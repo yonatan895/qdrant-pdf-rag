@@ -1426,3 +1426,29 @@ def test_same_page_message_bookmarks_end_to_end(tmp_path):
         assert chunk.text.startswith(msg)
         assert [m for m in chunk.message_ids if m.startswith("WID")] == [msg]
     assert sum(c.text.count("Explanation:") for c in chunks) == 4
+
+
+def test_recurring_subsection_titles_do_not_open_pieces():
+    """Reference manuals bookmark the same subsection titles under every
+    entry. Those stay with their entry; only outline-unique titles cut, so
+    no tiny context-free duplicate chunks appear."""
+    toc = [
+        [1, "Macros", 1],
+        [2, "WIDGETA", 2], [3, "Restrictions", 2], [3, "Performance implications", 2],
+        [2, "WIDGETB", 2], [3, "Restrictions", 2], [3, "Performance implications", 2],
+        [2, "WIDGETC", 3],
+    ]
+    page = (
+        "WIDGETA\nAllocates a widget.\nRestrictions\nNone.\nPerformance implications\nNone.\n"
+        "WIDGETB\nFrees a widget.\nRestrictions\nNone.\nPerformance implications\nNone.\n"
+    )
+    pages = ["Macro overview.", page, "WIDGETC\nResets a widget.\n"]
+    sections = outline_sections(_parsed_doc(toc, 3), pages)
+    shared = [s for s in sections if s.page_start == 1]
+    assert [s.heading_path for s in shared] == ["Macros > WIDGETA", "Macros > WIDGETB"]
+    assert [page[s.start_char : s.end_char] for s in shared] == [
+        "WIDGETA\nAllocates a widget.\nRestrictions\nNone.\nPerformance implications\nNone.\n",
+        "WIDGETB\nFrees a widget.\nRestrictions\nNone.\nPerformance implications\nNone.\n",
+    ]
+    chunks = make_chunks(_parsed_doc(toc, 3), pages, ["1", "2", "3"])
+    assert len({c.text for c in chunks}) == len(chunks)

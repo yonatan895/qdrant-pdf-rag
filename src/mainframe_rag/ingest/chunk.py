@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from collections import Counter
 from dataclasses import dataclass, field
 from itertools import pairwise
 from typing import TYPE_CHECKING
@@ -355,14 +356,18 @@ def _clean_title(title: str) -> str:
     return _WHITESPACE_RE.sub(" ", title).strip()
 
 
+def _title_key(title: str) -> str:
+    return _WHITESPACE_RE.sub(" ", title).strip().casefold()
+
+
 def _title_line_offset(text: str, title: str, start: int) -> int | None:
     """Offset of the first line at or after `start` that opens with the
     bookmark title (whitespace-collapsed, case-insensitive, whole words)."""
-    want = _WHITESPACE_RE.sub(" ", title).strip().casefold()
+    want = _title_key(title)
     offset = 0
     for line in text.splitlines(keepends=True):
         if offset >= start:
-            have = _WHITESPACE_RE.sub(" ", line).strip().casefold()
+            have = _title_key(line)
             if have and (have == want or have.startswith(want + " ")):
                 return offset
         offset += len(line)
@@ -370,19 +375,27 @@ def _title_line_offset(text: str, title: str, start: int) -> int | None:
 
 
 def _shared_page_pieces(
-    group: list[tuple[int, str, str]], page_text: str
+    group: list[tuple[int, str, str]], page_text: str, unique_titles: frozenset[str]
 ) -> list[tuple[str, int]] | None:
     """Split one page among the kept bookmarks that start on it.
+
+    Only a bookmark whose title occurs once in the outline opens a piece:
+    a message, command or macro name is an addressable entry, while a
+    recurring title ("Restrictions", "Syntax", "Examples") is a generic
+    subsection label whose text stays with the entry before it. Splitting
+    on those produced hundreds of tiny, byte-identical, context-free
+    chunks per reference manual.
 
     `group` holds (level, title, heading_path) in outline order. Returns
     (heading_path, start_char) per piece, or None to keep the page whole
     under the last bookmark (the pre-split behavior). Each later bookmark
     must be found as its own title line, in order, or nothing is split.
     A piece folds into the next one when the next bookmark is deeper (a
-    same-page parent's intro stays with its first child, issue #577), when
-    it holds nothing but its own title line, or when its heading repeats
-    one already on the page (the chunk key would collide).
+    same-page parent's intro stays with its first child, issue #577) or
+    when it holds nothing but its own title line. Nothing is split when two
+    pieces would share a heading path (the chunk key would collide).
     """
+    group = [group[0], *(e for e in group[1:] if _title_key(e[1]) in unique_titles)]
     starts = [0]
     for _, title, _ in group[1:]:
         found = _title_line_offset(page_text, title, starts[-1] + (len(starts) > 1))
@@ -394,11 +407,7 @@ def _shared_page_pieces(
         start = pieces.pop()[1] if pieces and pieces[-1][0] == "" else starts[idx]
         if idx + 1 < len(group):
             body = page_text[starts[idx] : starts[idx + 1]]
-            own = _WHITESPACE_RE.sub(" ", title).strip().casefold()
-            rest = [
-                ln for ln in body.splitlines()
-                if ln.strip() and _WHITESPACE_RE.sub(" ", ln).strip().casefold() != own
-            ]
+            rest = [ln for ln in body.splitlines() if ln.strip() and _title_key(ln) != _title_key(title)]
             if group[idx + 1][0] > level or not rest:
                 pieces.append(("", start))
                 continue
@@ -431,6 +440,8 @@ def outline_sections(parsed: ParsedDoc, page_texts: list[str] | None = None) -> 
             continue
         kept.append((level, title, page_1based))
 
+    title_counts = Counter(_title_key(title) for _, title, _ in kept)
+    unique_titles = frozenset(key for key, n in title_counts.items() if n == 1)
     sections: list[Section] = []
     stack: list[tuple[int, str]] = []
     # Kept bookmarks starting on the current page, in outline order. Before
@@ -457,7 +468,7 @@ def outline_sections(parsed: ParsedDoc, page_texts: list[str] | None = None) -> 
         if end > start:
             pieces = None
             if len(group) > 1 and page_texts is not None and start < len(page_texts):
-                pieces = _shared_page_pieces(group, page_texts[start])
+                pieces = _shared_page_pieces(group, page_texts[start], unique_titles)
             if pieces and len(pieces) > 1:
                 for (path, first), (_, nxt) in pairwise(pieces):
                     sections.append(Section(path, start, start + 1, first, nxt))
