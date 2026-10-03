@@ -79,6 +79,60 @@ PyMuPDF is the only parser. `parse_pdf` returns a frozen, slots `ParsedDoc`.
   the inventory skip-check and passes the digest through
   `parse_pdf(sha256=...)` so workers never re-read the file.
 
+### Page text extraction and table rows (issue #85)
+
+`ibm_pdf._extract_page_texts` (re-exported to `run_ingest`) owns page text
+extraction. It lives in `ibm_pdf.py` deliberately: that module is hashed
+into `extraction_rules_version`, so any payload-changing extraction rule
+here moves the version and forces a distinct-generation re-ingest. A rule
+left in `run_ingest.py` would not, and resumed ingests would keep stale
+payloads. **This change alters extracted payload text; existing
+collections need a re-ingest.**
+
+- Plain `page.get_text()` follows content-stream order, so a table drawn
+  column by column (or whose cells MuPDF emits one per line) extracts as
+  column lists and the row/value association is gone before chunking.
+- `get_text(sort=True)` was evaluated and rejected: in current PyMuPDF it
+  simulates layout (space padding, blank lines, words from different
+  columns on one line) and interleaves two-column prose.
+- `extract_page_text` therefore keeps plain extraction and corrects only
+  positively supported table regions. Consecutive text blocks that are *cell-like* (mean
+  <= 5 and max <= 8 words per line) and vertically adjacent (gap <= 1.5
+  line heights) form candidates. Admission requires at least two aligned
+  recognized table headings, three shared baselines and a consistently compact
+  key/value column. Centered headings may have different starts from their
+  data: repeated data starts beneath each heading's horizontal span establish
+  distinct ordered column alignment; headings that infer the same data column
+  keep stream order. Only blocks aligned to those columns become row lines,
+  cells ordered by x and joined by a single space; a wrapped continuation
+  follows its row. Captions and adjacent prose retain their original block
+  positions. Short independent procedures alone do not establish a table.
+  Ambiguous regions and pages whose blocks do not exactly reproduce plain text
+  stay in stream order, including whitespace-only blocks.
+- A standalone `|` is removed only as part of a repeated aligned run at a
+  page margin, separated from the text body's horizontal extent and paired
+  with at least three nonmonospaced prose sentences. Monospaced glyphs,
+  bars within the body, short-label diagram walls and lone margin glyphs
+  retain content. These geometry/typography signals are heuristic: they do
+  not establish the author's semantic intent or guarantee every diagram
+  shape. Source-fidelity qualification still needs SME review.
+- Known limits: unrecognized headings, prose-length cells (more
+  than 8 words per line), mixed prose/table blocks or no compact column keep
+  stream order. Wrapped cells use line baselines, not semantic cell objects;
+  ruling lines are not consulted. These conservative controls are not a
+  universal table/prose classifier. Chunk ids and the four-type vocabulary
+  retain their existing contract; the extraction hash changes and re-ingest
+  remains mandatory.
+- Historical census for the original PR rule, before the review correction,
+  on five local manuals (parse + chunk only, counts; z/OS 2.2
+  MVS Init & Tuning Reference, Principles of Operation, Program Management,
+  Device Validation Support, one CICS book; 3,799 pages): 1,470 pages
+  changed by the table rule, 0 pages gained or lost a word (the rebuild
+  only reorders), 0 prose lines of 9+ words disturbed, 0 duplicate chunk
+  texts before and after, chunk counts 4,144 -> 4,136 and chunk text 10.27M
+  -> 10.25M chars (change bars and merged cell lines). Word retention alone
+  did not establish source associations; this is not current-rule acceptance.
+
 Contract tests: `tests/test_parser_ibm_shape.py`,
 `tests/test_generic_pdf.py`, `tests/test_sanitize.py`.
 
@@ -242,7 +296,7 @@ for citations and filters.
   `p. PDF n–m`, see [retrieval §1](retrieval.md)). A `/PageLabels` tree whose
   first rule starts after page 0 makes PyMuPDF's `get_label()` raise
   `IndexError` on the earlier pages; extraction treats those labels as absent
-  (`run_ingest._page_label`) instead of failing the document.
+  (`ibm_pdf._page_label`) instead of failing the document.
 - Per chunk, `classify` (§5) plus message/member extraction run and land in
   the payload (§8).
 
@@ -301,6 +355,17 @@ Opt-in via `CONTEXTUAL_EMBED_ENABLED` (default off).
   `context_cache_skip_line`); the file is append-only and is never rewritten or
   required to be deleted. A hit that is not already whitespace-collapsed and
   within the cap is regenerated.
+  An append that finds a torn last line (parent killed mid-write) starts on a
+  fresh line, so the partial fragment is a skipped line and the new record
+  still loads. A worker that fails partway through a document returns an error
+  record and nothing from that document reaches the sidecar; a restarted worker
+  regenerates it, while a live worker retrying the same document reuses the
+  gists it already completed (identity unchanged).
+- Preflight (`model_config.validate_model_config`, run by `validate.sh` and the
+  values mapper): `CONTEXTUAL_EMBED_ENABLED` is a strict boolean, and
+  `true` requires both `CONTEXT_LLM_BASE_URL` and `CONTEXT_LLM_MODEL`; the
+  ingest parent and each worker re-check (`require_context_llm`). Enabling the
+  flag is supported with the identity above; it stays default-off.
 - Model budget 256 completion tokens; deterministic `CONTEXT_MAX_CHARS`
   (500) cap with collapse-and-rstrip normalization; empty gists raise
   (never stored silent-empty).
@@ -932,6 +997,15 @@ readiness, retrieval, answer/chat/console, recovery tools and evaluation.
   1/1/1 profile judges its single copy through its one endpoint. Moving
   replicas to repair an under-replicated candidate remains the
   snapshot-gated migration slice, never automatic.
+  The snapshot clone used to prepare an update staging generation (and the
+  legacy-layout migration) is the single-node recipe: a source with more
+  than one shard or replica, a selected multi-shard/replica policy, or an
+  unreadable, missing or invalid topology is refused before any snapshot/recover/delete
+  (`qdrant_io.require_single_node_recovery`; collection snapshots are
+  node-local, [deploy](deploy.md#distributed-recovery)). Authorization requires
+  explicit positive non-boolean integer shard/replica values, both exactly 1.
+  A distributed
+  generation is rebuilt fresh from the originals.
   Supply the comma-separated non-secret URLs via the operator env file or
   caller environment/Task variable (caller takes precedence). The launcher
   maps this to chart `ingest.peerUrls` and the ingest Job environment;

@@ -271,6 +271,18 @@ def load_context_cache(path: Path) -> dict[str, str]:
     return entries
 
 
+def _lacks_final_newline(path: Path) -> bool:
+    try:
+        with path.open("rb") as fh:
+            fh.seek(0, 2)
+            if fh.tell() == 0:
+                return False
+            fh.seek(-1, 2)
+            return fh.read(1) != b"\n"
+    except FileNotFoundError:
+        return False
+
+
 def append_context_entries(
     path: Path,
     binding: ContextBinding,
@@ -289,6 +301,10 @@ def append_context_entries(
         raise ValueError(f"context entries for unknown chunk ids: {missing[:3]}")
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as fh:
+        if _lacks_final_newline(path):
+            # A crash mid-append can leave a torn last line; start on a fresh
+            # line so it cannot swallow the first record written now.
+            fh.write("\n")
         for chunk_id, context in entries.items():
             fh.write(json.dumps(binding.record(by_id[chunk_id], context)) + "\n")
 

@@ -325,6 +325,63 @@ def snapshot_collection(client: QdrantPoints, collection: str) -> str:
     return snap.name
 
 
+class DistributedRecoveryUnsupportedError(RuntimeError):
+    """A node-local snapshot recipe was requested for a distributed collection."""
+
+
+def distributed_topology_reason(
+    client: QdrantPoints, settings: Settings, collection: str
+) -> str | None:
+    """Why `collection` must not use the single-node snapshot recipe, or None.
+
+    A Qdrant collection snapshot is node-specific: it holds only the shards
+    the answering peer stores, and recovery from a `file://` path reads one
+    peer's disk. With more than one shard or replica (or an explicit
+    multi-shard/replica policy selected for this run) the recipe cannot
+    establish that every shard was captured or restored, so it is refused
+    rather than trusted (issue #360). Unreadable values are unknown, not
+    proof of a single node, and refuse too.
+    """
+    policy = settings.collection_distribution_kwargs()
+    if policy.get("shard_number", 1) > 1 or policy.get("replication_factor", 1) > 1:
+        return (
+            f"selected policy shards={policy.get('shard_number')} "
+            f"replicas={policy.get('replication_factor')}"
+        )
+    try:
+        params = client.get_collection(collection).config.params
+    except Exception as exc:  # noqa: BLE001 - unreadable topology is a refusal
+        return f"{collection!r} topology unreadable ({type(exc).__name__})"
+    for attr in ("shard_number", "replication_factor"):
+        value = getattr(params, attr, None)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            return f"{collection!r} topology has no valid positive integer {attr}"
+        if value != 1:
+            return f"{collection!r} has {attr}={value}"
+    return None
+
+
+def require_single_node_recovery(
+    client: QdrantPoints, settings: Settings, collection: str, operation: str
+) -> None:
+    """Refuse node-local snapshot clone/migration on distributed storage.
+
+    Nothing is created, recovered or deleted when this raises. The supported
+    distributed paths are a fresh complete generation rebuilt from the
+    protected originals, or a site-qualified node-addressed procedure
+    (docs/deploy.md, distributed recovery).
+    """
+    reason = distributed_topology_reason(client, settings, collection)
+    if reason is not None:
+        raise DistributedRecoveryUnsupportedError(
+            f"{operation} of {collection!r} refused: {reason}. Collection "
+            "snapshots are node-local, so a snapshot clone/recover cannot "
+            "prove every shard was copied; live data is untouched. Rebuild "
+            "a fresh complete generation from the originals instead "
+            "(issue #360)."
+        )
+
+
 def clone_collection(
     client: QdrantPoints, settings: Settings, src: str, dst: str
 ) -> None:
@@ -333,8 +390,10 @@ def clone_collection(
     Fail closed on any count mismatch: a partial clone must never become a
     publish base. The snapshot location is the server-side snapshots dir
     (`Settings.qdrant_snapshots_dir`), the same formula the harness restore
-    uses.
+    uses. Single-node recipe only: distributed (multi-shard/replica)
+    sources are refused before any snapshot is taken.
     """
+    require_single_node_recovery(client, settings, src, "snapshot clone")
     snap = snapshot_collection(client, src)
     location = f"file://{settings.qdrant_snapshots_dir.rstrip('/')}/{src}/{snap}"
     client.recover_snapshot(dst, location, priority=models.SnapshotPriority.SNAPSHOT, wait=True)

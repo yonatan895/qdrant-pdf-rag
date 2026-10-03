@@ -632,7 +632,9 @@ def test_dry_run_makes_no_context_calls(synthetic_pdf, tmp_path, monkeypatch):
     assert contexts == {}
 
 
-def _resume_env(synthetic_pdf, tmp_path, monkeypatch, *, model="model-a", max_chars=500):
+def _resume_env(
+    synthetic_pdf, tmp_path, monkeypatch, *, model="model-a", max_chars=500, embedder=None
+):
     """Worker harness for file-level resume: real _parse_one + real sidecar
     loader (cold worker state per call) + the parent's append path."""
     from mainframe_rag.ingest import run_ingest
@@ -647,10 +649,11 @@ def _resume_env(synthetic_pdf, tmp_path, monkeypatch, *, model="model-a", max_ch
         context_max_chars=max_chars,
     )
     monkeypatch.setattr(run_ingest, "_load_worker_settings", lambda: settings)
-    monkeypatch.setattr(run_ingest, "_get_embedder", lambda s: HashEmbedder())
+    emb = embedder if embedder is not None else HashEmbedder()
+    monkeypatch.setattr(run_ingest, "_get_embedder", lambda s: emb)
     cache_path = tmp_path / "inv.contexts.jsonl"
 
-    def run(http, *, append=True):
+    def run(http, *, append=True, expect_error=False):
         monkeypatch.setattr(
             run_ingest, "_get_context_client", lambda s: ctx_mod.ContextLLMClient(s, client=http)
         )
@@ -661,6 +664,8 @@ def _resume_env(synthetic_pdf, tmp_path, monkeypatch, *, model="model-a", max_ch
             "dummy_sha", True, str(cache_path),
         )
         record, parsed, chunks, vectors, contexts = run_ingest._parse_one(task)
+        if expect_error:
+            return record, contexts
         assert record.status != "error"
         if append and contexts:
             ctx_mod.append_context_entries(
@@ -775,3 +780,146 @@ def test_contextual_off_worker_path_is_unchanged(synthetic_pdf, tmp_path, monkey
     assert contexts == {}
     assert len(vectors) == len(chunks) > 0
     assert not cache_path.exists()
+
+
+class _RecordingEmbedder:
+    """HashEmbedder that records the exact dense and sparse inputs."""
+
+    def __init__(self):
+        from mainframe_rag.ingest.embed import HashEmbedder
+
+        self._inner = HashEmbedder()
+        self.dense_texts: list[str] = []
+        self.sparse_texts: list[str] = []
+
+    def dense(self, texts):
+        self.dense_texts.extend(texts)
+        return self._inner.dense(texts)
+
+    def dense_query(self, queries):
+        return self.dense(queries)
+
+    def sparse(self, texts):
+        self.sparse_texts.extend(texts)
+        return self._inner.sparse(texts)
+
+
+def test_model_swap_embeds_new_prefix_and_leaves_sparse_unchanged(
+    synthetic_pdf, tmp_path, monkeypatch
+):
+    """Matrix: assert the dense input, not just the cache key. After a model
+    swap on a shared sidecar the dense text carries model B's gist and never
+    model A's; the sparse (BM25) inputs and vectors are byte-identical to the
+    model-A run and to a contextual-off run, so the swap cannot churn BM25."""
+    from mainframe_rag.ingest import run_ingest
+
+    emb_a = _RecordingEmbedder()
+    _, _, run_a = _resume_env(synthetic_pdf, tmp_path, monkeypatch, model="model-a", embedder=emb_a)
+    chunks, vec_a, _ = run_a(FakeHttpClient([FakeResp("Gist from A.")] * 100))
+    assert len(emb_a.dense_texts) == len(chunks) > 0
+
+    emb_b = _RecordingEmbedder()
+    _, _, run_b = _resume_env(synthetic_pdf, tmp_path, monkeypatch, model="model-b", embedder=emb_b)
+    http_b = FakeHttpClient([FakeResp("Gist from B.")] * 100)
+    _, vec_b, ctx_b = run_b(http_b)
+    assert len(http_b.posts) == len(chunks)
+    assert set(ctx_b.values()) == {"Gist from B."}
+    assert all("Gist from B." in t and "Gist from A." not in t for t in emb_b.dense_texts)
+    assert all("Gist from A." in t for t in emb_a.dense_texts)
+
+    # Contextual off over the same document: header-only dense, same sparse.
+    emb_off = _RecordingEmbedder()
+    settings_off = Settings(_env_file=None, embed_mode="hash", contextual_embed_enabled=False)
+    monkeypatch.setattr(run_ingest, "_load_worker_settings", lambda: settings_off)
+    monkeypatch.setattr(run_ingest, "_get_embedder", lambda s: emb_off)
+    record, _, _, vec_off, ctx_off = run_ingest._parse_one(
+        (
+            str(synthetic_pdf), None, None, None, str(synthetic_pdf.parent),
+            "dummy_sha", True, str(tmp_path / "inv.contexts.jsonl"),
+        )
+    )
+    assert record.status != "error" and ctx_off == {}
+    assert emb_a.sparse_texts == emb_b.sparse_texts == emb_off.sparse_texts
+    assert [v[1] for v in vec_a] == [v[1] for v in vec_b] == [v[1] for v in vec_off]
+    assert all("Gist" not in t for t in emb_off.dense_texts)
+    # Dense differs from header-only exactly where a prefix was applied.
+    assert [v[0] for v in vec_b] != [v[0] for v in vec_off]
+
+
+def test_interrupted_worker_persists_nothing_and_restart_regenerates(
+    synthetic_pdf, tmp_path, monkeypatch
+):
+    """The model fails partway through a document: the worker returns an error
+    record with no contexts (no half-embedded doc, no empty prefix), the
+    parent appends nothing, and a restarted (cold) worker regenerates every
+    chunk from a clean sidecar and then hits fully."""
+    _, cache_path, run = _resume_env(synthetic_pdf, tmp_path, monkeypatch)
+    probe = FakeHttpClient([FakeResp("probe")] * 100)
+    chunks, _, _ = run(probe, append=False)
+    n = len(chunks)
+    assert n >= 2, "synthetic document must have several chunks to interrupt"
+
+    flaky = FakeHttpClient([FakeResp("Partial.")] * (n - 1) + [FakeResp(status_code=503)])
+    record, contexts = run(flaky, append=False, expect_error=True)
+    assert record.status == "error" and record.error_type == "RuntimeError"
+    assert contexts == {}
+    assert len(flaky.posts) == n
+    assert not cache_path.exists()  # nothing was persisted for the failed doc
+
+    restarted = FakeHttpClient([FakeResp("Whole gist.")] * 100)
+    _, _, ctx = run(restarted)
+    assert len(restarted.posts) == n
+    assert set(ctx.values()) == {"Whole gist."}
+    again = FakeHttpClient([])
+    _, _, ctx2 = run(again)
+    assert again.posts == [] and ctx2 == ctx
+
+
+def test_live_worker_retry_reuses_only_completed_gists(synthetic_pdf, tmp_path, monkeypatch):
+    """Same worker process retries the interrupted doc: gists it already
+    completed are hits (their identity matches), the failed chunk and the rest
+    call the model once each, and the result is a complete map."""
+    from mainframe_rag.ingest import run_ingest
+
+    _, cache_path, run = _resume_env(synthetic_pdf, tmp_path, monkeypatch)
+    probe = FakeHttpClient([FakeResp("probe")] * 100)
+    chunks, _, _ = run(probe, append=False)
+    n = len(chunks)
+    assert n >= 3
+
+    flaky = FakeHttpClient([FakeResp("Early.")] * 2 + [FakeResp(status_code=503)])
+    record, _ = run(flaky, append=False, expect_error=True)
+    assert record.status == "error"
+
+    # Retry without resetting worker state (the real pool reuses processes).
+    http = FakeHttpClient([FakeResp("Late.")] * 100)
+    monkeypatch.setattr(
+        run_ingest, "_get_context_client", lambda s: ctx_mod.ContextLLMClient(s, client=http)
+    )
+    task = (
+        str(synthetic_pdf), None, None, None, str(synthetic_pdf.parent),
+        "dummy_sha", True, str(cache_path),
+    )
+    record2, _, chunks2, _, contexts = run_ingest._parse_one(task)
+    assert record2.status != "error"
+    assert len(http.posts) == n - 2
+    assert [contexts[c.chunk_id] for c in chunks2] == ["Early."] * 2 + ["Late."] * (n - 2)
+
+
+def test_append_after_torn_tail_does_not_corrupt_the_new_record(tmp_path):
+    """A parent killed mid-append leaves a newline-less partial last line. The
+    next append must start on a fresh line: otherwise it is glued onto the
+    fragment and the new, valid record is lost to the loader."""
+    path = tmp_path / "contexts.jsonl"
+    c1, c2 = _chunk("c1"), _chunk("c2")
+    binding = _binding()
+    ctx_mod.append_context_entries(path, binding, [c1, c2], {"c1": "Kept gist."})
+    full = json.dumps(binding.record(c2, "Torn gist."))
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(full[: len(full) // 2])  # simulated crash mid-write
+    assert not path.read_text().endswith("\n")
+
+    ctx_mod.append_context_entries(path, binding, [c1, c2], {"c2": "Replacement gist."})
+    loaded = ctx_mod.load_context_cache(path)
+    assert loaded[binding.key(c1)] == "Kept gist."
+    assert loaded[binding.key(c2)] == "Replacement gist."

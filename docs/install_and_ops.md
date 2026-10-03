@@ -1275,6 +1275,13 @@ on three distinct peers again.
   unrecoverable storage is a tested fresh rebuild from protected originals
   with explicitly accepted downtime (POC path, #447); no untested
   distributed-restore or uninterrupted-HA promise is implied.
+- A distributed (multi-shard or replicated) live generation cannot be
+  snapshot-cloned into an update staging generation or migrated from a
+  legacy layout: ingest refuses with `DistributedRecoveryUnsupportedError`
+  and changes nothing (`deploy.md#distributed-recovery`). Rebuild a fresh
+  generation from the originals. The site qualification steps and the
+  sizing/HA-scope decision are in `deploy.md#site-qualification` and
+  `deploy.md#sizing-note`.
 - Loss of publisher scratch state is not repaired by Qdrant replication:
   preserve progress/authorization/build state for deterministic resume
   (`ingest.md`), and treat a missing sidecar as explicit operator recovery,

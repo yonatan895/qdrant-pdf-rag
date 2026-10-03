@@ -127,3 +127,15 @@ def test_extract_page_texts_label_tree_starting_after_page_zero(tmp_path):
         texts, labels = _extract_page_texts(reopened)
     assert labels == [None, None, None, "1", "2"]
     assert [t.strip() for t in texts] == [f"Widget page {i + 1}" for i in range(5)]
+
+
+def test_extract_page_texts_lives_in_a_hashed_rule_module():
+    """Payload-changing extraction (#85 table rows) must sit in a module that
+    extraction_rules_version hashes; run_ingest only re-exports it."""
+    from pathlib import Path
+
+    from mainframe_rag.ingest import ibm_pdf, run_ingest
+    from mainframe_rag.ingest.rules_version import rule_module_paths
+
+    assert run_ingest._extract_page_texts is ibm_pdf._extract_page_texts
+    assert Path(ibm_pdf.__file__).resolve() in {p.resolve() for p in rule_module_paths()}
