@@ -717,7 +717,7 @@ def test_console_js_streaming_ux_wiring():
     """P3: streaming UX behaviors are wired in console.js — thinking
     placeholder, abort/stop, Ctrl+Enter submit, per-turn meta footer,
     session rename + filter, empty state. (This pins presence only; the
-    behavior is executed in tests/test_console_browser.py, issue #372.)"""
+    behavior is executed in tests/console_browser_contracts.py, issue #372.)"""
     js = (
         Path(app_mod.__file__).parents[1] / "webui" / "static" / "js" / "console.js"
     ).read_text(encoding="utf-8")
@@ -1239,7 +1239,7 @@ def test_ui_chat_root_is_server_and_ends(ui_client, monkeypatch):
 
 # ---------------------------------------------------------------------------
 # Retention and accessibility structure (issue #372). Hermetic; the executed
-# behavior lives in tests/test_console_browser.py (real browser, skips
+# behavior lives in tests/console_browser_contracts.py (real browser, skips
 # without a runtime).
 # ---------------------------------------------------------------------------
 

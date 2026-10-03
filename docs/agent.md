@@ -216,7 +216,7 @@ finished Jaeger roots, exact JSON log joins and the next ordinary request.
 
 The console's conversation state is browser-owned (ADR-0004); this section is
 the contract owner for what that state is, how long it lives and how it is
-cleared. Executed by `tests/test_console_browser.py` (real Chrome, shipped
+cleared. Executed by `tests/console_browser_contracts.py` (real Chrome, shipped
 `console.js`, scripted gateway-shaped LLM; `pytest -m browser`, skips without
 an offline Chrome for Testing + matching chromedriver via
 `CONSOLE_BROWSER_CHROME`/`CONSOLE_BROWSER_CHROMEDRIVER` or the selenium-manager

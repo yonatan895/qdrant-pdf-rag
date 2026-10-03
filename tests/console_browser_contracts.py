@@ -9,7 +9,10 @@ never on source strings.
 Runtime: an already-installed Chrome for Testing + matching chromedriver
 (CONSOLE_BROWSER_CHROME / CONSOLE_BROWSER_CHROMEDRIVER, or the existing
 selenium-manager cache). Nothing is downloaded. Without a runtime the suite
-SKIPS - a skip is not a pass. Run: `pytest -m browser tests/test_console_browser.py`.
+SKIPS - a skip is not a pass. Run: `pytest -m browser tests/console_browser_contracts.py`.
+The filename deliberately does not match `test_*.py`: default collection (the pinned
+CI selection policy in scripts/unit_evidence.py) never picks it up, so unit shards
+carry no browser skips; it runs only when named explicitly.
 
 Not covered here (see docs/console-contracts.md): other browsers, real
 screen readers, OS high-contrast/forced-colors, native browser zoom.
