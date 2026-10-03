@@ -25,6 +25,11 @@
               "minLength": 1,
               "not": { "pattern": "__[A-Z0-9_]+__" }
             },
+            "digest": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "description": "Verified registry manifest digest; when set the pod image is repository@digest (the tag stays informational)."
+            },
             "tag": {
               "type": "string",
               "pattern": "^[0-9a-f]{40}$",
@@ -45,6 +50,11 @@
               "type": "string",
               "minLength": 1,
               "not": { "pattern": "__[A-Z0-9_]+__" }
+            },
+            "digest": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "description": "Verified registry manifest digest; when set the pod image is repository@digest (the tag stays informational)."
             },
             "tag": {
               "type": "string",
@@ -67,6 +77,11 @@
               "minLength": 1,
               "not": { "pattern": "__[A-Z0-9_]+__" }
             },
+            "digest": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "description": "Verified registry manifest digest; when set the pod image is repository@digest (the tag stays informational)."
+            },
             "tag": {
               "type": "string",
               "minLength": 1,
@@ -87,6 +102,11 @@
               "type": "string",
               "minLength": 1,
               "not": { "pattern": "__[A-Z0-9_]+__" }
+            },
+            "digest": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "description": "Verified registry manifest digest; when set the pod image is repository@digest (the tag stays informational)."
             },
             "tag": {
               "type": "string",

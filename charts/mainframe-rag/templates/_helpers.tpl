@@ -13,19 +13,19 @@ app: rag-agent
 {{- end -}}
 
 {{- define "mainframe-rag.agentImage" -}}
-{{ required "images.agent.repository is required" .Values.images.agent.repository }}:{{ required "images.agent.tag is required (full git SHA)" .Values.images.agent.tag }}
+{{ required "images.agent.repository is required" .Values.images.agent.repository }}{{ with .Values.images.agent.digest }}@{{ . }}{{ else }}:{{ required "images.agent.tag is required (full git SHA)" .Values.images.agent.tag }}{{ end }}
 {{- end -}}
 
 {{- define "mainframe-rag.ingestImage" -}}
-{{ required "images.ingest.repository is required" .Values.images.ingest.repository }}:{{ required "images.ingest.tag is required (full git SHA)" .Values.images.ingest.tag }}
+{{ required "images.ingest.repository is required" .Values.images.ingest.repository }}{{ with .Values.images.ingest.digest }}@{{ . }}{{ else }}:{{ required "images.ingest.tag is required (full git SHA)" .Values.images.ingest.tag }}{{ end }}
 {{- end -}}
 
 {{- define "mainframe-rag.jaegerImage" -}}
-{{ required "images.jaeger.repository is required" .Values.images.jaeger.repository }}:{{ required "images.jaeger.tag is required" .Values.images.jaeger.tag }}
+{{ required "images.jaeger.repository is required" .Values.images.jaeger.repository }}{{ with .Values.images.jaeger.digest }}@{{ . }}{{ else }}:{{ required "images.jaeger.tag is required" .Values.images.jaeger.tag }}{{ end }}
 {{- end -}}
 
 {{- define "mainframe-rag.oauthProxyImage" -}}
-{{ required "images.oauthProxy.repository is required" .Values.images.oauthProxy.repository }}:{{ required "images.oauthProxy.tag is required" .Values.images.oauthProxy.tag }}
+{{ required "images.oauthProxy.repository is required" .Values.images.oauthProxy.repository }}{{ with .Values.images.oauthProxy.digest }}@{{ . }}{{ else }}:{{ required "images.oauthProxy.tag is required" .Values.images.oauthProxy.tag }}{{ end }}
 {{- end -}}
 
 {{- define "mainframe-rag.qdrantUrl" -}}

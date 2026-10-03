@@ -8,6 +8,7 @@
 # Route (charts/qdrant-openshift.values.yaml is never shrunk). No NFS. No Cloud.
 
 . "$(dirname -- "$0")/common.sh"
+. "$(dirname -- "$0")/image_identity.sh"
 
 [ -f charts/qdrant-openshift.values.yaml ] && [ -r charts/qdrant-openshift.values.yaml ] ||
     die "required Qdrant values file is missing or unreadable: charts/qdrant-openshift.values.yaml"
@@ -69,6 +70,16 @@ SNAPSHOT_STORAGE_CLASS=${SNAPSHOT_STORAGE_CLASS:-$STORAGE_CLASS}
 # Strip a "-unprivileged" suffix from the pin: the chart re-adds it itself.
 QDRANT_TAG=${QDRANT_TAG:-$(echo "${QDRANT_IMAGE:-docker.io/qdrant/qdrant:v1.19.0-unprivileged}" | sed "s/.*://; s/-unprivileged\$//")}
 QDRANT_URL="http://${QDRANT_RELEASE}:6333"
+
+# Registry image identity (issue #272), before any cluster change and for every
+# entry path (load -> deploy, pipeline --skip-load, standalone deploy): each
+# deployed image must be the packed one. First-party images are then rendered
+# as repository@digest; the Qdrant digest is checked against the pods below.
+DEPLOY_IMAGES="qdrant agent"
+[ "$JAEGER_DEPLOY" != "1" ] || DEPLOY_IMAGES="$DEPLOY_IMAGES jaeger"
+[ "$AGENT_ROUTE" != "true" ] || DEPLOY_IMAGES="$DEPLOY_IMAGES oauth_proxy"
+# shellcheck disable=SC2086
+verify_registry_images $DEPLOY_IMAGES
 
 KC=${KC:-$(kc)}
 check_gateway_ca
@@ -242,6 +253,10 @@ else
     if [ "$JAEGER_DEPLOY" = "1" ]; then
         wait_rollout "deploy/jaeger" 120
     fi
+    # Tags can move after the registry read-back: the running pods must report
+    # the verified digests (fail closed; legacy cleanup below is skipped).
+    # shellcheck disable=SC2086
+    verify_running_images $DEPLOY_IMAGES
     # Reconcile disabled legacy resources only after the selected workloads
     # are ready. PVCs are never members of this validated cleanup inventory.
     if [ -s dist/app-disabled-cleanup.json ]; then

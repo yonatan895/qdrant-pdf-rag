@@ -125,6 +125,19 @@ def split_retire(raw: str) -> list[str]:
     return entries
 
 
+def image_digest(role: str) -> dict:
+    """Verified registry manifest digest for an image (issue #272), exported
+    as IMAGE_DIGEST_<ROLE> by the deploy/ingest identity check. Unset keeps the
+    tag-only reference (dry-run, no packed MANIFEST); a malformed value fails
+    closed rather than rendering a reference that pins nothing."""
+    raw = env(f"IMAGE_DIGEST_{role}")
+    if not raw:
+        return {}
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", raw):
+        die(f"IMAGE_DIGEST_{role} must be a sha256 manifest digest")
+    return {"digest": raw}
+
+
 def emit_yaml(node, indent: int = 0) -> list[str]:
     """Deterministic restricted YAML: mappings (insertion-ordered), lists,
     strings (JSON double-quoted), integers, booleans. Empty mappings render
@@ -306,21 +319,25 @@ def build_values(deploy_only: bool = False) -> dict:
                 "repository": f"{internal_registry}/qdrant-pdf-rag-agent",
                 "tag": image_sha,
                 "pullPolicy": "IfNotPresent",
+                **image_digest("AGENT"),
             },
             "ingest": {
                 "repository": f"{internal_registry}/qdrant-pdf-rag-ingest",
                 "tag": image_sha,
                 "pullPolicy": "IfNotPresent",
+                **image_digest("INGEST"),
             },
             "jaeger": {
                 "repository": f"{internal_registry}/jaegertracing/jaeger",
                 "tag": "v2.20.0",
                 "pullPolicy": "IfNotPresent",
+                **image_digest("JAEGER"),
             },
             "oauthProxy": {
                 "repository": f"{internal_registry}/openshift4/ose-oauth-proxy",
                 "tag": "v4.14",
                 "pullPolicy": "IfNotPresent",
+                **image_digest("OAUTH_PROXY"),
             },
         },
         "qdrantRelease": qdrant_release,

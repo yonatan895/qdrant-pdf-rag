@@ -10,6 +10,7 @@
 # connected main is the only image factory.
 
 . "$(dirname -- "$0")/common.sh"
+. "$(dirname -- "$0")/image_identity.sh"
 
 enforce_product_rules
 resolve_aliases
@@ -145,6 +146,17 @@ OAUTH_DIGEST=""
 if [ -n "$OAUTH_TAR" ]; then
     OAUTH_DIGEST=$(skopeo inspect "docker-archive:$DIST/$OAUTH_TAR" --format '{{.Digest}}')
 fi
+# Image config digests (issue #272): pin the rootfs identity independently of
+# archive vs registry layer compression; deploy/ingest verify the registry
+# against these before any cluster change.
+INGEST_CONFIG_DIGEST=$(archive_config_digest "$DIST/app-ingest-$IMAGE_SHA.tar")
+AGENT_CONFIG_DIGEST=$(archive_config_digest "$DIST/app-agent-$IMAGE_SHA.tar")
+QDRANT_CONFIG_DIGEST=$(archive_config_digest "$DIST/qdrant-image.tar")
+JAEGER_CONFIG_DIGEST=$(archive_config_digest "$DIST/jaeger-image.tar")
+OAUTH_CONFIG_DIGEST=""
+if [ -n "$OAUTH_TAR" ]; then
+    OAUTH_CONFIG_DIGEST=$(archive_config_digest "$DIST/$OAUTH_TAR")
+fi
 UBI_REF=$(pin_from_images_txt python-314-minimal)
 UBI_DIGEST=${UBI_REF##*@}
 
@@ -162,18 +174,23 @@ CHART_SHA256=$(sha256sum charts/qdrant-*.tgz | awk '{print $1}')
     echo "date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "qdrant: $QDRANT_REF"
     echo "qdrant_digest: $QDRANT_DIGEST"
+    echo "qdrant_config_digest: $QDRANT_CONFIG_DIGEST"
     echo "jaeger: $JAEGER_REF"
     echo "jaeger_digest: $JAEGER_DIGEST"
+    echo "jaeger_config_digest: $JAEGER_CONFIG_DIGEST"
     if [ -n "$OAUTH_TAR" ]; then
         echo "oauth_proxy: $OAUTH_PROXY_REF"
         echo "oauth_proxy_digest: $OAUTH_DIGEST"
+        echo "oauth_proxy_config_digest: $OAUTH_CONFIG_DIGEST"
     fi
     echo "chart: $CHART_VERSION"
     echo "chart_sha256: $CHART_SHA256"
     echo "ingest: $INGEST_IMAGE"
     echo "ingest_digest: $INGEST_DIGEST"
+    echo "ingest_config_digest: $INGEST_CONFIG_DIGEST"
     echo "agent: $AGENT_IMAGE"
     echo "agent_digest: $AGENT_DIGEST"
+    echo "agent_config_digest: $AGENT_CONFIG_DIGEST"
     echo "app_registry: $APP_REGISTRY"
     # Honesty label, not a trust root: "true" only when the caller asserts
     # SNEAKERNET_KEY_TRUSTED=true for a production-custody key; throwaway

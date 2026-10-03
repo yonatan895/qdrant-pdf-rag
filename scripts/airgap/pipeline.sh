@@ -42,6 +42,7 @@ sh scripts/airgap/validate.sh
 if [ "$SKIP_LOAD" -eq 1 ]; then
     echo ""
     echo ">>> STAGE 2/5: IMAGE LOADING (SKIPPED via --skip-load)"
+    echo "    Registry images are read back and verified against the signed MANIFEST by stage 3, before any cluster change."
 else
     echo ""
     echo ">>> STAGE 2/5: IMAGE LOADING & INTEGRITY"

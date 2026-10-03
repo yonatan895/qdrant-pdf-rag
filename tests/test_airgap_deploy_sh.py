@@ -6,6 +6,7 @@ regression the rehearsal build surfaced: values.yaml's placeholder pull-secret
 name must never reach a cluster.
 """
 
+import json
 import re
 import shutil
 
@@ -24,6 +25,7 @@ from tests.helpers_airgap import (
     sha256_bytes,
     write_git_identity_stub,
     write_signed_manifest,
+    write_stub,
 )
 
 IMAGE_SHA = "a" * 40  # full-sha shaped; deploy.sh only rejects "" / "HEAD"
@@ -56,6 +58,8 @@ case "$*" in
     if [ -n "${{OWNERSHIP_FILE:-}}" ]; then cat "$OWNERSHIP_FILE";
     else :; fi ;;
 
+  *'get pods -o json'*)
+    [ -z "${{PODS_FILE:-}}" ] || cat "$PODS_FILE" ;;
   *'get secret '*'go-template='*)
     if [ -n "${{MISSING_KEY:-}}" ]; then
       case "$*" in *"$MISSING_KEY"*) exit 0 ;; esac
@@ -64,6 +68,18 @@ case "$*" in
 
 esac
 exit 0
+"""
+
+
+# Registry stub: `skopeo inspect --raw docker://REF` serves
+# $SKOPEO_REGISTRY/<REF with / : @ replaced by _>.raw, else "manifest unknown".
+STUB_SKOPEO = r"""#!/bin/sh
+printf 'skopeo %s\n' "$*" >> "$HELM_LOG"
+[ "$1" = inspect ] || exit 0
+for a in "$@"; do case "$a" in docker://*) ref="${a#docker://}" ;; esac; done
+f="$SKOPEO_REGISTRY/$(printf '%s' "$ref" | tr '/:@' '___').raw"
+[ -f "$f" ] || { echo "manifest unknown" >&2; exit 1; }
+cat "$f"
 """
 
 
@@ -79,6 +95,7 @@ def tree(tmp_path):
         p.write_text(STUB_BIN.format())
         p.chmod(0o755)
     install_rendering_helm(tmp_path)
+    write_stub(tmp_path / "bin" / "skopeo", STUB_SKOPEO)
     return tmp_path, helm_log
 
 
@@ -95,6 +112,8 @@ def _run(tree, *extra_env):
         "DENSE_DIM": "64",
         "EMBED_MODEL_REVISION": "rev-1",
         "VLLM_BASE_URL": "http://vllm:8000",
+        "SKOPEO_REGISTRY": str(tmp_path / "registry"),
+        "PODS_FILE": str(tmp_path / "pods.json"),
     }
     for k, v in extra_env:
         env[k] = v
@@ -196,13 +215,77 @@ def test_storage_size_knob_covers_persistence_and_snapshot(tree):
     assert "snapshotPersistence.size=1Gi" in log
 
 
-def _manifest(tree, chart_sha=None, sha=IMAGE_SHA):
+ROLE_REFS = {
+    "qdrant": "reg.internal/qdrant/qdrant:v1.19.0-unprivileged",
+    "agent": f"reg.internal/qdrant-pdf-rag-agent:{IMAGE_SHA}",
+    "jaeger": "reg.internal/jaegertracing/jaeger:v2.20.0",
+}
+ROLE_REPOS = {
+    "qdrant": "reg.internal/qdrant/qdrant",
+    "agent": "reg.internal/qdrant-pdf-rag-agent",
+    "jaeger": "reg.internal/jaegertracing/jaeger",
+}
+
+
+def _digest_of(raw: bytes) -> str:
+    return "sha256:" + sha256_bytes(raw)
+
+
+def _config_of(role: str) -> str:
+    return _digest_of(f"config-{role}".encode())
+
+
+def _image_manifest(role: str, config: str | None = None, **extra) -> bytes:
+    body = {
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+        "config": {"digest": config or _config_of(role), "size": 7},
+        "layers": [{"digest": _digest_of(f"layer-{role}-gz".encode()), "size": 9}],
+        **extra,
+    }
+    return json.dumps(body, separators=(",", ":")).encode() + b"\n"
+
+
+def _put_registry(tree, role: str, raw: bytes | None) -> str:
+    """Stub registry content for a role's tag; None removes the tag."""
+    reg = tree[0] / "registry"
+    reg.mkdir(exist_ok=True)
+    f = reg / (ROLE_REFS[role].replace("/", "_").replace(":", "_").replace("@", "_") + ".raw")
+    if raw is None:
+        f.unlink(missing_ok=True)
+        return ""
+    f.write_bytes(raw)
+    return _digest_of(raw)
+
+
+def _load_all(tree) -> dict[str, str]:
+    """What a successful airgap:load leaves in the registry: role -> manifest digest."""
+    return {role: _put_registry(tree, role, _image_manifest(role)) for role in ROLE_REFS}
+
+
+def _write_pods(tree, digests: dict[str, str], **override) -> None:
+    items = []
+    for role, repo in ROLE_REPOS.items():
+        if role in override and override[role] is None:
+            continue
+        digest = override.get(role, digests[role])
+        items.append({
+            "metadata": {"name": f"{role}-0"},
+            "spec": {"containers": [{"name": role, "image": f"{repo}:tag"}]},
+            "status": {"containerStatuses": [{"name": role, "imageID": f"{repo}@{digest}"}]},
+        })
+    (tree[0] / "pods.json").write_text(json.dumps({"items": items}))
+
+
+def _manifest(tree, chart_sha=None, sha=IMAGE_SHA, config_digests=True):
     dist = tree[0] / "dist"
     dist.mkdir(exist_ok=True)
     write_git_identity_stub(tree[0], sha)  # a claimed release needs a resolvable checkout (#414)
     lines = [f"sha: {sha}"]
     if chart_sha is not None:
         lines.append(f"chart_sha256: {chart_sha}")
+    if config_digests:
+        lines += [f"{role}_config_digest: {_config_of(role)}" for role in ROLE_REFS]
     write_signed_manifest(dist, "\n".join(lines) + "\n")
 
 
@@ -244,6 +327,7 @@ def test_manifest_without_chart_sha_refuses(tree):
 
 def test_manifest_chart_sha_match_deploys_that_chart(tree):
     _manifest(tree, sha256_bytes(_chart(tree).read_bytes()))
+    _write_pods(tree, _load_all(tree))
     result = _run(tree)
     assert result.returncode == 0, result.stderr
     assert "verified against packed MANIFEST" in result.stdout
@@ -258,6 +342,7 @@ def test_chart_identity_failure_then_fix_passes_on_next_run(tree):
     _manifest(tree, "0" * 64)
     assert _run(tree).returncode != 0
     _manifest(tree, sha256_bytes(_chart(tree).read_bytes()))
+    _write_pods(tree, _load_all(tree))
     result = _run(tree)
     assert result.returncode == 0, result.stderr
     assert "upgrade" in _helm_log(tree)
@@ -1157,3 +1242,131 @@ def test_route_pin_must_match_the_chart_tag(tree):
     assert r.returncode != 0
     assert "does not match the chart" in r.stderr
     assert "upgrade" not in _helm_log(tree)
+
+
+# ------------------------------------------------- registry image identity (#272)
+
+def _release(tree):
+    """A release-path deploy: packed MANIFEST, loaded registry, running pods."""
+    _manifest(tree, sha256_bytes(_chart(tree).read_bytes()))
+    digests = _load_all(tree)
+    _write_pods(tree, digests)
+    return digests
+
+
+def _mutations(tree):
+    log = _helm_log(tree) if tree[1].exists() else ""
+    return [w for w in ("upgrade", "create", "apply", "delete") if w in log.split()]
+
+
+def test_release_renders_first_party_images_by_verified_digest(tree):
+    digests = _release(tree)
+    result = _run(tree)
+    assert result.returncode == 0, result.stderr
+    values = (tree[0] / "dist" / "mainframe-rag-release-values.yaml").read_text()
+    assert f'digest: "{digests["agent"]}"' in values
+    assert f'digest: "{digests["jaeger"]}"' in values
+    rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
+    assert f"image: reg.internal/qdrant-pdf-rag-agent@{digests['agent']}" in rendered
+    assert f"reg.internal/qdrant-pdf-rag-agent:{IMAGE_SHA}" not in rendered
+    jaeger = (tree[0] / "dist" / "jaeger-rendered.yaml").read_text()
+    assert f"image: reg.internal/jaegertracing/jaeger@{digests['jaeger']}" in jaeger
+    assert "running images match the verified registry digests" in result.stdout
+    # The vendored Qdrant chart cannot render a digest: its tag stays, the pods are compared.
+    assert "image.tag=v1.19.0" in _helm_log(tree)
+
+
+def test_tag_swapped_after_load_refuses_before_any_mutation(tree):
+    _release(tree)
+    _put_registry(tree, "agent", _image_manifest("agent", config=_config_of("someone-else")))
+    result = _run(tree)
+    assert result.returncode != 0
+    assert "is not the packed image" in result.stderr
+    assert "nothing was deployed" in result.stderr
+    assert _mutations(tree) == []
+
+
+@pytest.mark.parametrize("role", ["qdrant", "agent", "jaeger"])
+def test_missing_registry_image_refuses_before_any_mutation(tree, role):
+    """pipeline --skip-load / standalone deploy against an empty or partial registry."""
+    _release(tree)
+    _put_registry(tree, role, None)
+    result = _run(tree)
+    assert result.returncode != 0
+    assert f"cannot read back registry image {ROLE_REFS[role]}" in result.stderr
+    assert _mutations(tree) == []
+
+
+def test_manifest_list_tag_refuses_before_any_mutation(tree):
+    _release(tree)
+    index = json.dumps({"schemaVersion": 2, "manifests": [{"digest": _config_of("qdrant")}]}).encode()
+    _put_registry(tree, "qdrant", index)
+    result = _run(tree)
+    assert result.returncode != 0
+    assert "not a single-image manifest" in result.stderr
+    assert _mutations(tree) == []
+
+
+def test_manifest_without_config_digests_refuses_before_any_mutation(tree):
+    _manifest(tree, sha256_bytes(_chart(tree).read_bytes()), config_digests=False)
+    _write_pods(tree, _load_all(tree))
+    result = _run(tree)
+    assert result.returncode != 0
+    assert "has no qdrant_config_digest" in result.stderr
+    assert _mutations(tree) == []
+
+
+def test_swapped_tag_refusal_then_reload_passes_next_run(tree):
+    digests = _release(tree)
+    _put_registry(tree, "agent", _image_manifest("agent", config=_config_of("someone-else")))
+    assert _run(tree).returncode != 0
+    # A reload overwrites the tag with the packed image; the next ordinary run deploys it.
+    _load_all(tree)
+    result = _run(tree)
+    assert result.returncode == 0, result.stderr
+    assert f"@{digests['agent']}" in (tree[0] / "dist" / "agent-rendered.yaml").read_text()
+
+
+def test_registry_digest_is_read_from_the_registry_not_the_archive(tree):
+    """The rendered digest is the registry manifest digest (compressed layers),
+    which differs from anything derivable from the archive."""
+    digests = _release(tree)
+    assert digests["agent"] != _config_of("agent")
+    _run(tree)
+    values = (tree[0] / "dist" / "mainframe-rag-release-values.yaml").read_text()
+    assert digests["agent"] in values
+    assert _config_of("agent") not in values
+
+
+def test_running_pod_with_different_digest_fails_after_rollout(tree):
+    digests = _release(tree)
+    _write_pods(tree, digests, qdrant="sha256:" + "9" * 64)
+    result = _run(tree)
+    assert result.returncode != 0
+    assert "pod qdrant-0 container qdrant runs sha256:" + "9" * 64 in result.stderr
+    assert "running pods do not use the verified registry images" in result.stderr
+    assert "upgrade" in _helm_log(tree)
+
+
+def test_missing_running_pod_for_verified_image_fails(tree):
+    digests = _release(tree)
+    _write_pods(tree, digests, agent=None)
+    result = _run(tree)
+    assert result.returncode != 0
+    assert "no running container found for reg.internal/qdrant-pdf-rag-agent" in result.stderr
+
+
+def test_dry_run_is_tag_only_and_reads_no_registry(tree):
+    _release(tree)
+    result = _run(tree, ("AIRGAP_DRYRUN", "1"))
+    assert result.returncode == 0, result.stderr
+    assert "not release-verified" in result.stderr
+    assert "skopeo" not in _helm_log(tree)
+    values = (tree[0] / "dist" / "mainframe-rag-release-values.yaml").read_text()
+    assert "digest" not in values
+
+
+def test_digest_from_caller_environment_is_never_rendered(tree):
+    result = _run(tree, ("AIRGAP_DRYRUN", "1"), ("IMAGE_DIGEST_AGENT", "sha256:" + "1" * 64))
+    assert result.returncode == 0, result.stderr
+    assert "digest" not in (tree[0] / "dist" / "mainframe-rag-release-values.yaml").read_text()
