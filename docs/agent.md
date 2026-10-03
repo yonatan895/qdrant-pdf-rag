@@ -472,6 +472,11 @@ hits omitted by budget packing, and the tail's example cite, are rejected:
   punctuation, ``[x](url)`` links, `<angle>` wraps, `(parens)` groups, and
   `[1]:`-style numeric prefixes (up to 6 rounds) on both paths — two
   regexes for one concept would diverge.
+- Citation shape is doc id, title, heading path, `, p. <page>`. The doc id
+  is an IBM doc number or, for documents ingested under their filename stem
+  (`tss-messages`), any doc id supplied in the prompt, so stem cites are
+  consumed by the block, swept from the body and counted like doc-number
+  ones. An exact supplied cite line always counts as a citation.
 - Validation is exact-match + dedupe against the supplied set; standalone
   lines only — inline mentions (`refer to SA22-… for details`), dimensions
   (`3.5 inches`), and table pipes survive.

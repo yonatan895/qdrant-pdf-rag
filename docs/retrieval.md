@@ -65,7 +65,8 @@ citation carries a location an engineer can open in the retained PDF. This
 is a PDF page number, not a printed folio. Points without a stored
 `page_start` keep the page-less form; points without `page_end` read as
 single-page. Both forms keep the `, p. <page>` tail that
-`cites.CITATION_LINE_RE` validates.
+`cites.is_citation_shaped` validates (doc-number or supplied filename-stem
+doc id).
 
 ## 2. Prefetch and filters
 
