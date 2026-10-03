@@ -415,6 +415,30 @@ def test_vendor_assets_match_pinned_sha256sums():
         assert hashlib.sha256(payload).hexdigest() == digest, name
 
 
+def test_vendored_fonts_are_local_pinned_and_served(ui_client):
+    """Console fonts (ADR-0004 §4 amendment): every face fonts.css declares is
+    a vendored, checksum-pinned file served from /ui/static as font/woff2,
+    the stylesheet names no remote host, and the shell links it ahead of
+    console.css so the face is declared before any rule uses it."""
+    import re
+
+    css_path = _VENDOR_DIR.parent / "css" / "fonts.css"
+    css = css_path.read_text(encoding="utf-8")
+    assert "http" not in css and "//" not in css.replace("/*", "").replace("*/", "")
+    urls = re.findall(r'url\("\.\./vendor/([^"]+)"\)', css)
+    assert len(urls) == css.count("@font-face") == 6
+    pinned = {line.split(maxsplit=1)[1].strip() for line in (_VENDOR_DIR / "SHA256SUMS").read_text().splitlines()}
+    assert "LICENSE.ibm-plex" in pinned
+    for name in urls:
+        assert name in pinned, name
+        resp = ui_client.get(f"/ui/static/vendor/{name}")
+        assert resp.status_code == 200, name
+        assert resp.headers["content-type"] == "font/woff2", name
+        assert resp.content[:4] == b"wOF2", name
+    shell = ui_client.get("/ui").text
+    assert shell.index("/ui/static/css/fonts.css") < shell.index("/ui/static/css/console.css")
+
+
 def test_dead_sse_extension_stays_removed(ui_client):
     """Issue #326 P0: streaming uses native fetch — the unreferenced sse.js
     must not come back as dead weight (file, manifest, or shell reference)."""

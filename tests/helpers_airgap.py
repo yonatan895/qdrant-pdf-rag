@@ -78,11 +78,15 @@ def copy_chart(tmp_path: Path) -> Path:
 
 def copy_license_inputs(tmp_path: Path) -> None:
     """Everything scripts/license_inventory.py reads for a pack tree (#376)."""
+    # Every vendored console asset, not a fixed list: the checker binds each
+    # file in static/vendor, so a new vendored file must reach the tree too.
+    vendor = sorted(
+        p.relative_to(REPO).as_posix()
+        for p in (REPO / "src/mainframe_rag/webui/static/vendor").iterdir()
+        if p.is_file()
+    )
     for relative in ("licenses/inventory.json", "scripts/license_inventory.py", "pyproject.toml", "LICENSE",
-                     "LICENSE.qdrant-skills", "NOTICE.qdrant-skills", "bm25-weights.sha256",
-                     "src/mainframe_rag/webui/static/vendor/htmx.min.js",
-                     "src/mainframe_rag/webui/static/vendor/LICENSE.htmx",
-                     "src/mainframe_rag/webui/static/vendor/SHA256SUMS"):
+                     "LICENSE.qdrant-skills", "NOTICE.qdrant-skills", "bm25-weights.sha256", *vendor):
         target = tmp_path / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(REPO / relative, target)

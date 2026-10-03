@@ -161,6 +161,15 @@
     - *Modern Dark Theme:*
       `ui-monospace, 'Cascadia Code', 'Source Code Pro', Consolas, 'Liberation Mono', monospace`
       and `-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`.
+  - **Vendored fonts (amendment):** IBM Plex Sans (400, italic 400, 500, 600) and
+    IBM Plex Mono (400, 500) are vendored as unmodified Latin-1 split `woff2` files
+    from npm `@ibm/plex-sans` 1.1.0 / `@ibm/plex-mono` 2.5.0 under
+    `src/mainframe_rag/webui/static/vendor/`, with the SIL OFL 1.1 text as
+    `LICENSE.ibm-plex`, pinned in `vendor/SHA256SUMS` and recorded in
+    `licenses/inventory.json`. `static/css/fonts.css` declares them with IBM's own
+    `unicode-range` and `font-display: swap`; they are served from `/ui/static`
+    (no remote font service, CSP unchanged) and every stack keeps the system
+    fallbacks above, so a missing glyph or file degrades to the system font.
   - **Vendored frontend assets:**
     - `src/mainframe_rag/webui/static/vendor/htmx.min.js`: HTMX 1.9.12 vendored locally,
       pinned to SHA256 `449317ade7881e949510db614991e195c3a099c4c791c24dacec55f9f4a2a452`

@@ -465,6 +465,22 @@ def test_no_external_requests_and_no_csp_violations(console, page):
 # -- storage / clipboard / export failures -----------------------------------------
 
 
+def test_vendored_fonts_load_under_the_strict_csp(console, page):
+    """Every vendored face decodes and is usable from /ui/static under the
+    shipped CSP (fonts fall under default-src 'self'); a broken file, a wrong
+    path or a CSP block leaves the face unloaded."""
+    faces = page.eval_async(
+        "const done = arguments[arguments.length - 1];"
+        "const specs = ['400 16px \"IBM Plex Sans\"', 'italic 400 16px \"IBM Plex Sans\"',"
+        " '500 16px \"IBM Plex Sans\"', '600 16px \"IBM Plex Sans\"',"
+        " '400 16px \"IBM Plex Mono\"', '500 16px \"IBM Plex Mono\"'];"
+        "Promise.all(specs.map((s) => document.fonts.load(s, 'Abc')))"
+        ".then((loaded) => done(loaded.map((list) => list.length)), (err) => done(String(err)));"
+    )
+    assert faces == [1, 1, 1, 1, 1, 1]
+    assert page.eval("return Array.from(document.fonts).filter((f) => f.status === 'error').length") == 0
+
+
 def test_unavailable_localstorage_degrades_visibly(console, browser):
     browser.init_script(
         "Object.defineProperty(window,'localStorage',{get(){throw new DOMException('denied','SecurityError');}});"
