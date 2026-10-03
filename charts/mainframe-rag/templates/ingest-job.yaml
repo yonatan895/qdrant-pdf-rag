@@ -40,7 +40,7 @@ spec:
       {{- end }}
       containers:
         - name: ingest
-          image: {{ include "mainframe-rag.ingestImage" . }}
+          image: {{ include "mainframe-rag.image" (dict "name" "ingest" "image" .Values.images.ingest) }}
           imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false

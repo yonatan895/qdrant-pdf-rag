@@ -4,28 +4,9 @@ Keep this file small: no general-purpose PodSpec framework (stop condition).
 Protected implementation defaults (selectors, ports, probes, keys) stay in
 the resource templates, not in values.
 */}}
-{{- define "mainframe-rag.labels" -}}
-app: rag-agent
-{{- end -}}
-
-{{- define "mainframe-rag.selectorLabels" -}}
-app: rag-agent
-{{- end -}}
-
-{{- define "mainframe-rag.agentImage" -}}
-{{ required "images.agent.repository is required" .Values.images.agent.repository }}{{ with .Values.images.agent.digest }}@{{ . }}{{ else }}:{{ required "images.agent.tag is required (full git SHA)" .Values.images.agent.tag }}{{ end }}
-{{- end -}}
-
-{{- define "mainframe-rag.ingestImage" -}}
-{{ required "images.ingest.repository is required" .Values.images.ingest.repository }}{{ with .Values.images.ingest.digest }}@{{ . }}{{ else }}:{{ required "images.ingest.tag is required (full git SHA)" .Values.images.ingest.tag }}{{ end }}
-{{- end -}}
-
-{{- define "mainframe-rag.jaegerImage" -}}
-{{ required "images.jaeger.repository is required" .Values.images.jaeger.repository }}{{ with .Values.images.jaeger.digest }}@{{ . }}{{ else }}:{{ required "images.jaeger.tag is required" .Values.images.jaeger.tag }}{{ end }}
-{{- end -}}
-
-{{- define "mainframe-rag.oauthProxyImage" -}}
-{{ required "images.oauthProxy.repository is required" .Values.images.oauthProxy.repository }}{{ with .Values.images.oauthProxy.digest }}@{{ . }}{{ else }}:{{ required "images.oauthProxy.tag is required" .Values.images.oauthProxy.tag }}{{ end }}
+{{- define "mainframe-rag.image" -}}
+{{- $tagHint := ternary " (full git SHA)" "" (has .name (list "agent" "ingest")) -}}
+{{ required (printf "images.%s.repository is required" .name) .image.repository }}{{ with .image.digest }}@{{ . }}{{ else }}:{{ required (printf "images.%s.tag is required%s" $.name $tagHint) $.image.tag }}{{ end }}
 {{- end -}}
 
 {{- define "mainframe-rag.qdrantUrl" -}}
