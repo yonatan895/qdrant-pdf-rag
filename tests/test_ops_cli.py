@@ -285,7 +285,7 @@ def test_search_scoped_request_and_full_structured_hits(agent):
         "/v1/search",
         Reply(
             body=SearchResponse(
-                request_id="r1", query_kind="message", hits=[hit(1), hit(2, rerank_score=0.9)]
+                request_id="r1", query_kind="message", hits=[h.model_dump() for h in (hit(1), hit(2, rerank_score=0.9))]
             ).model_dump(mode="json")
         ),
     )
