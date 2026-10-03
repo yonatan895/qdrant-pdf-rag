@@ -37,8 +37,9 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q -m 'not integration'"
+addopts = "-q -m 'not integration and not browser'"
 markers = [
+    "browser: executed real-browser console contracts (issue #372); needs an offline Chrome for Testing + chromedriver and skips without one; run `pytest -m browser tests/test_console_browser.py`",
     "integration: end-to-end tiers against a docker Qdrant server + loopback mocks (correctness via `sh scripts/tools/run-task.sh qa:sim`, load tier via `sh scripts/tools/run-task.sh qa:load`)",
 ]
 

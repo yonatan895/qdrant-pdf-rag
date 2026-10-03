@@ -716,8 +716,8 @@ def test_ui_chat_fragment_turn_copy_buttons(ui_client, monkeypatch):
 def test_console_js_streaming_ux_wiring():
     """P3: streaming UX behaviors are wired in console.js — thinking
     placeholder, abort/stop, Ctrl+Enter submit, per-turn meta footer,
-    session rename + filter, empty state. (No JS runtime in CI; this pins
-    presence, live probes exercise the behavior.)"""
+    session rename + filter, empty state. (This pins presence only; the
+    behavior is executed in tests/test_console_browser.py, issue #372.)"""
     js = (
         Path(app_mod.__file__).parents[1] / "webui" / "static" / "js" / "console.js"
     ).read_text(encoding="utf-8")
@@ -1235,3 +1235,40 @@ def test_ui_chat_root_is_server_and_ends(ui_client, monkeypatch):
     assert len(roots) == 1
     assert roots[0].kind == SpanKind.SERVER
     assert roots[0].end_time is not None
+
+
+# ---------------------------------------------------------------------------
+# Retention and accessibility structure (issue #372). Hermetic; the executed
+# behavior lives in tests/test_console_browser.py (real browser, skips
+# without a runtime).
+# ---------------------------------------------------------------------------
+
+
+def test_ui_shell_declares_retention_notice_clear_control_and_status_region(ui_client):
+    body = ui_client.get("/ui").text
+    assert '<html lang="en">' in body
+    assert '<aside class="sidebar" aria-label="Incidents">' in body
+    assert 'id="console-status"' in body and 'role="status"' in body
+    # The message list is not a live region: per-token re-rendering would flood AT.
+    assert 'id="messages" class="messages" role="region"' in body
+    assert 'id="messages" class="messages" aria-live' not in body
+    assert 'id="clear-history-btn"' in body
+    note = body.split('id="retention-note">', 1)[1].split("</p>", 1)[0]
+    for phrase in ("this browser only", "30 incidents", "until you clear", "shared workstation"):
+        assert phrase in note
+    assert 'id="storage-notice" role="status" hidden' in body
+
+
+def test_console_turn_text_never_reaches_server_logs(ui_client, caplog):
+    marker = "ZXQ-SENSITIVE-4417"
+    with caplog.at_level("DEBUG"):
+        resp = ui_client.post(
+            "/ui/chat/stream",
+            json={
+                "messages": [{"role": "user", "content": f"What is IEA500I? {marker}"}],
+                "splunk_context": f"JOB {marker}",
+            },
+        )
+    assert resp.status_code == 200 and "Reissue" in resp.text
+    assert marker not in caplog.text
+    assert "Reissue" not in caplog.text and "IEA500I BEFORE" not in caplog.text
