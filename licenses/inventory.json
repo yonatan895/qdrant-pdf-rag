@@ -169,7 +169,7 @@
           },
           {
             "path": "src/mainframe_rag/webui/static/vendor/SHA256SUMS",
-            "sha256": "884dfbe6165fab32aa75d966fd199b0583c86717171115f25cee76c8e544272e"
+            "sha256": "17e5f30bba792cad4a3f17b67e42cc152f32ff645df4b395f9421272097e868c"
           }
         ]
       },
@@ -187,6 +187,57 @@
       ],
       "spdx_basis": "license-file-text",
       "status": "declared"
+    },
+    {
+      "approval_ref": null,
+      "bind": {
+        "files": [
+          {
+            "path": "src/mainframe_rag/webui/static/vendor/IBMPlexMono-Medium-Latin1.woff2",
+            "sha256": "41201b658a328b9d00368215c2f1102770f80b15952ab82631e4006255e6365d"
+          },
+          {
+            "path": "src/mainframe_rag/webui/static/vendor/IBMPlexMono-Regular-Latin1.woff2",
+            "sha256": "e8993d946649b9d01abb1ed06d574b19d8ea3e66b5c3948602db335c44c18e56"
+          },
+          {
+            "path": "src/mainframe_rag/webui/static/vendor/IBMPlexSans-Italic-Latin1.woff2",
+            "sha256": "0a06b98143f3453b81f3c396241a01c6c4cff84c1a77bf0c75b18bd603018506"
+          },
+          {
+            "path": "src/mainframe_rag/webui/static/vendor/IBMPlexSans-Medium-Latin1.woff2",
+            "sha256": "b5610af04d0d4b5a14a621d96d974b993e945a065db1a8861918f69ef9321934"
+          },
+          {
+            "path": "src/mainframe_rag/webui/static/vendor/IBMPlexSans-Regular-Latin1.woff2",
+            "sha256": "b5ad7bd39f996144915f0ad9849a90183b27d8c28ad97ed98af5b1bebc51f6b1"
+          },
+          {
+            "path": "src/mainframe_rag/webui/static/vendor/IBMPlexSans-SemiBold-Latin1.woff2",
+            "sha256": "fff0ab3a88b0b4aa0b693e4f0201359a15183b08e3fa5696d1918d8f0ade8ad5"
+          },
+          {
+            "notice": true,
+            "path": "src/mainframe_rag/webui/static/vendor/LICENSE.ibm-plex",
+            "sha256": "7e6b2818edbd8f6a01ae80641cc8f16a51080d08fb4e532be3a0b6f74adb07da"
+          }
+        ]
+      },
+      "class": "unknown",
+      "distributed_by_repo": true,
+      "id": "asset:ibm-plex",
+      "kind": "vendored-font",
+      "license_declared": "SIL Open Font License 1.1 (vendored LICENSE.ibm-plex; npm @ibm/plex-sans 1.1.0, @ibm/plex-mono 2.5.0)",
+      "license_spdx": "OFL-1.1",
+      "name": "IBM Plex Sans and Mono (console fonts)",
+      "obligation": "SIL OFL 1.1: the fonts may be bundled and redistributed with the software if the copyright notice and license (LICENSE.ibm-plex) travel with them; they may not be sold on their own, and a modified version may not use the Reserved Font Name \"Plex\". The files ship unmodified. OFL-1.1 is not in this checker's license-class table, so classifying it is an owner decision.",
+      "ships_in": [
+        "app-agent image",
+        "app-ingest image",
+        "repo.bundle"
+      ],
+      "spdx_basis": "license-file-text",
+      "status": "pending-owner-decision"
     },
     {
       "approval_ref": null,
