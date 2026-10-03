@@ -1793,7 +1793,10 @@ class TestTaskCiConsumers(unittest.TestCase):
         job = yaml.safe_load((self.root / ".gitlab-ci.yml").read_text())["test"]
         self.assertEqual(job["variables"]["TASK_CONTRACTS_REQUIRE_RUNNER"], "1")
         commands = job["script"]
-        script = "\n".join(commands)
+        # The JUnit skip/xfail gate runs after pytest; tests/test_ci_gitlab_parity.py
+        # owns its behavior. Here only the prerequisite ordering is exercised.
+        gate = next(i for i, c in enumerate(commands) if "check_junit_clean.py" in c)
+        script = "\n".join(commands[:gate])
         with tempfile.TemporaryDirectory() as td:
             root = pathlib.Path(td)
             tool = root / "scripts/tools/install-task.sh"
@@ -1841,7 +1844,7 @@ class TestTaskCiConsumers(unittest.TestCase):
                 self.assertEqual((root / "doctor-args").exists(), task_status == helm_status == 0)
                 if task_status == 0:
                     self.assertEqual((root / "helm-args").read_text(), f"--archive\n{helm_archive}\n")
-            self.assertEqual((root / "tests-ran").read_text(), "-q\n")
+            self.assertEqual((root / "tests-ran").read_text(), "-q --junitxml=unit-junit.xml\n")
             self.assertEqual((root / "doctor-args").read_text(),
                              f"scripts/agent_doctor.py\n--python\n{root / 'python'}\n")
             self.assertEqual(shlex.split(commands[1]),

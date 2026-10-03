@@ -568,9 +568,11 @@ per-leg data keys. The API key value never enters Helm values or `airgap.env`.
 
 GitHub runs unit, sim, gates, bench, load, the path-filtered multi-peer HA
 lane (issue #360: three-peer placement/peer-loss fixture), connected E2E,
-and the dry-run gate; air-gap GitLab runs hygiene + pytest + gate-l1 only
-(no e2e, load, deploy, multi-peer docker, GHCR, or PDFs/tokens/hostnames in
-file). Job meaning stays aligned across the two files; only e2e-scale jobs
+and the dry-run gate; air-gap GitLab runs hygiene, lint/types, the full
+pytest suite, hazards, the sim tier and gate-l1 only (no e2e, load, deploy,
+multi-peer docker, GHCR, or PDFs/tokens/hostnames in file). GitLab unit/sim
+reports reject any skipped or xfailed test (`scripts/check_junit_clean.py`);
+`tests/test_ci_gitlab_parity.py` pins the correspondence and failure propagation. Job meaning stays aligned across the two files; only e2e-scale jobs
 live in `.github/workflows/e2e.yml`.
 
 - GitHub product `ci.yml`/`e2e.yml` run on every PR/push with no markdown-only
@@ -889,7 +891,8 @@ changes together. GitLab uses mirrored CI_PYTHON_IMAGE/CI_RUNNER_TAG and interna
 PIP_INDEX_URL or PIP_FIND_LINKS, failing closed without a package source. No
 public network, GHCR, deploy/pack/image-build or opencode reviewer in GitLab.
 Issue #397 authorizes the offline context check in hygiene and a small GitHub
-context workflow; general lint/type/coverage/ruleset changes remain #370.
+context workflow; #370 owns GitLab/GitHub gate parity, #584 the lint ruleset.
+Coverage ratchets and a real internal-runner pipeline run (#446) are not part of it.
 
 Third-party actions use full SHA pins; document runtime downloads outside that
 pin. Runtime artifacts need pinned versions and in-repo SHA256 verification;
