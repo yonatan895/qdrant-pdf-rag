@@ -79,6 +79,48 @@ PyMuPDF is the only parser. `parse_pdf` returns a frozen, slots `ParsedDoc`.
   the inventory skip-check and passes the digest through
   `parse_pdf(sha256=...)` so workers never re-read the file.
 
+### Page text extraction and table rows (issue #85)
+
+`ibm_pdf._extract_page_texts` (re-exported to `run_ingest`) owns page text
+extraction. It lives in `ibm_pdf.py` deliberately: that module is hashed
+into `extraction_rules_version`, so any payload-changing extraction rule
+here moves the version and forces a distinct-generation re-ingest. A rule
+left in `run_ingest.py` would not, and resumed ingests would keep stale
+payloads. **This change alters extracted payload text; existing
+collections need a re-ingest.**
+
+- Plain `page.get_text()` follows content-stream order, so a table drawn
+  column by column (or whose cells MuPDF emits one per line) extracts as
+  column lists and the row/value association is gone before chunking.
+- `get_text(sort=True)` was evaluated and rejected: in current PyMuPDF it
+  simulates layout (space padding, blank lines, words from different
+  columns on one line) and interleaves two-column prose.
+- `extract_page_text` therefore keeps plain extraction and corrects only
+  table-like regions. Consecutive text blocks that are *cell-like* (mean
+  <= 5 and max <= 8 words per line) and vertically adjacent (gap <= 1.5
+  line heights) form a column set. Only when at least 3 baselines in the
+  set carry two or more cells is the set re-emitted as one line per
+  baseline, cells ordered by x and joined by a single space; a wrapped
+  cell's continuation line follows its row. Everything else, including
+  multi-column prose (its lines run 8+ words), is byte-identical to plain
+  extraction. If the blocks do not reproduce the plain text exactly, the
+  page falls back to plain.
+- Bare IBM change-bar lines (a line that is only `|`) are dropped; they
+  are margin marks, not content, and surfaced as runs of `|` inside table
+  chunks. A `|` inside a longer line is untouched.
+- Known limits: a table whose cells are prose-length (more than 8 words per
+  line) is left in stream order; a wrapped cell is zipped line-by-line with
+  its neighbours' baselines, not parsed into cell objects; no ruling-line
+  (`find_tables`) detection. Chunk ids, `chunk_type` and the identity
+  contract are unchanged.
+- Measured on five local manuals (parse + chunk only, counts; z/OS 2.2
+  MVS Init & Tuning Reference, Principles of Operation, Program Management,
+  Device Validation Support, one CICS book; 3,799 pages): 1,470 pages
+  changed by the table rule, 0 pages gained or lost a word (the rebuild
+  only reorders), 0 prose lines of 9+ words disturbed, 0 duplicate chunk
+  texts before and after, chunk counts 4,144 -> 4,136 and chunk text 10.27M
+  -> 10.25M chars (change bars and merged cell lines).
+
 Contract tests: `tests/test_parser_ibm_shape.py`,
 `tests/test_generic_pdf.py`, `tests/test_sanitize.py`.
 
@@ -242,7 +284,7 @@ for citations and filters.
   `p. PDF n–m`, see [retrieval §1](retrieval.md)). A `/PageLabels` tree whose
   first rule starts after page 0 makes PyMuPDF's `get_label()` raise
   `IndexError` on the earlier pages; extraction treats those labels as absent
-  (`run_ingest._page_label`) instead of failing the document.
+  (`ibm_pdf._page_label`) instead of failing the document.
 - Per chunk, `classify` (§5) plus message/member extraction run and land in
   the payload (§8).
 
