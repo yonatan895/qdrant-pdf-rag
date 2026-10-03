@@ -479,8 +479,8 @@ this command never mutates. Publication eligibility is enforced in process
 as well as by this command: the cutover gate requires RF ACTIVE copies per
 shard on the staging pair through direct peer endpoints (`QDRANT_PEER_URLS`,
 [publication contract](ingest.md#publication-contract)) and refuses while
-degraded; operator plumbing of that setting through the air-gap render path
-is a follow-up slice.
+degraded. `QDRANT_PEER_URLS` flows operator -> mapper -> chart
+`ingest.peerUrls` -> ingest Job environment (#507).
 
 **Disposable local proof:** `scripts/qdrant_cluster.py` starts the pinned
 image as three loopback peers and `tests/test_ha_cluster.py`
@@ -503,6 +503,102 @@ corpus/control read-back via survivors and on every peer after rejoin),
 identical-ID retry convergence, and 2+1 partition behavior (minority writes
 never acknowledge; majority writes stay exact; healed peers converge to one
 exact state, so retries must reuse identical IDs and identical content).
+
+<a id="distributed-recovery"></a>
+#### Distributed recovery boundary (issue #360)
+
+Qdrant collection snapshots are node-specific and do not carry aliases, so
+the single-node snapshot clone/recover recipe cannot prove that every shard
+of a 6/3/2 collection was captured or restored. `qdrant_io.clone_collection`
+(update publications) and the legacy-layout migration in `run_ingest` now
+call `require_single_node_recovery` first: a source with `shard_number` > 1 or
+`replication_factor` > 1, an explicit multi-shard/replica policy selected for
+the run, or unreadable/missing/invalid topology raises
+`DistributedRecoveryUnsupportedError` before any snapshot, recover, or
+delete. Only explicit positive non-boolean integer live shard/replica values
+of 1/1 permit this recipe; a successful but incomplete response is unknown.
+Live data and the alias are untouched. Supported distributed
+recovery today is a fresh complete generation rebuilt from the protected
+originals (accepted downtime). Node-addressed restore, replacement-peer
+join and replica repair stay unqualified until site evidence exists. The
+safety snapshot taken at alias swap is node-local on a distributed source:
+it is not a restore point; the retained superseded physical collection is
+the rollback.
+
+<a id="site-qualification"></a>
+#### Site qualification procedure (issue #360; external, not run by CI)
+
+Run by the authorized site operator against the exact bundle/configuration
+that will serve users. Evidence goes to the approved venue (never git:
+credentials, hostnames, private corpus content stay out of the repository);
+record the exact image digests, chart values, `QDRANT_*`/`QDRANT_PEER_URLS`
+values, and the commit SHA of this repository. Any FAIL blocks a production-HA
+claim; do not lower RF/W, colocate peers, or relabel a one-node setup to pass.
+
+| Step | Action | Evidence to capture | Pass / fail |
+|---|---|---|---|
+| 1 Placement map | `kubectl get pods -o wide -l app.kubernetes.io/name=qdrant` and `kubectl get nodes -L topology.kubernetes.io/zone,kubernetes.io/hostname`; map peer id (from `/cluster`) -> pod -> worker -> storage volume/backing device | Table peer/pod/worker/zone/PV/storage class | PASS: 3 distinct workers; the site names the independent failure domain (hypervisor/rack/storage array) each worker sits in. FAIL: any two peers share a worker or an undeclared domain; hostname separation alone is recorded as "distinct hosts, domain unproven" |
+| 2 Storage | `df`/PVC capacity and used per peer for data and snapshots; storage class access mode and semantics (RWO block, not shared NFS) | Capacity/used/headroom per peer; storage class YAML | PASS: RWO block on each peer, headroom >= sizing below with margin for staging plus retained generation. FAIL: shared storage between peers, or headroom below one extra generation |
+| 3 Policy and placement | `scripts/verify_placement.py --production` with `QDRANT_URL` the Service and three direct `--peer-url`s, for the live alias and for each staging pair before cutover | Full verifier output including the `VERDICT:` line and exit code | PASS: exit 0, VERDICT healthy, 6/3/2 on corpus and control. FAIL: any other verdict (degraded/recovering/unverifiable/unservable) |
+| 4 Fresh generation | Canonical Task/launcher ingest from the protected originals into an empty alias (no clone path); then re-run it unchanged (steady-state re-verify) and restart the ingest Job | Job logs (`action: publish`), points count, second-run no-op log | PASS: first publication succeeds, repeat re-verifies read-only, restart is a no-op, counts equal across all three peers. FAIL: any clone/recover path reached (it must refuse on RF>1) or counts differ |
+| 5 Exact data | Per peer (direct URL) scroll the corpus and control collections and compare point ids, payload hashes and vector checksums against the first peer; run the golden/real-corpus retrieval check through the alias | Per-peer id/payload/vector digests, retrieval report | PASS: digests identical on all peers, retrieval within the accepted baseline. FAIL: any divergence |
+| 6 Write acknowledgement | Through the entry Service, upsert a marker batch with `wait=true` (W=2), record the acknowledgement; repeat while exactly one peer is stopped by the site | Ack responses, marker ids, read-back from every peer after rejoin | PASS: acknowledged writes succeed with one peer down and every acknowledged id is present exactly on all three peers after rejoin (RPO 0 target). Unacknowledged/ambiguous writes are retried with identical ids and converge without duplicates. FAIL: any acknowledged write missing |
+| 7 Peer loss | One authorized peer loss at a time (pod delete or node cordon+drain; never storage destruction): measure time to first successful search through the entry Service, then verifier with `--allow-degraded` | Timestamps, search results, degraded verdict output | PASS (targets, not SLAs until measured here): reads recover within the recorded bound (target 60 s); verdict `degraded` not `unverifiable`. FAIL: reads unavailable beyond the bound, or any verdict besides degraded |
+| 8 Rejoin | Restore the peer; poll the verifier (strict) until healthy, then repeat step 5 exact-data comparison and one ordinary read plus one ordinary publication re-run | Time to healthy (target 180 s on the small fixture; record the site-sized value), step 5 digests | PASS: healthy and digests identical. ACTIVE alone is not convergence (step 5 is required). FAIL: not healthy within the agreed window, or digests differ |
+| 9 Sequential maintenance | Evict peers one by one, waiting for step 8 before the next | Per-eviction verifier output | PASS: no shard ever has fewer than 2 ACTIVE copies; never two peers down. FAIL: PDB-only reliance without recovery wait |
+| 10 Replacement and restore | Only if the site wants to qualify it: replacement of a peer with empty storage through the supported remove-shards/join procedure, and node-addressed restore, each with step 5 digests plus control/alias/inventory reconciliation | Procedure transcript, digests | Not required for the frozen-generation POC. Until recorded PASS, the supported recovery is a fresh rebuild with accepted downtime |
+| 11 Report | Fill the venue record: topology, storage/headroom, read/write behavior, measured recovery times, objectives accepted or waived | Signed record linked from #360/#374/#272/#447 | A missing step is recorded as not run, never as pass |
+
+Steps 6-9 are destructive-adjacent and need explicit site authorization; this
+repository performs none of them.
+
+<a id="sizing-note"></a>
+#### Sizing note and HA-scope decision (issues #360, #374, #582)
+
+Measured input: the 2026-10-02 full re-ingest (`manuals_b5c1756`, 452 docs)
+holds 190,440 points of 1024-d dense vectors. The dense vector is
+190,440 x 1024 x 4 B = 0.78 GB float32 (0.73 GiB) and about 0.20 GB as int8
+scalar quantization (the collection's configured quantization). Dense and
+sparse vectors are `on_disk`. Payload text, the BM25 sparse vector and the
+HNSW graph are **not yet measured**: record the real per-peer
+`data` usage from step 2 above before relying on any total.
+
+| Quantity | Value |
+|---|---|
+| Logical dense vectors, float32 / int8 | 0.78 GB / 0.20 GB |
+| Points per shard at 6 shards | about 31,700 |
+| Copies at RF3 on 3 peers | every peer stores every shard: one full copy per peer; cluster total 3 x logical (dense 2.3 GB float32) |
+| During an update publication | live plus staging coexist (about 2 x per peer) plus retained superseded generations until the operator removes them |
+| Configured per peer | 500 Gi data, 500 Gi snapshots, 16 Gi RAM request / 32 Gi limit |
+
+Even with 3 retained generations the dense vectors are a few GB per peer,
+under 1 % of the configured data volume and well under the RAM request, so
+the current 6/3/2 topology is not capacity constrained; the sizing margin is
+large and a smaller request/limit is possible but is a capacity decision for
+#374 after real per-peer usage is measured, not a change made here.
+
+**Maintainer decision requested (HA scope; no change is made in code).**
+Replicas buy availability; shards buy scale. With 3 peers and RF3, every
+peer already holds every shard, so the 6 shards add no availability and no
+storage spreading today: they only fix the maximum spread for a future
+peer-count increase (shards can move to up to 6 distinct peers) and give
+about 31,700-point units for transfer/recovery. At the measured size one
+shard per peer would suffice. Options:
+
+1. Keep 6/3/2 (current decision). Shard-count headroom is kept; a later
+   change from any other shard count needs a rebuilt generation.
+2. Move to fewer shards (for example 3/3/2) at the next full rebuild: smaller
+   per-collection overhead and fewer recovery units, loses headroom beyond
+   3 peers. A shard-layout change is a distinct physical generation, never an
+   in-place edit, and never an embedding-model change.
+3. Keep availability scope explicit: RF3/W2 tolerates one peer at a time;
+   it does not tolerate simultaneous failures, shared-storage loss or loss of the
+   platform model/gateway tier.
+
+Recommendation: option 1 unless the corpus is expected to stay near its
+present size for the lifetime of the deployment and the maintainer prefers
+fewer recovery units; either way site steps 1-9 apply unchanged. No
+topology default changes until the maintainer records the decision.
 
 ## 6. Images and pins
 
