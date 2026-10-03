@@ -1390,3 +1390,77 @@ def test_physical_pair_without_alias_reports_the_physical_target(capsys):
     assert report is not None and report.alias is not None
     assert report.alias.target is None
     assert "not a current-alias certification" in output
+
+
+# ------------------------------------------------ replacement / interrupted copy
+REPLACEMENT = 404
+
+
+def _replacement_fleet(*, new_local_state=None, new_has_shards=False):
+    """Peer 303 was lost and its slot replaced by an empty-storage peer 404.
+    101/202 hold every shard; 404 holds nothing, or every shard in
+    `new_local_state` (the catch-up stage). Remote reports stay consistent."""
+    survivors = (101, 202)
+    shards = range(6)
+    observations = []
+    for peer in survivors:
+        other = next(p for p in survivors if p != peer)
+        remote = [_remote(s, other, "ACTIVE") for s in shards]
+        if new_has_shards:
+            remote += [_remote(s, REPLACEMENT, new_local_state) for s in shards]
+        observations.append(
+            _obs(peer, 6, local=[_local(s) for s in shards], remote=remote)
+        )
+    local = [_local(s, new_local_state) for s in shards] if new_has_shards else []
+    remote = [_remote(s, p, "ACTIVE") for p in survivors for s in shards]
+    observations.append(_obs(REPLACEMENT, 6, local=local, remote=remote))
+    return observations
+
+
+def test_replacement_peer_with_empty_storage_is_degraded_never_healthy():
+    accepted = (101, 202, REPLACEMENT)
+    empty = _judge(_replacement_fleet(), accepted=accepted)
+    assert empty.state == "degraded"
+    assert any("only 2/3" in problem for problem in empty.problems)
+
+
+def test_replacement_peer_catchup_is_recovering_until_every_copy_is_active():
+    accepted = (101, 202, REPLACEMENT)
+    initializing = _judge(
+        _replacement_fleet(new_has_shards=True, new_local_state="INITIALIZING"),
+        accepted=accepted,
+    )
+    assert initializing.state == "recovering"
+    done = _judge(
+        _replacement_fleet(new_has_shards=True, new_local_state="ACTIVE"), accepted=accepted
+    )
+    assert done.state == "healthy"
+    assert all(shard.active_peers == (101, 202, REPLACEMENT) for shard in done.shards)
+
+
+def test_replaced_peer_identity_is_refused_while_membership_still_names_it():
+    """The old peer id still referenced after replacement is outside the
+    accepted membership: refused as unverifiable, never counted as a copy."""
+    observations = _fleet(peers=(101, 202, REPLACEMENT))
+    stale = [
+        replace(view, remote_shards=view.remote_shards + ((0, 303, "ACTIVE"),))
+        for view in observations
+    ]
+    verdict = _judge(stale, accepted=(101, 202, REPLACEMENT))
+    assert verdict.state == "unverifiable"
+
+
+def test_interrupted_transfer_never_certifies_and_resumes_to_healthy():
+    """A transfer killed mid-way: while it is listed the pair is recovering;
+    once it vanishes with the target copy missing the shard is degraded (not
+    healthy and not unservable); only a completed copy returns healthy."""
+    base = _replacement_fleet()
+    accepted = (101, 202, REPLACEMENT)
+    in_flight = [
+        replace(view, transfers=((0, 101, REPLACEMENT),)) if view.peer_id == 101 else view
+        for view in base
+    ]
+    assert _judge(in_flight, accepted=accepted).state == "recovering"
+    assert _judge(base, accepted=accepted).state == "degraded"
+    resumed = _replacement_fleet(new_has_shards=True, new_local_state="ACTIVE")
+    assert _judge(resumed, accepted=accepted).state == "healthy"

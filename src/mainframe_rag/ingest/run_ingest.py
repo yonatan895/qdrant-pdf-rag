@@ -112,6 +112,7 @@ from mainframe_rag.ingest.qdrant_io import (
     delete_by_doc,
     delete_by_revision,
     ensure_collection,
+    require_single_node_recovery,
     resolve_live_collection,
     set_bulk_indexing,
     snapshot_collection,
@@ -1791,6 +1792,7 @@ def _run_publish_locked(
     if legacy and live is not None:
         # A legacy physical squats on the alias name: preserve it, then clear
         # the name (brief maintenance window, documented in docs/ingest.md).
+        require_single_node_recovery(client, settings, live, "legacy migration")
         snap = snapshot_collection(client, live)
         log.info(json.dumps({"action": "publish_migrate", "legacy": live, "snapshot": snap}))
         client.delete_collection(live)
