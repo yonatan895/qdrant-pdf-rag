@@ -30,6 +30,15 @@ Instruments (all `rag.` prefixed; Prometheus renders dots as underscores):
 - rag.retrieval.hits (histogram, count): endpoint x query_class.
 - rag.llm.ttft (histogram, milliseconds): model only. Recorded only when
   the leg measured it (None means unmeasured, not zero).
+- rag.admission.inflight (up-down counter): admitted requests holding a
+  slot, by endpoint; only counted when a concurrency limit is selected
+  (issue #374).
+- rag.admission.wait (histogram, seconds): queue wait of admitted requests,
+  by endpoint; only requests that actually queued.
+- rag.admission.rejected (counter): refusals by endpoint x reason
+  (`queue_full` | `queue_timeout`). Rejected and deadline-expired requests
+  also appear in rag.requests.total with outcome `overloaded` /
+  `deadline_exceeded`.
 """
 
 from __future__ import annotations
@@ -39,7 +48,7 @@ from dataclasses import dataclass
 
 from opentelemetry import metrics
 from opentelemetry.exporter.prometheus import PrometheusMetricReader
-from opentelemetry.metrics import Counter, Histogram, Meter
+from opentelemetry.metrics import Counter, Histogram, Meter, UpDownCounter
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.view import ExplicitBucketHistogramAggregation, View
 from prometheus_client import GCCollector, PlatformCollector, ProcessCollector
@@ -85,6 +94,9 @@ class Instruments:
     duration: Histogram
     hits: Histogram
     ttft: Histogram
+    admission_inflight: UpDownCounter
+    admission_wait: Histogram
+    admission_rejected: Counter
 
 
 _instruments: Instruments | None = None
@@ -132,6 +144,21 @@ def create_instruments(meter: Meter | None = None) -> Instruments:
             "rag.llm.ttft",
             description="Reasoning-model time to first token in milliseconds",
             unit="ms",
+        ),
+        admission_inflight=meter.create_up_down_counter(
+            "rag.admission.inflight",
+            description="Requests holding an admission slot",
+            unit="1",
+        ),
+        admission_wait=meter.create_histogram(
+            "rag.admission.wait",
+            description="Admission queue wait in seconds (queued requests only)",
+            unit="s",
+        ),
+        admission_rejected=meter.create_counter(
+            "rag.admission.rejected",
+            description="Requests refused by admission, by endpoint and reason",
+            unit="1",
         ),
     )
 
@@ -183,6 +210,32 @@ def record_request(
             instruments.ttft.record(max(ttft_ms, 0), {"model": llm_model})
     except Exception as exc:  # noqa: BLE001
         log.debug("otel record_request dropped: %s", error_type(exc))
+
+
+def record_admission(endpoint: str, *, wait_s: float | None = None, delta: int = 0) -> None:
+    """Admission slot accounting (issue #374): `delta` +1 on admit / -1 on
+    release; `wait_s` only for requests that actually queued. Fail-open."""
+    instruments = _instruments
+    if instruments is None or endpoint not in _METRIC_ENDPOINTS:
+        return
+    try:
+        if delta:
+            instruments.admission_inflight.add(delta, {"endpoint": endpoint})
+        if wait_s is not None:
+            instruments.admission_wait.record(max(wait_s, 0.0), {"endpoint": endpoint})
+    except Exception as exc:  # noqa: BLE001
+        log.debug("otel record_admission dropped: %s", error_type(exc))
+
+
+def record_admission_rejected(endpoint: str, reason: str) -> None:
+    """One refused request; `reason` is a fixed admission label."""
+    instruments = _instruments
+    if instruments is None or endpoint not in _METRIC_ENDPOINTS:
+        return
+    try:
+        instruments.admission_rejected.add(1, {"endpoint": endpoint, "reason": reason})
+    except Exception as exc:  # noqa: BLE001
+        log.debug("otel record_admission_rejected dropped: %s", error_type(exc))
 
 
 def setup_metrics(enabled: bool) -> MeterProvider | None:

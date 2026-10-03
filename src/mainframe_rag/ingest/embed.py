@@ -21,6 +21,7 @@ import re
 import httpx2
 
 from mainframe_rag.config import HASH_EMBED_DIM, Settings, bearer_auth_headers
+from mainframe_rag.ingest.bounds import require_embed_inputs_within
 from mainframe_rag.ingest.chunk import Chunk
 from mainframe_rag.ports import Embedder, SparseVector
 
@@ -152,6 +153,10 @@ class VllmEmbedder:
     def dense(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
+        # Size bound (issue #374): refuse BEFORE the POST; never truncate.
+        # The one remote-embed boundary, so ingest batches and agent queries
+        # are both covered whatever called here.
+        require_embed_inputs_within(texts, self._settings.embed_max_input_chars)
         base_url, model = self._resolve()
         resp = self._http().post(
             f"{base_url.rstrip('/')}/embeddings",

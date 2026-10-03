@@ -207,7 +207,9 @@ status (`/ui` failures render HTML banners instead, §1):
 | `not_configured` / `reasoning model…` | 503 | `/v1/answer` or `/v1/chat` without `LLM_BASE_URL` + reasoning model (pre-retrieval) |
 | `qdrant_unready` / `qdrant…` | 503 | `/healthz` Qdrant exception |
 | `representation_unavailable` / `the retrieval generation is not available` | 503 | Serving gate: resolved generation is `empty` or not validated compatible (drift/legacy/pending/unknown); `/ui/chat` renders its banner while `/ui/chat/stream` returns this envelope |
-| `invalid_request` / `request body failed validation` | 422 | Pydantic failure, the shared query guard (overlong, empty after `str.strip()`, or containing NUL/C0 controls other than `\t\n\r`, issue #579), and a chat/console active `user` turn that is missing, blank, control-character or overlong (one message, every 422 path) |
+| `invalid_request` / `request body failed validation` | 422 | Pydantic failure, the shared query guard (overlong, empty after `str.strip()`, or containing NUL/C0 controls other than `\t\n\r`, issue #579; or, when `embed_max_input_chars` is set, a query whose dense text — prefix plus query — exceeds it, issue #374: refused before any model call, never truncated; an effective query that only grows past the bound after expansion/condensation is refused by the embedder with the same envelope), and a chat/console active `user` turn that is missing, blank, control-character or overlong (one message, every 422 path) |
+| `overloaded` / `the service is at capacity; retry later` | 503 + `Retry-After: 1` | Request admission refused (issue #374): all `request_max_concurrent` slots busy and the bounded wait queue full or its wait expired. Raised first, before validation, the serving gate and any retrieval/model work; only when a limit is selected. `/ui/chat` renders its fixed banner; `/ui/chat/stream` returns this envelope |
+| `deadline_exceeded` / `request deadline exceeded` | 504 | Total request deadline (`request_deadline_s`, issue #374) expired before the response began; on an already-open stream it is an `error` event (no `final`, `generation_incomplete`) instead. Only when a deadline is selected |
 | `prompt_budget_exceeded` / `prompt exceeds the model token budget` | 422 | Irreducible token-budget overflow (issue #368): fixed content alone exceeds the window with nothing left to trim; raised before any model call on JSON/chat, as an `error` event (no `final`) on already-open streams; `/ui/chat` renders its fixed banner |
 | `metrics_unavailable` / `metrics are not available` | 503 | `/metrics` scrape failure while enabled |
 | `not_found` / `not found` | 404 | Unknown route |
@@ -425,6 +427,75 @@ the query timeout.
 - Health timeouts are split from traffic timeouts (5s Qdrant, 10s embed);
   the tokenizer RPC gets 5s.
 
+## 6a. Request admission, total deadline and embed-input bound (issue #374)
+
+**Status:** implemented with hermetic tests (`tests/test_request_bounds.py`,
+`tests/test_hash_embed.py`, `tests/test_run_ingest.py`); **every limit defaults
+off** (0), so behaviour is unchanged until an operator selects values. No
+numeric limit is approved or measured for production: choosing them needs the
+site procedure at the end of this section. **Decision owners:** `agent/admission.py`
+(`AdmissionController`), `app._admit` / `_within_deadline` / `_deadline_iter`,
+`ingest/bounds.py`.
+
+- **Admission** (`request_max_concurrent` > 0): `/v1/search`, `/v1/answer`,
+  `/v1/chat*` and `/ui/chat*` take one slot as the first step of the handler,
+  held until the response body ends (JSON: on return; SSE: when the stream
+  closes, including client disconnect and error). Up to `request_queue_max`
+  more wait FIFO for at most `request_queue_wait_s` (and never beyond the
+  remaining deadline); beyond that, or on expiry, the request gets the stable
+  `503 overloaded` and starts no work. Release is exactly once. `/livez`,
+  `/healthz` and `/metrics` are never admitted, so saturation cannot cause a
+  liveness restart storm. Uvicorn is deliberately launched without
+  `--limit-concurrency` (a connection-level limit cannot choose the client
+  semantics and would also drop probes).
+- **Deadline** (`request_deadline_s` > 0): one budget from request arrival
+  (queue wait included) across condense/embed/search/rerank/tokenize/model
+  legs and any permitted fallback; per-leg timeouts still apply inside it, so
+  the user-visible maximum is the smaller of the two. Expiry cancels the
+  awaiting task: async legs (Qdrant, reasoning model, open SSE upstream) stop
+  and release their connections. **Known gap:** sync legs already running via
+  `asyncio.to_thread` (embed POST, BM25, rerank, prompt build/tokenize RPC)
+  cannot be interrupted; they finish within their own per-leg timeouts
+  (`embed_timeout_s`, `rerank_timeout_s`, `llm_tokenize_timeout_s`) while the
+  slot is already free, so briefly more worker threads than admitted
+  requests can exist. Thread-pool saturation under sustained expiry is not
+  measured here.
+- **Embed-input bound** (`embed_max_input_chars` > 0, characters of the exact
+  dense text): the query path checks prefix + query before any model call;
+  `VllmEmbedder.dense` re-checks every remote batch, so ingest batches,
+  expanded/split/condensed queries and any future caller are covered.
+  Refusal is a fixed error carrying counts only (`EmbedInputTooLarge`), never
+  truncation. The chunker's whole-statement preservation is unchanged.
+- **Observability:** `rag.requests.total` outcomes `overloaded` /
+  `deadline_exceeded` (bounded labels), `rag.admission.inflight`,
+  `rag.admission.wait` (queued requests only), `rag.admission.rejected`
+  (`queue_full` | `queue_timeout`); structured logs carry active/queued
+  counts, never prompts.
+- **Propagation:** these are `Settings` fields read from the environment
+  (`REQUEST_MAX_CONCURRENT`, `REQUEST_QUEUE_MAX`, `REQUEST_QUEUE_WAIT_S`,
+  `REQUEST_DEADLINE_S`, `EMBED_MAX_INPUT_CHARS`, `INGEST_MAX_PDF_BYTES`,
+  `INGEST_MAX_DOC_PAGES`, `INGEST_MAX_DOC_CHUNKS`). The operator-file ->
+  Task/shell -> Helm handoff is **not** added in this change; until a
+  reviewed handoff exists, setting them is a local/CI experiment, not a
+  deployment change (same rule as `LLM_THINKING_RESERVE_TOKENS_SIMPLE`).
+
+**Local evidence (labelled by scope):** full re-ingest on 2026-10-02 —
+452 documents / 209,501 pages / 190,440 chunks in 98 minutes at 4 workers,
+about 2.1 GB peak worker RSS (one host, local models; not a production
+result). Admission/deadline behaviour is proven with fakes only; no load
+figure is claimed.
+
+**External qualification still required (not provable on a dev host):**
+on the exact site image/models/gateway/storage, (1) serialized baseline then
+stepped concurrency (1, 2, 4, ...) of mixed search/answer/chat, cold and
+warm, recording p50/p95/p99, TTFT, queue wait, admitted/rejected counts,
+peak RSS/CPU, restarts, thread count after forced expirations; (2) pick
+`request_max_concurrent`, queue size/wait and deadline from the measured
+knee with headroom and write the stop/rollback criteria; (3) largest
+included PDF through the whole ingest process tree (peak RSS, IPC bytes) to
+choose `ingest_max_*` and `embed_max_input_chars` (the embedding model's own
+window owns the latter); (4) the Helm/operator handoff for the chosen values.
+
 ## 7. Settings catalog
 
 Every timeout, retry, batch size, and limit comes from `Settings` with
@@ -453,6 +524,8 @@ readers:
 | `llm_max_model_len` / `llm_reserved_output_tokens` / `llm_thinking_reserve_tokens_complex` / `llm_token_safety_margin` / `llm_max_chunk_tokens_narrative` / `llm_tokenize_timeout_s` | 4096 / 1536 / 1000 / 128 / 350 / 5.0 | tokenizer-path budgeting (complex prompt budget prices high-effort thinking, issue #298) |
 | `llm_thinking_reserve_tokens_simple` | 0 | extra low-effort reasoning headroom in single-turn and chat prompt budgets; environment input `LLM_THINKING_RESERVE_TOKENS_SIMPLE` |
 | `llm_stream` | `false` | server-side reasoning SSE |
+| `request_max_concurrent` / `request_queue_max` / `request_queue_wait_s` / `request_deadline_s` | 0 (unlimited) / 0 / 5.0 (used only with a queue) / 0.0 (no deadline) | request admission and total deadline (§6a); issue #374, **no numeric envelope approved** — values come from site measurement |
+| `embed_max_input_chars` | 0 (unbounded) | refuse an over-bound dense embed input before the call, query path and ingest (§6a, `docs/ingest.md` §7) |
 | `http_connect_retries` / `http_max_connections` / `http_max_keepalive_connections` | 2 (connect-only) / 200 / 100 | both pools, embed/context clients |
 | `health_qdrant_timeout_s` / `health_embed_timeout_s` | 5.0 / 10.0 | healthz only |
 | `health_rerank_timeout_s` / `health_rerank_ttl_s` | 5.0 / 15.0 (ttl 0 = probe every scrape) | healthz rerank probe bound and outcome cache; only when `rerank_enabled` |
@@ -464,6 +537,7 @@ readers:
 | `rerank_enabled` / `rerank_model` / `rerank_base_url` / `rerank_api_key` / `rerank_endpoint_order` / `rerank_fusion_alpha` / `rerank_candidates` / `rerank_batch_size` / `rerank_timeout_s` | false / `BAAI/bge-reranker-v2-m3` / gateway URL (no embed fallback; unset when no gateway) / unset (keyless) / `score_first` (see install §4.4 `probe_gateway.py`: `rerank_first` only when the score leg is unavailable) / 1.0 / 50 / 32 / 5.0 | rerank dispatch → retrieve (see `retrieval.md` §6) |
 | `rrf_k` / `rrf_weight_*` / `rrf_sparse_boost_syntax` / `rrf_sparse_boost_table` / `retrieve_max_chunks_per_page|doc` | 2 / 1.0,1.0 – 1.0,3.0 / 1.0 / 1.0 / 1, 3 | retrieve fusion + diversification |
 | `acronym_expansion_enabled` / `comparative_split_enabled` / `diagnostic_dualpath_enabled` | `false` / `true` / `false` | rewrite + multipath (see `retrieval.md` §§3b,7) |
+| `ingest_max_pdf_bytes` / `ingest_max_doc_pages` / `ingest_max_doc_chunks` | 0 / 0 / 0 (unbounded) | per-document ingest refusal (`docs/ingest.md` §9, issue #374) |
 | ingest-only (`ingest_workers` = CPU-1, `batch_size` 128, `ingest_upsert_streams` 4, `ingest_bulk_load` false, `bm25_model`, `bm25_cache_dir` unset, `contextual_*` incl. `context_llm_timeout_s` 30.0 / `context_max_chars` 500 / `context_cache_path` unset) | — | ingest; see `docs/ingest.md` §§6–9 |
 | `zowe_mcp_enabled` / `zowe_mcp_base_url` / `zowe_mcp_timeout_s` / `zowe_mcp_max_bytes` / `zowe_mcp_dry_run` | `false` (client not constructed unless enabled) / unset / 15.0 / 262144 / `false` | live-state client (default off; unwired from every endpoint; contract: [source observations](#source-observations)) |
 
@@ -800,6 +874,7 @@ are above. **Authority:** ADR-0001/0004, #363 and existing transport contracts;
 | Embed/context/health pools | Bounded Settings connect-only retries, no generic POST replay policy |
 | Rerank | Configured score/rerank endpoint order plus alternate endpoint fallback; exhaustion fails closed; [retrieval](retrieval.md) owns dispatch |
 | Condensation | Optional reasoning call; failure returns the raw latest query, not a fabricated condensed result |
+| Admission / total deadline (issue #374) | Opt-in (`request_*`, default off): refusal is `503 overloaded` before any work; expiry cancels async legs and is `504 deadline_exceeded` / a terminal SSE `error` event; sync worker-thread legs are bounded by their own timeouts, not interrupted (§6a). No retry or fallback is added |
 | Tracing export | Separately bounded fail-open export; outages drop/log and must not fail request/shutdown |
 
 This policy describes current operations, not permission to add retries. A new
