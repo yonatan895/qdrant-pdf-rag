@@ -566,7 +566,7 @@ This generates `dist/qdrant-pdf-rag-<sha>.tar` and its digest `dist/qdrant-pdf-r
 3. Vendored third-party Qdrant unprivileged image and Jaeger v2 image (tag + digest pinned in `images.txt`).
 4. Vendored Helm chart (`charts/qdrant-1.19.0.tgz`).
 5. Self-contained extraction bootstrap script (`bootstrap.sh`).
-6. Manifest (`MANIFEST.txt`), Packing Record (`PACKING_RECORD.txt`), digest enumeration (`sbom.json`), offline signature (`SHA256SUMS.sig` + `sneakernet-signing.pub`), and member `SHA256SUMS`.
+6. Manifest (`MANIFEST.txt`), Packing Record (`PACKING_RECORD.txt`), digest enumeration (`sbom.json`), third-party notices and license review status (`THIRD-PARTY-NOTICES.txt`, see [licensing](licensing.md); declared licenses only, not a legal approval), offline signature (`SHA256SUMS.sig` + `sneakernet-signing.pub`), and member `SHA256SUMS`.
 7. The console oauth-proxy sidecar image (`oauth-proxy-image.tar`) — pinned in `images.txt`; connected packaging needs Red Hat registry authentication (see §4.4.2).
 8. The pinned host runner (`task_linux_amd64.tar.gz`), `task-pin.txt` and `task-LICENSE`, all covered by member checksums. Packaging reuses `.tools/cache` from the installer or `AIRGAP_TASK_ARCHIVE=/absolute/path/task_linux_amd64.tar.gz`; otherwise the connected pack fetches the exact pinned archive.
 

@@ -361,6 +361,7 @@ jobs:
           test -f qdrant-pdf-rag/dist/task_linux_amd64.tar.gz
           test -f qdrant-pdf-rag/dist/task-pin.txt
           test -f qdrant-pdf-rag/dist/task-LICENSE
+          test -s qdrant-pdf-rag/dist/THIRD-PARTY-NOTICES.txt
           grep -q "^task_version: " qdrant-pdf-rag/dist/MANIFEST.txt
           grep -q "go-task/task" qdrant-pdf-rag/dist/sbom.json
           test "$(git -C qdrant-pdf-rag rev-parse HEAD)" = "$SHA"
@@ -507,6 +508,7 @@ jobs:
           test -f qdrant-pdf-rag/dist/task_linux_amd64.tar.gz
           test -f qdrant-pdf-rag/dist/task-pin.txt
           test -f qdrant-pdf-rag/dist/task-LICENSE
+          test -s qdrant-pdf-rag/dist/THIRD-PARTY-NOTICES.txt
           grep -q "^task_version: " qdrant-pdf-rag/dist/MANIFEST.txt
           grep -q "go-task/task" qdrant-pdf-rag/dist/sbom.json
           test "$(git -C qdrant-pdf-rag rev-parse HEAD)" = "$SHA"

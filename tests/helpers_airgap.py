@@ -8,6 +8,7 @@ mechanical tree/run/sign/stub plumbing lives here.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import shutil
 import subprocess
@@ -29,6 +30,13 @@ def set_oauth_proxy_pin(tree: Path, digest: str) -> None:
     )
     assert count == 1
     path.write_text(updated)
+    record = tree / "licenses" / "inventory.json"
+    if record.is_file():  # keep the license record bound to the explicit pin state
+        inventory = json.loads(record.read_text())
+        for component in inventory["components"]:
+            if component["id"] == "image:oauth-proxy":
+                component["bind"]["digest"] = digest
+        record.write_text(json.dumps(inventory, indent=2, sort_keys=True) + "\n")
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -64,6 +72,18 @@ def copy_chart(tmp_path: Path) -> Path:
     if not dest.exists():
         shutil.copy(next(REPO.glob("charts/qdrant-*.tgz")), dest)
     return dest
+
+
+def copy_license_inputs(tmp_path: Path) -> None:
+    """Everything scripts/license_inventory.py reads for a pack tree (#376)."""
+    for relative in ("licenses/inventory.json", "scripts/license_inventory.py", "pyproject.toml", "LICENSE",
+                     "LICENSE.qdrant-skills", "NOTICE.qdrant-skills", "bm25-weights.sha256",
+                     "src/mainframe_rag/webui/static/vendor/htmx.min.js",
+                     "src/mainframe_rag/webui/static/vendor/LICENSE.htmx",
+                     "src/mainframe_rag/webui/static/vendor/SHA256SUMS"):
+        target = tmp_path / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(REPO / relative, target)
 
 
 def symlink_tools(tmp_path: Path, tools: tuple[str, ...]) -> None:

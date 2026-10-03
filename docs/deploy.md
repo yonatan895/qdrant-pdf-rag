@@ -262,7 +262,9 @@ they do not authorize production promotion.
 The connected host packs one tarball: git bundle, Qdrant + Jaeger + ingest
 + agent image archives (plus the oauth-proxy sidecar image once its
 `images.txt` digest is recorded), vendored chart, bootstrap script,
-`MANIFEST.txt`, `PACKING_RECORD.txt`, digest enumeration, offline signature,
+`MANIFEST.txt`, `PACKING_RECORD.txt`, digest enumeration, `THIRD-PARTY-NOTICES.txt`
+([licensing](licensing.md); pack fails closed on an unrecorded dependency, image
+digest or notice change, and bootstrap requires the member), offline signature,
 and member checksums. Verify the tarball digest **before** unpacking, member
 checksums **after**.
 

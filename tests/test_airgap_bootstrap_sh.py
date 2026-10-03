@@ -70,6 +70,7 @@ def bundle_dir(tmp_path):
         **task_members(),
         "PACKING_RECORD.txt": b"record\n",
         "sbom.json": b'{"images": []}\n',
+        "THIRD-PARTY-NOTICES.txt": b"notices\n",
         "sneakernet-signing.pub": (extract_dir / "sneakernet-signing.pub").read_bytes(),
     }
     sums = []
@@ -103,6 +104,17 @@ def test_bootstrap_tampered_sums_fails_signature(bundle_dir):
     r = subprocess.run(["sh", "bootstrap.sh"], cwd=bundle_dir, capture_output=True, text=True, check=False)
     assert r.returncode != 0
     assert "signature verification failed" in r.stderr
+
+
+def test_bootstrap_refuses_signed_bundle_without_third_party_notices(bundle_dir):
+    """A validly signed bundle that omits the notice member is not accepted (#376)."""
+    sums = (bundle_dir / "SHA256SUMS").read_text().splitlines(keepends=True)
+    (bundle_dir / "SHA256SUMS").write_text("".join(x for x in sums if not x.endswith("  THIRD-PARTY-NOTICES.txt\n")))
+    sign_sums(bundle_dir)
+    r = subprocess.run(["sh", "bootstrap.sh"], cwd=bundle_dir, capture_output=True, text=True, check=False)
+    assert r.returncode != 0
+    assert "exactly the required bundle members" in r.stderr
+    assert not (bundle_dir / "qdrant-pdf-rag").exists()
 
 
 def test_bootstrap_trusted_pub_mismatch_refuses(bundle_dir):
@@ -148,6 +160,7 @@ def test_bootstrap_success(bundle_dir):
     assert (dist_dir / "MANIFEST.txt").is_file()
     assert (dist_dir / "PACKING_RECORD.txt").is_file()
     assert (dist_dir / "sbom.json").is_file()
+    assert (dist_dir / "THIRD-PARTY-NOTICES.txt").read_bytes() == b"notices\n"
     assert (dist_dir / "sneakernet-signing.pub").is_file()
     assert (dist_dir / "SHA256SUMS.sig").is_file()
 
