@@ -57,3 +57,6 @@ package-lock.json
 .vscode/
 .idea/
 .DS_Store
+
+# --- Independent release set (#367): SME-authored, kept outside git like the corpora ---
+release_set.jsonl
