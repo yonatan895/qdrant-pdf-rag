@@ -441,13 +441,14 @@ class TaskContractsTests(unittest.TestCase):
             "local:llm", "local:embed", "local:rerank", "local:gateway:up",
             "local:gateway:down", "local:jaeger:up", "local:jaeger:down",
             "local:stack", "local:agent", "local:check", "local:repair-staging",
-            "qa:sim", "qa:load", "qa:vllm-e2e",
+            "qa:sim", "qa:load",
             # air-gap
             "airgap:pack", "airgap:load", "airgap:deploy", "airgap:ingest",
             "airgap:smoke", "airgap:validate", "airgap:pipeline", "airgap:dryrun",
         ):
             with self.subTest(command=name):
                 self.assertIn(name, listing)
+        self.assertNotIn("qa:vllm-e2e", listing)
         after = {p.relative_to(self.root).as_posix() for p in self.root.rglob("*") if p.is_file()}
         self.assertEqual(before, after, "discovery must not create or modify workspace files")
         self.assertFalse((self.root / ".venv").exists())
@@ -1194,20 +1195,11 @@ class TaskContractsTests(unittest.TestCase):
         self.assertEqual(self.pip_calls()[1]["argv"],
                          ["-m", "pytest", "-m", "integration", "tests/test_ha_cluster.py", "-v"])
 
-    def test_vllm_e2e_optional_flags(self):
+    def test_retired_vllm_e2e_fails_without_launching(self):
         self.make_venv_fake()
-        env = self.tool_env()
-        proc = self.run_task("qa:vllm-e2e", extra_env=env)
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        self.assertEqual(self.pip_calls()[0]["argv"],
-                         ["scripts/test_local_e2e_vllm.py", "--embed-mode", "hash"])
-        if (self.log).exists():
-            self.log.unlink()
-        proc = self.run_task("qa:vllm-e2e", "MODEL=m", "DENSE_DIM=768", extra_env=env)
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        self.assertEqual(self.pip_calls()[0]["argv"],
-                         ["scripts/test_local_e2e_vllm.py", "--model", "m",
-                          "--dense-dim", "768", "--embed-mode", "hash"])
+        proc = self.run_task("qa:vllm-e2e", extra_env=self.tool_env())
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        self.assertFalse(self.log.exists(), "retired command must not invoke Python")
 
     def test_operator_cli_beats_file(self):
         self.recorder_env = {"RECORDER_LOG": str(self.log), "RECORDER_TAG": "x", "RECORDER_EXIT": "0"}

@@ -141,7 +141,6 @@ Supporting cast: `render_report.py` (text/md/HTML renders and comparators),
 (the only docker-lifecycle and pin-parse owners), `query_demo.py`
 (inspection, never eval), `mock_vllm.py` (deterministic stand-in, §9),
 `make_synthetic_pdf.py` (runtime-only fixture factory),
-`test_local_e2e_vllm.py` (live-GPU manual precedent),
 `smoke_search.py` (in-cluster smoke: limit 8, `--min-hits 1`, substring
 `--expect` over lowercased cite/heading/text).
 

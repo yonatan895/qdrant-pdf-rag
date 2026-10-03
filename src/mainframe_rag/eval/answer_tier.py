@@ -69,8 +69,8 @@ Gate vs trend
     noise. No retries: /v1/answer is single-shot by contract.
 
 Execution shape
-    In-process FastAPI TestClient against the live app (precedent:
-    scripts/test_local_e2e_vllm.py, scripts/eval_answers.py). Requires the
+    In-process FastAPI TestClient against the live app through the
+    shared answer-tier runner. Requires the
     live GPU stack; it is a Task command (eval:harness:l2), never part of plain
     pytest and never a PR gate. Sampling is the same deterministic
     stratified round-robin as the answer-tier eval.

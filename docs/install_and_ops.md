@@ -231,7 +231,7 @@ PYTHONPATH=. .venv/bin/python scripts/query_demo.py --answer --query "IEA500I" -
 
 #### Local Development Environment Defaults
 
-When running local tooling (`sh scripts/tools/run-task.sh local:ask`, `sh scripts/tools/run-task.sh local:query`, `test_local_e2e_vllm.py`), the following defaults are automatically applied if unset in the environment:
+When running local tooling (`sh scripts/tools/run-task.sh local:ask`, `sh scripts/tools/run-task.sh local:query`), the following defaults are automatically applied if unset in the environment:
 
 | Variable | Local Dev Default | Air-Gap / Prod Rule |
 |---|---|---|
@@ -359,29 +359,25 @@ via the `LLM_REASONING_EFFORT_*` / `PROMPT_MAX_CONTEXT_CHARS*` Settings
 
 ---
 
-### 3.8 Automated Local End-to-End Suite (`sh scripts/tools/run-task.sh qa:vllm-e2e`)
+### 3.8 Local End-to-End Verification
 
-To verify the entire RAG pipeline from PDF generation and dense/sparse ingestion to HTTP retrieval and grounded LLM reasoning:
+The secondary `qa:vllm-e2e` command and its script are retired. Use the
+[canonical supervisor](live-stack.md#full-local-simulation) with its private
+gateway handoff, explicit model revision and selected dimension:
 
 ```bash
-# Use the trusted local handoff and the checks in live-stack.md first.
-. "$GATEWAY_ENV_FILE"
-: "${EMBED_MODEL_REVISION:?gateway handoff must include the local revision label}"
-: "${DENSE_DIM:?export the selected embedding dimension}"
-export DENSE_DIM
-export RERANK_ENABLED=false
-sh scripts/tools/run-task.sh qa:vllm-e2e \
-  MODEL="$LLM_MODEL_REASONING" VLLM_URL="$LLM_BASE_URL" \
-  EMBED_MODEL="$EMBED_MODEL" EMBED_URL="$EMBED_BASE_URL" DENSE_DIM="$DENSE_DIM"
+sh scripts/tools/run-task.sh dev:demo-pdfs
+CORPUS_DIR=output/demo-pdfs sh scripts/tools/run-task.sh local:stack
 ```
 
-#### Test Execution Flow
-1. **Model Connectivity & Dimension Probing**: Queries `/v1/models` and `/v1/embeddings` to auto-resolve served model names and probe the dense embedding dimension (`dense_dim=1024` for Qwen3-0.6B).
-2. **Collection Dimension Validation**: If `--skip-ingest` is passed, validates that the collection exists and its dense vector dimension matches `dense_dim` (failing fast if mismatched). If ingesting, automatically recreates the collection if dimensions changed.
-3. **Corpus Generation & Ingest**: Builds synthetic IBM-shaped manual PDFs with specific message IDs (`IEA500I`, `LFAREA`) and ingests them into a local Qdrant collection using real dense + BM25 sparse vectors.
-4. **HTTP `/v1/search` Verification**: Queries the FastAPI endpoint and validates parallel prefetch fusion and hit ranking.
-5. **HTTP `/v1/answer` Verification**: Executes reasoning queries through the real gateway via FastAPI HTTP endpoints.
-6. **Strict Grounding Gate**: Fails closed if the model response returns zero validated citations or indicates ungrounded hallucination.
+Check an existing stack with `sh scripts/tools/run-task.sh local:check --
+--agent URL --jaeger URL --query TEXT --followup TEXT --report PATH`; the
+[retained-stack runbook](local-real-corpus.md#4-verify-and-retain-the-complete-live-stack)
+owns endpoint and private-report selection. It requires grounded first and
+follow-up answers, complete SSE and a fresh search trace. Representation
+changes use the [snapshot-gated ingestion migration](ingest.md#metadata-contract).
+For semantic answer quality on the configured live GPU stack, run
+`sh scripts/tools/run-task.sh eval:answers` under the [answer-tier contract](testing.md#answer-tier).
 
 #### Streaming Reasoning on the Local Stack (`sh scripts/tools/run-task.sh local:agent`)
 ```bash

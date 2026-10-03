@@ -173,7 +173,7 @@ Dev golden set vs the mode-keyed baseline (auto-selected by `EMBED_MODE`; collec
 Operator-phrased queries whose answers exist in the synthetic corpus WITHOUT the query text near-verbatim (no-echo contract pinned hermetically in `tests/test_paraphrase.py`), over lexical-competitor docs. Separate golden set + mode-keyed baselines (`evals/baseline-paraphrase[-vllm].json`) so the main gate is untouched; corpus generated at runtime via `gate_l1.generate_synthetic_golden_corpus`, ingested into a dedicated collection. For semantic A/B work (contextual prefixes, reranker on/off, dense-prefix tuning) where the main set saturates. Not wired into CI.
 
 <a id="answer-tier"></a>
-### Answer tier (`sh scripts/tools/run-task.sh eval:answers`, live GPU stack, in-process TestClient like `scripts/test_local_e2e_vllm.py`)
+### Answer tier (`sh scripts/tools/run-task.sh eval:answers`, live GPU stack, in-process TestClient)
 
 /v1/answer` grounding honesty — answer entries must produce ≥1 explicit (non-inferred) validated citation and must not abstain (the agent's shared marker + shape predicate, #135/#305); abstain/trap entries must not be answered (zero validated citations). Gold substrings judge model phrasing and are suppressed on the canned zero-hits path. The judge never re-parses citations (the agent's validator is the single source of truth). No retries, no finish_reason checks (not in the response contract; the app alerts non-stop per request). Deterministic stratified round-robin sample (`N=24` default, `N=all` full run); reasoning sampling is not run-deterministic — structural FAILs gate, rates are trend data in the manifest.
 
