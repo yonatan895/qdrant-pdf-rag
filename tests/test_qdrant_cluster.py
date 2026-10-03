@@ -180,3 +180,116 @@ def test_main_up_reports_failure(monkeypatch, capsys):
 def test_qdrant_image_reads_the_images_pin():
     repo = Path(__file__).resolve().parents[1]
     assert "qdrant" in cluster.qdrant_image(repo)
+
+
+@pytest.fixture
+def rejoining_pair(monkeypatch):
+    """Exercise the HA scenario's actual writes/reads with delayed replica data.
+
+    Placement is already ACTIVE while one peer still serves its old records.
+    The virtual clock makes delayed recovery and permanent loss deterministic.
+    """
+    from copy import deepcopy
+
+    from tests import test_ha_cluster as ha
+
+    fixture = cluster.QdrantCluster("ha-unit", "ha-unit-net", ("u1", "u2", "u3"))
+    pair = ha.SeededPair("corpus", "control")
+    state = SimpleNamespace(
+        now=0.0, rejoined=False, recover_at=2.0, bad_peer="u2",
+        bad_collection="corpus", corruption=False, survivor_missing=False,
+        closed=[], placement=[],
+    )
+    initial = {
+        "corpus": {i: {"tag": f"corpus-{i}", "point": i} for i in range(1, 61)},
+        "control": {i: {"tag": f"control-{i}", "point": i} for i in range(1001, 1007)},
+    }
+    data = {url: deepcopy(initial) for url in fixture.urls}
+
+    class Reader:
+        def __init__(self, *, url, timeout):
+            self.url = url
+
+        def upsert(self, collection, *, points, wait):
+            assert wait is True
+            for url in fixture.urls:
+                if url != "u2" or state.rejoined:
+                    data[url][collection].update({p.id: deepcopy(p.payload) for p in points})
+
+        def retrieve(self, collection, *, ids, with_payload):
+            assert with_payload is True
+            records = data[self.url][collection]
+            if state.survivor_missing and self.url == "u3" and not state.rejoined:
+                records = initial[collection]
+            if (state.rejoined and self.url == state.bad_peer
+                    and collection == state.bad_collection and state.now < state.recover_at):
+                records = deepcopy(data["u1"][collection]) if state.corruption else initial[collection]
+                if state.corruption:
+                    records[ids[0]]["tag"] = "wrong-content"
+            elif state.rejoined:
+                # Replica recovery copies persisted records from a surviving peer.
+                records = data["u1"][collection]
+            return [SimpleNamespace(id=i, payload=deepcopy(records[i])) for i in ids if i in records]
+
+        def close(self):
+            state.closed.append(self.url)
+
+    def docker(cmd, **kwargs):
+        assert cmd[:2] in (["docker", "stop"], ["docker", "start"])
+        assert cmd[2] == "ha-unit-2"
+        if cmd[1] == "start":
+            state.rejoined = True
+        return SimpleNamespace(returncode=0)
+
+    def placement(urls, collection, **kwargs):
+        assert urls == fixture.urls
+        assert kwargs == {"shard_number": 6, "replication_factor": 3}
+        state.placement.append(collection)
+
+    monkeypatch.setattr(ha, "QdrantClient", Reader)
+    monkeypatch.setattr(ha.subprocess, "run", docker)
+    monkeypatch.setattr(ha, "wait_cluster_ready", lambda urls: None)
+    monkeypatch.setattr(ha, "wait_collection_placement", placement)
+    monkeypatch.setattr(ha.time, "monotonic", lambda: state.now)
+    monkeypatch.setattr(ha.time, "sleep", lambda seconds: setattr(state, "now", state.now + seconds))
+    return ha, fixture, pair, state
+
+
+@pytest.mark.parametrize("peer,collection", [("u1", "corpus"), ("u2", "corpus"), ("u3", "control")])
+def test_acknowledged_write_rejoin_waits_for_actual_records(rejoining_pair, peer, collection):
+    ha, fixture, pair, state = rejoining_pair
+    state.bad_peer, state.bad_collection = peer, collection
+    ha.test_acknowledged_writes_survive_one_peer_loss(fixture, pair)
+    assert state.now == 2.0
+    assert state.placement == ["corpus", "control"]
+    # The next ordinary read must see exact acknowledged corpus/control data.
+    for url in fixture.urls:
+        ha._assert_points_exact(url, "corpus", tuple(range(2001, 2011)), "corpus")
+        ha._assert_points_exact(url, "control", tuple(range(3001, 3004)), "control")
+        ha._assert_exact_payloads(url, pair)
+    assert set(state.closed) == set(fixture.urls)
+
+
+@pytest.mark.parametrize("collection,corruption", [("control", False), ("corpus", True)])
+def test_acknowledged_write_rejoin_refuses_permanent_loss_or_corruption(
+    rejoining_pair, collection, corruption,
+):
+    ha, fixture, pair, state = rejoining_pair
+    state.bad_collection, state.corruption = collection, corruption
+    state.recover_at = float("inf")
+    with pytest.raises(AssertionError, match="exact reads never converged") as failure:
+        ha.test_acknowledged_writes_survive_one_peer_loss(fixture, pair)
+    assert state.now == 60.0
+    assert f"u2 {collection}: expected" in str(failure.value)
+    assert "retrieved" in str(failure.value)
+    if corruption:
+        assert "wrong-content" in str(failure.value)
+    assert "u2" in state.closed
+
+
+def test_acknowledged_write_survivor_loss_still_fails_immediately(rejoining_pair):
+    ha, fixture, pair, state = rejoining_pair
+    state.survivor_missing = True
+    with pytest.raises(AssertionError, match="u3 corpus"):
+        ha.test_acknowledged_writes_survive_one_peer_loss(fixture, pair)
+    assert state.now == 0.0
