@@ -77,7 +77,19 @@ def test_render_otel_callback_only_when_endpoint_set():
     assert off['litellm_settings']['callbacks'] == ['scoped_passthrough.guard']
     on = yaml.safe_load(_read_cfg(_render({"GATEWAY_OTEL_ENDPOINT": "http://host.docker.internal:4318"})))
     assert on['litellm_settings']['custom_provider_map'] == off['litellm_settings']['custom_provider_map']
-    assert on['litellm_settings']['callbacks'] == ['scoped_passthrough.guard', 'otel']
+    # Issue #636: never the bare "otel" callback — it exports content,
+    # key hashes and hidden params. The allowlisting exporter replaces it.
+    assert on['litellm_settings']['callbacks'] == ['scoped_passthrough.guard', 'trace_privacy.otel']
+
+
+@pytest.mark.parametrize('endpoint', ['', 'http://host.docker.internal:4318'])
+def test_render_disables_content_and_key_logging(endpoint):
+    """Issue #636 defence in depth: message content and API-key-derived
+    metadata are off for every logging callback, traced or not."""
+    cfg = yaml.safe_load(_read_cfg(_render({'GATEWAY_OTEL_ENDPOINT': endpoint} if endpoint else None)))
+    assert cfg['litellm_settings']['turn_off_message_logging'] is True
+    assert cfg['litellm_settings']['redact_user_api_key_info'] is True
+    assert 'otel' not in cfg['litellm_settings']['callbacks']
 
 
 def test_render_includes_the_gateway_hook_beside_its_configuration():
@@ -87,6 +99,7 @@ def test_render_includes_the_gateway_hook_beside_its_configuration():
     try:
         assert (directory / 'strict_finish.py').read_bytes() == (SCRIPT.parent / 'gateway/strict_finish.py').read_bytes()
         assert (directory / 'scoped_passthrough.py').read_bytes() == (SCRIPT.parent / 'gateway/scoped_passthrough.py').read_bytes()
+        assert (directory / 'trace_privacy.py').read_bytes() == (SCRIPT.parent / 'gateway/trace_privacy.py').read_bytes()
     finally:
         shutil.rmtree(directory)
 
@@ -225,3 +238,68 @@ def test_gateway_log_defaults_off_tmpfs_and_honors_override(tmp_path):
     assert default_log == f"log {state}/mainframe-rag/local-litellm-gateway.log"
     custom = tmp_path / "gw.log"
     assert _gateway_args(_render({"GATEWAY_LOG": str(custom)}))[1] == f"log {custom}"
+
+
+def _load_trace_privacy(monkeypatch):
+    """Import gateway/trace_privacy.py with only the LiteLLM logger stubbed
+    (the pinned image provides it); the OpenTelemetry SDK is the real one."""
+    import importlib.util
+    import sys
+    import types
+
+    captured = {}
+
+    class Config:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    module = types.ModuleType("litellm.integrations.opentelemetry")
+    module.OpenTelemetryConfig = Config
+    module.OpenTelemetry = lambda config: config
+    for name in ("litellm", "litellm.integrations"):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    monkeypatch.setitem(sys.modules, "litellm.integrations.opentelemetry", module)
+    spec = importlib.util.spec_from_file_location("trace_privacy_under_test", SCRIPT.parent / "gateway" / "trace_privacy.py")
+    loaded = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(loaded)
+    return loaded, captured
+
+
+def test_trace_export_keeps_only_allowlisted_attributes(monkeypatch):
+    """Issue #636: content, key-derived metadata, hidden params, key records,
+    exception text, events and status descriptions never reach the exporter;
+    model, operation, usage and status do. Unknown future attributes drop."""
+    from opentelemetry.sdk.trace import Event, ReadableSpan
+    from opentelemetry.sdk.trace.export import SpanExportResult
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+    from opentelemetry.trace import SpanContext, Status, StatusCode, TraceFlags
+
+    tp, captured = _load_trace_privacy(monkeypatch)
+    assert captured["capture_message_content"] == "NO_CONTENT"
+    canary = "CANARY-manual-excerpt-and-key-material"
+    leaky = {
+        "gen_ai.input.messages": canary, "gen_ai.output.messages": canary,
+        "llm.strict_openai.messages": canary, "llm.None.input": canary,
+        "metadata.user_api_key_hash": canary, "metadata.user_api_key_alias": canary,
+        "hidden_params": canary, "response.token_id": canary, "response.key_name": canary,
+        "exception": canary, "error.message": canary, "some.future.attribute": canary,
+    }
+    safe = {"gen_ai.request.model": "Qwen/Qwen3-Embedding-0.6B", "llm.request.type": "embedding",
+            "gen_ai.usage.input_tokens": 3, "http.response.status_code": 200, "error.type": "Timeout"}
+    span = ReadableSpan(
+        name="litellm_request", attributes={**leaky, **safe},
+        context=SpanContext(trace_id=0x1, span_id=0x2, is_remote=False, trace_flags=TraceFlags(TraceFlags.SAMPLED)),
+        events=(Event("gen_ai.content.prompt", {"gen_ai.prompt": canary}),),
+        status=Status(StatusCode.ERROR, canary), start_time=1, end_time=2,
+    )
+    sink = InMemorySpanExporter()
+    exporter = tp.AllowlistExporter(sink)
+    assert exporter.export([span]) is SpanExportResult.SUCCESS
+    assert exporter.force_flush()
+    (out,) = sink.get_finished_spans()
+    assert dict(out.attributes) == safe
+    assert out.events == () and out.links == ()
+    assert out.status.status_code is StatusCode.ERROR and not out.status.description
+    assert out.name == "litellm_request" and (out.start_time, out.end_time) == (1, 2)
+    assert canary not in repr(out.to_json())
+    exporter.shutdown()

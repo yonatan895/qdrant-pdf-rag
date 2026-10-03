@@ -87,11 +87,13 @@ Consequence: failed-request investigation starts at the metric
 
 ## Boundary: gateway spans are not ours
 
-The distributed trace also contains `litellm-local` spans whose tags carry
-full prompt text, retrieved excerpts, key hashes, and requester metadata —
-platform-owned telemetry, privacy-unqualified. Investigation queries MUST
-filter `service=mainframe-rag-agent`. Nothing in this map depends on gateway
-span shape.
+The distributed trace also contains gateway spans (`litellm-local` locally).
+The local gateway exports them only through an attribute allowlist (#636:
+operation, model, token usage, status — no content, key-derived metadata,
+events or error text). The production gateway is platform-owned and its span
+content is not ours to qualify, so investigation queries MUST still filter
+`service=mainframe-rag-agent`. Nothing in this map depends on gateway span
+shape.
 
 ## Shipped queries
 

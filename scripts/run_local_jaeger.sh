@@ -2,7 +2,11 @@
 # Local Jaeger v2 trace backend for `sh scripts/tools/run-task.sh local:stack` (local-dev only).
 # OTLP/HTTP on :4318 + UI/API on :16686, in-memory storage (ephemeral by
 # design — local traces are debug data). Same image/digest the air-gap pack
-# mirrors (images.txt), started with the image's default config.
+# mirrors (images.txt), started with the image's default all-in-one config
+# plus two bounds (issue #636): the memory store keeps at most
+# JAEGER_MAX_TRACES traces (oldest evicted; the image default is 100000) and
+# the container is capped at JAEGER_MEMORY with no swap, so a full ingest's
+# per-request spans cannot grow the reference 16 GB host into swap thrash.
 #
 #   sh scripts/tools/run-task.sh local:jaeger:up        # foreground; Ctrl-C stops the container
 #   sh scripts/tools/run-task.sh local:jaeger:down   # stop a leftover container
@@ -18,12 +22,14 @@ JAEGER_OTLP_PORT="${JAEGER_OTLP_PORT:-4318}"
 JAEGER_NAME="${JAEGER_NAME:-local-jaeger}"
 # Digest pinned from images.txt (upstream tag 2.20.0). Bump deliberately.
 JAEGER_IMAGE="${JAEGER_IMAGE:-cr.jaegertracing.io/jaegertracing/jaeger@sha256:46a886260e04002d8f45e213fc39063fa11a50446048fdaa64786fc0840cb9f8}"
+JAEGER_MAX_TRACES="${JAEGER_MAX_TRACES:-20000}"
+JAEGER_MEMORY="${JAEGER_MEMORY:-1g}"
 JAEGER_DRYRUN="${JAEGER_DRYRUN:-0}"
 JAEGER_LOG="${JAEGER_LOG:-${TMPDIR:-/tmp}/local-jaeger.log}"
 
 die() { echo "ERROR: $1" >&2; exit 1; }
 
-for _pair in "JAEGER_PORT:$JAEGER_PORT" "JAEGER_OTLP_PORT:$JAEGER_OTLP_PORT"; do
+for _pair in "JAEGER_PORT:$JAEGER_PORT" "JAEGER_OTLP_PORT:$JAEGER_OTLP_PORT" "JAEGER_MAX_TRACES:$JAEGER_MAX_TRACES"; do
     _name="${_pair%%:*}"; _val="${_pair#*:}"
     case "$_val" in
         ''|*[!0-9]*) die "$_name must be a positive integer, got '$_val'" ;;
@@ -31,16 +37,21 @@ for _pair in "JAEGER_PORT:$JAEGER_PORT" "JAEGER_OTLP_PORT:$JAEGER_OTLP_PORT"; do
     esac
 done
 unset _pair _name _val
+case "$JAEGER_MEMORY" in
+    [1-9]*[mg]) case "${JAEGER_MEMORY%[mg]}" in *[!0-9]*) die "JAEGER_MEMORY must look like 512m or 1g, got '$JAEGER_MEMORY'" ;; esac ;;
+    *) die "JAEGER_MEMORY must look like 512m or 1g, got '$JAEGER_MEMORY'" ;;
+esac
+STORE_BOUND="--set=extensions.jaeger_storage.backends.some_storage.memory.max_traces=${JAEGER_MAX_TRACES}"
 
 BASE="http://127.0.0.1:${JAEGER_PORT}"
 if [ "$JAEGER_DRYRUN" = "1" ]; then
-    echo "[plan] local Jaeger: docker run --rm --name $JAEGER_NAME -p 127.0.0.1:$JAEGER_PORT:16686 -p 127.0.0.1:$JAEGER_OTLP_PORT:4318 $JAEGER_IMAGE"
+    echo "[plan] local Jaeger: docker run --rm --name $JAEGER_NAME --memory $JAEGER_MEMORY --memory-swap $JAEGER_MEMORY -p 127.0.0.1:$JAEGER_PORT:16686 -p 127.0.0.1:$JAEGER_OTLP_PORT:4318 $JAEGER_IMAGE $STORE_BOUND"
     echo "[plan] reuse when $BASE/api/services already answers; UI $BASE"
     exit 0
 fi
 
 if curl -s -m 3 -o /dev/null "$BASE/api/services" 2>/dev/null; then
-    echo "==> Jaeger already answering at $BASE (reusing; not owned by this script)"
+    echo "==> Jaeger already answering at $BASE (reusing; not owned by this script — its trace/memory bounds are whatever it was started with)"
     exit 0
 fi
 command -v docker >/dev/null 2>&1 || die "docker is required for local Jaeger"
@@ -51,11 +62,12 @@ if curl -s -m 2 -o /dev/null "http://127.0.0.1:${JAEGER_OTLP_PORT}/" 2>/dev/null
     die "port $JAEGER_OTLP_PORT is serving something that is not Jaeger — free it or set JAEGER_OTLP_PORT"
 fi
 
-echo "==> Starting local Jaeger ($JAEGER_NAME, UI $BASE, OTLP :$JAEGER_OTLP_PORT, log $JAEGER_LOG)"
+echo "==> Starting local Jaeger ($JAEGER_NAME, UI $BASE, OTLP :$JAEGER_OTLP_PORT, max $JAEGER_MAX_TRACES traces, memory $JAEGER_MEMORY, log $JAEGER_LOG)"
 docker run --rm --name "$JAEGER_NAME" \
+    --memory "$JAEGER_MEMORY" --memory-swap "$JAEGER_MEMORY" \
     -p "127.0.0.1:${JAEGER_PORT}:16686" \
     -p "127.0.0.1:${JAEGER_OTLP_PORT}:4318" \
-    "$JAEGER_IMAGE" >"$JAEGER_LOG" 2>&1 &
+    "$JAEGER_IMAGE" "$STORE_BOUND" >"$JAEGER_LOG" 2>&1 &
 DOCKER_PID=$!
 # shellcheck disable=SC2064
 trap "docker stop '$JAEGER_NAME' >/dev/null 2>&1 || true; exit 130" INT TERM
