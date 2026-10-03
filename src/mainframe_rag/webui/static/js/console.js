@@ -21,10 +21,14 @@
   const THEME_KEY = "mainframe_rag_theme";
   const REASONING_KEY = "mainframe_rag_reasoning_effort";
   const MAX_SAVED_SESSIONS = 30;
+  const PROVISIONAL_LABEL = "Provisional — still generating, not verified";
   const ERROR_TEXT = "The reasoning agent could not complete this request. Check the agent logs and retry.";
 
   const memory = { sessions: {}, active: null };
   let storageOk = true;
+  // This tab's own current incident. `store.active` only records the last
+  // incident used anywhere; two tabs must not fight over it.
+  let currentId = null;
   try {
     const probe = "__mainframe_rag_probe__";
     window.localStorage.setItem(probe, "1");
@@ -64,6 +68,7 @@
       storageOk = false;
       memory.sessions = store.sessions;
       memory.active = store.active;
+      syncStorageNotice();
     }
   }
 
@@ -75,7 +80,7 @@
     const ids = Object.keys(store.sessions);
     if (ids.length <= MAX_SAVED_SESSIONS) return;
     const inactive = ids
-      .filter((id) => id !== store.active)
+      .filter((id) => id !== store.active && id !== currentId)
       .sort((a, b) => (store.sessions[a].updated_at || 0) - (store.sessions[b].updated_at || 0));
     while (Object.keys(store.sessions).length > MAX_SAVED_SESSIONS && inactive.length) {
       delete store.sessions[inactive.shift()];
@@ -86,25 +91,66 @@
     const id = newSessionId();
     store.sessions[id] = { title: "New Incident", updated_at: Date.now(), turns: [] };
     store.active = id;
+    currentId = id;
     evictOldest(store);
-    saveStore(store);
     return id;
   }
 
-  function activeSession(store) {
-    let id = store.active;
-    if (!id || !store.sessions[id]) {
-      const ids = Object.keys(store.sessions);
-      id = ids.length ? ids.sort((a, b) => store.sessions[b].updated_at - store.sessions[a].updated_at)[0] : createSession(store);
-    }
-    return store.sessions[id];
+  /* Every mutation re-reads the persisted store, applies one change keyed
+   * by session id, and writes it back. Long-lived store objects captured by
+   * a render or a stream would overwrite another tab's (or another
+   * action's) newer data on save: new-session, delete, rename and
+   * cross-tab writes all race that way (issue #372). */
+  function mutate(fn) {
+    const store = loadStore();
+    const before = JSON.stringify(store);
+    const result = fn(store);
+    // Write only real changes: a no-op write would still wake every other
+    // tab's storage listener, and two tabs re-asserting their own active
+    // incident would ping-pong forever.
+    if (JSON.stringify(store) !== before) saveStore(store);
+    return result;
   }
 
-  function historyContent(turn) {
-    if (turn.role === "assistant" && turn.citations && turn.citations.length) {
-      return turn.content + "\n\nCitations:\n" + turn.citations.map((c) => "- " + c).join("\n");
+  /* Resolve this tab's current incident id inside `store`. `claim` also
+   * records it as the persisted last-used incident; read-only renders do not
+   * claim, so a cross-tab refresh never rewrites another tab's choice.
+   * Creates an empty incident when none survive. */
+  function resolveSession(store, claim) {
+    let id = currentId && store.sessions[currentId] ? currentId : null;
+    if (!id && store.active && store.sessions[store.active]) id = store.active;
+    if (!id) {
+      const ids = Object.keys(store.sessions);
+      id = ids.length
+        ? ids.sort((a, b) => (store.sessions[b].updated_at || 0) - (store.sessions[a].updated_at || 0))[0]
+        : createSession(store);
     }
-    return turn.content;
+    currentId = id;
+    if (claim) store.active = id;
+    return id;
+  }
+
+  function currentSession() {
+    return mutate((store) => {
+      const id = resolveSession(store);
+      return { id: id, session: store.sessions[id] };
+    });
+  }
+
+  const INCOMPLETE_HISTORY_NOTE =
+    "[This earlier answer was cut off before completion and was not verified; do not rely on it.]";
+
+  function historyContent(turn) {
+    let text = turn.content;
+    if (turn.role === "assistant" && turn.citations && turn.citations.length) {
+      text += "\n\nCitations:\n" + turn.citations.map((c) => "- " + c).join("\n");
+    }
+    // A cut-off answer reused as conversation context stays qualified for
+    // the model exactly as it is for the operator (issue #372).
+    if (turn.role === "assistant" && turn.verification_state === "generation_incomplete") {
+      text += "\n\n" + INCOMPLETE_HISTORY_NOTE;
+    }
+    return text;
   }
 
   function historyMessages(session) {
@@ -112,7 +158,14 @@
   }
 
   function markdownReport(session) {
-    const lines = ["# Incident Analysis: " + session.title, "", "---", ""];
+    const lines = [
+      "# Incident Analysis: " + session.title,
+      "",
+      "> Contains incident context and manual excerpts; handle per site data policy.",
+      "",
+      "---",
+      "",
+    ];
     session.turns.forEach((turn) => {
       lines.push("### " + (turn.role === "user" ? "Operator" : "Mainframe Copilot"));
       if (turn.splunk_context) {
@@ -455,6 +508,13 @@
   function renderTurn(turn) {
     const article = el("article", "turn turn-" + turn.role);
     if (turn.error) article.classList.add("turn-error");
+    if (turn.role === "assistant") {
+      // State hook shared by restored and streamed turns.
+      article.setAttribute(
+        "data-state",
+        turn.verification_state === "generation_incomplete" ? "incomplete" : "complete"
+      );
+    }
     if (turn.splunk_context) {
       const details = el("details", "turn-context");
       details.appendChild(el("summary", null, "Attached incident context"));
@@ -523,6 +583,7 @@
   const themeSelect = document.getElementById("theme-select");
   const sendBtn = document.getElementById("send-btn");
   const filterEl = document.getElementById("session-filter");
+  const newBtn = document.getElementById("new-session-btn");
 
   /* Streaming UX state (P3): at most one in-flight turn. The Send button
    * doubles as Stop while streaming; aborts keep partial content. */
@@ -575,8 +636,23 @@
     if (stick) window.scrollTo(0, document.documentElement.scrollHeight);
   }
 
-  function renderMessages(store) {
-    const session = activeSession(store);
+  /* The in-flight turn's live article, so rendering the same incident again
+   * (switching away and back, a cross-tab refresh) keeps the stream visible
+   * instead of orphaning it. */
+  let inflight = null;
+  let renaming = false;
+
+  function orphanNote() {
+    return el(
+      "div",
+      "orphan-note",
+      "No answer recorded for this question (still generating in another tab, or interrupted)."
+    );
+  }
+
+  function renderMessages() {
+    const current = currentSession();
+    const session = current.session;
     messagesEl.replaceChildren();
     if (!session.turns.length) {
       const empty = el("div", "empty-state");
@@ -594,12 +670,16 @@
       messagesEl.appendChild(empty);
     }
     session.turns.forEach((turn) => messagesEl.appendChild(renderTurn(turn)));
+    const streamingHere = inflight && inflight.sid === current.id;
+    const last = session.turns[session.turns.length - 1];
+    if (last && last.role === "user" && !streamingHere) messagesEl.appendChild(orphanNote());
+    if (streamingHere) messagesEl.appendChild(inflight.article);
     stick = true;
     messagesEl.scrollIntoView({ block: "end" });
   }
 
-  function startRename(store, id, row, openBtn) {
-    const session = store.sessions[id];
+  function startRename(id, row, openBtn) {
+    const session = loadStore().sessions[id];
     if (!session) return;
     const input = document.createElement("input");
     input.value = session.title || "";
@@ -607,27 +687,68 @@
     input.maxLength = 60;
     input.setAttribute("aria-label", "Rename incident");
     row.replaceChild(input, openBtn);
+    renaming = true;
     input.focus();
     input.select();
     let done = false;
-    const commit = (save) => {
+    const commit = (save, refocus) => {
       if (done) return;
       done = true;
+      renaming = false;
       if (save && input.value.trim()) {
-        session.title = input.value.trim().slice(0, 60);
-        session.updated_at = Date.now();
-        saveStore(store);
+        const title = input.value.trim().slice(0, 60);
+        mutate((store) => {
+          const live = store.sessions[id];
+          if (!live) return;
+          live.title = title;
+          live.updated_at = Date.now();
+        });
       }
-      renderSessions(store);
+      renderSessions();
+      if (refocus) focusSessionButton(id);
     };
     input.addEventListener("keydown", (event) => {
-      if (event.key === "Enter") commit(true);
-      else if (event.key === "Escape") commit(false);
+      if (event.key === "Enter") commit(true, true);
+      else if (event.key === "Escape") commit(false, true);
     });
-    input.addEventListener("blur", () => commit(true));
+    input.addEventListener("blur", () => commit(true, false));
   }
 
-  function renderSessions(store) {
+  function focusSessionButton(id) {
+    const row = sessionListEl.querySelector('[data-session-id="' + id + '"] .open');
+    if (row) row.focus();
+  }
+
+  function deleteSession(id) {
+    if (inflight && inflight.sid === id && streamAbort) streamAbort.abort();
+    if (currentId === id) currentId = null;
+    mutate((store) => {
+      delete store.sessions[id];
+      if (store.active === id) store.active = null;
+      // Record the surviving (or fresh) incident as active; resolving alone
+      // used to pick one without ever assigning it (issue #372).
+      resolveSession(store, true);
+    });
+    renderMessages();
+    renderSessions();
+    const active = sessionListEl.querySelector(".row.active .open");
+    if (active) active.focus();
+    else if (newBtn) newBtn.focus();
+    announce("Incident deleted.");
+  }
+
+  function openSession(id) {
+    currentId = id;
+    mutate((store) => {
+      if (store.sessions[id]) store.active = id;
+    });
+    renderMessages();
+    renderSessions();
+    focusSessionButton(id);
+  }
+
+  function renderSessions() {
+    const store = loadStore();
     sessionListEl.replaceChildren();
     const needle = sessionFilter.trim().toLowerCase();
     Object.keys(store.sessions)
@@ -635,39 +756,59 @@
       .sort((a, b) => (store.sessions[b].updated_at || 0) - (store.sessions[a].updated_at || 0))
       .forEach((id) => {
         const session = store.sessions[id];
-        const row = el("li", "row" + (id === store.active ? " active" : ""));
-        const open = el("button", "open", session.title || "New Incident");
+        const title = session.title || "New Incident";
+        const isCurrent = id === currentId;
+        const row = el("li", "row" + (isCurrent ? " active" : ""));
+        row.setAttribute("data-session-id", id);
+        const open = el("button", "open", title);
         open.type = "button";
         open.title = "Open incident (double-click to rename)";
-        open.addEventListener("click", () => {
-          store.active = id;
-          saveStore(store);
-          renderMessages(store);
-          renderSessions(store);
-        });
-        open.addEventListener("dblclick", () => {
-          startRename(store, id, row, open);
-        });
+        if (isCurrent) open.setAttribute("aria-current", "true");
+        open.addEventListener("click", () => openSession(id));
+        open.addEventListener("dblclick", () => startRename(id, row, open));
+        // Rename and delete are real buttons: double-click alone is not
+        // keyboard-operable.
+        const ren = el("button", "ren", "\u270E");
+        ren.type = "button";
+        ren.title = "Rename incident";
+        ren.setAttribute("aria-label", "Rename incident: " + title);
+        ren.addEventListener("click", () => startRename(id, row, open));
         const del = el("button", "del", "\u2715");
         del.type = "button";
-        del.title = "Delete session";
-        del.addEventListener("click", () => {
-          delete store.sessions[id];
-          if (store.active === id) store.active = null;
-          activeSession(store);
-          saveStore(store);
-          renderMessages(store);
-          renderSessions(store);
-        });
+        del.title = "Delete incident";
+        del.setAttribute("aria-label", "Delete incident: " + title);
+        del.addEventListener("click", () => deleteSession(id));
         row.appendChild(open);
+        row.appendChild(ren);
         row.appendChild(del);
         sessionListEl.appendChild(row);
       });
   }
 
+  /* Polite state announcements for assistive tech. The message list itself
+   * is not a live region: re-rendering the whole answer on every token would
+   * flood a screen reader. */
+  const statusEl = document.getElementById("console-status");
+  let announceTimer = null;
+  function announce(text) {
+    if (!statusEl) return;
+    statusEl.textContent = "";
+    window.clearTimeout(announceTimer);
+    announceTimer = window.setTimeout(() => {
+      statusEl.textContent = text;
+    }, 30);
+  }
+
+  function syncStorageNotice() {
+    const notice = document.getElementById("storage-notice");
+    if (notice) notice.hidden = storageOk;
+  }
+
   function applyTheme(theme) {
-    document.body.className = theme === "theme-dark" ? "theme-dark" : "theme-3270";
-    if (themeSelect) themeSelect.value = document.body.className;
+    const next = theme === "theme-dark" ? "theme-dark" : "theme-3270";
+    document.body.classList.remove("theme-dark", "theme-3270");
+    document.body.classList.add(next);
+    if (themeSelect) themeSelect.value = next;
   }
 
   const EFFORT_LEVELS = ["low", "medium", "high"];
@@ -687,7 +828,10 @@
     const slider = document.getElementById("reasoning-slider");
     const badge = document.getElementById("reasoning-badge");
     const hidden = document.getElementById("reasoning-effort-input");
-    if (slider) slider.value = idx;
+    if (slider) {
+      slider.value = idx;
+      slider.setAttribute("aria-valuetext", { low: "Low", medium: "Medium", high: "High" }[target]);
+    }
     if (badge) badge.textContent = EFFORT_LABELS[target] || "Low";
     if (hidden) hidden.value = target;
     document.querySelectorAll(".slider-ticks .tick").forEach((tick) => {
@@ -705,10 +849,19 @@
     return { name: name, data: data };
   }
 
-  async function streamTurn(store, session, userTurn) {
+  async function streamTurn(sid, history, userTurn) {
     const assistantTurn = { role: "assistant", content: "", citations: [], ts: Date.now() };
     const article = renderTurn(assistantTurn);
+    // Provisional until the final frame: streamed text must never read as a
+    // verified answer (issue #372). Cleared only by the completion path.
+    article.classList.add("turn-provisional");
+    article.setAttribute("data-state", "streaming");
+    const provisional = el("div", "state-badge state-provisional", PROVISIONAL_LABEL);
+    article.appendChild(provisional);
+    inflight = { sid: sid, article: article };
     messagesEl.appendChild(article);
+    messagesEl.setAttribute("aria-busy", "true");
+    announce("Generating answer. Provisional text, not yet verified.");
     const contentEl = article.querySelector(".turn-content");
     contentEl.appendChild(el("span", "thinking", "Thinking…"));
     stickScroll();
@@ -724,7 +877,7 @@
 
     try {
       const payload = {
-        messages: historyMessages(session),
+        messages: history,
         splunk_context: userTurn.splunk_context || null,
         product: productEl.value.trim() || null,
         version: versionEl.value.trim() || null,
@@ -778,12 +931,17 @@
       else failed = true;
     } finally {
       streamAbort = null;
+      inflight = null;
+      messagesEl.removeAttribute("aria-busy");
+      provisional.remove();
+      article.classList.remove("turn-provisional");
       setStreaming(false);
     }
 
     if (stopped && !assistantTurn.content) {
       // Stopped before the first token: leave no husk behind.
       article.remove();
+      announce("Stopped before any answer text arrived.");
       return;
     }
     const streamFailed = failed || (!stopped && !finalPayload);
@@ -795,6 +953,8 @@
       assistantTurn.verification_state = "generation_incomplete";
       contentEl.replaceChildren(renderMarkdown(assistantTurn.content));
       article.classList.add("turn-error");
+      article.setAttribute("data-state", "failed");
+      announce("The request failed. No answer was produced.");
       return;
     }
     if (streamFailed) {
@@ -855,10 +1015,38 @@
     const meta = renderMeta(assistantTurn);
     if (meta) article.appendChild(meta);
     stickScroll();
-    session.turns.push(assistantTurn);
-    session.updated_at = Date.now();
-    saveStore(store);
-    renderSessions(store);
+    // Commit against the freshly persisted store by session id: the operator
+    // may have created, renamed, deleted or switched incidents (here or in
+    // another tab) while this turn streamed. A deleted incident stays
+    // deleted: the finished turn is dropped, never resurrected.
+    const kept = mutate((store) => {
+      const live = store.sessions[sid];
+      if (!live) return false;
+      live.turns.push(assistantTurn);
+      live.updated_at = Date.now();
+      return true;
+    });
+    if (!kept) {
+      article.remove();
+      announce("The incident was deleted while the answer was generating; the answer was discarded.");
+      return;
+    }
+    article.setAttribute(
+      "data-state",
+      assistantTurn.verification_state === "generation_incomplete" ? "incomplete" : "complete"
+    );
+    renderSessions();
+    announce(completionAnnouncement(assistantTurn));
+  }
+
+  function completionAnnouncement(turn) {
+    if (turn.verification_state === "generation_incomplete") {
+      return turn.meta && turn.meta.stopped
+        ? "Stopped. Partial answer kept; incomplete and not verified."
+        : "Answer incomplete: the stream failed. Partial text kept; not verified.";
+    }
+    if (turn.verification_state === "accepted") return "Answer complete. Citations verified.";
+    return "Answer complete. State: " + String(turn.verification_state).replace(/_/g, " ") + ".";
   }
 
   async function onSubmit(event) {
@@ -871,29 +1059,34 @@
     }
     const text = promptEl.value.trim();
     if (!text) return;
-    const store = loadStore();
-    const session = activeSession(store);
     const userTurn = {
       role: "user",
       content: text,
       splunk_context: splunkEl.value.trim() || null,
       ts: Date.now(),
     };
-    session.turns.push(userTurn);
-    if (session.title === "New Incident") {
-      session.title = text.split("\n")[0].slice(0, 45);
-    }
-    session.updated_at = Date.now();
-    saveStore(store);
+    const saved = mutate((store) => {
+      const id = resolveSession(store, true);
+      const session = store.sessions[id];
+      session.turns.push(userTurn);
+      if (session.title === "New Incident") {
+        session.title = text.split("\n")[0].slice(0, 45);
+      }
+      session.updated_at = Date.now();
+      return { sid: id, history: historyMessages(session) };
+    });
     // A fresh question re-engages the follow; renderMessages resets stick.
     const empty = messagesEl.querySelector(".empty-state");
     if (empty) empty.remove();
+    const note = messagesEl.querySelector(".orphan-note");
+    if (note) note.remove();
     messagesEl.appendChild(renderTurn(userTurn));
     promptEl.value = "";
     updateSendBtn();
     stick = true;
     stickScroll();
-    await streamTurn(store, session, userTurn);
+    renderSessions();
+    await streamTurn(saved.sid, saved.history, userTurn);
   }
 
   /* Copy buttons read from the adjacent rendered node — no payload ever
@@ -927,6 +1120,10 @@
       },
       () => {
         button.textContent = "Copy failed";
+        announce("Copy failed. Select the text and copy it manually.");
+        window.setTimeout(() => {
+          button.textContent = "Copy";
+        }, 3000);
       }
     );
   }
@@ -940,23 +1137,85 @@
     });
   }
 
-  function download(text, filename) {    const blob = new Blob([text], { type: "text/markdown" });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = filename;
-    document.body.appendChild(anchor);
-    anchor.click();
-    anchor.remove();
-    URL.revokeObjectURL(url);
+  function download(text, filename) {
+    try {
+      const blob = new Blob([text], { type: "text/markdown" });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = filename;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+      announce("Incident exported. The file leaves this browser's control; handle it per site data policy.");
+    } catch (err) {
+      announce("Export failed. The incident is still saved in this browser.");
+    }
+  }
+
+  /* Explicit operator-initiated erase of every saved incident in this
+   * browser (issue #372 retention policy). Two-step so a stray click or
+   * keypress cannot destroy a shift's record; no native dialog, so it is
+   * equally operable by keyboard and by assistive tech. */
+  function clearAllSaved() {
+    if (streamAbort) streamAbort.abort();
+    try {
+      window.localStorage.removeItem(STORAGE_KEY);
+    } catch (err) {
+      /* storage unavailable: memory fallback is cleared below */
+    }
+    memory.sessions = {};
+    memory.active = null;
+    currentId = null;
+    renderMessages();
+    renderSessions();
+    announce("All saved incidents were erased from this browser.");
+  }
+
+  function wireClearButton() {
+    const btn = document.getElementById("clear-history-btn");
+    if (!btn) return;
+    const idle = btn.textContent;
+    let armed = false;
+    let timer = null;
+    const disarm = () => {
+      armed = false;
+      btn.textContent = idle;
+      btn.classList.remove("armed");
+      window.clearTimeout(timer);
+    };
+    btn.addEventListener("click", () => {
+      if (!armed) {
+        armed = true;
+        btn.textContent = "Confirm: erase ALL saved incidents";
+        btn.classList.add("armed");
+        announce("Press again to erase all saved incidents in this browser. This cannot be undone.");
+        timer = window.setTimeout(disarm, 6000);
+        return;
+      }
+      disarm();
+      clearAllSaved();
+    });
+    btn.addEventListener("blur", disarm);
   }
 
   function boot() {
-    const store = loadStore();    activeSession(store);
-    saveStore(store);
-    renderMessages(store);
-    renderSessions(store);
+    syncStorageNotice();
+    renderMessages();
+    renderSessions();
     localizeTimes(document);
+    wireClearButton();
+
+    // Another tab wrote the store: re-read it rather than keep showing (and
+    // later overwriting) a stale copy. The streaming tab keeps its live
+    // article; an open rename input is never torn down.
+    window.addEventListener("storage", (event) => {
+      if (event.key !== null && event.key !== STORAGE_KEY) return;
+      if (renaming) return;
+      renderMessages();
+      renderSessions();
+    });
 
     if (messagesEl) {
       messagesEl.addEventListener("click", (event) => {
@@ -1026,19 +1285,18 @@
     const exportBtn = document.getElementById("export-btn");
     if (exportBtn) {
       exportBtn.addEventListener("click", () => {
-        const current = loadStore();
-        const session = activeSession(current);
+        const session = currentSession().session;
         download(markdownReport(session), "incident-" + (session.title || "session").replace(/[^\w.-]+/g, "_") + ".md");
       });
     }
 
-    const newBtn = document.getElementById("new-session-btn");
     if (newBtn) {
       newBtn.addEventListener("click", () => {
-        const current = loadStore();
-        createSession(current);
-        renderMessages(current);
-        renderSessions(current);
+        mutate(createSession);
+        renderMessages();
+        renderSessions();
+        promptEl.focus();
+        announce("New incident started.");
       });
     }
 
@@ -1065,7 +1323,7 @@
     if (filterEl) {
       filterEl.addEventListener("input", () => {
         sessionFilter = filterEl.value;
-        renderSessions(loadStore());
+        renderSessions();
       });
     }
   }

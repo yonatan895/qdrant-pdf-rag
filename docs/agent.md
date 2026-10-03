@@ -193,6 +193,61 @@ real-SDK lifecycle, correlation and overlapping requests; the native
 `tests/live_agent_probes.py` verifies socket disconnect, upstream closure,
 finished Jaeger roots, exact JSON log joins and the next ordinary request.
 
+### Console browser contract: retention and accessibility (#372)
+
+The console's conversation state is browser-owned (ADR-0004); this section is
+the contract owner for what that state is, how long it lives and how it is
+cleared. Executed by `tests/test_console_browser.py` (real Chrome, shipped
+`console.js`, scripted gateway-shaped LLM; `pytest -m browser`, skips without
+an offline Chrome for Testing + matching chromedriver via
+`CONSOLE_BROWSER_CHROME`/`CONSOLE_BROWSER_CHROMEDRIVER` or the selenium-manager
+cache; nothing is downloaded). Hermetic structure pins live in
+`tests/test_webui.py`.
+
+Retention policy as shipped (no default changed by #372):
+
+- **Where:** only `localStorage` key `mainframe_rag_sessions` (plus the
+  cosmetic theme/reasoning keys). Turns include operator text, attached incident
+  context (JES spool/SYSLOG) and assistant answers quoting manual excerpts. Never
+  in cookies, `sessionStorage`, IndexedDB, or server logs (server logs carry
+  request id, query kind, counts, error type only; both pinned by tests).
+- **How long:** until the operator clears it, capped at 30 incidents (oldest
+  idle incident evicted first; the incidents open in this tab are protected).
+  There is no time-based expiry, no logout/user-switch clearing and no account
+  isolation: the key is global per browser origin profile. A cache-control
+  header does not change that.
+- **How cleared:** per incident (delete) or all incidents (`Clear all saved
+  incidents`, two-step confirm; other tabs follow through the `storage` event;
+  an in-flight answer for an erased incident is discarded, never resurrected).
+  Browser "clear site data" also clears everything.
+- **Storage unavailable/full:** the console keeps the conversation in memory for
+  the tab and shows a persistent notice that it is lost on reload.
+- **Export:** operator-initiated Markdown download of the open incident; it
+  leaves browser control and carries a handling banner. Incomplete turns export
+  with their non-accepted verification state.
+- **Open decisions (site owner, with #373):** time-based expiry, clearing on
+  logout/user switch, and per-user keys require an authenticated identity the
+  console does not have and a dedicated approved concern; they are not
+  implemented here.
+
+State contract: every mutation re-reads the persisted store and applies one
+change by incident id (no long-lived store copies), so new-incident, delete,
+rename and cross-tab writes during a stream never overwrite or misroute data. A
+streaming turn is labelled provisional until the final frame; failed, stopped or
+EOF-without-final output is stored and restored as `generation_incomplete`, is
+qualified when reused as model context, and an unanswered question is shown as
+such after reload.
+
+Accessibility behavior (executed, not a compliance claim): landmarks and
+accessible names for every control (checked on Chrome's accessibility tree),
+Tab reachability of every control with a visible focus ring, keyboard
+send/Stop/rename with focus return, a polite status region announcing
+generating/complete/incomplete/stopped/copy and export failure (the message list
+is deliberately not a live region), WCAG AA text contrast in both themes, and no
+horizontal scroll at 1280/640/375/320 CSS px (stand-ins for 100/200/400% zoom).
+Not covered: other browsers, real screen readers, forced-colors/OS high
+contrast, native browser zoom.
+
 ## 2. Error contract
 
 Every JSON error body is `ErrorEnvelope{code, message}` with a fixed

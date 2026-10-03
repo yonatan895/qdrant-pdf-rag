@@ -111,6 +111,11 @@
   - **Client-side Markdown export:** Incident handover reports are assembled into
     Markdown in the browser and downloaded directly via `Blob` (`URL.createObjectURL`),
     requiring zero server roundtrips or server-side file generation.
+  - **Retention and clearing (#372):** history lives only under that key until
+    the operator deletes an incident or uses `Clear all saved incidents`; no
+    expiry or per-user isolation exists. The full policy, its open decisions and
+    the executed browser contract are owned by `docs/agent.md` ("Console browser
+    contract: retention and accessibility").
   - **Prototype decommissioning:** The prototype package `src/mainframe_rag/ui/`
     (`app.py`, `db.py`, `styles.py`) and its SQLite unit tests (`tests/test_ui_db.py`)
     are deprecated and decommissioned. `streamlit` is removed from `pyproject.toml`.
