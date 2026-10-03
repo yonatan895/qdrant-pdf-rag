@@ -372,6 +372,13 @@ class Settings(BaseSettings):
     zowe_mcp_max_bytes: int = Field(default=262144, ge=1000, le=1000000)
     zowe_mcp_dry_run: bool = False
 
+    # Exact-evidence reads (issue #405): one whole retained chunk per call,
+    # never a prefix, so a chunk larger than the cap is an explicit 413. The
+    # deadline bounds the whole read (alias, control and point lookups); each
+    # Qdrant call is additionally bounded by qdrant_timeout_s.
+    evidence_max_bytes: int = Field(default=65536, ge=1024, le=1048576)
+    evidence_timeout_s: float = Field(default=10.0, gt=0.0, le=60.0)
+
     # Contextual retrieval (issue #78): an LLM-generated 1-2 sentence
     # situating prefix per chunk, embedded with the chunk. Default off —
     # enabling changes every dense vector, so the collection must be

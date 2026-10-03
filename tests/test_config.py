@@ -436,6 +436,8 @@ PINNED_SETTING_DEFAULTS: dict[str, object] = {
     "zowe_mcp_timeout_s": 15.0,
     "zowe_mcp_max_bytes": 262144,
     "zowe_mcp_dry_run": False,
+    "evidence_max_bytes": 65536,
+    "evidence_timeout_s": 10.0,
     "contextual_embed_enabled": False,
     "context_llm_base_url": None,
     "context_llm_model": None,

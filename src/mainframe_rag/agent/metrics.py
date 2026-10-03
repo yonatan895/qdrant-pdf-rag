@@ -76,10 +76,14 @@ HITS_BOUNDARIES: tuple[float, ...] = (0.0, 1.0, 2.0, 3.0, 5.0, 8.0, 13.0, 21.0, 
 # (/ui, /ui/static, /ui/healthz) are not countable product requests.
 _METRIC_ENDPOINTS: dict[str, tuple[str, ...]] = {
     "search": ("/v1/search",),
+    "evidence": (),  # prefix route /v1/evidence/{reference}, see endpoint_for_path
     "answer": ("/v1/answer",),
     "chat": ("/v1/chat", "/v1/chat/completions"),
     "console": ("/ui/chat", "/ui/chat/stream"),
 }
+
+# One path segment (the reference) follows; labels never carry the reference.
+_EVIDENCE_PREFIX = "/v1/evidence/"
 
 _provider: MeterProvider | None = None
 _platform_collectors_registered = False
@@ -168,6 +172,8 @@ def endpoint_for_path(path: str) -> str | None:
     is not a product endpoint (scrapes, probes, and unknown routes stay out
     of request series). One mapping, shared by every error handler."""
     clean = path.rstrip("/") or "/"
+    if clean.startswith(_EVIDENCE_PREFIX):
+        return "evidence"
     for endpoint, routes in _METRIC_ENDPOINTS.items():
         if clean in routes:
             return endpoint
