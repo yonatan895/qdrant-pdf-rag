@@ -471,19 +471,18 @@ pass. This narrow catalogue establishes sensitivity to the named historical
 counterexamples, not immunity to all faults or a global coverage percentage.
 
 The GitHub `hazards` job and offline GitLab `hazards` job run the full catalogue
-and retain its synthetic evidence. This producer is not yet an always-scheduled,
-trusted acceptance consumer; #411 owns that gate and maintainer enforcement.
+and retain its synthetic evidence. The scheduled acceptance consumer requires it
+when selected; #411 owns maintainer enforcement.
 
 ## Native CI execution evidence
 
 The existing review-tooling suite owns candidate selection, CI invocation and
 native receipt regression cases. It exercises real temporary Git merge histories
 and child processes, plus independently specified native API records and ZIP
-bytes. It rejects wrong producer/run/attempt/candidate identities, empty or
-skipped test reports, changed raw results, unsafe ZIP entries, and incomplete
-pagination. These local cases establish parser and attribution behavior; they do
-not establish a deployed acceptance check, actual human review, or merge-rule
-enforcement. Those require the real PR trials owned by #411.
+bytes. It rejects wrong producer/run/attempt/candidate identities, empty, skipped or
+xfail test reports, changed raw results, unsafe ZIP entries, and incomplete
+pagination. These local cases establish parser and attribution behavior, not a deployed
+acceptance check, human review, or merge-rule enforcement; #411's real PR trials do.
 
 The consumer cases also execute file pagination with both rename paths. Legacy
 review-parser tests retain optional diagnostic compatibility; native technical
@@ -491,8 +490,9 @@ verification ignores human comments and draft state. Only the maintainer control
 ready/review/merge decisions. Publication tests
 require pending before collection and failure after a failed currentness recheck.
 A controlled curl stub executes the GitLab report shell and verifies literal-body
-POST behavior. The GitHub report's actual API execution belongs to the native PR
-trial; YAML/source inspection alone does not prove a posted report.
+POST behavior. The posted GitHub report belongs to the native PR trial: compare the posted
+check with read-only `python -m scripts.acceptance --repository OWNER/REPO --pr N`;
+source inspection alone does not prove it.
 
 The publisher's independent API reads compare candidate producer/policy bytes
 with approved base bytes, rather than believing receipt hashes. Tests also

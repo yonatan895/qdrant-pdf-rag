@@ -1866,6 +1866,77 @@ class TestNativeExecutionEvidence(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "unsupported"):
                 junit_counts(report)
 
+    def test_real_pytest_xfail_and_skip_are_not_passes(self):
+        """Real pytest/JUnit semantics: xfail renders as <skipped>, so it cannot read as green."""
+        from unittest.mock import patch
+
+        from scripts import ci_evidence
+
+        cases = {
+            "xfail": "import pytest\n@pytest.mark.xfail(reason='known')\ndef test_known():\n    assert False\n",
+            "skip": "import pytest\n@pytest.mark.skip(reason='later')\ndef test_later():\n    pass\n",
+            "xpass-strict": ("import pytest\n@pytest.mark.xfail(strict=True, reason='r')\n"
+                             "def test_unexpected():\n    pass\n"),
+            "clean": "def test_ok():\n    pass\n",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            for name, source in cases.items():
+                (root / name).mkdir()
+                (root / name / f"test_{name.replace('-', '_')}.py").write_text(source + "\ndef test_companion():\n    pass\n")
+            for name, (expected_skipped, expected_exit) in {
+                    "xfail": (1, 1), "skip": (1, 1), "xpass-strict": (0, 1), "clean": (0, 0)}.items():
+                with self.subTest(name=name):
+                    junit = root / (name + ".xml")
+                    output = root / ("out-" + name)
+                    argv = ["ci_evidence.py", "--lane", "simulation", "--job-name", "sim",
+                            "--output", str(output), "--junit", str(junit), "--",
+                            sys.executable, "-m", "pytest", "-o", "addopts=", "-p", "no:cacheprovider", "-q",
+                            "--rootdir", str(root / name), str(root / name), "--junitxml", str(junit)]
+                    env = {"PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"}
+                    with patch.object(ci_evidence, "ROOT", root), \
+                            patch.object(ci_evidence, "identity", return_value={"execution_sha": "a" * 40}), \
+                            patch.dict(os.environ, env), patch.object(sys, "argv", argv):
+                        self.assertEqual(ci_evidence.main(), expected_exit)
+                    evidence = json.loads((output / "evidence.json").read_text())
+                    self.assertEqual(evidence["tests"]["skipped"], expected_skipped)
+                    self.assertEqual(evidence["passed"], expected_exit == 0)
+                    self.assertEqual(evidence["tests"]["executed"], 2)
+
+    def test_unittest_expected_failure_and_skip_are_not_passes(self):
+        import contextlib
+        import importlib
+        import io
+        import uuid
+
+        from scripts import ci_evidence
+
+        sources = {
+            "expected": ("import unittest\nclass T(unittest.TestCase):\n"
+                         "    def test_ok(self):\n        pass\n"
+                         "    @unittest.expectedFailure\n    def test_known(self):\n        self.fail()\n"),
+            "skipped": ("import unittest\nclass T(unittest.TestCase):\n"
+                        "    def test_ok(self):\n        pass\n"
+                        "    @unittest.skip('later')\n    def test_later(self):\n        pass\n"),
+            "clean": "import unittest\nclass T(unittest.TestCase):\n    def test_ok(self):\n        pass\n",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            sys.path.insert(0, directory)
+            try:
+                for name, source in sources.items():
+                    module = f"ctx_{name}_{uuid.uuid4().hex}"
+                    (root / (module + ".py")).write_text(source)
+                    importlib.invalidate_caches()
+                    with self.subTest(name=name):
+                        with contextlib.redirect_stderr(io.StringIO()):
+                            code, counts = ci_evidence.run_unittest([module])
+                        self.assertEqual(code, 0 if name == "clean" else 1, (name, counts))
+                        self.assertEqual(counts["skipped"], 0 if name == "clean" else 1)
+                        self.assertEqual(counts["errors"], 0)
+            finally:
+                sys.path.remove(directory)
+
     def test_native_command_requires_nonzero_fresh_passing_results(self):
         from unittest.mock import patch
 
@@ -2473,6 +2544,22 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
         args["archive"], args["artifact"]["digest"] = self.packed(receipt, xml)
         with self.assertRaises(ValueError):
             normalize_native(**args)
+
+    def test_xfail_shard_report_cannot_pass_even_with_an_honest_or_forged_receipt(self):
+        from scripts.acceptance_evidence import normalize_native
+        from scripts.ci_evidence import junit_bytes
+
+        args, receipt, xml = self.fixture()
+        args["archive"], args["artifact"]["digest"] = self.packed(receipt, xml)
+        self.assertEqual(normalize_native(**args)["status"], "success")  # negative control: unmodified shard passes
+        xfail = xml.replace(b"</testcase>", b'<skipped type="pytest.xfail" message="known"/></testcase>')
+        self.assertNotEqual(xfail, xml)
+        for claimed in (junit_bytes(xfail), junit_bytes(xml)):  # honest counts, then forged zero-skip counts
+            args, receipt, _ = self.fixture()
+            receipt["tests"] = claimed
+            args["archive"], args["artifact"]["digest"] = self.packed(receipt, xfail)
+            with self.assertRaises(ValueError):
+                normalize_native(**args)
 
     def test_candidate_cannot_substitute_workflow_or_a_different_merge_with_same_parents(self):
         from scripts.acceptance_evidence import normalize_native
