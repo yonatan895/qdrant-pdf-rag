@@ -763,7 +763,8 @@ def _assert_core_import_boundary():
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[1] / "src"
-    pending = ["mainframe_rag.agent.answer_core", "mainframe_rag.agent.model_adapter"]
+    pending = ["mainframe_rag.agent.answer_core", "mainframe_rag.agent.model_adapter",
+               "mainframe_rag.agent.resources"]
     visited = set()
     forbidden = ("mainframe_rag.agent.app", "mainframe_rag.agent.sse",
                  "mainframe_rag.webui", "mainframe_rag.mcp")
@@ -800,6 +801,7 @@ def test_core_import_graph_excludes_transports_and_application_singleton():
         ("model_adapter", "def deferred():\n    from mainframe_rag.webui import routes",
          "mainframe_rag.webui.routes"),
         ("core_ports", "from mainframe_rag.agent import sse", "mainframe_rag.agent.sse"),
+        ("resources", "import mainframe_rag.agent.app", "mainframe_rag.agent.app"),
     ],
 )
 def test_core_import_checker_rejects_forbidden_dependency(monkeypatch, module, injected, forbidden):
@@ -819,6 +821,97 @@ def test_core_import_checker_rejects_forbidden_dependency(monkeypatch, module, i
         with pytest.raises(AssertionError, match=re.escape(forbidden)):
             _assert_core_import_boundary()
     _assert_core_import_boundary()
+
+
+def test_agent_resources_import_without_the_application_singleton():
+    """Issue #369: the explicit resource view is importable and usable with no
+    application module (and therefore no lifespan or module globals) loaded."""
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parents[1] / "src"
+    probe = (
+        "import sys, mainframe_rag.agent.resources\n"
+        "assert 'mainframe_rag.agent.app' not in sys.modules\n"
+    )
+    done = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, check=False,
+                          env={"PYTHONPATH": str(src), "PATH": ""})
+    assert done.returncode == 0, done.stderr
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("async_edges", [False, True])
+async def test_use_case_runs_on_explicit_resources_and_borrows_the_model(stream, async_edges):
+    """Issue #369: the answer use case needs only an `AgentResources` view.
+    Retrieval receives the bound physical collection with the view's handles;
+    the model is borrowed (never closed); async model/retrieval legs really
+    suspend without starving the loop; sync tooling doubles still work."""
+    import asyncio
+
+    from mainframe_rag.agent.resources import AgentResources
+
+    qdrant, embedder, reranker = object(), object(), object()
+    searched = []
+    ticks = 0
+
+    async def ticker():
+        nonlocal ticks
+        while True:
+            await asyncio.sleep(0)
+            ticks += 1
+
+    class Model(CoreFakeLLM):
+        closed = 0
+
+        def close(self):
+            Model.closed += 1
+
+        async def aclose(self):
+            Model.closed += 1
+
+    class AsyncModel(Model):
+        async def chat(self, messages, reasoning_effort=None, temperature=None):
+            for _ in range(5):
+                await asyncio.sleep(0)
+            return super().chat(messages, reasoning_effort, temperature)
+
+    def sync_search(*args, **kwargs):
+        searched.append((args, kwargs))
+        return [_hit()], "identifier", {"embed_ms": 1, "qdrant_ms": 2}
+
+    async def async_search(*args, **kwargs):
+        for _ in range(5):
+            await asyncio.sleep(0)
+        return sync_search(*args, **kwargs)
+
+    model = AsyncModel() if async_edges else Model()
+    resources = AgentResources(
+        settings=_settings(), qdrant=qdrant, embedder=embedder, reranker=reranker,  # type: ignore[arg-type]
+        llm=model, tokenizer=None,  # type: ignore[arg-type]
+        search=async_search if async_edges else sync_search,
+    )
+    bound = _settings().model_copy(update={"qdrant_collection": "physical_gen_1"})
+    deps = resources.core_deps(bound)
+    task = asyncio.create_task(ticker())
+    try:
+        if stream:
+            events = [e async for e in execute_answer_core_stream(
+                AnswerCoreInput(query="IEA500I"), deps)]
+            output = events[-1]["output"]
+        else:
+            output = await execute_answer_core(AnswerCoreInput(query="IEA500I"), deps)
+    finally:
+        task.cancel()
+    assert output.finish_reason == "stop" and output.hits
+    (args, kwargs), = searched
+    assert args[:3] == (qdrant, embedder, "physical_gen_1")
+    assert kwargs["reranker"] is reranker and kwargs["limit"] == 8
+    assert kwargs["settings"] is bound
+    assert Model.closed == 0
+    if async_edges:
+        assert ticks > 0  # the awaits really suspended and the loop kept running
 
 
 def test_core_type_boundary_rejects_storage_injection_and_write_use(tmp_path):

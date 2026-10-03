@@ -436,11 +436,23 @@ the query timeout.
   hash-without-`ALLOW_HASH_MODE`; in vLLM mode require dim + endpoint. The
   LLM is deliberately **not** validated at startup — missing reasoning
   config fails per-request at `/v1/answer` (503, pre-retrieval).
-- Shutdown closes the `llm_client` local, not the `llm` global (tests swap
-  the global after startup); embedder/tokenizer/reranker have no close
-  (shared pool closed once); `close()` never nulls a pool, so post-shutdown
-  calls raise instead of silently rebuilding. Qdrant close is awaited only
-  if awaitable (sync doubles keep working).
+- Ownership (issue #369): lifespan registers every client it creates (both
+  pools, `HttpxLLMClient`, Qdrant, the Zowe client, tracing shutdown) on one
+  `AsyncExitStack` at creation. Startup refusal, normal shutdown and
+  cancellation/exception at the yield close exactly those objects, once each,
+  in reverse order; one failing close never skips the others (the first error
+  is reported afterwards). The created instances are closed, never the module
+  names tests swap after startup. `HttpxLLMClient` closes only pools it built;
+  a client injected via `client=` is borrowed. Embedder/tokenizer/reranker have
+  no close (shared pool closed once); `close()` never nulls a pool, so
+  post-shutdown calls raise instead of silently rebuilding. Qdrant close is
+  awaited only if awaitable (sync doubles keep working).
+- Request resources: lifespan publishes the clients as module names (the seam
+  tests replace); each request takes one `app.resources()` snapshot
+  (`agent/resources.py::AgentResources`) and passes it to retrieval and
+  `core_deps(resources)`; the serving gate stays the `serving_settings()` seam. A request keeps the resources it
+  captured if the names are replaced mid-flight; the view never closes anything
+  and `agent/resources.py` imports no transport or application module.
 - No sync fallback on the event loop: healthz and retrieval use the pooled
   clients only; a missing pool is a startup bug.
 - The reasoning client never retries at the transport (sync and async,
@@ -873,7 +885,8 @@ browser completion behavior. #372 retains those gaps (#365 closed 2026-10-02);
 no model run is claimed by this documentation audit.
 
 The shared core consumes typed operations from `core_ports`. Application
-composition captures request dependencies and passes the validated physical
+composition captures one `AgentResources` view per request (see the lifespan
+section) and passes the validated physical
 collection through the retrieval operation's settings. The model adapter owns
 sync/async calling compatibility and validates stream token/terminal fields.
 Both buffered and fallback-stream completions require `ChatResult`; bare strings

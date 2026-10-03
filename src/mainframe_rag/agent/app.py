@@ -22,8 +22,8 @@ import json
 import logging
 import time
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Callable, Iterable, Iterator
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import replace
 
 import anyio
@@ -82,6 +82,8 @@ from mainframe_rag.agent.metrics import (
     setup_metrics,
 )
 from mainframe_rag.agent.model_adapter import ModelAdapter
+from mainframe_rag.agent.resources import AgentResources
+from mainframe_rag.agent.resources import await_retrieval as _await_retrieval  # noqa: F401
 from mainframe_rag.agent.serving import ServingGate, ServingGeneration
 from mainframe_rag.agent.sse import (
     empty_final_payload,
@@ -474,39 +476,25 @@ async def _deadline_iter(owner: _RequestSpan, events: AsyncIterator) -> AsyncIte
         yield item
 
 
-async def _await_retrieval(
-    res: tuple[list[SearchHit], str, dict[str, int]]
-    | Awaitable[tuple[list[SearchHit], str, dict[str, int]]],
-) -> tuple[list[SearchHit], str, dict[str, int]]:
-    """Sync/async retrieval-leg shim: the pooled async client awaits while
-    sync test doubles resolve inline — one helper serves both endpoints so
-    the twin call sites cannot diverge (review S2)."""
-    if inspect.isawaitable(res):
-        return await res
-    return res
+def resources() -> AgentResources:
+    """Snapshot what the lifespan published, once per request. Handlers pass
+    this view explicitly; a request that captured it keeps those clients even
+    if the module names are replaced mid-flight (tests swap them), and nothing
+    here ever closes a client — the lifespan is the only owner."""
+    return AgentResources(
+        settings=settings, qdrant=qdrant, embedder=embedder, reranker=reranker,
+        llm=llm, tokenizer=tokenizer, search=retrieve_search,
+    )
 
 
-def core_deps() -> AnswerCoreDeps:
-    """Build the shared-engine dependency bag from the module globals at call
-    time, so tests that monkeypatch app_mod (llm, retrieve_search,
-    build_messages) drive the core through the same seam as production, and
-    the operator console reuses the identical retrieval/LLM wiring."""
-    client, embedding, ranking, retrieve_fn = qdrant, embedder, reranker, retrieve_search
-
-    async def retrieve(
-        query: str, *, product: str | None, version: str | None, settings: Settings
-    ) -> RetrievalResult:
-        hits, kind, timings = await _await_retrieval(retrieve_fn(
-            client, embedding, settings.qdrant_collection, query,
-            product=product, version=version, limit=8, settings=settings, reranker=ranking,
-        ))
-        return RetrievalResult(hits, kind, timings)
-
-    return AnswerCoreDeps(
-        settings=settings,
-        llm=ModelAdapter(llm),
-        retrieve=retrieve,
-        tokenizer=tokenizer,
+def core_deps(res: AgentResources | None = None) -> AnswerCoreDeps:
+    """Shared-engine dependency bag over an explicit resource view (default:
+    the current snapshot). The prompt builders are read from this module at
+    call time so tests that monkeypatch app_mod (build_messages, ...) drive
+    the core through the same seam as production, and the operator console
+    reuses the identical retrieval/LLM wiring."""
+    return replace(
+        (res or resources()).core_deps(),
         build_messages_fn=build_messages,
         build_chat_messages_fn=build_chat_messages,
         classify_query_complexity_fn=classify_query_complexity,
@@ -548,10 +536,11 @@ async def serving_settings() -> Settings:
     return settings.model_copy(update={"qdrant_collection": generation.physical})
 
 
-async def serving_deps() -> AnswerCoreDeps:
+async def serving_deps(rsc: AgentResources | None = None) -> AnswerCoreDeps:
     """Shared answer-core deps bound to the validated physical generation —
     the one gate for /v1/answer, /v1/chat*, and the operator console."""
-    return replace(core_deps(), settings=await serving_settings())
+    rsc = rsc or resources()
+    return replace(core_deps(rsc), settings=await serving_settings())
 
 
 def _timing_parts(
@@ -717,6 +706,18 @@ def _record_stream_abort(
     )
 
 
+async def _close_client(client: object) -> None:
+    """Close one lifespan-created client: `aclose`, else `close`; awaited when
+    the result is awaitable (sync doubles keep working). `close()` never nulls
+    a pool, so a post-shutdown call raises instead of silently rebuilding."""
+    closer = getattr(client, "aclose", None) or getattr(client, "close", None)
+    if closer is None:
+        return
+    result = closer()
+    if inspect.isawaitable(result):
+        await result
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     global settings, http, http_sync, qdrant, embedder, llm, tokenizer, reranker, zowe_mcp
@@ -740,150 +741,138 @@ async def lifespan(_app: FastAPI):
         # is not a model identity. Fail fast here (config error, before any
         # client is built) like every other embed-path misconfiguration.
         require_attested_revision(settings)
-    http_limits = httpx2.Limits(
-        max_keepalive_connections=settings.http_max_keepalive_connections,
-        max_connections=settings.http_max_connections,
-    )
-    http_client = httpx2.AsyncClient(
-        timeout=settings.embed_timeout_s,
-        transport=httpx2.AsyncHTTPTransport(retries=settings.http_connect_retries),
-        limits=http_limits,
-    )
-    http = http_client
-    # Sync pool for the retrieval leg (embedder / tokenizer / reranker): the
-    # Embedder/Reranker/Tokenizer protocols are sync, so their calls run
-    # inside asyncio.to_thread off the event loop. Bounded limits like the
-    # async pool; closed on shutdown. One pool on purpose — same shape as the
-    # pre-async stack (review S4).
-    http_sync_client = httpx2.Client(
-        timeout=settings.embed_timeout_s,
-        transport=httpx2.HTTPTransport(retries=settings.http_connect_retries),
-        limits=http_limits,
-    )
-    http_sync = http_sync_client
-    # One dispatch point for embed_mode; the reasoning-model client owns its
-    # own connection pool with its own (long) timeout. LLM env stays
-    # request-time fail-fast (assert_reasoning_model in /v1/answer).
-    embedder = build_embedder(settings, http_sync)
-    tokenizer = build_tokenizer(settings, http_sync)
-    reranker = build_reranker(settings, http_sync)
-    rerank_health = None
-    if reranker is not None:
-        # Best-effort reachability ping (warn-only): a mispointed
-        # RERANK_BASE_URL should surface as one loud startup line, not as
-        # per-request failures. Never fail-closed here — rerank is opt-in
-        # and must not keep the agent from listening at startup.
-        # Off the event loop like every other sync leg.
-        probe_error = await asyncio.to_thread(probe_reranker, reranker)
-        if probe_error is not None:
-            log.warning(json_log("lifespan", "reranker_unreachable", error=probe_error[:200]))
-    # Live z/OS state (ADR-0003, phase 2): default-off client, built only
-    # when enabled. Same warn-only probe discipline as the reranker — a
-    # dead bridge or a surprising tool registration must not keep the
-    # agent from listening. No endpoint calls it yet (phase 3 wiring).
-    zowe_mcp = build_zowe_mcp(settings)
-    if zowe_mcp is not None:
-        probe_error = await asyncio.to_thread(probe_zowe_mcp, zowe_mcp)
-        if probe_error is not None:
-            log.warning(json_log("lifespan", "zowe_mcp_unreachable", error=probe_error[:200]))
-    # Two names on purpose: tests swap the `llm` global after startup; shutdown
-    # must close the pool THIS lifespan created, never a test double.
-    llm_client = HttpxLLMClient(settings)
-    llm = llm_client
-
-    # The agent is async end to end: production always gets AsyncQdrantClient.
-    # No runtime sniffing of the module attribute — a swapped class (vendored
-    # shim, test double) is used as-is and sync doubles keep working through
-    # the isawaitable shims below (review S2).
-    import qdrant_client
-
-    qdrant_client_inst = qdrant_client.AsyncQdrantClient(
-        url=settings.qdrant_url,
-        api_key=settings.qdrant_api_key,
-        timeout=settings.qdrant_timeout_s,
-        limits=http_limits,
-    )
-    qdrant = qdrant_client_inst
-    # Admission controller (issue #374): fresh per lifespan so no slot or
-    # waiter from a previous lifespan can leak into this one. All limits
-    # default to 0 = unlimited (pre-#374 behaviour).
-    admission = AdmissionController(
-        settings.request_max_concurrent,
-        settings.request_queue_max,
-        settings.request_queue_wait_s,
-    )
-    # Serving-generation gate (issues #391 F3/F4): one instance per process,
-    # created from Settings unless a test injected its own (never overwritten
-    # then). The cache is invalidated at every startup so a validation from a
-    # previous lifespan can never leak into this one.
-    if serving_gate is None:
-        serving_gate = ServingGate(settings.representation_cache_ttl_s)
-    else:
-        serving_gate.invalidate()
-    # Startup gate: refuse to listen when the RESOLVED physical generation is
-    # known-incompatible (drift, legacy, or a pending migration — issue #391
-    # F2). An unreachable store reports unknown and the process starts; every
-    # request still passes the same gate, so an unverifiable state is refused
-    # (503) rather than served (F3). /healthz re-evaluates per scrape.
-    try:
-        generation = await serving_gate.generation(
-            qdrant, settings, extraction_rules_version(), fresh=True
+    async with AsyncExitStack() as owned:
+        http_limits = httpx2.Limits(
+            max_keepalive_connections=settings.http_max_keepalive_connections,
+            max_connections=settings.http_max_connections,
         )
-    except Exception as exc:  # noqa: BLE001 — exotic transports report unknown
-        generation = ServingGeneration(None, "unknown", (type(exc).__name__,))
-    if generation.outcome in ("reembed_required", "legacy", "pending"):
-        raise RuntimeError(
-            f"agent refuses a {generation.outcome} collection "
-            f"{settings.qdrant_collection!r} "
-            f"({', '.join(generation.details) or 'no contract'}): "
-            "re-run ingest with --reingest under these settings to re-embed, then restart "
-            "(never serve queries against incompatible vectors)."
+        http_client = httpx2.AsyncClient(
+            timeout=settings.embed_timeout_s,
+            transport=httpx2.AsyncHTTPTransport(retries=settings.http_connect_retries),
+            limits=http_limits,
         )
-    if generation.outcome in ("record_only_drift", "unknown"):
-        log.warning(
-            json_log(
-                "lifespan",
-                "representation_not_proven",
-                outcome=generation.outcome,
-                details=",".join(generation.details),
+        owned.push_async_callback(_close_client, http_client)
+        http = http_client
+        # Sync pool for the retrieval leg (embedder / tokenizer / reranker): the
+        # Embedder/Reranker/Tokenizer protocols are sync, so their calls run
+        # inside asyncio.to_thread off the event loop. Bounded limits like the
+        # async pool; closed on shutdown. One pool on purpose — same shape as the
+        # pre-async stack (review S4).
+        http_sync_client = httpx2.Client(
+            timeout=settings.embed_timeout_s,
+            transport=httpx2.HTTPTransport(retries=settings.http_connect_retries),
+            limits=http_limits,
+        )
+        owned.push_async_callback(_close_client, http_sync_client)
+        http_sync = http_sync_client
+        # One dispatch point for embed_mode; the reasoning-model client owns its
+        # own connection pool with its own (long) timeout. LLM env stays
+        # request-time fail-fast (assert_reasoning_model in /v1/answer).
+        embedder = build_embedder(settings, http_sync)
+        tokenizer = build_tokenizer(settings, http_sync)
+        reranker = build_reranker(settings, http_sync)
+        rerank_health = None
+        if reranker is not None:
+            # Best-effort reachability ping (warn-only): a mispointed
+            # RERANK_BASE_URL should surface as one loud startup line, not as
+            # per-request failures. Never fail-closed here — rerank is opt-in
+            # and must not keep the agent from listening at startup.
+            # Off the event loop like every other sync leg.
+            probe_error = await asyncio.to_thread(probe_reranker, reranker)
+            if probe_error is not None:
+                log.warning(json_log("lifespan", "reranker_unreachable", error=probe_error[:200]))
+        # Live z/OS state (ADR-0003, phase 2): default-off client, built only
+        # when enabled. Same warn-only probe discipline as the reranker — a
+        # dead bridge or a surprising tool registration must not keep the
+        # agent from listening. No endpoint calls it yet (phase 3 wiring).
+        zowe_mcp = build_zowe_mcp(settings)
+        if zowe_mcp is not None:
+            owned.push_async_callback(_close_client, zowe_mcp)
+            probe_error = await asyncio.to_thread(probe_zowe_mcp, zowe_mcp)
+            if probe_error is not None:
+                log.warning(json_log("lifespan", "zowe_mcp_unreachable", error=probe_error[:200]))
+        # Ownership: `owned` closes exactly the objects THIS lifespan created —
+        # on startup failure, shutdown and cancellation, once each — never a test
+        # double that later replaced a published name.
+        llm_client = HttpxLLMClient(settings)
+        owned.push_async_callback(_close_client, llm_client)
+        llm = llm_client
+
+        # The agent is async end to end: production always gets AsyncQdrantClient.
+        # No runtime sniffing of the module attribute — a swapped class (vendored
+        # shim, test double) is used as-is and sync doubles keep working through
+        # the isawaitable shims below (review S2).
+        import qdrant_client
+
+        qdrant_client_inst = qdrant_client.AsyncQdrantClient(
+            url=settings.qdrant_url,
+            api_key=settings.qdrant_api_key,
+            timeout=settings.qdrant_timeout_s,
+            limits=http_limits,
+        )
+        owned.push_async_callback(_close_client, qdrant_client_inst)
+        qdrant = qdrant_client_inst
+        # Admission controller (issue #374): fresh per lifespan so no slot or
+        # waiter from a previous lifespan can leak into this one. All limits
+        # default to 0 = unlimited (pre-#374 behaviour).
+        admission = AdmissionController(
+            settings.request_max_concurrent,
+            settings.request_queue_max,
+            settings.request_queue_wait_s,
+        )
+        # Serving-generation gate (issues #391 F3/F4): one instance per process,
+        # created from Settings unless a test injected its own (never overwritten
+        # then). The cache is invalidated at every startup so a validation from a
+        # previous lifespan can never leak into this one.
+        if serving_gate is None:
+            serving_gate = ServingGate(settings.representation_cache_ttl_s)
+        else:
+            serving_gate.invalidate()
+        # Startup gate: refuse to listen when the RESOLVED physical generation is
+        # known-incompatible (drift, legacy, or a pending migration — issue #391
+        # F2). An unreachable store reports unknown and the process starts; every
+        # request still passes the same gate, so an unverifiable state is refused
+        # (503) rather than served (F3). /healthz re-evaluates per scrape.
+        try:
+            generation = await serving_gate.generation(
+                qdrant, settings, extraction_rules_version(), fresh=True
             )
+        except Exception as exc:  # noqa: BLE001 — exotic transports report unknown
+            generation = ServingGeneration(None, "unknown", (type(exc).__name__,))
+        if generation.outcome in ("reembed_required", "legacy", "pending"):
+            raise RuntimeError(
+                f"agent refuses a {generation.outcome} collection "
+                f"{settings.qdrant_collection!r} "
+                f"({', '.join(generation.details) or 'no contract'}): "
+                "re-run ingest with --reingest under these settings to re-embed, then restart "
+                "(never serve queries against incompatible vectors)."
+            )
+        if generation.outcome in ("record_only_drift", "unknown"):
+            log.warning(
+                json_log(
+                    "lifespan",
+                    "representation_not_proven",
+                    outcome=generation.outcome,
+                    details=",".join(generation.details),
+                )
+            )
+        # OTel tracing (issue #83): OFF unless OTEL_EXPORTER_OTLP_ENDPOINT is set.
+        # The provider/exporter live for the process; flush + shutdown at lifespan
+        # exit so in-flight spans land even on graceful shutdown. Every bounded
+        # knob comes from Settings — no magic numbers here.
+        global tracer
+        tracer = setup_tracing(
+            settings.otel_exporter_otlp_endpoint,
+            sample_ratio=settings.otel_sample_ratio,
+            export_queue_size=settings.otel_export_queue_size,
+            export_timeout_ms=settings.otel_export_timeout_ms,
         )
-    # OTel tracing (issue #83): OFF unless OTEL_EXPORTER_OTLP_ENDPOINT is set.
-    # The provider/exporter live for the process; flush + shutdown at lifespan
-    # exit so in-flight spans land even on graceful shutdown. Every bounded
-    # knob comes from Settings — no magic numbers here.
-    global tracer
-    tracer = setup_tracing(
-        settings.otel_exporter_otlp_endpoint,
-        sample_ratio=settings.otel_sample_ratio,
-        export_queue_size=settings.otel_export_queue_size,
-        export_timeout_ms=settings.otel_export_timeout_ms,
-    )
-    # Prometheus metrics (issue #187): process-global provider + reader for
-    # UWM scrapes of GET /metrics. Pull model — nothing to flush, so no
-    # shutdown step; idempotent across lifespan re-entry.
-    setup_metrics(settings.metrics_enabled)
-    yield
-    shutdown_tracing()
-    if hasattr(http_client, "aclose"):
-        await http_client.aclose()
-    elif hasattr(http_client, "close"):
-        http_client.close()
-
-    http_sync_client.close()
-
-    if hasattr(llm_client, "aclose"):
-        await llm_client.aclose()
-    elif hasattr(llm_client, "close"):
-        llm_client.close()
-
-    if hasattr(qdrant_client_inst, "close"):
-        close_res = qdrant_client_inst.close()
-        if inspect.isawaitable(close_res):
-            await close_res
-
-    if zowe_mcp is not None and hasattr(zowe_mcp, "close"):
-        zowe_mcp.close()
+        owned.callback(shutdown_tracing)
+        # Prometheus metrics (issue #187): process-global provider + reader for
+        # UWM scrapes of GET /metrics. Pull model — nothing to flush, so no
+        # shutdown step; idempotent across lifespan re-entry.
+        setup_metrics(settings.metrics_enabled)
+        yield
 
 
 app = FastAPI(title="mainframe-rag agent", version="0.1.0", lifespan=lifespan)
@@ -1366,21 +1355,15 @@ async def _search_response(req, response, owner):
     _require_query_length(request_id, req.query)
     # Gate before any retrieval work (issue #391 F3/F4): 503 when the
     # resolved generation is not validated; otherwise bind to its physical.
+    rsc = resources()
     bound = await serving_settings()
     with use_span(root_span, end_on_exit=False):
         try:
-            res = retrieve_search(
-                qdrant,
-                embedder,
-                bound.qdrant_collection,
-                req.query,
-                product=req.product,
-                version=req.version,
-                limit=req.limit,
-                settings=bound,
-                reranker=reranker,
+            found = await rsc.retrieve(
+                req.query, product=req.product, version=req.version,
+                settings=bound, limit=req.limit,
             )
-            hits, kind, timings = await _await_retrieval(res)
+            hits, kind, timings = found.hits, found.kind, found.timings
         except Exception as exc:
             refused = _embed_input_refusal(owner, "search", exc)
             if refused is not None:
@@ -1848,6 +1831,7 @@ async def _answer_response(req, response, is_stream, owner):
     _require_reasoning_model(request_id, "answer")
     # Serving gate before retrieval and before the root stream opens (issue
     # #391 F3/F4): the request binds to the validated physical generation.
+    rsc = resources()
     bound = await serving_settings()
     llm_model = settings.require_reasoning_model()
 
@@ -1860,18 +1844,10 @@ async def _answer_response(req, response, is_stream, owner):
         # root is made current for the retrieval leg (the root span itself is
         # not created "as current" — the SSE generator outlives this block).
         with use_span(root_span, end_on_exit=False):
-            res = retrieve_search(
-                qdrant,
-                embedder,
-                bound.qdrant_collection,
-                req.query,
-                product=req.product,
-                version=req.version,
-                limit=8,
-                settings=bound,
-                reranker=reranker,
+            found = await rsc.retrieve(
+                req.query, product=req.product, version=req.version, settings=bound
             )
-            hits, kind, timings = await _await_retrieval(res)
+            hits, kind, timings = found.hits, found.kind, found.timings
     except Exception as exc:
         raise _retrieval_failed(owner, "answer", "answer", exc) from exc
 
@@ -1888,7 +1864,7 @@ async def _answer_response(req, response, is_stream, owner):
         query_kind=kind,
         timings=timings,
     )
-    deps = replace(core_deps(), settings=bound)
+    deps = replace(core_deps(rsc), settings=bound)
 
     if not is_stream:
         output = await _execute_core_or_raise(
@@ -2091,7 +2067,8 @@ async def _chat_response(req, response, owner):
     # request to the validated physical generation or refuse with the
     # stable 503. The error handler records the single terminal
     # observation (same series the explicit record produced).
-    deps = await serving_deps()
+    rsc = resources()
+    deps = await serving_deps(rsc)
 
     core_input = AnswerCoreInput(
         query=turn.query,
@@ -2108,18 +2085,11 @@ async def _chat_response(req, response, owner):
     try:
         with use_span(root_span, end_on_exit=False):
             search_query = await resolve_search_query(core_input, deps, parent_span=root_span)
-            retrieval_coro = retrieve_search(
-                qdrant,
-                embedder,
-                deps.settings.qdrant_collection,
-                search_query,
-                product=req.product,
-                version=req.version,
-                limit=8,
+            found = await rsc.retrieve(
+                search_query, product=req.product, version=req.version,
                 settings=deps.settings,
-                reranker=reranker,
             )
-            hits, kind, timings = await _await_retrieval(retrieval_coro)
+            hits, kind, timings = found.hits, found.kind, found.timings
     except Exception as exc:
         raise _retrieval_failed(owner, "chat", "chat_retrieval", exc) from exc
 

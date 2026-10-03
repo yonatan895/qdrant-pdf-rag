@@ -156,7 +156,9 @@ mappings. Bare strings are rejected; finish/usage metadata is never invented. Er
 propagate as exceptions, including the existing typed `TruncatedStreamError`.
 `CoreToken`/`CoreFinal` discriminate the internal stream; transport wire schemas
 remain unchanged. The adapter closes per-operation generators, never shared
-clients. The application lifespan retains client ownership.
+clients. The application lifespan retains client ownership and closes only what
+it created (`AsyncExitStack`: startup failure, shutdown, cancellation); requests
+use an `AgentResources` view that never closes anything.
 
 Retrieval SDK dispatch and its existing low-level ports remain unchanged. The
 core's `Retriever` operation is the read boundary: a storage/admin client cannot
@@ -277,6 +279,7 @@ src/mainframe_rag/
     chat_turn.py      # One active-user boundary for chat routes, retrieval and prompts
     core_ports.py     # Typed operations supplied to the answer use case
     model_adapter.py  # Normalizes legacy chat/stream seams; never owns the shared client
+    resources.py      # Per-request read-only view of lifespan-owned clients; retrieval wiring + core deps
   webui/
     routes.py         # Operator console routes (/ui): fail-closed gate, HTMX form/SSE, CSP
     templates/        # Jinja2 shell + message pair (server-rendered, no external assets)

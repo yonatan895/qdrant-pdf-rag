@@ -3708,6 +3708,158 @@ def test_lifespan_cleanup_closes_created_clients_when_globals_replaced(monkeypat
     assert dummy_llm.closed is False
 
 
+class _LifespanCloseSpies:
+    """Counts the close of every client one lifespan creates (issue #369).
+
+    Keys: async/sync httpx pools, the reasoning client, Qdrant. Each created
+    client must close exactly once on startup failure, shutdown and
+    cancellation; nothing a test swaps in afterwards is ever closed."""
+
+    def __init__(self, monkeypatch, qdrant_base=object):
+        self.closed = {"async": 0, "sync": 0, "llm": 0, "qdrant": 0}
+        closed = self.closed
+        real_async_cls, real_sync_cls = app_mod.httpx2.AsyncClient, app_mod.httpx2.Client
+        real_llm_cls = app_mod.HttpxLLMClient
+
+        class SpyAsyncClient(real_async_cls):
+            async def aclose(self):
+                closed["async"] += 1
+                await super().aclose()
+
+        class SpySyncClient(real_sync_cls):
+            def close(self):
+                closed["sync"] += 1
+                super().close()
+
+        class SpyLLM(real_llm_cls):
+            fail_close = False
+
+            async def aclose(self):
+                closed["llm"] += 1
+                if SpyLLM.fail_close:
+                    raise RuntimeError("synthetic close failure")
+                await super().aclose()
+
+        class SpyQdrant(qdrant_base):
+            def __init__(self, *args, **kwargs):
+                if qdrant_base is not object:
+                    super().__init__(*self.scenario)
+
+            def close(self):
+                closed["qdrant"] += 1
+
+        self.llm_cls = SpyLLM
+        self.qdrant_cls = SpyQdrant
+        monkeypatch.setattr(app_mod.httpx2, "AsyncClient", SpyAsyncClient)
+        monkeypatch.setattr(app_mod.httpx2, "Client", SpySyncClient)
+        monkeypatch.setattr(app_mod, "HttpxLLMClient", SpyLLM)
+        monkeypatch.setattr("qdrant_client.AsyncQdrantClient", SpyQdrant)
+
+
+def _lifespan_env(monkeypatch):
+    monkeypatch.setenv("QDRANT_URL", "http://localhost:6333")
+    monkeypatch.setenv("EMBED_MODE", "hash")
+    monkeypatch.setenv("ALLOW_HASH_MODE", "true")
+    monkeypatch.setenv("LLM_BASE_URL", "http://llm.internal/v1")
+    monkeypatch.setenv("LLM_MODEL_REASONING", "test-reasoning-model")
+
+
+def test_lifespan_startup_refusal_closes_created_clients_once(monkeypatch):
+    """Issue #369: a startup refusal (incompatible store) happens AFTER the
+    pools, reasoning client and Qdrant client were created. They must close
+    exactly once instead of leaking until process exit."""
+    from mainframe_rag.agent.serving import ServingGate
+    from tests.fakes import ServingManifestQdrant
+
+    _lifespan_env(monkeypatch)
+    spies = _LifespanCloseSpies(monkeypatch, qdrant_base=ServingManifestQdrant)
+    spies.qdrant_cls.scenario = (None, True)  # legacy: non-empty store, no contract
+    monkeypatch.setattr(app_mod, "serving_gate", ServingGate(0.0))
+    with pytest.raises(RuntimeError, match="refuses.*legacy"), TestClient(app_mod.app):
+        pass
+    assert spies.closed == {"async": 1, "sync": 1, "llm": 1, "qdrant": 1}
+
+
+def test_lifespan_cancellation_at_yield_closes_created_clients_once(monkeypatch):
+    """Issue #369: an exception/cancellation delivered while the app is up
+    (the lifespan is suspended at its yield) still closes every owned client
+    exactly once; previously the cleanup after the yield was skipped."""
+    import asyncio
+
+    _lifespan_env(monkeypatch)
+    spies = _LifespanCloseSpies(monkeypatch)
+
+    async def run():
+        with pytest.raises(asyncio.CancelledError):
+            async with app_mod.lifespan(app_mod.app):
+                raise asyncio.CancelledError
+
+    asyncio.run(run())
+    assert spies.closed == {"async": 1, "sync": 1, "llm": 1, "qdrant": 1}
+    # The next ordinary lifespan starts and stops cleanly on fresh clients.
+    with TestClient(app_mod.app):
+        pass
+    assert spies.closed == {"async": 2, "sync": 2, "llm": 2, "qdrant": 2}
+
+
+def test_lifespan_one_failing_close_does_not_skip_the_others(monkeypatch):
+    """Issue #369: shutdown attempts every owned client; the first failure is
+    reported afterwards instead of leaving later clients open."""
+    _lifespan_env(monkeypatch)
+    spies = _LifespanCloseSpies(monkeypatch)
+    spies.llm_cls.fail_close = True
+    with pytest.raises(RuntimeError, match="synthetic close failure"), TestClient(app_mod.app):
+        pass
+    assert spies.closed == {"async": 1, "sync": 1, "llm": 1, "qdrant": 1}
+
+
+def test_lifespan_closes_its_own_zowe_client_not_a_swapped_double(monkeypatch):
+    """Issue #369: the Zowe MCP client follows the same created-vs-borrowed
+    rule as the pools: the lifespan closes the instance it built, never the
+    object a test (or caller) later published under the same name."""
+    _lifespan_env(monkeypatch)
+
+    class Zowe:
+        closes = 0
+
+        def close(self):
+            type(self).closes += 1
+
+    class Swapped(Zowe):
+        closes = 0
+
+    owned = Zowe()
+    monkeypatch.setattr(app_mod, "build_zowe_mcp", lambda _settings: owned)
+    monkeypatch.setattr(app_mod, "probe_zowe_mcp", lambda _client: None)
+    with TestClient(app_mod.app):
+        monkeypatch.setattr(app_mod, "zowe_mcp", Swapped())
+    assert Zowe.closes == 1
+    assert Swapped.closes == 0
+
+
+@pytest.mark.parametrize("path, body", [
+    ("/v1/answer", {"query": "IEA500I"}),
+    ("/v1/chat", {"messages": [{"role": "user", "content": "IEA500I"}]}),
+])
+def test_request_keeps_resources_it_captured_when_published_names_change(
+    client, monkeypatch, path, body
+):
+    """Issue #369 (overlapping requests): one request binds retrieval and the
+    model to the SAME resource view, taken once at its start. A replacement
+    published while it is mid-retrieval serves only the NEXT request."""
+    first, second = app_mod.llm, FakeLLM()
+
+    def swapping_search(*args, **kwargs):
+        monkeypatch.setattr(app_mod, "llm", second)
+        return [_hit()], "identifier", {"embed_ms": 1, "qdrant_ms": 2}
+
+    monkeypatch.setattr(app_mod, "retrieve_search", swapping_search)
+    assert client.post(path, json=body).status_code == 200
+    assert (first.calls, second.calls) == (1, 0)
+    assert client.post(path, json=body).status_code == 200
+    assert (first.calls, second.calls) == (1, 1)
+
+
 
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("answer, state", [
