@@ -1139,6 +1139,39 @@
   /* Copy buttons read from the adjacent rendered node — no payload ever
    * travels in attributes, so there is nothing to escape. One delegated
    * listener covers streamed, restored, and server-fragment turns alike. */
+  /* The async Clipboard API exists only in secure contexts (HTTPS or
+   * localhost); a console reached over plain http://host:8080 has no
+   * navigator.clipboard at all. Fall back to the legacy copy command on an
+   * off-screen textarea, still inside the click's user activation, so the
+   * button works on every origin and a failure is always reported. */
+  function writeClipboard(text) {
+    if (navigator.clipboard && window.isSecureContext) {
+      return navigator.clipboard.writeText(text);
+    }
+    return new Promise((resolve, reject) => {
+      const area = el("textarea");
+      area.value = text;
+      area.setAttribute("readonly", "");
+      area.setAttribute("aria-hidden", "true");
+      area.style.position = "fixed";
+      area.style.top = "-1000px";
+      area.style.opacity = "0";
+      const focused = document.activeElement;
+      document.body.appendChild(area);
+      area.select();
+      let ok = false;
+      try {
+        ok = document.execCommand("copy");
+      } catch (err) {
+        ok = false;
+      }
+      area.remove();
+      if (focused && typeof focused.focus === "function") focused.focus();
+      if (ok) resolve();
+      else reject(new Error("copy command refused"));
+    });
+  }
+
   function copyFromButton(button) {
     let text = "";
     if (button.classList.contains("copy-turn")) {
@@ -1157,8 +1190,8 @@
         text = label ? label.textContent : "";
       }
     }
-    if (!text || !navigator.clipboard) return;
-    navigator.clipboard.writeText(text).then(
+    if (!text) return;
+    writeClipboard(text).then(
       () => {
         button.textContent = "Copied";
         window.setTimeout(() => {

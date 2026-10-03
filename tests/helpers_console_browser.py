@@ -217,7 +217,7 @@ class _HermeticQdrant:
 
 
 class Browser:
-    def __init__(self, chrome: str, chromedriver: str) -> None:
+    def __init__(self, chrome: str, chromedriver: str, extra_args: tuple[str, ...] = ()) -> None:
         self._tmp = Path(tempfile.mkdtemp(prefix="console-browser-"))
         port = _free_port()
         self._proc = subprocess.Popen(
@@ -245,6 +245,7 @@ class Browser:
             "--disable-background-networking",
             "--window-size=1280,900",
             f"--user-data-dir={self._tmp / 'profile'}",
+            *extra_args,
         ]
         reply = self._http.post(
             "/session",
