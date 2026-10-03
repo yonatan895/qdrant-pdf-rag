@@ -46,8 +46,9 @@ def _declares_litellm(deps: list[str]) -> list[str]:
 def test_litellm_is_only_imported_by_the_gateway_only_hooks():
     """LiteLLM was a phantom dependency: pinned in the lockfile and baked into
     the images while every src module used plain OpenAI-compatible httpx2.
-    Only the gateway-only finish adapter and model-scope callback may import it;
-    their directory is excluded from product images. No product dependency or lock pin."""
+    Only the gateway-only finish adapter, model-scope callback and trace-privacy
+    exporter (#636) may import it; their directory is excluded from product
+    images. No product dependency or lock pin."""
     scanned = [
         *(ROOT / "src").rglob("*.py"),
         *(ROOT / "scripts").rglob("*.py"),
@@ -55,7 +56,8 @@ def test_litellm_is_only_imported_by_the_gateway_only_hooks():
     ]
     bad_files = _litellm_import_files(scanned, ROOT)
     assert sorted(bad_files) == ['scripts/gateway/scoped_passthrough.py',
-                                 'scripts/gateway/strict_finish.py'], f"unexpected LiteLLM imports: {bad_files}"
+                                 'scripts/gateway/strict_finish.py',
+                                 'scripts/gateway/trace_privacy.py'], f"unexpected LiteLLM imports: {bad_files}"
     assert 'scripts/gateway' in (ROOT / '.dockerignore').read_text().splitlines()
 
     pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
