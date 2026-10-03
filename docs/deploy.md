@@ -618,8 +618,9 @@ passes; RF1 and control-only-mismatched staging refused) and the in-process
 ACTIVE-copy gate (refuses while one peer is down, passes again after
 rejoin). Each
 scenario creates its own corpus+control pair, so it runs alone or in any
-order, and rejoin waits for every shard to be ACTIVE on three distinct
-peers before re-qualifying (membership count alone is not catch-up). Three
+order. Rejoin requires ACTIVE placement on three distinct peers, then exact
+corpus/control reads within the existing 60-second convergence waits before
+re-qualifying; ACTIVE placement alone is not data catch-up. Three
 containers on one host prove distributed software behavior, not
 independent-worker or site tolerance. Existing one-node CRC/Kind lanes and
 the three-worker lifecycle lane are not distributed acceptance. The lane

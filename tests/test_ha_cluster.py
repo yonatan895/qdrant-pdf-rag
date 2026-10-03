@@ -166,7 +166,7 @@ def _assert_exact_payloads(url: str, pair: SeededPair) -> None:
             expected = pair.expected(collection)
             records = reader.retrieve(collection, ids=list(expected), with_payload=True)
             actual = {record.id: record.payload["tag"] for record in records}
-            assert actual == expected, f"{url} {collection}"
+            assert actual == expected, f"{url} {collection}: expected {expected!r}, retrieved {actual!r}"
     finally:
         reader.close()
 
@@ -357,8 +357,7 @@ def test_peer_loss_is_degraded_and_rejoins_healthy(
     output = capsys.readouterr().out
     assert code == 0, output
     assert report is not None and report.state == "healthy"
-    for url in cluster.urls:
-        _assert_exact_payloads(url, seeded_pair)
+    _wait_pair_exact(cluster.urls, seeded_pair)
 
 
 # New points for the write path must not collide with the seeded identity
@@ -388,9 +387,8 @@ def _assert_points_exact(url: str, collection: str, point_ids: tuple[int, ...], 
     try:
         records = reader.retrieve(collection, ids=list(point_ids), with_payload=True)
         actual = {record.id: record.payload["tag"] for record in records}
-        assert actual == {point_id: f"{prefix}-{point_id}" for point_id in point_ids}, (
-            f"{url} {collection}"
-        )
+        expected = {point_id: f"{prefix}-{point_id}" for point_id in point_ids}
+        assert actual == expected, f"{url} {collection}: expected {expected!r}, retrieved {actual!r}"
     finally:
         reader.close()
 
@@ -427,6 +425,13 @@ def test_acknowledged_writes_survive_one_peer_loss(cluster: QdrantCluster, seede
         wait_collection_placement(
             cluster.urls, collection, shard_number=SHARDS, replication_factor=RF
         )
+    # ACTIVE placement may precede data sync on a restarted peer. Preserve
+    # the exact expectations, but require read convergence within the same
+    # bounded recovery waits used after a network partition.
+    _wait_points_exact(cluster.urls, seeded_pair.corpus, WRITE_CORPUS_POINTS, "corpus")
+    _wait_points_exact(cluster.urls, seeded_pair.control, WRITE_CONTROL_POINTS, "control")
+    _wait_pair_exact(cluster.urls, seeded_pair)
+    # A fresh ordinary read after recovery must still see all retained data.
     for url in cluster.urls:
         _assert_points_exact(url, seeded_pair.corpus, WRITE_CORPUS_POINTS, "corpus")
         _assert_points_exact(url, seeded_pair.control, WRITE_CONTROL_POINTS, "control")
