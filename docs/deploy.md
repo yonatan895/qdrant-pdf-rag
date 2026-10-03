@@ -155,11 +155,16 @@ Compatibility and lifecycle decisions under #448:
   that cannot list Routes fails closed): any Route other than the owned
   `rag-agent` Route whose backend or `alternateBackends` is the agent or a
   Qdrant Service is refused in both Route-on and Route-off, and the owned Route
-  with `alternateBackends` is refused when Route-on. After the application
+  with `alternateBackends` is refused when Route-on. Before release work,
+  deploy classifies the owned Route against the generated OAuth contract and
+  deletes a confirmed incompatible Route; a valid Route and its operator
+  host/certificate fields stay. Foreign ownership is refused. After the application
   release, deploy re-reads the live Route and requires Service `rag-agent`,
   `targetPort: oauth`, `reencrypt`, `insecureEdgeTerminationPolicy: Redirect`,
-  the generated destination CA and no alternates; otherwise it deletes the
-  Route (never leaving an unauthenticated console) and fails. With Route-off an
+  the generated destination CA and no alternates; a readable owned mismatch
+  is deleted and fails. An unreadable Route or changed ownership fails with an
+  unknown/unverified exposure diagnostic; this does not prove absent exposure
+  and does not authorize deleting an operator object. With Route-off an
   existing owned Route is deleted before the first release mutation, not after
   the rollout wait. Not covered here (site evidence, see the issue): the OAuth
   login itself, who is authorized (`--email-domain=*` admits any authenticated
@@ -365,10 +370,13 @@ checksums **after**.
   a failed verification leaves `dist/` and `airgap.env` byte-identical and
   an interruption never yields a mixed bundle that verifies. `dist/` is never
   swapped wholesale: operator files and earlier releases' archives stay. If
-  the process was killed uncleanly the staging directory remains; the next run
-  refuses it with a fixed message (nothing from it was accepted) and the
-  operator removes it (`rm -rf <workspace>/dist/.bootstrap-staging`) before
-  rerunning. Bootstrap never deletes it on its own initiative after a crash.
+  the process was killed uncleanly the staging directory remains. A failure
+  before promotion preserves existing `dist/` bytes; interrupted promotion
+  may have replaced members before the acceptance metadata moved. The next run
+  refuses the stage and warns that `dist/` may be partial. Do not use it: remove
+  only `dist/.bootstrap-staging`, rerun the complete verified bundle and require
+  signature/member verification before load. Bootstrap never deletes a leftover
+  stage on its own initiative; operator files remain through recovery.
   The copy list includes `oauth-proxy-image.tar` when the bundle contains it;
   no manual sidecar-image copy is needed before `airgap:load`.
 
@@ -874,7 +882,9 @@ Implemented (issue #272), as one chain bound to the signed MANIFEST:
    without `<image>_config_digest` (older bundle: repack) stop with a fixed
    message and no mutation. The check shares `load.sh`'s read-back options
    (`SKOPEO_ARGS` access options, `INSECURE_REGISTRY`) and needs `skopeo` and
-   `python3`.
+   `python3`. `image_manifest.py` owns config-digest and layer structure parsing
+   for pack/load/deploy/ingest; load additionally binds the archive manifest
+   checksum and compares layer counts across serialization.
 3. The first-party images (agent, ingest, Jaeger, oauth-proxy) are then rendered
    as `repository@sha256:<registry manifest digest>` (`IMAGE_DIGEST_<ROLE>` →
    `map_values.py` → `images.<name>.digest`; the chart keeps the SHA tag only as
@@ -883,9 +893,15 @@ Implemented (issue #272), as one chain bound to the signed MANIFEST:
 4. The vendored Qdrant chart cannot render a digest (it appends
    `-unprivileged` to the tag and semver-compares the tag), and vendored-tree
    edits are not allowed. It stays tag-referenced; its verified digest is
-   compared with the running pods instead. After rollout, every running
-   container of a verified repository must report that digest as `imageID`
-   (`check_pod_images.py`); a mismatch or a missing pod fails the deploy
+   compared with the running pods instead. After rollout, `check_pod_images.py`
+   binds each role to the named release Deployment/StatefulSet and container,
+   using controller UIDs, selectors, the current Deployment ReplicaSet revision
+   or StatefulSet update revision. It requires every desired replica's regular
+   and applicable init-container repository and `imageID`, including completed
+   init containers; unrelated Jobs and terminating old Pods cannot supply or
+   invalidate this evidence. The deployer needs namespace-scoped list access to
+   Deployments, StatefulSets, ReplicaSets and Pods. Missing workload/controller/status, a wrong
+   repository, digest or replica count fails the deploy
    before the legacy-resource cleanup. Residual: between the read-back and the
    Qdrant pod pull, a tag could still move; the post-rollout check detects it
    after pods started, it cannot prevent it.

@@ -634,10 +634,12 @@ fetch_route_destination_ca() {
 # Pre-mutation Route inventory. $1 = enabled|disabled. Lists every Route in
 # the namespace (read-only) and refuses a Route other than the chart-owned
 # rag-agent one that backs the agent or Qdrant Services. Sets
-# OWNED_ROUTE_PRESENT=1 when the owned Route already exists. A deployer that
+# OWNED_ROUTE_PRESENT=1 when the owned Route already exists; when $2 supplies
+# the service CA, also sets OWNED_ROUTE_INCOMPATIBLE for retirement. A deployer that
 # cannot list Routes cannot prove the absence of a public path: fail closed.
 check_route_exposure() {
     OWNED_ROUTE_PRESENT=0
+    OWNED_ROUTE_INCOMPATIBLE=0
     [ "${AIRGAP_DRYRUN:-0}" != "1" ] || return 0
     _route_apis=$($KC api-resources -o name) || die "cannot discover the Route API"
     if ! printf '%s\n' "$_route_apis" | grep -qx 'routes.route.openshift.io'; then
@@ -645,17 +647,26 @@ check_route_exposure() {
         return 0
     fi
     _route_json=$($KC -n "$NAMESPACE" get routes.route.openshift.io -o json) || die "cannot list Routes in namespace '$NAMESPACE'; without it the absence of an unauthenticated public path cannot be proven (grant namespace-scoped list on routes, not cluster-admin)"
-    _route_out=$(printf '%s' "$_route_json" | python3 scripts/airgap/check_route_exposure.py inventory "$NAMESPACE" "$1" "$QDRANT_RELEASE" "${QDRANT_RELEASE}-headless") || exit 1
-    [ "$_route_out" != owned-route-present ] || OWNED_ROUTE_PRESENT=1
+    if [ "$1" = enabled ] && [ -n "${2:-}" ]; then
+        _route_out=$(printf '%s' "$_route_json" | python3 scripts/airgap/check_route_exposure.py classify "$NAMESPACE" "$2" "$QDRANT_RELEASE" "${QDRANT_RELEASE}-headless") || exit 1
+    else
+        _route_out=$(printf '%s' "$_route_json" | python3 scripts/airgap/check_route_exposure.py inventory "$NAMESPACE" "$1" "$QDRANT_RELEASE" "${QDRANT_RELEASE}-headless") || exit 1
+    fi
+    case "$_route_out" in
+        owned-route-present) OWNED_ROUTE_PRESENT=1 ;;
+        owned-route-incompatible) OWNED_ROUTE_PRESENT=1; OWNED_ROUTE_INCOMPATIBLE=1 ;;
+    esac
     unset _route_apis _route_json _route_out
 }
 
-# After the release: the live Route must equal the OAuth contract. Any
-# difference removes the Route (so no unauthenticated console stays exposed)
-# and fails. $1 = file holding the generated destination CA.
+# After release, remove a readable owned OAuth-contract mismatch and fail.
+# Unknown exposure/ownership fails without claiming verification or deleting
+# an operator object. $1 = file holding the generated destination CA.
 verify_agent_route() {
     [ "${AIRGAP_DRYRUN:-0}" != "1" ] || return 0
-    _route_json=$($KC -n "$NAMESPACE" get route.route.openshift.io/rag-agent -o json) || die "Route rag-agent cannot be read after the release; console exposure is NOT verified"
+    _route_json=$($KC -n "$NAMESPACE" get route.route.openshift.io/rag-agent -o json) || die "Route rag-agent cannot be read after the release; exposure state is unknown and console exposure is NOT verified"
+    printf '%s' "$_route_json" | python3 scripts/airgap/check_app_ownership.py "$NAMESPACE" ||
+        die "Route rag-agent ownership is not established; cannot safely remove it and console exposure is NOT verified"
     if ! printf '%s' "$_route_json" | python3 scripts/airgap/check_route_exposure.py verify "$NAMESPACE" "$1"; then
         $KC -n "$NAMESPACE" delete route.route.openshift.io/rag-agent --ignore-not-found >/dev/null 2>&1 ||
             die "Route rag-agent is not the OAuth contract AND could not be deleted: run '$KC -n $NAMESPACE delete route rag-agent' now"

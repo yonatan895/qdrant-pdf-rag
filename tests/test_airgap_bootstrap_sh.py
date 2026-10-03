@@ -591,3 +591,43 @@ def test_bootstrap_killed_first_run_never_leaves_accepted_bundle(bundle_dir, too
     again = _bootstrap(bundle_dir)
     assert again.returncode == 0, again.stdout + again.stderr
     assert _dist_matches_bundle(bundle_dir, workspace)
+
+
+def test_interrupted_promotion_warns_of_partial_dist_then_recovers_complete_bundle(bundle_dir):
+    assert _bootstrap(bundle_dir).returncode == 0
+    workspace = bundle_dir / "operator workspace"
+    retained = workspace / "dist/operator-evidence.txt"
+    retained.write_text("retain operator evidence")
+    (workspace / "airgap.env").write_text("INTERNAL_REGISTRY=operator-kept\n")
+    old_sums = (workspace / "dist/SHA256SUMS").read_bytes()
+    # Same approved source can be repacked. Change two authentic bundle
+    # members, then interrupt after promotion begins but before metadata moves.
+    (bundle_dir / "qdrant-image.tar").write_bytes(b"new-authentic-qdrant")
+    (bundle_dir / "sbom.json").write_bytes(b'{"images": ["new"]}\n')
+    _resign(bundle_dir)
+    interrupted = _bootstrap(bundle_dir, _fault_env(bundle_dir, "mv", "SHA256SUMS", "kill"))
+    assert interrupted.returncode != 0
+    assert (workspace / "dist/qdrant-image.tar").read_bytes() == b"new-authentic-qdrant"
+    assert (workspace / "dist/SHA256SUMS").read_bytes() == old_sums
+    stage = workspace / "dist" / STAGING_DIRNAME
+    assert stage.is_dir()
+    refused = _bootstrap(bundle_dir)
+    assert refused.returncode != 0
+    assert "may contain partially promoted members" in refused.stderr
+    assert "dist/ was not modified" not in refused.stderr
+    assert "Do not use it" in refused.stderr
+    # This is the actual signed member-verification consumer used before load,
+    # not an attribution marker or the mere presence of acceptance metadata.
+    def verify_members():
+        return subprocess.run(
+            ["sh", "-c", "openssl dgst -sha256 -verify sneakernet-signing.pub -signature SHA256SUMS.sig SHA256SUMS >/dev/null && sha256sum -c SHA256SUMS"],
+            cwd=workspace / "dist", capture_output=True, text=True, check=False)
+    assert verify_members().returncode != 0
+    shutil.rmtree(stage)  # documented operator action, only the stage
+    recovered = _bootstrap(bundle_dir)
+    assert recovered.returncode == 0, recovered.stdout + recovered.stderr
+    assert verify_members().returncode == 0
+    assert _dist_matches_bundle(bundle_dir, workspace)
+    assert retained.read_text() == "retain operator evidence"
+    assert (workspace / "airgap.env").read_text() == "INTERNAL_REGISTRY=operator-kept\n"
+    assert _bootstrap(bundle_dir).returncode == 0

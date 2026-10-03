@@ -55,14 +55,12 @@ def make_bin_tree(tmp_path: Path, scripts: list[str]) -> Path:
     (tmp_path / "scripts" / "airgap").mkdir(parents=True, exist_ok=True)
     if any(name in scripts for name in ("deploy.sh", "ingest.sh", "validate.sh")):
         shutil.copytree(REPO / "charts/mainframe-rag", tmp_path / "charts/mainframe-rag", dirs_exist_ok=True)
-    if "deploy.sh" in scripts:
-        scripts = [*scripts, "check_app_ownership.py"]
     if "deploy.sh" in scripts or "validate.sh" in scripts:
-        scripts = [*scripts, "check_route_exposure.py"]
+        scripts = [*scripts, "check_app_ownership.py", "check_route_exposure.py"]
     if "common.sh" in scripts:
         scripts = [*scripts, "model_config.py"]
     if any(name in scripts for name in ("pack.sh", "load.sh", "deploy.sh", "ingest.sh")):
-        scripts = [*scripts, "image_identity.sh"]
+        scripts = [*scripts, "image_identity.sh", "image_manifest.py"]
     if any(name in scripts for name in ("deploy.sh", "ingest.sh")):
         scripts = [*scripts, "check_pod_images.py"]
     for f in scripts:

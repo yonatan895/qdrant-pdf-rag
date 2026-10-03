@@ -245,7 +245,7 @@ def test_load_success_with_parent_dir(load_tree):
     subdir.mkdir()
     copy_task_tools(subdir)
     (subdir / "scripts" / "airgap").mkdir(parents=True)
-    for f in ("common.sh", "load.sh", "image_identity.sh"):
+    for f in ("common.sh", "load.sh", "image_identity.sh", "image_manifest.py"):
         shutil.copy(REPO / "scripts" / "airgap" / f, subdir / "scripts" / "airgap" / f)
     env = {
         "PATH": f"{tmp_path / 'bin'}:/usr/bin:/bin",
@@ -580,3 +580,36 @@ def test_load_verifies_optional_oauth_proxy_image_like_the_others(load_tree):
     second = _run_load(load_tree)
     assert second.returncode == 1
     assert f"registry image {ref} is not the packed image" in second.stderr
+
+
+@pytest.mark.parametrize("malformed", ["layers-object", "config-type", "layer-digest", "index"])
+def test_load_registry_structure_uses_same_validation_as_deploy(load_tree, malformed):
+    root, _ = load_tree
+    artdir = root / "dist"
+    _make_artifacts(artdir)
+    manifest = json.loads(_manifest(_config_of("agent"), _digest(b"layer-agent-gz")))
+    if malformed == "layers-object":
+        manifest["layers"] = {"digest": "sha256:" + "a" * 64}
+    elif malformed == "config-type":
+        manifest["config"]["digest"] = 42
+    elif malformed == "layer-digest":
+        manifest["layers"][0]["digest"] = "not-a-digest"
+    else:
+        manifest["manifests"] = []
+    _set_pushed(artdir, "agent", json.dumps(manifest).encode())
+    result = _run_load(load_tree)
+    assert result.returncode != 0
+    assert "not a single-image manifest" in result.stderr
+    assert "Loaded" not in result.stdout
+
+
+def test_load_preserves_layer_count_requirement(load_tree):
+    root, _ = load_tree
+    artdir = root / "dist"
+    _make_artifacts(artdir)
+    manifest = json.loads(_manifest(_config_of("agent"), _digest(b"layer-agent-gz")))
+    manifest["layers"].append({"digest": _digest(b"extra-layer")})
+    _set_pushed(artdir, "agent", json.dumps(manifest).encode())
+    result = _run_load(load_tree)
+    assert result.returncode != 0
+    assert "is not the packed image" in result.stderr

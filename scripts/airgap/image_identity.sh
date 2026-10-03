@@ -43,16 +43,8 @@ inspect_args() {
 # $1 = docker-archive tar path. Prints the image config digest of the archive.
 archive_config_digest() {
     _acd_raw=$(skopeo inspect --raw "docker-archive:$1") || die "cannot read the archive manifest of $(basename "$1")"
-    printf '%s' "$_acd_raw" | python3 -c '
-import json, re, sys
-try:
-    digest = json.load(sys.stdin)["config"]["digest"]
-except (ValueError, KeyError, TypeError):
-    sys.exit(1)
-if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
-    sys.exit(1)
-print(digest)
-' || die "archive manifest of $(basename "$1") has no usable image config digest"
+    printf '%s' "$_acd_raw" | python3 scripts/airgap/image_manifest.py config ||
+        die "archive manifest of $(basename "$1") has no usable image config digest"
 }
 
 # Release path = a packed MANIFEST is reachable and this is not a dry-run.
@@ -88,23 +80,7 @@ verify_registry_role() {
         die "cannot read back registry image $_vr_ref — it is not verified; load the bundle or fix registry access"
     }
     _vr_rc=0
-    _vr_digest=$(python3 - "$_vr_tmp" "$_vr_expected" <<'PYEOF'
-import hashlib
-import json
-import sys
-
-raw = open(sys.argv[1], "rb").read()
-try:
-    manifest = json.loads(raw)
-    config = manifest["config"]["digest"]
-    manifest["layers"]
-except (ValueError, KeyError, TypeError):
-    sys.exit(4)
-if config != sys.argv[2]:
-    sys.exit(5)
-print("sha256:" + hashlib.sha256(raw).hexdigest())
-PYEOF
-    ) || _vr_rc=$?
+    _vr_digest=$(python3 scripts/airgap/image_manifest.py registry "$_vr_tmp" "$_vr_expected") || _vr_rc=$?
     rm -f "$_vr_tmp"
     case "$_vr_rc" in
         0) ;;
@@ -130,8 +106,8 @@ verify_registry_images() {
     done
 }
 
-# After rollout: every running container of a verified image must report the
-# verified digest as its imageID. $@ = roles (same set as verify_registry_images).
+# After rollout: bind each role to its current workload/controller and check
+# every required replica/container. $@ = roles (same set as registry checks).
 verify_running_images() {
     image_identity_enforced || return 0
     _vp_pairs=""
@@ -140,13 +116,13 @@ verify_running_images() {
         eval "_vp_digest=\${IMAGE_DIGEST_${_vp_upper}:-}"
         [ -n "$_vp_digest" ] || die "internal: no verified digest for $_vp_role"
         _vp_ref=$(image_role_ref "$_vp_role")
-        _vp_pairs="$_vp_pairs ${_vp_ref%:*}=$_vp_digest"
+        _vp_pairs="$_vp_pairs $_vp_role=${_vp_ref%:*}@$_vp_digest"
     done
     _vp_tmp=$(mktemp) || die "cannot create a temporary file"
-    $KC -n "$NAMESPACE" get pods -o json > "$_vp_tmp" || { rm -f "$_vp_tmp"; die "cannot read pods to verify the running image identity"; }
+    $KC -n "$NAMESPACE" get deployments,statefulsets,replicasets,pods -o json > "$_vp_tmp" || { rm -f "$_vp_tmp"; die "cannot read workloads and pods to verify the running image identity"; }
     _vp_rc=0
     # shellcheck disable=SC2086
-    python3 scripts/airgap/check_pod_images.py $_vp_pairs < "$_vp_tmp" || _vp_rc=$?
+    python3 scripts/airgap/check_pod_images.py "$NAMESPACE" "$QDRANT_RELEASE" $_vp_pairs < "$_vp_tmp" || _vp_rc=$?
     rm -f "$_vp_tmp"
     [ "$_vp_rc" -eq 0 ] || die "running pods do not use the verified registry images"
 }

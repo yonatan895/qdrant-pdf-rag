@@ -100,10 +100,10 @@ cmp -s task-pin.txt "$DEST_DIR/scripts/tools/task-pin.txt" || {
     echo "FAIL: bundled Task pin does not match the approved workspace." >&2; exit 1;
 }
 # A staging directory left by an interrupted run is never accepted and never
-# silently deleted: nothing from it was committed, but the operator decides.
+# silently deleted: promotion may be partial, and the operator decides cleanup.
 STAGE="$DEST_DIR/dist/.bootstrap-staging"
 if [ -e "$STAGE" ] || [ -L "$STAGE" ]; then
-    echo "FAIL: interrupted bootstrap staging found at $STAGE; no artifact from it was accepted and dist/ was not modified. Remove it (rm -rf '$STAGE') and rerun bootstrap.sh." >&2
+    echo "FAIL: interrupted bootstrap staging found at $STAGE; dist/ may contain partially promoted members. Do not use it until the complete bundle is reinstalled and verified. Remove only the staging directory (rm -rf '$STAGE') and rerun bootstrap.sh from the verified bundle." >&2
     exit 1
 fi
 
@@ -121,7 +121,7 @@ echo "==> 4. Staging, verifying and committing sneakernet artifacts to ./$DEST_D
 # members into place. dist/ keeps operator files and earlier releases, so it is
 # never swapped wholesale; instead SHA256SUMS.sig, SHA256SUMS and MANIFEST.txt
 # move LAST and in that order, so any interruption leaves an old or incomplete
-# bundle that checksum/signature/MANIFEST consumers refuse, never a mixed one
+# bundle that signed member-verification consumers refuse, never a mixed one
 # that verifies. An uncleanly killed run leaves the staging directory, which
 # the next run refuses (see above) instead of trusting.
 mkdir -p "$DEST_DIR/dist"

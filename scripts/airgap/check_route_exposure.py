@@ -6,8 +6,11 @@
       `rag-agent` Route backs a protected Service (the unauthenticated agent
       HTTP port or Qdrant), or when the owned Route carries backends the
       release will not own. Prints `owned-route-present` when `rag-agent`
-      exists so the caller can retire it before mutation when the console
-      Route is disabled.
+      exists so the caller can retire it before mutation when disabled.
+  classify NAMESPACE CA_FILE SERVICE...              (stdin: Route list JSON)
+      Deployment preflight classifies the existing owned Route against the
+      OAuth contract. Prints `owned-route-incompatible` for an owned Route
+      to retire before release work, or `owned-route-present` to retain it.
   verify NAMESPACE CA_FILE                           (stdin: one Route JSON)
       After the release. The live Route must be the OAuth contract: Service
       rag-agent, targetPort oauth, reencrypt, HTTP redirected, destination CA
@@ -22,6 +25,8 @@ import json
 import re
 import sys
 from pathlib import Path
+
+from check_app_ownership import check as check_ownership
 
 OWNED = 'rag-agent'
 ROUTE_API = 'route.openshift.io/v1'
@@ -70,22 +75,28 @@ def _backends(spec):
     return names
 
 
-def inventory(document, namespace, mode, protected):
-    owned_present = False
+def inventory(document, namespace, mode, protected, ca_text=None):
+    owned_state = ''
     for item in _route_items(document, namespace):
         name = item['metadata'].get('name')
         spec = item['spec']
         if name == OWNED:
-            owned_present = True
+            check_ownership(item, namespace)
+            owned_state = 'owned-route-present'
             if mode == 'enabled' and spec.get('alternateBackends'):
                 _fail('Route rag-agent has alternateBackends the release does not own; '
                       'delete the Route (oc delete route rag-agent) and re-run so it is recreated')
+            if ca_text is not None:
+                try:
+                    verify(item, namespace, ca_text)
+                except ValueError:
+                    owned_state = 'owned-route-incompatible'
             continue
         exposed = sorted(set(_backends(spec)) & protected)
         if exposed:
             _fail(f'Route {_label(name)} exposes a protected Service outside the OAuth-protected '
                   f'{OWNED} Route; remove or retarget it (never expose the agent HTTP port or Qdrant directly)')
-    return owned_present
+    return owned_state
 
 
 def verify(document, namespace, ca_text):
@@ -122,8 +133,14 @@ def main(argv):
         command = argv[1] if len(argv) > 1 else ''
         if command == 'inventory' and len(argv) >= 4 and argv[3] in ('enabled', 'disabled'):
             protected = {OWNED, *argv[4:]}
-            if inventory(document, argv[2], argv[3], protected):
-                print('owned-route-present')
+            state = inventory(document, argv[2], argv[3], protected)
+            if state:
+                print(state)
+        elif command == 'classify' and len(argv) >= 4:
+            state = inventory(document, argv[2], 'enabled', {OWNED, *argv[4:]},
+                              Path(argv[3]).read_text(encoding='utf-8'))
+            if state:
+                print(state)
         elif command == 'verify' and len(argv) == 4:
             verify(document, argv[2], Path(argv[3]).read_text(encoding='utf-8'))
         else:

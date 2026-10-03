@@ -152,7 +152,7 @@ if [ "${AIRGAP_DRYRUN:-0}" != "1" ]; then
     # reach the unauthenticated agent HTTP port or Qdrant, whatever the
     # AGENT_ROUTE selection. Refused here, before any mutation.
     if [ "$AGENT_ROUTE" = "true" ]; then
-        check_route_exposure enabled
+        check_route_exposure enabled "$ROUTE_DESTINATION_CA_FILE"
     else
         check_route_exposure disabled
     fi
@@ -177,14 +177,13 @@ if [ "${AIRGAP_DRYRUN:-0}" != "1" ]; then
     fi
 fi
 
-# Console Route off: an existing owned Route may still point at the
-# unauthenticated HTTP port. Removing exposure never needs a ready workload,
-# so it is retired before the first release mutation rather than after the
-# rollout wait (the later inventory cleanup then finds it already gone).
-if [ "${OWNED_ROUTE_PRESENT:-0}" = "1" ] && [ "$AGENT_ROUTE" != "true" ]; then
-    echo "==> Console Route disabled: removing existing Route rag-agent before the release"
+# Retire a disabled or confirmed incompatible owned Route before release work.
+# Early Helm/rollout failure must not preserve known direct access. A valid
+# existing OAuth Route, including operator host/certificate choices, stays.
+if [ "${OWNED_ROUTE_PRESENT:-0}" = "1" ] && { [ "$AGENT_ROUTE" != "true" ] || [ "${OWNED_ROUTE_INCOMPATIBLE:-0}" = "1" ]; }; then
+    echo "==> Removing disabled or incompatible owned Route rag-agent before the release"
     $KC -n "$NAMESPACE" delete route.route.openshift.io/rag-agent --ignore-not-found ||
-        die "cannot remove existing Route rag-agent while AGENT_ROUTE is off"
+        die "cannot remove disabled or incompatible owned Route rag-agent before the release"
 fi
 
 echo "==> Helm: Qdrant from the vendored chart with PROD values"
@@ -215,8 +214,8 @@ echo "==> Helm: mainframe-rag application release"
 run helm upgrade --install mainframe-rag charts/mainframe-rag \
     --namespace "$NAMESPACE" -f dist/mainframe-rag-release-values.yaml --take-ownership --server-side=false
 if [ "$AGENT_ROUTE" = "true" ]; then
-    # Converge-or-fail-closed (issue #373): an adopted or pre-existing Route
-    # must now equal the OAuth reencrypt contract, else it is removed.
+    # Require the live OAuth contract, remove a readable owned mismatch,
+    # and refuse unknown/unreadable exposure without claiming verification.
     verify_agent_route "${ROUTE_DESTINATION_CA_FILE:-}"
 fi
 JAEGER_UI_HINT=""

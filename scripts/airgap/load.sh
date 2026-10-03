@@ -147,30 +147,7 @@ verify_registry_image() {
     skopeo inspect --raw $(inspect_args) "docker://$_vdst" > "$VERIFY_TMP/registry.raw" || \
         die "cannot read back registry image $_vdst after the push — it is not verified; fix registry access and rerun"
     _vrc=0
-    _vdigest=$(python3 - "$VERIFY_TMP/archive.raw" "$VERIFY_TMP/registry.raw" "$_vexpected" <<'PYEOF'
-import hashlib
-import json
-import sys
-
-archive_raw = open(sys.argv[1], "rb").read()
-registry_raw = open(sys.argv[2], "rb").read()
-expected = sys.argv[3]
-if "sha256:" + hashlib.sha256(archive_raw).hexdigest() != expected:
-    sys.exit(3)
-try:
-    archive = json.loads(archive_raw)
-    registry = json.loads(registry_raw)
-    archive_config = archive["config"]["digest"]
-    registry_config = registry["config"]["digest"]
-    archive_layers = len(archive["layers"])
-    registry_layers = len(registry["layers"])
-except (ValueError, KeyError, TypeError):
-    sys.exit(4)
-if registry_config != archive_config or registry_layers != archive_layers:
-    sys.exit(5)
-print("sha256:" + hashlib.sha256(registry_raw).hexdigest())
-PYEOF
-    ) || _vrc=$?
+    _vdigest=$(python3 scripts/airgap/image_manifest.py load "$VERIFY_TMP/archive.raw" "$VERIFY_TMP/registry.raw" "$_vexpected") || _vrc=$?
     case "$_vrc" in
         0) ;;
         3) die "archive for $_vdst no longer matches its MANIFEST digest — do not trust this bundle" ;;

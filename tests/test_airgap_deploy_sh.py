@@ -58,7 +58,7 @@ case "$*" in
     if [ -n "${{OWNERSHIP_FILE:-}}" ]; then cat "$OWNERSHIP_FILE";
     else :; fi ;;
 
-  *'get pods -o json'*)
+  *'get deployments,statefulsets,replicasets,pods -o json'*)
     [ -z "${{PODS_FILE:-}}" ] || cat "$PODS_FILE" ;;
   *'get secret '*'go-template='*)
     if [ -n "${{MISSING_KEY:-}}" ]; then
@@ -266,14 +266,37 @@ def _load_all(tree) -> dict[str, str]:
 def _write_pods(tree, digests: dict[str, str], **override) -> None:
     items = []
     for role, repo in ROLE_REPOS.items():
+        kind = "StatefulSet" if role == "qdrant" else "Deployment"
+        name = "rag-agent" if role == "agent" else role
+        replicas = 3 if role == "qdrant" else 1
+        uid = f"{role}-workload"
+        spec = {"containers": [{"name": role, "image": f"{repo}:tag"}]}
+        items.append({
+            "kind": kind, "metadata": {"name": name, "namespace": "ns", "uid": uid,
+                "annotations": {"deployment.kubernetes.io/revision": "2"}},
+            "spec": {"replicas": replicas, "selector": {"matchLabels": {"app": name}},
+                     "template": {"spec": spec}}, "status": {"updateRevision": "qdrant-current"},
+        })
+        owner_kind = kind
+        if kind == "Deployment":
+            owner_kind, uid = "ReplicaSet", f"{role}-rs"
+            items.append({"kind": "ReplicaSet", "metadata": {
+                "name": uid, "namespace": "ns", "uid": uid,
+                "annotations": {"deployment.kubernetes.io/revision": "2"},
+                "ownerReferences": [{"kind": kind, "uid": f"{role}-workload", "controller": True}],
+            }})
         if role in override and override[role] is None:
             continue
         digest = override.get(role, digests[role])
-        items.append({
-            "metadata": {"name": f"{role}-0"},
-            "spec": {"containers": [{"name": role, "image": f"{repo}:tag"}]},
-            "status": {"containerStatuses": [{"name": role, "imageID": f"{repo}@{digest}"}]},
-        })
+        for n in range(replicas):
+            items.append({
+                "kind": "Pod", "metadata": {"name": f"{role}-{n}", "namespace": "ns",
+                    "labels": {"app": name, "controller-revision-hash": "qdrant-current"},
+                    "ownerReferences": [{"kind": owner_kind, "uid": uid, "controller": True}]},
+                "spec": spec,
+                "status": {"phase": "Running", "containerStatuses": [
+                    {"name": role, "imageID": f"{repo}@{digest}"}]},
+            })
     (tree[0] / "pods.json").write_text(json.dumps({"items": items}))
 
 
@@ -1173,7 +1196,7 @@ def test_route_off_removal_failure_blocks_the_release(tree):
     routes = _route_list(tree, _route(port="http"))
     r = _run(tree, ("ROUTES_FILE", routes), ("DELETE_FAIL", "1"))
     assert r.returncode != 0
-    assert "cannot remove existing Route" in r.stderr
+    assert "cannot remove disabled or incompatible owned Route" in r.stderr
     assert "upgrade" not in _helm_log(tree)
 
 
@@ -1353,7 +1376,7 @@ def test_missing_running_pod_for_verified_image_fails(tree):
     _write_pods(tree, digests, agent=None)
     result = _run(tree)
     assert result.returncode != 0
-    assert "no running container found for reg.internal/qdrant-pdf-rag-agent" in result.stderr
+    assert "Deployment rag-agent has 0 current pods, expected 1" in result.stderr
 
 
 def test_dry_run_is_tag_only_and_reads_no_registry(tree):
@@ -1370,3 +1393,152 @@ def test_digest_from_caller_environment_is_never_rendered(tree):
     result = _run(tree, ("AIRGAP_DRYRUN", "1"), ("IMAGE_DIGEST_AGENT", "sha256:" + "1" * 64))
     assert result.returncode == 0, result.stderr
     assert "digest" not in (tree[0] / "dist" / "mainframe-rag-release-values.yaml").read_text()
+
+
+@pytest.mark.parametrize("phase", ["Succeeded", "Failed", "Running"])
+def test_release_identity_ignores_unrelated_retained_jobs(tree, phase):
+    digests = _release(tree)
+    path = tree[0] / "pods.json"
+    document = json.loads(path.read_text())
+    extra = next(item for item in document["items"] if item.get("kind") == "Pod" and item["metadata"]["name"] == "agent-0")
+    extra = json.loads(json.dumps(extra))
+    extra["metadata"].update(name="diagnostic-history", ownerReferences=[
+        {"kind": "Job", "uid": "diagnostic-job", "controller": True}])
+    extra["status"].update(phase=phase)
+    extra["status"]["containerStatuses"][0]["imageID"] = ROLE_REPOS["agent"] + "@sha256:" + "9" * 64
+    document["items"].append(extra)
+    path.write_text(json.dumps(document))
+    result = _run(tree)
+    assert result.returncode == 0, result.stderr
+    assert digests["agent"] in result.stdout
+
+
+def test_release_identity_wrong_target_repository_cannot_use_diagnostic_pod(tree):
+    _release(tree)
+    path = tree[0] / "pods.json"
+    document = json.loads(path.read_text())
+    target = next(item for item in document["items"] if item.get("kind") == "Pod" and item["metadata"]["name"] == "agent-0")
+    extra = json.loads(json.dumps(target))
+    extra["metadata"].update(name="diagnostic", ownerReferences=[
+        {"kind": "Job", "uid": "diagnostic-job", "controller": True}])
+    document["items"].append(extra)
+    target["spec"] = {"containers": [{"name": "agent", "image": "reg.internal/other:tag"}]}
+    path.write_text(json.dumps(document))
+    result = _run(tree)
+    assert result.returncode != 0
+    assert "pod agent-0 container agent has an unexpected repository" in result.stderr
+
+
+def test_release_identity_requires_status_on_each_target_replica(tree):
+    _release(tree)
+    path = tree[0] / "pods.json"
+    document = json.loads(path.read_text())
+    target = next(item for item in document["items"] if item.get("kind") == "Pod" and item["metadata"]["name"] == "qdrant-2")
+    target["status"]["containerStatuses"] = []
+    path.write_text(json.dumps(document))
+    result = _run(tree)
+    assert result.returncode != 0
+    assert "pod qdrant-2 container qdrant runs an unknown digest" in result.stderr
+
+
+@pytest.mark.parametrize("failure", ["QDRANT_HELM_FAIL", "ROLLOUT_FAIL", "APP_HELM_FAIL", "ROUTE_READ_FAIL"])
+@pytest.mark.parametrize("compatible", [False, True], ids=["direct-access", "valid-oauth"])
+def test_existing_owned_route_failure_paths_preserve_only_compatible_exposure(tree, failure, compatible):
+    existing = _route() if compatible else _route(port="http", termination="edge")
+    existing["spec"].update(host="operator.example", wildcardPolicy="None")
+    owned_state = tree[0] / "owned-route-state.json"
+    owned_state.write_text(json.dumps(existing))
+    # Give the process-boundary fake an actual named Route state, separate
+    # from the historical inventory snapshot and unrelated operator files.
+    kubectl = tree[0] / "bin/kubectl"
+    script = kubectl.read_text().replace(
+        '[ "${DELETE_FAIL:-}" != 1 ] || exit 1 ;;',
+        '[ "${DELETE_FAIL:-}" != 1 ] || exit 1\n'
+        '    [ -z "${OWNED_ROUTE_STATE:-}" ] || rm -f "$OWNED_ROUTE_STATE" ;;')
+    script = script.replace('[ "${ROUTE_LIVE_FILE:-}" != "" ] || exit 1',
+                            '[ "${ROUTE_READ_FAIL:-}" != 1 ] || exit 1\n'
+                            '    [ "${ROUTE_LIVE_FILE:-}" != "" ] || exit 1')
+    kubectl.write_text(script)
+    helm = tree[0] / "bin/helm"
+    helm.write_text(helm.read_text().replace('upgrade) exit 0 ;;', '''upgrade)
+        case "$*" in
+          *'--install mainframe-rag '*)
+            [ "${APP_HELM_FAIL:-}" != 1 ] || exit 1
+            [ -z "${OWNED_ROUTE_STATE:-}" ] || cp "$ROUTE_LIVE_FILE" "$OWNED_ROUTE_STATE" ;;
+          *) [ "${QDRANT_HELM_FAIL:-}" != 1 ] || exit 1 ;;
+        esac
+        exit 0 ;;'''))
+    live = _live(tree, existing if compatible else _route())
+    routes = _route_list(tree, existing, _route("operator-docs", to="docs-site"))
+    operator_state = tree[0] / "operator-docs-state.json"
+    operator_state.write_text(json.dumps(_route("operator-docs", to="docs-site")))
+    operator_before = operator_state.read_bytes()
+    result = _route_on(tree, ("ROUTES_FILE", routes), ("OWNED_ROUTE_STATE", str(owned_state)),
+                       (failure, "1"), live=live)
+    assert result.returncode != 0
+    log = _helm_log(tree)
+    delete = "delete\nroute.route.openshift.io/rag-agent"
+    if compatible:
+        assert delete not in log
+        assert json.loads(owned_state.read_text()) == existing
+    else:
+        assert log.index(delete) < log.index("upgrade")
+        if owned_state.exists():
+            assert json.loads(owned_state.read_text())["spec"]["port"]["targetPort"] == "oauth"
+        if failure in ("QDRANT_HELM_FAIL", "APP_HELM_FAIL"):
+            assert not owned_state.exists()
+    assert operator_state.read_bytes() == operator_before
+    assert "Route rag-agent -> svc port oauth" not in result.stdout
+    if failure == "ROUTE_READ_FAIL":
+        assert "exposure is NOT verified" in result.stderr
+        assert "Route rag-agent verified:" not in result.stdout
+    # The next ordinary operation recovers; no diagnostic history is deleted.
+    tree[1].write_text("")
+    recovered = _route_on(tree, ("ROUTES_FILE", _route_list(tree, _route())),
+                          ("OWNED_ROUTE_STATE", str(owned_state)), live=_live(tree))
+    assert recovered.returncode == 0, recovered.stderr
+    assert json.loads(owned_state.read_text())["spec"]["port"]["targetPort"] == "oauth"
+    assert operator_state.read_bytes() == operator_before
+
+
+@pytest.mark.parametrize("ownership", ["release", "controller", "manager"])
+def test_named_operator_owned_route_is_not_retired_or_adopted(tree, ownership):
+    route = _route(port="http", termination="edge")
+    if ownership == "release":
+        route["metadata"]["annotations"] = {"meta.helm.sh/release-name": "operator-release"}
+    elif ownership == "controller":
+        route["metadata"]["ownerReferences"] = [{"kind": "Operator", "name": "console"}]
+    else:
+        route["metadata"]["labels"] = {"app.kubernetes.io/managed-by": "operator"}
+    result = _route_on(tree, ("ROUTES_FILE", _route_list(tree, route)))
+    assert result.returncode != 0
+    assert "delete" not in _helm_log(tree) and "upgrade" not in _helm_log(tree)
+
+
+@pytest.mark.parametrize("malformed", ["layers-object", "config-type", "layer-digest", "index"])
+def test_deploy_registry_structure_is_validated_before_mutation(tree, malformed):
+    _release(tree)
+    manifest = json.loads(_image_manifest("agent"))
+    if malformed == "layers-object":
+        manifest["layers"] = {"digest": "sha256:" + "a" * 64}
+    elif malformed == "config-type":
+        manifest["config"]["digest"] = 42
+    elif malformed == "layer-digest":
+        manifest["layers"][0]["digest"] = "not-a-digest"
+    else:
+        manifest["manifests"] = []
+    _put_registry(tree, "agent", json.dumps(manifest).encode())
+    result = _run(tree)
+    assert result.returncode != 0
+    assert "not a single-image manifest" in result.stderr
+    assert _mutations(tree) == []
+
+
+def test_post_release_operator_ownership_is_not_deleted_on_route_drift(tree):
+    foreign = _route(port="http")
+    foreign["metadata"]["annotations"] = {"meta.helm.sh/release-name": "operator-release"}
+    result = _route_on(tree, live=_live(tree, foreign))
+    assert result.returncode != 0
+    assert "ownership is not established" in result.stderr
+    assert "exposure is NOT verified" in result.stderr
+    assert "delete" not in _helm_log(tree)
