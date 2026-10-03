@@ -35,6 +35,11 @@ from opentelemetry import trace
 from opentelemetry.trace import SpanKind, Status, StatusCode
 from pydantic import BaseModel, ConfigDict, Field
 
+from mainframe_rag.agent.admission import (
+    AdmissionController,
+    AdmissionRejected,
+    AdmissionTicket,
+)
 from mainframe_rag.agent.answer import (
     HttpxLLMClient,
     PromptBudgetExceeded,
@@ -61,7 +66,13 @@ from mainframe_rag.agent.chat_turn import (
     prepare_chat_turn,
 )
 from mainframe_rag.agent.core_ports import RetrievalResult
-from mainframe_rag.agent.metrics import endpoint_for_path, record_request, setup_metrics
+from mainframe_rag.agent.metrics import (
+    endpoint_for_path,
+    record_admission,
+    record_admission_rejected,
+    record_request,
+    setup_metrics,
+)
 from mainframe_rag.agent.model_adapter import ModelAdapter
 from mainframe_rag.agent.serving import ServingGate, ServingGeneration
 from mainframe_rag.agent.sse import (
@@ -76,6 +87,7 @@ from mainframe_rag.agent.sse import (
 from mainframe_rag.agent.tokenizer import build_tokenizer
 from mainframe_rag.agent.zowe_mcp import build_zowe_mcp, probe_zowe_mcp
 from mainframe_rag.config import Settings, bearer_auth_headers, load_settings
+from mainframe_rag.ingest.bounds import EmbedInputTooLarge
 from mainframe_rag.ingest.embed import build_embedder
 from mainframe_rag.ingest.representation import require_attested_revision
 from mainframe_rag.ingest.rules_version import extraction_rules_version
@@ -121,6 +133,10 @@ zowe_mcp: ZoweMCP | None = None
 # Serving-generation gate (issues #391 F3/F4): created in lifespan from
 # Settings, or injected by tests before startup (never overwritten then).
 serving_gate: ServingGate | None = None
+# Request admission (issue #374): rebuilt from Settings in lifespan; the
+# import-time instance is unlimited (pre-#374 behaviour) so anything that
+# runs without a lifespan is unchanged. Tests inject a controller directly.
+admission: AdmissionController = AdmissionController()
 # Tracer starts as the API proxy (no-op until a real provider is installed).
 # Lifespan reassigns it when tracing is enabled (issue #83); tests swap it
 # directly with a tracer backed by InMemorySpanExporter.
@@ -150,11 +166,31 @@ class _RequestSpan:
         self.ended = False
         self.query_class = "unknown"
         self.hits = None
+        # Admission slot and total deadline (issue #374), set by _admit.
+        self.ticket: AdmissionTicket | None = None
+        self.deadline_s: float | None = None
+
+    def remaining(self) -> float | None:
+        """Seconds left of the total request deadline (None = no deadline;
+        may be <= 0 when it has already passed)."""
+        if self.deadline_s is None:
+            return None
+        return self.deadline_s - (time.monotonic() - self.started)
 
     def end(self):
         if not self.ended:
             self.ended = True
-            self.span.end()
+            # Exactly-once slot release on every terminal path (normal
+            # completion, error, deadline, disconnect, stream close).
+            ticket, self.ticket = self.ticket, None
+            try:
+                if ticket is not None:
+                    held = ticket.held
+                    ticket.release()
+                    if held:
+                        record_admission(self.endpoint, delta=-1)
+            finally:
+                self.span.end()
 
     def abort(self):
         if getattr(self.request.state, "red_recorded", False):
@@ -266,11 +302,14 @@ def _request_span(request, span, endpoint, started):
 class AppError(Exception):
     """Operator-facing API error: stable code + message, no internals."""
 
-    def __init__(self, status: int, code: str, message: str) -> None:
+    def __init__(
+        self, status: int, code: str, message: str, headers: dict[str, str] | None = None
+    ) -> None:
         super().__init__(message)
         self.status = status
         self.code = code
         self.message = message
+        self.headers = headers
 
 
 def _require_query_length(request_id: str, query: str) -> None:
@@ -287,6 +326,25 @@ def _require_query_length(request_id: str, query: str) -> None:
     if len(query) > settings.query_max_chars:
         log.warning(json_log(request_id, "query_too_long", chars=len(query)))
         raise AppError(422, "invalid_request", "request body failed validation")
+    _require_embed_input(request_id, query)
+
+
+def _require_embed_input(request_id: str, query: str) -> None:
+    """Embed-input bound on the query path (issue #374), checked before any
+    model call (condensation, embedding, rerank): the exact dense text is the
+    query prefix plus the query. 0 = unbounded (legacy). A refusal is the
+    same fixed 422 as every other request-body failure, never a truncation.
+    The effective query (acronym expansion, split legs, condensation output)
+    can still exceed this; the embedder re-checks each text it would send."""
+    limit = settings.embed_max_input_chars
+    if limit <= 0:
+        return
+    size = len(settings.dense_query_prefix) + len(query)
+    if size > limit:
+        log.warning(
+            json_log(request_id, "embed_input_too_large", chars=size, limit=limit)
+        )
+        raise AppError(422, "invalid_request", "request body failed validation")
 
 
 def prepare_chat_request(
@@ -294,10 +352,114 @@ def prepare_chat_request(
 ) -> PreparedChatTurn:
     """Map the common chat-input validation to the API/console error contract."""
     try:
-        return prepare_chat_turn(messages, settings, splunk_context)
+        turn = prepare_chat_turn(messages, settings, splunk_context)
     except InvalidChatTurn as exc:
         log.warning(json_log(request_id, "invalid_chat_turn", reason=error_type(exc)))
         raise AppError(422, "invalid_request", "request body failed validation") from exc
+    _require_embed_input(request_id, turn.query)
+    return turn
+
+
+# Fixed client text for the two lifecycle refusals (issue #374): stable code,
+# fixed message, never upstream/exception text.
+_OVERLOADED = "the service is at capacity; retry later"
+_DEADLINE_EXCEEDED = "request deadline exceeded"
+
+
+class RequestDeadlineExceeded(Exception):
+    """The total request deadline expired mid-stream (headers already sent):
+    the SSE route turns it into its terminal error frame."""
+
+
+async def _admit(owner: _RequestSpan) -> None:
+    """Admission + deadline start for one product request (issue #374):
+    the first await of every product handler, before any validation, serving
+    gate or model work. Takes a slot (queueing within the bounded queue and
+    never beyond the remaining deadline) or refuses with the stable 503
+    `overloaded` + Retry-After. The slot is released exactly once by
+    `owner.end()` — after the response body for JSON, when the stream closes
+    for SSE. With no limit selected this admits immediately."""
+    request_id = owner.request.state.request_id
+    owner.deadline_s = settings.request_deadline_s or None
+    try:
+        ticket = await admission.acquire(owner.remaining())
+    except AdmissionRejected as exc:
+        record_admission_rejected(owner.endpoint, exc.reason)
+        log.warning(
+            json_log(
+                request_id,
+                owner.endpoint,
+                outcome="overloaded",
+                reason=exc.reason,
+                active=admission.active,
+                queued=admission.queued,
+            )
+        )
+        raise AppError(
+            503, "overloaded", _OVERLOADED, headers={"Retry-After": "1"}
+        ) from exc
+    owner.ticket = ticket
+    if ticket.held:
+        record_admission(
+            owner.endpoint, delta=1, wait_s=ticket.waited_s if ticket.waited_s > 0 else None
+        )
+
+
+def _deadline_error(owner: _RequestSpan) -> AppError:
+    """The stable 504 for a request whose total deadline expired before its
+    response began; the error handler records the single RED observation."""
+    log.warning(
+        json_log(
+            owner.request.state.request_id,
+            owner.endpoint,
+            outcome="deadline_exceeded",
+            deadline_s=owner.deadline_s,
+        )
+    )
+    return AppError(504, "deadline_exceeded", _DEADLINE_EXCEEDED)
+
+
+async def _within_deadline(owner: _RequestSpan, work: Awaitable):
+    """Await `work` inside what is left of the request deadline. On expiry
+    the awaiting task is cancelled (async legs — Qdrant, reasoning model —
+    stop and release their connections); sync legs already running in a
+    worker thread (embed, BM25, rerank, prompt build) cannot be interrupted
+    and finish within their own per-leg timeouts, but nothing waits for them
+    and the slot is released. Only expiry of THIS deadline becomes the 504;
+    any other TimeoutError is not ours to reinterpret."""
+    budget = owner.remaining()
+    if budget is None:
+        return await work
+    try:
+        async with asyncio.timeout(budget) as scope:
+            return await work
+    except TimeoutError as exc:
+        if scope.expired():
+            raise _deadline_error(owner) from exc
+        raise
+
+
+async def _deadline_iter(owner: _RequestSpan, events: AsyncIterator) -> AsyncIterator:
+    """Yield `events` items, each awaited within the remaining deadline; on
+    expiry raise RequestDeadlineExceeded (the caller's mid-stream failure
+    path emits the terminal error frame). The timeout scope never spans a
+    yield, so it is always entered and left within one task step."""
+    iterator = events.__aiter__()
+    while True:
+        budget = owner.remaining()
+        try:
+            if budget is None:
+                item = await anext(iterator)
+            else:
+                async with asyncio.timeout(budget) as scope:
+                    item = await anext(iterator)
+        except StopAsyncIteration:
+            return
+        except TimeoutError as exc:
+            if budget is not None and scope.expired():
+                raise RequestDeadlineExceeded from exc
+            raise
+        yield item
 
 
 async def _await_retrieval(
@@ -547,7 +709,7 @@ def _record_stream_abort(
 async def lifespan(_app: FastAPI):
     global settings, http, http_sync, qdrant, embedder, llm, tokenizer, reranker, zowe_mcp
     global rerank_health
-    global serving_gate
+    global serving_gate, admission
     settings = load_settings()
     configure_logging(settings.log_level)
     # Startup fail-fast (issue #20 PR D): the agent refuses to listen on a
@@ -630,6 +792,14 @@ async def lifespan(_app: FastAPI):
         limits=http_limits,
     )
     qdrant = qdrant_client_inst
+    # Admission controller (issue #374): fresh per lifespan so no slot or
+    # waiter from a previous lifespan can leak into this one. All limits
+    # default to 0 = unlimited (pre-#374 behaviour).
+    admission = AdmissionController(
+        settings.request_max_concurrent,
+        settings.request_queue_max,
+        settings.request_queue_wait_s,
+    )
     # Serving-generation gate (issues #391 F3/F4): one instance per process,
     # created from Settings unless a test injected its own (never overwritten
     # then). The cache is invalidated at every startup so a validation from a
@@ -910,6 +1080,7 @@ async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
     return JSONResponse(
         status_code=exc.status,
         content=ErrorEnvelope(code=exc.code, message=exc.message).model_dump(),
+        headers=exc.headers,
     )
 
 
@@ -1126,7 +1297,8 @@ async def v1_search(request: Request, req: SearchRequest, response: Response) ->
         attributes={"http.request_id": request_id, "rag.limit": req.limit},
     )
     with _request_span(request, root_span, "search", started) as owner:
-        return await _search_response(req, response, owner)
+        await _admit(owner)
+        return await _within_deadline(owner, _search_response(req, response, owner))
 
 
 async def _search_response(req, response, owner):
@@ -1153,6 +1325,9 @@ async def _search_response(req, response, owner):
             )
             hits, kind, timings = await _await_retrieval(res)
         except Exception as exc:
+            refused = _embed_input_refusal(owner, "search", exc)
+            if refused is not None:
+                raise refused from exc
             _span_error(root_span, exc)
             _record_endpoint(request, "search", "upstream_error", started)
             log.error(json_log(request_id, "search", error=error_type(exc)))
@@ -1200,10 +1375,32 @@ def _require_reasoning_model(request_id: str, action: str) -> None:
         raise AppError(503, "not_configured", "reasoning model is not configured") from exc
 
 
+def _embed_input_refusal(owner: _RequestSpan, endpoint: str, exc: Exception) -> AppError | None:
+    """The embedder refused an over-bound input before calling the model
+    (issue #374): a request-body fault, not an upstream one — the same fixed
+    422 as the early query-path check. None for any other exception."""
+    if not isinstance(exc, EmbedInputTooLarge):
+        return None
+    _record_endpoint(owner.request, endpoint, "invalid_request", owner.started)
+    log.warning(
+        json_log(
+            owner.request.state.request_id,
+            endpoint,
+            error=error_type(exc),
+            limit=exc.limit,
+            largest=exc.largest,
+        )
+    )
+    return AppError(422, "invalid_request", "request body failed validation")
+
+
 def _retrieval_failed(owner: _RequestSpan, endpoint: str, action: str, exc: Exception) -> AppError:
     """Terminal observation for a failed retrieval leg: the same fault maps to
     the same code+message on every endpoint ("retrieval failed", as on
     /v1/search). The caller raises the returned error from `exc`."""
+    refused = _embed_input_refusal(owner, endpoint, exc)
+    if refused is not None:
+        return refused
     _span_error(owner.span, exc)
     _record_endpoint(owner.request, endpoint, "upstream_error", owner.started)
     log.error(json_log(owner.request.state.request_id, action, error=error_type(exc)))
@@ -1337,6 +1534,7 @@ def _record_stream_failure(
     request_id = owner.request.state.request_id
     _span_error(owner.span, exc)
     budget = isinstance(exc, PromptBudgetExceeded)
+    expired = isinstance(exc, RequestDeadlineExceeded)
     if isinstance(exc, TruncatedStreamError):
         log.warning(
             json_log(
@@ -1349,13 +1547,19 @@ def _record_stream_failure(
     _record_endpoint(
         owner.request,
         endpoint,
-        "prompt_budget_exceeded" if budget else "upstream_error",
+        "prompt_budget_exceeded"
+        if budget
+        else "deadline_exceeded"
+        if expired
+        else "upstream_error",
         owner.started,
         query_class=kind,
         hits=hit_count,
         verification_state="generation_incomplete",
     )
-    (log.warning if budget else log.error)(json_log(request_id, action, error=error_type(exc)))
+    (log.warning if budget or expired else log.error)(
+        json_log(request_id, action, error=error_type(exc))
+    )
 
 
 async def _stream_answer_core(
@@ -1382,8 +1586,9 @@ async def _stream_answer_core(
     error counts as terminal — its frame already carries the incomplete
     state."""
     core_events = execute_answer_core_stream(core_input, deps, parent_span=owner.span)
+    bounded = _deadline_iter(owner, core_events)
     try:
-        async for item in core_events:
+        async for item in bounded:
             if item["type"] == "token":
                 delta = item["delta"]
                 if delta:
@@ -1396,6 +1601,7 @@ async def _stream_answer_core(
         for frame in error_frames():
             yield frame
     finally:
+        await bounded.aclose()
         await core_events.aclose()
 
 
@@ -1488,7 +1694,8 @@ async def v1_answer(
         attributes={"http.request_id": request_id, "rag.stream": is_stream},
     )
     with _request_span(request, root_span, "answer", started) as owner:
-        return await _answer_response(req, response, is_stream, owner)
+        await _admit(owner)
+        return await _within_deadline(owner, _answer_response(req, response, is_stream, owner))
 
 
 async def _answer_response(req, response, is_stream, owner):
@@ -1662,7 +1869,8 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
         attributes={"http.request_id": request_id, "rag.stream": req.stream},
     )
     with _request_span(request, root_span, "chat", started) as owner:
-        return await _chat_response(req, response, owner)
+        await _admit(owner)
+        return await _within_deadline(owner, _chat_response(req, response, owner))
 
 
 def _chat_final_frames(
