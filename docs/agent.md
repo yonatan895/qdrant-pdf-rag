@@ -375,6 +375,11 @@ strict stream-end rule above is the upstream reasoning wire and the
 
 ## 4. Prompt assembly and budgets
 
+`build_messages` and `build_chat_messages` share `answer._build_prompt` for
+packing, verification and evidence construction. Chat normalizes and caps
+history first; existing history, trim-round and character-packing policies
+remain distinct.
+
 Complexity (`classify_query_complexity`) drives three things: max context
 chars, reasoning effort, and the system prompt variant. Rules: message-id
 queries stay `simple` unless a deep root appears; complex roots are
