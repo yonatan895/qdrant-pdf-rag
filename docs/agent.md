@@ -398,9 +398,11 @@ select `complex`. Default is `simple`.
 - Tokenizer path (when a tokenizer is configured): plans with the
   in-process estimator (`≈3.5` chars/token, 350-token narrative cap), then
   verifies the packed prompt against the whole-message count per trim round
-  and trims up to 4 rounds (64-char overcut, drop under 80 chars, else
-  suffix). Chat packing (`build_chat_messages`) uses the same discipline but
-  trims in two tiers for up to `4*2 + len(prior turns)` rounds: excerpt
+  and trims up to `4 + 2*len(packed excerpts)` rounds (64-char overcut, drop
+  under 80 chars, else suffix; the bound scales with the trimmable evidence
+  so `prompt_budget_exceeded` means nothing was left to trim, #307).
+  Chat packing (`build_chat_messages`) uses the same discipline but
+  trims in two tiers for up to `4*2 + 2*len(packed) + len(prior turns)` rounds: excerpt
   bodies first, then it pops the oldest history turn. Never per-chunk
   tokenize RPCs.
 - Planning and verification both charge reserved output, the selected complexity's
