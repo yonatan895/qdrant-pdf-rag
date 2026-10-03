@@ -486,20 +486,21 @@ def _passed(case: ReleaseCase, o: Outcome | None) -> bool:
 
 
 def _cell(metric: str, case: ReleaseCase, o: Outcome | None) -> float:
-    scored = o is not None and o.status == "scored"
     if metric in ("answer_pass", "abstain_pass"):
         return float(_passed(case, o))
-    if metric == "completion_rate":
-        return float(scored and o.completed)
-    if metric == "false_refusal_rate":
-        return float(scored and o.completed and o.refused)
-    if metric == "evidence_supplied_rate":
-        return float(scored and o.evidence_supplied is True)
     if metric == "critical_failures":
         return float(len(o.critical_failures)) if o else 0.0
-    if metric == "fabrication_count":
-        return float(scored and o.fabricated_instruction is True)
-    raise AssertionError(metric)  # pragma: no cover
+    if metric not in ("completion_rate", "false_refusal_rate", "evidence_supplied_rate", "fabrication_count"):
+        raise AssertionError(metric)  # pragma: no cover
+    if o is None or o.status != "scored":
+        return 0.0  # missing/skipped/errored rows count as failures, never exclusions
+    if metric == "completion_rate":
+        return float(bool(o.completed))
+    if metric == "false_refusal_rate":
+        return float(bool(o.completed and o.refused))
+    if metric == "evidence_supplied_rate":
+        return float(o.evidence_supplied is True)
+    return float(o.fabricated_instruction is True)
 
 
 def _in_scope(case: ReleaseCase, scope: str) -> bool:
@@ -522,6 +523,7 @@ def _check_outcomes(release: ReleaseSet, outcomes: list[Outcome], repeats: int) 
         if key in table:
             raise AcceptanceError(f"duplicate outcome for {o.case_id!r} repeat {o.repeat}")
         if o.status == "scored" and o.completed:
+            need: tuple[bool | None, ...]
             if case.expected_behavior == "answer" and not o.refused:
                 need = (o.useful, o.supported, o.traceable)
             elif case.expected_behavior == "abstain":
@@ -547,8 +549,8 @@ def _evaluate(c: Criterion, stage: Stage, release: ReleaseSet, table: dict[tuple
     elif c.metric == "flip_rate":
         flips = 0
         for case in scoped:
-            cells = [_passed(case, table.get((case.id, r))) for r in range(1, stage.repeats + 1)]
-            flips += len(set(cells)) > 1
+            passes = [_passed(case, table.get((case.id, r))) for r in range(1, stage.repeats + 1)]
+            flips += len(set(passes)) > 1
         value = flips / len(scoped)
     elif c.metric in COUNT_METRICS:
         value = sum(
@@ -564,7 +566,7 @@ def _evaluate(c: Criterion, stage: Stage, release: ReleaseSet, table: dict[tuple
         ]
         value = sum(cells) / len(cells)
     bound = value
-    if c.statistic != "point":
+    if c.statistic != "point" and value is not None:
         bound = wilson_bound(value * len(scoped), len(scoped), stage.confidence,
                              "lower" if c.statistic == "wilson_lower" else "upper")
     if value is None or bound is None or not math.isfinite(bound):
