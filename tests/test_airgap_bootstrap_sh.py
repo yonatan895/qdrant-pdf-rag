@@ -358,6 +358,60 @@ def test_bootstrap_refuses_tracked_edit_then_rerun_passes_after_revert(bundle_di
     assert (workspace / "dist/retained-evidence.txt").read_text() == "original"
 
 
+@pytest.mark.parametrize("flag", ["--assume-unchanged", "--skip-worktree"])
+def test_bootstrap_refuses_index_flags_that_hide_edits_then_rerun_passes(bundle_dir, flag):
+    """An edit under assume-unchanged/skip-worktree is invisible to
+    `git diff`; the flag is refused before dist/ changes and the next run
+    passes once cleared (issue #414)."""
+    assert _bootstrap(bundle_dir).returncode == 0
+    workspace = bundle_dir / "operator workspace"
+    subprocess.run(["git", "update-index", flag, "README.md"], cwd=workspace, check=True)
+    (workspace / "README.md").write_text("hidden edit\n")
+    (workspace / "dist/MANIFEST.txt").unlink()
+    refused = _bootstrap(bundle_dir)
+    assert refused.returncode != 0
+    assert "hides tracked files from change detection" in refused.stderr
+    assert "hidden edit" not in refused.stdout + refused.stderr
+    assert "SUCCESS" not in refused.stdout
+    assert not (workspace / "dist/MANIFEST.txt").exists()
+    assert (workspace / "README.md").read_text() == "hidden edit\n"
+    subprocess.run(["git", "update-index", flag.replace("--", "--no-"), "README.md"], cwd=workspace, check=True)
+    subprocess.run(["git", "checkout", "--", "README.md"], cwd=workspace, check=True)
+    again = _bootstrap(bundle_dir)
+    assert again.returncode == 0, again.stdout + again.stderr
+
+
+def test_bootstrapped_workspace_passes_then_refuses_in_the_real_guard(bundle_dir):
+    """The dist/ chain bootstrap leaves is exactly what the downstream guard
+    verifies (real signature, real clone): pass when clean, refuse once the
+    committed MANIFEST is altered or a tracked edit hides behind an index
+    flag (issue #414)."""
+    assert _bootstrap(bundle_dir).returncode == 0
+    workspace = bundle_dir / "operator workspace"
+
+    def guard():
+        return subprocess.run(
+            ["sh", "-c", f'. "{REPO}/scripts/airgap/common.sh"; cd "$1" || exit 9; MANIFEST=dist/MANIFEST.txt; check_checkout_sha',
+             "guard", str(workspace)],
+            cwd=workspace, capture_output=True, text=True, check=False,
+            env={"PATH": "/usr/bin:/bin", "HOME": str(bundle_dir)},
+        )
+
+    ok = guard()
+    assert ok.returncode == 0, ok.stderr
+    assert ok.stderr == ""  # verified silently, not the "not release-verified" notice
+    manifest = workspace / "dist/MANIFEST.txt"
+    original = manifest.read_text()
+    manifest.write_text(original + "extra: line\n")
+    bad = guard()
+    assert bad.returncode != 0 and "signed checksum entry" in bad.stderr
+    manifest.write_text(original)
+    subprocess.run(["git", "update-index", "--assume-unchanged", "README.md"], cwd=workspace, check=True)
+    (workspace / "README.md").write_text("hidden\n")
+    hidden = guard()
+    assert hidden.returncode != 0 and "hides tracked files" in hidden.stderr
+
+
 def test_bootstrap_approved_upgrade_requires_explicit_checkout_preserves_operator_state(bundle_dir):
     assert _bootstrap(bundle_dir).returncode == 0
     workspace = bundle_dir / "operator workspace"

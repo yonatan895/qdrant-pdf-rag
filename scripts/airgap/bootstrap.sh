@@ -87,6 +87,15 @@ done
 git -C "$DEST_DIR" diff --quiet HEAD -- >/dev/null 2>&1 || {
     echo "FAIL: workspace has tracked changes against the approved commit; restore them (operator settings belong in the untracked airgap.env)." >&2; exit 1;
 }
+# `git diff` trusts the index: assume-unchanged and skip-worktree (incl. sparse
+# checkout) files are never compared, so the flags themselves are refused.
+# ls-files tags: H = normal, lowercase = assume-unchanged, S/s = skip-worktree.
+WS_FLAGS=$(git -C "$DEST_DIR" ls-files -v -- ':/' 2>/dev/null) || {
+    echo "FAIL: workspace index cannot be read; cannot prove no tracked file is hidden from the change check." >&2; exit 1;
+}
+printf '%s\n' "$WS_FLAGS" | awk 'NF && substr($0, 1, 2) != "H " { bad=1 } END { exit bad }' || {
+    echo "FAIL: workspace hides tracked files from change detection (assume-unchanged, skip-worktree or sparse checkout); clear the flags (git update-index --no-assume-unchanged / --no-skip-worktree) and rerun." >&2; exit 1;
+}
 cmp -s task-pin.txt "$DEST_DIR/scripts/tools/task-pin.txt" || {
     echo "FAIL: bundled Task pin does not match the approved workspace." >&2; exit 1;
 }

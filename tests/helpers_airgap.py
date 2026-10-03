@@ -76,7 +76,8 @@ def write_git_identity_stub(tree: Path, sha: str) -> None:
     release (a MANIFEST present, not dry-run): common.sh::check_checkout_sha
     fails closed on an unresolvable checkout (issue #414), so such fixtures say
     which commit is checked out and that it is clean. Real-git cases live in
-    the checkout_guard tests; everything but those two reads is real git."""
+    the checkout_guard tests; everything but those reads (HEAD, diff, the
+    index-flag listing) is real git."""
     import shlex
 
     real = shutil.which("git")
@@ -84,9 +85,30 @@ def write_git_identity_stub(tree: Path, sha: str) -> None:
 case "$1" in
     rev-parse) [ "$2" = HEAD ] && {{ echo {shlex.quote(sha)}; exit 0; }} ;;
     diff) exit 0 ;;
+    ls-files) exit 0 ;;
 esac
 exec {shlex.quote(real)} "$@"
 """)
+
+
+_MANIFEST_KEY: Path | None = None
+
+
+def write_signed_manifest(dist: Path, content: str) -> None:
+    """Write dist/MANIFEST.txt plus a real signature chain for it: SHA256SUMS
+    listing exactly MANIFEST.txt, SHA256SUMS.sig and sneakernet-signing.pub
+    (throwaway RSA key, reused per process). The guard verifies this chain
+    before trusting the MANIFEST (issue #414)."""
+    global _MANIFEST_KEY
+    if _MANIFEST_KEY is None:
+        import tempfile
+
+        _MANIFEST_KEY = gen_sign_keypair(Path(tempfile.mkdtemp(prefix="manifest-key-")))
+    dist.mkdir(parents=True, exist_ok=True)
+    (dist / "MANIFEST.txt").write_text(content)
+    (dist / "SHA256SUMS").write_text(f"{sha256_bytes(content.encode())}  MANIFEST.txt\n")
+    (dist / "sneakernet-signing.pub").unlink(missing_ok=True)
+    sign_sums(dist, _MANIFEST_KEY)
 
 
 def run_sh(script: Path, env: dict, cwd: Path):
