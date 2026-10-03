@@ -33,6 +33,32 @@ def test_dryrun_plan_pins_image_and_ports():
     assert "latest" not in r.stdout
 
 
+def test_dryrun_plan_bounds_store_and_container_memory():
+    """Issue #636: bounded trace store (image default is 100000) and a
+    no-swap container memory cap, both overridable."""
+    r = _run()
+    assert r.returncode == 0, r.stderr
+    assert "--memory 1g --memory-swap 1g" in r.stdout
+    assert "--set=extensions.jaeger_storage.backends.some_storage.memory.max_traces=20000" in r.stdout
+    r = _run({"JAEGER_MAX_TRACES": "500", "JAEGER_MEMORY": "512m"})
+    assert r.returncode == 0, r.stderr
+    assert "--memory 512m --memory-swap 512m" in r.stdout
+    assert "memory.max_traces=500" in r.stdout
+
+
+@pytest.mark.parametrize(
+    "var, bad",
+    [("JAEGER_MAX_TRACES", "0"), ("JAEGER_MAX_TRACES", "lots"), ("JAEGER_MAX_TRACES", "-5"),
+     ("JAEGER_MEMORY", "1x"), ("JAEGER_MEMORY", "0g"), ("JAEGER_MEMORY", "12q3g"),
+     ("JAEGER_MEMORY", "1g --privileged")],
+)
+def test_bad_bound_fails_closed_before_docker(var, bad):
+    r = _run({var: bad})
+    assert r.returncode != 0
+    assert f"{var} must" in r.stderr
+    assert "docker run" not in r.stdout
+
+
 def test_dryrun_plan_ports_override():
     r = _run({"JAEGER_PORT": "26686", "JAEGER_OTLP_PORT": "24318"})
     assert r.returncode == 0, r.stderr
@@ -101,3 +127,30 @@ def test_non_jaeger_port_squatter_fails_closed(tmp_path):
     r = _run_real(tmp_path, {"FAKE_OTLP_BUSY": "0"})
     assert r.returncode != 0
     assert "not Jaeger" in r.stderr
+
+
+RECORDING_DOCKER = """#!/bin/sh
+case "$1" in
+    ps) exit 0 ;;
+    run) printf '%s\\n' "$@" > "$FAKE_DOCKER_ARGV" ;;
+esac
+exit 0
+"""
+
+
+def test_started_container_carries_both_bounds(tmp_path):
+    """The real start path (not only the dry-run plan) passes the memory cap
+    and the store bound to docker as separate argv entries."""
+    bin_dir = _stub_tree(tmp_path)
+    (bin_dir / "docker").write_text(RECORDING_DOCKER)
+    argv_file = tmp_path / "argv"
+    env = {**os.environ, "PATH": f"{bin_dir}:/usr/bin:/bin", "JAEGER_DRYRUN": "0",
+           "FAKE_DOCKER_ARGV": str(argv_file), "JAEGER_MAX_TRACES": "777", "JAEGER_MEMORY": "768m"}
+    r = subprocess.run(["sh", str(SCRIPT)], capture_output=True, text=True, env=env, check=False)
+    # The fake container exits at once, so readiness fails closed afterwards.
+    assert r.returncode != 0 and "exited early" in r.stderr
+    argv = argv_file.read_text().splitlines()
+    assert argv[argv.index("--memory") + 1] == "768m"
+    assert argv[argv.index("--memory-swap") + 1] == "768m"
+    assert argv[-1] == "--set=extensions.jaeger_storage.backends.some_storage.memory.max_traces=777"
+    assert argv[-2].startswith("cr.jaegertracing.io/jaegertracing/jaeger@sha256:")

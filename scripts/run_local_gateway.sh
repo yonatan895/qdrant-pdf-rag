@@ -157,6 +157,7 @@ fi
 CFG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/local-gateway.XXXXXX")"
 cp "$SCRIPT_DIR/gateway/strict_finish.py" "$CFG_DIR/strict_finish.py"
 cp "$SCRIPT_DIR/gateway/scoped_passthrough.py" "$CFG_DIR/scoped_passthrough.py"
+cp "$SCRIPT_DIR/gateway/trace_privacy.py" "$CFG_DIR/trace_privacy.py"
 cat > "${CFG_DIR}/config.yaml" <<EOF
 # Rendered by scripts/run_local_gateway.sh (local-dev only, never committed).
 model_list:
@@ -191,13 +192,18 @@ general_settings:
       target: "${SCORE_TARGET}"
       methods: ["POST"]
 litellm_settings:
+  # Issue #636: no request/response content and no API-key-derived metadata
+  # in any logging callback. Defence in depth only: the otel export below is
+  # also rebuilt from an attribute allowlist (gateway/trace_privacy.py).
+  turn_off_message_logging: true
+  redact_user_api_key_info: true
   custom_provider_map:
     - provider: strict_openai
       custom_handler: strict_finish.strict_openai
 EOF
 if [ -n "$GATEWAY_OTEL_ENDPOINT" ]; then
     cat >> "${CFG_DIR}/config.yaml" <<EOF
-  callbacks: [scoped_passthrough.guard, "otel"]
+  callbacks: [scoped_passthrough.guard, trace_privacy.otel]
 EOF
 else
     echo '  callbacks: [scoped_passthrough.guard]' >> "${CFG_DIR}/config.yaml"
