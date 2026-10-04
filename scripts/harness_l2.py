@@ -14,54 +14,12 @@ _SOURCE = Path(__file__).resolve().parents[1] / "src"
 if str(_SOURCE) not in sys.path:
     sys.path.insert(0, str(_SOURCE))
 
-from mainframe_rag.eval.answer_tier import (  # noqa: F401 — compatibility exports
-    _INLINE_CITE_RE,
-    _AlertCapture,
-    _by_class_pr,
-    _by_complexity_truncation,
-    _by_failure_histogram,
-    _by_why,
-    _faithfulness_by_class,
-    apply_l2_measurements,
-    gate_l2,
-    run_l2,
-    summarize_l2,
-    syntax_check,
-    write_summary,
-)
-from mainframe_rag.eval.answers import (  # noqa: F401 — compatibility exports
-    AnswerCapture,
-    answer_completeness,
-    failure_bucket,
-    inferred_index_off_gold,
-    run_query,
-    select_sample,
-    why_mode,
-)
+from mainframe_rag.eval.answer_tier import gate_l2, run_l2, write_summary
 from mainframe_rag.eval.datasets import (
     DatasetError,
     read_golden_text,
     require_rc_for_collection,
     resolve_golden_paths,
-)
-from mainframe_rag.eval.judging import (  # noqa: F401 — compatibility exports
-    CITE_PREFIX_RE,
-    JSON_BLOCK_RE,
-    JUDGE_LABELS,
-    JUDGE_MAX_EVIDENCE_CHARS,
-    JUDGE_REASONING_EFFORT,
-    RELEVANCE_LABELS,
-    JudgeError,
-    _parse_label,
-    citation_to_hit,
-    cited_doc_ids,
-    evidence_for_citations,
-    judge_chat,
-    judge_messages,
-    parse_judge_label,
-    parse_relevance_label,
-    precision_recall,
-    relevance_messages,
 )
 
 

@@ -441,7 +441,7 @@ class TaskContractsTests(unittest.TestCase):
             "local:llm", "local:embed", "local:rerank", "local:gateway:up",
             "local:gateway:down", "local:jaeger:up", "local:jaeger:down",
             "local:stack", "local:agent", "local:check", "local:repair-staging",
-            "qa:sim", "qa:load", "qa:vllm-e2e",
+            "qa:sim", "qa:load",
             # air-gap
             "airgap:pack", "airgap:load", "airgap:deploy", "airgap:ingest",
             "airgap:smoke", "airgap:validate", "airgap:pipeline", "airgap:dryrun",
@@ -1199,21 +1199,6 @@ class TaskContractsTests(unittest.TestCase):
         self.assertEqual(self.pip_calls()[0]["argv"], ["scripts/agent_doctor.py", "--profile", "ha", "--python", ".venv/bin/python"])
         self.assertEqual(self.pip_calls()[1]["argv"],
                          ["-m", "pytest", "-m", "integration", "tests/test_ha_cluster.py", "-v"])
-
-    def test_vllm_e2e_optional_flags(self):
-        self.make_venv_fake()
-        env = self.tool_env()
-        proc = self.run_task("qa:vllm-e2e", extra_env=env)
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        self.assertEqual(self.pip_calls()[0]["argv"],
-                         ["scripts/test_local_e2e_vllm.py", "--embed-mode", "hash"])
-        if (self.log).exists():
-            self.log.unlink()
-        proc = self.run_task("qa:vllm-e2e", "MODEL=m", "DENSE_DIM=768", extra_env=env)
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        self.assertEqual(self.pip_calls()[0]["argv"],
-                         ["scripts/test_local_e2e_vllm.py", "--model", "m",
-                          "--dense-dim", "768", "--embed-mode", "hash"])
 
     def test_operator_cli_beats_file(self):
         self.recorder_env = {"RECORDER_LOG": str(self.log), "RECORDER_TAG": "x", "RECORDER_EXIT": "0"}

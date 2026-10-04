@@ -150,7 +150,7 @@ tasks:
   answers:
     desc: Answer-tier golden eval on the live GPU stack
     summary: |
-      `scripts/eval_answers.py` (one reasoning call per query), mirroring
+      `python -m mainframe_rag.eval.answers` (one reasoning call per query), mirroring
       the retired `make eval-answers`. Needs the live stack and the eval environment.
       Input: N bounds the sample (default 24; empty falls back).
     vars:
@@ -165,12 +165,12 @@ tasks:
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
       - mkdir -p "$TASK_BUNDLE_DIR"
-      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/eval_answers.py {{if .N}}--max-queries "$TASK_N"{{end}} --out "$TASK_BUNDLE_DIR/eval-answers-report.json" --summary "$TASK_BUNDLE_DIR/eval-answers-summary.md"
+      - PYTHONPATH=src EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python -m mainframe_rag.eval.answers {{if .N}}--max-queries "$TASK_N"{{end}} --out "$TASK_BUNDLE_DIR/eval-answers-report.json" --summary "$TASK_BUNDLE_DIR/eval-answers-summary.md"
 
   chat:
     desc: Multi-turn condensation A/B on the dev golden set (evidence only)
     summary: |
-      `scripts/eval_chat.py`, replacing the retired `make eval-chat`. Live stack only;
+      `python -m mainframe_rag.eval.chat`, replacing the retired `make eval-chat`. Live stack only;
       evidence for a future default decision, never a gate. Input: N
       (default 12; empty falls back).
     vars:
@@ -185,7 +185,7 @@ tasks:
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
       - mkdir -p "$TASK_BUNDLE_DIR"
-      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/eval_chat.py {{if .N}}--limit "$TASK_N"{{end}} --out "$TASK_BUNDLE_DIR/eval-chat-report.json" --summary "$TASK_BUNDLE_DIR/eval-chat-summary.md"
+      - PYTHONPATH=src EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python -m mainframe_rag.eval.chat {{if .N}}--limit "$TASK_N"{{end}} --out "$TASK_BUNDLE_DIR/eval-chat-report.json" --summary "$TASK_BUNDLE_DIR/eval-chat-summary.md"
 
   harness:gate:
     desc: Layered harness L1 retrieval + promotion gate
@@ -364,7 +364,7 @@ tasks:
   report:
     desc: Render the eval report (text/markdown)
     summary: |
-      `scripts/render_report.py eval`, replacing the retired `make eval-report`.
+      `python -m mainframe_rag.eval.reports eval`, replacing the retired `make eval-report`.
       Inputs: REPORT (default bundles/eval-report.json), BASELINE (default
       evals/baseline.json); empty values fall back. Note: this BASELINE is
       the report input selector, not the mode-keyed eval baseline.
@@ -380,12 +380,12 @@ tasks:
       TASK_BASELINE: '{{.BASELINE}}'
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
-      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/render_report.py eval --bundle-dir "$TASK_BUNDLE_DIR" {{if .REPORT}}--report "$TASK_REPORT"{{end}} {{if .BASELINE}}--baseline "$TASK_BASELINE"{{end}}
+      - PYTHONPATH=src EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python -m mainframe_rag.eval.reports eval --bundle-dir "$TASK_BUNDLE_DIR" {{if .REPORT}}--report "$TASK_REPORT"{{end}} {{if .BASELINE}}--baseline "$TASK_BASELINE"{{end}}
 
   html:
     desc: Render the eval report as a self-contained HTML dashboard
     summary: |
-      `scripts/render_report.py eval --format html`, mirroring
+      `python -m mainframe_rag.eval.reports eval --format html`, mirroring
       the retired `make eval-html`. Same inputs as `eval:report` plus OUT (default
       bundles/eval-report.html); prints the rendered path.
     vars:
@@ -401,12 +401,12 @@ tasks:
       TASK_OUT: '{{.OUT}}'
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
-      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/render_report.py eval --bundle-dir "$TASK_BUNDLE_DIR" {{if .REPORT}}--report "$TASK_REPORT"{{end}} {{if .BASELINE}}--baseline "$TASK_BASELINE"{{end}} --format html {{if .OUT}}--out "$TASK_OUT"{{end}}
+      - PYTHONPATH=src EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python -m mainframe_rag.eval.reports eval --bundle-dir "$TASK_BUNDLE_DIR" {{if .REPORT}}--report "$TASK_REPORT"{{end}} {{if .BASELINE}}--baseline "$TASK_BASELINE"{{end}} --format html {{if .OUT}}--out "$TASK_OUT"{{end}}
 
   compare:
     desc: Compare two eval baselines
     summary: |
-      `scripts/render_report.py compare-eval`, replacing the retired `make eval-compare`.
+      `python -m mainframe_rag.eval.reports compare-eval`, replacing the retired `make eval-compare`.
       Inputs: BASE (default evals/baseline.json), CURRENT (default
       bundles/eval-report.json); empty values fall back.
     vars:
@@ -420,12 +420,12 @@ tasks:
       TASK_CURRENT: '{{.CURRENT}}'
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
-      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/render_report.py compare-eval --bundle-dir "$TASK_BUNDLE_DIR" {{if .BASE}}--base "$TASK_BASE"{{end}} {{if .CURRENT}}--current "$TASK_CURRENT"{{end}}
+      - PYTHONPATH=src EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python -m mainframe_rag.eval.reports compare-eval --bundle-dir "$TASK_BUNDLE_DIR" {{if .BASE}}--base "$TASK_BASE"{{end}} {{if .CURRENT}}--current "$TASK_CURRENT"{{end}}
 
   bench-report:
     desc: Render the benchmark report (text/markdown)
     summary: |
-      `scripts/render_report.py bench`, replacing the retired `make bench-report`.
+      `python -m mainframe_rag.eval.reports bench`, replacing the retired `make bench-report`.
       Inputs: REPORT (default bundles/bench-report.json), BASELINE (default
       benchmarks/baseline.json); empty values fall back.
     vars:
@@ -440,12 +440,12 @@ tasks:
       TASK_BASELINE: '{{.BASELINE}}'
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
-      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/render_report.py bench --bundle-dir "$TASK_BUNDLE_DIR" {{if .REPORT}}--report "$TASK_REPORT"{{end}} {{if .BASELINE}}--baseline "$TASK_BASELINE"{{end}}
+      - PYTHONPATH=src EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python -m mainframe_rag.eval.reports bench --bundle-dir "$TASK_BUNDLE_DIR" {{if .REPORT}}--report "$TASK_REPORT"{{end}} {{if .BASELINE}}--baseline "$TASK_BASELINE"{{end}}
 
   bench-html:
     desc: Render the benchmark report as HTML
     summary: |
-      `scripts/render_report.py bench --format html`, mirroring
+      `python -m mainframe_rag.eval.reports bench --format html`, mirroring
       the retired `make bench-html`. Same inputs as `eval:bench-report` plus OUT
       (default bundles/bench-report.html); prints the rendered path.
     vars:
@@ -461,12 +461,12 @@ tasks:
       TASK_OUT: '{{.OUT}}'
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
-      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/render_report.py bench --bundle-dir "$TASK_BUNDLE_DIR" {{if .REPORT}}--report "$TASK_REPORT"{{end}} {{if .BASELINE}}--baseline "$TASK_BASELINE"{{end}} --format html {{if .OUT}}--out "$TASK_OUT"{{end}}
+      - PYTHONPATH=src EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python -m mainframe_rag.eval.reports bench --bundle-dir "$TASK_BUNDLE_DIR" {{if .REPORT}}--report "$TASK_REPORT"{{end}} {{if .BASELINE}}--baseline "$TASK_BASELINE"{{end}} --format html {{if .OUT}}--out "$TASK_OUT"{{end}}
 
   bench-compare:
     desc: Compare two benchmark baselines
     summary: |
-      `scripts/render_report.py compare-bench`, mirroring
+      `python -m mainframe_rag.eval.reports compare-bench`, mirroring
       the retired `make bench-compare`. Inputs: BASE (default benchmarks/baseline.json),
       CURRENT (default bundles/bench-report.json); empty values fall back.
     vars:
@@ -480,7 +480,7 @@ tasks:
       TASK_CURRENT: '{{.CURRENT}}'
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
-      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/render_report.py compare-bench --bundle-dir "$TASK_BUNDLE_DIR" {{if .BASE}}--base "$TASK_BASE"{{end}} {{if .CURRENT}}--current "$TASK_CURRENT"{{end}}
+      - PYTHONPATH=src EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python -m mainframe_rag.eval.reports compare-bench --bundle-dir "$TASK_BUNDLE_DIR" {{if .BASE}}--base "$TASK_BASE"{{end}} {{if .CURRENT}}--current "$TASK_CURRENT"{{end}}
 
   bench:
     desc: Run the benchmark workload against the committed baseline

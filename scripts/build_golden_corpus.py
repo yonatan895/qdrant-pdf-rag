@@ -454,7 +454,7 @@ def map_seed(entry: dict) -> dict:
         "source": "operator-history",
         "note": "; ".join(p for p in note_parts if p),
     }
-    # answer-tier gold carried through for scripts/eval_answers.py (superset schema)
+    # answer-tier gold carried through for eval.answers (superset schema)
     for k in ("gold_must_contain", "gold_must_not_contain", "must_cite_identifier", "domain", "trap_type"):
         if entry.get(k) not in (None, []):
             out[k] = entry[k]

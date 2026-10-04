@@ -43,17 +43,9 @@ from mainframe_rag.eval.datasets import (
     DatasetError,
     load_golden,
     require_rc_for_collection,
-    resolve_golden_paths,  # noqa: F401 — compatibility export
     resolve_harness_golden_paths,
 )
-
-# Retain historical imports as same-object compatibility exports.
-from mainframe_rag.eval.promotion import (  # noqa: F401
-    DEFAULT_CLASS_FLOOR,
-    PRIMARY_METRICS,
-    gate_verdict,
-)
-from mainframe_rag.eval.statistics import ci95_paired, ci_excludes_zero  # noqa: F401
+from mainframe_rag.eval.promotion import DEFAULT_CLASS_FLOOR, gate_verdict
 
 
 # ------------------------------------------------------------------ baseline

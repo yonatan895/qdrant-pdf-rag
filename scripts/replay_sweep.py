@@ -48,7 +48,9 @@ if str(REPO / "src") not in sys.path:
     sys.path.insert(0, str(REPO / "src"))
 
 from capture_pool import record_to_rows, replay_pool
-from eval_retrieval import GoldenEntry, is_relevant_hit, load_golden
+
+from mainframe_rag.eval.datasets import GoldenEntry, load_golden
+from mainframe_rag.eval.retrieval import is_relevant_hit
 
 # Production prefetch depth for the non-rerank path (query.PREFETCH_LIMIT):
 # pools may be captured deeper, so replays that mimic production must trim.

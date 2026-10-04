@@ -138,22 +138,6 @@ def test_replay_sweep_refuses_holdout_without_rc(monkeypatch, capfd, tmp_path):
     assert "frozen holdout" in capfd.readouterr().err
 
 
-def test_venue_delegate_is_canonical():
-    """Issue #508 C2: scripts/venue.py re-exports the package owner."""
-    import scripts.venue as venue_shim
-
-    from mainframe_rag.eval import datasets as canonical
-
-    for name in (
-        "VenueError",
-        "resolve_venue",
-        "require_rc_for_golden",
-        "require_rc_for_collection",
-        "resolve_golden_paths",
-    ):
-        assert getattr(venue_shim, name) is getattr(canonical, name), name
-
-
 def test_holdout_copy_elsewhere_still_requires_rc(tmp_path):
     """Filename identity crosses installs: a holdout copy outside evals/ is
     still the frozen holdout in dev."""

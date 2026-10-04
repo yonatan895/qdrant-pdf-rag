@@ -34,16 +34,8 @@ Exit codes: 0 green (or no gate requested); 1 regressions or query
 failures; 2 an explicitly requested gate could not be applied (baseline
 file missing, or collection/embed-mode mismatch — a skip is not a pass, issue #159).
 
-Compatibility delegate (issue #508 C2): pure dataset/scoring owners live in
-:mod:`mainframe_rag.eval.datasets` and :mod:`mainframe_rag.eval.retrieval`.
-This module re-exports the same classes/functions (not a copy) and keeps the
-operational ``label_draft`` / ``main`` entry points so documented
-``python scripts/eval_retrieval.py ...`` invocations and Task bridges keep
-working during migration.
-
-Retirement condition: all known callers import the package directly, the
-successor is documented and qualified, and the maintainer approves removing
-this shim. Unknown external usage is not deletion authority.
+Dataset/scoring owners live in :mod:`mainframe_rag.eval.datasets` and
+:mod:`mainframe_rag.eval.retrieval`; this script owns CLI and label drafting.
 """
 
 from __future__ import annotations
@@ -60,11 +52,7 @@ if str(_REPO / "src") not in sys.path:
 
 from mainframe_rag.config import load_settings
 from mainframe_rag.eval.datasets import (
-    QUERY_CLASSES,
     DatasetError,
-    GoldenEntry,
-    VenueError,  # noqa: F401 — compatibility export
-    default_baseline_path,
     default_retrieval_paths,
     load_golden,
     require_rc_for_collection,
@@ -73,55 +61,14 @@ from mainframe_rag.eval.datasets import (
 from mainframe_rag.eval.retrieval import (
     EVAL_ABSOLUTE_GATED_METRICS,
     EVAL_GATED_METRICS,
-    EVAL_ZERO_GATED_METRICS,
-    MUST_NOT_WINDOW,
-    SEARCH_LIMIT,
-    _absolute_floors_apply,
     _finite_number,
     _get,
-    _set,
     check_baseline,
     evaluate,
-    gain,
-    is_relevant_hit,
-    is_sibling_exception,
-    must_not_violations,
-    ndcg_at_k,
-    score_entry,
-    summarize,
     summary_markdown,
     update_baseline,
 )
 from mainframe_rag.manifest import write_run_manifest
-
-__all__ = [
-    "EVAL_ABSOLUTE_GATED_METRICS",
-    "EVAL_GATED_METRICS",
-    "EVAL_ZERO_GATED_METRICS",
-    "MUST_NOT_WINDOW",
-    "QUERY_CLASSES",
-    "SEARCH_LIMIT",
-    "GoldenEntry",
-    "_absolute_floors_apply",
-    "_finite_number",
-    "_get",
-    "_set",
-    "check_baseline",
-    "default_baseline_path",
-    "evaluate",
-    "gain",
-    "is_relevant_hit",
-    "is_sibling_exception",
-    "label_draft",
-    "load_golden",
-    "main",
-    "must_not_violations",
-    "ndcg_at_k",
-    "score_entry",
-    "summarize",
-    "summary_markdown",
-    "update_baseline",
-]
 
 
 class _LabelDraft(TypedDict):

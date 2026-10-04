@@ -4,23 +4,19 @@ Retrieval scoring and measured execution are owned by
 `mainframe_rag.eval.retrieval`: `evaluate` constructs the configured clients,
 measures each selected query and reports query failures; `collect_rows` uses
 the caller's clients for L1 and propagates query failures. Both retain their
-existing query depth and scoring rules. The retrieval CLI and L1 compatibility
-module export these same objects; the simulator gate and promotion harness
-consume the canonical operations directly. Client imports occur when an
-operation is called. CLI handling, label drafting, simulator lifecycle and
+existing query depth and scoring rules. The retrieval CLI, simulator gate and
+promotion harness consume the canonical operations directly. Client imports
+occur when an operation is called. CLI handling, label drafting, simulator lifecycle and
 snapshot/restore orchestration remain in their operational scripts.
 
 Answer-tier measurement is owned by `mainframe_rag.eval.answers`: deterministic
 sampling, request-attributed `AnswerCapture`, structural judging, aggregation,
 and report writing share that import identity with L2. The supported
-`python scripts/eval_answers.py` command delegates to its `main(argv)`;
-`python -m mainframe_rag.eval.answers` uses the same operation in a prepared
+`python -m mainframe_rag.eval.answers` command calls `main(argv)` in a prepared
 installation. Supply explicit `--golden`, `--out`, and `--summary` paths outside
 a workspace; default datasets remain relative to the working directory and
 missing files fail without acquisition. Venue guards apply before live work.
-The legacy `_AnswerCapture` import remains an alias during migration. Delegate
-retirement requires migrated callers, qualified successor commands, and an
-explicit maintainer decision. L2 judgment and L4 quality policy remain separate.
+L2 judgment and L4 quality policy remain separate.
 
 L2 judge prompts, bounded evidence assembly, citation mapping, label parsing and
 judge-call parameters live in `mainframe_rag.eval.judging`. L2 orchestration and
@@ -28,8 +24,7 @@ L4 repeated quality gates remain distinct; both consume the canonical labels.
 L2 row enrichment, request-attributed alert capture, aggregation, structural
 verdicts and measured execution live in `mainframe_rag.eval.answer_tier`.
 L4 imports this runner directly. L2's CLI retains dataset/venue resolution and
-output/manifest composition. Legacy `scripts.harness_l2` helper exports retain
-object identity during migration. Importing the measurement package does not
+output/manifest composition. Importing the measurement package does not
 start the app or connect to model/storage services; execution does so only
 when explicitly requested. The synthetic HTTP runner test covers per-run search
 caching, judge-leg order/eligibility, request attribution, cleanup and the next run.
@@ -37,25 +32,22 @@ caching, judge-leg order/eligibility, request attribution, cleanup and the next 
 L4 threshold validation, repeat aggregation, quality verdicts and recorded
 reports are owned by `mainframe_rag.eval.quality`, with explicit inputs and
 paths. `scripts/harness_l4.py` retains live repeat execution, CLI defaults,
-venue checks and the explicit record-versus-check operation. Its compatibility
-exports reference the same quality objects; moving ownership does not change
+venue checks and the explicit record-versus-check operation. It consumes the
+quality owner directly; moving ownership does not change
 rate thresholds, structural failure gates, sampling or repeat counts.
 
 Seeded bootstrap intervals are owned by `mainframe_rag.eval.statistics`.
-The promotion policy imports that owner directly; `scripts.bootstrap_ci`
-retains same-object compatibility exports. Resampling, pairing, seeds,
+The promotion policy imports that owner directly. Resampling, pairing, seeds,
 percentile bounds and the promotion decision remain unchanged.
 
 Pure promotion verdicts and their metric/floor constants are owned by
-`mainframe_rag.eval.promotion`. The harness calls that owner and retains
-same-object compatibility exports; baseline persistence, snapshots and CLI
-execution stay in `scripts/harness.py`. Trap rejection, class floors, paired
+`mainframe_rag.eval.promotion`. The harness calls that owner; baseline persistence,
+snapshots and CLI execution stay in `scripts/harness.py`. Trap rejection, class floors, paired
 improvement criteria and reason strings retain their existing behavior.
 
 Multi-turn condensation A/B measurement is owned by `mainframe_rag.eval.chat`,
-using the shared dataset and retrieval scorers. `scripts/eval_chat.py` delegates
-to the same CLI operation and retains same-object helper exports (`python -m
-mainframe_rag.eval.chat` runs the same `main`). Both literal
+using the shared dataset and retrieval scorers. `python -m mainframe_rag.eval.chat`
+runs its `main` in a prepared installation. Both literal
 and condensed arms, templates, scoring, call accounting and report fields are
 unchanged. Outside a workspace, supply explicit golden/output paths; the default
 `evals/golden.jsonl` stays relative to the working directory. Importing the
@@ -65,7 +57,7 @@ Reusable concurrent HTTP load measurement, Server-Timing parsing, percentiles
 and optional GPU observations are owned by `mainframe_rag.eval.load`. The L3
 harness, ingestion benchmark and load integration tier consume that owner.
 `scripts/loadtest.py` retains CLI dispatch and baseline persistence, including
-reserved CI-baseline protection, with same-object measurement exports.
+reserved CI-baseline protection.
 The `eval:load` Task delegates endpoint, worker-count, duration and absent-URL
 defaults to this CLI: search, eight workers, 30 seconds and
 `http://127.0.0.1:8080`. Explicit `AGENT_URL` values (including empty) are
@@ -91,8 +83,8 @@ Python. Gate runs never record baselines; recording remains explicit.
 
 Rendering and comparison of recorded retrieval/benchmark JSON are owned by
 `mainframe_rag.eval.reports`. The L1 gate imports this renderer directly;
-`scripts/render_report.py` delegates to its CLI and retains same-object helper
-exports (`python -m mainframe_rag.eval.reports` runs the same `main`). Text, Markdown, HTML, escaping, comparison rules and exit codes are
+`python -m mainframe_rag.eval.reports` runs its `main` in a prepared installation.
+Text, Markdown, HTML, escaping, comparison rules and exit codes are
 unchanged. The renderer consumes supplied files and never reruns evaluation.
 Explicit report/baseline/output paths remain authoritative. The opt-in
 `--bundle-dir DIR` selects the existing Task defaults: `DIR/eval-report.json`
@@ -113,6 +105,27 @@ for text/compare and is refused for HTML directory preparation. With a distinct 
 output aliases retain the existing writer behavior. Missing/corrupt inputs
 fail before an existing output is replaced.
 
+The #508 compatibility delegates are retired. Known callers and Task dispatch
+use these successors; old script commands/imports, including `_AnswerCapture`,
+are deliberately removed. Direct module commands require a prepared editable or
+wheel installation. The eight module Tasks (answers, chat, and six report
+operations) bind `PYTHONPATH=src` at the checkout root, selecting this checkout's
+canonical modules even with a foreign editable installation or inherited
+`PYTHONPATH`. Dependencies still require preparation; help names follow the module.
+
+| Retired module | Successor |
+|---|---|
+| `scripts.venue` | `mainframe_rag.eval.datasets` |
+| `scripts.bootstrap_ci` | `mainframe_rag.eval.statistics` |
+| `scripts.harness_l1` | `mainframe_rag.eval.retrieval` and `eval.datasets.GoldenEntry` |
+| `scripts.eval_answers` | `mainframe_rag.eval.answers`; CLI: `python -m mainframe_rag.eval.answers` |
+| `scripts.eval_chat` | `mainframe_rag.eval.chat`; CLI: `python -m mainframe_rag.eval.chat` |
+| `scripts.render_report` | `mainframe_rag.eval.reports`; CLI: `python -m mainframe_rag.eval.reports` |
+
+Retained retrieval/harness/load scripts own operational composition and no
+longer provide compatibility-only helper exports. Import measurement and
+policy helpers from their package owners above.
+
 Owner: this file. Test-writing rules: `docs/testing.md`. Live ladder:
 `docs/live-stack.md`. Design overview: `docs/architecture.md` §5.
 
@@ -130,19 +143,18 @@ mix (see `testing.md` harness invariants):
 | Retrieval eval | `eval_retrieval.py` | How accurate is retrieval on real data? | Live Qdrant, golden or holdout |
 | Paraphrase | `eval_retrieval.py --golden evals/paraphrase.jsonl` | Do semantic changes move non-verbatim queries? | Dedicated collection, manual runbook |
 | Section probes | `eval_retrieval.py --golden evals/sections.jsonl`; record-replay §6.1 | Does retrieval reach the right section of the right manual, not only the right manual? | Real-corpus collections only (no synthetic pages exist for it); dev-only, never part of golden/holdout |
-| Answer eval | `eval_answers.py` | Are answers grounded and abstentions honest? | Live GPU stack, in-process client |
-| Layered harness | `harness.py` + `harness_l1/l2/l3/l4.py` (`src/mainframe_rag/eval/quality.py` owns the L4 tier) | Promote to release candidacy? | Snapshot-pinned live index (RC only) |
+| Answer eval | `python -m mainframe_rag.eval.answers` | Are answers grounded and abstentions honest? | Live GPU stack, in-process client |
+| Layered harness | `harness.py` + `harness_l2/l3/l4.py` (`eval.retrieval` owns L1, `eval.quality` owns L4) | Promote to release candidacy? | Snapshot-pinned live index (RC only) |
 | Bench | `benchmark.py` | Do resources/latencies regress? | CI runner env, mock LLM |
 | Load | `loadtest.py` / `test_load_tier.py` | Do absolute contracts hold under concurrency? | Sim composition + real uvicorn agent |
 | Release acceptance (#367) | `eval_acceptance.py` | Does the production profile meet the pre-registered absolute criteria on the independent SME set? | `VENUE=rc`, sha-pinned `release_set.jsonl`, adjudicated outcomes; stand-in or proposed criteria never certify (§11) |
 | Corpus hygiene | `verify_golden.py` / `build_golden_corpus.py` | Is the golden set sound? | Live collection facts |
 
-Supporting cast: `render_report.py` (text/md/HTML renders and comparators),
-`bootstrap_ci.py` (paired-bootstrap CIs), `qdrant_sim.py` + `qdrant_pin.py`
+Supporting cast: `eval.reports` (text/md/HTML renders and comparators),
+`eval.statistics` (paired-bootstrap CIs), `qdrant_sim.py` + `qdrant_pin.py`
 (the only docker-lifecycle and pin-parse owners), `query_demo.py`
 (inspection, never eval), `mock_vllm.py` (deterministic stand-in, §9),
 `make_synthetic_pdf.py` (runtime-only fixture factory),
-`test_local_e2e_vllm.py` (live-GPU manual precedent),
 `smoke_search.py` (in-cluster smoke: limit 8, `--min-hits 1`, substring
 `--expect` over lowercased cite/heading/text).
 
@@ -265,7 +277,7 @@ legs; gateway-order A/Bs run the same gate with the env var set, after
 `probe_gateway.py` recommends it). The paraphrase branch builds pages from
 `answer_text` without echoing the query (see §6).
 
-## 4. Layered harness (`harness.py`, `harness_l1/l2/l3/l4.py`)
+## 4. Layered harness (`harness.py`, `harness_l2/l3/l4.py`)
 
 Release-candidate promotion gate, never a PR gate. Fingerprint, restore, or
 pin a Qdrant snapshot; run L1; deliver a `merge` / `hold` / `baseline`
@@ -379,7 +391,7 @@ verdict.
   percentiles — note the load-tier percentile below is nearest-rank, so
   cross-tier "p95" values are incomparable by construction.
 
-## 5. Answer eval (`eval_answers.py`)
+## 5. Answer eval (`python -m mainframe_rag.eval.answers`)
 
 Sample/repeat defaults belong to the Python parsers: answers and L2/L4 use
 24 queries, chat uses 12 sessions, and L4 uses 3 repeats. Task transports
@@ -698,7 +710,7 @@ holdout (`evals/holdout.jsonl`) and the real-corpus collection
 recipe itself, and by operators for the harness tiers
 (`VENUE=rc sh scripts/tools/run-task.sh eval:harness:l2`). Without the declaration the scripts exit 2
 ("frozen holdout … requires VENUE=rc"), so a truncated venue is never
-scored. `scripts/venue.py` owns the rule.
+scored. `mainframe_rag.eval.datasets` owns the rule.
 
 **Triggers** — run the battery when any of these fires:
 

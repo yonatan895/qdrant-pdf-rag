@@ -25,16 +25,16 @@ def sampling_workspace(tmp_path):
     repo = Path(__file__).resolve().parents[1]
     shutil.copy2(repo / "Taskfile.yml", tmp_path / "Taskfile.yml")
     shutil.copytree(repo / "taskfiles", tmp_path / "taskfiles")
+    (tmp_path / "src").symlink_to(repo / "src", target_is_directory=True)
     (tmp_path / "scripts").mkdir()
-    for name in ("eval_answers.py", "eval_chat.py", "harness_l2.py", "harness_l4.py"):
+    for name in ("harness_l2.py", "harness_l4.py"):
         shutil.copy2(repo / "scripts" / name, tmp_path / "scripts" / name)
     (tmp_path / ".venv/bin").mkdir(parents=True)
     launcher = tmp_path / ".venv/bin/python"
-    launcher.write_text(f"#!{sys.executable}\n" + f"source = {str(repo / 'src')!r}\n" + '''
+    launcher.write_text(f"#!{sys.executable}\n" + '''
 import importlib.util, json, os, sys
 from pathlib import Path
 from types import SimpleNamespace
-sys.path.insert(0, source)
 from mainframe_rag import config, manifest
 from mainframe_rag.eval import answers, answer_tier, chat
 from mainframe_rag.agent import answer
@@ -85,10 +85,15 @@ def retrieve(*args, **kwargs):
         cite='Original p. 1', heading='Example', title='Original', page_label='1',
         chunk_type='prose', message_ids=())], 'nl', {}
 chat.retrieve_search = retrieve
-spec = importlib.util.spec_from_file_location('actual_cli', sys.argv[1])
-cli = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(cli)
-raise SystemExit(cli.main(sys.argv[2:]))
+if sys.argv[1] == '-m':
+    cli = importlib.import_module(sys.argv[2])
+    args = sys.argv[3:]
+else:
+    spec = importlib.util.spec_from_file_location('actual_cli', sys.argv[1])
+    cli = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cli)
+    args = sys.argv[2:]
+raise SystemExit(cli.main(args))
 ''')
     launcher.chmod(0o755)
     evals = tmp_path / "evals"

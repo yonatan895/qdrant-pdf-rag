@@ -2,9 +2,9 @@
 truncation rate, syntax-shape compliance.
 
 Where it sits
-    L1 (scripts/harness_l1.py) gates retrieval deterministically against a
-    snapshot-pinned index. L2 scores the ANSWER tier on the live GPU stack
-    (Qdrant + embedding vLLM + reasoning vLLM): the deterministic retrieval
+    L1 (mainframe_rag.eval.retrieval) gates retrieval deterministically
+    against a snapshot-pinned index. L2 scores the ANSWER tier on the live
+    stack (Qdrant + gateway-backed embedding and reasoning): retrieval
     metrics cannot see whether the reasoning model cites the right books,
     stays faithful to the excerpts it cites, finishes its output, or codes
     the construct the query asked for.
@@ -69,11 +69,11 @@ Gate vs trend
     noise. No retries: /v1/answer is single-shot by contract.
 
 Execution shape
-    In-process FastAPI TestClient against the live app (precedent:
-    scripts/test_local_e2e_vllm.py, scripts/eval_answers.py). Requires the
-    live GPU stack; it is a Task command (eval:harness:l2), never part of plain
-    pytest and never a PR gate. Sampling is the same deterministic
-    stratified round-robin as the answer-tier eval.
+    In-process FastAPI TestClient against the live app, using production
+    code and lifespan-built clients. Requires the live stack (Qdrant +
+    gateway-backed embedding and reasoning); run eval:harness:l2 explicitly,
+    never as part of plain pytest or a PR gate. Sampling uses the shared
+    deterministic stratified round-robin.
 """
 
 from __future__ import annotations

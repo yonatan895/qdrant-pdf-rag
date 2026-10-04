@@ -322,25 +322,14 @@ def test_load_golden_abstain_roundtrip(tmp_path: Path):
         load_golden(bad)
 
 
-def test_eval_delegates_are_canonical_objects():
-    """Issue #508 C2: scripts/eval_retrieval.py re-exports the package owners
-    (same objects, not a second scoring implementation)."""
+def test_retrieval_cli_consumes_canonical_operations():
     import scripts.eval_retrieval as ev
 
     from mainframe_rag.eval import datasets as canonical_datasets
     from mainframe_rag.eval import retrieval as canonical_retrieval
 
-    assert ev.GoldenEntry is canonical_datasets.GoldenEntry
     assert ev.load_golden is canonical_datasets.load_golden
-    assert ev.default_baseline_path is canonical_datasets.default_baseline_path
     for name in (
-        "is_sibling_exception",
-        "is_relevant_hit",
-        "must_not_violations",
-        "gain",
-        "ndcg_at_k",
-        "score_entry",
-        "summarize",
         "check_baseline",
         "update_baseline",
         "summary_markdown",

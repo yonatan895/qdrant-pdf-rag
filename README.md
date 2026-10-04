@@ -113,7 +113,7 @@ the same tool without network access. Start with
 | | `sh scripts/tools/run-task.sh eval:answers` | Answer-tier grounding eval (`/v1/answer` must cite, abstain entries must not answer) — live GPU stack |
 | | `sh scripts/tools/run-task.sh eval:paraphrase` | Paraphrase retrieval instrument (semantic queries without near-verbatim echo) — dedicated collection |
 | | `sh scripts/tools/run-task.sh eval:holdout` | Score the frozen holdout (`evals/holdout.jsonl`, sha-pinned) — release candidates only |
-| | `sh scripts/tools/run-task.sh eval:chat` | Multi-turn condensation A/B (`scripts/eval_chat.py`) — live GPU stack, evidence-only, RC venue for real corpora |
+| | `sh scripts/tools/run-task.sh eval:chat` | Multi-turn condensation A/B (`mainframe_rag.eval.chat`) — live GPU stack, evidence-only, RC venue for real corpora |
 | | `sh scripts/tools/run-task.sh eval:baseline` | Re-record committed retrieval accuracy baseline (dedicated PR) |
 | | `sh scripts/tools/run-task.sh eval:draft` | Helper to draft golden-set candidate queries from collection payload |
 | | `sh scripts/tools/run-task.sh eval:verify-golden` | Mechanically verify golden expectations against the live collection (gates the corpus) |
@@ -139,7 +139,7 @@ the same tool without network access. Start with
 | | `sh scripts/tools/run-task.sh local:gateway:up` / `sh scripts/tools/run-task.sh local:gateway:down` | Foreground LiteLLM gateway (port 4000) / stop it and its key store |
 | | `sh scripts/tools/run-task.sh local:jaeger:up` / `sh scripts/tools/run-task.sh local:jaeger:down` | Jaeger v2 trace backend (UI :16686) / stop it |
 | | `sh scripts/tools/run-task.sh local:agent` | Start the agent with `LLM_STREAM=true` (reasoning SSE streaming for TTFT) on port 8080; serves `/ui` when `UI_ENABLED=true` |
-| | `sh scripts/tools/run-task.sh qa:vllm-e2e` | Run automated end-to-end suite against local vLLM & Qdrant with grounding validation |
+| | `sh scripts/tools/run-task.sh local:check -- --agent URL --jaeger URL --query TEXT --followup TEXT --report PATH` | Verify grounded answers, console follow-up and a fresh search trace against an existing stack |
 | **Cluster recipe** | `sh scripts/tools/run-task.sh artifacts:chart-fetch` / `sh scripts/tools/run-task.sh artifacts:helm-render` / `sh scripts/tools/run-task.sh artifacts:helm-lint` | Fetch / render / lint the vendored Qdrant chart against OpenShift values |
 | | `sh scripts/tools/run-task.sh artifacts:wheelhouse` / `sh scripts/tools/run-task.sh artifacts:bm25` / `sh scripts/tools/run-task.sh artifacts:images` | Build offline wheelhouse, cache BM25 weights, build UBI images (connected host) |
 | | `sh scripts/tools/run-task.sh dev:demo-pdfs` | Generate synthetic demo PDFs into `output/demo-pdfs` |

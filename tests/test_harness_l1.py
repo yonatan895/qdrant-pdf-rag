@@ -24,17 +24,6 @@ from mainframe_rag.eval.retrieval import aggregate, collect_rows, score_row
 from mainframe_rag.eval.statistics import ci95, ci95_paired, ci_excludes_zero
 
 
-def test_l1_delegates_are_canonical_objects():
-    """Issue #508 C2: scripts/harness_l1.py re-exports the package owners
-    (same objects, not a second implementation)."""
-    import scripts.harness_l1 as h1
-
-    assert h1.score_row is score_row
-    assert h1.aggregate is aggregate
-    assert h1.GoldenEntry is GoldenEntry
-    assert h1.collect_rows is collect_rows
-
-
 def test_collect_rows_uses_exact_order_depth_and_propagates_errors(monkeypatch):
     from mainframe_rag.retrieve import query
     from mainframe_rag.retrieve.query import SearchHit
@@ -539,17 +528,12 @@ def test_ndcg_graded_ideal_single_max_gain_for_multi_doc():
     assert row["ndcg@8"] == pytest.approx(0.7604, abs=0.001)
 
 
-def test_bootstrap_delegate_and_promotion_share_statistics():
-    from scripts import bootstrap_ci, harness
+def test_promotion_and_harness_share_canonical_owners():
+    from scripts import harness
 
     from mainframe_rag.eval import promotion, statistics
 
-    for name in bootstrap_ci.__all__:
-        assert getattr(bootstrap_ci, name) is getattr(statistics, name)
-    assert harness.ci95_paired is statistics.ci95_paired
-    assert harness.ci_excludes_zero is statistics.ci_excludes_zero
     assert harness.gate_verdict is promotion.gate_verdict
-    assert harness.PRIMARY_METRICS is promotion.PRIMARY_METRICS
     assert harness.DEFAULT_CLASS_FLOOR is promotion.DEFAULT_CLASS_FLOOR
     assert promotion.ci95_paired is statistics.ci95_paired
     assert promotion.ci_excludes_zero is statistics.ci_excludes_zero
@@ -576,8 +560,7 @@ def harness_input_workspace(tmp_path):
     shutil.copy2(repo / "Taskfile.yml", tmp_path / "Taskfile.yml")
     shutil.copytree(repo / "taskfiles", tmp_path / "taskfiles")
     (tmp_path / "scripts").mkdir()
-    for name in ("harness.py", "harness_l1.py"):
-        shutil.copy2(repo / "scripts" / name, tmp_path / "scripts" / name)
+    shutil.copy2(repo / "scripts/harness.py", tmp_path / "scripts/harness.py")
     (tmp_path / ".venv/bin").mkdir(parents=True)
     launcher = tmp_path / ".venv/bin/python"
     launcher.write_text(

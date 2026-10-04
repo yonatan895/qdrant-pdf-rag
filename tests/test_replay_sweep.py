@@ -5,7 +5,6 @@ from types import SimpleNamespace
 
 import pytest
 from scripts.capture_pool import legs_to_record
-from scripts.eval_retrieval import GoldenEntry
 from scripts.replay_sweep import (
     HeadingJoinError,
     SweepConfig,
@@ -19,6 +18,7 @@ from scripts.replay_sweep import (
 )
 
 from mainframe_rag.config import Settings
+from mainframe_rag.eval.datasets import GoldenEntry
 from tests.conftest import _point
 
 

@@ -3,8 +3,8 @@ verdict logic (judge), deterministic stratified sampling (select_sample),
 and aggregation (summarize).
 
 Hermetic: no Qdrant, no vLLM, no TestClient — the pure helpers are imported
-directly. The live tier runs via `sh scripts/tools/run-task.sh eval:answers` (like
-scripts/test_local_e2e_vllm.py, never part of plain pytest)."""
+directly. The live tier runs via `sh scripts/tools/run-task.sh eval:answers`,
+never part of plain pytest."""
 
 from __future__ import annotations
 
@@ -834,41 +834,28 @@ def test_security_refusal_requires_the_complete_response():
         assert not is_abstention(body)
 
 
-def test_answer_delegate_and_l2_share_canonical_measurements():
-    """Compatibility and L2 cannot create separate capture/scoring identities."""
-    from scripts import eval_answers, harness_l2
-
-    from mainframe_rag.eval import answers
-
-    for name in eval_answers.__all__:
-        canonical = "AnswerCapture" if name == "_AnswerCapture" else name
-        assert getattr(eval_answers, name) is getattr(answers, canonical)
-    for name in ("AnswerCapture", "run_query", "select_sample", "answer_completeness",
-                 "failure_bucket", "inferred_index_off_gold", "why_mode"):
-        assert getattr(harness_l2, name) is getattr(answers, name)
-
-
-def test_answer_entry_points_preserve_help_and_holdout_refusal(tmp_path):
+@pytest.mark.parametrize("module,flags", [
+    ("answers", ("--golden", "--max-queries", "--all", "--out", "--summary")),
+    ("chat", ("--golden", "--limit", "--out", "--summary")),
+])
+def test_eval_module_cli_help_and_holdout_refusal(tmp_path, module, flags):
     import os
     import subprocess
     import sys
-    from pathlib import Path
 
-    root = Path(__file__).resolve().parents[1]
-    env = dict(os.environ, VENUE="dev", PYTHONPATH=str(root / "src"))
-    commands = ([sys.executable, str(root / "scripts/eval_answers.py")],
-                [sys.executable, "-m", "mainframe_rag.eval.answers"])
-    for command in commands:
-        help_result = subprocess.run([*command, "--help"], cwd=tmp_path, env=env,
-                                     capture_output=True, text=True, check=False)
-        assert help_result.returncode == 0, help_result.stderr
-        for flag in ("--golden", "--max-queries", "--all", "--out", "--summary"):
-            assert flag in help_result.stdout
-        # Refuse before reading even a missing protected asset or starting clients.
-        refused = subprocess.run([*command, "--golden", "holdout.jsonl"], cwd=tmp_path,
-                                 env=env, capture_output=True, text=True, check=False)
-        assert refused.returncode == 2
-        assert "requires VENUE=rc" in refused.stderr
+    env = dict(os.environ, VENUE="dev")
+    env.pop("PYTHONPATH", None)
+    command = [sys.executable, "-m", f"mainframe_rag.eval.{module}"]
+    help_result = subprocess.run([*command, "--help"], cwd=tmp_path, env=env,
+                                 capture_output=True, text=True, check=False)
+    assert help_result.returncode == 0, help_result.stderr
+    for flag in flags:
+        assert flag in help_result.stdout
+    # Refuse before reading even a missing protected asset or starting clients.
+    refused = subprocess.run([*command, "--golden", "holdout.jsonl"], cwd=tmp_path,
+                             env=env, capture_output=True, text=True, check=False)
+    assert refused.returncode == 2
+    assert "requires VENUE=rc" in refused.stderr
 
 
 @pytest.mark.parametrize("row_id", ["NEG-02", "NEG-03", "NEG-04", "NEG-07"])

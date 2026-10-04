@@ -58,11 +58,10 @@ Deliberate non-features
       to run variance is known.
 
 Execution shape
-    In-process FastAPI TestClient against the live app (precedent:
-    scripts/test_local_e2e_vllm.py) — same app code path as production,
-    lifespan-built clients, no second deployment to drift. Requires the
-    live stack (Qdrant + embedding vLLM + reasoning vLLM); it is a make
-    target, never part of plain pytest.
+    In-process FastAPI TestClient against the live app, using production
+    code and lifespan-built clients. Requires the live stack (Qdrant +
+    gateway-backed embedding and reasoning); run eval:answers explicitly,
+    never as part of plain pytest.
 
     Sampling is deterministic stratified round-robin (sorted classes, sorted
     ids, no RNG): every query_class — including negative/abstain traps — is
@@ -808,9 +807,8 @@ def main(argv: list[str] | None = None) -> int:
     sample = entries if args.all else select_sample(entries, args.max_queries)
     print(f"[*] answer-tier eval: {len(sample)} of {len(entries)} entries (deterministic stratified sample)", file=sys.stderr)
 
-    # Live stack only from here on: env must be set before the app imports it
-    # (same pattern as scripts/test_local_e2e_vllm.py — load_settings reads the
-    # environment at import time).
+    # Live stack only from here on: load_settings reads the environment
+    # when the app imports it, so configure it before importing.
     from fastapi.testclient import TestClient
 
     import mainframe_rag.agent.app as app_mod

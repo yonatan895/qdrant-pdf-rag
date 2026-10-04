@@ -473,24 +473,14 @@ def compare_eval(base: dict[str, Any], current: dict[str, Any], fmt: str) -> tup
         if cur_kind != base_kind:
             classification_changed.append((q, base_kind, cur_kind))
 
-        cur_r1 = cur_r.get("recall@1", 0.0)
-        base_r1 = base_r.get("recall@1", 0.0)
-        cur_r5 = cur_r.get("recall@5", 0.0)
-        base_r5 = base_r.get("recall@5", 0.0)
-        cur_mrr = cur_r.get("mrr", 0.0)
-        base_mrr = base_r.get("mrr", 0.0)
-
-        r1_regressed = cur_r1 < base_r1 - 1e-4
-        r5_regressed = cur_r5 < base_r5 - 1e-4
-        mrr_regressed = cur_mrr < base_mrr - 1e-4
-
-        r1_improved = cur_r1 > base_r1 + 1e-4
-        r5_improved = cur_r5 > base_r5 + 1e-4
-        mrr_improved = cur_mrr > base_mrr + 1e-4
-
-        if r1_regressed or r5_regressed or mrr_regressed:
+        metric_pairs = [
+            (cur_r.get(m, 0.0), base_r.get(m, 0.0)) for m in ("recall@1", "recall@5", "mrr")
+        ]
+        metric_regressions = [cur < base - 1e-4 for cur, base in metric_pairs]
+        metric_improvements = [cur > base + 1e-4 for cur, base in metric_pairs]
+        if any(metric_regressions):
             regressed.append(q)
-        elif r1_improved or r5_improved or mrr_improved:
+        elif any(metric_improvements):
             improved.append(q)
         else:
             unchanged.append(q)
@@ -854,37 +844,24 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    # eval
-    p_eval = subparsers.add_parser("eval", help="Render retrieval evaluation report")
-    p_eval.add_argument("--report", type=Path, default=None, help="Path to eval JSON report")
-    p_eval.add_argument("--baseline", type=Path, default=None, help="Optional baseline JSON path")
-    p_eval.add_argument("--format", choices=["text", "markdown", "html"], default="text")
-    p_eval.add_argument("--out", type=Path, default=None, help="Write output to file")
-
-    # bench
-    p_bench = subparsers.add_parser("bench", help="Render benchmark report")
-    p_bench.add_argument("--report", type=Path, default=None, help="Path to bench JSON report")
-    p_bench.add_argument("--baseline", type=Path, default=None, help="Optional baseline JSON path")
-    p_bench.add_argument("--format", choices=["text", "markdown", "html"], default="text")
-    p_bench.add_argument("--out", type=Path, default=None, help="Write output to file")
-
-    # compare-eval
-    p_ceval = subparsers.add_parser("compare-eval", help="Compare two eval JSON reports")
-    p_ceval.add_argument("--base", type=Path, default=None, help="Base eval JSON path")
-    p_ceval.add_argument("--current", type=Path, default=None, help="Current eval JSON path")
-    p_ceval.add_argument("--format", choices=["text", "markdown", "html"], default="text")
-    p_ceval.add_argument("--fail-on-regression", action="store_true", help="Exit non-zero if a regression is detected")
-    p_ceval.add_argument("--out", type=Path, default=None, help="Write output to file")
-
-    # compare-bench
-    p_cbench = subparsers.add_parser("compare-bench", help="Compare two bench JSON reports")
-    p_cbench.add_argument("--base", type=Path, default=None, help="Base bench JSON path")
-    p_cbench.add_argument("--current", type=Path, default=None, help="Current bench JSON path")
-    p_cbench.add_argument("--format", choices=["text", "markdown", "html"], default="text")
-    p_cbench.add_argument("--fail-on-regression", action="store_true", help="Exit non-zero if a regression is detected")
-    p_cbench.add_argument("--out", type=Path, default=None, help="Write output to file")
-
-    for command in (p_eval, p_bench, p_ceval, p_cbench):
+    for name, help_text in (
+        ("eval", "Render retrieval evaluation report"),
+        ("bench", "Render benchmark report"),
+        ("compare-eval", "Compare two eval JSON reports"),
+        ("compare-bench", "Compare two bench JSON reports"),
+    ):
+        command = subparsers.add_parser(name, help=help_text)
+        family = name.removeprefix("compare-")
+        if name.startswith("compare-"):
+            command.add_argument("--base", type=Path, default=None, help=f"Base {family} JSON path")
+            command.add_argument("--current", type=Path, default=None, help=f"Current {family} JSON path")
+        else:
+            command.add_argument("--report", type=Path, default=None, help=f"Path to {family} JSON report")
+            command.add_argument("--baseline", type=Path, default=None, help="Optional baseline JSON path")
+        command.add_argument("--format", choices=["text", "markdown", "html"], default="text")
+        if name.startswith("compare-"):
+            command.add_argument("--fail-on-regression", action="store_true", help="Exit non-zero if a regression is detected")
+        command.add_argument("--out", type=Path, default=None, help="Write output to file")
         command.add_argument(
             "--bundle-dir", default=None,
             help="select Task-compatible report/baseline defaults; render HTML into this directory",
@@ -920,28 +897,18 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--report is required unless --bundle-dir is supplied")
 
     exit_code = 0
-    if args.command == "eval":
-        report_data = _load_json(args.report)
-        baseline_data = _load_json(args.baseline) if args.baseline else None
-        output = render_eval(report_data, baseline_data, args.format)
-    elif args.command == "bench":
-        report_data = _load_json(args.report)
-        baseline_data = _load_json(args.baseline) if args.baseline else None
-        output = render_bench(report_data, baseline_data, args.format)
-    elif args.command == "compare-eval":
+    if comparing:
         base_data = _load_json(args.base)
         cur_data = _load_json(args.current)
-        output, has_reg = compare_eval(base_data, cur_data, args.format)
-        if args.fail_on_regression and has_reg:
-            exit_code = 1
-    elif args.command == "compare-bench":
-        base_data = _load_json(args.base)
-        cur_data = _load_json(args.current)
-        output, has_reg = compare_bench(base_data, cur_data, args.format)
+        compare = {"compare-eval": compare_eval, "compare-bench": compare_bench}[args.command]
+        output, has_reg = compare(base_data, cur_data, args.format)
         if args.fail_on_regression and has_reg:
             exit_code = 1
     else:
-        parser.error(f"Unknown command {args.command}")
+        report_data = _load_json(args.report)
+        baseline_data = _load_json(args.baseline) if args.baseline else None
+        render = {"eval": render_eval, "bench": render_bench}[args.command]
+        output = render(report_data, baseline_data, args.format)
 
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)

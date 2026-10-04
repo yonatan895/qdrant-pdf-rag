@@ -10,7 +10,7 @@ verification:
   3. Ingests the corpus into Qdrant in EMBED_MODE=hash (fast, purely CPU-bound).
   4. Runs evaluate() across all queries and checks for regressions against
      evals/baseline.json.
-  5. Renders a markdown delta table via scripts/render_report.py for PR comments / MR notes.
+  5. Renders a markdown delta table via eval.reports for PR comments / MR notes.
   6. Cleans up collections and stops the simulator container.
   7. Exits nonzero if any regression or query failure occurs, or 2 when the
      gate cannot be applied (missing/wrong-mode baseline, golden sha mismatch).
