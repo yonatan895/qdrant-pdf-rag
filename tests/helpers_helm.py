@@ -16,15 +16,11 @@ IMAGE_SHA = "a" * 40
 FAKE_CA = "-----BEGIN CERTIFICATE-----\nFAKE-CA-BUNDLE\n-----END CERTIFICATE-----"
 
 BASE_ENV = {
-    "IMAGE_SHA": IMAGE_SHA,
     "INTERNAL_REGISTRY": "reg.internal",
-    "NAMESPACE": "ns",
     "STORAGE_CLASS": "standard",
     "EMBED_MODEL": "embed-model",
     "DENSE_DIM": "768",
     "EMBED_MODEL_REVISION": "rev-1",
-    "VLLM_BASE_URL": "http://vllm:8000",
-    # Explicit EMBED_BASE_URL to pin the derivation (VLLM_BASE_URL + /v1).
     "EMBED_BASE_URL": "http://vllm:8000/v1",
 }
 
@@ -113,9 +109,11 @@ def base_values() -> dict:
         },
     }
 
-def run_new_template(extra_values: dict, namespace: str = "ns") -> dict:
+def run_new_template(extra_values: dict, namespace: str = "ns", *, job_only: bool = False) -> dict:
     """Render the new chart with synthetic values; return parsed docs."""
     values = base_values()
+    if job_only:
+        values["ingest"]["enabled"] = True
     ns = namespace
     extras = dict(extra_values)
     if "_namespace" in extras:
@@ -129,61 +127,18 @@ def run_new_template(extra_values: dict, namespace: str = "ns") -> dict:
                 dst[k] = v
 
     merge(values, extras)
-    with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
-        yaml.safe_dump(values, f)
-        values_file = f.name
-    try:
-        r = run(
-            ["helm", "template", "test", str(CHART), "--namespace", ns, "-f", values_file], cwd=REPO
-        )
-    finally:
-        Path(values_file).unlink(missing_ok=True)
+    r = _helm_template_with_values(values, ns, job_only=job_only)
     assert r.returncode == 0, f"helm template failed: {r.stderr}"
-    assert "__" not in r.stdout, "placeholder leaked through chart render"
-    docs = list(yaml.safe_load_all(r.stdout))
-    return {(d["kind"], d["metadata"]["name"]): d for d in docs if d}
+    if not job_only:
+        assert "__" not in r.stdout, "placeholder leaked through chart render"
+    docs = [d for d in yaml.safe_load_all(r.stdout) if d]
+    if job_only:
+        assert len(docs) == 1 and docs[0]["kind"] == "Job", f"expected one Job, got: {r.stdout[:500]}"
+    return {(d["kind"], d["metadata"]["name"]): d for d in docs}
 
 def run_new_job_only(extra_values: dict, namespace: str = "ns") -> dict:
     """Render only the ingest Job template (the explicit-operation path)."""
-    values = base_values()
-    values["ingest"]["enabled"] = True
-    extras = dict(extra_values)
-    if "_namespace" in extras:
-        namespace = extras.pop("_namespace")
-
-    def merge(dst, src):
-        for k, v in src.items():
-            if isinstance(v, dict) and isinstance(dst.get(k), dict):
-                merge(dst[k], v)
-            else:
-                dst[k] = v
-
-    merge(values, extras)
-    with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
-        yaml.safe_dump(values, f)
-        values_file = f.name
-    try:
-        r = run(
-            [
-                "helm",
-                "template",
-                "test",
-                str(CHART),
-                "--namespace",
-                namespace,
-                "-f",
-                values_file,
-                "--show-only",
-                "templates/ingest-job.yaml",
-            ],
-            cwd=REPO,
-        )
-    finally:
-        Path(values_file).unlink(missing_ok=True)
-    assert r.returncode == 0, f"helm template (job-only) failed: {r.stderr}"
-    docs = [d for d in yaml.safe_load_all(r.stdout) if d]
-    assert len(docs) == 1 and docs[0]["kind"] == "Job", f"expected one Job, got: {r.stdout[:500]}"
-    return {("Job", docs[0]["metadata"]["name"]): docs[0]}
+    return run_new_template(extra_values, namespace, job_only=True)
 
 def env_map(deployment: dict, container: str = "agent") -> dict:
     containers = deployment["spec"]["template"]["spec"]["containers"]
@@ -198,13 +153,14 @@ def ingest_env_map(job: dict) -> dict:
     c = next(x for x in job["spec"]["template"]["spec"]["containers"] if x["name"] == "ingest")
     return {e["name"]: e for e in c.get("env", [])}
 
-def _helm_template_with_values(values: dict):
+def _helm_template_with_values(values: dict, namespace: str = "ns", *, job_only: bool = False):
     with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
         yaml.safe_dump(values, f)
         path = f.name
     try:
-        return run(
-            ["helm", "template", "test", str(CHART), "--namespace", "ns", "-f", path], cwd=REPO
-        )
+        cmd = ["helm", "template", "test", str(CHART), "--namespace", namespace, "-f", path]
+        if job_only:
+            cmd.extend(["--show-only", "templates/ingest-job.yaml"])
+        return run(cmd, cwd=REPO)
     finally:
         Path(path).unlink(missing_ok=True)

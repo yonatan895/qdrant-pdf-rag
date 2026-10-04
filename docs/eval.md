@@ -129,6 +129,7 @@ mix (see `testing.md` harness invariants):
 | L1 gate | `gate_l1.py` | Does retrieval regress this PR? | CPU hash mode, ephemeral simulator, runtime synthetic corpus; required PR check |
 | Retrieval eval | `eval_retrieval.py` | How accurate is retrieval on real data? | Live Qdrant, golden or holdout |
 | Paraphrase | `eval_retrieval.py --golden evals/paraphrase.jsonl` | Do semantic changes move non-verbatim queries? | Dedicated collection, manual runbook |
+| Section probes | `eval_retrieval.py --golden evals/sections.jsonl`; record-replay §6.1 | Does retrieval reach the right section of the right manual, not only the right manual? | Real-corpus collections only (no synthetic pages exist for it); dev-only, never part of golden/holdout |
 | Answer eval | `eval_answers.py` | Are answers grounded and abstentions honest? | Live GPU stack, in-process client |
 | Layered harness | `harness.py` + `harness_l1/l2/l3/l4.py` (`src/mainframe_rag/eval/quality.py` owns the L4 tier) | Promote to release candidacy? | Snapshot-pinned live index (RC only) |
 | Bench | `benchmark.py` | Do resources/latencies regress? | CI runner env, mock LLM |
@@ -525,7 +526,7 @@ anywhere (`tests/test_replay.py`, `scripts/capture_pool.py`):
 ```bash
 # 1. Capture (RC/gap, live Qdrant + platform embed/rerank endpoints):
 VENUE=rc sh scripts/tools/run-task.sh eval:capture-pool          # records into bundles/pools-YYYYMMDD.jsonl
-#    overrides: GOLDEN=evals/golden.jsonl OUT=/path/pools.jsonl
+#    overrides: GOLDEN=evals/golden.jsonl OUT=/path/pools.jsonl DEPTH=200
 #    (the raw script also takes --no-ce / --max-queries; see its --help)
 # 2. Carry pools.jsonl back (ids/ranks/scores only, never chunk text —
 #    safe to move; still never tune against the frozen holdout).
@@ -535,7 +536,39 @@ VENUE=rc sh scripts/tools/run-task.sh eval:capture-pool          # records into 
 #    doc-level recall/MRR against the tune golden:
 #      python scripts/replay_sweep.py --pools bundles/pools.jsonl \
 #        --golden evals/golden.jsonl --json bundles/sweep.json
+#    Section level: join the captured ids to a local collection ingested
+#    from the same sources under the same extraction rules:
+#      python scripts/replay_sweep.py --pools bundles/pools.jsonl \
+#        --golden evals/sections.jsonl --headings-from manuals_current
 ```
+
+**Depth.** `DEPTH` (`--depth`, at most 200) records each leg deeper than
+production; the default records exactly the production prefetch, and a
+capture is never shallower. Cross-encoder scores stop at 100 per leg (the
+`rerank_candidates` ceiling, the deepest pool replay can rerank). Records
+carry `_meta.depth`/`_meta.ce_depth`; replay refuses a config deeper than
+the recorded depth (legacy pools prove only their longest leg), and the
+sweep reports such configs as skipped. `rerank100` in the grid needs
+`DEPTH>=100`.
+
+**Page bucket.** Pools record each chunk's physical first page
+(`page_start`) and replay diversifies on it exactly like live search
+(`_page_key`, #271). Earlier pools carried only the printed label, which
+is empty for unlabelled manuals (the JCL reference among them), so their
+replays bucketed whole documents as one page; re-capture rather than
+compare against them.
+
+**Section level.** Pools carry no headings, but chunk ids are UUID5 over
+`source_rev|heading_path|page|ordinal`, so an id that resolves in a local
+collection is the captured chunk with the captured heading.
+`--headings-from` joins every captured id (doc id and page must agree too)
+and then scores `expected_heading` with the shared `is_relevant_hit`. Any
+missing or mismatched id refuses the whole join: a different ingest is not
+a partial answer. `evals/sections.jsonl` holds the section probes:
+parameter-value questions against the JCL reference whose
+`expected_heading` targets the correctly labelled "Subparameter
+definition" sections. The doc-level golden cannot see right-manual,
+wrong-section misses.
 
 Capture path defaults live in `capture_pool.main`, selected explicitly with
 `--bundle-dir DIR`: the default input is `evals/golden.jsonl` and the output is
@@ -551,9 +584,9 @@ access precedes client startup and output replacement on either entry point.
 Rules: CE-less pools (bypassed queries, `--no-ce`) replay RRF-only —
 rerank refuses them fail-closed, never fabricate scores. Split
 recordings replay per-leg (`record_to_rows(record, leg=i)`); merging
-legs corrupts ranks. The sweep's ruler is doc-level only (pools carry no
-headings/message ids), so a swept gain is a candidate: adoption requires
-the live eval/holdout. Deltas ship in the PR body like any retrieval
+legs corrupts ranks. The sweep's ruler is doc-level unless headings are
+joined (pools carry no message ids either), so a swept gain is a
+candidate: adoption requires the live eval/holdout. Deltas ship in the PR body like any retrieval
 change (`live-stack.md` rung 7); re-capture after any re-ingest (pools
 pin rank order, not content). Pools stay in `bundles/`/scratch — never
 committed (the real-corpus venue guard refuses `real_manuals` without

@@ -128,7 +128,8 @@ tasks:
     summary: |
       `scripts/capture_pool.py` where the real models live, mirroring
       the retired `make capture-pool`. Inputs: GOLDEN (default evals/golden.jsonl), OUT
-      (default bundles/pools-YYYYMMDD.jsonl); empty values fall back like
+      (default bundles/pools-YYYYMMDD.jsonl), DEPTH (per-leg pool depth, default
+      production; max 200); empty values fall back like
       Make `$(or)`. Output carries ids/ranks/scores only, never chunk text;
       keep it in bundles/ or scratch, never commit.
     vars:
@@ -141,9 +142,10 @@ tasks:
       TASK_VENUE: '{{.VENUE}}'
       TASK_GOLDEN: '{{.GOLDEN}}'
       TASK_OUT: '{{.OUT}}'
+      TASK_DEPTH: '{{.DEPTH}}'
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
-      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/capture_pool.py --bundle-dir "$TASK_BUNDLE_DIR" {{if .GOLDEN}}--golden "$TASK_GOLDEN"{{end}} {{if .OUT}}--out "$TASK_OUT"{{end}}
+      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/capture_pool.py --bundle-dir "$TASK_BUNDLE_DIR" {{if .GOLDEN}}--golden "$TASK_GOLDEN"{{end}} {{if .OUT}}--out "$TASK_OUT"{{end}} {{if .DEPTH}}--depth "$TASK_DEPTH"{{end}}
 
   answers:
     desc: Answer-tier golden eval on the live GPU stack
