@@ -286,9 +286,15 @@ a type-distinct body template (`Table:`/`Syntax:` label line for table/syntax
 bodies; message/narrative keep the bare prose shape), then text
 (not raw chunk text), and the query is the acronym-expanded form. Passages
 cap at `RERANK_PASSAGE_MAX_CHARS` (3000 chars, header-first: header, title,
-heading, and template label stay whole, the body tail is cut): oversize
-atomic chunks would otherwise 400 the scorer's 2048-token window and fail
-the whole search.
+heading, and template label stay whole, the body tail is cut). Measured with
+the bge-reranker-v2-m3 tokenizer over 226,917 real-corpus passages (issue
+#664): worst case 1.18 chars/token, and 31 passages overflow a 2048-token
+window (60-token query) at 3000 chars; a 2000-char cut overflows none. A
+static 2000 cut would shorten 62% of passages, so instead a batch rejected on
+both legs with HTTP 4xx (not 5xx, transport or shape errors) is re-scored
+once with each passage cut to `RERANK_RETRY_PASSAGE_MAX_CHARS` (2000; the
+tail of the formatted string, so the leading header lines stay); a failing
+retry raises as before (fail closed).
 
 The memoized reranker is keyed by `_reranker_config_key(settings)` (issue #156) —
 a tuple of 8 configuration values (`embed_mode`, `rerank_base_url`, `embed_base_url`,

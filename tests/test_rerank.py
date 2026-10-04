@@ -117,6 +117,25 @@ def test_format_rerank_text_caps_oversize_body():
     assert "Messages" in text
 
 
+def test_format_rerank_text_never_exceeds_cap_for_any_shape():
+    from mainframe_rag.retrieve.rerank import RERANK_PASSAGE_MAX_CHARS
+
+    for chunk_type in ("narrative", "table", "syntax", "message"):
+        for heading in ("", "H" * 50, "H" * 5000):
+            hit = _make_hit("c9", "SA22-7592-05", 0.7, heading=heading, text="x" * 9000)
+            hit = hit.model_copy(
+                update={"chunk_type": chunk_type, "message_ids": ("IEF123I",) * 400}
+            )
+            assert len(format_rerank_text(hit)) <= RERANK_PASSAGE_MAX_CHARS
+
+
+def test_format_rerank_text_short_passage_byte_identical():
+    hit = _make_hit("c1", "D1", 0.5, heading="H", text="short body")
+    text = format_rerank_text(hit)
+    assert text.endswith("\nshort body")
+    assert len(text) < 200
+
+
 def test_format_rerank_text_cap_keeps_template_label_whole():
     """Oversize table/syntax bodies: the template label stays whole with
     header/title/heading; only the body tail is cut."""
@@ -592,6 +611,139 @@ def test_http_reranker_rerank_first_both_spent_fails_closed():
     reranker = HttpReranker(settings, client=httpx2.Client(transport=httpx2.MockTransport(handler)))
     with pytest.raises(RuntimeError, match="no usable scores"):
         reranker.score("query", ["text0", "text1"])
+
+
+def _retry_settings(**kw):
+    return Settings(
+        rerank_base_url="http://rerank.test/v1",
+        rerank_model="BAAI/bge-reranker-v2-m3",
+        rerank_batch_size=2,
+        rerank_timeout_s=3.0,
+        _env_file=None,
+        **kw,
+    )
+
+
+def _window_handler(calls, *, status=400, retry_ok=True):
+    """Fake gateway: rejects (status) any request holding a passage over the
+    retry cap, on both endpoints; otherwise scores by text length."""
+    import json
+
+    from mainframe_rag.retrieve.rerank import RERANK_RETRY_PASSAGE_MAX_CHARS
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        body = json.loads(request.content)
+        docs = body.get("text_2") or body.get("documents")
+        calls.append((request.url.path, list(docs)))
+        if any(len(d) > RERANK_RETRY_PASSAGE_MAX_CHARS for d in docs) or not retry_ok:
+            return httpx2.Response(status, json={"error": "window"})
+        if request.url.path.endswith("/score"):
+            return httpx2.Response(
+                200, json={"data": [{"index": i, "score": len(d) / 10000} for i, d in enumerate(docs)]}
+            )
+        return httpx2.Response(
+            200, json={"results": [{"index": i, "score": len(d) / 10000} for i, d in enumerate(docs)]}
+        )
+
+    return handler
+
+
+def _client(handler):
+    return httpx2.Client(transport=httpx2.MockTransport(handler))
+
+
+def test_http_reranker_4xx_both_legs_retries_batch_with_cut_passages():
+    from mainframe_rag.retrieve.rerank import RERANK_RETRY_PASSAGE_MAX_CHARS
+
+    calls: list = []
+    reranker = HttpReranker(_retry_settings(), client=_client(_window_handler(calls)))
+    long_text = "H1\nH2\n" + "x" * 2900
+    scores = reranker.score("q", [long_text, "short"])
+    assert scores == [RERANK_RETRY_PASSAGE_MAX_CHARS / 10000, 5 / 10000]
+    # score + rerank rejected, then exactly one retry (score leg succeeds).
+    assert [c[0] for c in calls] == ["/v1/score", "/v1/rerank", "/v1/score"]
+    assert calls[0][1] == [long_text, "short"]
+    assert calls[2][1] == [long_text[:RERANK_RETRY_PASSAGE_MAX_CHARS], "short"]
+    assert calls[2][1][0].startswith("H1\nH2\n")
+
+
+def test_http_reranker_4xx_retry_only_affects_failing_batch():
+    calls: list = []
+    reranker = HttpReranker(_retry_settings(), client=_client(_window_handler(calls)))
+    reranker.score("q", ["a" * 100, "b" * 200, "c" * 2500, "d"])
+    paths = [c[0] for c in calls]
+    # first batch: single score call, texts untouched.
+    assert paths[0] == "/v1/score"
+    assert calls[0][1] == ["a" * 100, "b" * 200]
+    # second batch: rejected on both legs, retried once with the cut.
+    assert paths[1:] == ["/v1/score", "/v1/rerank", "/v1/score"]
+    assert calls[1][1] == ["c" * 2500, "d"]
+    assert calls[3][1] == ["c" * 2000, "d"]
+
+
+def test_http_reranker_normal_requests_byte_identical():
+    calls: list = []
+    reranker = HttpReranker(_retry_settings(), client=_client(_window_handler(calls)))
+    texts = ["s" * 5, "m" * 1999, "n" * 2000, "z"]
+    reranker.score("q", texts)
+    assert [c[0] for c in calls] == ["/v1/score", "/v1/score"]
+    assert calls[0][1] + calls[1][1] == texts
+
+
+@pytest.mark.parametrize("status", [500, 503])
+def test_http_reranker_5xx_not_retried_with_cut_text(status):
+    calls: list = []
+    reranker = HttpReranker(_retry_settings(), client=_client(_window_handler(calls, status=status)))
+    with pytest.raises(httpx2.HTTPStatusError):
+        reranker.score("q", ["x" * 2500, "y"])
+    assert [c[0] for c in calls] == ["/v1/score", "/v1/rerank"]
+    assert calls[0][1] == calls[1][1] == ["x" * 2500, "y"]
+
+
+def test_http_reranker_transport_error_not_retried_with_cut_text():
+    seen: list = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request.url.path)
+        raise httpx2.ConnectError("down", request=request)
+
+    reranker = HttpReranker(_retry_settings(), client=_client(handler))
+    with pytest.raises(httpx2.RequestError):
+        reranker.score("q", ["x" * 2500, "y"])
+    assert seen == ["/v1/score", "/v1/rerank"]
+
+
+def test_http_reranker_4xx_on_score_but_5xx_on_rerank_not_retried():
+    seen: list = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request.url.path)
+        return httpx2.Response(400 if request.url.path == "/v1/score" else 502)
+
+    reranker = HttpReranker(_retry_settings(), client=_client(handler))
+    with pytest.raises(httpx2.HTTPStatusError):
+        reranker.score("q", ["x" * 2500, "y"])
+    assert seen == ["/v1/score", "/v1/rerank"]
+
+
+def test_http_reranker_retry_also_failing_raises_as_before():
+    calls: list = []
+    reranker = HttpReranker(_retry_settings(), client=_client(_window_handler(calls, retry_ok=False)))
+    with pytest.raises(httpx2.HTTPStatusError):
+        reranker.score("q", ["x" * 2500, "y"])
+    # first attempt (2 legs) + exactly one retry attempt (2 legs), no more.
+    assert len(calls) == 4
+
+
+def test_http_reranker_rerank_first_4xx_retry():
+    calls: list = []
+    reranker = HttpReranker(
+        _retry_settings(rerank_endpoint_order="rerank_first"),
+        client=_client(_window_handler(calls)),
+    )
+    reranker.score("q", ["x" * 2500, "y"])
+    assert [c[0] for c in calls] == ["/v1/rerank", "/v1/score", "/v1/rerank"]
+    assert len(calls[2][1][0]) == 2000
 
 
 def test_build_reranker_dispatch():
