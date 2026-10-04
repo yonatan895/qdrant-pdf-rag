@@ -300,7 +300,7 @@ status (`/ui` failures render HTML banners instead, §1):
 | `invalid_request` / `request body failed validation` | 422 | Pydantic failure, the shared query guard (overlong, empty after `str.strip()`, or containing NUL/C0 controls other than `\t\n\r`, issue #579; or, when `embed_max_input_chars` is set, a query whose dense text — prefix plus query — exceeds it, issue #374: refused before any model call, never truncated; an effective query that only grows past the bound after expansion/condensation is refused by the embedder with the same envelope), and a chat/console active `user` turn that is missing, blank, control-character or overlong (one message, every 422 path) |
 | `overloaded` / `the service is at capacity; retry later` | 503 + `Retry-After: 1` | Request admission refused (issue #374): all `request_max_concurrent` slots busy and the bounded wait queue full or its wait expired. Raised first, before validation, the serving gate and any retrieval/model work; only when a limit is selected. `/ui/chat` renders its fixed banner; `/ui/chat/stream` returns this envelope |
 | `deadline_exceeded` / `request deadline exceeded` | 504 | Total request deadline (`request_deadline_s`, issue #374) expired before the response began; on an already-open stream it is an `error` event (no `final`, `generation_incomplete`) instead. Only when a deadline is selected |
-| `prompt_budget_exceeded` / `prompt exceeds the model token budget` | 422 | Irreducible token-budget overflow (issue #368): fixed content alone exceeds the window with nothing left to trim; raised before any model call on JSON/chat, as an `error` event (no `final`) on already-open streams; `/ui/chat` renders its fixed banner |
+| `prompt_budget_exceeded` / `prompt exceeds the model token budget` | 422 | Irreducible token-budget overflow (issue #368): fixed content alone exceeds the window with nothing left to trim, or (issue #634) hits were retrieved but final packing supplied no usable excerpt (atomic-unit omission, verification trimming, whitespace-only text); the second case is the `EvidenceBudgetExceeded` subtype, logged/spanned under that type but identical on the wire; raised before any model call on JSON/chat, as an `error` event (no `final`) on already-open streams; `/ui/chat` renders its fixed banner |
 | `metrics_unavailable` / `metrics are not available` | 503 | `/metrics` scrape failure while enabled |
 | `not_found` / `not found` | 404 | Unknown route |
 | `method_not_allowed` / `method not allowed` | 405 | Wrong method |
@@ -339,7 +339,9 @@ strict stream-end rule above is the upstream reasoning wire and the
   `citations_inferred: false`, empty `inferred_indices`, `ttft_ms: null`, zeroed usage. The empty-hits
   short-circuit happens before prompt build and any LLM call, on both JSON
   and SSE. A pre-generation budget failure (issue #368) likewise precedes
-  any model call: JSON/chat answer it with `422 prompt_budget_exceeded`,
+  any model call. Retrieved hits with zero usable supplied excerpts (issue
+  #634) take the same path, never a model call and never the no-hits
+  answer (which would claim the corpus lacks support): JSON/chat answer it with `422 prompt_budget_exceeded`,
   while an already-open stream carries `event: error` and ends without
   a `final`.
 - `Server-Timing` on `/v1/answer` SSE responses carries the retrieval legs only

@@ -1117,3 +1117,141 @@ async def test_single_incomplete_terminal_remains_incomplete(typed):
     assert events[-1]['type'] == 'final'
     assert events[-1]['output'].finish_reason == 'length'
     assert events[-1]['output'].verification_state == 'generation_incomplete'
+
+
+# ---------------------------------------------------------------------------
+# Issue #634: no generation call when final packing supplies no usable evidence
+# ---------------------------------------------------------------------------
+
+
+class _RecordingLLM:
+    """Counts real invocations of both generation methods."""
+
+    def __init__(self) -> None:
+        self.chat_calls = 0
+        self.stream_calls = 0
+
+    def chat(self, messages, reasoning_effort=None, temperature=None):
+        self.chat_calls += 1
+        return ChatResult(content="Answer.\n\nCitations:\n", finish_reason="stop", usage=TokenUsage())
+
+    async def chat_stream(self, messages, reasoning_effort=None, temperature=None):
+        self.stream_calls += 1
+        yield {"type": "token", "delta": "Answer.", "ttft_ms": 1}
+        yield {"type": "done", "finish_reason": "stop", "usage": TokenUsage(), "ttft_ms": 1}
+
+
+class _ExcerptOvershootTokenizer:
+    """Fixed prompt fits; any prompt carrying an excerpt overshoots, so the
+    verification loop trims every excerpt away."""
+
+    def __init__(self, marker: str) -> None:
+        self.marker = marker
+
+    def count_tokens(self, text: str) -> int:
+        return len(text) // 4
+
+    def count_messages(self, messages) -> int:
+        return 10**9 if any(self.marker in m.content for m in messages) else 10
+
+
+_BIG_ATOMIC = "//STEP1  EXEC PGM=IEFBR14,PARM=" + "A" * 1500
+
+
+def _zero_evidence_hit(kind: str) -> tuple[SearchHit, dict]:
+    hit = _hit()
+    settings: dict = {"prompt_max_chunk_chars": 500}
+    if kind == "atomic":
+        hit = hit.model_copy(update={"text": _BIG_ATOMIC, "units": ((0, len(_BIG_ATOMIC), "atomic"),)})
+    elif kind == "legacy":
+        hit = hit.model_copy(update={"text": _BIG_ATOMIC, "units": None})
+    elif kind == "whitespace":
+        hit = hit.model_copy(update={"text": "  \n\t  ", "units": None})
+    return hit, settings
+
+
+async def _run_zero_evidence(kind: str, mode: str, llm: _RecordingLLM):
+    hit, overrides = _zero_evidence_hit(kind)
+    tokenizer = _ExcerptOvershootTokenizer(f"[1] {hit.cite}") if kind == "verify" else None
+    deps = _deps(_settings(**overrides), llm, lambda *_a, **_k: ([hit], "nl", {}))
+    deps.tokenizer = tokenizer
+    messages = [ChatMessage(role="user", content="What does IEA500I mean?")]
+    source = AnswerCoreInput(
+        query="What does IEA500I mean?",
+        hits=[hit],
+        is_chat=mode.startswith("chat"),
+        messages=messages if mode.startswith("chat") else None,
+        splunk_context="host=ZOS1 level=ERROR synthetic",
+    )
+    if mode.endswith("stream"):
+        return [e async for e in execute_answer_core_stream(source, deps)]
+    return await execute_answer_core(source, deps)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", ["single", "chat", "single-stream", "chat-stream"])
+@pytest.mark.parametrize("kind", ["atomic", "legacy", "whitespace", "verify"])
+async def test_core_no_supplied_evidence_never_invokes_generation(kind, mode):
+    from mainframe_rag.agent.answer import PromptBudgetExceeded
+    from mainframe_rag.agent.answer_core import EvidenceBudgetExceeded
+
+    llm = _RecordingLLM()
+    with pytest.raises(EvidenceBudgetExceeded) as exc_info:
+        await _run_zero_evidence(kind, mode, llm)
+    assert (llm.chat_calls, llm.stream_calls) == (0, 0)
+    # Same client-visible cause as the existing budget mapping, count-only text.
+    assert isinstance(exc_info.value, PromptBudgetExceeded)
+    assert "IEA500I" not in str(exc_info.value) and "ZOS1" not in str(exc_info.value)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", ["single", "chat", "single-stream", "chat-stream"])
+async def test_core_one_usable_excerpt_invokes_generation_once(mode):
+    llm = _RecordingLLM()
+    hit = _hit()
+    deps = _deps(_settings(), llm, lambda *_a, **_k: ([hit], "nl", {}))
+    source = AnswerCoreInput(
+        query="What does IEA500I mean?",
+        hits=[hit],
+        is_chat=mode.startswith("chat"),
+        messages=[ChatMessage(role="user", content="What does IEA500I mean?")]
+        if mode.startswith("chat")
+        else None,
+    )
+    if mode.endswith("stream"):
+        events = [e async for e in execute_answer_core_stream(source, deps)]
+        assert events[-1]["type"] == "final"
+    else:
+        await execute_answer_core(source, deps)
+    assert (llm.chat_calls, llm.stream_calls) == (
+        (0, 1) if mode.endswith("stream") else (1, 0)
+    )
+
+
+@pytest.mark.anyio
+async def test_core_fixed_content_overflow_stays_plain_budget_error():
+    """Irreducible fixed-content overflow keeps its own (non-evidence) cause."""
+    from mainframe_rag.agent.answer import PromptBudgetExceeded
+    from mainframe_rag.agent.answer_core import EvidenceBudgetExceeded
+
+    class _AlwaysOver(_ExcerptOvershootTokenizer):
+        def count_messages(self, messages) -> int:
+            return 10**9
+
+    llm = _RecordingLLM()
+    hit = _hit()
+    deps = _deps(_settings(), llm, lambda *_a, **_k: ([hit], "nl", {}))
+    deps.tokenizer = _AlwaysOver("")
+    with pytest.raises(PromptBudgetExceeded) as exc_info:
+        await execute_answer_core(AnswerCoreInput(query="IEA500I", hits=[hit]), deps)
+    assert not isinstance(exc_info.value, EvidenceBudgetExceeded)
+    assert llm.chat_calls == 0
+
+
+@pytest.mark.anyio
+async def test_core_no_hits_remains_deterministic_not_budget_error():
+    llm = _RecordingLLM()
+    deps = _deps(_settings(), llm, lambda *_a, **_k: ([], "nl", {}))
+    out = await execute_answer_core(AnswerCoreInput(query="obscure thing", hits=[]), deps)
+    assert out.verification_state == "insufficient_evidence"
+    assert (llm.chat_calls, llm.stream_calls) == (0, 0)
