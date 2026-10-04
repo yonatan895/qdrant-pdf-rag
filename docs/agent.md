@@ -417,9 +417,19 @@ select `complex`. Default is `simple`.
   and trims up to `4 + 2*len(packed excerpts)` rounds (64-char overcut, drop
   under 80 chars, else suffix; the bound scales with the trimmable evidence
   so `prompt_budget_exceeded` means nothing was left to trim, #307).
-  Chat packing (`build_chat_messages`) uses the same discipline but
-  trims in two tiers for up to `4*2 + 2*len(packed) + len(prior turns)` rounds: excerpt
-  bodies first, then it pops the oldest history turn. Never per-chunk
+  Chat packing (`build_chat_messages`) uses the same discipline under one
+  deterministic retention policy (#633) applied to both planning and recount:
+  the system prompt, scope, active question and the most recent prior turn
+  (the last user message plus its assistant replies, the antecedent) are
+  mandatory; older whole turns are expendable and rank below current
+  evidence. Planning charges only the antecedent against the excerpt budget,
+  then keeps older turns newest-first, contiguous and whole, only in the
+  space the packed evidence leaves. Recount runs for up to
+  `4*2 + 2*len(packed) + len(older turns)` rounds: it pops the oldest older
+  turn first, then trims excerpt bodies; if the antecedent plus question and
+  evidence still overflow, it raises `PromptBudgetExceeded` rather than
+  dropping the antecedent. Prior assistant text never enters the evidence
+  manifest, and caller message lists are never mutated. Never per-chunk
   tokenize RPCs.
 - Planning and verification both charge reserved output, the selected complexity's
   thinking reserve and safety margin, for both single-turn answers and chat.

@@ -818,6 +818,18 @@ def build_messages(
     )
 
 
+def _split_history_turns(history: list[ChatMessage]) -> list[list[ChatMessage]]:
+    """Group history into whole turns: each starts at a user message and keeps
+    the assistant replies that follow it (leading assistants form their own
+    group). Returns new lists; the caller's list is never touched (issue #633)."""
+    turns: list[list[ChatMessage]] = []
+    for m in history:
+        if m.role == "user" or not turns:
+            turns.append([])
+        turns[-1].append(m)
+    return turns
+
+
 def _build_prompt(
     query: str,
     hits: list[SearchHit],
@@ -836,7 +848,12 @@ def _build_prompt(
     history: list[ChatMessage] | None = None,
 ) -> PreparedPrompt:
     is_chat = history is not None
-    prior_messages = history if history is not None else []
+    # Retention policy (issue #633), identical for planning and recount: the
+    # most recent turn is the mandatory antecedent; older turns are
+    # expendable and rank below current evidence.
+    history_turns = _split_history_turns(history) if history is not None else []
+    antecedent: list[ChatMessage] = history_turns[-1] if history_turns else []
+    older_turns: list[list[ChatMessage]] = history_turns[:-1]
     if complexity is None:
         complexity = classify_query_complexity(query)
 
@@ -885,7 +902,8 @@ def _build_prompt(
     def candidate() -> list[ChatMessage]:
         return [
             ChatMessage(role="system", content=system_content),
-            *prior_messages,
+            *(m for turn in older_turns for m in turn),
+            *antecedent,
             ChatMessage(
                 role="user",
                 content=_user_content(
@@ -915,7 +933,7 @@ def _build_prompt(
         # trailing citation example).
         fixed_tokens = estimate_tokens(
             system_content + "\n" + "\n".join(parts) + "\n" + tail_part
-        ) + sum(estimate_tokens(m.content) for m in prior_messages)
+        ) + sum(estimate_tokens(m.content) for m in antecedent)
         budget_tokens = max(100, model_len - reserved - thinking_reserve - margin - fixed_tokens)
 
         packed = _plan_packed_excerpts(
@@ -927,6 +945,20 @@ def _build_prompt(
             complexity,
         )
 
+        # Older turns only fill what the packed evidence leaves free, newest
+        # first and contiguous; the recount below is the exact check.
+        if older_turns:
+            candidates, older_turns = older_turns, []
+            estimated = sum(estimate_tokens(m.content) for m in candidate())
+            kept_turns: list[list[ChatMessage]] = []
+            for turn in reversed(candidates):
+                cost = sum(estimate_tokens(m.content) for m in turn)
+                if estimated + cost > model_len - reserved - thinking_reserve - margin:
+                    break
+                kept_turns.insert(0, turn)
+                estimated += cost
+            older_turns = kept_turns
+
         # Verification is the only tokenizer work: count the packed prompt
         # once, chat-template aware, and trim the tail if the estimator
         # drifted past the window. The verify limit prices the same terms as
@@ -936,7 +968,7 @@ def _build_prompt(
         verify_limit = model_len - reserved - thinking_reserve - margin
         verified_clean = False
         max_rounds = (
-            _trim_round_limit(len(packed), len(prior_messages), base=_MAX_TRIM_ROUNDS * 2)
+            _trim_round_limit(len(packed), len(older_turns), base=_MAX_TRIM_ROUNDS * 2)
             if is_chat
             else _trim_round_limit(len(packed))
         )
@@ -948,10 +980,10 @@ def _build_prompt(
             if used <= verify_limit:
                 verified_clean = True
                 break
-            if packed:
+            if older_turns:
+                older_turns.pop(0)
+            elif packed:
                 _verify_trim_last(packed, used, verify_limit)
-            elif prior_messages:
-                prior_messages.pop(0)
             else:
                 break
         if not verified_clean:
@@ -1745,13 +1777,17 @@ def build_chat_messages(
     """Build multi-turn chat prompt messages + supplied-evidence manifest.
 
     - System message: authoritative system prompt (with complex extension if applicable).
-    - Prior turns: user and assistant messages from history (sliding window).
+    - Prior turns: user and assistant messages from history (sliding window), grouped
+      into whole turns. The last turn is the mandatory antecedent; older turns are
+      expendable.
       Raw manual excerpts in past assistant messages are pruned and character-capped
       to preserve token budget.
     - Active turn (last user message): injected with current sysplex/splunk context,
       freshly retrieved manual excerpts for the active question, and citation tail instructions.
     - Tokenizer-aware verification: verifies whole prompt [system, *history, active]
-      against verify_limit with two-tier trimming (Tier 1: active excerpts; Tier 2: history turns).
+      against verify_limit; older whole turns are dropped oldest-first before
+      excerpts are trimmed, and the antecedent is never dropped (irreducible overflow
+      raises PromptBudgetExceeded).
     - Evidence: manifest of the active-turn excerpts that survived packing (issue
       #364); prior turns are conversation context, never evidence for the new answer.
     """
