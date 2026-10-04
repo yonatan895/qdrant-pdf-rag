@@ -883,9 +883,14 @@ from the finalized parse plus the transport outcome — one rule,
 | State | Meaning | Never means |
 |---|---|---|
 | `accepted` | Nonempty substantive parsed prose, eligible non-inferred citations and generation finished (`stop`) | Semantic proof of any claim or certification of an extracted script |
-| `insufficient_evidence` | Abstention-shaped evidence/security refusal or empty-hits short-circuit | A failed request (still 200 + explicit text) |
+| `insufficient_evidence` | Whole-response evidence/security refusal (every substantive clause refuses; any answer clause makes it mixed) with a `stop` finish, or the empty-hits short-circuit (no generation) | A failed request (still 200 + explicit text) |
 | `unverified_draft` | Non-abstention prose with zero eligible citations (absent, rejected, or inferred-only), or a finished nonempty script with no prose | An error (still 200 — the draft label is the signal) |
-| `generation_incomplete` | Non-`stop` finish, neither substantive parsed prose nor a nonempty script after fallbacks, absent/`null` terminal finish, upstream `error` frame, malformed frame, or stream error/cancel/disconnect | An accepted answer (terminal wire shape may still be complete) |
+| `generation_incomplete` | Non-`stop` finish after generation (including a cut-off refusal fragment; this outranks refusal), neither substantive parsed prose nor a nonempty script after fallbacks, absent/`null` terminal finish, upstream `error` frame, malformed frame, or stream error/cancel/disconnect | An accepted answer (terminal wire shape may still be complete) |
+
+State precedence (#630): empty-hits short circuit, then non-`stop` finish,
+then whole-response refusal, then body/citation outcome. Mixed answers (an
+answer clause plus a missing-detail caveat) are not refusals at any length and
+keep their eligible citations.
 
 Body presence is shared with the answer eval (#576): empty `Answer` headings,
 citation labels (including inline labels followed only by bracket indices or

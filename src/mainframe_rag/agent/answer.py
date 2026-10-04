@@ -13,7 +13,7 @@ import json
 import logging
 import re
 import time
-from collections.abc import AsyncIterator, Awaitable
+from collections.abc import AsyncIterator, Awaitable, Iterator, Sequence
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -220,28 +220,45 @@ def is_refusal(answer_body: str) -> bool:
             or _SECURITY_REFUSAL_RE.fullmatch(answer_body.strip()) is not None)
 
 
-# Abstention shape: an abstention's substance is the refusal itself. After
-# stripping the refusal-marked sentences, whatever prose remains is below
-# this floor. A grounded answer that hedges one sentence ("the excerpts do
-# not contain a specific value, the setting depends on ...") keeps several
-# hundred chars of substance and is NOT an abstention (caught live on the
-# LFAREA probe — issue #135).
-_ABSTENTION_REMAINDER_CHARS = 200
+# Whole-response refusal recognition (issue #630). A refusal is the whole
+# answer: every substantive clause is itself a refusal. An answer to one part
+# followed by a qualification about another keeps a non-refusal clause and is
+# therefore NOT an abstention, however short or long it is — no length
+# threshold, so harmless verbosity cannot flip the classification. A refusal
+# marker inside quotes is quoted text, not the response declining.
+_QUOTED_SPAN_RE = re.compile(r'"[^"\n]*"|“[^”\n]*”|`[^`\n]*`')
+_CLAUSE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\n+|;\s*|,?\s+(?:but|however),?\s+", re.IGNORECASE)
+# A bare pointer to the excerpts ("See [1].") carries no claim of its own.
+_POINTER_CLAUSE_RE = re.compile(
+    r"(?:see|refer to|cf\.?)\s*(?:\[[\d,\s]+\][\s,;]*(?:and\s*)?)+[.!]?", re.IGNORECASE
+)
 
 
-def is_abstention(answer_body: str) -> bool:
-    """True when the answer's substance is the refusal itself: at least one
-    explicit-refusal marker is present AND, after stripping the refusal-
-    marked sentences, the non-refusal remainder is under the shape floor.
-    The marker gate first (a short grounded answer carries no marker and is
-    never an abstention); the shape second — the battery alone cannot
-    distinguish a full abstention from a grounded answer quoting one
-    hedging sentence."""
+def _is_refusal_clause(clause: str) -> bool:
+    unquoted = _QUOTED_SPAN_RE.sub(" ", clause)
+    return is_refusal(_INLINE_INDEX_RE.sub("", unquoted).strip())
+
+
+def is_abstention(answer_body: str, citations: Sequence[str] = ()) -> bool:
+    """True only when the whole response is a refusal: it carries an explicit
+    refusal and every substantive clause (after dropping citation/label
+    scaffolding, bare "See [n]" pointers) is a refusal clause. `citations` are
+    the validated citation lines, so scaffolding is recognized exactly as
+    has_answer_body does."""
     if not is_refusal(answer_body):
         return False
-    sentences = re.split(r"(?<=[.!?])\s+|\n+", answer_body)
-    remaining = [s for s in sentences if s.strip() and not is_refusal(s)]
-    return sum(len(s) for s in remaining) < _ABSTENTION_REMAINDER_CHARS
+    clauses = [
+        clause
+        for line in _prose_lines(answer_body, citations)
+        for clause in _CLAUSE_SPLIT_RE.split(line)
+        if clause and clause.strip()
+    ]
+    if not clauses:
+        return False
+    return all(
+        _is_refusal_clause(c) or _POINTER_CLAUSE_RE.fullmatch(c.strip()) is not None
+        for c in clauses
+    )
 
 
 # Answer verification states (issue #365): machine-readable labels for what
@@ -282,8 +299,8 @@ _PROMPT_ECHO_LINE_RE = re.compile(
 )
 
 
-def has_answer_body(answer: str, citations: list[str]) -> bool:
-    """Recognize parsed prose beyond citation scaffolding, without a length floor."""
+def _prose_lines(answer: str, citations: Sequence[str]) -> Iterator[str]:
+    """Lines of parsed prose beyond citation scaffolding, labels removed."""
     from mainframe_rag.agent.cites import (
         CITATION_LINE_RE,
         normalize_citation_line,
@@ -301,8 +318,12 @@ def has_answer_body(answer: str, citations: list[str]) -> bool:
         ):
             continue
         if re.search(r"[^\W_]", _INLINE_INDEX_RE.sub("", candidate)):
-            return True
-    return False
+            yield candidate
+
+
+def has_answer_body(answer: str, citations: list[str]) -> bool:
+    """Recognize parsed prose beyond citation scaffolding, without a length floor."""
+    return next(_prose_lines(answer, citations), None) is not None
 
 
 def verification_state_for(
@@ -316,16 +337,20 @@ def verification_state_for(
     script_present: bool = False,
 ) -> VerificationState:
     """One rule mapping a finalized answer to its verification state (issue
-    #365/#576). Order is load-bearing: refusal/empty hits first, then unfinished
-    generation, then parsed-body and citation outcome. Inferred-only
+    #365/#576/#630). Order is load-bearing: the deterministic empty-hits
+    short circuit (no generation happened) first, then unfinished generation —
+    a refusal fragment cut off by `length` is incomplete, not a finished
+    refusal — then refusal, then parsed-body and citation outcome. Inferred-only
     provenance is a draft, not grounding — the eval never counts it, so the
     client must not read it as accepted either. Without prose, a nonempty
     extracted script is a human-review draft; otherwise generation is incomplete.
     Citation scaffolding alone never establishes an answer body."""
-    if empty_hits or abstained:
+    if empty_hits:
         return "insufficient_evidence"
     if finish_reason != "stop":
         return "generation_incomplete"
+    if abstained:
+        return "insufficient_evidence"
     if not has_answer_body(answer, citations):
         return "unverified_draft" if script_present else "generation_incomplete"
     if not citations or citations_inferred:
@@ -1613,12 +1638,12 @@ def parse_answer(content: str, evidence: PromptEvidence) -> ParsedAnswer:
 
     # 4. Zero citations on abstention (issue #135): a correct refusal that
     # ships citations to real-but-unsupporting chunks looks grounded while
-    # grounding nothing. Shape-based, not marker-based: a grounded answer
-    # that quotes one hedging sentence keeps its citations. Enforced here —
+    # grounding nothing. Whole-response, not marker-based (#630): an answer
+    # that carries any non-refusal clause keeps its citations. Enforced here —
     # not prompt hygiene — so every consumer of parse_answer (JSON path,
     # SSE final, query_demo) inherits it. `script` is code and passes
     # through untouched, as documented above.
-    abstained = is_abstention(body)
+    abstained = is_abstention(body, citations)
     if abstained:
         citations = []
         citations_inferred = False

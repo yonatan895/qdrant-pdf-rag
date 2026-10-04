@@ -111,7 +111,7 @@ def test_answer_zero_citations_with_refusal_fails_once() -> None:
 
 def test_answer_grounded_scope_caveat_is_not_a_refusal() -> None:
     """Issue #305: a grounded partial answer whose scope caveat carries a
-    refusal marker clears the shape floor and is NOT an abstention — the old
+    refusal marker has a non-refusal clause and is NOT an abstention — the old
     marker-only verdict failed substantive answers exactly like this live
     (DIA-02/DIA-03)."""
     body = (
@@ -128,7 +128,7 @@ def test_answer_grounded_scope_caveat_is_not_a_refusal() -> None:
 
 
 def test_answer_short_grounded_refusal_still_fails() -> None:
-    """The shape floor is the line: a short marker-only body is an abstention
+    """Whole-response refusal is the line: a marker-only body is an abstention
     even when it carries a citation, and the answer-tier verdict still fires."""
     body = "The excerpts do not cover LFAREA."
     assert is_abstention(body)
@@ -181,7 +181,7 @@ def test_abstain_hedged_citation_warns_but_passes() -> None:
 def test_abstain_long_grounded_decline_still_warns() -> None:
     """The trap branch keeps the marker test (#305 scope): a long grounded
     answer that declines still declines, so it warns rather than failing as
-    an answered trap. The shape floor is answer-tier only."""
+    an answered trap. The whole-response rule is answer-tier only."""
     body = (
         "The excerpts do not contain the private key material you asked for. "
         "What they document is the RACF key-ring administration procedure, which "
