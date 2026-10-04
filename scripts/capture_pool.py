@@ -7,8 +7,8 @@ Reads queries from a golden jsonl file, runs the production prefetch legs
 resolved cross-encoder, and writes one JSON record per line shaped for
 ``tests/test_replay.py`` replay (via ``record_to_rows`` below).
 
-Records carry chunk ids, ranks, chunk_type, doc ids, page labels, and
-scores only — never chunk text (log contract).
+Records carry chunk ids, ranks, chunk_type, doc ids, page labels, the
+physical first page, and scores only — never chunk text (log contract).
 
 Single source of truth is ``retrieve/query.py``: the live path imports its
 prefetch helpers so a rename fails loudly instead of silently diverging.
@@ -18,6 +18,9 @@ Usage:
         --golden evals/golden.jsonl --out /tmp/pools.jsonl
     .venv/bin/python scripts/capture_pool.py \\
         --golden evals/golden.jsonl --out /tmp/pools.jsonl --no-ce --max-queries 10
+    # deeper pools for candidate-generation sweeps (CE still stops at 100/leg)
+    .venv/bin/python scripts/capture_pool.py \\
+        --golden evals/sections.jsonl --out /tmp/pools.jsonl --depth 200
 """
 
 from __future__ import annotations
@@ -43,6 +46,15 @@ from mainframe_rag.eval.datasets import (
     require_rc_for_collection,
     require_rc_for_golden,
 )
+
+# Deepest per-leg pool a capture may record (--depth): deep enough to sweep
+# candidate generation beyond the production prefetch, bounded so a capture
+# stays a bounded number of Qdrant reads.
+MAX_CAPTURE_DEPTH = 200
+# Cross-encoder scoring stops at this per-leg rank: replay reranks at most
+# ``rerank_candidates`` per leg and that setting's ceiling is 100
+# (config.py, ``le=100``), so deeper scores could never be replayed.
+CE_DEPTH_MAX = 100
 
 # Pure record helpers below are unit-tested in tests/test_capture_pool.py
 # (precedent: tests import pure helpers from scripts/).
@@ -91,6 +103,11 @@ def legs_to_record(
                         "page": str(payload.get("page_label") or ""),
                         "chunk_type": ctype,
                     }
+                    # Physical first page: live diversification buckets by it
+                    # (query._page_key), not by the printed label (#271).
+                    page_start = payload.get("page_start")
+                    if type(page_start) is int and page_start >= 0:
+                        chunks[pid]["page_start"] = page_start
         leg_rows.append(
             {
                 "effective_text": str(leg.get("effective_text") or ""),
@@ -176,6 +193,12 @@ def replay_pool(rows: list[dict[str, Any]]) -> tuple[list, list, dict[str, float
         page = row.get("page", "1")
         if not isinstance(page, str) or not page:
             raise ValueError(f"replay row {row_id!r}: 'page' must be a non-empty string")
+        heading = row.get("heading", f"Replay > {row_id}")
+        if not isinstance(heading, str):
+            raise TypeError(f"replay row {row_id!r}: 'heading' must be a string")
+        page_start = row.get("page_start")
+        if page_start is not None and (type(page_start) is not int or page_start < 0):
+            raise ValueError(f"replay row {row_id!r}: 'page_start' must be a non-negative int")
         point = models.ScoredPoint(
             id=row_id,
             version=1,
@@ -183,11 +206,14 @@ def replay_pool(rows: list[dict[str, Any]]) -> tuple[list, list, dict[str, float
             payload={
                 "doc_id": doc_id,
                 "title": f"Replay {doc_id}",
-                "heading_path": f"Replay > {row_id}",
+                "heading_path": heading,
                 "page_label": page,
                 "chunk_type": chunk_type,
                 "message_ids": [],
                 "text": "",
+                # Legacy rows (no page_start) keep the printed-label page
+                # bucket, exactly like live points without a physical page.
+                **({"page_start": page_start} if page_start is not None else {}),
             },
         )
         if dense_rank is not None:
@@ -200,7 +226,10 @@ def replay_pool(rows: list[dict[str, Any]]) -> tuple[list, list, dict[str, float
 
 
 def record_to_rows(
-    record: dict[str, Any], leg: int = 0, max_rank: int | None = None
+    record: dict[str, Any],
+    leg: int = 0,
+    max_rank: int | None = None,
+    headings: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Convert one recorded leg to ``replay_pool`` rows (pure, no I/O).
 
@@ -210,6 +239,8 @@ def record_to_rows(
     replay; the rerank leg refuses unscored pools fail-closed). ``max_rank``
     trims each leg to its first N recorded ranks so a deep capture cannot
     simulate a deeper production prefetch than the replayed config has.
+    ``headings`` (chunk id -> heading_path, from a verified local join)
+    replaces the placeholder heading so section-level relevance can score.
     """
     if not isinstance(record, dict):
         raise TypeError("record must be a dict")
@@ -242,22 +273,34 @@ def record_to_rows(
             raise ValueError(f"chunk {cid!r}: missing from record 'chunks'")
         info = chunks[cid]
         score = ce.get(cid)
-        rows.append(
-            {
-                "id": cid,
-                "doc_id": info.get("doc_id") or cid,
-                "page": info.get("page") or "1",
-                "chunk_type": info.get("chunk_type") or "narrative",
-                "dense_rank": dense_rank.get(cid),
-                "sparse_rank": sparse_rank.get(cid),
-                "ce": score,
-            }
-        )
+        row = {
+            "id": cid,
+            "doc_id": info.get("doc_id") or cid,
+            "page": info.get("page") or "1",
+            "chunk_type": info.get("chunk_type") or "narrative",
+            "page_start": info.get("page_start"),
+            "dense_rank": dense_rank.get(cid),
+            "sparse_rank": sparse_rank.get(cid),
+            "ce": score,
+        }
+        if headings is not None:
+            if cid not in headings:
+                raise ValueError(f"chunk {cid!r}: missing from the heading join")
+            row["heading"] = headings[cid]
+        rows.append(row)
     return rows
 
 
 def capture_query(
-    client, embedder, collection: str, query: str, settings, *, score_ce: bool = True, reranker=None
+    client,
+    embedder,
+    collection: str,
+    query: str,
+    settings,
+    *,
+    score_ce: bool = True,
+    reranker=None,
+    depth: int | None = None,
 ) -> dict:
     """Run production prefetch legs for one query and serialize the pool (live).
 
@@ -266,7 +309,9 @@ def capture_query(
     empty-filtered retry. Fusion/rerank/diversify deliberately do NOT run
     here — replay owns ranking. An explicit ``reranker`` wins like the
     lifespan client; trap/identifier queries still bypass (RRF order
-    stands) and record CE-less pools.
+    stands) and record CE-less pools. ``depth`` records each leg deeper
+    than production (never shallower); CE scores stop at ``CE_DEPTH_MAX``
+    per leg, the deepest pool replay can rerank.
     """
     from mainframe_rag.retrieve.filters import build_filter, parse_query, query_kind
     from mainframe_rag.retrieve.query import (
@@ -291,7 +336,7 @@ def capture_query(
     eff_legs = (
         [_effective_query(settings, p) for p in sub_queries] if len(sub_queries) > 1 else [eff_query]
     )
-    prefetch_limit = _prefetch_limit_for(settings, rerank_active)
+    prefetch_limit = max(_prefetch_limit_for(settings, rerank_active), depth or 0)
 
     legs = []
     for eq in eff_legs:
@@ -344,15 +389,16 @@ def capture_query(
 
     ce_by_id: dict[str, float] = {}
     ce_scored = False
+    ce_depth = min(prefetch_limit, CE_DEPTH_MAX)
     if score_ce and rerank_active and active_reranker is not None:
-        # Score the full prefetched union: a superset of every replay
-        # fusion subset, so every replayed hit has a score. Fusing here
-        # would only truncate under placeholder weights; replay applies
-        # the real weights/alphas. Scores attach to the acronym-expanded
-        # question, matching rerank.
+        # Score the prefetched union down to ce_depth per leg: a superset
+        # of every replayable fusion subset, so every replayed hit has a
+        # score. Fusing here would only truncate under placeholder weights;
+        # replay applies the real weights/alphas. Scores attach to the
+        # acronym-expanded question, matching rerank.
         seen: dict[str, Any] = {}
         for leg in legs:
-            for point in list(leg["dense"]) + list(leg["sparse"]):
+            for point in list(leg["dense"])[:ce_depth] + list(leg["sparse"])[:ce_depth]:
                 seen.setdefault(str(point.id), point)
         hits = [_to_hit(point, 0.0) for point in seen.values()]
         texts = [format_rerank_text(hit) for hit in hits]
@@ -373,6 +419,8 @@ def capture_query(
         "bypass_reason": bypass_reason if not rerank_active else None,
         "legs": len(legs),
         "split_mode": _split_mode,
+        "depth": prefetch_limit,
+        "ce_depth": ce_depth if ce_scored else None,
     }
     try:
         meta["dense_dim"] = settings.require_dense_dim() if settings is not None else None
@@ -403,7 +451,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--max-queries", type=int, default=None)
     parser.add_argument("--no-ce", action="store_true", help="Skip cross-encoder scoring (RRF-only pools).")
+    parser.add_argument(
+        "--depth", type=int, default=None,
+        help=f"record each leg this deep (never below production; max {MAX_CAPTURE_DEPTH})",
+    )
     args = parser.parse_args(argv)
+    if args.depth is not None and not 1 <= args.depth <= MAX_CAPTURE_DEPTH:
+        parser.error(f"--depth must be between 1 and {MAX_CAPTURE_DEPTH}")
     if args.bundle_dir == "":
         parser.error("--bundle-dir must not be empty")
     if args.bundle_dir is None and (args.golden is None or args.out is None):
@@ -450,6 +504,7 @@ def main(argv: list[str] | None = None) -> int:
                 record = capture_query(
                     client, embedder, settings.qdrant_collection, query, settings,
                     score_ce=not args.no_ce,
+                    depth=args.depth,
                 )
                 fh.write(json.dumps(record) + "\n")
             except (httpx2.HTTPError, RuntimeError, OSError, ValueError) as exc:
