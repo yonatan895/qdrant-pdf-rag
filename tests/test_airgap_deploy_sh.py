@@ -125,14 +125,6 @@ def _helm_log(tree):
     return tree[1].read_text() if tree[1].exists() else ""
 
 
-def test_no_pull_secret_never_renders_placeholder_name(tree):
-    r = _run(tree)
-    assert r.returncode == 0, r.stderr
-    log = _helm_log(tree)
-    assert "imagePullSecrets=null" in log
-    assert "PLACEHOLDER" not in log
-
-
 def test_pull_secret_wired_when_set(tree):
     _run(tree, ("PULL_SECRET", "ghcr-pull"))
     log = _helm_log(tree)
@@ -173,16 +165,6 @@ def _qdrant_block(rendered):
     lines = rendered.splitlines()
     start = next(i for i, l in enumerate(lines) if "- name: QDRANT_API_KEY" in l)
     return "\n".join(lines[start : start + 5])
-
-
-def test_agent_qdrant_key_wired_readonly(tree):
-    """Issue #366: the rendered agent must reference the chart's read-only
-    key — never the full-access one."""
-    r = _run(tree)
-    assert r.returncode == 0, r.stderr
-    block = _qdrant_block((tree[0] / "dist" / "agent-rendered.yaml").read_text())
-    assert re.search(r"(?m)^\s*key: read-only-api-key$", block)
-    assert not re.search(r"(?m)^\s*key: api-key$", block)
 
 
 def test_agent_qdrant_write_key_fails_closed(tree):
@@ -378,12 +360,6 @@ def test_dry_run_with_manifest_is_noticed_not_verified(tree):
     assert "not release-verified" in result.stdout
 
 
-def test_no_manifest_is_noticed_not_verified(tree):
-    result = _run(tree)
-    assert result.returncode == 0, result.stderr
-    assert "not release-verified" in result.stdout
-
-
 def test_missing_production_values_fails_before_mutation(tree):
     (tree[0] / "charts" / "qdrant-openshift.values.yaml").unlink()
     result = _run(tree, ("AIRGAP_DRYRUN", "0"))
@@ -392,10 +368,30 @@ def test_missing_production_values_fails_before_mutation(tree):
     assert not tree[1].exists(), "no Helm or cluster command may run without base values"
 
 
-def test_missing_extra_values_file_fails_closed(tree):
-    r = _run(tree, ("QDRANT_EXTRA_VALUES", "/nonexistent/vals.yaml"))
-    assert r.returncode == 1
-    assert "QDRANT_EXTRA_VALUES file not found" in r.stderr
+@pytest.mark.parametrize("extra_env,exit_code,messages", [
+    pytest.param({'QDRANT_EXTRA_VALUES': '/nonexistent/vals.yaml'}, 1, ('QDRANT_EXTRA_VALUES file not found',),
+                 id='missing_extra_values_file_fails_closed'),
+    pytest.param({'EMBED_MODEL_REVISION': ''}, None, ('required variables unset', 'EMBED_MODEL_REVISION'),
+                 id='missing_embed_revision_fails_before_render'),
+    pytest.param({'EMBED_MODEL_REVISION': '  '}, None, ('EMBED_MODEL_REVISION must be a non-blank',),
+                 id='whitespace_embed_revision_fails_before_render'),
+    pytest.param({'OTEL_EXPORTER_OTLP_ENDPOINT': 'jaeger:4318'}, None, ('must be http(s) or off',),
+                 id='tracing_bad_endpoint_fails_closed'),
+    pytest.param({'GATEWAY_API_KEY_SECRET': 'Bad_Name!'}, None, ('GATEWAY_API_KEY_SECRET must be a DNS-subdomain name',),
+                 id='gateway_secret_bad_name_fails_closed'),
+    pytest.param({'OTEL_EXPORTER_OTLP_ENDPOINT': 'off', 'JAEGER_ENABLED': 'true'}, None, ('JAEGER_ENABLED=true requires tracing',),
+                 id='jaeger_true_with_tracing_off_fails_closed'),
+    pytest.param({'JAEGER_ENABLED': 'maybe'}, None, ('JAEGER_ENABLED must be true/false',),
+                 id='jaeger_garbage_fails_closed'),
+    pytest.param({'SERVICEMONITOR_ENABLED': 'true'}, None, ('SERVICEMONITOR_ENABLED=true requires METRICS_ENABLED=true',),
+                 id='monitor_true_with_metrics_off_fails_closed'),
+])
+def test_invalid_configuration_fails_closed(tree, extra_env, exit_code, messages):
+    result = _run(tree, *extra_env.items())
+    assert result.returncode != 0 if exit_code is None else result.returncode == exit_code, result.stderr
+    for message in messages:
+        assert message in result.stderr
+
 
 
 def test_extra_values_file_reaches_helm(tree):
@@ -413,41 +409,42 @@ def test_rendered_manifest_substituted_and_written(tree):
     r = _run(tree)
     assert r.returncode == 0, r.stderr
     rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
+    # Identical default runs share a render; every field oracle stays explicit.
     assert "reg.internal/qdrant-pdf-rag-agent" in rendered
-    # Issue #391 F1: the operator-declared revision reaches the agent
-    # container (the agent refuses a blank attestation at startup).
     assert re.search(r"(?m)^\s*- name: EMBED_MODEL_REVISION$", rendered)
     assert rendered_env(rendered, "agent")["EMBED_MODEL_REVISION"] == "rev-1"
     assert_no_placeholders(rendered)
-
-
-def test_missing_embed_revision_fails_before_render(tree):
-    r = _run(tree, ("EMBED_MODEL_REVISION", ""))
-    assert r.returncode != 0
-    assert "required variables unset" in r.stderr and "EMBED_MODEL_REVISION" in r.stderr
-
-
-def test_whitespace_embed_revision_fails_before_render(tree):
-    r = _run(tree, ("EMBED_MODEL_REVISION", "  "))
-    assert r.returncode != 0
-    assert "EMBED_MODEL_REVISION must be a non-blank" in r.stderr
-
+    log = _helm_log(tree)
+    assert "imagePullSecrets=null" in log
+    assert "PLACEHOLDER" not in log
+    block = _qdrant_block((tree[0] / "dist" / "agent-rendered.yaml").read_text())
+    assert re.search(r"(?m)^\s*key: read-only-api-key$", block)
+    assert not re.search(r"(?m)^\s*key: api-key$", block)
+    assert "not release-verified" in r.stdout
+    assert (tree[0] / "dist" / "jaeger-rendered.yaml").exists()
+    assert 'value: "http://jaeger:4318"' in rendered
+    assert "Tracing off" not in r.stdout
+    assert rendered_env(rendered, "agent")["IMAGE_SHA"] == IMAGE_SHA
+    assert rendered_env(rendered, "agent")["OTEL_DEPLOYMENT_ENVIRONMENT"] == ""
+    assert "OTEL_SERVICE_NAME" not in rendered
+    assert "__OTEL_SERVICE_NAME__" not in rendered
+    assert not (tree[0] / "dist" / "servicemonitor-rendered.yaml").exists()
+    assert re.search(r'METRICS_ENABLED\n\s+value: "false"', rendered, re.MULTILINE)
+    assert "Metrics off" in r.stdout
+    assert 'value: "false"' in rendered or "value: false" in rendered
+    assert "__RERANK_" not in rendered
+    assert rendered_env(rendered, "agent")["RERANK_ENDPOINT_ORDER"] == "score_first"
+    assert "__RERANK_ENDPOINT_ORDER__" not in rendered
+    for env_name in ("LLM_API_KEY", "EMBED_API_KEY", "RERANK_API_KEY"):
+        assert env_name not in rendered
+    assert "__GATEWAY_API_KEY_SECRET__" not in rendered
+    assert "QDRANT_API_KEY" in rendered
+    assert "RERANK_MODEL" in rendered
+    assert "Gateway keys off" in r.stdout
 
 
 
 # ------------------------------------------------------- Jaeger / tracing (#83)
-
-
-def test_tracing_on_by_default_deploys_jaeger(tree):
-    # Unset OTEL_EXPORTER_OTLP_ENDPOINT resolves to the in-cluster Jaeger:
-    # tracing is active in production unless explicitly disabled.
-    r = _run(tree)
-    assert r.returncode == 0, r.stderr
-    assert (tree[0] / "dist" / "jaeger-rendered.yaml").exists()
-    rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
-    assert 'value: "http://jaeger:4318"' in rendered
-    assert_no_placeholders(rendered)
-    assert "Tracing off" not in r.stdout
 
 
 @pytest.mark.parametrize("token", ["off", "none", "false", "0", "OFF", "Off"])
@@ -459,12 +456,6 @@ def test_tracing_off_sentinel_skips_jaeger(tree, token):
     # Endpoint env var always rendered; empty value = tracing off.
     assert rendered_env(rendered, "agent")["OTEL_EXPORTER_OTLP_ENDPOINT"] == ""
     assert "Tracing off" in r.stdout
-
-
-def test_tracing_bad_endpoint_fails_closed(tree):
-    r = _run(tree, ("OTEL_EXPORTER_OTLP_ENDPOINT", "jaeger:4318"))
-    assert r.returncode != 0
-    assert "must be http(s) or off" in r.stderr
 
 
 def test_tracing_enabled_deploys_jaeger_and_wires_endpoint(tree):
@@ -503,39 +494,11 @@ def test_tracing_jaeger_pull_secret_stays_absent_when_unset(tree):
 # ------------------------------------------------------- deploy identity (Phase 2b)
 
 
-def test_deploy_identity_version_always_rendered(tree):
-    r = _run(tree)
-    assert r.returncode == 0, r.stderr
-    rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
-    # service.version is the packed SHA: always set, deploy.sh fail-closes
-    # on empty/HEAD before rendering.
-    assert rendered_env(rendered, "agent")["IMAGE_SHA"] == IMAGE_SHA
-
-
-def test_deploy_identity_environment_empty_by_default(tree):
-    r = _run(tree)
-    assert r.returncode == 0, r.stderr
-    rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
-    # Optional: bare `value:` renders and the agent omits the attribute —
-    # same empty-renders-bare convention as the OTEL endpoint above.
-    assert rendered_env(rendered, "agent")["OTEL_DEPLOYMENT_ENVIRONMENT"] == ""
-
-
 def test_deploy_identity_environment_wired_when_set(tree):
     r = _run(tree, ("OTEL_DEPLOYMENT_ENVIRONMENT", "lab"))
     assert r.returncode == 0, r.stderr
     rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
     assert rendered_env(rendered, "agent")["OTEL_DEPLOYMENT_ENVIRONMENT"] == "lab"
-
-
-def test_service_name_stripped_when_unset(tree):
-    # Unset must leave no entry at all: a blank value would override the
-    # agent default (mainframe-rag-agent) with "" (tracing.py: no fallback).
-    r = _run(tree)
-    assert r.returncode == 0, r.stderr
-    rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
-    assert "OTEL_SERVICE_NAME" not in rendered
-    assert "__OTEL_SERVICE_NAME__" not in rendered
 
 
 def test_service_name_wired_when_set(tree):
@@ -546,16 +509,6 @@ def test_service_name_wired_when_set(tree):
 
 
 # ------------------------------------------------------- ServiceMonitor (#187)
-
-
-def test_metrics_off_skips_servicemonitor_and_renders_false(tree):
-    r = _run(tree)
-    assert r.returncode == 0, r.stderr
-    assert not (tree[0] / "dist" / "servicemonitor-rendered.yaml").exists()
-    rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
-    # Env var always rendered, quoted "false" = /metrics 404s (fail-closed).
-    assert re.search(r'METRICS_ENABLED\n\s+value: "false"', rendered, re.MULTILINE)
-    assert "Metrics off" in r.stdout
 
 
 def test_metrics_enabled_deploys_servicemonitor_and_wires_env(tree):
@@ -579,14 +532,6 @@ def test_metrics_non_true_value_skips_servicemonitor(tree):
         assert not (tree[0] / "dist" / "servicemonitor-rendered.yaml").exists()
 
 
-def test_reranker_defaults_off(tree):
-    r = _run(tree)
-    assert r.returncode == 0, r.stderr
-    rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
-    assert 'value: "false"' in rendered or "value: false" in rendered
-    assert "__RERANK_" not in rendered
-
-
 def test_reranker_configured_when_enabled(tree):
     r = _run(
         tree,
@@ -602,14 +547,6 @@ def test_reranker_configured_when_enabled(tree):
     assert "__RERANK_" not in rendered
 
 
-def test_reranker_endpoint_order_defaults_score_first(tree):
-    r = _run(tree)
-    assert r.returncode == 0, r.stderr
-    rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
-    assert rendered_env(rendered, "agent")["RERANK_ENDPOINT_ORDER"] == "score_first"
-    assert "__RERANK_ENDPOINT_ORDER__" not in rendered
-
-
 def test_reranker_endpoint_order_rerank_first_renders(tree):
     r = _run(tree, ("RERANK_ENDPOINT_ORDER", "rerank_first"))
     assert r.returncode == 0, r.stderr
@@ -618,24 +555,6 @@ def test_reranker_endpoint_order_rerank_first_renders(tree):
 
 
 # ------------------------------------------------------- gateway keys (LiteLLM)
-
-
-def test_gateway_keys_off_strips_secret_block(tree):
-    r = _run(tree)
-    assert r.returncode == 0, r.stderr
-    rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
-    # Gateway secret references are gone (no key env names, no surviving
-    # token) while the neighboring plain entries survive the strip (an
-    # end-anchored range running past its entry would eat them). The
-    # chart-managed QDRANT_API_KEY ref is not a gateway key and stays
-    # (issue #366).
-    for env_name in ("LLM_API_KEY", "EMBED_API_KEY", "RERANK_API_KEY"):
-        assert env_name not in rendered
-    assert "__GATEWAY_API_KEY_SECRET__" not in rendered
-    assert "QDRANT_API_KEY" in rendered
-    assert "RERANK_MODEL" in rendered
-    assert_no_placeholders(rendered)
-    assert "Gateway keys off" in r.stdout
 
 
 def test_gateway_keys_wired_when_secret_set(tree):
@@ -654,16 +573,6 @@ def test_gateway_keys_wired_when_secret_set(tree):
     assert "__GATEWAY_API_KEY_SECRET__" not in rendered
     assert_no_placeholders(rendered)
     assert "Gateway keys wired" in r.stdout
-
-
-def test_gateway_secret_bad_name_fails_closed(tree):
-    r = _run(tree, ("GATEWAY_API_KEY_SECRET", "Bad_Name!"))
-    assert r.returncode != 0
-    assert "GATEWAY_API_KEY_SECRET must be a DNS-subdomain name" in r.stderr
-
-
-
-
 
 
 def test_agent_route_renders_oauth_sidecar_and_reencrypt_route(tree):
@@ -1019,30 +928,12 @@ def test_jaeger_explicit_true_with_tracing_on(tree):
     assert (tree[0] / "dist" / "jaeger-rendered.yaml").exists()
 
 
-def test_jaeger_true_with_tracing_off_fails_closed(tree):
-    r = _run(tree, ("OTEL_EXPORTER_OTLP_ENDPOINT", "off"), ("JAEGER_ENABLED", "true"))
-    assert r.returncode != 0
-    assert "JAEGER_ENABLED=true requires tracing" in r.stderr
-
-
-def test_jaeger_garbage_fails_closed(tree):
-    r = _run(tree, ("JAEGER_ENABLED", "maybe"))
-    assert r.returncode != 0
-    assert "JAEGER_ENABLED must be true/false" in r.stderr
-
-
 def test_monitor_decoupled_from_exposition(tree):
     r = _run(tree, ("METRICS_ENABLED", "true"), ("SERVICEMONITOR_ENABLED", "false"))
     assert r.returncode == 0, r.stderr
     assert not (tree[0] / "dist" / "servicemonitor-rendered.yaml").exists()
     rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
     assert rendered_env(rendered, "agent")["METRICS_ENABLED"] == "true"
-
-
-def test_monitor_true_with_metrics_off_fails_closed(tree):
-    r = _run(tree, ("SERVICEMONITOR_ENABLED", "true"))
-    assert r.returncode != 0
-    assert "SERVICEMONITOR_ENABLED=true requires METRICS_ENABLED=true" in r.stderr
 
 
 # ----------------------------------------------------- console Route (#373)

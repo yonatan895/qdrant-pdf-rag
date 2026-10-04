@@ -91,15 +91,39 @@ def test_ingest_dryrun_renders_clean_manifest(ingest_tree):
     r = _run_ingest(ingest_tree)
     assert r.returncode == 0, r.stderr
     rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
+    # Identical default runs share a render; every field oracle stays explicit.
     assert_no_placeholders(rendered)
     assert "reg.internal:5000/qdrant-pdf-rag-ingest:" in rendered
     assert "claimName: my-manuals-pvc" in rendered
     assert 'value: "4"' in rendered or "value: 4" in rendered
     assert 'value: "http://vllm:8000/v1"' in rendered
-    # Issue #391 F1: the representation preflight refuses a blank revision,
-    # so the operator-declared value must reach the Job environment.
     assert re.search(r"(?m)^\s*- name: EMBED_MODEL_REVISION$", rendered)
     assert rendered_env(rendered, "ingest")["EMBED_MODEL_REVISION"] == "rev-1"
+    assert rendered_env(rendered, "ingest")["IMAGE_SHA"] == IMAGE_SHA
+    block = _ingest_qdrant_block(
+        (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
+    )
+    assert re.search(r"(?m)^\s*key: api-key$", block)
+    assert rendered_container(rendered, "ingest")["args"] == [
+        "--src", "/corpus", "--progress", "/work/inventory.jsonl",
+    ]
+    assert rendered_env(rendered, "ingest")["INGEST_ALIAS_PUBLISH"] == "false"
+    assert '"--reingest"' not in rendered
+    assert '"--retire-doc"' not in rendered
+    assert re.search(r'(?m)^\s*value: "false"$', rendered)
+    assert 'value: "http://jaeger:4318"' in rendered
+    assert "value: mainframe-rag-ingest" in rendered
+    assert "imagePullSecrets: []" in rendered
+    assert "name: custom-registry-secret" not in rendered
+    assert rendered.count("secretKeyRef") == 1
+    assert "EMBED_API_KEY" not in rendered
+    assert "CONTEXT_LLM_API_KEY" not in rendered
+    assert "RERANK_API_KEY" not in rendered
+    assert "CONTEXT_LLM_MODEL" in rendered
+    assert "volumes:" in rendered
+    assert "__GATEWAY_API_KEY_SECRET__" not in rendered
+    assert "Gateway keys off" in r.stdout
+
 
 
 @pytest.mark.parametrize("delete_fails", [False, True])
@@ -251,25 +275,38 @@ elif 'pods' in a:
             proc.communicate(timeout=5)
 
 
-def test_ingest_missing_embed_revision_fails_closed(ingest_tree):
-    r = _run_ingest(ingest_tree, ("EMBED_MODEL_REVISION", ""))
-    assert r.returncode != 0
-    assert "required variables unset" in r.stderr and "EMBED_MODEL_REVISION" in r.stderr
+@pytest.mark.parametrize("extra_env,exit_code,messages", [
+    pytest.param({'EMBED_MODEL_REVISION': ''}, None, ('required variables unset', 'EMBED_MODEL_REVISION'),
+                 id='ingest_missing_embed_revision_fails_closed'),
+    pytest.param({'EMBED_MODEL_REVISION': '  '}, None, ('EMBED_MODEL_REVISION must be a non-blank',),
+                 id='ingest_whitespace_embed_revision_fails_closed'),
+    pytest.param({'INGEST_RETIRE_DOCS': 'SA22-0000-00'}, None, ('INGEST_ALIAS_PUBLISH=true',),
+                 id='ingest_retire_docs_require_alias_publish'),
+    pytest.param({'INGEST_ALIAS_PUBLISH': 'true', 'INGEST_RETIRE_DOCS': '*'}, None, ('malformed INGEST_RETIRE_DOCS', 'wildcards'),
+                 id='ingest_retire_docs_wildcard_fails_closed'),
+    pytest.param({'INGEST_ALIAS_PUBLISH': 'true', 'INGEST_RETIRE_DOCS': 'SA22-0000-00@'}, None, ("empty side of '@'",),
+                 id='ingest_retire_docs_empty_side_fails_closed'),
+    pytest.param({'INGEST_ALIAS_PUBLISH': 'true', 'INGEST_RETIRE_DOCS': 'SA22-0000-00"bad'}, None, ('malformed INGEST_RETIRE_DOCS',),
+                 id='ingest_malformed_retire_docs_fails_closed'),
+    pytest.param({'INGEST_REINGEST': 'maybe'}, None, ('must be true/false',),
+                 id='ingest_invalid_maintenance_bool_fails_closed'),
+    pytest.param({'QDRANT_REPLICATION_FACTOR': ''}, 1, ('QDRANT_REPLICATION_FACTOR',),
+                 id='ingest_collection_policy_partial_fails_closed'),
+    pytest.param({'PULL_SECRET': 'Bad_Name!'}, None, ('PULL_SECRET must be a DNS-subdomain name',),
+                 id='ingest_pull_secret_bad_name_fails_closed'),
+    pytest.param({'STORAGE_CLASS': 'nfs-storage-class'}, 1, ('looks like NFS',),
+                 id='ingest_refuses_nfs_storage'),
+    pytest.param({'CORPUS_PVC': ''}, 1, ('required variables unset: CORPUS_PVC',),
+                 id='ingest_missing_corpus_pvc_fails_closed'),
+    pytest.param({'GATEWAY_API_KEY_SECRET': 'Bad_Name!'}, 1, ('GATEWAY_API_KEY_SECRET must be a DNS-subdomain name',),
+                 id='ingest_gateway_secret_bad_name_fails_closed'),
+])
+def test_invalid_configuration_fails_closed(ingest_tree, extra_env, exit_code, messages):
+    result = _run_ingest(ingest_tree, *extra_env.items())
+    assert result.returncode != 0 if exit_code is None else result.returncode == exit_code, result.stderr
+    for message in messages:
+        assert message in result.stderr
 
-
-def test_ingest_whitespace_embed_revision_fails_closed(ingest_tree):
-    r = _run_ingest(ingest_tree, ("EMBED_MODEL_REVISION", "  "))
-    assert r.returncode != 0
-    assert "EMBED_MODEL_REVISION must be a non-blank" in r.stderr
-
-
-def test_ingest_identity_version_always_rendered(ingest_tree):
-    r = _run_ingest(ingest_tree)
-    assert r.returncode == 0, r.stderr
-    rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
-    # service.version is the packed SHA: always set, ingest.sh fail-closes
-    # on empty/HEAD before rendering (issue #315).
-    assert rendered_env(rendered, "ingest")["IMAGE_SHA"] == IMAGE_SHA
 
 
 # ------------------------------------------------------- Qdrant least privilege (#366)
@@ -278,17 +315,6 @@ def _ingest_qdrant_block(rendered):
     lines = rendered.splitlines()
     start = next(i for i, l in enumerate(lines) if "- name: QDRANT_API_KEY" in l)
     return "\n".join(lines[start : start + 5])
-
-
-def test_ingest_qdrant_key_keeps_write_access(ingest_tree):
-    """Issue #366 mirror: ingestion owns corpus mutation, so the rendered
-    Job keeps the full-access key while the agent goes read-only."""
-    r = _run_ingest(ingest_tree)
-    assert r.returncode == 0, r.stderr
-    block = _ingest_qdrant_block(
-        (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
-    )
-    assert re.search(r"(?m)^\s*key: api-key$", block)
 
 
 def test_ingest_qdrant_readonly_key_fails_closed(ingest_tree):
@@ -329,42 +355,12 @@ def test_ingest_qdrant_copresent_readonly_key_fails_closed(ingest_tree):
 
 
 
-def test_ingest_overlay_maintenance_contract(ingest_tree):
-    """The explicit Job preserves the shared progress path and safe defaults."""
-    result = _run_ingest(ingest_tree)
-    assert result.returncode == 0, result.stderr
-    rendered = (ingest_tree[0] / "dist/ingest-rendered.yaml").read_text()
-    assert rendered_container(rendered, "ingest")["args"] == [
-        "--src", "/corpus", "--progress", "/work/inventory.jsonl",
-    ]
-    assert rendered_env(rendered, "ingest")["INGEST_ALIAS_PUBLISH"] == "false"
-
-
-def test_ingest_default_render_adds_no_maintenance_args(ingest_tree):
-    r = _run_ingest(ingest_tree)
-    assert r.returncode == 0, r.stderr
-    rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
-    assert rendered_container(rendered, "ingest")["args"] == ["--src", "/corpus", "--progress", "/work/inventory.jsonl"]
-    assert '"--reingest"' not in rendered
-    assert '"--retire-doc"' not in rendered
-    # Review F1: boolean env values render as quoted strings (K8s EnvVar.value
-    # is a string field), matching the sibling integer quoting contract.
-    assert re.search(r'(?m)^\s*value: "false"$', rendered)
-    assert_no_placeholders(rendered)
-
-
 def test_ingest_force_repair_args_rendered(ingest_tree):
     r = _run_ingest(ingest_tree, ("INGEST_REINGEST", "true"))
     assert r.returncode == 0, r.stderr
     rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
     assert "--reingest" in rendered_container(rendered, "ingest")["args"]
     assert_no_placeholders(rendered)
-
-
-def test_ingest_retire_docs_require_alias_publish(ingest_tree):
-    r = _run_ingest(ingest_tree, ("INGEST_RETIRE_DOCS", "SA22-0000-00"))
-    assert r.returncode != 0
-    assert "INGEST_ALIAS_PUBLISH=true" in r.stderr
 
 
 def test_ingest_retire_docs_rendered_with_alias_publish(ingest_tree):
@@ -486,48 +482,6 @@ def test_ingest_retire_docs_newline_separated(ingest_tree):
     assert retire_args == ["SA23-1380-09@rev-1", "SA22-0000-00"]
 
 
-def test_ingest_retire_docs_wildcard_fails_closed(ingest_tree):
-    """Review F3: operator input is never pathname-expanded (noglob) and
-    wildcards fail closed instead of rendering local filenames."""
-    r = _run_ingest(
-        ingest_tree,
-        ("INGEST_ALIAS_PUBLISH", "true"),
-        ("INGEST_RETIRE_DOCS", "*"),
-    )
-    assert r.returncode != 0
-    assert "malformed INGEST_RETIRE_DOCS" in r.stderr
-    assert "wildcards" in r.stderr
-
-
-def test_ingest_retire_docs_empty_side_fails_closed(ingest_tree):
-    r = _run_ingest(
-        ingest_tree,
-        ("INGEST_ALIAS_PUBLISH", "true"),
-        ("INGEST_RETIRE_DOCS", "SA22-0000-00@"),
-    )
-    assert r.returncode != 0
-    assert "empty side of '@'" in r.stderr
-
-
-def test_ingest_malformed_retire_docs_fails_closed(ingest_tree):
-    """Quotes/backslashes would break the rendered double-quoted YAML scalar
-    and are refused; other punctuation (/, |, spaces, ';') is data, never a
-    shell evaluation, and reaches the backend verbatim."""
-    r = _run_ingest(
-        ingest_tree,
-        ("INGEST_ALIAS_PUBLISH", "true"),
-        ("INGEST_RETIRE_DOCS", 'SA22-0000-00"bad'),
-    )
-    assert r.returncode != 0
-    assert "malformed INGEST_RETIRE_DOCS" in r.stderr
-
-
-def test_ingest_invalid_maintenance_bool_fails_closed(ingest_tree):
-    r = _run_ingest(ingest_tree, ("INGEST_REINGEST", "maybe"))
-    assert r.returncode != 0
-    assert "must be true/false" in r.stderr
-
-
 def test_ingest_dryrun_custom_workers(ingest_tree):
     r = _run_ingest(ingest_tree, ("INGEST_WORKERS", "8"))
     assert r.returncode == 0, r.stderr
@@ -559,12 +513,6 @@ def test_ingest_collection_policy_absent_fails_closed(ingest_tree):
     assert r.returncode == 1
     assert "collection distribution policy is incomplete" in r.stderr
     assert "1/1/1" in r.stderr
-
-
-def test_ingest_collection_policy_partial_fails_closed(ingest_tree):
-    r = _run_ingest(ingest_tree, ("QDRANT_REPLICATION_FACTOR", ""))
-    assert r.returncode == 1
-    assert "QDRANT_REPLICATION_FACTOR" in r.stderr
 
 
 def test_ingest_collection_policy_preset_supplies_production_tuple(ingest_tree):
@@ -666,16 +614,6 @@ def test_production_preset_is_the_owner_decision():
         assert line in text.splitlines()
 
 
-def test_ingest_otel_on_by_default(ingest_tree):
-    # Unset endpoint resolves to the in-cluster Jaeger (tracing ON); the
-    # service name is fixed so the Job never merges into the agent service.
-    r = _run_ingest(ingest_tree)
-    assert r.returncode == 0, r.stderr
-    rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
-    assert 'value: "http://jaeger:4318"' in rendered
-    assert "value: mainframe-rag-ingest" in rendered
-
-
 def test_ingest_otel_off_sentinel(ingest_tree):
     r = _run_ingest(ingest_tree, ("OTEL_EXPORTER_OTLP_ENDPOINT", "off"))
     assert r.returncode == 0, r.stderr
@@ -720,32 +658,6 @@ def test_ingest_pull_secret_wired_when_set(ingest_tree):
     assert_pull_secret_wired(rendered, "custom-registry-secret")
 
 
-def test_ingest_pull_secret_bad_name_fails_closed(ingest_tree):
-    r = _run_ingest(ingest_tree, ("PULL_SECRET", "Bad_Name!"))
-    assert r.returncode != 0
-    assert "PULL_SECRET must be a DNS-subdomain name" in r.stderr
-
-
-def test_ingest_pull_secret_stays_empty_when_unset(ingest_tree):
-    r = _run_ingest(ingest_tree)
-    assert r.returncode == 0, r.stderr
-    rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
-    assert "imagePullSecrets: []" in rendered
-    assert "name: custom-registry-secret" not in rendered
-
-
-def test_ingest_refuses_nfs_storage(ingest_tree):
-    r = _run_ingest(ingest_tree, ("STORAGE_CLASS", "nfs-storage-class"))
-    assert r.returncode == 1
-    assert "looks like NFS" in r.stderr
-
-
-def test_ingest_missing_corpus_pvc_fails_closed(ingest_tree):
-    r = _run_ingest(ingest_tree, ("CORPUS_PVC", ""))
-    assert r.returncode == 1
-    assert "required variables unset: CORPUS_PVC" in r.stderr
-
-
 def test_ingest_cli_corpus_pvc_beats_env_file(ingest_tree):
     env_file = ingest_tree[0] / "case.env"
     env_file.write_text("CORPUS_PVC=file-pvc-should-lose\n")
@@ -754,24 +666,6 @@ def test_ingest_cli_corpus_pvc_beats_env_file(ingest_tree):
     rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
     assert "claimName: my-manuals-pvc" in rendered
     assert "file-pvc-should-lose" not in rendered
-
-
-def test_ingest_gateway_keys_off_strips_secret_block(ingest_tree):
-    r = _run_ingest(ingest_tree)
-    assert r.returncode == 0, r.stderr
-    rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
-    # No gateway secret reference: the only secretKeyRef left is the
-    # chart-managed QDRANT_API_KEY. The neighboring plain entries and the
-    # volumes section survive the strip.
-    assert rendered.count("secretKeyRef") == 1
-    assert "EMBED_API_KEY" not in rendered
-    assert "CONTEXT_LLM_API_KEY" not in rendered
-    assert "RERANK_API_KEY" not in rendered
-    assert "CONTEXT_LLM_MODEL" in rendered
-    assert "volumes:" in rendered
-    assert "__GATEWAY_API_KEY_SECRET__" not in rendered
-    assert_no_placeholders(rendered)
-    assert "Gateway keys off" in r.stdout
 
 
 def test_ingest_gateway_keys_wired_when_secret_set(ingest_tree):
@@ -794,12 +688,6 @@ def test_ingest_gateway_keys_wired_when_secret_set(ingest_tree):
     assert "__GATEWAY_API_KEY_SECRET__" not in rendered
     assert_no_placeholders(rendered)
     assert "Gateway keys wired" in r.stdout
-
-
-def test_ingest_gateway_secret_bad_name_fails_closed(ingest_tree):
-    r = _run_ingest(ingest_tree, ("GATEWAY_API_KEY_SECRET", "Bad_Name!"))
-    assert r.returncode == 1
-    assert "GATEWAY_API_KEY_SECRET must be a DNS-subdomain name" in r.stderr
 
 
 @pytest.mark.parametrize("via_task", [False, True])

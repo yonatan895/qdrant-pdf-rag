@@ -85,11 +85,10 @@ def test_validate_clean_exits_zero(tree):
     r = _run(tree)
     assert r.returncode == 0, r.stderr
     assert "SUCCESS: Pre-flight validation passed (dry-run mode)." in r.stdout
-
-
-def test_validate_reports_selected_policy(tree):
-    r = _run(tree)
     assert "Collection policy: S=1 RF=1 W=1" in r.stdout
+    assert "Tracing:           ON (http://jaeger:4318)" in r.stdout
+    assert "EMBED_MODEL_REVISION: rev-1" in r.stdout
+
 
 
 def test_validate_production_preset_supplies_tuple(tree):
@@ -110,24 +109,46 @@ def test_validate_production_preset_supplies_tuple(tree):
     assert "Collection policy: S=6 RF=3 W=2" in r.stdout
 
 
-def test_validate_partial_policy_fails_closed(tree):
-    r = _run(tree, {"QDRANT_REPLICATION_FACTOR": None})
-    assert r.returncode == 1
-    assert "collection distribution policy is incomplete" in r.stderr
-    assert "QDRANT_REPLICATION_FACTOR" in r.stderr
+@pytest.mark.parametrize("extra_env,exit_code,messages", [
+    pytest.param({'QDRANT_REPLICATION_FACTOR': None}, 1, ('collection distribution policy is incomplete', 'QDRANT_REPLICATION_FACTOR'),
+                 id='validate_partial_policy_fails_closed'),
+    pytest.param({'QDRANT_SHARD_NUMBER': '6', 'QDRANT_REPLICATION_FACTOR': '2', 'QDRANT_WRITE_CONSISTENCY_FACTOR': '3'}, 1, ('exceeds',),
+                 id='validate_write_above_replication_fails_closed'),
+    pytest.param({'OTEL_EXPORTER_OTLP_ENDPOINT': 'jaeger:4318'}, None, ('must be http(s) or off',),
+                 id='validate_tracing_bad_endpoint_fails_closed'),
+    pytest.param({'INTERNAL_REGISTRY': None, 'REGISTRY_INTERNAL': None}, None, ('INTERNAL_REGISTRY', 'FAIL:'),
+                 id='validate_missing_registry_fails'),
+    pytest.param({'INTERNAL_REGISTRY': None, 'REGISTRY_INTERNAL': None, 'STORAGE_CLASS': None}, None, ('INTERNAL_REGISTRY', 'STORAGE_CLASS'),
+                 id='validate_lists_all_missing_vars_at_once'),
+    pytest.param({'STORAGE_CLASS': 'nfs-client'}, None, ('looks like NFS',),
+                 id='validate_nfs_storage_refused'),
+    pytest.param({'DENSE_DIM': 'not-a-number'}, None, ('DENSE_DIM must be a positive integer',),
+                 id='validate_dense_dim_non_integer_refused'),
+    pytest.param({'DENSE_DIM': '0'}, None, ('DENSE_DIM must be greater than 0',),
+                 id='validate_dense_dim_zero_refused'),
+    pytest.param({'EMBED_MODEL_REVISION': None}, None, ('EMBED_MODEL_REVISION', 'required variables unset'),
+                 id='validate_missing_embed_revision_fails'),
+    pytest.param({'EMBED_MODEL_REVISION': '   '}, None, ('EMBED_MODEL_REVISION must be a non-blank',),
+                 id='validate_whitespace_embed_revision_fails'),
+    pytest.param({'RERANK_ENDPOINT_ORDER': 'bogus'}, None, ('RERANK_ENDPOINT_ORDER must be score_first or rerank_first',),
+                 id='validate_rerank_endpoint_order_bad_value_refused'),
+    pytest.param({'VLLM_BASE_URL': 'ftp://vllm:8000'}, None, ('VLLM_BASE_URL must begin with http:// or https://',),
+                 id='validate_vllm_url_bad_scheme_refused'),
+    pytest.param({'GATEWAY_API_KEY_SECRET': 'Bad_Name!'}, None, ('GATEWAY_API_KEY_SECRET must be a DNS-subdomain name',),
+                 id='validate_gateway_secret_bad_name_fails_closed'),
+    pytest.param({'GATEWAY_BASE_URL': 'sample-api/v1'}, None, ('GATEWAY_BASE_URL must begin with http:// or https://',),
+                 id='shared_gateway_invalid_url_refuses'),
+    pytest.param({'LLM_MODEL_REASONING': 'code'}, None, ('LLM_BASE_URL is required when LLM_MODEL_REASONING is set',),
+                 id='reasoning_without_resolved_url_fails_preflight'),
+    pytest.param({'AGENT_ROUTE': 'maybe'}, None, ('AGENT_ROUTE must be true/false',),
+                 id='validate_route_invalid_boolean_refused_even_in_dryrun'),
+])
+def test_invalid_configuration_fails_closed(tree, extra_env, exit_code, messages):
+    result = _run(tree, extra_env)
+    assert result.returncode != 0 if exit_code is None else result.returncode == exit_code, result.stderr
+    for message in messages:
+        assert message in result.stderr
 
-
-def test_validate_write_above_replication_fails_closed(tree):
-    r = _run(
-        tree,
-        {
-            "QDRANT_SHARD_NUMBER": "6",
-            "QDRANT_REPLICATION_FACTOR": "2",
-            "QDRANT_WRITE_CONSISTENCY_FACTOR": "3",
-        },
-    )
-    assert r.returncode == 1
-    assert "exceeds" in r.stderr
 
 
 def test_validate_agent_write_key_fails_closed(tree):
@@ -183,12 +204,6 @@ def test_validate_ingest_copresent_readonly_key_fails_closed(tree):
     assert "read-only" in r.stderr
 
 
-def test_validate_tracing_on_by_default(tree):
-    r = _run(tree)
-    assert r.returncode == 0, r.stderr
-    assert "Tracing:           ON (http://jaeger:4318)" in r.stdout
-
-
 def test_validate_tracing_off_sentinel(tree):
     r = _run(tree, {"OTEL_EXPORTER_OTLP_ENDPOINT": "off"})
     assert r.returncode == 0, r.stderr
@@ -205,79 +220,9 @@ def test_validate_jaeger_false_requires_intentional_destination(tree):
     assert "Tracing:           ON (http://collector.platform:4318)" in ok.stdout
 
 
-def test_validate_tracing_bad_endpoint_fails_closed(tree):
-    r = _run(tree, {"OTEL_EXPORTER_OTLP_ENDPOINT": "jaeger:4318"})
-    assert r.returncode != 0
-    assert "must be http(s) or off" in r.stderr
-
-
-def test_validate_missing_registry_fails(tree):
-    r = _run(tree, {"INTERNAL_REGISTRY": None, "REGISTRY_INTERNAL": None})
-    assert r.returncode != 0
-    assert "INTERNAL_REGISTRY" in r.stderr and "FAIL:" in r.stderr
-
-
-def test_validate_lists_all_missing_vars_at_once(tree):
-    r = _run(tree, {"INTERNAL_REGISTRY": None, "REGISTRY_INTERNAL": None, "STORAGE_CLASS": None})
-    assert r.returncode != 0
-    assert "INTERNAL_REGISTRY" in r.stderr
-    assert "STORAGE_CLASS" in r.stderr
-
-
-def test_validate_nfs_storage_refused(tree):
-    r = _run(tree, {"STORAGE_CLASS": "nfs-client"})
-    assert r.returncode != 0
-    assert "looks like NFS" in r.stderr
-
-
-def test_validate_dense_dim_non_integer_refused(tree):
-    r = _run(tree, {"DENSE_DIM": "not-a-number"})
-    assert r.returncode != 0
-    assert "DENSE_DIM must be a positive integer" in r.stderr
-
-
-def test_validate_dense_dim_zero_refused(tree):
-    r = _run(tree, {"DENSE_DIM": "0"})
-    assert r.returncode != 0
-    assert "DENSE_DIM must be greater than 0" in r.stderr
-
-
-def test_validate_missing_embed_revision_fails(tree):
-    """Issue #391 F1: vllm mode refuses a blank attestation at startup, so
-    a missing revision must fail pre-flight, not crash-loop the pods."""
-    r = _run(tree, {"EMBED_MODEL_REVISION": None})
-    assert r.returncode != 0
-    assert "EMBED_MODEL_REVISION" in r.stderr
-    assert "required variables unset" in r.stderr
-
-
-def test_validate_whitespace_embed_revision_fails(tree):
-    r = _run(tree, {"EMBED_MODEL_REVISION": "   "})
-    assert r.returncode != 0
-    assert "EMBED_MODEL_REVISION must be a non-blank" in r.stderr
-
-
-def test_validate_embed_revision_echoed(tree):
-    r = _run(tree)
-    assert r.returncode == 0, r.stderr
-    assert "EMBED_MODEL_REVISION: rev-1" in r.stdout
-
-
-def test_validate_rerank_endpoint_order_bad_value_refused(tree):
-    r = _run(tree, {"RERANK_ENDPOINT_ORDER": "bogus"})
-    assert r.returncode != 0
-    assert "RERANK_ENDPOINT_ORDER must be score_first or rerank_first" in r.stderr
-
-
 def test_validate_rerank_endpoint_order_rerank_first_accepted(tree):
     r = _run(tree, {"RERANK_ENDPOINT_ORDER": "rerank_first"})
     assert r.returncode == 0, r.stderr
-
-
-def test_validate_vllm_url_bad_scheme_refused(tree):
-    r = _run(tree, {"VLLM_BASE_URL": "ftp://vllm:8000"})
-    assert r.returncode != 0
-    assert "VLLM_BASE_URL must begin with http:// or https://" in r.stderr
 
 
 @pytest.mark.parametrize(
@@ -486,12 +431,6 @@ def test_validate_allows_empty_and_commented_gateway_keys(tree):
         {"AIRGAP_ENV": _write_env_file(tree, "LLM_API_KEY=\n#EMBED_API_KEY=sk-commented\n")},
     )
     assert r.returncode == 0, r.stderr
-
-
-def test_validate_gateway_secret_bad_name_fails_closed(tree):
-    r = _run(tree, {"GATEWAY_API_KEY_SECRET": "Bad_Name!"})
-    assert r.returncode != 0
-    assert "GATEWAY_API_KEY_SECRET must be a DNS-subdomain name" in r.stderr
 
 
 @pytest.mark.parametrize("bad_name", ["Bad_Name!", "a&b", "a|b"])
@@ -970,18 +909,6 @@ def test_shared_gateway_needs_no_legacy_vllm_url(tree):
     assert "EMBED_BASE_URL:    https://sample-api/v1" in result.stdout
 
 
-def test_shared_gateway_invalid_url_refuses(tree):
-    result = _run(tree, {"GATEWAY_BASE_URL": "sample-api/v1"})
-    assert result.returncode != 0
-    assert "GATEWAY_BASE_URL must begin with http:// or https://" in result.stderr
-
-
-def test_reasoning_without_resolved_url_fails_preflight(tree):
-    result = _run(tree, {"LLM_MODEL_REASONING": "code"})
-    assert result.returncode != 0
-    assert "LLM_BASE_URL is required when LLM_MODEL_REASONING is set" in result.stderr
-
-
 def test_model_validation_preserves_caller_over_file_precedence(tree):
     path = tree / "selected.env"
     path.write_text("LLM_BASE_URL=invalid-file-url\nLLM_MODEL_REASONING=code\nGATEWAY_BASE_URL=https://file-gateway/v1\n")
@@ -1256,12 +1183,6 @@ def test_validate_route_pin_tag_must_match_chart(tree):
     r = _route_run(tree, live=False)
     assert r.returncode != 0
     assert "does not match the chart" in r.stderr
-
-
-def test_validate_route_invalid_boolean_refused_even_in_dryrun(tree):
-    r = _run(tree, {"AGENT_ROUTE": "maybe"})
-    assert r.returncode != 0
-    assert "AGENT_ROUTE must be true/false" in r.stderr
 
 
 def test_validate_route_manifest_without_oauth_member_refused(tree):
