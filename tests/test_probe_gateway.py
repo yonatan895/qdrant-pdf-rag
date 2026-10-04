@@ -153,6 +153,22 @@ def test_probe_all_healthy_recommends_score_first(monkeypatch, capsys):
     assert by_url["http://gw:8002/v1/score"] == {"Authorization": "Bearer sk-rerank"}
 
 
+@pytest.mark.parametrize("route", ["/embeddings", "/chat/completions"])
+def test_unreachable_required_gateway_leg_fails(monkeypatch, route):
+    _env(monkeypatch)
+    fake = FakeGateway(_healthy_routes())
+    normal_post = fake.post
+
+    def post(url, **kwargs):
+        if url.endswith(route):
+            raise httpx2.ConnectError("synthetic unavailable")
+        return normal_post(url, **kwargs)
+
+    monkeypatch.setattr(fake, "post", post)
+    monkeypatch.setattr(probe_mod, "httpx2", fake)
+    assert main(["--require-reasoning"]) == 1
+
+
 def test_probe_score_dead_recommends_rerank_first(monkeypatch, capsys):
     routes = [r for r in _healthy_routes() if r[1] != "/v1/score"]
     routes.append(("POST", "/v1/score", 404, {}))

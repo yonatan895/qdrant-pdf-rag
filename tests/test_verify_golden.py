@@ -3,7 +3,6 @@
 import json
 from pathlib import Path
 
-from scripts.eval_retrieval import GoldenEntry
 from scripts.verify_golden import (
     CorpusFacts,
     DocFacts,
@@ -11,6 +10,8 @@ from scripts.verify_golden import (
     load_entries,
     verify_entry,
 )
+
+from mainframe_rag.eval.datasets import GoldenEntry
 
 
 def _facts() -> CorpusFacts:

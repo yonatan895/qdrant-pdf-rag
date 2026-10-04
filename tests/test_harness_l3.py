@@ -245,8 +245,7 @@ def test_l3_policy_exports_share_canonical_owner():
 
     from mainframe_rag.eval import performance
 
-    for name in ("_ENV_GATE_KEYS", "_get_nested", "default_baseline_path",
-                 "gate_verdict_l3", "summary_markdown_l3"):
+    for name in ("default_baseline_path", "gate_verdict_l3", "summary_markdown_l3"):
         assert getattr(harness_l3, name) is getattr(performance, name)
 
 

@@ -5,8 +5,9 @@ import json
 from pathlib import Path
 
 import pymupdf
-from scripts.eval_retrieval import load_golden
 from scripts.gate_l1 import generate_synthetic_golden_corpus
+
+from mainframe_rag.eval.datasets import load_golden
 
 PARAPHRASE_PATH = Path("evals/paraphrase.jsonl")
 GOLDEN_PATH = Path("evals/golden.jsonl")

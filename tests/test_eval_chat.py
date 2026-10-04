@@ -1,4 +1,4 @@
-"""Unit tests for the multi-turn condensation A/B helpers (scripts/eval_chat.py).
+"""Unit tests for the multi-turn condensation A/B helpers (eval.chat).
 
 Hermetic: follow-up templates, per-arm entry construction, and pure
 aggregation only. The live tier runs via `sh scripts/tools/run-task.sh eval:chat` on the RC stack.
@@ -222,15 +222,8 @@ def test_evaluate_sessions_preserves_both_arms_and_condensation_accounting(monke
     assert report["summary"]["delta_recall@1"] == 0.0
 
 
-def test_chat_compatibility_exports_are_canonical():
-    from scripts import eval_chat
-
+def test_chat_consumes_canonical_datasets_and_scoring():
     from mainframe_rag.eval import chat, datasets, retrieval
 
-    for name in ("main", "evaluate_sessions", "_retrieve_arm", "follow_up_query",
-                 "session_messages", "arm_entry", "summarize_arms", "select_entries",
-                 "summary_markdown", "FOLLOW_UPS", "DEFAULT_FOLLOW_UP",
-                 "ASSISTANT_PLACEHOLDER", "ARM_LITERAL", "ARM_CONDENSED"):
-        assert getattr(eval_chat, name) is getattr(chat, name)
     assert chat.GoldenEntry is datasets.GoldenEntry
     assert chat.score_entry is retrieval.score_entry

@@ -303,13 +303,12 @@ def test_main_exit_2_when_reference_missing(tmp_path: Path, monkeypatch, capfd):
     assert "no L4 reference" in capfd.readouterr().err
 
 
-def test_l4_delegate_preserves_quality_identity():
+def test_l4_consumes_canonical_quality_policy():
     from scripts import harness_l4
 
     from mainframe_rag.eval import quality
 
-    for name in ("ThresholdError", "GATED_METRICS", "DEFAULT_TOLERANCE",
-                 "summarize_l4", "gate_l4", "load_thresholds", "save_thresholds",
+    for name in ("ThresholdError", "summarize_l4", "gate_l4", "load_thresholds", "save_thresholds",
                  "build_review_queue", "record_blockers", "write_summary"):
         assert getattr(harness_l4, name) is getattr(quality, name)
 

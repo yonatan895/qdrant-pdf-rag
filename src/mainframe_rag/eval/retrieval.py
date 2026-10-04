@@ -2,9 +2,8 @@
 
 Canonical owner for the retrieval-eval machinery (same ``retrieve_search``,
 same golden schema, same must_not sibling allowance) plus the harness L1
-metric set. Mechanical move from ``scripts/eval_retrieval.py`` pure helpers
-and ``scripts/harness_l1.py`` scoring/aggregation: no metric, default, gate
-or label change.
+metric set. The retrieval CLI and promotion harness consume this shared
+scoring/aggregation owner: no metric, default, gate or label change.
 
 Per-class/trap/paired-query semantics stay explicit; there is exactly one
 relevance implementation (``is_relevant_hit``), one sibling allowance

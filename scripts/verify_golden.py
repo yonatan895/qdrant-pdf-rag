@@ -35,11 +35,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # repo root: scripts.* imports
 
 from mainframe_rag.config import load_settings
+from mainframe_rag.eval.datasets import QUERY_CLASSES, GoldenEntry
+from mainframe_rag.eval.retrieval import is_sibling_exception
 from mainframe_rag.retrieve.filters import parse_query
-from scripts.eval_retrieval import QUERY_CLASSES, GoldenEntry, is_sibling_exception
 
 RARITY_LIMIT = 10  # a must_not message ID in more docs than this is a weak trap
 PAGE_SIZE = 1000

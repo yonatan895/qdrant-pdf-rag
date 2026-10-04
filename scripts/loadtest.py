@@ -33,14 +33,7 @@ REPO = Path(__file__).resolve().parents[1]
 if str(REPO / "src") not in sys.path:
     sys.path.insert(0, str(REPO / "src"))
 
-from mainframe_rag.eval.load import (  # noqa: F401 — compatibility exports
-    DEFAULT_QUERIES,
-    _percentile,
-    parse_server_timing,
-    query_gpu_name,
-    query_vram_mb,
-    run_load,
-)
+from mainframe_rag.eval.load import DEFAULT_QUERIES, query_gpu_name, run_load
 
 
 def _set_nested(target: dict[str, Any], dotted: str, value: Any) -> None:

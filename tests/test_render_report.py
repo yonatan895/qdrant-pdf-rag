@@ -1,4 +1,4 @@
-"""Unit tests for scripts/render_report.py (pure functions, no network/docker)."""
+"""Unit tests for eval.reports (pure functions, no network/docker)."""
 
 import json
 import os
@@ -6,6 +6,8 @@ import shlex
 import shutil
 import subprocess
 import sys
+import sysconfig
+import venv
 from pathlib import Path
 
 import pytest
@@ -231,15 +233,11 @@ def test_compare_eval_mixed_directional_change_regression(tmp_path: Path):
 
 
 
-def test_report_delegate_and_l1_consumer_share_canonical_owner():
-    from scripts import gate_l1, render_report
+def test_l1_consumes_canonical_report_renderer():
+    from scripts import gate_l1
 
     from mainframe_rag.eval import reports
 
-    for name in ("_load_json", "_get", "_diff_badge", "_html_esc", "_md_esc",
-                 "render_eval", "render_bench", "compare_eval", "compare_bench",
-                 "main", "BASE_HTML_STYLE"):
-        assert getattr(render_report, name) is getattr(reports, name)
     assert gate_l1.render_eval is reports.render_eval
 
 
@@ -255,8 +253,7 @@ def report_workspace(tmp_path):
     repo = Path(__file__).resolve().parents[1]
     shutil.copy2(repo / "Taskfile.yml", tmp_path / "Taskfile.yml")
     shutil.copytree(repo / "taskfiles", tmp_path / "taskfiles")
-    (tmp_path / "scripts").mkdir()
-    shutil.copy2(repo / "scripts/render_report.py", tmp_path / "scripts/render_report.py")
+    (tmp_path / "src").symlink_to(repo / "src", target_is_directory=True)
     (tmp_path / ".venv/bin").mkdir(parents=True)
     launcher = tmp_path / ".venv/bin/python"
     launcher.write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n')
@@ -285,10 +282,72 @@ def report_workspace(tmp_path):
     (tmp_path / "evals/baseline-vllm.json").write_text("wrong mode-selected file")
     def run(operation, *args, ambient=None):
         return subprocess.run([task, "--taskfile", str(tmp_path / "Taskfile.yml"), f"eval:{operation}", *args],
-            cwd=tmp_path, env={"PATH": os.defpath, "HOME": str(tmp_path), "PYTHONPATH": str(repo / "src"),
+            cwd=tmp_path, env={"PATH": os.defpath, "HOME": str(tmp_path),
                                "EMBED_MODE": "vllm", **(ambient or {})},
             capture_output=True, text=True, timeout=30, check=False)
     return tmp_path, run, paths, values
+
+
+@pytest.mark.parametrize("inherited_source", [False, True])
+@pytest.mark.parametrize("operation,module", [
+    ("answers", "answers"), ("chat", "chat"), ("report", "reports"),
+    ("html", "reports"), ("compare", "reports"), ("bench-report", "reports"),
+    ("bench-html", "reports"), ("bench-compare", "reports"),
+])
+def test_module_tasks_execute_checkout_with_foreign_editable(report_workspace, operation, module, inherited_source):
+    root, run, _paths, values = report_workspace
+    foreign = root / "foreign-src"
+    package = foreign / "mainframe_rag"
+    (package / "eval").mkdir(parents=True)
+    (package / "__init__.py").write_text("")
+    (package / "eval/__init__.py").write_text("")
+    for name in ("answers", "chat", "reports"):
+        (package / f"eval/{name}.py").write_text("raise SystemExit('foreign checkout executed')\n")
+    # Real interpreter + editable .pth: no launcher that inserts the right src.
+    environment = root / ".venv"
+    (environment / "bin/python").unlink()
+    venv.EnvBuilder(with_pip=False).create(environment)
+    site = Path(sysconfig.get_path("purelib", vars={"base": str(environment), "platbase": str(environment)}))
+    (site / "foreign-editable.pth").write_text(f"{foreign}\n{sysconfig.get_path('purelib')}\n")
+    (foreign / "sitecustomize.py").write_text('''
+import atexit, json, os, sys
+from pathlib import Path
+def trace():
+    module = sys.modules['__main__']
+    Path(os.environ['IMPORT_TRACE']).write_text(json.dumps({
+        'module': module.__spec__.name, 'file': module.__file__}))
+if 'IMPORT_TRACE' in os.environ:
+    atexit.register(trace)
+''')
+    probe = subprocess.run([str(environment / "bin/python"), "-c",
+                            "import mainframe_rag; print(mainframe_rag.__file__)"],
+                           env={"PATH": os.defpath}, capture_output=True, text=True, check=True)
+    assert Path(probe.stdout.strip()) == package / "__init__.py"
+    trace = root / "import-trace.json"
+    ambient = {"IMPORT_TRACE": str(trace)}
+    if inherited_source:
+        ambient["PYTHONPATH"] = str(foreign)
+    # Parser refusal exercises the answer/chat module without model/storage work.
+    proc = run(operation, *(["N=invalid"] if module != "reports" else []), ambient=ambient)
+    if module != "reports":
+        assert proc.returncode != 0
+        assert "invalid int value" in proc.stderr
+    else:
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        family = "bench" if operation.startswith("bench-") else "eval"
+        current, baseline = values[family, False]
+        if operation.endswith("html"):
+            renderer = render_eval if family == "eval" else render_bench
+            assert (root / f"bundles/{family}-report.html").read_text() == renderer(current, baseline, "html")
+        else:
+            renderer = ((compare_eval if family == "eval" else compare_bench) if operation.endswith("compare")
+                        else (render_eval if family == "eval" else render_bench))
+            result = renderer(baseline, current, "text")[0] if operation.endswith("compare") else renderer(current, baseline, "text")
+            assert proc.stdout == result + "\n"
+    assert json.loads(trace.read_text()) == {
+        "module": f"mainframe_rag.eval.{module}",
+        "file": str(root / f"src/mainframe_rag/eval/{module}.py"),
+    }
 
 
 @pytest.mark.parametrize("operation,family,kind", [

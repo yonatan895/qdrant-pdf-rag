@@ -40,9 +40,7 @@ from loadtest import export_to_baseline
 
 from mainframe_rag.eval.datasets import VenueError, require_rc_for_collection
 from mainframe_rag.eval.load import DEFAULT_QUERIES, query_gpu_name, query_vram_mb, run_load
-from mainframe_rag.eval.performance import (  # noqa: F401 — compatibility exports
-    _ENV_GATE_KEYS,
-    _get_nested,
+from mainframe_rag.eval.performance import (
     default_baseline_path,
     gate_verdict_l3,
     summary_markdown_l3,

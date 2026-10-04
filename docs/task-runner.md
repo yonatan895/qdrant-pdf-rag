@@ -160,9 +160,9 @@ keeps its separate fixed rehearsal inputs.
 | `BUDGET_PYTHON` | fixed by local launch tasks | Always the repository's `.venv/bin/python`; not caller-overridable or globally exported. |
 | Operator keys (`INTERNAL_REGISTRY`, `NAMESPACE`, …) | `airgap:deploy INTERNAL_REGISTRY=x` | No Task-side defaults. `common.sh` owns the full `OPERATOR_ENV_KEYS` list and env/file/default precedence: explicit nonempty values win, explicit empty stays unset. See [configuration](deploy.md#configuration-contract). |
 
-Values use environment bridges and quoted expansion, never template text
-reparsed as shell commands. The working directory is the repository root for
-all included modules; caller-relative focused test paths resolve there too.
+Values use environment bridges and quoted expansion, never templates reparsed
+as shell commands. Included modules run at the checkout root; module evaluation
+Tasks bind `PYTHONPATH=src` there. Focused test paths resolve there too.
 Use `sh scripts/tools/run-task.sh --exit-code dev:doctor` when the script's
 exact 0/1/2 result is required; ordinary Task failures are nonzero Task codes.
 Cancellation remains a failure; existing foreground owners perform cleanup.
@@ -269,12 +269,12 @@ executed. Prefix current tasks with `sh scripts/tools/run-task.sh`. Task
 | `lint`, `typecheck`, `test`, `check` | `qa:lint`, `qa:typecheck`, `qa:unit`, `qa:check` | Ruff, mypy, pytest; root aliases retained |
 | `wheelhouse`, `bm25-weights` | `artifacts:wheelhouse`, `artifacts:bm25` | artifact preparation and BM25 fetcher |
 | `chart`, `pull-chart`, `helm-template`, `helm-lint`, `build-images` | `artifacts:chart-check`, `artifacts:chart-fetch`, `artifacts:helm-render`, `artifacts:helm-lint`, `artifacts:images` | Helm, Docker and artifact owners |
-| `sim`, `loadtest-mock`, `test-vllm-e2e` | `qa:sim`, `qa:load`, `qa:vllm-e2e`, `qa:ha` (new multi-peer lane) | existing suites/scripts; `qa:ha` is the issue #360 three-peer fixture |
+| `sim`, `loadtest-mock` | `qa:sim`, `qa:load`, `qa:ha` (new multi-peer lane) | existing suites/scripts; `qa:ha` is the issue #360 three-peer fixture |
 | `sim-qdrant`, `sim-clean` | `local:qdrant:up`, `local:qdrant:down` | `sim_qdrant.sh`, shared Qdrant helpers |
 | `eval`, `eval-baseline`, `eval-draft`, `eval-holdout`, `eval-paraphrase` | `eval:retrieval`, `eval:baseline`, `eval:draft`, `eval:holdout`, `eval:paraphrase` | retrieval scripts, mode-keyed baselines |
 | `verify-golden`, `gate-l1`, `capture-pool`, `eval-answers`, `eval-chat` | `eval:verify-golden`, `eval:gate-l1`, `eval:capture-pool`, `eval:answers`, `eval:chat` | existing evaluation scripts |
 | `harness-gate`, `harness-baseline`, `harness-l2`, `harness-l3`, `harness-l3-baseline`, `harness-l4`, `harness-l4-record` | `eval:harness:gate`, `eval:harness:baseline`, `eval:harness:l2`, `eval:harness:l3`, `eval:harness:l3-baseline`, `eval:harness:l4`, `eval:harness:l4-record` | harness scripts and separate tier baselines |
-| `eval-report`, `eval-html`, `eval-compare` | `eval:report`, `eval:html`, `eval:compare` | `render_report.py` |
+| `eval-report`, `eval-html`, `eval-compare` | `eval:report`, `eval:html`, `eval:compare` | `mainframe_rag.eval.reports` |
 | `bench`, `bench-baseline`, `bench-report`, `bench-html`, `bench-compare`, `loadtest` | `eval:bench`, `eval:bench-baseline`, `eval:bench-report`, `eval:bench-html`, `eval:bench-compare`, `eval:load` | benchmark/load/report scripts |
 | `query-demo`, `ask`, `run-agent` | `local:query`, `local:ask`, `local:agent` | query script and agent |
 | `local-vllm`, `local-vllm-embed`, `local-vllm-rerank`, `local-stack` | `local:llm`, `local:embed`, `local:rerank`, `local:stack` | existing launchers/supervisor |

@@ -224,8 +224,7 @@ def test_load_measurement_consumers_share_canonical_owner():
 
     from mainframe_rag.eval import load
 
-    for name in ("DEFAULT_QUERIES", "_percentile", "parse_server_timing",
-                 "query_gpu_name", "query_vram_mb", "run_load"):
+    for name in ("DEFAULT_QUERIES", "query_gpu_name", "run_load"):
         assert getattr(loadtest, name) is getattr(load, name)
     assert benchmark.run_load is harness_l3.run_load is load.run_load
     assert benchmark.DEFAULT_QUERIES is harness_l3.DEFAULT_QUERIES is load.DEFAULT_QUERIES

@@ -611,21 +611,12 @@ def test_summarize_by_why_modes_and_off_gold():
     assert m["inferred_index_off_gold"] == 0
 
 
-def test_judge_compatibility_identity():
-    from scripts import harness_l2
+def test_l2_and_l4_consume_canonical_runner():
+    from scripts import harness_l2, harness_l4
 
-    from mainframe_rag.eval import answer_tier, judging
+    from mainframe_rag.eval import answer_tier
 
-    for name in ("JudgeError", "judge_chat", "judge_messages", "relevance_messages",
-                 "parse_judge_label", "parse_relevance_label", "evidence_for_citations",
-                 "citation_to_hit", "cited_doc_ids", "precision_recall", "RELEVANCE_LABELS"):
-        assert getattr(harness_l2, name) is getattr(judging, name)
-    from scripts import harness_l4
-
-    for name in ("run_l2", "_AlertCapture", "apply_l2_measurements", "summarize_l2",
-                 "gate_l2", "syntax_check", "write_summary"):
-        assert getattr(harness_l2, name) is getattr(answer_tier, name)
-    assert harness_l4.run_l2 is answer_tier.run_l2
+    assert harness_l2.run_l2 is harness_l4.run_l2 is answer_tier.run_l2
 
 
 @pytest.mark.parametrize("relevance_enabled", [False, True])

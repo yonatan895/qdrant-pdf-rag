@@ -23,7 +23,7 @@ Where it sits
 
 Venue (issue #268)
     Dev defaults to ``evals/golden.jsonl`` only; the frozen holdout and the
-    ``real_manuals`` collection require ``VENUE=rc`` (``scripts/venue.py``).
+    ``real_manuals`` collection require ``VENUE=rc`` (``eval.datasets``).
     The reference file is checked against the live venue/embed/reasoning
     model before any GPU spend — a reference from a different judge tier is
     not comparable and fails closed.
@@ -60,19 +60,11 @@ from mainframe_rag.eval.datasets import (
 
 DEFAULT_THRESHOLDS = REPO / "evals" / "harness-l4-thresholds.json"
 
-from mainframe_rag.eval.quality import (  # noqa: F401 — compatibility exports
-    _FAITHFULNESS_IDEAL,
-    _RELEVANCE_IDEAL,
-    DEFAULT_TOLERANCE,
-    GATED_METRICS,
+from mainframe_rag.eval.quality import (
     ThresholdError,
-    _sum_state_histograms,
     build_review_queue,
-    classify,
     gate_l4,
-    get_nested,
     load_thresholds,
-    mean_metric,
     record_blockers,
     save_thresholds,
     summarize_l4,
