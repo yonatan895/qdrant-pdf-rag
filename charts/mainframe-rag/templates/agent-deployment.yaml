@@ -9,16 +9,16 @@ metadata:
   name: rag-agent
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "mainframe-rag.labels" . | nindent 4 }}
+    app: rag-agent
 spec:
   replicas: {{ .Values.replicaCount }}
   selector:
     matchLabels:
-      {{- include "mainframe-rag.selectorLabels" . | nindent 6 }}
+      app: rag-agent
   template:
     metadata:
       labels:
-        {{- include "mainframe-rag.selectorLabels" . | nindent 8 }}
+        app: rag-agent
     spec:
       securityContext:
         runAsNonRoot: true
@@ -35,7 +35,7 @@ spec:
       {{- end }}
       containers:
         - name: agent
-          image: {{ include "mainframe-rag.agentImage" . }}
+          image: {{ include "mainframe-rag.image" (dict "name" "agent" "image" .Values.images.agent) }}
           imagePullPolicy: {{ .Values.images.agent.pullPolicy | default "IfNotPresent" }}
           securityContext:
             allowPrivilegeEscalation: false
@@ -132,7 +132,7 @@ spec:
           {{- end }}
         {{- if .Values.route.enabled }}
         - name: oauth-proxy
-          image: {{ include "mainframe-rag.oauthProxyImage" . }}
+          image: {{ include "mainframe-rag.image" (dict "name" "oauthProxy" "image" .Values.images.oauthProxy) }}
           imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false
