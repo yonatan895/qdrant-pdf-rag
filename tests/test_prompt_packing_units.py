@@ -15,6 +15,7 @@ from __future__ import annotations
 import pytest
 
 from mainframe_rag.agent.answer import (
+    _LEADING_MARKER,
     _TRUNCATED_SUFFIX,
     PromptBudgetExceeded,
     _verify_trim_last,
@@ -640,3 +641,271 @@ def test_trim_round_limit_scales_with_trimmable_content():
     assert _trim_round_limit(0) == _MAX_TRIM_ROUNDS
     assert _trim_round_limit(8) > _trim_round_limit(2) > _MAX_TRIM_ROUNDS
     assert _trim_round_limit(3, 2, base=_MAX_TRIM_ROUNDS * 2) == _MAX_TRIM_ROUNDS * 2 + 6 + 2
+
+
+# ---------------------------------------------------------------------------
+# Requested-passage range selection with truthful source offsets (#632).
+# Original synthetic text only.
+# ---------------------------------------------------------------------------
+
+
+def _entry(code: str, body_chars: int, fill: str = "alpha ") -> str:
+    explanation = (fill * (body_chars // len(fill) + 1))[:body_chars].rstrip()
+    return f"{code} Synthetic message text.\nExplanation: {explanation}"
+
+
+def _spans_for(parts: list[str]) -> tuple[tuple[int, int, str], ...]:
+    out, pos = [], 0
+    for part in parts:
+        out.append((pos, pos + len(part), "atomic"))
+        pos += len(part) + 2
+    return tuple(out)
+
+
+def _message_hit(parts: list[str], index: str = "m1", units=None) -> SearchHit:
+    text = "\n\n".join(parts)
+    return _hit(
+        text,
+        chunk_type="message",
+        units=_spans_for(parts) if units is None else units,
+        index=index,
+    )
+
+
+def _supplied(prepared, index: int = 1) -> str:
+    """Exact excerpt text the model receives (without the [i] cite header)."""
+    return _excerpt_body(prepared, index).split("\n", 1)[1]
+
+
+def _assert_offsets_reconstruct(prepared, hit, index: int = 1) -> None:
+    entry = next(e for e in prepared.evidence.entries if e.prompt_index == index)
+    source = hit.text.strip()
+    expected = (
+        (_LEADING_MARKER if entry.start_char > 0 else "")
+        + source[entry.start_char : entry.included_chars]
+        + (_TRUNCATED_SUFFIX if entry.included_chars < len(source) else "")
+    )
+    assert _supplied(prepared, index) == expected
+    assert entry.truncated == (entry.start_char > 0 or entry.included_chars < len(source))
+
+
+TWO_ENTRIES = [_entry("ABC100I", 2550), _entry("ABC200E", 800, "bravo ")]
+
+
+@pytest.mark.parametrize("tokenized", [False, True])
+def test_requested_later_entry_is_supplied_not_unrelated_prefix(tokenized):
+    hit = _message_hit(TWO_ENTRIES)
+    assert 3400 < len(hit.text) and hit.text.index("ABC200E") > 2500
+    kwargs = (
+        {"tokenizer": FallbackTokenizer(), "settings": _tokenizer_settings()}
+        if tokenized
+        else {}
+    )
+    prepared = build_messages("What does ABC200E mean?", [hit], **kwargs)
+    shipped = _supplied(prepared)
+    assert shipped.startswith(_LEADING_MARKER + "ABC200E Synthetic message text.")
+    assert "ABC100I" not in shipped
+    assert TWO_ENTRIES[1] in shipped
+    entry = prepared.evidence.entries[0]
+    assert entry.start_char == hit.text.index("ABC200E")
+    assert entry.units_total == 2 and entry.units_retained == 1
+    _assert_offsets_reconstruct(prepared, hit)
+
+
+def test_unrequested_and_unmatched_queries_keep_prefix_behavior():
+    hit = _message_hit(TWO_ENTRIES)
+    for query in ("q", "What does ABC300I mean?", "What does ABC100I mean?"):
+        prepared = build_messages(query, [hit])
+        entry = prepared.evidence.entries[0]
+        assert entry.start_char == 0, query
+        assert _supplied(prepared).startswith("ABC100I"), query
+        assert "ABC200E" not in _supplied(prepared), query
+        _assert_offsets_reconstruct(prepared, hit)
+
+
+def test_incidental_mention_is_not_an_entry_heading():
+    parts = [
+        _entry("ABC100I", 1400) + " See also ABC200E for details.",
+        _entry("ABC150W", 1300),
+        _entry("ABC200E", 500, "bravo "),
+    ]
+    hit = _message_hit(parts)
+    prepared = build_messages("ABC200E", [hit], max_chunk_chars=2200)
+    assert parts[2] in _supplied(prepared)
+    entry = prepared.evidence.entries[0]
+    assert entry.start_char > 0
+    _assert_offsets_reconstruct(prepared, hit)
+    # A near-miss identifier (longer token) is not a heading either.
+    near = _message_hit([_entry("ABC2001E", 1800), _entry("ABC200E", 400, "bravo ")])
+    prepared = build_messages("ABC200E", [near], max_chunk_chars=1500)
+    assert near.text.index("ABC200E Synthetic") == prepared.evidence.entries[0].start_char
+
+
+def test_multiple_requested_identifiers_share_one_contiguous_range():
+    parts = [_entry("ABC050I", 1500), _entry("ABC100I", 500), _entry("ABC200E", 500, "bravo ")]
+    hit = _message_hit(parts)
+    prepared = build_messages("ABC100I and ABC200E", [hit], max_chunk_chars=1400)
+    shipped = _supplied(prepared)
+    assert parts[1] in shipped and parts[2] in shipped
+    assert "ABC050I" not in shipped
+    _assert_offsets_reconstruct(prepared, hit)
+
+
+def test_unfittable_entry_is_omitted_explicitly():
+    """An entry larger than the cap is never partially shipped."""
+    hit = _message_hit([_entry("ABC100I", 3400)])
+    prepared = build_messages("ABC100I", [hit], max_chunk_chars=1000)
+    assert prepared.evidence.entries == ()
+    assert prepared.evidence.omitted_indices == (1,)
+    assert prepared.evidence.cite_for_index(1) is None
+
+
+@pytest.mark.parametrize("order", ["retrieval", "stable_cache"])
+def test_chat_path_supplies_requested_later_entry(order):
+    hit = _message_hit(TWO_ENTRIES)
+    prepared = build_chat_messages(
+        [ChatMessage(role="user", content="What does ABC200E mean?")], [hit], order=order
+    )
+    body = prepared.messages[-1].content
+    assert TWO_ENTRIES[1] in body and "ABC100I" not in body
+    assert prepared.evidence.entries[0].start_char == hit.text.index("ABC200E")
+
+
+class _OvershootTokenizer:
+    """Reports overshoot for the first N counts, forcing real trim rounds."""
+
+    remote_confirmed = False
+
+    def __init__(self, over_rounds: int):
+        self.left = over_rounds
+
+    def count_messages(self, messages) -> int:
+        if self.left > 0 and "[1] " in messages[-1].content:
+            self.left -= 1
+            return 6528 + 150
+        return 5
+
+
+def test_offsets_reconstruct_exactly_after_every_trim_round():
+    settings = _tokenizer_settings(llm_max_model_len=8192)
+    parts = [_entry("ABC100I", 600), _entry("ABC200E", 1200, "bravo "), _entry("ABC300I", 400)]
+    hit = _message_hit(parts)
+    outcomes = []
+    for rounds in range(1, 4):
+        prepared = build_messages(
+            "ABC200E",
+            [hit],
+            tokenizer=_OvershootTokenizer(rounds),
+            settings=settings,
+            max_chunk_chars=1500,
+        )
+        entries = prepared.evidence.entries
+        if not entries:
+            assert prepared.evidence.omitted_indices == (1,)
+            outcomes.append("omitted")
+            continue
+        _assert_offsets_reconstruct(prepared, hit)
+        # The requested entry is whole whenever the excerpt survives.
+        assert parts[1] in _supplied(prepared)
+        outcomes.append(entries[0].included_chars)
+    assert outcomes  # every round count produced a consistent result
+
+
+def test_trim_dropping_requested_entry_omits_the_excerpt():
+    from mainframe_rag.agent.answer import (
+        _hit_spans,
+        _packed_excerpt,
+        _requested_identifiers,
+        _select_range,
+    )
+
+    hit = _message_hit([_entry("ABC100I", 1500), _entry("ABC200E", 900, "bravo ")])
+    source = hit.text.strip()
+    start, end, required = _select_range(
+        source, _hit_spans(hit, source), 1200, _requested_identifiers("ABC200E")
+    )
+    assert start == source.index("ABC200E") and required == end
+    packed = [_packed_excerpt(1, hit, source, start, end, required)]
+    # Overshoot large enough that only a cut inside the entry would fit.
+    _verify_trim_last(packed, used=1000, verify_limit=1000 - 100)
+    assert packed == []
+
+
+@pytest.mark.parametrize("tail", [" Applies to all devices.", ""])
+def test_prose_cut_ends_on_sentence_boundary(tail):
+    lead = "Run the utility during the nightly maintenance window on every system. " * 3
+    text = lead + "Use FAST=YES only when recovery mode is disabled." + tail
+    hit = _hit(text, chunk_type="narrative", units=())
+    cap = len(lead) + len("Use FAST=YES")
+    prepared = build_messages("q", [hit], max_chunk_chars=cap, max_chunk_chars_narrative=cap)
+    shipped = _supplied(prepared)
+    assert "FAST=YES" not in shipped
+    assert shipped.removesuffix(_TRUNCATED_SUFFIX).endswith("window on every system.")
+    _assert_offsets_reconstruct(prepared, hit)
+
+
+def test_prose_cut_never_separates_assertion_from_its_qualifier():
+    lead = "Run the utility during the nightly maintenance window on every system. " * 3
+    text = lead + "Use FAST=YES. However, do not use it when recovery mode is enabled. More."
+    hit = _hit(text, chunk_type="narrative", units=())
+    cap = len(lead) + len("Use FAST=YES. However")
+    prepared = build_messages("q", [hit], max_chunk_chars=cap, max_chunk_chars_narrative=cap)
+    assert "FAST=YES" not in _supplied(prepared)
+    # Whole text fits: both sentences ship together.
+    prepared = build_messages("q", [hit], max_chunk_chars=len(text) + 5)
+    assert "However, do not use it" in _supplied(prepared)
+
+
+def test_malformed_unit_spans_fall_back_without_inventing_anchors():
+    overlapping = ((0, 3000, "atomic"), (10, 20, "atomic"))
+    hit = _message_hit(TWO_ENTRIES, units=overlapping)
+    prepared = build_messages("ABC200E", [hit])
+    entry = prepared.evidence.entries[0]
+    assert entry.start_char == 0 and entry.included_chars <= 3000
+    _assert_offsets_reconstruct(prepared, hit)
+
+
+def _chunker_hits(text: str, heading: str) -> list[SearchHit]:
+    from pathlib import Path
+
+    from mainframe_rag.ingest.chunk import make_chunks
+    from mainframe_rag.ingest.ibm_pdf import ParsedDoc
+
+    parsed = ParsedDoc(
+        path=Path("synthetic.pdf"),
+        sha256="deadbeef",
+        doc_id="SA99-0000-00",
+        title=heading,
+        toc=((1, heading, 1),),
+        page_count=1,
+    )
+    return [
+        SearchHit(
+            chunk_id=f"k{c.ordinal}",
+            score=1.0,
+            cite="SA99-0000-00 Synthetic Codes, H, p. 1-1",
+            heading=heading,
+            text=c.text,
+            doc_id="SA99-0000-00",
+            title="Synthetic Codes",
+            page_label="1-1",
+            chunk_type=c.chunk_type,
+            message_ids=(),
+            units=tuple((u.start, u.end, u.kind) for u in c.units or ()),
+        )
+        for c in make_chunks(parsed, [text])
+    ]
+
+
+def test_current_chunker_fixture_supplies_requested_code_entry():
+    entries = [
+        f"0C{n}\nExplanation:\n" + ("Synthetic condition text for this code. " * 12)
+        for n in range(1, 10)
+    ]
+    heading = "System completion codes"
+    hits = _chunker_hits(heading + "\n\n" + "\n\n".join(entries), heading)
+    target = next(h for h in hits if "\n0C9\n" in f"\n{h.text}")
+    assert target.text.index("0C9") > 600  # a later entry in its chunk
+    prepared = build_messages("abend code 0C9", [target], max_chunk_chars=900)
+    assert "0C9\nExplanation:" in _supplied(prepared)
+    _assert_offsets_reconstruct(prepared, target)

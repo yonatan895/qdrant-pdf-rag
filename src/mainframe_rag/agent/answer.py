@@ -36,6 +36,7 @@ from mainframe_rag.ingest.chunk import (
 from mainframe_rag.logs import error_type
 from mainframe_rag.ports import ChatMessage, ChatResult, LLMClient, Tokenizer, TokenUsage
 from mainframe_rag.regexes import find_message_ids
+from mainframe_rag.retrieve.filters import parse_query
 from mainframe_rag.retrieve.query import SearchHit
 
 FENCE_RE = re.compile(r"```([a-zA-Z0-9_-]*)\n(.*?)```", re.DOTALL)
@@ -51,6 +52,9 @@ _INLINE_INDEX_RE = re.compile(r"\[\s*(\d+(?:\s*,\s*\d+)*)\s*\]")
 # the real tokenizer is what actually guarantees the window.
 _APPROX_CHARS_PER_TOKEN = 3.5
 _TRUNCATED_SUFFIX = "\n... [truncated]"
+# Prefix of an excerpt whose range does not start at the chunk start (issue
+# #632): the model must see that earlier text was left out.
+_LEADING_MARKER = "[... earlier text omitted]\n"
 _MAX_TRIM_ROUNDS = 4
 _TRIM_OVERCUT_CHARS = 64
 _MIN_TAIL_CHARS = 80
@@ -445,8 +449,9 @@ def _frame_excerpt(text: str) -> str:
 class EvidenceEntry:
     """One retrieved chunk actually supplied to the model in the final prompt
     (issue #364). Identity is chunk_id (UUID5, revision-keyed) plus doc_id;
-    the retained text is the prefix range [0, included_chars) of the stripped
-    source text, never the text itself. `truncated` marks a packing or
+    the retained text is the contiguous range [start_char, included_chars) of
+    the stripped source text (issue #632; start_char is 0 for a prefix),
+    never the text itself. `truncated` marks a packing or
     verification cut; `est_tokens` is estimator-only (never a tokenize RPC).
     `units_total`/`units_retained` (issue #368) count whole atomic/prose
     units: a retained prefix always covers whole units, so a cut statement
@@ -462,6 +467,7 @@ class EvidenceEntry:
     est_tokens: int
     units_total: int = 0
     units_retained: int = 0
+    start_char: int = 0
 
 
 @dataclass(frozen=True)
@@ -498,25 +504,48 @@ class PromptEvidence:
         return sum(e.units_total - e.units_retained for e in self.entries)
 
 
+def _compose_body(source: str, start: int, end: int) -> str:
+    """The exact text shipped for source[start:end] (issue #632): a leading
+    marker when earlier text was left out, a truncation suffix when later
+    text was. Every producer and the verifier use this one rule, so recorded
+    offsets reconstruct the supplied text exactly."""
+    lead = _LEADING_MARKER if start > 0 else ""
+    tail = _TRUNCATED_SUFFIX if end < len(source) else ""
+    return f"{lead}{source[start:end]}{tail}"
+
+
 @dataclass
 class PackedExcerpt:
     """One hit in the prompt under construction: stable identity, the [i]
-    label it will ship with, and its final body text (truncation suffix
-    included when `truncated`). One list carries identity and text through
-    planning and every verification trim round, so the manifest cannot drift
-    from the rendered prompt (issue #364)."""
+    label it will ship with, and its final body text (leading marker and
+    truncation suffix included when cut). One list carries identity and text
+    through planning and every verification trim round, so the manifest
+    cannot drift from the rendered prompt (issue #364). `start`/`end` are
+    the explicit source offsets of the retained range (issue #632); `end`
+    None means a legacy prefix whose range derives from the body.
+    `required_end` is the end of the requested entry inside the range
+    (0 when none): a trim that would cut it away drops the excerpt."""
 
     index: int
     hit: SearchHit
     body: str
     truncated: bool = False
+    start: int = 0
+    end: int | None = None
+    required_end: int = 0
+
+    def source_range(self) -> tuple[int, int]:
+        if self.end is not None:
+            return self.start, self.end
+        included = len(self.body) - (len(_TRUNCATED_SUFFIX) if self.truncated else 0)
+        return 0, max(0, included)
 
     def render(self) -> tuple[str, str]:
         return f"[{self.index}] {self.hit.cite}", self.body
 
     def evidence_entry(self) -> EvidenceEntry:
         source = self.hit.text.strip()
-        included = len(self.body) - (len(_TRUNCATED_SUFFIX) if self.truncated else 0)
+        start, end = self.source_range()
         spans = _hit_spans(self.hit, source)
         return EvidenceEntry(
             prompt_index=self.index,
@@ -524,11 +553,12 @@ class PackedExcerpt:
             doc_id=self.hit.doc_id,
             cite=self.hit.cite,
             truncated=self.truncated,
-            included_chars=max(0, included),
+            included_chars=end,
             source_chars=len(source),
             est_tokens=estimate_tokens(f"[{self.index}] {self.hit.cite}\n{self.body}"),
             units_total=len(spans),
-            units_retained=sum(1 for s in spans if s.end <= max(0, included)),
+            units_retained=sum(1 for sp in spans if start <= sp.start and sp.end <= end),
+            start_char=start,
         )
 
 
@@ -579,45 +609,170 @@ def _hit_spans(hit: SearchHit, stripped: str) -> tuple[UnitSpan, ...]:
     return units_for_text(stripped)
 
 
-def _snap_prefix(
-    source: str, spans: tuple[UnitSpan, ...], max_chars: int
-) -> tuple[str, int] | None:
-    """Largest fittable prefix of `source` within max_chars (issue #368).
+_SENTENCE_END_RE = re.compile(r"[.!?][\"')\]]*(?=\s|$)")
+_ABBREVIATIONS = frozenset({"e.g", "i.e", "vs", "etc", "no", "fig", "approx"})
+# A sentence that opens with one of these qualifies the one before it
+# (a condition, exception or negation): never ship the asserted sentence
+# without it (issue #632).
+_QUALIFIER_START_RE = re.compile(
+    r"(?:however|unless|except|but|otherwise|only\s+(?:if|when)|if\s+not|"
+    r"do\s+not|does\s+not|never|note\s+that)\b",
+    re.IGNORECASE,
+)
+
+
+_NO_BOUNDARY = -1
+
+
+def _sentence_cut(source: str, lo: int, hi: int) -> int | None:
+    """Largest sentence/paragraph boundary in (lo, hi] whose following text
+    is not a qualifier of the sentence before it (issue #632). None means
+    boundaries exist but every one would strand a qualifier (omit);
+    _NO_BOUNDARY means the range holds no complete sentence at all, so the
+    caller keeps the legacy marked character cut. Boundaries are
+    punctuation followed by whitespace/end, or a blank line."""
+    window = source[lo : min(hi + 1, len(source))]
+    cuts: list[int] = []
+    for m in _SENTENCE_END_RE.finditer(window):
+        word = re.search(r"([A-Za-z.]+)$", window[: m.start()])
+        if m.group(0) == "." and word and word.group(1).lower().rstrip(".") in _ABBREVIATIONS:
+            continue
+        cuts.append(lo + m.end())
+    for m in re.finditer(r"\n[ \t]*\n", window):
+        cuts.append(lo + m.start())
+    candidates = sorted({c for c in cuts if lo < c <= hi}, reverse=True)
+    if not candidates:
+        return _NO_BOUNDARY
+    for cut in candidates:
+        if not _QUALIFIER_START_RE.match(source[cut:].lstrip()):
+            return cut
+    return None
+
+
+def _snap_window(
+    source: str, spans: tuple[UnitSpan, ...], start: int, max_chars: int
+) -> int | None:
+    """End offset of the largest fittable range of `source` starting at
+    `start` within max_chars (issues #368, #632).
 
     A cut inside an atomic span snaps back to the span start (whole units
-    or omission); a cut inside a prose span keeps the legacy character cut
-    (safe narrative truncation is not banned). Returns (kept, retained span
-    count), or None when nothing fits — the caller omits the excerpt with
-    explicit omission metadata instead of shipping a sliver. Empty spans
-    mean unknown structure: legacy char cut with the historical tail floor.
+    or omission). A cut inside a prose span snaps back to a sentence or
+    paragraph boundary that leaves no dangling qualifier; with none in the
+    span it snaps back to the span start. Returns None when nothing fits —
+    the caller omits the excerpt with explicit omission metadata instead of
+    shipping a sliver. Empty spans mean unknown structure: sentence-boundary
+    cut with the historical tail floor.
     """
-    if max_chars >= len(source):
-        return source, len(spans)
+    limit = start + max(0, max_chars)
+    if limit >= len(source):
+        return len(source)
     if not spans:
-        kept = source[:max_chars].rstrip()
+        cut = _sentence_cut(source, start, limit)
+        if cut is None:
+            return None
+        if cut == _NO_BOUNDARY:
+            cut = limit
+        kept = source[start:cut].rstrip()
         if not kept or len(kept) < _MIN_TAIL_CHARS:
             return None
-        return kept, 0
-    kept_len = max_chars
+        return start + len(kept)
+    cut = limit
     for span in spans:
-        if span.end <= max_chars:
+        if span.end <= limit:
             continue
-        if span.start < max_chars and span.kind == UNIT_PROSE:
-            # A cut inside a prose span keeps the legacy character cut.
-            break
-        if span.start >= max_chars:
+        if span.start >= limit:
             # Cut inside an inter-unit gap: the rstrip below pulls back to
             # the prior unit end.
             break
-        # Cut inside an atomic span: snap back to the span start so only
-        # whole units ship.
-        kept_len = span.start
+        if span.kind == UNIT_PROSE:
+            boundary = _sentence_cut(source, max(span.start, start), limit)
+            if boundary == _NO_BOUNDARY:
+                boundary = limit
+            cut = boundary if boundary is not None else span.start
+        else:
+            cut = span.start
         break
-    kept = source[:kept_len].rstrip()
-    if not kept:
+    end = start + len(source[start:cut].rstrip())
+    return end if end > start else None
+
+
+def _requested_identifiers(query: str) -> re.Pattern[str] | None:
+    """Pattern matching an entry HEADING for an identifier the query names
+    (issue #632), from the shared query normalization. Anchored at the
+    start of a unit's first line, so an incidental mention inside another
+    entry never counts. None when the query names no identifier."""
+    parsed = parse_query(query)
+    ids = sorted(
+        {*parsed.message_ids, *parsed.members, *parsed.system_codes}, key=len, reverse=True
+    )
+    if not ids:
         return None
-    retained = sum(1 for s in spans if s.end <= len(kept))
-    return kept, retained
+    return re.compile(
+        r"\W*(?:" + "|".join(re.escape(i) for i in ids) + r")(?!\w)", re.IGNORECASE
+    )
+
+
+def _entry_anchors(
+    source: str, spans: tuple[UnitSpan, ...], requested: re.Pattern[str] | None
+) -> list[UnitSpan]:
+    if requested is None:
+        return []
+    return [
+        span
+        for span in spans
+        if requested.match(source[span.start : span.end].lstrip("\n").split("\n", 1)[0])
+    ]
+
+
+def _select_range(
+    source: str,
+    spans: tuple[UnitSpan, ...],
+    max_chars: int,
+    requested: re.Pattern[str] | None,
+) -> tuple[int, int, int] | None:
+    """Pick ONE contiguous source range within max_chars (issue #632):
+    (start, end, required_end), required_end being where the first requested
+    entry inside the range ends (0 when none). The legacy prefix wins unless
+    a range beginning at a requested entry heading covers strictly more of
+    the requested entries — so queries without a reliable heading match, and
+    chunks whose prefix already holds the entry, behave exactly as before.
+    Deterministic: ties go to the earlier start. None when nothing fits."""
+    end = _snap_window(source, spans, 0, max_chars)
+    anchors = _entry_anchors(source, spans, requested)
+    covered = [a for a in anchors if end is not None and a.end <= end]
+    prefix = (0, end, covered[0].end if covered else 0) if end is not None else None
+    if not anchors or len(source) <= max_chars or len(covered) == len(anchors):
+        return prefix
+    best: tuple[tuple[int, int], tuple[int, int, int]] | None = None
+    for anchor in anchors:
+        if anchor.start == 0:
+            continue
+        w_end = _snap_window(source, spans, anchor.start, max_chars - len(_LEADING_MARKER))
+        if w_end is None:
+            continue
+        inside = [a for a in anchors if a.start >= anchor.start and a.end <= w_end]
+        if not inside:
+            continue
+        key = (len(inside), -anchor.start)
+        if best is None or key > best[0]:
+            best = (key, (anchor.start, w_end, inside[0].end))
+    if best is not None and best[0][0] > len(covered):
+        return best[1]
+    return prefix
+
+
+def _packed_excerpt(
+    index: int, hit: SearchHit, source: str, start: int, end: int, required_end: int
+) -> PackedExcerpt:
+    return PackedExcerpt(
+        index=index,
+        hit=hit,
+        body=_compose_body(source, start, end),
+        truncated=start > 0 or end < len(source),
+        start=start,
+        end=end,
+        required_end=required_end,
+    )
 
 
 def _plan_packed_excerpts(
@@ -627,66 +782,54 @@ def _plan_packed_excerpts(
     max_chunk_chars_narrative: int | None,
     narrative_token_cap: int,
     complexity: str,
+    requested: re.Pattern[str] | None = None,
 ) -> list[PackedExcerpt]:
     """Estimator-only planning loop shared by the single-turn and chat
     tokenizer paths (one excerpt-identity rule, so the two builders cannot
     diverge on labels, truncation flags, or budget cuts). Per-chunk and
-    remainder cuts snap to whole atomic units (issue #368): a hit whose
-    first unit does not fit is omitted with explicit omission metadata
-    instead of shipping a partial statement."""
+    remainder cuts select one contiguous range of whole atomic units
+    (issues #368, #632): a requested entry heading is kept in preference to
+    an unrelated prefix, and a hit whose necessary unit does not fit is
+    omitted with explicit omission metadata instead of shipping a partial
+    statement."""
     packed: list[PackedExcerpt] = []
     total_tokens = 0
     for i, hit in enumerate(hits, 1):
         text = hit.text.strip()
         spans = _hit_spans(hit, text)
-        truncated = False
+        cap: int | None = None
         if hit.chunk_type not in ("syntax", "message", "table"):
             if max_chunk_chars_narrative is not None and len(text) > max_chunk_chars_narrative:
-                snapped = _snap_prefix(text, spans, max_chunk_chars_narrative)
-                if snapped is None:
-                    continue
-                text, _ = snapped
-                text += _TRUNCATED_SUFFIX
-                truncated = True
+                cap = max_chunk_chars_narrative
             elif complexity == "complex" and estimate_tokens(text) > narrative_token_cap:
-                snapped = _snap_prefix(
-                    text, spans, int(narrative_token_cap * _APPROX_CHARS_PER_TOKEN)
-                )
-                if snapped is None:
-                    continue
-                text, _ = snapped
-                text += _TRUNCATED_SUFFIX
-                truncated = True
+                cap = int(narrative_token_cap * _APPROX_CHARS_PER_TOKEN)
         elif len(text) > max_chunk_chars:
-            snapped = _snap_prefix(text, spans, max_chunk_chars)
-            if snapped is None:
+            cap = max_chunk_chars
+        start, end, required_end = 0, len(text), 0
+        if cap is not None:
+            selected = _select_range(text, spans, cap, requested)
+            if selected is None:
                 continue
-            text, _ = snapped
-            text += _TRUNCATED_SUFFIX
-            truncated = True
+            start, end, required_end = selected
+        excerpt = _packed_excerpt(i, hit, text, start, end, required_end)
         header = f"[{i}] {hit.cite}"
-        chunk_tokens = estimate_tokens(f"{header}\n{text}")
+        chunk_tokens = estimate_tokens(f"{header}\n{excerpt.body}")
         if total_tokens + chunk_tokens > budget_tokens and packed:
             rem_tokens = budget_tokens - total_tokens
             # The char cut must leave room for the header too, or the
             # packed sum can exceed the budget by the header size.
             body_rem_tokens = rem_tokens - estimate_tokens(header)
             if body_rem_tokens > 60:
-                snapped = _snap_prefix(
-                    text, spans, int(body_rem_tokens * _APPROX_CHARS_PER_TOKEN)
+                reselected = _select_range(
+                    text,
+                    spans,
+                    min(int(body_rem_tokens * _APPROX_CHARS_PER_TOKEN), end - start),
+                    requested,
                 )
-                if snapped is not None:
-                    kept, _ = snapped
-                    packed.append(
-                        PackedExcerpt(
-                            index=i,
-                            hit=hit,
-                            body=kept + _TRUNCATED_SUFFIX,
-                            truncated=True,
-                        )
-                    )
+                if reselected is not None:
+                    packed.append(_packed_excerpt(i, hit, text, *reselected))
             break
-        packed.append(PackedExcerpt(index=i, hit=hit, body=text, truncated=truncated))
+        packed.append(excerpt)
         total_tokens += chunk_tokens
     return packed
 
@@ -696,31 +839,39 @@ def _verify_trim_last(
 ) -> None:
     """One verification trim round on the last packed excerpt, shared by both
     tokenizer paths: regenerate its cut from the measured overshoot, snapping
-    back to whole atomic units (issue #368), and drop it when no unit fits.
-    A complete short unit always survives in preference to an empty excerpt:
-    the loop recounts afterwards, so keeping evidence can never stall it.
-    The manifest is derived from `packed` afterwards, so trimming cannot
-    bypass it."""
+    back to whole atomic units (issue #368), and drop it when no unit fits or
+    the cut would remove the requested entry (issue #632). The retained range
+    keeps its start; its recorded offsets must reproduce the shipped body
+    exactly or the excerpt is dropped. A complete short unit always survives
+    in preference to an empty excerpt: the loop recounts afterwards, so
+    keeping evidence can never stall it. The manifest is derived from
+    `packed` afterwards, so trimming cannot bypass it."""
     overshoot = used - verify_limit
     cut = int(overshoot * _APPROX_CHARS_PER_TOKEN) + _TRIM_OVERCUT_CHARS
     last = packed[-1]
-    source = (
-        last.body[: -len(_TRUNCATED_SUFFIX)] if last.truncated else last.body
-    )
-    spans = _hit_spans(last.hit, last.hit.text.strip())
-    if not last.hit.text.strip().startswith(source):
-        # Defensive: the body is not a prefix of its hit (should be
-        # impossible) — drop the excerpt entirely to keep the whole-unit
+    source = last.hit.text.strip()
+    start, end = last.source_range()
+    if last.end is None:
+        # Legacy prefix excerpt: the body must start with its source prefix.
+        consistent = last.body[:end] == source[:end]
+    else:
+        consistent = 0 <= start <= end <= len(source) and last.body == _compose_body(
+            source, start, end
+        )
+    if not consistent:
+        # Defensive: the body does not reproduce its recorded range (should
+        # be impossible) — drop the excerpt entirely to keep the whole-unit
         # invariant structural.
         packed.pop()
         return
-    snapped = _snap_prefix(source, spans, max(0, len(source) - cut))
-    if snapped is None:
+    spans = _hit_spans(last.hit, source)
+    new_end = _snap_window(source, spans, start, max(0, (end - start) - cut))
+    if new_end is None or new_end < last.required_end:
         packed.pop()
     else:
-        kept, _ = snapped
-        last.body = kept + _TRUNCATED_SUFFIX
+        last.body = _compose_body(source, start, new_end)
         last.truncated = True
+        last.start, last.end = start, new_end
 
 
 def order_prompt_blocks(
@@ -898,6 +1049,7 @@ def _build_prompt(
     )
 
     packed: list[PackedExcerpt] = []
+    requested = _requested_identifiers(query)
 
     def candidate() -> list[ChatMessage]:
         return [
@@ -943,6 +1095,7 @@ def _build_prompt(
             max_chunk_chars_narrative,
             narrative_token_cap,
             complexity,
+            requested,
         )
 
         # Older turns only fill what the packed evidence leaves free, newest
@@ -1023,34 +1176,25 @@ def _build_prompt(
                 if hit.chunk_type in ("syntax", "message", "table")
                 else min(max_chunk_chars, narrative_cap)
             )
-            truncated = False
-            if len(text) > chunk_cap:
-                snapped = _snap_prefix(text, spans, chunk_cap)
-                if snapped is None:
-                    continue
-                text, _ = snapped
-                text += _TRUNCATED_SUFFIX
-                truncated = True
+            selected = _select_range(text, spans, chunk_cap, requested)
+            if selected is None:
+                continue
+            start, end, required_end = selected
+            excerpt = _packed_excerpt(i, hit, text, start, end, required_end)
             header = f"[{i}] {hit.cite}"
-            chunk_len = len(header) + len(text) + (2 if is_chat else 1)
+            chunk_len = len(header) + len(excerpt.body) + (2 if is_chat else 1)
             if total_chars + chunk_len > max_context_chars and (is_chat or packed):
                 remaining = max_context_chars - total_chars
                 if is_chat:
                     remaining -= len(header) + 2
                 if remaining > 200:
-                    snapped = _snap_prefix(text, spans, remaining)
-                    if snapped is not None:
-                        kept, _ = snapped
-                        packed.append(
-                            PackedExcerpt(
-                                index=i,
-                                hit=hit,
-                                body=kept + _TRUNCATED_SUFFIX,
-                                truncated=True,
-                            )
-                        )
+                    reselected = _select_range(
+                        text, spans, min(remaining, end - start), requested
+                    )
+                    if reselected is not None:
+                        packed.append(_packed_excerpt(i, hit, text, *reselected))
                 break
-            packed.append(PackedExcerpt(index=i, hit=hit, body=text, truncated=truncated))
+            packed.append(excerpt)
             total_chars += chunk_len
 
     return PreparedPrompt(

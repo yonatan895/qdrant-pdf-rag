@@ -404,6 +404,26 @@ select `complex`. Default is `simple`.
   prose up to the narrative cap (1100 for complex queries); cuts marked
   with a truncation suffix; packing stops at the context budget with at
   most one partial chunk.
+- Range selection (#632): when the query names a message id, member or
+  system code (shared `parse_query` normalization), a chunk over its cap ships
+  ONE contiguous source range chosen from stored/redetected unit spans. A unit
+  whose first line starts with the requested identifier is an entry heading
+  (an incidental mention or a longer near-miss token is not). The range starts
+  at a heading only when it covers strictly more requested headings than the
+  legacy prefix; otherwise, and for queries without a heading match or with
+  absent/malformed spans, the prefix behavior is unchanged. A range that does
+  not start at the chunk start leads with `[... earlier text omitted]`; a cut
+  tail ends with the truncation suffix. A cut inside prose ends at a sentence
+  or blank-line boundary and never strands a following qualifier sentence
+  (however/unless/except/do not/...): that sentence is shipped with its
+  assertion or both are left out; only a range with no complete sentence at
+  all keeps the marked character cut. An entry that cannot fit whole is
+  omitted explicitly (`omitted_indices`).
+  `EvidenceEntry` carries `start_char` and `included_chars` (the range end);
+  the shipped body is exactly marker + `source[start_char:included_chars]` +
+  suffix, which verification trim rounds re-check before cutting. A trim that
+  would remove the requested entry drops the excerpt instead. Defaults and
+  budgets are unchanged.
 - `prompt_order` policies reorder (never drop or duplicate — violations fail
   closed): `retrieval` keeps historical assembly order byte-identical;
   `stable_cache` frames excerpts in attributeless
