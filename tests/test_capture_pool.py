@@ -10,7 +10,15 @@ The capture→replay seam is pinned structurally: rows emitted by
 from datetime import UTC
 
 import pytest
-from scripts.capture_pool import capture_query, legs_to_record, record_to_rows
+from scripts.capture_pool import (
+    CE_DEPTH_MAX,
+    MAX_CAPTURE_DEPTH,
+    capture_query,
+    legs_to_record,
+    main,
+    record_to_rows,
+    replay_pool,
+)
 
 from mainframe_rag.config import Settings
 from tests.conftest import FakeEmbedder, FakeQdrant, MockReranker, _point
@@ -55,7 +63,7 @@ def test_legs_to_record_shape():
             "sparse": ["p2", "p3"],
         }
     ]
-    assert record["chunks"]["p2"] == {"doc_id": "D2", "page": "2", "chunk_type": "table"}
+    assert record["chunks"]["p2"] == {"doc_id": "D2", "page": "2", "chunk_type": "table", "page_start": 5}
     assert record["ce"] == {"p1": 0.9}
     assert record["_meta"] == {"collection": "c"}
 
@@ -118,6 +126,7 @@ def test_record_to_rows_round_trip():
         "doc_id": "D2",
         "page": "2",
         "chunk_type": "table",
+        "page_start": 5,
         "dense_rank": 1,
         "sparse_rank": 0,
         "ce": 0.1,
@@ -252,6 +261,77 @@ def test_capture_query_explicit_reranker_scores_nl_pool():
     assert reranker.call_count == 1
     assert record["ce"] == {"p1": 0.5}
     assert record["_meta"]["ce_scored"] is True
+
+
+def test_capture_query_depth_records_deeper_never_shallower():
+    point = _cpoint("p1", "D1", "1", "narrative")
+    deep = FakeQdrant(dense=[point], sparse=[point])
+    record = capture_query(deep, FakeEmbedder(), "mainframe_manuals", "sizing lookaside", _settings(),
+                           depth=MAX_CAPTURE_DEPTH)
+    assert {req.limit for req in deep.batch_requests} == {MAX_CAPTURE_DEPTH}
+    assert record["_meta"]["depth"] == MAX_CAPTURE_DEPTH
+    shallow = FakeQdrant(dense=[point], sparse=[point])
+    record = capture_query(shallow, FakeEmbedder(), "mainframe_manuals", "sizing lookaside", _settings(), depth=1)
+    # Production prefetch for the non-rerank path (query.PREFETCH_LIMIT) is the floor.
+    assert {req.limit for req in shallow.batch_requests} == {40}
+    assert record["_meta"]["depth"] == 40
+    assert record["_meta"]["ce_depth"] is None
+
+
+def test_capture_query_ce_scores_stop_at_ce_depth_per_leg():
+    dense = [_cpoint(f"d{i}", "D1", str(i), "narrative") for i in range(CE_DEPTH_MAX + 20)]
+    sparse = [_cpoint(f"s{i}", "D2", str(i), "narrative") for i in range(CE_DEPTH_MAX + 20)]
+    reranker = MockReranker()
+    record = capture_query(FakeQdrant(dense=dense, sparse=sparse), FakeEmbedder(), "mainframe_manuals",
+                           "sizing lookaside", _settings(), reranker=reranker, depth=MAX_CAPTURE_DEPTH)
+    expected = {f"d{i}" for i in range(CE_DEPTH_MAX)} | {f"s{i}" for i in range(CE_DEPTH_MAX)}
+    assert set(record["ce"]) == expected
+    assert len(record["legs"][0]["dense"]) == CE_DEPTH_MAX + 20  # ranks are still recorded deeper
+    assert record["_meta"]["ce_depth"] == CE_DEPTH_MAX
+
+
+def test_ce_depth_max_is_the_rerank_candidates_ceiling():
+    """Replay reranks at most rerank_candidates per leg; scoring deeper is waste
+    and scoring shallower would leave replayable hits unscored."""
+    bounds = [m.le for m in Settings.model_fields["rerank_candidates"].metadata if hasattr(m, "le")]
+    assert bounds == [CE_DEPTH_MAX]
+
+
+def test_record_to_rows_headings_replace_placeholder_and_refuse_gaps():
+    record = legs_to_record("q", "nl", _legs(), {}, {})
+    headings = {"p1": "Book > Section A", "p2": "Book > Table B", "p3": ""}
+    rows = record_to_rows(record, headings=headings)
+    assert [r["heading"] for r in rows] == ["Book > Section A", "Book > Table B", ""]
+    dense, _sparse, _ce = replay_pool(rows)
+    assert [p.payload["heading_path"] for p in dense] == ["Book > Section A", "Book > Table B"]
+    with pytest.raises(ValueError, match="missing from the heading join"):
+        record_to_rows(record, headings={"p1": "x"})
+    placeholder, _, _ = replay_pool(record_to_rows(record))
+    assert placeholder[0].payload["heading_path"] == "Replay > p1"
+
+
+def test_legs_to_record_keeps_physical_page_for_diversification():
+    labelled = _cpoint("p1", "D1", "", "narrative")
+    labelled = labelled.model_copy(update={"payload": {**labelled.payload, "page_start": 41}})
+    legacy = _cpoint("p2", "D1", "", "narrative")
+    legacy = legacy.model_copy(update={"payload": {k: v for k, v in legacy.payload.items() if k != "page_start"}})
+    record = legs_to_record("q", "nl", [{"effective_text": "q", "dense": [labelled, legacy], "sparse": []}], {}, {})
+    assert record["chunks"]["p1"]["page_start"] == 41
+    assert "page_start" not in record["chunks"]["p2"]
+    rows = record_to_rows(record)
+    assert [r["page_start"] for r in rows] == [41, None]
+    dense, _, _ = replay_pool(rows)
+    assert dense[0].payload["page_start"] == 41 and "page_start" not in dense[1].payload
+    with pytest.raises(ValueError, match="page_start"):
+        replay_pool([{**rows[0], "page_start": -1}])
+
+
+@pytest.mark.parametrize("depth", ["0", str(MAX_CAPTURE_DEPTH + 1)])
+def test_capture_cli_refuses_out_of_range_depth(tmp_path, depth):
+    with pytest.raises(SystemExit) as exc:
+        main(["--golden", "g.jsonl", "--out", str(tmp_path / "o.jsonl"), "--depth", depth])
+    assert exc.value.code == 2
+    assert not (tmp_path / "o.jsonl").exists()
 
 
 @pytest.fixture
