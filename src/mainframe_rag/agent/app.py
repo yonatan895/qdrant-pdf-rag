@@ -1647,6 +1647,21 @@ async def _execute_core_or_raise(
         raise AppError(502, "upstream_error", "answer failed") from exc
 
 
+def _answer_metadata(output: AnswerCoreOutput, *, hits: list | None = None) -> dict:
+    """Shared JSON/chat-final fields, preserving the no-evidence defaults."""
+    has_hits = bool(output.hits)
+    return {
+        "citations": output.citations if has_hits else [],
+        "citations_inferred": output.citations_inferred if has_hits else False,
+        "inferred_indices": output.inferred_indices if has_hits else [],
+        **({"hits": hits} if hits is not None else {}),
+        "verification_state": output.verification_state,
+        "script": output.script if has_hits else None,
+        "script_lang": output.script_lang if has_hits else None,
+        "script_review_required": output.script_review_required,
+    }
+
+
 def _output_log_fields(
     output: AnswerCoreOutput, kind: str, timings: dict, started: float, *, stream: bool
 ) -> dict:
@@ -1954,13 +1969,7 @@ async def _answer_response(req, response, is_stream, owner):
             return AnswerResponse(
                 request_id=request_id,
                 answer=output.answer,
-                citations=[],
-                citations_inferred=False,
-                inferred_indices=[],
-                script=None,
-                script_lang=None,
-                verification_state=output.verification_state,
-                script_review_required=output.script_review_required,
+                **_answer_metadata(output),
             )
 
         _set_server_timing(response.headers, timings, llm_ms=output.llm_ms, ttft_ms=output.ttft_ms)
@@ -1986,13 +1995,7 @@ async def _answer_response(req, response, is_stream, owner):
         return AnswerResponse(
             request_id=request_id,
             answer=output.answer,
-            citations=output.citations,
-            citations_inferred=output.citations_inferred,
-            inferred_indices=output.inferred_indices,
-            script=output.script,
-            script_lang=output.script_lang,
-            verification_state=output.verification_state,
-            script_review_required=output.script_review_required,
+            **_answer_metadata(output),
         )
 
     # SSE streaming path
@@ -2069,16 +2072,7 @@ def _chat_final_frames(
     request_id = owner.request.state.request_id
     if not output.hits:
         yield format_openai_chunk(chat_id, llm_model, delta_content=output.answer)
-        extra_meta = {
-            "citations": [],
-            "citations_inferred": False,
-            "inferred_indices": [],
-            "hits": [],
-            "verification_state": output.verification_state,
-            "script": None,
-            "script_lang": None,
-            "script_review_required": output.script_review_required,
-        }
+        extra_meta = _answer_metadata(output, hits=[])
         root_span.set_attributes({"rag.query_kind": kind, "rag.hits": 0})
         _record_no_hits(owner, "chat", kind, output)
         log.info(json_log(request_id, "chat", query_kind=kind, hits=0, stream=True))
@@ -2090,16 +2084,7 @@ def _chat_final_frames(
         cites_delta = "\n\n**Citations:**\n" + "\n".join(f"- {c}" for c in output.citations)
         yield format_openai_chunk(chat_id, llm_model, delta_content=cites_delta)
 
-    extra_meta = {
-        "citations": output.citations,
-        "citations_inferred": output.citations_inferred,
-        "inferred_indices": output.inferred_indices,
-        "hits": [h.model_dump() for h in output.hits],
-        "verification_state": output.verification_state,
-        "script": output.script,
-        "script_lang": output.script_lang,
-        "script_review_required": output.script_review_required,
-    }
+    extra_meta = _answer_metadata(output, hits=[h.model_dump() for h in output.hits])
     _record_answered(owner, "chat", kind, output, llm_model)
     log.info(
         json_log(
@@ -2185,14 +2170,8 @@ async def _chat_response(req, response, owner):
                     )
                 ],
                 usage=TokenUsage(),
-                citations=[],
-                citations_inferred=False,
-                inferred_indices=[],
                 hits=[],
-                verification_state=output.verification_state,
-                script=None,
-                script_lang=None,
-                script_review_required=output.script_review_required,
+                **_answer_metadata(output),
             )
 
         content = output.answer
@@ -2221,14 +2200,8 @@ async def _chat_response(req, response, owner):
                 )
             ],
             usage=output.usage,
-            citations=output.citations,
-            citations_inferred=output.citations_inferred,
-            inferred_indices=output.inferred_indices,
             hits=output.hits,
-            verification_state=output.verification_state,
-            script=output.script,
-            script_lang=output.script_lang,
-            script_review_required=output.script_review_required,
+            **_answer_metadata(output),
         )
 
     chat_id = f"chatcmpl-{request_id}"

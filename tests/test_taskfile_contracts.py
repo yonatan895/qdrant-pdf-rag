@@ -854,11 +854,17 @@ class TaskContractsTests(unittest.TestCase):
         self.assertNotIn("--out", argv)
         if (self.log).exists():
             self.log.unlink()
-        proc = self.run_task("eval:capture-pool", "OUT=/tmp/x.jsonl", "GOLDEN=g.jsonl", extra_env=env)
+        self.assertNotIn("--depth", argv)
+        if (self.log).exists():
+            self.log.unlink()
+        proc = self.run_task(
+            "eval:capture-pool", "OUT=/tmp/x.jsonl", "GOLDEN=g.jsonl", "DEPTH=200", extra_env=env
+        )
         self.assertEqual(proc.returncode, 0, proc.stdout)
         argv = self.pip_calls()[0]["argv"]
         self.assertEqual(argv[argv.index("--out") + 1], "/tmp/x.jsonl")
         self.assertEqual(argv[argv.index("--golden") + 1], "g.jsonl")
+        self.assertEqual(argv[argv.index("--depth") + 1], "200")
 
     def test_report_transports_bundle_and_explicit_inputs(self):
         self.make_venv_fake()

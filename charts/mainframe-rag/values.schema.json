@@ -4,6 +4,44 @@
   "type": "object",
   "additionalProperties": false,
   "required": ["replicaCount", "images", "qdrantRelease", "models", "gateway", "tracing", "metrics", "ui", "route", "storage", "ingest", "pullSecret", "resources"],
+  "definitions": {
+    "nonPlaceholderString": {
+      "type": "string",
+      "minLength": 1,
+      "not": { "pattern": "__[A-Z0-9_]+__" }
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "tag"],
+      "properties": {
+        "repository": { "$ref": "#/definitions/nonPlaceholderString" },
+        "digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "description": "Verified registry manifest digest; when set the pod image is repository@digest (the tag stays informational)."
+        },
+        "tag": { "$ref": "#/definitions/nonPlaceholderString" },
+        "pullPolicy": {
+          "type": "string",
+          "enum": ["Always", "IfNotPresent", "Never"]
+        }
+      }
+    },
+    "appImage": {
+      "allOf": [
+        { "$ref": "#/definitions/image" },
+        {
+          "properties": {
+            "tag": {
+              "pattern": "^[0-9a-f]{40}$",
+              "description": "Full git SHA; deploy.sh fail-closes on empty/HEAD. The generator sets agent and ingest tags from IMAGE_SHA."
+            }
+          }
+        }
+      ]
+    }
+  },
   "properties": {
     "replicaCount": {
       "type": "integer",
@@ -15,110 +53,10 @@
       "additionalProperties": false,
       "required": ["agent", "ingest", "jaeger", "oauthProxy"],
       "properties": {
-        "agent": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["repository", "tag"],
-          "properties": {
-            "repository": {
-              "type": "string",
-              "minLength": 1,
-              "not": { "pattern": "__[A-Z0-9_]+__" }
-            },
-            "digest": {
-              "type": "string",
-              "pattern": "^sha256:[0-9a-f]{64}$",
-              "description": "Verified registry manifest digest; when set the pod image is repository@digest (the tag stays informational)."
-            },
-            "tag": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{40}$",
-              "description": "Full git SHA; deploy.sh fail-closes on empty/HEAD."
-            },
-            "pullPolicy": {
-              "type": "string",
-              "enum": ["Always", "IfNotPresent", "Never"]
-            }
-          }
-        },
-        "ingest": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["repository", "tag"],
-          "properties": {
-            "repository": {
-              "type": "string",
-              "minLength": 1,
-              "not": { "pattern": "__[A-Z0-9_]+__" }
-            },
-            "digest": {
-              "type": "string",
-              "pattern": "^sha256:[0-9a-f]{64}$",
-              "description": "Verified registry manifest digest; when set the pod image is repository@digest (the tag stays informational)."
-            },
-            "tag": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{40}$",
-              "description": "Packed SHA; the generator sets agent and ingest tags from IMAGE_SHA."
-            },
-            "pullPolicy": {
-              "type": "string",
-              "enum": ["Always", "IfNotPresent", "Never"]
-            }
-          }
-        },
-        "jaeger": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["repository", "tag"],
-          "properties": {
-            "repository": {
-              "type": "string",
-              "minLength": 1,
-              "not": { "pattern": "__[A-Z0-9_]+__" }
-            },
-            "digest": {
-              "type": "string",
-              "pattern": "^sha256:[0-9a-f]{64}$",
-              "description": "Verified registry manifest digest; when set the pod image is repository@digest (the tag stays informational)."
-            },
-            "tag": {
-              "type": "string",
-              "minLength": 1,
-              "not": { "pattern": "__[A-Z0-9_]+__" }
-            },
-            "pullPolicy": {
-              "type": "string",
-              "enum": ["Always", "IfNotPresent", "Never"]
-            }
-          }
-        },
-        "oauthProxy": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["repository", "tag"],
-          "properties": {
-            "repository": {
-              "type": "string",
-              "minLength": 1,
-              "not": { "pattern": "__[A-Z0-9_]+__" }
-            },
-            "digest": {
-              "type": "string",
-              "pattern": "^sha256:[0-9a-f]{64}$",
-              "description": "Verified registry manifest digest; when set the pod image is repository@digest (the tag stays informational)."
-            },
-            "tag": {
-              "type": "string",
-              "minLength": 1,
-              "not": { "pattern": "__[A-Z0-9_]+__" }
-            },
-            "pullPolicy": {
-              "type": "string",
-              "enum": ["Always", "IfNotPresent", "Never"]
-            }
-          }
-        }
+        "agent": { "$ref": "#/definitions/appImage" },
+        "ingest": { "$ref": "#/definitions/appImage" },
+        "jaeger": { "$ref": "#/definitions/image" },
+        "oauthProxy": { "$ref": "#/definitions/image" }
       }
     },
     "qdrantRelease": {
@@ -140,11 +78,7 @@
               "type": "string",
               "pattern": "^https?://\\S+$"
             },
-            "model": {
-              "type": "string",
-              "minLength": 1,
-              "not": { "pattern": "__[A-Z0-9_]+__" }
-            },
+            "model": { "$ref": "#/definitions/nonPlaceholderString" },
             "revision": {
               "type": "string",
               "minLength": 1,
@@ -206,11 +140,7 @@
               "type": "string",
               "description": "Empty falls back to the embedding URL (HttpReranker)."
             },
-            "model": {
-              "type": "string",
-              "minLength": 1,
-              "not": { "pattern": "__[A-Z0-9_]+__" }
-            },
+            "model": { "$ref": "#/definitions/nonPlaceholderString" },
             "endpointOrder": {
               "type": "string",
               "enum": ["score_first", "rerank_first"]

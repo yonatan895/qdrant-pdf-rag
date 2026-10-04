@@ -36,7 +36,7 @@ spec:
       {{- end }}
       containers:
         - name: jaeger
-          image: {{ include "mainframe-rag.jaegerImage" . }}
+          image: {{ include "mainframe-rag.image" (dict "name" "jaeger" "image" .Values.images.jaeger) }}
           imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false

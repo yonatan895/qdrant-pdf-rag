@@ -776,6 +776,42 @@ def build_messages(
     settings: Settings | None = None,
     order: Literal["retrieval", "stable_cache"] = "retrieval",
 ) -> PreparedPrompt:
+    return _build_prompt(
+        query,
+        hits,
+        product=product,
+        version=version,
+        splunk_context=splunk_context,
+        max_context_chars=max_context_chars,
+        max_chunk_chars=max_chunk_chars,
+        max_chunk_chars_narrative=max_chunk_chars_narrative,
+        splunk_context_max_chars=splunk_context_max_chars,
+        complexity=complexity,
+        tokenizer=tokenizer,
+        settings=settings,
+        order=order,
+    )
+
+
+def _build_prompt(
+    query: str,
+    hits: list[SearchHit],
+    product: str | None = None,
+    version: str | None = None,
+    splunk_context: str | None = None,
+    max_context_chars: int = 8000,
+    max_chunk_chars: int = 3000,
+    max_chunk_chars_narrative: int | None = None,
+    splunk_context_max_chars: int = 4000,
+    complexity: str | None = None,
+    tokenizer: Tokenizer | None = None,
+    settings: Settings | None = None,
+    order: Literal["retrieval", "stable_cache"] = "retrieval",
+    *,
+    history: list[ChatMessage] | None = None,
+) -> PreparedPrompt:
+    is_chat = history is not None
+    prior_messages = history if history is not None else []
     if complexity is None:
         complexity = classify_query_complexity(query)
 
@@ -800,6 +836,8 @@ def build_messages(
     # Pre-excerpt user parts, exactly as before: the estimator below counts
     # this shape, so it stays character-identical.
     parts = [*context_entries, question_text]
+    if is_chat and not context_entries:
+        parts.insert(0, "")
 
     system_content = (
         SYSTEM_PROMPT + SYSTEM_PROMPT_COMPLEX_EXTENSION
@@ -818,6 +856,19 @@ def build_messages(
     )
 
     packed: list[PackedExcerpt] = []
+
+    def candidate() -> list[ChatMessage]:
+        return [
+            ChatMessage(role="system", content=system_content),
+            *prior_messages,
+            ChatMessage(
+                role="user",
+                content=_user_content(
+                    _assemble_blocks(context_entries, question_text, packed, tail_part), order
+                ),
+            ),
+        ]
+
     if tokenizer is not None:
         if settings is None:
             raise ValueError("settings is required when a tokenizer is provided")
@@ -839,7 +890,7 @@ def build_messages(
         # trailing citation example).
         fixed_tokens = estimate_tokens(
             system_content + "\n" + "\n".join(parts) + "\n" + tail_part
-        )
+        ) + sum(estimate_tokens(m.content) for m in prior_messages)
         budget_tokens = max(100, model_len - reserved - thinking_reserve - margin - fixed_tokens)
 
         packed = _plan_packed_excerpts(
@@ -859,37 +910,31 @@ def build_messages(
         # rounds; a prompt that still does not fit refuses before inference.
         verify_limit = model_len - reserved - thinking_reserve - margin
         verified_clean = False
-        for _ in range(_trim_round_limit(len(packed))):
-            if not packed:
+        max_rounds = (
+            _trim_round_limit(len(packed), len(prior_messages), base=_MAX_TRIM_ROUNDS * 2)
+            if is_chat
+            else _trim_round_limit(len(packed))
+        )
+        for _ in range(max_rounds):
+            if not packed and not is_chat:
                 break
-            messages = [
-                ChatMessage(role="system", content=system_content),
-                ChatMessage(
-                    role="user",
-                    content=_user_content(
-                        _assemble_blocks(context_entries, question_text, packed, tail_part), order
-                    ),
-                ),
-            ]
+            messages = candidate()
             used = tokenizer.count_messages(messages)
             if used <= verify_limit:
                 verified_clean = True
                 break
-            _verify_trim_last(packed, used, verify_limit)
+            if packed:
+                _verify_trim_last(packed, used, verify_limit)
+            elif prior_messages:
+                prior_messages.pop(0)
+            else:
+                break
         if not verified_clean:
             # Trims happened after the last fit (or nothing was ever
             # counted): confirm the final messages against the window
             # instead of returning an unchecked prompt. One bounded extra
             # count, not a repair loop.
-            messages = [
-                ChatMessage(role="system", content=system_content),
-                ChatMessage(
-                    role="user",
-                    content=_user_content(
-                        _assemble_blocks(context_entries, question_text, packed, tail_part), order
-                    ),
-                ),
-            ]
+            messages = candidate()
             used = tokenizer.count_messages(messages)
             if used > verify_limit:
                 raise PromptBudgetExceeded(used, verify_limit)
@@ -930,9 +975,11 @@ def build_messages(
                 text += _TRUNCATED_SUFFIX
                 truncated = True
             header = f"[{i}] {hit.cite}"
-            chunk_len = len(header) + 1 + len(text)
-            if total_chars + chunk_len > max_context_chars and packed:
+            chunk_len = len(header) + len(text) + (2 if is_chat else 1)
+            if total_chars + chunk_len > max_context_chars and (is_chat or packed):
                 remaining = max_context_chars - total_chars
+                if is_chat:
+                    remaining -= len(header) + 2
                 if remaining > 200:
                     snapped = _snap_prefix(text, spans, remaining)
                     if snapped is not None:
@@ -949,14 +996,8 @@ def build_messages(
             packed.append(PackedExcerpt(index=i, hit=hit, body=text, truncated=truncated))
             total_chars += chunk_len
 
-    ordered = order_prompt_blocks(
-        _assemble_blocks(context_entries, question_text, packed, tail_part), order
-    )
     return PreparedPrompt(
-        messages=messages if tokenizer is not None else [
-            ChatMessage(role="system", content=system_content),
-            ChatMessage(role="user", content="\n\n".join(text for _, text in ordered)),
-        ],
+        messages=messages if tokenizer is not None else candidate(),
         evidence=_prompt_evidence(packed, len(hits)),
         budget_verified=budget_verified,
     )
@@ -1692,15 +1733,6 @@ def build_chat_messages(
     turn = prepare_chat_turn(messages, settings, splunk_context)
     active_query = turn.query
 
-    if complexity is None:
-        complexity = classify_query_complexity(active_query)
-
-    system_content = (
-        SYSTEM_PROMPT + SYSTEM_PROMPT_COMPLEX_EXTENSION
-        if complexity == "complex"
-        else SYSTEM_PROMPT
-    )
-
     max_turns = settings.chat_max_turns if settings is not None else 10
     max_prior_chars = (
         settings.chat_max_prior_turn_chars if settings is not None else _MAX_PRIOR_TURN_CHARS
@@ -1717,174 +1749,19 @@ def build_chat_messages(
             text = text[:max_prior_chars] + " ... [history truncated]"
         prior_messages.append(ChatMessage(role=m.role, content=text))
 
-    context_entries: list[str] = []
-    context_bits = []
-    if product:
-        context_bits.append(f"product: {product}")
-    if version:
-        context_bits.append(f"version: {version}")
-    if context_bits:
-        context_entries.append(f"{SYSPLEX_LABEL} " + ", ".join(context_bits))
-    if splunk_context:
-        splunk_text = splunk_context.strip()
-        if len(splunk_text) > splunk_context_max_chars:
-            splunk_text = splunk_text[:splunk_context_max_chars].rstrip() + _TRUNCATED_SUFFIX
-        context_entries.append(f"{SPLUNK_HEADER}\n" + splunk_text)
-    question_text = f"{QUESTION_LABEL} " + active_query
-    example_cite = (
-        hits[0].cite
-        if hits
-        else "SA22-7592-05 z/OS MVS Initialization and Tuning Reference, IEASYSxx > LFAREA, p. 1-17"
-    )
-    tail_part = (
-        "Please answer based strictly on the retrieved manual excerpts above and conclude with the 'Citations:' section copying the exact citation line for each excerpt used, for example:\n"
-        f"Citations:\n{example_cite}"
-    )
-
-    packed: list[PackedExcerpt] = []
-    if tokenizer is not None:
-        if settings is None:
-            raise ValueError("settings is required when a tokenizer is provided")
-        model_len = settings.llm_max_model_len
-        reserved = settings.llm_reserved_output_tokens
-        margin = settings.llm_token_safety_margin
-        narrative_token_cap = settings.llm_max_chunk_tokens_narrative
-        thinking_reserve = (
-            settings.llm_thinking_reserve_tokens_complex
-            if complexity == "complex"
-            else settings.llm_thinking_reserve_tokens_simple
-        )
-
-        history_tokens = sum(estimate_tokens(m.content) for m in prior_messages)
-        fixed_tokens = (
-            estimate_tokens(
-                system_content
-                + "\n"
-                + "\n".join(context_entries)
-                + "\n"
-                + question_text
-                + "\n"
-                + tail_part
-            )
-            + history_tokens
-        )
-
-        budget_tokens = max(100, model_len - reserved - thinking_reserve - margin - fixed_tokens)
-
-        packed = _plan_packed_excerpts(
-            hits,
-            budget_tokens,
-            max_chunk_chars,
-            max_chunk_chars_narrative,
-            narrative_token_cap,
-            complexity,
-        )
-
-        verify_limit = model_len - reserved - thinking_reserve - margin
-        max_rounds = _trim_round_limit(
-            len(packed), len(prior_messages), base=_MAX_TRIM_ROUNDS * 2
-        )
-        verified_clean = False
-        for _ in range(max_rounds):
-            candidate = [
-                ChatMessage(role="system", content=system_content),
-                *prior_messages,
-                ChatMessage(
-                    role="user",
-                    content=_user_content(
-                        _assemble_blocks(context_entries, question_text, packed, tail_part), order
-                    ),
-                ),
-            ]
-            used = tokenizer.count_messages(candidate)
-            if used <= verify_limit:
-                verified_clean = True
-                break
-            if packed:
-                _verify_trim_last(packed, used, verify_limit)
-            elif prior_messages:
-                prior_messages.pop(0)
-            else:
-                break
-        if not verified_clean:
-            # Trims happened after the last fit, or nothing was ever
-            # counted: confirm the final messages instead of returning an
-            # unchecked prompt. One bounded extra count, not a repair loop.
-            candidate = [
-                ChatMessage(role="system", content=system_content),
-                *prior_messages,
-                ChatMessage(
-                    role="user",
-                    content=_user_content(
-                        _assemble_blocks(context_entries, question_text, packed, tail_part), order
-                    ),
-                ),
-            ]
-            used = tokenizer.count_messages(candidate)
-            if used > verify_limit:
-                raise PromptBudgetExceeded(used, verify_limit)
-            verified_clean = True
-        # Only a fitting remote measurement confirms compliance (issue
-        # #368): estimator-only verification reports estimated.
-        budget_verified = verified_clean and bool(
-            getattr(tokenizer, "remote_confirmed", False)
-        )
-    else:
-        # No tokenizer: estimator char packing with no token-budget claim
-        # (reports budget_verified=False; production serving always supplies
-        # a tokenizer, so this offline/test path never raises budget errors).
-        budget_verified = False
-        total_chars = 0
-        for i, hit in enumerate(hits, 1):
-            text = hit.text.strip()
-            spans = _hit_spans(hit, text)
-            narrative_cap = (
-                max_chunk_chars_narrative
-                if max_chunk_chars_narrative is not None
-                else max_chunk_chars
-            )
-            chunk_cap = (
-                max_chunk_chars
-                if hit.chunk_type in ("syntax", "message", "table")
-                else min(max_chunk_chars, narrative_cap)
-            )
-            truncated = False
-            if len(text) > chunk_cap:
-                snapped = _snap_prefix(text, spans, chunk_cap)
-                if snapped is None:
-                    continue
-                text, _ = snapped
-                text += _TRUNCATED_SUFFIX
-                truncated = True
-            header = f"[{i}] {hit.cite}"
-            chunk_len = len(header) + len(text) + 2
-            if total_chars + chunk_len > max_context_chars:
-                rem = max_context_chars - total_chars - len(header) - 2
-                if rem > 200:
-                    snapped = _snap_prefix(text, spans, rem)
-                    if snapped is not None:
-                        kept, _ = snapped
-                        packed.append(
-                            PackedExcerpt(
-                                index=i,
-                                hit=hit,
-                                body=kept + _TRUNCATED_SUFFIX,
-                                truncated=True,
-                            )
-                        )
-                break
-            packed.append(PackedExcerpt(index=i, hit=hit, body=text, truncated=truncated))
-            total_chars += chunk_len
-
-    ordered = order_prompt_blocks(
-        _assemble_blocks(context_entries, question_text, packed, tail_part), order
-    )
-    return PreparedPrompt(
-        messages=candidate if tokenizer is not None else [
-            ChatMessage(role="system", content=system_content),
-            *prior_messages,
-            ChatMessage(role="user", content="\n\n".join(text for _, text in ordered)),
-        ],
-        evidence=_prompt_evidence(packed, len(hits)),
-        budget_verified=budget_verified,
+    return _build_prompt(
+        active_query,
+        hits,
+        product=product,
+        version=version,
+        splunk_context=splunk_context,
+        max_context_chars=max_context_chars,
+        max_chunk_chars=max_chunk_chars,
+        max_chunk_chars_narrative=max_chunk_chars_narrative,
+        splunk_context_max_chars=splunk_context_max_chars,
+        complexity=complexity,
+        tokenizer=tokenizer,
+        settings=settings,
+        order=order,
+        history=prior_messages,
     )
