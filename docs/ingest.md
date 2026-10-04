@@ -207,7 +207,8 @@ for citations and filters.
   index) skip at any position; contents/figures/tables/summary-of-changes
   skip only at or before the limit — a mid-book same-named section is kept
   by design.
-- Outline build (issue #577): entries sorted by `(page, level)`, a stack popping
+- Outline build (issue #577): entries stable-sorted by page only (bookmarks sharing a page keep outline
+  order, #663), a stack popping
   deeper-or-equal levels, `heading_path` joined with `" > "`, each kept section
   running to the next kept entry of any level (else end of doc); empty ranges
   dropped. Skipped headings (empty, always-skipped, front-matter) produce no

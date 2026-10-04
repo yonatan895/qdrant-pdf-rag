@@ -424,7 +424,9 @@ def outline_sections(parsed: ParsedDoc, page_texts: list[str] | None = None) -> 
     front_matter_limit = max(
         FRONT_MATTER_MIN_PAGES, int(FRONT_MATTER_FRACTION * parsed.page_count)
     )
-    entries = sorted(parsed.toc, key=lambda e: (e[2], e[0]))
+    # Page only: sorted() is stable, so bookmarks sharing a page keep outline
+    # (reading) order and the heading stack names their real ancestors.
+    entries = sorted(parsed.toc, key=lambda e: e[2])
 
     # Issue #577: skipped headings (empty, SKIP_ALWAYS, front matter) produce
     # no section, so they must not bound a kept section either — otherwise a
