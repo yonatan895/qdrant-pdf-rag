@@ -1081,3 +1081,58 @@ def test_clear_all_erases_previous_persisted_data_after_memory_fallback(console,
     assert "Persisted before fallback" not in page.eval("return document.body.innerText")
     send(page, "Next after erase")
     wait_state(page, "complete")
+
+
+# -- supplied-excerpt view (issue #635) ------------------------------------------
+
+
+def test_supplied_excerpts_expand_as_data_for_current_response_only(console, page, monkeypatch):
+    """The current response's excerpts expand/collapse, render hostile markup
+    as text, show unknown version and omission status, never reach
+    localStorage or the export, and become unavailable after a reload."""
+    from mainframe_rag.agent import app as app_mod
+    from tests.test_webui import _hit
+
+    hostile = '<script>window.__pwned=1</script><img src="http://x.invalid/a">'
+    hits = [
+        _hit().model_copy(update={"text": hostile, "version": None}),
+        _hit().model_copy(update={"chunk_id": "second", "text": "Second excerpt.", "version": "2.0"}),
+    ]
+    monkeypatch.setattr(app_mod, "retrieve_search", lambda *_a, **_kw: (hits, "semantic", {}))
+    console.llm.queue(("token", FINAL_ANSWER), ("done",))
+    send(page, "What is IEA500I?")
+    wait_state(page, "complete")
+    # init_script only covers new documents; hook the already-loaded page.
+    page.eval(
+        "window.__exports=[];const o=URL.createObjectURL.bind(URL);"
+        "URL.createObjectURL=(blob)=>{blob.text().then(t=>window.__exports.push(t));return o(blob);};"
+    )
+
+    assert page.eval("return document.querySelector('.evidence[data-evidence=current]') !== null")
+    assert page.eval("return document.querySelector('.evidence-view').open") is False
+    page.click(".evidence-view > summary")
+    assert page.eval("return document.querySelector('.evidence-view').open") is True
+    assert page.eval("return document.querySelectorAll('.evidence-item').length") == 2
+    assert text(page, ".evidence-item .evidence-text") == hostile
+    assert page.eval("return document.querySelector('.evidence-text img, .evidence-text script')") is None
+    assert page.eval("return window.__pwned") is None
+    assert "version: unknown" in text(page, ".evidence-item .evidence-meta")
+    assert "whole chunk supplied" in text(page, ".evidence-item .evidence-range")
+    assert "same citation text" in text(page, ".evidence-item .evidence-warn")
+    assert "Source-matched, not semantically checked" in text(page, ".evidence-note")
+    page.click(".evidence-view > summary")
+    assert page.eval("return document.querySelector('.evidence-view').open") is False
+
+    # Never persisted: the stored turn and the export carry no excerpt text.
+    raw = page.eval("return window.localStorage.getItem(arguments[0])", STORE_KEY)
+    assert "window.__pwned" not in raw and "Second excerpt." not in raw
+    page.click("#export-btn")
+    page.wait("return window.__exports && window.__exports.length==1", what="export")
+    assert "Second excerpt." not in page.eval("return window.__exports[0]")
+
+    # Reload: older history falls back to explicit unavailability.
+    page.reload()
+    page.wait("return document.querySelectorAll('#messages .turn-assistant').length==1")
+    assert page.eval("return document.querySelector('.evidence[data-evidence=unavailable]') !== null")
+    assert page.eval("return document.querySelector('.evidence-view')") is None
+    assert "not available" in text(page, ".evidence-unavailable")

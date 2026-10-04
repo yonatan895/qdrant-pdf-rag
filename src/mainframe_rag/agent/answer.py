@@ -20,7 +20,7 @@ from typing import Any, Literal
 
 import anyio
 import httpx2
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 log = logging.getLogger(__name__)
 
@@ -504,6 +504,32 @@ class PromptEvidence:
         return sum(e.units_total - e.units_retained for e in self.entries)
 
 
+_UNKNOWN_SOURCE = "unknown"
+_SOURCE_FIELD_MAX_CHARS = 120
+
+
+def _source_field(value: str | None) -> str:
+    """One source product/version value as a single prompt line fragment
+    (issue #635): whitespace collapsed, bounded, and `unknown` when the
+    stored payload recorded nothing. The caller's scope is never substituted
+    for a missing value."""
+    text = " ".join((value or "").split())[:_SOURCE_FIELD_MAX_CHARS]
+    return text or _UNKNOWN_SOURCE
+
+
+def _excerpt_header(index: int, hit: SearchHit) -> str:
+    """The excerpt header lines: the `[i] cite` label line (the exact
+    citation line the model copies) followed by the explicit source
+    product/version (issue #635). Every estimator, the renderer and the
+    manifest token count use this one rule, so the recounted prompt includes
+    the metadata."""
+    return (
+        f"[{index}] {hit.cite}\n"
+        f"Source product: {_source_field(hit.product)}; "
+        f"version: {_source_field(hit.version)}"
+    )
+
+
 def _compose_body(source: str, start: int, end: int) -> str:
     """The exact text shipped for source[start:end] (issue #632): a leading
     marker when earlier text was left out, a truncation suffix when later
@@ -541,7 +567,7 @@ class PackedExcerpt:
         return 0, max(0, included)
 
     def render(self) -> tuple[str, str]:
-        return f"[{self.index}] {self.hit.cite}", self.body
+        return _excerpt_header(self.index, self.hit), self.body
 
     def evidence_entry(self) -> EvidenceEntry:
         source = self.hit.text.strip()
@@ -555,11 +581,100 @@ class PackedExcerpt:
             truncated=self.truncated,
             included_chars=end,
             source_chars=len(source),
-            est_tokens=estimate_tokens(f"[{self.index}] {self.hit.cite}\n{self.body}"),
+            est_tokens=estimate_tokens(f"{_excerpt_header(self.index, self.hit)}\n{self.body}"),
             units_total=len(spans),
             units_retained=sum(1 for sp in spans if start <= sp.start and sp.end <= end),
             start_char=start,
         )
+
+
+# Response bounds for the supplied-evidence projection (issue #635). The
+# slice is already capped by the prompt window; these are hard wire limits
+# on top, applied per entry then in total, and a clipped entry says so.
+SUPPLIED_EXCERPT_MAX_CHARS = 8000
+SUPPLIED_EVIDENCE_MAX_CHARS = 48000
+
+
+class SuppliedExcerpt(BaseModel):
+    """One excerpt exactly as supplied to the model in the final prompt
+    (issue #635): the request-local, additive response projection reused by
+    the JSON, stream, chat and console surfaces. `text` is the source slice
+    [start_char, end_char) of the stripped chunk text, i.e. what the prompt
+    carried after every trim round (leading/trailing cut markers excluded);
+    it is never reconstructed from a fresh search. `index` is the prompt
+    label [n] and is the only per-entry handle: `citation` is display text
+    and may repeat across versions (`duplicate_citation`). Offsets are
+    characters of the stripped chunk text; the stated location is the
+    recorded chunk span (heading and pages), not a finer attribution.
+    `product`/`version` are the stored source values, None when unknown."""
+
+    model_config = ConfigDict(frozen=True)
+
+    index: int
+    citation: str
+    duplicate_citation: bool = False
+    product: str | None = None
+    version: str | None = None
+    doc_id: str
+    title: str
+    heading: str
+    page_label: str
+    pdf_page_start: int | None = None
+    pdf_page_end: int | None = None
+    start_char: int
+    end_char: int
+    source_chars: int
+    truncated_start: bool
+    truncated_end: bool
+    text_clipped: bool = False
+    text: str
+
+
+def _supplied_excerpts(packed: list[PackedExcerpt]) -> tuple[SuppliedExcerpt, ...]:
+    """The bounded projection of the final packed list (after every trim),
+    the same list the prompt and manifest derive from: retrieved-but-omitted
+    chunks and conversation history never appear here."""
+    cite_counts: dict[str, int] = {}
+    for p in packed:
+        cite_counts[p.hit.cite] = cite_counts.get(p.hit.cite, 0) + 1
+    out: list[SuppliedExcerpt] = []
+    budget = SUPPLIED_EVIDENCE_MAX_CHARS
+    for p in packed:
+        hit = p.hit
+        source = hit.text.strip()
+        start, end = p.source_range()
+        text = source[start:end]
+        limit = max(0, min(SUPPLIED_EXCERPT_MAX_CHARS, budget))
+        clipped = len(text) > limit
+        text = text[:limit]
+        budget -= len(text)
+        out.append(
+            SuppliedExcerpt(
+                index=p.index,
+                citation=hit.cite,
+                duplicate_citation=cite_counts[hit.cite] > 1,
+                product=hit.product or None,
+                version=hit.version or None,
+                doc_id=hit.doc_id,
+                title=hit.title,
+                heading=hit.heading,
+                page_label=hit.page_label,
+                pdf_page_start=None if hit.page_start is None else hit.page_start + 1,
+                pdf_page_end=(
+                    None
+                    if hit.page_start is None
+                    else (hit.page_end if hit.page_end is not None else hit.page_start) + 1
+                ),
+                start_char=start,
+                end_char=end,
+                source_chars=len(source),
+                truncated_start=start > 0,
+                truncated_end=end < len(source),
+                text_clipped=clipped,
+                text=text,
+            )
+        )
+    return tuple(out)
 
 
 @dataclass
@@ -574,6 +689,7 @@ class PreparedPrompt:
     messages: list[ChatMessage]
     evidence: PromptEvidence
     budget_verified: bool = False
+    supplied: tuple[SuppliedExcerpt, ...] = ()
 
 
 def _prompt_evidence(packed: list[PackedExcerpt], total_hits: int) -> PromptEvidence:
@@ -812,7 +928,7 @@ def _plan_packed_excerpts(
                 continue
             start, end, required_end = selected
         excerpt = _packed_excerpt(i, hit, text, start, end, required_end)
-        header = f"[{i}] {hit.cite}"
+        header = _excerpt_header(i, hit)
         chunk_tokens = estimate_tokens(f"{header}\n{excerpt.body}")
         if total_tokens + chunk_tokens > budget_tokens and packed:
             rem_tokens = budget_tokens - total_tokens
@@ -1181,12 +1297,12 @@ def _build_prompt(
                 continue
             start, end, required_end = selected
             excerpt = _packed_excerpt(i, hit, text, start, end, required_end)
-            header = f"[{i}] {hit.cite}"
+            header = _excerpt_header(i, hit)
             chunk_len = len(header) + len(excerpt.body) + (2 if is_chat else 1)
             if total_chars + chunk_len > max_context_chars and (is_chat or packed):
-                remaining = max_context_chars - total_chars
-                if is_chat:
-                    remaining -= len(header) + 2
+                # The remainder cut must leave room for the header (label +
+                # source metadata, issue #635) and the block separator.
+                remaining = max_context_chars - total_chars - len(header) - (2 if is_chat else 1)
                 if remaining > 200:
                     reselected = _select_range(
                         text, spans, min(remaining, end - start), requested
@@ -1201,6 +1317,7 @@ def _build_prompt(
         messages=messages if tokenizer is not None else candidate(),
         evidence=_prompt_evidence(packed, len(hits)),
         budget_verified=budget_verified,
+        supplied=_supplied_excerpts(packed),
     )
 
 
