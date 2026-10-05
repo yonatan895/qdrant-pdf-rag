@@ -990,3 +990,59 @@ def test_failed_preflight_starts_no_workers_and_writes_nothing(
     after = (fake._points, fake.upserts, fake.upsert_calls, fake.deletes, fake.created_collections)
     assert after == before, f"{case}: storage mutated before the refusal"
     assert not progress.exists() or progress.read_text() == ""
+
+
+def test_combined_in_flight_window_bounds_parse_and_upsert_work(tmp_path, monkeypatch):
+    """Issue #583 S4: parse futures plus upsert futures awaiting the parent
+    never exceed max(2, workers * 2), so slow upserts cannot make the parent
+    hold unbounded parsed documents and vectors. Both pools run in-process
+    here; a future counts as in flight from submit until the parent reads
+    its result."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor as RealThreads
+
+    from scripts.make_synthetic_pdf import build
+
+    from mainframe_rag.ingest import run_ingest
+
+    corpus = tmp_path / "corpus"
+    for n in range(4):
+        build(corpus / f"SA22-70{n}0-00.pdf", doc_id=f"SA22-70{n}0-00",
+              title=f"Synthetic Reference {n}", message_id=f"IEA{n}00I")
+    monkeypatch.setenv("EMBED_MODE", "hash")
+    monkeypatch.delenv("DENSE_DIM", raising=False)
+    fake = _FakeQdrant()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    lock = threading.Lock()
+    state = {"in_flight": 0, "peak": 0, "submitted": 0}
+
+    class Recording(RealThreads):
+        def __init__(self, max_workers=None, mp_context=None, **_):
+            super().__init__(max_workers=max_workers)
+
+        def submit(self, fn, /, *args, **kwargs):
+            future = super().submit(fn, *args, **kwargs)
+            with lock:
+                state["in_flight"] += 1
+                state["submitted"] += 1
+                state["peak"] = max(state["peak"], state["in_flight"])
+            real_result = future.result
+            consumed = []
+
+            def result(timeout=None):
+                if not consumed:
+                    consumed.append(True)
+                    with lock:
+                        state["in_flight"] -= 1
+                return real_result(timeout)
+
+            future.result = result
+            return future
+
+    monkeypatch.setattr(run_ingest, "ProcessPoolExecutor", Recording)
+    monkeypatch.setattr(run_ingest, "ThreadPoolExecutor", Recording)
+    progress = tmp_path / "inventory.jsonl"
+    assert main(_migration_args(corpus, progress)) == 0
+    assert state["submitted"] == 8  # 4 parses + 4 upserts
+    assert state["peak"] <= 2, state  # workers=1 -> window = max(2, 1 * 2)
+    assert state["in_flight"] == 0

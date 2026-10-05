@@ -933,6 +933,240 @@ def _preflight(
     return _Preflight(client, run_lock, resume_checkpoints, bulk_active)
 
 
+def _execute(
+    tasks: list[ParseTask],
+    stats: _RunStats,
+    *,
+    settings: Settings,
+    progress: Path,
+    workers: int,
+    dry_run: bool,
+    rules_v: str,
+    src_labels: str,
+    force_reingest: bool,
+    lineage_by_path: dict[str, str | None],
+    cache_path: Path | None,
+) -> None:
+    """Execution (issue #583 S4): the parse process pool and the upsert
+    threads under one combined in-flight window. The parent alone appends
+    inventory records and updates `stats`; one bad document never stops
+    the run. Moved verbatim from _run_impl."""
+    ctx = mp.get_context("spawn")
+    # Combined in-flight budget: parse_pending + upsert_pending is capped
+    # at window so slow upserts never let the parent hold unbounded
+    # parsed/embedded docs and vectors in RAM.
+    window = max(2, workers * 2)
+    task_iter = iter(tasks)
+    locks = _DocLocks()
+    # Stage 2: dedicated upsert streams (ingest_upsert_streams, bounded
+    # in Settings). Embedding is done in stage-1 workers; these
+    # threads are I/O-bound against Qdrant. Skipped during dry runs.
+    parse_pending: dict[concurrent.futures.Future, str] = {}
+    # Upsert futures carry their inventory record plus the precomputed
+    # generation binding (parent has chunks before submitting; the
+    # worker thread must not recompute digests divergently).
+    upsert_pending: dict[
+        concurrent.futures.Future,
+        tuple[InventoryRecord, str | None, str | None, str | None],
+    ] = {}
+
+    def submit_parse(
+        task: ParseTask,
+    ) -> None:
+        parse_pending[pool.submit(_parse_one, task)] = task[0]
+
+    def refill_parse() -> None:
+        while len(parse_pending) + len(upsert_pending) < window:
+            next_task = next(task_iter, None)
+            if next_task is None:
+                break
+            submit_parse(next_task)
+
+    upsert_ctx = (
+        ThreadPoolExecutor(max_workers=settings.ingest_upsert_streams)
+        if not dry_run
+        else nullcontext()
+    )
+
+    with (
+        ProcessPoolExecutor(max_workers=workers, mp_context=ctx) as pool,
+        upsert_ctx as upsert_pool,
+    ):
+        refill_parse()
+
+        while parse_pending or upsert_pending:
+            done, _ = concurrent.futures.wait(
+                set(parse_pending) | set(upsert_pending),
+                return_when=concurrent.futures.FIRST_COMPLETED,
+            )
+            for future in done:
+                if future in parse_pending:
+                    path_str = parse_pending.pop(future)
+                    try:
+                        record, parsed, chunks, vectors, contexts = future.result()
+                    except Exception as exc:  # noqa: BLE001 — one bad PDF must not kill the run
+                        stats.files_failed += 1
+                        append_record(
+                            progress,
+                            InventoryRecord(
+                                path=path_str,
+                                sha256="",
+                                status="error",
+                                error=str(exc)[:500],
+                                error_type=type(exc).__name__,
+                            ),
+                        )
+                        log.error(
+                            json.dumps(
+                                {
+                                    "path": path_str,
+                                    "action": "error",
+                                    "error_type": type(exc).__name__,
+                                }
+                            )
+                        )
+                        refill_parse()
+                        continue
+                    if record.status == "error":
+                        stats.files_failed += 1
+                        append_record(progress, record)
+                        log.error(
+                            json.dumps(
+                                {
+                                    "path": path_str,
+                                    "action": "error",
+                                    "error_type": record.error_type,
+                                }
+                            )
+                        )
+                        refill_parse()
+                        continue
+                    stats.pages += record.pages
+                    stats.parse_seconds += record.seconds
+
+                    if dry_run:
+                        record.status = "dry"
+                        append_record(progress, record)
+                        stats.files_ok += 1
+                        log.info(
+                            json.dumps(
+                                {
+                                    "path": path_str,
+                                    "doc_id": record.doc_id,
+                                    "chunks": record.chunks,
+                                    "action": "dry",
+                                }
+                            )
+                        )
+                        refill_parse()
+                        continue
+
+                    assert upsert_pool is not None
+                    if contexts:
+                        # Cache-first: preserve the expensive LLM work even
+                        # if the upsert below fails. Non-empty contexts
+                        # imply cache_path was resolved (workers only
+                        # generate when the parent validated + passed it).
+                        assert cache_path is not None
+                        append_context_entries(
+                            cache_path,
+                            ContextBinding.from_settings(
+                                settings,
+                                doc_sha256=parsed.sha256,
+                                product=parsed.product,
+                                version=parsed.version,
+                                title=parsed.title,
+                            ),
+                            chunks,
+                            contexts,
+                        )
+                    if len(chunks) == 0:
+                        binding: tuple[str | None, str | None, str | None] = (None, None, None)
+                    else:
+                        n, ids_d, content_d = expected_digests(chunks)
+                        if n != len(chunks) or n != record.chunks:
+                            raise RuntimeError(
+                                f"binding digest mismatch for {record.path}: "
+                                f"{n} digested vs {len(chunks)} chunks vs "
+                                f"{record.chunks} recorded — refusing to bind."
+                            )
+                        binding = (
+                            doc_generation_id(settings, parsed.sha256, rules_v, src_labels),
+                            ids_d,
+                            content_d,
+                        )
+                    upsert_pending[
+                        upsert_pool.submit(
+                            _upsert_one,
+                            parsed,
+                            chunks,
+                            vectors,
+                            settings,
+                            locks,
+                            contexts or None,
+                            force_reingest,
+                            src_labels=src_labels,
+                            lineage_rev=lineage_by_path.get(path_str),
+                        )
+                    ] = (record, *binding)
+                    refill_parse()
+                else:  # upsert stream result
+                    record, generation_id, ids_digest, content_digest = upsert_pending.pop(
+                        future
+                    )
+                    try:
+                        status, seconds = future.result()
+                    except Exception as exc:  # noqa: BLE001 — one bad PDF must not kill the run
+                        stats.files_failed += 1
+                        record.status = "error"
+                        record.error = str(exc)[:500]
+                        record.error_type = type(exc).__name__
+                        log.error(
+                            json.dumps(
+                                {
+                                    "path": record.path,
+                                    "doc_id": record.doc_id,
+                                    "action": "error",
+                                    "error_type": record.error_type,
+                                }
+                            )
+                        )
+                    else:
+                        stats.upsert_seconds += seconds
+                        record.status = status
+                        if status in ("upserted", "skipped"):
+                            # Bind the inventory line to the committed
+                            # generation (req 3); legacy lines without a
+                            # binding never skip on their own.
+                            record.generation_id = generation_id
+                            record.chunk_ids_digest = ids_digest
+                            record.content_digest = content_digest
+                        elif status == "empty":
+                            stats.files_failed += 1
+                            record.error = "document produced zero chunks; nothing published"
+                            record.error_type = "EmptyDocument"
+                            log.error(
+                                json.dumps(
+                                    {
+                                        "path": record.path,
+                                        "doc_id": record.doc_id,
+                                        "action": "empty",
+                                        "error_type": record.error_type,
+                                    }
+                                )
+                            )
+                    if record.status in ("upserted", "skipped"):
+                        # "skipped" = verified completion for this
+                        # generation already committed — still ok.
+                        stats.files_ok += 1
+                    elif record.status == "empty":
+                        pass  # already counted as failed above
+                    if record.status == "upserted":
+                        stats.chunks_upserted += record.chunks
+                    append_record(progress, record)
+                    refill_parse()
+
+
 def _run_impl(
     src: Path,
     progress: Path,
@@ -1080,238 +1314,20 @@ def _run_impl(
                 }
             )
         )
-        if not tasks:
-            # Nothing to do (all skipped): still emit the run summary. A
-            # pending migration with zero tasks commits only if the residue
-            # proof passes (an empty corpus must not certify stale vectors).
-            if manifest_mode == STATE_PENDING:
-                assert client is not None
-                _commit_migration_representation(
-                    client,
-                    settings,
-                    rules_v,
-                    walked=walk_entries,
-                    inventory=load_inventory(progress),
-                    src_labels=src_labels,
-                    pending_removals=_pending_removals,
-                    retire_plan=_retire_plan,
-                )
-            return _finish_run(root, stats, settings, started, bulk, manifest_mode)
-
-        ctx = mp.get_context("spawn")
-        # Combined in-flight budget: parse_pending + upsert_pending is capped
-        # at window so slow upserts never let the parent hold unbounded
-        # parsed/embedded docs and vectors in RAM.
-        window = max(2, workers * 2)
-        task_iter = iter(tasks)
-        locks = _DocLocks()
-        # Stage 2: dedicated upsert streams (ingest_upsert_streams, bounded
-        # in Settings). Embedding is done in stage-1 workers; these
-        # threads are I/O-bound against Qdrant. Skipped during dry runs.
-        parse_pending: dict[concurrent.futures.Future, str] = {}
-        # Upsert futures carry their inventory record plus the precomputed
-        # generation binding (parent has chunks before submitting; the
-        # worker thread must not recompute digests divergently).
-        upsert_pending: dict[
-            concurrent.futures.Future,
-            tuple[InventoryRecord, str | None, str | None, str | None],
-        ] = {}
-
-        def submit_parse(
-            task: ParseTask,
-        ) -> None:
-            parse_pending[pool.submit(_parse_one, task)] = task[0]
-
-        def refill_parse() -> None:
-            while len(parse_pending) + len(upsert_pending) < window:
-                next_task = next(task_iter, None)
-                if next_task is None:
-                    break
-                submit_parse(next_task)
-
-        upsert_ctx = (
-            ThreadPoolExecutor(max_workers=settings.ingest_upsert_streams)
-            if not dry_run
-            else nullcontext()
-        )
-
-        with (
-            ProcessPoolExecutor(max_workers=workers, mp_context=ctx) as pool,
-            upsert_ctx as upsert_pool,
-        ):
-            refill_parse()
-
-            while parse_pending or upsert_pending:
-                done, _ = concurrent.futures.wait(
-                    set(parse_pending) | set(upsert_pending),
-                    return_when=concurrent.futures.FIRST_COMPLETED,
-                )
-                for future in done:
-                    if future in parse_pending:
-                        path_str = parse_pending.pop(future)
-                        try:
-                            record, parsed, chunks, vectors, contexts = future.result()
-                        except Exception as exc:  # noqa: BLE001 — one bad PDF must not kill the run
-                            stats.files_failed += 1
-                            append_record(
-                                progress,
-                                InventoryRecord(
-                                    path=path_str,
-                                    sha256="",
-                                    status="error",
-                                    error=str(exc)[:500],
-                                    error_type=type(exc).__name__,
-                                ),
-                            )
-                            log.error(
-                                json.dumps(
-                                    {
-                                        "path": path_str,
-                                        "action": "error",
-                                        "error_type": type(exc).__name__,
-                                    }
-                                )
-                            )
-                            refill_parse()
-                            continue
-                        if record.status == "error":
-                            stats.files_failed += 1
-                            append_record(progress, record)
-                            log.error(
-                                json.dumps(
-                                    {
-                                        "path": path_str,
-                                        "action": "error",
-                                        "error_type": record.error_type,
-                                    }
-                                )
-                            )
-                            refill_parse()
-                            continue
-                        stats.pages += record.pages
-                        stats.parse_seconds += record.seconds
-
-                        if dry_run:
-                            record.status = "dry"
-                            append_record(progress, record)
-                            stats.files_ok += 1
-                            log.info(
-                                json.dumps(
-                                    {
-                                        "path": path_str,
-                                        "doc_id": record.doc_id,
-                                        "chunks": record.chunks,
-                                        "action": "dry",
-                                    }
-                                )
-                            )
-                            refill_parse()
-                            continue
-
-                        assert upsert_pool is not None
-                        if contexts:
-                            # Cache-first: preserve the expensive LLM work even
-                            # if the upsert below fails. Non-empty contexts
-                            # imply cache_path was resolved (workers only
-                            # generate when the parent validated + passed it).
-                            assert cache_path is not None
-                            append_context_entries(
-                                cache_path,
-                                ContextBinding.from_settings(
-                                    settings,
-                                    doc_sha256=parsed.sha256,
-                                    product=parsed.product,
-                                    version=parsed.version,
-                                    title=parsed.title,
-                                ),
-                                chunks,
-                                contexts,
-                            )
-                        if len(chunks) == 0:
-                            binding: tuple[str | None, str | None, str | None] = (None, None, None)
-                        else:
-                            n, ids_d, content_d = expected_digests(chunks)
-                            if n != len(chunks) or n != record.chunks:
-                                raise RuntimeError(
-                                    f"binding digest mismatch for {record.path}: "
-                                    f"{n} digested vs {len(chunks)} chunks vs "
-                                    f"{record.chunks} recorded — refusing to bind."
-                                )
-                            binding = (
-                                doc_generation_id(settings, parsed.sha256, rules_v, src_labels),
-                                ids_d,
-                                content_d,
-                            )
-                        upsert_pending[
-                            upsert_pool.submit(
-                                _upsert_one,
-                                parsed,
-                                chunks,
-                                vectors,
-                                settings,
-                                locks,
-                                contexts or None,
-                                force_reingest,
-                                src_labels=src_labels,
-                                lineage_rev=lineage_by_path.get(path_str),
-                            )
-                        ] = (record, *binding)
-                        refill_parse()
-                    else:  # upsert stream result
-                        record, generation_id, ids_digest, content_digest = upsert_pending.pop(
-                            future
-                        )
-                        try:
-                            status, seconds = future.result()
-                        except Exception as exc:  # noqa: BLE001 — one bad PDF must not kill the run
-                            stats.files_failed += 1
-                            record.status = "error"
-                            record.error = str(exc)[:500]
-                            record.error_type = type(exc).__name__
-                            log.error(
-                                json.dumps(
-                                    {
-                                        "path": record.path,
-                                        "doc_id": record.doc_id,
-                                        "action": "error",
-                                        "error_type": record.error_type,
-                                    }
-                                )
-                            )
-                        else:
-                            stats.upsert_seconds += seconds
-                            record.status = status
-                            if status in ("upserted", "skipped"):
-                                # Bind the inventory line to the committed
-                                # generation (req 3); legacy lines without a
-                                # binding never skip on their own.
-                                record.generation_id = generation_id
-                                record.chunk_ids_digest = ids_digest
-                                record.content_digest = content_digest
-                            elif status == "empty":
-                                stats.files_failed += 1
-                                record.error = "document produced zero chunks; nothing published"
-                                record.error_type = "EmptyDocument"
-                                log.error(
-                                    json.dumps(
-                                        {
-                                            "path": record.path,
-                                            "doc_id": record.doc_id,
-                                            "action": "empty",
-                                            "error_type": record.error_type,
-                                        }
-                                    )
-                                )
-                        if record.status in ("upserted", "skipped"):
-                            # "skipped" = verified completion for this
-                            # generation already committed — still ok.
-                            stats.files_ok += 1
-                        elif record.status == "empty":
-                            pass  # already counted as failed above
-                        if record.status == "upserted":
-                            stats.chunks_upserted += record.chunks
-                        append_record(progress, record)
-                        refill_parse()
+        if tasks:
+            _execute(
+                tasks,
+                stats,
+                settings=settings,
+                progress=progress,
+                workers=workers,
+                dry_run=dry_run,
+                rules_v=rules_v,
+                src_labels=src_labels,
+                force_reingest=force_reingest,
+                lineage_by_path=lineage_by_path,
+                cache_path=cache_path,
+            )
         # Commit the pending migration contract inside the bulk window (it
         # is part of the load) and only when no document failed — the scope
         # proof runs here, before any summary claims success (issue #391 F2).
