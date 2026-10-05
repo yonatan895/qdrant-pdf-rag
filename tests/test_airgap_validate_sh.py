@@ -1037,6 +1037,43 @@ def test_validate_live_storageclass_other_error_fails(tree):
     assert "unexpected client error" in r.stderr
 
 
+def _namespace_admin_kubectl(api_error=None):
+    """kubectl stub shaped like a namespace admin, as measured on a cluster
+    (#678): kube-system and cluster-scoped reads are Forbidden; API discovery
+    succeeds unless `api_error` models an anonymous/invalid/unreachable one."""
+    discovery = (
+        f"  if [ \"$arg\" = /api ]; then cat >&2 <<'EOT'\n{api_error}\nEOT\n    exit 1; fi\n"
+        if api_error else ""
+    )
+    return (
+        "#!/bin/sh\nfor arg in \"$@\"; do\n"
+        "  case \"$arg\" in cluster-info|storageclass|scc)\n"
+        f"    echo '{FORBIDDEN}' >&2; exit 1;;\n  esac\n"
+        f"{discovery}done\nexit 0\n"
+    )
+
+
+def test_validate_live_namespace_admin_passes_cluster_probe(tree):
+    write_stub(tree / "bin" / "kubectl", _namespace_admin_kubectl())
+    r = _live(tree)
+    assert r.returncode == 0, r.stderr
+    assert "cannot connect" not in r.stderr
+    assert "existence is NOT verified" in r.stdout
+    assert "cluster type is NOT determined" in r.stdout
+
+
+@pytest.mark.parametrize("api_error", [
+    FORBIDDEN,  # anonymous: /version would pass, discovery does not
+    "error: You must be logged in to the server (Unauthorized)",
+    "dial tcp 127.0.0.1:6443: connect: connection refused",
+])
+def test_validate_live_unauthenticated_or_unreachable_api_fails(tree, api_error):
+    write_stub(tree / "bin" / "kubectl", _namespace_admin_kubectl(api_error))
+    r = _live(tree)
+    assert r.returncode != 0
+    assert "cannot connect to Kubernetes/OpenShift API server" in r.stderr
+
+
 def test_validate_live_forbidden_namespace_still_checks_secret(tree):
     """A namespace-scoped deployer cannot get the Namespace object; the
     Secret check must still run (found -> verified), not be skipped."""
