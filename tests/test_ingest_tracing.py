@@ -85,3 +85,52 @@ def test_ingest_run_is_tracing_noop_when_disabled(monkeypatch, traced):
     assert rc == 0
     assert seen["endpoint"] is None
     assert not exporter.get_finished_spans()
+
+
+def _capture_ingest_root(monkeypatch):
+    """Route the ingest tracer to an in-memory exporter (issue #583): the
+    root `ingest.run` span is where _finish_run records the run counters."""
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(ri, "setup_tracing", lambda *a, **k: provider.get_tracer("ingest-test"))
+    monkeypatch.setattr(ri, "shutdown_tracing", lambda: None)
+
+    def roots():
+        return [s for s in exporter.get_finished_spans() if s.name == "ingest.run"]
+
+    return roots
+
+
+def test_root_span_counters_and_status_on_failed_and_no_task_runs(
+    tmp_path, synthetic_pdf, monkeypatch
+):
+    """Both end-of-run paths (the no-task early return and the normal end)
+    record the same counters on the root span; only document failures set an
+    ERROR status, and the exit code follows the failure count (#583)."""
+    from opentelemetry.trace import StatusCode
+
+    roots = _capture_ingest_root(monkeypatch)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    (corpus / synthetic_pdf.name).write_bytes(synthetic_pdf.read_bytes())
+    (corpus / "corrupt.pdf").write_bytes(b"not a pdf")
+    progress = tmp_path / "inventory.jsonl"
+    args = ["--src", str(corpus), "--progress", str(progress), "--workers", "1", "--dry-run"]
+
+    assert ri.main(args) == 1
+    failed = roots()[-1]
+    assert failed.status.status_code == StatusCode.ERROR
+    assert failed.attributes["ingest.files_ok"] == 1
+    assert failed.attributes["ingest.files_failed"] == 1
+    assert failed.attributes["ingest.chunks_upserted"] == 0
+    assert failed.attributes["ingest.pages"] > 0
+
+    (corpus / "corrupt.pdf").unlink()
+    assert ri.main(args) == 0  # every remaining file skips: the no-task path
+    no_task = roots()[-1]
+    assert no_task.status.status_code != StatusCode.ERROR
+    assert no_task.attributes["ingest.todo"] == 0
+    assert no_task.attributes["ingest.files_ok"] == 1
+    assert no_task.attributes["ingest.files_failed"] == 0
+    assert no_task.attributes["ingest.chunks_upserted"] == 0
