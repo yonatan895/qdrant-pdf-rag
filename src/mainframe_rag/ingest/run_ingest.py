@@ -28,7 +28,7 @@ from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 from opentelemetry import context as otel_context
 from opentelemetry import trace
@@ -808,6 +808,131 @@ def _plan(
     return _Plan(walk_entries, tasks, lineage_by_path, skipped_ok)
 
 
+@dataclass(frozen=True)
+class _Preflight:
+    """What a passed preflight hands the run: the store client, the held
+    single-writer lock (released by the caller's `finally`), whether a
+    forced resume may reuse verified document checkpoints, and whether bulk
+    indexing was switched on (restored by the caller). Dry runs contact no
+    store and get the empty record."""
+
+    client: Any = None
+    run_lock: Any = None
+    resume_checkpoints: bool = False
+    bulk_active: bool = False
+
+
+def _preflight(
+    settings: Settings,
+    progress: Path,
+    *,
+    rules_v: str,
+    force_reingest: bool,
+    limit: int | None,
+    bulk: bool,
+    publish_target: PublishTarget | None,
+    resume_verified_build: bool,
+) -> _Preflight:
+    """Every gate before planning and before any worker spawns (issue #583
+    S3), in its established order: immutable-build guard, single-writer
+    lock, collection ensure, extraction-rules gate, identity attestation,
+    forced-resume checkpoint check, representation compatibility,
+    partial-walk migration refusal, then bulk indexing. A refusal raises
+    before the parse pool exists and before any point, completion or
+    manifest write."""
+    resume_checkpoints = False
+    bulk_active = False
+    # Single-writer guard (issue #359 req 6): a second concurrent run
+    # sharing the progress directory fails closed before any stage runs.
+    client = _get_qdrant(settings)
+    if publish_target is None:
+        aliases = {a.alias_name: a.collection_name for a in client.get_aliases().aliases}
+        physical = aliases.get(settings.qdrant_collection, settings.qdrant_collection)
+        existing_build = read_build_binding(client, physical + "__completions")
+        if existing_build is not None or any(
+            is_build_alias(name) and target in (physical, physical + "__completions")
+            for name, target in aliases.items()
+        ):
+            raise RuntimeError("in-place ingest cannot modify an immutable build; use alias publication")
+    run_lock = acquire_run_lock(progress)
+    ensure_collection(client, settings)
+    ensure_completion_collection(client, settings)
+    # Extraction-rules gate (issue #124): a non-empty collection whose
+    # payloads were extracted under different rules must never be
+    # appended to or skipped against — identifier regexes, chunking, or
+    # classify changes would silently mix rule generations in one
+    # collection and desync the message_ids prefetch filter (the #120
+    # failure mode). Fail closed with the remediation; --reingest is
+    # the deliberate override that re-extracts every doc. Empty
+    # collection (None) needs no gate; legacy points (empty string)
+    # are a mismatch like any other version.
+    stored_v = stored_rules_version(client, settings)
+    if stored_v is not None and stored_v != rules_v and not force_reingest:
+        if stored_v == "":
+            raise RuntimeError(
+                f"collection {settings.qdrant_collection!r} predates extraction-rules "
+                f"versioning (no rules_v on its points; this tree computes {rules_v!r}). "
+                "Re-ingest required: re-run with --reingest to stamp every doc "
+                "(never serve mixed-rule payloads)."
+            )
+        raise RuntimeError(
+            f"extraction-rules mismatch: collection {settings.qdrant_collection!r} holds "
+            f"payloads extracted under rules {stored_v!r}, this tree computes {rules_v!r}. "
+            "Re-ingest required: re-run with --reingest to re-extract every doc "
+            "(never serve mixed-rule payloads)."
+        )
+    # Identity attestation is unconditional (issue #391 F2): --reingest
+    # bypasses rejection of stored data, never the requirement to name
+    # the representation it writes.
+    require_attested_revision(settings)
+    # Force authorizes the migration; it must not discard this build's
+    # durable document checkpoints on a retry. The publisher grants this
+    # path only under its lock, for matching sidecar inputs and reused
+    # staging. A matching stored contract is necessary but not sufficient:
+    # each planner skip still verifies its target-bound completion and
+    # actual stored points. Inherited live markers cannot satisfy it.
+    if (
+        force_reingest
+        and resume_verified_build
+        and publish_target is not None
+        and publish_target.staging == settings.qdrant_collection
+        and publish_target.live != settings.qdrant_collection
+    ):
+        stored = read_manifest_record(client, completion_collection_name(settings))
+        resume_checkpoints = (
+            stored is not None
+            and stored.state in (STATE_PENDING, STATE_COMMITTED)
+            and stored.manifest == build_manifest(settings, rules_v)
+        )
+    if not force_reingest:
+        # Representation preflight (issue #362): the rules gate proves
+        # extraction identity; this proves embedding identity — same
+        # dimension under a different model/revision must never be
+        # skipped against. Runs before any parse worker spawns (req 4:
+        # reject before expensive work, not in an offline report).
+        # Record-only drift (query prefix) proceeds with a warning;
+        # --reingest bypasses like the rules gate and re-embeds
+        # everything downstream, so a bypassed run cannot mix.
+        _, record_drift = check_ingest_compatible(
+            client, settings, completion_collection_name(settings), rules_v
+        )
+        _log_record_drift(settings, record_drift)
+    if limit:
+        # A partial walk cannot certify a collection-wide contract
+        # (issue #391 F2); read-only, refused before any mutation.
+        # `--limit 0` truncates nothing (same falsy rule as the walk
+        # above), so it is not a partial walk.
+        refuse_limited_migration(
+            client, settings, completion_collection_name(settings), rules_v
+        )
+    if bulk:
+        # Bulk load: HNSW builds must not compete with the upserts
+        # (ingest_bulk_load, default off; see qdrant_io.set_bulk_indexing).
+        set_bulk_indexing(client, settings.qdrant_collection, bulk=True)
+        bulk_active = True
+    return _Preflight(client, run_lock, resume_checkpoints, bulk_active)
+
+
 def _run_impl(
     src: Path,
     progress: Path,
@@ -872,100 +997,23 @@ def _run_impl(
     # logged once per run. Logs carry ids and counts, never PDF text.
     stats = _RunStats()
     bulk = settings.ingest_bulk_load and not dry_run
-    bulk_active = False
-    client = None
-    run_lock = None
     manifest_mode: str | None = None
-    resume_checkpoints = False
-    if not dry_run:
-        # Single-writer guard (issue #359 req 6): a second concurrent run
-        # sharing the progress directory fails closed before any stage runs.
-        client = _get_qdrant(settings)
-        if _publish_target is None:
-            aliases = {a.alias_name: a.collection_name for a in client.get_aliases().aliases}
-            physical = aliases.get(settings.qdrant_collection, settings.qdrant_collection)
-            existing_build = read_build_binding(client, physical + "__completions")
-            if existing_build is not None or any(
-                is_build_alias(name) and target in (physical, physical + "__completions")
-                for name, target in aliases.items()
-            ):
-                raise RuntimeError("in-place ingest cannot modify an immutable build; use alias publication")
-        run_lock = acquire_run_lock(progress)
-        ensure_collection(client, settings)
-        ensure_completion_collection(client, settings)
-        # Extraction-rules gate (issue #124): a non-empty collection whose
-        # payloads were extracted under different rules must never be
-        # appended to or skipped against — identifier regexes, chunking, or
-        # classify changes would silently mix rule generations in one
-        # collection and desync the message_ids prefetch filter (the #120
-        # failure mode). Fail closed with the remediation; --reingest is
-        # the deliberate override that re-extracts every doc. Empty
-        # collection (None) needs no gate; legacy points (empty string)
-        # are a mismatch like any other version.
-        stored_v = stored_rules_version(client, settings)
-        if stored_v is not None and stored_v != rules_v and not force_reingest:
-            if stored_v == "":
-                raise RuntimeError(
-                    f"collection {settings.qdrant_collection!r} predates extraction-rules "
-                    f"versioning (no rules_v on its points; this tree computes {rules_v!r}). "
-                    "Re-ingest required: re-run with --reingest to stamp every doc "
-                    "(never serve mixed-rule payloads)."
-                )
-            raise RuntimeError(
-                f"extraction-rules mismatch: collection {settings.qdrant_collection!r} holds "
-                f"payloads extracted under rules {stored_v!r}, this tree computes {rules_v!r}. "
-                "Re-ingest required: re-run with --reingest to re-extract every doc "
-                "(never serve mixed-rule payloads)."
-            )
-        # Identity attestation is unconditional (issue #391 F2): --reingest
-        # bypasses rejection of stored data, never the requirement to name
-        # the representation it writes.
-        require_attested_revision(settings)
-        # Force authorizes the migration; it must not discard this build's
-        # durable document checkpoints on a retry. The publisher grants this
-        # path only under its lock, for matching sidecar inputs and reused
-        # staging. A matching stored contract is necessary but not sufficient:
-        # each planner skip still verifies its target-bound completion and
-        # actual stored points. Inherited live markers cannot satisfy it.
-        if (
-            force_reingest
-            and _resume_verified_build
-            and _publish_target is not None
-            and _publish_target.staging == settings.qdrant_collection
-            and _publish_target.live != settings.qdrant_collection
-        ):
-            stored = read_manifest_record(client, completion_collection_name(settings))
-            resume_checkpoints = (
-                stored is not None
-                and stored.state in (STATE_PENDING, STATE_COMMITTED)
-                and stored.manifest == build_manifest(settings, rules_v)
-            )
-        if not force_reingest:
-            # Representation preflight (issue #362): the rules gate proves
-            # extraction identity; this proves embedding identity — same
-            # dimension under a different model/revision must never be
-            # skipped against. Runs before any parse worker spawns (req 4:
-            # reject before expensive work, not in an offline report).
-            # Record-only drift (query prefix) proceeds with a warning;
-            # --reingest bypasses like the rules gate and re-embeds
-            # everything downstream, so a bypassed run cannot mix.
-            _, record_drift = check_ingest_compatible(
-                client, settings, completion_collection_name(settings), rules_v
-            )
-            _log_record_drift(settings, record_drift)
-        if limit:
-            # A partial walk cannot certify a collection-wide contract
-            # (issue #391 F2); read-only, refused before any mutation.
-            # `--limit 0` truncates nothing (same falsy rule as the walk
-            # above), so it is not a partial walk.
-            refuse_limited_migration(
-                client, settings, completion_collection_name(settings), rules_v
-            )
-        if bulk:
-            # Bulk load: HNSW builds must not compete with the upserts
-            # (ingest_bulk_load, default off; see qdrant_io.set_bulk_indexing).
-            set_bulk_indexing(client, settings.qdrant_collection, bulk=True)
-            bulk_active = True
+    pre = (
+        _preflight(
+            settings,
+            progress,
+            rules_v=rules_v,
+            force_reingest=force_reingest,
+            limit=limit,
+            bulk=bulk,
+            publish_target=_publish_target,
+            resume_verified_build=_resume_verified_build,
+        )
+        if not dry_run
+        else _Preflight()
+    )
+    client, run_lock = pre.client, pre.run_lock
+    resume_checkpoints, bulk_active = pre.resume_checkpoints, pre.bulk_active
     try:
         with start_as_current_span(tracer, "ingest.plan") as plan_span:
             plan = _plan(

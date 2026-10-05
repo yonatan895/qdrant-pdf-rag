@@ -944,3 +944,49 @@ def test_oversize_document_is_never_upserted_or_completed_and_next_run_succeeds(
     monkeypatch.delenv("INGEST_MAX_DOC_CHUNKS")
     assert main([*args, "--reingest"]) == 0
     assert sum(fake.upserts) > 0
+
+
+@pytest.mark.parametrize(
+    ("case", "fake_kwargs", "env", "extra", "match"),
+    [
+        ("rules_mismatch", {"stored_sha": "c" * 64, "stored_rules_v": "0123456789abcdef"}, {}, (), "extraction-rules mismatch"),
+        ("legacy_unversioned", {"stored_sha": "c" * 64, "stored_rules_v": ""}, {}, (), "predates extraction-rules"),
+        ("unattested_revision", {}, {"EMBED_MODE": "vllm", "DENSE_DIM": "256"}, ("--reingest",),
+         "EMBED_MODEL_REVISION"),
+        ("contextual_on_hash", {}, {"CONTEXTUAL_EMBED_ENABLED": "true"}, (), "requires embed_mode=vllm"),
+    ],
+)
+def test_failed_preflight_starts_no_workers_and_writes_nothing(
+    tmp_path, synthetic_pdf, monkeypatch, case, fake_kwargs, env, extra, match
+):
+    """Issue #583 acceptance: every preflight refusal happens before the
+    parse pool exists and leaves storage and the inventory untouched."""
+    import copy
+
+    from mainframe_rag.ingest import run_ingest
+
+    fake = _FakeQdrant(**fake_kwargs)
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    monkeypatch.setenv("EMBED_MODE", "hash")
+    monkeypatch.delenv("DENSE_DIM", raising=False)
+    monkeypatch.delenv("EMBED_MODEL_REVISION", raising=False)
+    monkeypatch.delenv("CONTEXTUAL_EMBED_ENABLED", raising=False)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    pools: list[object] = []
+
+    def no_pool(*a, **k):
+        pools.append(k)
+        raise AssertionError("parse worker pool started after a failed preflight")
+
+    monkeypatch.setattr(run_ingest, "ProcessPoolExecutor", no_pool)
+    before = copy.deepcopy(
+        (fake._points, fake.upserts, fake.upsert_calls, fake.deletes, fake.created_collections)
+    )
+    progress = tmp_path / "inventory.jsonl"
+    with pytest.raises(RuntimeError, match=match):
+        main(_migration_args(synthetic_pdf.parent, progress, *extra))
+    assert pools == []
+    after = (fake._points, fake.upserts, fake.upsert_calls, fake.deletes, fake.created_collections)
+    assert after == before, f"{case}: storage mutated before the refusal"
+    assert not progress.exists() or progress.read_text() == ""
