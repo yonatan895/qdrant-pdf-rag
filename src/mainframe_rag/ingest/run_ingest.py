@@ -26,6 +26,7 @@ import time
 import uuid
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
+from dataclasses import dataclass
 from pathlib import Path
 
 from opentelemetry import context as otel_context
@@ -710,12 +711,7 @@ def _run_impl(
     )
     # Progress counters (issue #20 PR D): files ok / failed / chunks upserted,
     # logged once per run. Logs carry ids and counts, never PDF text.
-    files_ok = 0
-    files_failed = 0
-    chunks_upserted = 0
-    parse_seconds = 0.0
-    upsert_seconds = 0.0
-    pages_seen = 0
+    stats = _RunStats()
     bulk = settings.ingest_bulk_load and not dry_run
     bulk_active = False
     client = None
@@ -847,7 +843,7 @@ def _run_impl(
                     force_reingest=force_reingest and not resume_checkpoints,
                 ):
                     if dry_run:
-                        files_ok += 1  # already ingested — an ok outcome
+                        stats.files_ok += 1  # already ingested — an ok outcome
                         log.info(
                             json.dumps(
                                 {"path": path_str, "sha256": record.sha256, "action": "skip"}
@@ -885,7 +881,7 @@ def _run_impl(
                             ),
                         )
                     ):
-                        files_ok += 1
+                        stats.files_ok += 1
                         log.info(
                             json.dumps(
                                 {"path": path_str, "sha256": record.sha256, "action": "skip"}
@@ -979,24 +975,9 @@ def _run_impl(
                     pending_removals=_pending_removals,
                     retire_plan=_retire_plan,
                 )
-            root.set_attribute("ingest.files_ok", files_ok)
-            root.set_attribute("ingest.files_failed", 0)
-            root.set_attribute("ingest.chunks_upserted", chunks_upserted)
-            _log_summary(
-                started,
-                files_ok,
-                files_failed,
-                chunks_upserted,
-                failures=0,
-                parse_seconds=parse_seconds,
-                upsert_seconds=upsert_seconds,
-                pages=pages_seen,
-                bulk_load=bulk,
-            )
-            return 0
+            return _finish_run(root, stats, settings, started, bulk, manifest_mode)
 
         ctx = mp.get_context("spawn")
-        failures = 0
         # Combined in-flight budget: parse_pending + upsert_pending is capped
         # at window so slow upserts never let the parent hold unbounded
         # parsed/embedded docs and vectors in RAM.
@@ -1050,8 +1031,7 @@ def _run_impl(
                         try:
                             record, parsed, chunks, vectors, contexts = future.result()
                         except Exception as exc:  # noqa: BLE001 — one bad PDF must not kill the run
-                            failures += 1
-                            files_failed += 1
+                            stats.files_failed += 1
                             append_record(
                                 progress,
                                 InventoryRecord(
@@ -1074,8 +1054,7 @@ def _run_impl(
                             refill_parse()
                             continue
                         if record.status == "error":
-                            failures += 1
-                            files_failed += 1
+                            stats.files_failed += 1
                             append_record(progress, record)
                             log.error(
                                 json.dumps(
@@ -1088,13 +1067,13 @@ def _run_impl(
                             )
                             refill_parse()
                             continue
-                        pages_seen += record.pages
-                        parse_seconds += record.seconds
+                        stats.pages += record.pages
+                        stats.parse_seconds += record.seconds
 
                         if dry_run:
                             record.status = "dry"
                             append_record(progress, record)
-                            files_ok += 1
+                            stats.files_ok += 1
                             log.info(
                                 json.dumps(
                                     {
@@ -1164,8 +1143,7 @@ def _run_impl(
                         try:
                             status, seconds = future.result()
                         except Exception as exc:  # noqa: BLE001 — one bad PDF must not kill the run
-                            failures += 1
-                            files_failed += 1
+                            stats.files_failed += 1
                             record.status = "error"
                             record.error = str(exc)[:500]
                             record.error_type = type(exc).__name__
@@ -1180,7 +1158,7 @@ def _run_impl(
                                 )
                             )
                         else:
-                            upsert_seconds += seconds
+                            stats.upsert_seconds += seconds
                             record.status = status
                             if status in ("upserted", "skipped"):
                                 # Bind the inventory line to the committed
@@ -1190,8 +1168,7 @@ def _run_impl(
                                 record.chunk_ids_digest = ids_digest
                                 record.content_digest = content_digest
                             elif status == "empty":
-                                failures += 1
-                                files_failed += 1
+                                stats.files_failed += 1
                                 record.error = "document produced zero chunks; nothing published"
                                 record.error_type = "EmptyDocument"
                                 log.error(
@@ -1207,17 +1184,17 @@ def _run_impl(
                         if record.status in ("upserted", "skipped"):
                             # "skipped" = verified completion for this
                             # generation already committed — still ok.
-                            files_ok += 1
+                            stats.files_ok += 1
                         elif record.status == "empty":
                             pass  # already counted as failed above
                         if record.status == "upserted":
-                            chunks_upserted += record.chunks
+                            stats.chunks_upserted += record.chunks
                         append_record(progress, record)
                         refill_parse()
         # Commit the pending migration contract inside the bulk window (it
         # is part of the load) and only when no document failed — the scope
         # proof runs here, before any summary claims success (issue #391 F2).
-        if failures == 0 and manifest_mode == STATE_PENDING:
+        if stats.files_failed == 0 and manifest_mode == STATE_PENDING:
             assert client is not None
             _commit_migration_representation(
                 client,
@@ -1242,37 +1219,7 @@ def _run_impl(
                     json.dumps({"action": "restore_bulk_indexing_failed", "error_type": type(exc).__name__})
                 )
 
-    root.set_attribute("ingest.files_ok", files_ok)
-    root.set_attribute("ingest.files_failed", files_failed)
-    root.set_attribute("ingest.chunks_upserted", chunks_upserted)
-    root.set_attribute("ingest.pages", pages_seen)
-    if failures:
-        root.set_status(Status(StatusCode.ERROR, "document failures"))
-        if manifest_mode == STATE_PENDING:
-            # Scope proof needs every walked document re-embedded; failures
-            # leave the contract pending (never certified over partial work).
-            log.warning(
-                json.dumps(
-                    {
-                        "action": "representation",
-                        "collection": settings.qdrant_collection,
-                        "result": STATE_PENDING,
-                        "note": "document failures blocked the commit; resume with --reingest",
-                    }
-                )
-            )
-    _log_summary(
-        started,
-        files_ok,
-        files_failed,
-        chunks_upserted,
-        failures,
-        parse_seconds=parse_seconds,
-        upsert_seconds=upsert_seconds,
-        pages=pages_seen,
-        bulk_load=bulk,
-    )
-    return 1 if failures else 0
+    return _finish_run(root, stats, settings, started, bulk, manifest_mode)
 
 
 def _commit_migration_representation(
@@ -1796,33 +1743,72 @@ def _run_publish_locked(
     return 0
 
 
-def _log_summary(
+@dataclass
+class _RunStats:
+    """Parent-owned run accounting (issue #20 PR D). Only the parent mutates
+    it, from planning skips and the parse/upsert result handlers; workers
+    return records and never see it. Every failed document is counted once
+    in `files_failed`, which also decides the exit code."""
+
+    files_ok: int = 0
+    files_failed: int = 0
+    chunks_upserted: int = 0
+    parse_seconds: float = 0.0
+    upsert_seconds: float = 0.0
+    pages: int = 0
+
+
+def _finish_run(
+    root: trace.Span,
+    stats: _RunStats,
+    settings: Settings,
     started: float,
-    files_ok: int,
-    files_failed: int,
-    chunks_upserted: int,
-    failures: int,
-    parse_seconds: float,
-    upsert_seconds: float,
-    pages: int,
     bulk_load: bool,
-) -> None:
+    manifest_mode: str | None,
+) -> int:
+    """The one end-of-run path (issue #583): root-span counters, the
+    pending-migration note when failures blocked the commit, the summary,
+    and the exit code."""
+    root.set_attribute("ingest.files_ok", stats.files_ok)
+    root.set_attribute("ingest.files_failed", stats.files_failed)
+    root.set_attribute("ingest.chunks_upserted", stats.chunks_upserted)
+    root.set_attribute("ingest.pages", stats.pages)
+    if stats.files_failed:
+        root.set_status(Status(StatusCode.ERROR, "document failures"))
+        if manifest_mode == STATE_PENDING:
+            # Scope proof needs every walked document re-embedded; failures
+            # leave the contract pending (never certified over partial work).
+            log.warning(
+                json.dumps(
+                    {
+                        "action": "representation",
+                        "collection": settings.qdrant_collection,
+                        "result": STATE_PENDING,
+                        "note": "document failures blocked the commit; resume with --reingest",
+                    }
+                )
+            )
+    _log_summary(started, stats, bulk_load)
+    return 1 if stats.files_failed else 0
+
+
+def _log_summary(started: float, stats: _RunStats, bulk_load: bool) -> None:
     """One 'done' summary per run (issue #20 PR D): files ok / failed /
     chunks upserted / phase seconds / pages_per_s / elapsed_ms. Warning
     level when anything failed."""
     wall = time.monotonic() - started
     payload = {
         "action": "done",
-        "files_ok": files_ok,
-        "files_failed": files_failed,
-        "chunks_upserted": chunks_upserted,
-        "parse_s": round(parse_seconds, 1),
-        "upsert_s": round(upsert_seconds, 1),
-        "pages_per_s": round(pages / wall, 1) if wall > 0 and pages else 0.0,
+        "files_ok": stats.files_ok,
+        "files_failed": stats.files_failed,
+        "chunks_upserted": stats.chunks_upserted,
+        "parse_s": round(stats.parse_seconds, 1),
+        "upsert_s": round(stats.upsert_seconds, 1),
+        "pages_per_s": round(stats.pages / wall, 1) if wall > 0 and stats.pages else 0.0,
         "bulk_load": bulk_load,
         "elapsed_ms": int(wall * 1000),
     }
-    if failures:
+    if stats.files_failed:
         log.warning(json.dumps(payload))
     else:
         log.info(json.dumps(payload))
