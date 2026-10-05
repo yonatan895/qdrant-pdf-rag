@@ -162,7 +162,10 @@ probe() {
 }
 
 echo "==> 4. Validating cluster context & StorageClass"
-if ! $KC cluster-info >/dev/null 2>&1; then
+# API discovery needs an authenticated identity but no namespace beyond the
+# deployer's own (#678): `cluster-info` lists kube-system Services, which a
+# namespace admin cannot, and /version is readable anonymously.
+if ! $KC get --raw /api >/dev/null 2>&1; then
     die "cannot connect to Kubernetes/OpenShift API server using $KC"
 fi
 

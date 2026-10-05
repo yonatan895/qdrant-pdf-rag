@@ -74,6 +74,10 @@ restores the snapshot over whatever the file assigned; empty stays unset
   default). `validate.sh` rejects any other value before the pipeline pushes
   images; the diagnostic names the key, never the value. One parser
   (`model_config.parse_strict_bool`) serves preflight and `map_values.py`.
+- `validate.sh` needs only a namespace-admin identity. Its reachability probe is
+  API discovery (`get --raw /api`): an anonymous or invalid identity fails, and
+  a namespace-scoped one passes. It does not use `cluster-info` (kube-system
+  Services) or `/version` (anonymous).
 - Live cluster probes in `validate.sh` classify the client error: a
   `Forbidden` StorageClass read is a notice (existence unverified, not
   "absent"); a `Forbidden` Namespace read falls through to the Secret check
