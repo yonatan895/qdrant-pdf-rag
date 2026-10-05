@@ -1452,3 +1452,32 @@ def test_recurring_subsection_titles_do_not_open_pieces():
     ]
     chunks = make_chunks(_parsed_doc(toc, 3), pages, ["1", "2", "3"])
     assert len({c.text for c in chunks}) == len(chunks)
+
+
+def test_same_page_bookmarks_keep_outline_order_for_heading_paths():
+    """A deeper entry stays under its own parent when a shallower page-mate
+    follows it in the outline (#663): ordering by level filed the sibling's
+    section beneath the deeper example."""
+    toc = [
+        [1, "DD statement", 1],
+        [2, "DEST parameter", 2],
+        [3, "Example of the DEST parameter", 2],
+        [2, "DISP parameter", 2],
+        [2, "DLM parameter", 3],
+    ]
+    page = (
+        "DEST parameter\nRoutes output.\nExample of the DEST parameter\nDEST=NODE1\n"
+        "DISP parameter\nSets disposition.\n"
+    )
+    pages = ["DD statement overview.", page, "DLM parameter\nDelimiter.\n"]
+    sections = outline_sections(_parsed_doc(toc, 3), pages)
+    shared = [s for s in sections if s.page_start == 1]
+    assert [s.heading_path for s in shared] == [
+        "DD statement > DEST parameter > Example of the DEST parameter",
+        "DD statement > DISP parameter",
+    ]
+    assert page[shared[1].start_char : shared[1].end_char].startswith("DISP parameter")
+    # No page text: page-granular, still the last page-mate's real path.
+    assert [s.heading_path for s in outline_sections(_parsed_doc(toc, 3)) if s.page_start == 1] == [
+        "DD statement > DISP parameter"
+    ]
