@@ -28,13 +28,21 @@ from mainframe_rag.ports import Reranker
 
 _TOKEN_RE = re.compile(r"[A-Za-z0-9]{2,}")
 
-# Longest passage the rerank server scores faithfully. The server window is
-# 2048 tokens (Budget rerank role) and syntax-dense text measures ~2.0
-# chars/token, so 3000 chars keeps query+passage inside with margin.
-# Oversize atomic chunks are emitted whole past SECTION_MAX_CHARS (up to
-# ~5300 chars measured live) and would otherwise 400 the /v1/score call —
-# failing the whole search, not just one candidate.
+# Longest passage sent in a normal rerank call. The server window is 2048
+# tokens (Budget rerank role). Measured 2026-10-04 (issue #664) with the
+# bge-reranker-v2-m3 tokenizer over 226,917 real-corpus passages: worst case
+# 1.18 chars/token, and 31 passages overflow a 2048 window (60-token query +
+# special tokens) at this cap; a 2000-char cut overflows none. A static cut
+# to 2000 would shorten 62% of passages, so the cap stays and the rare
+# overflow is handled by a one-shot retry (RERANK_RETRY_PASSAGE_MAX_CHARS in
+# HttpReranker.score) when a whole batch is rejected with HTTP 4xx.
 RERANK_PASSAGE_MAX_CHARS = 3000
+
+# Retry-only passage cut: applied to the tail of the already-formatted
+# passage (the header lines come first, so they stay whole unless the header
+# alone exceeds this cap), only for a batch that failed on both legs with a
+# 4xx status.
+RERANK_RETRY_PASSAGE_MAX_CHARS = 2000
 
 
 def _rerank_body_label(chunk_type: str) -> str | None:
@@ -106,6 +114,11 @@ class HashReranker:
         return scores
 
 
+def _is_client_error(exc: BaseException) -> bool:
+    """True for an HTTP 4xx status failure (not 5xx, transport or shape)."""
+    return isinstance(exc, httpx2.HTTPStatusError) and 400 <= exc.response.status_code < 500
+
+
 # ------------------------------------------------------- HTTP implementation (vLLM / TEI)
 class HttpReranker:
     """Production reranker: sends candidate pairs to vLLM or TEI scoring endpoint."""
@@ -150,37 +163,82 @@ class HttpReranker:
 
         for i in range(0, len(texts), self._batch_size):
             batch_texts = texts[i : i + self._batch_size]
-            batch_scores: list[float] | None = None
-            for index, leg in enumerate(legs):
-                last = index == len(legs) - 1
-                try:
-                    batch_scores = leg(client, base, headers, query, batch_texts)
-                except (
-                    httpx2.HTTPStatusError,
-                    httpx2.RequestError,
-                    ValueError,
-                    KeyError,
-                    RuntimeError,
-                ):
-                    # A spent leg falls through to the next one; the last
-                    # leg failing fails the search closed, exactly as the
-                    # legacy single-fallback path did.
-                    if last:
-                        raise
-                    batch_scores = None
-                if batch_scores is not None:
-                    break
-            if batch_scores is None:
-                # Reachable only when the trailing leg yields None instead
-                # of raising (the score leg never raises): both legs are
-                # spent, so fail closed rather than scoring silently empty.
-                raise RuntimeError(
-                    f"Reranker endpoints under {base} returned no usable scores "
-                    f"for a batch of {len(batch_texts)} texts"
+            outcomes: list[bool] = []
+            try:
+                batch_scores = self._run_legs(
+                    legs, client, base, headers, query, batch_texts, outcomes
                 )
+            except (
+                httpx2.HTTPStatusError,
+                httpx2.RequestError,
+                ValueError,
+                KeyError,
+                RuntimeError,
+            ):
+                # Issue #664: only when every leg was rejected with HTTP 4xx
+                # (not 5xx, transport or shape errors) the batch is retried
+                # once with passages cut to RERANK_RETRY_PASSAGE_MAX_CHARS;
+                # a failing retry raises exactly as the first attempt would.
+                if len(outcomes) != len(legs) or not all(outcomes):
+                    raise
+                cut = [t[:RERANK_RETRY_PASSAGE_MAX_CHARS] for t in batch_texts]
+                batch_scores = self._run_legs(legs, client, base, headers, query, cut, [])
             scores.extend(batch_scores)
 
         return scores
+
+    def _run_legs(
+        self,
+        legs: Sequence[Callable[..., list[float] | None]],
+        client: httpx2.Client,
+        base: str,
+        headers: dict[str, str],
+        query: str,
+        batch_texts: list[str],
+        outcomes: list[bool],
+    ) -> list[float]:
+        """Score one batch through the ordered legs, failing closed when the
+        last leg fails. `outcomes` gets one entry per failed leg: True when
+        that leg was rejected with an HTTP 4xx status."""
+        batch_scores: list[float] | None = None
+        for index, leg in enumerate(legs):
+            last = index == len(legs) - 1
+            rejected: list[BaseException] = []
+            try:
+                if leg == self._score_batch:
+                    batch_scores = self._score_batch(
+                        client, base, headers, query, batch_texts, rejected
+                    )
+                else:
+                    batch_scores = leg(client, base, headers, query, batch_texts)
+            except (
+                httpx2.HTTPStatusError,
+                httpx2.RequestError,
+                ValueError,
+                KeyError,
+                RuntimeError,
+            ) as exc:
+                outcomes.append(_is_client_error(exc))
+                # A spent leg falls through to the next one; the last
+                # leg failing fails the search closed, exactly as the
+                # legacy single-fallback path did.
+                if last:
+                    raise
+                batch_scores = None
+            else:
+                if batch_scores is None:
+                    outcomes.append(bool(rejected) and _is_client_error(rejected[-1]))
+            if batch_scores is not None:
+                break
+        if batch_scores is None:
+            # Reachable only when the trailing leg yields None instead
+            # of raising (the score leg never raises): both legs are
+            # spent, so fail closed rather than scoring silently empty.
+            raise RuntimeError(
+                f"Reranker endpoints under {base} returned no usable scores "
+                f"for a batch of {len(batch_texts)} texts"
+            )
+        return batch_scores
 
     def _score_batch(
         self,
@@ -189,10 +247,12 @@ class HttpReranker:
         headers: dict[str, str],
         query: str,
         batch_texts: list[str],
+        rejected: list[BaseException] | None = None,
     ) -> list[float] | None:
         """vLLM proprietary leg (`/v1/score`). None means unusable here —
         transport failure or unexpected shape — so the caller tries the
-        next leg. Never raises for server behavior."""
+        next leg. Never raises for server behavior; an HTTP status failure
+        is appended to `rejected` when given (the 4xx retry rule)."""
         url = f"{base}/score" if base.endswith("/v1") else f"{base}/v1/score"
         payload = {
             "model": self._model,
@@ -209,7 +269,11 @@ class HttpReranker:
                 if len(items) == len(batch_texts):
                     sorted_items = sorted(items, key=lambda d: d.get("index", 0))
                     batch_scores = [float(d["score"]) for d in sorted_items]
-        except (httpx2.HTTPStatusError, httpx2.RequestError, ValueError, KeyError):
+        except httpx2.HTTPStatusError as exc:
+            if rejected is not None:
+                rejected.append(exc)
+            batch_scores = None
+        except (httpx2.RequestError, ValueError, KeyError):
             batch_scores = None
         return batch_scores
 

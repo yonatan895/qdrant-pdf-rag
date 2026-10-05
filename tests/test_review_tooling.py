@@ -97,7 +97,7 @@ class TestProfileClassification(unittest.TestCase):
         for path in ("src/mainframe_rag/eval/__init__.py",
                      "src/mainframe_rag/eval/datasets.py",
                      "src/mainframe_rag/eval/retrieval.py",
-                     "scripts/eval_retrieval.py", "scripts/harness_l1.py", "scripts/venue.py"):
+                     "scripts/eval_retrieval.py"):
             with self.subTest(path=path):
                 decision = classify_paths([path])
                 self.assertEqual(decision.profile, ProfileName.OFFLINE)

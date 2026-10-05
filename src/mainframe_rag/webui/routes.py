@@ -484,6 +484,8 @@ def _turn(
     verification_state: str | None = None,
     citations_inferred: bool = False,
     script_review_required: bool = False,
+    supplied_evidence: list[Any] | None = None,
+    evidence_omitted: int = 0,
 ) -> dict[str, Any]:
     turn = {
         "role": role,
@@ -500,6 +502,10 @@ def _turn(
         "verification_state": verification_state,
         "citations_inferred": citations_inferred,
         "script_review_required": script_review_required,
+        # Supplied-excerpt view (issue #635): this response only, rendered
+        # once by the fragment; never part of history_json or browser state.
+        "supplied_evidence": supplied_evidence,
+        "evidence_omitted": evidence_omitted,
     }
     # Assistant turns render the safe markdown subset; operator turns stay
     # plain <pre> (the operator's own keystrokes, never model output).
@@ -725,6 +731,8 @@ async def ui_chat(
             verification_state=output.verification_state,
             citations_inferred=output.citations_inferred,
             script_review_required=output.script_review_required,
+            supplied_evidence=list(output.supplied),
+            evidence_omitted=len(output.evidence.omitted_indices),
         )
         turns.append(assistant_turn)
         if is_htmx:
@@ -827,6 +835,8 @@ async def _console_stream_response(req, owner):
                             script_lang=output.script_lang,
                             verification_state=output.verification_state,
                             script_review_required=output.script_review_required,
+                            supplied_evidence=output.supplied,
+                            evidence_omitted=len(output.evidence.omitted_indices),
                         ),
                     )
         except Exception as exc:  # noqa: BLE001 — mid-stream: error event, no final

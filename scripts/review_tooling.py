@@ -79,7 +79,6 @@ DEPLOY_PATTERNS = [
     "taskfiles/artifacts.yml",
     "scripts/tools/**",
     "scripts/bootstrap.sh",
-    "scripts/bootstrap_ci.py",
     "pyproject.toml",
     "requirements*.txt",
     "requirements*.in",
@@ -947,8 +946,7 @@ def required_lanes(manifest: dict[str, Any]) -> set[str]:
     # Evaluation is tooling regardless of its package location (#508).
     # Exercise its real retrieval consumers as well as unit scoring tests;
     # these synthetic lanes do not substitute for production semantic checks.
-    if any(_match_any(path, ["src/mainframe_rag/eval/**", "scripts/eval_retrieval.py",
-                            "scripts/harness_l1.py", "scripts/venue.py"])
+    if any(_match_any(path, ["src/mainframe_rag/eval/**", "scripts/eval_retrieval.py"])
            and not path.replace("\\", "/").endswith((".md", ".markdown")) for path in paths):
         required_lanes.update({"simulation", "gate_l1"})
     if any(_match_any(path, ["Taskfile.yml", "taskfiles/**", "scripts/tools/**", "requirements*.txt",

@@ -41,7 +41,8 @@ as `chatcmpl-<request_id>`). The ops endpoints carry none: `/healthz`,
 - `POST /v1/answer` — `AnswerRequest{query, product?, version?,
   splunk_context?, stream (default false), temperature?}` → `AnswerResponse{request_id,
   answer, citations, citations_inferred, inferred_indices, script,
-  script_lang, verification_state, script_review_required}`.
+  script_lang, verification_state, script_review_required, supplied_evidence,
+  evidence_omitted}` (the last two: [supplied-evidence projection](#supplied-excerpts)).
   `temperature` (issue #596) is an optional per-request override of
   `Settings.llm_temperature` (0.0–2.0, no inf/NaN; out-of-range 422s before
   retrieval); omitted means the configured default. The chat routes accept
@@ -133,7 +134,8 @@ as `chatcmpl-<request_id>`). The ops endpoints carry none: `/healthz`,
   accepted and ignored (token limits are server-side). The response is
   `ChatCompletionsResponse{id: "chatcmpl-<request_id>", created, model,
   choices[], usage, citations, citations_inferred, inferred_indices, hits,
-  verification_state, script, script_lang, script_review_required}`;
+  verification_state, script, script_lang, script_review_required,
+  supplied_evidence, evidence_omitted}`;
   `choices[0].message.content` carries the answer plus a trailing markdown
   `**Citations:**` bullet list when cites exist. Empty hits return
   `finish_reason: "stop"`, zeroed usage, and empty citations/hits. Provenance
@@ -300,7 +302,7 @@ status (`/ui` failures render HTML banners instead, §1):
 | `invalid_request` / `request body failed validation` | 422 | Pydantic failure, the shared query guard (overlong, empty after `str.strip()`, or containing NUL/C0 controls other than `\t\n\r`, issue #579; or, when `embed_max_input_chars` is set, a query whose dense text — prefix plus query — exceeds it, issue #374: refused before any model call, never truncated; an effective query that only grows past the bound after expansion/condensation is refused by the embedder with the same envelope), and a chat/console active `user` turn that is missing, blank, control-character or overlong (one message, every 422 path) |
 | `overloaded` / `the service is at capacity; retry later` | 503 + `Retry-After: 1` | Request admission refused (issue #374): all `request_max_concurrent` slots busy and the bounded wait queue full or its wait expired. Raised first, before validation, the serving gate and any retrieval/model work; only when a limit is selected. `/ui/chat` renders its fixed banner; `/ui/chat/stream` returns this envelope |
 | `deadline_exceeded` / `request deadline exceeded` | 504 | Total request deadline (`request_deadline_s`, issue #374) expired before the response began; on an already-open stream it is an `error` event (no `final`, `generation_incomplete`) instead. Only when a deadline is selected |
-| `prompt_budget_exceeded` / `prompt exceeds the model token budget` | 422 | Irreducible token-budget overflow (issue #368): fixed content alone exceeds the window with nothing left to trim; raised before any model call on JSON/chat, as an `error` event (no `final`) on already-open streams; `/ui/chat` renders its fixed banner |
+| `prompt_budget_exceeded` / `prompt exceeds the model token budget` | 422 | Irreducible token-budget overflow (issue #368): fixed content alone exceeds the window with nothing left to trim, or (issue #634) hits were retrieved but final packing supplied no usable excerpt (atomic-unit omission, verification trimming, whitespace-only text); the second case is the `EvidenceBudgetExceeded` subtype, logged/spanned under that type but identical on the wire; raised before any model call on JSON/chat, as an `error` event (no `final`) on already-open streams; `/ui/chat` renders its fixed banner |
 | `metrics_unavailable` / `metrics are not available` | 503 | `/metrics` scrape failure while enabled |
 | `not_found` / `not found` | 404 | Unknown route |
 | `method_not_allowed` / `method not allowed` | 405 | Wrong method |
@@ -318,7 +320,8 @@ mislabeled as retrieval.
 then exactly one terminal `event: final` carrying the full answer, validated
 citations, the `citations_inferred` provenance flag, the `inferred_indices`
 list, the `verification_state` label, optional script plus its review flag,
-retrieval hits, query kind, `ttft_ms`, and token usage. A mid-stream failure
+retrieval hits, the `supplied_evidence` projection with `evidence_omitted`,
+query kind, `ttft_ms`, and token usage. A mid-stream failure
 emits `event: error` and ends **without** a `final` — clients must treat
 stream-end-without-final as a failed request. `/ui/chat/stream` consumes the
 same token→final contract with the identical `final` terminal event.
@@ -326,7 +329,8 @@ same token→final contract with the identical `final` terminal event.
 `/v1/chat` + `/v1/chat/completions` with `stream=true` instead stream OpenAI
 `chat.completion.chunk` frames (`data: {...}` content deltas), then one
 terminal chunk with `finish_reason` carrying `citations`,
-`citations_inferred`, `inferred_indices`, and `hits` (chat chunks carry no
+`citations_inferred`, `inferred_indices`, `hits`, `supplied_evidence` and
+`evidence_omitted` (chat chunks carry no
 `usage`), then `data: [DONE]`. A mid-stream failure emits one
 `data: {"error": {"code": "upstream_error", "message": "stream failed"}, "verification_state": "generation_incomplete"}`
 frame (the strict `error` object plus the additive sibling state, issue #365)
@@ -339,7 +343,9 @@ strict stream-end rule above is the upstream reasoning wire and the
   `citations_inferred: false`, empty `inferred_indices`, `ttft_ms: null`, zeroed usage. The empty-hits
   short-circuit happens before prompt build and any LLM call, on both JSON
   and SSE. A pre-generation budget failure (issue #368) likewise precedes
-  any model call: JSON/chat answer it with `422 prompt_budget_exceeded`,
+  any model call. Retrieved hits with zero usable supplied excerpts (issue
+  #634) take the same path, never a model call and never the no-hits
+  answer (which would claim the corpus lacks support): JSON/chat answer it with `422 prompt_budget_exceeded`,
   while an already-open stream carries `event: error` and ends without
   a `final`.
 - `Server-Timing` on `/v1/answer` SSE responses carries the retrieval legs only
@@ -402,6 +408,34 @@ select `complex`. Default is `simple`.
   prose up to the narrative cap (1100 for complex queries); cuts marked
   with a truncation suffix; packing stops at the context budget with at
   most one partial chunk.
+- Source metadata (#635): each excerpt header is two lines, the exact
+  citation label line `[i] <citation>` followed by
+  `Source product: <product|unknown>; version: <version|unknown>`, taken from
+  the stored payload only (whitespace collapsed, 120 chars). A missing value is
+  `unknown`; the caller's `product`/`version` scope is never substituted. The
+  header is part of every estimator, the remainder cut and the exact final
+  recount, so the budget includes it. The `[i]` label is the per-entry handle;
+  the citation text is display only and may repeat across versions.
+- Range selection (#632): when the query names a message id, member or
+  system code (shared `parse_query` normalization), a chunk over its cap ships
+  ONE contiguous source range chosen from stored/redetected unit spans. A unit
+  whose first line starts with the requested identifier is an entry heading
+  (an incidental mention or a longer near-miss token is not). The range starts
+  at a heading only when it covers strictly more requested headings than the
+  legacy prefix; otherwise, and for queries without a heading match or with
+  absent/malformed spans, the prefix behavior is unchanged. A range that does
+  not start at the chunk start leads with `[... earlier text omitted]`; a cut
+  tail ends with the truncation suffix. A cut inside prose ends at a sentence
+  or blank-line boundary and never strands a following qualifier sentence
+  (however/unless/except/do not/...): that sentence is shipped with its
+  assertion or both are left out; only a range with no complete sentence at
+  all keeps the marked character cut. An entry that cannot fit whole is
+  omitted explicitly (`omitted_indices`).
+  `EvidenceEntry` carries `start_char` and `included_chars` (the range end);
+  the shipped body is exactly marker + `source[start_char:included_chars]` +
+  suffix, which verification trim rounds re-check before cutting. A trim that
+  would remove the requested entry drops the excerpt instead. Defaults and
+  budgets are unchanged.
 - `prompt_order` policies reorder (never drop or duplicate — violations fail
   closed): `retrieval` keeps historical assembly order byte-identical;
   `stable_cache` frames excerpts in attributeless
@@ -415,9 +449,19 @@ select `complex`. Default is `simple`.
   and trims up to `4 + 2*len(packed excerpts)` rounds (64-char overcut, drop
   under 80 chars, else suffix; the bound scales with the trimmable evidence
   so `prompt_budget_exceeded` means nothing was left to trim, #307).
-  Chat packing (`build_chat_messages`) uses the same discipline but
-  trims in two tiers for up to `4*2 + 2*len(packed) + len(prior turns)` rounds: excerpt
-  bodies first, then it pops the oldest history turn. Never per-chunk
+  Chat packing (`build_chat_messages`) uses the same discipline under one
+  deterministic retention policy (#633) applied to both planning and recount:
+  the system prompt, scope, active question and the most recent prior turn
+  (the last user message plus its assistant replies, the antecedent) are
+  mandatory; older whole turns are expendable and rank below current
+  evidence. Planning charges only the antecedent against the excerpt budget,
+  then keeps older turns newest-first, contiguous and whole, only in the
+  space the packed evidence leaves. Recount runs for up to
+  `4*2 + 2*len(packed) + len(older turns)` rounds: it pops the oldest older
+  turn first, then trims excerpt bodies; if the antecedent plus question and
+  evidence still overflow, it raises `PromptBudgetExceeded` rather than
+  dropping the antecedent. Prior assistant text never enters the evidence
+  manifest, and caller message lists are never mutated. Never per-chunk
   tokenize RPCs.
 - Planning and verification both charge reserved output, the selected complexity's
   thinking reserve and safety margin, for both single-turn answers and chat.
@@ -850,6 +894,38 @@ These pin binding/refusal/cache behavior, not immutability or absence of concurr
 mutation. Active-reader repair and warm-cache mutation remain #391 acceptance
 counterexamples; [publication](ingest.md#publication-contract) owns writer ordering.
 
+<a id="supplied-excerpts"></a>
+## Supplied-evidence projection (issue #635)
+
+One bounded, request-local projection derived from the finalized prepared
+prompt (`PreparedPrompt.supplied`, from the same packed list as the manifest
+after every trim round), reused by JSON, SSE `final`, chat JSON/stream and
+`/ui/chat[/stream]`. Additive fields: `supplied_evidence` (list, prompt order)
+and `evidence_omitted` (count of retrieved excerpts that did not survive
+packing; they are never listed). Empty/0 when nothing was retrieved. History
+and retrieved-but-omitted chunks never appear. Per entry:
+`index` (the prompt `[n]` handle), `citation` (display text),
+`duplicate_citation` (another supplied entry has the same display text; this
+slice does not resolve which one a model citation meant, see #631),
+`product`/`version` (stored values; null = unknown), `doc_id`, `title`,
+`heading`, `page_label`, `pdf_page_start`/`pdf_page_end` (one-based, null when
+not stored), `start_char`/`end_char`/`source_chars` (offsets into the stripped
+chunk text, from #632), `truncated_start`/`truncated_end`, `text_clipped`, and
+`text`: exactly `source[start_char:end_char]`, i.e. the source slice shipped
+(the leading/trailing cut markers are not part of it). The location is the
+recorded chunk span, not finer attribution. `chunk_id` is not exposed.
+
+Bounds: `text` is clipped at 8000 chars per entry and 48000 chars in total
+(`text_clipped: true`; the text is then a prefix of the shipped slice); the
+rest is bounded by the prompt window. Raw excerpt text is response-only: never
+logged, in metrics or spans. The console shows it in an expandable view for
+the current response only, held in memory (never in localStorage, history or
+the markdown export, gone on reload); earlier turns show an explicit
+"not available" note and are never rebuilt by a new search. Opening the view
+makes no request. Excerpt text enters the DOM as text only. Citation wording:
+a citation is *source-matched* (it names a supplied excerpt); that is not a
+semantic-support check (see the table below).
+
 <a id="answer-contract"></a>
 ## Supplied evidence and answer states
 
@@ -881,9 +957,14 @@ from the finalized parse plus the transport outcome — one rule,
 | State | Meaning | Never means |
 |---|---|---|
 | `accepted` | Nonempty substantive parsed prose, eligible non-inferred citations and generation finished (`stop`) | Semantic proof of any claim or certification of an extracted script |
-| `insufficient_evidence` | Abstention-shaped evidence/security refusal or empty-hits short-circuit | A failed request (still 200 + explicit text) |
+| `insufficient_evidence` | Whole-response evidence/security refusal (every substantive clause refuses; any answer clause makes it mixed) with a `stop` finish, or the empty-hits short-circuit (no generation) | A failed request (still 200 + explicit text) |
 | `unverified_draft` | Non-abstention prose with zero eligible citations (absent, rejected, or inferred-only), or a finished nonempty script with no prose | An error (still 200 — the draft label is the signal) |
-| `generation_incomplete` | Non-`stop` finish, neither substantive parsed prose nor a nonempty script after fallbacks, absent/`null` terminal finish, upstream `error` frame, malformed frame, or stream error/cancel/disconnect | An accepted answer (terminal wire shape may still be complete) |
+| `generation_incomplete` | Non-`stop` finish after generation (including a cut-off refusal fragment; this outranks refusal), neither substantive parsed prose nor a nonempty script after fallbacks, absent/`null` terminal finish, upstream `error` frame, malformed frame, or stream error/cancel/disconnect | An accepted answer (terminal wire shape may still be complete) |
+
+State precedence (#630): empty-hits short circuit, then non-`stop` finish,
+then whole-response refusal, then body/citation outcome. Mixed answers (an
+answer clause plus a missing-detail caveat) are not refusals at any length and
+keep their eligible citations.
 
 Body presence is shared with the answer eval (#576): empty `Answer` headings,
 citation labels (including inline labels followed only by bracket indices or
@@ -1006,7 +1087,7 @@ are above. **Authority:** ADR-0001/0004, #363 and existing transport contracts;
 | Client-visible `chat_stream` | No-content or pre-output stream failure (malformed first frame, pre-output error, missing finish/done before any emitted token) can make one non-streaming ask; malformed/rejected/empty/no-finish fallback fails. Missing `[DONE]`, an upstream error frame, a malformed frame, or `[DONE]` without an explicit finish after actually emitted content raises truncation; no replay after those tokens. The shared core applies the same gate to the terminal `done` item itself: a falsy/missing `done` finish, or a token-only stream with no `done`, raises truncation and never synthesizes `stop` (issue #365) |
 | Tokenizer | Plan locally, verify whole messages per trim round; first RPC failure warns and pins estimator for that instance. No per-chunk RPCs; gateway may lack `/tokenize` |
 | Embed/context/health pools | Bounded Settings connect-only retries, no generic POST replay policy |
-| Rerank | Configured score/rerank endpoint order plus alternate endpoint fallback; exhaustion fails closed; [retrieval](retrieval.md) owns dispatch |
+| Rerank | Configured score/rerank endpoint order plus alternate endpoint fallback; exhaustion fails closed; a batch rejected on both legs with HTTP 4xx (not 5xx/transport/shape) is re-scored once with passages cut to `RERANK_RETRY_PASSAGE_MAX_CHARS` (2000), and a failing retry fails closed (issue #664); [retrieval](retrieval.md) owns dispatch |
 | Condensation | Optional reasoning call; failure returns the raw latest query, not a fabricated condensed result |
 | Admission / total deadline (issue #374) | Opt-in (`request_*`, default off): refusal is `503 overloaded` before any work; expiry cancels async legs and is `504 deadline_exceeded` / a terminal SSE `error` event; sync worker-thread legs are bounded by their own timeouts, not interrupted (§6a). No retry or fallback is added |
 | Tracing export | Separately bounded fail-open export; outages drop/log and must not fail request/shutdown |

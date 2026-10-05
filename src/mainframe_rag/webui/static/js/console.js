@@ -187,7 +187,7 @@
       if (turn.citations && turn.citations.length) {
         const citeLabel =
           turn.verification_state === "accepted" && !turn.citations_inferred
-            ? "**Verified citations:**"
+            ? "**Verified citations (source-matched to supplied excerpts; not a check that the excerpts support the answer):**"
             : "**Citations (" + (turn.verification_state || "unverified") + "):**";
         lines.push(citeLabel);
         turn.citations.forEach((c) => lines.push("- " + c));
@@ -266,6 +266,86 @@
       list.appendChild(li);
     });
     box.appendChild(list);
+    if (!turn.citations_inferred) box.appendChild(el("div", "evidence-note citations-note", SOURCE_MATCH_NOTE));
+    return box;
+  }
+
+  /* Supplied-excerpt view (issue #635). The excerpts the model actually
+   * received for the CURRENT response only: held in memory, never written to
+   * localStorage, never exported, gone on reload. Every string enters the DOM
+   * through textContent, so excerpt markup renders as data. A citation is
+   * source-matched (it names an excerpt that was supplied); that is not a
+   * check that the excerpt semantically supports the claim. */
+  const SOURCE_MATCH_NOTE =
+    "Source-matched, not semantically checked: a citation here only means it matches an excerpt that was supplied for this answer. It does not confirm the excerpt supports the claim.";
+  let liveEvidence = null;
+
+  function evidenceLocation(item) {
+    const parts = [];
+    if (item.heading) parts.push(item.heading);
+    if (item.page_label) parts.push("printed p. " + item.page_label);
+    if (typeof item.pdf_page_start === "number") {
+      const last = typeof item.pdf_page_end === "number" ? item.pdf_page_end : item.pdf_page_start;
+      parts.push(last === item.pdf_page_start ? "PDF p. " + item.pdf_page_start : "PDF pp. " + item.pdf_page_start + "\u2013" + last);
+    }
+    return parts.length ? parts.join(" \u00b7 ") : "not recorded";
+  }
+
+  function evidenceCoverage(item) {
+    let range = "Characters " + item.start_char + "\u2013" + item.end_char + " of " + item.source_chars + " in the stored chunk";
+    if (!item.truncated_start && !item.truncated_end) return range + " (whole chunk supplied)";
+    const cuts = [];
+    if (item.truncated_start) cuts.push("earlier text left out");
+    if (item.truncated_end) cuts.push("later text left out");
+    return range + " (" + cuts.join("; ") + ")";
+  }
+
+  function evidenceItem(item) {
+    const details = el("div", "evidence-item");
+    details.setAttribute("data-index", String(item.index));
+    details.appendChild(el("div", "evidence-head", "[" + item.index + "] " + item.citation));
+    const unknown = "unknown";
+    details.appendChild(
+      el("div", "evidence-meta", "Source product: " + (item.product || unknown) + " \u00b7 version: " + (item.version || unknown))
+    );
+    details.appendChild(el("div", "evidence-loc", "Recorded location: " + evidenceLocation(item)));
+    details.appendChild(el("div", "evidence-range", evidenceCoverage(item)));
+    if (item.duplicate_citation) {
+      details.appendChild(
+        el("div", "evidence-warn", "Another supplied excerpt has this same citation text; entries are told apart by number and version, not by citation text.")
+      );
+    }
+    if (item.text_clipped) {
+      details.appendChild(el("div", "evidence-warn", "Displayed text is clipped to the response size limit."));
+    }
+    details.appendChild(el("pre", "evidence-text", item.text));
+    return details;
+  }
+
+  function evidenceBox(turn) {
+    if (turn.role !== "assistant" || turn.error || !turn.verification_state) return null;
+    const box = el("div", "evidence");
+    if (!liveEvidence || liveEvidence.ts !== turn.ts) {
+      box.setAttribute("data-evidence", "unavailable");
+      box.appendChild(
+        el("div", "evidence-unavailable", "Supplied excerpts are not available for this response. They are shown only for the latest completed response in this tab, are never stored with earlier answers, and are not reconstructed by a new search.")
+      );
+      return box;
+    }
+    box.setAttribute("data-evidence", "current");
+    const items = liveEvidence.items;
+    const outer = el("details", "evidence-view");
+    const incomplete = turn.verification_state === "generation_incomplete";
+    outer.appendChild(
+      el("summary", null, "Supplied excerpts (" + items.length + ")" + (incomplete ? " \u2014 incomplete generation" : ""))
+    );
+    const omitted = liveEvidence.omitted;
+    outer.appendChild(
+      el("div", "evidence-note", "Exactly what the model received for this response. " + (omitted > 0 ? omitted + " retrieved " + (omitted === 1 ? "excerpt was" : "excerpts were") + " omitted before the model call and " + (omitted === 1 ? "is" : "are") + " not shown. " : "") + SOURCE_MATCH_NOTE)
+    );
+    if (!items.length) outer.appendChild(el("div", "evidence-unavailable", "No excerpt was supplied."));
+    items.forEach((item) => outer.appendChild(evidenceItem(item)));
+    box.appendChild(outer);
     return box;
   }
 
@@ -587,6 +667,8 @@
     }
     const cites = citationsBox(turn);
     if (cites) article.appendChild(cites);
+    const evidence = evidenceBox(turn);
+    if (evidence) article.appendChild(evidence);
     stateChip(article, turn);
     stateBadges(article, turn);
     const meta = renderMeta(turn);
@@ -1037,9 +1119,21 @@
       assistantTurn.meta = { stopped: true };
     }
     assistantTurn.ts = Date.now();
+    // Current-response excerpts live in memory only (issue #635): never on
+    // the persisted turn, so localStorage and exports cannot carry them.
+    liveEvidence =
+      finalPayload && Array.isArray(finalPayload.supplied_evidence)
+        ? {
+            ts: assistantTurn.ts,
+            items: finalPayload.supplied_evidence,
+            omitted: typeof finalPayload.evidence_omitted === "number" ? finalPayload.evidence_omitted : 0,
+          }
+        : null;
     contentEl.replaceChildren(renderMarkdown(assistantTurn.content));
     const cites = citationsBox(assistantTurn);
     if (cites) article.appendChild(cites);
+    const evidence = evidenceBox(assistantTurn);
+    if (evidence) article.appendChild(evidence);
     stateChip(article, assistantTurn);
     stateBadges(article, assistantTurn);
     const meta = renderMeta(assistantTurn);

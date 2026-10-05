@@ -14,7 +14,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from mainframe_rag.agent import app as app_mod
-from mainframe_rag.agent.answer import parse_answer
+from mainframe_rag.agent.answer import is_abstention, parse_answer, verification_state_for
 from mainframe_rag.agent.cites import extract_citation_lines, valid_citations
 from mainframe_rag.agent.tokenizer import FallbackTokenizer
 from mainframe_rag.ports import ChatResult, TokenUsage
@@ -1424,14 +1424,16 @@ def test_parse_answer_grounded_answer_with_hedging_sentence_keeps_citations():
     assert parsed.citations == [cite1, cite2]
     assert "LFAREA" in parsed.answer
 
-    # The twin shape check: same body truncated to noise-only remainder is
-    # an abstention and zeroes.
-    short_hedge = (
+    # Whole-response recognition (#630): a refusal plus an extra non-refusal
+    # clause is a mixed answer, not a complete refusal — it keeps its
+    # citation and is never zeroed on length alone.
+    mixed = (
         "The excerpts do not contain a specific value for the LFAREA "
         "parameter. Check with your capacity team."
     )
-    parsed2 = parse_answer(short_hedge + f"\n\nCitations:\n{cite1}", make_evidence({cite1}))
-    assert parsed2.citations == []
+    parsed2 = parse_answer(mixed + f"\n\nCitations:\n{cite1}", make_evidence({cite1}))
+    assert parsed2.abstained is False
+    assert parsed2.citations == [cite1]
 
 
 def test_parse_answer_refusal_with_script_keeps_script():
@@ -1587,7 +1589,7 @@ def test_build_messages_context_budgeting():
     msgs1 = build_messages("test query", [hit1], max_chunk_chars=100, max_context_chars=1000).messages
     user_prompt1 = msgs1[1].content
     assert "... [truncated]" in user_prompt1
-    assert len(user_prompt1) < 500
+    assert len(user_prompt1) < 600  # + one source-metadata line (issue #635)
 
     # Total context max truncates subsequent hits
     msgs2 = build_messages("test query", [hit1, hit2], max_chunk_chars=400, max_context_chars=500).messages
@@ -3526,7 +3528,6 @@ def test_answer_premise_correction_keeps_citations(client, monkeypatch):
 def test_verification_state_for_matrix():
     """Unit pin for the single mapping rule (issue #365): order matters —
     refusal/empty first, unfinished generation second, citation outcome last."""
-    from mainframe_rag.agent.answer import verification_state_for
 
     assert verification_state_for(
         answer="Retry.",
@@ -3537,6 +3538,17 @@ def test_verification_state_for_matrix():
         answer="The supplied excerpts do not answer the question.",
         citations=[], citations_inferred=False,
         finish_reason="stop", abstained=True, empty_hits=False,
+    ) == "insufficient_evidence"
+    # #630: a refusal cut off by a non-stop finish is incomplete; the
+    # deterministic empty-hits short circuit stays insufficient_evidence.
+    for finish in ("length", "content_filter", ""):
+        assert verification_state_for(
+            answer="The excerpts do not contain", citations=[], citations_inferred=False,
+            finish_reason=finish, abstained=True, empty_hits=False,
+        ) == "generation_incomplete"
+    assert verification_state_for(
+        answer="No excerpts.", citations=[], citations_inferred=False,
+        finish_reason="", abstained=False, empty_hits=True,
     ) == "insufficient_evidence"
     assert verification_state_for(
         answer="No supporting manual excerpts were found for this question.",
@@ -3996,3 +4008,170 @@ def test_security_refusal_state_json_and_sse(client, monkeypatch, stream, answer
     assert body["answer"] == answer
     assert body["citations"] == []
     assert body["verification_state"] == state
+
+
+_MIXED_CITE = "SA22-0000-00 Synthetic Reference, Chapter 1 > CHECK, p. 1-3"
+_MIXED_INSTRUCTION = "Run CHECK first [1]."
+_MIXED_CAVEAT = "The excerpts do not contain the site-specific retry limit."
+
+
+@pytest.mark.parametrize("repeats", [1, 2, 12])
+def test_mixed_answer_classification_is_independent_of_verbosity(repeats):
+    """Issue #630: a supported answer plus a missing-detail caveat keeps its
+    citation and its state however much harmless prose surrounds it."""
+    body = " ".join([_MIXED_INSTRUCTION] * repeats + [_MIXED_CAVEAT])
+    parsed = parse_answer(body, make_evidence([_MIXED_CITE]))
+    assert parsed.abstained is False
+    assert parsed.citations == [_MIXED_CITE]
+    assert parsed.citations_inferred is True
+    # Explicit Citations: block variant is accepted at every length.
+    explicit = parse_answer(
+        body.replace("[1]", "") + f"\n\nCitations:\n{_MIXED_CITE}", make_evidence([_MIXED_CITE])
+    )
+    assert explicit.abstained is False and explicit.citations == [_MIXED_CITE]
+    assert verification_state_for(
+        answer=explicit.answer, citations=explicit.citations, citations_inferred=False,
+        finish_reason="stop", abstained=explicit.abstained, empty_hits=False,
+    ) == "accepted"
+
+
+@pytest.mark.parametrize("body, expected", [
+    # positive controls: not refusals
+    ("Run CHECK first.", False),
+    ("Run CHECK first. Then confirm the status. Finally restart the task.", False),
+    ('The tool printed "the excerpts do not contain a value" and stopped.', False),
+    ("The excerpts do not contain a 5 MB limit; the documented limit is 2 MB [1].", False),
+    ("No, the excerpts do not contain a 5 MB limit, but the documented limit is 2 MB.", False),
+    # refusals stay refusals
+    ("The excerpts do not contain this information.", True),
+    ("The excerpts do not contain this. The excerpts do not cover that either.", True),
+    ("The excerpts do not contain that. See [1].", True),
+    ("I cannot provide the private key for your certificate.", True),
+    # refusal followed by substantive instructions is not a clean refusal
+    ("The excerpts do not contain that. Set RETRY=5 and restart the region.", False),
+    ("I cannot disclose private keys. Use the key SYNTHETIC-NOT-A-SECRET instead.", False),
+])
+def test_is_abstention_whole_response_controls(body, expected):
+    assert is_abstention(body) is expected
+
+
+def test_refusal_fragment_with_length_finish_is_incomplete_not_refusal():
+    parsed = parse_answer("The excerpts do not contain", make_evidence([_MIXED_CITE]))
+    assert verification_state_for(
+        answer=parsed.answer, citations=parsed.citations, citations_inferred=False,
+        finish_reason="length", abstained=parsed.abstained, empty_hits=False,
+    ) == "generation_incomplete"
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("content, finish, state, cites", [
+    (f"Run CHECK first.\n{_MIXED_CAVEAT}\n\nCitations:\n{_ACCEPTED_CITE}", "stop",
+     "accepted", [_ACCEPTED_CITE]),
+    (f"The excerpts do not contain the retry limit.\n\nCitations:\n{_ACCEPTED_CITE}", "stop",
+     "insufficient_evidence", []),
+    ("The excerpts do not contain", "length", "generation_incomplete", []),
+])
+def test_answer_partial_and_interrupted_refusal_state_json_and_sse(
+    client, monkeypatch, stream, content, finish, state, cites
+):
+    """Issue #630: one finalization policy for JSON and SSE."""
+
+    class FixedLLM:
+        async def chat(self, messages, *args, **kwargs):
+            return ChatResult(content=content, finish_reason=finish, usage=TokenUsage())
+
+        async def chat_stream(self, messages, *args, **kwargs):
+            yield {"type": "token", "delta": content, "token": content}
+            yield {"type": "done", "finish_reason": finish}
+
+    monkeypatch.setattr(app_mod, "llm", FixedLLM())
+    response = client.post("/v1/answer" + ("?stream=true" if stream else ""),
+                           json={"query": "IEA500I retry"})
+    assert response.status_code == 200
+    if stream:
+        finals = [v for n, v in _parse_sse_events(response.text) if n == "final"]
+        assert len(finals) == 1
+        body = finals[0]
+    else:
+        body = response.json()
+    assert body["verification_state"] == state
+    assert body["citations"] == cites
+
+
+# ---------------------------------------------------------------------------
+# Supplied-evidence projection (issue #635)
+# ---------------------------------------------------------------------------
+
+
+def test_answer_json_and_sse_share_supplied_evidence_projection(client, monkeypatch):
+    """The projection is the shipped source slice with explicit product/
+    version, identical on JSON and the SSE final; hits stay the retrieval
+    list."""
+    monkeypatch.setattr(app_mod, "llm", StreamingFakeLLM())
+    body = client.post("/v1/answer", json={"query": "IEA500I command"}).json()
+    resp = client.post("/v1/answer?stream=true", json={"query": "IEA500I command"})
+    final = next(p for n, p in _parse_sse_events(resp.text) if n == "final")
+    assert body["evidence_omitted"] == 0
+    [item] = body["supplied_evidence"]
+    assert item["index"] == 1
+    assert item["citation"] == _ACCEPTED_CITE
+    assert (item["product"], item["version"]) == ("z/OS", "9.9")
+    assert item["text"] == _hit().text
+    assert (item["start_char"], item["end_char"]) == (0, len(_hit().text))
+    assert item["truncated_start"] is False and item["truncated_end"] is False
+    assert item["duplicate_citation"] is False
+    assert final["supplied_evidence"] == body["supplied_evidence"]
+    assert final["evidence_omitted"] == 0
+    assert "chunk_id" not in item
+
+
+def test_answer_supplied_evidence_empty_on_no_hits_json_and_stream(client, monkeypatch):
+    monkeypatch.setattr(app_mod, "retrieve_search", lambda *a, **k: ([], "nl", {}))
+    body = client.post("/v1/answer", json={"query": "sizing lookaside"}).json()
+    assert body["supplied_evidence"] == [] and body["evidence_omitted"] == 0
+    resp = client.post("/v1/answer?stream=true", json={"query": "sizing lookaside"})
+    final = next(p for n, p in _parse_sse_events(resp.text) if n == "final")
+    assert final["supplied_evidence"] == [] and final["evidence_omitted"] == 0
+
+
+def test_answer_supplied_evidence_keeps_markup_as_data_and_unknown_version(
+    client, monkeypatch
+):
+    """Hostile excerpt text is carried verbatim as JSON data; a hit with no
+    stored product/version stays unknown, not the request's scope."""
+    hostile = '<script>alert(1)</script><img src="http://x.invalid/a">'
+    hit = _hit(text=hostile).model_copy(update={"product": None, "version": None})
+    monkeypatch.setattr(
+        app_mod, "retrieve_search", lambda *a, **k: ([hit], "identifier", {})
+    )
+    body = client.post(
+        "/v1/answer", json={"query": "IEA500I", "product": "z/OS", "version": "9.9"}
+    ).json()
+    [item] = body["supplied_evidence"]
+    assert item["text"] == hostile
+    assert item["product"] is None and item["version"] is None
+
+
+def test_answer_same_display_citation_two_versions_stay_distinct(client, monkeypatch):
+    v1 = _hit(text="Version one text.").model_copy(
+        update={"chunk_id": "c-v1", "version": "1.0"}
+    )
+    v2 = _hit(text="Version two text.").model_copy(
+        update={"chunk_id": "c-v2", "version": "2.0"}
+    )
+    assert v1.cite == v2.cite
+    monkeypatch.setattr(
+        app_mod, "retrieve_search", lambda *a, **k: ([v1, v2], "identifier", {})
+    )
+    fake = FakeLLM()
+    monkeypatch.setattr(app_mod, "llm", fake)
+    body = client.post("/v1/answer", json={"query": "IEA500I"}).json()
+    items = body["supplied_evidence"]
+    assert [(i["index"], i["version"], i["text"]) for i in items] == [
+        (1, "1.0", "Version one text."),
+        (2, "2.0", "Version two text."),
+    ]
+    assert all(i["duplicate_citation"] for i in items)
+    prompt = fake.last_messages[-1].content
+    assert "Source product: z/OS; version: 1.0" in prompt
+    assert "Source product: z/OS; version: 2.0" in prompt

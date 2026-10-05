@@ -184,12 +184,11 @@ def judge(
     cite must come from an explicit citation line to count as grounded.
 
     Refusal on an answer row is judged with the agent's own abstention
-    predicate (`is_abstention`, #135/#305): a marker-bearing answer whose
-    non-refusal remainder clears the shape floor is a grounded partial
-    answer, not a refusal. Marker presence alone (the old verdict) failed
+    predicate (`is_abstention`, #135/#305/#630): a marker-bearing answer with
+    any non-refusal clause is a grounded partial answer, not a refusal. Marker presence alone (the old verdict) failed
     substantive answers that scope what the excerpts do not cover — the
     #305 gap report measured that artifact as a refusal share. True refusals
-    (nothing left after the marker sentences) still FAIL. On a trap row the
+    (every clause refuses) still FAIL. On a trap row the
     marker test stays (any decline phrase counts as declining; a grounded
     decline warns), because there a long answer means the trap was answered.
 

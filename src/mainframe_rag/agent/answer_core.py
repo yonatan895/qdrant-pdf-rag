@@ -28,7 +28,9 @@ from mainframe_rag.agent.answer import (
     REASON_MISSING_FINISH,
     ParsedAnswer,
     PreparedPrompt,
+    PromptBudgetExceeded,
     PromptEvidence,
+    SuppliedExcerpt,
     TruncatedStreamError,
     VerificationState,
     assert_reasoning_model,
@@ -191,6 +193,9 @@ class AnswerCoreOutput:
     # for a fitting remote tokenizer measurement; estimator and
     # char-packing paths report False (estimated, never confirmed).
     budget_verified: bool = False
+    # Bounded supplied-evidence projection (issue #635), derived from the
+    # same finalized prepared prompt as `evidence`; empty on no-hits paths.
+    supplied: tuple[SuppliedExcerpt, ...] = ()
 
 
 class CoreToken(TypedDict):
@@ -288,6 +293,30 @@ async def _build_prepared_prompt(
         )
 
 
+class EvidenceBudgetExceeded(PromptBudgetExceeded):
+    """Hits were retrieved but final prompt packing supplied no usable
+    excerpt (issue #634). A PromptBudgetExceeded subtype, so every transport
+    keeps its one fixed budget mapping (422 / SSE error / console banner);
+    the distinct type only separates the log/span cause from irreducible
+    fixed-content overflow. Carries no prompt or manual text."""
+
+    def __init__(self, retrieved: int) -> None:
+        Exception.__init__(
+            self, f"no retrieved excerpt fit the prompt budget ({retrieved} retrieved)"
+        )
+        self.used = 0
+        self.limit = 0
+        self.retrieved = retrieved
+
+
+def _require_supplied_evidence(prepared: PreparedPrompt, retrieved: int) -> None:
+    """The one post-packing guard for both executors: the model is never
+    asked to answer manual questions from zero supplied excerpts. An entry
+    counts only when it retains non-empty source text."""
+    if not any(entry.included_chars > 0 for entry in prepared.evidence.entries):
+        raise EvidenceBudgetExceeded(retrieved)
+
+
 def _finalize_answer(
     content: str,
     prepared: PreparedPrompt,
@@ -335,6 +364,7 @@ def _finalize_answer(
         parsed=parsed,
         evidence=prepared.evidence,
         budget_verified=prepared.budget_verified,
+        supplied=prepared.supplied,
     )
 
 
@@ -399,6 +429,7 @@ async def execute_answer_core(
     # 3. Prompt building (shared with the streaming executor)
     effort = _resolve_reasoning_effort(input_data, settings, complexity)
     prepared = await _build_prepared_prompt(input_data, deps, hits, complexity, effort, root_ctx)
+    _require_supplied_evidence(prepared, len(hits))
 
     # 4. LLM inference
     temperature = (
@@ -476,6 +507,7 @@ async def execute_answer_core_stream(
     # 3. Prompt building (shared with the buffered executor)
     effort = _resolve_reasoning_effort(input_data, settings, complexity)
     prepared = await _build_prepared_prompt(input_data, deps, hits, complexity, effort, root_ctx)
+    _require_supplied_evidence(prepared, len(hits))
 
     # 4. LLM streaming
     temperature = (

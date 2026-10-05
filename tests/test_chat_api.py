@@ -779,3 +779,22 @@ async def test_direct_chat_builders_share_active_user(tail_role):
     assert "LATER_TURN" not in prompt[-1].content
     assert "UNTRUSTED_SYSTEM" not in prompt[0].content
     assert [m.model_dump() for m in messages] == before
+
+
+def test_chat_json_and_stream_carry_supplied_evidence(chat_client):
+    """The chat surfaces reuse the answer projection (issue #635)."""
+    body = chat_client.post(
+        "/v1/chat/completions",
+        json={"messages": [{"role": "user", "content": "Show JCL"}]},
+    ).json()
+    [item] = body["supplied_evidence"]
+    assert item["index"] == 1 and item["text"]
+    assert body["evidence_omitted"] == 0
+    resp = chat_client.post(
+        "/v1/chat/completions",
+        json={"messages": [{"role": "user", "content": "Show JCL"}], "stream": True},
+    )
+    frames = [ln for ln in resp.text.splitlines() if ln.startswith("data:")]
+    terminal = json.loads(frames[-2][len("data: "):])["choices"][0]
+    assert terminal["supplied_evidence"] == body["supplied_evidence"]
+    assert terminal["evidence_omitted"] == 0

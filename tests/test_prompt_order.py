@@ -54,8 +54,9 @@ def test_build_messages_funnels_order_through_policy():
 
 
 def test_default_assembly_is_exact():
-    """Byte pin of the historical user message: question, headed excerpts
-    in retrieval order, tail last."""
+    """Byte pin of the user message: question, headed excerpts (label line
+    plus source product/version line, issue #635) in retrieval order, tail
+    last."""
     hit1 = _hit("SA22-0000-00 Ref, Chapter 2 > IEA500I, p. 1-6", "First body.")
     hit2 = _hit("SA22-7777-01 Ref, Chapter 1 > IEB700I, p. 2-3", "Second body.")
     messages = build_messages("Do the thing?", [hit1, hit2], complexity="simple").messages
@@ -67,8 +68,8 @@ def test_default_assembly_is_exact():
     )
     assert user == (
         "Question: Do the thing?"
-        "\n\nRetrieved manual excerpts:\n[1] SA22-0000-00 Ref, Chapter 2 > IEA500I, p. 1-6\nFirst body."
-        "\n\n[2] SA22-7777-01 Ref, Chapter 1 > IEB700I, p. 2-3\nSecond body."
+        "\n\nRetrieved manual excerpts:\n[1] SA22-0000-00 Ref, Chapter 2 > IEA500I, p. 1-6\nSource product: z/OS; version: 9.9\nFirst body."
+        "\n\n[2] SA22-7777-01 Ref, Chapter 1 > IEB700I, p. 2-3\nSource product: z/OS; version: 9.9\nSecond body."
         f"\n\n{tail}"
     )
     assert messages[0].role == "system" and messages[0].content
@@ -334,3 +335,127 @@ def test_build_messages_stable_cache_end_to_end():
     question_at = user.index("Question: Do the thing?")
     tail_at = user.index("Please answer based strictly")
     assert instructions_at < context_at < excerpt_at < question_at < tail_at
+
+
+class _LengthTokenizer:
+    remote_confirmed = True
+
+    def count_messages(self, messages):
+        return sum(len(m.content) for m in messages)
+
+
+def _chat_history(older_turns):
+    from mainframe_rag.ports import ChatMessage
+
+    stale = []
+    for n in range(older_turns):
+        stale.append(ChatMessage(role="user", content=f"Older question {n}?"))
+        stale.append(ChatMessage(role="assistant", content=(f"Stale advice {n}. " * 40).strip()))
+    recent = [
+        ChatMessage(role="user", content="What does IEA500I mean? XYZ123I"),
+        ChatMessage(role="assistant", content="XYZ123I is a synthetic message."),
+    ]
+    active = [ChatMessage(role="user", content="What should I check next?")]
+    return stale, recent, active
+
+
+def _tight_chat_settings(limit):
+    from mainframe_rag.config import Settings
+
+    # simple complexity: window = model_len - reserved - margin (no thinking reserve)
+    return Settings(_env_file=None, llm_max_model_len=1536 + 128 + limit)
+
+
+@pytest.mark.parametrize("order", ["retrieval", "stable_cache"])
+@pytest.mark.parametrize("older_turns", [0, 2, 6])
+def test_chat_budget_keeps_passage_and_antecedent_over_older_history(order, older_turns):
+    """Issue #633: stale older turns never displace the current passage."""
+    from mainframe_rag.agent.answer import build_chat_messages
+    from mainframe_rag.config import Settings
+
+    hits = [_hit("SA22-0000-00 Synthetic, p. 1", "Check the synthetic passage PASSAGE-OK. " * 3)]
+    _, recent, active = _chat_history(0)
+    wide = Settings(_env_file=None, llm_max_model_len=131072)
+    minimal = build_chat_messages(
+        [*recent, *active], hits, tokenizer=_LengthTokenizer(), settings=wide, order=order,
+    )
+    limit = sum(len(m.content) for m in minimal.messages) + 5
+    stale, recent, active = _chat_history(older_turns)
+    supplied = [*stale, *recent, *active]
+    snapshot = [m.model_dump() for m in supplied]
+
+    prepared = build_chat_messages(
+        supplied, hits, tokenizer=_LengthTokenizer(),
+        settings=_tight_chat_settings(limit), order=order,
+    )
+
+    assert [m.model_dump() for m in supplied] == snapshot  # caller list untouched
+    assert prepared.budget_verified
+    joined = "\n".join(m.content for m in prepared.messages)
+    assert "PASSAGE-OK" in prepared.messages[-1].content
+    assert len(prepared.evidence.entries) == len(minimal.evidence.entries) == 1
+    assert "XYZ123I is a synthetic message." in joined  # antecedent retained
+    assert "What does IEA500I mean?" in joined
+    assert "Stale advice" not in joined  # older turns are the expendable tier
+    assert [m.role for m in prepared.messages] == ["system", "user", "assistant", "user"]
+    assert "Stale advice" not in "".join(e.cite for e in prepared.evidence.entries)
+
+
+def test_chat_budget_keeps_older_turns_whole_and_newest_first_when_slack_exists():
+    from mainframe_rag.agent.answer import build_chat_messages
+
+    hits = [_hit("SA22-0000-00 Synthetic, p. 1", "Passage PASSAGE-OK.")]
+    stale, recent, active = _chat_history(3)
+    supplied = [*stale, *recent, *active]
+    wide = _tight_chat_settings(100000)
+    full = build_chat_messages(supplied, hits, tokenizer=_LengthTokenizer(), settings=wide)
+    assert len(full.messages) == 1 + 6 + 2 + 1
+    total = sum(len(m.content) for m in full.messages)
+    # Room for exactly one older turn: the newest one survives, whole.
+    limit = total - sum(len(m.content) for m in stale[:4]) + 2
+    prepared = build_chat_messages(
+        supplied, hits, tokenizer=_LengthTokenizer(), settings=_tight_chat_settings(limit),
+    )
+    contents = [m.content for m in prepared.messages]
+    assert stale[4].content in contents and stale[5].content in contents
+    assert not any(m.content in contents for m in stale[:4])
+    assert "PASSAGE-OK" in prepared.messages[-1].content
+
+
+@pytest.mark.parametrize("order", ["retrieval", "stable_cache"])
+def test_chat_budget_irreducible_antecedent_refuses_rather_than_dropping_it(order):
+    from mainframe_rag.agent.answer import PromptBudgetExceeded, build_chat_messages
+
+    hits = [_hit("SA22-0000-00 Synthetic, p. 1", "Passage PASSAGE-OK.")]
+    stale, recent, active = _chat_history(2)
+    with pytest.raises(PromptBudgetExceeded) as err:
+        build_chat_messages(
+            [*stale, *recent, *active], hits, tokenizer=_LengthTokenizer(),
+            settings=_tight_chat_settings(300), order=order,
+        )
+    assert err.value.used > err.value.limit
+    assert "XYZ123I" not in str(err.value)
+
+
+def test_chat_budget_standalone_and_scope_change_follow_same_policy():
+    from mainframe_rag.agent.answer import build_chat_messages
+    from mainframe_rag.ports import ChatMessage
+
+    hits = [_hit("SA22-0000-00 Synthetic, p. 1", "Passage PASSAGE-OK.")]
+    stale, _, _ = _chat_history(3)
+    standalone = [*stale, ChatMessage(role="user", content="Explain IEA999I now.")]
+    kwargs = {"product": "z/OS", "version": "9.9", "tokenizer": _LengthTokenizer()}
+    minimal = build_chat_messages(
+        [*stale[-2:], standalone[-1]], hits, settings=_tight_chat_settings(100000), **kwargs,
+    )
+    limit = sum(len(m.content) for m in minimal.messages) + 5
+    prepared = build_chat_messages(
+        standalone, hits, settings=_tight_chat_settings(limit), **kwargs,
+    )
+    user = prepared.messages[-1].content
+    assert "product: z/OS, version: 9.9" in user and "Explain IEA999I now." in user
+    assert "PASSAGE-OK" in user
+    assert len(prepared.evidence.entries) == 1
+    # The latest turn (stale[-2:]) is the antecedent; older turns are gone.
+    assert [m.content for m in prepared.messages[1:3]] == [m.content for m in stale[-2:]]
+    assert len(prepared.messages) == 4

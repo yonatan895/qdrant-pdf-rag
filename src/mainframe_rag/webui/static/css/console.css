@@ -497,6 +497,34 @@ input::placeholder, textarea::placeholder { color: var(--faint); opacity: 1; }
 .citations li::before { content: counter(cite); color: var(--faint); min-width: 1ch; }
 .citations li span { flex: 1; min-width: 0; color: var(--prose); overflow-wrap: anywhere; }
 
+/* ---- supplied excerpts (issue #635) ----------------------------------------- */
+
+.evidence {
+  margin-top: 0.6rem;
+  border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--panel);
+  padding: 0.6rem 0.9rem;
+  font-size: 0.8rem; color: var(--prose);
+}
+.evidence summary { cursor: pointer; color: var(--muted); font-weight: 600; }
+.evidence-note, .evidence-unavailable { color: var(--muted); font-size: 0.75rem; margin: 0.4rem 0; }
+.citations-note { margin-bottom: 0; }
+.evidence-item { margin: 0.5rem 0 0; border-top: 1px solid var(--line); padding-top: 0.4rem; }
+.evidence-head { font-weight: 600; font-family: var(--font-code); overflow-wrap: anywhere; }
+.evidence-meta, .evidence-loc, .evidence-range { margin: 0.2rem 0; overflow-wrap: anywhere; }
+.evidence-warn {
+  margin: 0.3rem 0; padding: 0.3rem 0.5rem;
+  color: var(--warn-fg); background: var(--warn-bg);
+  border: 1px solid var(--warn-line); border-radius: var(--radius-sm);
+}
+.evidence-text {
+  margin: 0.4rem 0 0; padding: 0.5rem 0.7rem;
+  font-family: var(--font-code); font-size: 0.78rem;
+  color: var(--code-text); background: var(--code-bg);
+  border: 1px solid var(--line); border-radius: var(--radius-sm);
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+
 /* ---- copy buttons ----------------------------------------------------------- */
 
 .copy-btn {
