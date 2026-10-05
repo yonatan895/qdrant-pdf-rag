@@ -41,7 +41,8 @@ as `chatcmpl-<request_id>`). The ops endpoints carry none: `/healthz`,
 - `POST /v1/answer` — `AnswerRequest{query, product?, version?,
   splunk_context?, stream (default false), temperature?}` → `AnswerResponse{request_id,
   answer, citations, citations_inferred, inferred_indices, script,
-  script_lang, verification_state, script_review_required}`.
+  script_lang, verification_state, script_review_required, supplied_evidence,
+  evidence_omitted}` (the last two: [supplied-evidence projection](#supplied-excerpts)).
   `temperature` (issue #596) is an optional per-request override of
   `Settings.llm_temperature` (0.0–2.0, no inf/NaN; out-of-range 422s before
   retrieval); omitted means the configured default. The chat routes accept
@@ -133,7 +134,8 @@ as `chatcmpl-<request_id>`). The ops endpoints carry none: `/healthz`,
   accepted and ignored (token limits are server-side). The response is
   `ChatCompletionsResponse{id: "chatcmpl-<request_id>", created, model,
   choices[], usage, citations, citations_inferred, inferred_indices, hits,
-  verification_state, script, script_lang, script_review_required}`;
+  verification_state, script, script_lang, script_review_required,
+  supplied_evidence, evidence_omitted}`;
   `choices[0].message.content` carries the answer plus a trailing markdown
   `**Citations:**` bullet list when cites exist. Empty hits return
   `finish_reason: "stop"`, zeroed usage, and empty citations/hits. Provenance
@@ -318,7 +320,8 @@ mislabeled as retrieval.
 then exactly one terminal `event: final` carrying the full answer, validated
 citations, the `citations_inferred` provenance flag, the `inferred_indices`
 list, the `verification_state` label, optional script plus its review flag,
-retrieval hits, query kind, `ttft_ms`, and token usage. A mid-stream failure
+retrieval hits, the `supplied_evidence` projection with `evidence_omitted`,
+query kind, `ttft_ms`, and token usage. A mid-stream failure
 emits `event: error` and ends **without** a `final` — clients must treat
 stream-end-without-final as a failed request. `/ui/chat/stream` consumes the
 same token→final contract with the identical `final` terminal event.
@@ -326,7 +329,8 @@ same token→final contract with the identical `final` terminal event.
 `/v1/chat` + `/v1/chat/completions` with `stream=true` instead stream OpenAI
 `chat.completion.chunk` frames (`data: {...}` content deltas), then one
 terminal chunk with `finish_reason` carrying `citations`,
-`citations_inferred`, `inferred_indices`, and `hits` (chat chunks carry no
+`citations_inferred`, `inferred_indices`, `hits`, `supplied_evidence` and
+`evidence_omitted` (chat chunks carry no
 `usage`), then `data: [DONE]`. A mid-stream failure emits one
 `data: {"error": {"code": "upstream_error", "message": "stream failed"}, "verification_state": "generation_incomplete"}`
 frame (the strict `error` object plus the additive sibling state, issue #365)
@@ -404,6 +408,14 @@ select `complex`. Default is `simple`.
   prose up to the narrative cap (1100 for complex queries); cuts marked
   with a truncation suffix; packing stops at the context budget with at
   most one partial chunk.
+- Source metadata (#635): each excerpt header is two lines, the exact
+  citation label line `[i] <citation>` followed by
+  `Source product: <product|unknown>; version: <version|unknown>`, taken from
+  the stored payload only (whitespace collapsed, 120 chars). A missing value is
+  `unknown`; the caller's `product`/`version` scope is never substituted. The
+  header is part of every estimator, the remainder cut and the exact final
+  recount, so the budget includes it. The `[i]` label is the per-entry handle;
+  the citation text is display only and may repeat across versions.
 - Range selection (#632): when the query names a message id, member or
   system code (shared `parse_query` normalization), a chunk over its cap ships
   ONE contiguous source range chosen from stored/redetected unit spans. A unit
@@ -881,6 +893,38 @@ implements the build-pinned read without using the gate.
 These pin binding/refusal/cache behavior, not immutability or absence of concurrent
 mutation. Active-reader repair and warm-cache mutation remain #391 acceptance
 counterexamples; [publication](ingest.md#publication-contract) owns writer ordering.
+
+<a id="supplied-excerpts"></a>
+## Supplied-evidence projection (issue #635)
+
+One bounded, request-local projection derived from the finalized prepared
+prompt (`PreparedPrompt.supplied`, from the same packed list as the manifest
+after every trim round), reused by JSON, SSE `final`, chat JSON/stream and
+`/ui/chat[/stream]`. Additive fields: `supplied_evidence` (list, prompt order)
+and `evidence_omitted` (count of retrieved excerpts that did not survive
+packing; they are never listed). Empty/0 when nothing was retrieved. History
+and retrieved-but-omitted chunks never appear. Per entry:
+`index` (the prompt `[n]` handle), `citation` (display text),
+`duplicate_citation` (another supplied entry has the same display text; this
+slice does not resolve which one a model citation meant, see #631),
+`product`/`version` (stored values; null = unknown), `doc_id`, `title`,
+`heading`, `page_label`, `pdf_page_start`/`pdf_page_end` (one-based, null when
+not stored), `start_char`/`end_char`/`source_chars` (offsets into the stripped
+chunk text, from #632), `truncated_start`/`truncated_end`, `text_clipped`, and
+`text`: exactly `source[start_char:end_char]`, i.e. the source slice shipped
+(the leading/trailing cut markers are not part of it). The location is the
+recorded chunk span, not finer attribution. `chunk_id` is not exposed.
+
+Bounds: `text` is clipped at 8000 chars per entry and 48000 chars in total
+(`text_clipped: true`; the text is then a prefix of the shipped slice); the
+rest is bounded by the prompt window. Raw excerpt text is response-only: never
+logged, in metrics or spans. The console shows it in an expandable view for
+the current response only, held in memory (never in localStorage, history or
+the markdown export, gone on reload); earlier turns show an explicit
+"not available" note and are never rebuilt by a new search. Opening the view
+makes no request. Excerpt text enters the DOM as text only. Citation wording:
+a citation is *source-matched* (it names a supplied excerpt); that is not a
+semantic-support check (see the table below).
 
 <a id="answer-contract"></a>
 ## Supplied evidence and answer states

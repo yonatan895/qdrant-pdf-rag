@@ -1307,3 +1307,81 @@ def test_console_turn_text_never_reaches_server_logs(ui_client, caplog):
     assert resp.status_code == 200 and "Reissue" in resp.text
     assert marker not in caplog.text
     assert "Reissue" not in caplog.text and "IEA500I BEFORE" not in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Supplied-excerpt view (issue #635)
+# ---------------------------------------------------------------------------
+
+
+def _hostile_hit():
+    return _hit().model_copy(
+        update={
+            "text": '<script>alert(1)</script><img src="http://x.invalid/a">',
+            "version": None,
+        }
+    )
+
+
+def test_ui_stream_final_carries_supplied_evidence_projection(ui_client):
+    resp = ui_client.post(
+        "/ui/chat/stream", json={"messages": [{"role": "user", "content": "IEA500I"}]}
+    )
+    final = next(p for n, p in _parse_sse_events(resp.text) if n == "final")
+    [item] = final["supplied_evidence"]
+    assert item["index"] == 1 and item["text"] == _hit().text
+    assert item["end_char"] == len(_hit().text)
+    assert final["evidence_omitted"] == 0
+    assert "chunk_id" not in item
+
+
+def test_ui_fragment_renders_supplied_excerpt_as_data(ui_client, monkeypatch):
+    """The server fragment shows the current response's excerpts with
+    product/version/location; hostile excerpt markup is escaped, and an
+    unknown version is not replaced by the request's."""
+    monkeypatch.setattr(
+        app_mod,
+        "retrieve_search",
+        lambda *a, **k: ([_hostile_hit()], "identifier", {}),
+    )
+    resp = ui_client.post(
+        "/ui/chat",
+        data={"message": "IEA500I", "messages": ""},
+        headers={"HX-Request": "true"},
+    )
+    body = resp.text
+    assert "<script>alert(1)</script>" not in body
+    assert '<img src="http://x.invalid/a">' not in body
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in body
+    assert 'class="evidence" data-evidence="current"' in body
+    assert "Source product: z/OS · version: unknown" in body
+    assert "Recorded location: Chapter 2 &gt; IEA500I" in body
+    assert "whole chunk supplied" in body
+    assert "Source-matched, not semantically checked" in body
+
+
+def test_ui_history_payload_never_carries_excerpt_text(ui_client):
+    """Excerpts are current-response-only: the history the full page hands
+    back to the browser is role/content only."""
+    resp = ui_client.post("/ui/chat", data={"message": "IEA500I", "messages": ""})
+    assert _hit().text in resp.text  # shown in the view...
+    marker = 'id="history-json" value="'
+    start = resp.text.index(marker) + len(marker)
+    history = resp.text[start : resp.text.index('"', start)]
+    assert _hit().text not in history  # ...but not in the carried history
+
+
+def test_console_js_keeps_excerpts_out_of_persistence():
+    """Static contract for the in-memory-only view: the live-evidence holder
+    is never written to the store, the export, or history, and excerpt text
+    only enters the DOM through textContent."""
+    js = (
+        Path(app_mod.__file__).resolve().parents[1] / "webui" / "static" / "js" / "console.js"
+    ).read_text()
+    assert ".innerHTML" not in js and "insertAdjacentHTML" not in js
+    assert "supplied_evidence" in js
+    for forbidden in ("setItem(STORAGE_KEY, JSON.stringify(liveEvidence", "turn.supplied_evidence"):
+        assert forbidden not in js
+    start = js.index("function saveStore")
+    assert "liveEvidence" not in js[start : js.index("function newSessionId")]
+    assert "liveEvidence" not in js[js.index("function markdownReport") : js.index("function el(")]

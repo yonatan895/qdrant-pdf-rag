@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
 from mainframe_rag.ports import TokenUsage
 
 if TYPE_CHECKING:
+    from mainframe_rag.agent.answer import SuppliedExcerpt
     from mainframe_rag.retrieve.query import SearchHit
 
 # Single error shape for every mid-stream failure (was two identical
@@ -73,6 +75,8 @@ def empty_final_payload(
         "script": None,
         "script_lang": None,
         "script_review_required": script_review_required,
+        "supplied_evidence": [],
+        "evidence_omitted": 0,
         "query_kind": query_kind,
         "hits": [],
         "finish_reason": "stop",
@@ -101,6 +105,8 @@ def final_payload(
     script_lang: str | None = None,
     verification_state: str = "unverified_draft",
     script_review_required: bool = False,
+    supplied_evidence: Sequence[SuppliedExcerpt] = (),
+    evidence_omitted: int = 0,
 ) -> dict[str, Any]:
     """Terminal `final` for the streamed answer: verified citations/script
     identical in shape to the JSON mode and the empty-hits path.
@@ -124,6 +130,8 @@ def final_payload(
         "script": script,
         "script_lang": script_lang,
         "script_review_required": script_review_required,
+        "supplied_evidence": [e.model_dump() for e in supplied_evidence],
+        "evidence_omitted": evidence_omitted,
         "query_kind": query_kind,
         "hits": [h.model_dump() for h in hits],
         "finish_reason": finish_reason,

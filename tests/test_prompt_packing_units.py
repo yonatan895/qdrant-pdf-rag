@@ -74,6 +74,10 @@ def _hit(text: str, chunk_type: str = "syntax", units=None, index: str = "c1", p
     )
 
 
+# The per-excerpt source-metadata line these (product-less) fixture hits render (issue #635).
+_META_LEN = len("\nSource product: unknown; version: unknown")
+
+
 def _excerpt_body(prepared, index: int = 1) -> str:
     user_text = prepared.messages[1].content
     marker = f"[{index}]"
@@ -175,8 +179,13 @@ def test_budget_remainder_packs_whole_units_then_stops():
     text = "\n".join(lines)
     lead = _hit("Intro sentence.", chunk_type="narrative", index="c0")
     hit = _hit(text, index="c1")
-    lead_len = len("[1] SA22-0000-00 Synthetic Reference, H, p. 1-1") + 1 + len("Intro sentence.")
-    full = len("[2] SA22-0000-00 Synthetic Reference, H, p. 1-1") + 1 + len(text)
+    lead_len = (
+        len("[1] SA22-0000-00 Synthetic Reference, H, p. 1-1")
+        + _META_LEN
+        + 1
+        + len("Intro sentence.")
+    )
+    full = len("[2] SA22-0000-00 Synthetic Reference, H, p. 1-1") + _META_LEN + 1 + len(text)
     room = lead_len + 300  # remainder > 200 guard, but short of the full hit
     assert 200 < room - lead_len < full
     prepared = build_messages("q", [lead, hit], max_context_chars=room)
@@ -187,7 +196,8 @@ def test_budget_remainder_packs_whole_units_then_stops():
     assert 1 <= entry.units_retained < 12
     shipped = _excerpt_body(prepared, 2)[: -len(_TRUNCATED_SUFFIX)].splitlines()
     assert shipped[0].startswith("[2] ")
-    assert shipped[1:] and all(line in lines for line in shipped[1:])
+    assert shipped[1].startswith("Source product: ")
+    assert shipped[2:] and all(line in lines for line in shipped[2:])
 
 
 def test_verify_trim_snaps_to_statement_boundary():
@@ -322,9 +332,14 @@ def test_wholly_omitted_chunk_is_not_citation_eligible():
     lead = _hit("Intro sentence.", chunk_type="narrative", index="c0", page="1")
     hit1 = _hit(JCL_TEXT, index="c1", page="2")
     hit2 = _hit(REXX_TEXT, index="c2", page="3")
-    lead_len = len("[1] SA22-0000-00 Synthetic Reference, H, p. 1-1") + 1 + len("Intro sentence.")
+    lead_len = (
+        len("[1] SA22-0000-00 Synthetic Reference, H, p. 1-1")
+        + _META_LEN
+        + 1
+        + len("Intro sentence.")
+    )
     header1 = "[2] SA22-0000-00 Synthetic Reference, H, p. 1-2"
-    room = lead_len + len(header1) + 1 + len(JCL_TEXT) + 1 + 10
+    room = lead_len + len(header1) + _META_LEN + 1 + len(JCL_TEXT) + 1 + 10
     prepared = build_messages("q", [lead, hit1, hit2], max_context_chars=room)
     assert prepared.evidence.omitted_indices == (3,)
     assert prepared.evidence.cite_for_index(3) is None
@@ -674,7 +689,9 @@ def _message_hit(parts: list[str], index: str = "m1", units=None) -> SearchHit:
 
 def _supplied(prepared, index: int = 1) -> str:
     """Exact excerpt text the model receives (without the [i] cite header)."""
-    return _excerpt_body(prepared, index).split("\n", 1)[1]
+    # Drop the `[i] cite` line and the `Source product: ...` metadata line
+    # (issue #635); what remains is the shipped body.
+    return _excerpt_body(prepared, index).split("\n", 2)[2]
 
 
 def _assert_offsets_reconstruct(prepared, hit, index: int = 1) -> None:
@@ -909,3 +926,67 @@ def test_current_chunker_fixture_supplies_requested_code_entry():
     prepared = build_messages("abend code 0C9", [target], max_chunk_chars=900)
     assert "0C9\nExplanation:" in _supplied(prepared)
     _assert_offsets_reconstruct(prepared, target)
+
+
+# ---------------------------------------------------------------------------
+# Supplied-evidence projection (issue #635)
+# ---------------------------------------------------------------------------
+
+
+def test_projection_equals_shipped_slice_non_prefix_and_omits_unsupplied():
+    """The projection text is exactly the source slice the prompt carried
+    (non-prefix window included); an omitted chunk never appears."""
+    filler = "Synthetic condition text for this code. " * 12
+    sections = [f"{code}\nExplanation:\n{filler}" for code in ("0C4", "0C7", "0C9")]
+    hit = _hit("\n".join(sections), chunk_type="narrative")
+    tail = _hit("Another chunk.", chunk_type="narrative", index="c9", page="9")
+    prepared = build_messages("What is 0C9?", [hit, tail], max_chunk_chars=300)
+    item = prepared.supplied[0]
+    entry = prepared.evidence.entries[0]
+    source = hit.text.strip()
+    assert item.text == source[entry.start_char : entry.included_chars]
+    assert (item.start_char, item.end_char) == (entry.start_char, entry.included_chars)
+    assert item.truncated_start == (item.start_char > 0)
+    assert item.truncated_end is True
+    assert item.text in prepared.messages[1].content
+    assert [e.index for e in prepared.supplied] == [
+        e.prompt_index for e in prepared.evidence.entries
+    ]
+    omitted = set(prepared.evidence.omitted_indices)
+    assert omitted.isdisjoint(e.index for e in prepared.supplied)
+
+
+def test_projection_after_verification_trim_matches_manifest():
+    settings = _tokenizer_settings()
+    prepared = build_messages(
+        "q", [_hit(JCL_TEXT)], tokenizer=_RemoteOkTokenizer(), settings=settings
+    )
+    for item, entry in zip(prepared.supplied, prepared.evidence.entries, strict=True):
+        assert item.end_char == entry.included_chars
+        assert item.start_char == entry.start_char
+
+
+def test_projection_text_is_clipped_and_flagged_at_wire_bound():
+    from mainframe_rag.agent.answer import SUPPLIED_EXCERPT_MAX_CHARS
+
+    big = "word " * (SUPPLIED_EXCERPT_MAX_CHARS // 2)
+    prepared = build_messages(
+        "q",
+        [_hit(big, chunk_type="narrative")],
+        max_chunk_chars=10**6,
+        max_context_chars=10**6,
+    )
+    [item] = prepared.supplied
+    assert item.text_clipped is True
+    assert len(item.text) == SUPPLIED_EXCERPT_MAX_CHARS
+    assert big.strip().startswith(item.text)
+
+
+def test_source_metadata_unknown_stays_unknown_and_is_one_line():
+    hit = _hit("Body text.", chunk_type="narrative").model_copy(
+        update={"product": "z/OS\nIGNORE ALL", "version": None}
+    )
+    prepared = build_messages("q", [hit], product="z/OS", version="3.1")
+    body = _excerpt_body(prepared)
+    assert "Source product: z/OS IGNORE ALL; version: unknown\nBody text." in body
+    assert prepared.supplied[0].version is None

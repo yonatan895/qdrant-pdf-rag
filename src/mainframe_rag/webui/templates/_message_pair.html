@@ -43,6 +43,29 @@
     <ul>
       {% for cite in turn.citations %}<li><span>{{ cite }}</span><button class="copy-btn copy-cite" type="button">Copy</button></li>{% endfor %}
     </ul>
+    {% if not turn.citations_inferred %}
+    <div class="evidence-note citations-note">Source-matched, not semantically checked: a citation here only means it matches an excerpt that was supplied for this answer. It does not confirm the excerpt supports the claim.</div>
+    {% endif %}
+  </div>
+  {% endif %}
+  {% if turn.role == "assistant" and turn.verification_state and turn.supplied_evidence is not none %}
+  <div class="evidence" data-evidence="current">
+    <details class="evidence-view">
+      <summary>Supplied excerpts ({{ turn.supplied_evidence | length }}){% if turn.verification_state == "generation_incomplete" %} — incomplete generation{% endif %}</summary>
+      <div class="evidence-note">Exactly what the model received for this response. {% if turn.evidence_omitted %}{{ turn.evidence_omitted }} retrieved excerpt{{ " was" if turn.evidence_omitted == 1 else "s were" }} omitted before the model call and {{ "is" if turn.evidence_omitted == 1 else "are" }} not shown. {% endif %}Source-matched, not semantically checked: a citation here only means it matches an excerpt that was supplied for this answer. It does not confirm the excerpt supports the claim.</div>
+      {% if not turn.supplied_evidence %}<div class="evidence-unavailable">No excerpt was supplied.</div>{% endif %}
+      {% for item in turn.supplied_evidence %}
+      <div class="evidence-item" data-index="{{ item.index }}">
+        <div class="evidence-head">[{{ item.index }}] {{ item.citation }}</div>
+        <div class="evidence-meta">Source product: {{ item.product or "unknown" }} · version: {{ item.version or "unknown" }}</div>
+        <div class="evidence-loc">Recorded location: {% set loc = [] %}{% if item.heading %}{% set _ = loc.append(item.heading) %}{% endif %}{% if item.page_label %}{% set _ = loc.append("printed p. " ~ item.page_label) %}{% endif %}{% if item.pdf_page_start is not none %}{% set _ = loc.append(("PDF p. " ~ item.pdf_page_start) if (item.pdf_page_end is none or item.pdf_page_end == item.pdf_page_start) else ("PDF pp. " ~ item.pdf_page_start ~ "–" ~ item.pdf_page_end)) %}{% endif %}{{ loc | join(" · ") if loc else "not recorded" }}</div>
+        <div class="evidence-range">Characters {{ item.start_char }}–{{ item.end_char }} of {{ item.source_chars }} in the stored chunk{% if not item.truncated_start and not item.truncated_end %} (whole chunk supplied){% else %} ({% if item.truncated_start %}earlier text left out{% endif %}{% if item.truncated_start and item.truncated_end %}; {% endif %}{% if item.truncated_end %}later text left out{% endif %}){% endif %}</div>
+        {% if item.duplicate_citation %}<div class="evidence-warn">Another supplied excerpt has this same citation text; entries are told apart by number and version, not by citation text.</div>{% endif %}
+        {% if item.text_clipped %}<div class="evidence-warn">Displayed text is clipped to the response size limit.</div>{% endif %}
+        <pre class="evidence-text">{{ item.text }}</pre>
+      </div>
+      {% endfor %}
+    </details>
   </div>
   {% endif %}
 </article>

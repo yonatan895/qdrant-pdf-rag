@@ -54,8 +54,9 @@ def test_build_messages_funnels_order_through_policy():
 
 
 def test_default_assembly_is_exact():
-    """Byte pin of the historical user message: question, headed excerpts
-    in retrieval order, tail last."""
+    """Byte pin of the user message: question, headed excerpts (label line
+    plus source product/version line, issue #635) in retrieval order, tail
+    last."""
     hit1 = _hit("SA22-0000-00 Ref, Chapter 2 > IEA500I, p. 1-6", "First body.")
     hit2 = _hit("SA22-7777-01 Ref, Chapter 1 > IEB700I, p. 2-3", "Second body.")
     messages = build_messages("Do the thing?", [hit1, hit2], complexity="simple").messages
@@ -67,8 +68,8 @@ def test_default_assembly_is_exact():
     )
     assert user == (
         "Question: Do the thing?"
-        "\n\nRetrieved manual excerpts:\n[1] SA22-0000-00 Ref, Chapter 2 > IEA500I, p. 1-6\nFirst body."
-        "\n\n[2] SA22-7777-01 Ref, Chapter 1 > IEB700I, p. 2-3\nSecond body."
+        "\n\nRetrieved manual excerpts:\n[1] SA22-0000-00 Ref, Chapter 2 > IEA500I, p. 1-6\nSource product: z/OS; version: 9.9\nFirst body."
+        "\n\n[2] SA22-7777-01 Ref, Chapter 1 > IEB700I, p. 2-3\nSource product: z/OS; version: 9.9\nSecond body."
         f"\n\n{tail}"
     )
     assert messages[0].role == "system" and messages[0].content

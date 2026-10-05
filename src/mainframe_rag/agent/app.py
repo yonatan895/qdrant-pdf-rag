@@ -43,6 +43,7 @@ from mainframe_rag.agent.admission import (
 from mainframe_rag.agent.answer import (
     HttpxLLMClient,
     PromptBudgetExceeded,
+    SuppliedExcerpt,
     TruncatedStreamError,
     assert_reasoning_model,
     build_chat_messages,
@@ -1026,6 +1027,12 @@ class AnswerResponse(BaseModel):
     # through unvalidated, so a surfaced script is a human-review-required
     # draft, never certified-executable guidance.
     script_review_required: bool = False
+    # Request-local supplied-evidence projection (issue #635): the excerpts
+    # actually shipped in the final prompt, bounded; `evidence_omitted` counts
+    # retrieved excerpts that did not survive packing. Additive; never the
+    # retrieval list. See docs/agent.md.
+    supplied_evidence: list[SuppliedExcerpt] = Field(default_factory=list)
+    evidence_omitted: int = 0
 
 
 class ChatRequest(BaseModel):
@@ -1076,6 +1083,12 @@ class ChatCompletionsResponse(BaseModel):
     script: str | None = None
     script_lang: str | None = None
     script_review_required: bool = False
+    # Request-local supplied-evidence projection (issue #635): the excerpts
+    # actually shipped in the final prompt, bounded; `evidence_omitted` counts
+    # retrieved excerpts that did not survive packing. Additive; never the
+    # retrieval list. See docs/agent.md.
+    supplied_evidence: list[SuppliedExcerpt] = Field(default_factory=list)
+    evidence_omitted: int = 0
 
 
 ChatResponse = ChatCompletionsResponse
@@ -1659,6 +1672,8 @@ def _answer_metadata(output: AnswerCoreOutput, *, hits: list | None = None) -> d
         "script": output.script if has_hits else None,
         "script_lang": output.script_lang if has_hits else None,
         "script_review_required": output.script_review_required,
+        "supplied_evidence": [e.model_dump() for e in output.supplied] if has_hits else [],
+        "evidence_omitted": len(output.evidence.omitted_indices) if has_hits else 0,
     }
 
 
@@ -1860,6 +1875,8 @@ def _answer_final_frames(
         script_lang=output.script_lang,
         verification_state=output.verification_state,
         script_review_required=output.script_review_required,
+        supplied_evidence=output.supplied,
+        evidence_omitted=len(output.evidence.omitted_indices),
     )
     root_span.set_attributes(
         _answer_span_attrs(

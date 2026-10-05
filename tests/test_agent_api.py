@@ -1589,7 +1589,7 @@ def test_build_messages_context_budgeting():
     msgs1 = build_messages("test query", [hit1], max_chunk_chars=100, max_context_chars=1000).messages
     user_prompt1 = msgs1[1].content
     assert "... [truncated]" in user_prompt1
-    assert len(user_prompt1) < 500
+    assert len(user_prompt1) < 600  # + one source-metadata line (issue #635)
 
     # Total context max truncates subsequent hits
     msgs2 = build_messages("test query", [hit1, hit2], max_chunk_chars=400, max_context_chars=500).messages
@@ -4096,3 +4096,82 @@ def test_answer_partial_and_interrupted_refusal_state_json_and_sse(
         body = response.json()
     assert body["verification_state"] == state
     assert body["citations"] == cites
+
+
+# ---------------------------------------------------------------------------
+# Supplied-evidence projection (issue #635)
+# ---------------------------------------------------------------------------
+
+
+def test_answer_json_and_sse_share_supplied_evidence_projection(client, monkeypatch):
+    """The projection is the shipped source slice with explicit product/
+    version, identical on JSON and the SSE final; hits stay the retrieval
+    list."""
+    monkeypatch.setattr(app_mod, "llm", StreamingFakeLLM())
+    body = client.post("/v1/answer", json={"query": "IEA500I command"}).json()
+    resp = client.post("/v1/answer?stream=true", json={"query": "IEA500I command"})
+    final = next(p for n, p in _parse_sse_events(resp.text) if n == "final")
+    assert body["evidence_omitted"] == 0
+    [item] = body["supplied_evidence"]
+    assert item["index"] == 1
+    assert item["citation"] == _ACCEPTED_CITE
+    assert (item["product"], item["version"]) == ("z/OS", "9.9")
+    assert item["text"] == _hit().text
+    assert (item["start_char"], item["end_char"]) == (0, len(_hit().text))
+    assert item["truncated_start"] is False and item["truncated_end"] is False
+    assert item["duplicate_citation"] is False
+    assert final["supplied_evidence"] == body["supplied_evidence"]
+    assert final["evidence_omitted"] == 0
+    assert "chunk_id" not in item
+
+
+def test_answer_supplied_evidence_empty_on_no_hits_json_and_stream(client, monkeypatch):
+    monkeypatch.setattr(app_mod, "retrieve_search", lambda *a, **k: ([], "nl", {}))
+    body = client.post("/v1/answer", json={"query": "sizing lookaside"}).json()
+    assert body["supplied_evidence"] == [] and body["evidence_omitted"] == 0
+    resp = client.post("/v1/answer?stream=true", json={"query": "sizing lookaside"})
+    final = next(p for n, p in _parse_sse_events(resp.text) if n == "final")
+    assert final["supplied_evidence"] == [] and final["evidence_omitted"] == 0
+
+
+def test_answer_supplied_evidence_keeps_markup_as_data_and_unknown_version(
+    client, monkeypatch
+):
+    """Hostile excerpt text is carried verbatim as JSON data; a hit with no
+    stored product/version stays unknown, not the request's scope."""
+    hostile = '<script>alert(1)</script><img src="http://x.invalid/a">'
+    hit = _hit(text=hostile).model_copy(update={"product": None, "version": None})
+    monkeypatch.setattr(
+        app_mod, "retrieve_search", lambda *a, **k: ([hit], "identifier", {})
+    )
+    body = client.post(
+        "/v1/answer", json={"query": "IEA500I", "product": "z/OS", "version": "9.9"}
+    ).json()
+    [item] = body["supplied_evidence"]
+    assert item["text"] == hostile
+    assert item["product"] is None and item["version"] is None
+
+
+def test_answer_same_display_citation_two_versions_stay_distinct(client, monkeypatch):
+    v1 = _hit(text="Version one text.").model_copy(
+        update={"chunk_id": "c-v1", "version": "1.0"}
+    )
+    v2 = _hit(text="Version two text.").model_copy(
+        update={"chunk_id": "c-v2", "version": "2.0"}
+    )
+    assert v1.cite == v2.cite
+    monkeypatch.setattr(
+        app_mod, "retrieve_search", lambda *a, **k: ([v1, v2], "identifier", {})
+    )
+    fake = FakeLLM()
+    monkeypatch.setattr(app_mod, "llm", fake)
+    body = client.post("/v1/answer", json={"query": "IEA500I"}).json()
+    items = body["supplied_evidence"]
+    assert [(i["index"], i["version"], i["text"]) for i in items] == [
+        (1, "1.0", "Version one text."),
+        (2, "2.0", "Version two text."),
+    ]
+    assert all(i["duplicate_citation"] for i in items)
+    prompt = fake.last_messages[-1].content
+    assert "Source product: z/OS; version: 1.0" in prompt
+    assert "Source product: z/OS; version: 2.0" in prompt

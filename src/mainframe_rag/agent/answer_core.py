@@ -30,6 +30,7 @@ from mainframe_rag.agent.answer import (
     PreparedPrompt,
     PromptBudgetExceeded,
     PromptEvidence,
+    SuppliedExcerpt,
     TruncatedStreamError,
     VerificationState,
     assert_reasoning_model,
@@ -192,6 +193,9 @@ class AnswerCoreOutput:
     # for a fitting remote tokenizer measurement; estimator and
     # char-packing paths report False (estimated, never confirmed).
     budget_verified: bool = False
+    # Bounded supplied-evidence projection (issue #635), derived from the
+    # same finalized prepared prompt as `evidence`; empty on no-hits paths.
+    supplied: tuple[SuppliedExcerpt, ...] = ()
 
 
 class CoreToken(TypedDict):
@@ -360,6 +364,7 @@ def _finalize_answer(
         parsed=parsed,
         evidence=prepared.evidence,
         budget_verified=prepared.budget_verified,
+        supplied=prepared.supplied,
     )
 
 
