@@ -28,6 +28,7 @@ from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NamedTuple
 
 from opentelemetry import context as otel_context
 from opentelemetry import trace
@@ -151,8 +152,35 @@ _worker_context_cache: dict[str, str] | None = None
 _worker_context_cache_path: str | None = None
 
 
+class ParseTask(NamedTuple):
+    """One parse-worker job (picklable across the spawn pool; a tuple, so
+    positional unpacking in _parse_one is unchanged). `cache_path` is the
+    contextual sidecar, None when contextual ingest is off."""
+
+    path: str
+    vendor: str | None
+    product: str | None
+    version: str | None
+    corpus_root: str
+    sha256: str
+    embed: bool
+    cache_path: str | None
+
+
+@dataclass(frozen=True)
+class _Plan:
+    """Planning result: the gated walk, the queued tasks, the per-path
+    lineage map for refresh replacement, and how many files skipped as
+    already ingested (counted as ok)."""
+
+    walk_entries: list[tuple[str, str]]
+    tasks: list[ParseTask]
+    lineage_by_path: dict[str, str | None]
+    skipped_ok: int
+
+
 def _parse_one(
-    args: tuple[str, str | None, str | None, str | None, str, str, bool, str | None],
+    args: ParseTask,
 ) -> tuple[
     InventoryRecord, ParsedDoc, list[Chunk], list[tuple[list[float], SparseVector]], dict[str, str]
 ]:
@@ -649,6 +677,137 @@ def _log_record_drift(settings: Settings, record_drift: list[str]) -> None:
         )
 
 
+def _plan(
+    src: Path,
+    progress: Path,
+    settings: Settings,
+    *,
+    client,
+    prewalked: list[tuple[str, str]] | None,
+    limit: int | None,
+    dry_run: bool,
+    rules_v: str,
+    src_labels: str,
+    force_reingest: bool,
+    resume_checkpoints: bool,
+    vendor: str | None,
+    product: str | None,
+    version: str | None,
+    cache_path: Path | None,
+) -> _Plan:
+    """Planning (issue #583 S2): walk or take the pre-hashed walk, apply the
+    identity gate, and decide per file whether it skips or is queued.
+    Read-only against storage: it reads the inventory and, for bound skips,
+    the target's completion records and points; it never writes. Runs before
+    the representation manifest opens and before any worker spawns."""
+    if prewalked is None:
+        pdfs = walk_pdfs(src)
+        if limit:
+            pdfs = pdfs[:limit]
+        walk_entries = [(str(p), sha256_file(p)) for p in pdfs]
+    else:
+        if limit is not None:
+            raise RuntimeError("pre-hashed walk and --limit are mutually exclusive.")
+        walk_entries = prewalked
+    # Identity gate (issue #361): dedup byte-identical copies and
+    # abort on cross-revision doc_id collisions before any parse,
+    # delete, or upsert. Deterministic for identical inputs.
+    walk_entries = _gate_planned_entries(src, walk_entries)
+    inventory = load_inventory(progress)
+    # Lineage map (issue #361): the previous source revision per
+    # path, for precise refresh replacement in the upsert stage. A
+    # path whose record predates revision stamps carries None —
+    # the refresh plan then treats stored history by the
+    # sole-lineage/residue rules instead of guessing.
+    lineage_by_path = {path: rec.source_rev for path, rec in inventory.items()}
+
+    tasks: list[ParseTask] = []
+    skipped_ok = 0
+    for path_str, sha in walk_entries:
+        record = inventory.get(path_str)
+        if record and should_skip(
+            record,
+            sha,
+            allow_dry=dry_run,
+            rules_version=rules_v,
+            force_reingest=force_reingest and not resume_checkpoints,
+        ):
+            if dry_run:
+                skipped_ok += 1  # already ingested — an ok outcome
+                log.info(
+                    json.dumps(
+                        {"path": path_str, "sha256": record.sha256, "action": "skip"}
+                    )
+                )
+                continue
+            # Bound skip (issue #359 req 3): an inventory line alone
+            # never proves the target holds the generation. Require
+            # a valid completion + verified points; otherwise
+            # re-queue for parse+upsert+verify. Legacy records
+            # without a doc_id re-ingest explicitly.
+            assert client is not None
+            bound_doc = record.doc_id
+            bound_rev = record.source_rev
+            # Bound skip (issue #359 req 3, revision-scoped by #361):
+            # an inventory line alone never proves the target holds
+            # the generation. Require a valid completion for THIS
+            # revision plus verified points; otherwise re-queue for
+            # parse+upsert+verify. Legacy records without a doc_id
+            # or revision re-ingest explicitly (one lazy-migration
+            # cycle, never a wrong skip).
+            if (
+                bound_doc
+                and bound_rev
+                and is_doc_complete(
+                    client,
+                    settings,
+                    bound_doc,
+                    sha256=sha,
+                    rules_v=rules_v,
+                    source_labels=src_labels,
+                    source_rev=bound_rev,
+                    required_manifest_digest=(
+                        manifest_digest(settings, rules_v) if resume_checkpoints else None
+                    ),
+                )
+            ):
+                skipped_ok += 1
+                log.info(
+                    json.dumps(
+                        {"path": path_str, "sha256": record.sha256, "action": "skip"}
+                    )
+                )
+                continue
+            log.info(
+                json.dumps(
+                    {
+                        "path": path_str,
+                        "sha256": sha[:16],
+                        "action": "requeue",
+                        "reason": "no_valid_completion",
+                    }
+                )
+            )
+        # sha passes through: the parent hashed for the skip check, so the
+        # worker never re-reads the file for hashing. Embedding flag keeps
+        # the --dry-run contract (parse + chunk only, no embeddings).
+        # Cache path travels with the task because spawn workers share no
+        # memory with the parent (None when contextual ingest is off).
+        tasks.append(
+            ParseTask(
+                path_str,
+                vendor or detect_vendor(Path(path_str)),
+                product,
+                version,
+                str(src),
+                sha,
+                not dry_run,
+                str(cache_path) if cache_path is not None else None,
+            )
+        )
+    return _Plan(walk_entries, tasks, lineage_by_path, skipped_ok)
+
+
 def _run_impl(
     src: Path,
     progress: Path,
@@ -809,112 +968,26 @@ def _run_impl(
             bulk_active = True
     try:
         with start_as_current_span(tracer, "ingest.plan") as plan_span:
-            if prewalked is None:
-                pdfs = walk_pdfs(src)
-                if limit:
-                    pdfs = pdfs[:limit]
-                walk_entries = [(str(p), sha256_file(p)) for p in pdfs]
-            else:
-                if limit is not None:
-                    raise RuntimeError("pre-hashed walk and --limit are mutually exclusive.")
-                walk_entries = prewalked
-            # Identity gate (issue #361): dedup byte-identical copies and
-            # abort on cross-revision doc_id collisions before any parse,
-            # delete, or upsert. Deterministic for identical inputs.
-            walk_entries = _gate_planned_entries(src, walk_entries)
-            inventory = load_inventory(progress)
-            # Lineage map (issue #361): the previous source revision per
-            # path, for precise refresh replacement in the upsert stage. A
-            # path whose record predates revision stamps carries None —
-            # the refresh plan then treats stored history by the
-            # sole-lineage/residue rules instead of guessing.
-            lineage_by_path = {path: rec.source_rev for path, rec in inventory.items()}
-
-            tasks: list[
-                tuple[str, str | None, str | None, str | None, str, str, bool, str | None]
-            ] = []
-            for path_str, sha in walk_entries:
-                record = inventory.get(path_str)
-                if record and should_skip(
-                    record,
-                    sha,
-                    allow_dry=dry_run,
-                    rules_version=rules_v,
-                    force_reingest=force_reingest and not resume_checkpoints,
-                ):
-                    if dry_run:
-                        stats.files_ok += 1  # already ingested — an ok outcome
-                        log.info(
-                            json.dumps(
-                                {"path": path_str, "sha256": record.sha256, "action": "skip"}
-                            )
-                        )
-                        continue
-                    # Bound skip (issue #359 req 3): an inventory line alone
-                    # never proves the target holds the generation. Require
-                    # a valid completion + verified points; otherwise
-                    # re-queue for parse+upsert+verify. Legacy records
-                    # without a doc_id re-ingest explicitly.
-                    assert client is not None
-                    bound_doc = record.doc_id
-                    bound_rev = record.source_rev
-                    # Bound skip (issue #359 req 3, revision-scoped by #361):
-                    # an inventory line alone never proves the target holds
-                    # the generation. Require a valid completion for THIS
-                    # revision plus verified points; otherwise re-queue for
-                    # parse+upsert+verify. Legacy records without a doc_id
-                    # or revision re-ingest explicitly (one lazy-migration
-                    # cycle, never a wrong skip).
-                    if (
-                        bound_doc
-                        and bound_rev
-                        and is_doc_complete(
-                            client,
-                            settings,
-                            bound_doc,
-                            sha256=sha,
-                            rules_v=rules_v,
-                            source_labels=src_labels,
-                            source_rev=bound_rev,
-                            required_manifest_digest=(
-                                manifest_digest(settings, rules_v) if resume_checkpoints else None
-                            ),
-                        )
-                    ):
-                        stats.files_ok += 1
-                        log.info(
-                            json.dumps(
-                                {"path": path_str, "sha256": record.sha256, "action": "skip"}
-                            )
-                        )
-                        continue
-                    log.info(
-                        json.dumps(
-                            {
-                                "path": path_str,
-                                "sha256": sha[:16],
-                                "action": "requeue",
-                                "reason": "no_valid_completion",
-                            }
-                        )
-                    )
-                # sha passes through: the parent hashed for the skip check, so the
-                # worker never re-reads the file for hashing. Embedding flag keeps
-                # the --dry-run contract (parse + chunk only, no embeddings).
-                # Cache path travels with the task because spawn workers share no
-                # memory with the parent (None when contextual ingest is off).
-                tasks.append(
-                    (
-                        path_str,
-                        vendor or detect_vendor(Path(path_str)),
-                        product,
-                        version,
-                        str(src),
-                        sha,
-                        not dry_run,
-                        str(cache_path) if cache_path is not None else None,
-                    )
-                )
+            plan = _plan(
+                src,
+                progress,
+                settings,
+                client=client,
+                prewalked=prewalked,
+                limit=limit,
+                dry_run=dry_run,
+                rules_v=rules_v,
+                src_labels=src_labels,
+                force_reingest=force_reingest,
+                resume_checkpoints=resume_checkpoints,
+                vendor=vendor,
+                product=product,
+                version=version,
+                cache_path=cache_path,
+            )
+            walk_entries, tasks = plan.walk_entries, plan.tasks
+            lineage_by_path = plan.lineage_by_path
+            stats.files_ok += plan.skipped_ok
             plan_span.set_attribute("ingest.pdfs", len(walk_entries))
             plan_span.set_attribute("ingest.todo", len(tasks))
             root.set_attribute("ingest.workers", workers)
@@ -997,7 +1070,7 @@ def _run_impl(
         ] = {}
 
         def submit_parse(
-            task: tuple[str, str | None, str | None, str | None, str, str, bool, str | None],
+            task: ParseTask,
         ) -> None:
             parse_pending[pool.submit(_parse_one, task)] = task[0]
 
