@@ -49,7 +49,14 @@ case "$*" in
     cat "$ROUTE_LIVE_FILE" ;;
   *'get configmap openshift-service-ca.crt'*)
     printf '%s\\n' "${{SERVICE_CA:-}}" ;;
-  *'get deployment.apps/jaeger '*|*'get serviceaccount/rag-agent '*|*'get servicemonitor.monitoring.coreos.com/rag-agent '*)
+  *'get '*'servicemonitor.monitoring.coreos.com/rag-agent '*)
+    case "${{SM_READ:-}}" in
+      forbidden) echo 'Error from server (Forbidden): servicemonitors.monitoring.coreos.com "rag-agent" is forbidden: User "site-user" cannot get resource' >&2; exit 1 ;;
+      fail) echo 'dial tcp 10.0.0.1:6443: i/o timeout' >&2; exit 1 ;;
+    esac
+    [ "${{DISABLED_READ_FAIL:-}}" != 1 ] || exit 1
+    [ -z "${{SM_FILE:-}}" ] || cat "$SM_FILE" ;;
+  *'get deployment.apps/jaeger '*|*'get serviceaccount/rag-agent '*)
     [ "${{DISABLED_READ_FAIL:-}}" != 1 ] || exit 1
     if [ -n "${{DISABLED_FILE:-}}" ]; then cat "$DISABLED_FILE";
     else :; fi ;;
@@ -719,6 +726,42 @@ def test_disabled_resource_read_failures_block_mutations(tree, failure):
     assert result.returncode != 0
     assert "upgrade" not in _helm_log(tree)
     assert "delete" not in _helm_log(tree)
+
+
+def test_forbidden_servicemonitor_read_is_a_notice_for_namespace_admins(tree):
+    """#680: OpenShift's namespace admin role cannot read monitoring.coreos.com.
+    The disabled ServiceMonitor check becomes a notice; deploy proceeds and the
+    client's text (it names the user) is not echoed."""
+    result = _run(tree, ("SM_READ", "forbidden"))
+    assert result.returncode == 0, result.stderr
+    assert "may not read ServiceMonitors (Forbidden)" in result.stdout
+    assert "site-user" not in result.stdout + result.stderr
+    log = _helm_log(tree)
+    assert "upgrade" in log
+    assert "delete" not in log
+
+
+def test_other_servicemonitor_read_error_still_blocks_mutations(tree):
+    result = _run(tree, ("SM_READ", "fail"))
+    assert result.returncode != 0
+    assert "cannot read disabled ServiceMonitor rag-agent (unexpected client error)" in result.stderr
+    assert "10.0.0.1" not in result.stdout + result.stderr
+    assert "upgrade" not in _helm_log(tree)
+
+
+def test_readable_owned_leftover_servicemonitor_is_still_cleaned(tree):
+    import json
+
+    path = tree[0] / "sm.json"
+    path.write_text(json.dumps({"apiVersion": "monitoring.coreos.com/v1", "kind": "ServiceMonitor",
+                                "metadata": {"name": "rag-agent", "namespace": "ns"}}))
+    result = _run(tree, ("SM_FILE", str(path)))
+    assert result.returncode == 0, result.stderr
+    cleanup = json.loads((tree[0] / "dist/app-disabled-cleanup.json").read_text())
+    assert {"apiVersion": "monitoring.coreos.com/v1", "kind": "ServiceMonitor",
+            "metadata": {"name": "rag-agent", "namespace": "ns"}} in cleanup["items"]
+    log = _helm_log(tree)
+    assert log.index("delete") > log.index("rollout") > log.index("upgrade")
 
 
 def test_disabled_cleanup_never_accepts_a_pvc(tree):

@@ -74,7 +74,8 @@ restores the snapshot over whatever the file assigned; empty stays unset
   default). `validate.sh` rejects any other value before the pipeline pushes
   images; the diagnostic names the key, never the value. One parser
   (`model_config.parse_strict_bool`) serves preflight and `map_values.py`.
-- `validate.sh` needs only a namespace-admin identity. Its reachability probe is
+- `validate.sh` and `deploy.sh` need only a namespace-admin identity (#678,
+  #680). The validate reachability probe is
   API discovery (`get --raw /api`): an anonymous or invalid identity fails, and
   a namespace-scoped one passes. It does not use `cluster-info` (kube-system
   Services) or `/version` (anonymous).
@@ -192,6 +193,13 @@ Compatibility and lifecycle decisions under #448:
   the checked disabled Jaeger workloads/config, console Route/ServiceAccount
   and ServiceMonitor. This covers objects absent from the first Helm release's
   history. The cleanup inventory never permits a PVC.
+- The one exception (#680) is a disabled ServiceMonitor read that returns
+  `Forbidden`. OpenShift's namespace admin role has no `monitoring.coreos.com`
+  rights, so this read is a notice: a leftover ServiceMonitor is not checked or
+  removed, and deploy continues. A ServiceMonitor is metrics-only and never an
+  exposure path, and that identity could not remove one anyway. Any other read
+  failure, and every Route, Jaeger and ServiceAccount read failure, still stops
+  before mutation.
 - Disabled optional workloads, Routes and monitors are removed on upgrades of
   the Helm release. The Jaeger PVC has `helm.sh/resource-policy: keep`: disabling
   tracing or removing the app release retains its data. Re-enabling tracing

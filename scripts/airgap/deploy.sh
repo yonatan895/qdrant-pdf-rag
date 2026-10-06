@@ -135,15 +135,41 @@ if [ "${AIRGAP_DRYRUN:-0}" != "1" ]; then
             set -- "$@" route.route.openshift.io/rag-agent
         fi
     fi
-    if [ "$SERVICEMONITOR_DEPLOY" != "1" ]; then
-        if printf '%s\n' "$_app_apis" | grep -qx 'servicemonitors.monitoring.coreos.com'; then
-            set -- "$@" servicemonitor.monitoring.coreos.com/rag-agent
-        fi
-    fi
     if [ "$#" -gt 0 ]; then
         $KC -n "$NAMESPACE" get "$@" --ignore-not-found -o json > dist/app-disabled-existing.json
     else
         printf '%s\n' '{"apiVersion":"v1","kind":"List","items":[]}' > dist/app-disabled-existing.json
+    fi
+    # Issue #680: OpenShift's namespace admin role has no monitoring.coreos.com
+    # rights, so read the ServiceMonitor alone. A Forbidden read is a notice:
+    # the object is metrics-only (never an exposure path, unlike the Route) and
+    # this identity could not remove one anyway. Any other failure still stops.
+    # The client's text is not echoed (it can carry identities).
+    if [ "$SERVICEMONITOR_DEPLOY" != "1" ] &&
+        printf '%s\n' "$_app_apis" | grep -qx 'servicemonitors.monitoring.coreos.com'; then
+        if _sm_err=$($KC -n "$NAMESPACE" get servicemonitor.monitoring.coreos.com/rag-agent \
+            --ignore-not-found -o json 2>&1 >dist/app-disabled-servicemonitor.json); then
+            python3 - dist/app-disabled-existing.json dist/app-disabled-servicemonitor.json \
+                > dist/app-disabled-merged.json <<'PY' || die "cannot merge disabled application resources"
+import json, sys
+items = []
+for path in sys.argv[1:]:
+    with open(path) as f:
+        raw = f.read()
+    if raw.strip():
+        doc = json.loads(raw)
+        items += doc.get('items', []) if doc.get('kind') == 'List' else [doc]
+json.dump({'apiVersion': 'v1', 'kind': 'List', 'items': items}, sys.stdout)
+PY
+            mv dist/app-disabled-merged.json dist/app-disabled-existing.json
+        else
+            case "$_sm_err" in
+                *"(Forbidden)"*)
+                    echo "==> Notice: this identity may not read ServiceMonitors (Forbidden); a leftover ServiceMonitor rag-agent from an earlier metrics-enabled release is NOT checked or removed. Remove it with a monitoring-capable identity if one exists." ;;
+                *) die "cannot read disabled ServiceMonitor rag-agent (unexpected client error)" ;;
+            esac
+        fi
+        unset _sm_err
     fi
     python3 scripts/airgap/check_app_ownership.py "$NAMESPACE" --disabled \
         < dist/app-disabled-existing.json > dist/app-disabled-cleanup.json
