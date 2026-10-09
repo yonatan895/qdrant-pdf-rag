@@ -216,6 +216,10 @@ _MESSAGE_CITE = (
 
 
 def test_ingest_real_server_and_resume(qdrant_url, corpus, tmp_path, monkeypatch):
+    """In-place mode recovers a lost inventory through the Qdrant-level sha
+    skip. Publication (the default) instead re-verifies live against the
+    durable inventory, so this pin selects the deprecated in-place mode."""
+    monkeypatch.setenv("INGEST_ALIAS_PUBLISH", "false")
     records = _ingest(monkeypatch, qdrant_url, "sim-hash", corpus, tmp_path / "inv.jsonl")
     assert [r["status"] for r in records] == ["upserted"] * 3
     assert all(r["chunks"] > 0 for r in records)
