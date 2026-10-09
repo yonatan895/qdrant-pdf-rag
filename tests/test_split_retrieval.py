@@ -14,6 +14,7 @@ from typing import Any
 from qdrant_client import models
 
 from mainframe_rag.config import Settings
+from mainframe_rag.ports import AsyncReaderAdapter
 from mainframe_rag.retrieve.query import async_search, max_split_hits, merge_split_hits, search
 from tests.conftest import _point
 
@@ -210,7 +211,7 @@ def test_split_twins_parity_comparative_and_diagnostic():
             )
             async_hits, async_kind, async_timings = asyncio.run(
                 async_search(
-                    SplitAwareFakeQdrant(), SplitAwareEmbedder(), "coll", query,
+                    AsyncReaderAdapter(SplitAwareFakeQdrant()), SplitAwareEmbedder(), "coll", query,
                     settings=_split_settings(**flags),
                 )
             )
@@ -224,7 +225,7 @@ def test_async_comparative_split_covers_both_entities():
     dropped split if only sync were tested)."""
     hits, _, _ = asyncio.run(
         async_search(
-            SplitAwareFakeQdrant(), SplitAwareEmbedder(), "coll", COMPARATIVE_QUERY,
+            AsyncReaderAdapter(SplitAwareFakeQdrant()), SplitAwareEmbedder(), "coll", COMPARATIVE_QUERY,
             settings=_split_settings(),
         )
     )
