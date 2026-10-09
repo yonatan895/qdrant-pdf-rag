@@ -150,6 +150,11 @@ def _ingest(
     monkeypatch.setenv("QDRANT_URL", qdrant_url)
     monkeypatch.setenv("QDRANT_COLLECTION", collection)
     monkeypatch.setenv("EMBED_MODE", embed)
+    # Publication is the default; tests that publish select it explicitly,
+    # and the rest (shared corpora re-ingested with fresh inventories,
+    # in-place migration and restore pins) select in-place explicitly.
+    if "INGEST_ALIAS_PUBLISH" not in os.environ:
+        monkeypatch.setenv("INGEST_ALIAS_PUBLISH", "false")
     if embed == "vllm":
         assert mock_url, "the vLLM-shaped variant needs the mock endpoint URL"
         monkeypatch.setenv("EMBED_BASE_URL", f"{mock_url}/v1")
