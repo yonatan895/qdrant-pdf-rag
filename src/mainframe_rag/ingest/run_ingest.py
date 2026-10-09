@@ -1716,9 +1716,7 @@ def _run_publish_locked(
                 }
             )
         )
-        target = PublishTarget(
-            alias=settings.qdrant_collection, staging=staging, live=live, legacy=legacy
-        )
+        target = PublishTarget(staging=staging, live=live)
         rc = _run_impl(
             src,
             progress,
