@@ -1536,43 +1536,27 @@ def _run_publish_locked(
     # If the sidecar matches these inputs and records the requested retirements,
     # reuse the bound removal plan rather than re-evaluating against a mutated inventory
     # or an already-retired inventory record on post-cutover retry.
-    is_replaying_retire = False
+    retire_plan = None
     if state is not None and state.get("gen_fp") == gen_fp and state.get("corpus_fp") == corp_fp:
         recorded_retire_docs = state.get("retire_docs")
         already_swapped = state.get("staging") == live
-        if already_swapped:
-            # The recorded build already cut over before cleanup. Finalizing
-            # uses the recorded retire_plan to finish committing inventory and
-            # clearing the sidecar, whether retried with the same flags or on
-            # an ordinary run.
-            if "retire_plan" in state and state["retire_plan"] is not None:
-                retire_plan = state["retire_plan"]
-                retired = frozenset(retire_plan)
-                is_replaying_retire = True
-        elif recorded_retire_docs is not None:
-            if list(retire_docs or ()) != recorded_retire_docs:
-                raise RuntimeError(
-                    f"publish state records staging {state.get('staging')!r} for different "
-                    f"retirements (recorded {recorded_retire_docs!r}, requested "
-                    f"{list(retire_docs or ())!r}): refusing a build the current "
-                    "inputs cannot explain — remove the state file explicitly to "
-                    "abandon the recorded build, then rerun."
-                )
-            if "retire_plan" in state and state["retire_plan"] is not None:
-                retire_plan = state["retire_plan"]
-                retired = frozenset(retire_plan)
-                is_replaying_retire = True
-        elif "retire_plan" in state and state["retire_plan"] is not None and retire_docs:
-            retire_plan = state["retire_plan"]
-            retired = frozenset(retire_plan)
-            is_replaying_retire = True
-
-    if not is_replaying_retire:
-        retire_plan, retired = (
-            plan_approved_removals(tuple(retire_docs or ()), prior_inventory)
-            if retire_docs
-            else ({}, frozenset())
-        )
+        if (
+            not already_swapped
+            and recorded_retire_docs is not None
+            and list(retire_docs or ()) != recorded_retire_docs
+        ):
+            raise RuntimeError(
+                f"publish state records staging {state.get('staging')!r} for different "
+                f"retirements (recorded {recorded_retire_docs!r}, requested "
+                f"{list(retire_docs or ())!r}): refusing a build the current "
+                "inputs cannot explain — remove the state file explicitly to "
+                "abandon the recorded build, then rerun."
+            )
+        if already_swapped or recorded_retire_docs is not None or retire_docs:
+            retire_plan = state.get("retire_plan")
+    if retire_plan is None:
+        retire_plan = plan_approved_removals(retire_docs, prior_inventory)[0] if retire_docs else {}
+    retired = frozenset(retire_plan)
 
     conflicts: set[str] = set()
     if retire_plan:
@@ -1594,14 +1578,8 @@ def _run_publish_locked(
                 revs = entry.get("revs")
                 if entry.get("whole"):
                     conflicts.add(doc_id)
-                elif (
-                    source_rev is not None
-                    and isinstance(revs, (set, frozenset))
-                    and source_rev in revs
-                ):
+                elif isinstance(revs, (set, frozenset)) and source_rev in revs:
                     conflicts.add(f"{doc_id}@{source_rev}")
-                elif source_rev is None and entry.get("legacy"):
-                    conflicts.add(doc_id)
     if conflicts:
         raise RuntimeError(
             f"retired document(s) {sorted(conflicts)} still present in "
