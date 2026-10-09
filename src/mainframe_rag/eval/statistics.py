@@ -38,8 +38,8 @@ def _percentile(sorted_values: list[float], q: float) -> float:
     return sorted_values[lo] * (1.0 - frac) + sorted_values[hi] * frac
 
 
-def _bootstrap_stat(
-    values: Sequence[float], stat, resamples: int, seed: int, alpha: float
+def _bootstrap_mean(
+    values: Sequence[float], resamples: int, seed: int, alpha: float
 ) -> tuple[float, float]:
     if not values:
         raise ValueError("bootstrap of empty sequence")
@@ -47,16 +47,11 @@ def _bootstrap_stat(
     stats: list[float] = []
     n = len(values)
     for _ in range(resamples):
-        sample = [values[rng.randrange(n)] for _ in range(n)]
-        stats.append(stat(sample))
+        stats.append(sum(values[rng.randrange(n)] for _ in range(n)) / n)
     stats.sort()
     lo = _percentile(stats, 100.0 * (alpha / 2.0))
     hi = _percentile(stats, 100.0 * (1.0 - alpha / 2.0))
     return lo, hi
-
-
-def _mean(xs: list[float]) -> float:
-    return sum(xs) / len(xs)
 
 
 def ci95(
@@ -70,7 +65,7 @@ def ci95(
     caller renders 'n/a' — an empty class must not fabricate a CI)."""
     if not values:
         return None
-    return _bootstrap_stat(list(values), _mean, resamples, seed, alpha)
+    return _bootstrap_mean(list(values), resamples, seed, alpha)
 
 
 def ci95_paired(
@@ -85,7 +80,7 @@ def ci95_paired(
     if not pairs:
         return None
     deltas = [c - b for c, b in pairs]
-    return _bootstrap_stat(deltas, _mean, resamples, seed, alpha)
+    return _bootstrap_mean(deltas, resamples, seed, alpha)
 
 
 def ci_excludes_zero(ci: tuple[float, float], *, improvement: bool) -> bool:
