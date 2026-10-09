@@ -708,8 +708,12 @@ thread pool.
   read-only check for record-only drift and for a pending same-contract
   resume). Because the fingerprint embeds every re-embed-required field
   (issue #391 F2), a revision-only change derives a **distinct** staging
-  generation instead of reconverging live. Staging starts as a
-  server-side snapshot-clone of live (points AND completion markers); a
+  generation instead of reconverging live. Staging starts as an exact copy
+  of live made through the points API (`qdrant_io.clone_collection`: every
+  point's id, named vectors and payload, AND the completion markers, into
+  collections created with the selected policy and verified by exact id
+  set; no node-local snapshot, so distributed generations copy
+  shard-complete, issue #360); a
   marker certifies its own `target_collection`, so the walked corpus
   re-embeds into the new generation rather than skipping across physicals
   — the clone preserves the old physical during ordinary distinct-staging
@@ -1038,8 +1042,9 @@ readiness, retrieval, answer/chat/console, recovery tools and evaluation.
   1/1/1 profile judges its single copy through its one endpoint. Moving
   replicas to repair an under-replicated candidate remains the
   snapshot-gated migration slice, never automatic.
-  The snapshot clone used to prepare an update staging generation (and the
-  legacy-layout migration) is the single-node recipe: a source with more
+  Update staging preparation copies through the points API and is not
+  limited by topology. The legacy-layout migration (snapshot, then delete
+  the physical squatting on the alias name) is the single-node recipe: a source with more
   than one shard or replica, a selected multi-shard/replica policy, or an
   unreadable, missing or invalid topology is refused before any snapshot/recover/delete
   (`qdrant_io.require_single_node_recovery`; collection snapshots are

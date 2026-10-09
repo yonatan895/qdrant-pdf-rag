@@ -70,7 +70,7 @@ class SyncStore:
     def collection_exists(self, name):
         return True
 
-    def scroll(self, name, *, scroll_filter=None, limit=10, with_payload=None, offset=None):
+    def scroll(self, name, *, scroll_filter=None, limit=10, with_payload=None, with_vectors=False, offset=None):
         return self._points.get(name, [])[:limit], None
 
     def retrieve(self, name, ids, *, with_payload=True, with_vectors=False):

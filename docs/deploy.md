@@ -646,10 +646,15 @@ exact state, so retries must reuse identical IDs and identical content).
 #### Distributed recovery boundary (issue #360)
 
 Qdrant collection snapshots are node-specific and do not carry aliases, so
-the single-node snapshot clone/recover recipe cannot prove that every shard
-of a 6/3/2 collection was captured or restored. `qdrant_io.clone_collection`
-(update publications) and the legacy-layout migration in `run_ingest` now
-call `require_single_node_recovery` first: a source with `shard_number` > 1 or
+a snapshot recipe cannot prove that every shard of a 6/3/2 collection was
+captured or restored. Update publications therefore never use snapshots to
+prepare staging: `qdrant_io.clone_collection` copies every point (id, named
+vectors, payload) and completion marker through the points API into a new
+collection created with the selected policy, and refuses unless the copy
+holds exactly the source's point ids; the cutover gates then verify the
+staging pair's distribution and placement. The legacy-layout migration in
+`run_ingest`, which snapshots and deletes a physical squatting on the alias
+name, still calls `require_single_node_recovery` first: a source with `shard_number` > 1 or
 `replication_factor` > 1, an explicit multi-shard/replica policy selected for
 the run, or unreadable/missing/invalid topology raises
 `DistributedRecoveryUnsupportedError` before any snapshot, recover, or
@@ -678,7 +683,7 @@ claim; do not lower RF/W, colocate peers, or relabel a one-node setup to pass.
 | 1 Placement map | `kubectl get pods -o wide -l app.kubernetes.io/name=qdrant` and `kubectl get nodes -L topology.kubernetes.io/zone,kubernetes.io/hostname`; map peer id (from `/cluster`) -> pod -> worker -> storage volume/backing device | Table peer/pod/worker/zone/PV/storage class | PASS: 3 distinct workers; the site names the independent failure domain (hypervisor/rack/storage array) each worker sits in. FAIL: any two peers share a worker or an undeclared domain; hostname separation alone is recorded as "distinct hosts, domain unproven" |
 | 2 Storage | `df`/PVC capacity and used per peer for data and snapshots; storage class access mode and semantics (RWO block, not shared NFS) | Capacity/used/headroom per peer; storage class YAML | PASS: RWO block on each peer, headroom >= sizing below with margin for staging plus retained generation. FAIL: shared storage between peers, or headroom below one extra generation |
 | 3 Policy and placement | `scripts/verify_placement.py --production` with `QDRANT_URL` the Service and three direct `--peer-url`s, for the live alias and for each staging pair before cutover | Full verifier output including the `VERDICT:` line and exit code | PASS: exit 0, VERDICT healthy, 6/3/2 on corpus and control. FAIL: any other verdict (degraded/recovering/unverifiable/unservable) |
-| 4 Fresh generation | Canonical Task/launcher ingest from the protected originals into an empty alias (no clone path); then re-run it unchanged (steady-state re-verify) and restart the ingest Job | Job logs (`action: publish`), points count, second-run no-op log | PASS: first publication succeeds, repeat re-verifies read-only, restart is a no-op, counts equal across all three peers. FAIL: any clone/recover path reached (it must refuse on RF>1) or counts differ |
+| 4 Fresh and update generations | Canonical Task/launcher ingest from the protected originals into an empty alias; re-run it unchanged (steady-state re-verify) and restart the ingest Job; then change one source document and run it again (update publication) | Job logs (`action: publish`, `staging_mode`), points count, second-run no-op log, update-run alias target | PASS: first publication succeeds, repeat re-verifies read-only, restart is a no-op, the update publishes a new 6/3/2 generation (`staging_mode: cloned`) while the superseded one is retained, counts equal across all three peers. FAIL: any snapshot/recover path reached, the update refuses, or counts differ |
 | 5 Exact data | Per peer (direct URL) scroll the corpus and control collections and compare point ids, payload hashes and vector checksums against the first peer; run the golden/real-corpus retrieval check through the alias | Per-peer id/payload/vector digests, retrieval report | PASS: digests identical on all peers, retrieval within the accepted baseline. FAIL: any divergence |
 | 6 Write acknowledgement | Through the entry Service, upsert a marker batch with `wait=true` (W=2), record the acknowledgement; repeat while exactly one peer is stopped by the site | Ack responses, marker ids, read-back from every peer after rejoin | PASS: acknowledged writes succeed with one peer down and every acknowledged id is present exactly on all three peers after rejoin (RPO 0 target). Unacknowledged/ambiguous writes are retried with identical ids and converge without duplicates. FAIL: any acknowledged write missing |
 | 7 Peer loss | One authorized peer loss at a time (pod delete or node cordon+drain; never storage destruction): measure time to first successful search through the entry Service, then verifier with `--allow-degraded` | Timestamps, search results, degraded verdict output | PASS (targets, not SLAs until measured here): reads recover within the recorded bound (target 60 s); verdict `degraded` not `unverifiable`. FAIL: reads unavailable beyond the bound, or any verdict besides degraded |

@@ -385,23 +385,60 @@ def require_single_node_recovery(
 def clone_collection(
     client: QdrantPoints, settings: Settings, src: str, dst: str
 ) -> None:
-    """Server-side copy src -> dst (created by recover) + count verification.
+    """Copy src -> dst through the points API, then verify (issue #360).
 
-    Fail closed on any count mismatch: a partial clone must never become a
-    publish base. The snapshot location is the server-side snapshots dir
-    (`Settings.qdrant_snapshots_dir`), the same formula the harness restore
-    uses. Single-node recipe only: distributed (multi-shard/replica)
-    sources are refused before any snapshot is taken.
-    """
-    require_single_node_recovery(client, settings, src, "snapshot clone")
-    snap = snapshot_collection(client, src)
-    location = f"file://{settings.qdrant_snapshots_dir.rstrip('/')}/{src}/{snap}"
-    client.recover_snapshot(dst, location, priority=models.SnapshotPriority.SNAPSHOT, wait=True)
-    want = client.get_collection(src).points_count
-    got = client.get_collection(dst).points_count
+    Every point (id, named vectors, payload) is read with scroll and written
+    with upsert, so the copy covers every shard of a distributed collection;
+    node-local snapshots are not involved. dst must not exist. It is created
+    with src's dense dimension (a model change is still refused downstream,
+    as for any existing target), this run's distribution policy and src's
+    payload indexes, before any point is loaded. Fail closed unless dst then
+    holds exactly src's point ids: a partial copy must never become a
+    publish base. src is only read."""
+    if client.collection_exists(dst):
+        raise RuntimeError(f"copy target {dst!r} already exists — refusing to copy into it.")
+    info = client.get_collection(src)
+    vectors = info.config.params.vectors
+    dense = vectors.get("dense") if isinstance(vectors, dict) else None
+    if dense is None:
+        raise RuntimeError(f"copy source {src!r} has no named dense vector — refusing to copy it.")
+    vectors_config, sparse_vectors_config = collection_vector_configs(dense.size)
+    client.create_collection(
+        dst,
+        vectors_config=vectors_config,
+        sparse_vectors_config=sparse_vectors_config,
+        on_disk_payload=True,
+        **settings.collection_distribution_kwargs(),
+    )
+    for field, index in sorted((getattr(info, "payload_schema", None) or {}).items()):
+        client.create_payload_index(dst, field_name=field, field_schema=index.data_type)
+    offset: int | str | UUID | None = None
+    while True:
+        page, offset = client.scroll(
+            src,
+            limit=settings.ingest_scan_page_size,
+            with_payload=True,
+            with_vectors=True,
+            offset=offset,
+        )
+        if page:
+            points = []
+            for record in page:
+                vector = getattr(record, "vector", None)
+                named: dict[str, Any] = dict(vector) if isinstance(vector, dict) else {}
+                points.append(models.PointStruct(id=record.id, vector=named, payload=record.payload))
+            client.upsert(dst, points=points, wait=True)
+        if offset is None or not page:
+            break
+    page_size = settings.ingest_scan_page_size
+    want = {str(p.id) for p in scroll_all_points(
+        client, src, scroll_filter=None, with_payload=False, page_size=page_size)}
+    got = {str(p.id) for p in scroll_all_points(
+        client, dst, scroll_filter=None, with_payload=False, page_size=page_size)}
     if got != want:
         raise RuntimeError(
-            f"clone {src!r} -> {dst!r} unverified: {got} != {want} points — refusing to publish from it."
+            f"copy {src!r} -> {dst!r} unverified: {len(got)} of {len(want)} point ids match "
+            "the source — refusing to publish from it."
         )
 
 
