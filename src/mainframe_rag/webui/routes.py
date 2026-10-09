@@ -38,7 +38,7 @@ from mainframe_rag.agent.answer_core import (
     execute_answer_core,
     execute_answer_core_stream,
 )
-from mainframe_rag.agent.sse import error_payload, final_payload, format_sse_event
+from mainframe_rag.agent.sse import error_payload, format_sse_event, output_final_payload
 from mainframe_rag.ingest.bounds import EmbedInputTooLarge
 from mainframe_rag.ingest.chunk import detect_code_region
 from mainframe_rag.logs import error_type
@@ -816,25 +816,7 @@ async def _console_stream_response(req, owner):
                         )
                     )
                     yield format_sse_event(
-                        "final",
-                        final_payload(
-                            request_id,
-                            output.answer,
-                            output.citations,
-                            output.citations_inferred,
-                            output.script,
-                            output.query_kind,
-                            output.hits,
-                            output.finish_reason,
-                            output.ttft_ms,
-                            output.usage,
-                            inferred_indices=output.inferred_indices,
-                            script_lang=output.script_lang,
-                            verification_state=output.verification_state,
-                            script_review_required=output.script_review_required,
-                            supplied_evidence=output.supplied,
-                            evidence_omitted=len(output.evidence.omitted_indices),
-                        ),
+                        "final", output_final_payload(request_id, output, output.query_kind)
                     )
         except Exception as exc:  # noqa: BLE001 — mid-stream: error event, no final
             from mainframe_rag.agent.answer import PromptBudgetExceeded

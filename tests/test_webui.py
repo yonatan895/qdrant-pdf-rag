@@ -249,6 +249,28 @@ def test_ui_chat_stream_sse_token_final_contract(ui_client):
     assert final["hits"][0]["doc_id"] == "SA22-0000-00"
 
 
+def test_ui_chat_stream_final_matches_answer_stream_final(ui_client):
+    """The console stream and the /v1/answer stream share one final-frame
+    mapping: for the same retrieved hits and model output their `final`
+    payloads are identical apart from the request id."""
+    question = "What is IEA500I?"
+    console = ui_client.post(
+        "/ui/chat/stream", json={"messages": [{"role": "user", "content": question}]}
+    )
+    answer = ui_client.post("/v1/answer", json={"query": question, "stream": True})
+    assert console.status_code == answer.status_code == 200
+    finals = []
+    for resp in (console, answer):
+        events = _parse_sse_events(resp.text)
+        assert [name for name, _ in events].count("final") == 1
+        final = next(payload for name, payload in events if name == "final")
+        finals.append({k: v for k, v in final.items() if k != "request_id"})
+    console_final, answer_final = finals
+    assert console_final == answer_final
+    assert console_final["hits"] and console_final["citations"] == [_hit().cite]
+    assert console_final["supplied_evidence"]
+
+
 def test_ui_chat_stream_error_emits_error_event_without_final(
     monkeypatch, synthetic_pdf, servable_representation_gate
 ):
