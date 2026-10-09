@@ -112,11 +112,6 @@ def default_retrieval_paths(
     return Path("evals") / golden, Path("evals") / f"baseline{family}{mode}.json"
 
 
-def default_baseline_path(embed_mode: str) -> Path:
-    """Compatibility entry for the dev retrieval baseline selection."""
-    return default_retrieval_paths(embed_mode)[1]
-
-
 DEV_GOLDEN_PATH = Path("evals/golden.jsonl")
 HOLDOUT_PATH = Path("evals/holdout.jsonl")
 HOLDOUT_FILENAME = "holdout.jsonl"

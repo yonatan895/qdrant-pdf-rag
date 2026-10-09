@@ -10,7 +10,7 @@ import httpx2
 import pytest
 from pydantic import ValidationError
 
-from mainframe_rag.eval.datasets import GoldenEntry, default_baseline_path, load_golden
+from mainframe_rag.eval.datasets import GoldenEntry, load_golden
 from mainframe_rag.eval.retrieval import (
     check_baseline,
     is_relevant_hit,
@@ -287,11 +287,6 @@ def test_update_baseline_roundtrip_with_new_keys(tmp_path: Path):
     assert recorded["classes"]["doc_number"]["recall@1"] == 1.0
     assert recorded["abstain"]["n"] == 1
     assert check_baseline(report, recorded) == []
-
-
-def test_default_baseline_path():
-    assert default_baseline_path("hash") == Path("evals/baseline.json")
-    assert default_baseline_path("vllm") == Path("evals/baseline-vllm.json")
 
 
 def test_load_golden_abstain_roundtrip(tmp_path: Path):
