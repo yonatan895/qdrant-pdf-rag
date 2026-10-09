@@ -865,7 +865,7 @@ def test_forced_repair_never_touches_live_during_build(tmp_path, monkeypatch):
     real_inner = run_ingest._run_impl
 
     def observing_inner(*args, **kwargs):
-        if kwargs.get("_publish_target") is None:
+        if kwargs.get("staging") is None:
             return real_inner(*args, **kwargs)
         observed["alias_target"] = fake.aliases[ALIAS]
         observed["live_points"] = [p.id for p in fake.collections[live]]
@@ -934,7 +934,7 @@ def test_interrupted_same_contract_repair_resumes_recorded_build(tmp_path, monke
     real_inner = run_ingest._run_impl
 
     def dying_inner(*args, **kwargs):
-        if kwargs.get("_publish_target") is None:
+        if kwargs.get("staging") is None:
             return real_inner(*args, **kwargs)
         raise RuntimeError("injected mid-repair crash")
 
@@ -1533,7 +1533,7 @@ def test_concurrent_publish_same_alias_serializes(tmp_path, monkeypatch):
     real_inner = run_ingest._run_impl
 
     def slow_inner(*args, **kwargs):
-        if kwargs.get("_publish_target") is None:
+        if kwargs.get("staging") is None:
             return real_inner(*args, **kwargs)
         entered.set()
         assert release.wait(timeout=60)
@@ -1638,7 +1638,7 @@ def test_interrupted_forced_run_resumes_same_staging(tmp_path, monkeypatch):
     real_inner = run_ingest._run_impl
 
     def dying_inner(*args, **kwargs):
-        if kwargs.get("_publish_target") is None:
+        if kwargs.get("staging") is None:
             return real_inner(*args, **kwargs)
         raise RuntimeError("injected mid-build crash")
 
@@ -2766,7 +2766,7 @@ def test_retire_revision_a_with_deleted_legacy_sibling_fails_verification(tmp_pa
 
     def delete_legacy_impl(*args, **kwargs):
         rc = real_impl(*args, **kwargs)
-        target = kwargs.get("_publish_target")
+        target = kwargs.get("staging")
         if target and target.staging in fake.collections:
             fake.collections[target.staging] = [
                 p
