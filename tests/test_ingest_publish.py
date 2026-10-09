@@ -2671,6 +2671,83 @@ def test_retire_revision_a_while_retaining_and_walking_revision_b_succeeds(tmp_p
     assert any(getattr(p, "id", None) == "legacy-doc-a" for p in fake.collections[live_2])
 
 
+def _resolution_snapshot(fake: PublishFake, progress: Path, sidecar: Path):
+    """Everything a publication refusal must leave byte-identical: points
+    and payloads per collection, aliases and alias operations, snapshots,
+    the inventory and the publish sidecar."""
+    return (
+        {
+            name: [(getattr(p, "id", None), dict(getattr(p, "payload", None) or {})) for p in points]
+            for name, points in fake.collections.items()
+        },
+        dict(fake.aliases),
+        len(fake.alias_calls),
+        sorted(fake.snapshots),
+        progress.read_bytes() if progress.exists() else None,
+        sidecar.read_bytes() if sidecar.exists() else None,
+    )
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["walked_conflict", "foreign_sidecar", "old_format_sidecar", "retirement_mismatch", "rebound_live"],
+)
+def test_publication_resolution_refusal_writes_nothing(tmp_path, monkeypatch, case):
+    """Issue #583 S6: every refusal while publication resolves its
+    predecessor, build identity, retirement plan and staging target happens
+    before its first write — storage, aliases, inventory and the publish
+    sidecar are unchanged afterwards."""
+    import json
+
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.inventory import load_inventory
+    from mainframe_rag.ingest.publish import (
+        publish_state_path,
+        read_publication_metadata,
+        write_publish_state,
+    )
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    a_path, _ = _two_doc_corpus(corpus)
+    progress = tmp_path / "inv.jsonl"
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    live = fake.aliases[ALIAS]
+    fingerprints = read_publication_metadata(fake, live + "__completions")
+    assert fingerprints is not None
+    gen_fp, corp_fp = fingerprints
+    sidecar = publish_state_path(progress, ALIAS)
+    extra: tuple[str, ...] = ()
+    if case == "walked_conflict":
+        rev_a = load_inventory(progress)[str(a_path)].source_rev
+        extra, match = ("--retire-doc", f"{DOC_A}@{rev_a}"), "still present in the walked corpus"
+    elif case == "foreign_sidecar":
+        write_publish_state(progress, ALIAS, "foreign-candidate", "f" * 16, "c" * 12, previous=live)
+        match = "different inputs"
+    elif case == "old_format_sidecar":
+        sidecar.write_text(json.dumps({
+            "version": 1, "alias": ALIAS, "staging": "old-candidate",
+            "gen_fp": gen_fp, "corpus_fp": corp_fp,
+        }))
+        match = "old-format"
+    elif case == "retirement_mismatch":
+        write_publish_state(
+            progress, ALIAS, "recorded-candidate", gen_fp, corp_fp, retire_docs=(DOC_B,), previous=live
+        )
+        match = "different retirements"
+    else:
+        # A sidecar naming the live generation under another build identity.
+        write_publish_state(progress, ALIAS, live, gen_fp, corp_fp, previous=None)
+        match = "does not match its recorded identity"
+    before = _resolution_snapshot(fake, progress, sidecar)
+    with pytest.raises(RuntimeError, match=match):
+        _run_main(monkeypatch, corpus, progress, *extra)
+    assert _resolution_snapshot(fake, progress, sidecar) == before, f"{case}: refusal wrote state"
+
+
 def test_retire_revision_a_with_walked_revision_a_fails_closed(tmp_path, monkeypatch):
     """R-REV: retiring revision A while revision A is still present in the walked
     corpus fails closed before mutation."""
