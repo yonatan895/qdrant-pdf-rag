@@ -628,29 +628,10 @@ def _answer_span_attrs(
     }
 
 
-def _answer_log_fields(
-    kind: str,
-    complexity: str,
-    hits: list[SearchHit],
-    timings: dict,
-    citations: int,
-    has_script: bool,
-    finish_reason: str,
-    usage: TokenUsage,
-    llm_ms: int,
-    ttft_ms: int | None,
-    started: float,
-    stream: bool = False,
-    evidence: int = 0,
-    inline_bracket_present: bool = False,
-    citations_header_present: bool = False,
-    cites_rejected_shape_bad: int = 0,
-    cites_rejected_unmapped: int = 0,
-    verification_state: str = "unverified_draft",
-    budget_verified: bool = False,
-    units_omitted: int = 0,
+def _output_log_fields(
+    output: AnswerCoreOutput, kind: str, timings: dict, started: float, *, stream: bool
 ) -> dict:
-    """Answer-leg log fields shared by the JSON and SSE finals: identical
+    """Finalized answer log fields shared by the JSON and SSE finals: identical
     keys so log consumers see one shape; stream=True only marks the SSE one.
     The citation-attempt counters (issue #299) let the eval split zero-cite
     rows into malformed vs fabricated vs never-attempted without putting
@@ -663,33 +644,33 @@ def _answer_log_fields(
     across packed excerpts, so truncation depth is countable from logs."""
     fields: dict = {
         "query_kind": kind,
-        "query_complexity": complexity,
-        "hits": len(hits),
-        "evidence": evidence,
+        "query_complexity": output.complexity,
+        "hits": len(output.hits),
+        "evidence": output.evidence.supplied_count,
         "embed_ms": timings.get("embed_ms"),
         "qdrant_ms": timings.get("qdrant_ms"),
         "rerank_ms": timings.get("rerank_ms"),
-        "llm_ms": llm_ms,
-        "citations": citations,
-        "has_script": has_script,
-        "finish_reason": finish_reason,
-        "verification_state": verification_state,
-        "budget_verified": budget_verified,
-        "units_omitted": units_omitted,
-        "prompt_tokens": usage.prompt_tokens,
-        "completion_tokens": usage.completion_tokens,
-        "reasoning_tokens": usage.reasoning_tokens,
-        "total_tokens": usage.total_tokens,
-        "inline_bracket_present": inline_bracket_present,
-        "citations_header_present": citations_header_present,
-        "cites_rejected_shape_bad": cites_rejected_shape_bad,
-        "cites_rejected_unmapped": cites_rejected_unmapped,
+        "llm_ms": output.llm_ms,
+        "citations": len(output.citations),
+        "has_script": output.script is not None,
+        "finish_reason": output.finish_reason,
+        "verification_state": output.verification_state,
+        "budget_verified": output.budget_verified,
+        "units_omitted": output.evidence.units_omitted,
+        "prompt_tokens": output.usage.prompt_tokens,
+        "completion_tokens": output.usage.completion_tokens,
+        "reasoning_tokens": output.usage.reasoning_tokens,
+        "total_tokens": output.usage.total_tokens,
+        "inline_bracket_present": output.parsed.inline_bracket_present,
+        "citations_header_present": output.parsed.citations_header_present,
+        "cites_rejected_shape_bad": output.parsed.cites_rejected_shape_bad,
+        "cites_rejected_unmapped": output.parsed.cites_rejected_unmapped,
         "elapsed_ms": int((time.monotonic() - started) * 1000),
     }
     if stream:
         fields["stream"] = True
-    if ttft_ms is not None:
-        fields["ttft_ms"] = ttft_ms
+    if output.ttft_ms is not None:
+        fields["ttft_ms"] = output.ttft_ms
     return fields
 
 
@@ -1677,35 +1658,6 @@ def _answer_metadata(output: AnswerCoreOutput, *, hits: list | None = None) -> d
     }
 
 
-def _output_log_fields(
-    output: AnswerCoreOutput, kind: str, timings: dict, started: float, *, stream: bool
-) -> dict:
-    """Answer-leg log fields of a finalized core output: one shape for the
-    JSON and SSE finals of both routes."""
-    return _answer_log_fields(
-        kind,
-        output.complexity,
-        output.hits,
-        timings,
-        len(output.citations),
-        output.script is not None,
-        output.finish_reason,
-        output.usage,
-        output.llm_ms,
-        output.ttft_ms,
-        started,
-        stream=stream,
-        evidence=output.evidence.supplied_count,
-        inline_bracket_present=output.parsed.inline_bracket_present,
-        citations_header_present=output.parsed.citations_header_present,
-        cites_rejected_shape_bad=output.parsed.cites_rejected_shape_bad,
-        cites_rejected_unmapped=output.parsed.cites_rejected_unmapped,
-        verification_state=output.verification_state,
-        budget_verified=output.budget_verified,
-        units_omitted=output.evidence.units_omitted,
-    )
-
-
 def _record_no_hits(
     owner: _RequestSpan, endpoint: str, kind: str, output: AnswerCoreOutput
 ) -> None:
@@ -1952,9 +1904,7 @@ async def _answer_response(req, response, is_stream, owner):
         product=req.product,
         version=req.version,
         splunk_context=req.splunk_context,
-        stream=is_stream,
         temperature=req.temperature,
-        request_id=request_id,
         is_chat=False,
         hits=hits,
         query_kind=kind,
@@ -2142,9 +2092,7 @@ async def _chat_response(req, response, owner):
         product=req.product,
         version=req.version,
         splunk_context=req.splunk_context,
-        stream=is_stream,
         temperature=req.temperature,
-        request_id=request_id,
         is_chat=True,
     )
 

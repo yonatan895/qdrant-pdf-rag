@@ -12,19 +12,6 @@ set -eu
 
 MODEL="${MODEL:-google/gemma-4-E4B-it-qat-mobile-ct}"
 PORT="${PORT:-8000}"
-# Track explicit overrides so Budget resolution fills only what the operator
-# did not set (serving-budget track PR-B; extends the issue #99 pattern).
-# Launch-flag defaults come from `mainframe_rag.serve` Budget profiles below;
-# explicit GPU_MEM / MAX_LEN / SEQS in the environment always win.
-GPU_MEM_SET=0
-[ -n "${GPU_MEM:-}" ] && GPU_MEM_SET=1
-MAX_LEN_SET=0
-[ -n "${MAX_LEN:-}" ] && MAX_LEN_SET=1
-SEQS_SET=0
-[ -n "${SEQS:-}" ] && SEQS_SET=1
-GPU_MEM="${GPU_MEM:-}"
-MAX_LEN="${MAX_LEN:-}"
-SEQS="${SEQS:-}"
 IMAGE="${VLLM_IMAGE:-vllm/vllm-openai:v0.28.0}"
 
 # Startup banner is printed after Budget resolution below (it reports the
@@ -89,9 +76,9 @@ eval "${BUDGET_OUT}"
 : "${BUDGET_RUNNER:?serving-budget resolve did not emit BUDGET_RUNNER}"
 : "${BUDGET_SEQS:?serving-budget resolve did not emit BUDGET_SEQS}"
 # Explicit environment wins over Budget resolution (operator override rule).
-if [ "${GPU_MEM_SET}" -eq 0 ]; then GPU_MEM="${BUDGET_GPU_MEM}"; fi
-if [ "${MAX_LEN_SET}" -eq 0 ]; then MAX_LEN="${BUDGET_MAX_LEN}"; fi
-if [ "${SEQS_SET}" -eq 0 ]; then SEQS="${BUDGET_SEQS}"; fi
+GPU_MEM="${GPU_MEM:-${BUDGET_GPU_MEM}}"
+MAX_LEN="${MAX_LEN:-${BUDGET_MAX_LEN}}"
+SEQS="${SEQS:-${BUDGET_SEQS}}"
 
 # Host-RAM budget (issue #580): the container gets a hard memory cap with no
 # swap, and the launch is refused up front when the host cannot fit the cap

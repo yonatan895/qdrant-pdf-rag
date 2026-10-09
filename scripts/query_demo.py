@@ -86,6 +86,12 @@ def render_query_text(query: str, kind: str, hits: list[SearchHit], timings: dic
 
 
 def render_query_html(query: str, kind: str, hits: list[SearchHit], timings: dict[str, int]) -> str:
+    return _render_html(query, kind, hits, timings)
+
+
+def _render_html(
+    query: str, kind: str, hits: list[SearchHit], timings: dict[str, int], parsed: ParsedAnswer | None = None,
+) -> str:
     total_ms = timings.get("embed_ms", 0) + timings.get("qdrant_ms", 0)
 
     cards_html = ""
@@ -99,25 +105,25 @@ def render_query_html(query: str, kind: str, hits: list[SearchHit], timings: dic
             <span class="score-pill">Score: {h.score:.4f}</span>
           </div>
           <div class="hit-cite"><strong>Citation:</strong> {html.escape(h.cite)}</div>
-          <div class="meta-row">
+          {f'''<div class="meta-row">
             <span class="meta-item"><strong>Doc ID:</strong> {html.escape(h.doc_id)}</span>
             <span class="meta-item"><strong>Heading:</strong> {html.escape(h.heading)}</span>
             <span class="meta-item"><strong>Page:</strong> {html.escape(h.page_label)}</span>
             <span class="meta-item"><strong>Type:</strong> {html.escape(h.chunk_type)}</span>
             {f'<span class="meta-item"><strong>Messages:</strong> {msgs}</span>' if msgs else ''}
-          </div>
+          </div>''' if parsed is None else ''}
           <pre class="hit-text">{html.escape(h.text)}</pre>
         </div>
         """
 
-    if not hits:
+    if not hits and parsed is None:
         cards_html = '<div class="hit-card"><p><em>No matching chunks found.</em></p></div>'
 
     return f"""<!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8">
-  <title>Query Inspection: {html.escape(query)}</title>
+  <title>{'Query Inspection' if parsed is None else 'RAG Answer'}: {html.escape(query)}</title>
   <style>
     :root {{
       --bg: #0f172a;
@@ -128,8 +134,8 @@ def render_query_html(query: str, kind: str, hits: list[SearchHit], timings: dic
       --accent: #38bdf8;
       --success: #4ade80;
     }}
-    @media (prefers-color-scheme: light) {{
-      :root {{
+    {'''@media (prefers-color-scheme: light) {
+      :root {
         --bg: #f8fafc;
         --surface: #ffffff;
         --border: #e2e8f0;
@@ -137,8 +143,8 @@ def render_query_html(query: str, kind: str, hits: list[SearchHit], timings: dic
         --text-muted: #64748b;
         --accent: #0284c7;
         --success: #16a34a;
-      }}
-    }}
+      }
+    }''' if parsed is None else ''}
     body {{
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
       background: var(--bg); color: var(--text); margin: 0; padding: 2rem; line-height: 1.5;
@@ -146,28 +152,31 @@ def render_query_html(query: str, kind: str, hits: list[SearchHit], timings: dic
     .container {{ max-width: 1000px; margin: 0 auto; }}
     .header {{ margin-bottom: 2rem; border-bottom: 1px solid var(--border); padding-bottom: 1rem; }}
     .meta-tag {{ display: inline-block; background: var(--surface); border: 1px solid var(--border); padding: 0.3rem 0.7rem; border-radius: 6px; font-size: 0.85rem; margin-right: 0.5rem; color: var(--text-muted); }}
+    {'.answer-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin-bottom: 1.5rem; }' if parsed is not None else ''}
     .hit-card {{ background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.25rem; margin-bottom: 1.5rem; }}
     .hit-header {{ display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.5rem; }}
     .hit-rank {{ font-size: 1.2rem; font-weight: 700; color: var(--accent); }}
     .hit-title {{ font-size: 1.1rem; font-weight: 600; flex-grow: 1; }}
     .score-pill {{ background: rgba(56, 189, 248, 0.15); color: var(--accent); padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.85rem; font-weight: 600; }}
     .hit-cite {{ font-size: 0.95rem; margin-bottom: 0.5rem; color: var(--text); }}
-    .meta-row {{ display: flex; flex-wrap: wrap; gap: 0.75rem; font-size: 0.85rem; color: var(--text-muted); margin-bottom: 0.75rem; }}
-    .tag {{ background: var(--border); color: var(--text); padding: 0.1rem 0.4rem; border-radius: 3px; font-size: 0.8rem; }}
+    {'''.meta-row { display: flex; flex-wrap: wrap; gap: 0.75rem; font-size: 0.85rem; color: var(--text-muted); margin-bottom: 0.75rem; }
+    .tag { background: var(--border); color: var(--text); padding: 0.1rem 0.4rem; border-radius: 3px; font-size: 0.8rem; }''' if parsed is None else ''}
     .hit-text {{ background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 0.75rem; font-family: "SFMono-Regular", Consolas, monospace; font-size: 0.85rem; overflow-x: auto; white-space: pre-wrap; }}
   </style>
 </head>
 <body>
   <div class="container">
     <div class="header">
-      <h1>Query Inspection Demo</h1>
+      <h1>{'Query Inspection Demo' if parsed is None else 'Mainframe RAG Answer'}</h1>
       <h2>"{html.escape(query)}"</h2>
       <span class="meta-tag">Kind: <strong>{html.escape(kind.upper())}</strong></span>
-      <span class="meta-tag">Hits: {len(hits)}</span>
+      <span class="meta-tag">{'Hits' if parsed is None else 'Excerpts'}: {len(hits)}</span>
+      {f'<span class="meta-tag">Verification: {html.escape(parsed.verification_state or "unknown")}</span>' if parsed is not None else ''}
       <span class="meta-tag">Embed: {timings.get('embed_ms', 0)}ms</span>
       <span class="meta-tag">Qdrant: {timings.get('qdrant_ms', 0)}ms</span>
       <span class="meta-tag">Total: {total_ms}ms</span>
     </div>
+    {_render_answer_content(parsed) if parsed is not None else ''}
     {cards_html}
   </div>
 </body>
@@ -238,8 +247,10 @@ def render_answer_html(
     hits: list[SearchHit],
     timings: dict[str, int],
 ) -> str:
-    total_ms = timings.get("embed_ms", 0) + timings.get("qdrant_ms", 0)
+    return _render_html(query, kind, hits, timings, parsed)
 
+
+def _render_answer_content(parsed: ParsedAnswer) -> str:
     citations_html = "".join(f"<li>{html.escape(c)}</li>" for c in parsed.citations)
     if not citations_html:
         citations_html = "<li><em>No direct citations validated</em></li>"
@@ -255,65 +266,7 @@ def render_answer_html(
         </div>
         """
 
-    sources_html = ""
-    for i, h in enumerate(hits, 1):
-        sources_html += f"""
-        <div class="hit-card">
-          <div class="hit-header">
-            <span class="hit-rank">#{i}</span>
-            <span class="hit-title">{html.escape(h.title or h.doc_id)}</span>
-            <span class="score-pill">Score: {h.score:.4f}</span>
-          </div>
-          <div class="hit-cite"><strong>Citation:</strong> {html.escape(h.cite)}</div>
-          <pre class="hit-text">{html.escape(h.text)}</pre>
-        </div>
-        """
-
-    return f"""<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <title>RAG Answer: {html.escape(query)}</title>
-  <style>
-    :root {{
-      --bg: #0f172a;
-      --surface: #1e293b;
-      --border: #334155;
-      --text: #f8fafc;
-      --text-muted: #94a3b8;
-      --accent: #38bdf8;
-      --success: #4ade80;
-    }}
-    body {{
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-      background: var(--bg); color: var(--text); margin: 0; padding: 2rem; line-height: 1.5;
-    }}
-    .container {{ max-width: 1000px; margin: 0 auto; }}
-    .header {{ margin-bottom: 2rem; border-bottom: 1px solid var(--border); padding-bottom: 1rem; }}
-    .meta-tag {{ display: inline-block; background: var(--surface); border: 1px solid var(--border); padding: 0.3rem 0.7rem; border-radius: 6px; font-size: 0.85rem; margin-right: 0.5rem; color: var(--text-muted); }}
-    .answer-card {{ background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin-bottom: 1.5rem; }}
-    .hit-card {{ background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.25rem; margin-bottom: 1.5rem; }}
-    .hit-header {{ display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.5rem; }}
-    .hit-rank {{ font-size: 1.2rem; font-weight: 700; color: var(--accent); }}
-    .hit-title {{ font-size: 1.1rem; font-weight: 600; flex-grow: 1; }}
-    .score-pill {{ background: rgba(56, 189, 248, 0.15); color: var(--accent); padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.85rem; font-weight: 600; }}
-    .hit-cite {{ font-size: 0.95rem; margin-bottom: 0.5rem; color: var(--text); }}
-    .hit-text {{ background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 0.75rem; font-family: "SFMono-Regular", Consolas, monospace; font-size: 0.85rem; overflow-x: auto; white-space: pre-wrap; }}
-  </style>
-</head>
-<body>
-  <div class="container">
-    <div class="header">
-      <h1>Mainframe RAG Answer</h1>
-      <h2>"{html.escape(query)}"</h2>
-      <span class="meta-tag">Kind: <strong>{html.escape(kind.upper())}</strong></span>
-      <span class="meta-tag">Excerpts: {len(hits)}</span>
-      <span class="meta-tag">Verification: {html.escape(parsed.verification_state or "unknown")}</span>
-      <span class="meta-tag">Embed: {timings.get('embed_ms', 0)}ms</span>
-      <span class="meta-tag">Qdrant: {timings.get('qdrant_ms', 0)}ms</span>
-      <span class="meta-tag">Total: {total_ms}ms</span>
-    </div>
-    <div class="answer-card">
+    return f"""<div class="answer-card">
       <h3>Reasoning Answer</h3>
       <div style="white-space: pre-wrap; line-height: 1.6;">{html.escape(parsed.answer)}</div>
       <hr style="border: none; border-top: 1px solid var(--border); margin: 1.5rem 0;" />
@@ -322,10 +275,6 @@ def render_answer_html(
     </div>
     {script_html}
     <h3>Retrieved Source Excerpts</h3>
-    {sources_html}
-  </div>
-</body>
-</html>
 """
 
 

@@ -93,9 +93,7 @@ class AnswerCoreInput:
     product: str | None = None
     version: str | None = None
     splunk_context: str | None = None
-    stream: bool = False
     temperature: float | None = None
-    request_id: str | None = None
     is_chat: bool = False
     hits: list[SearchHit] | None = None
     query_kind: str | None = None

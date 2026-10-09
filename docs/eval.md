@@ -237,7 +237,8 @@ while `diagnostic_dualpath_enabled` remains default-off.
   it does not attest exact platform weights or semantic model acceptance.
 - **Retrieval input selection (#508):** `eval.datasets.default_retrieval_paths`
   owns the workspace-relative dataset/baseline pair for `--suite dev` (default)
-  or `--suite paraphrase`. It uses the current invocation's normalized Settings
+  or `--suite paraphrase`; its unused baseline-only compatibility delegate is retired.
+  It uses the current invocation's normalized Settings
   mode: vllm selects the `-vllm` baseline; other modes select the hash-family
   filename. An explicitly empty mode remains empty, without promising a usable
   model backend. Explicit `--golden`, `--check PATH`, and

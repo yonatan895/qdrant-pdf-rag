@@ -78,10 +78,8 @@ from mainframe_rag.ports import QdrantPoints
 class PublishTarget:
     """Resolved publication endpoints for one run."""
 
-    alias: str
     staging: str
     live: str | None
-    legacy: bool
 
 
 def generation_fingerprint(settings: Settings, rules_v: str, cli_triple: str) -> str:

@@ -248,7 +248,6 @@ fi
 # UI port (an operator-managed Jaeger is not ours to stop), otherwise start
 # the pinned owner script and stop it again on exit.
 JAEGER_PID=""
-JAEGER_OWNED=0
 if curl -s -m 3 -o /dev/null "$JAEGER_UI_URL/api/services" 2>/dev/null; then
     step "Jaeger reachable at $JAEGER_UI_URL (reusing)"
 else
@@ -256,7 +255,6 @@ else
     JAEGER_PORT="$JAEGER_PORT" JAEGER_OTLP_PORT="$JAEGER_OTLP_PORT" \
         sh "$REPO_ROOT/scripts/run_local_jaeger.sh" >"$LOG_DIR/local-stack-jaeger.log" 2>&1 &
     JAEGER_PID=$!
-    JAEGER_OWNED=1
     _i=0
     while [ "$_i" -lt 60 ]; do
         curl -s -m 3 -o /dev/null "$JAEGER_UI_URL/api/services" 2>/dev/null && break
