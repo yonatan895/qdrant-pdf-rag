@@ -249,7 +249,7 @@ def _record_from_payload(payload: dict) -> StoredManifest | None:
 
 
 def read_manifest_record(
-    client: QdrantPoints, completions_collection: str, *, validate_envelope: bool = False
+    client: QdrantReader, completions_collection: str, *, validate_envelope: bool = False
 ) -> StoredManifest | None:
     """Stored contract + state, or None when absent/legacy/unparseable.
     Never raises on stored data: a corrupt manifest is a legacy outcome,
@@ -277,7 +277,7 @@ def read_manifest_record(
 
 
 def read_manifest(
-    client: QdrantPoints, completions_collection: str
+    client: QdrantReader, completions_collection: str
 ) -> RepresentationManifest | None:
     """Model-only read, or None when absent/legacy/unparseable. Callers that
     must distinguish pending from committed use `read_manifest_record`."""
@@ -328,7 +328,7 @@ def commit_manifest(
 
 
 def refuse_limited_migration(
-    client: QdrantPoints, settings: Settings, completions_collection: str, rules_v: str
+    client: QdrantReader, settings: Settings, completions_collection: str, rules_v: str
 ) -> None:
     """`--limit` + a representation migration = refuse (issue #391 F2): a
     partial walk cannot prove the whole searchable collection was
@@ -426,7 +426,7 @@ def require_attested_revision(settings: Settings) -> None:
 
 
 def check_ingest_compatible(
-    client: QdrantPoints,
+    client: QdrantReader,
     settings: Settings,
     completions_collection: str,
     rules_v: str,

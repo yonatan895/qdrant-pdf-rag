@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any
 from qdrant_client import models
 
 if TYPE_CHECKING:
-    from mainframe_rag.ports import QdrantPoints
+    from mainframe_rag.ports import QdrantReader
 
 SEAL_SCHEMA = 1
 
@@ -56,7 +56,7 @@ def _point_digest(point: Any) -> bytes:
 
 
 def _collection_digest(
-    client: QdrantPoints, collection: str, binding: list[str], role: str, excluded_id: str | None,
+    client: QdrantReader, collection: str, binding: list[str], role: str, excluded_id: str | None,
 ) -> dict:
     # Keep only IDs and fixed-size hashes across pages; never retain all corpus
     # text/vectors. Sorted IDs make the certificate independent of page order.
@@ -102,7 +102,7 @@ def _collection_digest(
 
 
 def capture_content_seal(
-    client: QdrantPoints, *, build_id: str, alias: str, physical: str,
+    client: QdrantReader, *, build_id: str, alias: str, physical: str,
     gen_fp: str, corpus_fp: str, receipt_id: str,
 ) -> dict:
     """Capture verified immutable bytes, bound to the complete build identity."""
