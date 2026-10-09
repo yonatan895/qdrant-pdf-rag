@@ -24,6 +24,10 @@ REQUIRED = (
 )
 SKILLS = Path(".agents/skills")
 PROVENANCE = Path(".agents/qdrant-skills-provenance.md")
+SKILL_PROVIDERS = (
+    (PROVENANCE, "qdrant-skills"),
+    (Path(".agents/mattpocock-skills-provenance.md"), "mattpocock-skills"),
+)
 ALLOWLIST = re.compile(r"<!-- skills-allowlist:start -->\n(.*?)<!-- skills-allowlist:end -->", re.DOTALL)
 SHA = re.compile(r"\b[0-9a-f]{40}\b")
 LINK = re.compile(r"\[([^\]\n]+)\]\(([^()\s]+)\)")
@@ -190,26 +194,38 @@ def check(root: Path, client_limit: int | None = None) -> tuple[list[str], list[
         errors.append(f"docs/agent-workflow.md: {exc}")
 
     if (root/SKILLS).exists():
-        provenance = read(root/PROVENANCE)
-        block = ALLOWLIST.search(provenance)
-        allowed = {line[2:].strip() for line in block[1].splitlines() if line.startswith("- ")} if block else set()
+        allowed: set[str] = set()
+        for record, provider in SKILL_PROVIDERS:
+            if record != PROVENANCE and not (root/record).exists():
+                continue
+            provenance = read(root/record)
+            block = ALLOWLIST.search(provenance)
+            selected = {line[2:].strip() for line in block[1].splitlines() if line.startswith("- ")} if block else set()
+            if not selected:
+                errors.append(f"{record}: missing skills-allowlist block")
+            for name in sorted(allowed & selected):
+                errors.append(f"{SKILLS/name}: skill claimed by multiple provider allowlists")
+            allowed.update(selected)
+            links(root/record, provenance)
+            notice = read(root/f"NOTICE.{provider}")
+            if not (root/f"LICENSE.{provider}").is_file():
+                errors.append(f"LICENSE.{provider}: missing")
+            if not set(SHA.findall(provenance)) or set(SHA.findall(provenance)) != set(SHA.findall(notice)):
+                errors.append(f"{record} and NOTICE.{provider} must name the same pinned SHA")
+            for name in sorted(selected):
+                skill = root/SKILLS/name/"SKILL.md"
+                if not skill.is_file():
+                    errors.append(f"{record}: allowlisted skill {name} missing from {SKILLS}")
+                elif provider == "mattpocock-skills":
+                    links(skill, read(skill))
         present = {path.name for path in (root/SKILLS).iterdir() if path.is_dir()}
-        if not allowed:
-            errors.append(f"{PROVENANCE}: missing skills-allowlist block")
         for name in sorted(present - allowed):
-            errors.append(f"{SKILLS/name}: vendored skill not in {PROVENANCE} allowlist")
-        for name in sorted(allowed - present):
-            errors.append(f"{PROVENANCE}: allowlisted skill {name} missing from {SKILLS}")
+            errors.append(f"{SKILLS/name}: skill not in provider allowlists")
         index = root/SKILLS/"index.md"
         if not index.is_file():
             errors.append(f"{SKILLS}/index.md: repository-owned index missing")
         else:
             links(index, read(index))
-        notice = read(root/"NOTICE.qdrant-skills")
-        if not (root/"LICENSE.qdrant-skills").is_file():
-            errors.append("LICENSE.qdrant-skills: missing")
-        if not set(SHA.findall(provenance)) or set(SHA.findall(provenance)) != set(SHA.findall(notice)):
-            errors.append(f"{PROVENANCE} and NOTICE.qdrant-skills must name the same pinned SHA")
 
     for directory, dirs, names in os.walk(root):
         dirs[:] = [name for name in dirs if name not in EXCLUDED and not Path(directory, name).is_symlink()]

@@ -29,7 +29,7 @@ Decision owners: `licenses/inventory.json` (the record),
 ## What is recorded and how it is derived
 
 `licenses/inventory.json` holds one record per locked runtime wheel (60) and per
-non-Python component (14, including the three non-distributed boundaries above).
+non-Python component (15, including the three non-distributed boundaries above).
 
 - **Python wheels** are derived offline from the exact locked wheel bytes (59,
   METADATA `License-Expression`, `License` field or classifier, plus license-file
@@ -123,9 +123,9 @@ then `pymupdf` stays `pending-owner-decision` and `check --release` fails.
 3. The bundle carries `THIRD-PARTY-NOTICES.txt` (signed member in `SHA256SUMS`,
    required by `bootstrap.sh`, copied to `dist/`): the license/class/status of every
    component and wheel, the open owner decisions, the approval state, and the full
-   texts of the project LICENSE, the Qdrant chart LICENSE, htmx, the Qdrant skills
-   license and notice, and Task (`task-LICENSE`). It is deterministic and readable
-   without any tool beyond a text viewer.
+   texts of the project LICENSE, the Qdrant chart LICENSE, htmx, the Qdrant and
+   Matt Pocock skills licenses and notices, and Task (`task-LICENSE`). It is
+   deterministic and readable without any tool beyond a text viewer.
 4. Python license texts travel inside each image (`<dist>.dist-info`), not in the
    notices file. Pack-time verification of license files inside the actual image
    layers is not implemented (follow-up with the #371 image reader).

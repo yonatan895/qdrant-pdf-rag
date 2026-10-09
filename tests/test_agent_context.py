@@ -233,3 +233,61 @@ class VendoredSkillsTests(TestCase):
 
     def test_repository_skills_tree_matches_its_allowlist(self):
         self.assertEqual([e for e in check(REAL_ROOT)[0] if "skill" in e.lower()], [])
+
+    def add_engineering_provider(self):
+        pin = "b" * 40
+        (self.root/".agents/mattpocock-skills-provenance.md").write_text(
+            f"pin `{pin}`\n<!-- skills-allowlist:start -->\n- tdd\n<!-- skills-allowlist:end -->\n")
+        (self.root/"NOTICE.mattpocock-skills").write_text(f"commit {pin}\n")
+        (self.root/"LICENSE.mattpocock-skills").write_text("MIT\n")
+        wrapper = self.root/".agents/skills/tdd/SKILL.md"
+        wrapper.parent.mkdir()
+        wrapper.write_text("[Upstream](../../vendor/mattpocock-skills/tdd/SKILL.md)\n")
+        upstream = self.root/".agents/vendor/mattpocock-skills/tdd/SKILL.md"
+        upstream.parent.mkdir(parents=True)
+        upstream.write_text("original upstream skill\n")
+        with (self.root/".agents/skills/index.md").open("a") as index:
+            index.write("[TDD](tdd/SKILL.md)\n")
+
+    def test_independently_pinned_providers_can_share_the_skills_directory(self):
+        self.add_engineering_provider()
+        self.assertEqual(check(self.root)[0], [])
+
+    def test_second_provider_does_not_permit_unselected_categories(self):
+        self.add_engineering_provider()
+        for name in ("qdrant-edge", "research"):
+            with self.subTest(name=name):
+                (self.root/".agents/skills"/name).mkdir()
+                self.assertTrue(any(name in e and "allowlist" in e for e in check(self.root)[0]))
+                (self.root/".agents/skills"/name).rmdir()
+
+    def test_provider_pin_and_license_checks_remain_independent(self):
+        self.add_engineering_provider()
+        (self.root/"NOTICE.mattpocock-skills").write_text(f"commit {SHA}\n")
+        (self.root/"LICENSE.mattpocock-skills").unlink()
+        errors = check(self.root)[0]
+        self.assertTrue(any("mattpocock-skills" in e and "same pinned SHA" in e for e in errors))
+        self.assertTrue(any("LICENSE.mattpocock-skills" in e for e in errors))
+        self.assertFalse(any("NOTICE.qdrant-skills" in e for e in errors))
+
+    def test_provider_allowlists_cannot_claim_the_same_skill(self):
+        self.add_engineering_provider()
+        record = self.root/".agents/mattpocock-skills-provenance.md"
+        record.write_text(record.read_text().replace("- tdd", "- tdd\n- qdrant-sizing"))
+        self.assertTrue(any("qdrant-sizing" in e and "multiple provider" in e for e in check(self.root)[0]))
+
+    def test_repository_entry_point_must_resolve_its_local_upstream_reference(self):
+        self.add_engineering_provider()
+        (self.root/".agents/vendor/mattpocock-skills/tdd/SKILL.md").unlink()
+        self.assertTrue(any("tdd/SKILL.md" in e and "broken local reference" in e for e in check(self.root)[0]))
+
+    def test_repository_engineering_vendor_bytes_match_the_pinned_manifest(self):
+        import hashlib
+
+        manifest = REAL_ROOT/".agents/mattpocock-skills.sha256"
+        recorded = {path: digest for digest, path in (line.split("  ", 1) for line in manifest.read_text().splitlines())}
+        vendor = REAL_ROOT/".agents/vendor/mattpocock-skills"
+        actual = {p.relative_to(REAL_ROOT).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
+                  for p in vendor.rglob("*") if p.is_file()}
+        self.assertTrue(recorded)
+        self.assertEqual(actual, recorded)

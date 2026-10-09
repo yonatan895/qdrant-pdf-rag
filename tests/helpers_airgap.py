@@ -86,7 +86,9 @@ def copy_license_inputs(tmp_path: Path) -> None:
         if p.is_file()
     )
     for relative in ("licenses/inventory.json", "scripts/license_inventory.py", "pyproject.toml", "LICENSE",
-                     "LICENSE.qdrant-skills", "NOTICE.qdrant-skills", "bm25-weights.sha256", *vendor):
+                     "LICENSE.qdrant-skills", "NOTICE.qdrant-skills",
+                     "LICENSE.mattpocock-skills", "NOTICE.mattpocock-skills",
+                     ".agents/mattpocock-skills.sha256", "bm25-weights.sha256", *vendor):
         target = tmp_path / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(REPO / relative, target)
