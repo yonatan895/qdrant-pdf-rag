@@ -64,30 +64,11 @@ def empty_final_payload(
     (review S6); no tokens streamed, so ttft_ms stays null and usage zeros.
     The state is always `insufficient_evidence` — nothing was attempted from
     evidence — and no script can ride this path, so both default closed."""
-    return {
-        "type": "final",
-        "request_id": request_id,
-        "answer": answer,
-        "citations": [],
-        "citations_inferred": False,
-        "inferred_indices": [],
-        "verification_state": verification_state,
-        "script": None,
-        "script_lang": None,
-        "script_review_required": script_review_required,
-        "supplied_evidence": [],
-        "evidence_omitted": 0,
-        "query_kind": query_kind,
-        "hits": [],
-        "finish_reason": "stop",
-        "ttft_ms": None,
-        "usage": {
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "reasoning_tokens": 0,
-            "total_tokens": 0,
-        },
-    }
+    return final_payload(
+        request_id, answer, [], False, None, query_kind, [], "stop", None, TokenUsage(),
+        verification_state=verification_state,
+        script_review_required=script_review_required,
+    )
 
 
 def final_payload(
