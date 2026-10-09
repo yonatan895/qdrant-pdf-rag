@@ -559,15 +559,6 @@ async def read_manifest_record_async(
     return _record_from_payload(points[0].payload or {})
 
 
-async def read_manifest_async(
-    async_client: AsyncQdrantPoints | QdrantPoints, completions_collection: str
-) -> RepresentationManifest | None:
-    """Model-only async read. Serving callers that must distinguish pending
-    from committed use `read_manifest_record_async`."""
-    record = await read_manifest_record_async(async_client, completions_collection)
-    return record.manifest if record is not None else None
-
-
 async def serving_outcome(
     async_client: AsyncQdrantPoints | QdrantPoints,
     settings: Settings,
