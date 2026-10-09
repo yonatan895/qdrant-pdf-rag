@@ -821,10 +821,10 @@ live in `.github/workflows/e2e.yml`.
   contract lanes set `TASK_CONTRACTS_REQUIRE_RUNNER=1`; absence is a failure,
   never a skipped pass. Offline GitLab runners mount the approved
   `task_linux_amd64.tar.gz` at `CI_TASK_ARCHIVE`; the unit job verifies/installs
-  it with `install-task.sh --archive`, with no public download. Prepared Python
-  jobs retain their interpreter and do not run `dev:setup`. Python preparation
-  uses [complete target hash locks](dependencies.md) and verifies the installed
-  inventory. Runtime images check approved wheel bytes before offline installation;
+  it with `install-task.sh --archive`, with no public download. Prepared jobs
+  retain their Python interpreter without `dev:setup`. Preparation uses
+  [complete target hash locks](dependencies.md), verifies installed inventory, and
+  omits unused pip caching. Runtime images check approved wheel bytes before offline installation;
   packaging reconciles actual image layers with the Python SBOM. Unit jobs also
   explicitly prepare the existing pinned Helm binary (offline GitLab input
   `CI_HELM_ARCHIVE`) and run `agent_doctor.py --python` before pytest collection.
