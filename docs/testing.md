@@ -69,10 +69,10 @@ Pure builders live in `tests/fakes.py` (`make_hit`, `make_point`,
 `tests/conftest.py` re-exports the retrieval doubles as
 backwards-compatible aliases — import from either, define in neither.
 
-Behavior pins stay explicit via arguments, never subclasses: the
-sequential-fallback pin needs a double with NO `query_batch_points`
-method (`LegacyQdrantFake` — retrieve dispatches on `hasattr`, so a
-raising stub would error instead of falling back); `str` vs `ChatResult`
+Behavior pins stay explicit via arguments, never subclasses. Serving
+awaits only async readers: wrap a sync Qdrant double in
+`ports.AsyncReaderAdapter` where a test calls async serving code directly
+(`tests.fakes.batch_via_query_points` gives a double its batch call); `str` vs `ChatResult`
 LLM returns lock different coercion paths (do not normalize to one);
 limit-slicing, dim-16 recording, and per-file cite shapes stay local
 with a comment saying why. A shared-helper change must never silently

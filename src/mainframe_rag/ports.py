@@ -249,6 +249,77 @@ class AsyncQdrantReader(Protocol):
     async def close(self) -> None: ...
 
 
+class AsyncReaderAdapter:
+    """The one sync-to-async boundary for Qdrant reads (issue #369): an
+    `AsyncQdrantReader` view over a sync `QdrantReader`. Serving awaits only
+    async readers; sync tooling (`retrieve.query.search`, evals, scripts)
+    and tests holding a sync client reach it through this adapter. Calls run
+    inline, so it belongs only where a sync client already blocks — never in
+    the agent, whose client is async. `close` leaves the wrapped client to
+    its owner."""
+
+    def __init__(self, reader: QdrantReader) -> None:
+        self._reader = reader
+
+    async def collection_exists(self, collection_name: str) -> bool:
+        return self._reader.collection_exists(collection_name)
+
+    async def get_collection(self, collection_name: str) -> models.CollectionInfo:
+        return self._reader.get_collection(collection_name)
+
+    async def get_aliases(self) -> models.CollectionsAliasesResponse:
+        return self._reader.get_aliases()
+
+    async def scroll(
+        self,
+        collection_name: str,
+        *,
+        scroll_filter: models.Filter | None = None,
+        limit: int = 10,
+        with_payload: bool | list[str],
+        offset: int | str | UUID | None = None,
+    ) -> tuple[list[models.Record], int | str | UUID | None]:
+        return self._reader.scroll(
+            collection_name, scroll_filter=scroll_filter, limit=limit,
+            with_payload=with_payload, offset=offset,
+        )
+
+    async def retrieve(
+        self,
+        collection_name: str,
+        ids: list[str],
+        *,
+        with_payload: bool | list[str],
+        with_vectors: bool = False,
+    ) -> list[models.Record]:
+        return self._reader.retrieve(
+            collection_name, ids, with_payload=with_payload, with_vectors=with_vectors
+        )
+
+    async def query_points(
+        self,
+        collection_name: str,
+        *,
+        query: list[float] | models.SparseVector,
+        using: str,
+        limit: int,
+        query_filter: models.Filter | None,
+        with_payload: bool | list[str],
+    ) -> models.QueryResponse:
+        return self._reader.query_points(
+            collection_name, query=query, using=using, limit=limit,
+            query_filter=query_filter, with_payload=with_payload,
+        )
+
+    async def query_batch_points(
+        self, collection_name: str, *, requests: list[models.QueryRequest]
+    ) -> list[models.QueryResponse]:
+        return self._reader.query_batch_points(collection_name, requests=requests)
+
+    async def close(self) -> None:
+        return None
+
+
 class TokenUsage(BaseModel):
     model_config = ConfigDict(frozen=True)
     prompt_tokens: int = 0

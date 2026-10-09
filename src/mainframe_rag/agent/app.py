@@ -104,7 +104,6 @@ from mainframe_rag.ports import (
     ChatMessage,
     Embedder,
     LLMClient,
-    QdrantReader,
     Reranker,
     Tokenizer,
     TokenUsage,
@@ -129,7 +128,7 @@ log = logging.getLogger("agent")
 settings: Settings
 http: httpx2.AsyncClient
 http_sync: httpx2.Client
-qdrant: AsyncQdrantReader | QdrantReader
+qdrant: AsyncQdrantReader
 embedder: Embedder
 llm: LLMClient
 tokenizer: Tokenizer

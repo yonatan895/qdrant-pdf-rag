@@ -592,21 +592,21 @@ def test_healthz_representation_drift_degrades(client, monkeypatch):
         completion_collection_name(settings), embed_model_revision="other-rev",
     )
 
-    class SyncDriftQdrant:
-        def get_aliases(self):
+    class DriftQdrant:
+        async def get_aliases(self):
             return SimpleNamespace(aliases=[])
 
-        def collection_exists(self, name):
+        async def collection_exists(self, name):
             return True
 
-        def retrieve(self, *a, **k):
+        async def retrieve(self, *a, **k):
             return [SimpleNamespace(payload=envelope)]
 
-        def scroll(self, *a, **k):
+        async def scroll(self, *a, **k):
             return ([SimpleNamespace(payload={})], None)
 
     monkeypatch.setattr(app_mod, "http", _ready_pool())
-    monkeypatch.setattr(app_mod, "qdrant", SyncDriftQdrant())
+    monkeypatch.setattr(app_mod, "qdrant", DriftQdrant())
     monkeypatch.setattr(app_mod, "serving_gate", ServingGate(0.0))
     resp = client.get("/healthz")
     assert resp.status_code == 503

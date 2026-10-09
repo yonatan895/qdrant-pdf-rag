@@ -21,7 +21,13 @@ from qdrant_client import models
 if TYPE_CHECKING:
     from mainframe_rag.config import Settings
 
-from mainframe_rag.ports import AsyncQdrantReader, Embedder, QdrantReader, Reranker, maybe_await
+from mainframe_rag.ports import (
+    AsyncQdrantReader,
+    AsyncReaderAdapter,
+    Embedder,
+    QdrantReader,
+    Reranker,
+)
 from mainframe_rag.retrieve.filters import (
     build_fallback_filter,
     build_filter,
@@ -610,7 +616,7 @@ def search(
         )
     return asyncio.run(
         async_search(
-            client,
+            AsyncReaderAdapter(client),
             embedder,
             collection,
             query,
@@ -623,28 +629,8 @@ def search(
     )
 
 
-async def _async_prefetch_one(
-    client: AsyncQdrantReader | QdrantReader,
-    collection: str,
-    vec: list[float] | models.SparseVector,
-    using: str,
-    flt: models.Filter | None,
-    limit: int,
-) -> list[models.ScoredPoint]:
-    res = client.query_points(
-        collection,
-        query=vec,
-        using=using,
-        limit=limit,
-        query_filter=flt,
-        with_payload=list(RETRIEVE_PAYLOAD_FIELDS),
-    )
-    resp = await maybe_await(res)
-    return resp.points
-
-
 async def async_search(
-    client: AsyncQdrantReader | QdrantReader,
+    client: AsyncQdrantReader,
     embedder: Embedder,
     collection: str,
     query: str,
@@ -657,7 +643,7 @@ async def async_search(
     """Async: returns (hits, query_kind, timing_ms). Filters applied inside prefetch.
 
     Dense and sparse prefetch queries execute concurrently in a single HTTP
-    batch call via query_batch_points (falling back to query_points if unsupported).
+    batch call via query_batch_points.
     When reranking is enabled, fused candidates (top-50) are scored by the cross-encoder."""
     identifiers = parse_query(query)
     flt = build_filter(identifiers, product=product, version=version)
@@ -709,7 +695,9 @@ async def async_search(
             "retrieve.prefetch",
             kind=SpanKind.CLIENT,
             attributes={
-                "rag.batch": hasattr(client, "query_batch_points"),
+                # Always one batch per leg (the reader protocol requires it);
+                # kept for the trace attribute contract.
+                "rag.batch": True,
                 "rag.prefetch_limit": prefetch_limit,
             },
         ):
@@ -725,43 +713,19 @@ async def async_search(
                     dense_vec, sparse_idx, sparse_val, flt, prefetch_limit
                 )
 
-                if hasattr(client, "query_batch_points"):
-                    res = client.query_batch_points(collection, requests=[dense_req, sparse_req])
-                    responses = await maybe_await(res)
-                    dense_points = responses[0].points
-                    sparse_points = responses[1].points
-                else:
-                    dense_points = await _async_prefetch_one(client, collection, dense_vec, "dense", flt, prefetch_limit)
-                    sparse_points = await _async_prefetch_one(
-                        client,
-                        collection,
-                        models.SparseVector(indices=sparse_idx, values=sparse_val),
-                        "bm25",
-                        flt,
-                        prefetch_limit,
-                    )
+                responses = await client.query_batch_points(
+                    collection, requests=[dense_req, sparse_req]
+                )
+                dense_points, sparse_points = responses[0].points, responses[1].points
                 leg_fallback = _needs_filter_fallback(dense_points, sparse_points, flt, fallback_flt)
                 if leg_fallback:
                     dense_req, sparse_req = _build_prefetch_requests(
                         dense_vec, sparse_idx, sparse_val, fallback_flt, prefetch_limit
                     )
-                    if hasattr(client, "query_batch_points"):
-                        res = client.query_batch_points(collection, requests=[dense_req, sparse_req])
-                        responses = await maybe_await(res)
-                        dense_points = responses[0].points
-                        sparse_points = responses[1].points
-                    else:
-                        dense_points = await _async_prefetch_one(
-                            client, collection, dense_vec, "dense", fallback_flt, prefetch_limit
-                        )
-                        sparse_points = await _async_prefetch_one(
-                            client,
-                            collection,
-                            models.SparseVector(indices=sparse_idx, values=sparse_val),
-                            "bm25",
-                            fallback_flt,
-                            prefetch_limit,
-                        )
+                    responses = await client.query_batch_points(
+                        collection, requests=[dense_req, sparse_req]
+                    )
+                    dense_points, sparse_points = responses[0].points, responses[1].points
                 leg_dense_points.append(dense_points)
                 leg_sparse_points.append(sparse_points)
                 filter_fallback = filter_fallback or leg_fallback

@@ -68,7 +68,7 @@ from qdrant_client import models
 
 from mainframe_rag.config import Settings
 from mainframe_rag.ingest.context import CONTEXT_PROMPT_VERSION
-from mainframe_rag.ports import AsyncQdrantReader, QdrantPoints, QdrantReader, maybe_await
+from mainframe_rag.ports import AsyncQdrantReader, QdrantPoints, QdrantReader
 
 MANIFEST_SCHEMA_VERSION = 1
 
@@ -534,7 +534,7 @@ def rekey_manifest(
 
 
 async def read_manifest_record_async(
-    async_client: AsyncQdrantReader | QdrantReader, completions_collection: str
+    async_client: AsyncQdrantReader, completions_collection: str
 ) -> StoredManifest | None:
     """Async mirror of `read_manifest_record` for the serving path (lifespan
     + `/healthz`): stored contract + state, or None when
@@ -543,23 +543,21 @@ async def read_manifest_record_async(
     The existence check runs first (issue #391: a fresh install reads as
     absent, not as an unreachable store). Sync test doubles resolve inline
     through the shared shim (same discipline as the retrieval legs)."""
-    exists = await maybe_await(async_client.collection_exists(completions_collection))
+    exists = await async_client.collection_exists(completions_collection)
     if not exists:
         return None
-    points = await maybe_await(
-        async_client.retrieve(
+    points = await async_client.retrieve(
             completions_collection,
             ids=[manifest_point_id(completions_collection)],
             with_payload=True,
         )
-    )
     if not points:
         return None
     return _record_from_payload(points[0].payload or {})
 
 
 async def serving_outcome(
-    async_client: AsyncQdrantReader | QdrantReader,
+    async_client: AsyncQdrantReader,
     settings: Settings,
     completions_collection: str,
     rules_v: str,
@@ -575,11 +573,9 @@ async def serving_outcome(
     try:
         stored = await read_manifest_record_async(async_client, completions_collection)
         if stored is None:
-            points, _ = await maybe_await(
-                async_client.scroll(
+            points, _ = await async_client.scroll(
                     settings.qdrant_collection, limit=1, with_payload=False
                 )
-            )
             return ("empty", []) if not points else ("legacy", [])
         if stored.state != STATE_COMMITTED:
             return "pending", []
@@ -589,7 +585,7 @@ async def serving_outcome(
 
 
 async def resolve_serving_generation(
-    async_client: AsyncQdrantReader | QdrantReader,
+    async_client: AsyncQdrantReader,
     settings: Settings,
     rules_v: str,
 ) -> tuple[str | None, str, list[str]]:
@@ -603,7 +599,7 @@ async def resolve_serving_generation(
     from mainframe_rag.ingest.qdrant_io import live_collection_from
 
     alias = settings.qdrant_collection
-    aliases = await maybe_await(async_client.get_aliases())
+    aliases = await async_client.get_aliases()
     target = next(
         (
             desc.collection_name
@@ -613,7 +609,7 @@ async def resolve_serving_generation(
         None,
     )
     candidate = target if target is not None else alias
-    exists = bool(await maybe_await(async_client.collection_exists(candidate)))
+    exists = bool(await async_client.collection_exists(candidate))
     physical, _legacy = live_collection_from(alias, target, exists)
     if physical is None:
         return None, "empty", []

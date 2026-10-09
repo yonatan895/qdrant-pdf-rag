@@ -8,10 +8,11 @@ import pytest
 from qdrant_client import models
 
 from mainframe_rag.config import Settings
-from mainframe_rag.ports import Embedder
+from mainframe_rag.ports import AsyncReaderAdapter, Embedder
 from mainframe_rag.retrieve.filters import build_filter, build_scope_filter, parse_query
 from mainframe_rag.retrieve.query import format_citation, rrf_fuse, search
-from tests.conftest import FakeEmbedder, FakeQdrant, LegacyFakeQdrant, _point, _typed_point
+from tests.conftest import FakeEmbedder, FakeQdrant, _point, _typed_point
+from tests.fakes import batch_via_query_points
 
 
 def _settings(dim: int | None = 768) -> Settings:
@@ -193,18 +194,6 @@ def test_search_uses_query_batch_points_with_field_include_list(embedder):
     assert len(hits) == 2
 
 
-def test_search_falls_back_to_query_points_when_batch_unsupported(embedder):
-    """search() must fall back to sequential query_points if the client lacks query_batch_points."""
-    from mainframe_rag.retrieve.query import RETRIEVE_PAYLOAD_FIELDS
-
-    fake = LegacyFakeQdrant(dense=[_point("d1")], sparse=[_point("s1")])
-    hits, _kind, _timings = search(fake, embedder, "mainframe_manuals", "sample query", limit=5)
-    assert len(fake.queries) == 2
-    for q in fake.queries:
-        assert q["with_payload"] == list(RETRIEVE_PAYLOAD_FIELDS)
-    assert len(hits) == 2
-
-
 def test_search_identifier_weights_favor_bm25(embedder):
     fake = FakeQdrant(dense=[_point("dense-only")], sparse=[_point("sparse-only")])
     hits, kind, _ = search(fake, embedder, "mainframe_manuals", "IEA500I", limit=5)
@@ -304,8 +293,7 @@ def test_search_type_boost_matches_async_twin():
             fake_sync, FakeEmbedder(), "mainframe_manuals", query, limit=5, settings=settings
         )
         async_hits, async_kind, _ = asyncio.run(
-            async_search(
-                fake_async, FakeEmbedder(), "mainframe_manuals", query, limit=5, settings=settings
+            async_search(AsyncReaderAdapter(fake_async), FakeEmbedder(), "mainframe_manuals", query, limit=5, settings=settings
             )
         )
         assert sync_kind == async_kind == "nl"
@@ -385,7 +373,7 @@ async def test_async_search_offloads_blocking_embed_from_event_loop():
     hb = asyncio.create_task(heartbeat())
     t0 = time.monotonic()
     await asyncio.gather(
-        *(async_search(qdrant, embedder, "mainframe_manuals", f"IEA500I {i}", limit=5) for i in range(4))
+        *(async_search(AsyncReaderAdapter(qdrant), embedder, "mainframe_manuals", f"IEA500I {i}", limit=5) for i in range(4))
     )
     elapsed = time.monotonic() - t0
     hb.cancel()
@@ -425,7 +413,7 @@ def test_async_search_matches_sync_search_identical_fakes():
 
             sync_res = search(fake_sync, embedder, "mainframe_manuals", query, limit=5, reranker=reranker)
             async_res = asyncio.run(
-                async_search(fake_async, embedder, "mainframe_manuals", query, limit=5, reranker=reranker)
+                async_search(AsyncReaderAdapter(fake_async), embedder, "mainframe_manuals", query, limit=5, reranker=reranker)
             )
 
             sync_hits, sync_kind, sync_timings = sync_res
@@ -477,8 +465,7 @@ def test_async_search_alpha_sweep_matches_sync():
             settings=settings, reranker=PromotingByIndex(),
         )
         async_hits, async_kind, async_timings = asyncio.run(
-            async_search(
-                fake_async, embedder, "mainframe_manuals", query, limit=5,
+            async_search(AsyncReaderAdapter(fake_async), embedder, "mainframe_manuals", query, limit=5,
                 settings=settings, reranker=PromotingByIndex(),
             )
         )
@@ -560,25 +547,6 @@ def test_search_filter_fallback_single_retry_only(embedder):
     assert all(req.filter is not None for req in fake.batch_requests)
 
 
-def test_search_filter_fallback_legacy_client_retries_unfiltered(embedder):
-    """Same claimed path over the sequential query_points fallback transport."""
-
-    class FilterAwareLegacy(LegacyFakeQdrant):
-        def query_points(self, collection, query, using, limit, query_filter, with_payload, **_):
-            self.queries.append({"using": using, "filter": query_filter, "with_payload": with_payload})
-            if query_filter is not None:
-                return SimpleNamespace(points=[])
-            points = self._dense if using == "dense" else self._sparse
-            return SimpleNamespace(points=list(points))
-
-    fake = FilterAwareLegacy(dense=[_point("d1")], sparse=[_point("s1")])
-    hits, _kind, _timings = search(fake, embedder, "mainframe_manuals", "SC23-6862 details", limit=5)
-    assert {h.chunk_id for h in hits} == {"d1", "s1"}
-    assert len(fake.queries) == 4
-    assert fake.queries[0]["filter"] is not None
-    assert fake.queries[2]["filter"] is None
-
-
 def test_async_search_filter_fallback_matches_sync(embedder):
     """Drift guard for the new branch: identical filter-aware fakes in,
     identical recovered hits out of both twins."""
@@ -588,7 +556,7 @@ def test_async_search_filter_fallback_matches_sync(embedder):
     fake_async = FilterAwareFakeQdrant(dense=[_point("d1")], sparse=[_point("s1")])
     sync_hits, sync_kind, _ = search(fake_sync, embedder, "mainframe_manuals", "SC23-6862", limit=5)
     async_hits, async_kind, _ = asyncio.run(
-        async_search(fake_async, embedder, "mainframe_manuals", "SC23-6862", limit=5)
+        async_search(AsyncReaderAdapter(fake_async), embedder, "mainframe_manuals", "SC23-6862", limit=5)
     )
     assert sync_kind == async_kind == "identifier"
     assert [h.model_dump() for h in sync_hits] == [h.model_dump() for h in async_hits]
@@ -596,7 +564,6 @@ def test_async_search_filter_fallback_matches_sync(embedder):
 
 
 @pytest.mark.parametrize("async_entry", [False, True])
-@pytest.mark.parametrize("batch", [False, True])
 @pytest.mark.parametrize(
     "query,field,wanted,sibling",
     [
@@ -605,9 +572,9 @@ def test_async_search_filter_fallback_matches_sync(embedder):
     ],
 )
 def test_empty_code_lookup_excludes_annotated_sibling_before_prefetch(
-    embedder, async_entry, batch, query, field, wanted, sibling,
+    embedder, async_entry, query, field, wanted, sibling,
 ):
-    """Actual pinned-client filter semantics drive both transport shapes.
+    """Actual pinned-client filter semantics drive both entry points.
 
     The exact lookup is empty; a known wrong code must not enter either
     fallback leg. Generic metadata states and explicit scope stay usable.
@@ -639,15 +606,14 @@ def test_empty_code_lookup_excludes_annotated_sibling_before_prefetch(
             self.calls.append((using, query_filter, [p.id for p in eligible]))
             return SimpleNamespace(points=eligible[:limit])
 
-    class BatchClient(FilterClient):
-        async def query_batch_points(self, collection, requests, **kwargs):
-            return [self.query_points(collection, r.query, r.using, r.limit, r.filter)
-                    for r in requests]
+        query_batch_points = batch_via_query_points
 
-    client = BatchClient() if batch else FilterClient()
+    client = FilterClient()
     kwargs = {"product": "z/OS", "version": "3.1", "limit": 8}
     if async_entry:
-        hits, kind, _ = asyncio.run(async_search(client, embedder, "scratch", query, **kwargs))
+        hits, kind, _ = asyncio.run(
+            async_search(AsyncReaderAdapter(client), embedder, "scratch", query, **kwargs)
+        )
     else:
         hits, kind, _ = search(client, embedder, "scratch", query, **kwargs)
     assert kind == "identifier"
@@ -748,8 +714,10 @@ def test_search_delegates_to_async_core_exactly_once(monkeypatch):
         product="z/OS", version="3.1", limit=5, settings=None, reranker=None,
     )
     assert out == ([], "nl", {"embed_ms": 1})
+    adapter = seen.pop("client")
+    assert isinstance(adapter, AsyncReaderAdapter) and adapter._reader is client
     assert seen == {
-        "client": client, "embedder": embedder, "collection": "coll",
+        "embedder": embedder, "collection": "coll",
         "query": "sizing lookaside", "product": "z/OS", "version": "3.1",
         "limit": 5, "settings": None, "reranker": None,
     }

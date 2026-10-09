@@ -253,8 +253,8 @@ async def test_publication_during_validation_preserves_resolved_reader(monkeypat
                         manifests={physical + "__completions": manifest_envelope(
                             settings, RULES, physical + "__completions") for physical in (old, new)})
     get_aliases = client.get_aliases
-    def advance_after_resolution():
-        observed = get_aliases()
+    async def advance_after_resolution():
+        observed = await get_aliases()
         client.aliases[alias] = new
         return observed
     monkeypatch.setattr(client, "get_aliases", advance_after_resolution)
@@ -295,13 +295,17 @@ def test_serving_read_surface_accepts_real_clients_and_rejects_writes(tmp_path):
     good.write_text("""
 import qdrant_client
 
-from mainframe_rag.ports import AsyncQdrantReader, QdrantPoints, QdrantReader
+from mainframe_rag.ports import AsyncQdrantReader, AsyncReaderAdapter, QdrantPoints, QdrantReader
 
 
 def readers(
     a: qdrant_client.AsyncQdrantClient, s: qdrant_client.QdrantClient, w: QdrantPoints
 ) -> list[AsyncQdrantReader | QdrantReader]:
     return [a, s, w]
+
+
+def adapted(s: qdrant_client.QdrantClient) -> AsyncQdrantReader:
+    return AsyncReaderAdapter(s)
 
 
 def writer(s: qdrant_client.QdrantClient) -> QdrantPoints:
@@ -324,8 +328,7 @@ def bad(res: AgentResources, a: AsyncQdrantReader, s: QdrantReader) -> None:
     rejected = subprocess.run([*command, str(bad)], capture_output=True, text=True, check=False)
     assert rejected.returncode == 1, rejected.stdout + rejected.stderr
     out = rejected.stdout
-    assert 'Item "AsyncQdrantReader" of "AsyncQdrantReader | QdrantReader" has no attribute "upsert"' in out
-    assert 'Item "QdrantReader" of "AsyncQdrantReader | QdrantReader" has no attribute "upsert"' in out
+    assert '"AsyncQdrantReader" has no attribute "upsert"' in out
     assert '"AsyncQdrantReader" has no attribute "delete_collection"' in out
     assert '"QdrantReader" has no attribute "update_collection_aliases"' in out
-    assert "Found 4 errors" in out
+    assert "Found 3 errors" in out
