@@ -25,10 +25,10 @@ tasks:
       127.0.0.1:SIM_PORT. Inputs: SIM_CONTAINER (default qdrant-sim),
       SIM_PORT (default 6333); explicit empty fails closed in the helper.
       Run artifacts:qdrant explicitly first on a connected preparation host.
-    vars:
+    vars: &qdrant_vars
       SIM_CONTAINER: '{{if hasKey . "SIM_CONTAINER"}}{{.SIM_CONTAINER}}{{else}}qdrant-sim{{end}}'
       SIM_PORT: '{{if hasKey . "SIM_PORT"}}{{.SIM_PORT}}{{else}}6333{{end}}'
-    env:
+    env: &qdrant_env
       TASK_SIM_CONTAINER: '{{.SIM_CONTAINER}}'
       TASK_SIM_PORT: '{{.SIM_PORT}}'
     cmds:
@@ -40,12 +40,8 @@ tasks:
       `sh scripts/sim_qdrant.sh down`, replacing the retired `make sim-clean`. Never
       fails when the container is already gone. Same inputs as
       `local:qdrant:up`.
-    vars:
-      SIM_CONTAINER: '{{if hasKey . "SIM_CONTAINER"}}{{.SIM_CONTAINER}}{{else}}qdrant-sim{{end}}'
-      SIM_PORT: '{{if hasKey . "SIM_PORT"}}{{.SIM_PORT}}{{else}}6333{{end}}'
-    env:
-      TASK_SIM_CONTAINER: '{{.SIM_CONTAINER}}'
-      TASK_SIM_PORT: '{{.SIM_PORT}}'
+    vars: *qdrant_vars
+    env: *qdrant_env
     cmds:
       - SIM_CONTAINER="$TASK_SIM_CONTAINER" SIM_PORT="$TASK_SIM_PORT" sh scripts/sim_qdrant.sh down
 
@@ -58,7 +54,10 @@ tasks:
       Pairs accumulate through positional parameters, so free-text values
       arrive as single argv entries and execute nothing. Read-only
       inspection, not a substitute for eval.
-    env:
+    vars:
+      TASK_ANSWER: 'false'
+    env: &query_env
+      TASK_ANSWER: '{{.TASK_ANSWER}}'
       PYTHONPATH: '.'
       TASK_QUERY: '{{.QUERY}}'
       TASK_COLLECTION: '{{.COLLECTION}}'
@@ -73,10 +72,11 @@ tasks:
       TASK_MODEL: '{{.MODEL}}'
       TASK_VLLM_URL: '{{.VLLM_URL}}'
       TASK_OTEL_ENDPOINT: '{{.OTEL_ENDPOINT}}'
-    cmds:
+    cmds: &query_cmds
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
       - >-
         set --;
+        if [ "${TASK_ANSWER:-}" = true ]; then set -- --answer; fi;
         if [ -n "${TASK_QUERY:-}" ]; then set -- "$@" --query "$TASK_QUERY"; fi;
         if [ -n "${TASK_COLLECTION:-}" ]; then set -- "$@" --collection "$TASK_COLLECTION"; fi;
         if [ -n "${TASK_LIMIT:-}" ]; then set -- "$@" --limit "$TASK_LIMIT"; fi;
@@ -96,38 +96,10 @@ tasks:
     summary: |
       Same forwarding as `local:query` with `--answer` first, mirroring
       the retired `make ask`. Interactive; output goes to the terminal.
-    env:
-      PYTHONPATH: '.'
-      TASK_QUERY: '{{.QUERY}}'
-      TASK_COLLECTION: '{{.COLLECTION}}'
-      TASK_LIMIT: '{{.LIMIT}}'
-      TASK_PRODUCT: '{{.PRODUCT}}'
-      TASK_VERSION: '{{.VERSION}}'
-      TASK_EMBED_MODEL: '{{.EMBED_MODEL}}'
-      TASK_EMBED_URL: '{{.EMBED_URL}}'
-      TASK_EMBED_MODE: '{{if hasKey . "EMBED_MODE"}}{{.EMBED_MODE}}{{else}}hash{{end}}'
-      EMBED_MODE: '{{if hasKey . "EMBED_MODE"}}{{.EMBED_MODE}}{{else}}hash{{end}}'
-      TASK_DENSE_DIM: '{{.DENSE_DIM}}'
-      TASK_MODEL: '{{.MODEL}}'
-      TASK_VLLM_URL: '{{.VLLM_URL}}'
-      TASK_OTEL_ENDPOINT: '{{.OTEL_ENDPOINT}}'
-    cmds:
-      - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
-      - >-
-        set -- --answer;
-        if [ -n "${TASK_QUERY:-}" ]; then set -- "$@" --query "$TASK_QUERY"; fi;
-        if [ -n "${TASK_COLLECTION:-}" ]; then set -- "$@" --collection "$TASK_COLLECTION"; fi;
-        if [ -n "${TASK_LIMIT:-}" ]; then set -- "$@" --limit "$TASK_LIMIT"; fi;
-        if [ -n "${TASK_PRODUCT:-}" ]; then set -- "$@" --product "$TASK_PRODUCT"; fi;
-        if [ -n "${TASK_VERSION:-}" ]; then set -- "$@" --version "$TASK_VERSION"; fi;
-        if [ -n "${TASK_EMBED_MODEL:-}" ]; then set -- "$@" --embed-model "$TASK_EMBED_MODEL"; fi;
-        if [ -n "${TASK_EMBED_URL:-}" ]; then set -- "$@" --embed-url "$TASK_EMBED_URL"; fi;
-        if [ -n "${TASK_EMBED_MODE:-}" ]; then set -- "$@" --embed-mode "$TASK_EMBED_MODE"; fi;
-        if [ -n "${TASK_DENSE_DIM:-}" ]; then set -- "$@" --dense-dim "$TASK_DENSE_DIM"; fi;
-        if [ -n "${TASK_MODEL:-}" ]; then set -- "$@" --model "$TASK_MODEL"; fi;
-        if [ -n "${TASK_VLLM_URL:-}" ]; then set -- "$@" --vllm-url "$TASK_VLLM_URL"; fi;
-        if [ -n "${TASK_OTEL_ENDPOINT:-}" ]; then set -- "$@" --otel-endpoint "$TASK_OTEL_ENDPOINT"; fi;
-        exec .venv/bin/python scripts/query_demo.py "$@"
+    vars:
+      TASK_ANSWER: 'true'
+    env: *query_env
+    cmds: *query_cmds
 
   llm:
     desc: Serve the reasoning model locally (GPU, foreground)
@@ -138,7 +110,7 @@ tasks:
       globally). Inputs: ROLE (default reasoning), MODEL, PORT, BUDGET_PROFILE,
       GPU_MEM, MAX_LEN, SEQS, VLLM_IMAGE, SERVED_NAME, CONTAINER_NAME. Foreground: Ctrl-C stops
       the server. Needs the 8GB GPU budget; see docs/live-stack.md.
-    env:
+    env: &vllm_env
       TASK_ROLE: '{{.ROLE}}'
       TASK_MODEL: '{{.MODEL}}'
       TASK_PORT: '{{.PORT}}'
@@ -173,17 +145,7 @@ tasks:
       Qwen/Qwen3-Embedding-0.6B), PORT (default 8001), BUDGET_PROFILE,
       GPU_MEM, MAX_LEN, SEQS, VLLM_IMAGE, SERVED_NAME, CONTAINER_NAME. Never export MODEL
       globally: it would hijack the sibling launchers' defaults.
-    env:
-      TASK_ROLE: '{{.ROLE}}'
-      TASK_MODEL: '{{.MODEL}}'
-      TASK_PORT: '{{.PORT}}'
-      TASK_BUDGET_PROFILE: '{{.BUDGET_PROFILE}}'
-      TASK_GPU_MEM: '{{.GPU_MEM}}'
-      TASK_MAX_LEN: '{{.MAX_LEN}}'
-      TASK_SEQS: '{{.SEQS}}'
-      TASK_VLLM_IMAGE: '{{.VLLM_IMAGE}}'
-      TASK_SERVED_NAME: '{{.SERVED_NAME}}'
-      TASK_CONTAINER_NAME: '{{.CONTAINER_NAME}}'
+    env: *vllm_env
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
       - >-
@@ -208,17 +170,7 @@ tasks:
       ROLE (default rerank), MODEL (default BAAI/bge-reranker-v2-m3), PORT
       (default 8002), GPU_MEM, MAX_LEN, SEQS, VLLM_IMAGE, SERVED_NAME, CONTAINER_NAME. Never alongside
       the default 8GB pair.
-    env:
-      TASK_BUDGET_PROFILE: '{{.BUDGET_PROFILE}}'
-      TASK_ROLE: '{{.ROLE}}'
-      TASK_MODEL: '{{.MODEL}}'
-      TASK_PORT: '{{.PORT}}'
-      TASK_GPU_MEM: '{{.GPU_MEM}}'
-      TASK_MAX_LEN: '{{.MAX_LEN}}'
-      TASK_SEQS: '{{.SEQS}}'
-      TASK_VLLM_IMAGE: '{{.VLLM_IMAGE}}'
-      TASK_SERVED_NAME: '{{.SERVED_NAME}}'
-      TASK_CONTAINER_NAME: '{{.CONTAINER_NAME}}'
+    env: *vllm_env
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
       - >-
