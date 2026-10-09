@@ -120,16 +120,6 @@ def review_template(api: GitHub, number: int) -> dict[str, Any]:
             'evidence': {'review': '<reviewed scope and verification evidence>'}}
 
 
-def is_unfilled_review_template(payload: dict[str, Any]) -> bool:
-    """Exclude exact unfilled scaffolding, never actual or partially entered findings."""
-    legacy = [{'id': '<finding ID; use [] only if none>', 'disposition': 'unresolved',
-               'description': '<finding and evidence; carry forward prior findings>'}]
-    return (payload.get('code_assessment') == '<acceptable|changes_required|incomplete>'
-            and payload.get('verification') == '<complete|incomplete|failed>'
-            and payload.get('merge_readiness') == '<ready_for_maintainer|not_ready>'
-            and payload.get('material_findings') in ([], legacy))
-
-
 def review_template_comment(template: dict[str, Any]) -> str:
     """A copyable skeleton, explicitly not an independent review."""
     return ('<!-- generated-human-review-template -->\n'
@@ -261,81 +251,6 @@ def collect_native(api: GitHub, pr: dict[str, Any], approved_root: Path) -> dict
     return {'candidate': candidate, 'native': native, 'lane_statuses': statuses, 'runs': snapshots,
             'policy_sha256': policy_digest, 'producer_sha256': producer_digest, 'policy_inputs': policy_inputs,
             'verifier_approval': verifier_approval}
-
-
-def collect_review(api: GitHub, pr: dict[str, Any], candidate: dict[str, Any]):
-    """Bind the existing structured review format to an authorized human record.
-
-    A successful bot job, arbitrary marker, or author's supplied JSON file is
-    not an approval. Only a repository collaborator's current API record can
-    supply the human review path; agents must never submit their own approval.
-    """
-    from scripts.review_tooling import extract_review_json, validate_review_payload
-
-    reviews = paginate(api.get, api.prefix + f"pulls/{pr['number']}/reviews")
-    comments = paginate(api.get, api.prefix + f"issues/{pr['number']}/comments")
-    permissions: dict[str, bool] = {}
-    structured = []
-    opinions: dict[int, tuple[str, int, str]] = {}
-    history = set()
-    for source, records in (('review', reviews), ('comment', comments)):
-        for record in records:
-            actor = record['user']
-            if actor['type'] != 'User' or record.get('author_association') not in {'OWNER', 'MEMBER', 'COLLABORATOR'}:
-                continue
-            login = actor['login']
-            require(bool(re.fullmatch('[A-Za-z0-9-]+', login)))
-            if login not in permissions:
-                permission = api.get(api.prefix + f'collaborators/{login}/permission')
-                permissions[login] = permission['permission'] in {'admin', 'maintain', 'write'}
-            if not permissions[login]:
-                continue
-            timestamp = ((record.get('updated_at') if source == 'comment' else record.get('submitted_at'))
-                         or record.get('created_at'))
-            if not timestamp:
-                continue  # A pending native review is not submitted approval.
-            if source == 'review' and record['state'] in {'APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'}:
-                previous = opinions.get(actor['id'])
-                if previous is None or (timestamp, record['id']) > previous[:2]:
-                    opinions[actor['id']] = (timestamp, record['id'], record['state'])
-            payload = extract_review_json(record.get('body') or '')
-            if payload is None or is_unfilled_review_template(payload):
-                continue
-            for finding in payload.get('material_findings', []):
-                if isinstance(finding, dict) and isinstance(finding.get('id'), str):
-                    history.add(finding['id'])
-            structured.append((timestamp, record['id'], source, record, payload))
-    if not structured:
-        return None, {}, {'status': 'missing_authorized_review'}
-    _, _, source, record, payload = max(structured, key=lambda item: item[:2])
-    errors = []
-    if source == 'review' and record['commit_id'] != candidate['head_sha']:
-        errors.append('Native review belongs to another head')
-    if any(opinion[2] == 'CHANGES_REQUESTED' for opinion in opinions.values()):
-        errors.append('A submitted authorized native review still requests changes')
-    latest_ids = {f.get('id') for f in payload.get('material_findings', []) if isinstance(f, dict)}
-    if not history.issubset(latest_ids):
-        errors.append('Latest review omits earlier material finding dispositions')
-    review = validate_review_payload(payload, expected_head=candidate['head_sha'],
-                                     expected_base=candidate['base_sha'], expected_execution=candidate['execution_sha'],
-                                     parse_error='; '.join(errors) if errors else None)
-    manual = {}
-    # Required venue-specific checks can be supplied by the authorized human,
-    # with exact candidate attribution and an evidence link, never a bare green
-    # field in an author-controlled artifact. Their relevance is base policy.
-    for lane in ('agent_probes', 'eval_retrieval'):
-        evidence = review.evidence.get(lane)
-        if isinstance(evidence, dict):
-            bound = all(evidence.get(key) == candidate[key] for key in ('head_sha', 'base_sha', 'execution_sha'))
-            link = evidence.get('url')
-            if (bound and evidence.get('status') == 'success' and isinstance(link, str)
-                    and link.startswith('https://') and evidence.get('command') and evidence.get('result')):
-                manual[lane] = 'success'
-            else:
-                manual[lane] = 'unverified'
-    return review, manual, {'source': source, 'id': record['id'], 'actor_id': record['user']['id'],
-                            'url': record['html_url'], 'updated_at': record.get('updated_at'),
-                            'body_sha256': hashlib.sha256(record['body'].encode()).hexdigest()}
 
 
 def changed_pr_paths(api: GitHub, pr: dict[str, Any]) -> list[str]:

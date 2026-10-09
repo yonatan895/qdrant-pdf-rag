@@ -2195,87 +2195,6 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
         raw = buffer.getvalue()
         return raw, "sha256:" + hashlib.sha256(raw).hexdigest()
 
-    def test_human_review_requires_authorized_current_api_record_and_preserves_rejection(self):
-        import copy
-
-        from scripts.acceptance import collect_review
-
-        candidate = self.fixture()[0]["candidate"]
-        payload = {"schema_version": 1, "head_sha": candidate["head_sha"], "base_sha": candidate["base_sha"],
-                   "execution_sha": candidate["execution_sha"], "code_assessment": "acceptable",
-                   "verification": "complete", "candidate_currentness": "current",
-                   "merge_readiness": "ready_for_maintainer", "material_findings": [], "evidence": {}}
-        comment = {"id": 11, "user": {"id": 7, "login": "synthetic", "type": "User"},
-                   "author_association": "OWNER", "created_at": "2026-09-24T10:00:00Z",
-                   "updated_at": "2026-09-24T10:00:00Z", "body": json.dumps(payload),
-                   "html_url": "https://github.com/synthetic/repository/pull/3#issuecomment-11"}
-        class API:
-            prefix = "repos/synthetic/repository/"
-            def __init__(self):
-                self.comment = copy.deepcopy(comment)
-                self.reviews = []
-                self.older_comments = []
-                self.permission = "admin"
-            def get(self, endpoint):
-                if "/collaborators/" in endpoint:
-                    return {"permission": self.permission}
-                if "/reviews?" in endpoint:
-                    return self.reviews
-                return [*self.older_comments, self.comment]
-        api = API()
-        review, manual, identity = collect_review(api, {"number": 3, "user": {"id": 99}}, candidate)
-        self.assertEqual(review.merge_readiness, "ready_for_maintainer")
-        self.assertEqual(identity["actor_id"], 7)
-        self.assertEqual(manual, {})
-        # The maintainer independently reviews agent work using the same GitHub
-        # account that the agent uses to open PRs. Account equality is not a
-        # substitute for the actual human-review process.
-        api.comment["user"]["id"] = 99
-        shared_review, _, shared_identity = collect_review(api, {"number": 3, "user": {"id": 99}}, candidate)
-        self.assertEqual(shared_review.merge_readiness, "ready_for_maintainer")
-        self.assertEqual(shared_identity["actor_id"], 99)
-        for change in ("bot", "author-pass-table", "stranger", "read-only", "stale", "changes-required", "native-rejection"):
-            with self.subTest(change=change):
-                api = API()
-                revised = copy.deepcopy(payload)
-                if change == "bot":
-                    api.comment["user"]["type"] = "Bot"
-                elif change == "author-pass-table":
-                    api.comment["user"]["id"] = 99
-                    revised = {"result": "PASS"}
-                elif change == "stranger":
-                    api.comment["author_association"] = "NONE"
-                elif change == "read-only":
-                    api.permission = "read"
-                elif change == "stale":
-                    revised["base_sha"] = "f" * 40
-                elif change == "changes-required":
-                    revised["code_assessment"] = "changes_required"
-                else:
-                    api.reviews = [{**copy.deepcopy(comment), "id": 12, "body": "",
-                                    "submitted_at": "2026-09-24T11:00:00Z", "state": "CHANGES_REQUESTED",
-                                    "commit_id": candidate["head_sha"]}]
-                api.comment["body"] = json.dumps(revised)
-                review, _, _ = collect_review(api, {"number": 3, "user": {"id": 99}}, candidate)
-                self.assertTrue(review is None or review.merge_readiness == "not_ready")
-        api = API()
-        previous = copy.deepcopy(payload)
-        previous["material_findings"] = [{"id": "F1", "disposition": "unresolved"}]
-        api.reviews = [{**copy.deepcopy(comment), "id": 9, "body": json.dumps(previous),
-                        "submitted_at": "2026-09-24T09:00:00Z", "state": "COMMENTED",
-                        "commit_id": candidate["head_sha"]}]
-        review, _, _ = collect_review(api, {"number": 3, "user": {"id": 99}}, candidate)
-        self.assertEqual(review.merge_readiness, "not_ready")
-        self.assertIn("earlier material finding", " ".join(review.validation_errors))
-        api = API()
-        rejection = {**copy.deepcopy(payload), "code_assessment": "changes_required"}
-        api.older_comments = [{**copy.deepcopy(comment), "id": 8,
-                               "created_at": "2026-09-24T08:00:00Z",
-                               "updated_at": "2026-09-24T12:00:00Z", "body": json.dumps(rejection)}]
-        review, _, identity = collect_review(api, {"number": 3, "user": {"id": 99}}, candidate)
-        self.assertEqual(identity["id"], 8)
-        self.assertEqual(review.merge_readiness, "not_ready")
-
     def test_collector_requires_all_native_shards_and_never_reuses_an_older_green_run(self):
         import hashlib
 
@@ -2796,7 +2715,6 @@ class TestAcceptanceSnapshot(unittest.TestCase):
 
     def test_recheck_refuses_candidate_and_attempt_movement(self):
         import copy
-        from unittest.mock import patch
 
         from scripts.acceptance import candidate_identity, recheck_current
 
@@ -2813,6 +2731,8 @@ class TestAcceptanceSnapshot(unittest.TestCase):
                 self.run = {"id": 123, "path": ".github/workflows/ci.yml",
                             "run_attempt": 1, "status": "completed"}
             def get(self, endpoint):
+                if "/reviews?" in endpoint or "/comments?" in endpoint or "/permission" in endpoint:
+                    raise AssertionError("Technical recheck must not fetch human votes")
                 if endpoint.endswith("git/ref/heads/main"):
                     return {"ref": "refs/heads/main", "object": {"type": "commit", "sha": self.base_ref}}
                 if "actions/runs?" in endpoint:
@@ -2821,26 +2741,25 @@ class TestAcceptanceSnapshot(unittest.TestCase):
         result = {"candidate": candidate_identity(pr, API.repository), "draft": False,
                   "review_identity": {"id": 10}, "all_prerequisites_met": False,
                   "runs": {"ci.yml": {"run_id": 123, "run_attempt": 1, "status": "completed"}}}
-        with patch("scripts.acceptance.collect_review", side_effect=AssertionError("Do not read human votes")):
-            recheck_current(API(), result)
-            moved_draft = API()
-            moved_draft.pr["draft"] = True
-            recheck_current(moved_draft, result)
-            for mutation in ("head", "base", "merge", "attempt", "run", "live_base"):
-                with self.subTest(mutation=mutation):
-                    api = API()
-                    if mutation in {"head", "base"}:
-                        api.pr[mutation]["sha"] = "d" * 40
-                    elif mutation == "merge":
-                        api.pr["merge_commit_sha"] = "d" * 40
-                    elif mutation == "attempt":
-                        api.run["run_attempt"] = 2
-                    elif mutation == "live_base":
-                        api.base_ref = "d" * 40
-                    elif mutation == "run":
-                        api.run["id"] = 124
-                    with self.assertRaises(ValueError):
-                        recheck_current(api, result)
+        recheck_current(API(), result)
+        moved_draft = API()
+        moved_draft.pr["draft"] = True
+        recheck_current(moved_draft, result)
+        for mutation in ("head", "base", "merge", "attempt", "run", "live_base"):
+            with self.subTest(mutation=mutation):
+                api = API()
+                if mutation in {"head", "base"}:
+                    api.pr[mutation]["sha"] = "d" * 40
+                elif mutation == "merge":
+                    api.pr["merge_commit_sha"] = "d" * 40
+                elif mutation == "attempt":
+                    api.run["run_attempt"] = 2
+                elif mutation == "live_base":
+                    api.base_ref = "d" * 40
+                elif mutation == "run":
+                    api.run["id"] = 124
+                with self.assertRaises(ValueError):
+                    recheck_current(api, result)
 
 
     def test_bulk_publisher_reports_candidate_failures_without_failing_reconciliation(self):
@@ -3266,59 +3185,6 @@ class ReviewTemplateTests(unittest.TestCase):
                  self.assertRaises(ValueError):
                 api.write(endpoint, {'body': 'template'}, method=method)
             run.assert_not_called()
-
-    def test_shared_account_scaffolding_is_not_review_or_finding_history(self):
-        import copy
-
-        from scripts.acceptance import collect_review
-
-        candidate = {'head_sha': 'a' * 40, 'base_sha': 'b' * 40, 'execution_sha': 'c' * 40}
-        human = {'schema_version': 1, **candidate, 'candidate_currentness': 'current',
-                 'code_assessment': 'acceptable', 'verification': 'complete',
-                 'merge_readiness': 'ready_for_maintainer', 'material_findings': [], 'evidence': {}}
-        scaffold = {**human, 'code_assessment': '<acceptable|changes_required|incomplete>',
-                    'verification': '<complete|incomplete|failed>',
-                    'merge_readiness': '<ready_for_maintainer|not_ready>'}
-        legacy = [{'id': '<finding ID; use [] only if none>', 'disposition': 'unresolved',
-                   'description': '<finding and evidence; carry forward prior findings>'}]
-
-        def comment(number, payload):
-            return {'id': number, 'user': {'id': 7, 'login': 'synthetic', 'type': 'User'},
-                    'author_association': 'OWNER', 'updated_at': f'2026-09-24T10:00:0{number}Z',
-                    'body': '<!-- generated-human-review-template -->\n```json\n' + json.dumps(payload) + '\n```',
-                    'html_url': f'https://github.com/synthetic/repository/pull/3#issuecomment-{number}'}
-
-        class API:
-            prefix = 'repos/synthetic/repository/'
-
-            def __init__(self, comments):
-                self.comments = comments
-
-            def get(self, endpoint):
-                if '/collaborators/' in endpoint:
-                    return {'permission': 'admin'}
-                if '/reviews?' in endpoint:
-                    return []
-                return self.comments
-
-        for findings in ([], legacy):
-            with self.subTest(findings=findings):
-                template = {**scaffold, 'material_findings': findings}
-                api = API([comment(1, template), comment(2, human), comment(3, template)])
-                review, _, identity = collect_review(api, {'number': 3}, candidate)
-                self.assertEqual(review.merge_readiness, 'ready_for_maintainer')
-                self.assertEqual(identity['id'], 2)
-                review, _, _ = collect_review(API([comment(1, template)]), {'number': 3}, candidate)
-                self.assertIsNone(review)
-        real_finding = copy.deepcopy(scaffold)
-        real_finding['material_findings'] = [{'id': 'F1', 'disposition': 'unresolved', 'description': 'Real defect'}]
-        review, _, _ = collect_review(API([comment(1, real_finding), comment(2, human)]), {'number': 3}, candidate)
-        self.assertEqual(review.merge_readiness, 'not_ready')
-        self.assertTrue(any('omits earlier material finding' in e for e in review.validation_errors))
-        malformed = {**human, 'material_findings': [{'id': '[]', 'disposition': '[]', 'description': '[]'}]}
-        review, _, _ = collect_review(API([comment(1, malformed)]), {'number': 3}, candidate)
-        self.assertEqual(review.merge_readiness, 'not_ready')
-
 
 class TestVerifierUpdateDecision(unittest.TestCase):
     """Trust changes must bind real native data, without relaxing test outcomes."""
