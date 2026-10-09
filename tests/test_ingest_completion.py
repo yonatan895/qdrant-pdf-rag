@@ -36,6 +36,14 @@ from mainframe_rag.ingest.rules_version import extraction_rules_version
 from tests.test_run_ingest import _filter_doc_id
 
 
+@pytest.fixture(autouse=True)
+def _in_place_mode(monkeypatch):
+    """These tests cover the in-place build (which publication also runs for
+    each staging generation). Alias publication is the default, so select
+    the deprecated in-place mode explicitly, as an operator would."""
+    monkeypatch.setenv("INGEST_ALIAS_PUBLISH", "false")
+
+
 def _settings(**overrides):
     kw = {"embed_mode": "hash", "_env_file": None}
     kw.update(overrides)

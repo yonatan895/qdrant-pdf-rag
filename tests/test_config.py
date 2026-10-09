@@ -147,13 +147,12 @@ def test_ingest_tuning_defaults():
     assert s.ingest_bulk_load is False
 
 
-def test_alias_publish_defaults_off(monkeypatch):
-    """Issue #359 publish path ships default-off (ROADMAP rule for new
-    capabilities); the env opt-in is exact, and enabling by default is a
-    dedicated follow-up PR."""
-    assert Settings(_env_file=None).ingest_alias_publish is False
-    monkeypatch.setenv("INGEST_ALIAS_PUBLISH", "true")
+def test_alias_publish_is_the_default(monkeypatch):
+    """Issue #359/#360: alias publication is the default write mode; the
+    explicit opt-out selects the deprecated in-place mode."""
     assert Settings(_env_file=None).ingest_alias_publish is True
+    monkeypatch.setenv("INGEST_ALIAS_PUBLISH", "false")
+    assert Settings(_env_file=None).ingest_alias_publish is False
 
 
 def test_contextual_embed_defaults():
@@ -418,7 +417,7 @@ PINNED_SETTING_DEFAULTS: dict[str, object] = {
     "ingest_upsert_streams": 4,
     "ingest_scan_page_size": 1000,
     "ingest_bulk_load": False,
-    "ingest_alias_publish": False,
+    "ingest_alias_publish": True,
     "bm25_model": "Qdrant/bm25",
     "bm25_cache_dir": None,
     "bm25_weights_revision": "22b8d2af71a76161e18dd432d2cee0eefa66e412",

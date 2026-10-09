@@ -10,6 +10,14 @@ import pytest
 from mainframe_rag.ingest.run_ingest import main
 
 
+@pytest.fixture(autouse=True)
+def _in_place_mode(monkeypatch):
+    """These tests cover the in-place build (which publication also runs for
+    each staging generation). Alias publication is the default, so select
+    the deprecated in-place mode explicitly, as an operator would."""
+    monkeypatch.setenv("INGEST_ALIAS_PUBLISH", "false")
+
+
 def test_dry_run_ingest(tmp_path, synthetic_pdf, capsys):
     progress = tmp_path / "inventory.jsonl"
     rc = main(["--src", str(synthetic_pdf.parent), "--progress", str(progress),
@@ -284,6 +292,25 @@ def test_upsert_path_counters_with_fake_qdrant(tmp_path, synthetic_pdf, capsys, 
     main_collection = _Settings(_env_file=None).qdrant_collection
     main_sent = sum(n for collection, n in fake.upsert_calls if collection == main_collection)
     assert main_sent == done[0]["chunks_upserted"]
+
+
+def test_in_place_real_run_logs_deprecation_and_dry_run_does_not(
+    tmp_path, synthetic_pdf, capsys, monkeypatch
+):
+    """Alias publication is the default; a real in-place run (explicit
+    INGEST_ALIAS_PUBLISH=false) still works for one release and says so."""
+    from mainframe_rag.ingest import run_ingest
+
+    monkeypatch.setenv("EMBED_MODE", "hash")
+    monkeypatch.delenv("DENSE_DIM", raising=False)
+    fake = _FakeQdrant()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    args = ["--src", str(synthetic_pdf.parent), "--workers", "1"]
+    assert main([*args, "--progress", str(tmp_path / "dry.jsonl"), "--dry-run"]) == 0
+    assert not [l for l in _stderr_json(capsys) if l.get("action") == "in_place_deprecated"]
+    assert main([*args, "--progress", str(tmp_path / "real.jsonl")]) == 0
+    warned = [l for l in _stderr_json(capsys) if l.get("action") == "in_place_deprecated"]
+    assert len(warned) == 1 and "INGEST_ALIAS_PUBLISH" in warned[0]["remediation"]
 
 
 def test_qdrant_level_skip_counts_as_ok(tmp_path, synthetic_pdf, capsys, monkeypatch):

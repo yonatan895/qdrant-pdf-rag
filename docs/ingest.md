@@ -685,8 +685,8 @@ thread pool.
   refresh of each lineage rewrites them scoped. Evaluation needs no
   re-baseline: citations, filters, and goldens key on `doc_id`/text (see
   the eval numbers in each 361B PR).
-- **Refresh visibility — alias publication** (`INGEST_ALIAS_PUBLISH=true`,
-  default off; enabling by default is a dedicated follow-up PR; issue #359
+- **Refresh visibility — alias publication** (the default;
+  `INGEST_ALIAS_PUBLISH=false` selects the deprecated in-place mode; issue #359
   req 4/5, `ingest/publish.py` + `qdrant_io` alias/snapshot helpers):
   readers resolve `<collection>` through a Qdrant alias. The ordinary
   distinct-staging cutover keeps the old target during preparation; one
@@ -772,7 +772,8 @@ thread pool.
    Unexplained residue under walked, unwalked or retired docs refuses and is
    preserved. The prod Job reaches these modes through
    `scripts/airgap/ingest.sh` (issue #391 current packet):
-   `INGEST_ALIAS_PUBLISH=true` selects publication, `INGEST_REINGEST=true`
+   publication is the default (`INGEST_ALIAS_PUBLISH=false` selects the
+   deprecated in-place mode), `INGEST_REINGEST=true`
     renders `--reingest` (forced repair), and `INGEST_RETIRE_DOCS` takes a
     **comma- or newline-separated** `DOCID[@SOURCEREV]` list rendered as
     repeated `--retire-doc` (requires alias publication; labels may carry
@@ -1090,8 +1091,11 @@ only serializes revisions inside one process. Supported operation requires
 operator-serialized jobs, not a claim of distributed lock enforcement. No HA
 claim follows from a single-node run.
 
-**Maintenance and rollback:** in-place mode (`INGEST_ALIAS_PUBLISH=false`)
-is limited to legacy collections without full build controls or immutable build
+**Maintenance and rollback:** in-place mode (explicit `INGEST_ALIAS_PUBLISH=false`)
+is deprecated: every real in-place run logs `in_place_deprecated`, and the mode
+is kept for one release so operators can schedule their first publication
+(which migrates an existing in-place collection into a retained copy). It is
+limited to legacy collections without full build controls or immutable build
 aliases. It refuses new-format published, sealed and retained builds. For a
 legacy repair, operators must quiesce writers and drain affected readers first; setting a manifest pending or waiting a TTL
 alone does not drain in-flight requests. Alias-mode repair is a normal
