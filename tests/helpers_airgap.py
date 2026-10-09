@@ -18,8 +18,6 @@ REPO = Path(__file__).resolve().parent.parent
 
 STUB_TOOL = "#!/bin/sh\nexit 0\n"
 
-PULL_SECRET_RE = re.compile(r"^([ ]*)imagePullSecrets:\n\1  - name: (\S+)$", re.MULTILINE)
-
 
 def set_oauth_proxy_pin(tree: Path, digest: str) -> None:
     """Select an explicit OAuth pin state independently of the production pin."""
@@ -220,20 +218,6 @@ fi
 {materialize_arm}printf '%s\\n' "$@" >> "$SKOPEO_LOG"
 exit 0
 """
-
-
-def git_init_repo(path: Path, files: dict[str, str] | None = None) -> str:
-    """Init a throwaway git repo at path; return HEAD sha."""
-    subprocess.run(["git", "init", "-b", "main"], cwd=path, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "Test"], cwd=path, check=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=path, check=True)
-    for name, content in (files or {"README.md": "Hello"}).items():
-        (path / name).write_text(content)
-    subprocess.run(["git", "add", "."], cwd=path, check=True)
-    subprocess.run(["git", "commit", "-m", "init"], cwd=path, check=True, capture_output=True)
-    return subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=path, check=True, capture_output=True, text=True
-    ).stdout.strip()
 
 
 def assert_no_placeholders(text: str) -> None:
