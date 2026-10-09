@@ -264,6 +264,9 @@ def _spawn_agent(
         "LLM_MODEL_REASONING": "mock-reasoning",
         "LLM_STREAM": "true",
         "PYTHONUNBUFFERED": "1",
+        # The spawned agent runs this checkout, never an editable install
+        # elsewhere (conftest's sys.path fix does not reach subprocesses).
+        "PYTHONPATH": str(REPO_ROOT / "src"),
     }
     print(f"\n[load-tier:{tag}] mock={mock_url} qdrant={qdrant_url} agent-port={port}", flush=True)
     # Agent stdout goes to a file, never a pipe: under threaded load the
