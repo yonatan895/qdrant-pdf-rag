@@ -517,11 +517,20 @@ let independent agents mutate the same workspace or redefine one contract.
 Supply each subagent its relevant task packet explicitly. No orchestration
 service is required by this workflow.
 
+## Engineering skills
+
+The [skill index](../.agents/skills/index.md) routes `diagnosing-bugs`, `tdd` and
+`codebase-design` through repository-owned entry points to pinned local upstream
+copies. [Provenance](../.agents/mattpocock-skills-provenance.md) owns the allowlist,
+license and updates. Use them on demand; their compatibility rules retain existing
+testing, coverage and review contracts. This does not install the upstream workflow
+bundle or add an automatic instruction chain.
+
 <a id="qdrant-skills"></a>
 ## Vendored Qdrant skills
 
-[.agents/skills](../.agents/skills) is a curated, intentionally incomplete subset
-of upstream Qdrant skills for server operations that are hard to reconstruct
+Qdrant directories in [.agents/skills](../.agents/skills) form a curated,
+intentionally incomplete subset for server operations that are hard to reconstruct
 offline. Its first-party [index](../.agents/skills/index.md) and the pin,
 allowlist and notices in
 [.agents/qdrant-skills-provenance.md](../.agents/qdrant-skills-provenance.md)

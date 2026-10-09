@@ -237,6 +237,7 @@ def test_unrecorded_vendored_asset_and_second_chart_are_flagged(tree, capsys):
 
 
 @pytest.mark.parametrize("relative", ["NOTICE.qdrant-skills", "LICENSE.qdrant-skills",
+                                      "NOTICE.mattpocock-skills", "LICENSE.mattpocock-skills",
                                       "src/mainframe_rag/webui/static/vendor/LICENSE.htmx", "LICENSE"])
 def test_missing_or_altered_notice_file_is_flagged(tree, capsys, relative):
     (tree / relative).write_bytes((tree / relative).read_bytes() + b"\nchanged\n")
@@ -337,6 +338,8 @@ def test_notices_carry_real_texts_and_open_decisions_and_refuse_a_missing_member
     inventory = notice_inventory(tmp_path)
     text = li.render_notices(REPO, inventory, tmp_path)
     assert "Apache License" in text and "Zero-Clause BSD" in text
+    assert "### skills:mattpocock: LICENSE.mattpocock-skills" in text
+    assert "Copyright (c) 2026 Matt Pocock" in text
     assert "### tool:task: task-LICENSE" in text and "Synthetic MIT task license" in text
     assert "### chart:qdrant-1.19.0: charts/qdrant-1.19.0.tgz:qdrant/LICENSE" in text
     assert "pymupdf==1.28.2" in text.split("COMPONENTS")[0]

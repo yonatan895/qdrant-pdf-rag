@@ -17,8 +17,9 @@ decisions; see [vendored skill routing](../docs/agent-workflow.md#qdrant-skills)
 ## Vendored paths (allowlist)
 
 Verbatim copies of upstream `skills/<name>/**` at the pinned SHA.
-`scripts/check_agent_context.py` requires the top-level directories under
-`.agents/skills/` to equal this list exactly.
+`scripts/check_agent_context.py` requires `.agents/skills/` directories to match
+the union of this list and the independent
+[engineering allowlist](mattpocock-skills-provenance.md), with no overlap.
 
 <!-- skills-allowlist:start -->
 - qdrant-monitoring

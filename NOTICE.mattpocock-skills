@@ -1,0 +1,10 @@
+Matt Pocock engineering skills
+Source: https://github.com/mattpocock/skills
+Pinned upstream commit: 49dd158d1076134a641b33efb035946536778336
+Copyright (c) 2026 Matt Pocock
+License: MIT; the full upstream text is in LICENSE.mattpocock-skills.
+
+The diagnosing-bugs, tdd and codebase-design subtrees under
+.agents/vendor/mattpocock-skills/ are verbatim copies of upstream
+skills/engineering/<name>/ at that commit. Repository-owned entry points
+under .agents/skills/ state local compatibility rules and link those copies.

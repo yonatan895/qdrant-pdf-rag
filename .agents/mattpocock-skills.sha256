@@ -1,0 +1,11 @@
+f3dd099ce99289bd213914d8ee3e2429b78309c3957ca4583f7659551b1d53c1  .agents/vendor/mattpocock-skills/codebase-design/DEEPENING.md
+52b52e75655a27aea59c6966b410bac82448968ad46ef1ebb9f07c274e3ae010  .agents/vendor/mattpocock-skills/codebase-design/DESIGN-IT-TWICE.md
+2c20617f87ec8af6a434859f381b2f061a69b530444e74eb39e78bb016a6d1e2  .agents/vendor/mattpocock-skills/codebase-design/SKILL.md
+edebc9e4fcfe102114012575eaa9600b9b5fd08c311664f389c36e7bc717740f  .agents/vendor/mattpocock-skills/codebase-design/agents/openai.yaml
+849198df88cdb65fd0d97236604c1fca7ff2f22d2f705f9724a800d0266b118d  .agents/vendor/mattpocock-skills/diagnosing-bugs/SKILL.md
+3e430dbe4334a87597488c060cb3dc3786bb00c9182877d6f5ec41f62490e90b  .agents/vendor/mattpocock-skills/diagnosing-bugs/agents/openai.yaml
+35103539fc36873eea36074769ad454f9379d6fc8b2dc0e26ce987fd3bfe5503  .agents/vendor/mattpocock-skills/diagnosing-bugs/scripts/hitl-loop.template.sh
+5505d25bbaa8fc14a79e4d20163936958992a2995b7f1dd1d6197edc9ed722e0  .agents/vendor/mattpocock-skills/tdd/SKILL.md
+ea6f01cf1b8c06a4b0f5b649d74b1b8ce8685e72af1b38d70d877693e092af0b  .agents/vendor/mattpocock-skills/tdd/agents/openai.yaml
+3ceb807fdf4a47d6a93d4d9a891e5ba6d362a6247bd08adc451feebfc17361ef  .agents/vendor/mattpocock-skills/tdd/mocking.md
+859f9e592c188fda4fc7277dd180e4ce9c7a2e13f6efe1f6f29eccc9d28c106a  .agents/vendor/mattpocock-skills/tdd/tests.md
