@@ -47,7 +47,7 @@ def test_answer_client_uses_setting_and_never_retries(monkeypatch):
     captured = _spy_transport(monkeypatch)
     s = _settings(answer_timeout_s=12.5)
     llm = HttpxLLMClient(s)
-    client = llm._http()
+    client = llm._sync_http()
     assert client.timeout.read == 12.5
     # /v1/answer is single shot: connection retries are off.
     assert captured["retries"] == 0
@@ -58,7 +58,7 @@ def test_chat_after_close_fails_loudly(monkeypatch):
     chat() hits the closed pool and raises, never silently rebuilds."""
     captured = _spy_transport(monkeypatch)
     llm = HttpxLLMClient(_settings())
-    client = llm._http()
+    client = llm._sync_http()
     client.close()
     llm.close()
     assert captured["retries"] == 0

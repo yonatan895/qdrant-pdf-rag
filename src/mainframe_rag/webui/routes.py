@@ -579,7 +579,6 @@ async def _run_turn(request: Request, req: UiChatRequest, root_span):
         product=req.product,
         version=req.version,
         splunk_context=req.splunk_context,
-        request_id=request_id,
         is_chat=True,
         reasoning_effort=req.reasoning_effort,
     )
@@ -778,9 +777,7 @@ async def _console_stream_response(req, owner):
         product=req.product,
         version=req.version,
         splunk_context=req.splunk_context,
-        request_id=request_id,
         is_chat=True,
-        stream=True,
         reasoning_effort=req.reasoning_effort,
     )
 

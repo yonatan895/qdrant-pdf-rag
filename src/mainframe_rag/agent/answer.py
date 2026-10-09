@@ -1550,9 +1550,6 @@ class HttpxLLMClient:
         self._cached_sync_client: httpx2.Client | None = None
         self._cached_async_client: httpx2.AsyncClient | None = None
 
-    def _http(self) -> Any:
-        return self._sync_http()
-
     def _sync_http(self) -> Any:
         if self._client is not None:
             return self._client

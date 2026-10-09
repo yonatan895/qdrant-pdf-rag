@@ -69,14 +69,9 @@ class AgentResources:
         """Answer-use-case dependencies over THIS view; the model adapter
         borrows `llm` and never closes it."""
 
-        async def retrieve(
-            query: str, *, product: str | None, version: str | None, settings: Settings
-        ) -> RetrievalResult:
-            return await self.retrieve(query, product=product, version=version, settings=settings)
-
         return AnswerCoreDeps(
             settings=settings or self.settings,
             llm=ModelAdapter(self.llm),
-            retrieve=retrieve,
+            retrieve=self.retrieve,
             tokenizer=self.tokenizer,
         )
