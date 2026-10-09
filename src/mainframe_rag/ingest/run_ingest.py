@@ -115,10 +115,9 @@ from mainframe_rag.ingest.qdrant_io import (
     delete_by_doc,
     delete_by_revision,
     ensure_collection,
-    require_single_node_recovery,
     resolve_live_collection,
+    retain_copy,
     set_bulk_indexing,
-    snapshot_collection,
     stored_rules_version,
     swap_alias_to,
     upsert_chunks,
@@ -1997,11 +1996,14 @@ def _build_and_cut_over(
     previous = live
     migrated = None
     if legacy and live is not None:
-        # A legacy physical squats on the alias name: preserve it, then clear
-        # the name (brief maintenance window, documented in docs/ingest.md).
-        require_single_node_recovery(client, settings, live, "legacy migration")
-        snap = snapshot_collection(client, live)
-        log.info(json.dumps({"action": "publish_migrate", "legacy": live, "snapshot": snap}))
+        # A legacy physical squats on the alias name: keep a verified copy as
+        # the retained rollback generation, then clear the name (brief
+        # maintenance window, documented in docs/ingest.md). The copy goes
+        # through the points API, so distributed layouts migrate too (issue
+        # #360); a retry of this build reuses its verified copy.
+        retained = f"{live}__legacy_{build_id[:8]}"
+        retain_copy(client, settings, live, retained)
+        log.info(json.dumps({"action": "publish_migrate", "legacy": live, "retained": retained}))
         client.delete_collection(live)
         migrated = live
         previous = None

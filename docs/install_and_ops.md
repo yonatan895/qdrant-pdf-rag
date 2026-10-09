@@ -1290,11 +1290,10 @@ on three distinct peers again.
   with explicitly accepted downtime (POC path, #447); no untested
   distributed-restore or uninterrupted-HA promise is implied.
 - Update publications over a distributed (multi-shard or replicated) live
-  generation prepare staging by an exact points-API copy, never a snapshot
-  (`deploy.md#distributed-recovery`). A distributed legacy layout (a
-  physical collection squatting on the alias name) cannot be migrated:
-  ingest refuses with `DistributedRecoveryUnsupportedError` and changes
-  nothing. Rebuild a fresh generation from the originals. The site qualification steps and the
+  generation prepare staging by an exact points-API copy, never a snapshot,
+  and a legacy layout (a physical collection squatting on the alias name)
+  is migrated by copying it into the retained `<alias>__legacy_<build>`
+  generation before it is removed (`deploy.md#distributed-recovery`). The site qualification steps and the
   sizing/HA-scope decision are in `deploy.md#site-qualification` and
   `deploy.md#sizing-note`.
 - Loss of publisher scratch state is not repaired by Qdrant replication:

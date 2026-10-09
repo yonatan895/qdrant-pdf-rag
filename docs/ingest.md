@@ -791,10 +791,13 @@ thread pool.
    no distributed lock.
   During a migration retained markers block the commit until
   the operator re-ingests the complete corpus or cleans the stale
-  generation. First-publish cutover from a legacy physical layout snapshots the
-  squatter, deletes it (brief documented maintenance window), then creates
-  the alias; stale-rules legacy content needs `--reingest` like any other
-  rules migration.
+  generation. First-publish cutover from a legacy physical layout copies the
+  squatter through the points API into the retained rollback generation
+  `<alias>__legacy_<build>` (verified by exact point ids; a retry of the same
+  build reuses only an exact copy), deletes it (brief documented maintenance
+  window), then creates the alias; this works on distributed layouts too.
+  Stale-rules legacy content needs `--reingest` like any other rules
+  migration.
 - **Retained generations are never workspace (issue #405 R2):** a derived
   staging name that collides with a committed retained (non-live)
   generation allocates a suffixed candidate instead of reusing it, so
@@ -1042,16 +1045,9 @@ readiness, retrieval, answer/chat/console, recovery tools and evaluation.
   1/1/1 profile judges its single copy through its one endpoint. Moving
   replicas to repair an under-replicated candidate remains the
   snapshot-gated migration slice, never automatic.
-  Update staging preparation copies through the points API and is not
-  limited by topology. The legacy-layout migration (snapshot, then delete
-  the physical squatting on the alias name) is the single-node recipe: a source with more
-  than one shard or replica, a selected multi-shard/replica policy, or an
-  unreadable, missing or invalid topology is refused before any snapshot/recover/delete
-  (`qdrant_io.require_single_node_recovery`; collection snapshots are
-  node-local, [deploy](deploy.md#distributed-recovery)). Authorization requires
-  explicit positive non-boolean integer shard/replica values, both exactly 1.
-  A distributed
-  generation is rebuilt fresh from the originals.
+  Update staging preparation and the legacy-layout migration copy through
+  the points API and are not limited by topology; no node-local snapshot is
+  a restore point ([deploy](deploy.md#distributed-recovery)).
   Supply the comma-separated non-secret URLs via the operator env file or
   caller environment/Task variable (caller takes precedence). The launcher
   maps this to chart `ingest.peerUrls` and the ingest Job environment;

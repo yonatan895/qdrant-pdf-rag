@@ -325,61 +325,10 @@ def snapshot_collection(client: QdrantPoints, collection: str) -> str:
     return snap.name
 
 
-class DistributedRecoveryUnsupportedError(RuntimeError):
-    """A node-local snapshot recipe was requested for a distributed collection."""
-
-
-def distributed_topology_reason(
-    client: QdrantPoints, settings: Settings, collection: str
-) -> str | None:
-    """Why `collection` must not use the single-node snapshot recipe, or None.
-
-    A Qdrant collection snapshot is node-specific: it holds only the shards
-    the answering peer stores, and recovery from a `file://` path reads one
-    peer's disk. With more than one shard or replica (or an explicit
-    multi-shard/replica policy selected for this run) the recipe cannot
-    establish that every shard was captured or restored, so it is refused
-    rather than trusted (issue #360). Unreadable values are unknown, not
-    proof of a single node, and refuse too.
-    """
-    policy = settings.collection_distribution_kwargs()
-    if policy.get("shard_number", 1) > 1 or policy.get("replication_factor", 1) > 1:
-        return (
-            f"selected policy shards={policy.get('shard_number')} "
-            f"replicas={policy.get('replication_factor')}"
-        )
-    try:
-        params = client.get_collection(collection).config.params
-    except Exception as exc:  # noqa: BLE001 - unreadable topology is a refusal
-        return f"{collection!r} topology unreadable ({type(exc).__name__})"
-    for attr in ("shard_number", "replication_factor"):
-        value = getattr(params, attr, None)
-        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
-            return f"{collection!r} topology has no valid positive integer {attr}"
-        if value != 1:
-            return f"{collection!r} has {attr}={value}"
-    return None
-
-
-def require_single_node_recovery(
-    client: QdrantPoints, settings: Settings, collection: str, operation: str
-) -> None:
-    """Refuse node-local snapshot clone/migration on distributed storage.
-
-    Nothing is created, recovered or deleted when this raises. The supported
-    distributed paths are a fresh complete generation rebuilt from the
-    protected originals, or a site-qualified node-addressed procedure
-    (docs/deploy.md, distributed recovery).
-    """
-    reason = distributed_topology_reason(client, settings, collection)
-    if reason is not None:
-        raise DistributedRecoveryUnsupportedError(
-            f"{operation} of {collection!r} refused: {reason}. Collection "
-            "snapshots are node-local, so a snapshot clone/recover cannot "
-            "prove every shard was copied; live data is untouched. Rebuild "
-            "a fresh complete generation from the originals instead "
-            "(issue #360)."
-        )
+def _point_ids(client: QdrantPoints, settings: Settings, collection: str) -> set[str]:
+    return {str(p.id) for p in scroll_all_points(
+        client, collection, scroll_filter=None, with_payload=False,
+        page_size=settings.ingest_scan_page_size)}
 
 
 def clone_collection(
@@ -430,15 +379,26 @@ def clone_collection(
             client.upsert(dst, points=points, wait=True)
         if offset is None or not page:
             break
-    page_size = settings.ingest_scan_page_size
-    want = {str(p.id) for p in scroll_all_points(
-        client, src, scroll_filter=None, with_payload=False, page_size=page_size)}
-    got = {str(p.id) for p in scroll_all_points(
-        client, dst, scroll_filter=None, with_payload=False, page_size=page_size)}
+    want, got = _point_ids(client, settings, src), _point_ids(client, settings, dst)
     if got != want:
         raise RuntimeError(
             f"copy {src!r} -> {dst!r} unverified: {len(got)} of {len(want)} point ids match "
             "the source — refusing to publish from it."
+        )
+
+
+def retain_copy(client: QdrantPoints, settings: Settings, src: str, dst: str) -> None:
+    """Keep an exact copy of src at dst before src is removed (issue #360):
+    copy it through the points API, or accept a dst from an interrupted
+    earlier attempt only when it holds exactly src's point ids. Anything
+    else refuses, so src is never deleted without its verified copy."""
+    if not client.collection_exists(dst):
+        clone_collection(client, settings, src, dst)
+        return
+    if _point_ids(client, settings, dst) != _point_ids(client, settings, src):
+        raise RuntimeError(
+            f"retained copy {dst!r} does not hold exactly {src!r}'s points — refusing to "
+            "remove the source; inspect or remove the copy explicitly, then rerun."
         )
 
 

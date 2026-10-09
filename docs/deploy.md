@@ -653,16 +653,12 @@ vectors, payload) and completion marker through the points API into a new
 collection created with the selected policy, and refuses unless the copy
 holds exactly the source's point ids; the cutover gates then verify the
 staging pair's distribution and placement. The legacy-layout migration in
-`run_ingest`, which snapshots and deletes a physical squatting on the alias
-name, still calls `require_single_node_recovery` first: a source with `shard_number` > 1 or
-`replication_factor` > 1, an explicit multi-shard/replica policy selected for
-the run, or unreadable/missing/invalid topology raises
-`DistributedRecoveryUnsupportedError` before any snapshot, recover, or
-delete. Only explicit positive non-boolean integer live shard/replica values
-of 1/1 permit this recipe; a successful but incomplete response is unknown.
-Live data and the alias are untouched. Supported distributed
-recovery today is a fresh complete generation rebuilt from the protected
-originals (accepted downtime). Node-addressed restore, replacement-peer
+`run_ingest` uses the same copy: a physical collection squatting on the alias
+name is copied into the retained generation `<alias>__legacy_<build>` and
+verified before it is deleted, so its rollback is a real collection, not a
+node-local snapshot. Supported recovery from lost distributed storage is
+still a fresh complete generation rebuilt from the protected originals
+(accepted downtime). Node-addressed restore, replacement-peer
 join and replica repair stay unqualified until site evidence exists. The
 safety snapshot taken at alias swap is node-local on a distributed source:
 it is not a restore point; the retained superseded physical collection is

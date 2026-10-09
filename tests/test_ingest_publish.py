@@ -511,8 +511,9 @@ def test_swap_rejection_raises_without_applying(monkeypatch):
 
 
 def test_legacy_migration_preserves_then_clears(tmp_path, monkeypatch):
-    """Pre-alias physical layout: snapshot it, converge staging, delete the
-    squatter, create the alias. Stale rules without --reingest fail closed."""
+    """Pre-alias physical layout: converge staging, keep a verified copy of
+    the squatter as the retained rollback generation, delete the squatter,
+    create the alias. Stale rules without --reingest fail closed."""
     from qdrant_client import models
 
     from mainframe_rag.ingest import run_ingest
@@ -543,8 +544,13 @@ def test_legacy_migration_preserves_then_clears(tmp_path, monkeypatch):
     assert _run_main(monkeypatch, corpus, progress, "--reingest") == 0
     assert ALIAS in fake.aliases
     gen = fake.aliases[ALIAS]
-    assert gen != ALIAS and ALIAS not in fake.collections, "squatter cleared after safety snapshot"
-    assert fake.snapshots.get(ALIAS), "legacy generation preserved as a snapshot"
+    assert gen != ALIAS and ALIAS not in fake.collections, "squatter cleared after its copy"
+    retained = [name for name in fake.collections if name.startswith(f"{ALIAS}__legacy_")]
+    assert len(retained) == 1, "legacy generation retained as a verified copy"
+    assert [(p.id, p.payload["text"]) for p in fake.collections[retained[0]]] == [
+        ("00000000-0000-0000-0000-000000000001", "stale")
+    ]
+    assert retained[0] not in fake.aliases.values()
     assert {p.payload["doc_id"] for p in fake.alias_target_points(ALIAS)} == {"SA22-0000-00"}
 
 
@@ -4611,14 +4617,56 @@ def test_ensure_staging_prepares_over_distributed_live_and_leaves_it_serving():
     assert fake.snapshots == {}
 
 
-def test_legacy_migration_refuses_distributed_squatter_before_any_delete(tmp_path, monkeypatch):
+def test_legacy_migration_retains_distributed_squatter_then_publishes(tmp_path, monkeypatch):
+    """Issue #360: a distributed legacy layout migrates like a single-node
+    one. The squatter is copied through the points API into a retained
+    generation before it is deleted; the alias then names the new build."""
     from qdrant_client import models
 
     from mainframe_rag.ingest import run_ingest
-    from mainframe_rag.ingest.qdrant_io import DistributedRecoveryUnsupportedError
 
     _publish_env(monkeypatch)
-    fake = _TopologyFake(3, 1)
+    fake = _RecordingTopologyFake(3, 1)
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _build_doc(corpus, "SA22-0000-00_first")
+    squatter = [
+        models.PointStruct(
+            id="00000000-0000-0000-0000-000000000001",
+            vector={"dense": [0.0] * 256, "bm25": models.SparseVector(indices=[0], values=[1.0])},
+            payload={"doc_id": "SA22-0000-00", "sha256": "0" * 64, "rules_v": "0" * 16, "text": "old"},
+        )
+    ]
+    fake.collections[ALIAS] = list(squatter)
+    copies_at_delete = []
+    real_delete = fake.delete_collection
+
+    def observing_delete(name):
+        if name == ALIAS:
+            copies_at_delete.append([fake.collections[n] for n in fake.collections
+                                     if n.startswith(f"{ALIAS}__legacy_")])
+        return real_delete(name)
+
+    fake.delete_collection = observing_delete
+    assert _run_main(monkeypatch, corpus, tmp_path / "inv.jsonl", "--reingest") == 0
+    assert copies_at_delete == [[squatter]], "an exact copy existed before the squatter was deleted"
+    retained = [name for name in fake.collections if name.startswith(f"{ALIAS}__legacy_")]
+    assert len(retained) == 1 and fake.collections[retained[0]] == squatter
+    assert ALIAS not in fake.collections and fake.aliases[ALIAS] not in (ALIAS, retained[0])
+    assert fake.snapshots.get(ALIAS) is None, "no node-local snapshot is the rollback"
+
+
+def test_legacy_migration_refuses_a_mismatched_retained_copy(tmp_path, monkeypatch):
+    """A leftover retained copy that does not hold exactly the squatter's
+    points (an interrupted or foreign copy) is never trusted: the squatter
+    is not deleted and the alias is not created."""
+    from qdrant_client import models
+
+    from mainframe_rag.ingest import run_ingest
+
+    _publish_env(monkeypatch)
+    fake = _RecordingTopologyFake(1, 1)
     monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
     corpus = tmp_path / "corpus"
     corpus.mkdir()
@@ -4630,10 +4678,17 @@ def test_legacy_migration_refuses_distributed_squatter_before_any_delete(tmp_pat
             payload={"doc_id": "SA22-0000-00", "sha256": "0" * 64, "rules_v": "0" * 16, "text": "old"},
         )
     ]
-    with pytest.raises(DistributedRecoveryUnsupportedError):
+    real_retain = run_ingest.retain_copy
+
+    def leftover_then_retain(client, settings, src, dst):
+        fake.collections[dst] = []  # an interrupted earlier copy
+        return real_retain(client, settings, src, dst)
+
+    monkeypatch.setattr(run_ingest, "retain_copy", leftover_then_retain)
+    with pytest.raises(RuntimeError, match="does not hold exactly"):
         _run_main(monkeypatch, corpus, tmp_path / "inv.jsonl", "--reingest")
-    assert ALIAS in fake.collections and len(fake.collections[ALIAS]) == 1
-    assert ALIAS not in fake.aliases and not fake.snapshots
+    assert len(fake.collections[ALIAS]) == 1 and ALIAS not in fake.aliases
+    assert "delete" not in fake.mutations
 
 
 def test_distribution_mismatch_names_the_required_migration_class():
