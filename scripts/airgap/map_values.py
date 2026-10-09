@@ -50,13 +50,6 @@ def env(name: str, default: str = "") -> str:
     return os.environ.get(name, default)
 
 
-def nonempty(name: str, err: str) -> str:
-    val = env(name)
-    if not val:
-        die(f"{name} {err}")
-    return val
-
-
 def positive_int(name: str, raw: str) -> int:
     if not re.fullmatch(r"[0-9]+", raw or "") or int(raw) < 1:
         die(f"{name} must be a positive integer (got {raw!r})")
@@ -199,8 +192,8 @@ def build_values(deploy_only: bool = False) -> dict:
         validate_model_config(model_config)
     except ValueError as exc:
         die(str(exc))
-    for key in ("EMBED_MODEL", "EMBED_MODEL_REVISION"):
-        nonempty(key, "is required for deploy/ingest (see airgap.env.example)")
+    if not env("EMBED_MODEL_REVISION"):
+        die("EMBED_MODEL_REVISION is required for deploy/ingest (see airgap.env.example)")
     if not re.search(r"\S", env("EMBED_MODEL_REVISION")):
         die("EMBED_MODEL_REVISION must be a non-blank immutable revision")
     dimension = positive_int("DENSE_DIM", env("DENSE_DIM"))
@@ -277,11 +270,6 @@ def build_values(deploy_only: bool = False) -> dict:
                 "QDRANT_WRITE_CONSISTENCY_FACTOR", env("QDRANT_WRITE_CONSISTENCY_FACTOR")
             ),
         }
-    else:
-        # Parser defaults; unused while ingest.enabled is false (schema still
-        # requires the complete object, W<=RF stays shell-owned).
-        qdrant_policy = {"shardNumber": 6, "replicationFactor": 3, "writeConsistencyFactor": 2}
-    if ingest_enabled:
         ingest_block = {
             "enabled": True,
             "workSize": env("INGEST_WORK_SIZE") or "100Gi",
@@ -306,11 +294,7 @@ def build_values(deploy_only: bool = False) -> dict:
             die("INGEST_RETIRE_DOCS requires INGEST_ALIAS_PUBLISH=true")
 
     reasoning_model = env("LLM_MODEL_REASONING")
-    if reasoning_model:
-        reasoning_base = env("LLM_BASE_URL")
-    else:
-        reasoning_base = ""
-        reasoning_model = ""
+    reasoning_base = env("LLM_BASE_URL") if reasoning_model else ""
 
     return {
         "replicaCount": 2,

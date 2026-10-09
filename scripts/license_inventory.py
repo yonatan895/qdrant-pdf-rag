@@ -77,7 +77,6 @@ CLASSIFIER_NORMALIZATION = {
 }
 LICENSE_FILE = re.compile(r"(?i)^(licen[sc]e|copying|notice)")
 TOKEN = re.compile(r"\(|\)|[A-Za-z0-9.+:-]+")
-HEX64 = re.compile(r"[0-9a-f]{64}")
 PROBLEM_LIMIT = 40
 
 
