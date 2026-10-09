@@ -2,7 +2,6 @@
 """Normalize legacy chat/stream seams once; never own or close the shared client."""
 from __future__ import annotations
 
-import inspect
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping
 from typing import Protocol, cast, runtime_checkable
 
@@ -13,7 +12,7 @@ from mainframe_rag.agent.answer import (
     as_chat_result,
 )
 from mainframe_rag.agent.core_ports import ModelDone, ModelEvent, ModelToken
-from mainframe_rag.ports import ChatMessage, ChatResult, LLMClient, TokenUsage
+from mainframe_rag.ports import ChatMessage, ChatResult, LLMClient, TokenUsage, maybe_await
 
 
 @runtime_checkable
@@ -35,7 +34,7 @@ class ModelAdapter:
         result = self._client.chat(
             messages, reasoning_effort=reasoning_effort, temperature=temperature
         )
-        return as_chat_result(await result if inspect.isawaitable(result) else result)
+        return as_chat_result(await maybe_await(result))
 
     async def stream(
         self, messages: list[ChatMessage], reasoning_effort: str, temperature: float,

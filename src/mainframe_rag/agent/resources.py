@@ -10,7 +10,6 @@ imports neither the application singleton nor any transport.
 """
 from __future__ import annotations
 
-import inspect
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
@@ -25,21 +24,13 @@ from mainframe_rag.ports import (
     QdrantReader,
     Reranker,
     Tokenizer,
+    maybe_await,
 )
 from mainframe_rag.retrieve.query import SearchHit
 
 type SearchOutcome = tuple[list[SearchHit], str, dict[str, int]]
 # Sync doubles resolve inline; the pooled production retriever is awaited.
 type SearchFn = Callable[..., SearchOutcome | Awaitable[SearchOutcome]]
-
-
-async def await_retrieval(res: SearchOutcome | Awaitable[SearchOutcome]) -> SearchOutcome:
-    """Sync/async retrieval-leg shim: the pooled async client awaits while
-    sync test doubles resolve inline — one helper serves every endpoint so
-    the call sites cannot diverge (review S2)."""
-    if inspect.isawaitable(res):
-        return await res
-    return res
 
 
 @dataclass(frozen=True)
@@ -58,7 +49,7 @@ class AgentResources:
     ) -> RetrievalResult:
         """The one retrieval wiring for /v1/search, /v1/answer, /v1/chat and the
         console. `settings` carries the validated physical collection."""
-        hits, kind, timings = await await_retrieval(self.search(
+        hits, kind, timings = await maybe_await(self.search(
             self.qdrant, self.embedder, settings.qdrant_collection, query,
             product=product, version=version, limit=limit, settings=settings,
             reranker=self.reranker,

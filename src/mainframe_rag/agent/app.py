@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import inspect
 import json
 import logging
 import time
@@ -82,7 +81,6 @@ from mainframe_rag.agent.metrics import (
     setup_metrics,
 )
 from mainframe_rag.agent.resources import AgentResources
-from mainframe_rag.agent.resources import await_retrieval as _await_retrieval  # noqa: F401
 from mainframe_rag.agent.serving import ServingGate, ServingGeneration
 from mainframe_rag.agent.sse import (
     empty_final_payload,
@@ -111,6 +109,7 @@ from mainframe_rag.ports import (
     Tokenizer,
     TokenUsage,
     ZoweMCP,
+    maybe_await,
 )
 from mainframe_rag.retrieve.query import SearchHit
 from mainframe_rag.retrieve.query import async_search as retrieve_search
@@ -732,9 +731,7 @@ async def _close_client(client: object) -> None:
     closer = getattr(client, "aclose", None) or getattr(client, "close", None)
     if closer is None:
         return
-    result = closer()
-    if inspect.isawaitable(result):
-        await result
+    await maybe_await(closer())
 
 
 @asynccontextmanager
@@ -820,7 +817,7 @@ async def lifespan(_app: FastAPI):
         # The agent is async end to end: production always gets AsyncQdrantClient.
         # No runtime sniffing of the module attribute — a swapped class (vendored
         # shim, test double) is used as-is and sync doubles keep working through
-        # the isawaitable shims below (review S2).
+        # ports.maybe_await (review S2).
         import qdrant_client
 
         qdrant_client_inst = qdrant_client.AsyncQdrantClient(

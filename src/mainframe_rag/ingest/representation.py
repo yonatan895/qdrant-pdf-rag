@@ -59,7 +59,6 @@ residue proof.
 from __future__ import annotations
 
 import hashlib
-import inspect
 import json
 import uuid
 from dataclasses import dataclass
@@ -69,7 +68,7 @@ from qdrant_client import models
 
 from mainframe_rag.config import Settings
 from mainframe_rag.ingest.context import CONTEXT_PROMPT_VERSION
-from mainframe_rag.ports import AsyncQdrantReader, QdrantPoints, QdrantReader
+from mainframe_rag.ports import AsyncQdrantReader, QdrantPoints, QdrantReader, maybe_await
 
 MANIFEST_SCHEMA_VERSION = 1
 
@@ -544,10 +543,10 @@ async def read_manifest_record_async(
     The existence check runs first (issue #391: a fresh install reads as
     absent, not as an unreachable store). Sync test doubles resolve inline
     through the shared shim (same discipline as the retrieval legs)."""
-    exists = await _await_client(async_client.collection_exists(completions_collection))
+    exists = await maybe_await(async_client.collection_exists(completions_collection))
     if not exists:
         return None
-    points = await _await_client(
+    points = await maybe_await(
         async_client.retrieve(
             completions_collection,
             ids=[manifest_point_id(completions_collection)],
@@ -576,7 +575,7 @@ async def serving_outcome(
     try:
         stored = await read_manifest_record_async(async_client, completions_collection)
         if stored is None:
-            points, _ = await _await_client(
+            points, _ = await maybe_await(
                 async_client.scroll(
                     settings.qdrant_collection, limit=1, with_payload=False
                 )
@@ -604,7 +603,7 @@ async def resolve_serving_generation(
     from mainframe_rag.ingest.qdrant_io import live_collection_from
 
     alias = settings.qdrant_collection
-    aliases = await _await_client(async_client.get_aliases())
+    aliases = await maybe_await(async_client.get_aliases())
     target = next(
         (
             desc.collection_name
@@ -614,7 +613,7 @@ async def resolve_serving_generation(
         None,
     )
     candidate = target if target is not None else alias
-    exists = bool(await _await_client(async_client.collection_exists(candidate)))
+    exists = bool(await maybe_await(async_client.collection_exists(candidate)))
     physical, _legacy = live_collection_from(alias, target, exists)
     if physical is None:
         return None, "empty", []
@@ -624,11 +623,3 @@ async def resolve_serving_generation(
     )
     return physical, outcome, details
 
-
-async def _await_client(res):
-    """Sync/async client shim for the serving path: the pooled async client
-    awaits while sync test doubles resolve inline — one helper serves
-    lifespan + `/healthz` so the twin call sites cannot diverge."""
-    if inspect.isawaitable(res):
-        return await res
-    return res

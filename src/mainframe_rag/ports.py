@@ -9,6 +9,7 @@ structurally — parameter names/returns mirror the real client), HttpxLLMClient
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Awaitable
 from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 from uuid import UUID
@@ -19,6 +20,17 @@ if TYPE_CHECKING:
     from qdrant_client import models
 
 SparseVector = tuple[list[int], list[float]]
+
+
+async def maybe_await[T](value: T | Awaitable[T]) -> T:
+    """The one sync/async compatibility rule (issue #369): production
+    clients return awaitables, sync tooling and test doubles return values.
+    Awaited when awaitable, returned as-is otherwise; cancellation and errors
+    propagate unchanged. Every serving call site that accepts either shape
+    goes through here."""
+    if inspect.isawaitable(value):
+        return await value
+    return value
 
 
 class ChatMessage(BaseModel):
@@ -287,7 +299,7 @@ class LLMClient(Protocol):
     capability via hasattr and falls back to non-streaming chat otherwise.
     There is deliberately no separate async-chat protocol: HttpxLLMClient's
     chat() resolves to a coroutine when called on a running loop, and every
-    consumer funnels through as_chat_result / isawaitable.
+    consumer funnels through as_chat_result / maybe_await.
     """
 
     def chat(

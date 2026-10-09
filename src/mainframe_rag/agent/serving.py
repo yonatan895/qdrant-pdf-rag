@@ -28,12 +28,9 @@ from mainframe_rag.config import Settings
 from mainframe_rag.ingest.build import decode_build_binding, require_published_binding
 from mainframe_rag.ingest.publish import publication_metadata_point_id
 from mainframe_rag.ingest.representation import (
-    _await_client,
-)
-from mainframe_rag.ingest.representation import (
     resolve_serving_generation as resolve_representation_generation,
 )
-from mainframe_rag.ports import AsyncQdrantReader, QdrantReader
+from mainframe_rag.ports import AsyncQdrantReader, QdrantReader, maybe_await
 
 # Outcomes a request may be served against (`resolve_serving_generation`
 # vocabulary). `empty` is deliberately absent: readiness keeps it as the
@@ -49,8 +46,8 @@ async def resolve_published_generation(
     if physical is not None and outcome in SERVABLE_OUTCOMES:
         control = physical + "__completions"
         try:
-            aliases = await _await_client(client.get_aliases())
-            records = await _await_client(client.retrieve(
+            aliases = await maybe_await(client.get_aliases())
+            records = await maybe_await(client.retrieve(
                 control, ids=[publication_metadata_point_id(control)], with_payload=True,
             ))
             payload = (records[0].payload or {}) if records else None
