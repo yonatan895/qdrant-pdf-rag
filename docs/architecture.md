@@ -160,8 +160,13 @@ clients. The application lifespan retains client ownership and closes only what
 it created (`AsyncExitStack`: startup failure, shutdown, cancellation); requests
 use an `AgentResources` view that never closes anything.
 
-Retrieval SDK dispatch and its existing low-level ports remain unchanged. The
-core's `Retriever` operation is the read boundary: a storage/admin client cannot
+Retrieval SDK dispatch is unchanged. Beneath it, serving holds only the read
+protocols `ports.QdrantReader`/`AsyncQdrantReader` (#369): retrieval, the serving
+gate, the evidence service and `AgentResources` cannot write through their
+handle, and only ingest/admin code holds the writer protocol `QdrantPoints`.
+`tests/test_serving_gate.py` runs the `qa:typecheck` checker to accept the real
+clients there and reject writes; read-only credentials remain the runtime
+boundary. The core's `Retriever` operation is the read boundary: a storage/admin client cannot
 stand in for that operation, and the core has no storage handle on which to write.
 The three core modules carry their strict mypy options inline; ordinary
 `qa:typecheck` enforces them without changing shared pytest/verifier configuration.
@@ -236,7 +241,7 @@ artifact/topology acceptance stays in [the CRC gate](crc-release-verification.md
 
 ```text
 src/mainframe_rag/
-  ports.py            # Layer-boundary protocols (Embedder, QdrantPoints, Reranker, LLMClient, Tokenizer)
+  ports.py            # Layer-boundary protocols (Embedder, QdrantReader/QdrantPoints, Reranker, LLMClient, Tokenizer)
   ingest/
     walk.py           # *.pdf discovery
     ibm_pdf.py        # PDF parser & metadata extraction

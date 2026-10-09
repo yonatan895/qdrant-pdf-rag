@@ -102,11 +102,11 @@ from mainframe_rag.ingest.representation import require_attested_revision
 from mainframe_rag.ingest.rules_version import extraction_rules_version
 from mainframe_rag.logs import configure_logging, error_type
 from mainframe_rag.ports import (
-    AsyncQdrantPoints,
+    AsyncQdrantReader,
     ChatMessage,
     Embedder,
     LLMClient,
-    QdrantPoints,
+    QdrantReader,
     Reranker,
     Tokenizer,
     TokenUsage,
@@ -130,7 +130,7 @@ log = logging.getLogger("agent")
 settings: Settings
 http: httpx2.AsyncClient
 http_sync: httpx2.Client
-qdrant: AsyncQdrantPoints | QdrantPoints
+qdrant: AsyncQdrantReader | QdrantReader
 embedder: Embedder
 llm: LLMClient
 tokenizer: Tokenizer
