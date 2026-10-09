@@ -950,7 +950,7 @@ def _execute(
     """Execution (issue #583 S4): the parse process pool and the upsert
     threads under one combined in-flight window. The parent alone appends
     inventory records and updates `stats`; one bad document never stops
-    the run. Moved verbatim from _run_impl."""
+    the run."""
     ctx = mp.get_context("spawn")
     # Combined in-flight budget: parse_pending + upsert_pending is capped
     # at window so slow upserts never let the parent hold unbounded
@@ -970,17 +970,12 @@ def _execute(
         tuple[InventoryRecord, str | None, str | None, str | None],
     ] = {}
 
-    def submit_parse(
-        task: ParseTask,
-    ) -> None:
-        parse_pending[pool.submit(_parse_one, task)] = task[0]
-
     def refill_parse() -> None:
         while len(parse_pending) + len(upsert_pending) < window:
             next_task = next(task_iter, None)
             if next_task is None:
                 break
-            submit_parse(next_task)
+            parse_pending[pool.submit(_parse_one, next_task)] = next_task.path
 
     upsert_ctx = (
         ThreadPoolExecutor(max_workers=settings.ingest_upsert_streams)
@@ -1005,28 +1000,13 @@ def _execute(
                     try:
                         record, parsed, chunks, vectors, contexts = future.result()
                     except Exception as exc:  # noqa: BLE001 — one bad PDF must not kill the run
-                        stats.files_failed += 1
-                        append_record(
-                            progress,
-                            InventoryRecord(
-                                path=path_str,
-                                sha256="",
-                                status="error",
-                                error=str(exc)[:500],
-                                error_type=type(exc).__name__,
-                            ),
+                        record = InventoryRecord(
+                            path=path_str,
+                            sha256="",
+                            status="error",
+                            error=str(exc)[:500],
+                            error_type=type(exc).__name__,
                         )
-                        log.error(
-                            json.dumps(
-                                {
-                                    "path": path_str,
-                                    "action": "error",
-                                    "error_type": type(exc).__name__,
-                                }
-                            )
-                        )
-                        refill_parse()
-                        continue
                     if record.status == "error":
                         stats.files_failed += 1
                         append_record(progress, record)
@@ -1159,8 +1139,6 @@ def _execute(
                         # "skipped" = verified completion for this
                         # generation already committed — still ok.
                         stats.files_ok += 1
-                    elif record.status == "empty":
-                        pass  # already counted as failed above
                     if record.status == "upserted":
                         stats.chunks_upserted += record.chunks
                     append_record(progress, record)
