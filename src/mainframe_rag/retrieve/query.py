@@ -636,9 +636,8 @@ def _query_filters(
     """The constraint filter for a query and its relaxed retry filter: the
     retry keeps the scope and excludes known-wrong codes (Invariant D1)."""
     flt = build_filter(identifiers, product=product, version=version)
-    fallback_flt = build_fallback_filter(
-        identifiers, scope=build_scope_filter(product=product, version=version)
-    )
+    fallback_flt = build_scope_filter(product=product, version=version)
+    fallback_flt = build_fallback_filter(identifiers, scope=fallback_flt)
     return flt, fallback_flt
 
 
