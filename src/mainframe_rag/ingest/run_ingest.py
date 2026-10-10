@@ -697,6 +697,16 @@ def _dispatch(
             force_reingest=force_reingest,
             retire_docs=retire_docs,
         )
+    if not dry_run:
+        log.warning(
+            json.dumps(
+                {
+                    "action": "in_place_deprecated",
+                    "collection": settings.qdrant_collection,
+                    "remediation": "unset INGEST_ALIAS_PUBLISH (alias publication is the default)",
+                }
+            )
+        )
     if retire_docs:
         # Explicit removals are a publication operation (intended-set
         # membership); in-place mode never deletes unwalked data and

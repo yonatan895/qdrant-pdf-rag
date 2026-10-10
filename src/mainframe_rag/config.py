@@ -322,12 +322,12 @@ class Settings(BaseSettings):
     # measured caveat) — never for incremental prod runs.
     ingest_bulk_load: bool = False
     # Alias publication (issue #359): ingest converges a versioned staging
-    # collection (snapshot-cloned from live) and atomically swaps the
+    # collection (an exact API copy of live) and atomically swaps the
     # collection alias only after every document verifies — readers see a
-    # complete old or complete new generation, never a partial mix.
-    # Default off (ROADMAP: new capabilities ship default-off); enabling by
-    # default is a dedicated follow-up PR. Env INGEST_ALIAS_PUBLISH.
-    ingest_alias_publish: bool = False
+    # complete old or complete new generation, never a partial mix. The
+    # default (#360 follow-up); INGEST_ALIAS_PUBLISH=false keeps the
+    # deprecated in-place mode for one release.
+    ingest_alias_publish: bool = True
     bm25_model: str = "Qdrant/bm25"
     bm25_cache_dir: str | None = None
     # Pinned sparse-weights revision (issue #362): mirrors the `revision`

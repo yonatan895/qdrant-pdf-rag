@@ -179,7 +179,7 @@ def test_metrics_literal_true_only(monkeypatch, mapper_env):
 
 
 @pytest.mark.parametrize("raw,expected", [
-    ("", False), ("true", True), ("1", True), ("yes", True),
+    ("", True), ("true", True), ("1", True), ("yes", True),
     ("false", False), ("0", False), ("no", False),
 ])
 def test_strict_maintenance_bool(monkeypatch, mapper_env, raw, expected):
@@ -250,10 +250,20 @@ def test_ingest_enabled_block_and_tricky_retire(monkeypatch, mapper_env):
 
 def test_retire_without_alias_fails_closed(monkeypatch, mapper_env):
     monkeypatch.setenv("CORPUS_PVC", "corpus-pvc")
+    monkeypatch.setenv("INGEST_ALIAS_PUBLISH", "false")
     monkeypatch.setenv("INGEST_RETIRE_DOCS", "DOC1")
     r, _ = mapper_env()
     assert r.returncode != 0
     assert "INGEST_ALIAS_PUBLISH" in r.stderr
+
+
+def test_retire_with_default_publication_renders(monkeypatch, mapper_env):
+    monkeypatch.setenv("CORPUS_PVC", "corpus-pvc")
+    monkeypatch.setenv("INGEST_RETIRE_DOCS", "DOC1")
+    r, out = mapper_env()
+    assert r.returncode == 0, r.stderr
+    ingest = load_values(out)["ingest"]
+    assert ingest["aliasPublish"] is True and ingest["retireDocs"] == ["DOC1"]
 
 
 def test_route_needs_ca_file(monkeypatch, mapper_env, tmp_path):

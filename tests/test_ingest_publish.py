@@ -755,14 +755,14 @@ def test_dangling_alias_publishes_fresh(tmp_path, monkeypatch):
 
 
 def test_flag_off_creates_no_alias_or_generations(tmp_path, monkeypatch):
-    """Default-off pin: the legacy in-place path creates no alias, no
-    staging generations, no snapshots."""
+    """Explicit opt-out pin: the deprecated in-place path creates no alias,
+    no staging generations, no snapshots."""
     from mainframe_rag.ingest import run_ingest
 
     monkeypatch.setenv("EMBED_MODE", "hash")
     monkeypatch.setenv("ALLOW_HASH_MODE", "true")
     monkeypatch.delenv("DENSE_DIM", raising=False)
-    monkeypatch.delenv("INGEST_ALIAS_PUBLISH", raising=False)
+    monkeypatch.setenv("INGEST_ALIAS_PUBLISH", "false")
     fake = PublishFake()
     monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
     corpus = tmp_path / "corpus"
@@ -1715,7 +1715,7 @@ def test_inplace_run_uses_progress_lock_only(tmp_path, monkeypatch):
 
     monkeypatch.setenv("EMBED_MODE", "hash")
     monkeypatch.setenv("ALLOW_HASH_MODE", "true")
-    monkeypatch.delenv("INGEST_ALIAS_PUBLISH", raising=False)
+    monkeypatch.setenv("INGEST_ALIAS_PUBLISH", "false")
     fake = PublishFake()
     monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
     corpus = tmp_path / "corpus"
