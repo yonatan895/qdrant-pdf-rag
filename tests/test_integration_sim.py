@@ -29,6 +29,15 @@ from fastapi.testclient import TestClient
 pytestmark = pytest.mark.integration
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _checkout_env() -> dict[str, str]:
+    """Child-process environment that runs this checkout's code: pytest's
+    sys.path fix (conftest) does not reach a spawned `python -m`, which would
+    otherwise import whatever an editable install in a shared venv names."""
+    return {**os.environ, "PYTHONPATH": str(REPO_ROOT / "src")}
+
+
 MOCK_DIM = 32  # must equal the DENSE_DIM the vLLM-shaped variant declares
 
 MOCK_SPEC = importlib.util.spec_from_file_location(
@@ -1647,7 +1656,7 @@ def test_publisher_process_death_resumes_same_build(
         # A file, not a PIPE: orphaned pool workers cannot keep communicate open.
         with child_log.open("w") as output:
             process = subprocess.Popen(
-                [*worker, "--", *args], cwd=REPO_ROOT, env=os.environ.copy(),
+                [*worker, "--", *args], cwd=REPO_ROOT, env=_checkout_env(),
                 stdout=output, stderr=subprocess.STDOUT, start_new_session=True,
             )
             try:
@@ -1665,7 +1674,7 @@ def test_publisher_process_death_resumes_same_build(
                     with loser_log.open("w") as loser_output:
                         loser = subprocess.Popen(
                             [sys.executable, "-m", "mainframe_rag.ingest.run_ingest", *loser_args],
-                            cwd=REPO_ROOT, env=os.environ.copy(), stdout=loser_output,
+                            cwd=REPO_ROOT, env=_checkout_env(), stdout=loser_output,
                             stderr=subprocess.STDOUT, start_new_session=True,
                         )
                         try:
