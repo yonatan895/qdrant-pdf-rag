@@ -29,6 +29,7 @@ from mainframe_rag.ports import (
     Reranker,
 )
 from mainframe_rag.retrieve.filters import (
+    QueryIdentifiers,
     build_fallback_filter,
     build_filter,
     build_scope_filter,
@@ -629,6 +630,51 @@ def search(
     )
 
 
+def _query_filters(
+    identifiers: QueryIdentifiers, product: str | None, version: str | None
+) -> tuple[models.Filter | None, models.Filter | None]:
+    """The constraint filter for a query and its relaxed retry filter: the
+    retry keeps the scope and excludes known-wrong codes (Invariant D1)."""
+    flt = build_filter(identifiers, product=product, version=version)
+    fallback_flt = build_scope_filter(product=product, version=version)
+    fallback_flt = build_fallback_filter(identifiers, scope=fallback_flt)
+    return flt, fallback_flt
+
+
+async def _prefetch_leg_points(
+    client: AsyncQdrantReader,
+    collection: str,
+    leg_vecs: list[tuple[list[float], list[int], list[float]]],
+    flt: models.Filter | None,
+    fallback_flt: models.Filter | None,
+    prefetch_limit: int,
+) -> list[tuple[list[models.ScoredPoint], list[models.ScoredPoint], bool]]:
+    """The production prefetch, one owner for search and pool capture: per
+    leg, one batched dense + BM25 query under the ORIGINAL filter (splitting
+    changes ranking text only, never the constraint allowlist, so a stripped
+    cause leg cannot surface must_not docs the symptom filter excluded), and
+    the empty-filtered retry under the relaxed filter. Returns (dense,
+    sparse, retried) per leg."""
+    legs = []
+    for dense_vec, sparse_idx, sparse_val in leg_vecs:
+        dense_req, sparse_req = _build_prefetch_requests(
+            dense_vec, sparse_idx, sparse_val, flt, prefetch_limit
+        )
+        responses = await client.query_batch_points(collection, requests=[dense_req, sparse_req])
+        dense_points, sparse_points = responses[0].points, responses[1].points
+        retried = _needs_filter_fallback(dense_points, sparse_points, flt, fallback_flt)
+        if retried:
+            dense_req, sparse_req = _build_prefetch_requests(
+                dense_vec, sparse_idx, sparse_val, fallback_flt, prefetch_limit
+            )
+            responses = await client.query_batch_points(
+                collection, requests=[dense_req, sparse_req]
+            )
+            dense_points, sparse_points = responses[0].points, responses[1].points
+        legs.append((dense_points, sparse_points, retried))
+    return legs
+
+
 async def async_search(
     client: AsyncQdrantReader,
     embedder: Embedder,
@@ -646,9 +692,7 @@ async def async_search(
     batch call via query_batch_points.
     When reranking is enabled, fused candidates (top-50) are scored by the cross-encoder."""
     identifiers = parse_query(query)
-    flt = build_filter(identifiers, product=product, version=version)
-    fallback_flt = build_scope_filter(product=product, version=version)
-    fallback_flt = build_fallback_filter(identifiers, scope=fallback_flt)
+    flt, fallback_flt = _query_filters(identifiers, product, version)
 
     active_reranker, rerank_active, bypass_reason = _resolve_active_reranker(
         settings, reranker, query, identifiers.has_identifiers
@@ -702,33 +746,12 @@ async def async_search(
             },
         ):
             t0 = time.monotonic()
-            # Every leg shares the ORIGINAL filter: splitting changes ranking
-            # text only, never the constraint allowlist (a stripped cause leg
-            # must not surface must_not docs the symptom filter excluded).
-            leg_dense_points: list[list[models.ScoredPoint]] = []
-            leg_sparse_points: list[list[models.ScoredPoint]] = []
-            filter_fallback = False
-            for dense_vec, sparse_idx, sparse_val in leg_vecs:
-                dense_req, sparse_req = _build_prefetch_requests(
-                    dense_vec, sparse_idx, sparse_val, flt, prefetch_limit
-                )
-
-                responses = await client.query_batch_points(
-                    collection, requests=[dense_req, sparse_req]
-                )
-                dense_points, sparse_points = responses[0].points, responses[1].points
-                leg_fallback = _needs_filter_fallback(dense_points, sparse_points, flt, fallback_flt)
-                if leg_fallback:
-                    dense_req, sparse_req = _build_prefetch_requests(
-                        dense_vec, sparse_idx, sparse_val, fallback_flt, prefetch_limit
-                    )
-                    responses = await client.query_batch_points(
-                        collection, requests=[dense_req, sparse_req]
-                    )
-                    dense_points, sparse_points = responses[0].points, responses[1].points
-                leg_dense_points.append(dense_points)
-                leg_sparse_points.append(sparse_points)
-                filter_fallback = filter_fallback or leg_fallback
+            prefetched = await _prefetch_leg_points(
+                client, collection, leg_vecs, flt, fallback_flt, prefetch_limit
+            )
+            leg_dense_points = [dense for dense, _, _ in prefetched]
+            leg_sparse_points = [sparse for _, sparse, _ in prefetched]
+            filter_fallback = any(retried for _, _, retried in prefetched)
             timings["qdrant_ms"] = int((time.monotonic() - t0) * 1000)
 
         weights, k, max_per_page, max_per_doc = _ranking_params(settings, identifiers.has_identifiers)
