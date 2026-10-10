@@ -36,7 +36,6 @@ import json
 import time
 import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -72,14 +71,6 @@ from mainframe_rag.ingest.placement import (
 )
 from mainframe_rag.ingest.seal import capture_content_seal
 from mainframe_rag.ports import QdrantPoints
-
-
-@dataclass(frozen=True)
-class PublishTarget:
-    """Resolved publication endpoints for one run."""
-
-    staging: str
-    live: str | None
 
 
 def generation_fingerprint(settings: Settings, rules_v: str, cli_triple: str) -> str:

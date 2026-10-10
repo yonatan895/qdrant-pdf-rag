@@ -954,6 +954,12 @@ def test_oversize_document_is_never_upserted_or_completed_and_next_run_succeeds(
         ("unattested_revision", {}, {"EMBED_MODE": "vllm", "DENSE_DIM": "256"}, ("--reingest",),
          "EMBED_MODEL_REVISION"),
         ("contextual_on_hash", {}, {"CONTEXTUAL_EMBED_ENABLED": "true"}, (), "requires embed_mode=vllm"),
+        # Mode dispatch (issue #583 S5): refused before publication takes its
+        # lock, records a build or prepares staging.
+        ("contextual_on_hash_publish", {},
+         {"CONTEXTUAL_EMBED_ENABLED": "true", "INGEST_ALIAS_PUBLISH": "true"}, (),
+         "requires embed_mode=vllm"),
+        ("retire_in_place", {}, {}, ("--retire-doc", "SA22-7000-00"), "requires INGEST_ALIAS_PUBLISH"),
     ],
 )
 def test_failed_preflight_starts_no_workers_and_writes_nothing(
@@ -990,6 +996,9 @@ def test_failed_preflight_starts_no_workers_and_writes_nothing(
     after = (fake._points, fake.upserts, fake.upsert_calls, fake.deletes, fake.created_collections)
     assert after == before, f"{case}: storage mutated before the refusal"
     assert not progress.exists() or progress.read_text() == ""
+    if case in ("contextual_on_hash_publish", "retire_in_place"):
+        # Dispatch refusals precede every lock, so no lock/state file exists.
+        assert sorted(p.name for p in tmp_path.iterdir()) == [], f"{case}: lock or state written"
 
 
 def test_combined_in_flight_window_bounds_parse_and_upsert_work(tmp_path, monkeypatch):

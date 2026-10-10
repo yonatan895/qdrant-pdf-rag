@@ -91,7 +91,6 @@ from mainframe_rag.ingest.inventory import (
 )
 from mainframe_rag.ingest.publish import (
     PUBLISH_STATE_VERSION,
-    PublishTarget,
     apply_approved_removals,
     clear_publish_state,
     commit_retired_inventory,
@@ -177,6 +176,23 @@ class _Plan:
     tasks: list[ParseTask]
     lineage_by_path: dict[str, str | None]
     skipped_ok: int
+
+
+@dataclass(frozen=True)
+class _StagingBuild:
+    """Publisher-owned inputs for building one staging generation (issue
+    #583 S5). Only `_run_publish_locked` creates it, under the target
+    publish lock and after retirement planning; in-place runs have none, so
+    they can never carry a pre-hashed walk, an approved removal plan or a
+    checkpoint-resume grant. `staging`/`live` are the resolved physical
+    names; `resume_verified` is granted only for reused staging."""
+
+    staging: str
+    live: str | None
+    prewalked: list[tuple[str, str]]
+    pending_removals: frozenset[str]
+    retire_plan: dict[str, dict[str, set[str] | bool]]
+    resume_verified: bool
 
 
 def _parse_one(
@@ -613,7 +629,7 @@ def run(
     root = start_span(tracer, "ingest.run")
     token = otel_context.attach(trace.set_span_in_context(root))
     try:
-        return _run_impl(
+        return _dispatch(
             src,
             progress,
             workers,
@@ -636,6 +652,74 @@ def run(
         otel_context.detach(token)
         root.end()
         shutdown_tracing()
+
+
+def _dispatch(
+    src: Path,
+    progress: Path,
+    workers: int | None,
+    limit: int | None,
+    dry_run: bool,
+    settings: Settings,
+    tracer: trace.Tracer,
+    root: trace.Span,
+    vendor: str | None = None,
+    product: str | None = None,
+    version: str | None = None,
+    force_reingest: bool = False,
+    retire_docs: tuple[str, ...] | None = None,
+) -> int:
+    """Mode choice (issue #583 S5), made once per run: alias publication
+    for a real run with INGEST_ALIAS_PUBLISH, otherwise an in-place build.
+    The publisher builds its staging generation through `_run_impl` with a
+    `_StagingBuild`; `_run_impl` itself never chooses a mode."""
+    if settings.contextual_embed_enabled and not dry_run:
+        # Fail the whole run before spawning the pool: a misconfigured flag
+        # must never degrade into header-only vectors doc by doc. Dry runs
+        # embed nothing, so they need no context endpoint.
+        if settings.embed_mode == "hash":
+            raise RuntimeError(
+                "CONTEXTUAL_EMBED_ENABLED=true requires embed_mode=vllm; "
+                "hash mode cannot call an LLM."
+            )
+        settings.require_context_llm()
+    if settings.ingest_alias_publish and not dry_run:
+        return _run_publish(
+            src,
+            progress,
+            workers,
+            limit,
+            settings,
+            tracer,
+            root,
+            vendor=vendor,
+            product=product,
+            version=version,
+            force_reingest=force_reingest,
+            retire_docs=retire_docs,
+        )
+    if retire_docs:
+        # Explicit removals are a publication operation (intended-set
+        # membership); in-place mode never deletes unwalked data and
+        # dry runs mutate nothing.
+        raise RuntimeError(
+            "--retire-doc requires INGEST_ALIAS_PUBLISH=true (and a real run, "
+            "not --dry-run): in-place ingest never removes unwalked documents."
+        )
+    return _run_impl(
+        src,
+        progress,
+        workers,
+        limit,
+        dry_run,
+        settings,
+        tracer,
+        root,
+        vendor=vendor,
+        product=product,
+        version=version,
+        force_reingest=force_reingest,
+    )
 
 
 def _gate_planned_entries(src: Path, walk_entries: list[tuple[str, str]]) -> list[tuple[str, str]]:
@@ -830,8 +914,7 @@ def _preflight(
     force_reingest: bool,
     limit: int | None,
     bulk: bool,
-    publish_target: PublishTarget | None,
-    resume_verified_build: bool,
+    staging: _StagingBuild | None,
 ) -> _Preflight:
     """Every gate before planning and before any worker spawns (issue #583
     S3), in its established order: immutable-build guard, single-writer
@@ -845,7 +928,7 @@ def _preflight(
     # Single-writer guard (issue #359 req 6): a second concurrent run
     # sharing the progress directory fails closed before any stage runs.
     client = _get_qdrant(settings)
-    if publish_target is None:
+    if staging is None:
         aliases = {a.alias_name: a.collection_name for a in client.get_aliases().aliases}
         physical = aliases.get(settings.qdrant_collection, settings.qdrant_collection)
         existing_build = read_build_binding(client, physical + "__completions")
@@ -893,10 +976,10 @@ def _preflight(
     # actual stored points. Inherited live markers cannot satisfy it.
     if (
         force_reingest
-        and resume_verified_build
-        and publish_target is not None
-        and publish_target.staging == settings.qdrant_collection
-        and publish_target.live != settings.qdrant_collection
+        and staging is not None
+        and staging.resume_verified
+        and staging.staging == settings.qdrant_collection
+        and staging.live != settings.qdrant_collection
     ):
         stored = read_manifest_record(client, completion_collection_name(settings))
         resume_checkpoints = (
@@ -1158,50 +1241,15 @@ def _run_impl(
     product: str | None = None,
     version: str | None = None,
     force_reingest: bool = False,
-    prewalked: list[tuple[str, str]] | None = None,
-    _publish_target: PublishTarget | None = None,
-    _pending_removals: frozenset[str] = frozenset(),
-    retire_docs: tuple[str, ...] | None = None,
-    _retire_plan: dict[str, dict[str, set[str] | bool]] | None = None,
-    _resume_verified_build: bool = False,
+    staging: _StagingBuild | None = None,
 ) -> int:
+    """One build: in place (`staging` None, chosen by `_dispatch`) or the
+    publisher's staging generation (`settings` already name the staging
+    physical)."""
     workers = resolve_workers(workers, settings)
     rules_v = extraction_rules_version()
     src_labels = source_labels(vendor, product, version)
     started = time.monotonic()
-    if settings.contextual_embed_enabled and not dry_run:
-        # Fail the whole run before spawning the pool: a misconfigured flag
-        # must never degrade into header-only vectors doc by doc. Dry runs
-        # embed nothing, so they need no context endpoint.
-        if settings.embed_mode == "hash":
-            raise RuntimeError(
-                "CONTEXTUAL_EMBED_ENABLED=true requires embed_mode=vllm; "
-                "hash mode cannot call an LLM."
-            )
-        settings.require_context_llm()
-    if settings.ingest_alias_publish and not dry_run and _publish_target is None:
-        return _run_publish(
-            src,
-            progress,
-            workers,
-            limit,
-            settings,
-            tracer,
-            root,
-            vendor=vendor,
-            product=product,
-            version=version,
-            force_reingest=force_reingest,
-            retire_docs=retire_docs,
-        )
-    if retire_docs:
-        # Explicit removals are a publication operation (intended-set
-        # membership); in-place mode never deletes unwalked data and
-        # dry runs mutate nothing.
-        raise RuntimeError(
-            "--retire-doc requires INGEST_ALIAS_PUBLISH=true (and a real run, "
-            "not --dry-run): in-place ingest never removes unwalked documents."
-        )
     cache_path = (
         resolve_cache_path(settings, progress) if settings.contextual_embed_enabled else None
     )
@@ -1218,8 +1266,7 @@ def _run_impl(
             force_reingest=force_reingest,
             limit=limit,
             bulk=bulk,
-            publish_target=_publish_target,
-            resume_verified_build=_resume_verified_build,
+            staging=staging,
         )
         if not dry_run
         else _Preflight()
@@ -1233,7 +1280,7 @@ def _run_impl(
                 progress,
                 settings,
                 client=client,
-                prewalked=prewalked,
+                prewalked=staging.prewalked if staging is not None else None,
                 limit=limit,
                 dry_run=dry_run,
                 rules_v=rules_v,
@@ -1318,8 +1365,8 @@ def _run_impl(
                 walked=walk_entries,
                 inventory=load_inventory(progress),
                 src_labels=src_labels,
-                pending_removals=_pending_removals,
-                retire_plan=_retire_plan,
+                pending_removals=staging.pending_removals if staging is not None else frozenset(),
+                retire_plan=staging.retire_plan if staging is not None else None,
             )
     finally:
         if run_lock is not None:
@@ -1716,7 +1763,6 @@ def _run_publish_locked(
                 }
             )
         )
-        target = PublishTarget(staging=staging, live=live)
         rc = _run_impl(
             src,
             progress,
@@ -1730,11 +1776,14 @@ def _run_publish_locked(
             product=product,
             version=version,
             force_reingest=force_reingest,
-            prewalked=prewalked,
-            _publish_target=target,
-            _pending_removals=retired,
-            _retire_plan=retire_plan,
-            _resume_verified_build=resumed and mode == "reused",
+            staging=_StagingBuild(
+                staging=staging,
+                live=live,
+                prewalked=prewalked,
+                pending_removals=retired,
+                retire_plan=retire_plan,
+                resume_verified=resumed and mode == "reused",
+            ),
         )
         if rc != 0:
             return rc
