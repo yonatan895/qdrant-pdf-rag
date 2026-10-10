@@ -29,6 +29,8 @@ def _report() -> dict:
         "elapsed_s": 0.25,
         "embed_mode": "hash",
         "collection": "test-corpus",
+        "representation": {"servable": True, "outcome": "compatible", "details": [],
+                           "physical": "test-corpus__gen1"},
         "recall@1": 0.5,
         "recall@3": 0.75,
         "recall@5": 0.75,
@@ -128,7 +130,7 @@ def test_check_baseline_none_baseline_passes():
 
 # --- main() exit-code contract (issue #159): a skipped gate is not a pass ---
 
-def _hermetic_main(monkeypatch, tmp_path: Path, **settings_kwargs) -> Path:
+def _hermetic_main(monkeypatch, tmp_path: Path, report=None, **settings_kwargs) -> Path:
     """Drive eval_retrieval.main() with evaluate() canned and settings
     patched: no Qdrant, no embedder, no repo-file manifest writes."""
     import scripts.eval_retrieval as ev
@@ -136,7 +138,8 @@ def _hermetic_main(monkeypatch, tmp_path: Path, **settings_kwargs) -> Path:
     golden = tmp_path / "golden.jsonl"
     golden.write_text((Path("evals/golden.jsonl").read_text().splitlines()[0]) + "\n")
     settings = Settings(embed_mode="hash", qdrant_collection="test-corpus", _env_file=None, **settings_kwargs)
-    monkeypatch.setattr(ev, "evaluate", lambda golden_entries, s: _report())
+    canned = report or _report()
+    monkeypatch.setattr(ev, "evaluate", lambda golden_entries, s: canned)
     monkeypatch.setattr(ev, "load_settings", lambda: settings)
     monkeypatch.setattr(ev, "write_run_manifest", lambda *a, **k: {"git_sha": "test"})
     return golden
@@ -174,6 +177,41 @@ def test_main_allows_holdout_with_rc_declaration(tmp_path, monkeypatch):
     _hermetic_main(monkeypatch, tmp_path)
     monkeypatch.setenv("VENUE", "rc")
     assert main(["--golden", "evals/holdout.jsonl", "--no-check"]) == 0
+
+
+def _unservable_report() -> dict:
+    report = _report()
+    report["representation"] = {"servable": False, "outcome": "incompatible",
+                                "details": ["embed_model_revision"], "physical": "test-corpus__gen1"}
+    return report
+
+
+def test_main_exit_2_when_collection_is_not_servable(tmp_path, monkeypatch, capfd):
+    """The agent refuses a generation whose representation does not match
+    these settings; a gated eval cannot certify it either, even when the
+    numbers would match the baseline."""
+    golden = _hermetic_main(monkeypatch, tmp_path, report=_unservable_report())
+    baseline = tmp_path / "baseline.json"
+    update_baseline(_report(), baseline)
+    rc = main(["--golden", str(golden), "--check", str(baseline)])
+    assert rc == 2
+    assert "not servable under these settings" in capfd.readouterr().err
+
+
+def test_main_refuses_baseline_from_unservable_collection(tmp_path, monkeypatch, capfd):
+    golden = _hermetic_main(monkeypatch, tmp_path, report=_unservable_report())
+    baseline = tmp_path / "baseline.json"
+    rc = main(["--golden", str(golden), "--update-baseline", str(baseline)])
+    assert rc == 2
+    assert not baseline.exists()
+    assert "refusing to record a baseline" in capfd.readouterr().err
+
+
+def test_main_ungated_trend_run_still_reports_unservable(tmp_path, monkeypatch):
+    golden = _hermetic_main(monkeypatch, tmp_path, report=_unservable_report())
+    out = tmp_path / "report.json"
+    assert main(["--golden", str(golden), "--no-check", "--out", str(out)]) == 0
+    assert json.loads(out.read_text())["representation"]["servable"] is False
 
 
 def test_main_exit_0_when_gate_applied_and_green(tmp_path, monkeypatch):
@@ -605,13 +643,17 @@ def test_cli_scores_actual_rows_before_deciding_gate(tmp_path, monkeypatch):
     import qdrant_client
     import scripts.eval_retrieval as ev
 
-    from mainframe_rag.ingest import embed, qdrant_io
+    from mainframe_rag.ingest import embed
     from mainframe_rag.retrieve import query, rerank
     from mainframe_rag.retrieve.query import SearchHit
 
     monkeypatch.setattr(qdrant_client, "QdrantClient", lambda **kw: object())
     monkeypatch.setattr(embed, "build_embedder", lambda settings: object())
-    monkeypatch.setattr(qdrant_io, "stored_rules_version", lambda *a: None)
+    from mainframe_rag.agent.serving import ServingGeneration
+    from mainframe_rag.eval import retrieval as retrieval_mod
+
+    monkeypatch.setattr(retrieval_mod, "_serving_generation",
+                        lambda c, s: ServingGeneration(s.qdrant_collection, "compatible"))
     monkeypatch.setattr(rerank, "build_reranker", lambda settings: None)
     monkeypatch.setattr(ev, "load_settings", lambda: Settings(embed_mode="hash", qdrant_collection="c", _env_file=None))
     monkeypatch.setattr(ev, "write_run_manifest", lambda *a, **kw: {"git_sha": "synthetic"})
@@ -826,7 +868,9 @@ import qdrant_client
 ev.load_settings = lambda: Settings(_env_file=None, qdrant_collection='test-corpus')
 qdrant_client.QdrantClient = lambda **kw: object()
 embed.build_embedder = lambda settings: object()
-qdrant_io.stored_rules_version = lambda *a: None
+from mainframe_rag.agent.serving import ServingGeneration
+from mainframe_rag.eval import retrieval as retrieval_mod
+retrieval_mod._serving_generation = lambda c, s: ServingGeneration(s.qdrant_collection, 'compatible')
 rerank.build_reranker = lambda settings: None
 def search(client, embedder, collection, query, **kw):
     with Path('queries.jsonl').open('a') as out:

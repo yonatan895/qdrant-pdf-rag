@@ -244,7 +244,15 @@ while `diagnostic_dualpath_enabled` remains default-off.
   model backend. Explicit `--golden`, `--check PATH`, and
   `--update-baseline PATH` remain authoritative.
   A bare `--check` requires the selected default baseline (missing means exit 2);
-  a bare `--update-baseline` explicitly records that default. Omitting both
+  a bare `--update-baseline` explicitly records that default.
+  Every report carries `representation`: the serving gate's own verdict on the
+  configured collection (`agent.serving.resolve_published_generation`:
+  representation contract and immutable publication). A servable run is
+  measured through the validated physical, exactly as the agent binds requests.
+  A non-servable run (for example a different `EMBED_MODEL_REVISION` than the
+  collection was built with) still prints trend numbers with a warning, but a
+  requested gate is skipped with exit 2 and `--update-baseline` refuses (exit 2);
+  `scripts/gate_l1.py` fails the same way. Omitting both
   retains the legacy implicit check only when the default exists.
   Task `eval:retrieval`, `eval:paraphrase`, and `eval:baseline` pass suite and
   operation intent to this owner. This fixes raw-mode YAML selection disagreeing
