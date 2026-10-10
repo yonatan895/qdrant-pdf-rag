@@ -128,7 +128,7 @@ async def test_gate_caches_within_ttl_and_revalidates(monkeypatch):
 
     async def fake_resolve(client, settings, rules_v):
         calls.append(settings.qdrant_collection)
-        return "physical-1", "compatible", []
+        return serving_mod.ServingGeneration("physical-1", "compatible")
 
     monkeypatch.setattr(serving_mod, "resolve_published_generation", fake_resolve)
     s = _settings()
@@ -161,7 +161,7 @@ async def test_gate_zero_ttl_validates_every_request_and_caches_refusals(monkeyp
 
     async def fake_resolve(client, settings, rules_v):
         calls.append(1)
-        return "physical-1", "pending", []
+        return serving_mod.ServingGeneration("physical-1", "pending")
 
     monkeypatch.setattr(serving_mod, "resolve_published_generation", fake_resolve)
     s = _settings()
@@ -226,6 +226,13 @@ async def test_serving_requires_full_published_build_pair(damage, direct, schema
     assert generation.physical == physical
     assert generation.outcome == ("compatible" if damage is None else "unknown")
     assert generation.details == (() if damage is None else ("build_control",))
+    # Search mints exact-evidence references from this binding, so only a
+    # validated build pair may hand one out.
+    if damage is None:
+        assert generation.binding is not None
+        assert (generation.binding.build_id, generation.binding.physical) == (build_id, physical)
+    else:
+        assert generation.binding is None
     assert not qd.writes
 
 

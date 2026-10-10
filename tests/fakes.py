@@ -391,10 +391,11 @@ class ServingGateFake:
     (flat local deployment). Gate/refusal tests use the real gate with a
     scripted Qdrant double instead."""
 
-    def __init__(self, physical=None, outcome="compatible", details=()):
+    def __init__(self, physical=None, outcome="compatible", details=(), binding=None):
         self.physical = physical
         self.outcome = outcome
         self.details = tuple(details)
+        self.binding = binding
         self.calls: list[tuple[str, bool]] = []
         self.invalidations = 0
 
@@ -406,6 +407,7 @@ class ServingGateFake:
             physical=self.physical or settings.qdrant_collection,
             outcome=self.outcome,
             details=self.details,
+            binding=self.binding,
         )
 
     def invalidate(self):

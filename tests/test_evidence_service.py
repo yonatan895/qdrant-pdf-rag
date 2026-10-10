@@ -13,6 +13,7 @@ import asyncio
 import base64
 import hashlib
 import json
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -29,8 +30,9 @@ from mainframe_rag.agent.evidence import (
     encode_reference,
     parse_reference,
 )
+from mainframe_rag.agent.serving import ServingGeneration
 from mainframe_rag.config import Settings
-from mainframe_rag.ingest.build import build_aliases
+from mainframe_rag.ingest.build import build_aliases, decode_build_binding
 from mainframe_rag.ingest.chunk import make_chunk_id
 from mainframe_rag.ingest.publish import publication_metadata_point_id
 from tests.fakes import settings_kw
@@ -152,6 +154,15 @@ def _service(qd, access=None, **settings_overrides):
     return EvidenceService(qd, _settings(**settings_overrides), access or SharedCorpusAccess())
 
 
+def _generation(qd, physical, outcome="compatible") -> ServingGeneration:
+    """What the serving gate hands a search for `physical`: the build binding
+    it decoded from the build's control record (agent.serving)."""
+    control = physical + "__completions"
+    record = qd.collections.get(control, {}).get(publication_metadata_point_id(control))
+    binding = decode_build_binding(record, control) if record is not None else None
+    return ServingGeneration(physical, outcome, (), binding)
+
+
 async def _refusal(coro) -> EvidenceFailure:
     with pytest.raises(EvidenceFailure) as caught:
         await coro
@@ -265,7 +276,7 @@ async def test_unrecorded_units_are_null_not_empty_and_missing_page_end_is_expli
     del payload["units"], payload["page_end"]
     qd = _world(payload)
     service = _service(qd)
-    minted = await service.mint_references("wt405_gen_a", [CHUNK])
+    minted = await service.mint_references(_generation(qd, "wt405_gen_a"), [CHUNK])
     got = await service.read_evidence(CALLER, minted[CHUNK])
     assert got.atomic_spans is None, "absent units must not read as 'no atomic items'"
     assert got.physical_page_end is None and got.physical_page_start == 3
@@ -275,7 +286,7 @@ async def test_unrecorded_units_are_null_not_empty_and_missing_page_end_is_expli
 async def test_old_reference_survives_alias_swap_and_repair_and_never_reads_successor():
     """Same recipe (same gen_fp), changed corpus text, same chunk id."""
     qd = _world(serving=True)
-    old_ref = (await _service(qd).mint_references("wt405_gen_a", [CHUNK]))[CHUNK]
+    old_ref = (await _service(qd).mint_references(_generation(qd, "wt405_gen_a"), [CHUNK]))[CHUNK]
     new_payload = _payload(text="//A EXEC PGM=NEW", units=[[0, 16, "atomic"]])
     qd.publish(BUILD_B, "wt405_gen_b", {CHUNK: new_payload}, serving=True)  # alias swap
     service = _service(qd)
@@ -283,7 +294,7 @@ async def test_old_reference_survives_alias_swap_and_repair_and_never_reads_succ
     old = await service.read_evidence(CALLER, old_ref)
     assert old.text == TEXT and old.build_id == BUILD_A
 
-    new_ref = (await service.mint_references("wt405_gen_b", [CHUNK]))[CHUNK]
+    new_ref = (await service.mint_references(_generation(qd, "wt405_gen_b"), [CHUNK]))[CHUNK]
     assert new_ref != old_ref
     assert (await service.read_evidence(CALLER, new_ref)).text == "//A EXEC PGM=NEW"
 
@@ -296,14 +307,14 @@ async def test_old_reference_survives_alias_swap_and_repair_and_never_reads_succ
 @pytest.mark.anyio
 async def test_removed_build_is_unavailable_never_the_successor():
     qd = _world(serving=True)
-    ref = (await _service(qd).mint_references("wt405_gen_a", [CHUNK]))[CHUNK]
+    ref = (await _service(qd).mint_references(_generation(qd, "wt405_gen_a"), [CHUNK]))[CHUNK]
     qd.publish(BUILD_B, "wt405_gen_b", {CHUNK: _payload(text="successor", units=[])}, serving=True)
     data_alias, control_alias = build_aliases(LOGICAL, BUILD_A)
     del qd.aliases[data_alias], qd.aliases[control_alias]  # retired build
     refusal = await _refusal(_service(qd).read_evidence(CALLER, ref))
     assert (refusal.kind, refusal.reason) == ("unavailable", "unknown_build")
     # The next ordinary operation still works against the successor.
-    successor = (await _service(qd).mint_references("wt405_gen_b", [CHUNK]))[CHUNK]
+    successor = (await _service(qd).mint_references(_generation(qd, "wt405_gen_b"), [CHUNK]))[CHUNK]
     assert (await _service(qd).read_evidence(CALLER, successor)).text == "successor"
 
 
@@ -320,7 +331,7 @@ async def test_removed_build_is_unavailable_never_the_successor():
 ])
 async def test_missing_or_redirected_controls_refuse_instead_of_guessing(break_it, reason):
     qd = _world(serving=True)
-    ref = (await _service(qd).mint_references("wt405_gen_a", [CHUNK]))[CHUNK]
+    ref = (await _service(qd).mint_references(_generation(qd, "wt405_gen_a"), [CHUNK]))[CHUNK]
     break_it(qd)
     refusal = await _refusal(_service(qd).read_evidence(CALLER, ref))
     assert (refusal.kind, refusal.reason) == ("corrupt", reason)
@@ -330,7 +341,7 @@ async def test_missing_or_redirected_controls_refuse_instead_of_guessing(break_i
 async def test_a_data_alias_redirected_to_another_build_is_refused():
     qd = _world(serving=True)
     qd.publish(BUILD_B, "wt405_gen_b", {CHUNK: _payload(text="other")}, serving=True)
-    ref_a = (await _service(qd).mint_references("wt405_gen_a", [CHUNK]))[CHUNK]
+    ref_a = (await _service(qd).mint_references(_generation(qd, "wt405_gen_a"), [CHUNK]))[CHUNK]
     data_alias, _ = build_aliases(LOGICAL, BUILD_A)
     qd.aliases[data_alias] = "wt405_gen_b"  # redirect; control alias still names gen_a
     refusal = await _refusal(_service(qd).read_evidence(CALLER, ref_a))
@@ -341,7 +352,7 @@ async def test_a_data_alias_redirected_to_another_build_is_refused():
 async def test_stored_data_changed_under_the_pinned_build_is_refused():
     qd = _world(serving=True)
     service = _service(qd)
-    ref = (await service.mint_references("wt405_gen_a", [CHUNK]))[CHUNK]
+    ref = (await service.mint_references(_generation(qd, "wt405_gen_a"), [CHUNK]))[CHUNK]
     qd.collections["wt405_gen_a"][CHUNK] = _payload(text=TEXT + " edited")
     refusal = await _refusal(service.read_evidence(CALLER, ref))
     assert (refusal.kind, refusal.reason) == ("corrupt", "digest_mismatch")
@@ -361,12 +372,12 @@ async def test_stored_data_changed_under_the_pinned_build_is_refused():
 async def test_payload_that_cannot_form_a_complete_envelope_is_never_returned(override, reason):
     qd = _world(serving=True)
     service = _service(qd)
-    ref = (await service.mint_references("wt405_gen_a", [CHUNK]))[CHUNK]
+    ref = (await service.mint_references(_generation(qd, "wt405_gen_a"), [CHUNK]))[CHUNK]
     qd.collections["wt405_gen_a"][CHUNK] = _payload(**override)
     refusal = await _refusal(service.read_evidence(CALLER, ref))
     assert refusal.kind == "corrupt" and refusal.reason == reason
     # ...and mint skips it rather than issuing a partial reference.
-    assert await service.mint_references("wt405_gen_a", [CHUNK]) == {}
+    assert await service.mint_references(_generation(qd, "wt405_gen_a"), [CHUNK]) == {}
 
 
 # ------------------------------------------------------------------ budget
@@ -376,7 +387,7 @@ async def test_payload_that_cannot_form_a_complete_envelope_is_never_returned(ov
 async def test_budget_is_whole_chunk_or_explicit_413_never_a_prefix():
     qd = _world(serving=True)
     service = _service(qd)
-    ref = (await service.mint_references("wt405_gen_a", [CHUNK]))[CHUNK]
+    ref = (await service.mint_references(_generation(qd, "wt405_gen_a"), [CHUNK]))[CHUNK]
     assert (await service.read_evidence(CALLER, ref, max_bytes=32)).text == TEXT
     for budget in (31, 16, 1):
         refusal = await _refusal(service.read_evidence(CALLER, ref, max_bytes=budget))
@@ -385,7 +396,7 @@ async def test_budget_is_whole_chunk_or_explicit_413_never_a_prefix():
     qd.collections["wt405_gen_a"][CHUNK] = big = _payload(text="x" * 2048, units=[])
     del big["units"]
     capped = _service(qd, evidence_max_bytes=1024)
-    ref2 = (await capped.mint_references("wt405_gen_a", [CHUNK]))[CHUNK]
+    ref2 = (await capped.mint_references(_generation(qd, "wt405_gen_a"), [CHUNK]))[CHUNK]
     refusal = await _refusal(capped.read_evidence(CALLER, ref2, max_bytes=1_000_000))
     assert refusal.kind == "budget_exceeded"
 
@@ -398,7 +409,7 @@ async def test_revocation_applies_to_the_next_read_on_the_same_service():
     qd = _world(serving=True)
     access = _Access()
     service = _service(qd, access)
-    ref = (await service.mint_references("wt405_gen_a", [CHUNK]))[CHUNK]
+    ref = (await service.mint_references(_generation(qd, "wt405_gen_a"), [CHUNK]))[CHUNK]
     assert (await service.read_evidence(CALLER, ref)).text == TEXT
     access.allow = False  # warm path, no cache clearing
     refusal = await _refusal(service.read_evidence(CALLER, ref))
@@ -411,7 +422,7 @@ async def test_revocation_between_admission_and_response_is_redecided():
     qd = _world(serving=True)
     access = _Access()
     service = _service(qd, access)
-    ref = (await service.mint_references("wt405_gen_a", [CHUNK]))[CHUNK]
+    ref = (await service.mint_references(_generation(qd, "wt405_gen_a"), [CHUNK]))[CHUNK]
     original = access.authorize
 
     async def revoke_after_grant(caller, scope):
@@ -429,7 +440,7 @@ async def test_policy_outage_and_missing_identity_fail_closed():
     qd = _world(serving=True)
     access = _Access()
     service = _service(qd, access)
-    ref = (await service.mint_references("wt405_gen_a", [CHUNK]))[CHUNK]
+    ref = (await service.mint_references(_generation(qd, "wt405_gen_a"), [CHUNK]))[CHUNK]
     access.unavailable = True
     assert (await _refusal(service.read_evidence(CALLER, ref))).kind == "access_unavailable"
     access.unavailable, access.unauthenticated = False, True
@@ -441,7 +452,7 @@ async def test_denied_caller_learns_nothing_from_corruption_or_size():
     qd = _world(serving=True)
     access = _Access()
     service = _service(qd, access)
-    ref = (await service.mint_references("wt405_gen_a", [CHUNK]))[CHUNK]
+    ref = (await service.mint_references(_generation(qd, "wt405_gen_a"), [CHUNK]))[CHUNK]
     qd.collections["wt405_gen_a"][CHUNK] = _payload(text="tampered")
     access.allow = False
     refusal = await _refusal(service.read_evidence(CALLER, ref, max_bytes=1))
@@ -452,7 +463,7 @@ async def test_denied_caller_learns_nothing_from_corruption_or_size():
 async def test_product_and_version_assertions_only_narrow():
     qd = _world(serving=True)
     service = _service(qd)
-    ref = (await service.mint_references("wt405_gen_a", [CHUNK]))[CHUNK]
+    ref = (await service.mint_references(_generation(qd, "wt405_gen_a"), [CHUNK]))[CHUNK]
     assert (await service.read_evidence(CALLER, ref, product="synthos", version="1")).text == TEXT
     for kwargs in ({"product": "z/OS"}, {"version": "2"}):
         refusal = await _refusal(service.read_evidence(CALLER, ref, **kwargs))
@@ -465,7 +476,7 @@ async def test_product_and_version_assertions_only_narrow():
 @pytest.mark.anyio
 async def test_deadline_is_a_typed_timeout():
     qd = _world(serving=True)
-    ref = (await _service(qd).mint_references("wt405_gen_a", [CHUNK]))[CHUNK]
+    ref = (await _service(qd).mint_references(_generation(qd, "wt405_gen_a"), [CHUNK]))[CHUNK]
 
     async def stall(name, ids):
         await asyncio.sleep(5)
@@ -478,7 +489,7 @@ async def test_deadline_is_a_typed_timeout():
 @pytest.mark.anyio
 async def test_cancellation_propagates_through_the_real_await_boundary():
     qd = _world(serving=True)
-    ref = (await _service(qd).mint_references("wt405_gen_a", [CHUNK]))[CHUNK]
+    ref = (await _service(qd).mint_references(_generation(qd, "wt405_gen_a"), [CHUNK]))[CHUNK]
     entered, released = asyncio.Event(), asyncio.Event()
 
     async def stall(name, ids):
@@ -501,7 +512,7 @@ async def test_cancellation_propagates_through_the_real_await_boundary():
 @pytest.mark.anyio
 async def test_storage_failure_is_a_fixed_upstream_refusal_without_storage_text():
     qd = _world(serving=True)
-    ref = (await _service(qd).mint_references("wt405_gen_a", [CHUNK]))[CHUNK]
+    ref = (await _service(qd).mint_references(_generation(qd, "wt405_gen_a"), [CHUNK]))[CHUNK]
     del qd.collections["wt405_gen_a"]
     refusal = await _refusal(_service(qd).read_evidence(CALLER, ref))
     assert refusal.kind == "upstream" and refusal.reason == "ConnectionError"
@@ -512,25 +523,39 @@ async def test_storage_failure_is_a_fixed_upstream_refusal_without_storage_text(
 
 
 @pytest.mark.anyio
-async def test_legacy_or_unpublished_or_foreign_generations_mint_nothing():
+async def test_legacy_or_refused_or_foreign_generations_mint_nothing():
     legacy = EvidenceQdrant()
     legacy.collections["wt405_old"] = {CHUNK: _payload()}  # no control record at all
-    assert await _service(legacy).mint_references("wt405_old", [CHUNK]) == {}
+    assert await _service(legacy).mint_references(_generation(legacy, "wt405_old"), [CHUNK]) == {}
 
-    unpublished = _world(retained_aliases=False)  # sealed, never published
-    assert await _service(unpublished).mint_references("wt405_gen_a", [CHUNK]) == {}
+    # Unpublished builds never reach minting: the serving gate refuses them
+    # (test_serving_gate.test_serving_requires_full_published_build_pair).
+    qd = _world(serving=True)
+    refused = _generation(qd, "wt405_gen_a", outcome="unknown")
+    assert await _service(qd).mint_references(refused, [CHUNK]) == {}
+    mismatched = replace(_generation(qd, "wt405_gen_a"), physical="wt405_gen_b")
+    assert await _service(qd).mint_references(mismatched, [CHUNK]) == {}
 
-    foreign = _world(serving=True)
-    other = EvidenceService(foreign, _settings(qdrant_collection="another_corpus"),
+    other = EvidenceService(qd, _settings(qdrant_collection="another_corpus"),
                             SharedCorpusAccess())
-    assert await other.mint_references("wt405_gen_a", [CHUNK]) == {}
-    assert await _service(foreign).mint_references("wt405_gen_a", []) == {}
+    assert await other.mint_references(_generation(qd, "wt405_gen_a"), [CHUNK]) == {}
+    assert await _service(qd).mint_references(_generation(qd, "wt405_gen_a"), []) == {}
+    assert qd.calls == [], "refusals are decided from the validated generation alone"
+
+
+@pytest.mark.anyio
+async def test_minting_reads_only_the_served_hits():
+    """The gate already validated the build; minting adds exactly one read."""
+    qd = _world(serving=True)
+    minted = await _service(qd).mint_references(_generation(qd, "wt405_gen_a"), [CHUNK])
+    assert set(minted) == {CHUNK}
+    assert qd.calls == ["retrieve"]
 
 
 @pytest.mark.anyio
 async def test_minted_reference_equals_the_independent_witness_and_reads_back():
     qd = _world(serving=True)
-    minted = await _service(qd).mint_references("wt405_gen_a", [CHUNK, CHUNK, "absent"])
+    minted = await _service(qd).mint_references(_generation(qd, "wt405_gen_a"), [CHUNK, CHUNK, "absent"])
     assert minted == {CHUNK: _expected_ref(BUILD_A, _expected_envelope())}
     assert (await _service(qd).read_evidence(CALLER, minted[CHUNK])).text == TEXT
 
@@ -588,7 +613,8 @@ def http(monkeypatch, synthetic_pdf, servable_representation_gate):
         monkeypatch.setattr(app_mod, "retrieve_search", search)
         monkeypatch.setattr(app_mod, "llm", Llm())
         monkeypatch.setattr(app_mod, "serving_gate", __import__("tests.fakes", fromlist=["x"])
-                            .ServingGateFake(physical="wt405_gen_a"))
+                            .ServingGateFake(physical="wt405_gen_a",
+                                             binding=_generation(qd, "wt405_gen_a").binding))
         yield SimpleNamespace(client=client, qd=qd, app=app_mod, llm=Llm, monkeypatch=monkeypatch)
 
 
@@ -620,7 +646,7 @@ def test_search_hits_carry_a_reference_that_reads_back_exactly(http):
 
 
 def test_search_without_a_build_binding_returns_null_reference_and_still_succeeds(http):
-    http.qd.collections["wt405_gen_a__completions"].clear()  # legacy-shaped generation
+    http.app.serving_gate.binding = None  # what the gate validates for a legacy generation
     assert _search(http)["hits"][0]["reference"] is None
 
 

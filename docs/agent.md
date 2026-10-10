@@ -22,8 +22,9 @@ as `chatcmpl-<request_id>`). The ops endpoints carry none: `/healthz`,
   `reference` (issue #405): the opaque `ep1.` exact-evidence reference, or
   `null` when no exact read can be promised for it (generation without a build
   binding, or a stored payload that cannot form a complete envelope). Minting
-  is best-effort and read-only; a fault there yields nulls, never a failed
-  search.
+  uses the build binding the serving gate validated and reads only the served
+  hits; it is best-effort and read-only, and a fault there yields nulls,
+  never a failed search.
 - `GET /v1/evidence/{reference}?max_bytes&product&version` — exact stored
   evidence for one cited chunk (issue #405): `EvidenceResponse{request_id,
   reference, digest, completeness ("complete"), build_id, chunk_id,
