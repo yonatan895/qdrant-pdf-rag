@@ -157,6 +157,69 @@ def test_agent_lifespan_timeouts_and_retries(monkeypatch):
     assert sync_closed == [True]
 
 
+def test_agent_qdrant_client_requests_uncompressed_responses(monkeypatch):
+    """Qdrant answers gzip with a chunked body written after the headers; the
+    agent then waited out ~40 ms delayed-ACK stalls on payload reads. The
+    lifespan's client must ask for identity encoding on the wire."""
+    import asyncio
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    from qdrant_client.async_qdrant_client import AsyncQdrantClient as RealAsyncQdrantClient
+
+    monkeypatch.setenv("QDRANT_URL", "http://localhost:6333")
+    monkeypatch.setenv("EMBED_MODE", "hash")
+    monkeypatch.setenv("ALLOW_HASH_MODE", "true")
+    monkeypatch.setenv("LLM_MODEL_REASONING", "test-reasoning-model")
+
+    captured: dict = {}
+
+    class SpyAsyncQdrantClient:
+        def __init__(self, **kw):
+            captured.update(kw)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("qdrant_client.AsyncQdrantClient", SpyAsyncQdrantClient)
+    with TestClient(app_mod.app):
+        pass
+
+    seen: list[str | None] = []
+
+    class Recorder(BaseHTTPRequestHandler):
+        def do_GET(self):
+            seen.append(self.headers.get("Accept-Encoding"))
+            body = b'{"result":{"collections":[]},"status":"ok","time":0}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Recorder)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        kw = {**captured, "url": f"http://127.0.0.1:{server.server_address[1]}"}
+
+        async def call():
+            client = RealAsyncQdrantClient(**kw)
+            try:
+                await client.get_collections()
+            finally:
+                await client.close()
+
+        asyncio.run(call())
+    finally:
+        server.shutdown()
+        server.server_close()
+    # Every request on the wire (the client may also probe the server version).
+    assert seen and set(seen) == {"identity"}
+
+
 def test_ingest_qdrant_timeout_from_settings(monkeypatch):
     from mainframe_rag.ingest import run_ingest
 

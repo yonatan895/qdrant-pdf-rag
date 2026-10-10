@@ -819,11 +819,16 @@ async def lifespan(_app: FastAPI):
         # ports.maybe_await (review S2).
         import qdrant_client
 
+        # Uncompressed responses: Qdrant answers a gzip request as a chunked
+        # body written after its headers, and the agent then waited out a
+        # ~40 ms delayed-ACK stall on most payload-carrying reads (search p50
+        # 47 -> 4 ms in the bench harness with identity).
         qdrant_client_inst = qdrant_client.AsyncQdrantClient(
             url=settings.qdrant_url,
             api_key=settings.qdrant_api_key,
             timeout=settings.qdrant_timeout_s,
             limits=http_limits,
+            headers={"Accept-Encoding": "identity"},
         )
         owned.push_async_callback(_close_client, qdrant_client_inst)
         qdrant = qdrant_client_inst
