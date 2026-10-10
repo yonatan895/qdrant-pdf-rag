@@ -153,10 +153,8 @@ ingest:
   # Explicit direct REST peers for placement evidence; never inferred from the Service.
   # Comma-separated non-secret URLs. Existing runtime parser/gate owns validation.
   peerUrls: ""
-  # Alias publication is the default; false selects the deprecated in-place mode.
-  aliasPublish: true
   reingest: false
-  # Explicit approved removals (requires aliasPublish=true). Entries accept
+  # Explicit approved removals (a publication operation). Entries accept
   # the backend alphabet (labels may carry '/', '|' and spaces); shell
   # preflight remains the owner for malformed combinations (D6).
   retireDocs: []

@@ -963,11 +963,22 @@ def test_validate_invalid_operator_boolean_refused(tree, key):
 @pytest.mark.parametrize("key", BOOL_KEYS)
 @pytest.mark.parametrize("value", ["true", "False", "1", "no", "YES"])
 def test_validate_valid_operator_boolean_accepted(tree, key, value):
+    if key == "INGEST_ALIAS_PUBLISH" and value.lower() in ("false", "no"):
+        pytest.skip("in-place ingest was retired (#360): see the refusal test below")
     env = {key: value}
     if key == "CONTEXTUAL_EMBED_ENABLED":
         env |= {"CONTEXT_LLM_BASE_URL": "http://llm:8000/v1", "CONTEXT_LLM_MODEL": "m"}
     r = _run(tree, env)
     assert r.returncode == 0, r.stderr
+
+
+@pytest.mark.parametrize("value", ["false", "False", "0", "no"])
+def test_validate_refuses_the_retired_in_place_switch(tree, value):
+    """INGEST_ALIAS_PUBLISH accepts only unset/true: an explicit false fails
+    closed at preflight with the retirement, never silently ignored."""
+    r = _run(tree, {"INGEST_ALIAS_PUBLISH": value})
+    assert r.returncode != 0
+    assert "in-place ingest was retired" in r.stderr
 
 
 def test_validate_invalid_boolean_from_env_file_then_corrected(tree):
