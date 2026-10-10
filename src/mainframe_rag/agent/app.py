@@ -543,13 +543,11 @@ def core_deps(res: AgentResources | None = None) -> AnswerCoreDeps:
 _REPRESENTATION_UNAVAILABLE = "the retrieval generation is not available"
 
 
-async def serving_settings() -> Settings:
+async def serving_generation() -> ServingGeneration:
     """The one serving boundary (issues #391 F3/F4): resolve the configured
-    alias through the TTL-cached gate and return settings bound to the
-    validated physical collection. Raises the stable 503 before any
-    retrieval or stream opens — an unverified or incompatible generation is
-    never queried, and the physical name means an alias swap cannot redirect
-    this request."""
+    alias through the TTL-cached gate and return the validated, servable
+    generation. Raises the stable 503 before any retrieval or stream opens —
+    an unverified or incompatible generation is never queried."""
     assert serving_gate is not None, "lifespan must initialize the serving gate"
     try:
         generation = await serving_gate.generation(qdrant, settings, extraction_rules_version())
@@ -568,8 +566,19 @@ async def serving_settings() -> Settings:
             )
         )
         raise AppError(503, "representation_unavailable", _REPRESENTATION_UNAVAILABLE)
+    return generation
+
+
+def bound_settings(generation: ServingGeneration) -> Settings:
+    """Settings bound to the generation's validated physical collection, so
+    an alias swap cannot redirect the request that holds them."""
     assert generation.physical is not None
     return settings.model_copy(update={"qdrant_collection": generation.physical})
+
+
+async def serving_settings() -> Settings:
+    """Settings bound to the validated physical generation (serving_generation)."""
+    return bound_settings(await serving_generation())
 
 
 async def serving_deps(rsc: AgentResources | None = None) -> AnswerCoreDeps:
@@ -1405,7 +1414,8 @@ async def _search_response(req, response, owner):
     # Gate before any retrieval work (issue #391 F3/F4): 503 when the
     # resolved generation is not validated; otherwise bind to its physical.
     rsc = resources()
-    bound = await serving_settings()
+    generation = await serving_generation()
+    bound = bound_settings(generation)
     with use_span(root_span, end_on_exit=False):
         try:
             found = await rsc.retrieve(
@@ -1437,7 +1447,7 @@ async def _search_response(req, response, owner):
     timing_parts = _timing_parts(timings)
     if timing_parts:
         response.headers["Server-Timing"] = ", ".join(timing_parts)
-    references = await _mint_references(request_id, bound.qdrant_collection, hits)
+    references = await _mint_references(request_id, generation, hits)
     _record_endpoint(request, "search", "ok", started, query_class=kind, hits=len(hits))
     return SearchResponse(
         request_id=request_id,
@@ -1457,13 +1467,14 @@ def evidence_service() -> EvidenceService:
 
 
 async def _mint_references(
-    request_id: str, physical: str, hits: list[SearchHit]
+    request_id: str, generation: ServingGeneration, hits: list[SearchHit]
 ) -> dict[str, str]:
-    """Best-effort exact-read references for the hits just served. A fault
-    here costs the references, never the search: the response then carries
-    `reference: null` and the log the error type only."""
+    """Best-effort exact-read references for the hits just served from the
+    validated generation. A fault here costs the references, never the
+    search: the response then carries `reference: null` and the log the
+    error type only."""
     try:
-        return await evidence_service().mint_references(physical, [h.chunk_id for h in hits])
+        return await evidence_service().mint_references(generation, [h.chunk_id for h in hits])
     except Exception as exc:  # noqa: BLE001
         log.warning(json_log(request_id, "evidence_mint", error=error_type(exc)))
         return {}
