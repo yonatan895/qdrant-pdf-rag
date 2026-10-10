@@ -18,7 +18,7 @@ from mainframe_rag.ingest.chunk import Chunk
 from mainframe_rag.ingest.ibm_pdf import ParsedDoc
 from mainframe_rag.ingest.identity import source_rev_key
 from mainframe_rag.ingest.rules_version import extraction_rules_version
-from mainframe_rag.ports import QdrantPoints, SparseVector
+from mainframe_rag.ports import QdrantPoints, QdrantReader, SparseVector
 
 HNSW_M = 16
 HNSW_EF_CONSTRUCT = 128
@@ -33,7 +33,7 @@ _KEYWORD_INDEXES = ("vendor", "product", "version", "doc_id", "chunk_type", "mes
 
 
 def scroll_all_points(
-    client: QdrantPoints,
+    client: QdrantReader,
     collection: str,
     *,
     scroll_filter: models.Filter | None,
@@ -79,7 +79,7 @@ _POLICY_ATTRS = (
 
 
 def check_collection_distribution(
-    client: QdrantPoints, collection: str, settings: Settings
+    client: QdrantReader, collection: str, settings: Settings
 ) -> None:
     """Read-only policy examination (issue #360): when the operator selected
     an explicit distribution policy, an existing collection whose configured
@@ -205,7 +205,7 @@ def ensure_collection(client: QdrantPoints, settings: Settings) -> None:
 
 
 def stored_doc_revisions(
-    client: QdrantPoints, settings: Settings, doc_id: str
+    client: QdrantReader, settings: Settings, doc_id: str
 ) -> set[str | None]:
     """Distinct source revisions stored under a printed doc_id (issue #361):
     the `source_rev` payload of every point, with None for legacy points
@@ -226,7 +226,7 @@ def stored_doc_revisions(
     return revisions
 
 
-def stored_rules_version(client: QdrantPoints, settings: Settings) -> str | None:
+def stored_rules_version(client: QdrantReader, settings: Settings) -> str | None:
     """Extraction-rules version carried by the collection's points (issue
     #124). Returns None when the collection is EMPTY (fresh — nothing to
     compare) and the empty string when points exist but predate versioning
@@ -292,7 +292,7 @@ def live_collection_from(
     return (alias, True) if target_exists else (None, False)
 
 
-def resolve_live_collection(client: QdrantPoints, settings: Settings) -> tuple[str | None, bool]:
+def resolve_live_collection(client: QdrantReader, settings: Settings) -> tuple[str | None, bool]:
     """Physical collection behind the `<collection>` alias.
 
     Returns (physical, legacy): (name, False) for the alias target, (None,
@@ -325,7 +325,7 @@ def snapshot_collection(client: QdrantPoints, collection: str) -> str:
     return snap.name
 
 
-def _point_ids(client: QdrantPoints, settings: Settings, collection: str) -> set[str]:
+def _point_ids(client: QdrantReader, settings: Settings, collection: str) -> set[str]:
     return {str(p.id) for p in scroll_all_points(
         client, collection, scroll_filter=None, with_payload=False,
         page_size=settings.ingest_scan_page_size)}

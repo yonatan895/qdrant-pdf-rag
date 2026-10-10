@@ -4702,3 +4702,56 @@ def test_distribution_mismatch_names_the_required_migration_class():
     )
     rf = "\n".join(verify_staging_distribution(wrong_rf, _dist_settings()))
     assert "same shard layout" in rf and "ACTIVE copies" in rf
+
+
+def test_publication_checks_are_read_only_by_type(tmp_path):
+    """Issue #369: publication's resolution and verification helpers take
+    the read-only `QdrantReader`, so the checker used by qa:typecheck proves
+    they cannot write (transitively: a reader can only reach other reader
+    helpers), while every helper that mutates storage requires the writer
+    protocol and rejects a reader."""
+    import subprocess
+    import sys
+
+    command = [sys.executable, "-m", "mypy", "--strict", "--follow-imports=silent", "--no-incremental"]
+    imports = """
+import qdrant_client
+
+from mainframe_rag.config import Settings
+from mainframe_rag.ingest.publish import (
+    audit_unmarked_residue,
+    ensure_staging,
+    resolve_publish_staging,
+    verify_staging_distribution,
+)
+from mainframe_rag.ingest.qdrant_io import delete_by_doc, swap_alias_to
+from mainframe_rag.ingest.representation import check_ingest_compatible
+from mainframe_rag.ports import QdrantReader
+"""
+    good = tmp_path / "good.py"
+    good.write_text(imports + """
+
+def checks(r: QdrantReader, real: qdrant_client.QdrantClient, s: Settings) -> None:
+    verify_staging_distribution(r, s)
+    audit_unmarked_residue(r, s, [], {}, "rules")
+    check_ingest_compatible(r, s, "c__completions", "rules")
+    resolve_publish_staging(real, s, gen_fp="g", corpus_fp="c", live=None,
+                            force_reingest=False, state=None)
+""")
+    accepted = subprocess.run([*command, str(good)], capture_output=True, text=True, check=False)
+    assert accepted.returncode == 0, accepted.stdout + accepted.stderr
+
+    bad = tmp_path / "bad.py"
+    bad.write_text(imports + """
+
+def writes(r: QdrantReader, s: Settings) -> None:
+    ensure_staging(r, s, s, None)
+    delete_by_doc(r, s, "doc")
+    swap_alias_to(r, s, "staging", None)
+""")
+    rejected = subprocess.run([*command, str(bad)], capture_output=True, text=True, check=False)
+    assert rejected.returncode == 1, rejected.stdout + rejected.stderr
+    for name in ("ensure_staging", "delete_by_doc", "swap_alias_to"):
+        assert (f'Argument 1 to "{name}" has incompatible type "QdrantReader"; '
+                'expected "QdrantPoints"') in rejected.stdout
+    assert "Found 3 errors" in rejected.stdout

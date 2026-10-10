@@ -52,8 +52,8 @@ class Reranker(Protocol):
 
 @runtime_checkable
 class QdrantReader(Protocol):
-    """The read-only Qdrant surface serving uses (issue #369): alias and
-    collection lookup, scroll/retrieve, and dense/sparse queries. Serving
+    """The read-only Qdrant surface (issue #369): alias and collection
+    lookup, scroll/retrieve, dense/sparse queries and cluster inspection. Serving
     consumers (retrieval, the serving gate, the evidence service, the agent's
     resources) are typed against this protocol, so the type checker rejects a
     write through them; read-only Qdrant credentials remain the runtime
@@ -105,18 +105,18 @@ class QdrantReader(Protocol):
         requests: list[models.QueryRequest],
     ) -> list[models.QueryResponse]: ...
 
-
-@runtime_checkable
-class QdrantPoints(QdrantReader, Protocol):
-    """The full Qdrant surface ingest/publication uses: the read surface plus
-    cluster inspection, collection/alias/snapshot administration and point
-    writes. Only the writer (ingest and admin tooling) holds it."""
-
     def collection_cluster_info(
         self, collection_name: str
     ) -> models.CollectionClusterInfo: ...
 
     def cluster_status(self) -> models.ClusterStatus: ...
+
+
+@runtime_checkable
+class QdrantPoints(QdrantReader, Protocol):
+    """The full Qdrant surface ingest/publication uses: the read surface plus
+    collection/alias/snapshot administration and point writes. Only the
+    writer (ingest and admin tooling) holds it."""
 
     def create_collection(
         self,
