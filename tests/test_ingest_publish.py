@@ -4105,6 +4105,63 @@ def test_in_place_writer_cannot_mutate_full_build(tmp_path, monkeypatch, target_
     assert (fake.collections, fake.aliases, progress.read_bytes()) == before
 
 
+@pytest.mark.parametrize("target_kind", ["physical", "retained", "build-alias"])
+def test_publication_refuses_a_generation_targeted_by_name(tmp_path, monkeypatch, target_kind):
+    """QDRANT_COLLECTION naming a generation's physical collection (or a
+    build alias) is a misconfiguration, never a legacy layout: before the
+    refusal, publication "migrated" the serving physical — copied it aside
+    and deleted the collection its logical alias still served. The refusal
+    mutates nothing, and the next ordinary publication still succeeds."""
+    from copy import deepcopy
+
+    from mainframe_rag.ingest import run_ingest
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _build_doc_with_id(corpus, "doc_a", DOC_A)
+    progress = tmp_path / "inventory.jsonl"
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    physical = fake.aliases[ALIAS]
+    target = physical
+    if target_kind == "retained":
+        assert _run_main(monkeypatch, corpus, progress, "--reingest") == 0
+        assert fake.aliases[ALIAS] != physical, "the first build is now retained"
+    elif target_kind == "build-alias":
+        target = next(name for name, value in fake.aliases.items()
+                      if name != ALIAS and value == physical)
+    before = deepcopy(fake.collections), dict(fake.aliases), progress.read_bytes()
+    monkeypatch.setenv("QDRANT_COLLECTION", target)
+    with pytest.raises(RuntimeError):
+        _run_main(monkeypatch, corpus, progress, "--reingest")
+    assert (fake.collections, fake.aliases, progress.read_bytes()) == before
+    monkeypatch.setenv("QDRANT_COLLECTION", ALIAS)
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    assert fake.aliases[ALIAS] in fake.collections
+
+
+@pytest.mark.parametrize("target_kind", ["physical", "retained"])
+def test_physical_target_refusal_names_the_misconfiguration(tmp_path, monkeypatch, target_kind):
+    from mainframe_rag.ingest import run_ingest
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _build_doc_with_id(corpus, "doc_a", DOC_A)
+    progress = tmp_path / "inventory.jsonl"
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    physical = fake.aliases[ALIAS]
+    if target_kind == "retained":
+        assert _run_main(monkeypatch, corpus, progress, "--reingest") == 0
+    monkeypatch.setenv("QDRANT_COLLECTION", physical)
+    with pytest.raises(RuntimeError, match="publish through its logical alias"):
+        _run_main(monkeypatch, corpus, progress)
+
+
 def test_completed_legacy_backfill_never_creates_build_identity(tmp_path, monkeypatch):
     from copy import deepcopy
 
