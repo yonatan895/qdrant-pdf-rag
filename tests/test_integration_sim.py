@@ -29,6 +29,15 @@ from fastapi.testclient import TestClient
 pytestmark = pytest.mark.integration
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _checkout_env() -> dict[str, str]:
+    """Child-process environment that runs this checkout's code: pytest's
+    sys.path fix (conftest) does not reach a spawned `python -m`, which would
+    otherwise import whatever an editable install in a shared venv names."""
+    return {**os.environ, "PYTHONPATH": str(REPO_ROOT / "src")}
+
+
 MOCK_DIM = 32  # must equal the DENSE_DIM the vLLM-shaped variant declares
 
 MOCK_SPEC = importlib.util.spec_from_file_location(
@@ -150,6 +159,11 @@ def _ingest(
     monkeypatch.setenv("QDRANT_URL", qdrant_url)
     monkeypatch.setenv("QDRANT_COLLECTION", collection)
     monkeypatch.setenv("EMBED_MODE", embed)
+    # Publication is the default; tests that publish select it explicitly,
+    # and the rest (shared corpora re-ingested with fresh inventories,
+    # in-place migration and restore pins) select in-place explicitly.
+    if "INGEST_ALIAS_PUBLISH" not in os.environ:
+        monkeypatch.setenv("INGEST_ALIAS_PUBLISH", "false")
     if embed == "vllm":
         assert mock_url, "the vLLM-shaped variant needs the mock endpoint URL"
         monkeypatch.setenv("EMBED_BASE_URL", f"{mock_url}/v1")
@@ -216,6 +230,10 @@ _MESSAGE_CITE = (
 
 
 def test_ingest_real_server_and_resume(qdrant_url, corpus, tmp_path, monkeypatch):
+    """In-place mode recovers a lost inventory through the Qdrant-level sha
+    skip. Publication (the default) instead re-verifies live against the
+    durable inventory, so this pin selects the deprecated in-place mode."""
+    monkeypatch.setenv("INGEST_ALIAS_PUBLISH", "false")
     records = _ingest(monkeypatch, qdrant_url, "sim-hash", corpus, tmp_path / "inv.jsonl")
     assert [r["status"] for r in records] == ["upserted"] * 3
     assert all(r["chunks"] > 0 for r in records)
@@ -1638,7 +1656,7 @@ def test_publisher_process_death_resumes_same_build(
         # A file, not a PIPE: orphaned pool workers cannot keep communicate open.
         with child_log.open("w") as output:
             process = subprocess.Popen(
-                [*worker, "--", *args], cwd=REPO_ROOT, env=os.environ.copy(),
+                [*worker, "--", *args], cwd=REPO_ROOT, env=_checkout_env(),
                 stdout=output, stderr=subprocess.STDOUT, start_new_session=True,
             )
             try:
@@ -1656,7 +1674,7 @@ def test_publisher_process_death_resumes_same_build(
                     with loser_log.open("w") as loser_output:
                         loser = subprocess.Popen(
                             [sys.executable, "-m", "mainframe_rag.ingest.run_ingest", *loser_args],
-                            cwd=REPO_ROOT, env=os.environ.copy(), stdout=loser_output,
+                            cwd=REPO_ROOT, env=_checkout_env(), stdout=loser_output,
                             stderr=subprocess.STDOUT, start_new_session=True,
                         )
                         try:

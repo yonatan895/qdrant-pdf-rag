@@ -247,7 +247,7 @@ def build_values(deploy_only: bool = False) -> dict:
         "corpusPVC": "",
         "workers": 4,
         "workSize": env("INGEST_WORK_SIZE") or "100Gi",
-        "aliasPublish": False,
+        "aliasPublish": True,
         "peerUrls": "",
         "reingest": False,
         "retireDocs": [],
@@ -275,7 +275,7 @@ def build_values(deploy_only: bool = False) -> dict:
             "workSize": env("INGEST_WORK_SIZE") or "100Gi",
             "corpusPVC": corpus_pvc,
             "workers": positive_int("INGEST_WORKERS", env("INGEST_WORKERS") or "4"),
-            "aliasPublish": strict_bool("INGEST_ALIAS_PUBLISH", env("INGEST_ALIAS_PUBLISH"), False),
+            "aliasPublish": strict_bool("INGEST_ALIAS_PUBLISH", env("INGEST_ALIAS_PUBLISH"), True),
             "reingest": strict_bool("INGEST_REINGEST", env("INGEST_REINGEST"), False),
             "retireDocs": split_retire(env("INGEST_RETIRE_DOCS")),
             "contextualEnabled": strict_bool(

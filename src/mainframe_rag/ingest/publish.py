@@ -36,7 +36,6 @@ import json
 import time
 import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -71,15 +70,7 @@ from mainframe_rag.ingest.placement import (
     observe_collection,
 )
 from mainframe_rag.ingest.seal import capture_content_seal
-from mainframe_rag.ports import QdrantPoints
-
-
-@dataclass(frozen=True)
-class PublishTarget:
-    """Resolved publication endpoints for one run."""
-
-    staging: str
-    live: str | None
+from mainframe_rag.ports import QdrantPoints, QdrantReader
 
 
 def generation_fingerprint(settings: Settings, rules_v: str, cli_triple: str) -> str:
@@ -402,7 +393,7 @@ def write_publication_metadata(
     )
 
 
-def read_publication_record(client: QdrantPoints, completions_collection: str) -> dict | None:
+def read_publication_record(client: QdrantReader, completions_collection: str) -> dict | None:
     if not client.collection_exists(completions_collection):
         return None
     points = client.retrieve(completions_collection,
@@ -419,7 +410,7 @@ def read_publication_record(client: QdrantPoints, completions_collection: str) -
     return payload
 
 
-def verify_publication_seal(client: QdrantPoints, completions_collection: str) -> bool:
+def verify_publication_seal(client: QdrantReader, completions_collection: str) -> bool:
     """Compare retained content independently of surviving completions/inventory.
 
     Older completed receipts remain readable, without acquiring this capability.
@@ -441,12 +432,12 @@ def verify_publication_seal(client: QdrantPoints, completions_collection: str) -
     return True
 
 
-def read_build_binding(client: QdrantPoints, completions_collection: str) -> BuildBinding | None:
+def read_build_binding(client: QdrantReader, completions_collection: str) -> BuildBinding | None:
     payload = read_publication_record(client, completions_collection)
     return decode_build_binding(payload, completions_collection) if payload is not None else None
 
 
-def read_publication_metadata(client: QdrantPoints, completions_collection: str) -> tuple[str, str] | None:
+def read_publication_metadata(client: QdrantReader, completions_collection: str) -> tuple[str, str] | None:
     """Read fingerprints; a present unknown mandatory build schema fails closed."""
     payload = read_publication_record(client, completions_collection)
     if payload is None:
@@ -504,7 +495,7 @@ def delete_publication_metadata(
 
 
 def _fresh_staging_candidate(
-    client: QdrantPoints, base: str, live: str | None, skip: frozenset[str] = frozenset()
+    client: QdrantReader, base: str, live: str | None, skip: frozenset[str] = frozenset()
 ) -> str:
     """Allocate a suffixed staging name outside the live and skipped
     generations. Collisions are rare and deliberate (rollback-by-republish),
@@ -523,7 +514,7 @@ def _fresh_staging_candidate(
 
 
 def resolve_publish_staging(
-    client: QdrantPoints,
+    client: QdrantReader,
     settings: Settings,
     *,
     gen_fp: str,
@@ -715,7 +706,7 @@ def _transfer_staging_metadata(
 
 
 def verify_searchable_coverage(
-    client: QdrantPoints,
+    client: QdrantReader,
     settings: Settings,
     walked: list[tuple[str, str]],
     inventory: dict[str, InventoryRecord],
@@ -794,7 +785,7 @@ def verify_searchable_coverage(
 
 
 def verify_all_complete(
-    client: QdrantPoints,
+    client: QdrantReader,
     staging_settings: Settings,
     walked: list[tuple[str, str]],
     inventory: dict[str, InventoryRecord],
@@ -851,7 +842,7 @@ def verify_all_complete(
 
 
 def verify_staging_distribution(
-    client: QdrantPoints,
+    client: QdrantReader,
     staging_settings: Settings,
 ) -> list[str]:
     """Strict configured-distribution gate for publication cutover (issue #360).
@@ -926,13 +917,13 @@ def verify_staging_distribution(
     return problems
 
 
-def _cluster_info_of(client: QdrantPoints, collection: str):
+def _cluster_info_of(client: QdrantReader, collection: str):
     """Eagerly-bound collection_cluster_info fetch for observe_collection
     (avoids loop-variable closures when observing several endpoints)."""
     return client.collection_cluster_info(collection)
 
 
-def _placement_peer_view(endpoint: str, client: QdrantPoints) -> PeerClusterView:
+def _placement_peer_view(endpoint: str, client: QdrantReader) -> PeerClusterView:
     """One direct peer endpoint's own control-plane view for the in-process
     gate (mirrors the verify_placement CLI reader: an unreadable view is an
     explicit error, never a missing member). A standalone server reports no
@@ -954,7 +945,7 @@ def _placement_peer_view(endpoint: str, client: QdrantPoints) -> PeerClusterView
 
 
 def verify_staging_placement(
-    clients_by_endpoint: Mapping[str, QdrantPoints],
+    clients_by_endpoint: Mapping[str, QdrantReader],
     staging_settings: Settings,
 ) -> list[str]:
     """In-process ACTIVE-copy gate for publication cutover (issue #360).
@@ -1049,7 +1040,7 @@ def verify_staging_placement(
 
 
 def _verify_single_node_placement(
-    endpoint: str, client: QdrantPoints, staging_settings: Settings
+    endpoint: str, client: QdrantReader, staging_settings: Settings
 ) -> list[str]:
     """Judge the explicit 1/1/1 profile through its one endpoint: the single
     copy of every required shard must be ACTIVE with no transfers. The peer
@@ -1121,7 +1112,7 @@ def _is_point_retired(
 
 
 def _retired_still_present(
-    client: QdrantPoints,
+    client: QdrantReader,
     staging_settings: Settings,
     staging: str,
     doc_id: str,
@@ -1195,7 +1186,7 @@ def approved_legacy_membership(
 
 
 def verify_approved_legacy_points(
-    client: QdrantPoints,
+    client: QdrantReader,
     staging_settings: Settings,
     inventory: dict[str, InventoryRecord],
     rules_v: str,
@@ -1313,7 +1304,7 @@ def verify_approved_legacy_points(
 
 
 def audit_unmarked_residue(
-    client: QdrantPoints,
+    client: QdrantReader,
     staging_settings: Settings,
     walked: list[tuple[str, str]],
     inventory: dict[str, InventoryRecord],

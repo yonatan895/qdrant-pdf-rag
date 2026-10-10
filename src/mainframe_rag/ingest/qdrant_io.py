@@ -18,7 +18,7 @@ from mainframe_rag.ingest.chunk import Chunk
 from mainframe_rag.ingest.ibm_pdf import ParsedDoc
 from mainframe_rag.ingest.identity import source_rev_key
 from mainframe_rag.ingest.rules_version import extraction_rules_version
-from mainframe_rag.ports import QdrantPoints, SparseVector
+from mainframe_rag.ports import QdrantPoints, QdrantReader, SparseVector
 
 HNSW_M = 16
 HNSW_EF_CONSTRUCT = 128
@@ -33,7 +33,7 @@ _KEYWORD_INDEXES = ("vendor", "product", "version", "doc_id", "chunk_type", "mes
 
 
 def scroll_all_points(
-    client: QdrantPoints,
+    client: QdrantReader,
     collection: str,
     *,
     scroll_filter: models.Filter | None,
@@ -79,7 +79,7 @@ _POLICY_ATTRS = (
 
 
 def check_collection_distribution(
-    client: QdrantPoints, collection: str, settings: Settings
+    client: QdrantReader, collection: str, settings: Settings
 ) -> None:
     """Read-only policy examination (issue #360): when the operator selected
     an explicit distribution policy, an existing collection whose configured
@@ -205,7 +205,7 @@ def ensure_collection(client: QdrantPoints, settings: Settings) -> None:
 
 
 def stored_doc_revisions(
-    client: QdrantPoints, settings: Settings, doc_id: str
+    client: QdrantReader, settings: Settings, doc_id: str
 ) -> set[str | None]:
     """Distinct source revisions stored under a printed doc_id (issue #361):
     the `source_rev` payload of every point, with None for legacy points
@@ -226,7 +226,7 @@ def stored_doc_revisions(
     return revisions
 
 
-def stored_rules_version(client: QdrantPoints, settings: Settings) -> str | None:
+def stored_rules_version(client: QdrantReader, settings: Settings) -> str | None:
     """Extraction-rules version carried by the collection's points (issue
     #124). Returns None when the collection is EMPTY (fresh — nothing to
     compare) and the empty string when points exist but predate versioning
@@ -292,7 +292,7 @@ def live_collection_from(
     return (alias, True) if target_exists else (None, False)
 
 
-def resolve_live_collection(client: QdrantPoints, settings: Settings) -> tuple[str | None, bool]:
+def resolve_live_collection(client: QdrantReader, settings: Settings) -> tuple[str | None, bool]:
     """Physical collection behind the `<collection>` alias.
 
     Returns (physical, legacy): (name, False) for the alias target, (None,
@@ -325,83 +325,80 @@ def snapshot_collection(client: QdrantPoints, collection: str) -> str:
     return snap.name
 
 
-class DistributedRecoveryUnsupportedError(RuntimeError):
-    """A node-local snapshot recipe was requested for a distributed collection."""
-
-
-def distributed_topology_reason(
-    client: QdrantPoints, settings: Settings, collection: str
-) -> str | None:
-    """Why `collection` must not use the single-node snapshot recipe, or None.
-
-    A Qdrant collection snapshot is node-specific: it holds only the shards
-    the answering peer stores, and recovery from a `file://` path reads one
-    peer's disk. With more than one shard or replica (or an explicit
-    multi-shard/replica policy selected for this run) the recipe cannot
-    establish that every shard was captured or restored, so it is refused
-    rather than trusted (issue #360). Unreadable values are unknown, not
-    proof of a single node, and refuse too.
-    """
-    policy = settings.collection_distribution_kwargs()
-    if policy.get("shard_number", 1) > 1 or policy.get("replication_factor", 1) > 1:
-        return (
-            f"selected policy shards={policy.get('shard_number')} "
-            f"replicas={policy.get('replication_factor')}"
-        )
-    try:
-        params = client.get_collection(collection).config.params
-    except Exception as exc:  # noqa: BLE001 - unreadable topology is a refusal
-        return f"{collection!r} topology unreadable ({type(exc).__name__})"
-    for attr in ("shard_number", "replication_factor"):
-        value = getattr(params, attr, None)
-        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
-            return f"{collection!r} topology has no valid positive integer {attr}"
-        if value != 1:
-            return f"{collection!r} has {attr}={value}"
-    return None
-
-
-def require_single_node_recovery(
-    client: QdrantPoints, settings: Settings, collection: str, operation: str
-) -> None:
-    """Refuse node-local snapshot clone/migration on distributed storage.
-
-    Nothing is created, recovered or deleted when this raises. The supported
-    distributed paths are a fresh complete generation rebuilt from the
-    protected originals, or a site-qualified node-addressed procedure
-    (docs/deploy.md, distributed recovery).
-    """
-    reason = distributed_topology_reason(client, settings, collection)
-    if reason is not None:
-        raise DistributedRecoveryUnsupportedError(
-            f"{operation} of {collection!r} refused: {reason}. Collection "
-            "snapshots are node-local, so a snapshot clone/recover cannot "
-            "prove every shard was copied; live data is untouched. Rebuild "
-            "a fresh complete generation from the originals instead "
-            "(issue #360)."
-        )
+def _point_ids(client: QdrantReader, settings: Settings, collection: str) -> set[str]:
+    return {str(p.id) for p in scroll_all_points(
+        client, collection, scroll_filter=None, with_payload=False,
+        page_size=settings.ingest_scan_page_size)}
 
 
 def clone_collection(
     client: QdrantPoints, settings: Settings, src: str, dst: str
 ) -> None:
-    """Server-side copy src -> dst (created by recover) + count verification.
+    """Copy src -> dst through the points API, then verify (issue #360).
 
-    Fail closed on any count mismatch: a partial clone must never become a
-    publish base. The snapshot location is the server-side snapshots dir
-    (`Settings.qdrant_snapshots_dir`), the same formula the harness restore
-    uses. Single-node recipe only: distributed (multi-shard/replica)
-    sources are refused before any snapshot is taken.
-    """
-    require_single_node_recovery(client, settings, src, "snapshot clone")
-    snap = snapshot_collection(client, src)
-    location = f"file://{settings.qdrant_snapshots_dir.rstrip('/')}/{src}/{snap}"
-    client.recover_snapshot(dst, location, priority=models.SnapshotPriority.SNAPSHOT, wait=True)
-    want = client.get_collection(src).points_count
-    got = client.get_collection(dst).points_count
+    Every point (id, named vectors, payload) is read with scroll and written
+    with upsert, so the copy covers every shard of a distributed collection;
+    node-local snapshots are not involved. dst must not exist. It is created
+    with src's dense dimension (a model change is still refused downstream,
+    as for any existing target), this run's distribution policy and src's
+    payload indexes, before any point is loaded. Fail closed unless dst then
+    holds exactly src's point ids: a partial copy must never become a
+    publish base. src is only read."""
+    if client.collection_exists(dst):
+        raise RuntimeError(f"copy target {dst!r} already exists — refusing to copy into it.")
+    info = client.get_collection(src)
+    vectors = info.config.params.vectors
+    dense = vectors.get("dense") if isinstance(vectors, dict) else None
+    if dense is None:
+        raise RuntimeError(f"copy source {src!r} has no named dense vector — refusing to copy it.")
+    vectors_config, sparse_vectors_config = collection_vector_configs(dense.size)
+    client.create_collection(
+        dst,
+        vectors_config=vectors_config,
+        sparse_vectors_config=sparse_vectors_config,
+        on_disk_payload=True,
+        **settings.collection_distribution_kwargs(),
+    )
+    for field, index in sorted((getattr(info, "payload_schema", None) or {}).items()):
+        client.create_payload_index(dst, field_name=field, field_schema=index.data_type)
+    offset: int | str | UUID | None = None
+    while True:
+        page, offset = client.scroll(
+            src,
+            limit=settings.ingest_scan_page_size,
+            with_payload=True,
+            with_vectors=True,
+            offset=offset,
+        )
+        if page:
+            points = []
+            for record in page:
+                vector = getattr(record, "vector", None)
+                named: dict[str, Any] = dict(vector) if isinstance(vector, dict) else {}
+                points.append(models.PointStruct(id=record.id, vector=named, payload=record.payload))
+            client.upsert(dst, points=points, wait=True)
+        if offset is None or not page:
+            break
+    want, got = _point_ids(client, settings, src), _point_ids(client, settings, dst)
     if got != want:
         raise RuntimeError(
-            f"clone {src!r} -> {dst!r} unverified: {got} != {want} points — refusing to publish from it."
+            f"copy {src!r} -> {dst!r} unverified: {len(got)} of {len(want)} point ids match "
+            "the source — refusing to publish from it."
+        )
+
+
+def retain_copy(client: QdrantPoints, settings: Settings, src: str, dst: str) -> None:
+    """Keep an exact copy of src at dst before src is removed (issue #360):
+    copy it through the points API, or accept a dst from an interrupted
+    earlier attempt only when it holds exactly src's point ids. Anything
+    else refuses, so src is never deleted without its verified copy."""
+    if not client.collection_exists(dst):
+        clone_collection(client, settings, src, dst)
+        return
+    if _point_ids(client, settings, dst) != _point_ids(client, settings, src):
+        raise RuntimeError(
+            f"retained copy {dst!r} does not hold exactly {src!r}'s points — refusing to "
+            "remove the source; inspect or remove the copy explicitly, then rerun."
         )
 
 

@@ -2,13 +2,14 @@
 
 These are the only types layers may use to talk to each other for embed,
 Qdrant points, and LLM access. Implementations: VllmEmbedder / HashEmbedder
-(ingest.embed), qdrant_client.QdrantClient (satisfies QdrantPoints
+(ingest.embed), qdrant_client.QdrantClient (satisfies QdrantPoints and QdrantReader
 structurally — parameter names/returns mirror the real client), HttpxLLMClient
 (agent.answer), HttpZoweMCP (agent.zowe_mcp, ADR-0003).
 """
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Awaitable
 from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 from uuid import UUID
@@ -19,6 +20,17 @@ if TYPE_CHECKING:
     from qdrant_client import models
 
 SparseVector = tuple[list[int], list[float]]
+
+
+async def maybe_await[T](value: T | Awaitable[T]) -> T:
+    """The one sync/async compatibility rule (issue #369): production
+    clients return awaitables, sync tooling and test doubles return values.
+    Awaited when awaitable, returned as-is otherwise; cancellation and errors
+    propagate unchanged. Every serving call site that accepts either shape
+    goes through here."""
+    if inspect.isawaitable(value):
+        return await value
+    return value
 
 
 class ChatMessage(BaseModel):
@@ -51,22 +63,72 @@ class Reranker(Protocol):
 
 
 @runtime_checkable
-class QdrantPoints(Protocol):
-    """The Qdrant surface this project actually uses — only these methods may
-    appear at layer edges. Unit tests fake this protocol, which is why the
-    query_points signature (query_filter, not filter) stays honest. Parameter
-    names mirror qdrant_client.QdrantClient so the real client satisfies the
-    protocol structurally."""
+class QdrantReader(Protocol):
+    """The read-only Qdrant surface (issue #369): alias and collection
+    lookup, scroll/retrieve, dense/sparse queries and cluster inspection. Serving
+    consumers (retrieval, the serving gate, the evidence service, the agent's
+    resources) are typed against this protocol, so the type checker rejects a
+    write through them; read-only Qdrant credentials remain the runtime
+    boundary. Unit tests fake it, which is why the query_points signature
+    (query_filter, not filter) stays honest. Parameter names mirror
+    qdrant_client.QdrantClient so the real client satisfies it structurally."""
 
     def collection_exists(self, collection_name: str) -> bool: ...
 
     def get_collection(self, collection_name: str) -> models.CollectionInfo: ...
+
+    def get_aliases(self) -> models.CollectionsAliasesResponse: ...
+
+    def scroll(
+        self,
+        collection_name: str,
+        *,
+        scroll_filter: models.Filter | None = None,
+        limit: int = 10,
+        with_payload: bool | list[str],
+        with_vectors: bool = False,
+        offset: int | str | UUID | None = None,
+    ) -> tuple[list[models.Record], int | str | UUID | None]: ...
+
+    def retrieve(
+        self,
+        collection_name: str,
+        ids: list[str],
+        *,
+        with_payload: bool | list[str],
+        with_vectors: bool = False,
+    ) -> list[models.Record]: ...
+
+    def query_points(
+        self,
+        collection_name: str,
+        *,
+        query: list[float] | models.SparseVector,
+        using: str,
+        limit: int,
+        query_filter: models.Filter | None,
+        with_payload: bool | list[str],
+    ) -> models.QueryResponse: ...
+
+    def query_batch_points(
+        self,
+        collection_name: str,
+        *,
+        requests: list[models.QueryRequest],
+    ) -> list[models.QueryResponse]: ...
 
     def collection_cluster_info(
         self, collection_name: str
     ) -> models.CollectionClusterInfo: ...
 
     def cluster_status(self) -> models.ClusterStatus: ...
+
+
+@runtime_checkable
+class QdrantPoints(QdrantReader, Protocol):
+    """The full Qdrant surface ingest/publication uses: the read surface plus
+    collection/alias/snapshot administration and point writes. Only the
+    writer (ingest and admin tooling) holds it."""
 
     def create_collection(
         self,
@@ -81,8 +143,6 @@ class QdrantPoints(Protocol):
     ) -> bool: ...
 
     def delete_collection(self, collection_name: str) -> bool: ...
-
-    def get_aliases(self) -> models.CollectionsAliasesResponse: ...
 
     def update_collection_aliases(
         self,
@@ -119,25 +179,6 @@ class QdrantPoints(Protocol):
         optimizer_config: models.OptimizersConfigDiff,
     ) -> bool: ...
 
-    def scroll(
-        self,
-        collection_name: str,
-        *,
-        scroll_filter: models.Filter | None = None,
-        limit: int = 10,
-        with_payload: bool | list[str],
-        offset: int | str | UUID | None = None,
-    ) -> tuple[list[models.Record], int | str | UUID | None]: ...
-
-    def retrieve(
-        self,
-        collection_name: str,
-        ids: list[str],
-        *,
-        with_payload: bool | list[str],
-        with_vectors: bool = False,
-    ) -> list[models.Record]: ...
-
     def delete(
         self,
         collection_name: str,
@@ -154,84 +195,19 @@ class QdrantPoints(Protocol):
         wait: bool = True,
     ) -> models.UpdateResult: ...
 
-    def query_points(
-        self,
-        collection_name: str,
-        *,
-        query: list[float] | models.SparseVector,
-        using: str,
-        limit: int,
-        query_filter: models.Filter | None,
-        with_payload: bool | list[str],
-    ) -> models.QueryResponse: ...
-
-    def query_batch_points(
-        self,
-        collection_name: str,
-        *,
-        requests: list[models.QueryRequest],
-    ) -> list[models.QueryResponse]: ...
-
 
 @runtime_checkable
-class AsyncQdrantPoints(Protocol):
-    """The async Qdrant surface for agent endpoints (issue #77 PR-03).
-    Mirrors qdrant_client.AsyncQdrantClient."""
+class AsyncQdrantReader(Protocol):
+    """The async read surface for agent endpoints (issues #77, #369): the
+    same reads as `QdrantReader`, plus close. Mirrors
+    qdrant_client.AsyncQdrantClient. Nothing in the async serving path
+    writes, so no async write surface exists."""
 
     async def collection_exists(self, collection_name: str) -> bool: ...
 
     async def get_collection(self, collection_name: str) -> models.CollectionInfo: ...
 
-    async def create_collection(
-        self,
-        collection_name: str,
-        *,
-        vectors_config: dict[str, models.VectorParams],
-        sparse_vectors_config: dict[str, models.SparseVectorParams],
-        on_disk_payload: bool,
-        shard_number: int | None = None,
-        replication_factor: int | None = None,
-        write_consistency_factor: int | None = None,
-    ) -> bool: ...
-
-    async def delete_collection(self, collection_name: str) -> bool: ...
-
     async def get_aliases(self) -> models.CollectionsAliasesResponse: ...
-
-    async def update_collection_aliases(
-        self,
-        change_aliases_operations: list[
-            models.CreateAliasOperation | models.DeleteAliasOperation
-        ],
-    ) -> bool: ...
-
-    async def create_snapshot(
-        self, collection_name: str, *, wait: bool = True
-    ) -> models.SnapshotDescription | None: ...
-
-    async def recover_snapshot(
-        self,
-        collection_name: str,
-        location: str,
-        *,
-        priority: models.SnapshotPriority | None = None,
-        wait: bool = True,
-    ) -> bool | None: ...
-
-    async def create_payload_index(
-        self,
-        collection_name: str,
-        *,
-        field_name: str,
-        field_schema: models.PayloadSchemaType,
-    ) -> models.UpdateResult: ...
-
-    async def update_collection(
-        self,
-        collection_name: str,
-        *,
-        optimizer_config: models.OptimizersConfigDiff,
-    ) -> bool: ...
 
     async def scroll(
         self,
@@ -252,22 +228,6 @@ class AsyncQdrantPoints(Protocol):
         with_vectors: bool = False,
     ) -> list[models.Record]: ...
 
-    async def delete(
-        self,
-        collection_name: str,
-        *,
-        points_selector: models.FilterSelector | models.PointIdsList,
-        wait: bool = True,
-    ) -> models.UpdateResult: ...
-
-    async def upsert(
-        self,
-        collection_name: str,
-        *,
-        points: list[models.PointStruct],
-        wait: bool = True,
-    ) -> models.UpdateResult: ...
-
     async def query_points(
         self,
         collection_name: str,
@@ -287,6 +247,77 @@ class AsyncQdrantPoints(Protocol):
     ) -> list[models.QueryResponse]: ...
 
     async def close(self) -> None: ...
+
+
+class AsyncReaderAdapter:
+    """The one sync-to-async boundary for Qdrant reads (issue #369): an
+    `AsyncQdrantReader` view over a sync `QdrantReader`. Serving awaits only
+    async readers; sync tooling (`retrieve.query.search`, evals, scripts)
+    and tests holding a sync client reach it through this adapter. Calls run
+    inline, so it belongs only where a sync client already blocks — never in
+    the agent, whose client is async. `close` leaves the wrapped client to
+    its owner."""
+
+    def __init__(self, reader: QdrantReader) -> None:
+        self._reader = reader
+
+    async def collection_exists(self, collection_name: str) -> bool:
+        return self._reader.collection_exists(collection_name)
+
+    async def get_collection(self, collection_name: str) -> models.CollectionInfo:
+        return self._reader.get_collection(collection_name)
+
+    async def get_aliases(self) -> models.CollectionsAliasesResponse:
+        return self._reader.get_aliases()
+
+    async def scroll(
+        self,
+        collection_name: str,
+        *,
+        scroll_filter: models.Filter | None = None,
+        limit: int = 10,
+        with_payload: bool | list[str],
+        offset: int | str | UUID | None = None,
+    ) -> tuple[list[models.Record], int | str | UUID | None]:
+        return self._reader.scroll(
+            collection_name, scroll_filter=scroll_filter, limit=limit,
+            with_payload=with_payload, offset=offset,
+        )
+
+    async def retrieve(
+        self,
+        collection_name: str,
+        ids: list[str],
+        *,
+        with_payload: bool | list[str],
+        with_vectors: bool = False,
+    ) -> list[models.Record]:
+        return self._reader.retrieve(
+            collection_name, ids, with_payload=with_payload, with_vectors=with_vectors
+        )
+
+    async def query_points(
+        self,
+        collection_name: str,
+        *,
+        query: list[float] | models.SparseVector,
+        using: str,
+        limit: int,
+        query_filter: models.Filter | None,
+        with_payload: bool | list[str],
+    ) -> models.QueryResponse:
+        return self._reader.query_points(
+            collection_name, query=query, using=using, limit=limit,
+            query_filter=query_filter, with_payload=with_payload,
+        )
+
+    async def query_batch_points(
+        self, collection_name: str, *, requests: list[models.QueryRequest]
+    ) -> list[models.QueryResponse]:
+        return self._reader.query_batch_points(collection_name, requests=requests)
+
+    async def close(self) -> None:
+        return None
 
 
 class TokenUsage(BaseModel):
@@ -339,7 +370,7 @@ class LLMClient(Protocol):
     capability via hasattr and falls back to non-streaming chat otherwise.
     There is deliberately no separate async-chat protocol: HttpxLLMClient's
     chat() resolves to a coroutine when called on a running loop, and every
-    consumer funnels through as_chat_result / isawaitable.
+    consumer funnels through as_chat_result / maybe_await.
     """
 
     def chat(

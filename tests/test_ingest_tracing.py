@@ -17,6 +17,14 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from mainframe_rag.ingest import run_ingest as ri
 
 
+@pytest.fixture(autouse=True)
+def _in_place_mode(monkeypatch):
+    """These tests cover the in-place build (which publication also runs for
+    each staging generation). Alias publication is the default, so select
+    the deprecated in-place mode explicitly, as an operator would."""
+    monkeypatch.setenv("INGEST_ALIAS_PUBLISH", "false")
+
+
 @pytest.fixture
 def traced(monkeypatch):
     exporter = InMemorySpanExporter()

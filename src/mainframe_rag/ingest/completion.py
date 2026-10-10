@@ -48,7 +48,7 @@ from mainframe_rag.ingest.representation import (
     build_manifest,
     manifest_digest,
 )
-from mainframe_rag.ports import QdrantPoints
+from mainframe_rag.ports import QdrantPoints, QdrantReader
 
 _COMPLETION_SUFFIX = "__completions"
 
@@ -218,7 +218,7 @@ def _doc_id_filter(doc_id: str) -> models.Filter:
     )
 
 
-def _doc_markers(client: QdrantPoints, settings: Settings, doc_id: str) -> list[CompletionRecord]:
+def _doc_markers(client: QdrantReader, settings: Settings, doc_id: str) -> list[CompletionRecord]:
     """All parseable markers under a doc_id, paginated to exhaustion.
     Corrupt payloads read as absent — a corrupt marker is a legacy outcome,
     not a crash."""
@@ -242,7 +242,7 @@ def _doc_markers(client: QdrantPoints, settings: Settings, doc_id: str) -> list[
 
 
 def read_completion(
-    client: QdrantPoints,
+    client: QdrantReader,
     settings: Settings,
     doc_id: str,
     *,
@@ -262,7 +262,7 @@ def read_completion(
     return None
 
 
-def legacy_markers(client: QdrantPoints, settings: Settings, doc_id: str) -> list[CompletionRecord]:
+def legacy_markers(client: QdrantReader, settings: Settings, doc_id: str) -> list[CompletionRecord]:
     """Pre-361B markers (no source_rev) under a doc_id. Only
     is_doc_complete's legacy rule interprets them."""
     return [m for m in _doc_markers(client, settings, doc_id) if m.source_rev is None]
@@ -389,7 +389,7 @@ def _match_digests(
 
 
 def verify_doc_points(
-    client: QdrantPoints,
+    client: QdrantReader,
     settings: Settings,
     doc_id: str,
     *,
@@ -460,7 +460,7 @@ def _verify_batch(
 
 
 def is_doc_complete(
-    client: QdrantPoints,
+    client: QdrantReader,
     settings: Settings,
     doc_id: str,
     *,
@@ -534,7 +534,7 @@ def is_doc_complete(
 
 
 def is_revision_committed(
-    client: QdrantPoints, settings: Settings, doc_id: str, source_rev: str
+    client: QdrantReader, settings: Settings, doc_id: str, source_rev: str
 ) -> bool:
     """Self-consistent completeness of one revision under its OWN committed
     generation (no current-run inputs needed): any scoped marker whose
@@ -579,7 +579,7 @@ def _is_marker_excluded(
 
 
 def stale_completion_markers(
-    client: QdrantPoints,
+    client: QdrantReader,
     settings: Settings,
     wanted_digest: str,
     *,
@@ -628,7 +628,7 @@ def stale_completion_markers(
 
 
 def plan_refresh_deletes(
-    client: QdrantPoints,
+    client: QdrantReader,
     settings: Settings,
     doc_id: str,
     source_rev: str,
@@ -669,7 +669,7 @@ def plan_refresh_deletes(
     return dels, False
 
 
-def _stray_sha16s(client: QdrantPoints, settings: Settings, doc_id: str) -> list[str]:
+def _stray_sha16s(client: QdrantReader, settings: Settings, doc_id: str) -> list[str]:
     """Distinct content ids of sourceless points under a doc_id (raise path
     only): paginated to exhaustion like the revision scan, deterministic
     order."""

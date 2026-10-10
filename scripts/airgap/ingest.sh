@@ -52,14 +52,16 @@ mkdir -p dist
 # validation instead of ad-hoc applies. One Job name and the shared
 # ingest-work PVC keep the host-local target lock meaningful (one
 # authorized publisher, shared progress path); no distributed lock is
-# claimed, and aliases/defaults are never flipped implicitly.
+# claimed, and aliases/defaults are never flipped implicitly. Alias
+# publication is the default; INGEST_ALIAS_PUBLISH=false selects the
+# deprecated in-place mode.
 #
 # Retirement entries accept the real backend alphabet: a source_rev is
 # `vendor|product|version|sha256` (labels may carry '/', '|' and spaces),
 # so validation rejects only what would break the shell or the rendered
 # YAML — control characters, quotes, backslashes and wildcards — and the
 # backend still refuses any revision absent from the approved inventory.
-ALIAS_PUBLISH=$(bool_flag INGEST_ALIAS_PUBLISH false)
+ALIAS_PUBLISH=$(bool_flag INGEST_ALIAS_PUBLISH true)
 REINGEST=$(bool_flag INGEST_REINGEST false)
 if [ -n "${INGEST_RETIRE_DOCS:-}" ]; then
     [ "$ALIAS_PUBLISH" = "true" ] || die "INGEST_RETIRE_DOCS requires INGEST_ALIAS_PUBLISH=true — explicit removals are a publication operation and the ingest refuses them in-place"

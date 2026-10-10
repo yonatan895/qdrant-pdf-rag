@@ -6,9 +6,11 @@ nonzero with diagnostics on stderr and NOTHING eval-able on stdout.
 sys.executable is the gate python (project venv), so no env/network/GPU.
 """
 
+import os
 import re
 import subprocess
 import sys
+from pathlib import Path
 
 from mainframe_rag.serve import PROFILES, resolve
 from mainframe_rag.serve.budget import ProfileBundle
@@ -19,6 +21,8 @@ _ASSIGN = re.compile(r"^([A-Z_]+)='([A-Za-z0-9._-]*)'$")
 def _run(*argv: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, "-m", "mainframe_rag.serve", *argv],
+        # This checkout's code, not an editable install elsewhere.
+        env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")},
         capture_output=True,
         text=True,
         timeout=120,

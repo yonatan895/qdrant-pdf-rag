@@ -33,7 +33,7 @@ from qdrant_client import models
 
 from mainframe_rag.config import Settings
 from mainframe_rag.ingest.completion import completion_collection_for
-from mainframe_rag.ports import QdrantPoints
+from mainframe_rag.ports import QdrantReader
 
 POLICY_KEYS = (
     "QDRANT_SHARD_NUMBER",
@@ -886,7 +886,7 @@ def evidence_lines(
     return lines
 
 
-def resolve_alias_binding(client: QdrantPoints, configured: str) -> AliasBinding:
+def resolve_alias_binding(client: QdrantReader, configured: str) -> AliasBinding:
     """Capture the alias -> physical generation binding together with the
     durable pair the active generation needs: the resolved physical corpus
     collection plus its paired control collection (the same pair the serving

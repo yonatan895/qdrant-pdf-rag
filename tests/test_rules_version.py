@@ -22,6 +22,14 @@ from mainframe_rag.ingest.rules_version import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _in_place_mode(monkeypatch):
+    """These tests cover the in-place build (which publication also runs for
+    each staging generation). Alias publication is the default, so select
+    the deprecated in-place mode explicitly, as an operator would."""
+    monkeypatch.setenv("INGEST_ALIAS_PUBLISH", "false")
+
+
 # ---------------------------------------------------------------- version
 def test_version_is_stable_and_short() -> None:
     v1 = extraction_rules_version()

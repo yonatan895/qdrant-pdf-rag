@@ -685,8 +685,8 @@ thread pool.
   refresh of each lineage rewrites them scoped. Evaluation needs no
   re-baseline: citations, filters, and goldens key on `doc_id`/text (see
   the eval numbers in each 361B PR).
-- **Refresh visibility — alias publication** (`INGEST_ALIAS_PUBLISH=true`,
-  default off; enabling by default is a dedicated follow-up PR; issue #359
+- **Refresh visibility — alias publication** (the default;
+  `INGEST_ALIAS_PUBLISH=false` selects the deprecated in-place mode; issue #359
   req 4/5, `ingest/publish.py` + `qdrant_io` alias/snapshot helpers):
   readers resolve `<collection>` through a Qdrant alias. The ordinary
   distinct-staging cutover keeps the old target during preparation; one
@@ -708,8 +708,12 @@ thread pool.
   read-only check for record-only drift and for a pending same-contract
   resume). Because the fingerprint embeds every re-embed-required field
   (issue #391 F2), a revision-only change derives a **distinct** staging
-  generation instead of reconverging live. Staging starts as a
-  server-side snapshot-clone of live (points AND completion markers); a
+  generation instead of reconverging live. Staging starts as an exact copy
+  of live made through the points API (`qdrant_io.clone_collection`: every
+  point's id, named vectors and payload, AND the completion markers, into
+  collections created with the selected policy and verified by exact id
+  set; no node-local snapshot, so distributed generations copy
+  shard-complete, issue #360); a
   marker certifies its own `target_collection`, so the walked corpus
   re-embeds into the new generation rather than skipping across physicals
   — the clone preserves the old physical during ordinary distinct-staging
@@ -768,7 +772,8 @@ thread pool.
    Unexplained residue under walked, unwalked or retired docs refuses and is
    preserved. The prod Job reaches these modes through
    `scripts/airgap/ingest.sh` (issue #391 current packet):
-   `INGEST_ALIAS_PUBLISH=true` selects publication, `INGEST_REINGEST=true`
+   publication is the default (`INGEST_ALIAS_PUBLISH=false` selects the
+   deprecated in-place mode), `INGEST_REINGEST=true`
     renders `--reingest` (forced repair), and `INGEST_RETIRE_DOCS` takes a
     **comma- or newline-separated** `DOCID[@SOURCEREV]` list rendered as
     repeated `--retire-doc` (requires alias publication; labels may carry
@@ -787,10 +792,13 @@ thread pool.
    no distributed lock.
   During a migration retained markers block the commit until
   the operator re-ingests the complete corpus or cleans the stale
-  generation. First-publish cutover from a legacy physical layout snapshots the
-  squatter, deletes it (brief documented maintenance window), then creates
-  the alias; stale-rules legacy content needs `--reingest` like any other
-  rules migration.
+  generation. First-publish cutover from a legacy physical layout copies the
+  squatter through the points API into the retained rollback generation
+  `<alias>__legacy_<build>` (verified by exact point ids; a retry of the same
+  build reuses only an exact copy), deletes it (brief documented maintenance
+  window), then creates the alias; this works on distributed layouts too.
+  Stale-rules legacy content needs `--reingest` like any other rules
+  migration.
 - **Retained generations are never workspace (issue #405 R2):** a derived
   staging name that collides with a committed retained (non-live)
   generation allocates a suffixed candidate instead of reusing it, so
@@ -1038,15 +1046,9 @@ readiness, retrieval, answer/chat/console, recovery tools and evaluation.
   1/1/1 profile judges its single copy through its one endpoint. Moving
   replicas to repair an under-replicated candidate remains the
   snapshot-gated migration slice, never automatic.
-  The snapshot clone used to prepare an update staging generation (and the
-  legacy-layout migration) is the single-node recipe: a source with more
-  than one shard or replica, a selected multi-shard/replica policy, or an
-  unreadable, missing or invalid topology is refused before any snapshot/recover/delete
-  (`qdrant_io.require_single_node_recovery`; collection snapshots are
-  node-local, [deploy](deploy.md#distributed-recovery)). Authorization requires
-  explicit positive non-boolean integer shard/replica values, both exactly 1.
-  A distributed
-  generation is rebuilt fresh from the originals.
+  Update staging preparation and the legacy-layout migration copy through
+  the points API and are not limited by topology; no node-local snapshot is
+  a restore point ([deploy](deploy.md#distributed-recovery)).
   Supply the comma-separated non-secret URLs via the operator env file or
   caller environment/Task variable (caller takes precedence). The launcher
   maps this to chart `ingest.peerUrls` and the ingest Job environment;
@@ -1089,8 +1091,11 @@ only serializes revisions inside one process. Supported operation requires
 operator-serialized jobs, not a claim of distributed lock enforcement. No HA
 claim follows from a single-node run.
 
-**Maintenance and rollback:** in-place mode (`INGEST_ALIAS_PUBLISH=false`)
-is limited to legacy collections without full build controls or immutable build
+**Maintenance and rollback:** in-place mode (explicit `INGEST_ALIAS_PUBLISH=false`)
+is deprecated: every real in-place run logs `in_place_deprecated`, and the mode
+is kept for one release so operators can schedule their first publication
+(which migrates an existing in-place collection into a retained copy). It is
+limited to legacy collections without full build controls or immutable build
 aliases. It refuses new-format published, sealed and retained builds. For a
 legacy repair, operators must quiesce writers and drain affected readers first; setting a manifest pending or waiting a TTL
 alone does not drain in-flight requests. Alias-mode repair is a normal

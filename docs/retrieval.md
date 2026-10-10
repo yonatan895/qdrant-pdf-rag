@@ -14,9 +14,10 @@ tooling, scripts — audited: no async-context caller) that fails closed
 inside a running loop. Wrapper tests pin identical outputs on identical
 fakes.
 The async core never runs sync I/O on the event loop — the dense-query,
-sparse, and cross-encoder legs go through `asyncio.to_thread`, and the
-Qdrant calls ride `isawaitable` shims so test doubles work on both entry
-points.
+sparse, and cross-encoder legs go through `asyncio.to_thread`. The core
+awaits only an async reader (`ports.AsyncQdrantReader`, #369); the sync
+wrapper hands its client in through `ports.AsyncReaderAdapter`, the one
+sync-to-async boundary for tooling and tests.
 
 Stage order:
 
@@ -31,10 +32,9 @@ Stage order:
 5. `embedder.dense_query` + `embedder.sparse` embed each leg (one embed per
    path, sequential for determinism).
 6. `_build_prefetch_requests` issues one dense + one BM25 prefetch per leg
-   in batched `query_batch_points` calls (taking `filter=flt` on each
-   `QueryRequest`, falling back to sequential `query_points` taking
-   `query_filter=flt` per Qdrant Client 1.19+ conventions when the server
-   lacks batching). Every leg shares the ORIGINAL filter: splitting changes
+   in one batched `query_batch_points` call (taking `filter=flt` on each
+   `QueryRequest`; the reader protocol and the pinned client always provide
+   it). Every leg shares the ORIGINAL filter: splitting changes
    ranking text only, never the constraint allowlist.
 7. `rrf_fuse` merges the legs per path (§4); paths merge when split —
    comparative peers by best evidence (`max_split_hits`: each doc's maximum
@@ -103,11 +103,9 @@ so lexical and semantic candidates are scoped identically before any fusion.
   Non-empty
   filtered results never pay the second call. The retry lands on the trace
   as boolean `rag.filter_fallback` (bounded, never free text).
-- The legs are named `dense` and `bm25`, dense first. Batched calls pass
-  `requests=[QueryRequest(filter=flt, ...)]` into `query_batch_points`,
-  while the sequential fallback calls `query_points(..., query_filter=flt)`
-  per Qdrant Client 1.19+ conventions (builders at `query.py:471`, batch
-  calls at `query.py:723,743`, sequential at `query.py:629`).
+- The legs are named `dense` and `bm25`, dense first. Each leg passes
+  `requests=[QueryRequest(filter=flt, ...)]` into one `query_batch_points`
+  call (builders in `_build_prefetch_requests`).
 
 ## 3. Identifiers and query kind
 

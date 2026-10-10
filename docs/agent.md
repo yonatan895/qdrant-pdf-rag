@@ -568,8 +568,9 @@ the query timeout.
   names tests swap after startup. `HttpxLLMClient` closes only pools it built;
   a client injected via `client=` is borrowed. Embedder/tokenizer/reranker have
   no close (shared pool closed once); `close()` never nulls a pool, so
-  post-shutdown calls raise instead of silently rebuilding. Qdrant close is
-  awaited only if awaitable (sync doubles keep working).
+  post-shutdown calls raise instead of silently rebuilding. The Qdrant client
+  is async (`ports.AsyncQdrantReader`); its close goes through
+  `ports.maybe_await` with the other lifespan closers.
 - Request resources: lifespan publishes the clients as module names (the seam
   tests replace); each request takes one `app.resources()` snapshot
   (`agent/resources.py::AgentResources`) and passes it to retrieval and

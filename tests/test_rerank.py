@@ -24,6 +24,7 @@ from qdrant_client import models
 
 from mainframe_rag.agent.app import SearchResponse
 from mainframe_rag.config import Settings
+from mainframe_rag.ports import AsyncReaderAdapter
 from mainframe_rag.retrieve.query import SearchHit, async_search, diversify_hits, search
 from mainframe_rag.retrieve.rerank import (
     HashReranker,
@@ -34,6 +35,7 @@ from mainframe_rag.retrieve.rerank import (
     rerank_candidates,
 )
 from tests.conftest import FakeEmbedder, MockReranker, PromotingReranker, _make_hit
+from tests.fakes import batch_via_query_points
 
 
 class FakeQdrantPoints:
@@ -57,6 +59,8 @@ class FakeQdrantPoints:
     ) -> Any:
         self.queries_made.append({"using": using, "limit": limit})
         return SimpleNamespace(points=self.points[:limit])
+
+    query_batch_points = batch_via_query_points
 
 
 # ---------------------------------------------------------------- Tests
@@ -317,15 +321,13 @@ def test_async_search_rerank_alpha_zero_keeps_rrf_order():
     )
     base = {"rerank_enabled": True, "embed_mode": "hash", "allow_hash_mode": True, "_env_file": None}
     kept = asyncio.run(
-        async_search(
-            FakeQdrantPoints([c1, c2]), FakeEmbedder(), "test-coll", "certificate key management",
+        async_search(AsyncReaderAdapter(FakeQdrantPoints([c1, c2])), FakeEmbedder(), "test-coll", "certificate key management",
             settings=Settings(**base, rerank_fusion_alpha=0.0), reranker=PromotingReranker(),
         )
     )[0]
     assert [h.chunk_id for h in kept] == ["c1", "c2"]
     flipped = asyncio.run(
-        async_search(
-            FakeQdrantPoints([c1, c2]), FakeEmbedder(), "test-coll", "certificate key management",
+        async_search(AsyncReaderAdapter(FakeQdrantPoints([c1, c2])), FakeEmbedder(), "test-coll", "certificate key management",
             settings=Settings(**base, rerank_fusion_alpha=1.0), reranker=PromotingReranker(),
         )
     )[0]

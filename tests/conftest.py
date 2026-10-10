@@ -80,18 +80,12 @@ def rexx_pdf(tmp_path_factory) -> Path:
 
 # ---------------------------------------------------------------------------
 # Shared retrieval doubles — single-sourced from tests.fakes (share
-# builders, pin behavior). LegacyFakeQdrant is method-less on purpose:
-# retrieve dispatches on hasattr(client, "query_batch_points"), so the
-# sequential-fallback pin needs the method ABSENT, not raising.
-# Names here are kept as backwards-compatible aliases so existing imports
+# builders, pin behavior). Names here are kept as backwards-compatible aliases so existing imports
 # keep working.
 # ---------------------------------------------------------------------------
 
 from tests.fakes import (  # noqa: F401
     EmbedderFake as FakeEmbedder,
-)
-from tests.fakes import (  # noqa: F401
-    LegacyQdrantFake as LegacyFakeQdrant,
 )
 from tests.fakes import (  # noqa: F401
     PromotingRerankerFake as PromotingReranker,

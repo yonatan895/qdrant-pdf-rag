@@ -107,7 +107,7 @@ def test_ingest_dryrun_renders_clean_manifest(ingest_tree):
     assert rendered_container(rendered, "ingest")["args"] == [
         "--src", "/corpus", "--progress", "/work/inventory.jsonl",
     ]
-    assert rendered_env(rendered, "ingest")["INGEST_ALIAS_PUBLISH"] == "false"
+    assert rendered_env(rendered, "ingest")["INGEST_ALIAS_PUBLISH"] == "true"
     assert '"--reingest"' not in rendered
     assert '"--retire-doc"' not in rendered
     assert re.search(r'(?m)^\s*value: "false"$', rendered)
@@ -280,7 +280,7 @@ elif 'pods' in a:
                  id='ingest_missing_embed_revision_fails_closed'),
     pytest.param({'EMBED_MODEL_REVISION': '  '}, None, ('EMBED_MODEL_REVISION must be a non-blank',),
                  id='ingest_whitespace_embed_revision_fails_closed'),
-    pytest.param({'INGEST_RETIRE_DOCS': 'SA22-0000-00'}, None, ('INGEST_ALIAS_PUBLISH=true',),
+    pytest.param({'INGEST_ALIAS_PUBLISH': 'false', 'INGEST_RETIRE_DOCS': 'SA22-0000-00'}, None, ('INGEST_ALIAS_PUBLISH=true',),
                  id='ingest_retire_docs_require_alias_publish'),
     pytest.param({'INGEST_ALIAS_PUBLISH': 'true', 'INGEST_RETIRE_DOCS': '*'}, None, ('malformed INGEST_RETIRE_DOCS', 'wildcards'),
                  id='ingest_retire_docs_wildcard_fails_closed'),
