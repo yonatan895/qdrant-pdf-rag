@@ -1,8 +1,9 @@
 """Extraction-rules version (issue #124).
 
 The payload content of every point — identifier regexes (#120), chrome
-stripping, chunk boundaries, classify labels — is produced by five rule
-modules. Nothing used to version that content: ingest skips on file sha
+stripping, chunk boundaries, classify labels, source labels and revision
+keys, and the stored field mapping itself — is produced by the rule
+modules below. Nothing used to version that content: ingest skips on file sha
 alone, so a retrieval-side regex widening silently desynced queries (new
 rules) from payloads (old rules) and collapsed recall with no error
 anywhere. This module computes the version instead of asking a human to
@@ -14,6 +15,9 @@ the collection-level gate both key on.
 Included files are the payload producers only — embed models, prompts,
 and retrieval constants do not change what is stored, so they do not
 belong here (model_ids/settings_hash cover those in the run manifest).
+The set is closed under package imports: a rule module may import only
+other rule modules, so no payload-shaping code can sit outside the hash
+(tests/test_rules_version.py enforces the closure).
 """
 
 from __future__ import annotations
@@ -29,13 +33,16 @@ _RULE_MODULES: tuple[str, ...] = (
     "ingest/chrome.py",
     "ingest/chunk.py",
     "ingest/classify.py",
+    "ingest/walk.py",  # vendor/product/version labels from path and markers
+    "ingest/identity.py",  # source-revision key and label normalization
+    "ingest/payload.py",  # the stored field mapping
 )
 
 
 def rule_module_paths() -> tuple[Path, ...]:
     """Absolute paths of the payload-producing rule modules (test seam:
     tests pin the set; hashing is over bytes, so any packaging layout
-    works as long as all five resolve)."""
+    works as long as every module resolves)."""
     pkg_root = Path(__file__).resolve().parent.parent  # .../mainframe_rag
     paths = []
     for rel in _RULE_MODULES:

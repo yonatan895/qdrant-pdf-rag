@@ -260,6 +260,7 @@ src/mainframe_rag/
     inventory.py      # Ingest progress tracking
     embed.py          # vLLM dense & FastEmbed BM25 embedder; embed-text builder
     qdrant_io.py      # Collection creation & upsert batching
+    payload.py        # The stored point payload (an extraction-rules module)
     run_ingest.py     # Ingest CLI worker orchestration
     build.py          # Versioned immutable build binding
     placement.py      # Replica-placement evaluation for HA acceptance
