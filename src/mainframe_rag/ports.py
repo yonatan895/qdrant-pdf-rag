@@ -126,6 +126,7 @@ class QdrantPoints(Protocol):
         scroll_filter: models.Filter | None = None,
         limit: int = 10,
         with_payload: bool | list[str],
+        with_vectors: bool = False,
         offset: int | str | UUID | None = None,
     ) -> tuple[list[models.Record], int | str | UUID | None]: ...
 
