@@ -25,7 +25,11 @@ import time
 from dataclasses import dataclass
 
 from mainframe_rag.config import Settings
-from mainframe_rag.ingest.build import decode_build_binding, require_published_binding
+from mainframe_rag.ingest.build import (
+    BuildBinding,
+    decode_build_binding,
+    require_published_binding,
+)
 from mainframe_rag.ingest.publish import publication_metadata_point_id
 from mainframe_rag.ingest.representation import (
     resolve_serving_generation as resolve_representation_generation,
@@ -38,43 +42,47 @@ from mainframe_rag.ports import AsyncQdrantReader
 SERVABLE_OUTCOMES = ("compatible", "record_only_drift")
 
 
-async def resolve_published_generation(
-    client: AsyncQdrantReader, settings: Settings, rules_v: str,
-) -> tuple[str | None, str, list[str]]:
-    """Validate representation and immutable publication before caching a target."""
-    physical, outcome, details = await resolve_representation_generation(client, settings, rules_v)
-    if physical is not None and outcome in SERVABLE_OUTCOMES:
-        control = physical + "__completions"
-        try:
-            aliases = await client.get_aliases()
-            records = await client.retrieve(
-                control, ids=[publication_metadata_point_id(control)], with_payload=True,
-            )
-            payload = (records[0].payload or {}) if records else None
-            if payload is not None and payload.get("record_type") != "publication-metadata":
-                raise ValueError("invalid publication control record")
-            binding = decode_build_binding(payload, control) if payload is not None else None
-            # Publication may advance after representation validation. The
-            # already resolved old physical remains valid as a retained build.
-            require_published_binding(binding, settings.qdrant_collection, physical,
-                                      {a.alias_name: a.collection_name for a in aliases.aliases})
-        except Exception:  # noqa: BLE001 — fixed refusal, never upstream/storage text
-            return physical, "unknown", ["build_control"]
-    return physical, outcome, details
-
-
 @dataclass(frozen=True)
 class ServingGeneration:
     """One validated serving target: the resolved physical collection (None
-    when nothing is published) and its representation outcome."""
+    when nothing is published), its representation outcome, and the build
+    binding the gate validated as published or retained. `binding` is None
+    for completed legacy generations, which never mint evidence references."""
 
     physical: str | None
     outcome: str
     details: tuple[str, ...] = ()
+    binding: BuildBinding | None = None
 
     @property
     def servable(self) -> bool:
         return self.physical is not None and self.outcome in SERVABLE_OUTCOMES
+
+
+async def resolve_published_generation(
+    client: AsyncQdrantReader, settings: Settings, rules_v: str,
+) -> ServingGeneration:
+    """Validate representation and immutable publication before caching a target."""
+    physical, outcome, details = await resolve_representation_generation(client, settings, rules_v)
+    if physical is None or outcome not in SERVABLE_OUTCOMES:
+        return ServingGeneration(physical, outcome, tuple(details))
+    control = physical + "__completions"
+    try:
+        aliases = await client.get_aliases()
+        records = await client.retrieve(
+            control, ids=[publication_metadata_point_id(control)], with_payload=True,
+        )
+        payload = (records[0].payload or {}) if records else None
+        if payload is not None and payload.get("record_type") != "publication-metadata":
+            raise ValueError("invalid publication control record")
+        binding = decode_build_binding(payload, control) if payload is not None else None
+        # Publication may advance after representation validation. The
+        # already resolved old physical remains valid as a retained build.
+        require_published_binding(binding, settings.qdrant_collection, physical,
+                                  {a.alias_name: a.collection_name for a in aliases.aliases})
+    except Exception:  # noqa: BLE001 — fixed refusal, never upstream/storage text
+        return ServingGeneration(physical, "unknown", ("build_control",))
+    return ServingGeneration(physical, outcome, tuple(details), binding)
 
 
 class ServingGate:
@@ -112,10 +120,7 @@ class ServingGate:
             if not fresh and self._fresh():
                 assert self._cached is not None
                 return self._cached
-            physical, outcome, details = await resolve_published_generation(
-                client, settings, rules_v
-            )
-            generation = ServingGeneration(physical, outcome, tuple(details))
+            generation = await resolve_published_generation(client, settings, rules_v)
             self._cached = generation
             self._checked_at = time.monotonic()
             return generation

@@ -138,7 +138,7 @@ def test_request_cancellation_ends_root_before_headers(
                 cleaned.set()
 
         monkeypatch.setattr(
-            app_mod, "serving_settings" if stage == "admission" else "retrieve_search", suspended
+            app_mod, "serving_generation" if stage == "admission" else "retrieve_search", suspended
         )
         path = (
             ("/ui/chat/stream" if stream else "/ui/chat") if route == "console" else f"/v1/{route}"
@@ -393,7 +393,7 @@ def test_terminal_log_contract_across_transports(
                 503, "representation_unavailable", app_mod._REPRESENTATION_UNAVAILABLE
             )
 
-        monkeypatch.setattr(app_mod, "serving_settings", refuse)
+        monkeypatch.setattr(app_mod, "serving_generation", refuse)
     response = _post_terminal(client, path, stream)
     expected_status = (502 if path == "/ui/chat" else 503) if outcome == "admission" else 200
     assert response.status_code == expected_status
@@ -1529,7 +1529,7 @@ def test_serving_refusal_marks_server_span(client, monkeypatch):
     async def refused():
         raise AppError(503, "representation_unavailable", "unavailable")
 
-    monkeypatch.setattr(app_mod, "serving_settings", refused)
+    monkeypatch.setattr(app_mod, "serving_generation", refused)
     c, exporter = client
     resp = c.post("/v1/search", json={"query": "IEA500I"})
     assert resp.status_code == 503

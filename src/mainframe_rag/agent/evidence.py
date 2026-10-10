@@ -39,11 +39,11 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol, get_args
 
+from mainframe_rag.agent.serving import ServingGeneration
 from mainframe_rag.config import Settings
 from mainframe_rag.ingest.build import (
     BuildBinding,
     build_aliases,
-    build_phase,
     decode_build_binding,
 )
 from mainframe_rag.ingest.classify import ChunkType
@@ -409,30 +409,30 @@ class EvidenceService:
 
     # -- minting (search side)
 
-    async def mint_references(self, physical: str, chunk_ids: Sequence[str]) -> dict[str, str]:
-        """References for the hits a search just served from `physical`.
+    async def mint_references(
+        self, generation: ServingGeneration, chunk_ids: Sequence[str]
+    ) -> dict[str, str]:
+        """References for the hits a search just served from `generation`.
 
-        Empty when the serving generation has no build binding (legacy/in-place
-        generations never mint) or is not the published/retained build of the
-        configured logical corpus. A chunk whose stored payload cannot form a
+        Minting uses the build binding the serving gate validated as published
+        or retained (agent.serving) instead of re-reading the control plane per
+        request. An exact read re-resolves the build through its immutable
+        aliases, so a build retired after validation is refused there, never
+        read from a successor. Empty when the generation is not servable, has
+        no build binding (legacy/in-place generations never mint), or binds
+        another logical corpus. A chunk whose stored payload cannot form a
         complete envelope is skipped, never given a partial reference."""
         ids = list(dict.fromkeys(chunk_ids))
-        if not ids:
-            return {}
-        binding = await self._binding(physical)
+        binding = generation.binding
         if (
-            binding is None
-            or binding.physical != physical
+            not ids
+            or not generation.servable
+            or binding is None
+            or binding.physical != generation.physical
             or binding.alias != self._settings.qdrant_collection
         ):
             return {}
-        try:
-            phase = build_phase(binding, await self._aliases())
-        except ValueError:
-            return {}
-        if phase not in ("published", "retained"):
-            return {}
-        records = await self._client.retrieve(physical, ids, with_payload=True)
+        records = await self._client.retrieve(binding.physical, ids, with_payload=True)
         minted: dict[str, str] = {}
         for record in records:
             chunk_id = str(record.id)
