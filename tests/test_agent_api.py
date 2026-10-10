@@ -3723,11 +3723,12 @@ def test_awaited_retrieval_async_error_maps_to_upstream_error(client, monkeypatc
 
 
 def test_awaited_retrieval_cancellation_propagates():
-    """Issue #370: _await_retrieval re-raises asyncio.CancelledError directly
-    without converting it into AppError or suppressing cancellation."""
+    """Issue #370: the shared sync/async rule (`ports.maybe_await`, which
+    every retrieval leg awaits through) re-raises asyncio.CancelledError
+    directly without converting it into AppError or suppressing cancellation."""
     import asyncio
 
-    from mainframe_rag.agent.app import _await_retrieval
+    from mainframe_rag.ports import maybe_await as _await_retrieval
 
     async def _cancelled():
         raise asyncio.CancelledError()

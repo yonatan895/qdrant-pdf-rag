@@ -9,7 +9,6 @@ here, preserve the "filters in prefetch" contract. architecture.md 4.5.
 from __future__ import annotations
 
 import asyncio
-import inspect
 import time
 from collections import defaultdict
 from typing import TYPE_CHECKING
@@ -22,7 +21,7 @@ from qdrant_client import models
 if TYPE_CHECKING:
     from mainframe_rag.config import Settings
 
-from mainframe_rag.ports import AsyncQdrantReader, Embedder, QdrantReader, Reranker
+from mainframe_rag.ports import AsyncQdrantReader, Embedder, QdrantReader, Reranker, maybe_await
 from mainframe_rag.retrieve.filters import (
     build_fallback_filter,
     build_filter,
@@ -640,7 +639,7 @@ async def _async_prefetch_one(
         query_filter=flt,
         with_payload=list(RETRIEVE_PAYLOAD_FIELDS),
     )
-    resp = await res if inspect.isawaitable(res) else res
+    resp = await maybe_await(res)
     return resp.points
 
 
@@ -728,7 +727,7 @@ async def async_search(
 
                 if hasattr(client, "query_batch_points"):
                     res = client.query_batch_points(collection, requests=[dense_req, sparse_req])
-                    responses = await res if inspect.isawaitable(res) else res
+                    responses = await maybe_await(res)
                     dense_points = responses[0].points
                     sparse_points = responses[1].points
                 else:
@@ -748,7 +747,7 @@ async def async_search(
                     )
                     if hasattr(client, "query_batch_points"):
                         res = client.query_batch_points(collection, requests=[dense_req, sparse_req])
-                        responses = await res if inspect.isawaitable(res) else res
+                        responses = await maybe_await(res)
                         dense_points = responses[0].points
                         sparse_points = responses[1].points
                     else:
