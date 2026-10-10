@@ -356,7 +356,10 @@ Opt-in via `CONTEXTUAL_EMBED_ENABLED` (default off).
   answer timeout. `CONTEXT_LLM_API_KEY` (unset = keyless) rides the gist
   calls as a Bearer virtual key behind a gateway.
 - Prompt template `CONTEXT_PROMPT_VERSION = "v2"` (v1 duplicated the header
-  and echoed instructions).
+  and echoed instructions). The representation manifest records only this
+  version, so a template edit (system prompt, message builder or completion
+  cap) must bump it: `tests/test_contextual.py` pins the template digest per
+  version and fails until the bump and its new pin land.
 - Cache identity (issue #416): `ContextBinding` in `context.py` is the one
   owner of the sidecar key and record. A cached gist is reused only when ALL
   of these match: prompt version, doc sha256, chunk id, the contextual model
