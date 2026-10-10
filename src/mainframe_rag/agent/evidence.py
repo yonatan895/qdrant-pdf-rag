@@ -50,6 +50,7 @@ from mainframe_rag.ingest.classify import ChunkType
 from mainframe_rag.ingest.publish import publication_metadata_point_id
 from mainframe_rag.ingest.representation import _await_client
 from mainframe_rag.logs import error_type
+from mainframe_rag.ports import AsyncQdrantReader, QdrantReader
 
 log = logging.getLogger("agent.evidence")
 
@@ -377,7 +378,9 @@ def _control_of(physical: str) -> str:
 class EvidenceService:
     """`client` is the serving (read-only) Qdrant client, sync or async."""
 
-    def __init__(self, client: Any, settings: Settings, access: EvidenceAccess) -> None:
+    def __init__(
+        self, client: AsyncQdrantReader | QdrantReader, settings: Settings, access: EvidenceAccess
+    ) -> None:
         self._client = client
         self._settings = settings
         self._access = access

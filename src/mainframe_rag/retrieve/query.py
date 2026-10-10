@@ -22,7 +22,7 @@ from qdrant_client import models
 if TYPE_CHECKING:
     from mainframe_rag.config import Settings
 
-from mainframe_rag.ports import AsyncQdrantPoints, Embedder, QdrantPoints, Reranker
+from mainframe_rag.ports import AsyncQdrantReader, Embedder, QdrantReader, Reranker
 from mainframe_rag.retrieve.filters import (
     build_fallback_filter,
     build_filter,
@@ -581,7 +581,7 @@ def _diversify_with_span(
 
 
 def search(
-    client: QdrantPoints,
+    client: QdrantReader,
     embedder: Embedder,
     collection: str,
     query: str,
@@ -625,7 +625,7 @@ def search(
 
 
 async def _async_prefetch_one(
-    client: AsyncQdrantPoints | QdrantPoints,
+    client: AsyncQdrantReader | QdrantReader,
     collection: str,
     vec: list[float] | models.SparseVector,
     using: str,
@@ -645,7 +645,7 @@ async def _async_prefetch_one(
 
 
 async def async_search(
-    client: AsyncQdrantPoints | QdrantPoints,
+    client: AsyncQdrantReader | QdrantReader,
     embedder: Embedder,
     collection: str,
     query: str,

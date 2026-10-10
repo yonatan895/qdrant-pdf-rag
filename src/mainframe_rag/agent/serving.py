@@ -33,6 +33,7 @@ from mainframe_rag.ingest.representation import (
 from mainframe_rag.ingest.representation import (
     resolve_serving_generation as resolve_representation_generation,
 )
+from mainframe_rag.ports import AsyncQdrantReader, QdrantReader
 
 # Outcomes a request may be served against (`resolve_serving_generation`
 # vocabulary). `empty` is deliberately absent: readiness keeps it as the
@@ -41,7 +42,7 @@ SERVABLE_OUTCOMES = ("compatible", "record_only_drift")
 
 
 async def resolve_published_generation(
-    client, settings: Settings, rules_v: str,
+    client: AsyncQdrantReader | QdrantReader, settings: Settings, rules_v: str,
 ) -> tuple[str | None, str, list[str]]:
     """Validate representation and immutable publication before caching a target."""
     physical, outcome, details = await resolve_representation_generation(client, settings, rules_v)

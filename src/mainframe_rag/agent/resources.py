@@ -19,10 +19,10 @@ from mainframe_rag.agent.core_ports import RetrievalResult
 from mainframe_rag.agent.model_adapter import ModelAdapter
 from mainframe_rag.config import Settings
 from mainframe_rag.ports import (
-    AsyncQdrantPoints,
+    AsyncQdrantReader,
     Embedder,
     LLMClient,
-    QdrantPoints,
+    QdrantReader,
     Reranker,
     Tokenizer,
 )
@@ -45,7 +45,7 @@ async def await_retrieval(res: SearchOutcome | Awaitable[SearchOutcome]) -> Sear
 @dataclass(frozen=True)
 class AgentResources:
     settings: Settings
-    qdrant: AsyncQdrantPoints | QdrantPoints
+    qdrant: AsyncQdrantReader | QdrantReader
     embedder: Embedder
     reranker: Reranker | None
     llm: LLMClient

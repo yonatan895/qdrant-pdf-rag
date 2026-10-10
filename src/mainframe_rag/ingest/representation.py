@@ -69,7 +69,7 @@ from qdrant_client import models
 
 from mainframe_rag.config import Settings
 from mainframe_rag.ingest.context import CONTEXT_PROMPT_VERSION
-from mainframe_rag.ports import AsyncQdrantPoints, QdrantPoints
+from mainframe_rag.ports import AsyncQdrantReader, QdrantPoints, QdrantReader
 
 MANIFEST_SCHEMA_VERSION = 1
 
@@ -535,7 +535,7 @@ def rekey_manifest(
 
 
 async def read_manifest_record_async(
-    async_client: AsyncQdrantPoints | QdrantPoints, completions_collection: str
+    async_client: AsyncQdrantReader | QdrantReader, completions_collection: str
 ) -> StoredManifest | None:
     """Async mirror of `read_manifest_record` for the serving path (lifespan
     + `/healthz`): stored contract + state, or None when
@@ -560,7 +560,7 @@ async def read_manifest_record_async(
 
 
 async def serving_outcome(
-    async_client: AsyncQdrantPoints | QdrantPoints,
+    async_client: AsyncQdrantReader | QdrantReader,
     settings: Settings,
     completions_collection: str,
     rules_v: str,
@@ -590,7 +590,7 @@ async def serving_outcome(
 
 
 async def resolve_serving_generation(
-    async_client: AsyncQdrantPoints | QdrantPoints,
+    async_client: AsyncQdrantReader | QdrantReader,
     settings: Settings,
     rules_v: str,
 ) -> tuple[str | None, str, list[str]]:

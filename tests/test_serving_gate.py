@@ -279,3 +279,53 @@ async def test_legacy_corpus_name_with_build_substring_remains_readable(alias):
     generation = await ServingGate(ttl_s=0).generation(client, settings, RULES)
     assert generation.physical == physical and generation.servable
     assert not client.writes
+
+
+def test_serving_read_surface_accepts_real_clients_and_rejects_writes(tmp_path):
+    """Issue #369: serving holds only the read protocols. The checker used by
+    qa:typecheck accepts the real sync/async Qdrant clients (and the writer
+    protocol) wherever serving reads, and rejects a write through the agent's
+    resources or either reader. Read-only credentials stay the runtime
+    boundary; this pins the code-level one."""
+    import subprocess
+    import sys
+
+    command = [sys.executable, "-m", "mypy", "--strict", "--follow-imports=silent", "--no-incremental"]
+    good = tmp_path / "good.py"
+    good.write_text("""
+import qdrant_client
+
+from mainframe_rag.ports import AsyncQdrantReader, QdrantPoints, QdrantReader
+
+
+def readers(
+    a: qdrant_client.AsyncQdrantClient, s: qdrant_client.QdrantClient, w: QdrantPoints
+) -> list[AsyncQdrantReader | QdrantReader]:
+    return [a, s, w]
+
+
+def writer(s: qdrant_client.QdrantClient) -> QdrantPoints:
+    return s
+""")
+    accepted = subprocess.run([*command, str(good)], capture_output=True, text=True, check=False)
+    assert accepted.returncode == 0, accepted.stdout + accepted.stderr
+
+    bad = tmp_path / "bad.py"
+    bad.write_text("""
+from mainframe_rag.agent.resources import AgentResources
+from mainframe_rag.ports import AsyncQdrantReader, QdrantReader
+
+
+def bad(res: AgentResources, a: AsyncQdrantReader, s: QdrantReader) -> None:
+    res.qdrant.upsert("c", points=[])
+    a.delete_collection("c")
+    s.update_collection_aliases([])
+""")
+    rejected = subprocess.run([*command, str(bad)], capture_output=True, text=True, check=False)
+    assert rejected.returncode == 1, rejected.stdout + rejected.stderr
+    out = rejected.stdout
+    assert 'Item "AsyncQdrantReader" of "AsyncQdrantReader | QdrantReader" has no attribute "upsert"' in out
+    assert 'Item "QdrantReader" of "AsyncQdrantReader | QdrantReader" has no attribute "upsert"' in out
+    assert '"AsyncQdrantReader" has no attribute "delete_collection"' in out
+    assert '"QdrantReader" has no attribute "update_collection_aliases"' in out
+    assert "Found 4 errors" in out
