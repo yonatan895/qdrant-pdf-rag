@@ -560,7 +560,7 @@ def aggregate(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _serving_generation(client, settings):
+def serving_generation(client, settings):
     """The serving gate's own verdict on the configured collection (issue
     #391 F3/F4): representation contract (embed model/revision/dim,
     extraction rules, sparse model) and immutable publication, through the
@@ -595,7 +595,7 @@ def evaluate(golden: list[GoldenEntry], settings) -> dict:
     # generation is measured through its validated physical name, as
     # serving binds requests; any other outcome still yields trend numbers
     # (the configured name), but a gate or baseline never accepts them.
-    generation = _serving_generation(client, settings)
+    generation = serving_generation(client, settings)
     if not generation.servable:
         print(
             f"warn: collection {settings.qdrant_collection!r} is not servable under these settings "

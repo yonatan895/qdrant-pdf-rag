@@ -358,7 +358,7 @@ def test_measurement_preserves_calls_errors_and_next_run(monkeypatch, failure):
 
     generations = []
     monkeypatch.setattr(
-        retrieval_mod, "_serving_generation",
+        retrieval_mod, "serving_generation",
         lambda c, s: generations.append((c, s)) or ServingGeneration("original__gen1", "compatible"),
     )
     entries = [GoldenEntry(query="broken", expected_doc_ids=["missing"]),

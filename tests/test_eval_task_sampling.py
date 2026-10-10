@@ -68,6 +68,8 @@ fastapi.testclient.TestClient = Client
 answer.HttpxLLMClient = chat.HttpxLLMClient = Client
 qdrant_client.QdrantClient = Client
 embed.build_embedder = lambda settings: object()
+from mainframe_rag.agent.serving import ServingGeneration
+chat.serving_generation = lambda c, s: ServingGeneration(s.qdrant_collection, 'compatible')
 rerank.build_reranker = lambda settings: None
 
 def measured_answer(client, entry, *args, **kwargs):

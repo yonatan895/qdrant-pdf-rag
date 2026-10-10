@@ -252,7 +252,8 @@ while `diagnostic_dualpath_enabled` remains default-off.
   A non-servable run (for example a different `EMBED_MODEL_REVISION` than the
   collection was built with) still prints trend numbers with a warning, but a
   requested gate is skipped with exit 2 and `--update-baseline` refuses (exit 2);
-  `scripts/gate_l1.py` fails the same way. Omitting both
+  `scripts/gate_l1.py` fails the same way, and the chat eval
+  (`mainframe_rag.eval.chat`) records and binds to the same verdict. Omitting both
   retains the legacy implicit check only when the default exists.
   Task `eval:retrieval`, `eval:paraphrase`, and `eval:baseline` pass suite and
   operation intent to this owner. This fixes raw-mode YAML selection disagreeing

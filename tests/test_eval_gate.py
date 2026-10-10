@@ -652,7 +652,7 @@ def test_cli_scores_actual_rows_before_deciding_gate(tmp_path, monkeypatch):
     from mainframe_rag.agent.serving import ServingGeneration
     from mainframe_rag.eval import retrieval as retrieval_mod
 
-    monkeypatch.setattr(retrieval_mod, "_serving_generation",
+    monkeypatch.setattr(retrieval_mod, "serving_generation",
                         lambda c, s: ServingGeneration(s.qdrant_collection, "compatible"))
     monkeypatch.setattr(rerank, "build_reranker", lambda settings: None)
     monkeypatch.setattr(ev, "load_settings", lambda: Settings(embed_mode="hash", qdrant_collection="c", _env_file=None))
@@ -870,7 +870,7 @@ qdrant_client.QdrantClient = lambda **kw: object()
 embed.build_embedder = lambda settings: object()
 from mainframe_rag.agent.serving import ServingGeneration
 from mainframe_rag.eval import retrieval as retrieval_mod
-retrieval_mod._serving_generation = lambda c, s: ServingGeneration(s.qdrant_collection, 'compatible')
+retrieval_mod.serving_generation = lambda c, s: ServingGeneration(s.qdrant_collection, 'compatible')
 rerank.build_reranker = lambda settings: None
 def search(client, embedder, collection, query, **kw):
     with Path('queries.jsonl').open('a') as out:

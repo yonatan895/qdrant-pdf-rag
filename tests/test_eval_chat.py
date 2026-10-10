@@ -186,7 +186,8 @@ def test_evaluate_sessions_preserves_both_arms_and_condensation_accounting(monke
 
     def search(client, embedder, collection, query, **kwargs):
         assert isinstance(client, Storage) and embedder is sentinel
-        assert collection == "synthetic" and kwargs["limit"] == 8
+        # Measured through the serving gate's validated physical.
+        assert collection == "synthetic__gen1" and kwargs["limit"] == 8
         assert kwargs["settings"] is settings and kwargs["reranker"] is None
         events.append(("retrieve", query))
         return [], "identifier", {"synthetic_ms": 1}
@@ -198,9 +199,19 @@ def test_evaluate_sessions_preserves_both_arms_and_condensation_accounting(monke
     monkeypatch.setattr(chat, "HttpxLLMClient", LLM)
     monkeypatch.setattr(chat, "condense_query", condense)
     monkeypatch.setattr(chat, "retrieve_search", search)
+    from mainframe_rag.agent.serving import ServingGeneration
+
+    verdicts = []
+    monkeypatch.setattr(
+        chat, "serving_generation",
+        lambda c, s: verdicts.append(s) or ServingGeneration("synthetic__gen1", "compatible"),
+    )
     entries = [GoldenEntry(id=name, query=name, expected_doc_ids=["doc"])
                for name in ("rewrite", "broken", "fallback")]
     report = chat.evaluate_sessions(entries, settings)
+    assert verdicts == [settings]
+    assert report["representation"]["servable"] is True
+    assert report["representation"]["physical"] == "synthetic__gen1"
     follow_up = "Tell me more about this."
     assert events == [
         ("retrieve", follow_up), ("condense", "rewrite"), ("retrieve", "rewritten identifier"),
