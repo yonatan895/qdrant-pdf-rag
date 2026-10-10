@@ -85,11 +85,11 @@ from mainframe_rag.agent.serving import ServingGate, ServingGeneration
 from mainframe_rag.agent.sse import (
     empty_final_payload,
     error_payload,
-    final_payload,
     format_openai_chunk,
     format_openai_done,
     format_openai_error,
     format_sse_event,
+    output_final_payload,
 )
 from mainframe_rag.agent.tokenizer import build_tokenizer
 from mainframe_rag.agent.zowe_mcp import build_zowe_mcp, probe_zowe_mcp
@@ -1808,24 +1808,7 @@ def _answer_final_frames(
         )
     )
 
-    final = final_payload(
-        request_id,
-        output.answer,
-        output.citations,
-        output.citations_inferred,
-        output.script,
-        kind,
-        output.hits,
-        output.finish_reason,
-        output.ttft_ms,
-        output.usage,
-        inferred_indices=output.inferred_indices,
-        script_lang=output.script_lang,
-        verification_state=output.verification_state,
-        script_review_required=output.script_review_required,
-        supplied_evidence=output.supplied,
-        evidence_omitted=len(output.evidence.omitted_indices),
-    )
+    final = output_final_payload(request_id, output, kind)
     root_span.set_attributes(
         _answer_span_attrs(
             kind,

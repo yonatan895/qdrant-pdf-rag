@@ -17,6 +17,7 @@ from mainframe_rag.ports import TokenUsage
 
 if TYPE_CHECKING:
     from mainframe_rag.agent.answer import SuppliedExcerpt
+    from mainframe_rag.agent.answer_core import AnswerCoreOutput
     from mainframe_rag.retrieve.query import SearchHit
 
 # Single error shape for every mid-stream failure (was two identical
@@ -166,3 +167,31 @@ def format_openai_error(code: str = SSE_ERROR_CODE, message: str = SSE_ERROR_MES
         "verification_state": "generation_incomplete",
     }
     return f"data: {json.dumps(payload)}\n\n"
+
+
+def output_final_payload(
+    request_id: str, output: AnswerCoreOutput, query_kind: str
+) -> dict[str, Any]:
+    """Terminal `final` for a finalized core output: the one field mapping
+    shared by the /v1/answer stream and the console stream, so a field the
+    core adds cannot reach one surface and be missed by the other.
+    `query_kind` is the caller's label (the answer route reports its
+    retrieval kind)."""
+    return final_payload(
+        request_id,
+        output.answer,
+        output.citations,
+        output.citations_inferred,
+        output.script,
+        query_kind,
+        output.hits,
+        output.finish_reason,
+        output.ttft_ms,
+        output.usage,
+        inferred_indices=output.inferred_indices,
+        script_lang=output.script_lang,
+        verification_state=output.verification_state,
+        script_review_required=output.script_review_required,
+        supplied_evidence=output.supplied,
+        evidence_omitted=len(output.evidence.omitted_indices),
+    )
