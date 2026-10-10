@@ -30,7 +30,7 @@ from mainframe_rag.ingest.publish import publication_metadata_point_id
 from mainframe_rag.ingest.representation import (
     resolve_serving_generation as resolve_representation_generation,
 )
-from mainframe_rag.ports import AsyncQdrantReader, QdrantReader, maybe_await
+from mainframe_rag.ports import AsyncQdrantReader
 
 # Outcomes a request may be served against (`resolve_serving_generation`
 # vocabulary). `empty` is deliberately absent: readiness keeps it as the
@@ -39,17 +39,17 @@ SERVABLE_OUTCOMES = ("compatible", "record_only_drift")
 
 
 async def resolve_published_generation(
-    client: AsyncQdrantReader | QdrantReader, settings: Settings, rules_v: str,
+    client: AsyncQdrantReader, settings: Settings, rules_v: str,
 ) -> tuple[str | None, str, list[str]]:
     """Validate representation and immutable publication before caching a target."""
     physical, outcome, details = await resolve_representation_generation(client, settings, rules_v)
     if physical is not None and outcome in SERVABLE_OUTCOMES:
         control = physical + "__completions"
         try:
-            aliases = await maybe_await(client.get_aliases())
-            records = await maybe_await(client.retrieve(
+            aliases = await client.get_aliases()
+            records = await client.retrieve(
                 control, ids=[publication_metadata_point_id(control)], with_payload=True,
-            ))
+            )
             payload = (records[0].payload or {}) if records else None
             if payload is not None and payload.get("record_type") != "publication-metadata":
                 raise ValueError("invalid publication control record")
@@ -97,7 +97,7 @@ class ServingGate:
 
     async def generation(
         self,
-        client,
+        client: AsyncQdrantReader,
         settings: Settings,
         rules_v: str,
         *,

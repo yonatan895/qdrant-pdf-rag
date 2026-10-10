@@ -160,10 +160,12 @@ clients. The application lifespan retains client ownership and closes only what
 it created (`AsyncExitStack`: startup failure, shutdown, cancellation); requests
 use an `AgentResources` view that never closes anything.
 
-Retrieval SDK dispatch is unchanged. Beneath it, serving holds only the read
-protocols `ports.QdrantReader`/`AsyncQdrantReader` (#369): retrieval, the serving
-gate, the evidence service and `AgentResources` cannot write through their
-handle, and only ingest/admin code holds the writer protocol `QdrantPoints`.
+Retrieval SDK dispatch is unchanged. Beneath it, serving holds only the async
+read protocol `ports.AsyncQdrantReader` (#369): retrieval, the serving gate,
+the evidence service and `AgentResources` await it and cannot write through
+their handle. Sync tooling enters through `ports.AsyncReaderAdapter` (the
+`retrieve.query.search` wrapper), and only ingest/admin code holds the writer
+protocol `QdrantPoints`.
 Within ingest, publication resolution, verification and every other helper that
 only reads also take `QdrantReader`; only helpers that mutate storage require
 `QdrantPoints`. `tests/test_serving_gate.py` and `tests/test_ingest_publish.py`

@@ -21,7 +21,6 @@ from mainframe_rag.ports import (
     AsyncQdrantReader,
     Embedder,
     LLMClient,
-    QdrantReader,
     Reranker,
     Tokenizer,
     maybe_await,
@@ -36,7 +35,7 @@ type SearchFn = Callable[..., SearchOutcome | Awaitable[SearchOutcome]]
 @dataclass(frozen=True)
 class AgentResources:
     settings: Settings
-    qdrant: AsyncQdrantReader | QdrantReader
+    qdrant: AsyncQdrantReader
     embedder: Embedder
     reranker: Reranker | None
     llm: LLMClient

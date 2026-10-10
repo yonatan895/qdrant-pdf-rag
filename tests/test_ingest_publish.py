@@ -855,6 +855,7 @@ def test_forced_repair_never_touches_live_during_build(tmp_path, monkeypatch):
     from mainframe_rag.ingest import run_ingest
     from mainframe_rag.ingest.representation import resolve_serving_generation
     from mainframe_rag.ingest.rules_version import extraction_rules_version
+    from mainframe_rag.ports import AsyncReaderAdapter
 
     _publish_env(monkeypatch)
     fake = PublishFake()
@@ -877,7 +878,8 @@ def test_forced_repair_never_touches_live_during_build(tmp_path, monkeypatch):
         observed["live_points"] = [p.id for p in fake.collections[live]]
         observed["reader"] = asyncio.run(
             resolve_serving_generation(
-                fake, _settings(qdrant_collection=ALIAS), extraction_rules_version()
+                AsyncReaderAdapter(fake), _settings(qdrant_collection=ALIAS),
+                extraction_rules_version(),
             )
         )
         return real_inner(*args, **kwargs)
