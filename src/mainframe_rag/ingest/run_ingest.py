@@ -1530,7 +1530,83 @@ def _run_publish_locked(
     retire_docs: tuple[str, ...] | None,
     rules_v: str,
 ) -> int:
-    """Publication body under the target lock (see _run_publish)."""
+    """Publication body under the target lock (see _run_publish), in three
+    phases (issue #583 S6): a read-only resolution of the predecessor, build
+    identity, retirement plan and staging target; then either the read-only
+    re-certification of a generation that already serves, or a staging build
+    that is verified and cut over."""
+    res = _resolve_publication(
+        src,
+        progress,
+        settings,
+        vendor=vendor,
+        product=product,
+        version=version,
+        force_reingest=force_reingest,
+        prewalked=prewalked,
+        retire_docs=retire_docs,
+        rules_v=rules_v,
+    )
+    if res.live == res.staging:
+        return _recertify_live(res, progress, settings, prewalked=prewalked, rules_v=rules_v)
+    return _build_and_cut_over(
+        res,
+        src,
+        progress,
+        workers,
+        settings,
+        tracer,
+        root,
+        vendor=vendor,
+        product=product,
+        version=version,
+        force_reingest=force_reingest,
+        prewalked=prewalked,
+        retire_docs=retire_docs,
+        rules_v=rules_v,
+    )
+
+
+@dataclass(frozen=True)
+class _Resolution:
+    """What publication resolved before its first write (issue #583 S6):
+    the live generation and whether a legacy physical squats on the alias,
+    the input fingerprints, the bound publish state and live build binding,
+    the observed aliases, the authorized removal plan and the staging
+    target (`resumed` when an existing recorded build is continued). Every
+    refusal while resolving happens before any storage, sidecar or
+    inventory write."""
+
+    client: Any
+    labels: str
+    live: str | None
+    legacy: bool
+    gen_fp: str
+    corp_fp: str
+    state: dict | None
+    live_binding: BuildBinding | None
+    observed_aliases: dict[str, str]
+    retire_plan: dict[str, dict[str, set[str] | bool]]
+    staging: str
+    resumed: bool
+
+
+def _resolve_publication(
+    src: Path,
+    progress: Path,
+    settings: Settings,
+    *,
+    vendor: str | None,
+    product: str | None,
+    version: str | None,
+    force_reingest: bool,
+    prewalked: list[tuple[str, str]],
+    retire_docs: tuple[str, ...] | None,
+    rules_v: str,
+) -> _Resolution:
+    """Read-only resolution: publish-state format and predecessor binding,
+    retirement plan selection (replaying a bound plan), walked-corpus
+    conflicts with that plan, and the staging target."""
     labels = source_labels(vendor, product, version)
     alias = settings.qdrant_collection
     client = _get_qdrant(settings)
@@ -1581,7 +1657,6 @@ def _run_publish_locked(
             retire_plan = state.get("retire_plan")
     if retire_plan is None:
         retire_plan = plan_approved_removals(retire_docs, prior_inventory)[0] if retire_docs else {}
-    retired = frozenset(retire_plan)
 
     conflicts: set[str] = set()
     if retire_plan:
@@ -1620,91 +1695,150 @@ def _run_publish_locked(
         has_retirements=bool(retire_docs),
         state=state,
     )
-    staging_settings = settings.model_copy(update={"qdrant_collection": staging})
-    if live == staging:
-        # Steady state: the resolved generation already serves. That is a
-        # plain rerun with the derived name (unforced), or a sidecar-bound
-        # build that swapped before its cleanup (forced repair, issue #391
-        # current packet). Either way: re-verify read-only instead of
-        # cloning/building onto live. The representation read-only check
-        # rides along: it is the one place record-only drift (a new dense
-        # query prefix keeps the same staging name — and is never a re-embed
-        # trigger) is acknowledged, and it raises on a pending contract
-        # (interrupted run of the same representation). Preserve the bound
-        # sidecar and uncommitted retirement inventory until every check and
-        # any receipt backfill succeeds: failed certification must retain the
-        # exact build and removal authorization needed for another retry.
-        _, record_drift = check_ingest_compatible(
+    return _Resolution(
+        client=client,
+        labels=labels,
+        live=live,
+        legacy=legacy,
+        gen_fp=gen_fp,
+        corp_fp=corp_fp,
+        state=state,
+        live_binding=live_binding,
+        observed_aliases=observed_aliases,
+        retire_plan=retire_plan,
+        staging=staging,
+        resumed=resumed,
+    )
+
+
+def _recertify_live(
+    res: _Resolution,
+    progress: Path,
+    settings: Settings,
+    *,
+    prewalked: list[tuple[str, str]],
+    rules_v: str,
+) -> int:
+    """The resolved generation already serves: re-verify it read-only, then
+    finish the bound retirement inventory and clear the sidecar."""
+    client, live, state, live_binding = res.client, res.live, res.state, res.live_binding
+    labels, retire_plan, gen_fp, corp_fp = res.labels, res.retire_plan, res.gen_fp, res.corp_fp
+    retired = frozenset(retire_plan)
+    alias = settings.qdrant_collection
+    staging_settings = settings.model_copy(update={"qdrant_collection": res.staging})
+
+    # Steady state: the resolved generation already serves. That is a
+    # plain rerun with the derived name (unforced), or a sidecar-bound
+    # build that swapped before its cleanup (forced repair, issue #391
+    # current packet). Either way: re-verify read-only instead of
+    # cloning/building onto live. The representation read-only check
+    # rides along: it is the one place record-only drift (a new dense
+    # query prefix keeps the same staging name — and is never a re-embed
+    # trigger) is acknowledged, and it raises on a pending contract
+    # (interrupted run of the same representation). Preserve the bound
+    # sidecar and uncommitted retirement inventory until every check and
+    # any receipt backfill succeeds: failed certification must retain the
+    # exact build and removal authorization needed for another retry.
+    _, record_drift = check_ingest_compatible(
+        client,
+        staging_settings,
+        completion_collection_name(staging_settings),
+        rules_v,
+    )
+    _log_record_drift(staging_settings, record_drift)
+    dist_problems = verify_staging_distribution(client, staging_settings)
+    if dist_problems:
+        raise RuntimeError(
+            f"live generation {live!r} fails distribution policy for "
+            f"{len(dist_problems)} check(s) "
+            f"(e.g. {dist_problems[0]!r}) — alias untouched, operator "
+            "intervention required (issue #360)."
+        )
+    with _placement_clients(settings, client) as placement_map:
+        place_problems = (
+            []
+            if placement_map is None
+            else verify_staging_placement(placement_map, staging_settings)
+        )
+    if place_problems:
+        raise RuntimeError(
+            f"live generation {live!r} fails ACTIVE-copy placement for "
+            f"{len(place_problems)} check(s) "
+            f"(e.g. {place_problems[0]!r}) — alias untouched, the old "
+            "generation keeps serving reads, operator intervention "
+            "required (issue #360)."
+        )
+    problems = verify_all_complete(
+        client,
+        staging_settings,
+        prewalked,
+        load_inventory(progress),
+        rules_v,
+        labels,
+        retired,
+        retire_plan,
+    )
+    if problems:
+        raise RuntimeError(
+            f"live generation {live!r} fails verification for {len(problems)} "
+            f"path(s) (e.g. {problems[0]!r}) — operator intervention required."
+        )
+    verify_publication_seal(client, completion_collection_name(staging_settings))
+    if live_binding is None and read_publication_metadata(
+        client, completion_collection_name(staging_settings)
+    ) is None:
+        write_publication_metadata(
             client,
-            staging_settings,
             completion_collection_name(staging_settings),
-            rules_v,
-        )
-        _log_record_drift(staging_settings, record_drift)
-        dist_problems = verify_staging_distribution(client, staging_settings)
-        if dist_problems:
-            raise RuntimeError(
-                f"live generation {live!r} fails distribution policy for "
-                f"{len(dist_problems)} check(s) "
-                f"(e.g. {dist_problems[0]!r}) — alias untouched, operator "
-                "intervention required (issue #360)."
-            )
-        with _placement_clients(settings, client) as placement_map:
-            place_problems = (
-                []
-                if placement_map is None
-                else verify_staging_placement(placement_map, staging_settings)
-            )
-        if place_problems:
-            raise RuntimeError(
-                f"live generation {live!r} fails ACTIVE-copy placement for "
-                f"{len(place_problems)} check(s) "
-                f"(e.g. {place_problems[0]!r}) — alias untouched, the old "
-                "generation keeps serving reads, operator intervention "
-                "required (issue #360)."
-            )
-        problems = verify_all_complete(
-            client,
             staging_settings,
-            prewalked,
-            load_inventory(progress),
-            rules_v,
-            labels,
-            retired,
-            retire_plan,
+            gen_fp=gen_fp,
+            corpus_fp=corp_fp,
         )
-        if problems:
-            raise RuntimeError(
-                f"live generation {live!r} fails verification for {len(problems)} "
-                f"path(s) (e.g. {problems[0]!r}) — operator intervention required."
-            )
-        verify_publication_seal(client, completion_collection_name(staging_settings))
-        if live_binding is None and read_publication_metadata(
-            client, completion_collection_name(staging_settings)
-        ) is None:
-            write_publication_metadata(
-                client,
-                completion_collection_name(staging_settings),
-                staging_settings,
-                gen_fp=gen_fp,
-                corpus_fp=corp_fp,
-            )
-        if state and state.get("retire_plan"):
-            commit_retired_inventory(progress, load_inventory(progress), state["retire_plan"])
-        if clear_publish_state(progress, alias):
-            log.info(json.dumps({"action": "publish_state_superseded", "alias": alias}))
-        log.info(
-            json.dumps(
-                {
-                    "action": "publish",
-                    "alias": settings.qdrant_collection,
-                    "physical": live,
-                    "result": "already_live",
-                    "docs": len(prewalked),
-                }
-            )
+    if state and state.get("retire_plan"):
+        commit_retired_inventory(progress, load_inventory(progress), state["retire_plan"])
+    if clear_publish_state(progress, alias):
+        log.info(json.dumps({"action": "publish_state_superseded", "alias": alias}))
+    log.info(
+        json.dumps(
+            {
+                "action": "publish",
+                "alias": settings.qdrant_collection,
+                "physical": live,
+                "result": "already_live",
+                "docs": len(prewalked),
+            }
         )
-        return 0
+    )
+    return 0
+
+
+def _build_and_cut_over(
+    res: _Resolution,
+    src: Path,
+    progress: Path,
+    workers: int | None,
+    settings: Settings,
+    tracer: trace.Tracer,
+    root: trace.Span,
+    *,
+    vendor: str | None,
+    product: str | None,
+    version: str | None,
+    force_reingest: bool,
+    prewalked: list[tuple[str, str]],
+    retire_docs: tuple[str, ...] | None,
+    rules_v: str,
+) -> int:
+    """A distinct staging generation: bind and record the build, prepare
+    and build staging, apply approved removals, verify, then cut the alias
+    over and finish the retirement inventory."""
+    client, live, legacy, state = res.client, res.live, res.legacy, res.state
+    labels, retire_plan, gen_fp, corp_fp = res.labels, res.retire_plan, res.gen_fp, res.corp_fp
+    staging, resumed, observed_aliases = res.staging, res.resumed, res.observed_aliases
+    retired = frozenset(retire_plan)
+    alias = settings.qdrant_collection
+    staging_settings = settings.model_copy(update={"qdrant_collection": staging})
+
     # Distinct staging build: record it before any mutation so an
     # interrupted run resumes this same build (issue #405 R2) instead
     # of allocating another suffix — including a forced repair build,
