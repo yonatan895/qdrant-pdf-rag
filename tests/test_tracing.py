@@ -22,7 +22,7 @@ from mainframe_rag.agent import answer_core as answer_core_mod
 from mainframe_rag.agent import app as app_mod
 from mainframe_rag.agent.tokenizer import FallbackTokenizer
 from mainframe_rag.logs import JsonFormatter
-from mainframe_rag.ports import ChatResult, TokenUsage
+from mainframe_rag.ports import AsyncReaderAdapter, ChatResult, TokenUsage
 from mainframe_rag.retrieve import query as query_mod
 from mainframe_rag.retrieve.query import async_search, search
 from tests.conftest import FakeEmbedder, FakeQdrant, MockReranker, _point
@@ -1224,7 +1224,9 @@ def test_search_stage_tree_split_reports_paths_and_mode():
     assert root.attributes["rag.split_mode"] == "comparative"
 
     (_a_hits, a_kind, _a_timings), a_exporter = _run_and_collect(
-        lambda *args, **kwargs: asyncio.run(async_search(*args, **kwargs)),
+        lambda client, *args, **kwargs: asyncio.run(
+            async_search(AsyncReaderAdapter(client), *args, **kwargs)
+        ),
         FakeQdrant(dense=[_point("a")], sparse=[_point("b")]),
         FakeEmbedder(), "mainframe_manuals", query, limit=5, settings=settings,
     )
@@ -1267,7 +1269,9 @@ def test_search_stage_tree_rerank_reports_bounded_alpha():
         assert 0.0 <= rr.attributes["rag.rerank_alpha"] <= 1.0
 
         (_a_hits, a_kind, _a_timings), a_exporter = _run_and_collect(
-            lambda *args, **kwargs: asyncio.run(async_search(*args, **kwargs)),
+            lambda client, *args, **kwargs: asyncio.run(
+            async_search(AsyncReaderAdapter(client), *args, **kwargs)
+        ),
             FakeQdrant(dense=[_point("a")], sparse=[_point("b")]),
             FakeEmbedder(), "mainframe_manuals", "sizing the lookaside facility",
             limit=5, settings=settings, reranker=MockReranker(),
@@ -1304,7 +1308,9 @@ def test_async_search_stage_tree_matches_sync():
     )
     fake_async = FakeQdrant(dense=[_point("a")], sparse=[_point("b")])
     (a_hits, a_kind, _), a_exporter = _run_and_collect(
-        lambda *args, **kwargs: asyncio.run(async_search(*args, **kwargs)),
+        lambda client, *args, **kwargs: asyncio.run(
+            async_search(AsyncReaderAdapter(client), *args, **kwargs)
+        ),
         fake_async, embedder, "mainframe_manuals", query, limit=5,
     )
 

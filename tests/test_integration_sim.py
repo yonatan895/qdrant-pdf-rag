@@ -159,6 +159,11 @@ def _ingest(
     monkeypatch.setenv("QDRANT_URL", qdrant_url)
     monkeypatch.setenv("QDRANT_COLLECTION", collection)
     monkeypatch.setenv("EMBED_MODE", embed)
+    # Publication is the default; tests that publish select it explicitly,
+    # and the rest (shared corpora re-ingested with fresh inventories,
+    # in-place migration and restore pins) select in-place explicitly.
+    if "INGEST_ALIAS_PUBLISH" not in os.environ:
+        monkeypatch.setenv("INGEST_ALIAS_PUBLISH", "false")
     if embed == "vllm":
         assert mock_url, "the vLLM-shaped variant needs the mock endpoint URL"
         monkeypatch.setenv("EMBED_BASE_URL", f"{mock_url}/v1")
@@ -225,6 +230,10 @@ _MESSAGE_CITE = (
 
 
 def test_ingest_real_server_and_resume(qdrant_url, corpus, tmp_path, monkeypatch):
+    """In-place mode recovers a lost inventory through the Qdrant-level sha
+    skip. Publication (the default) instead re-verifies live against the
+    durable inventory, so this pin selects the deprecated in-place mode."""
+    monkeypatch.setenv("INGEST_ALIAS_PUBLISH", "false")
     records = _ingest(monkeypatch, qdrant_url, "sim-hash", corpus, tmp_path / "inv.jsonl")
     assert [r["status"] for r in records] == ["upserted"] * 3
     assert all(r["chunks"] > 0 for r in records)

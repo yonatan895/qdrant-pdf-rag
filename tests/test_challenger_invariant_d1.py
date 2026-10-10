@@ -94,42 +94,6 @@ class AdversarialScopeQdrant:
         return SimpleNamespace(points=sorted_matching)
 
 
-class LegacyAdversarialScopeQdrant:
-    """Method-less double: deliberately has NO query_batch_points so
-    retrieve's hasattr dispatch pins the sequential query_points fallback path."""
-
-    def __init__(
-        self,
-        dense_points: list[models.ScoredPoint] | None = None,
-        sparse_points: list[models.ScoredPoint] | None = None,
-        all_points: list[models.ScoredPoint] | None = None,
-    ):
-        if all_points is not None:
-            self._dense = list(all_points)
-            self._sparse = list(all_points)
-        else:
-            self._dense = list(dense_points or [])
-            self._sparse = list(sparse_points or [])
-        self.single_calls = 0
-        self.queries: list[dict[str, Any]] = []
-
-    def query_points(
-        self,
-        collection: str,
-        query: Any,
-        using: str,
-        limit: int,
-        query_filter: models.Filter | None,
-        with_payload: Any,
-        **_,
-    ):
-        self.single_calls += 1
-        self.queries.append({"using": using, "filter": query_filter, "with_payload": with_payload})
-        pool = self._dense if using == "dense" else self._sparse
-        matching = [p for p in pool if _matches_filter(p, query_filter)]
-        sorted_matching = sorted(matching, key=lambda p: p.score, reverse=True)[:limit]
-        return SimpleNamespace(points=sorted_matching)
-
 
 class AsyncAdversarialScopeQdrant(AdversarialScopeQdrant):
     """Async variant returning awaitables for query_batch_points and query_points."""
@@ -591,32 +555,8 @@ class TestScoreDifferencesAndOutofScopeLeakage:
 
 class TestTransportAndInterfaceParity:
     """Stress test scope retention across transport variations:
-    LegacyQdrant (sequential fallback) and AsyncQdrant client."""
+    batch transport through the sync wrapper and the async client."""
 
-    def test_legacy_sequential_qdrant_client_retains_scope(self, embedder):
-        """A client without query_batch_points takes the sequential _async_prefetch_one path;
-        it must retain scope filters on fallback and reject out-of-scope records."""
-        in_scope = _make_point("in-scope", product="z/OS", version="3.1")
-        out_scope = _make_point("out-scope", product="Linux", version="3.1")
-
-        fake = LegacyAdversarialScopeQdrant(all_points=[in_scope, out_scope])
-        assert not hasattr(fake, "query_batch_points")
-
-        hits, kind, _ = search(
-            fake,
-            embedder,
-            "mainframe_manuals",
-            "Identify SC99-9999",  # Triggers fallback
-            product="z/OS",
-            version="3.1",
-            limit=5,
-        )
-
-        assert kind == "identifier"
-        # 2 legs (dense, bm25) * 2 attempts (initial, fallback) = 4 single calls
-        assert fake.single_calls == 4
-        assert len(hits) == 1
-        assert hits[0].chunk_id == "in-scope"
 
     def test_async_search_direct_invocation_scope_retention(self, embedder):
         """Direct invocation of async_search with AsyncQdrantPoints strictly enforces Invariant D1."""
@@ -641,24 +581,6 @@ class TestTransportAndInterfaceParity:
         assert fake.batch_calls == 2
         assert len(hits) == 1
         assert hits[0].chunk_id == "in-scope"
-
-    def test_empty_results_when_all_points_out_of_scope_legacy_sequential(self, embedder):
-        """Sequential client returns [] when no points match scope, never falling back to unfiltered."""
-        out_scope = _make_point("out-scope", product="Linux", version="3.1")
-        fake = LegacyAdversarialScopeQdrant(all_points=[out_scope])
-
-        hits, _, _ = search(
-            fake,
-            embedder,
-            "mainframe_manuals",
-            "Identify SC99-9999",
-            product="z/OS",
-            version="3.1",
-            limit=5,
-        )
-
-        assert fake.single_calls == 4
-        assert hits == []
 
 
 # ============================================================================

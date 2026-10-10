@@ -304,21 +304,25 @@ def capture_query(
 ) -> dict:
     """Run production prefetch legs for one query and serialize the pool (live).
 
-    Mirrors ``async_search`` prefetch: identifiers → filter → split paths →
-    per-leg expansion → embed → batched prefetch (sequential fallback) →
-    empty-filtered retry. Fusion/rerank/diversify deliberately do NOT run
+    Runs ``async_search``'s own prefetch (``_prefetch_leg_points``, through
+    ``AsyncReaderAdapter`` for this sync client): identifiers → filter and
+    its scope-preserving retry filter → split paths → per-leg expansion →
+    embed → batched prefetch → empty-filtered retry. Fusion/rerank/diversify deliberately do NOT run
     here — replay owns ranking. An explicit ``reranker`` wins like the
     lifespan client; trap/identifier queries still bypass (RRF order
     stands) and record CE-less pools. ``depth`` records each leg deeper
     than production (never shallower); CE scores stop at ``CE_DEPTH_MAX``
     per leg, the deepest pool replay can rerank.
     """
-    from mainframe_rag.retrieve.filters import build_filter, parse_query, query_kind
+    import asyncio
+
+    from mainframe_rag.ports import AsyncReaderAdapter
+    from mainframe_rag.retrieve.filters import parse_query, query_kind
     from mainframe_rag.retrieve.query import (
-        _build_prefetch_requests,
         _effective_query,
-        _needs_filter_fallback,
+        _prefetch_leg_points,
         _prefetch_limit_for,
+        _query_filters,
         _resolve_active_reranker,
         _split_paths_for,
         _to_hit,
@@ -327,7 +331,7 @@ def capture_query(
 
     identifiers = parse_query(query)
     kind = query_kind(identifiers)
-    flt = build_filter(identifiers)
+    flt, fallback_flt = _query_filters(identifiers, None, None)
     active_reranker, rerank_active, bypass_reason = _resolve_active_reranker(
         settings, reranker, query, identifiers.has_identifiers
     )
@@ -338,54 +342,18 @@ def capture_query(
     )
     prefetch_limit = max(_prefetch_limit_for(settings, rerank_active), depth or 0)
 
-    legs = []
+    leg_vecs = []
     for eq in eff_legs:
         dense_vec = embedder.dense_query([eq])[0]
         sparse_idx, sparse_val = embedder.sparse([eq])[0]
-        dense_req, sparse_req = _build_prefetch_requests(dense_vec, sparse_idx, sparse_val, flt, prefetch_limit)
-        if hasattr(client, "query_batch_points"):
-            responses = client.query_batch_points(collection, requests=[dense_req, sparse_req])
-            dense_points, sparse_points = responses[0].points, responses[1].points
-        else:
-            dense_points = client.query_points(
-                collection, query=dense_vec, using="dense", limit=prefetch_limit,
-                query_filter=flt, with_payload=True,
-            ).points
-            from qdrant_client.http import models
-
-            sparse_points = client.query_points(
-                collection,
-                query=models.SparseVector(indices=sparse_idx, values=sparse_val),
-                using="bm25", limit=prefetch_limit, query_filter=flt, with_payload=True,
-            ).points
-        leg_fallback = _needs_filter_fallback(dense_points, sparse_points, flt)
-        if leg_fallback:
-            dense_req, sparse_req = _build_prefetch_requests(
-                dense_vec, sparse_idx, sparse_val, None, prefetch_limit
-            )
-            if hasattr(client, "query_batch_points"):
-                responses = client.query_batch_points(collection, requests=[dense_req, sparse_req])
-                dense_points, sparse_points = responses[0].points, responses[1].points
-            else:
-                from qdrant_client.http import models
-
-                dense_points = client.query_points(
-                    collection, query=dense_vec, using="dense", limit=prefetch_limit,
-                    query_filter=None, with_payload=True,
-                ).points
-                sparse_points = client.query_points(
-                    collection,
-                    query=models.SparseVector(indices=sparse_idx, values=sparse_val),
-                    using="bm25", limit=prefetch_limit, query_filter=None, with_payload=True,
-                ).points
-        legs.append(
-            {
-                "effective_text": eq,
-                "filter_fallback": leg_fallback,
-                "dense": dense_points,
-                "sparse": sparse_points,
-            }
-        )
+        leg_vecs.append((dense_vec, sparse_idx, sparse_val))
+    prefetched = asyncio.run(_prefetch_leg_points(
+        AsyncReaderAdapter(client), collection, leg_vecs, flt, fallback_flt, prefetch_limit
+    ))
+    legs: list[dict[str, Any]] = [
+        {"effective_text": eq, "filter_fallback": retried, "dense": dense, "sparse": sparse}
+        for eq, (dense, sparse, retried) in zip(eff_legs, prefetched)
+    ]
 
     ce_by_id: dict[str, float] = {}
     ce_scored = False

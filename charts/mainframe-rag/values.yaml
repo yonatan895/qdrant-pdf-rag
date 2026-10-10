@@ -153,7 +153,8 @@ ingest:
   # Explicit direct REST peers for placement evidence; never inferred from the Service.
   # Comma-separated non-secret URLs. Existing runtime parser/gate owns validation.
   peerUrls: ""
-  aliasPublish: false
+  # Alias publication is the default; false selects the deprecated in-place mode.
+  aliasPublish: true
   reingest: false
   # Explicit approved removals (requires aliasPublish=true). Entries accept
   # the backend alphabet (labels may carry '/', '|' and spaces); shell

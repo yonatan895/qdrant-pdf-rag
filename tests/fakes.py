@@ -145,19 +145,14 @@ class QdrantFake:
         return results
 
 
-class LegacyQdrantFake:
-    """Method-less double: deliberately has NO query_batch_points so
-    retrieve's hasattr dispatch pins the sequential query_points fallback
-    path. Do not add batch support here — that is the pin."""
-
-    def __init__(self, dense, sparse):
-        self._dense, self._sparse = dense, sparse
-        self.queries = []
-
-    def query_points(self, collection, query, using, limit, query_filter, with_payload, **_):
-        self.queries.append({"using": using, "filter": query_filter, "with_payload": with_payload})
-        points = self._dense if using == "dense" else self._sparse
-        return SimpleNamespace(points=list(points))
+def batch_via_query_points(self, collection, requests, **_):
+    """`query_batch_points` for a double: one `query_points` answer per
+    request, in order, like the real client's batch of the same requests."""
+    return [
+        self.query_points(collection, query=r.query, using=r.using, limit=r.limit,
+                          query_filter=r.filter, with_payload=r.with_payload)
+        for r in requests
+    ]
 
 
 class EmbedderFake:
@@ -362,11 +357,11 @@ class ServingManifestQdrant:
         if self.explode:
             raise ConnectionError("refused")
 
-    def get_aliases(self):
+    async def get_aliases(self):
         self._refuse()
         return SimpleNamespace(aliases=[])
 
-    def collection_exists(self, name):
+    async def collection_exists(self, name):
         self._refuse()
         return self.envelope is not None or self.points
 
@@ -422,8 +417,8 @@ class AliasQdrant:
     collections, and per-completions-collection manifest payloads.
 
     `manifests` maps a completion collection name to its payload (or None),
-    `points` is the set of collections holding points. Sync methods ride the
-    agent's isawaitable shim, mirroring the other doubles.
+    `points` is the set of collections holding points. Reads are async,
+    like the agent's client (serving awaits only async readers).
     """
 
     def __init__(self, aliases=None, manifests=None, points=(), publications=None):
@@ -434,7 +429,7 @@ class AliasQdrant:
         self.retrieved: list[str] = []
         self.writes: list[str] = []  # any mutating call records here (read-only proof)
 
-    def get_aliases(self):
+    async def get_aliases(self):
         return SimpleNamespace(
             aliases=[
                 SimpleNamespace(alias_name=a, collection_name=p)
@@ -442,7 +437,7 @@ class AliasQdrant:
             ]
         )
 
-    def collection_exists(self, name):
+    async def collection_exists(self, name):
         return name in self.manifests or name in self.publications or name in self.points
 
     async def retrieve(self, name, ids, *, with_payload=True, with_vectors=False):

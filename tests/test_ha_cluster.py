@@ -668,7 +668,7 @@ def test_operator_job_publishes_exact_corpus_on_three_peers(cluster, ingest_tree
 
     from mainframe_rag.ingest.publish import publish_state_path
     from tests.helpers_airgap import rendered_container
-    from tests.helpers_publication_lifecycle import TEXTS, _records, _write_source
+    from tests.helpers_publication_lifecycle import REPLACEMENT, TEXTS, _records, _write_source
 
     tree = ingest_tree[0]
     shutil.copy(REPO / "Taskfile.yml", tree)
@@ -719,6 +719,8 @@ def test_operator_job_publishes_exact_corpus_on_three_peers(cluster, ingest_tree
                if key in {"PATH", "HOME", "LANG", "LC_ALL", "TMPDIR"}}
         env.update({key: value for key, value in job_env.items() if isinstance(value, str)})
         env.update(QDRANT_URL=cluster.urls[0], EMBED_MODE="hash", ALLOW_HASH_MODE="true")
+        # Run this checkout's code, not an editable install elsewhere.
+        env["PYTHONPATH"] = str(REPO / "src")
         launched += 1
         log = tmp_path / f"ingest-{launched}.log"
         command = [sys.executable, *entrypoint[1:], *args]
@@ -791,6 +793,31 @@ def test_operator_job_publishes_exact_corpus_on_three_peers(cluster, ingest_tree
                             if a.alias_name == alias) == recorded
                 assert (_records(client, recorded), _records(client, recorded + "__completions")) == frozen
             assert not state_path.exists()
+        # Update publication over the distributed live generation (issue #360):
+        # staging is prepared by an API copy of live, so a changed document
+        # publishes a new 6/3/2 generation; the old one is retained untouched.
+        _write_source(corpus, "alpha", REPLACEMENT)
+        updated = run_job(healthy)
+        assert updated.returncode == 0, updated.stdout + updated.stderr
+        current = next(a.collection_name for a in clients[0].get_aliases().aliases if a.alias_name == alias)
+        assert current != recorded
+        assert not state_path.exists()
+        for client in clients:
+            assert next(a.collection_name for a in client.get_aliases().aliases
+                        if a.alias_name == alias) == current
+            for collection in (current, current + "__completions"):
+                params = client.get_collection(collection).config.params
+                assert (params.shard_number, params.replication_factor,
+                        params.write_consistency_factor) == (6, 3, 2)
+            by_doc = {}
+            for payload, _ in _records(client, current).values():
+                by_doc.setdefault(payload["doc_id"], []).append(payload["text"])
+            assert by_doc == {"alpha": [REPLACEMENT], "beta": [TEXTS["beta"]]}
+            assert (_records(client, recorded), _records(client, recorded + "__completions")) == frozen
+        steady = run_job(healthy)
+        assert steady.returncode == 0, steady.stdout + steady.stderr
+        assert next(a.collection_name for a in clients[0].get_aliases().aliases
+                    if a.alias_name == alias) == current
     finally:
         try:
             if any(a.alias_name == alias for a in clients[0].get_aliases().aliases):

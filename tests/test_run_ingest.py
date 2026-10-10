@@ -10,6 +10,14 @@ import pytest
 from mainframe_rag.ingest.run_ingest import main
 
 
+@pytest.fixture(autouse=True)
+def _in_place_mode(monkeypatch):
+    """These tests cover the in-place build (which publication also runs for
+    each staging generation). Alias publication is the default, so select
+    the deprecated in-place mode explicitly, as an operator would."""
+    monkeypatch.setenv("INGEST_ALIAS_PUBLISH", "false")
+
+
 def test_dry_run_ingest(tmp_path, synthetic_pdf, capsys):
     progress = tmp_path / "inventory.jsonl"
     rc = main(["--src", str(synthetic_pdf.parent), "--progress", str(progress),
@@ -284,6 +292,25 @@ def test_upsert_path_counters_with_fake_qdrant(tmp_path, synthetic_pdf, capsys, 
     main_collection = _Settings(_env_file=None).qdrant_collection
     main_sent = sum(n for collection, n in fake.upsert_calls if collection == main_collection)
     assert main_sent == done[0]["chunks_upserted"]
+
+
+def test_in_place_real_run_logs_deprecation_and_dry_run_does_not(
+    tmp_path, synthetic_pdf, capsys, monkeypatch
+):
+    """Alias publication is the default; a real in-place run (explicit
+    INGEST_ALIAS_PUBLISH=false) still works for one release and says so."""
+    from mainframe_rag.ingest import run_ingest
+
+    monkeypatch.setenv("EMBED_MODE", "hash")
+    monkeypatch.delenv("DENSE_DIM", raising=False)
+    fake = _FakeQdrant()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    args = ["--src", str(synthetic_pdf.parent), "--workers", "1"]
+    assert main([*args, "--progress", str(tmp_path / "dry.jsonl"), "--dry-run"]) == 0
+    assert not [l for l in _stderr_json(capsys) if l.get("action") == "in_place_deprecated"]
+    assert main([*args, "--progress", str(tmp_path / "real.jsonl")]) == 0
+    warned = [l for l in _stderr_json(capsys) if l.get("action") == "in_place_deprecated"]
+    assert len(warned) == 1 and "INGEST_ALIAS_PUBLISH" in warned[0]["remediation"]
 
 
 def test_qdrant_level_skip_counts_as_ok(tmp_path, synthetic_pdf, capsys, monkeypatch):
@@ -954,6 +981,12 @@ def test_oversize_document_is_never_upserted_or_completed_and_next_run_succeeds(
         ("unattested_revision", {}, {"EMBED_MODE": "vllm", "DENSE_DIM": "256"}, ("--reingest",),
          "EMBED_MODEL_REVISION"),
         ("contextual_on_hash", {}, {"CONTEXTUAL_EMBED_ENABLED": "true"}, (), "requires embed_mode=vllm"),
+        # Mode dispatch (issue #583 S5): refused before publication takes its
+        # lock, records a build or prepares staging.
+        ("contextual_on_hash_publish", {},
+         {"CONTEXTUAL_EMBED_ENABLED": "true", "INGEST_ALIAS_PUBLISH": "true"}, (),
+         "requires embed_mode=vllm"),
+        ("retire_in_place", {}, {}, ("--retire-doc", "SA22-7000-00"), "requires INGEST_ALIAS_PUBLISH"),
     ],
 )
 def test_failed_preflight_starts_no_workers_and_writes_nothing(
@@ -990,6 +1023,9 @@ def test_failed_preflight_starts_no_workers_and_writes_nothing(
     after = (fake._points, fake.upserts, fake.upsert_calls, fake.deletes, fake.created_collections)
     assert after == before, f"{case}: storage mutated before the refusal"
     assert not progress.exists() or progress.read_text() == ""
+    if case in ("contextual_on_hash_publish", "retire_in_place"):
+        # Dispatch refusals precede every lock, so no lock/state file exists.
+        assert sorted(p.name for p in tmp_path.iterdir()) == [], f"{case}: lock or state written"
 
 
 def test_combined_in_flight_window_bounds_parse_and_upsert_work(tmp_path, monkeypatch):

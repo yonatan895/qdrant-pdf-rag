@@ -534,3 +534,39 @@ def test_capture_date_is_resolved_for_each_invocation(tmp_path, monkeypatch):
         output = tmp_path / "bundles" / f"pools-{day}.jsonl"
         assert json.loads(output.read_text())["query"] == query
     assert json.loads((tmp_path / "bundles/pools-20260101.jsonl").read_text())["query"] == "first original question"
+
+
+def test_capture_retry_records_the_pool_search_prefetches():
+    """An empty exact code lookup retries under the filter that keeps scope
+    and still excludes a known-wrong sibling code. The capture runs search's
+    own prefetch, so it records that pool, never an unfiltered one."""
+    from types import SimpleNamespace
+
+    from qdrant_client.local.payload_filters import check_filter
+
+    from mainframe_rag.retrieve.query import search
+    from tests.fakes import batch_via_query_points
+
+    points = []
+    for pid, codes in (("missing", None), ("wrong", ["IEC070I"])):
+        point = _cpoint(pid, f"DOC-{pid}", "1", "message")
+        point.payload.pop("message_ids", None)
+        if codes is not None:
+            point.payload["message_ids"] = codes
+        points.append(point)
+
+    class FilterClient:
+        def query_points(self, collection, query, using, limit, query_filter, **_):
+            eligible = [p for p in points if query_filter is None
+                        or check_filter(query_filter, p.payload, p.id, {})]
+            return SimpleNamespace(points=eligible[:limit])
+
+        query_batch_points = batch_via_query_points
+
+    query = "What does IEC072I report?"
+    record = capture_query(FilterClient(), FakeEmbedder(), "mainframe_manuals", query, _settings())
+    recorded = {pid for leg in record["legs"] for pid in leg["dense"] + leg["sparse"]}
+    assert record["legs"][0]["filter_fallback"] is True
+    assert recorded == {"missing"}, "the known-wrong sibling never enters the recorded pool"
+    hits, _, _ = search(FilterClient(), FakeEmbedder(), "mainframe_manuals", query, limit=8)
+    assert {h.chunk_id for h in hits} == recorded

@@ -15,6 +15,7 @@ from typing import Any
 from qdrant_client import models
 
 from mainframe_rag.config import Settings
+from mainframe_rag.ports import AsyncReaderAdapter
 from mainframe_rag.retrieve.query import async_search, search
 from mainframe_rag.retrieve.rewrite import (
     ACRONYM_GLOSSARY_VERSION,
@@ -22,7 +23,7 @@ from mainframe_rag.retrieve.rewrite import (
     expand_query,
     should_rewrite,
 )
-from tests.fakes import iter_golden_queries
+from tests.fakes import batch_via_query_points, iter_golden_queries
 
 
 def _glossary() -> dict[str, str]:
@@ -167,6 +168,8 @@ class _FakePoints:
     def query_points(self, collection_name: str, **kwargs: Any) -> Any:
         return SimpleNamespace(points=self.points[: kwargs.get("limit", 40)])
 
+    query_batch_points = batch_via_query_points
+
 
 def _point(pid: str, score: float, text: str = "Body") -> models.ScoredPoint:
     return models.ScoredPoint(
@@ -211,7 +214,7 @@ def test_twins_agree_with_expansion_on() -> None:
     fake_async = _FakePoints([_point("c1", 0.9), _point("c2", 0.5)])
     query = "Show JCL to assemble with DFHEITAL"
     sync_res = search(fake_sync, sync_emb, "coll", query, limit=5, settings=_flag_settings())
-    async_res = asyncio.run(async_search(fake_async, async_emb, "coll", query, limit=5, settings=_flag_settings()))
+    async_res = asyncio.run(async_search(AsyncReaderAdapter(fake_async), async_emb, "coll", query, limit=5, settings=_flag_settings()))
     assert [h.model_dump() for h in sync_res[0]] == [h.model_dump() for h in async_res[0]]
     assert sync_res[1] == async_res[1] == "nl"
     assert set(sync_res[2]) == set(async_res[2])

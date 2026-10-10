@@ -592,21 +592,21 @@ def test_healthz_representation_drift_degrades(client, monkeypatch):
         completion_collection_name(settings), embed_model_revision="other-rev",
     )
 
-    class SyncDriftQdrant:
-        def get_aliases(self):
+    class DriftQdrant:
+        async def get_aliases(self):
             return SimpleNamespace(aliases=[])
 
-        def collection_exists(self, name):
+        async def collection_exists(self, name):
             return True
 
-        def retrieve(self, *a, **k):
+        async def retrieve(self, *a, **k):
             return [SimpleNamespace(payload=envelope)]
 
-        def scroll(self, *a, **k):
+        async def scroll(self, *a, **k):
             return ([SimpleNamespace(payload={})], None)
 
     monkeypatch.setattr(app_mod, "http", _ready_pool())
-    monkeypatch.setattr(app_mod, "qdrant", SyncDriftQdrant())
+    monkeypatch.setattr(app_mod, "qdrant", DriftQdrant())
     monkeypatch.setattr(app_mod, "serving_gate", ServingGate(0.0))
     resp = client.get("/healthz")
     assert resp.status_code == 503
@@ -3723,11 +3723,12 @@ def test_awaited_retrieval_async_error_maps_to_upstream_error(client, monkeypatc
 
 
 def test_awaited_retrieval_cancellation_propagates():
-    """Issue #370: _await_retrieval re-raises asyncio.CancelledError directly
-    without converting it into AppError or suppressing cancellation."""
+    """Issue #370: the shared sync/async rule (`ports.maybe_await`, which
+    every retrieval leg awaits through) re-raises asyncio.CancelledError
+    directly without converting it into AppError or suppressing cancellation."""
     import asyncio
 
-    from mainframe_rag.agent.app import _await_retrieval
+    from mainframe_rag.ports import maybe_await as _await_retrieval
 
     async def _cancelled():
         raise asyncio.CancelledError()

@@ -8,7 +8,6 @@ settings.llm_model_reasoning; there is deliberately no other model knob.
 from __future__ import annotations
 
 import asyncio
-import inspect
 import json
 import logging
 import re
@@ -34,7 +33,14 @@ from mainframe_rag.ingest.chunk import (
     units_for_text,
 )
 from mainframe_rag.logs import error_type
-from mainframe_rag.ports import ChatMessage, ChatResult, LLMClient, Tokenizer, TokenUsage
+from mainframe_rag.ports import (
+    ChatMessage,
+    ChatResult,
+    LLMClient,
+    Tokenizer,
+    TokenUsage,
+    maybe_await,
+)
 from mainframe_rag.regexes import find_message_ids
 from mainframe_rag.retrieve.filters import parse_query
 from mainframe_rag.retrieve.query import SearchHit
@@ -2005,9 +2011,7 @@ async def condense_query(
     effort = reasoning_effort or (settings.llm_reasoning_effort_simple if settings else "low")
     temp = temperature if temperature is not None else (settings.llm_temperature if settings else 0.0)
     try:
-        res = llm.chat(prompt, reasoning_effort=effort, temperature=temp)
-        if inspect.isawaitable(res):
-            res = await res
+        res = await maybe_await(llm.chat(prompt, reasoning_effort=effort, temperature=temp))
         condensed = as_chat_result(res).content.strip()
         condensed = re.sub(r'^(Standalone (search )?query:|"|\')\s*', "", condensed, flags=re.IGNORECASE)
         condensed = condensed.strip('"\'')

@@ -48,8 +48,8 @@ from mainframe_rag.ingest.build import (
 )
 from mainframe_rag.ingest.classify import ChunkType
 from mainframe_rag.ingest.publish import publication_metadata_point_id
-from mainframe_rag.ingest.representation import _await_client
 from mainframe_rag.logs import error_type
+from mainframe_rag.ports import AsyncQdrantReader
 
 log = logging.getLogger("agent.evidence")
 
@@ -377,7 +377,9 @@ def _control_of(physical: str) -> str:
 class EvidenceService:
     """`client` is the serving (read-only) Qdrant client, sync or async."""
 
-    def __init__(self, client: Any, settings: Settings, access: EvidenceAccess) -> None:
+    def __init__(
+        self, client: AsyncQdrantReader, settings: Settings, access: EvidenceAccess
+    ) -> None:
         self._client = client
         self._settings = settings
         self._access = access
@@ -385,16 +387,16 @@ class EvidenceService:
     # -- storage reads (each is a real await boundary on the async client)
 
     async def _aliases(self) -> dict[str, str]:
-        listing = await _await_client(self._client.get_aliases())
+        listing = await self._client.get_aliases()
         return {a.alias_name: a.collection_name for a in listing.aliases}
 
     async def _binding(self, physical: str) -> BuildBinding | None:
         control = _control_of(physical)
-        if not await _await_client(self._client.collection_exists(control)):
+        if not await self._client.collection_exists(control):
             return None
-        records = await _await_client(self._client.retrieve(
+        records = await self._client.retrieve(
             control, ids=[publication_metadata_point_id(control)], with_payload=True,
-        ))
+        )
         if not records:
             return None
         payload = records[0].payload or {}
@@ -430,7 +432,7 @@ class EvidenceService:
             return {}
         if phase not in ("published", "retained"):
             return {}
-        records = await _await_client(self._client.retrieve(physical, ids, with_payload=True))
+        records = await self._client.retrieve(physical, ids, with_payload=True)
         minted: dict[str, str] = {}
         for record in records:
             chunk_id = str(record.id)
@@ -477,9 +479,9 @@ class EvidenceService:
         cap = self._settings.evidence_max_bytes
         budget = cap if max_bytes is None else min(max_bytes, cap)
         binding, physical = await self._pinned_build(parsed.build_id)
-        records = await _await_client(self._client.retrieve(
+        records = await self._client.retrieve(
             physical, [parsed.chunk_id], with_payload=True,
-        ))
+        )
         if len(records) != 1 or str(records[0].id) != parsed.chunk_id:
             raise EvidenceFailure("corrupt", "chunk_missing")
         payload = records[0].payload or {}
