@@ -12,6 +12,9 @@ presence.
 
 from __future__ import annotations
 
+import json
+
+import httpx2
 import pytest
 
 from mainframe_rag.agent.answer import (
@@ -23,7 +26,7 @@ from mainframe_rag.agent.answer import (
     build_messages,
     parse_answer,
 )
-from mainframe_rag.agent.tokenizer import FallbackTokenizer
+from mainframe_rag.agent.tokenizer import FallbackTokenizer, VllmTokenizer
 from mainframe_rag.ingest.chunk import UnitSpan, units_for_text
 from mainframe_rag.ports import ChatMessage
 from mainframe_rag.retrieve.query import SearchHit
@@ -240,7 +243,7 @@ def test_verify_trim_pops_when_no_unit_fits():
 class _HugeTokenizer:
     remote_confirmed = False
 
-    def count_messages(self, messages) -> int:
+    def count_messages(self, messages, *, reasoning_effort=None) -> int:
         return 10**9
 
 
@@ -253,7 +256,7 @@ class _TwoPhaseTokenizer:
     def __init__(self):
         self.calls = 0
 
-    def count_messages(self, messages) -> int:
+    def count_messages(self, messages, *, reasoning_effort=None) -> int:
         self.calls += 1
         return 10**9 if self.calls == 1 else 5
 
@@ -261,7 +264,7 @@ class _TwoPhaseTokenizer:
 class _RemoteOkTokenizer:
     remote_confirmed = True
 
-    def count_messages(self, messages) -> int:
+    def count_messages(self, messages, *, reasoning_effort=None) -> int:
         return 5
 
 
@@ -269,6 +272,30 @@ def _tokenizer_settings(**overrides):
     from mainframe_rag.config import Settings
 
     return Settings(**settings_kw(**overrides))
+
+
+@pytest.mark.parametrize("chat", [False, True])
+@pytest.mark.parametrize("order", ["retrieval", "stable_cache"])
+def test_final_recount_keeps_the_selected_reasoning_template(chat, order):
+    """Removing the last excerpt still needs a count with this request's effort."""
+    bodies = []
+
+    def count(request):
+        bodies.append(json.loads(request.content))
+        return httpx2.Response(200, json={"count": 10**9 if len(bodies) == 1 else 10})
+
+    with httpx2.Client(transport=httpx2.MockTransport(count)) as client:
+        tokenizer = VllmTokenizer("http://synthetic/v1", "reasoning", client=client)
+        source = [ChatMessage(role="user", content="Original synthetic question")] if chat else "Original synthetic question"
+        build = build_chat_messages if chat else build_messages
+        prepared = build(source, [_hit(JCL_TEXT)], tokenizer=tokenizer,
+                         settings=_tokenizer_settings(), order=order, reasoning_effort="low")
+    assert len(bodies) == 2
+    assert all(body["chat_template_kwargs"] == {"reasoning_effort": "low", "enable_thinking": True}
+               for body in bodies)
+    assert bodies[-1]["messages"] == [message.model_dump() for message in prepared.messages]
+    assert prepared.budget_verified
+    assert all(entry.included_chars == 0 for entry in prepared.evidence.entries)
 
 
 def test_irreducible_fixed_overflow_raises_before_generation():
@@ -389,7 +416,7 @@ class _NeverLLM:
 class _RouteOvershootTokenizer:
     remote_confirmed = False
 
-    def count_messages(self, messages) -> int:
+    def count_messages(self, messages, *, reasoning_effort=None) -> int:
         return 10**9
 
 
@@ -623,7 +650,7 @@ class _DenseTokenizer:
 
     remote_confirmed = True
 
-    def count_messages(self, messages) -> int:
+    def count_messages(self, messages, *, reasoning_effort=None) -> int:
         return sum(len(m.content) for m in messages)
 
 
@@ -796,7 +823,7 @@ class _OvershootTokenizer:
     def __init__(self, over_rounds: int):
         self.left = over_rounds
 
-    def count_messages(self, messages) -> int:
+    def count_messages(self, messages, *, reasoning_effort=None) -> int:
         if self.left > 0 and "[1] " in messages[-1].content:
             self.left -= 1
             return 6528 + 150

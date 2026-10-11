@@ -2259,9 +2259,9 @@ def test_prompt_budget_prices_simple_reasoning_without_changing_complex(chat, or
     from mainframe_rag.ports import ChatMessage
 
     class TemplateTokenizer(FallbackTokenizer):
-        def count_messages(self, messages):
+        def count_messages(self, messages, *, reasoning_effort=None):
             # Whole-message template overhead is absent from the cheap planner.
-            return super().count_messages(messages) + 180
+            return super().count_messages(messages, reasoning_effort=reasoning_effort) + 180
 
     hits = [
         _hit(text="Original synthetic manual guidance. " * 100).model_copy(
@@ -3273,9 +3273,9 @@ class SlowBlockingTokenizer(FallbackTokenizer):
     def __init__(self, delay_s: float = 0.3):
         self.delay_s = delay_s
 
-    def count_messages(self, messages):
+    def count_messages(self, messages, *, reasoning_effort=None):
         time.sleep(self.delay_s)
-        return super().count_messages(messages)
+        return super().count_messages(messages, reasoning_effort=reasoning_effort)
 
 
 def test_slow_tokenizer_verify_keeps_loop_responsive(client, monkeypatch):

@@ -10,6 +10,7 @@ from __future__ import annotations
 import inspect
 import json
 
+import httpx2
 import pytest
 
 from mainframe_rag.agent.answer import (
@@ -30,6 +31,7 @@ from mainframe_rag.agent.answer_core import (
 )
 from mainframe_rag.agent.core_ports import RetrievalResult
 from mainframe_rag.agent.model_adapter import ModelAdapter
+from mainframe_rag.agent.tokenizer import VllmTokenizer
 from mainframe_rag.config import Settings
 from mainframe_rag.ports import ChatMessage, ChatResult, TokenUsage
 from mainframe_rag.retrieve.query import SearchHit
@@ -553,15 +555,16 @@ async def test_core_reasoning_effort_explicit_override_stream():
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("effort", ["high", "xhigh"])
+@pytest.mark.parametrize("effort", ["low", "medium", "high", "xhigh"])
 @pytest.mark.parametrize("source", ["setting", "override"])
 @pytest.mark.parametrize("mode", ["post", "buffered_sse", "stream"])
+@pytest.mark.parametrize("is_chat", [False, True])
 @pytest.mark.parametrize("query,field", [
     ("IEA500I", "llm_reasoning_effort_simple"),
     ("diagnose abend S0C4 with registers and spool dump", "llm_reasoning_effort_complex"),
 ])
-async def test_core_selected_reasoning_effort_reaches_http_request(effort, source, mode, query, field):
-    """Settings and explicit overrides survive the public core and real client."""
+async def test_core_selected_reasoning_effort_reaches_http_request(effort, source, mode, is_chat, query, field):
+    """Counting and completion must render the same request-local template."""
     values = {
         "llm_stream": mode == "buffered_sse",
         "llm_reasoning_effort_simple": "low",
@@ -584,13 +587,24 @@ async def test_core_selected_reasoning_effort_reaches_http_request(effort, sourc
     def retrieve(*_a, **_k):
         return [_hit()], "nl", {}
 
-    input_data = AnswerCoreInput(query=query, reasoning_effort=effort if source == "override" else None)
+    input_data = AnswerCoreInput(
+        query=query, reasoning_effort=effort if source == "override" else None,
+        is_chat=is_chat, messages=[ChatMessage(role="user", content=query)] if is_chat else None,
+    )
     deps = _deps(settings, llm, retrieve)
-    if mode == "stream":
-        events = [event async for event in execute_answer_core_stream(input_data, deps)]
-        output = events[-1]["output"]
-    else:
-        output = await execute_answer_core(input_data, deps)
+    tokenized = []
+
+    def count(request):
+        tokenized.append(json.loads(request.content))
+        return httpx2.Response(200, json={"count": 10})
+
+    with httpx2.Client(transport=httpx2.MockTransport(count)) as client:
+        deps.tokenizer = VllmTokenizer(settings.llm_base_url, settings.llm_model_reasoning, client=client)
+        if mode == "stream":
+            events = [event async for event in execute_answer_core_stream(input_data, deps)]
+            output = events[-1]["output"]
+        else:
+            output = await execute_answer_core(input_data, deps)
 
     assert output.finish_reason == "stop"
     assert output.answer == "Reissue the command."
@@ -598,6 +612,11 @@ async def test_core_selected_reasoning_effort_reaches_http_request(effort, sourc
     bodies = transport.post_bodies if mode == "post" else transport.stream_bodies
     assert len(bodies) == 1
     assert bodies[0]["reasoning_effort"] == effort
+    assert output.budget_verified
+    assert tokenized
+    assert all(body["chat_template_kwargs"] == {"reasoning_effort": effort, "enable_thinking": True}
+               for body in tokenized)
+    assert tokenized[-1]["messages"] == bodies[0]["messages"]
 
 
 @pytest.mark.anyio
@@ -1202,7 +1221,7 @@ class _ExcerptOvershootTokenizer:
     def count_tokens(self, text: str) -> int:
         return len(text) // 4
 
-    def count_messages(self, messages) -> int:
+    def count_messages(self, messages, *, reasoning_effort=None) -> int:
         return 10**9 if any(self.marker in m.content for m in messages) else 10
 
 
@@ -1286,7 +1305,7 @@ async def test_core_fixed_content_overflow_stays_plain_budget_error():
     from mainframe_rag.agent.answer_core import EvidenceBudgetExceeded
 
     class _AlwaysOver(_ExcerptOvershootTokenizer):
-        def count_messages(self, messages) -> int:
+        def count_messages(self, messages, *, reasoning_effort=None) -> int:
             return 10**9
 
     llm = _RecordingLLM()
