@@ -23,7 +23,13 @@ from scripts.acceptance_evidence import (
 )
 from scripts.unit_evidence import INPUTS as UNIT_INPUTS
 from scripts.unit_evidence import validate_union
-from scripts.verifier_approval import VerifierApprovalRequired, approved_inputs, validated_decision
+from scripts.verifier_approval import (
+    CATALOGUE,
+    VerifierApprovalRequired,
+    approved_catalogue,
+    approved_inputs,
+    validated_decision,
+)
 
 VERIFICATION_INPUTS = (
     *UNIT_INPUTS,
@@ -163,14 +169,21 @@ def collect_native(api: GitHub, pr: dict[str, Any], approved_root: Path) -> dict
     require(not subprocess.check_output(['git', 'status', '--porcelain', '--untracked-files=no'],
                                         cwd=approved_root, text=True).strip())
     policy_digest = hashlib.sha256((approved_root / 'scripts/review_tooling.py').read_bytes()).hexdigest()
+    # A distinct decision can change anchors, never the approved obligations.
+    # Only after that proof may the ordinary implementation comparison treat
+    # these catalogue bytes as approved. Mixed changes require both decisions.
+    approved_catalogue_bytes = (approved_root / CATALOGUE).read_bytes()
+    catalogue_bytes, catalogue_approval = approved_catalogue(api, candidate, approved_catalogue_bytes)
+    expected_inputs = verification_inputs(approved_root)
+    expected_inputs[CATALOGUE] = hashlib.sha256(catalogue_bytes).hexdigest()
     # Receipt hashes are claims, not proof of the actual executed source.
-    policy_inputs, verifier_approval = approved_inputs(api, candidate, verification_inputs(approved_root))
+    policy_inputs, verifier_approval = approved_inputs(api, candidate, expected_inputs)
     # The receipt describes the selector that ran in the candidate job. Its
     # approved bytes may differ from main, but cannot select acceptance lanes:
     # collect_acceptance continues to use this approved-base process's policy.
     execution_policy_digest = policy_inputs['scripts/review_tooling.py']
     producer_digest = policy_inputs['scripts/ci_evidence.py']
-    hazard_policy = {'catalogue': (approved_root / 'tests/hazards/critical.json').read_bytes(),
+    hazard_policy = {'catalogue': catalogue_bytes, 'approved_catalogue': approved_catalogue_bytes,
                      'runner_sha256': policy_inputs['scripts/check_hazard_sensitivity.py']}
     runs = paginate(api.get, api.prefix + f"actions/runs?event=pull_request&head_sha={candidate['head_sha']}", 'workflow_runs')
     workflows = {p.workflow for p in PRODUCERS}
@@ -250,7 +263,7 @@ def collect_native(api: GitHub, pr: dict[str, Any], approved_root: Path) -> dict
         # taxonomy: do not turn it into a reported execution failure.
     return {'candidate': candidate, 'native': native, 'lane_statuses': statuses, 'runs': snapshots,
             'policy_sha256': policy_digest, 'producer_sha256': producer_digest, 'policy_inputs': policy_inputs,
-            'verifier_approval': verifier_approval}
+            'verifier_approval': verifier_approval, 'catalogue_approval': catalogue_approval}
 
 
 def changed_pr_paths(api: GitHub, pr: dict[str, Any]) -> list[str]:
@@ -291,6 +304,7 @@ def collect_acceptance(api: GitHub, number: int, approved_root: Path) -> dict[st
     result['policy_sha256'] = native['policy_sha256']
     result['policy_inputs'] = native['policy_inputs']
     result['verifier_approval'] = native.get('verifier_approval')
+    result['catalogue_approval'] = native.get('catalogue_approval')
     result['markdown_report'] = summary.markdown_report
     tested_shas = sorted({record['execution_sha'] for record in native['native']
                           if record.get('status') == 'success' and record.get('execution_sha')})
@@ -305,6 +319,12 @@ def collect_acceptance(api: GitHub, number: int, approved_root: Path) -> dict[st
                                       f'https://github.com/{api.repository}/actions/runs/{run_id}). '
                                       'This binds the exact candidate bytes; it does not waive technical checks '
                                       'or authorize merging.')
+    if result['catalogue_approval'] is not None:
+        run_id = result['catalogue_approval']['run_id']
+        result['markdown_report'] += ('\n\nCatalogue anchor trust: [maintainer decision]('
+                                      f'https://github.com/{api.repository}/actions/runs/{run_id}). '
+                                      'Only the exact before/after strings are adopted; all approved-main '
+                                      'challenge obligations and technical checks still apply.')
     result['candidate'] = candidate
     result['draft'] = pr['draft']
     return result
@@ -331,6 +351,9 @@ def recheck_current(api: GitHub, result: dict[str, Any]) -> None:
     if result.get('verifier_approval') is not None:
         require(validated_decision(api, candidate, result['verifier_approval']['inputs'])
                 == result['verifier_approval'])
+    if result.get('catalogue_approval') is not None:
+        _, current = approved_catalogue(api, candidate, api.blob(candidate['base_sha'], CATALOGUE))
+        require(current == result['catalogue_approval'])
     require_current_base(api, pr, candidate)
 
 
@@ -385,11 +408,18 @@ def publish_acceptance(api: GitHub, number: int, approved_root: Path, *,
                     '[Verifier update decision](https://github.com/' + api.repository
                     + '/actions/workflows/verifier-update.yml) workflow on main with this PR number. '
                     'Ready-for-review is not a verifier trust decision. All selected technical checks still apply.')
-        if not exc.approval_allowed:
+        if exc.kind == 'catalogue-anchors':
+            guidance = ('The maintainer must review the exact before/after anchor changes, then run the '
+                        '[Verifier update decision](https://github.com/' + api.repository
+                        + '/actions/workflows/verifier-update.yml) workflow on main with this PR number '
+                        'and kind catalogue-anchors. An implementation decision cannot approve anchors; '
+                        'all approved-main challenge obligations and technical checks still apply.')
+        elif not exc.approval_allowed:
             guidance = ('Hazard-catalogue changes cannot use a verifier implementation '
                         'decision. They require a separately reviewed catalogue change; no obligations are waived.')
         result = {'all_prerequisites_met': False, 'verification_status': 'incomplete',
-                  'error': ('verifier_update_requires_maintainer_decision' if exc.approval_allowed
+                  'error': ('hazard_catalogue_requires_maintainer_decision' if exc.kind == 'catalogue-anchors'
+                            else 'verifier_update_requires_maintainer_decision' if exc.approval_allowed
                             else 'verifier_policy_change_not_supported'),
                   'markdown_report': ('Verifier files differ from approved main: ' + ', '.join(exc.paths)
                                       + '.\n\n' + guidance)}

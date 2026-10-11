@@ -1,5 +1,5 @@
 name: Verifier update decision
-run-name: 'Verifier PR ${{ inputs.pr }}: ${{ inputs.decision }}'
+run-name: "${{ inputs.kind == 'catalogue-anchors' && 'Catalogue anchors' || 'Verifier' }} PR ${{ inputs.pr }}: ${{ inputs.decision }}"
 on:
   workflow_dispatch:
     inputs:
@@ -12,6 +12,12 @@ on:
         required: true
         type: choice
         options: [approve, revoke]
+      kind:
+        description: 'Implementation bytes, or only catalogue before/after anchors with every obligation retained'
+        required: true
+        default: implementation
+        type: choice
+        options: [implementation, catalogue-anchors]
 permissions:
   contents: read
   pull-requests: read
@@ -33,12 +39,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERIFIER_PR: ${{ inputs.pr }}
           VERIFIER_DECISION: ${{ inputs.decision }}
+          VERIFIER_KIND: ${{ inputs.kind || 'implementation' }}
         run: >-
           python -m scripts.verifier_approval --pr "$VERIFIER_PR" --decision "$VERIFIER_DECISION"
+          --kind "$VERIFIER_KIND"
           --output "$RUNNER_TEMP/evidence.json"
       - name: Retain maintainer decision
         uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
         with:
-          name: verifier-decision-${{ github.run_attempt }}
+          name: ${{ inputs.kind == 'catalogue-anchors' && 'catalogue-anchor-decision' || 'verifier-decision' }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/evidence.json
           if-no-files-found: error
