@@ -30,6 +30,13 @@ for arg in "$@"; do
     esac
 done
 
+GATEWAY_PROBE_MAX_TOKENS=${GATEWAY_PROBE_MAX_TOKENS:-16}
+case "$GATEWAY_PROBE_MAX_TOKENS" in
+    *[!0-9]*|?????*) die "GATEWAY_PROBE_MAX_TOKENS must be an integer from 1 to 4096" ;;
+esac
+[ "$GATEWAY_PROBE_MAX_TOKENS" -ge 1 ] && [ "$GATEWAY_PROBE_MAX_TOKENS" -le 4096 ] || \
+    die "GATEWAY_PROBE_MAX_TOKENS must be an integer from 1 to 4096"
+
 echo "================================================================================"
 echo "          MAINFRAME RAG — AIR-GAP PROMOTION PIPELINE ORCHESTRATOR"
 echo "================================================================================"
@@ -56,7 +63,8 @@ sh scripts/airgap/deploy.sh
 echo "==> Gateway readiness from the agent pod"
 KC=${KC:-$(kc)}
 resolve_aliases
-run "$KC" -n "$NAMESPACE" exec deploy/rag-agent -- python3 /app/scripts/probe_gateway.py
+run "$KC" -n "$NAMESPACE" exec deploy/rag-agent -- python3 /app/scripts/probe_gateway.py \
+    --max-tokens "$GATEWAY_PROBE_MAX_TOKENS"
 
 INGEST_PERFORMED=0
 if [ "$SKIP_INGEST" -eq 1 ]; then

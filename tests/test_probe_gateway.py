@@ -97,6 +97,7 @@ def _env(monkeypatch, **overrides):
         "RERANK_BASE_URL": "http://gw:8002/v1",
         "RERANK_MODEL": "gw-rerank",
         "RERANK_API_KEY": "sk-rerank",
+        "GATEWAY_PROBE_MAX_TOKENS": "16",
     }
     base.update(overrides)
     for k, v in base.items():
@@ -352,3 +353,50 @@ def test_required_tokenizer_counts_chat_generation_template(monkeypatch):
     assert body['messages'] == [{'role': 'user', 'content': probe_mod.PROBE_TEXT}]
     assert body['add_generation_prompt'] is True
     assert body['add_special_tokens'] is False
+
+
+def test_explicit_completion_budget_reaches_json_and_stream(monkeypatch):
+    routes = [("STREAM", "/chat/completions", 200, [
+        'data: {"choices": [{"delta": {"content": "ok"}}]}',
+        'data: {"choices": [{"delta": {}, "finish_reason": "stop"}]}',
+        "data: [DONE]",
+    ]), *_healthy_routes()]
+    fake, rc = _run(monkeypatch, routes, argv=["--stream", "--max-tokens", "512"])
+    assert rc == 0
+    assert [body["max_tokens"] for url, body in fake.bodies
+            if url.endswith("/chat/completions")] == [512, 512]
+
+
+@pytest.mark.parametrize("argv,env,want", [
+    ([], "16", 16),
+    ([], "512", 512),
+    (["--max-tokens", "4096"], "512", 4096),
+    (["--max-tokens", "1"], "512", 1),
+])
+def test_completion_budget_default_environment_and_cli_precedence(monkeypatch, argv, env, want):
+    fake, rc = _run(monkeypatch, _healthy_routes(), argv=argv, GATEWAY_PROBE_MAX_TOKENS=env)
+    assert rc == 0
+    assert next(body["max_tokens"] for url, body in fake.bodies
+                if url.endswith("/chat/completions")) == want
+
+
+@pytest.mark.parametrize("bad", ["0", "-1", "4097", "999999999999999999999", "1.5", "true"])
+@pytest.mark.parametrize("via_env", [False, True])
+def test_invalid_completion_budget_fails_before_any_model_request(monkeypatch, bad, via_env):
+    _env(monkeypatch, GATEWAY_PROBE_MAX_TOKENS=bad if via_env else "16")
+    fake = FakeGateway(_healthy_routes())
+    monkeypatch.setattr(probe_mod, "httpx2", fake)
+    with pytest.raises(SystemExit) as exc:
+        main([] if via_env else ["--max-tokens", bad])
+    assert exc.value.code == 2
+    assert fake.calls == []
+
+
+@pytest.mark.parametrize("content,finish", [("ok", "length"), ("", "stop"), ("   ", "stop")])
+def test_larger_budget_retains_strict_final_answer_gate(monkeypatch, content, finish):
+    routes = [("POST", "/chat/completions", 200, {"choices": [{
+        "message": {"content": content, "reasoning_content": "private reasoning"},
+        "finish_reason": finish,
+    }]}), *_healthy_routes()]
+    _, rc = _run(monkeypatch, routes, argv=["--max-tokens", "512"])
+    assert rc == 1

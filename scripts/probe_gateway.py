@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -38,6 +39,21 @@ from mainframe_rag.config import Settings, bearer_auth_headers, load_settings
 
 PROBE_TEXT = "gateway readiness probe"
 PROBE_TIMEOUT_S = 30.0
+PROBE_MAX_TOKENS = 16
+PROBE_MAX_TOKENS_CAP = 4096
+
+
+def completion_budget(value: str) -> int:
+    """Diagnostic completion limit; never changes application answer budgets."""
+    if not value.isascii() or not value.isdecimal() or len(value) > 4:
+        raise argparse.ArgumentTypeError("max tokens must be an integer from 1 to 4096")
+    try:
+        budget = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("max tokens must be an integer from 1 to 4096") from None
+    if not 1 <= budget <= PROBE_MAX_TOKENS_CAP:
+        raise argparse.ArgumentTypeError("max tokens must be an integer from 1 to 4096")
+    return budget
 
 
 def _auth_hint(status: int, knob: str) -> str:
@@ -98,7 +114,9 @@ def check_embeddings(settings: Settings, timeout: float) -> tuple[str, str]:
     return "ok", f"embed /embeddings: model={model} dim={len(vec)}"
 
 
-def check_chat(settings: Settings, timeout: float, stream: bool) -> tuple[str, str]:
+def check_chat(
+    settings: Settings, timeout: float, stream: bool, max_tokens: int = PROBE_MAX_TOKENS
+) -> tuple[str, str]:
     """POST /chat/completions (+ optional SSE [DONE] check). Skipped when no
     reasoning model is configured — answers stay disabled by design then."""
     if not settings.llm_base_url or not settings.llm_model_reasoning:
@@ -109,7 +127,7 @@ def check_chat(settings: Settings, timeout: float, stream: bool) -> tuple[str, s
         "model": model,
         "messages": [{"role": "user", "content": "Reply with the single word: ok"}],
         "temperature": 0,
-        "max_tokens": 16,
+        "max_tokens": max_tokens,
         # Match the application's simple-query reasoning contract.
         "reasoning_effort": settings.llm_reasoning_effort_simple,
     }
@@ -302,6 +320,11 @@ def check_tokenize(settings: Settings, timeout: float, required: bool = False) -
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Probe gateway model legs before cutover.")
     parser.add_argument("--timeout", type=float, default=PROBE_TIMEOUT_S)
+    parser.add_argument(
+        "--max-tokens", type=completion_budget,
+        default=os.environ.get("GATEWAY_PROBE_MAX_TOKENS") or str(PROBE_MAX_TOKENS),
+        help="completion budget 1–4096 (GATEWAY_PROBE_MAX_TOKENS; default 16)",
+    )
     parser.add_argument("--stream", action="store_true", help="require a successful chat stream ending in [DONE]")
     parser.add_argument("--require-reasoning", action="store_true", help="fail when reasoning is not configured")
     parser.add_argument("--require-tokenizer", action="store_true", help="require chat-template-aware model token counts")
@@ -340,7 +363,7 @@ def main(argv: list[str] | None = None) -> int:
         status, detail = check_models("reasoning", settings.llm_base_url, settings.llm_api_key, args.timeout)
         print(f"[{status.upper()}] {detail}")
         failures += status == "fail"
-    status, detail = check_chat(settings, args.timeout, args.stream)
+    status, detail = check_chat(settings, args.timeout, args.stream, args.max_tokens)
     if status == "skip" and (args.require_reasoning or args.stream):
         status, detail = "fail", "reasoning required but LLM_BASE_URL / LLM_MODEL_REASONING not configured"
     print(f"[{status.upper()}] {detail}")

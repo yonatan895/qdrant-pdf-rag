@@ -99,7 +99,8 @@ def test_pipeline_dryrun_full(pipe_tree):
 
 @pytest.mark.parametrize("probe_exit", [0, 1])
 @pytest.mark.parametrize("skip_ingest", [False, True])
-def test_pipeline_live_gateway_probe_gates_ingest(pipe_tree, probe_exit, skip_ingest):
+@pytest.mark.parametrize("budget", ["16", "512"])
+def test_pipeline_live_gateway_probe_gates_ingest(pipe_tree, probe_exit, skip_ingest, budget):
     # Run the real orchestrator with stage recorders. The gateway command
     # must run between deploy and ingest and use the selected cluster client.
     log = pipe_tree / "stages.log"
@@ -115,12 +116,12 @@ def test_pipeline_live_gateway_probe_gates_ingest(pipe_tree, probe_exit, skip_in
     )
     r = _run_pipeline(pipe_tree, *(["--skip-ingest"] if skip_ingest else []), extra_env={
         "AIRGAP_DRYRUN": "0", "CORPUS_PVC": "test-corpus",
-        "KC": "custom-kc", "STAGE_LOG": str(log),
+        "KC": "custom-kc", "STAGE_LOG": str(log), "GATEWAY_PROBE_MAX_TOKENS": budget,
     })
     stages = log.read_text().splitlines()
     assert stages[:4] == [
         "validate", "load", "deploy",
-        "probe -n mainframe-rag exec deploy/rag-agent -- python3 /app/scripts/probe_gateway.py",
+        f"probe -n mainframe-rag exec deploy/rag-agent -- python3 /app/scripts/probe_gateway.py --max-tokens {budget}",
     ]
     if probe_exit:
         assert r.returncode != 0
@@ -133,6 +134,14 @@ def test_pipeline_live_gateway_probe_gates_ingest(pipe_tree, probe_exit, skip_in
         assert ("ingest NOT RUN" in r.stdout) is skip_ingest
         assert "Full application/release acceptance remains separate" in r.stdout
     assert "OPERATIONAL & ACCEPTED" not in r.stdout
+
+
+@pytest.mark.parametrize("bad", ["0", "4097", "99999999999999999999", "1.5", "bad"])
+def test_pipeline_bad_probe_budget_fails_before_stages(pipe_tree, bad):
+    r = _run_pipeline(pipe_tree, extra_env={"GATEWAY_PROBE_MAX_TOKENS": bad})
+    assert r.returncode != 0
+    assert "GATEWAY_PROBE_MAX_TOKENS must be" in r.stderr
+    assert "STAGE" not in r.stdout
 
 
 def test_pipeline_dryrun_including_load(pipe_tree):

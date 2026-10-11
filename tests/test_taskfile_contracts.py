@@ -46,7 +46,7 @@ REQUIRE_RUNNER = os.environ.get("TASK_CONTRACTS_REQUIRE_RUNNER") == "1"
 # tuple, so the logged set cannot drift between copies.
 LOGGED_ENV_KEYS = ("EMBED_MODE", "VENUE", "PYTHONPATH", "LLM_STREAM", "UI_ENABLED",
                    "ROLE", "MODEL", "SERVED_NAME", "CONTAINER_NAME", "PORT", "BUDGET_PROFILE", "BUDGET_PYTHON",
-                   "GATEWAY_PORT", "CORPUS_DIR", "LOCAL_AGENT_PORT", "JAEGER_PORT",
+                   "GATEWAY_PORT", "GATEWAY_PROBE_MAX_TOKENS", "CORPUS_DIR", "LOCAL_AGENT_PORT", "JAEGER_PORT",
                    "SIM_CONTAINER", "SIM_PORT",
                    "GPU_MEM", "MAX_LEN", "SEQS", "LOCAL_STACK_DRYRUN")
 
@@ -1128,11 +1128,13 @@ class TaskContractsTests(unittest.TestCase):
         self.make_venv_fake()
         self.make_script_recorder("run_local_stack.sh")
         env = self.tool_env()
-        proc = self.run_task("local:stack", "CORPUS_DIR=/data", "GATEWAY_PORT=4001", extra_env=env)
+        proc = self.run_task("local:stack", "CORPUS_DIR=/data", "GATEWAY_PORT=4001",
+                             "GATEWAY_PROBE_MAX_TOKENS=512", extra_env=dict(env, GATEWAY_PROBE_MAX_TOKENS="16"))
         self.assertEqual(proc.returncode, 0, proc.stdout)
         calls = self.script_calls("run_local_stack.sh")
         self.assertEqual(len(calls), 1)
         self.assertEnvSubset(calls[0], {"CORPUS_DIR": "/data", "GATEWAY_PORT": "4001",
+                                        "GATEWAY_PROBE_MAX_TOKENS": "512",
                                         "LOCAL_AGENT_PORT": None, "JAEGER_PORT": None,
                                         "LOCAL_STACK_DRYRUN": None})
         if (self.log).exists():

@@ -140,6 +140,13 @@ GPU pack before starting component servers; the default pair uses
 A third backend requires the matching pack. Backend curls above are component
 probes, not application consumer configuration.
 
+`GATEWAY_PROBE_MAX_TOKENS` selects the diagnostic completion budget (decimal
+1–4096, default 16). `local:stack GATEWAY_PROBE_MAX_TOKENS=512` forwards the
+explicit lab budget to both buffered and SSE readiness requests. This changes
+no application output reserve and preserves all completed-answer checks. For
+manual/in-pod probes use `--max-tokens 512`; the air-gap pipeline carries the
+same operator input into its pod command.
+
 With `CORPUS_DIR` set, the supervisor's ingest is sized to the host's RAM
 (issue #580; the 2026-10-01 incident was a 3-worker ingest started beside
 loaded model servers on the 16 GB reference host). It passes

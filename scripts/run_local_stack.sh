@@ -55,6 +55,7 @@ case "${METRICS_ENABLED:-false}" in
     *) echo "ERROR: METRICS_ENABLED must be true or false" >&2; exit 1 ;;
 esac
 GATEWAY_PORT="${GATEWAY_PORT:-4000}"
+GATEWAY_PROBE_MAX_TOKENS="${GATEWAY_PROBE_MAX_TOKENS:-16}"
 GATEWAY_ENV_FILE="${GATEWAY_ENV_FILE:-${TMPDIR:-/tmp}/local-stack-gateway-${GATEWAY_PORT}.env}"
 JAEGER_PORT="${JAEGER_PORT:-16686}"
 JAEGER_OTLP_PORT="${JAEGER_OTLP_PORT:-4318}"
@@ -96,6 +97,11 @@ die() { echo "ERROR: $1" >&2; exit 1; }
 step() { echo "==> $1"; }
 
 # Input validation first: a bad value must die before any docker call.
+case "$GATEWAY_PROBE_MAX_TOKENS" in
+    *[!0-9]*|?????*) die "GATEWAY_PROBE_MAX_TOKENS must be an integer from 1 to 4096" ;;
+esac
+[ "$GATEWAY_PROBE_MAX_TOKENS" -ge 1 ] && [ "$GATEWAY_PROBE_MAX_TOKENS" -le 4096 ] || \
+    die "GATEWAY_PROBE_MAX_TOKENS must be an integer from 1 to 4096"
 for _pair in "GATEWAY_PORT:$GATEWAY_PORT" "LOCAL_AGENT_PORT:$LOCAL_AGENT_PORT" "DENSE_DIM:$DENSE_DIM" \
     "JAEGER_PORT:$JAEGER_PORT" "JAEGER_OTLP_PORT:$JAEGER_OTLP_PORT" "OTEL_TRACE_TIMEOUT:$OTEL_TRACE_TIMEOUT" \
     "LOCAL_INGEST_WORKER_MB:$LOCAL_INGEST_WORKER_MB" "HOST_CPUS:$HOST_CPUS"; do
@@ -181,7 +187,7 @@ if [ "$DRYRUN" = "1" ]; then
     echo "[plan] 2. qdrant:  reuse $QDRANT_URL (start with 'sh scripts/tools/run-task.sh local:qdrant:up' if unreachable)"
     echo "[plan] 3. jaeger:  reuse $JAEGER_UI_URL or start scripts/run_local_jaeger.sh (OTLP $OTEL_ENDPOINT)"
     echo "[plan] 4. gateway: GATEWAY_ENV_FILE=$GATEWAY_ENV_FILE sh scripts/run_local_gateway.sh"
-    echo "[plan] 5. probe:   $PY scripts/probe_gateway.py --stream"
+    echo "[plan] 5. probe:   $PY scripts/probe_gateway.py --stream --max-tokens $GATEWAY_PROBE_MAX_TOKENS"
     if [ -n "$CORPUS_DIR" ]; then
         echo "[plan] 6. ingest:  OTEL_SERVICE_NAME=$INGEST_SERVICE_NAME $PY -m mainframe_rag.ingest.run_ingest --src $CORPUS_DIR --workers $INGEST_WORKERS_CHOSEN (collection $QDRANT_COLLECTION)$INGEST_PLAN_NOTE"
     else
@@ -316,7 +322,7 @@ export OTEL_EXPORTER_OTLP_ENDPOINT="$OTEL_ENDPOINT"
 export OTEL_DEPLOYMENT_ENVIRONMENT="${OTEL_DEPLOYMENT_ENVIRONMENT:-local}"
 
 step "Probing every model leg through the gateway"
-"$PY" "$REPO_ROOT/scripts/probe_gateway.py" --stream
+"$PY" "$REPO_ROOT/scripts/probe_gateway.py" --stream --max-tokens "$GATEWAY_PROBE_MAX_TOKENS"
 
 if [ -n "$CORPUS_DIR" ]; then
     step "Ingesting $CORPUS_DIR through the gateway (collection $QDRANT_COLLECTION)"

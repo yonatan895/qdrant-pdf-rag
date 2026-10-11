@@ -21,6 +21,13 @@ no rollback:
   agent pod before ingestion. Embeddings are required; reasoning and rerank
   are checked when configured. A failed leg stops the pipeline. This uses
   the pod's actual endpoints and Secret-backed keys, not bastion connectivity.
+- `GATEWAY_PROBE_MAX_TOKENS` sets only the readiness completion budget:
+  decimal 1–4096, default 16; the Colab lab selects 512 explicitly. The pipeline
+  passes it as `--max-tokens` into the pod and rejects invalid values before
+  any stage. Task CLI values override ambient/file values as usual. A larger
+  budget still requires non-empty final content, `finish_reason=stop`, and
+  (with `--stream`) a successful terminal SSE event; reasoning-only and
+  length-finished output fail.
 - The final banner differs: `PIPELINE STAGES COMPLETE: deployment, ingest and smoke passed`
   when ingestion ran, `PIPELINE STAGES COMPLETE: deployment and smoke passed; ingest NOT RUN`
   when it did not.
