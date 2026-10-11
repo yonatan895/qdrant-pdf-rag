@@ -61,6 +61,7 @@ SOURCE_REQUIRED = ("scripts/colab.py", "scripts/colab_preflight.py", "scripts/co
                    "taskfiles/local.yml", "Taskfile.yml", "pyproject.toml", "requirements.lock.txt")
 TRANSPORT_TOOLS = ("colab", "ssh", "ssh_keygen", "docker")
 NETWORK_RELEASE_SECONDS = 5
+FINAL_USAGE_SECONDS = 5
 EVENT_HISTORY_LIMIT = 64
 CU_HISTORY_LIMIT = 32
 METADATA_PERSIST_SECONDS = 5
@@ -934,9 +935,9 @@ class Run:
             raise LabError("owned session endpoint changed; automatic stop is refused")
         return True
 
-    def budget(self, *, initial: bool = False) -> None:
-        self.check_qdrant()
-        output = self.colab("usage").stdout
+    def observe_usage(self, *, cleanup: bool = False, seconds: float = 30) -> dict:
+        """Read actual pinned CLI usage without making it a release prerequisite."""
+        output = self.colab("usage", cleanup=cleanup, seconds=seconds).stdout
         balance_match = re.search(r"Current balance: ([0-9.]+) compute units", output)
         rate_match = re.search(r"Usage rate: ([0-9.]+)/hr", output)
         assignments_match = re.search(r"Active assignments: ([0-9]+)", output)
@@ -962,6 +963,34 @@ class Run:
         summary.setdefault("first", observation)
         summary.update(last=observation, min_balance=min(summary.get("min_balance", balance), balance),
                        max_rate_per_hour=max(summary.get("max_rate_per_hour", rate), rate))
+        return observation
+
+    def final_usage(self) -> bool:
+        """Retain final best-effort account evidence without spending stop's reserve."""
+        previous_expiry = self.cleanup_phase_expiry
+        now = time.time()
+        self.cleanup_phase_expiry = now + min(FINAL_USAGE_SECONDS, max(0.0, self.expiry - now) / 4)
+        try:
+            observation = self.observe_usage(cleanup=True, seconds=FINAL_USAGE_SECONDS)
+            starting = self.manifest.get("starting_balance")
+            spent = (max(0.0, starting - observation["balance"])
+                     if type(starting) in (int, float) and math.isfinite(starting) else None)
+            self.manifest["final_cu_observation"] = {"status": "available", **observation,
+                                                      "spent_since_start": spent}
+            self.save("final_cu_usage_available")
+            return True
+        except (LabError, OSError, ValueError, KeyError, subprocess.SubprocessError, KeyboardInterrupt):
+            self.manifest["final_cu_observation"] = {"status": "unavailable", "time": time.time(),
+                                                      "reason": "usage_unavailable"}
+            self.save("final_cu_usage_unavailable")
+            return False
+        finally:
+            self.cleanup_phase_expiry = previous_expiry
+
+    def budget(self, *, initial: bool = False) -> None:
+        self.check_qdrant()
+        observation = self.observe_usage()
+        balance, rate, assignments = (observation[key] for key in ("balance", "rate_per_hour", "assignments"))
         if initial:
             if assignments:
                 raise LabError("another Colab assignment is active; this controller never stops it")
@@ -1186,6 +1215,7 @@ class Run:
         env.update(PG_NET=self.config["gateway_network"], GATEWAY_NAME=self.config["gateway_name"],
                    LITELLM_IMAGE=identity["gateway_image"], GATEWAY_DOCKER_BIN=self.tools["docker"],
                    GATEWAY_DEBUG=self.config["gateway_debug"],
+                   GATEWAY_RUN_OWNER=self.manifest["session"],
                    GATEWAY_REASONING_URL=identity["reasoning_url"], GATEWAY_EMBED_URL=identity["embedding_url"],
                    GATEWAY_TRANSPORT_NETWORK_ID=ownership.get("network_id", ""),
                    GATEWAY_TRANSPORT_NETWORK_CREATED="1" if ownership.get("created") is True else "0")
@@ -1225,22 +1255,34 @@ class Run:
                               stdout_observer=observe)
         if result.returncode or not accepted:
             raise LabError("gateway owner could not prove the exact network and backend addresses")
+        # Only a successful native fresh-owner check admits later daemon
+        # discovery. A pre-existing matching label cannot be adopted on failure.
+        self.manifest["gateway_container_owner"] = self.manifest["session"]
+        self.save("gateway_container_owner_admitted")
 
     def release_gateway_network(self) -> None:
         ownership = self.manifest.get("gateway_network")
         if ownership is None:
             return
+        owner = self.manifest.get("gateway_container_owner")
+        if owner is not None and owner != self.manifest["session"]:
+            raise LabError("gateway container ownership changed; automatic release is refused")
+        env = self.gateway_environment(self.manifest["gateway_network_bridge"])
+        env["GATEWAY_RUN_OWNER"] = owner or ""
         # Mandatory VM stop/absence runs first. This separate bounded control
         # window may finish after that absolute deadline and cannot spend the
         # Colab release capture pool or postpone its mandatory operations.
         self.command(["sh", str(self.execution_root / "scripts/run_local_gateway.sh"), "transport-release"],
-                     env=self.gateway_environment(self.manifest["gateway_network_bridge"]),
+                     env=env,
                      seconds=NETWORK_RELEASE_SECONDS, cleanup=True,
                      cleanup_deadline=time.time() + NETWORK_RELEASE_SECONDS,
                      require_complete_stdout=False)
         self.manifest["gateway_network_cleanup"] = {"completed": True,
                                                      "owned_removed_or_absent": ownership["created"],
                                                      "preexisting_preserved": not ownership["created"]}
+        if owner is not None:
+            self.manifest["gateway_container_cleanup"] = {"completed": True, "owner": owner,
+                                                          "owned_removed_or_absent": True}
         self.save("gateway_network_cleanup_complete")
 
     def environment(self, bridge: str) -> dict[str, str]:
@@ -1365,6 +1407,10 @@ class Run:
                 self.save("artifact_export_unavailable")
             finally:
                 self.cleanup_phase_expiry = None
+            # Account failures are explicit, but cannot skip or consume the
+            # independent VM stop/absence operations below.
+            if not self.final_usage():
+                ok = False
             # Export failure is isolated from the mandatory VM release attempt.
             try:
                 if self.owned(cleanup=True):
@@ -1389,6 +1435,8 @@ class Run:
         except (LabError, OSError, ValueError, KeyError, subprocess.SubprocessError):
             ok = False
             self.manifest["gateway_network_cleanup"] = {"completed": False}
+            if self.manifest.get("gateway_container_owner") is not None:
+                self.manifest["gateway_container_cleanup"] = {"completed": False}
             self.save("gateway_network_cleanup_failed")
         if self.manifest.get("released"):
             for filename in ("id_ed25519_colab_rag", "id_ed25519_colab_rag.pub"):

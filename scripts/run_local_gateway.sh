@@ -8,10 +8,12 @@
 #
 #   GATEWAY_MASTER_KEY=$(openssl rand -hex 16) sh scripts/tools/run-task.sh local:gateway:up
 #   sh scripts/run_local_gateway.sh transport-probe  # connected Colab transport only
-#   sh scripts/run_local_gateway.sh transport-release  # exact owned network only
+#   sh scripts/run_local_gateway.sh transport-release  # exact owned resources
 # Probe/release use GATEWAY_TRANSPORT_NETWORK_ID and the returned created flag
 # as GATEWAY_TRANSPORT_NETWORK_CREATED. Pass both to the later normal launch.
 # This proves image/network/upstream reachability, not a running gateway service.
+# GATEWAY_RUN_OWNER is a fresh run identity; transport-release also recovers
+# its labelled gateway/Postgres containers. Never reuse another run's owner.
 #
 # Keys: pass GATEWAY_MASTER_KEY / GATEWAY_LLM_KEY / GATEWAY_EMBED_KEY /
 # GATEWAY_RERANK_KEY to reuse stable values, or leave them unset and the
@@ -47,6 +49,8 @@ PG_NET="${PG_NET:-${GATEWAY_NAME}-net}"
 GATEWAY_DOCKER_BIN="${GATEWAY_DOCKER_BIN:-docker}"
 GATEWAY_TRANSPORT_NETWORK_ID="${GATEWAY_TRANSPORT_NETWORK_ID:-}"
 GATEWAY_TRANSPORT_NETWORK_CREATED="${GATEWAY_TRANSPORT_NETWORK_CREATED:-0}"
+GATEWAY_RUN_OWNER="${GATEWAY_RUN_OWNER:-}"
+GATEWAY_RUN_LABEL="io.mainframe-rag.gateway-run"
 GATEWAY_NETWORK_TARGET="$PG_NET"
 PG_PASSWORD="${PG_PASSWORD:-litellm-local-dev}"
 GATEWAY_RESET_KEYS="${GATEWAY_RESET_KEYS:-0}"
@@ -98,22 +102,55 @@ case "$GATEWAY_TRANSPORT_NETWORK_CREATED" in
     0|1) ;;
     *) die "transport network ownership must be 0 or 1" ;;
 esac
+case "$GATEWAY_RUN_OWNER" in
+    *[!A-Za-z0-9_.-]*) die "gateway run ownership must be a bounded opaque identity" ;;
+esac
+[ "${#GATEWAY_RUN_OWNER}" -le 128 ] || die "gateway run ownership must be a bounded opaque identity"
 case "$GATEWAY_DEBUG" in
     1|true) GATEWAY_DEBUG_ARGS="--detailed_debug" ;;
     0|false|'') GATEWAY_DEBUG_ARGS="" ;;
     *) die "GATEWAY_DEBUG must be 1/true or 0/false/empty, got '$GATEWAY_DEBUG'" ;;
 esac
-# Stops both containers by name (never kills PIDs: killing the attached
-# `docker run` client detaches and orphans the container, as a first failed
-# launch proved). Safe before anything started (names simply miss). The
-# network is disposable; the key-store volume is not (remove explicitly).
+# The daemon can finish creating a container after its client is interrupted.
+# Discover by the admitted run label, then recheck/remove full IDs, never names.
+# Validate the whole bounded set before removing any object. Volumes persist.
+owned_container_ids() {
+    gateway_docker ps -aq --no-trunc --filter "label=$GATEWAY_RUN_LABEL=$GATEWAY_RUN_OWNER"
+}
+
+require_fresh_container_owner() {
+    [ -n "$GATEWAY_RUN_OWNER" ] || return 0
+    _existing_owned="$(owned_container_ids)" || die "gateway run ownership could not be verified"
+    [ -z "$_existing_owned" ] || die "gateway run owner already exists; use its recorded recovery"
+}
+
+release_owned_containers() {
+    [ -n "$GATEWAY_RUN_OWNER" ] || return 0
+    _owned_ids="$(owned_container_ids)" || return 1
+    _owned_count=0
+    for _owned_id in $_owned_ids; do
+        _owned_count=$((_owned_count + 1))
+        [ "$_owned_count" -le 2 ] || return 1
+        case "$_owned_id" in ''|*[!0-9a-f]*) return 1 ;; esac
+        [ "${#_owned_id}" -eq 64 ] || return 1
+        _owned_info="$(gateway_docker inspect "$_owned_id" --format \
+            '{{.Id}} {{index .Config.Labels "io.mainframe-rag.gateway-run"}}' 2>/dev/null)" || return 1
+        [ "$_owned_info" = "$_owned_id $GATEWAY_RUN_OWNER" ] || return 1
+    done
+    for _owned_id in $_owned_ids; do
+        # Recheck immediately before deletion: a changed label is not authority.
+        _owned_info="$(gateway_docker inspect "$_owned_id" --format \
+            '{{.Id}} {{index .Config.Labels "io.mainframe-rag.gateway-run"}}' 2>/dev/null)" || return 1
+        [ "$_owned_info" = "$_owned_id $GATEWAY_RUN_OWNER" ] || return 1
+        gateway_docker rm -f "$_owned_id" >/dev/null 2>&1 || return 1
+    done
+    _remaining_owned="$(owned_container_ids)" || return 1
+    [ -z "$_remaining_owned" ]
+}
+
 stop_gateway() {
-    gateway_docker stop "$GATEWAY_NAME" "$PG_NAME" >/dev/null 2>&1 || true
-    if [ -n "$GATEWAY_TRANSPORT_NETWORK_ID" ]; then
-        release_transport_network || true
-    else
-        gateway_docker network rm "$PG_NET" >/dev/null 2>&1 || true
-    fi
+    release_owned_containers || return 1
+    release_transport_network
 }
 
 # Docker IDs, rather than names, keep a replaced network out of an admitted run.
@@ -140,6 +177,27 @@ release_transport_network() {
     gateway_docker network rm "$GATEWAY_TRANSPORT_NETWORK_ID" >/dev/null 2>&1
 }
 
+prepare_transport_network() {
+    _probe_created=0
+    if _probe_network_id="$(transport_network_id)"; then
+        if [ -n "$GATEWAY_TRANSPORT_NETWORK_ID" ]; then
+            [ "$_probe_network_id" = "$GATEWAY_TRANSPORT_NETWORK_ID" ] || die "transport network identity changed"
+            _probe_created="$GATEWAY_TRANSPORT_NETWORK_CREATED"
+        fi
+    else
+        [ -z "$GATEWAY_TRANSPORT_NETWORK_ID" ] || die "transport network identity changed"
+        _created_network_id="$(gateway_docker network create "$PG_NET" 2>/dev/null)" || die "transport network could not be prepared"
+        _probe_created=1
+        if ! _probe_network_id="$(transport_network_id)" || [ "$_probe_network_id" != "$_created_network_id" ]; then
+            gateway_docker network rm "$_created_network_id" >/dev/null 2>&1 || true
+            die "transport network identity is unavailable"
+        fi
+    fi
+    GATEWAY_TRANSPORT_NETWORK_ID="$_probe_network_id"
+    GATEWAY_TRANSPORT_NETWORK_CREATED="$_probe_created"
+    GATEWAY_NETWORK_TARGET="$GATEWAY_TRANSPORT_NETWORK_ID"
+}
+
 # python3 mints keys and reads JSON below; docker is checked after the
 # DRYRUN exit so render-only runs stay hermetic (CI has no daemon).
 command -v python3 >/dev/null 2>&1 || die "python3 is required (key minting + JSON reads)"
@@ -151,7 +209,7 @@ if [ "$GATEWAY_OPERATION" != serve ]; then
     [ "$GATEWAY_DRYRUN" != 1 ] || die "transport operations cannot run in render-only mode"
     command -v "$GATEWAY_DOCKER_BIN" >/dev/null 2>&1 || die "docker is required for the local gateway"
     if [ "$GATEWAY_OPERATION" = transport-release ]; then
-        release_transport_network || die "owned transport network could not be released"
+        stop_gateway || die "owned gateway resources could not be released"
         exit 0
     fi
     # Transport-only mode never generates host keys/config/log files or starts the
@@ -180,24 +238,8 @@ PY
         die "transport probe requires a pinned image and numeric IPv4 HTTP backend URLs"
     fi
     gateway_docker image inspect "$LITELLM_IMAGE" >/dev/null 2>&1 || die "transport probe requires the pinned image already present"
-    _probe_created=0
-    if _probe_network_id="$(transport_network_id)"; then
-        if [ -n "$GATEWAY_TRANSPORT_NETWORK_ID" ]; then
-            [ "$_probe_network_id" = "$GATEWAY_TRANSPORT_NETWORK_ID" ] || die "transport network identity changed"
-            _probe_created="$GATEWAY_TRANSPORT_NETWORK_CREATED"
-        fi
-    else
-        [ -z "$GATEWAY_TRANSPORT_NETWORK_ID" ] || die "transport network identity changed"
-        _created_network_id="$(gateway_docker network create "$PG_NET" 2>/dev/null)" || die "transport network could not be prepared"
-        _probe_created=1
-        if ! _probe_network_id="$(transport_network_id)" || [ "$_probe_network_id" != "$_created_network_id" ]; then
-            # Never attribute a name-reused replacement to our successful create.
-            gateway_docker network rm "$_created_network_id" >/dev/null 2>&1 || true
-            die "transport network identity is unavailable"
-        fi
-    fi
-    GATEWAY_TRANSPORT_NETWORK_ID="$_probe_network_id"
-    GATEWAY_TRANSPORT_NETWORK_CREATED="$_probe_created"
+    require_fresh_container_owner
+    prepare_transport_network
     trap 'release_transport_network || true; exit 130' INT TERM
     # Emit ownership before the potentially interrupted probe, so recovery can
     # release an owned network. This identity alone is never a passing result:
@@ -380,6 +422,7 @@ if [ "$GATEWAY_DRYRUN" = "1" ]; then
 fi
 command -v "$GATEWAY_DOCKER_BIN" >/dev/null 2>&1 || die "docker is required for the local gateway"
 trap 'rm -rf "$CFG_DIR"' EXIT
+[ -n "$GATEWAY_RUN_OWNER" ] || GATEWAY_RUN_OWNER="$(python3 -c 'import uuid; print("gateway-" + uuid.uuid4().hex)')"
 
 for _taken in "$GATEWAY_NAME" "$PG_NAME"; do
     if gateway_docker ps -a --format '{{.Names}}' | grep -qx "$_taken"; then
@@ -387,21 +430,26 @@ for _taken in "$GATEWAY_NAME" "$PG_NAME"; do
     fi
 done
 unset _taken
+require_fresh_container_owner
 if [ -n "$GATEWAY_TRANSPORT_NETWORK_ID" ]; then
     _admitted_network_id="$(transport_network_id)" || die "transport network identity changed"
     [ "$_admitted_network_id" = "$GATEWAY_TRANSPORT_NETWORK_ID" ] || die "transport network identity changed"
     GATEWAY_NETWORK_TARGET="$GATEWAY_TRANSPORT_NETWORK_ID"
 fi
+# Arm cleanup before either daemon container or network can be created.
+# The controller's finite group-KILL may interrupt this trap; recovery uses the
+# same admitted label and exact network ID without a surviving local process.
+trap 'stop_gateway || true; rm -rf "$CFG_DIR"' EXIT
+trap 'exit 130' INT TERM
 if [ "$GATEWAY_RESET_KEYS" = "1" ]; then
     gateway_docker volume rm "$PG_VOLUME" >/dev/null 2>&1 || true
     echo "==> Key store wiped ($PG_VOLUME removed)"
 fi
 
-if [ -z "$GATEWAY_TRANSPORT_NETWORK_ID" ]; then
-    gateway_docker network create "$PG_NET" >/dev/null 2>&1 || true
-fi
+prepare_transport_network
 echo "==> Starting key-store postgres ($PG_NAME, volume $PG_VOLUME)"
 gateway_docker run -d --rm --name "$PG_NAME" --network "$GATEWAY_NETWORK_TARGET" \
+    --label "$GATEWAY_RUN_LABEL=$GATEWAY_RUN_OWNER" \
     -e POSTGRES_USER=litellm -e POSTGRES_PASSWORD="$PG_PASSWORD" -e POSTGRES_DB=litellm \
     -v "${PG_VOLUME}:/var/lib/postgresql/data" \
     "$PG_IMAGE" >/dev/null
@@ -435,6 +483,7 @@ if [ -n "$GATEWAY_OTEL_ENDPOINT" ]; then
 fi
 # shellcheck disable=SC2086
 gateway_docker run --rm --name "$GATEWAY_NAME" --network "$GATEWAY_NETWORK_TARGET" \
+    --label "$GATEWAY_RUN_LABEL=$GATEWAY_RUN_OWNER" \
     --add-host=host.docker.internal:host-gateway \
     -p "${GATEWAY_PORT}:4000" \
     -v "${CFG_DIR}:/app/gateway:ro" \
@@ -444,9 +493,7 @@ gateway_docker run --rm --name "$GATEWAY_NAME" --network "$GATEWAY_NETWORK_TARGE
     --config /app/gateway/config.yaml ${GATEWAY_DEBUG_ARGS} \
     >>"$GATEWAY_LOG" 2>&1 &
 DOCKER_PID=$!
-# Ctrl-C stops both containers by name (the attached client alone would
-# detach); --rm removes them, the named volume keeps the minted keys.
-trap 'stop_gateway; rm -rf "$CFG_DIR"; exit 130' INT TERM
+# The earlier trap owns both labelled daemon containers during readiness too.
 
 echo "==> Waiting for $BASE/v1/models (up to 90s)"
 _OK=0

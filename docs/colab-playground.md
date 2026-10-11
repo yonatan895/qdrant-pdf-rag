@@ -238,6 +238,15 @@ admit their disk destinations separately before a full-stack run. A cgroup
 around the controller does not contain Docker daemon writes. Retain final
 CU/session evidence even when export fails.
 
+After export, cleanup/recovery gives final account usage a command timeout of at
+most five seconds and a quarter of the remaining cleanup window, followed by the
+existing bounded process-reaping grace. Its output uses the export allowance,
+preserving the separate release allowance. The manifest records available balance/rate/assignments
+and account balance change, or an explicit unavailable observation. Unavailable
+usage makes cleanup incomplete and prevents a CPU transport receipt; exact
+session stop and absence verification still execute. Account observations do not
+prove per-run billing.
+
 Preparation creates one private source snapshot: at most 32 MiB of execution
 source and one separately bounded 64 MiB pinned Task executable. It reuses the
 prepared interpreter and copies no environment, corpus or weights. Fresh host
@@ -252,6 +261,14 @@ same private state for bounded recovery:
 ```sh
 sh scripts/tools/run-task.sh local:colab:stop COLAB_STATE="$COLAB_STATE"
 ```
+
+The native gateway labels its Postgres and gateway with the fresh private run
+identity, after refusing pre-existing names or matching owner labels. Cleanup is
+armed before Postgres readiness. Recovery discovers at most those two full
+container IDs, rechecks their labels, and removes only those IDs before releasing
+the exact created network. This works after the local process group is killed;
+pre-existing containers/networks and the key-store volume remain untouched.
+Gateway recovery retains its separate five-second window after VM release.
 
 Stop only the exact recorded session. Follow the session-specific recovery
 command printed by the controller if automatic cleanup cannot confirm release;

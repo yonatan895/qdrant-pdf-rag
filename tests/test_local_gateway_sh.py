@@ -419,6 +419,12 @@ if kind == "curl":
     sys.exit(0)
 state_path = root / "networks.json"
 networks = json.loads(state_path.read_text())
+containers_path = root / "containers.json"
+containers = json.loads(containers_path.read_text()) if containers_path.exists() else {}
+def container(value):
+    return next((item for item in containers.values() if value in (item["name"], item["id"])), None)
+def retain_containers():
+    containers_path.write_text(json.dumps(containers))
 def network(value):
     return next((item for item in networks.values() if value in (item["name"], item["id"])), None)
 if args[:2] == ["image", "inspect"]:
@@ -450,8 +456,52 @@ elif args[:2] == ["network", "rm"]:
     item = network(args[2])
     if item is None:
         sys.exit(1)
+    # Docker daemon resources outlive the client process. A connected PG
+    # prevents network removal even after its original shell was killed.
+    if any(value["network"] in (item["id"], item["name"]) for value in containers.values()):
+        sys.exit(1)
     del networks[item["name"]]
     state_path.write_text(json.dumps(networks))
+elif args and args[0] == "ps":
+    selected = list(containers.values())
+    if "--filter" in args:
+        label = args[args.index("--filter") + 1]
+        assert label.startswith("label=io.mainframe-rag.gateway-run=")
+        key, expected = label.removeprefix("label=").split("=", 1)
+        selected = [item for item in selected if item["labels"].get(key) == expected]
+    if "--format" in args:
+        assert args[args.index("--format") + 1] == "{{.Names}}"
+        print("\n".join(item["name"] for item in selected))
+    else:
+        assert "-aq" in args and "--no-trunc" in args
+        print("\n".join(item["id"] for item in selected))
+elif args and args[0] == "inspect":
+    format_at = args.index("--format")
+    targets = [value for index, value in enumerate(args[1:], 1) if index not in (format_at, format_at + 1)]
+    assert len(targets) == 1
+    item = container(targets[0])
+    if item is None:
+        sys.exit(1)
+    assert args[format_at + 1] == '{{.Id}} {{index .Config.Labels "io.mainframe-rag.gateway-run"}}'
+    print(item["id"] + " " + item["labels"].get("io.mainframe-rag.gateway-run", "<no value>"))
+elif args and args[0] in ("stop", "rm"):
+    targets = [value for value in args[1:] if not value.startswith("-")]
+    failed = False
+    for target in targets:
+        item = container(target)
+        if item is None:
+            failed = True
+        else:
+            del containers[item["id"]]
+    retain_containers()
+    sys.exit(1 if failed else 0)
+elif args and args[0] == "exec":
+    item = container(args[1])
+    assert args[2:] == ["pg_isready", "-U", "litellm"]
+    if item is None:
+        sys.exit(1)
+    (root / "pg-readiness-entered").write_text(item["id"])
+    sys.exit(1 if os.environ.get("FAKE_GATEWAY_SCENARIO") == "postgres-notready" else 0)
 elif args and args[0] == "run":
     item = network(args[args.index("--network") + 1])
     if item is None:
@@ -473,12 +523,39 @@ elif args and args[0] == "run":
                  os.environ.get("FAKE_GATEWAY_SCENARIO") == "gateway-network-down")):
             sys.exit(7)
         subprocess.run([sys.executable, "-c", args[code_index + 1], *urls], check=True)
-    elif "-v" in args and "/app/gateway:ro" in args[args.index("-v") + 1]:
-        assert "--add-host=host.docker.internal:host-gateway" in args
-        mount = args[args.index("-v") + 1]
-        source = mount.removesuffix(":/app/gateway:ro")
-        (root / "rendered-gateway.yaml").write_text((pathlib.Path(source) / "config.yaml").read_text())
-elif args and args[0] in ("ps", "exec", "stop", "volume"):
+    else:
+        name = args[args.index("--name") + 1]
+        if container(name):
+            sys.exit(1)
+        counter_path = root / "container-count"
+        count = int(counter_path.read_text()) + 1 if counter_path.exists() else 1
+        counter_path.write_text(str(count))
+        identifier = f"{count:064x}"
+        labels = {}
+        for index, value in enumerate(args):
+            if value == "--label":
+                key, label = args[index + 1].split("=", 1)
+                labels[key] = label
+            elif value.startswith("--label="):
+                key, label = value.removeprefix("--label=").split("=", 1)
+                labels[key] = label
+        containers[identifier] = {"id": identifier, "name": name, "network": item["id"], "labels": labels}
+        retain_containers()
+        if "-d" in args:
+            assert args[args.index("-v") + 1].endswith(":/var/lib/postgresql/data")
+            print(identifier)
+        else:
+            assert "--add-host=host.docker.internal:host-gateway" in args
+            mount = args[args.index("-v") + 1]
+            assert mount.endswith(":/app/gateway:ro")
+            source = mount.removesuffix(":/app/gateway:ro")
+            (root / "rendered-gateway.yaml").write_text((pathlib.Path(source) / "config.yaml").read_text())
+            # A short successful gateway exits naturally. Docker --rm removes
+            # it; the daemon PG remains until explicit owned cleanup.
+            assert "--rm" in args
+            del containers[identifier]
+            retain_containers()
+elif args and args[0] == "volume":
     pass
 else:
     raise AssertionError("unsupported fake Docker operation")
@@ -502,6 +579,7 @@ def gateway_transport(tmp_path):
     (root / "networks.json").write_text(json.dumps({
         "bridge": {"name": "bridge", "id": BRIDGE_ID, "driver": "bridge"},
     }))
+    (root / "containers.json").write_text("{}")
     hits = []
     servers = []
     threads = []
@@ -623,6 +701,39 @@ def test_preexisting_network_survives_probe_failure_and_release(gateway_transpor
     assert json.loads(network_file.read_text()) == networks
     assert not any(args[:2] == ["network", "rm"] or args[0] == "stop"
                    for args in _transport_calls(gateway_transport))
+
+
+@pytest.mark.parametrize("existing", ["container-name", "owner-label"])
+def test_preexisting_container_or_owner_scope_is_never_adopted_by_native_launch(gateway_transport, existing):
+    root, env, _, _ = gateway_transport
+    owner = "rag-" + "a" * 16
+    foreign = {"f" * 64: {
+        "id": "f" * 64,
+        "name": env["GATEWAY_NAME"] + "-pg" if existing == "container-name" else "preexisting-owner-container",
+        "network": BRIDGE_ID,
+        "labels": {"io.mainframe-rag.gateway-run": owner if existing == "owner-label" else "rag-" + "b" * 16},
+    }}
+    containers = root / "containers.json"
+    containers.write_text(json.dumps(foreign))
+    probe = _transport_operation(gateway_transport, GATEWAY_RUN_OWNER=owner)
+    if existing == "owner-label":
+        assert probe.returncode != 0, "probe adopted a preexisting run-labelled daemon"
+        assert not any(argv[:2] == ["network", "create"] for argv in _transport_calls(gateway_transport))
+    else:
+        assert probe.returncode == 0, probe.stderr
+        identity = json.loads(probe.stdout)
+        refused = _transport_operation(
+            gateway_transport, "serve", GATEWAY_RUN_OWNER=owner,
+            GATEWAY_TRANSPORT_NETWORK_ID=identity["network_id"], GATEWAY_TRANSPORT_NETWORK_CREATED="1",
+        )
+        assert refused.returncode != 0 and "already exists" in refused.stderr
+        released = _transport_operation(
+            gateway_transport, "transport-release", GATEWAY_RUN_OWNER=owner,
+            GATEWAY_TRANSPORT_NETWORK_ID=identity["network_id"], GATEWAY_TRANSPORT_NETWORK_CREATED="1",
+        )
+        assert released.returncode == 0, released.stderr
+    assert json.loads(containers.read_text()) == foreign
+    assert all(argv[0] not in ("stop", "rm", "volume") for argv in _transport_calls(gateway_transport))
 
 
 def test_probe_then_normal_launch_reuses_exact_network_and_renders_probed_urls(gateway_transport):

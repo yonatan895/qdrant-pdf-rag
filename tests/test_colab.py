@@ -17,10 +17,11 @@ from types import SimpleNamespace
 import pytest
 from scripts import colab as controller
 
-from tests import test_colab_production, test_colab_storage
+from tests import test_colab_production, test_colab_storage, test_local_gateway_sh
 
 retained = test_colab_storage.retained
 original_inputs = test_colab_production.original_inputs
+gateway_transport = test_local_gateway_sh.gateway_transport
 
 ROOT = Path(__file__).resolve().parents[1]
 IMAGE = "example.invalid/gateway@sha256:" + "a" * 64
@@ -73,6 +74,15 @@ if name=='colab':
         reads=root/'usage-reads'
         count=int(reads.read_text()) if reads.exists() else 0
         reads.write_text(str(count+1))
+        override=root/'usage-response.json'
+        if override.exists():
+            response=json.loads(override.read_text())
+            if response['mode']=='error': sys.exit(17)
+            if response['mode']=='timeout': time.sleep(30)
+            if response['mode']=='malformed':
+                print('original fake account usage is unavailable'); sys.exit(0)
+            print('Current balance: '+str(response['balance'])+' compute units\nUsage rate: 0.00/hr\nActive assignments: '+str(len(state)))
+            sys.exit(0)
         balance='175.00' if scenario=='spent_cap_zero_rate' and count else '200.00'
         rate='0.00' if scenario=='spent_cap_zero_rate' else '8.00'
         print('Current balance: '+balance+' compute units\nUsage rate: '+rate+'/hr\nActive assignments: '+str(len(state)))
@@ -167,6 +177,9 @@ elif name=='docker':
         for key in names: del networks[key]
         networks_file.write_text(json.dumps(networks))
     elif args[0]=='image': print('sha256:'+'a'*64)
+    elif args[0]=='ps':
+        assert args[1:3]==['-aq','--no-trunc']
+        assert args[3]=='--filter' and args[4].startswith('label=io.mainframe-rag.gateway-run=')
     elif args[0]=='run':
         network=args[args.index('--network')+1]
         if network!='bridge':
@@ -261,6 +274,214 @@ def _run_fake(state, workload=("/bin/true",)):
 def _events(root):
     path = root / "events.jsonl"
     return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+
+def _allocated_cleanup_run(lab):
+    """Actual pinned CLI creation/ownership, without model or transport setup."""
+    root, state, _ = lab
+    run = controller.Run(state)
+    run.expiry = time.time() + 30
+    run.work_expiry = run.expiry - 5
+    run.cleanup_reserve = 5
+    with controller.state_lock(state, recovery=False):
+        run.budget(initial=True)
+        run.manifest.update(allocation_attempted=True, phase="allocating")
+        run.save("allocation_attempted")
+        run.colab("new", "-s", run.manifest["session"])
+        assert run.owned()
+        run.budget()
+        assert run.manifest["cu_summary"]["last"]["balance"] == 200.0
+        run.manifest["phase"] = "running"
+        run.save("original_fake_owned_runtime")
+    (root / "remote" / "colab-artifacts.tgz").write_bytes(b"original-fake-diagnostics")
+    return run
+
+
+def test_cleanup_observes_usage_after_last_work_poll_before_exact_release_then_next_run_works(lab):
+    root, state, _ = lab
+    run = _allocated_cleanup_run(lab)
+    (root / "usage-response.json").write_text(json.dumps({"mode": "available", "balance": 197.0}))
+    assert run.cleanup() is True
+    manifest = json.loads((state / "manifest.json").read_text())
+    final = manifest["final_cu_observation"]
+    assert final["status"] == "available"
+    assert final["balance"] == 197.0 and final["rate_per_hour"] == 0.0 and final["assignments"] == 1
+    assert final["spent_since_start"] == 3.0
+    assert manifest["released"] is True and manifest["release_evidence"]["absent"] is True
+    assert json.loads((root / "sessions.json").read_text()) == {}
+    calls = [(kind, argv) for kind, argv in _events(root) if kind == "colab"]
+    usage = [index for index, (_, argv) in enumerate(calls) if argv[2] == "usage"]
+    stop = next(index for index, (_, argv) in enumerate(calls) if argv[2] == "stop")
+    assert len(usage) == 3 and usage[-1] < stop
+    assert calls[stop][1][-1] == run.manifest["session"]
+    (root / "usage-response.json").unlink()
+    ordinary = _prepare_new(state, root / "ordinary-after-final-usage")
+    assert _run_fake(ordinary) == 0
+
+
+@pytest.mark.parametrize("failure", ["error", "malformed", "timeout"])
+def test_unavailable_final_usage_is_explicit_and_cannot_block_exact_release_then_next_run(lab, failure):
+    root, state, _ = lab
+    run = _allocated_cleanup_run(lab)
+    (root / "usage-response.json").write_text(json.dumps({"mode": failure}))
+    started = time.monotonic()
+    assert run.cleanup() is False
+    assert time.monotonic() - started < 9
+    manifest = json.loads((state / "manifest.json").read_text())
+    final = manifest["final_cu_observation"]
+    assert final["status"] == "unavailable"
+    assert final["reason"] == "usage_unavailable"
+    assert "balance" not in final and "spent_since_start" not in final
+    assert "original fake" not in json.dumps(final)
+    assert manifest["released"] is True and manifest["release_evidence"]["absent"] is True
+    assert json.loads((root / "sessions.json").read_text()) == {}
+    calls = [(kind, argv) for kind, argv in _events(root) if kind == "colab"]
+    stops = [argv[-1] for _, argv in calls if argv[2] == "stop"]
+    assert stops == [run.manifest["session"]]
+    assert sum(argv[2] == "usage" for _, argv in calls) == 3
+    (root / "usage-response.json").unlink()
+    ordinary = _prepare_new(state, root / "ordinary-after-unavailable-final-usage")
+    assert _run_fake(ordinary) == 0
+
+
+@pytest.mark.parametrize("available", [True, False])
+def test_manual_recovery_records_final_usage_or_explicit_unavailable_and_still_releases(lab, available):
+    root, state, _ = lab
+    run = _allocated_cleanup_run(lab)
+    response = {"mode": "available", "balance": 196.0} if available else {"mode": "error"}
+    (root / "usage-response.json").write_text(json.dumps(response))
+    assert _controller_call(["stop", "--state", str(state)]) == (0 if available else 1)
+    manifest = json.loads((state / "manifest.json").read_text())
+    final = manifest["final_cu_observation"]
+    assert final["status"] == ("available" if available else "unavailable")
+    if available:
+        assert final["balance"] == 196.0 and final["spent_since_start"] == 4.0
+    else:
+        assert final["reason"] == "usage_unavailable" and "balance" not in final
+    assert manifest["released"] is True and manifest["release_evidence"]["absent"] is True
+    assert json.loads((root / "sessions.json").read_text()) == {}
+    stops = [argv[-1] for kind, argv in _events(root) if kind == "colab" and argv[2] == "stop"]
+    assert stops == [run.manifest["session"]]
+    (root / "usage-response.json").unlink()
+    ordinary = _prepare_new(state, root / "ordinary-after-final-usage-recovery")
+    assert _run_fake(ordinary) == 0
+
+
+def test_successful_workload_with_unavailable_final_usage_has_no_cpu_receipt_then_next_run_works(lab, monkeypatch):
+    root, state, _ = lab
+    cleanup = controller.Run.cleanup
+
+    def fail_only_final_account_observation(self):
+        response = root / "usage-response.json"
+        response.write_text(json.dumps({"mode": "error"}))
+        try:
+            return cleanup(self)
+        finally:
+            response.unlink()
+
+    monkeypatch.setattr(controller.Run, "cleanup", fail_only_final_account_observation)
+    assert _run_fake(state) == 1
+    manifest = json.loads((state / "manifest.json").read_text())
+    assert manifest["workload_succeeded"] is True
+    assert manifest["final_cu_observation"]["status"] == "unavailable"
+    assert manifest["released"] is True and manifest["release_evidence"]["absent"] is True
+    assert not (state / "transport-receipt.json").exists()
+    assert json.loads((root / "sessions.json").read_text()) == {}
+    stops = [argv[-1] for kind, argv in _events(root) if kind == "colab" and argv[2] == "stop"]
+    assert stops == [manifest["session"]]
+    monkeypatch.setattr(controller.Run, "cleanup", cleanup)
+    ordinary = _prepare_new(state, root / "ordinary-after-unavailable-final-accounting")
+    assert _run_fake(ordinary) == 0
+    assert (ordinary / "transport-receipt.json").is_file()
+
+
+@pytest.mark.parametrize("interruption,created", [("terminate", True), ("terminate", False), ("recovery", True)])
+def test_native_gateway_pg_readiness_interruption_and_recovery_preserve_foreign_objects_then_next_serve(
+    lab, gateway_transport, monkeypatch, interruption, created,
+):
+    root, original, _ = lab
+    gateway_root, gateway_env, urls, _ = gateway_transport
+    for key, value in gateway_env.items():
+        monkeypatch.setenv(key, value)
+    # The exact probed endpoints remain tiny loopback handlers. The prepared
+    # controller uses the same explicit Docker owner and configuration.
+    ports = [url.rsplit(":", 1)[1].split("/", 1)[0] for url in urls]
+    state = _prepare_new(original, root / "native-owned-cleanup", extra=(
+        "--docker", gateway_env["GATEWAY_DOCKER_BIN"], "--reasoning-port", ports[0],
+        "--embedding-port", ports[1],
+    ))
+    run = _allocated_cleanup_run((root, state, None))
+    foreign = {"f" * 64: {"id": "f" * 64, "name": "unrelated-existing-postgres",
+                            "network": test_local_gateway_sh.BRIDGE_ID,
+                            "labels": {"io.mainframe-rag.gateway-run": "rag-" + "b" * 16}}}
+    container_file = gateway_root / "containers.json"
+    container_file.write_text(json.dumps(foreign))
+    network_file = gateway_root / "networks.json"
+    if not created:
+        networks = json.loads(network_file.read_text())
+        networks[run.config["gateway_network"]] = {
+            "name": run.config["gateway_network"], "id": "e" * 64, "driver": "bridge"}
+        network_file.write_text(json.dumps(networks))
+    run.probe_gateway_network("127.0.0.2")
+    ownership = run.manifest["gateway_network"]
+    assert ownership["created"] is created
+    env = run.gateway_environment("127.0.0.2")
+    env["FAKE_GATEWAY_SCENARIO"] = "postgres-notready"
+    child = run.spawn(["sh", str(run.execution_root / "scripts/run_local_gateway.sh")], "native-gateway", env=env)
+    run.workload = child
+    try:
+        entered = gateway_root / "pg-readiness-entered"
+        until = time.monotonic() + 5
+        while not entered.exists() and child.poll() is None and time.monotonic() < until:
+            time.sleep(.01)
+        assert entered.exists(), "native shell never reached daemon PG readiness"
+        owned_id = entered.read_text()
+        containers = json.loads(container_file.read_text())
+        assert containers[owned_id]["name"] == run.config["gateway_name"] + "-pg"
+        assert child.poll() is None
+        if interruption == "terminate":
+            # Exercise the real controller's TERM then finite KILL policy,
+            # rather than manually invoking a new cleanup helper.
+            run.terminate(child)
+            assert json.loads(container_file.read_text()) == foreign, "owned daemon PG survived controller TERM"
+            assert run.cleanup() is True
+        else:
+            # A dead controller cannot run a trap. Recovery has only retained
+            # run ownership, not this child's in-memory PID or Docker ID.
+            os.killpg(child.pid, signal.SIGKILL)
+            child.wait(timeout=2)
+            run.terminate(child)
+            assert owned_id in json.loads(container_file.read_text())
+            assert _controller_call(["stop", "--state", str(state)]) == 0
+    finally:
+        run.terminate(child)
+    manifest = json.loads((state / "manifest.json").read_text())
+    assert manifest["released"] is True and manifest["release_evidence"]["absent"] is True
+    assert manifest["gateway_network_cleanup"]["completed"] is True
+    assert json.loads(container_file.read_text()) == foreign
+    networks = json.loads(network_file.read_text())
+    if created:
+        assert set(networks) == {"bridge"}
+    else:
+        assert len(networks) == 2
+        assert networks[test_local_gateway_sh.TRANSPORT_NETWORK]["id"] == ownership["network_id"]
+    calls = test_local_gateway_sh._transport_calls(gateway_transport)
+    deleted = [argv[-1] for argv in calls if argv[0] in ("stop", "rm")]
+    assert owned_id in deleted and "f" * 64 not in deleted
+    assert "unrelated-existing-postgres" not in deleted
+    assert not any(argv[0] == "volume" for argv in calls)
+    # The next normal native operation must pass its real existing-name check.
+    next_probe = test_local_gateway_sh._transport_operation(gateway_transport)
+    assert next_probe.returncode == 0, next_probe.stderr
+    next_identity = json.loads(next_probe.stdout)
+    next_serve = test_local_gateway_sh._transport_operation(
+        gateway_transport, "serve", GATEWAY_RUN_OWNER="rag-" + "c" * 16,
+        GATEWAY_TRANSPORT_NETWORK_ID=next_identity["network_id"],
+        GATEWAY_TRANSPORT_NETWORK_CREATED="1" if next_identity["created"] else "0",
+    )
+    assert next_serve.returncode == 0, next_serve.stderr
+    assert json.loads(container_file.read_text()) == foreign
+    assert (gateway_root / "rendered-gateway.yaml").is_file()
 
 
 def _production_fixture_paths():
