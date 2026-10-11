@@ -960,11 +960,18 @@ def test_validate_invalid_operator_boolean_refused(tree, key):
     assert "maybe-secretish" not in r.stderr + r.stdout
 
 
-@pytest.mark.parametrize("key", BOOL_KEYS)
-@pytest.mark.parametrize("value", ["true", "False", "1", "no", "YES"])
+# INGEST_ALIAS_PUBLISH accepts only unset/true since in-place ingest was
+# retired (#360); its false spellings are pinned by the refusal test below.
+_ACCEPTED_BOOLEANS = [
+    (key, value)
+    for key in BOOL_KEYS
+    for value in ("true", "False", "1", "no", "YES")
+    if not (key == "INGEST_ALIAS_PUBLISH" and value.lower() in ("false", "no"))
+]
+
+
+@pytest.mark.parametrize(("key", "value"), _ACCEPTED_BOOLEANS)
 def test_validate_valid_operator_boolean_accepted(tree, key, value):
-    if key == "INGEST_ALIAS_PUBLISH" and value.lower() in ("false", "no"):
-        pytest.skip("in-place ingest was retired (#360): see the refusal test below")
     env = {key: value}
     if key == "CONTEXTUAL_EMBED_ENABLED":
         env |= {"CONTEXT_LLM_BASE_URL": "http://llm:8000/v1", "CONTEXT_LLM_MODEL": "m"}
