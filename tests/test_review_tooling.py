@@ -3574,17 +3574,25 @@ class TestCatalogueAnchorDecision(unittest.TestCase):
         import copy
 
         root = pathlib.Path(__file__).resolve().parents[1]
-        approved = (root / 'tests/hazards/critical.json').read_bytes()
-        original = json.loads(approved)
+        original = json.loads((root / 'tests/hazards/critical.json').read_bytes())
         self.assertEqual([hazard['id'] for hazard in original['hazards']], [
             'vector-projection', 'same-id-overwrite', 'unmarked-residue', 'reader-repair-overlap',
             'scope-losing-fallback', 'missing-terminal-finish', 'final-order-miscount',
             'latest-user-mismatch', 'dropped-operator-value', 'mixed-release-identity',
         ])
+        # Retain the complete current oracle, but specify both historical #718
+        # anchor states independently of whether the repository adopted them.
+        original_hazard = original['hazards'][6]
+        self.assertEqual(original_hazard['occurrences'], 2)
+        original_hazard['before'] = '            used = tokenizer.count_messages(messages)'
+        original_hazard['after'] = (
+            '            used = tokenizer.count_messages(messages[:-1] + '
+            '[ChatMessage(role="user", content=_user_content(_assemble_blocks('
+            'context_entries, question_text, packed, tail_part), "retrieval"))])'
+        )
+        approved = json.dumps(original).encode()
         adopted = copy.deepcopy(original)
         hazard = adopted['hazards'][6]
-        self.assertEqual(hazard['before'], '            used = tokenizer.count_messages(messages)')
-        self.assertEqual(hazard['occurrences'], 2)
         # These are the original #718 changes, independently specified rather
         # than copied from an approval implementation's transformed output.
         hazard['before'] = '            used = tokenizer.count_messages(messages'
@@ -3849,6 +3857,47 @@ class TestCatalogueAnchorDecision(unittest.TestCase):
             'candidate_sha256': hashlib.sha256(adopted).hexdigest(),
             'changed_ids': ['final-order-miscount'],
         })
+
+    def test_historical_approval_and_native_oracle_survive_repository_anchor_adoption(self):
+        from unittest.mock import patch
+
+        from scripts.verifier_approval import approved_catalogue
+
+        catalogue_path = pathlib.Path(__file__).resolve().parents[1] / 'tests/hazards/critical.json'
+        repository = json.loads(catalogue_path.read_bytes())
+        repository['hazards'][6]['before'] = '            used = tokenizer.count_messages(messages'
+        repository['hazards'][6]['after'] = (
+            '            used = tokenizer.count_messages(messages[:-1] + '
+            '[ChatMessage(role="user", content=_user_content(_assemble_blocks('
+            'context_entries, question_text, packed, tail_part), "retrieval"))]'
+        )
+        adopted_repository = json.dumps(repository).encode()
+        original_read = pathlib.Path.read_bytes
+
+        def read_adopted_repository(path):
+            return adopted_repository if path == catalogue_path else original_read(path)
+
+        with patch.object(pathlib.Path, 'read_bytes', autospec=True, side_effect=read_adopted_repository):
+            api, historical, candidate, identity = self.fixture()
+            old_hazard = json.loads(historical)['hazards'][6]
+            self.assertEqual(old_hazard['before'], '            used = tokenizer.count_messages(messages)')
+            self.assertEqual(old_hazard['after'], (
+                '            used = tokenizer.count_messages(messages[:-1] + '
+                '[ChatMessage(role="user", content=_user_content(_assemble_blocks('
+                'context_entries, question_text, packed, tail_part), "retrieval"))])'
+            ))
+            self.assertNotEqual(historical, adopted_repository)
+            self.assertEqual(candidate, adopted_repository)
+            self.assertEqual(approved_catalogue(api, api.candidate, historical), (candidate, identity))
+            accepted = self.normalize_hazards(candidate, self.hazard_report(candidate))
+            self.assertEqual(accepted['status'], 'success')
+            self.assertEqual(len(accepted['results']['results']), 10)
+            self.assertEqual(accepted['results']['results'][6]['replacement']['occurrences'], 2)
+            weakened = json.loads(candidate)
+            weakened['hazards'][6]['assertion'] = 'assert True'
+            weakened_bytes = json.dumps(weakened).encode()
+            with self.assertRaises(ValueError):
+                self.normalize_hazards(weakened_bytes, self.hazard_report(weakened_bytes))
 
     def test_anchor_decision_refuses_structural_edits_even_when_python_values_compare_equal(self):
         import copy
