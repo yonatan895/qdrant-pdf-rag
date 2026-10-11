@@ -15,6 +15,16 @@ from mainframe_rag.ingest.ibm_pdf import ParsedDoc
 from mainframe_rag.ingest.identity import source_rev_key
 
 
+def normalize_context(text: str, max_chars: int) -> str:
+    """The stored contextual prefix recipe (issue #78): collapse whitespace
+    and enforce the deterministic char cap so the embed-window budget pin
+    stays provable for any model output. It lives in this rule module so a
+    change to the recipe changes the extraction-rules version (review of
+    #701): ingest then refuses or re-extracts instead of mixing recipes."""
+    collapsed = " ".join(text.split())
+    return collapsed[:max_chars].rstrip()
+
+
 def point_payload(
     parsed: ParsedDoc, chunk: Chunk, rules_v: str, context: str | None = None
 ) -> dict[str, Any]:

@@ -81,6 +81,21 @@ def test_rule_modules_import_only_rule_modules() -> None:
     assert escapes == [], escapes
 
 
+def test_context_normalization_recipe_is_a_rule_module() -> None:
+    """The stored contextual prefix passes through normalize_context (review
+    of #701): its recipe must change the version like any payload producer,
+    and the context producer must use that very function."""
+    import inspect
+
+    from mainframe_rag.ingest import context
+    from mainframe_rag.ingest.payload import normalize_context
+
+    assert Path(inspect.getfile(normalize_context)).resolve() in {
+        p.resolve() for p in rule_module_paths()
+    }
+    assert context.normalize_context is normalize_context
+
+
 def test_stored_payload_is_owned_by_a_rule_module() -> None:
     """upsert_chunks stores exactly point_payload's mapping, and that
     mapping lives in a hashed module: adding or deriving a stored field

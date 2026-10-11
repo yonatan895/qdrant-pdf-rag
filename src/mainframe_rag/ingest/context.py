@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Any
 import httpx2
 
 from mainframe_rag.config import Settings, bearer_auth_headers
+from mainframe_rag.ingest.payload import normalize_context
 from mainframe_rag.ports import ChatMessage
 
 if TYPE_CHECKING:
@@ -89,13 +90,6 @@ def build_context_messages(
         ChatMessage(role="system", content=CONTEXT_SYSTEM_PROMPT),
         ChatMessage(role="user", content=user),
     ]
-
-
-def normalize_context(text: str, max_chars: int) -> str:
-    """Collapse whitespace and enforce the deterministic char cap so the
-    embed-window budget pin stays provable for any model output."""
-    collapsed = " ".join(text.split())
-    return collapsed[:max_chars].rstrip()
 
 
 # Sidecar record schema. Bumped only when the identity fields below change.
