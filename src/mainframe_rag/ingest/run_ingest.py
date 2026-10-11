@@ -24,6 +24,7 @@ import sys
 import threading
 import time
 import uuid
+from collections.abc import Iterator
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
@@ -137,7 +138,7 @@ from mainframe_rag.ingest.representation import (
 from mainframe_rag.ingest.rules_version import extraction_rules_version
 from mainframe_rag.ingest.walk import detect_vendor, walk_pdfs
 from mainframe_rag.logs import configure_logging
-from mainframe_rag.ports import SparseVector
+from mainframe_rag.ports import QdrantPoints, QdrantReader, SparseVector
 from mainframe_rag.tracing import setup_tracing, shutdown_tracing, start_as_current_span, start_span
 
 log = logging.getLogger("ingest")
@@ -376,7 +377,7 @@ def _get_context_cache(cache_path: str) -> dict[str, str]:
     return _worker_context_cache
 
 
-def _get_qdrant(settings: Settings):
+def _get_qdrant(settings: Settings) -> QdrantPoints:
     from qdrant_client import QdrantClient
 
     global _worker_qdrant
@@ -390,8 +391,15 @@ def _get_qdrant(settings: Settings):
 
 
 @contextmanager
-def _placement_clients(settings: Settings, main_client):
+def _placement_clients(
+    settings: Settings, main_client: QdrantReader
+) -> Iterator[dict[str, QdrantReader] | None]:
     """Endpoint -> client map for the ACTIVE-copy cutover gate (issue #360).
+
+    Every handle is typed as the read-only protocol: the gate only reads,
+    and the explicit 1/1/1 profile hands back the publisher's own client,
+    so a write through the map must fail typecheck like any other write in
+    a certification check.
 
     Yields None when no explicit distribution policy is selected (dev
     passthrough — the gate is a no-op). Otherwise every direct peer
@@ -424,7 +432,7 @@ def _placement_clients(settings: Settings, main_client):
         )
     from qdrant_client import QdrantClient
 
-    mapping = {
+    mapping: dict[str, QdrantReader] = {
         endpoint: QdrantClient(
             url=endpoint,
             api_key=settings.qdrant_api_key,
@@ -1544,7 +1552,9 @@ def _run_publish_locked(
     identity, retirement plan and staging target; then either the read-only
     re-certification of a generation that already serves, or a staging build
     that is verified and cut over."""
+    client = _get_qdrant(settings)
     res = _resolve_publication(
+        client,
         src,
         progress,
         settings,
@@ -1557,9 +1567,10 @@ def _run_publish_locked(
         rules_v=rules_v,
     )
     if res.live == res.staging:
-        return _recertify_live(res, progress, settings, prewalked=prewalked, rules_v=rules_v)
+        return _recertify_live(res, client, progress, settings, prewalked=prewalked, rules_v=rules_v)
     return _build_and_cut_over(
         res,
+        client,
         src,
         progress,
         workers,
@@ -1586,7 +1597,6 @@ class _Resolution:
     refusal while resolving happens before any storage, sidecar or
     inventory write."""
 
-    client: Any
     labels: str
     live: str | None
     legacy: bool
@@ -1601,6 +1611,7 @@ class _Resolution:
 
 
 def _resolve_publication(
+    client: QdrantReader,
     src: Path,
     progress: Path,
     settings: Settings,
@@ -1615,10 +1626,10 @@ def _resolve_publication(
 ) -> _Resolution:
     """Read-only resolution: publish-state format and predecessor binding,
     retirement plan selection (replaying a bound plan), walked-corpus
-    conflicts with that plan, and the staging target."""
+    conflicts with that plan, and the staging target. `client` is the
+    read-only protocol, so the type checker rejects a write here."""
     labels = source_labels(vendor, product, version)
     alias = settings.qdrant_collection
-    client = _get_qdrant(settings)
     live, legacy = resolve_live_collection(client, settings)
     gen_fp = generation_fingerprint(settings, rules_v, labels)
     corp_fp = corpus_fingerprint(prewalked)
@@ -1722,7 +1733,6 @@ def _resolve_publication(
         state=state,
     )
     return _Resolution(
-        client=client,
         labels=labels,
         live=live,
         legacy=legacy,
@@ -1737,21 +1747,20 @@ def _resolve_publication(
     )
 
 
-def _recertify_live(
+def _certify_live(
     res: _Resolution,
+    client: QdrantReader,
     progress: Path,
     settings: Settings,
+    staging_settings: Settings,
     *,
     prewalked: list[tuple[str, str]],
     rules_v: str,
-) -> int:
-    """The resolved generation already serves: re-verify it read-only, then
-    finish the bound retirement inventory and clear the sidecar."""
-    client, live, state, live_binding = res.client, res.live, res.state, res.live_binding
-    labels, retire_plan, gen_fp, corp_fp = res.labels, res.retire_plan, res.gen_fp, res.corp_fp
+) -> None:
+    """Every check re-certification makes on the serving generation. `client`
+    is the read-only protocol, so the type checker rejects a write here."""
+    live, labels, retire_plan = res.live, res.labels, res.retire_plan
     retired = frozenset(retire_plan)
-    alias = settings.qdrant_collection
-    staging_settings = settings.model_copy(update={"qdrant_collection": res.staging})
 
     # Steady state: the resolved generation already serves. That is a
     # plain rerun with the derived name (unforced), or a sidecar-bound
@@ -1810,6 +1819,28 @@ def _recertify_live(
             f"path(s) (e.g. {problems[0]!r}) — operator intervention required."
         )
     verify_publication_seal(client, completion_collection_name(staging_settings))
+
+
+def _recertify_live(
+    res: _Resolution,
+    client: QdrantPoints,
+    progress: Path,
+    settings: Settings,
+    *,
+    prewalked: list[tuple[str, str]],
+    rules_v: str,
+) -> int:
+    """The resolved generation already serves: re-verify it read-only
+    (_certify_live), backfill its publication receipt when a pre-build
+    generation has none, then finish the bound retirement inventory and
+    clear the sidecar."""
+    live, state, live_binding = res.live, res.state, res.live_binding
+    gen_fp, corp_fp = res.gen_fp, res.corp_fp
+    alias = settings.qdrant_collection
+    staging_settings = settings.model_copy(update={"qdrant_collection": res.staging})
+    _certify_live(
+        res, client, progress, settings, staging_settings, prewalked=prewalked, rules_v=rules_v
+    )
     if live_binding is None and read_publication_metadata(
         client, completion_collection_name(staging_settings)
     ) is None:
@@ -1840,6 +1871,7 @@ def _recertify_live(
 
 def _build_and_cut_over(
     res: _Resolution,
+    client: QdrantPoints,
     src: Path,
     progress: Path,
     workers: int | None,
@@ -1858,7 +1890,7 @@ def _build_and_cut_over(
     """A distinct staging generation: bind and record the build, prepare
     and build staging, apply approved removals, verify, then cut the alias
     over and finish the retirement inventory."""
-    client, live, legacy, state = res.client, res.live, res.legacy, res.state
+    live, legacy, state = res.live, res.legacy, res.state
     labels, retire_plan, gen_fp, corp_fp = res.labels, res.retire_plan, res.gen_fp, res.corp_fp
     staging, resumed, observed_aliases = res.staging, res.resumed, res.observed_aliases
     retired = frozenset(retire_plan)

@@ -4768,7 +4768,9 @@ def test_publication_checks_are_read_only_by_type(tmp_path):
     the read-only `QdrantReader`, so the checker used by qa:typecheck proves
     they cannot write (transitively: a reader can only reach other reader
     helpers), while every helper that mutates storage requires the writer
-    protocol and rejects a reader."""
+    protocol and rejects a reader. The publish decision step and the
+    re-certification checks are readers; re-certification's receipt
+    backfill is its one write and needs the writer."""
     import subprocess
     import sys
 
@@ -4785,7 +4787,14 @@ from mainframe_rag.ingest.publish import (
 )
 from mainframe_rag.ingest.qdrant_io import delete_by_doc, swap_alias_to
 from mainframe_rag.ingest.representation import check_ingest_compatible
+from mainframe_rag.ingest.run_ingest import (
+    _certify_live,
+    _placement_clients,
+    _recertify_live,
+    _resolve_publication,
+)
 from mainframe_rag.ports import QdrantReader
+from pathlib import Path
 """
     good = tmp_path / "good.py"
     good.write_text(imports + """
@@ -4796,6 +4805,10 @@ def checks(r: QdrantReader, real: qdrant_client.QdrantClient, s: Settings) -> No
     check_ingest_compatible(r, s, "c__completions", "rules")
     resolve_publish_staging(real, s, gen_fp="g", corpus_fp="c", live=None,
                             force_reingest=False, state=None)
+    res = _resolve_publication(r, Path("src"), Path("progress"), s, vendor=None, product=None,
+                               version=None, force_reingest=False, prewalked=[],
+                               retire_docs=None, rules_v="rules")
+    _certify_live(res, r, Path("progress"), s, s, prewalked=[], rules_v="rules")
 """)
     accepted = subprocess.run([*command, str(good)], capture_output=True, text=True, check=False)
     assert accepted.returncode == 0, accepted.stdout + accepted.stderr
@@ -4807,10 +4820,23 @@ def writes(r: QdrantReader, s: Settings) -> None:
     ensure_staging(r, s, s, None)
     delete_by_doc(r, s, "doc")
     swap_alias_to(r, s, "staging", None)
+    res = _resolve_publication(r, Path("src"), Path("progress"), s, vendor=None, product=None,
+                               version=None, force_reingest=False, prewalked=[],
+                               retire_docs=None, rules_v="rules")
+    _recertify_live(res, r, Path("progress"), s, prewalked=[], rules_v="rules")
+    with _placement_clients(s, r) as placement:
+        if placement is not None:
+            for peer in placement.values():
+                peer.delete_collection("staging")
 """)
     rejected = subprocess.run([*command, str(bad)], capture_output=True, text=True, check=False)
     assert rejected.returncode == 1, rejected.stdout + rejected.stderr
     for name in ("ensure_staging", "delete_by_doc", "swap_alias_to"):
         assert (f'Argument 1 to "{name}" has incompatible type "QdrantReader"; '
                 'expected "QdrantPoints"') in rejected.stdout
-    assert "Found 3 errors" in rejected.stdout
+    assert ('Argument 2 to "_recertify_live" has incompatible type "QdrantReader"; '
+            'expected "QdrantPoints"') in rejected.stdout
+    # The placement map (review of #699): the explicit 1/1/1 profile yields
+    # the publisher's own client, so its handles must be readers too.
+    assert '"QdrantReader" has no attribute "delete_collection"' in rejected.stdout
+    assert "Found 5 errors" in rejected.stdout
