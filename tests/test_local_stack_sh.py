@@ -42,6 +42,21 @@ def test_dryrun_plan_order_and_stages():
     assert "v1.search" in lines[8] and "mainframe-rag-agent" in lines[8]
 
 
+def test_dryrun_explicit_probe_budget_reaches_command():
+    r = _run({"GATEWAY_PROBE_MAX_TOKENS": "512"})
+    assert r.returncode == 0, r.stderr
+    probe = next(line for line in r.stdout.splitlines() if "probe_gateway.py" in line)
+    assert "--max-tokens 512" in probe
+
+
+@pytest.mark.parametrize("bad", ["0", "4097", "99999999999999999999", "1.5", "bad"])
+def test_bad_probe_budget_fails_before_stack_work(bad):
+    r = _run({"GATEWAY_PROBE_MAX_TOKENS": bad})
+    assert r.returncode != 0
+    assert "GATEWAY_PROBE_MAX_TOKENS must be" in r.stderr
+    assert "[plan]" not in r.stdout
+
+
 def test_dryrun_ui_enabled_by_default():
     r = _run()
     assert r.returncode == 0, r.stderr
