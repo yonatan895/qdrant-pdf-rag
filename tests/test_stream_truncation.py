@@ -65,26 +65,38 @@ def _settings_kwargs(**overrides):
     ids=["missing-done", "upstream-error"],
 )
 @pytest.mark.anyio
-async def test_achat_failed_stream_discards_partial_and_recovers_via_post(lines):
+@pytest.mark.parametrize("effort", [None, "high", "xhigh"])
+async def test_achat_failed_stream_discards_partial_and_recovers_via_post(lines, effort):
     """Buffered content is discarded; one POST supplies the complete answer."""
     fake = HttpxStreamFake(lines=lines, payload=_COMPLETE_PAYLOAD)
     settings = Settings(**_settings_kwargs(llm_stream=True))
     llm = HttpxLLMClient(settings, client=fake)
-    result = await llm.achat([ChatMessage(role="user", content="hi")])
+    result = await llm.achat([ChatMessage(role="user", content="hi")], reasoning_effort=effort)
     assert len(fake.post_bodies) == 1
+    for body in fake.stream_bodies + fake.post_bodies:
+        if effort is None:
+            assert "reasoning_effort" not in body
+        else:
+            assert body["reasoning_effort"] == effort
     assert result.content == "Complete answer"
     assert result.finish_reason == "stop"
 
 
-def test_chat_sync_truncated_stream_falls_back_to_complete_post():
+@pytest.mark.parametrize("effort", [None, "high", "xhigh"])
+def test_chat_sync_truncated_stream_falls_back_to_complete_post(effort):
     """Sync mirror of the achat case: truncation recovers through POST."""
     fake = HttpxStreamFake(lines=TRUNCATED_LINES, payload=_COMPLETE_PAYLOAD)
     fake.stream = fake.stream_sync  # Explicitly select the sync transport.
     settings = Settings(**_settings_kwargs(llm_stream=True))
     llm = HttpxLLMClient(settings, client=fake)
-    result = llm.chat([ChatMessage(role="user", content="hi")])
+    result = llm.chat([ChatMessage(role="user", content="hi")], reasoning_effort=effort)
     assert len(fake.stream_bodies) == 1
     assert len(fake.post_bodies) == 1
+    for body in fake.stream_bodies + fake.post_bodies:
+        if effort is None:
+            assert "reasoning_effort" not in body
+        else:
+            assert body["reasoning_effort"] == effort
     assert result.content == "Complete answer"
     assert result.finish_reason == "stop"
 

@@ -466,7 +466,8 @@ def test_no_auth_header_sent_on_nonstream_post_when_key_unset():
 
 
 @pytest.mark.anyio
-async def test_chat_stream_empty_fallback_posts_without_stream_flag():
+@pytest.mark.parametrize("effort", ["high", "xhigh"])
+async def test_chat_stream_empty_fallback_posts_without_stream_flag(effort):
     """Issue #363: the chat_stream empty-content recovery POST must carry
     non-streaming semantics (no stream key, no stream_options) while keeping
     model/messages/reasoning_effort/temperature identical to the SSE leg. A
@@ -487,7 +488,7 @@ async def test_chat_stream_empty_fallback_posts_without_stream_flag():
     llm = HttpxLLMClient(Settings(**_settings_kwargs()), client=fake)
     items = [
         item
-        async for item in llm.chat_stream(_msgs(), reasoning_effort="high", temperature=0.2)
+        async for item in llm.chat_stream(_msgs(), reasoning_effort=effort, temperature=0.2)
     ]
     assert fake.stream_bodies[0]["stream"] is True
     fallback = fake.post_bodies[-1]
@@ -495,6 +496,7 @@ async def test_chat_stream_empty_fallback_posts_without_stream_flag():
     assert "stream_options" not in fallback
     for key in ("model", "messages", "reasoning_effort", "temperature"):
         assert fallback[key] == fake.stream_bodies[0][key]
+    assert fallback["reasoning_effort"] == effort
     assert [i["type"] for i in items] == ["token", "done"]
     assert items[0]["delta"] == "recovered"
     assert items[0]["ttft_ms"] is not None

@@ -8,12 +8,14 @@ condensation gate, and the empty-hits stream shape.
 from __future__ import annotations
 
 import inspect
+import json
 
 import pytest
 
 from mainframe_rag.agent.answer import (
     REASON_MALFORMED_FRAME,
     REASON_MISSING_FINISH,
+    HttpxLLMClient,
     TruncatedStreamError,
 )
 from mainframe_rag.agent.answer_core import (
@@ -31,6 +33,7 @@ from mainframe_rag.agent.model_adapter import ModelAdapter
 from mainframe_rag.config import Settings
 from mainframe_rag.ports import ChatMessage, ChatResult, TokenUsage
 from mainframe_rag.retrieve.query import SearchHit
+from tests.fakes import HttpxStreamFake
 
 
 def _settings(**overrides) -> Settings:
@@ -547,6 +550,54 @@ async def test_core_reasoning_effort_explicit_override_stream():
     ):
         pass
     assert llm.calls[0]["reasoning_effort"] == "medium"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("effort", ["high", "xhigh"])
+@pytest.mark.parametrize("source", ["setting", "override"])
+@pytest.mark.parametrize("mode", ["post", "buffered_sse", "stream"])
+@pytest.mark.parametrize("query,field", [
+    ("IEA500I", "llm_reasoning_effort_simple"),
+    ("diagnose abend S0C4 with registers and spool dump", "llm_reasoning_effort_complex"),
+])
+async def test_core_selected_reasoning_effort_reaches_http_request(effort, source, mode, query, field):
+    """Settings and explicit overrides survive the public core and real client."""
+    values = {
+        "llm_stream": mode == "buffered_sse",
+        "llm_reasoning_effort_simple": "low",
+        "llm_reasoning_effort_complex": "medium",
+    }
+    if source == "setting":
+        values[field] = effort
+    settings = _settings(**values)
+    content = "Reissue the command.\n\nCitations:\n- " + _hit().cite
+    transport = HttpxStreamFake(
+        lines=[
+            "data: " + json.dumps({"choices": [{"delta": {"content": content}}]}),
+            'data: {"choices": [{"delta": {}, "finish_reason": "stop"}]}',
+            "data: [DONE]",
+        ],
+        payload={"choices": [{"message": {"content": content}, "finish_reason": "stop"}]},
+    )
+    llm = HttpxLLMClient(settings, client=transport)
+
+    def retrieve(*_a, **_k):
+        return [_hit()], "nl", {}
+
+    input_data = AnswerCoreInput(query=query, reasoning_effort=effort if source == "override" else None)
+    deps = _deps(settings, llm, retrieve)
+    if mode == "stream":
+        events = [event async for event in execute_answer_core_stream(input_data, deps)]
+        output = events[-1]["output"]
+    else:
+        output = await execute_answer_core(input_data, deps)
+
+    assert output.finish_reason == "stop"
+    assert output.answer == "Reissue the command."
+    assert transport.capture["url"] == "http://llm.internal/v1/chat/completions"
+    bodies = transport.post_bodies if mode == "post" else transport.stream_bodies
+    assert len(bodies) == 1
+    assert bodies[0]["reasoning_effort"] == effort
 
 
 @pytest.mark.anyio
