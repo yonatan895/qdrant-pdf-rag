@@ -570,6 +570,16 @@ def prepare(args: argparse.Namespace, *, source_root: Path | None = None) -> int
                             deadline_seconds=args.deadline_seconds)
     if not re.fullmatch(r"[^\s]+@sha256:[0-9a-f]{64}", args.gateway_image):
         raise LabError("gateway image must be the existing gateway owner's digest pin")
+    docker_gateway = None
+    if args.docker_gateway is not None:
+        try:
+            address = ipaddress.IPv4Address(args.docker_gateway)
+        except ipaddress.AddressValueError as exc:
+            raise LabError("explicit Docker gateway must be a numeric RFC1918 IPv4 address") from exc
+        if not any(address in ipaddress.IPv4Network(network)
+                   for network in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")):
+            raise LabError("explicit Docker gateway must be a numeric RFC1918 IPv4 address")
+        docker_gateway = str(address)
     for port in (args.reasoning_port, args.embedding_port, args.qdrant_port):
         if not 1024 <= port <= 65535:
             raise LabError("local ports must be distinct unprivileged TCP ports")
@@ -587,6 +597,7 @@ def prepare(args: argparse.Namespace, *, source_root: Path | None = None) -> int
                for value in (gateway_name, gateway_network)):
         raise LabError("gateway and network names must be bounded Docker object names")
     config = {"dataset": args.dataset, "gateway_image": args.gateway_image,
+              "docker_gateway": docker_gateway,
               "gateway_name": gateway_name, "gateway_network": gateway_network,
               "gateway_debug": "0",
               "reasoning_port": args.reasoning_port, "embedding_port": args.embedding_port,
@@ -1494,7 +1505,9 @@ class Run:
                 verify_production_sources(self.production_admission(), deadline=time.monotonic() + seconds)
             if not re.search(r"\b0\.7\.4\b", self.colab("version").stdout):
                 raise LabError("google-colab-cli 0.7.4 is required")
-            bridge = self.command([self.tools["docker"], "network", "inspect", "bridge", "--format", "{{(index .IPAM.Config 0).Gateway}}"]).stdout.strip()
+            bridge = self.config.get("docker_gateway")
+            if bridge is None:
+                bridge = self.command([self.tools["docker"], "network", "inspect", "bridge", "--format", "{{(index .IPAM.Config 0).Gateway}}"]).stdout.strip()
             address = ipaddress.ip_address(bridge)
             if address.version != 4 or address.is_unspecified or address.is_multicast or bridge == "127.0.0.1":
                 raise LabError("Docker bridge gateway must be a specific IPv4 address")
@@ -1625,6 +1638,7 @@ def parser() -> argparse.ArgumentParser:
     prep.add_argument("--profile", choices=COLAB_PROFILES, default="COLAB_G4_BF16")
     prep.add_argument("--dataset", choices=("production", "synthetic"), default="production")
     prep.add_argument("--gateway-image", required=True)
+    prep.add_argument("--docker-gateway", help="explicit numeric RFC1918 host listener; default: native Docker bridge")
     for name in ("corpus", "golden", "inventory", "source-inventory", "embedding-evidence",
                  "production-approval", "data-state", "kubeconfig", "inference-lock", "transport-receipt"):
         prep.add_argument("--" + name, type=Path)

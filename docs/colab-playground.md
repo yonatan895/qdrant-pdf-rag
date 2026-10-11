@@ -85,7 +85,17 @@ flock -n -E 75 "$HOME/.cache/agent-tmp/mainframe-rag-heavy.lock" \
 
 The controller first verifies an exact owned session endpoint, then one SSH
 connection with four model-port forwards: host loopback and the selected local
-Docker bridge. Fresh known-hosts state and a private SSH key belong to this run.
+Docker-to-host address. Native Docker uses its bridge gateway by default.
+Docker Desktop's bridge can belong to a separate VM and be unavailable to the
+WSL host. In that case, explicitly pass `COLAB_DOCKER_GATEWAY` during preparation
+with a numeric RFC1918 IPv4 address on the controller host, after proving that
+the pinned gateway container can reach that specific listener. The address is
+frozen in the run configuration; later environment changes cannot redirect it.
+There is no automatic discovery or fallback. Wildcard, loopback, public,
+link-local addresses and hostnames are refused as explicit overrides. Existing
+preallocation bind checks and actual gateway-network probes remain required;
+the successful CPU receipt binds this effective address for GPU admission.
+Fresh known-hosts state and a private SSH key belong to this run.
 Every CLI operation uses the run's private `colab-sessions.json` store, including
 runtime execution, SSH and the printed recovery command. SSH uses unnamed proxy
 mode: CLI 0.7.4 resolves the sole live record in that isolated store and refuses
@@ -116,6 +126,7 @@ is new for each run.
 | Task input | Controller input / meaning |
 | --- | --- |
 | `COLAB_STATE`, `COLAB_GATEWAY_IMAGE` | Required fresh private state and existing gateway digest |
+| `COLAB_DOCKER_GATEWAY` | Optional `--docker-gateway`; frozen numeric RFC1918 host listener instead of native bridge discovery |
 | `PRODUCTION_CORPUS_DIR`, `PRODUCTION_GOLDEN_PATH` | `--corpus`, `--golden`; originals and grounded JSONL |
 | `COLAB_INVENTORY`, `COLAB_DATA_STATE` | `--inventory`, `--data-state`; census and retained ingest progress |
 | `COLAB_SOURCE_INVENTORY` | `--source-inventory`; independently discovered complete source membership and hashes |

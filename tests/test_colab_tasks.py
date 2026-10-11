@@ -36,8 +36,10 @@ class ColabTaskTests(unittest.TestCase):
             f"COLAB_PRODUCTION_APPROVAL={private}/production-approval.json",
             f"COLAB_DATA_STATE={private}/retained", "COLAB_KUBE_CONTEXT=context = 'one'",
             "COLAB_DEADLINE_SECONDS=180", "COLAB_CU_CAP=1", "COLAB_CU_FLOOR=10",
+            f"COLAB_DOCKER_GATEWAY={private}",
             extra_env={**boundary.recorder_env, "COLAB_STATE": "ambient wrong value",
-                       "PRODUCTION_CORPUS_DIR": "ambient wrong corpus"},
+                       "PRODUCTION_CORPUS_DIR": "ambient wrong corpus",
+                       "COLAB_DOCKER_GATEWAY": "ambient wrong address"},
         )
         self.assertEqual(proc.returncode, 0, proc.stdout)
         self.assertEqual([call["argv"] for call in boundary.calls()], [[
@@ -50,6 +52,7 @@ class ColabTaskTests(unittest.TestCase):
             "--production-approval", private + "/production-approval.json",
             "--data-state", private + "/retained", "--kube-context", "context = 'one'",
             "--deadline-seconds", "180", "--cu-cap", "1", "--cu-floor", "10",
+            "--docker-gateway", private,
         ]])
         self.assertFalse(marker.exists(), "Task input was evaluated as shell source")
 

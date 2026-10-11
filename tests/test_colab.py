@@ -1419,6 +1419,45 @@ def test_successful_cpu_receipt_is_created_only_after_exact_release_absence(lab)
     assert json.loads((root / "sessions.json").read_text()) == {}
 
 
+@pytest.mark.parametrize("address", ["10.23.4.5", "172.20.5.6", "192.168.42.3"])
+def test_explicit_private_docker_gateway_is_frozen_and_checked_before_allocation(lab, monkeypatch, address):
+    root, base, _ = lab
+    state = _prepare_new(base, root / "explicit-route", extra=("--docker-gateway", address))
+    prepared = json.loads((state / "manifest.json").read_text())
+    assert prepared["config"]["docker_gateway"] == address
+    monkeypatch.setenv("COLAB_DOCKER_GATEWAY", "10.99.99.99")
+    checked = []
+
+    def unavailable(self, host, port):
+        checked.append((host, port))
+        if host == address:
+            raise controller.LabError("original fixture private listener is unavailable")
+
+    monkeypatch.setattr(controller.Run, "free_port", unavailable)
+    assert _run_fake(state) != 0
+    assert checked == [("127.0.0.1", prepared["config"]["reasoning_port"]),
+                       (address, prepared["config"]["reasoning_port"])]
+    assert not any(kind == "docker" and argv[:3] == ["network", "inspect", "bridge"]
+                   for kind, argv in _events(root))
+    assert not any(kind == "colab" and argv[2] == "new" for kind, argv in _events(root))
+    failed = json.loads((state / "manifest.json").read_text())
+    assert failed["allocation_attempted"] is False and failed["endpoint"] is None
+    assert not (state / "transport-receipt.json").exists()
+
+
+@pytest.mark.parametrize("address", ["0.0.0.0", "127.0.0.1", "127.0.0.2", "169.254.1.2",
+                                     "192.0.2.1", "100.64.0.1", "8.8.8.8", "224.0.0.1",
+                                     "::1", "fd00::1", "host.docker.internal", "http://10.0.0.1",
+                                     "10.0.0.1:8000", "10.0.0.1\n", "010.0.0.1"])
+def test_non_private_or_non_numeric_docker_gateway_refuses_preparation(lab, address):
+    root, base, _ = lab
+    state = root / "rejected-route"
+    argv, source = _prepare_arguments(base, state, extra=("--docker-gateway", address))
+    assert _controller_call(argv, source_root=source) == 2
+    assert not state.exists()
+    assert _events(root) == []
+
+
 def test_cpu_transport_survives_delayed_listener_inside_run_deadline_then_next_run_works(lab, monkeypatch):
     root, state, command = lab
     manifest = json.loads((state / "manifest.json").read_text())
