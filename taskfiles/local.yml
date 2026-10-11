@@ -265,7 +265,7 @@ tasks:
     cmds:
       - >-
         if [ -n "${TASK_CORPUS_DIR:-}" ]; then export CORPUS_DIR="$TASK_CORPUS_DIR"; fi;
-        if [ -n "${TASK_LOCAL_INGEST_PROGRESS:-}" ]; then export LOCAL_INGEST_PROGRESS="$TASK_LOCAL_INGEST_PROGRESS"; fi;
+        if [ -n "${TASK_LOCAL_INGEST_PROGRESS:-}" ]; then export LOCAL_INGEST_PROGRESS="$TASK_LOCAL_INGEST_PROGRESS"; else unset LOCAL_INGEST_PROGRESS; fi;
         if [ -n "${TASK_GATEWAY_PORT:-}" ]; then export GATEWAY_PORT="$TASK_GATEWAY_PORT"; fi;
         if [ -n "${TASK_LOCAL_AGENT_PORT:-}" ]; then export LOCAL_AGENT_PORT="$TASK_LOCAL_AGENT_PORT"; fi;
         if [ -n "${TASK_GATEWAY_PROBE_MAX_TOKENS:-}" ]; then export GATEWAY_PROBE_MAX_TOKENS="$TASK_GATEWAY_PROBE_MAX_TOKENS"; fi;

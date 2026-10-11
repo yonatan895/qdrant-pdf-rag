@@ -1162,6 +1162,22 @@ class TaskContractsTests(unittest.TestCase):
         calls = self.script_calls("run_local_stack.sh")
         self.assertEnvSubset(calls[0], {"LOCAL_STACK_DRYRUN": "0"})
 
+    def test_stack_explicit_empty_progress_overrides_ambient_to_the_default(self):
+        self.make_venv_fake()
+        self.make_script_recorder("run_local_stack.sh")
+        env = dict(self.tool_env(), LOCAL_INGEST_PROGRESS="/old/inventory.jsonl")
+        proc = self.run_task("local:stack", "LOCAL_INGEST_PROGRESS=", extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        call = self.script_calls("run_local_stack.sh")[0]
+        self.assertEnvSubset(call, {"LOCAL_INGEST_PROGRESS": None})
+        shutil.copyfile(REPO / "scripts/run_local_stack.sh", self.root / "scripts/run_local_stack.sh")
+        logs = self.root / "default logs"
+        proc = self.run_task("local:stack", "LOCAL_INGEST_PROGRESS=", "LOCAL_STACK_DRYRUN=1",
+                             f"CORPUS_DIR={self.root}", extra_env=dict(env, LOCAL_STACK_LOG_DIR=str(logs)))
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn(f"--progress {logs}/local-stack-ingest-progress.jsonl", proc.stdout)
+        self.assertNotIn("/old/inventory.jsonl", proc.stdout)
+
     def test_agent_stream_port_and_ui(self):
         self.make_venv_fake()
         env = self.tool_env()
