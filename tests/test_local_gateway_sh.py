@@ -1,16 +1,19 @@
 """Render + fail-closed tests for scripts/run_local_gateway.sh (local-dev only).
 
-Hermetic: every case runs with GATEWAY_DRYRUN=1 (render-only, exits before
-any docker call) and dummy sk-test-* keys, so no daemon, no network, no GPU.
+Hermetic: rendering uses GATEWAY_DRYRUN=1 and dummy sk-test-* keys. Transport
+cases use executable Docker/curl fakes and tiny loopback HTTP servers; no daemon,
+external network, GPU, real gateway or model service is contacted.
 """
 
 from __future__ import annotations
 
+import http.server
 import json
 import os
 import shutil
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -397,3 +400,427 @@ def test_trace_export_keeps_only_allowlisted_attributes(monkeypatch):
     assert out.name == "litellm_request" and (out.start_time, out.end_time) == (1, 2)
     assert canary not in repr(out.to_json())
     exporter.shutdown()
+
+
+TRANSPORT_IMAGE = "example.invalid/gateway@sha256:" + "a" * 64
+TRANSPORT_NETWORK = "rag-owned-model-net"
+BRIDGE_ID = "b" * 64
+
+GATEWAY_DOCKER_FAKE = r'''
+import json, os, pathlib, subprocess, sys
+root = pathlib.Path(os.environ["FAKE_GATEWAY_ROOT"])
+args = sys.argv[1:]
+kind = pathlib.Path(sys.argv[0]).name
+with (root / "calls.jsonl").open("a") as stream:
+    stream.write(json.dumps([kind, args]) + "\n")
+if kind == "curl":
+    if "-w" in args:
+        print("401" if any("sk-local-wrong" in arg for arg in args) else "200", end="")
+    sys.exit(0)
+state_path = root / "networks.json"
+networks = json.loads(state_path.read_text())
+containers_path = root / "containers.json"
+containers = json.loads(containers_path.read_text()) if containers_path.exists() else {}
+def container(value):
+    return next((item for item in containers.values() if value in (item["name"], item["id"])), None)
+def retain_containers():
+    containers_path.write_text(json.dumps(containers))
+def network(value):
+    return next((item for item in networks.values() if value in (item["name"], item["id"])), None)
+if args[:2] == ["image", "inspect"]:
+    sys.exit(1 if os.environ.get("FAKE_GATEWAY_SCENARIO") == "missing-image" else 0)
+if args[:2] == ["network", "inspect"]:
+    item = network(args[2])
+    if item is None:
+        sys.exit(1)
+    assert args[3:] == ["--format", "{{.Id}} {{.Driver}}"]
+    print(item["id"] + " " + item["driver"])
+elif args[:2] == ["network", "create"]:
+    if network(args[2]):
+        sys.exit(1)
+    count_path = root / "network-count"
+    count = int(count_path.read_text()) + 1 if count_path.exists() else 1
+    count_path.write_text(str(count))
+    networks[args[2]] = {"name": args[2], "id": f"{count:064x}", "driver": "bridge"}
+    if os.environ.get("FAKE_GATEWAY_SCENARIO") == "replace-after-create":
+        networks[args[2]]["id"] = "d" * 64
+    state_path.write_text(json.dumps(networks))
+    print(f"{count:064x}")
+elif args[:2] == ["network", "ls"]:
+    assert args[2:] == ["--no-trunc", "--filter", args[4], "--format", "{{.ID}}"]
+    identifier = args[4].removeprefix("id=")
+    item = network(identifier)
+    if item:
+        print(item["id"])
+elif args[:2] == ["network", "rm"]:
+    item = network(args[2])
+    if item is None:
+        sys.exit(1)
+    # Docker daemon resources outlive the client process. A connected PG
+    # prevents network removal even after its original shell was killed.
+    if any(value["network"] in (item["id"], item["name"]) for value in containers.values()):
+        sys.exit(1)
+    del networks[item["name"]]
+    state_path.write_text(json.dumps(networks))
+elif args and args[0] == "ps":
+    selected = list(containers.values())
+    if "--filter" in args:
+        label = args[args.index("--filter") + 1]
+        assert label.startswith("label=io.mainframe-rag.gateway-run=")
+        key, expected = label.removeprefix("label=").split("=", 1)
+        selected = [item for item in selected if item["labels"].get(key) == expected]
+    if "--format" in args:
+        assert args[args.index("--format") + 1] == "{{.Names}}"
+        print("\n".join(item["name"] for item in selected))
+    else:
+        assert "-aq" in args and "--no-trunc" in args
+        print("\n".join(item["id"] for item in selected))
+elif args and args[0] == "inspect":
+    format_at = args.index("--format")
+    targets = [value for index, value in enumerate(args[1:], 1) if index not in (format_at, format_at + 1)]
+    assert len(targets) == 1
+    item = container(targets[0])
+    if item is None:
+        sys.exit(1)
+    assert args[format_at + 1] == '{{.Id}} {{index .Config.Labels "io.mainframe-rag.gateway-run"}}'
+    print(item["id"] + " " + item["labels"].get("io.mainframe-rag.gateway-run", "<no value>"))
+elif args and args[0] in ("stop", "rm"):
+    targets = [value for value in args[1:] if not value.startswith("-")]
+    failed = False
+    for target in targets:
+        item = container(target)
+        if item is None:
+            failed = True
+        else:
+            del containers[item["id"]]
+    retain_containers()
+    sys.exit(1 if failed else 0)
+elif args and args[0] == "exec":
+    item = container(args[1])
+    assert args[2:] == ["pg_isready", "-U", "litellm"]
+    if item is None:
+        sys.exit(1)
+    (root / "pg-readiness-entered").write_text(item["id"])
+    sys.exit(1 if os.environ.get("FAKE_GATEWAY_SCENARIO") == "postgres-notready" else 0)
+elif args and args[0] == "run":
+    item = network(args[args.index("--network") + 1])
+    if item is None:
+        sys.exit(7)
+    if "--entrypoint" in args:
+        assert args[args.index("--entrypoint") + 1] == "python"
+        assert "--add-host=host.docker.internal:host-gateway" in args
+        assert args[args.index("--pull") + 1] == "never"
+        code_index = args.index("-c")
+        assert args[code_index - 1] == os.environ["FAKE_GATEWAY_IMAGE"]
+        urls = args[code_index + 2:]
+        expected = [os.environ["FAKE_GATEWAY_REASONING_URL"], os.environ["FAKE_GATEWAY_EMBED_URL"]]
+        if urls != expected:
+            sys.exit(8)
+        # The discriminating case: default bridge remains healthy while the
+        # later gateway's actual network cannot reach these same addresses.
+        if (item["name"] != "bridge" and
+                (item["name"] != os.environ["FAKE_GATEWAY_NETWORK"] or
+                 os.environ.get("FAKE_GATEWAY_SCENARIO") == "gateway-network-down")):
+            sys.exit(7)
+        subprocess.run([sys.executable, "-c", args[code_index + 1], *urls], check=True)
+    else:
+        name = args[args.index("--name") + 1]
+        if container(name):
+            sys.exit(1)
+        counter_path = root / "container-count"
+        count = int(counter_path.read_text()) + 1 if counter_path.exists() else 1
+        counter_path.write_text(str(count))
+        identifier = f"{count:064x}"
+        labels = {}
+        for index, value in enumerate(args):
+            if value == "--label":
+                key, label = args[index + 1].split("=", 1)
+                labels[key] = label
+            elif value.startswith("--label="):
+                key, label = value.removeprefix("--label=").split("=", 1)
+                labels[key] = label
+        containers[identifier] = {"id": identifier, "name": name, "network": item["id"], "labels": labels}
+        retain_containers()
+        if "-d" in args:
+            assert args[args.index("-v") + 1].endswith(":/var/lib/postgresql/data")
+            print(identifier)
+        else:
+            assert "--add-host=host.docker.internal:host-gateway" in args
+            mount = args[args.index("-v") + 1]
+            assert mount.endswith(":/app/gateway:ro")
+            source = mount.removesuffix(":/app/gateway:ro")
+            (root / "rendered-gateway.yaml").write_text((pathlib.Path(source) / "config.yaml").read_text())
+            # A short successful gateway exits naturally. Docker --rm removes
+            # it; the daemon PG remains until explicit owned cleanup.
+            assert "--rm" in args
+            del containers[identifier]
+            retain_containers()
+elif args and args[0] == "volume":
+    pass
+else:
+    raise AssertionError("unsupported fake Docker operation")
+'''
+
+
+@pytest.fixture
+def gateway_transport(tmp_path):
+    root = tmp_path / "gateway-owner"
+    root.mkdir()
+    binary_dir = root / "bin"
+    binary_dir.mkdir()
+    for name in ("owned-docker", "curl"):
+        executable = binary_dir / name
+        executable.write_text(f"#!{sys.executable}\n" + GATEWAY_DOCKER_FAKE)
+        executable.chmod(0o755)
+    # Explicit Docker executable selection must survive every owner operation.
+    docker = binary_dir / "docker"
+    docker.write_text("#!/bin/sh\nexit 99\n")
+    docker.chmod(0o755)
+    (root / "networks.json").write_text(json.dumps({
+        "bridge": {"name": "bridge", "id": BRIDGE_ID, "driver": "bridge"},
+    }))
+    (root / "containers.json").write_text("{}")
+    hits = []
+    servers = []
+    threads = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            hits.append((self.server.server_port, self.path))
+            self.send_response(200 if self.path == "/health" else 404)
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    for _ in range(2):
+        server = http.server.ThreadingHTTPServer(("127.0.0.2", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": .01})
+        thread.start()
+        servers.append(server)
+        threads.append(thread)
+    urls = [f"http://127.0.0.2:{server.server_port}/v1" for server in servers]
+    env = {key: value for key, value in os.environ.items()
+           if not key.startswith(("GATEWAY_", "PG_", "LITELLM_", "FAKE_GATEWAY_"))
+           and key.lower() not in {"http_proxy", "https_proxy", "all_proxy", "no_proxy"}}
+    env.update({
+        **DUMMY_KEYS, "GATEWAY_NAME": "rag-owned-gateway", "PG_NET": TRANSPORT_NETWORK,
+        "GATEWAY_DOCKER_BIN": str(binary_dir / "owned-docker"),
+        "LITELLM_IMAGE": TRANSPORT_IMAGE, "GATEWAY_REASONING_URL": urls[0],
+        "GATEWAY_EMBED_URL": urls[1], "GATEWAY_OTEL_ENDPOINT": "http://unused.invalid:4318",
+        "GATEWAY_ENV_FILE": str(root / "gateway.env"), "GATEWAY_LOG": str(root / "gateway.log"),
+        "TMPDIR": str(root), "PATH": f"{binary_dir}:{os.environ['PATH']}",
+        "FAKE_GATEWAY_ROOT": str(root), "FAKE_GATEWAY_NETWORK": TRANSPORT_NETWORK,
+        "FAKE_GATEWAY_IMAGE": TRANSPORT_IMAGE, "FAKE_GATEWAY_REASONING_URL": urls[0],
+        "FAKE_GATEWAY_EMBED_URL": urls[1],
+    })
+    try:
+        yield root, env, urls, hits
+    finally:
+        for server in servers:
+            server.shutdown()
+            server.server_close()
+        for thread in threads:
+            thread.join(timeout=1)
+            assert not thread.is_alive()
+
+
+def _transport_operation(lab, operation="transport-probe", **extra):
+    return subprocess.run(["sh", str(SCRIPT), operation], env={**lab[1], **extra},
+                          capture_output=True, text=True, timeout=15, check=False)
+
+
+def _transport_calls(lab):
+    path = lab[0] / "calls.jsonl"
+    return [json.loads(line)[1] for line in path.read_text().splitlines()] if path.exists() else []
+
+
+def test_transport_probe_uses_gateway_image_network_and_actual_addresses_without_services(gateway_transport):
+    root, _, urls, hits = gateway_transport
+    result = _transport_operation(gateway_transport)
+    assert result.returncode == 0, result.stderr
+    proof = json.loads(result.stdout)
+    assert proof == {
+        "network_name": TRANSPORT_NETWORK, "network_id": "0" * 63 + "1", "created": True,
+        "gateway_image": TRANSPORT_IMAGE, "reasoning_url": urls[0], "embedding_url": urls[1],
+    }
+    calls = _transport_calls(gateway_transport)
+    runs = [args for args in calls if args[0] == "run"]
+    assert len(runs) == 1 and "--entrypoint" in runs[0]
+    assert runs[0][runs[0].index("--network") + 1] == proof["network_id"]
+    assert hits == [(int(urls[0].split(":")[2].split("/")[0]), "/health"),
+                    (int(urls[1].split(":")[2].split("/")[0]), "/health")]
+    assert not (root / "gateway.env").exists() and not (root / "gateway.log").exists()
+    assert not list(root.glob("local-gateway.*"))
+    assert all(args[0] not in ("exec", "stop", "volume") for args in calls)
+
+
+def test_gateway_network_failure_refuses_despite_healthy_host_and_default_bridge_then_recovers(gateway_transport):
+    import urllib.request
+
+    root, env, urls, _ = gateway_transport
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    for origin in urls:
+        with opener.open(origin.removesuffix("/v1") + "/health", timeout=2) as response:
+            assert response.status == 200
+    # A wrong default-bridge probe really succeeds under the same failure.
+    bridge = subprocess.run([
+        env["GATEWAY_DOCKER_BIN"], "run", "--rm", "--pull", "never", "--network", "bridge",
+        "--add-host=host.docker.internal:host-gateway", "--entrypoint", "python", TRANSPORT_IMAGE,
+        "-c", "import sys,urllib.request\nfor u in sys.argv[1:]: urllib.request.urlopen(u.removesuffix('/v1')+'/health',timeout=2).close()",
+        *urls,
+    ], env={**env, "FAKE_GATEWAY_SCENARIO": "gateway-network-down"}, capture_output=True,
+        text=True, timeout=5, check=False)
+    assert bridge.returncode == 0, bridge.stderr
+    failed = _transport_operation(gateway_transport, FAKE_GATEWAY_SCENARIO="gateway-network-down")
+    assert failed.returncode != 0 and "gateway network transport probe failed" in failed.stderr
+    failed_identity = json.loads(failed.stdout)
+    assert failed_identity["created"] is True
+    assert json.loads((root / "networks.json").read_text()) == {
+        "bridge": {"name": "bridge", "id": BRIDGE_ID, "driver": "bridge"},
+    }
+    recovered = _transport_operation(gateway_transport)
+    assert recovered.returncode == 0, recovered.stderr
+    assert json.loads(recovered.stdout)["network_id"] == "0" * 63 + "2"
+
+
+def test_preexisting_network_survives_probe_failure_and_release(gateway_transport):
+    root = gateway_transport[0]
+    network_file = root / "networks.json"
+    networks = json.loads(network_file.read_text())
+    networks[TRANSPORT_NETWORK] = {"name": TRANSPORT_NETWORK, "id": "c" * 64, "driver": "bridge"}
+    network_file.write_text(json.dumps(networks))
+    failed = _transport_operation(gateway_transport, FAKE_GATEWAY_SCENARIO="gateway-network-down")
+    assert failed.returncode != 0
+    identity = json.loads(failed.stdout)
+    assert identity["created"] is False and identity["network_id"] == "c" * 64
+    release = _transport_operation(gateway_transport, "transport-release",
+                                   GATEWAY_TRANSPORT_NETWORK_ID=identity["network_id"],
+                                   GATEWAY_TRANSPORT_NETWORK_CREATED="0")
+    assert release.returncode == 0, release.stderr
+    assert json.loads(network_file.read_text()) == networks
+    assert not any(args[:2] == ["network", "rm"] or args[0] == "stop"
+                   for args in _transport_calls(gateway_transport))
+
+
+@pytest.mark.parametrize("existing", ["container-name", "owner-label"])
+def test_preexisting_container_or_owner_scope_is_never_adopted_by_native_launch(gateway_transport, existing):
+    root, env, _, _ = gateway_transport
+    owner = "rag-" + "a" * 16
+    foreign = {"f" * 64: {
+        "id": "f" * 64,
+        "name": env["GATEWAY_NAME"] + "-pg" if existing == "container-name" else "preexisting-owner-container",
+        "network": BRIDGE_ID,
+        "labels": {"io.mainframe-rag.gateway-run": owner if existing == "owner-label" else "rag-" + "b" * 16},
+    }}
+    containers = root / "containers.json"
+    containers.write_text(json.dumps(foreign))
+    probe = _transport_operation(gateway_transport, GATEWAY_RUN_OWNER=owner)
+    if existing == "owner-label":
+        assert probe.returncode != 0, "probe adopted a preexisting run-labelled daemon"
+        assert not any(argv[:2] == ["network", "create"] for argv in _transport_calls(gateway_transport))
+    else:
+        assert probe.returncode == 0, probe.stderr
+        identity = json.loads(probe.stdout)
+        refused = _transport_operation(
+            gateway_transport, "serve", GATEWAY_RUN_OWNER=owner,
+            GATEWAY_TRANSPORT_NETWORK_ID=identity["network_id"], GATEWAY_TRANSPORT_NETWORK_CREATED="1",
+        )
+        assert refused.returncode != 0 and "already exists" in refused.stderr
+        released = _transport_operation(
+            gateway_transport, "transport-release", GATEWAY_RUN_OWNER=owner,
+            GATEWAY_TRANSPORT_NETWORK_ID=identity["network_id"], GATEWAY_TRANSPORT_NETWORK_CREATED="1",
+        )
+        assert released.returncode == 0, released.stderr
+    assert json.loads(containers.read_text()) == foreign
+    assert all(argv[0] not in ("stop", "rm", "volume") for argv in _transport_calls(gateway_transport))
+
+
+def test_probe_then_normal_launch_reuses_exact_network_and_renders_probed_urls(gateway_transport):
+    root, _, urls, _ = gateway_transport
+    probe = _transport_operation(gateway_transport)
+    assert probe.returncode == 0, probe.stderr
+    identity = json.loads(probe.stdout)
+    started = _transport_operation(gateway_transport, "serve",
+                                   GATEWAY_TRANSPORT_NETWORK_ID=identity["network_id"],
+                                   GATEWAY_TRANSPORT_NETWORK_CREATED="1")
+    assert started.returncode == 0, started.stderr
+    normal_runs = [args for args in _transport_calls(gateway_transport)
+                   if args[0] == "run" and "--entrypoint" not in args]
+    assert len(normal_runs) == 2
+    assert all(args[args.index("--network") + 1] == identity["network_id"] for args in normal_runs)
+    config = yaml.safe_load((root / "rendered-gateway.yaml").read_text())
+    assert [item["litellm_params"]["api_base"] for item in config["model_list"][:2]] == urls
+    assert sum(args[:2] == ["network", "create"] for args in _transport_calls(gateway_transport)) == 1
+
+
+def test_network_name_reuse_refuses_launch_and_preserves_replacement_during_cleanup(gateway_transport):
+    root = gateway_transport[0]
+    probe = _transport_operation(gateway_transport)
+    assert probe.returncode == 0, probe.stderr
+    identity = json.loads(probe.stdout)
+    network_file = root / "networks.json"
+    networks = json.loads(network_file.read_text())
+    networks[TRANSPORT_NETWORK]["id"] = "d" * 64
+    network_file.write_text(json.dumps(networks))
+    before = len(_transport_calls(gateway_transport))
+    refused = _transport_operation(gateway_transport, "serve",
+                                   GATEWAY_TRANSPORT_NETWORK_ID=identity["network_id"],
+                                   GATEWAY_TRANSPORT_NETWORK_CREATED="1", GATEWAY_RESET_KEYS="1")
+    assert refused.returncode != 0 and "transport network identity changed" in refused.stderr
+    release = _transport_operation(gateway_transport, "transport-release",
+                                   GATEWAY_TRANSPORT_NETWORK_ID=identity["network_id"],
+                                   GATEWAY_TRANSPORT_NETWORK_CREATED="1")
+    # Absence of the old exact ID is successful cleanup; its replacement lives.
+    assert release.returncode == 0, release.stderr
+    following = _transport_calls(gateway_transport)[before:]
+    assert all(args[0] not in ("run", "stop", "volume") and args[:2] != ["network", "rm"]
+               for args in following)
+    assert json.loads(network_file.read_text()) == networks
+
+
+def test_owned_network_release_then_next_probe_uses_new_identity(gateway_transport):
+    first = _transport_operation(gateway_transport)
+    assert first.returncode == 0, first.stderr
+    identity = json.loads(first.stdout)
+    release = _transport_operation(gateway_transport, "transport-release",
+                                   GATEWAY_TRANSPORT_NETWORK_ID=identity["network_id"],
+                                   GATEWAY_TRANSPORT_NETWORK_CREATED="1")
+    assert release.returncode == 0, release.stderr
+    assert ["network", "rm", identity["network_id"]] in _transport_calls(gateway_transport)
+    assert all(args[0] != "stop" for args in _transport_calls(gateway_transport))
+    repeated = _transport_operation(gateway_transport, "transport-release",
+                                    GATEWAY_TRANSPORT_NETWORK_ID=identity["network_id"],
+                                    GATEWAY_TRANSPORT_NETWORK_CREATED="1")
+    assert repeated.returncode == 0, repeated.stderr
+    next_probe = _transport_operation(gateway_transport)
+    assert next_probe.returncode == 0, next_probe.stderr
+    assert json.loads(next_probe.stdout)["network_id"] == "0" * 63 + "2"
+
+
+def test_network_replacement_after_create_cannot_inherit_cleanup_ownership(gateway_transport):
+    root = gateway_transport[0]
+    failed = _transport_operation(gateway_transport, FAKE_GATEWAY_SCENARIO="replace-after-create")
+    assert failed.returncode != 0 and "transport network identity is unavailable" in failed.stderr
+    assert json.loads((root / "networks.json").read_text())[TRANSPORT_NETWORK]["id"] == "d" * 64
+    calls = _transport_calls(gateway_transport)
+    assert ["network", "rm", "0" * 63 + "1"] in calls
+    assert all(args[0] != "run" and args != ["network", "rm", "d" * 64] for args in calls)
+
+
+def test_missing_pinned_image_refuses_before_network_creation(gateway_transport):
+    failed = _transport_operation(gateway_transport, FAKE_GATEWAY_SCENARIO="missing-image")
+    assert failed.returncode != 0 and "pinned image already present" in failed.stderr
+    assert all(args[0] == "image" for args in _transport_calls(gateway_transport))
+
+
+@pytest.mark.parametrize("overrides", [
+    {"GATEWAY_REASONING_URL": "http://host.docker.internal:8000/v1"},
+    {"GATEWAY_EMBED_URL": "http://127.0.0.2:8001/other"},
+    {"LITELLM_IMAGE": "example.invalid/gateway:latest"},
+])
+def test_unprobed_address_or_unpinned_image_refuses_before_docker(gateway_transport, overrides):
+    failed = _transport_operation(gateway_transport, **overrides)
+    assert failed.returncode != 0
+    assert "pinned image and numeric IPv4 HTTP backend URLs" in failed.stderr
+    assert _transport_calls(gateway_transport) == []
