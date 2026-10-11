@@ -1156,13 +1156,22 @@ included, is an intentional platform-owned collector.
 per-leg credentials must match the deployment. Gateway aliases are mutable and
 cannot attest weights. Secrets reach pods via Secret refs; rotations require the
 runbook's restart/verification. Local `GATEWAY_ENV_FILE` is launcher-owned and
-provides gateway URLs/model IDs/keys plus a local simulation revision label.
+provides gateway URLs/model IDs/keys plus `EMBED_MODEL_REVISION`. The local gateway
+accepts `GATEWAY_EMBED_MODEL_REVISION` as an opaque, caller-attested immutable
+weight identity and shell-quotes it in that private handoff. The local stack
+sources the exported value unchanged for both ingest and serving. Unset or empty
+input retains the existing `local:<model-id>` simulation label; that label does
+not attest immutable weights. Set the matching `DENSE_DIM` explicitly for another
+embedding model; the gateway does not infer dimensions or alter collections.
 Explicit CLI/Task/env model or endpoint overrides must apply or fail; ambiguous
 model discovery fails closed. No new production value is invented here.
 
 **Evidence:** `tests/test_airgap_validate_sh.py`, `test_airgap_deploy_sh.py`,
 `test_airgap_ingest_sh.py`, `test_airgap_pipeline_sh.py`, `test_config.py` and
-`test_representation_gate.py`. Render tests prove wiring under their fixtures;
+`test_representation_gate.py`. `test_local_gateway_sh.py` also exercises the real
+gateway handoff through local-stack ingest and serving process launches, including
+exact opaque revision round-trips across shell-significant text and whitespace.
+Render tests prove wiring under their fixtures;
 real trust/identity/model readiness still needs the application-pod gateway probe
 and release acceptance. `/healthz` plus search does not prove reasoning readiness.
 Known metadata/publication gaps remain #391; broader CI enforcement remains #370.
