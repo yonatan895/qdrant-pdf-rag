@@ -61,6 +61,15 @@ models:
     # Empty model disables /v1/answer; when set, baseUrl is required.
     baseUrl: ""
     model: ""
+    # Optional bounded app overrides (#706); absent keys preserve Settings
+    # defaults. Explicit zero thinking reserves and stream: false are retained.
+    # maxModelLen: 16384
+    # reservedOutputTokens: 2048
+    # thinkingReserveTokensSimple: 512
+    # thinkingReserveTokensComplex: 2048
+    # reasoningEffortSimple: low
+    # reasoningEffortComplex: medium
+    # stream: true
   rerank:
     enabled: false
     baseUrl: ""
