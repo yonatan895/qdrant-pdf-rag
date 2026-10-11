@@ -97,7 +97,14 @@
           "properties": {
             "baseUrl": { "type": "string" },
             "model": { "type": "string" },
-            "condenseEnabled": { "type": "boolean" }
+            "condenseEnabled": { "type": "boolean" },
+            "maxModelLen": { "type": "integer", "minimum": 512, "maximum": 131072 },
+            "reservedOutputTokens": { "type": "integer", "minimum": 128, "maximum": 16384 },
+            "thinkingReserveTokensSimple": { "type": "integer", "minimum": 0, "maximum": 16384 },
+            "thinkingReserveTokensComplex": { "type": "integer", "minimum": 0, "maximum": 16384 },
+            "reasoningEffortSimple": { "type": "string", "enum": ["low", "medium", "high", "xhigh"] },
+            "reasoningEffortComplex": { "type": "string", "enum": ["low", "medium", "high", "xhigh"] },
+            "stream": { "type": "boolean" }
           },
           "allOf": [
             {

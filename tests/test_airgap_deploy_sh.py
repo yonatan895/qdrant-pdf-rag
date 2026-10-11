@@ -9,6 +9,7 @@ name must never reach a cluster.
 import json
 import re
 import shutil
+import subprocess
 
 import pytest
 
@@ -147,6 +148,64 @@ def test_pull_secret_wired_agent_render_keeps_mapping(tree):
     assert r.returncode == 0, r.stderr
     rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
     assert_pull_secret_wired(rendered, "ghcr-pull")
+
+
+@pytest.mark.parametrize("source", ["file", "environment", "task"])
+def test_model_budget_operator_precedence_reaches_rendered_pod(tree, source):
+    """Exercise real common.sh, mapper and Helm, plus the public Task bridge.
+
+    File assignments are deliberately unexported; explicit env/Task settings
+    must beat conflicting file values and still reach the final Deployment.
+    """
+    root, log = tree
+    selected = {
+        "LLM_MAX_MODEL_LEN": "16384", "LLM_RESERVED_OUTPUT_TOKENS": "2048",
+        "LLM_THINKING_RESERVE_TOKENS_SIMPLE": "512",
+        "LLM_THINKING_RESERVE_TOKENS_COMPLEX": "2048",
+        "LLM_REASONING_EFFORT_SIMPLE": "low", "LLM_REASONING_EFFORT_COMPLEX": "medium",
+        "LLM_STREAM": "true", "UI_ENABLED": "true",
+        "CHAT_CONDENSE_ENABLED": "true", "RERANK_ENABLED": "false",
+    }
+    alternate = {
+        "LLM_MAX_MODEL_LEN": "8192", "LLM_RESERVED_OUTPUT_TOKENS": "1024",
+        "LLM_THINKING_RESERVE_TOKENS_SIMPLE": "0",
+        "LLM_THINKING_RESERVE_TOKENS_COMPLEX": "1000",
+        "LLM_REASONING_EFFORT_SIMPLE": "medium", "LLM_REASONING_EFFORT_COMPLEX": "high",
+        "LLM_STREAM": "false", "UI_ENABLED": "false",
+        "CHAT_CONDENSE_ENABLED": "false", "RERANK_ENABLED": "true",
+    }
+    file_values = {
+        "INTERNAL_REGISTRY": "reg.internal", "NAMESPACE": "ns",
+        "STORAGE_CLASS": "standard", "IMAGE_SHA": IMAGE_SHA,
+        "EMBED_MODEL": "embed", "DENSE_DIM": "64", "EMBED_MODEL_REVISION": "rev-1",
+        "EMBED_BASE_URL": "http://vllm:8000/v1",
+        **(selected if source == "file" else alternate),
+    }
+    env_file = root / "airgap.env"
+    env_file.write_text("".join(f"{key}={value}\n" for key, value in file_values.items()))
+    if source == "task":
+        shutil.copyfile(REPO / "Taskfile.yml", root / "Taskfile.yml")
+        shutil.copytree(REPO / "taskfiles", root / "taskfiles")
+        tools = root / "scripts/tools"
+        tools.mkdir()
+        for name in ("run-task.sh", "task-pin.txt"):
+            shutil.copyfile(REPO / "scripts/tools" / name, tools / name)
+        task_bin = root / ".tools/bin"
+        task_bin.mkdir(parents=True)
+        (task_bin / "task").symlink_to(REPO / ".tools/bin/task")
+        result = subprocess.run(
+            ["sh", str(tools / "run-task.sh"), "airgap:deploy",
+             *[f"{key}={value}" for key, value in selected.items()]],
+            capture_output=True, text=True, check=False, cwd=root,
+            env={"PATH": f"{root / 'bin'}:/usr/bin:/bin", "HELM_LOG": str(log),
+                 "AIRGAP_ENV": str(env_file), "AIRGAP_DRYRUN": "1", **alternate},
+        )
+    else:
+        overrides = selected if source == "environment" else {}
+        result = _run(tree, ("AIRGAP_ENV", str(env_file)), *overrides.items())
+    assert result.returncode == 0, result.stderr
+    pod = rendered_env((root / "dist/agent-rendered.yaml").read_text(), "agent")
+    assert {name: pod.get(name) for name in selected} == selected
 
 
 @pytest.mark.parametrize("bad_name", ["Bad_Name!", "a&b", "a|b"])
