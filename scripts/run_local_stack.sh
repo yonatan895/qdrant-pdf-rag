@@ -90,6 +90,7 @@ HOST_MEMINFO="${HOST_MEMINFO:-/proc/meminfo}"
 HOST_PSI_DIR="${HOST_PSI_DIR:-/proc/pressure}"
 HOST_CPUS="${HOST_CPUS:-$(nproc 2>/dev/null || echo 2)}"
 LOG_DIR="${LOCAL_STACK_LOG_DIR:-${TMPDIR:-/tmp}}"
+LOCAL_INGEST_PROGRESS="${LOCAL_INGEST_PROGRESS:-$LOG_DIR/local-stack-ingest-progress.jsonl}"
 DRYRUN="${LOCAL_STACK_DRYRUN:-0}"
 PY="${PY:-$REPO_ROOT/.venv/bin/python}"
 
@@ -189,7 +190,7 @@ if [ "$DRYRUN" = "1" ]; then
     echo "[plan] 4. gateway: GATEWAY_ENV_FILE=$GATEWAY_ENV_FILE sh scripts/run_local_gateway.sh"
     echo "[plan] 5. probe:   $PY scripts/probe_gateway.py --stream --max-tokens $GATEWAY_PROBE_MAX_TOKENS"
     if [ -n "$CORPUS_DIR" ]; then
-        echo "[plan] 6. ingest:  OTEL_SERVICE_NAME=$INGEST_SERVICE_NAME $PY -m mainframe_rag.ingest.run_ingest --src $CORPUS_DIR --workers $INGEST_WORKERS_CHOSEN (collection $QDRANT_COLLECTION)$INGEST_PLAN_NOTE"
+        echo "[plan] 6. ingest:  OTEL_SERVICE_NAME=$INGEST_SERVICE_NAME $PY -m mainframe_rag.ingest.run_ingest --src $CORPUS_DIR --workers $INGEST_WORKERS_CHOSEN --progress $LOCAL_INGEST_PROGRESS (collection $QDRANT_COLLECTION)$INGEST_PLAN_NOTE"
     else
         echo "[plan] 6. ingest:  skipped (CORPUS_DIR unset)"
     fi
@@ -327,7 +328,7 @@ step "Probing every model leg through the gateway"
 if [ -n "$CORPUS_DIR" ]; then
     step "Ingesting $CORPUS_DIR through the gateway (collection $QDRANT_COLLECTION)"
     OTEL_SERVICE_NAME="$INGEST_SERVICE_NAME" "$PY" -m mainframe_rag.ingest.run_ingest --src "$CORPUS_DIR" \
-        --workers "$INGEST_WORKERS_CHOSEN" --progress "$LOG_DIR/local-stack-ingest-progress.jsonl"
+        --workers "$INGEST_WORKERS_CHOSEN" --progress "$LOCAL_INGEST_PROGRESS"
 fi
 
 _health_code="$(curl -s -m 3 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$LOCAL_AGENT_PORT/healthz" 2>/dev/null || true)"

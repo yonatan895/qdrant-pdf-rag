@@ -6,8 +6,11 @@ and prints the ordered plan before any docker/network call.
 
 from __future__ import annotations
 
+import json
 import os
+import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -93,6 +96,57 @@ def test_dryrun_plan_includes_ingest_when_corpus_set(tmp_path):
     assert r.returncode == 0, r.stderr
     ingest = next(ln for ln in r.stdout.splitlines() if "ingest" in ln)
     assert str(tmp_path) in ingest and "skipped" not in ingest
+
+
+def test_persistent_progress_reaches_ingest_after_stack_cleanup_and_restart(tmp_path):
+    scripts = tmp_path / "checkout" / "scripts"
+    scripts.mkdir(parents=True)
+    shutil.copyfile(SCRIPT, scripts / SCRIPT.name)
+    gateway = scripts / "run_local_gateway.sh"
+    gateway.write_text('#!/bin/sh\nprintf "export EMBED_MODEL=fixture\\n" > "$GATEWAY_ENV_FILE"\nexec sleep 30\n')
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    (bindir / "curl").write_text('#!/bin/sh\ncase "$*" in */healthz*) printf 503;; *) printf 200;; esac\n')
+    (bindir / "docker").write_text('#!/bin/sh\nexit 99\n')
+    consumer = bindir / "consumer-python"
+    consumer.write_text(f"#!{sys.executable}\n" + '''import json, os, sys
+from pathlib import Path
+if sys.argv[1:3] == ["-m", "mainframe_rag.ingest.run_ingest"]:
+    progress = sys.argv[sys.argv.index("--progress") + 1]
+    with Path(progress).open("a") as target:
+        target.write("retained checkpoint\\n")
+    with open(os.environ["INGEST_CALLS"], "a") as target:
+        target.write(json.dumps(sys.argv[1:]) + "\\n")
+if sys.argv[1:3] == ["-m", "uvicorn"]:
+    sys.exit(23)
+''')
+    for path in bindir.iterdir():
+        path.chmod(0o755)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    persistent = tmp_path / "persistent ' state ; Ω"
+    persistent.mkdir()
+    progress = persistent / "inventory.jsonl"
+    calls = tmp_path / "calls.jsonl"
+    for attempt in range(2):
+        logs = tmp_path / f"logs-{attempt}"
+        logs.mkdir()
+        handoff = tmp_path / f"gateway-{attempt}.env"
+        result = subprocess.run(["sh", str(scripts / SCRIPT.name)], text=True,
+            capture_output=True, check=False, timeout=15, env={**os.environ,
+            "PATH": f"{bindir}:{os.environ['PATH']}", "PY": str(consumer),
+            "LOCAL_STACK_DRYRUN": "0", "LOCAL_STACK_LOG_DIR": str(logs),
+            "LOCAL_INGEST_PROGRESS": str(progress), "INGEST_CALLS": str(calls),
+            "CORPUS_DIR": str(corpus), "GATEWAY_ENV_FILE": str(handoff),
+            "INGEST_WORKERS": "1", "FORCE_START": "1"})
+        # Stop before any application runs; successful fake ingest precedes cleanup.
+        assert result.returncode == 1 and "agent exited early" in result.stderr, result.stderr
+        assert progress.read_text() == "retained checkpoint\n" * (attempt + 1)
+        assert not handoff.exists()
+        assert not (logs / "local-stack-ingest-progress.jsonl").exists()
+    invocations = [json.loads(line) for line in calls.read_text().splitlines()]
+    assert len(invocations) == 2
+    assert [argv[argv.index("--progress") + 1] for argv in invocations] == [str(progress)] * 2
 
 
 def test_local_agent_port_override_reflected(tmp_path):
