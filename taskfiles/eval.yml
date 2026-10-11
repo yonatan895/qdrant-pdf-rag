@@ -152,20 +152,23 @@ tasks:
     summary: |
       `python -m mainframe_rag.eval.answers` (one reasoning call per query), mirroring
       the retired `make eval-answers`. Needs the live stack and the eval environment.
-      Input: N bounds the sample (default 24; empty falls back).
+      Inputs: N bounds the sample (default 24; empty falls back). Optional
+      AGENT_URL targets a deployed HTTP agent; unset/empty keeps TestClient.
     vars:
       BUNDLE_DIR: '{{if hasKey . "BUNDLE_DIR"}}{{.BUNDLE_DIR}}{{else}}bundles{{end}}'
       EMBED_MODE: '{{if hasKey . "EMBED_MODE"}}{{.EMBED_MODE}}{{else}}hash{{end}}'
       VENUE: '{{if hasKey . "VENUE"}}{{.VENUE}}{{else}}dev{{end}}'
+      AGENT_URL: '{{if hasKey . "AGENT_URL"}}{{.AGENT_URL}}{{else}}{{end}}'
     env:
       TASK_BUNDLE_DIR: '{{.BUNDLE_DIR}}'
       TASK_EMBED_MODE: '{{.EMBED_MODE}}'
       TASK_VENUE: '{{.VENUE}}'
       TASK_N: '{{.N}}'
+      TASK_AGENT_URL: '{{.AGENT_URL}}'
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
       - mkdir -p "$TASK_BUNDLE_DIR"
-      - PYTHONPATH=src EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python -m mainframe_rag.eval.answers {{if .N}}--max-queries "$TASK_N"{{end}} --out "$TASK_BUNDLE_DIR/eval-answers-report.json" --summary "$TASK_BUNDLE_DIR/eval-answers-summary.md"
+      - PYTHONPATH=src EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python -m mainframe_rag.eval.answers {{if .N}}--max-queries "$TASK_N"{{end}} {{if .AGENT_URL}}--agent-url "$TASK_AGENT_URL"{{end}} --out "$TASK_BUNDLE_DIR/eval-answers-report.json" --summary "$TASK_BUNDLE_DIR/eval-answers-summary.md"
 
   chat:
     desc: Multi-turn condensation A/B on the dev golden set (evidence only)

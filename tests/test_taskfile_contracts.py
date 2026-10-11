@@ -46,7 +46,7 @@ REQUIRE_RUNNER = os.environ.get("TASK_CONTRACTS_REQUIRE_RUNNER") == "1"
 # tuple, so the logged set cannot drift between copies.
 LOGGED_ENV_KEYS = ("EMBED_MODE", "VENUE", "PYTHONPATH", "LLM_STREAM", "UI_ENABLED",
                    "ROLE", "MODEL", "SERVED_NAME", "CONTAINER_NAME", "PORT", "BUDGET_PROFILE", "BUDGET_PYTHON",
-                   "GATEWAY_PORT", "GATEWAY_PROBE_MAX_TOKENS", "CORPUS_DIR", "LOCAL_AGENT_PORT", "JAEGER_PORT",
+                   "GATEWAY_PORT", "GATEWAY_PROBE_MAX_TOKENS", "CORPUS_DIR", "LOCAL_INGEST_PROGRESS", "LOCAL_AGENT_PORT", "JAEGER_PORT",
                    "SIM_CONTAINER", "SIM_PORT",
                    "GPU_MEM", "MAX_LEN", "SEQS", "LOCAL_STACK_DRYRUN")
 
@@ -822,6 +822,28 @@ class TaskContractsTests(unittest.TestCase):
         argv = self.pip_calls()[0]["argv"]
         self.assertNotIn("--limit", argv)
 
+    def test_answer_eval_agent_url_is_optional_and_roundtrips_exactly(self):
+        self.make_venv_fake()
+        env = self.tool_env()
+        target = "http://agent:8087/route אב;$(touch SENTINEL)/'quoted'"
+        ambient = "http://ambient-agent:8087/other"
+        for args, value, expected in (
+            ((), "", None),
+            ((f"AGENT_URL={target}",), ambient, target),
+            (("AGENT_URL=",), ambient, None),
+            ((), ambient, ambient),
+        ):
+            with self.subTest(args=args, ambient=value):
+                self.log.unlink(missing_ok=True)
+                proc = self.run_task("eval:answers", *args, extra_env=dict(env, AGENT_URL=value))
+                self.assertEqual(proc.returncode, 0, proc.stdout)
+                argv = self.pip_calls()[0]["argv"]
+                if expected is None:
+                    self.assertNotIn("--agent-url", argv)
+                else:
+                    self.assertEqual(argv[argv.index("--agent-url") + 1], expected)
+                self.assertFalse((self.root / "SENTINEL").exists())
+
     def test_bench_verify_and_load_carry_no_mode_exports(self):
         self.make_venv_fake()
         self.make_tool_recorder("python3base")
@@ -1129,12 +1151,15 @@ class TaskContractsTests(unittest.TestCase):
         self.make_script_recorder("run_local_stack.sh")
         env = self.tool_env()
         proc = self.run_task("local:stack", "CORPUS_DIR=/data", "GATEWAY_PORT=4001",
-                             "GATEWAY_PROBE_MAX_TOKENS=512", extra_env=dict(env, GATEWAY_PROBE_MAX_TOKENS="16"))
+                             "GATEWAY_PROBE_MAX_TOKENS=512",
+                             "LOCAL_INGEST_PROGRESS=/private state/inventory.jsonl",
+                             extra_env=dict(env, GATEWAY_PROBE_MAX_TOKENS="16", LOCAL_INGEST_PROGRESS="ambient-inventory"))
         self.assertEqual(proc.returncode, 0, proc.stdout)
         calls = self.script_calls("run_local_stack.sh")
         self.assertEqual(len(calls), 1)
         self.assertEnvSubset(calls[0], {"CORPUS_DIR": "/data", "GATEWAY_PORT": "4001",
                                         "GATEWAY_PROBE_MAX_TOKENS": "512",
+                                        "LOCAL_INGEST_PROGRESS": "/private state/inventory.jsonl",
                                         "LOCAL_AGENT_PORT": None, "JAEGER_PORT": None,
                                         "LOCAL_STACK_DRYRUN": None})
         if (self.log).exists():
@@ -1158,6 +1183,35 @@ class TaskContractsTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stdout)
         calls = self.script_calls("run_local_stack.sh")
         self.assertEnvSubset(calls[0], {"LOCAL_STACK_DRYRUN": "0"})
+
+    def test_stack_explicit_empty_probe_budget_overrides_ambient_to_the_default(self):
+        self.make_venv_fake()
+        self.make_script_recorder("run_local_stack.sh")
+        env = dict(self.tool_env(), GATEWAY_PROBE_MAX_TOKENS="512")
+        proc = self.run_task("local:stack", "GATEWAY_PROBE_MAX_TOKENS=", extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertEnvSubset(self.script_calls("run_local_stack.sh")[0], {"GATEWAY_PROBE_MAX_TOKENS": None})
+        shutil.copyfile(REPO / "scripts/run_local_stack.sh", self.root / "scripts/run_local_stack.sh")
+        proc = self.run_task("local:stack", "GATEWAY_PROBE_MAX_TOKENS=", "LOCAL_STACK_DRYRUN=1", extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn("--max-tokens 16", proc.stdout)
+        self.assertNotIn("--max-tokens 512", proc.stdout)
+
+    def test_stack_explicit_empty_progress_overrides_ambient_to_the_default(self):
+        self.make_venv_fake()
+        self.make_script_recorder("run_local_stack.sh")
+        env = dict(self.tool_env(), LOCAL_INGEST_PROGRESS="/old/inventory.jsonl")
+        proc = self.run_task("local:stack", "LOCAL_INGEST_PROGRESS=", extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        call = self.script_calls("run_local_stack.sh")[0]
+        self.assertEnvSubset(call, {"LOCAL_INGEST_PROGRESS": None})
+        shutil.copyfile(REPO / "scripts/run_local_stack.sh", self.root / "scripts/run_local_stack.sh")
+        logs = self.root / "default logs"
+        proc = self.run_task("local:stack", "LOCAL_INGEST_PROGRESS=", "LOCAL_STACK_DRYRUN=1",
+                             f"CORPUS_DIR={self.root}", extra_env=dict(env, LOCAL_STACK_LOG_DIR=str(logs)))
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn(f"--progress {logs}/local-stack-ingest-progress.jsonl", proc.stdout)
+        self.assertNotIn("/old/inventory.jsonl", proc.stdout)
 
     def test_agent_stream_port_and_ui(self):
         self.make_venv_fake()
