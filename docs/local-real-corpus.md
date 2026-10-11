@@ -154,6 +154,25 @@ Inventory counts alone do not establish that the actual target can skip work.
 Alias publication retains the old generation and promotes only after full coverage
 and representation checks. A failed or still-running Job is not acceptance.
 
+For the host `local:stack` lane, set `LOCAL_INGEST_PROGRESS` to a persistent
+inventory path outside Git before launching with `CORPUS_DIR`. Task CLI values
+override ambient values; the supervisor passes the selected path unchanged as
+ingest's `--progress`. Create its parent directory first. Unset or empty keeps
+the existing `${LOCAL_STACK_LOG_DIR:-${TMPDIR:-/tmp}}/local-stack-ingest-progress.jsonl`
+default. Stack cleanup removes its gateway handoff and leaves inventory and
+publication sidecars in place. Retain that entire directory across restarts.
+
+The Colab lane requires corpus/representation-keyed state under
+`COLAB_DATA_STATE` (controller admission belongs to #706 WP5); never reuse a
+checkpoint to claim compatibility with changed
+weights, rules, dimensions or recipes. Reuse the selected persistent Kind/Helm
+Qdrant endpoint through `COLAB_QDRANT_URL`; a reachable ephemeral simulation
+container does not qualify for production-corpus acceptance. A deadline must
+interrupt the build before cutover rather than certify a partial subset. The
+existing same-build resume and full-coverage publication gates remain authoritative.
+These are operating requirements for the playground; GPU teardown and actual
+persistent-volume restart still need its recorded live acceptance.
+
 After successful migration, perform the next ordinary operation without forcing
 another re-embed:
 

@@ -246,6 +246,7 @@ tasks:
     desc: Run the full local production simulation (supervisor)
     summary: |
       `sh scripts/run_local_stack.sh` with caller-set CORPUS_DIR,
+      LOCAL_INGEST_PROGRESS (unset retains the log-directory inventory),
       GATEWAY_PORT, GATEWAY_PROBE_MAX_TOKENS (default 16, range 1–4096),
       LOCAL_AGENT_PORT, JAEGER_PORT and LOCAL_STACK_DRYRUN
       forwarded, replacing the retired `make local-stack`. The supervisor owns
@@ -255,6 +256,7 @@ tasks:
       backends and .venv (checked by the script, not here — same as Make).
     env:
       TASK_CORPUS_DIR: '{{.CORPUS_DIR}}'
+      TASK_LOCAL_INGEST_PROGRESS: '{{.LOCAL_INGEST_PROGRESS}}'
       TASK_GATEWAY_PORT: '{{.GATEWAY_PORT}}'
       TASK_LOCAL_AGENT_PORT: '{{.LOCAL_AGENT_PORT}}'
       TASK_GATEWAY_PROBE_MAX_TOKENS: '{{.GATEWAY_PROBE_MAX_TOKENS}}'
@@ -263,6 +265,7 @@ tasks:
     cmds:
       - >-
         if [ -n "${TASK_CORPUS_DIR:-}" ]; then export CORPUS_DIR="$TASK_CORPUS_DIR"; fi;
+        if [ -n "${TASK_LOCAL_INGEST_PROGRESS:-}" ]; then export LOCAL_INGEST_PROGRESS="$TASK_LOCAL_INGEST_PROGRESS"; fi;
         if [ -n "${TASK_GATEWAY_PORT:-}" ]; then export GATEWAY_PORT="$TASK_GATEWAY_PORT"; fi;
         if [ -n "${TASK_LOCAL_AGENT_PORT:-}" ]; then export LOCAL_AGENT_PORT="$TASK_LOCAL_AGENT_PORT"; fi;
         if [ -n "${TASK_GATEWAY_PROBE_MAX_TOKENS:-}" ]; then export GATEWAY_PROBE_MAX_TOKENS="$TASK_GATEWAY_PROBE_MAX_TOKENS"; fi;
