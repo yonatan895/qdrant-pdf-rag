@@ -415,9 +415,58 @@ Existing zero-sample exit differences remain: answers/L2 emit empty results;
 chat refuses an empty sample and L4 cannot gate/record uncomputed metrics.
 None of these empty runs establishes semantic acceptance.
 
-In-process `/v1/answer` grounding honesty: deterministic stratified
+`/v1/answer` grounding honesty: deterministic stratified
 round-robin sampling (sorted classes and ids, no RNG, small classes
 revisited first; default 24 queries, `--all` for full runs), then judge.
+The default executes the local app through FastAPI TestClient and its live
+lifespan-built clients. For an already deployed agent, pass `--agent-url`:
+
+```bash
+VENUE=rc .venv/bin/python -m mainframe_rag.eval.answers \
+  --agent-url http://127.0.0.1:8087 \
+  --golden "$PRODUCTION_GOLDEN_PATH" --all \
+  --out "$LAB_STATE/answer-report.json" \
+  --summary "$LAB_STATE/answer-summary.md"
+```
+
+The HTTP mode sends the same sibling `/v1/search` and scored `/v1/answer`
+requests to that target. It uses no local app lifespan, Settings, Qdrant or
+model clients. Task `eval:answers AGENT_URL=http://127.0.0.1:8087` exposes the
+same optional target with its existing dataset/sample inputs; an unset or
+explicitly empty `AGENT_URL` selects TestClient. Protected dataset/holdout
+venue and pin checks still apply;
+use the declared venue and explicit private golden path for production-corpus
+measurement. The agent URL accepts an HTTP(S) base with an optional Route
+prefix; URL credentials, query strings and fragments are rejected. Use the
+authorized local forward or trusted TLS endpoint. Redirects and environment
+proxy routing are disabled. `--request-timeout` sets the HTTP client timeout
+for search/answer calls (1–600 seconds, default 300); the pre-scoring health
+call uses 10 seconds. The owning run controller supplies the overall deadline.
+Requests are single-shot, without retries.
+
+Before scoring, HTTP mode reads the target's actual `/healthz` response and
+requires HTTP 200, `status=ok`, Qdrant ready, no failed embedding/rerank leg,
+and the serving owner's `compatible` or `record_only_drift` representation.
+The ready-but-`empty` bootstrap state cannot certify an evaluation. An
+unhealthy, non-servable, malformed or unreachable target exits 2, sends no
+scored requests, and retains every selected case as an error row in the
+report. Missing/null required answer or citation fields are malformed, including
+on abstention cases. Per-case HTTP, transport or malformed-response errors remain rows,
+later cases still run, and any error makes the final exit nonzero. Existing
+rates retain their judged-row meanings; `metrics.queries` counts all selected
+cases and `metrics.errors` exposes unsuccessful ones.
+
+HTTP reports and trend manifests record the target URL, observed fixed health
+fields and pre-scoring representation verdict. `/healthz` exposes no immutable
+build SHA, image digest, model/configuration or collection identity: absent
+deployment fields remain unknown. Trend manifests separately label the
+evaluator checkout SHA as `evaluator_git_sha`; it never attributes the deployment.
+Retain the deployment lane's actual image/bundle/configuration/corpus receipt
+beside these private results before comparing builds. HTTP mode cannot join
+the remote process's answer logs, so finish/token-budget attribution stays
+unknown without a separately retained request-ID log/trace join. Answer and
+golden content in reports remains private, outside git and public CI.
+
 Sampling temperature (issue #596): the answer eval sends `temperature=0` by
 default and records it per row, in the report `params`, and in the run
 manifest — production `llm_temperature` (0.2) is unchanged. L2/L4 stay on

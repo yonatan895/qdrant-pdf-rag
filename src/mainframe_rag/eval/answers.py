@@ -58,8 +58,10 @@ Deliberate non-features
       to run variance is known.
 
 Execution shape
-    In-process FastAPI TestClient against the live app, using production
-    code and lifespan-built clients. Requires the live stack (Qdrant +
+    In-process FastAPI TestClient against the live app by default, using
+    production code and lifespan-built clients. --agent-url instead sends
+    the same requests to an already deployed HTTP agent and checks its
+    serving readiness before scoring. Requires the live stack (Qdrant +
     gateway-backed embedding and reasoning); run eval:answers explicitly,
     never as part of plain pytest.
 
@@ -74,12 +76,17 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import re
 import sys
 import time
 from collections import Counter, defaultdict
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
+
+import httpx2
 
 # The agent's fixed zero-hits response (agent/app.py) — quoted, not imported,
 # to keep the eval importable without the fastapi/qdrant stack for its pure
@@ -161,6 +168,87 @@ from mainframe_rag.eval.datasets import (
     require_rc_for_collection,
     resolve_golden_paths,
 )
+
+
+def _agent_url(raw: str) -> str:
+    """Explicit HTTP target; URL credentials must never enter reports."""
+    try:
+        parts = urlsplit(raw.strip())
+        _ = parts.port
+    except ValueError:
+        raise argparse.ArgumentTypeError("agent URL must be an http(s) URL") from None
+    if (
+        parts.scheme not in ("http", "https") or not parts.hostname
+        or parts.username is not None or parts.password is not None
+        or parts.query or parts.fragment
+    ):
+        raise argparse.ArgumentTypeError("agent URL must be http(s), without credentials, query or fragment")
+    return f"{parts.scheme}://{parts.netloc}{parts.path.rstrip('/')}"
+
+
+def _request_timeout(raw: str) -> float:
+    try:
+        value = float(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError("request timeout must be 1–600 seconds") from None
+    if not math.isfinite(value) or not 1 <= value <= 600:
+        raise argparse.ArgumentTypeError("request timeout must be 1–600 seconds")
+    return value
+
+
+def _http_health(client: httpx2.Client) -> tuple[dict[str, Any] | None, str | None]:
+    """Read the actual agent verdict, retaining only its fixed health schema."""
+    from mainframe_rag.agent.serving import SERVABLE_OUTCOMES
+
+    try:
+        response = client.get("/healthz", timeout=10.0)
+    except httpx2.HTTPError:
+        return None, "agent health request failed"
+    http_error = None if response.status_code == 200 else f"agent health returned HTTP {response.status_code}"
+    try:
+        body = response.json()
+    except ValueError:
+        return None, http_error or "malformed agent health response"
+    if (
+        not isinstance(body, dict) or body.get("status") not in ("ok", "degraded")
+        or type(body.get("qdrant")) is not bool
+        or any(body.get(key) is not None and type(body.get(key)) is not bool
+               for key in ("embed", "rerank"))
+        or body.get("representation") not in (
+            *SERVABLE_OUTCOMES, "empty", "reembed_required", "legacy", "pending", "unknown",
+        )
+    ):
+        return None, http_error or "malformed agent health response"
+    health = {key: body.get(key) for key in ("status", "qdrant", "embed", "representation", "rerank")}
+    if http_error is not None:
+        return health, http_error
+    if (
+        health["status"] != "ok" or not health["qdrant"]
+        or health["embed"] is False or health["rerank"] is False
+        or health["representation"] not in SERVABLE_OUTCOMES
+    ):
+        return health, "agent health is not servable"
+    return health, None
+
+
+def _write_http_manifest(report: dict[str, Any]) -> dict[str, Any]:
+    """Remote trend evidence cannot inherit local Settings or Qdrant identity."""
+    from mainframe_rag.manifest import get_git_sha
+
+    manifest = {
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "run_type": "eval_answers", "execution_mode": "http",
+        "git_sha": "unknown", "evaluator_git_sha": get_git_sha(),
+        "settings_hash": None, "model_ids": None, "extraction_rules_version": None,
+        "qdrant_version": "unknown", "collection_snapshot_id": None,
+        "params": report["params"], "metrics": report["metrics"],
+        "deployment": report["deployment"], "representation": report["representation"],
+    }
+    out = Path("evals/runs/eval_answers_runs.jsonl")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with out.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(manifest, ensure_ascii=False) + "\n")
+    return manifest
 
 
 def judge(
@@ -470,7 +558,11 @@ def _fetch_pool(client: Any, query: str) -> list[dict[str, Any]] | None:
         resp = client.post("/v1/search", json={"query": query, "limit": 8})
         if resp.status_code != 200:
             return None
-        return list(resp.json().get("hits", []))
+        body = resp.json()
+        hits = body.get("hits") if isinstance(body, dict) else None
+        if not isinstance(hits, list) or any(not isinstance(hit, dict) for hit in hits):
+            return None
+        return hits
     except Exception:  # noqa: BLE001
         return None
 
@@ -518,16 +610,32 @@ def run_query(
         code = error_code(resp)
         row.update(verdict="error", failures=[f"HTTP {resp.status_code} ({code})"], elapsed_ms=elapsed_ms)
         return row
-    data = resp.json()
-    answer = str(data.get("answer") or "")
-    citations = list(data.get("citations") or [])
+    try:
+        data = resp.json()
+    except ValueError:
+        row.update(verdict="error", failures=["malformed answer response"], elapsed_ms=elapsed_ms)
+        return row
+    if not isinstance(data, dict):
+        row.update(verdict="error", failures=["malformed answer response"], elapsed_ms=elapsed_ms)
+        return row
+    answer_value = data.get("answer")
+    citation_values = data.get("citations")
+    if (
+        not isinstance(answer_value, str)
+        or not isinstance(citation_values, list)
+        or any(not isinstance(cite, str) for cite in citation_values)
+    ):
+        row.update(verdict="error", failures=["malformed answer response"], elapsed_ms=elapsed_ms)
+        return row
+    answer = answer_value
+    citations = citation_values
     citations_inferred = bool(data.get("citations_inferred", False))
     # A malformed provenance field is a contract violation, not a citation
     # signal: fail the row closed like every other bad-response path instead
     # of raising through the runner (issue #299 review).
     try:
         inferred_indices = [int(i) for i in (data.get("inferred_indices") or [])]
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         row.update(
             verdict="error",
             failures=["malformed inferred_indices in response"],
@@ -539,10 +647,12 @@ def run_query(
     # server) reads as None: the row is judged without the state check,
     # never assumed accepted.
     verification_state = data.get("verification_state")
-    if verification_state is not None and verification_state not in VERIFICATION_STATES:
+    if verification_state is not None and (
+        not isinstance(verification_state, str) or verification_state not in VERIFICATION_STATES
+    ):
         row.update(
             verdict="error",
-            failures=[f"unknown verification_state in response: {verification_state!r}"],
+            failures=["unknown verification_state in response"],
             elapsed_ms=elapsed_ms,
         )
         return row
@@ -779,6 +889,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--all", action="store_true", help="run every golden entry (slow: one reasoning call each)")
     parser.add_argument("--out", type=Path, default=None, help="JSON report path")
     parser.add_argument("--summary", type=Path, default=None, help="markdown summary path")
+    parser.add_argument("--agent-url", type=_agent_url, default=None,
+                        help="evaluate an already deployed HTTP agent instead of local TestClient")
+    parser.add_argument("--request-timeout", type=_request_timeout, default=300.0,
+                        help="HTTP-mode request timeout in seconds (1–600, default 300)")
     parser.add_argument("--temperature", type=float, default=0.0,
                         help="sampling temperature sent per request (default 0 for stable "
                              "comparisons, issue #596; pass the production setting explicitly "
@@ -789,7 +903,8 @@ def main(argv: list[str] | None = None) -> int:
         # Venue rule (issue #268): dev defaults to the golden set only; the
         # holdout and the real-corpus collection require VENUE=rc.
         golden_paths = resolve_golden_paths(args.golden)
-        require_rc_for_collection(load_settings().qdrant_collection)
+        if args.agent_url is None:
+            require_rc_for_collection(load_settings().qdrant_collection)
         entries: list[dict[str, Any]] = []
         for p in golden_paths:
             for line in read_golden_text(p).splitlines():
@@ -806,21 +921,41 @@ def main(argv: list[str] | None = None) -> int:
     sample = entries if args.all else select_sample(entries, args.max_queries)
     print(f"[*] answer-tier eval: {len(sample)} of {len(entries)} entries (deterministic stratified sample)", file=sys.stderr)
 
-    # Live stack only from here on: load_settings reads the environment
-    # when the app imports it, so configure it before importing.
-    from fastapi.testclient import TestClient
-
-    import mainframe_rag.agent.app as app_mod
-
     results: list[dict[str, Any]] = []
-    capture = AnswerCapture()
-    logging.getLogger("agent").addHandler(capture)
-    try:
-        with TestClient(app_mod.app) as client:
+    deployment: dict[str, Any] | None = None
+    health_error: str | None = None
+    client: Any
+    signals: dict[str, dict[str, Any]] | None
+    with ExitStack() as stack:
+        if args.agent_url is not None:
+            client = stack.enter_context(httpx2.Client(
+                base_url=args.agent_url, timeout=args.request_timeout,
+                follow_redirects=False, trust_env=False,
+            ))
+            health, health_error = _http_health(client)
+            deployment = {"agent_url": args.agent_url, "healthz": health,
+                          "git_sha": None, "image_digest": None}
+            signals = None
+        else:
+            # The default keeps the production app's lifespan-built clients.
+            from fastapi.testclient import TestClient
+
+            import mainframe_rag.agent.app as app_mod
+
+            capture = AnswerCapture()
+            logging.getLogger("agent").addHandler(capture)
+            stack.callback(logging.getLogger("agent").removeHandler, capture)
+            client = stack.enter_context(TestClient(app_mod.app))
+            signals = capture.signals
+        if health_error is not None:
+            print(f"FAIL: {health_error}", file=sys.stderr)
+            results = [dict(entry, temperature=args.temperature, verdict="error",
+                            failures=[health_error], elapsed_ms=0) for entry in sample]
+        else:
             for i, entry in enumerate(sample, 1):
                 pool = _fetch_pool(client, entry["query"])
                 row = run_query(
-                    client, entry, capture.signals, pool, temperature=args.temperature
+                    client, entry, signals, pool, temperature=args.temperature
                 )
                 if pool is not None:
                     apply_pool_join(row, entry, pool)
@@ -833,12 +968,17 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 for f in row.get("failures") or []:
                     print(f"        FAIL {f}", file=sys.stderr)
-    finally:
-        logging.getLogger("agent").removeHandler(capture)
 
     metrics = summarize(results)
-    params = {"temperature": args.temperature}
-    report = {"metrics": metrics, "results": results, "params": params}
+    params: dict[str, Any] = {"temperature": args.temperature}
+    report: dict[str, Any] = {"metrics": metrics, "results": results, "params": params}
+    if deployment is not None:
+        params.update(agent_url=args.agent_url, request_timeout=args.request_timeout)
+        report["deployment"] = deployment
+        report["representation"] = {
+            "servable": health_error is None,
+            "outcome": (deployment["healthz"] or {}).get("representation", "unknown"),
+        }
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(json.dumps(report, indent=1, ensure_ascii=False), encoding="utf-8")
@@ -846,17 +986,22 @@ def main(argv: list[str] | None = None) -> int:
         args.summary.parent.mkdir(parents=True, exist_ok=True)
         write_summary(args.summary, results, metrics)
 
-    # Trend manifest (gitignored evals/runs/) — same helper as the retrieval
-    # eval so dashboards see one shape. run_type "eval_answers".
+    # Trend manifests stay in gitignored evals/runs/. Only in-process runs
+    # may use the shared local Settings/Qdrant identity helper.
     try:
-        from mainframe_rag.manifest import write_run_manifest
+        if deployment is not None:
+            manifest = _write_http_manifest(report)
+        else:
+            from mainframe_rag.manifest import write_run_manifest
 
-        manifest = write_run_manifest("eval_answers", load_settings(), metrics, params=params)
+            manifest = write_run_manifest("eval_answers", load_settings(), metrics, params=params)
         print(f"run manifest appended ({manifest['git_sha'][:8]})", file=sys.stderr)
     except Exception as exc:  # noqa: BLE001 — manifest is observability, never the gate
         print(f"warn: failed to append run manifest: {exc}", file=sys.stderr)
 
     # Fail closed: structural FAILs and stack errors both gate the exit code.
+    if health_error is not None:
+        return 2
     return 0 if metrics["failures"] == 0 and metrics["errors"] == 0 else 1
 
 

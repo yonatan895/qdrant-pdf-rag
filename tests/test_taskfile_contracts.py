@@ -822,6 +822,28 @@ class TaskContractsTests(unittest.TestCase):
         argv = self.pip_calls()[0]["argv"]
         self.assertNotIn("--limit", argv)
 
+    def test_answer_eval_agent_url_is_optional_and_roundtrips_exactly(self):
+        self.make_venv_fake()
+        env = self.tool_env()
+        target = "http://agent:8087/route אב;$(touch SENTINEL)/'quoted'"
+        ambient = "http://ambient-agent:8087/other"
+        for args, value, expected in (
+            ((), "", None),
+            ((f"AGENT_URL={target}",), ambient, target),
+            (("AGENT_URL=",), ambient, None),
+            ((), ambient, ambient),
+        ):
+            with self.subTest(args=args, ambient=value):
+                self.log.unlink(missing_ok=True)
+                proc = self.run_task("eval:answers", *args, extra_env=dict(env, AGENT_URL=value))
+                self.assertEqual(proc.returncode, 0, proc.stdout)
+                argv = self.pip_calls()[0]["argv"]
+                if expected is None:
+                    self.assertNotIn("--agent-url", argv)
+                else:
+                    self.assertEqual(argv[argv.index("--agent-url") + 1], expected)
+                self.assertFalse((self.root / "SENTINEL").exists())
+
     def test_bench_verify_and_load_carry_no_mode_exports(self):
         self.make_venv_fake()
         self.make_tool_recorder("python3base")
@@ -1161,6 +1183,19 @@ class TaskContractsTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stdout)
         calls = self.script_calls("run_local_stack.sh")
         self.assertEnvSubset(calls[0], {"LOCAL_STACK_DRYRUN": "0"})
+
+    def test_stack_explicit_empty_probe_budget_overrides_ambient_to_the_default(self):
+        self.make_venv_fake()
+        self.make_script_recorder("run_local_stack.sh")
+        env = dict(self.tool_env(), GATEWAY_PROBE_MAX_TOKENS="512")
+        proc = self.run_task("local:stack", "GATEWAY_PROBE_MAX_TOKENS=", extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertEnvSubset(self.script_calls("run_local_stack.sh")[0], {"GATEWAY_PROBE_MAX_TOKENS": None})
+        shutil.copyfile(REPO / "scripts/run_local_stack.sh", self.root / "scripts/run_local_stack.sh")
+        proc = self.run_task("local:stack", "GATEWAY_PROBE_MAX_TOKENS=", "LOCAL_STACK_DRYRUN=1", extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn("--max-tokens 16", proc.stdout)
+        self.assertNotIn("--max-tokens 512", proc.stdout)
 
     def test_stack_explicit_empty_progress_overrides_ambient_to_the_default(self):
         self.make_venv_fake()
