@@ -101,6 +101,32 @@ class FakeResp:
         return {"choices": [{"message": {"content": self._content}}]}
 
 
+# Template digest per prompt version: the version rides the context cache
+# key and the representation manifest, so a template edit without a bump
+# would keep serving contexts generated under the old prompt. Bump
+# CONTEXT_PROMPT_VERSION with any change here and pin the new digest.
+_PROMPT_PINS = {"v2": "d9daab45b97178cd"}
+
+
+def _prompt_digest() -> str:
+    import hashlib
+    import inspect
+
+    template = "\0".join([
+        ctx_mod.CONTEXT_SYSTEM_PROMPT,
+        inspect.getsource(ctx_mod.build_context_messages),
+        str(ctx_mod.MAX_COMPLETION_TOKENS),
+    ])
+    return hashlib.sha256(template.encode("utf-8")).hexdigest()[:16]
+
+
+def test_prompt_template_change_requires_a_version_bump():
+    assert _PROMPT_PINS.get(ctx_mod.CONTEXT_PROMPT_VERSION) == _prompt_digest(), (
+        "context prompt template changed: bump CONTEXT_PROMPT_VERSION and pin "
+        f"its digest {_prompt_digest()} in _PROMPT_PINS"
+    )
+
+
 def test_prompt_template_is_versioned_and_mirrors_embed_header():
     assert ctx_mod.CONTEXT_PROMPT_VERSION == "v2"
     # v2 contract (issue #78 reviewer sequence): the gist must ADD what the
