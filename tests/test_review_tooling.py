@@ -3567,6 +3567,591 @@ class TestVerifierUpdateDecision(unittest.TestCase):
                     self.assertIn('/actions/workflows/verifier-update.yml', api.writes[-1]['output']['summary'])
 
 
+class TestCatalogueAnchorDecision(unittest.TestCase):
+    """A human anchor decision preserves the complete native challenge oracle."""
+
+    def catalogues(self):
+        import copy
+
+        root = pathlib.Path(__file__).resolve().parents[1]
+        original = json.loads((root / 'tests/hazards/critical.json').read_bytes())
+        self.assertEqual([hazard['id'] for hazard in original['hazards']], [
+            'vector-projection', 'same-id-overwrite', 'unmarked-residue', 'reader-repair-overlap',
+            'scope-losing-fallback', 'missing-terminal-finish', 'final-order-miscount',
+            'latest-user-mismatch', 'dropped-operator-value', 'mixed-release-identity',
+        ])
+        # Retain the complete current oracle, but specify both historical #718
+        # anchor states independently of whether the repository adopted them.
+        original_hazard = original['hazards'][6]
+        self.assertEqual(original_hazard['occurrences'], 2)
+        original_hazard['before'] = '            used = tokenizer.count_messages(messages)'
+        original_hazard['after'] = (
+            '            used = tokenizer.count_messages(messages[:-1] + '
+            '[ChatMessage(role="user", content=_user_content(_assemble_blocks('
+            'context_entries, question_text, packed, tail_part), "retrieval"))])'
+        )
+        approved = json.dumps(original).encode()
+        adopted = copy.deepcopy(original)
+        hazard = adopted['hazards'][6]
+        # These are the original #718 changes, independently specified rather
+        # than copied from an approval implementation's transformed output.
+        hazard['before'] = '            used = tokenizer.count_messages(messages'
+        hazard['after'] = (
+            '            used = tokenizer.count_messages(messages[:-1] + '
+            '[ChatMessage(role="user", content=_user_content(_assemble_blocks('
+            'context_entries, question_text, packed, tail_part), "retrieval"))]'
+        )
+        return approved, json.dumps(adopted).encode()
+
+    def hazard_report(self, catalogue):
+        import hashlib
+
+        return {
+            'schema_version': 1, 'candidate_sha': 'c' * 40,
+            'catalogue_sha256': hashlib.sha256(catalogue).hexdigest(), 'runner_sha256': 'f' * 64,
+            'complete_catalogue': True, 'passed': True,
+            'results': [{
+                'id': hazard['id'], 'contract': hazard['contract'], 'target': hazard['target'],
+                'expected_test': hazard['test'], 'expected_assertion': hazard['assertion'],
+                'replacement': {key: hazard[key] for key in ('before', 'after', 'occurrences', 'target_role')},
+                'baseline': {'status': 'baseline_pass', 'exit_code': 0},
+                'mutation': {'status': 'killed_by_behavior', 'exit_code': 1, 'cause': hazard['assertion']},
+            } for hazard in json.loads(catalogue)['hazards']],
+        }
+
+    def fixture(self):
+        import copy
+        import hashlib
+
+        approved, adopted = self.catalogues()
+        api = TestVerifierUpdateDecision().fixture()
+        api.sources = {'tests/hazards/critical.json': adopted}
+        api.base_sources = {'tests/hazards/critical.json': approved}
+        api.run['display_title'] = 'Catalogue anchors PR 3: approve'
+        api.artifact['name'] = 'catalogue-anchor-decision-1'
+        api.record.update(schema_version=2, kind='catalogue-anchors', catalogue={
+            'base_sha256': hashlib.sha256(approved).hexdigest(),
+            'candidate_sha256': hashlib.sha256(adopted).hexdigest(),
+            'changed_ids': ['final-order-miscount'],
+        }, inputs={'tests/hazards/critical.json': hashlib.sha256(adopted).hexdigest()})
+        api.pack()
+        def blob(sha, path):
+            if sha == api.candidate['base_sha']:
+                return api.base_sources[path]
+            self.assertEqual(sha, api.candidate['execution_sha'])
+            return api.sources[path]
+        api.blob = blob
+        identity = {'run_id': 900, 'run_attempt': 1, 'inputs': copy.deepcopy(api.record['inputs']),
+                    'kind': 'catalogue-anchors', 'catalogue': copy.deepcopy(api.record['catalogue'])}
+        return api, approved, adopted, identity
+
+    def collector_fixture(self, root, *, mixed=False):
+        import copy
+        import hashlib
+        import io
+        import zipfile
+
+        from scripts.acceptance import VERIFICATION_INPUTS, verification_inputs
+        from scripts.acceptance_evidence import PRODUCERS
+        from scripts.verifier_approval import record_decision
+
+        api, approved, adopted, _ = self.fixture()
+        paths = (*VERIFICATION_INPUTS, 'taskfiles/quality.yml',
+                 *sorted({'.github/workflows/' + producer.workflow for producer in PRODUCERS}))
+        for relative in paths:
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(approved if relative == 'tests/hazards/critical.json' else b'approved original\n')
+        (root / '.github/workflows/ci.yml').write_bytes(
+            b'    name: unit (${{ matrix.shard }}/2)\n        shard: [1, 2]\n')
+        def git(*args):
+            return subprocess.check_output(['git', *args], cwd=root, text=True,
+                                           stderr=subprocess.DEVNULL).strip()
+        git('init', '-b', 'main')
+        git('config', 'user.name', 'Synthetic Test')
+        git('config', 'user.email', 'synthetic@example.invalid')
+        git('add', '.')
+        git('commit', '-m', 'Approved original catalogue and verifier')
+        base = git('rev-parse', 'HEAD')
+        api.candidate['base_sha'] = api.run['head_sha'] = api.job['head_sha'] = base
+        api.artifact['workflow_run']['head_sha'] = base
+        api.sources = {relative: (root / relative).read_bytes() for relative in verification_inputs(root)}
+        api.base_sources = copy.deepcopy(api.sources)
+        api.sources['tests/hazards/critical.json'] = adopted
+        if mixed:
+            api.sources['scripts/check_hazard_sensitivity.py'] = b'changed runner\n'
+        api.record = record_decision(api, 3, 'approve', root, 900, 1, kind='catalogue-anchors')
+        api.pack()
+        api.implementation = None
+        api.native_reads = 0
+        api.revoke_on_recheck = False
+        native, receipt, _ = TestNativeEvidenceConsumer().fixture()
+        api.native_run = native['run']
+        api.native_run['head_repository']['id'] = 42
+        api.native_job = {**native['job'], 'name': 'hazards'}
+        api.native_artifact = copy.deepcopy(native['artifact'])
+        api.native_artifact['name'] = 'evidence-hazards-attempt-2'
+        api.native_artifact['workflow_run']['head_repository_id'] = 42
+        api.native_report = self.hazard_report(adopted)
+        api.native_report['runner_sha256'] = hashlib.sha256(api.sources['scripts/check_hazard_sensitivity.py']).hexdigest()
+        api.native_receipt = receipt
+        api.native_receipt.pop('unit_coverage')
+        api.native_receipt.update(base_sha=base, execution_parents=[base, 'a' * 40],
+                                  policy_sha256=hashlib.sha256(api.sources['scripts/review_tooling.py']).hexdigest(),
+                                  producer_sha256=hashlib.sha256(api.sources['scripts/ci_evidence.py']).hexdigest(),
+                                  job_key='hazards', job_name='hazards', lane='hazards', tests=None)
+        def pack_native():
+            raw = json.dumps(api.native_report).encode()
+            api.native_receipt['result_sha256'] = hashlib.sha256(raw).hexdigest()
+            buffer = io.BytesIO()
+            with zipfile.ZipFile(buffer, 'w') as archive:
+                archive.writestr('evidence.json', json.dumps(api.native_receipt))
+                archive.writestr('results.json', raw)
+            api.native_archive = buffer.getvalue()
+            api.native_artifact.update(size_in_bytes=len(api.native_archive),
+                                       digest='sha256:' + hashlib.sha256(api.native_archive).hexdigest())
+        api.pack_native = pack_native
+        pack_native()
+        original_get, original_raw = api.get, api.raw
+        def get(endpoint):
+            if '/pulls/3/files?' in endpoint:
+                return [{'filename': 'tests/hazards/critical.json', 'status': 'modified'}]
+            if endpoint.endswith('/pulls/3'):
+                return {**original_get(endpoint), 'changed_files': 1}
+            if 'actions/runs?event=pull_request' in endpoint:
+                api.native_reads += 1
+                if api.revoke_on_recheck and api.native_reads == 2:
+                    old = copy.deepcopy(api.run)
+                    api.run = {**api.run, 'id': 910, 'display_title': 'Catalogue anchors PR 3: revoke'}
+                    api.runs = [old, api.run]
+                return {'total_count': 1, 'workflow_runs': [api.native_run]}
+            if endpoint.endswith('/123'):
+                return api.native_run
+            if '/123/attempts/2/jobs?' in endpoint:
+                return {'total_count': 1, 'jobs': [api.native_job]}
+            if '/123/artifacts?' in endpoint:
+                return {'total_count': 1, 'artifacts': [api.native_artifact]}
+            if api.implementation is not None:
+                if endpoint.endswith('/920'):
+                    return api.implementation.run
+                if '/920/attempts/1/jobs?' in endpoint:
+                    return {'total_count': 1, 'jobs': [api.implementation.job]}
+                if '/920/artifacts?' in endpoint:
+                    return {'total_count': 1, 'artifacts': [api.implementation.artifact]}
+            return original_get(endpoint)
+        def raw(endpoint):
+            if endpoint == api.prefix + 'actions/artifacts/789/zip':
+                return api.native_archive
+            if api.implementation is not None and endpoint == api.prefix + 'actions/artifacts/922/zip':
+                return api.implementation.archive
+            return original_raw(endpoint)
+        api.get, api.raw = get, raw
+        return api
+
+    def add_implementation_decision(self, api, root):
+        import copy
+
+        from scripts.verifier_approval import record_decision
+
+        implementation = TestVerifierUpdateDecision().fixture()
+        implementation.candidate = copy.deepcopy(api.candidate)
+        implementation.run.update(id=920, head_sha=api.candidate['base_sha'])
+        implementation.job.update(id=921, run_id=920, head_sha=api.candidate['base_sha'])
+        implementation.artifact.update(id=922, workflow_run={
+            'id': 920, 'repository_id': 42, 'head_repository_id': 42, 'head_sha': api.candidate['base_sha']})
+        implementation.record = record_decision(api, 3, 'approve', root, 920, 1)
+        implementation.pack()
+        api.implementation = implementation
+        api.runs = [api.run, implementation.run]
+        return implementation
+
+    def test_actual_anchor_record_round_trips_through_collector_and_acceptance(self):
+        import hashlib
+
+        from scripts.acceptance import collect_acceptance, collect_native, recheck_current
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            api = self.collector_fixture(root)
+            self.assertEqual(api.record['schema_version'], 2)
+            self.assertEqual(api.record['kind'], 'catalogue-anchors')
+            self.assertEqual(api.record['catalogue']['changed_ids'], ['final-order-miscount'])
+            self.assertEqual(api.record['inputs'], {
+                'tests/hazards/critical.json': hashlib.sha256(api.sources['tests/hazards/critical.json']).hexdigest()})
+            self.assertEqual((root / 'tests/hazards/critical.json').read_bytes(), self.catalogues()[0])
+            result = collect_native(api, api.get(api.prefix + 'pulls/3'), root)
+            self.assertEqual(result['lane_statuses']['hazards'], 'success')
+            self.assertEqual(result['catalogue_approval']['run_id'], 900)
+            self.assertIsNone(result['verifier_approval'])
+            hazard = next(item for item in result['native'] if item['lane'] == 'hazards')
+            self.assertEqual(len(hazard['results']['results']), 10)
+            self.assertEqual(hazard['results']['results'][6]['replacement']['occurrences'], 2)
+            summary = collect_acceptance(api, 3, root)
+            self.assertEqual(summary['catalogue_approval'], result['catalogue_approval'])
+            self.assertFalse(summary['all_prerequisites_met'])  # Other native jobs are absent.
+            recheck_current(api, summary)
+            api.native_report = self.hazard_report(self.catalogues()[0])
+            api.native_report['runner_sha256'] = hashlib.sha256(api.sources['scripts/check_hazard_sensitivity.py']).hexdigest()
+            api.pack_native()
+            rejected = collect_native(api, api.get(api.prefix + 'pulls/3'), root)
+            self.assertEqual(rejected['lane_statuses']['hazards'], 'unverified')
+
+    def test_mixed_catalogue_and_implementation_changes_need_both_distinct_decisions(self):
+        from scripts.acceptance import collect_native
+        from scripts.verifier_approval import VerifierApprovalRequired
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            api = self.collector_fixture(root, mixed=True)
+            with self.assertRaises(VerifierApprovalRequired):
+                collect_native(api, api.get(api.prefix + 'pulls/3'), root)
+            implementation = self.add_implementation_decision(api, root)
+            both = collect_native(api, api.get(api.prefix + 'pulls/3'), root)
+            self.assertEqual(both['lane_statuses']['hazards'], 'success')
+            self.assertEqual(both['catalogue_approval']['run_id'], 900)
+            self.assertEqual(both['verifier_approval']['run_id'], 920)
+            self.assertEqual(implementation.record['schema_version'], 1)
+            self.assertNotIn('kind', implementation.record)
+            self.assertEqual(implementation.record['inputs']['tests/hazards/critical.json'],
+                             api.record['inputs']['tests/hazards/critical.json'])
+            api.runs = [implementation.run]
+            with self.assertRaises(VerifierApprovalRequired):
+                collect_native(api, api.get(api.prefix + 'pulls/3'), root)
+            api.runs = [api.run]
+            with self.assertRaises(VerifierApprovalRequired):
+                collect_native(api, api.get(api.prefix + 'pulls/3'), root)
+
+    def test_catalogue_only_collection_refuses_a_complete_ordinary_decision(self):
+        from scripts.acceptance import collect_native
+        from scripts.verifier_approval import VerifierApprovalRequired
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            api = self.collector_fixture(root)
+            ordinary = self.add_implementation_decision(api, root)
+            api.runs = [ordinary.run]
+            with self.assertRaises(VerifierApprovalRequired):
+                collect_native(api, api.get(api.prefix + 'pulls/3'), root)
+
+    def test_actual_publisher_refuses_anchor_revoked_between_collection_and_final_write(self):
+        from scripts.acceptance import publish_acceptance
+
+        with tempfile.TemporaryDirectory() as directory:
+            api = self.collector_fixture(pathlib.Path(directory))
+            api.revoke_on_recheck = True
+            result = publish_acceptance(api, 3, pathlib.Path(directory))
+            self.assertEqual(api.native_reads, 2)
+            self.assertEqual(result['error'], 'hazard_catalogue_requires_maintainer_decision')
+            self.assertFalse(result['all_prerequisites_met'])
+            self.assertEqual(api.writes[-1]['conclusion'], 'failure')
+            self.assertEqual(api.run['display_title'], 'Catalogue anchors PR 3: revoke')
+
+    def test_exact_original_718_anchor_change_preserves_every_other_typed_obligation(self):
+        import hashlib
+
+        from scripts.verifier_approval import allowed_anchor_change
+
+        approved, adopted = self.catalogues()
+        self.assertEqual(allowed_anchor_change(approved, adopted), {
+            'base_sha256': hashlib.sha256(approved).hexdigest(),
+            'candidate_sha256': hashlib.sha256(adopted).hexdigest(),
+            'changed_ids': ['final-order-miscount'],
+        })
+
+    def test_historical_approval_and_native_oracle_survive_repository_anchor_adoption(self):
+        from unittest.mock import patch
+
+        from scripts.verifier_approval import approved_catalogue
+
+        catalogue_path = pathlib.Path(__file__).resolve().parents[1] / 'tests/hazards/critical.json'
+        repository = json.loads(catalogue_path.read_bytes())
+        repository['hazards'][6]['before'] = '            used = tokenizer.count_messages(messages'
+        repository['hazards'][6]['after'] = (
+            '            used = tokenizer.count_messages(messages[:-1] + '
+            '[ChatMessage(role="user", content=_user_content(_assemble_blocks('
+            'context_entries, question_text, packed, tail_part), "retrieval"))]'
+        )
+        adopted_repository = json.dumps(repository).encode()
+        original_read = pathlib.Path.read_bytes
+
+        def read_adopted_repository(path):
+            return adopted_repository if path == catalogue_path else original_read(path)
+
+        with patch.object(pathlib.Path, 'read_bytes', autospec=True, side_effect=read_adopted_repository):
+            api, historical, candidate, identity = self.fixture()
+            old_hazard = json.loads(historical)['hazards'][6]
+            self.assertEqual(old_hazard['before'], '            used = tokenizer.count_messages(messages)')
+            self.assertEqual(old_hazard['after'], (
+                '            used = tokenizer.count_messages(messages[:-1] + '
+                '[ChatMessage(role="user", content=_user_content(_assemble_blocks('
+                'context_entries, question_text, packed, tail_part), "retrieval"))])'
+            ))
+            self.assertNotEqual(historical, adopted_repository)
+            self.assertEqual(candidate, adopted_repository)
+            self.assertEqual(approved_catalogue(api, api.candidate, historical), (candidate, identity))
+            accepted = self.normalize_hazards(candidate, self.hazard_report(candidate))
+            self.assertEqual(accepted['status'], 'success')
+            self.assertEqual(len(accepted['results']['results']), 10)
+            self.assertEqual(accepted['results']['results'][6]['replacement']['occurrences'], 2)
+            weakened = json.loads(candidate)
+            weakened['hazards'][6]['assertion'] = 'assert True'
+            weakened_bytes = json.dumps(weakened).encode()
+            with self.assertRaises(ValueError):
+                self.normalize_hazards(weakened_bytes, self.hazard_report(weakened_bytes))
+
+    def test_anchor_decision_refuses_structural_edits_even_when_python_values_compare_equal(self):
+        import copy
+
+        from scripts.verifier_approval import allowed_anchor_change
+
+        approved, adopted = self.catalogues()
+        document = json.loads(adopted)
+        mutations = []
+        for path, value in [
+            (('schema_version',), True), (('schema_version',), 1.0),
+            (('owner',), 'different owner'),
+            (('deferred', 0, 'id'), 'different future challenge'),
+            (('deferred', 0, 'owner'), '#999'), (('deferred', 0, 'reason'), 'weakened future scope'),
+            (('hazards', 0, 'id'), 'different challenge'),
+            (('hazards', 0, 'contract'), 'different guarantee'),
+            (('hazards', 0, 'target'), 'src/unrelated.py'),
+            (('hazards', 0, 'test'), 'tests/test_unrelated.py::test_pass'),
+            (('hazards', 0, 'assertion'), 'assert True'),
+            (('hazards', 0, 'occurrences'), True), (('hazards', 0, 'occurrences'), 1.0),
+            (('hazards', 0, 'occurrences'), 2), (('hazards', 0, 'target_role'), 'weaker_role'),
+        ]:
+            altered = copy.deepcopy(document)
+            parent = altered
+            for key in path[:-1]:
+                parent = parent[key]
+            parent[path[-1]] = value
+            mutations.append((str(path) + '=' + repr(value), altered))
+        for path in ((), ('deferred', 0), ('hazards', 0)):
+            for operation in ('add', 'remove'):
+                altered = copy.deepcopy(document)
+                parent = altered
+                for key in path:
+                    parent = parent[key]
+                if operation == 'add':
+                    parent['extra_policy'] = 'unapproved'
+                else:
+                    del parent['owner' if path == () or path[0] == 'deferred' else 'target']
+                mutations.append((str(path) + ':' + operation + ' field', altered))
+        for operation in ('remove', 'add', 'duplicate-id', 'reorder'):
+            altered = copy.deepcopy(document)
+            hazards = altered['hazards']
+            if operation == 'remove':
+                hazards.pop()
+            elif operation == 'add':
+                hazards.append(copy.deepcopy(hazards[0]))
+                hazards[-1]['id'] = 'unapproved-extra-challenge'
+            elif operation == 'duplicate-id':
+                hazards[-1]['id'] = hazards[0]['id']
+            else:
+                hazards[0], hazards[1] = hazards[1], hazards[0]
+            mutations.append((operation + ' challenge', altered))
+        for value in ([], document['deferred'] * 2):
+            mutations.append(('changed deferred membership', {**document, 'deferred': value}))
+        for field in ('before', 'after'):
+            for value in (None, True, 1, 1.0, [], {}, ''):
+                altered = copy.deepcopy(document)
+                altered['hazards'][6][field] = value
+                mutations.append((field + '=' + repr(value), altered))
+            altered = copy.deepcopy(document)
+            del altered['hazards'][6][field]
+            mutations.append(('missing ' + field, altered))
+        for label, altered in mutations:
+            with self.subTest(case=label), self.assertRaises(ValueError):
+                allowed_anchor_change(approved, json.dumps(altered).encode())
+        duplicate_key = adopted.replace(b'"schema_version": 1', b'"schema_version": 1, "schema_version": 1', 1)
+        for raw in (approved, json.dumps(json.loads(approved), indent=3).encode(), duplicate_key,
+                    b'{malformed', b'[]'):
+            with self.subTest(raw=raw[:80]), self.assertRaises(ValueError):
+                allowed_anchor_change(approved, raw)
+
+    def test_distinct_anchor_decision_approves_exact_bytes_but_ordinary_approval_stays_excluded(self):
+        from scripts.verifier_approval import (
+            VerifierApprovalRequired,
+            approved_catalogue,
+            approved_inputs,
+        )
+
+        api, approved, adopted, identity = self.fixture()
+        self.assertEqual(approved_catalogue(api, api.candidate, approved), (adopted, identity))
+        with self.assertRaises(VerifierApprovalRequired) as rejected:
+            approved_inputs(api, api.candidate, {'tests/hazards/critical.json': '0' * 64})
+        self.assertFalse(rejected.exception.approval_allowed)
+        api.run['display_title'] = 'Verifier PR 3: approve'
+        api.artifact['name'] = 'verifier-decision-1'
+        api.record['schema_version'] = 1
+        del api.record['kind']
+        del api.record['catalogue']
+        api.pack()
+        with self.assertRaises(ValueError):
+            approved_catalogue(api, api.candidate, approved)
+        api.sources['tests/hazards/critical.json'] = approved
+        api.runs = []
+        self.assertEqual(approved_catalogue(api, api.candidate, approved), (approved, None))
+
+    def test_anchor_decision_rejects_stale_malformed_or_mixed_provenance(self):
+        from scripts.verifier_approval import approved_catalogue
+
+        mutations = [
+            ('run', 'head_sha', 'd' * 40), ('run', 'head_branch', 'candidate'),
+            ('run', 'event', 'pull_request'), ('run', 'path', '.github/workflows/ci.yml'),
+            ('run', 'status', 'in_progress'), ('run', 'conclusion', 'failure'),
+            ('run', 'actor', {'login': 'other', 'type': 'User'}),
+            ('run', 'triggering_actor', {'login': 'yonatan895', 'type': 'Bot'}),
+            ('job', 'run_attempt', 2), ('job', 'conclusion', 'skipped'),
+            ('artifact', 'expired', True), ('artifact', 'name', 'verifier-decision-1'),
+            ('artifact', 'digest', 'sha256:' + '0' * 64),
+            ('record', 'kind', 'implementation'), ('record', 'schema_version', 1),
+            ('record', 'schema_version', 2.0), ('record', 'decision', 'revoke'),
+            ('record', 'inputs', {}), ('record', 'run_id', 800),
+            ('record', 'pr_updated_at', '2026-09-25T12:00:01Z'),
+            ('record', 'pr_updated_at', '2026-09-25T12:00:02Z'),
+        ]
+        for target, key, value in mutations:
+            with self.subTest(target=target, key=key, value=value):
+                api, approved, _, _ = self.fixture()
+                getattr(api, target)[key] = value
+                if target == 'record':
+                    api.pack()
+                with self.assertRaises(ValueError):
+                    approved_catalogue(api, api.candidate, approved)
+        for field, value in (('base_sha256', '0' * 64), ('candidate_sha256', '0' * 64),
+                             ('changed_ids', []), ('changed_ids', ['vector-projection'])):
+            with self.subTest(field=field):
+                api, approved, _, _ = self.fixture()
+                api.record['catalogue'][field] = value
+                api.pack()
+                with self.assertRaises(ValueError):
+                    approved_catalogue(api, api.candidate, approved)
+        for field in ('head_sha', 'base_sha', 'execution_sha'):
+            with self.subTest(candidate=field):
+                api, approved, _, _ = self.fixture()
+                api.record['candidate'][field] = 'd' * 40
+                api.pack()
+                with self.assertRaises(ValueError):
+                    approved_catalogue(api, api.candidate, approved)
+        api, approved, adopted, _ = self.fixture()
+        api.sources['tests/hazards/critical.json'] = adopted + b'\n'
+        with self.assertRaises(ValueError):
+            approved_catalogue(api, api.candidate, approved)
+
+    def test_new_anchor_revoke_pending_or_failure_after_collection_blocks_publication(self):
+        import copy
+
+        from scripts.acceptance import recheck_current
+        from scripts.verifier_approval import approved_catalogue
+
+        for status, conclusion, decision in (
+            ('completed', 'success', 'revoke'), ('in_progress', None, 'approve'),
+            ('completed', 'failure', 'approve'), ('completed', 'cancelled', 'approve'),
+        ):
+            with self.subTest(status=status, decision=decision):
+                api, approved, _, _ = self.fixture()
+                _, identity = approved_catalogue(api, api.candidate, approved)
+                result = {'candidate': api.candidate, 'runs': {}, 'verifier_approval': None,
+                          'catalogue_approval': identity}
+                recheck_current(api, result)
+                old = copy.deepcopy(api.run)
+                api.run.update(id=910, status=status, conclusion=conclusion,
+                               display_title='Catalogue anchors PR 3: ' + decision)
+                api.runs = [old, api.run]
+                with self.assertRaises(ValueError):
+                    recheck_current(api, result)
+
+    def normalize_hazards(self, catalogue, report, *, include_results=True):
+        import hashlib
+        import io
+        import zipfile
+
+        from scripts.acceptance_evidence import PRODUCERS, normalize_native
+
+        args, receipt, _ = TestNativeEvidenceConsumer().fixture()
+        args['producer'] = next(producer for producer in PRODUCERS if producer.lane == 'hazards')
+        args['job']['name'] = 'hazards'
+        args['artifact']['name'] = 'evidence-hazards-attempt-2'
+        args['hazard_policy'] = {'catalogue': catalogue, 'approved_catalogue': self.catalogues()[0],
+                                 'runner_sha256': 'f' * 64}
+        raw = json.dumps(report).encode()
+        receipt.update(job_key='hazards', job_name='hazards', lane='hazards', tests=None,
+                       result_sha256=hashlib.sha256(raw).hexdigest())
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, 'w') as archive:
+            archive.writestr('evidence.json', json.dumps(receipt))
+            if include_results:
+                archive.writestr('results.json', raw)
+        args['archive'] = buffer.getvalue()
+        args['artifact']['digest'] = 'sha256:' + hashlib.sha256(args['archive']).hexdigest()
+        return normalize_native(**args)
+
+    def test_native_receipt_binds_exact_adopted_catalogue_and_all_ten_obligations(self):
+        import copy
+        import hashlib
+
+        original, adopted = self.catalogues()
+        report = self.hazard_report(adopted)
+        accepted = self.normalize_hazards(adopted, report)
+        self.assertEqual(accepted['status'], 'success')
+        self.assertEqual(accepted['results']['catalogue_sha256'], hashlib.sha256(adopted).hexdigest())
+        self.assertEqual(len(accepted['results']['results']), 10)
+        self.assertEqual(accepted['results']['results'][6]['replacement'], {
+            'before': '            used = tokenizer.count_messages(messages',
+            'after': ('            used = tokenizer.count_messages(messages[:-1] + '
+                      '[ChatMessage(role="user", content=_user_content(_assemble_blocks('
+                      'context_entries, question_text, packed, tail_part), "retrieval"))]'),
+            'occurrences': 2, 'target_role': 'production',
+        })
+        mutants = [('old catalogue and otherwise passing native report', self.hazard_report(original))]
+        mixed = copy.deepcopy(report)
+        mixed['results'][6] = self.hazard_report(original)['results'][6]
+        mutants.append(('approved hash with original anchor receipt', mixed))
+        missing = copy.deepcopy(report)
+        missing['results'].pop()
+        mutants.append(('missing challenge', missing))
+        duplicate = copy.deepcopy(report)
+        duplicate['results'][-1] = copy.deepcopy(duplicate['results'][0])
+        mutants.append(('duplicate challenge replaces another', duplicate))
+        altered_catalogue = json.loads(adopted)
+        altered_catalogue['hazards'][6]['before'] += ', different_effort=True)'
+        altered = json.dumps(altered_catalogue).encode()
+        self_declared = self.hazard_report(altered)
+        self_declared['catalogue'] = altered_catalogue
+        mutants.append(('self-consistent artifact chooses its own catalogue', copy.deepcopy(self_declared)))
+        self_declared['catalogue_sha256'] = hashlib.sha256(adopted).hexdigest()
+        mutants.append(('approved hash does not excuse different anchor contents', copy.deepcopy(self_declared)))
+        for label, mutant in mutants:
+            with self.subTest(case=label), self.assertRaises((ValueError, KeyError)):
+                self.normalize_hazards(adopted, mutant)
+        with self.assertRaises((ValueError, KeyError)):
+            self.normalize_hazards(adopted, report, include_results=False)
+
+    def test_native_policy_cannot_replace_approved_obligations_with_self_consistent_candidate(self):
+        import copy
+
+        _, adopted = self.catalogues()
+        original = json.loads(adopted)
+        for defect in ('omitted hazard', 'weaker assertion', 'changed occurrences', 'bool occurrence'):
+            with self.subTest(defect=defect):
+                altered = copy.deepcopy(original)
+                if defect == 'omitted hazard':
+                    altered['hazards'].pop()
+                elif defect == 'weaker assertion':
+                    altered['hazards'][0]['assertion'] = 'assert True'
+                elif defect == 'changed occurrences':
+                    altered['hazards'][0]['occurrences'] = 2
+                else:
+                    altered['hazards'][0]['occurrences'] = True
+                catalogue = json.dumps(altered).encode()
+                report = self.hazard_report(catalogue)
+                # Hash, raw results, expected assertions and replacement all
+                # agree with the candidate. Approved-main remains the oracle.
+                with self.assertRaises(ValueError):
+                    self.normalize_hazards(catalogue, report)
+
+
 class TestEvalRetrievalProducer(unittest.TestCase):
     """The eval_retrieval lane has a native CI producer (ci.yml eval-retrieval
     job running scripts/gate_l1.py). These tests pin the receipt binding and

@@ -120,12 +120,20 @@ def validate_hazard_report(report: dict[str, Any], execution: str, policy: dict[
     require(isinstance(policy, dict))
     assert policy is not None
     catalogue_bytes = policy['catalogue']
-    catalogue = object_json(catalogue_bytes)
+    approved_bytes = policy.get('approved_catalogue', catalogue_bytes)
+    if approved_bytes != catalogue_bytes:
+        # Trust is established by the caller's native decision validation.
+        # Recheck the structural boundary here before consuming candidate data.
+        from scripts.verifier_approval import allowed_anchor_change
+
+        allowed_anchor_change(approved_bytes, catalogue_bytes)
+    catalogue = object_json(approved_bytes)
     require(catalogue['schema_version'] == 1)
     hazards = catalogue['hazards']
     require(isinstance(hazards, list) and bool(hazards))
     expected = {hazard['id']: hazard for hazard in hazards}
     require(len(expected) == len(hazards))
+    anchors = {hazard['id']: hazard for hazard in object_json(catalogue_bytes)['hazards']}
     require(type(report.get('schema_version')) is int and report['schema_version'] == 1)
     require(report.get('candidate_sha') == execution)
     require(report.get('catalogue_sha256') == hashlib.sha256(catalogue_bytes).hexdigest())
@@ -144,7 +152,8 @@ def validate_hazard_report(report: dict[str, Any], execution: str, policy: dict[
             ('contract', 'contract'), ('target', 'target'), ('expected_test', 'test'),
             ('expected_assertion', 'assertion'))))
         replacement = result.get('replacement')
-        expected_replacement = {key: hazard[key] for key in ('before', 'after', 'occurrences', 'target_role')}
+        expected_replacement = {key: anchors[identity][key] for key in ('before', 'after')}
+        expected_replacement.update({key: hazard[key] for key in ('occurrences', 'target_role')})
         require(isinstance(replacement, dict) and replacement == expected_replacement)
         require(all(type(replacement[key]) is type(value) for key, value in expected_replacement.items()))
         baseline, mutation = result.get('baseline'), result.get('mutation')

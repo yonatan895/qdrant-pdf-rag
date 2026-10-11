@@ -307,7 +307,8 @@ A PR that changes a protected verifier or native producer workflow needs a
 separate trust decision. Marking it ready does not grant that trust. After
 reviewing the actual changes, **only the human maintainer yonatan895** runs
 Actions → **Verifier update decision** → Run workflow, selects **main**, enters
-the PR number, and selects **approve**. No SHA or JSON is entered manually.
+the PR number, leaves **kind: implementation**, and selects **approve**. No SHA
+or JSON is entered manually.
 Agents must never dispatch or rerun this workflow on the maintainer's behalf.
 The workflow does not mark ready, submit a PR review, merge, or change settings.
 
@@ -344,8 +345,8 @@ old-policy-required lane still fails, even if its proposed policy would omit
 that lane. The reported policy digest continues to identify the approved-base
 selection policy; the approved input map separately identifies execution bytes.
 The proposed selection rules take effect only after maintainer adoption into
-main. Hazard-catalogue changes remain excluded; incompatible evidence schemas
-still fail. Forks cannot use this path.
+main. Implementation decisions exclude hazard-catalogue changes; incompatible
+evidence schemas still fail. Forks cannot use this path.
 Normal PRs with unchanged verifier inputs require no manual decision.
 
 For unit-layout changes, merge approved-main compatibility support before
@@ -356,20 +357,25 @@ verifier decision authorizes producer bytes, not a smaller receipt-declared
 coverage obligation. Refresh activation PRs after the compatibility merge and
 obtain a new exact-candidate decision; old approvals do not transfer.
 
-For the selector-approval bootstrap, the consumer and trust validator change
-without changing the selector, catalogue, native producer or receipt format.
-The current consumer can verify that bootstrap under its existing policy. After
-the maintainer merges it, refresh dependent selector PRs against the new base
-and record a new exact-candidate decision. An approval issued against the old
-base/head/test-merge cannot transfer to the refreshed candidate.
+### Approving catalogue anchors
 
-Bootstrap: this implementation changes the consumer and adds its decision
-workflow, without changing any existing protected producer inputs. It can pass
-the current consumer before deployment. The maintainer reviews and merges this
-PR first. Only then does the new workflow become available on main. Afterwards,
-refresh prerequisite PRs against that approved base and use the decision workflow
-for each exact verifier candidate. No ruleset bypass or temporary disabling of
-required checks is part of this procedure.
+#718: only the human maintainer runs **Verifier update decision** on **main**
+with **kind: catalogue-anchors** and **approve** or **revoke**. Receipts bind exact
+repository/base/head/test-merge, raw catalogue hashes and changed IDs. Only
+nonempty, distinct `before`/`after` strings may change; all other typed fields,
+membership/order, targets, tests, assertions, occurrence counts and deferred
+obligations remain identical. Other changes remain unsupported.
+Ordinary approval is insufficient; mixed changes require both decisions.
+
+Approved-main fetches candidate data through the API without execution, retains
+main obligations, and validates complete native baselines/kills against approved
+anchors. Old, mixed or incomplete reports fail. Each kind's latest decision is
+rechecked immediately before publication; revocation retains the limits above.
+
+Bootstrap keeps `critical.json` unchanged: adopt reviewed consumer support,
+refresh dependent PRs, then obtain new exact-candidate decisions against adopted
+main. Base/head/test-merge changes invalidate approvals. No bypasses
+or disabled checks.
 
 Both GitHub and GitLab L1 comment publishers append historical reports with
 candidate/run attribution. They never acquire ownership of an existing comment
