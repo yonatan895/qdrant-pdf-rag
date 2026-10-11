@@ -822,6 +822,28 @@ class TaskContractsTests(unittest.TestCase):
         argv = self.pip_calls()[0]["argv"]
         self.assertNotIn("--limit", argv)
 
+    def test_answer_eval_agent_url_is_optional_and_roundtrips_exactly(self):
+        self.make_venv_fake()
+        env = self.tool_env()
+        target = "http://agent:8087/route אב;$(touch SENTINEL)/'quoted'"
+        ambient = "http://ambient-agent:8087/other"
+        for args, value, expected in (
+            ((), "", None),
+            ((f"AGENT_URL={target}",), ambient, target),
+            (("AGENT_URL=",), ambient, None),
+            ((), ambient, ambient),
+        ):
+            with self.subTest(args=args, ambient=value):
+                self.log.unlink(missing_ok=True)
+                proc = self.run_task("eval:answers", *args, extra_env=dict(env, AGENT_URL=value))
+                self.assertEqual(proc.returncode, 0, proc.stdout)
+                argv = self.pip_calls()[0]["argv"]
+                if expected is None:
+                    self.assertNotIn("--agent-url", argv)
+                else:
+                    self.assertEqual(argv[argv.index("--agent-url") + 1], expected)
+                self.assertFalse((self.root / "SENTINEL").exists())
+
     def test_bench_verify_and_load_carry_no_mode_exports(self):
         self.make_venv_fake()
         self.make_tool_recorder("python3base")
