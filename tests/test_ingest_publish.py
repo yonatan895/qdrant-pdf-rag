@@ -4105,6 +4105,63 @@ def test_in_place_writer_cannot_mutate_full_build(tmp_path, monkeypatch, target_
     assert (fake.collections, fake.aliases, progress.read_bytes()) == before
 
 
+@pytest.mark.parametrize("target_kind", ["physical", "retained", "build-alias"])
+def test_publication_refuses_a_generation_targeted_by_name(tmp_path, monkeypatch, target_kind):
+    """QDRANT_COLLECTION naming a generation's physical collection (or a
+    build alias) is a misconfiguration, never a legacy layout: before the
+    refusal, publication "migrated" the serving physical — copied it aside
+    and deleted the collection its logical alias still served. The refusal
+    mutates nothing, and the next ordinary publication still succeeds."""
+    from copy import deepcopy
+
+    from mainframe_rag.ingest import run_ingest
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _build_doc_with_id(corpus, "doc_a", DOC_A)
+    progress = tmp_path / "inventory.jsonl"
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    physical = fake.aliases[ALIAS]
+    target = physical
+    if target_kind == "retained":
+        assert _run_main(monkeypatch, corpus, progress, "--reingest") == 0
+        assert fake.aliases[ALIAS] != physical, "the first build is now retained"
+    elif target_kind == "build-alias":
+        target = next(name for name, value in fake.aliases.items()
+                      if name != ALIAS and value == physical)
+    before = deepcopy(fake.collections), dict(fake.aliases), progress.read_bytes()
+    monkeypatch.setenv("QDRANT_COLLECTION", target)
+    with pytest.raises(RuntimeError):
+        _run_main(monkeypatch, corpus, progress, "--reingest")
+    assert (fake.collections, fake.aliases, progress.read_bytes()) == before
+    monkeypatch.setenv("QDRANT_COLLECTION", ALIAS)
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    assert fake.aliases[ALIAS] in fake.collections
+
+
+@pytest.mark.parametrize("target_kind", ["physical", "retained"])
+def test_physical_target_refusal_names_the_misconfiguration(tmp_path, monkeypatch, target_kind):
+    from mainframe_rag.ingest import run_ingest
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _build_doc_with_id(corpus, "doc_a", DOC_A)
+    progress = tmp_path / "inventory.jsonl"
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    physical = fake.aliases[ALIAS]
+    if target_kind == "retained":
+        assert _run_main(monkeypatch, corpus, progress, "--reingest") == 0
+    monkeypatch.setenv("QDRANT_COLLECTION", physical)
+    with pytest.raises(RuntimeError, match="publish through its logical alias"):
+        _run_main(monkeypatch, corpus, progress)
+
+
 def test_completed_legacy_backfill_never_creates_build_identity(tmp_path, monkeypatch):
     from copy import deepcopy
 
@@ -4711,7 +4768,9 @@ def test_publication_checks_are_read_only_by_type(tmp_path):
     the read-only `QdrantReader`, so the checker used by qa:typecheck proves
     they cannot write (transitively: a reader can only reach other reader
     helpers), while every helper that mutates storage requires the writer
-    protocol and rejects a reader."""
+    protocol and rejects a reader. The publish decision step and the
+    re-certification checks are readers; re-certification's receipt
+    backfill is its one write and needs the writer."""
     import subprocess
     import sys
 
@@ -4728,7 +4787,14 @@ from mainframe_rag.ingest.publish import (
 )
 from mainframe_rag.ingest.qdrant_io import delete_by_doc, swap_alias_to
 from mainframe_rag.ingest.representation import check_ingest_compatible
+from mainframe_rag.ingest.run_ingest import (
+    _certify_live,
+    _placement_clients,
+    _recertify_live,
+    _resolve_publication,
+)
 from mainframe_rag.ports import QdrantReader
+from pathlib import Path
 """
     good = tmp_path / "good.py"
     good.write_text(imports + """
@@ -4739,6 +4805,10 @@ def checks(r: QdrantReader, real: qdrant_client.QdrantClient, s: Settings) -> No
     check_ingest_compatible(r, s, "c__completions", "rules")
     resolve_publish_staging(real, s, gen_fp="g", corpus_fp="c", live=None,
                             force_reingest=False, state=None)
+    res = _resolve_publication(r, Path("src"), Path("progress"), s, vendor=None, product=None,
+                               version=None, force_reingest=False, prewalked=[],
+                               retire_docs=None, rules_v="rules")
+    _certify_live(res, r, Path("progress"), s, s, prewalked=[], rules_v="rules")
 """)
     accepted = subprocess.run([*command, str(good)], capture_output=True, text=True, check=False)
     assert accepted.returncode == 0, accepted.stdout + accepted.stderr
@@ -4750,10 +4820,23 @@ def writes(r: QdrantReader, s: Settings) -> None:
     ensure_staging(r, s, s, None)
     delete_by_doc(r, s, "doc")
     swap_alias_to(r, s, "staging", None)
+    res = _resolve_publication(r, Path("src"), Path("progress"), s, vendor=None, product=None,
+                               version=None, force_reingest=False, prewalked=[],
+                               retire_docs=None, rules_v="rules")
+    _recertify_live(res, r, Path("progress"), s, prewalked=[], rules_v="rules")
+    with _placement_clients(s, r) as placement:
+        if placement is not None:
+            for peer in placement.values():
+                peer.delete_collection("staging")
 """)
     rejected = subprocess.run([*command, str(bad)], capture_output=True, text=True, check=False)
     assert rejected.returncode == 1, rejected.stdout + rejected.stderr
     for name in ("ensure_staging", "delete_by_doc", "swap_alias_to"):
         assert (f'Argument 1 to "{name}" has incompatible type "QdrantReader"; '
                 'expected "QdrantPoints"') in rejected.stdout
-    assert "Found 3 errors" in rejected.stdout
+    assert ('Argument 2 to "_recertify_live" has incompatible type "QdrantReader"; '
+            'expected "QdrantPoints"') in rejected.stdout
+    # The placement map (review of #699): the explicit 1/1/1 profile yields
+    # the publisher's own client, so its handles must be readers too.
+    assert '"QdrantReader" has no attribute "delete_collection"' in rejected.stdout
+    assert "Found 5 errors" in rejected.stdout

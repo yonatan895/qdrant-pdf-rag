@@ -312,6 +312,55 @@ def test_alias_publish_rekeys_manifest_across_clone(qdrant_url, corpus, tmp_path
         client.close()
 
 
+def test_publication_by_physical_name_is_refused_on_real_server(
+    qdrant_url, corpus, tmp_path, monkeypatch
+):
+    """Real-server semantics for the physical-target misconfiguration: a
+    real Qdrant drops a collection's aliases with it, so "migrating" the
+    serving physical as a legacy layout would leave the logical alias with
+    nothing to serve. The run must refuse, leave the serving generation and
+    its points intact, and the next ordinary publication must succeed."""
+    import uuid
+
+    import pytest
+    from qdrant_client import QdrantClient
+
+    from mainframe_rag.ingest import run_ingest
+
+    monkeypatch.setenv("INGEST_ALIAS_PUBLISH", "true")
+    alias = f"phys_target_{uuid.uuid4().hex[:8]}"
+    local = tmp_path / "corpus"
+    local.mkdir()
+    for pdf in corpus.iterdir():
+        shutil.copy(pdf, local / pdf.name)
+    progress = tmp_path / "inv.jsonl"
+    _ingest(monkeypatch, qdrant_url, alias, local, progress)
+    client = QdrantClient(url=qdrant_url, timeout=30)
+    try:
+        def serving():
+            return {a.alias_name: a.collection_name for a in client.get_aliases().aliases}[alias]
+
+        physical = serving()
+        points = client.count(physical, exact=True).count
+        collections = {c.name for c in client.get_collections().collections}
+        monkeypatch.setenv("QDRANT_COLLECTION", physical)
+        previous = run_ingest._worker_qdrant
+        if previous is not None:
+            previous.close()
+        monkeypatch.setattr(run_ingest, "_worker_qdrant", None)
+        with pytest.raises(RuntimeError, match="publish through its logical alias"):
+            run_ingest.main(["--src", str(local), "--progress", str(progress),
+                             "--workers", "1", "--reingest"])
+        assert serving() == physical, "the serving alias still names the same generation"
+        assert client.collection_exists(physical)
+        assert client.count(physical, exact=True).count == points
+        assert {c.name for c in client.get_collections().collections} == collections
+        _ingest(monkeypatch, qdrant_url, alias, local, progress)
+        assert client.collection_exists(serving())
+    finally:
+        client.close()
+
+
 def test_alias_publish_revision_migration_keeps_old_generation(
     qdrant_url, mock_url, corpus, tmp_path, monkeypatch
 ):
@@ -878,6 +927,22 @@ def test_eval_retrieval_on_synthetic_corpus(qdrant_url, mock_url, corpus, tmp_pa
     assert report["identifier"]["recall@1"] == 1.0
     assert report["identifier"]["mrr"] == 1.0
     assert report["nl"]["recall@5"] == 1.0
+    # The serving gate's own verdict: the run measured what the agent serves.
+    assert report["representation"]["servable"] is True
+    assert report["representation"]["physical"]
+
+    # Same collection, a different attested embedding revision: the agent
+    # would refuse it, so the run still yields trend numbers but reports the
+    # representation as not servable (gates and baselines refuse it).
+    import os
+
+    revision = os.environ.get("EMBED_MODEL_REVISION", "")
+    monkeypatch.setenv("EMBED_MODEL_REVISION", revision + "-other")
+    mismatched = evaluate(golden, load_settings())
+    assert mismatched["n"] == 3
+    assert mismatched["representation"]["servable"] is False
+    assert mismatched["representation"]["outcome"] != "compatible"
+    monkeypatch.setenv("EMBED_MODEL_REVISION", revision)
 
     # Baseline roundtrip & check
     baseline_path = tmp_path / "eval-baseline.json"

@@ -49,7 +49,7 @@ from mainframe_rag.eval.datasets import (
     require_rc_for_collection,
     require_rc_for_golden,
 )
-from mainframe_rag.eval.retrieval import SEARCH_LIMIT, score_entry
+from mainframe_rag.eval.retrieval import SEARCH_LIMIT, score_entry, serving_generation
 from mainframe_rag.manifest import write_run_manifest
 from mainframe_rag.ports import ChatMessage
 from mainframe_rag.retrieve.query import search as retrieve_search
@@ -145,6 +145,17 @@ def evaluate_sessions(entries: list[GoldenEntry], settings) -> dict:
     embedder = build_embedder(settings)
     reranker = build_reranker(settings)
     llm = HttpxLLMClient(settings)
+    # Same verdict as the retrieval eval and the agent's serving gate: a
+    # servable generation is measured through its validated physical name.
+    generation = serving_generation(client, settings)
+    if not generation.servable:
+        print(
+            f"warn: collection {settings.qdrant_collection!r} is not servable under these settings "
+            f"(outcome {generation.outcome!r}); the numbers describe a representation the agent "
+            "would refuse",
+            file=sys.stderr,
+        )
+    collection = generation.physical if generation.servable else settings.qdrant_collection
 
     rows: list[dict] = []
     failures = 0
@@ -152,7 +163,7 @@ def evaluate_sessions(entries: list[GoldenEntry], settings) -> dict:
         messages = session_messages(entry)
         follow_up = messages[-1].content
         literal_row = _retrieve_arm(
-            client, embedder, reranker, settings, entry, follow_up, ARM_LITERAL
+            client, embedder, reranker, settings, collection, entry, follow_up, ARM_LITERAL
         )
         rows.append(literal_row)
 
@@ -174,7 +185,7 @@ def evaluate_sessions(entries: list[GoldenEntry], settings) -> dict:
             )
             continue
         condensed_row = _retrieve_arm(
-            client, embedder, reranker, settings, entry, condensed_query, ARM_CONDENSED
+            client, embedder, reranker, settings, collection, entry, condensed_query, ARM_CONDENSED
         )
         condensed_row["condense_ms"] = condense_ms
         rows.append(condensed_row)
@@ -190,18 +201,24 @@ def evaluate_sessions(entries: list[GoldenEntry], settings) -> dict:
             "embed_mode": settings.embed_mode,
             "llm_model": settings.llm_model_reasoning,
         },
+        "representation": {
+            "servable": generation.servable,
+            "outcome": generation.outcome,
+            "details": list(generation.details),
+            "physical": generation.physical,
+        },
     }
 
 
 def _retrieve_arm(
-    client, embedder, reranker, settings, entry: GoldenEntry, query: str, arm: str
+    client, embedder, reranker, settings, collection: str, entry: GoldenEntry, query: str, arm: str
 ) -> dict:
     started = time.perf_counter()
     try:
         hits, kind, timings = retrieve_search(
             client,
             embedder,
-            settings.qdrant_collection,
+            collection,
             query,
             limit=SEARCH_LIMIT,
             settings=settings,

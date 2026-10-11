@@ -32,7 +32,9 @@ must_not violations are gated to zero within the top-5 window.
 
 Exit codes: 0 green (or no gate requested); 1 regressions or query
 failures; 2 an explicitly requested gate could not be applied (baseline
-file missing, or collection/embed-mode mismatch — a skip is not a pass, issue #159).
+file missing, collection/embed-mode mismatch, or a collection the agent would
+not serve under these settings — a skip is not a pass, issue #159), or a
+baseline was requested from such a collection.
 
 Dataset/scoring owners live in :mod:`mainframe_rag.eval.datasets` and
 :mod:`mainframe_rag.eval.retrieval`; this script owns CLI and label drafting.
@@ -176,6 +178,14 @@ def main(argv: list[str] | None = None) -> int:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 2
     report = evaluate(entries, settings)
+    servable = report["representation"]["servable"]
+    if args.update_baseline and not servable:
+        print(
+            "FAIL: refusing to record a baseline from a collection the agent would not serve "
+            f"(representation outcome {report['representation']['outcome']!r})",
+            file=sys.stderr,
+        )
+        return 2
 
     baseline = None
     regressions: list[str] = []
@@ -189,7 +199,15 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(f"warn: no baseline for embed_mode={settings.embed_mode} ({candidate}); nothing gated", file=sys.stderr)
     gate_skipped = False
-    if check_path is not None:
+    if check_path is not None and not servable:
+        print(
+            "warn: the collection is not servable under these settings (representation outcome "
+            f"{report['representation']['outcome']!r}); the requested gate cannot be applied — "
+            "exit 2 so a skip cannot read as pass",
+            file=sys.stderr,
+        )
+        gate_skipped = True
+    elif check_path is not None:
         if not check_path.exists():
             print(
                 f"warn: baseline {check_path} missing; the requested gate cannot be applied — "

@@ -560,6 +560,23 @@ def aggregate(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def serving_generation(client, settings):
+    """The serving gate's own verdict on the configured collection (issue
+    #391 F3/F4): representation contract (embed model/revision/dim,
+    extraction rules, sparse model) and immutable publication, through the
+    one sync-to-async boundary. Evals reuse it so they measure exactly what
+    the agent would serve."""
+    import asyncio
+
+    from mainframe_rag.agent.serving import resolve_published_generation
+    from mainframe_rag.ingest.rules_version import extraction_rules_version
+    from mainframe_rag.ports import AsyncReaderAdapter
+
+    return asyncio.run(
+        resolve_published_generation(AsyncReaderAdapter(client), settings, extraction_rules_version())
+    )
+
+
 def evaluate(golden: list[GoldenEntry], settings) -> dict:
     import httpx2
     from qdrant_client import QdrantClient
@@ -573,26 +590,24 @@ def evaluate(golden: list[GoldenEntry], settings) -> dict:
         timeout=settings.qdrant_timeout_s,
     )
     embedder = build_embedder(settings)
-    # Extraction-rules desync warning (issue #124): the eval is the
-    # instrument that caught the #120 silent-recall loss — payload
-    # message_ids extracted under older regex rules made the prefetch
-    # filter match nothing. Warning only: the run still produces numbers
-    # (trend data), but they are not comparable to a same-rules baseline.
-    from mainframe_rag.ingest.qdrant_io import stored_rules_version
-    from mainframe_rag.ingest.rules_version import extraction_rules_version
-
-    stored_v = stored_rules_version(client, settings)
-    if stored_v is not None and stored_v != extraction_rules_version():
+    # Representation gate (issues #124, #391): the agent serves only a
+    # generation whose stored contract matches these settings. A servable
+    # generation is measured through its validated physical name, as
+    # serving binds requests; any other outcome still yields trend numbers
+    # (the configured name), but a gate or baseline never accepts them.
+    generation = serving_generation(client, settings)
+    if not generation.servable:
         print(
-            f"warn: collection {settings.qdrant_collection!r} payloads were extracted under rules "
-            f"{stored_v!r}; this tree computes {extraction_rules_version()!r} — "
-            "re-ingest required for numbers comparable to a same-rules baseline",
+            f"warn: collection {settings.qdrant_collection!r} is not servable under these settings "
+            f"(outcome {generation.outcome!r}: {', '.join(generation.details) or 'no detail'}); "
+            "the numbers describe a representation the agent would refuse — not comparable to "
+            "any baseline",
             file=sys.stderr,
         )
     from mainframe_rag.retrieve.rerank import build_reranker
 
     reranker = build_reranker(settings)
-    collection = settings.qdrant_collection
+    collection = generation.physical if generation.servable else settings.qdrant_collection
 
     rows, failures = [], 0
     started = time.perf_counter()
@@ -614,13 +629,20 @@ def evaluate(golden: list[GoldenEntry], settings) -> dict:
             failures += 1
             rows.append({"query": entry.query, "error": str(exc)[:200], "kind": "error"})
 
-    return summarize(
+    report = summarize(
         rows,
         failures=failures,
         elapsed_s=round(time.perf_counter() - started, 2),
         embed_mode=settings.embed_mode,
-        collection=collection,
+        collection=settings.qdrant_collection,
     )
+    report["representation"] = {
+        "servable": generation.servable,
+        "outcome": generation.outcome,
+        "details": list(generation.details),
+        "physical": generation.physical,
+    }
+    return report
 
 
 def collect_rows(
