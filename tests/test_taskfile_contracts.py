@@ -1159,6 +1159,19 @@ class TaskContractsTests(unittest.TestCase):
         calls = self.script_calls("run_local_stack.sh")
         self.assertEnvSubset(calls[0], {"LOCAL_STACK_DRYRUN": "0"})
 
+    def test_stack_explicit_empty_probe_budget_overrides_ambient_to_the_default(self):
+        self.make_venv_fake()
+        self.make_script_recorder("run_local_stack.sh")
+        env = dict(self.tool_env(), GATEWAY_PROBE_MAX_TOKENS="512")
+        proc = self.run_task("local:stack", "GATEWAY_PROBE_MAX_TOKENS=", extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertEnvSubset(self.script_calls("run_local_stack.sh")[0], {"GATEWAY_PROBE_MAX_TOKENS": None})
+        shutil.copyfile(REPO / "scripts/run_local_stack.sh", self.root / "scripts/run_local_stack.sh")
+        proc = self.run_task("local:stack", "GATEWAY_PROBE_MAX_TOKENS=", "LOCAL_STACK_DRYRUN=1", extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn("--max-tokens 16", proc.stdout)
+        self.assertNotIn("--max-tokens 512", proc.stdout)
+
     def test_agent_stream_port_and_ui(self):
         self.make_venv_fake()
         env = self.tool_env()

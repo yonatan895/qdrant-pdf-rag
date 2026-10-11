@@ -265,7 +265,7 @@ tasks:
         if [ -n "${TASK_CORPUS_DIR:-}" ]; then export CORPUS_DIR="$TASK_CORPUS_DIR"; fi;
         if [ -n "${TASK_GATEWAY_PORT:-}" ]; then export GATEWAY_PORT="$TASK_GATEWAY_PORT"; fi;
         if [ -n "${TASK_LOCAL_AGENT_PORT:-}" ]; then export LOCAL_AGENT_PORT="$TASK_LOCAL_AGENT_PORT"; fi;
-        if [ -n "${TASK_GATEWAY_PROBE_MAX_TOKENS:-}" ]; then export GATEWAY_PROBE_MAX_TOKENS="$TASK_GATEWAY_PROBE_MAX_TOKENS"; fi;
+        if [ -n "${TASK_GATEWAY_PROBE_MAX_TOKENS:-}" ]; then export GATEWAY_PROBE_MAX_TOKENS="$TASK_GATEWAY_PROBE_MAX_TOKENS"; else unset GATEWAY_PROBE_MAX_TOKENS; fi;
         if [ -n "${TASK_JAEGER_PORT:-}" ]; then export JAEGER_PORT="$TASK_JAEGER_PORT"; fi;
         if [ -n "${TASK_LOCAL_STACK_DRYRUN:-}" ]; then export LOCAL_STACK_DRYRUN="$TASK_LOCAL_STACK_DRYRUN"; fi;
         sh scripts/run_local_stack.sh
