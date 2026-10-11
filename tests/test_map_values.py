@@ -32,6 +32,9 @@ MAPPER_KEYS = [
     "QDRANT_RELEASE", "IMAGE_SHA", "EMBED_BASE_URL", "VLLM_BASE_URL",
     "EMBED_MODEL", "DENSE_DIM", "EMBED_MODEL_REVISION",
     "LLM_BASE_URL", "LLM_MODEL_REASONING", "CHAT_CONDENSE_ENABLED",
+    "LLM_MAX_MODEL_LEN", "LLM_RESERVED_OUTPUT_TOKENS",
+    "LLM_THINKING_RESERVE_TOKENS_SIMPLE", "LLM_THINKING_RESERVE_TOKENS_COMPLEX",
+    "LLM_REASONING_EFFORT_SIMPLE", "LLM_REASONING_EFFORT_COMPLEX", "LLM_STREAM",
     "RERANK_ENABLED", "RERANK_BASE_URL", "RERANK_MODEL", "RERANK_ENDPOINT_ORDER",
     "GATEWAY_API_KEY_SECRET", "GATEWAY_API_KEY_SECRET_KEY", "GATEWAY_CA_CONFIGMAP", "PULL_SECRET",
     "OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_ENDPOINT_RESOLVED", "OTEL_TRACING_ENABLED",
@@ -492,6 +495,71 @@ def test_condensation_mapper_to_agent_round_trip(monkeypatch, mapper_env):
     agent = deployment["spec"]["template"]["spec"]["containers"][0]
     assert next(e for e in agent["env"] if e["name"] == "CHAT_CONDENSE_ENABLED") == {
         "name": "CHAT_CONDENSE_ENABLED", "value": "true"}
+
+
+@pytest.mark.parametrize("stream,simple_reserve,complex_effort", [
+    ("true", "512", "medium"), ("false", "0", "xhigh"),
+])
+def test_selected_model_budgets_reach_rendered_agent(monkeypatch, mapper_env, stream, simple_reserve, complex_effort):
+    selected = {
+        "LLM_MAX_MODEL_LEN": "16384",
+        "LLM_RESERVED_OUTPUT_TOKENS": "2048",
+        "LLM_THINKING_RESERVE_TOKENS_SIMPLE": simple_reserve,
+        "LLM_THINKING_RESERVE_TOKENS_COMPLEX": "2048",
+        "LLM_REASONING_EFFORT_SIMPLE": "low",
+        "LLM_REASONING_EFFORT_COMPLEX": complex_effort,
+        "LLM_STREAM": stream, "UI_ENABLED": "true",
+        "CHAT_CONDENSE_ENABLED": "true", "RERANK_ENABLED": "false",
+    }
+    for name, value in selected.items():
+        monkeypatch.setenv(name, value)
+    result, output = mapper_env()
+    assert result.returncode == 0, result.stderr
+    rendered = subprocess.run(
+        [str(REPO / ".tools/bin/helm"), "template", "app", str(CHART), "-f", str(output),
+         "--namespace", "ns", "--show-only", "templates/agent-deployment.yaml"],
+        capture_output=True, text=True, check=False,
+    )
+    assert rendered.returncode == 0, rendered.stderr
+    deployment = yaml.safe_load(rendered.stdout)
+    agent = deployment["spec"]["template"]["spec"]["containers"][0]
+    actual = {entry["name"]: entry.get("value") for entry in agent["env"]}
+    assert {name: actual.get(name) for name in selected} == selected
+
+
+@pytest.mark.parametrize("name,bad", [
+    ("LLM_MAX_MODEL_LEN", "511"), ("LLM_MAX_MODEL_LEN", "131073"),
+    ("LLM_MAX_MODEL_LEN", "16384.0"),
+    pytest.param("LLM_MAX_MODEL_LEN", "9" * 5000, id="oversized-integer"),
+    ("LLM_RESERVED_OUTPUT_TOKENS", "127"), ("LLM_RESERVED_OUTPUT_TOKENS", "16385"),
+    ("LLM_THINKING_RESERVE_TOKENS_SIMPLE", "-1"),
+    ("LLM_THINKING_RESERVE_TOKENS_SIMPLE", "16385"),
+    ("LLM_THINKING_RESERVE_TOKENS_COMPLEX", "-1"),
+    ("LLM_THINKING_RESERVE_TOKENS_COMPLEX", "16385"),
+    ("LLM_REASONING_EFFORT_SIMPLE", "unsupported-private-value"),
+    ("LLM_REASONING_EFFORT_COMPLEX", "unsupported-private-value"),
+    ("LLM_STREAM", "unsupported-private-value"),
+])
+def test_model_budget_invalid_selection_fails_without_artifact(monkeypatch, mapper_env, name, bad):
+    monkeypatch.setenv(name, bad)
+    result, output = mapper_env()
+    assert result.returncode != 0
+    assert name in result.stderr
+    assert not output.exists()
+    if bad == "unsupported-private-value":
+        assert bad not in result.stderr + result.stdout
+
+
+def test_empty_model_budget_inputs_preserve_application_defaults(monkeypatch, mapper_env):
+    for name in ("LLM_MAX_MODEL_LEN", "LLM_RESERVED_OUTPUT_TOKENS",
+                 "LLM_THINKING_RESERVE_TOKENS_SIMPLE", "LLM_THINKING_RESERVE_TOKENS_COMPLEX",
+                 "LLM_REASONING_EFFORT_SIMPLE", "LLM_REASONING_EFFORT_COMPLEX", "LLM_STREAM"):
+        monkeypatch.setenv(name, "")
+    result, output = mapper_env()
+    assert result.returncode == 0, result.stderr
+    assert load_values(output)["models"]["reasoning"] == {
+        "baseUrl": "", "model": "", "condenseEnabled": False,
+    }
 
 
 def test_decoupled_backend_flags_follow_the_parent_by_default(mapper_env):

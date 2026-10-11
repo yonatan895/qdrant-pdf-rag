@@ -76,7 +76,7 @@ restores the snapshot over whatever the file assigned; empty stays unset
   `STORAGE_CLASS` and `SNAPSHOT_STORAGE_CLASS` are checked (the latter
   defaults to the former); the corpus PVC is not.
 - Operator booleans `UI_ENABLED`, `CONTEXTUAL_EMBED_ENABLED`,
-  `INGEST_ALIAS_PUBLISH`, `INGEST_REINGEST` and `CHAT_CONDENSE_ENABLED`
+  `INGEST_ALIAS_PUBLISH`, `INGEST_REINGEST`, `CHAT_CONDENSE_ENABLED` and `LLM_STREAM`
   accept only `true/1/yes` or `false/0/no` (any case; unset keeps the
   default). `INGEST_ALIAS_PUBLISH` may only be unset or true: in-place ingest
   was retired (#360) and an explicit false fails closed.
@@ -103,6 +103,21 @@ restores the snapshot over whatever the file assigned; empty stays unset
   its value. Python 3 is required on the bastion for this check as well as
   mapping. URL resolution and caller/file precedence remain `common.sh`-owned;
   rerank's existing embedding-URL/model fallback is unchanged.
+- Optional application budgets (`LLM_MAX_MODEL_LEN`, `LLM_RESERVED_OUTPUT_TOKENS`,
+  `LLM_THINKING_RESERVE_TOKENS_SIMPLE` / `COMPLEX`), reasoning efforts
+  (`LLM_REASONING_EFFORT_SIMPLE` / `COMPLEX`) and `LLM_STREAM` follow that same
+  precedence/export path into `models.reasoning` and the rendered agent pod.
+  `model_config.reasoning_overrides` enforces the existing Settings integer bounds,
+  the `low/medium/high/xhigh` effort domain and strict streaming booleans; chart
+  schema also enforces these types and ranges for direct Helm callers. `xhigh`
+  needs an application build with #707 support. Unset/empty operator values omit
+  the new pod env entries, preserving application defaults; explicit zero
+  thinking reserves and streaming false remain present. These are application
+  settings, not an inference-server reconfiguration: the operator must align
+  them with the served model window. Existing UI, condensation and rerank
+  selections keep their previous defaults and interpretation. Render/precedence
+  evidence lives in `test_map_values.py`, `test_helm_chart_contracts.py` and
+  `test_airgap_deploy_sh.py`; live model/deployment acceptance stays separate.
 - **Maintenance warning:** a new `.example` key that is not added to
   `OPERATOR_ENV_KEYS` silently regresses to file-wins. The list and the
   example must change together.

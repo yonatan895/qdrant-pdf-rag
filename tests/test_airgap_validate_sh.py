@@ -948,7 +948,7 @@ def test_shipped_example_model_mode_is_explicit(tree, shared):
 
 BOOL_KEYS = [
     "UI_ENABLED", "CONTEXTUAL_EMBED_ENABLED", "INGEST_ALIAS_PUBLISH",
-    "INGEST_REINGEST", "CHAT_CONDENSE_ENABLED",
+    "INGEST_REINGEST", "CHAT_CONDENSE_ENABLED", "LLM_STREAM",
 ]
 
 
@@ -958,6 +958,21 @@ def test_validate_invalid_operator_boolean_refused(tree, key):
     assert r.returncode != 0
     assert f"{key} must be true/false" in r.stderr
     assert "maybe-secretish" not in r.stderr + r.stdout
+
+
+@pytest.mark.parametrize("key,bad", [
+    ("LLM_MAX_MODEL_LEN", "511"),
+    ("LLM_RESERVED_OUTPUT_TOKENS", "16385"),
+    ("LLM_THINKING_RESERVE_TOKENS_SIMPLE", "-1"),
+    ("LLM_THINKING_RESERVE_TOKENS_COMPLEX", "16385"),
+    ("LLM_REASONING_EFFORT_COMPLEX", "unsupported-private-value"),
+])
+def test_validate_file_model_budgets_fail_before_later_stages(tree, key, bad):
+    result = _run(tree, {"AIRGAP_ENV": _write_env_file(tree, f"{key}={bad}\n")})
+    assert result.returncode != 0
+    assert key in result.stderr
+    assert "2. " not in result.stdout
+    assert "unsupported-private-value" not in result.stderr + result.stdout
 
 
 # INGEST_ALIAS_PUBLISH accepts only unset/true since in-place ingest was
