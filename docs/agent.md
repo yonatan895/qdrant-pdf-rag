@@ -1082,6 +1082,20 @@ are above. **Authority:** ADR-0001/0004, #363 and existing transport contracts;
 #397 corrects the overly broad old “never retry” summary. **Decision owners:**
 `HttpxLLMClient`, `VllmTokenizer`, `HttpReranker`, `http_client` and lifespan.
 
+`LLM_REASONING_EFFORT_SIMPLE` and `LLM_REASONING_EFFORT_COMPLEX` accept `low`,
+`medium`, `high` and explicit `xhigh`; their defaults remain `low` and `high`.
+Shared-core overrides accept the same values. The selected effort reaches the
+reasoning HTTP request verbatim for buffered, streamed and permitted fallback
+calls; `high` is never translated to `xhigh`, and an omitted direct-client effort
+remains omitted. Support depends on the served chat template: the stock
+[Qwen3.8-27B template](https://huggingface.co/Qwen/Qwen3.8-27B/blob/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/chat_template.jinja)
+accepts `low`, `medium` and `xhigh` when thinking, so that profile must explicitly
+select compatible settings ([#707](https://github.com/yonatan895/qdrant-pdf-rag/issues/707)).
+The console's browser controls still offer `low`, `medium` and `high`; `xhigh`
+is available through configuration and the shared core, with no new public
+answer/chat request field. Tokenizer requests retain their existing message and
+generation flags; this change does not establish effort-dependent token counts.
+
 | Operation | Current permitted recovery / failure boundary |
 |---|---|
 | Reasoning transport | Sync/async reasoning pools use `retries=0`; no connection-level automatic repeat |

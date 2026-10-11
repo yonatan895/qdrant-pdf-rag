@@ -185,8 +185,9 @@ class Settings(BaseSettings):
     # Reasoning effort control: directs the reasoning model to think more thoroughly
     # on complex operational, diagnostic, and comparative inquiries while conserving
     # latency on simple factoid/message lookups.
-    llm_reasoning_effort_simple: Literal["low", "medium", "high"] = Field(default="low")
-    llm_reasoning_effort_complex: Literal["low", "medium", "high"] = Field(default="high")
+    # Values are forwarded verbatim; operators select the served template's domain.
+    llm_reasoning_effort_simple: Literal["low", "medium", "high", "xhigh"] = Field(default="low")
+    llm_reasoning_effort_complex: Literal["low", "medium", "high", "xhigh"] = Field(default="high")
     llm_temperature: float = Field(default=0.2, ge=0.0, le=2.0)
 
     # Context budgeting via tokenizer accounting:

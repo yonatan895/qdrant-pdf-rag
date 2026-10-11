@@ -184,8 +184,21 @@ def test_require_context_llm_fails_closed():
         s.require_context_llm()
 
 
+@pytest.mark.parametrize("field", ["llm_reasoning_effort_simple", "llm_reasoning_effort_complex"])
+@pytest.mark.parametrize("effort", ["low", "medium", "high", "xhigh"])
+@pytest.mark.parametrize("from_env", [False, True])
+def test_reasoning_effort_round_trips_configuration(monkeypatch, field, effort, from_env):
+    monkeypatch.delenv(field.upper(), raising=False)
+    if from_env:
+        monkeypatch.setenv(field.upper(), effort)
+        settings = Settings(_env_file=None)
+    else:
+        settings = Settings(_env_file=None, **{field: effort})
+    assert getattr(settings, field) == effort
+
+
 def test_reasoning_effort_validation():
-    """llm_reasoning_effort_* are constrained to Literal['low', 'medium', 'high']."""
+    """Unsupported effort values fail at configuration time."""
     import pytest
     from pydantic import ValidationError
 
