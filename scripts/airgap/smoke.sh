@@ -6,8 +6,7 @@
 . "$(dirname -- "$0")/common.sh"
 
 resolve_aliases
-resolve_otel_endpoint
-resolve_bundle_choices
+resolve_observability
 require_env NAMESPACE
 KC=${KC:-$(kc)}
 QUERY=${QUERY:-IEA500I operator message}

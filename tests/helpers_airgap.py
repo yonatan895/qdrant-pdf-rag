@@ -56,7 +56,8 @@ def make_bin_tree(tmp_path: Path, scripts: list[str]) -> Path:
     if "deploy.sh" in scripts or "validate.sh" in scripts:
         scripts = [*scripts, "check_app_ownership.py", "check_route_exposure.py"]
     if "common.sh" in scripts:
-        scripts = [*scripts, "model_config.py"]
+        # resolve_observability evaluates the values mapper's decisions.
+        scripts = [*scripts, "model_config.py", "map_values.py"]
     if any(name in scripts for name in ("pack.sh", "load.sh", "deploy.sh", "ingest.sh")):
         scripts = [*scripts, "image_identity.sh", "image_manifest.py"]
     if any(name in scripts for name in ("deploy.sh", "ingest.sh")):

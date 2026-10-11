@@ -1140,11 +1140,16 @@ the serving Deployment does not receive this writer-side setting.
 precedence and otherwise permits file/default resolution; required attestation
 rejects whitespace. Runtime bearer auth intentionally omits a header for an
 absent/empty/whitespace key. These are different owners/meanings: do not globally
-normalize blanks without tracing both consumers. `resolve_otel_endpoint` owns the
-separate unset=local-Jaeger and off/none/false/0=disabled policy across stages;
-an unset endpoint with `JAEGER_ENABLED=false` fails closed (`map_values.py` and
-the chart's empty `tracing.endpoint` mirror it), since the default names the
-service just disabled. Any explicit `http(s)` URL, the former hostname
+normalize blanks without tracing both consumers. `map_values.py observability()`
+is the one owner of the observability decisions across stages: the
+unset=local-Jaeger and off/none/false/0=disabled tracing policy, and whether the
+bundled Jaeger and the ServiceMonitor deploy (explicit flag, else the parent leg;
+a backend for a disabled leg fails closed). The shell stages `eval` its
+`--bundle-decisions` (`common.sh resolve_observability`) and the release renders
+the same booleans, so deploy/smoke/validate gates and the chart cannot disagree.
+An unset endpoint with `JAEGER_ENABLED=false` fails closed (the chart's empty
+`tracing.endpoint` guard keeps it for direct chart users), since the default
+names the service just disabled. Any explicit `http(s)` URL, the former hostname
 included, is an intentional platform-owned collector.
 
 **Preconditions/failures/lifetime:** platform-supplied model/dimension/revision and
