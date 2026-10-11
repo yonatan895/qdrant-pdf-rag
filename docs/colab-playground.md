@@ -85,7 +85,23 @@ flock -n -E 75 "$HOME/.cache/agent-tmp/mainframe-rag-heavy.lock" \
 
 The controller first verifies an exact owned session endpoint, then one SSH
 connection with four model-port forwards: host loopback and the selected local
-Docker bridge. Fresh known-hosts state and a private SSH key belong to this run.
+Docker-to-host address. Native Docker uses its bridge gateway by default.
+Docker Desktop's bridge can belong to a separate VM and be unavailable to the
+WSL host. In that case, explicitly pass `COLAB_DOCKER_GATEWAY` during preparation
+with a numeric RFC1918 IPv4 address on the controller host, after proving that
+the pinned gateway container can reach that specific listener. The address is
+frozen in the run configuration; later environment changes cannot redirect it.
+There is no automatic discovery or fallback. Wildcard, loopback, public,
+link-local addresses and hostnames are refused as explicit overrides. Existing
+preallocation bind checks and actual gateway-network probes remain required;
+the successful CPU receipt binds this effective address for GPU admission.
+Fresh known-hosts state and a private SSH key belong to this run.
+Every CLI operation uses the run's private `colab-sessions.json` store, including
+runtime execution, SSH and the printed recovery command. SSH uses unnamed proxy
+mode: CLI 0.7.4 resolves the sole live record in that isolated store and refuses
+an empty, pruned or ambiguous store. Its named proxy mode can create a missing
+session and is therefore unsuitable here. A fresh run refuses a pre-existing
+private store; global CLI sessions are neither imported nor adopted.
 Do not use an unreviewed public tunnel or call an SSH operation that could
 silently allocate a replacement session. Both host probes and probes from the
 actual digest-pinned gateway container network path must pass. The remote runtime
@@ -110,6 +126,7 @@ is new for each run.
 | Task input | Controller input / meaning |
 | --- | --- |
 | `COLAB_STATE`, `COLAB_GATEWAY_IMAGE` | Required fresh private state and existing gateway digest |
+| `COLAB_DOCKER_GATEWAY` | Optional `--docker-gateway`; frozen numeric RFC1918 host listener instead of native bridge discovery |
 | `PRODUCTION_CORPUS_DIR`, `PRODUCTION_GOLDEN_PATH` | `--corpus`, `--golden`; originals and grounded JSONL |
 | `COLAB_INVENTORY`, `COLAB_DATA_STATE` | `--inventory`, `--data-state`; census and retained ingest progress |
 | `COLAB_SOURCE_INVENTORY` | `--source-inventory`; independently discovered complete source membership and hashes |
@@ -273,6 +290,12 @@ Gateway recovery retains its separate five-second window after VM release.
 Stop only the exact recorded session. Follow the session-specific recovery
 command printed by the controller if automatic cleanup cannot confirm release;
 verify that exact session is absent from the explicit OAuth session listing.
+Release also requires absence of the bound endpoint under every listed name,
+including the CLI's `?` label for server assignments missing local state. An
+allocation with no bound endpoint remains `cleanup_required`, even after an
+empty listing: a timed-out allocation is not proof that no runtime was created.
+Inspect unresolved assignments in the Colab UI; never invent a name or adopt an
+unattributed endpoint to stop it automatically.
 Preserve the final account usage observation, stop result and absence proof.
 An archive export error must not prevent the stop attempt. A dead host cannot
 run local traps: the maintainer must stop the owned session from another terminal

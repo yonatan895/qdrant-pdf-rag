@@ -50,6 +50,7 @@ tasks:
       TASK_COLAB_DEADLINE_SECONDS: '{{.COLAB_DEADLINE_SECONDS}}'
       TASK_COLAB_CU_CAP: '{{.COLAB_CU_CAP}}'
       TASK_COLAB_CU_FLOOR: '{{.COLAB_CU_FLOOR}}'
+      TASK_COLAB_DOCKER_GATEWAY: '{{.COLAB_DOCKER_GATEWAY}}'
       TASK_COLAB_POLL_SECONDS: '{{.COLAB_POLL_SECONDS}}'
       TASK_COLAB_BIN: '{{.COLAB_BIN}}'
       TASK_COLAB_SSH_BIN: '{{.COLAB_SSH_BIN}}'
@@ -87,6 +88,7 @@ tasks:
         if [ -n "${TASK_COLAB_DEADLINE_SECONDS:-}" ]; then set -- "$@" --deadline-seconds "$TASK_COLAB_DEADLINE_SECONDS"; fi;
         if [ -n "${TASK_COLAB_CU_CAP:-}" ]; then set -- "$@" --cu-cap "$TASK_COLAB_CU_CAP"; fi;
         if [ -n "${TASK_COLAB_CU_FLOOR:-}" ]; then set -- "$@" --cu-floor "$TASK_COLAB_CU_FLOOR"; fi;
+        if [ -n "${TASK_COLAB_DOCKER_GATEWAY:-}" ]; then set -- "$@" --docker-gateway "$TASK_COLAB_DOCKER_GATEWAY"; fi;
         if [ -n "${TASK_COLAB_POLL_SECONDS:-}" ]; then set -- "$@" --poll-seconds "$TASK_COLAB_POLL_SECONDS"; fi;
         if [ -n "${TASK_COLAB_BIN:-}" ]; then set -- "$@" --colab "$TASK_COLAB_BIN"; fi;
         if [ -n "${TASK_COLAB_SSH_BIN:-}" ]; then set -- "$@" --ssh "$TASK_COLAB_SSH_BIN"; fi;
