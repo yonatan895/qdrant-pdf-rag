@@ -37,6 +37,7 @@ from mainframe_rag.serve.colab_profiles import COLAB_PROFILES, admit, build_prof
 from mainframe_rag.serve.colab_storage import prove_qdrant_storage
 
 if TYPE_CHECKING:
+    from mainframe_rag.config import Settings
     from mainframe_rag.serve.colab_production import PreparedProduction
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -68,6 +69,28 @@ METADATA_PERSIST_SECONDS = 5
 MANIFEST_LIMIT_BYTES = 64 * 1024
 QDRANT_CONFIG_PATHS = frozenset(f"/qdrant/config/{filename}" for filename in
                                ("initialize.sh", "config.yaml", "production.yaml", "local.yaml"))
+# The existing bounded process owner caps the entire exchange, including slow
+# headers/chunk framing; a socket idle timeout alone is not an absolute deadline.
+QDRANT_READ = """
+import http.client, json, os, sys
+connection = http.client.HTTPConnection('127.0.0.1', int(sys.argv[1]), timeout=2)
+try:
+    body = sys.argv[3] or None
+    headers = {'Content-Type': 'application/json'}
+    if os.environ.get('QDRANT_API_KEY'):
+        headers['api-key'] = os.environ['QDRANT_API_KEY']
+    connection.request('GET' if body is None else 'POST', sys.argv[2], body=body, headers=headers)
+    response = connection.getresponse()
+    raw = response.read(65537)
+    if response.status != 200 or len(raw) > 65536:
+        raise ValueError()
+    json.loads(raw.decode('utf-8'))
+    sys.stdout.buffer.write(raw)
+except Exception:
+    sys.exit(2)
+finally:
+    connection.close()
+"""
 
 
 class LabError(RuntimeError):
@@ -536,10 +559,8 @@ def production_approval(config: dict, profile: dict) -> dict:
     return approval
 
 
-def prepare_production_admission(config: dict, profile: dict, state: Path,
-                                 execution_root: Path, approval: dict) -> PreparedProduction:
+def production_runtime(profile: dict, inference_lock: Path) -> tuple[Settings, dict]:
     from mainframe_rag.config import Settings
-    from mainframe_rag.serve.colab_production import ScanBounds, prepare_production
 
     if TYPE_CHECKING or __package__:
         from scripts.colab_runtime import validate_inference_lock
@@ -553,7 +574,15 @@ def prepare_production_admission(config: dict, profile: dict, state: Path,
     # BaseSettings supports this runtime option; the model plugin omits it.
     settings = Settings(_env_file=None, embed_mode="vllm", embed_model=server["model_id"],  # type: ignore[call-arg]
                         embed_model_revision=server["revision"], dense_dim=profile["dense_dim"])
-    pins = validate_inference_lock(state / "inference.lock", profile["inference_lock_sha256"])
+    pins = validate_inference_lock(inference_lock, profile["inference_lock_sha256"])
+    return settings, pins
+
+
+def prepare_production_admission(config: dict, profile: dict, state: Path,
+                                 execution_root: Path, approval: dict) -> PreparedProduction:
+    from mainframe_rag.serve.colab_production import ScanBounds, prepare_production
+
+    settings, pins = production_runtime(profile, state / "inference.lock")
     scan = config["production_scan"]
     return prepare_production(
         config, profile, state=state, settings=settings, runtime_pins=pins,
@@ -676,21 +705,102 @@ def prepare(args: argparse.Namespace, *, source_root: Path | None = None) -> int
     return 0
 
 
+def initialize_fresh(args: argparse.Namespace, *, source_root: Path | None = None) -> int:
+    """One local operation, no deferred dispatch, cloud tools or paid-run snapshot."""
+    from mainframe_rag.serve.colab_production import ScanBounds, initialize_fresh_binding
+
+    state = external(args.state)
+    if state.exists() or state.is_symlink():
+        raise LabError("initialization state already exists; select a fresh private operation directory")
+    if not 1024 <= args.qdrant_port <= 65535 or not 1 <= args.deadline_seconds <= 300:
+        raise LabError("initialization requires an unprivileged port and a finite deadline of at most 300 seconds")
+    source = ROOT if source_root is None else source_root.absolute()
+    check_source_configuration(source)
+    profile = build_profile(args.profile, embed_max_len=args.embedding_max_len,
+                            deadline_seconds=args.deadline_seconds)
+    config: dict = {name: str(external(getattr(args, name))) for name in (
+        "corpus", "golden", "inventory", "source_inventory", "embedding_evidence", "production_approval",
+        "data_state", "kubeconfig", "inference_lock")}
+    config.update(dataset="production", namespace=args.namespace, kube_context=args.kube_context,
+                  qdrant_service=args.qdrant_service, qdrant_port=args.qdrant_port)
+    profile["inference_lock_sha256"] = digest_file(Path(config["inference_lock"]), PREREQUISITE_LIMITS["inference_lock"])
+    approval = production_approval(config, profile)
+    settings, pins = production_runtime(profile, Path(config["inference_lock"]))
+    if args.collection != settings.qdrant_collection:
+        raise LabError("explicit fresh collection must match QDRANT_COLLECTION native settings")
+    tools = {"kubectl": executable(args.kubectl)}
+    candidate, tool_hashes, prerequisites = candidate_identity(ROOT, source_root=source), tool_identity(tools), prerequisite_identity(config)
+    state.mkdir(parents=True, mode=0o700)
+    state.chmod(0o700)
+    private_json(state / "manifest.json", {
+        "schema": 1, "session": "rag-" + uuid.uuid4().hex[:16], "purpose": "fresh-index-initialization",
+        "phase": "initializing", "allocation_attempted": False, "endpoint": None,
+        "created_at": time.time(), "config": config, "profile": profile, "tools": tools,
+        "candidate": candidate, "tools_sha256": tool_hashes, "prerequisites_sha256": prerequisites,
+    })
+    run = Run(state, local_initialization=True)
+    run.expiry = time.time() + args.deadline_seconds
+    run.work_expiry = run.expiry - min(5, args.deadline_seconds / 3)
+    try:
+        proof = run.inspect_qdrant_storage()
+        run.forward_qdrant(proof)
+
+        def recheck() -> None:
+            run.check_qdrant(proof)
+            if (candidate_identity(ROOT, source_root=source) != candidate or tool_identity(tools) != tool_hashes
+                    or prerequisite_identity(config) != prerequisites):
+                raise LabError("initialization candidate/tool/input identities changed")
+
+        scan = config["production_scan"]
+        run.manifest["initialization"] = initialize_fresh_binding(
+            config, profile, collection=args.collection, storage_proof=proof, settings=settings,
+            runtime_pins=pins, pooling_producer=approval["pooling_producer"], census_producer=approval["census_producer"],
+            recipe_root=source, bounds=ScanBounds(scan["max_entries"], scan["max_bytes"]),
+            deadline=time.monotonic() + min(scan["deadline_seconds"], run.work_expiry - time.time()),
+            read_qdrant=lambda path, body: run.read_qdrant(path, body, api_key=settings.qdrant_api_key),
+            recheck_producer=recheck)
+        run.manifest["phase"] = "initialized"
+        run.save("fresh_binding_committed")
+    finally:
+        # This operation never owns a Colab assignment or gateway. Cloud cleanup
+        # would be the wrong authority; release only its exact local forward.
+        previous = {sig: signal.signal(sig, signal.SIG_IGN) for sig in (signal.SIGINT, signal.SIGTERM)}
+        run.expiry = time.time() + 5
+        try:
+            # Include a command whose own finally was interrupted before reaping.
+            for child in list(run.captures):
+                run.terminate(child)
+            run.manifest["local_forward_released"] = True
+            run.save("initialization_forward_released")
+        finally:
+            for sig, handler in previous.items():
+                signal.signal(sig, handler)
+    print_diagnostic("Fresh private index binding initialized; ordinary production preparation is now required.")
+    return 0
+
+
 class Run:
-    def __init__(self, state: Path):
+    def __init__(self, state: Path, *, local_initialization: bool = False):
         self.state = state.expanduser().absolute()
         if self.state.is_symlink() or self.state.stat().st_uid != os.geteuid() or self.state.stat().st_mode & 0o077:
             raise LabError("run state must be private and owned by the current user")
         self.manifest = json.loads(read_bounded_input(self.state / "manifest.json", MANIFEST_LIMIT_BYTES))
         if self.manifest.get("schema") != 1 or not re.fullmatch(r"rag-[0-9a-f]{16}", self.manifest.get("session", "")):
             raise LabError("invalid run ownership manifest")
-        origin, execution = self.manifest["origin"], self.manifest["execution"]
-        self.origin_root = Path(origin["git_root"])
-        self.origin_source_root = Path(origin["source_root"])
-        self.execution_root = self.state / "execution"
-        if (not self.origin_root.is_absolute() or not self.origin_source_root.is_absolute()
-                or execution["root"] != str(self.execution_root)):
-            raise LabError("invalid original/execution source ownership")
+        if local_initialization:
+            if self.manifest.get("purpose") != "fresh-index-initialization" or self.manifest.get("phase") != "initializing":
+                raise LabError("local initializer requires its own fresh operation manifest")
+            self.origin_root = self.origin_source_root = self.execution_root = ROOT
+        else:
+            if self.manifest.get("purpose") is not None:
+                raise LabError("local initialization state cannot authorize cloud run or stop")
+            origin, execution = self.manifest["origin"], self.manifest["execution"]
+            self.origin_root = Path(origin["git_root"])
+            self.origin_source_root = Path(origin["source_root"])
+            self.execution_root = self.state / "execution"
+            if (not self.origin_root.is_absolute() or not self.origin_source_root.is_absolute()
+                    or execution["root"] != str(self.execution_root)):
+                raise LabError("invalid original/execution source ownership")
         # Snapshot dispatch has no .git. Git/private-path validation always
         # belongs to the original repository, not the relocated source root.
         self.state = external(self.state, repository_root=self.origin_root)
@@ -1083,8 +1193,8 @@ class Run:
         return [self.tools["kubectl"], "--kubeconfig", self.config["kubeconfig"],
                 "--context", self.config["kube_context"], "--namespace", self.config["namespace"], *args]
 
-    def persistent_qdrant(self) -> None:
-        """Bind the inspected PVC producer to this run's owned loopback forward."""
+    def inspect_qdrant_storage(self) -> dict:
+        """Prove selected Kubernetes storage without assuming a retained ledger."""
         service = self.qdrant_object("service", self.config["qdrant_service"])
         metadata = service.get("metadata")
         if (not isinstance(metadata, dict) or metadata.get("name") != self.config["qdrant_service"]
@@ -1103,7 +1213,7 @@ class Run:
         if not isinstance(listing, dict) or not isinstance(listing.get("items"), list):
             raise LabError("selected Qdrant pod inventory is incomplete")
         pods = listing["items"]
-        proof = prove_qdrant_storage(
+        return prove_qdrant_storage(
             service, pods,
             read_pvc=lambda name: self.qdrant_object("pvc", name),
             read_pv=lambda name: self.qdrant_object("pv", name),
@@ -1111,9 +1221,8 @@ class Run:
             read_node=lambda name: self.qdrant_object("node", name),
             read_container_file=self.qdrant_config,
         )
-        if self.config["dataset"] == "production":
-            from mainframe_rag.serve.colab_production import verify_retained_target
-            self.manifest["production_progress"] = verify_retained_target(self.production_admission(), proof)
+
+    def forward_qdrant(self, proof: dict) -> None:
         port = self.config["qdrant_port"]
         self.free_port("127.0.0.1", port)
         self.qdrant_forward = self.spawn(self.kubectl("port-forward", "--address", "127.0.0.1",
@@ -1122,6 +1231,36 @@ class Run:
         self.check_qdrant(proof)
         self.manifest["persistent_qdrant"] = {**proof, "url": f"http://127.0.0.1:{port}"}
         self.save("persistent_qdrant_admitted")
+
+    def persistent_qdrant(self) -> None:
+        """Keep the ordinary retained-ledger gate before starting its forward."""
+        proof = self.inspect_qdrant_storage()
+        if self.config["dataset"] == "production":
+            from mainframe_rag.serve.colab_production import verify_retained_target
+            self.manifest["production_progress"] = verify_retained_target(self.production_admission(), proof)
+        self.forward_qdrant(proof)
+
+    def read_qdrant(self, path: str, body: dict | None, *, api_key: str | None) -> dict:
+        """Bound read-only initialization responses; no proxies, redirects or raw logging."""
+        remaining = self.work_expiry - time.time()
+        if remaining <= 0:
+            raise LabError("fresh target inventory deadline expired")
+        used = self.manifest.setdefault("initialization_response_bytes", 0)
+        limit = min(CAPTURE_LIMIT_BYTES, 4 * 1024 * 1024 - used)
+        if limit <= 0:
+            raise LabError("fresh target inventory byte allowance exhausted")
+        self.check_qdrant()
+        response = self.command([sys.executable, "-I", "-B", "-c", QDRANT_READ, str(self.config["qdrant_port"]),
+                                 path, "" if body is None else json.dumps(body)], seconds=remaining,
+                                sensitive=True, env={**os.environ, "QDRANT_API_KEY": api_key or ""})
+        size = len(response.stdout.encode("utf-8"))
+        if size > limit:
+            raise LabError("fresh target response exceeds its bounded complete inventory")
+        self.manifest["initialization_response_bytes"] = used + size
+        value = json.loads(response.stdout)
+        if type(value) is not dict:
+            raise LabError("fresh target response is incomplete")
+        return value
 
     def qdrant_object(self, kind: str, name: str) -> dict:
         # Pod specifications/annotations may also contain private configuration.
@@ -1655,6 +1794,19 @@ def parser() -> argparse.ArgumentParser:
     prep.add_argument("--cu-cap", type=float, default=20)
     prep.add_argument("--cu-floor", type=float, default=10)
     prep.add_argument("--poll-seconds", type=float, default=1)
+    fresh = commands.add_parser("initialize-fresh")
+    fresh.add_argument("--state", type=Path, required=True)
+    fresh.add_argument("--collection", required=True)
+    fresh.add_argument("--profile", choices=COLAB_PROFILES[1:], default="COLAB_G4_BF16")
+    for name in ("corpus", "golden", "inventory", "source-inventory", "embedding-evidence", "production-approval",
+                 "data-state", "kubeconfig", "inference-lock"):
+        fresh.add_argument("--" + name, type=Path, required=True)
+    for name in ("kube-context", "namespace", "qdrant-service"):
+        fresh.add_argument("--" + name, required=True)
+    fresh.add_argument("--kubectl", default="kubectl")
+    fresh.add_argument("--qdrant-port", type=int, default=16333)
+    fresh.add_argument("--embedding-max-len", type=int, default=4096)
+    fresh.add_argument("--deadline-seconds", type=int, default=180)
     for name in ("run", "stop"):
         command = commands.add_parser(name)
         command.add_argument("--state", type=Path, required=True)
@@ -1670,6 +1822,12 @@ def main(argv: list[str] | None = None, *, bootstrap: bool = True, source_root: 
     try:
         if args.command == "prepare":
             return prepare(args, source_root=source_root)
+        if args.command == "initialize-fresh":
+            signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
+            try:
+                return initialize_fresh(args, source_root=source_root)
+            except KeyboardInterrupt:
+                raise LabError("fresh initialization interrupted; inspect private state before ordinary preparation") from None
         run = Run(args.state)
         run.validate_execution()
         if bootstrap and ROOT.resolve() != run.execution_root.resolve():

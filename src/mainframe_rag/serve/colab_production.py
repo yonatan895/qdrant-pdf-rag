@@ -20,12 +20,14 @@ import math
 import os
 import re
 import stat
+import tempfile
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Any
+from urllib.parse import quote
 
 import httpx2
 
@@ -35,14 +37,29 @@ from mainframe_rag.eval.datasets import (
     RELEASE_SET_FILENAME,
     parse_golden_text,
 )
-from mainframe_rag.ingest.completion import representation_fingerprint, source_labels
+from mainframe_rag.ingest.build import decode_build_binding, is_build_alias
+from mainframe_rag.ingest.completion import (
+    acquire_publish_lock,
+    completion_collection_for,
+    publish_lock_path,
+    release_run_lock,
+    representation_fingerprint,
+    source_labels,
+)
 from mainframe_rag.ingest.embed import VllmEmbedder
+from mainframe_rag.ingest.publish import (
+    decode_publication_record,
+    publication_metadata_point_id,
+    staging_name_for,
+)
 from mainframe_rag.ingest.rules_version import hash_rule_files, rule_module_paths
 from mainframe_rag.ingest.walk import _IGNORED_DIRS
 from mainframe_rag.serve.colab_corpus import (
     MAX_CENSUS_BYTES,
+    Admission,
     CensusAdmissionError,
     admit_production_census,
+    production_progress_binding,
 )
 from mainframe_rag.serve.colab_profiles import build_profile
 
@@ -596,7 +613,7 @@ def build_production_expected(
 
     ``runtime_pins`` must come from the validated approved inference lock, and
     ``pooling_producer`` from a separate review/approval. ``recipe_root`` must be
-    the host's exact prepared candidate. The clock and input-capture callable are
+    the host's exact executing candidate (a frozen snapshot for paid runs). The clock and input-capture callable are
     injectable adapters; ordinary host callers retain native_query_inputs.
     Entry/aggregate-source-byte ceilings and an absolute monotonic deadline are
     mandatory. The deadline cannot exceed the selected profile's finite envelope.
@@ -703,6 +720,141 @@ def _write_sidecar(path: Path, value: Object) -> bytes:
     return raw
 
 
+def _census(config: Mapping[str, Any], expected: ProductionExpectation, settings: Settings,
+            producer: Mapping[str, str], binding: Object, scan: _Scan) -> tuple[Admission, Object]:
+    path = Path(config["inventory"]).resolve(strict=True)
+    raw = _read(path, MAX_CENSUS_BYTES, scan)
+    census = _json(raw)
+    approved = _object(dict(producer), {"development_sha", "source_sha256"})
+    _sha(approved["development_sha"], 40)
+    _sha(approved["source_sha256"])
+    if type(census) is not dict or census.get("producer") != approved:
+        raise ProductionAdmissionError("complete census producer lacks the independent approved identity")
+    admission = admit_production_census(census, expected.expected, binding)
+    counts = {row["index"]: row["embedding_inputs"] for row in census["queries"]}
+    if tuple(counts[index] for index in range(len(expected.query_input_counts))) != expected.query_input_counts:
+        raise ProductionAdmissionError("census query input counts differ from native golden query producers")
+    for document in census["documents"]:
+        for setting, key in (("ingest_max_pdf_bytes", "bytes"), ("ingest_max_doc_pages", "pages"),
+                             ("ingest_max_doc_chunks", "chunks")):
+            limit = getattr(settings, setting)
+            if limit and document[key] > limit:
+                raise ProductionAdmissionError("census document exceeds the frozen native ingest bounds")
+    return admission, _record(path, raw)
+
+
+def _fresh_qdrant(collection: str, read: Callable[[str, Object | None], Object]) -> Object:
+    """Complete bounded inventories, including orphaned controls and dangling aliases."""
+    def result(path: str, body: Object | None = None) -> Any:
+        response = read(path, body)
+        if type(response) is not dict or response.get("status") != "ok" or "result" not in response:
+            raise ProductionAdmissionError("fresh target inventory is unavailable")
+        return response["result"]
+
+    collections = _object(result("/collections"), {"collections"})["collections"]
+    aliases = _object(result("/aliases"), {"aliases"})["aliases"]
+    if (type(collections) is not list or type(aliases) is not list
+            or len(collections) > 4096 or len(aliases) > 4096):
+        raise ProductionAdmissionError("fresh target inventory exceeds its complete entry bound")
+    names = [_text(_object(row, {"name"})["name"]) for row in collections]
+    alias_names = []
+    alias_targets = []
+    for row in aliases:
+        alias = _object(row, {"alias_name", "collection_name"})
+        alias_names.append(_text(alias["alias_name"]))
+        alias_targets.append(_text(alias["collection_name"]))
+    if len(set(names)) != len(names) or len(set(alias_names)) != len(alias_names):
+        raise ProductionAdmissionError("fresh target inventory repeats an identity")
+    for name in (*names, *alias_names, *alias_targets):
+        if (name in (collection, completion_collection_for(collection))
+                or name.startswith(staging_name_for(collection, "", ""))
+                or is_build_alias(name) and name.rpartition("__build_")[0] == collection):
+            raise ProductionAdmissionError("selected logical target is not fresh")
+    controls = [name for name in names if name.endswith(completion_collection_for(""))]
+    for control in controls:
+        points = result(f"/collections/{quote(control, safe='')}/points", {
+            "ids": [publication_metadata_point_id(control)], "with_payload": True, "with_vector": False})
+        if type(points) is not list or len(points) > 1:
+            raise ProductionAdmissionError("fresh target publication inventory is incomplete")
+        if points:
+            payload = points[0].get("payload") if type(points[0]) is dict else None
+            if type(payload) is not dict:
+                raise ProductionAdmissionError("fresh target publication control is invalid")
+            binding = decode_build_binding(decode_publication_record(payload, control), control)
+            if binding is not None and binding.alias == collection:
+                raise ProductionAdmissionError("selected logical target has retained publication state; not fresh")
+    return {"collections": len(names), "aliases": len(alias_names), "controls_checked": len(controls)}
+
+
+def _install_ledger(path: Path, value: Object) -> bytes:
+    """Readers see complete bytes; a concurrent/existing destination is never replaced."""
+    raw = _bytes(value, MANIFEST_BYTES)
+    descriptor, name = tempfile.mkstemp(prefix=".retained-index-binding-", suffix=".tmp", dir=path.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.link(temporary, path, follow_symlinks=False)
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return raw
+
+
+def initialize_fresh_binding(
+    config: Mapping[str, Any], profile: Object, *, collection: str, storage_proof: Object,
+    settings: Settings, runtime_pins: Mapping[str, str], pooling_producer: Mapping[str, str],
+    census_producer: Mapping[str, str], recipe_root: Path, bounds: ScanBounds, deadline: float,
+    read_qdrant: Callable[[str, Object | None], Object], recheck_producer: Callable[[], None],
+    clock: Clock = time.monotonic, query_inputs: QueryInputs = native_query_inputs,
+) -> Object:
+    """Explicit one-shot fresh-target decision; never changes Qdrant or adopts retained data.
+
+    All writers must serialize initialization through first native publication.
+    The native host lock held here ends at ledger commit, not at future ingestion.
+    """
+    lock = None
+    try:
+        if collection != settings.qdrant_collection:
+            raise ProductionAdmissionError("explicit fresh target conflicts with native collection selection")
+        data = _private_directory(Path(config["data_state"]))
+        expected = build_production_expected(
+            config, profile, settings=settings, runtime_pins=runtime_pins, pooling_producer=pooling_producer,
+            recipe_root=recipe_root, bounds=bounds, deadline=deadline, clock=clock, query_inputs=query_inputs)
+        binding = production_progress_binding(expected.expected)
+        _census(config, expected, settings, census_producer, binding, _Scan(bounds, deadline, clock))
+        target = {name: _text(storage_proof[name]) for name in ("namespace", "claim_uid", "pv_uid", "storage_path")}
+        target["logical_collection"] = collection
+        if target["namespace"] != config["namespace"] or target["storage_path"] != "/qdrant/storage":
+            raise ProductionAdmissionError("fresh target storage proof conflicts with selected storage")
+        progress = data / "fresh-index.jsonl"  # Only its parent is used by the native target lock.
+        lock_path = publish_lock_path(progress, collection)
+        if lock_path.is_symlink() or lock_path.exists() and not lock_path.is_file():
+            raise ProductionAdmissionError("fresh target publication lock is invalid")
+        lock = acquire_publish_lock(progress, collection)
+        if any(path != lock_path for path in data.iterdir()):
+            raise ProductionAdmissionError("fresh target data directory already contains retained state")
+        inventory = _fresh_qdrant(collection, read_qdrant)
+        recheck_producer()
+        _Scan(bounds, deadline, clock).check()
+        raw = _install_ledger(data / LEDGER_FILENAME, {"schema": 1, "target": target, "progress_binding": binding})
+        return {"schema": 1, "kind": "fresh-index-initialization", "acceptance_certified": False,
+                "ledger_sha256": hashlib.sha256(raw).hexdigest(), "inventory": inventory}
+    except ProductionAdmissionError:
+        raise
+    except (OSError, ValueError, TypeError, KeyError, RuntimeError):
+        raise ProductionAdmissionError("fresh target initialization refused; no compatibility claimed") from None
+    finally:
+        if lock is not None:
+            release_run_lock(lock)
+
+
 def prepare_production(
     config: Mapping[str, Any], profile: Object, *, state: Path, settings: Settings,
     runtime_pins: Mapping[str, str], pooling_producer: Mapping[str, str],
@@ -725,27 +877,11 @@ def prepare_production(
             config, profile, settings=settings, runtime_pins=runtime_pins,
             pooling_producer=pooling_producer, recipe_root=recipe_root, bounds=bounds,
             deadline=deadline, clock=clock, query_inputs=query_inputs)
-        census_path = Path(config["inventory"]).resolve(strict=True)
-        census_raw = _read(census_path, MAX_CENSUS_BYTES, _Scan(bounds, deadline, clock))
-        census = _json(census_raw)
-        approved_census = _object(dict(census_producer), {"development_sha", "source_sha256"})
-        _sha(approved_census["development_sha"], 40)
-        _sha(approved_census["source_sha256"])
-        if type(census) is not dict or census.get("producer") != approved_census:
-            raise ProductionAdmissionError("complete census producer lacks the independent approved identity")
-        admission = admit_production_census(census, expected.expected, ledger["progress_binding"])
-        query_counts = {row["index"]: row["embedding_inputs"] for row in census["queries"]}
-        if tuple(query_counts[index] for index in range(len(expected.query_input_counts))) != expected.query_input_counts:
-            raise ProductionAdmissionError("census query input counts differ from native golden query producers")
-        for document in census["documents"]:
-            for setting, key in (("ingest_max_pdf_bytes", "bytes"), ("ingest_max_doc_pages", "pages"),
-                                 ("ingest_max_doc_chunks", "chunks")):
-                limit = getattr(settings, setting)
-                if limit and document[key] > limit:
-                    raise ProductionAdmissionError("census document exceeds the frozen native ingest bounds")
+        admission, census_record = _census(config, expected, settings, census_producer, ledger["progress_binding"],
+                                            _Scan(bounds, deadline, clock))
         environment = dict(expected.environment)
         unset_environment = list(expected.unset_environment)
-        prerequisite = {**expected.prerequisites, "census": _record(census_path, census_raw),
+        prerequisite = {**expected.prerequisites, "census": census_record,
                         "ledger": _record(ledger_path, ledger_raw)}
         payload = {
             "schema": 1, "expected": expected.expected, "environment": environment,

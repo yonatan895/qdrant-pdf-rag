@@ -189,6 +189,38 @@ Changes confined to golden queries or controller code do not by themselves
 invalidate document compatibility. Changed document recipes, corpus roots,
 sources, tokenizer semantics or embedding geometry do.
 
+For a first build, explicitly select a new logical collection with both native
+`QDRANT_COLLECTION` and `COLAB_INITIALIZE_COLLECTION`. Create an empty private
+`COLAB_DATA_STATE` directory outside Git, supply the complete production inputs
+above, and use a fresh `COLAB_STATE` for this local operation:
+
+```sh
+sh scripts/tools/run-task.sh local:colab:initialize-fresh \
+  COLAB_INITIALIZE_COLLECTION="$QDRANT_COLLECTION" COLAB_INITIALIZE_SECONDS=180
+```
+
+Run inside the existing host guard and shared lock. This command uses only the
+selected kubectl and read-only Qdrant requests through its owned loopback forward;
+it never allocates Colab or installs/downloads models. It proves the responding
+pod/container/PVC/PV identity, admits the complete census, and refuses any existing
+logical target, dangling alias, staging/build/completion state or retained local
+bookkeeping. Complete inventories have 4096-entry, 64-KiB response and 4-MiB total
+read ceilings; exceeding them refuses initialization. The private ledger is
+installed atomically without replacement. It records intended build identity,
+not ingestion completion or serving acceptance. Ordinary preparation still
+requires its own fresh state, CPU receipt and all GPU prerequisites.
+
+Serialize every target writer/admin operation from initialization through the
+first native publication. The native target lock is held during initialization;
+after release, it provides no continuing remote reservation. Existing multi-host
+concurrent publication remains unsupported. A failed operation releases its
+owned forward and can be retried with fresh operation state after inspecting the
+data directory. A committed ledger proceeds through ordinary preparation; it is
+never overwritten by initialization. After a hard process/host kill, inspect any
+occupied local port or `.retained-index-binding-*.tmp` residue explicitly; no
+unidentified process or residue is adopted or deleted automatically. Preserve
+legacy collections and snapshots; rebuild/adoption remains a separate decision.
+
 ```sh
 sh scripts/tools/run-task.sh local:colab:prepare \
   COLAB_PROFILE=COLAB_G4_BF16 COLAB_DATASET=production \

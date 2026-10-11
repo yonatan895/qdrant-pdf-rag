@@ -15,6 +15,55 @@
 version: '3'
 
 tasks:
+  colab:initialize-fresh:
+    desc: Verify a fresh retained Qdrant target and exclusively initialize its private binding
+    summary: |
+      CPU-only explicit first-run operation; never allocates Colab or changes Qdrant.
+      Requires complete admitted production inputs, COLAB_INITIALIZE_COLLECTION
+      matching native QDRANT_COLLECTION, an empty private COLAB_DATA_STATE, fresh
+      COLAB_STATE and explicit existing Kubernetes target. Keep every target writer
+      serialized from this operation through first native publication. Use the
+      existing host guard/lock; see docs/colab-playground.md. No tool installs.
+    env:
+      TASK_COLAB_STATE: '{{.COLAB_STATE}}'
+      TASK_COLAB_INITIALIZE_COLLECTION: '{{.COLAB_INITIALIZE_COLLECTION}}'
+      TASK_COLAB_CORPUS: '{{.PRODUCTION_CORPUS_DIR}}'
+      TASK_COLAB_GOLDEN: '{{.PRODUCTION_GOLDEN_PATH}}'
+      TASK_COLAB_INVENTORY: '{{.COLAB_INVENTORY}}'
+      TASK_COLAB_SOURCE_INVENTORY: '{{.COLAB_SOURCE_INVENTORY}}'
+      TASK_COLAB_EMBEDDING_EVIDENCE: '{{.COLAB_EMBEDDING_EVIDENCE}}'
+      TASK_COLAB_PRODUCTION_APPROVAL: '{{.COLAB_PRODUCTION_APPROVAL}}'
+      TASK_COLAB_DATA_STATE: '{{.COLAB_DATA_STATE}}'
+      TASK_COLAB_KUBECONFIG: '{{.COLAB_KUBECONFIG}}'
+      TASK_COLAB_KUBE_CONTEXT: '{{.COLAB_KUBE_CONTEXT}}'
+      TASK_COLAB_NAMESPACE: '{{.COLAB_NAMESPACE}}'
+      TASK_COLAB_QDRANT_SERVICE: '{{.COLAB_QDRANT_SERVICE}}'
+      TASK_COLAB_INFERENCE_LOCK: '{{.COLAB_INFERENCE_LOCK}}'
+      TASK_COLAB_PROFILE: '{{.COLAB_PROFILE}}'
+      TASK_COLAB_QDRANT_PORT: '{{.COLAB_QDRANT_PORT}}'
+      TASK_COLAB_EMBEDDING_MAX_LEN: '{{.COLAB_EMBEDDING_MAX_LEN}}'
+      TASK_COLAB_INITIALIZE_SECONDS: '{{.COLAB_INITIALIZE_SECONDS}}'
+      TASK_COLAB_KUBECTL_BIN: '{{.COLAB_KUBECTL_BIN}}'
+      TASK_COLAB_CLI_ARGS: '{{.CLI_ARGS}}'
+    cmds:
+      - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
+      - >-
+        test -z "${TASK_COLAB_CLI_ARGS:-}" ||
+        { echo "use named Colab Task inputs, not trailing shell arguments" >&2; exit 2; };
+        set -- initialize-fresh --state "$TASK_COLAB_STATE" --collection "$TASK_COLAB_INITIALIZE_COLLECTION"
+        --corpus "$TASK_COLAB_CORPUS" --golden "$TASK_COLAB_GOLDEN" --inventory "$TASK_COLAB_INVENTORY"
+        --source-inventory "$TASK_COLAB_SOURCE_INVENTORY" --embedding-evidence "$TASK_COLAB_EMBEDDING_EVIDENCE"
+        --production-approval "$TASK_COLAB_PRODUCTION_APPROVAL" --data-state "$TASK_COLAB_DATA_STATE"
+        --kubeconfig "$TASK_COLAB_KUBECONFIG" --kube-context "$TASK_COLAB_KUBE_CONTEXT"
+        --namespace "$TASK_COLAB_NAMESPACE" --qdrant-service "$TASK_COLAB_QDRANT_SERVICE"
+        --inference-lock "$TASK_COLAB_INFERENCE_LOCK";
+        if [ -n "${TASK_COLAB_PROFILE:-}" ]; then set -- "$@" --profile "$TASK_COLAB_PROFILE"; fi;
+        if [ -n "${TASK_COLAB_QDRANT_PORT:-}" ]; then set -- "$@" --qdrant-port "$TASK_COLAB_QDRANT_PORT"; fi;
+        if [ -n "${TASK_COLAB_EMBEDDING_MAX_LEN:-}" ]; then set -- "$@" --embedding-max-len "$TASK_COLAB_EMBEDDING_MAX_LEN"; fi;
+        if [ -n "${TASK_COLAB_INITIALIZE_SECONDS:-}" ]; then set -- "$@" --deadline-seconds "$TASK_COLAB_INITIALIZE_SECONDS"; fi;
+        if [ -n "${TASK_COLAB_KUBECTL_BIN:-}" ]; then set -- "$@" --kubectl "$TASK_COLAB_KUBECTL_BIN"; fi;
+        exec .venv/bin/python scripts/colab.py "$@"
+
   colab:prepare:
     desc: Prepare private Colab run state without allocating or authenticating
     summary: |

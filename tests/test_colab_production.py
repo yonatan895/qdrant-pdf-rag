@@ -244,6 +244,125 @@ def test_unknown_ledger_does_not_initialize_from_empty_host_directory(original_i
     assert not ledger.exists()
 
 
+def _initialize(original_inputs, *, collections=(), aliases=(), control=None, recheck=lambda: None):
+    config, profile, arguments, _ = original_inputs
+    _, _, target = _complete(original_inputs)
+    (Path(config["data_state"]) / production.LEDGER_FILENAME).unlink()
+    reads = []
+
+    def read(path, body=None):
+        reads.append((path, body))
+        if path == "/collections":
+            return {"status": "ok", "result": {"collections": [{"name": name} for name in collections]}}
+        if path == "/aliases":
+            return {"status": "ok", "result": {"aliases": [
+                {"alias_name": name, "collection_name": physical} for name, physical in aliases]}}
+        assert body == {"ids": [production.publication_metadata_point_id("unrelated__completions")],
+                        "with_payload": True, "with_vector": False}
+        return {"status": "ok", "result": [] if control is None else [{"payload": control}]}
+
+    return production.initialize_fresh_binding(
+        config, profile, collection="original_manuals", storage_proof=target,
+        census_producer={"development_sha": "6" * 40, "source_sha256": "7" * 64},
+        read_qdrant=read, recheck_producer=recheck, **arguments), reads, target
+
+
+def test_explicit_fresh_binding_allows_next_ordinary_prepare_without_claiming_ingestion(
+        original_inputs, tmp_path):
+    proof, reads, target = _initialize(original_inputs, collections=("legacy1024",))
+    ledger = Path(original_inputs[0]["data_state"]) / production.LEDGER_FILENAME
+    stored = json.loads(ledger.read_bytes())
+    assert stored["target"] == target
+    assert proof["ledger_sha256"] == hashlib.sha256(ledger.read_bytes()).hexdigest()
+    assert proof["acceptance_certified"] is False
+    assert ledger.stat().st_mode & 0o777 == 0o600
+    assert reads == [("/collections", None), ("/aliases", None)]
+    prepared = _prepare(original_inputs, tmp_path)
+    assert production.verify_retained_target(prepared, target).endswith(".jsonl")
+    assert not list(Path(original_inputs[0]["data_state"]).glob("*.jsonl"))
+
+
+@pytest.mark.parametrize("collections,aliases", [
+    (("original_manuals",), ()),
+    ((), (("original_manuals", "absent-physical"),)),
+    (("original_manuals__completions",), ()),
+    (("original_manuals__gen" + "a" * 28 + "_repair",), ()),
+    ((), (("original_manuals__build_00000000-0000-0000-0000-000000000001", "absent"),)),
+    ((), (("unrelated-alias", "original_manuals__gen" + "a" * 28),)),
+])
+def test_initialization_refuses_existing_or_dangling_native_target_state(
+        original_inputs, collections, aliases):
+    with pytest.raises(production.ProductionAdmissionError, match="fresh"):
+        _initialize(original_inputs, collections=collections, aliases=aliases)
+    assert not (Path(original_inputs[0]["data_state"]) / production.LEDGER_FILENAME).exists()
+
+
+def test_fresh_names_cannot_hide_target_publication_control(original_inputs):
+    control = {"record_type": "publication-metadata", "target_collection": "unrelated__completions",
+               "build_schema": 1, "build_id": "00000000-0000-0000-0000-000000000001",
+               "logical_alias": "original_manuals", "data_collection": "unrelated",
+               "gen_fp": "a" * 16, "corpus_fp": "b" * 12}
+    with pytest.raises(production.ProductionAdmissionError, match="fresh"):
+        _initialize(original_inputs, collections=("unrelated__completions",), control=control)
+    assert not (Path(original_inputs[0]["data_state"]) / production.LEDGER_FILENAME).exists()
+
+
+def test_producer_replacement_prevents_ledger_commit(original_inputs):
+    def replaced():
+        raise RuntimeError("original test producer replaced")
+
+    with pytest.raises((production.ProductionAdmissionError, RuntimeError)):
+        _initialize(original_inputs, recheck=replaced)
+    assert not (Path(original_inputs[0]["data_state"]) / production.LEDGER_FILENAME).exists()
+
+
+def test_native_publisher_lock_blocks_initialization_without_stealing_ownership(original_inputs):
+    config = original_inputs[0]
+    progress = Path(config["data_state"]) / "ordinary-progress.jsonl"
+    lock = production.acquire_publish_lock(progress, "original_manuals")
+    try:
+        with pytest.raises(production.ProductionAdmissionError):
+            _initialize(original_inputs)
+        assert not (progress.parent / production.LEDGER_FILENAME).exists()
+        with pytest.raises(RuntimeError):
+            production.acquire_publish_lock(progress, "original_manuals")
+    finally:
+        production.release_run_lock(lock)
+    assert _initialize(original_inputs)[0]["kind"] == "fresh-index-initialization"
+
+
+def test_concurrent_destination_is_never_replaced(original_inputs, monkeypatch):
+    ledger = Path(original_inputs[0]["data_state"]) / production.LEDGER_FILENAME
+    real_link = os.link
+
+    def competing_install(source, destination, **kwargs):
+        assert not ledger.exists()
+        # The staged inode is already complete/durable before readers can see it.
+        assert json.loads(Path(source).read_bytes())["target"]["logical_collection"] == "original_manuals"
+        ledger.write_bytes(b"independent competing destination\n")
+        real_link(source, destination, **kwargs)
+
+    monkeypatch.setattr(os, "link", competing_install)
+    with pytest.raises(production.ProductionAdmissionError):
+        _initialize(original_inputs)
+    assert ledger.read_bytes() == b"independent competing destination\n"
+    assert not list(ledger.parent.glob(".retained-index-binding-*.tmp"))
+
+
+def test_interrupted_staged_write_leaves_no_ledger_then_fresh_retry_works(original_inputs, monkeypatch):
+    def interrupted(_descriptor):
+        raise OSError("original staged fsync failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "fsync", interrupted)
+        with pytest.raises(production.ProductionAdmissionError):
+            _initialize(original_inputs)
+    data = Path(original_inputs[0]["data_state"])
+    assert not (data / production.LEDGER_FILENAME).exists()
+    assert not list(data.glob(".retained-index-binding-*.tmp"))
+    assert _initialize(original_inputs)[0]["kind"] == "fresh-index-initialization"
+
+
 def test_loader_restores_next_process_identities_without_repreparing(original_inputs, tmp_path):
     _, _, target = _complete(original_inputs)
     prepared = _prepare(original_inputs, tmp_path)

@@ -399,7 +399,11 @@ def read_publication_record(client: QdrantReader, completions_collection: str) -
                              ids=[publication_metadata_point_id(completions_collection)], with_payload=True)
     if not points:
         return None
-    payload = points[0].payload or {}
+    return decode_publication_record(points[0].payload or {}, completions_collection)
+
+
+def decode_publication_record(payload: dict, completions_collection: str) -> dict:
+    """Validate the control payload for both SDK and bounded read transports."""
     if payload.get("record_type") != _PUBLICATION_METADATA_PREFIX:
         raise RuntimeError("invalid publication control record")
     try:
