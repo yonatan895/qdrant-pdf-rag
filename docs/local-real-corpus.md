@@ -13,6 +13,11 @@ Keep CRC and unrelated rehearsal clusters stopped while both real models run.
 Never query a hash collection with real embeddings. Reranking stays explicitly
 disabled for the two-model 8 GiB GPU pack.
 
+The separate [Colab model playground](colab-playground.md) consumes this
+retained Qdrant and corpus owner with explicit native-4096 model overrides.
+Its CPU transport rehearsal and GPU commissioning do not replace this
+runbook's published-bundle and full-corpus acceptance.
+
 ## 1. Establish the candidate, data and resource budget
 
 Follow [the Kind setup](local-release-fallback.md#3-disposable-kind-with-both-real-models)

@@ -7,6 +7,11 @@
 # (LiteLLM serves no native /v1/score).
 #
 #   GATEWAY_MASTER_KEY=$(openssl rand -hex 16) sh scripts/tools/run-task.sh local:gateway:up
+#   sh scripts/run_local_gateway.sh transport-probe  # connected Colab transport only
+#   sh scripts/run_local_gateway.sh transport-release  # exact owned network only
+# Probe/release use GATEWAY_TRANSPORT_NETWORK_ID and the returned created flag
+# as GATEWAY_TRANSPORT_NETWORK_CREATED. Pass both to the later normal launch.
+# This proves image/network/upstream reachability, not a running gateway service.
 #
 # Keys: pass GATEWAY_MASTER_KEY / GATEWAY_LLM_KEY / GATEWAY_EMBED_KEY /
 # GATEWAY_RERANK_KEY to reuse stable values, or leave them unset and the
@@ -39,6 +44,10 @@ PG_IMAGE="${PG_IMAGE:-docker.io/library/postgres@sha256:67f41722b7a8cbdb868a44a4
 PG_NAME="${PG_NAME:-${GATEWAY_NAME}-pg}"
 PG_VOLUME="${PG_VOLUME:-${GATEWAY_NAME}-pgdata}"
 PG_NET="${PG_NET:-${GATEWAY_NAME}-net}"
+GATEWAY_DOCKER_BIN="${GATEWAY_DOCKER_BIN:-docker}"
+GATEWAY_TRANSPORT_NETWORK_ID="${GATEWAY_TRANSPORT_NETWORK_ID:-}"
+GATEWAY_TRANSPORT_NETWORK_CREATED="${GATEWAY_TRANSPORT_NETWORK_CREATED:-0}"
+GATEWAY_NETWORK_TARGET="$PG_NET"
 PG_PASSWORD="${PG_PASSWORD:-litellm-local-dev}"
 GATEWAY_RESET_KEYS="${GATEWAY_RESET_KEYS:-0}"
 
@@ -79,6 +88,16 @@ GATEWAY_OTEL_SERVICE_NAME="${GATEWAY_OTEL_SERVICE_NAME:-litellm-local}"
 BASE="http://localhost:${GATEWAY_PORT}"
 
 die() { echo "ERROR: $1" >&2; exit 1; }
+gateway_docker() { "$GATEWAY_DOCKER_BIN" "$@"; }
+case "${1:-serve}" in
+    serve|transport-probe|transport-release) GATEWAY_OPERATION="${1:-serve}" ;;
+    *) die "unknown local gateway operation" ;;
+esac
+[ "$#" -le 1 ] || die "unexpected local gateway arguments"
+case "$GATEWAY_TRANSPORT_NETWORK_CREATED" in
+    0|1) ;;
+    *) die "transport network ownership must be 0 or 1" ;;
+esac
 case "$GATEWAY_DEBUG" in
     1|true) GATEWAY_DEBUG_ARGS="--detailed_debug" ;;
     0|false|'') GATEWAY_DEBUG_ARGS="" ;;
@@ -89,8 +108,36 @@ esac
 # launch proved). Safe before anything started (names simply miss). The
 # network is disposable; the key-store volume is not (remove explicitly).
 stop_gateway() {
-    docker stop "$GATEWAY_NAME" "$PG_NAME" >/dev/null 2>&1 || true
-    docker network rm "$PG_NET" >/dev/null 2>&1 || true
+    gateway_docker stop "$GATEWAY_NAME" "$PG_NAME" >/dev/null 2>&1 || true
+    if [ -n "$GATEWAY_TRANSPORT_NETWORK_ID" ]; then
+        release_transport_network || true
+    else
+        gateway_docker network rm "$PG_NET" >/dev/null 2>&1 || true
+    fi
+}
+
+# Docker IDs, rather than names, keep a replaced network out of an admitted run.
+transport_network_id() {
+    _network_info="$(gateway_docker network inspect "$PG_NET" --format '{{.Id}} {{.Driver}}' 2>/dev/null)" || return 1
+    _network_id="${_network_info% *}"
+    [ "${_network_info##* }" = bridge ] || return 1
+    case "$_network_id" in ''|*[!0-9a-f]*) return 1 ;; esac
+    [ "${#_network_id}" -eq 64 ] || return 1
+    printf '%s\n' "$_network_id"
+}
+
+release_transport_network() {
+    [ "$GATEWAY_TRANSPORT_NETWORK_CREATED" = 1 ] || return 0
+    [ -n "$GATEWAY_TRANSPORT_NETWORK_ID" ] || return 1
+    _remaining_network_id="$(gateway_docker network ls --no-trunc \
+        --filter "id=$GATEWAY_TRANSPORT_NETWORK_ID" --format '{{.ID}}' 2>/dev/null)" || return 1
+    [ -n "$_remaining_network_id" ] || return 0
+    [ "$_remaining_network_id" = "$GATEWAY_TRANSPORT_NETWORK_ID" ] || return 1
+    _current_network_id="$(transport_network_id)" || return 1
+    [ "$_current_network_id" = "$GATEWAY_TRANSPORT_NETWORK_ID" ] || return 1
+    # Removal by ID cannot delete a new object that subsequently reuses PG_NET.
+    # Docker itself refuses a network that still has attached containers.
+    gateway_docker network rm "$GATEWAY_TRANSPORT_NETWORK_ID" >/dev/null 2>&1
 }
 
 # python3 mints keys and reads JSON below; docker is checked after the
@@ -99,6 +146,86 @@ command -v python3 >/dev/null 2>&1 || die "python3 is required (key minting + JS
 # The handoff is sourced as shell code. Preserve the opaque revision literally,
 # including whitespace/quotes, without interpreting it as commands on sourcing.
 EMBED_MODEL_REVISION_SH="$(python3 -c 'import shlex, sys; print(shlex.quote(sys.argv[1]))' "$GATEWAY_EMBED_MODEL_REVISION")"
+
+if [ "$GATEWAY_OPERATION" != serve ]; then
+    [ "$GATEWAY_DRYRUN" != 1 ] || die "transport operations cannot run in render-only mode"
+    command -v "$GATEWAY_DOCKER_BIN" >/dev/null 2>&1 || die "docker is required for the local gateway"
+    if [ "$GATEWAY_OPERATION" = transport-release ]; then
+        release_transport_network || die "owned transport network could not be released"
+        exit 0
+    fi
+    # Transport-only mode never generates host keys/config/log files or starts the
+    # database/gateway. Arguments carry URLs as data, never generated code.
+    if ! python3 - "$LITELLM_IMAGE" "$GATEWAY_REASONING_URL" "$GATEWAY_EMBED_URL" <<'PY'
+import ipaddress
+import re
+import sys
+from urllib.parse import urlsplit
+
+try:
+    if not re.fullmatch(r"[^\s]+@sha256:[0-9a-f]{64}", sys.argv[1]):
+        raise ValueError
+    for raw in sys.argv[2:]:
+        url = urlsplit(raw)
+        address = ipaddress.ip_address(url.hostname)
+        if (url.scheme != "http" or address.version != 4 or address.is_unspecified
+                or address.is_multicast or url.username is not None or url.password is not None
+                or url.query or url.fragment or url.path not in ("/v1", "/v1/")
+                or url.port is None or not 1024 <= url.port <= 65535):
+            raise ValueError
+except (TypeError, ValueError):
+    sys.exit(1)
+PY
+    then
+        die "transport probe requires a pinned image and numeric IPv4 HTTP backend URLs"
+    fi
+    gateway_docker image inspect "$LITELLM_IMAGE" >/dev/null 2>&1 || die "transport probe requires the pinned image already present"
+    _probe_created=0
+    if _probe_network_id="$(transport_network_id)"; then
+        if [ -n "$GATEWAY_TRANSPORT_NETWORK_ID" ]; then
+            [ "$_probe_network_id" = "$GATEWAY_TRANSPORT_NETWORK_ID" ] || die "transport network identity changed"
+            _probe_created="$GATEWAY_TRANSPORT_NETWORK_CREATED"
+        fi
+    else
+        [ -z "$GATEWAY_TRANSPORT_NETWORK_ID" ] || die "transport network identity changed"
+        _created_network_id="$(gateway_docker network create "$PG_NET" 2>/dev/null)" || die "transport network could not be prepared"
+        _probe_created=1
+        if ! _probe_network_id="$(transport_network_id)" || [ "$_probe_network_id" != "$_created_network_id" ]; then
+            # Never attribute a name-reused replacement to our successful create.
+            gateway_docker network rm "$_created_network_id" >/dev/null 2>&1 || true
+            die "transport network identity is unavailable"
+        fi
+    fi
+    GATEWAY_TRANSPORT_NETWORK_ID="$_probe_network_id"
+    GATEWAY_TRANSPORT_NETWORK_CREATED="$_probe_created"
+    trap 'release_transport_network || true; exit 130' INT TERM
+    # Emit ownership before the potentially interrupted probe, so recovery can
+    # release an owned network. This identity alone is never a passing result:
+    # the caller must also require this operation's exit status to be zero.
+    python3 - "$PG_NET" "$_probe_network_id" "$_probe_created" "$LITELLM_IMAGE" \
+        "$GATEWAY_REASONING_URL" "$GATEWAY_EMBED_URL" <<'PY'
+import json
+import sys
+print(json.dumps({"network_name": sys.argv[1], "network_id": sys.argv[2],
+                  "created": sys.argv[3] == "1", "gateway_image": sys.argv[4],
+                  "reasoning_url": sys.argv[5], "embedding_url": sys.argv[6]}))
+PY
+    if ! gateway_docker run --rm --pull never --network "$_probe_network_id" \
+        --add-host=host.docker.internal:host-gateway --entrypoint python \
+        "$LITELLM_IMAGE" -c '
+import sys
+import urllib.request
+for origin in sys.argv[1:]:
+    url = origin.rstrip("/").removesuffix("/v1") + "/health"
+    with urllib.request.urlopen(url, timeout=5) as response:
+        if response.status != 200 or response.geturl() != url:
+            raise RuntimeError("transport health check failed")
+' "$GATEWAY_REASONING_URL" "$GATEWAY_EMBED_URL" >/dev/null 2>&1; then
+        release_transport_network || true
+        die "gateway network transport probe failed"
+    fi
+    exit 0
+fi
 
 # Operator-supplied keys stay in a tight charset (they render into YAML);
 # generated keys are sk-local- + 16 hex bytes.
@@ -251,23 +378,30 @@ if [ "$GATEWAY_DRYRUN" = "1" ]; then
     echo "$CFG_DIR"
     exit 0
 fi
-command -v docker >/dev/null 2>&1 || die "docker is required for the local gateway"
+command -v "$GATEWAY_DOCKER_BIN" >/dev/null 2>&1 || die "docker is required for the local gateway"
 trap 'rm -rf "$CFG_DIR"' EXIT
 
 for _taken in "$GATEWAY_NAME" "$PG_NAME"; do
-    if docker ps -a --format '{{.Names}}' | grep -qx "$_taken"; then
+    if gateway_docker ps -a --format '{{.Names}}' | grep -qx "$_taken"; then
         die "container '$_taken' already exists — docker stop/remove it first (never auto-killed)"
     fi
 done
 unset _taken
+if [ -n "$GATEWAY_TRANSPORT_NETWORK_ID" ]; then
+    _admitted_network_id="$(transport_network_id)" || die "transport network identity changed"
+    [ "$_admitted_network_id" = "$GATEWAY_TRANSPORT_NETWORK_ID" ] || die "transport network identity changed"
+    GATEWAY_NETWORK_TARGET="$GATEWAY_TRANSPORT_NETWORK_ID"
+fi
 if [ "$GATEWAY_RESET_KEYS" = "1" ]; then
-    docker volume rm "$PG_VOLUME" >/dev/null 2>&1 || true
+    gateway_docker volume rm "$PG_VOLUME" >/dev/null 2>&1 || true
     echo "==> Key store wiped ($PG_VOLUME removed)"
 fi
 
-docker network create "$PG_NET" >/dev/null 2>&1 || true
+if [ -z "$GATEWAY_TRANSPORT_NETWORK_ID" ]; then
+    gateway_docker network create "$PG_NET" >/dev/null 2>&1 || true
+fi
 echo "==> Starting key-store postgres ($PG_NAME, volume $PG_VOLUME)"
-docker run -d --rm --name "$PG_NAME" --network "$PG_NET" \
+gateway_docker run -d --rm --name "$PG_NAME" --network "$GATEWAY_NETWORK_TARGET" \
     -e POSTGRES_USER=litellm -e POSTGRES_PASSWORD="$PG_PASSWORD" -e POSTGRES_DB=litellm \
     -v "${PG_VOLUME}:/var/lib/postgresql/data" \
     "$PG_IMAGE" >/dev/null
@@ -275,7 +409,7 @@ echo "==> Waiting for postgres (up to 60s)"
 _OK=0
 i=0
 while [ "$i" -lt 60 ]; do
-    if docker exec "$PG_NAME" pg_isready -U litellm >/dev/null 2>&1; then
+    if gateway_docker exec "$PG_NAME" pg_isready -U litellm >/dev/null 2>&1; then
         _OK=1
         break
     fi
@@ -300,7 +434,7 @@ if [ -n "$GATEWAY_OTEL_ENDPOINT" ]; then
     OTEL_RUN_ARGS="-e OTEL_EXPORTER_OTLP_ENDPOINT=$GATEWAY_OTEL_ENDPOINT -e OTEL_SERVICE_NAME=$GATEWAY_OTEL_SERVICE_NAME"
 fi
 # shellcheck disable=SC2086
-docker run --rm --name "$GATEWAY_NAME" --network "$PG_NET" \
+gateway_docker run --rm --name "$GATEWAY_NAME" --network "$GATEWAY_NETWORK_TARGET" \
     --add-host=host.docker.internal:host-gateway \
     -p "${GATEWAY_PORT}:4000" \
     -v "${CFG_DIR}:/app/gateway:ro" \
