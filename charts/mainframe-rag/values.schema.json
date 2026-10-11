@@ -285,7 +285,7 @@
     "ingest": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["enabled", "workers", "aliasPublish", "reingest", "collectionPolicy"],
+      "required": ["enabled", "workers", "reingest", "collectionPolicy"],
       "properties": {
         "enabled": {
           "type": "boolean",
@@ -304,7 +304,6 @@
           "type": "string",
           "description": "Comma-separated direct Qdrant REST endpoints. Empty is unconfigured; runtime placement checks refuse missing multi-peer evidence."
         },
-        "aliasPublish": { "type": "boolean" },
         "reingest": { "type": "boolean" },
         "retireDocs": {
           "type": "array",
@@ -346,15 +345,6 @@
               "corpusPVC": { "pattern": "^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$" }
             },
             "required": ["corpusPVC"]
-          }
-        },
-        {
-          "if": {
-            "properties": { "retireDocs": { "minItems": 1 } },
-            "required": ["retireDocs"]
-          },
-          "then": {
-            "properties": { "aliasPublish": { "const": true } }
           }
         }
       ]

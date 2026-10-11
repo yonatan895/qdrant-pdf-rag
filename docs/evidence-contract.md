@@ -145,8 +145,9 @@ build is restored. Keeping every historical ANN index forever is not promised.
 ## Publication and reader lifetime
 
 The selected normal mode is immutable alias publication under one authorized
-publisher per logical corpus. Existing in-place mode remains isolated legacy
-maintenance requiring operator quiescence/drain; it cannot issue v1 references.
+publisher per logical corpus. In-place ingest was retired (#360); legacy
+collections that predate publication cannot issue v1 references until their
+first publication.
 No launcher default is changed by this decision. Multi-host concurrent writers
 remain unsupported; a local file lock and RWO volume are not distributed locks.
 

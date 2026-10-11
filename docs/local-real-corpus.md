@@ -139,7 +139,7 @@ is not permission to disable probes or declare readiness; Qdrant must be ready
 before proceeding with the explicit migration:
 
 ```sh
-INGEST_ALIAS_PUBLISH=true INGEST_REINGEST=true INGEST_TIMEOUT=86400 \
+INGEST_REINGEST=true INGEST_TIMEOUT=86400 \
   sh scripts/tools/run-task.sh airgap:ingest
 ```
 
@@ -158,7 +158,7 @@ After successful migration, perform the next ordinary operation without forcing
 another re-embed:
 
 ```sh
-INGEST_ALIAS_PUBLISH=true sh scripts/tools/run-task.sh airgap:ingest
+sh scripts/tools/run-task.sh airgap:ingest
 sh scripts/tools/run-task.sh airgap:deploy
 sh scripts/tools/run-task.sh airgap:smoke
 ```

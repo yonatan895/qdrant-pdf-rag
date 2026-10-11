@@ -448,7 +448,7 @@ behind the gateway. Follow [the environment handoff checks](live-stack.md#local-
 first. The generated local revision label is a simulation label, never production
 weight attestation. Before modifying existing data, read the
 [publication/reader limitations](ingest.md#publication-contract); serialize writers
-and drain readers for in-place maintenance. These commands are operator actions,
+and drain readers for any maintenance that writes outside publication. These commands are operator actions,
 not prerequisites for a documentation change.
 
 #### 1. Initial Ingestion with Dense Embeddings

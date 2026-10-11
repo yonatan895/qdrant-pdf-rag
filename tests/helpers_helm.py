@@ -84,7 +84,6 @@ def base_values() -> dict:
             "enabled": False,
             "corpusPVC": "",
             "workers": 4,
-            "aliasPublish": False,
             "reingest": False,
             "retireDocs": [],
             "contextualEnabled": False,

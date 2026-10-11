@@ -23,9 +23,8 @@ published". A forced rebuild of that live physical (issue #391 current
 packet) allocates a suffixed repair build instead of mutating it: readers
 keep the complete old generation until the verified atomic swap.
 
-Corpus deletions are NOT swept (status quo: same as in-place runs —
-stale-generation points survive until an operator cleans them; see
-docs/ingest.md). Publishing a `--limit` subset or an empty corpus is
+Corpus deletions are NOT swept: stale-generation points survive until an
+operator removes them explicitly (`--retire-doc`; see docs/ingest.md). Publishing a `--limit` subset or an empty corpus is
 refused fail-closed by the caller.
 """
 

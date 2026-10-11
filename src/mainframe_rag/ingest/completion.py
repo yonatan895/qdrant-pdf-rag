@@ -12,11 +12,10 @@ and the stored points verify (count + chunk-ID/content digests). Every skip
 path requires a valid completion tied to the actual target generation;
 missing, legacy, or mismatched completions re-ingest, never skip.
 
-In-place runs still delete before re-upserting, so a crash mid-refresh
-leaves no completion (safe retry) but no atomic old-or-new visibility —
-that needs the versioned-collection + alias publication path
-(`ingest/publish.py`, `INGEST_ALIAS_PUBLISH`). Rollback/GC are deliberate
-operator actions.
+A refresh deletes before re-upserting inside the staging generation, so a
+crash mid-refresh leaves no completion (safe retry); readers keep the old
+generation through the alias until the verified swap (`ingest/publish.py`).
+Rollback/GC are deliberate operator actions.
 """
 
 from __future__ import annotations

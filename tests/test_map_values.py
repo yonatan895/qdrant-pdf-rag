@@ -228,16 +228,26 @@ def test_metrics_literal_true_only(monkeypatch, mapper_env):
     assert load_values(out)["metrics"] == {"enabled": True, "serviceMonitor": {"enabled": True}}
 
 
-@pytest.mark.parametrize("raw,expected", [
-    ("", True), ("true", True), ("1", True), ("yes", True),
-    ("false", False), ("0", False), ("no", False),
-])
-def test_strict_maintenance_bool(monkeypatch, mapper_env, raw, expected):
+@pytest.mark.parametrize("raw", ["", "true", "1", "yes"])
+def test_retired_in_place_switch_accepts_publication(monkeypatch, mapper_env, raw):
+    """In-place ingest was retired (#360): unset or true still renders, and
+    the chart carries no switch (publication is the only mode)."""
     monkeypatch.setenv("CORPUS_PVC", "corpus-pvc")
     monkeypatch.setenv("INGEST_ALIAS_PUBLISH", raw)
     r, out = mapper_env()
     assert r.returncode == 0, r.stderr
-    assert load_values(out)["ingest"]["aliasPublish"] is expected
+    assert "aliasPublish" not in load_values(out)["ingest"]
+
+
+@pytest.mark.parametrize("raw", ["false", "0", "no"])
+def test_retired_in_place_switch_refuses_false(monkeypatch, mapper_env, raw):
+    """An explicit false fails closed with the retirement, never silently
+    rendering a publication the operator did not ask for."""
+    monkeypatch.setenv("CORPUS_PVC", "corpus-pvc")
+    monkeypatch.setenv("INGEST_ALIAS_PUBLISH", raw)
+    r, _ = mapper_env()
+    assert r.returncode != 0
+    assert "in-place ingest was retired" in r.stderr
 
 
 def test_strict_bool_rejects_garbage(monkeypatch, mapper_env):
@@ -281,7 +291,6 @@ def test_ingest_enabled_block_and_tricky_retire(monkeypatch, mapper_env):
     tricky = "SA22-7777-01@vendor|product with spaces|v1|abc123 & more"
     monkeypatch.setenv("CORPUS_PVC", "corpus-pvc")
     monkeypatch.setenv("INGEST_WORKERS", "8")
-    monkeypatch.setenv("INGEST_ALIAS_PUBLISH", "true")
     monkeypatch.setenv("INGEST_REINGEST", "true")
     monkeypatch.setenv("INGEST_RETIRE_DOCS", f"SA22-0000-00,\n{tricky}\n")
     monkeypatch.setenv("GATEWAY_API_KEY_SECRET", "gw-keys")
@@ -291,29 +300,19 @@ def test_ingest_enabled_block_and_tricky_retire(monkeypatch, mapper_env):
     assert ing["enabled"] is True
     assert ing["corpusPVC"] == "corpus-pvc"
     assert ing["workers"] == 8 and isinstance(ing["workers"], int)
-    assert ing["aliasPublish"] is True and ing["reingest"] is True
+    assert ing["reingest"] is True and "aliasPublish" not in ing
     assert ing["retireDocs"] == ["SA22-0000-00", tricky]
     assert ing["collectionPolicy"] == {
         "shardNumber": 6, "replicationFactor": 3, "writeConsistencyFactor": 2,
     }
 
 
-def test_retire_without_alias_fails_closed(monkeypatch, mapper_env):
-    monkeypatch.setenv("CORPUS_PVC", "corpus-pvc")
-    monkeypatch.setenv("INGEST_ALIAS_PUBLISH", "false")
-    monkeypatch.setenv("INGEST_RETIRE_DOCS", "DOC1")
-    r, _ = mapper_env()
-    assert r.returncode != 0
-    assert "INGEST_ALIAS_PUBLISH" in r.stderr
-
-
-def test_retire_with_default_publication_renders(monkeypatch, mapper_env):
+def test_retire_renders_under_publication(monkeypatch, mapper_env):
     monkeypatch.setenv("CORPUS_PVC", "corpus-pvc")
     monkeypatch.setenv("INGEST_RETIRE_DOCS", "DOC1")
     r, out = mapper_env()
     assert r.returncode == 0, r.stderr
-    ingest = load_values(out)["ingest"]
-    assert ingest["aliasPublish"] is True and ingest["retireDocs"] == ["DOC1"]
+    assert load_values(out)["ingest"]["retireDocs"] == ["DOC1"]
 
 
 def test_route_needs_ca_file(monkeypatch, mapper_env, tmp_path):
@@ -385,7 +384,6 @@ def test_mapper_to_helm_round_trip(mapper_env, tmp_path):
     """Producer-to-consumer: env -> values -> helm template -> resources."""
     tricky = "SA22-7777-01@vendor|product with spaces|v1|abc123 & more"
     os.environ["CORPUS_PVC"] = "corpus-pvc"
-    os.environ["INGEST_ALIAS_PUBLISH"] = "true"
     os.environ["INGEST_RETIRE_DOCS"] = tricky
     os.environ["RERANK_ENABLED"] = "true"
     os.environ["RERANK_BASE_URL"] = "http://rerank:8002/v1"
@@ -412,7 +410,7 @@ def test_mapper_to_helm_round_trip(mapper_env, tmp_path):
         env = {e["name"]: e for e in ingest["env"]}
         assert "RERANK_ENABLED" not in env  # agent-only key
         assert env["QDRANT_SHARD_NUMBER"]["value"] == "6"
-        assert env["INGEST_ALIAS_PUBLISH"]["value"] == "true"
+        assert "INGEST_ALIAS_PUBLISH" not in env  # retired switch (#360)
     finally:
         for k in ("CORPUS_PVC", "INGEST_ALIAS_PUBLISH", "INGEST_RETIRE_DOCS",
                   "RERANK_ENABLED", "RERANK_BASE_URL"):

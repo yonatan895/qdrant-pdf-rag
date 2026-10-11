@@ -754,26 +754,6 @@ def test_dangling_alias_publishes_fresh(tmp_path, monkeypatch):
     assert {p.payload["doc_id"] for p in fake.alias_target_points(ALIAS)} == {"SA22-0000-00"}
 
 
-def test_flag_off_creates_no_alias_or_generations(tmp_path, monkeypatch):
-    """Explicit opt-out pin: the deprecated in-place path creates no alias,
-    no staging generations, no snapshots."""
-    from mainframe_rag.ingest import run_ingest
-
-    monkeypatch.setenv("EMBED_MODE", "hash")
-    monkeypatch.setenv("ALLOW_HASH_MODE", "true")
-    monkeypatch.delenv("DENSE_DIM", raising=False)
-    monkeypatch.setenv("INGEST_ALIAS_PUBLISH", "false")
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
-    _build_doc(corpus, "SA22-0000-00_first")
-    assert _run_main(monkeypatch, corpus, tmp_path / "inv.jsonl") == 0
-    assert fake.aliases == {}
-    assert all("__gen" not in name for name in fake.collections)
-    assert fake.snapshots == {}
-
-
 def _live_manifest_revision(fake, live):
     from mainframe_rag.ingest.representation import read_manifest
 
@@ -1708,29 +1688,6 @@ def test_revisit_retained_generation_never_mutated(tmp_path, monkeypatch):
     assert [(p.id, dict(p.payload or {})) for p in fake.collections[gen_a]] == points_before
     assert read_manifest_record(fake, completion_collection_for(gen_a)) == manifest_before
     assert _live_doc_ids(fake) == {DOC_A}
-
-
-def test_inplace_run_uses_progress_lock_only(tmp_path, monkeypatch):
-    """R2 acceptance: the in-place (non-publish) path keeps its progress
-    lock and takes no target lock; explicit removals are rejected there."""
-    from mainframe_rag.ingest import run_ingest
-
-    monkeypatch.setenv("EMBED_MODE", "hash")
-    monkeypatch.setenv("ALLOW_HASH_MODE", "true")
-    monkeypatch.setenv("INGEST_ALIAS_PUBLISH", "false")
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
-    _build_doc_with_id(corpus, "doc_a", DOC_A)
-    progress = tmp_path / "inv.jsonl"
-    assert _run_main(monkeypatch, corpus, progress) == 0
-    assert (tmp_path / "inv.jsonl.lock").exists()
-    assert list(tmp_path.glob("publish-*.lock")) == []
-    assert list(tmp_path.glob("publish-*.json")) == []
-
-    with pytest.raises(RuntimeError, match="INGEST_ALIAS_PUBLISH"):
-        _run_main(monkeypatch, corpus, progress, "--retire-doc", DOC_A)
 
 
 # ------------------------------------------------- Review round on #409 (issue #405)
@@ -4072,37 +4029,6 @@ def test_sealed_retry_refuses_inconsistent_build_without_mutation(tmp_path, monk
     with pytest.raises(RuntimeError):
         _run_main(monkeypatch, corpus, progress, "--reingest")
     assert (fake.collections, fake.aliases, sidecar.read_bytes(), progress.read_bytes()) == before
-
-
-@pytest.mark.parametrize("target_kind", ["logical", "physical", "build-alias", "retained"])
-def test_in_place_writer_cannot_mutate_full_build(tmp_path, monkeypatch, target_kind):
-    from copy import deepcopy
-
-    from mainframe_rag.ingest import run_ingest
-
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
-    _build_doc_with_id(corpus, "doc_a", DOC_A)
-    progress = tmp_path / "inventory.jsonl"
-    assert _run_main(monkeypatch, corpus, progress) == 0
-    physical = fake.aliases[ALIAS]
-    target = ALIAS
-    if target_kind in ("physical", "retained"):
-        target = physical
-    elif target_kind == "build-alias":
-        target = next(name for name, value in fake.aliases.items()
-                      if name != ALIAS and value == physical)
-    if target_kind == "retained":
-        assert _run_main(monkeypatch, corpus, progress, "--reingest") == 0
-    monkeypatch.setenv("INGEST_ALIAS_PUBLISH", "false")
-    monkeypatch.setenv("QDRANT_COLLECTION", target)
-    before = deepcopy(fake.collections), dict(fake.aliases), progress.read_bytes()
-    with pytest.raises(RuntimeError, match="immutable build"):
-        _run_main(monkeypatch, corpus, progress, "--reingest")
-    assert (fake.collections, fake.aliases, progress.read_bytes()) == before
 
 
 @pytest.mark.parametrize("target_kind", ["physical", "retained", "build-alias"])

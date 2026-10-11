@@ -41,7 +41,6 @@ from mainframe_rag.ingest.bounds import require_document_within, require_embed_i
 from mainframe_rag.ingest.build import (
     BuildBinding,
     build_phase,
-    is_build_alias,
     require_published_binding,
 )
 from mainframe_rag.ingest.chrome import strip_chrome
@@ -132,7 +131,6 @@ from mainframe_rag.ingest.representation import (
     commit_manifest,
     manifest_digest,
     read_manifest_record,
-    refuse_limited_migration,
     require_attested_revision,
 )
 from mainframe_rag.ingest.rules_version import extraction_rules_version
@@ -182,9 +180,9 @@ class _Plan:
 class _StagingBuild:
     """Publisher-owned inputs for building one staging generation (issue
     #583 S5). Only `_run_publish_locked` creates it, under the target
-    publish lock and after retirement planning; in-place runs have none, so
-    they can never carry a pre-hashed walk, an approved removal plan or a
-    checkpoint-resume grant. `staging`/`live` are the resolved physical
+    publish lock and after retirement planning; a real build requires one
+    and dry runs have none, so nothing else can carry a pre-hashed walk,
+    an approved removal plan or a checkpoint-resume grant. `staging`/`live` are the resolved physical
     names; `resume_verified` is granted only for reused staging."""
 
     staging: str
@@ -676,10 +674,12 @@ def _dispatch(
     force_reingest: bool = False,
     retire_docs: tuple[str, ...] | None = None,
 ) -> int:
-    """Mode choice (issue #583 S5), made once per run: alias publication
-    for a real run with INGEST_ALIAS_PUBLISH, otherwise an in-place build.
-    The publisher builds its staging generation through `_run_impl` with a
-    `_StagingBuild`; `_run_impl` itself never chooses a mode."""
+    """Mode choice (issue #583 S5), made once per run: every real run is an
+    alias publication; only a dry run (which writes nothing) reaches the
+    builder directly. In-place ingest, which wrote into the serving
+    collection, was retired (#360). The publisher builds its staging
+    generation through `_run_impl` with a `_StagingBuild`; `_run_impl`
+    itself never chooses a mode."""
     if settings.contextual_embed_enabled and not dry_run:
         # Fail the whole run before spawning the pool: a misconfigured flag
         # must never degrade into header-only vectors doc by doc. Dry runs
@@ -690,7 +690,7 @@ def _dispatch(
                 "hash mode cannot call an LLM."
             )
         settings.require_context_llm()
-    if settings.ingest_alias_publish and not dry_run:
+    if not dry_run:
         return _run_publish(
             src,
             progress,
@@ -705,24 +705,10 @@ def _dispatch(
             force_reingest=force_reingest,
             retire_docs=retire_docs,
         )
-    if not dry_run:
-        log.warning(
-            json.dumps(
-                {
-                    "action": "in_place_deprecated",
-                    "collection": settings.qdrant_collection,
-                    "remediation": "unset INGEST_ALIAS_PUBLISH (alias publication is the default)",
-                }
-            )
-        )
     if retire_docs:
-        # Explicit removals are a publication operation (intended-set
-        # membership); in-place mode never deletes unwalked data and
-        # dry runs mutate nothing.
-        raise RuntimeError(
-            "--retire-doc requires INGEST_ALIAS_PUBLISH=true (and a real run, "
-            "not --dry-run): in-place ingest never removes unwalked documents."
-        )
+        # Explicit removals are a publication operation; a dry run mutates
+        # nothing.
+        raise RuntimeError("--retire-doc requires a real run, not --dry-run.")
     return _run_impl(
         src,
         progress,
@@ -740,7 +726,7 @@ def _dispatch(
 
 
 def _gate_planned_entries(src: Path, walk_entries: list[tuple[str, str]]) -> list[tuple[str, str]]:
-    """Identity planning gate (issue #361 req 3/4), shared by the in-place
+    """Identity planning gate (issue #361 req 3/4), shared by the dry-run
     plan span and the alias-publish prewalk: byte-identical copies collapse
     onto the deterministic winner (logged, never ingested twice), and
     distinct revisions claiming one doc_id abort fail-closed before any
@@ -761,7 +747,7 @@ def _gate_planned_entries(src: Path, walk_entries: list[tuple[str, str]]) -> lis
 
 
 def _log_record_drift(settings: Settings, record_drift: list[str]) -> None:
-    """One rule for the record-only drift note (in-place preflight and the
+    """One rule for the record-only drift note (staging preflight and the
     publish read-only check share it): warn loudly, proceed — vectors are
     unaffected, re-evaluation is owed."""
     if record_drift:
@@ -929,9 +915,8 @@ def _preflight(
     *,
     rules_v: str,
     force_reingest: bool,
-    limit: int | None,
     bulk: bool,
-    staging: _StagingBuild | None,
+    staging: _StagingBuild,
 ) -> _Preflight:
     """Every gate before planning and before any worker spawns (issue #583
     S3), in its established order: immutable-build guard, single-writer
@@ -945,15 +930,6 @@ def _preflight(
     # Single-writer guard (issue #359 req 6): a second concurrent run
     # sharing the progress directory fails closed before any stage runs.
     client = _get_qdrant(settings)
-    if staging is None:
-        aliases = {a.alias_name: a.collection_name for a in client.get_aliases().aliases}
-        physical = aliases.get(settings.qdrant_collection, settings.qdrant_collection)
-        existing_build = read_build_binding(client, physical + "__completions")
-        if existing_build is not None or any(
-            is_build_alias(name) and target in (physical, physical + "__completions")
-            for name, target in aliases.items()
-        ):
-            raise RuntimeError("in-place ingest cannot modify an immutable build; use alias publication")
     run_lock = acquire_run_lock(progress)
     ensure_collection(client, settings)
     ensure_completion_collection(client, settings)
@@ -993,7 +969,6 @@ def _preflight(
     # actual stored points. Inherited live markers cannot satisfy it.
     if (
         force_reingest
-        and staging is not None
         and staging.resume_verified
         and staging.staging == settings.qdrant_collection
         and staging.live != settings.qdrant_collection
@@ -1017,14 +992,6 @@ def _preflight(
             client, settings, completion_collection_name(settings), rules_v
         )
         _log_record_drift(settings, record_drift)
-    if limit:
-        # A partial walk cannot certify a collection-wide contract
-        # (issue #391 F2); read-only, refused before any mutation.
-        # `--limit 0` truncates nothing (same falsy rule as the walk
-        # above), so it is not a partial walk.
-        refuse_limited_migration(
-            client, settings, completion_collection_name(settings), rules_v
-        )
     if bulk:
         # Bulk load: HNSW builds must not compete with the upserts
         # (ingest_bulk_load, default off; see qdrant_io.set_bulk_indexing).
@@ -1260,9 +1227,10 @@ def _run_impl(
     force_reingest: bool = False,
     staging: _StagingBuild | None = None,
 ) -> int:
-    """One build: in place (`staging` None, chosen by `_dispatch`) or the
-    publisher's staging generation (`settings` already name the staging
-    physical)."""
+    """One build: the publisher's staging generation (`settings` already
+    name the staging physical), or a dry run (`staging` None), which writes
+    nothing. A real run without a staging build is refused, so no caller can
+    write into the serving collection (in-place ingest was retired, #360)."""
     workers = resolve_workers(workers, settings)
     rules_v = extraction_rules_version()
     src_labels = source_labels(vendor, product, version)
@@ -1275,19 +1243,22 @@ def _run_impl(
     stats = _RunStats()
     bulk = settings.ingest_bulk_load and not dry_run
     manifest_mode: str | None = None
-    pre = (
-        _preflight(
+    if dry_run:
+        pre = _Preflight()
+    elif staging is None:
+        raise RuntimeError(
+            "ingest writes only a publication staging generation; in-place ingest "
+            "was retired (#360)"
+        )
+    else:
+        pre = _preflight(
             settings,
             progress,
             rules_v=rules_v,
             force_reingest=force_reingest,
-            limit=limit,
             bulk=bulk,
             staging=staging,
         )
-        if not dry_run
-        else _Preflight()
-    )
     client, run_lock = pre.client, pre.run_lock
     resume_checkpoints, bulk_active = pre.resume_checkpoints, pre.bulk_active
     try:
@@ -1492,13 +1463,13 @@ def _run_publish(
     rules_v = extraction_rules_version()
     if limit is not None:
         raise RuntimeError(
-            "INGEST_ALIAS_PUBLISH refuses --limit: publication certifies the "
-            "whole corpus; rerun without --limit."
+            "ingest refuses --limit on a real run: publication certifies the "
+            "whole corpus; rerun without --limit (a --dry-run may plan a prefix)."
         )
     pdfs = walk_pdfs(src)
     if not pdfs:
         raise RuntimeError(
-            "INGEST_ALIAS_PUBLISH refuses an empty corpus: publishing nothing "
+            "ingest refuses an empty corpus: publishing nothing "
             "would leave the alias serving an empty generation."
         )
     prewalked = [(str(p), sha256_file(p)) for p in pdfs]
@@ -1509,8 +1480,7 @@ def _run_publish(
     # Writer ownership (issue #405 R2): one target-held lock spans staging
     # resolution through alias cutover — including retirement planning
     # below, so two serialized publishers sharing the progress directory
-    # can never plan on stale inventory (issue #409 review). In-place mode
-    # keeps its own progress lock only (explicitly scoped legacy path).
+    # can never plan on stale inventory (issue #409 review).
     target_lock = acquire_publish_lock(progress, settings.qdrant_collection)
     try:
         return _run_publish_locked(

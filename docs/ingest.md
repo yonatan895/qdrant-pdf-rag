@@ -20,8 +20,8 @@ with an inventory file for resume.
 ## 1. Discovery and vendor inference (`walk.py`)
 
 `walk_pdfs(root)` returns a deterministically **sorted** list of PDFs;
-`--limit` truncates that order, so limited runs are a stable prefix, not a
-sample.
+`--limit` truncates that order, so limited dry runs plan a stable prefix, not
+a sample (a real run is a publication of the whole corpus and refuses `--limit`).
 
 - Only `suffix.lower() == ".pdf"` is kept; `.pdx`/`.idx` catalogs are ignored
   by omission.
@@ -595,8 +595,8 @@ thread pool.
   leaves the contract pending; points an explicit, lock-validated
   `--retire-doc` plan removes before the swap audit are excused at commit
   and enforced gone downstream. Unknown data is preserved, never deleted;
-  `--limit` is refused for any migration (`refuse_limited_migration`)
-  except a fresh empty-target bootstrap. A pending contract is never
+  a real run refuses `--limit` outright (publication certifies the whole
+  corpus), so no partial walk can reach a collection. A pending contract is never
   ordinarily skippable (`check_ingest_compatible`), servable
   (`serving_outcome`/lifespan; `/healthz` degrades), or swappable
   (`verify_all_complete`); resumption is `--reingest`. For alias publication,
@@ -639,7 +639,7 @@ thread pool.
   (family/citation key), `source_rev`
   (`normalize(vendor)|normalize(product)|normalize(version)|sha256`, the
   destructive key for locks, deletes, completions, and chunk ids),
-  committed generation. Planning (in-place and alias-publish prewalk
+  committed generation. Planning (dry runs and the publication prewalk
   alike) gates the walked corpus before any parse worker spawns:
   byte-identical copies under several paths ingest exactly once (the
   lexicographically smallest corpus-relpath wins; losers log
@@ -688,9 +688,9 @@ thread pool.
   refresh of each lineage rewrites them scoped. Evaluation needs no
   re-baseline: citations, filters, and goldens key on `doc_id`/text (see
   the eval numbers in each 361B PR).
-- **Refresh visibility — alias publication** (the default;
-  `INGEST_ALIAS_PUBLISH=false` selects the deprecated in-place mode; issue #359
-  req 4/5, `ingest/publish.py` + `qdrant_io` alias/snapshot helpers):
+- **Refresh visibility — alias publication** (the only real-run mode; in-place
+  ingest was retired in #360 and `INGEST_ALIAS_PUBLISH=false` fails closed; issue
+  #359 req 4/5, `ingest/publish.py` + `qdrant_io` alias/snapshot helpers):
   readers resolve `<collection>` through a Qdrant alias. The ordinary
   distinct-staging cutover keeps the old target during preparation; one
   target-held lock serializes publishers for the same alias from staging
@@ -775,8 +775,8 @@ thread pool.
    Unexplained residue under walked, unwalked or retired docs refuses and is
    preserved. The prod Job reaches these modes through
    `scripts/airgap/ingest.sh` (issue #391 current packet):
-   publication is the default (`INGEST_ALIAS_PUBLISH=false` selects the
-   deprecated in-place mode), `INGEST_REINGEST=true`
+   publication is the only mode (the values mapper refuses
+   `INGEST_ALIAS_PUBLISH=false`), `INGEST_REINGEST=true`
     renders `--reingest` (forced repair), and `INGEST_RETIRE_DOCS` takes a
     **comma- or newline-separated** `DOCID[@SOURCEREV]` list rendered as
     repeated `--retire-doc` (requires alias publication; labels may carry
@@ -864,9 +864,11 @@ thread pool.
   and both immutable aliases; missing, redirected or unknown-version controls
   refuse instead of downgrading to legacy behavior. Completed legacy generations
   remain readable but acquire no full build UUID through metadata backfill.
-  In-place ingest refuses these builds through logical, physical or build-alias
-  targets, including retained builds. Post-cutover recovery validates the same
-  UUID before read-only finalization.
+  Publication refuses a physical or build-alias target that names one of these
+  builds, including retained builds (publish through the logical alias). The
+  builder writes only a publication staging generation, so nothing else can
+  target them. Post-cutover recovery validates the same UUID before read-only
+  finalization.
   Build schema 2 additionally requires a separately versioned **content seal**.
   After the full intended-set/representation/placement proof, the writer reads
   all stored payloads and named dense/sparse vectors and records SHA-256 roots
@@ -1074,8 +1076,7 @@ readiness, retrieval, answer/chat/console, recovery tools and evaluation.
   and any searchable point no verified walked generation accounts for —
   sourceless points only through verified approved legacy document digests
   (read-only residue audit; explicit `--retire-doc` removals are the only
-  deletions and are applied before verification). In-place mode still never
-  removes unwalked data.
+  deletions and are applied before verification).
 - Distinct staging plus the alias update isolates ordinary cutover and forced
   repair under the coverage and writer assumptions below; the serving
   generation is never mutated in publish mode, and only first legacy-name
@@ -1099,14 +1100,15 @@ only serializes revisions inside one process. Supported operation requires
 operator-serialized jobs, not a claim of distributed lock enforcement. No HA
 claim follows from a single-node run.
 
-**Maintenance and rollback:** in-place mode (explicit `INGEST_ALIAS_PUBLISH=false`)
-is deprecated: every real in-place run logs `in_place_deprecated`, and the mode
-is kept for one release so operators can schedule their first publication
-(which migrates an existing in-place collection into a retained copy). It is
-limited to legacy collections without full build controls or immutable build
-aliases. It refuses new-format published, sealed and retained builds. For a
-legacy repair, operators must quiesce writers and drain affected readers first; setting a manifest pending or waiting a TTL
-alone does not drain in-flight requests. Alias-mode repair is a normal
+**Maintenance and rollback:** in-place ingest was retired (#360): every real
+run is a publication, `INGEST_ALIAS_PUBLISH=false` fails closed (settings,
+values mapper and chart schema), and the builder refuses a real run without
+a publication staging generation. A pre-publication collection that still
+carries the logical name is migrated by its first publication into a
+retained copy. Repair of a legacy collection outside ingest (for example
+`ingest/repair.py`) still requires quiescing writers and draining affected
+readers first; setting a manifest pending or waiting a TTL alone does not
+drain in-flight requests. Alias-mode repair is a normal
 distinct-generation publish: the old physical keeps serving until the
 verified atomic swap, and is retained afterward. Preserve a restorable backup
 and the old physical **and its own metadata**. Alias rollback still needs
@@ -1129,9 +1131,10 @@ plus the R1/R2 lifecycle: partial-walk refusal with
 preservation, explicit retirement with rollback history, fail-closed unknown
 and contradictory retirements, read-only residue audit, same-target writer
 serialization, overtaken-publisher refusal, same-staging resume, retained
-generation immutability, and in-place lock scoping. The #391 current-packet
+generation immutability, and the physical-target refusal
+(`test_publication_refuses_a_generation_targeted_by_name`). The #391 current-packet
 scope proof adds `tests/test_run_ingest.py::test_unmarked_searchable_point_blocks_migration_commit`
-(empty walk over an unmarked old-rules point refuses and preserves it) and
+(a walk that does not account for an unmarked old-rules point refuses and preserves it) and
 `test_ingest_publish.py::test_walked_doc_unapproved_legacy_stray_refuses` /
 `test_walked_doc_approved_legacy_stray_publishes` (content attribution, not a
 printed-doc_id match), plus the migration-with-retirement pair

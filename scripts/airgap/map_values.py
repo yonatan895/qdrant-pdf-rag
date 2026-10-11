@@ -33,10 +33,16 @@ try:
     from scripts.airgap.model_config import (
         MODEL_CONFIG_KEYS,
         parse_strict_bool,
+        require_in_place_retired,
         validate_model_config,
     )
 except ModuleNotFoundError:
-    from model_config import MODEL_CONFIG_KEYS, parse_strict_bool, validate_model_config
+    from model_config import (
+        MODEL_CONFIG_KEYS,
+        parse_strict_bool,
+        require_in_place_retired,
+        validate_model_config,
+    )
 
 DEFAULT_OUT = "dist/mainframe-rag-release-values.yaml"
 
@@ -266,7 +272,6 @@ def build_values(deploy_only: bool = False) -> dict:
         "corpusPVC": "",
         "workers": 4,
         "workSize": env("INGEST_WORK_SIZE") or "100Gi",
-        "aliasPublish": True,
         "peerUrls": "",
         "reingest": False,
         "retireDocs": [],
@@ -280,6 +285,10 @@ def build_values(deploy_only: bool = False) -> dict:
         },
     }
     if ingest_enabled:
+        try:
+            require_in_place_retired(env("INGEST_ALIAS_PUBLISH"))
+        except ValueError as exc:
+            die(str(exc))
         qdrant_policy = {
             "shardNumber": positive_int("QDRANT_SHARD_NUMBER", env("QDRANT_SHARD_NUMBER")),
             "replicationFactor": positive_int(
@@ -294,7 +303,6 @@ def build_values(deploy_only: bool = False) -> dict:
             "workSize": env("INGEST_WORK_SIZE") or "100Gi",
             "corpusPVC": corpus_pvc,
             "workers": positive_int("INGEST_WORKERS", env("INGEST_WORKERS") or "4"),
-            "aliasPublish": strict_bool("INGEST_ALIAS_PUBLISH", env("INGEST_ALIAS_PUBLISH"), True),
             "reingest": strict_bool("INGEST_REINGEST", env("INGEST_REINGEST"), False),
             "retireDocs": split_retire(env("INGEST_RETIRE_DOCS")),
             "contextualEnabled": strict_bool(
@@ -309,8 +317,6 @@ def build_values(deploy_only: bool = False) -> dict:
                 "limits": {"cpu": "16", "memory": "32Gi"},
             },
         }
-        if ingest_block["retireDocs"] and not ingest_block["aliasPublish"]:
-            die("INGEST_RETIRE_DOCS requires INGEST_ALIAS_PUBLISH=true")
 
     reasoning_model = env("LLM_MODEL_REASONING")
     reasoning_base = env("LLM_BASE_URL") if reasoning_model else ""

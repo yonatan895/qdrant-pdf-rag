@@ -33,9 +33,20 @@ def parse_strict_bool(name: str, raw: str, default: bool) -> bool:
     raise ValueError(f"{name} must be true/false")
 
 
+def require_in_place_retired(raw: str) -> None:
+    """In-place ingest was retired (#360): INGEST_ALIAS_PUBLISH may be unset
+    or true, and an explicit false fails closed instead of being ignored."""
+    if not parse_strict_bool("INGEST_ALIAS_PUBLISH", raw, True):
+        raise ValueError(
+            "in-place ingest was retired (#360): alias publication is the only "
+            "ingest mode; unset INGEST_ALIAS_PUBLISH"
+        )
+
+
 def validate_operator_booleans(values: Mapping[str, str]) -> None:
     for name in OPERATOR_BOOL_KEYS:
         parse_strict_bool(name, values.get(name, ""), False)
+    require_in_place_retired(values.get("INGEST_ALIAS_PUBLISH", ""))
 
 
 def validate_model_config(values: Mapping[str, str]) -> None:
