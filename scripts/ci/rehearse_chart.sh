@@ -5,7 +5,7 @@ set -eu
 set -a
 . "$(dirname -- "$0")/../airgap/common.sh"
 resolve_aliases
-resolve_otel_endpoint
+resolve_observability
 set +a
 
 DATA_NS="$NAMESPACE"
