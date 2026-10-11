@@ -902,11 +902,15 @@ class Run:
             raise LabError("local tool operation failed; details retained in private run state")
         return result
 
+    def colab_argv(self, command: str, *args: str) -> list[str]:
+        return [self.tools["colab"], "--auth", "oauth2", "--config",
+                str(self.state / "colab-sessions.json"), command, *args]
+
     def colab(self, command: str, *args: str, **kwargs) -> subprocess.CompletedProcess:
         # Only these pinned CLI stdout contracts establish identity/account
         # state. Progress from upload/download/new/exec is diagnostic output.
         kwargs.setdefault("require_complete_stdout", command in ("version", "sessions", "usage"))
-        return self.command([self.tools["colab"], "--auth", "oauth2", command, *args], **kwargs)
+        return self.command(self.colab_argv(command, *args), **kwargs)
 
     def sessions(self, *, cleanup: bool = False) -> dict[str, str]:
         output = self.colab("sessions", cleanup=cleanup, seconds=5 if cleanup else 30).stdout
@@ -923,8 +927,13 @@ class Run:
         return found
 
     def owned(self, *, cleanup: bool = False) -> bool:
-        endpoint = self.sessions(cleanup=cleanup).get(self.manifest["session"])
+        assignments = self.sessions(cleanup=cleanup)
+        endpoint = assignments.get(self.manifest["session"])
         if endpoint is None:
+            if self.manifest["allocation_attempted"] and self.manifest["endpoint"] is None:
+                raise LabError("allocation outcome is unknown; automatic release cannot be verified")
+            if self.manifest["endpoint"] in assignments.values():
+                raise LabError("owned endpoint is active without its local name; automatic stop is refused")
             return False
         if self.manifest["endpoint"] is None:
             if not self.manifest["allocation_attempted"]:
@@ -1188,8 +1197,10 @@ class Run:
         key = self.state / "id_ed25519_colab_rag"
         self.command([self.tools["ssh_keygen"], "-q", "-t", "ed25519", "-N", "", "-f", str(key), "-C", self.manifest["session"]])
         key.chmod(0o600)
-        proxy = shlex.join([self.tools["colab"], "--auth", "oauth2", "ssh", "--proxy-mode",
-                            "-s", self.manifest["session"], "--identity", str(key)])
+        # In 0.7.4 named proxy mode auto-creates missing names. Unnamed mode
+        # only resolves the sole live record in this run's private store;
+        # empty/pruned/ambiguous stores refuse without allocating anything.
+        proxy = shlex.join(self.colab_argv("ssh", "--proxy-mode", "--identity", str(key)))
         configuration = self.state / "ssh_config"
         configuration.write_text("Host rag-colab\n  HostName colab-runtime\n  User root\n"
                                  f"  IdentityFile {json.dumps(str(key))}\n  IdentitiesOnly yes\n"
@@ -1457,6 +1468,9 @@ class Run:
     def run(self, approval: float, workload: list[str]) -> int:
         if self.manifest["phase"] != "prepared" or approval != self.config["cu_cap"]:
             raise LabError("fresh prepared run and exact per-run CU approval are required")
+        cli_store = self.state / "colab-sessions.json"
+        if cli_store.exists() or cli_store.is_symlink():
+            raise LabError("fresh run cannot adopt pre-existing private CLI session state")
         self.validate_prepared()
         start = time.time()
         duration = self.profile["deadline_seconds"]
@@ -1466,7 +1480,7 @@ class Run:
         self.manifest.update(started_at=start, expires_at=self.expiry, approved_cu=approval)
         self.profile["expires_at"] = self.work_expiry
         self.save("run_approved")
-        print_diagnostic("Manual recovery: " + shlex.join([self.tools["colab"], "--auth", "oauth2", "stop", "-s", self.manifest["session"]]))
+        print_diagnostic("Manual recovery: " + shlex.join(self.colab_argv("stop", "-s", self.manifest["session"])))
         status = 1
         try:
             if self.config["dataset"] == "production":
@@ -1529,9 +1543,9 @@ class Run:
             if preflight.returncode or not observed.get("admitted"):
                 raise LabError("remote preflight refused the assigned resources")
             self.save("remote_resources_admitted")
-            runtime = self.spawn([self.tools["colab"], "--auth", "oauth2", "exec", "-s", self.manifest["session"],
+            runtime = self.spawn(self.colab_argv("exec", "-s", self.manifest["session"],
                                   "--timeout", str(max(1, int(self.work_expiry - time.time()))), "--env",
-                                  f"RAG_COLAB_PROFILE={REMOTE_PROFILE}", "-f", str(self.execution_root / "scripts/colab_runtime.py")], "runtime")
+                                  f"RAG_COLAB_PROFILE={REMOTE_PROFILE}", "-f", str(self.execution_root / "scripts/colab_runtime.py")), "runtime")
             self.runtime = runtime
             self.diagnostic_stage("transport_ready")
             self.transport(bridge)

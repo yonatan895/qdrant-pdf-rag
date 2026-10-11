@@ -31,14 +31,20 @@ IMAGE = "example.invalid/gateway@sha256:" + "a" * 64
 # really binds the four requested local sockets; Docker's host-gateway fake
 # probes those sockets rather than declaring them reachable by fiat.
 FAKE = r'''
-import http.server, json, os, pathlib, signal, socketserver, subprocess, sys, threading, time
+import http.server, json, os, pathlib, shlex, signal, socketserver, subprocess, sys, threading, time
 root=pathlib.Path(os.environ['FAKE_COLAB_ROOT'])
 with (root/'fake-pids').open('a') as f: f.write(str(os.getpid())+'\n')
 name=pathlib.Path(sys.argv[0]).name
 args=sys.argv[1:]
+store=root/'default-cli-store.json'
+if name=='colab' and '--config' in args:
+    position=args.index('--config')
+    store=pathlib.Path(args[position+1])
+    args=args[:position]+args[position+2:]
 def event(kind, data):
     with (root/'events.jsonl').open('a') as f: f.write(json.dumps([kind,data])+'\n')
 event(name,args)
+if name=='colab': event('cli-store',[str(store)])
 scenario=os.environ.get('FAKE_COLAB_SCENARIO','success')
 remote=root/'remote'; remote.mkdir(exist_ok=True)
 def path(p): return remote/pathlib.Path(p).name
@@ -68,6 +74,7 @@ if name=='colab':
     cmd=args[2]; rest=args[3:]
     sessions=root/'sessions.json'
     state=json.loads(sessions.read_text()) if sessions.exists() else {}
+    local=json.loads(store.read_text()) if store.exists() else {}
     session=rest[rest.index('-s')+1] if '-s' in rest else None
     if cmd=='version': print('0.7.4')
     elif cmd=='usage':
@@ -91,19 +98,36 @@ if name=='colab':
             (root/'first-sessions').touch()
             time.sleep(10)
         if not state: print('[colab] No active sessions found on server.')
-        for n,e in state.items(): print(f'[{n}] {e} | Hardware: G4 | Shape: HIGH_RAM | Variant: GPU')
+        for n,e in state.items():
+            shown='?' if os.environ.get('FAKE_UNNAMED_SESSIONS') else next((n for n,v in local.items() if v==e),'?')
+            print(f'[{shown}] {e} | Hardware: G4 | Shape: HIGH_RAM | Variant: GPU')
     elif cmd=='new':
         assert session not in state
         for previous in remote.iterdir(): previous.unlink()
         state[session]='endpoint-owned'; sessions.write_text(json.dumps(state))
+        local[session]='endpoint-owned'; store.write_text(json.dumps(local))
         if scenario=='origin_mutation': mutate_origin()
         print('[colab] Session READY.')
     elif cmd=='stop':
         if scenario=='stop_fail': sys.exit(1)
         state.pop(session,None); sessions.write_text(json.dumps(state))
+        local.pop(session,None); store.write_text(json.dumps(local))
         restore_origin()
         if scenario=='noisy_stop': print('x'*262144)
         print('[colab] Session terminated.')
+    elif cmd=='ssh':
+        assert '--proxy-mode' in rest
+        if session and session not in local:
+            # Actual0.7.4 named proxy selection allocates if local name vanished.
+            state[session]='endpoint-replacement'; sessions.write_text(json.dumps(state))
+            local[session]='endpoint-replacement'; store.write_text(json.dumps(local))
+            event('proxy-allocation',[session])
+        elif not session:
+            live=[n for n,e in local.items() if e in state.values()]
+            if len(live)!=1: sys.exit(2)
+            session=live[0]
+            print("[colab] Using unique session '"+session+"'.")
+        if local[session] not in state.values(): sys.exit(2)
     elif cmd=='upload':
         local, target=rest[-2:]; path(target).write_bytes(pathlib.Path(local).read_bytes())
     elif cmd=='download':
@@ -133,6 +157,15 @@ if name=='colab':
     else: raise AssertionError('unsupported real CLI command: '+cmd)
 elif name=='ssh':
     assert '-N' in args and args.count('-L')==4
+    configuration=pathlib.Path(args[args.index('-F')+1]).read_text()
+    proxy=shlex.split(next(line.strip().removeprefix('ProxyCommand ') for line in configuration.splitlines()
+                           if line.strip().startswith('ProxyCommand ')))
+    if scenario=='proxy_session_pruned':
+        (root/'sessions.json').write_text('{}')
+        proxy_store=pathlib.Path(proxy[proxy.index('--config')+1]) if '--config' in proxy else root/'default-cli-store.json'
+        proxy_store.unlink(missing_ok=True)
+    result=subprocess.run(proxy,check=False)
+    if result.returncode: sys.exit(result.returncode)
     lifetime=min(30,json.loads(path('/content/model-profile.json').read_text())['deadline_seconds'])
     assert type(lifetime) is int and lifetime>0
     until=time.monotonic()+lifetime
@@ -283,6 +316,12 @@ def _events(root):
     return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
 
 
+def _seed_owned_assignment(run, root, *, unrelated=None):
+    owned = {run.manifest["session"]: "endpoint-owned"}
+    (root / "sessions.json").write_text(json.dumps({**owned, **(unrelated or {})}))
+    (run.state / "colab-sessions.json").write_text(json.dumps(owned))
+
+
 def _allocated_cleanup_run(lab):
     """Actual pinned CLI creation/ownership, without model or transport setup."""
     root, state, _ = lab
@@ -324,6 +363,71 @@ def test_cleanup_observes_usage_after_last_work_poll_before_exact_release_then_n
     (root / "usage-response.json").unlink()
     ordinary = _prepare_new(state, root / "ordinary-after-final-usage")
     assert _run_fake(ordinary) == 0
+
+
+@pytest.mark.parametrize("endpoint_bound", [True, False])
+def test_orphan_assignment_cannot_establish_release_then_named_recovery_allows_next_run(lab, monkeypatch,
+                                                                                       endpoint_bound):
+    root, state, _ = lab
+    run = _allocated_cleanup_run(lab)
+    if not endpoint_bound:
+        # Backend allocation can finish before CLI persistence/parent binding.
+        run.manifest["endpoint"] = None
+        run.save("allocation_result_unknown")
+    monkeypatch.setenv("FAKE_UNNAMED_SESSIONS", "1")
+    assert run.cleanup() is False
+    manifest = json.loads((state / "manifest.json").read_text())
+    assert manifest["released"] is False
+    assert manifest["phase"] == "cleanup_required"
+    assert not manifest.get("release_evidence", {}).get("absent")
+    assert json.loads((root / "sessions.json").read_text()) == {run.manifest["session"]: "endpoint-owned"}
+    assert not any(kind == "colab" and argv[2] == "stop" for kind, argv in _events(root))
+
+    # Independent CLI naming restoration makes exact recovery possible. Never
+    # infer a writable name from an orphan's endpoint or stop a foreign VM.
+    monkeypatch.delenv("FAKE_UNNAMED_SESSIONS")
+    assert _controller_call(["stop", "--state", str(state)]) == 0
+    assert json.loads((root / "sessions.json").read_text()) == {}
+    ordinary = _prepare_new(state, root / "ordinary-after-orphan-recovery")
+    assert _run_fake(ordinary) == 0
+
+
+def test_unbound_allocation_with_empty_listing_remains_unverified(lab):
+    root, state, _ = lab
+    run = controller.Run(state)
+    run.expiry = time.time() + 10
+    run.manifest["allocation_attempted"] = True
+    run.save("allocation_result_unknown")
+    assert run.cleanup() is False
+    manifest = json.loads((state / "manifest.json").read_text())
+    assert manifest["released"] is False
+    assert manifest["phase"] == "cleanup_required"
+    assert not manifest.get("release_evidence", {}).get("absent")
+    assert not any(kind == "colab" and argv[2] == "stop" for kind, argv in _events(root))
+
+
+def test_generated_ssh_proxy_never_reallocates_pruned_session_then_next_run_works(lab, monkeypatch):
+    root, state, _ = lab
+    monkeypatch.setenv("FAKE_COLAB_SCENARIO", "proxy_session_pruned")
+    assert _run_fake(state) != 0
+    assert not any(kind == "proxy-allocation" for kind, _ in _events(root))
+    assert json.loads((root / "sessions.json").read_text()) == {}
+    manifest = json.loads((state / "manifest.json").read_text())
+    assert manifest["released"] is True and manifest["release_evidence"]["absent"] is True
+    assert not (state / "transport-receipt.json").exists()
+    monkeypatch.delenv("FAKE_COLAB_SCENARIO")
+    ordinary = _prepare_new(state, root / "ordinary-after-pruned-proxy")
+    assert _run_fake(ordinary) == 0
+    stores = {argv[0] for kind, argv in _events(root) if kind == "cli-store"}
+    assert stores == {str(state / "colab-sessions.json"), str(ordinary / "colab-sessions.json")}
+
+
+def test_fresh_run_refuses_preexisting_private_cli_store_without_any_cloud_command(lab):
+    root, state, _ = lab
+    (state / "colab-sessions.json").write_text(json.dumps({"foreign": "endpoint-foreign"}))
+    assert _run_fake(state) == 2
+    assert _events(root) == []
+    assert json.loads((state / "manifest.json").read_text())["allocation_attempted"] is False
 
 
 @pytest.mark.parametrize("failure", ["error", "malformed", "timeout"])
@@ -1046,7 +1150,7 @@ def test_slow_export_cannot_consume_owned_vm_release_budget(lab, monkeypatch):
     monkeypatch.setenv("FAKE_COLAB_SCENARIO", "slow_export")
     run = controller.Run(state)
     run.manifest.update(allocation_attempted=True, endpoint="endpoint-owned")
-    (root / "sessions.json").write_text(json.dumps({run.manifest["session"]: "endpoint-owned"}))
+    _seed_owned_assignment(run, root)
     run.expiry = time.time() + 6
     assert run.cleanup() is False, "an unavailable export cannot be reported as a complete cleanup"
     assert json.loads((root / "sessions.json").read_text()) == {}
@@ -1216,7 +1320,7 @@ def test_output_limits_never_prevent_owned_release_and_a_fresh_ordinary_operatio
     monkeypatch.setenv("FAKE_COLAB_SCENARIO", scenario)
     run = controller.Run(state)
     run.manifest.update(allocation_attempted=True, endpoint="endpoint-owned")
-    (root / "sessions.json").write_text(json.dumps({run.manifest["session"]: "endpoint-owned"}))
+    _seed_owned_assignment(run, root)
     remote = root / "remote"
     remote.mkdir()
     (remote / "colab-artifacts.tgz").write_bytes(b"private-fake-diagnostics")
@@ -2132,7 +2236,7 @@ def test_manifest_disk_full_during_cleanup_cannot_prevent_exact_vm_release(lab, 
     run = controller.Run(state)
     run.manifest.update(allocation_attempted=True, endpoint="endpoint-owned", phase="running")
     unrelated = {"rag-" + "b" * 16: "endpoint-unrelated"}
-    (root / "sessions.json").write_text(json.dumps({run.manifest["session"]: "endpoint-owned", **unrelated}))
+    _seed_owned_assignment(run, root, unrelated=unrelated)
     remote = root / "remote"
     remote.mkdir()
     (remote / "colab-artifacts.tgz").write_bytes(b"original-fake-diagnostics")
@@ -2256,7 +2360,7 @@ def test_read_only_existing_recovery_lock_keeps_exclusive_ownership_then_next_ru
     run = controller.Run(state)
     run.manifest.update(allocation_attempted=True, endpoint="endpoint-owned", phase="running")
     run.save("original_owned_assignment")
-    (root / "sessions.json").write_text(json.dumps({run.manifest["session"]: "endpoint-owned"}))
+    _seed_owned_assignment(run, root)
     remote = root / "remote"
     remote.mkdir()
     (remote / "colab-artifacts.tgz").write_bytes(b"original-fake-diagnostics")
@@ -2374,7 +2478,7 @@ def test_manifest_and_diagnostic_sink_disk_full_cannot_interrupt_release_then_re
     with controller.state_lock(state, recovery=False):
         pass
     unrelated = {"rag-" + "b" * 16: "endpoint-unrelated"}
-    (root / "sessions.json").write_text(json.dumps({run.manifest["session"]: "endpoint-owned", **unrelated}))
+    _seed_owned_assignment(run, root, unrelated=unrelated)
     remote = root / "remote"
     remote.mkdir()
     (remote / "colab-artifacts.tgz").write_bytes(b"original-fake-diagnostics")

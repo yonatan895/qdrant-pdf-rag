@@ -86,6 +86,12 @@ flock -n -E 75 "$HOME/.cache/agent-tmp/mainframe-rag-heavy.lock" \
 The controller first verifies an exact owned session endpoint, then one SSH
 connection with four model-port forwards: host loopback and the selected local
 Docker bridge. Fresh known-hosts state and a private SSH key belong to this run.
+Every CLI operation uses the run's private `colab-sessions.json` store, including
+runtime execution, SSH and the printed recovery command. SSH uses unnamed proxy
+mode: CLI 0.7.4 resolves the sole live record in that isolated store and refuses
+an empty, pruned or ambiguous store. Its named proxy mode can create a missing
+session and is therefore unsuitable here. A fresh run refuses a pre-existing
+private store; global CLI sessions are neither imported nor adopted.
 Do not use an unreviewed public tunnel or call an SSH operation that could
 silently allocate a replacement session. Both host probes and probes from the
 actual digest-pinned gateway container network path must pass. The remote runtime
@@ -273,6 +279,12 @@ Gateway recovery retains its separate five-second window after VM release.
 Stop only the exact recorded session. Follow the session-specific recovery
 command printed by the controller if automatic cleanup cannot confirm release;
 verify that exact session is absent from the explicit OAuth session listing.
+Release also requires absence of the bound endpoint under every listed name,
+including the CLI's `?` label for server assignments missing local state. An
+allocation with no bound endpoint remains `cleanup_required`, even after an
+empty listing: a timed-out allocation is not proof that no runtime was created.
+Inspect unresolved assignments in the Colab UI; never invent a name or adopt an
+unattributed endpoint to stop it automatically.
 Preserve the final account usage observation, stop result and absence proof.
 An archive export error must not prevent the stop attempt. A dead host cannot
 run local traps: the maintainer must stop the owned session from another terminal
