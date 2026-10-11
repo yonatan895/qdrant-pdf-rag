@@ -44,7 +44,7 @@ def http_answer_eval(tmp_path, monkeypatch):
     """Run the actual CLI and HTTP client against an inert HTTP boundary."""
     import httpx2
 
-    import mainframe_rag.eval.answers as answers
+    from mainframe_rag.eval import answers
 
     monkeypatch.chdir(tmp_path)
     real_client = httpx2.Client
@@ -292,8 +292,8 @@ def test_http_answer_eval_uses_a_real_http_agent_and_preserves_query_bytes(tmp_p
     import threading
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-    import mainframe_rag.eval.answers as answers
-    import mainframe_rag.manifest as manifest
+    from mainframe_rag import manifest
+    from mainframe_rag.eval import answers
 
     query = "Original question אב; $(touch SENTINEL) 'quoted'\nwith a second line"
     observed = []
@@ -378,7 +378,7 @@ def test_http_answer_eval_uses_a_real_http_agent_and_preserves_query_bytes(tmp_p
 
 @pytest.mark.parametrize("value", ["0", "-1", "601", "nan", "inf", "bad"])
 def test_http_answer_eval_rejects_invalid_timeout_before_io(monkeypatch, value):
-    import mainframe_rag.eval.answers as answers
+    from mainframe_rag.eval import answers
 
     monkeypatch.setattr(answers, "resolve_golden_paths", lambda *a: pytest.fail("invalid input reached dataset IO"))
     with pytest.raises(SystemExit) as exc:
@@ -391,7 +391,7 @@ def test_http_answer_eval_rejects_invalid_timeout_before_io(monkeypatch, value):
     "http://agent?private=secret", "http://agent/#private", "http://agent:bad",
 ])
 def test_http_answer_eval_rejects_unsafe_target_before_io(monkeypatch, value):
-    import mainframe_rag.eval.answers as answers
+    from mainframe_rag.eval import answers
 
     monkeypatch.setattr(answers, "resolve_golden_paths", lambda *a: pytest.fail("invalid input reached dataset IO"))
     with pytest.raises(SystemExit) as exc:
