@@ -255,6 +255,62 @@ def test_http_answer_eval_malformed_answer_fields_cannot_abort_or_pass(
     assert "PRIVATE ANSWER DETAIL" not in json.dumps(report) + capsys.readouterr().err
 
 
+@pytest.mark.parametrize("behavior", ["answer", "abstain"])
+@pytest.mark.parametrize("payload", [
+    {}, {"answer": None, "citations": None}, {"answer": "Original refusal", "citations": None},
+    {"answer": None, "citations": []}, {"answer": ""}, {"citations": []},
+])
+def test_http_answer_eval_missing_required_fields_are_errors_even_for_abstention(
+    http_answer_eval, behavior, payload,
+):
+    import httpx2
+
+    entries = [_entry(id="BAD", query="Original incomplete response", expected_behavior=behavior),
+               _entry(id="GOOD", query="Original next complete response")]
+
+    def respond(request):
+        if request.url.path == "/healthz":
+            return httpx2.Response(200, json={"status": "ok", "qdrant": True,
+                                             "representation": "compatible"})
+        if request.url.path == "/v1/search":
+            return httpx2.Response(200, json={"hits": []})
+        body = payload if json.loads(request.content)["query"] == entries[0]["query"] else _answer_payload()
+        return httpx2.Response(200, json=body)
+
+    status, report, calls, _ = http_answer_eval(respond, entries)
+    assert status == 1
+    assert report["metrics"]["errors"] == 1
+    assert report["metrics"]["judged"] == 1
+    assert [row["verdict"] for row in report["results"]] == ["error", "pass"]
+    assert report["results"][0]["failures"] == ["malformed answer response"]
+    assert len([request for request in calls if request.url.path == "/v1/answer"]) == 2
+
+
+def test_http_answer_eval_numeric_overflow_retains_prior_and_next_cases(http_answer_eval):
+    import httpx2
+
+    entries = [_entry(id=identity, query=identity) for identity in ("FIRST", "OVERFLOW", "NEXT")]
+
+    def respond(request):
+        if request.url.path == "/healthz":
+            return httpx2.Response(200, json={"status": "ok", "qdrant": True,
+                                             "representation": "compatible"})
+        if request.url.path == "/v1/search":
+            return httpx2.Response(200, json={"hits": []})
+        if json.loads(request.content)["query"] == "OVERFLOW":
+            # Valid JSON numeric syntax can exceed the decoder's float range.
+            return httpx2.Response(200, content=b'{"answer":"Original answer", "citations":[], "inferred_indices":[1e309]}')
+        return httpx2.Response(200, json=_answer_payload())
+
+    status, report, calls, _ = http_answer_eval(respond, entries)
+    assert status == 1
+    assert report["metrics"]["errors"] == 1
+    assert report["metrics"]["judged"] == 2
+    assert [row["verdict"] for row in report["results"]] == ["pass", "error", "pass"]
+    assert report["results"][1]["failures"] == ["malformed inferred_indices in response"]
+    assert len([request for request in calls if request.url.path == "/v1/answer"]) == 3
+
+
 @pytest.mark.parametrize("hits", [
     [None], [1], ["PRIVATE SEARCH DETAIL"], {"PRIVATE SEARCH DETAIL": "not a hit list"},
     [{"doc_id": "A", "cite": "Original p. 1"}, {"doc_id": "B"}, 42],

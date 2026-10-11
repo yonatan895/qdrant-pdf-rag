@@ -450,7 +450,8 @@ and the serving owner's `compatible` or `record_only_drift` representation.
 The ready-but-`empty` bootstrap state cannot certify an evaluation. An
 unhealthy, non-servable, malformed or unreachable target exits 2, sends no
 scored requests, and retains every selected case as an error row in the
-report. Per-case HTTP, transport or malformed-response errors remain rows,
+report. Missing/null required answer or citation fields are malformed, including
+on abstention cases. Per-case HTTP, transport or malformed-response errors remain rows,
 later cases still run, and any error makes the final exit nonzero. Existing
 rates retain their judged-row meanings; `metrics.queries` counts all selected
 cases and `metrics.errors` exposes unsuccessful ones.

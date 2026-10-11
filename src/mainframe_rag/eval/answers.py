@@ -621,23 +621,21 @@ def run_query(
     answer_value = data.get("answer")
     citation_values = data.get("citations")
     if (
-        answer_value is not None and not isinstance(answer_value, str)
-        or citation_values is not None and (
-            not isinstance(citation_values, list)
-            or any(not isinstance(cite, str) for cite in citation_values)
-        )
+        not isinstance(answer_value, str)
+        or not isinstance(citation_values, list)
+        or any(not isinstance(cite, str) for cite in citation_values)
     ):
         row.update(verdict="error", failures=["malformed answer response"], elapsed_ms=elapsed_ms)
         return row
-    answer = answer_value or ""
-    citations = citation_values or []
+    answer = answer_value
+    citations = citation_values
     citations_inferred = bool(data.get("citations_inferred", False))
     # A malformed provenance field is a contract violation, not a citation
     # signal: fail the row closed like every other bad-response path instead
     # of raising through the runner (issue #299 review).
     try:
         inferred_indices = [int(i) for i in (data.get("inferred_indices") or [])]
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         row.update(
             verdict="error",
             failures=["malformed inferred_indices in response"],
