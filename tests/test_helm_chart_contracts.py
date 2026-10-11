@@ -328,7 +328,6 @@ def test_ingest_job_contract_normal():
         "QDRANT_SHARD_NUMBER": "6",
         "QDRANT_REPLICATION_FACTOR": "3",
         "QDRANT_WRITE_CONSISTENCY_FACTOR": "2",
-        "INGEST_ALIAS_PUBLISH": "false",
         "EMBED_BASE_URL": "http://vllm:8000/v1",
         "EMBED_MODEL": "embed-model",
         "DENSE_DIM": "768",
@@ -350,7 +349,8 @@ def test_ingest_job_contract_normal():
     }
     assert new_env["QDRANT_COLLECTION"]["value"] == "mainframe_manuals"
     assert new_env["QDRANT_SHARD_NUMBER"]["value"] == "6"
-    assert new_env["INGEST_ALIAS_PUBLISH"]["value"] == "false"
+    # In-place ingest was retired (#360): the Job never renders the switch.
+    assert "INGEST_ALIAS_PUBLISH" not in new_env
     assert new_env["INGEST_WORKERS"]["value"] == "4"
     assert new_env["OTEL_SERVICE_NAME"]["value"] == "mainframe-rag-ingest"
     assert "EMBED_API_KEY" not in new_env
@@ -367,7 +367,6 @@ def test_ingest_job_contract_maintenance_with_tricky_revision():
         {
             "ingest": {
                 "corpusPVC": "corpus-pvc",
-                "aliasPublish": True,
                 "reingest": True,
                 "retireDocs": ["SA22-0000-00", tricky],
             },
@@ -394,7 +393,7 @@ def test_ingest_job_contract_maintenance_with_tricky_revision():
     assert new_args == expected
     for docs in (new,):
         env = ingest_env_map(docs["Job", "ingest"])
-        assert env["INGEST_ALIAS_PUBLISH"]["value"] == "true"
+        assert "INGEST_ALIAS_PUBLISH" not in env
         assert env["EMBED_API_KEY"]["valueFrom"]["secretKeyRef"] == {
             "name": "gw-keys",
             "key": "embed-api-key",
@@ -443,7 +442,8 @@ def test_schema_rejects_invalid_selected_configuration():
         ({"route": {"enabled": True, "timeoutSeconds": 0}}, "timeoutSeconds"),
         ({"storage": {"className": "nfs-client"}}, "storage"),
         ({"ingest": {"enabled": True, "corpusPVC": ""}}, "corpusPVC"),
-        ({"ingest": {"enabled": True, "corpusPVC": "c", "retireDocs": ["DOC1"]}}, "aliasPublish"),
+        # The retired in-place switch (#360) is refused, not silently ignored.
+        ({"ingest": {"aliasPublish": False}}, "aliasPublish"),
         ({"ingest": {"retireDocs": ['bad"quote']}}, "retireDocs"),
         ({"ingest": {"workers": 0}}, "workers"),
         ({"ingest": {"collectionPolicy": {"shardNumber": 0}}}, "shardNumber"),

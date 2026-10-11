@@ -17,14 +17,6 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from mainframe_rag.ingest import run_ingest as ri
 
 
-@pytest.fixture(autouse=True)
-def _in_place_mode(monkeypatch):
-    """These tests cover the in-place build (which publication also runs for
-    each staging generation). Alias publication is the default, so select
-    the deprecated in-place mode explicitly, as an operator would."""
-    monkeypatch.setenv("INGEST_ALIAS_PUBLISH", "false")
-
-
 @pytest.fixture
 def traced(monkeypatch):
     exporter = InMemorySpanExporter()
@@ -44,7 +36,9 @@ def traced(monkeypatch):
 
     monkeypatch.setattr(ri, "setup_tracing", fake_setup)
     monkeypatch.setattr(ri, "shutdown_tracing", lambda: seen.__setitem__("shutdown", True))
-    monkeypatch.setattr(ri, "_run_impl", lambda *a, **k: 0)
+    # The root span wraps the whole run, whatever the mode: stub the one
+    # dispatch point inside it.
+    monkeypatch.setattr(ri, "_dispatch", lambda *a, **k: 0)
     return exporter, seen
 
 
@@ -74,7 +68,7 @@ def test_ingest_error_marks_root_span(monkeypatch, traced):
     def boom(*a, **k):
         raise RuntimeError("bad corpus")
 
-    monkeypatch.setattr(ri, "_run_impl", boom)
+    monkeypatch.setattr(ri, "_dispatch", boom)
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector:4318")
     with pytest.raises(RuntimeError):
         ri.run(Path("/corpus"), Path("/tmp/p.jsonl"), None, None, False)

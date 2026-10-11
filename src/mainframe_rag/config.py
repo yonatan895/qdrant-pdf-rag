@@ -321,13 +321,24 @@ class Settings(BaseSettings):
     # restore after (see set_bulk_indexing in ingest/qdrant_io.py for the
     # measured caveat) — never for incremental prod runs.
     ingest_bulk_load: bool = False
-    # Alias publication (issue #359): ingest converges a versioned staging
-    # collection (an exact API copy of live) and atomically swaps the
-    # collection alias only after every document verifies — readers see a
-    # complete old or complete new generation, never a partial mix. The
-    # default (#360 follow-up); INGEST_ALIAS_PUBLISH=false keeps the
-    # deprecated in-place mode for one release.
+    # Alias publication (issue #359) is the only real-run ingest mode: ingest
+    # converges a versioned staging collection (an exact API copy of live)
+    # and atomically swaps the collection alias only after every document
+    # verifies — readers see a complete old or complete new generation,
+    # never a partial mix. In-place ingest was retired (#360); the field
+    # remains only so an explicit INGEST_ALIAS_PUBLISH=false fails closed
+    # instead of being silently ignored.
     ingest_alias_publish: bool = True
+
+    @field_validator("ingest_alias_publish")
+    @classmethod
+    def _in_place_retired(cls, v: bool) -> bool:
+        if not v:
+            raise ValueError(
+                "in-place ingest was retired (#360): alias publication is the only "
+                "ingest mode; unset INGEST_ALIAS_PUBLISH"
+            )
+        return v
     bm25_model: str = "Qdrant/bm25"
     bm25_cache_dir: str | None = None
     # Pinned sparse-weights revision (issue #362): mirrors the `revision`

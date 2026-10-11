@@ -33,10 +33,16 @@ try:
     from scripts.airgap.model_config import (
         MODEL_CONFIG_KEYS,
         parse_strict_bool,
+        require_in_place_retired,
         validate_model_config,
     )
 except ModuleNotFoundError:
-    from model_config import MODEL_CONFIG_KEYS, parse_strict_bool, validate_model_config
+    from model_config import (
+        MODEL_CONFIG_KEYS,
+        parse_strict_bool,
+        require_in_place_retired,
+        validate_model_config,
+    )
 
 DEFAULT_OUT = "dist/mainframe-rag-release-values.yaml"
 
@@ -65,9 +71,8 @@ def strict_bool(name: str, raw: str, default: bool) -> bool:
 
 
 def optional_bool(name: str, raw: str) -> bool | None:
-    """Decoupled backend flags (issue #529 OBS-2): unset follows the parent
-    leg (None renders no subkey); an explicit value must be a boolean.
-    Mirror resolve_bundle_flag in common.sh — keep in sync."""
+    """Decoupled backend flags (issue #529 OBS-2): unset (None) follows the
+    parent leg; an explicit value must be a boolean."""
     if raw == "":
         return None
     low = raw.lower()
@@ -88,7 +93,10 @@ def lenient_bool(raw: str) -> bool:
 
 
 def resolve_otel() -> tuple[bool, str]:
-    """Mirror resolve_otel_endpoint in common.sh exactly."""
+    """Effective tracing leg. The in-cluster default belongs to the bundled
+    Jaeger (issue #568): an explicit JAEGER_ENABLED=false with no endpoint
+    would keep exporting to a Service nothing deploys, so it must name a
+    collector (any http(s) URL) or off."""
     raw = env("OTEL_EXPORTER_OTLP_ENDPOINT")
     if raw == "" and optional_bool("JAEGER_ENABLED", env("JAEGER_ENABLED")) is False:
         die(
@@ -96,9 +104,6 @@ def resolve_otel() -> tuple[bool, str]:
             "OTEL_EXPORTER_OTLP_ENDPOINT to the external collector's http(s) URL, "
             "or to off to disable tracing"
         )
-    # Prefer values already resolved by the calling shell stage.
-    if env("OTEL_TRACING_ENABLED") in ("0", "1") and "OTEL_ENDPOINT_RESOLVED" in os.environ:
-        return env("OTEL_TRACING_ENABLED") == "1", env("OTEL_ENDPOINT_RESOLVED")
     if raw == "":
         return True, "http://jaeger:4318"
     if raw.lower() in ("off", "none", "false", "0"):
@@ -106,6 +111,35 @@ def resolve_otel() -> tuple[bool, str]:
     if raw.startswith(("http://", "https://")):
         return True, raw
     die(f"OTEL_EXPORTER_OTLP_ENDPOINT must be http(s) or off/none/false/0, got {raw!r}")
+
+
+def observability() -> tuple[bool, str, bool, bool]:
+    """The one owner of the observability decisions (issue #529 OBS-2):
+    (tracing, endpoint, deploy bundled Jaeger, deploy ServiceMonitor).
+    Explicit JAEGER_ENABLED/SERVICEMONITOR_ENABLED override; unset follows
+    the parent leg. A backend for a disabled leg fails before any manifest
+    is rendered. The shell stages consume this (--bundle-decisions) and the
+    chart receives the effective booleans, never a default to re-derive."""
+    tracing, endpoint = resolve_otel()
+    metrics = env("METRICS_ENABLED") == "true"
+    jaeger = optional_bool("JAEGER_ENABLED", env("JAEGER_ENABLED"))
+    if jaeger and not tracing:
+        die(
+            "JAEGER_ENABLED=true requires tracing (OTEL_EXPORTER_OTLP_ENDPOINT is off): "
+            "refusing a bundled Jaeger nothing exports to"
+        )
+    monitor = optional_bool("SERVICEMONITOR_ENABLED", env("SERVICEMONITOR_ENABLED"))
+    if monitor and not metrics:
+        die(
+            "SERVICEMONITOR_ENABLED=true requires METRICS_ENABLED=true: refusing to "
+            "monitor a disabled endpoint"
+        )
+    return (
+        tracing,
+        endpoint,
+        tracing if jaeger is None else jaeger,
+        metrics if monitor is None else monitor,
+    )
 
 
 def split_retire(raw: str) -> list[str]:
@@ -198,19 +232,10 @@ def build_values(deploy_only: bool = False) -> dict:
         die("EMBED_MODEL_REVISION must be a non-blank immutable revision")
     dimension = positive_int("DENSE_DIM", env("DENSE_DIM"))
 
-    tracing_enabled, otel_endpoint = resolve_otel()
+    tracing_enabled, otel_endpoint, jaeger_deploy, monitor_deploy = observability()
 
     rerank_enabled = lenient_bool(env("RERANK_ENABLED"))
     metrics_enabled = env("METRICS_ENABLED") == "true"
-    # Decoupled backend choices (issue #529 OBS-2): explicit overrides only;
-    # unset follows the parent leg (no subkey rendered). A backend for a
-    # disabled leg fails before mutation, mirroring the chart fail guards.
-    jaeger_enabled = optional_bool("JAEGER_ENABLED", env("JAEGER_ENABLED"))
-    if jaeger_enabled and not tracing_enabled:
-        die("JAEGER_ENABLED=true requires tracing (OTEL_EXPORTER_OTLP_ENDPOINT is off)")
-    monitor_enabled = optional_bool("SERVICEMONITOR_ENABLED", env("SERVICEMONITOR_ENABLED"))
-    if monitor_enabled and not metrics_enabled:
-        die("SERVICEMONITOR_ENABLED=true requires METRICS_ENABLED=true")
     # Issue #479: operator console selection. Unset keeps the chart default
     # (true); invalid nonempty values fail before mutation. Independent of
     # AGENT_ROUTE — disabling the UI never touches Route/OAuth/TLS wiring.
@@ -247,7 +272,6 @@ def build_values(deploy_only: bool = False) -> dict:
         "corpusPVC": "",
         "workers": 4,
         "workSize": env("INGEST_WORK_SIZE") or "100Gi",
-        "aliasPublish": True,
         "peerUrls": "",
         "reingest": False,
         "retireDocs": [],
@@ -261,6 +285,10 @@ def build_values(deploy_only: bool = False) -> dict:
         },
     }
     if ingest_enabled:
+        try:
+            require_in_place_retired(env("INGEST_ALIAS_PUBLISH"))
+        except ValueError as exc:
+            die(str(exc))
         qdrant_policy = {
             "shardNumber": positive_int("QDRANT_SHARD_NUMBER", env("QDRANT_SHARD_NUMBER")),
             "replicationFactor": positive_int(
@@ -275,7 +303,6 @@ def build_values(deploy_only: bool = False) -> dict:
             "workSize": env("INGEST_WORK_SIZE") or "100Gi",
             "corpusPVC": corpus_pvc,
             "workers": positive_int("INGEST_WORKERS", env("INGEST_WORKERS") or "4"),
-            "aliasPublish": strict_bool("INGEST_ALIAS_PUBLISH", env("INGEST_ALIAS_PUBLISH"), True),
             "reingest": strict_bool("INGEST_REINGEST", env("INGEST_REINGEST"), False),
             "retireDocs": split_retire(env("INGEST_RETIRE_DOCS")),
             "contextualEnabled": strict_bool(
@@ -290,8 +317,6 @@ def build_values(deploy_only: bool = False) -> dict:
                 "limits": {"cpu": "16", "memory": "32Gi"},
             },
         }
-        if ingest_block["retireDocs"] and not ingest_block["aliasPublish"]:
-            die("INGEST_RETIRE_DOCS requires INGEST_ALIAS_PUBLISH=true")
 
     reasoning_model = env("LLM_MODEL_REASONING")
     reasoning_base = env("LLM_BASE_URL") if reasoning_model else ""
@@ -352,15 +377,11 @@ def build_values(deploy_only: bool = False) -> dict:
             "endpoint": otel_endpoint,
             "deploymentEnvironment": env("OTEL_DEPLOYMENT_ENVIRONMENT"),
             "serviceName": env("OTEL_SERVICE_NAME"),
-            **({"jaeger": {"enabled": jaeger_enabled}} if jaeger_enabled is not None else {}),
+            "jaeger": {"enabled": jaeger_deploy},
         },
         "metrics": {
             "enabled": metrics_enabled,
-            **(
-                {"serviceMonitor": {"enabled": monitor_enabled}}
-                if monitor_enabled is not None
-                else {}
-            ),
+            "serviceMonitor": {"enabled": monitor_deploy},
         },
         "ui": {"enabled": ui_enabled},
         "route": {
@@ -381,10 +402,25 @@ def build_values(deploy_only: bool = False) -> dict:
     }
 
 
+def print_bundle_decisions() -> None:
+    """Shell-safe assignments the airgap stages `eval` (common.sh
+    resolve_observability): the one owner's decisions, never re-derived."""
+    import shlex
+
+    tracing, endpoint, jaeger, monitor = observability()
+    print(f"OTEL_TRACING_ENABLED={int(tracing)}")
+    print(f"OTEL_ENDPOINT_RESOLVED={shlex.quote(endpoint)}")
+    print(f"JAEGER_DEPLOY={int(jaeger)}")
+    print(f"SERVICEMONITOR_DEPLOY={int(monitor)}")
+
+
 def main(argv: list[str]) -> int:
     out = DEFAULT_OUT
     deploy_only = False
     args = list(argv)
+    if args == ["--bundle-decisions"]:
+        print_bundle_decisions()
+        return 0
     while args:
         flag = args.pop(0)
         if flag == "--out" and args:
@@ -394,7 +430,7 @@ def main(argv: list[str]) -> int:
         else:
             print(
                 "FAIL: unknown argument: "
-                f"{flag} (usage: map_values.py [--out PATH] [--without-ingest-job])",
+                f"{flag} (usage: map_values.py [--out PATH] [--without-ingest-job] | --bundle-decisions)",
                 file=sys.stderr,
             )
             return 1

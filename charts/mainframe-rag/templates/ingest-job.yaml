@@ -78,8 +78,6 @@ spec:
               value: {{ .Values.ingest.collectionPolicy.replicationFactor | quote }}
             - name: QDRANT_WRITE_CONSISTENCY_FACTOR
               value: {{ .Values.ingest.collectionPolicy.writeConsistencyFactor | quote }}
-            - name: INGEST_ALIAS_PUBLISH
-              value: {{ .Values.ingest.aliasPublish | toString | quote }}
             - name: EMBED_BASE_URL
               value: {{ .Values.models.embedding.baseUrl | quote }}
             - name: EMBED_MODEL

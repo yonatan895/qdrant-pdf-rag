@@ -40,9 +40,9 @@ Contract lifecycle (issue #391 F2): the manifest point carries an
 envelope-level `state` — `pending` is written BEFORE a migration deletes
 or re-embeds anything, `committed` only after the success-path residue
 proof shows no marker under an older contract remains. A pending contract
-is never skippable (`check_ingest_compatible`), never servable
-(`serving_outcome`), and never a basis for a partial `--limit` migration
-(`refuse_limited_migration`). Pre-state manifests read as committed.
+is never skippable (`check_ingest_compatible`) and never servable
+(`serving_outcome`); a real run refuses `--limit`, so no partial walk can
+migrate it. Pre-state manifests read as committed.
 
 Skip paths share the contract structurally, not per document: the
 preflight proves run-level compatibility before any skip is evaluated, so
@@ -324,39 +324,6 @@ def commit_manifest(
     return write_manifest(
         client, completions_collection, settings, rules_v, state=STATE_COMMITTED
     )
-
-
-def refuse_limited_migration(
-    client: QdrantReader, settings: Settings, completions_collection: str, rules_v: str
-) -> None:
-    """`--limit` + a representation migration = refuse (issue #391 F2): a
-    partial walk cannot prove the whole searchable collection was
-    re-embedded, so it must not commit a collection-wide contract. Read-only;
-    raises before any mutation. A fresh empty target is not a migration (no
-    stored vectors to mix in), so a deliberate subset bootstrap stays
-    possible; record-only drift is not a migration either."""
-    stored = read_manifest_record(client, completions_collection)
-    if stored is None:
-        if not client.collection_exists(settings.qdrant_collection):
-            return
-        points, _ = client.scroll(settings.qdrant_collection, limit=1, with_payload=False)
-        if not points:
-            return
-        raise RuntimeError(
-            f"--limit refuses a legacy migration of {settings.qdrant_collection!r}: the "
-            "target holds unattributed vectors and a partial walk cannot re-embed them "
-            "all. Re-run with --reingest without --limit."
-        )
-    wanted = build_manifest(settings, rules_v)
-    if (
-        stored.state != STATE_COMMITTED
-        or compare_manifests(stored.manifest, wanted)[0] == REEMBED_REQUIRED
-    ):
-        raise RuntimeError(
-            f"--limit refuses a representation migration of {settings.qdrant_collection!r}: "
-            "a partial walk cannot prove every stored vector was re-embedded under the "
-            "wanted contract. Re-run without --limit."
-        )
 
 
 # Re-embed-required manifest fields (issue #362 req 2): a change means the

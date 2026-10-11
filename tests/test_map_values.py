@@ -1,9 +1,10 @@
 """map_values.py unit + producer round-trip.
 
-The mapper reads the already-resolved operator environment (single owner:
-common.sh) and writes the Helm release values with a stdlib-only
-deterministic emitter. Tests pin the mapping table, the OTEL/bool mirrors
-of the shell helpers, fail-closed behavior, and the full producer chain
+The mapper reads the operator environment and writes the Helm release values
+with a stdlib-only deterministic emitter; it is also the one owner of the
+observability decisions the shell stages consume (--bundle-decisions). Tests
+pin the mapping table, those decisions against the rendered release,
+fail-closed behavior, and the full producer chain
 (env -> values file -> helm template -> parsed resources), including tricky
 revisions with spaces/pipes/ampersands. No cluster required (helm template
 only); the helm round-trip skips without helm.
@@ -107,8 +108,9 @@ def test_full_mapping_table(mapper_env):
     assert v["tracing"] == {
         "enabled": True, "endpoint": "http://jaeger:4318",
         "deploymentEnvironment": "", "serviceName": "",
+        "jaeger": {"enabled": True},
     }
-    assert v["metrics"] == {"enabled": False}
+    assert v["metrics"] == {"enabled": False, "serviceMonitor": {"enabled": False}}
     assert v["route"] == {"enabled": False, "timeoutSeconds": 300, "destinationCA": ""}
     assert v["storage"] == {"className": "standard"}
     assert v["ingest"]["enabled"] is False  # no CORPUS_PVC
@@ -145,15 +147,63 @@ def test_otel_bad_value_fails_closed(monkeypatch, mapper_env):
     assert "OTEL_EXPORTER_OTLP_ENDPOINT" in r.stderr
 
 
-def test_otel_prefers_shell_resolved(monkeypatch, mapper_env):
+def test_otel_is_owned_by_the_mapper_not_stale_shell_state(monkeypatch, mapper_env):
+    """One owner: decisions exported by an earlier shell stage can never
+    override the operator's input in the rendered release."""
     monkeypatch.setenv("OTEL_TRACING_ENABLED", "0")
     monkeypatch.setenv("OTEL_ENDPOINT_RESOLVED", "")
-    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://ignored:4318")
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector:4318")
     r, out = mapper_env()
     assert r.returncode == 0, r.stderr
     t = load_values(out)["tracing"]
-    assert t == {"enabled": False, "endpoint": "",
-                 "deploymentEnvironment": "", "serviceName": ""}
+    assert (t["enabled"], t["endpoint"], t["jaeger"]) == (True, "http://collector:4318", {"enabled": True})
+
+
+@pytest.mark.parametrize(("environment", "expected"), [
+    ({}, {"OTEL_TRACING_ENABLED": "1", "OTEL_ENDPOINT_RESOLVED": "http://jaeger:4318",
+          "JAEGER_DEPLOY": "1", "SERVICEMONITOR_DEPLOY": "0"}),
+    ({"OTEL_EXPORTER_OTLP_ENDPOINT": "off"},
+     {"OTEL_TRACING_ENABLED": "0", "OTEL_ENDPOINT_RESOLVED": "", "JAEGER_DEPLOY": "0",
+      "SERVICEMONITOR_DEPLOY": "0"}),
+    ({"OTEL_EXPORTER_OTLP_ENDPOINT": "https://c.example:4318", "JAEGER_ENABLED": "false",
+      "METRICS_ENABLED": "true"},
+     {"OTEL_TRACING_ENABLED": "1", "OTEL_ENDPOINT_RESOLVED": "https://c.example:4318",
+      "JAEGER_DEPLOY": "0", "SERVICEMONITOR_DEPLOY": "1"}),
+    ({"METRICS_ENABLED": "true", "SERVICEMONITOR_ENABLED": "false"},
+     {"OTEL_TRACING_ENABLED": "1", "OTEL_ENDPOINT_RESOLVED": "http://jaeger:4318",
+      "JAEGER_DEPLOY": "1", "SERVICEMONITOR_DEPLOY": "0"}),
+])
+def test_bundle_decisions_match_the_rendered_release(monkeypatch, mapper_env, environment, expected):
+    """The shell stages `eval` --bundle-decisions; the release renders the
+    same function's booleans, so smoke/cleanup gates and the chart agree by
+    construction (no mirror to keep in sync)."""
+    for key, value in environment.items():
+        monkeypatch.setenv(key, value)
+    r = subprocess.run(["python3", str(MAPPER), "--bundle-decisions"], capture_output=True,
+                       text=True, cwd=REPO, check=False)
+    assert r.returncode == 0, r.stderr
+    decisions = dict(line.split("=", 1) for line in r.stdout.splitlines())
+    decisions["OTEL_ENDPOINT_RESOLVED"] = decisions["OTEL_ENDPOINT_RESOLVED"].strip("'")
+    assert decisions == expected
+    r2, out = mapper_env()
+    assert r2.returncode == 0, r2.stderr
+    v = load_values(out)
+    assert v["tracing"]["jaeger"]["enabled"] is (expected["JAEGER_DEPLOY"] == "1")
+    assert v["metrics"]["serviceMonitor"]["enabled"] is (expected["SERVICEMONITOR_DEPLOY"] == "1")
+
+
+def test_bundle_decisions_quote_operator_endpoints_for_shell_eval(monkeypatch):
+    """The endpoint is operator input evaluated by the shell: it must come
+    back verbatim and never execute."""
+    endpoint = "https://c.example:4318/$(touch pwned)'`id`"
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint)
+    r = subprocess.run(["python3", str(MAPPER), "--bundle-decisions"], capture_output=True,
+                       text=True, cwd=REPO, check=False)
+    assert r.returncode == 0, r.stderr
+    shell = subprocess.run(["sh", "-c", r.stdout + '\nprintf %s "$OTEL_ENDPOINT_RESOLVED"'],
+                           capture_output=True, text=True, cwd=REPO, check=False)
+    assert shell.stdout == endpoint
+    assert not (REPO / "pwned").exists()
 
 
 @pytest.mark.parametrize("raw,expected", [
@@ -171,23 +221,33 @@ def test_metrics_literal_true_only(monkeypatch, mapper_env):
     monkeypatch.setenv("METRICS_ENABLED", "1")
     r, out = mapper_env()
     assert r.returncode == 0, r.stderr
-    assert load_values(out)["metrics"] == {"enabled": False}
+    assert load_values(out)["metrics"] == {"enabled": False, "serviceMonitor": {"enabled": False}}
     monkeypatch.setenv("METRICS_ENABLED", "true")
     r, out = mapper_env()
     assert r.returncode == 0, r.stderr
-    assert load_values(out)["metrics"] == {"enabled": True}
+    assert load_values(out)["metrics"] == {"enabled": True, "serviceMonitor": {"enabled": True}}
 
 
-@pytest.mark.parametrize("raw,expected", [
-    ("", True), ("true", True), ("1", True), ("yes", True),
-    ("false", False), ("0", False), ("no", False),
-])
-def test_strict_maintenance_bool(monkeypatch, mapper_env, raw, expected):
+@pytest.mark.parametrize("raw", ["", "true", "1", "yes"])
+def test_retired_in_place_switch_accepts_publication(monkeypatch, mapper_env, raw):
+    """In-place ingest was retired (#360): unset or true still renders, and
+    the chart carries no switch (publication is the only mode)."""
     monkeypatch.setenv("CORPUS_PVC", "corpus-pvc")
     monkeypatch.setenv("INGEST_ALIAS_PUBLISH", raw)
     r, out = mapper_env()
     assert r.returncode == 0, r.stderr
-    assert load_values(out)["ingest"]["aliasPublish"] is expected
+    assert "aliasPublish" not in load_values(out)["ingest"]
+
+
+@pytest.mark.parametrize("raw", ["false", "0", "no"])
+def test_retired_in_place_switch_refuses_false(monkeypatch, mapper_env, raw):
+    """An explicit false fails closed with the retirement, never silently
+    rendering a publication the operator did not ask for."""
+    monkeypatch.setenv("CORPUS_PVC", "corpus-pvc")
+    monkeypatch.setenv("INGEST_ALIAS_PUBLISH", raw)
+    r, _ = mapper_env()
+    assert r.returncode != 0
+    assert "in-place ingest was retired" in r.stderr
 
 
 def test_strict_bool_rejects_garbage(monkeypatch, mapper_env):
@@ -231,7 +291,6 @@ def test_ingest_enabled_block_and_tricky_retire(monkeypatch, mapper_env):
     tricky = "SA22-7777-01@vendor|product with spaces|v1|abc123 & more"
     monkeypatch.setenv("CORPUS_PVC", "corpus-pvc")
     monkeypatch.setenv("INGEST_WORKERS", "8")
-    monkeypatch.setenv("INGEST_ALIAS_PUBLISH", "true")
     monkeypatch.setenv("INGEST_REINGEST", "true")
     monkeypatch.setenv("INGEST_RETIRE_DOCS", f"SA22-0000-00,\n{tricky}\n")
     monkeypatch.setenv("GATEWAY_API_KEY_SECRET", "gw-keys")
@@ -241,29 +300,19 @@ def test_ingest_enabled_block_and_tricky_retire(monkeypatch, mapper_env):
     assert ing["enabled"] is True
     assert ing["corpusPVC"] == "corpus-pvc"
     assert ing["workers"] == 8 and isinstance(ing["workers"], int)
-    assert ing["aliasPublish"] is True and ing["reingest"] is True
+    assert ing["reingest"] is True and "aliasPublish" not in ing
     assert ing["retireDocs"] == ["SA22-0000-00", tricky]
     assert ing["collectionPolicy"] == {
         "shardNumber": 6, "replicationFactor": 3, "writeConsistencyFactor": 2,
     }
 
 
-def test_retire_without_alias_fails_closed(monkeypatch, mapper_env):
-    monkeypatch.setenv("CORPUS_PVC", "corpus-pvc")
-    monkeypatch.setenv("INGEST_ALIAS_PUBLISH", "false")
-    monkeypatch.setenv("INGEST_RETIRE_DOCS", "DOC1")
-    r, _ = mapper_env()
-    assert r.returncode != 0
-    assert "INGEST_ALIAS_PUBLISH" in r.stderr
-
-
-def test_retire_with_default_publication_renders(monkeypatch, mapper_env):
+def test_retire_renders_under_publication(monkeypatch, mapper_env):
     monkeypatch.setenv("CORPUS_PVC", "corpus-pvc")
     monkeypatch.setenv("INGEST_RETIRE_DOCS", "DOC1")
     r, out = mapper_env()
     assert r.returncode == 0, r.stderr
-    ingest = load_values(out)["ingest"]
-    assert ingest["aliasPublish"] is True and ingest["retireDocs"] == ["DOC1"]
+    assert load_values(out)["ingest"]["retireDocs"] == ["DOC1"]
 
 
 def test_route_needs_ca_file(monkeypatch, mapper_env, tmp_path):
@@ -335,7 +384,6 @@ def test_mapper_to_helm_round_trip(mapper_env, tmp_path):
     """Producer-to-consumer: env -> values -> helm template -> resources."""
     tricky = "SA22-7777-01@vendor|product with spaces|v1|abc123 & more"
     os.environ["CORPUS_PVC"] = "corpus-pvc"
-    os.environ["INGEST_ALIAS_PUBLISH"] = "true"
     os.environ["INGEST_RETIRE_DOCS"] = tricky
     os.environ["RERANK_ENABLED"] = "true"
     os.environ["RERANK_BASE_URL"] = "http://rerank:8002/v1"
@@ -362,7 +410,7 @@ def test_mapper_to_helm_round_trip(mapper_env, tmp_path):
         env = {e["name"]: e for e in ingest["env"]}
         assert "RERANK_ENABLED" not in env  # agent-only key
         assert env["QDRANT_SHARD_NUMBER"]["value"] == "6"
-        assert env["INGEST_ALIAS_PUBLISH"]["value"] == "true"
+        assert "INGEST_ALIAS_PUBLISH" not in env  # retired switch (#360)
     finally:
         for k in ("CORPUS_PVC", "INGEST_ALIAS_PUBLISH", "INGEST_RETIRE_DOCS",
                   "RERANK_ENABLED", "RERANK_BASE_URL"):
@@ -446,13 +494,14 @@ def test_condensation_mapper_to_agent_round_trip(monkeypatch, mapper_env):
         "name": "CHAT_CONDENSE_ENABLED", "value": "true"}
 
 
-def test_decoupled_backend_flags_omitted_by_default(mapper_env):
-    """OBS-2: unset subflags render no subkey (omitted preserves behavior)."""
+def test_decoupled_backend_flags_follow_the_parent_by_default(mapper_env):
+    """OBS-2: unset subflags follow the parent leg; the release carries the
+    effective boolean (the chart never re-derives the default)."""
     r, out = mapper_env()
     assert r.returncode == 0, r.stderr
     v = load_values(out)
-    assert "jaeger" not in v["tracing"]
-    assert "serviceMonitor" not in v["metrics"]
+    assert v["tracing"]["jaeger"] == {"enabled": v["tracing"]["enabled"]}
+    assert v["metrics"]["serviceMonitor"] == {"enabled": v["metrics"]["enabled"]}
 
 
 @pytest.mark.parametrize("raw,expected", [

@@ -147,12 +147,16 @@ def test_ingest_tuning_defaults():
     assert s.ingest_bulk_load is False
 
 
-def test_alias_publish_is_the_default(monkeypatch):
-    """Issue #359/#360: alias publication is the default write mode; the
-    explicit opt-out selects the deprecated in-place mode."""
+def test_alias_publication_is_the_only_ingest_mode(monkeypatch):
+    """Issue #359/#360: alias publication is the only write mode. In-place
+    ingest was retired, and an explicit opt-out fails closed instead of
+    being silently ignored."""
+    assert Settings(_env_file=None).ingest_alias_publish is True
+    monkeypatch.setenv("INGEST_ALIAS_PUBLISH", "true")
     assert Settings(_env_file=None).ingest_alias_publish is True
     monkeypatch.setenv("INGEST_ALIAS_PUBLISH", "false")
-    assert Settings(_env_file=None).ingest_alias_publish is False
+    with pytest.raises(ValueError, match="in-place ingest was retired"):
+        Settings(_env_file=None)
 
 
 def test_contextual_embed_defaults():

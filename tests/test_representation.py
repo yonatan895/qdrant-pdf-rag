@@ -26,14 +26,12 @@ from mainframe_rag.ingest.representation import (
     write_manifest,
 )
 from mainframe_rag.ingest.rules_version import extraction_rules_version
+from tests.helpers_builder import staging_builder  # noqa: F401 — fixture
 
+# Real runs publish (in-place ingest retired, #360); these tests cover the
+# builder against a fixed collection through tests/helpers_builder.py.
+pytestmark = pytest.mark.usefixtures("staging_builder")
 
-@pytest.fixture(autouse=True)
-def _in_place_mode(monkeypatch):
-    """These tests cover the in-place build (which publication also runs for
-    each staging generation). Alias publication is the default, so select
-    the deprecated in-place mode explicitly, as an operator would."""
-    monkeypatch.setenv("INGEST_ALIAS_PUBLISH", "false")
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RULES = "testrules12345678"

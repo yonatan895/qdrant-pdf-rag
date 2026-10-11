@@ -107,7 +107,7 @@ def test_ingest_dryrun_renders_clean_manifest(ingest_tree):
     assert rendered_container(rendered, "ingest")["args"] == [
         "--src", "/corpus", "--progress", "/work/inventory.jsonl",
     ]
-    assert rendered_env(rendered, "ingest")["INGEST_ALIAS_PUBLISH"] == "true"
+    assert "INGEST_ALIAS_PUBLISH" not in rendered_env(rendered, "ingest")  # retired (#360)
     assert '"--reingest"' not in rendered
     assert '"--retire-doc"' not in rendered
     assert re.search(r'(?m)^\s*value: "false"$', rendered)
@@ -280,8 +280,8 @@ elif 'pods' in a:
                  id='ingest_missing_embed_revision_fails_closed'),
     pytest.param({'EMBED_MODEL_REVISION': '  '}, None, ('EMBED_MODEL_REVISION must be a non-blank',),
                  id='ingest_whitespace_embed_revision_fails_closed'),
-    pytest.param({'INGEST_ALIAS_PUBLISH': 'false', 'INGEST_RETIRE_DOCS': 'SA22-0000-00'}, None, ('INGEST_ALIAS_PUBLISH=true',),
-                 id='ingest_retire_docs_require_alias_publish'),
+    pytest.param({'INGEST_ALIAS_PUBLISH': 'false'}, None, ('in-place ingest was retired',),
+                 id='ingest_retired_in_place_switch_fails_closed'),
     pytest.param({'INGEST_ALIAS_PUBLISH': 'true', 'INGEST_RETIRE_DOCS': '*'}, None, ('malformed INGEST_RETIRE_DOCS', 'wildcards'),
                  id='ingest_retire_docs_wildcard_fails_closed'),
     pytest.param({'INGEST_ALIAS_PUBLISH': 'true', 'INGEST_RETIRE_DOCS': 'SA22-0000-00@'}, None, ("empty side of '@'",),
@@ -373,7 +373,7 @@ def test_ingest_retire_docs_rendered_with_alias_publish(ingest_tree):
     rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
     assert rendered_container(rendered, "ingest")["args"][-4:-2] == ["--retire-doc", "SA22-0000-00"]
     assert rendered_container(rendered, "ingest")["args"][-2:] == ["--retire-doc", "SA22-7777-01@rev-1"]
-    assert re.search(r'(?m)^\s*value: "true"$', rendered)
+    assert "INGEST_ALIAS_PUBLISH" not in rendered_env(rendered, "ingest")
     assert_no_placeholders(rendered)
 
 

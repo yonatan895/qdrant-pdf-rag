@@ -17,7 +17,7 @@ require_embed_revision
 check_secret_name "${GATEWAY_API_KEY_SECRET:-}" GATEWAY_API_KEY_SECRET
 check_secret_name "${PULL_SECRET:-}" PULL_SECRET
 check_secret_name "${GATEWAY_CA_CONFIGMAP:-}" GATEWAY_CA_CONFIGMAP
-resolve_otel_endpoint
+resolve_observability
 case "$IMAGE_SHA" in
     ""|HEAD) die "IMAGE_SHA must be the packed git SHA (see dist/MANIFEST.txt)" ;;
 esac
@@ -53,18 +53,16 @@ mkdir -p dist
 # ingest-work PVC keep the host-local target lock meaningful (one
 # authorized publisher, shared progress path); no distributed lock is
 # claimed, and aliases/defaults are never flipped implicitly. Alias
-# publication is the default; INGEST_ALIAS_PUBLISH=false selects the
-# deprecated in-place mode.
+# publication is the only ingest mode (in-place was retired, #360; the
+# values mapper refuses INGEST_ALIAS_PUBLISH=false).
 #
 # Retirement entries accept the real backend alphabet: a source_rev is
 # `vendor|product|version|sha256` (labels may carry '/', '|' and spaces),
 # so validation rejects only what would break the shell or the rendered
 # YAML — control characters, quotes, backslashes and wildcards — and the
 # backend still refuses any revision absent from the approved inventory.
-ALIAS_PUBLISH=$(bool_flag INGEST_ALIAS_PUBLISH true)
 REINGEST=$(bool_flag INGEST_REINGEST false)
 if [ -n "${INGEST_RETIRE_DOCS:-}" ]; then
-    [ "$ALIAS_PUBLISH" = "true" ] || die "INGEST_RETIRE_DOCS requires INGEST_ALIAS_PUBLISH=true — explicit removals are a publication operation and the ingest refuses them in-place"
     _old_ifs=$IFS
     _nl='
 '

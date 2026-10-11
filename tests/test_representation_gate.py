@@ -30,7 +30,6 @@ from mainframe_rag.ingest.representation import (
     manifest_digest,
     manifest_point_id,
     read_manifest_record,
-    refuse_limited_migration,
     rekey_manifest,
     require_attested_revision,
     serving_outcome,
@@ -425,46 +424,6 @@ def test_preflight_pending_contract_rejects_with_resume_path():
     with pytest.raises(RuntimeError, match="unfinished representation migration") as exc:
         check_ingest_compatible(store, s, comp, RULES)
     assert "--reingest" in str(exc.value)
-
-
-def test_refuse_limited_migration_matrix():
-    """--limit may never carry a migration: drift, pending, and legacy
-    targets are refused before mutation; a fresh empty target and a
-    record-only/compatible refresh stay allowed."""
-    s = _settings()
-    drift = _settings(embed_model_revision="rev-2")
-    prefix = _settings(dense_query_prefix="OTHER:")
-
-    compatible = SyncStore()
-    write_manifest(compatible, _completions(s), s, RULES)
-    compatible._points.setdefault(s.qdrant_collection, []).append(_point())
-    refuse_limited_migration(compatible, s, _completions(s), RULES)  # no raise
-
-    record_only = SyncStore()
-    write_manifest(record_only, _completions(s), s, RULES)
-    record_only._points.setdefault(s.qdrant_collection, []).append(_point())
-    refuse_limited_migration(record_only, prefix, _completions(prefix), RULES)  # no raise
-
-    fresh = SyncStore()
-    refuse_limited_migration(fresh, s, _completions(s), RULES)  # no raise
-
-    pending = SyncStore()
-    write_manifest(pending, _completions(s), s, RULES, state=STATE_PENDING)
-    pending._points.setdefault(s.qdrant_collection, []).append(_point())
-    with pytest.raises(RuntimeError, match="representation migration") as exc:
-        refuse_limited_migration(pending, s, _completions(s), RULES)
-    assert "without --limit" in str(exc.value)
-
-    drifted = SyncStore()
-    write_manifest(drifted, _completions(s), s, RULES)
-    drifted._points.setdefault(s.qdrant_collection, []).append(_point())
-    with pytest.raises(RuntimeError, match="representation migration"):
-        refuse_limited_migration(drifted, drift, _completions(drift), RULES)
-
-    legacy = SyncStore()
-    legacy._points.setdefault(s.qdrant_collection, []).append(_point())
-    with pytest.raises(RuntimeError, match="legacy migration"):
-        refuse_limited_migration(legacy, s, _completions(s), RULES)
 
 
 def test_rekey_carries_pending_state():

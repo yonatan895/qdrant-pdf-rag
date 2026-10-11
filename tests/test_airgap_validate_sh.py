@@ -960,14 +960,32 @@ def test_validate_invalid_operator_boolean_refused(tree, key):
     assert "maybe-secretish" not in r.stderr + r.stdout
 
 
-@pytest.mark.parametrize("key", BOOL_KEYS)
-@pytest.mark.parametrize("value", ["true", "False", "1", "no", "YES"])
+# INGEST_ALIAS_PUBLISH accepts only unset/true since in-place ingest was
+# retired (#360); its false spellings are pinned by the refusal test below.
+_ACCEPTED_BOOLEANS = [
+    (key, value)
+    for key in BOOL_KEYS
+    for value in ("true", "False", "1", "no", "YES")
+    if not (key == "INGEST_ALIAS_PUBLISH" and value.lower() in ("false", "no"))
+]
+
+
+@pytest.mark.parametrize(("key", "value"), _ACCEPTED_BOOLEANS)
 def test_validate_valid_operator_boolean_accepted(tree, key, value):
     env = {key: value}
     if key == "CONTEXTUAL_EMBED_ENABLED":
         env |= {"CONTEXT_LLM_BASE_URL": "http://llm:8000/v1", "CONTEXT_LLM_MODEL": "m"}
     r = _run(tree, env)
     assert r.returncode == 0, r.stderr
+
+
+@pytest.mark.parametrize("value", ["false", "False", "0", "no"])
+def test_validate_refuses_the_retired_in_place_switch(tree, value):
+    """INGEST_ALIAS_PUBLISH accepts only unset/true: an explicit false fails
+    closed at preflight with the retirement, never silently ignored."""
+    r = _run(tree, {"INGEST_ALIAS_PUBLISH": value})
+    assert r.returncode != 0
+    assert "in-place ingest was retired" in r.stderr
 
 
 def test_validate_invalid_boolean_from_env_file_then_corrected(tree):

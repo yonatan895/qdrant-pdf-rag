@@ -342,7 +342,7 @@ def test_measurement_preserves_calls_errors_and_next_run(monkeypatch, failure):
     import qdrant_client
 
     from mainframe_rag.eval.retrieval import evaluate
-    from mainframe_rag.ingest import embed, qdrant_io
+    from mainframe_rag.ingest import embed
     from mainframe_rag.retrieve import query, rerank
 
     settings = SimpleNamespace(qdrant_url="http://unused.invalid", qdrant_api_key=None,
@@ -353,7 +353,14 @@ def test_measurement_preserves_calls_errors_and_next_run(monkeypatch, failure):
                         lambda **kwargs: constructors.append(kwargs) or client)
     monkeypatch.setattr(embed, "build_embedder", lambda actual: embedder if actual is settings else None)
     monkeypatch.setattr(rerank, "build_reranker", lambda actual: reranker if actual is settings else None)
-    monkeypatch.setattr(qdrant_io, "stored_rules_version", lambda *args: None)
+    from mainframe_rag.agent.serving import ServingGeneration
+    from mainframe_rag.eval import retrieval as retrieval_mod
+
+    generations = []
+    monkeypatch.setattr(
+        retrieval_mod, "serving_generation",
+        lambda c, s: generations.append((c, s)) or ServingGeneration("original__gen1", "compatible"),
+    )
     entries = [GoldenEntry(query="broken", expected_doc_ids=["missing"]),
                GoldenEntry(query="answer", expected_doc_ids=["SC23-6883-70"]),
                GoldenEntry(query="abstain", expected_behavior="abstain")]
@@ -367,8 +374,13 @@ def test_measurement_preserves_calls_errors_and_next_run(monkeypatch, failure):
     monkeypatch.setattr(query, "search", search)
     report = evaluate(entries, settings)
     assert constructors == [{"url": "http://unused.invalid", "api_key": None, "timeout": 17}]
-    assert calls == [((client, embedder, "original", entry.query),
+    # The serving gate's verdict binds the run to the validated physical.
+    assert generations == [(client, settings)]
+    assert calls == [((client, embedder, "original__gen1", entry.query),
                       {"limit": 8, "settings": settings, "reranker": reranker}) for entry in entries]
+    assert report["representation"] == {"servable": True, "outcome": "compatible",
+                                        "details": [], "physical": "original__gen1"}
+    assert report["collection"] == "original"
     assert report["n"] == 3 and report["failures"] == 1 and report["scored"] == 1
     assert report["recall@1"] == 1.0 and report["mrr"] == 1.0
     assert report["abstain"]["n"] == 1

@@ -8,14 +8,12 @@ import json
 import pytest
 
 from mainframe_rag.ingest.run_ingest import main
+from tests.helpers_builder import staging_builder  # noqa: F401 — fixture
 
+# Real runs publish (in-place ingest retired, #360); these tests cover the
+# builder against a fixed collection through tests/helpers_builder.py.
+pytestmark = pytest.mark.usefixtures("staging_builder")
 
-@pytest.fixture(autouse=True)
-def _in_place_mode(monkeypatch):
-    """These tests cover the in-place build (which publication also runs for
-    each staging generation). Alias publication is the default, so select
-    the deprecated in-place mode explicitly, as an operator would."""
-    monkeypatch.setenv("INGEST_ALIAS_PUBLISH", "false")
 
 
 def test_dry_run_ingest(tmp_path, synthetic_pdf, capsys):
@@ -294,23 +292,40 @@ def test_upsert_path_counters_with_fake_qdrant(tmp_path, synthetic_pdf, capsys, 
     assert main_sent == done[0]["chunks_upserted"]
 
 
-def test_in_place_real_run_logs_deprecation_and_dry_run_does_not(
+def test_builder_refuses_a_real_run_without_a_staging_build(
     tmp_path, synthetic_pdf, capsys, monkeypatch
 ):
-    """Alias publication is the default; a real in-place run (explicit
-    INGEST_ALIAS_PUBLISH=false) still works for one release and says so."""
+    """In-place ingest was retired (#360): the builder writes only a
+    publication staging generation. Called directly for a real run without
+    one, it refuses before any lock or storage write, so no caller can write
+    into the serving collection; a dry run (which writes nothing) still
+    plans without one."""
+    import pytest
+    from opentelemetry import trace
+
+    from mainframe_rag.config import Settings
     from mainframe_rag.ingest import run_ingest
 
     monkeypatch.setenv("EMBED_MODE", "hash")
     monkeypatch.delenv("DENSE_DIM", raising=False)
     fake = _FakeQdrant()
     monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    args = ["--src", str(synthetic_pdf.parent), "--workers", "1"]
-    assert main([*args, "--progress", str(tmp_path / "dry.jsonl"), "--dry-run"]) == 0
+    settings = Settings(_env_file=None)
+    tracer = trace.NoOpTracerProvider().get_tracer("test")
+    root = trace.INVALID_SPAN
+    progress = tmp_path / "real.jsonl"
+    with pytest.raises(RuntimeError, match="writes only a publication staging generation"):
+        run_ingest._run_impl(
+            synthetic_pdf.parent, progress, 1, None, False, settings, tracer, root
+        )
+    assert fake._points == {} and not progress.exists()
+    assert not (tmp_path / "real.jsonl.lock").exists()
+    dry = tmp_path / "dry.jsonl"
+    assert run_ingest._run_impl(
+        synthetic_pdf.parent, dry, 1, None, True, settings, tracer, root
+    ) == 0
+    assert fake._points == {}
     assert not [l for l in _stderr_json(capsys) if l.get("action") == "in_place_deprecated"]
-    assert main([*args, "--progress", str(tmp_path / "real.jsonl")]) == 0
-    warned = [l for l in _stderr_json(capsys) if l.get("action") == "in_place_deprecated"]
-    assert len(warned) == 1 and "INGEST_ALIAS_PUBLISH" in warned[0]["remediation"]
 
 
 def test_qdrant_level_skip_counts_as_ok(tmp_path, synthetic_pdf, capsys, monkeypatch):
@@ -754,21 +769,16 @@ def test_stale_generation_marker_blocks_commit(tmp_path, synthetic_pdf, monkeypa
     assert read_manifest_record(fake, comp).state == "committed"
 
 
-def test_limit_allows_fresh_subset_but_refuses_revision_migration(
-    tmp_path, synthetic_pdf, monkeypatch
-):
-    """--limit on a fresh empty target is a deliberate subset bootstrap; the
-    same flag during a representation migration is refused (issue #391 F2)."""
+def test_limit_is_refused_on_every_real_run(tmp_path, synthetic_pdf, monkeypatch):
+    """A real run is a publication of the whole corpus (#360), so --limit is
+    refused before any write. This replaces the in-place subset bootstrap
+    and its limited-migration refusal (issue #391 F2): a partial walk can no
+    longer reach a collection at all."""
     import shutil
 
     import pytest
 
-    from mainframe_rag.config import Settings
     from mainframe_rag.ingest import run_ingest
-    from mainframe_rag.ingest.representation import (
-        STATE_COMMITTED,
-        read_manifest_record,
-    )
 
     corpus = tmp_path / "corpus"
     corpus.mkdir()
@@ -779,19 +789,13 @@ def test_limit_allows_fresh_subset_but_refuses_revision_migration(
     fake = _FakeQdrant()
     monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
     progress = tmp_path / "inventory.jsonl"
-    args = _migration_args(corpus, progress, "--limit", "1")
-    assert main(args) == 0
-    collection = Settings(_env_file=None).qdrant_collection
-    comp = f"{collection}__completions"
-    assert read_manifest_record(fake, comp).state == STATE_COMMITTED
-    assert len(_marker_generations(fake, collection)) == 1
-
-    monkeypatch.setenv("EMBED_MODEL_REVISION", "rev-B")
-    with pytest.raises(RuntimeError, match="--limit refuses a representation migration"):
-        main([*args, "--reingest"])
+    with pytest.raises(RuntimeError, match="refuses --limit on a real run"):
+        main(_migration_args(corpus, progress, "--limit", "1"))
+    assert fake._points == {}, "the refusal precedes every write"
+    assert not progress.exists()
 
 
-def test_unmarked_searchable_point_blocks_migration_commit(tmp_path, monkeypatch):
+def test_unmarked_searchable_point_blocks_migration_commit(tmp_path, synthetic_pdf, monkeypatch):
     """Issue #391 current packet (counterexample 1): the commit-time residue
     scan reads completion markers only, so an unmarked old-rules point was
     certified as the wanted representation. The scope proof must verify the
@@ -817,6 +821,11 @@ def test_unmarked_searchable_point_blocks_migration_commit(tmp_path, monkeypatch
     ]
     corpus = tmp_path / "corpus"
     corpus.mkdir()
+    # Publication needs a non-empty corpus; the walked doc is not the
+    # unmarked legacy point, which stays unknown data.
+    import shutil
+
+    shutil.copy(synthetic_pdf, corpus / synthetic_pdf.name)
     progress = tmp_path / "inventory.jsonl"
     monkeypatch.setenv("EMBED_MODEL_REVISION", "rev-B")
     with pytest.raises(RuntimeError, match="searchable point"):
@@ -832,10 +841,15 @@ def test_unmarked_searchable_point_blocks_migration_commit(tmp_path, monkeypatch
     ), "unknown data is preserved: refusal is never a deletion instruction"
 
 
-def test_empty_target_migration_commits_when_nothing_is_searchable(tmp_path, monkeypatch):
+def test_empty_target_migration_commits_when_nothing_is_searchable(
+    tmp_path, synthetic_pdf, monkeypatch
+):
     """Control for counterexample 1: a truly empty target exposes no stale
     vectors, so the pending bootstrap still commits — the new scope proof is
-    not a blanket refusal."""
+    not a blanket refusal. (One walked doc: publication refuses an empty
+    corpus; the target itself starts empty.)"""
+    import shutil
+
     from mainframe_rag.config import Settings
     from mainframe_rag.ingest import run_ingest
     from mainframe_rag.ingest.representation import STATE_COMMITTED, read_manifest_record
@@ -847,6 +861,7 @@ def test_empty_target_migration_commits_when_nothing_is_searchable(tmp_path, mon
     collection = Settings(_env_file=None).qdrant_collection
     corpus = tmp_path / "corpus"
     corpus.mkdir()
+    shutil.copy(synthetic_pdf, corpus / synthetic_pdf.name)
     progress = tmp_path / "inventory.jsonl"
     assert main(_migration_args(corpus, progress, "--reingest")) == 0
     record = read_manifest_record(fake, f"{collection}__completions")
@@ -986,7 +1001,7 @@ def test_oversize_document_is_never_upserted_or_completed_and_next_run_succeeds(
         ("contextual_on_hash_publish", {},
          {"CONTEXTUAL_EMBED_ENABLED": "true", "INGEST_ALIAS_PUBLISH": "true"}, (),
          "requires embed_mode=vllm"),
-        ("retire_in_place", {}, {}, ("--retire-doc", "SA22-7000-00"), "requires INGEST_ALIAS_PUBLISH"),
+        ("retire_dry_run", {}, {}, ("--retire-doc", "SA22-7000-00", "--dry-run"), "requires a real run"),
     ],
 )
 def test_failed_preflight_starts_no_workers_and_writes_nothing(
@@ -1023,7 +1038,7 @@ def test_failed_preflight_starts_no_workers_and_writes_nothing(
     after = (fake._points, fake.upserts, fake.upsert_calls, fake.deletes, fake.created_collections)
     assert after == before, f"{case}: storage mutated before the refusal"
     assert not progress.exists() or progress.read_text() == ""
-    if case in ("contextual_on_hash_publish", "retire_in_place"):
+    if case in ("contextual_on_hash_publish", "retire_dry_run"):
         # Dispatch refusals precede every lock, so no lock/state file exists.
         assert sorted(p.name for p in tmp_path.iterdir()) == [], f"{case}: lock or state written"
 

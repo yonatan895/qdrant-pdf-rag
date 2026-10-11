@@ -71,7 +71,9 @@ restores the snapshot over whatever the file assigned; empty stays unset
 - Operator booleans `UI_ENABLED`, `CONTEXTUAL_EMBED_ENABLED`,
   `INGEST_ALIAS_PUBLISH`, `INGEST_REINGEST` and `CHAT_CONDENSE_ENABLED`
   accept only `true/1/yes` or `false/0/no` (any case; unset keeps the
-  default). `validate.sh` rejects any other value before the pipeline pushes
+  default). `INGEST_ALIAS_PUBLISH` may only be unset or true: in-place ingest
+  was retired (#360) and an explicit false fails closed.
+  `validate.sh` rejects any other value before the pipeline pushes
   images; the diagnostic names the key, never the value. One parser
   (`model_config.parse_strict_bool`) serves preflight and `map_values.py`.
 - `validate.sh` and `deploy.sh` need only a namespace-admin identity (#678,
@@ -1083,12 +1085,12 @@ explicit environment → `OPERATOR_ENV_KEYS` snapshot/restore around file loadin
 → both agent and ingest environments → Settings and operation-specific interpretation. Trace every step
 for a newly required input; an example alone or agent-only render is insufficient.
 Maintenance modes (issue #391 current packet) follow the same path:
-`INGEST_ALIAS_PUBLISH`, `INGEST_REINGEST` and `INGEST_RETIRE_DOCS` are
-`OPERATOR_ENV_KEYS` validated by `scripts/airgap/ingest.sh` and rendered into
-the ingest Job args/env (`INGEST_RETIRE_DOCS` accepts comma- or newline-separated
+`INGEST_REINGEST` and `INGEST_RETIRE_DOCS` are `OPERATOR_ENV_KEYS` validated by
+`scripts/airgap/ingest.sh` and rendered into the ingest Job args (`INGEST_RETIRE_DOCS` accepts comma- or newline-separated
 `DOCID[@SOURCEREV]` entries and preserves interior whitespace in product/version labels);
-alias publication is the default (the example documents the deprecated
-`INGEST_ALIAS_PUBLISH=false` opt-out commented out), and the shared ingest-work progress path is fixed so one authorized
+alias publication is the only ingest mode (the Job carries no mode switch, the
+chart schema refuses `ingest.aliasPublish`, and the values mapper refuses
+`INGEST_ALIAS_PUBLISH=false`), and the shared ingest-work progress path is fixed so one authorized
 publisher at a time is enforceable (host-local target lock, no distributed
 lock claim). Replacing the immutable Job waits for foreground deletion of its
 prior pods before applying the replacement; a deletion failure aborts the
@@ -1138,11 +1140,16 @@ the serving Deployment does not receive this writer-side setting.
 precedence and otherwise permits file/default resolution; required attestation
 rejects whitespace. Runtime bearer auth intentionally omits a header for an
 absent/empty/whitespace key. These are different owners/meanings: do not globally
-normalize blanks without tracing both consumers. `resolve_otel_endpoint` owns the
-separate unset=local-Jaeger and off/none/false/0=disabled policy across stages;
-an unset endpoint with `JAEGER_ENABLED=false` fails closed (`map_values.py` and
-the chart's empty `tracing.endpoint` mirror it), since the default names the
-service just disabled. Any explicit `http(s)` URL, the former hostname
+normalize blanks without tracing both consumers. `map_values.py observability()`
+is the one owner of the observability decisions across stages: the
+unset=local-Jaeger and off/none/false/0=disabled tracing policy, and whether the
+bundled Jaeger and the ServiceMonitor deploy (explicit flag, else the parent leg;
+a backend for a disabled leg fails closed). The shell stages `eval` its
+`--bundle-decisions` (`common.sh resolve_observability`) and the release renders
+the same booleans, so deploy/smoke/validate gates and the chart cannot disagree.
+An unset endpoint with `JAEGER_ENABLED=false` fails closed (the chart's empty
+`tracing.endpoint` guard keeps it for direct chart users), since the default
+names the service just disabled. Any explicit `http(s)` URL, the former hostname
 included, is an intentional platform-owned collector.
 
 **Preconditions/failures/lifetime:** platform-supplied model/dimension/revision and

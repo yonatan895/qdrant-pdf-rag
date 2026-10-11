@@ -454,7 +454,7 @@ class TestAliasCutoverBypassResistance:
         corpus.mkdir()
         _build_doc_with_id(corpus, "DOC1", "SA22-0000-00")
 
-        with pytest.raises(RuntimeError, match="INGEST_ALIAS_PUBLISH refuses --limit"):
+        with pytest.raises(RuntimeError, match="refuses --limit on a real run"):
             _run_main(monkeypatch, corpus, tmp_path / "inv.jsonl", "--limit", "1")
 
         assert fake.aliases == {}
