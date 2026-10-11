@@ -33,13 +33,15 @@ try:
     from scripts.airgap.model_config import (
         MODEL_CONFIG_KEYS,
         parse_strict_bool,
+        reasoning_overrides,
         require_in_place_retired,
         validate_model_config,
     )
 except ModuleNotFoundError:
-    from model_config import (
+    from model_config import (  # type: ignore[no-redef]  # Direct bastion-script execution.
         MODEL_CONFIG_KEYS,
         parse_strict_bool,
+        reasoning_overrides,
         require_in_place_retired,
         validate_model_config,
     )
@@ -359,7 +361,8 @@ def build_values(deploy_only: bool = False) -> dict:
             },
             "reasoning": {"baseUrl": reasoning_base, "model": reasoning_model,
                           "condenseEnabled": strict_bool("CHAT_CONDENSE_ENABLED",
-                                                         env("CHAT_CONDENSE_ENABLED"), False)},
+                                                         env("CHAT_CONDENSE_ENABLED"), False),
+                          **reasoning_overrides(model_config)},
             "rerank": {
                 "enabled": rerank_enabled,
                 "baseUrl": env("RERANK_BASE_URL"),

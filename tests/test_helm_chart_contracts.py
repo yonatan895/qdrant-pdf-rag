@@ -525,6 +525,42 @@ def test_explicit_followup_condensation_reaches_agent():
     assert env_map(deployment)["CHAT_CONDENSE_ENABLED"]["value"] == "true"
 
 
+@pytest.mark.parametrize("field,value,environment", [
+    ("maxModelLen", 512, "LLM_MAX_MODEL_LEN"),
+    ("maxModelLen", 131072, "LLM_MAX_MODEL_LEN"),
+    ("reservedOutputTokens", 128, "LLM_RESERVED_OUTPUT_TOKENS"),
+    ("reservedOutputTokens", 16384, "LLM_RESERVED_OUTPUT_TOKENS"),
+    ("thinkingReserveTokensSimple", 0, "LLM_THINKING_RESERVE_TOKENS_SIMPLE"),
+    ("thinkingReserveTokensSimple", 16384, "LLM_THINKING_RESERVE_TOKENS_SIMPLE"),
+    ("thinkingReserveTokensComplex", 0, "LLM_THINKING_RESERVE_TOKENS_COMPLEX"),
+    ("thinkingReserveTokensComplex", 16384, "LLM_THINKING_RESERVE_TOKENS_COMPLEX"),
+    ("reasoningEffortSimple", "high", "LLM_REASONING_EFFORT_SIMPLE"),
+    ("reasoningEffortComplex", "xhigh", "LLM_REASONING_EFFORT_COMPLEX"),
+    ("stream", False, "LLM_STREAM"),
+])
+def test_direct_chart_optional_budget_limits_reach_pod(field, value, environment):
+    rendered = run_new_template({"models": {"reasoning": {field: value}}})
+    pod = env_map(rendered["Deployment", "rag-agent"])
+    expected = "false" if value is False else str(value)
+    assert pod[environment]["value"] == expected
+
+
+@pytest.mark.parametrize("field,value", [
+    ("maxModelLen", 511), ("maxModelLen", 131073), ("maxModelLen", "16384"),
+    ("reservedOutputTokens", 127), ("reservedOutputTokens", 16385),
+    ("thinkingReserveTokensSimple", -1), ("thinkingReserveTokensSimple", 16385),
+    ("thinkingReserveTokensComplex", -1), ("thinkingReserveTokensComplex", 16385),
+    ("reasoningEffortSimple", "unsupported"), ("reasoningEffortComplex", "unsupported"),
+    ("stream", "true"),
+])
+def test_direct_chart_refuses_invalid_model_budget(field, value):
+    values = base_values()
+    values["models"]["reasoning"][field] = value
+    result = _helm_template_with_values(values)
+    assert result.returncode != 0
+    assert field in result.stderr
+
+
 def test_ui_disabled_renders_false_and_keeps_agent_contract():
     """Issue #479: ui.enabled=false reaches the Deployment; probes,
     selectors and read-only credentials are unchanged."""
