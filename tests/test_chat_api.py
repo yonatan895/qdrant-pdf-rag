@@ -442,6 +442,27 @@ def test_chat_completions_streaming_sse(chat_client):
     assert len(final_chunk["choices"][0]["citations"]) == 1
 
 
+@pytest.mark.parametrize("path", ["/v1/chat", "/v1/chat/completions"])
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("query,field", [
+    ("IEA500I", "llm_reasoning_effort_simple"),
+    ("diagnose abend S0C4 with registers and spool dump", "llm_reasoning_effort_complex"),
+])
+def test_chat_configured_xhigh_reaches_model(chat_client, monkeypatch, path, stream, query, field):
+    monkeypatch.setattr(app_mod.settings, field, "xhigh")
+    response = chat_client.post(path, json={
+        "messages": [{"role": "user", "content": query}], "stream": stream,
+    })
+
+    assert response.status_code == 200
+    calls = chat_client.fake_llm.stream_calls if stream else chat_client.fake_llm.chat_calls
+    assert calls[-1]["reasoning_effort"] == "xhigh"
+    if stream:
+        assert response.text.count("data: [DONE]") == 1
+    else:
+        assert response.json()["choices"][0]["finish_reason"] == "stop"
+
+
 def test_chat_completions_validation_errors(chat_client):
     # Empty messages list
     r1 = chat_client.post("/v1/chat/completions", json={"messages": []})

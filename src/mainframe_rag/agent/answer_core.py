@@ -15,8 +15,8 @@ from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass, replace
 from typing import Literal, TypedDict
 
-ReasoningEffort = Literal["low", "medium", "high"]
-VALID_REASONING_EFFORTS: frozenset[ReasoningEffort] = frozenset({"low", "medium", "high"})
+ReasoningEffort = Literal["low", "medium", "high", "xhigh"]
+VALID_REASONING_EFFORTS: frozenset[ReasoningEffort] = frozenset({"low", "medium", "high", "xhigh"})
 
 
 from opentelemetry import trace

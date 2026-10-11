@@ -1692,6 +1692,27 @@ def test_answer_dispatches_reasoning_effort_by_complexity(client, monkeypatch):
     assert fake.last_temperature == 0.2
 
 
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("query,field", [
+    ("IEA500I", "llm_reasoning_effort_simple"),
+    ("How do I diagnose and recover when DFSMShsm journal fills up during migration?",
+     "llm_reasoning_effort_complex"),
+])
+def test_answer_configured_xhigh_reaches_model(client, monkeypatch, stream, query, field):
+    monkeypatch.setattr(app_mod.settings, field, "xhigh")
+    fake = FakeLLM()
+    monkeypatch.setattr(app_mod, "llm", fake)
+
+    response = client.post("/v1/answer", json={"query": query, "stream": stream})
+
+    assert response.status_code == 200
+    assert fake.last_reasoning_effort == "xhigh"
+    if stream:
+        assert response.text.count("event: final") == 1
+    else:
+        assert response.json()["citations"]
+
+
 def test_answer_accepts_per_request_temperature_override(client, monkeypatch):
     """Issue #596: /v1/answer accepts an optional temperature override for
     deterministic eval sampling; omitting it keeps Settings.llm_temperature."""
@@ -1707,7 +1728,8 @@ def test_answer_accepts_per_request_temperature_override(client, monkeypatch):
     assert fake.last_temperature == 0.2
 
 
-def test_httpx_llm_client_passes_reasoning_params(monkeypatch):
+@pytest.mark.parametrize("effort", ["high", "xhigh"])
+def test_httpx_llm_client_passes_reasoning_params(effort):
     from mainframe_rag.agent.answer import HttpxLLMClient
     from mainframe_rag.config import Settings
     from mainframe_rag.ports import ChatMessage
@@ -1743,11 +1765,11 @@ def test_httpx_llm_client_passes_reasoning_params(monkeypatch):
     )
     client = HttpxLLMClient(s, client=MockHttpClient())  # type: ignore[arg-type]
     msgs = [ChatMessage(role="user", content="Hello")]
-    ans = client.chat(msgs, reasoning_effort="high", temperature=0.2)
+    ans = client.chat(msgs, reasoning_effort=effort, temperature=0.2)
     assert ans.content and "Test answer" in ans.content
     assert ans.finish_reason == "stop"
     assert recorded_payload["model"] == "mock-reasoning-model"
-    assert recorded_payload["reasoning_effort"] == "high"
+    assert recorded_payload["reasoning_effort"] == effort
     assert recorded_payload["temperature"] == 0.2
 
 
