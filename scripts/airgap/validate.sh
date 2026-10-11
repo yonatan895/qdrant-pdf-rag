@@ -30,8 +30,7 @@ validate_model_config
 check_secret_name "${GATEWAY_API_KEY_SECRET:-}" GATEWAY_API_KEY_SECRET
 check_secret_name "${PULL_SECRET:-}" PULL_SECRET
 check_secret_name "${GATEWAY_CA_CONFIGMAP:-}" GATEWAY_CA_CONFIGMAP
-resolve_otel_endpoint
-resolve_bundle_choices
+resolve_observability
 resolve_agent_route
 
 case "${RERANK_ENDPOINT_ORDER:-score_first}" in

@@ -174,72 +174,21 @@ check_secret_name() {
     esac
 }
 
-# Tracing mode: one rule for deploy / validate / smoke / ingest (issue #83).
-# Unset or empty means the in-cluster Jaeger default (tracing ON); an explicit
-# off sentinel disables; an http(s) URL is a custom collector; anything else
-# fails closed before a manifest is rendered. Sets OTEL_ENDPOINT_RESOLVED
-# (empty = disabled) and OTEL_TRACING_ENABLED (1/0). One helper so the four
-# call sites can never disagree on what "active" means. The in-cluster default
-# belongs to the bundled Jaeger (issue #568): an explicit JAEGER_ENABLED=false
-# with no endpoint would keep exporting to a Service nothing deploys, so it
-# must name a collector (any http(s) URL, including the former hostname) or
-# off. Mirrored in map_values.py.
-resolve_otel_endpoint() {
-    _raw="${OTEL_EXPORTER_OTLP_ENDPOINT:-}"
-    case "$_raw" in
-        "")
-            _jaeger=$(resolve_bundle_flag "${JAEGER_ENABLED:-}" 1 JAEGER_ENABLED)
-            [ "$_jaeger" = "1" ] ||
-                die "JAEGER_ENABLED=false needs an intentional trace destination: set OTEL_EXPORTER_OTLP_ENDPOINT to the external collector's http(s) URL, or to off to disable tracing"
-            OTEL_ENDPOINT_RESOLVED="http://jaeger:4318"
-            OTEL_TRACING_ENABLED=1
-            ;;
-        [Oo][Ff][Ff]|[Nn][Oo][Nn][Ee]|[Ff][Aa][Ll][Ss][Ee]|0)
-            OTEL_ENDPOINT_RESOLVED=""
-            OTEL_TRACING_ENABLED=0
-            ;;
-        http://*|https://*)
-            OTEL_ENDPOINT_RESOLVED="$_raw"
-            OTEL_TRACING_ENABLED=1
-            ;;
-        *)
-            die "OTEL_EXPORTER_OTLP_ENDPOINT must be http(s) or off/none/false/0, got '$_raw'"
-            ;;
-    esac
-    unset _raw _jaeger
-    export OTEL_ENDPOINT_RESOLVED OTEL_TRACING_ENABLED
-}
-
-# Effective bundled-backend decisions (issue #529 OBS-2): an explicit
-# JAEGER_ENABLED/SERVICEMONITOR_ENABLED true/false overrides; unset follows
-# the parent leg. Sets JAEGER_DEPLOY / SERVICEMONITOR_DEPLOY (1/0) for the
-# deploy evidence/cleanup and smoke gates. Contradictions (an explicitly
-# enabled backend for a disabled leg) fail before any manifest is rendered.
-# Mirrored in map_values.py (optional_bool plus the same guards) — keep the
-# spellings, follow rules and messages in sync.
-resolve_bundle_flag() {
-    # $1 = raw operator value (may be empty), $2 = parent 1/0, $3 = var name.
-    case "${1:-}" in
-        "") printf '%s' "$2" ;;
-        [Tt][Rr][Uu][Ee]|1|[Yy][Ee][Ss]) printf '1' ;;
-        [Ff][Aa][Ll][Ss][Ee]|0|[Nn][Oo]) printf '0' ;;
-        *) die "$3 must be true/false (got '$1')" ;;
-    esac
-}
-
-resolve_bundle_choices() {
-    # Requires OTEL_TRACING_ENABLED from resolve_otel_endpoint first.
-    JAEGER_DEPLOY=$(resolve_bundle_flag "${JAEGER_ENABLED:-}" "$OTEL_TRACING_ENABLED" "JAEGER_ENABLED")
-    if [ "${METRICS_ENABLED:-false}" = "true" ]; then _mon_parent=1; else _mon_parent=0; fi
-    SERVICEMONITOR_DEPLOY=$(resolve_bundle_flag "${SERVICEMONITOR_ENABLED:-}" "$_mon_parent" "SERVICEMONITOR_ENABLED")
-    unset _mon_parent
-    if [ -n "${JAEGER_ENABLED:-}" ] && [ "$JAEGER_DEPLOY" = "1" ] && [ "$OTEL_TRACING_ENABLED" != "1" ]; then
-        die "JAEGER_ENABLED=true requires tracing (OTEL_EXPORTER_OTLP_ENDPOINT is off): refusing a bundled Jaeger nothing exports to"
-    fi
-    if [ -n "${SERVICEMONITOR_ENABLED:-}" ] && [ "$SERVICEMONITOR_DEPLOY" = "1" ] && [ "${METRICS_ENABLED:-false}" != "true" ]; then
-        die "SERVICEMONITOR_ENABLED=true requires METRICS_ENABLED=true: refusing to monitor a disabled endpoint"
-    fi
-    export JAEGER_DEPLOY SERVICEMONITOR_DEPLOY
+# Observability decisions (issues #83, #529 OBS-2, #568): one owner for
+# deploy / validate / smoke / ingest and the chart values — the values mapper
+# (scripts/airgap/map_values.py observability()). Sets OTEL_ENDPOINT_RESOLVED
+# (empty = disabled), OTEL_TRACING_ENABLED, JAEGER_DEPLOY and
+# SERVICEMONITOR_DEPLOY (1/0); invalid or contradictory operator input fails
+# before any manifest is rendered. The same function renders the chart's
+# explicit booleans, so the shell gates and the release can never disagree.
+resolve_observability() {
+    command -v python3 >/dev/null 2>&1 || die "python3 is required for observability decisions"
+    export OTEL_EXPORTER_OTLP_ENDPOINT JAEGER_ENABLED SERVICEMONITOR_ENABLED METRICS_ENABLED
+    _decisions=$(python3 scripts/airgap/map_values.py --bundle-decisions) ||
+        die "observability configuration refused (see the message above)"
+    eval "$_decisions"
+    unset _decisions
+    export OTEL_ENDPOINT_RESOLVED OTEL_TRACING_ENABLED JAEGER_DEPLOY SERVICEMONITOR_DEPLOY
 }
 
 resolve_aliases() {
