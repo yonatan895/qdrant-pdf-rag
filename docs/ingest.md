@@ -800,6 +800,11 @@ thread pool.
   `<alias>__legacy_<build>` (verified by exact point ids; a retry of the same
   build reuses only an exact copy), deletes it (brief documented maintenance
   window), then creates the alias; this works on distributed layouts too.
+  A physical collection counts as a legacy layout only when it carries no
+  build binding and no alias targets it: `QDRANT_COLLECTION` naming a
+  published or retained generation's physical collection refuses before any
+  write (publish through the logical alias), since "migrating" it would delete
+  the collection the logical alias serves.
   Stale-rules legacy content needs `--reingest` like any other rules
   migration.
 - **Retained generations are never workspace (issue #405 R2):** a derived

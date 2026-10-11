@@ -1640,6 +1640,23 @@ def _resolve_publication(
             "abandon the recorded candidate before starting a new verified build"
         )
     observed_aliases = {a.alias_name: a.collection_name for a in client.get_aliases().aliases}
+    if legacy:
+        # A physical collection that carries the configured name is a legacy
+        # layout only when nothing identifies it as a build: a published or
+        # retained generation targeted by name must never be "migrated",
+        # which would copy it aside and delete the collection its logical
+        # alias still serves.
+        assert live is not None
+        targeted_by = sorted(
+            name for name, target in observed_aliases.items()
+            if target in (live, live + "__completions")
+        )
+        if targeted_by or read_build_binding(client, live + "__completions") is not None:
+            raise RuntimeError(
+                f"{alias!r} is a published or retained generation (aliased by "
+                f"{targeted_by}), not a legacy layout: publish through its logical "
+                "alias, never by a generation's physical name"
+            )
     live_binding = None
     if live is not None:
         live_binding = read_build_binding(client, live + "__completions")
