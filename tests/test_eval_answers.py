@@ -2,9 +2,10 @@
 verdict logic (judge), deterministic stratified sampling (select_sample),
 and aggregation (summarize).
 
-Hermetic: no Qdrant, no vLLM, no TestClient — the pure helpers are imported
-directly. The live tier runs via `sh scripts/tools/run-task.sh eval:answers`,
-never part of plain pytest."""
+Hermetic: no Qdrant, no vLLM, no TestClient. Pure helpers are imported directly;
+HTTP mode uses an inert transport or an original loopback HTTP producer. The
+live model tier runs via `sh scripts/tools/run-task.sh eval:answers`, never as
+part of plain pytest."""
 
 from __future__ import annotations
 
@@ -36,6 +37,366 @@ def _entry(**overrides) -> dict:
     }
     base.update(overrides)
     return base
+
+
+@pytest.fixture
+def http_answer_eval(tmp_path, monkeypatch):
+    """Run the actual CLI and HTTP client against an inert HTTP boundary."""
+    import httpx2
+
+    import mainframe_rag.eval.answers as answers
+
+    monkeypatch.chdir(tmp_path)
+    real_client = httpx2.Client
+    calls = []
+    options = []
+
+    def local_settings_forbidden():
+        raise AssertionError("HTTP eval must not inspect the evaluator's local stack")
+
+    monkeypatch.setattr(answers, "load_settings", local_settings_forbidden)
+
+    def run(respond, entries=None, extra=()):
+        golden = tmp_path / "original.jsonl"
+        golden.write_text("".join(json.dumps(e) + "\n" for e in (entries or [_entry()])))
+
+        def record(request):
+            calls.append(request)
+            return respond(request)
+
+        def client(**kwargs):
+            options.append(kwargs)
+            return real_client(transport=httpx2.MockTransport(record), **kwargs)
+
+        monkeypatch.setattr(httpx2, "Client", client)
+        status = answers.main([
+            "--agent-url", "http://deployed-agent:8087", "--golden", str(golden),
+            "--all", "--out", str(tmp_path / "report.json"), *extra,
+        ])
+        report_path = tmp_path / "report.json"
+        report = json.loads(report_path.read_text()) if report_path.exists() else None
+        return status, report, calls, options
+
+    return run
+
+
+def test_http_answer_eval_scores_the_deployed_agent(http_answer_eval, tmp_path):
+    import httpx2
+
+    health = {"status": "ok", "qdrant": True, "embed": True,
+              "representation": "compatible", "rerank": None}
+
+    def respond(request):
+        if request.url.path == "/healthz":
+            return httpx2.Response(200, json=health)
+        if request.url.path == "/v1/search":
+            return httpx2.Response(200, json={"hits": []})
+        assert request.url.path == "/v1/answer"
+        return httpx2.Response(200, json=_answer_payload())
+
+    status, report, calls, options = http_answer_eval(respond)
+    assert status == 0
+    assert [(r.method, str(r.url)) for r in calls] == [
+        ("GET", "http://deployed-agent:8087/healthz"),
+        ("POST", "http://deployed-agent:8087/v1/search"),
+        ("POST", "http://deployed-agent:8087/v1/answer"),
+    ]
+    assert json.loads(calls[-1].content) == {"query": "What does IEA500I report?", "temperature": 0.0}
+    assert report["metrics"]["queries"] == 1
+    assert report["results"][0]["verdict"] == "pass"
+    assert report["results"][0]["finish_reason"] is None
+    assert report["deployment"] == {
+        "agent_url": "http://deployed-agent:8087", "healthz": health,
+        "git_sha": None, "image_digest": None,
+    }
+    assert report["representation"] == {"servable": True, "outcome": "compatible"}
+    assert options == [{"base_url": "http://deployed-agent:8087", "timeout": 300.0,
+                        "follow_redirects": False, "trust_env": False}]
+    manifest = json.loads((tmp_path / "evals/runs/eval_answers_runs.jsonl").read_text())
+    assert manifest["deployment"] == report["deployment"]
+    assert manifest["git_sha"] == "unknown"
+    assert manifest["settings_hash"] is None
+    assert manifest["model_ids"] is None
+
+
+@pytest.mark.parametrize("status,health,observed", [
+    (200, {"status": "ok", "qdrant": True, "representation": "empty"}, True),
+    (200, {"status": "ok", "qdrant": True, "representation": "legacy"}, True),
+    (200, {"status": "ok", "qdrant": True, "representation": "reembed_required"}, True),
+    (503, {"status": "degraded", "qdrant": True, "representation": "pending"}, True),
+    (503, {"status": "degraded", "qdrant": False, "representation": "unknown"}, True),
+    (200, {"status": "ok", "qdrant": True, "embed": False, "representation": "compatible"}, True),
+    (200, {"status": "ok", "qdrant": True, "rerank": False, "representation": "compatible"}, True),
+    (200, {"status": "ok", "qdrant": "true", "representation": "compatible"}, False),
+    (200, {"status": "ok", "qdrant": True, "embed": 1, "representation": "compatible"}, False),
+    (200, {"status": "ok", "qdrant": True}, False),
+    (200, {"status": "ok", "qdrant": True, "representation": ["compatible"]}, False),
+    (200, [], False),
+    (200, None, False),
+    (401, {"code": "unauthorized", "message": "PRIVATE HEALTH DETAIL"}, False),
+    (302, {"status": "ok", "qdrant": True, "representation": "compatible"}, True),
+])
+def test_http_answer_eval_refuses_nonservable_health(
+    http_answer_eval, capsys, status, health, observed,
+):
+    import httpx2
+
+    def respond(request):
+        assert request.url.path == "/healthz"
+        return httpx2.Response(status, json=health)
+
+    entries = [_entry(), _entry(id="MSG-02", query="Original second case")]
+    result, report, calls, _ = http_answer_eval(respond, entries)
+    assert result == 2
+    assert len(calls) == 1
+    assert report["metrics"]["queries"] == 2
+    assert report["metrics"]["judged"] == 0
+    assert report["metrics"]["errors"] == 2
+    assert [row["id"] for row in report["results"]] == ["MSG-01", "MSG-02"]
+    assert report["representation"]["servable"] is False
+    observed_health = report["deployment"]["healthz"]
+    assert (observed_health is not None) is observed
+    if observed:
+        assert report["representation"]["outcome"] == health["representation"]
+    assert "PRIVATE HEALTH DETAIL" not in json.dumps(report) + capsys.readouterr().err
+
+
+@pytest.mark.parametrize("failure", ["connection", "json"])
+def test_http_answer_eval_health_errors_are_fixed_and_keep_every_case(
+    http_answer_eval, capsys, failure,
+):
+    import httpx2
+
+    def respond(request):
+        if failure == "connection":
+            raise httpx2.ConnectError("PRIVATE HEALTH DETAIL", request=request)
+        return httpx2.Response(200, text="PRIVATE HEALTH DETAIL")
+
+    status, report, calls, _ = http_answer_eval(respond)
+    assert status == 2
+    assert report["metrics"]["errors"] == report["metrics"]["queries"] == 1
+    assert report["deployment"]["healthz"] is None
+    assert len(calls) == 1
+    assert "PRIVATE HEALTH DETAIL" not in json.dumps(report) + capsys.readouterr().err
+
+
+def test_http_answer_eval_retains_failed_answers_and_continues(http_answer_eval, capsys):
+    import httpx2
+
+    entries = [_entry(id=identity, query=query) for identity, query in (
+        ("ERR-HTTP", "Original HTTP error case"),
+        ("ERR-TIMEOUT", "Original timeout case"),
+        ("ERR-JSON", "Original malformed case"),
+        ("GOOD", "Original successful case"),
+    )]
+
+    def respond(request):
+        if request.url.path == "/healthz":
+            return httpx2.Response(200, json={"status": "ok", "qdrant": True,
+                                             "representation": "compatible"})
+        if request.url.path == "/v1/search":
+            return httpx2.Response(200, json={"hits": []})
+        query = json.loads(request.content)["query"]
+        if query == "Original HTTP error case":
+            return httpx2.Response(503, json={"code": "representation_unavailable",
+                                              "message": "PRIVATE ANSWER DETAIL"})
+        if query == "Original timeout case":
+            raise httpx2.ReadTimeout("PRIVATE ANSWER DETAIL", request=request)
+        if query == "Original malformed case":
+            return httpx2.Response(200, text="PRIVATE ANSWER DETAIL")
+        return httpx2.Response(200, json=_answer_payload())
+
+    status, report, calls, _ = http_answer_eval(respond, entries)
+    assert status == 1
+    assert report["metrics"]["queries"] == 4
+    assert report["metrics"]["errors"] == 3
+    assert report["metrics"]["judged"] == 1
+    assert [row["id"] for row in report["results"]] == ["ERR-HTTP", "ERR-TIMEOUT", "ERR-JSON", "GOOD"]
+    assert [row["verdict"] for row in report["results"]] == ["error", "error", "error", "pass"]
+    assert report["results"][0]["failures"] == ["HTTP 503 (representation_unavailable)"]
+    assert report["results"][1]["failures"] == ["request error: ReadTimeout"]
+    assert report["results"][2]["failures"] == ["malformed answer response"]
+    assert len([r for r in calls if r.url.path == "/v1/answer"]) == 4
+    assert "PRIVATE ANSWER DETAIL" not in json.dumps(report) + capsys.readouterr().err
+
+
+@pytest.mark.parametrize("payload", [
+    [], True, "PRIVATE ANSWER DETAIL",
+    {"answer": {"PRIVATE ANSWER DETAIL": "not prose"}},
+    {"citations": 1}, {"citations": ["Original p. 1", {"PRIVATE ANSWER DETAIL": "not a cite"}]},
+    {"citations": {"PRIVATE ANSWER DETAIL": "not a list"}},
+    {"verification_state": []}, {"verification_state": "PRIVATE ANSWER DETAIL"},
+])
+def test_http_answer_eval_malformed_answer_fields_cannot_abort_or_pass(
+    http_answer_eval, capsys, payload,
+):
+    import httpx2
+
+    entries = [_entry(id="BAD", query="Original malformed response"),
+               _entry(id="GOOD", query="Original next ordinary request")]
+
+    def respond(request):
+        if request.url.path == "/healthz":
+            return httpx2.Response(200, json={"status": "ok", "qdrant": True,
+                                             "representation": "compatible"})
+        if request.url.path == "/v1/search":
+            return httpx2.Response(200, json={"hits": []})
+        if json.loads(request.content)["query"] == "Original malformed response":
+            body = _answer_payload(**payload) if isinstance(payload, dict) else payload
+            return httpx2.Response(200, json=body)
+        return httpx2.Response(200, json=_answer_payload())
+
+    status, report, calls, _ = http_answer_eval(respond, entries)
+    assert status == 1
+    assert report["metrics"]["queries"] == 2
+    assert report["metrics"]["errors"] == 1
+    assert [r["verdict"] for r in report["results"]] == ["error", "pass"]
+    assert len([r for r in calls if r.url.path == "/v1/answer"]) == 2
+    assert "PRIVATE ANSWER DETAIL" not in json.dumps(report) + capsys.readouterr().err
+
+
+@pytest.mark.parametrize("hits", [
+    [None], [1], ["PRIVATE SEARCH DETAIL"], {"PRIVATE SEARCH DETAIL": "not a hit list"},
+    [{"doc_id": "A", "cite": "Original p. 1"}, {"doc_id": "B"}, 42],
+])
+def test_http_answer_eval_malformed_search_pool_keeps_the_next_case(
+    http_answer_eval, capsys, hits,
+):
+    import httpx2
+
+    entries = [_entry(id="BAD-POOL", query="Original malformed pool", expected_doc_ids=["A"]),
+               _entry(id="GOOD", query="Original next ordinary request")]
+
+    def respond(request):
+        if request.url.path == "/healthz":
+            return httpx2.Response(200, json={"status": "ok", "qdrant": True,
+                                             "representation": "compatible"})
+        if request.url.path == "/v1/search":
+            bad_pool = json.loads(request.content)["query"] == "Original malformed pool"
+            return httpx2.Response(200, json={"hits": hits if bad_pool else []})
+        return httpx2.Response(200, json=_answer_payload())
+
+    status, report, calls, _ = http_answer_eval(respond, entries)
+    assert status == 0
+    assert report["metrics"]["queries"] == report["metrics"]["judged"] == 2
+    assert report["metrics"]["errors"] == 0
+    assert [r["verdict"] for r in report["results"]] == ["pass", "pass"]
+    assert report["results"][0]["hit_doc_ids"] is None
+    assert "citation_recall" not in report["results"][0]
+    assert len([r for r in calls if r.url.path == "/v1/answer"]) == 2
+    assert "PRIVATE SEARCH DETAIL" not in json.dumps(report) + capsys.readouterr().err
+
+
+def test_http_answer_eval_uses_a_real_http_agent_and_preserves_query_bytes(tmp_path, monkeypatch):
+    """Socket boundary: an HTTP deployment, including a Route path prefix."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    import mainframe_rag.eval.answers as answers
+    import mainframe_rag.manifest as manifest
+
+    query = "Original question אב; $(touch SENTINEL) 'quoted'\nwith a second line"
+    observed = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def reply(self, body):
+            data = json.dumps(body).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def do_GET(self):
+            observed.append(("GET", self.path, None))
+            if self.path != "/route/healthz":
+                self.send_error(404)
+                return
+            self.reply({"status": "ok", "qdrant": True, "embed": True,
+                        "representation": "record_only_drift", "rerank": None})
+
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            observed.append(("POST", self.path, body))
+            if self.path == "/route/v1/search":
+                self.reply({"hits": []})
+            elif self.path == "/route/v1/answer":
+                if body["query"] == query:
+                    self.reply(_answer_payload(answer="Original grounded answer."))
+                else:
+                    self.reply(_answer_payload(answer=ZERO_HITS_ANSWER, citations=[]))
+            else:
+                self.send_error(404)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    worker = threading.Thread(target=server.serve_forever, daemon=True)
+    worker.start()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(answers, "load_settings", lambda: pytest.fail("remote eval touched local Settings"))
+    monkeypatch.setattr(manifest, "get_git_sha", lambda: "e" * 40)
+    golden = tmp_path / "original.jsonl"
+    golden.write_text("\n".join(json.dumps(e) for e in [
+        _entry(id="HTTP-ANSWER", query=query, gold_must_contain=["Original grounded"]),
+        _entry(id="HTTP-REFUSAL", query="Original absent fixture", expected_behavior="abstain"),
+    ]) + "\n")
+    target = f"http://127.0.0.1:{server.server_port}/route"
+    try:
+        status = answers.main([
+            "--agent-url", target + "/", "--golden", str(golden), "--all",
+            "--temperature", "0.2", "--request-timeout", "12",
+            "--out", str(tmp_path / "report.json"),
+        ])
+    finally:
+        server.shutdown()
+        server.server_close()
+        worker.join(timeout=2)
+    assert not worker.is_alive()
+    assert status == 0
+    assert [(method, path) for method, path, _ in observed] == [
+        ("GET", "/route/healthz"), ("POST", "/route/v1/search"),
+        ("POST", "/route/v1/answer"), ("POST", "/route/v1/search"),
+        ("POST", "/route/v1/answer"),
+    ]
+    assert observed[2][2] == {"query": query, "temperature": 0.2}
+    report = json.loads((tmp_path / "report.json").read_text())
+    assert report["metrics"]["queries"] == 2
+    assert report["metrics"]["errors"] == 0
+    assert report["metrics"]["answer_n"] == report["metrics"]["abstain_n"] == 1
+    assert report["metrics"]["answer_pass_rate"] == report["metrics"]["abstain_pass_rate"] == 1.0
+    assert report["deployment"]["agent_url"] == target
+    assert report["deployment"]["git_sha"] is None
+    assert report["deployment"]["image_digest"] is None
+    assert report["params"]["request_timeout"] == 12.0
+    recorded = json.loads((tmp_path / "evals/runs/eval_answers_runs.jsonl").read_text())
+    assert recorded["evaluator_git_sha"] == "e" * 40
+    assert recorded["git_sha"] == "unknown"
+    assert not (tmp_path / "SENTINEL").exists()
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "601", "nan", "inf", "bad"])
+def test_http_answer_eval_rejects_invalid_timeout_before_io(monkeypatch, value):
+    import mainframe_rag.eval.answers as answers
+
+    monkeypatch.setattr(answers, "resolve_golden_paths", lambda *a: pytest.fail("invalid input reached dataset IO"))
+    with pytest.raises(SystemExit) as exc:
+        answers.main(["--agent-url", "http://agent:8080", "--request-timeout", value])
+    assert exc.value.code == 2
+
+
+@pytest.mark.parametrize("value", [
+    "", "agent:8080", "file:///tmp/agent", "http://user:private@agent",
+    "http://agent?private=secret", "http://agent/#private", "http://agent:bad",
+])
+def test_http_answer_eval_rejects_unsafe_target_before_io(monkeypatch, value):
+    import mainframe_rag.eval.answers as answers
+
+    monkeypatch.setattr(answers, "resolve_golden_paths", lambda *a: pytest.fail("invalid input reached dataset IO"))
+    with pytest.raises(SystemExit) as exc:
+        answers.main(["--agent-url", value])
+    assert exc.value.code == 2
 
 
 # ----------------------------------------------------------------- refusal helper

@@ -153,6 +153,7 @@ keeps its separate fixed rehearsal inputs.
 | `EMBED_MODE` | `eval:retrieval EMBED_MODE=vllm` | Eval-family default `hash`; script-read and scoped to the selected task. Explicit empty is preserved and fails validation. Baselines derive from effective mode; mismatch/skipped gates are not passes. |
 | `VENUE` | `eval:retrieval VENUE=rc` | Eval-family default `dev`; `eval:holdout` forces `rc`. Hash/dev settings never become air-gap defaults. |
 | `N`, `RESTORE`, `REPEATS`, `GOLDEN`, `OUT`, `REPORT`, `BASELINE`, `BASE`, `CURRENT`, `BENCH_REPEATS` | `eval:answers N=5` | Empty uses the documented task fallback; nonempty values pass through exactly. This preserves the former Make `$(or)` behavior. |
+| `AGENT_URL` | `eval:answers AGENT_URL=http://127.0.0.1:8087` | Optional deployed HTTP target; unset/empty keeps TestClient. Nonempty CLI selection overrides ambient and passes as one exact argument. |
 | `AGENT_URL`, `CONCURRENCY`, `DURATION`, `REQUEST_TIMEOUT`, `HARNESS_L3_BASELINE` | `eval:harness:l3 AGENT_URL=…` | Declared defaults (including `:8080`, `8`/`30`/`30` and mode-keyed baseline); explicit empty is preserved. |
 | Optional flags (`QUERY`, `LIMIT`, …) | `local:query QUERY="text" LIMIT=5` | Unset/empty flags are omitted. Quoted positional arguments preserve spaces, Unicode and shell metacharacters as literal data. |
 | Optional environment (`CORPUS_DIR`, `UI_ENABLED`, …) | `local:stack CORPUS_DIR=/data` | Only set, nonempty values are exported for that operation; otherwise the script default applies. |
