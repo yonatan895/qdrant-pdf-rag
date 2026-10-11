@@ -24,6 +24,7 @@ import sys
 import threading
 import time
 import uuid
+from collections.abc import Iterator
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
@@ -390,8 +391,15 @@ def _get_qdrant(settings: Settings) -> QdrantPoints:
 
 
 @contextmanager
-def _placement_clients(settings: Settings, main_client):
+def _placement_clients(
+    settings: Settings, main_client: QdrantReader
+) -> Iterator[dict[str, QdrantReader] | None]:
     """Endpoint -> client map for the ACTIVE-copy cutover gate (issue #360).
+
+    Every handle is typed as the read-only protocol: the gate only reads,
+    and the explicit 1/1/1 profile hands back the publisher's own client,
+    so a write through the map must fail typecheck like any other write in
+    a certification check.
 
     Yields None when no explicit distribution policy is selected (dev
     passthrough — the gate is a no-op). Otherwise every direct peer
@@ -424,7 +432,7 @@ def _placement_clients(settings: Settings, main_client):
         )
     from qdrant_client import QdrantClient
 
-    mapping = {
+    mapping: dict[str, QdrantReader] = {
         endpoint: QdrantClient(
             url=endpoint,
             api_key=settings.qdrant_api_key,

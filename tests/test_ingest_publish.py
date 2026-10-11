@@ -4730,7 +4730,12 @@ from mainframe_rag.ingest.publish import (
 )
 from mainframe_rag.ingest.qdrant_io import delete_by_doc, swap_alias_to
 from mainframe_rag.ingest.representation import check_ingest_compatible
-from mainframe_rag.ingest.run_ingest import _certify_live, _recertify_live, _resolve_publication
+from mainframe_rag.ingest.run_ingest import (
+    _certify_live,
+    _placement_clients,
+    _recertify_live,
+    _resolve_publication,
+)
 from mainframe_rag.ports import QdrantReader
 from pathlib import Path
 """
@@ -4762,6 +4767,10 @@ def writes(r: QdrantReader, s: Settings) -> None:
                                version=None, force_reingest=False, prewalked=[],
                                retire_docs=None, rules_v="rules")
     _recertify_live(res, r, Path("progress"), s, prewalked=[], rules_v="rules")
+    with _placement_clients(s, r) as placement:
+        if placement is not None:
+            for peer in placement.values():
+                peer.delete_collection("staging")
 """)
     rejected = subprocess.run([*command, str(bad)], capture_output=True, text=True, check=False)
     assert rejected.returncode == 1, rejected.stdout + rejected.stderr
@@ -4770,4 +4779,7 @@ def writes(r: QdrantReader, s: Settings) -> None:
                 'expected "QdrantPoints"') in rejected.stdout
     assert ('Argument 2 to "_recertify_live" has incompatible type "QdrantReader"; '
             'expected "QdrantPoints"') in rejected.stdout
-    assert "Found 4 errors" in rejected.stdout
+    # The placement map (review of #699): the explicit 1/1/1 profile yields
+    # the publisher's own client, so its handles must be readers too.
+    assert '"QdrantReader" has no attribute "delete_collection"' in rejected.stdout
+    assert "Found 5 errors" in rejected.stdout
