@@ -16,7 +16,7 @@ from qdrant_client import models
 from mainframe_rag.config import Settings
 from mainframe_rag.ingest.chunk import Chunk
 from mainframe_rag.ingest.ibm_pdf import ParsedDoc
-from mainframe_rag.ingest.identity import source_rev_key
+from mainframe_rag.ingest.payload import point_payload
 from mainframe_rag.ingest.rules_version import extraction_rules_version
 from mainframe_rag.ports import QdrantPoints, QdrantReader, SparseVector
 
@@ -481,47 +481,8 @@ def upsert_chunks(
         )
     points: list[models.PointStruct] = []
     for chunk, (dense, (sparse_idx, sparse_val)) in zip(chunks, vectors):
-        payload: dict[str, Any] = {
-            "vendor": parsed.vendor,
-            "product": parsed.product,
-            "version": parsed.version,
-            "doc_id": chunk.doc_id,
-            # Source-revision key (issue #361): the destructive key since
-            # the 361B migration — locks, deletes, completions, and chunk
-            # ids all scope to it. Computed from the same labels the
-            # planner gates on.
-            "source_rev": source_rev_key(
-                parsed.vendor, parsed.product, parsed.version, parsed.sha256
-            ),
-            "title": parsed.title,
-            "heading_path": chunk.heading_path,
-            "page_label": chunk.page_label,
-            "page_start": chunk.page_start,
-            # Physical span end, 0-based inclusive (issue #271): citations
-            # fall back to "p. PDF n–m" when printed labels cannot locate
-            # the whole span. Not indexed and not part of chunk identity.
-            "page_end": chunk.page_end if chunk.page_end is not None else chunk.page_start,
-            "chunk_type": chunk.chunk_type,
-            "message_ids": chunk.message_ids,
-            "members": chunk.members,
-            # Completion-code entries (issue #591). Without this key the
-            # keyword index exists but stays empty and every code query's
-            # must-filter matches nothing, so the family would be inert.
-            "system_codes": chunk.system_codes,
-            "sha256": parsed.sha256,
-            "rules_v": rules_v,
-            "text": chunk.text,
-        }
-        # Atomic-unit spans (issue #368): stored only for structured chunks
-        # (non-empty span list). Prose chunks omit the key, so their
-        # payloads stay byte-identical to before; legacy points without the
-        # key pack via the shared fallback detector. Never indexed.
-        if chunk.units:
-            payload["units"] = [
-                [span.start, span.end, span.kind] for span in chunk.units
-            ]
-        if contexts and (context := contexts.get(chunk.chunk_id)):
-            payload["context"] = context
+        context = contexts.get(chunk.chunk_id) if contexts else None
+        payload = point_payload(parsed, chunk, rules_v, context)
         points.append(
             models.PointStruct(
                 id=chunk.chunk_id,

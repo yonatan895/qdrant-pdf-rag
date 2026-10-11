@@ -10,6 +10,7 @@ Hermetic: no Qdrant, no network — fakes for the port, temp files for the
 hash seam."""
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -39,7 +40,76 @@ def test_version_is_stable_and_short() -> None:
 
 def test_version_covers_all_payload_producers() -> None:
     names = {p.name for p in rule_module_paths()}
-    assert names == {"regexes.py", "ibm_pdf.py", "chrome.py", "chunk.py", "classify.py"}
+    assert names == {
+        "regexes.py", "ibm_pdf.py", "chrome.py", "chunk.py", "classify.py",
+        "walk.py", "identity.py", "payload.py",
+    }
+
+
+def _package_imports(path) -> set[str]:
+    """Every `mainframe_rag.*` module a source file imports, at any depth
+    (function-local and TYPE_CHECKING imports included: conservative)."""
+    import ast
+
+    found: set[str] = set()
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if isinstance(node, ast.ImportFrom) and node.module and node.module.startswith("mainframe_rag"):
+            found.add(node.module)
+        elif isinstance(node, ast.Import):
+            found.update(a.name for a in node.names if a.name.startswith("mainframe_rag"))
+    return found
+
+
+def test_rule_modules_import_only_rule_modules() -> None:
+    """The hashed set is closed under package imports. A rule module that
+    imports payload-shaping code from outside the set lets that code change
+    stored payloads without changing the version, the silent desync #124
+    exists to prevent (walk.py labels, identity.py keys and the payload
+    mapping in qdrant_io.py were outside it)."""
+    import importlib.util
+
+    rules = {p.resolve() for p in rule_module_paths()}
+    escapes = []
+    for path in sorted(rules):
+        for module in sorted(_package_imports(path)):
+            spec = importlib.util.find_spec(module)
+            origin = spec.origin if spec is not None else None
+            if origin is None or Path(origin).resolve() not in rules:
+                escapes.append(f"{path.name} imports {module}")
+    assert escapes == [], escapes
+
+
+def test_context_normalization_recipe_is_a_rule_module() -> None:
+    """The stored contextual prefix passes through normalize_context (review
+    of #701): its recipe must change the version like any payload producer,
+    and the context producer must use that very function."""
+    import inspect
+
+    from mainframe_rag.ingest import context
+    from mainframe_rag.ingest.payload import normalize_context
+
+    assert Path(inspect.getfile(normalize_context)).resolve() in {
+        p.resolve() for p in rule_module_paths()
+    }
+    assert context.normalize_context is normalize_context
+
+
+def test_stored_payload_is_owned_by_a_rule_module() -> None:
+    """upsert_chunks stores exactly point_payload's mapping, and that
+    mapping lives in a hashed module: adding or deriving a stored field
+    anywhere else would bypass the version."""
+    import inspect
+
+    from mainframe_rag.ingest.payload import point_payload
+
+    assert Path(inspect.getfile(point_payload)).resolve() in {
+        p.resolve() for p in rule_module_paths()
+    }
+    client, parsed, chunk = _upsert_one({"c1": "situating gist"})
+    assert client.points[0].payload == point_payload(
+        parsed, chunk, extraction_rules_version(), "situating gist"
+    )
+    assert client.points[0].payload["context"] == "situating gist"
 
 
 def test_hash_changes_when_rules_change(tmp_path) -> None:
@@ -79,6 +149,11 @@ def test_should_skip_force_reingest_never_skips() -> None:
 
 # ---------------------------------------------------------------- payload
 def test_upsert_payload_carries_rules_v() -> None:
+    client, _parsed, _chunk = _upsert_one()
+    assert client.points[0].payload["rules_v"] == extraction_rules_version()
+
+
+def _upsert_one(contexts=None):
     from types import SimpleNamespace
 
     from mainframe_rag.ingest.ibm_pdf import ParsedDoc
@@ -90,8 +165,6 @@ def test_upsert_payload_carries_rules_v() -> None:
         def upsert(self, collection, *, points, wait=True):
             self.points.extend(points)
             return SimpleNamespace()
-
-    from pathlib import Path
 
     parsed = ParsedDoc(
         path=Path("x.pdf"), sha256="a" * 64, doc_id="SA22-0000-00", title="t",
@@ -106,8 +179,8 @@ def test_upsert_payload_carries_rules_v() -> None:
     )
     settings = _settings()
     client = FakeClient()
-    upsert_chunks(client, settings, parsed, [chunk], [([0.0] * 8, ([0], [1.0]))])
-    assert client.points[0].payload["rules_v"] == extraction_rules_version()
+    upsert_chunks(client, settings, parsed, [chunk], [([0.0] * 8, ([0], [1.0]))], contexts)
+    return client, parsed, chunk
 
 
 def _settings():

@@ -549,9 +549,14 @@ thread pool.
   skip. Inventory `upserted`/`skipped` lines carry the generation binding
   (`generation_id`, `chunk_ids_digest`, `content_digest`); pre-#359 lines
   without it re-verify in Qdrant.
-  Extraction rules version (`rules_v`) is a 16-hex SHA-256 over the 5 payload-producing
+  Extraction rules version (`rules_v`) is a 16-hex SHA-256 over the 8 payload-producing
   modules (`regexes.py`, `ingest/ibm_pdf.py`, `ingest/chrome.py`, `ingest/chunk.py`,
-  `ingest/classify.py`). If either the PDF SHA, `rules_v`, or the representation
+  `ingest/classify.py`, `ingest/walk.py` (source labels), `ingest/identity.py`
+  (revision keys) and `ingest/payload.py` (the stored field mapping)). The set is
+  closed under package imports: `tests/test_rules_version.py` fails if a rule module
+  imports one outside it, or if any field is stored other than through
+  `payload.point_payload`. Any edit to these files, comments included, changes
+  `rules_v` and requires a `--reingest` of existing collections. If either the PDF SHA, `rules_v`, or the representation
   fingerprint mismatches, skip is refused: the document is re-parsed and existing
   points in Qdrant are deleted and re-upserted.
   Additionally, `run_ingest` checks `stored_rules_version(client, settings)` at startup;
