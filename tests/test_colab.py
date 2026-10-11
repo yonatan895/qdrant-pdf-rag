@@ -120,7 +120,9 @@ if name=='colab':
             path('/content/colab-preflight.json').write_text(json.dumps(report))
         else:
             diagnostic({'stage':'transport_ready'})
-            until=time.monotonic()+12
+            lifetime=min(30,json.loads(path('/content/model-profile.json').read_text())['deadline_seconds'])
+            assert type(lifetime) is int and lifetime>0
+            until=time.monotonic()+lifetime
             while not path('/content/colab-stop').exists() and time.monotonic()<until:
                 if path('/content/colab-transport-ok').exists():
                     report=root/'original-runtime-observed.json'
@@ -131,6 +133,12 @@ if name=='colab':
     else: raise AssertionError('unsupported real CLI command: '+cmd)
 elif name=='ssh':
     assert '-N' in args and args.count('-L')==4
+    lifetime=min(30,json.loads(path('/content/model-profile.json').read_text())['deadline_seconds'])
+    assert type(lifetime) is int and lifetime>0
+    until=time.monotonic()+lifetime
+    startup=float(os.environ.get('FAKE_SSH_START_SECONDS','0'))
+    assert 0<=startup<=13, 'fake SSH startup must remain bounded'
+    time.sleep(startup)
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
             self.send_response(200); self.end_headers(); self.wfile.write(b'{"status":"ok"}')
@@ -146,7 +154,6 @@ elif name=='ssh':
     for server in servers:
         threading.Thread(target=server.serve_forever,daemon=True).start()
     if scenario=='tunnel_loss': time.sleep(.5); sys.exit(7)
-    until=time.monotonic()+12
     while time.monotonic()<until: time.sleep(.1)
 elif name=='docker':
     networks_file=root/'gateway-networks.json'
@@ -1308,6 +1315,35 @@ def test_successful_cpu_receipt_is_created_only_after_exact_release_absence(lab)
     assert json.loads((root / "sessions.json").read_text()) == {}
 
 
+def test_cpu_transport_survives_delayed_listener_inside_run_deadline_then_next_run_works(lab, monkeypatch):
+    root, state, command = lab
+    manifest = json.loads((state / "manifest.json").read_text())
+    assert manifest["profile"]["deadline_seconds"] == 30
+    # The public controller has a 20-second work window. Its boundary doubles
+    # must not disappear at 12 seconds while that valid work is still ongoing.
+    with monkeypatch.context() as delayed:
+        delayed.setenv("FAKE_SSH_START_SECONDS", "12.5")
+        result = subprocess.run(command + ["run", "--state", str(state), "--approve-cu", "20",
+                                           "--", "/bin/true"],
+                                capture_output=True, text=True, timeout=24, check=False)
+    assert result.returncode == 0, result.stdout + result.stderr
+    receipt = json.loads((state / "transport-receipt.json").read_text())
+    assert receipt["released"] is True and receipt["workload_succeeded"] is True
+    assert receipt["release_evidence"]["session"] == manifest["session"]
+    assert receipt["release_evidence"]["endpoint"] == "endpoint-owned"
+    assert receipt["release_evidence"]["absent"] is True
+    assert json.loads((root / "sessions.json").read_text()) == {}
+    assert json.loads((root / "gateway-networks.json").read_text()) == {}
+
+    following = _prepare_new(state, root / "ordinary-after-delayed-listener")
+    assert _run_fake(following) == 0
+    next_receipt = json.loads((following / "transport-receipt.json").read_text())
+    assert next_receipt["released"] is True and next_receipt["workload_succeeded"] is True
+    assert next_receipt["release_evidence"]["absent"] is True
+    assert json.loads((root / "sessions.json").read_text()) == {}
+    assert json.loads((root / "gateway-networks.json").read_text()) == {}
+
+
 @pytest.mark.parametrize("failure", ["workload", "download_fail", "stop_fail"])
 def test_failed_cpu_run_has_no_receipt_and_recovery_allows_a_fresh_normal_run(lab, monkeypatch, failure):
     root, state, _ = lab
@@ -2042,7 +2078,7 @@ def test_two_hour_poll_metadata_is_bounded_linear_and_critical_state_is_immediat
     tick = [0]
 
     def usage(*args, **kwargs):
-        assert args == ("usage",) and kwargs == {}
+        assert args == ("usage",) and kwargs == {"cleanup": False, "seconds": 30}
         output = (f"Current balance: {200 - tick[0] / 10000:.4f} compute units\n"
                   "Usage rate: 8.00/hr\nActive assignments: 1\n")
         return subprocess.CompletedProcess(["original-fake-colab"], 0, output, "")
