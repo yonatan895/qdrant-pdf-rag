@@ -6,9 +6,11 @@ any docker call) and dummy sk-test-* keys, so no daemon, no network, no GPU.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -150,6 +152,7 @@ def test_env_file_handoff_written_mode_600(tmp_path):
         "export LLM_API_KEY=sk-test-llm",
         "export EMBED_BASE_URL=http://localhost:4000/v1",
         "export EMBED_API_KEY=sk-test-embed",
+        "export EMBED_MODEL_REVISION=local:Qwen/Qwen3-Embedding-0.6B",
         "export RERANK_ENABLED=true",
         "export RERANK_BASE_URL=http://localhost:4000/v1",
         "export RERANK_API_KEY=sk-test-rerank",
@@ -164,6 +167,97 @@ def test_env_file_absent_when_unset(tmp_path):
     assert proc.returncode == 0, proc.stderr
     _read_cfg(proc)
     assert list(tmp_path.glob("*.env")) == []
+
+
+@pytest.mark.parametrize("revision", [
+    "1d8ad4ca9b3dd8059ad90a75d4983776a23d44af",
+    " rev:tag | 'quoted' \"$HOME\" $(touch \"$REVISION_CANARY\") `touch \"$REVISION_CANARY\"`\nnext \tend\n",
+    "",
+])
+def test_explicit_embedding_revision_survives_sourced_handoff(tmp_path, revision):
+    env_file = tmp_path / "gateway.env"
+    proc = _render({
+        "GATEWAY_ENV_FILE": str(env_file),
+        "GATEWAY_EMBED_MODEL": "Qwen/Qwen3-Embedding-8B",
+        "GATEWAY_EMBED_MODEL_REVISION": revision,
+    })
+    assert proc.returncode == 0, proc.stderr
+    _read_cfg(proc)
+    consumer = subprocess.run(
+        ["sh", "-c", '. "$1"; printenv EMBED_MODEL_REVISION', "consumer", str(env_file)],
+        capture_output=True, text=True, check=False,
+        env={**os.environ, "REVISION_CANARY": str(tmp_path / "executed")},
+    )
+    assert consumer.returncode == 0, consumer.stderr
+    assert consumer.stdout == (revision or "local:Qwen/Qwen3-Embedding-8B") + "\n"
+    assert not (tmp_path / "executed").exists()
+
+
+@pytest.mark.parametrize("revision", [
+    "1d8ad4ca9b3dd8059ad90a75d4983776a23d44af",
+    " rev:tag | 'quoted' \"$HOME\" $(touch \"$REVISION_CANARY\")\nnext \tend\n",
+])
+def test_gateway_revision_reaches_stack_ingest_and_serving(tmp_path, revision):
+    """Real gateway producer and stack consumer; fake only external processes.
+
+    Stop after the serving process records its environment, before any app runs.
+    A pre-exported EMBED_MODEL_REVISION must not override the explicit gateway
+    revision and a correct generated string alone does not prove child export.
+    """
+    scripts = tmp_path / "checkout" / "scripts"
+    scripts.mkdir(parents=True)
+    for name in ("run_local_gateway.sh", "run_local_stack.sh"):
+        shutil.copyfile(REPO / "scripts" / name, scripts / name)
+    shutil.copytree(REPO / "scripts" / "gateway", scripts / "gateway")
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    (bindir / "docker").write_text("#!/bin/sh\nexit 99\n")
+    curl = bindir / "curl"
+    curl.write_text('''#!/bin/sh
+case "$*" in
+    */healthz*) printf '503' ;;
+    *) printf '200' ;;
+esac
+''')
+    python = bindir / "consumer-python"
+    python.write_text(f"#!{sys.executable}\n" + '''import json, os, sys
+with open(os.environ["CONSUMER_LOG"], "a") as output:
+    output.write(json.dumps({"argv": sys.argv[1:],
+        "revision": os.environ.get("EMBED_MODEL_REVISION"),
+        "model": os.environ.get("EMBED_MODEL"),
+        "dimension": os.environ.get("DENSE_DIM")}) + "\\n")
+if sys.argv[1:3] == ["-m", "uvicorn"]:
+    sys.exit(23)
+''')
+    for file in bindir.iterdir():
+        file.chmod(0o755)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    log = tmp_path / "consumers.jsonl"
+    result = subprocess.run(
+        ["sh", str(scripts / "run_local_stack.sh")],
+        capture_output=True, text=True, check=False, timeout=15,
+        env={**os.environ, **DUMMY_KEYS,
+            "PATH": f"{bindir}:{os.environ['PATH']}",
+            "PY": str(python), "CONSUMER_LOG": str(log),
+            "LOCAL_STACK_DRYRUN": "0", "GATEWAY_DRYRUN": "1",
+            "GATEWAY_ENV_FILE": str(tmp_path / "gateway.env"),
+            "LOCAL_STACK_LOG_DIR": str(tmp_path), "CORPUS_DIR": str(corpus),
+            "GATEWAY_EMBED_MODEL": "Qwen/Qwen3-Embedding-8B",
+            "GATEWAY_EMBED_MODEL_REVISION": revision,
+            "EMBED_MODEL_REVISION": "stale-preexported-revision", "DENSE_DIM": "4096",
+            "REVISION_CANARY": str(tmp_path / "executed"), "FORCE_START": "1",
+            "TMPDIR": str(tmp_path)},
+    )
+    assert result.returncode == 1 and "agent exited early" in result.stderr, result.stderr
+    calls = [json.loads(line) for line in log.read_text().splitlines()]
+    for role in ("mainframe_rag.ingest.run_ingest", "uvicorn"):
+        (consumer,) = [call for call in calls if call["argv"][:2] == ["-m", role]]
+        assert consumer["revision"] == revision
+        assert consumer["model"] == "Qwen/Qwen3-Embedding-8B"
+        assert consumer["dimension"] == "4096"
+    assert not (tmp_path / "executed").exists()
+    assert not (tmp_path / "gateway.env").exists(), "stack cleanup owns the private handoff"
 
 
 @pytest.mark.parametrize("var", ["GATEWAY_MASTER_KEY", "GATEWAY_LLM_KEY", "GATEWAY_EMBED_KEY", "GATEWAY_RERANK_KEY"])

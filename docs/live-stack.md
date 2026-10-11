@@ -196,9 +196,12 @@ export RERANK_ENABLED=false  # selected two-backend topology; source first
 export DENSE_DIM QDRANT_URL QDRANT_COLLECTION
 ```
 
-The gateway handoff provides `EMBED_MODEL_REVISION` as a **local simulation**
-label (`local:<model-id>`); it is not immutable production weight attestation.
-Production requires the platform-declared revision through the
+Before launching a local gateway/stack, set `GATEWAY_EMBED_MODEL_REVISION` to the
+verified immutable embedding weight identity and `DENSE_DIM` to its dimension.
+The generated handoff exports that exact revision to both ingest and serving.
+Unset or empty input retains the **local simulation** label (`local:<model-id>`),
+which is not immutable production weight attestation. Production requires the
+platform-declared revision through the
 [configuration contract](deploy.md#configuration-contract). Use the exact served
 model IDs; a short/basename guess can fail or route incorrectly. Explicit CLI,
 Task and environment selections must apply or fail nonzero; ambiguous discovery

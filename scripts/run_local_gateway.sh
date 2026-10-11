@@ -44,6 +44,9 @@ GATEWAY_RESET_KEYS="${GATEWAY_RESET_KEYS:-0}"
 
 GATEWAY_REASONING_MODEL="${GATEWAY_REASONING_MODEL:-google/gemma-4-E4B-it-qat-mobile-ct}"
 GATEWAY_EMBED_MODEL="${GATEWAY_EMBED_MODEL:-Qwen/Qwen3-Embedding-0.6B}"
+# Immutable weight identity attested by the caller, not inferred from an alias.
+# Existing local profiles retain their simulation label when unset or empty.
+GATEWAY_EMBED_MODEL_REVISION="${GATEWAY_EMBED_MODEL_REVISION:-local:${GATEWAY_EMBED_MODEL}}"
 GATEWAY_RERANK_MODEL="${GATEWAY_RERANK_MODEL:-BAAI/bge-reranker-v2-m3}"
 GATEWAY_REASONING_URL="${GATEWAY_REASONING_URL:-http://host.docker.internal:8000/v1}"
 GATEWAY_EMBED_URL="${GATEWAY_EMBED_URL:-http://host.docker.internal:8001/v1}"
@@ -93,6 +96,9 @@ stop_gateway() {
 # python3 mints keys and reads JSON below; docker is checked after the
 # DRYRUN exit so render-only runs stay hermetic (CI has no daemon).
 command -v python3 >/dev/null 2>&1 || die "python3 is required (key minting + JSON reads)"
+# The handoff is sourced as shell code. Preserve the opaque revision literally,
+# including whitespace/quotes, without interpreting it as commands on sourcing.
+EMBED_MODEL_REVISION_SH="$(python3 -c 'import shlex, sys; print(shlex.quote(sys.argv[1]))' "$GATEWAY_EMBED_MODEL_REVISION")"
 
 # Operator-supplied keys stay in a tight charset (they render into YAML);
 # generated keys are sk-local- + 16 hex bytes.
@@ -224,10 +230,8 @@ export LLM_API_KEY=${GATEWAY_LLM_KEY}
 export EMBED_BASE_URL=${BASE}/v1
 export EMBED_MODEL=${GATEWAY_EMBED_MODEL}
 export EMBED_API_KEY=${GATEWAY_EMBED_KEY}
-# Dev-only attestation (issue #362): the local gateway serves exactly this
-# model id, so it doubles as the revision the agent/ingest gate requires.
-# Prod declares the platform team's immutable revision instead.
-export EMBED_MODEL_REVISION="local:${GATEWAY_EMBED_MODEL}"
+# Caller-attested immutable revision, or the legacy local simulation label.
+export EMBED_MODEL_REVISION=${EMBED_MODEL_REVISION_SH}
 export RERANK_ENABLED=true
 export RERANK_BASE_URL=${BASE}/v1
 export RERANK_MODEL=${GATEWAY_RERANK_MODEL}
@@ -388,7 +392,7 @@ cat <<EOF
     recommendation:
 
 export LLM_BASE_URL=${BASE}/v1 LLM_MODEL_REASONING=${GATEWAY_REASONING_MODEL} LLM_API_KEY=${GATEWAY_LLM_KEY}
-export EMBED_BASE_URL=${BASE}/v1 EMBED_MODEL=${GATEWAY_EMBED_MODEL} EMBED_API_KEY=${GATEWAY_EMBED_KEY} DENSE_DIM=1024 EMBED_MODEL_REVISION="local:${GATEWAY_EMBED_MODEL}"
+export EMBED_BASE_URL=${BASE}/v1 EMBED_MODEL=${GATEWAY_EMBED_MODEL} EMBED_API_KEY=${GATEWAY_EMBED_KEY} DENSE_DIM=${DENSE_DIM:-1024} EMBED_MODEL_REVISION=${EMBED_MODEL_REVISION_SH}
 export RERANK_ENABLED=true RERANK_BASE_URL=${BASE}/v1 RERANK_MODEL=${GATEWAY_RERANK_MODEL} RERANK_API_KEY=${GATEWAY_RERANK_KEY}
 
 Ctrl-C stops the gateway AND its postgres (keys stay in the volume).
