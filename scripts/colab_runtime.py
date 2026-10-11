@@ -379,6 +379,7 @@ SOFTWARE_PROBE = r'''
 import importlib.metadata as metadata, json, pathlib, platform, sys, torch
 pathlib.Path(sys.argv[1]).write_text(json.dumps({"python": platform.python_version(), "vllm": metadata.version("vllm"),
                   "transformers": metadata.version("transformers"), "torch": metadata.version("torch"),
+                  "tokenizers": metadata.version("tokenizers"),
                   "huggingface_hub": metadata.version("huggingface-hub"), "cuda_build": torch.version.cuda,
                   "cuda_available": torch.cuda.is_available()}))
 '''
@@ -523,7 +524,10 @@ class RemoteRuntime:
                 raise TypeError("observed remote resources must be an object")
             for field in ("available_ram_mib", "free_disk_mib", *(('vram_mib',) if self.gpu else ())):
                 value = observed.get(field)
-                if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
+                if type(value) not in (int, float):
+                    raise RuntimeError("cannot verify finite observed remote resources")
+                assert isinstance(value, (int, float))
+                if not math.isfinite(value) or value <= 0:
                     raise RuntimeError("cannot verify finite observed remote resources")
             if self.gpu:
                 driver = observed.get("driver_version")
@@ -606,12 +610,15 @@ class RemoteRuntime:
         software = self.read_observed(observed)
         expected = {"vllm": "0.28.0", "transformers": "5.15.0", "torch": pins["torch"],
                     "huggingface_hub": pins["huggingface-hub"], "cuda_build": "13.0"}
-        for field in ("python", *expected):
+        if "tokenizers" in pins:
+            expected["tokenizers"] = pins["tokenizers"]
+        for field in ("python", "tokenizers", *expected):
             if not isinstance(software.get(field), str):
                 raise TypeError("observed inference software versions must be strings")
         if type(software.get("cuda_available")) is not bool:
             raise TypeError("observed CUDA availability must be a boolean")
         if (len(software["python"]) > 64 or not re.fullmatch(r"3\.12\.[0-9]+", software["python"])
+                or not 1 <= len(software["tokenizers"]) <= 64
                 or any(software[field] != version for field, version in expected.items())
                 or software["cuda_available"] is not True):
             raise RuntimeError("observed inference software does not match the admitted reference")
@@ -691,8 +698,12 @@ class RemoteRuntime:
     def start_models(self) -> None:
         for server in self.profile["servers"]:
             self.tick()
-            child = self.processes.start(list(server["argv"]), server["role"])
+            argv = list(server["argv"])
+            child = self.processes.start(argv, server["role"])
             self.background.append(child)
+            manifest = next(model for model in self.report["models"] if model["model_id"] == server["model_id"])
+            exact_argv = json.dumps(argv, sort_keys=True, separators=(",", ":"), allow_nan=False)
+            manifest["server_argv_sha256"] = hashlib.sha256(exact_argv.encode()).hexdigest()
             self.wait_model(server, child)
             self.check()
             timeout = min(30, max(.01, self.deadline - self.clock()))

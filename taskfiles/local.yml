@@ -33,6 +33,9 @@ tasks:
       TASK_COLAB_CORPUS: '{{.PRODUCTION_CORPUS_DIR}}'
       TASK_COLAB_GOLDEN: '{{.PRODUCTION_GOLDEN_PATH}}'
       TASK_COLAB_INVENTORY: '{{.COLAB_INVENTORY}}'
+      TASK_COLAB_SOURCE_INVENTORY: '{{.COLAB_SOURCE_INVENTORY}}'
+      TASK_COLAB_EMBEDDING_EVIDENCE: '{{.COLAB_EMBEDDING_EVIDENCE}}'
+      TASK_COLAB_PRODUCTION_APPROVAL: '{{.COLAB_PRODUCTION_APPROVAL}}'
       TASK_COLAB_DATA_STATE: '{{.COLAB_DATA_STATE}}'
       TASK_COLAB_KUBECONFIG: '{{.COLAB_KUBECONFIG}}'
       TASK_COLAB_KUBE_CONTEXT: '{{.COLAB_KUBE_CONTEXT}}'
@@ -67,6 +70,9 @@ tasks:
         if [ -n "${TASK_COLAB_CORPUS:-}" ]; then set -- "$@" --corpus "$TASK_COLAB_CORPUS"; fi;
         if [ -n "${TASK_COLAB_GOLDEN:-}" ]; then set -- "$@" --golden "$TASK_COLAB_GOLDEN"; fi;
         if [ -n "${TASK_COLAB_INVENTORY:-}" ]; then set -- "$@" --inventory "$TASK_COLAB_INVENTORY"; fi;
+        if [ -n "${TASK_COLAB_SOURCE_INVENTORY:-}" ]; then set -- "$@" --source-inventory "$TASK_COLAB_SOURCE_INVENTORY"; fi;
+        if [ -n "${TASK_COLAB_EMBEDDING_EVIDENCE:-}" ]; then set -- "$@" --embedding-evidence "$TASK_COLAB_EMBEDDING_EVIDENCE"; fi;
+        if [ -n "${TASK_COLAB_PRODUCTION_APPROVAL:-}" ]; then set -- "$@" --production-approval "$TASK_COLAB_PRODUCTION_APPROVAL"; fi;
         if [ -n "${TASK_COLAB_DATA_STATE:-}" ]; then set -- "$@" --data-state "$TASK_COLAB_DATA_STATE"; fi;
         if [ -n "${TASK_COLAB_KUBECONFIG:-}" ]; then set -- "$@" --kubeconfig "$TASK_COLAB_KUBECONFIG"; fi;
         if [ -n "${TASK_COLAB_KUBE_CONTEXT:-}" ]; then set -- "$@" --kube-context "$TASK_COLAB_KUBE_CONTEXT"; fi;
@@ -95,8 +101,9 @@ tasks:
       Requires COLAB_STATE and a fresh explicit COLAB_APPROVE_CU matching
       that prepared run's cap. Caller must use the existing host resource
       guard and shared host lock; this dispatcher adds neither. Optional
-      COLAB_WORKLOAD is one executable path, never a shell command string;
-      use a private executable wrapper for arguments. Otherwise the
+      COLAB_WORKLOAD is one executable path for synthetic runs, never a
+      shell command string. Production permits only the native local:stack
+      invocation so its recipe and environment remain verifiable. Otherwise the
       controller chooses its existing CPU/local-stack workload. No login.
     env:
       TASK_COLAB_STATE: '{{.COLAB_STATE}}'

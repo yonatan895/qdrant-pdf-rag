@@ -112,6 +112,9 @@ is new for each run.
 | `COLAB_STATE`, `COLAB_GATEWAY_IMAGE` | Required fresh private state and existing gateway digest |
 | `PRODUCTION_CORPUS_DIR`, `PRODUCTION_GOLDEN_PATH` | `--corpus`, `--golden`; originals and grounded JSONL |
 | `COLAB_INVENTORY`, `COLAB_DATA_STATE` | `--inventory`, `--data-state`; census and retained ingest progress |
+| `COLAB_SOURCE_INVENTORY` | `--source-inventory`; independently discovered complete source membership and hashes |
+| `COLAB_EMBEDDING_EVIDENCE` | `--embedding-evidence`; complete pinned tokenizer/model metadata and approved pooling observations |
+| `COLAB_PRODUCTION_APPROVAL` | `--production-approval`; independently reviewed census/pooling producer identities and explicit scan ceilings |
 | `COLAB_KUBECONFIG`, `COLAB_KUBE_CONTEXT` | Explicit existing cluster identity |
 | `COLAB_NAMESPACE`, `COLAB_QDRANT_SERVICE` | Retained PVC-backed Qdrant service, not an ephemeral container |
 | `COLAB_INFERENCE_LOCK`, `COLAB_TRANSPORT_RECEIPT` | Approved wheel lock and prior CPU transport proof |
@@ -124,9 +127,10 @@ Unset/empty optional inputs preserve controller defaults. Optional ports are
 `COLAB_POLL_SECONDS`. Explicit executable overrides are `COLAB_BIN`,
 `COLAB_SSH_BIN`, `COLAB_SSH_KEYGEN_BIN`, `COLAB_DOCKER_BIN`, `COLAB_KUBECTL_BIN`.
 Task bridges values as individual quoted argv entries, including whitespace and
-delimiters. Trailing shell arguments are rejected. `COLAB_WORKLOAD` on `run` may
-name one private executable wrapper; its arguments belong inside that wrapper.
-Without it, the controller uses its existing CPU/local-stack workload.
+delimiters. Trailing shell arguments are rejected. `COLAB_WORKLOAD` on synthetic
+runs may name one private executable wrapper; its arguments belong inside that
+wrapper. Production requires the native `local:stack` invocation, with its
+prepared interpreter, source root and frozen environment.
 
 The corpus inventory must bind every source hash, document/page/chunk count,
 failure and exclusion; the golden file identity; exact 8B tokenizer revision
@@ -135,6 +139,38 @@ maximum document/query token lengths. Count actual recipe outputs with the
 pinned tokenizer. Do not truncate, drop difficult inputs, change recipes or use
 a convenient subset to make a 4096-token window pass. Historical corpus counts
 describe their own backup and are not an independent acceptance oracle.
+
+Production preparation reconciles that complete census against independently
+discovered source membership, streamed original bytes, native document/query
+recipes and approved pooling observations. Source discovery and streaming have
+explicit entry, byte and time ceilings supplied in the private approval file.
+No parsing, tokenizer/model loading or corpus copy happens during preparation.
+The selected profile supplies the exact embedding model, revision and dimension;
+conflicting explicit model environment values are refused. Other resolved native
+settings are frozen for the child, including unset optional values. Private
+`.env` dependencies are unsupported; supply settings and credentials through the
+caller environment. Hashes establish identity, while separate review establishes
+which evidence producers are trusted.
+
+The private approval file has exact schema version 1 and fields
+`pooling_producer`, `census_producer`, and `source_scan`. Each producer identity
+has `development_sha` (40 hexadecimal characters) and `source_sha256` (64).
+`source_scan` supplies positive integer `max_entries`, `max_bytes`, and
+`deadline_seconds`; the last cannot exceed the selected run deadline. These are
+independently reviewed identities and explicit operator ceilings, never values
+copied from the census to approve itself. The complete hash-locked inference
+requirements supply runtime pins, including `tokenizers`; missing pins refuse
+preparation. The approval file contains no credentials.
+
+The stable private data directory must already contain the approved
+`retained-index-binding.json` ledger. It binds compatible document/index identity
+to the actual namespace, PVC UID, PV UID, storage path and logical collection.
+An empty directory cannot establish retained-vector compatibility. Missing or
+incompatible bindings require an explicit fresh-index or rebuild decision;
+preparation never creates a compatibility assertion from unknown stored data.
+Changes confined to golden queries or controller code do not by themselves
+invalidate document compatibility. Changed document recipes, corpus roots,
+sources, tokenizer semantics or embedding geometry do.
 
 ```sh
 sh scripts/tools/run-task.sh local:colab:prepare \
@@ -155,6 +191,9 @@ fallback shape, precision, account or second session.
 Reasoning must become ready and finish a strict low-effort, 512-token warmup
 with nonempty final content and `finish_reason=stop` before embedding starts.
 Embedding must produce finite, normalized native 4096-dimensional vectors.
+Production startup also checks the actually installed tokenizer/runtime versions,
+downloaded metadata hashes and the exact embedding server argv passed to spawn
+against the approved pooling evidence before starting its workload.
 Record observed software, driver/device and sampled peak resources; a successful
 warmup alone does not prove the corpus workload fits.
 
@@ -164,6 +203,9 @@ The controller verifies retained Qdrant PVC/service ownership and owns a local
 loopback port-forward. Its private `handoff.env` carries the resulting
 `QDRANT_URL` and progress path to local consumers. Never hand-edit an unrelated
 Qdrant URL into the run or delete retained PVCs/progress during model shutdown.
+Production handoff clears case variants of its frozen settings and routing in
+the sourcing terminal before exporting canonical values. The native gateway
+then generates fresh model-leg URLs and credentials before its consumers start.
 Ingest must reconcile every source hash and chunk outcome, resume only compatible
 same-build progress, and publish no partial collection. After cleanup and a new
 session, prove the next ordinary operation uses that retained state.
@@ -195,6 +237,14 @@ gateway's existing logging policy and Jaeger's existing memory/trace caps;
 admit their disk destinations separately before a full-stack run. A cgroup
 around the controller does not contain Docker daemon writes. Retain final
 CU/session evidence even when export fails.
+
+Preparation creates one private source snapshot: at most 32 MiB of execution
+source and one separately bounded 64 MiB pinned Task executable. It reuses the
+prepared interpreter and copies no environment, corpus or weights. Fresh host
+imports, remote uploads, gateway commands and the native workload use that
+verified snapshot. This bounds snapshot writes to 96 MiB once per prepared run;
+it is not a limit on later workload or daemon writes. External interpreter
+dependencies and system tools remain their existing owners' responsibility.
 
 On an interrupted controller, first interrupt its owning process, then use the
 same private state for bounded recovery:

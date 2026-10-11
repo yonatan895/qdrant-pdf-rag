@@ -93,8 +93,8 @@ def _effective_config(pod: Object, container: Object, read_file: ConfigReader) -
         "ulimit -a -H", "ulimit -n $(ulimit -Hn)", "SET_INDEX=${HOSTNAME##*-}",
         'echo "Starting initializing for pod $SET_INDEX"',
         'if [ "$SET_INDEX" = "0" ]; then', f"exec ./entrypoint.sh --uri '{uri}'", "else",
-        f"exec ./entrypoint.sh --bootstrap '{uri}' --uri "
-        f"'http://{stem}-'\"$SET_INDEX\"'.{stem}-headless:6335'", "fi",
+        (f"exec ./entrypoint.sh --bootstrap '{uri}' --uri "
+         f"'http://{stem}-'\"$SET_INDEX\"'.{stem}-headless:6335'"), "fi",
     ]
     initializer = read_file(pod_name, container_name, "/qdrant/config/initialize.sh")
     if (not isinstance(initializer, str) or len(initializer.encode("utf-8")) > 64 * 1024

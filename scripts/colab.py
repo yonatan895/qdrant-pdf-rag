@@ -31,9 +31,13 @@ import uuid
 from collections.abc import Callable
 from contextlib import contextmanager
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from mainframe_rag.serve.colab_profiles import COLAB_PROFILES, admit, build_profile
 from mainframe_rag.serve.colab_storage import prove_qdrant_storage
+
+if TYPE_CHECKING:
+    from mainframe_rag.serve.colab_production import PreparedProduction
 
 ROOT = Path(__file__).resolve().parents[1]
 REMOTE_PROFILE = "/content/model-profile.json"
@@ -46,9 +50,11 @@ PIPE_DRAIN_GRACE_SECONDS = .2
 SOURCE_LIMIT_BYTES = 32 * 1024 * 1024
 SOURCE_FILE_LIMIT_BYTES = 4 * 1024 * 1024
 SOURCE_ENTRY_LIMIT = 4096
+TASK_BINARY_LIMIT_BYTES = 64 * 1024 * 1024
 PREREQUISITE_LIMITS = {"inference_lock": 1024 * 1024, "transport_receipt": 64 * 1024,
                        "kubeconfig": 1024 * 1024, "inventory": 16 * 1024 * 1024,
-                       "golden": 16 * 1024 * 1024}
+                       "golden": 16 * 1024 * 1024, "source_inventory": 16 * 1024 * 1024,
+                       "production_approval": 64 * 1024}
 SOURCE_REQUIRED = ("scripts/colab.py", "scripts/colab_preflight.py", "scripts/colab_runtime.py",
                    "src/mainframe_rag/serve/colab_profiles.py", "scripts/tools/run-task.sh",
                    "scripts/run_local_stack.sh", "scripts/run_local_gateway.sh", "scripts/probe_gateway.py",
@@ -65,6 +71,14 @@ QDRANT_CONFIG_PATHS = frozenset(f"/qdrant/config/{filename}" for filename in
 
 class LabError(RuntimeError):
     """Fixed local diagnostic; upstream text is preserved privately only."""
+
+
+def print_diagnostic(message: str, *, error: bool = False) -> None:
+    """A closed/full diagnostic sink cannot interrupt owned release control."""
+    try:
+        print(message, file=sys.stderr if error else sys.stdout, flush=True)
+    except (OSError, ValueError):
+        pass
 
 
 class CaptureBudget:
@@ -248,6 +262,23 @@ def assignment_lock():
         yield
 
 
+@contextmanager
+def state_lock(state: Path, *, recovery: bool):
+    # A prepared allocation must create its durable lock before doing work.
+    # Recovery reuses that same inode without requiring state-directory writes.
+    flags = os.O_RDONLY if recovery else os.O_WRONLY | os.O_CREAT
+    descriptor = os.open(state / "run.lock", flags | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, 0o600)
+    with os.fdopen(descriptor, "rb" if recovery else "ab") as lock:
+        info = os.fstat(lock.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+            raise LabError("run ownership lock must be private, regular and owned")
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise LabError("another controller owns this run; interrupt it before recovery") from exc
+        yield
+
+
 def private_json(path: Path, value: dict) -> None:
     encoded = json.dumps(value, indent=2) + "\n"
     if path.name == "manifest.json" and len(encoded.encode()) > MANIFEST_LIMIT_BYTES:
@@ -259,12 +290,13 @@ def private_json(path: Path, value: dict) -> None:
     os.replace(temporary, path)
 
 
-def external(path: Path) -> Path:
+def external(path: Path, *, repository_root: Path | None = None) -> Path:
     path = path.expanduser().absolute()
+    repository_root = ROOT if repository_root is None else repository_root
     common = Path(subprocess.check_output(
-        ["git", "-C", str(ROOT), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+        ["git", "-C", str(repository_root), "rev-parse", "--path-format=absolute", "--git-common-dir"],
         text=True, timeout=5).strip()).parent
-    if path.resolve().is_relative_to(ROOT) or path.resolve().is_relative_to(common):
+    if path.resolve().is_relative_to(repository_root) or path.resolve().is_relative_to(common):
         raise LabError("private state/corpus/evidence must be outside a Git checkout")
     return path
 
@@ -305,8 +337,8 @@ def read_bounded_input(path: Path, limit: int) -> bytes:
     return raw
 
 
-def source_identity(root: Path) -> dict:
-    """Bind execution owners, including dirty/new source, without traversing data."""
+def source_paths(root: Path) -> list[Path]:
+    """Enumerate only the bounded execution owners, never environments/data."""
     paths = {root / name for name in SOURCE_REQUIRED}
     pending = [root / name for name in ("scripts", "src/mainframe_rag", "taskfiles")]
     entries = 0
@@ -324,9 +356,15 @@ def source_identity(root: Path) -> dict:
                     pending.append(Path(entry.path))
                 elif not entry.name.endswith((".pyc", ".pyo")):
                     paths.add(Path(entry.path))
+    return sorted(paths)
+
+
+def source_identity(root: Path) -> dict:
+    """Bind execution owners, including dirty/new source, without traversing data."""
     total = 0
     digest = hashlib.sha256()
-    for path in sorted(paths):
+    paths = source_paths(root)
+    for path in paths:
         total += path.stat().st_size
         if total > SOURCE_LIMIT_BYTES:
             raise LabError("candidate execution source exceeded its bounded byte inventory")
@@ -335,14 +373,75 @@ def source_identity(root: Path) -> dict:
     return {"source_sha256": digest.hexdigest(), "source_files": len(paths), "source_bytes": total}
 
 
-def candidate_identity() -> dict:
-    head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True, timeout=10).strip()
+def candidate_identity(root: Path, *, source_root: Path | None = None) -> dict:
+    head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True, timeout=10).strip()
     if not re.fullmatch(r"[0-9a-f]{40}", head):
         raise LabError("cannot establish the exact prepared candidate")
-    return {"development_sha": head, **source_identity(ROOT)}
+    return {"development_sha": head, **source_identity(root if source_root is None else source_root)}
 
 
-def object_digest(value: dict) -> str:
+def task_pin(root: Path) -> str:
+    raw = read_bounded_input(root / "scripts/tools/task-pin.txt", 64 * 1024).decode()
+    pins = re.findall(r"^binary-sha256: *([0-9a-f]{64}) *$", raw, re.MULTILINE)
+    if len(pins) != 1:
+        raise LabError("execution Task pin must declare one exact binary digest")
+    return pins[0]
+
+
+def check_source_configuration(root: Path) -> None:
+    for path in (root / ".env", root / "scripts/tools/.env"):
+        if path.exists() or path.is_symlink():
+            raise LabError("execution requires explicit environment inputs; private checkout dotenv is unsupported")
+
+
+def copy_execution_source(source: Path, destination: Path, candidate: dict) -> dict:
+    """Publish once: at most 32MiB source plus one already-pinned 64MiB tool."""
+    destination.mkdir(mode=0o700)
+    total = 0
+    for path in source_paths(source):
+        raw = read_bounded_input(path, SOURCE_FILE_LIMIT_BYTES)
+        total += len(raw)
+        if total > SOURCE_LIMIT_BYTES:
+            raise LabError("execution source copy exceeded its bounded byte inventory")
+        target = destination / path.relative_to(source)
+        target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        mode = 0o500 if path.stat().st_mode & 0o111 else 0o400
+        descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(raw)
+    expected = {key: candidate[key] for key in ("source_sha256", "source_files", "source_bytes")}
+    if source_identity(destination) != expected:
+        raise LabError("execution source changed during its bounded snapshot copy")
+    pin = task_pin(destination)
+    task_source = (source / ".tools/bin/task").resolve(strict=True)
+    task_target = destination / ".tools/bin/task"
+    task_target.parent.mkdir(parents=True, mode=0o700)
+    copied = 0
+    digest = hashlib.sha256()
+    input_descriptor = os.open(task_source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    with os.fdopen(input_descriptor, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or not info.st_mode & 0o111 or info.st_size > TASK_BINARY_LIMIT_BYTES:
+            raise LabError("pinned Task executable exceeds its bounded regular-file envelope")
+        descriptor = os.open(task_target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o500)
+        with os.fdopen(descriptor, "wb") as output:
+            while raw := stream.read(min(65536, TASK_BINARY_LIMIT_BYTES - copied + 1)):
+                copied += len(raw)
+                if copied > TASK_BINARY_LIMIT_BYTES:
+                    raise LabError("pinned Task executable grew beyond its copy envelope")
+                digest.update(raw)
+                output.write(raw)
+    if digest.hexdigest() != pin or digest_file(task_target, TASK_BINARY_LIMIT_BYTES) != pin:
+        raise LabError("execution Task binary differs from its exact source pin")
+    directories = {destination, task_target.parent, task_target.parent.parent}
+    for path in source_paths(destination):
+        directories.update(path.parents[:len(path.relative_to(destination).parts) - 1])
+    for directory in sorted(directories, key=lambda path: len(path.parts), reverse=True):
+        directory.chmod(0o500)
+    return {"root": str(destination), "source": expected, "task_sha256": pin, "task_bytes": copied}
+
+
+def object_digest(value: object) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
 
 
@@ -380,7 +479,7 @@ def validate_gpu_prerequisites(manifest: dict, bridge: str, state: Path) -> None
     if not config.get("inference_lock") or not config.get("transport_receipt"):
         raise LabError("GPU allocation requires the approved inference lock and released CPU transport receipt")
     # Both import paths use the same stdlib runtime owner; no duplicate parser.
-    if __package__:
+    if TYPE_CHECKING or __package__:
         from scripts.colab_runtime import validate_inference_lock
     else:
         from colab_runtime import validate_inference_lock
@@ -411,7 +510,58 @@ def validate_gpu_prerequisites(manifest: dict, bridge: str, state: Path) -> None
         raise LabError("CPU transport receipt lacks exact successful owned-session absence proof")
 
 
-def prepare(args: argparse.Namespace) -> int:
+def production_approval(config: dict, profile: dict) -> dict:
+    def unique_fields(pairs):
+        result = {}
+        for name, value in pairs:
+            if name in result:
+                raise LabError("production approval repeats a field")
+            result[name] = value
+        return result
+
+    approval = json.loads(read_bounded_input(Path(config["production_approval"]),
+                                            PREREQUISITE_LIMITS["production_approval"]),
+                          object_pairs_hook=unique_fields)
+    if (type(approval) is not dict or set(approval) != {
+            "schema", "pooling_producer", "census_producer", "source_scan"}
+            or type(approval["schema"]) is not int or approval["schema"] != 1):
+        raise LabError("production requires the exact independently reviewed approval schema")
+    scan = approval["source_scan"]
+    if (type(scan) is not dict or set(scan) != {"max_entries", "max_bytes", "deadline_seconds"}
+            or any(type(value) is not int or value <= 0 for value in scan.values())
+            or scan["deadline_seconds"] > profile["deadline_seconds"]):
+        raise LabError("production requires explicit positive source scan ceilings within its deadline")
+    config["production_scan"] = scan
+    return approval
+
+
+def prepare_production_admission(config: dict, profile: dict, state: Path,
+                                 execution_root: Path, approval: dict) -> PreparedProduction:
+    from mainframe_rag.config import Settings
+    from mainframe_rag.serve.colab_production import ScanBounds, prepare_production
+
+    if TYPE_CHECKING or __package__:
+        from scripts.colab_runtime import validate_inference_lock
+    else:
+        from colab_runtime import validate_inference_lock
+    server = profile["servers"][1]
+    model = {"EMBED_MODE": "vllm", "EMBED_MODEL": server["model_id"],
+             "EMBED_MODEL_REVISION": server["revision"], "DENSE_DIM": str(profile["dense_dim"])}
+    if any(name.upper() in model and value != model[name.upper()] for name, value in os.environ.items()):
+        raise LabError("explicit embedding environment conflicts with the selected reference profile")
+    # BaseSettings supports this runtime option; the model plugin omits it.
+    settings = Settings(_env_file=None, embed_mode="vllm", embed_model=server["model_id"],  # type: ignore[call-arg]
+                        embed_model_revision=server["revision"], dense_dim=profile["dense_dim"])
+    pins = validate_inference_lock(state / "inference.lock", profile["inference_lock_sha256"])
+    scan = config["production_scan"]
+    return prepare_production(
+        config, profile, state=state, settings=settings, runtime_pins=pins,
+        pooling_producer=approval["pooling_producer"], census_producer=approval["census_producer"],
+        recipe_root=execution_root, bounds=ScanBounds(scan["max_entries"], scan["max_bytes"]),
+        deadline=time.monotonic() + scan["deadline_seconds"])
+
+
+def prepare(args: argparse.Namespace, *, source_root: Path | None = None) -> int:
     state = external(args.state)
     if state.exists() or state.is_symlink():
         raise LabError("run state already exists; use a fresh per-run directory")
@@ -442,27 +592,26 @@ def prepare(args: argparse.Namespace) -> int:
               "qdrant_port": args.qdrant_port, "cu_cap": args.cu_cap, "cu_floor": args.cu_floor,
               "namespace": args.namespace, "qdrant_service": args.qdrant_service,
               "kube_context": args.kube_context, "poll_seconds": args.poll_seconds}
-    for key in ("corpus", "golden", "inventory", "data_state", "kubeconfig",
+    for key in ("corpus", "golden", "inventory", "source_inventory", "embedding_evidence",
+                "production_approval", "data_state", "kubeconfig",
                 "inference_lock", "transport_receipt"):
         value = getattr(args, key)
         config[key] = str(external(value)) if value else None
     if args.dataset == "production":
         if not all(config[key] for key in ("corpus", "golden", "inventory", "data_state",
+                                           "source_inventory", "embedding_evidence", "production_approval",
+                                           "inference_lock", "transport_receipt",
                                            "kubeconfig", "kube_context", "namespace", "qdrant_service")):
-            raise LabError("production requires private corpus/golden/inventory and explicit retained Kind PVC service inputs")
+            raise LabError("production requires complete independent census/runtime inputs and explicit retained Kind PVC inputs")
+        if not profile["accelerator"]:
+            raise LabError("production census admission requires the selected native GPU profile")
         if not Path(config["corpus"]).is_dir() or not Path(config["golden"]).is_file():
             raise LabError("production corpus directory and grounded evaluation file must already exist")
-        inventory = json.loads(read_bounded_input(Path(config["inventory"]), PREREQUISITE_LIMITS["inventory"]))
-        lengths = (inventory["max_document_tokens"], inventory["max_query_tokens"])
-        if not all(type(value) is int and value > 0 for value in lengths):
-            raise LabError("inventory must contain measured positive token lengths")
-        if max(lengths) > args.embedding_max_len:
-            raise LabError("measured embedding inputs exceed the selected window; truncation is forbidden")
-        config["inventory_sha256"] = digest_file(Path(config["inventory"]), PREREQUISITE_LIMITS["inventory"])
         data = Path(config["data_state"])
-        data.mkdir(parents=True, exist_ok=True, mode=0o700)
-        if data.is_symlink() or data.stat().st_mode & 0o077:
-            raise LabError("persistent local data state must be private and not a symlink")
+        if (data.is_symlink() or not data.is_dir() or data.stat().st_mode & 0o077
+                or not (data / "retained-index-binding.json").is_file()):
+            raise LabError("retained binding is unknown; explicit fresh index or rebuild decision required")
+        approval = production_approval(config, profile)
     for key in ("inference_lock", "transport_receipt", "kubeconfig"):
         if config[key] and not Path(config[key]).is_file():
             raise LabError("a declared private prerequisite file is missing")
@@ -473,11 +622,19 @@ def prepare(args: argparse.Namespace) -> int:
         tools["kubectl"] = executable(args.kubectl)
     state.mkdir(parents=True, mode=0o700)
     state.chmod(0o700)
-    candidate = candidate_identity()
+    source_root = ROOT if source_root is None else source_root.absolute()
+    check_source_configuration(source_root)
+    candidate = candidate_identity(ROOT, source_root=source_root)
+    origin = {"git_root": str(ROOT), "source_root": str(source_root)}
+    execution = copy_execution_source(source_root, state / "execution", candidate)
+    interpreter = str(Path(sys.executable).absolute())
+    execution["interpreter"] = interpreter
+    execution["interpreter_sha256"] = digest_file(Path(interpreter).resolve(strict=True), 128 * 1024 * 1024)
     manifest = {"schema": 1, "session": "rag-" + uuid.uuid4().hex[:16], "endpoint": None,
                 "phase": "prepared", "allocation_attempted": False,
                 "created_at": time.time(), "development_sha": candidate["development_sha"],
-                "config": config, "profile": profile, "tools": tools, "events": []}
+                "config": config, "profile": profile, "tools": tools, "events": [],
+                "origin": origin, "execution": execution}
     private_json(state / "model-profile.json", profile)
     snapshots = {}
     for name, filename in (("inference_lock", "inference.lock"),
@@ -491,11 +648,15 @@ def prepare(args: argparse.Namespace) -> int:
     prerequisites = prerequisite_identity(config)
     if any(digest != prerequisites[name] for name, digest in snapshots.items()):
         raise LabError("private prerequisite changed while preparing its owned snapshot")
+    if args.dataset == "production":
+        admission = prepare_production_admission(config, profile, state, state / "execution", approval)
+        manifest["production"] = admission.manifest
     manifest["prepared_identity"] = {
         "candidate": candidate, "config_sha256": object_digest(config), "profile_sha256": object_digest(profile),
         "tools_sha256": tool_identity(tools), "tools_config_sha256": object_digest(tools),
         "prerequisites_sha256": prerequisites, "snapshots_sha256": snapshots,
         "model_profile_sha256": digest_file(state / "model-profile.json", 64 * 1024),
+        "origin_sha256": object_digest(origin), "execution_sha256": object_digest(execution),
     }
     private_json(state / "manifest.json", manifest)
     print(f"Prepared private run: {state}")
@@ -505,12 +666,22 @@ def prepare(args: argparse.Namespace) -> int:
 
 class Run:
     def __init__(self, state: Path):
-        self.state = external(state)
+        self.state = state.expanduser().absolute()
         if self.state.is_symlink() or self.state.stat().st_uid != os.geteuid() or self.state.stat().st_mode & 0o077:
             raise LabError("run state must be private and owned by the current user")
         self.manifest = json.loads(read_bounded_input(self.state / "manifest.json", MANIFEST_LIMIT_BYTES))
         if self.manifest.get("schema") != 1 or not re.fullmatch(r"rag-[0-9a-f]{16}", self.manifest.get("session", "")):
             raise LabError("invalid run ownership manifest")
+        origin, execution = self.manifest["origin"], self.manifest["execution"]
+        self.origin_root = Path(origin["git_root"])
+        self.origin_source_root = Path(origin["source_root"])
+        self.execution_root = self.state / "execution"
+        if (not self.origin_root.is_absolute() or not self.origin_source_root.is_absolute()
+                or execution["root"] != str(self.execution_root)):
+            raise LabError("invalid original/execution source ownership")
+        # Snapshot dispatch has no .git. Git/private-path validation always
+        # belongs to the original repository, not the relocated source root.
+        self.state = external(self.state, repository_root=self.origin_root)
         self.config = self.manifest["config"]
         self.profile = self.manifest["profile"]
         self.tools = self.manifest["tools"]
@@ -530,6 +701,48 @@ class Run:
         self.cleanup_in_progress = False
         self.cleanup_metadata_failed = False
         self.metadata_warning_printed = False
+        self.production: PreparedProduction | None = None
+
+    def production_admission(self) -> PreparedProduction:
+        from mainframe_rag.serve.colab_production import load_prepared_production
+        if self.production is None:
+            self.production = load_prepared_production(
+                self.manifest["production"], state=self.state, data_state=Path(self.config["data_state"]))
+        return self.production
+
+    def validate_execution(self) -> None:
+        check_source_configuration(self.execution_root)
+        execution = self.manifest["execution"]
+        info = self.execution_root.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077
+                or self.execution_root.is_symlink()
+                or source_identity(self.execution_root) != execution["source"]
+                or task_pin(self.execution_root) != execution["task_sha256"]
+                or digest_file(self.execution_root / ".tools/bin/task", TASK_BINARY_LIMIT_BYTES)
+                != execution["task_sha256"]
+                or (self.execution_root / ".tools/bin/task").stat().st_size != execution["task_bytes"]
+                or self.manifest["prepared_identity"].get("execution_sha256") != object_digest(execution)
+                or self.manifest["prepared_identity"].get("origin_sha256") != object_digest(self.manifest["origin"])):
+            raise LabError("owned execution snapshot or pinned tool bytes changed")
+
+    def execution_environment(self) -> dict[str, str]:
+        env = dict(os.environ)
+        env.update(PY=self.manifest["execution"]["interpreter"],
+                   PYTHONPATH=os.pathsep.join((str(self.execution_root / "src"), str(self.execution_root))),
+                   PYTHONDONTWRITEBYTECODE="1")
+        return env
+
+    def bootstrap(self, args: argparse.Namespace) -> None:
+        interpreter = self.manifest["execution"]["interpreter"]
+        if args.command == "run":
+            self.validate_prepared()
+        argv = [interpreter, "-B", str(self.execution_root / "scripts/colab.py"),
+                args.command, "--state", str(self.state)]
+        if args.command == "run":
+            argv += ["--approve-cu", str(args.approve_cu), *args.workload]
+        # No account/run lock or cloud operation exists yet. The fresh image
+        # imports app/owner modules only from verified execution source.
+        os.execve(interpreter, argv, self.execution_environment())
 
     def save(self, event: str) -> None:
         now = time.time()
@@ -546,9 +759,9 @@ class Run:
             self.cleanup_metadata_failed = True
             self.manifest["metadata_persistence_failed"] = True
             if not getattr(self, "metadata_warning_printed", False):
-                print("Cleanup metadata could not be persisted; exact VM release continues without acceptance.",
-                      file=sys.stderr)
                 self.metadata_warning_printed = True
+                print_diagnostic("Cleanup metadata could not be persisted; exact VM release continues without acceptance.",
+                                 error=True)
             return
         self.last_metadata_persist = now
 
@@ -563,6 +776,8 @@ class Run:
         return summary
 
     def validate_prepared(self, *, running: bool = False) -> None:
+        self.validate_execution()
+        check_source_configuration(self.origin_source_root)
         prepared = self.manifest.get("prepared_identity", {})
         profile = dict(self.profile)
         if running and profile.pop("expires_at", None) != self.work_expiry:
@@ -571,7 +786,11 @@ class Run:
                      for name, filename in (("inference_lock", "inference.lock"),
                                             ("transport_receipt", "cpu-transport-receipt.input.json"))
                      if self.config.get(name)}
-        if (prepared.get("candidate") != candidate_identity()
+        execution = self.manifest["execution"]
+        if (prepared.get("candidate") != candidate_identity(self.origin_root, source_root=self.origin_source_root)
+                or execution["interpreter"] != str(Path(sys.executable).absolute())
+                or digest_file(Path(execution["interpreter"]).resolve(strict=True), 128 * 1024 * 1024)
+                != execution["interpreter_sha256"]
                 or self.manifest.get("development_sha") != prepared["candidate"]["development_sha"]
                 or prepared.get("config_sha256") != object_digest(self.config)
                 or prepared.get("profile_sha256") != object_digest(profile)
@@ -630,7 +849,7 @@ class Run:
         self.sequence += 1
         try:
             process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                       stderr=subprocess.PIPE, start_new_session=True, cwd=ROOT, env=env)
+                                       stderr=subprocess.PIPE, start_new_session=True, cwd=self.execution_root, env=env)
         except BaseException:
             self.output_budget.finish(pool, reserved, 0)
             raise
@@ -718,10 +937,15 @@ class Run:
     def budget(self, *, initial: bool = False) -> None:
         self.check_qdrant()
         output = self.colab("usage").stdout
+        balance_match = re.search(r"Current balance: ([0-9.]+) compute units", output)
+        rate_match = re.search(r"Usage rate: ([0-9.]+)/hr", output)
+        assignments_match = re.search(r"Active assignments: ([0-9]+)", output)
+        if balance_match is None or rate_match is None or assignments_match is None:
+            raise LabError("cannot verify current CU balance/rate")
         try:
-            balance = float(re.search(r"Current balance: ([0-9.]+) compute units", output)[1])
-            rate = float(re.search(r"Usage rate: ([0-9.]+)/hr", output)[1])
-            assignments = int(re.search(r"Active assignments: ([0-9]+)", output)[1])
+            balance = float(balance_match[1])
+            rate = float(rate_match[1])
+            assignments = int(assignments_match[1])
         except (TypeError, ValueError) as exc:
             raise LabError("cannot verify current CU balance/rate") from exc
         if not all(math.isfinite(value) for value in (balance, rate)):
@@ -763,7 +987,7 @@ class Run:
         reserved = self.output_budget.reserve("work")
         try:
             child = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                     env=env, start_new_session=True, cwd=ROOT)
+                                     env=env, start_new_session=True, cwd=self.execution_root)
         except BaseException:
             self.output_budget.finish("work", reserved, 0)
             raise
@@ -838,6 +1062,9 @@ class Run:
             read_node=lambda name: self.qdrant_object("node", name),
             read_container_file=self.qdrant_config,
         )
+        if self.config["dataset"] == "production":
+            from mainframe_rag.serve.colab_production import verify_retained_target
+            self.manifest["production_progress"] = verify_retained_target(self.production_admission(), proof)
         port = self.config["qdrant_port"]
         self.free_port("127.0.0.1", port)
         self.qdrant_forward = self.spawn(self.kubectl("port-forward", "--address", "127.0.0.1",
@@ -904,7 +1131,7 @@ class Run:
             time.sleep(.05)
         raise LabError("owned local transport did not become reachable")
 
-    def diagnostic_stage(self, stage: str) -> None:
+    def diagnostic_stage(self, stage: str) -> dict:
         until = min(self.work_expiry, time.time() + 1200)
         destination = self.state / "remote-diagnostics.json"
         while time.time() < until:
@@ -915,9 +1142,11 @@ class Run:
             result = self.colab("download", "-s", self.manifest["session"], "/content/colab-diagnostics.json",
                                 str(destination), seconds=10, allow_failure=True)
             if result.returncode == 0:
-                diagnostic = json.loads(destination.read_text())
+                diagnostic = json.loads(read_bounded_input(destination, CAPTURE_LIMIT_BYTES))
+                if type(diagnostic) is not dict:
+                    raise LabError("remote diagnostic must be a bounded JSON object")
                 if diagnostic["stage"] == stage:
-                    return
+                    return diagnostic
                 if diagnostic["stage"] == "failed":
                     raise LabError("remote runtime reported a failure")
             self.budget()
@@ -951,7 +1180,7 @@ class Run:
         self.save("host_and_gateway_network_transport_verified")
 
     def gateway_environment(self, bridge: str) -> dict[str, str]:
-        env = dict(os.environ)
+        env = self.execution_environment()
         identity = transport_identity(self.config, bridge)
         ownership = self.manifest.get("gateway_network", {})
         env.update(PG_NET=self.config["gateway_network"], GATEWAY_NAME=self.config["gateway_name"],
@@ -991,7 +1220,7 @@ class Run:
             nonlocal accepted
             accepted = self.observe_gateway_network(raw, bridge)
 
-        result = self.command(["sh", str(ROOT / "scripts/run_local_gateway.sh"), "transport-probe"],
+        result = self.command(["sh", str(self.execution_root / "scripts/run_local_gateway.sh"), "transport-probe"],
                               env=self.gateway_environment(bridge), seconds=20, allow_failure=True,
                               stdout_observer=observe)
         if result.returncode or not accepted:
@@ -1004,7 +1233,7 @@ class Run:
         # Mandatory VM stop/absence runs first. This separate bounded control
         # window may finish after that absolute deadline and cannot spend the
         # Colab release capture pool or postpone its mandatory operations.
-        self.command(["sh", str(ROOT / "scripts/run_local_gateway.sh"), "transport-release"],
+        self.command(["sh", str(self.execution_root / "scripts/run_local_gateway.sh"), "transport-release"],
                      env=self.gateway_environment(self.manifest["gateway_network_bridge"]),
                      seconds=NETWORK_RELEASE_SECONDS, cleanup=True,
                      cleanup_deadline=time.time() + NETWORK_RELEASE_SECONDS,
@@ -1028,14 +1257,59 @@ class Run:
                        GATEWAY_ENV_FILE=str(self.state / "gateway.env"),
                        LOCAL_STACK_LOG_DIR=str(self.state))
         if self.config["dataset"] == "production":
-            env.update(CORPUS_DIR=self.config["corpus"], PRODUCTION_CORPUS_DIR=self.config["corpus"],
-                       PRODUCTION_GOLDEN_PATH=self.config["golden"],
-                       QDRANT_URL=self.manifest["persistent_qdrant"]["url"],
-                       LOCAL_INGEST_PROGRESS=str(Path(self.config["data_state"]) /
-                                                 f"ingest-{self.config['inventory_sha256']}.json"))
+            from mainframe_rag.serve.colab_production import verify_workload_environment
+            prepared = self.production_admission()
+            operation = {
+                "CORPUS_DIR": str(Path(self.config["corpus"]).resolve(strict=True)),
+                "PRODUCTION_CORPUS_DIR": str(Path(self.config["corpus"]).resolve(strict=True)),
+                "PRODUCTION_GOLDEN_PATH": str(Path(self.config["golden"]).resolve(strict=True)),
+                "QDRANT_URL": self.manifest["persistent_qdrant"]["url"],
+                "LOCAL_INGEST_PROGRESS": self.manifest["production_progress"], "LOCAL_STACK_DRYRUN": "0",
+                "PY": self.manifest["execution"]["interpreter"], "PYTHONPATH": str(self.execution_root / "src"),
+                "GATEWAY_EMBED_MODEL": self.profile["servers"][1]["model_id"],
+                "GATEWAY_EMBED_MODEL_REVISION": self.profile["servers"][1]["revision"],
+                "RERANK_ENABLED": "false",
+            }
+            # The native gateway generates these canonical Settings exports
+            # later. Ambient aliases must not override those fresh leg values.
+            gateway_legs = {"LLM_BASE_URL", "LLM_MODEL_REASONING", "LLM_API_KEY", "EMBED_BASE_URL", "EMBED_API_KEY",
+                            "RERANK_BASE_URL", "RERANK_MODEL", "RERANK_API_KEY"}
+            protected_names = set(prepared.environment) | set(prepared.unset_environment) | set(operation)
+            protected_names.update(gateway_legs | {"PYTHONHOME"})
+            protected = {name.casefold() for name in protected_names}
+            for name in tuple(env):
+                if name.casefold() in protected:
+                    del env[name]
+            env.update(prepared.environment)
+            # Preserve canonical paths/interpreter, even when caller settings
+            # changed between prepare and run. Never encode optional None as ''.
+            env.update(operation)
+            verify_workload_environment(prepared, env, execution_root=self.execution_root,
+                                        expected_interpreter=self.manifest["execution"]["interpreter"],
+                                        cwd=self.execution_root)
         # Only controlled, non-secret values are written for a second local terminal.
         keys = {key for key in env if key not in os.environ or env[key] != os.environ[key]}
-        (self.state / "handoff.env").write_text("".join(f"export {key}={shlex.quote(env[key])}\n" for key in sorted(keys)))
+        unsets: set[str] = set()
+        alias_cleanup = ""
+        if self.config["dataset"] == "production":
+            # A second terminal may have different values or case aliases;
+            # publish the whole frozen contract, including explicit absence.
+            keys.update(prepared.environment)
+            keys.update(operation)
+            unsets.update(set(prepared.unset_environment) | gateway_legs | {"PYTHONHOME"})
+            patterns = ["".join(f"[{char.lower()}{char.upper()}]" if char.isalpha() else char for char in key)
+                        for key in sorted(protected_names)]
+            # Enumerate names in the sourcing terminal, never evaluate values.
+            # Clearing only aliases seen by this process misses a later shell.
+            alias_cleanup = (
+                "for RAG_COLAB_ENV_KEY in $(env | sed -n 's/^\\([A-Za-z_][A-Za-z0-9_]*\\)=.*/\\1/p'); do\n"
+                '  case "$RAG_COLAB_ENV_KEY" in\n'
+                f"    {'|'.join(patterns)}) unset \"$RAG_COLAB_ENV_KEY\" ;;\n"
+                "  esac\ndone\nunset RAG_COLAB_ENV_KEY\n"
+            )
+        (self.state / "handoff.env").write_text(
+            alias_cleanup + "".join(f"unset {key}\n" for key in sorted(unsets))
+            + "".join(f"export {key}={shlex.quote(env[key])}\n" for key in sorted(keys)))
         return env
 
     def cleanup(self) -> bool:
@@ -1118,13 +1392,18 @@ class Run:
             self.save("gateway_network_cleanup_failed")
         if self.manifest.get("released"):
             for filename in ("id_ed25519_colab_rag", "id_ed25519_colab_rag.pub"):
-                (self.state / filename).unlink(missing_ok=True)
+                try:
+                    (self.state / filename).unlink(missing_ok=True)
+                except OSError:
+                    ok = False
+                    self.manifest["private_key_cleanup_failed"] = True
+                    self.save("private_key_cleanup_failed")
         self.manifest["phase"] = "released" if self.manifest.get("released") else "cleanup_required"
         ok = ok and not self.cleanup_metadata_failed
         self.save("cleanup_complete" if ok else "cleanup_incomplete")
         ok = ok and not self.cleanup_metadata_failed
         if not ok:
-            print("Cleanup/export incomplete; inspect private evidence and use the recovery command.", file=sys.stderr)
+            print_diagnostic("Cleanup/export incomplete; inspect private evidence and use the recovery command.", error=True)
         return ok
 
     def run(self, approval: float, workload: list[str]) -> int:
@@ -1139,9 +1418,18 @@ class Run:
         self.manifest.update(started_at=start, expires_at=self.expiry, approved_cu=approval)
         self.profile["expires_at"] = self.work_expiry
         self.save("run_approved")
-        print("Manual recovery: " + shlex.join([self.tools["colab"], "--auth", "oauth2", "stop", "-s", self.manifest["session"]]), flush=True)
+        print_diagnostic("Manual recovery: " + shlex.join([self.tools["colab"], "--auth", "oauth2", "stop", "-s", self.manifest["session"]]))
         status = 1
         try:
+            if self.config["dataset"] == "production":
+                from mainframe_rag.serve.colab_production import (
+                    NATIVE_WORKLOAD,
+                    verify_production_sources,
+                )
+                if workload and tuple(workload) != NATIVE_WORKLOAD:
+                    raise LabError("production requires the native workload without wrappers or overrides")
+                seconds = min(self.config["production_scan"]["deadline_seconds"], self.work_expiry - time.time())
+                verify_production_sources(self.production_admission(), deadline=time.monotonic() + seconds)
             if not re.search(r"\b0\.7\.4\b", self.colab("version").stdout):
                 raise LabError("google-colab-cli 0.7.4 is required")
             bridge = self.command([self.tools["docker"], "network", "inspect", "bridge", "--format", "{{(index .IPAM.Config 0).Gateway}}"]).stdout.strip()
@@ -1152,6 +1440,11 @@ class Run:
                 for host in ("127.0.0.1", bridge):
                     self.free_port(host, port)
             self.command([self.tools["docker"], "image", "inspect", self.config["gateway_image"]],
+                         require_complete_stdout=False)
+            # Prove the relocated pinned entry/config path before allocating
+            # paid resources. Task's owner keeps inherited-config refusal.
+            self.command(["sh", str(self.execution_root / "scripts/tools/run-task.sh"),
+                          "local:stack", "--summary"], env=self.execution_environment(),
                          require_complete_stdout=False)
             if self.config["dataset"] == "production":
                 self.persistent_qdrant()
@@ -1174,12 +1467,12 @@ class Run:
             self.profile["expires_at"] = self.work_expiry
             private_json(self.state / "model-profile.json", self.profile)
             for local, remote in ((self.state / "model-profile.json", REMOTE_PROFILE),
-                                  (ROOT / "src/mainframe_rag/serve/colab_profiles.py", "/content/colab_profiles.py")):
+                                  (self.execution_root / "src/mainframe_rag/serve/colab_profiles.py", "/content/colab_profiles.py")):
                 self.colab("upload", "-s", self.manifest["session"], str(local), remote)
             if self.config["inference_lock"]:
                 self.colab("upload", "-s", self.manifest["session"], str(self.state / "inference.lock"), "/content/inference.lock")
             preflight = self.colab("exec", "-s", self.manifest["session"], "--timeout", "180", "--env",
-                                   f"RAG_COLAB_PROFILE={REMOTE_PROFILE}", "-f", str(ROOT / "scripts/colab_preflight.py"),
+                                   f"RAG_COLAB_PROFILE={REMOTE_PROFILE}", "-f", str(self.execution_root / "scripts/colab_preflight.py"),
                                    seconds=180, allow_failure=True)
             census = self.state / "preflight.json"
             self.colab("download", "-s", self.manifest["session"], "/content/colab-preflight.json", str(census))
@@ -1188,15 +1481,22 @@ class Run:
             if preflight.returncode or not observed.get("admitted"):
                 raise LabError("remote preflight refused the assigned resources")
             self.save("remote_resources_admitted")
-            self.runtime = self.spawn([self.tools["colab"], "--auth", "oauth2", "exec", "-s", self.manifest["session"],
-                                       "--timeout", str(max(1, int(self.work_expiry - time.time()))), "--env",
-                                       f"RAG_COLAB_PROFILE={REMOTE_PROFILE}", "-f", str(ROOT / "scripts/colab_runtime.py")], "runtime")
+            runtime = self.spawn([self.tools["colab"], "--auth", "oauth2", "exec", "-s", self.manifest["session"],
+                                  "--timeout", str(max(1, int(self.work_expiry - time.time()))), "--env",
+                                  f"RAG_COLAB_PROFILE={REMOTE_PROFILE}", "-f", str(self.execution_root / "scripts/colab_runtime.py")], "runtime")
+            self.runtime = runtime
             self.diagnostic_stage("transport_ready")
             self.transport(bridge)
+            tunnel = self.tunnel
+            if tunnel is None:
+                raise LabError("owned SSH tunnel was not established")
             control = self.state / "transport-control"
             control.write_text("verified\n")
             self.colab("upload", "-s", self.manifest["session"], str(control), "/content/colab-transport-ok")
-            self.diagnostic_stage("ready")
+            diagnostic = self.diagnostic_stage("ready")
+            if self.config["dataset"] == "production":
+                from mainframe_rag.serve.colab_production import verify_runtime_evidence
+                verify_runtime_evidence(self.production_admission(), diagnostic)
             child = self.spawn(workload or (["/bin/true"] if not self.profile["accelerator"]
                                             else ["sh", "scripts/tools/run-task.sh", "local:stack"]), "workload", env=self.environment(bridge))
             self.workload = child
@@ -1206,13 +1506,13 @@ class Run:
             while child.poll() is None:
                 if time.time() >= self.work_expiry:
                     raise LabError("run work deadline/CU envelope reached")
-                if self.tunnel.poll() is not None or self.runtime.poll() is not None:
+                if tunnel.poll() is not None or runtime.poll() is not None:
                     raise LabError("owned model transport/runtime was lost")
                 if time.time() >= next_budget:
                     self.budget()
                     next_budget = time.time() + 30
                 time.sleep(self.config["poll_seconds"])
-            if self.tunnel.poll() is not None or self.runtime.poll() is not None:
+            if tunnel.poll() is not None or runtime.poll() is not None:
                 raise LabError("owned model transport/runtime was lost before workload completion")
             self.check_qdrant()
             status = child.returncode
@@ -1222,7 +1522,7 @@ class Run:
             status = 1
             self.manifest["failure_type"] = type(exc).__name__
             self.save("run_failed")
-            print("Colab run failed; private evidence and exact recovery command retained.", file=sys.stderr)
+            print_diagnostic("Colab run failed; private evidence and exact recovery command retained.", error=True)
         except KeyboardInterrupt:
             status = 130
             self.save("run_interrupted")
@@ -1263,7 +1563,8 @@ def parser() -> argparse.ArgumentParser:
     prep.add_argument("--profile", choices=COLAB_PROFILES, default="COLAB_G4_BF16")
     prep.add_argument("--dataset", choices=("production", "synthetic"), default="production")
     prep.add_argument("--gateway-image", required=True)
-    for name in ("corpus", "golden", "inventory", "data-state", "kubeconfig", "inference-lock", "transport-receipt"):
+    for name in ("corpus", "golden", "inventory", "source-inventory", "embedding-evidence",
+                 "production-approval", "data-state", "kubeconfig", "inference-lock", "transport-receipt"):
         prep.add_argument("--" + name, type=Path)
     for name in ("kube-context", "namespace", "qdrant-service"):
         prep.add_argument("--" + name)
@@ -1287,18 +1588,17 @@ def parser() -> argparse.ArgumentParser:
     return result
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *, bootstrap: bool = True, source_root: Path | None = None) -> int:
     os.umask(0o077)
     args = parser().parse_args(argv)
     try:
         if args.command == "prepare":
-            return prepare(args)
+            return prepare(args, source_root=source_root)
         run = Run(args.state)
-        with assignment_lock(), (run.state / "run.lock").open("a") as lock:
-            try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError as exc:
-                raise LabError("another controller owns this run; interrupt it before recovery") from exc
+        run.validate_execution()
+        if bootstrap and ROOT.resolve() != run.execution_root.resolve():
+            run.bootstrap(args)
+        with assignment_lock(), state_lock(run.state, recovery=args.command == "stop"):
             if args.command == "stop":
                 run.expiry = time.time() + 60
                 return 0 if run.cleanup() else 1
@@ -1306,7 +1606,7 @@ def main(argv: list[str] | None = None) -> int:
             workload = args.workload[1:] if args.workload[:1] == ["--"] else args.workload
             return run.run(args.approve_cu, workload)
     except (LabError, OSError, ValueError, KeyError, subprocess.SubprocessError):
-        print("Colab controller refused invalid/missing prerequisites; no acceptance claimed.", file=sys.stderr)
+        print_diagnostic("Colab controller refused invalid/missing prerequisites; no acceptance claimed.", error=True)
         return 2
 
 

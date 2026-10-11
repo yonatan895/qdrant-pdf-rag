@@ -1,6 +1,9 @@
 """Lifecycle through executable CLI boundaries; never invoke an installed Colab."""
 from __future__ import annotations
 
+import ast
+import fcntl
+import hashlib
 import json
 import os
 import signal
@@ -9,10 +12,15 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from scripts import colab as controller
-from tests.test_colab_storage import retained as retained
+
+from tests import test_colab_production, test_colab_storage
+
+retained = test_colab_storage.retained
+original_inputs = test_colab_production.original_inputs
 
 ROOT = Path(__file__).resolve().parents[1]
 IMAGE = "example.invalid/gateway@sha256:" + "a" * 64
@@ -38,6 +46,22 @@ def diagnostic(value):
     temporary=target.with_suffix('.json.tmp')
     temporary.write_text(json.dumps(value))
     os.replace(temporary,target)
+def mutate_origin():
+    source=pathlib.Path(os.environ['FAKE_COLAB_SOURCE_ROOT'])
+    names=['scripts/colab_runtime.py','scripts/colab_preflight.py','scripts/run_local_gateway.sh',
+           'src/mainframe_rag/serve/colab_profiles.py','src/mainframe_rag/snapshot_probe.py','.tools/bin/task']
+    originals={name:(source/name).read_bytes().hex() for name in names}
+    (root/'original-source-bytes.json').write_text(json.dumps(originals))
+    for name in names:
+        (source/name).write_text("raise AssertionError('mutable origin must not execute')\n")
+    (source/'src/mainframe_rag/snapshot_probe.py').write_text("VALUE = 'unattributed mutable origin'\n")
+    (root/'origin-mutated').touch()
+def restore_origin():
+    saved=root/'original-source-bytes.json'
+    if saved.exists():
+        source=pathlib.Path(os.environ['FAKE_COLAB_SOURCE_ROOT'])
+        for name,raw in json.loads(saved.read_text()).items(): (source/name).write_bytes(bytes.fromhex(raw))
+        saved.unlink()
 if name=='colab':
     assert args[:2]==['--auth','oauth2']
     cmd=args[2]; rest=args[3:]
@@ -62,10 +86,12 @@ if name=='colab':
         assert session not in state
         for previous in remote.iterdir(): previous.unlink()
         state[session]='endpoint-owned'; sessions.write_text(json.dumps(state))
+        if scenario=='origin_mutation': mutate_origin()
         print('[colab] Session READY.')
     elif cmd=='stop':
         if scenario=='stop_fail': sys.exit(1)
         state.pop(session,None); sessions.write_text(json.dumps(state))
+        restore_origin()
         if scenario=='noisy_stop': print('x'*262144)
         print('[colab] Session terminated.')
     elif cmd=='upload':
@@ -87,7 +113,9 @@ if name=='colab':
             until=time.monotonic()+12
             while not path('/content/colab-stop').exists() and time.monotonic()<until:
                 if path('/content/colab-transport-ok').exists():
-                    diagnostic({'stage':'ready'})
+                    report=root/'original-runtime-observed.json'
+                    observed=json.loads(report.read_text()) if report.exists() else {}
+                    diagnostic({**observed,'stage':'ready'})
                 time.sleep(.02)
             path('/content/colab-artifacts.tgz').write_bytes(b'private-fake-diagnostics')
     else: raise AssertionError('unsupported real CLI command: '+cmd)
@@ -103,7 +131,10 @@ elif name=='ssh':
         if arg=='-L':
             host,port,_,_=args[i+1].split(':')
             server=Server((host,int(port)),Handler); servers.append(server)
-            threading.Thread(target=server.serve_forever,daemon=True).start()
+    # SSH admits every requested forward before serving traffic. Starting a
+    # listener early let the fake expose health before its final bridge bind.
+    for server in servers:
+        threading.Thread(target=server.serve_forever,daemon=True).start()
     if scenario=='tunnel_loss': time.sleep(.5); sys.exit(7)
     until=time.monotonic()+12
     while time.monotonic()<until: time.sleep(.1)
@@ -195,18 +226,18 @@ def _reference_lock():
                                            ("torch", "2.11.0"), ("huggingface-hub", "1.0.0"))) + "\n"
 
 
-def _controller_call(argv):
+def _controller_call(argv, *, source_root=None):
     previous = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
     previous_umask = os.umask(0o077)
     try:
-        return controller.main(argv)
+        return controller.main(argv, bootstrap=False, source_root=source_root)
     finally:
         os.umask(previous_umask)
         for sig, handler in previous.items():
             signal.signal(sig, handler)
 
 
-def _prepare_new(source_state, state, *, profile="COLAB_CPU_TRANSPORT", extra=()):
+def _prepare_arguments(source_state, state, *, profile="COLAB_CPU_TRANSPORT", extra=()):
     original = json.loads((source_state / "manifest.json").read_text())
     config, tools = original["config"], original["tools"]
     argv = ["prepare", "--state", str(state), "--dataset", "synthetic", "--profile", profile,
@@ -214,7 +245,12 @@ def _prepare_new(source_state, state, *, profile="COLAB_CPU_TRANSPORT", extra=()
             "--reasoning-port", str(config["reasoning_port"]), "--embedding-port", str(config["embedding_port"])]
     for name in ("colab", "ssh", "ssh_keygen", "docker"):
         argv += ["--" + name.replace("_", "-"), tools[name]]
-    assert _controller_call(argv + list(extra)) == 0
+    return argv + list(extra), Path(original["origin"]["source_root"])
+
+
+def _prepare_new(source_state, state, *, profile="COLAB_CPU_TRANSPORT", extra=()):
+    argv, source = _prepare_arguments(source_state, state, profile=profile, extra=extra)
+    assert _controller_call(argv, source_root=source) == 0
     return state
 
 
@@ -227,8 +263,110 @@ def _events(root):
     return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
 
 
+def _production_fixture_paths():
+    # Only the native admission/import/recipe closure, with explicit finite
+    # fixture bounds. No checkout, environment, corpus or model-tree copy.
+    names = {
+        "mainframe_rag.serve.colab_production", "mainframe_rag.serve.colab_corpus",
+        "mainframe_rag.ingest.run_ingest", "mainframe_rag.ingest.ibm_pdf",
+        "mainframe_rag.ingest.chrome", "mainframe_rag.ingest.classify",
+        "mainframe_rag.ingest.identity", "mainframe_rag.ingest.payload",
+    }
+    pending = list(names)
+    files = set()
+    while pending:
+        name = pending.pop()
+        base = ROOT / "src" / name.replace(".", "/")
+        path = base.with_suffix(".py") if base.with_suffix(".py").is_file() else base / "__init__.py"
+        if not path.is_file() or path in files:
+            continue
+        files.add(path)
+        assert len(files) <= 128 and sum(item.stat().st_size for item in files) < 4 * 1024 * 1024
+        for directory in path.parents:
+            if directory == ROOT / "src":
+                break
+            initializer = directory / "__init__.py"
+            if initializer.is_file():
+                module = initializer.parent.relative_to(ROOT / "src").as_posix().replace("/", ".")
+                if module not in names:
+                    names.add(module)
+                    pending.append(module)
+        for node in ast.walk(ast.parse(path.read_bytes())):
+            imports = []
+            if isinstance(node, ast.Import):
+                imports = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+                imports = [node.module, *(node.module + "." + alias.name for alias in node.names)]
+            for module in imports:
+                if module.startswith("mainframe_rag.") and module not in names:
+                    names.add(module)
+                    pending.append(module)
+    return {path.relative_to(ROOT).as_posix() for path in files} | {
+        "src/mainframe_rag/retrieve/acronyms_v1.json",
+    }
+
+
+def _execution_fixture(root, *, production=False):
+    # Copy actual bounded owner code only, with an original tiny pinned Task;
+    # never duplicate the checkout, site-packages or the 52MiB real Task binary.
+    source = root / "original-execution-source"
+    paths = set(controller.SOURCE_REQUIRED) | {
+        "scripts/tools/task-pin.txt", "src/mainframe_rag/__init__.py",
+        "src/mainframe_rag/serve/__init__.py", "src/mainframe_rag/serve/colab_storage.py",
+        "src/mainframe_rag/serve/budget.py", "src/mainframe_rag/serve/profiles.py",
+        "scripts/gateway/strict_finish.py", "scripts/gateway/scoped_passthrough.py",
+        "scripts/gateway/trace_privacy.py",
+    }
+    paths.update(path.relative_to(ROOT).as_posix() for path in (ROOT / "taskfiles").iterdir() if path.is_file())
+    if production:
+        paths.update(_production_fixture_paths())
+    assert sum((ROOT / name).stat().st_size for name in paths) < 4 * 1024 * 1024
+    for relative in paths:
+        path = source / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes((ROOT / relative).read_bytes())
+    task = source / ".tools/bin/task"
+    task.parent.mkdir(parents=True)
+    task.write_text(f"#!{sys.executable}\n" + '''
+import json,os,pathlib,subprocess,sys
+assert sys.argv[1:3]==['--offline','--dir'] and sys.argv[4]=='--taskfile'
+assert pathlib.Path(sys.argv[3])==pathlib.Path.cwd()
+assert pathlib.Path(sys.argv[5]).parent==pathlib.Path.cwd().parents[1]
+if '--summary' in sys.argv: sys.exit(0)
+if 'local:stack' in sys.argv:
+    os.chdir(pathlib.Path(sys.argv[5]).parent)
+    code="""
+import json,os,time
+from pathlib import Path
+import mainframe_rag.snapshot_probe as p
+observed={'value':p.VALUE,'module':p.__file__,'cwd':str(Path.cwd()),'python':os.environ['PY'],
+          'origin_changed':Path(os.environ['FAKE_COLAB_ROOT'],'origin-mutated').exists()}
+if 'PRODUCTION_CORPUS_DIR' in os.environ:
+    from mainframe_rag.config import Settings
+    from mainframe_rag.ingest.completion import representation_fingerprint
+    from mainframe_rag.ingest.rules_version import extraction_rules_version
+    settings=Settings(_env_file=None)
+    names=('CORPUS_DIR','PRODUCTION_CORPUS_DIR','PRODUCTION_GOLDEN_PATH','LOCAL_INGEST_PROGRESS',
+           'LOCAL_STACK_DRYRUN','QDRANT_URL','PYTHONPATH','GATEWAY_EMBED_MODEL','GATEWAY_EMBED_MODEL_REVISION')
+    observed['production']={name:os.environ[name] for name in names}
+    observed['production'].update(collection=settings.qdrant_collection,prefix=settings.dense_query_prefix,
+        context_model=settings.context_llm_model,bm25_cache=settings.bm25_cache_dir,
+        representation=representation_fingerprint(settings,extraction_rules_version()))
+Path(os.environ['FAKE_COLAB_ROOT'],'snapshot-workload.json').write_text(json.dumps(observed))
+time.sleep(float(os.environ.get('FAKE_NATIVE_WORKLOAD_SECONDS','0')))
+"""
+    subprocess.run([os.environ['PY'],'-c',code],check=True)
+''')
+    task.chmod(0o755)
+    pin = source / "scripts/tools/task-pin.txt"
+    pin.write_text("binary-sha256: " + hashlib.sha256(task.read_bytes()).hexdigest() + "\n")
+    (source / "src/mainframe_rag/snapshot_probe.py").write_text("VALUE = 'original frozen fixture'\n")
+    return source
+
+
 @pytest.fixture
 def lab(tmp_path, monkeypatch, request):
+    source = _execution_fixture(tmp_path, production="storage_lab" in request.fixturenames)
     binaries = tmp_path / "bin"
     binaries.mkdir()
     for name in ("colab", "ssh", "docker"):
@@ -240,6 +378,7 @@ def lab(tmp_path, monkeypatch, request):
     monkeypatch.delenv("GATEWAY_NAME", raising=False)
     monkeypatch.delenv("PG_NET", raising=False)
     monkeypatch.setenv("GATEWAY_DRYRUN", "0")
+    monkeypatch.setenv("FAKE_COLAB_SOURCE_ROOT", str(source))
     with socket.socket() as first, socket.socket() as second:
         first.bind(("127.0.0.1", 0))
         second.bind(("127.0.0.1", 0))
@@ -255,9 +394,8 @@ def lab(tmp_path, monkeypatch, request):
     prerequisites = []
     if profile != "COLAB_CPU_TRANSPORT":
         cpu = tmp_path / "cpu-proof"
-        prepared = subprocess.run(command + ["prepare", "--state", str(cpu), "--profile", "COLAB_CPU_TRANSPORT"]
-                                  + common, capture_output=True, text=True, timeout=15, check=False)
-        assert prepared.returncode == 0, prepared.stderr
+        assert _controller_call(["prepare", "--state", str(cpu), "--profile", "COLAB_CPU_TRANSPORT"]
+                                + common, source_root=source) == 0
         proof = subprocess.run(command + ["run", "--state", str(cpu), "--approve-cu", "20", "--", "/bin/true"],
                                capture_output=True, text=True, timeout=15, check=False)
         assert proof.returncode == 0, proof.stdout + proof.stderr
@@ -266,9 +404,8 @@ def lab(tmp_path, monkeypatch, request):
         prerequisites = ["--inference-lock", str(inference_lock),
                          "--transport-receipt", str(cpu / "transport-receipt.json")]
         (tmp_path / "events.jsonl").write_text("")
-    result = subprocess.run(command + ["prepare", "--state", str(state), "--profile", profile] + common + prerequisites,
-                            capture_output=True, text=True, timeout=15, check=False)
-    assert result.returncode == 0, result.stderr
+    assert _controller_call(["prepare", "--state", str(state), "--profile", profile] + common + prerequisites,
+                            source_root=source) == 0
     try:
         yield tmp_path, state, command
     finally:
@@ -283,39 +420,143 @@ def lab(tmp_path, monkeypatch, request):
                     pass
                 except FileNotFoundError:
                     pass
+        # Restore only test-owned snapshot directories for bounded fixture
+        # cleanup after their children are gone. Source files remain read-only.
+        for execution in tmp_path.glob("*/execution"):
+            for directory, children, _ in os.walk(execution):
+                Path(directory).chmod(0o700)
+                for name in children:
+                    (Path(directory) / name).chmod(0o700)
 
 
 @pytest.fixture
-def storage_lab(lab, retained):
-    root, base, _ = lab
+def storage_lab(lab, retained, original_inputs, monkeypatch):
+    root, base, command = lab
+    original = json.loads((base / "manifest.json").read_text())
+    source = Path(original["origin"]["source_root"])
     kubectl = root / "bin/kubectl"
     kubectl.write_text(f"#!{sys.executable}\n" + FAKE)
     kubectl.chmod(0o755)
     (root / "storage-fixture.json").write_text(json.dumps(retained))
-    corpus = root / "original-corpus-fixture"
-    corpus.mkdir()
-    golden = root / "original-golden.jsonl"
-    golden.write_text('{"question":"original test question"}\n')
-    inventory = root / "original-inventory.json"
-    inventory.write_text('{"max_document_tokens":8,"max_query_tokens":3}\n')
+    config, _, arguments, evidence = original_inputs
+    config["namespace"] = "retained"
+    profile = controller.build_profile("COLAB_G4_BF16", deadline_seconds=30)
+    arguments["recipe_root"] = source
+    pins = {"vllm": "0.28.0", "transformers": "5.15.0", "torch": "2.11.0",
+            "tokenizers": "0.0.0+originalfixture", "huggingface-hub": "1.0.0"}
+    arguments["runtime_pins"] = pins
+    evidence["runtime"] = {name: pins[name] for name in ("vllm", "transformers", "tokenizers", "torch")}
+    evidence["provenance"]["runtime_sha256"] = test_colab_production._digest(evidence["runtime"])
+    test_colab_production._json(Path(config["embedding_evidence"]) / "manifest.json", evidence)
+    fields = ("embed_mode", "embed_model", "embed_model_revision", "dense_dim", "qdrant_collection",
+              "bm25_model", "bm25_weights_revision", "bm25_cache_dir", "dense_query_prefix",
+              "acronym_expansion_enabled", "comparative_split_enabled", "diagnostic_dualpath_enabled",
+              "contextual_embed_enabled", "context_llm_model", "context_max_chars", "embed_max_input_chars",
+              "ingest_max_pdf_bytes", "ingest_max_doc_pages", "ingest_max_doc_chunks", "ingest_alias_publish",
+              "query_max_chars")
+    for name in tuple(os.environ):
+        if name.casefold() in fields:
+            monkeypatch.delenv(name)
+    for name in fields:
+        value = getattr(arguments["settings"], name)
+        if value is not None:
+            monkeypatch.setenv(name.upper(), str(value).lower() if type(value) is bool else str(value))
+    # The existing complete factory checks actual original PDF/artifact bytes
+    # and native query producers; it never substitutes admission success.
+    expected, _, _ = test_colab_production._complete((config, profile, arguments, evidence))
+    target = {"namespace": "retained", "claim_uid": "claim-original", "pv_uid": "pv-original-uid",
+              "storage_path": "/qdrant/storage", "logical_collection": "original_manuals"}
+    ledger = Path(config["data_state"]) / "retained-index-binding.json"
+    stored = json.loads(ledger.read_text())
+    stored["target"] = target
+    test_colab_production._json(ledger, stored)
+    approval = root / "original-production-approval.json"
+    test_colab_production._json(approval, {
+        "schema": 1, "pooling_producer": arguments["pooling_producer"],
+        "census_producer": {"development_sha": "6" * 40, "source_sha256": "7" * 64},
+        "source_scan": {"max_entries": 100, "max_bytes": 32 * 1024, "deadline_seconds": 20},
+    })
+    inference = root / "original-production-inference.lock"
+    inference.write_text("\n".join(f"{name}=={version} --hash=sha256:" + "0" * 64
+                                   for name, version in pins.items()) + "\n")
+    runtime = {"software": evidence["runtime"], "models": [{
+        "model_id": profile["servers"][1]["model_id"], "resolved_revision": profile["servers"][1]["revision"],
+        "server_argv_sha256": test_colab_production._digest(profile["servers"][1]["argv"]),
+        "metadata_sha256": {name: row["sha256"] for name, row in evidence["files"].items()},
+    }]}
+    test_colab_production._json(root / "original-runtime-observed.json", runtime)
+    proof = subprocess.run(command + ["run", "--state", str(base), "--approve-cu", "20", "--", "/bin/true"],
+                           capture_output=True, text=True, timeout=15, check=False)
+    assert proof.returncode == 0, proof.stdout + proof.stderr
+    (root / "events.jsonl").write_text("")
     kubeconfig = root / "original-kubeconfig"
     kubeconfig.write_text("original fake Kubernetes client input\n")
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
         port = listener.getsockname()[1]
-    state = _prepare_new(base, root / "retained-qdrant-run", extra=[
-        "--dataset", "production", "--corpus", str(corpus), "--golden", str(golden),
-        "--inventory", str(inventory), "--data-state", str(root / "retained-data"),
+    state = _prepare_new(base, root / "retained-qdrant-run", profile="COLAB_G4_BF16", extra=[
+        "--dataset", "production", "--corpus", config["corpus"], "--golden", config["golden"],
+        "--inventory", config["inventory"], "--data-state", config["data_state"],
+        "--source-inventory", config["source_inventory"], "--embedding-evidence", config["embedding_evidence"],
+        "--production-approval", str(approval), "--inference-lock", str(inference),
+        "--transport-receipt", str(base / "transport-receipt.json"),
         "--kubeconfig", str(kubeconfig), "--kube-context", "original-kind", "--namespace", "retained",
         "--qdrant-service", "qdrant", "--kubectl", str(kubectl), "--qdrant-port", str(port),
     ])
     run = controller.Run(state)
+    assert run.manifest["production"]["summary"]["source_count"] == 2
+    assert run.production_admission().environment["QDRANT_COLLECTION"] == "original_manuals"
+    assert expected.query_input_counts == (1, 2)
     run.cleanup_reserve = 10
     try:
         yield root, run, retained
     finally:
         for child in reversed(run.children):
             run.terminate(child)
+
+
+def _prepare_production_again(run, name):
+    extra = []
+    for field in ("corpus", "golden", "inventory", "source_inventory", "embedding_evidence", "production_approval",
+                  "data_state", "kubeconfig", "kube_context", "namespace", "qdrant_service",
+                  "inference_lock", "transport_receipt", "qdrant_port"):
+        extra += ["--" + field.replace("_", "-"), str(run.config[field])]
+    extra += ["--dataset", "production", "--kubectl", run.tools["kubectl"]]
+    return _prepare_new(run.state, run.state.parent / name, profile="COLAB_G4_BF16", extra=extra)
+
+
+def _production_cli(state, *, stop=False, workload=()):
+    argv = [sys.executable, str(ROOT / "scripts/colab.py"), "stop" if stop else "run", "--state", str(state)]
+    if not stop:
+        argv += ["--approve-cu", "20"]
+        if workload:
+            argv += ["--", *workload]
+    return subprocess.run(argv, capture_output=True, text=True, timeout=20, check=False)
+
+
+def test_production_prepare_refuses_maxima_only_census_without_independent_inputs(lab):
+    root, base, _ = lab
+    original = json.loads((base / "manifest.json").read_text())
+    corpus = root / "unmeasured-original-corpus"
+    corpus.mkdir()
+    golden = root / "unmeasured-original-golden.jsonl"
+    golden.write_text('{"query":"Original question","expected_doc_ids":["original"]}\n')
+    inventory = root / "maxima-only.json"
+    inventory.write_text('{"max_document_tokens":8,"max_query_tokens":3}\n')
+    kubeconfig = root / "original-kubeconfig"
+    kubeconfig.write_text("original fake Kubernetes client input\n")
+    state = root / "must-refuse-incomplete-production"
+    argv = ["prepare", "--state", str(state), "--profile", "COLAB_G4_BF16",
+            "--dataset", "production", "--gateway-image", IMAGE,
+            "--corpus", str(corpus), "--golden", str(golden), "--inventory", str(inventory),
+            "--data-state", str(root / "unknown-retained-data"), "--kubeconfig", str(kubeconfig),
+            "--kube-context", "original-kind", "--namespace", "retained", "--qdrant-service", "qdrant"]
+    for name in ("colab", "ssh", "ssh_keygen", "docker"):
+        argv += ["--" + name.replace("_", "-"), original["tools"][name]]
+    argv += ["--kubectl", original["tools"]["docker"]]
+    assert _controller_call(argv, source_root=Path(original["origin"]["source_root"])) == 2
+    assert _events(root) == [], "incomplete evidence reached an external tool"
+    assert not state.exists(), "incomplete evidence was published as prepared production"
 
 
 @pytest.mark.parametrize("lab", ["COLAB_G4_BF16"], indirect=True)
@@ -397,24 +638,177 @@ def test_workload_executes_the_prepared_checkout_from_a_decoy_cwd(lab, tmp_path)
                             "--", sys.executable, "-c", program],
                             cwd=decoy, capture_output=True, text=True, timeout=15, check=False)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert observed.read_text() == str(ROOT)
+    assert observed.read_text() == str(state / "execution")
     assert json.loads((root / "sessions.json").read_text()) == {}
+
+
+@pytest.mark.parametrize("lab", ["COLAB_G4_BF16"], indirect=True)
+def test_paid_execution_uses_frozen_uploads_gateway_task_and_fresh_imports_during_origin_mutation(lab, monkeypatch):
+    root, state, command = lab
+    manifest = json.loads((state / "manifest.json").read_text())
+    execution = state / "execution"
+    origin = Path(manifest["origin"]["source_root"])
+    expected_profile = (execution / "src/mainframe_rag/serve/colab_profiles.py").read_bytes()
+    monkeypatch.setenv("FAKE_COLAB_SCENARIO", "origin_mutation")
+    result = subprocess.run(command + ["run", "--state", str(state), "--approve-cu", "20"],
+                            capture_output=True, text=True, timeout=20, check=False)
+    assert result.returncode == 0, result.stdout + result.stderr
+    observed = json.loads((root / "snapshot-workload.json").read_text())
+    assert observed == {
+        "value": "original frozen fixture",
+        "module": str(execution / "src/mainframe_rag/snapshot_probe.py"),
+        "cwd": str(execution), "python": sys.executable, "origin_changed": True,
+    }
+    assert (root / "remote/colab_profiles.py").read_bytes() == expected_profile
+    executions = [argv[argv.index("-f") + 1] for kind, argv in _events(root)
+                  if kind == "colab" and argv[2] == "exec"]
+    assert executions == [str(execution / "scripts/colab_preflight.py"),
+                          str(execution / "scripts/colab_runtime.py")]
+    # The fake modifies the original gateway and Task to fail after allocation;
+    # successful probing and the imported marker therefore require the copies.
+    restored = controller.source_identity(origin)
+    assert restored == manifest["execution"]["source"]
+    assert hashlib.sha256((origin / ".tools/bin/task").read_bytes()).hexdigest() == \
+        manifest["execution"]["task_sha256"]
+    assert manifest["execution"]["source"]["source_bytes"] < 2 * 1024 * 1024
+    assert manifest["execution"]["task_bytes"] < 4096
+    assert not any((execution / name).exists() for name in (".git", ".venv", ".env", "corpus"))
+    finished = json.loads((state / "manifest.json").read_text())
+    assert finished["released"] is True and finished["release_evidence"]["absent"] is True
+    assert not (state / "transport-receipt.json").exists(), "GPU success cannot certify CPU transport"
+    assert json.loads((root / "sessions.json").read_text()) == {}
+    monkeypatch.setenv("FAKE_COLAB_SCENARIO", "success")
+    ordinary = _prepare_new(state, root / "ordinary-after-source-restoration")
+    next_run = subprocess.run(command + ["run", "--state", str(ordinary), "--approve-cu", "20", "--", "/bin/true"],
+                              capture_output=True, text=True, timeout=15, check=False)
+    assert next_run.returncode == 0, next_run.stdout + next_run.stderr
+    assert (ordinary / "transport-receipt.json").is_file()
+
+
+@pytest.mark.parametrize("changed", ["source", "task", "dotenv"])
+def test_tampered_execution_snapshot_refuses_before_tools_then_restored_snapshot_runs(lab, changed):
+    root, state, command = lab
+    execution = state / "execution"
+    relative = {"source": "scripts/colab_preflight.py", "task": ".tools/bin/task", "dotenv": ".env"}[changed]
+    target = execution / relative
+    original = target.read_bytes() if changed != "dotenv" else None
+    if changed == "dotenv":
+        execution.chmod(0o700)
+        target.write_text("ORIGINAL_SYNTHETIC_SETTING=unsupported\n")
+        execution.chmod(0o500)
+    else:
+        target.chmod(0o600)
+        target.write_bytes(original + b"\n# original synthetic tampering\n")
+        target.chmod(0o500 if changed == "task" else 0o400)
+    rejected = subprocess.run(command + ["run", "--state", str(state), "--approve-cu", "20", "--", "/bin/true"],
+                              capture_output=True, text=True, timeout=5, check=False)
+    assert rejected.returncode == 2
+    assert _events(root) == []
+    assert json.loads((state / "manifest.json").read_text())["allocation_attempted"] is False
+    if changed == "dotenv":
+        execution.chmod(0o700)
+        target.unlink()
+        execution.chmod(0o500)
+    else:
+        target.chmod(0o600)
+        target.write_bytes(original)
+        target.chmod(0o500 if changed == "task" else 0o400)
+    result = subprocess.run(command + ["run", "--state", str(state), "--approve-cu", "20", "--", "/bin/true"],
+                            capture_output=True, text=True, timeout=15, check=False)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (state / "transport-receipt.json").is_file()
+
+
+@pytest.mark.parametrize("changed", ["task", "dotenv", "copy_race"])
+def test_prepare_publishes_only_exact_bounded_source_and_pinned_tool_then_next_candidate_runs(lab, monkeypatch, changed):
+    root, base, command = lab
+    state = root / "rejected-source-candidate"
+    argv, source = _prepare_arguments(base, state)
+    task = source / ".tools/bin/task"
+    original_task = task.read_bytes()
+    read_bounded = controller.read_bounded_input
+    if changed == "task":
+        task.write_bytes(original_task + b"\n# mismatched original tool\n")
+    elif changed == "dotenv":
+        (source / ".env").write_text("ORIGINAL_SYNTHETIC_SETTING=unsupported\n")
+    else:
+        def changed_during_copy(path, limit):
+            raw = read_bounded(path, limit)
+            return raw + b"\n# original concurrent edit\n" if path == source / "scripts/colab_preflight.py" else raw
+
+        monkeypatch.setattr(controller, "read_bounded_input", changed_during_copy)
+    assert _controller_call(argv, source_root=source) == 2
+    assert not (state / "manifest.json").exists(), "a partial or mismatched copy became a prepared candidate"
+    assert _events(root) == []
+    assert not (state / "execution/.env").exists(), "private configuration was copied"
+    if changed == "task":
+        task.write_bytes(original_task)
+    elif changed == "dotenv":
+        (source / ".env").unlink()
+    else:
+        monkeypatch.setattr(controller, "read_bounded_input", read_bounded)
+    ordinary = _prepare_new(base, root / "ordinary-after-invalid-source")
+    result = subprocess.run(command + ["run", "--state", str(ordinary), "--approve-cu", "20", "--", "/bin/true"],
+                            capture_output=True, text=True, timeout=15, check=False)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (ordinary / "transport-receipt.json").is_file()
+
+
+@pytest.mark.parametrize("bounded", ["source_bytes", "source_entries", "task_bytes"])
+def test_prepare_copy_enforces_separate_source_and_tool_caps_without_allocating(lab, monkeypatch, bounded):
+    root, base, _ = lab
+    state = root / "bounded-source-refusal"
+    argv, source = _prepare_arguments(base, state)
+    if bounded == "source_bytes":
+        monkeypatch.setattr(controller, "SOURCE_LIMIT_BYTES", 1)
+    elif bounded == "source_entries":
+        monkeypatch.setattr(controller, "SOURCE_ENTRY_LIMIT", 1)
+    else:
+        monkeypatch.setattr(controller, "TASK_BINARY_LIMIT_BYTES", 1)
+    assert _controller_call(argv, source_root=source) == 2
+    assert not (state / "manifest.json").exists()
+    assert _events(root) == []
+    copied = state / "execution/.tools/bin/task"
+    assert not copied.exists(), "a tool larger than its independent envelope was copied"
+
+
+def test_snapshot_recovery_releases_owned_session_despite_changed_origin_then_next_run_works(lab, monkeypatch):
+    root, state, command = lab
+    monkeypatch.setenv("FAKE_COLAB_SCENARIO", "stop_fail")
+    failed = subprocess.run(command + ["run", "--state", str(state), "--approve-cu", "20", "--", "/bin/true"],
+                            capture_output=True, text=True, timeout=15, check=False)
+    assert failed.returncode == 1
+    manifest = json.loads((state / "manifest.json").read_text())
+    assert json.loads((root / "sessions.json").read_text()) == {manifest["session"]: "endpoint-owned"}
+    source = Path(manifest["origin"]["source_root"])
+    changed = source / "scripts/run_local_gateway.sh"
+    original = changed.read_bytes()
+    changed.write_text("exit 97\n")
+    monkeypatch.setenv("FAKE_COLAB_SCENARIO", "success")
+    recovered = subprocess.run(command + ["stop", "--state", str(state)],
+                               capture_output=True, text=True, timeout=15, check=False)
+    assert recovered.returncode == 0, recovered.stdout + recovered.stderr
+    assert json.loads((root / "sessions.json").read_text()) == {}
+    assert json.loads((root / "gateway-networks.json").read_text()) == {}
+    assert not (state / "transport-receipt.json").exists()
+    changed.write_bytes(original)
+    ordinary = _prepare_new(state, root / "ordinary-after-frozen-recovery")
+    result = subprocess.run(command + ["run", "--state", str(ordinary), "--approve-cu", "20", "--", "/bin/true"],
+                            capture_output=True, text=True, timeout=15, check=False)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (ordinary / "transport-receipt.json").is_file()
 
 
 @pytest.mark.parametrize("lab", ["COLAB_CPU_TRANSPORT"], indirect=True)
 def test_separate_run_states_share_assignment_ownership_and_allow_next_run(lab, monkeypatch):
     root, state, _ = lab
-    second = root / "second-private-run"
-    second.mkdir(mode=0o700)
-    manifest = json.loads((state / "manifest.json").read_text())
-    manifest["session"] = "rag-" + "b" * 16
-    (second / "manifest.json").write_text(json.dumps(manifest))
+    second = _prepare_new(state, root / "second-private-run")
     entered = []
     monkeypatch.setattr(controller.Run, "run", lambda self, approval, workload: entered.append(self.state) or 0)
     with controller.assignment_lock():
-        assert controller.main(["run", "--state", str(second), "--approve-cu", "20"]) == 2
+        assert _controller_call(["run", "--state", str(second), "--approve-cu", "20"]) == 2
         assert entered == [], "a distinct state bypassed assignment ownership"
-    assert controller.main(["run", "--state", str(second), "--approve-cu", "20"]) == 0
+    assert _controller_call(["run", "--state", str(second), "--approve-cu", "20"]) == 0
     assert entered == [second]
 
 
@@ -588,7 +982,6 @@ def test_command_capture_uses_a_fixed_number_of_log_slots(lab, monkeypatch):
 def test_output_limits_never_prevent_owned_release_and_a_fresh_ordinary_operation(lab, monkeypatch,
                                                                                  budget, scenario):
     root, state, _ = lab
-    prepared = json.loads((state / "manifest.json").read_text())
     ledger = {"schema": 1, "used": {"work": 4 * 1024 * 1024,
                                     "export": 256 * 1024, "release": 512 * 1024}}
     (state / "capture-budget.json").write_text(json.dumps(ledger) if budget == "exhausted" else "[]")
@@ -612,8 +1005,7 @@ def test_output_limits_never_prevent_owned_release_and_a_fresh_ordinary_operatio
     assert len(stops) == 1 and stops[0][-1] == run.manifest["session"]
     assert not list(state.glob("command-*.log")), "exhausted capture must not create unbounded cleanup logs"
     fresh = root / "next-private-run"
-    fresh.mkdir(mode=0o700)
-    (fresh / "manifest.json").write_text(json.dumps(prepared))
+    _prepare_new(state, fresh)
     ordinary = controller.Run(fresh)
     assert ordinary.command([sys.executable, "-c", "print('ordinary after release')"],
                             seconds=3).stdout == "ordinary after release\n"
@@ -621,20 +1013,15 @@ def test_output_limits_never_prevent_owned_release_and_a_fresh_ordinary_operatio
 
 def test_prepared_dirty_source_change_refuses_before_allocation_then_ordinary_cpu_run(lab, monkeypatch):
     root, base, _ = lab
-    sources = root / "original-source-fixture"
-    for relative in controller.SOURCE_REQUIRED:
-        path = sources / relative
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("original source fixture\n")
-    real_source_identity = controller.source_identity
-    monkeypatch.setattr(controller, "source_identity", lambda _: real_source_identity(sources))
+    sources = Path(json.loads((base / "manifest.json").read_text())["origin"]["source_root"])
     state = _prepare_new(base, root / "bound-source-run")
     changed = sources / "src/mainframe_rag/serve/colab_profiles.py"
+    original = changed.read_bytes()
     changed.write_text("changed source at the same HEAD\n")
     assert _run_fake(state) == 2
     assert _events(root) == [], "source drift reached a tool or allocated a runtime"
     assert json.loads((state / "manifest.json").read_text())["allocation_attempted"] is False
-    changed.write_text("original source fixture\n")
+    changed.write_bytes(original)
     assert _run_fake(state) == 0
     assert (state / "transport-receipt.json").is_file()
     assert json.loads((root / "sessions.json").read_text()) == {}
@@ -829,6 +1216,226 @@ def test_sensitive_capture_keeps_bounded_memory_without_disk_then_ordinary_captu
     assert any(path.read_text() == "ordinary after secret read\n" for path in state.glob("*.stdout.log"))
 
 
+def test_native_settings_use_proven_qdrant_and_gateway_generated_legs_despite_case_aliases(storage_lab, monkeypatch):
+    _, run, _ = storage_lab
+    run.persistent_qdrant()
+    proven_url = f"http://127.0.0.1:{run.config['qdrant_port']}"
+    assert run.manifest["persistent_qdrant"]["url"] == proven_url
+    with monkeypatch.context() as ambient:
+        ambient.setenv("QDRANT_URL", "http://unapproved-original-target.invalid:6333")
+        # These aliases are introduced after preparation. Setting an uppercase
+        # URL alone cannot constrain native case-insensitive Settings.
+        ambient.setenv("qdrant_url", "http://unapproved-later-target.invalid:6333")
+        ambient.setenv("embed_base_url", "http://unapproved-embedding.invalid/v1")
+        ambient.setenv("llm_base_url", "http://unapproved-reasoning.invalid/v1")
+        ambient.setenv("llm_model_reasoning", "unapproved-reasoning-model")
+        ambient.setenv("embed_api_key", "sk-original-unapproved-embedding")
+        ambient.setenv("llm_api_key", "sk-original-unapproved-reasoning")
+        ambient.setenv("rerank_base_url", "http://unapproved-reranking.invalid/v1")
+        ambient.setenv("rerank_model", "unapproved-reranking-model")
+        ambient.setenv("rerank_api_key", "sk-original-unapproved-reranking")
+        environment = run.environment("127.0.0.2")
+    assert environment["QDRANT_URL"] == proven_url
+    direct = subprocess.run(
+        [run.manifest["execution"]["interpreter"], "-c",
+         "from mainframe_rag.config import Settings; print(Settings(_env_file=None).qdrant_url)"],
+        env=environment, cwd=run.execution_root, capture_output=True, text=True, timeout=5, check=False)
+    assert direct.returncode == 0, direct.stdout + direct.stderr
+    assert direct.stdout.strip() == proven_url
+    program = """
+import json
+from mainframe_rag.config import Settings
+s=Settings(_env_file=None)
+print(json.dumps({'qdrant':s.qdrant_url,'embedding':s.embed_base_url,'reasoning':s.llm_base_url,
+                  'reasoning_model':s.llm_model_reasoning,
+                  'embedding_key_owned':s.embed_api_key=='sk-original-embedding',
+                  'reasoning_key_owned':s.llm_api_key=='sk-original-reasoning',
+                  'reranking':s.rerank_base_url,'reranking_model':s.rerank_model,
+                  'reranking_key_owned':s.rerank_api_key=='sk-original-reranking'}))
+"""
+    # The owner's generated gateway file exports these canonical names before
+    # the native consumer starts. Original fake leg values preserve that shell
+    # boundary without rendering or starting a gateway and without real keys.
+    leg_exports = """
+export LLM_BASE_URL=http://localhost:40127/v1 LLM_MODEL_REASONING="$3" LLM_API_KEY=sk-original-reasoning
+export EMBED_BASE_URL=http://localhost:40127/v1 EMBED_API_KEY=sk-original-embedding
+export RERANK_BASE_URL=http://localhost:40127/v1 RERANK_MODEL=original-reranking-model RERANK_API_KEY=sk-original-reranking
+exec "$1" -c "$2"
+"""
+    child = subprocess.run(["sh", "-c", leg_exports, "original-routing-child",
+                            run.manifest["execution"]["interpreter"], program, run.profile["servers"][0]["model_id"]],
+                           env=environment, cwd=run.execution_root,
+                           capture_output=True, text=True, timeout=5, check=False)
+    assert child.returncode == 0, child.stdout + child.stderr
+    actual = json.loads(child.stdout)
+    assert actual == {
+        "qdrant": proven_url, "embedding": "http://localhost:40127/v1", "reasoning": "http://localhost:40127/v1",
+        "reasoning_model": run.profile["servers"][0]["model_id"],
+        "embedding_key_owned": True, "reasoning_key_owned": True,
+        "reranking": "http://localhost:40127/v1", "reranking_model": "original-reranking-model",
+        "reranking_key_owned": True,
+    }
+
+
+def test_handoff_canonicalizes_new_aliases_in_a_different_shell_and_preserves_native_representation(
+        storage_lab, monkeypatch):
+    _, run, _ = storage_lab
+    run.persistent_qdrant()
+    monkeypatch.delenv("context_llm_model", raising=False)
+    monkeypatch.delenv("dense_query_prefix", raising=False)
+    run.environment("127.0.0.2")
+    handoff = run.state / "handoff.env"
+    assert handoff.is_file()
+    expected = json.loads((run.state / "production-expected.json").read_text())["expected"]
+    second_shell = dict(os.environ)
+    second_shell.update(context_llm_model="unapproved-later-context-model",
+                        dense_query_prefix="Unapproved later prefix | α\n",
+                        ORIGINAL_UNRELATED_KEEP="Original | α\n$(printf literal-value)")
+    program = """
+import json,os
+from mainframe_rag.config import Settings
+from mainframe_rag.ingest.completion import representation_fingerprint
+from mainframe_rag.ingest.rules_version import extraction_rules_version
+from mainframe_rag.serve.colab_production import native_query_inputs
+s=Settings(_env_file=None)
+print(json.dumps({'prefix':s.dense_query_prefix,'context_model':s.context_llm_model,
+                  'representation':representation_fingerprint(s,extraction_rules_version()),
+                  'queries':list(native_query_inputs(s,'Compare CSA versus ECSA')),
+                  'python':os.environ['PY'],'unrelated':os.environ['ORIGINAL_UNRELATED_KEEP']}))
+"""
+    child = subprocess.run(["sh", "-c", '. "$1"; exec "$PY" -c "$2"', "original-independent-shell",
+                            str(handoff), program], env=second_shell, cwd=run.execution_root,
+                           capture_output=True, text=True, timeout=5, check=False)
+    assert child.returncode == 0, child.stdout + child.stderr
+    actual = json.loads(child.stdout)
+    assert actual == {
+        "prefix": "Original: ", "context_model": None,
+        "representation": expected["contract"]["representation_fingerprint"],
+        "queries": ["Original: CSA", "Original: ECSA"], "python": run.manifest["execution"]["interpreter"],
+        "unrelated": "Original | α\n$(printf literal-value)",
+    }
+    assert actual["python"] == sys.executable
+
+
+def test_complete_production_admission_hands_exact_target_progress_and_native_settings_to_fresh_child(
+        storage_lab, monkeypatch):
+    root, run, _ = storage_lab
+    sidecar = json.loads((run.state / "production-expected.json").read_text())
+    target = {"namespace": "retained", "claim_uid": "claim-original", "pv_uid": "pv-original-uid",
+              "storage_path": "/qdrant/storage", "logical_collection": "original_manuals"}
+    assert sidecar["target"] == target
+    progress_key = hashlib.sha256(json.dumps(
+        {"target": target, "progress_binding": sidecar["progress_binding"]},
+        sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    progress = str(Path(run.config["data_state"]) / f"ingest-{progress_key}.jsonl")
+    # Settings is case-insensitive. Later aliases must not replace the prepared
+    # prefix or restore optional values that were deliberately absent.
+    with monkeypatch.context() as ambient:
+        ambient.setenv("dense_query_prefix", "Unapproved changed prefix | α\n")
+        ambient.setenv("context_llm_model", "unapproved-context-model")
+        ambient.setenv("bm25_cache_dir", str(root / "unapproved-cache"))
+        result = _production_cli(run.state)
+    assert result.returncode == 0, result.stdout + result.stderr
+    observed = json.loads((root / "snapshot-workload.json").read_text())
+    production = observed["production"]
+    assert observed["cwd"] == str(run.execution_root) and observed["python"] == sys.executable
+    assert production == {
+        "CORPUS_DIR": run.config["corpus"], "PRODUCTION_CORPUS_DIR": run.config["corpus"],
+        "PRODUCTION_GOLDEN_PATH": run.config["golden"], "LOCAL_INGEST_PROGRESS": progress,
+        "LOCAL_STACK_DRYRUN": "0", "QDRANT_URL": f"http://127.0.0.1:{run.config['qdrant_port']}",
+        "PYTHONPATH": str(run.execution_root / "src"),
+        "GATEWAY_EMBED_MODEL": run.profile["servers"][1]["model_id"],
+        "GATEWAY_EMBED_MODEL_REVISION": run.profile["servers"][1]["revision"],
+        "collection": "original_manuals", "prefix": "Original: ", "context_model": None, "bm25_cache": None,
+        "representation": sidecar["expected"]["contract"]["representation_fingerprint"],
+    }
+    manifest = json.loads((run.state / "manifest.json").read_text())
+    assert manifest["production_progress"] == progress
+    assert manifest["persistent_qdrant"]["claim_uid"] == "claim-original"
+    assert manifest["persistent_qdrant"]["pv_uid"] == "pv-original-uid"
+    assert manifest["workload_succeeded"] is True and manifest["released"] is True
+    assert manifest["production"]["acceptance_certified"] is False
+    assert not (run.state / "transport-receipt.json").exists()
+    assert json.loads((root / "sessions.json").read_text()) == {}
+    assert json.loads((root / "gateway-networks.json").read_text()) == {}
+    next_state = _prepare_production_again(run, "ordinary-native-production-after-success")
+    next_run = _production_cli(next_state)
+    assert next_run.returncode == 0, next_run.stdout + next_run.stderr
+    next_observed = json.loads((root / "snapshot-workload.json").read_text())
+    assert next_observed["production"]["LOCAL_INGEST_PROGRESS"] == progress
+
+
+@pytest.mark.parametrize("changed", ["source", "ledger", "wrapper", "runtime_software", "runtime_metadata"])
+def test_production_drift_and_wrappers_refuse_before_native_workload_then_next_native_run_succeeds(
+        storage_lab, changed):
+    root, run, _ = storage_lab
+    target = original = None
+    if changed == "source":
+        target = Path(run.config["corpus"]) / "original books/manual a.pdf"
+        original = target.read_bytes()
+        target.write_bytes(bytes([original[0] ^ 1]) + original[1:])
+    elif changed == "ledger":
+        target = Path(run.config["data_state"]) / "retained-index-binding.json"
+        original = target.read_bytes()
+        with target.open("a") as stream:
+            stream.write("\n")
+    elif changed.startswith("runtime_"):
+        target = root / "original-runtime-observed.json"
+        original = target.read_bytes()
+        report = json.loads(original)
+        if changed == "runtime_software":
+            report["software"]["tokenizers"] = "unapproved-fixture-version"
+        else:
+            report["models"][0]["metadata_sha256"]["tokenizer.json"] = "f" * 64
+        test_colab_production._json(target, report)
+    rejected = _production_cli(run.state, workload=("/bin/true",) if changed == "wrapper" else ())
+    assert rejected.returncode == 1, rejected.stdout + rejected.stderr
+    assert not (root / "snapshot-workload.json").exists(), "unadmitted native workload executed"
+    manifest = json.loads((run.state / "manifest.json").read_text())
+    assert manifest.get("workload_succeeded") is not True
+    assert not (run.state / "transport-receipt.json").exists()
+    allocated = [argv for kind, argv in _events(root) if kind == "colab" and argv[2] == "new"]
+    if changed.startswith("runtime_"):
+        assert len(allocated) == 1
+        assert manifest["released"] is True and manifest["release_evidence"]["absent"] is True
+        assert json.loads((root / "sessions.json").read_text()) == {}
+        stopped = [argv[-1] for kind, argv in _events(root) if kind == "colab" and argv[2] == "stop"]
+        assert stopped == [manifest["session"]]
+    else:
+        assert allocated == [], "source/ledger/wrapper refusal allocated a paid runtime"
+        assert manifest["allocation_attempted"] is False
+    if target is not None:
+        target.write_bytes(original)
+    next_state = _prepare_production_again(run, "ordinary-native-production-after-refusal")
+    ordinary = _production_cli(next_state)
+    assert ordinary.returncode == 0, ordinary.stdout + ordinary.stderr
+    assert json.loads((root / "snapshot-workload.json").read_text())["production"]["collection"] == "original_manuals"
+    assert json.loads((root / "sessions.json").read_text()) == {}
+
+
+def test_malformed_production_sidecar_cannot_block_exact_recovery_then_next_native_run_works(storage_lab, monkeypatch):
+    root, run, _ = storage_lab
+    monkeypatch.setenv("FAKE_COLAB_SCENARIO", "stop_fail")
+    failed = _production_cli(run.state)
+    assert failed.returncode == 1, failed.stdout + failed.stderr
+    manifest = json.loads((run.state / "manifest.json").read_text())
+    assert manifest["workload_succeeded"] is True
+    assert json.loads((root / "sessions.json").read_text()) == {manifest["session"]: "endpoint-owned"}
+    (run.state / "production-expected.json").write_text("{original broken synthetic sidecar\n")
+    monkeypatch.setenv("FAKE_COLAB_SCENARIO", "success")
+    recovered = _production_cli(run.state, stop=True)
+    assert recovered.returncode == 0, recovered.stdout + recovered.stderr
+    assert json.loads((root / "sessions.json").read_text()) == {}
+    stopped = [argv[-1] for kind, argv in _events(root) if kind == "colab" and argv[2] == "stop"]
+    assert stopped == [manifest["session"], manifest["session"]]
+    assert json.loads((root / "gateway-networks.json").read_text()) == {}
+    assert not (run.state / "transport-receipt.json").exists()
+    next_state = _prepare_production_again(run, "ordinary-native-production-after-sidecar-recovery")
+    ordinary = _production_cli(next_state)
+    assert ordinary.returncode == 0, ordinary.stdout + ordinary.stderr
+    assert json.loads((root / "snapshot-workload.json").read_text())["production"]["collection"] == "original_manuals"
+
+
 def test_retained_storage_forwards_exact_proven_pod_without_logging_live_config(storage_lab):
     root, run, _ = storage_lab
     run.persistent_qdrant()
@@ -842,7 +1449,7 @@ def test_retained_storage_forwards_exact_proven_pod_without_logging_live_config(
     forwards = [argv for argv in calls if argv[0] == "port-forward"]
     assert forwards == [["port-forward", "--address", "127.0.0.1", "pod/qdrant-0",
                          f"{run.config['qdrant_port']}:6333"]]
-    assert set(tuple(argv) for argv in calls if argv[0] == "exec") == {
+    assert {tuple(argv) for argv in calls if argv[0] == "exec"} == {
         ("exec", "qdrant-0", "-c", "qdrant", "--", "cat", path)
         for path in ("/qdrant/config/initialize.sh", "/qdrant/config/config.yaml",
                      "/qdrant/config/production.yaml", "/qdrant/config/local.yaml")
@@ -931,7 +1538,7 @@ def test_workload_cannot_succeed_after_retained_container_restart(storage_lab, m
         return child
 
     monkeypatch.setattr(controller.Run, "spawn", restart_after_workload)
-    assert _run_fake(run.state) != 0
+    assert _run_fake(run.state, ()) != 0
     manifest = json.loads((run.state / "manifest.json").read_text())
     assert manifest.get("workload_succeeded") is not True
     assert manifest["released"] is True and not (run.state / "transport-receipt.json").exists()
@@ -948,7 +1555,8 @@ def test_running_budget_poll_lost_forward_releases_owned_vm(storage_lab, monkeyp
         return budget(self, initial=initial)
 
     monkeypatch.setattr(controller.Run, "budget", lose_running_forward)
-    assert _run_fake(run.state, (sys.executable, "-c", "import time; time.sleep(3)")) != 0
+    monkeypatch.setenv("FAKE_NATIVE_WORKLOAD_SECONDS", "3")
+    assert _run_fake(run.state, ()) != 0
     manifest = json.loads((run.state / "manifest.json").read_text())
     assert manifest.get("workload_succeeded") is not True and manifest["released"] is True
     assert json.loads((root / "sessions.json").read_text()) == {}
@@ -1384,3 +1992,168 @@ def test_port_admission_refuses_live_listener_then_allows_closed_transport_reuse
                 client.shutdown(socket.SHUT_WR)
                 assert accepted.recv(1) == b""
     run.free_port(address, port)
+
+
+def test_read_only_existing_recovery_lock_keeps_exclusive_ownership_then_next_run_works(lab, monkeypatch):
+    root, state, _ = lab
+    run = controller.Run(state)
+    run.manifest.update(allocation_attempted=True, endpoint="endpoint-owned", phase="running")
+    run.save("original_owned_assignment")
+    (root / "sessions.json").write_text(json.dumps({run.manifest["session"]: "endpoint-owned"}))
+    remote = root / "remote"
+    remote.mkdir()
+    (remote / "colab-artifacts.tgz").write_bytes(b"original-fake-diagnostics")
+    lock_path = state / "run.lock"
+    lock_path.write_bytes(b"")
+    lock_path.chmod(0o400)
+    inode = lock_path.stat().st_ino
+    flock = fcntl.flock
+    observed = []
+
+    def inspect_recovery_lock(descriptor, operation):
+        number = descriptor if isinstance(descriptor, int) else descriptor.fileno()
+        if os.fstat(number).st_ino == inode:
+            # This tests the real descriptor access mode, including on a root
+            # test host that could bypass the file's mode0400 permission.
+            assert fcntl.fcntl(number, fcntl.F_GETFL) & os.O_ACCMODE == os.O_RDONLY
+            observed.append(operation)
+        return flock(descriptor, operation)
+
+    with lock_path.open("rb") as owner:
+        flock(owner, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        monkeypatch.setattr(controller.fcntl, "flock", inspect_recovery_lock)
+        assert _controller_call(["stop", "--state", str(state)]) == 2
+        assert _events(root) == [], "recovery bypassed the active exclusive owner"
+        assert json.loads((root / "sessions.json").read_text()) == {run.manifest["session"]: "endpoint-owned"}
+    assert _controller_call(["stop", "--state", str(state)]) == 0
+    assert observed == [fcntl.LOCK_EX | fcntl.LOCK_NB] * 2
+    assert lock_path.stat().st_ino == inode and lock_path.stat().st_mode & 0o777 == 0o400
+    assert json.loads((root / "sessions.json").read_text()) == {}
+    assert not (state / "transport-receipt.json").exists()
+    ordinary = _prepare_new(state, root / "ordinary-after-read-only-recovery")
+    assert _run_fake(ordinary) == 0
+
+
+@pytest.mark.parametrize("unsafe", ["missing", "symlink", "fifo", "public", "unowned"])
+def test_recovery_refuses_unsafe_existing_lock_without_tool_calls(lab, monkeypatch, unsafe):
+    root, state, _ = lab
+    lock = state / "run.lock"
+    if unsafe == "symlink":
+        target = root / "original-other-lock"
+        target.write_bytes(b"")
+        lock.symlink_to(target)
+    elif unsafe == "fifo":
+        os.mkfifo(lock, 0o600)
+    elif unsafe != "missing":
+        lock.write_bytes(b"")
+        lock.chmod(0o644 if unsafe == "public" else 0o600)
+        if unsafe == "unowned":
+            inode = lock.stat().st_ino
+            fstat = os.fstat
+
+            def wrong_owner(descriptor):
+                info = fstat(descriptor)
+                if info.st_ino == inode:
+                    return SimpleNamespace(st_mode=info.st_mode, st_uid=info.st_uid + 1)
+                return info
+
+            monkeypatch.setattr(controller.os, "fstat", wrong_owner)
+    assert _controller_call(["stop", "--state", str(state)]) == 2
+    assert _events(root) == []
+
+
+def test_normal_allocation_cannot_bypass_unwritable_lock_creation_then_next_run_works(lab, monkeypatch):
+    root, state, _ = lab
+    open_descriptor = os.open
+
+    def read_only_state(path, flags, *args, **kwargs):
+        if path == state / "run.lock":
+            raise OSError(30, "original fake read-only allocation lock")
+        return open_descriptor(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(controller.os, "open", read_only_state)
+    assert _run_fake(state) == 2
+    assert _events(root) == []
+    assert not (state / "run.lock").exists()
+    monkeypatch.setattr(controller.os, "open", open_descriptor)
+    assert _run_fake(state) == 0
+
+
+def test_private_key_unlink_failure_is_incomplete_after_exact_release_then_recovery_works(lab, monkeypatch):
+    root, state, _ = lab
+    unlink = Path.unlink
+    attempted = []
+
+    def failed_private_key(self, *args, **kwargs):
+        if self.parent == state and self.name in ("id_ed25519_colab_rag", "id_ed25519_colab_rag.pub"):
+            attempted.append(self.name)
+            if self.name == "id_ed25519_colab_rag":
+                raise PermissionError(13, "original fake private key unlink refusal")
+        return unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", failed_private_key)
+    assert _run_fake(state) == 1
+    manifest = json.loads((state / "manifest.json").read_text())
+    assert manifest["released"] is True and manifest["release_evidence"]["absent"] is True
+    assert manifest["private_key_cleanup_failed"] is True
+    assert manifest["events"][-1]["event"] == "cleanup_incomplete"
+    assert attempted == ["id_ed25519_colab_rag", "id_ed25519_colab_rag.pub"]
+    assert (state / "id_ed25519_colab_rag").exists() and not (state / "id_ed25519_colab_rag.pub").exists()
+    assert not (state / "transport-receipt.json").exists()
+    assert json.loads((root / "sessions.json").read_text()) == {}
+    monkeypatch.setattr(Path, "unlink", unlink)
+    assert _controller_call(["stop", "--state", str(state)]) == 0
+    assert not (state / "id_ed25519_colab_rag").exists()
+    assert not (state / "transport-receipt.json").exists()
+    ordinary = _prepare_new(state, root / "ordinary-after-private-key-recovery")
+    assert _run_fake(ordinary) == 0
+
+
+def test_manifest_and_diagnostic_sink_disk_full_cannot_interrupt_release_then_recovery_works(lab, monkeypatch):
+    root, state, _ = lab
+    run = controller.Run(state)
+    run.manifest.update(allocation_attempted=True, endpoint="endpoint-owned", phase="running")
+    run.save("original_owned_assignment")
+    with controller.state_lock(state, recovery=False):
+        pass
+    unrelated = {"rag-" + "b" * 16: "endpoint-unrelated"}
+    (root / "sessions.json").write_text(json.dumps({run.manifest["session"]: "endpoint-owned", **unrelated}))
+    remote = root / "remote"
+    remote.mkdir()
+    (remote / "colab-artifacts.tgz").write_bytes(b"original-fake-diagnostics")
+    child = run.spawn([sys.executable, "-c", "import time; time.sleep(30)"], "workload")
+    run.workload = child
+    run.expiry = time.time() + 10
+    private_json = controller.private_json
+
+    def disk_full(path, value):
+        if path == state / "manifest.json":
+            raise OSError(28, "original fake metadata disk full")
+        return private_json(path, value)
+
+    class FullDiagnosticSink:
+        def write(self, value):
+            raise OSError(28, "original fake stderr disk full")
+
+        def flush(self):
+            raise OSError(28, "original fake stderr disk full")
+
+    try:
+        with monkeypatch.context() as fault:
+            fault.setattr(controller, "private_json", disk_full)
+            fault.setattr(controller.sys, "stderr", FullDiagnosticSink())
+            assert run.cleanup() is False
+    finally:
+        run.terminate(child)
+    assert run.manifest["released"] is True and run.manifest["release_evidence"]["absent"] is True
+    assert run.manifest["metadata_persistence_failed"] is True and run.metadata_warning_printed is True
+    assert json.loads((root / "sessions.json").read_text()) == unrelated
+    assert not (state / "transport-receipt.json").exists()
+    assert run.command([sys.executable, "-c", "print('ordinary after both sinks failed')"],
+                       seconds=3).stdout == "ordinary after both sinks failed\n"
+    assert _controller_call(["stop", "--state", str(state)]) == 0
+    assert not (state / "transport-receipt.json").exists()
+    # Model the unrelated owner's independent release, never a controller stop.
+    (root / "sessions.json").write_text("{}")
+    ordinary = _prepare_new(state, root / "ordinary-after-diagnostic-sink-recovery")
+    assert _run_fake(ordinary) == 0

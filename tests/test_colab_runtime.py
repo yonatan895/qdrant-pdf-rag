@@ -8,6 +8,7 @@ import sys
 import tarfile
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from scripts.colab_runtime import (
@@ -15,6 +16,7 @@ from scripts.colab_runtime import (
     LOCK_LIMIT_BYTES,
     LOG_LIMIT_BYTES,
     MODEL_LIMIT_BYTES,
+    SOFTWARE_PROBE,
     BoundedLog,
     ProcessSupervisor,
     RemoteRuntime,
@@ -24,6 +26,25 @@ from scripts.colab_runtime import (
     warmup_embedding,
     warmup_reasoning,
 )
+
+
+def test_software_probe_observes_installed_tokenizers_version(tmp_path, monkeypatch):
+    observed = tmp_path / "software.json"
+    versions = {"vllm": "0.28.0", "transformers": "5.15.0", "torch": "2.12.0",
+                "huggingface-hub": "1.31.0", "tokenizers": "0.23.7"}
+    requested = []
+
+    def installed_version(name):
+        requested.append(name)
+        return versions[name]
+
+    monkeypatch.setattr("importlib.metadata.version", installed_version)
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(
+        version=SimpleNamespace(cuda="13.0"), cuda=SimpleNamespace(is_available=lambda: True)))
+    monkeypatch.setattr(sys, "argv", ["software-probe", str(observed)])
+    exec(SOFTWARE_PROBE, {})  # noqa: S102 - Execute the fixed repository probe with metadata fakes.
+    assert "tokenizers" in requested
+    assert json.loads(observed.read_text())["tokenizers"] == "0.23.7"
 
 
 @pytest.mark.parametrize("raw", [b"[]", b"null", b'"unexpected"', b"42"])
@@ -400,6 +421,8 @@ def test_transport_approval_is_required_before_any_gpu_bootstrap(tmp_path):
     ("stop", 2, False, ("software", "vllm", True), "TypeError"),
     ("stop", 2, False, ("software", "vllm", "0.28.1"), "RuntimeError"),
     ("stop", 2, False, ("software", "transformers", 5.15), "TypeError"),
+    ("stop", 2, False, ("software", "tokenizers", []), "TypeError"),
+    ("stop", 2, False, ("software", "tokenizers", "0.23.8"), "RuntimeError"),
     ("stop", 2, False, ("software", "torch", "2.12.1"), "RuntimeError"),
     ("stop", 2, False, ("software", "huggingface_hub", "1.31.1"), "RuntimeError"),
     ("stop", 2, False, ("software", "cuda_build", []), "TypeError"),
@@ -434,6 +457,7 @@ def test_gpu_startup_uses_exact_argv_and_warms_reasoning_before_embedding(
     lock = ("vllm==0.28.0 --hash=sha256:" + "a" * 64 + "\n"
             "transformers==5.15.0 --hash=sha256:" + "b" * 64 + "\n"
             "torch==2.12.0 --hash=sha256:" + "c" * 64 + "\n"
+            "tokenizers==0.23.7 --hash=sha256:" + "e" * 64 + "\n"
             "huggingface-hub==1.31.0 --hash=sha256:" + "d" * 64 + "\n")
     (tmp_path / "inference.lock").write_text(lock)
     profile["inference_lock_sha256"] = hashlib.sha256(lock.encode()).hexdigest()
@@ -475,7 +499,7 @@ def test_gpu_startup_uses_exact_argv_and_warms_reasoning_before_embedding(
                 pass
             elif argv[1] == "-c" and len(argv) == 4:
                 software = {"python": "3.12.14", "vllm": "0.28.0",
-                    "transformers": "5.15.0", "torch": "2.12.0", "huggingface_hub": "1.31.0",
+                    "transformers": "5.15.0", "torch": "2.12.0", "huggingface_hub": "1.31.0", "tokenizers": "0.23.7",
                     "cuda_build": "13.0", "cuda_available": True}
                 if malformed and malformed[0] == "software":
                     if len(malformed) == 1:
@@ -543,6 +567,13 @@ def test_gpu_startup_uses_exact_argv_and_warms_reasoning_before_embedding(
     assert all(process.poll() is not None for process in processes)
     assert all(server.closed and server.stopped.is_set() for server in listeners)
     report = json.loads((tmp_path / "colab-diagnostics.json").read_text())
+    for model in report.get("models", []):
+        matching = [argv for argv in started if model["model_id"] in argv]
+        if matching:
+            exact_argv = json.dumps(matching[0], sort_keys=True, separators=(",", ":"), allow_nan=False)
+            assert model["server_argv_sha256"] == hashlib.sha256(exact_argv.encode()).hexdigest()
+        else:
+            assert "server_argv_sha256" not in model
     if malformed and malformed[0] == "resources":
         assert not processes
     else:
