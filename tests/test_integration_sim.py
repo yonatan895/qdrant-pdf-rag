@@ -927,6 +927,22 @@ def test_eval_retrieval_on_synthetic_corpus(qdrant_url, mock_url, corpus, tmp_pa
     assert report["identifier"]["recall@1"] == 1.0
     assert report["identifier"]["mrr"] == 1.0
     assert report["nl"]["recall@5"] == 1.0
+    # The serving gate's own verdict: the run measured what the agent serves.
+    assert report["representation"]["servable"] is True
+    assert report["representation"]["physical"]
+
+    # Same collection, a different attested embedding revision: the agent
+    # would refuse it, so the run still yields trend numbers but reports the
+    # representation as not servable (gates and baselines refuse it).
+    import os
+
+    revision = os.environ.get("EMBED_MODEL_REVISION", "")
+    monkeypatch.setenv("EMBED_MODEL_REVISION", revision + "-other")
+    mismatched = evaluate(golden, load_settings())
+    assert mismatched["n"] == 3
+    assert mismatched["representation"]["servable"] is False
+    assert mismatched["representation"]["outcome"] != "compatible"
+    monkeypatch.setenv("EMBED_MODEL_REVISION", revision)
 
     # Baseline roundtrip & check
     baseline_path = tmp_path / "eval-baseline.json"

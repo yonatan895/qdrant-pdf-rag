@@ -269,6 +269,13 @@ def run_gate(
         t_ev0 = time.monotonic()
         report = evaluate(entries, settings)
         ev_time = round(time.monotonic() - t_ev0, 2)
+        if not report["representation"]["servable"]:
+            msg = (
+                "FAIL: the freshly ingested collection is not servable (representation outcome "
+                f"{report['representation']['outcome']!r}); the gate cannot be applied"
+            )
+            print(msg, file=sys.stderr)
+            return 2, f"## Retrieval Evaluation Gate (L1)\n\n**ERROR:** {msg}\n"
         print(
             f"[*] evaluation completed in {ev_time}s (n={report['n']}, failures={report['failures']})",
             file=sys.stderr,
