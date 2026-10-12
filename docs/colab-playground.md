@@ -123,6 +123,13 @@ existing JSON file. A fake receipt or an unverified session release is not this
 gate. Receipt production/validation and its identity contract must be verified
 before declaring Slice A complete.
 
+Preflight records preinstalled kernel pip; GPU setup requires its `--python`
+support (22.3 or newer). Setup creates a fresh environment using preinstalled
+Python 3.12 and `--without-pip`, proves its interpreter/prefix and tests kernel pip against
+that target before downloads. The same target owns hash-locked binary installation
+and dependency checking. Inherited pip recursion/destination/configuration
+overrides are removed. No apt, get-pip, installer upgrade or Python download runs.
+
 GPU startup measures offline pooling/tokenizer behavior after the qualified
 install and pinned snapshots, before either server starts. It uses one existing
 supervised child, bounded by120seconds and the remaining runtime deadline, and

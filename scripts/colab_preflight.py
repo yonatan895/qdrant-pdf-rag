@@ -14,7 +14,23 @@ import re
 import shutil
 import subprocess
 import time
+from importlib import metadata
 from pathlib import Path
+
+
+def observe_kernel_pip() -> dict:
+    """Record the preinstalled installer; never bootstrap or upgrade it."""
+    try:
+        version = metadata.version("pip")
+    except metadata.PackageNotFoundError:
+        return {"version": None, "error": "not_found"}
+    except (OSError, ValueError, TypeError):
+        return {"version": None, "error": "probe_failed"}
+    if (type(version) is not str or len(version) > 64
+            or not re.fullmatch(r"[0-9]+\.[0-9]+(?:\.[0-9]+)?", version)):
+        return {"version": None, "error": "invalid_version"}
+    supported = tuple(int(part) for part in version.split(".")[:2]) >= (22, 3)
+    return {"version": version, "error": None if supported else "unsupported_version"}
 
 
 def observe_inference_python() -> dict:
@@ -65,6 +81,7 @@ def census() -> dict:
                            "glibc": glibc, "distribution_id": distribution.get("ID"),
                            "distribution_version": distribution.get("VERSION_ID")},
               "inference_python": observe_inference_python(),
+              "kernel_pip": observe_kernel_pip(),
               "available_ram_mib": memory["MemAvailable"],
               "free_disk_mib": shutil.disk_usage("/content").free / 1024**2,
               "gpu_name": "CPU", "vram_mib": 0, "driver_version": None}
@@ -96,6 +113,8 @@ def main() -> int:
                 interpreter["error"] is not None or interpreter["implementation"] != "CPython"
                 or not re.fullmatch(r"3\.12\.[0-9]+", interpreter["version"] or "")):
             raise ValueError("preinstalled CPython 3.12 is required; no paid bootstrap fallback")
+        if profile["accelerator"] and report["kernel_pip"]["error"] is not None:
+            raise ValueError("preinstalled kernel pip with --python support is required")
         report["admitted"] = True
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         report.update(admitted=False, error=str(exc), error_type=type(exc).__name__)

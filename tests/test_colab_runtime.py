@@ -87,6 +87,7 @@ def remote_preflight(tmp_path, monkeypatch):
                         lambda: {"ID": "ubuntu", "VERSION_ID": "22.04"})
     monkeypatch.setattr(colab_preflight.os, "confstr", lambda _name: "glibc 2.35")
     monkeypatch.setitem(sys.modules, "colab_profiles", colab_profiles)
+    monkeypatch.setattr(colab_preflight, "observe_kernel_pip", lambda: {"version": "26.2.1", "error": None})
     profile = content / "profile.json"
     monkeypatch.setenv("RAG_COLAB_PROFILE", str(profile))
 
@@ -223,6 +224,129 @@ def test_software_probe_observes_installed_tokenizers_version(tmp_path, monkeypa
     exec(SOFTWARE_PROBE, {})  # noqa: S102 - Execute the fixed repository probe with metadata fakes.
     assert "tokenizers" in requested
     assert json.loads(observed.read_text())["tokenizers"] == "0.23.7"
+
+
+@pytest.mark.parametrize("corruption", [None, "base_prefix", "prefix", "python", "implementation",
+                                      "installer_kernel", "installer_old", "installer_exit", "check_exit"])
+def test_inference_install_works_without_ensurepip_and_targets_fresh_environment(tmp_path, monkeypatch, corruption):
+    from mainframe_rag.serve.colab_profiles import build_profile
+
+    profile = build_profile("COLAB_G4_BF16")
+    profile["expires_at"] = 10000
+    lock = ("vllm==0.28.0 --hash=sha256:" + "a" * 64 + "\n"
+            "transformers==5.15.0 --hash=sha256:" + "b" * 64 + "\n"
+            "torch==2.12.0 --hash=sha256:" + "c" * 64 + "\n"
+            "tokenizers==0.23.7 --hash=sha256:" + "e" * 64 + "\n"
+            "huggingface-hub==1.31.0 --hash=sha256:" + "d" * 64 + "\n")
+    (tmp_path / "inference.lock").write_text(lock)
+    profile["inference_lock_sha256"] = hashlib.sha256(lock.encode()).hexdigest()
+    monkeypatch.setattr("scripts.colab_runtime.shutil.which", lambda _: "/system/python3.12")
+    for name, value in {"_PIP_RUNNING_IN_SUBPROCESS": "0", "PIP_TARGET": "/wrong-target",
+                        "PIP_PREFIX": "/wrong-prefix", "PIP_ROOT": "/wrong-root",
+                        "PIP_USER": "1", "PIP_CONFIG_FILE": "/wrong-config"}.items():
+        monkeypatch.setenv(name, value)
+    calls = []
+    target = tmp_path / "rag-vllm/bin/python"
+
+    class SetupProcess:
+        def __init__(self, argv, **kwargs):
+            self.pid, self.returncode = 400001 + len(calls), 0
+            calls.append(argv)
+            output = b""
+            if argv[1:3] == ["-m", "venv"]:
+                # The real Ubuntu symptom: venv works, its ensurepip component does not.
+                if "--without-pip" not in argv:
+                    self.returncode, output = 1, b"ensurepip is not available\n"
+                else:
+                    Path(argv[-1]).mkdir()
+            elif "--python" in argv:
+                assert argv[:6] == [sys.executable, "-I", "-B", "-m", "pip", "--python"]
+                assert argv[6] == str(target)
+                env = kwargs["env"]
+                assert "_PIP_RUNNING_IN_SUBPROCESS" not in env
+                assert all(name not in env for name in ("PIP_TARGET", "PIP_PREFIX", "PIP_ROOT", "PIP_USER"))
+                assert env["PIP_CONFIG_FILE"] == os.devnull
+                if "--version" in argv:
+                    output = b"pip 26.2.1 from /kernel/pip (python 3.12)\n"
+                    if corruption == "installer_kernel":
+                        output = output.replace(b"3.12", b"3.13")
+                    elif corruption == "installer_old":
+                        output = output.replace(b"26.2.1", b"22.2")
+                    elif corruption == "installer_exit":
+                        self.returncode = 1
+                elif "install" in argv:
+                    assert {"--require-hashes", "--only-binary=:all:", "--no-deps", "--no-cache-dir"} <= set(argv)
+                else:
+                    assert argv[-1] == "check"
+                    if corruption == "check_exit":
+                        self.returncode = 1
+            elif "-c" in argv:
+                if "sys.prefix" in argv[argv.index("-c") + 1]:
+                    value = {"python": "3.12.3", "implementation": "CPython",
+                             "prefix": str(target.parent.parent), "base_prefix": "/system",
+                             "executable": str(target)}
+                    if corruption in ("base_prefix", "prefix", "python", "implementation"):
+                        value[corruption] = {"base_prefix": str(target.parent.parent), "prefix": "/wrong-target",
+                                             "python": "3.13.3", "implementation": "PyPy"}[corruption]
+                    output = json.dumps(value).encode() + b"\n"
+                else:
+                    value = {"python": "3.12.3", "vllm": "0.28.0", "transformers": "5.15.0",
+                             "torch": "2.12.0", "huggingface_hub": "1.31.0", "tokenizers": "0.23.7",
+                             "cuda_build": "13.0", "cuda_available": True}
+                    Path(argv[-1]).write_text(json.dumps(value))
+            else:
+                raise AssertionError("unexpected setup operation")
+            self.stdout = io.BytesIO(output)
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, **kwargs):
+            return self.returncode
+
+    runtime = RemoteRuntime(profile, root=tmp_path, clock=lambda: 100, sleep=lambda _: None,
+                            popen=SetupProcess, development_sha="a" * 40)
+    if corruption:
+        with pytest.raises(RuntimeError):
+            runtime.install_inference()
+        assert not (tmp_path / "software-observed.json").exists()
+        if corruption != "check_exit":
+            assert not any("install" in argv for argv in calls)
+        return
+    assert runtime.install_inference() == target
+    assert [argv[-1] for argv in calls if "--python" in argv] == ["--version", str(tmp_path / "inference.lock"), "check"]
+    assert runtime.report["installer"]["version"] == "26.2.1"
+
+
+@pytest.mark.parametrize("version,error", [("22.2", "unsupported_version"), ("22.3", None),
+    ("26.2.1", None), ("not-a-version", "invalid_version"), (None, "invalid_version"),
+    (colab_preflight.metadata.PackageNotFoundError("pip"), "not_found"),
+    (OSError("unreadable metadata"), "probe_failed")])
+def test_preflight_records_kernel_pip_without_installing_or_bootstrapping(monkeypatch, version, error):
+    def observe(name):
+        assert name == "pip"
+        if isinstance(version, Exception):
+            raise version
+        return version
+
+    monkeypatch.setattr(colab_preflight.metadata, "version", observe)
+    result = colab_preflight.observe_kernel_pip()
+    assert result == {"version": version if error in (None, "unsupported_version") else None,
+                      "error": error}
+
+
+@pytest.mark.parametrize("error", ["not_found", "unsupported_version", "invalid_version"])
+def test_missing_kernel_installer_refuses_gpu_but_next_cpu_remains_usable(remote_preflight, monkeypatch, error):
+    monkeypatch.setattr(colab_preflight, "observe_inference_python", lambda: {
+        "executable": "/usr/bin/python3.12", "version": "3.12.3", "implementation": "CPython", "error": None})
+    monkeypatch.setattr(colab_preflight, "observe_kernel_pip", lambda: {"version": None, "error": error})
+    monkeypatch.setattr(colab_preflight.shutil, "which", lambda name: "/usr/bin/nvidia-smi" if name == "nvidia-smi" else None)
+    monkeypatch.setattr(colab_preflight.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(
+        stdout="NVIDIA RTX PRO 6000 Blackwell,98304,580.100\n"))
+    status, facts = remote_preflight("COLAB_G4_BF16")
+    assert status == 2 and facts["admitted"] is False and facts["kernel_pip"]["error"] == error
+    assert "kernel pip" in facts["error"]
+    assert remote_preflight("COLAB_CPU_TRANSPORT")[0] == 0
 
 
 @pytest.mark.parametrize("raw", [b"[]", b"null", b'"unexpected"', b"42"])
@@ -686,6 +810,12 @@ def test_gpu_startup_uses_exact_argv_and_warms_reasoning_before_embedding(
             processes.append(self)
             if argv[1:3] == ["-m", "venv"]:
                 Path(argv[-1]).mkdir()
+            elif argv[1:4] == ["-I", "-B", "-c"]:
+                self.stdout = io.BytesIO(json.dumps({"python": "3.12.3", "implementation": "CPython",
+                    "prefix": str(tmp_path / "rag-vllm"), "base_prefix": "/system",
+                    "executable": str(tmp_path / "rag-vllm/bin/python")}).encode() + b"\n")
+            elif "--version" in argv:
+                self.stdout = io.BytesIO(b"pip 26.2.1 from /kernel/pip (python 3.12)\n")
             elif "install" in argv:
                 assert "--require-hashes" in argv
                 assert "--only-binary=:all:" in argv

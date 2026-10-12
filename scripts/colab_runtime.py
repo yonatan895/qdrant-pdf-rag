@@ -21,6 +21,7 @@ import shutil
 import signal
 import stat
 import subprocess
+import sys
 import tarfile
 import threading
 import time
@@ -786,11 +787,14 @@ class RemoteRuntime:
                        "sample_interval_seconds": SAMPLE_INTERVAL_SECONDS,
                        "disk_growth_bytes": MAX_DISK_GROWTH_BYTES if self.gpu else 16 * 1024**2},
         }
-        environment = dict(os.environ)
+        environment = {name: value for name, value in os.environ.items()
+                       if not name.startswith("PIP_")
+                       and name not in {"_PIP_RUNNING_IN_SUBPROCESS", "PYTHONHOME", "PYTHONPATH"}}
         environment.update(HF_HOME=str(root / "hf-cache"), HF_HUB_DISABLE_TELEMETRY="1",
                            HF_HUB_DISABLE_PROGRESS_BARS="1", HF_HUB_DISABLE_XET="1",
                            HF_HUB_ETAG_TIMEOUT="10", HF_HUB_DOWNLOAD_TIMEOUT="30",
                            PIP_DISABLE_PIP_VERSION_CHECK="1", PIP_NO_INPUT="1",
+                           PIP_CONFIG_FILE=os.devnull,
                            VLLM_LOGGING_LEVEL="INFO",
                            TMPDIR=str(root / "rag-inference-tmp"))
         self.processes = ProcessSupervisor(root / "rag-colab-logs", guard=self.check,
@@ -915,12 +919,33 @@ class RemoteRuntime:
         venv = self.root / "rag-vllm"
         if venv.exists():
             raise RuntimeError("inference environment already exists; refusing ambiguous reuse")
-        self.processes.run([python, "-m", "venv", str(venv)], "venv", seconds=120)
+        self.processes.run([python, "-m", "venv", "--without-pip", str(venv)], "venv", seconds=120)
         interpreter = venv / "bin/python"
-        self.processes.run([str(interpreter), "-m", "pip", "install", "--require-hashes",
+        identity = json.loads(self.processes.run(
+            [str(interpreter), "-I", "-B", "-c",
+             ("import json, platform, sys; print(json.dumps({'python': platform.python_version(), "
+             "'implementation': platform.python_implementation(), 'prefix': sys.prefix, "
+              "'base_prefix': sys.base_prefix, 'executable': sys.executable}))")],
+            "interpreter", seconds=5))
+        if (type(identity) is not dict or any(type(identity.get(name)) is not str
+                for name in ("python", "implementation", "prefix", "base_prefix", "executable"))
+                or not re.fullmatch(r"3\.12\.[0-9]+", identity["python"])
+                or identity["implementation"] != "CPython" or identity["prefix"] != str(venv)
+                or identity["base_prefix"] == identity["prefix"]
+                or identity["executable"] != str(interpreter)):
+            raise RuntimeError("fresh inference interpreter identity could not be verified")
+        pip = [sys.executable, "-I", "-B", "-m", "pip", "--python", str(interpreter)]
+        capability = self.processes.run([*pip, "--version"], "installer", seconds=10)
+        version = re.fullmatch(rb"pip ([0-9]+\.[0-9]+(?:\.[0-9]+)?) from [^\r\n]+ \(python 3\.12\)\r?\n?", capability)
+        if version is None or tuple(int(part) for part in version[1].split(b".")[:2]) < (22, 3):
+            raise RuntimeError("preinstalled kernel pip cannot manage the inference interpreter")
+        self.report["installer"] = {"version": version[1].decode(), "target": str(interpreter),
+                                    "launcher": sys.executable, "venv": identity}
+        self.write_report("inference_environment_ready")
+        self.processes.run([*pip, "install", "--require-hashes",
                             "--only-binary=:all:", "--no-deps", "--no-cache-dir", "-r", str(lock)],
                            "install", seconds=1200)
-        self.processes.run([str(interpreter), "-m", "pip", "check"], "dependencies", seconds=30)
+        self.processes.run([*pip, "check"], "dependencies", seconds=30)
         observed = self.root / "software-observed.json"
         self.processes.run([str(interpreter), "-c", SOFTWARE_PROBE, str(observed)], "software", seconds=30)
         software = self.read_observed(observed)
