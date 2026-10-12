@@ -438,15 +438,331 @@ pathlib.Path(report).write_text(json.dumps({"model_id": model, "resolved_revisio
 '''
 
 
+# Exact UTF-8 source executed by the qualified interpreter; its digest identifies
+# the producer independently of its frozen wrapper/candidate. Facts grant no trust.
+POOLING_PROBE = r'''
+"""Private #706 inline producer body; execute only through the native supervisor.
+
+Inputs: qualified_python -c SOURCE native_root frozen_candidate_sha.
+No engines, tensor reads, downloads, connections, resource owner or approval.
+"""
+import contextlib
+import dataclasses
+import hashlib
+import json
+import os
+import platform
+import re
+import stat
+import sys
+import tempfile
+from importlib import metadata
+from pathlib import Path
+
+JSON_BYTES, FILE_BYTES, TOTAL_BYTES = 64 * 1024, 32 * 1024**2, 64 * 1024**2
+PACKAGES = ("vllm", "transformers", "tokenizers", "torch", "huggingface-hub")
+SUFFIXES = {".json", ".txt", ".model", ".tiktoken", ".jinja"}
+
+
+class ObservationError(ValueError):
+    """Only fixed codes constructed by this program may be exported."""
+
+
+def require(condition, code):
+    if not condition:
+        raise ObservationError(code)
+
+
+def digest(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
+                                     allow_nan=False).encode("utf-8")).hexdigest()
+
+
+def stamp(info):
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
+
+
+def read(path, maximum=JSON_BYTES):
+    require(path.is_absolute() and path.resolve(strict=True) == path, "input_not_canonical")
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    with os.fdopen(descriptor, "rb") as stream:
+        before = os.fstat(stream.fileno())
+        require(stat.S_ISREG(before.st_mode) and 0 < before.st_size <= maximum, "input_unbounded")
+        raw = stream.read(maximum + 1)
+        after = os.fstat(stream.fileno())
+    require(len(raw) == before.st_size and stamp(before) == stamp(after), "input_changed")
+    return raw
+
+
+def decode(raw):
+    def fields(pairs):
+        result = {}
+        for key, value in pairs:
+            require(key not in result, "duplicate_json_field")
+            result[key] = value
+        return result
+
+    def invalid(_value):
+        raise ObservationError("nonfinite_json")
+
+    return json.loads(raw, object_pairs_hook=fields, parse_constant=invalid)
+
+
+def inventory(directory):
+    """Native snapshot metadata selection and bounds; never open tensor shards."""
+    require(directory.resolve(strict=True) == directory, "model_directory_not_canonical")
+    pending, names, entries = [directory], set(), 0
+    while pending:
+        with os.scandir(pending.pop()) as children:
+            for item in children:
+                entries += 1
+                require(entries <= 256 and not item.is_symlink(), "snapshot_entry_unsupported")
+                path = Path(item.path)
+                relative = path.relative_to(directory)
+                if ".cache" in relative.parts:
+                    continue
+                if item.is_dir(follow_symlinks=False):
+                    pending.append(path)
+                elif item.is_file(follow_symlinks=False) and path.suffix in SUFFIXES:
+                    names.add(relative.as_posix())
+    require(1 <= len(names) <= 64, "snapshot_metadata_set_unbounded")
+    result, total = {}, 0
+    for name in sorted(names):
+        path = directory / name
+        require(path.resolve(strict=True) == path, "snapshot_metadata_not_canonical")
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        with os.fdopen(descriptor, "rb") as stream:
+            before = os.fstat(stream.fileno())
+            require(stat.S_ISREG(before.st_mode) and 0 < before.st_size <= FILE_BYTES,
+                    "snapshot_metadata_file_unbounded")
+            total += before.st_size
+            require(total <= TOTAL_BYTES, "snapshot_metadata_total_unbounded")
+            hasher, size = hashlib.sha256(), 0
+            while chunk := stream.read(65536):
+                size += len(chunk)
+                require(size <= before.st_size, "snapshot_metadata_changed")
+                hasher.update(chunk)
+            after = os.fstat(stream.fileno())
+        require(size == before.st_size and stamp(before) == stamp(after), "snapshot_metadata_changed")
+        result[name] = {"bytes": size, "sha256": hasher.hexdigest()}
+    return result
+
+
+def install(path, value):
+    raw = (json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n").encode("utf-8")
+    require(len(raw) <= JSON_BYTES, "output_exceeds_bound")
+    descriptor, temporary = tempfile.mkstemp(prefix=".pooling-", dir=path.parent)
+    temporary = Path(temporary)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            os.fchmod(stream.fileno(), 0o600)
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.link(temporary, path)  # Exclusive complete-record publication; never replace.
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def observe():
+    invocation = tuple(sys.orig_argv)
+    require(len(invocation) == 5 and invocation[1] == "-c"
+            and sys.argv == ["-c", invocation[3], invocation[4]], "unsupported_invocation")
+    root, candidate = Path(sys.argv[1]), sys.argv[2]
+    require(root.is_absolute() and root.resolve(strict=True) == root and root.is_dir(), "invalid_native_root")
+    require(re.fullmatch(r"[0-9a-f]{40}", candidate), "invalid_candidate_identity")
+    producer = {"development_sha": candidate,
+                "source_sha256": hashlib.sha256(invocation[2].encode("utf-8")).hexdigest()}
+    output = root / "pooling-observed.json"
+    require(not output.exists() and not output.is_symlink(), "output_already_exists")
+    paths = {name: root / filename for name, filename in (
+        ("profile", "model-profile.json"), ("software", "software-observed.json"),
+        ("snapshot", "snapshot-embed.json"))}
+    inputs = {name: read(path) for name, path in paths.items()}
+    profile, software, snapshot = (decode(inputs[name]) for name in ("profile", "software", "snapshot"))
+    require(all(type(value) is dict for value in (profile, software, snapshot)), "native_inputs_not_objects")
+    require((profile.get("name"), profile.get("accelerator")) in (
+        ("COLAB_G4_BF16", "G4"), ("COLAB_A100_80GB_BF16", "A100"))
+        and profile.get("vllm_version") == "0.28.0" and profile.get("transformers_version") == "5.15.0"
+        and profile.get("python_version") == "3.12" and profile.get("dense_dim") == 4096,
+        "unsupported_native_profile")
+    servers = [server for server in profile["servers"] if server["role"] == "embed"]
+    require(len(servers) == 1, "native_embedding_server_ambiguous")
+    server, directory = servers[0], root / "models/embedding"
+    argv = server["argv"]
+    require(server["local_dir"] == str(directory) and type(argv) is list
+            and all(type(value) is str and "\0" not in value for value in argv)
+            and argv[:3] == [str(root / "rag-vllm/bin/vllm"), "serve", str(directory)]
+            and argv.count("--max-model-len") == 1, "native_embedding_argv_unsupported")
+    window = int(argv[argv.index("--max-model-len") + 1])
+    require(4096 <= window <= 32768, "native_window_unbounded")
+    require(type(server["model_id"]) is str and re.fullmatch(r"[0-9a-f]{40}", server["revision"])
+            and snapshot["model_id"] == server["model_id"]
+            and snapshot["resolved_revision"] == server["revision"], "snapshot_identity_differs")
+    lock = read(root / "inference.lock", 1024**2)
+    lock_sha256 = hashlib.sha256(lock).hexdigest()
+    require(lock_sha256 == profile["inference_lock_sha256"], "native_lock_identity_differs")
+    files = inventory(directory)
+    require(snapshot["metadata_sha256"] == {name: row["sha256"] for name, row in files.items()},
+            "actual_snapshot_metadata_differs")
+
+    def packages():
+        result = {name: metadata.version(name) for name in PACKAGES}
+        require(result == {name: software[name.replace("-", "_")] for name in PACKAGES}
+                and result["vllm"] == "0.28.0" and result["transformers"] == "5.15.0"
+                and platform.python_implementation() == "CPython" and sys.version_info[:2] == (3, 12)
+                and platform.python_version() == software["python"] and Path(sys.prefix) == root / "rag-vllm",
+                "qualified_runtime_identity_differs")
+        return result
+
+    installed = packages()
+    require(all(name not in sys.modules for name in ("vllm", "transformers", "huggingface_hub")),
+            "inference_library_loaded_before_offline_controls")
+    permitted = {"VLLM_NO_USAGE_STATS": "1", "VLLM_DO_NOT_TRACK": "1", "VLLM_LOGGING_LEVEL": "ERROR"}
+    require(all(not name.startswith("VLLM_") or name in permitted for name in os.environ),
+            "unsupported_vllm_environment_override")
+    plugins = list(metadata.entry_points(group="vllm.general_plugins"))
+    require({entry.name: entry.value for entry in plugins} == {
+        "lora_filesystem_resolver": "vllm.plugins.lora_resolvers.filesystem_resolver:register_filesystem_resolver",
+        "lora_hf_hub_resolver": "vllm.plugins.lora_resolvers.hf_hub_resolver:register_hf_hub_resolver"}
+        and len(plugins) == 2 and all(entry.dist is not None and entry.dist.metadata["Name"] == "vllm"
+            and entry.dist.version == installed["vllm"] for entry in plugins)
+        and not metadata.entry_points(group="vllm.platform_plugins"), "unreviewed_vllm_plugin_present")
+    os.environ.update({"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", "HF_HUB_DISABLE_TELEMETRY": "1",
+                       "DO_NOT_TRACK": "1", "TOKENIZERS_PARALLELISM": "false", **permitted})
+    from huggingface_hub import constants as hub_constants
+    from transformers import Qwen2Tokenizer, Qwen2TokenizerFast
+    from vllm.engine.arg_utils import EngineArgs
+    from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
+    from vllm.entrypoints.pooling.embed.protocol import EmbeddingCompletionRequest
+    from vllm.exceptions import VLLMValidationError
+    from vllm.tokenizers.hf import CachedHfTokenizer
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
+
+    require(hub_constants.HF_HUB_OFFLINE is True, "actual_hub_offline_mode_unavailable")
+    args = make_arg_parser(FlexibleArgumentParser(description="Offline pooling observation")).parse_args(argv[2:])
+    validate_parsed_serve_args(args)
+    require(args.model_tag == str(directory), "native_model_tag_missing")
+    args.model = args.model_tag  # Native ServeSubcommand precedence; never dispatch serve.
+    require(args.trust_remote_code is False and args.runner == "pooling" and args.convert == "embed"
+            and args.tokenizer is None and args.hf_config_path is None and args.config is None
+            and args.tokenizer_mode == "auto", "unsupported_native_config_options")
+    model_config = EngineArgs.from_cli_args(args).create_model_config()  # Never create_engine_config/LLM.
+    require(model_config.trust_remote_code is False
+            and Path(model_config.model).resolve(strict=True) == directory
+            and Path(model_config.tokenizer).resolve(strict=True) == directory, "actual_model_config_escaped_inputs")
+    request = EmbeddingCompletionRequest(model=server["model_id"], input="Original MiXeD café α <|im_end|> fixture.")
+    params, pooler = request.build_tok_params(model_config), model_config.pooler_config
+    require(pooler is not None and model_config.encoder_config is None
+            and type(model_config.max_model_len) is int and type(params.max_input_tokens) is int
+            and params.max_input_tokens == model_config.max_model_len == window
+            and params.truncate_prompt_tokens is None and params.pad_prompt_tokens is None
+            and params.do_lower_case is False and params.add_special_tokens is True, "observed_pooling_semantics_unsupported")
+    require(Qwen2TokenizerFast is Qwen2Tokenizer, "actual_fast_compatibility_alias_differs")
+    local = Qwen2TokenizerFast.from_pretrained(str(directory), local_files_only=True, trust_remote_code=False)
+    native = CachedHfTokenizer.from_pretrained(str(directory), local_files_only=True, trust_remote_code=False)
+    require(isinstance(local, Qwen2TokenizerFast) and isinstance(native, Qwen2TokenizerFast)
+            and local.is_fast is True and native.is_fast is True, "actual_tokenizer_unsupported")
+    initial_truncation = {"alias": local.backend_tokenizer.truncation, "native": native.backend_tokenizer.truncation}
+    for tokenizer in (local, native):
+        tokenizer.backend_tokenizer.no_truncation()
+        require(tokenizer.backend_tokenizer.truncation is None, "backend_truncation_remains_enabled")
+
+    def encode(tokenizer, text):
+        ids = tokenizer.encode(text, add_special_tokens=params.add_special_tokens, truncation=False)
+        require(type(ids) is list and ids and all(type(token) is int and token >= 0 for token in ids)
+                and tokenizer.backend_tokenizer.truncation is None, "actual_encoding_unsupported")
+        return ids
+
+    text = request.input
+    pre = params.apply_pre_tokenization(native, {"prompt": text})["prompt"]
+    require(pre == text, "native_plain_string_was_transformed")
+    short_ids = encode(local, text)
+    require(short_ids == encode(native, pre) and short_ids != encode(local, text.lower())
+            and local.backend_tokenizer.encode(text, add_special_tokens=True).ids == short_ids,
+            "actual_special_token_or_case_semantics_differ")
+    require(params.apply_post_tokenization(native, {"prompt_token_ids": list(short_ids)})["prompt_token_ids"]
+            == short_ids, "native_short_tokens_changed")
+    local_backend, native_backend = local.backend_tokenizer.to_str(), native.backend_tokenizer.to_str()
+    require(len(local_backend.encode("utf-8")) <= FILE_BYTES and len(native_backend.encode("utf-8")) <= FILE_BYTES,
+            "backend_serialization_unbounded")
+    require(decode(local_backend) == decode(native_backend), "native_and_alias_backends_differ")
+    long_text = "OriginalBoundaryMiXeD17 " * (window + 32)  # Window was bounded before multiplication.
+    require(len(long_text) <= 2 * 1024**2, "original_probe_exceeds_character_bound")
+    long_ids = encode(local, long_text)
+    require(len(long_ids) > window, "original_probe_did_not_exceed_window")
+    encode_kwargs = params.get_encode_kwargs()
+    sentinel_ids = native.encode(long_text, **encode_kwargs)
+    require(len(sentinel_ids) == window + 1, "native_refusal_sentinel_differs")
+    try:
+        params.apply_post_tokenization(native, {"prompt_token_ids": sentinel_ids})
+    except VLLMValidationError as exc:
+        require(exc.parameter == "input_tokens" and exc.value == len(sentinel_ids), "unexpected_native_overflow_refusal")
+    else:
+        raise ObservationError("native_oversize_input_was_accepted")
+    runtime = {name: installed[name] for name in ("vllm", "transformers", "tokenizers", "torch")}
+    observation = {
+        "implementation": type(request).__module__ + "." + type(request).__qualname__, "version": installed["vllm"],
+        "model_config": {"max_model_len": model_config.max_model_len, "encoder_config": model_config.encoder_config,
+                         "pooler_config": {name: getattr(pooler, name) for name in (
+                             "enable_chunked_processing", "max_embed_len", "seq_pooling_type", "use_activation")}},
+        "counting_options": {"add_special_tokens": params.add_special_tokens, "do_lower_case": params.do_lower_case,
+                             "truncation": params.truncate_prompt_tokens is not None},
+        "effective_window": params.max_input_tokens,
+    }
+    manifest = {
+        "schema": 1, "model": {"model": server["model_id"], "revision": snapshot["resolved_revision"]},
+        "tokenizer": {"implementation": "transformers.Qwen2TokenizerFast", "version": installed["transformers"]},
+        "runtime": runtime, "server_argv": argv, "files": files, "observation": observation,
+        "provenance": {"kind": "offline-vllm-pooling-observation", "producer": producer,
+                       "resolved_revision": snapshot["resolved_revision"], "files_sha256": digest(files),
+                       "runtime_sha256": digest(runtime), "server_argv_sha256": digest(argv)},
+    }
+    facts = {
+        "producer": producer, "packages": installed, "python": platform.python_version(),
+        **{name + "_sha256": hashlib.sha256(raw).hexdigest() for name, raw in inputs.items()},
+        "inference_lock_sha256": lock_sha256, "actual_hub_offline": hub_constants.HF_HUB_OFFLINE,
+        "actual_trust_remote_code": model_config.trust_remote_code,
+        "actual_runner_type": model_config.runner_type, "actual_convert_type": model_config.convert_type,
+        "tokenizer_alias_target": Qwen2TokenizerFast.__module__ + "." + Qwen2TokenizerFast.__qualname__,
+        "native_tokenizer_class": type(native).__module__ + "." + type(native).__qualname__,
+        "tokenize_params": dataclasses.asdict(params), "native_encode_kwargs": encode_kwargs,
+        "initial_backend_truncation": initial_truncation, "backend_equivalence": True,
+        "short_tokens": len(short_ids), "short_ids_sha256": digest(short_ids),
+        "full_nontruncated_probe_tokens": len(long_ids), "full_probe_ids_sha256": digest(long_ids),
+        "native_refusal_sentinel_tokens": len(sentinel_ids), "oversize_native_refusal": True,
+        "logical_truncation_requested": False, "metadata_files": len(files),
+        "metadata_bytes": sum(row["bytes"] for row in files.values()),
+    }
+    require(inventory(directory) == files and packages() == installed and tuple(sys.orig_argv) == invocation
+            and all(read(paths[name]) == raw for name, raw in inputs.items())
+            and read(root / "inference.lock", 1024**2) == lock, "inputs_or_producer_changed_during_observation")
+    install(output, {"schema": 1, "status": "observed", "trust": "unreviewed", "acceptance_certified": False,
+                     "manifest": manifest, "facts": facts})
+
+
+try:
+    # Library diagnostics are not evidence; supervisor still bounds/drains the OS stream.
+    with open(os.devnull, "w") as sink, contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
+        observe()
+except BaseException as exc:  # noqa: BLE001 - fixed failures; the supervisor owns interruption.
+    print(json.dumps({"status": "failed", "code": str(exc) if isinstance(exc, ObservationError)
+                      else "actual_observation_failed"}, sort_keys=True))
+    raise SystemExit(1)
+print(json.dumps({"status": "observed", "acceptance_certified": False}, sort_keys=True))
+'''
+
+
 class RemoteRuntime:
     """One session's transport/bootstrap/model/process lifecycle."""
 
     def __init__(self, profile: dict, *, root: Path = Path("/content"), http=request_json,
                  popen=subprocess.Popen, server_factory=TinyHTTPServer,
                  observe=None, admission=None, terminate=terminate_group,
-                 clock=time.time, sleep=time.sleep):
+                 clock=time.time, sleep=time.sleep, development_sha: str | None = None):
         self.profile = profile
         self.root = root
+        self.development_sha = development_sha
         self.http = http
         self.server_factory = server_factory
         self.observe = observe or (lambda gpu: observe_resources(gpu, root=root))
@@ -675,6 +991,79 @@ class RemoteRuntime:
             raise TypeError("observed inference metadata must be a JSON object")
         return observed
 
+    def observe_pooling(self, interpreter: Path) -> None:
+        """Generate attributable, unreviewed facts through the existing owner."""
+        self.tick()
+        candidate = self.development_sha
+        if type(candidate) is not str or not re.fullmatch(r"[0-9a-f]{40}", candidate):
+            raise RuntimeError("pooling observation requires frozen candidate identity")
+        output = self.root / "pooling-observed.json"
+        if output.exists() or output.is_symlink():
+            raise RuntimeError("pooling observation output already exists")
+        seconds = min(120, self.deadline - self.clock())
+        if seconds <= 0:
+            raise RuntimeError("remote absolute wall deadline reached")
+        self.processes.run([str(interpreter), "-c", POOLING_PROBE, str(self.root), candidate],
+                           "pooling", seconds=seconds)
+        observed = self.read_observed(output)
+        # Nested NaN/Infinity must not become diagnostic or manifest facts.
+        json.dumps(observed, allow_nan=False)
+        if (set(observed) != {"schema", "status", "trust", "acceptance_certified", "manifest", "facts"}
+                or type(observed["schema"]) is not int or observed["schema"] != 1
+                or observed["status"] != "observed" or observed["trust"] != "unreviewed"
+                or observed["acceptance_certified"] is not False):
+            raise RuntimeError("pooling observation record is unsupported")
+        manifest, facts = observed["manifest"], observed["facts"]
+        software = self.report["software"]
+        server, = (server for server in self.profile["servers"] if server["role"] == "embed")
+        snapshot, = (item for item in self.report["models"] if item["model_id"] == server["model_id"])
+        producer = {"development_sha": candidate,
+                    "source_sha256": hashlib.sha256(POOLING_PROBE.encode("utf-8")).hexdigest()}
+        runtime = {name: software[name] for name in ("vllm", "transformers", "tokenizers", "torch")}
+        if (not isinstance(manifest, dict) or not isinstance(facts, dict)
+                or set(manifest) != {"schema", "model", "tokenizer", "runtime", "server_argv", "files", "observation", "provenance"}
+                or type(manifest["schema"]) is not int or manifest["schema"] != 1
+                or manifest["model"] != {"model": server["model_id"], "revision": server["revision"]}
+                or manifest["runtime"] != runtime or manifest["server_argv"] != server["argv"]
+                or manifest["tokenizer"] != {"implementation": "transformers.Qwen2TokenizerFast", "version": software["transformers"]}
+                or not isinstance(manifest["observation"], dict) or facts.get("producer") != producer
+                or facts.get("packages") != {name: software[name.replace("-", "_")] for name in (*runtime, "huggingface-hub")}):
+            raise RuntimeError("pooling observation differs from qualified native inputs")
+        observation = manifest["observation"]
+        window = int(server["argv"][server["argv"].index("--max-model-len") + 1])
+        if (set(observation) != {"implementation", "version", "model_config", "counting_options", "effective_window"}
+                or observation["implementation"] != "vllm.entrypoints.pooling.embed.protocol.EmbeddingCompletionRequest"
+                or observation["version"] != software["vllm"]
+                or type(observation["effective_window"]) is not int or observation["effective_window"] != window
+                or observation["counting_options"] != {"add_special_tokens": True, "do_lower_case": False, "truncation": False}
+                or any(type(value) is not bool for value in observation["counting_options"].values())):
+            raise RuntimeError("pooling observation request semantics are unsupported")
+        config = observation["model_config"]
+        if (not isinstance(config, dict) or set(config) != {"max_model_len", "encoder_config", "pooler_config"}
+                or type(config["max_model_len"]) is not int or config["max_model_len"] != window
+                or config["encoder_config"] is not None or not isinstance(config["pooler_config"], dict)
+                or set(config["pooler_config"]) != {"enable_chunked_processing", "max_embed_len", "seq_pooling_type", "use_activation"}):
+            raise RuntimeError("pooling observation model configuration is unsupported")
+        files = manifest["files"]
+        if (not isinstance(files, dict) or not 1 <= len(files) <= 64
+                or any(type(name) is not str or not isinstance(row, dict)
+                       or set(row) != {"bytes", "sha256"} or type(row["bytes"]) is not int
+                       or not 0 < row["bytes"] <= 32 * 1024**2 or type(row["sha256"]) is not str
+                       or not re.fullmatch(r"[0-9a-f]{64}", row["sha256"]) for name, row in files.items())
+                or sum(row["bytes"] for row in files.values()) > 64 * 1024**2
+                or {name: row["sha256"] for name, row in files.items()} != snapshot["metadata_sha256"]):
+            raise RuntimeError("pooling observation metadata differs from the downloaded snapshot")
+        def digest(value):
+            raw = json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+            return hashlib.sha256(raw).hexdigest()
+        if manifest["provenance"] != {
+                "kind": "offline-vllm-pooling-observation", "producer": producer,
+                "resolved_revision": server["revision"], "files_sha256": digest(files),
+                "runtime_sha256": digest(runtime), "server_argv_sha256": digest(server["argv"])}:
+            raise RuntimeError("pooling observation provenance differs from its executed source")
+        self.report["pooling_observation"] = observed
+        self.write_report("pooling_observed")
+
     def wait_model(self, server: dict, child: Child) -> None:
         until = min(self.deadline, self.clock() + 1200)
         while self.clock() < until:
@@ -753,6 +1142,9 @@ class RemoteRuntime:
         self.root.mkdir(parents=True, exist_ok=True)
         try:
             self.validate_profile()
+            if self.gpu and (type(self.development_sha) is not str
+                             or not re.fullmatch(r"[0-9a-f]{40}", self.development_sha)):
+                raise RuntimeError("GPU pooling observation requires frozen candidate identity")
             self.start_free = shutil.disk_usage(self.root).free
             self.tick()
             if self.gpu:
@@ -767,6 +1159,7 @@ class RemoteRuntime:
                 self.stop_transport()
                 interpreter = self.install_inference()
                 self.download_models(interpreter)
+                self.observe_pooling(interpreter)
                 self.start_models()
             self.write_report("ready")
             while True:
@@ -809,7 +1202,7 @@ def main() -> int:
             raise RuntimeError("profile must be a bounded supplied JSON file")
         profile = json.loads(path.read_text())
         signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
-        status = RemoteRuntime(profile).run()
+        status = RemoteRuntime(profile, development_sha=os.environ.get("RAG_COLAB_DEVELOPMENT_SHA")).run()
     except (OSError, RuntimeError, ValueError, KeyError, TypeError):
         status = 2
     print(json.dumps({"remote_runtime_exit": status}), flush=True)

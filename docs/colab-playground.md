@@ -123,6 +123,21 @@ existing JSON file. A fake receipt or an unverified session release is not this
 gate. Receipt production/validation and its identity contract must be verified
 before declaring Slice A complete.
 
+GPU startup measures offline pooling/tokenizer behavior after the qualified
+install and pinned snapshots, before either server starts. It uses one existing
+supervised child, bounded by120seconds and the remaining runtime deadline, and
+adds no connection. The frozen candidate SHA comes from the host manifest; the
+producer digest hashes the exact executed UTF-8 `-c` program, including its
+leading/trailing newlines. Native ModelConfig, embedding-request tokenization and
+fast-tokenizer probes supply the facts; tensors and manual text are not read.
+The existing private diagnostics/archive retain `pooling_observation` through
+later failures, labelled `trust: unreviewed` and `acceptance_certified: false`.
+This generates evidence for separate producer review/adoption; it cannot approve
+itself or replace the production admission manifest. First commissioning can use
+the explicitly selected synthetic lane while production prerequisites remain
+unmet. CPU skips this stage. Actual target-library execution and GPU fit still
+require the separately approved live run; unit packets prove integration only.
+
 ## Prepare the full-corpus GPU run
 
 Use originals already present on the host. Qdrant snapshots alone do not provide
