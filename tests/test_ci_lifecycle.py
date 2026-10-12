@@ -109,6 +109,27 @@ def ingest_job():
     }}}}
 
 
+def test_snapshot_job_inherits_read_only_security_with_its_own_temporary_storage():
+    """Recovery must not lose /tmp or reattach ingest's corpus/work PVCs."""
+    from tests.helpers_helm import run_new_template
+
+    source = run_new_template({"ingest": {"enabled": True, "corpusPVC": "manuals"}})["Job", "ingest"]
+    before = copy.deepcopy(source)
+    job = runpy.run_path(str(ROOT / 'scripts/ci/check_snapshot.py'))['maintenance_job'](source, 'recovery')
+    pod = job['spec']['template']['spec']
+    container = pod['containers'][0]
+    assert pod['securityContext'] == {
+        'runAsNonRoot': True, 'seccompProfile': {'type': 'RuntimeDefault'},
+    }
+    assert container['securityContext'] == {
+        'allowPrivilegeEscalation': False, 'readOnlyRootFilesystem': True,
+        'capabilities': {'drop': ['ALL']},
+    }
+    assert pod['volumes'] == [{'name': 'tmp', 'emptyDir': {}}]
+    assert container['volumeMounts'] == [{'name': 'tmp', 'mountPath': '/tmp'}]
+    assert source == before
+
+
 @pytest.mark.parametrize('failure', ['', 'create', 'wait', 'logs', 'delete', 'get'])
 def test_lifecycle_runs_snapshot_as_writer_job_and_cleans_up(tmp_path, failure):
     """Exercise the shell entrypoint: read-only agent refuses snapshot mutations."""
@@ -164,7 +185,9 @@ if command == os.environ['FAIL_AT']:
     assert container['image'] == 'registry.test/ingest:published-sha'
     assert container['resources'] == {'limits': {'memory': '512Mi'}}
     assert container['securityContext'] == {'allowPrivilegeEscalation': False}
-    assert 'volumes' not in spec and 'volumeMounts' not in container and 'args' not in container
+    assert spec['volumes'] == [{'name': 'tmp', 'emptyDir': {}}]
+    assert container['volumeMounts'] == [{'name': 'tmp', 'mountPath': '/tmp'}]
+    assert 'args' not in container
     assert 'envFrom' not in container
     env = {e['name']: e for e in container['env']}
     assert set(env) == {'QDRANT_URL', 'QDRANT_COLLECTION', 'QDRANT_API_KEY'}

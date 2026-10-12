@@ -318,6 +318,7 @@ def test_ingest_job_contract_normal():
         "limits": {"cpu": "16", "memory": "32Gi"},
     }
     assert new_c["volumeMounts"] == [
+        {"name": "tmp", "mountPath": "/tmp"},
         {"name": "corpus", "mountPath": "/corpus", "readOnly": True},
         {"name": "work", "mountPath": "/work"},
     ]
@@ -772,6 +773,66 @@ def test_every_rendered_pod_is_hardened_without_fixed_identities():
     }
     for key, pod in pods.items():
         assert _hardening_violations(pod) == [], key
+
+
+def _assert_app_read_only_paths(pod, container_name, writable_paths):
+    container = next(c for c in pod["containers"] if c["name"] == container_name)
+    assert container["securityContext"].get("readOnlyRootFilesystem") is True, (
+        f"{container_name} readOnlyRootFilesystem"
+    )
+    mounts = {mount["mountPath"]: mount for mount in container.get("volumeMounts", [])}
+    actual_writable = {path for path, mount in mounts.items() if not mount.get("readOnly", False)}
+    assert actual_writable == writable_paths, f"{container_name} writable paths"
+    volumes = {volume["name"]: volume for volume in pod["volumes"]}
+    assert volumes[mounts["/tmp"]["name"]] == {"name": mounts["/tmp"]["name"], "emptyDir": {}}
+    if container_name == "ingest":
+        assert mounts["/corpus"]["readOnly"] is True
+        assert volumes[mounts["/work"]["name"]]["persistentVolumeClaim"] == {"claimName": "ingest-work"}
+
+
+@pytest.mark.parametrize("extras", [
+    {},
+    {"route": {"enabled": True, "destinationCA": FAKE_CA},
+     "gateway": {"caConfigMapName": "model-ca"}},
+])
+def test_app_read_only_roots_keep_only_declared_writable_paths(extras):
+    """#585: baked source/weights stay read-only; temporary/work writes have mounts.
+
+    This checks the chart boundary. Actual-image and lifecycle execution remain
+    separate evidence for whether the declared paths cover runtime writes.
+    """
+    docs = run_new_template({**extras, "ingest": {"enabled": True, "corpusPVC": "corpus-pvc"}})
+    for key, container_name, writable_paths in (
+        (("Deployment", "rag-agent"), "agent", {"/tmp"}),
+        (("Job", "ingest"), "ingest", {"/tmp", "/work"}),
+    ):
+        pod = docs[key]["spec"]["template"]["spec"]
+        _assert_app_read_only_paths(pod, container_name, writable_paths)
+
+
+@pytest.mark.parametrize("fault", ["missing-security", "missing-tmp", "writable-source", "writable-weights"])
+def test_app_filesystem_check_rejects_missing_or_broad_write_paths(fault):
+    """Negative controls must catch an undeclared required runtime write path."""
+    container = {
+        "name": "agent", "securityContext": {"readOnlyRootFilesystem": True},
+        "volumeMounts": [{"name": "tmp", "mountPath": "/tmp"}],
+    }
+    pod = {"containers": [container], "volumes": [{"name": "tmp", "emptyDir": {}}]}
+    _assert_app_read_only_paths(pod, "agent", {"/tmp"})
+    if fault == "missing-security":
+        container["securityContext"].pop("readOnlyRootFilesystem")
+        error = "agent readOnlyRootFilesystem"
+    else:
+        if fault == "missing-tmp":
+            container["volumeMounts"] = []
+        else:
+            container["volumeMounts"].append({
+                "name": "broad", "mountPath": "/app" if fault == "writable-source" else "/opt/bm25",
+            })
+            pod["volumes"].append({"name": "broad", "emptyDir": {}})
+        error = "agent writable paths"
+    with pytest.raises(AssertionError, match=error):
+        _assert_app_read_only_paths(pod, "agent", {"/tmp"})
 
 
 def test_hardening_check_rejects_unhardened_and_fixed_identity_containers():

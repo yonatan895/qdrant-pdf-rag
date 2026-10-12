@@ -39,6 +39,7 @@ spec:
           imagePullPolicy: {{ .Values.images.agent.pullPolicy | default "IfNotPresent" }}
           securityContext:
             allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
             capabilities:
               drop: [ALL]
           ports:
@@ -131,12 +132,14 @@ spec:
             failureThreshold: 3
           resources:
             {{- toYaml .Values.resources.agent | nindent 12 }}
-          {{- if .Values.gateway.caConfigMapName }}
           volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            {{- if .Values.gateway.caConfigMapName }}
             - name: gateway-ca
               mountPath: /etc/gateway-ca
               readOnly: true
-          {{- end }}
+            {{- end }}
         {{- if .Values.route.enabled }}
         - name: oauth-proxy
           image: {{ include "mainframe-rag.image" (dict "name" "oauthProxy" "image" .Values.images.oauthProxy) }}
@@ -173,8 +176,9 @@ spec:
               cpu: 200m
               memory: 128Mi
         {{- end }}
-      {{- if or .Values.gateway.caConfigMapName .Values.route.enabled }}
       volumes:
+        - name: tmp
+          emptyDir: {}
         {{- if .Values.gateway.caConfigMapName }}
         - name: gateway-ca
           configMap:
@@ -191,4 +195,3 @@ spec:
           secret:
             secretName: rag-agent-oauth-cookie
         {{- end }}
-      {{- end }}
