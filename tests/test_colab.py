@@ -673,7 +673,7 @@ def _execution_fixture(root, *, production=False):
         "src/mainframe_rag/serve/__init__.py", "src/mainframe_rag/serve/colab_storage.py",
         "src/mainframe_rag/serve/budget.py", "src/mainframe_rag/serve/profiles.py",
         "scripts/gateway/strict_finish.py", "scripts/gateway/scoped_passthrough.py",
-        "scripts/gateway/trace_privacy.py",
+        "scripts/gateway/trace_privacy.py", "scripts/gateway/log_capture.py",
     }
     paths.update(path.relative_to(ROOT).as_posix() for path in (ROOT / "taskfiles").iterdir() if path.is_file())
     if production:
@@ -1189,18 +1189,30 @@ def test_tampered_execution_snapshot_refuses_before_tools_then_restored_snapshot
     assert (state / "transport-receipt.json").is_file()
 
 
-@pytest.mark.parametrize("changed", ["task", "dotenv", "copy_race"])
+@pytest.mark.parametrize("changed", ["task", "dotenv", "copy_race", "gateway_capture", "gateway_capture_race"])
 def test_prepare_publishes_only_exact_bounded_source_and_pinned_tool_then_next_candidate_runs(lab, monkeypatch, changed):
     root, base, command = lab
     state = root / "rejected-source-candidate"
     argv, source = _prepare_arguments(base, state)
     task = source / ".tools/bin/task"
     original_task = task.read_bytes()
+    capture = source / "scripts/gateway/log_capture.py"
+    original_capture = capture.read_bytes()
     read_bounded = controller.read_bounded_input
+    source_check = controller.check_source_configuration
     if changed == "task":
         task.write_bytes(original_task + b"\n# mismatched original tool\n")
     elif changed == "dotenv":
         (source / ".env").write_text("ORIGINAL_SYNTHETIC_SETTING=unsupported\n")
+    elif changed == "gateway_capture":
+        capture.unlink()
+    elif changed == "gateway_capture_race":
+        def removed_after_precheck(root):
+            source_check(root)
+            if root == source:
+                capture.unlink()
+
+        monkeypatch.setattr(controller, "check_source_configuration", removed_after_precheck)
     else:
         def changed_during_copy(path, limit):
             raw = read_bounded(path, limit)
@@ -1215,6 +1227,9 @@ def test_prepare_publishes_only_exact_bounded_source_and_pinned_tool_then_next_c
         task.write_bytes(original_task)
     elif changed == "dotenv":
         (source / ".env").unlink()
+    elif changed in {"gateway_capture", "gateway_capture_race"}:
+        capture.write_bytes(original_capture)
+        monkeypatch.setattr(controller, "check_source_configuration", source_check)
     else:
         monkeypatch.setattr(controller, "read_bounded_input", read_bounded)
     ordinary = _prepare_new(base, root / "ordinary-after-invalid-source")
@@ -2158,6 +2173,25 @@ def test_normal_workload_gets_frozen_gateway_network_handoff_and_debug_disabled(
     }
     assert manifest["gateway_network_cleanup"]["owned_removed_or_absent"] is True
     assert json.loads((root / "gateway-networks.json").read_text()) == {}
+
+
+@pytest.mark.parametrize("lab", ["COLAB_G4_BF16"], indirect=True)
+def test_colab_workload_uses_prepared_gateway_caps_despite_ambient_removal(lab, monkeypatch):
+    root, state, _ = lab
+    expected = {
+        "GATEWAY_MEMORY_MIB": "2048", "PG_MEMORY_MIB": "512",
+        "GATEWAY_LOG_MAX_BYTES": "8388608", "GATEWAY_DOCKER_LOG_MAX_BYTES": "8388608",
+        "GATEWAY_DOCKER_LOG_FILES": "2",
+    }
+    prepared = json.loads((state / "manifest.json").read_text())
+    assert prepared["config"]["gateway_limits"] == expected
+    for name in expected:
+        monkeypatch.setenv(name, "0")
+    observed = root / "gateway-resource-observation.json"
+    program = ("import json,os; from pathlib import Path; "
+               f"Path({str(observed)!r}).write_text(json.dumps({{key:os.environ[key] for key in {tuple(expected)!r}}}))")
+    assert _run_fake(state, (sys.executable, "-c", program)) == 0
+    assert json.loads(observed.read_text()) == expected
 
 
 def test_preexisting_gateway_network_is_pinned_and_preserved(lab):

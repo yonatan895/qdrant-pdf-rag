@@ -77,6 +77,13 @@ GATEWAY_DEBUG="${GATEWAY_DEBUG:-0}"
 # Container log on disk, not /tmp: /tmp is tmpfs on the reference WSL host, so
 # a long run's log is RAM (issue #590). The previous run's log rotates to .1.
 GATEWAY_LOG="${GATEWAY_LOG:-${XDG_STATE_HOME:-$HOME/.local/state}/mainframe-rag/${GATEWAY_NAME}.log}"
+# Optional, complete resource envelope for this gateway's two owned containers.
+# Colab freezes explicit values; ordinary local profiles retain their defaults.
+GATEWAY_MEMORY_MIB="${GATEWAY_MEMORY_MIB:-}"
+PG_MEMORY_MIB="${PG_MEMORY_MIB:-}"
+GATEWAY_LOG_MAX_BYTES="${GATEWAY_LOG_MAX_BYTES:-}"
+GATEWAY_DOCKER_LOG_MAX_BYTES="${GATEWAY_DOCKER_LOG_MAX_BYTES:-}"
+GATEWAY_DOCKER_LOG_FILES="${GATEWAY_DOCKER_LOG_FILES:-}"
 # Optional machine handoff for orchestrators (sh scripts/tools/run-task.sh local:stack): when set,
 # the leg env (URLs, model ids, per-leg keys) is written there mode 600.
 # Contains ephemeral keys — never a repo path, never committed.
@@ -111,6 +118,45 @@ case "$GATEWAY_DEBUG" in
     0|false|'') GATEWAY_DEBUG_ARGS="" ;;
     *) die "GATEWAY_DEBUG must be 1/true or 0/false/empty, got '$GATEWAY_DEBUG'" ;;
 esac
+GATEWAY_LIMITS_ENABLED=0
+if [ "$GATEWAY_OPERATION" = serve ] && \
+    [ -n "$GATEWAY_MEMORY_MIB$PG_MEMORY_MIB$GATEWAY_LOG_MAX_BYTES$GATEWAY_DOCKER_LOG_MAX_BYTES$GATEWAY_DOCKER_LOG_FILES" ]; then
+    for _bound in "$GATEWAY_MEMORY_MIB:1048576" "$PG_MEMORY_MIB:1048576" \
+        "$GATEWAY_LOG_MAX_BYTES:67108864" "$GATEWAY_DOCKER_LOG_MAX_BYTES:67108864" \
+        "$GATEWAY_DOCKER_LOG_FILES:8"; do
+        _value="${_bound%:*}"; _maximum="${_bound#*:}"
+        case "$_value" in
+            ''|*[!0-9]*|0*|??????????*) die "gateway resource limits require complete positive bounded integers" ;;
+        esac
+        [ "$_value" -le "$_maximum" ] || die "gateway resource limits require complete positive bounded integers"
+    done
+    [ "$GATEWAY_LOG_MAX_BYTES" -ge 64 ] || die "gateway resource limits require at least 64 host log bytes"
+    unset _bound _value _maximum
+    command -v mkfifo >/dev/null 2>&1 || die "mkfifo is required for bounded gateway capture"
+    [ -f "$SCRIPT_DIR/gateway/log_capture.py" ] && [ -r "$SCRIPT_DIR/gateway/log_capture.py" ] || \
+        die "bounded gateway capture source is unavailable"
+    GATEWAY_LIMITS_ENABLED=1
+fi
+
+service_docker() {
+    _service_memory="$1"; shift
+    if [ "$GATEWAY_LIMITS_ENABLED" = 1 ]; then
+        gateway_docker run --memory "${_service_memory}m" --memory-swap "${_service_memory}m" \
+            --log-driver json-file --log-opt "max-size=$GATEWAY_DOCKER_LOG_MAX_BYTES" \
+            --log-opt "max-file=$GATEWAY_DOCKER_LOG_FILES" "$@"
+    else
+        gateway_docker run "$@"
+    fi
+}
+
+LOG_CAPTURE_PID=""
+stop_log_capture() {
+    if [ -n "$LOG_CAPTURE_PID" ]; then
+        kill -TERM "$LOG_CAPTURE_PID" 2>/dev/null || true
+        wait "$LOG_CAPTURE_PID" 2>/dev/null || true
+        LOG_CAPTURE_PID=""
+    fi
+}
 # The daemon can finish creating a container after its client is interrupted.
 # Discover by the admitted run label, then recheck/remove full IDs, never names.
 # Validate the whole bounded set before removing any object. Volumes persist.
@@ -439,7 +485,7 @@ fi
 # Arm cleanup before either daemon container or network can be created.
 # The controller's finite group-KILL may interrupt this trap; recovery uses the
 # same admitted label and exact network ID without a surviving local process.
-trap 'stop_gateway || true; rm -rf "$CFG_DIR"' EXIT
+trap 'stop_gateway || true; stop_log_capture; rm -rf "$CFG_DIR"' EXIT
 trap 'exit 130' INT TERM
 if [ "$GATEWAY_RESET_KEYS" = "1" ]; then
     gateway_docker volume rm "$PG_VOLUME" >/dev/null 2>&1 || true
@@ -448,7 +494,7 @@ fi
 
 prepare_transport_network
 echo "==> Starting key-store postgres ($PG_NAME, volume $PG_VOLUME)"
-gateway_docker run -d --rm --name "$PG_NAME" --network "$GATEWAY_NETWORK_TARGET" \
+service_docker "$PG_MEMORY_MIB" -d --rm --name "$PG_NAME" --network "$GATEWAY_NETWORK_TARGET" \
     --label "$GATEWAY_RUN_LABEL=$GATEWAY_RUN_OWNER" \
     -e POSTGRES_USER=litellm -e POSTGRES_PASSWORD="$PG_PASSWORD" -e POSTGRES_DB=litellm \
     -v "${PG_VOLUME}:/var/lib/postgresql/data" \
@@ -474,6 +520,14 @@ echo "==> Starting local LiteLLM gateway ($GATEWAY_NAME on :$GATEWAY_PORT, log $
 mkdir -p "$(dirname "$GATEWAY_LOG")" || die "cannot create log directory for $GATEWAY_LOG"
 [ -f "$GATEWAY_LOG" ] && mv -f "$GATEWAY_LOG" "$GATEWAY_LOG.1"
 ( umask 077 && : > "$GATEWAY_LOG" ) || die "cannot write gateway log $GATEWAY_LOG"
+GATEWAY_OUTPUT="$GATEWAY_LOG"
+if [ "$GATEWAY_LIMITS_ENABLED" = 1 ]; then
+    GATEWAY_OUTPUT="$CFG_DIR/gateway-output.fifo"
+    mkfifo -m 600 "$GATEWAY_OUTPUT" || die "cannot create bounded gateway log stream"
+    (exec python3 -B "$SCRIPT_DIR/gateway/log_capture.py" "$GATEWAY_LOG" "$GATEWAY_LOG_MAX_BYTES" \
+        < "$GATEWAY_OUTPUT") &
+    LOG_CAPTURE_PID=$!
+fi
 # OTel env only when a local Jaeger was found: container reaches the host
 # collector via the host.docker.internal mapping added above.
 OTEL_RUN_ARGS=""
@@ -482,7 +536,7 @@ if [ -n "$GATEWAY_OTEL_ENDPOINT" ]; then
     OTEL_RUN_ARGS="-e OTEL_EXPORTER_OTLP_ENDPOINT=$GATEWAY_OTEL_ENDPOINT -e OTEL_SERVICE_NAME=$GATEWAY_OTEL_SERVICE_NAME"
 fi
 # shellcheck disable=SC2086
-gateway_docker run --rm --name "$GATEWAY_NAME" --network "$GATEWAY_NETWORK_TARGET" \
+service_docker "$GATEWAY_MEMORY_MIB" --rm --name "$GATEWAY_NAME" --network "$GATEWAY_NETWORK_TARGET" \
     --label "$GATEWAY_RUN_LABEL=$GATEWAY_RUN_OWNER" \
     --add-host=host.docker.internal:host-gateway \
     -p "${GATEWAY_PORT}:4000" \
@@ -491,7 +545,7 @@ gateway_docker run --rm --name "$GATEWAY_NAME" --network "$GATEWAY_NETWORK_TARGE
     ${OTEL_RUN_ARGS} \
     "$LITELLM_IMAGE" \
     --config /app/gateway/config.yaml ${GATEWAY_DEBUG_ARGS} \
-    >>"$GATEWAY_LOG" 2>&1 &
+    >>"$GATEWAY_OUTPUT" 2>&1 &
 DOCKER_PID=$!
 # The earlier trap owns both labelled daemon containers during readiness too.
 
@@ -578,5 +632,17 @@ export RERANK_ENABLED=true RERANK_BASE_URL=${BASE}/v1 RERANK_MODEL=${GATEWAY_RER
 
 Ctrl-C stops the gateway AND its postgres (keys stay in the volume).
 EOF
-wait "$DOCKER_PID"
-stop_gateway
+_docker_status=0
+wait "$DOCKER_PID" || _docker_status=$?
+if [ -n "$LOG_CAPTURE_PID" ]; then
+    # Docker has closed its only FIFO writer. Drain/reap before normal cleanup;
+    # keep Docker's real failure even when logging also fails.
+    if ! wait "$LOG_CAPTURE_PID"; then
+        [ "$_docker_status" -ne 0 ] || _docker_status=1
+    fi
+    LOG_CAPTURE_PID=""
+fi
+if ! stop_gateway; then
+    [ "$_docker_status" -ne 0 ] || _docker_status=1
+fi
+exit "$_docker_status"
