@@ -595,6 +595,10 @@ def prepare(args: argparse.Namespace, *, source_root: Path | None = None) -> int
     state = external(args.state)
     if state.exists() or state.is_symlink():
         raise LabError("run state already exists; use a fresh per-run directory")
+    source_root = ROOT if source_root is None else source_root.absolute()
+    log_capture = source_root / "scripts/gateway/log_capture.py"
+    if log_capture.is_symlink() or not log_capture.is_file():
+        raise LabError("native bounded gateway capture source is required before preparing a run")
     profile = build_profile(args.profile, embed_max_len=args.embedding_max_len,
                             deadline_seconds=args.deadline_seconds)
     if not re.fullmatch(r"[^\s]+@sha256:[0-9a-f]{64}", args.gateway_image):
@@ -629,6 +633,9 @@ def prepare(args: argparse.Namespace, *, source_root: Path | None = None) -> int
               "docker_gateway": docker_gateway,
               "gateway_name": gateway_name, "gateway_network": gateway_network,
               "gateway_debug": "0",
+              "gateway_limits": {"GATEWAY_MEMORY_MIB": "2048", "PG_MEMORY_MIB": "512",
+                                 "GATEWAY_LOG_MAX_BYTES": "8388608",
+                                 "GATEWAY_DOCKER_LOG_MAX_BYTES": "8388608", "GATEWAY_DOCKER_LOG_FILES": "2"},
               "reasoning_port": args.reasoning_port, "embedding_port": args.embedding_port,
               "qdrant_port": args.qdrant_port, "cu_cap": args.cu_cap, "cu_floor": args.cu_floor,
               "namespace": args.namespace, "qdrant_service": args.qdrant_service,
@@ -663,7 +670,6 @@ def prepare(args: argparse.Namespace, *, source_root: Path | None = None) -> int
         tools["kubectl"] = executable(args.kubectl)
     state.mkdir(parents=True, mode=0o700)
     state.chmod(0o700)
-    source_root = ROOT if source_root is None else source_root.absolute()
     check_source_configuration(source_root)
     candidate = candidate_identity(ROOT, source_root=source_root)
     origin = {"git_root": str(ROOT), "source_root": str(source_root)}
@@ -1380,6 +1386,7 @@ class Run:
                    GATEWAY_REASONING_URL=identity["reasoning_url"], GATEWAY_EMBED_URL=identity["embedding_url"],
                    GATEWAY_TRANSPORT_NETWORK_ID=ownership.get("network_id", ""),
                    GATEWAY_TRANSPORT_NETWORK_CREATED="1" if ownership.get("created") is True else "0")
+        env.update(self.config["gateway_limits"])
         return env
 
     def observe_gateway_network(self, raw: str, bridge: str) -> bool:

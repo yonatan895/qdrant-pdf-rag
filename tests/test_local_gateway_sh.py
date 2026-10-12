@@ -555,6 +555,12 @@ elif args and args[0] == "run":
             assert "--rm" in args
             del containers[identifier]
             retain_containers()
+            count = int(os.environ.get("FAKE_GATEWAY_LOG_BYTES", "0"))
+            sys.stdout.buffer.write(b"X" * count)
+            sys.stdout.buffer.flush()
+            sys.stderr.buffer.write(b"Y" * count)
+            sys.stderr.buffer.flush()
+            sys.exit(int(os.environ.get("FAKE_GATEWAY_EXIT_CODE", "0")))
 elif args and args[0] == "volume":
     pass
 else:
@@ -824,3 +830,107 @@ def test_unprobed_address_or_unpinned_image_refuses_before_docker(gateway_transp
     assert failed.returncode != 0
     assert "pinned image and numeric IPv4 HTTP backend URLs" in failed.stderr
     assert _transport_calls(gateway_transport) == []
+
+
+BOUNDED_GATEWAY_ENV = {
+    "GATEWAY_MEMORY_MIB": "2048", "PG_MEMORY_MIB": "512",
+    "GATEWAY_LOG_MAX_BYTES": "256", "GATEWAY_DOCKER_LOG_MAX_BYTES": "8388608",
+    "GATEWAY_DOCKER_LOG_FILES": "2",
+}
+
+
+def test_selected_gateway_limits_bound_both_owned_daemons_without_swap(gateway_transport):
+    result = _transport_operation(gateway_transport, "serve", **BOUNDED_GATEWAY_ENV)
+    assert result.returncode == 0, result.stderr
+    runs = [args for args in _transport_calls(gateway_transport)
+            if args[0] == "run" and "--entrypoint" not in args]
+    assert len(runs) == 2
+    for args, memory in zip(runs, ("512m", "2048m"), strict=True):
+        assert args[args.index("--memory") + 1] == memory
+        assert args[args.index("--memory-swap") + 1] == memory
+        assert args[args.index("--log-driver") + 1] == "json-file"
+        options = [args[index + 1] for index, value in enumerate(args) if value == "--log-opt"]
+        assert options == ["max-size=8388608", "max-file=2"]
+    assert json.loads((gateway_transport[0] / "containers.json").read_text()) == {}
+
+
+@pytest.mark.parametrize("override", [
+    {"PG_MEMORY_MIB": ""}, {"GATEWAY_MEMORY_MIB": "0"}, {"GATEWAY_MEMORY_MIB": "1048577"},
+    {"GATEWAY_LOG_MAX_BYTES": "67108865"}, {"GATEWAY_DOCKER_LOG_FILES": "9"},
+    {"GATEWAY_DOCKER_LOG_MAX_BYTES": "-1"}, {"GATEWAY_DOCKER_LOG_MAX_BYTES": "99999999999999999999"},
+    {"GATEWAY_LOG_MAX_BYTES": "1"},
+])
+def test_invalid_or_incomplete_gateway_limits_refuse_before_docker(gateway_transport, override):
+    result = _transport_operation(gateway_transport, "serve", **{**BOUNDED_GATEWAY_ENV, **override})
+    assert result.returncode != 0 and "gateway resource limits" in result.stderr
+    assert _transport_calls(gateway_transport) == []
+
+
+def test_gateway_release_ignores_invalid_startup_limits_and_allows_next_launch(gateway_transport):
+    root = gateway_transport[0]
+    probe = _transport_operation(gateway_transport)
+    assert probe.returncode == 0, probe.stderr
+    identity = json.loads(probe.stdout)
+    owner = "rag-" + "e" * 16
+    (root / "containers.json").write_text(json.dumps({"f" * 64: {
+        "id": "f" * 64, "name": "original-owned-pg", "network": identity["network_id"],
+        "labels": {"io.mainframe-rag.gateway-run": owner},
+    }}))
+    released = _transport_operation(
+        gateway_transport, "transport-release", GATEWAY_RUN_OWNER=owner,
+        GATEWAY_TRANSPORT_NETWORK_ID=identity["network_id"], GATEWAY_TRANSPORT_NETWORK_CREATED="1",
+        GATEWAY_MEMORY_MIB="invalid", GATEWAY_LOG_MAX_BYTES="0",
+    )
+    assert released.returncode == 0, released.stderr
+    assert json.loads((root / "containers.json").read_text()) == {}
+    assert json.loads((root / "networks.json").read_text()) == {
+        "bridge": {"name": "bridge", "id": BRIDGE_ID, "driver": "bridge"},
+    }
+    ordinary = _transport_operation(gateway_transport, "serve", **BOUNDED_GATEWAY_ENV)
+    assert ordinary.returncode == 0, ordinary.stderr
+    assert json.loads((root / "containers.json").read_text()) == {}
+
+
+def test_saturated_gateway_log_preserves_docker_failure_reaps_and_next_launch_works(gateway_transport):
+    root = gateway_transport[0]
+    # Observe the real sink process lifetime through the executable boundary,
+    # without changing its source or adding an application test-only option.
+    python = root / "bin/python3"
+    python.write_text(f"#!{sys.executable}\n" + """
+import os, pathlib, sys
+if any(pathlib.Path(arg).name == 'log_capture.py' for arg in sys.argv[1:]):
+    (pathlib.Path(os.environ['FAKE_GATEWAY_ROOT']) / 'capture-pid').write_text(str(os.getpid()))
+os.execv(sys.executable, [sys.executable, *sys.argv[1:]])
+""")
+    python.chmod(0o755)
+    failed = _transport_operation(gateway_transport, "serve", **BOUNDED_GATEWAY_ENV,
+                                  FAKE_GATEWAY_LOG_BYTES="262144", FAKE_GATEWAY_EXIT_CODE="37")
+    assert failed.returncode == 37, failed.stderr
+    log = (root / "gateway.log").read_bytes()
+    assert len(log) == 256 and log.startswith(b"X" * 64)
+    assert log.endswith(b"\n[gateway log truncated]\n")
+    assert "excess output was discarded" in failed.stderr
+    assert (root / "gateway.log").stat().st_mode & 0o777 == 0o600
+    with pytest.raises(ProcessLookupError):
+        os.kill(int((root / "capture-pid").read_text()), 0)
+    assert json.loads((root / "containers.json").read_text()) == {}
+    assert json.loads((root / "networks.json").read_text()) == {
+        "bridge": {"name": "bridge", "id": BRIDGE_ID, "driver": "bridge"},
+    }
+    assert all(args[:2] != ["volume", "rm"] for args in _transport_calls(gateway_transport))
+    ordinary = _transport_operation(gateway_transport, "serve", **BOUNDED_GATEWAY_ENV)
+    assert ordinary.returncode == 0, ordinary.stderr
+    assert (root / "gateway.log").read_bytes() == b""
+    assert (root / "gateway.log.1").read_bytes() == log
+    with pytest.raises(ProcessLookupError):
+        os.kill(int((root / "capture-pid").read_text()), 0)
+    assert json.loads((root / "containers.json").read_text()) == {}
+
+
+def test_failed_gateway_log_destination_still_drains_without_exception_text(tmp_path):
+    result = subprocess.run(
+        [sys.executable, str(REPO / "scripts/gateway/log_capture.py"), str(tmp_path), "256"],
+        input=b"original bytes without newlines" * 16384, capture_output=True, timeout=5, check=False,
+    )
+    assert result.returncode == 1
+    assert result.stdout == b"" and result.stderr == b"Gateway host log capture failed.\n"

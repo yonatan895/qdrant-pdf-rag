@@ -315,12 +315,16 @@ are 4 MiB for work, 256 KiB for export and 512 KiB reserved for release commands
 Truncated structured output cannot establish session or resource identity.
 Exhausted diagnostic capture still permits bounded stop and absence checks.
 
-These stream limits do not constrain files opened directly by a workload or
-CLI downloads, or writes performed by the Docker daemon. Reuse the local
-gateway's existing logging policy and Jaeger's existing memory/trace caps;
-admit their disk destinations separately before a full-stack run. A cgroup
-around the controller does not contain Docker daemon writes. Retain final
-CU/session evidence even when export fails.
+These stream limits do not constrain arbitrary workload files, CLI downloads
+or Docker daemon writes. Colab freezes an explicit native gateway envelope at
+preparation: 2048MiB LiteLLM and 512MiB Postgres, each without swap; an 8MiB
+gateway host-log cap and Docker rotation at 8MiB×2 files per container. Later
+ambient settings cannot remove those selected limits. Saturated host capture
+drains excess output, records truncation, and preserves Docker failure/cleanup.
+These limits need measured fit; they do not cap images, volumes, historical logs
+or cumulative daemon writes. Retain Jaeger's existing memory/trace caps and admit
+every full-stack memory/disk destination separately: the controller cgroup does
+not contain Docker descendants. Retain final CU/session evidence on export failure.
 
 After export, cleanup/recovery gives final account usage a command timeout of at
 most five seconds and a quarter of the remaining cleanup window, followed by the

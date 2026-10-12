@@ -174,7 +174,20 @@ Colab recovery reuses that owner and the exact created network ID after a killed
 process group; pre-existing resources and the key-store volume are preserved.
 The gateway's container log is
 `${XDG_STATE_HOME:-~/.local/state}/mainframe-rag/<name>.log` (mode 600; the
-previous run rotates to `.1`; `GATEWAY_LOG` overrides). It is never in `/tmp`,
+previous run rotates to `.1`; `GATEWAY_LOG` overrides). An explicit gateway
+resource envelope supplies all five positive bounded integers:
+`GATEWAY_MEMORY_MIB`, `PG_MEMORY_MIB`, `GATEWAY_LOG_MAX_BYTES`,
+`GATEWAY_DOCKER_LOG_MAX_BYTES` and `GATEWAY_DOCKER_LOG_FILES`. The native owner
+sets role memory limits with equal memory-swap values, rotates both Docker logs,
+and continuously drains combined gateway output into a byte-capped host log.
+Saturation leaves a fixed truncation marker and observation; capture failure
+fails the operation without hiding Docker's exit or skipping labelled cleanup.
+The sink is reaped before ordinary completion. Unset preserves existing local
+behavior; partial/invalid startup envelopes refuse before Docker, and the host
+cap must retain at least 64 bytes. Recovery ignores irrelevant startup limits.
+Historical `.1` files
+are retained without a new size claim. Docker rotation bounds retained logs,
+not total bytes written, volume/image writes or host-stack memory. The host log is never in `/tmp`,
 which is RAM-backed tmpfs on the reference WSL host (issue #590). LiteLLM
 `--detailed_debug` logs full request bodies (prompts with manual excerpts,
 embedding inputs), so it is off unless `GATEWAY_DEBUG=1`/`true` is set
