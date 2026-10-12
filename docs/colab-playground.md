@@ -40,6 +40,14 @@ binary wheels with required hashes, no dependency resolution fallback or source
 build. The prepared profile records the lock digest. No usable approved lock
 means no GPU commissioning. Observed GPU identity, VRAM, available RAM, disk and
 driver 580 or newer must pass admission before downloading either pinned model.
+The existing preflight records OS/freedesktop metadata, architecture, glibc and
+kernel Python separately from an isolated, three-second probe of preinstalled
+`python3.12`. GPU preflight refuses missing, failed or incompatible CPython 3.12
+evidence before inference setup and retains the measured facts in private
+`preflight.json`. CPU transport records interpreter availability without requiring
+it. These facts do not establish wheel/import/CUDA compatibility; the inference
+stage still verifies the installed environment. Collect metadata in this native
+preflight/runtime path: Colab can reject a second active SSH connection.
 
 ## Keep the existing host resource owner
 
