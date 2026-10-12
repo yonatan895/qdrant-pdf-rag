@@ -8,6 +8,7 @@ name must never reach a cluster.
 
 import json
 import re
+import shlex
 import shutil
 import subprocess
 
@@ -30,6 +31,34 @@ from tests.helpers_airgap import (
 )
 
 IMAGE_SHA = "a" * 40  # full-sha shaped; deploy.sh only rejects "" / "HEAD"
+
+
+def test_packaging_pr_gate_checks_vendored_qdrant_chart():
+    """The PR packaging job must execute both existing Qdrant checks.
+
+    This pins workflow dispatch only; real pinned-Helm renders prove chart
+    validity separately. A printed dry-run upgrade is not either check.
+    """
+    import yaml
+
+    workflow = yaml.safe_load((REPO / ".github/workflows/e2e.yml").read_text())
+    job = workflow["jobs"]["airgap-dryrun"]
+    assert job["if"] == "contains(fromJSON(needs.select.outputs.lanes), 'packaging')"
+    commands = [
+        shlex.split(line)
+        for step in job["steps"]
+        if not step.get("if") and not step.get("continue-on-error")
+        for line in step.get("run", "").splitlines()
+        if line.strip().startswith("sh scripts/tools/run-task.sh artifacts:")
+    ]
+    for task in ("artifacts:helm-lint", "artifacts:helm-render"):
+        output = [">", "$RUNNER_TEMP/qdrant-rendered.yaml"] if task == "artifacts:helm-render" else []
+        assert any(
+            argv[:3] == ["sh", "scripts/tools/run-task.sh", task]
+            and argv[3:] == output
+            for argv in commands
+        ), f"packaging PR job must execute {task} without masking failure"
+
 
 STUB_BIN = """#!/bin/sh
 printf '%s\\n' "$@" >> "$HELM_LOG"

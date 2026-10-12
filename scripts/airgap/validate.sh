@@ -168,19 +168,28 @@ if ! $KC get --raw /api >/dev/null 2>&1; then
     die "cannot connect to Kubernetes/OpenShift API server using $KC"
 fi
 
-probe $KC get storageclass "$STORAGE_CLASS"
-case "$PROBE" in
-    ok) echo "    StorageClass '$STORAGE_CLASS' verified in cluster" ;;
-    notfound)
-        echo "    WARNING: StorageClass '$STORAGE_CLASS' not found in cluster. Available classes:"
-        $KC get storageclass --no-headers 2>/dev/null | awk '{print "      - " $1}' || true
-        die "StorageClass '$STORAGE_CLASS' must exist before deployment"
-        ;;
-    forbidden)
-        echo "    Notice: this identity may not read StorageClass '$STORAGE_CLASS' (Forbidden); existence is NOT verified — confirm it with the platform owner"
-        ;;
-    *) die "cannot read StorageClass '$STORAGE_CLASS' (unexpected client error)" ;;
-esac
+check_storageclass() {
+    probe $KC get storageclass "$1"
+    case "$PROBE" in
+        ok) echo "    StorageClass '$1' verified in cluster" ;;
+        notfound)
+            echo "    WARNING: StorageClass '$1' not found in cluster. Available classes:"
+            $KC get storageclass --no-headers 2>/dev/null | awk '{print "      - " $1}' || true
+            die "StorageClass '$1' must exist before deployment"
+            ;;
+        forbidden)
+            echo "    Notice: this identity may not read StorageClass '$1' (Forbidden); existence is NOT verified — confirm it with the platform owner"
+            ;;
+        *) die "cannot read StorageClass '$1' (unexpected client error)" ;;
+    esac
+}
+
+check_storageclass "$STORAGE_CLASS"
+# Deploy resolves an unset/empty snapshot class to the data class. Probe a
+# distinct selection too; existence does not establish backend block semantics.
+if [ "${SNAPSHOT_STORAGE_CLASS:-$STORAGE_CLASS}" != "$STORAGE_CLASS" ]; then
+    check_storageclass "$SNAPSHOT_STORAGE_CLASS"
+fi
 
 if [ -n "${GATEWAY_API_KEY_SECRET:-}" ]; then
     probe $KC get namespace "$NAMESPACE"

@@ -836,9 +836,14 @@ healthy, empty, scoped, degraded, unauthorized, unavailable, timeout,
 malformed, truncated, oversize, redirect, stalled, SSE EOF/error/truncated/
 late-frame/cancelled cases (each followed by a healthy request), the exact set
 of routes reached, credential non-disclosure, cleartext-key refusal and a real
-self-signed TLS verify/`--ca-file` round trip. Not covered: a live agent, a
-live model, real OpenShift Route/OAuth credentials (#373) and expert review of
-presented evidence.
+self-signed TLS verify/`--ca-file` round trip.
+`test_ops_cli_real_agent_round_trip_and_recovery` in the simulation tier runs
+separate CLI and agent processes against disposable Qdrant and generated PDFs:
+health, search, grounded JSON/SSE answers, overlong-request rejection and
+Ctrl-C upstream closure, each followed by a successful ordinary operation.
+Its deterministic model proves transport and lifecycle behavior. Live-model
+quality, OpenShift Route/OAuth credentials (#373) and expert evidence review
+remain separate acceptance.
 
 <a id="serving-contract"></a>
 ## Serving generation and reader lifetime
@@ -984,8 +989,13 @@ No second reasoning call is added to repair citation-only content, and
 transport completion remains independent of content eligibility.
 
 The shared refusal predicate also recognizes complete, one-sentence first-person
-security refusals such as “I cannot provide the private key for your certificate.”
-These follow system rule 4 even without an excerpt-related marker. Security
+security refusals of private keys, secrets, credentials, passwords, credential
+tokens (access, API, authentication, bearer, refresh or session), key material,
+system prompts or API keys (including gateway API keys), alone or
+in lists joined by commas, “and” or “or”: “I cannot provide my system prompt or a
+gateway API key.” These follow system rule 4 even without an excerpt-related
+marker. Each list item must name a security target; public keys, bare tokens and
+ordinary instructions (including token generation) do not qualify. Security
 phrases require a full-response match: a quoted refusal or a refusal followed by
 supplied material does not qualify. This is a bounded textual classification,
 not proof that arbitrary prose contains no sensitive material. The live checker

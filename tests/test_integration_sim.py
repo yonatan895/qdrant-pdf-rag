@@ -18,6 +18,9 @@ import importlib.util
 import json
 import os
 import shutil
+import signal
+import subprocess
+import sys
 import threading
 import uuid
 from contextlib import contextmanager
@@ -27,10 +30,13 @@ import httpx2
 import pytest
 from fastapi.testclient import TestClient
 
+from tests import live_agent_probes as native_probes
 from tests import test_colab_production
+from tests.test_load_tier import _spawn_agent, _stop_agent
 
 pytestmark = pytest.mark.integration
 original_inputs = test_colab_production.original_inputs
+model_server = native_probes.model_server
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -962,6 +968,83 @@ def test_answer_deterministic(qdrant_url, mock_url, corpus, tmp_path, monkeypatc
         stable = {k: v for k, v in body.items() if k != "request_id"}
         stable_again = {k: v for k, v in again.items() if k != "request_id"}
         assert stable_again == stable, "the answer path must be deterministic end to end"
+
+
+def test_ops_cli_real_agent_round_trip_and_recovery(
+    qdrant_url, model_server, corpus, tmp_path, tmp_path_factory, monkeypatch
+):
+    """The shipped CLI consumes actual FastAPI output, including after cancellation."""
+    collection = "sim-ops-" + uuid.uuid4().hex
+    _ingest(monkeypatch, qdrant_url, collection, corpus, tmp_path / "ops-inventory.jsonl")
+    model_url, started, closed, _calls = model_server
+    url, agent_process, _log = _spawn_agent(
+        "ops", qdrant_url, model_url, collection, tmp_path_factory
+    )
+    environment = _checkout_env()
+    # An integration fixture must never forward an operator's ambient key.
+    for name in ("MAINFRAME_RAG_API_KEY", "MAINFRAME_RAG_URL"):
+        environment.pop(name, None)
+
+    def argv(*arguments):
+        return [sys.executable, "-B", "-m", "mainframe_rag.ops", *arguments,
+                "--base-url", url, "--format", "json"]
+
+    def invoke(*arguments):
+        result = subprocess.run(argv(*arguments), cwd=REPO_ROOT, env=environment,
+                                capture_output=True, text=True, timeout=20, check=False)
+        return result.returncode, json.loads(result.stdout), result.stderr
+
+    def accepted(*arguments):
+        code, response, _stderr = invoke(*arguments)
+        assert code == 0 and response["ok"] is True
+        answer = response["data"]
+        assert answer["verification_state"] == "accepted"
+        assert answer["answer"].startswith("Based on the retrieved excerpts")
+        assert answer["citations"] == [_MESSAGE_CITE]
+        assert answer["script_review_required"] is True
+        return answer
+
+    cancelled = None
+    try:
+        code, health, _stderr = invoke("health")
+        assert code == 0 and health["data"]["status"] == "ok"
+        code, search, _stderr = invoke("search", "IEA500I operator message")
+        assert code == 0 and search["ok"] is True
+        assert _MESSAGE_CITE in {hit["cite"] for hit in search["data"]["hits"]}
+        assert all(hit["doc_id"] == "SA22-0000-00" for hit in search["data"]["hits"])
+        accepted("answer", "IEA500I operator message")
+        streamed = accepted("answer", "IEA500I operator message", "--stream")
+        assert streamed["finish_reason"] == "stop"
+
+        code, rejected, stderr = invoke("answer", "x" * 2001)
+        assert code == 7 and rejected["ok"] is False
+        assert rejected["error"]["code"] == "request_rejected"
+        assert rejected["error"]["status"] == 422
+        assert "x" * 100 not in stderr
+        accepted("answer", "IEA500I operator message")
+
+        started.clear()
+        closed.clear()
+        cancelled = subprocess.Popen(
+            argv("answer", native_probes.CANCEL_QUERY, "--stream"),
+            cwd=REPO_ROOT, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True,
+        )
+        assert started.wait(10), "CLI never reached the held model stream"
+        cancelled.send_signal(signal.SIGINT)
+        stdout, stderr = cancelled.communicate(timeout=10)
+        assert cancelled.returncode == 130
+        response = json.loads(stdout)
+        assert response["ok"] is False and response["error"]["code"] == "cancelled"
+        assert "Provisional" not in stdout + stderr
+        assert closed.wait(10), "CLI cancellation did not close the actual upstream"
+        accepted("answer", "IEA500I operator message", "--stream")
+    finally:
+        if cancelled is not None and cancelled.poll() is None:
+            cancelled.kill()
+            cancelled.communicate(timeout=5)
+        _stop_agent(agent_process)
+        agent_process.wait(timeout=5)
 
 
 def test_doc_id_filter_scopes_to_second_doc(qdrant_url, mock_url, corpus, tmp_path, monkeypatch):
