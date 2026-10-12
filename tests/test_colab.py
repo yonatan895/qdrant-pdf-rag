@@ -1189,7 +1189,7 @@ def test_tampered_execution_snapshot_refuses_before_tools_then_restored_snapshot
     assert (state / "transport-receipt.json").is_file()
 
 
-@pytest.mark.parametrize("changed", ["task", "dotenv", "copy_race", "gateway_capture"])
+@pytest.mark.parametrize("changed", ["task", "dotenv", "copy_race", "gateway_capture", "gateway_capture_race"])
 def test_prepare_publishes_only_exact_bounded_source_and_pinned_tool_then_next_candidate_runs(lab, monkeypatch, changed):
     root, base, command = lab
     state = root / "rejected-source-candidate"
@@ -1199,12 +1199,20 @@ def test_prepare_publishes_only_exact_bounded_source_and_pinned_tool_then_next_c
     capture = source / "scripts/gateway/log_capture.py"
     original_capture = capture.read_bytes()
     read_bounded = controller.read_bounded_input
+    source_check = controller.check_source_configuration
     if changed == "task":
         task.write_bytes(original_task + b"\n# mismatched original tool\n")
     elif changed == "dotenv":
         (source / ".env").write_text("ORIGINAL_SYNTHETIC_SETTING=unsupported\n")
     elif changed == "gateway_capture":
         capture.unlink()
+    elif changed == "gateway_capture_race":
+        def removed_after_precheck(root):
+            source_check(root)
+            if root == source:
+                capture.unlink()
+
+        monkeypatch.setattr(controller, "check_source_configuration", removed_after_precheck)
     else:
         def changed_during_copy(path, limit):
             raw = read_bounded(path, limit)
@@ -1219,8 +1227,9 @@ def test_prepare_publishes_only_exact_bounded_source_and_pinned_tool_then_next_c
         task.write_bytes(original_task)
     elif changed == "dotenv":
         (source / ".env").unlink()
-    elif changed == "gateway_capture":
+    elif changed in {"gateway_capture", "gateway_capture_race"}:
         capture.write_bytes(original_capture)
+        monkeypatch.setattr(controller, "check_source_configuration", source_check)
     else:
         monkeypatch.setattr(controller, "read_bounded_input", read_bounded)
     ordinary = _prepare_new(base, root / "ordinary-after-invalid-source")

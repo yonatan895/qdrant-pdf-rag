@@ -57,6 +57,7 @@ PREREQUISITE_LIMITS = {"inference_lock": 1024 * 1024, "transport_receipt": 64 * 
                        "golden": 16 * 1024 * 1024, "source_inventory": 16 * 1024 * 1024,
                        "production_approval": 64 * 1024}
 SOURCE_REQUIRED = ("scripts/colab.py", "scripts/colab_preflight.py", "scripts/colab_runtime.py",
+                   "scripts/gateway/log_capture.py",
                    "src/mainframe_rag/serve/colab_profiles.py", "scripts/tools/run-task.sh",
                    "scripts/run_local_stack.sh", "scripts/run_local_gateway.sh", "scripts/probe_gateway.py",
                    "taskfiles/local.yml", "Taskfile.yml", "pyproject.toml", "requirements.lock.txt")
