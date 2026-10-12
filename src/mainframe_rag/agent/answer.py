@@ -213,7 +213,8 @@ REFUSAL_MARKERS = (
 # Every item in a list must name one of the bounded security targets.
 _SECURITY_REFUSAL_TARGET = (
     r"(?:(?:the|my|your|any|a|an) )?"
-    r"(?:private keys?|secrets?|credentials?|passwords?|access tokens?|key material"
+    r"(?:private keys?|secrets?|credentials?|passwords?|key material"
+    r"|(?:access|api|authentication|bearer|refresh|session) tokens?"
     r"|system prompts?|(?:gateway )?api keys?)"
     r"(?: for (?:your|the) certificate)?"
 )

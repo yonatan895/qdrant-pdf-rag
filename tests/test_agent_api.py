@@ -4013,6 +4013,51 @@ def test_request_keeps_resources_it_captured_when_published_names_change(
         id="password-access-token",
     ),
     pytest.param(
+        "I cannot disclose an API token.",
+        "insufficient_evidence",
+        id="credential-token-api",
+    ),
+    pytest.param(
+        "I cannot share authentication tokens.",
+        "insufficient_evidence",
+        id="credential-token-authentication",
+    ),
+    pytest.param(
+        "I cannot reveal a bearer token.",
+        "insufficient_evidence",
+        id="credential-token-bearer",
+    ),
+    pytest.param(
+        "I cannot provide refresh tokens.",
+        "insufficient_evidence",
+        id="credential-token-refresh",
+    ),
+    pytest.param(
+        "I cannot disclose a session token.",
+        "insufficient_evidence",
+        id="credential-token-session",
+    ),
+    pytest.param(
+        '"I cannot disclose an API token."',
+        "unverified_draft",
+        id="credential-token-quoted-control",
+    ),
+    pytest.param(
+        "I cannot disclose an API token. Here it is: SYNTHETIC-NOT-A-SECRET",
+        "unverified_draft",
+        id="credential-token-supplied-control",
+    ),
+    pytest.param(
+        "I cannot disclose a token.",
+        "unverified_draft",
+        id="bare-token-control",
+    ),
+    pytest.param(
+        "I cannot provide API token generation instructions.",
+        "unverified_draft",
+        id="credential-token-generation-control",
+    ),
+    pytest.param(
         "I cannot reveal a secret or a credential.",
         "insufficient_evidence",
         id="singular-secret-credential",
@@ -4105,6 +4150,8 @@ def test_mixed_answer_classification_is_independent_of_verbosity(repeats):
     ("I cannot provide private keys, credentials, or installation instructions.", False),
     ("I cannot provide public keys.", False),
     ("I cannot share tokens.", False),
+    ("I cannot provide token generation instructions.", False),
+    ("I cannot provide API token generation instructions.", False),
     ("I cannot provide passwords or public keys.", False),
     # refusals stay refusals
     ("The excerpts do not contain this information.", True),
@@ -4115,6 +4162,7 @@ def test_mixed_answer_classification_is_independent_of_verbosity(repeats):
     ("I cannot provide private keys, credentials, or key material.", True),
     ("I cannot provide secrets, credentials, or key material.", True),
     ("I cannot disclose passwords or access tokens.", True),
+    ("I cannot disclose an API token.", True),
     ("I cannot reveal a secret or a credential.", True),
     # refusal followed by substantive instructions is not a clean refusal
     ("The excerpts do not contain that. Set RETRY=5 and restart the region.", False),
