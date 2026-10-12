@@ -1037,6 +1037,61 @@ def test_validate_live_storageclass_notfound_fails(tree):
     assert "must exist before deployment" in r.stderr
 
 
+def test_validate_live_distinct_snapshot_storageclass_notfound_fails(tree):
+    """An existing data class does not establish the distinct snapshot class."""
+    write_stub(
+        tree / "bin" / "kubectl",
+        "#!/bin/sh\n"
+        'if [ "$1" = get ] && [ "$2" = storageclass ] && [ "${3:-}" = snapshots-missing ]; then\n'
+        '  echo \'Error from server (NotFound): storageclasses "snapshots-missing" not found\' >&2\n'
+        "  exit 1\nfi\nexit 0\n",
+    )
+    r = _live(tree, SNAPSHOT_STORAGE_CLASS="snapshots-missing")
+    assert r.returncode != 0
+    assert "StorageClass 'standard' verified in cluster" in r.stdout
+    assert "StorageClass 'snapshots-missing' must exist before deployment" in r.stderr
+
+
+@pytest.mark.parametrize("snapshot_class", [None, "", "standard"])
+def test_validate_live_shared_snapshot_storageclass_is_read_once(tree, snapshot_class):
+    write_stub(
+        tree / "bin" / "kubectl",
+        "#!/bin/sh\n"
+        'if [ "$1" = get ] && [ "$2" = storageclass ]; then\n'
+        '  printf \'%s\\n\' "$3" >> storageclass-reads\n'
+        "fi\nexit 0\n",
+    )
+    r = _live(tree, SNAPSHOT_STORAGE_CLASS=snapshot_class)
+    assert r.returncode == 0, r.stderr
+    assert (tree / "storageclass-reads").read_text().splitlines() == ["standard"]
+
+
+@pytest.mark.parametrize("client_error,exit_code,message", [
+    (None, 0, "StorageClass 'snapshot-tier' verified in cluster"),
+    (FORBIDDEN, 0, "StorageClass 'snapshot-tier' (Forbidden); existence is NOT verified"),
+    ("dial tcp: connection refused", 1, "cannot read StorageClass 'snapshot-tier' (unexpected client error)"),
+])
+def test_validate_live_distinct_snapshot_storageclass_probe(tree, client_error, exit_code, message):
+    failure = (
+        f"  cat >&2 <<'EOT'\n{client_error}\nEOT\n  exit 1\n"
+        if client_error else "  exit 0\n"
+    )
+    write_stub(
+        tree / "bin" / "kubectl",
+        "#!/bin/sh\n"
+        'if [ "$1" = get ] && [ "$2" = storageclass ]; then\n'
+        '  printf \'%s\\n\' "$3" >> storageclass-reads\n'
+        '  if [ "$3" = snapshot-tier ]; then\n'
+        f"{failure}  fi\nfi\nexit 0\n",
+    )
+    r = _live(tree, SNAPSHOT_STORAGE_CLASS="snapshot-tier")
+    assert r.returncode == exit_code, r.stderr
+    assert message in r.stdout + r.stderr
+    assert (tree / "storageclass-reads").read_text().splitlines() == ["standard", "snapshot-tier"]
+    if client_error:
+        assert client_error not in r.stdout + r.stderr
+
+
 def test_validate_live_storageclass_forbidden_is_not_reported_absent(tree):
     write_stub(tree / "bin" / "kubectl", _kubectl_stub("storageclass", FORBIDDEN))
     r = _live(tree)

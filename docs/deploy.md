@@ -88,13 +88,15 @@ restores the snapshot over whatever the file assigned; empty stays unset
   API discovery (`get --raw /api`): an anonymous or invalid identity fails, and
   a namespace-scoped one passes. It does not use `cluster-info` (kube-system
   Services) or `/version` (anonymous).
-- Live cluster probes in `validate.sh` classify the client error: a
-  `Forbidden` StorageClass read is a notice (existence unverified, not
-  "absent"); a `Forbidden` Namespace read falls through to the Secret check
-  in the namespace; a `Forbidden` Secret read fails; only `NotFound` means
-  absent. `get scc` succeeding means OpenShift, a missing resource type means
-  standard Kubernetes, and a denied or failed read leaves the cluster type
-  undetermined (never reported as non-OpenShift).
+- `validate.sh` probes each distinct data/snapshot StorageClass; unset/empty
+  snapshots share the data class. `Forbidden` means existence unverified;
+  `NotFound` means absent and fails; other client errors fail. A denied
+  Namespace read still checks its Secret; denied Secret reads fail.
+  SCC read success means OpenShift, a missing resource type means standard
+  Kubernetes; denied/failed reads leave cluster type undetermined.
+  Successful class reads prove existence only; NFS-name rejection cannot
+  prove backend semantics. The platform owner qualifies RWO block data
+  and snapshot suitability at the site.
 - `scripts/airgap/model_config.py` owns pure validation of the resolved model
   inputs for both preflight and the values mapper. A reasoning alias requires
   a resolved reasoning/shared URL; enabled contextual embedding requires its
@@ -133,20 +135,20 @@ restores the snapshot over whatever the file assigned; empty stays unset
 
 ## 3. Render pipeline
 
-Qdrant deploys as its separate release from `charts/qdrant-1.19.0.tgz`;
-`mainframe-rag` deploys the first-party chart from the exact verified source
-checkout. Use the checksum-pinned Helm 4.3.0 client from
-[the workflow](../.github/workflows/e2e.yml). Neither chart needs a remote
-chart repository in the air gap.
-Deploy also reads back every deployed image from the registry before any
-cluster change, so `pipeline.sh --skip-load` and standalone `airgap:deploy`
-are verified exactly like a fresh load (see [image identity](#image-identity-across-archive-and-registry-formats)).
-Deploy requires exactly one `charts/qdrant-*.tgz` (none or several is refused
-before any release command). When a packed `MANIFEST.txt` is reachable and the
-run is not a dry-run, that archive's sha256 must equal the MANIFEST
-`chart_sha256`; a mismatch or missing field fails closed. Dry-run and
-no-MANIFEST runs print a "not release-verified" notice instead. Pack refuses
-a checkout with zero or several chart archives, so the MANIFEST binds one.
+Qdrant deploys separately from `charts/qdrant-1.19.0.tgz`; the first-party
+application chart uses the verified checkout. Both render offline with
+checksum-pinned Helm 4.3.0. The packaging-selected PR job in
+[the workflow](../.github/workflows/e2e.yml) executes `artifacts:helm-lint` and
+`artifacts:helm-render` with `charts/qdrant-openshift.values.yaml`, the same
+production-values owner deploy uses. Generated Secret data stays in
+runner-temporary render output, outside logs/artifacts. First-party render
+checks remain separate; Qdrant dry-run only prints upgrade argv.
+Deploy reads every deployed registry image before mutation, including
+`--skip-load` and standalone paths (see [image identity](#image-identity-across-archive-and-registry-formats)).
+Deploy and pack require exactly one `charts/qdrant-*.tgz`. For live deploy
+with a reachable packed `MANIFEST.txt`, its archive sha256 must match
+`chart_sha256`; mismatch/missing fields fail closed before release commands.
+Dry-run or no-MANIFEST runs report "not release-verified".
 `airgap.env` remains the only operator configuration owner. After `common.sh`
 resolves precedence and validates inputs, `map_app_values` exports the declared
 non-secret inputs to the deterministic serializer in `map_values.py`.
