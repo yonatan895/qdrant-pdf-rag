@@ -44,6 +44,7 @@ spec:
           imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
             capabilities:
               drop: [ALL]
           args:
@@ -121,6 +122,8 @@ spec:
           resources:
             {{- toYaml .Values.ingest.resources | nindent 12 }}
           volumeMounts:
+            - name: tmp
+              mountPath: /tmp
             - name: corpus
               mountPath: /corpus
               readOnly: true
@@ -132,6 +135,8 @@ spec:
               readOnly: true
             {{- end }}
       volumes:
+        - name: tmp
+          emptyDir: {}
         - name: corpus
           persistentVolumeClaim:
             claimName: {{ required "ingest.corpusPVC is required when ingest.enabled is true" .Values.ingest.corpusPVC }}

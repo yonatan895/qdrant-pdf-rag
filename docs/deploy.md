@@ -454,8 +454,20 @@ cannot schedule on one node — proven).
   `allowPrivilegeEscalation: false` and `capabilities.drop: [ALL]`. The chart
   never sets `runAsUser`, `runAsGroup` or `fsGroup`; OpenShift assigns them.
   The agent and ingest images declare numeric `USER 1000`.
-  `readOnlyRootFilesystem` with `/tmp` emptyDirs is not yet set: it needs a
-  Kind run proving nothing else writes to the root filesystem.
+  Agent and ingest containers additionally set `readOnlyRootFilesystem: true`.
+  Each mounts a disk-backed `emptyDir` at `/tmp`; ingest reuses its existing
+  `/work` PVC for inventory, writer locks, publication state and the default
+  contextual cache. Image `PYTHONDONTWRITEBYTECODE=1` prevents import cache
+  writes. Baked `/opt/bm25` and `HF_HOME=/opt/bm25/hf` remain read-only: the
+  pinned `Qdrant/bm25` implementation reads its existing snapshot and uses
+  text stopwords/stemming, without an ONNX model/session. No writable source,
+  weight or home overlay is provided. The snapshot-maintenance Job inherits
+  ingest's security settings and has its own `/tmp` emptyDir, without corpus
+  or work PVC attachments. Render tests check these declarations;
+  current-candidate image/pipeline/lifecycle execution must establish write-path
+  coverage. The pinned OAuth sidecar retains the four original controls;
+  its read-only-root/write-path qualification and actual `restricted-v2`
+  admission remain separate acceptance under #585/#373/#447.
 - Jaeger is on by default (unset `OTEL_EXPORTER_OTLP_ENDPOINT` resolves to
   `http://jaeger:4318`; the off sentinel disables both tracing and this
   deployment; `JAEGER_ENABLED=false` skips only the deployment and is
@@ -988,7 +1000,7 @@ LiteLLM import exception. Served model IDs and application contracts remain the
 same; production's platform gateway must provide equivalent protection.
 
 The production SCC fixes remove fixed Qdrant/Jaeger identities and make the
-application's required cache/work paths group-0 writable. Jaeger uses `Recreate`
+application's required work paths group-0 writable. Jaeger uses `Recreate`
 for its single RWO volume, avoiding concurrent-writer locks during redeployment.
 The dedicated OAuth pin and registry service-account authentication make the
 sidecar part of the signed candidate, rather than an unresolved release input.
@@ -1071,8 +1083,9 @@ Preserve separate CI/prod Qdrant values and sizing. CI synthetic hash jobs never
 prod ingest; production has no EMBED_MODE key, RWO block data/work storage,
 read-only caller corpus and two agent replicas. Qdrant chart IDs are explicitly
 null; Jaeger uses project-assigned IDs and `Recreate` for its single Badger writer.
-App source is read-only; required caches/work paths are group-0 writable. Never
-repair admission with `anyuid`. Verify an old trace survives replacement.
+Agent and ingest image roots (source and baked BM25 snapshot included) are
+read-only; only `/tmp` and ingest's existing `/work` mount accept writes.
+Never repair admission with `anyuid`. Verify an old trace survives replacement.
 
 Keep placeholders in git, render fails closed on leftover tokens, quote scalar
 environment values, and wire PULL_SECRET to Qdrant **and** agent/ingest. Deploy

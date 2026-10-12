@@ -54,12 +54,14 @@ def maintenance_job(ingest, namespace):
         raise ValueError('Ingest must reference the full-access Qdrant Secret key')
     container['env'] = [env[name] for name in ('QDRANT_URL', 'QDRANT_COLLECTION', 'QDRANT_API_KEY')]
     container['command'] = ['python3', '-c', SNAPSHOT_CHECK]
-    # Recovery needs no corpus/scratch PVC; avoid attaching ingest's RWO volumes.
+    # Recovery needs only ephemeral temporary storage, never ingest's RWO PVCs.
     for field in ('args', 'volumeMounts', 'volumeDevices', 'envFrom'):
         container.pop(field, None)
+    container['volumeMounts'] = [{'name': 'tmp', 'mountPath': '/tmp'}]
     spec = {key: source[key] for key in ('imagePullSecrets', 'serviceAccountName', 'securityContext')
             if key in source}
-    spec.update(containers=[container], restartPolicy='Never', automountServiceAccountToken=False)
+    spec.update(containers=[container], volumes=[{'name': 'tmp', 'emptyDir': {}}],
+                restartPolicy='Never', automountServiceAccountToken=False)
     return {
         'apiVersion': 'batch/v1', 'kind': 'Job',
         'metadata': {'name': 'ci-qdrant-recovery-' + uuid.uuid4().hex, 'namespace': namespace},

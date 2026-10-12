@@ -22,12 +22,14 @@ COPY src/ /app/src/
 # smoke_search.py for the connected CI E2E (issue #8); harmless in prod.
 COPY scripts/ /app/scripts/
 ENV PYTHONPATH=/app/src \
+    PYTHONDONTWRITEBYTECODE=1 \
     BM25_CACHE_DIR=/opt/bm25 \
     HF_HOME=/opt/bm25/hf
 
 # The python-314-minimal base defaults to a non-root user; setup needs root.
 USER root
-# OpenShift assigns an arbitrary UID in group 0. FastEmbed needs a writable cache.
+# Keep baked weights readable for OpenShift's arbitrary UID in group 0.
+# Runtime uses a read-only root; temporary files belong on the /tmp mount.
 RUN useradd -u 1000 -M -s /sbin/nologin rag \
     && chown -R rag:0 /opt/bm25 \
     && chmod -R g=u /opt/bm25
