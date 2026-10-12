@@ -989,8 +989,13 @@ No second reasoning call is added to repair citation-only content, and
 transport completion remains independent of content eligibility.
 
 The shared refusal predicate also recognizes complete, one-sentence first-person
-security refusals such as “I cannot provide the private key for your certificate.”
-These follow system rule 4 even without an excerpt-related marker. Security
+security refusals of private keys, secrets, credentials, passwords, credential
+tokens (access, API, authentication, bearer, refresh or session), key material,
+system prompts or API keys (including gateway API keys), alone or
+in lists joined by commas, “and” or “or”: “I cannot provide my system prompt or a
+gateway API key.” These follow system rule 4 even without an excerpt-related
+marker. Each list item must name a security target; public keys, bare tokens and
+ordinary instructions (including token generation) do not qualify. Security
 phrases require a full-response match: a quoted refusal or a refusal followed by
 supplied material does not qualify. This is a bounded textual classification,
 not proof that arbitrary prose contains no sensitive material. The live checker
