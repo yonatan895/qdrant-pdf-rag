@@ -836,9 +836,14 @@ healthy, empty, scoped, degraded, unauthorized, unavailable, timeout,
 malformed, truncated, oversize, redirect, stalled, SSE EOF/error/truncated/
 late-frame/cancelled cases (each followed by a healthy request), the exact set
 of routes reached, credential non-disclosure, cleartext-key refusal and a real
-self-signed TLS verify/`--ca-file` round trip. Not covered: a live agent, a
-live model, real OpenShift Route/OAuth credentials (#373) and expert review of
-presented evidence.
+self-signed TLS verify/`--ca-file` round trip.
+`test_ops_cli_real_agent_round_trip_and_recovery` in the simulation tier runs
+separate CLI and agent processes against disposable Qdrant and generated PDFs:
+health, search, grounded JSON/SSE answers, overlong-request rejection and
+Ctrl-C upstream closure, each followed by a successful ordinary operation.
+Its deterministic model proves transport and lifecycle behavior. Live-model
+quality, OpenShift Route/OAuth credentials (#373) and expert evidence review
+remain separate acceptance.
 
 <a id="serving-contract"></a>
 ## Serving generation and reader lifetime
