@@ -1073,6 +1073,8 @@ def build_messages(
     tokenizer: Tokenizer | None = None,
     settings: Settings | None = None,
     order: Literal["retrieval", "stable_cache"] = "retrieval",
+    *,
+    reasoning_effort: str | None = None,
 ) -> PreparedPrompt:
     return _build_prompt(
         query,
@@ -1088,6 +1090,7 @@ def build_messages(
         tokenizer=tokenizer,
         settings=settings,
         order=order,
+        reasoning_effort=reasoning_effort,
     )
 
 
@@ -1119,6 +1122,7 @@ def _build_prompt(
     order: Literal["retrieval", "stable_cache"] = "retrieval",
     *,
     history: list[ChatMessage] | None = None,
+    reasoning_effort: str | None = None,
 ) -> PreparedPrompt:
     is_chat = history is not None
     # Retention policy (issue #633), identical for planning and recount: the
@@ -1251,7 +1255,7 @@ def _build_prompt(
             if not packed and not is_chat:
                 break
             messages = candidate()
-            used = tokenizer.count_messages(messages)
+            used = tokenizer.count_messages(messages, reasoning_effort=reasoning_effort)
             if used <= verify_limit:
                 verified_clean = True
                 break
@@ -1267,7 +1271,7 @@ def _build_prompt(
             # instead of returning an unchecked prompt. One bounded extra
             # count, not a repair loop.
             messages = candidate()
-            used = tokenizer.count_messages(messages)
+            used = tokenizer.count_messages(messages, reasoning_effort=reasoning_effort)
             if used > verify_limit:
                 raise PromptBudgetExceeded(used, verify_limit)
             verified_clean = True
@@ -2035,6 +2039,8 @@ def build_chat_messages(
     tokenizer: Tokenizer | None = None,
     settings: Settings | None = None,
     order: Literal["retrieval", "stable_cache"] = "retrieval",
+    *,
+    reasoning_effort: str | None = None,
 ) -> PreparedPrompt:
     """Build multi-turn chat prompt messages + supplied-evidence manifest.
 
@@ -2087,4 +2093,5 @@ def build_chat_messages(
         settings=settings,
         order=order,
         history=prior_messages,
+        reasoning_effort=reasoning_effort,
     )

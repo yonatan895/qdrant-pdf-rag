@@ -90,7 +90,7 @@ class OvershootTokenizer(FallbackTokenizer):
     """Reports a prompt far over any window so the verify loop trims every
     packed excerpt away (the zero-evidence case the issue calls out)."""
 
-    def count_messages(self, messages) -> int:
+    def count_messages(self, messages, *, reasoning_effort=None) -> int:
         return 10**9
 
 

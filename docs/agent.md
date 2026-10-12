@@ -1041,6 +1041,9 @@ final messages are confirmed against the real tokenizer/template budget
 (fixed system/history/context/question text plus output/thinking reserves),
 always counting the selected final-order candidate — a retrieval-order
 count never certifies a `stable_cache` prompt (issue #368);
+every count and recount carries the request's selected reasoning effort and
+matching thinking template kwargs, identical to completion. This state stays
+local to the request; shared tokenizer instances and Settings are not mutated.
 estimator-only and char-packing paths report `budget_verified: false`
 (estimated, never confirmed; the offline/caller-provided `tokenizer=None`
 char-packing path is estimated-only with no token budget claim, while production

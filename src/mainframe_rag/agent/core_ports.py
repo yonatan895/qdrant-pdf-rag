@@ -33,6 +33,7 @@ class PromptBuilder[T](Protocol):
         max_chunk_chars_narrative: int | None, splunk_context_max_chars: int,
         complexity: str, tokenizer: Tokenizer | None, settings: Settings,
         order: Literal["retrieval", "stable_cache"],
+        reasoning_effort: str | None = None,
     ) -> PreparedPrompt: ...
 
 
