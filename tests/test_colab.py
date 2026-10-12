@@ -10,6 +10,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -251,6 +252,7 @@ elif name=='kubectl':
             elif changed=='container': status['containerID']='containerd://replacement'
             elif changed=='image': status['imageID']='sha256:replacement'
             elif changed=='ready': status['ready']=False
+            if (root/'fresh-producer-replaced').exists(): output['metadata']['uid']='fresh-replacement'
         print(json.dumps(output))
     elif rest[0]=='exec':
         assert rest[1:6]==['qdrant-0','-c','qdrant','--','cat']
@@ -260,10 +262,34 @@ elif name=='kubectl':
     elif rest[0]=='port-forward':
         assert rest[:4]==['port-forward','--address','127.0.0.1','pod/qdrant-0']
         local,remote_port=rest[4].split(':'); assert remote_port=='6333'
+        if os.environ.get('FAKE_FRESH_API')=='resist-cleanup':
+            signal.signal(signal.SIGTERM,lambda *_: (root/'fresh-forward-term').touch())
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
-                assert self.path=='/readyz'
-                self.send_response(200); self.end_headers(); self.wfile.write(b'ok')
+                if self.path=='/readyz':
+                    self.send_response(200); self.end_headers(); self.wfile.write(b'ok'); return
+                event('qdrant-read',['GET',self.path])
+                assert self.path in ('/collections','/aliases')
+                slow=os.environ.get('FAKE_FRESH_API')
+                if self.path=='/collections' and slow in ('slow-headers','slow-chunk'):
+                    self.wfile.write(b'HTTP/1.1 200 OK\r\nX-Slow: ' if slow=='slow-headers' else
+                                     b'HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n')
+                    (root/'fresh-slow-started').touch()
+                    while True:
+                        self.wfile.write(b'a'); self.wfile.flush(); time.sleep(.05)
+                inventory=root/'fresh-qdrant.json'
+                values=json.loads(inventory.read_text()) if inventory.exists() else {
+                    '/collections': {'collections':[{'name':'legacy1024'}]}, '/aliases': {'aliases':[]}}
+                payload=json.dumps({'status':'ok','result':values[self.path]}).encode()
+                if os.environ.get('FAKE_FRESH_API')=='oversized': payload=b'x'*65537
+                self.send_response(200); self.end_headers(); self.wfile.write(payload)
+                if self.path=='/aliases' and os.environ.get('FAKE_FRESH_API')=='replace-producer':
+                    (root/'fresh-producer-replaced').touch()
+            def do_POST(self):
+                body=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+                event('qdrant-read',['POST',self.path,body])
+                assert self.path.endswith('__completions/points')
+                self.send_response(200); self.end_headers(); self.wfile.write(b'{"status":"ok","result":[]}')
             def log_message(self,*args): pass
         class Server(http.server.HTTPServer): allow_reuse_address=True
         Server(('127.0.0.1',int(local)),Handler).serve_forever()
@@ -855,6 +881,115 @@ def _prepare_production_again(run, name):
         extra += ["--" + field.replace("_", "-"), str(run.config[field])]
     extra += ["--dataset", "production", "--kubectl", run.tools["kubectl"]]
     return _prepare_new(run.state, run.state.parent / name, profile="COLAB_G4_BF16", extra=extra)
+
+
+def _fresh_cli(run, name="fresh-initialization", *, extra=()):
+    argv = ["initialize-fresh", "--state", str(run.state.parent / name), "--collection", "original_manuals",
+            "--profile", "COLAB_G4_BF16", "--deadline-seconds", "30", "--kubectl", run.tools["kubectl"],
+            "--qdrant-port", str(run.config["qdrant_port"])]
+    for field in ("corpus", "golden", "inventory", "source_inventory", "embedding_evidence", "production_approval",
+                  "data_state", "kubeconfig", "kube_context", "namespace", "qdrant_service", "inference_lock"):
+        argv += ["--" + field.replace("_", "-"), run.config[field]]
+    return _controller_call([*argv, *extra], source_root=run.origin_source_root)
+
+
+def test_fresh_cli_proves_storage_releases_forward_and_next_ordinary_prepare_works(storage_lab):
+    root, run, _ = storage_lab
+    ledger = Path(run.config["data_state"]) / "retained-index-binding.json"
+    ledger.unlink()
+    assert _fresh_cli(run) == 0
+    state = run.state.parent / "fresh-initialization"
+    manifest = json.loads((state / "manifest.json").read_text())
+    assert manifest["phase"] == "initialized" and manifest["local_forward_released"] is True
+    assert manifest["allocation_attempted"] is False and manifest["endpoint"] is None
+    assert not (state / "execution").exists()
+    assert manifest["initialization"]["inventory"] == {"collections": 1, "aliases": 0, "controls_checked": 0}
+    assert json.loads(ledger.read_text())["target"] == {
+        "namespace": "retained", "claim_uid": "claim-original", "pv_uid": "pv-original-uid",
+        "storage_path": "/qdrant/storage", "logical_collection": "original_manuals"}
+    assert [(kind, argv) for kind, argv in _events(root) if kind == "qdrant-read"] == [
+        ("qdrant-read", ["GET", "/collections"]), ("qdrant-read", ["GET", "/aliases"])]
+    with socket.socket() as listener:
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", run.config["qdrant_port"]))
+    for command in (["stop", "--state", str(state)], ["run", "--state", str(state), "--approve-cu", "20"]):
+        assert _controller_call(command) == 2
+    assert not any(kind in ("colab", "docker", "ssh", "ssh-keygen") for kind, _ in _events(root))
+    next_state = _prepare_production_again(run, "ordinary-after-fresh-binding")
+    ordinary = controller.Run(next_state)
+    assert ordinary.production_admission().manifest["sources_verified"] is True
+    original = ledger.read_bytes()
+    assert _fresh_cli(run, "duplicate-initialization") == 2
+    assert ledger.read_bytes() == original
+
+
+@pytest.mark.parametrize("failure", ["oversized", "replace-producer"])
+def test_fresh_cli_refusal_releases_forward_then_retry_reproves_target(storage_lab, monkeypatch, failure):
+    root, run, _ = storage_lab
+    ledger = Path(run.config["data_state"]) / "retained-index-binding.json"
+    ledger.unlink()
+    monkeypatch.setenv("FAKE_FRESH_API", failure)
+    assert _fresh_cli(run) == 2
+    assert not ledger.exists()
+    manifest = json.loads((run.state.parent / "fresh-initialization/manifest.json").read_text())
+    assert manifest["local_forward_released"] is True
+    monkeypatch.delenv("FAKE_FRESH_API")
+    (root / "fresh-producer-replaced").unlink(missing_ok=True)
+    assert _fresh_cli(run, "fresh-after-refusal") == 0
+    assert ledger.exists()
+    assert not any(kind in ("colab", "docker", "ssh", "ssh-keygen") for kind, _ in _events(root))
+
+
+@pytest.mark.parametrize("mode", ["slow-headers", "slow-chunk"])
+def test_fresh_http_progress_cannot_extend_absolute_deadline(storage_lab, monkeypatch, mode):
+    root, run, _ = storage_lab
+    ledger = Path(run.config["data_state"]) / "retained-index-binding.json"
+    ledger.unlink()
+    approval = Path(run.config["production_approval"])
+    value = json.loads(approval.read_text())
+    value["source_scan"]["deadline_seconds"] = 2
+    test_colab_production._json(approval, value)
+    monkeypatch.setenv("FAKE_FRESH_API", mode)
+    started = time.monotonic()
+    assert _fresh_cli(run, extra=("--deadline-seconds", "3")) == 2
+    assert time.monotonic() - started < 8
+    assert (root / "fresh-slow-started").exists(), "the actual framing read must have started"
+    assert not ledger.exists()
+    manifest = json.loads((run.state.parent / "fresh-initialization/manifest.json").read_text())
+    assert manifest["local_forward_released"] is True
+    with socket.socket() as listener:
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", run.config["qdrant_port"]))
+
+
+@pytest.mark.parametrize("interrupt", [signal.SIGINT, signal.SIGTERM])
+def test_fresh_cleanup_finishes_before_honoring_another_interrupt(storage_lab, monkeypatch, interrupt):
+    root, run, _ = storage_lab
+    (Path(run.config["data_state"]) / "retained-index-binding.json").unlink()
+    monkeypatch.setenv("FAKE_FRESH_API", "resist-cleanup")
+    delivered = []
+
+    def interrupt_term_wait():
+        until = time.monotonic() + 8
+        while time.monotonic() < until:
+            if (root / "fresh-forward-term").exists():
+                os.kill(os.getpid(), interrupt)
+                delivered.append(True)
+                return
+            time.sleep(.01)
+
+    sender = threading.Thread(target=interrupt_term_wait, daemon=True)
+    sender.start()
+    try:
+        assert _fresh_cli(run) == 0
+    finally:
+        sender.join(timeout=8)
+    assert delivered == [True]
+    manifest = json.loads((run.state.parent / "fresh-initialization/manifest.json").read_text())
+    assert manifest["local_forward_released"] is True
+    with socket.socket() as listener:
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", run.config["qdrant_port"]))
 
 
 def _production_cli(state, *, stop=False, workload=()):

@@ -56,6 +56,34 @@ class ColabTaskTests(unittest.TestCase):
         ]])
         self.assertFalse(marker.exists(), "Task input was evaluated as shell source")
 
+    def test_initialize_fresh_preserves_exact_target_inputs_without_cloud_flags(self):
+        boundary = self.boundary
+        marker = boundary.root / "must-not-exist"
+        private = str(boundary.root / f"fresh space'|=;$(touch {marker})")
+        values = [
+            ("COLAB_STATE", "--state"), ("COLAB_INITIALIZE_COLLECTION", "--collection"),
+            ("PRODUCTION_CORPUS_DIR", "--corpus"), ("PRODUCTION_GOLDEN_PATH", "--golden"),
+            ("COLAB_INVENTORY", "--inventory"), ("COLAB_SOURCE_INVENTORY", "--source-inventory"),
+            ("COLAB_EMBEDDING_EVIDENCE", "--embedding-evidence"),
+            ("COLAB_PRODUCTION_APPROVAL", "--production-approval"), ("COLAB_DATA_STATE", "--data-state"),
+            ("COLAB_KUBECONFIG", "--kubeconfig"), ("COLAB_KUBE_CONTEXT", "--kube-context"),
+            ("COLAB_NAMESPACE", "--namespace"), ("COLAB_QDRANT_SERVICE", "--qdrant-service"),
+            ("COLAB_INFERENCE_LOCK", "--inference-lock"), ("COLAB_PROFILE", "--profile"),
+            ("COLAB_QDRANT_PORT", "--qdrant-port"), ("COLAB_EMBEDDING_MAX_LEN", "--embedding-max-len"),
+            ("COLAB_INITIALIZE_SECONDS", "--deadline-seconds"), ("COLAB_KUBECTL_BIN", "--kubectl"),
+        ]
+        proc = boundary.run_task("local:colab:initialize-fresh", *(f"{key}={private}/{key}" for key, _ in values),
+                                 extra_env={**boundary.recorder_env, "COLAB_STATE": "ambient wrong state"})
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertEqual(boundary.calls()[0]["argv"], ["scripts/colab.py", "initialize-fresh", *[
+            item for key, flag in values for item in (flag, f"{private}/{key}")]])
+        self.assertFalse(marker.exists())
+        boundary.log.unlink()
+        proc = boundary.run_task("local:colab:initialize-fresh", "--", "unreviewed source",
+                                 extra_env=boundary.recorder_env)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertEqual(boundary.calls(), [])
+
     def test_prepare_omits_optional_flags_and_requires_explicit_state_and_image(self):
         boundary = self.boundary
         image = "example.invalid/gateway@sha256:" + "b" * 64
