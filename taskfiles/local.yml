@@ -15,6 +15,182 @@
 version: '3'
 
 tasks:
+  colab:initialize-fresh:
+    desc: Verify a fresh retained Qdrant target and exclusively initialize its private binding
+    summary: |
+      CPU-only explicit first-run operation; never allocates Colab or changes Qdrant.
+      Requires complete admitted production inputs, COLAB_INITIALIZE_COLLECTION
+      matching native QDRANT_COLLECTION, an empty private COLAB_DATA_STATE, fresh
+      COLAB_STATE and explicit existing Kubernetes target. Keep every target writer
+      serialized from this operation through first native publication. Use the
+      existing host guard/lock; see docs/colab-playground.md. No tool installs.
+    env:
+      TASK_COLAB_STATE: '{{.COLAB_STATE}}'
+      TASK_COLAB_INITIALIZE_COLLECTION: '{{.COLAB_INITIALIZE_COLLECTION}}'
+      TASK_COLAB_CORPUS: '{{.PRODUCTION_CORPUS_DIR}}'
+      TASK_COLAB_GOLDEN: '{{.PRODUCTION_GOLDEN_PATH}}'
+      TASK_COLAB_INVENTORY: '{{.COLAB_INVENTORY}}'
+      TASK_COLAB_SOURCE_INVENTORY: '{{.COLAB_SOURCE_INVENTORY}}'
+      TASK_COLAB_EMBEDDING_EVIDENCE: '{{.COLAB_EMBEDDING_EVIDENCE}}'
+      TASK_COLAB_PRODUCTION_APPROVAL: '{{.COLAB_PRODUCTION_APPROVAL}}'
+      TASK_COLAB_DATA_STATE: '{{.COLAB_DATA_STATE}}'
+      TASK_COLAB_KUBECONFIG: '{{.COLAB_KUBECONFIG}}'
+      TASK_COLAB_KUBE_CONTEXT: '{{.COLAB_KUBE_CONTEXT}}'
+      TASK_COLAB_NAMESPACE: '{{.COLAB_NAMESPACE}}'
+      TASK_COLAB_QDRANT_SERVICE: '{{.COLAB_QDRANT_SERVICE}}'
+      TASK_COLAB_INFERENCE_LOCK: '{{.COLAB_INFERENCE_LOCK}}'
+      TASK_COLAB_PROFILE: '{{.COLAB_PROFILE}}'
+      TASK_COLAB_QDRANT_PORT: '{{.COLAB_QDRANT_PORT}}'
+      TASK_COLAB_EMBEDDING_MAX_LEN: '{{.COLAB_EMBEDDING_MAX_LEN}}'
+      TASK_COLAB_INITIALIZE_SECONDS: '{{.COLAB_INITIALIZE_SECONDS}}'
+      TASK_COLAB_KUBECTL_BIN: '{{.COLAB_KUBECTL_BIN}}'
+      TASK_COLAB_CLI_ARGS: '{{.CLI_ARGS}}'
+    cmds:
+      - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
+      - >-
+        test -z "${TASK_COLAB_CLI_ARGS:-}" ||
+        { echo "use named Colab Task inputs, not trailing shell arguments" >&2; exit 2; };
+        set -- initialize-fresh --state "$TASK_COLAB_STATE" --collection "$TASK_COLAB_INITIALIZE_COLLECTION"
+        --corpus "$TASK_COLAB_CORPUS" --golden "$TASK_COLAB_GOLDEN" --inventory "$TASK_COLAB_INVENTORY"
+        --source-inventory "$TASK_COLAB_SOURCE_INVENTORY" --embedding-evidence "$TASK_COLAB_EMBEDDING_EVIDENCE"
+        --production-approval "$TASK_COLAB_PRODUCTION_APPROVAL" --data-state "$TASK_COLAB_DATA_STATE"
+        --kubeconfig "$TASK_COLAB_KUBECONFIG" --kube-context "$TASK_COLAB_KUBE_CONTEXT"
+        --namespace "$TASK_COLAB_NAMESPACE" --qdrant-service "$TASK_COLAB_QDRANT_SERVICE"
+        --inference-lock "$TASK_COLAB_INFERENCE_LOCK";
+        if [ -n "${TASK_COLAB_PROFILE:-}" ]; then set -- "$@" --profile "$TASK_COLAB_PROFILE"; fi;
+        if [ -n "${TASK_COLAB_QDRANT_PORT:-}" ]; then set -- "$@" --qdrant-port "$TASK_COLAB_QDRANT_PORT"; fi;
+        if [ -n "${TASK_COLAB_EMBEDDING_MAX_LEN:-}" ]; then set -- "$@" --embedding-max-len "$TASK_COLAB_EMBEDDING_MAX_LEN"; fi;
+        if [ -n "${TASK_COLAB_INITIALIZE_SECONDS:-}" ]; then set -- "$@" --deadline-seconds "$TASK_COLAB_INITIALIZE_SECONDS"; fi;
+        if [ -n "${TASK_COLAB_KUBECTL_BIN:-}" ]; then set -- "$@" --kubectl "$TASK_COLAB_KUBECTL_BIN"; fi;
+        exec .venv/bin/python scripts/colab.py "$@"
+
+  colab:prepare:
+    desc: Prepare private Colab run state without allocating or authenticating
+    summary: |
+      Local-only preparation for issue #706; see docs/colab-playground.md.
+      Requires COLAB_STATE (fresh directory outside Git) and
+      COLAB_GATEWAY_IMAGE (existing digest pin). Optional COLAB_* inputs map
+      to scripts/colab.py prepare flags; PRODUCTION_CORPUS_DIR and
+      PRODUCTION_GOLDEN_PATH supply private production sources. Unset/empty
+      optional values preserve controller defaults. Never installs tools,
+      logs in, allocates a session or approves compute units.
+    env:
+      TASK_COLAB_STATE: '{{.COLAB_STATE}}'
+      TASK_COLAB_GATEWAY_IMAGE: '{{.COLAB_GATEWAY_IMAGE}}'
+      TASK_COLAB_PROFILE: '{{.COLAB_PROFILE}}'
+      TASK_COLAB_DATASET: '{{.COLAB_DATASET}}'
+      TASK_COLAB_CORPUS: '{{.PRODUCTION_CORPUS_DIR}}'
+      TASK_COLAB_GOLDEN: '{{.PRODUCTION_GOLDEN_PATH}}'
+      TASK_COLAB_INVENTORY: '{{.COLAB_INVENTORY}}'
+      TASK_COLAB_SOURCE_INVENTORY: '{{.COLAB_SOURCE_INVENTORY}}'
+      TASK_COLAB_EMBEDDING_EVIDENCE: '{{.COLAB_EMBEDDING_EVIDENCE}}'
+      TASK_COLAB_PRODUCTION_APPROVAL: '{{.COLAB_PRODUCTION_APPROVAL}}'
+      TASK_COLAB_DATA_STATE: '{{.COLAB_DATA_STATE}}'
+      TASK_COLAB_KUBECONFIG: '{{.COLAB_KUBECONFIG}}'
+      TASK_COLAB_KUBE_CONTEXT: '{{.COLAB_KUBE_CONTEXT}}'
+      TASK_COLAB_NAMESPACE: '{{.COLAB_NAMESPACE}}'
+      TASK_COLAB_QDRANT_SERVICE: '{{.COLAB_QDRANT_SERVICE}}'
+      TASK_COLAB_INFERENCE_LOCK: '{{.COLAB_INFERENCE_LOCK}}'
+      TASK_COLAB_TRANSPORT_RECEIPT: '{{.COLAB_TRANSPORT_RECEIPT}}'
+      TASK_COLAB_REASONING_PORT: '{{.COLAB_REASONING_PORT}}'
+      TASK_COLAB_EMBEDDING_PORT: '{{.COLAB_EMBEDDING_PORT}}'
+      TASK_COLAB_QDRANT_PORT: '{{.COLAB_QDRANT_PORT}}'
+      TASK_COLAB_EMBEDDING_MAX_LEN: '{{.COLAB_EMBEDDING_MAX_LEN}}'
+      TASK_COLAB_DEADLINE_SECONDS: '{{.COLAB_DEADLINE_SECONDS}}'
+      TASK_COLAB_CU_CAP: '{{.COLAB_CU_CAP}}'
+      TASK_COLAB_CU_FLOOR: '{{.COLAB_CU_FLOOR}}'
+      TASK_COLAB_DOCKER_GATEWAY: '{{.COLAB_DOCKER_GATEWAY}}'
+      TASK_COLAB_POLL_SECONDS: '{{.COLAB_POLL_SECONDS}}'
+      TASK_COLAB_BIN: '{{.COLAB_BIN}}'
+      TASK_COLAB_SSH_BIN: '{{.COLAB_SSH_BIN}}'
+      TASK_COLAB_SSH_KEYGEN_BIN: '{{.COLAB_SSH_KEYGEN_BIN}}'
+      TASK_COLAB_DOCKER_BIN: '{{.COLAB_DOCKER_BIN}}'
+      TASK_COLAB_KUBECTL_BIN: '{{.COLAB_KUBECTL_BIN}}'
+      TASK_COLAB_CLI_ARGS: '{{.CLI_ARGS}}'
+    cmds:
+      - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
+      - >-
+        test -n "${TASK_COLAB_STATE:-}" && test -n "${TASK_COLAB_GATEWAY_IMAGE:-}" ||
+        { echo "COLAB_STATE and COLAB_GATEWAY_IMAGE are required" >&2; exit 2; };
+        test -z "${TASK_COLAB_CLI_ARGS:-}" ||
+        { echo "use named Colab Task inputs, not trailing shell arguments" >&2; exit 2; };
+        set -- prepare --state "$TASK_COLAB_STATE" --gateway-image "$TASK_COLAB_GATEWAY_IMAGE";
+        if [ -n "${TASK_COLAB_PROFILE:-}" ]; then set -- "$@" --profile "$TASK_COLAB_PROFILE"; fi;
+        if [ -n "${TASK_COLAB_DATASET:-}" ]; then set -- "$@" --dataset "$TASK_COLAB_DATASET"; fi;
+        if [ -n "${TASK_COLAB_CORPUS:-}" ]; then set -- "$@" --corpus "$TASK_COLAB_CORPUS"; fi;
+        if [ -n "${TASK_COLAB_GOLDEN:-}" ]; then set -- "$@" --golden "$TASK_COLAB_GOLDEN"; fi;
+        if [ -n "${TASK_COLAB_INVENTORY:-}" ]; then set -- "$@" --inventory "$TASK_COLAB_INVENTORY"; fi;
+        if [ -n "${TASK_COLAB_SOURCE_INVENTORY:-}" ]; then set -- "$@" --source-inventory "$TASK_COLAB_SOURCE_INVENTORY"; fi;
+        if [ -n "${TASK_COLAB_EMBEDDING_EVIDENCE:-}" ]; then set -- "$@" --embedding-evidence "$TASK_COLAB_EMBEDDING_EVIDENCE"; fi;
+        if [ -n "${TASK_COLAB_PRODUCTION_APPROVAL:-}" ]; then set -- "$@" --production-approval "$TASK_COLAB_PRODUCTION_APPROVAL"; fi;
+        if [ -n "${TASK_COLAB_DATA_STATE:-}" ]; then set -- "$@" --data-state "$TASK_COLAB_DATA_STATE"; fi;
+        if [ -n "${TASK_COLAB_KUBECONFIG:-}" ]; then set -- "$@" --kubeconfig "$TASK_COLAB_KUBECONFIG"; fi;
+        if [ -n "${TASK_COLAB_KUBE_CONTEXT:-}" ]; then set -- "$@" --kube-context "$TASK_COLAB_KUBE_CONTEXT"; fi;
+        if [ -n "${TASK_COLAB_NAMESPACE:-}" ]; then set -- "$@" --namespace "$TASK_COLAB_NAMESPACE"; fi;
+        if [ -n "${TASK_COLAB_QDRANT_SERVICE:-}" ]; then set -- "$@" --qdrant-service "$TASK_COLAB_QDRANT_SERVICE"; fi;
+        if [ -n "${TASK_COLAB_INFERENCE_LOCK:-}" ]; then set -- "$@" --inference-lock "$TASK_COLAB_INFERENCE_LOCK"; fi;
+        if [ -n "${TASK_COLAB_TRANSPORT_RECEIPT:-}" ]; then set -- "$@" --transport-receipt "$TASK_COLAB_TRANSPORT_RECEIPT"; fi;
+        if [ -n "${TASK_COLAB_REASONING_PORT:-}" ]; then set -- "$@" --reasoning-port "$TASK_COLAB_REASONING_PORT"; fi;
+        if [ -n "${TASK_COLAB_EMBEDDING_PORT:-}" ]; then set -- "$@" --embedding-port "$TASK_COLAB_EMBEDDING_PORT"; fi;
+        if [ -n "${TASK_COLAB_QDRANT_PORT:-}" ]; then set -- "$@" --qdrant-port "$TASK_COLAB_QDRANT_PORT"; fi;
+        if [ -n "${TASK_COLAB_EMBEDDING_MAX_LEN:-}" ]; then set -- "$@" --embedding-max-len "$TASK_COLAB_EMBEDDING_MAX_LEN"; fi;
+        if [ -n "${TASK_COLAB_DEADLINE_SECONDS:-}" ]; then set -- "$@" --deadline-seconds "$TASK_COLAB_DEADLINE_SECONDS"; fi;
+        if [ -n "${TASK_COLAB_CU_CAP:-}" ]; then set -- "$@" --cu-cap "$TASK_COLAB_CU_CAP"; fi;
+        if [ -n "${TASK_COLAB_CU_FLOOR:-}" ]; then set -- "$@" --cu-floor "$TASK_COLAB_CU_FLOOR"; fi;
+        if [ -n "${TASK_COLAB_DOCKER_GATEWAY:-}" ]; then set -- "$@" --docker-gateway "$TASK_COLAB_DOCKER_GATEWAY"; fi;
+        if [ -n "${TASK_COLAB_POLL_SECONDS:-}" ]; then set -- "$@" --poll-seconds "$TASK_COLAB_POLL_SECONDS"; fi;
+        if [ -n "${TASK_COLAB_BIN:-}" ]; then set -- "$@" --colab "$TASK_COLAB_BIN"; fi;
+        if [ -n "${TASK_COLAB_SSH_BIN:-}" ]; then set -- "$@" --ssh "$TASK_COLAB_SSH_BIN"; fi;
+        if [ -n "${TASK_COLAB_SSH_KEYGEN_BIN:-}" ]; then set -- "$@" --ssh-keygen "$TASK_COLAB_SSH_KEYGEN_BIN"; fi;
+        if [ -n "${TASK_COLAB_DOCKER_BIN:-}" ]; then set -- "$@" --docker "$TASK_COLAB_DOCKER_BIN"; fi;
+        if [ -n "${TASK_COLAB_KUBECTL_BIN:-}" ]; then set -- "$@" --kubectl "$TASK_COLAB_KUBECTL_BIN"; fi;
+        exec .venv/bin/python scripts/colab.py "$@"
+
+  colab:run:
+    desc: Run one explicitly approved Colab session in the foreground
+    summary: |
+      Requires COLAB_STATE and a fresh explicit COLAB_APPROVE_CU matching
+      that prepared run's cap. Caller must use the existing host resource
+      guard and shared host lock; this dispatcher adds neither. Optional
+      COLAB_WORKLOAD is one executable path for synthetic runs, never a
+      shell command string. Production permits only the native local:stack
+      invocation so its recipe and environment remain verifiable. Otherwise the
+      controller chooses its existing CPU/local-stack workload. No login.
+    env:
+      TASK_COLAB_STATE: '{{.COLAB_STATE}}'
+      TASK_COLAB_APPROVE_CU: '{{.COLAB_APPROVE_CU}}'
+      TASK_COLAB_WORKLOAD: '{{.COLAB_WORKLOAD}}'
+      TASK_COLAB_CLI_ARGS: '{{.CLI_ARGS}}'
+    cmds:
+      - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
+      - >-
+        test -n "${TASK_COLAB_STATE:-}" && test -n "${TASK_COLAB_APPROVE_CU:-}" ||
+        { echo "COLAB_STATE and explicit per-run COLAB_APPROVE_CU are required" >&2; exit 2; };
+        test -z "${TASK_COLAB_CLI_ARGS:-}" ||
+        { echo "use COLAB_WORKLOAD for a private executable, not trailing shell arguments" >&2; exit 2; };
+        set -- run --state "$TASK_COLAB_STATE" --approve-cu "$TASK_COLAB_APPROVE_CU";
+        if [ -n "${TASK_COLAB_WORKLOAD:-}" ]; then set -- "$@" -- "$TASK_COLAB_WORKLOAD"; fi;
+        exec .venv/bin/python scripts/colab.py "$@"
+
+  colab:stop:
+    desc: Recover and verify release of the exact Colab session in private state
+    summary: |
+      Requires COLAB_STATE. Uses that controller's bounded cleanup and
+      session ownership; does not stop unrelated sessions or delete corpus,
+      Qdrant storage or retained ingest progress. Interrupt the active
+      controller before recovery; never treat an unconfirmed stop as release.
+    env:
+      TASK_COLAB_STATE: '{{.COLAB_STATE}}'
+      TASK_COLAB_CLI_ARGS: '{{.CLI_ARGS}}'
+    cmds:
+      - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
+      - >-
+        test -n "${TASK_COLAB_STATE:-}" ||
+        { echo "COLAB_STATE is required" >&2; exit 2; };
+        test -z "${TASK_COLAB_CLI_ARGS:-}" ||
+        { echo "use named Colab Task inputs, not trailing shell arguments" >&2; exit 2; };
+        exec .venv/bin/python scripts/colab.py stop --state "$TASK_COLAB_STATE"
+
   qdrant:up:
     desc: Start the pinned sim Qdrant on the fixed loopback port
     summary: |

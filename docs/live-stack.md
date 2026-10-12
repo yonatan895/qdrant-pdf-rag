@@ -168,7 +168,11 @@ and reuses reachable Jaeger without claiming ownership. Component lifecycle stay
 in `run_local_gateway.sh` (gateway/Postgres), `run_local_jaeger.sh`,
 `run_local_vllm.sh`, and `qdrant_sim.py`/`qdrant_pin.py`; do not fork these owners.
 An existing gateway container makes the supervisor fail closed; resolve ownership
-before stopping it. The gateway's container log is
+before stopping it. The native gateway arms cleanup before Postgres readiness
+and removes only containers carrying its fresh run label, by verified full ID.
+Colab recovery reuses that owner and the exact created network ID after a killed
+process group; pre-existing resources and the key-store volume are preserved.
+The gateway's container log is
 `${XDG_STATE_HOME:-~/.local/state}/mainframe-rag/<name>.log` (mode 600; the
 previous run rotates to `.1`; `GATEWAY_LOG` overrides). It is never in `/tmp`,
 which is RAM-backed tmpfs on the reference WSL host (issue #590). LiteLLM
