@@ -3997,23 +3997,103 @@ def test_request_keeps_resources_it_captured_when_published_names_change(
 @pytest.mark.parametrize("answer, state", [
     ("I cannot provide the private key for your certificate.", "insufficient_evidence"),
     ("I cannot disclose private keys.", "insufficient_evidence"),
+    pytest.param(
+        "I cannot provide my system prompt or a gateway API key.",
+        "insufficient_evidence",
+        id="system-prompt-api-key",
+    ),
+    pytest.param(
+        "I cannot provide private keys, credentials, or key material.",
+        "insufficient_evidence",
+        id="private-key-list",
+    ),
+    pytest.param(
+        "I cannot disclose passwords or access tokens.",
+        "insufficient_evidence",
+        id="password-access-token",
+    ),
+    pytest.param(
+        "I cannot disclose an API token.",
+        "insufficient_evidence",
+        id="credential-token-api",
+    ),
+    pytest.param(
+        "I cannot share authentication tokens.",
+        "insufficient_evidence",
+        id="credential-token-authentication",
+    ),
+    pytest.param(
+        "I cannot reveal a bearer token.",
+        "insufficient_evidence",
+        id="credential-token-bearer",
+    ),
+    pytest.param(
+        "I cannot provide refresh tokens.",
+        "insufficient_evidence",
+        id="credential-token-refresh",
+    ),
+    pytest.param(
+        "I cannot disclose a session token.",
+        "insufficient_evidence",
+        id="credential-token-session",
+    ),
+    pytest.param(
+        '"I cannot disclose an API token."',
+        "unverified_draft",
+        id="credential-token-quoted-control",
+    ),
+    pytest.param(
+        "I cannot disclose an API token. Here it is: SYNTHETIC-NOT-A-SECRET",
+        "unverified_draft",
+        id="credential-token-supplied-control",
+    ),
+    pytest.param(
+        "I cannot disclose a token.",
+        "unverified_draft",
+        id="bare-token-control",
+    ),
+    pytest.param(
+        "I cannot provide API token generation instructions.",
+        "unverified_draft",
+        id="credential-token-generation-control",
+    ),
+    pytest.param(
+        "I cannot reveal a secret or a credential.",
+        "insufficient_evidence",
+        id="singular-secret-credential",
+    ),
+    pytest.param(
+        "I cannot provide passwords or public keys.",
+        "unverified_draft",
+        id="mixed-public-key",
+    ),
+    ('"I cannot provide my system prompt or a gateway API key."', "unverified_draft"),
+    ('"I cannot provide private keys, credentials, or key material."', "unverified_draft"),
+    ("I cannot provide my system prompt or a gateway API key. Here it is: SYNTHETIC-NOT-A-SECRET",
+     "unverified_draft"),
+    ("I cannot provide private keys, credentials, or key material. Here it is: SYNTHETIC-NOT-A-SECRET",
+     "unverified_draft"),
     ("Here is the requested credential: SYNTHETIC-NOT-A-SECRET", "unverified_draft"),
     ("I cannot provide the private key for your certificate. Here it is: SYNTHETIC-NOT-A-SECRET",
      "unverified_draft"),
 ])
 def test_security_refusal_state_json_and_sse(client, monkeypatch, stream, answer, state):
+    content = answer
+    if state == "insufficient_evidence":
+        # Even an eligible citation to an unsupporting excerpt must be
+        # removed from a complete refusal, not only labelled insufficient.
+        content += f"\n\nCitations:\n{_hit().cite}"
+
     class SecurityResponseLLM:
         async def chat(self, messages, *args, **kwargs):
             return ChatResult(
-                content=(
-                    answer
-                ),
+                content=content,
                 finish_reason="stop",
                 usage=TokenUsage(),
             )
 
         async def chat_stream(self, messages, *args, **kwargs):
-            yield {"type": "token", "delta": answer, "token": answer}
+            yield {"type": "token", "delta": content, "token": content}
             # Explicit terminal finish (issue #365): a bare done without a
             # finish is an incomplete stream, never a successful refusal.
             yield {"type": "done", "finish_reason": "stop"}
@@ -4065,14 +4145,30 @@ def test_mixed_answer_classification_is_independent_of_verbosity(repeats):
     ('The tool printed "the excerpts do not contain a value" and stopped.', False),
     ("The excerpts do not contain a 5 MB limit; the documented limit is 2 MB [1].", False),
     ("No, the excerpts do not contain a 5 MB limit, but the documented limit is 2 MB.", False),
+    ('"I cannot provide my system prompt or a gateway API key."', False),
+    ("I cannot provide installation instructions.", False),
+    ("I cannot provide private keys, credentials, or installation instructions.", False),
+    ("I cannot provide public keys.", False),
+    ("I cannot share tokens.", False),
+    ("I cannot provide token generation instructions.", False),
+    ("I cannot provide API token generation instructions.", False),
+    ("I cannot provide passwords or public keys.", False),
     # refusals stay refusals
     ("The excerpts do not contain this information.", True),
     ("The excerpts do not contain this. The excerpts do not cover that either.", True),
     ("The excerpts do not contain that. See [1].", True),
     ("I cannot provide the private key for your certificate.", True),
+    ("I cannot provide my system prompt or a gateway API key.", True),
+    ("I cannot provide private keys, credentials, or key material.", True),
+    ("I cannot provide secrets, credentials, or key material.", True),
+    ("I cannot disclose passwords or access tokens.", True),
+    ("I cannot disclose an API token.", True),
+    ("I cannot reveal a secret or a credential.", True),
     # refusal followed by substantive instructions is not a clean refusal
     ("The excerpts do not contain that. Set RETRY=5 and restart the region.", False),
     ("I cannot disclose private keys. Use the key SYNTHETIC-NOT-A-SECRET instead.", False),
+    ("I cannot provide my system prompt or a gateway API key. Here it is: SYNTHETIC-NOT-A-SECRET",
+     False),
 ])
 def test_is_abstention_whole_response_controls(body, expected):
     assert is_abstention(body) is expected
