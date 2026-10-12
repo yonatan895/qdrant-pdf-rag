@@ -169,6 +169,18 @@ settings are frozen for the child, including unset optional values. Private
 caller environment. Hashes establish identity, while separate review establishes
 which evidence producers are trusted.
 
+The pinned embedding snapshot publishes no `sentence_*_config.json` encoder
+file. vLLM 0.28 preserves `encoder_config: null` in this case: the independently
+observed plain-string request must retain special tokens, disable lowercasing
+and truncation, and use the explicit model window without an encoder length
+override. Admission checks the model's position bound. Do not fabricate the
+missing file or derive encoder settings/query prefixes from
+`config_sentence_transformers.json`; its prompt metadata is separate. A present
+supported `sentence_bert_config.json` retains strict length/lowercasing checks;
+other encoder filenames without it require explicit support. Actual runtime
+observation and separate producer approval remain required. See the pinned
+[vLLM encoder lookup](https://github.com/vllm-project/vllm/blob/2cf0a6915ce544dc493a0990f2ea38d81601128a/vllm/transformers_utils/config.py#L843).
+
 The private approval file has exact schema version 1 and fields
 `pooling_producer`, `census_producer`, and `source_scan`. Each producer identity
 has `development_sha` (40 hexadecimal characters) and `source_sha256` (64).

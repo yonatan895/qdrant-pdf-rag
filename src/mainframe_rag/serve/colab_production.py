@@ -472,23 +472,31 @@ def _embedding_evidence(directory: Path, server: Object, window: int, profile: O
             raise ProductionAdmissionError("embedding artifact bytes or paths differ from independent evidence")
         records[name] = {"path": str(path), "bytes": size, "sha256": digest}
     required = {"tokenizer.json", "tokenizer_config.json", "vocab.json", "merges.txt",
-                "config.json", "sentence_bert_config.json", "modules.json"}
+                "config.json", "modules.json"}
     if not required <= set(files):
         raise ProductionAdmissionError("embedding tokenizer/model/encoder configuration coverage is incomplete")
     model = _json(_read(directory / "config.json", MANIFEST_BYTES, scan))
     token = _json(_read(directory / "tokenizer_config.json", MANIFEST_BYTES, scan))
-    encoder = _json(_read(directory / "sentence_bert_config.json", MANIFEST_BYTES, scan))
+    encoder = None
+    if "sentence_bert_config.json" in files:
+        encoder = _json(_read(directory / "sentence_bert_config.json", MANIFEST_BYTES, scan))
+        if (type(encoder) is not dict or type(encoder.get("do_lower_case")) is not bool
+                or window > _integer(encoder.get("max_seq_length"))):
+            raise ProductionAdmissionError("embedding encoder configuration is unsupported")
+    elif any(name in files for name in (
+            "sentence_roberta_config.json", "sentence_distilbert_config.json",
+            "sentence_camembert_config.json", "sentence_albert_config.json",
+            "sentence_xlm-roberta_config.json", "sentence_xlnet_config.json")):
+        raise ProductionAdmissionError("embedding encoder configuration is unsupported")
     modules = _json(_read(directory / "modules.json", MANIFEST_BYTES, scan))
-    if (type(model) is not dict or type(token) is not dict or type(encoder) is not dict
+    if (type(model) is not dict or type(token) is not dict
             or model.get("model_type") != "qwen3"
             or model.get("architectures") != ["Qwen3ForCausalLM"]
             or model.get("auto_map") or token.get("auto_map")
             or model.get("rope_scaling") or model.get("rope_parameters")
             or model.get("use_sliding_window")
             or token.get("tokenizer_class") not in {"Qwen2Tokenizer", "Qwen2TokenizerFast"}
-            or type(encoder.get("do_lower_case")) is not bool
-            or window > min(_integer(model.get("max_position_embeddings")),
-                            _integer(encoder.get("max_seq_length")))):
+            or window > _integer(model.get("max_position_embeddings"))):
         raise ProductionAdmissionError("model/encoder/tokenizer configuration has unsupported runtime semantics")
     if (type(modules) is not list or len(modules) != 3
             or [module.get("type") for module in modules] != [
@@ -506,9 +514,14 @@ def _embedding_evidence(directory: Path, server: Object, window: int, profile: O
                    if key.startswith("pooling_mode_") and key != "pooling_mode_lasttoken")):
         raise ProductionAdmissionError("embedding pooling configuration is unsupported")
     # Supported v0.28 plain-string completion request: special tokens are on;
-    # lowercasing comes from checked encoder config. No chunked/max_embed_len
-    # overrides exist in the exact native argv. This is not a general vLLM parser.
-    options = {"add_special_tokens": True, "do_lower_case": encoder["do_lower_case"], "truncation": False}
+    # v0.28 preserves encoder_config=None when all seven sentence_* files are
+    # absent; pooling requests then use do_lower_case=False. Sentence Transformers
+    # prompt metadata is not encoder config. The independent observation must
+    # match that null state; do not synthesize a replacement file or length.
+    # No chunked/max_embed_len overrides exist in the exact native argv.
+    options = {"add_special_tokens": True,
+               "do_lower_case": encoder["do_lower_case"] if encoder is not None else False,
+               "truncation": False}
     observation = {
         "implementation": "vllm.entrypoints.pooling.embed.protocol.EmbeddingCompletionRequest",
         "version": runtime["vllm"],
