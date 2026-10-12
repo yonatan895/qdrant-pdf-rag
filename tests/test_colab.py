@@ -1131,6 +1131,9 @@ def test_paid_execution_uses_frozen_uploads_gateway_task_and_fresh_imports_durin
                   if kind == "colab" and argv[2] == "exec"]
     assert executions == [str(execution / "scripts/colab_preflight.py"),
                           str(execution / "scripts/colab_runtime.py")]
+    runtime_call = next(argv for kind, argv in _events(root)
+                        if kind == "colab" and argv[2] == "exec" and argv[-1].endswith("colab_runtime.py"))
+    assert "RAG_COLAB_DEVELOPMENT_SHA=" + manifest["development_sha"] in runtime_call
     # The fake modifies the original gateway and Task to fail after allocation;
     # successful probing and the imported marker therefore require the copies.
     restored = controller.source_identity(origin)

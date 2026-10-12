@@ -1697,7 +1697,9 @@ class Run:
             self.save("remote_resources_admitted")
             runtime = self.spawn(self.colab_argv("exec", "-s", self.manifest["session"],
                                   "--timeout", str(max(1, int(self.work_expiry - time.time()))), "--env",
-                                  f"RAG_COLAB_PROFILE={REMOTE_PROFILE}", "-f", str(self.execution_root / "scripts/colab_runtime.py")), "runtime")
+                                  f"RAG_COLAB_PROFILE={REMOTE_PROFILE}", "--env",
+                                  f"RAG_COLAB_DEVELOPMENT_SHA={self.manifest['development_sha']}",
+                                  "-f", str(self.execution_root / "scripts/colab_runtime.py")), "runtime")
             self.runtime = runtime
             self.diagnostic_stage("transport_ready")
             self.transport(bridge)

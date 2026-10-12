@@ -17,6 +17,7 @@ from scripts.colab_runtime import (
     LOCK_LIMIT_BYTES,
     LOG_LIMIT_BYTES,
     MODEL_LIMIT_BYTES,
+    POOLING_PROBE,
     SOFTWARE_PROBE,
     BoundedLog,
     ProcessSupervisor,
@@ -27,6 +28,41 @@ from scripts.colab_runtime import (
     warmup_embedding,
     warmup_reasoning,
 )
+
+
+def synthetic_pooling_record(profile, software, candidate, source):
+    """Original control-flow packet, never qualified native-library evidence."""
+    server = profile["servers"][1]
+    producer = {"development_sha": candidate,
+                "source_sha256": hashlib.sha256(source.encode()).hexdigest()}
+    runtime = {name: software[name] for name in ("vllm", "transformers", "tokenizers", "torch")}
+    files = {"tokenizer.json": {"bytes": 1, "sha256": "e" * 64}}
+    window = int(server["argv"][server["argv"].index("--max-model-len") + 1])
+    def digest(value):
+        return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+    return {"schema": 1, "status": "observed", "trust": "unreviewed", "acceptance_certified": False,
+            "manifest": {"schema": 1, "model": {"model": server["model_id"], "revision": server["revision"]},
+                "tokenizer": {"implementation": "transformers.Qwen2TokenizerFast", "version": software["transformers"]},
+                "runtime": runtime, "server_argv": server["argv"], "files": files,
+                "observation": {"implementation": "vllm.entrypoints.pooling.embed.protocol.EmbeddingCompletionRequest",
+                    "version": software["vllm"], "effective_window": window,
+                    "counting_options": {"add_special_tokens": True, "do_lower_case": False, "truncation": False},
+                    "model_config": {"max_model_len": window, "encoder_config": None,
+                        "pooler_config": {"enable_chunked_processing": False, "max_embed_len": None,
+                                          "seq_pooling_type": "LAST", "use_activation": False}}},
+                "provenance": {"kind": "offline-vllm-pooling-observation", "producer": producer,
+                    "resolved_revision": server["revision"], "files_sha256": digest(files),
+                    "runtime_sha256": digest(runtime), "server_argv_sha256": digest(server["argv"])}},
+            "facts": {"producer": producer, "packages": {name: software[name.replace("-", "_")]
+                       for name in (*runtime, "huggingface-hub")}}}
+
+
+def test_actual_inline_probe_refuses_invalid_identity_before_inference(tmp_path):
+    result = subprocess.run([sys.executable, "-c", POOLING_PROBE, str(tmp_path), "invalid"],
+                            capture_output=True, text=True, timeout=5, check=False)
+    assert result.returncode == 1
+    assert json.loads(result.stdout) == {"status": "failed", "code": "invalid_candidate_identity"}
+    assert not list(tmp_path.iterdir())
 
 
 @pytest.fixture
@@ -540,7 +576,7 @@ def test_transport_approval_is_required_before_any_gpu_bootstrap(tmp_path):
                 "driver_version": "580.100", "available_ram_mib": 131072, "free_disk_mib": 200000}
     runtime = RemoteRuntime(profile, root=tmp_path, clock=clock, sleep=clock.sleep,
                             popen=forbidden_process, server_factory=FakeLoopbackServer,
-                            observe=lambda gpu: observed, admission=admit)
+                            observe=lambda gpu: observed, admission=admit, development_sha="a" * 40)
     assert runtime.run() == 0
     report = json.loads((tmp_path / "colab-diagnostics.json").read_text())
     assert report["transport_verified"] is False
@@ -585,6 +621,24 @@ def test_transport_approval_is_required_before_any_gpu_bootstrap(tmp_path):
     ("stop", 2, False, ("snapshot", "tensor_shards", True), "TypeError"),
     ("stop", 2, False, ("snapshot", "metadata_sha256", []), "TypeError"),
     ("stop", 2, False, ("snapshot", "metadata_sha256", {"tokenizer.json": True}), "RuntimeError"),
+    ("stop", 2, False, ("candidate", None), "RuntimeError"),
+    ("stop", 2, False, ("candidate", "wrong"), "RuntimeError"),
+    ("stop", 2, False, ("pooling",), "TypeError"),
+    ("stop", 2, False, ("pooling", "missing"), "FileNotFoundError"),
+    ("stop", 2, False, ("pooling", "oversize"), "RuntimeError"),
+    ("stop", 2, False, ("pooling", "timeout"), "RuntimeError"),
+    ("stop", 2, False, ("pooling", "exit"), "RuntimeError"),
+    ("stop", 2, False, ("pooling", "trust", "approved"), "RuntimeError"),
+    ("stop", 2, False, ("pooling", "acceptance_certified", True), "RuntimeError"),
+    ("stop", 2, False, ("pooling", "facts", None), "RuntimeError"),
+    ("stop", 2, False, ("pooling", "facts", "packages", "tokenizers", "0.99"), "RuntimeError"),
+    ("stop", 2, False, ("pooling", "manifest", "provenance", "producer", "source_sha256", "f" * 64), "RuntimeError"),
+    ("stop", 2, False, ("pooling", "manifest", "model", "revision", "f" * 40), "RuntimeError"),
+    ("stop", 2, False, ("pooling", "manifest", "files", "tokenizer.json", "sha256", "f" * 64), "RuntimeError"),
+    ("stop", 2, False, ("pooling", "manifest", "observation", "counting_options", "truncation", True), "RuntimeError"),
+    ("stop", 2, False, ("pooling", "manifest", "observation", "counting_options", "add_special_tokens", 1), "RuntimeError"),
+    ("stop", 2, False, ("pooling", "manifest", "observation", "effective_window", 8192), "RuntimeError"),
+    ("stop", 2, False, ("pooling", "manifest", "observation", "effective_window", float("nan")), "ValueError"),
 ])
 def test_gpu_startup_uses_exact_argv_and_warms_reasoning_before_embedding(
         tmp_path, monkeypatch, finish, status, embedding_started, malformed, failure_type):
@@ -659,6 +713,27 @@ def test_gpu_startup_uses_exact_argv_and_warms_reasoning_before_embedding(
                     else:
                         snapshot[malformed[1]] = malformed[2]
                 Path(argv[-1]).write_text(json.dumps(snapshot))
+            elif argv[1] == "-c" and len(argv) == 5:
+                assert argv[2] == POOLING_PROBE and argv[-2:] == [str(tmp_path), "a" * 40]
+                software = json.loads((tmp_path / "software-observed.json").read_text())
+                packet = synthetic_pooling_record(profile, software, argv[-1], argv[2])
+                if malformed and malformed[0] == "pooling":
+                    if len(malformed) == 1:
+                        packet = []
+                    elif malformed[1] == "missing":
+                        return
+                    elif malformed[1] == "oversize":
+                        (tmp_path / "pooling-observed.json").write_text(" " * (64 * 1024 + 1))
+                        return
+                    elif malformed[1] in ("timeout", "exit"):
+                        self.returncode = None if malformed[1] == "timeout" else 1
+                        return
+                    else:
+                        target = packet
+                        for field in malformed[1:-2]:
+                            target = target[field]
+                        target[malformed[-2]] = malformed[-1]
+                (tmp_path / "pooling-observed.json").write_text(json.dumps(packet))
             else:
                 assert argv in [server["argv"] for server in profile["servers"]]
 
@@ -691,15 +766,15 @@ def test_gpu_startup_uses_exact_argv_and_warms_reasoning_before_embedding(
         return stream
 
     monkeypatch.setattr("scripts.colab_runtime.urllib.request.urlopen", malformed_response)
-    clock.on_sleep = lambda: (tmp_path / "colab-stop").write_text("stop\n")
+    clock.on_sleep = (lambda: None) if malformed and malformed[:2] == ("pooling", "timeout") else lambda: (tmp_path / "colab-stop").write_text("stop\n")
     runtime = RemoteRuntime(profile, root=tmp_path, clock=clock, sleep=clock.sleep,
                             popen=InferenceProcess, terminate=terminate, http=endpoint,
                             server_factory=server_factory, observe=lambda gpu: observed,
-                            admission=admit)
+                            admission=admit, development_sha=(malformed[1] if malformed and malformed[0] == "candidate" else "a" * 40))
     assert runtime.run() == status
     started = [argv for kind, argv in events if kind == "process" and argv[1] == "serve"]
     model_count = 2 if embedding_started else 1
-    if malformed and malformed[0] in ("software", "snapshot", "resources"):
+    if malformed and malformed[0] in ("software", "snapshot", "resources", "candidate", "pooling"):
         model_count = 0
     assert started == [server["argv"] for server in profile["servers"][:model_count]]
     reasoning_warmup = ("http", "http://127.0.0.1:8000/v1/chat/completions")
@@ -709,6 +784,11 @@ def test_gpu_startup_uses_exact_argv_and_warms_reasoning_before_embedding(
     assert all(process.poll() is not None for process in processes)
     assert all(server.closed and server.stopped.is_set() for server in listeners)
     report = json.loads((tmp_path / "colab-diagnostics.json").read_text())
+    if malformed is None or malformed[0] == "models":
+        pooling_call = next(event for event in events if event[0] == "process" and event[1][1:3] == ["-c", POOLING_PROBE])
+        assert events.index(pooling_call) < events.index(("process", profile["servers"][0]["argv"]))
+        assert report["pooling_observation"]["trust"] == "unreviewed"
+        assert report["pooling_observation"]["acceptance_certified"] is False
     for model in report.get("models", []):
         matching = [argv for argv in started if model["model_id"] in argv]
         if matching:
@@ -716,7 +796,7 @@ def test_gpu_startup_uses_exact_argv_and_warms_reasoning_before_embedding(
             assert model["server_argv_sha256"] == hashlib.sha256(exact_argv.encode()).hexdigest()
         else:
             assert "server_argv_sha256" not in model
-    if malformed and malformed[0] == "resources":
+    if malformed and malformed[0] in ("resources", "candidate"):
         assert not processes
     else:
         assert report["peak_resources"]["sampled_gpu_used_mib"] == 72000
