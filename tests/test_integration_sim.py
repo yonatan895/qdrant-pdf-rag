@@ -19,6 +19,7 @@ import json
 import os
 import shutil
 import threading
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -26,7 +27,10 @@ import httpx2
 import pytest
 from fastapi.testclient import TestClient
 
+from tests import test_colab_production
+
 pytestmark = pytest.mark.integration
+original_inputs = test_colab_production.original_inputs
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -231,6 +235,92 @@ _MESSAGE_CITE = (
     "SA22-0000-00 Synthetic Operating System Reference, "
     "Chapter 2 Operator messages > IEA500I, p. 1-6"
 )
+
+
+def test_fresh_binding_then_native_publication_and_next_ingest_on_real_server(
+        qdrant_url, original_inputs, tmp_path, monkeypatch):
+    """Logical storage boundary only: original fixtures and deterministic HTTP embeddings."""
+    from qdrant_client import QdrantClient, models
+
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.serve import colab_production as production
+    from tests import test_colab_production as fixtures
+
+    config, profile, arguments, _ = original_inputs
+    logical = "sim-colab-fresh-" + uuid.uuid4().hex
+    legacy = logical + "-legacy1024"
+    arguments["settings"] = arguments["settings"].model_copy(update={
+        "qdrant_collection": logical, "bm25_cache_dir": _bm25_cache_dir(), "ingest_alias_publish": True})
+    fixtures._complete(original_inputs)
+    (Path(config["data_state"]) / production.LEDGER_FILENAME).unlink()
+    proof = {"namespace": config["namespace"], "claim_uid": "fixture-claim", "pv_uid": "fixture-pv",
+             "storage_path": "/qdrant/storage"}
+    # A separate instance of the existing deterministic HTTP model boundary.
+    with monkeypatch.context() as patch:
+        patch.setenv("MOCK_DIM", "4096")
+        mod = importlib.util.module_from_spec(MOCK_SPEC)
+        MOCK_SPEC.loader.exec_module(mod)
+    server = mod.ThreadingHTTPServer(("127.0.0.1", 0), mod.Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    client = QdrantClient(url=qdrant_url, timeout=10)
+    try:
+        client.create_collection(legacy, vectors_config={"dense": models.VectorParams(size=1024, distance=models.Distance.COSINE)})
+        client.upsert(legacy, points=[models.PointStruct(id=1, vector={"dense": [1.0] + [0.0] * 1023},
+                                                        payload={"text": "Original preserved legacy fixture."})], wait=True)
+
+        def read(path, body):
+            response = httpx2.request("GET" if body is None else "POST", qdrant_url + path, json=body, timeout=5)
+            response.raise_for_status()
+            return response.json()
+
+        initialized = production.initialize_fresh_binding(
+            config, profile, collection=logical, storage_proof=proof,
+            census_producer={"development_sha": "6" * 40, "source_sha256": "7" * 64},
+            read_qdrant=read, recheck_producer=lambda: None, **arguments)
+        assert initialized["acceptance_certified"] is False
+        state = tmp_path / "ordinary-after-initialization"
+        state.mkdir(mode=0o700)
+        prepared = production.prepare_production(config, profile, state=state,
+            census_producer={"development_sha": "6" * 40, "source_sha256": "7" * 64}, **arguments)
+        progress = Path(production.verify_retained_target(prepared, proof))
+        for name, value in prepared.environment.items():
+            monkeypatch.setenv(name, value)
+        for name in prepared.unset_environment:
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("QDRANT_URL", qdrant_url)
+        monkeypatch.setenv("EMBED_BASE_URL", f"http://127.0.0.1:{server.server_address[1]}/v1")
+        previous = run_ingest._worker_qdrant
+        if previous is not None:
+            previous.close()
+        monkeypatch.setattr(run_ingest, "_worker_qdrant", None)
+        monkeypatch.setattr(run_ingest, "_worker_embedder", None)
+        argv = ["--src", config["corpus"], "--progress", str(progress), "--workers", "1"]
+        assert run_ingest.main(argv) == 0
+        points, offset = client.scroll(logical, limit=10, with_payload=True, with_vectors=True)
+        assert offset is None and len(points) == 2
+        assert {point.payload["text"] for point in points} == {"Original alpha fixture.", "Original beta fixture."}
+        assert all(len(point.vector["dense"]) == 4096 for point in points)
+        hit = client.query_points(logical, query=points[0].vector["dense"], using="dense", limit=1, with_payload=True)
+        assert hit.points[0].payload["text"] == points[0].payload["text"]
+        before = {point.id: point.payload for point in points}
+        # Ordinary steady-state operation reuses the same ledger/progress/build.
+        assert run_ingest.main(argv) == 0
+        after, _ = client.scroll(logical, limit=10, with_payload=True)
+        assert {point.id: point.payload for point in after} == before
+        assert client.retrieve(legacy, ids=[1], with_payload=True)[0].payload == {
+            "text": "Original preserved legacy fixture."}
+    finally:
+        server.shutdown()
+        server.server_close()
+        aliases = [models.DeleteAliasOperation(delete_alias=models.DeleteAlias(alias_name=row.alias_name))
+                   for row in client.get_aliases().aliases if row.alias_name.startswith(logical)]
+        if aliases:
+            client.update_collection_aliases(aliases)
+        for row in client.get_collections().collections:
+            if row.name.startswith(logical):
+                client.delete_collection(row.name)
+        client.close()
 
 
 def test_ingest_real_server_and_resume(qdrant_url, corpus, tmp_path, monkeypatch):
