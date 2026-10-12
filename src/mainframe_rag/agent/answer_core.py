@@ -269,6 +269,7 @@ async def _build_prepared_prompt(
                 tokenizer=deps.tokenizer,
                 settings=settings,
                 order=settings.prompt_order,
+                reasoning_effort=effort,
             )
         build_msg_fn = deps.build_messages_fn or build_messages
         return await asyncio.to_thread(
@@ -288,6 +289,7 @@ async def _build_prepared_prompt(
             tokenizer=deps.tokenizer,
             settings=settings,
             order=settings.prompt_order,
+            reasoning_effort=effort,
         )
 
 

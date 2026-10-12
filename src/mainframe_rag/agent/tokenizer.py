@@ -49,7 +49,9 @@ class FallbackTokenizer:
     def count_tokens(self, text: str) -> int:
         return estimate_tokens(text)
 
-    def count_messages(self, messages: list[ChatMessage]) -> int:
+    def count_messages(
+        self, messages: list[ChatMessage], *, reasoning_effort: str | None = None
+    ) -> int:
         return sum(estimate_tokens(f"{m.role}\n{m.content}") for m in messages)
 
 
@@ -96,21 +98,30 @@ class VllmTokenizer:
             return count
         return self._fallback.count_tokens(text)
 
-    def count_messages(self, messages: list[ChatMessage]) -> int:
+    def count_messages(
+        self, messages: list[ChatMessage], *, reasoning_effort: str | None = None
+    ) -> int:
         """Chat-template-aware count: what /tokenize reports for the message
         list is what actually consumes max_model_len."""
         if not messages:
             return 0
-        payload = {
+        payload: dict[str, Any] = {
             "model": self._model,
             "messages": [m.model_dump() for m in messages],
             "add_generation_prompt": True,
             "add_special_tokens": False,
         }
+        if reasoning_effort:
+            # vLLM chat completions forward the selected effort and enable
+            # thinking. /tokenize needs these explicit nested template kwargs.
+            # Keep them local to this call: one tokenizer serves concurrent turns.
+            payload["chat_template_kwargs"] = {
+                "reasoning_effort": reasoning_effort, "enable_thinking": reasoning_effort != "none",
+            }
         count = self._remote_count(payload)
         if count is not None:
             return count
-        return self._fallback.count_messages(messages)
+        return self._fallback.count_messages(messages, reasoning_effort=reasoning_effort)
 
     def _remote_count(self, payload: dict[str, Any]) -> int | None:
         """One /tokenize call; None means the endpoint failed and this

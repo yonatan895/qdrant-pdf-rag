@@ -1,5 +1,6 @@
 """Tests for agent/tokenizer.py (vLLM /tokenize client and fallback)."""
 
+import json
 import logging
 
 import httpx2
@@ -227,3 +228,61 @@ def test_chat_tokenizer_matches_inference_template_flags():
     assert tokenizer.count_messages(messages) == 12
     assert captured["json"] == {"model": "reasoning", "messages": [messages[0].model_dump()],
                                 "add_generation_prompt": True, "add_special_tokens": False}
+
+
+@pytest.mark.parametrize("effort,count", [("low", 45), ("medium", 15), ("xhigh", 57), ("none", 17), (None, 57)])
+def test_chat_token_count_uses_selected_request_template(effort, count):
+    """Model-specific counts differ; omitted effort cannot verify a low prompt."""
+    bodies = []
+
+    def respond(request):
+        body = json.loads(request.content)
+        bodies.append(body)
+        selected = body.get("chat_template_kwargs", {}).get("reasoning_effort")
+        return httpx2.Response(200, json={"count": {"low": 45, "medium": 15, "xhigh": 57, "none": 17, None: 57}[selected]})
+
+    with httpx2.Client(transport=httpx2.MockTransport(respond)) as client:
+        tokenizer = VllmTokenizer("http://synthetic/v1", "reasoning", client=client)
+        messages = [ChatMessage(role="user", content="Return the word READY")]
+        assert tokenizer.count_messages(messages, reasoning_effort=effort) == count
+        assert tokenizer.remote_confirmed
+    expected = {"reasoning_effort": effort, "enable_thinking": effort != "none"} if effort else None
+    assert bodies[0].get("chat_template_kwargs") == expected
+
+
+def test_chat_token_counts_do_not_retain_another_requests_effort():
+    calls = []
+
+    def respond(request):
+        selected = json.loads(request.content).get("chat_template_kwargs", {}).get("reasoning_effort")
+        calls.append(selected)
+        return httpx2.Response(200, json={"count": {"low": 45, "medium": 15, None: 57}[selected]})
+
+    with httpx2.Client(transport=httpx2.MockTransport(respond)) as client:
+        tokenizer = VllmTokenizer("http://synthetic/v1", "reasoning", client=client)
+        messages = [ChatMessage(role="user", content="Return the word READY")]
+        assert tokenizer.count_messages(messages, reasoning_effort="low") == 45
+        assert tokenizer.count_messages(messages, reasoning_effort="medium") == 15
+        assert tokenizer.count_messages(messages, reasoning_effort="low") == 45
+        assert tokenizer.count_messages(messages) == 57
+    assert calls == ["low", "medium", "low", None]
+
+
+def test_effort_specific_count_failure_still_pins_unverified_estimation():
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx2.Response(503)
+
+    messages = [ChatMessage(role="user", content="Original synthetic question")]
+    fallback = FallbackTokenizer()
+    expected = fallback.count_messages(messages)
+    assert fallback.count_messages(messages, reasoning_effort="xhigh") == expected
+    assert not fallback.remote_confirmed
+    with httpx2.Client(transport=httpx2.MockTransport(respond)) as client:
+        tokenizer = VllmTokenizer("http://synthetic/v1", "reasoning", client=client)
+        assert tokenizer.count_messages(messages, reasoning_effort="low") == expected
+        assert tokenizer.count_messages(messages, reasoning_effort="medium") == expected
+        assert not tokenizer.remote_confirmed
+    assert len(requests) == 1

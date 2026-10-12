@@ -118,7 +118,7 @@ def test_exact_final_messages_are_the_last_verified_candidate(chat, order):
         def __init__(self):
             self.calls = []
 
-        def count_messages(self, messages):
+        def count_messages(self, messages, *, reasoning_effort=None):
             self.calls.append([m.model_dump() for m in messages])
             # Ordering adds actual template material; a count of retrieval
             # order cannot certify a stable-cache candidate.
@@ -160,7 +160,7 @@ def test_stable_cache_only_overflow_trims_or_refuses_before_model(chat):
         def __init__(self):
             self.calls = []
 
-        def count_messages(self, messages):
+        def count_messages(self, messages, *, reasoning_effort=None):
             self.calls.append([m.model_dump() for m in messages])
             return sum(len(m.content) for m in messages)
 
@@ -219,7 +219,7 @@ def test_last_bounded_extra_count_can_confirm_budget(chat):
     class ExactEmptyTokenizer:
         remote_confirmed = True
 
-        def count_messages(self, messages):
+        def count_messages(self, messages, *, reasoning_effort=None):
             return 200
 
     kwargs = {"tokenizer": ExactEmptyTokenizer(), "settings": Settings(_env_file=None)}
@@ -340,7 +340,7 @@ def test_build_messages_stable_cache_end_to_end():
 class _LengthTokenizer:
     remote_confirmed = True
 
-    def count_messages(self, messages):
+    def count_messages(self, messages, *, reasoning_effort=None):
         return sum(len(m.content) for m in messages)
 
 

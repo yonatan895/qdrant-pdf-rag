@@ -615,6 +615,7 @@ def execute_answer(
                 tokenizer=tokenizer,
                 settings=settings,
                 order=settings.prompt_order,
+                reasoning_effort=effort,
             )
 
         with start_as_current_span(

@@ -344,7 +344,9 @@ class Tokenizer(Protocol):
 
     def count_tokens(self, text: str) -> int: ...
 
-    def count_messages(self, messages: list[ChatMessage]) -> int: ...
+    def count_messages(
+        self, messages: list[ChatMessage], *, reasoning_effort: str | None = None
+    ) -> int: ...
 
 
 @runtime_checkable

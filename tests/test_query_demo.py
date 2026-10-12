@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import httpx2
 import pytest
 from scripts.query_demo import (
     _format_text_hit,
@@ -13,6 +14,8 @@ from scripts.query_demo import (
     resolve_runtime_settings,
 )
 
+from mainframe_rag.agent.answer import HttpxLLMClient
+from mainframe_rag.agent.tokenizer import VllmTokenizer
 from mainframe_rag.config import Settings
 from mainframe_rag.ports import ChatResult, TokenUsage
 from mainframe_rag.retrieve.query import SearchHit
@@ -64,6 +67,56 @@ def test_execute_answer_citation_only_uses_parsed_body_state(script):
     assert parsed.script_review_required is (script is not None)
     model_factory.return_value.chat.assert_called_once()
     model_factory.return_value.close.assert_called_once()
+
+
+@pytest.mark.parametrize("effort", ["low", "medium"])
+@pytest.mark.parametrize("query,field", [
+    ("IEA500I", "llm_reasoning_effort_simple"),
+    ("diagnose abend S0C4", "llm_reasoning_effort_complex"),
+])
+def test_cli_answer_counts_the_same_effort_as_completion_near_window(effort, query, field):
+    from scripts.query_demo import execute_answer
+
+    settings = Settings(
+        _env_file=None, llm_base_url="http://synthetic/v1", llm_model_reasoning="reasoning",
+        llm_max_model_len=4096, llm_reserved_output_tokens=128,
+        llm_thinking_reserve_tokens_simple=0, llm_thinking_reserve_tokens_complex=0,
+        llm_token_safety_margin=0, **{field: effort},
+    )
+    original_settings = settings.model_dump()
+    hit = _sample_hit()
+    counted, completed = [], []
+
+    def respond(request):
+        body = json.loads(request.content)
+        if request.url.path == "/tokenize":
+            counted.append(body)
+            selected = body.get("chat_template_kwargs", {}).get("reasoning_effort")
+            # Independent synthetic near-window oracle: omitted effort adds
+            # 12 tokens and falsely exceeds the 4096 - 128 = 3968 budget.
+            return httpx2.Response(200, json={"count": 3963 if selected == effort else 3975})
+        assert request.url.path == "/v1/chat/completions"
+        completed.append(body)
+        return httpx2.Response(200, json={"choices": [{
+            "message": {"content": "Original guidance.\n\nCitations:\n" + hit.cite},
+            "finish_reason": "stop",
+        }]})
+
+    with (
+        httpx2.Client(transport=httpx2.MockTransport(respond)) as client,
+        patch("scripts.query_demo.execute_query", return_value=([hit], "identifier", {})),
+        patch("scripts.query_demo.build_tokenizer", return_value=VllmTokenizer(
+            "http://synthetic/v1", "reasoning", client=client)),
+        patch("mainframe_rag.agent.answer.HttpxLLMClient", side_effect=lambda values: HttpxLLMClient(values, client=client)),
+    ):
+        parsed, _hits, _kind, _timings = execute_answer(query, settings=settings)
+    assert parsed.answer == "Original guidance."
+    assert parsed.citations == [hit.cite]
+    assert len(completed) == 1 and completed[0]["reasoning_effort"] == effort
+    assert counted[-1]["messages"] == completed[0]["messages"]
+    assert all(body["chat_template_kwargs"] == {"reasoning_effort": effort, "enable_thinking": True}
+               for body in counted)
+    assert settings.model_dump() == original_settings
 
 
 def test_format_text_hit():
