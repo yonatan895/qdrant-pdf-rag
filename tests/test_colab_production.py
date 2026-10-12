@@ -188,6 +188,98 @@ def test_resolved_settings_are_frozen_even_when_the_ambient_environment_changes(
     assert result.environment["COMPARATIVE_SPLIT_ENABLED"] == "true"
 
 
+def _absent_encoder(original_inputs):
+    config, _, _, manifest = original_inputs
+    evidence = Path(config["embedding_evidence"])
+    (evidence / "sentence_bert_config.json").unlink()
+    manifest["files"].pop("sentence_bert_config.json")
+    metadata = evidence / "config_sentence_transformers.json"
+    _json(metadata, {"prompts": {"query": "Separate prompt: "},
+                     "default_prompt_name": "query", "similarity_fn_name": "cosine"})
+    raw = metadata.read_bytes()
+    manifest["files"][metadata.name] = {"bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+    manifest["observation"]["model_config"]["encoder_config"] = None
+    manifest["provenance"]["files_sha256"] = _digest(manifest["files"])
+    _json(evidence / "manifest.json", manifest)
+    return evidence, manifest
+
+
+def test_absent_encoder_preserves_observed_null_and_next_ordinary_prepare(
+        original_inputs, tmp_path):
+    evidence, _ = _absent_encoder(original_inputs)
+    expected, _, target = _complete(original_inputs)
+    assert expected.expected["contract"]["counting_options"] == {
+        "add_special_tokens": True, "do_lower_case": False, "truncation": False}
+    assert expected.expected["contract"]["effective_window"] == 4096
+    assert expected.environment["DENSE_QUERY_PREFIX"] == "Original: "
+    assert production.native_query_inputs(original_inputs[2]["settings"], "An original question") == [
+        "Original: An original question"]
+    for name in ("first", "next"):
+        prepared = _prepare(original_inputs, tmp_path, name=name)
+        assert production.verify_retained_target(prepared, target).endswith(".jsonl")
+    assert not (evidence / "sentence_bert_config.json").exists()
+
+
+@pytest.mark.parametrize("encoder", [
+    None, {"max_seq_length": 2048, "do_lower_case": False},
+    {"max_seq_length": 32768, "do_lower_case": "false"},
+])
+def test_present_encoder_keeps_its_strict_semantics(original_inputs, encoder):
+    config, profile, arguments, manifest = original_inputs
+    evidence = Path(config["embedding_evidence"])
+    path = evidence / "sentence_bert_config.json"
+    _json(path, encoder)
+    raw = path.read_bytes()
+    manifest["files"][path.name] = {"bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+    manifest["observation"]["model_config"]["encoder_config"] = encoder
+    manifest["provenance"]["files_sha256"] = _digest(manifest["files"])
+    _json(evidence / "manifest.json", manifest)
+    with pytest.raises(production.ProductionAdmissionError):
+        production.build_production_expected(config, profile, **arguments)
+
+
+@pytest.mark.parametrize("filename", [
+    "sentence_roberta_config.json", "sentence_distilbert_config.json",
+    "sentence_camembert_config.json", "sentence_albert_config.json",
+    "sentence_xlm-roberta_config.json", "sentence_xlnet_config.json",
+])
+def test_absent_bert_cannot_hide_an_alternative_runtime_encoder(original_inputs, filename):
+    evidence, manifest = _absent_encoder(original_inputs)
+    _json(evidence / filename, {"max_seq_length": 128, "do_lower_case": True})
+    raw = (evidence / filename).read_bytes()
+    manifest["files"][filename] = {"bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+    manifest["provenance"]["files_sha256"] = _digest(manifest["files"])
+    _json(evidence / "manifest.json", manifest)
+    config, profile, arguments, _ = original_inputs
+    with pytest.raises(production.ProductionAdmissionError, match="encoder"):
+        production.build_production_expected(config, profile, **arguments)
+
+
+@pytest.mark.parametrize("change", ["forged_encoder", "lowercase", "model_window", "provenance"])
+def test_absent_encoder_keeps_observation_model_and_provenance_checks(original_inputs, change):
+    evidence, manifest = _absent_encoder(original_inputs)
+    if change == "forged_encoder":
+        manifest["observation"]["model_config"]["encoder_config"] = {
+            "max_seq_length": 32768, "do_lower_case": False}
+    elif change == "lowercase":
+        manifest["observation"]["counting_options"]["do_lower_case"] = True
+    elif change == "model_window":
+        path = evidence / "config.json"
+        model = json.loads(path.read_text())
+        model["max_position_embeddings"] = 2048
+        _json(path, model)
+        raw = path.read_bytes()
+        manifest["files"]["config.json"] = {"bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+        manifest["provenance"]["files_sha256"] = _digest(manifest["files"])
+    else:
+        original_inputs[2]["pooling_producer"] = dict(original_inputs[2]["pooling_producer"])
+        manifest["provenance"]["producer"]["source_sha256"] = "8" * 64
+    _json(evidence / "manifest.json", manifest)
+    config, profile, arguments, _ = original_inputs
+    with pytest.raises(production.ProductionAdmissionError):
+        production.build_production_expected(config, profile, **arguments)
+
+
 def test_frozen_exports_and_unsets_round_trip_actual_native_settings(original_inputs, monkeypatch):
     config, profile, arguments, _ = original_inputs
     prefix = "Original prefix | α\nQuery:\t"
