@@ -969,6 +969,14 @@ jobs:
         run: |
           sh scripts/tools/install-task.sh
 
+      - name: Vendored Qdrant production-values lint and render
+        run: |
+          export PATH="/usr/local/bin:$PATH"
+          sh scripts/tools/run-task.sh artifacts:helm-lint
+          # The chart generates Secret data; keep rendered YAML out of logs
+          # and uploaded artifacts. These tasks use the checked-in prod values.
+          sh scripts/tools/run-task.sh artifacts:helm-render > "$RUNNER_TEMP/qdrant-rendered.yaml"
+
       - name: airgap-deploy dry-run (prod render, fail-closed placeholders, knobs)
         env:
           IMAGE_SHA: ${{ env.SHA }}
