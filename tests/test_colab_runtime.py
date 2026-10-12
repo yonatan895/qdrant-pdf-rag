@@ -11,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from scripts import colab_preflight
 from scripts.colab_runtime import (
     ARCHIVE_LIMIT_BYTES,
     LOCK_LIMIT_BYTES,
@@ -26,6 +27,147 @@ from scripts.colab_runtime import (
     warmup_embedding,
     warmup_reasoning,
 )
+
+
+@pytest.fixture
+def remote_preflight(tmp_path, monkeypatch):
+    from mainframe_rag.serve import colab_profiles
+
+    content = tmp_path / "remote content"
+    content.mkdir()
+    meminfo = tmp_path / "meminfo"
+    meminfo.write_text("MemAvailable: 134217728 kB\n")
+    monkeypatch.setattr(colab_preflight, "Path", lambda value: (
+        content / Path(value).name if str(value).startswith("/content/")
+        else meminfo if str(value) == "/proc/meminfo" else Path(value)))
+    monkeypatch.setattr(colab_preflight.shutil, "disk_usage",
+                        lambda _path: SimpleNamespace(free=200000 * 1024**2))
+    monkeypatch.setattr(colab_preflight.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(colab_preflight.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(colab_preflight.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(colab_preflight.platform, "python_version", lambda: "3.13.16")
+    monkeypatch.setattr(colab_preflight.platform, "python_implementation", lambda: "CPython")
+    monkeypatch.setattr(colab_preflight.platform, "freedesktop_os_release",
+                        lambda: {"ID": "ubuntu", "VERSION_ID": "22.04"})
+    monkeypatch.setattr(colab_preflight.os, "confstr", lambda _name: "glibc 2.35")
+    monkeypatch.setitem(sys.modules, "colab_profiles", colab_profiles)
+    profile = content / "profile.json"
+    monkeypatch.setenv("RAG_COLAB_PROFILE", str(profile))
+
+    def run(name):
+        value = colab_profiles.build_profile(name)
+        value["expires_at"] = colab_preflight.time.time() + 30
+        profile.write_text(json.dumps(value))
+        status = colab_preflight.main()
+        return status, json.loads((content / "colab-preflight.json").read_text())
+
+    return run
+
+
+def test_cpu_preflight_records_actual_platform_without_inference_python(remote_preflight):
+    status, observed = remote_preflight("COLAB_CPU_TRANSPORT")
+    assert status == 0 and observed["admitted"] is True
+    assert observed["python"] == "3.13.16"
+    assert observed["python_implementation"] == "CPython"
+    assert observed["platform"] == {"system": "Linux", "machine": "x86_64",
+                                    "glibc": "glibc 2.35", "distribution_id": "ubuntu",
+                                    "distribution_version": "22.04"}
+    assert observed["inference_python"] == {"executable": None, "version": None,
+                                            "implementation": None, "error": "not_found"}
+
+
+@pytest.mark.parametrize("failure", [OSError("metadata absent"), ValueError("unsupported confstr"),
+                                    UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid byte")])
+def test_cpu_preflight_records_unknown_optional_platform_facts(remote_preflight, monkeypatch, failure):
+    def unavailable(*args):
+        raise failure
+
+    monkeypatch.setattr(colab_preflight.platform, "freedesktop_os_release", unavailable)
+    monkeypatch.setattr(colab_preflight.os, "confstr", unavailable)
+    status, observed = remote_preflight("COLAB_CPU_TRANSPORT")
+    assert status == 0 and observed["admitted"] is True
+    assert observed["platform"] == {"system": "Linux", "machine": "x86_64", "glibc": None,
+                                    "distribution_id": None, "distribution_version": None}
+
+
+@pytest.mark.parametrize("failure", [subprocess.TimeoutExpired("python3.12", 3),
+                                    ValueError("malformed interpreter output")])
+def test_cpu_preflight_survives_inference_probe_failure(remote_preflight, monkeypatch, failure):
+    monkeypatch.setattr(colab_preflight.shutil, "which", lambda name: (
+        "/usr/bin/python3.12" if name == "python3.12" else None))
+
+    def probe(*args, **kwargs):
+        raise failure
+
+    monkeypatch.setattr(colab_preflight.subprocess, "run", probe)
+    status, observed = remote_preflight("COLAB_CPU_TRANSPORT")
+    assert status == 0 and observed["admitted"] is True
+    assert observed["inference_python"]["error"] == (
+        "timeout" if isinstance(failure, subprocess.TimeoutExpired) else "invalid_output")
+
+
+@pytest.mark.parametrize("version,implementation,error,expected_status", [
+    ("3.12.13", "CPython", None, 0), ("3.13.16", "CPython", None, 2),
+    ("3.12.13", "PyPy", None, 2), (None, None, "not_found", 2),
+    (None, None, "timeout", 2), (None, None, "probe_failed", 2),
+    (None, None, "invalid_output", 2),
+])
+def test_gpu_preflight_checks_interpreter_before_setup_and_preserves_facts(
+        remote_preflight, monkeypatch, version, implementation, error, expected_status):
+    monkeypatch.setattr(colab_preflight, "observe_inference_python", lambda: {
+        "executable": "/runtime with spaces/python3.12", "version": version,
+        "implementation": implementation, "error": error})
+    monkeypatch.setattr(colab_preflight.shutil, "which", lambda name: (
+        "/usr/bin/nvidia-smi" if name == "nvidia-smi" else None))
+    monkeypatch.setattr(colab_preflight.subprocess, "run", lambda *args, **kwargs: (
+        SimpleNamespace(stdout="NVIDIA RTX PRO 6000 Blackwell,98304,580.100\n")))
+    status, observed = remote_preflight("COLAB_G4_BF16")
+    assert status == expected_status
+    assert observed["admitted"] is (expected_status == 0)
+    assert observed["platform"]["glibc"] == "glibc 2.35"
+    assert observed["python"] == "3.13.16"
+    assert observed["gpu_name"] == "NVIDIA RTX PRO 6000 Blackwell"
+    assert observed["inference_python"]["version"] == version
+    if expected_status:
+        assert "preinstalled CPython 3.12" in observed["error"]
+    # A refusal must leave the next ordinary CPU transport independent of it.
+    assert remote_preflight("COLAB_CPU_TRANSPORT")[0] == 0
+
+
+def test_inference_interpreter_probe_uses_real_isolated_stdlib_process(tmp_path, monkeypatch):
+    # The executable path crosses whitespace unchanged, even when its actual
+    # version differs from the name the provider placed on PATH.
+    executable = tmp_path / "runtime with spaces" / "python3.12"
+    executable.parent.mkdir()
+    executable.symlink_to(sys.executable)
+    monkeypatch.setattr(colab_preflight.shutil, "which", lambda _name: str(executable))
+    observed = colab_preflight.observe_inference_python()
+    assert observed == {"executable": str(executable), "version": sys.version.split()[0],
+                        "implementation": "CPython", "error": None}
+
+
+@pytest.mark.parametrize("result,error", [
+    (subprocess.TimeoutExpired("python3.12", 3), "timeout"),
+    (OSError("cannot start"), "probe_failed"),
+    (subprocess.CalledProcessError(1, "python3.12"), "probe_failed"),
+    ("[]", "invalid_output"), ("not json", "invalid_output"),
+    ('{"version": 312, "implementation": "CPython"}', "invalid_output"),
+    ('{"version": "3.12.13"}', "invalid_output"),
+])
+def test_inference_interpreter_probe_reports_unknown_evidence(monkeypatch, result, error):
+    monkeypatch.setattr(colab_preflight.shutil, "which", lambda _name: "/usr/bin/python3.12")
+
+    def probe(argv, **kwargs):
+        assert argv[:4] == ["/usr/bin/python3.12", "-I", "-S", "-B"]
+        assert kwargs["timeout"] == 3 and kwargs["check"] is True
+        if isinstance(result, Exception):
+            raise result
+        return SimpleNamespace(stdout=result)
+
+    monkeypatch.setattr(colab_preflight.subprocess, "run", probe)
+    assert colab_preflight.observe_inference_python() == {
+        "executable": "/usr/bin/python3.12", "version": None,
+        "implementation": None, "error": error}
 
 
 def test_software_probe_observes_installed_tokenizers_version(tmp_path, monkeypatch):
