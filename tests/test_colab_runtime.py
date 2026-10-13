@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tarfile
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -247,6 +248,9 @@ def test_inference_install_works_without_ensurepip_and_targets_fresh_environment
         monkeypatch.setenv(name, value)
     calls = []
     target = tmp_path / "rag-vllm/bin/python"
+    provider_bin = tmp_path / "provider commands"
+    provider_bin.mkdir()
+    monkeypatch.setenv("PATH", str(provider_bin))
 
     class SetupProcess:
         def __init__(self, argv, **kwargs):
@@ -276,6 +280,10 @@ def test_inference_install_works_without_ensurepip_and_targets_fresh_environment
                         self.returncode = 1
                 elif "install" in argv:
                     assert {"--require-hashes", "--only-binary=:all:", "--no-deps", "--no-cache-dir"} <= set(argv)
+                    target.parent.mkdir(parents=True)
+                    helper = target.parent / "ninja"
+                    helper.write_text("#!/bin/sh\nprintf 'qualified-inference-tool\\n'\n")
+                    helper.chmod(0o700)
                 else:
                     assert argv[-1] == "check"
                     if corruption == "check_exit":
@@ -309,6 +317,7 @@ def test_inference_install_works_without_ensurepip_and_targets_fresh_environment
     if corruption:
         with pytest.raises(RuntimeError):
             runtime.install_inference()
+        assert runtime.processes.env["PATH"] == str(provider_bin)
         assert not (tmp_path / "software-observed.json").exists()
         if corruption != "check_exit":
             assert not any("install" in argv for argv in calls)
@@ -316,6 +325,17 @@ def test_inference_install_works_without_ensurepip_and_targets_fresh_environment
     assert runtime.install_inference() == target
     assert [argv[-1] for argv in calls if "--python" in argv] == ["--version", str(tmp_path / "inference.lock"), "check"]
     assert runtime.report["installer"]["version"] == "26.2.1"
+    # Absolute model entrypoints still resolve their nested helpers through PATH.
+    runtime.processes.popen = subprocess.Popen
+    runtime.processes.clock, runtime.processes.sleep = time.monotonic, time.sleep
+    argv = [sys.executable, "-I", "-B", "-c",
+            "import subprocess; print(subprocess.check_output(['ninja'], text=True).strip())"]
+    assert runtime.processes.run(argv, "qualified-helper", seconds=5) == b"qualified-inference-tool\n"
+    provider_helper = provider_bin / "ninja"
+    provider_helper.write_text("#!/bin/sh\nprintf 'provider-tool\\n'\n")
+    provider_helper.chmod(0o700)
+    assert runtime.processes.run(argv, "qualified-helper-again", seconds=5) == b"qualified-inference-tool\n"
+    assert os.environ["PATH"] == str(provider_bin)
 
 
 @pytest.mark.parametrize("version,error", [("22.2", "unsupported_version"), ("22.3", None),
