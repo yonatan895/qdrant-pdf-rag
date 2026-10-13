@@ -602,6 +602,72 @@ class Clock:
         self.on_sleep()
 
 
+@pytest.mark.parametrize("readiness_seconds,cold_seconds,remaining,budget,late_response", [
+    (15, 41, 7200, 1185, False),
+    (1190, 5, 7200, 10, False),
+    (10, 41, 65, 55, False),
+    (1190, 11, 7200, 10, True),
+    (10, 56, 65, 55, True),
+    (1201, 0, 7200, None, True),
+])
+def test_model_startup_shares_readiness_and_cold_inference_deadline(
+        tmp_path, monkeypatch, readiness_seconds, cold_seconds, remaining, budget, late_response):
+    from mainframe_rag.serve.colab_profiles import build_profile
+
+    clock = Clock()
+    profile = build_profile("COLAB_G4_BF16", deadline_seconds=7200)
+    profile["expires_at"] = clock() + 7200
+    starts, requests = [], []
+    model_ids = {server["port"]: server["model_id"] for server in profile["servers"]}
+
+    def endpoint(url, body=None, *, timeout):
+        reasoning = ":8000/" in url
+        if url.endswith("/health"):
+            if reasoning:
+                clock.now += readiness_seconds
+            return {}
+        if url.endswith("/v1/models"):
+            return {"data": [{"id": model_ids[8000 if reasoning else 8001]}]}
+        requests.append(("reasoning" if reasoning else "embed", timeout, body))
+        if reasoning:
+            if cold_seconds > timeout and not late_response:
+                clock.now += timeout
+                raise TimeoutError("cold first inference exceeded supplied socket timeout")
+            clock.now += cold_seconds
+            return {"choices": [{"finish_reason": "stop", "message": {"content": "READY"}}]}
+        return {"data": [{"embedding": [1.0] + [0.0] * 4095}]}
+
+    runtime = RemoteRuntime(profile, root=tmp_path, clock=clock, sleep=clock.sleep, http=endpoint)
+    runtime.report["models"] = [{"model_id": server["model_id"]} for server in profile["servers"]]
+    # This test exercises startup timing, not GPU resource sampling or spawning.
+    monkeypatch.setattr(runtime, "tick", runtime.check)
+
+    def start(argv, role):
+        starts.append(role)
+        if role == "embed":
+            assert "reasoning_warmed" in [event["stage"] for event in runtime.report["events"]]
+        return SimpleNamespace(process=SimpleNamespace(poll=lambda: None), error=None)
+
+    monkeypatch.setattr(runtime.processes, "start", start)
+    clock.now += 7200 - remaining  # Bootstrap has already spent this part of the run.
+    if late_response:
+        with pytest.raises(RuntimeError, match="deadline"):
+            runtime.start_models()
+        assert starts == ["reasoning"]
+        assert runtime.report["events"] == []
+        if budget is None:
+            assert requests == []
+    else:
+        runtime.start_models()
+        assert starts == ["reasoning", "embed"]
+        assert [event["stage"] for event in runtime.report["events"]] == [
+            "reasoning_warmed", "embedding_warmed"]
+        assert requests[0][1] == budget
+        assert requests[0][2]["reasoning_effort"] == "low"
+        assert requests[0][2]["max_tokens"] == 512
+        assert [request[0] for request in requests] == ["reasoning", "embed"]
+
+
 class FakeLoopbackServer:
     """TCP listener boundary without real network bindings or external services."""
 
