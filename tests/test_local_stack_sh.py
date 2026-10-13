@@ -1,7 +1,7 @@
 """Plan + fail-closed tests for scripts/run_local_stack.sh (local-dev only).
 
-Hermetic: every case runs with LOCAL_STACK_DRYRUN=1, which validates inputs
-and prints the ordered plan before any docker/network call.
+Hermetic: dry-run cases validate plans; actual-launcher cases use command and
+service fakes without contacting Docker, models or network services.
 """
 
 from __future__ import annotations
@@ -112,12 +112,14 @@ def test_persistent_progress_reaches_ingest_after_stack_cleanup_and_restart(tmp_
     consumer.write_text(f"#!{sys.executable}\n" + '''import json, os, sys
 from pathlib import Path
 if sys.argv[1:3] == ["-m", "mainframe_rag.ingest.run_ingest"]:
+    assert not any(name.casefold() in {"qdrant_api_key", "qdrant_ingest_api_key"} for name in os.environ)
     progress = sys.argv[sys.argv.index("--progress") + 1]
     with Path(progress).open("a") as target:
         target.write("retained checkpoint\\n")
     with open(os.environ["INGEST_CALLS"], "a") as target:
         target.write(json.dumps(sys.argv[1:]) + "\\n")
 if sys.argv[1:3] == ["-m", "uvicorn"]:
+    assert not any(name.casefold() in {"qdrant_api_key", "qdrant_ingest_api_key"} for name in os.environ)
     sys.exit(23)
 ''')
     for path in bindir.iterdir():
@@ -128,12 +130,14 @@ if sys.argv[1:3] == ["-m", "uvicorn"]:
     persistent.mkdir()
     progress = persistent / "inventory.jsonl"
     calls = tmp_path / "calls.jsonl"
+    keyless_env = {name: value for name, value in os.environ.items()
+                   if name.casefold() not in {"qdrant_api_key", "qdrant_ingest_api_key"}}
     for attempt in range(2):
         logs = tmp_path / f"logs-{attempt}"
         logs.mkdir()
         handoff = tmp_path / f"gateway-{attempt}.env"
         result = subprocess.run(["sh", str(scripts / SCRIPT.name)], text=True,
-            capture_output=True, check=False, timeout=15, env={**os.environ,
+            capture_output=True, check=False, timeout=15, env={**keyless_env,
             "PATH": f"{bindir}:{os.environ['PATH']}", "PY": str(consumer),
             "LOCAL_STACK_DRYRUN": "0", "LOCAL_STACK_LOG_DIR": str(logs),
             "LOCAL_INGEST_PROGRESS": str(progress), "INGEST_CALLS": str(calls),
@@ -147,6 +151,180 @@ if sys.argv[1:3] == ["-m", "uvicorn"]:
     invocations = [json.loads(line) for line in calls.read_text().splitlines()]
     assert len(invocations) == 2
     assert [argv[argv.index("--progress") + 1] for argv in invocations] == [str(progress)] * 2
+
+
+@pytest.mark.parametrize(
+    ("reader", "writer", "exported_scratch", "unrelated_note"),
+    [
+        ("fixture-readonly-706|=literal", "fixture-writer-706;$literal|=end", False, None),
+        (" \tfixture-readonly-706|=literal\t ", " \tfixture-writer-706;$literal|=end\t ", True, None),
+        (
+            "fixture-readonly-706|=literal",
+            "fixture-writer-706;$literal|=end",
+            False,
+            "text\nQDRANT_INGEST_API_KEY=not-an-env-entry",
+        ),
+    ],
+    ids=["role-keys", "whitespace-and-inherited-scratch", "unrelated-multiline-value"],
+)
+def test_authenticated_stack_hands_writer_only_to_ingest_and_readonly_to_agent(
+    tmp_path, monkeypatch, reader, writer, exported_scratch, unrelated_note
+):
+    if unrelated_note is not None:
+        monkeypatch.setenv("NOTE", unrelated_note)
+    scripts = tmp_path / "checkout" / "scripts"
+    scripts.mkdir(parents=True)
+    shutil.copyfile(SCRIPT, scripts / SCRIPT.name)
+    (scripts / "run_local_gateway.sh").write_text('''#!/bin/sh
+"$PY" --fixture-gateway
+printf 'export EMBED_MODEL=fixture\\n' > "$GATEWAY_ENV_FILE"
+exec sleep 30
+''')
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    (bindir / "curl").write_text('#!/bin/sh\ncase "$*" in */healthz*) printf 503;; *) printf 200;; esac\n')
+    (bindir / "docker").write_text('#!/bin/sh\nexit 99\n')
+    consumer = bindir / "consumer-python"
+    # Parameters are independent original fixture values, never credentials.
+    consumer.write_text(f"#!{sys.executable}\n" + f'''import json, os, sys
+sys.path.insert(0, {str(REPO / "src")!r})
+if sys.argv[1:3] == ["-m", "mainframe_rag.ingest.run_ingest"]:
+    role = "ingest"
+elif sys.argv[1:3] == ["-m", "uvicorn"]:
+    role = "agent"
+elif sys.argv[1:] == ["--fixture-gateway"]:
+    role = "gateway"
+else:
+    role = "probe"
+keys = {{name: value for name, value in os.environ.items()
+        if name.casefold() in {{"qdrant_api_key", "qdrant_ingest_api_key"}}}}
+resolved = None
+if role in {{"ingest", "agent"}}:
+    from mainframe_rag.config import Settings
+    resolved = Settings(_env_file=None).qdrant_api_key
+with open(os.environ["ROLE_CALLS"], "a") as target:
+    target.write(json.dumps({{"role": role, "keys": keys, "resolved": resolved,
+        "writer_present": any({writer!r} in value for value in os.environ.values())}}) + "\\n")
+if role == "agent":
+    sys.exit(23)
+''')
+    for path in bindir.iterdir():
+        path.chmod(0o755)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    calls = tmp_path / "role-calls.jsonl"
+    handoff = tmp_path / "gateway.env"
+    clean = {name: value for name, value in os.environ.items()
+             if name.casefold() not in {"qdrant_api_key", "qdrant_ingest_api_key"}
+             and name not in _INGEST_VARS}
+    # An inherited variable keeps its export attribute when reassigned unless
+    # the supervisor explicitly unsets it, including the raw-env scratch copy.
+    scratch = {name: writer for name in (
+        "_STACK_QDRANT_WRITE_KEY", "_qdrant_value", "_qdrant_names"
+    )} if exported_scratch else {}
+    result = subprocess.run(["sh", str(scripts / SCRIPT.name)], text=True,
+        capture_output=True, check=False, timeout=15, env={**clean, **scratch, **_host(tmp_path),
+        "PATH": f"{bindir}:{os.environ['PATH']}", "PY": str(consumer),
+        "LOCAL_STACK_DRYRUN": "0", "LOCAL_STACK_LOG_DIR": str(logs),
+        "ROLE_CALLS": str(calls), "CORPUS_DIR": str(corpus),
+        "GATEWAY_ENV_FILE": str(handoff), "INGEST_WORKERS": "1",
+        "RERANK_ENABLED": "false",
+        # Settings accepts one unambiguous mixed-case spelling per role.
+        "qDrAnT_aPi_KeY": reader, "qDrAnT_iNgEsT_aPi_KeY": writer})
+    assert result.returncode == 1 and "agent exited early" in result.stderr, result.stderr
+    observed = [json.loads(line) for line in calls.read_text().splitlines()]
+    assert [row["role"] for row in observed] == ["gateway", "probe", "ingest", "agent"]
+    children = {row["role"]: row for row in observed}
+    assert children["ingest"]["resolved"] == writer
+    assert children["ingest"]["keys"] == {"QDRANT_API_KEY": writer}
+    assert children["agent"]["resolved"] == reader
+    assert children["agent"]["keys"] == {"QDRANT_API_KEY": reader}
+    for role in ("gateway", "probe", "agent"):
+        assert not children[role]["writer_present"], role
+        assert not any(name.casefold() == "qdrant_ingest_api_key" for name in children[role]["keys"]), role
+    assert not handoff.exists()
+    for path in (logs / "local-stack-gateway.log", logs / "local-stack-agent.log"):
+        text = path.read_text()
+        assert reader not in text and writer not in text
+    assert reader not in result.stdout + result.stderr and writer not in result.stdout + result.stderr
+
+
+def test_qdrant_credential_enumerator_failure_refuses_before_service_children(tmp_path):
+    scripts = tmp_path / "checkout" / "scripts"
+    scripts.mkdir(parents=True)
+    shutil.copyfile(SCRIPT, scripts / SCRIPT.name)
+    (scripts / "run_local_gateway.sh").write_text('#!/bin/sh\nprintf "gateway\\n" >> "$SERVICE_CALLS"\nexit 23\n')
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    (bindir / "env").write_text('''#!/bin/sh
+printf '%s\\n' "$qDrAnT_iNgEsT_aPi_KeY" >&2
+exit 9
+''')
+    for name in ("curl", "docker", "consumer-python"):
+        (bindir / name).write_text(f'#!/bin/sh\nprintf "{name}\\n" >> "$SERVICE_CALLS"\nexit 23\n')
+    for path in bindir.iterdir():
+        path.chmod(0o755)
+    calls = tmp_path / "service-calls"
+    reader = "fixture-enumerator-readonly-706"
+    writer = "fixture-enumerator-writer-706"
+    clean = {name: value for name, value in os.environ.items()
+             if name.casefold() not in {"qdrant_api_key", "qdrant_ingest_api_key"}
+             and name not in _INGEST_VARS}
+    result = subprocess.run(["sh", str(scripts / SCRIPT.name)], text=True,
+        capture_output=True, check=False, timeout=10, env={**clean, **_host(tmp_path),
+        "PATH": f"{bindir}:{os.environ['PATH']}", "PY": str(bindir / "consumer-python"),
+        "LOCAL_STACK_DRYRUN": "0", "LOCAL_STACK_LOG_DIR": str(tmp_path),
+        "GATEWAY_ENV_FILE": str(tmp_path / "gateway.env"),
+        "CORPUS_DIR": str(tmp_path), "INGEST_WORKERS": "1", "RERANK_ENABLED": "false",
+        "SERVICE_CALLS": str(calls), "qDrAnT_aPi_KeY": reader, "qDrAnT_iNgEsT_aPi_KeY": writer})
+    assert not calls.exists(), "credential prerequisite failure reached a service/probe child"
+    assert result.returncode != 0
+    assert "Qdrant credential environment is unavailable" in result.stderr
+    assert reader not in result.stdout + result.stderr and writer not in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    ("credentials", "diagnostic"),
+    [
+        ({"QDRANT_API_KEY": "fixture-readonly-706"},
+         "authenticated Qdrant ingest requires a distinct writer credential"),
+        ({"QDRANT_INGEST_API_KEY": "fixture-writer-706"},
+         "Qdrant requires distinct read-only and ingest credentials"),
+        ({"QDRANT_API_KEY": "fixture-shared-706", "QDRANT_INGEST_API_KEY": "fixture-shared-706"},
+         "Qdrant requires distinct read-only and ingest credentials"),
+        ({"QDRANT_API_KEY": "fixture-readonly-706", "qdrant_api_key": "fixture-other-reader-706",
+          "QDRANT_INGEST_API_KEY": "fixture-writer-706"}, "Qdrant credential aliases conflict"),
+        ({"QDRANT_API_KEY": "fixture-readonly-706", "QDRANT_INGEST_API_KEY": "fixture-writer-706",
+          "qdrant_ingest_api_key": "fixture-other-writer-706"}, "Qdrant credential aliases conflict"),
+    ],
+    ids=["missing-writer", "missing-reader", "equal-roles", "reader-alias-conflict", "writer-alias-conflict"],
+)
+def test_unsafe_qdrant_role_inputs_refuse_before_service_children(tmp_path, credentials, diagnostic):
+    scripts = tmp_path / "checkout" / "scripts"
+    scripts.mkdir(parents=True)
+    shutil.copyfile(SCRIPT, scripts / SCRIPT.name)
+    (scripts / "run_local_gateway.sh").write_text('#!/bin/sh\nprintf "gateway\\n" >> "$SERVICE_CALLS"\nexit 23\n')
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    for name in ("curl", "docker", "consumer-python"):
+        path = bindir / name
+        path.write_text(f'#!/bin/sh\nprintf "{name}\\n" >> "$SERVICE_CALLS"\nexit 23\n')
+        path.chmod(0o755)
+    calls = tmp_path / "service-calls"
+    clean = {name: value for name, value in os.environ.items()
+             if name.casefold() not in {"qdrant_api_key", "qdrant_ingest_api_key"}
+             and name not in _INGEST_VARS}
+    result = subprocess.run(["sh", str(scripts / SCRIPT.name)], text=True,
+        capture_output=True, check=False, timeout=10, env={**clean, **_host(tmp_path), **credentials,
+        "PATH": f"{bindir}:{os.environ['PATH']}", "PY": str(bindir / "consumer-python"),
+        "LOCAL_STACK_DRYRUN": "0", "LOCAL_STACK_LOG_DIR": str(tmp_path),
+        "GATEWAY_ENV_FILE": str(tmp_path / "gateway.env"), "CORPUS_DIR": str(tmp_path),
+        "INGEST_WORKERS": "1", "RERANK_ENABLED": "false", "SERVICE_CALLS": str(calls)})
+    assert not calls.exists(), "unsafe credentials reached a service/probe child"
+    assert result.returncode != 0 and diagnostic in result.stderr
+    assert all(value not in result.stdout + result.stderr for value in credentials.values())
 
 
 def test_local_agent_port_override_reflected(tmp_path):

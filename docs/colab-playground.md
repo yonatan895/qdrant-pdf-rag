@@ -158,6 +158,13 @@ questions, answers, vectors, snapshots, private paths and raw logs outside Git.
 The retained data directory is stable across runs; the controller state directory
 is new for each run.
 
+Authenticated runs inherit the local stack's environment-only role inputs:
+`QDRANT_API_KEY` is the read-only key, and `QDRANT_INGEST_API_KEY` is the distinct
+writer used only by ingest. Supply them privately in the caller environment,
+never as Task variables or in the controller/gateway handoff files. The native
+supervisor owns case-insensitive alias cleanup and the ingest-only writer
+handoff; see [the local credential contract](live-stack.md#full-local-simulation).
+
 | Task input | Controller input / meaning |
 | --- | --- |
 | `COLAB_STATE`, `COLAB_GATEWAY_IMAGE` | Required fresh private state and existing gateway digest |
