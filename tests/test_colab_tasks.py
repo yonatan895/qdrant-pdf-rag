@@ -56,6 +56,26 @@ class ColabTaskTests(unittest.TestCase):
         ]])
         self.assertFalse(marker.exists(), "Task input was evaluated as shell source")
 
+    def test_prepare_bridges_only_an_explicit_ingest_reingest_choice(self):
+        # Issue #737: production resume of a pending build is an explicit choice.
+        boundary = self.boundary
+        image = "example.invalid/gateway@sha256:" + "c" * 64
+        base = ["scripts/colab.py", "prepare", "--state", "/private/run", "--gateway-image", image]
+        for value, expected in (("1", base + ["--ingest-reingest"]), ("0", base), ("", base)):
+            proc = boundary.run_task("local:colab:prepare", "COLAB_STATE=/private/run",
+                                     f"COLAB_GATEWAY_IMAGE={image}", f"COLAB_INGEST_REINGEST={value}",
+                                     extra_env={**boundary.recorder_env, "COLAB_INGEST_REINGEST": "1"})
+            self.assertEqual(proc.returncode, 0, proc.stdout)
+            self.assertEqual(boundary.calls()[0]["argv"], expected)
+            boundary.log.unlink()
+        for bad in ("true", "2", " 1"):
+            proc = boundary.run_task("local:colab:prepare", "COLAB_STATE=/private/run",
+                                     f"COLAB_GATEWAY_IMAGE={image}", f"COLAB_INGEST_REINGEST={bad}",
+                                     extra_env=boundary.recorder_env)
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("COLAB_INGEST_REINGEST must be 0 or 1", proc.stdout)
+            self.assertEqual(boundary.calls(), [])
+
     def test_initialize_fresh_preserves_exact_target_inputs_without_cloud_flags(self):
         boundary = self.boundary
         marker = boundary.root / "must-not-exist"

@@ -558,6 +558,50 @@ def test_live_ingest_is_launched_with_the_sized_worker_count(tmp_path):
     assert "--workers 4 " in ingest[0]
 
 
+@pytest.mark.parametrize("value", [None, "", "0"])
+def test_ingest_is_not_forced_unless_reingest_is_selected(tmp_path, value):
+    extra = {} if value is None else {"LOCAL_INGEST_REINGEST": value}
+    clean = {k: v for k, v in os.environ.items() if k != "LOCAL_INGEST_REINGEST"}
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    plan = subprocess.run(["sh", str(SCRIPT)], capture_output=True, text=True, check=False,
+                          env={**clean, "LOCAL_STACK_DRYRUN": "1", "CORPUS_DIR": str(corpus), **extra})
+    assert plan.returncode == 0, plan.stderr
+    assert "--reingest" not in plan.stdout
+    r, calls = _live(tmp_path / "live", _host(tmp_path), extra)
+    ingest = _ingest_calls(calls)
+    assert len(ingest) == 1, (r.stderr, calls)
+    assert "--reingest" not in ingest[0]
+
+
+def test_explicit_reingest_reaches_plan_and_ingest_argv(tmp_path):
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    plan = _run({"CORPUS_DIR": str(corpus), "LOCAL_INGEST_REINGEST": "1"})
+    assert plan.returncode == 0, plan.stderr
+    ingest_plan = next(ln for ln in plan.stdout.splitlines() if "run_ingest" in ln)
+    assert "--reingest (collection" in ingest_plan
+    r, calls = _live(tmp_path / "live", _host(tmp_path), {"LOCAL_INGEST_REINGEST": "1"})
+    ingest = _ingest_calls(calls)
+    assert len(ingest) == 1, (r.stderr, calls)
+    assert ingest[0].split()[-1] == "--reingest"
+
+
+@pytest.mark.parametrize("bad", ["true", "yes", "2", " 1", "1 "])
+def test_invalid_reingest_choice_fails_before_stack_work(tmp_path, bad):
+    r = _run({"CORPUS_DIR": str(tmp_path), "LOCAL_INGEST_REINGEST": bad})
+    assert r.returncode != 0
+    assert "LOCAL_INGEST_REINGEST must be 0 or 1" in r.stderr
+    assert "[plan]" not in r.stdout
+
+
+def test_reingest_without_corpus_fails_before_stack_work():
+    r = _run({"CORPUS_DIR": "", "LOCAL_INGEST_REINGEST": "1"})
+    assert r.returncode != 0
+    assert "LOCAL_INGEST_REINGEST=1 requires CORPUS_DIR" in r.stderr
+    assert "[plan]" not in r.stdout
+
+
 def test_live_low_ram_refuses_before_any_model_or_ingest_call(tmp_path):
     r, calls = _live(tmp_path, _host(tmp_path, avail_mb=3071))
     assert r.returncode == 75

@@ -3200,6 +3200,79 @@ def test_forced_build_retry_keeps_verified_document_checkpoint(tmp_path, monkeyp
     assert sorted(parsed) == ["doc_a", "doc_b"]  # A new deliberate repair still rebuilds all.
 
 
+def test_interrupted_first_build_resumes_only_under_explicit_reingest(tmp_path, monkeypatch):
+    """Issue #737: the contract's only resumption of an interrupted first build.
+
+    An ordinary build into an empty alias leaves its staging contract pending
+    when a document fails. A plain retry must refuse before any parse or write;
+    the explicit --reingest retry (what LOCAL_INGEST_REINGEST/--ingest-reingest
+    select) reuses the verified checkpoint, embeds only the rest, publishes
+    once, and the next ordinary operation is read-only.
+    """
+    import json
+    from concurrent.futures import ThreadPoolExecutor
+
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.publish import publish_state_path
+
+    _publish_env(monkeypatch)
+    monkeypatch.setenv("INGEST_UPSERT_STREAMS", "1")
+    monkeypatch.setattr(run_ingest, "ProcessPoolExecutor", lambda max_workers, mp_context: ThreadPoolExecutor(max_workers=max_workers))
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _two_doc_corpus(corpus)
+    progress = tmp_path / "inv.jsonl"
+
+    original_parse = run_ingest._parse_one
+    original_upsert = run_ingest._upsert_one
+    parsed: list[str] = []
+    upserted: list[str] = []
+
+    def capture_parse(args):
+        parsed.append(Path(args[0]).stem)
+        return original_parse(args)
+
+    def failing_upsert(doc, *args, **kwargs):
+        if doc.doc_id == DOC_B:
+            raise RuntimeError("synthetic connection interruption")
+        upserted.append(doc.doc_id)
+        return original_upsert(doc, *args, **kwargs)
+
+    monkeypatch.setattr(run_ingest, "_parse_one", capture_parse)
+    monkeypatch.setattr(run_ingest, "_upsert_one", failing_upsert)
+    assert _run_main(monkeypatch, corpus, progress) == 1
+    assert ALIAS not in fake.aliases  # No partial corpus is ever published.
+    state_path = publish_state_path(progress, ALIAS)
+    staging = json.loads(state_path.read_text())["staging"]
+    checkpoint = [p.model_dump() for p in fake.collections[staging] if p.payload.get("doc_id") == DOC_A]
+    assert checkpoint and upserted == [DOC_A]
+
+    def capture_upsert(doc, *args, **kwargs):
+        upserted.append(doc.doc_id)
+        return original_upsert(doc, *args, **kwargs)
+
+    monkeypatch.setattr(run_ingest, "_upsert_one", capture_upsert)
+    stored = {name: [p.model_dump() for p in points] for name, points in fake.collections.items()}
+    parsed.clear()
+    upserted.clear()
+    with pytest.raises(RuntimeError, match="unfinished representation migration"):
+        _run_main(monkeypatch, corpus, progress)
+    assert parsed == upserted == []
+    assert {name: [p.model_dump() for p in points] for name, points in fake.collections.items()} == stored
+    assert ALIAS not in fake.aliases
+
+    assert _run_main(monkeypatch, corpus, progress, "--reingest") == 0
+    assert parsed == ["doc_b"] and upserted == [DOC_B]
+    assert fake.aliases[ALIAS] == staging and not state_path.exists()
+    assert [p.model_dump() for p in fake.collections[staging] if p.payload.get("doc_id") == DOC_A] == checkpoint
+    parsed.clear()
+    upserted.clear()
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    assert parsed == upserted == []
+
+
 @pytest.mark.parametrize("after_commit", [False, True])
 def test_forced_retry_after_all_checkpoints_does_no_embedding(tmp_path, monkeypatch, after_commit):
     """Crashing around manifest commit must not redo a fully checkpointed build."""

@@ -167,6 +167,15 @@ the existing `${LOCAL_STACK_LOG_DIR:-${TMPDIR:-/tmp}}/local-stack-ingest-progres
 default. Stack cleanup removes its gateway handoff and leaves inventory and
 publication sidecars in place. Retain that entire directory across restarts.
 
+An interrupted alias build leaves its staging contract `pending`, and an ordinary
+rerun refuses it before any parse (`docs/ingest.md` §9). To resume, explicitly set
+`LOCAL_INGEST_REINGEST=1` for that run with the same progress directory; the
+supervisor adds ingest's `--reingest`. The publisher alone decides checkpoint
+reuse: a same-build retry skips verified documents, while any other state is a
+fresh forced build that re-embeds everything into staging. Unset, empty or `0`
+keeps the default; other values refuse before any service starts. Leave it unset
+afterwards: a later forced run deliberately rebuilds the whole corpus.
+
 The Colab lane requires corpus/representation-keyed state under
 `COLAB_DATA_STATE` (controller admission belongs to #706 WP5); never reuse a
 checkpoint to claim compatibility with changed

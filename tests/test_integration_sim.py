@@ -1818,6 +1818,93 @@ def test_inflight_and_warm_http_readers_keep_verified_generation(
         writer.close()
         _drop_publish_fixture(qdrant_url)
 
+def test_interrupted_first_build_resumes_on_real_qdrant_only_under_reingest(
+    tmp_path, monkeypatch, qdrant_url,
+):
+    """Issue #737 on the real server: no live generation, a failed first build,
+    a refused ordinary retry, then the explicit --reingest resume."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from qdrant_client import QdrantClient
+
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.publish import publish_state_path
+    from tests.helpers_publication_lifecycle import TEXTS, _records, _write_source
+
+    _drop_publish_fixture(qdrant_url)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    for name, text in TEXTS.items():
+        _write_source(corpus, name, text)
+    progress = tmp_path / "progress.jsonl"
+    for name, value in (("QDRANT_URL", qdrant_url), ("QDRANT_COLLECTION", PUBLISH_ALIAS),
+                        ("ALLOW_HASH_MODE", "true"), ("EMBED_MODE", "hash"), ("DENSE_DIM", "256"),
+                        ("EMBED_MODEL_REVISION", ""), ("INGEST_ALIAS_PUBLISH", "true")):
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(run_ingest, "ProcessPoolExecutor",
+                        lambda max_workers, mp_context: ThreadPoolExecutor(max_workers=max_workers))
+    original_parse, original_upsert = run_ingest._parse_one, run_ingest._upsert_one
+    parsed: list[str] = []
+    fail = {"beta": True}
+
+    def capture_parse(args):
+        parsed.append(Path(args[0]).stem)
+        return original_parse(args)
+
+    def interrupted_upsert(doc, *args, **kwargs):
+        if fail["beta"] and "beta" in doc.doc_id.lower():
+            raise RuntimeError("synthetic connection interruption")
+        return original_upsert(doc, *args, **kwargs)
+
+    monkeypatch.setattr(run_ingest, "_parse_one", capture_parse)
+    monkeypatch.setattr(run_ingest, "_upsert_one", interrupted_upsert)
+
+    def ingest(*extra):
+        previous = run_ingest._worker_qdrant
+        if previous is not None:
+            previous.close()
+        monkeypatch.setattr(run_ingest, "_worker_qdrant", None)
+        monkeypatch.setattr(run_ingest, "_worker_embedder", None)
+        return run_ingest.main(["--src", str(corpus), "--progress", str(progress), "--workers", "1", *extra])
+
+    client = QdrantClient(url=qdrant_url, timeout=10)
+
+    def aliases():
+        return {a.alias_name: a.collection_name for a in client.get_aliases().aliases}
+
+    def stored():
+        return {c.name: _records(client, c.name) for c in client.get_collections().collections
+                if c.name.startswith(PUBLISH_ALIAS)}
+
+    try:
+        assert ingest() == 1
+        assert PUBLISH_ALIAS not in aliases()  # A partial corpus is never published.
+        staging = json.loads(publish_state_path(progress, PUBLISH_ALIAS).read_text())["staging"]
+        def alpha_records():
+            return {key: value for key, value in _records(client, staging).items()
+                    if "alpha" in str(value[0].get("doc_id", "")).lower()}
+
+        alpha = alpha_records()
+        assert alpha
+        fail["beta"] = False
+        before = stored()
+        parsed.clear()
+        with pytest.raises(RuntimeError, match="unfinished representation migration"):
+            ingest()
+        assert parsed == [] and stored() == before and PUBLISH_ALIAS not in aliases()
+
+        assert ingest("--reingest") == 0
+        assert parsed == ["beta"]
+        assert aliases()[PUBLISH_ALIAS] == staging
+        assert alpha_records() == alpha  # The verified checkpoint is reused unchanged.
+        parsed.clear()
+        assert ingest() == 0
+        assert parsed == []  # The next ordinary operation is read-only.
+    finally:
+        client.close()
+        _drop_publish_fixture(qdrant_url)
+
+
 @pytest.mark.parametrize("boundary", [
     "sidecar", "corpus-clone", "control-clone", "rekey", "pending",
     "invalidated", "deleted", "points", "completion", "inventory", "committed", "removals", "receipt",

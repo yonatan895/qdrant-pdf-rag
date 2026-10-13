@@ -640,6 +640,8 @@ def prepare(args: argparse.Namespace, *, source_root: Path | None = None) -> int
         raise LabError("CU floor must be finite and within the monthly envelope")
     if type(args.poll_seconds) not in (int, float) or not math.isfinite(args.poll_seconds) or not 1 <= args.poll_seconds <= 5:
         raise LabError("poll interval must be finite and between one and five seconds")
+    if args.ingest_reingest and args.dataset != "production":
+        raise LabError("ingest reingest is an explicit production resume choice")
     gateway_name = os.environ.get("GATEWAY_NAME") or "local-litellm-gateway"
     gateway_network = os.environ.get("PG_NET") or f"{gateway_name}-net"
     if not all(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", value)
@@ -655,7 +657,10 @@ def prepare(args: argparse.Namespace, *, source_root: Path | None = None) -> int
               "reasoning_port": args.reasoning_port, "embedding_port": args.embedding_port,
               "qdrant_port": args.qdrant_port, "cu_cap": args.cu_cap, "cu_floor": args.cu_floor,
               "namespace": args.namespace, "qdrant_service": args.qdrant_service,
-              "kube_context": args.kube_context, "poll_seconds": args.poll_seconds}
+              "kube_context": args.kube_context, "poll_seconds": args.poll_seconds,
+              # Frozen per run (issue #737): approval covers the choice; the
+              # ingest publisher alone decides whether checkpoints are reused.
+              "ingest_reingest": args.ingest_reingest}
     for key in ("corpus", "golden", "inventory", "source_inventory", "embedding_evidence",
                 "production_approval", "data_state", "kubeconfig",
                 "inference_lock", "transport_receipt"):
@@ -1491,6 +1496,7 @@ class Run:
                 "PRODUCTION_GOLDEN_PATH": str(Path(self.config["golden"]).resolve(strict=True)),
                 "QDRANT_URL": self.manifest["persistent_qdrant"]["url"],
                 "LOCAL_INGEST_PROGRESS": self.manifest["production_progress"], "LOCAL_STACK_DRYRUN": "0",
+                "LOCAL_INGEST_REINGEST": "1" if self.config.get("ingest_reingest") is True else "0",
                 "PY": self.manifest["execution"]["interpreter"], "PYTHONPATH": str(self.execution_root / "src"),
                 "GATEWAY_EMBED_MODEL": self.profile["servers"][1]["model_id"],
                 "GATEWAY_EMBED_MODEL_REVISION": self.profile["servers"][1]["revision"],
@@ -1819,6 +1825,8 @@ def parser() -> argparse.ArgumentParser:
     prep.add_argument("--cu-cap", type=float, default=20)
     prep.add_argument("--cu-floor", type=float, default=10)
     prep.add_argument("--poll-seconds", type=float, default=1)
+    prep.add_argument("--ingest-reingest", action="store_true",
+                      help="production only: explicit ingest --reingest, the contract's pending-build resumption")
     fresh = commands.add_parser("initialize-fresh")
     fresh.add_argument("--state", type=Path, required=True)
     fresh.add_argument("--collection", required=True)
