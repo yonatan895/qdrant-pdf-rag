@@ -97,6 +97,72 @@ PY="${PY:-$REPO_ROOT/.venv/bin/python}"
 die() { echo "ERROR: $1" >&2; exit 1; }
 step() { echo "==> $1"; }
 
+# Qdrant role inputs are environment-only. Settings resolves aliases without
+# case sensitivity, so remove every input spelling before any service child.
+# Unset internal copies first: assigning an inherited exported shell variable
+# would otherwise preserve its export attribute and leak the writer downstream.
+unset _STACK_QDRANT_READ_KEY _STACK_QDRANT_WRITE_KEY _qdrant_value _qdrant_name _qdrant_names \
+    _qdrant_read_seen _qdrant_write_seen
+_STACK_QDRANT_READ_KEY=""
+_STACK_QDRANT_WRITE_KEY=""
+_qdrant_read_seen=0
+_qdrant_write_seen=0
+# NUL records preserve actual environment entries across multiline values.
+# A success marker distinguishes failed enumeration from keyless mode even
+# without pipefail; every real name=value record contains '=' and cannot match it.
+_qdrant_names=$(
+    { if env -0 2>/dev/null; then printf ':qdrant-environment-ok:\000'; fi; } |
+        LC_ALL=C awk '
+            BEGIN { RS = "\0" }
+            $0 == ":qdrant-environment-ok:" { complete = 1; next }
+            {
+                name = substr($0, 1, index($0, "=") - 1)
+                folded = tolower(name)
+                if (folded == "qdrant_api_key" || folded == "qdrant_ingest_api_key")
+                    print name
+            }
+            END { if (!complete) exit 1 }
+        ' 2>/dev/null
+) || die "Qdrant credential environment is unavailable"
+for _qdrant_name in $_qdrant_names; do
+    case "$_qdrant_name" in
+        [Qq][Dd][Rr][Aa][Nn][Tt]_[Aa][Pp][Ii]_[Kk][Ee][Yy])
+            # Only the name enters argv. The sentinel preserves trailing key
+            # whitespace; remove it and exactly printenv's added newline.
+            _qdrant_value=$(printenv "$_qdrant_name" 2>/dev/null && printf '.') ||
+                die "Qdrant credential input is unavailable"
+            _qdrant_value=${_qdrant_value%.}
+            _qdrant_value=${_qdrant_value%?}
+            [ "$_qdrant_read_seen" = 0 ] || [ "$_STACK_QDRANT_READ_KEY" = "$_qdrant_value" ] ||
+                die "Qdrant credential aliases conflict"
+            _STACK_QDRANT_READ_KEY=$_qdrant_value
+            _qdrant_read_seen=1
+            unset "$_qdrant_name"
+            ;;
+        [Qq][Dd][Rr][Aa][Nn][Tt]_[Ii][Nn][Gg][Ee][Ss][Tt]_[Aa][Pp][Ii]_[Kk][Ee][Yy])
+            _qdrant_value=$(printenv "$_qdrant_name" 2>/dev/null && printf '.') ||
+                die "Qdrant credential input is unavailable"
+            _qdrant_value=${_qdrant_value%.}
+            _qdrant_value=${_qdrant_value%?}
+            [ "$_qdrant_write_seen" = 0 ] || [ "$_STACK_QDRANT_WRITE_KEY" = "$_qdrant_value" ] ||
+                die "Qdrant credential aliases conflict"
+            _STACK_QDRANT_WRITE_KEY=$_qdrant_value
+            _qdrant_write_seen=1
+            unset "$_qdrant_name"
+            ;;
+    esac
+done
+unset _qdrant_value _qdrant_name _qdrant_names _qdrant_read_seen _qdrant_write_seen
+if [ -n "$_STACK_QDRANT_WRITE_KEY" ]; then
+    [ -n "$_STACK_QDRANT_READ_KEY" ] && [ "$_STACK_QDRANT_READ_KEY" != "$_STACK_QDRANT_WRITE_KEY" ] ||
+        die "Qdrant requires distinct read-only and ingest credentials"
+elif [ -n "$_STACK_QDRANT_READ_KEY" ] && [ -n "$CORPUS_DIR" ]; then
+    die "authenticated Qdrant ingest requires a distinct writer credential"
+fi
+if [ -n "$_STACK_QDRANT_READ_KEY" ]; then
+    export QDRANT_API_KEY="$_STACK_QDRANT_READ_KEY"
+fi
+
 # Input validation first: a bad value must die before any docker call.
 case "$GATEWAY_PROBE_MAX_TOKENS" in
     *[!0-9]*|?????*) die "GATEWAY_PROBE_MAX_TOKENS must be an integer from 1 to 4096" ;;
@@ -327,8 +393,13 @@ step "Probing every model leg through the gateway"
 
 if [ -n "$CORPUS_DIR" ]; then
     step "Ingesting $CORPUS_DIR through the gateway (collection $QDRANT_COLLECTION)"
-    OTEL_SERVICE_NAME="$INGEST_SERVICE_NAME" "$PY" -m mainframe_rag.ingest.run_ingest --src "$CORPUS_DIR" \
-        --workers "$INGEST_WORKERS_CHOSEN" --progress "$LOCAL_INGEST_PROGRESS"
+    (
+        if [ -n "$_STACK_QDRANT_WRITE_KEY" ]; then
+            export QDRANT_API_KEY="$_STACK_QDRANT_WRITE_KEY"
+        fi
+        OTEL_SERVICE_NAME="$INGEST_SERVICE_NAME" exec "$PY" -m mainframe_rag.ingest.run_ingest --src "$CORPUS_DIR" \
+            --workers "$INGEST_WORKERS_CHOSEN" --progress "$LOCAL_INGEST_PROGRESS"
+    )
 fi
 
 _health_code="$(curl -s -m 3 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$LOCAL_AGENT_PORT/healthz" 2>/dev/null || true)"

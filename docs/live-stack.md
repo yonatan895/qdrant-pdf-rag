@@ -140,6 +140,20 @@ GPU pack before starting component servers; the default pair uses
 A third backend requires the matching pack. Backend curls above are component
 probes, not application consumer configuration.
 
+For authenticated Qdrant, supply the read-only credential through the caller's
+`QDRANT_API_KEY` environment variable. Ingest additionally requires the distinct
+writer credential in `QDRANT_INGEST_API_KEY`. These are environment-only secrets:
+never Task variables, command arguments, dry-run output or handoff-file content.
+The supervisor canonicalizes case-insensitive input spellings, removes the
+writer input from inherited child environments, and exposes it as
+`QDRANT_API_KEY` only inside ingest. The agent receives the read-only key;
+gateway and model-probe children receive no writer. Conflicting aliases,
+writer-only/equal credentials, authenticated ingest without its writer, or
+unavailable credential-environment enumeration refuse before service startup.
+Empty inputs count as absent; with both absent, development remains
+unauthenticated. The operator must select the actual read-only/writer Secret
+entries; distinct values alone do not prove their server permissions.
+
 `GATEWAY_PROBE_MAX_TOKENS` selects the diagnostic completion budget (decimal
 1–4096, default 16). `local:stack GATEWAY_PROBE_MAX_TOKENS=512` forwards the
 explicit lab budget to both buffered and SSE readiness requests. This changes
