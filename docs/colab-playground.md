@@ -287,6 +287,11 @@ fallback shape, precision, account or second session.
 Reasoning must become ready and finish a strict low-effort, 512-token warmup
 with nonempty final content and `finish_reason=stop` before embedding starts.
 Embedding must produce finite, normalized native 4096-dimensional vectors.
+Each model shares its existing 1,200-second startup window across health/alias
+readiness and first inference, bounded by the absolute run deadline. Warmup
+receives the remaining window to allow cold kernel compilation; a late response
+cannot certify readiness. HTTP socket timeouts still rely on the independent
+controller and outer guard for the absolute run deadline.
 Production startup also checks the actually installed tokenizer/runtime versions,
 downloaded metadata hashes and the exact embedding server argv passed to spawn
 against the approved pooling evidence before starting its workload.

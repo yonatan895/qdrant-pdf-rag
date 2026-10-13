@@ -1093,8 +1093,8 @@ class RemoteRuntime:
         self.report["pooling_observation"] = observed
         self.write_report("pooling_observed")
 
-    def wait_model(self, server: dict, child: Child) -> None:
-        until = min(self.deadline, self.clock() + 1200)
+    def wait_model(self, server: dict, child: Child, *, startup_deadline: float) -> None:
+        until = min(self.deadline, startup_deadline)
         while self.clock() < until:
             self.tick()
             if child.process.poll() is not None:
@@ -1116,21 +1116,28 @@ class RemoteRuntime:
     def start_models(self) -> None:
         for server in self.profile["servers"]:
             self.tick()
+            startup_deadline = min(self.deadline, self.clock() + 1200)
             argv = list(server["argv"])
             child = self.processes.start(argv, server["role"])
             self.background.append(child)
             manifest = next(model for model in self.report["models"] if model["model_id"] == server["model_id"])
             exact_argv = json.dumps(argv, sort_keys=True, separators=(",", ":"), allow_nan=False)
             manifest["server_argv_sha256"] = hashlib.sha256(exact_argv.encode()).hexdigest()
-            self.wait_model(server, child)
+            self.wait_model(server, child, startup_deadline=startup_deadline)
             self.check()
-            timeout = min(30, max(.01, self.deadline - self.clock()))
+            timeout = startup_deadline - self.clock()
+            if timeout <= 0:
+                raise RuntimeError("model startup exceeded its readiness and warmup deadline")
             if server["role"] == "reasoning":
                 warmup_reasoning(server, http=self.http, timeout=timeout)
-                self.write_report("reasoning_warmed")
+                stage = "reasoning_warmed"
             else:
                 warmup_embedding(server, http=self.http, timeout=timeout)
-                self.write_report("embedding_warmed")
+                stage = "embedding_warmed"
+            self.check()
+            if self.clock() >= startup_deadline:
+                raise RuntimeError("model startup exceeded its readiness and warmup deadline")
+            self.write_report(stage)
 
     def validate_profile(self) -> None:
         duration = self.profile.get("deadline_seconds")
