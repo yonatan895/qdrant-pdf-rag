@@ -326,6 +326,8 @@ separately, retaining at most 64 KiB per stream. Persistent raw-write allowances
 are 4 MiB for work, 256 KiB for export and 512 KiB reserved for release commands.
 Truncated structured output cannot establish session or resource identity.
 Exhausted diagnostic capture still permits bounded stop and absence checks.
+At the post-exit grace boundary, a bounded nonblocking probe checks pending EOF
+before classifying incomplete pipes; it adds no wait or output allowance.
 
 These stream limits do not constrain arbitrary workload files, CLI downloads
 or Docker daemon writes. Colab freezes an explicit native gateway envelope at
