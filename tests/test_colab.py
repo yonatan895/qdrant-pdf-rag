@@ -1375,6 +1375,79 @@ def _assert_process_not_live(pid: int) -> None:
     pytest.fail("owned process remained live after bounded group termination")
 
 
+@pytest.mark.parametrize("overflow", [False, True])
+def test_closed_child_pipes_survive_scheduler_pause_before_final_eof_then_next_command_works(lab, monkeypatch, overflow):
+    _, state, _ = lab
+    run = controller.Run(state)
+    stdout = "complete | ordinary α\n".encode()
+    child = subprocess.Popen([sys.executable, "-c", f"import os; os.write(1, {stdout!r})"],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+    assert child.wait(timeout=3) == 0  # No descendants or live writer remain.
+    selector_factory = controller.selectors.DefaultSelector
+    clock = controller.time
+    offset = 0.0
+
+    class PauseAfterReady:
+        def __init__(self):
+            self.selector = selector_factory()
+            self.paused = False
+
+        def __enter__(self):
+            self.selector.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.selector.__exit__(*args)
+
+        def __getattr__(self, name):
+            return getattr(self.selector, name)
+
+        def select(self, timeout):
+            nonlocal offset
+            events = self.selector.select(timeout)
+            if events and not self.paused:
+                self.paused = True
+                offset += controller.PIPE_DRAIN_GRACE_SECONDS + .01
+            return events
+
+    if overflow:
+        monkeypatch.setattr(controller, "CAPTURE_LIMIT_BYTES", 16)
+    read = os.read
+    stdout_fd = child.stdout.fileno()
+    bytes_read = 0
+
+    def partial_first_read(fd, limit):
+        nonlocal bytes_read
+        if fd == stdout_fd and bytes_read == 0:
+            limit = min(limit, 8)
+        data = read(fd, limit)
+        if fd == stdout_fd:
+            bytes_read += len(data)
+        return data
+
+    reserved = run.output_budget.reserve("work")
+    try:
+        with monkeypatch.context() as patch:
+            if overflow:
+                patch.setattr(controller.os, "read", partial_first_read)
+            patch.setattr(controller, "time", SimpleNamespace(monotonic=lambda: clock.monotonic() + offset))
+            patch.setattr(controller.selectors, "DefaultSelector", PauseAfterReady)
+            capture = run.capture(child, {name: state / f"paused.{name}.log" for name in ("stdout", "stderr")},
+                                  "work", reserved, retain=True)
+            capture.finish()
+    finally:
+        run.terminate(child)
+    assert offset > controller.PIPE_DRAIN_GRACE_SECONDS
+    expected = stdout[:16] if overflow else stdout
+    assert bytes(capture.output["stdout"]) == expected
+    assert capture.truncated == {"stdout": overflow, "stderr": False}
+    assert capture.held_pipes is overflow and capture.log_failed is False
+    assert (state / "paused.stdout.log").read_bytes() == expected
+    if overflow:
+        assert bytes_read == 17, "final probing must read only the cap plus one overflow byte"
+    assert run.command([sys.executable, "-c", "print('ordinary')"], seconds=3).stdout == "ordinary\n"
+
+
 def test_root_exit_with_descendant_held_pipes_is_bounded_and_next_command_works(lab):
     root, state, _ = lab
     run = controller.Run(state)

@@ -963,6 +963,10 @@ class RemoteRuntime:
                 or any(software[field] != version for field, version in expected.items())
                 or software["cuda_available"] is not True):
             raise RuntimeError("observed inference software does not match the admitted reference")
+        # An absolute vLLM entrypoint does not activate its nested console tools.
+        assert self.processes.env is not None
+        inherited_path = self.processes.env.get("PATH") or os.defpath
+        self.processes.env["PATH"] = os.pathsep.join((str(interpreter.parent), inherited_path))
         self.report["software"] = software
         self.write_report("inference_ready")
         return interpreter

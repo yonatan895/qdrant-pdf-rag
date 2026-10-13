@@ -129,6 +129,11 @@ Python 3.12 and `--without-pip`, proves its interpreter/prefix and tests kernel 
 that target before downloads. The same target owns hash-locked binary installation
 and dependency checking. Inherited pip recursion/destination/configuration
 overrides are removed. No apt, get-pip, installer upgrade or Python download runs.
+After installation, dependency and software checks pass, inference children put
+that verified environment's `bin` first on `PATH`, retaining the provider's
+system-tool path (or `os.defpath` when absent/empty). Nested tools such as
+FlashInfer's pinned `ninja` then resolve from the qualified environment without
+changing the host or CPU transport environment.
 
 GPU startup measures offline pooling/tokenizer behavior after the qualified
 install and pinned snapshots, before either server starts. It uses one existing
@@ -321,6 +326,8 @@ separately, retaining at most 64 KiB per stream. Persistent raw-write allowances
 are 4 MiB for work, 256 KiB for export and 512 KiB reserved for release commands.
 Truncated structured output cannot establish session or resource identity.
 Exhausted diagnostic capture still permits bounded stop and absence checks.
+At the post-exit grace boundary, a bounded nonblocking probe checks pending EOF
+before classifying incomplete pipes; it adds no wait or output allowance.
 
 These stream limits do not constrain arbitrary workload files, CLI downloads
 or Docker daemon writes. Colab freezes an explicit native gateway envelope at
