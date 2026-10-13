@@ -209,38 +209,53 @@ class ProcessCapture:
                     pipe = getattr(self.process, name)
                     os.set_blocking(pipe.fileno(), False)
                     selector.register(pipe, selectors.EVENT_READ, name)
+
+                def read_pipe(key, limit: int) -> int | None:
+                    try:
+                        data = os.read(key.fd, limit)
+                    except BlockingIOError:
+                        return None
+                    if not data:
+                        selector.unregister(key.fileobj)
+                        return 0
+                    name = key.data
+                    kept = data[:max(0, CAPTURE_LIMIT_BYTES - self.sizes[name])]
+                    self.truncated[name] |= len(kept) != len(data)
+                    self.sizes[name] += len(kept)
+                    if self.retain:
+                        self.output[name].extend(kept)
+                    stream = self.streams.get(name)
+                    raw = kept[:max(0, self.reserved - self.written)]
+                    if stream is not None and raw:
+                        try:
+                            self.written += stream.write(raw)
+                        except OSError:
+                            self.log_failed = True
+                            stream.close()
+                            del self.streams[name]
+                    return len(data)
+
                 while selector.get_map() and not self.stop.is_set():
                     if self.process.poll() is not None:
                         if exited_at is None:
                             exited_at = time.monotonic()
                         elif time.monotonic() - exited_at >= PIPE_DRAIN_GRACE_SECONDS:
-                            self.held_pipes = True
+                            # A delayed reader may still need to consume EOF on
+                            # closed pipes. Probe without waiting, bounded by
+                            # the remaining prefix plus one overflow byte.
+                            for key in list(selector.get_map().values()):
+                                remaining = CAPTURE_LIMIT_BYTES - self.sizes[key.data] + 1
+                                while remaining > 0:
+                                    size = read_pipe(key, min(8192, remaining))
+                                    if not size:
+                                        break
+                                    remaining -= size
+                            self.held_pipes = bool(selector.get_map())
                             for key in selector.get_map().values():
                                 self.truncated[key.data] = True
                             break
                     for key, _ in selector.select(.025):
-                        try:
-                            data = os.read(key.fd, 8192)
-                        except BlockingIOError:
-                            continue
-                        if not data:
-                            selector.unregister(key.fileobj)
-                            continue
-                        name = key.data
-                        kept = data[:max(0, CAPTURE_LIMIT_BYTES - self.sizes[name])]
-                        self.truncated[name] |= len(kept) != len(data)
-                        self.sizes[name] += len(kept)
-                        if self.retain:
-                            self.output[name].extend(kept)
-                        stream = self.streams.get(name)
-                        raw = kept[:max(0, self.reserved - self.written)]
-                        if stream is not None and raw:
-                            try:
-                                self.written += stream.write(raw)
-                            except OSError:
-                                self.log_failed = True
-                                stream.close()
-                                del self.streams[name]
+                        read_pipe(key, 8192)
                 if self.stop.is_set():
                     for key in selector.get_map().values():
                         self.truncated[key.data] = True
