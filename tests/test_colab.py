@@ -305,11 +305,29 @@ def _reference_lock():
                                            ("torch", "2.11.0"), ("huggingface-hub", "1.0.0"))) + "\n"
 
 
+def _run_trail(state):
+    """Fake-run outcome summary for failure reports (#588): names the cleanup
+    substage behind an otherwise opaque nonzero exit. Never asserts."""
+    try:
+        manifest = json.loads((Path(state) / "manifest.json").read_text())
+    except (OSError, ValueError):
+        return f"run trail unavailable for {state}"
+    events = [item.get("event") for item in manifest.get("events", [])
+              if item.get("event") != "cu_observed_best_effort"]
+    summary = {key: manifest.get(key) for key in (
+        "phase", "released", "workload_succeeded", "final_cu_observation",
+        "gateway_network_cleanup", "gateway_container_cleanup", "private_key_cleanup_failed")}
+    return f"run trail {state}: {json.dumps(summary, sort_keys=True, default=str)} events={events[-30:]}"
+
+
 def _controller_call(argv, *, source_root=None):
     previous = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
     previous_umask = os.umask(0o077)
     try:
-        return controller.main(argv, bootstrap=False, source_root=source_root)
+        result = controller.main(argv, bootstrap=False, source_root=source_root)
+        if argv[:1] == ["run"] and result != 0:
+            print(_run_trail(argv[argv.index("--state") + 1]))  # shown only for failing tests
+        return result
     finally:
         os.umask(previous_umask)
         for sig, handler in previous.items():
@@ -756,7 +774,7 @@ def lab(tmp_path, monkeypatch, request):
                                 + common, source_root=source) == 0
         proof = subprocess.run(command + ["run", "--state", str(cpu), "--approve-cu", "20", "--", "/bin/true"],
                                capture_output=True, text=True, timeout=15, check=False)
-        assert proof.returncode == 0, proof.stdout + proof.stderr
+        assert proof.returncode == 0, proof.stdout + proof.stderr + _run_trail(cpu)
         inference_lock = tmp_path / "inference.lock"
         inference_lock.write_text(_reference_lock())
         prerequisites = ["--inference-lock", str(inference_lock),
@@ -845,7 +863,7 @@ def storage_lab(lab, retained, original_inputs, monkeypatch):
     test_colab_production._json(root / "original-runtime-observed.json", runtime)
     proof = subprocess.run(command + ["run", "--state", str(base), "--approve-cu", "20", "--", "/bin/true"],
                            capture_output=True, text=True, timeout=15, check=False)
-    assert proof.returncode == 0, proof.stdout + proof.stderr
+    assert proof.returncode == 0, proof.stdout + proof.stderr + _run_trail(base)
     (root / "events.jsonl").write_text("")
     kubeconfig = root / "original-kubeconfig"
     kubeconfig.write_text("original fake Kubernetes client input\n")
@@ -998,7 +1016,10 @@ def _production_cli(state, *, stop=False, workload=()):
         argv += ["--approve-cu", "20"]
         if workload:
             argv += ["--", *workload]
-    return subprocess.run(argv, capture_output=True, text=True, timeout=20, check=False)
+    result = subprocess.run(argv, capture_output=True, text=True, timeout=20, check=False)
+    if result.returncode != 0:
+        print(_run_trail(state))  # shown only for failing tests
+    return result
 
 
 def test_production_prepare_refuses_maxima_only_census_without_independent_inputs(lab):
