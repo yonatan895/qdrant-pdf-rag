@@ -46,7 +46,7 @@ REQUIRE_RUNNER = os.environ.get("TASK_CONTRACTS_REQUIRE_RUNNER") == "1"
 # tuple, so the logged set cannot drift between copies.
 LOGGED_ENV_KEYS = ("EMBED_MODE", "VENUE", "PYTHONPATH", "LLM_STREAM", "UI_ENABLED",
                    "ROLE", "MODEL", "SERVED_NAME", "CONTAINER_NAME", "PORT", "BUDGET_PROFILE", "BUDGET_PYTHON",
-                   "GATEWAY_PORT", "GATEWAY_PROBE_MAX_TOKENS", "CORPUS_DIR", "LOCAL_INGEST_PROGRESS", "LOCAL_AGENT_PORT", "JAEGER_PORT",
+                   "GATEWAY_PORT", "GATEWAY_PROBE_MAX_TOKENS", "CORPUS_DIR", "LOCAL_INGEST_PROGRESS", "LOCAL_INGEST_REINGEST", "LOCAL_AGENT_PORT", "JAEGER_PORT",
                    "SIM_CONTAINER", "SIM_PORT",
                    "GPU_MEM", "MAX_LEN", "SEQS", "LOCAL_STACK_DRYRUN")
 
@@ -1212,6 +1212,29 @@ class TaskContractsTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stdout)
         self.assertIn(f"--progress {logs}/local-stack-ingest-progress.jsonl", proc.stdout)
         self.assertNotIn("/old/inventory.jsonl", proc.stdout)
+
+    def test_stack_forwards_reingest_only_when_selected(self):
+        # Issue #737: the contract's resume remedy reaches the supervisor only
+        # as an explicit choice; an explicit empty value disarms an ambient one.
+        self.make_venv_fake()
+        self.make_script_recorder("run_local_stack.sh")
+        env = self.tool_env()
+        for args, ambient, expected in (((), None, None), (("LOCAL_INGEST_REINGEST=1",), None, "1"),
+                                        (("LOCAL_INGEST_REINGEST=",), "1", None)):
+            extra = env if ambient is None else dict(env, LOCAL_INGEST_REINGEST=ambient)
+            proc = self.run_task("local:stack", *args, extra_env=extra)
+            self.assertEqual(proc.returncode, 0, proc.stdout)
+            self.assertEnvSubset(self.script_calls("run_local_stack.sh")[0], {"LOCAL_INGEST_REINGEST": expected})
+            self.log.unlink()
+        shutil.copyfile(REPO / "scripts/run_local_stack.sh", self.root / "scripts/run_local_stack.sh")
+        proc = self.run_task("local:stack", "LOCAL_INGEST_REINGEST=1", "LOCAL_STACK_DRYRUN=1",
+                             f"CORPUS_DIR={self.root}", extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn("--reingest (collection", proc.stdout)
+        proc = self.run_task("local:stack", "LOCAL_INGEST_REINGEST=", "LOCAL_STACK_DRYRUN=1",
+                             f"CORPUS_DIR={self.root}", extra_env=dict(env, LOCAL_INGEST_REINGEST="1"))
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertNotIn("--reingest", proc.stdout)
 
     def test_agent_stream_port_and_ui(self):
         self.make_venv_fake()

@@ -25,6 +25,9 @@
 # estimate) and the ingest is refused (exit 75) when RAM or memory/IO pressure
 # cannot take it; FORCE_START=1 skips only that refusal. This sizing is local
 # only: the ingest CLI default, production Jobs and airgap workers are untouched.
+# LOCAL_INGEST_REINGEST=1 is the explicit per-run `--reingest` (issue #737): the
+# ingest contract's only resumption of a pending build (docs/ingest.md §9). The
+# publisher alone decides checkpoint reuse; unset/0 keeps the default.
 # LOCAL_STACK_DRYRUN=1 prints the ordered plan and validates inputs only.
 # Never a product path; never in CI or the air gap.
 
@@ -91,6 +94,7 @@ HOST_PSI_DIR="${HOST_PSI_DIR:-/proc/pressure}"
 HOST_CPUS="${HOST_CPUS:-$(nproc 2>/dev/null || echo 2)}"
 LOG_DIR="${LOCAL_STACK_LOG_DIR:-${TMPDIR:-/tmp}}"
 LOCAL_INGEST_PROGRESS="${LOCAL_INGEST_PROGRESS:-$LOG_DIR/local-stack-ingest-progress.jsonl}"
+LOCAL_INGEST_REINGEST="${LOCAL_INGEST_REINGEST:-0}"
 DRYRUN="${LOCAL_STACK_DRYRUN:-0}"
 PY="${PY:-$REPO_ROOT/.venv/bin/python}"
 
@@ -198,6 +202,15 @@ esac
 if [ -n "$CORPUS_DIR" ] && [ ! -d "$CORPUS_DIR" ]; then
     die "CORPUS_DIR is not a directory: $CORPUS_DIR"
 fi
+INGEST_FORCE_ARG=""
+case "$LOCAL_INGEST_REINGEST" in
+    0) ;;
+    1)
+        [ -n "$CORPUS_DIR" ] || die "LOCAL_INGEST_REINGEST=1 requires CORPUS_DIR"
+        INGEST_FORCE_ARG="--reingest"
+        ;;
+    *) die "LOCAL_INGEST_REINGEST must be 0 or 1, got '$LOCAL_INGEST_REINGEST'" ;;
+esac
 
 # Size the local ingest and decide admission (issue #580). Sets
 # INGEST_WORKERS_CHOSEN; returns 1 (fixed message) when the host cannot take it.
@@ -256,7 +269,7 @@ if [ "$DRYRUN" = "1" ]; then
     echo "[plan] 4. gateway: GATEWAY_ENV_FILE=$GATEWAY_ENV_FILE sh scripts/run_local_gateway.sh"
     echo "[plan] 5. probe:   $PY scripts/probe_gateway.py --stream --max-tokens $GATEWAY_PROBE_MAX_TOKENS"
     if [ -n "$CORPUS_DIR" ]; then
-        echo "[plan] 6. ingest:  OTEL_SERVICE_NAME=$INGEST_SERVICE_NAME $PY -m mainframe_rag.ingest.run_ingest --src $CORPUS_DIR --workers $INGEST_WORKERS_CHOSEN --progress $LOCAL_INGEST_PROGRESS (collection $QDRANT_COLLECTION)$INGEST_PLAN_NOTE"
+        echo "[plan] 6. ingest:  OTEL_SERVICE_NAME=$INGEST_SERVICE_NAME $PY -m mainframe_rag.ingest.run_ingest --src $CORPUS_DIR --workers $INGEST_WORKERS_CHOSEN --progress $LOCAL_INGEST_PROGRESS${INGEST_FORCE_ARG:+ $INGEST_FORCE_ARG} (collection $QDRANT_COLLECTION)$INGEST_PLAN_NOTE"
     else
         echo "[plan] 6. ingest:  skipped (CORPUS_DIR unset)"
     fi
@@ -398,7 +411,7 @@ if [ -n "$CORPUS_DIR" ]; then
             export QDRANT_API_KEY="$_STACK_QDRANT_WRITE_KEY"
         fi
         OTEL_SERVICE_NAME="$INGEST_SERVICE_NAME" exec "$PY" -m mainframe_rag.ingest.run_ingest --src "$CORPUS_DIR" \
-            --workers "$INGEST_WORKERS_CHOSEN" --progress "$LOCAL_INGEST_PROGRESS"
+            --workers "$INGEST_WORKERS_CHOSEN" --progress "$LOCAL_INGEST_PROGRESS" ${INGEST_FORCE_ARG:+"$INGEST_FORCE_ARG"}
     )
 fi
 

@@ -180,6 +180,7 @@ handoff; see [the local credential contract](live-stack.md#full-local-simulation
 | `COLAB_PROFILE`, `COLAB_DATASET` | Named profile and explicit `production`/`synthetic` selection |
 | `COLAB_EMBEDDING_MAX_LEN` | Measured supported input window; default 4096 is commissioning only |
 | `COLAB_DEADLINE_SECONDS`, `COLAB_CU_CAP`, `COLAB_CU_FLOOR` | Defaults 7200 seconds, 20 CU, 10 CU retained floor |
+| `COLAB_INGEST_REINGEST` | Optional `--ingest-reingest`; production only, `1` freezes an explicit ingest `--reingest` for this run |
 
 Unset/empty optional inputs preserve controller defaults. Optional ports are
 `COLAB_REASONING_PORT`, `COLAB_EMBEDDING_PORT`, `COLAB_QDRANT_PORT`; polling uses
@@ -317,6 +318,17 @@ then generates fresh model-leg URLs and credentials before its consumers start.
 Ingest must reconcile every source hash and chunk outcome, resume only compatible
 same-build progress, and publish no partial collection. After cleanup and a new
 session, prove the next ordinary operation uses that retained state.
+
+An interrupted first build leaves its staging contract `pending`; an ordinary
+retry refuses at ingest preflight, after allocation and model warmup. Resuming is
+the contract's explicit `--reingest` (`docs/ingest.md` §9): prepare that run with
+`COLAB_INGEST_REINGEST=1`. The choice is frozen in the prepared manifest, so its
+approval covers it, and the native workload receives `LOCAL_INGEST_REINGEST=1`;
+otherwise it receives `0` and ambient values are ignored. The ingest publisher
+alone decides whether verified document checkpoints are reused. A non-resumable
+state becomes a fresh forced build that re-embeds everything. Confirm the outcome
+from the retained workload log (`publish_resume`, skip counts) and the progress
+inventory. Prepare the next run after a completed publication without the option.
 
 Full acceptance follows [live-stack verification](live-stack.md) and the
 [real-corpus runbook](local-real-corpus.md): actual stored content, all golden

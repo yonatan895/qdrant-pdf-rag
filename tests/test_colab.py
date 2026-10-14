@@ -351,6 +351,14 @@ def _prepare_new(source_state, state, *, profile="COLAB_CPU_TRANSPORT", extra=()
     return state
 
 
+def test_ingest_reingest_is_refused_outside_production_before_state(lab):
+    root, base, _ = lab
+    state = root / "synthetic-reingest"
+    argv, source = _prepare_arguments(base, state, extra=("--ingest-reingest",))
+    assert _controller_call(argv, source_root=source) == 2
+    assert not state.exists()
+
+
 def _run_fake(state, workload=("/bin/true",)):
     return _controller_call(["run", "--state", str(state), "--approve-cu", "20", "--", *workload])
 
@@ -723,7 +731,8 @@ if 'PRODUCTION_CORPUS_DIR' in os.environ:
     from mainframe_rag.ingest.rules_version import extraction_rules_version
     settings=Settings(_env_file=None)
     names=('CORPUS_DIR','PRODUCTION_CORPUS_DIR','PRODUCTION_GOLDEN_PATH','LOCAL_INGEST_PROGRESS',
-           'LOCAL_STACK_DRYRUN','QDRANT_URL','PYTHONPATH','GATEWAY_EMBED_MODEL','GATEWAY_EMBED_MODEL_REVISION')
+           'LOCAL_INGEST_REINGEST','LOCAL_STACK_DRYRUN','QDRANT_URL','PYTHONPATH','GATEWAY_EMBED_MODEL',
+           'GATEWAY_EMBED_MODEL_REVISION')
     observed['production']={name:os.environ[name] for name in names}
     observed['production'].update(collection=settings.qdrant_collection,prefix=settings.dense_query_prefix,
         context_model=settings.context_llm_model,bm25_cache=settings.bm25_cache_dir,
@@ -891,8 +900,8 @@ def storage_lab(lab, retained, original_inputs, monkeypatch):
             run.terminate(child)
 
 
-def _prepare_production_again(run, name):
-    extra = []
+def _prepare_production_again(run, name, *, extra=()):
+    extra = list(extra)
     for field in ("corpus", "golden", "inventory", "source_inventory", "embedding_evidence", "production_approval",
                   "data_state", "kubeconfig", "kube_context", "namespace", "qdrant_service",
                   "inference_lock", "transport_receipt", "qdrant_port"):
@@ -1981,6 +1990,9 @@ def test_complete_production_admission_hands_exact_target_progress_and_native_se
         ambient.setenv("dense_query_prefix", "Unapproved changed prefix | α\n")
         ambient.setenv("context_llm_model", "unapproved-context-model")
         ambient.setenv("bm25_cache_dir", str(root / "unapproved-cache"))
+        # Issue #737: only the prepared choice may force ingest, never ambient.
+        ambient.setenv("LOCAL_INGEST_REINGEST", "1")
+        ambient.setenv("local_ingest_reingest", "1")
         result = _production_cli(run.state)
     assert result.returncode == 0, result.stdout + result.stderr
     observed = json.loads((root / "snapshot-workload.json").read_text())
@@ -1989,6 +2001,7 @@ def test_complete_production_admission_hands_exact_target_progress_and_native_se
     assert production == {
         "CORPUS_DIR": run.config["corpus"], "PRODUCTION_CORPUS_DIR": run.config["corpus"],
         "PRODUCTION_GOLDEN_PATH": run.config["golden"], "LOCAL_INGEST_PROGRESS": progress,
+        "LOCAL_INGEST_REINGEST": "0",
         "LOCAL_STACK_DRYRUN": "0", "QDRANT_URL": f"http://127.0.0.1:{run.config['qdrant_port']}",
         "PYTHONPATH": str(run.execution_root / "src"),
         "GATEWAY_EMBED_MODEL": run.profile["servers"][1]["model_id"],
@@ -2010,6 +2023,16 @@ def test_complete_production_admission_hands_exact_target_progress_and_native_se
     assert next_run.returncode == 0, next_run.stdout + next_run.stderr
     next_observed = json.loads((root / "snapshot-workload.json").read_text())
     assert next_observed["production"]["LOCAL_INGEST_PROGRESS"] == progress
+    assert next_observed["production"]["LOCAL_INGEST_REINGEST"] == "0"
+    assert json.loads((next_state / "manifest.json").read_text())["config"]["ingest_reingest"] is False
+    # Issue #737: the explicit per-run choice is frozen and reaches the native stack.
+    selected = _prepare_production_again(run, "explicit-reingest-resume", extra=("--ingest-reingest",))
+    assert json.loads((selected / "manifest.json").read_text())["config"]["ingest_reingest"] is True
+    resumed = _production_cli(selected)
+    assert resumed.returncode == 0, resumed.stdout + resumed.stderr
+    resumed_observed = json.loads((root / "snapshot-workload.json").read_text())
+    assert resumed_observed["production"]["LOCAL_INGEST_REINGEST"] == "1"
+    assert resumed_observed["production"]["LOCAL_INGEST_PROGRESS"] == progress
 
 
 @pytest.mark.parametrize("changed", ["source", "ledger", "wrapper", "runtime_software", "runtime_metadata"])

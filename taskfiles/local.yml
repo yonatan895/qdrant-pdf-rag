@@ -72,8 +72,10 @@ tasks:
       COLAB_GATEWAY_IMAGE (existing digest pin). Optional COLAB_* inputs map
       to scripts/colab.py prepare flags; PRODUCTION_CORPUS_DIR and
       PRODUCTION_GOLDEN_PATH supply private production sources. Unset/empty
-      optional values preserve controller defaults. Never installs tools,
-      logs in, allocates a session or approves compute units.
+      optional values preserve controller defaults. COLAB_INGEST_REINGEST=1
+      (production only) freezes an explicit ingest --reingest for this run
+      (issue #737). Never installs tools, logs in, allocates a session or
+      approves compute units.
     env:
       TASK_COLAB_STATE: '{{.COLAB_STATE}}'
       TASK_COLAB_GATEWAY_IMAGE: '{{.COLAB_GATEWAY_IMAGE}}'
@@ -101,6 +103,7 @@ tasks:
       TASK_COLAB_CU_FLOOR: '{{.COLAB_CU_FLOOR}}'
       TASK_COLAB_DOCKER_GATEWAY: '{{.COLAB_DOCKER_GATEWAY}}'
       TASK_COLAB_POLL_SECONDS: '{{.COLAB_POLL_SECONDS}}'
+      TASK_COLAB_INGEST_REINGEST: '{{.COLAB_INGEST_REINGEST}}'
       TASK_COLAB_BIN: '{{.COLAB_BIN}}'
       TASK_COLAB_SSH_BIN: '{{.COLAB_SSH_BIN}}'
       TASK_COLAB_SSH_KEYGEN_BIN: '{{.COLAB_SSH_KEYGEN_BIN}}'
@@ -139,6 +142,7 @@ tasks:
         if [ -n "${TASK_COLAB_CU_FLOOR:-}" ]; then set -- "$@" --cu-floor "$TASK_COLAB_CU_FLOOR"; fi;
         if [ -n "${TASK_COLAB_DOCKER_GATEWAY:-}" ]; then set -- "$@" --docker-gateway "$TASK_COLAB_DOCKER_GATEWAY"; fi;
         if [ -n "${TASK_COLAB_POLL_SECONDS:-}" ]; then set -- "$@" --poll-seconds "$TASK_COLAB_POLL_SECONDS"; fi;
+        case "${TASK_COLAB_INGEST_REINGEST:-}" in ''|0) ;; 1) set -- "$@" --ingest-reingest ;; *) echo "COLAB_INGEST_REINGEST must be 0 or 1" >&2; exit 2 ;; esac;
         if [ -n "${TASK_COLAB_BIN:-}" ]; then set -- "$@" --colab "$TASK_COLAB_BIN"; fi;
         if [ -n "${TASK_COLAB_SSH_BIN:-}" ]; then set -- "$@" --ssh "$TASK_COLAB_SSH_BIN"; fi;
         if [ -n "${TASK_COLAB_SSH_KEYGEN_BIN:-}" ]; then set -- "$@" --ssh-keygen "$TASK_COLAB_SSH_KEYGEN_BIN"; fi;
@@ -423,6 +427,8 @@ tasks:
     summary: |
       `sh scripts/run_local_stack.sh` with caller-set CORPUS_DIR,
       LOCAL_INGEST_PROGRESS (unset retains the log-directory inventory),
+      LOCAL_INGEST_REINGEST (explicit 1 passes ingest --reingest, the
+      contract's resumption of a pending build; unset/0 keeps the default),
       GATEWAY_PORT, GATEWAY_PROBE_MAX_TOKENS (default 16, range 1–4096),
       LOCAL_AGENT_PORT, JAEGER_PORT and LOCAL_STACK_DRYRUN
       forwarded, replacing the retired `make local-stack`. The supervisor owns
@@ -433,6 +439,7 @@ tasks:
     env:
       TASK_CORPUS_DIR: '{{.CORPUS_DIR}}'
       TASK_LOCAL_INGEST_PROGRESS: '{{.LOCAL_INGEST_PROGRESS}}'
+      TASK_LOCAL_INGEST_REINGEST: '{{.LOCAL_INGEST_REINGEST}}'
       TASK_GATEWAY_PORT: '{{.GATEWAY_PORT}}'
       TASK_LOCAL_AGENT_PORT: '{{.LOCAL_AGENT_PORT}}'
       TASK_GATEWAY_PROBE_MAX_TOKENS: '{{.GATEWAY_PROBE_MAX_TOKENS}}'
@@ -442,6 +449,7 @@ tasks:
       - >-
         if [ -n "${TASK_CORPUS_DIR:-}" ]; then export CORPUS_DIR="$TASK_CORPUS_DIR"; fi;
         if [ -n "${TASK_LOCAL_INGEST_PROGRESS:-}" ]; then export LOCAL_INGEST_PROGRESS="$TASK_LOCAL_INGEST_PROGRESS"; else unset LOCAL_INGEST_PROGRESS; fi;
+        if [ -n "${TASK_LOCAL_INGEST_REINGEST:-}" ]; then export LOCAL_INGEST_REINGEST="$TASK_LOCAL_INGEST_REINGEST"; else unset LOCAL_INGEST_REINGEST; fi;
         if [ -n "${TASK_GATEWAY_PORT:-}" ]; then export GATEWAY_PORT="$TASK_GATEWAY_PORT"; fi;
         if [ -n "${TASK_LOCAL_AGENT_PORT:-}" ]; then export LOCAL_AGENT_PORT="$TASK_LOCAL_AGENT_PORT"; fi;
         if [ -n "${TASK_GATEWAY_PROBE_MAX_TOKENS:-}" ]; then export GATEWAY_PROBE_MAX_TOKENS="$TASK_GATEWAY_PROBE_MAX_TOKENS"; else unset GATEWAY_PROBE_MAX_TOKENS; fi;

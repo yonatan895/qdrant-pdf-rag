@@ -470,7 +470,7 @@ Mainframe RAG supports native **idempotent incremental ingestion** via the inven
 * **Verified skipping**: Inventory matches avoid parsing/embedding only after the target generation's completion and stored points verify; inventory status alone is insufficient.
 * **Extraction-rules changes**: a stored point whose `rules_v` differs is deleted and re-ingested; a non-empty collection written by a different rules version fails closed unless `--reingest` is passed (details in `docs/ingest.md` §9).
 * **Deterministic UUID5 Point IDs**: New chunks are assigned deterministic UUID5 keys and inserted directly into the existing Qdrant collection without deleting or modifying previously indexed vectors.
-* **Corrupted / Partial File Safety**: If ingestion was interrupted midway or a PDF failed earlier with an error, re-running `run_ingest` will pick up right where it left off, only processing un-ingested files.
+* **Corrupted / Partial File Safety**: An interrupted or failed build never publishes a partial corpus. Its staging contract stays `pending`, so an ordinary re-run refuses before any parse; resume it with `--reingest`, which reuses that build's verified document checkpoints and reprocesses the rest (`docs/ingest.md` §9). The local stack and Colab lanes expose this as an explicit per-run choice (`LOCAL_INGEST_REINGEST=1`, `COLAB_INGEST_REINGEST=1`).
 
 **How to add new manuals:**
 Simply drop the new PDFs into your manuals directory (or specify a new `--src` directory) and re-run with the same `QDRANT_COLLECTION` and `--progress` path:
