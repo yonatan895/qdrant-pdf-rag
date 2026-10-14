@@ -8,6 +8,8 @@
 # an explicit empty value fails closed here with a clear message (Make leaves
 # it to a cryptic docker error; recorded in docs/task-runner.md). PY selects
 # the interpreter for scripts/qdrant_pin.py (default python3, stdlib-only).
+# SIM_QDRANT_VOLUME (opt-in, env-only; #742) names a Docker volume mounted at
+# /qdrant/storage so data survives `down`/`up`; unset keeps the ephemeral default.
 set -eu
 
 REPO_ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
@@ -18,6 +20,14 @@ if [ -z "$SIM_CONTAINER" ] || [ -z "$SIM_PORT" ]; then
   echo "sim_qdrant: SIM_CONTAINER and SIM_PORT must not be empty" >&2
   exit 2
 fi
+SIM_QDRANT_VOLUME="${SIM_QDRANT_VOLUME:-}"
+case "$SIM_QDRANT_VOLUME" in
+  '') ;;
+  [!A-Za-z0-9]*|*[!A-Za-z0-9_.-]*)
+    echo "sim_qdrant: SIM_QDRANT_VOLUME must be a plain Docker volume name" >&2
+    exit 2
+    ;;
+esac
 
 case "${1:?usage: sim_qdrant.sh up|down}" in
   up)
@@ -28,7 +38,18 @@ case "${1:?usage: sim_qdrant.sh up|down}" in
         echo "sim_qdrant: existing container is stopped or uses unapproved image bytes" >&2
         exit 1
       }
+      if [ -n "$SIM_QDRANT_VOLUME" ]; then
+        MOUNTED=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/qdrant/storage"}}{{.Name}}{{end}}{{end}}' "$SIM_CONTAINER")
+        [ "$MOUNTED" = "$SIM_QDRANT_VOLUME" ] || {
+          echo "sim_qdrant: running container does not persist to SIM_QDRANT_VOLUME; stop it first" >&2
+          exit 1
+        }
+      fi
       echo "sim qdrant already running: QDRANT_SIM_URL=http://127.0.0.1:${SIM_PORT}"
+    elif [ -n "$SIM_QDRANT_VOLUME" ]; then
+      docker run --pull=never -d --name "$SIM_CONTAINER" --rm -p "127.0.0.1:${SIM_PORT}:6333" \
+        -v "${SIM_QDRANT_VOLUME}:/qdrant/storage" "$IMAGE_ID"
+      echo "Qdrant sim up (persistent volume ${SIM_QDRANT_VOLUME}): QDRANT_SIM_URL=http://127.0.0.1:${SIM_PORT}"
     else
       docker run --pull=never -d --name "$SIM_CONTAINER" --rm -p "127.0.0.1:${SIM_PORT}:6333" \
         "$IMAGE_ID"
