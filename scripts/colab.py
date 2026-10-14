@@ -1542,6 +1542,13 @@ class Run:
         (self.state / "handoff.env").write_text(
             alias_cleanup + "".join(f"unset {key}\n" for key in sorted(unsets))
             + "".join(f"export {key}={shlex.quote(env[key])}\n" for key in sorted(keys)))
+        if self.config["dataset"] != "production":
+            # Sandbox lane (#742): the same model routing and gateway ownership
+            # for a stack started from the operator's own checkout, so the
+            # interpreter and import path stay the caller's, not the snapshot's.
+            sandbox = sorted(keys - {"PY", "PYTHONPATH", "PYTHONDONTWRITEBYTECODE"})
+            (self.state / "sandbox.env").write_text(
+                "".join(f"export {key}={shlex.quote(env[key])}\n" for key in sandbox))
         return env
 
     def cleanup(self) -> bool:
@@ -1753,8 +1760,12 @@ class Run:
             if self.config["dataset"] == "production":
                 from mainframe_rag.serve.colab_production import verify_runtime_evidence
                 verify_runtime_evidence(self.production_admission(), diagnostic)
+            # The workload learns its private state and work deadline (#742), so
+            # a sandbox hold can end cleanly before the controller's deadline.
+            workload_env = {**self.environment(bridge), "RAG_COLAB_STATE": str(self.state),
+                            "RAG_COLAB_WORK_EXPIRY": repr(self.work_expiry)}
             child = self.spawn(workload or (["/bin/true"] if not self.profile["accelerator"]
-                                            else ["sh", "scripts/tools/run-task.sh", "local:stack"]), "workload", env=self.environment(bridge))
+                                            else ["sh", "scripts/tools/run-task.sh", "local:stack"]), "workload", env=workload_env)
             self.workload = child
             self.manifest["phase"] = "running"
             self.save("local_workload_started")

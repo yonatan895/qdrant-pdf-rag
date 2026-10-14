@@ -56,6 +56,45 @@ class SimQdrantScriptTests(unittest.TestCase):
         self.assertIn("--pull=never", docker[1])
         self.assertIn("QDRANT_SIM_URL=http://127.0.0.1:6333", proc.stdout)
 
+    def _up(self, **extra):
+        env = dict(self.env, RECORDER_LOG=str(self.log), RECORDER_EXIT="0", **extra)
+        return subprocess.run(["sh", str(self.root / "scripts/sim_qdrant.sh"), "up"], capture_output=True,
+                              text=True, env=env, cwd=self.root, timeout=60, check=False)
+
+    def test_persistent_volume_is_mounted_only_when_selected(self):
+        # #742: opt-in persistence for the sandbox; the default stays ephemeral.
+        proc = self._up(DOCKER_INSPECT_EXIT="1", SIM_QDRANT_VOLUME="rag-sandbox-qdrant")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        run = next(c["argv"] for c in self.calls() if c["argv"][:1] == ["run"])
+        self.assertEqual(run[run.index("-v") + 1], "rag-sandbox-qdrant:/qdrant/storage")
+        self.assertIn("persistent volume rag-sandbox-qdrant", proc.stdout)
+        self.log.unlink()
+        proc = self._up(DOCKER_INSPECT_EXIT="1")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        run = next(c["argv"] for c in self.calls() if c["argv"][:1] == ["run"])
+        self.assertNotIn("-v", run)
+
+    def test_running_container_is_reused_only_with_the_selected_volume(self):
+        proc = self._up(DOCKER_INSPECT_EXIT="0", SIM_QDRANT_VOLUME="rag-sandbox-qdrant",
+                        DOCKER_MOUNT_VOLUME="rag-sandbox-qdrant")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("already running", proc.stdout)
+        self.log.unlink()
+        for mounted in ("", "other-volume"):
+            proc = self._up(DOCKER_INSPECT_EXIT="0", SIM_QDRANT_VOLUME="rag-sandbox-qdrant",
+                            DOCKER_MOUNT_VOLUME=mounted)
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("does not persist to SIM_QDRANT_VOLUME", proc.stderr)
+            self.assertFalse(any(c["argv"][0] in ("run", "stop", "rm") for c in self.calls()))
+            self.log.unlink()
+
+    def test_invalid_volume_names_refuse_before_docker(self):
+        for bad in ("-v", "../data", "a b", "name:/etc", "/abs"):
+            proc = self._up(DOCKER_INSPECT_EXIT="1", SIM_QDRANT_VOLUME=bad)
+            self.assertEqual(proc.returncode, 2, bad)
+            self.assertIn("plain Docker volume name", proc.stderr)
+            self.assertEqual(self.calls(), [], "docker must not run on an invalid volume name")
+
     def test_sim_helper_rejects_empty_names(self):
         env = dict(self.env,
                    RECORDER_LOG=str(self.log), RECORDER_EXIT="0",

@@ -150,6 +150,53 @@ the explicitly selected synthetic lane while production prerequisites remain
 unmet. CPU skips this stage. Actual target-library execution and GPU fit still
 require the separately approved live run; unit packets prove integration only.
 
+## Sandbox lane (daily iteration)
+
+The sandbox (#742) keeps both models up for one owned G4 session while you start,
+stop and restart the local stack from your own checkout. A stack crash costs one
+rerun, not the session. Sandbox results are iteration evidence, not acceptance;
+the production lane below is unchanged.
+
+Prepare a synthetic GPU run as for commissioning (`COLAB_PROFILE=COLAB_G4_BF16`,
+`COLAB_DATASET=synthetic`, the approved inference lock and a CPU receipt for the
+same candidate). Keep `COLAB_STATE` and progress under a durable private
+directory such as `~/.local/share/mainframe-rag/colab-runs/`, never under a
+pruned temporary directory. After its approval, terminal 1 runs the hold
+workload inside the existing guard and host lock:
+
+```sh
+sh scripts/tools/run-task.sh local:colab:run COLAB_STATE="$COLAB_STATE" \
+  COLAB_APPROVE_CU=20 COLAB_WORKLOAD=scripts/colab_hold.py
+```
+
+When the models are ready, the controller writes `$COLAB_STATE/sandbox.env`.
+This is the private run's model routing, bounded gateway settings and ownership
+labels, without the snapshot interpreter or import path. Terminal 2, in your
+checkout, starts a persistent Qdrant once and then runs the stack as often as
+needed. The host lock is already held by terminal 1; keep the memory guard.
+
+```sh
+SIM_QDRANT_VOLUME=rag-sandbox-qdrant sh scripts/tools/run-task.sh local:qdrant:up
+. "$COLAB_STATE/sandbox.env"
+CORPUS_DIR="$PRODUCTION_CORPUS_DIR" INGEST_WORKERS=3 \
+  LOCAL_INGEST_PROGRESS="$SANDBOX_DATA/inventory.jsonl" \
+  sh scripts/tools/run-task.sh local:stack
+```
+
+Ctrl-C stops the stack; its traps remove the gateway it started. After a hard
+kill, `sh scripts/tools/run-task.sh local:gateway:down` removes leftovers before
+the next start. Resume an interrupted build with `LOCAL_INGEST_REINGEST=1`
+(#737). Keep the same Qdrant volume and progress path across sessions, and leave
+the option unset afterwards. `SIM_QDRANT_VOLUME` is opt-in; the default simulator
+stays ephemeral. Remove its data deliberately with `docker volume rm`.
+
+End the session with `touch "$COLAB_STATE/sandbox-stop"`. The hold also ends
+itself 15 seconds before the work deadline. Either way the run completes
+normally, and the controller exports diagnostics, stops and verifies release,
+and removes the gateway resources it owns. Ctrl-C in terminal 1 remains an
+interruption (status 130) with the same cleanup. The controller's tunnel and
+budget checks still end the session on transport loss or CU limits.
+
 ## Prepare the full-corpus GPU run
 
 Use originals already present on the host. Qdrant snapshots alone do not provide

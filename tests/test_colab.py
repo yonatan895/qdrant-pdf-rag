@@ -703,7 +703,7 @@ def _execution_fixture(root, *, production=False):
         "src/mainframe_rag/serve/__init__.py", "src/mainframe_rag/serve/colab_storage.py",
         "src/mainframe_rag/serve/budget.py", "src/mainframe_rag/serve/profiles.py",
         "scripts/gateway/strict_finish.py", "scripts/gateway/scoped_passthrough.py",
-        "scripts/gateway/trace_privacy.py", "scripts/gateway/log_capture.py",
+        "scripts/gateway/trace_privacy.py", "scripts/gateway/log_capture.py", "scripts/colab_hold.py",
     }
     paths.update(path.relative_to(ROOT).as_posix() for path in (ROOT / "taskfiles").iterdir() if path.is_file())
     if production:
@@ -713,6 +713,8 @@ def _execution_fixture(root, *, production=False):
         path = source / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes((ROOT / relative).read_bytes())
+        if (ROOT / relative).stat().st_mode & 0o111:
+            path.chmod(0o755)
     task = source / ".tools/bin/task"
     task.parent.mkdir(parents=True)
     task.write_text(f"#!{sys.executable}\n" + '''
@@ -1782,6 +1784,23 @@ def test_cpu_transport_survives_delayed_listener_inside_run_deadline_then_next_r
     assert json.loads((root / "gateway-networks.json").read_text()) == {}
 
 
+def test_sandbox_hold_hands_off_without_snapshot_interpreter_then_releases_and_next_run_works(lab):
+    """#742: the hold workload keeps the session until its margin, then ends a
+    completed run; sandbox.env carries routing/ownership, not the snapshot interpreter."""
+    root, state, _ = lab
+    assert _run_fake(state, ("scripts/colab_hold.py",)) == 0
+    manifest = json.loads((state / "manifest.json").read_text())
+    assert manifest["workload_succeeded"] is True and manifest["released"] is True
+    sandbox = (state / "sandbox.env").read_text().splitlines()
+    names = {line.split("=", 1)[0].removeprefix("export ") for line in sandbox}
+    assert {"GATEWAY_RUN_OWNER", "GATEWAY_REASONING_URL", "GATEWAY_EMBED_URL", "PG_NET"} <= names
+    assert not names & {"PY", "PYTHONPATH", "PYTHONDONTWRITEBYTECODE"}
+    handoff = {line.split("=", 1)[0].removeprefix("export ") for line in (state / "handoff.env").read_text().splitlines()}
+    assert names == handoff - {"PY", "PYTHONPATH", "PYTHONDONTWRITEBYTECODE"}
+    assert "Sandbox models are up" in (state / "workload.stdout.log").read_text()
+    assert json.loads((root / "sessions.json").read_text()) == {}
+    assert _run_fake(_prepare_new(state, root / "ordinary-after-sandbox")) == 0
+
 @pytest.mark.parametrize("failure", ["workload", "download_fail", "stop_fail"])
 def test_failed_cpu_run_has_no_receipt_and_recovery_allows_a_fresh_normal_run(lab, monkeypatch, failure):
     root, state, _ = lab
@@ -2062,6 +2081,7 @@ def test_complete_production_admission_hands_exact_target_progress_and_native_se
     assert next_run.returncode == 0, next_run.stdout + next_run.stderr
     next_observed = json.loads((root / "snapshot-workload.json").read_text())
     assert next_observed["production"]["LOCAL_INGEST_PROGRESS"] == progress
+    assert not (run.state / "sandbox.env").exists(), "the sandbox handoff never carries the frozen production contract"
     assert next_observed["production"]["LOCAL_INGEST_REINGEST"] == "0"
     assert json.loads((next_state / "manifest.json").read_text())["config"]["ingest_reingest"] is False
     # Issue #737: the explicit per-run choice is frozen and reaches the native stack.
