@@ -1354,9 +1354,15 @@ class Run:
                 raise LabError("remote runtime exited before readiness; diagnostics retained privately")
             if self.tunnel and self.tunnel.poll() is not None:
                 raise LabError("owned SSH tunnel was lost")
-            result = self.colab("download", "-s", self.manifest["session"], "/content/colab-diagnostics.json",
-                                str(destination), seconds=10, allow_failure=True)
-            if result.returncode == 0:
+            try:
+                result = self.colab("download", "-s", self.manifest["session"], "/content/colab-diagnostics.json",
+                                    str(destination), seconds=10, allow_failure=True)
+            except subprocess.TimeoutExpired:
+                # One slow poll means "not ready yet" (#746): readiness stays
+                # bounded by `until`, and liveness/budget checks still run.
+                self.manifest["diagnostic_poll_timeouts"] = self.manifest.get("diagnostic_poll_timeouts", 0) + 1
+                result = None
+            if result is not None and result.returncode == 0:
                 diagnostic = json.loads(read_bounded_input(destination, CAPTURE_LIMIT_BYTES))
                 if type(diagnostic) is not dict:
                     raise LabError("remote diagnostic must be a bounded JSON object")

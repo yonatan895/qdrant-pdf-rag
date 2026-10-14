@@ -138,6 +138,9 @@ if name=='colab':
     elif cmd=='download':
         source,target=rest[-2:]
         if scenario=='download_fail' and source.endswith('.tgz'): sys.exit(1)
+        if (scenario=='slow_diagnostics' and source.endswith('colab-diagnostics.json')
+                and not (root/'slow-diagnostics-done').exists()):
+            (root/'slow-diagnostics-done').touch(); time.sleep(12)
         pathlib.Path(target).write_bytes(path(source).read_bytes())
     elif cmd=='exec':
         file=rest[rest.index('-f')+1]
@@ -1121,7 +1124,7 @@ def test_interrupt_quiesces_workload_before_remote_export_and_release(lab):
         if process.poll() is None:
             process.kill()
             process.communicate(timeout=3)
-    assert process.returncode == 130, stdout + stderr
+    assert process.returncode == 130, stdout + stderr + _run_trail(state)
     events = [json.loads(line) for line in (root / "events.jsonl").read_text().splitlines()]
     stopped = next(i for i, (kind, _) in enumerate(events) if kind == "workload-stopped")
     remote_teardown = next(i for i, (kind, argv) in enumerate(events)
@@ -1331,6 +1334,21 @@ def test_separate_run_states_share_assignment_ownership_and_allow_next_run(lab, 
         assert entered == [], "a distinct state bypassed assignment ownership"
     assert _controller_call(["run", "--state", str(second), "--approve-cu", "20"]) == 0
     assert entered == [second]
+
+
+def test_slow_diagnostics_poll_is_not_ready_then_run_completes_and_next_run_works(lab, monkeypatch):
+    """#746: one readiness poll slower than its 10 s command bound means "not
+    ready yet", bounded by the readiness deadline; it never fails the session."""
+    root, state, _ = lab
+    slow = _prepare_new(state, root / "slow-diagnostics-poll", extra=("--deadline-seconds", "60"))
+    monkeypatch.setenv("FAKE_COLAB_SCENARIO", "slow_diagnostics")
+    assert _run_fake(slow) == 0
+    manifest = json.loads((slow / "manifest.json").read_text())
+    assert (root / "slow-diagnostics-done").exists() and manifest["diagnostic_poll_timeouts"] == 1
+    assert manifest["workload_succeeded"] is True and manifest["released"] is True
+    assert json.loads((root / "sessions.json").read_text()) == {}
+    monkeypatch.setenv("FAKE_COLAB_SCENARIO", "success")
+    assert _run_fake(_prepare_new(state, root / "ordinary-after-slow-poll")) == 0
 
 
 @pytest.mark.parametrize("lab", ["COLAB_CPU_TRANSPORT"], indirect=True)
