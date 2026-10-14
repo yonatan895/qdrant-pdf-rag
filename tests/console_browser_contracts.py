@@ -481,6 +481,32 @@ def test_list_item_continuation_lines_render_inside_their_item(console, page):
     assert page.eval(shape) == expected
 
 
+def test_pipe_tables_render_identically_to_the_server_subset(console, page):
+    """Issue #749: streamed and reloaded GFM tables match the server renderer
+    block for block, including alignment, inline cells and inert hostile text."""
+    from mainframe_rag.webui.routes import render_markdown_subset
+
+    answer = (
+        "The HSM category is subdivided into:\n\n"
+        "| Sub-category | Description |\n"
+        "|---|:---:|\n"
+        "| **HSM SFF** | Named `hlq.HMIGTAPE.DATASET`. |\n"
+        '| <img src=x onerror="window.__pwn=7"> | short \\| row\n'
+        "\nAfter the table.\n"
+    )
+    console.llm.queue(("token", answer), ("done",))
+    send(page, "What HSM tape categories exist?")
+    wait_state(page, "complete")
+    blocks = "return Array.from(document.querySelectorAll('.turn-assistant .md > *')).map(e => e.outerHTML)"
+    expected = render_markdown_subset(answer).split("\n")
+    assert page.eval(blocks) == expected
+    assert page.eval("return document.querySelectorAll('.turn-assistant .md img').length") == 0
+    assert page.eval("return window.__pwn === undefined")
+    page.reload()
+    wait_state(page, "complete")
+    assert page.eval(blocks) == expected
+
+
 def test_hostile_markup_is_inert_everywhere(console, page):
     hostile = (
         '<img src=x onerror="window.__pwn=1"> <script>window.__pwn=2</script> '

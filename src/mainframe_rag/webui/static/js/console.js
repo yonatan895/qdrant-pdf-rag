@@ -10,7 +10,7 @@
  * Assistant turns render the same safe markdown subset as the server
  * (routes.render_markdown_subset): headings, bold/italic, code spans,
  * fenced blocks, unordered/ordered lists (a plain line under an item
- * continues it) — built as DOM nodes via
+ * continues it), GFM pipe tables (issue #749) — built as DOM nodes via
  * textContent, never innerHTML, so hostile markup stays inert.
  *
  * No inline handlers or eval: the strict CSP (`script-src 'self'`) applies.
@@ -357,6 +357,48 @@
   const MD_UL = /^ {0,3}[-*]\s+(.*)$/;
   const MD_OL = /^ {0,3}\d+[.)]\s+(.*)$/;
   const MD_INLINE = /(`[^`\n]+?`)|(\*\*(.+?)\*\*)|((?<!\*)\*([^*\n]+?)\*(?!\*))/g;
+  const MD_TABLE_DELIM_CELL = /^:?-{3,}:?$/;
+
+  /* GFM pipe-table rows, mirroring routes._md_table_cells: optional outer
+   * pipes, `\|` stays a literal pipe inside a cell. */
+  function mdTableCells(line) {
+    let row = line.trim();
+    if (!row.includes("|")) return null;
+    if (row.startsWith("|")) row = row.slice(1);
+    if (row.endsWith("|") && !row.endsWith("\\|")) row = row.slice(0, -1);
+    return row.split(/(?<!\\)\|/).map((cell) => cell.trim().replace(/\\\|/g, "|"));
+  }
+
+  function mdTableAlignments(line, width) {
+    const cells = mdTableCells(line);
+    if (!cells || cells.length !== width || !cells.every((c) => MD_TABLE_DELIM_CELL.test(c))) return null;
+    return cells.map((c) => (c.startsWith(":") && c.endsWith(":") ? "center"
+      : c.endsWith(":") ? "right" : c.startsWith(":") ? "left" : ""));
+  }
+
+  function mdTable(header, aligns, rows) {
+    const wrap = el("div", "md-table");
+    const table = el("table");
+    const cell = (tag, text, align) => {
+      const node = el(tag, align ? "align-" + align : null);
+      mdInline(text, node);
+      return node;
+    };
+    const head = el("thead");
+    const headRow = el("tr");
+    header.forEach((text, i) => headRow.appendChild(cell("th", text, aligns[i])));
+    head.appendChild(headRow);
+    const body = el("tbody");
+    rows.forEach((row) => {
+      const tr = el("tr");
+      for (let i = 0; i < header.length; i += 1) tr.appendChild(cell("td", row[i] || "", aligns[i]));
+      body.appendChild(tr);
+    });
+    table.appendChild(head);
+    table.appendChild(body);
+    wrap.appendChild(table);
+    return wrap;
+  }
 
   const JCL_CARD_RE = /^\/\//;
   const JCL_DD_DATA_RE = /^\/\/\S+\s+DD\s+(\*|DATA)(?=[\s,]|$)/i;
@@ -545,6 +587,22 @@
         }
         pre.appendChild(code);
         frag.appendChild(pre);
+        continue;
+      }
+      const header = mdTableCells(line);
+      const aligns = header && i + 1 < lines.length ? mdTableAlignments(lines[i + 1], header.length) : null;
+      if (header && aligns) {
+        flushPara();
+        closeList();
+        const rows = [];
+        i += 2;
+        while (i < lines.length && lines[i].trim()) {
+          const row = mdTableCells(lines[i]);
+          if (!row) break;
+          rows.push(row);
+          i += 1;
+        }
+        frag.appendChild(mdTable(header, aligns, rows));
         continue;
       }
       const heading = MD_HEADING.exec(line);

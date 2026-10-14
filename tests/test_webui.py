@@ -613,6 +613,78 @@ def test_markdown_subset_renders_blocks_and_inline():
             assert needle not in rendered, (source, needle)
 
 
+def test_markdown_subset_renders_gfm_pipe_tables():
+    """Issue #749: the reasoning model answers with pipe tables; they render as
+    a real table instead of one run-on paragraph."""
+    from mainframe_rag.webui.routes import render_markdown_subset
+
+    rendered = render_markdown_subset(
+        "The HSM category is subdivided into:\n\n"
+        "| Sub-category | Description |\n"
+        "|---|:---:|\n"
+        "| **HSM SFF** | Named `hlq.HMIGTAPE.DATASET`. |\n"
+        "| **HSM GEN** | Generated data sets, such as *VTOCDUMPs*. |\n"
+        "\nAfter the table."
+    )
+    assert rendered == (
+        "<p>The HSM category is subdivided into:</p>\n"
+        '<div class="md-table"><table><thead><tr><th>Sub-category</th>'
+        '<th class="align-center">Description</th></tr></thead><tbody>'
+        '<tr><td><strong>HSM SFF</strong></td>'
+        '<td class="align-center">Named <code>hlq.HMIGTAPE.DATASET</code>.</td></tr>'
+        '<tr><td><strong>HSM GEN</strong></td>'
+        '<td class="align-center">Generated data sets, such as <em>VTOCDUMPs</em>.</td></tr>'
+        "</tbody></table></div>\n"
+        "<p>After the table.</p>"
+    )
+
+
+def test_markdown_subset_tables_pad_ragged_rows_keep_escaped_pipes_and_stop_at_plain_text():
+    from mainframe_rag.webui.routes import render_markdown_subset
+
+    rendered = render_markdown_subset(
+        "Code | Meaning | Action\n"
+        "---|---:|:---\n"
+        "04 | short \\| row\n"
+        "| 08 | error | retry | extra |\n"
+        "Not a row"
+    )
+    assert '<th class="align-right">Meaning</th><th class="align-left">Action</th>' in rendered
+    assert ('<tr><td>04</td><td class="align-right">short | row</td>'
+            '<td class="align-left"></td></tr>') in rendered
+    assert ('<tr><td>08</td><td class="align-right">error</td>'
+            '<td class="align-left">retry</td></tr>') in rendered
+    assert "extra" not in rendered
+    assert rendered.endswith("</tbody></table></div>\n<p>Not a row</p>")
+
+
+def test_markdown_subset_partial_tables_stay_inert_text():
+    from mainframe_rag.webui.routes import render_markdown_subset
+
+    for source in (
+        "| a | b |",  # header without a delimiter row
+        "| a | b |\n| c | d |",  # second row is not a delimiter
+        "| a | b |\n|---|",  # delimiter width differs from the header
+        "| a | b |\n|--|--|",  # fewer than three dashes is not a delimiter
+    ):
+        rendered = render_markdown_subset(source)
+        assert "<table" not in rendered and rendered.startswith("<p>"), source
+
+
+def test_markdown_subset_table_cells_neutralize_hostile_markup():
+    from mainframe_rag.webui.routes import render_markdown_subset
+
+    rendered = render_markdown_subset(
+        "| <script>alert(1)</script> | [x](javascript:alert(2)) |\n"
+        "|---|---|\n"
+        '| <img src=x onerror=alert(3)> | AT&T |'
+    )
+    assert "<table>" in rendered
+    for forbidden in ("<script>", "<img", "<a "):
+        assert forbidden not in rendered
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in rendered and "AT&amp;T" in rendered
+
+
 def test_markdown_subset_neutralizes_hostile_markup():
     """Spool dumps and retrieved chunks are untrusted: markup must render
     inert — escaped text, our tags only, no links anywhere."""
