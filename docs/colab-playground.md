@@ -345,7 +345,9 @@ Embedding must produce finite, normalized native 4096-dimensional vectors.
 Each model shares its existing 1,200-second startup window across health/alias
 readiness and first inference, bounded by the absolute run deadline. Warmup
 receives the remaining window to allow cold kernel compilation; a late response
-cannot certify readiness. HTTP socket timeouts still rely on the independent
+cannot certify readiness. A diagnostics poll that exceeds its 10-second command
+bound counts as not ready (#746), still within that readiness bound.
+HTTP socket timeouts still rely on the independent
 controller and outer guard for the absolute run deadline.
 Production startup also checks the actually installed tokenizer/runtime versions,
 downloaded metadata hashes and the exact embedding server argv passed to spawn
