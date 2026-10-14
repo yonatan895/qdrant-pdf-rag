@@ -364,6 +364,13 @@ or cumulative daemon writes. Retain Jaeger's existing memory/trace caps and admi
 every full-stack memory/disk destination separately: the controller cgroup does
 not contain Docker descendants. Retain final CU/session evidence on export failure.
 
+Export uses one bounded window: at most 20 seconds, ending at least 30 seconds
+(or two thirds of the remaining cleanup window) before the run deadline. The
+stop-marker upload gets at most half of what remains; the artifact download gets
+the rest. An upload timeout or failure (`artifact_stop_signal_failed`) never
+skips the download. Without the stop signal the runtime packages nothing, so the
+download fails, cleanup stays incomplete and no CPU receipt is issued (#740).
+
 After export, cleanup/recovery gives final account usage a command timeout of at
 most five seconds and a quarter of the remaining cleanup window, followed by the
 existing bounded process-reaping grace. Its output uses the export allowance,

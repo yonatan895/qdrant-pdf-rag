@@ -130,7 +130,11 @@ if name=='colab':
             print("[colab] Using unique session '"+session+"'.")
         if local[session] not in state.values(): sys.exit(2)
     elif cmd=='upload':
-        local, target=rest[-2:]; path(target).write_bytes(pathlib.Path(local).read_bytes())
+        local, target=rest[-2:]
+        if target.endswith('colab-stop'):
+            if scenario=='slow_upload': time.sleep(6)
+            if scenario=='upload_fail': sys.exit(1)
+        path(target).write_bytes(pathlib.Path(local).read_bytes())
     elif cmd=='download':
         source,target=rest[-2:]
         if scenario=='download_fail' and source.endswith('.tgz'): sys.exit(1)
@@ -1342,6 +1346,41 @@ def test_slow_export_cannot_consume_owned_vm_release_budget(lab, monkeypatch):
     assert any(event["event"] == "artifact_export_unavailable" for event in manifest["events"])
     run.expiry = time.time() + 6
     assert run.cleanup() is True, "the next ordinary recovery must recognize the released session"
+
+
+@pytest.mark.parametrize("lab", ["COLAB_CPU_TRANSPORT"], indirect=True)
+def test_slow_stop_upload_still_exports_artifacts_and_issues_cpu_receipt_then_next_run_works(lab, monkeypatch):
+    """#740: a stop-marker upload slower than the former fixed 5 s cap uses the
+    bounded export window; the archive is still downloaded and the run certified."""
+    root, state, _ = lab
+    monkeypatch.setenv("FAKE_COLAB_SCENARIO", "slow_upload")
+    assert _run_fake(state) == 0
+    manifest = json.loads((state / "manifest.json").read_text())
+    events = [event["event"] for event in manifest["events"]]
+    assert "artifact_export_unavailable" not in events and "cleanup_complete" in events
+    assert (state / "colab-artifacts.tgz").is_file() and (state / "transport-receipt.json").is_file()
+    assert manifest["released"] is True and json.loads((root / "sessions.json").read_text()) == {}
+    monkeypatch.setenv("FAKE_COLAB_SCENARIO", "success")
+    assert _run_fake(_prepare_new(state, root / "ordinary-after-slow-upload")) == 0
+
+
+@pytest.mark.parametrize("lab", ["COLAB_CPU_TRANSPORT"], indirect=True)
+def test_failed_stop_upload_still_attempts_download_and_stays_incomplete_then_next_run_works(lab, monkeypatch):
+    """#740: a failed stop-marker upload cannot skip the download attempt, and a
+    run whose archive is unavailable is never reported complete or certified."""
+    root, state, _ = lab
+    monkeypatch.setenv("FAKE_COLAB_SCENARIO", "upload_fail")
+    assert _run_fake(state) != 0
+    manifest = json.loads((state / "manifest.json").read_text())
+    events = [event["event"] for event in manifest["events"]]
+    assert "artifact_stop_signal_failed" in events and "cleanup_incomplete" in events
+    downloads = [argv for kind, argv in _events(root)
+                 if kind == "colab" and "download" in argv and argv[-1].endswith("colab-artifacts.tgz")]
+    assert downloads, "the archive download must still be attempted after a failed stop upload"
+    assert manifest["released"] is True and not (state / "transport-receipt.json").exists()
+    assert json.loads((root / "sessions.json").read_text()) == {}
+    monkeypatch.setenv("FAKE_COLAB_SCENARIO", "success")
+    assert _run_fake(_prepare_new(state, root / "ordinary-after-failed-upload")) == 0
 
 
 def test_cli_capture_keeps_stdout_separate_from_bounded_noisy_stderr_and_allows_next_command(lab):
