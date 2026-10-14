@@ -190,6 +190,24 @@ the next start. Resume an interrupted build with `LOCAL_INGEST_REINGEST=1`
 the option unset afterwards. `SIM_QDRANT_VOLUME` is opt-in; the default simulator
 stays ephemeral. Remove its data deliberately with `docker volume rm`.
 
+A full 4096-dimensional index needs several GiB, and the simulator container has
+no memory cap. To reuse the retained, memory-capped Kind Qdrant instead, run the
+supervised forward in its own terminal (#751). Then point the stack at it with
+`QDRANT_URL=http://127.0.0.1:16333`, the role keys from the namespace Secret and
+the frozen representation settings of its build:
+
+```sh
+sh scripts/tools/run-task.sh local:qdrant:forward \
+  QDRANT_FORWARD_NAMESPACE=rag-colab-706-4096 \
+  QDRANT_FORWARD_KUBECONFIG="$KIND_KUBECONFIG" QDRANT_FORWARD_CONTEXT=kind-rag-kind
+```
+
+It binds `127.0.0.1` only, so the Service stays ClusterIP. It restarts
+`kubectl port-forward` with bounded backoff when the forward exits or `/readyz`
+keeps failing. The agent then recovers within seconds instead of staying
+`qdrant_unready`. An ingest interrupted by a drop retries the affected
+documents on the next resume.
+
 End the session with `touch "$COLAB_STATE/sandbox-stop"`. The hold also ends
 itself 15 seconds before the work deadline. Either way the run completes
 normally, and the controller exports diagnostics, stops and verifies release,

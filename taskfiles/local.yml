@@ -225,6 +225,32 @@ tasks:
     cmds:
       - SIM_CONTAINER="$TASK_SIM_CONTAINER" SIM_PORT="$TASK_SIM_PORT" sh scripts/sim_qdrant.sh down
 
+  qdrant:forward:
+    desc: Supervised loopback port-forward to a retained Kind Qdrant Service
+    summary: |
+      `scripts/kube_forward.py` (issue #751): binds 127.0.0.1 only, refuses
+      an occupied port, restarts `kubectl port-forward` with bounded backoff
+      when it exits or its /readyz probe keeps failing, and stops on Ctrl-C.
+      The Service stays ClusterIP. Inputs: QDRANT_FORWARD_NAMESPACE (required),
+      QDRANT_FORWARD_SERVICE (default qdrant), QDRANT_FORWARD_PORT (default
+      16333), QDRANT_FORWARD_KUBECONFIG, QDRANT_FORWARD_CONTEXT,
+      QDRANT_FORWARD_KUBECTL (default kubectl). Foreground; never mutates the
+      cluster.
+    env:
+      TASK_QF_NAMESPACE: '{{.QDRANT_FORWARD_NAMESPACE}}'
+      TASK_QF_SERVICE: '{{.QDRANT_FORWARD_SERVICE}}'
+      TASK_QF_PORT: '{{.QDRANT_FORWARD_PORT}}'
+      TASK_QF_KUBECONFIG: '{{.QDRANT_FORWARD_KUBECONFIG}}'
+      TASK_QF_CONTEXT: '{{.QDRANT_FORWARD_CONTEXT}}'
+      TASK_QF_KUBECTL: '{{.QDRANT_FORWARD_KUBECTL}}'
+    cmds:
+      - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
+      - >-
+        test -n "${TASK_QF_NAMESPACE:-}" || { echo "QDRANT_FORWARD_NAMESPACE is required" >&2; exit 2; };
+        exec .venv/bin/python scripts/kube_forward.py --namespace "$TASK_QF_NAMESPACE"
+        --service "${TASK_QF_SERVICE:-qdrant}" --local-port "${TASK_QF_PORT:-16333}" --remote-port 6333
+        --kubectl "${TASK_QF_KUBECTL:-kubectl}" --kubeconfig "${TASK_QF_KUBECONFIG:-}" --context "${TASK_QF_CONTEXT:-}"
+
   query:
     desc: Interactive query inspection against Qdrant/gateway (read-only)
     summary: |
