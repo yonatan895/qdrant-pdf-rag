@@ -137,8 +137,11 @@ def _assistant_content(answer: str, citations: list[str]) -> str:
 # fenced code blocks (``` + optional language, unclosed closes at EOF),
 # unordered (-/*) and ordered (1./1)) lists. A plain line directly under a
 # list item continues that item (CommonMark lazy continuation) instead of
-# becoming a paragraph out of order. No links, images, tables, or
-# raw HTML — anything outside the subset renders as inert text.
+# becoming a paragraph out of order. GFM pipe tables (issue #749): a header
+# row, then a delimiter row with the same cell count, then body rows; cells
+# carry the inline subset and ragged rows are padded/truncated to the header.
+# No links, images or raw HTML — anything outside the subset renders as
+# inert text.
 # console.js implements the same subset for the streaming path; the fixture
 # battery in tests/test_webui.py pins both the rendering and the refusal
 # cases (server side — there is no JS runtime in CI).
@@ -147,6 +150,7 @@ _MD_FENCE_RE = re.compile(r"^ {0,3}```([\w+-]*)\s*$")
 _MD_UL_RE = re.compile(r"^ {0,3}[-*]\s+(.*)$")
 _MD_OL_RE = re.compile(r"^ {0,3}\d+[.)]\s+(.*)$")
 _MD_CODE_RE = re.compile(r"`([^`\n]+?)`")
+_MD_TABLE_DELIM_CELL_RE = re.compile(r"^:?-{3,}:?$")
 _MD_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
 _MD_ITALIC_RE = re.compile(r"(?<!\*)\*([^*\n]+?)\*(?!\*)")
 
@@ -383,6 +387,41 @@ def _md_inline(escaped: str) -> str:
     return text
 
 
+def _md_table_cells(line: str) -> list[str] | None:
+    """Split one pipe-table row; None when the line is not a pipe row."""
+    row = line.strip()
+    if "|" not in row:
+        return None
+    row = row.removeprefix("|")
+    if row.endswith("|") and not row.endswith("\\|"):
+        row = row[:-1]
+    return [cell.strip().replace("\\|", "|") for cell in re.split(r"(?<!\\)\|", row)]
+
+
+def _md_table_alignments(line: str, width: int) -> list[str] | None:
+    """Delimiter-row alignments, or None unless it matches the header width."""
+    cells = _md_table_cells(line)
+    if cells is None or len(cells) != width or not all(_MD_TABLE_DELIM_CELL_RE.match(c) for c in cells):
+        return None
+    return ["center" if c.startswith(":") and c.endswith(":") else "right" if c.endswith(":")
+            else "left" if c.startswith(":") else "" for c in cells]
+
+
+def _md_table_html(header: list[str], aligns: list[str], rows: list[list[str]]) -> str:
+    def cell(tag: str, text: str, align: str) -> str:
+        cls = f' class="align-{align}"' if align else ""
+        return f"<{tag}{cls}>{_md_inline(html.escape(text, quote=False))}</{tag}>"
+
+    width = len(header)
+    head = "".join(cell("th", text, align) for text, align in zip(header, aligns, strict=True))
+    body = "".join(
+        "<tr>" + "".join(cell("td", text, align)
+                         for text, align in zip((row + [""] * width)[:width], aligns, strict=True)) + "</tr>"
+        for row in rows
+    )
+    return f'<div class="md-table"><table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>'
+
+
 def render_markdown_subset(text: str) -> str:
     """Render the assistant-turn markdown subset to safe HTML."""
     out: list[str] = []
@@ -438,6 +477,22 @@ def render_markdown_subset(text: str) -> str:
                 '<pre><button class="copy-btn" type="button">Copy</button>'
                 f"<code{cls}>{code_html}</code></pre>"
             )
+            continue
+        header = _md_table_cells(line)
+        aligns = (_md_table_alignments(lines[idx + 1], len(header))
+                  if header is not None and idx + 1 < len(lines) else None)
+        if header is not None and aligns is not None:
+            flush_para()
+            close_list()
+            rows: list[list[str]] = []
+            idx += 2
+            while idx < len(lines) and lines[idx].strip():
+                row = _md_table_cells(lines[idx])
+                if row is None:
+                    break
+                rows.append(row)
+                idx += 1
+            out.append(_md_table_html(header, aligns, rows))
             continue
         heading = _MD_HEADING_RE.match(line)
         if heading:
