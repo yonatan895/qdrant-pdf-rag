@@ -1577,8 +1577,18 @@ class Run:
                 if self.owned(cleanup=True):
                     control = self.state / "stop-control"
                     control.write_text("stop\n")
-                    self.colab("upload", "-s", session, str(control), "/content/colab-stop", cleanup=True,
-                               seconds=5, allow_failure=True, require_complete_stdout=False)
+                    # Upload and download share the bounded export window (#740):
+                    # the stop signal gets at most half, and its timeout or
+                    # failure never skips the download. Without the signal the
+                    # runtime packages nothing, so the download then fails visibly.
+                    try:
+                        upload = self.colab("upload", "-s", session, str(control), "/content/colab-stop",
+                                            cleanup=True, seconds=max(.1, (self.cleanup_phase_expiry - time.time()) / 2),
+                                            allow_failure=True, require_complete_stdout=False)
+                        if upload.returncode:
+                            self.save("artifact_stop_signal_failed")
+                    except subprocess.SubprocessError:
+                        self.save("artifact_stop_signal_failed")
                     if self.runtime:
                         wait = min(5, self.cleanup_phase_expiry - time.time())
                         if wait > 0:
@@ -1587,7 +1597,8 @@ class Run:
                             except subprocess.TimeoutExpired:
                                 pass
                     result = self.colab("download", "-s", session, "/content/colab-artifacts.tgz",
-                                        str(self.state / "colab-artifacts.tgz"), cleanup=True, seconds=10,
+                                        str(self.state / "colab-artifacts.tgz"), cleanup=True,
+                                        seconds=max(.1, self.cleanup_phase_expiry - time.time()),
                                         allow_failure=True, require_complete_stdout=False)
                     if result.returncode:
                         ok = False
