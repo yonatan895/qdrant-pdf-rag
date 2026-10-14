@@ -6,11 +6,19 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from scripts.acceptance_evidence import LIMIT, artifact_members, object_json, paginate, require
+from scripts.acceptance_evidence import (
+    LIMIT,
+    artifact_members,
+    object_json,
+    paginate,
+    require,
+    require_same_merge,
+)
 
 WORKFLOW = 'verifier-update.yml'
 MAINTAINER = 'yonatan895'
@@ -90,6 +98,24 @@ def latest_decision(api: Any, candidate: dict, *, kind: str = 'implementation') 
     return run
 
 
+def _bound_candidate(api: Any, candidate: dict, recorded: str) -> dict:
+    """The candidate a decision may name: the current merge or its content twin.
+
+    GitHub can regenerate an unchanged PR's test merge with a new SHA (#753).
+    The receipt rule applies: exact current base/head parents and an identical
+    tree, read from independently fetched commit records. A new base or head
+    changes the parents, so it still needs a new decision.
+    """
+    if recorded == candidate['execution_sha']:
+        return candidate
+    require(isinstance(recorded, str) and re.fullmatch('[a-f0-9]{40}', recorded) is not None)
+    current = api.get(api.prefix + 'commits/' + candidate['execution_sha'])
+    other = api.get(api.prefix + 'commits/' + recorded)
+    require(other['sha'] == recorded)
+    require_same_merge(candidate, current, other)
+    return {**candidate, 'execution_sha': recorded}
+
+
 def validated_decision(api: Any, candidate: dict, inputs: dict[str, str], *,
                        kind: str = 'implementation', catalogue: dict | None = None) -> dict:
     title, artifact_name = _namespace(kind)
@@ -134,7 +160,8 @@ def validated_decision(api: Any, candidate: dict, inputs: dict[str, str], *,
     updated = datetime.fromisoformat(record['pr_updated_at'])
     dispatched = datetime.fromisoformat(run['created_at'])
     require(updated.tzinfo is not None and dispatched.tzinfo is not None and updated < dispatched)
-    expected = {'schema_version': 1, 'candidate': candidate, 'inputs': inputs,
+    bound = _bound_candidate(api, candidate, record['candidate']['execution_sha'])
+    expected = {'schema_version': 1, 'candidate': bound, 'inputs': inputs,
                 'pr_updated_at': record['pr_updated_at'],
                 'decision': 'approve', 'run_id': run['id'], 'run_attempt': run['run_attempt']}
     identity = {'run_id': run['id'], 'run_attempt': run['run_attempt'], 'inputs': inputs}
