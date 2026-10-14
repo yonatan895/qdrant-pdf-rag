@@ -584,6 +584,34 @@ def test_jaeger_enabled_selection(monkeypatch, mapper_env, raw, expected):
     assert load_values(out)["tracing"]["jaeger"] == {"enabled": expected}
 
 
+def test_jaeger_otlp_grpc_port_maps_only_when_selected(monkeypatch, mapper_env):
+    """Issue #744: an explicit port reaches the chart; unset renders nothing new."""
+    r, out = mapper_env()
+    assert r.returncode == 0, r.stderr
+    assert "otlpGrpcPort" not in load_values(out)["tracing"]["jaeger"]
+    monkeypatch.setenv("JAEGER_OTLP_GRPC_PORT", "4317")
+    r, out = mapper_env()
+    assert r.returncode == 0, r.stderr
+    assert load_values(out)["tracing"]["jaeger"] == {"enabled": True, "otlpGrpcPort": 4317}
+
+
+@pytest.mark.parametrize("raw", ["80", "1023", "65536", "4318", "16686", "13133", "8888", "4317x", " 4317", "-1"])
+def test_jaeger_otlp_grpc_port_refuses_invalid_values(monkeypatch, mapper_env, raw):
+    monkeypatch.setenv("JAEGER_OTLP_GRPC_PORT", raw)
+    r, _ = mapper_env()
+    assert r.returncode != 0
+    assert "JAEGER_OTLP_GRPC_PORT must be an unprivileged port" in r.stderr
+
+
+def test_jaeger_otlp_grpc_port_without_bundled_jaeger_fails_closed(monkeypatch, mapper_env):
+    monkeypatch.setenv("JAEGER_ENABLED", "false")
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector.platform:4318")
+    monkeypatch.setenv("JAEGER_OTLP_GRPC_PORT", "4317")
+    r, _ = mapper_env()
+    assert r.returncode != 0
+    assert "JAEGER_OTLP_GRPC_PORT requires the bundled Jaeger" in r.stderr
+
+
 @pytest.mark.parametrize("raw,expected", [("true", True), ("false", False)])
 def test_servicemonitor_enabled_selection(monkeypatch, mapper_env, raw, expected):
     monkeypatch.setenv("METRICS_ENABLED", "true")

@@ -46,6 +46,10 @@ spec:
           ports:
             - containerPort: 4318
               name: otlp-http
+            {{- with include "mainframe-rag.jaegerOtlpGrpcPort" . }}
+            - containerPort: {{ . }}
+              name: otlp-grpc
+            {{- end }}
             - containerPort: 16686
               name: ui
           readinessProbe:

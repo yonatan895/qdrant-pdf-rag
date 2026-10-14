@@ -475,9 +475,13 @@ cannot schedule on one node — proven).
   deployment; `JAEGER_ENABLED=false` skips only the deployment and is
   refused unless `OTEL_EXPORTER_OTLP_ENDPOINT` names a collector or `off`,
   in preflight, mapper and chart alike): 1 replica,
-  project-assigned UID and volume group from `restricted-v2` for Badger, 10Gi volume with 14-day span TTL, OTLP/HTTP 4318 only (the configured exporter uses HTTP;
+  project-assigned UID and volume group from `restricted-v2` for Badger, 10Gi volume with 14-day span TTL, OTLP/HTTP 4318 (the configured exporter uses HTTP;
   the Qdrant client independently brings a transitive `grpcio` wheel), UI on
-  port-forward only, no archive store (debug data, not records).
+  port-forward only, no archive store (debug data, not records). An optional
+  OTLP gRPC intake for components that export over gRPC opens only when
+  `JAEGER_OTLP_GRPC_PORT` (chart `tracing.jaeger.otlpGrpcPort`) names an
+  unprivileged port other than 4318/16686/13133/8888, on the ClusterIP Service
+  only. It is refused without the bundled Jaeger and closed when unset (#744).
 - Validate is read-only pre-flight: required keys, non-blank
   `EMBED_MODEL_REVISION` (the vllm attestation ingest/serving refuse when
   blank), `DENSE_DIM` positive

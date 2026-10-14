@@ -64,6 +64,24 @@ def positive_int(name: str, raw: str) -> int:
     return int(raw)
 
 
+JAEGER_RESERVED_PORTS = (4318, 16686, 13133, 8888)
+
+
+def jaeger_otlp_grpc_port(jaeger_deploy: bool) -> int | None:
+    """Optional OTLP gRPC intake on the bundled Jaeger (issue #744). Empty keeps
+    it closed; a port needs the bundled backend and must not collide with its
+    OTLP/HTTP, UI, health or telemetry listeners (mirrors the chart helper)."""
+    raw = env("JAEGER_OTLP_GRPC_PORT")
+    if raw == "":
+        return None
+    if not re.fullmatch(r"[0-9]+", raw) or not 1024 <= int(raw) <= 65535 or int(raw) in JAEGER_RESERVED_PORTS:
+        die(f"JAEGER_OTLP_GRPC_PORT must be an unprivileged port (1024-65535) not used by Jaeger "
+            f"{JAEGER_RESERVED_PORTS}, got {raw!r}")
+    if not jaeger_deploy:
+        die("JAEGER_OTLP_GRPC_PORT requires the bundled Jaeger: refusing a receiver nothing deploys")
+    return int(raw)
+
+
 def strict_bool(name: str, raw: str, default: bool) -> bool:
     """Mirror bool_flag in common.sh: unset keeps default, else strict."""
     try:
@@ -235,6 +253,9 @@ def build_values(deploy_only: bool = False) -> dict:
     dimension = positive_int("DENSE_DIM", env("DENSE_DIM"))
 
     tracing_enabled, otel_endpoint, jaeger_deploy, monitor_deploy = observability()
+    # Emitted only when selected, so existing operators' values stay byte-identical.
+    grpc_port = jaeger_otlp_grpc_port(jaeger_deploy)
+    jaeger_grpc_values = {} if grpc_port is None else {"otlpGrpcPort": grpc_port}
 
     rerank_enabled = lenient_bool(env("RERANK_ENABLED"))
     metrics_enabled = env("METRICS_ENABLED") == "true"
@@ -380,7 +401,7 @@ def build_values(deploy_only: bool = False) -> dict:
             "endpoint": otel_endpoint,
             "deploymentEnvironment": env("OTEL_DEPLOYMENT_ENVIRONMENT"),
             "serviceName": env("OTEL_SERVICE_NAME"),
-            "jaeger": {"enabled": jaeger_deploy},
+            "jaeger": {"enabled": jaeger_deploy, **jaeger_grpc_values},
         },
         "metrics": {
             "enabled": metrics_enabled,

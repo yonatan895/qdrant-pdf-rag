@@ -194,7 +194,13 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "enabled": { "type": ["boolean", "null"] }
+            "enabled": { "type": ["boolean", "null"] },
+            "otlpGrpcPort": {
+              "type": ["integer", "null"],
+              "minimum": 1024,
+              "maximum": 65535,
+              "not": { "enum": [4318, 16686, 13133, 8888] }
+            }
           }
         },
         "deploymentEnvironment": { "type": "string" },

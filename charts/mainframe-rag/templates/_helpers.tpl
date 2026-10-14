@@ -55,6 +55,25 @@ use {{- if include ... }} directly (a "false" string would be truthy).
 {{- if $enabled -}}true{{- end -}}
 {{- end -}}
 
+{{/*
+Optional OTLP gRPC intake on the bundled Jaeger (issue #744). Null keeps the
+receiver closed (the historical render). A port needs the bundled Jaeger and
+must not collide with its OTLP/HTTP, UI, health or telemetry listeners.
+*/}}
+{{- define "mainframe-rag.jaegerOtlpGrpcPort" -}}
+{{- $port := .Values.tracing.jaeger.otlpGrpcPort -}}
+{{- if not (kindIs "invalid" $port) -}}
+{{- if not (include "mainframe-rag.jaegerEnabled" .) -}}
+{{- fail "tracing.jaeger.otlpGrpcPort requires the bundled Jaeger: refusing a receiver nothing deploys" -}}
+{{- end -}}
+{{- $p := int $port -}}
+{{- if or (ne (float64 $p) (float64 $port)) (lt $p 1024) (gt $p 65535) (has $p (list 4318 16686 13133 8888)) -}}
+{{- fail "tracing.jaeger.otlpGrpcPort must be an unprivileged port (1024-65535) not used by Jaeger (4318, 16686, 13133, 8888)" -}}
+{{- end -}}
+{{- $p -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "mainframe-rag.serviceMonitorEnabled" -}}
 {{- $enabled := .Values.metrics.enabled -}}
 {{- if kindIs "bool" .Values.metrics.serviceMonitor.enabled -}}

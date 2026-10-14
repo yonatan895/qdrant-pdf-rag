@@ -1,6 +1,9 @@
 # Jaeger badger storage config (issue #83). Single primary store on the
-# mounted RWO volume (no archive store); OTLP/HTTP receiver only (4317 stays
-# closed); telemetry metrics at basic level, not exposed by the Service.
+# mounted RWO volume (no archive store); OTLP/HTTP receiver, plus OTLP gRPC only
+# when tracing.jaeger.otlpGrpcPort is set (issue #744; closed by default);
+# telemetry metrics at basic level, not exposed by the Service.
+{{- /* Evaluated outside the guard so a port without the bundled Jaeger fails. */}}
+{{- $grpcPort := include "mainframe-rag.jaegerOtlpGrpcPort" . }}
 {{- if include "mainframe-rag.jaegerEnabled" . }}
 apiVersion: v1
 kind: ConfigMap
@@ -54,6 +57,10 @@ data:
         protocols:
           http:
             endpoint: 0.0.0.0:4318
+          {{- if $grpcPort }}
+          grpc:
+            endpoint: 0.0.0.0:{{ $grpcPort }}
+          {{- end }}
 
     processors:
       batch:

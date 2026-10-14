@@ -104,6 +104,11 @@ tracing:
     # nothing exports to). Explicit values must be booleans, not truthy
     # strings (enforced by values.schema.json).
     enabled: null
+    # Optional OTLP gRPC receiver on the bundled Jaeger (issue #744), for
+    # components that export over gRPC. Null (default) keeps it closed, as
+    # before; an unprivileged port opens it on the ClusterIP Service only
+    # (never a Route). The agent itself still exports OTLP/HTTP.
+    otlpGrpcPort: null
   # Optional deploy identity; empty renders an empty string (no attribute).
   deploymentEnvironment: ""
   # Optional service name; empty strips the entry entirely so the agent

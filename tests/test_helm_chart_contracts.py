@@ -676,6 +676,60 @@ def test_jaeger_explicit_true_with_tracing_on():
     assert ("Service", "jaeger") in new
 
 
+def _jaeger_receivers(rendered: dict) -> dict:
+    config = yaml.safe_load(rendered["ConfigMap", "jaeger-config"]["data"]["config-badger.yaml"])
+    return config["receivers"]["otlp"]["protocols"]
+
+
+def test_jaeger_otlp_grpc_receiver_is_closed_by_default():
+    """Issue #744: the default render keeps the historical OTLP/HTTP-only intake."""
+    rendered = run_new_template({})
+    assert _jaeger_receivers(rendered) == {"http": {"endpoint": "0.0.0.0:4318"}}
+    jaeger = next(c for c in rendered["Deployment", "jaeger"]["spec"]["template"]["spec"]["containers"]
+                  if c["name"] == "jaeger")
+    assert "otlp-grpc" not in {port["name"] for port in jaeger["ports"]}
+    assert "otlp-grpc" not in {port["name"] for port in rendered["Service", "jaeger"]["spec"]["ports"]}
+
+
+def test_jaeger_otlp_grpc_port_opens_receiver_container_and_clusterip_service():
+    rendered = run_new_template({"tracing": {"jaeger": {"otlpGrpcPort": 4317}}})
+    assert _jaeger_receivers(rendered) == {"http": {"endpoint": "0.0.0.0:4318"},
+                                           "grpc": {"endpoint": "0.0.0.0:4317"}}
+    jaeger = next(c for c in rendered["Deployment", "jaeger"]["spec"]["template"]["spec"]["containers"]
+                  if c["name"] == "jaeger")
+    assert jaeger["ports"] == [
+        {"containerPort": 4318, "name": "otlp-http"},
+        {"containerPort": 4317, "name": "otlp-grpc"},
+        {"containerPort": 16686, "name": "ui"},
+    ]
+    service = rendered["Service", "jaeger"]
+    assert service["spec"]["type"] == "ClusterIP"
+    assert service["spec"]["ports"] == [
+        {"name": "otlp-http", "port": 4318, "targetPort": "otlp-http"},
+        {"name": "otlp-grpc", "port": 4317, "targetPort": "otlp-grpc"},
+        {"name": "ui", "port": 16686, "targetPort": "ui"},
+    ]
+    assert not [key for key in rendered if key[0] == "Route" and "jaeger" in key[1]]
+
+
+def test_jaeger_otlp_grpc_port_without_bundled_jaeger_fails():
+    values = base_values()
+    values["tracing"].update(endpoint="http://otel-collector.platform:4318",
+                             jaeger={"enabled": False, "otlpGrpcPort": 4317})
+    raw = _helm_template_with_values(values)
+    assert raw.returncode != 0
+    assert "tracing.jaeger.otlpGrpcPort requires the bundled Jaeger" in raw.stderr
+
+
+@pytest.mark.parametrize("port", [80, 1023, 65536, 4318, 16686, 13133, 8888, "4317", 4317.5])
+def test_jaeger_otlp_grpc_port_refuses_privileged_reserved_or_non_integer_values(port):
+    values = base_values()
+    values["tracing"]["jaeger"] = {"otlpGrpcPort": port}
+    raw = _helm_template_with_values(values)
+    assert raw.returncode != 0, port
+    assert "otlpGrpcPort" in raw.stderr
+
+
 def test_jaeger_enabled_with_tracing_off_fails():
     """OBS-2 item 3: a bundled backend nothing exports to is rejected
     before mutation, not deployed idle."""

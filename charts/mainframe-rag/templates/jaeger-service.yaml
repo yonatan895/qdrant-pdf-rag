@@ -1,5 +1,6 @@
 # Jaeger Service (issue #83). ClusterIP only. 4318 is OTLP/HTTP (the agent's
-# only exporter transport); 16686 is the UI for port-forward. No Route, ever.
+# only exporter transport); 16686 is the UI for port-forward; an optional OTLP
+# gRPC intake follows tracing.jaeger.otlpGrpcPort (issue #744). No Route, ever.
 {{- if include "mainframe-rag.jaegerEnabled" . }}
 apiVersion: v1
 kind: Service
@@ -16,6 +17,11 @@ spec:
     - name: otlp-http
       port: 4318
       targetPort: otlp-http
+    {{- with include "mainframe-rag.jaegerOtlpGrpcPort" . }}
+    - name: otlp-grpc
+      port: {{ . }}
+      targetPort: otlp-grpc
+    {{- end }}
     - name: ui
       port: 16686
       targetPort: ui
