@@ -1124,7 +1124,7 @@ def test_interrupt_quiesces_workload_before_remote_export_and_release(lab):
         if process.poll() is None:
             process.kill()
             process.communicate(timeout=3)
-    assert process.returncode == 130, stdout + stderr
+    assert process.returncode == 130, stdout + stderr + _run_trail(state)
     events = [json.loads(line) for line in (root / "events.jsonl").read_text().splitlines()]
     stopped = next(i for i, (kind, _) in enumerate(events) if kind == "workload-stopped")
     remote_teardown = next(i for i, (kind, argv) in enumerate(events)
