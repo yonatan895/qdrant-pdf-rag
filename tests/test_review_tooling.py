@@ -3221,6 +3221,7 @@ class TestVerifierUpdateDecision(unittest.TestCase):
                                "pr_updated_at": "2026-09-25T12:00:00Z",
                                "run_id": 900, "run_attempt": 1,
                                "inputs": {k: hashlib.sha256(v).hexdigest() for k, v in self.sources.items()}}
+                self.commits = {}
                 self.pack()
                 self.writes = []
             def pack(self):
@@ -3249,6 +3250,9 @@ class TestVerifierUpdateDecision(unittest.TestCase):
                 if endpoint.endswith("git/ref/heads/main"):
                     return {"ref": "refs/heads/main", "object": {"type": "commit", "sha": self.candidate["base_sha"]}}
                 if "/commits/" in endpoint:
+                    sha = endpoint.rsplit("/", 1)[1]
+                    if sha in self.commits:
+                        return copy.deepcopy(self.commits[sha])
                     return {"sha": self.candidate["execution_sha"], "commit": {"tree": {"sha": "1" * 40}}, "parents": [
                         {"sha": self.candidate["base_sha"]}, {"sha": self.candidate["head_sha"]}]}
                 if "actions/runs?" in endpoint:
@@ -3309,6 +3313,59 @@ class TestVerifierUpdateDecision(unittest.TestCase):
                     api.pack()  # Correct archive digest does not prove valid content.
                 with self.assertRaises(ValueError):
                     validated_decision(api, api.candidate, {k: v for k, v in self.fixture().record['inputs'].items()})
+
+    def test_decision_survives_regenerated_merge_only_with_identical_tree_and_parents(self):
+        import copy
+
+        from scripts.verifier_approval import (
+            VerifierApprovalRequired,
+            approved_inputs,
+            validated_decision,
+        )
+
+        # #753: the decision recorded merge c; GitHub regenerated the same content as f.
+        def regenerated(fault=None):
+            api = self.fixture()
+            api.candidate["execution_sha"] = "f" * 40
+            recorded = {"sha": "c" * 40, "commit": {"tree": {"sha": "1" * 40}},
+                        "parents": [{"sha": "b" * 40}, {"sha": "a" * 40}]}
+            if fault == "changed-tree":
+                recorded["commit"]["tree"]["sha"] = "2" * 40
+            elif fault == "old-base":
+                recorded["parents"][0]["sha"] = "e" * 40
+            elif fault == "reordered-parents":
+                recorded["parents"].reverse()
+            elif fault == "extra-parent":
+                recorded["parents"].append({"sha": "e" * 40})
+            elif fault == "invalid-tree":
+                # Equal but invalid trees are not proof of identical content.
+                api.commits["f" * 40] = copy.deepcopy(recorded) | {"sha": "f" * 40}
+                for commit in (recorded, api.commits["f" * 40]):
+                    commit["commit"]["tree"]["sha"] = "not-a-tree"
+            elif fault == "unknown-commit":
+                recorded["sha"] = "d" * 40
+            elif fault == "malformed-sha":
+                api.record["candidate"]["execution_sha"] = "../pulls/3"
+                api.pack()
+            elif fault == "new-head":
+                api.candidate["head_sha"] = "e" * 40
+            api.commits["c" * 40] = recorded
+            return api
+
+        api = regenerated()
+        inputs = api.record["inputs"]
+        self.assertEqual(validated_decision(api, api.candidate, inputs),
+                         {"run_id": 900, "run_attempt": 1, "inputs": inputs})
+        accepted, identity = approved_inputs(api, api.candidate, {k: "0" * 64 for k in inputs})
+        self.assertEqual((accepted, identity["run_id"]), (inputs, 900))
+        for fault in ("changed-tree", "old-base", "reordered-parents", "extra-parent", "invalid-tree",
+                      "unknown-commit", "malformed-sha", "new-head"):
+            with self.subTest(fault=fault):
+                api = regenerated(fault)
+                with self.assertRaises(ValueError):
+                    validated_decision(api, api.candidate, inputs)
+                with self.assertRaises(VerifierApprovalRequired):
+                    approved_inputs(api, api.candidate, {k: "0" * 64 for k in inputs})
 
     def test_latest_revoke_or_pending_decision_blocks_old_approval_and_recheck(self):
         import copy

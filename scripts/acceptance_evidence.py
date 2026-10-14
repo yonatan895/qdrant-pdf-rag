@@ -164,6 +164,22 @@ def validate_hazard_report(report: dict[str, Any], execution: str, policy: dict[
                 and mutation['exit_code'] == 1 and mutation.get('cause') == hazard['assertion'])
 
 
+def require_same_merge(candidate: dict[str, Any], current: dict[str, Any], other: dict[str, Any]) -> None:
+    """Accept another test-merge commit only as the current one's content twin.
+
+    GitHub can regenerate a test merge with a different timestamp/SHA.
+    Parent names alone do not prove the executed source: compare trees from
+    independently fetched commit records, never a receipt- or record-supplied tree.
+    """
+    require(current['sha'] == candidate['execution_sha'])
+    parents = [candidate['base_sha'], candidate['head_sha']]
+    require([parent['sha'] for parent in other['parents']] == parents)
+    require([parent['sha'] for parent in current['parents']] == parents)
+    tree = other['commit']['tree']['sha']
+    require(isinstance(tree, str) and re.fullmatch('[a-f0-9]{40}', tree) is not None)
+    require(tree == current['commit']['tree']['sha'])
+
+
 def normalize_native(
     *, candidate: dict[str, Any], producer: NativeProducer,
     run: dict[str, Any], job: dict[str, Any], artifact: dict[str, Any],
@@ -216,16 +232,8 @@ def normalize_native(
     # Native API head_sha is the PR head, whereas checkout/workflow SHA is the
     # merge revision. The commit API, not the receipt, establishes its parents.
     require(report['execution_sha'] == execution_commit['sha'])
-    require(candidate_commit['sha'] == candidate['execution_sha'])
+    require_same_merge(candidate, candidate_commit, execution_commit)
     parents = [candidate['base_sha'], candidate['head_sha']]
-    require([parent['sha'] for parent in execution_commit['parents']] == parents)
-    require([parent['sha'] for parent in candidate_commit['parents']] == parents)
-    # GitHub can regenerate a test merge with a different timestamp/SHA.
-    # Parent names alone do not prove the executed source: compare trees from
-    # independently fetched commit records, never a receipt-supplied tree.
-    tree = execution_commit['commit']['tree']['sha']
-    require(isinstance(tree, str) and re.fullmatch('[a-f0-9]{40}', tree) is not None)
-    require(tree == candidate_commit['commit']['tree']['sha'])
     require(report['execution_parents'] == parents)
     require(report['workflow_sha'] == execution_commit['sha'])
     counts = report['tests']

@@ -275,8 +275,8 @@ the consumer accepts native evidence across those SHAs only when independently
 fetched commit records also have identical valid Git tree IDs. Matching parents
 alone cannot authorize a different merge tree; receipt-supplied tree claims are
 not trusted. Native records and the check summary retain the actual tested SHA,
-and hazard results must bind that tested execution. The current candidate and
-maintainer verifier decision still bind the exact current test-merge SHA.
+and hazard results must bind that tested execution. Maintainer verifier decisions
+accept a regenerated test merge by this same rule (#753).
 ZIP members are read in memory; they are never extracted, imported, or executed.
 
 The approved base supplies policy, producer and workflow bytes, Task dispatch
@@ -327,7 +327,7 @@ approval. Use the same workflow with **revoke** to withdraw trust. The publisher
 runs after workflow completion and on its existing periodic reconciliation;
 revocation is not an atomic merge lock. An already-running merge is not undone.
 
-Any base, head, test-merge or verifier-byte change invalidates approval. Rerun the
+Any base, head, test-merge tree or verifier-byte change invalidates approval. Rerun the
 workflow only after reviewing the new candidate. Human identity is still a
 working-agreement boundary: shared account credentials cannot distinguish an
 agent from a human. The actor check does not claim otherwise.
@@ -374,7 +374,7 @@ rechecked immediately before publication; revocation retains the limits above.
 
 Bootstrap keeps `critical.json` unchanged: adopt reviewed consumer support,
 refresh dependent PRs, then obtain new exact-candidate decisions against adopted
-main. Base/head/test-merge changes invalidate approvals. No bypasses
+main. Base/head/test-merge tree changes invalidate approvals. No bypasses
 or disabled checks.
 
 Both GitHub and GitLab L1 comment publishers append historical reports with
