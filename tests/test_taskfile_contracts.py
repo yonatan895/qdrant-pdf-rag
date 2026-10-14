@@ -1236,6 +1236,21 @@ class TaskContractsTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stdout)
         self.assertNotIn("--reingest", proc.stdout)
 
+    def test_qdrant_forward_bridges_explicit_inputs_and_requires_a_namespace(self):
+        # Issue #751: one supervised loopback forward; values travel as argv.
+        self.make_venv_fake()
+        proc = self.run_task("local:qdrant:forward", extra_env=self.recorder_env)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertEqual(self.pip_calls(), [])
+        proc = self.run_task("local:qdrant:forward", "QDRANT_FORWARD_NAMESPACE=rag-colab-706-4096",
+                             "QDRANT_FORWARD_KUBECONFIG=/private kube/config", "QDRANT_FORWARD_CONTEXT=kind-rag-kind",
+                             extra_env=self.recorder_env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertEqual(self.pip_calls()[0]["argv"], [
+            "scripts/kube_forward.py", "--namespace", "rag-colab-706-4096", "--service", "qdrant",
+            "--local-port", "16333", "--remote-port", "6333", "--kubectl", "kubectl",
+            "--kubeconfig", "/private kube/config", "--context", "kind-rag-kind"])
+
     def test_agent_stream_port_and_ui(self):
         self.make_venv_fake()
         env = self.tool_env()
