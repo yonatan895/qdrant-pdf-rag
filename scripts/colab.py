@@ -1794,6 +1794,9 @@ class Run:
         except (LabError, OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
             status = 1
             self.manifest["failure_type"] = type(exc).__name__
+            if type(exc) is LabError:
+                # Controller-authored fixed text only; OS/upstream text never enters the record.
+                self.manifest["failure_reason"] = str(exc)
             self.save("run_failed")
             print_diagnostic("Colab run failed; private evidence and exact recovery command retained.", error=True)
         except KeyboardInterrupt:

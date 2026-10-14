@@ -322,7 +322,7 @@ def _run_trail(state):
     events = [item.get("event") for item in manifest.get("events", [])
               if item.get("event") != "cu_observed_best_effort"]
     summary = {key: manifest.get(key) for key in (
-        "phase", "released", "workload_succeeded", "final_cu_observation",
+        "phase", "failure_type", "failure_reason", "released", "workload_succeeded", "final_cu_observation",
         "gateway_network_cleanup", "gateway_container_cleanup", "private_key_cleanup_failed")}
     return f"run trail {state}: {json.dumps(summary, sort_keys=True, default=str)} events={events[-30:]}"
 
@@ -2402,6 +2402,31 @@ def test_preexisting_gateway_network_is_pinned_and_preserved(lab):
     assert json.loads((root / "gateway-networks.json").read_text()) == existing
     assert not any(kind == "docker" and argv[:2] in (["network", "create"], ["network", "rm"])
                    for kind, argv in _events(root))
+
+
+def test_run_failure_records_only_controller_text_then_next_run_is_clean(lab, monkeypatch):
+    # #755: a failed lifecycle run must name its cause without carrying OS/upstream text.
+    root, base, _ = lab
+    check = controller.Run.check_qdrant
+    for index, (raised, reason) in enumerate( ((controller.LabError("owned output drain did not stop within its bounded grace"),
+                            "owned output drain did not stop within its bounded grace"),
+                           (OSError(5, "upstream /private/secret-path detail"), None))):
+        state = base if index == 0 else _prepare_new(base, root / "after-os-failure")
+        def fail(self, raised=raised):
+            raise raised
+        monkeypatch.setattr(controller.Run, "check_qdrant", fail)
+        assert _run_fake(state) == 1
+        raw = (state / "manifest.json").read_text()
+        manifest = json.loads(raw)
+        assert manifest["failure_type"] == type(raised).__name__
+        assert manifest.get("failure_reason") == reason
+        assert "secret-path" not in raw
+    monkeypatch.setattr(controller.Run, "check_qdrant", check)
+    state = _prepare_new(base, root / "next-ordinary-run")
+    assert _run_fake(state) == 0
+    manifest = json.loads((state / "manifest.json").read_text())
+    assert manifest["workload_succeeded"] is True
+    assert "failure_type" not in manifest and "failure_reason" not in manifest
 
 
 @pytest.mark.parametrize("failure", ["timeout", "interrupt"])

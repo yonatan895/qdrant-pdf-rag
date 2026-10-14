@@ -196,6 +196,9 @@ normally, and the controller exports diagnostics, stops and verifies release,
 and removes the gateway resources it owns. Ctrl-C in terminal 1 remains an
 interruption (status 130) with the same cleanup. The controller's tunnel and
 budget checks still end the session on transport loss or CU limits.
+A failed run (status 1) records `failure_type` in the private `manifest.json`,
+plus `failure_reason` when the controller raised its own fixed message; OS and
+upstream exception text is never recorded.
 
 ## Prepare the full-corpus GPU run
 
