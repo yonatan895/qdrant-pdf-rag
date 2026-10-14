@@ -110,8 +110,10 @@ restores the snapshot over whatever the file assigned; empty stays unset
   (`LLM_REASONING_EFFORT_SIMPLE` / `COMPLEX`) and `LLM_STREAM` follow that same
   precedence/export path into `models.reasoning` and the rendered agent pod.
   `model_config.reasoning_overrides` enforces the existing Settings integer bounds,
-  the `low/medium/high/xhigh` effort domain and strict streaming booleans; chart
-  schema also enforces these types and ranges for direct Helm callers. `xhigh`
+  the `low/medium/high/xhigh` effort domain, `LLM_REASONING_EFFORTS` membership
+  of both efforts (explicit or default, #748) and strict streaming booleans; chart
+  schema also enforces these types and ranges for direct Helm callers, whose pod
+  then refuses non-member efforts at Settings startup. `xhigh`
   needs an application build with #707 support. Unset/empty operator values omit
   the new pod env entries, preserving application defaults; explicit zero
   thinking reserves and streaming false remain present. These are application

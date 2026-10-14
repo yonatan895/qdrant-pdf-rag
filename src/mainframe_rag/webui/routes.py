@@ -34,11 +34,11 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from mainframe_rag.agent.answer_core import (
     AnswerCoreInput,
-    ReasoningEffort,
     execute_answer_core,
     execute_answer_core_stream,
 )
 from mainframe_rag.agent.sse import error_payload, format_sse_event, output_final_payload
+from mainframe_rag.config import ReasoningEffort
 from mainframe_rag.ingest.bounds import EmbedInputTooLarge
 from mainframe_rag.ingest.chunk import detect_code_region
 from mainframe_rag.logs import error_type
@@ -69,6 +69,28 @@ _BUDGET_ERROR_TEXT = (
     "The request exceeds the model's token budget. Shorten the question, "
     "context, or history and retry."
 )
+_EFFORT_ERROR_TEXT = (
+    "This deployment does not offer the selected reasoning effort. "
+    "Reload the console and choose another level."
+)
+_EFFORT_LABELS: dict[str, str] = {"low": "Low", "medium": "Medium", "high": "High", "xhigh": "Extra high"}
+
+
+def _offered_efforts() -> tuple[ReasoningEffort, ...]:
+    from mainframe_rag.agent import app as app_mod
+
+    return app_mod.settings.reasoning_efforts()
+
+
+def _require_offered_effort(effort: ReasoningEffort | None) -> None:
+    """Refuse an effort the served template does not accept (#748) before
+    any model call, so it is never reported as a model outage."""
+    from mainframe_rag.agent import app as app_mod
+
+    if effort is not None and effort not in _offered_efforts():
+        raise app_mod.AppError(
+            422, "unsupported_reasoning_effort", "the reasoning effort is not offered by this deployment"
+        )
 
 
 def _require_ui() -> None:
@@ -582,6 +604,9 @@ def _render_page(
     form: dict[str, str] | None = None,
     status_code: int = 200,
 ) -> Response:
+    offered = _offered_efforts()
+    requested = (form or {}).get("reasoning_effort")
+    selected = requested if requested in offered else ("low" if "low" in offered else offered[0])
     body = templates.get_template("index.html").render(
         request=request,
         turns=turns,
@@ -590,7 +615,8 @@ def _render_page(
         splunk_context=(form or {}).get("splunk_context", ""),
         product=(form or {}).get("product", ""),
         version=(form or {}).get("version", ""),
-        reasoning_effort=(form or {}).get("reasoning_effort", "low"),
+        reasoning_effort=selected,
+        reasoning_efforts=[(effort, _EFFORT_LABELS[effort]) for effort in offered],
     )
     return _secure(HTMLResponse(body, status_code=status_code))
 
@@ -622,6 +648,7 @@ async def _run_turn(request: Request, req: UiChatRequest, root_span):
     client-facing error mapping (fixed text, detail to logs only)."""
     from mainframe_rag.agent import app as app_mod
 
+    _require_offered_effort(req.reasoning_effort)
     request_id = getattr(request.state, "request_id", "ui")
     turn = app_mod.prepare_chat_request(request_id, req.messages, req.splunk_context)
     # Serving gate before any retrieval (issues #391 F3/F4): the console
@@ -736,10 +763,15 @@ async def ui_chat(
             log.error(app_mod.json_log(request_id, "console", error=error_type(exc)))
             # An irreducible budget overflow is the operator's request to
             # shrink, not a server fault: distinct fixed banner (issue #368).
+            effort_refused = isinstance(exc, app_mod.AppError) and exc.code == "unsupported_reasoning_effort"
             error_text = (
-                _BUDGET_ERROR_TEXT if isinstance(exc, PromptBudgetExceeded) else _ERROR_TEXT
+                _BUDGET_ERROR_TEXT
+                if isinstance(exc, PromptBudgetExceeded)
+                else _EFFORT_ERROR_TEXT
+                if effort_refused
+                else _ERROR_TEXT
             )
-            status_code = 422 if isinstance(exc, PromptBudgetExceeded) else 502
+            status_code = 422 if isinstance(exc, PromptBudgetExceeded) or effort_refused else 502
             outcome = (
                 "prompt_budget_exceeded"
                 if isinstance(exc, PromptBudgetExceeded)
@@ -821,6 +853,7 @@ async def _console_stream_response(req, owner):
     root_span = owner.span
     request_id = request.state.request_id
     started = owner.started
+    _require_offered_effort(req.reasoning_effort)
     turn = app_mod.prepare_chat_request(request_id, req.messages, req.splunk_context)
     # Serving gate before the stream opens (issues #391 F3/F4): a non-servable
     # generation is the same stable 503 JSON the API returns, never an SSE

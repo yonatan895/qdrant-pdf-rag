@@ -1490,6 +1490,7 @@ class Run:
                        GATEWAY_EMBED_MODEL_REVISION=self.profile["servers"][1]["revision"],
                        DENSE_DIM="4096", RERANK_ENABLED="false", LLM_MAX_MODEL_LEN="16384",
                        LLM_REASONING_EFFORT_SIMPLE="low", LLM_REASONING_EFFORT_COMPLEX="medium",
+                       LLM_REASONING_EFFORTS="low,medium,xhigh",  # Qwen3.8 template domain (#748)
                        GATEWAY_PROBE_MAX_TOKENS="512", LITELLM_IMAGE=self.config["gateway_image"],
                        GATEWAY_ENV_FILE=str(self.state / "gateway.env"),
                        LOCAL_STACK_LOG_DIR=str(self.state))

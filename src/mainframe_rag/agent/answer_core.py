@@ -15,10 +15,6 @@ from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass, replace
 from typing import Literal, TypedDict
 
-ReasoningEffort = Literal["low", "medium", "high", "xhigh"]
-VALID_REASONING_EFFORTS: frozenset[ReasoningEffort] = frozenset({"low", "medium", "high", "xhigh"})
-
-
 from opentelemetry import trace
 from opentelemetry.context import Context
 from opentelemetry.trace import SpanKind, Status, StatusCode
@@ -53,12 +49,14 @@ from mainframe_rag.agent.core_ports import (
     RetrievalResult,
     Retriever,
 )
-from mainframe_rag.config import Settings
+from mainframe_rag.config import REASONING_EFFORTS, ReasoningEffort, Settings
 from mainframe_rag.logs import error_type
 from mainframe_rag.ports import ChatMessage, Tokenizer, TokenUsage
 from mainframe_rag.retrieve.filters import parse_query
 from mainframe_rag.retrieve.query import SearchHit
 from mainframe_rag.tracing import bind_module_tracer, start_as_current_span
+
+VALID_REASONING_EFFORTS: frozenset[ReasoningEffort] = frozenset(REASONING_EFFORTS)
 
 tracer: trace.Tracer = trace.get_tracer("mainframe-rag.agent")
 bind_module_tracer(__name__, "tracer", "mainframe-rag.agent")

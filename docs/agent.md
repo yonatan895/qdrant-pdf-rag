@@ -304,6 +304,7 @@ status (`/ui` failures render HTML banners instead, §1):
 | `overloaded` / `the service is at capacity; retry later` | 503 + `Retry-After: 1` | Request admission refused (issue #374): all `request_max_concurrent` slots busy and the bounded wait queue full or its wait expired. Raised first, before validation, the serving gate and any retrieval/model work; only when a limit is selected. `/ui/chat` renders its fixed banner; `/ui/chat/stream` returns this envelope |
 | `deadline_exceeded` / `request deadline exceeded` | 504 | Total request deadline (`request_deadline_s`, issue #374) expired before the response began; on an already-open stream it is an `error` event (no `final`, `generation_incomplete`) instead. Only when a deadline is selected |
 | `prompt_budget_exceeded` / `prompt exceeds the model token budget` | 422 | Irreducible token-budget overflow (issue #368): fixed content alone exceeds the window with nothing left to trim, or (issue #634) hits were retrieved but final packing supplied no usable excerpt (atomic-unit omission, verification trimming, whitespace-only text); the second case is the `EvidenceBudgetExceeded` subtype, logged/spanned under that type but identical on the wire; raised before any model call on JSON/chat, as an `error` event (no `final`) on already-open streams; `/ui/chat` renders its fixed banner |
+| `unsupported_reasoning_effort` / `the reasoning effort is not offered by this deployment` | 422 | Console only (#748): the requested effort is outside `LLM_REASONING_EFFORTS`; refused before any model call. `/ui/chat` renders its fixed banner; `/ui/chat/stream` returns this envelope |
 | `metrics_unavailable` / `metrics are not available` | 503 | `/metrics` scrape failure while enabled |
 | `not_found` / `not found` | 404 | Unknown route |
 | `method_not_allowed` / `method not allowed` | 405 | Wrong method |
@@ -694,6 +695,7 @@ readers:
 | `llm_base_url` / `llm_model_reasoning` / `llm_api_key` | unset (answer stays disabled; key unset = keyless) | per-request assertion, LLM client, tokenizer |
 | `answer_timeout_s` | 300.0 | reasoning client; no transport retries, explicit fallback policy below |
 | `llm_reasoning_effort_simple` / `_complex` / `llm_temperature` | low / high / 0.2 | answer path |
+| `llm_reasoning_efforts` | `low,medium,high` | served template's effort domain: console choices; both efforts above must be members (#748) |
 | `llm_max_model_len` / `llm_reserved_output_tokens` / `llm_thinking_reserve_tokens_complex` / `llm_token_safety_margin` / `llm_max_chunk_tokens_narrative` / `llm_tokenize_timeout_s` | 4096 / 1536 / 1000 / 128 / 350 / 5.0 | tokenizer-path budgeting (complex prompt budget prices high-effort thinking, issue #298) |
 | `llm_thinking_reserve_tokens_simple` | 0 | extra low-effort reasoning headroom in single-turn and chat prompt budgets; environment input `LLM_THINKING_RESERVE_TOKENS_SIMPLE` |
 | `llm_stream` | `false` | server-side reasoning SSE |
@@ -1104,8 +1106,14 @@ remains omitted. Support depends on the served chat template: the stock
 [Qwen3.8-27B template](https://huggingface.co/Qwen/Qwen3.8-27B/blob/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/chat_template.jinja)
 accepts `low`, `medium` and `xhigh` when thinking, so that profile must explicitly
 select compatible settings ([#707](https://github.com/yonatan895/qdrant-pdf-rag/issues/707)).
-The console's browser controls still offer `low`, `medium` and `high`; `xhigh`
-is available through configuration and the shared core, with no new public
+`LLM_REASONING_EFFORTS` declares the efforts the served template accepts
+(default `low,medium,high`; stock Qwen3.8 needs `low,medium,xhigh`). Settings and
+air-gap preflight refuse a simple/complex effort outside it, naming the field
+([#748](https://github.com/yonatan895/qdrant-pdf-rag/issues/748)). The console
+renders exactly these choices (`xhigh` as "Extra high") and refuses any other
+before a model call: `/ui/chat` shows a fixed banner and `/ui/chat/stream`
+returns `422 unsupported_reasoning_effort`. A stale saved browser choice keeps
+the server's default; no effort is remapped. There is still no public
 answer/chat request field. Tokenizer requests retain their existing message and
 generation flags; this change does not establish effort-dependent token counts.
 

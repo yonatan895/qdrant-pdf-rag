@@ -26,6 +26,7 @@
   const sharedLocks = navigator.locks && window.isSecureContext;
   const PROVISIONAL_LABEL = "Provisional — still generating, not verified";
   const ERROR_TEXT = "The reasoning agent could not complete this request. Check the agent logs and retry.";
+  const EFFORT_ERROR_TEXT = "This deployment does not offer the selected reasoning effort. Reload the console and choose another level.";
 
   const memory = { sessions: {}, active: null };
   let storageOk = !!sharedLocks;
@@ -984,19 +985,26 @@
     if (themeSelect) themeSelect.value = next;
   }
 
-  const EFFORT_LEVELS = ["low", "medium", "high"];
-
   /* Reasoning effort: one pressed toggle in the .segmented group; the
-   * hidden form field carries the value for both the JS and no-JS paths. */
+   * hidden form field carries the value for both the JS and no-JS paths.
+   * The server renders only the efforts the configured model accepts (#748). */
+  function effortLevels() {
+    return Array.from(document.querySelectorAll(".segmented .seg")).map((seg) => seg.getAttribute("data-effort"));
+  }
+
   function getReasoningEffort() {
+    const levels = effortLevels();
     const hidden = document.getElementById("reasoning-effort-input");
-    if (hidden && EFFORT_LEVELS.includes(hidden.value)) return hidden.value;
+    if (hidden && levels.includes(hidden.value)) return hidden.value;
     const pressed = document.querySelector('.segmented .seg[aria-pressed="true"]');
-    return pressed ? pressed.getAttribute("data-effort") : "low";
+    return pressed ? pressed.getAttribute("data-effort") : levels[0] || null;
   }
 
   function setReasoningEffort(effort) {
-    const target = EFFORT_LEVELS.includes(effort) ? effort : "low";
+    // An effort this deployment does not offer (e.g. a stale saved choice)
+    // keeps the current selection; it is never remapped to another level.
+    if (!effortLevels().includes(effort)) return;
+    const target = effort;
     const hidden = document.getElementById("reasoning-effort-input");
     if (hidden) hidden.value = target;
     document.querySelectorAll(".segmented .seg").forEach((seg) => {
@@ -1053,6 +1061,7 @@
     setStreaming(true);
     let failed = false;
     let stopped = false;
+    let effortRefused = false;
     let started = false;
     let finalPayload = null;
     let frameBuffer = "";
@@ -1071,6 +1080,15 @@
         body: JSON.stringify(payload),
         signal: controller.signal,
       });
+      if (response.status === 422) {
+        let envelope = null;
+        try {
+          envelope = await response.json();
+        } catch (err) {
+          envelope = null;
+        }
+        if (envelope && envelope.code === "unsupported_reasoning_effort") effortRefused = true;
+      }
       if (!response.ok || !response.body) throw new Error("HTTP " + response.status);
 
       const reader = response.body.getReader();
@@ -1131,7 +1149,7 @@
       // Failed before the first token: only the banner would persist, nothing
       // was displayed to retain — leave no husk behind.
       assistantTurn.error = true;
-      assistantTurn.content = ERROR_TEXT;
+      assistantTurn.content = effortRefused ? EFFORT_ERROR_TEXT : ERROR_TEXT;
       assistantTurn.verification_state = "generation_incomplete";
       contentEl.replaceChildren(renderMarkdown(assistantTurn.content));
       article.classList.add("turn-error");
