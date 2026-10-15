@@ -386,8 +386,8 @@ pathlib.Path(sys.argv[1]).write_text(json.dumps({"python": platform.python_versi
 '''
 
 SNAPSHOT_FETCH = r'''
-import fnmatch, hashlib, json, pathlib, shutil, sys
-from huggingface_hub import HfApi, snapshot_download
+import fnmatch, hashlib, importlib.util, json, pathlib, shutil, sys, time
+from huggingface_hub import HfApi, constants, snapshot_download
 model, revision, destination, budget, report = sys.argv[1:]
 budget = int(budget)
 patterns = ["*.safetensors", "*.json", "*.txt", "*.model", "*.tiktoken", "*.jinja", "LICENSE*"]
@@ -400,8 +400,13 @@ if not selected or any(item.size is None for item in selected):
 download_bytes = sum(item.size for item in selected)
 if download_bytes > budget or shutil.disk_usage(pathlib.Path(destination).parent.parent).free < download_bytes + 8 * 1024**3:
     raise RuntimeError("pinned snapshot exceeds the admitted disk budget")
+# Xet is the locked hub's own transfer path (hf-xet is in the inference lock);
+# the elapsed time and transfer are recorded so each session measures startup.
+transfer = "xet" if not constants.HF_HUB_DISABLE_XET and importlib.util.find_spec("hf_xet") else "http"
+started = time.monotonic()
 snapshot_download(model, revision=revision, local_dir=destination,
-                  allow_patterns=patterns, max_workers=2)
+                  allow_patterns=patterns, max_workers=8)
+download_seconds = time.monotonic() - started
 root = pathlib.Path(destination)
 index = json.loads((root / "model.safetensors.index.json").read_text())
 shards = sorted(set(index["weight_map"].values()))
@@ -435,7 +440,8 @@ for path in sorted(root.rglob("*")):
     with path.open("rb") as stream:
         hashes[path.relative_to(root).as_posix()] = hashlib.file_digest(stream, "sha256").hexdigest()
 pathlib.Path(report).write_text(json.dumps({"model_id": model, "resolved_revision": info.sha, "download_bytes": download_bytes,
-                  "tensor_bytes": tensor_bytes, "tensor_shards": len(shards), "metadata_sha256": hashes}))
+                  "tensor_bytes": tensor_bytes, "tensor_shards": len(shards), "metadata_sha256": hashes,
+                  "transfer": transfer, "download_seconds": download_seconds}))
 '''
 
 
@@ -790,8 +796,12 @@ class RemoteRuntime:
         environment = {name: value for name, value in os.environ.items()
                        if not name.startswith("PIP_")
                        and name not in {"_PIP_RUNNING_IN_SUBPROCESS", "PYTHONHOME", "PYTHONPATH"}}
+        # Xet downloads with high-performance concurrency, no chunk cache
+        # (the snapshot itself is the only copy) and no transfer telemetry.
         environment.update(HF_HOME=str(root / "hf-cache"), HF_HUB_DISABLE_TELEMETRY="1",
-                           HF_HUB_DISABLE_PROGRESS_BARS="1", HF_HUB_DISABLE_XET="1",
+                           HF_HUB_DISABLE_PROGRESS_BARS="1", HF_HUB_DISABLE_XET="0",
+                           HF_XET_HIGH_PERFORMANCE="1", HF_XET_CHUNK_CACHE_SIZE_BYTES="0",
+                           HF_XET_TELEMETRY_ENABLED="false",
                            HF_HUB_ETAG_TIMEOUT="10", HF_HUB_DOWNLOAD_TIMEOUT="30",
                            PIP_DISABLE_PIP_VERSION_CHECK="1", PIP_NO_INPUT="1",
                            PIP_CONFIG_FILE=os.devnull,
@@ -996,6 +1006,13 @@ class RemoteRuntime:
             if not (0 < manifest["tensor_shards"] <= manifest["tensor_bytes"]
                     <= manifest["download_bytes"] <= budget):
                 raise RuntimeError("downloaded model sizes exceed the declared snapshot envelope")
+            if manifest.get("transfer") not in ("xet", "http"):
+                raise RuntimeError("observed snapshot transfer is invalid")
+            seconds = manifest.get("download_seconds")
+            if isinstance(seconds, bool) or not isinstance(seconds, (int, float)):
+                raise TypeError("observed snapshot download time must be a number")
+            if not 0 <= seconds <= 1200:
+                raise RuntimeError("observed snapshot download time is outside its bound")
             hashes = manifest.get("metadata_sha256")
             if not isinstance(hashes, dict):
                 raise TypeError("observed snapshot metadata hashes must be an object")

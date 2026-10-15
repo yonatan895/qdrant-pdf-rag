@@ -19,6 +19,7 @@ from scripts.colab_runtime import (
     LOG_LIMIT_BYTES,
     MODEL_LIMIT_BYTES,
     POOLING_PROBE,
+    SNAPSHOT_FETCH,
     SOFTWARE_PROBE,
     BoundedLog,
     ProcessSupervisor,
@@ -225,6 +226,58 @@ def test_software_probe_observes_installed_tokenizers_version(tmp_path, monkeypa
     exec(SOFTWARE_PROBE, {})  # noqa: S102 - Execute the fixed repository probe with metadata fakes.
     assert "tokenizers" in requested
     assert json.loads(observed.read_text())["tokenizers"] == "0.23.7"
+
+
+@pytest.mark.parametrize("disabled", [False, True])
+def test_snapshot_fetch_uses_parallel_transfer_and_records_its_time(tmp_path, monkeypatch, disabled):
+    """The fixed fetch script downloads with 8 file workers, names the transfer
+    the locked hub actually uses and reports elapsed time for startup measurement."""
+    destination = tmp_path / "models" / "reasoning"
+    destination.mkdir(parents=True)
+    files = {"model-00001-of-00001.safetensors": b"w" * 64, "config.json": b"{}",
+             "tokenizer.json": b"{}", "tokenizer_config.json": b"{}",
+             "model.safetensors.index.json": json.dumps({"metadata": {"total_size": 64},
+                 "weight_map": {"layer": "model-00001-of-00001.safetensors"}}).encode()}
+    calls = []
+
+    def snapshot_download(model, **kwargs):
+        calls.append(kwargs)
+        for name, raw in files.items():
+            (destination / name).write_bytes(raw)
+
+    siblings = [SimpleNamespace(rfilename=name, size=len(raw)) for name, raw in files.items()]
+    api = SimpleNamespace(model_info=lambda model, **_: SimpleNamespace(sha="a" * 40, siblings=siblings))
+    hub = SimpleNamespace(HfApi=lambda: api, snapshot_download=snapshot_download,
+                          constants=SimpleNamespace(HF_HUB_DISABLE_XET=disabled))
+    monkeypatch.setitem(sys.modules, "huggingface_hub", hub)
+    monkeypatch.setattr("importlib.util.find_spec", lambda name: object() if name == "hf_xet" else None)
+    report = tmp_path / "snapshot.json"
+    monkeypatch.setattr(sys, "argv", ["snapshot", "Qwen/Qwen3.8-27B", "a" * 40, str(destination),
+                                      str(MODEL_LIMIT_BYTES), str(report)])
+    exec(SNAPSHOT_FETCH, {})  # noqa: S102 - Execute the fixed repository script with hub fakes.
+    assert calls == [{"revision": "a" * 40, "local_dir": str(destination),
+                      "allow_patterns": calls[0]["allow_patterns"], "max_workers": 8}]
+    observed = json.loads(report.read_text())
+    assert observed["transfer"] == ("http" if disabled else "xet")
+    assert type(observed["download_seconds"]) is float and 0 <= observed["download_seconds"] < 60
+    assert observed["tensor_bytes"] == 64 and observed["resolved_revision"] == "a" * 40
+
+
+def test_runtime_environment_enables_bounded_xet_despite_ambient_disable(tmp_path, monkeypatch):
+    from mainframe_rag.serve.colab_profiles import build_profile
+
+    for name, value in {"HF_HUB_DISABLE_XET": "1", "HF_XET_CHUNK_CACHE_SIZE_BYTES": "10000000000",
+                        "HF_XET_TELEMETRY_ENABLED": "true", "HF_HUB_DISABLE_TELEMETRY": "0"}.items():
+        monkeypatch.setenv(name, value)
+    runtime = RemoteRuntime(build_profile("COLAB_G4_BF16", deadline_seconds=30), root=tmp_path,
+                            clock=lambda: 100, sleep=lambda _: None, development_sha="a" * 40)
+    env = runtime.processes.env
+    assert {name: env[name] for name in ("HF_HUB_DISABLE_XET", "HF_XET_HIGH_PERFORMANCE",
+                                         "HF_XET_CHUNK_CACHE_SIZE_BYTES", "HF_XET_TELEMETRY_ENABLED",
+                                         "HF_HUB_DISABLE_TELEMETRY")} == {
+        "HF_HUB_DISABLE_XET": "0", "HF_XET_HIGH_PERFORMANCE": "1", "HF_XET_CHUNK_CACHE_SIZE_BYTES": "0",
+        "HF_XET_TELEMETRY_ENABLED": "false", "HF_HUB_DISABLE_TELEMETRY": "1"}
+    assert env["HF_HOME"] == str(tmp_path / "hf-cache")
 
 
 @pytest.mark.parametrize("corruption", [None, "base_prefix", "prefix", "python", "implementation",
@@ -829,6 +882,11 @@ def test_transport_approval_is_required_before_any_gpu_bootstrap(tmp_path):
     ("stop", 2, False, ("snapshot", "tensor_bytes", True), "TypeError"),
     ("stop", 2, False, ("snapshot", "tensor_bytes", 101), "RuntimeError"),
     ("stop", 2, False, ("snapshot", "tensor_shards", True), "TypeError"),
+    ("stop", 2, False, ("snapshot", "transfer", "ftp"), "RuntimeError"),
+    ("stop", 2, False, ("snapshot", "download_seconds", "1.5"), "TypeError"),
+    ("stop", 2, False, ("snapshot", "download_seconds", True), "TypeError"),
+    ("stop", 2, False, ("snapshot", "download_seconds", -1), "RuntimeError"),
+    ("stop", 2, False, ("snapshot", "download_seconds", float("nan")), "RuntimeError"),
     ("stop", 2, False, ("snapshot", "metadata_sha256", []), "TypeError"),
     ("stop", 2, False, ("snapshot", "metadata_sha256", {"tokenizer.json": True}), "RuntimeError"),
     ("stop", 2, False, ("candidate", None), "RuntimeError"),
@@ -922,7 +980,8 @@ def test_gpu_startup_uses_exact_argv_and_warms_reasoning_before_embedding(
             elif argv[1] == "-c" and len(argv) == 8:
                 snapshot = {"model_id": argv[3], "resolved_revision": argv[4],
                             "download_bytes": 100, "tensor_bytes": 100, "tensor_shards": 1,
-                            "metadata_sha256": {"tokenizer.json": "e" * 64}}
+                            "metadata_sha256": {"tokenizer.json": "e" * 64},
+                            "transfer": "xet", "download_seconds": 1.5}
                 if malformed and malformed[0] == "snapshot":
                     if len(malformed) == 1:
                         snapshot = []

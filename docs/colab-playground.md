@@ -366,6 +366,14 @@ time and CU for cleanup. Reject insufficient remaining balance, unknown usage,
 an unsuitable assignment or a missing prerequisite. Do not autoallocate a
 fallback shape, precision, account or second session.
 
+Each pinned snapshot downloads through the locked hub's Xet transfer
+(`hf-xet` in the inference lock), with 8 file workers, high-performance
+concurrency, no chunk cache and Xet telemetry off. Each model's private
+diagnostics record `transfer` (`xet`, or `http` if the hub fell back) and
+`download_seconds` within the existing 1,200-second fetch bound. Compare these
+per session before adding a cross-session weight cache. On 2026-10-14, the HTTP
+path with 2 workers took about 5.5 minutes for both models (70.7 GB).
+
 Reasoning must become ready and finish a strict low-effort, 512-token warmup
 with nonempty final content and `finish_reason=stop` before embedding starts.
 Embedding must produce finite, normalized native 4096-dimensional vectors.
