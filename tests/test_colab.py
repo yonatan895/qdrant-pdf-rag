@@ -1615,6 +1615,28 @@ def test_closed_child_pipes_survive_scheduler_pause_before_final_eof_then_next_c
     assert run.command([sys.executable, "-c", "print('ordinary')"], seconds=3).stdout == "ordinary\n"
 
 
+def test_late_scheduled_drain_keeps_complete_identity_output_then_next_command_works(lab, monkeypatch):
+    """#755: on a loaded CI runner the drain thread started late, and finish()
+    gave it only 0.1 s after forcing stop, failing a pre-allocation command with
+    "owned output drain did not stop within its bounded grace"."""
+    _, state, _ = lab
+    run = controller.Run(state)
+    drain = controller.ProcessCapture.drain
+
+    def late_drain(self):
+        time.sleep(.6)  # Thread scheduled well past the former 0.4 s total wait.
+        drain(self)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(controller.ProcessCapture, "drain", late_drain)
+        started = time.monotonic()
+        # An identity-shaped command: truncated stdout would itself be refused.
+        result = run.command([sys.executable, "-c", "print('0.7.4')"], seconds=3)
+    assert result.stdout == "0.7.4\n"
+    assert time.monotonic() - started < controller.PIPE_DRAIN_GRACE_SECONDS + 2 * controller.PIPE_DRAIN_SCHEDULING_SECONDS
+    assert run.command([sys.executable, "-c", "print('ordinary')"], seconds=3).stdout == "ordinary\n"
+
+
 def test_root_exit_with_descendant_held_pipes_is_bounded_and_next_command_works(lab):
     root, state, _ = lab
     run = controller.Run(state)

@@ -48,6 +48,10 @@ CAPTURE_POOLS = {"work": 4 * 1024 * 1024, "export": 256 * 1024, "release": 512 *
 COMMAND_LOG_SLOTS = 32
 MAX_CAPTURED_CHILDREN = 8
 PIPE_DRAIN_GRACE_SECONDS = .2
+# A healthy drain ends within that grace once it observes the exit, but a loaded
+# host can schedule its thread late (#755). finish() waits this long before and
+# after forcing stop, so late output is kept rather than truncated or refused.
+PIPE_DRAIN_SCHEDULING_SECONDS = 1.0
 SOURCE_LIMIT_BYTES = 32 * 1024 * 1024
 SOURCE_FILE_LIMIT_BYTES = 4 * 1024 * 1024
 SOURCE_ENTRY_LIMIT = 4096
@@ -279,10 +283,10 @@ class ProcessCapture:
             self.budget.finish(self.pool, self.reserved, self.written)
 
     def finish(self) -> None:
-        self.thread.join(PIPE_DRAIN_GRACE_SECONDS + .1)
+        self.thread.join(PIPE_DRAIN_GRACE_SECONDS + PIPE_DRAIN_SCHEDULING_SECONDS)
         if self.thread.is_alive():
             self.stop.set()
-            self.thread.join(.1)
+            self.thread.join(PIPE_DRAIN_SCHEDULING_SECONDS)
         if self.thread.is_alive():
             raise LabError("owned output drain did not stop within its bounded grace")
 
