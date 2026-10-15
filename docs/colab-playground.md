@@ -214,6 +214,12 @@ normally, and the controller exports diagnostics, stops and verifies release,
 and removes the gateway resources it owns. Ctrl-C in terminal 1 remains an
 interruption (status 130) with the same cleanup. The controller's tunnel and
 budget checks still end the session on transport loss or CU limits.
+A running CU poll that fails or times out (for example, a WSL DNS blip) is
+counted in `cu_poll_failures` and does not end the session (#746). This applies
+only while the last successful observation includes the owned assignment and is
+under two minutes old. That observation's rate already bounds the work deadline
+by the CU cap and floor. Output that cannot be parsed, a stale observation, or a
+failure right after allocation still end the run.
 A failed run (status 1) records `failure_type` in the private `manifest.json`,
 plus `failure_reason` when the controller raised its own fixed message; OS and
 upstream exception text is never recorded.
@@ -473,7 +479,10 @@ the exact created network. This works after the local process group is killed;
 pre-existing containers/networks and the key-store volume remain untouched.
 Gateway recovery retains its separate five-second window after VM release.
 
-Stop only the exact recorded session. Follow the session-specific recovery
+Stop only the exact recorded session. A failed `stop` or session listing, or a
+session still listed after `stop`, repeats stop plus the absence check every five
+seconds until the hard deadline (`release_retries`, #746). Ownership refusals
+are not retried. Follow the session-specific recovery
 command printed by the controller if automatic cleanup cannot confirm release;
 verify that exact session is absent from the explicit OAuth session listing.
 Release also requires absence of the bound endpoint under every listed name,

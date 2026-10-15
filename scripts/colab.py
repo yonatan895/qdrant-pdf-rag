@@ -64,6 +64,11 @@ SOURCE_REQUIRED = ("scripts/colab.py", "scripts/colab_preflight.py", "scripts/co
 TRANSPORT_TOOLS = ("colab", "ssh", "ssh_keygen", "docker")
 NETWORK_RELEASE_SECONDS = 5
 FINAL_USAGE_SECONDS = 5
+# Transient account/control-plane failures (#746). A running budget poll may go
+# unobserved this long after the last observation of the owned assignment: the
+# CU cap and floor stay enforced through work_expiry from that observed rate.
+USAGE_STALE_SECONDS = 120
+RELEASE_RETRY_SECONDS = 5
 EVENT_HISTORY_LIMIT = 64
 CU_HISTORY_LIMIT = 32
 METADATA_PERSIST_SECONDS = 5
@@ -96,6 +101,10 @@ finally:
 
 class LabError(RuntimeError):
     """Fixed local diagnostic; upstream text is preserved privately only."""
+
+
+class ToolFailure(LabError):
+    """A local tool exited nonzero: possibly transient, unlike controller refusals (#746)."""
 
 
 def print_diagnostic(message: str, *, error: bool = False) -> None:
@@ -1047,7 +1056,7 @@ class Run:
         if capture.log_failed and not cleanup:
             raise LabError("controller output could not be retained within its bounded log")
         if result.returncode and not allow_failure:
-            raise LabError("local tool operation failed; details retained in private run state")
+            raise ToolFailure("local tool operation failed; details retained in private run state")
         return result
 
     def colab_argv(self, command: str, *args: str) -> list[str]:
@@ -1092,9 +1101,13 @@ class Run:
             raise LabError("owned session endpoint changed; automatic stop is refused")
         return True
 
-    def observe_usage(self, *, cleanup: bool = False, seconds: float = 30) -> dict:
+    def observe_usage(self, *, cleanup: bool = False, seconds: float = 30,
+                      allow_failure: bool = False) -> dict | None:
         """Read actual pinned CLI usage without making it a release prerequisite."""
-        output = self.colab("usage", cleanup=cleanup, seconds=seconds).stdout
+        result = self.colab("usage", cleanup=cleanup, seconds=seconds, allow_failure=allow_failure)
+        if result.returncode:
+            return None
+        output = result.stdout
         balance_match = re.search(r"Current balance: ([0-9.]+) compute units", output)
         rate_match = re.search(r"Usage rate: ([0-9.]+)/hr", output)
         assignments_match = re.search(r"Active assignments: ([0-9]+)", output)
@@ -1129,6 +1142,8 @@ class Run:
         self.cleanup_phase_expiry = now + min(FINAL_USAGE_SECONDS, max(0.0, self.expiry - now) / 4)
         try:
             observation = self.observe_usage(cleanup=True, seconds=FINAL_USAGE_SECONDS)
+            if observation is None:
+                raise LabError("cannot verify current CU balance/rate")
             starting = self.manifest.get("starting_balance")
             spent = (max(0.0, starting - observation["balance"])
                      if type(starting) in (int, float) and math.isfinite(starting) else None)
@@ -1146,7 +1161,22 @@ class Run:
 
     def budget(self, *, initial: bool = False) -> None:
         self.check_qdrant()
-        observation = self.observe_usage()
+        try:
+            observation = self.observe_usage(allow_failure=not initial)
+        except subprocess.TimeoutExpired:
+            if initial:
+                raise
+            observation = None
+        if observation is None:
+            # Only a poll that failed to run is tolerated; unparseable output
+            # still refuses. The last observation must include the owned
+            # assignment, or its rate cannot bound work_expiry (#746).
+            last = self.manifest.get("cu_summary", {}).get("last", {})
+            if not last.get("assignments") or time.time() - last["time"] >= USAGE_STALE_SECONDS:
+                raise LabError("CU usage could not be observed within its bounded tolerance")
+            self.manifest["cu_poll_failures"] = self.manifest.get("cu_poll_failures", 0) + 1
+            self.save("cu_observation_unavailable")
+            return
         balance, rate, assignments = (observation[key] for key in ("balance", "rate_per_hour", "assignments"))
         if initial:
             if assignments:
@@ -1627,19 +1657,33 @@ class Run:
             if not self.final_usage():
                 ok = False
             # Export failure is isolated from the mandatory VM release attempt.
-            try:
-                if self.owned(cleanup=True):
-                    self.colab("stop", "-s", session, cleanup=True, seconds=10, require_complete_stdout=False)
-                if self.owned(cleanup=True):
-                    raise LabError("owned session is still active after stop")
-                self.manifest["released"] = True
-                self.manifest["release_evidence"] = {"session": session, "endpoint": self.manifest["endpoint"],
-                                                      "absent": True, "observed_at": time.time()}
-                self.save("session_release_absence_verified")
-            except (LabError, OSError, subprocess.SubprocessError):
+            # An unverified release keeps billing, so a failed tool call or a
+            # still-active session repeats stop plus the absence check until
+            # the hard deadline (#746). Ownership refusals are never retried.
+            while True:
+                retry = True
+                try:
+                    if self.owned(cleanup=True):
+                        self.colab("stop", "-s", session, cleanup=True, seconds=10, require_complete_stdout=False)
+                    if not self.owned(cleanup=True):
+                        self.manifest["released"] = True
+                        self.manifest["release_evidence"] = {"session": session, "endpoint": self.manifest["endpoint"],
+                                                              "absent": True, "observed_at": time.time()}
+                        self.save("session_release_absence_verified")
+                        break
+                except (ToolFailure, OSError, subprocess.SubprocessError):
+                    pass
+                except LabError:
+                    retry = False
+                if retry and time.time() + RELEASE_RETRY_SECONDS < self.expiry:
+                    self.manifest["release_retries"] = self.manifest.get("release_retries", 0) + 1
+                    self.save("session_release_retrying")
+                    time.sleep(RELEASE_RETRY_SECONDS)
+                    continue
                 ok = False
                 self.manifest["released"] = False
                 self.save("session_release_unverified")
+                break
         for child in reversed(self.children):
             try:
                 self.terminate(child)
@@ -1795,7 +1839,7 @@ class Run:
         except (LabError, OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
             status = 1
             self.manifest["failure_type"] = type(exc).__name__
-            if type(exc) is LabError:
+            if isinstance(exc, LabError):
                 # Controller-authored fixed text only; OS/upstream text never enters the record.
                 self.manifest["failure_reason"] = str(exc)
             self.save("run_failed")
