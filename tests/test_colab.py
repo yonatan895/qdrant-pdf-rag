@@ -77,6 +77,13 @@ if name=='colab':
     state=json.loads(sessions.read_text()) if sessions.exists() else {}
     local=json.loads(store.read_text()) if store.exists() else {}
     session=rest[rest.index('-s')+1] if '-s' in rest else None
+    # Transient control-plane outage (#746): fail the listed per-command call
+    # indexes the way the real CLI did when WSL's DNS proxy blipped.
+    calls=root/('calls-'+cmd); index=int(calls.read_text()) if calls.exists() else 0
+    calls.write_text(str(index+1))
+    failures=root/'fail-calls.json'
+    if failures.exists() and index in json.loads(failures.read_text()).get(cmd,[]):
+        print("NameResolutionError: Failed to resolve 'colab.research.google.com'",file=sys.stderr); sys.exit(1)
     if cmd=='version': print('0.7.4')
     elif cmd=='usage':
         reads=root/'usage-reads'
@@ -1028,13 +1035,13 @@ def test_fresh_cleanup_finishes_before_honoring_another_interrupt(storage_lab, m
         listener.bind(("127.0.0.1", run.config["qdrant_port"]))
 
 
-def _production_cli(state, *, stop=False, workload=()):
+def _production_cli(state, *, stop=False, workload=(), timeout=20):
     argv = [sys.executable, str(ROOT / "scripts/colab.py"), "stop" if stop else "run", "--state", str(state)]
     if not stop:
         argv += ["--approve-cu", "20"]
         if workload:
             argv += ["--", *workload]
-    result = subprocess.run(argv, capture_output=True, text=True, timeout=20, check=False)
+    result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, check=False)
     if result.returncode != 0:
         print(_run_trail(state))  # shown only for failing tests
     return result
@@ -1299,10 +1306,15 @@ def test_prepare_copy_enforces_separate_source_and_tool_caps_without_allocating(
 def test_snapshot_recovery_releases_owned_session_despite_changed_origin_then_next_run_works(lab, monkeypatch):
     root, state, command = lab
     monkeypatch.setenv("FAKE_COLAB_SCENARIO", "stop_fail")
+    # A persistent stop failure is retried until the 30 s run deadline (#746).
     failed = subprocess.run(command + ["run", "--state", str(state), "--approve-cu", "20", "--", "/bin/true"],
-                            capture_output=True, text=True, timeout=15, check=False)
+                            capture_output=True, text=True, timeout=60, check=False)
     assert failed.returncode == 1
     manifest = json.loads((state / "manifest.json").read_text())
+    events = [event["event"] for event in manifest["events"]]
+    assert manifest["release_retries"] >= 1 and manifest["released"] is False
+    assert events.index("session_release_unverified") > events.index("session_release_retrying")
+    assert time.time() < manifest["expires_at"] + 15, "release retries must stay within the hard deadline"
     assert json.loads((root / "sessions.json").read_text()) == {manifest["session"]: "endpoint-owned"}
     source = Path(manifest["origin"]["source_root"])
     changed = source / "scripts/run_local_gateway.sh"
@@ -1349,6 +1361,72 @@ def test_slow_diagnostics_poll_is_not_ready_then_run_completes_and_next_run_work
     assert json.loads((root / "sessions.json").read_text()) == {}
     monkeypatch.setenv("FAKE_COLAB_SCENARIO", "success")
     assert _run_fake(_prepare_new(state, root / "ordinary-after-slow-poll")) == 0
+
+
+def test_transient_budget_poll_failure_keeps_session_then_run_completes_and_next_run_works(lab):
+    """#746: one failed running CU poll (DNS blip) is not fatal while the last
+    observation of the owned assignment is fresh; it is counted and the run ends normally."""
+    root, state, _ = lab
+    # usage call 0 is the initial budget, 1 follows allocation, 2 is the hold loop's first poll.
+    (root / "fail-calls.json").write_text(json.dumps({"usage": [2]}))
+    assert _run_fake(state, ("/bin/sleep", "1")) == 0
+    manifest = json.loads((state / "manifest.json").read_text())
+    assert manifest["cu_poll_failures"] == 1 and "failure_reason" not in manifest
+    assert manifest["final_cu_observation"]["status"] == "available"
+    assert manifest["workload_succeeded"] is True and manifest["released"] is True
+    assert (state / "transport-receipt.json").is_file()
+    assert json.loads((root / "sessions.json").read_text()) == {}
+    (root / "fail-calls.json").unlink()
+    assert _run_fake(_prepare_new(state, root / "ordinary-after-budget-blip")) == 0
+
+
+def test_budget_poll_failure_without_fresh_owned_observation_refuses_then_releases(lab):
+    """#746 bound: a failed poll is tolerated only when the last observation
+    includes the owned assignment and is younger than USAGE_STALE_SECONDS."""
+    root, state, _ = lab
+    run = _allocated_cleanup_run(lab)
+    (root / "fail-calls.json").write_text(json.dumps({"usage": [2, 3]}))
+    with controller.state_lock(state, recovery=False):
+        run.budget()
+        assert run.manifest["cu_poll_failures"] == 1
+        run.manifest["cu_summary"]["last"]["time"] -= controller.USAGE_STALE_SECONDS
+        with pytest.raises(controller.LabError, match="bounded tolerance"):
+            run.budget()
+    assert run.cleanup() is True
+    assert json.loads((root / "sessions.json").read_text()) == {}
+
+
+def test_failed_poll_right_after_allocation_cannot_bound_cap_and_fails_closed(lab):
+    """The pre-allocation observation has no owned assignment, so its rate cannot
+    bound work_expiry: a failed first post-allocation poll still ends the run."""
+    root, state, _ = lab
+    (root / "fail-calls.json").write_text(json.dumps({"usage": [1]}))
+    assert _run_fake(state) == 1
+    manifest = json.loads((state / "manifest.json").read_text())
+    assert manifest["failure_reason"] == "CU usage could not be observed within its bounded tolerance"
+    assert manifest["released"] is True and not (state / "transport-receipt.json").exists()
+    assert json.loads((root / "sessions.json").read_text()) == {}
+    (root / "fail-calls.json").unlink()
+    assert _run_fake(_prepare_new(state, root / "ordinary-after-unbounded-poll")) == 0
+
+
+@pytest.mark.parametrize("failed", [{"stop": [0]}, {"sessions": [4, 5]}])
+def test_transient_release_failure_is_retried_until_absence_then_next_run_works(lab, failed):
+    """#746: a failed stop or absence check during an outage is retried within
+    the hard deadline instead of leaving the session billing unverified."""
+    root, state, _ = lab
+    # sessions calls 0-2 precede/prove allocation and transport, 3 is export
+    # ownership, so 4 and 5 are the release's ownership and absence checks.
+    (root / "fail-calls.json").write_text(json.dumps(failed))
+    assert _run_fake(state) == 0
+    manifest = json.loads((state / "manifest.json").read_text())
+    assert manifest["release_retries"] == len(next(iter(failed.values()))) and manifest["released"] is True
+    assert "cleanup_complete" in [event["event"] for event in manifest["events"]]
+    assert manifest["release_evidence"]["absent"] is True
+    assert (state / "transport-receipt.json").is_file()
+    assert json.loads((root / "sessions.json").read_text()) == {}
+    (root / "fail-calls.json").unlink()
+    assert _run_fake(_prepare_new(state, root / "ordinary-after-release-retry")) == 0
 
 
 @pytest.mark.parametrize("lab", ["COLAB_CPU_TRANSPORT"], indirect=True)
@@ -2176,7 +2254,8 @@ def test_production_drift_and_wrappers_refuse_before_native_workload_then_next_n
 def test_malformed_production_sidecar_cannot_block_exact_recovery_then_next_native_run_works(storage_lab, monkeypatch):
     root, run, _ = storage_lab
     monkeypatch.setenv("FAKE_COLAB_SCENARIO", "stop_fail")
-    failed = _production_cli(run.state)
+    # A persistent stop failure is retried until the 30 s run deadline (#746).
+    failed = _production_cli(run.state, timeout=60)
     assert failed.returncode == 1, failed.stdout + failed.stderr
     manifest = json.loads((run.state / "manifest.json").read_text())
     assert manifest["workload_succeeded"] is True
@@ -2187,7 +2266,9 @@ def test_malformed_production_sidecar_cannot_block_exact_recovery_then_next_nati
     assert recovered.returncode == 0, recovered.stdout + recovered.stderr
     assert json.loads((root / "sessions.json").read_text()) == {}
     stopped = [argv[-1] for kind, argv in _events(root) if kind == "colab" and argv[2] == "stop"]
-    assert stopped == [manifest["session"], manifest["session"]]
+    # Retried run attempts (the last may meet the deadline first) and the
+    # recovery stop all target only the owned session.
+    assert set(stopped) == {manifest["session"]} and len(stopped) >= 2
     assert json.loads((root / "gateway-networks.json").read_text()) == {}
     assert not (run.state / "transport-receipt.json").exists()
     next_state = _prepare_production_again(run, "ordinary-native-production-after-sidecar-recovery")
@@ -2625,7 +2706,7 @@ def test_two_hour_poll_metadata_is_bounded_linear_and_critical_state_is_immediat
     tick = [0]
 
     def usage(*args, **kwargs):
-        assert args == ("usage",) and kwargs == {"cleanup": False, "seconds": 30}
+        assert args == ("usage",) and kwargs == {"cleanup": False, "seconds": 30, "allow_failure": True}
         output = (f"Current balance: {200 - tick[0] / 10000:.4f} compute units\n"
                   "Usage rate: 8.00/hr\nActive assignments: 1\n")
         return subprocess.CompletedProcess(["original-fake-colab"], 0, output, "")
