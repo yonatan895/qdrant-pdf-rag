@@ -34,7 +34,7 @@ MAPPER_KEYS = [
     "LLM_BASE_URL", "LLM_MODEL_REASONING", "CHAT_CONDENSE_ENABLED",
     "LLM_MAX_MODEL_LEN", "LLM_RESERVED_OUTPUT_TOKENS",
     "LLM_THINKING_RESERVE_TOKENS_SIMPLE", "LLM_THINKING_RESERVE_TOKENS_COMPLEX",
-    "LLM_REASONING_EFFORT_SIMPLE", "LLM_REASONING_EFFORT_COMPLEX", "LLM_STREAM",
+    "LLM_REASONING_EFFORT_SIMPLE", "LLM_REASONING_EFFORT_COMPLEX", "LLM_REASONING_EFFORTS", "LLM_STREAM",
     "RERANK_ENABLED", "RERANK_BASE_URL", "RERANK_MODEL", "RERANK_ENDPOINT_ORDER",
     "GATEWAY_API_KEY_SECRET", "GATEWAY_API_KEY_SECRET_KEY", "GATEWAY_CA_CONFIGMAP", "PULL_SECRET",
     "OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_ENDPOINT_RESOLVED", "OTEL_TRACING_ENABLED",
@@ -497,10 +497,12 @@ def test_condensation_mapper_to_agent_round_trip(monkeypatch, mapper_env):
         "name": "CHAT_CONDENSE_ENABLED", "value": "true"}
 
 
-@pytest.mark.parametrize("stream,simple_reserve,complex_effort", [
-    ("true", "512", "medium"), ("false", "0", "xhigh"),
+@pytest.mark.parametrize("stream,simple_reserve,complex_effort,efforts", [
+    ("true", "512", "medium", "low,medium,high"), ("false", "0", "xhigh", "low,medium,xhigh"),
+    ("false", "0", "xhigh", " xhigh, low,medium"),  # accepted spelling reaches the pod canonically
 ])
-def test_selected_model_budgets_reach_rendered_agent(monkeypatch, mapper_env, stream, simple_reserve, complex_effort):
+def test_selected_model_budgets_reach_rendered_agent(monkeypatch, mapper_env, stream, simple_reserve, complex_effort,
+                                                     efforts):
     selected = {
         "LLM_MAX_MODEL_LEN": "16384",
         "LLM_RESERVED_OUTPUT_TOKENS": "2048",
@@ -508,6 +510,7 @@ def test_selected_model_budgets_reach_rendered_agent(monkeypatch, mapper_env, st
         "LLM_THINKING_RESERVE_TOKENS_COMPLEX": "2048",
         "LLM_REASONING_EFFORT_SIMPLE": "low",
         "LLM_REASONING_EFFORT_COMPLEX": complex_effort,
+        "LLM_REASONING_EFFORTS": efforts,
         "LLM_STREAM": stream, "UI_ENABLED": "true",
         "CHAT_CONDENSE_ENABLED": "true", "RERANK_ENABLED": "false",
     }
@@ -524,7 +527,10 @@ def test_selected_model_budgets_reach_rendered_agent(monkeypatch, mapper_env, st
     deployment = yaml.safe_load(rendered.stdout)
     agent = deployment["spec"]["template"]["spec"]["containers"][0]
     actual = {entry["name"]: entry.get("value") for entry in agent["env"]}
-    assert {name: actual.get(name) for name in selected} == selected
+    expected = {**selected, "LLM_REASONING_EFFORTS": ",".join(
+        effort for effort in ("low", "medium", "high", "xhigh")
+        if effort in {part.strip() for part in efforts.split(",")})}
+    assert {name: actual.get(name) for name in selected} == expected
 
 
 @pytest.mark.parametrize("name,bad", [
@@ -538,6 +544,8 @@ def test_selected_model_budgets_reach_rendered_agent(monkeypatch, mapper_env, st
     ("LLM_THINKING_RESERVE_TOKENS_COMPLEX", "16385"),
     ("LLM_REASONING_EFFORT_SIMPLE", "unsupported-private-value"),
     ("LLM_REASONING_EFFORT_COMPLEX", "unsupported-private-value"),
+    ("LLM_REASONING_EFFORTS", "unsupported-private-value"),
+    ("LLM_REASONING_EFFORTS", "low,low,high"),
     ("LLM_STREAM", "unsupported-private-value"),
 ])
 def test_model_budget_invalid_selection_fails_without_artifact(monkeypatch, mapper_env, name, bad):
@@ -550,10 +558,40 @@ def test_model_budget_invalid_selection_fails_without_artifact(monkeypatch, mapp
         assert bad not in result.stderr + result.stdout
 
 
+@pytest.mark.parametrize("selected,field", [
+    # #748: Qwen3.8's domain while COMPLEX keeps the Settings default "high".
+    ({"LLM_REASONING_EFFORTS": "low,medium,xhigh"}, "LLM_REASONING_EFFORT_COMPLEX"),
+    ({"LLM_REASONING_EFFORTS": "medium,xhigh", "LLM_REASONING_EFFORT_COMPLEX": "xhigh"},
+     "LLM_REASONING_EFFORT_SIMPLE"),
+    ({"LLM_REASONING_EFFORT_COMPLEX": "xhigh"}, "LLM_REASONING_EFFORT_COMPLEX"),
+])
+def test_effort_outside_served_set_fails_before_artifact(monkeypatch, mapper_env, selected, field):
+    for name, value in selected.items():
+        monkeypatch.setenv(name, value)
+    result, output = mapper_env()
+    assert result.returncode != 0
+    assert f"{field} must be one of LLM_REASONING_EFFORTS" in result.stderr
+    assert not output.exists()
+
+
+def test_preflight_effort_mirror_matches_settings():
+    """The bastion preflight cannot import pydantic; its mirror must not drift (#748)."""
+    from scripts.airgap import model_config
+
+    from mainframe_rag.config import REASONING_EFFORTS, Settings
+
+    assert model_config.REASONING_EFFORTS == REASONING_EFFORTS
+    fields = Settings.model_fields
+    assert model_config.REASONING_EFFORT_DEFAULTS == {
+        name.upper(): fields[name].default
+        for name in ("llm_reasoning_effort_simple", "llm_reasoning_effort_complex", "llm_reasoning_efforts")}
+
+
 def test_empty_model_budget_inputs_preserve_application_defaults(monkeypatch, mapper_env):
     for name in ("LLM_MAX_MODEL_LEN", "LLM_RESERVED_OUTPUT_TOKENS",
                  "LLM_THINKING_RESERVE_TOKENS_SIMPLE", "LLM_THINKING_RESERVE_TOKENS_COMPLEX",
-                 "LLM_REASONING_EFFORT_SIMPLE", "LLM_REASONING_EFFORT_COMPLEX", "LLM_STREAM"):
+                 "LLM_REASONING_EFFORT_SIMPLE", "LLM_REASONING_EFFORT_COMPLEX", "LLM_REASONING_EFFORTS",
+                 "LLM_STREAM"):
         monkeypatch.setenv(name, "")
     result, output = mapper_env()
     assert result.returncode == 0, result.stderr

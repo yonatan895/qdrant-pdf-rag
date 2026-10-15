@@ -854,6 +854,39 @@ def test_reasoning_effort_choice_reaches_the_model_and_survives_reload(console, 
     assert console.llm.efforts[-1] == "low"
 
 
+def test_console_offers_only_served_efforts_and_explains_a_refused_stale_choice(console, browser, monkeypatch):
+    """#748: Qwen3.8's template accepts low/medium/xhigh. A stale saved High keeps
+    the server default, Extra high reaches the model verbatim, and a choice the
+    deployment stopped offering after page load shows its own fixed message."""
+    from mainframe_rag.agent import app as app_mod
+
+    monkeypatch.setattr(app_mod.settings, "llm_reasoning_efforts", "low,medium,xhigh")
+    monkeypatch.setattr(app_mod.settings, "llm_reasoning_effort_complex", "medium")
+    browser.get(console.url)
+    browser.wait("return !!document.querySelector('#messages .empty-state')", what="console boot")
+    browser.eval("window.localStorage.setItem('mainframe_rag_reasoning_effort', 'high')")
+    browser.reload()
+    browser.wait("return !!document.querySelector('#messages .empty-state')", what="console reboot")
+    offered = "return Array.from(document.querySelectorAll('.segmented .seg')).map(b => [b.dataset.effort, b.textContent])"
+    assert browser.eval(offered) == [["low", "Low"], ["medium", "Medium"], ["xhigh", "Extra high"]]
+    selected = "return document.querySelector('.segmented .seg[aria-pressed=\"true\"]').dataset.effort"
+    assert browser.eval(selected) == "low"
+
+    browser.click('.segmented .seg[data-effort="xhigh"]')
+    send(browser, "What is IEA500I?")
+    wait_state(browser, "complete")
+    assert console.llm.efforts[-1] == "xhigh"
+
+    calls = len(console.llm.efforts)
+    monkeypatch.setattr(app_mod.settings, "llm_reasoning_efforts", "low,medium")
+    send(browser, "Again")
+    wait_state(browser, "failed")
+    failed = "return document.querySelector('.turn-assistant[data-state=\"failed\"]').textContent"
+    assert "does not offer the selected reasoning effort" in browser.eval(failed)
+    assert "could not complete this request" not in browser.eval(failed)
+    assert len(console.llm.efforts) == calls
+
+
 def test_answer_status_reads_before_the_answer_it_qualifies(console, page):
     """Verified answers carry a header chip; an unverified answer's warning
     sits above its text, both when streamed and after reload."""

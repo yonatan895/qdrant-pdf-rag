@@ -17,7 +17,11 @@ REASONING_EFFORT_FIELDS = {
     "LLM_REASONING_EFFORT_SIMPLE": "reasoningEffortSimple",
     "LLM_REASONING_EFFORT_COMPLEX": "reasoningEffortComplex",
 }
-REASONING_ENV_KEYS = (*REASONING_INTEGER_FIELDS, *REASONING_EFFORT_FIELDS, "LLM_STREAM")
+REASONING_EFFORTS = ("low", "medium", "high", "xhigh")
+# Mirrors config.Settings defaults; tests pin both sides (#748).
+REASONING_EFFORT_DEFAULTS = {"LLM_REASONING_EFFORT_SIMPLE": "low", "LLM_REASONING_EFFORT_COMPLEX": "high",
+                             "LLM_REASONING_EFFORTS": "low,medium,high"}
+REASONING_ENV_KEYS = (*REASONING_INTEGER_FIELDS, *REASONING_EFFORT_FIELDS, "LLM_REASONING_EFFORTS", "LLM_STREAM")
 
 MODEL_CONFIG_KEYS = (
     "GATEWAY_BASE_URL", "VLLM_BASE_URL", "EMBED_BASE_URL", "EMBED_MODEL",
@@ -88,9 +92,21 @@ def reasoning_overrides(values: Mapping[str, str]) -> dict[str, int | str | bool
         raw = values.get(name, "")
         if raw == "":
             continue
-        if raw not in ("low", "medium", "high", "xhigh"):
+        if raw not in REASONING_EFFORTS:
             raise ValueError(f"{name} must be low/medium/high/xhigh")
         result[field] = raw
+    # The served template's effort domain; both efforts, explicit or default,
+    # must be members so the console and complex path never send another (#748).
+    raw = values.get("LLM_REASONING_EFFORTS", "")
+    parts = [part.strip() for part in (raw or REASONING_EFFORT_DEFAULTS["LLM_REASONING_EFFORTS"]).split(",")]
+    if any(part not in REASONING_EFFORTS for part in parts) or len(set(parts)) != len(parts):
+        raise ValueError("LLM_REASONING_EFFORTS must list distinct low/medium/high/xhigh values")
+    if raw != "":
+        # Canonical ascending form: whatever preflight accepts, the chart schema accepts.
+        result["reasoningEfforts"] = ",".join(effort for effort in REASONING_EFFORTS if effort in parts)
+    for name in REASONING_EFFORT_FIELDS:
+        if (values.get(name, "") or REASONING_EFFORT_DEFAULTS[name]) not in parts:
+            raise ValueError(f"{name} must be one of LLM_REASONING_EFFORTS")
     if values.get("LLM_STREAM", "") != "":
         result["stream"] = parse_strict_bool("LLM_STREAM", values["LLM_STREAM"], False)
     return result

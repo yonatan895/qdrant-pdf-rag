@@ -10,15 +10,20 @@ feature hashing, no network, no model weights. Never the default in prod.
 
 import contextlib
 import multiprocessing
-from typing import Literal
+from typing import Literal, get_args
 
 from opentelemetry import propagate
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Dense dimension of the hashed embedder. Fixed so CI never depends on the
 # vLLM team's DENSE_DIM; prod always overrides via embed_mode=vllm + DENSE_DIM.
 HASH_EMBED_DIM = 256
+
+# Reasoning-effort vocabulary in ascending order (#707). Values are forwarded
+# verbatim; LLM_REASONING_EFFORTS declares the subset the served template accepts.
+ReasoningEffort = Literal["low", "medium", "high", "xhigh"]
+REASONING_EFFORTS: tuple[ReasoningEffort, ...] = get_args(ReasoningEffort)
 
 
 def bearer_auth_headers(api_key: str | None) -> dict[str, str]:
@@ -186,8 +191,12 @@ class Settings(BaseSettings):
     # on complex operational, diagnostic, and comparative inquiries while conserving
     # latency on simple factoid/message lookups.
     # Values are forwarded verbatim; operators select the served template's domain.
-    llm_reasoning_effort_simple: Literal["low", "medium", "high", "xhigh"] = Field(default="low")
-    llm_reasoning_effort_complex: Literal["low", "medium", "high", "xhigh"] = Field(default="high")
+    llm_reasoning_effort_simple: ReasoningEffort = Field(default="low")
+    llm_reasoning_effort_complex: ReasoningEffort = Field(default="high")
+    # Comma list of efforts the served chat template accepts (#748): the console
+    # offers exactly these, and both defaults above must be members. The stock
+    # Qwen3.8 template needs "low,medium,xhigh".
+    llm_reasoning_efforts: str = Field(default="low,medium,high")
     llm_temperature: float = Field(default=0.2, ge=0.0, le=2.0)
 
     # Context budgeting via tokenizer accounting:
@@ -330,6 +339,23 @@ class Settings(BaseSettings):
     # remains only so an explicit INGEST_ALIAS_PUBLISH=false fails closed
     # instead of being silently ignored.
     ingest_alias_publish: bool = True
+
+    @model_validator(mode="after")
+    def _efforts_match_served_template(self) -> Settings:
+        """One owner for the served effort domain; messages name fields, not values."""
+        efforts = self.reasoning_efforts()
+        for name in ("llm_reasoning_effort_simple", "llm_reasoning_effort_complex"):
+            if getattr(self, name) not in efforts:
+                raise ValueError(f"{name.upper()} must be one of LLM_REASONING_EFFORTS")
+        return self
+
+    def reasoning_efforts(self) -> tuple[ReasoningEffort, ...]:
+        """Declared efforts in ascending vocabulary order; refuses unknown,
+        duplicate or empty entries instead of dropping them."""
+        parts = [part.strip() for part in self.llm_reasoning_efforts.split(",")]
+        if not parts or any(part not in REASONING_EFFORTS for part in parts) or len(set(parts)) != len(parts):
+            raise ValueError("LLM_REASONING_EFFORTS must list distinct low/medium/high/xhigh values")
+        return tuple(effort for effort in REASONING_EFFORTS if effort in parts)
 
     @field_validator("ingest_alias_publish")
     @classmethod

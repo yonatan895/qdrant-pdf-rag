@@ -69,6 +69,9 @@ models:
     # thinkingReserveTokensComplex: 2048
     # reasoningEffortSimple: low
     # reasoningEffortComplex: medium
+    # Efforts the served template accepts; the console offers exactly these and
+    # both efforts above must be members. Stock Qwen3.8 needs low,medium,xhigh.
+    # reasoningEfforts: low,medium,xhigh
     # stream: true
   rerank:
     enabled: false

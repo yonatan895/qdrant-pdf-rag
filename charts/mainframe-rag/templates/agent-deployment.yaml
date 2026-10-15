@@ -65,7 +65,7 @@ spec:
               value: {{ .Values.models.reasoning.baseUrl | quote }}
             - name: LLM_MODEL_REASONING
               value: {{ .Values.models.reasoning.model | quote }}
-            {{- $reasoningEnv := dict "maxModelLen" "LLM_MAX_MODEL_LEN" "reservedOutputTokens" "LLM_RESERVED_OUTPUT_TOKENS" "thinkingReserveTokensSimple" "LLM_THINKING_RESERVE_TOKENS_SIMPLE" "thinkingReserveTokensComplex" "LLM_THINKING_RESERVE_TOKENS_COMPLEX" "reasoningEffortSimple" "LLM_REASONING_EFFORT_SIMPLE" "reasoningEffortComplex" "LLM_REASONING_EFFORT_COMPLEX" "stream" "LLM_STREAM" }}
+            {{- $reasoningEnv := dict "maxModelLen" "LLM_MAX_MODEL_LEN" "reservedOutputTokens" "LLM_RESERVED_OUTPUT_TOKENS" "thinkingReserveTokensSimple" "LLM_THINKING_RESERVE_TOKENS_SIMPLE" "thinkingReserveTokensComplex" "LLM_THINKING_RESERVE_TOKENS_COMPLEX" "reasoningEffortSimple" "LLM_REASONING_EFFORT_SIMPLE" "reasoningEffortComplex" "LLM_REASONING_EFFORT_COMPLEX" "reasoningEfforts" "LLM_REASONING_EFFORTS" "stream" "LLM_STREAM" }}
             {{- range $field, $name := $reasoningEnv }}
             {{- if hasKey $.Values.models.reasoning $field }}
             - name: {{ $name }}

@@ -243,6 +243,7 @@ When running local tooling (`sh scripts/tools/run-task.sh local:ask`, `sh script
 | **`LLM_MODEL_REASONING`** | Auto-resolved from `/v1/models` on local server | Dedicated reasoning model specified in `airgap.env` |
 | **`LLM_REASONING_EFFORT_SIMPLE`** | `"low"` | `"low"` (preserves latency on factoid lookups) |
 | **`LLM_REASONING_EFFORT_COMPLEX`** | `"high"` | `"high"` (enforces deep multi-step deliberation) |
+| **`LLM_REASONING_EFFORTS`** | `"low,medium,high"` | The served template's efforts; Qwen3.8 needs `"low,medium,xhigh"` with a member complex effort (#748) |
 | **`LLM_TEMPERATURE`** | `0.2` | `0.2` (deterministic, grounded technical reasoning) |
 | **`PROMPT_MAX_CONTEXT_CHARS`** | `8000` | `8000` (for simple queries) |
 | **`PROMPT_MAX_CONTEXT_CHARS_COMPLEX`** | `4500` | `4500` (reserves ~2.6k token headroom for reasoning) |

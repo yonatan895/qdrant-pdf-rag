@@ -2009,6 +2009,19 @@ exec "$1" -c "$2"
     }
 
 
+def test_g4_environment_declares_qwen38_efforts_accepted_by_settings(storage_lab):
+    """#748: the G4 stack's console offers only Qwen3.8's template efforts."""
+    from mainframe_rag.config import Settings
+
+    _, run, _ = storage_lab
+    run.persistent_qdrant()
+    env = run.environment("127.0.0.2")
+    names = ("LLM_REASONING_EFFORTS", "LLM_REASONING_EFFORT_SIMPLE", "LLM_REASONING_EFFORT_COMPLEX")
+    settings = Settings(_env_file=None, **{name.lower(): env[name] for name in names})
+    assert settings.reasoning_efforts() == ("low", "medium", "xhigh")
+    assert "export LLM_REASONING_EFFORTS=low,medium,xhigh" in (run.state / "handoff.env").read_text()
+
+
 def test_handoff_canonicalizes_new_aliases_in_a_different_shell_and_preserves_native_representation(
         storage_lab, monkeypatch):
     _, run, _ = storage_lab

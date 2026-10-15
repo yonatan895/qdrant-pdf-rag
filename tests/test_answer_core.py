@@ -569,6 +569,7 @@ async def test_core_selected_reasoning_effort_reaches_http_request(effort, sourc
         "llm_stream": mode == "buffered_sse",
         "llm_reasoning_effort_simple": "low",
         "llm_reasoning_effort_complex": "medium",
+        "llm_reasoning_efforts": "low,medium,high,xhigh",  # transport covers the whole vocabulary
     }
     if source == "setting":
         values[field] = effort

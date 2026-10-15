@@ -189,12 +189,48 @@ def test_require_context_llm_fails_closed():
 @pytest.mark.parametrize("from_env", [False, True])
 def test_reasoning_effort_round_trips_configuration(monkeypatch, field, effort, from_env):
     monkeypatch.delenv(field.upper(), raising=False)
+    domain = "low,medium,high,xhigh"  # every value is a member of the served set
     if from_env:
         monkeypatch.setenv(field.upper(), effort)
+        monkeypatch.setenv("LLM_REASONING_EFFORTS", domain)
         settings = Settings(_env_file=None)
     else:
-        settings = Settings(_env_file=None, **{field: effort})
+        settings = Settings(_env_file=None, **{field: effort, "llm_reasoning_efforts": domain})
     assert getattr(settings, field) == effort
+
+
+@pytest.mark.parametrize(("efforts", "simple", "complex_", "expected"), [
+    ("low,medium,high", "low", "high", ("low", "medium", "high")),
+    (" xhigh , low,medium ", "low", "xhigh", ("low", "medium", "xhigh")),  # ascending, stripped
+    ("medium,xhigh", "medium", "medium", ("medium", "xhigh")),
+])
+def test_served_efforts_parse_in_vocabulary_order(monkeypatch, efforts, simple, complex_, expected):
+    for name in ("LLM_REASONING_EFFORTS", "LLM_REASONING_EFFORT_SIMPLE", "LLM_REASONING_EFFORT_COMPLEX"):
+        monkeypatch.delenv(name, raising=False)
+    settings = Settings(_env_file=None, llm_reasoning_efforts=efforts,
+                        llm_reasoning_effort_simple=simple, llm_reasoning_effort_complex=complex_)
+    assert settings.reasoning_efforts() == expected
+
+
+@pytest.mark.parametrize(("overrides", "field"), [
+    # #748: Qwen3.8's domain with the default complex "high" must not start.
+    ({"llm_reasoning_efforts": "low,medium,xhigh"}, "LLM_REASONING_EFFORT_COMPLEX"),
+    ({"llm_reasoning_efforts": "medium,high"}, "LLM_REASONING_EFFORT_SIMPLE"),
+    ({"llm_reasoning_effort_complex": "xhigh"}, "LLM_REASONING_EFFORT_COMPLEX"),
+    ({"llm_reasoning_efforts": "low,low,high"}, "LLM_REASONING_EFFORTS"),
+    ({"llm_reasoning_efforts": "low,maximal-private,high"}, "LLM_REASONING_EFFORTS"),
+    ({"llm_reasoning_efforts": ""}, "LLM_REASONING_EFFORTS"),
+    ({"llm_reasoning_efforts": "low,,high"}, "LLM_REASONING_EFFORTS"),
+])
+def test_efforts_outside_the_served_set_refuse_startup(monkeypatch, overrides, field):
+    from pydantic import ValidationError
+
+    for name in ("LLM_REASONING_EFFORTS", "LLM_REASONING_EFFORT_SIMPLE", "LLM_REASONING_EFFORT_COMPLEX"):
+        monkeypatch.delenv(name, raising=False)
+    with pytest.raises(ValidationError) as caught:
+        Settings(_env_file=None, **overrides)
+    message = "; ".join(error["msg"] for error in caught.value.errors())
+    assert field in message and "maximal-private" not in message
 
 
 def test_reasoning_effort_validation():
@@ -393,6 +429,7 @@ PINNED_SETTING_DEFAULTS: dict[str, object] = {
     "retrieve_max_chunks_per_doc": 3,
     "llm_reasoning_effort_simple": "low",
     "llm_reasoning_effort_complex": "high",
+    "llm_reasoning_efforts": "low,medium,high",
     "llm_temperature": 0.2,
     "llm_max_model_len": 4096,
     "llm_reserved_output_tokens": 1536,

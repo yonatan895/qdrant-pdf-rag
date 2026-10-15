@@ -4,7 +4,9 @@ SSE streaming, static-asset pin verification, and traversal defense."""
 from __future__ import annotations
 
 import hashlib
+import html
 import json
+import re
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -1143,6 +1145,46 @@ def test_ui_index_renders_reasoning_effort_toggle(ui_client):
     assert '<button type="button" class="seg" data-effort="low" aria-pressed="true">Low</button>' in body
     assert body.count('aria-pressed="true"') == 1
     assert 'name="reasoning_effort" id="reasoning-effort-input" value="low"' in body
+
+
+def test_console_offers_only_served_efforts_and_refuses_others_before_the_model(ui_client, monkeypatch):
+    """#748: with Qwen3.8's template domain the console offers no High, refuses
+    it with a fixed client error before any model call, and xhigh is sent
+    verbatim; an omitted effort still takes the server default."""
+    from mainframe_rag.webui import routes
+
+    fake_llm = UiFakeLLM()
+    monkeypatch.setattr(app_mod, "llm", fake_llm)
+    monkeypatch.setattr(app_mod.settings, "llm_reasoning_efforts", "low,medium,xhigh")
+    monkeypatch.setattr(app_mod.settings, "llm_reasoning_effort_complex", "medium")
+
+    body = ui_client.get("/ui").text
+    assert re.findall(r'data-effort="([a-z]+)"', body) == ["low", "medium", "xhigh"]
+    assert '<button type="button" class="seg" data-effort="xhigh" aria-pressed="false">Extra high</button>' in body
+    assert body.count('aria-pressed="true"') == 1
+
+    page = ui_client.post("/ui/chat", data={"message": "What is IEA500I?", "reasoning_effort": "high"})
+    assert page.status_code == 422
+    assert html.escape(routes._EFFORT_ERROR_TEXT, quote=False) in page.text
+    assert routes._ERROR_TEXT not in page.text  # not presented as a model outage
+    assert 'data-effort="low" aria-pressed="true"' in page.text  # unoffered value never stays selected
+    fragment = ui_client.post("/ui/chat", data={"message": "What is IEA500I?", "reasoning_effort": "high"},
+                              headers={"HX-Request": "true"})
+    assert html.escape(routes._EFFORT_ERROR_TEXT, quote=False) in fragment.text
+    stream = ui_client.post("/ui/chat/stream", json={
+        "messages": [{"role": "user", "content": "What is IEA500I?"}], "reasoning_effort": "high"})
+    assert stream.status_code == 422
+    assert stream.json() == {"code": "unsupported_reasoning_effort",
+                             "message": "the reasoning effort is not offered by this deployment"}
+    assert fake_llm.calls == [] and fake_llm.stream_calls == []
+
+    accepted = ui_client.post("/ui/chat/stream", json={
+        "messages": [{"role": "user", "content": "What is IEA500I?"}], "reasoning_effort": "xhigh"})
+    assert accepted.status_code == 200
+    assert fake_llm.stream_calls[-1]["reasoning_effort"] == "xhigh"
+    default = ui_client.post("/ui/chat/stream", json={"messages": [{"role": "user", "content": "What is IEA500I?"}]})
+    assert default.status_code == 200
+    assert fake_llm.stream_calls[-1]["reasoning_effort"] == "low"
 
 
 def test_console_js_reasoning_effort_parity():

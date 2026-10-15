@@ -537,6 +537,7 @@ def test_explicit_followup_condensation_reaches_agent():
     ("thinkingReserveTokensComplex", 16384, "LLM_THINKING_RESERVE_TOKENS_COMPLEX"),
     ("reasoningEffortSimple", "high", "LLM_REASONING_EFFORT_SIMPLE"),
     ("reasoningEffortComplex", "xhigh", "LLM_REASONING_EFFORT_COMPLEX"),
+    ("reasoningEfforts", "low,medium,xhigh", "LLM_REASONING_EFFORTS"),
     ("stream", False, "LLM_STREAM"),
 ])
 def test_direct_chart_optional_budget_limits_reach_pod(field, value, environment):
@@ -552,6 +553,7 @@ def test_direct_chart_optional_budget_limits_reach_pod(field, value, environment
     ("thinkingReserveTokensSimple", -1), ("thinkingReserveTokensSimple", 16385),
     ("thinkingReserveTokensComplex", -1), ("thinkingReserveTokensComplex", 16385),
     ("reasoningEffortSimple", "unsupported"), ("reasoningEffortComplex", "unsupported"),
+    ("reasoningEfforts", "low,maximal"), ("reasoningEfforts", "low, medium"), ("reasoningEfforts", ""),
     ("stream", "true"),
 ])
 def test_direct_chart_refuses_invalid_model_budget(field, value):
