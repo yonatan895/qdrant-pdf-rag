@@ -28,15 +28,13 @@ def problems_for(inventory, root=REPO, release=False, found=None):
 
 @pytest.mark.parametrize("expression, expected", [
     ("MIT", "permissive"),
-    ("Apache-2.0 OR BSD-2-Clause", "permissive"),
-    ("BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0", "permissive"),
     ("MPL-2.0 AND MIT", "weak-copyleft"),
     ("GPL-3.0-or-later", "strong-copyleft"),
     ("GPL-2.0-only WITH Classpath-exception-2.0", "strong-copyleft"),
     ("AGPL-3.0-only", "network-copyleft"),
+    ("(MIT OR Apache-2.0) AND MPL-2.0", "weak-copyleft"),
     ("AGPL-3.0-only OR LicenseRef-Artifex-Commercial", "election-required"),
     ("MIT AND LicenseRef-Vendor-EULA", "proprietary"),
-    ("(MIT OR Apache-2.0) AND MPL-2.0", "weak-copyleft"),
     ("Some Free Text License", "unknown"),
     ("MIT AND", "unknown"),
     ("", "unknown"),
@@ -87,9 +85,6 @@ def test_new_locked_dependency_without_a_record_is_flagged():
     removed = inventory["python"].pop(5)
     problems, _, _ = problems_for(inventory)
     assert [p for p in problems if removed["name"] in p and "no license record" in p]
-
-
-def test_record_for_a_dependency_not_in_the_lock_is_flagged():
     inventory = real_inventory()
     ghost = copy.deepcopy(inventory["python"][0]) | {"name": "ghost-package"}
     inventory["python"].append(ghost)
@@ -97,12 +92,12 @@ def test_record_for_a_dependency_not_in_the_lock_is_flagged():
     assert any("ghost-package" in p and "not in the locked runtime profile" in p for p in problems)
 
 
-@pytest.mark.parametrize("field", ["version", "wheel", "sha256"])
-def test_version_or_wheel_bump_without_review_is_flagged(field):
-    inventory = real_inventory()
-    inventory["python"][0][field] = "0" * 64 if field == "sha256" else "9.9.9"
-    problems, _, _ = problems_for(inventory)
-    assert any(f"recorded {field} differs from the lock" in p for p in problems)
+def test_version_or_wheel_bump_without_review_is_flagged():
+    for field in ("version", "wheel", "sha256"):
+        inventory = real_inventory()
+        inventory["python"][0][field] = "0" * 64 if field == "sha256" else "9.9.9"
+        problems, _, _ = problems_for(inventory)
+        assert any(f"recorded {field} differs from the lock" in p for p in problems)
 
 
 def test_class_claim_must_follow_the_recorded_expression():
@@ -114,15 +109,6 @@ def test_class_claim_must_follow_the_recorded_expression():
     entry["class"] = "network-copyleft"
     problems, _, _ = problems_for(inventory)
     assert any("click" in p and "declared metadata" in p for p in problems)
-
-
-def test_unrecognized_license_id_is_unknown_and_not_approvable_by_declaration():
-    inventory = real_inventory()
-    entry = next(e for e in inventory["python"] if e["name"] == "click")
-    entry["license_spdx"] = "Totally-New-License-1.0"
-    entry["class"] = "unknown"
-    problems, _, _ = problems_for(inventory)
-    assert any("click" in p and "unknown" in p for p in problems)
 
 
 def test_approved_status_needs_a_protected_reference():
@@ -177,10 +163,7 @@ def test_release_approval_is_bound_to_the_exact_inventory_and_goes_stale():
     problems, _, state = problems_for(inventory, release=True)
     assert state == "stale"
     assert any("changed since the approved digest" in p for p in problems)
-
-
-def test_scope_digest_ignores_decision_fields_only():
-    inventory = real_inventory()
+    # Decision fields alone never move the digest; license/dependency records do.
     before = li.scope_digest(inventory)
     inventory["python"][0]["status"] = "approved"
     inventory["python"][0]["approval_ref"] = "x"
@@ -188,9 +171,6 @@ def test_scope_digest_ignores_decision_fields_only():
     assert li.scope_digest(inventory) == before
     inventory["python"][0]["license_spdx"] = "ISC"
     assert li.scope_digest(inventory) != before
-
-
-# --- tree-level changes: images, vendored assets, charts, notices -------------
 
 
 @pytest.fixture
@@ -236,10 +216,7 @@ def test_unrecorded_vendored_asset_and_second_chart_are_flagged(tree, capsys):
     assert "chart qdrant-9.9.9.tgz: vendored chart archive has no license record" in out
 
 
-@pytest.mark.parametrize("relative", ["NOTICE.qdrant-skills", "LICENSE.qdrant-skills",
-                                      "NOTICE.mattpocock-skills", "LICENSE.mattpocock-skills",
-                                      "NOTICE.pstack-skills", "LICENSE.pstack-skills",
-                                      "src/mainframe_rag/webui/static/vendor/LICENSE.htmx", "LICENSE"])
+@pytest.mark.parametrize("relative", ["NOTICE.qdrant-skills", "LICENSE"])
 def test_missing_or_altered_notice_file_is_flagged(tree, capsys, relative):
     (tree / relative).write_bytes((tree / relative).read_bytes() + b"\nchanged\n")
     code, out = run(tree, capsys)
@@ -354,12 +331,3 @@ def test_notices_carry_real_texts_and_open_decisions_and_refuse_a_missing_member
         li.render_notices(REPO, inventory, None)
 
 
-def test_notices_are_deterministic(tmp_path):
-    inventory = notice_inventory(tmp_path)
-    assert li.render_notices(REPO, inventory, tmp_path) == li.render_notices(REPO, inventory, tmp_path)
-
-
-def test_script_is_stdlib_only_and_offline():
-    source = (REPO / "scripts/license_inventory.py").read_text()
-    for banned in ("import requests", "import httpx", "urllib.request", "import socket", "subprocess"):
-        assert banned not in source

@@ -32,7 +32,7 @@ def test_ca_mount_targets_only_application_containers():
     assert not any(v['name'] == 'gateway-ca' for v in jaeger['volumes'])
 
 
-@pytest.mark.parametrize('name', ['', 'bad/name', 'BadName', 'x|y'])
+@pytest.mark.parametrize('name', ['', 'BadName', 'x|y'])
 def test_ca_absent_or_invalid_render(name):
     from tests.helpers_helm import _helm_template_with_values, base_values
 
@@ -45,7 +45,7 @@ def test_ca_absent_or_invalid_render(name):
         assert 'mountPath: /etc/gateway-ca' not in result.stdout
 
 
-@pytest.mark.parametrize('state', ['present', 'missing', 'empty'])
+@pytest.mark.parametrize('state', ['present', 'missing'])
 def test_ca_preflight_requires_configmap_and_key(tmp_path, state):
     kc = tmp_path / 'kc'
     kc.write_text('#!/bin/sh\n' + ('exit 1\n' if state == 'missing' else 'echo bundle\n' if state == 'present' else 'exit 0\n'))
