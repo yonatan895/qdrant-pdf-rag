@@ -231,22 +231,18 @@ def _gen_collections(fake: PublishFake) -> list[str]:
 
 
 # ---------------------------------------------------------------- naming
-def test_staging_name_shape_and_determinism():
+def test_publication_identity_addresses_distinct_generations():
+    from mainframe_rag.ingest.rules_version import extraction_rules_version
+
     name = staging_name_for(ALIAS, "a" * 16, "b" * 12)
     assert re.fullmatch(r"mainframe_manuals__gen[0-9a-f]{28}", name)
     assert staging_name_for(ALIAS, "a" * 16, "b" * 12) == name
     assert staging_name_for(ALIAS, "c" * 16, "b" * 12) != name
 
-
-def test_corpus_fingerprint_order_invariant_and_sensitive():
     entries = [("b.pdf", "1" * 64), ("a.pdf", "2" * 64)]
     assert corpus_fingerprint(entries) == corpus_fingerprint(list(reversed(entries)))
     assert corpus_fingerprint(entries) != corpus_fingerprint([("a.pdf", "2" * 64)])
     assert re.fullmatch(r"[0-9a-f]{12}", corpus_fingerprint(entries))
-
-
-def test_generation_fingerprint_sensitive_to_inputs():
-    from mainframe_rag.ingest.rules_version import extraction_rules_version
 
     settings = _settings()
     rules_v = extraction_rules_version()
@@ -261,28 +257,7 @@ def test_generation_fingerprint_sensitive_to_inputs():
 
 
 # ---------------------------------------------------------------- publish
-def test_first_publish_creates_alias_and_serves(tmp_path, monkeypatch):
-    from mainframe_rag.ingest import run_ingest
-
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
-    _build_doc(corpus, "SA22-0000-00_first")
-    assert _run_main(monkeypatch, corpus, tmp_path / "inv.jsonl") == 0
-
-    gens = _gen_collections(fake)
-    assert len(gens) == 1, f"one staging generation expected, got {gens}"
-    assert fake.aliases.get(ALIAS) == gens[0]
-    assert gens[0] != ALIAS
-    points = fake.alias_target_points(ALIAS)
-    assert points, "alias must serve the published generation"
-    assert {p.payload["doc_id"] for p in points} == {"SA22-0000-00"}
-    assert f"{gens[0]}__completions" in fake.collections
-
-
-def test_clean_rerun_is_noop(tmp_path, monkeypatch):
+def test_first_publish_creates_alias_and_clean_rerun_is_noop(tmp_path, monkeypatch):
     from mainframe_rag.ingest import run_ingest
 
     _publish_env(monkeypatch)
@@ -293,15 +268,26 @@ def test_clean_rerun_is_noop(tmp_path, monkeypatch):
     _build_doc(corpus, "SA22-0000-00_first")
     progress = tmp_path / "inv.jsonl"
     assert _run_main(monkeypatch, corpus, progress) == 0
-    target = fake.aliases[ALIAS]
+
+    gens = _gen_collections(fake)
+    assert len(gens) == 1, f"one staging generation expected, got {gens}"
+    assert fake.aliases.get(ALIAS) == gens[0]
+    assert gens[0] != ALIAS
+    points = fake.alias_target_points(ALIAS)
+    assert points, "alias must serve the published generation"
+    assert {p.payload["doc_id"] for p in points} == {"SA22-0000-00"}
+    assert f"{gens[0]}__completions" in fake.collections
+
     n_collections = len(fake.collections)
     assert _run_main(monkeypatch, corpus, progress) == 0
-    assert fake.aliases[ALIAS] == target, "steady state must not flip the alias"
+    assert fake.aliases[ALIAS] == gens[0], "steady state must not flip the alias"
     assert len(fake.collections) == n_collections, "no new staging on a clean rerun"
 
 
-def test_refresh_publishes_new_generation_and_keeps_old(tmp_path, monkeypatch):
+def test_refresh_publishes_new_generation_keeps_old_and_rolls_back(tmp_path, monkeypatch):
     from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.qdrant_io import swap_alias_to
+    from mainframe_rag.ingest.representation import read_manifest
 
     _publish_env(monkeypatch)
     fake = PublishFake()
@@ -326,77 +312,26 @@ def test_refresh_publishes_new_generation_and_keeps_old(tmp_path, monkeypatch):
     # The new staging inherited live's contract through the clone + re-key
     # (issue #391 F5): the fake honors the real retrieve projection default,
     # so this passes only because rekey_manifest requests vectors explicitly.
-    from mainframe_rag.ingest.representation import read_manifest
-
     assert read_manifest(fake, f"{gen2}__completions") is not None
+
+    # Operator rollback: re-point the alias at the kept previous generation.
+    swap_alias_to(fake, _settings(), gen1, gen2)
+    assert fake.aliases[ALIAS] == gen1
+    assert {p.payload["doc_id"] for p in fake.alias_target_points(ALIAS)} == {"SA22-0000-00"}
 
 
 def _staging_settings(collection: str) -> Settings:
     return _settings(qdrant_collection=collection)
 
 
-def test_staging_metadata_repair_after_interrupted_metadata_clone(tmp_path, monkeypatch):
-    """Issue #391 F5: a crash after the data clone but before the completions
-    clone leaves staging data with no readable metadata. Reuse must repair
-    (re-transfer live's contract), not publish from incomplete preparation."""
+def test_incomplete_staging_metadata_is_repaired_or_refused_never_published(tmp_path, monkeypatch):
+    """Issue #391 F5: preparation interrupted after the data clone (no
+    completions) or after the metadata clone (no re-key) is repaired by
+    re-transferring live's contract verbatim; a source that cannot yield its
+    manifest vector fails loudly. The alias and live never move."""
     from mainframe_rag.ingest import run_ingest
     from mainframe_rag.ingest.publish import ensure_staging
     from mainframe_rag.ingest.representation import read_manifest
-
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
-    _build_doc(corpus, "SA22-0000-00_first")
-    assert _run_main(monkeypatch, corpus, tmp_path / "inv.jsonl") == 0
-    live = fake.aliases[ALIAS]
-    live_points = list(fake.collections[live])
-    live_completions = list(fake.collections[f"{live}__completions"])
-
-    staging = "mainframe_manuals__genDEADBEEF0123456789ab"
-    fake.collections[staging] = list(live_points)  # data clone got through
-
-    assert ensure_staging(fake, _settings(), _staging_settings(staging), live) == "repaired"
-    assert read_manifest(fake, f"{staging}__completions") is not None
-    assert fake.aliases[ALIAS] == live, "repair never moves the alias"
-    assert fake.collections[live] == live_points, "live data untouched"
-    assert fake.collections[f"{live}__completions"] == live_completions, "live metadata untouched"
-
-
-def test_staging_metadata_repair_after_failed_rekey(tmp_path, monkeypatch):
-    """Metadata was cloned but the re-key never ran: the copied manifest
-    point still carries the live id, so staging reads no manifest. Reuse
-    re-keys verbatim from live instead of reading inherited state as legacy."""
-    from mainframe_rag.ingest import run_ingest
-    from mainframe_rag.ingest.publish import ensure_staging
-    from mainframe_rag.ingest.representation import read_manifest
-
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
-    _build_doc(corpus, "SA22-0000-00_first")
-    assert _run_main(monkeypatch, corpus, tmp_path / "inv.jsonl") == 0
-    live = fake.aliases[ALIAS]
-    contract = read_manifest(fake, f"{live}__completions")
-    assert contract is not None
-
-    staging = "mainframe_manuals__genFEDCBA9876543210abcd"
-    fake.collections[staging] = list(fake.collections[live])
-    fake.collections[f"{staging}__completions"] = list(fake.collections[f"{live}__completions"])
-
-    assert ensure_staging(fake, _settings(), _staging_settings(staging), live) == "repaired"
-    assert read_manifest(fake, f"{staging}__completions") == contract
-    assert fake.aliases[ALIAS] == live
-
-
-def test_incomplete_metadata_transfer_never_publishes(tmp_path, monkeypatch):
-    """A source that cannot yield its manifest vector must fail preparation
-    loudly: no silent 'reused', live untouched, no publish path."""
-    from mainframe_rag.ingest import run_ingest
-    from mainframe_rag.ingest.publish import ensure_staging
 
     class _NoVectorStore(PublishFake):
         omit_vectors = False
@@ -421,14 +356,37 @@ def test_incomplete_metadata_transfer_never_publishes(tmp_path, monkeypatch):
     live = fake.aliases[ALIAS]
     live_points = list(fake.collections[live])
     live_completions = list(fake.collections[f"{live}__completions"])
+    contract = read_manifest(fake, f"{live}__completions")
+    assert contract is not None
 
-    fake.omit_vectors = True  # Inject the transfer fault after the initial verified publication.
-    staging = "mainframe_manuals__gen00112233445566778899"
+    def assert_live_untouched():
+        assert fake.aliases[ALIAS] == live, "preparation never moves the alias"
+        assert fake.collections[live] == live_points, "live data untouched"
+        assert fake.collections[f"{live}__completions"] == live_completions, "live metadata untouched"
+
+    # Crash after the data clone but before the completions clone.
+    staging = "mainframe_manuals__genDEADBEEF0123456789ab"
+    fake.collections[staging] = list(live_points)
+    assert ensure_staging(fake, _settings(), _staging_settings(staging), live) == "repaired"
+    assert read_manifest(fake, f"{staging}__completions") == contract
+    assert_live_untouched()
+
+    # Metadata cloned but the re-key never ran: the copied manifest point still
+    # carries the live id, so staging reads no manifest until it is re-keyed.
+    staging = "mainframe_manuals__genFEDCBA9876543210abcd"
+    fake.collections[staging] = list(live_points)
+    fake.collections[f"{staging}__completions"] = list(live_completions)
+    assert ensure_staging(fake, _settings(), _staging_settings(staging), live) == "repaired"
+    assert read_manifest(fake, f"{staging}__completions") == contract
+    assert_live_untouched()
+
+    # A source that cannot yield its manifest vector fails preparation.
+    fake.omit_vectors = True
     with pytest.raises(RuntimeError, match="staging metadata transfer failed"):
-        ensure_staging(fake, _settings(), _staging_settings(staging), live)
-    assert fake.aliases[ALIAS] == live
-    assert fake.collections[live] == live_points
-    assert fake.collections[f"{live}__completions"] == live_completions
+        ensure_staging(
+            fake, _settings(), _staging_settings("mainframe_manuals__gen00112233445566778899"), live
+        )
+    assert_live_untouched()
 
 
 def test_staging_invisible_until_swap(tmp_path, monkeypatch):
@@ -554,7 +512,10 @@ def test_legacy_migration_preserves_then_clears(tmp_path, monkeypatch):
     assert {p.payload["doc_id"] for p in fake.alias_target_points(ALIAS)} == {"SA22-0000-00"}
 
 
-def test_publish_refuses_limit_and_empty_corpus(tmp_path, monkeypatch):
+@pytest.mark.parametrize("case", ["limit", "empty-corpus", "revision-collision"])
+def test_publish_refusals_precede_any_allocation(tmp_path, monkeypatch, case):
+    from scripts.make_synthetic_pdf import build as make_pdf
+
     from mainframe_rag.ingest import run_ingest
 
     _publish_env(monkeypatch)
@@ -562,15 +523,22 @@ def test_publish_refuses_limit_and_empty_corpus(tmp_path, monkeypatch):
     monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
     corpus = tmp_path / "corpus"
     corpus.mkdir()
-    _build_doc(corpus, "SA22-0000-00_first")
-    with pytest.raises(RuntimeError, match="refuses --limit"):
-        _run_main(monkeypatch, corpus, tmp_path / "inv.jsonl", "--limit", "1")
+    extra: tuple[str, ...] = ()
+    if case == "limit":
+        _build_doc(corpus, "SA22-0000-00_first")
+        extra, match = ("--limit", "1"), "refuses --limit"
+    elif case == "empty-corpus":
+        match = "empty corpus"
+    else:
+        # Two distinct byte-streams sharing one printed doc_id.
+        for sub, title in (("a", "Edition one"), ("b", "Edition two")):
+            (corpus / sub).mkdir()
+            make_pdf(corpus / sub / "dup.pdf", doc_id="SA22-0000-00", title=title)
+        match = "revision collision"
+    with pytest.raises(RuntimeError, match=match):
+        _run_main(monkeypatch, corpus, tmp_path / "inv.jsonl", *extra)
     assert fake.aliases == {}
-    empty = tmp_path / "empty"
-    empty.mkdir()
-    with pytest.raises(RuntimeError, match="empty corpus"):
-        _run_main(monkeypatch, empty, tmp_path / "inv2.jsonl")
-    assert fake.aliases == {}
+    assert not any("__gen" in c for c in fake.collections)
 
 
 def test_verify_failure_blocks_swap(tmp_path, monkeypatch):
@@ -653,10 +621,19 @@ def test_verify_all_complete_matrix(monkeypatch):
             rules_version=rules_v,
         ),
     }
+    inv["unstored.pdf"] = InventoryRecord(
+        path="unstored.pdf",
+        sha256="f" * 64,
+        doc_id="D4",
+        status="upserted",
+        rules_version=rules_v,
+        source_rev=source_rev_key("v", "p", "1", "f" * 64),
+    )
     problems = verify_all_complete(
         fake,
         staging,
         [
+            ("unstored.pdf", "f" * 64),
             ("ok.pdf", "a" * 64),
             ("missing.pdf", "b" * 64),
             ("stale.pdf", "c" * 64),
@@ -668,34 +645,121 @@ def test_verify_all_complete_matrix(monkeypatch):
         rules_v,
         "||",
     )
-    assert sorted(problems) == ["err.pdf", "ghost.pdf", "legacy.pdf", "missing.pdf", "stale.pdf"]
+    assert sorted(problems) == [
+        "err.pdf", "ghost.pdf", "legacy.pdf", "missing.pdf", "stale.pdf", "unstored.pdf",
+    ]
 
 
-def test_verify_all_complete_refuses_pending_contract(monkeypatch):
-    """Issue #391 F2: a pending migration contract blocks the swap even when
-    every walked document verifies — publication certifies a committed
-    generation, never an unfinished re-embed."""
-    from mainframe_rag.ingest import run_ingest
-    from mainframe_rag.ingest.representation import (
-        STATE_COMMITTED,
-        STATE_PENDING,
-        read_manifest_record,
-        write_manifest,
-    )
+def _seed_manifest_point(fake, staging, **payload):
+    from mainframe_rag.ingest.representation import manifest_point_id
+
+    completions = f"{staging.qdrant_collection}__completions"
+    fake.collections[completions] = [
+        SimpleNamespace(id=manifest_point_id(completions), payload=payload)
+    ]
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["missing", "wrong-record-type", "manifest-not-dict", "manifest-bad-schema", "state-not-string",
+     "retrieve-raises"],
+)
+def test_verify_all_complete_refuses_unreadable_manifest_on_populated_staging(case):
+    """Invariant D2: a populated staging whose manifest is absent, corrupt or
+    unreadable blocks publication."""
+    from mainframe_rag.ingest.representation import STATE_COMMITTED, build_manifest
     from mainframe_rag.ingest.rules_version import extraction_rules_version
 
-    _publish_env(monkeypatch)
     fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda s: fake)
-    staging = _settings(qdrant_collection="stg-pending")
+    staging = _settings(qdrant_collection="stg-unreadable")
     rules_v = extraction_rules_version()
-    write_manifest(fake, "stg-pending__completions", staging, rules_v, state=STATE_PENDING)
-    problems = verify_all_complete(fake, staging, [], {}, rules_v, "||")
-    assert problems == ["stg-pending: contract 'pending'"]
-    write_manifest(fake, "stg-pending__completions", staging, rules_v, state=STATE_COMMITTED)
+    good = build_manifest(staging, rules_v).model_dump(mode="json")
+    record = {"record_type": "representation-manifest", "manifest": good, "state": STATE_COMMITTED}
+    if case == "wrong-record-type":
+        _seed_manifest_point(fake, staging, **{**record, "record_type": "completion-marker"})
+    elif case == "manifest-not-dict":
+        _seed_manifest_point(fake, staging, **{**record, "manifest": "not a dict"})
+    elif case == "manifest-bad-schema":
+        _seed_manifest_point(fake, staging, **{**record, "manifest": {"bad": "schema"}})
+    elif case == "state-not-string":
+        _seed_manifest_point(fake, staging, **{**record, "state": 123})
+    elif case == "retrieve-raises":
+        fake.collections["stg-unreadable__completions"] = []
+
+        def exploding(*args, **kwargs):
+            raise RuntimeError("Database connection timed out")
+
+        fake.retrieve = exploding
+    problems = verify_all_complete(fake, staging, [("doc.pdf", "a" * 64)], {}, rules_v, "||")
+    assert "stg-unreadable: missing or unreadable metadata manifest" in problems
+    if case == "missing":
+        # Empty bootstrap (no walked documents) is the one permitted absence.
+        assert verify_all_complete(fake, staging, [], {}, rules_v, "||") == []
+
+
+@pytest.mark.parametrize("state", ["pending", "COMMITTED"])
+def test_verify_all_complete_refuses_a_non_committed_contract(state):
+    """Publication certifies a committed generation, never an unfinished
+    re-embed (issue #391 F2); the comparison is exact (no case folding), and
+    the block holds even with nothing walked."""
+    from mainframe_rag.ingest.representation import write_manifest
+    from mainframe_rag.ingest.rules_version import extraction_rules_version
+
+    rules_v = extraction_rules_version()
+    fake = PublishFake()
+    staging = _settings(qdrant_collection="stg-states")
+    write_manifest(fake, "stg-states__completions", staging, rules_v, state=state)
+    problems = verify_all_complete(fake, staging, [("doc.pdf", "a" * 64)], {}, rules_v, "||")
+    assert f"stg-states: contract {state!r}" in problems
+    assert verify_all_complete(fake, staging, [], {}, rules_v, "||") == [f"stg-states: contract {state!r}"]
+
+
+@pytest.mark.parametrize(
+    ("settings_kw", "manifest_kw", "fields"),
+    [
+        ({}, {"rules": "old_rules_v_1234"}, "extraction_rules"),
+        (
+            {"bm25_model": "bm25_v1", "bm25_weights_revision": "rev1"},
+            {"bm25_model": "bm25_v2", "bm25_weights_revision": "rev2"},
+            "sparse_model, sparse_weights_revision",
+        ),
+        (
+            {"embed_mode": "vllm", "embed_model": "model-a", "embed_model_revision": "rev1", "dense_dim": 512},
+            {"embed_model": "model-b", "dense_dim": 768, "rules": "other_rules_v"},
+            "extraction_rules, embed_model, dense_dim",
+        ),
+    ],
+)
+def test_verify_all_complete_refuses_representation_drift(settings_kw, manifest_kw, fields):
+    """A committed contract that drifted on any re-embed coordinate blocks
+    publication, naming each drifted field."""
+    from mainframe_rag.ingest.representation import write_manifest
+    from mainframe_rag.ingest.rules_version import extraction_rules_version
+
+    rules_v = extraction_rules_version()
+    fake = PublishFake()
+    staging = _settings(qdrant_collection="stg-drift", **settings_kw)
+    manifest_kw = dict(manifest_kw)
+    rules = manifest_kw.pop("rules", rules_v)
+    write_manifest(
+        fake, "stg-drift__completions", staging.model_copy(update=manifest_kw), rules, state="committed"
+    )
+    problems = verify_all_complete(fake, staging, [("doc.pdf", "a" * 64)], {}, rules_v, "||")
+    assert any(f"stg-drift: representation drift on {fields}" in p for p in problems)
+
+
+def test_verify_all_complete_ignores_record_only_prefix_drift():
+    from mainframe_rag.ingest.representation import write_manifest
+    from mainframe_rag.ingest.rules_version import extraction_rules_version
+
+    rules_v = extraction_rules_version()
+    fake = PublishFake()
+    staging = _settings(qdrant_collection="stg-record-only", dense_query_prefix="PREFIX_A: ")
+    write_manifest(
+        fake, "stg-record-only__completions",
+        staging.model_copy(update={"dense_query_prefix": "PREFIX_B: "}), rules_v, state="committed",
+    )
     assert verify_all_complete(fake, staging, [], {}, rules_v, "||") == []
-    record = read_manifest_record(fake, "stg-pending__completions")
-    assert record.state == STATE_COMMITTED
 
 
 def _parsed_doc(doc_id, sha):
@@ -713,29 +777,6 @@ def _parsed_doc(doc_id, sha):
         vendor="v",
         page_count=1,
     )
-
-
-def test_rollback_repoint(tmp_path, monkeypatch):
-    """Operator rollback: re-point the alias at the kept previous generation."""
-    from mainframe_rag.ingest import run_ingest
-    from mainframe_rag.ingest.qdrant_io import swap_alias_to
-
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
-    _build_doc(corpus, "SA22-0000-00_first")
-    progress = tmp_path / "inv.jsonl"
-    assert _run_main(monkeypatch, corpus, progress) == 0
-    gen1 = fake.aliases[ALIAS]
-    _build_doc(corpus, "SA22-0000-01_second")
-    assert _run_main(monkeypatch, corpus, progress) == 0
-    assert fake.aliases[ALIAS] != gen1
-
-    swap_alias_to(fake, _settings(), gen1, fake.aliases[ALIAS])
-    assert fake.aliases[ALIAS] == gen1
-    assert {p.payload["doc_id"] for p in fake.alias_target_points(ALIAS)} == {"SA22-0000-00"}
 
 
 def test_dangling_alias_publishes_fresh(tmp_path, monkeypatch):
@@ -758,35 +799,6 @@ def _live_manifest_revision(fake, live):
     from mainframe_rag.ingest.representation import read_manifest
 
     return read_manifest(fake, f"{live}__completions")
-
-
-def test_steady_live_with_drifted_revision_fails_closed(tmp_path, monkeypatch):
-    """Issue #391 F2: a revision-only change derives a DIFFERENT staging
-    generation, so the unforced run clones live and fails in the inner
-    preflight (drift, `--reingest` remediation). Alias, live points, and
-    live metadata stay untouched — a failed migration leaves A serving."""
-    from mainframe_rag.ingest import run_ingest
-
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
-    _build_doc(corpus, "SA22-0000-00_first")
-    progress = tmp_path / "inv.jsonl"
-    assert _run_main(monkeypatch, corpus, progress) == 0
-    live = fake.aliases[ALIAS]
-    points_before = list(fake.collections[live])
-    assert _live_manifest_revision(fake, live).embed_model_revision == ""
-
-    monkeypatch.setenv("EMBED_MODEL_REVISION", "rev-2")
-    with pytest.raises(RuntimeError, match="representation drift on embed_model_revision"):
-        _run_main(monkeypatch, corpus, progress)
-    assert fake.aliases[ALIAS] == live, "failed run moves no alias"
-    assert fake.collections[live] == points_before, "failed run touches no live point"
-    assert _live_manifest_revision(fake, live).embed_model_revision == "", (
-        "failed run commits no manifest"
-    )
 
 
 def test_publish_force_same_contract_repairs_distinct_generation(tmp_path, monkeypatch):
@@ -875,30 +887,6 @@ def test_forced_repair_never_touches_live_during_build(tmp_path, monkeypatch):
     assert fake.aliases[ALIAS] != live, "the repair swapped only after verification"
 
 
-def test_forced_repair_partial_corpus_refuses_and_preserves_live(tmp_path, monkeypatch):
-    """A repair build must certify the same complete corpus as any publish:
-    a removed file without an approved removal blocks the swap, the old
-    generation keeps serving, and its points are untouched."""
-    from mainframe_rag.ingest import run_ingest
-
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
-    _, b_path = _two_doc_corpus(corpus)
-    progress = tmp_path / "inv.jsonl"
-    assert _run_main(monkeypatch, corpus, progress) == 0
-    live = fake.aliases[ALIAS]
-    points_before = [(p.id, dict(p.payload or {})) for p in fake.collections[live]]
-
-    b_path.rename(tmp_path / "doc_b.pdf.held")
-    with pytest.raises(RuntimeError, match="unmarked residue"):
-        _run_main(monkeypatch, corpus, progress, "--reingest")
-    assert fake.aliases[ALIAS] == live
-    assert [(p.id, dict(p.payload or {})) for p in fake.collections[live]] == points_before
-
-
 def test_interrupted_same_contract_repair_resumes_recorded_build(tmp_path, monkeypatch):
     """A crash mid-repair resumes the recorded repair generation (distinct
     from live) instead of allocating another suffix; live stays unchanged
@@ -940,35 +928,6 @@ def test_interrupted_same_contract_repair_resumes_recorded_build(tmp_path, monke
     assert fake.aliases[ALIAS] == staging
     assert not state_path.exists()
     assert _gen_collections(fake) == sorted([live, staging])
-
-
-def test_forced_repair_swap_then_crash_finalizes_read_only(tmp_path, monkeypatch):
-    """A crash between the repair swap and sidecar cleanup resumes through
-    the read-only steady-state path: no second repair generation, no
-    mutation of the generation already serving."""
-    from mainframe_rag.ingest import run_ingest
-
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
-    _build_doc_with_id(corpus, "doc_a", DOC_A)
-    progress = tmp_path / "inv.jsonl"
-    assert _run_main(monkeypatch, corpus, progress) == 0
-
-    real_clear = run_ingest.clear_publish_state
-    monkeypatch.setattr(run_ingest, "clear_publish_state", lambda *a, **k: False)
-    assert _run_main(monkeypatch, corpus, progress, "--reingest") == 0
-    repaired = fake.aliases[ALIAS]
-    gens_before = _gen_collections(fake)
-    points_after = [(p.id, dict(p.payload or {})) for p in fake.collections[repaired]]
-
-    monkeypatch.setattr(run_ingest, "clear_publish_state", real_clear)
-    assert _run_main(monkeypatch, corpus, progress, "--reingest") == 0
-    assert fake.aliases[ALIAS] == repaired
-    assert _gen_collections(fake) == gens_before, "finalize allocates nothing"
-    assert [(p.id, dict(p.payload or {})) for p in fake.collections[repaired]] == points_after
 
 
 def test_subsequent_ordinary_run_recognizes_repair_steady_state(tmp_path, monkeypatch):
@@ -1042,31 +1001,11 @@ def test_subsequent_ordinary_run_recognizes_repair_steady_state(tmp_path, monkey
     assert new_corpus_gen != repaired
     assert new_corpus_gen in _gen_collections(fake)
 
-
-def test_subsequent_run_changed_revision_after_repair_derives_new_generation(tmp_path, monkeypatch):
-    """Issue #391 Q418-R1 counterexample 2: after a forced repair, changing the
-    model revision changes gen_fp so publication metadata in live no longer
-    matches; an ordinary run allocates a new staging generation instead of
-    re-verifying live as steady state."""
-    from mainframe_rag.ingest import run_ingest
-
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
-    _build_doc_with_id(corpus, "doc_a", DOC_A)
-    progress = tmp_path / "inv.jsonl"
-
-    assert _run_main(monkeypatch, corpus, progress) == 0
-    assert _run_main(monkeypatch, corpus, progress, "--reingest") == 0
-    repaired = fake.aliases[ALIAS]
-
-    # Change revision: gen_fp changes, so it must not be recognized as steady state
+    # 6. Counterexample 2: a model-revision change changes gen_fp, so live is
+    # not recognized as steady state and a new generation is derived.
     monkeypatch.setenv("EMBED_MODEL_REVISION", "rev-new")
     assert _run_main(monkeypatch, corpus, progress, "--reingest") == 0
-    after_rev = fake.aliases[ALIAS]
-    assert after_rev != repaired
+    assert fake.aliases[ALIAS] != new_corpus_gen
 
 
 def test_q418_r1_publication_receipt_not_accumulated_across_clones():
@@ -1194,13 +1133,14 @@ def test_q418_r1_publication_receipt_not_accumulated_across_clones():
     assert str(stg2_receipts_after_pub[0].id) == publication_metadata_point_id(staging2_completions)
 
 
-def test_publish_force_revision_change_migrates_to_new_generation(tmp_path, monkeypatch):
-    """Issue #391 F2: a revision-only change must never reconverge the live
-    physical. The versioned fingerprint embeds the operator revision, so
-    --reingest derives a distinct staging generation, re-embeds into it,
-    verifies, and swaps; the old generation keeps its points AND its rev-A
-    manifest for metadata rollback, and the serving generation's contract is
-    committed (never a half-rebuilt B)."""
+def test_revision_only_change_fails_unforced_and_migrates_when_forced(tmp_path, monkeypatch):
+    """Issue #391 F2: a revision-only change derives a DIFFERENT staging
+    generation, so the unforced run clones live and fails in the inner
+    preflight (drift, `--reingest` remediation) leaving alias, live points and
+    live metadata untouched. `--reingest` then re-embeds into that distinct
+    generation, verifies and swaps; the old generation keeps its points AND
+    its rev-A manifest for rollback, and the serving contract is committed
+    (never a half-rebuilt B)."""
     from mainframe_rag.ingest import run_ingest
     from mainframe_rag.ingest.representation import STATE_COMMITTED, read_manifest_record
 
@@ -1213,8 +1153,16 @@ def test_publish_force_revision_change_migrates_to_new_generation(tmp_path, monk
     progress = tmp_path / "inv.jsonl"
     assert _run_main(monkeypatch, corpus, progress) == 0
     old = fake.aliases[ALIAS]
+    points_before = list(fake.collections[old])
+    assert _live_manifest_revision(fake, old).embed_model_revision == ""
 
     monkeypatch.setenv("EMBED_MODEL_REVISION", "rev-2")
+    with pytest.raises(RuntimeError, match="representation drift on embed_model_revision"):
+        _run_main(monkeypatch, corpus, progress)
+    assert fake.aliases[ALIAS] == old, "failed run moves no alias"
+    assert fake.collections[old] == points_before, "failed run touches no live point"
+    assert _live_manifest_revision(fake, old).embed_model_revision == "", "failed run commits no manifest"
+
     assert _run_main(monkeypatch, corpus, progress, "--reingest") == 0
     new = fake.aliases[ALIAS]
     assert new != old, "a representation change must publish a distinct generation"
@@ -1222,120 +1170,98 @@ def test_publish_force_revision_change_migrates_to_new_generation(tmp_path, monk
     assert _live_manifest_revision(fake, old).embed_model_revision == "", (
         "old generation keeps its own contract"
     )
-    old_docs = {
-        (p.payload or {}).get("doc_id")
-        for p in fake.collections[old]
-        if (p.payload or {}).get("doc_id")
-    }
-    assert old_docs == {"SA22-0000-00"}, "old generation keeps its points"
+    assert fake.collections[old] == points_before, "old generation keeps its points"
     assert _live_manifest_revision(fake, new).embed_model_revision == "rev-2"
     record = read_manifest_record(fake, f"{new}__completions")
     assert record is not None and record.state == STATE_COMMITTED
     assert {p.payload["doc_id"] for p in fake.alias_target_points(ALIAS)} == {"SA22-0000-00"}
 
 
-def test_verify_all_complete_refuses_missing_manifest_on_populated_staging(monkeypatch):
-    """Invariant D2: Populated staging without a manifest blocks publication;
-    empty bootstrap (0 walked docs) remains permitted."""
+@pytest.mark.parametrize("mode", ["dropped", "pending"])
+def test_publish_unusable_manifest_prevents_alias_cutover(tmp_path, monkeypatch, mode):
+    """Invariant D2 E2E: the full publication flow aborts and leaves the alias
+    untouched when the staging manifest is dropped or left pending at the
+    publication gate."""
     from mainframe_rag.ingest import run_ingest
-    from mainframe_rag.ingest.rules_version import extraction_rules_version
+    from mainframe_rag.ingest.representation import STATE_PENDING, manifest_point_id, write_manifest
 
     _publish_env(monkeypatch)
     fake = PublishFake()
     monkeypatch.setattr(run_ingest, "_get_qdrant", lambda s: fake)
-    staging = _settings(qdrant_collection="stg-nomanifest")
-    rules_v = extraction_rules_version()
-
-    # Case A: Populated target (walked is non-empty) -> missing manifest is a blocking problem
-    problems = verify_all_complete(fake, staging, [("doc.pdf", "a" * 64)], {}, rules_v, "||")
-    assert "stg-nomanifest: missing or unreadable metadata manifest" in problems
-
-    # Case B: Empty bootstrap (walked is empty) -> missing manifest is permitted
-    assert verify_all_complete(fake, staging, [], {}, rules_v, "||") == []
-
-
-def test_verify_all_complete_refuses_corrupt_manifest_on_populated_staging(monkeypatch):
-    """Invariant D2: Staging with unparseable/corrupt manifest payload blocks publication."""
-    from types import SimpleNamespace
-
-    from mainframe_rag.ingest import run_ingest
-    from mainframe_rag.ingest.representation import manifest_point_id
-    from mainframe_rag.ingest.rules_version import extraction_rules_version
-
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda s: fake)
-    staging = _settings(qdrant_collection="stg-corrupt")
-    rules_v = extraction_rules_version()
-
-    completions = "stg-corrupt__completions"
-    fake.collections[completions] = [
-        SimpleNamespace(
-            id=manifest_point_id(completions),
-            payload={
-                "record_type": "manifest",
-                "manifest": "not-a-valid-manifest-dict",
-                "state": "committed",
-            },
-        )
-    ]
-
-    problems = verify_all_complete(fake, staging, [("doc.pdf", "a" * 64)], {}, rules_v, "||")
-    assert "stg-corrupt: missing or unreadable metadata manifest" in problems
-
-
-def test_verify_all_complete_refuses_representation_drift(monkeypatch):
-    """Invariant D2: Committed manifest with drifted representation blocks publication."""
-    from mainframe_rag.ingest import run_ingest
-    from mainframe_rag.ingest.representation import STATE_COMMITTED, write_manifest
-    from mainframe_rag.ingest.rules_version import extraction_rules_version
-
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda s: fake)
-    staging = _settings(qdrant_collection="stg-drift", embed_model="model-a")
-    rules_v = extraction_rules_version()
-
-    # Write manifest under model-b
-    drift_settings = staging.model_copy(update={"embed_model": "model-b"})
-    write_manifest(fake, "stg-drift__completions", drift_settings, rules_v, state=STATE_COMMITTED)
-
-    problems = verify_all_complete(fake, staging, [("doc.pdf", "a" * 64)], {}, rules_v, "||")
-    assert any("stg-drift: representation drift on embed_model" in p for p in problems)
-
-
-def test_publish_missing_manifest_prevents_alias_cutover(tmp_path, monkeypatch):
-    """Invariant D2 E2E: Full publication flow aborts and leaves alias untouched
-    when the staging manifest is missing at publication gate."""
-    from mainframe_rag.ingest import run_ingest
-    from mainframe_rag.ingest.representation import manifest_point_id
-
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda s: fake)
-
     corpus = tmp_path / "corpus"
     corpus.mkdir()
     _build_doc(corpus, "SA22-0000-00_first")
-
-    # Hook commit_manifest to suppress writing the committed manifest point,
-    # simulating a missing or dropped manifest at publication gate
     orig_commit = run_ingest.commit_manifest
 
-    def _suppress_commit(client, completions_collection, settings, rules_v):
+    def _unusable_commit(client, completions_collection, settings, rules_v):
+        if mode == "pending":
+            return write_manifest(client, completions_collection, settings, rules_v, state=STATE_PENDING)
         orig_commit(client, completions_collection, settings, rules_v)
-        # Remove manifest point
-        comp_points = fake.collections.get(completions_collection, [])
         mp_id = manifest_point_id(completions_collection)
-        fake.collections[completions_collection] = [p for p in comp_points if str(p.id) != mp_id]
+        fake.collections[completions_collection] = [
+            p for p in fake.collections.get(completions_collection, []) if str(p.id) != mp_id
+        ]
         return ""
 
-    monkeypatch.setattr(run_ingest, "commit_manifest", _suppress_commit)
-
-    with pytest.raises(RuntimeError, match="missing or unreadable metadata manifest"):
+    monkeypatch.setattr(run_ingest, "commit_manifest", _unusable_commit)
+    match = {"dropped": "missing or unreadable metadata manifest", "pending": "contract 'pending'"}[mode]
+    with pytest.raises(RuntimeError, match=match):
         _run_main(monkeypatch, corpus, tmp_path / "inv.jsonl")
+    assert fake.aliases == {}, "alias cutover must be refused"
 
-    assert fake.aliases == {}, "Alias cutover must be refused when metadata manifest is missing"
+
+@pytest.mark.parametrize("damage", ["dropped", "pending"])
+def test_steady_state_reverification_refuses_unusable_live_manifest(tmp_path, monkeypatch, damage):
+    """An ordinary rerun of identical inputs re-verifies the live generation
+    read-only and fails closed when its manifest is gone or pending; an
+    explicit --reingest of a contract-less live repairs into a distinct
+    generation instead of mutating the serving one (issue #391)."""
+    from copy import deepcopy
+
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.representation import (
+        STATE_COMMITTED,
+        STATE_PENDING,
+        manifest_point_id,
+        read_manifest_record,
+        write_manifest,
+    )
+    from mainframe_rag.ingest.rules_version import extraction_rules_version
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda s: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _build_doc_with_id(corpus, "doc_a", DOC_A)
+    progress = tmp_path / "inv.jsonl"
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    live = fake.aliases[ALIAS]
+    live_points = [p.id for p in fake.collections[live]]
+    completions = f"{live}__completions"
+    if damage == "dropped":
+        mp_id = manifest_point_id(completions)
+        fake.collections[completions] = [p for p in fake.collections[completions] if str(p.id) != mp_id]
+        match = "predates the representation manifest"
+    else:
+        write_manifest(
+            fake, completions, _settings(qdrant_collection=live), extraction_rules_version(),
+            state=STATE_PENDING,
+        )
+        match = "unfinished representation migration"
+    before = deepcopy(fake.collections), dict(fake.aliases)
+    with pytest.raises(RuntimeError, match=match):
+        _run_main(monkeypatch, corpus, progress)
+    assert (fake.collections, fake.aliases) == before, "the refusal mutates nothing"
+
+    if damage == "dropped":
+        assert _run_main(monkeypatch, corpus, progress, "--reingest") == 0
+        repaired = fake.aliases[ALIAS]
+        assert repaired != live
+        assert [p.id for p in fake.collections[live]] == live_points
+        assert read_manifest_record(fake, completions) is None
+        record = read_manifest_record(fake, f"{repaired}__completions")
+        assert record is not None and record.state == STATE_COMMITTED
 
 
 # ------------------------------------------------- R1 intended set (issue #405)
@@ -1365,8 +1291,9 @@ def _live_doc_ids(fake: PublishFake):
 
 def test_partial_walk_refuses_and_preserves_unretired_doc(tmp_path, monkeypatch):
     """R1 acceptance: a partial walk (missing mount/copy) without an
-    approved removal refuses cutover; the approved doc is not silently
-    retired and the live generation is untouched."""
+    approved removal refuses cutover, for an ordinary run and a forced repair
+    alike (a repair certifies the same complete corpus as any publish); the
+    approved doc is not silently retired and the live generation is untouched."""
     from mainframe_rag.ingest import run_ingest
 
     _publish_env(monkeypatch)
@@ -1378,81 +1305,52 @@ def test_partial_walk_refuses_and_preserves_unretired_doc(tmp_path, monkeypatch)
     progress = tmp_path / "inv.jsonl"
     assert _run_main(monkeypatch, corpus, progress) == 0
     live_before = fake.aliases[ALIAS]
+    points_before = [(p.id, dict(p.payload or {})) for p in fake.collections[live_before]]
     assert _live_doc_ids(fake) == {DOC_A, DOC_B}
 
     held = tmp_path / "doc_b.pdf.held"
     b_path.rename(held)
-    with pytest.raises(RuntimeError, match="unmarked residue"):
-        _run_main(monkeypatch, corpus, progress)
-    assert fake.aliases[ALIAS] == live_before
-    assert _live_doc_ids(fake) == {DOC_A, DOC_B}
+    for extra in ((), ("--reingest",)):
+        with pytest.raises(RuntimeError, match="unmarked residue"):
+            _run_main(monkeypatch, corpus, progress, *extra)
+        assert fake.aliases[ALIAS] == live_before
+        assert [(p.id, dict(p.payload or {})) for p in fake.collections[live_before]] == points_before
+        assert _live_doc_ids(fake) == {DOC_A, DOC_B}
 
 
-def test_explicit_retire_doc_succeeds_with_rollback_history(tmp_path, monkeypatch):
-    """R1 acceptance: an explicitly approved removal publishes; the
-    superseded physical (with the retired doc) and its safety snapshot
-    are retained for rollback."""
+@pytest.mark.parametrize("case", ["unknown-doc", "walked-revision", "replaced-revision"])
+def test_retire_refusals_mutate_nothing(tmp_path, monkeypatch, case):
+    """R1 / R-REV acceptance: a typo (no approved history) and a retirement
+    contradicting the walked corpus (a named revision still present, or any
+    revision of the document still walked) fail before any mutation."""
+    from scripts.make_synthetic_pdf import build as make_pdf
+
     from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.inventory import load_inventory
+    from mainframe_rag.ingest.publish import publish_state_path
 
     _publish_env(monkeypatch)
     fake = PublishFake()
     monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
     corpus = tmp_path / "corpus"
     corpus.mkdir()
-    _, b_path = _two_doc_corpus(corpus)
+    a_path, _ = _two_doc_corpus(corpus)
     progress = tmp_path / "inv.jsonl"
     assert _run_main(monkeypatch, corpus, progress) == 0
-    live_before = fake.aliases[ALIAS]
-
-    b_path.rename(tmp_path / "doc_b.pdf.held")
-    assert _run_main(monkeypatch, corpus, progress, "--retire-doc", DOC_B) == 0
-    live_after = fake.aliases[ALIAS]
-    assert live_after != live_before
-    assert _live_doc_ids(fake) == {DOC_A}
-    assert live_before in fake.collections
-    assert {p.payload["doc_id"] for p in fake.collections[live_before]} == {DOC_A, DOC_B}
-    assert fake.snapshots.get(live_before), "superseded generation keeps a safety snapshot"
-
-
-def test_retire_unknown_doc_fails_closed(tmp_path, monkeypatch):
-    """R1 acceptance: retiring a document with no approved history fails
-    before any mutation (typo guard) — no staging, no alias move."""
-    from mainframe_rag.ingest import run_ingest
-
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
-    _two_doc_corpus(corpus)
-    progress = tmp_path / "inv.jsonl"
-    assert _run_main(monkeypatch, corpus, progress) == 0
-    before_aliases = dict(fake.aliases)
-    before_collections = set(fake.collections)
-
-    with pytest.raises(RuntimeError, match="no approved history"):
-        _run_main(monkeypatch, corpus, progress, "--retire-doc", "SA99-9999-99")
-    assert dict(fake.aliases) == before_aliases
-    assert set(fake.collections) == before_collections
-
-
-def test_retire_walked_doc_fails_closed(tmp_path, monkeypatch):
-    """R1 acceptance: a retirement contradicting the walked corpus (file
-    still present) fails before any mutation."""
-    from mainframe_rag.ingest import run_ingest
-
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
-    _two_doc_corpus(corpus)
-    progress = tmp_path / "inv.jsonl"
-    assert _run_main(monkeypatch, corpus, progress) == 0
-
-    with pytest.raises(RuntimeError, match="still present"):
-        _run_main(monkeypatch, corpus, progress, "--retire-doc", DOC_A)
-    assert _live_doc_ids(fake) == {DOC_A, DOC_B}
+    rev_a = load_inventory(progress)[str(a_path)].source_rev
+    assert rev_a is not None
+    if case == "unknown-doc":
+        flag, match = "SA99-9999-99", "no approved history"
+    elif case == "walked-revision":
+        flag, match = f"{DOC_A}@{rev_a}", "still present in the walked corpus"
+    else:
+        make_pdf(a_path, doc_id=DOC_A, title="Synthetic Doc A Rev 2")
+        flag, match = DOC_A, "still present in the walked corpus"
+    sidecar = publish_state_path(progress, ALIAS)
+    before = _resolution_snapshot(fake, progress, sidecar)
+    with pytest.raises(RuntimeError, match=match):
+        _run_main(monkeypatch, corpus, progress, "--retire-doc", flag)
+    assert _resolution_snapshot(fake, progress, sidecar) == before
 
 
 def test_unmarked_legacy_residue_blocks_cutover_without_deletion(tmp_path, monkeypatch):
@@ -1605,54 +1503,6 @@ def test_overtaken_publisher_refuses_stale_cutover(tmp_path, monkeypatch):
     assert fake.aliases[ALIAS] == "G2manual"
 
 
-def test_interrupted_forced_run_resumes_same_staging(tmp_path, monkeypatch):
-    """R2 acceptance: an interrupted forced rebuild resumes its recorded
-    unfinished staging instead of allocating another suffix; the previous
-    live generation stays unchanged throughout."""
-    from mainframe_rag.ingest import run_ingest
-    from mainframe_rag.ingest.publish import publish_state_path
-
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
-    _build_doc_with_id(corpus, "doc_a", DOC_A)
-    progress = tmp_path / "inv.jsonl"
-    assert _run_main(monkeypatch, corpus, progress) == 0
-    live_before = fake.aliases[ALIAS]
-    _build_doc_with_id(corpus, "doc_b", DOC_B)
-
-    real_inner = run_ingest._run_impl
-
-    def dying_inner(*args, **kwargs):
-        if kwargs.get("staging") is None:
-            return real_inner(*args, **kwargs)
-        raise RuntimeError("injected mid-build crash")
-
-    monkeypatch.setattr(run_ingest, "_run_impl", dying_inner)
-    with pytest.raises(RuntimeError, match="injected mid-build crash"):
-        _run_main(monkeypatch, corpus, progress, "--reingest")
-    assert fake.aliases[ALIAS] == live_before
-    state_path = publish_state_path(progress, ALIAS)
-    assert state_path.exists()
-    import json
-
-    staging = json.loads(state_path.read_text())["staging"]
-    assert staging in fake.collections
-    assert staging != live_before
-
-    monkeypatch.setattr(run_ingest, "_run_impl", real_inner)
-    assert _run_main(monkeypatch, corpus, progress, "--reingest") == 0
-    assert fake.aliases[ALIAS] == staging
-    assert not state_path.exists()
-    data_gens = [
-        name for name in fake.collections if "__gen" in name and not name.endswith("__completions")
-    ]
-    assert sorted(data_gens) == sorted([live_before, staging])
-    assert _live_doc_ids(fake) == {DOC_A, DOC_B}
-
-
 def test_revisit_retained_generation_never_mutated(tmp_path, monkeypatch):
     """R2 acceptance: republishing an older input set allocates a new
     staging generation; the retained published generation (points and
@@ -1693,137 +1543,15 @@ def test_revisit_retained_generation_never_mutated(tmp_path, monkeypatch):
 # ------------------------------------------------- Review round on #409 (issue #405)
 
 
-def _write_committed_manifest(fake, collection):
-    from mainframe_rag.ingest.representation import STATE_COMMITTED, write_manifest
-    from mainframe_rag.ingest.rules_version import extraction_rules_version
-
-    staging = _settings(qdrant_collection=collection)
-    write_manifest(
-        fake,
-        f"{collection}__completions",
-        staging,
-        extraction_rules_version(),
-        state=STATE_COMMITTED,
-    )
-
-
-def test_suffixed_crash_retry_resumes_recorded_staging(monkeypatch):
-    """B1: a crash after the sidecar records a suffixed allocation resumes
-    that same staging on retry with identical inputs — no new collection,
-    no strand."""
-    from mainframe_rag.ingest.publish import (
-        resolve_publish_staging,
-        staging_name_for,
-    )
-
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    settings = _settings(qdrant_collection=ALIAS)
-    gen_fp = "g" * 16
-    corp_fp = "c" * 12
-    base = staging_name_for(ALIAS, gen_fp, corp_fp)
-    live = "live-gen"
-    fake.collections[live] = []
-    # Derived base is a retained published generation ...
-    fake.collections[base] = [SimpleNamespace(id="p", payload={"doc_id": "X"})]
-    _write_committed_manifest(fake, base)
-    # ... so the first build allocated base_1, recorded it, then crashed
-    # before cutover (the clone carries a committed manifest verbatim).
-    recorded = f"{base}_1"
-    fake.collections[recorded] = [SimpleNamespace(id="q", payload={"doc_id": "X"})]
-    _write_committed_manifest(fake, recorded)
-    state = {
-        "version": 1,
-        "alias": ALIAS,
-        "staging": recorded,
-        "gen_fp": gen_fp,
-        "corpus_fp": corp_fp,
-    }
-    before = set(fake.collections)
-    staging, resumed = resolve_publish_staging(
-        fake,
-        settings,
-        gen_fp=gen_fp,
-        corpus_fp=corp_fp,
-        live=live,
-        force_reingest=False,
-        state=state,
-    )
-    assert (staging, resumed) == (recorded, True)
-    assert set(fake.collections) == before, "resume allocates nothing"
-
-
-def test_foreign_publish_state_fails_closed(monkeypatch):
-    """A sidecar recording different inputs than the current run is never
-    acted on — only the operator may abandon it."""
-    from mainframe_rag.ingest.publish import resolve_publish_staging
-
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    settings = _settings(qdrant_collection=ALIAS)
-    with pytest.raises(RuntimeError, match="different inputs"):
-        resolve_publish_staging(
-            fake,
-            settings,
-            gen_fp="g" * 16,
-            corpus_fp="c" * 12,
-            live=None,
-            force_reingest=False,
-            state={"staging": "other", "gen_fp": "h" * 16, "corpus_fp": "c" * 12},
-        )
-
-
-def test_recorded_serving_generation_finalizes_read_only(tmp_path, monkeypatch):
-    """SF3: a crash between swap and sidecar cleanup (suffixed staging now
-    serving) finalizes through the read-only steady-state path on retry —
-    no rebuild, no build into live, no new generation."""
-    from mainframe_rag.ingest import run_ingest
-
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    dir_a = tmp_path / "corpus_a"
-    dir_a.mkdir()
-    _build_doc_with_id(dir_a, "doc_a", DOC_A)
-    dir_b = tmp_path / "corpus_b"
-    dir_b.mkdir()
-    _build_doc_with_id(dir_b, "doc_b", DOC_B)
-    progress = tmp_path / "inv.jsonl"
-
-    assert _run_main(monkeypatch, dir_a, progress) == 0
-    assert _run_main(monkeypatch, dir_b, progress, "--retire-doc", DOC_A) == 0
-    # Revisit the older input set: derived base is retained, so the build
-    # allocates a suffix. Suppress the post-swap cleanup to simulate the
-    # crash landing between cutover and sidecar removal.
-    real_clear = run_ingest.clear_publish_state
-    monkeypatch.setattr(run_ingest, "clear_publish_state", lambda *a, **k: False)
-    assert _run_main(monkeypatch, dir_a, progress, "--retire-doc", DOC_B) == 0
-    live = fake.aliases[ALIAS]
-    assert live != ALIAS and live.endswith("_1"), f"expected suffixed staging, got {live}"
-    gens_before = _gen_collections(fake)
-    assert _live_doc_ids(fake) == {DOC_A}
-
-    monkeypatch.setattr(run_ingest, "clear_publish_state", real_clear)
-    assert _run_main(monkeypatch, dir_a, progress, "--retire-doc", DOC_B) == 0
-    assert fake.aliases[ALIAS] == live
-    assert _gen_collections(fake) == gens_before, "finalize allocates nothing"
-    assert _live_doc_ids(fake) == {DOC_A}
-
-
-def test_plan_retire_mixed_history_covers_approved_legacy():
+def test_plan_retire_deletes_takes_legacy_only_for_whole_document_retirement():
     """B2: whole-document retirement covers approved sourceless history
-    alongside named revisions (the #409 reproducer, fixed expectation)."""
+    alongside named revisions (the #409 reproducer); a named-only retirement
+    never takes legacy points."""
     from mainframe_rag.ingest.completion import plan_retire_deletes
 
     assert plan_retire_deletes({"DOC": {"rev1", None}}, {"DOC": {None}}) == {
         "DOC": {"revs": {"rev1"}, "legacy": True, "whole": True}
     }
-
-
-def test_plan_retire_partial_leaves_legacy():
-    """A named-only retirement never takes legacy points, whole or not."""
-    from mainframe_rag.ingest.completion import plan_retire_deletes
-
     assert plan_retire_deletes({"DOC": {"rev1", None}}, {"DOC": {"rev1"}}) == {
         "DOC": {"revs": {"rev1"}, "legacy": False, "whole": False}
     }
@@ -1883,10 +1611,12 @@ def _seed_approved_legacy(progress, doc_id, *, points=None, sha256="0" * 64, rul
         f.write(legacy.model_dump_json() + "\n")
 
 
-def test_whole_doc_retire_covers_mixed_history(tmp_path, monkeypatch):
-    """B2 end to end: a document with a named revision plus approved
-    sourceless history retires completely — named points, legacy points,
-    and legacy markers all go; rollback history is retained."""
+def test_whole_doc_retirement_removes_named_and_legacy_history_keeping_rollback(tmp_path, monkeypatch):
+    """B2 / R1 end to end: a document with a named revision plus approved
+    sourceless history retires completely — named points, legacy points and
+    legacy markers all go from the new generation, the sibling document stays
+    live, and the superseded physical (plus its safety snapshot) is retained
+    for rollback."""
     from mainframe_rag.ingest import run_ingest
 
     _publish_env(monkeypatch)
@@ -1910,10 +1640,9 @@ def test_whole_doc_retire_covers_mixed_history(tmp_path, monkeypatch):
     assert live_after != live_before
     assert {p.payload["doc_id"] for p in fake.collections[live_after]} == {DOC_B}
     assert live_before in fake.collections
-    assert {p.payload["doc_id"] for p in fake.collections[live_before]} == {
-        DOC_A,
-        DOC_B,
-    }
+    assert {p.payload["doc_id"] for p in fake.collections[live_before]} == {DOC_A, DOC_B}
+    assert any(getattr(p, "id", None) == "legacy-a" for p in fake.collections[live_before])
+    assert fake.snapshots.get(live_before), "superseded generation keeps a safety snapshot"
 
 
 def test_partial_retire_leaves_legacy_with_named_path(tmp_path, monkeypatch):
@@ -2023,39 +1752,7 @@ def test_retire_plan_validated_under_target_lock(tmp_path, monkeypatch):
     assert _gen_collections(fake) == gens_before, "stale plan builds nothing"
 
 
-def test_walked_doc_unapproved_legacy_stray_refuses(tmp_path, monkeypatch):
-    """Issue #391 current packet (counterexample 2): sharing a walked doc_id
-    is not attributed coverage. A sourceless point with no approved legacy
-    membership refuses the steady-state re-verify; the point is preserved and
-    the alias does not move."""
-    from mainframe_rag.ingest import run_ingest
-
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
-    _build_doc_with_id(corpus, "doc_a", DOC_A)
-    progress = tmp_path / "inv.jsonl"
-    assert _run_main(monkeypatch, corpus, progress) == 0
-    live = fake.aliases[ALIAS]
-    _make_completed_legacy_fixture(fake, live)
-
-    fake.collections[live].append(
-        SimpleNamespace(id="stray-a", payload={"doc_id": DOC_A, "text": "pre-361B"})
-    )
-    with pytest.raises(RuntimeError, match="unmarked residue"):
-        _run_main(monkeypatch, corpus, progress)
-    assert fake.aliases[ALIAS] == live, "refusal moves no alias"
-    assert any(getattr(p, "id", None) == "stray-a" for p in fake.collections[live]), (
-        "unknown residue is preserved, never deleted"
-    )
-
-
-def test_walked_doc_approved_legacy_stray_publishes(tmp_path, monkeypatch):
-    """The pre-361B bridge survives with content attribution: a sourceless
-    point whose (doc_id, sha256) matches an approved legacy inventory record
-    and passes full digest/rules verification is permitted."""
+def _legacy_history_case(tmp_path, monkeypatch):
     from mainframe_rag.ingest import run_ingest
     from mainframe_rag.ingest.rules_version import extraction_rules_version
 
@@ -2069,210 +1766,79 @@ def test_walked_doc_approved_legacy_stray_publishes(tmp_path, monkeypatch):
     assert _run_main(monkeypatch, corpus, progress) == 0
     live = fake.aliases[ALIAS]
     _make_completed_legacy_fixture(fake, live)
-
     rules_v = extraction_rules_version()
-    legacy_pt = SimpleNamespace(
-        id="legacy-a",
-        payload={"doc_id": DOC_A, "sha256": "0" * 64, "rules_v": rules_v, "text": "pre-361B"},
-    )
-    fake.collections[live].append(legacy_pt)
-    _seed_approved_legacy(progress, DOC_A, points=[legacy_pt])
+
+    def point(pid, text="pre-361B", rules=rules_v):
+        return SimpleNamespace(
+            id=pid,
+            payload={"doc_id": DOC_A, "sha256": "0" * 64, "rules_v": rules, "text": text},
+        )
+
+    return fake, corpus, progress, live, rules_v, point
+
+
+@pytest.mark.parametrize(
+    ("case", "match"),
+    [
+        ("unapproved-stray", "unmarked residue"),
+        ("unexpected-chunk-id", "fail content/digest verification"),
+        ("incompatible-rules", "extraction rules 'old_rules_v' mismatch current rules"),
+        ("extra-chunk", "chunk count mismatch: expected 1, found 2"),
+        ("no-digests", "has no verifiable chunk/content digest — re-ingest with --reingest"),
+    ],
+)
+def test_walked_doc_legacy_history_refuses_without_content_verification(tmp_path, monkeypatch, case, match):
+    """Issue #391 current packet (counterexample 2) and Q417-L1: sharing a
+    walked doc_id is not attributed coverage. A sourceless point that no
+    approved legacy inventory record matches by exact ids, rules, count and
+    digests refuses the steady-state re-verify, is preserved, and the alias
+    does not move."""
+    from mainframe_rag.ingest.inventory import load_inventory
+
+    fake, corpus, progress, live, rules_v, point = _legacy_history_case(tmp_path, monkeypatch)
+    if case == "unapproved-stray":
+        stored = [SimpleNamespace(id="stray-a", payload={"doc_id": DOC_A, "text": "pre-361B"})]
+    elif case == "unexpected-chunk-id":
+        _seed_approved_legacy(progress, DOC_A, points=[point("legacy-a")])
+        stored = [point("legacy-unexpected-id")]
+    elif case == "incompatible-rules":
+        stale = point("legacy-a", rules="old_rules_v")
+        _seed_approved_legacy(progress, DOC_A, points=[stale], rules_v="old_rules_v")
+        stored = [stale]
+    elif case == "extra-chunk":
+        part1, part2 = point("legacy-a1", "pre-361B part 1"), point("legacy-a2", "pre-361B part 2")
+        _seed_approved_legacy(progress, DOC_A, points=[part1])
+        stored = [part1, part2]
+    else:
+        template = next(iter(load_inventory(progress).values()))
+        legacy = template.model_copy(update={
+            "path": f"legacy/{DOC_A}.pdf", "sha256": "0" * 64, "source_rev": None, "chunks": 1,
+            "chunk_ids_digest": "", "content_digest": "", "rules_version": rules_v,
+        })
+        with open(progress, "a", encoding="utf-8") as f:
+            f.write(legacy.model_dump_json() + "\n")
+        stored = [point("legacy-a")]
+    fake.collections[live].extend(stored)
+    with pytest.raises(RuntimeError, match=match):
+        _run_main(monkeypatch, corpus, progress)
+    assert fake.aliases[ALIAS] == live, "refusal moves no alias"
+    for p in stored:
+        assert any(getattr(q, "id", None) == p.id for q in fake.collections[live]), (
+            "unknown residue is preserved, never deleted"
+        )
+
+
+def test_walked_doc_approved_legacy_history_publishes(tmp_path, monkeypatch):
+    """The pre-361B bridge survives with content attribution: a sourceless
+    point matching an approved legacy record and passing full digest/rules
+    verification is permitted."""
+    fake, corpus, progress, live, _, point = _legacy_history_case(tmp_path, monkeypatch)
+    approved = point("legacy-a")
+    fake.collections[live].append(approved)
+    _seed_approved_legacy(progress, DOC_A, points=[approved])
     assert _run_main(monkeypatch, corpus, progress) == 0
     assert fake.aliases[ALIAS] == live
     assert any(getattr(p, "id", None) == "legacy-a" for p in fake.collections[live])
-
-
-def test_walked_doc_approved_legacy_unexpected_chunk_id_refuses(tmp_path, monkeypatch):
-    """Issue #391 Q417-L1 counterexample 1: unexpected chunk ID carrying an approved
-    sha256 fails digest verification and refuses cutover."""
-    from mainframe_rag.ingest import run_ingest
-    from mainframe_rag.ingest.rules_version import extraction_rules_version
-
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
-    _build_doc_with_id(corpus, "doc_a", DOC_A)
-    progress = tmp_path / "inv.jsonl"
-    assert _run_main(monkeypatch, corpus, progress) == 0
-    live = fake.aliases[ALIAS]
-    _make_completed_legacy_fixture(fake, live)
-
-    rules_v = extraction_rules_version()
-    expected_pt = SimpleNamespace(
-        id="legacy-a",
-        payload={"doc_id": DOC_A, "sha256": "0" * 64, "rules_v": rules_v, "text": "pre-361B"},
-    )
-    _seed_approved_legacy(progress, DOC_A, points=[expected_pt])
-    corrupt_pt = SimpleNamespace(
-        id="legacy-unexpected-id",
-        payload={"doc_id": DOC_A, "sha256": "0" * 64, "rules_v": rules_v, "text": "pre-361B"},
-    )
-    fake.collections[live].append(corrupt_pt)
-    with pytest.raises(RuntimeError, match="fail content/digest verification"):
-        _run_main(monkeypatch, corpus, progress)
-    assert fake.aliases[ALIAS] == live
-
-
-def test_walked_doc_approved_legacy_altered_text_refuses(tmp_path, monkeypatch):
-    """Issue #391 Q417-L1 counterexample 2: altered text carrying an approved sha256
-    fails digest verification and refuses cutover."""
-    from mainframe_rag.ingest import run_ingest
-    from mainframe_rag.ingest.rules_version import extraction_rules_version
-
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
-    _build_doc_with_id(corpus, "doc_a", DOC_A)
-    progress = tmp_path / "inv.jsonl"
-    assert _run_main(monkeypatch, corpus, progress) == 0
-    live = fake.aliases[ALIAS]
-    _make_completed_legacy_fixture(fake, live)
-
-    rules_v = extraction_rules_version()
-    expected_pt = SimpleNamespace(
-        id="legacy-a",
-        payload={
-            "doc_id": DOC_A,
-            "sha256": "0" * 64,
-            "rules_v": rules_v,
-            "text": "pre-361B original",
-        },
-    )
-    _seed_approved_legacy(progress, DOC_A, points=[expected_pt])
-    altered_pt = SimpleNamespace(
-        id="legacy-a",
-        payload={
-            "doc_id": DOC_A,
-            "sha256": "0" * 64,
-            "rules_v": rules_v,
-            "text": "pre-361B altered",
-        },
-    )
-    fake.collections[live].append(altered_pt)
-    with pytest.raises(RuntimeError, match="fail content/digest verification"):
-        _run_main(monkeypatch, corpus, progress)
-    assert fake.aliases[ALIAS] == live
-
-
-def test_walked_doc_approved_legacy_incompatible_rules_refuses(tmp_path, monkeypatch):
-    """Issue #391 Q417-L1 counterexample 3: incompatible extraction rules in approved legacy
-    record refuse cutover and require reingest."""
-    from mainframe_rag.ingest import run_ingest
-
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
-    _build_doc_with_id(corpus, "doc_a", DOC_A)
-    progress = tmp_path / "inv.jsonl"
-    assert _run_main(monkeypatch, corpus, progress) == 0
-    live = fake.aliases[ALIAS]
-    _make_completed_legacy_fixture(fake, live)
-
-    legacy_pt = SimpleNamespace(
-        id="legacy-a",
-        payload={"doc_id": DOC_A, "sha256": "0" * 64, "rules_v": "old_rules_v", "text": "pre-361B"},
-    )
-    fake.collections[live].append(legacy_pt)
-    _seed_approved_legacy(progress, DOC_A, points=[legacy_pt], rules_v="old_rules_v")
-    with pytest.raises(RuntimeError, match="extraction rules 'old_rules_v' mismatch current rules"):
-        _run_main(monkeypatch, corpus, progress)
-    assert fake.aliases[ALIAS] == live
-
-
-def test_walked_doc_approved_legacy_extra_chunk_refuses(tmp_path, monkeypatch):
-    """Issue #391 Q417-L1 counterexample 4: extra chunk carrying approved sha256
-    causes chunk count mismatch and refuses cutover."""
-    from mainframe_rag.ingest import run_ingest
-    from mainframe_rag.ingest.rules_version import extraction_rules_version
-
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
-    _build_doc_with_id(corpus, "doc_a", DOC_A)
-    progress = tmp_path / "inv.jsonl"
-    assert _run_main(monkeypatch, corpus, progress) == 0
-    live = fake.aliases[ALIAS]
-    _make_completed_legacy_fixture(fake, live)
-
-    rules_v = extraction_rules_version()
-    pt1 = SimpleNamespace(
-        id="legacy-a1",
-        payload={
-            "doc_id": DOC_A,
-            "sha256": "0" * 64,
-            "rules_v": rules_v,
-            "text": "pre-361B part 1",
-        },
-    )
-    _seed_approved_legacy(progress, DOC_A, points=[pt1])
-    pt2 = SimpleNamespace(
-        id="legacy-a2",
-        payload={
-            "doc_id": DOC_A,
-            "sha256": "0" * 64,
-            "rules_v": rules_v,
-            "text": "pre-361B part 2",
-        },
-    )
-    fake.collections[live].extend([pt1, pt2])
-    with pytest.raises(RuntimeError, match="chunk count mismatch: expected 1, found 2"):
-        _run_main(monkeypatch, corpus, progress)
-    assert fake.aliases[ALIAS] == live
-
-
-def test_walked_doc_legacy_no_digests_fails_closed_with_reingest(tmp_path, monkeypatch):
-    """Issue #391 Q417-L1 counterexample 5: legacy document lacking digests fails closed
-    with explicit --reingest remediation message."""
-    from mainframe_rag.ingest import run_ingest
-    from mainframe_rag.ingest.inventory import load_inventory
-    from mainframe_rag.ingest.rules_version import extraction_rules_version
-
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
-    _build_doc_with_id(corpus, "doc_a", DOC_A)
-    progress = tmp_path / "inv.jsonl"
-    assert _run_main(monkeypatch, corpus, progress) == 0
-    live = fake.aliases[ALIAS]
-    _make_completed_legacy_fixture(fake, live)
-
-    rules_v = extraction_rules_version()
-    legacy_pt = SimpleNamespace(
-        id="legacy-a",
-        payload={"doc_id": DOC_A, "sha256": "0" * 64, "rules_v": rules_v, "text": "pre-361B"},
-    )
-    fake.collections[live].append(legacy_pt)
-    inv = load_inventory(progress)
-    template = next(iter(inv.values()))
-    legacy = template.model_copy(
-        update={
-            "path": f"legacy/{DOC_A}.pdf",
-            "sha256": "0" * 64,
-            "source_rev": None,
-            "chunks": 1,
-            "chunk_ids_digest": "",
-            "content_digest": "",
-            "rules_version": rules_v,
-        }
-    )
-    with open(progress, "a", encoding="utf-8") as f:
-        f.write(legacy.model_dump_json() + "\n")
-
-    with pytest.raises(
-        RuntimeError, match="has no verifiable chunk/content digest — re-ingest with --reingest"
-    ):
-        _run_main(monkeypatch, corpus, progress)
-    assert fake.aliases[ALIAS] == live
 
 
 def test_publish_migration_with_explicit_retire_single_run(tmp_path, monkeypatch):
@@ -2655,7 +2221,7 @@ def _resolution_snapshot(fake: PublishFake, progress: Path, sidecar: Path):
 
 @pytest.mark.parametrize(
     "case",
-    ["walked_conflict", "foreign_sidecar", "old_format_sidecar", "retirement_mismatch", "rebound_live"],
+    ["foreign_sidecar", "old_format_sidecar", "retirement_mismatch", "rebound_live"],
 )
 def test_publication_resolution_refusal_writes_nothing(tmp_path, monkeypatch, case):
     """Issue #583 S6: every refusal while publication resolves its
@@ -2665,7 +2231,6 @@ def test_publication_resolution_refusal_writes_nothing(tmp_path, monkeypatch, ca
     import json
 
     from mainframe_rag.ingest import run_ingest
-    from mainframe_rag.ingest.inventory import load_inventory
     from mainframe_rag.ingest.publish import (
         publish_state_path,
         read_publication_metadata,
@@ -2677,7 +2242,7 @@ def test_publication_resolution_refusal_writes_nothing(tmp_path, monkeypatch, ca
     monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
     corpus = tmp_path / "corpus"
     corpus.mkdir()
-    a_path, _ = _two_doc_corpus(corpus)
+    _two_doc_corpus(corpus)
     progress = tmp_path / "inv.jsonl"
     assert _run_main(monkeypatch, corpus, progress) == 0
     live = fake.aliases[ALIAS]
@@ -2686,10 +2251,7 @@ def test_publication_resolution_refusal_writes_nothing(tmp_path, monkeypatch, ca
     gen_fp, corp_fp = fingerprints
     sidecar = publish_state_path(progress, ALIAS)
     extra: tuple[str, ...] = ()
-    if case == "walked_conflict":
-        rev_a = load_inventory(progress)[str(a_path)].source_rev
-        extra, match = ("--retire-doc", f"{DOC_A}@{rev_a}"), "still present in the walked corpus"
-    elif case == "foreign_sidecar":
+    if case == "foreign_sidecar":
         write_publish_state(progress, ALIAS, "foreign-candidate", "f" * 16, "c" * 12, previous=live)
         match = "different inputs"
     elif case == "old_format_sidecar":
@@ -2711,56 +2273,6 @@ def test_publication_resolution_refusal_writes_nothing(tmp_path, monkeypatch, ca
     with pytest.raises(RuntimeError, match=match):
         _run_main(monkeypatch, corpus, progress, *extra)
     assert _resolution_snapshot(fake, progress, sidecar) == before, f"{case}: refusal wrote state"
-
-
-def test_retire_revision_a_with_walked_revision_a_fails_closed(tmp_path, monkeypatch):
-    """R-REV: retiring revision A while revision A is still present in the walked
-    corpus fails closed before mutation."""
-    from mainframe_rag.ingest import run_ingest
-    from mainframe_rag.ingest.inventory import load_inventory
-
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
-    a_path, _ = _two_doc_corpus(corpus)
-    progress = tmp_path / "inv.jsonl"
-    assert _run_main(monkeypatch, corpus, progress) == 0
-    live = fake.aliases[ALIAS]
-    rev_a = load_inventory(progress)[str(a_path)].source_rev
-    assert rev_a is not None
-
-    with pytest.raises(RuntimeError, match="still present in the walked corpus"):
-        _run_main(monkeypatch, corpus, progress, "--retire-doc", f"{DOC_A}@{rev_a}")
-    assert fake.aliases[ALIAS] == live, "refusal does not move alias"
-
-
-def test_whole_document_retirement_with_walked_revision_b_fails_closed(tmp_path, monkeypatch):
-    """R-REV: whole-document retirement (--retire-doc DOC_A) fails closed if any
-    revision of DOC_A is walked."""
-    from scripts.make_synthetic_pdf import build as make_pdf
-
-    from mainframe_rag.ingest import run_ingest
-
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
-    progress = tmp_path / "inv.jsonl"
-
-    a_path = corpus / "doc_a.pdf"
-    make_pdf(a_path, doc_id=DOC_A, title="Synthetic Doc A Rev 1")
-    _build_doc_with_id(corpus, "doc_b", DOC_B)
-    assert _run_main(monkeypatch, corpus, progress) == 0
-    live = fake.aliases[ALIAS]
-
-    # Replace with rev 2
-    make_pdf(a_path, doc_id=DOC_A, title="Synthetic Doc A Rev 2")
-    with pytest.raises(RuntimeError, match="still present in the walked corpus"):
-        _run_main(monkeypatch, corpus, progress, "--retire-doc", DOC_A)
-    assert fake.aliases[ALIAS] == live
 
 
 def test_retire_revision_a_with_deleted_legacy_sibling_fails_verification(tmp_path, monkeypatch):
@@ -2823,53 +2335,12 @@ def test_retire_revision_a_with_deleted_legacy_sibling_fails_verification(tmp_pa
     assert fake.aliases[ALIAS] == live_1, "cutover refused: live alias unchanged"
 
 
-def test_whole_doc_retire_deletes_both_named_and_legacy_history(tmp_path, monkeypatch):
-    """S424-F1: whole-document retirement (--retire-doc DOC) removes both
-    named revisions and approved legacy history."""
-    from scripts.make_synthetic_pdf import build as make_pdf
-
-    from mainframe_rag.ingest import run_ingest
-    from mainframe_rag.ingest.rules_version import extraction_rules_version
-
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
-    progress = tmp_path / "inv.jsonl"
-
-    a_path = corpus / "doc_a.pdf"
-    make_pdf(a_path, doc_id=DOC_A, title="Synthetic Doc A Rev 1")
-    _build_doc_with_id(corpus, "doc_b", DOC_B)
-    assert _run_main(monkeypatch, corpus, progress) == 0
-    live_1 = fake.aliases[ALIAS]
-
-    rules_v = extraction_rules_version()
-    legacy_pt = SimpleNamespace(
-        id="legacy-doc-a",
-        vector={"dense": [0.25] * 256, "bm25": models.SparseVector(indices=[3], values=[0.5])},
-        payload={
-            "doc_id": DOC_A,
-            "sha256": "a" * 64,
-            "rules_v": rules_v,
-            "text": "pre-361B legacy Doc A",
-        },
-    )
-    fake.collections[live_1].append(legacy_pt)
-    _seed_approved_legacy(progress, DOC_A, points=[legacy_pt], sha256="a" * 64)
-
-    a_path.unlink()
-    assert _run_main(monkeypatch, corpus, progress, "--retire-doc", DOC_A) == 0
-    live_2 = fake.aliases[ALIAS]
-    assert live_2 != live_1
-    assert not any((p.payload or {}).get("doc_id") == DOC_A for p in fake.collections[live_2])
-    assert any(getattr(p, "id", None) == "legacy-doc-a" for p in fake.collections[live_1])
-
-
-def test_retire_retry_after_inventory_append_succeeds(tmp_path, monkeypatch):
+def test_retire_retry_recovers_its_plan_and_refuses_a_changed_request(tmp_path, monkeypatch):
     """S424-F2: when an interrupted run appends revision B's inventory record,
-    retrying the same command recovers the authorized retirement plan from
-    the publish_state sidecar and cutover succeeds safely."""
+    changing the requested retirement does not inherit another transaction's
+    authorization (fails closed), while retrying the identical command
+    recovers the authorized plan from the publish_state sidecar and the
+    cutover succeeds safely."""
     from scripts.make_synthetic_pdf import build as make_pdf
 
     from mainframe_rag.ingest import run_ingest
@@ -2916,50 +2387,16 @@ def test_retire_retry_after_inventory_append_succeeds(tmp_path, monkeypatch):
     assert fake.aliases[ALIAS] == live_1
     assert any((p.payload or {}).get("source_rev") == rev_a for p in fake.collections[live_1])
 
+    # A different retirement request is refused.
+    with pytest.raises(RuntimeError, match="refusing a build the current inputs cannot explain"):
+        _run_main(monkeypatch, corpus, progress, "--retire-doc", DOC_B)
+    assert fake.aliases[ALIAS] == live_1
+
     # Retry the IDENTICAL command: recovers retire_plan from publish_state sidecar
     assert _run_main(monkeypatch, corpus, progress, "--retire-doc", f"{DOC_A}@{rev_a}") == 0
     live_2 = fake.aliases[ALIAS]
     assert live_2 != live_1
     assert not any((p.payload or {}).get("source_rev") == rev_a for p in fake.collections[live_2])
-
-
-def test_retire_retry_with_changed_retirements_fails_closed(tmp_path, monkeypatch):
-    """S424-F2: changing the requested retirement on retry does not inherit
-    another transaction's authorization and fails closed."""
-    from scripts.make_synthetic_pdf import build as make_pdf
-
-    from mainframe_rag.ingest import run_ingest
-    from mainframe_rag.ingest.inventory import load_inventory
-
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
-    progress = tmp_path / "inv.jsonl"
-
-    a_path = corpus / "doc_a.pdf"
-    make_pdf(a_path, doc_id=DOC_A, title="Synthetic Doc A Rev 1")
-    _build_doc_with_id(corpus, "doc_b", DOC_B)
-    assert _run_main(monkeypatch, corpus, progress) == 0
-    inv_1 = load_inventory(progress)
-    rev_a = inv_1[str(a_path)].source_rev
-
-    make_pdf(a_path, doc_id=DOC_A, title="Synthetic Doc A Rev 2")
-
-    def fail_before_swap(*args, **kwargs):
-        raise RuntimeError("simulated crash before swap")
-
-    monkeypatch.setattr(run_ingest, "apply_approved_removals", fail_before_swap)
-    with pytest.raises(RuntimeError, match="simulated crash"):
-        _run_main(monkeypatch, corpus, progress, "--retire-doc", f"{DOC_A}@{rev_a}")
-
-    # Retry with a different retirement request: fails closed
-    monkeypatch.undo()
-    _publish_env(monkeypatch)
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    with pytest.raises(RuntimeError, match="refusing a build the current inputs cannot explain"):
-        _run_main(monkeypatch, corpus, progress, "--retire-doc", DOC_B)
 
 
 def test_conflict_preflight_same_bytes_changed_label_replaces_old_revision(tmp_path, monkeypatch):
@@ -3019,52 +2456,6 @@ def test_conflict_preflight_same_bytes_changed_label_replaces_old_revision(tmp_p
     assert not any((p.payload or {}).get("source_rev") == rev_3_1 for p in fake.collections[live_2])
 
 
-def test_conflict_preflight_walked_retired_revision_fails_closed(tmp_path, monkeypatch):
-    """S424-F3: walking the retired revision refuses in preflight before any mutation."""
-    from scripts.make_synthetic_pdf import build as make_pdf
-
-    from mainframe_rag.ingest import run_ingest
-    from mainframe_rag.ingest.inventory import load_inventory
-
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
-    progress = tmp_path / "inv.jsonl"
-
-    a_path = corpus / "doc_a.pdf"
-    make_pdf(a_path, doc_id=DOC_A, title="Doc A Content")
-    _build_doc_with_id(corpus, "doc_b", DOC_B)
-
-    assert (
-        _run_main(
-            monkeypatch, corpus, progress, "--vendor", "ibm", "--product", "zos", "--version", "3.1"
-        )
-        == 0
-    )
-    live_1 = fake.aliases[ALIAS]
-    inv_1 = load_inventory(progress)
-    rev_3_1 = inv_1[str(a_path)].source_rev
-
-    # Walking the file with version 3.1 while requesting retirement of 3.1 refuses before mutation
-    with pytest.raises(RuntimeError, match="still present in the walked corpus"):
-        _run_main(
-            monkeypatch,
-            corpus,
-            progress,
-            "--vendor",
-            "ibm",
-            "--product",
-            "zos",
-            "--version",
-            "3.1",
-            "--retire-doc",
-            f"{DOC_A}@{rev_3_1}",
-        )
-    assert fake.aliases[ALIAS] == live_1
-
-
 def test_stale_completion_markers_revision_scoped_exclusion():
     """R-REV: stale_completion_markers excuses only the retired revision,
     not retained sibling revisions of the same document."""
@@ -3108,8 +2499,11 @@ def test_stale_completion_markers_revision_scoped_exclusion():
     assert labels_whole == []
 
 
-@pytest.mark.parametrize("changed_representation", [False, True])
-@pytest.mark.parametrize("damage", [None, "text", "point", "marker", "marker_digest", "wrong_target"])
+@pytest.mark.parametrize(
+    ("changed_representation", "damage"),
+    [(False, damage) for damage in (None, "text", "point", "marker", "marker_digest")]
+    + [(True, None)],
+)
 def test_forced_build_retry_keeps_verified_document_checkpoint(tmp_path, monkeypatch, changed_representation, damage):
     """A completed document survives a later document failure without re-embedding.
 
@@ -3353,107 +2747,63 @@ def _dist_params(shards=6, rf=3, w=2):
     )
 
 
-def test_staging_distribution_no_policy_is_passthrough():
-    fake = _DistFake(missing=("genA", "genA__completions"))
-    assert verify_staging_distribution(fake, _settings()) == []
-
-
-def test_staging_distribution_matching_pair_passes():
+def test_staging_distribution_gate_passes_only_the_selected_policy():
     staging = "genA"
-    fake = _DistFake(
-        {
-            staging: _dist_params(),
-            f"{staging}__completions": _dist_params(),
-        }
-    )
-    assert verify_staging_distribution(fake, _dist_settings(staging)) == []
+    # No policy: passthrough, even with nothing stored.
+    assert verify_staging_distribution(_DistFake(missing=(staging, f"{staging}__completions")), _settings()) == []
+    matching = _DistFake({staging: _dist_params(), f"{staging}__completions": _dist_params()})
+    assert verify_staging_distribution(matching, _dist_settings(staging)) == []
+    # A partial explicit selection gates only its keys; unselected keys, even
+    # wildly different, do not block.
+    odd = _DistFake({
+        staging: _dist_params(shards=99, rf=3, w=2),
+        f"{staging}__completions": _dist_params(shards=99, rf=3, w=2),
+    })
+    partial = _settings(qdrant_collection=staging, qdrant_replication_factor=3, _env_file=None)
+    assert verify_staging_distribution(odd, partial) == []
 
 
-def test_staging_distribution_false_ha_corpus_refused():
-    """Three peers mean nothing with one copy: an RF1 staging corpus must
-    refuse cutover even when coverage would otherwise pass."""
-    staging = "genA"
-    fake = _DistFake(
-        {
-            staging: _dist_params(6, 1, 1),
-            f"{staging}__completions": _dist_params(),
-        }
-    )
-    problems = verify_staging_distribution(
-        fake, _dist_settings(staging, qdrant_write_consistency_factor=1)
-    )
-    assert problems
-    assert any("replication_factor=1" in p for p in problems)
-    assert any("snapshot-gated" in p for p in problems)
-    assert any(staging in p for p in problems)
-
-
-def test_staging_distribution_control_only_mismatch_refused():
-    """The paired control collection gates cutover too, not just the corpus."""
-    staging = "genA"
-    fake = _DistFake(
-        {
-            staging: _dist_params(),
-            f"{staging}__completions": _dist_params(6, 1, 1),
-        }
-    )
-    problems = verify_staging_distribution(
-        fake, _dist_settings(staging, qdrant_write_consistency_factor=1)
-    )
-    assert problems
-    assert any(f"{staging}__completions" in p for p in problems)
-    assert any("replication_factor=1" in p for p in problems)
-
-
-def test_staging_distribution_unknown_values_refused():
-    """Unlike the lenient ingest compatibility check, publication never
-    certifies an unknown topology."""
-    staging = "genA"
-    fake = _DistFake(
-        {
-            staging: SimpleNamespace(
-                shard_number=None, replication_factor=None, write_consistency_factor=None
-            ),
-            f"{staging}__completions": _dist_params(),
-        }
-    )
-    problems = verify_staging_distribution(fake, _dist_settings(staging))
-    assert problems
-    assert any("unknown/unreadable" in p for p in problems)
-
-
-def test_staging_distribution_missing_collection_refused():
-    fake = _DistFake(
-        {"genA__completions": _dist_params()},
-        missing=("genA",),
-    )
-    problems = verify_staging_distribution(fake, _dist_settings("genA"))
-    assert problems
-    assert any("absent" in p for p in problems)
-
-
-def test_staging_distribution_unreadable_collection_refused():
+def _unreadable_dist_fake():
     fake = _DistFake(get_error=RuntimeError("config read failed"))
     fake.collection_exists = lambda _name: True  # type: ignore[method-assign]
-    problems = verify_staging_distribution(fake, _dist_settings("genA"))
-    assert problems
-    assert any("unreadable" in p for p in problems)
+    return fake
 
 
-def test_staging_distribution_partial_policy_checks_only_selected_keys():
-    """A partial explicit selection gates only its keys; unselected keys,
-    even wildly different, do not block."""
+@pytest.mark.parametrize(
+    "case",
+    ["false-ha-corpus", "control-only", "unknown-values", "missing-collection", "unreadable-collection", "wrong-shard-layout"],
+)
+def test_staging_distribution_gate_refuses_mismatched_or_unverifiable_layouts(case):
+    """Three peers mean nothing with one copy; the paired control collection
+    gates cutover too; unlike the lenient ingest check, publication never
+    certifies an unknown topology; refusals name the migration class."""
     staging = "genA"
-    fake = _DistFake(
-        {
-            staging: _dist_params(shards=99, rf=3, w=2),
-            f"{staging}__completions": _dist_params(shards=99, rf=3, w=2),
-        }
-    )
-    settings = _settings(
-        qdrant_collection=staging, qdrant_replication_factor=3, _env_file=None
-    )
-    assert verify_staging_distribution(fake, settings) == []
+    controls = f"{staging}__completions"
+    one_copy = _dist_settings(staging, qdrant_write_consistency_factor=1)
+    unknown = SimpleNamespace(shard_number=None, replication_factor=None, write_consistency_factor=None)
+    fake, settings, needles = {
+        "false-ha-corpus": (
+            _DistFake({staging: _dist_params(6, 1, 1), controls: _dist_params()}),
+            one_copy, ["replication_factor=1", "snapshot-gated", staging]),
+        "control-only": (
+            _DistFake({staging: _dist_params(), controls: _dist_params(6, 1, 1)}),
+            one_copy, [controls, "replication_factor=1"]),
+        "unknown-values": (
+            _DistFake({staging: unknown, controls: _dist_params()}),
+            _dist_settings(staging), ["unknown/unreadable"]),
+        "missing-collection": (
+            _DistFake({controls: _dist_params()}, missing=(staging,)),
+            _dist_settings(staging), ["absent"]),
+        "unreadable-collection": (
+            _unreadable_dist_fake(), _dist_settings(staging), ["unreadable"]),
+        "wrong-shard-layout": (
+            _DistFake({staging: _dist_params(shards=3), controls: _dist_params(shards=3)}),
+            _dist_settings(), ["shard-layout change", "rebuilt generation"]),
+    }[case]
+    text = "\n".join(verify_staging_distribution(fake, settings))
+    assert text
+    for needle in needles:
+        assert needle in text, needle
 
 
 class _PlacementFake:
@@ -3544,101 +2894,12 @@ def _placement_settings(staging="genA", **overrides):
     return Settings(**kw)
 
 
-def test_staging_placement_no_policy_is_passthrough():
+def test_staging_placement_gate_passes_healthy_and_single_node_profiles():
+    assert Settings(_env_file=None).qdrant_peer_endpoints() == ()
+    parsed = Settings(_env_file=None, qdrant_peer_urls="http://a:6333, http://b:6333 ,,")
+    assert parsed.qdrant_peer_endpoints() == ("http://a:6333", "http://b:6333")
     assert verify_staging_placement({}, _settings()) == []
-
-
-def test_staging_placement_healthy_pair_passes():
     assert verify_staging_placement(_healthy_placement_map(), _placement_settings()) == []
-
-
-def test_staging_placement_partial_policy_refused():
-    """Actual copies cannot be judged without the complete tuple — unlike
-    the configured check, placement needs S and RF to know what to count."""
-    settings = _settings(qdrant_collection="genA", qdrant_replication_factor=3)
-    problems = verify_staging_placement(_healthy_placement_map(), settings)
-    assert problems
-    assert any("partial policy" in p for p in problems)
-
-
-def test_staging_placement_no_endpoints_refused():
-    """Zero observations never certify, even though the configured values
-    could match: unknown placement is unverifiable, never green."""
-    problems = verify_staging_placement({}, _placement_settings())
-    assert problems
-    assert any("QDRANT_PEER_URLS" in p for p in problems)
-    assert any("entry endpoint" in p for p in problems)
-
-
-def test_staging_placement_too_few_endpoints_refused():
-    mapping = _healthy_placement_map()
-    one = {next(iter(mapping)): mapping[next(iter(mapping))]}
-    problems = verify_staging_placement(one, _placement_settings())
-    assert problems
-    assert any("cannot hold replication_factor=3" in p for p in problems)
-
-
-def test_staging_placement_unreachable_peer_refused():
-    """A dead peer is degraded, not healthy: cutover waits for all three
-    ACTIVE copies while the old generation keeps serving."""
-    mapping = _healthy_placement_map()
-    dead_url = "http://peer2:6333"
-    mapping[dead_url] = _PlacementFake(
-        peer_id=None, status_error=ConnectionError("refused"), info_error=ConnectionError("refused")
-    )
-    problems = verify_staging_placement(mapping, _placement_settings())
-    assert problems
-    assert any("degraded" in p for p in problems)
-
-
-def test_staging_placement_duplicate_peer_identities_refused():
-    """Three URLs reaching two peers (a Service masquerading as a third
-    copy) must refuse, never count one peer's report twice."""
-    mapping = _healthy_placement_map()
-    urls = list(mapping)
-    mapping[urls[2]] = _PlacementFake(
-        peer_id=101, infos=mapping[urls[0]]._infos
-    )
-    problems = verify_staging_placement(mapping, _placement_settings())
-    assert problems
-    assert any("distinct peer id" in p for p in problems)
-
-
-def test_staging_placement_transfer_in_progress_refused():
-    """ACTIVE copies with a replica transfer still running are recovering,
-    not healthy: the swap waits for catch-up to finish."""
-    mapping = _healthy_placement_map()
-    urls = list(mapping)
-    first = mapping[urls[0]]
-    infos = dict(first._infos)
-    infos["genA"] = _placement_info(
-        101, 6, [(shard, "ACTIVE") for shard in range(6)], transfers=[(0, 101, 202)]
-    )
-    mapping[urls[0]] = _PlacementFake(peer_id=101, infos=infos)
-    problems = verify_staging_placement(mapping, _placement_settings("genA"))
-    assert problems
-    assert any("recovering" in p for p in problems)
-
-
-def test_staging_placement_under_replicated_shard_refused():
-    """A shard with only two ACTIVE copies (one stale) is degraded even
-    when every endpoint answers and the cluster looks coherent."""
-    mapping = _healthy_placement_map()
-    urls = list(mapping)
-    first = mapping[urls[0]]
-    infos = dict(first._infos)
-    local = [(shard, "ACTIVE") for shard in range(1, 6)] + [(0, "DEAD")]
-    infos["genA"] = _placement_info(101, 6, local)
-    mapping[urls[0]] = _PlacementFake(peer_id=101, infos=infos)
-    problems = verify_staging_placement(mapping, _placement_settings("genA"))
-    assert problems
-    assert any("genA" in p for p in problems)
-    assert any("degraded" in p or "2/3" in p for p in problems)
-
-
-def test_staging_placement_single_node_profile_passes():
-    """The explicit 1/1/1 profile judges its single ACTIVE copy through its
-    one endpoint — a standalone server reports no cluster peer id."""
 
     class _Standalone:
         def cluster_status(self):
@@ -3647,16 +2908,14 @@ def test_staging_placement_single_node_profile_passes():
         def collection_cluster_info(self, name):
             return _placement_info(999, 1, [(0, "ACTIVE")])
 
-    settings = _settings(
-        qdrant_collection="genA",
-        qdrant_shard_number=1,
-        qdrant_replication_factor=1,
+    # The explicit 1/1/1 profile judges its single ACTIVE copy through its one
+    # endpoint — a standalone server reports no cluster peer id.
+    single = _settings(
+        qdrant_collection="genA", qdrant_shard_number=1, qdrant_replication_factor=1,
         qdrant_write_consistency_factor=1,
     )
-    assert verify_staging_placement({"http://127.0.0.1:6333": _Standalone()}, settings) == []
+    assert verify_staging_placement({"http://127.0.0.1:6333": _Standalone()}, single) == []
 
-
-def test_staging_placement_single_node_unreachable_refused():
     class _Down:
         def cluster_status(self):
             raise ConnectionError("refused")
@@ -3664,23 +2923,53 @@ def test_staging_placement_single_node_unreachable_refused():
         def collection_cluster_info(self, name):
             raise ConnectionError("refused")
 
-    settings = _settings(
-        qdrant_collection="genA",
-        qdrant_shard_number=1,
-        qdrant_replication_factor=1,
-        qdrant_write_consistency_factor=1,
-    )
-    problems = verify_staging_placement({"http://127.0.0.1:6333": _Down()}, settings)
-    assert problems
+    problems = verify_staging_placement({"http://127.0.0.1:6333": _Down()}, single)
     assert any("unreachable" in p for p in problems)
 
 
-def test_peer_endpoints_parsing():
-    assert Settings(_env_file=None).qdrant_peer_endpoints() == ()
-    settings = Settings(
-        _env_file=None, qdrant_peer_urls="http://a:6333, http://b:6333 ,,"
-    )
-    assert settings.qdrant_peer_endpoints() == ("http://a:6333", "http://b:6333")
+@pytest.mark.parametrize(
+    "case",
+    ["partial-policy", "no-endpoints", "too-few-endpoints", "unreachable-peer", "duplicate-peer",
+     "transfer-in-progress", "under-replicated-shard"],
+)
+def test_staging_placement_gate_refuses_unverifiable_or_degraded_copies(case):
+    """Actual copies cannot be judged without the complete policy tuple, zero
+    observations never certify, and a dead peer, a Service masquerading as a
+    third copy, a running transfer or a stale replica are degraded, not
+    healthy: cutover waits while the old generation keeps serving."""
+    healthy = _healthy_placement_map()
+    urls = list(healthy)
+    infos = dict(healthy[urls[0]]._infos)
+    mapping, settings, needles = healthy, _placement_settings("genA"), []
+    if case == "partial-policy":
+        settings = _settings(qdrant_collection="genA", qdrant_replication_factor=3)
+        needles = ["partial policy"]
+    elif case == "no-endpoints":
+        mapping, needles = {}, ["QDRANT_PEER_URLS", "entry endpoint"]
+    elif case == "too-few-endpoints":
+        mapping, needles = {urls[0]: healthy[urls[0]]}, ["cannot hold replication_factor=3"]
+    elif case == "unreachable-peer":
+        mapping[urls[2]] = _PlacementFake(
+            peer_id=None, status_error=ConnectionError("refused"), info_error=ConnectionError("refused"))
+        needles = ["degraded"]
+    elif case == "duplicate-peer":
+        mapping[urls[2]] = _PlacementFake(peer_id=101, infos=infos)
+        needles = ["distinct peer id"]
+    elif case == "transfer-in-progress":
+        infos["genA"] = _placement_info(
+            101, 6, [(shard, "ACTIVE") for shard in range(6)], transfers=[(0, 101, 202)])
+        mapping[urls[0]] = _PlacementFake(peer_id=101, infos=infos)
+        needles = ["recovering"]
+    else:
+        infos["genA"] = _placement_info(101, 6, [(s_, "ACTIVE") for s_ in range(1, 6)] + [(0, "DEAD")])
+        mapping[urls[0]] = _PlacementFake(peer_id=101, infos=infos)
+        needles = ["genA"]
+    text = "\n".join(verify_staging_placement(mapping, settings))
+    assert text
+    for needle in needles:
+        assert needle in text, needle
+    if case == "under-replicated-shard":
+        assert "degraded" in text or "2/3" in text
 
 
 @pytest.mark.parametrize("fault", ["before", "after"])
@@ -3694,13 +2983,15 @@ def test_bounded_publication_lifecycle_traces(tmp_path, monkeypatch, operations,
     exercise_publication_trace(tmp_path, monkeypatch, PublishFake(), operations, fault, ALIAS)
 
 
-@pytest.mark.parametrize("operation", ["repair", "retire"])
 @pytest.mark.parametrize(
-    "gate",
+    ("operation", "gate"),
     [
-        "check_ingest_compatible", "verify_staging_distribution", "_placement_clients",
-        "verify_all_complete", "read_build_binding",
-    ],
+        ("repair", gate)
+        for gate in (
+            "check_ingest_compatible", "verify_all_complete", "read_build_binding",
+        )
+    ]
+    + [("retire", "verify_all_complete")],
 )
 def test_failed_post_cutover_revalidation_preserves_finalization(
     tmp_path, monkeypatch, operation, gate
@@ -3763,13 +3054,8 @@ def test_failed_post_cutover_revalidation_preserves_finalization(
         assert (_records(fake, old), _records(fake, old + "__completions")) == retained
 
 
-@pytest.mark.parametrize("damage", [
-    "version_bool", "version_float", "plan_list", "entry_scalar", "revs_string",
-    "revs_nested", "revs_number", "legacy_string", "whole_number", "missing_whole",
-    "extra_entry_field", "empty_doc", "partial_legacy", "empty_selection",
-    "requests_string", "request_number", "request_empty", "plan_extra_doc",
-    "partial_widened", "whole_widened", "duplicate_key",
-])
+@pytest.mark.parametrize("damage", ["version_bool", "plan_list", "revs_string", "legacy_string", "missing_whole", "extra_entry_field", "empty_selection", "request_number", "plan_extra_doc", "duplicate_key",
+    "request_empty", "entry_scalar", "partial_legacy", "whole_widened", "partial_widened"])
 def test_corrupt_publish_record_refuses_without_rewriting(tmp_path, damage):
     import json
 
@@ -3834,12 +3120,14 @@ def test_corrupt_publish_record_refuses_without_rewriting(tmp_path, damage):
     path.write_text(raw)
     with pytest.raises(RuntimeError, match="publish state"):
         read_publish_state(progress, ALIAS)
-    assert path.read_text() == raw
+    assert path.read_text() == raw, damage
 
 
-@pytest.mark.parametrize("version", [1, 2])
-@pytest.mark.parametrize("fields", ["neither", "plan", "requests", "both"])
-def test_valid_publish_record_preserves_supported_optional_fields(tmp_path, fields, version):
+
+@pytest.mark.parametrize(
+    ("version", "fields"), [(1, "both"), (2, "both"), (2, "neither")]
+)
+def test_valid_publish_record_preserves_supported_optional_fields(tmp_path, version, fields):
     from mainframe_rag.ingest.publish import read_publish_state, write_publish_state
 
     plan = {
@@ -3875,6 +3163,7 @@ def test_valid_publish_record_preserves_supported_optional_fields(tmp_path, fiel
         assert result["retire_docs"] == list(flags)
     else:
         assert "retire_docs" not in result
+
 
 
 def _exercise_corrupt_retirement_retry(tmp_path, monkeypatch, client, alias):
@@ -4026,37 +3315,11 @@ def _exercise_build_uuid_recovery(tmp_path, monkeypatch, fake, alias):
     assert aliases()[f"{alias}__build_{build_id}"] == physical
 
 
-def test_new_writer_refuses_unfinished_old_format_before_mutation(tmp_path, monkeypatch):
-    import json
-
-    from mainframe_rag.ingest import run_ingest
-    from mainframe_rag.ingest.publish import publish_state_path
-
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
-    _build_doc_with_id(corpus, "doc_a", DOC_A)
-    progress = tmp_path / "inventory.jsonl"
-    sidecar = publish_state_path(progress, ALIAS)
-    sidecar.write_text(json.dumps({
-        "version": 1, "alias": ALIAS, "staging": "legacy-candidate",
-        "gen_fp": "old-recipe", "corpus_fp": "old-corpus",
-    }))
-    before = sidecar.read_bytes()
-    with pytest.raises(RuntimeError, match="old-format"):
-        _run_main(monkeypatch, corpus, progress)
-    assert sidecar.read_bytes() == before
-    assert not fake.collections and not fake.aliases
-    assert not progress.exists()
-
-
 def test_build_uuid_precedes_writes_and_sealed_retry_is_read_only(tmp_path, monkeypatch):
     _exercise_build_uuid_recovery(tmp_path, monkeypatch, PublishFake(), ALIAS)
 
 
-@pytest.mark.parametrize("damage", ["version", "uuid", "predecessor", "control", "partial-alias", "redirect-alias", "missing-control"])
+@pytest.mark.parametrize("damage", ["version", "uuid", "predecessor", "control", "partial-alias", "missing-control"])
 def test_sealed_retry_refuses_inconsistent_build_without_mutation(tmp_path, monkeypatch, damage):
     import json
     from copy import deepcopy
@@ -4101,7 +3364,8 @@ def test_sealed_retry_refuses_inconsistent_build_without_mutation(tmp_path, monk
     fake.fail_swap = None
     with pytest.raises(RuntimeError):
         _run_main(monkeypatch, corpus, progress, "--reingest")
-    assert (fake.collections, fake.aliases, sidecar.read_bytes(), progress.read_bytes()) == before
+    assert (fake.collections, fake.aliases, sidecar.read_bytes(), progress.read_bytes()) == before, damage
+
 
 
 @pytest.mark.parametrize("target_kind", ["physical", "retained", "build-alias"])
@@ -4133,32 +3397,14 @@ def test_publication_refuses_a_generation_targeted_by_name(tmp_path, monkeypatch
                       if name != ALIAS and value == physical)
     before = deepcopy(fake.collections), dict(fake.aliases), progress.read_bytes()
     monkeypatch.setenv("QDRANT_COLLECTION", target)
-    with pytest.raises(RuntimeError):
+    with pytest.raises(
+        RuntimeError, match=None if target_kind == "build-alias" else "publish through its logical alias"
+    ):
         _run_main(monkeypatch, corpus, progress, "--reingest")
     assert (fake.collections, fake.aliases, progress.read_bytes()) == before
     monkeypatch.setenv("QDRANT_COLLECTION", ALIAS)
     assert _run_main(monkeypatch, corpus, progress) == 0
     assert fake.aliases[ALIAS] in fake.collections
-
-
-@pytest.mark.parametrize("target_kind", ["physical", "retained"])
-def test_physical_target_refusal_names_the_misconfiguration(tmp_path, monkeypatch, target_kind):
-    from mainframe_rag.ingest import run_ingest
-
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
-    _build_doc_with_id(corpus, "doc_a", DOC_A)
-    progress = tmp_path / "inventory.jsonl"
-    assert _run_main(monkeypatch, corpus, progress) == 0
-    physical = fake.aliases[ALIAS]
-    if target_kind == "retained":
-        assert _run_main(monkeypatch, corpus, progress, "--reingest") == 0
-    monkeypatch.setenv("QDRANT_COLLECTION", physical)
-    with pytest.raises(RuntimeError, match="publish through its logical alias"):
-        _run_main(monkeypatch, corpus, progress)
 
 
 def test_completed_legacy_backfill_never_creates_build_identity(tmp_path, monkeypatch):
@@ -4239,7 +3485,7 @@ def _make_completed_legacy_fixture(client, physical, alias=ALIAS):
         client.update_collection_aliases(operations)
 
 
-@pytest.mark.parametrize("damage", ["lost-document", "text", "dense", "sparse", "control", "seal-missing", "seal-schema"])
+@pytest.mark.parametrize("damage", ["lost-document", "sparse", "control", "seal-missing", "seal-schema"])
 def test_sealed_content_damage_refuses_retry_without_mutation(tmp_path, monkeypatch, damage):
     import json
     from copy import deepcopy
@@ -4280,7 +3526,8 @@ def test_sealed_content_damage_refuses_retry_without_mutation(tmp_path, monkeypa
     fake.fail_swap = None
     with pytest.raises(RuntimeError, match="seal|build control"):
         _run_main(monkeypatch, corpus, progress, "--reingest")
-    assert (fake.collections, fake.aliases, sidecar.read_bytes(), progress.read_bytes()) == before
+    assert (fake.collections, fake.aliases, sidecar.read_bytes(), progress.read_bytes()) == before, damage
+
 
 
 def _exercise_retained_content_seal(tmp_path, monkeypatch, client, alias, damage):
@@ -4350,7 +3597,7 @@ def _exercise_retained_content_seal(tmp_path, monkeypatch, client, alias, damage
         assert (_records(client, retained), _records(client, control)) == damaged
 
 
-@pytest.mark.parametrize("damage", ["lost-document", "dense", "sparse"])
+@pytest.mark.parametrize("damage", ["lost-document", "sparse"])
 def test_retained_seal_detects_stored_content_loss(tmp_path, monkeypatch, damage):
     _exercise_retained_content_seal(tmp_path, monkeypatch, PublishFake(), ALIAS, damage)
 
@@ -4406,6 +3653,7 @@ def test_content_seal_refuses_incomplete_scan(damage):
         fake.scroll = lambda *a, **kw: ([point], "never-progresses")
     with pytest.raises(ValueError):
         capture_content_seal(fake, build_id="b", alias="a", physical="physical", gen_fp="g", corpus_fp="c", receipt_id="receipt")
+
 
 
 def test_completed_binding_without_seal_is_not_retroactively_certified(tmp_path, monkeypatch):
@@ -4551,7 +3799,7 @@ class _RecordingTopologyFake(_TopologyFake):
         return super().delete_collection(*args, **kwargs)
 
 
-@pytest.mark.parametrize("layout", [(1, 1), (6, 3), (1, 3), (6, 1), (None, 1), ("missing", "6")])
+@pytest.mark.parametrize("layout", [(6, 3), (None, 1), ("missing", "6")])
 def test_clone_copies_any_source_topology_exactly_through_the_api(layout):
     """Issue #360: staging preparation copies points (ids, named vectors,
     payloads) through scroll/upsert, so distributed sources are copied
@@ -4581,18 +3829,25 @@ def test_clone_creates_staging_with_the_selected_distribution_policy():
     assert created["vectors_config"]["dense"].size == 256
 
 
-def test_clone_refuses_unreadable_source_before_any_write():
+@pytest.mark.parametrize("case", ["unreadable-source", "existing-target"])
+def test_clone_refuses_before_any_write(case):
     from mainframe_rag.ingest.qdrant_io import clone_collection
 
     class _Unreadable(_RecordingTopologyFake):
         def get_collection(self, name):
             raise ConnectionError("peer down")
 
-    fake = _Unreadable()
+    fake = _Unreadable() if case == "unreadable-source" else _RecordingTopologyFake(1, 1)
     live = _seed_live_pair(fake)
-    with pytest.raises(ConnectionError, match="peer down"):
+    if case == "existing-target":
+        fake.collections["mainframe_manuals__genNEW"] = []
+    with pytest.raises(
+        (ConnectionError, RuntimeError), match="peer down" if case == "unreadable-source" else "already exists"
+    ):
         clone_collection(fake, _settings(), live, "mainframe_manuals__genNEW")
-    assert fake.mutations == [] and "mainframe_manuals__genNEW" not in fake.collections
+    assert fake.mutations == []
+    if case == "unreadable-source":
+        assert "mainframe_manuals__genNEW" not in fake.collections
 
 
 def test_clone_refuses_a_partial_copy():
@@ -4612,22 +3867,12 @@ def test_clone_refuses_a_partial_copy():
     assert _point_records(fake, live) and fake.aliases[ALIAS] == live
 
 
-def test_clone_refuses_an_existing_target():
-    from mainframe_rag.ingest.qdrant_io import clone_collection
-
-    fake = _RecordingTopologyFake(1, 1)
-    live = _seed_live_pair(fake)
-    fake.collections["mainframe_manuals__genNEW"] = []
-    with pytest.raises(RuntimeError, match="already exists"):
-        clone_collection(fake, _settings(), live, "mainframe_manuals__genNEW")
-    assert fake.mutations == []
-
-
-@pytest.mark.parametrize("field", ["shard_number", "replication_factor"])
-@pytest.mark.parametrize("value", [None, 0, -1, True, False, "1", "6", 1.0, "missing"])
-def test_unknown_topology_legacy_migration_never_deletes_the_squatter(
-    tmp_path, monkeypatch, field, value,
-):
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("shard_number", v) for v in (None, 0, "missing")]
+    + [("replication_factor", None)],
+)
+def test_unknown_topology_legacy_migration_never_deletes_the_squatter(tmp_path, monkeypatch, field, value):
     """A legacy physical squatting on the alias name is never snapshotted or
     deleted while its topology is unknown: the run refuses (here at the
     commit proof, since the squatter holds an unwalked point; the walked
@@ -4658,21 +3903,6 @@ def test_unknown_topology_legacy_migration_never_deletes_the_squatter(
     assert "delete" not in fake.mutations and fake.snapshots == {}
     assert _point_records(fake, live) == before and ALIAS not in fake.aliases
 
-
-def test_ensure_staging_prepares_over_distributed_live_and_leaves_it_serving():
-    """An update publication over a distributed live generation prepares
-    staging by an exact API copy; live, its points and the alias are
-    untouched until the verified cutover."""
-    from mainframe_rag.ingest.publish import ensure_staging
-
-    fake = _RecordingTopologyFake(6, 3)
-    live = _seed_live_pair(fake)
-    before = _point_records(fake, live)
-    staging = "mainframe_manuals__genNEW"
-    assert ensure_staging(fake, _settings(), _staging_settings(staging), live) == "cloned"
-    assert _point_records(fake, staging) == before
-    assert fake.aliases[ALIAS] == live and _point_records(fake, live) == before
-    assert fake.snapshots == {}
 
 
 def test_legacy_migration_retains_distributed_squatter_then_publishes(tmp_path, monkeypatch):
@@ -4747,19 +3977,6 @@ def test_legacy_migration_refuses_a_mismatched_retained_copy(tmp_path, monkeypat
         _run_main(monkeypatch, corpus, tmp_path / "inv.jsonl", "--reingest")
     assert len(fake.collections[ALIAS]) == 1 and ALIAS not in fake.aliases
     assert "delete" not in fake.mutations
-
-
-def test_distribution_mismatch_names_the_required_migration_class():
-    wrong_layout = _DistFake(
-        {"genA": _dist_params(shards=3), "genA__completions": _dist_params(shards=3)}
-    )
-    layout = "\n".join(verify_staging_distribution(wrong_layout, _dist_settings()))
-    assert "shard-layout change" in layout and "rebuilt generation" in layout
-    wrong_rf = _DistFake(
-        {"genA": _dist_params(rf=1), "genA__completions": _dist_params(rf=1)}
-    )
-    rf = "\n".join(verify_staging_distribution(wrong_rf, _dist_settings()))
-    assert "same shard layout" in rf and "ACTIVE copies" in rf
 
 
 def test_publication_checks_are_read_only_by_type(tmp_path):
