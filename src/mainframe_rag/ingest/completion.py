@@ -37,7 +37,6 @@ from qdrant_client import models
 
 from mainframe_rag.config import Settings
 from mainframe_rag.ingest.chunk import Chunk
-from mainframe_rag.ingest.identity import UnsupportedLegacyDataError
 from mainframe_rag.ingest.qdrant_io import (
     check_collection_distribution,
     collection_vector_configs,
@@ -570,6 +569,23 @@ def stale_completion_markers(
         if len(labels) < sample:
             labels.append(f"{doc_id}@{payload.get('source_rev') or 'unknown'}")
     return count, labels
+
+
+class UnsupportedLegacyDataError(RuntimeError):
+    """Fail-closed refresh abort: a document has stored points without a
+    source revision. Pre-revision (pre-361B) data is no longer supported, so
+    nothing deletes, migrates or certifies it. The report carries the doc_id
+    and the stray content ids only — never manual text or filesystem
+    details. Defined here, not in a rule module: rule-module bytes are the
+    extraction-rules version (rules_version.py)."""
+
+    def __init__(self, doc_id: str, stray_sha16s: list[str]) -> None:
+        self.doc_id = doc_id
+        super().__init__(
+            f"unsupported stored data under doc_id {doc_id!r}: points without a source "
+            f"revision (content {', '.join(stray_sha16s) or 'unknown'}). Pre-revision data "
+            "is no longer supported; build the corpus into a new collection."
+        )
 
 
 def plan_refresh_deletes(

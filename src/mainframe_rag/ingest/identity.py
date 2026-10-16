@@ -102,8 +102,8 @@ def plan_duplicates(
 @dataclass(frozen=True)
 class Collision:
     """Several walked files resolving to one ``doc_id`` with different
-    bytes. Ingesting any of them would refresh the others' generation
-    (points and completion markers key on bare ``doc_id``), so the run must abort
+    bytes. Ingesting any of them would delete the others' points
+    (``delete_by_doc`` keys on bare ``doc_id``), so the run must abort
     before any delete/upsert. Members are (corpus-relpath, sha16) sorted
     by relpath — deterministic regardless of input order."""
 
@@ -174,17 +174,22 @@ def prescan_doc_ids(paths: list[str]) -> dict[str, str | None]:
     return {path_str: resolve_doc_id(Path(path_str)) for path_str in paths}
 
 
-class UnsupportedLegacyDataError(RuntimeError):
-    """Fail-closed refresh abort: a document has stored points without a
-    source revision. Pre-revision (pre-361B) data is no longer supported, so
-    nothing deletes, migrates or certifies it. The report carries the doc_id
-    and the stray content ids only — never manual text or filesystem
-    details."""
+class AmbiguousRevisionError(RuntimeError):
+    """Fail-closed refresh abort (issue #361): sourceless pre-361B residue
+    shares a doc_id with named revisions, so no selector can attribute it
+    to this run's lineage or a coexisting one. Deleting by doc_id could
+    wipe a live revision; leaving it serves mixed generations. The report
+    carries the doc_id, the named revisions present, and the stray content
+    ids only — never manual text or filesystem details."""
 
-    def __init__(self, doc_id: str, stray_sha16s: list[str]) -> None:
+    def __init__(self, doc_id: str, revisions: list[str], stray_sha16s: list[str]) -> None:
         self.doc_id = doc_id
+        self.revisions = revisions
         super().__init__(
-            f"unsupported stored data under doc_id {doc_id!r}: points without a source "
-            f"revision (content {', '.join(stray_sha16s) or 'unknown'}). Pre-revision data "
-            "is no longer supported; build the corpus into a new collection."
+            f"ambiguous revisions under doc_id {doc_id!r}: unattributable legacy points "
+            f"(content {', '.join(stray_sha16s)}) share the document with named revisions "
+            f"({', '.join(revisions)}). Resolve explicitly: re-run with the original "
+            "--progress file carrying inventory lineage (precise per-revision replace), "
+            "or delete the stale revision's points (doc_id + content-sha filter) after "
+            "a snapshot, then re-ingest. Refusing to guess."
         )
