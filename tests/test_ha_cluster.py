@@ -192,6 +192,14 @@ def test_real_three_peer_healthy_fixture(
     for url in cluster.urls:
         _assert_exact_payloads(url, seeded_pair)
 
+    # The exact cutover helper wired into publication passes the same real
+    # healthy 6/3/2 pair through the publisher's single-client surface.
+    client = QdrantClient(url=cluster.urls[0], timeout=60)
+    try:
+        assert verify_staging_distribution(client, settings) == []
+    finally:
+        client.close()
+
 
 def test_false_ha_configuration_refused(cluster: QdrantCluster, capsys):
     """Three Ready peers with an RF1 corpus and control collection must be
@@ -209,20 +217,6 @@ def test_false_ha_configuration_refused(cluster: QdrantCluster, capsys):
     assert report is not None
     assert report.configured_problems
     assert any("replication_factor=1" in problem for problem in report.configured_problems)
-
-
-def test_cutover_gate_passes_on_healthy_staging_pair(
-    cluster: QdrantCluster, seeded_pair: SeededPair
-):
-    """The exact cutover helper wired into publication must pass a real
-    healthy 6/3/2 staging pair through the same single-client surface the
-    publisher uses — guarding against fake/real client drift."""
-    settings = _settings(cluster.urls[0], seeded_pair.corpus)
-    client = QdrantClient(url=cluster.urls[0], timeout=60)
-    try:
-        assert verify_staging_distribution(client, settings) == []
-    finally:
-        client.close()
 
 
 def test_cutover_gate_refuses_false_ha_staging_pair(cluster: QdrantCluster):
@@ -276,60 +270,25 @@ def test_cutover_gate_refuses_control_only_mismatch(cluster: QdrantCluster):
     assert any("replication_factor=1" in problem for problem in problems)
 
 
-def test_active_copy_gate_blocks_cutover_while_degraded(
-    cluster: QdrantCluster, seeded_pair: SeededPair
-):
-    """The in-process cutover gate must refuse while one peer is down and
-    pass again after rejoin: degraded placement blocks the swap while the
-    old generation keeps serving. Same per-endpoint client surface the
-    publisher builds from QDRANT_PEER_URLS."""
-    settings = _settings(cluster.urls[0], seeded_pair.corpus)
-    dropped = f"{cluster.prefix}-2"
-    clients = {url: QdrantClient(url=url, timeout=30) for url in cluster.urls}
-    try:
-        assert verify_staging_placement(clients, settings) == []
-        subprocess.run(
-            ["docker", "stop", dropped], check=True, capture_output=True, text=True
-        )
-        problems = verify_staging_placement(clients, settings)
-        assert problems
-        assert any(
-            word in problems[0] for word in ("degraded", "unreachable", "unverifiable")
-        )
-        subprocess.run(
-            ["docker", "start", dropped], check=True, capture_output=True, text=True
-        )
-        wait_cluster_ready(cluster.urls)
-        for collection in (seeded_pair.corpus, seeded_pair.control):
-            wait_collection_placement(
-                cluster.urls, collection, shard_number=SHARDS, replication_factor=RF
-            )
-        # Post-rejoin convergence is not instant: ACTIVE placement returns
-        # before catch-up finishes, so the gate is waited for, not asserted
-        # once. A permanent loss times the wait out instead of passing.
-        deadline = time.monotonic() + 120.0
-        problems = ["no attempt"]
-        while time.monotonic() < deadline:
-            problems = verify_staging_placement(clients, settings)
-            if not problems:
-                break
-            time.sleep(2.0)
-        assert problems == [], problems
-    finally:
-        for client in clients.values():
-            client.close()
-
-
 def test_peer_loss_is_degraded_and_rejoins_healthy(
     cluster: QdrantCluster, seeded_pair: SeededPair, capsys
 ):
     settings = _settings(cluster.urls[0], seeded_pair.corpus)
     dropped = f"{cluster.prefix}-2"
     survivors = (cluster.urls[0], cluster.urls[2])
+    gate_clients = {url: QdrantClient(url=url, timeout=30) for url in cluster.urls}
 
     try:
+        assert verify_staging_placement(gate_clients, settings) == []
         subprocess.run(
             ["docker", "stop", dropped], check=True, capture_output=True, text=True
+        )
+        # Degraded placement blocks the in-process cutover gate (same
+        # per-endpoint clients the publisher builds from QDRANT_PEER_URLS).
+        problems = verify_staging_placement(gate_clients, settings)
+        assert problems
+        assert any(
+            word in problems[0] for word in ("degraded", "unreachable", "unverifiable")
         )
         report, code = _verify(settings, cluster.urls)
         output = capsys.readouterr().out
@@ -358,6 +317,22 @@ def test_peer_loss_is_degraded_and_rejoins_healthy(
     assert code == 0, output
     assert report is not None and report.state == "healthy"
     _wait_pair_exact(cluster.urls, seeded_pair)
+
+    # Post-rejoin convergence is not instant: ACTIVE placement returns
+    # before catch-up finishes, so the gate is waited for, not asserted
+    # once. A permanent loss times the wait out instead of passing.
+    try:
+        deadline = time.monotonic() + 120.0
+        problems = ["no attempt"]
+        while time.monotonic() < deadline:
+            problems = verify_staging_placement(gate_clients, settings)
+            if not problems:
+                break
+            time.sleep(2.0)
+        assert problems == [], problems
+    finally:
+        for client in gate_clients.values():
+            client.close()
 
 
 # New points for the write path must not collide with the seeded identity
