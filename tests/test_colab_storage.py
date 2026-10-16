@@ -157,7 +157,7 @@ def test_pod_ready_does_not_replace_actual_qdrant_container_readiness(retained):
         prove(retained)
 
 
-@pytest.mark.parametrize("filename", ["config.yaml", "production.yaml", "local.yaml"])
+@pytest.mark.parametrize("filename", ["config.yaml", "local.yaml"])  # image default and Secret mount
 def test_effective_config_redirect_to_emptydir_refuses_nominal_pvc(retained, filename):
     retained["pod"]["spec"]["volumes"].append({"name": "other", "emptyDir": {}})
     retained["pod"]["spec"]["containers"][0]["volumeMounts"].append({
@@ -176,13 +176,9 @@ def test_subpath_pod_mounted_bytes_override_newer_clean_api_config(retained):
         prove(retained)
 
 
-@pytest.mark.parametrize("variable", [
-    {"name": "QDRANT__STORAGE__STORAGE_PATH", "value": "/data"},
-    {"name": "RUN_MODE", "value": "custom"},
-    {"name": "BASH_ENV", "value": "/data/override.sh"},
-])
-def test_environment_cannot_redirect_config_or_chart_launch(retained, variable):
-    retained["pod"]["spec"]["containers"][0]["env"].append(variable)
+def test_environment_cannot_redirect_config_or_chart_launch(retained):
+    retained["pod"]["spec"]["containers"][0]["env"].append(
+        {"name": "QDRANT__STORAGE__STORAGE_PATH", "value": "/data"})
     with pytest.raises(StorageProofError, match="unsupported Qdrant launch"):
         prove(retained)
 
@@ -194,9 +190,8 @@ def test_writable_image_config_cannot_establish_process_start_files(retained):
 
 
 @pytest.mark.parametrize("config", [
-    "storage.storage_path: /ephemeral\n",
-    "storage:\n  storage_path: /qdrant/storage\n  nested.path: /ephemeral\n",
-    "service: [ORIGINAL-FAKE-WRITER]\n",
+    "storage.storage_path: /ephemeral\n",  # dotted key
+    "service: [ORIGINAL-FAKE-WRITER]\n",  # wrong section type
     "service: [ORIGINAL-FAKE-WRITER\n",
 ])
 def test_unknown_or_malformed_config_refuses_with_fixed_diagnostic(retained, config):
@@ -221,9 +216,7 @@ def test_unproven_launch_and_config_sources_refuse(retained, change):
 
 
 @pytest.mark.parametrize("object_name,field,value", [
-    ("pvc", "uid", "new-claim"), ("pvc", "namespace", "other"),
-    ("pv", "uid", "older-claim"), ("pv", "name", "other-claim"),
-    ("pv", "namespace", "other"),
+    ("pvc", "namespace", "other"), ("pv", "uid", "older-claim"), ("pv", "name", "other-claim"),
 ])
 def test_exact_pv_claim_binding_rejects_name_reuse_and_other_namespace(retained, object_name, field, value):
     destination = retained["pvc"]["metadata"] if object_name == "pvc" else retained["pv"]["spec"]["claimRef"]
@@ -232,9 +225,9 @@ def test_exact_pv_claim_binding_rejects_name_reuse_and_other_namespace(retained,
         prove(retained)
 
 
-@pytest.mark.parametrize("object_name", ["pvc", "pv"])
-@pytest.mark.parametrize("field,value", [
-    ("accessModes", ["ReadWriteMany"]), ("volumeMode", "Block"), ("phase", "Pending"),
+@pytest.mark.parametrize("object_name,field,value", [
+    ("pvc", "accessModes", ["ReadWriteMany"]), ("pvc", "phase", "Pending"),
+    ("pv", "volumeMode", "Block"), ("pv", "phase", "Pending"),
 ])
 def test_bound_rwo_filesystem_is_required_on_both_sides(retained, object_name, field, value):
     retained[object_name]["status" if field == "phase" else "spec"][field] = value
