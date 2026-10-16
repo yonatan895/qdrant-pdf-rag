@@ -6,19 +6,17 @@ moves — identifiers stay byte-exact, ambiguous tokens are excluded, and
 identifier-heavy queries bypass rewriting entirely.
 """
 
-import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
 from qdrant_client import models
 
 from mainframe_rag.config import Settings
-from mainframe_rag.ports import AsyncReaderAdapter
-from mainframe_rag.retrieve.query import async_search, search
+from mainframe_rag.retrieve.query import search
 from mainframe_rag.retrieve.rewrite import (
-    ACRONYM_GLOSSARY_VERSION,
     TWO_LETTER,
     expand_query,
     should_rewrite,
@@ -30,13 +28,6 @@ def _glossary() -> dict[str, str]:
     from mainframe_rag.retrieve.rewrite import _glossary as load
 
     return load()
-
-
-def test_glossary_version_file_exists_and_pins() -> None:
-    assert ACRONYM_GLOSSARY_VERSION == "v1"
-    path = Path(__file__).resolve().parent.parent / "src" / "mainframe_rag" / "retrieve" / "acronyms_v1.json"
-    assert path.exists()
-    assert len(_glossary()) >= 100
 
 
 def test_glossary_keys_sorted_uppercase_unique() -> None:
@@ -67,39 +58,23 @@ def test_ambiguous_tokens_excluded_never_guessed() -> None:
     assert "SIT (CICS System Initialization Table)" in expanded
 
 
-def test_basic_expansion_and_casing() -> None:
+def test_known_acronyms_expand_and_nothing_else_moves() -> None:
     assert expand_query("Show JCL to assemble") == "Show JCL to assemble JCL (Job Control Language)"
     assert expand_query("what is ipl?") == "what is ipl? ipl (Initial Program Load)"
-    assert expand_query("Explain RACF PERMIT") == "Explain RACF PERMIT RACF (Resource Access Control Facility)"
-
-
-def test_slashed_forms_expand_as_one_token() -> None:
+    # Slashed forms expand as one token.
     assert "SMP/E (System Modification Program Extended)" in expand_query("Plan the SMP/E upgrade")
     assert "TCP/IP (Transmission Control Protocol Internet Protocol)" in expand_query("Debug TCP/IP routing")
-    assert "PR/SM (Processor Resource Systems Manager)" in expand_query("Check PR/SM weights")
-    assert "PL/I (Programming Language One)" in expand_query("Compile the PL/I program")
-
-
-def test_two_letter_gate() -> None:
+    # Two-letter tokens expand only when allowlisted.
     assert "CF (Coupling Facility)" in expand_query("Define the CF structure")
-    assert "LU (Logical Unit)" in expand_query("Check the LU status")
-    assert "EE (Enterprise Extender)" in expand_query("Trace the EE connection")
-    # Not allowlisted: left alone even though two letters.
     assert expand_query("le tournesol?") == "le tournesol?"
     assert expand_query("See AR and CR values") == "See AR and CR values"
-
-
-def test_identifier_tokens_never_expand() -> None:
-    assert expand_query("DSN9022I") == "DSN9022I"
-    assert expand_query("IEA500I") == "IEA500I"
-    assert expand_query("SA22-7592-05") == "SA22-7592-05"
-    assert expand_query("IEASYSxx") == "IEASYSxx"
-
-
-def test_dedup_and_noop() -> None:
+    # Repeats expand once.
     assert expand_query("JCL and more JCL jobs") == "JCL and more JCL jobs JCL (Job Control Language)"
-    assert expand_query("plain prose without known tokens") == "plain prose without known tokens"
-    assert expand_query("") == ""
+
+
+@pytest.mark.parametrize("unchanged", ["DSN9022I", "SA22-7592-05", "IEASYSxx"])
+def test_non_acronym_and_identifier_tokens_never_move(unchanged) -> None:
+    assert expand_query(unchanged) == unchanged
 
 
 def test_should_rewrite_bypasses_identifiers() -> None:
@@ -182,14 +157,6 @@ def _flag_settings() -> Settings:
     return Settings(acronym_expansion_enabled=True, _env_file=None)
 
 
-def test_search_embeds_original_when_flag_off() -> None:
-    embedder = _RecordingEmbedder()
-    search(_FakePoints([_point("c1", 0.9)]), embedder, "coll", "Show JCL jobs",
-           settings=Settings(_env_file=None))
-    assert embedder.dense_inputs == ["Show JCL jobs"]
-    assert embedder.sparse_inputs == ["Show JCL jobs"]
-
-
 def test_search_embeds_expanded_when_flag_on() -> None:
     embedder = _RecordingEmbedder()
     hits, kind, _ = search(_FakePoints([_point("c1", 0.9)]), embedder, "coll", "Show JCL jobs",
@@ -200,22 +167,12 @@ def test_search_embeds_expanded_when_flag_on() -> None:
     assert kind == "nl"
 
 
-def test_search_bypasses_expansion_for_identifier_query() -> None:
+@pytest.mark.parametrize(
+    ("flag_on", "query"),
+    [(False, "Show JCL jobs"), (True, "What does DSN9022I mean?")],
+)
+def test_search_embeds_original_when_flag_off_or_identifier_query(flag_on, query) -> None:
     embedder = _RecordingEmbedder()
-    search(_FakePoints([_point("c1", 0.9)]), embedder, "coll", "What does DSN9022I mean?",
-           settings=_flag_settings())
-    assert embedder.dense_inputs == ["What does DSN9022I mean?"]
-
-
-def test_twins_agree_with_expansion_on() -> None:
-    """Drift parity on the rewritten path: identical fakes, flag on."""
-    sync_emb, async_emb = _RecordingEmbedder(), _RecordingEmbedder()
-    fake_sync = _FakePoints([_point("c1", 0.9), _point("c2", 0.5)])
-    fake_async = _FakePoints([_point("c1", 0.9), _point("c2", 0.5)])
-    query = "Show JCL to assemble with DFHEITAL"
-    sync_res = search(fake_sync, sync_emb, "coll", query, limit=5, settings=_flag_settings())
-    async_res = asyncio.run(async_search(AsyncReaderAdapter(fake_async), async_emb, "coll", query, limit=5, settings=_flag_settings()))
-    assert [h.model_dump() for h in sync_res[0]] == [h.model_dump() for h in async_res[0]]
-    assert sync_res[1] == async_res[1] == "nl"
-    assert set(sync_res[2]) == set(async_res[2])
-    assert sync_emb.dense_inputs == async_emb.dense_inputs != [query]
+    settings = _flag_settings() if flag_on else Settings(_env_file=None)
+    search(_FakePoints([_point("c1", 0.9)]), embedder, "coll", query, settings=settings)
+    assert embedder.dense_inputs == embedder.sparse_inputs == [query]

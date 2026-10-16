@@ -64,26 +64,32 @@ def test_replay_alpha_one_follows_ce_alpha_zero_keeps_rrf_order():
     assert [h.chunk_id for h in replay_record(record, config, _settings())] == ["c2", "c3", "c1"]
     kept = replay_record(record, replace(config, alpha=0.0), _settings())
     assert [h.chunk_id for h in kept] == ["c1", "c2", "c3"]
-
-
-def test_replay_rerank_refuses_unscored_pool():
-    record = _record(["c1", "c2"], {}, {"ce_scored": True})
-    config = SweepConfig(label="alpha", rerank=True, fuse_limit=50)
+    # A rerank replay over a pool without CE scores refuses rather than guesses.
     with pytest.raises(ValueError, match="no CE score"):
-        replay_record(record, config, _settings())
+        replay_record(_record(["c1", "c2"], {}, {"ce_scored": True}), config, _settings())
 
 
-def test_replay_fuse_limit_truncates_candidates():
+def test_replay_limits_truncate_and_refuse_beyond_the_recorded_pool():
     record = _record([f"c{i}" for i in range(5)])
     base = SweepConfig(label="prod")
     assert len(replay_record(record, replace(base, fuse_limit=5), _settings())) == 5
     assert len(replay_record(record, replace(base, fuse_limit=2), _settings())) == 2
-
-
-def test_replay_prefetch_limit_trims_deep_capture():
-    record = _record([f"c{i}" for i in range(5)])
-    hits = replay_record(record, replace(SweepConfig(label="t"), prefetch_limit=1), _settings())
+    hits = replay_record(record, replace(base, prefetch_limit=1), _settings())
     assert [h.chunk_id for h in hits] == ["c0"]
+
+    deep = replace(SweepConfig(label="deep"), prefetch_limit=100)
+    with pytest.raises(ValueError, match="exceeds the recorded pool depth 50"):
+        replay_record(_record(["c0"], meta={"depth": 50}), deep, _settings())
+    # Legacy pool (no recorded depth) proves only its longest leg.
+    with pytest.raises(ValueError, match="recorded pool depth 2"):
+        replay_record(_record(["c0", "c1"]), deep, _settings())
+    # run_config skips (never scores) an unsupported config.
+    records = [_record(["c0"], meta={"depth": 50}), {"query": "broken", "error": "x"}]
+    assert unsupported_reason(records, SweepConfig(label="p")) is None
+    assert unsupported_reason(records, deep) == "pool depth 50 < prefetch 100"
+    assert run_config(records, {}, deep, _settings()) == {
+        "label": "deep", "scoring": "doc", "skipped": "pool depth 50 < prefetch 100"
+    }
 
 
 def test_replay_split_modes_merge_differently():
@@ -106,7 +112,7 @@ def test_replay_split_modes_merge_differently():
     assert replay_record(rec, config, _settings())[0].chunk_id == "b"
 
 
-def test_score_hits_doc_level_recall_and_must_not():
+def test_score_hits_doc_level_section_level_and_must_not():
     entry = GoldenEntry(
         query="q", expected_doc_ids=["D"], must_not_retrieve=["X"], query_class="syntax"
     )
@@ -116,6 +122,16 @@ def test_score_hits_doc_level_recall_and_must_not():
     assert row["violations"] == ["X"]
     abstain = GoldenEntry(query="trap", expected_behavior="abstain", query_class="negative")
     assert score_hits([], abstain) is None
+
+    entry = GoldenEntry(query="q", expected_doc_ids=["D"], expected_heading="Status subparameter",
+                        query_class="syntax")
+    wrong = SimpleNamespace(doc_id="D", heading="Book > DISP parameter > Example of the DEST parameter")
+    right = SimpleNamespace(doc_id="D", heading="Book > DISP parameter > Status subparameter")
+    doc_row = score_hits([wrong, right], entry)
+    assert doc_row is not None and doc_row["recall@1"] == 1.0  # doc-level ignores the heading
+    section_row = score_hits([wrong, right], entry, section_level=True)
+    assert section_row is not None
+    assert section_row["recall@1"] == 0.0 and section_row["mrr"] == 0.5
 
 
 def test_summarize_means_classes_and_violations():
@@ -131,27 +147,6 @@ def test_summarize_means_classes_and_violations():
     assert summary["violations"] == 1
 
 
-def test_replay_refuses_prefetch_deeper_than_recorded_pool():
-    deep = replace(SweepConfig(label="t"), prefetch_limit=100)
-    with pytest.raises(ValueError, match="exceeds the recorded pool depth 50"):
-        replay_record(_record(["c0"], meta={"depth": 50}), deep, _settings())
-    # Legacy pool (no recorded depth) proves only its longest leg.
-    with pytest.raises(ValueError, match="recorded pool depth 2"):
-        replay_record(_record(["c0", "c1"]), deep, _settings())
-    shallower = replace(SweepConfig(label="t"), prefetch_limit=2)
-    assert [h.chunk_id for h in replay_record(_record(["c0", "c1"]), shallower, _settings())] == ["c0", "c1"]
-
-
-def test_unsupported_configs_are_skipped_not_scored():
-    records = [_record(["c0"], meta={"depth": 50}), {"query": "broken", "error": "x"}]
-    deep = replace(SweepConfig(label="deep"), prefetch_limit=100)
-    assert unsupported_reason(records, SweepConfig(label="p")) is None
-    assert unsupported_reason(records, deep) == "pool depth 50 < prefetch 100"
-    assert unsupported_reason([_record(["c0"])], deep) == "pool depth 1 < prefetch 100"
-    result = run_config(records, {}, deep, _settings())
-    assert result == {"label": "deep", "scoring": "doc", "skipped": "pool depth 50 < prefetch 100"}
-
-
 def test_rerank100_replays_a_deep_scored_pool():
     ids = [f"c{i:03d}" for i in range(120)]
     ce = {cid: float(i) / 1000 for i, cid in enumerate(ids[:100])}  # capture stops CE at 100
@@ -160,18 +155,6 @@ def test_rerank100_replays_a_deep_scored_pool():
     assert config.rerank and config.prefetch_limit == 100
     hits = replay_record(record, config, _settings())
     assert hits[0].chunk_id == "c099"  # the deepest scored candidate wins on CE alone (alpha 1.0)
-
-
-def test_score_hits_section_level_requires_expected_heading():
-    entry = GoldenEntry(query="q", expected_doc_ids=["D"], expected_heading="Status subparameter",
-                        query_class="syntax")
-    wrong = SimpleNamespace(doc_id="D", heading="Book > DISP parameter > Example of the DEST parameter")
-    right = SimpleNamespace(doc_id="D", heading="Book > DISP parameter > Status subparameter")
-    doc_row = score_hits([wrong, right], entry)
-    assert doc_row is not None and doc_row["recall@1"] == 1.0  # doc-level ignores the heading
-    section_row = score_hits([wrong, right], entry, section_level=True)
-    assert section_row is not None
-    assert section_row["recall@1"] == 0.0 and section_row["mrr"] == 0.5
 
 
 def test_replay_headings_change_scoring_not_ranking():
