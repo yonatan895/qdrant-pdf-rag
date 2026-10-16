@@ -171,9 +171,31 @@ def test_timeout_and_jes_refusal_map_to_stable_codes_per_tool() -> None:
     assert out["isError"] is True
     assert out["content"][0]["text"].startswith("jes_unavailable")
     assert "s3cret" not in out["content"][0]["text"]
+    out = bridge.jes_spool_read(_session(NoJesFTP()), "JOB00123", "2")
+    assert out["isError"] is True
+    assert out["content"][0]["text"].startswith("jes_unavailable")
     ok = FakeFTP()
     ok.files["'A.B'"] = b"data\n"
     assert bridge.dataset_read(_session(ok), "A.B")["isError"] is False
+
+
+def test_connect_protects_the_data_channel_only_over_tls(monkeypatch) -> None:
+    """use_tls selects FTPS and calls PROT P (encrypted data channel); the
+    plain default uses the injected factory and never upgrades silently."""
+
+    class FakeTLS(FakeFTP, ftplib.FTP_TLS):
+        def prot_p(self) -> str:
+            self.commands.append("PROT P")
+            return "200 protection level set"
+
+    monkeypatch.setattr(bridge.ftplib, "FTP_TLS", FakeTLS)
+    tls = bridge.connect(_config(use_tls=True), factory=FakeFTP)
+    assert isinstance(tls, FakeTLS)
+    assert tls.commands == ["CONNECT mf.example.com:21", "PROT P"]
+    assert tls.logged_in == ("READER", "s3cret")
+    plain = bridge.connect(_config(), factory=FakeFTP)
+    assert type(plain) is FakeFTP
+    assert plain.commands == ["CONNECT mf.example.com:21"]
 
 
 # ------------------------------------------------------- MCP framing

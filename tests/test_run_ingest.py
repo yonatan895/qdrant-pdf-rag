@@ -40,6 +40,24 @@ def test_dry_run_ingest(tmp_path, synthetic_pdf, capsys):
         assert summary["elapsed_ms"] >= 0
 
 
+def test_worker_qdrant_client_is_built_once_from_ingest_settings(monkeypatch):
+    """Each spawned ingest worker opens one Qdrant client with the writer URL,
+    key and ingest timeout, then reuses it for every document it processes."""
+    import qdrant_client
+
+    from mainframe_rag.config import Settings
+    from mainframe_rag.ingest import run_ingest
+
+    built = []
+    monkeypatch.setattr(qdrant_client, "QdrantClient", lambda **kw: built.append(kw) or object())
+    monkeypatch.setattr(run_ingest, "_worker_qdrant", None)
+    settings = Settings(_env_file=None, qdrant_url="http://writer:6333", qdrant_api_key="writer-key",
+                        qdrant_ingest_timeout_s=42)
+    first = run_ingest._get_qdrant(settings)
+    assert run_ingest._get_qdrant(settings) is first
+    assert built == [{"url": "http://writer:6333", "api_key": "writer-key", "timeout": 42}]
+
+
 def test_resolve_workers_is_a_cap(tmp_path):
     from mainframe_rag.config import Settings
     from mainframe_rag.ingest.run_ingest import resolve_workers
