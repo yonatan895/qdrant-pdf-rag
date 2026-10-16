@@ -86,6 +86,11 @@ def test_legs_to_record_rejects_bad_legs(legs, exc):
         legs_to_record("q", "nl", legs, {}, {})
 
 
+def test_legs_to_record_empty_query_rejected():
+    with pytest.raises(ValueError):
+        legs_to_record("", "nl", _legs(), {}, {})
+
+
 def test_record_to_rows_round_trip():
     record = legs_to_record("sizing lookaside", "nl", _legs(), {"p1": 0.9, "p2": 0.1}, {})
     rows = record_to_rows(record)
@@ -122,11 +127,20 @@ def test_record_to_rows_rejects_unknown_chunk():
     [
         "not-a-dict",
         {"legs": []},
+        {"legs": [{"dense": [], "sparse": []}]},
     ],
 )
 def test_record_to_rows_rejects_bad_record(record):
     with pytest.raises((ValueError, TypeError)):
         record_to_rows(record)
+
+
+@pytest.mark.parametrize("kwargs", [{"leg": 2}, {"max_rank": 0}, {"max_rank": True}])
+def test_record_to_rows_refuses_out_of_range_leg_and_max_rank(kwargs):
+    record = legs_to_record("q", "nl", _legs(), {}, {})
+    with pytest.raises(ValueError):
+        record_to_rows(record, **kwargs)
+    assert [row["id"] for row in record_to_rows(record, max_rank=1)] == ["p1", "p2"]
 
 
 def test_capture_query_nl_kind_with_fake_legs():
@@ -245,6 +259,74 @@ def test_capture_cli_refuses_out_of_range_depth(tmp_path, depth):
         main(["--golden", "g.jsonl", "--out", str(tmp_path / "o.jsonl"), "--depth", depth])
     assert exc.value.code == 2
     assert not (tmp_path / "o.jsonl").exists()
+
+
+@pytest.fixture
+def in_process_capture(tmp_path, monkeypatch):
+    """Run the real ``main`` with the shared Qdrant/embedder fakes, no Task or venv."""
+    import json
+
+    import qdrant_client
+
+    from mainframe_rag import config
+    from mainframe_rag.ingest import embed
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("VENUE", "dev")
+    monkeypatch.setattr(config, "load_settings", lambda: _settings(_env_file=None, rerank_enabled=False))
+    monkeypatch.setattr(
+        qdrant_client, "QdrantClient",
+        lambda **kwargs: FakeQdrant(dense=[_cpoint("p1", "D1", "1", "prose")], sparse=[]))
+    monkeypatch.setattr(embed, "build_embedder", lambda settings: FakeEmbedder())
+    golden = tmp_path / "golden.jsonl"
+    golden.write_text("\n".join([
+        json.dumps({"query": "first question"}), "  ",
+        json.dumps({"query": "second question"}), json.dumps({"query": "third question"}),
+    ]) + "\n")
+    return tmp_path, golden
+
+
+def test_capture_bundle_dir_defaults_golden_and_output_name_and_honors_max_queries(in_process_capture, monkeypatch, capsys):
+    import json
+
+    from scripts import capture_pool
+
+    root, golden = in_process_capture
+    monkeypatch.setattr(capture_pool.time, "strftime", lambda fmt: "20260102")
+    monkeypatch.setattr(capture_pool, "DEV_GOLDEN_PATH", golden)
+    assert main(["--bundle-dir", "new-bundle", "--max-queries", "2"]) == 0
+    output = root / "new-bundle" / "pools-20260102.jsonl"
+    records = [json.loads(line) for line in output.read_text().splitlines()]
+    assert [r["query"] for r in records] == ["first question", "second question"]
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["queries"] == 2 and summary["failures"] == 0
+
+
+def test_capture_records_failed_query_as_error_row_exits_nonzero_and_next_run_succeeds(
+        in_process_capture, monkeypatch, capsys):
+    import json
+
+    from scripts import capture_pool
+
+    root, golden = in_process_capture
+    real = capture_pool.capture_query
+
+    def flaky(client, embedder, collection, query, *args, **kwargs):
+        if query == "second question":
+            raise RuntimeError("upstream unavailable " + "x" * 400)
+        return real(client, embedder, collection, query, *args, **kwargs)
+
+    out = root / "pools.jsonl"
+    monkeypatch.setattr(capture_pool, "capture_query", flaky)
+    assert main(["--golden", str(golden), "--out", str(out)]) == 1
+    rows = [json.loads(line) for line in out.read_text().splitlines()]
+    assert [r["query"] for r in rows] == ["first question", "second question", "third question"]
+    assert "legs" in rows[0] and "legs" in rows[2]
+    assert rows[1].keys() == {"query", "error"} and len(rows[1]["error"]) == 200
+    assert json.loads(capsys.readouterr().out)["failures"] == 1
+    monkeypatch.setattr(capture_pool, "capture_query", real)
+    assert main(["--golden", str(golden), "--out", str(out)]) == 0
+    assert all("legs" in json.loads(line) for line in out.read_text().splitlines())
 
 
 @pytest.fixture

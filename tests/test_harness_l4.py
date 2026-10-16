@@ -126,12 +126,16 @@ def test_gate_structural_fault_dominates_healthy_rates():
     assert not any("grounded_rate" in r for r in reasons)
 
 
-def test_gate_uncomputed_metric_fails_closed():
+@pytest.mark.parametrize("runs,metric", [
     # syntax_compliance is None when a sample has no syntax rows.
-    runs = [_run(syntax_compliance=None), _run(syntax_compliance=None)]
+    ([_run(syntax_compliance=None), _run(syntax_compliance=None)], "syntax_compliance"),
+    # A leg missing from one repeat cannot be averaged over the others.
+    ([_run(), _run(relevance={"judge_errors": 0})], "relevance.relevant"),
+], ids=["none-everywhere", "missing-in-one-repeat"])
+def test_gate_uncomputed_metric_fails_closed(runs, metric):
     verdict, reasons, _ = gate_l4(summarize_l4(runs), _thresholds())
     assert verdict == "fail"
-    assert any("syntax_compliance" in r and "not computed" in r for r in reasons)
+    assert any(metric in r and "not computed" in r for r in reasons)
 
 
 def test_gate_max_metric_regression_fails():
@@ -263,3 +267,13 @@ def test_l4_repeats_preserve_sample_and_judge_legs(monkeypatch):
     result = harness_l4.run_l4(entries, 7, 3)
     assert calls == [(7, {"judge_enabled": True, "relevance_enabled": True})] * 3
     assert result == [{"rows": [{"repeat": n}], "metrics": {"queries": 1}} for n in (1, 2, 3)]
+
+
+def test_classify_max_direction_has_a_borderline_band_before_fail():
+    """A lower-is-better metric slightly over its reference is borderline (a
+    reviewer's call), clearly over is fail, at or under is pass."""
+    from mainframe_rag.eval.quality import classify
+
+    assert classify(0.10, 0.10, 0.05, "max") == "pass"
+    assert classify(0.13, 0.10, 0.05, "max") == "borderline"
+    assert classify(0.20, 0.10, 0.05, "max") == "fail"

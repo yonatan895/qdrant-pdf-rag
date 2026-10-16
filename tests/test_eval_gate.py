@@ -790,3 +790,18 @@ def test_retrieval_cli_explicit_paths_and_required_default(retrieval_task_worksp
     assert proc.returncode == 0
     assert json.loads((root / "report.json").read_text())["gate"]["status"] == "not_requested"
     assert not (root / "SENTINEL").exists()
+
+
+def test_ndcg_at_k_ignores_relevant_hits_ranked_past_k():
+    """nDCG@k must not credit a relevant document that sits beyond rank k."""
+    from mainframe_rag.eval.datasets import GoldenEntry
+    from mainframe_rag.eval.retrieval import ndcg_at_k
+    from mainframe_rag.retrieve.query import SearchHit
+
+    def hit(doc_id):
+        return SearchHit(chunk_id=doc_id, score=1.0, cite="c", heading="H", text="t",
+                         doc_id=doc_id, title="T", page_label="1", chunk_type="narrative", message_ids=())
+
+    entry = GoldenEntry(query="q", expected_doc_ids=["DOC-1"])
+    assert ndcg_at_k([hit("X"), hit("Y"), hit("DOC-1")], entry, k=2) == 0.0
+    assert ndcg_at_k([hit("X"), hit("Y"), hit("DOC-1")], entry, k=3) > 0.0

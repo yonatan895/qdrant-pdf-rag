@@ -68,6 +68,10 @@ class ContextCheckTests(TestCase):
         self.assertTrue(any("canonical local Markdown owner" in e for e in errors))
         self.assertTrue(any("required entry point missing" in e for e in errors))
 
+    def test_missing_map_marker_fails_the_check(self):
+        self.replace('<!-- context-map:end -->', '')
+        self.assertTrue(any('context-map: expected one start/end marker pair' in e for e in check(self.root)[0]))
+
     def test_template_canonical_url_valid(self):
         canonical = "https://github.com/yonatan895/qdrant-pdf-rag/blob/main/docs/owner.md#contract"
         (self.root/".github/pull_request_template.md").write_text(f'[Owner]({canonical})')

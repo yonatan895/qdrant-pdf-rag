@@ -69,6 +69,7 @@ def test_framing_and_tool_catalog():
     ("knowledge_search", {}),
     ("knowledge_search", {"query": "x", "limit": 41}),
     ("knowledge_search", {"query": "x", "limit": True}),
+    ("knowledge_search", {"query": "x", "product": 7}),
     ("evidence_read", {"reference": ""}),
     ("evidence_read", {"reference": "r", "max_bytes": 2_000_000}),
 ])

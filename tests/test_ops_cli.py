@@ -441,6 +441,7 @@ def test_stream_never_prints_a_completed_answer_without_final(agent, name, chunk
         [b"event: surprise\ndata: {}\n\n"],
         [b'event: final\ndata: {"type": "final"}\n\n'],
         [b"\xff\xfe\n\n"],
+        [b"event: token\ndata: [1]\n\n", final_event().encode()],
         [final_event().encode(), token_event("late").encode()],
     ],
 )
@@ -555,6 +556,7 @@ def test_unknown_server_code_is_dropped(agent):
     "reply",
     [
         Reply(body="<html>not json</html>"),
+        Reply(body={"request_id": "r", "query_kind": "x"}),  # no hits list
         Reply(body={"request_id": "r", "query_kind": "x", "hits": [{"cite": "only"}]}),
         Reply(  # exact reference must be a scalar
             body={
@@ -648,6 +650,7 @@ def test_no_key_means_no_authorization_header_and_flag_does_not_exist(agent):
         "ftp://127.0.0.1",
         "",
         "http://127.0.0.1:99999",
+        "http://127.0.0.1:1/?token=x",
     ],
 )
 def test_bad_base_url_is_usage_error_without_echo(url):

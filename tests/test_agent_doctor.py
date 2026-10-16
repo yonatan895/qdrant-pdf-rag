@@ -78,6 +78,24 @@ class DoctorTests(TestCase):
             (self.root/'scripts/tools/task-pin.txt').unlink()
             self.assertEqual(doctor.inspect_task(self.root).status, 'unable to verify')
 
+    def test_missing_or_tampered_cached_task_archive_is_not_ready(self):
+        archive = self.root/'.tools/cache/task_linux_amd64.tar.gz'
+        archive.write_bytes(b'tampered')
+        self.assertEqual(doctor.inspect_task(self.root).subject, 'Task archive')
+        self.assertEqual(doctor.inspect_task(self.root).status, 'missing prerequisite')
+        archive.unlink()
+        self.assertEqual(doctor.inspect_task(self.root).status, 'missing prerequisite')
+
+    def test_deploy_profile_requires_its_inputs_and_a_cluster_cli(self):
+        with patch.object(doctor.subprocess, 'run', side_effect=AssertionError('no service or Task calls')):
+            findings = doctor.diagnose(self.root, 'deploy')
+            self.assertTrue(all(f.status == 'ready' for f in findings), findings)
+            helm = str(self.root/'bin/helm')
+            self.which.side_effect = lambda name: helm if name == 'helm' else None if name in ('oc', 'kubectl') else '/tools/'+name
+            (self.root/'airgap.env.example').unlink()
+            missing = {f.subject for f in doctor.diagnose(self.root, 'deploy') if f.status == 'missing prerequisite'}
+        self.assertEqual(missing, {'oc or kubectl', 'airgap.env.example'})
+
     def test_helm_missing_foreign_or_tampered_is_rejected_without_execution(self):
         with patch.object(doctor.subprocess, 'run', side_effect=AssertionError('never execute Helm')):
             self.assertEqual(doctor.inspect_helm(self.root).status, 'ready')

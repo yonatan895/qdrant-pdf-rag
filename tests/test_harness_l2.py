@@ -437,3 +437,21 @@ def test_apply_truncation_join_and_content_floor_exemptions():
         row = _llm_row(**kw)
         apply_l2_measurements(row, entry, HITS, alerts={})
         assert not any("no substantive prose" in f for f in row["failures"]), kw
+
+
+def test_gate_holds_on_relevance_judge_error_alone():
+    m = summarize_l2([_row("A", judge_label="entailed", relevance_error="JudgeError: junk")])
+    assert m["relevance"]["judge_errors"] == 1
+    verdict, reasons = gate_l2(m)
+    assert verdict == "hold"
+    assert any("relevance judge" in r for r in reasons)
+
+
+def test_judge_evidence_is_bounded_before_the_prompt():
+    from mainframe_rag.eval.judging import JUDGE_MAX_EVIDENCE_CHARS, evidence_for_citations
+
+    hits = [_hit("SA23-1380-70 z/OS MVS Init Tuning Ref, p. 100", "SA23-1380-70", "x" * (JUDGE_MAX_EVIDENCE_CHARS * 2))]
+    evidence, unmapped = evidence_for_citations(["[1] SA23-1380-70 z/OS MVS Init Tuning Ref, p. 100"], hits)
+    assert unmapped == []
+    assert len(evidence) < JUDGE_MAX_EVIDENCE_CHARS + 100
+    assert evidence.endswith("[truncated for the judge]")

@@ -176,6 +176,8 @@ def _mutated(tmp_path, csha, mutate) -> str:
     (lambda r: r[1].update(evidence=[]), "evidence"),
     (lambda r: r[1].update(expected_doc_ids=["OTHER"]), "evidence doc ids"),
     (lambda r: r[25].update(must_not_assert=[]), "must_not_assert"),
+    (lambda r: r[25].update(expected_doc_ids=["D1"]), "abstain cases take no expected docs"),
+    (lambda r: r[2].update(id=r[1]["id"]), "duplicate case ids"),
     (lambda r: r[2].update(query=r[1]["query"].upper() + "  "), "duplicate queries"),
     (lambda r: r[0]["independence"].update(saw_system_outputs=True), "saw_system_outputs"),
     (lambda r: r[0].update(authors=["Zed"]), "author is not declared"),

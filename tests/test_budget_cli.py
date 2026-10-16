@@ -125,3 +125,12 @@ def test_deficit_host_override_fails_closed_with_remedies():
     assert "BUDGET DEFICIT" in proc.stderr
     assert "Qwen/Qwen3-Embedding-0.6B" in proc.stderr
     assert proc.stdout.strip() == ""
+
+
+def test_check_pack_on_a_fitting_pack_emits_the_same_flags_as_single_resolve():
+    """Preflight on a fitting pack must not change what the launcher evals."""
+    plain = _assignments(_run("resolve", "--profile", "LOCAL_RT_8GB", "--role", "embed"))
+    checked = _assignments(
+        _run("resolve", "--profile", "LOCAL_RT_8GB", "--role", "embed", "--check-pack")
+    )
+    assert checked == plain

@@ -301,6 +301,21 @@ def test_resolve_drift_match_skips_restore():
     assert resolve_snapshot_action(fp, recorded, restore="drift", record_mode=False) == ("skip", "pin.snapshot")
 
 
+def test_resolve_always_restores_the_recorded_pin_and_never_pins_live_state():
+    fp = {"points_count": 840396, "snapshot_names": ["stray.snapshot", "pin.snapshot"]}
+    recorded = {"points_count": 840396, "snapshot_name": "pin.snapshot"}
+    assert resolve_snapshot_action(fp, recorded, restore="never", record_mode=False)[0] == "skip"
+    assert resolve_snapshot_action(fp, recorded, restore="always", record_mode=False) == ("restore", "pin.snapshot")
+    # A gate run with no recorded pin, or whose pin was deleted, must fail rather than restore a stray.
+    action, reason = resolve_snapshot_action(fp, None, restore="always", record_mode=False)
+    assert action == "fail" and "no recorded pin" in reason
+    gone = {"points_count": 840396, "snapshot_name": "deleted.snapshot"}
+    assert resolve_snapshot_action(fp, gone, restore="always", record_mode=False)[0] == "fail"
+    # Only an explicit record run may create a new pin.
+    assert resolve_snapshot_action(fp, gone, restore="always", record_mode=True) == ("pin", None)
+    assert resolve_snapshot_action(fp, recorded, restore="always", record_mode=True) == ("restore", "pin.snapshot")
+
+
 def test_resolve_drift_restores_recorded_pin_despite_drift():
     # Production shape: main() passes prefer_name=recorded, so a stray alone
     # cannot push the recorded pin out of first place (that combination is
@@ -563,3 +578,9 @@ def test_harness_task_refuses_invalid_inputs_before_external_effects(harness_inp
     assert report is None
     assert effects == []
     assert (root / "benchmarks/harness.json").read_bytes() == before[root / "benchmarks/harness.json"]
+
+
+def test_empty_classes_get_no_confidence_interval():
+    """An empty class must render n/a, never a fabricated CI."""
+    assert ci95([]) is None
+    assert ci95_paired([]) is None
