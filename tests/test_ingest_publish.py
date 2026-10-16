@@ -1651,7 +1651,6 @@ def test_unbound_live_generation_refuses_without_mutation(tmp_path, monkeypatch)
     no control record, no immutable build aliases) is unsupported. The
     ordinary run refuses instead of backfilling a receipt, and neither the
     alias nor the live points change."""
-    from mainframe_rag.ingest import run_ingest
     from mainframe_rag.ingest.publish import publication_metadata_point_id
 
     fake, corpus, progress, live = _revision_less_case(tmp_path, monkeypatch)
