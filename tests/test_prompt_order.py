@@ -13,6 +13,14 @@ import pytest
 from mainframe_rag.agent.answer import build_messages
 from mainframe_rag.retrieve.query import SearchHit
 
+# Ordering/trim mechanics are pinned to the budget their windows were drawn
+# against, independent of the 27B-sized application defaults (#777).
+_MECHANICS_BUDGET = {
+    "llm_reserved_output_tokens": 1536,
+    "llm_thinking_reserve_tokens_simple": 0,
+    "llm_thinking_reserve_tokens_complex": 1000,
+}
+
 
 def _hit(cite: str, text: str) -> SearchHit:
     return SearchHit(
@@ -97,7 +105,8 @@ def test_exact_final_messages_are_the_last_verified_candidate(chat, order):
             return 3000 if "Body one." in content and content.startswith("Instructions:") else 200
 
     tok = RecordingTokenizer()
-    settings = Settings(_env_file=None)
+    # 4096 window: the 3000-token stable_cache candidate must overflow it.
+    settings = Settings(_env_file=None, **_MECHANICS_BUDGET, llm_max_model_len=4096)
     hits = [_hit("SA22-0000-00 Synthetic, p. 1", "Body one.")]
     kwargs = {"tokenizer": tok, "settings": settings, "order": order}
     prepared = (
@@ -138,7 +147,7 @@ def test_stable_cache_only_overflow_trims_or_refuses_before_model(chat):
     body = "Body one. " * 8
     hits = [_hit("SA22-0000-00 Synthetic, p. 1", body)]
     history = [ChatMessage(role="user", content="Next?")] if chat else "Next?"
-    wide = Settings(_env_file=None, llm_max_model_len=131072)
+    wide = Settings(_env_file=None, **_MECHANICS_BUDGET, llm_max_model_len=131072)
 
     def build(order, settings, tok):
         if chat:
@@ -157,7 +166,7 @@ def test_stable_cache_only_overflow_trims_or_refuses_before_model(chat):
     limit = len_r + 20
     assert limit < len_s
     model_len = 1536 + 128 + limit  # reserved + margin + window (simple: no thinking reserve)
-    tight = Settings(_env_file=None, llm_max_model_len=model_len)
+    tight = Settings(_env_file=None, **_MECHANICS_BUDGET, llm_max_model_len=model_len)
 
     tok_r = LengthTokenizer()
     ok = build("retrieval", tight, tok_r)
@@ -192,7 +201,7 @@ def test_last_bounded_extra_count_can_confirm_budget():
         def count_messages(self, messages, *, reasoning_effort=None):
             return 200
 
-    kwargs = {"tokenizer": ExactEmptyTokenizer(), "settings": Settings(_env_file=None)}
+    kwargs = {"tokenizer": ExactEmptyTokenizer(), "settings": Settings(_env_file=None, **_MECHANICS_BUDGET)}
     chat = build_chat_messages([ChatMessage(role="user", content="Question?")], [], **kwargs)
     assert chat.budget_verified
     assert build_messages("Question?", [], **kwargs).budget_verified
@@ -269,7 +278,7 @@ def _tight_chat_settings(limit):
     from mainframe_rag.config import Settings
 
     # simple complexity: window = model_len - reserved - margin (no thinking reserve)
-    return Settings(_env_file=None, llm_max_model_len=1536 + 128 + limit)
+    return Settings(_env_file=None, **_MECHANICS_BUDGET, llm_max_model_len=1536 + 128 + limit)
 
 
 @pytest.mark.parametrize("order,older_turns", [("retrieval", 6), ("stable_cache", 2)])
@@ -280,7 +289,7 @@ def test_chat_budget_keeps_passage_and_antecedent_over_older_history(order, olde
 
     hits = [_hit("SA22-0000-00 Synthetic, p. 1", "Check the synthetic passage PASSAGE-OK. " * 3)]
     _, recent, active = _chat_history(0)
-    wide = Settings(_env_file=None, llm_max_model_len=131072)
+    wide = Settings(_env_file=None, **_MECHANICS_BUDGET, llm_max_model_len=131072)
     minimal = build_chat_messages(
         [*recent, *active], hits, tokenizer=_LengthTokenizer(), settings=wide, order=order,
     )

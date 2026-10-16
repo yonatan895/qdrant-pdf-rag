@@ -48,7 +48,8 @@ LOGGED_ENV_KEYS = ("EMBED_MODE", "VENUE", "PYTHONPATH", "LLM_STREAM", "UI_ENABLE
                    "ROLE", "MODEL", "SERVED_NAME", "CONTAINER_NAME", "PORT", "BUDGET_PROFILE", "BUDGET_PYTHON",
                    "GATEWAY_PORT", "GATEWAY_PROBE_MAX_TOKENS", "CORPUS_DIR", "LOCAL_INGEST_PROGRESS", "LOCAL_INGEST_REINGEST", "LOCAL_AGENT_PORT", "JAEGER_PORT",
                    "SIM_CONTAINER", "SIM_PORT",
-                   "GPU_MEM", "MAX_LEN", "SEQS", "LOCAL_STACK_DRYRUN")
+                   "GPU_MEM", "MAX_LEN", "SEQS", "LOCAL_STACK_DRYRUN",
+                   "LLM_MAX_MODEL_LEN", "LLM_REASONING_EFFORT_COMPLEX")
 
 # Python tuple literal rendered into the shell recorders below.
 _LOGGED_KEYS_LITERAL = "(" + ", ".join(f'"{key}"' for key in LOGGED_ENV_KEYS) + ",)"
@@ -126,6 +127,7 @@ class TaskContractsTests(unittest.TestCase):
         shutil.copy(REPO / "Taskfile.yml", self.root / "Taskfile.yml")
         shutil.copytree(REPO / "taskfiles", self.root / "taskfiles")
         (self.root / "scripts").mkdir()
+        shutil.copy(REPO / "scripts/local_lane_budget.sh", self.root / "scripts")
         self.log = self.root / "calls.jsonl"
 
     def run_task(self, *args: str, cwd: Path | None = None, extra_env: dict | None = None) -> subprocess.CompletedProcess:
@@ -795,7 +797,9 @@ class TaskContractsTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stdout)
         calls = self.calls()
         self.assertEqual(calls[0]["argv"], ["scripts/query_demo.py", "--embed-mode", "hash"])
-        self.assertEnvSubset(calls[0], {"PYTHONPATH": ".", "EMBED_MODE": "hash"})
+        # #777: the local 8 GB lane budget reaches the tool unless a window is declared.
+        self.assertEnvSubset(calls[0], {"PYTHONPATH": ".", "EMBED_MODE": "hash",
+                                        "LLM_MAX_MODEL_LEN": "4096", "LLM_REASONING_EFFORT_COMPLEX": "high"})
         if (self.log).exists():
             self.log.unlink()
         sentinel = "a b$c;`echo PWNED`"

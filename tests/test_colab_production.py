@@ -104,13 +104,13 @@ def original_inputs(tmp_path):
         "observation": {
             "implementation": "vllm.entrypoints.pooling.embed.protocol.EmbeddingCompletionRequest",
             "version": "0.28.0",
-            "model_config": {"max_model_len": 4096, "encoder_config": encoder,
+            "model_config": {"max_model_len": 8192, "encoder_config": encoder,
                              "pooler_config": {"enable_chunked_processing": False,
                                                "max_embed_len": None,
                                                "seq_pooling_type": "LAST", "use_activation": True}},
             "counting_options": {"add_special_tokens": True, "do_lower_case": False,
                                  "truncation": False},
-            "effective_window": 4096,
+            "effective_window": 8192,
         },
         "provenance": {"kind": "offline-vllm-pooling-observation", "producer": producer,
                        "resolved_revision": server["revision"], "files_sha256": _digest(files),
@@ -169,7 +169,7 @@ def test_expected_sources_golden_settings_and_native_query_inputs_are_independen
     assert result.expected["contract"]["representation_fingerprint"] == representation_fingerprint(
         arguments["settings"], extraction_rules_version())
     assert result.expected["contract"]["source_labels"] == "||"
-    assert result.expected["contract"]["effective_window"] == 4096
+    assert result.expected["contract"]["effective_window"] == 8192
     assert result.environment["DENSE_QUERY_PREFIX"] == "Original: "
     assert result.environment["COMPARATIVE_SPLIT_ENABLED"] == "true"
     assert result.environment["EMBED_MODEL"] == profile["servers"][1]["model_id"]
@@ -210,7 +210,7 @@ def test_absent_encoder_preserves_observed_null_and_next_ordinary_prepare(
     expected, _, target = _complete(original_inputs)
     assert expected.expected["contract"]["counting_options"] == {
         "add_special_tokens": True, "do_lower_case": False, "truncation": False}
-    assert expected.expected["contract"]["effective_window"] == 4096
+    assert expected.expected["contract"]["effective_window"] == 8192
     assert expected.environment["DENSE_QUERY_PREFIX"] == "Original: "
     assert production.native_query_inputs(original_inputs[2]["settings"], "An original question") == [
         "Original: An original question"]

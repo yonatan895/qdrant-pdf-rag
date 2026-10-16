@@ -101,7 +101,10 @@ class Settings(BaseSettings):
     # the keyless wire shape; never logged, never committed — deployment
     # delivers it via secretKeyRef, never plaintext in airgap.env.
     embed_api_key: str | None = None
-    dense_dim: int | None = None
+    # Production embedder Qwen3-Embedding-8B (#777). A mismatch still fails
+    # closed: the gateway probe compares vector length, Qdrant rejects wrong-
+    # size vectors and the representation manifest records the dimension.
+    dense_dim: int | None = 4096
     embed_timeout_s: float = 60.0
     # Operator-declared immutable revision of the dense embedding model
     # (issue #362): the gateway exposes only mutable aliases, so the
@@ -127,12 +130,15 @@ class Settings(BaseSettings):
     # Reasoning models think; the long timeout is the retry policy — /v1/answer
     # never retries (issue #20 PR C).
     answer_timeout_s: float = 300.0
-    # Prompt context length budget: caps total characters of retrieved chunk
-    # text sent to the reasoning model to prevent context overflow (4096-token limits).
-    prompt_max_context_chars: int = Field(default=8000, ge=1000, le=50000)
-    prompt_max_context_chars_complex: int = Field(default=4500, ge=1000, le=50000)
-    prompt_max_chunk_chars: int = Field(default=3000, ge=500, le=10000)
-    prompt_max_chunk_chars_complex: int = Field(default=1100, ge=300, le=5000)
+    # Prompt excerpt caps (#777, sized for Qwen3.8-27B at a 32k window): a
+    # whole chunk (SECTION_MAX_CHARS 3500 plus a <=500-char context prefix)
+    # fits per excerpt on both paths; the context caps are the no-tokenizer
+    # fallback for 8 such excerpts. The 4096-era caps (8000/4500, 3000/1100)
+    # omitted evidence units on 21 of 32 complex #759 requests.
+    prompt_max_context_chars: int = Field(default=32000, ge=1000, le=50000)
+    prompt_max_context_chars_complex: int = Field(default=32000, ge=1000, le=50000)
+    prompt_max_chunk_chars: int = Field(default=4000, ge=500, le=10000)
+    prompt_max_chunk_chars_complex: int = Field(default=4000, ge=300, le=5000)
     # Request-size guardrails (issue #87): unbounded operator input must not
     # eat the reasoning window or the embed call. Overlong queries fail
     # closed with the same invalid_request 422 as any other body-validation
@@ -191,30 +197,38 @@ class Settings(BaseSettings):
     # on complex operational, diagnostic, and comparative inquiries while conserving
     # latency on simple factoid/message lookups.
     # Values are forwarded verbatim; operators select the served template's domain.
-    llm_reasoning_effort_simple: ReasoningEffort = Field(default="low")
-    llm_reasoning_effort_complex: ReasoningEffort = Field(default="high")
+    # Production target is xhigh on both paths (#777); complexity still selects
+    # the complex system-prompt extension.
+    llm_reasoning_effort_simple: ReasoningEffort = Field(default="xhigh")
+    llm_reasoning_effort_complex: ReasoningEffort = Field(default="xhigh")
     # Comma list of efforts the served chat template accepts (#748): the console
     # offers exactly these, and both defaults above must be members. The stock
-    # Qwen3.8 template needs "low,medium,xhigh".
-    llm_reasoning_efforts: str = Field(default="low,medium,high")
+    # Qwen3.8 template needs "low,medium,xhigh" (the default since #777).
+    llm_reasoning_efforts: str = Field(default="low,medium,xhigh")
     llm_temperature: float = Field(default=0.2, ge=0.0, le=2.0)
 
     # Context budgeting via tokenizer accounting:
     # budget = max_model_len - reserved_output_tokens - measured_system_prompt - safety_margin
-    llm_max_model_len: int = Field(default=4096, ge=512, le=131072)
-    llm_reserved_output_tokens: int = Field(default=1536, ge=128, le=16384)
-    # Low-effort reasoning also consumes completion space. Keep this separate
-    # from the answer reserve and the independently tuned complex budget.
-    llm_thinking_reserve_tokens_simple: int = Field(default=0, ge=0, le=16384)
+    # Must not exceed the served window (#777: 32768 for Qwen3.8-27B; the
+    # model's native 262144 is not served). The reserves only shape the prompt
+    # budget: no max_tokens is sent, so generation is bounded by the server.
+    # Visible answers reached 2331 tokens in #759, above the old 1536 reserve.
+    llm_max_model_len: int = Field(default=32768, ge=512, le=131072)
+    llm_reserved_output_tokens: int = Field(default=2560, ge=128, le=16384)
+    # Reasoning also consumes completion space. Keep this separate from the
+    # answer reserve. xhigh thinking is provisionally priced at 8192 on both
+    # paths until measured (#777).
+    llm_thinking_reserve_tokens_simple: int = Field(default=8192, ge=0, le=16384)
     # Thinking reserve, complex path only (issue #298): high-effort thinking
     # draws from the same window as the answer, but the single 1536-token
     # output bucket priced none of it — 0.81 of complex L4 rows truncated at
     # prompt+completion = 4096 with reasoning p50 1120. Pricing 1000 of it
     # into the complex prompt budget trades excerpt chars for a prompt that
     # can actually finish.
-    llm_thinking_reserve_tokens_complex: int = Field(default=1000, ge=0, le=16384)
+    llm_thinking_reserve_tokens_complex: int = Field(default=8192, ge=0, le=16384)
     llm_token_safety_margin: int = Field(default=128, ge=0, le=1024)
-    llm_max_chunk_tokens_narrative: int = Field(default=350, ge=50, le=2048)
+    # Complex-path narrative cap above the largest chunk (~1150 tokens, #777).
+    llm_max_chunk_tokens_narrative: int = Field(default=1200, ge=50, le=2048)
     llm_tokenize_timeout_s: float = Field(default=5.0, gt=0.0, le=60.0)
     llm_stream: bool = Field(default=False, description="Stream chat completions to measure TTFT")
 

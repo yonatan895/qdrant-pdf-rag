@@ -258,7 +258,7 @@ handoff; see [the local credential contract](live-stack.md#full-local-simulation
 | `COLAB_NAMESPACE`, `COLAB_QDRANT_SERVICE` | Retained PVC-backed Qdrant service, not an ephemeral container |
 | `COLAB_INFERENCE_LOCK`, `COLAB_TRANSPORT_RECEIPT` | Approved wheel lock and prior CPU transport proof |
 | `COLAB_PROFILE`, `COLAB_DATASET` | Named profile and explicit `production`/`synthetic` selection |
-| `COLAB_EMBEDDING_MAX_LEN` | Measured supported input window; default 4096 is commissioning only |
+| `COLAB_EMBEDDING_MAX_LEN` | Measured supported input window; default 8192 matches the production embedding server (#777). A changed window needs renewed census admission; document checkpoints are unchanged |
 | `COLAB_DEADLINE_SECONDS`, `COLAB_CU_CAP`, `COLAB_CU_FLOOR` | Defaults 7200 seconds, 20 CU, 10 CU retained floor |
 | `COLAB_INGEST_REINGEST` | Optional `--ingest-reingest`; production only, `1` freezes an explicit ingest `--reingest` for this run |
 

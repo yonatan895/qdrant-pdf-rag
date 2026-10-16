@@ -19,12 +19,15 @@ def test_g4_reference_keeps_immutable_models_and_independent_allocations():
         "/content/rag-vllm/bin/vllm", "serve", "/content/models/reasoning",
         "--served-model-name", "Qwen/Qwen3.8-27B", "--dtype", "bfloat16",
         "--tensor-parallel-size", "1", "--language-model-only", "--reasoning-parser", "qwen3",
-        "--gpu-memory-utilization", "0.66", "--max-model-len", "16384",
+        "--gpu-memory-utilization", "0.66", "--max-model-len", "32768",
         "--max-num-seqs", "2", "--max-num-batched-tokens", "4096",
         "--enable-chunked-prefill", "--enforce-eager", "--host", "127.0.0.1", "--port", "8000",
     ]
     assert embedding["argv"][-4:] == ["--host", "127.0.0.1", "--port", "8001"]
     assert embedding["argv"][embedding["argv"].index("--gpu-memory-utilization") + 1] == "0.24"
+    # #777: production embedding window; the 146k-token reasoning KV pool
+    # holds two 32k sequences at 0.66.
+    assert embedding["argv"][embedding["argv"].index("--max-model-len") + 1] == "8192"
     assert profile["dense_dim"] == 4096
     with pytest.raises(ValueError, match="assigned GPU"):
         admit(profile, {"gpu_name": "NVIDIA A100-SXM4-40GB", "vram_mib": 40960,

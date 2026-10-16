@@ -431,13 +431,13 @@ async def test_core_reasoning_effort_explicit_override_sync():
     def retrieve(*_a, **_k):
         return [_hit()], "nl", {"embed_ms": 1, "qdrant_ms": 1}
 
-    # Query without override -> simple query defaults to "low"
+    # Query without override -> simple query uses the xhigh default (#777)
     llm1 = CoreFakeLLM()
     await execute_answer_core(
         AnswerCoreInput(query="simple query"),
         _deps(_settings(), llm1, retrieve),
     )
-    assert llm1.calls[0]["reasoning_effort"] == "low"
+    assert llm1.calls[0]["reasoning_effort"] == "xhigh"
 
     # Simple query with explicit override="high" -> gets "high"
     llm2 = CoreFakeLLM()
@@ -455,11 +455,12 @@ async def test_core_reasoning_effort_explicit_override_sync():
     )
     assert llm3.calls[0]["reasoning_effort"] == "low"
 
-    # Invalid override ignored -> falls back to complexity default ("low" for simple)
+    # Invalid override ignored -> falls back to the configured simple effort
+    # (set to "low" so the fallback is distinguishable from the xhigh default)
     llm4 = CoreFakeLLM()
     await execute_answer_core(
         AnswerCoreInput(query="simple query", reasoning_effort="ultra"),  # type: ignore[arg-type]
-        _deps(_settings(), llm4, retrieve),
+        _deps(_settings(llm_reasoning_effort_simple="low"), llm4, retrieve),
     )
     assert llm4.calls[0]["reasoning_effort"] == "low"
 

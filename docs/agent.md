@@ -397,17 +397,24 @@ otherwise multi-step configuration phrasing, comparisons (`versus`, `vs`,
 (`rule, interval, parameter, parmlib, jcl, policy, threshold, journal`)
 select `complex`. Default is `simple`.
 
-- Simple: 8000 context chars, `low` effort. Complex: 4500 context chars,
-  `high` effort, extended system prompt. Temperature 0.2 both. The 4500 cap
-  reserves roughly 2.6k tokens of headroom for thinking + answer inside the
-  4096-token local window — the truncation bug it fixes (8k context starving
-  generation, `finish: length`, dropped `Citations:`) must not be
-  reintroduced by raising it.
+- Defaults (#777, sized for Qwen3.8-27B at a 32768-token window): `xhigh`
+  effort on both paths; complex adds the extended system prompt. Temperature
+  0.2 both. Both paths take whole chunks (4000 chars per excerpt, 32000 chars
+  of no-tokenizer context); the prompt budget prices a 2560-token answer
+  reserve plus an 8192-token thinking reserve (provisional until xhigh is
+  measured). In #759 the window never bound (largest request 9011 of 16384
+  tokens) while the 4096-era complex caps omitted evidence on 21 of 32
+  complex requests. The local 8 GB lane keeps its 4096-window budget
+  (8000/4500 chars, 3000/1100 per excerpt, 1536 answer, 0/1000 thinking,
+  `low`/`high`): `run_local_stack.sh` pins it unless the caller declares
+  `LLM_MAX_MODEL_LEN`. On that window, raising the caps reintroduces the
+  truncation bug (`finish: length`, dropped `Citations:`).
 - Blocks are named (`context`, `question`, `excerpt`, `tail`, the standalone
   `excerpts` header when nothing is packed, and the `stable_cache`
   `instructions` block) and packed
-  per-type: syntax, message, and table chunks up to 3000 chars; narrative
-  prose up to the narrative cap (1100 for complex queries); cuts marked
+  per-type: syntax, message, and table chunks up to `prompt_max_chunk_chars`
+  (4000); narrative prose up to the complex narrative cap
+  (`prompt_max_chunk_chars_complex`, 4000) on complex queries; cuts marked
   with a truncation suffix; packing stops at the context budget with at
   most one partial chunk.
 - Source metadata (#635): each excerpt header is two lines, the exact
@@ -446,7 +453,7 @@ select `complex`. Default is `simple`.
   (no cites, timestamps, or ids — the prefix-cache premise) that demotes
   excerpts to untrusted data.
 - Tokenizer path (when a tokenizer is configured): plans with the
-  in-process estimator (`≈3.5` chars/token, 350-token narrative cap), then
+  in-process estimator (`≈3.5` chars/token, 1200-token complex narrative cap), then
   verifies the packed prompt against the whole-message count per trim round
   and trims up to `4 + 2*len(packed excerpts)` rounds (64-char overcut, drop
   under 80 chars, else suffix; the bound scales with the trimmable evidence
@@ -682,11 +689,11 @@ readers:
 | `qdrant_url` / `qdrant_api_key` / `qdrant_collection` / `qdrant_snapshots_dir` | `http://localhost:6333` / unset / `mainframe_manuals` / `/qdrant/snapshots` | lifespan, healthz readyZ, retrieve calls, manifests, harness snapshot restore |
 | `qdrant_timeout_s` / `qdrant_ingest_timeout_s` | 30 / 120 | query path / ingest path (split: different call shapes); the agent's client requests `Accept-Encoding: identity`, since gzip-chunked Qdrant responses stalled payload reads ~40 ms each |
 | `embed_mode` | `vllm` (normalized lower/strip) | lifespan fail-fast, embedder dispatch, ingest |
-| `embed_base_url` / `embed_model` / `dense_dim` / `embed_api_key` | unset (endpoint trio required in vLLM; key unset = keyless) | endpoint+model validation, healthz ping, dim check, `Authorization` on embed calls |
+| `embed_base_url` / `embed_model` / `dense_dim` / `embed_api_key` | unset / unset / 4096 (Qwen3-Embedding-8B, #777) / unset (endpoint and model required in vLLM; key unset = keyless) | endpoint+model validation, healthz ping, dim check, `Authorization` on embed calls |
 | `embed_timeout_s` | 60.0 | both HTTP pools |
 | `dense_query_prefix` | asymmetric instruct prefix | dense query vectors only |
-| `prompt_max_context_chars` / `_complex` | 8000 / 4500 | `build_messages` by complexity |
-| `prompt_max_chunk_chars` / `prompt_max_chunk_chars_complex` | 3000 / 1100 | per-type packing caps |
+| `prompt_max_context_chars` / `_complex` | 32000 / 32000 | `build_messages` by complexity (no-tokenizer fallback) |
+| `prompt_max_chunk_chars` / `prompt_max_chunk_chars_complex` | 4000 / 4000 | per-type packing caps |
 | `query_max_chars` / `splunk_context_max_chars` | 2000 (422s) / 4000 (truncate+suffix) | length guard (search/answer, chat latest turn) / prompt packing |
 | `chat_condense_enabled` | `false` | follow-up condensation gate (`resolve_search_query`) |
 | `chat_max_body_chars` | 32768 (422) | `/v1/chat` + `/ui` body cap (shared `chat_body_chars` helper) |
@@ -694,10 +701,10 @@ readers:
 | `prompt_order` | `retrieval` (`stable_cache` alt) | block ordering |
 | `llm_base_url` / `llm_model_reasoning` / `llm_api_key` | unset (answer stays disabled; key unset = keyless) | per-request assertion, LLM client, tokenizer |
 | `answer_timeout_s` | 300.0 | reasoning client; no transport retries, explicit fallback policy below |
-| `llm_reasoning_effort_simple` / `_complex` / `llm_temperature` | low / high / 0.2 | answer path |
-| `llm_reasoning_efforts` | `low,medium,high` | served template's effort domain: console choices; both efforts above must be members (#748) |
-| `llm_max_model_len` / `llm_reserved_output_tokens` / `llm_thinking_reserve_tokens_complex` / `llm_token_safety_margin` / `llm_max_chunk_tokens_narrative` / `llm_tokenize_timeout_s` | 4096 / 1536 / 1000 / 128 / 350 / 5.0 | tokenizer-path budgeting (complex prompt budget prices high-effort thinking, issue #298) |
-| `llm_thinking_reserve_tokens_simple` | 0 | extra low-effort reasoning headroom in single-turn and chat prompt budgets; environment input `LLM_THINKING_RESERVE_TOKENS_SIMPLE` |
+| `llm_reasoning_effort_simple` / `_complex` / `llm_temperature` | xhigh / xhigh / 0.2 | answer path (#777) |
+| `llm_reasoning_efforts` | `low,medium,xhigh` | served template's effort domain (Qwen3.8): console choices; both efforts above must be members (#748) |
+| `llm_max_model_len` / `llm_reserved_output_tokens` / `llm_thinking_reserve_tokens_complex` / `llm_token_safety_margin` / `llm_max_chunk_tokens_narrative` / `llm_tokenize_timeout_s` | 32768 / 2560 / 8192 / 128 / 1200 / 5.0 | tokenizer-path budgeting (#298, #777). `llm_max_model_len` must not exceed the served `--max-model-len`; no `max_tokens` is sent, so the reserves shape only the prompt budget |
+| `llm_thinking_reserve_tokens_simple` | 8192 | reasoning headroom in single-turn and chat prompt budgets (provisional for xhigh, #777); environment input `LLM_THINKING_RESERVE_TOKENS_SIMPLE` |
 | `llm_stream` | `false` | server-side reasoning SSE |
 | `request_max_concurrent` / `request_queue_max` / `request_queue_wait_s` / `request_deadline_s` | 0 (unlimited) / 0 / 5.0 (used only with a queue) / 0.0 (no deadline) | request admission and total deadline (§6a); issue #374, **no numeric envelope approved** — values come from site measurement |
 | `embed_max_input_chars` | 0 (unbounded) | refuse an over-bound dense embed input before the call, query path and ingest (§6a, `docs/ingest.md` §7) |

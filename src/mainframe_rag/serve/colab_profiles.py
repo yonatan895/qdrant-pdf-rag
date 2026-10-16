@@ -15,7 +15,7 @@ EMBEDDING_REVISION = "1d8ad4ca9b3dd8059ad90a75d4983776a23d44af"
 COLAB_PROFILES = ("COLAB_CPU_TRANSPORT", "COLAB_G4_BF16", "COLAB_A100_80GB_BF16")
 
 
-def build_profile(name: str, *, embed_max_len: int = 4096,
+def build_profile(name: str, *, embed_max_len: int = 8192,
                   deadline_seconds: int = 7200) -> dict[str, Any]:
     """Produce a public reference profile; reject unknown profiles/oversize inputs."""
     if name not in COLAB_PROFILES:
@@ -42,7 +42,7 @@ def build_profile(name: str, *, embed_max_len: int = 4096,
         return profile
     for role, model, revision, path, port, allocation, window, sequences in (
         ("reasoning", "Qwen/Qwen3.8-27B", GENERATOR_REVISION, "reasoning", 8000,
-         "0.73" if a100 else "0.66", 16384, 1 if a100 else 2),
+         "0.73" if a100 else "0.66", 32768, 1 if a100 else 2),
         ("embed", "Qwen/Qwen3-Embedding-8B", EMBEDDING_REVISION, "embedding", 8001,
          "0.22" if a100 else "0.24", embed_max_len, 1 if a100 else 8),
     ):

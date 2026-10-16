@@ -519,9 +519,11 @@ def test_model_budget_invalid_selection_fails_without_artifact(monkeypatch, mapp
 
 
 @pytest.mark.parametrize("selected,field", [
-    # #748: Qwen3.8's domain while COMPLEX keeps the Settings default "high".
-    ({"LLM_REASONING_EFFORTS": "low,medium,xhigh"}, "LLM_REASONING_EFFORT_COMPLEX"),
-    ({"LLM_REASONING_EFFORTS": "medium,xhigh", "LLM_REASONING_EFFORT_COMPLEX": "xhigh"},
+    # #748/#777: a served domain without xhigh while an effort keeps the
+    # Settings default "xhigh".
+    ({"LLM_REASONING_EFFORTS": "low,medium,high", "LLM_REASONING_EFFORT_SIMPLE": "low"},
+     "LLM_REASONING_EFFORT_COMPLEX"),
+    ({"LLM_REASONING_EFFORTS": "low,medium,high", "LLM_REASONING_EFFORT_COMPLEX": "high"},
      "LLM_REASONING_EFFORT_SIMPLE"),
 ])
 def test_effort_outside_served_set_fails_before_artifact(monkeypatch, mapper_env, selected, field):
