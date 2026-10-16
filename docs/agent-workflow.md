@@ -169,8 +169,8 @@ scope/base/outcome; contract/impact (defaults, API/schema, identities, operation
 requirements, rollback); evidence table (claim/counterexample, test/command,
 tested SHA, result, location); limits/issue owners; self-review. Distinguish
 observed results, static reasoning, proposed tests and checks not run. Group
-related evidence; no artifact is required for every trivial assertion. Map old
-test cases to retained behavior or a justified implementation-pin retirement.
+related evidence; no artifact is required for every trivial assertion. Tests carry their
+[admission](testing.md#test-admission) evidence.
 Do not write blanket `Fixes`/`Closes` for a partly addressed parent.
 
 Independent reviewer prompt:

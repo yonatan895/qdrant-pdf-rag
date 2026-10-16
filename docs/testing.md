@@ -55,7 +55,6 @@ real non-dry control path against faithful fakes so the claimed behavior runs.
 - Patch `httpx2.get` / `httpx2.post` in every unit test that can reach them. Hostnames like `embed-host:9000` are live network. A test that “works because connect failed” is invalid. For scripts that also stream, patch `httpx2.stream` too — or swap the whole `httpx2` module attribute for a URL-keyed fake (the `FakeGateway` pattern in `tests/test_probe_gateway.py`: first-match-wins routes, a `(method, url, headers)` call log, canned-server failures only).
 - Requesting the `monkeypatch` fixture does nothing by itself. Register every mutated env key with `monkeypatch.setenv` / `monkeypatch.delenv` **before** the code under test runs, or snapshot with `monkeypatch.setattr(os, "environ", dict(os.environ))`. Autouse fixtures must call `monkeypatch`.
 - Do not mutate module-global state (routes on the global app, leftover `os.environ`) that later tests inherit.
-- Pin public contracts, not private internals (`client._transport._pool._retries` dies on the next lockfile bump).
 - Remove unused fixtures and parameters when touching a test.
 
 ## Shared doubles: share builders, pin behavior
@@ -360,35 +359,44 @@ source identity != stored-content verification
 
 For streaming recovery, assert yielded events and fallback-call counts through the actual iterator. For storage, inspect actual records and protected operations. A flag saying `complete` or a test named `parity` is not itself proof of the corresponding behavior.
 
-### D. Curate exploratory tests before committing
+<a id="test-admission"></a>
+### D. Admitting, changing and removing tests
 
-Challengers may explore freely in an isolated workspace, but retain only clear cases protecting distinct behavior. Add them to the owning suite; use parameterization when the rule is genuinely shared. Do not preserve separate large files named after each agent or review round. Map replacements to their retained coverage; removing a forbidden-behavior pin requires explicit contract authority, not merely the desire for a green run.
+A test earns its place:
 
-Existing homes: completion/publication/representation/serving suites cover
-those boundaries; API/chat/webui/stream suites cover adapters and completion;
-air-gap shell suites cover configuration precedence and both render paths.
-Prefer adding a regression to these behavior-focused suites. Every new handler,
-branch and error shape needs a reachable case. Input handling should cover empty,
-multi-digit, wrapped (quotes, blockquotes, backticks, parentheses, bold, links,
-angle brackets), inline, top-placed, missing-blank-line and case-folded forms when
-those inputs are meaningful to the parser.
+1. **Owner first.** Extend the test that owns the guarantee (owner contract;
+   [2026-10-16 ledger](records/2026-10-16-test-justification-ledger.md)).
+   Add a test or file only when none exists, and say so. Exploratory and
+   review-round cases keep only distinct behavior, in the owning suite, never
+   in files named after an agent or round.
+2. **Prove it.** Name the line it protects and show it fails when that line is
+   mutated; a test that survives, or names no line, protects nothing. Note
+   equivalent mutants.
+3. **Contract at the public boundary.** Derive cases from the owner section;
+   assert what callers see (stable codes, not message text; exit codes; stored
+   content). One parametrized case per equivalence class plus real boundaries,
+   never looped; every new handler, branch and error shape gets a
+   reachable case. Parser inputs cover empty, multi-digit, wrapped (quotes,
+   blockquotes, backticks, parentheses, bold, links, angle brackets), inline,
+   top-placed, missing-blank-line and case-folded forms where meaningful.
+4. **Deletion is a coverage event.** Map `old case → retained behavior and
+   owner` or justify retiring an implementation-only pin, and re-cover or
+   justify each newly uncovered line (advisory, per #587). Never delete or weaken a
+   failing product test to get green; removing a forbidden-behavior pin needs contract
+   authority.
+5. **No suites for test tools.** Mocks and simulators are proven by the lanes
+   using them; check one directly only when a gate verdict depends on it
+   unnoticed. Fakes keep real projection, capability, overwrite, filtering and
+   alias semantics (absent batch capability differs from raising), without
+   normalized return shapes or a universal fake framework ([shared doubles](#shared-doubles-share-builders-pin-behavior)).
+6. **Findings name the owning test to extend.**
 
-Before consolidating tests, map `old case → retained behavior and owner` or give
-a reason to retire an implementation-only pin. Never delete/weaken a failing
-product test to get green. A fake must preserve the real operation's projection,
-capability, overwrite, filtering and alias semantics; do not normalize every
-return shape or invent a universal fake framework. Examples: omitted
-`with_vectors` must not return vectors; absent batch capability is different from
-a method that raises; upsert replaces an existing same-ID point. Read-only
-contracts must assert no writes, rather than merely successful return values.
-
-Evidence records separate observed execution (SHA, command, exit, counts and
-location), static reasoning, proposed tests and unavailable checks. A skipped
-required check is not a pass. Historical green runs are not current release
-evidence. The PR table can group related tests; do not fabricate a run or require
-a permanent artifact for every small assertion. New context-tool tests use
-temporary trees/mocked subprocesses, not live Docker, GPU or a private corpus.
-
+Homes: completion/publication/representation/serving suites own those
+boundaries; API/chat/webui/stream suites own adapters; air-gap shell suites own
+configuration precedence and both render paths. Read-only contracts assert no
+writes. Context-tool tests use temporary trees and mocked subprocesses. Evidence
+follows [review and handoff](agent-workflow.md#review-handoff); historical
+green runs are not current evidence.
 
 <a id="helm-coverage"></a>
 ## Helm deployment coverage
