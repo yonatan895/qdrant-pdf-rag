@@ -11,58 +11,34 @@ def _hash_settings() -> Settings:
     return Settings(embed_mode="hash", _env_file=None)
 
 
-def test_dense_dim_and_norm():
+def test_hash_embedder_is_deterministic_normalized_and_offline():
+    text = "the widget torque buffer reached capacity WDG001I"
     vecs = hash_dense_embed(["IEA500I BEFORE IOS IOSCMDS COMMAND REJECTED", "torque the widget"])
     assert len(vecs) == 2
     for v in vecs:
         assert len(v) == HASH_EMBED_DIM
         assert abs(math.sqrt(sum(x * x for x in v)) - 1.0) < 1e-9
-
-
-def test_deterministic_across_calls():
-    text = "the widget torque buffer reached capacity WDG001I"
     assert hash_dense_embed([text]) == hash_dense_embed([text])
     assert hash_sparse_embed([text]) == hash_sparse_embed([text])
-
-
-def test_empty_text_is_zero_vector():
+    assert hash_dense_embed(["torque wrench calibration"]) != hash_dense_embed(["mainframe channel subsystem"])
     assert hash_dense_embed([""]) == [[0.0] * HASH_EMBED_DIM]
-
-
-def test_sparse_shape_and_determinism():
-    idx, vals = hash_sparse_embed(["torque the widget screws; torque specs"][0])[0]
-    assert idx == sorted(idx)
+    idx, vals = hash_sparse_embed(["torque the widget screws; torque specs"])[0]
+    assert idx == sorted(idx) and len(idx) == len(vals)
     assert all(0 <= i < (1 << 31) for i in idx)
     assert all(v > 0 for v in vals)
-    assert len(idx) == len(vals)
-
-
-def test_dispatch_uses_hash_without_network():
-    s = _hash_settings()
-    embedder = build_embedder(s)  # must not require EMBED_BASE_URL
+    # Dispatch needs no EMBED_BASE_URL (no network).
+    embedder = build_embedder(_hash_settings())
     assert isinstance(embedder, Embedder)
-    dense = embedder.dense(["IEA500I"])
-    assert len(dense[0]) == HASH_EMBED_DIM
-    assert embedder.sparse(["IEA500I"])[0][0] == sorted(embedder.sparse(["IEA500I"])[0][0])
+    assert len(embedder.dense(["IEA500I"])[0]) == HASH_EMBED_DIM
 
 
-def test_hash_mode_needs_no_dense_dim_env():
-    s = Settings(embed_mode="hash", dense_dim=None, _env_file=None)
-    assert s.require_dense_dim() == HASH_EMBED_DIM
-
-
-def test_hash_mode_rejects_vllm_endpoint_requirement():
-    s = Settings(embed_mode="hash", _env_file=None)
+def test_hash_mode_needs_no_dense_dim_and_rejects_vllm_requirement():
     import pytest
 
+    s = Settings(embed_mode="hash", dense_dim=None, _env_file=None)
+    assert s.require_dense_dim() == HASH_EMBED_DIM
     with pytest.raises(RuntimeError, match="vLLM-only"):
         s.require_embed()
-
-
-def test_different_texts_differ():
-    a = hash_dense_embed(["torque wrench calibration"])[0]
-    b = hash_dense_embed(["mainframe channel subsystem"])[0]
-    assert a != b
 
 
 def test_vllm_embedder_dense_query_prepends_prefix():
@@ -139,13 +115,10 @@ def _header_capturing_embedder(api_key):
     return VllmEmbedder(settings, client=FakeHttp()), seen
 
 
-def test_vllm_embedder_sends_bearer_when_key_set():
+def test_vllm_embedder_auth_header_present_only_when_key_set():
     embedder, seen = _header_capturing_embedder("sk-test-embed")
     embedder.dense(["hi"])
     assert seen["headers"] == {"Authorization": "Bearer sk-test-embed"}
-
-
-def test_vllm_embedder_omits_auth_when_key_unset():
     embedder, seen = _header_capturing_embedder(None)
     embedder.dense(["hi"])
     assert seen["headers"] == {}
@@ -184,7 +157,7 @@ def _counting_vllm_embedder(**overrides):
 def test_embed_bound_refuses_before_the_post_and_never_truncates():
     """Issue #374: an over-bound input is refused with counts only — the
     endpoint is never called for the batch (not even for its in-bound
-    members) and nothing is truncated."""
+    members) and nothing is truncated. The bound counts the query prefix."""
     import pytest
 
     from mainframe_rag.ingest.bounds import EmbedInputTooLarge
@@ -200,18 +173,12 @@ def test_embed_bound_refuses_before_the_post_and_never_truncates():
     embedder.dense(["z" * 50])
     assert posts == [["z" * 50]]
 
-
-def test_embed_bound_counts_the_query_prefix():
-    import pytest
-
-    from mainframe_rag.ingest.bounds import EmbedInputTooLarge
-
-    embedder, posts = _counting_vllm_embedder(embed_max_input_chars=10)
-    embedder.dense_query(["1234567"])  # "Q: " + 7 chars == 10
-    assert posts == [["Q: 1234567"]]
+    prefixed, qposts = _counting_vllm_embedder(embed_max_input_chars=10)
+    prefixed.dense_query(["1234567"])  # "Q: " + 7 chars == 10
+    assert qposts == [["Q: 1234567"]]
     with pytest.raises(EmbedInputTooLarge):
-        embedder.dense_query(["12345678"])
-    assert len(posts) == 1
+        prefixed.dense_query(["12345678"])
+    assert len(qposts) == 1
 
 
 def test_embed_bound_default_is_unbounded_legacy_behaviour():

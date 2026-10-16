@@ -571,10 +571,12 @@ def test_forced_repair_publishes_distinct_generation_on_real_server(
     """Issue #391 current packet, real clone/alias semantics: a forced
     same-contract rebuild (--reingest) publishes a suffixed repair
     generation, keeps the old physical and its manifest byte-identical, and
-    swaps the alias only after verification."""
+    swaps the alias only after verification; the next ordinary run is
+    steady state (no new collection)."""
     from qdrant_client import QdrantClient
 
     from mainframe_rag.config import Settings
+    from mainframe_rag.ingest import run_ingest
     from mainframe_rag.ingest.qdrant_io import resolve_live_collection
     from mainframe_rag.ingest.representation import STATE_COMMITTED, read_manifest_record
 
@@ -617,71 +619,22 @@ def test_forced_repair_publishes_distinct_generation_on_real_server(
         )
         new_record = read_manifest_record(client, f"{new}__completions")
         assert new_record is not None and new_record.state == STATE_COMMITTED
-    finally:
-        client.close()
-        _drop_publish_fixture(qdrant_url)
 
-
-def test_subsequent_run_after_repair_steady_state_on_real_server(
-    qdrant_url, corpus, tmp_path, monkeypatch
-):
-    """Issue #391 Q418-R1 against real Qdrant server: a successful repair cuts
-    over to a suffixed generation; subsequent ordinary ingest without --reingest
-    recognizes live as steady state, performs a read-only verification, and
-    allocates no new collections."""
-    import shutil
-
-    from qdrant_client import QdrantClient
-
-    from mainframe_rag.config import Settings
-    from mainframe_rag.ingest import run_ingest
-    from mainframe_rag.ingest.qdrant_io import resolve_live_collection
-
-    _drop_publish_fixture(qdrant_url)
-    monkeypatch.setenv("INGEST_ALIAS_PUBLISH", "true")
-    monkeypatch.setenv("EMBED_MODEL_REVISION", "")
-    local = tmp_path / "repair-steady-corpus"
-    local.mkdir()
-    for pdf in corpus.iterdir():
-        shutil.copy(pdf, local / pdf.name)
-    progress = tmp_path / "inv.jsonl"
-    first = _ingest(monkeypatch, qdrant_url, PUBLISH_ALIAS, local, progress)
-    assert [r["status"] for r in first] == ["upserted"] * 3
-
-    settings = Settings(
-        _env_file=None,
-        qdrant_url=qdrant_url,
-        qdrant_collection=PUBLISH_ALIAS,
-        embed_mode="hash",
-        allow_hash_mode=True,
-    )
-    client = QdrantClient(url=qdrant_url, timeout=10)
-    try:
-        old, _ = resolve_live_collection(client, settings)
-        assert old is not None
-
-        # Forced repair: cuts over to suffixed generation
-        _ingest(monkeypatch, qdrant_url, PUBLISH_ALIAS, local, progress, extra=("--reingest",))
-        repaired, _ = resolve_live_collection(client, settings)
-        assert repaired != old
-        assert repaired.endswith("_1")
+        # Next ordinary run WITHOUT --reingest: live is steady state, the
+        # run verifies read-only and allocates no new collection.
         cols_before = {c.name for c in client.get_collections().collections}
-
-        # Subsequent ordinary run WITHOUT --reingest
         previous = run_ingest._worker_qdrant
         if previous is not None:
             previous.close()
         monkeypatch.setattr(run_ingest, "_worker_qdrant", None)
         monkeypatch.setattr(run_ingest, "_worker_embedder", None)
-
         assert (
             run_ingest.main(["--src", str(local), "--progress", str(progress), "--workers", "1"])
             == 0
         )
         current, _ = resolve_live_collection(client, settings)
-        assert current == repaired
-        cols_after = {c.name for c in client.get_collections().collections}
-        assert cols_after == cols_before, (
+        assert current == new
+        assert {c.name for c in client.get_collections().collections} == cols_before, (
             "ordinary steady-state run must not create new collections"
         )
     finally:
@@ -944,6 +897,24 @@ def test_search_end_to_end_deterministic(qdrant_url, mock_url, corpus, tmp_path,
             "retrieval must be deterministic for a fixed corpus+query"
         )
 
+        # doc_id filter scopes to the second document.
+        second = client.post(
+            "/v1/search", json={"query": "SA22-7777-01 initialization parameters"}
+        ).json()
+        assert second["query_kind"] == "identifier"
+        assert second["hits"], "doc_id filter must match the second ingested document"
+        assert {h["doc_id"] for h in second["hits"]} == {"SA22-7777-01"}
+        assert all(
+            "SA22-7777-01 Synthetic Initialization and Tuning Reference" in h["cite"]
+            for h in second["hits"]
+        )
+
+        # A plain (no IBM signals) doc is retrievable under its stem doc_id.
+        plain = client.post("/v1/search", json={"query": "widget torque buffer"}).json()
+        assert plain["query_kind"] == "nl"
+        assert plain["hits"], "lexical overlap must rank the plain doc"
+        assert "widget-guide" in {h["doc_id"] for h in plain["hits"]}
+
         health = client.get("/healthz")
         assert health.status_code == 200
         assert health.json()["qdrant"] is True
@@ -1045,30 +1016,6 @@ def test_ops_cli_real_agent_round_trip_and_recovery(
             cancelled.communicate(timeout=5)
         _stop_agent(agent_process)
         agent_process.wait(timeout=5)
-
-
-def test_doc_id_filter_scopes_to_second_doc(qdrant_url, mock_url, corpus, tmp_path, monkeypatch):
-    _ingest(monkeypatch, qdrant_url, "sim-hash", corpus, tmp_path / "inv.jsonl")
-    with _agent(monkeypatch, qdrant_url, mock_url, "sim-hash") as client:
-        body = client.post(
-            "/v1/search", json={"query": "SA22-7777-01 initialization parameters"}
-        ).json()
-        assert body["query_kind"] == "identifier"
-        hits = body["hits"]
-        assert hits, "doc_id filter must match the second ingested document"
-        assert {h["doc_id"] for h in hits} == {"SA22-7777-01"}
-        assert all(
-            "SA22-7777-01 Synthetic Initialization and Tuning Reference" in h["cite"] for h in hits
-        )
-
-
-def test_plain_doc_retrievable_by_stem_doc_id(qdrant_url, mock_url, corpus, tmp_path, monkeypatch):
-    _ingest(monkeypatch, qdrant_url, "sim-hash", corpus, tmp_path / "inv.jsonl")
-    with _agent(monkeypatch, qdrant_url, mock_url, "sim-hash") as client:
-        body = client.post("/v1/search", json={"query": "widget torque buffer"}).json()
-        assert body["query_kind"] == "nl"
-        assert body["hits"], "lexical overlap must rank the plain doc"
-        assert "widget-guide" in {h["doc_id"] for h in body["hits"]}
 
 
 def test_eval_retrieval_on_synthetic_corpus(qdrant_url, mock_url, corpus, tmp_path, monkeypatch):

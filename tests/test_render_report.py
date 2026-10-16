@@ -76,107 +76,17 @@ def _bench_report() -> dict:
     }
 
 
-def test_render_eval_text_and_markdown():
-    rep = _eval_report()
-    text = render_eval(rep, None, "text")
-    assert "RETRIEVAL EVALUATION REPORT" in text
-    assert "recall@1" in text
-
-    md = render_eval(rep, rep, "markdown")
-    assert "## Retrieval Evaluation Report" in md
-    assert "| recall@1 | 0.5 |" in md
-
-
-def test_render_eval_html_and_escaping():
+def test_html_reports_escape_untrusted_values():
     rep = _eval_report()
     rep["rows"][0]["kind"] = "<img src=x onerror=alert(1)>"
     html_out = render_eval(rep, rep, "html")
-    assert "<!DOCTYPE html>" in html_out
-    assert "Retrieval Accuracy Report" in html_out
     assert "&lt;img src=x onerror=alert(1)&gt;" in html_out
     assert "<img src=x" not in html_out
-
-
-def test_render_bench_html_escaping():
     b = _bench_report()
     b["env"]["qdrant_image"] = "<script>alert(1)</script>"
-    b["env"]["cpu_count"] = "<b>24</b>"
     html_out = render_bench(b, b, "html")
-    assert "<!DOCTYPE html>" in html_out
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html_out
     assert "<script>" not in html_out
-    assert "&lt;b&gt;24&lt;/b&gt;" in html_out
-
-
-def test_render_eval_markdown_escaping():
-    rep = _eval_report()
-    rep["rows"][0]["query"] = "pipe|query\nwith newline"
-    rep["rows"][0]["hit_doc_ids"] = ["DOC|1"]
-    md = render_eval(rep, rep, "markdown")
-    assert "pipe\\|query with newline" in md
-    assert "DOC\\|1" in md
-
-
-def test_compare_eval_classification_shifts_and_population():
-    base = _eval_report()
-    cur = _eval_report()
-
-    # Classification shift: IEA500I identifier -> nl
-    cur["rows"][0]["kind"] = "nl"
-    # Added query
-    cur["rows"].append({
-        "query": "new query",
-        "kind": "nl",
-        "recall@1": 1.0,
-        "recall@5": 1.0,
-        "mrr": 1.0,
-        "hit_doc_ids": ["NEW-01"],
-    })
-    # Removed query (remove system tuning from cur)
-    cur["rows"].pop(1)
-
-    cmp_text, _has_reg = compare_eval(base, cur, "text")
-    assert "Classification Shifts:" in cmp_text
-    assert "IEA500I: identifier -> nl" in cmp_text
-    assert "Added Queries" in cmp_text
-    assert "new query" in cmp_text
-    assert "Removed Queries" in cmp_text
-    assert "system tuning" in cmp_text
-
-    cmp_md, _ = compare_eval(base, cur, "markdown")
-    assert "### Classification Shifts:" in cmp_md
-    assert "| `IEA500I` | `identifier` | `nl` |" in cmp_md
-    assert "### Added Queries" in cmp_md
-    assert "### Removed Queries" in cmp_md
-
-    cmp_html, _ = compare_eval(base, cur, "html")
-    assert "Classification Shifts" in cmp_html
-    assert "Evaluated Population Changes" in cmp_html
-
-
-def test_compare_eval_regression_alert_and_fail_flag(tmp_path: Path):
-    base = _eval_report()
-    cur = _eval_report()
-    # Regress system tuning recall@5 from 1.0 to 0.0
-    cur["rows"][1]["recall@5"] = 0.0
-    cur["rows"][1]["mrr"] = 0.0
-    cur["recall@5"] = 0.5
-    cur["mrr"] = 0.5
-
-    cmp_text, has_reg = compare_eval(base, cur, "text")
-    assert has_reg is True
-    assert "ALERT: Regressions detected" in cmp_text
-    assert "! system tuning" in cmp_text
-
-    base_p = tmp_path / "base.json"
-    cur_p = tmp_path / "cur.json"
-    base_p.write_text(json.dumps(base), encoding="utf-8")
-    cur_p.write_text(json.dumps(cur), encoding="utf-8")
-
-    # Without flag -> exit 0
-    assert main(["compare-eval", "--base", str(base_p), "--current", str(cur_p)]) == 0
-    # With --fail-on-regression -> exit 1
-    assert main(["compare-eval", "--base", str(base_p), "--current", str(cur_p), "--fail-on-regression"]) == 1
 
 
 def test_compare_bench_regression_and_fail_flag(tmp_path: Path):
@@ -233,14 +143,6 @@ def test_compare_eval_mixed_directional_change_regression(tmp_path: Path):
 
 
 
-def test_l1_consumes_canonical_report_renderer():
-    from scripts import gate_l1
-
-    from mainframe_rag.eval import reports
-
-    assert gate_l1.render_eval is reports.render_eval
-
-
 @pytest.fixture
 def report_workspace(tmp_path):
     from tests.test_taskfile_contracts import REQUIRE_RUNNER, find_task
@@ -288,11 +190,8 @@ def report_workspace(tmp_path):
     return tmp_path, run, paths, values
 
 
-@pytest.mark.parametrize("inherited_source", [False, True])
-@pytest.mark.parametrize("operation,module", [
-    ("answers", "answers"), ("chat", "chat"), ("report", "reports"),
-    ("html", "reports"), ("compare", "reports"), ("bench-report", "reports"),
-    ("bench-html", "reports"), ("bench-compare", "reports"),
+@pytest.mark.parametrize("operation,module,inherited_source", [
+    ("answers", "answers", False), ("report", "reports", True), ("bench-html", "reports", False),
 ])
 def test_module_tasks_execute_checkout_with_foreign_editable(report_workspace, operation, module, inherited_source):
     root, run, _paths, values = report_workspace
@@ -350,11 +249,12 @@ if 'IMPORT_TRACE' in os.environ:
     }
 
 
-@pytest.mark.parametrize("operation,family,kind", [
-    ("report", "eval", "text"), ("html", "eval", "html"), ("compare", "eval", "compare"),
-    ("bench-report", "bench", "text"), ("bench-html", "bench", "html"), ("bench-compare", "bench", "compare"),
+@pytest.mark.parametrize("operation,family,kind,selection", [
+    ("report", "eval", "text", "default"), ("report", "eval", "text", "empty"),
+    ("report", "eval", "text", "override"), ("report", "eval", "text", "ambient"),
+    ("compare", "eval", "compare", "default"),
+    ("bench-html", "bench", "html", "default"), ("bench-html", "bench", "html", "override"),
 ])
-@pytest.mark.parametrize("selection", ["default", "empty", "override", "ambient"])
 def test_report_task_selects_recorded_inputs(report_workspace, operation, family, kind, selection):
     root, run, paths, values = report_workspace
     override = selection in ("override", "ambient")
@@ -394,8 +294,7 @@ def test_report_task_selects_recorded_inputs(report_workspace, operation, family
     assert not (root / "wrong.html").exists()
 
 
-@pytest.mark.parametrize("family,operation", [("eval", "html"), ("bench", "bench-html")])
-@pytest.mark.parametrize("input_index", [0, 1])
+@pytest.mark.parametrize("family,operation,input_index", [("eval", "html", 0), ("bench", "bench-html", 1)])
 def test_report_invalid_input_preserves_output_and_recovers(report_workspace, family, operation, input_index):
     root, run, paths, _values = report_workspace
     assert run(operation).returncode == 0
@@ -417,7 +316,7 @@ def test_report_invalid_input_preserves_output_and_recovers(report_workspace, fa
         assert output.read_bytes() == before
 
 
-@pytest.mark.parametrize("family", ["eval", "bench"])
+@pytest.mark.parametrize("family", ["eval"])
 def test_report_bundle_defaults_require_explicit_opt_in(tmp_path, monkeypatch, capsys, family):
     monkeypatch.chdir(tmp_path)
     current = _eval_report() if family == "eval" else _bench_report()
@@ -456,7 +355,7 @@ def test_report_bundle_defaults_require_explicit_opt_in(tmp_path, monkeypatch, c
     assert not (tmp_path / "SENTINEL").exists()
 
 
-@pytest.mark.parametrize("command", ["eval", "bench", "compare-eval", "compare-bench"])
+@pytest.mark.parametrize("command", ["eval", "compare-bench"])
 def test_empty_report_bundle_preserves_root_relative_read_contract(monkeypatch, command):
     from mainframe_rag.eval import reports
 

@@ -13,13 +13,10 @@ from pathlib import Path
 import pytest
 
 from mainframe_rag.eval.quality import (
-    GATED_METRICS,
     ThresholdError,
     build_review_queue,
-    classify,
     gate_l4,
     load_thresholds,
-    mean_metric,
     record_blockers,
     save_thresholds,
     summarize_l4,
@@ -72,18 +69,6 @@ def _thresholds(tolerance=0.05, metrics=None, meta=None):
 
 
 # ---------------------------------------------------------------- classify
-def test_classify_min_directions():
-    assert classify(0.80, 0.80, 0.05, "min") == "pass"
-    assert classify(0.78, 0.80, 0.05, "min") == "borderline"
-    assert classify(0.70, 0.80, 0.05, "min") == "fail"
-
-
-def test_classify_max_directions():
-    assert classify(0.10, 0.10, 0.05, "max") == "pass"
-    assert classify(0.13, 0.10, 0.05, "max") == "borderline"
-    assert classify(0.20, 0.10, 0.05, "max") == "fail"
-
-
 # ---------------------------------------------------------------- summarize
 def test_summarize_means_rates_and_sums_faults():
     runs = [
@@ -107,11 +92,6 @@ def test_summarize_means_rates_and_sums_faults():
     # in GATED_METRICS, so recording a reference cannot adopt it silently).
     assert summary["by_verification_state"] == {"accepted": 22, "unverified_draft": 2}
     assert summary["state_mismatches"] == 1
-
-
-def test_mean_metric_none_when_a_repeat_missing():
-    runs = [_run(), {"rows": [], "metrics": {"queries": 24}}]
-    assert mean_metric(runs, "grounded_rate") is None
 
 
 # ---------------------------------------------------------------- gate
@@ -162,44 +142,21 @@ def test_gate_max_metric_regression_fails():
 
 
 # ---------------------------------------------------------------- reference file
-def test_load_thresholds_roundtrip(tmp_path: Path):
-    path = tmp_path / "ref.json"
-    path.write_text(json.dumps(_thresholds()))
-    doc = load_thresholds(path)
-    assert doc["_meta"]["tolerance"] == 0.05
-    assert set(doc["metrics"]) == {name for name, _ in GATED_METRICS}
-
-
 def test_load_thresholds_missing_fails_closed(tmp_path: Path):
     with pytest.raises(ThresholdError):
         load_thresholds(tmp_path / "nope.json")
 
 
-def test_load_thresholds_metric_mismatch_fails_closed(tmp_path: Path):
-    ref = _thresholds()
-    del ref["metrics"]["truncation_rate"]
-    path = tmp_path / "ref.json"
-    path.write_text(json.dumps(ref))
-    with pytest.raises(ThresholdError):
-        load_thresholds(path)
-
-
-def test_load_thresholds_bad_tolerance_fails_closed(tmp_path: Path):
-    ref = _thresholds()
-    ref["_meta"]["tolerance"] = 2.0
-    path = tmp_path / "ref.json"
-    path.write_text(json.dumps(ref))
-    with pytest.raises(ThresholdError):
-        load_thresholds(path)
-
-
-def test_load_thresholds_missing_tier_meta_fails_closed(tmp_path: Path):
-    ref = _thresholds()
-    del ref["_meta"]["llm_model_reasoning"]
-    path = tmp_path / "ref.json"
-    path.write_text(json.dumps(ref))
-    with pytest.raises(ThresholdError):
-        load_thresholds(path)
+def test_load_thresholds_malformed_reference_fails_closed(tmp_path: Path):
+    missing_metric = _thresholds()
+    del missing_metric["metrics"]["truncation_rate"]
+    missing_tier = _thresholds()
+    del missing_tier["_meta"]["llm_model_reasoning"]
+    for ref in (missing_metric, missing_tier, _thresholds(tolerance=2.0)):
+        path = tmp_path / "ref.json"
+        path.write_text(json.dumps(ref))
+        with pytest.raises(ThresholdError):
+            load_thresholds(path)
 
 
 def test_save_thresholds_records_mode_and_rounds(tmp_path: Path):
@@ -274,18 +231,6 @@ def test_review_queue_selects_weak_rows_only():
     assert queue[3]["failures"] == ["run 1: syntax pattern missed"]
 
 
-def test_review_queue_aggregates_repeats():
-    rows_a = [_row("A", judge_label="neutral"), _row("B")]
-    rows_b = [_row("A"), _row("B")]
-    queue = build_review_queue([
-        {"rows": rows_a, "metrics": {}},
-        {"rows": rows_b, "metrics": {}},
-    ])
-    assert [r["id"] for r in queue] == ["A"]
-    assert queue[0]["faithfulness"] == ["neutral", "entailed"]
-    assert queue[0]["verdicts"] == ["pass", "pass"]
-
-
 # ---------------------------------------------------------------- entry point
 def test_main_exit_2_when_reference_missing(tmp_path: Path, monkeypatch, capfd):
     from scripts.harness_l4 import main as l4_main
@@ -301,16 +246,6 @@ def test_main_exit_2_when_reference_missing(tmp_path: Path, monkeypatch, capfd):
     rc = l4_main(["--thresholds", str(tmp_path / "nope.json")])
     assert rc == 2
     assert "no L4 reference" in capfd.readouterr().err
-
-
-def test_l4_consumes_canonical_quality_policy():
-    from scripts import harness_l4
-
-    from mainframe_rag.eval import quality
-
-    for name in ("ThresholdError", "summarize_l4", "gate_l4", "load_thresholds", "save_thresholds",
-                 "build_review_queue", "record_blockers", "write_summary"):
-        assert getattr(harness_l4, name) is getattr(quality, name)
 
 
 def test_l4_repeats_preserve_sample_and_judge_legs(monkeypatch):

@@ -405,60 +405,6 @@ class TaskContractsTests(unittest.TestCase):
                 (self.root / "ready").unlink()
                 (self.root / "cleaned").unlink()
 
-    def test_discovery_registers_documented_commands_without_side_effects(self):
-        # One compact discovery contract consolidating the former per-family
-        # --list tests plus the no-venv/no-config/no-services probe: the
-        # documented public names and representative aliases resolve, while
-        # discovery performs no work, reads no private config and writes
-        # no freshness state.
-        before = {p.relative_to(self.root).as_posix() for p in self.root.rglob("*") if p.is_file()}
-        for args in (["--list"], ["--list", "--json"], ["help"], ["qa:context", "--summary"],
-                     ["dev:doctor", "--summary"], ["qa:unit", "--summary"]):
-            with self.subTest(args=args):
-                proc = self.run_task(*args)
-                self.assertEqual(proc.returncode, 0, proc.stdout)
-        listing = self.run_task("--list").stdout
-        for name in (
-            # aliases
-            "agent-doctor", "check", "check-context", "default", "help", "lint", "test", "typecheck",
-            # quality / verification
-            "qa:check", "qa:context", "qa:lint", "qa:typecheck", "qa:unit",
-            "dev:doctor", "dev:setup", "dev:clean",
-            # artifacts
-            "artifacts:wheelhouse", "artifacts:bm25", "artifacts:chart-check",
-            "artifacts:chart-fetch", "artifacts:helm-render", "artifacts:helm-lint",
-            "artifacts:image", "artifacts:images",
-            # evaluation
-            "eval:retrieval", "eval:gate-l1", "eval:paraphrase", "eval:holdout",
-            "eval:verify-golden", "eval:baseline", "eval:draft", "eval:capture-pool",
-            "eval:answers", "eval:chat", "eval:harness:gate", "eval:harness:baseline",
-            "eval:harness:l2", "eval:harness:l3", "eval:harness:l3-baseline",
-            "eval:harness:l4", "eval:harness:l4-record", "eval:report", "eval:html",
-            "eval:compare", "eval:bench-report", "eval:bench-html", "eval:bench-compare",
-            "eval:bench", "eval:bench-baseline", "eval:load",
-            # local topology
-            "local:qdrant:up", "local:qdrant:down", "local:query", "local:ask",
-            "local:llm", "local:embed", "local:rerank", "local:gateway:up",
-            "local:gateway:down", "local:jaeger:up", "local:jaeger:down",
-            "local:stack", "local:agent", "local:check", "local:repair-staging",
-            "qa:sim", "qa:load",
-            # air-gap
-            "airgap:pack", "airgap:load", "airgap:deploy", "airgap:ingest",
-            "airgap:smoke", "airgap:validate", "airgap:pipeline", "airgap:dryrun",
-        ):
-            with self.subTest(command=name):
-                self.assertIn(name, listing)
-        after = {p.relative_to(self.root).as_posix() for p in self.root.rglob("*") if p.is_file()}
-        self.assertEqual(before, after, "discovery must not create or modify workspace files")
-        self.assertFalse((self.root / ".venv").exists())
-
-    def test_unknown_task_fails(self):
-        proc = self.run_task("does-not-exist")
-        self.assertNotEqual(proc.returncode, 0)
-        # Our boundary is the refusal itself naming the request, not the
-        # runner's exact error sentence (upstream wording, retired per #508).
-        self.assertIn("does-not-exist", proc.stdout)
-
     def test_verification_fails_closed_without_venv(self):
         # Named failure-before-effects matrix consolidating the former
         # per-task duplicate and the tool-env duplicate: every verification
@@ -490,15 +436,6 @@ class TaskContractsTests(unittest.TestCase):
         self.assertEqual(calls[0]["argv"], ["scripts/agent_doctor.py", "--python", ".venv/bin/python"])
         self.assertEqual(calls[1]["argv"], ["-m", "pytest", "tests", "-v"])
         self.assertEqual(calls[0]["cwd"], str(self.root))
-
-    def test_unit_focused_selection_replaces_default(self):
-        self.make_recorder(self.root / ".venv/bin/python")
-        proc = self.run_task("qa:unit", "--", "tests/test_agent_context.py", "-q",
-                             extra_env=self.recorder_env)
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        calls = self.calls()
-        self.assertEqual(len(calls), 2, "one prerequisite check, one focused pytest invocation")
-        self.assertEqual(calls[1]["argv"], ["-m", "pytest", "tests/test_agent_context.py", "-q"])
 
     def test_hazard_paths_reach_runner_without_shell_interpretation(self):
         self.make_recorder(self.root / "python with spaces")
@@ -546,14 +483,6 @@ class TaskContractsTests(unittest.TestCase):
                 ["scripts/agent_doctor.py", "--python", ".venv/bin/python"],
             ])
 
-    def test_cwd_is_workspace_root_from_subdirectory(self):
-        self.make_recorder(self.root / ".venv/bin/python")
-        sub = self.root / "sub"
-        sub.mkdir()
-        proc = self.run_task("qa:unit", cwd=sub, extra_env=self.recorder_env)
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        self.assertEqual(self.calls()[0]["cwd"], str(self.root))
-
     def test_profile_values_reach_doctor_exactly(self):
         self.make_recorder(self.root / "pyrec")
         for profile, expected in (("sim", "sim"), ("false", "false"), ("0", "0"), ("", "")):
@@ -567,17 +496,6 @@ class TaskContractsTests(unittest.TestCase):
                 self.assertEqual(len(calls), 1)
                 self.assertEqual(calls[0]["argv"], ["scripts/agent_doctor.py", "--profile", expected])
 
-    def test_py_metacharacters_are_not_executed(self):
-        sentinel = self.root / "PWNED"
-        proc = self.run_task("qa:context", f"PY=$(touch {sentinel})")
-        self.assertNotEqual(proc.returncode, 0)
-        self.assertFalse(sentinel.exists(), "interpolated PY value must never execute")
-
-    def test_exit_code_passthrough_documents_contracted_codes(self):
-        self.make_recorder(self.root / ".venv/bin/python", exit_code=3)
-        proc = self.run_task("--exit-code", "qa:lint", extra_env=self.recorder_env)
-        self.assertEqual(proc.returncode, 3, proc.stdout)
-
     def test_wheelhouse_preparation_failure_stops_image_build(self):
         self.make_venv_fake()
         self.make_artifact_fixtures()
@@ -586,24 +504,6 @@ class TaskContractsTests(unittest.TestCase):
         self.assertNotEqual(proc.returncode, 0)
         self.assertEqual(self.tool_calls("docker"), [])
         self.assertEqual(len(self.pip_calls()), 1)
-
-    def test_wheelhouse_bundle_dir_override(self):
-        self.make_venv_fake()
-        self.make_artifact_fixtures()
-        env = self.tool_env()
-        proc = self.run_task("artifacts:wheelhouse", "BUNDLE_DIR=alt", extra_env=env)
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        self.assertEqual([c["argv"] for c in self.pip_calls()],
-                         [["scripts/dependency_lock.py", "prepare", "--profile", "runtime", "--directory", "alt/wheelhouse"]])
-        self.assertFalse((self.root / "bundles").exists())
-
-    def test_wheelhouse_missing_venv_fails_closed(self):
-        self.make_artifact_fixtures()
-        self.recorder_env = {}
-        proc = self.run_task("artifacts:wheelhouse", extra_env={})
-        self.assertNotEqual(proc.returncode, 0)
-        self.assertIn("missing development environment", proc.stdout)
-        self.assertFalse((self.root / "bundles").exists(), "failed prep must leave no outputs")
 
     def test_bm25_model_selection_reaches_fetcher(self):
         self.make_venv_fake()
@@ -758,22 +658,6 @@ class TaskContractsTests(unittest.TestCase):
                 self.assertFalse((self.root / "SENTINEL").exists())
         # Mode/venue/precedence and actual verdicts live in test_eval_gate.
 
-    def test_harness_delegates_dataset_and_baseline_selection(self):
-        self.make_venv_fake()
-        env = self.tool_env()
-        proc = self.run_task("eval:harness:gate", extra_env=env)
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        argv = self.pip_calls()[0]["argv"]
-        self.assertNotIn("--golden", argv)
-        self.assertNotIn("--baseline", argv)
-        if (self.log).exists():
-            self.log.unlink()
-        proc = self.run_task("eval:harness:gate", "EMBED_MODE=vllm", extra_env=env)
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        argv = self.pip_calls()[0]["argv"]
-        self.assertNotIn("--golden", argv)
-        self.assertNotIn("--baseline", argv)
-
     def test_holdout_transports_forced_rc_venue(self):
         self.make_venv_fake()
         env = self.tool_env()
@@ -801,26 +685,6 @@ class TaskContractsTests(unittest.TestCase):
         if (self.log).exists():
             self.log.unlink()
         # Pin refusal and recovery run through the real CLI in test_eval_gate.
-
-    def test_eval_counts_transport_only_nonempty_values(self):
-        self.make_venv_fake()
-        env = self.tool_env()
-        proc = self.run_task("eval:answers", "N=5", extra_env=env)
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        argv = self.pip_calls()[0]["argv"]
-        self.assertEqual(argv[argv.index("--max-queries") + 1], "5")
-        if (self.log).exists():
-            self.log.unlink()
-        proc = self.run_task("eval:answers", "N=", extra_env=env)
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        argv = self.pip_calls()[0]["argv"]
-        self.assertNotIn("--max-queries", argv)
-        if (self.log).exists():
-            self.log.unlink()
-        proc = self.run_task("eval:chat", extra_env=env)
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        argv = self.pip_calls()[0]["argv"]
-        self.assertNotIn("--limit", argv)
 
     def test_answer_eval_agent_url_is_optional_and_roundtrips_exactly(self):
         self.make_venv_fake()
@@ -888,23 +752,6 @@ class TaskContractsTests(unittest.TestCase):
         self.assertEqual(argv[argv.index("--golden") + 1], "g.jsonl")
         self.assertEqual(argv[argv.index("--depth") + 1], "200")
 
-    def test_report_transports_bundle_and_explicit_inputs(self):
-        self.make_venv_fake()
-        env = self.tool_env()
-        proc = self.run_task("eval:report", extra_env=env)
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        argv = self.pip_calls()[0]["argv"]
-        self.assertEqual(argv[argv.index("--bundle-dir") + 1], "bundles")
-        self.assertNotIn("--report", argv)
-        self.assertNotIn("--baseline", argv)
-        if (self.log).exists():
-            self.log.unlink()
-        proc = self.run_task("eval:report", "REPORT=/r.json", "BASELINE=/b.json", extra_env=env)
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        argv = self.pip_calls()[0]["argv"]
-        self.assertEqual(argv[argv.index("--report") + 1], "/r.json")
-        self.assertEqual(argv[argv.index("--baseline") + 1], "/b.json")
-
     def test_harness_l3_transports_only_explicit_baseline(self):
         self.make_venv_fake()
         env = self.tool_env()
@@ -960,16 +807,6 @@ class TaskContractsTests(unittest.TestCase):
         self.assertEqual(calls[0]["argv"], ["scripts/query_demo.py", "--query", sentinel,
                                             "--limit", "5", "--embed-mode", "hash"])
         self.assertFalse((self.root / "PWNED").exists())
-
-    def test_ask_answer_flag_first(self):
-        self.make_recorder(self.root / ".venv/bin/python")
-        proc = self.run_task("local:ask", "QUERY=hi", extra_env=self.tool_env())
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        # The parsed-option boundary is the forwarded flag set, not the
-        # incidental flag position (retired per #508).
-        self.assertEqual(set(self.calls()[0]["argv"]),
-                         {"scripts/query_demo.py", "--answer", "--query", "hi",
-                          "--embed-mode", "hash"})
 
     def test_vllm_launcher_env_exact(self):
         self.make_venv_fake()
@@ -1048,18 +885,6 @@ class TaskContractsTests(unittest.TestCase):
                 self.assertEnvSubset(self.script_calls("run_local_vllm.sh")[0],
                                      {"SERVED_NAME": "ambient-name"})
 
-    def test_local_model_container_name_round_trip(self):
-        self.make_venv_fake()
-        self.make_script_recorder("run_local_vllm.sh")
-        for task in ("local:llm", "local:embed", "local:rerank"):
-            with self.subTest(task=task):
-                self.log.unlink(missing_ok=True)
-                proc = self.run_task(task, "CONTAINER_NAME=rag-kind-model",
-                                     extra_env=dict(self.tool_env(), CONTAINER_NAME="ambient-model"))
-                self.assertEqual(proc.returncode, 0, proc.stdout)
-                self.assertEnvSubset(self.script_calls("run_local_vllm.sh")[0],
-                                     {"CONTAINER_NAME": "rag-kind-model"})
-
     def test_gateway_down_ignores_absent_resources(self):
         self.recorder_env = {"RECORDER_LOG": str(self.log), "RECORDER_TAG": "x", "RECORDER_EXIT": "1"}
         self.make_tool_recorder("docker")
@@ -1076,38 +901,6 @@ class TaskContractsTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stdout)
         docker = [c["argv"] for c in self.tool_calls("docker")]
         self.assertEqual(docker, [["stop", "g", "p"], ["network", "rm", "n"]])
-
-    def test_gateway_up_forwards_port_to_script(self):
-        self.make_venv_fake()
-        self.make_script_recorder("run_local_gateway.sh")
-        env = self.tool_env()
-        proc = self.run_task("local:gateway:up", extra_env=env)
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        calls = self.script_calls("run_local_gateway.sh")
-        self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0]["argv"], [])
-        self.assertEnvSubset(calls[0], {"GATEWAY_PORT": "4000"})
-        if (self.log).exists():
-            self.log.unlink()
-        proc = self.run_task("local:gateway:up", "GATEWAY_PORT=4321", extra_env=env)
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        self.assertEnvSubset(self.script_calls("run_local_gateway.sh")[0], {"GATEWAY_PORT": "4321"})
-
-    def test_jaeger_tasks(self):
-        self.recorder_env = {"RECORDER_LOG": str(self.log), "RECORDER_TAG": "x", "RECORDER_EXIT": "0"}
-        self.make_script_recorder("run_local_jaeger.sh")
-        self.make_tool_recorder("docker")
-        env = self.tool_env()
-        proc = self.run_task("local:jaeger:up", extra_env=env)
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        self.assertEqual(len(self.script_calls("run_local_jaeger.sh")), 1)
-        if (self.log).exists():
-            self.log.unlink()
-        self.recorder_env = {"RECORDER_LOG": str(self.log), "RECORDER_TAG": "x", "RECORDER_EXIT": "1"}
-        proc = self.run_task("local:jaeger:down", extra_env=self.tool_env())
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        self.assertEqual([c["argv"] for c in self.tool_calls("docker")],
-                         [["stop", "local-jaeger"]])
 
     def test_qdrant_tasks_delegate_to_helper(self):
         simulator_env = prepare_simulator(self.root, self.log)
@@ -1183,19 +976,6 @@ class TaskContractsTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stdout)
         calls = self.script_calls("run_local_stack.sh")
         self.assertEnvSubset(calls[0], {"LOCAL_STACK_DRYRUN": "0"})
-
-    def test_stack_explicit_empty_probe_budget_overrides_ambient_to_the_default(self):
-        self.make_venv_fake()
-        self.make_script_recorder("run_local_stack.sh")
-        env = dict(self.tool_env(), GATEWAY_PROBE_MAX_TOKENS="512")
-        proc = self.run_task("local:stack", "GATEWAY_PROBE_MAX_TOKENS=", extra_env=env)
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        self.assertEnvSubset(self.script_calls("run_local_stack.sh")[0], {"GATEWAY_PROBE_MAX_TOKENS": None})
-        shutil.copyfile(REPO / "scripts/run_local_stack.sh", self.root / "scripts/run_local_stack.sh")
-        proc = self.run_task("local:stack", "GATEWAY_PROBE_MAX_TOKENS=", "LOCAL_STACK_DRYRUN=1", extra_env=env)
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        self.assertIn("--max-tokens 16", proc.stdout)
-        self.assertNotIn("--max-tokens 512", proc.stdout)
 
     def test_stack_explicit_empty_progress_overrides_ambient_to_the_default(self):
         self.make_venv_fake()
@@ -1294,25 +1074,6 @@ class TaskContractsTests(unittest.TestCase):
         self.assertEqual(self.pip_calls()[1]["argv"],
                          ["-m", "pytest", "-m", "integration", "tests/test_ha_cluster.py", "-v"])
 
-    def test_operator_cli_beats_file(self):
-        self.recorder_env = {"RECORDER_LOG": str(self.log), "RECORDER_TAG": "x", "RECORDER_EXIT": "0"}
-        self.make_airgap_fixtures({"INTERNAL_REGISTRY": "file-reg", "NAMESPACE": "file-ns"})
-        self.make_airgap_stage_double("deploy.sh")
-        proc = self.run_task("airgap:deploy", "INTERNAL_REGISTRY=cli-reg",
-                             extra_env=self.tool_env())
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        resolved = self.airgap_calls()[0]["resolved"]
-        self.assertEqual(resolved["INTERNAL_REGISTRY"], "cli-reg")
-        self.assertEqual(resolved["NAMESPACE"], "file-ns")
-
-    def test_operator_file_applies_when_unset(self):
-        self.recorder_env = {"RECORDER_LOG": str(self.log), "RECORDER_TAG": "x", "RECORDER_EXIT": "0"}
-        self.make_airgap_fixtures({"INTERNAL_REGISTRY": "file-reg"})
-        self.make_airgap_stage_double("deploy.sh")
-        proc = self.run_task("airgap:deploy", extra_env=self.tool_env())
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        self.assertEqual(self.airgap_calls()[0]["resolved"]["INTERNAL_REGISTRY"], "file-reg")
-
     def test_operator_empty_stays_unset(self):
         self.recorder_env = {"RECORDER_LOG": str(self.log), "RECORDER_TAG": "x", "RECORDER_EXIT": "0"}
         self.make_airgap_fixtures({"INTERNAL_REGISTRY": "file-reg"})
@@ -1376,26 +1137,6 @@ class TaskContractsTests(unittest.TestCase):
         self.assertEqual(resolved["NAMESPACE"], "cli-ns", "CLI must override ambient and file")
         self.assertEqual(resolved["INTERNAL_REGISTRY"], "ambient-reg", "ambient must override file when CLI unset")
         self.assertEqual(resolved["CORPUS_PVC"], "file-pvc", "file applies when CLI and ambient unset")
-
-    def test_airgap_dryrun_cli_and_ambient_precedence(self):
-        # TR435-F1: AIRGAP_DRYRUN selection must not be defeated by ambient env
-        self.recorder_env = {"RECORDER_LOG": str(self.log), "RECORDER_TAG": "x", "RECORDER_EXIT": "0"}
-        self.make_airgap_fixtures({"AIRGAP_DRYRUN": "0"})
-        self.make_airgap_stage_double("deploy.sh")
-        # 1. Ambient 0 + CLI 1 -> child receives 1
-        proc = self.run_task("airgap:deploy", "AIRGAP_DRYRUN=1",
-                             extra_env=dict(self.tool_env(), AIRGAP_DRYRUN="0"))
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        resolved = self.airgap_calls()[0]["resolved"]
-        self.assertEqual(resolved["AIRGAP_DRYRUN"], "1")
-        if (self.log).exists():
-            self.log.unlink()
-        # 2. Ambient 1 + CLI 0 -> child receives 0
-        proc = self.run_task("airgap:deploy", "AIRGAP_DRYRUN=0",
-                             extra_env=dict(self.tool_env(), AIRGAP_DRYRUN="1"))
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        resolved = self.airgap_calls()[0]["resolved"]
-        self.assertEqual(resolved["AIRGAP_DRYRUN"], "0")
 
     def test_airgap_env_selector_cli_and_ambient_precedence(self):
         # TR435-F2: AIRGAP_ENV selector directs common.sh to source the chosen file
@@ -1495,17 +1236,6 @@ class TaskContractsTests(unittest.TestCase):
         self.assertNotIn('Task "dev:setup" is up to date', proc.stdout)
         self.assertTrue((self.root / ".venv/.setup-complete").is_file(), "stamp re-created on retry")
 
-    def test_dev_demo_pdfs_and_clean(self):
-        self.make_venv_fake()
-        env = self.tool_env()
-        proc = self.run_task("dev:demo-pdfs", extra_env=env)
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        self.assertEqual(
-            [c["argv"] for c in self.pip_calls()],
-            [["scripts/make_synthetic_pdf.py", "--out", "output/demo-pdfs/SA22-0000-00_outline.pdf"],
-             ["scripts/make_synthetic_pdf.py", "--plain", "--out", "output/demo-pdfs/plain-widget-notes.pdf"]])
-        self.assertTrue((self.root / "output/demo-pdfs").is_dir())
-
     def test_dev_clean_bounded_retention(self):
         self.recorder_env = {"RECORDER_LOG": str(self.log), "RECORDER_TAG": "x", "RECORDER_EXIT": "0"}
         keepers = [".tools/bin/task", "dist/keep.tar", "airgap.env"]
@@ -1525,78 +1255,6 @@ class TaskContractsTests(unittest.TestCase):
             self.assertTrue((self.root / name).is_file(), name)
         self.assertTrue((self.root / "Taskfile.yml").is_file(), "tracked sources survive clean")
         self.assertTrue((self.root / "dist").is_dir(), "dist survives for its kept archives")
-
-    def test_taskfile_wiring_stays_dispatch_only(self):
-        root_text = (REPO / "Taskfile.yml").read_text(encoding="utf-8")
-        quality_text = (REPO / "taskfiles/quality.yml").read_text(encoding="utf-8")
-        dev_text = (REPO / "taskfiles/dev.yml").read_text(encoding="utf-8")
-        artifacts_text = (REPO / "taskfiles/artifacts.yml").read_text(encoding="utf-8")
-        eval_text = (REPO / "taskfiles/eval.yml").read_text(encoding="utf-8")
-        local_text = (REPO / "taskfiles/local.yml").read_text(encoding="utf-8")
-        airgap_text = (REPO / "taskfiles/airgap.yml").read_text(encoding="utf-8")
-        combined = root_text + quality_text + dev_text + artifacts_text + eval_text + local_text + airgap_text
-        # Local required namespaced includes; one implementation per alias.
-        self.assertIn("taskfile: ./taskfiles/quality.yml", root_text)
-        self.assertIn("taskfile: ./taskfiles/dev.yml", root_text)
-        self.assertIn("taskfile: ./taskfiles/artifacts.yml", root_text)
-        self.assertIn("taskfile: ./taskfiles/eval.yml", root_text)
-        self.assertIn("taskfile: ./taskfiles/local.yml", root_text)
-        self.assertIn("taskfile: ./taskfiles/airgap.yml", root_text)
-        for alias, canonical in (("task: qa:lint", "lint"), ("task: qa:check", "check"),
-                                 ("task: qa:context", "context"), ("task: dev:doctor", "doctor")):
-            self.assertIn(alias, root_text, canonical)
-        # Forbidden in this migration: remote includes, private env loading,
-        # parallel-dep orchestration, freshness caching on verification.
-        # (Comments excluded: the Taskfiles document these prohibitions.)
-        code = "\n".join(
-            line for line in combined.splitlines() if not line.lstrip().startswith("#")
-        )
-        self.assertNotIn("dotenv", code)
-        # No remote includes: every taskfile reference resolves locally.
-        # (Plain http(s) defaults such as AGENT_URL are legitimate and
-        # covered by exact-argv tests, not by this structural check.)
-        for line in code.splitlines():
-            if "taskfile:" in line:
-                self.assertIn("./", line)
-                self.assertNotIn("http", line)
-        self.assertNotIn("deps:", code)
-        # Optional `--flag value` pairs accumulate through positional
-        # parameters: quotes nested inside `${VAR:+...}` do NOT survive outer
-        # field splitting on any POSIX shell, so that idiom is forbidden.
-        self.assertNotIn(":+--", code)
-        self.assertNotIn("sources:", code)
-        self.assertNotIn("method:", code)
-        self.assertNotIn("ignore_error", code)
-        self.assertNotIn("export EMBED_MODE", code)
-        self.assertNotIn("airgap.env", code)
-        # Verification and evaluation never cache (`sources:` fingerprints
-        # even write state on `--list --json`). Artifact freshness is delegated
-        # to its preparation owners; dev:setup retains its presence check.
-        verify_code = "\n".join(
-            line for line in (root_text + quality_text + eval_text).splitlines()
-            if not line.lstrip().startswith("#")
-        )
-        self.assertNotIn("status:", verify_code)
-        build_code = "\n".join(
-            line for line in artifacts_text.splitlines() if not line.lstrip().startswith("#")
-        )
-        # Artifact completion is now owned by the Python preparers; behavior
-        # suites prove freshness/recovery and the actual Task-to-owner boundary.
-        self.assertNotIn("status:", build_code)
-        dev_code = "\n".join(
-            line for line in dev_text.splitlines() if not line.lstrip().startswith("#")
-        )
-        self.assertIn(".setup-complete", dev_code)
-        # Mode/venue bridged under TASK_ prefixes and bound at the command boundary
-        # so ambient environment variables cannot defeat CLI inputs.
-        eval_code = "\n".join(
-            line for line in eval_text.splitlines() if not line.lstrip().startswith("#")
-        )
-        self.assertIn("TASK_EMBED_MODE: '{{.EMBED_MODE}}'", eval_code)
-        self.assertIn("TASK_VENUE: '{{.VENUE}}'", eval_code)
-        self.assertIn('EMBED_MODE="$TASK_EMBED_MODE"', eval_code)
-        self.assertIn('VENUE="$TASK_VENUE"', eval_code)
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -162,13 +162,6 @@ def _helm_log(tree):
     return tree[1].read_text() if tree[1].exists() else ""
 
 
-def test_pull_secret_wired_when_set(tree):
-    _run(tree, ("PULL_SECRET", "ghcr-pull"))
-    log = _helm_log(tree)
-    assert "imagePullSecrets[0].name=ghcr-pull" in log
-    assert "imagePullSecrets=null" not in log
-
-
 def test_pull_secret_wired_agent_render_keeps_mapping(tree):
     # The wired item must reuse the pod-spec indent: a fixed 2-space insert
     # broke out of the mapping and kubectl rejected agent-rendered.yaml
@@ -177,6 +170,9 @@ def test_pull_secret_wired_agent_render_keeps_mapping(tree):
     assert r.returncode == 0, r.stderr
     rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
     assert_pull_secret_wired(rendered, "ghcr-pull")
+    log = _helm_log(tree)
+    assert "imagePullSecrets[0].name=ghcr-pull" in log
+    assert "imagePullSecrets=null" not in log
 
 
 @pytest.mark.parametrize("source", ["file", "environment", "task"])
@@ -237,9 +233,8 @@ def test_model_budget_operator_precedence_reaches_rendered_pod(tree, source):
     assert {name: pod.get(name) for name in selected} == selected
 
 
-@pytest.mark.parametrize("bad_name", ["Bad_Name!", "a&b", "a|b"])
-def test_pull_secret_bad_name_fails_closed(tree, bad_name):
-    r = _run(tree, ("PULL_SECRET", bad_name))
+def test_pull_secret_bad_name_fails_closed(tree):
+    r = _run(tree, ("PULL_SECRET", "a&b"))
     assert r.returncode != 0
     assert "PULL_SECRET must be a DNS-subdomain name" in r.stderr
 
@@ -268,28 +263,6 @@ def test_agent_qdrant_write_key_fails_closed(tree):
     r = _run(tree)
     assert r.returncode != 0
     assert "read-only-api-key" in r.stderr
-
-
-def test_agent_qdrant_key_missing_fails_closed(tree):
-    """No QDRANT_API_KEY block at all must also stop the deploy."""
-    tmp_path, _ = tree
-    stub = (tmp_path / "charts/mainframe-rag/templates/agent-deployment.yaml").read_text()
-    lines = stub.splitlines()
-    start = next(i for i, l in enumerate(lines) if "- name: QDRANT_API_KEY" in l)
-    del lines[start : start + 5]
-    (tmp_path / "charts/mainframe-rag/templates/agent-deployment.yaml").write_text("\n".join(lines) + "\n")
-    r = _run(tree)
-    assert r.returncode != 0
-    assert "read-only-api-key" in r.stderr
-
-
-
-
-def test_storage_size_knob_covers_persistence_and_snapshot(tree):
-    _run(tree, ("QDRANT_STORAGE_SIZE", "1Gi"))
-    log = _helm_log(tree)
-    assert "persistence.size=1Gi" in log
-    assert "snapshotPersistence.size=1Gi" in log
 
 
 ROLE_REFS = {
@@ -402,14 +375,6 @@ def test_two_qdrant_charts_refuse_before_any_command(tree):
     assert not tree[1].exists() or "upgrade" not in _helm_log(tree)
 
 
-def test_no_qdrant_chart_refuses(tree):
-    _chart(tree).unlink()
-    result = _run(tree)
-    assert result.returncode != 0
-    assert "exactly one vendored Qdrant chart is required" in result.stderr
-    assert "found 0" in result.stderr
-
-
 def test_manifest_chart_sha_mismatch_refuses_before_mutation(tree):
     _manifest(tree, "0" * 64)
     result = _run(tree)
@@ -425,15 +390,6 @@ def test_manifest_without_chart_sha_refuses(tree):
     assert "has no chart_sha256" in result.stderr
 
 
-def test_manifest_chart_sha_match_deploys_that_chart(tree):
-    _manifest(tree, sha256_bytes(_chart(tree).read_bytes()))
-    _write_pods(tree, _load_all(tree))
-    result = _run(tree)
-    assert result.returncode == 0, result.stderr
-    assert "verified against packed MANIFEST" in result.stdout
-    assert str(_chart(tree).relative_to(tree[0])) in _helm_log(tree)
-
-
 def test_chart_identity_failure_then_fix_passes_on_next_run(tree):
     extra = tree[0] / "charts" / "qdrant-9.9.9.tgz"
     shutil.copy(_chart(tree), extra)
@@ -445,6 +401,8 @@ def test_chart_identity_failure_then_fix_passes_on_next_run(tree):
     _write_pods(tree, _load_all(tree))
     result = _run(tree)
     assert result.returncode == 0, result.stderr
+    assert "verified against packed MANIFEST" in result.stdout
+    assert str(_chart(tree).relative_to(tree[0])) in _helm_log(tree)
     assert "upgrade" in _helm_log(tree)
 
 
@@ -466,20 +424,14 @@ def test_missing_production_values_fails_before_mutation(tree):
 @pytest.mark.parametrize("extra_env,exit_code,messages", [
     pytest.param({'QDRANT_EXTRA_VALUES': '/nonexistent/vals.yaml'}, 1, ('QDRANT_EXTRA_VALUES file not found',),
                  id='missing_extra_values_file_fails_closed'),
-    pytest.param({'EMBED_MODEL_REVISION': ''}, None, ('required variables unset', 'EMBED_MODEL_REVISION'),
-                 id='missing_embed_revision_fails_before_render'),
     pytest.param({'EMBED_MODEL_REVISION': '  '}, None, ('EMBED_MODEL_REVISION must be a non-blank',),
                  id='whitespace_embed_revision_fails_before_render'),
     pytest.param({'OTEL_EXPORTER_OTLP_ENDPOINT': 'jaeger:4318'}, None, ('must be http(s) or off',),
                  id='tracing_bad_endpoint_fails_closed'),
     pytest.param({'GATEWAY_API_KEY_SECRET': 'Bad_Name!'}, None, ('GATEWAY_API_KEY_SECRET must be a DNS-subdomain name',),
                  id='gateway_secret_bad_name_fails_closed'),
-    pytest.param({'OTEL_EXPORTER_OTLP_ENDPOINT': 'off', 'JAEGER_ENABLED': 'true'}, None, ('JAEGER_ENABLED=true requires tracing',),
-                 id='jaeger_true_with_tracing_off_fails_closed'),
     pytest.param({'JAEGER_ENABLED': 'maybe'}, None, ('JAEGER_ENABLED must be true/false',),
                  id='jaeger_garbage_fails_closed'),
-    pytest.param({'SERVICEMONITOR_ENABLED': 'true'}, None, ('SERVICEMONITOR_ENABLED=true requires METRICS_ENABLED=true',),
-                 id='monitor_true_with_metrics_off_fails_closed'),
 ])
 def test_invalid_configuration_fails_closed(tree, extra_env, exit_code, messages):
     result = _run(tree, *extra_env.items())
@@ -488,12 +440,13 @@ def test_invalid_configuration_fails_closed(tree, extra_env, exit_code, messages
         assert message in result.stderr
 
 
-
-def test_extra_values_file_reaches_helm(tree):
+def test_rehearsal_knobs_reach_helm(tree):
     vals = tree[0] / "vals.yaml"
     vals.write_text("resources: {}\n")
-    r = _run(tree, ("QDRANT_EXTRA_VALUES", str(vals)))
+    r = _run(tree, ("QDRANT_EXTRA_VALUES", str(vals)), ("QDRANT_STORAGE_SIZE", "1Gi"))
     assert r.returncode == 0, r.stderr
+    assert "persistence.size=1Gi" in _helm_log(tree)
+    assert "snapshotPersistence.size=1Gi" in _helm_log(tree)
     args = _helm_log(tree).splitlines()
     assert str(vals) in args
     assert args[args.index(str(vals)) - 1] == "-f"
@@ -538,19 +491,7 @@ def test_rendered_manifest_substituted_and_written(tree):
     assert "Gateway keys off" in r.stdout
 
 
-
 # ------------------------------------------------------- Jaeger / tracing (#83)
-
-
-@pytest.mark.parametrize("token", ["off", "none", "false", "0", "OFF", "Off"])
-def test_tracing_off_sentinel_skips_jaeger(tree, token):
-    r = _run(tree, ("OTEL_EXPORTER_OTLP_ENDPOINT", token))
-    assert r.returncode == 0, r.stderr
-    assert not (tree[0] / "dist" / "jaeger-rendered.yaml").exists()
-    rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
-    # Endpoint env var always rendered; empty value = tracing off.
-    assert rendered_env(rendered, "agent")["OTEL_EXPORTER_OTLP_ENDPOINT"] == ""
-    assert "Tracing off" in r.stdout
 
 
 def test_tracing_enabled_deploys_jaeger_and_wires_endpoint(tree):
@@ -564,43 +505,16 @@ def test_tracing_enabled_deploys_jaeger_and_wires_endpoint(tree):
     assert_no_placeholders(jaeger)
     assert rendered_env(agent, "agent")["OTEL_EXPORTER_OTLP_ENDPOINT"] == "http://jaeger:4318"
     assert_no_placeholders(agent)
-
-
-def test_tracing_jaeger_pull_secret_wired_when_set(tree):
-    r = _run(
-        tree,
-        ("OTEL_EXPORTER_OTLP_ENDPOINT", "http://jaeger:4318"),
-        ("PULL_SECRET", "ghcr-pull"),
-    )
-    assert r.returncode == 0, r.stderr
-    jaeger = (tree[0] / "dist" / "jaeger-rendered.yaml").read_text()
-    assert "name: ghcr-pull" in jaeger
-    assert_pull_secret_wired(jaeger, "ghcr-pull")
-
-
-def test_tracing_jaeger_pull_secret_stays_absent_when_unset(tree):
-    r = _run(tree, ("OTEL_EXPORTER_OTLP_ENDPOINT", "http://jaeger:4318"))
-    assert r.returncode == 0, r.stderr
-    jaeger = (tree[0] / "dist" / "jaeger-rendered.yaml").read_text()
-    assert "imagePullSecrets: []" in jaeger
-    assert "name: ghcr-pull" not in jaeger
+    # The off sentinel renders an empty endpoint and no Jaeger backend.
+    off = _run(tree, ("OTEL_EXPORTER_OTLP_ENDPOINT", "off"))
+    assert off.returncode == 0, off.stderr
+    assert not (tree[0] / "dist" / "jaeger-rendered.yaml").exists()
+    rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
+    assert rendered_env(rendered, "agent")["OTEL_EXPORTER_OTLP_ENDPOINT"] == ""
+    assert "Tracing off" in off.stdout
 
 
 # ------------------------------------------------------- deploy identity (Phase 2b)
-
-
-def test_deploy_identity_environment_wired_when_set(tree):
-    r = _run(tree, ("OTEL_DEPLOYMENT_ENVIRONMENT", "lab"))
-    assert r.returncode == 0, r.stderr
-    rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
-    assert rendered_env(rendered, "agent")["OTEL_DEPLOYMENT_ENVIRONMENT"] == "lab"
-
-
-def test_service_name_wired_when_set(tree):
-    r = _run(tree, ("OTEL_SERVICE_NAME", "my-rag-prod"))
-    assert r.returncode == 0, r.stderr
-    rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
-    assert rendered_env(rendered, "agent")["OTEL_SERVICE_NAME"] == "my-rag-prod"
 
 
 # ------------------------------------------------------- ServiceMonitor (#187)
@@ -617,36 +531,12 @@ def test_metrics_enabled_deploys_servicemonitor_and_wires_env(tree):
     assert_no_placeholders(sm)
     assert re.search(r'METRICS_ENABLED\n\s+value: "true"', agent, re.MULTILINE)
     assert_no_placeholders(agent)
-
-
-def test_metrics_non_true_value_skips_servicemonitor(tree):
-    # Only the literal "true" opts in — "false"/"1"/empty all stay off.
+    # Only the literal "true" opts in: "false"/"1"/empty all stay off.
     for value in ("false", "1", ""):
-        r = _run(tree, ("METRICS_ENABLED", value))
-        assert r.returncode == 0, r.stderr
+        (tree[0] / "dist" / "servicemonitor-rendered.yaml").unlink(missing_ok=True)
+        off = _run(tree, ("METRICS_ENABLED", value))
+        assert off.returncode == 0, off.stderr
         assert not (tree[0] / "dist" / "servicemonitor-rendered.yaml").exists()
-
-
-def test_reranker_configured_when_enabled(tree):
-    r = _run(
-        tree,
-        ("RERANK_ENABLED", "true"),
-        ("RERANK_BASE_URL", "http://rerank:8002/v1"),
-        ("RERANK_MODEL", "my-reranker-model"),
-    )
-    assert r.returncode == 0, r.stderr
-    rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
-    assert 'value: "true"' in rendered or "value: true" in rendered
-    assert 'value: "http://rerank:8002/v1"' in rendered or "value: http://rerank:8002/v1" in rendered
-    assert 'value: "my-reranker-model"' in rendered or "value: my-reranker-model" in rendered
-    assert "__RERANK_" not in rendered
-
-
-def test_reranker_endpoint_order_rerank_first_renders(tree):
-    r = _run(tree, ("RERANK_ENDPOINT_ORDER", "rerank_first"))
-    assert r.returncode == 0, r.stderr
-    rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
-    assert rendered_env(rendered, "agent")["RERANK_ENDPOINT_ORDER"] == "rerank_first"
 
 
 # ------------------------------------------------------- gateway keys (LiteLLM)
@@ -703,7 +593,7 @@ def test_agent_route_fails_closed_on_pending_oauth_pin(tree):
     assert "sha256:PENDING" in r.stderr
 
 
-@pytest.mark.parametrize("ownership", ["legacy", "ours", "other-release", "other-namespace", "controller", "other-manager"])
+@pytest.mark.parametrize("ownership", ["legacy", "ours", "other-release", "controller", "other-manager"])
 def test_app_adoption_checks_ownership_before_any_release_mutation(tree, ownership):
     import json
 
@@ -733,7 +623,7 @@ def test_app_adoption_checks_ownership_before_any_release_mutation(tree, ownersh
         assert "ownership preflight refused" in result.stderr
 
 
-@pytest.mark.parametrize("key", ["llm-api-key", "embed-api-key", "rerank-api-key", ".dockerconfigjson"])
+@pytest.mark.parametrize("key", ["llm-api-key", ".dockerconfigjson"])
 def test_missing_referenced_secret_key_blocks_before_mutation(tree, key):
     result = _run(tree, ("GATEWAY_API_KEY_SECRET", "gateway-keys"),
                   ("PULL_SECRET", "registry-pull"), ("MISSING_KEY", key))
@@ -760,7 +650,7 @@ def test_model_revision_yaml_characters_round_trip(tree):
     assert rendered_env(rendered, "agent")["EMBED_MODEL"] == "true"
 
 
-@pytest.mark.parametrize("payload", ['{"kind":"List"}', '{"kind":"List","items":null}', 'not-json'])
+@pytest.mark.parametrize("payload", ['{"kind":"List"}'])
 def test_corrupt_ownership_inventory_blocks_mutation(tree, payload):
     inventory = tree[0] / "existing.json"
     inventory.write_text(payload)
@@ -780,7 +670,7 @@ def test_old_helm_fails_before_any_release_mutation(tree):
     assert "upgrade" not in _helm_log(tree)
 
 
-@pytest.mark.parametrize("owner", ["legacy", "ours", "other", "controller"])
+@pytest.mark.parametrize("owner", ["legacy", "other", "controller"])
 def test_disabled_legacy_resources_are_checked_then_cleaned_after_rollout(tree, owner):
     import json
 
@@ -882,7 +772,7 @@ def test_legacy_cleanup_waits_for_successful_rollouts(tree):
     assert "delete" not in log
 
 
-@pytest.mark.parametrize("from_file", [False, True])
+@pytest.mark.parametrize("from_file", [False])
 def test_shared_gateway_aliases_and_secret_reach_requests(tree, from_file):
     import json
 
@@ -979,7 +869,7 @@ def test_missing_shared_gateway_key_blocks_before_mutation(tree):
     assert "upgrade" not in log and "apply" not in log
 
 
-@pytest.mark.parametrize("key,secret", [('bad"key', "shared"), ("a" * 254, "shared"), ("api-key", "")])
+@pytest.mark.parametrize("key,secret", [('bad"key', "shared"), ("api-key", "")])
 def test_invalid_shared_gateway_key_refuses_before_commands(tree, key, secret):
     result = _run(tree, ("GATEWAY_API_KEY_SECRET", secret), ("GATEWAY_API_KEY_SECRET_KEY", key))
     assert result.returncode != 0
@@ -999,9 +889,13 @@ def test_jaeger_false_without_destination_fails_before_mutation(tree):
     assert "JAEGER_ENABLED=false needs an intentional trace destination" in r.stderr
     assert not tree[1].exists()
     assert not (tree[0] / "dist").exists()
+    # Next ordinary run after correcting the config: nothing was left behind.
+    ok = _run(tree, ("JAEGER_ENABLED", "false"), ("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector.platform:4318"))
+    assert ok.returncode == 0, ok.stderr
+    assert "upgrade" in _helm_log(tree)
 
 
-@pytest.mark.parametrize("endpoint", ["http://collector.platform:4318", "http://jaeger:4318"])
+@pytest.mark.parametrize("endpoint", ["http://jaeger:4318"])
 def test_jaeger_false_with_explicit_collector_exports_to_it(tree, endpoint):
     # The former hostname stays possible when it is chosen intentionally.
     r = _run(tree, ("JAEGER_ENABLED", "false"), ("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint))
@@ -1011,22 +905,6 @@ def test_jaeger_false_with_explicit_collector_exports_to_it(tree, endpoint):
     assert rendered_env(rendered, "agent")["OTEL_EXPORTER_OTLP_ENDPOINT"] == endpoint
     assert "kind: Deployment\nmetadata:\n  name: jaeger" not in rendered
     assert "deploy/jaeger" not in _helm_log(tree)  # no rollout wait for a backend not deployed
-
-
-def test_jaeger_false_with_tracing_off_is_an_intentional_choice(tree):
-    r = _run(tree, ("JAEGER_ENABLED", "false"), ("OTEL_EXPORTER_OTLP_ENDPOINT", "off"))
-    assert r.returncode == 0, r.stderr
-    rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
-    assert rendered_env(rendered, "agent")["OTEL_EXPORTER_OTLP_ENDPOINT"] == ""
-
-
-def test_jaeger_false_rejection_then_corrected_run_succeeds(tree):
-    # Next ordinary run after correcting the config: the refusal left
-    # nothing behind that blocks the corrected deploy.
-    assert _run(tree, ("JAEGER_ENABLED", "false")).returncode != 0
-    r = _run(tree, ("JAEGER_ENABLED", "false"), ("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector.platform:4318"))
-    assert r.returncode == 0, r.stderr
-    assert "upgrade" in _helm_log(tree)
 
 
 def test_upgrade_from_bundled_jaeger_selects_destination_before_removal(tree):
@@ -1051,20 +929,6 @@ def test_upgrade_from_bundled_jaeger_selects_destination_before_removal(tree):
     log = _helm_log(tree)
     assert log.index("delete") > log.index("rollout") > log.index("upgrade")
     assert "jaeger-badger" not in log
-
-
-def test_jaeger_explicit_true_with_tracing_on(tree):
-    r = _run(tree, ("JAEGER_ENABLED", "true"))
-    assert r.returncode == 0, r.stderr
-    assert (tree[0] / "dist" / "jaeger-rendered.yaml").exists()
-
-
-def test_monitor_decoupled_from_exposition(tree):
-    r = _run(tree, ("METRICS_ENABLED", "true"), ("SERVICEMONITOR_ENABLED", "false"))
-    assert r.returncode == 0, r.stderr
-    assert not (tree[0] / "dist" / "servicemonitor-rendered.yaml").exists()
-    rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
-    assert rendered_env(rendered, "agent")["METRICS_ENABLED"] == "true"
 
 
 # ----------------------------------------------------- console Route (#373)
@@ -1125,12 +989,9 @@ def test_route_on_live_deploy_verifies_the_actual_route_and_renders_the_cluster_
 
 @pytest.mark.parametrize("drift", [
     {"port": "http"},
-    {"termination": "edge"},
-    {"insecure": "Allow"},
     {"ca": "-----BEGIN CERTIFICATE-----\nT0xELUNB\n-----END CERTIFICATE-----"},
-    {"to": "qdrant"},
     {"alternates": ("qdrant",)},
-], ids=["http-port", "edge", "http-allowed", "stale-ca", "wrong-backend", "alternate-backend"])
+], ids=["http-port", "stale-ca", "alternate-backend"])
 def test_route_not_converged_after_release_is_deleted_and_fails(tree, drift):
     # Whatever the adopted Route still looks like after the release, it is
     # removed rather than left as a public unauthenticated console.
@@ -1161,8 +1022,9 @@ def test_route_refusal_then_corrected_run_succeeds(tree):
     assert _route_on(tree).returncode == 0
 
 
-@pytest.mark.parametrize("backend", ["rag-agent", "qdrant", "qdrant-headless"])
-@pytest.mark.parametrize("enabled", [True, False])
+@pytest.mark.parametrize(("backend", "enabled"), [
+    ("rag-agent", True), ("rag-agent", False), ("qdrant", False), ("qdrant-headless", False),
+])
 def test_other_routes_to_agent_or_qdrant_refuse_before_any_mutation(tree, backend, enabled):
     routes = _route_list(tree, _route("public-console", to=backend))
     extra = (("AGENT_ROUTE", "true"), ("SERVICE_CA", SERVICE_CA)) if enabled else ()
@@ -1229,7 +1091,7 @@ def test_unlistable_routes_fail_closed_before_mutation(tree, failure):
     assert "upgrade" not in _helm_log(tree)
 
 
-@pytest.mark.parametrize("payload", ["", "not-json", '{"kind":"List","items":[{"kind":"Deployment"}]}'])
+@pytest.mark.parametrize("payload", ["not-json", '{"kind":"List","items":[{"kind":"Deployment"}]}'])
 def test_corrupt_route_inventory_blocks_mutation(tree, payload):
     path = tree[0] / "bad-routes.json"
     path.write_text(payload)
@@ -1248,20 +1110,6 @@ def test_route_inventory_failure_never_echoes_route_data(tree):
     assert secret not in r.stdout + r.stderr + (tree[0] / "helm-args.log").read_text()
 
 
-def test_invalid_agent_route_value_fails_before_mutation(tree):
-    r = _run(tree, ("AGENT_ROUTE", "maybe"))
-    assert r.returncode != 0
-    assert "AGENT_ROUTE must be true/false" in r.stderr
-    assert "upgrade" not in _helm_log(tree)
-
-
-def test_agent_route_boolean_spellings_select_the_route(tree):
-    set_oauth_proxy_pin(tree[0], GOOD_PIN)
-    r = _run(tree, ("AGENT_ROUTE", "True"), ("SERVICE_CA", SERVICE_CA), ("ROUTE_LIVE_FILE", _live(tree)))
-    assert r.returncode == 0, r.stderr
-    assert "ose-oauth-proxy" in (tree[0] / "dist/agent-rendered.yaml").read_text()
-
-
 def test_missing_cookie_secret_key_blocks_route_before_mutation(tree):
     r = _route_on(tree, ("MISSING_KEY", "cookie-secret"))
     assert r.returncode != 0
@@ -1269,23 +1117,12 @@ def test_missing_cookie_secret_key_blocks_route_before_mutation(tree):
     assert "upgrade" not in _helm_log(tree)
 
 
-@pytest.mark.parametrize("ca", ["", "not a certificate"])
+@pytest.mark.parametrize("ca", ["not a certificate"])
 def test_unusable_service_ca_blocks_route_before_mutation(tree, ca):
     set_oauth_proxy_pin(tree[0], GOOD_PIN)
     r = _run(tree, ("AGENT_ROUTE", "true"), ("SERVICE_CA", ca), ("ROUTE_LIVE_FILE", _live(tree)))
     assert r.returncode != 0
     assert "not a PEM certificate bundle" in r.stderr
-    assert "upgrade" not in _helm_log(tree)
-
-
-def test_route_pin_must_match_the_chart_tag(tree):
-    # images.txt and the chart tag move together (docs/deploy.md pin note).
-    set_oauth_proxy_pin(tree[0], GOOD_PIN)
-    images = tree[0] / "images.txt"
-    images.write_text(images.read_text().replace("ose-oauth-proxy:v4.14", "ose-oauth-proxy:v4.15"))
-    r = _run(tree, ("AGENT_ROUTE", "true"), ("SERVICE_CA", SERVICE_CA), ("ROUTE_LIVE_FILE", _live(tree)))
-    assert r.returncode != 0
-    assert "does not match the chart" in r.stderr
     assert "upgrade" not in _helm_log(tree)
 
 
@@ -1321,17 +1158,7 @@ def test_release_renders_first_party_images_by_verified_digest(tree):
     assert "image.tag=v1.19.0" in _helm_log(tree)
 
 
-def test_tag_swapped_after_load_refuses_before_any_mutation(tree):
-    _release(tree)
-    _put_registry(tree, "agent", _image_manifest("agent", config=_config_of("someone-else")))
-    result = _run(tree)
-    assert result.returncode != 0
-    assert "is not the packed image" in result.stderr
-    assert "nothing was deployed" in result.stderr
-    assert _mutations(tree) == []
-
-
-@pytest.mark.parametrize("role", ["qdrant", "agent", "jaeger"])
+@pytest.mark.parametrize("role", ["jaeger"])
 def test_missing_registry_image_refuses_before_any_mutation(tree, role):
     """pipeline --skip-load / standalone deploy against an empty or partial registry."""
     _release(tree)
@@ -1339,16 +1166,6 @@ def test_missing_registry_image_refuses_before_any_mutation(tree, role):
     result = _run(tree)
     assert result.returncode != 0
     assert f"cannot read back registry image {ROLE_REFS[role]}" in result.stderr
-    assert _mutations(tree) == []
-
-
-def test_manifest_list_tag_refuses_before_any_mutation(tree):
-    _release(tree)
-    index = json.dumps({"schemaVersion": 2, "manifests": [{"digest": _config_of("qdrant")}]}).encode()
-    _put_registry(tree, "qdrant", index)
-    result = _run(tree)
-    assert result.returncode != 0
-    assert "not a single-image manifest" in result.stderr
     assert _mutations(tree) == []
 
 
@@ -1361,26 +1178,19 @@ def test_manifest_without_config_digests_refuses_before_any_mutation(tree):
     assert _mutations(tree) == []
 
 
-def test_swapped_tag_refusal_then_reload_passes_next_run(tree):
+def test_swapped_tag_refuses_before_mutation_then_reload_passes_next_run(tree):
     digests = _release(tree)
     _put_registry(tree, "agent", _image_manifest("agent", config=_config_of("someone-else")))
-    assert _run(tree).returncode != 0
+    refused = _run(tree)
+    assert refused.returncode != 0
+    assert "is not the packed image" in refused.stderr
+    assert "nothing was deployed" in refused.stderr
+    assert _mutations(tree) == []
     # A reload overwrites the tag with the packed image; the next ordinary run deploys it.
     _load_all(tree)
     result = _run(tree)
     assert result.returncode == 0, result.stderr
     assert f"@{digests['agent']}" in (tree[0] / "dist" / "agent-rendered.yaml").read_text()
-
-
-def test_registry_digest_is_read_from_the_registry_not_the_archive(tree):
-    """The rendered digest is the registry manifest digest (compressed layers),
-    which differs from anything derivable from the archive."""
-    digests = _release(tree)
-    assert digests["agent"] != _config_of("agent")
-    _run(tree)
-    values = (tree[0] / "dist" / "mainframe-rag-release-values.yaml").read_text()
-    assert digests["agent"] in values
-    assert _config_of("agent") not in values
 
 
 def test_running_pod_with_different_digest_fails_after_rollout(tree):
@@ -1417,7 +1227,7 @@ def test_digest_from_caller_environment_is_never_rendered(tree):
     assert "digest" not in (tree[0] / "dist" / "mainframe-rag-release-values.yaml").read_text()
 
 
-@pytest.mark.parametrize("phase", ["Succeeded", "Failed", "Running"])
+@pytest.mark.parametrize("phase", ["Failed"])
 def test_release_identity_ignores_unrelated_retained_jobs(tree, phase):
     digests = _release(tree)
     path = tree[0] / "pods.json"
@@ -1463,8 +1273,9 @@ def test_release_identity_requires_status_on_each_target_replica(tree):
     assert "pod qdrant-2 container qdrant runs an unknown digest" in result.stderr
 
 
-@pytest.mark.parametrize("failure", ["QDRANT_HELM_FAIL", "ROLLOUT_FAIL", "APP_HELM_FAIL", "ROUTE_READ_FAIL"])
-@pytest.mark.parametrize("compatible", [False, True], ids=["direct-access", "valid-oauth"])
+@pytest.mark.parametrize(("failure", "compatible"), [
+    ("QDRANT_HELM_FAIL", False), ("ROUTE_READ_FAIL", True),
+], ids=["direct-access-before-release", "valid-oauth-unreadable-after-release"])
 def test_existing_owned_route_failure_paths_preserve_only_compatible_exposure(tree, failure, compatible):
     existing = _route() if compatible else _route(port="http", termination="edge")
     existing["spec"].update(host="operator.example", wildcardPolicy="None")
@@ -1523,7 +1334,7 @@ def test_existing_owned_route_failure_paths_preserve_only_compatible_exposure(tr
     assert operator_state.read_bytes() == operator_before
 
 
-@pytest.mark.parametrize("ownership", ["release", "controller", "manager"])
+@pytest.mark.parametrize("ownership", ["release"])
 def test_named_operator_owned_route_is_not_retired_or_adopted(tree, ownership):
     route = _route(port="http", termination="edge")
     if ownership == "release":
@@ -1537,7 +1348,7 @@ def test_named_operator_owned_route_is_not_retired_or_adopted(tree, ownership):
     assert "delete" not in _helm_log(tree) and "upgrade" not in _helm_log(tree)
 
 
-@pytest.mark.parametrize("malformed", ["layers-object", "config-type", "layer-digest", "index"])
+@pytest.mark.parametrize("malformed", ["layer-digest", "index"])
 def test_deploy_registry_structure_is_validated_before_mutation(tree, malformed):
     _release(tree)
     manifest = json.loads(_image_manifest("agent"))

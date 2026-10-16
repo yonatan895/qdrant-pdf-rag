@@ -223,8 +223,18 @@ def _observe(client, timeline, endpoint, stream):
     }
 
 
-_STREAM_SCENARIOS = ["ok", "length", "no_hits", "runtime_error", "truncated", "budget_stream"]
-_JSON_SCENARIOS = ["ok", "length", "no_hits", "budget_json", "llm_error"]
+# /v1/answer owns every outcome; /v1/chat shares the route helpers, so it keeps
+# the success path plus the error classes that map differently on its wire format.
+_STREAM_SCENARIOS = [
+    ("answer", s) for s in ("ok", "length", "no_hits", "runtime_error", "truncated", "budget_stream")
+] + [("chat", s) for s in ("ok", "no_hits", "truncated", "budget_stream")]
+_JSON_SCENARIOS = [
+    ("answer", s) for s in ("ok", "length", "no_hits", "budget_json", "llm_error")
+] + [("chat", s) for s in ("ok", "no_hits", "llm_error")]
+_CLOSE_SCENARIOS = [
+    ("answer", "hang", 1), ("answer", "truncated", 2), ("answer", "ok", 3),
+    ("chat", "hang", 1), ("chat", "ok", 3),
+]
 
 
 @pytest.fixture
@@ -245,23 +255,20 @@ def start(monkeypatch, synthetic_pdf, servable_representation_gate):
         yield run
 
 
-@pytest.mark.parametrize("endpoint", ["answer", "chat"])
-@pytest.mark.parametrize("scenario", _STREAM_SCENARIOS)
+@pytest.mark.parametrize("endpoint,scenario", _STREAM_SCENARIOS)
 def test_stream_outcome_is_pinned(start, endpoint, scenario):
     client, timeline = start(scenario)
     _check(f"{endpoint}/stream/{scenario}", _observe(client, timeline, endpoint, True))
 
 
-@pytest.mark.parametrize("endpoint", ["answer", "chat"])
-@pytest.mark.parametrize("scenario", _JSON_SCENARIOS)
+@pytest.mark.parametrize("endpoint,scenario", _JSON_SCENARIOS)
 def test_json_outcome_is_pinned(start, endpoint, scenario):
     client, timeline = start(scenario)
     _check(f"{endpoint}/json/{scenario}", _observe(client, timeline, endpoint, False))
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("endpoint", ["answer", "chat"])
-@pytest.mark.parametrize("scenario,frames", [("hang", 1), ("truncated", 2), ("ok", 3)])
+@pytest.mark.parametrize("endpoint,scenario,frames", _CLOSE_SCENARIOS)
 async def test_close_outcome_is_pinned(start, endpoint, scenario, frames):
     """Close the body at a frame boundary the way a client disconnect does:
     mid-stream (hang), right after a terminal error frame, right after the

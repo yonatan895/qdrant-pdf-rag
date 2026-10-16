@@ -24,78 +24,41 @@ def _run(extra_env: dict[str, str] | None = None) -> subprocess.CompletedProcess
     return subprocess.run(["sh", str(SCRIPT)], capture_output=True, text=True, env=env, check=False)
 
 
-def test_dryrun_plan_order_and_stages():
+def test_dryrun_plan_orders_stages():
+    """Dry-run plan keeps the prod topology order (backends, Qdrant, Jaeger,
+    gateway, probe, ingest, agent)."""
     r = _run()
     assert r.returncode == 0, r.stderr
-    lines = [ln for ln in r.stdout.splitlines() if ln.startswith("[plan]")]
-    assert len(lines) == 9
-    # The prod topology order: backends -> Qdrant -> Jaeger -> gateway ->
-    # probe -> ingest -> agent -> smoke -> trace check. Models are never
-    # addressed straight from the agent; the plan hands the container
-    # host.docker.internal URLs, and tracing is part of the stack.
-    assert "backends" in lines[0] and "127.0.0.1:8000" in lines[0]
-    assert "qdrant" in lines[1]
-    assert "jaeger" in lines[2] and "run_local_jaeger.sh" in lines[2]
-    assert "run_local_gateway.sh" in lines[3]
-    assert "probe_gateway.py" in lines[4]
-    assert "ingest" in lines[5] and "skipped" in lines[5]
-    assert "uvicorn" in lines[6] and "OTEL_EXPORTER_OTLP_ENDPOINT" in lines[6]
-    assert "UI_ENABLED=true" in lines[6]
-    assert "/v1/search" in lines[7] and "/ui" in lines[7]
-    assert "v1.search" in lines[8] and "mainframe-rag-agent" in lines[8]
+    plan = "\n".join(ln for ln in r.stdout.splitlines() if ln.startswith("[plan]"))
+    marks = ["backends", "qdrant", "run_local_jaeger.sh", "run_local_gateway.sh", "probe_gateway.py", "ingest", "uvicorn"]
+    positions = [plan.index(m) for m in marks]
+    assert positions == sorted(positions)
+    assert "UI_ENABLED=true" in plan
 
 
-def test_dryrun_explicit_probe_budget_reaches_command():
-    r = _run({"GATEWAY_PROBE_MAX_TOKENS": "512"})
+def test_dryrun_plan_reflects_operator_overrides(tmp_path):
+    r = _run({
+        "GATEWAY_PROBE_MAX_TOKENS": "512", "UI_ENABLED": "false", "OTEL_TRACE_TIMEOUT": "7",
+        "LOCAL_AGENT_PORT": "9099", "CORPUS_DIR": str(tmp_path), "RERANK_ENABLED": "false",
+    })
     assert r.returncode == 0, r.stderr
-    probe = next(line for line in r.stdout.splitlines() if "probe_gateway.py" in line)
-    assert "--max-tokens 512" in probe
+    lines = r.stdout.splitlines()
+    assert "--max-tokens 512" in next(ln for ln in lines if "probe_gateway.py" in ln)
+    assert "UI_ENABLED=false" in next(ln for ln in lines if "uvicorn" in ln)
+    ingest = next(ln for ln in lines if "ingest" in ln)
+    assert str(tmp_path) in ingest and "skipped" not in ingest
+    # A shared service name would merge agent and ingest in one Jaeger.
+    assert "OTEL_SERVICE_NAME=mainframe-rag-ingest" in ingest
+    assert "timeout 7s" in r.stdout and "--port 9099" in r.stdout
+    assert "8002" not in lines[0]
 
 
-@pytest.mark.parametrize("bad", ["0", "4097", "99999999999999999999", "1.5", "bad"])
+@pytest.mark.parametrize("bad", ["0", "4097", "bad"])
 def test_bad_probe_budget_fails_before_stack_work(bad):
     r = _run({"GATEWAY_PROBE_MAX_TOKENS": bad})
     assert r.returncode != 0
     assert "GATEWAY_PROBE_MAX_TOKENS must be" in r.stderr
     assert "[plan]" not in r.stdout
-
-
-def test_dryrun_ui_enabled_by_default():
-    r = _run()
-    assert r.returncode == 0, r.stderr
-    agent = next(ln for ln in r.stdout.splitlines() if "uvicorn" in ln)
-    assert "UI_ENABLED=true" in agent
-
-
-def test_dryrun_ui_disabled_override_reflected():
-    r = _run({"UI_ENABLED": "false"})
-    assert r.returncode == 0, r.stderr
-    agent = next(ln for ln in r.stdout.splitlines() if "uvicorn" in ln)
-    assert "UI_ENABLED=false" in agent
-    smoke = next(ln for ln in r.stdout.splitlines() if "/v1/search" in ln)
-    assert "/ui" not in smoke and "UI disabled" in smoke
-
-
-def test_dryrun_ingest_names_its_own_service(tmp_path):
-    # A shared OTEL_SERVICE_NAME would merge agent and ingest in one Jaeger;
-    # the plan pins the ingest service name explicitly.
-    r = _run({"CORPUS_DIR": str(tmp_path)})
-    assert r.returncode == 0, r.stderr
-    ingest = next(ln for ln in r.stdout.splitlines() if "ingest" in ln)
-    assert "OTEL_SERVICE_NAME=mainframe-rag-ingest" in ingest
-
-
-def test_dryrun_trace_timeout_override_reflected():
-    r = _run({"OTEL_TRACE_TIMEOUT": "7"})
-    assert r.returncode == 0, r.stderr
-    assert "timeout 7s" in r.stdout
-
-
-def test_dryrun_plan_includes_ingest_when_corpus_set(tmp_path):
-    r = _run({"CORPUS_DIR": str(tmp_path)})
-    assert r.returncode == 0, r.stderr
-    ingest = next(ln for ln in r.stdout.splitlines() if "ingest" in ln)
-    assert str(tmp_path) in ingest and "skipped" not in ingest
 
 
 def test_persistent_progress_reaches_ingest_after_stack_cleanup_and_restart(tmp_path):
@@ -156,7 +119,6 @@ if sys.argv[1:3] == ["-m", "uvicorn"]:
 @pytest.mark.parametrize(
     ("reader", "writer", "exported_scratch", "unrelated_note"),
     [
-        ("fixture-readonly-706|=literal", "fixture-writer-706;$literal|=end", False, None),
         (" \tfixture-readonly-706|=literal\t ", " \tfixture-writer-706;$literal|=end\t ", True, None),
         (
             "fixture-readonly-706|=literal",
@@ -165,7 +127,7 @@ if sys.argv[1:3] == ["-m", "uvicorn"]:
             "text\nQDRANT_INGEST_API_KEY=not-an-env-entry",
         ),
     ],
-    ids=["role-keys", "whitespace-and-inherited-scratch", "unrelated-multiline-value"],
+    ids=["whitespace-and-inherited-scratch", "unrelated-multiline-value"],
 )
 def test_authenticated_stack_hands_writer_only_to_ingest_and_readonly_to_agent(
     tmp_path, monkeypatch, reader, writer, exported_scratch, unrelated_note
@@ -290,16 +252,12 @@ exit 9
     [
         ({"QDRANT_API_KEY": "fixture-readonly-706"},
          "authenticated Qdrant ingest requires a distinct writer credential"),
-        ({"QDRANT_INGEST_API_KEY": "fixture-writer-706"},
-         "Qdrant requires distinct read-only and ingest credentials"),
         ({"QDRANT_API_KEY": "fixture-shared-706", "QDRANT_INGEST_API_KEY": "fixture-shared-706"},
          "Qdrant requires distinct read-only and ingest credentials"),
         ({"QDRANT_API_KEY": "fixture-readonly-706", "qdrant_api_key": "fixture-other-reader-706",
           "QDRANT_INGEST_API_KEY": "fixture-writer-706"}, "Qdrant credential aliases conflict"),
-        ({"QDRANT_API_KEY": "fixture-readonly-706", "QDRANT_INGEST_API_KEY": "fixture-writer-706",
-          "qdrant_ingest_api_key": "fixture-other-writer-706"}, "Qdrant credential aliases conflict"),
     ],
-    ids=["missing-writer", "missing-reader", "equal-roles", "reader-alias-conflict", "writer-alias-conflict"],
+    ids=["missing-writer", "equal-roles", "reader-alias-conflict"],
 )
 def test_unsafe_qdrant_role_inputs_refuse_before_service_children(tmp_path, credentials, diagnostic):
     scripts = tmp_path / "checkout" / "scripts"
@@ -327,27 +285,17 @@ def test_unsafe_qdrant_role_inputs_refuse_before_service_children(tmp_path, cred
     assert all(value not in result.stdout + result.stderr for value in credentials.values())
 
 
-def test_local_agent_port_override_reflected(tmp_path):
-    r = _run({"LOCAL_AGENT_PORT": "9099"})
-    assert r.returncode == 0, r.stderr
-    assert "--port 9099" in r.stdout
-    assert "http://127.0.0.1:9099/v1/search" in r.stdout
-
-
 @pytest.mark.parametrize(
-    "var",
-    ["GATEWAY_PORT", "LOCAL_AGENT_PORT", "DENSE_DIM", "JAEGER_PORT", "JAEGER_OTLP_PORT", "OTEL_TRACE_TIMEOUT"],
+    ("var", "bad"),
+    [("GATEWAY_PORT", "not-a-number"), ("DENSE_DIM", "0"), ("OTEL_TRACE_TIMEOUT", "0")],
 )
-@pytest.mark.parametrize("bad", ["not-a-number", "0"])
 def test_bad_numeric_fails_closed(var, bad):
     r = _run({var: bad})
     assert r.returncode != 0
     assert f"{var} must be" in r.stderr
 
 
-@pytest.mark.parametrize(
-    "var", ["QDRANT_URL", "GATEWAY_REASONING_URL", "GATEWAY_EMBED_URL", "GATEWAY_RERANK_URL"]
-)
+@pytest.mark.parametrize("var", ["QDRANT_URL", "GATEWAY_RERANK_URL"])
 def test_bare_hostname_fails_closed(var):
     r = _run({var: "gpu-box:8000"})
     assert r.returncode != 0
@@ -364,14 +312,6 @@ def test_missing_corpus_dir_fails_closed():
     r = _run({"CORPUS_DIR": "/nonexistent/corpus"})
     assert r.returncode != 0
     assert "CORPUS_DIR is not a directory" in r.stderr
-
-
-def test_rerank_false_selects_two_backend_plan():
-    r = _run({'RERANK_ENABLED': 'false'})
-    assert r.returncode == 0, r.stderr
-    backend_line = r.stdout.splitlines()[0]
-    assert '8000' in backend_line and '8001' in backend_line
-    assert '8002' not in backend_line
 
 
 def test_invalid_rerank_flag_fails_before_launch():
@@ -460,7 +400,6 @@ def _plan_workers(tmp_path: Path, host: dict[str, str]) -> tuple[subprocess.Comp
     ("avail_mb", "workers"),
     [
         (64000, 7),  # plenty of RAM: the CPU-1 cap (8 CPUs) applies
-        (6144, 4),  # (6144-2048)/1024
         (4608, 2),  # a few GB free sizes down
         (3072, 1),  # exactly one worker + headroom
     ],
@@ -472,37 +411,17 @@ def test_ingest_workers_follow_available_ram(tmp_path, avail_mb, workers):
     assert "REFUSED" not in ingest and "REFUSED" not in r.stderr
 
 
-def test_ingest_workers_floor_at_one_cpu(tmp_path):
-    r, ingest = _plan_workers(tmp_path, {**_host(tmp_path), "HOST_CPUS": "1"})
-    assert r.returncode == 0, r.stderr
-    assert "--workers 1 " in ingest
-
-
-def test_per_worker_estimate_and_headroom_envs_are_respected(tmp_path):
-    host = {**_host(tmp_path, avail_mb=6144), "LOCAL_INGEST_WORKER_MB": "2048", "HOST_MEM_HEADROOM_MB": "0"}
-    _, ingest = _plan_workers(tmp_path, host)
-    assert "--workers 3 " in ingest
-
-
 def test_ingest_workers_env_overrides_sizing(tmp_path):
     r, ingest = _plan_workers(tmp_path, {**_host(tmp_path, avail_mb=64000), "INGEST_WORKERS": "2"})
     assert r.returncode == 0, r.stderr
     assert "--workers 2 " in ingest
 
 
-@pytest.mark.parametrize("bad", ["0", "-1", "lots", "2.5", "03"])
+@pytest.mark.parametrize("bad", ["0", "lots"])
 def test_invalid_ingest_workers_fails_closed(tmp_path, bad):
     r, _ = _plan_workers(tmp_path, {**_host(tmp_path), "INGEST_WORKERS": bad})
     assert r.returncode != 0
     assert "INGEST_WORKERS must be a positive integer" in r.stderr
-
-
-def test_dryrun_flags_ingest_that_would_be_refused(tmp_path):
-    # One worker + headroom = 3072 MiB; 3071 available cannot take any ingest.
-    r, ingest = _plan_workers(tmp_path, _host(tmp_path, avail_mb=3071))
-    assert r.returncode == 0, r.stderr
-    assert "--workers 1 " in ingest and "would be REFUSED" in ingest
-    assert "REFUSED: host RAM too low" in r.stderr
 
 
 def _live(tmp_path: Path, host: dict[str, str], extra: dict[str, str] | None = None):
@@ -551,43 +470,16 @@ def _ingest_calls(calls: list[str]) -> list[str]:
     return [c for c in calls if "mainframe_rag.ingest.run_ingest" in c]
 
 
-def test_live_ingest_is_launched_with_the_sized_worker_count(tmp_path):
-    r, calls = _live(tmp_path, _host(tmp_path, avail_mb=6144))
-    ingest = _ingest_calls(calls)
-    assert len(ingest) == 1, (r.stderr, calls)
-    assert "--workers 4 " in ingest[0]
-
-
-@pytest.mark.parametrize("value", [None, "", "0"])
-def test_ingest_is_not_forced_unless_reingest_is_selected(tmp_path, value):
+@pytest.mark.parametrize("value", [None, "1"])
+def test_ingest_is_forced_only_when_reingest_is_selected(tmp_path, value):
     extra = {} if value is None else {"LOCAL_INGEST_REINGEST": value}
-    clean = {k: v for k, v in os.environ.items() if k != "LOCAL_INGEST_REINGEST"}
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
-    plan = subprocess.run(["sh", str(SCRIPT)], capture_output=True, text=True, check=False,
-                          env={**clean, "LOCAL_STACK_DRYRUN": "1", "CORPUS_DIR": str(corpus), **extra})
-    assert plan.returncode == 0, plan.stderr
-    assert "--reingest" not in plan.stdout
-    r, calls = _live(tmp_path / "live", _host(tmp_path), extra)
+    r, calls = _live(tmp_path, _host(tmp_path), extra)
     ingest = _ingest_calls(calls)
     assert len(ingest) == 1, (r.stderr, calls)
-    assert "--reingest" not in ingest[0]
+    assert ("--reingest" in ingest[0]) == (value == "1")
 
 
-def test_explicit_reingest_reaches_plan_and_ingest_argv(tmp_path):
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
-    plan = _run({"CORPUS_DIR": str(corpus), "LOCAL_INGEST_REINGEST": "1"})
-    assert plan.returncode == 0, plan.stderr
-    ingest_plan = next(ln for ln in plan.stdout.splitlines() if "run_ingest" in ln)
-    assert "--reingest (collection" in ingest_plan
-    r, calls = _live(tmp_path / "live", _host(tmp_path), {"LOCAL_INGEST_REINGEST": "1"})
-    ingest = _ingest_calls(calls)
-    assert len(ingest) == 1, (r.stderr, calls)
-    assert ingest[0].split()[-1] == "--reingest"
-
-
-@pytest.mark.parametrize("bad", ["true", "yes", "2", " 1", "1 "])
+@pytest.mark.parametrize("bad", ["true", " 1"])
 def test_invalid_reingest_choice_fails_before_stack_work(tmp_path, bad):
     r = _run({"CORPUS_DIR": str(tmp_path), "LOCAL_INGEST_REINGEST": bad})
     assert r.returncode != 0

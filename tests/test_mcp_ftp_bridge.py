@@ -89,41 +89,24 @@ JES_FIXTURE = [
 ]
 
 
-def test_dataset_read_sequential() -> None:
+def test_dataset_read_sequential_member_listing_and_stable_errors() -> None:
     fake = FakeFTP()
     fake.files["'SYS1.PARMLIB'"] = b"LINE1\nLINE2\n"
+    fake.files["'SYS1.PROCLIB'(IEFBR14)"] = b"//X EXEC PGM=IEFBR14\n"
+    fake.listings["'SYS1.PROCLIB'"] = ["IEFBR14", "SORT"]
     out = bridge.dataset_read(_session(fake), "sys1.parmlib")
     assert out["isError"] is False
     assert out["content"][0]["text"] == "LINE1\nLINE2\n"
     assert "TYPE A" in fake.commands  # EBCDIC converted on the wire
-
-
-def test_dataset_read_pds_member() -> None:
-    fake = FakeFTP()
-    fake.files["'SYS1.PROCLIB'(IEFBR14)"] = b"//X EXEC PGM=IEFBR14\n"
     out = bridge.dataset_read(_session(fake), "SYS1.PROCLIB", member="iefbr14")
-    assert out["isError"] is False
-    assert "IEFBR14" in out["content"][0]["text"]
-
-
-def test_dataset_read_pds_without_member_lists_members() -> None:
-    fake = FakeFTP()
-    fake.listings["'SYS1.PROCLIB'"] = ["IEFBR14", "SORT"]
+    assert out["isError"] is False and "IEFBR14" in out["content"][0]["text"]
     out = bridge.dataset_read(_session(fake), "SYS1.PROCLIB")
-    assert out["isError"] is False
-    assert "IEFBR14" in out["content"][0]["text"]
-
-
-def test_dataset_read_missing_is_not_found() -> None:
-    fake = FakeFTP()
-    out = bridge.dataset_read(_session(fake), "NO.SUCH.DSN")
-    assert out["isError"] is True
-    assert out["content"][0]["text"].startswith("not_found")
-
-
-def test_dataset_read_empty_name_rejected() -> None:
-    out = bridge.dataset_read(_session(FakeFTP()), "   ")
-    assert out["isError"] is True
+    assert out["isError"] is False and "SORT" in out["content"][0]["text"]
+    missing = bridge.dataset_read(_session(fake), "NO.SUCH.DSN")
+    assert missing["isError"] is True
+    assert missing["content"][0]["text"].startswith("not_found")
+    assert "s3cret" not in missing["content"][0]["text"]  # errors never carry credentials
+    assert bridge.dataset_read(_session(fake), "   ")["isError"] is True
 
 
 def test_uss_read_and_path_guards() -> None:
@@ -136,7 +119,7 @@ def test_uss_read_and_path_guards() -> None:
     assert bridge.uss_read(_session(FakeFTP()), "/u/x/../y")["isError"] is True
 
 
-def test_job_status_parses_rc_and_filters() -> None:
+def test_job_status_filters_and_jes_spool_read_with_arg_guards() -> None:
     fake = FakeFTP()
     fake.jes_lines = list(JES_FIXTURE)
     out = bridge.job_status(_session(fake), job_name="PAY*")
@@ -149,10 +132,6 @@ def test_job_status_parses_rc_and_filters() -> None:
     only = bridge.job_status(_session(fake), job_id="job00124")
     assert "BACKUP" in only["content"][0]["text"]
     assert "PAYROLL" not in only["content"][0]["text"]
-
-
-def test_jes_spool_read_and_arg_guards() -> None:
-    fake = FakeFTP()
     fake.files["JOB00123.3"] = b"IEF142I PAYROLL ENDED RC=0\n"
     out = bridge.jes_spool_read(_session(fake), "job00123", "3")
     assert out["isError"] is False
@@ -172,7 +151,11 @@ def test_byte_cap_truncates_with_suffix() -> None:
     assert fake.aborted  # transfer aborted, not downloaded whole
 
 
-def test_timeout_maps_to_stable_code() -> None:
+def test_timeout_and_jes_refusal_map_to_stable_codes_per_tool() -> None:
+    """Timeout gets a stable code. JES refused: job tools report
+    jes_unavailable while dataset reads (no SITE JES involved) keep working —
+    never all-or-nothing."""
+
     class SlowFTP(FakeFTP):
         def retrbinary(self, cmd: str, callback) -> str:
             raise TimeoutError("timed out")
@@ -181,15 +164,14 @@ def test_timeout_maps_to_stable_code() -> None:
     assert out["isError"] is True
     assert out["content"][0]["text"].startswith("timeout")
 
-
-def test_site_failure_is_per_tool() -> None:
-    """JES refused: job tools report jes_unavailable while dataset reads
-    (no SITE JES involved) keep working — never all-or-nothing."""
-
     class NoJesFTP(FakeFTP):
         site_fails = True
 
     out = bridge.job_status(_session(NoJesFTP()))
+    assert out["isError"] is True
+    assert out["content"][0]["text"].startswith("jes_unavailable")
+    assert "s3cret" not in out["content"][0]["text"]
+    out = bridge.jes_spool_read(_session(NoJesFTP()), "JOB00123", "2")
     assert out["isError"] is True
     assert out["content"][0]["text"].startswith("jes_unavailable")
     ok = FakeFTP()
@@ -197,18 +179,23 @@ def test_site_failure_is_per_tool() -> None:
     assert bridge.dataset_read(_session(ok), "A.B")["isError"] is False
 
 
-def test_errors_never_carry_credentials() -> None:
-    fake = FakeFTP()
-    for out in (
-        bridge.dataset_read(_session(fake), "NOPE.DSN"),
-        bridge.job_status(_session(fake)),
-    ):
-        assert "s3cret" not in out["content"][0]["text"]
+def test_connect_protects_the_data_channel_only_over_tls(monkeypatch) -> None:
+    """use_tls selects FTPS and calls PROT P (encrypted data channel); the
+    plain default uses the injected factory and never upgrades silently."""
 
+    class FakeTLS(FakeFTP, ftplib.FTP_TLS):
+        def prot_p(self) -> str:
+            self.commands.append("PROT P")
+            return "200 protection level set"
 
-def test_connect_logs_in_with_config() -> None:
-    config = _config()
-    assert isinstance(bridge.connect(config, FakeFTP), FakeFTP)
+    monkeypatch.setattr(bridge.ftplib, "FTP_TLS", FakeTLS)
+    tls = bridge.connect(_config(use_tls=True), factory=FakeFTP)
+    assert isinstance(tls, FakeTLS)
+    assert tls.commands == ["CONNECT mf.example.com:21", "PROT P"]
+    assert tls.logged_in == ("READER", "s3cret")
+    plain = bridge.connect(_config(), factory=FakeFTP)
+    assert type(plain) is FakeFTP
+    assert plain.commands == ["CONNECT mf.example.com:21"]
 
 
 # ------------------------------------------------------- MCP framing
@@ -228,7 +215,9 @@ def _call(name: str, args: dict) -> dict:
     )
 
 
-def test_initialize_negotiates_and_identifies() -> None:
+def test_initialize_negotiates_and_tools_list_registers_exactly_the_allowlist() -> None:
+    """Registration lock: the dispatch table IS the capability tier — any
+    fifth tool fails this test."""
     reply = server.handle_request(
         {"jsonrpc": "2.0", "id": 7, "method": "initialize",
          "params": {"protocolVersion": "2024-11-05"}},
@@ -241,9 +230,6 @@ def test_initialize_negotiates_and_identifies() -> None:
     assert server.handle_request({"jsonrpc": "2.0", "id": 8, "method": "ping"}, _config(), lambda _c: FakeFTP())["result"] == {}
 
 
-def test_tools_list_registers_exactly_the_allowlist() -> None:
-    """Registration lock: the dispatch table IS the capability tier — any
-    fifth tool fails this test."""
     reply = server.handle_request(
         {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
         _config(),
@@ -381,7 +367,8 @@ def test_tools_call_span_joins_parent_and_carries_bounded_attrs(monkeypatch) -> 
     test_tracer = provider.get_tracer("test")
     monkeypatch.setattr(server_mod, "tracer", test_tracer)
     fake = FakeFTP()
-    fake.files["JOB00123.3"] = b"IEF142I PAYROLL ENDED RC=0\n"
+    body = b"IEF142I PAYROLL ENDED RC=0\npassword hunter2\nSECRET=abc123\n"
+    fake.files["JOB00123.3"] = body
 
     parent = test_tracer.start_span("agent-live-fetch")
     parent_ctx = trace.set_span_in_context(parent)
@@ -400,47 +387,14 @@ def test_tools_call_span_joins_parent_and_carries_bounded_attrs(monkeypatch) -> 
     assert child.parent.span_id == parent.get_span_context().span_id
     attrs = dict(child.attributes or {})
     assert attrs["mcp.tool"] == "jes_spool_read"
-    assert attrs["mcp.bytes_out"] == len(b"IEF142I PAYROLL ENDED RC=0\n")
+    assert attrs["mcp.bytes_out"] == len(body)
     assert attrs["mcp.is_error"] is False
     assert isinstance(attrs["mcp.elapsed_ms"], int)
-
-
-def test_span_attrs_never_carry_content_or_secrets(monkeypatch) -> None:
-    """Adversarial: spool bytes containing secret-looking text must not
-    appear in any span attribute value."""
-    from mainframe_rag.mcp import server as server_mod
-
-    provider, exporter = _test_tracer()
-    monkeypatch.setattr(server_mod, "tracer", provider.get_tracer("test"))
-    fake = FakeFTP()
-    fake.files["'PAYROLL.DATA'"] = b"password hunter2\nSECRET=abc123\nsalary 99999\n"
-    server_mod.handle_request(
-        {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-         "params": {"name": "dataset_read", "arguments": {"dataset": "PAYROLL.DATA"}}},
-        _config(),
-        lambda _cfg: fake,
-    )
+    # Attributes are ids/counts only: spool content and credentials never appear.
     haystack = json.dumps(
         [dict(s.attributes or {}) for s in exporter.get_finished_spans()], default=str
     )
-    assert "hunter2" not in haystack
-    assert "abc123" not in haystack
-    assert "s3cret" not in haystack
-
-
-def test_tracing_off_by_default_serves_untraced(monkeypatch) -> None:
-    """No endpoint configured: the proxy tracer no-ops and serving is
-    byte-identical (this is also what the pre-tracing tests exercise)."""
-    monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
-    fake = FakeFTP()
-    fake.files["/u/r/n.txt"] = b"hi\n"
-    reply = server.handle_request(
-        {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-         "params": {"name": "uss_read", "arguments": {"path": "/u/r/n.txt"}}},
-        _config(),
-        lambda _cfg: fake,
-    )
-    assert reply["result"]["content"][0]["text"] == "hi\n"
+    assert "hunter2" not in haystack and "abc123" not in haystack and "s3cret" not in haystack
 
 
 def test_lifespan_wires_tracer_setup_and_shutdown(monkeypatch) -> None:

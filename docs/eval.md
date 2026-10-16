@@ -601,7 +601,7 @@ VENUE=rc sh scripts/tools/run-task.sh eval:capture-pool          # records into 
 #    (the raw script also takes --no-ce / --max-queries; see its --help)
 # 2. Carry pools.jsonl back (ids/ranks/scores only, never chunk text —
 #    safe to move; still never tune against the frozen holdout).
-# 3. Replay locally (record_to_rows → replay_pool → replay_rank): sweep
+# 3. Replay locally (record_to_rows → replay_pool → rank the replayed pool): sweep
 #    type-boosts, fusion alpha, and diversity caps hermetically, no GPU.
 #    The sweep CLI runs the production chain per config and scores
 #    doc-level recall/MRR against the tune golden:

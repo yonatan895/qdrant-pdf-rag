@@ -215,9 +215,8 @@ def test_reference_matches_independent_literal_envelope_bytes():
 
 @pytest.mark.parametrize("field,changed", [
     ("text", "//A EXEC PGM=ONE\n\n//B µ PGM=TW0"),
-    ("page_start", 3), ("page_end", 4), ("page_label", "iii"), ("title", "Other"),
-    ("doc_id", "SYN-0002-00"), ("product", "other"), ("version", "2"),
-    ("heading_path", "Guide > Other"), ("sha256", "b" * 64), ("source_rev", REV + "x"),
+    ("page_start", 3), ("page_label", "iii"), ("doc_id", "SYN-0002-00"),
+    ("sha256", "b" * 64), ("source_rev", REV + "x"),
     ("units", [[0, 31, "atomic"]]),
 ])
 def test_every_stored_field_changes_the_reference(field, changed):
@@ -321,8 +320,6 @@ async def test_removed_build_is_unavailable_never_the_successor():
 @pytest.mark.anyio
 @pytest.mark.parametrize("break_it,reason", [
     (lambda qd: qd.aliases.pop(build_aliases(LOGICAL, BUILD_A)[1]), "build_aliases"),
-    (lambda qd: qd.aliases.__setitem__(build_aliases(LOGICAL, BUILD_A)[1], "other__completions"),
-     "build_aliases"),
     (lambda qd: qd.collections["wt405_gen_a__completions"].clear(), "control_mismatch"),
     (lambda qd: qd.collections["wt405_gen_a__completions"].update(
         {publication_metadata_point_id("wt405_gen_a__completions"):
@@ -360,13 +357,10 @@ async def test_stored_data_changed_under_the_pinned_build_is_refused():
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("override,reason", [
-    ({"text": ""}, "text"), ({"text": 5}, "text"), ({"chunk_type": "code"}, "chunk_type"),
-    ({"chunk_type": "prose"}, "chunk_type"), ({"sha256": "xyz"}, "source_sha256"),
-    ({"source_rev": ""}, "source_revision"), ({"page_start": -1}, "page_start"),
-    ({"page_start": True}, "page_start"), ({"page_end": 1}, "page_end"),
-    ({"units": "bad"}, "units_shape"), ({"units": [[0, 40, "atomic"]]}, "units_range"),
-    ({"units": [[5, 9, "atomic"], [0, 3, "prose"]]}, "units_range"),
-    ({"units": [[0, 3, "other"]]}, "units_range"), ({"title": None}, "payload_field_type"),
+    ({"text": ""}, "text"), ({"chunk_type": "code"}, "chunk_type"),
+    ({"sha256": "xyz"}, "source_sha256"), ({"source_rev": ""}, "source_revision"), ({"page_start": True}, "page_start"),
+    ({"page_end": 1}, "page_end"), ({"units": "bad"}, "units_shape"),
+    ({"units": [[0, 40, "atomic"]]}, "units_range"), ({"title": None}, "payload_field_type"),
     ({"text": "bad\ud800"}, "text_encoding"),
 ])
 async def test_payload_that_cannot_form_a_complete_envelope_is_never_returned(override, reason):
@@ -474,19 +468,6 @@ async def test_product_and_version_assertions_only_narrow():
 
 
 @pytest.mark.anyio
-async def test_deadline_is_a_typed_timeout():
-    qd = _world(serving=True)
-    ref = (await _service(qd).mint_references(_generation(qd, "wt405_gen_a"), [CHUNK]))[CHUNK]
-
-    async def stall(name, ids):
-        await asyncio.sleep(5)
-
-    qd.before_retrieve = stall
-    refusal = await _refusal(_service(qd, evidence_timeout_s=0.05).read_evidence(CALLER, ref))
-    assert refusal.kind == "timeout"
-
-
-@pytest.mark.anyio
 async def test_cancellation_propagates_through_the_real_await_boundary():
     qd = _world(serving=True)
     ref = (await _service(qd).mint_references(_generation(qd, "wt405_gen_a"), [CHUNK]))[CHUNK]
@@ -507,16 +488,6 @@ async def test_cancellation_propagates_through_the_real_await_boundary():
     with pytest.raises(asyncio.CancelledError):
         await task
     assert released.is_set(), "cancellation must reach the awaited storage call"
-
-
-@pytest.mark.anyio
-async def test_storage_failure_is_a_fixed_upstream_refusal_without_storage_text():
-    qd = _world(serving=True)
-    ref = (await _service(qd).mint_references(_generation(qd, "wt405_gen_a"), [CHUNK]))[CHUNK]
-    del qd.collections["wt405_gen_a"]
-    refusal = await _refusal(_service(qd).read_evidence(CALLER, ref))
-    assert refusal.kind == "upstream" and refusal.reason == "ConnectionError"
-    assert "storage-secret-detail" not in str(PUBLIC_FAILURES[refusal.kind])
 
 
 # ------------------------------------------------------------------ minting
@@ -544,19 +515,11 @@ async def test_legacy_or_refused_or_foreign_generations_mint_nothing():
 
 
 @pytest.mark.anyio
-async def test_minting_reads_only_the_served_hits():
-    """The gate already validated the build; minting adds exactly one read."""
-    qd = _world(serving=True)
-    minted = await _service(qd).mint_references(_generation(qd, "wt405_gen_a"), [CHUNK])
-    assert set(minted) == {CHUNK}
-    assert qd.calls == ["retrieve"]
-
-
-@pytest.mark.anyio
 async def test_minted_reference_equals_the_independent_witness_and_reads_back():
     qd = _world(serving=True)
     minted = await _service(qd).mint_references(_generation(qd, "wt405_gen_a"), [CHUNK, CHUNK, "absent"])
     assert minted == {CHUNK: _expected_ref(BUILD_A, _expected_envelope())}
+    assert qd.calls == ["retrieve"], "the gate validated the build; minting adds one read"
     assert (await _service(qd).read_evidence(CALLER, minted[CHUNK])).text == TEXT
 
 

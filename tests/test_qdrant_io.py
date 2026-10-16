@@ -58,7 +58,7 @@ _POLICY = {
 }
 
 
-def test_ensure_collection_creates_named_vectors_and_sparse():
+def test_ensure_collection_creates_schema_and_indexes_before_load():
     client = RecordingClient(exists=False)
     ensure_collection(client, _settings(768))
     vectors = client.created["vectors_config"]
@@ -71,45 +71,27 @@ def test_ensure_collection_creates_named_vectors_and_sparse():
     assert vectors["dense"].quantization_config.scalar.always_ram is True
     assert sparse["bm25"].modifier == models.Modifier.IDF
     assert client.created["on_disk_payload"] is True
-
-
-def test_ensure_collection_creates_all_payload_indexes_before_load():
-    client = RecordingClient(exists=False)
-    ensure_collection(client, _settings(768))
+    # Unset policy reproduces server-default creation exactly (issue #360):
+    # no shard/replication/consistency keys travel.
+    for key in ("shard_number", "replication_factor", "write_consistency_factor"):
+        assert key not in client.created
     by_name = dict(client.indexes)
     for kw in ("vendor", "product", "version", "doc_id", "chunk_type",
                "message_ids", "members", "system_codes", "sha256", "source_rev"):
         assert by_name[kw] == models.PayloadSchemaType.KEYWORD, kw
     assert by_name["page_start"] == models.PayloadSchemaType.INTEGER
     assert len(client.indexes) == 11
+    # Hash mode pins the dimension regardless of DENSE_DIM.
+    hashed = RecordingClient(exists=False)
+    ensure_collection(hashed, Settings(embed_mode="hash", dense_dim=None, _env_file=None))
+    assert hashed.created["vectors_config"]["dense"].size == 256
 
 
-def test_ensure_collection_fails_fast_on_dim_mismatch():
-    client = RecordingClient(exists=True, vector_size=384)
+def test_ensure_collection_refuses_dimension_problems():
     with pytest.raises(DimMismatchError):
-        ensure_collection(client, _settings(768))
-
-
-def test_ensure_collection_hash_mode_uses_fixed_dim():
-    client = RecordingClient(exists=False)
-    s = Settings(embed_mode="hash", dense_dim=None, _env_file=None)
-    ensure_collection(client, s)
-    assert client.created["vectors_config"]["dense"].size == 256
-
-
-def test_ensure_collection_requires_dense_dim():
-    client = RecordingClient(exists=False)
+        ensure_collection(RecordingClient(exists=True, vector_size=384), _settings(768))
     with pytest.raises(RuntimeError, match="DENSE_DIM"):
-        ensure_collection(client, _settings(dim=None))
-
-
-def test_ensure_collection_unset_policy_creates_without_distribution_keys():
-    """Unset policy reproduces today's server-default creation exactly
-    (issue #360): no shard/replication/consistency keys travel."""
-    client = RecordingClient(exists=False)
-    ensure_collection(client, _settings(768))
-    for key in ("shard_number", "replication_factor", "write_consistency_factor"):
-        assert key not in client.created
+        ensure_collection(RecordingClient(exists=False), _settings(dim=None))
 
 
 def test_ensure_collection_forwards_selected_policy_verbatim():
@@ -120,20 +102,22 @@ def test_ensure_collection_forwards_selected_policy_verbatim():
     assert client.created["write_consistency_factor"] == 1
 
 
-def test_ensure_collection_existing_matching_policy_passes_without_recreation():
+def test_ensure_collection_existing_policy_is_examined_never_recreated():
     live = {"shard_number": 6, "replication_factor": 2, "write_consistency_factor": 1}
-    client = RecordingClient(exists=True, vector_size=768, live_params=live)
-    ensure_collection(client, _settings(768, **_POLICY))
-    assert client.created is None  # examined, never recreated
-
-
-def test_ensure_collection_existing_partial_policy_checks_only_selected_keys():
-    """Unset keys are not examined: an operator selecting only replication
-    does not fail on the shard count the server chose."""
-    live = {"shard_number": 99, "replication_factor": 2, "write_consistency_factor": 1}
-    client = RecordingClient(exists=True, vector_size=768, live_params=live)
-    ensure_collection(client, _settings(768, qdrant_replication_factor=2))
-    assert client.created is None
+    matching = RecordingClient(exists=True, vector_size=768, live_params=live)
+    ensure_collection(matching, _settings(768, **_POLICY))
+    assert matching.created is None
+    # Unset keys are not examined: selecting only replication does not fail on
+    # the shard count the server chose.
+    partial = RecordingClient(
+        exists=True, vector_size=768, live_params={**live, "shard_number": 99}
+    )
+    ensure_collection(partial, _settings(768, qdrant_replication_factor=2))
+    assert partial.created is None
+    # A live info without readable values is unknown, not a mismatch.
+    unreadable = RecordingClient(exists=True, vector_size=768, live_params=None)
+    ensure_collection(unreadable, _settings(768, **_POLICY))
+    assert unreadable.created is None
 
 
 def test_ensure_collection_existing_mismatch_fails_closed_without_mutation():
@@ -143,14 +127,6 @@ def test_ensure_collection_existing_mismatch_fails_closed_without_mutation():
         ensure_collection(client, _settings(768, **_POLICY))
     assert client.created is None  # never recreated
     assert client.indexes == []  # refused before index reconciliation
-
-
-def test_ensure_collection_existing_unreadable_policy_values_are_not_mismatches():
-    """A live info without readable values is unknown, not a mismatch —
-    absence of evidence must not fail a healthy collection."""
-    client = RecordingClient(exists=True, vector_size=768, live_params=None)
-    ensure_collection(client, _settings(768, **_POLICY))
-    assert client.created is None
 
 
 def test_upsert_chunks_payload_is_slimmed_without_embed_text():
@@ -202,6 +178,10 @@ def test_upsert_chunks_payload_is_slimmed_without_embed_text():
     assert payload["text"] == "This is the main body text of the chunk."
     assert payload["heading_path"] == "Chapter 1 > Overview"
     assert "embed_text" not in payload, "embed_text must not be stored in point payload"
+    # Revision identity travels with the point (normalized labels + content hash);
+    # the indexed code field exists on every point, code-bearing or not.
+    assert payload["source_rev"] == "ibm|z/os|3.2|abc123"
+    assert payload["system_codes"] == []
 
 
 
@@ -310,34 +290,3 @@ def test_completion_code_round_trips_ingest_to_query_filter():
     )
     assert client.upserted_points
     assert all(p.payload["system_codes"] == [] for p in client.upserted_points)
-
-
-def test_completion_codes_key_present_even_without_codes():
-    """The key is written unconditionally, so the indexed field exists on
-    every point instead of only on code-bearing chunks."""
-    from mainframe_rag.ingest.chunk import Chunk
-    from mainframe_rag.ingest.ibm_pdf import ParsedDoc
-    from mainframe_rag.ingest.qdrant_io import upsert_chunks
-
-    class UpsertRecordingClient(RecordingClient):
-        def __init__(self):
-            super().__init__()
-            self.upserted_points = []
-
-        def upsert(self, collection_name, *, points, wait=True):
-            self.upserted_points.extend(points)
-            return True
-
-    parsed = ParsedDoc(
-        path="manual.pdf", doc_id="SC14-7315-70", sha256="abc123", vendor="IBM",
-        product="z/OS", version="3.2", title="Sample Manual", page_count=10,
-    )
-    chunk = Chunk(
-        chunk_id="00000000-0000-0000-0000-000000000001", doc_id="SC14-7315-70",
-        heading_path="Chapter 1 > Overview", page_start=1, page_label="1-1",
-        chunk_type="narrative", text="No codes on this page.", message_ids=[],
-        members=[], ordinal=0,
-    )
-    client = UpsertRecordingClient()
-    upsert_chunks(client, _settings(4), parsed, [chunk], [([0.1] * 4, ([1], [1.0]))])
-    assert client.upserted_points[0].payload["system_codes"] == []

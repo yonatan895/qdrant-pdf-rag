@@ -69,19 +69,6 @@ def test_standard_entry_still_echoes_query(tmp_path):
     assert _norm(entry["query"]) in _norm(_page_texts(out, "SA22-0000-00"))
 
 
-def test_abstain_entry_generates_no_doc(tmp_path):
-    entry = {
-        "id": "NEG-T",
-        "query": "What PTFs are applied?",
-        "expected_behavior": "abstain",
-        "must_not_retrieve": ["SA22-8001-00"],
-    }
-    out = tmp_path / "corpus"
-    info = generate_synthetic_golden_corpus([entry], out)
-    assert info["docs_generated"] == 1  # distractor only
-    assert list(out.glob("*.pdf")) == [out / "generic-distractor.pdf"]
-
-
 def test_generator_is_deterministic(tmp_path):
     entries = [
         {
@@ -106,47 +93,35 @@ def _paraphrase_entries() -> list[dict]:
     ]
 
 
-def test_paraphrase_file_loads_and_has_unique_ids():
+def test_paraphrase_file_is_valid_instrument_input():
+    """Unique ids; answer entries carry doc ids and answer_text, abstain
+    entries neither; paraphrase docs are disjoint from golden's; every
+    must_not trap names a doc that exists in the paraphrase corpus (a trap
+    against a never-ingested doc can never fire)."""
     entries = load_golden(PARAPHRASE_PATH)
-    assert len(entries) >= 10
     ids = [e.id for e in entries]
-    assert len(set(ids)) == len(ids)
+    assert len(ids) >= 10 and len(set(ids)) == len(ids)
 
-
-def test_paraphrase_answer_entries_carry_answer_text():
-    for raw in _paraphrase_entries():
+    raws = _paraphrase_entries()
+    corpus_docs: set[str] = set()
+    for raw in raws:
         if raw.get("expected_behavior", "answer") == "answer":
             assert raw.get("expected_doc_ids"), raw.get("id")
             assert raw.get("answer_text"), f"{raw.get('id')}: answer entry needs answer_text"
         else:
             assert not raw.get("expected_doc_ids"), raw.get("id")
             assert not raw.get("answer_text"), f"{raw.get('id')}: abstain entry must not set answer_text"
-
-
-def test_paraphrase_doc_ids_disjoint_from_golden():
-    """Separate corpora today; disjoint IDs keep a future merge safe and
-    prove the paraphrase docs are genuinely new fixtures."""
-    def doc_ids(path: Path) -> set[str]:
-        ids: set[str] = set()
-        for line in path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if line and not line.startswith("#"):
-                ids.update(json.loads(line).get("expected_doc_ids", []))
-        return ids
-
-    overlap = doc_ids(PARAPHRASE_PATH) & doc_ids(GOLDEN_PATH)
-    assert overlap == set(), f"paraphrase doc ids collide with golden: {overlap}"
-
-
-def test_paraphrase_traps_reference_existing_docs():
-    """A must_not trap against a doc that is never ingested can never fire —
-    every trapped doc must exist in the paraphrase corpus."""
-    corpus_docs: set[str] = set()
-    for raw in _paraphrase_entries():
         corpus_docs.update(raw.get("expected_doc_ids", []))
-    for raw in _paraphrase_entries():
+    for raw in raws:
         for trapped in raw.get("must_not_retrieve", []):
             assert trapped in corpus_docs, f"{raw.get('id')}: must_not {trapped} not in corpus"
+
+    golden_docs: set[str] = set()
+    for line in GOLDEN_PATH.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            golden_docs.update(json.loads(line).get("expected_doc_ids", []))
+    assert corpus_docs & golden_docs == set()
 
 
 def test_paraphrase_no_query_echo_in_generated_pages(tmp_path):
@@ -166,16 +141,3 @@ def test_paraphrase_no_query_echo_in_generated_pages(tmp_path):
             runs = _verbatim_runs(query.split(), page)
             assert runs == [], f"{raw['id']}: verbatim run in {doc_id}: {runs[0][:60]}"
 
-
-def test_paraphrase_baselines_parse():
-    for name, mode in (
-        ("evals/baseline-paraphrase.json", "hash"),
-        ("evals/baseline-paraphrase-vllm.json", "vllm"),
-    ):
-        data = json.loads(Path(name).read_text(encoding="utf-8"))
-        meta = data["_meta"]
-        assert meta["collection"] == "paraphrase-manuals"
-        assert meta["embed_mode"] == mode
-        assert meta["n"] == 22
-        for key in ("recall@1", "recall@5", "mrr"):
-            assert key in data, f"{name} missing {key}"

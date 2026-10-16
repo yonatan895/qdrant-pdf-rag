@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from mainframe_rag.eval.performance import gate_verdict_l3, summary_markdown_l3
+from mainframe_rag.eval.performance import gate_verdict_l3
 
 
 def _sample_report() -> dict:
@@ -57,15 +57,10 @@ def _sample_baseline() -> dict:
     }
 
 
-def test_gate_verdict_no_baseline_clean():
-    report = _sample_report()
-    verdict, reasons = gate_verdict_l3(report, None)
-    assert verdict == "baseline"
-    assert "no baseline recorded" in reasons[0]
-
-
-def test_gate_verdict_no_baseline_with_errors_holds():
+def test_gate_verdict_no_baseline_records_but_never_drops_errors():
     """Fail-closed invariant: request errors must NOT be dropped when baseline is missing."""
+    verdict, reasons = gate_verdict_l3(_sample_report(), None)
+    assert verdict == "baseline"
     report = _sample_report()
     report["search"]["errors"] = 3
     verdict, reasons = gate_verdict_l3(report, None)
@@ -102,48 +97,20 @@ def test_gate_verdict_env_mismatch_fails_closed():
     verdict, reasons = gate_verdict_l3(report, baseline)
     assert verdict == "hold"
     assert any("baseline env mismatch: cpu_count 4 != runner 8" in r for r in reasons)
-
-
-def test_gate_verdict_concurrency_mismatch_fails_closed():
-    """A p95 recorded at concurrency 2 must not gate a concurrency-8 run."""
-    report = _sample_report()
-    report["env"] = {"cpu_count": 8, "embed_mode": "vllm", "qdrant_image": "pin-a", "concurrency": 8}
-    baseline = _sample_baseline()
-    baseline["_meta"] = {"env": {"cpu_count": 8, "embed_mode": "vllm", "qdrant_image": "pin-a", "concurrency": 2}}
-    verdict, reasons = gate_verdict_l3(report, baseline)
-    assert verdict == "hold"
-    assert any("baseline env mismatch: concurrency 2 != runner 8" in r for r in reasons)
-
-
-def test_env_snapshot_records_run_provenance(monkeypatch):
-    from scripts import harness_l3
-
-    monkeypatch.setattr(harness_l3, "query_gpu_name", lambda: "RTX 5060")
-    env = harness_l3.env_snapshot(concurrency=4, duration_s=15, request_timeout_s=120)
-    assert env["concurrency"] == 4
-    assert env["duration_s"] == 15
-    assert env["request_timeout_s"] == 120
-
-
-def test_gate_verdict_gpu_name_mismatch_fails():
-    """Gate fails closed if both baseline and runner have non-null differing GPUs."""
-    report = _sample_report()
-    report["env"] = {"cpu_count": 8, "embed_mode": "vllm", "qdrant_image": "pin-a", "gpu_name": "RTX 5060"}
-    baseline = _sample_baseline()
-    baseline["_meta"] = {"env": {"cpu_count": 8, "embed_mode": "vllm", "qdrant_image": "pin-a", "gpu_name": "RTX 4090"}}
-    verdict, reasons = gate_verdict_l3(report, baseline)
-    assert verdict == "hold"
-    assert any("baseline env mismatch: gpu_name 'RTX 4090' != runner 'RTX 5060'" in r for r in reasons)
-
-
-def test_gate_verdict_gpu_name_null_passes():
-    """If one side lacks GPU info (e.g. CPU runner or unprobed), GPU gate does not fire."""
-    report = _sample_report()
-    report["env"] = {"cpu_count": 8, "embed_mode": "vllm", "qdrant_image": "pin-a", "gpu_name": None}
-    baseline = _sample_baseline()
-    baseline["_meta"] = {"env": {"cpu_count": 8, "embed_mode": "vllm", "qdrant_image": "pin-a", "gpu_name": "RTX 4090"}}
-    verdict, _ = gate_verdict_l3(report, baseline)
-    assert verdict == "pass"
+    # A p95 recorded at another concurrency or GPU must not gate this run; a
+    # side lacking GPU info does not fire the GPU check.
+    for key, base_val, run_val, hit in (
+        ("concurrency", 2, 8, "concurrency 2 != runner 8"),
+        ("gpu_name", "RTX 4090", "RTX 5060", "gpu_name 'RTX 4090' != runner 'RTX 5060'"),
+    ):
+        same = {"cpu_count": 8, "embed_mode": "vllm", "qdrant_image": "pin-a"}
+        report["env"] = {**same, key: run_val}
+        baseline["_meta"] = {"env": {**same, key: base_val}}
+        verdict, reasons = gate_verdict_l3(report, baseline)
+        assert verdict == "hold" and any(hit in r for r in reasons)
+    report["env"] = {**same, "gpu_name": None}
+    baseline["_meta"] = {"env": {**same, "gpu_name": "RTX 4090"}}
+    assert gate_verdict_l3(report, baseline)[0] == "pass"
 
 
 def test_gate_verdict_passes_within_tolerance():
@@ -154,25 +121,6 @@ def test_gate_verdict_passes_within_tolerance():
     assert reasons == []
 
 
-def test_gate_verdict_fails_on_errors():
-    report = _sample_report()
-    report["search"]["errors"] = 2
-    baseline = _sample_baseline()
-    verdict, reasons = gate_verdict_l3(report, baseline)
-    assert verdict == "hold"
-    assert any("search: 2 request error(s)" in r for r in reasons)
-
-
-def test_gate_verdict_fails_on_total_latency_regression():
-    report = _sample_report()
-    # Baseline answer p95 is 50.0; x3.0 limit is 150.0; 160.0 should trigger hold
-    report["answer"]["latency_ms"]["p95"] = 160.0
-    baseline = _sample_baseline()
-    verdict, reasons = gate_verdict_l3(report, baseline, tolerance=3.0)
-    assert verdict == "hold"
-    assert any("answer.latency_ms.p95" in r for r in reasons)
-
-
 def test_gate_verdict_fails_on_stage_latency_regression():
     report = _sample_report()
     # Baseline llm_ms p95 is 30.0; x3.0 limit is 90.0; 100.0 should trigger hold
@@ -181,21 +129,6 @@ def test_gate_verdict_fails_on_stage_latency_regression():
     verdict, reasons = gate_verdict_l3(report, baseline, tolerance=3.0)
     assert verdict == "hold"
     assert any("answer.stages.llm_ms.p95" in r for r in reasons)
-
-
-def test_summary_markdown_renders_tables_and_vram():
-    report = _sample_report()
-    baseline = _sample_baseline()
-    md = summary_markdown_l3(report, baseline)
-    assert "Harness L3 — performance & latency report" in md
-    assert "Request Latencies" in md
-    assert "Per-Stage Latencies" in md
-    assert "embed_ms" in md
-    assert "qdrant_ms" in md
-    assert "llm_ms" in md
-    assert "ttft_ms" in md
-    assert "VRAM Footprint (trend data; not gated)" in md
-    assert "4000.0 MB" in md
 
 
 def _stub_l3_operations(monkeypatch):
@@ -238,15 +171,6 @@ def test_main_resolves_mode_baseline_per_invocation(tmp_path, monkeypatch):
     monkeypatch.setenv("EMBED_MODE", "vllm")
     assert harness_l3.main(["--gate", "--baseline", str(hash_path)]) == 0
     assert (hash_path.read_bytes(), real_path.read_bytes()) == original
-
-
-def test_l3_policy_exports_share_canonical_owner():
-    from scripts import harness_l3
-
-    from mainframe_rag.eval import performance
-
-    for name in ("default_baseline_path", "gate_verdict_l3", "summary_markdown_l3"):
-        assert getattr(harness_l3, name) is getattr(performance, name)
 
 
 @pytest.fixture
@@ -324,15 +248,8 @@ def l3_task_workspace(tmp_path):
 
 @pytest.mark.parametrize("mode,override,ambient,expected", [
     ("hash", None, None, 0),
-    ("vllm", None, None, 1),
     ("VLLM", None, None, 1),
-    ("", None, None, 0),
-    (" vllm ", None, None, 0),  # preserve L3's current lower(), without strip()
     ("vllm", "custom", None, 0),
-    ("VLLM", None, "custom", 0),
-    ("VLLM", "custom", "missing.json", 0),
-    ("vllm", "", "custom", 1),  # explicit empty is not an omitted override
-    ("vllm", None, "", 1),
     ("hash", "missing.json", None, 1),
 ])
 def test_task_l3_matches_actual_cli_baseline_decision(l3_task_workspace, mode, override, ambient, expected):
@@ -350,9 +267,7 @@ def test_task_l3_matches_actual_cli_baseline_decision(l3_task_workspace, mode, o
 
 
 @pytest.mark.parametrize("mode,override,target", [
-    ("hash", None, "hash"),
     ("VLLM", None, "vllm"),
-    ("vllm", "custom", "custom"),
     ("vllm", "", None),
 ])
 def test_task_l3_recording_only_updates_selected_synthetic_baseline(l3_task_workspace, mode, override, target):

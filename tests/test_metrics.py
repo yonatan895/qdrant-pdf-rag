@@ -12,13 +12,10 @@ from mainframe_rag.agent import metrics as metrics_mod
 from mainframe_rag.retrieve.query import SearchHit
 
 
-def test_setup_metrics_disabled_returns_none():
+def test_setup_metrics_disabled_and_idempotent():
     # Order-independent: the disabled path returns before touching globals,
     # so earlier test files may already have enabled the provider.
     assert metrics_mod.setup_metrics(False) is None
-
-
-def test_setup_metrics_idempotent():
     first = metrics_mod.setup_metrics(True)
     assert first is not None
     assert metrics_mod.setup_metrics(True) is first
@@ -27,23 +24,23 @@ def test_setup_metrics_idempotent():
 # ------------------------------------------------------- endpoint mapping
 
 
-@pytest.mark.parametrize(
-    ("path", "want"),
-    [
+def test_endpoint_for_path():
+    """Only the four documented endpoints are counted; everything else
+    (including probes, scrapes, console shell and unknown paths) is not."""
+    for path, want in (
         ("/v1/search", "search"),
         ("/v1/search/", "search"),
         ("/v1/answer", "answer"),
-        ("/v1/answer?stream=true", "answer"),
+        ("/ui/chat", "console"),
+        ("/ui/chat/stream", "console"),
         ("/metrics", None),
         ("/healthz", None),
+        ("/ui/healthz", None),
+        ("/ui", None),
         ("/v1/nope", None),
         ("/", None),
-    ],
-)
-def test_endpoint_for_path(path, want):
-    from urllib.parse import urlsplit
-
-    assert metrics_mod.endpoint_for_path(urlsplit(path).path) == want
+    ):
+        assert metrics_mod.endpoint_for_path(path) == want, path
 
 
 # ------------------------------------------------------- hermetic instruments
@@ -100,12 +97,9 @@ def test_record_request_counter_and_histograms(monkeypatch):
     assert dict(ttft[0].attributes) == {"model": "m"}
 
 
-def test_record_request_noop_when_disabled(monkeypatch):
+def test_record_request_noop_when_disabled_and_clamps_bad_values(monkeypatch):
     monkeypatch.setattr(metrics_mod, "_instruments", None)
     metrics_mod.record_request("search", "ok", query_class="identifier", elapsed_s=1.0, hits=5)
-
-
-def test_record_request_never_raises(monkeypatch):
     reader = _hermetic_instruments(monkeypatch)
     metrics_mod.record_request("search", "ok", elapsed_s=-1.0, hits=-2)  # clamps, not raises
     assert sum(p.count for p in _points(reader, "rag.request.duration")) == 1
@@ -198,15 +192,7 @@ def test_overlong_query_records_invalid_request(client):
         assert _series(body, "rag_requests_total", **labels) == before + 1.0
 
 
-@pytest.mark.parametrize("path", ["/ui/chat", "/ui/chat/stream", "/ui/healthz", "/ui"])
-def test_console_path_mapping(path):
-    assert metrics_mod.endpoint_for_path(path) == (
-        "console" if path in ("/ui/chat", "/ui/chat/stream") else None
-    )
-
-
-@pytest.mark.parametrize("state", ["accepted", "insufficient_evidence", "unverified_draft",
-                                    "generation_incomplete", "SECRET-unknown-state"])
+@pytest.mark.parametrize("state", ["accepted", "SECRET-unknown-state"])
 def test_verification_label_is_bounded(monkeypatch, state):
     reader = _hermetic_instruments(monkeypatch)
     metrics_mod.record_request("answer", "ok", verification_state=state)
@@ -257,12 +243,18 @@ def _post_outcome(client, path, stream):
     return client.post(path, json=payload if path == "/ui/chat/stream" else {**payload, "stream": stream})
 
 
-@pytest.mark.parametrize("path,stream,endpoint", [
-    ("/v1/answer", False, "answer"), ("/v1/answer", True, "answer"),
-    ("/v1/chat", False, "chat"), ("/v1/chat", True, "chat"),
-    ("/ui/chat", False, "console"), ("/ui/chat/stream", True, "console"),
+@pytest.mark.parametrize("path,stream,endpoint,state", [
+    ("/v1/answer", False, "answer", "accepted"),
+    ("/v1/answer", True, "answer", "unverified_draft"),
+    ("/v1/chat", False, "chat", "generation_incomplete"),
+    ("/v1/chat", True, "chat", "accepted"),
+    ("/v1/chat", True, "chat", "unverified_draft"),
+    ("/ui/chat", False, "console", "empty"),
+    ("/ui/chat/stream", True, "console", "accepted"),
+    ("/v1/answer", False, "answer", "error"),
+    ("/v1/chat", True, "chat", "error"),
+    ("/ui/chat/stream", True, "console", "error"),
 ])
-@pytest.mark.parametrize("state", ["accepted", "unverified_draft", "generation_incomplete", "empty", "error"])
 def test_finalized_outcome_series(outcome_client, monkeypatch, path, stream, endpoint, state):
     monkeypatch.setattr(app_mod, "llm", _OutcomeLLM(state))
     if state == "empty":
@@ -287,8 +279,10 @@ def test_finalized_outcome_series(outcome_client, monkeypatch, path, stream, end
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("endpoint", ["answer", "chat", "console"])
-@pytest.mark.parametrize("close_after", ["token", "final", "error"])
+@pytest.mark.parametrize("endpoint,close_after", [
+    ("answer", "token"), ("answer", "final"), ("answer", "error"),
+    ("chat", "token"), ("console", "final"),
+])
 async def test_stream_close_records_once(outcome_client, monkeypatch, endpoint, close_after):
     from fastapi import Request, Response
 

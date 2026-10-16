@@ -1141,7 +1141,7 @@ Every handler/error shape needs a reachable test; catch narrowly around the
 smallest call, preserve stable 404/405/500 contracts, and never leak internals.
 
 **Evidence:** `tests/test_stream_truncation.py`, `tests/test_vllm_server_contract.py`,
-`tests/test_agent_api.py`, `tests/test_chat_api.py`, `tests/test_mock_vllm.py`,
+`tests/test_agent_api.py`, `tests/test_chat_api.py`,
 `tests/test_probe_gateway.py`, `tests/test_failfast.py`.
 The approved local/CI gateway-only LiteLLM adapter exception is owned by
 [deployment policy](deploy.md#deployment-policy); production gateway protection

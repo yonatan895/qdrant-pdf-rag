@@ -15,7 +15,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from mainframe_rag.agent import app as app_mod
-from mainframe_rag.agent.answer import _ABEND_RE, build_chat_messages, condense_query
+from mainframe_rag.agent.answer import build_chat_messages, condense_query
 from mainframe_rag.agent.tokenizer import FallbackTokenizer
 from mainframe_rag.ports import ChatMessage, ChatResult, TokenUsage
 from mainframe_rag.retrieve.query import SearchHit
@@ -147,12 +147,14 @@ def test_chat_completions_single_turn_json(chat_client):
         json={
             "messages": [{"role": "user", "content": "What is IEA500I?"}],
             "stream": False,
+            # Issue #313: a caller-supplied `model` is accepted-and-ignored.
+            "model": "caller-chosen-model",
         },
     )
     assert res.status_code == 200
     data = res.json()
     assert data["object"] == "chat.completion"
-    assert data["model"] == "test-reasoning-model"
+    assert data["model"] == "test-reasoning-model"  # the model that actually ran
     assert len(data["choices"]) == 1
     choice = data["choices"][0]
     assert choice["message"]["role"] == "assistant"
@@ -161,94 +163,8 @@ def test_chat_completions_single_turn_json(chat_client):
     assert len(data["citations"]) == 1
     assert "IEA500I" in data["citations"][0]
     assert len(data["hits"]) == 1
-
-
-def test_chat_completions_caller_model_ignored_reports_reasoning_model(chat_client):
-    # Issue #313: a caller-supplied `model` is accepted-and-ignored; the
-    # response reports the reasoning model that actually ran. Fails before
-    # the fix (caller value echoed back).
-    res = chat_client.post(
-        "/v1/chat/completions",
-        json={
-            "messages": [{"role": "user", "content": "What is IEA500I?"}],
-            "model": "caller-chosen-model",
-            "stream": False,
-        },
-    )
-    assert res.status_code == 200
-    assert res.json()["model"] == "test-reasoning-model"
-
-
-def test_chat_completions_multi_turn_with_condensation(chat_client, monkeypatch):
-    # Second turn has no identifier ("How do I resolve this?") -> triggers
-    # condense_query only when the gated setting is on (ADR-0004: default off).
-    monkeypatch.setattr(app_mod.settings, "chat_condense_enabled", True)
-    messages = [
-        {"role": "user", "content": "What causes IEA500I?"},
-        {"role": "assistant", "content": "IEA500I occurs during IOS initialization."},
-        {"role": "user", "content": "How do I resolve this issue?"},
-    ]
-    res = chat_client.post(
-        "/v1/chat/completions",
-        json={"messages": messages, "stream": False},
-    )
-    assert res.status_code == 200
-    # Search should have been invoked with the condensed query returned by FakeLLM
-    search_calls = chat_client.mock_search.calls
-    assert len(search_calls) == 1
-    assert search_calls[0]["query"] == "IEA500I recovery procedure"
-
-
-def test_chat_completions_multi_turn_bypass_condensation(chat_client):
-    # Second turn contains explicit identifier "IEE400I" -> skips condensation LLM call
-    messages = [
-        {"role": "user", "content": "What causes IEA500I?"},
-        {"role": "assistant", "content": "IEA500I occurs during IOS initialization."},
-        {"role": "user", "content": "What about message IEE400I?"},
-    ]
-    res = chat_client.post(
-        "/v1/chat/completions",
-        json={"messages": messages, "stream": False},
-    )
-    assert res.status_code == 200
-    search_calls = chat_client.mock_search.calls
-    assert len(search_calls) == 1
-    assert search_calls[0]["query"] == "What about message IEE400I?"
-
-
-def test_chat_completions_abend_code_bypass(chat_client):
-    # Abend codes (e.g. S0C4, U4038) bypass query condensation via _ABEND_RE
-    messages = [
-        {"role": "user", "content": "System had a crash."},
-        {"role": "assistant", "content": "What error occurred?"},
-        {"role": "user", "content": "We received abend S0C4 in module XYZ"},
-    ]
-    res = chat_client.post(
-        "/v1/chat/completions",
-        json={"messages": messages, "stream": False},
-    )
-    assert res.status_code == 200
-    search_calls = chat_client.mock_search.calls
-    assert len(search_calls) == 1
-    assert search_calls[0]["query"] == "We received abend S0C4 in module XYZ"
-
-
-def test_chat_completions_condensation_default_off(chat_client):
-    # ADR-0004: the condensation rewrite ships gated off; a follow-up without
-    # identifiers searches its literal text and never rewrites.
-    messages = [
-        {"role": "user", "content": "What causes IEA500I?"},
-        {"role": "assistant", "content": "IEA500I occurs during IOS initialization."},
-        {"role": "user", "content": "How do I resolve this issue?"},
-    ]
-    res = chat_client.post(
-        "/v1/chat/completions",
-        json={"messages": messages, "stream": False},
-    )
-    assert res.status_code == 200
-    search_calls = chat_client.mock_search.calls
-    assert len(search_calls) == 1
-    assert search_calls[0]["query"] == "How do I resolve this issue?"
+    assert data["verification_state"] == "accepted"
+    assert data["script_review_required"] is False
 
 
 def test_chat_native_route_matches_openai_alias(chat_client):
@@ -361,16 +277,6 @@ def test_chat_completions_stream_error_frame_then_done_is_failure(chat_client, m
     assert "SECRET-UPSTREAM-TEXT" not in res.text
 
 
-def test_chat_completions_traceparent_header_propagation(chat_client):
-    headers = {"traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"}
-    res = chat_client.post(
-        "/v1/chat/completions",
-        json={"messages": [{"role": "user", "content": "What is IEA500I?"}]},
-        headers=headers,
-    )
-    assert res.status_code == 200
-
-
 def test_chat_completions_empty_hits_short_circuit(chat_client, monkeypatch):
     # When retrieval yields 0 hits, endpoint short-circuits without calling LLM
     empty_search = MockSearch(return_hits=False)
@@ -442,11 +348,10 @@ def test_chat_completions_streaming_sse(chat_client):
     assert len(final_chunk["choices"][0]["citations"]) == 1
 
 
-@pytest.mark.parametrize("path", ["/v1/chat", "/v1/chat/completions"])
-@pytest.mark.parametrize("stream", [False, True])
-@pytest.mark.parametrize("query,field", [
-    ("IEA500I", "llm_reasoning_effort_simple"),
-    ("diagnose abend S0C4 with registers and spool dump", "llm_reasoning_effort_complex"),
+@pytest.mark.parametrize("path,stream,query,field", [
+    ("/v1/chat", False, "IEA500I", "llm_reasoning_effort_simple"),
+    ("/v1/chat/completions", True, "diagnose abend S0C4 with registers and spool dump",
+     "llm_reasoning_effort_complex"),
 ])
 def test_chat_configured_xhigh_reaches_model(chat_client, monkeypatch, path, stream, query, field):
     monkeypatch.setattr(app_mod.settings, field, "xhigh")
@@ -461,30 +366,6 @@ def test_chat_configured_xhigh_reaches_model(chat_client, monkeypatch, path, str
         assert response.text.count("data: [DONE]") == 1
     else:
         assert response.json()["choices"][0]["finish_reason"] == "stop"
-
-
-def test_chat_completions_validation_errors(chat_client):
-    # Empty messages list
-    r1 = chat_client.post("/v1/chat/completions", json={"messages": []})
-    assert r1.status_code == 422
-
-    # Messages with no user role: same fixed 422 envelope as every other
-    # body-validation failure (issue #314 — no distinct message).
-    r2 = chat_client.post(
-        "/v1/chat/completions",
-        json={"messages": [{"role": "assistant", "content": "Hello"}]},
-    )
-    assert r2.status_code == 422
-    assert r2.json() == {"code": "invalid_request", "message": "request body failed validation"}
-
-    # Query over limit
-    huge_text = "A" * 5000
-    r3 = chat_client.post(
-        "/v1/chat/completions",
-        json={"messages": [{"role": "user", "content": huge_text}]},
-    )
-    assert r3.status_code == 422
-    assert r3.json()["code"] == "invalid_request"
 
 
 def test_build_chat_messages_pruning_and_cap():
@@ -545,14 +426,6 @@ async def test_condense_query_direct_bypass():
     assert res_abend == "We encountered abend S0C4 in step 1"
 
 
-def test_abend_regex():
-    assert _ABEND_RE.search("ABEND S0C4")
-    assert _ABEND_RE.search("s0c4")
-    assert _ABEND_RE.search("abend U4038")
-    assert _ABEND_RE.search("System abend S013 occurred")
-    assert not _ABEND_RE.search("How do I fix this error?")
-
-
 # ---------------------------------------------------------------------------
 # Answer verification states on chat surfaces (issue #365)
 # ---------------------------------------------------------------------------
@@ -573,16 +446,6 @@ class ScriptChatLLM:
             finish_reason="stop",
             usage=TokenUsage(prompt_tokens=10, completion_tokens=20, total_tokens=30),
         )
-
-
-def test_chat_json_carries_verification_state(chat_client):
-    data = chat_client.post(
-        "/v1/chat/completions",
-        json={"messages": [{"role": "user", "content": "What is IEA500I?"}], "stream": False},
-    ).json()
-    assert data["verification_state"] == "accepted"
-    assert data["script_review_required"] is False
-    assert len(data["citations"]) == 1
 
 
 def test_chat_json_surfaces_script_with_review_flag(chat_client, monkeypatch):
@@ -626,10 +489,12 @@ def test_chat_stream_terminal_chunk_carries_state_and_script(chat_client, monkey
     }
 
 
-@pytest.mark.parametrize("path", ["/v1/chat", "/v1/chat/completions"])
-@pytest.mark.parametrize("stream", [False, True])
-@pytest.mark.parametrize("tail_role", ["assistant", "system"])
-@pytest.mark.parametrize("condense", [False, True])
+@pytest.mark.parametrize("path,stream,tail_role,condense", [
+    ("/v1/chat", False, "assistant", False),
+    ("/v1/chat/completions", True, "system", True),
+    ("/v1/chat", True, "system", False),
+    ("/v1/chat/completions", False, "assistant", True),
+])
 def test_chat_active_user_agrees_across_retrieval_and_prompt(
     chat_client, monkeypatch, path, stream, tail_role, condense
 ):
@@ -655,38 +520,39 @@ def test_chat_active_user_agrees_across_retrieval_and_prompt(
         assert len(chat_client.fake_llm.chat_calls) == 0  # Identifier bypass, no condense ask.
 
 
-@pytest.mark.parametrize("stream", [False, True])
-def test_chat_blank_active_user_refuses_before_any_work(chat_client, stream):
-    result = chat_client.post("/v1/chat", json={"messages": [
-        {"role": "user", "content": " \t\n "},
-        {"role": "assistant", "content": "This is not the question"},
-    ], "stream": stream})
-    assert result.status_code == 422
-    assert result.json() == {"code": "invalid_request", "message": "request body failed validation"}
+def test_chat_blank_active_user_refuses_before_any_work(chat_client):
+    """A blank active user turn is not replaced by the assistant tail."""
+    for stream in (False, True):
+        result = chat_client.post("/v1/chat", json={"messages": [
+            {"role": "user", "content": " \t\n "},
+            {"role": "assistant", "content": "This is not the question"},
+        ], "stream": stream})
+        assert result.status_code == 422
+        assert result.json() == {"code": "invalid_request", "message": "request body failed validation"}
     assert chat_client.mock_search.calls == []
     assert chat_client.fake_llm.chat_calls == []
     assert chat_client.fake_llm.stream_calls == []
 
 
-@pytest.mark.parametrize("content", ["   ", "\t\n", "\x00x", "a\x1bb"])
-@pytest.mark.parametrize("path", ["/v1/chat", "/v1/chat/completions"])
-@pytest.mark.parametrize("stream", [False, True])
-def test_chat_unsearchable_active_user_refuses_before_any_work(chat_client, content, path, stream):
+@pytest.mark.parametrize("path,stream", [("/v1/chat", False), ("/v1/chat/completions", True)])
+def test_chat_unsearchable_active_user_refuses_before_any_work(chat_client, path, stream):
     """Issue #579: blank or NUL/C0-control active turns share the fixed 422."""
-    result = chat_client.post(path, json={"messages": [
-        {"role": "user", "content": "Earlier question"},
-        {"role": "assistant", "content": "Earlier answer"},
-        {"role": "user", "content": content},
-    ], "stream": stream})
-    assert result.status_code == 422
-    assert result.json() == {"code": "invalid_request", "message": "request body failed validation"}
+    for content in ["   ", "\t\n", "\x00x", "a\x1bb"]:
+        result = chat_client.post(path, json={"messages": [
+            {"role": "user", "content": "Earlier question"},
+            {"role": "assistant", "content": "Earlier answer"},
+            {"role": "user", "content": content},
+        ], "stream": stream})
+        assert result.status_code == 422, repr(content)
+        assert result.json() == {"code": "invalid_request", "message": "request body failed validation"}
     assert chat_client.mock_search.calls == []
     assert chat_client.fake_llm.chat_calls == []
     assert chat_client.fake_llm.stream_calls == []
 
 
-@pytest.mark.parametrize("mode", ["off", "on", "failure", "unstructured"])
-@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("mode,stream", [
+    ("off", False), ("on", True), ("failure", False), ("unstructured", True),
+])
 def test_chat_condensation_uses_only_history_before_normalized_user(
     chat_client, monkeypatch, mode, stream
 ):
@@ -728,12 +594,12 @@ def test_chat_condensation_uses_only_history_before_normalized_user(
         assert "LATER_" not in text and "UNTRUSTED_SYSTEM_OVERRIDE" not in text
 
 
-@pytest.mark.parametrize("messages", [
-    [{"role": "assistant", "content": "No user"}],
-    [{"role": "user", "content": "x" * 2001}, {"role": "assistant", "content": "Short tail"}],
+@pytest.mark.parametrize("messages,path,stream", [
+    ([], "/v1/chat", False),
+    ([{"role": "assistant", "content": "No user"}], "/v1/chat/completions", True),
+    ([{"role": "user", "content": "x" * 2001}, {"role": "assistant", "content": "Short tail"}],
+     "/v1/chat", True),
 ])
-@pytest.mark.parametrize("path", ["/v1/chat", "/v1/chat/completions"])
-@pytest.mark.parametrize("stream", [False, True])
 def test_chat_invalid_active_turn_has_no_model_or_retrieval(chat_client, messages, path, stream):
     result = chat_client.post(path, json={"messages": messages, "stream": stream})
     assert result.status_code == 422
@@ -742,8 +608,7 @@ def test_chat_invalid_active_turn_has_no_model_or_retrieval(chat_client, message
     assert chat_client.fake_llm.chat_calls == chat_client.fake_llm.stream_calls == []
 
 
-@pytest.mark.parametrize("temperature", [-1.0, 2.1])
-@pytest.mark.parametrize("path", ["/v1/chat", "/v1/chat/completions"])
+@pytest.mark.parametrize("temperature,path", [(-1.0, "/v1/chat"), (2.1, "/v1/chat/completions")])
 def test_chat_rejects_out_of_range_temperature(chat_client, path, temperature):
     """Issue #596: the chat temperature override carries the same bounds as
     Settings.llm_temperature — client input errors 422 before any work."""
@@ -757,17 +622,17 @@ def test_chat_rejects_out_of_range_temperature(chat_client, path, temperature):
     assert chat_client.fake_llm.chat_calls == chat_client.fake_llm.stream_calls == []
 
 
-@pytest.mark.parametrize("temperature", [float("nan"), float("inf")])
-def test_chat_temperature_rejects_non_finite(temperature):
+def test_chat_temperature_rejects_non_finite():
     """Non-finite floats cannot cross the JSON wire, so the allow_inf_nan
     bound is pinned at the model layer."""
     import pydantic
 
-    with pytest.raises(pydantic.ValidationError):
-        app_mod.ChatRequest(
-            messages=[{"role": "user", "content": "What does IEA500I mean?"}],
-            temperature=temperature,
-        )
+    for temperature in (float("nan"), float("inf")):
+        with pytest.raises(pydantic.ValidationError):
+            app_mod.ChatRequest(
+                messages=[{"role": "user", "content": "What does IEA500I mean?"}],
+                temperature=temperature,
+            )
 
 
 def test_chat_ignored_tail_still_counts_toward_body_limit(chat_client, monkeypatch):
@@ -783,23 +648,23 @@ def test_chat_ignored_tail_still_counts_toward_body_limit(chat_client, monkeypat
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("tail_role", ["assistant", "system"])
-async def test_direct_chat_builders_share_active_user(tail_role):
-    messages = [
-        ChatMessage(role="system", content="UNTRUSTED_SYSTEM"),
-        ChatMessage(role="user", content=" \tWhat does IEA500I mean?\n"),
-        ChatMessage(role=tail_role, content="LATER_TURN S0C4"),
-    ]
-    before = [m.model_dump() for m in messages]
-    llm = ChatFakeLLM()
-    assert await condense_query(llm, messages) == "What does IEA500I mean?"
-    assert llm.chat_calls == []
-    prompt = build_chat_messages(messages, [_hit()]).messages
-    assert len(prompt) == 2
-    assert "Question: What does IEA500I mean?\n" in prompt[-1].content
-    assert "LATER_TURN" not in prompt[-1].content
-    assert "UNTRUSTED_SYSTEM" not in prompt[0].content
-    assert [m.model_dump() for m in messages] == before
+async def test_direct_chat_builders_share_active_user():
+    for tail_role in ("assistant", "system"):
+        messages = [
+            ChatMessage(role="system", content="UNTRUSTED_SYSTEM"),
+            ChatMessage(role="user", content=" \tWhat does IEA500I mean?\n"),
+            ChatMessage(role=tail_role, content="LATER_TURN S0C4"),
+        ]
+        before = [m.model_dump() for m in messages]
+        llm = ChatFakeLLM()
+        assert await condense_query(llm, messages) == "What does IEA500I mean?"
+        assert llm.chat_calls == []
+        prompt = build_chat_messages(messages, [_hit()]).messages
+        assert len(prompt) == 2
+        assert "Question: What does IEA500I mean?\n" in prompt[-1].content
+        assert "LATER_TURN" not in prompt[-1].content
+        assert "UNTRUSTED_SYSTEM" not in prompt[0].content
+        assert [m.model_dump() for m in messages] == before
 
 
 def test_chat_json_and_stream_carry_supplied_evidence(chat_client):

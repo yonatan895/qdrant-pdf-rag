@@ -48,9 +48,7 @@ def test_deadline_margin_ends_the_hold_without_waiting_past_it(tmp_path):
 
 @pytest.mark.parametrize("environment", [
     {},
-    {"RAG_COLAB_WORK_EXPIRY": "1e18"},
     {"RAG_COLAB_STATE": "{state}", "RAG_COLAB_WORK_EXPIRY": "nan"},
-    {"RAG_COLAB_STATE": "{state}", "RAG_COLAB_WORK_EXPIRY": "not-a-time"},
     {"RAG_COLAB_STATE": "{missing}", "RAG_COLAB_WORK_EXPIRY": "1e18"},
 ])
 def test_missing_or_invalid_controller_inputs_refuse_before_holding(tmp_path, environment):

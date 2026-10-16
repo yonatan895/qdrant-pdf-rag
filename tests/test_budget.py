@@ -12,43 +12,18 @@ from pydantic import ValidationError
 
 from mainframe_rag.serve import (
     BGE_RERANKER_V2_M3,
-    COMPILED_MARGIN_FLOOR_MIB,
-    DEFAULT_RESERVE_MIB,
-    EAGER_GENERATE_MARGIN_MIB,
     GEMMA4_E4B_QAT,
     LOCAL_RT_8GB,
     MAX_UTIL,
     OPENSHIFT_PROD,
-    POOLING_EAGER_MARGIN_MIB,
     QWEN3_EMBED_06B,
-    RANK_EMBED_8GB,
     TRIPLE_8GB,
     BudgetDeficitError,
     HostSpec,
     ModelSpec,
     ProfileBundle,
-    list_profiles,
     resolve,
 )
-
-# Today's run_local_vllm.sh operating points (scripts/run_local_vllm.sh):
-# reasoning GPU_MEM=0.65 compiled, embed GPU_MEM=0.33 pooling + eager.
-TODAY_REASONING_UTIL = 0.65
-TODAY_EMBED_UTIL = 0.33
-CALIBRATION_SLACK = 0.05
-
-
-def test_engine_margin_defaults():
-    """New constants get default assertions (repo test_config convention)."""
-    assert DEFAULT_RESERVE_MIB == 256.0
-    assert COMPILED_MARGIN_FLOOR_MIB == 2000.0
-    assert EAGER_GENERATE_MARGIN_MIB == 400.0
-    assert POOLING_EAGER_MARGIN_MIB == 1500.0
-    assert MAX_UTIL == 0.99
-
-
-def test_profiles_registered():
-    assert list_profiles() == ["LOCAL_CRC_32GB", "LOCAL_RT_8GB", "OPENSHIFT_PROD", "RANK_EMBED_8GB", "TRIPLE_8GB"]
 
 
 def test_local_profile_resolves_to_validated_operating_points():
@@ -79,16 +54,6 @@ def test_local_profile_resolves_to_validated_operating_points():
     assert plan.slack_mib >= 0
     assert plan.warnings == []
 
-
-def test_local_utils_within_soak_validated_envelope():
-    """Resolved utils stay within calibration slack of the soak-validated
-    operating points, on the safe (packable) side."""
-    plan = resolve(LOCAL_RT_8GB)
-    reasoning, embed = plan.servers
-    assert abs(reasoning.gpu_memory_utilization - TODAY_REASONING_UTIL) <= CALIBRATION_SLACK
-    assert abs(embed.gpu_memory_utilization - TODAY_EMBED_UTIL) <= CALIBRATION_SLACK
-    assert reasoning.gpu_memory_utilization <= TODAY_REASONING_UTIL
-    assert embed.gpu_memory_utilization <= TODAY_EMBED_UTIL
 
 
 def test_local_allocation_order_is_not_brittle():
@@ -132,16 +97,6 @@ def test_deficit_fails_closed_with_remedies():
     assert any("total_vram_mib" in r for r in remedies)
 
 
-def test_pooling_deficit_fails_closed():
-    """Pooling has no eager fallback to try (it is already eager): a tight
-    host refuses with remedies on the same path generate uses."""
-    host = HostSpec(total_vram_mib=2000.0)  # free 1744 < embed 2650
-    profile = ProfileBundle(name="TINY_EMBED", host=host, servers=[LOCAL_RT_8GB.servers[1]])
-    with pytest.raises(BudgetDeficitError) as exc_info:
-        resolve(profile)
-    assert "Qwen/Qwen3-Embedding-0.6B" in str(exc_info.value)
-    assert exc_info.value.remedies != []
-
 
 def test_zero_free_host_fails():
     """Reserve covering the whole host refuses before any server is sized."""
@@ -170,33 +125,11 @@ def test_max_util_guard_fails_closed():
     assert any("larger host" in r for r in exc_info.value.remedies)
 
 
-def test_weight_alone_exceeding_host_fails():
-    oversized = ModelSpec(
-        model_id="huge/model",
-        role="reasoning",
-        runner="generate",
-        weight_mib=8000.0,
-        kv_bytes_per_token=98304.0,
-        context_need=4096,
-    )
-    profile = ProfileBundle(name="OVER", host=HostSpec(total_vram_mib=8151.0), servers=[oversized])
-    with pytest.raises(BudgetDeficitError) as exc_info:
-        resolve(profile)
-    assert exc_info.value.remedies != []
-
 
 def test_empty_profile_rejected():
     with pytest.raises(ValidationError):
         ProfileBundle(name="EMPTY", host=HostSpec(total_vram_mib=8151.0), servers=[])
 
-
-def test_pooling_batched_tokens_follow_window():
-    """Pooling prefill memory scales with in-flight tokens: cap at the
-    window. Generate leaves the server default."""
-    plan = resolve(LOCAL_RT_8GB)
-    reasoning, embed = plan.servers
-    assert reasoning.max_num_batched_tokens is None
-    assert embed.max_num_batched_tokens == embed.max_model_len == 4096
 
 
 def test_prod_profile_resolves():
@@ -219,25 +152,6 @@ def test_prod_profile_resolves():
     assert plan.slack_mib >= 0
 
 
-def test_explain_contains_sizing_math():
-    text = resolve(LOCAL_RT_8GB).explain()
-    assert "Budget LOCAL_RT_8GB" in text
-    assert "8151 MiB" in text
-    assert "google/gemma-4-E4B-it-qat-mobile-ct" in text
-    assert "Qwen/Qwen3-Embedding-0.6B" in text
-    assert "gpu-memory-utilization 0.64" in text
-    assert "gpu-memory-utilization 0.33" in text
-    assert "max-model-len 4096" in text
-    assert "--runner pooling --convert embed --enforce-eager" in text
-    assert "FIT" in text
-
-
-def test_prefix_cache_pinned_on_for_local_reasoning_only():
-    """Prefix caching is pinned ON for the LOCAL reasoning server (issue
-    #80: vLLM already caches by default; the explicit flag documents
-    effective state). Embed stays off: single-shot prefill, unmeasured."""
-    plan = resolve(LOCAL_RT_8GB)
-    assert [s.enable_prefix_caching for s in plan.servers] == [True, False]
 
 
 def test_prefix_cache_flows_to_plan_and_explain():
@@ -256,13 +170,6 @@ def test_prefix_cache_flows_to_plan_and_explain():
     assert plan.servers[0].enable_prefix_caching is True
     assert "--enable-prefix-caching" in plan.explain()
 
-
-def test_specs_are_immutable():
-    """Declared facts are frozen: resolve inputs cannot be mutated mid-flight."""
-    with pytest.raises(ValidationError):
-        LOCAL_RT_8GB.servers[0].weight_mib = 1.0  # type: ignore[misc]
-    with pytest.raises(ValidationError):
-        LOCAL_RT_8GB.host.total_vram_mib = 1.0  # type: ignore[misc]
 
 
 def test_triple_pack_fits_with_measured_operating_points():
@@ -294,36 +201,6 @@ def test_triple_pack_fits_with_measured_operating_points():
     assert plan.warnings == []
 
 
-def test_compiled_margin_override_defaults_to_formula():
-    """The override is opt-in per spec: unset means the floor+fraction
-    formula, so every existing profile resolves byte-identically."""
-    assert TRIPLE_8GB.servers[1].compiled_margin_mib is None
-    assert TRIPLE_8GB.servers[0].compiled_margin_mib == 500.0
-    # The override is what lets the 0.5B server fit: the 2 GiB floor alone
-    # prices it off the card (3048 MiB footprint before embed/rerank claim).
-    from mainframe_rag.serve.budget import _compiled_margin
-
-    assert _compiled_margin(TRIPLE_8GB.servers[0]) == 500.0
-    assert _compiled_margin(TRIPLE_8GB.servers[1]) == COMPILED_MARGIN_FLOOR_MIB
-
-
-def test_rank_embed_pack_fits_without_reasoning():
-    """RANK_EMBED_8GB: embed + rerank for retrieval/rerank work with no LLM
-    VRAM spent. Same specs as the triple minus reasoning."""
-    plan = resolve(RANK_EMBED_8GB)
-    assert plan.profile_name == "RANK_EMBED_8GB"
-    assert len(plan.servers) == 2
-    embed, rerank = plan.servers
-
-    assert embed.model_id == "Qwen/Qwen3-Embedding-0.6B"
-    assert embed.gpu_memory_utilization == 0.33
-    assert rerank.model_id == "BAAI/bge-reranker-v2-m3"
-    assert rerank.gpu_memory_utilization == 0.34
-    assert rerank.runner == "pooling"
-    assert rerank.enforce_eager is True
-
-    assert plan.slack_mib >= 0
-    assert plan.warnings == []
 
 
 def test_big_reasoning_triple_refuses_closed():

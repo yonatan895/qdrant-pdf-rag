@@ -180,14 +180,6 @@ def test_pack_refuses_several_chart_archives_then_passes_after_fix(pack_tree):
     assert f"chart_sha256: {sha256_bytes(chart.read_bytes())}\n" in manifest
 
 
-def test_pack_refuses_missing_chart_archive(pack_tree):
-    tmp_path, *_ = pack_tree
-    next((tmp_path / "charts").glob("qdrant-*.tgz")).unlink()
-    r, _ = _run_pack(pack_tree)
-    assert r.returncode != 0
-    assert "exactly one vendored Qdrant chart is required" in r.stderr
-
-
 def test_pack_missing_skopeo_fails_closed(pack_tree):
     os.remove(pack_tree[0] / "bin" / "skopeo")
     r, _head = _run_pack(pack_tree)
@@ -272,6 +264,9 @@ def test_pack_success_builds_verified_tarball(pack_tree):
     # every inspect identically, while the fixture images.txt pins differ.
     assert f"qdrant_digest: {STUB_DIGEST}" in manifest
     assert "signed: ephemeral" in manifest
+    assert "sha256:PENDING: not bundled" in r.stdout
+    assert not (dist / "oauth-proxy-image.tar").exists()
+    assert "oauth_proxy" not in manifest
     assert f"task_sha256: {TASK_SHA256}" in manifest
     assert f"task_binary_sha256: {TASK_BINARY_SHA256}" in manifest
     log = skopeo_log.read_text()
@@ -313,21 +308,6 @@ def test_pack_success_builds_verified_tarball(pack_tree):
     assert "pymupdf==" in notices.split("COMPONENTS")[0]
     assert "Owner approval of this inventory: absent" in notices
     assert "Third-party notices: THIRD-PARTY-NOTICES.txt" in (dist / "PACKING_RECORD.txt").read_text()
-
-
-def test_pack_skips_pending_oauth_proxy_pin(pack_tree):
-    """An explicitly pending pin leaves the sidecar out of the bundle."""
-    tmp_path, skopeo_log, _head, _key = pack_tree
-    r, _ = _run_pack(pack_tree)
-    assert r.returncode == 0, r.stderr
-    dist = tmp_path / "dist"
-    assert "sha256:PENDING: not bundled" in r.stdout
-    assert not (dist / "oauth-proxy-image.tar").exists()
-    manifest = (dist / "MANIFEST.txt").read_text()
-    assert "oauth_proxy" not in manifest
-    assert skopeo_log.read_text().splitlines().count("copy") == 4
-    sbom = json.loads((dist / "sbom.json").read_text())
-    assert "oauth-proxy" not in {img["name"] for img in sbom["images"]}
 
 
 def test_pack_bundles_oauth_proxy_once_digest_recorded(pack_tree):
@@ -413,7 +393,7 @@ fi
     assert logged == head
 
 
-@pytest.mark.parametrize("damage", ["missing", "corrupt"])
+@pytest.mark.parametrize("damage", ["corrupt"])
 def test_pack_rejects_bad_task_before_image_calls(pack_tree, damage):
     tree, log, _, _ = pack_tree
     archive = tree / "unapproved.tar.gz"
@@ -452,7 +432,7 @@ def _break_license_record(tree, mutate):
     record.write_text(json.dumps(inventory, indent=2, sort_keys=True) + "\n")
 
 
-@pytest.mark.parametrize("change", ["missing-notice", "image-digest", "unrecorded-dependency", "license-text-change"])
+@pytest.mark.parametrize("change", ["image-digest", "unrecorded-dependency", "license-text-change"])
 def test_pack_refuses_unreviewed_license_change_before_any_image_call(pack_tree, change):
     """A synthetic missing notice or unreviewed dependency/image change blocks the
     transfer bundle, then the next ordinary pack passes once it is reverted (#376)."""

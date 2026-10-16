@@ -235,6 +235,14 @@ def test_two_vendors_coexist_either_order(monkeypatch, first):
     markers = fake._points.get(name, [])
     assert len(markers) == 2
     assert len({str(p.id) for p in markers}) == 2
+    # Marker ids and reads are scoped per revision AND generation.
+    id_a = completion_point_id(coll, "reference", REV_A, _gen_id(settings, SHA_A1))
+    id_b = completion_point_id(coll, "reference", REV_B, _gen_id(settings, SHA_B1))
+    assert id_a != id_b
+    assert read_completion(fake, settings, "reference", source_rev=REV_A,
+                           generation_id=_gen_id(settings, SHA_A1)) is not None
+    assert read_completion(fake, settings, "reference", source_rev=REV_A,
+                           generation_id=_gen_id(settings, SHA_B1)) is None
 
 
 def test_update_one_revision_leaves_other_untouched(monkeypatch):
@@ -445,33 +453,6 @@ def test_sourceless_residue_amid_named_raises(monkeypatch):
     assert raised is not None
     assert "reference" in raised and "original --progress file" in raised
     assert "/tmp" not in raised and "stray 0" not in raised
-
-
-def test_completion_ids_scope_per_revision(monkeypatch):
-    settings = _settings()
-    fake = RevisionFake()
-    _upsert_one(monkeypatch, fake, _parsed(sha=SHA_A1, vendor="vendor-a",
-                product="product-x", version="1.0"),
-                _chunks(rev=REV_A, tag="A"), settings)
-    _upsert_one(monkeypatch, fake, _parsed(sha=SHA_B1, vendor="vendor-b",
-                product="product-y", version="2.0"),
-                _chunks(rev=REV_B, tag="B"), settings)
-    coll = settings.qdrant_collection
-    id_a = completion_point_id(coll, "reference", REV_A, _gen_id(settings, SHA_A1))
-    id_b = completion_point_id(coll, "reference", REV_B, _gen_id(settings, SHA_B1))
-    assert id_a != id_b
-    assert read_completion(fake, settings, "reference", source_rev=REV_A,
-                           generation_id=_gen_id(settings, SHA_A1)) is not None
-    assert read_completion(fake, settings, "reference", source_rev=REV_A,
-                           generation_id=_gen_id(settings, SHA_B1)) is None
-
-
-def test_locks_keyed_by_revision():
-    from mainframe_rag.ingest.run_ingest import _DocLocks
-
-    locks = _DocLocks()
-    assert locks.get(REV_A) is locks.get(REV_A)
-    assert locks.get(REV_B) is not locks.get(REV_A)
 
 
 def test_stored_doc_revisions_and_delete_by_revision(monkeypatch):

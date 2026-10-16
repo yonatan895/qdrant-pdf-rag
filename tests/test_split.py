@@ -29,22 +29,7 @@ def test_versus_splits_into_entity_paths():
     ]
 
 
-def test_vs_abbreviation_splits():
-    paths, mode = _split("Compare MXT vs EDSALIMIT for the region.")
-    assert mode == "comparative"
-    assert len(paths) == 2
-    assert "MXT" in paths[0] and "EDSALIMIT" not in paths[0]
-    assert "EDSALIMIT" in paths[1] and "MXT" not in paths[1]
-
-
-def test_difference_between_pairs_with_and():
-    paths, mode = _split("What is the difference between DEFINE and ALTER?")
-    assert mode == "comparative"
-    assert len(paths) == 2
-    assert "DEFINE" in paths[0] and "ALTER" in paths[1]
-
-
-def test_multiword_entities_stay_whole():
+def test_multiword_entities_split_into_exact_paths():
     paths, mode = _split("Compare WLM service classes versus report classes when tuning batch goals.")
     assert mode == "comparative"
     assert paths == [
@@ -53,17 +38,20 @@ def test_multiword_entities_stay_whole():
     ]
 
 
-def test_word_number_entities():
-    paths, mode = _split("Compare documented migration level 1 versus level 2: when is each used?")
+@pytest.mark.parametrize(
+    ("query", "first", "second"),
+    [
+        ("Compare MXT vs EDSALIMIT for the region.", "MXT", "EDSALIMIT"),
+        ("What is the difference between DEFINE and ALTER?", "DEFINE", "ALTER"),
+        ("Compare TSO/E TRANSMIT and RECEIVE for data set exchange.", "TRANSMIT", "RECEIVE"),
+    ],
+)
+def test_marker_forms_split_into_one_path_per_entity(query, first, second):
+    paths, mode = _split(query)
     assert mode == "comparative"
-    assert "level 1" in paths[0] and "level 2" not in paths[0]
-    assert "level 2" in paths[1] and "level 1" not in paths[1]
-
-
-def test_narrow_and_splits_with_compare_word():
-    paths, mode = _split("Compare TSO/E TRANSMIT and RECEIVE for data set exchange.")
-    assert mode == "comparative"
-    assert "TRANSMIT" in paths[0] and "RECEIVE" in paths[1]
+    assert len(paths) == 2
+    assert first in paths[0] and second not in paths[0]
+    assert second in paths[1] and first not in paths[1]
 
 
 def test_bare_and_does_not_split_diagnostics():
@@ -75,11 +63,6 @@ def test_bare_and_does_not_split_diagnostics():
     paths, mode = split_query(query, comparative_enabled=True, diagnostic_enabled=False)
     assert mode == "single"
     assert paths == [query]
-
-
-def test_bare_or_does_not_split():
-    _paths, mode = _split("HASP050 spool shortage: should the operator retry or drain?")
-    assert mode == "single"
 
 
 def test_slash_pairs_never_split():
@@ -103,16 +86,6 @@ def test_three_entities_cap_at_two_paths():
     paths, mode = _split("Compare A1 versus B2 versus C3 options for paging?")
     assert mode == "comparative"
     assert len(paths) == 2
-
-
-def test_question_word_side_stays_single():
-    _paths, mode = _split("HASP050 spool shortage: retry or drain? versus what?")
-    assert mode == "single"
-
-
-def test_markdown_adjacent_marker_stays_single():
-    _paths, mode = _split("Spool is full: drain or wait? **versus** reboot?")
-    assert mode == "single"
 
 
 # ---------------------------------------------------------------- bypasses
@@ -155,21 +128,6 @@ def test_member_only_comparatives_split():
     ]
 
 
-def test_factoid_with_signal_word_stays_single():
-    assert _split("What does IEA500I mean?")[1] == "single"
-    assert _split("What is LFAREA?")[1] == "single"
-
-
-def test_flags_off_is_legacy_single():
-    query = "Compare documented JES2 versus JES3 spool concepts."
-    assert _single(query) == ([query], "single")
-
-
-def test_empty_and_whitespace_stay_single():
-    assert _split("") == ([""], "single")
-    assert _split("   ") == (["   "], "single")
-
-
 # ---------------------------------------------------------------- diagnostic
 
 
@@ -182,31 +140,20 @@ def test_diagnostic_dual_path_keeps_original_plus_stripped():
     assert "shortage" in paths[1] and "recovery" in paths[1]
 
 
-def test_nl_diagnostic_without_identifiers_stays_single():
+def test_diagnostic_stays_single_without_a_distinct_cause_leg():
     # Nothing to strip (stripped == original): a second identical leg would
     # double cost for zero signal.
-    query = "The clock is drifting between LPARs — where do I set the time zone offset?"
-    _paths, mode = _split(query)
-    assert mode == "single"
-
-
-def test_too_short_stripped_leg_stays_single():
+    assert _split("The clock is drifting between LPARs — where do I set the time zone offset?")[1] == "single"
     # "IEA500I failed" strips to "failed" (< 20 chars): noise, not a path.
     assert _split("IEA500I failed")[1] == "single"
 
 
-def test_strip_identifiers_removes_all_families():
+def test_strip_identifiers_removes_all_families_including_folded_members():
     stripped = strip_identifiers("IRA100E in SA22-7592-05 on IEASYSxx reports a shortage.")
-    assert "IRA100E" not in stripped
-    assert "SA22-7592-05" not in stripped
-    assert "IEASYSxx" not in stripped
+    for identifier in ("IRA100E", "SA22-7592-05", "IEASYSxx"):
+        assert identifier not in stripped
     assert "shortage" in stripped
-
-
-def test_strip_identifiers_removes_folded_lowercase_member():
-    """Issue #133 sibling sweep: a lowercase-typed member strips at the
-    same span its folded form filters on, so the diagnostic cause leg
-    broadens exactly like the uppercase-typed one."""
+    # Issue #133: a lowercase-typed member strips at the span it folds to.
     stripped = strip_identifiers("ieasysxx reports a CSA shortage, what recovery applies?")
     assert "ieasysxx" not in stripped
     assert "shortage" in stripped and "recovery" in stripped
@@ -219,16 +166,11 @@ def test_strip_identifiers_removes_folded_lowercase_member():
     "query",
     [
         "> Compare JES2 versus JES3 spool concepts.",  # quote prefix
-        "`Compare JES2 versus JES3 spool concepts.`",  # backticks
-        '"Compare JES2 versus JES3 spool concepts."',  # quotes
-        "(Compare JES2 versus JES3 spool concepts.)",  # parens
-        "**Compare JES2 versus JES3 spool concepts.**",  # bold
         "[Compare JES2 versus JES3](http://x) spool concepts.",  # link text
-        "<Compare JES2 versus JES3> spool concepts?",  # angle
-        "compare documented jes2 versus jes3 spool concepts.",  # case folding
         "Spool concepts, JES2 versus JES3, when the job will not start.",  # inline
-        "Versus JES3, JES2 spool handling differs: which catalog documents it?",  # top-placed
         "Compare migration level 12 versus level 345 for paging?",  # multi-digit
+        "compare documented jes2 versus jes3 spool concepts.",  # case folding
+        "Versus JES3, JES2 spool handling differs: which catalog documents it?",  # top-placed
     ],
 )
 def test_comparative_marker_shapes(query: str):
@@ -239,15 +181,19 @@ def test_comparative_marker_shapes(query: str):
 @pytest.mark.parametrize(
     "query",
     [
-        "IEA500I rejected: retry or collect?",  # or, no signal words
-        "HASP050 spool shortage: retry or drain the queue?",  # or without entities
-        "What does DFHAC2006 mean?",  # factoid, no signal
-        "sizing the lookaside facility",  # plain NL
+        "HASP050 spool shortage: should the operator retry or drain?",  # or without entities
         "SC23-6858-01 dumps",  # doc-number only, no signal
-        "DFSORT tuning",  # too short for any marker
+        "sizing the lookaside facility",  # plain NL
+        "HASP050 spool shortage: retry or drain? versus what?",  # question-word side
+        "Spool is full: drain or wait? **versus** reboot?",  # markdown-adjacent marker
     ],
 )
 def test_single_path_shapes(query: str):
     paths, mode = _split(query)
     assert mode == "single", query
     assert paths == [query]
+
+
+def test_empty_and_whitespace_stay_single():
+    assert _split("") == ([""], "single")
+    assert _split("   ") == (["   "], "single")

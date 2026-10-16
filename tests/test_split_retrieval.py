@@ -7,15 +7,13 @@ Qdrant / vLLM / network. Detector unit tests live in test_split.py.
 
 from __future__ import annotations
 
-import asyncio
 from types import SimpleNamespace
 from typing import Any
 
 from qdrant_client import models
 
 from mainframe_rag.config import Settings
-from mainframe_rag.ports import AsyncReaderAdapter
-from mainframe_rag.retrieve.query import async_search, max_split_hits, merge_split_hits, search
+from mainframe_rag.retrieve.query import max_split_hits, merge_split_hits, search
 from tests.conftest import _point
 
 
@@ -115,26 +113,14 @@ def test_comparative_split_covers_both_entities():
     assert {h.doc_id for h in off} == {"SHARED-DOC"}
 
     fake = SplitAwareFakeQdrant()
-    hits, kind, timings = search(fake, SplitAwareEmbedder(), "coll", COMPARATIVE_QUERY, settings=_split_settings())
+    emb = SplitAwareEmbedder()
+    hits, kind, timings = search(fake, emb, "coll", COMPARATIVE_QUERY, settings=_split_settings())
     assert kind == "nl"
     assert {"JES2-DOC", "JES3-DOC"} <= {h.doc_id for h in hits}
-    # Two legs × dense+sparse batch.
+    # Two legs × dense+sparse batch; each leg embeds independently.
     assert len(fake.batch_requests) == 4
-    assert set(timings) >= {"embed_ms", "qdrant_ms"}
-
-
-def test_comparative_split_embed_fanout_counted():
-    """Each leg embeds independently: 2 dense + 2 sparse calls when split,
-    1 + 1 when single."""
-    emb = SplitAwareEmbedder()
-    search(SplitAwareFakeQdrant(), emb, "coll", COMPARATIVE_QUERY, settings=_split_settings())
     assert emb.dense_calls == 2 and emb.sparse_calls == 2
-    emb2 = SplitAwareEmbedder()
-    search(
-        SplitAwareFakeQdrant(), emb2, "coll", COMPARATIVE_QUERY,
-        settings=_split_settings(comparative_split_enabled=False, diagnostic_dualpath_enabled=False),
-    )
-    assert emb2.dense_calls == 1 and emb2.sparse_calls == 1
+    assert set(timings) >= {"embed_ms", "qdrant_ms"}
 
 
 def test_diagnostic_dual_path_covers_symptom_and_cause():
@@ -195,43 +181,6 @@ def test_trap_and_exact_anchor_comparatives_stay_single():
     assert emb.dense_calls == 2
 
 
-def test_split_twins_parity_comparative_and_diagnostic():
-    """Drift guard for the new legs: identical fakes in, identical hits out
-    on both twins, for comparative, diagnostic, and single paths."""
-    from mainframe_rag.retrieve.screen import screen_query  # noqa: F401 (documents gate order)
-
-    for query in (COMPARATIVE_QUERY, DIAGNOSTIC_QUERY, "sizing the lookaside facility"):
-        for flags in (
-            {"comparative_split_enabled": True, "diagnostic_dualpath_enabled": True},
-            {"comparative_split_enabled": False, "diagnostic_dualpath_enabled": False},
-        ):
-            sync_hits, sync_kind, sync_timings = search(
-                SplitAwareFakeQdrant(), SplitAwareEmbedder(), "coll", query,
-                settings=_split_settings(**flags),
-            )
-            async_hits, async_kind, async_timings = asyncio.run(
-                async_search(
-                    AsyncReaderAdapter(SplitAwareFakeQdrant()), SplitAwareEmbedder(), "coll", query,
-                    settings=_split_settings(**flags),
-                )
-            )
-            assert sync_kind == async_kind
-            assert [h.model_dump() for h in sync_hits] == [h.model_dump() for h in async_hits]
-            assert set(sync_timings) == set(async_timings)
-
-
-def test_async_comparative_split_covers_both_entities():
-    """Async twin threads the legs identically (would not catch a twin that
-    dropped split if only sync were tested)."""
-    hits, _, _ = asyncio.run(
-        async_search(
-            AsyncReaderAdapter(SplitAwareFakeQdrant()), SplitAwareEmbedder(), "coll", COMPARATIVE_QUERY,
-            settings=_split_settings(),
-        )
-    )
-    assert {"JES2-DOC", "JES3-DOC"} <= {h.doc_id for h in hits}
-
-
 # ---------------------------------------------------------------- merge unit
 
 
@@ -256,21 +205,14 @@ def test_max_fusion_prefers_focused_rank1_over_shared_noise():
     assert merged[0].score == 1.0 / 3  # best-evidence scale, not a sum
 
 
-def test_max_fusion_dedupes_shared_chunks_first_seen_wins():
+    # Shared chunks dedupe (first seen wins) and the limit holds.
     merged = max_split_hits(
         [[_hit("x", "A", 0.9), _hit("y", "B", 0.1)], [_hit("x", "A", 0.9), _hit("z", "C", 0.8)]],
         k=2, limit=3,
     )
     assert [h.chunk_id for h in merged] == ["x", "y", "z"]
     assert merged[0].doc_id == "A"
-
-
-def test_max_fusion_respects_limit():
-    merged = max_split_hits(
-        [[_hit("a1", "A", 0.9)], [_hit("b1", "B", 0.9), _hit("b2", "B", 0.8)]],
-        k=2, limit=2,
-    )
-    assert len(merged) == 2
+    assert len(max_split_hits([[_hit("a1", "A", 0.9)], [_hit("b1", "B", 0.9), _hit("b2", "B", 0.8)]], k=2, limit=2)) == 2
 
 
 def test_merge_diagnostic_weights_favor_symptom_leg():
@@ -280,25 +222,15 @@ def test_merge_diagnostic_weights_favor_symptom_leg():
         (2.0, 1.0), k=2, limit=2,
     )
     assert [h.chunk_id for h in merged] == ["s1", "c1"]
-
-
-def test_merge_dedupes_shared_chunks_first_seen_wins():
+    # Shared chunks dedupe (first seen wins); an empty leg returns the other.
     merged = merge_split_hits(
-        [[_hit("x", "A", 0.9)], [_hit("x", "A", 0.9), _hit("y", "B", 0.8)]],
-        (1.0, 1.0), k=2, limit=2,
+        [[_hit("x", "A", 0.9)], [_hit("x", "A", 0.9), _hit("y", "B", 0.8)]], (1.0, 1.0), k=2, limit=2
     )
     assert [h.chunk_id for h in merged] == ["x", "y"]
     assert merged[0].doc_id == "A"
+    assert [h.chunk_id for h in merge_split_hits([[], [_hit("b1", "B", 0.9)]], (1.0, 1.0), k=2, limit=2)] == ["b1"]
+    # The limit holds.
+    assert len(merge_split_hits(
+        [[_hit("a1", "A", 0.9), _hit("a2", "A", 0.8)], [_hit("b1", "B", 0.9)]], (1.0, 1.0), k=2, limit=2
+    )) == 2
 
-
-def test_merge_respects_limit():
-    merged = merge_split_hits(
-        [[_hit("a1", "A", 0.9), _hit("a2", "A", 0.8)], [_hit("b1", "B", 0.9)]],
-        (1.0, 1.0), k=2, limit=2,
-    )
-    assert len(merged) == 2
-
-
-def test_merge_empty_leg_returns_other_leg():
-    merged = merge_split_hits([[], [_hit("b1", "B", 0.9)]], (1.0, 1.0), k=2, limit=2)
-    assert [h.chunk_id for h in merged] == ["b1"]

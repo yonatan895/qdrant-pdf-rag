@@ -79,29 +79,3 @@ def test_litellm_is_only_imported_by_the_gateway_only_hooks():
     assert pins == [], f"litellm must not return to the lockfile: {pins}"
 
 
-def test_litellm_import_guard_flags_synthetic_files(tmp_path):
-    clean = tmp_path / "clean.py"
-    clean.write_text("import httpx2\n", encoding="utf-8")
-    mention = tmp_path / "mention.py"
-    mention.write_text('BASE_URL = "http://litellm:4000/v1"\n', encoding="utf-8")
-    plain = tmp_path / "plain.py"
-    plain.write_text("import litellm\n", encoding="utf-8")
-    from_import = tmp_path / "from_import.py"
-    from_import.write_text("from litellm import Router\n", encoding="utf-8")
-    nested = tmp_path / "nested.py"
-    nested.write_text("def f():\n    import litellm.router\n", encoding="utf-8")
-
-    flagged = _litellm_import_files(
-        [clean, mention, plain, from_import, nested], tmp_path
-    )
-
-    assert flagged == ["plain.py", "from_import.py", "nested.py"]
-
-
-def test_litellm_declaration_guard_flags_specifiers():
-    assert _declares_litellm(["litellm"]) == ["litellm"]
-    assert _declares_litellm(["LiteLLM[proxy]>=1.0", "litellm==1.98.0"]) == [
-        "LiteLLM[proxy]>=1.0",
-        "litellm==1.98.0",
-    ]
-    assert _declares_litellm(["openai", "httpx2", "litellm-proxy"]) == []

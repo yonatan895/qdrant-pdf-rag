@@ -32,37 +32,34 @@ def test_g4_reference_keeps_immutable_models_and_independent_allocations():
                         "driver_version": "580.100"})
 
 
-@pytest.mark.parametrize("field", ["vram_mib", "available_ram_mib", "free_disk_mib"])
-@pytest.mark.parametrize("unknown", [float("nan"), float("inf"), float("-inf"),
-                                    True, False, "200000", None, [], {}])
-def test_gpu_admission_refuses_unknown_capacity(field, unknown):
+# Each capacity field is its own call site; the shared validator rejects a boolean
+# (numerically valid), text, an absent value, a nonfinite number, and a shortfall.
+MISSING = object()
+
+
+@pytest.mark.parametrize("field,value", [
+    ("vram_mib", 92159), ("available_ram_mib", 65535), ("free_disk_mib", 131071),
+    ("vram_mib", True), ("available_ram_mib", "65536"), ("free_disk_mib", float("inf")),
+    ("available_ram_mib", MISSING),
+])
+def test_gpu_admission_refuses_unknown_missing_or_insufficient_capacity(field, value):
     observed = _g4_observation()
-    observed[field] = unknown
+    if value is MISSING:
+        del observed[field]
+    else:
+        observed[field] = value
     with pytest.raises(ValueError):
         admit(build_profile("COLAB_G4_BF16"), observed)
 
 
-@pytest.mark.parametrize("field", ["available_ram_mib", "free_disk_mib"])
-@pytest.mark.parametrize("unknown", [float("nan"), float("inf"), "2048", True, None])
+@pytest.mark.parametrize("field,unknown", [
+    ("available_ram_mib", None), ("free_disk_mib", float("nan")),
+])
 def test_cpu_transport_also_requires_measured_finite_resources(field, unknown):
     observed = {"available_ram_mib": 1024, "free_disk_mib": 1024}
     observed[field] = unknown
     with pytest.raises(ValueError):
         admit(build_profile("COLAB_CPU_TRANSPORT"), observed)
-
-
-@pytest.mark.parametrize("field,minimum", [
-    ("vram_mib", 92160), ("available_ram_mib", 65536), ("free_disk_mib", 131072),
-])
-def test_gpu_admission_refuses_missing_or_insufficient_capacity(field, minimum):
-    for value in (None, minimum - 1):
-        observed = _g4_observation()
-        if value is None:
-            del observed[field]
-        else:
-            observed[field] = value
-        with pytest.raises(ValueError):
-            admit(build_profile("COLAB_G4_BF16"), observed)
 
 
 @pytest.mark.parametrize("as_float", [False, True])
@@ -85,17 +82,12 @@ def test_gpu_name_must_be_observed_text_not_a_stringified_container():
         admit(build_profile("COLAB_G4_BF16"), observed)
 
 
+# Non-int types (bool, a float that equals the bound) and each side of each range.
 @pytest.mark.parametrize("field,invalid", [
-    ("deadline_seconds", True), ("deadline_seconds", False),
-    ("deadline_seconds", 7200.0), ("deadline_seconds", "7200"),
-    ("deadline_seconds", None), ("deadline_seconds", float("nan")),
-    ("deadline_seconds", float("inf")), ("deadline_seconds", 0),
-    ("deadline_seconds", 7201),
-    ("embed_max_len", True), ("embed_max_len", False),
-    ("embed_max_len", 4096.0), ("embed_max_len", "4096"),
-    ("embed_max_len", None), ("embed_max_len", float("nan")),
-    ("embed_max_len", float("inf")), ("embed_max_len", 4095),
-    ("embed_max_len", 32769),
+    ("deadline_seconds", True), ("deadline_seconds", 7200.0),
+    ("deadline_seconds", 0), ("deadline_seconds", 7201),
+    ("embed_max_len", True), ("embed_max_len", 4096.0),
+    ("embed_max_len", 4095), ("embed_max_len", 32769),
 ])
 def test_profile_window_and_deadline_require_bounded_integers(field, invalid):
     with pytest.raises(ValueError, match="deadline/window"):

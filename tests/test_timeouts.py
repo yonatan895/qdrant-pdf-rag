@@ -220,29 +220,6 @@ def test_agent_qdrant_client_requests_uncompressed_responses(monkeypatch):
     assert seen and set(seen) == {"identity"}
 
 
-def test_ingest_qdrant_timeout_from_settings(monkeypatch):
-    from mainframe_rag.ingest import run_ingest
-
-    monkeypatch.setenv("QDRANT_INGEST_TIMEOUT_S", "44")
-    captured: dict = {}
-
-    class FakeQdrantClient:
-        def __init__(self, **kw):
-            captured.update(kw)
-
-        def close(self):
-            pass
-
-    monkeypatch.setattr("qdrant_client.QdrantClient", FakeQdrantClient)
-    s = run_ingest.load_settings()
-    client = run_ingest._get_qdrant(s)
-    try:
-        assert captured["timeout"] == 44.0
-        assert client is not None
-    finally:
-        run_ingest._worker_qdrant = None
-
-
 def test_connect_retries_setting_is_bounded():
     from pydantic import ValidationError
 

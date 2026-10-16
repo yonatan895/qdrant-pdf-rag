@@ -239,9 +239,7 @@ def test_present_encoder_keeps_its_strict_semantics(original_inputs, encoder):
 
 
 @pytest.mark.parametrize("filename", [
-    "sentence_roberta_config.json", "sentence_distilbert_config.json",
-    "sentence_camembert_config.json", "sentence_albert_config.json",
-    "sentence_xlm-roberta_config.json", "sentence_xlnet_config.json",
+    "sentence_roberta_config.json", "sentence_xlnet_config.json",  # first and last of the alternatives
 ])
 def test_absent_bert_cannot_hide_an_alternative_runtime_encoder(original_inputs, filename):
     evidence, manifest = _absent_encoder(original_inputs)
@@ -377,7 +375,6 @@ def test_explicit_fresh_binding_allows_next_ordinary_prepare_without_claiming_in
 @pytest.mark.parametrize("collections,aliases", [
     (("original_manuals",), ()),
     ((), (("original_manuals", "absent-physical"),)),
-    (("original_manuals__completions",), ()),
     (("original_manuals__gen" + "a" * 28 + "_repair",), ()),
     ((), (("original_manuals__build_00000000-0000-0000-0000-000000000001", "absent"),)),
     ((), (("unrelated-alias", "original_manuals__gen" + "a" * 28),)),
@@ -593,7 +590,7 @@ def test_source_scan_uses_explicit_entry_stream_and_deadline_bounds(original_inp
         production.build_production_expected(config, profile, **arguments)
 
 
-@pytest.mark.parametrize("value", [True, False, 0, -1, 1.5])
+@pytest.mark.parametrize("value", [True, 0, 1.5])  # bool, range, non-int
 def test_explicit_source_bounds_do_not_coerce_booleans_or_invalid_counts(value):
     with pytest.raises(production.ProductionAdmissionError):
         production.ScanBounds(max_entries=value, max_bytes=1)

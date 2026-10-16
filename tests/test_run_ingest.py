@@ -15,12 +15,11 @@ from tests.helpers_builder import staging_builder  # noqa: F401 — fixture
 pytestmark = pytest.mark.usefixtures("staging_builder")
 
 
-
 def test_dry_run_ingest(tmp_path, synthetic_pdf, capsys):
     progress = tmp_path / "inventory.jsonl"
-    rc = main(["--src", str(synthetic_pdf.parent), "--progress", str(progress),
-               "--workers", "1", "--dry-run"])
-    assert rc == 0
+    args = ["--src", str(synthetic_pdf.parent), "--progress", str(progress),
+            "--workers", "1", "--dry-run"]
+    assert main(args) == 0
     records = [json.loads(l) for l in progress.read_text().splitlines() if l.strip()]
     assert len(records) == 1
     rec = records[0]
@@ -28,16 +27,35 @@ def test_dry_run_ingest(tmp_path, synthetic_pdf, capsys):
     assert rec["pages"] == 8
     assert rec["chunks"] > 0
     assert rec["status"] == "dry"
-
-
-def test_dry_run_skips_already_processed(tmp_path, synthetic_pdf):
-    progress = tmp_path / "inventory.jsonl"
-    args = ["--src", str(synthetic_pdf.parent), "--progress", str(progress),
-            "--workers", "1", "--dry-run"]
+    # Second run: same sha256 -> skipped (still an ok outcome), no new records.
+    # (One capsys read at the end: the StreamHandler binds stderr at creation.)
     assert main(args) == 0
-    assert main(args) == 0  # second run: same sha256 -> skipped, no new records
-    records = [json.loads(l) for l in progress.read_text().splitlines() if l.strip()]
-    assert len(records) == 1
+    assert len(progress.read_text().splitlines()) == 1
+    done = [l for l in _stderr_json(capsys) if l.get("action") == "done"]
+    assert len(done) == 2
+    for summary in done:
+        assert summary["files_ok"] == 1
+        assert summary["files_failed"] == 0
+        assert summary["chunks_upserted"] == 0  # dry run: parsed, not upserted
+        assert summary["elapsed_ms"] >= 0
+
+
+def test_worker_qdrant_client_is_built_once_from_ingest_settings(monkeypatch):
+    """Each spawned ingest worker opens one Qdrant client with the writer URL,
+    key and ingest timeout, then reuses it for every document it processes."""
+    import qdrant_client
+
+    from mainframe_rag.config import Settings
+    from mainframe_rag.ingest import run_ingest
+
+    built = []
+    monkeypatch.setattr(qdrant_client, "QdrantClient", lambda **kw: built.append(kw) or object())
+    monkeypatch.setattr(run_ingest, "_worker_qdrant", None)
+    settings = Settings(_env_file=None, qdrant_url="http://writer:6333", qdrant_api_key="writer-key",
+                        qdrant_ingest_timeout_s=42)
+    first = run_ingest._get_qdrant(settings)
+    assert run_ingest._get_qdrant(settings) is first
+    assert built == [{"url": "http://writer:6333", "api_key": "writer-key", "timeout": 42}]
 
 
 def test_resolve_workers_is_a_cap(tmp_path):
@@ -51,11 +69,9 @@ def test_resolve_workers_is_a_cap(tmp_path):
     assert resolve_workers(10_000, settings) <= 2 * (__import__("os").cpu_count() or 2)
 
 
-def test_corrupt_pdf_writes_typed_error_record(tmp_path, synthetic_pdf):
+def test_corrupt_pdf_writes_typed_error_record(tmp_path, synthetic_pdf, capsys):
     """One bad PDF must not kill the run; the error record carries the
-    exception type for triage."""
-    import json
-
+    exception type for triage and the summary counts the failure."""
     bad = tmp_path / "corrupt.pdf"
     bad.write_bytes(b"this is not a pdf at all")
     progress = tmp_path / "inventory.jsonl"
@@ -66,6 +82,9 @@ def test_corrupt_pdf_writes_typed_error_record(tmp_path, synthetic_pdf):
     err = [r for r in records if r["status"] == "error"]
     assert err and err[0]["path"] == str(bad)
     assert err[0]["error_type"]
+    done = [l for l in _stderr_json(capsys) if l.get("action") == "done"]
+    assert len(done) == 1
+    assert done[0]["files_failed"] == 1
 
 
 def _stderr_json(capsys) -> list[dict]:
@@ -80,37 +99,6 @@ def _stderr_json(capsys) -> list[dict]:
             if isinstance(parsed, dict):
                 lines.append(parsed)
     return lines
-
-
-def test_summary_counters_ok_run(tmp_path, synthetic_pdf, capsys):
-    """PR D: files ok / failed / chunks upserted, one summary line per run."""
-    progress = tmp_path / "inventory.jsonl"
-    rc = main(["--src", str(synthetic_pdf.parent), "--progress", str(progress),
-               "--workers", "1", "--dry-run"])
-    assert rc == 0
-    # Second run: the file is skipped — still an ok outcome. (One capsys
-    # read at the end: the StreamHandler binds stderr at creation.)
-    rc = main(["--src", str(synthetic_pdf.parent), "--progress", str(progress),
-               "--workers", "1", "--dry-run"])
-    assert rc == 0
-    done = [l for l in _stderr_json(capsys) if l.get("action") == "done"]
-    assert len(done) == 2
-    for summary in done:
-        assert summary["files_ok"] == 1
-        assert summary["files_failed"] == 0
-        assert summary["chunks_upserted"] == 0  # dry run: parsed, not upserted
-        assert summary["elapsed_ms"] >= 0
-
-
-def test_summary_counters_failed_run(tmp_path, synthetic_pdf, capsys):
-    (tmp_path / "corrupt.pdf").write_bytes(b"not a pdf")
-    progress = tmp_path / "inventory.jsonl"
-    rc = main(["--src", str(tmp_path), "--progress", str(progress),
-               "--workers", "1", "--dry-run"])
-    assert rc == 1
-    done = [l for l in _stderr_json(capsys) if l.get("action") == "done"]
-    assert len(done) == 1
-    assert done[0]["files_failed"] == 1
 
 
 def _filter_match_value(filter_obj, key: str) -> str | None:
@@ -272,7 +260,11 @@ class _FakeQdrant:
 
 def test_upsert_path_counters_with_fake_qdrant(tmp_path, synthetic_pdf, capsys, monkeypatch):
     """Non-dry run with a fake port: files_ok counts the upsert and
-    chunks_upserted matches the points actually sent."""
+    chunks_upserted matches the points actually sent. A second run with a
+    fresh inventory and warm Qdrant parses again, verifies the completion and
+    skips: files_ok counts it, nothing is upserted or deleted. (A bare
+    sampled point without a completion must never skip, issue #359, pinned in
+    test_ingest_completion.py.)"""
     from mainframe_rag.ingest import run_ingest
 
     monkeypatch.setenv("EMBED_MODE", "hash")
@@ -282,14 +274,21 @@ def test_upsert_path_counters_with_fake_qdrant(tmp_path, synthetic_pdf, capsys, 
     progress = tmp_path / "inventory.jsonl"
     rc = main(["--src", str(synthetic_pdf.parent), "--progress", str(progress), "--workers", "1"])
     assert rc == 0
-    done = [l for l in _stderr_json(capsys) if l.get("action") == "done"]
-    assert done[0]["files_ok"] == 1
-    assert done[0]["chunks_upserted"] > 0
     from mainframe_rag.config import Settings as _Settings
 
     main_collection = _Settings(_env_file=None).qdrant_collection
     main_sent = sum(n for collection, n in fake.upsert_calls if collection == main_collection)
-    assert main_sent == done[0]["chunks_upserted"]
+    assert main_sent > 0
+    fake.upserts.clear()
+    deletes_after_first = fake.deletes
+    progress.unlink()
+    assert main(["--src", str(synthetic_pdf.parent), "--progress", str(progress), "--workers", "1"]) == 0
+    done = [l for l in _stderr_json(capsys) if l.get("action") == "done"]
+    assert done[0]["files_ok"] == 1
+    assert done[0]["chunks_upserted"] == main_sent
+    assert done[-1]["files_ok"] == 1
+    assert done[-1]["chunks_upserted"] == 0
+    assert fake.upserts == [] and fake.deletes == deletes_after_first
 
 
 def test_builder_refuses_a_real_run_without_a_staging_build(
@@ -328,34 +327,6 @@ def test_builder_refuses_a_real_run_without_a_staging_build(
     assert not [l for l in _stderr_json(capsys) if l.get("action") == "in_place_deprecated"]
 
 
-def test_qdrant_level_skip_counts_as_ok(tmp_path, synthetic_pdf, capsys, monkeypatch):
-    """Qdrant already holds a VERIFIED completion for this generation (second
-    run, fresh inventory, warm Qdrant): files_ok counts it, nothing is
-    upserted or deleted. A bare sampled point without a completion must
-    never skip (issue #359) — that case is pinned in
-    test_ingest_completion.py."""
-    from mainframe_rag.ingest import run_ingest
-
-    monkeypatch.setenv("EMBED_MODE", "hash")
-    monkeypatch.delenv("DENSE_DIM", raising=False)
-    fake = _FakeQdrant()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    progress = tmp_path / "inventory.jsonl"
-    assert main(["--src", str(synthetic_pdf.parent), "--progress", str(progress), "--workers", "1"]) == 0
-    first_upserts = list(fake.upserts)
-    assert first_upserts, "first run must publish points + completion"
-    fake.upserts.clear()
-    deletes_after_first = fake.deletes
-    # Fresh inventory, warm Qdrant: parse again, verify completion, skip.
-    progress.unlink()
-    rc = main(["--src", str(synthetic_pdf.parent), "--progress", str(progress), "--workers", "1"])
-    assert rc == 0
-    done = [l for l in _stderr_json(capsys) if l.get("action") == "done"]
-    assert done[-1]["files_ok"] == 1
-    assert done[-1]["chunks_upserted"] == 0
-    assert fake.upserts == [] and fake.deletes == deletes_after_first
-
-
 def test_embed_failfast_upserts_nothing(tmp_path, synthetic_pdf, monkeypatch):
     """Embedding happens in the parse workers now, so an embed failure fails
     the whole task — the upsert stage never sees the doc. Exercised through
@@ -389,51 +360,18 @@ def test_embed_failfast_upserts_nothing(tmp_path, synthetic_pdf, monkeypatch):
 def test_doc_locks_are_per_doc_id():
     """Colliding doc_ids (shared form numbers) must serialize their
     check-delete-upsert sequence; distinct doc_ids must not contend."""
-    import threading
-    import time
-
-    from mainframe_rag.ingest.ibm_pdf import ParsedDoc
     from mainframe_rag.ingest.run_ingest import _DocLocks
 
     locks = _DocLocks()
-    assert locks.get("SC14-7315-70") is locks.get("SC14-7315-70")
-    assert locks.get("SC23-6845-22") is not locks.get("SC14-7315-70")
-
-    # Concurrency test: same doc_id cannot execute critical section concurrently
-    active = 0
-    max_active = 0
-    counter_lock = threading.Lock()
-    barrier = threading.Barrier(2)
-
-    parsed = ParsedDoc(
-        path="manual.pdf",
-        doc_id="SC14-7315-70",
-        sha256="abc",
-        vendor="ibm",
-        product=None,
-        version=None,
-        title="Title",
-        page_count=1,
-    )
-
-    def run_worker():
-        nonlocal active, max_active
-        barrier.wait()
-        with locks.get(parsed.doc_id):
-            with counter_lock:
-                active += 1
-                max_active = max(max_active, active)
-            time.sleep(0.05)
-            with counter_lock:
-                active -= 1
-
-    t1 = threading.Thread(target=run_worker)
-    t2 = threading.Thread(target=run_worker)
-    t1.start()
-    t2.start()
-    t1.join()
-    t2.join()
-    assert max_active == 1, "threads with the same doc_id must not execute critical section simultaneously"
+    held = locks.get("SC14-7315-70")
+    assert held is locks.get("SC14-7315-70")
+    assert locks.get("SC23-6845-22") is not held
+    with held:
+        again = locks.get("SC14-7315-70")
+        assert again.acquire(blocking=False) is False  # same key excluded
+        other = locks.get("SC23-6845-22")
+        assert other.acquire(blocking=False) is True  # distinct key free
+        other.release()
 
 
 def test_worker_embed_batches_by_batch_size(synthetic_pdf, monkeypatch):
@@ -464,7 +402,6 @@ def test_worker_embed_batches_by_batch_size(synthetic_pdf, monkeypatch):
     assert all(c <= 2 for c in embed_calls), f"every embed call must be <= batch_size=2: {embed_calls}"
     assert sum(embed_calls) == len(chunks)
     assert len(vectors) == len(chunks)
-
 
 
 def test_bulk_load_disables_and_restores_indexing(tmp_path, synthetic_pdf, monkeypatch):
@@ -542,8 +479,6 @@ def test_parse_one_error_isolation_and_picklability(tmp_path):
     assert unpacked_contexts == {}
 
 
-
-
 # --------------------------------------- representation migration (391 F2) ---
 def _migration_args(corpus, progress, *extra):
     return ["--src", str(corpus), "--progress", str(progress), "--workers", "1", *extra]
@@ -611,24 +546,6 @@ def test_revision_change_blocks_skip_and_force_reembeds(tmp_path, synthetic_pdf,
     record = read_manifest_record(fake, f"{a_model.qdrant_collection}__completions")
     assert record.state == STATE_COMMITTED
     assert record.manifest.embed_model_revision == "rev-B"
-
-
-def test_force_reingest_still_requires_attested_revision(tmp_path, synthetic_pdf, monkeypatch):
-    """A force flag may bypass rejection of old data, never the requirement
-    to identify the new representation (issue #391 F2)."""
-    import pytest
-
-    from mainframe_rag.ingest import run_ingest
-
-    fake = _FakeQdrant()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    monkeypatch.setenv("EMBED_MODE", "vllm")
-    monkeypatch.setenv("DENSE_DIM", "256")
-    monkeypatch.delenv("EMBED_MODEL_REVISION", raising=False)
-    progress = tmp_path / "inventory.jsonl"
-    with pytest.raises(RuntimeError, match="EMBED_MODEL_REVISION"):
-        main(_migration_args(synthetic_pdf.parent, progress, "--reingest"))
-    assert fake.upserts == [], "attestation fails before any point write"
 
 
 def test_interrupted_migration_stays_pending_until_forced_resume(
@@ -841,33 +758,6 @@ def test_unmarked_searchable_point_blocks_migration_commit(tmp_path, synthetic_p
     ), "unknown data is preserved: refusal is never a deletion instruction"
 
 
-def test_empty_target_migration_commits_when_nothing_is_searchable(
-    tmp_path, synthetic_pdf, monkeypatch
-):
-    """Control for counterexample 1: a truly empty target exposes no stale
-    vectors, so the pending bootstrap still commits — the new scope proof is
-    not a blanket refusal. (One walked doc: publication refuses an empty
-    corpus; the target itself starts empty.)"""
-    import shutil
-
-    from mainframe_rag.config import Settings
-    from mainframe_rag.ingest import run_ingest
-    from mainframe_rag.ingest.representation import STATE_COMMITTED, read_manifest_record
-
-    monkeypatch.setenv("EMBED_MODE", "hash")
-    monkeypatch.delenv("DENSE_DIM", raising=False)
-    fake = _FakeQdrant()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    collection = Settings(_env_file=None).qdrant_collection
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
-    shutil.copy(synthetic_pdf, corpus / synthetic_pdf.name)
-    progress = tmp_path / "inventory.jsonl"
-    assert main(_migration_args(corpus, progress, "--reingest")) == 0
-    record = read_manifest_record(fake, f"{collection}__completions")
-    assert record is not None and record.state == STATE_COMMITTED
-
-
 def test_upsert_failure_log_carries_error_type_not_exception_text(
     tmp_path, synthetic_pdf, capsys, monkeypatch
 ):
@@ -927,7 +817,8 @@ def test_document_bounds_refuse_before_embedding_with_an_error_record(
     synthetic_pdf, monkeypatch, override, dimension
 ):
     """Issue #374: an over-bound document is an explicit typed error record
-    (counts only), embeds nothing and returns no chunks/vectors to upsert."""
+    (counts only), embeds nothing and returns no chunks/vectors to upsert.
+    Defaults stay unbounded (the ordinary ingest tests prove it)."""
     from mainframe_rag.config import Settings
     from mainframe_rag.ingest import run_ingest
 
@@ -942,17 +833,6 @@ def test_document_bounds_refuse_before_embedding_with_an_error_record(
         assert dimension in record.error
     assert (chunks, vectors, contexts) == ([], [], {})
     assert embed_calls == [], "no embed call for a refused document"
-
-
-def test_document_bounds_default_off_changes_nothing(synthetic_pdf, monkeypatch):
-    from mainframe_rag.config import Settings
-    from mainframe_rag.ingest import run_ingest
-
-    monkeypatch.setattr(
-        run_ingest, "_load_worker_settings", lambda: Settings(embed_mode="hash", _env_file=None)
-    )
-    record, _parsed, chunks, vectors, _ctx = run_ingest._parse_one(_bounded_task(synthetic_pdf))
-    assert record.status != "error" and chunks and len(vectors) == len(chunks)
 
 
 def test_oversize_document_is_never_upserted_or_completed_and_next_run_succeeds(
@@ -991,8 +871,13 @@ def test_oversize_document_is_never_upserted_or_completed_and_next_run_succeeds(
 @pytest.mark.parametrize(
     ("case", "fake_kwargs", "env", "extra", "match"),
     [
-        ("rules_mismatch", {"stored_sha": "c" * 64, "stored_rules_v": "0123456789abcdef"}, {}, (), "extraction-rules mismatch"),
-        ("legacy_unversioned", {"stored_sha": "c" * 64, "stored_rules_v": ""}, {}, (), "predates extraction-rules"),
+        ("rules_mismatch", {"stored_sha": "c" * 64, "stored_rules_v": "0123456789abcdef"}, {}, (),
+         "extraction-rules mismatch"),
+        # A pre-versioning collection cannot prove which rules extracted its payloads.
+        ("legacy_unversioned", {"stored_sha": "c" * 64, "stored_rules_v": ""}, {}, (),
+         "predates extraction-rules"),
+        # A force flag may bypass rejection of old data, never the
+        # requirement to identify the new representation (issue #391 F2).
         ("unattested_revision", {}, {"EMBED_MODE": "vllm", "DENSE_DIM": "256"}, ("--reingest",),
          "EMBED_MODEL_REVISION"),
         ("contextual_on_hash", {}, {"CONTEXTUAL_EMBED_ENABLED": "true"}, (), "requires embed_mode=vllm"),

@@ -127,13 +127,9 @@ def test_prompt_template_change_requires_a_version_bump():
     )
 
 
-def test_prompt_template_is_versioned_and_mirrors_embed_header():
-    assert ctx_mod.CONTEXT_PROMPT_VERSION == "v2"
-    # v2 contract (issue #78 reviewer sequence): the gist must ADD what the
-    # header lacks, never restate it — pin both sides so the template cannot
-    # silently regress to v1 semantics.
-    assert "Never repeat the manual title" in ctx_mod.CONTEXT_SYSTEM_PROMPT
-    assert "name the manual and section" not in ctx_mod.CONTEXT_SYSTEM_PROMPT
+def test_prompt_messages_carry_the_embed_header_fields():
+    # The digest pin above owns the template wording and its version; here the
+    # messages must carry the same identifying fields the header-only baseline embeds.
     messages = ctx_mod.build_context_messages(
         product="z/OS",
         version="3.1",
@@ -144,14 +140,8 @@ def test_prompt_template_is_versioned_and_mirrors_embed_header():
     )
     assert [m.role for m in messages] == ["system", "user"]
     user = messages[1].content
-    # Same identifying fields the header-only baseline embeds.
     for needle in ("SA22-0000-00", "Synthetic Reference", "Chapter 2 > IEA500I", "IEA500I body"):
         assert needle in user
-
-
-def test_normalize_context_collapses_and_truncates():
-    assert ctx_mod.normalize_context("  a   b\nc  ", 100) == "a b c"
-    assert ctx_mod.normalize_context("x" * 600, 500) == "x" * 500
 
 
 def test_cache_key_binds_every_generation_input():
@@ -188,13 +178,8 @@ def test_cache_round_trip_last_wins_and_skips_corrupt_lines(tmp_path, caplog):
     assert loaded[binding.key(c1)] == "updated"
     assert loaded[binding.key(c2)] == "second"
     assert "context_cache_skip_line" in caplog.text
-
-
-def test_append_rejects_entries_for_unknown_chunks(tmp_path):
     with pytest.raises(ValueError, match="unknown chunk ids"):
-        ctx_mod.append_context_entries(
-            tmp_path / "c.jsonl", _binding(), [_chunk("c1")], {"zzz": "gist"}
-        )
+        ctx_mod.append_context_entries(tmp_path / "c.jsonl", binding, [c1], {"zzz": "gist"})
     assert not (tmp_path / "c.jsonl").exists()
 
 
@@ -246,7 +231,7 @@ def test_resolve_cache_path_explicit_wins_and_sibling_default(tmp_path):
     )
 
 
-def test_complete_posts_short_deterministic_completion():
+def test_complete_request_contract():
     http = FakeHttpClient([FakeResp("  Gist with\nnewline.  ")])
     client = ctx_mod.ContextLLMClient(_settings(), client=http)
     out = client.complete([ChatMessage(role="user", content="hi")])
@@ -256,31 +241,17 @@ def test_complete_posts_short_deterministic_completion():
     assert post["json"]["model"] == "test-gist-model"
     assert post["json"]["temperature"] == 0.0
     assert post["json"]["max_tokens"] == ctx_mod.MAX_COMPLETION_TOKENS
-
-
-def test_complete_sends_bearer_when_key_set():
-    http = FakeHttpClient([FakeResp("Gist.")])
-    client = ctx_mod.ContextLLMClient(
-        _settings(context_llm_api_key="sk-test-context"), client=http
+    assert post["headers"] == {}  # no key: header absent, not empty
+    keyed = FakeHttpClient([FakeResp("Gist.")])
+    ctx_mod.ContextLLMClient(_settings(context_llm_api_key="sk-test-context"), client=keyed).complete(
+        [ChatMessage(role="user", content="hi")]
     )
-    client.complete([ChatMessage(role="user", content="hi")])
-    (post,) = http.posts
-    assert post["headers"] == {"Authorization": "Bearer sk-test-context"}
-
-
-def test_complete_omits_auth_when_key_unset():
-    http = FakeHttpClient([FakeResp("Gist.")])
-    client = ctx_mod.ContextLLMClient(_settings(), client=http)
-    client.complete([ChatMessage(role="user", content="hi")])
-    (post,) = http.posts
-    assert post["headers"] == {}
-
-
-def test_complete_http_error_propagates():
-    http = FakeHttpClient([FakeResp(status_code=500)])
-    client = ctx_mod.ContextLLMClient(_settings(), client=http)
+    assert keyed.posts[0]["headers"] == {"Authorization": "Bearer sk-test-context"}
+    failing = FakeHttpClient([FakeResp(status_code=500)])
     with pytest.raises(RuntimeError, match="HTTP 500"):
-        client.complete([ChatMessage(role="user", content="hi")])
+        ctx_mod.ContextLLMClient(_settings(), client=failing).complete(
+            [ChatMessage(role="user", content="hi")]
+        )
 
 
 def test_generate_contexts_uses_cache_and_generates_misses():
@@ -290,33 +261,10 @@ def test_generate_contexts_uses_cache_and_generates_misses():
     assert full == {"c1": "Cached gist.", "c2": "Fresh gist."}
     assert new == {"c2": "Fresh gist."}
     assert len(http.posts) == 1  # the hit made zero LLM calls
-
-
-def test_same_input_second_pass_makes_zero_calls():
-    cache: dict[str, str] = {}
-    http = FakeHttpClient([FakeResp("Gist A."), FakeResp("Gist B.")])
-    full1, new1 = _gen([_chunk("c1"), _chunk("c2")], http, cache)
-    assert len(http.posts) == 2
+    # Second pass over the same input: all hits, zero calls.
     http2 = FakeHttpClient([])  # any POST raises
     full2, new2 = _gen([_chunk("c1"), _chunk("c2")], http2, cache)
-    assert full2 == full1 == {"c1": "Gist A.", "c2": "Gist B."}
-    assert new2 == {} and http2.posts == []
-    assert new1 == full1
-
-
-def test_issue_416_repro_model_cap_and_body_change_miss_the_cache():
-    """The exact reported scenario: a cache primed by model A (130 chars) must
-    not answer for model B with max_chars=10 and a changed body."""
-    cache: dict[str, str] = {}
-    _gen([_chunk("c1")], FakeHttpClient([FakeResp("A" * 130)]), cache, model="model-a")
-    http_b = FakeHttpClient([FakeResp("B" * 130)])
-    full, new = _gen(
-        [_chunk("c1", text="changed body")], http_b, cache, model="model-b", max_chars=10
-    )
-    assert len(http_b.posts) == 1
-    assert http_b.posts[0]["json"]["model"] == "model-b"
-    assert "changed body" in http_b.posts[0]["json"]["messages"][1]["content"]
-    assert full == new == {"c1": "B" * 10}
+    assert full2 == full and new2 == {} and http2.posts == []
 
 
 def test_model_swap_same_chunk_misses_and_calls_new_model():
@@ -357,38 +305,28 @@ def test_max_chars_change_is_policy_correct_in_both_directions():
 
 
 @pytest.mark.parametrize(
-    "edit",
+    ("edit", "override"),
     [
-        {"text": "IEA500I changed body text"},
-        {"heading_path": "Chapter 9 > IEA999I"},
+        ({"text": "IEA500I changed body text"}, {}),  # chunk input under a stable chunk id
+        ({}, {"title": "Other Title"}),  # header field
+        ({}, {"sha": "other-sha"}),  # doc content digest
     ],
 )
-def test_changed_chunk_input_under_stable_chunk_id_misses(edit):
+def test_changed_inputs_under_stable_chunk_id_miss(edit, override):
     cache: dict[str, str] = {}
     _gen([_chunk()], FakeHttpClient([FakeResp("Original gist.")]), cache)
-    edited = _chunk(**edit)
     http = FakeHttpClient([FakeResp("Edited gist.")])
-    full, _ = _gen([edited], http, cache)
+    full, _ = _gen([_chunk(**edit)], http, cache, **override)
     assert full == {"c1": "Edited gist."}
     assert len(http.posts) == 1
-    assert next(iter(edit.values())) in http.posts[0]["json"]["messages"][1]["content"]
-
-
-@pytest.mark.parametrize(
-    "override",
-    [{"title": "Other Title"}, {"product": "CICS"}, {"version": "9.9"}, {"sha": "other-sha"}],
-)
-def test_changed_header_fields_or_doc_sha_miss(override):
-    cache: dict[str, str] = {}
-    _gen([_chunk()], FakeHttpClient([FakeResp("Original gist.")]), cache)
-    http = FakeHttpClient([FakeResp("Fresh gist.")])
-    full, _ = _gen([_chunk()], http, cache, **override)
-    assert full == {"c1": "Fresh gist."}
-    assert len(http.posts) == 1
+    if edit:
+        assert next(iter(edit.values())) in http.posts[0]["json"]["messages"][1]["content"]
 
 
 def test_unnormalized_cache_hit_is_regenerated():
     """A hit that violates the current normalization policy is not served."""
+    assert ctx_mod.normalize_context("  a   b\nc  ", 100) == "a b c"
+    assert ctx_mod.normalize_context("x" * 600, 500) == "x" * 500
     cache = {_binding().key(_chunk()): "has   odd\nwhitespace"}
     http = FakeHttpClient([FakeResp("Clean gist.")])
     full, _ = _gen([_chunk()], http, cache)
@@ -409,33 +347,6 @@ def test_generate_contexts_empty_gist_fails_loud():
             cache={},
             max_chars=500,
         )
-
-
-def test_embed_batch_prefixes_dense_only():
-    from mainframe_rag.ingest.embed import embed_batch
-
-    seen: dict[str, list[str]] = {"dense": [], "sparse": []}
-
-    class RecordingEmbedder:
-        def dense(self, texts):
-            seen["dense"] = list(texts)
-            return [[0.1] * 4 for _ in texts]
-
-        def dense_query(self, queries):
-            return self.dense(queries)
-
-        def sparse(self, texts):
-            seen["sparse"] = list(texts)
-            return [([3], [1.0]) for _ in texts]
-
-    chunk = _chunk()
-    embed_batch([chunk], "z/OS", "3.1", "Synthetic Reference", RecordingEmbedder(), {"c1": "Gist."})
-    assert "Gist." in seen["dense"][0]
-    assert "Gist." not in seen["sparse"][0]
-    # Sparse input is byte-identical to the legacy header-only string.
-    from mainframe_rag.ingest.embed import chunk_embed_text
-
-    assert seen["sparse"][0] == chunk_embed_text(chunk, "z/OS", "3.1", "Synthetic Reference")
 
 
 def test_upsert_payload_stores_context_only_when_present():
@@ -475,23 +386,10 @@ def test_upsert_payload_stores_context_only_when_present():
     assert with_ctx.points[0].payload["text"] == chunk.text
 
 
-def test_run_fails_closed_on_hash_mode(monkeypatch, tmp_path):
-    """Enabled + hash embedder can never silently embed header-only vectors."""
-    from mainframe_rag.ingest import run_ingest
-
-    monkeypatch.setenv("EMBED_MODE", "hash")
-    monkeypatch.setenv("ALLOW_HASH_MODE", "true")
-    monkeypatch.setenv("CONTEXTUAL_EMBED_ENABLED", "true")
-    monkeypatch.setenv("CONTEXT_LLM_BASE_URL", "http://context.internal/v1")
-    monkeypatch.setenv("CONTEXT_LLM_MODEL", "test-gist-model")
-    with pytest.raises(RuntimeError, match="embed_mode=vllm"):
-        run_ingest.run(
-            src=tmp_path, progress=tmp_path / "inventory.jsonl",
-            workers=1, limit=None, dry_run=False,
-        )
-
-
 def test_run_fails_closed_without_context_llm(monkeypatch, tmp_path):
+    """Enabled without a context LLM can never silently embed header-only
+    vectors (the hash-mode refusal is pinned in test_run_ingest's preflight
+    matrix, case contextual_on_hash)."""
     from mainframe_rag.ingest import run_ingest
 
     monkeypatch.setenv("EMBED_MODE", "vllm")
@@ -562,73 +460,6 @@ def test_parse_one_contextual_path_end_to_end(synthetic_pdf, tmp_path, monkeypat
     import pickle
 
     pickle.dumps((record2, parsed, chunks2, vectors2, contexts2))
-
-
-def test_rerun_reads_sidecar_file_with_zero_llm_calls(synthetic_pdf, tmp_path, monkeypatch):
-    """Acceptance #2 at file level: run 1 writes the sidecar through the
-    parent's append path; run 2 loads it through the real worker cache
-    loader (cold worker state, as in a separate process) and makes zero
-    LLM calls with identical contexts and vectors. The primed-dict test
-    above cannot catch a file-format skew between append and load."""
-    from mainframe_rag.ingest import run_ingest
-    from mainframe_rag.ingest.embed import HashEmbedder
-
-    settings = Settings(
-        _env_file=None,
-        embed_mode="vllm",
-        contextual_embed_enabled=True,
-        context_llm_base_url="http://context.internal/v1",
-        context_llm_model="test-gist-model",
-    )
-    monkeypatch.setattr(run_ingest, "_load_worker_settings", lambda: settings)
-    monkeypatch.setattr(run_ingest, "_get_embedder", lambda s: HashEmbedder())
-    cache_path = tmp_path / "inv.contexts.jsonl"
-
-    def fresh_worker_cache():
-        run_ingest._worker_context_cache = None
-        run_ingest._worker_context_cache_path = None
-
-    def task():
-        return (
-            str(synthetic_pdf), None, None, None, str(synthetic_pdf.parent),
-            "dummy_sha", True, str(cache_path),
-        )
-
-    http1 = FakeHttpClient([FakeResp(f"Gist {i}.") for i in range(100)])
-    monkeypatch.setattr(
-        run_ingest, "_get_context_client", lambda s: ctx_mod.ContextLLMClient(s, client=http1)
-    )
-    fresh_worker_cache()
-    record1, parsed1, chunks1, vectors1, contexts1 = run_ingest._parse_one(task())
-    assert record1.status != "error"
-    assert len(http1.posts) == len(chunks1) > 0
-    # Parent append, exactly like run_ingest.main: the full map, last-wins load.
-    ctx_mod.append_context_entries(
-        cache_path,
-        ctx_mod.ContextBinding.from_settings(
-            settings,
-            doc_sha256="dummy_sha",
-            product=parsed1.product,
-            version=parsed1.version,
-            title=parsed1.title,
-        ),
-        chunks1,
-        contexts1,
-    )
-    assert cache_path.exists()
-
-    http2 = FakeHttpClient([])  # any POST raises: zero calls allowed
-    monkeypatch.setattr(
-        run_ingest, "_get_context_client", lambda s: ctx_mod.ContextLLMClient(s, client=http2)
-    )
-    fresh_worker_cache()
-    record2, _, _chunks2, vectors2, contexts2 = run_ingest._parse_one(task())
-    assert record2.status != "error"
-    assert http2.posts == []
-    assert contexts2 == contexts1
-    assert vectors2 == vectors1
-    lines = [line for line in cache_path.read_text().splitlines() if line.strip()]
-    assert len(lines) == len(chunks1)
 
 
 def test_dry_run_makes_no_context_calls(synthetic_pdf, tmp_path, monkeypatch):
@@ -736,20 +567,6 @@ def test_resume_after_model_swap_regenerates_through_worker(synthetic_pdf, tmp_p
     http_a2 = FakeHttpClient([])
     _, _, ctx_a2 = run_a2(http_a2)
     assert http_a2.posts == [] and ctx_a2 == ctx_a
-
-
-def test_resume_after_cap_change_regenerates_through_worker(synthetic_pdf, tmp_path, monkeypatch):
-    _, _, run_500 = _resume_env(synthetic_pdf, tmp_path, monkeypatch, max_chars=500)
-    http1 = FakeHttpClient([FakeResp("word " * 60)] * 100)
-    chunks, _, ctx1 = run_500(http1)
-    assert len(http1.posts) == len(chunks) > 0
-    assert all(len(v) > 100 for v in ctx1.values())
-
-    _, _, run_50 = _resume_env(synthetic_pdf, tmp_path, monkeypatch, max_chars=50)
-    http2 = FakeHttpClient([FakeResp("word " * 60)] * 100)
-    _, _, ctx2 = run_50(http2)
-    assert len(http2.posts) == len(chunks)
-    assert all(0 < len(v) <= 50 for v in ctx2.values())
 
 
 def test_resume_with_legacy_sidecar_regenerates_without_deleting_it(

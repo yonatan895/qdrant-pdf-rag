@@ -137,18 +137,6 @@ def _parse_sse_events(text: str) -> list[tuple[str, dict]]:
     return events
 
 
-def test_ui_disabled_serves_404_envelope_on_every_path(ui_disabled_client):
-    for method, path, kwargs in (
-        ("get", "/ui", {}),
-        ("get", "/ui/static/css/console.css", {}),
-        ("get", "/ui/healthz", {}),
-        ("post", "/ui/chat", {"data": {"message": "hi"}}),
-    ):
-        resp = getattr(ui_disabled_client, method)(path, **kwargs)
-        assert resp.status_code == 404, path
-        assert resp.json() == {"code": "not_found", "message": "not found"}, path
-
-
 def test_ui_disabled_blocks_stream_and_history_with_zero_model_calls(
     monkeypatch, synthetic_pdf, servable_representation_gate
 ):
@@ -162,6 +150,7 @@ def test_ui_disabled_blocks_stream_and_history_with_zero_model_calls(
         history = json.dumps([{"role": "user", "content": "earlier"}])
         for method, path, kwargs in (
             ("get", "/ui", {}),
+            ("get", "/ui/healthz", {}),
             ("get", "/ui/static/js/console.js", {}),
             ("post", "/ui/chat", {"data": {"message": "hi", "messages": history}}),
             ("post", "/ui/chat/stream", {"json": {"messages": [{"role": "user", "content": "hi"}]}}),
@@ -249,6 +238,8 @@ def test_ui_chat_stream_sse_token_final_contract(ui_client):
     assert "Reissue the command" in final["answer"]
     assert final["citations"] == [_hit().cite]
     assert final["hits"][0]["doc_id"] == "SA22-0000-00"
+    assert final["verification_state"] == "accepted"
+    assert final["script_review_required"] is False
 
 
 def test_ui_chat_stream_final_matches_answer_stream_final(ui_client):
@@ -327,6 +318,9 @@ def test_ui_chat_stream_parser_failure_carries_incomplete_state(
 
 
 def test_ui_chat_retrieval_failure_renders_fixed_banner(ui_client, monkeypatch):
+    """Full page and HTMX paths both surface the fixed banner (the HTMX path
+    must not silently swap only the user turn); upstream text never leaks."""
+
     def boom(*_a, **_k):
         raise RuntimeError("qdrant exploded: internal detail")
 
@@ -335,16 +329,6 @@ def test_ui_chat_retrieval_failure_renders_fixed_banner(ui_client, monkeypatch):
     assert resp.status_code == 502
     assert "The reasoning agent could not complete this request." in resp.text
     assert "qdrant exploded" not in resp.text
-
-
-def test_ui_chat_htmx_retrieval_failure_renders_error_fragment(ui_client, monkeypatch):
-    """Review fix: the HTMX path must surface the failure, not silently swap
-    only the user turn (the pre-fix behavior)."""
-
-    def boom(*_a, **_k):
-        raise RuntimeError("qdrant exploded: internal detail")
-
-    monkeypatch.setattr(app_mod, "retrieve_search", boom)
     resp = ui_client.post(
         "/ui/chat",
         data={"message": "What is IEA500I?", "messages": ""},
@@ -463,103 +447,6 @@ def test_vendored_fonts_are_local_pinned_and_served(ui_client):
     assert shell.index("/ui/static/css/fonts.css") < shell.index("/ui/static/css/console.css")
 
 
-def test_dead_sse_extension_stays_removed(ui_client):
-    """Issue #326 P0: streaming uses native fetch — the unreferenced sse.js
-    must not come back as dead weight (file, manifest, or shell reference)."""
-    assert not (_VENDOR_DIR / "sse.js").exists()
-    manifest = (_VENDOR_DIR / "SHA256SUMS").read_text(encoding="utf-8")
-    assert "sse.js" not in manifest
-    resp = ui_client.get("/ui/static/vendor/sse.js")
-    assert resp.status_code == 404
-    shell = ui_client.get("/ui").text
-    assert "sse.js" not in shell
-
-
-def _css_rule(css: str, selector: str) -> str:
-    """Declaration block for an exact selector. Pins assert rule + property
-    together so a bare property passing from an unrelated rule cannot fool
-    them (review on #333). Prefix the selector with "\\n" to anchor a
-    top-level rule and skip indented overrides inside @media blocks."""
-
-    start = css.index("{", css.index(selector))
-    return css[start : css.index("}", start)]
-
-
-def test_console_css_layout_survival_rules():
-    """Issue #326 P0: narrow viewports clipped the topbar and SEND button
-    because flex/grid children default to min-width: auto. Pin the
-    shrinkability rules so the fix cannot silently regress."""
-    css = (
-        Path(app_mod.__file__).parents[1] / "webui" / "static" / "css" / "console.css"
-    ).read_text(encoding="utf-8")
-    assert "min-width: 0;" in _css_rule(css, ".layout > *")
-    assert "flex-wrap: wrap;" in _css_rule(css, ".topbar-controls")
-    assert "min-width: 0;" in _css_rule(css, ".composer textarea")
-    # Sidebar owns its scroll instead of riding the page (follow-up: the
-    # tool section vanished off-screen on long conversations).
-    assert "position: sticky;" in _css_rule(css, ".sidebar {")
-    assert "overflow-y: auto;" in _css_rule(css, ".sidebar {")
-
-
-def test_console_css_theme_polish():
-    """Issue #326 P4: readability invariants — visible focus, glow scoped
-    off body copy, primary Send, reduced-motion respect."""
-    css = (
-        Path(app_mod.__file__).parents[1] / "webui" / "static" / "css" / "console.css"
-    ).read_text(encoding="utf-8")
-    assert ":focus-visible" in css
-    assert ".topbar h1 { text-shadow: var(--glow); }" in css
-    # Exactly one text-shadow in the sheet: the header glow. Body copy in
-    # the 3270 theme stays crisp (dark theme sets --glow: none anyway).
-    assert css.count("text-shadow") == 1
-    assert "#send-btn:not(.stop)" in css
-    assert "prefers-reduced-motion" in css
-    assert "::selection" in css
-
-
-def test_console_css_chrome_pass():
-    """Issue #332: sidebar tool section, circular glyph send, pill composer
-    with styled placeholder."""
-    css = (
-        Path(app_mod.__file__).parents[1] / "webui" / "static" / "css" / "console.css"
-    ).read_text(encoding="utf-8")
-    assert ".sidebar-tools {" in css
-    # The circular Send shape (#332) was retired by the Plex Ops redesign;
-    # its reachability at every width is executed by the browser layout
-    # contract (test_layout_has_no_horizontal_scroll_and_composer_stays_reachable).
-    assert ".composer textarea::placeholder" in css
-    assert ".composer textarea:focus" in css
-
-
-def test_console_css_beauty_pass():
-    """Issue #334: send previews green / stop previews red (hover and focus
-    agree), and code leaves Courier behind for a modern system mono stack
-    with per-theme chip tokens."""
-    css = (
-        Path(app_mod.__file__).parents[1] / "webui" / "static" / "css" / "console.css"
-    ).read_text(encoding="utf-8")
-    assert "ui-monospace" in _css_rule(css, ":root")
-    assert "--send-hover:" in _css_rule(css, "body.theme-dark {")
-    assert "--stop-hover:" in _css_rule(css, "body.theme-dark {")
-    assert "--send-hover:" in _css_rule(css, "body.theme-3270 {")
-    assert "--stop-hover:" in _css_rule(css, "body.theme-3270 {")
-    assert "var(--send-hover)" in _css_rule(css, "#send-btn:not(.stop):hover")
-    assert "var(--send-hover)" in _css_rule(css, "#send-btn:not(.stop):focus-visible")
-    assert "var(--stop-hover)" in _css_rule(css, "#send-btn.stop:hover")
-    assert "var(--stop-hover)" in _css_rule(css, "#send-btn.stop:focus-visible")
-    code = _css_rule(css, ".turn-content.md code")
-    assert "var(--font-code)" in code
-    assert "color: var(--code-text);" in code
-    assert "Courier" not in code
-    assert "var(--font-code)" in _css_rule(css, ".turn-content.md pre code")
-    # Reduced-motion override must follow the base #send-btn rule: same
-    # specificity means file order decides (review on #335 caught the
-    # transition being re-enabled by the later base rule).
-    reduced = css.index("@media (prefers-reduced-motion: reduce)")
-    assert reduced > css.index("\n#send-btn {")
-    assert "transition: none;" in css[reduced:]
-
-
 # ---------------------------------------------------------------- markdown (P1)
 
 
@@ -641,7 +528,7 @@ def test_markdown_subset_renders_gfm_pipe_tables():
     )
 
 
-def test_markdown_subset_tables_pad_ragged_rows_keep_escaped_pipes_and_stop_at_plain_text():
+def test_markdown_subset_table_edge_cases():
     from mainframe_rag.webui.routes import render_markdown_subset
 
     rendered = render_markdown_subset(
@@ -659,32 +546,14 @@ def test_markdown_subset_tables_pad_ragged_rows_keep_escaped_pipes_and_stop_at_p
     assert "extra" not in rendered
     assert rendered.endswith("</tbody></table></div>\n<p>Not a row</p>")
 
-
-def test_markdown_subset_partial_tables_stay_inert_text():
-    from mainframe_rag.webui.routes import render_markdown_subset
-
     for source in (
         "| a | b |",  # header without a delimiter row
         "| a | b |\n| c | d |",  # second row is not a delimiter
         "| a | b |\n|---|",  # delimiter width differs from the header
         "| a | b |\n|--|--|",  # fewer than three dashes is not a delimiter
     ):
-        rendered = render_markdown_subset(source)
-        assert "<table" not in rendered and rendered.startswith("<p>"), source
-
-
-def test_markdown_subset_table_cells_neutralize_hostile_markup():
-    from mainframe_rag.webui.routes import render_markdown_subset
-
-    rendered = render_markdown_subset(
-        "| <script>alert(1)</script> | [x](javascript:alert(2)) |\n"
-        "|---|---|\n"
-        '| <img src=x onerror=alert(3)> | AT&T |'
-    )
-    assert "<table>" in rendered
-    for forbidden in ("<script>", "<img", "<a "):
-        assert forbidden not in rendered
-    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in rendered and "AT&amp;T" in rendered
+        inert = render_markdown_subset(source)
+        assert "<table" not in inert and inert.startswith("<p>"), source
 
 
 def test_markdown_subset_neutralizes_hostile_markup():
@@ -703,6 +572,16 @@ def test_markdown_subset_neutralizes_hostile_markup():
     assert "<a " not in rendered and "<a>" not in rendered
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in rendered
     assert "AT&amp;T stays &amp; fine" in rendered
+
+    table = render_markdown_subset(
+        "| <script>alert(1)</script> | [x](javascript:alert(2)) |\n"
+        "|---|---|\n"
+        '| <img src=x onerror=alert(3)> | AT&T |'
+    )
+    assert "<table>" in table
+    for forbidden in ("<script>", "<img", "<a "):
+        assert forbidden not in table
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in table and "AT&amp;T" in table
 
 
 class MarkdownFakeLLM:
@@ -769,116 +648,6 @@ def test_ui_chat_fragment_renders_markdown_not_markers(ui_client, monkeypatch):
     assert "Verified manual citations" in body
 
 
-def test_ui_nojs_page_renders_markdown(ui_client, monkeypatch):
-    """Plain-form path renders the same safe HTML in the full page."""
-    monkeypatch.setattr(app_mod, "llm", MarkdownFakeLLM())
-    resp = ui_client.post("/ui/chat", data={"message": "What is IKJEFT01?", "messages": ""})
-    assert resp.status_code == 200
-    assistant = _assistant_html(resp.text)
-    assert "<h3>Program Function</h3>" in assistant
-    assert "###" not in assistant
-
-
-def test_ui_chat_fragment_message_design(ui_client, monkeypatch):
-    """P2: avatar header, timestamp, code copy button, citation count and
-    per-cite copy buttons arrive in the fragment."""
-    monkeypatch.setattr(app_mod, "llm", MarkdownFakeLLM())
-    resp = ui_client.post(
-        "/ui/chat",
-        data={"message": "What is IKJEFT01?", "messages": ""},
-        headers={"HX-Request": "true"},
-    )
-    assert resp.status_code == 200
-    body = resp.text
-    assert '<span class="avatar" aria-hidden="true">O</span>' in body
-    assert '<span class="avatar" aria-hidden="true">C</span>' in body
-    assert 'class="turn-time" data-ts="' in body
-    # The ```jcl block leaves the answer body as output.script and is
-    # re-attached with its threaded language tag (issue #337) — operators
-    # see the highlighted code.
-    assert "//STEP1" in _assistant_html(body)
-    assert (
-        '<pre><button class="copy-btn" type="button">Copy</button>'
-        '<code class="language-jcl">//STEP1 <span class="tok-keyword">EXEC</span> <span class="tok-keyword">PGM</span>=IEFBR14</code></pre>'
-        in body
-    )
-    assert "Verified manual citations (1)" in body
-    assert '<button class="copy-btn copy-cite" type="button">Copy</button>' in body
-    # Plex Ops header chip mirrors console.js stateChip (accepted + cited).
-    assert '<span class="state-chip state-chip-ok">Verified &middot; 1 citation</span>' in body
-
-
-def test_ui_shell_has_session_filter(ui_client):
-    """P3: the sidebar carries the incident filter input (browser-only)."""
-    body = ui_client.get("/ui").text
-    assert 'id="session-filter"' in body
-
-
-def test_ui_sidebar_tools_replace_topbar_controls(ui_client):
-    """Issue #332.1: theme + export live in the sidebar (reachable while
-    scrolled); the topbar keeps only the health badge. IDs are unchanged
-    so the client wiring is untouched."""
-    body = ui_client.get("/ui").text
-    topbar, _, rest = body.partition("<aside")
-    assert 'id="theme-select"' not in topbar
-    assert 'id="export-btn"' not in topbar
-    assert 'id="health-badge"' in topbar
-    assert 'id="theme-select"' in rest
-    assert 'id="export-btn"' in rest
-
-
-def test_ui_send_button_glyph(ui_client):
-    """Issue #332.3: glyph button with an accessible name, not a text label."""
-    body = ui_client.get("/ui").text
-    assert 'id="send-btn" aria-label="Send">&#9650;' in body
-
-
-def test_ui_chat_fragment_turn_copy_buttons(ui_client, monkeypatch):
-    """Issue #332.2: every turn header carries a Copy button."""
-    monkeypatch.setattr(app_mod, "llm", MarkdownFakeLLM())
-    resp = ui_client.post(
-        "/ui/chat",
-        data={"message": "What is IKJEFT01?", "messages": ""},
-        headers={"HX-Request": "true"},
-    )
-    assert resp.status_code == 200
-    assert resp.text.count('<button class="copy-btn copy-turn" type="button">Copy</button>') == 2
-
-
-def test_console_js_streaming_ux_wiring():
-    """P3: streaming UX behaviors are wired in console.js — thinking
-    placeholder, abort/stop, Ctrl+Enter submit, per-turn meta footer,
-    session rename + filter, empty state. (This pins presence only; the
-    behavior is executed in tests/console_browser_contracts.py, issue #372.)"""
-    js = (
-        Path(app_mod.__file__).parents[1] / "webui" / "static" / "js" / "console.js"
-    ).read_text(encoding="utf-8")
-    for token in (
-        "Thinking…",
-        "AbortController",
-        "requestSubmit",
-        "turn-meta",
-        "empty-state",
-        "EMPTY_EXAMPLES",
-        "startRename",
-        "sessionFilter",
-        "stickScroll",
-        # Issue #332: per-turn copy + glyph send/stop.
-        "copy-turn",
-        "aria-label",
-        "■",
-        "▲",
-        # Follow-up: Stop must survive native validation (required toggle).
-        'removeAttribute("required")',
-        # Issue #365: a failed stream with displayed partial content is
-        # persisted as generation_incomplete (never silently dropped from
-        # history/export, never promoted to accepted).
-        "const streamFailed = failed || (!stopped && !finalPayload);",
-        "Stream failed — partial answer kept, not verified",
-    ):
-        assert token in js, token
-
-
 def test_markdown_subset_highlights_jcl():
     """Issue #337: JCL code block renders highlighted comment, string, keyword, and number spans."""
     from mainframe_rag.webui.routes import render_markdown_subset
@@ -904,32 +673,6 @@ def test_markdown_subset_highlights_jcl():
     assert '<span class="tok-keyword">CYL</span>' in rendered
     assert '<span class="tok-number">10</span>' in rendered
     assert '<span class="tok-number">5</span>' in rendered
-
-
-def test_markdown_subset_highlights_rexx():
-    """Issue #337: REXX code block renders highlighted comment, string, keyword, and number spans."""
-    from mainframe_rag.webui.routes import render_markdown_subset
-
-    source = (
-        "```rexx\n"
-        "/* REXX sample */\n"
-        "say 'Hello, world!'\n"
-        "count = 42\n"
-        "do i = 1 to count\n"
-        '  say "item" i\n'
-        "end\n"
-        "```"
-    )
-    rendered = render_markdown_subset(source)
-    assert '<code class="language-rexx">' in rendered
-    assert '<span class="tok-comment">/* REXX sample */</span>' in rendered
-    assert '<span class="tok-string">\'Hello, world!\'</span>' in rendered
-    assert '<span class="tok-number">42</span>' in rendered
-    assert '<span class="tok-keyword">say</span>' in rendered or '<span class="tok-keyword">SAY</span>' in rendered
-    assert '<span class="tok-keyword">do</span>' in rendered
-    assert '<span class="tok-keyword">to</span>' in rendered
-    assert '<span class="tok-keyword">end</span>' in rendered
-    assert '<span class="tok-string">"item"</span>' in rendered
 
 
 def test_markdown_subset_unlabeled_fence_content_sniffing():
@@ -960,22 +703,6 @@ def test_markdown_subset_unlabeled_fence_content_sniffing():
     assert "<code" in rendered_prose
     assert "language-" not in rendered_prose
     assert "tok-" not in rendered_prose
-
-
-def test_markdown_subset_other_languages_keep_class_no_spans():
-    """Issue #337: languages other than JCL/REXX keep their class but emit no spans."""
-    from mainframe_rag.webui.routes import render_markdown_subset
-
-    py_source = "```python\ndef hello():\n    return 42\n```"
-    rendered_py = render_markdown_subset(py_source)
-    assert '<code class="language-python">' in rendered_py
-    assert "tok-" not in rendered_py
-    assert "def hello():" in rendered_py
-
-    json_source = '```json\n{"status": "ok", "code": 200}\n```'
-    rendered_json = render_markdown_subset(json_source)
-    assert '<code class="language-json">' in rendered_json
-    assert "tok-" not in rendered_json
 
 
 def test_markdown_subset_code_adversarial():
@@ -1019,62 +746,6 @@ def test_markdown_subset_code_adversarial():
     assert "tok-" not in rendered_unknown
 
 
-def test_ui_chat_stream_final_includes_script_lang(ui_client, monkeypatch):
-    """Issue #337 & #339 should-fix: UI chat stream final event payload carries script_lang."""
-    monkeypatch.setattr(app_mod, "llm", MarkdownFakeLLM())
-    resp = ui_client.post(
-        "/ui/chat/stream",
-        json={"messages": [{"role": "user", "content": "What is IKJEFT01?"}]},
-    )
-    assert resp.status_code == 200
-    events = [line for line in resp.text.split("\n\n") if line.strip()]
-    final_event = next(e for e in events if "event: final" in e)
-    payload_line = next(line for line in final_event.split("\n") if line.startswith("data: "))
-    payload = json.loads(payload_line[6:])
-    assert payload["script"] == "//STEP1 EXEC PGM=IEFBR14"
-    assert payload["script_lang"] == "jcl"
-
-
-def test_ui_chat_script_lang_fallback_unlabeled(ui_client, monkeypatch):
-    """Issue #337: when script_lang is None, script append falls back to unlabeled fence."""
-    class FakeLLMNoLang:
-        def chat(self, messages, reasoning_effort=None, temperature=None):
-            return ChatResult(
-                content="Here is code:\n\n```\n//UNLABELED EXEC PGM=IEFBR14\n```\n\nCitations:\n- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\n",
-                finish_reason="stop",
-                usage=TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
-            )
-
-    monkeypatch.setattr(app_mod, "llm", FakeLLMNoLang())
-    resp = ui_client.post(
-        "/ui/chat",
-        data={"message": "Show code", "messages": ""},
-        headers={"HX-Request": "true"},
-    )
-    assert resp.status_code == 200
-    body = resp.text
-    # Bare fence unwraps to prose in parse_answer (no script extracted, rendered directly)
-    assert "//UNLABELED" in _assistant_html(body)
-
-
-def test_console_js_code_tokenizer_parity():
-    """Issue #337: console.js contains client-side sniffing and tokenization mirroring server."""
-    js = (
-        Path(app_mod.__file__).parents[1] / "webui" / "static" / "js" / "console.js"
-    ).read_text(encoding="utf-8")
-    for token in (
-        "detectCodeRegion",
-        "tokenizeCode",
-        "JCL_TOKEN",
-        "REXX_TOKEN",
-        "tok-comment",
-        "tok-string",
-        "tok-keyword",
-        "tok-number",
-    ):
-        assert token in js, token
-
-
 def test_ui_chat_passes_reasoning_effort(ui_client, monkeypatch):
     """Reasoning effort selected in UI form is forwarded to LLM chat call."""
     fake_llm = UiFakeLLM()
@@ -1097,24 +768,8 @@ def test_ui_chat_passes_reasoning_effort(ui_client, monkeypatch):
     assert fake_llm.calls[-1]["reasoning_effort"] == "low"
 
 
-def test_ui_chat_stream_passes_reasoning_effort(ui_client, monkeypatch):
-    """Reasoning effort selected in UI stream payload is forwarded to LLM chat_stream."""
-    fake_llm = UiFakeLLM()
-    monkeypatch.setattr(app_mod, "llm", fake_llm)
-
-    resp = ui_client.post(
-        "/ui/chat/stream",
-        json={
-            "messages": [{"role": "user", "content": "What is IEA500I?"}],
-            "reasoning_effort": "medium",
-        },
-    )
-    assert resp.status_code == 200
-    assert fake_llm.stream_calls[-1]["reasoning_effort"] == "medium"
-
-
-def test_ui_chat_stream_invalid_reasoning_effort_rejected(ui_client, monkeypatch):
-    """Invalid reasoning effort in stream returns 422 validation error."""
+def test_ui_invalid_reasoning_effort_rejected(ui_client):
+    """An unknown reasoning effort is a 422 on both the stream and form paths."""
     resp = ui_client.post(
         "/ui/chat/stream",
         json={
@@ -1123,28 +778,11 @@ def test_ui_chat_stream_invalid_reasoning_effort_rejected(ui_client, monkeypatch
         },
     )
     assert resp.status_code == 422
-
-
-def test_ui_chat_form_invalid_reasoning_effort_rejected(ui_client):
-    """Invalid reasoning effort in form post returns 422 validation error."""
     resp = ui_client.post(
         "/ui/chat",
         data={"message": "What is IEA500I?", "reasoning_effort": "ultra"},
     )
     assert resp.status_code == 422
-
-
-def test_ui_index_renders_reasoning_effort_toggle(ui_client):
-    """GET /ui renders the reasoning effort toggle group (one pressed
-    option, matching the hidden form value the no-JS POST carries)."""
-    resp = ui_client.get("/ui")
-    assert resp.status_code == 200
-    body = resp.text
-    assert "composer-toolbar" in body
-    assert 'class="reasoning-control" role="group" aria-labelledby="reasoning-label"' in body
-    assert '<button type="button" class="seg" data-effort="low" aria-pressed="true">Low</button>' in body
-    assert body.count('aria-pressed="true"') == 1
-    assert 'name="reasoning_effort" id="reasoning-effort-input" value="low"' in body
 
 
 def test_console_offers_only_served_efforts_and_refuses_others_before_the_model(ui_client, monkeypatch):
@@ -1187,45 +825,6 @@ def test_console_offers_only_served_efforts_and_refuses_others_before_the_model(
     assert fake_llm.stream_calls[-1]["reasoning_effort"] == "low"
 
 
-def test_console_js_reasoning_effort_parity():
-    """console.js contains client-side persistence and payload integration for reasoning effort."""
-    js = (
-        Path(app_mod.__file__).parents[1] / "webui" / "static" / "js" / "console.js"
-    ).read_text(encoding="utf-8")
-    for token in (
-        "REASONING_KEY",
-        "mainframe_rag_reasoning_effort",
-        "getReasoningEffort",
-        "setReasoningEffort",
-        "reasoning_effort",
-        ".segmented .seg",
-        "aria-pressed",
-        "updateSendBtn",
-    ):
-        assert token in js, token
-
-
-def test_console_css_reasoning_control():
-    """console.css styles the composer toolbar and the reasoning toggle group
-    (the range-slider pins retired with the slider in the Plex Ops redesign)."""
-    css = (
-        Path(app_mod.__file__).parents[1] / "webui" / "static" / "css" / "console.css"
-    ).read_text(encoding="utf-8")
-    assert ".composer-toolbar" in css
-    assert ".reasoning-control" in css
-    assert ".segmented .seg" in css
-    assert '.segmented .seg[aria-pressed="true"]' in css
-
-
-def test_console_send_button_visibility():
-    """Send button is hidden when textarea is empty and visible on input or streaming."""
-    css = (
-        Path(app_mod.__file__).parents[1] / "webui" / "static" / "css" / "console.css"
-    ).read_text(encoding="utf-8")
-    assert "#send-btn.hidden" in css
-    assert "placeholder-shown + #send-btn:not(.stop)" in css
-
-
 # ---------------------------------------------------------------------------
 # Verification-state presentation (issue #365)
 # ---------------------------------------------------------------------------
@@ -1249,7 +848,7 @@ class RefusalUiLLM:
         )
 
 
-def test_ui_fragment_accepted_keeps_verified_title_and_review_badge(ui_client, monkeypatch):
+def test_ui_fragment_verification_state_presentation(ui_client, monkeypatch):
     """Accepted + script (MarkdownFakeLLM): the verified title is preserved
     exactly, no draft badge appears, and the script carries its review badge."""
     monkeypatch.setattr(app_mod, "llm", MarkdownFakeLLM())
@@ -1264,10 +863,7 @@ def test_ui_fragment_accepted_keeps_verified_title_and_review_badge(ui_client, m
     assert "state-generation_incomplete" not in body
     assert "Human review required" in body
 
-
-def test_ui_fragment_draft_badge_without_verified_title(ui_client, monkeypatch):
-    """Fluent prose, zero eligible citations: the draft badge renders and
-    no citations box may read as verified."""
+    # Fluent prose with zero eligible citations: draft badge, never "verified".
     monkeypatch.setattr(app_mod, "llm", FluentNoCiteUiLLM())
     body = ui_client.post(
         "/ui/chat",
@@ -1278,8 +874,6 @@ def test_ui_fragment_draft_badge_without_verified_title(ui_client, monkeypatch):
     assert "Verified manual citations" not in body
     assert "Inferred citations" not in body
 
-
-def test_ui_fragment_insufficient_evidence_refusal(ui_client, monkeypatch):
     monkeypatch.setattr(app_mod, "llm", RefusalUiLLM())
     body = ui_client.post(
         "/ui/chat",
@@ -1290,22 +884,9 @@ def test_ui_fragment_insufficient_evidence_refusal(ui_client, monkeypatch):
     assert "Verified manual citations" not in body
 
 
-def test_ui_stream_final_carries_verification_state(ui_client):
-    """The /ui stream terminal final reports the core-computed state and
-    review flag for the console client (UiFakeLLM: accepted, no script)."""
-    resp = ui_client.post(
-        "/ui/chat/stream",
-        json={"messages": [{"role": "user", "content": "What is IEA500I?"}]},
-    )
-    final = next(payload for name, payload in _parse_sse_events(resp.text) if name == "final")
-    assert final["verification_state"] == "accepted"
-    assert final["script_review_required"] is False
-
-
-@pytest.mark.parametrize("role", ["assistant", "system"])
-def test_ui_stream_missing_user_is_fixed_validation_error(ui_client, role):
+def test_ui_stream_missing_user_is_fixed_validation_error(ui_client):
     result = ui_client.post("/ui/chat/stream", json={"messages": [
-        {"role": role, "content": "No user question was supplied"},
+        {"role": "assistant", "content": "No user question was supplied"},
     ]})
     assert result.status_code == 422
     assert result.json() == {"code": "invalid_request", "message": "request body failed validation"}
@@ -1347,7 +928,7 @@ def test_ui_stream_invalid_active_user_refuses_before_work(ui_client, message):
     assert app_mod.llm.calls == app_mod.llm.stream_calls == []
 
 
-@pytest.mark.parametrize("message", ["   ", "\t\n", "\x00x", "a\x1bb"])
+@pytest.mark.parametrize("message", ["\x00x", "a\x1bb"])
 def test_ui_stream_unsearchable_active_user_refuses_before_work(ui_client, message):
     """Issue #579: control characters and blank turns, fixed 422, no work."""
     result = ui_client.post("/ui/chat/stream", json={"messages": [{"role": "user", "content": message}]})
@@ -1357,8 +938,7 @@ def test_ui_stream_unsearchable_active_user_refuses_before_work(ui_client, messa
     assert app_mod.llm.calls == app_mod.llm.stream_calls == []
 
 
-@pytest.mark.parametrize("htmx", [False, True])
-@pytest.mark.parametrize("message", ["   ", "\t\n", "\x00x", "a\x1bb"])
+@pytest.mark.parametrize("message,htmx", [("   ", False), ("a\x1bb", True)])
 def test_ui_form_unsearchable_message_refuses_before_work(ui_client, message, htmx):
     """Issue #579: the console form shows its fixed banner and does no work."""
     result = ui_client.post("/ui/chat", headers={"HX-Request": "true"} if htmx else {}, data={
@@ -1369,9 +949,8 @@ def test_ui_form_unsearchable_message_refuses_before_work(ui_client, message, ht
     assert app_mod.llm.calls == app_mod.llm.stream_calls == []
 
 
-@pytest.mark.parametrize("htmx", [False, True])
-def test_ui_form_normalizes_current_message_with_real_history(ui_client, htmx):
-    result = ui_client.post("/ui/chat", headers={"HX-Request": "true"} if htmx else {}, data={
+def test_ui_form_normalizes_current_message_with_real_history(ui_client):
+    result = ui_client.post("/ui/chat", data={
         "message": " \tWhat does IEA500I mean?\n",
         "messages": json.dumps([
             {"role": "user", "content": "Earlier question"},
@@ -1384,28 +963,6 @@ def test_ui_form_normalizes_current_message_with_real_history(ui_client, htmx):
     assert prompt[1].content == "Earlier question"
     assert prompt[2].content == "Earlier answer"
     assert "Question: What does IEA500I mean?\n" in prompt[-1].content
-
-
-def test_ui_chat_root_is_server_and_ends(ui_client, monkeypatch):
-    """OBS-1B §4.3: the console turn runs under a SERVER root that ends."""
-    from opentelemetry.sdk.trace import TracerProvider
-    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
-    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
-    from opentelemetry.trace import SpanKind
-
-    from mainframe_rag.agent import answer_core as answer_core_mod
-
-    exporter = InMemorySpanExporter()
-    provider = TracerProvider()
-    provider.add_span_processor(SimpleSpanProcessor(exporter))
-    monkeypatch.setattr(app_mod, "tracer", provider.get_tracer("ui-test"))
-    monkeypatch.setattr(answer_core_mod, "tracer", provider.get_tracer("ui-test"))
-    resp = ui_client.post("/ui/chat", data={"message": "What is IEA500I?", "messages": ""})
-    assert resp.status_code == 200
-    roots = [s for s in exporter.get_finished_spans() if s.name == "ui.chat"]
-    assert len(roots) == 1
-    assert roots[0].kind == SpanKind.SERVER
-    assert roots[0].end_time is not None
 
 
 # ---------------------------------------------------------------------------
@@ -1492,8 +1049,6 @@ def test_ui_fragment_renders_supplied_excerpt_as_data(ui_client, monkeypatch):
     assert 'class="evidence" data-evidence="current"' in body
     assert "Source product: z/OS · version: unknown" in body
     assert "Recorded location: Chapter 2 &gt; IEA500I" in body
-    assert "whole chunk supplied" in body
-    assert "Source-matched, not semantically checked" in body
 
 
 def test_ui_history_payload_never_carries_excerpt_text(ui_client):

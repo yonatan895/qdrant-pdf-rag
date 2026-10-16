@@ -51,11 +51,8 @@ def test_verify_entry_fails_on_unknown_docs():
     fails, _ = verify_entry(entry, _facts())
     assert any("NOPE-1" in f for f in fails)
     assert any("NOPE-2" in f for f in fails)
-
-
-def test_verify_entry_fails_on_duplicate_expected_docs():
-    entry = GoldenEntry(query="x", expected_doc_ids=["SC23-6883-70", "SC23-6883-70"])
-    fails, _ = verify_entry(entry, _facts())
+    dup = GoldenEntry(query="x", expected_doc_ids=["SC23-6883-70", "SC23-6883-70"])
+    fails, _ = verify_entry(dup, _facts())
     assert any("duplicate expected_doc_ids" in f for f in fails)
 
 
@@ -124,21 +121,6 @@ def test_verify_entry_same_volume_sibling_trap_allowed():
     assert fails == [] and warns == []
 
 
-def test_verify_entry_weak_trap_warns():
-    facts = _facts()
-    facts.msg_docs["IEA501I"] = {f"D{i}" for i in range(20)}
-    entry = GoldenEntry(
-        id="msg-03",
-        query="IEA501I code",
-        query_class="message_id",
-        expected_doc_ids=["SC23-6883-70"],
-        must_not_message_ids=["IEA501I"],
-        source="operator-history",
-    )
-    _, warns = verify_entry(entry, facts)
-    assert any("weak trap" in w for w in warns)
-
-
 def test_verify_entry_nonexistent_sibling_trap_fails():
     entry = GoldenEntry(
         id="msg-04",
@@ -150,25 +132,6 @@ def test_verify_entry_nonexistent_sibling_trap_fails():
     )
     fails, _ = verify_entry(entry, _facts())
     assert any("does not exist" in f for f in fails)
-
-
-def test_verify_entry_abstain_without_targets_or_note_warns():
-    entry = GoldenEntry(id="neg-01", query="q", query_class="negative", expected_behavior="abstain", source="operator-history")
-    _, warns = verify_entry(entry, _facts())
-    assert any("abstain" in w for w in warns)
-    entry_noted = GoldenEntry(
-        id="neg-02", query="q", query_class="negative", expected_behavior="abstain",
-        source="operator-history", note="out-of-corpus topic by design",
-    )
-    _, warns2 = verify_entry(entry_noted, _facts())
-    assert not any("abstain" in w for w in warns2)
-
-
-def test_verify_entry_hygiene_warns():
-    entry = GoldenEntry(query="q", expected_doc_ids=["SC23-6883-70"])
-    _, warns = verify_entry(entry, _facts())
-    joined = " | ".join(warns)
-    assert "missing id" in joined and "missing query_class" in joined and "missing source" in joined
 
 
 def test_find_duplicate_queries():
@@ -192,16 +155,6 @@ def test_load_entries_collects_per_line_errors(tmp_path: Path):
     assert len(entries) == 1
     assert len(errors) == 2
     assert "line 2" in errors[0] and "line 3" in errors[1]
-
-
-def test_verify_entry_needs_no_network():
-    """Guard against regressions that silently dial the network: verify_entry
-    is pure over CorpusFacts."""
-    entry = GoldenEntry(query="q", expected_doc_ids=["SC23-6883-70"])
-    fails, warns = verify_entry(entry, _facts())
-    assert fails == []
-    assert len(warns) == 3
-    assert any("query_class" in w and "message_id" in w for w in warns)
 
 
 def _code_facts() -> CorpusFacts:

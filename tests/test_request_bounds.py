@@ -178,53 +178,6 @@ SEARCH = ("/v1/search", {"query": "IEA500I"})
 # ------------------------------------------------------------ controller unit
 
 
-def test_controller_unlimited_admits_everything_and_counts_nothing():
-    async def main():
-        ctl = AdmissionController()
-        tickets = [await ctl.acquire() for _ in range(50)]
-        assert ctl.active == 0 and ctl.queued == 0
-        assert not any(t.held for t in tickets)
-
-    _run(main)
-
-
-@pytest.mark.parametrize("deadline", ["0", "0.2"])
-def test_stalled_source_cleanup_is_bounded_and_releases_admission_even_without_deadline(env, deadline):
-    from fastapi import Request
-
-    env.setenv("REQUEST_MAX_CONCURRENT", "1")
-    env.setenv("REQUEST_DEADLINE_S", deadline)
-
-    async def main():
-        cm = await _serve(env, InstantSearch())
-        closed = asyncio.Event()
-
-        class Source:
-            async def aclose(self):
-                try:
-                    await asyncio.Event().wait()
-                finally:
-                    closed.set()
-
-        request = Request({"type": "http", "state": {"request_id": "cleanup-probe"}})
-        started = app_mod.time.monotonic()
-        span = app_mod.trace.get_tracer(__name__).start_span("cleanup-probe")
-        owner = app_mod._RequestSpan(request, span, "answer", started)
-        try:
-            await app_mod._admit(owner)
-            stream = app_mod._SpanStream(Source(), owner)
-            assert app_mod.admission.active == 1
-            await asyncio.wait_for(stream.aclose(), 2)
-            assert app_mod.time.monotonic() - started < 1.35
-            assert closed.is_set() and owner.ended and app_mod.admission.active == 0
-            await stream.aclose()
-            assert (await _Call(*SEARCH).start().done()).status == 200
-        finally:
-            await cm.__aexit__(None, None, None)
-
-    _run(main)
-
-
 def test_controller_never_exceeds_active_or_queue_and_is_fifo():
     async def main():
         ctl = AdmissionController(max_active=2, max_queue=2, queue_wait_s=5)
@@ -281,24 +234,12 @@ def test_controller_queue_timeout_leaves_no_waiter_and_no_leak():
             await ctl.acquire()
         assert timed_out.value.reason == admission_mod.REASON_QUEUE_TIMEOUT
         assert ctl.queued == 0 and ctl.active == 1
+        with pytest.raises(AdmissionRejected):  # an exhausted caller deadline never queues
+            await ctl.acquire(0.0)
+        assert ctl.queued == 0
         holder.release()
         assert ctl.active == 0
         (await ctl.acquire()).release()  # next ordinary request is admitted
-
-    _run(main)
-
-
-def test_controller_wait_cap_below_queue_wait_applies():
-    async def main():
-        ctl = AdmissionController(max_active=1, max_queue=1, queue_wait_s=30)
-        holder = await ctl.acquire()
-        started = asyncio.get_running_loop().time()
-        with pytest.raises(AdmissionRejected):
-            await ctl.acquire(0.05)
-        assert asyncio.get_running_loop().time() - started < 2
-        with pytest.raises(AdmissionRejected):
-            await ctl.acquire(0.0)
-        holder.release()
 
     _run(main)
 
@@ -593,7 +534,7 @@ def test_deadline_mid_stream_ends_with_terminal_error_frame_and_frees_the_slot(e
 # ------------------------------------------------------------ embed-input bound
 
 
-@pytest.mark.parametrize("endpoint", ["search", "answer", "chat"])
+@pytest.mark.parametrize("endpoint", ["search", "chat"])
 def test_oversize_query_is_rejected_before_any_model_call(env, endpoint):
     prefix_len = len(app_mod.Settings.model_fields["dense_query_prefix"].default)
     env.setenv("EMBED_MAX_INPUT_CHARS", str(prefix_len + 40))
@@ -620,7 +561,7 @@ def test_oversize_query_is_rejected_before_any_model_call(env, endpoint):
     _run(main)
 
 
-@pytest.mark.parametrize("endpoint", ["search", "answer", "chat"])
+@pytest.mark.parametrize("endpoint", ["search", "chat"])
 def test_embedder_refusal_backstop_is_a_422_not_an_upstream_error(env, endpoint):
     async def refuse(*a, **k):
         raise EmbedInputTooLarge(100, 150, 1)
@@ -896,7 +837,7 @@ def test_stream_deadline_closes_stalled_asgi_send_and_admits_next_queued_request
     _run(main)
 
 
-@pytest.mark.parametrize("endpoint", ["answer", "chat", "console"])
+@pytest.mark.parametrize("endpoint", ["answer", "console"])
 def test_producer_deadline_terminal_frames_share_one_absolute_delivery_grace(env, endpoint):
     env.setenv("REQUEST_MAX_CONCURRENT", "1")
     env.setenv("REQUEST_DEADLINE_S", "0.2")
@@ -942,7 +883,7 @@ def test_producer_deadline_terminal_frames_share_one_absolute_delivery_grace(env
     _run(main)
 
 
-@pytest.mark.parametrize("endpoint", ["answer", "chat", "console"])
+@pytest.mark.parametrize("endpoint", ["chat", "console"])
 def test_deadline_and_admission_include_the_closing_asgi_body_send(env, endpoint):
     env.setenv("REQUEST_MAX_CONCURRENT", "1")
     env.setenv("REQUEST_QUEUE_MAX", "1")

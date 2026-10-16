@@ -124,41 +124,26 @@ def _worst_case_embed_text(tmp_path: Path) -> tuple[str, str]:
     return embed_text, longest.text
 
 
-def test_chunker_emits_the_worst_case_body_shape(tmp_path: Path):
+def test_worst_case_embed_text_fits_the_embed_window_budget(tmp_path: Path):
     """The constructed PDF must actually push make_chunks to its worst body
-    size — if the chunker ever changes shape, this fails before the budget
-    assertions below can pass vacuously."""
-    _, body = _worst_case_embed_text(tmp_path)
-    assert len(body) >= SECTION_MAX_CHARS + SPLIT_OVERLAP_CHARS
-    assert len(body) <= MAX_BODY_CHARS
-
-
-def test_worst_case_embed_text_under_char_budget(tmp_path: Path):
-    """Worst-case embedded string (header + syntax-dense body with overlap
-    seed) must stay inside the conservative char budget. Fails if
-    SECTION_MAX_CHARS, SPLIT_OVERLAP_CHARS, or the build_embed_text header
-    grows the worst case past the embed window's headroom budget."""
-    embed_text, _ = _worst_case_embed_text(tmp_path)
-    assert len(embed_text) <= CHAR_BUDGET, (
-        f"worst-case embed text is {len(embed_text)} chars; budget is "
-        f"{CHAR_BUDGET} ({TOKEN_BUDGET} tokens at {MIN_CHARS_PER_TOKEN} chars/token). "
-        "The local embed server window would no longer be safe; re-run the "
-        "issue #99 tokenizer sweep before changing anything."
-    )
-
-
-def test_worst_case_with_max_context_prefix_under_budget(tmp_path: Path):
-    """Issue #78: the contextual prefix is deterministically capped at
-    context_max_chars, so the worst case stays provable — header + max
-    prefix + worst body must fit INSIDE the window's headroom budget
-    (CHAR_BUDGET covers the entire embedded string; adding the prefix on
-    top would push the effective bound past the 3584-token headroom)."""
+    size (else the budget assertions pass vacuously), and the worst embedded
+    string (header + syntax-dense body with overlap seed, with and without
+    the maximal contextual prefix) must stay inside the conservative char
+    budget. Fails if SECTION_MAX_CHARS, SPLIT_OVERLAP_CHARS, context_max_chars
+    or the build_embed_text header grows the worst case past the window's
+    headroom; re-run the issue #99 tokenizer sweep before changing anything."""
     from mainframe_rag.config import Settings
 
-    max_prefix = Settings(_env_file=None).context_max_chars
-    _, body = _worst_case_embed_text(tmp_path)
+    embed_text, body = _worst_case_embed_text(tmp_path)
+    assert SECTION_MAX_CHARS + SPLIT_OVERLAP_CHARS <= len(body) <= MAX_BODY_CHARS
+    assert len(embed_text) <= CHAR_BUDGET, (
+        f"worst-case embed text is {len(embed_text)} chars; budget is "
+        f"{CHAR_BUDGET} ({TOKEN_BUDGET} tokens at {MIN_CHARS_PER_TOKEN} chars/token)."
+    )
+    # Issue #78: the contextual prefix is capped at context_max_chars, so the
+    # worst case stays provable: header + max prefix + worst body fits too.
     with_prefix = build_embed_text(
         PRODUCT, VERSION, DOC_ID, TITLE, HEADING_PATH, body,
-        context="x" * max_prefix,
+        context="x" * Settings(_env_file=None).context_max_chars,
     )
     assert len(with_prefix) <= CHAR_BUDGET

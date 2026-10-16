@@ -4,15 +4,12 @@ from mainframe_rag.ingest.chrome import chrome_lines, strip_page
 from mainframe_rag.ingest.classify import classify
 
 
-def test_message():
-    text = "IEA500I BEFORE IOS IOSCMDS COMMAND REJECTED, REASON=yy\n\nExplanation: fixture text."
-    assert classify(text) == "message"
-
-
 def test_message_families_beyond_classic():
     """Issue #216: the anchored detector covers the MSG_RE families CICS
     DFH cards, IMS DFS codes (severity optional), and 4-letter prefixes —
     still line-anchored, still the fixed `message` value (no new vocab)."""
+    text = "IEA500I BEFORE IOS IOSCMDS COMMAND REJECTED, REASON=yy\n\nExplanation: fixture text."
+    assert classify(text) == "message"
     assert classify("DFHAC2006 CICS TRANSACTION FAILED") == "message"
     assert classify("DFHSI1579 CICS INITIALIZATION") == "message"
     assert classify("DFS058 IMS DATABASE ERROR") == "message"
@@ -40,13 +37,10 @@ def test_message_buried_after_explanation():
     assert classify(deep) == "narrative"
 
 
-def test_syntax():
+def test_syntax_table_and_narrative():
     assert classify(">>-IOSCMDS--+-APPLY-+--parm---><\n            +-LIST--+") == "syntax"
     assert classify("expr ::= term | factor") == "syntax"
     assert classify("┌─────────┐\n│ operand │\n└─────────┘") == "syntax"
-
-
-def test_table_and_narrative():
     table = "Parameter   Meaning\nLFAREA      Size\nPROGxx      Auth"
     assert classify(table) == "table"
     assert classify("The lookaside facility stores invented entries for tests.") == "narrative"
@@ -107,8 +101,7 @@ def test_strip_page_drops_entry_range_headers_above_a_footer_folio():
         assert strip_page(f"{body}\n{footer}\n17", set()) == body
 
 
-def test_strip_page_keeps_bullet_pairs_that_are_not_entry_ranges():
-    body = "\n".join(f"Generated entry text line {i}." for i in range(8))
+    # Bullet pairs that are not entry ranges stay content.
     for line in ("Yes \u2022 No", "TSO \u2022 ISPF", "Return Code=4 \u2022 Return Code=8"):
         assert strip_page(f"{line}\n{body}\n17", set()) == f"{line}\n{body}"
     # An entry range in the page body is left alone, like a bare number.
@@ -116,15 +109,10 @@ def test_strip_page_keeps_bullet_pairs_that_are_not_entry_ranges():
     assert "ICH408I \u2022 ICH409I" in strip_page(page, set())
 
 
-def test_strip_page_keeps_whitespace_lines():
-    """Empty/whitespace-only lines are never page numbers — the regexes reject
-    empty input structurally, and strip_page keeps blank lines as-is."""
+def test_strip_page_keeps_blank_lines_and_inner_dot_numbers():
+    """Blank lines are never page numbers. A standalone "1.2" is a section
+    number, not a page footer; dash-between stays a page range."""
     assert strip_page("body\n\n   \n\t\n7", set()) == "body\n\n   \n\t"
-
-
-def test_strip_page_keeps_inner_dot_numbers():
-    """A standalone "1.2" is a section number, not a page footer: the old
-    r"\\d+[-.]?\\d*" form deleted it. Dash-between stays a page range."""
     out = strip_page("intro\n1.2\n2.10\n12-34", set())
     assert "1.2" in out and "2.10" in out
     assert "12-34" not in out

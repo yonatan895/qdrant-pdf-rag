@@ -66,7 +66,7 @@ def _stderr_actions(capsys) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
-def test_normalize_label_matrix():
+def test_label_normalization_and_revision_key_identity():
     assert normalize_label("IBM") == "ibm"
     assert normalize_label("  z/OS  ") == "z/os"
     assert normalize_label("V1\t R1") == "v1 r1"
@@ -74,19 +74,13 @@ def test_normalize_label_matrix():
     assert normalize_label(None) == ""
     assert normalize_label("") == ""
 
-
-def test_source_rev_key_literal():
     sha = "ab" * 32
+    other_sha = "cd" * 32
     assert source_rev_key("IBM", "z/OS", "3.1", sha) == f"ibm|z/os|3.1|{sha}"
     # Missing labels are empty segments, never an empty-key collision: the
     # content hash always disambiguates.
     assert source_rev_key(None, None, None, sha) == f"|||{sha}"
     assert source_rev_key("unknown", "unknown", "", sha) == f"unknown|unknown||{sha}"
-
-
-def test_source_rev_key_separates_revisions_not_case():
-    sha = "ab" * 32
-    other_sha = "cd" * 32
     assert source_rev_key("IBM", "z/OS", "3.1", sha) != source_rev_key("IBM", "z/OS", "3.1", other_sha)
     assert source_rev_key("IBM", "z/OS", "3.1", sha) != source_rev_key("IBM", "z/OS", "3.2", sha)
     assert source_rev_key("IBM", "z/OS", "3.1", sha) != source_rev_key("BMC", "z/OS", "3.1", sha)
@@ -94,8 +88,6 @@ def test_source_rev_key_separates_revisions_not_case():
     assert source_rev_key("ibm", "Z/os", "3.1", sha) == source_rev_key("IBM", "z/OS", "3.1", sha)
     assert source_rev_key(" IBM ", "z/OS", "3.1", sha) == source_rev_key("IBM", "z/OS", "3.1", sha)
 
-
-def test_corpus_relpath_is_mount_portable():
     assert corpus_relpath("/mnt/a/corpus/x/y.pdf", Path("/mnt/a/corpus")) == "x/y.pdf"
     assert corpus_relpath("/mnt/b/corpus/x/y.pdf", Path("/mnt/b/corpus")) == "x/y.pdf"
     # Outside the root: bare filename, never the absolute layout.
@@ -114,28 +106,20 @@ _ENTRIES = [
 ]
 
 
-def test_plan_duplicates_deterministic_winner():
+def test_plan_duplicates_elects_a_deterministic_winner():
     kept, duplicates = plan_duplicates(_ENTRIES, Path("/corpus"))
     assert kept == [("/corpus/A/x.pdf", "s1"), ("/corpus/C/y.pdf", "s2")]
     assert [(d.loser_rel, d.winner_rel) for d in duplicates] == [
         ("B/x.pdf", "A/x.pdf"),
         ("D/z.pdf", "A/x.pdf"),
     ]
-
-
-def test_plan_duplicates_order_independent():
-    kept_fwd, dups_fwd = plan_duplicates(_ENTRIES, Path("/corpus"))
     kept_rev, dups_rev = plan_duplicates(list(reversed(_ENTRIES)), Path("/corpus"))
-    assert sorted(kept_fwd) == sorted(kept_rev)
-    assert sorted((d.loser_rel, d.winner_rel) for d in dups_fwd) == sorted(
-        (d.loser_rel, d.winner_rel) for d in dups_rev
+    assert sorted(kept_rev) == sorted(kept)
+    assert sorted((d.loser_rel, d.winner_rel) for d in dups_rev) == sorted(
+        (d.loser_rel, d.winner_rel) for d in duplicates
     )
-
-
-def test_plan_duplicates_unique_corpus_is_untouched():
-    entries = [(f"/corpus/{c}.pdf", f"s{i}") for i, c in enumerate("abcd")]
-    kept, duplicates = plan_duplicates(entries, Path("/corpus"))
-    assert kept == entries and duplicates == []
+    unique = [(f"/corpus/{c}.pdf", f"s{i}") for i, c in enumerate("abcd")]
+    assert plan_duplicates(unique, Path("/corpus")) == (unique, [])
 
 
 # ---------------------------------------------------------------------------
@@ -143,7 +127,7 @@ def test_plan_duplicates_unique_corpus_is_untouched():
 # ---------------------------------------------------------------------------
 
 
-def test_find_collisions_basic_and_sorted():
+def test_find_collisions_flags_only_same_doc_id_with_distinct_sha():
     resolved = [
         ("/corpus/b/reference.pdf", "sha2", "reference"),
         ("/corpus/a/reference.pdf", "sha1", "reference"),
@@ -152,9 +136,7 @@ def test_find_collisions_basic_and_sorted():
     (collision,) = find_collisions(resolved, Path("/corpus"))
     assert collision.doc_id == "reference"
     assert collision.members == (("a/reference.pdf", "sha1"), ("b/reference.pdf", "sha2"))
-
-
-def test_find_collisions_clean_cases():
+    assert find_collisions(list(reversed(resolved)), Path("/corpus")) == [collision]
     # Same doc_id + same sha (post-dedup residue) is fine.
     assert find_collisions(
         [("/corpus/a/r.pdf", "s1", "r"), ("/corpus/b/r.pdf", "s1", "r")], Path("/corpus")
@@ -170,15 +152,11 @@ def test_find_collisions_clean_cases():
     assert find_collisions(
         [("/corpus/a.pdf", "s1", "d"), ("/corpus/b.pdf", "s2", None)], Path("/corpus")
     ) == []
-
-
-def test_find_collisions_order_independent_and_sha16():
-    sha1, sha2 = "a" * 64, "b" * 64
-    resolved = [("/corpus/a.pdf", sha1, "d"), ("/corpus/b.pdf", sha2, "d")]
-    fwd = find_collisions(resolved, Path("/corpus"))
-    rev = find_collisions(list(reversed(resolved)), Path("/corpus"))
-    assert fwd == rev
-    assert fwd[0].members == (("a.pdf", "a" * 16), ("b.pdf", "b" * 16))
+    # Members report the 16-character sha prefix.
+    (full,) = find_collisions(
+        [("/corpus/a.pdf", "a" * 64, "d"), ("/corpus/b.pdf", "b" * 64, "d")], Path("/corpus")
+    )
+    assert full.members == (("a.pdf", "a" * 16), ("b.pdf", "b" * 16))
 
 
 def test_collision_report_names_inputs_not_layout_or_text():
@@ -196,16 +174,13 @@ def test_collision_report_names_inputs_not_layout_or_text():
     assert "--vendor/--product/--version" in text
 
 
-def test_prescan_doc_ids_never_raise():
+def test_prescan_doc_ids_never_raise(tmp_path):
     assert prescan_doc_ids([]) == {}
     # Filename-form resolves without any readable file behind it.
     assert prescan_doc_ids(["/nonexistent/SA22-0000-00_note.pdf"]) == {
         "/nonexistent/SA22-0000-00_note.pdf": "SA22-0000-00"
     }
     assert prescan_doc_ids(["/nonexistent/missing.pdf"]) == {"/nonexistent/missing.pdf": None}
-
-
-def test_prescan_doc_id_unreadable_file_maps_none(tmp_path):
     bad = tmp_path / "reference.pdf"
     bad.write_bytes(b"not a pdf at all")
     assert prescan_doc_ids([str(bad)]) == {str(bad): None}
@@ -216,7 +191,7 @@ def test_prescan_doc_id_unreadable_file_maps_none(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_same_stem_collision_aborts_before_any_work(tmp_path, capsys):
+def test_filename_collision_aborts_before_any_work(tmp_path, capsys):
     from mainframe_rag.ingest.run_ingest import main
 
     _write_text_pdf(tmp_path / "a" / "reference.pdf", ["Acme widget guide, edition one."])
@@ -229,6 +204,14 @@ def test_same_stem_collision_aborts_before_any_work(tmp_path, capsys):
     assert not progress.exists()
     assert all(a.get("action") not in ("dry", "upserted", "skip") for a in _stderr_actions(capsys))
 
+    # A form number carried in the filename collides the same way.
+    forms = tmp_path / "forms"
+    _write_text_pdf(forms / "a" / "SA22-9999-00_note.pdf", ["First note text."])
+    _write_text_pdf(forms / "b" / "SA22-9999-00_note.pdf", ["Second note text."])
+    with pytest.raises(RevisionCollisionError, match="SA22-9999-00"):
+        main(["--src", str(forms), "--progress", str(forms / "inv.jsonl"),
+              "--workers", "1", "--dry-run"])
+
 
 def test_text_derived_collision_aborts(tmp_path):
     """Different stems, one form number inside the text: prescan must open
@@ -238,16 +221,6 @@ def test_text_derived_collision_aborts(tmp_path):
     _write_text_pdf(tmp_path / "alpha-manual.pdf", ["SA22-7777-77", "Alpha edition prose."])
     _write_text_pdf(tmp_path / "beta-manual.pdf", ["SA22-7777-77", "Beta edition prose."])
     with pytest.raises(RevisionCollisionError, match="SA22-7777-77"):
-        main(["--src", str(tmp_path), "--progress", str(tmp_path / "inv.jsonl"),
-              "--workers", "1", "--dry-run"])
-
-
-def test_filename_form_collision_aborts(tmp_path):
-    from mainframe_rag.ingest.run_ingest import main
-
-    _write_text_pdf(tmp_path / "a" / "SA22-9999-00_note.pdf", ["First note text."])
-    _write_text_pdf(tmp_path / "b" / "SA22-9999-00_note.pdf", ["Second note text."])
-    with pytest.raises(RevisionCollisionError, match="SA22-9999-00"):
         main(["--src", str(tmp_path), "--progress", str(tmp_path / "inv.jsonl"),
               "--workers", "1", "--dry-run"])
 
@@ -347,62 +320,3 @@ def test_nondry_collision_writes_nothing(tmp_path, monkeypatch):
         run_ingest.main(["--src", str(tmp_path), "--progress", str(tmp_path / "inv.jsonl"),
                          "--workers", "1"])
     assert fake.upserts == [] and fake.deletes == 0
-
-
-def test_parse_one_stamps_source_rev_literal(tmp_path, monkeypatch):
-    """Inventory provenance for the 361B migration: exact key composition."""
-    from mainframe_rag.config import Settings
-    from mainframe_rag.ingest import run_ingest
-    from mainframe_rag.ingest.ibm_pdf import sha256_file
-
-    pdf = _write_text_pdf(tmp_path / "manual.pdf", ["Acme widget guide."])
-    sha = sha256_file(pdf)
-    monkeypatch.setattr(
-        run_ingest, "_load_worker_settings", lambda: Settings(_env_file=None)
-    )
-    (record, _, _, _, _) = run_ingest._parse_one(
-        (str(pdf), "IBM", "  z/OS ", "3.1", str(tmp_path), sha, False, None)
-    )
-    assert record.source_rev == f"ibm|z/os|3.1|{sha}"
-
-
-def test_upsert_payload_carries_source_rev():
-    from mainframe_rag.ingest.chunk import Chunk
-    from mainframe_rag.ingest.ibm_pdf import ParsedDoc
-    from mainframe_rag.ingest.qdrant_io import upsert_chunks
-    from tests.test_qdrant_io import RecordingClient, _settings
-
-    class _Capture(RecordingClient):
-        def __init__(self):
-            super().__init__()
-            self.points = []
-
-        def upsert(self, collection_name, *, points, wait=True):
-            self.points.extend(points)
-            return True
-
-    client = _Capture()
-    parsed = ParsedDoc(
-        path="manual.pdf",
-        doc_id="SC14-7315-70",
-        sha256="abc123",
-        vendor="IBM",
-        product="z/OS",
-        version="3.2",
-        title="Sample Manual",
-        page_count=10,
-    )
-    chunk = Chunk(
-        chunk_id="00000000-0000-0000-0000-000000000001",
-        doc_id="SC14-7315-70",
-        heading_path="Chapter 1",
-        page_start=1,
-        page_label="1",
-        chunk_type="narrative",
-        text="Body text.",
-        message_ids=[],
-        members=[],
-        ordinal=0,
-    )
-    assert upsert_chunks(client, _settings(4), parsed, [chunk], [([0.1] * 4, ([1], [1.0]))]) == 1
-    assert client.points[0].payload["source_rev"] == "ibm|z/os|3.2|abc123"

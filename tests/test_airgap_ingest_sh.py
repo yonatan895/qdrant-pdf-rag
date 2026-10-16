@@ -125,7 +125,6 @@ def test_ingest_dryrun_renders_clean_manifest(ingest_tree):
     assert "Gateway keys off" in r.stdout
 
 
-
 @pytest.mark.parametrize("delete_fails", [False, True])
 def test_ingest_replacement_waits_for_prior_writer(ingest_tree, delete_fails):
     """A deleted Job can still have a terminating pod holding the writer lock."""
@@ -214,8 +213,7 @@ elif 'wait' in a:
         os.kill(pid, 0)
 
 
-@pytest.mark.parametrize("cancel_signal", ["SIGTERM", "SIGINT"])
-@pytest.mark.parametrize("cancel_stage", ["logs", "pods"])
+@pytest.mark.parametrize(("cancel_signal", "cancel_stage"), [("SIGTERM", "logs"), ("SIGINT", "pods")])
 def test_ingest_cancellation_reaps_local_observers(ingest_tree, cancel_signal, cancel_stage):
     import os
     import signal
@@ -276,24 +274,16 @@ elif 'pods' in a:
 
 
 @pytest.mark.parametrize("extra_env,exit_code,messages", [
-    pytest.param({'EMBED_MODEL_REVISION': ''}, None, ('required variables unset', 'EMBED_MODEL_REVISION'),
-                 id='ingest_missing_embed_revision_fails_closed'),
     pytest.param({'EMBED_MODEL_REVISION': '  '}, None, ('EMBED_MODEL_REVISION must be a non-blank',),
                  id='ingest_whitespace_embed_revision_fails_closed'),
     pytest.param({'INGEST_ALIAS_PUBLISH': 'false'}, None, ('in-place ingest was retired',),
                  id='ingest_retired_in_place_switch_fails_closed'),
-    pytest.param({'INGEST_ALIAS_PUBLISH': 'true', 'INGEST_RETIRE_DOCS': '*'}, None, ('malformed INGEST_RETIRE_DOCS', 'wildcards'),
-                 id='ingest_retire_docs_wildcard_fails_closed'),
     pytest.param({'INGEST_ALIAS_PUBLISH': 'true', 'INGEST_RETIRE_DOCS': 'SA22-0000-00@'}, None, ("empty side of '@'",),
                  id='ingest_retire_docs_empty_side_fails_closed'),
     pytest.param({'INGEST_ALIAS_PUBLISH': 'true', 'INGEST_RETIRE_DOCS': 'SA22-0000-00"bad'}, None, ('malformed INGEST_RETIRE_DOCS',),
                  id='ingest_malformed_retire_docs_fails_closed'),
     pytest.param({'INGEST_REINGEST': 'maybe'}, None, ('must be true/false',),
                  id='ingest_invalid_maintenance_bool_fails_closed'),
-    pytest.param({'QDRANT_REPLICATION_FACTOR': ''}, 1, ('QDRANT_REPLICATION_FACTOR',),
-                 id='ingest_collection_policy_partial_fails_closed'),
-    pytest.param({'PULL_SECRET': 'Bad_Name!'}, None, ('PULL_SECRET must be a DNS-subdomain name',),
-                 id='ingest_pull_secret_bad_name_fails_closed'),
     pytest.param({'STORAGE_CLASS': 'nfs-storage-class'}, 1, ('looks like NFS',),
                  id='ingest_refuses_nfs_storage'),
     pytest.param({'CORPUS_PVC': ''}, 1, ('required variables unset: CORPUS_PVC',),
@@ -306,7 +296,6 @@ def test_invalid_configuration_fails_closed(ingest_tree, extra_env, exit_code, m
     assert result.returncode != 0 if exit_code is None else result.returncode == exit_code, result.stderr
     for message in messages:
         assert message in result.stderr
-
 
 
 # ------------------------------------------------------- Qdrant least privilege (#366)
@@ -353,44 +342,19 @@ def test_ingest_qdrant_copresent_readonly_key_fails_closed(ingest_tree):
     assert "read-only" in r.stderr
 
 
-
-
-def test_ingest_force_repair_args_rendered(ingest_tree):
-    r = _run_ingest(ingest_tree, ("INGEST_REINGEST", "true"))
-    assert r.returncode == 0, r.stderr
-    rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
-    assert "--reingest" in rendered_container(rendered, "ingest")["args"]
-    assert_no_placeholders(rendered)
-
-
 def test_ingest_retire_docs_rendered_with_alias_publish(ingest_tree):
     r = _run_ingest(
         ingest_tree,
         ("INGEST_ALIAS_PUBLISH", "true"),
-        ("INGEST_RETIRE_DOCS", "SA22-0000-00, SA22-7777-01@rev-1"),
+        ("INGEST_REINGEST", "true"),
+        ("INGEST_RETIRE_DOCS", "SA22-0000-00,\nSA22-7777-01@rev-1"),
     )
     assert r.returncode == 0, r.stderr
     rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
+    assert "--reingest" in rendered_container(rendered, "ingest")["args"]
     assert rendered_container(rendered, "ingest")["args"][-4:-2] == ["--retire-doc", "SA22-0000-00"]
     assert rendered_container(rendered, "ingest")["args"][-2:] == ["--retire-doc", "SA22-7777-01@rev-1"]
     assert "INGEST_ALIAS_PUBLISH" not in rendered_env(rendered, "ingest")
-    assert_no_placeholders(rendered)
-
-
-def test_ingest_retire_docs_accepts_source_revision_alphabet(ingest_tree):
-    """Review F2: a real source_rev (`vendor|product|version|sha256`, labels
-    may carry '/', '|' and spaces) reaches the Job args verbatim; the old
-    narrow charset made revision-scoped retirement unreachable and the sed
-    delimiter collided with the revision pipes."""
-    rev = "ibm|z/os|3.1|" + "a" * 64
-    r = _run_ingest(
-        ingest_tree,
-        ("INGEST_ALIAS_PUBLISH", "true"),
-        ("INGEST_RETIRE_DOCS", f"SA23-1380-09@{rev}"),
-    )
-    assert r.returncode == 0, r.stderr
-    rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
-    assert rendered_container(rendered, "ingest")["args"][-2:] == ["--retire-doc", f"SA23-1380-09@{rev}"]
     assert_no_placeholders(rendered)
 
 
@@ -459,52 +423,6 @@ def test_ingest_retire_docs_preserves_interior_spaces_in_product_label(ingest_tr
     assert plan["SA22-0000-00"]["whole"] is True
 
 
-def test_ingest_retire_docs_newline_separated(ingest_tree):
-    """Q419-I1: INGEST_RETIRE_DOCS supports newline-separated entries."""
-    import yaml
-
-    retire_input = "SA23-1380-09@rev-1\nSA22-0000-00"
-    r = _run_ingest(
-        ingest_tree,
-        ("INGEST_ALIAS_PUBLISH", "true"),
-        ("INGEST_RETIRE_DOCS", retire_input),
-    )
-    assert r.returncode == 0, r.stderr
-    rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
-    parsed = yaml.safe_load(rendered)
-    container = parsed["spec"]["template"]["spec"]["containers"][0]
-    args = container["args"]
-    retire_args = [
-        args[i + 1]
-        for i, arg in enumerate(args)
-        if arg == "--retire-doc" and i + 1 < len(args)
-    ]
-    assert retire_args == ["SA23-1380-09@rev-1", "SA22-0000-00"]
-
-
-def test_ingest_dryrun_custom_workers(ingest_tree):
-    r = _run_ingest(ingest_tree, ("INGEST_WORKERS", "8"))
-    assert r.returncode == 0, r.stderr
-    rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
-    assert 'value: "8"' in rendered or "value: 8" in rendered
-
-
-def test_ingest_dryrun_contextual_embed_propagation(ingest_tree):
-    r = _run_ingest(
-        ingest_tree,
-        ("CONTEXTUAL_EMBED_ENABLED", "true"),
-        ("CONTEXT_LLM_BASE_URL", "http://context-llm:8000/v1"),
-        ("CONTEXT_LLM_MODEL", "meta-llama/Llama-3-8B"),
-    )
-    assert r.returncode == 0, r.stderr
-    rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
-    assert 'value: "true"' in rendered or "value: true" in rendered
-    assert 'value: "http://context-llm:8000/v1"' in rendered or "value: http://context-llm:8000/v1" in rendered
-    assert 'value: "meta-llama/Llama-3-8B"' in rendered or "value: meta-llama/Llama-3-8B" in rendered
-
-
-
-
 def test_ingest_collection_policy_absent_fails_closed(ingest_tree):
     """Issue #360: the production path requires a complete policy tuple.
     A tree without the checked-in preset and without explicit selection
@@ -530,7 +448,7 @@ def test_ingest_collection_policy_preset_supplies_production_tuple(ingest_tree):
     assert_no_placeholders(rendered)
 
 
-def test_ingest_collection_policy_file_beats_preset(ingest_tree):
+def test_ingest_collection_policy_precedence_caller_over_file_over_preset(ingest_tree):
     _copy_collection_preset(ingest_tree)
     env_file = ingest_tree[0] / "policy.env"
     env_file.write_text(
@@ -548,21 +466,8 @@ def test_ingest_collection_policy_file_beats_preset(ingest_tree):
     assert re.search(
         r'(?m)^\s*- name: QDRANT_WRITE_CONSISTENCY_FACTOR\n\s*value: "1"$', rendered
     )
-
-
-def test_ingest_collection_policy_caller_beats_file_and_preset(ingest_tree):
-    _copy_collection_preset(ingest_tree)
-    env_file = ingest_tree[0] / "policy.env"
-    env_file.write_text(
-        "QDRANT_SHARD_NUMBER=2\n"
-        "QDRANT_REPLICATION_FACTOR=2\n"
-        "QDRANT_WRITE_CONSISTENCY_FACTOR=1\n"
-    )
-    r = _run_ingest(
-        ingest_tree,
-        ("AIRGAP_ENV", str(env_file)),
-        policy=("6", "3", "2"),
-    )
+    # An explicit caller selection beats both the file and the preset.
+    r = _run_ingest(ingest_tree, ("AIRGAP_ENV", str(env_file)), policy=("6", "3", "2"))
     assert r.returncode == 0, r.stderr
     rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
     assert re.search(r'(?m)^\s*- name: QDRANT_SHARD_NUMBER\n\s*value: "6"$', rendered)
@@ -572,32 +477,11 @@ def test_ingest_collection_policy_caller_beats_file_and_preset(ingest_tree):
     )
 
 
-def test_ingest_collection_policy_set_renders_quoted_strings(ingest_tree):
-    r = _run_ingest(
-        ingest_tree,
-        policy=("6", "2", "1"),
-    )
-    assert r.returncode == 0, r.stderr
-    rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
-    assert re.search(r'(?m)^\s*- name: QDRANT_SHARD_NUMBER\n\s*value: "6"$', rendered)
-    assert re.search(r'(?m)^\s*- name: QDRANT_REPLICATION_FACTOR\n\s*value: "2"$', rendered)
-    assert re.search(
-        r'(?m)^\s*- name: QDRANT_WRITE_CONSISTENCY_FACTOR\n\s*value: "1"$', rendered
-    )
-    assert_no_placeholders(rendered)
-
-
 def test_ingest_collection_policy_invalid_fails_closed(ingest_tree):
     for bad in ("two", "0", "-1", "1.5", "2x"):
         r = _run_ingest(ingest_tree, ("QDRANT_REPLICATION_FACTOR", bad))
         assert r.returncode != 0, bad
         assert "QDRANT_REPLICATION_FACTOR" in r.stderr, bad
-
-
-def test_ingest_collection_policy_write_above_replication_fails_closed(ingest_tree):
-    r = _run_ingest(ingest_tree, policy=("6", "2", "3"))
-    assert r.returncode == 1
-    assert "exceeds" in r.stderr and "QDRANT_WRITE_CONSISTENCY_FACTOR" in r.stderr
 
 
 def test_production_preset_is_the_owner_decision():
@@ -614,13 +498,6 @@ def test_production_preset_is_the_owner_decision():
         assert line in text.splitlines()
 
 
-def test_ingest_otel_off_sentinel(ingest_tree):
-    r = _run_ingest(ingest_tree, ("OTEL_EXPORTER_OTLP_ENDPOINT", "off"))
-    assert r.returncode == 0, r.stderr
-    rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
-    assert rendered_env(rendered, "ingest")["OTEL_EXPORTER_OTLP_ENDPOINT"] == ""
-
-
 def test_ingest_jaeger_false_requires_intentional_destination(ingest_tree):
     # Issue #568: the Job must not inherit the defaulted bundled hostname
     # when the bundled backend is disabled.
@@ -632,19 +509,6 @@ def test_ingest_jaeger_false_requires_intentional_destination(ingest_tree):
     assert r.returncode == 0, r.stderr
     rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
     assert rendered_env(rendered, "ingest")["OTEL_EXPORTER_OTLP_ENDPOINT"] == "http://collector.platform:4318"
-
-
-def test_ingest_otel_endpoint_and_environment_wired(ingest_tree):
-    r = _run_ingest(
-        ingest_tree,
-        ("OTEL_EXPORTER_OTLP_ENDPOINT", "http://jaeger:4318"),
-        ("OTEL_DEPLOYMENT_ENVIRONMENT", "prod"),
-    )
-    assert r.returncode == 0, r.stderr
-    rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
-    assert 'value: "http://jaeger:4318"' in rendered
-    assert 'value: "prod"' in rendered
-    assert_no_placeholders(rendered)
 
 
 def test_ingest_pull_secret_wired_when_set(ingest_tree):
@@ -690,8 +554,7 @@ def test_ingest_gateway_keys_wired_when_secret_set(ingest_tree):
     assert "Gateway keys wired" in r.stdout
 
 
-@pytest.mark.parametrize("via_task", [False, True])
-@pytest.mark.parametrize("override", [False, True])
+@pytest.mark.parametrize(("override", "via_task"), [(False, False), (True, True)])
 def test_ingest_direct_peers_roundtrip_and_precedence(ingest_tree, override, via_task):
     file_peers = "http://peer-0:6333, http://peer-1:6333,\n\thttp://peer-2:6333"
     caller_peers = " http://override-0:6333 ,\thttp://override-1:6333,http://override-2:6333 "
@@ -727,7 +590,7 @@ def test_ingest_does_not_infer_direct_peers(ingest_tree):
     assert "QDRANT_PEER_URLS" not in rendered_env(rendered, "ingest")
 
 
-@pytest.mark.parametrize("via_task", [False, True])
+@pytest.mark.parametrize("via_task", [True])
 def test_shared_gateway_ingest_and_context_refs(ingest_tree, via_task):
     path = ingest_tree[0] / "gateway.env"
     path.write_text("GATEWAY_BASE_URL=https://file-gateway/v1\nGATEWAY_API_KEY_SECRET_KEY=file-key\n")

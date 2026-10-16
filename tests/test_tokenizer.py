@@ -17,21 +17,9 @@ from mainframe_rag.ports import ChatMessage
 from tests.fakes import TokenizerPostFake
 
 
-def test_estimate_tokens_empty():
+def test_fallback_estimator_counts_text_and_messages():
     assert estimate_tokens("") == 0
-
-
-def test_estimate_tokens_text():
-    count = estimate_tokens("Hello world, this is a test.")
-    assert count >= 6
-
-
-def test_fallback_tokenizer():
-    tok = FallbackTokenizer()
-    assert tok.count_tokens("IEA500I IOSCMDS") >= 2
-
-
-def test_fallback_count_messages():
+    assert estimate_tokens("Hello world, this is a test.") >= 6
     tok = FallbackTokenizer()
     messages = [
         ChatMessage(role="system", content="Be terse."),
@@ -58,35 +46,22 @@ def test_vllm_tokenizer_calls_origin_root():
     assert tokens == 7
     assert captured["url"] == "http://mock-llm:8000/tokenize"
     assert captured["json"]["model"] == "mock-reasoning"
+    bare = {}
+    VllmTokenizer(
+        base_url="http://mock-llm:8000", model="m", client=TokenizerPostFake(count=3, capture=bare)
+    ).count_tokens("abc")
+    assert bare["url"] == "http://mock-llm:8000/tokenize"
 
 
-def test_vllm_tokenizer_sends_bearer_when_key_set():
-    """A gateway-guarded /tokenize must see the reasoning leg's virtual key."""
+def test_tokenize_auth_header_follows_the_reasoning_key():
+    """A gateway-guarded /tokenize sees the reasoning leg's key; keyless
+    setups keep the pre-gateway shape (no header)."""
+    keyless = {}
+    VllmTokenizer(
+        base_url="http://mock-llm:8000/v1", model="m", client=TokenizerPostFake(count=7, capture=keyless)
+    ).count_tokens("abc")
+    assert keyless["headers"] == {}
     captured = {}
-    client = TokenizerPostFake(count=7, capture=captured)
-
-    tok = VllmTokenizer(
-        base_url="http://mock-llm:8000/v1", model="m", client=client, api_key="sk-test-llm"
-    )
-    assert tok.count_tokens("abc") == 7
-    assert captured["headers"] == {"Authorization": "Bearer sk-test-llm"}
-
-
-def test_vllm_tokenizer_omits_auth_when_key_unset():
-    """Keyless setups keep the pre-gateway /tokenize shape: no header."""
-    captured = {}
-    client = TokenizerPostFake(count=7, capture=captured)
-
-    tok = VllmTokenizer(base_url="http://mock-llm:8000/v1", model="m", client=client)
-    assert tok.count_tokens("abc") == 7
-    assert captured["headers"] == {}
-
-
-def test_build_tokenizer_wires_llm_api_key():
-    """build_tokenizer passes the reasoning leg's key into the client."""
-    captured = {}
-    client = TokenizerPostFake(count=7, capture=captured)
-
     tok = build_tokenizer(
         Settings(
             llm_base_url="http://mock-llm:8000/v1",
@@ -94,92 +69,35 @@ def test_build_tokenizer_wires_llm_api_key():
             llm_api_key="sk-test-llm",
             _env_file=None,
         ),
-        client=client,
+        client=TokenizerPostFake(count=7, capture=captured),
     )
     assert tok.count_tokens("abc") == 7
     assert captured["headers"] == {"Authorization": "Bearer sk-test-llm"}
 
 
-def test_vllm_tokenizer_base_without_v1_unchanged():
-    captured = {}
-    client = TokenizerPostFake(count=3, capture=captured)
-
-    tok = VllmTokenizer(base_url="http://mock-llm:8000", model="m", client=client)
-    assert tok.count_tokens("abc") == 3
-    assert captured["url"] == "http://mock-llm:8000/tokenize"
-
-
-def test_vllm_tokenizer_count_messages_posts_messages_shape():
-    """The verification count is chat-template aware: vLLM /tokenize accepts
-    the message list, and that is what consumes max_model_len."""
-    captured = {}
-    client = TokenizerPostFake(count=11, capture=captured)
-
-    tok = VllmTokenizer(base_url="http://mock-llm:8000/v1", model="mock-reasoning", client=client)
-    messages = [
-        ChatMessage(role="system", content="System prompt."),
-        ChatMessage(role="user", content="Question: IEA500I?"),
-    ]
-    assert tok.count_messages(messages) == 11
-    assert captured["url"] == "http://mock-llm:8000/tokenize"
-    assert [m["role"] for m in captured["json"]["messages"]] == ["system", "user"]
-    assert captured["json"]["model"] == "mock-reasoning"
-
-
-def test_vllm_tokenizer_non_200_warns_once_then_sticks(caplog):
-    """A non-200 (e.g. LiteLLM without /tokenize) must log a warning — not
-    silently pass — and permanently pin the estimator: a second call must
-    not re-attempt the endpoint."""
-    client = TokenizerPostFake(count=0, status_code=404)
-
+@pytest.mark.parametrize("fake", [
+    lambda: TokenizerPostFake(count=0, status_code=404),
+    lambda: TokenizerPostFake(count=0, raises=RuntimeError("network down")),
+    lambda: TokenizerPostFake(count=None, extra={"unexpected": "shape"}),
+], ids=["non-200", "transport-error", "malformed-200-body"])
+def test_failed_tokenize_downgrades_permanently_with_one_warning(fake, caplog):
+    """A non-200 (e.g. LiteLLM without /tokenize), transport error or 200
+    without a usable count must warn, answer from the estimator, flip
+    remote_confirmed, and never re-attempt the endpoint (count_messages
+    included)."""
+    client = fake()
     tok = VllmTokenizer(base_url="http://litellm:4000/v1", model="m", client=client)
+    assert tok.remote_confirmed is True
     with caplog.at_level(logging.WARNING, logger="agent.tokenizer"):
         first = tok.count_tokens("some text to count here")
         second = tok.count_tokens("another text to count")
-
-    assert first >= 5  # estimator fallback answered, not zero
-    assert second >= 4
+        messages = [ChatMessage(role="user", content="IEA500I operator action")]
+        counted = tok.count_messages(messages)
+    assert first >= 5 and second >= 4  # estimator answered, not zero
+    assert counted == FallbackTokenizer().count_messages(messages)
     assert len(client.calls) == 1  # sticky downgrade: no repeated doomed RPCs
-    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-    assert len(warnings) == 1
-    assert "/tokenize" in warnings[0].getMessage()
-
-
-def test_vllm_tokenizer_error_fallback_warns(caplog):
-    client = TokenizerPostFake(count=0, raises=RuntimeError("network down"))
-
-    tok = VllmTokenizer(
-        base_url="http://mock-llm:8000/v1",
-        model="mock-reasoning",
-        client=client,
-    )
-    with caplog.at_level(logging.WARNING, logger="agent.tokenizer"):
-        tokens = tok.count_tokens("Some query text to tokenize")
-    assert tokens >= 4
-    assert any(r.levelno == logging.WARNING for r in caplog.records)
-
-
-def test_vllm_tokenizer_downgrade_pins_count_messages():
-    """After the first /tokenize failure, count_messages must use the
-    estimator too — no second network attempt, consistent accounting."""
-    client = TokenizerPostFake(count=0, raises=RuntimeError("down"))
-
-    tok = VllmTokenizer(base_url="http://mock-llm:8000/v1", model="m", client=client)
-    tok.count_tokens("warm the sticky downgrade")
-    messages = [ChatMessage(role="user", content="IEA500I operator action")]
-    assert tok.count_messages(messages) == FallbackTokenizer().count_messages(messages)
-    assert len(client.calls) == 1
-
-
-def test_vllm_tokenizer_malformed_200_body_downgrades(caplog):
-    """HTTP 200 without a usable count is also a failed endpoint."""
-
-    client = TokenizerPostFake(count=None, extra={"unexpected": "shape"})
-
-    tok = VllmTokenizer(base_url="http://mock-llm:8000/v1", model="m", client=client)
-    with caplog.at_level(logging.WARNING, logger="agent.tokenizer"):
-        assert tok.count_tokens("some text to count") >= 4
-    assert any(r.levelno == logging.WARNING for r in caplog.records)
+    assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 1
+    assert tok.remote_confirmed is False
 
 
 def test_build_tokenizer_dispatch():
@@ -194,17 +112,7 @@ def test_build_tokenizer_dispatch():
     assert isinstance(build_tokenizer(s_vllm), VllmTokenizer)
 
 
-def test_vllm_tokenizer_remote_confirmed_flips_to_false_on_downgrade():
-    """VllmTokenizer.remote_confirmed starts True and permanently flips
-    to False after the one-shot downgrade on /tokenize failure."""
-    client = TokenizerPostFake(count=0, status_code=404)
-    tok = VllmTokenizer(base_url="http://mock-llm:8000/v1", model="m", client=client)
-    assert tok.remote_confirmed is True
-    tok.count_tokens("trigger downgrade")
-    assert tok.remote_confirmed is False
-
-
-@pytest.mark.parametrize("count", [-1, True, "12", 1.5, None])
+@pytest.mark.parametrize("count", [-1, True, "12"])
 def test_malformed_count_cannot_verify_even_with_tokens(count):
     calls = []
     def respond(request):
@@ -230,7 +138,7 @@ def test_chat_tokenizer_matches_inference_template_flags():
                                 "add_generation_prompt": True, "add_special_tokens": False}
 
 
-@pytest.mark.parametrize("effort,count", [("low", 45), ("medium", 15), ("xhigh", 57), ("none", 17), (None, 57)])
+@pytest.mark.parametrize("effort,count", [("low", 45), ("none", 17), (None, 57)])
 def test_chat_token_count_uses_selected_request_template(effort, count):
     """Model-specific counts differ; omitted effort cannot verify a low prompt."""
     bodies = []

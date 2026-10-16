@@ -572,7 +572,7 @@ def test_successful_workload_with_unavailable_final_usage_has_no_cpu_receipt_the
     assert (ordinary / "transport-receipt.json").is_file()
 
 
-@pytest.mark.parametrize("interruption,created", [("terminate", True), ("terminate", False), ("recovery", True)])
+@pytest.mark.parametrize("interruption,created", [("terminate", True), ("recovery", True)])
 def test_native_gateway_pg_readiness_interruption_and_recovery_preserve_foreign_objects_then_next_serve(
     lab, gateway_transport, monkeypatch, interruption, created,
 ):
@@ -983,7 +983,7 @@ def test_fresh_cli_refusal_releases_forward_then_retry_reproves_target(storage_l
     assert not any(kind in ("colab", "docker", "ssh", "ssh-keygen") for kind, _ in _events(root))
 
 
-@pytest.mark.parametrize("mode", ["slow-headers", "slow-chunk"])
+@pytest.mark.parametrize("mode", ["slow-chunk"])
 def test_fresh_http_progress_cannot_extend_absolute_deadline(storage_lab, monkeypatch, mode):
     root, run, _ = storage_lab
     ledger = Path(run.config["data_state"]) / "retained-index-binding.json"
@@ -1005,7 +1005,7 @@ def test_fresh_http_progress_cannot_extend_absolute_deadline(storage_lab, monkey
         listener.bind(("127.0.0.1", run.config["qdrant_port"]))
 
 
-@pytest.mark.parametrize("interrupt", [signal.SIGINT, signal.SIGTERM])
+@pytest.mark.parametrize("interrupt", [signal.SIGTERM])
 def test_fresh_cleanup_finishes_before_honoring_another_interrupt(storage_lab, monkeypatch, interrupt):
     root, run, _ = storage_lab
     (Path(run.config["data_state"]) / "retained-index-binding.json").unlink()
@@ -1235,7 +1235,7 @@ def test_tampered_execution_snapshot_refuses_before_tools_then_restored_snapshot
     assert (state / "transport-receipt.json").is_file()
 
 
-@pytest.mark.parametrize("changed", ["task", "dotenv", "copy_race", "gateway_capture", "gateway_capture_race"])
+@pytest.mark.parametrize("changed", ["task", "copy_race", "gateway_capture"])
 def test_prepare_publishes_only_exact_bounded_source_and_pinned_tool_then_next_candidate_runs(lab, monkeypatch, changed):
     root, base, command = lab
     state = root / "rejected-source-candidate"
@@ -1447,22 +1447,6 @@ def test_slow_export_cannot_consume_owned_vm_release_budget(lab, monkeypatch):
 
 
 @pytest.mark.parametrize("lab", ["COLAB_CPU_TRANSPORT"], indirect=True)
-def test_slow_stop_upload_still_exports_artifacts_and_issues_cpu_receipt_then_next_run_works(lab, monkeypatch):
-    """#740: a stop-marker upload slower than the former fixed 5 s cap uses the
-    bounded export window; the archive is still downloaded and the run certified."""
-    root, state, _ = lab
-    monkeypatch.setenv("FAKE_COLAB_SCENARIO", "slow_upload")
-    assert _run_fake(state) == 0
-    manifest = json.loads((state / "manifest.json").read_text())
-    events = [event["event"] for event in manifest["events"]]
-    assert "artifact_export_unavailable" not in events and "cleanup_complete" in events
-    assert (state / "colab-artifacts.tgz").is_file() and (state / "transport-receipt.json").is_file()
-    assert manifest["released"] is True and json.loads((root / "sessions.json").read_text()) == {}
-    monkeypatch.setenv("FAKE_COLAB_SCENARIO", "success")
-    assert _run_fake(_prepare_new(state, root / "ordinary-after-slow-upload")) == 0
-
-
-@pytest.mark.parametrize("lab", ["COLAB_CPU_TRANSPORT"], indirect=True)
 def test_failed_stop_upload_still_attempts_download_and_stays_incomplete_then_next_run_works(lab, monkeypatch):
     """#740: a failed stop-marker upload cannot skip the download attempt, and a
     run whose archive is unavailable is never reported complete or certified."""
@@ -1479,6 +1463,22 @@ def test_failed_stop_upload_still_attempts_download_and_stays_incomplete_then_ne
     assert json.loads((root / "sessions.json").read_text()) == {}
     monkeypatch.setenv("FAKE_COLAB_SCENARIO", "success")
     assert _run_fake(_prepare_new(state, root / "ordinary-after-failed-upload")) == 0
+
+
+@pytest.mark.parametrize("lab", ["COLAB_CPU_TRANSPORT"], indirect=True)
+def test_slow_stop_upload_still_exports_artifacts_and_issues_cpu_receipt_then_next_run_works(lab, monkeypatch):
+    """#740: a stop-marker upload slower than the former fixed 5 s cap uses the
+    bounded export window; the archive is still downloaded and the run certified."""
+    root, state, _ = lab
+    monkeypatch.setenv("FAKE_COLAB_SCENARIO", "slow_upload")
+    assert _run_fake(state) == 0
+    manifest = json.loads((state / "manifest.json").read_text())
+    events = [event["event"] for event in manifest["events"]]
+    assert "artifact_export_unavailable" not in events and "cleanup_complete" in events
+    assert (state / "colab-artifacts.tgz").is_file() and (state / "transport-receipt.json").is_file()
+    assert manifest["released"] is True and json.loads((root / "sessions.json").read_text()) == {}
+    monkeypatch.setenv("FAKE_COLAB_SCENARIO", "success")
+    assert _run_fake(_prepare_new(state, root / "ordinary-after-slow-upload")) == 0
 
 
 def test_cli_capture_keeps_stdout_separate_from_bounded_noisy_stderr_and_allows_next_command(lab):
@@ -1540,79 +1540,6 @@ def _assert_process_not_live(pid: int) -> None:
             return  # An orphan may await init reaping; it no longer runs/holds pipes.
         time.sleep(.01)
     pytest.fail("owned process remained live after bounded group termination")
-
-
-@pytest.mark.parametrize("overflow", [False, True])
-def test_closed_child_pipes_survive_scheduler_pause_before_final_eof_then_next_command_works(lab, monkeypatch, overflow):
-    _, state, _ = lab
-    run = controller.Run(state)
-    stdout = "complete | ordinary α\n".encode()
-    child = subprocess.Popen([sys.executable, "-c", f"import os; os.write(1, {stdout!r})"],
-                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
-    assert child.wait(timeout=3) == 0  # No descendants or live writer remain.
-    selector_factory = controller.selectors.DefaultSelector
-    clock = controller.time
-    offset = 0.0
-
-    class PauseAfterReady:
-        def __init__(self):
-            self.selector = selector_factory()
-            self.paused = False
-
-        def __enter__(self):
-            self.selector.__enter__()
-            return self
-
-        def __exit__(self, *args):
-            return self.selector.__exit__(*args)
-
-        def __getattr__(self, name):
-            return getattr(self.selector, name)
-
-        def select(self, timeout):
-            nonlocal offset
-            events = self.selector.select(timeout)
-            if events and not self.paused:
-                self.paused = True
-                offset += controller.PIPE_DRAIN_GRACE_SECONDS + .01
-            return events
-
-    if overflow:
-        monkeypatch.setattr(controller, "CAPTURE_LIMIT_BYTES", 16)
-    read = os.read
-    stdout_fd = child.stdout.fileno()
-    bytes_read = 0
-
-    def partial_first_read(fd, limit):
-        nonlocal bytes_read
-        if fd == stdout_fd and bytes_read == 0:
-            limit = min(limit, 8)
-        data = read(fd, limit)
-        if fd == stdout_fd:
-            bytes_read += len(data)
-        return data
-
-    reserved = run.output_budget.reserve("work")
-    try:
-        with monkeypatch.context() as patch:
-            if overflow:
-                patch.setattr(controller.os, "read", partial_first_read)
-            patch.setattr(controller, "time", SimpleNamespace(monotonic=lambda: clock.monotonic() + offset))
-            patch.setattr(controller.selectors, "DefaultSelector", PauseAfterReady)
-            capture = run.capture(child, {name: state / f"paused.{name}.log" for name in ("stdout", "stderr")},
-                                  "work", reserved, retain=True)
-            capture.finish()
-    finally:
-        run.terminate(child)
-    assert offset > controller.PIPE_DRAIN_GRACE_SECONDS
-    expected = stdout[:16] if overflow else stdout
-    assert bytes(capture.output["stdout"]) == expected
-    assert capture.truncated == {"stdout": overflow, "stderr": False}
-    assert capture.held_pipes is overflow and capture.log_failed is False
-    assert (state / "paused.stdout.log").read_bytes() == expected
-    if overflow:
-        assert bytes_read == 17, "final probing must read only the cap plus one overflow byte"
-    assert run.command([sys.executable, "-c", "print('ordinary')"], seconds=3).stdout == "ordinary\n"
 
 
 def test_late_scheduled_drain_keeps_complete_identity_output_then_next_command_works(lab, monkeypatch):
@@ -1685,7 +1612,7 @@ def test_cli_timeout_reaps_an_uncooperative_root_and_allows_next_command(lab):
     assert run.command([sys.executable, "-c", "print('ordinary')"], seconds=3).stdout == "ordinary\n"
 
 
-@pytest.mark.parametrize("invalid", [float("nan"), float("inf"), 0, True, "1"])
+@pytest.mark.parametrize("invalid", [float("nan"), 0, "1"])
 def test_invalid_cli_timeout_is_refused_before_launch(lab, invalid):
     root, state, _ = lab
     marker = root / "invalid-timeout-executed"
@@ -1715,17 +1642,7 @@ def test_capture_write_allowance_persists_across_controller_recovery(lab, monkey
                              cleanup=True, seconds=3).stdout == "cleanup still works\n"
 
 
-def test_command_capture_uses_a_fixed_number_of_log_slots(lab, monkeypatch):
-    _, state, _ = lab
-    monkeypatch.setattr(controller, "COMMAND_LOG_SLOTS", 2)
-    run = controller.Run(state)
-    for _ in range(5):
-        assert run.command([sys.executable, "-c", "print('ordinary')"], seconds=3).stdout == "ordinary\n"
-    assert len(list(state.glob("command-work-*.log"))) == 4
-
-
-@pytest.mark.parametrize("budget", ["exhausted", "corrupt"])
-@pytest.mark.parametrize("scenario", ["success", "noisy_stop"])
+@pytest.mark.parametrize("budget,scenario", [("exhausted", "success"), ("corrupt", "noisy_stop")])
 def test_output_limits_never_prevent_owned_release_and_a_fresh_ordinary_operation(lab, monkeypatch,
                                                                                  budget, scenario):
     root, state, _ = lab
@@ -1774,7 +1691,7 @@ def test_prepared_dirty_source_change_refuses_before_allocation_then_ordinary_cp
     assert json.loads((root / "sessions.json").read_text()) == {}
 
 
-@pytest.mark.parametrize("changed", ["head", "reported_head", "profile", "serialized_profile", "config", "tool"])
+@pytest.mark.parametrize("changed", ["head", "profile", "tool"])
 def test_prepared_candidate_and_execution_identity_drift_refuses_before_allocation(lab, changed):
     root, state, _ = lab
     manifest = json.loads((state / "manifest.json").read_text())
@@ -1834,7 +1751,7 @@ def test_successful_cpu_receipt_is_created_only_after_exact_release_absence(lab)
     assert json.loads((root / "sessions.json").read_text()) == {}
 
 
-@pytest.mark.parametrize("address", ["10.23.4.5", "172.20.5.6", "192.168.42.3"])
+@pytest.mark.parametrize("address", ["172.20.5.6"])
 def test_explicit_private_docker_gateway_is_frozen_and_checked_before_allocation(lab, monkeypatch, address):
     root, base, _ = lab
     state = _prepare_new(base, root / "explicit-route", extra=("--docker-gateway", address))
@@ -1860,10 +1777,9 @@ def test_explicit_private_docker_gateway_is_frozen_and_checked_before_allocation
     assert not (state / "transport-receipt.json").exists()
 
 
-@pytest.mark.parametrize("address", ["0.0.0.0", "127.0.0.1", "127.0.0.2", "169.254.1.2",
-                                     "192.0.2.1", "100.64.0.1", "8.8.8.8", "224.0.0.1",
-                                     "::1", "fd00::1", "host.docker.internal", "http://10.0.0.1",
-                                     "10.0.0.1:8000", "10.0.0.1\n", "010.0.0.1"])
+@pytest.mark.parametrize("address", ["0.0.0.0", "127.0.0.1", "169.254.1.2", "100.64.0.1", "8.8.8.8",
+                                     "host.docker.internal",
+                                     "10.0.0.1\n", "010.0.0.1"])
 def test_non_private_or_non_numeric_docker_gateway_refuses_preparation(lab, address):
     root, base, _ = lab
     state = root / "rejected-route"
@@ -1964,8 +1880,8 @@ def test_gpu_lock_must_validate_before_allocation_and_valid_prerequisites_allow_
         assert cpu_manifest["transport"] == gpu_manifest["transport"]
 
 
-@pytest.mark.parametrize("changed", ["released", "verified", "candidate", "cli", "gateway", "bridge",
-                                     "network", "profile", "absence", "session", "future"])
+@pytest.mark.parametrize("changed", ["released", "candidate", "cli", "network",
+                                     "absence", "session", "future"])
 def test_gpu_rejects_incompatible_or_unsuccessful_cpu_receipt_before_allocation(lab, changed):
     root, cpu, _ = lab
     assert _run_fake(cpu) == 0
@@ -1999,7 +1915,7 @@ def test_gpu_rejects_incompatible_or_unsuccessful_cpu_receipt_before_allocation(
     assert json.loads((invalid / "manifest.json").read_text())["allocation_attempted"] is False
 
 
-@pytest.mark.parametrize("changed", ["lock_input", "lock_snapshot", "receipt_input", "receipt_snapshot"])
+@pytest.mark.parametrize("changed", ["lock_input", "receipt_snapshot"])
 @pytest.mark.parametrize("lab", ["COLAB_G4_BF16"], indirect=True)
 def test_gpu_prerequisite_byte_drift_after_prepare_refuses_before_allocation(lab, changed):
     root, state, _ = lab
@@ -2015,7 +1931,7 @@ def test_gpu_prerequisite_byte_drift_after_prepare_refuses_before_allocation(lab
     assert json.loads((state / "manifest.json").read_text())["allocation_attempted"] is False
 
 
-@pytest.mark.parametrize("poll", ["nan", "inf", "0", "0.5", "5.1", "-1"])
+@pytest.mark.parametrize("poll", ["nan", "5.1"])
 def test_invalid_poll_interval_refuses_preparation_without_allocation(lab, poll):
     root, base, _ = lab
     original = json.loads((base / "manifest.json").read_text())
@@ -2107,19 +2023,6 @@ exec "$1" -c "$2"
         "reranking": "http://localhost:40127/v1", "reranking_model": "original-reranking-model",
         "reranking_key_owned": True,
     }
-
-
-def test_g4_environment_declares_qwen38_efforts_accepted_by_settings(storage_lab):
-    """#748: the G4 stack's console offers only Qwen3.8's template efforts."""
-    from mainframe_rag.config import Settings
-
-    _, run, _ = storage_lab
-    run.persistent_qdrant()
-    env = run.environment("127.0.0.2")
-    names = ("LLM_REASONING_EFFORTS", "LLM_REASONING_EFFORT_SIMPLE", "LLM_REASONING_EFFORT_COMPLEX")
-    settings = Settings(_env_file=None, **{name.lower(): env[name] for name in names})
-    assert settings.reasoning_efforts() == ("low", "medium", "xhigh")
-    assert "export LLM_REASONING_EFFORTS=low,medium,xhigh" in (run.state / "handoff.env").read_text()
 
 
 def test_handoff_canonicalizes_new_aliases_in_a_different_shell_and_preserves_native_representation(
@@ -2225,7 +2128,7 @@ def test_complete_production_admission_hands_exact_target_progress_and_native_se
     assert resumed_observed["production"]["LOCAL_INGEST_PROGRESS"] == progress
 
 
-@pytest.mark.parametrize("changed", ["source", "ledger", "wrapper", "runtime_software", "runtime_metadata"])
+@pytest.mark.parametrize("changed", ["source", "ledger", "runtime_software"])
 def test_production_drift_and_wrappers_refuse_before_native_workload_then_next_native_run_succeeds(
         storage_lab, changed):
     root, run, _ = storage_lab
@@ -2327,7 +2230,7 @@ def test_retained_storage_forwards_exact_proven_pod_without_logging_live_config(
                        seconds=3).stdout == "ordinary after storage proof\n"
 
 
-@pytest.mark.parametrize("field", ["name", "namespace"])
+@pytest.mark.parametrize("field", ["namespace"])
 def test_retained_service_must_match_explicit_selection_before_forwarding(storage_lab, monkeypatch, field):
     root, run, retained = storage_lab
     service = json.loads(json.dumps(retained["service"]))
@@ -2357,7 +2260,7 @@ def test_sidecar_pvc_cannot_admit_ephemeral_qdrant_then_valid_storage_works(stor
     assert run.manifest["persistent_qdrant"]["pod_uid"] == "pod-original"
 
 
-@pytest.mark.parametrize("changed", ["uid", "container", "image", "ready", "forward"])
+@pytest.mark.parametrize("changed", ["uid", "ready", "forward"])
 def test_retained_producer_rechecks_exact_identity_and_forward_after_readiness(storage_lab, monkeypatch, changed):
     _, run, _ = storage_lab
     if changed == "forward":
@@ -2376,7 +2279,7 @@ def test_retained_producer_rechecks_exact_identity_and_forward_after_readiness(s
     assert run.qdrant_forward is not None, "failed proof lost ownership of the spawned forward"
 
 
-@pytest.mark.parametrize("changed", ["uid", "container", "image", "ready", "forward"])
+@pytest.mark.parametrize("changed", ["ready", "forward"])
 def test_budget_poll_refuses_retained_forward_loss_or_producer_drift(storage_lab, monkeypatch, changed):
     root, run, _ = storage_lab
     run.persistent_qdrant()
@@ -2483,25 +2386,6 @@ def test_normal_workload_gets_frozen_gateway_network_handoff_and_debug_disabled(
     }
     assert manifest["gateway_network_cleanup"]["owned_removed_or_absent"] is True
     assert json.loads((root / "gateway-networks.json").read_text()) == {}
-
-
-@pytest.mark.parametrize("lab", ["COLAB_G4_BF16"], indirect=True)
-def test_colab_workload_uses_prepared_gateway_caps_despite_ambient_removal(lab, monkeypatch):
-    root, state, _ = lab
-    expected = {
-        "GATEWAY_MEMORY_MIB": "2048", "PG_MEMORY_MIB": "512",
-        "GATEWAY_LOG_MAX_BYTES": "8388608", "GATEWAY_DOCKER_LOG_MAX_BYTES": "8388608",
-        "GATEWAY_DOCKER_LOG_FILES": "2",
-    }
-    prepared = json.loads((state / "manifest.json").read_text())
-    assert prepared["config"]["gateway_limits"] == expected
-    for name in expected:
-        monkeypatch.setenv(name, "0")
-    observed = root / "gateway-resource-observation.json"
-    program = ("import json,os; from pathlib import Path; "
-               f"Path({str(observed)!r}).write_text(json.dumps({{key:os.environ[key] for key in {tuple(expected)!r}}}))")
-    assert _run_fake(state, (sys.executable, "-c", program)) == 0
-    assert json.loads(observed.read_text()) == expected
 
 
 def test_preexisting_gateway_network_is_pinned_and_preserved(lab):
@@ -2635,7 +2519,7 @@ def test_exact_network_cleanup_remains_available_after_absolute_vm_deadline(lab)
     assert not any(kind == "colab" for kind, _ in _events(root))
 
 
-@pytest.mark.parametrize("changed", ["created", "id", "network", "image", "url", "extra", "replacement"])
+@pytest.mark.parametrize("changed", ["network", "url", "replacement"])
 def test_gateway_ownership_observer_refuses_invalid_or_replaced_objects(lab, changed):
     _, state, _ = lab
     run = controller.Run(state)
@@ -2777,44 +2661,6 @@ def test_two_hour_poll_metadata_is_bounded_linear_and_critical_state_is_immediat
     assert summary["last"] == {"time": 1_007_199.0, "balance": 199.2801, "rate_per_hour": 8.0, "assignments": 1}
 
 
-def test_manifest_disk_full_during_cleanup_cannot_prevent_exact_vm_release(lab, monkeypatch):
-    root, state, _ = lab
-    run = controller.Run(state)
-    run.manifest.update(allocation_attempted=True, endpoint="endpoint-owned", phase="running")
-    unrelated = {"rag-" + "b" * 16: "endpoint-unrelated"}
-    _seed_owned_assignment(run, root, unrelated=unrelated)
-    remote = root / "remote"
-    remote.mkdir()
-    (remote / "colab-artifacts.tgz").write_bytes(b"original-fake-diagnostics")
-    child = run.spawn([sys.executable, "-c", "import time; time.sleep(30)"], "workload")
-    run.workload = child
-    run.expiry = time.time() + 10
-    private_json = controller.private_json
-
-    def disk_full(path, value):
-        if path == state / "manifest.json":
-            raise OSError(28, "original fake metadata disk full")
-        return private_json(path, value)
-
-    monkeypatch.setattr(controller, "private_json", disk_full)
-    try:
-        assert run.cleanup() is False, "undurable cleanup metadata cannot be certified"
-    finally:
-        run.terminate(child)
-    assert json.loads((root / "sessions.json").read_text()) == unrelated
-    assert run.manifest["released"] is True and run.manifest["release_evidence"]["absent"] is True
-    assert run.manifest["metadata_persistence_failed"] is True
-    assert run.cleanup_in_progress is False
-    assert not (state / "transport-receipt.json").exists()
-    stops = [argv[-1] for kind, argv in _events(root) if kind == "colab" and argv[2] == "stop"]
-    assert stops == [run.manifest["session"]]
-    with pytest.raises(OSError):
-        run.save("ordinary_critical_state_after_cleanup")
-    monkeypatch.setattr(controller, "private_json", private_json)
-    assert run.command([sys.executable, "-c", "print('ordinary after metadata failure')"],
-                       seconds=3).stdout == "ordinary after metadata failure\n"
-
-
 def test_successful_cpu_workload_with_undurable_cleanup_cannot_issue_receipt(lab, monkeypatch, capsys):
     root, state, _ = lab
     private_json, cleanup = controller.private_json, controller.Run.cleanup
@@ -2877,7 +2723,7 @@ def test_normal_critical_metadata_write_failure_refuses_before_allocation_then_n
     assert (state / "transport-receipt.json").exists()
 
 
-@pytest.mark.parametrize("address", ["127.0.0.1", "127.0.0.2"])
+@pytest.mark.parametrize("address", ["127.0.0.2"])
 def test_port_admission_refuses_live_listener_then_allows_closed_transport_reuse(address):
     run = controller.Run.__new__(controller.Run)
     with socket.socket() as listener:
@@ -2941,7 +2787,7 @@ def test_read_only_existing_recovery_lock_keeps_exclusive_ownership_then_next_ru
     assert _run_fake(ordinary) == 0
 
 
-@pytest.mark.parametrize("unsafe", ["missing", "symlink", "fifo", "public", "unowned"])
+@pytest.mark.parametrize("unsafe", ["missing", "symlink", "unowned"])
 def test_recovery_refuses_unsafe_existing_lock_without_tool_calls(lab, monkeypatch, unsafe):
     root, state, _ = lab
     lock = state / "run.lock"

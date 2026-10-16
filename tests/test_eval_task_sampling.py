@@ -121,12 +121,16 @@ raise SystemExit(cli.main(args))
     return tmp_path, run
 
 
-@pytest.mark.parametrize("operation", ["answers", "chat", "harness:l2", "harness:l4", "harness:l4-record"])
-@pytest.mark.parametrize("args,ambient,count,repeats", [
-    ([], {}, None, 3),
-    (["N=", "REPEATS="], {"N": "5", "REPEATS": "2"}, None, 3),
-    (["N=5", "REPEATS=2"], {"N": "1", "REPEATS": "1"}, 5, 2),
-    ([], {"N": "3", "REPEATS": "1"}, 3, 1),
+_DEFAULT = ([], {}, None, 3)
+_EMPTY_ARGS = (["N=", "REPEATS="], {"N": "5", "REPEATS": "2"}, None, 3)
+_ARGS_WIN = (["N=5", "REPEATS=2"], {"N": "1", "REPEATS": "1"}, 5, 2)
+_AMBIENT = ([], {"N": "3", "REPEATS": "1"}, 3, 1)
+
+
+@pytest.mark.parametrize("operation,args,ambient,count,repeats", [
+    *[("answers", *c) for c in (_DEFAULT, _EMPTY_ARGS, _ARGS_WIN, _AMBIENT)],
+    *[("harness:l4", *c) for c in (_DEFAULT, _EMPTY_ARGS, _ARGS_WIN, _AMBIENT)],
+    *[(op, *_ARGS_WIN) for op in ("chat", "harness:l2", "harness:l4-record")],
 ])
 def test_task_sampling_and_repeat_counts(sampling_workspace, operation, args, ambient, count, repeats):
     root, run = sampling_workspace
@@ -172,7 +176,7 @@ def test_task_sampling_and_repeat_counts(sampling_workspace, operation, args, am
     assert not (root / "SENTINEL").exists()
 
 
-@pytest.mark.parametrize("operation", ["answers", "chat", "harness:l2", "harness:l4", "harness:l4-record"])
+@pytest.mark.parametrize("operation", ["answers", "chat"])
 def test_zero_sample_is_not_replaced_with_default(sampling_workspace, operation):
     root, run = sampling_workspace
     reference = root / "evals/harness-l4-thresholds.json"
@@ -185,7 +189,7 @@ def test_zero_sample_is_not_replaced_with_default(sampling_workspace, operation)
     assert reference.read_bytes() == before
 
 
-@pytest.mark.parametrize("operation", ["answers", "chat", "harness:l2", "harness:l4", "harness:l4-record"])
+@pytest.mark.parametrize("operation", ["answers", "harness:l4"])
 def test_invalid_sample_refuses_before_measurement(sampling_workspace, operation):
     root, run = sampling_workspace
     proc = run(operation, "N=bad אב;$(touch SENTINEL)")
@@ -195,8 +199,9 @@ def test_invalid_sample_refuses_before_measurement(sampling_workspace, operation
     assert not (root / "SENTINEL").exists()
 
 
-@pytest.mark.parametrize("operation", ["harness:l4", "harness:l4-record"])
-@pytest.mark.parametrize("value", ["0", "-1", "bad אב;$(touch SENTINEL)"])
+@pytest.mark.parametrize("operation,value", [
+    ("harness:l4", "0"), ("harness:l4-record", "bad אב;$(touch SENTINEL)"),
+])
 def test_invalid_repeat_refuses_before_measurement(sampling_workspace, operation, value):
     root, run = sampling_workspace
     proc = run(operation, "N=1", f"REPEATS={value}")

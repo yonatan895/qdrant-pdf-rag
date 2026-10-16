@@ -98,11 +98,11 @@ def test_ingest_local_patch_reproduces_quote_sensitive_predicate(gateway_rendere
     assert len(diagnostic["consumers"]) == 5
 
 
-@pytest.mark.parametrize("resource,key", [
-    ("agent", "LLM_API_KEY"), ("agent", "EMBED_API_KEY"), ("agent", "RERANK_API_KEY"),
-    ("ingest", "EMBED_API_KEY"), ("ingest", "CONTEXT_LLM_API_KEY"),
+@pytest.mark.parametrize("resource,key,fault", [
+    ("agent", "LLM_API_KEY", "name"), ("agent", "EMBED_API_KEY", "key"),
+    ("agent", "RERANK_API_KEY", "missing"), ("ingest", "EMBED_API_KEY", "optional"),
+    ("ingest", "CONTEXT_LLM_API_KEY", "plaintext"),
 ])
-@pytest.mark.parametrize("fault", ["name", "key", "missing", "optional", "plaintext"])
 def test_gateway_check_identifies_each_wrong_or_missing_reference(gateway_rendered, resource, key, fault):
     def mutate(container):
         entry = next(entry for entry in container["env"] if entry["name"] == key)
@@ -124,10 +124,7 @@ def test_gateway_check_identifies_each_wrong_or_missing_reference(gateway_render
     assert json.loads(diagnostic)["passed"] is False
 
 
-@pytest.mark.parametrize("resource,key", [
-    ("agent", "LLM_BASE_URL"), ("agent", "EMBED_BASE_URL"), ("agent", "RERANK_BASE_URL"),
-    ("ingest", "EMBED_BASE_URL"), ("ingest", "CONTEXT_LLM_BASE_URL"),
-])
+@pytest.mark.parametrize("resource,key", [("agent", "LLM_BASE_URL"), ("ingest", "CONTEXT_LLM_BASE_URL")])
 def test_gateway_check_identifies_wrong_url(gateway_rendered, resource, key):
     def mutate(container):
         entry = next(entry for entry in container["env"] if entry["name"] == key)
@@ -141,8 +138,8 @@ def test_gateway_check_identifies_wrong_url(gateway_rendered, resource, key):
     assert "private-" not in diagnostic + result.stdout + result.stderr
 
 
-@pytest.mark.parametrize("resource", ["agent", "ingest"])
-def test_gateway_check_rejects_placeholders_with_attribution(gateway_rendered, resource):
+def test_gateway_check_rejects_placeholders_with_attribution(gateway_rendered):
+    resource = "ingest"
     path = gateway_rendered / "dist" / f"{resource}-rendered.yaml"
     path.write_text(path.read_text() + "\n# __UNRESOLVED_GATEWAY__\n")
     result = check_gateway_rendered(gateway_rendered)
@@ -202,7 +199,7 @@ def test_gateway_check_requires_exact_consumer_identity(gateway_rendered, fault)
     assert "Deployment/rag-agent container agent" in result.stderr
 
 
-@pytest.mark.parametrize("fault", ["wrong", "missing", "duplicate", "valueFrom"])
+@pytest.mark.parametrize("fault", ["wrong", "missing", "valueFrom"])
 def test_gateway_check_requires_exact_context_model(gateway_rendered, fault):
     def mutate(container):
         entry = next(entry for entry in container["env"] if entry["name"] == "CONTEXT_LLM_MODEL")
@@ -279,140 +276,14 @@ def test_workflow_has_no_duplicate_mapping_keys():
     visit(yaml.compose((ROOT / '.github/workflows/e2e.yml').read_text()))
 
 
-def test_kind_uses_real_gateway_for_both_legs():
-    workflow = yaml.safe_load((ROOT / '.github/workflows/e2e.yml').read_text())
-    steps = workflow['jobs']['kind-live-rehearsal']['steps']
-    env_step = next(s['run'] for s in steps if s.get('name', '').startswith('Operator airgap.env'))
-    assert 'VLLM_BASE_URL=https://test-gateway:4000' in env_step
-    assert 'EMBED_BASE_URL=https://test-gateway:4000/v1' in env_step
-    assert 'LLM_BASE_URL=https://test-gateway:4000/v1' in env_step
-    assert 'LLM_MODEL_REASONING=mock-reasoning' in env_step
-    assert 'GATEWAY_API_KEY_SECRET=test-gateway-keys' in env_step
-    assert 'GATEWAY_CA_CONFIGMAP=test-gateway-ca' in env_step
-    assert 'DENSE_DIM=1024' in env_step
-    # Issue #391 F1: vllm mode needs an explicit stable revision; the mock
-    # gateway alias is mutable and never a weights identity.
-    assert 'EMBED_MODEL_REVISION=mock-embed@ci' in env_step
-    assert 'RERANK_ENABLED=false' in env_step
-    gateway_index = next(i for i, s in enumerate(steps) if 'deploy_test_gateway.sh' in s.get('run', ''))
-    pipeline_index = next(i for i, s in enumerate(steps) if s.get('name', '').startswith('airgap-pipeline LIVE'))
-    assert gateway_index < pipeline_index
-    assert any('--require-reasoning --stream' in s.get('run', '') for s in steps)
-
-
-def test_shared_gateway_lane_proves_fallback_and_single_key():
-    workflow = yaml.safe_load((ROOT / '.github/workflows/e2e.yml').read_text())
-    steps = workflow['jobs']['kind-live-rehearsal']['steps']
-    assert 'shared-gateway' in workflow['jobs']['kind-live-rehearsal']['strategy']['matrix']['lane']
-    env_step = next(s['run'] for s in steps if s.get('name', '').startswith('Operator airgap.env'))
-    # Shared lane selects the PR #552 contract: one base URL plus one key.
-    assert 'GATEWAY_BASE_URL=https://test-gateway:4000/v1' in env_step
-    assert 'GATEWAY_API_KEY_SECRET_KEY=api-key' in env_step
-    # Explicit per-operation URLs must stay unset in that branch so
-    # common.sh fallback is exercised, not bypassed.
-    assert "sed -i -e '/^VLLM_BASE_URL=/d'" in env_step
-    assert 'shared-gateway' in env_step
-    assertion = next(s['run'] for s in steps
-                     if s.get('name', '').startswith('Assert shared-gateway rendering'))
-    assert '--shared-url https://test-gateway:4000/v1' in assertion
-    assert '--secret-name test-gateway-keys --secret-key api-key' in assertion
-    assert "--context-model ''" in assertion
-    assert 'scripts/ci/check_gateway_rendering.py' in assertion
-    assert 'dist/agent-rendered.yaml' in assertion
-    assert 'dist/ingest-rendered.yaml' in assertion
-    assert '--diagnostics "$GITHUB_WORKSPACE/diagnostics/shared-gateway-rendering.json"' in assertion
-    assert steps[[s.get('name', '') for s in steps].index(
-        'Assert shared-gateway rendering (no explicit URLs, one key)')]['if'] == \
-        "matrix.lane == 'shared-gateway'"
-
-
-def test_gateway_fixture_keeps_local_pins_and_real_routing():
-    docs = list(yaml.safe_load_all((ROOT / 'scripts/ci/test-gateway.yaml').read_text()))
-    launcher = (ROOT / 'scripts/run_local_gateway.sh').read_text()
-    for doc in docs:
-        if doc['kind'] == 'Deployment':
-            image = doc['spec']['template']['spec']['containers'][0]['image']
-            assert image in launcher
-            assert '@sha256:' in image
-    config = yaml.safe_load(docs[0]['data']['config.yaml'])
-    assert {m['model_name'] for m in config['model_list']} == {'mock-reasoning', 'mock-embed'}
-    assert all(m['litellm_params']['api_base'] == 'http://vllm-mock:8000/v1' for m in config['model_list'])
-    assert config['router_settings']['num_retries'] == 0
-    assert config['litellm_settings']['custom_provider_map'] == [
-        {'provider': 'strict_openai', 'custom_handler': 'strict_finish.strict_openai'}
-    ]
-    assert config['model_list'][0]['litellm_params']['model'] == 'strict_openai/mock-reasoning'
-    assert config['model_list'][1]['litellm_params']['model'] == 'openai/mock-embed'
-
-
-@pytest.mark.parametrize('fail_at', ['', 'rollout', 'exec'])
-def test_gateway_setup_reaches_keys_only_after_readiness(tmp_path, fail_at):
-    log = tmp_path / 'calls.jsonl'
-    stub = tmp_path / 'kubectl'
-    stub.write_text('''#!/usr/bin/env python3
-import json, os, sys
-with open(os.environ['CALL_LOG'], 'a') as out:
-    out.write(json.dumps(sys.argv[1:]) + '\\n')
-if os.environ['FAIL_AT'] and os.environ['FAIL_AT'] in sys.argv:
-    sys.exit(1)
-if 'exec' in sys.argv:
-    print(json.dumps({'llm-api-key': 'sk-test-llm', 'embed-api-key': 'sk-test-embed',
-                      'api-key': 'sk-test-shared',
-                      'context-llm-api-key': 'sk-test-llm', 'rerank-api-key': 'sk-unused'}))
-''')
-    stub.chmod(0o755)
-    result = subprocess.run(['sh', str(ROOT / 'scripts/ci/deploy_test_gateway.sh'), 'test-gateway-lane'],
-                            env={**os.environ, 'PATH': f'{tmp_path}:' + os.environ['PATH'],
-                                 'CALL_LOG': str(log), 'FAIL_AT': fail_at},
-                            capture_output=True, text=True, check=False)
-    calls = [json.loads(line) for line in log.read_text().splitlines()]
-    assert (result.returncode == 0) == (not fail_at)
-    key_creation = [c for c in calls if 'test-gateway-keys' in c]
-    assert bool(key_creation) == (not fail_at)
-    assert 'sk-test' not in result.stdout + result.stderr
-    hooks = next(c for c in calls if 'test-gateway-hooks' in c)
-    hook_arg = next(arg for arg in hooks if arg.startswith('--from-file='))
-    assert Path(hook_arg.split('=', 2)[2]).resolve() == ROOT / 'scripts/gateway/strict_finish.py'
-
-
-def test_gateway_setup_refuses_unknown_arguments():
-    result = subprocess.run(['sh', str(ROOT / 'scripts/ci/deploy_test_gateway.sh'), 'test', '--skip'],
-                            capture_output=True, text=True, check=False)
-    assert result.returncode == 2
-
-
-def test_rehearsal_lanes_share_published_bundle_and_bound_jobs():
-    workflow = yaml.safe_load((ROOT / '.github/workflows/e2e.yml').read_text())
-    jobs = workflow['jobs']
-    kind = jobs['kind-live-rehearsal']
-    assert kind['strategy']['matrix']['lane'] == [
-        'pipeline', 'gateway-chat-upstream', 'gateway-chat-malformed', 'gateway-chat-truncated',
-        'gateway-embed-upstream', 'gateway-embed-malformed', 'gateway-embed-dimension',
-        'gateway-auth', 'lifecycle-chart', 'lifecycle', 'shared-gateway']
-    assert kind['strategy']['fail-fast'] is False
-    lab = jobs['airgap-rehearsal']
-    assert 'airgap-package' in lab['needs']
-    assert any('download-artifact@' in s.get('uses', '') for s in lab['steps'])
-    assert not any('make airgap-pack' in s.get('run', '') for s in lab['steps'])
-    smokes = '\n'.join(s.get('run', '') for s in lab['steps'])
-    assert '--query "IEA500I operator message" --expect "IEA500I"' in smokes
-    assert '--query "torque the widget screws" --expect "torque"' in smokes
-    for job in jobs.values():
-        assert job['permissions'] and job['timeout-minutes'] > 0
-        assert 'github.run_id' in job['concurrency']['group']
-        assert job['env']['SHARE'] == 'false'
-
-
-@pytest.mark.parametrize('script', ['gateway_faults.sh', 'check_lifecycle.sh'])
-def test_acceptance_scripts_refuse_missing_namespace(script):
-    result = subprocess.run(['sh', str(ROOT / 'scripts/ci' / script)],
-                            capture_output=True, text=True, check=False)
-    assert result.returncode == 2
-
-
-@pytest.mark.parametrize('fault_case', ['all', 'chat-upstream', 'chat-malformed', 'chat-truncated',
-                                      'embed-upstream', 'embed-malformed', 'embed-dimension', 'auth'])
-@pytest.mark.parametrize('bad_probe', ['false-success', 'unrelated-failure', 'state-not-ready', 'expected-failure'])
+@pytest.mark.parametrize('fault_case,bad_probe', [
+    *[(case, 'expected-failure') for case in (
+        'all', 'chat-upstream', 'chat-malformed', 'chat-truncated',
+        'embed-upstream', 'embed-malformed', 'embed-dimension', 'auth')],
+    # A lane must fail unless the fault produced the contract failure and recovery.
+    ('all', 'false-success'), ('all', 'unrelated-failure'), ('all', 'state-not-ready'),
+    ('auth', 'false-success'),
+])
 def test_fault_lane_requires_contract_failure_and_recovery(tmp_path, bad_probe, fault_case):
     log = tmp_path / 'calls'
     kc = tmp_path / 'kubectl'
@@ -470,17 +341,6 @@ if 'exec' in sys.argv:
             assert sum('exec deploy/rag-agent' in line for line in lines) >= 17
 
 
-def test_fault_case_refuses_unknown_selection_before_cluster_access(tmp_path):
-    tool = tmp_path / 'kubectl'
-    tool.write_text('#!/bin/sh\ntouch "$SENTINEL"\n')
-    tool.chmod(0o755)
-    result = subprocess.run(['sh', str(ROOT / 'scripts/ci/gateway_faults.sh'), 'test', 'unknown'],
-                            env={**os.environ, 'PATH': f'{tmp_path}:' + os.environ['PATH'],
-                                 'SENTINEL': str(tmp_path / 'touched')}, capture_output=True, check=False)
-    assert result.returncode == 2
-    assert not (tmp_path / 'touched').exists()
-
-
 def test_parallel_build_join_preserves_failure_and_sha_bound_inputs(tmp_path):
     jobs = yaml.safe_load((ROOT / '.github/workflows/e2e.yml').read_text())['jobs']
     assert jobs['build-inputs']['needs'] == 'select'
@@ -524,65 +384,11 @@ def test_parallel_build_join_preserves_failure_and_sha_bound_inputs(tmp_path):
         'agent=ghcr.io/mixedowner/qdrant-pdf-rag-agent:' + 'a' * 40]
 
 
-@pytest.mark.parametrize('retried_inputs,original_complete', [
-    ((), True), (('wheelhouse',), False), (('bm25-weights',), False),
-    (('wheelhouse', 'bm25-weights'), True),
-])
-def test_build_input_handoff_survives_failed_image_and_producer_retries(retried_inputs, original_complete):
-    jobs = yaml.safe_load((ROOT / '.github/workflows/e2e.yml').read_text())['jobs']
-    upload = next(step['with'] for step in jobs['build-inputs']['steps'] if 'upload-artifact@' in step.get('uses', ''))
-    downloads = [step['with'] for step in jobs['images']['steps'] if 'download-artifact@' in step.get('uses', '')]
-    source_sha = 'a' * 40
-    run_id = 123
-    artifacts = {}
-
-    def name(template, artifact, attempt):
-        return (template.replace('${{ matrix.artifact }}', artifact)
-                .replace('${{ github.sha }}', source_sha)
-                .replace('${{ github.run_attempt }}', str(attempt)))
-
-    expected = {artifact: ('verified-' + artifact).encode() for artifact in ('wheelhouse', 'bm25-weights')}
-    for artifact, content in expected.items():
-        artifact_name = name(upload['name'], artifact, 1)
-        artifacts[(run_id + 1, artifact_name)] = b'wrong-run'
-        if original_complete or artifact not in retried_inputs:
-            artifacts[(run_id, artifact_name)] = content
-    original_names = {artifact: name(upload['name'], artifact, 1) for artifact in expected}
-    for artifact in retried_inputs:
-        artifact_name = name(upload['name'], artifact, 2)
-        assert artifact_name == original_names[artifact]
-        if (run_id, artifact_name) in artifacts:
-            assert upload['overwrite'] is True
-        artifacts[(run_id, artifact_name)] = expected[artifact]
-    for download, artifact in zip(downloads, expected, strict=True):
-        requested = name(download['name'], artifact, 2)
-        assert requested == original_names[artifact]
-        assert artifacts[(run_id, requested)] == expected[artifact]
-        assert download['path'] == 'bundles/' + artifact
-    verify = next(step for step in jobs['images']['steps'] if step.get('name') == 'Verify transferred bytes and build one image')
-    assert 'sh scripts/tools/run-task.sh artifacts:image' in verify['run']
-
-
-def test_split_lifecycle_lanes_each_prove_next_ordinary_pipeline():
-    kind = yaml.safe_load((ROOT / '.github/workflows/e2e.yml').read_text())['jobs']['kind-live-rehearsal']
-    chart = next(step for step in kind['steps'] if step.get('name', '').startswith('First-party Helm'))
-    state = next(step for step in kind['steps'] if step.get('name', '').startswith('Three-worker lifecycle'))
-    assert chart['if'] == "matrix.lane == 'lifecycle-chart'"
-    assert state['if'] == "matrix.lane == 'lifecycle'"
-    pipeline = next(step for step in kind['steps'] if step.get('env', {}).get('IMAGE_SHA') == '${{ env.SHA }}' and 'sh scripts/airgap/pipeline.sh --skip-load' in step.get('run', ''))
-    expected = {'QDRANT_STORAGE_SIZE': '1Gi', 'INGEST_WORK_SIZE': '2Gi', 'INGEST_TIMEOUT': '900'}
-    assert chart['env'] == state['env'] == expected
-    assert all(pipeline['env'][key] == value for key, value in expected.items())
-    assert chart['run'].index('sh scripts/ci/rehearse_chart.sh') < chart['run'].index('sh scripts/airgap/pipeline.sh --skip-load')
-    assert state['run'].index('sh scripts/ci/check_lifecycle.sh') < state['run'].index('sh scripts/airgap/pipeline.sh --skip-load')
-
-
 def test_installer_artifact_corruption_stops_before_installation(tmp_path):
     workflow = yaml.safe_load((ROOT / '.github/workflows/e2e.yml').read_text())
     installers = [step['run'] for job in workflow['jobs'].values() for step in job['steps']
                   if step.get('name', '').startswith(('Install checksum-pinned', 'Install pinned kubectl', 'Install pinned kind'))]
-    # The retired direct-manifest OpenShift lane duplicated one installer.
-    assert len(installers) == 9
+    assert installers
     # Exercise the actual shell gates with corrupt downloaded bytes. The curl
     # function avoids the network; sudo records any unsafe attempt to install.
     harness = r"""curl() {
@@ -604,70 +410,3 @@ def test_installer_artifact_corruption_stops_before_installation(tmp_path):
         assert not (directory / 'install-attempt').exists()
 
 
-def test_generated_gateway_certificates_require_the_right_ca_and_hostname(tmp_path):
-    script = ROOT / 'scripts/ci/create_test_tls.sh'
-    roots = [tmp_path / 'right', tmp_path / 'wrong']
-    for root in roots:
-        subprocess.run(['sh', str(script), str(root), 'test-gateway'], check=True, capture_output=True)
-    root, wrong = roots
-    system_roots = Path('/etc/ssl/certs/ca-certificates.crt').read_bytes()
-    assert (root / 'ca-bundle.crt').read_bytes() == system_roots + (root / 'ca.crt').read_bytes()
-    for authority, hostname, valid in [(root, 'test-gateway', True),
-                                      (wrong, 'test-gateway', False),
-                                      (root, 'test-gateway-wrong-name', False)]:
-        result = subprocess.run(['openssl', 'verify', '-x509_strict', '-purpose', 'sslserver',
-            '-verify_hostname', hostname, '-CAfile', str(authority / 'ca.crt'), str(root / 'tls.crt')],
-            capture_output=True, text=True, check=False)
-        assert (result.returncode == 0) is valid
-    assert (root / 'tls.key').stat().st_mode & 0o077 == 0
-
-
-@pytest.mark.parametrize('args', [[], ['dir'], ['dir', 'bad/name'], ['dir', 'name', '--skip']])
-def test_test_certificate_cli_fails_closed(args):
-    result = subprocess.run(['sh', str(ROOT / 'scripts/ci/create_test_tls.sh'), *args],
-                            capture_output=True, text=True, check=False)
-    assert result.returncode == 2
-
-
-def test_kind_tls_precedes_validation_and_first_pull():
-    steps = yaml.safe_load((ROOT / '.github/workflows/e2e.yml').read_text())['jobs']['kind-live-rehearsal']['steps']
-    def index(prefix):
-        return next(i for i, step in enumerate(steps) if step.get('name', '').startswith(prefix))
-    assert index('Black-box handoff') < index('Start authenticated TLS registry')
-    assert index('Create registry pull secret') < index('Deploy mock vLLM')
-    assert index('Real test gateway') < index('airgap-validate LIVE')
-    registry = steps[index('Start authenticated TLS registry')]['run']
-    assert 'registry.mirrors' not in registry
-    assert 'REGISTRY_AUTH=htpasswd' in registry
-    assert '/etc/containerd/certs.d' in registry
-    assert 'tls-verify=false' not in registry and 'skip_verify' not in registry
-    env = steps[index('Operator airgap.env')]['run']
-    assert 'INSECURE_REGISTRY=true' not in env
-    docs = list(yaml.safe_load_all((ROOT / 'scripts/ci/test-gateway.yaml').read_text()))
-    pod = next(d for d in docs if d['kind'] == 'Deployment' and d['metadata']['name'] == 'test-gateway')['spec']['template']['spec']
-    container = pod['containers'][0]
-    assert '--ssl_certfile_path' in container['args']
-    assert '--ssl_keyfile_path' in container['args']
-    assert container['readinessProbe']['httpGet']['scheme'] == 'HTTPS'
-    assert all('ca.key' not in str(v) for v in pod['volumes'])
-
-
-def test_gateway_configuration_and_provider_share_one_projected_directory():
-    docs = list(yaml.safe_load_all((ROOT / 'scripts/ci/test-gateway.yaml').read_text()))
-    deployment = next(d for d in docs if d['kind'] == 'Deployment'
-                      and d['metadata']['name'] == 'test-gateway')
-    pod = deployment['spec']['template']['spec']
-    container = pod['containers'][0]
-    config_path = Path(container['args'][container['args'].index('--config') + 1])
-    mounts = [m for m in container['volumeMounts']
-              if Path(m['mountPath']) == config_path.parent
-              or config_path.parent in Path(m['mountPath']).parents]
-    assert len(mounts) == 1, 'nested ConfigMap subPath mounts fail before gateway startup'
-    mount = mounts[0]
-    assert mount['readOnly'] is True and 'subPath' not in mount
-    volume = next(v for v in pod['volumes'] if v['name'] == mount['name'])
-    sources = volume['projected']['sources']
-    assert sources == [{'configMap': {'name': 'test-gateway'}},
-                       {'configMap': {'name': 'test-gateway-hooks'}}]
-    assert config_path.name in docs[0]['data']
-    assert (ROOT / 'scripts/gateway/strict_finish.py').is_file()

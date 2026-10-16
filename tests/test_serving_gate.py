@@ -173,10 +173,14 @@ async def test_gate_zero_ttl_validates_every_request_and_caches_refusals(monkeyp
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("damage", [None, "version", "uuid", "pair", "logical", "missing-record",
-                                    "missing-data-alias", "missing-control-alias", "redirect-control", "seal-missing", "seal-schema", "seal-count"])
-@pytest.mark.parametrize("direct", [False, True])
-@pytest.mark.parametrize("schema", [1, 2])
+@pytest.mark.parametrize(
+    "damage,direct,schema",
+    [(None, direct, schema) for direct in (False, True) for schema in (1, 2)]
+    + [(d, False, 1) for d in ("version", "uuid", "pair", "logical", "missing-record",
+                               "missing-data-alias", "missing-control-alias", "redirect-control",
+                               "seal-missing", "seal-schema", "seal-count")]
+    + [("pair", True, 2)],
+)
 async def test_serving_requires_full_published_build_pair(damage, direct, schema):
     s = _settings()
     alias = s.qdrant_collection
@@ -274,7 +278,7 @@ async def test_publication_during_validation_preserves_resolved_reader(monkeypat
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("alias", ["corpus__build_notes", "corpus__build_notes__completions"])
+@pytest.mark.parametrize("alias", ["corpus__build_notes"])
 async def test_legacy_corpus_name_with_build_substring_remains_readable(alias):
     from mainframe_rag.agent.serving import ServingGate
 

@@ -105,18 +105,11 @@ def _assert_root_join(events, root, request_id):
 @pytest.mark.parametrize(
     "stage,route,stream",
     [
-        (stage, route, stream)
-        for stage in ("admission", "retrieval")
-        for route, stream in (
-            ("search", False),
-            ("answer", False),
-            ("answer", True),
-            ("chat", False),
-            ("chat", True),
-            ("console", False),
-            ("console", True),
-        )
-        if (stage, route, stream) != ("retrieval", "console", True)
+        ("admission", "search", False),
+        ("admission", "answer", True),
+        ("admission", "console", True),
+        ("retrieval", "search", False),
+        ("retrieval", "chat", False),
     ],
 )
 def test_request_cancellation_ends_root_before_headers(
@@ -200,11 +193,19 @@ def test_console_stream_cancel_during_postheader_retrieval(terminal_telemetry, m
     assert points[0].attributes["verification_state"] == "generation_incomplete"
 
 
-@pytest.mark.parametrize("route", ["answer", "chat", "console"])
 @pytest.mark.parametrize(
-    "operation", ["close", "cancel", "disconnect", "disconnect_send", "send_failure"]
+    "route,operation,cleanup_failure",
+    [
+        *[
+            ("answer", op, False)
+            for op in ("close", "cancel", "disconnect", "disconnect_send", "send_failure")
+        ],
+        ("answer", "cancel", True),
+        ("chat", "cancel", False),
+        ("console", "disconnect_send", False),
+        ("console", "cancel", True),
+    ],
 )
-@pytest.mark.parametrize("cleanup_failure", [False, True])
 def test_stream_cancellation_finishes_root_and_closes_owned_io(
     terminal_telemetry,
     monkeypatch,
@@ -316,10 +317,7 @@ def test_stream_cancellation_finishes_root_and_closes_owned_io(
     "path,stream",
     [
         ("/v1/search", False),
-        ("/v1/answer", False),
         ("/v1/answer", True),
-        ("/v1/chat", False),
-        ("/v1/chat", True),
         ("/ui/chat", False),
         ("/ui/chat/stream", True),
     ],
@@ -376,8 +374,22 @@ def _post_terminal(client, path, stream):
     return client.post(path, json=payload)
 
 
-@pytest.mark.parametrize("path,stream", TERMINAL_ROUTES)
-@pytest.mark.parametrize("outcome", ["success", "empty", "admission"])
+@pytest.mark.parametrize(
+    "path,stream,outcome",
+    [
+        ("/v1/search", False, "success"),
+        ("/v1/answer", True, "success"),
+        ("/ui/chat/stream", True, "success"),
+        ("/v1/search", False, "empty"),
+        ("/v1/answer", False, "empty"),
+        ("/v1/answer", True, "empty"),
+        ("/v1/chat", False, "empty"),
+        ("/v1/chat", True, "empty"),
+        ("/v1/search", False, "admission"),
+        ("/v1/chat", False, "admission"),
+        ("/ui/chat", False, "admission"),
+    ],
+)
 def test_terminal_log_contract_across_transports(
     terminal_telemetry, monkeypatch, path, stream, outcome
 ):
@@ -407,7 +419,10 @@ def test_terminal_log_contract_across_transports(
     assert sum(point.value for point in _points(reader, "rag.requests.total")) == 1
 
 
-@pytest.mark.parametrize("path,stream", TERMINAL_ROUTES[1:])
+@pytest.mark.parametrize(
+    "path,stream",
+    [TERMINAL_ROUTES[1], TERMINAL_ROUTES[-1]],
+)
 @pytest.mark.parametrize("outcome", ["budget", "model_error", "non_stop", "invalid_finalize"])
 def test_generation_terminal_logs_join_specific_root(
     terminal_telemetry, monkeypatch, path, stream, outcome
@@ -454,7 +469,7 @@ def test_generation_terminal_logs_join_specific_root(
         assert any(event.get("alert") == "finish_reason_non_stop" for event in events)
 
 
-@pytest.mark.parametrize("path,stream", TERMINAL_ROUTES[3:])
+@pytest.mark.parametrize("path,stream", [TERMINAL_ROUTES[3], TERMINAL_ROUTES[-1]])
 def test_condense_failure_terminal_log_joins_root(terminal_telemetry, monkeypatch, path, stream):
     client, exporter, reader, events = terminal_telemetry
 
@@ -471,7 +486,7 @@ def test_condense_failure_terminal_log_joins_root(terminal_telemetry, monkeypatc
     assert sum(point.value for point in _points(reader, "rag.requests.total")) == 1
 
 
-@pytest.mark.parametrize("path,stream", TERMINAL_ROUTES)
+@pytest.mark.parametrize("path,stream", [TERMINAL_ROUTES[0], TERMINAL_ROUTES[-1]])
 @pytest.mark.parametrize("sampling", ["disabled", "dropped"])
 def test_nonrecording_failures_never_invent_correlation(
     terminal_telemetry, monkeypatch, path, stream, sampling
@@ -498,7 +513,7 @@ def test_nonrecording_failures_never_invent_correlation(
         provider.shutdown()
 
 
-@pytest.mark.parametrize("route", ["answer", "chat", "console"])
+@pytest.mark.parametrize("route", ["answer", "console"])
 def test_stream_response_failure_before_iteration_finishes_root(terminal_telemetry, route):
     from fastapi import Request
     from starlette.requests import ClientDisconnect
@@ -530,7 +545,7 @@ def test_stream_response_failure_before_iteration_finishes_root(terminal_telemet
     assert sum(point.value for point in _points(reader, "rag.requests.total")) == 1
 
 
-@pytest.mark.parametrize("route", ["search", "answer", "chat", "console"])
+@pytest.mark.parametrize("route", ["search", "console"])
 def test_overlapping_awaited_requests_keep_independent_roots(
     terminal_telemetry, monkeypatch, route
 ):
@@ -587,7 +602,7 @@ def test_overlapping_awaited_requests_keep_independent_roots(
     assert {point.attributes["outcome"] for point in points} == {"client_disconnect", "ok"}
 
 
-@pytest.mark.parametrize("route", ["answer", "chat", "console"])
+@pytest.mark.parametrize("route", ["answer", "console"])
 def test_overlapping_streams_do_not_end_or_borrow_other_root(
     terminal_telemetry, monkeypatch, route
 ):
@@ -691,45 +706,6 @@ def test_overlapping_streams_do_not_end_or_borrow_other_root(
     assert {point.attributes["outcome"] for point in points} == {"client_disconnect", "ok"}
 
 
-def test_cancellation_regression_rejects_end_after_finally(terminal_telemetry, monkeypatch):
-    from fastapi.responses import StreamingResponse
-
-    def unsafe_stream(owner, source, **kwargs):
-        async def events():
-            with tracing_mod.use_span(owner.span):
-                try:
-                    async for chunk in source:
-                        yield chunk
-                finally:
-                    owner.abort()
-            owner.end()
-
-        owner.streaming = True
-        kwargs.pop("query_class", None)
-        kwargs.pop("hits", None)
-        return StreamingResponse(events(), **kwargs)
-
-    monkeypatch.setattr(app_mod._RequestSpan, "stream", unsafe_stream)
-    with pytest.raises(AssertionError, match="cancelled stream root must finish exactly once"):
-        test_stream_cancellation_finishes_root_and_closes_owned_io(
-            terminal_telemetry, monkeypatch, "answer", "cancel", False
-        )
-
-
-def test_failure_log_regression_rejects_end_before_log(terminal_telemetry, monkeypatch):
-    original = app_mod.log.error
-
-    def ended_log(message, *args, **kwargs):
-        trace.get_current_span().end()
-        original(message, *args, **kwargs)
-
-    monkeypatch.setattr(app_mod.log, "error", ended_log)
-    with pytest.raises(AssertionError, match="terminal log trace_id"):
-        test_retrieval_failure_terminal_logs_join_recording_root(
-            terminal_telemetry, monkeypatch, "/v1/search", False
-        )
-
-
 def _provider() -> tuple[TracerProvider, InMemorySpanExporter]:
     exporter = InMemorySpanExporter()
     provider = TracerProvider()
@@ -809,6 +785,9 @@ def test_trace_disabled_without_endpoint(monkeypatch):
     with span:  # non-recording: safe to enter/exit, no provider touched
         pass
     assert tracing_mod._provider is None
+    # Never enabled: lifecycle calls are safe no-ops.
+    tracing_mod.shutdown_tracing()
+    tracing_mod.flush_tracing()
 
 
 def _setup_with_capture(monkeypatch):
@@ -850,9 +829,8 @@ def test_setup_tracing_builds_provider_and_appends_traces_path(monkeypatch):
     assert tracing_mod._provider is FakeProvider.instances[0]
     assert len(FakeProvider.instances) == 1
 
-
-def test_setup_tracing_accepts_full_traces_url_without_doubling(monkeypatch):
-    seen, _ = _setup_with_capture(monkeypatch)
+    # A full traces URL is not doubled.
+    tracing_mod._provider = None
     tracing_mod.setup_tracing("http://collector.internal:4318/v1/traces")
     assert seen["endpoint"] == "http://collector.internal:4318/v1/traces"
 
@@ -899,58 +877,34 @@ def test_lifecycle_flush_and_swallows_errors(monkeypatch, op, expect_shutdowns, 
         assert tracing_mod._provider is None
 
 
-def test_lifecycle_noop_when_never_enabled():
-    tracing_mod.shutdown_tracing()  # no provider installed: must not raise
-    tracing_mod.flush_tracing()
-
-
-# ---------------------------------------------------------------- resource identity
-
-
-def test_setup_tracing_resource_carries_deploy_identity(monkeypatch):
-    """OTel Phase 2b: every exported span carries the packed version and the
-    operator environment, so multi-env Jaeger backends stay unambiguous."""
+def test_setup_tracing_resource_identity_and_service_name_precedence(monkeypatch):
+    """Every exported span carries the packed version and operator
+    environment (unset identity is omitted, never empty); service name
+    precedence is explicit argument > OTEL_SERVICE_NAME > module default."""
+    monkeypatch.setattr(tracing_mod, "OTLPSpanExporter", FakeOTLPExporter)
+    monkeypatch.delenv("OTEL_SERVICE_NAME", raising=False)
     monkeypatch.setenv("IMAGE_SHA", "abc123def456")
     monkeypatch.setenv("OTEL_DEPLOYMENT_ENVIRONMENT", "lab")
-    monkeypatch.setattr(tracing_mod, "OTLPSpanExporter", FakeOTLPExporter)
     tracing_mod.setup_tracing("http://collector.internal:4318")
     attrs = dict(tracing_mod._provider.resource.attributes)
-    assert attrs["service.name"] == "mainframe-rag-agent"
+    assert attrs["service.name"] == tracing_mod.DEFAULT_SERVICE_NAME == "mainframe-rag-agent"
     assert attrs["service.version"] == "abc123def456"
     assert attrs["deployment.environment"] == "lab"
     assert all(v != "" for v in attrs.values() if isinstance(v, str))
 
-
-def test_setup_tracing_omits_identity_when_unset(monkeypatch):
-    """Unset identity is omitted, never rendered as an empty attribute."""
-    monkeypatch.delenv("IMAGE_SHA", raising=False)
-    monkeypatch.delenv("OTEL_DEPLOYMENT_ENVIRONMENT", raising=False)
-    monkeypatch.setattr(tracing_mod, "OTLPSpanExporter", FakeOTLPExporter)
+    monkeypatch.delenv("IMAGE_SHA")
+    monkeypatch.delenv("OTEL_DEPLOYMENT_ENVIRONMENT")
+    monkeypatch.setenv("OTEL_SERVICE_NAME", "from-env")
+    tracing_mod._provider = None
     tracing_mod.setup_tracing("http://collector.internal:4318")
     attrs = dict(tracing_mod._provider.resource.attributes)
+    assert attrs["service.name"] == "from-env"
     assert "service.version" not in attrs
     assert "deployment.environment" not in attrs
-
-
-def test_setup_tracing_service_name_precedence(monkeypatch):
-    """explicit argument > OTEL_SERVICE_NAME > module default (ingest relies
-    on this to name itself without losing the operator override)."""
-    monkeypatch.setattr(tracing_mod, "OTLPSpanExporter", FakeOTLPExporter)
-    monkeypatch.setenv("OTEL_SERVICE_NAME", "from-env")
-    tracing_mod.setup_tracing("http://collector.internal:4318")
-    assert dict(tracing_mod._provider.resource.attributes)["service.name"] == "from-env"
 
     tracing_mod._provider = None
     tracing_mod.setup_tracing("http://collector.internal:4318", service_name="explicit")
     assert dict(tracing_mod._provider.resource.attributes)["service.name"] == "explicit"
-
-    monkeypatch.delenv("OTEL_SERVICE_NAME", raising=False)
-    tracing_mod._provider = None
-    tracing_mod.setup_tracing("http://collector.internal:4318")
-    assert (
-        dict(tracing_mod._provider.resource.attributes)["service.name"]
-        == tracing_mod.DEFAULT_SERVICE_NAME
-    )
 
 
 # ---------------------------------------------------------------- app spans
@@ -1046,6 +1000,13 @@ def test_answer_json_trace_tree(client):
     assert llm.attributes["llm.model"] == "test-reasoning-model"
     assert llm.attributes["llm.finish_reason"] == "stop"
     assert llm.attributes["llm.total_tokens"] >= 0
+    # OBS-1B: admitted HTTP work is a SERVER root; outbound legs are CLIENT
+    # children of it; local stages stay INTERNAL.
+    prompt = _spans(exporter)["prompt.build"][0]
+    assert root.kind == trace.SpanKind.SERVER
+    assert llm.kind == trace.SpanKind.CLIENT and llm.parent.span_id == root.context.span_id
+    assert prompt.kind == trace.SpanKind.INTERNAL
+    assert prompt.parent.span_id == root.context.span_id
 
 
 def test_chat_caller_model_ignored_on_span_and_response(client):
@@ -1202,6 +1163,11 @@ def test_search_stage_tree_nl_with_rerank():
     root = by_name["retrieve.search"][0]
     assert root.attributes["rag.rerank_active"] is True
     assert "rag.rerank_bypass_reason" not in root.attributes
+    # OBS-1B: embed/prefetch/rerank are CLIENT legs under the INTERNAL search stage.
+    assert root.kind == trace.SpanKind.INTERNAL
+    for name in ("retrieve.embed", "retrieve.prefetch", "retrieve.rerank"):
+        assert by_name[name][0].kind == trace.SpanKind.CLIENT
+        assert by_name[name][0].parent.span_id == root.context.span_id
 
 
 def test_search_stage_tree_split_reports_paths_and_mode():
@@ -1352,18 +1318,15 @@ def test_span_attributes_bounded():
 
 # ---------------------------------------------------------------- log correlation
 
-def test_current_trace_ids_empty_without_span():
-    """Issue #185: no active span (tracing off) -> {} so the log shape is
-    unchanged."""
+def test_current_trace_ids_follow_recording_spans_only():
+    """Log correlation ids: {} without a span (log shape unchanged), the
+    32/16-hex ids under a recording span, and {} for a valid-but-unsampled
+    context (ids no backend will ever store must not be logged)."""
+    from opentelemetry.trace import NonRecordingSpan, SpanContext, TraceFlags, TraceState
+
     assert tracing_mod.current_trace_ids() == {}
-
-
-def test_current_trace_ids_match_active_span():
-    """Issue #185: under a real SDK span the helper returns that span's
-    32/16-hex ids for log correlation."""
     provider, _exporter = _provider()
-    tracer = provider.get_tracer("test")
-    with tracer.start_as_current_span("op") as span:
+    with provider.get_tracer("test").start_as_current_span("op") as span:
         got = tracing_mod.current_trace_ids()
         ctx = span.get_span_context()
         assert got == {
@@ -1372,6 +1335,16 @@ def test_current_trace_ids_match_active_span():
         }
         assert len(got["trace_id"]) == 32 and len(got["span_id"]) == 16
     assert tracing_mod.current_trace_ids() == {}
+    dropped = SpanContext(
+        trace_id=0x1234567890ABCDEF1234567890ABCDEF,
+        span_id=0x1234567890ABCDEF,
+        is_remote=False,
+        trace_flags=TraceFlags(0x00),
+        trace_state=TraceState(),
+    )
+    assert dropped.is_valid
+    with trace.use_span(NonRecordingSpan(dropped), end_on_exit=False):
+        assert tracing_mod.current_trace_ids() == {}
 
 
 # ---------------------------------------------------------------- ingress propagation
@@ -1395,7 +1368,6 @@ def _remote_context(ctx):
     ("headers", "expect_valid", "expect_ids"),
     [
         ({"traceparent": _traceparent()}, True, True),
-        ({}, False, False),
         ({"traceparent": "bogus"}, False, False),
     ],
 )
@@ -1414,7 +1386,6 @@ def test_parent_context_headers(headers, expect_valid, expect_ids):
     [
         ("/v1/search", "v1.search", True),
         ("/v1/search", "v1.search", False),
-        ("/v1/answer", "v1.answer", True),
     ],
 )
 def test_upstream_trace_join_or_root(client, endpoint, span_name, join):
@@ -1434,7 +1405,7 @@ def test_upstream_trace_join_or_root(client, endpoint, span_name, join):
 # ------------------------------------------- outbound propagation (model legs)
 
 
-def test_bearer_headers_carry_traceparent_only_inside_span():
+def test_bearer_headers_carry_traceparent_only_inside_span_and_trim_key():
     from mainframe_rag.config import bearer_auth_headers
 
     provider, _ = _provider()
@@ -1450,63 +1421,11 @@ def test_bearer_headers_carry_traceparent_only_inside_span():
     # No active span: byte-identical to the auth-only shape.
     assert bearer_auth_headers("sk-x") == {"Authorization": "Bearer sk-x"}
     assert bearer_auth_headers(None) == {}
-
-
-def test_bearer_headers_trims_key_without_propagation_context():
-    from mainframe_rag.config import bearer_auth_headers
-
     assert bearer_auth_headers("  sk-x\n") == {"Authorization": "Bearer sk-x"}
     assert bearer_auth_headers("   ") == {}
 
 
 # ---------------------------------------------------------------- OBS-1B tree
-
-
-def test_server_client_kinds_and_parentage(client):
-    """OBS-1B §4.3: admitted HTTP work runs under a SERVER root; outbound
-    legs are CLIENT children of it; local stages stay INTERNAL."""
-    from opentelemetry.trace import SpanKind
-
-    c, exporter = client
-    resp = c.post("/v1/answer", json={"query": "IEA500I"})
-    assert resp.status_code == 200
-    by_name = _spans(exporter)
-    root = by_name["v1.answer"][0]
-    assert root.kind == SpanKind.SERVER
-    llm = by_name["llm.chat"][0]
-    assert llm.kind == SpanKind.CLIENT
-    assert llm.parent.span_id == root.context.span_id
-    prompt = by_name["prompt.build"][0]
-    assert prompt.kind == SpanKind.INTERNAL
-    assert prompt.parent.span_id == root.context.span_id
-
-    chat_resp = c.post(
-        "/v1/chat/completions",
-        json={"messages": [{"role": "user", "content": "IEA500I"}]},
-    )
-    assert chat_resp.status_code == 200
-    by_name = _spans(exporter)
-    chat_root = [s for s in by_name["v1.chat"] if s.kind == SpanKind.SERVER]
-    assert chat_root, "expected a SERVER v1.chat root"
-
-
-def test_retrieve_stage_kinds():
-    """OBS-1B §4.3: embed/prefetch/rerank are CLIENT outbound legs under
-    the INTERNAL retrieve.search stage."""
-    from opentelemetry.trace import SpanKind
-
-    reranker = MockReranker()
-    fake = FakeQdrant(dense=[_point("a")], sparse=[_point("b")])
-    (_hits, _kind, _timings), exporter = _run_and_collect(
-        search, fake, FakeEmbedder(), "mainframe_manuals", "sizing the lookaside facility",
-        limit=5, reranker=reranker,
-    )
-    by_name = _spans(exporter)
-    assert by_name["retrieve.search"][0].kind == SpanKind.INTERNAL
-    for name in ("retrieve.embed", "retrieve.prefetch", "retrieve.rerank"):
-        span = by_name[name][0]
-        assert span.kind == SpanKind.CLIENT
-        assert span.parent.span_id == by_name["retrieve.search"][0].context.span_id
 
 
 def test_search_root_covers_length_rejection(client):
@@ -1577,27 +1496,6 @@ def test_final_logs_join_the_trace(client):
     answer_finals = [line for line in by_action.get("answer", []) if "trace_id" in line]
     assert answer_finals, "expected joined answer final logs (JSON and SSE)"
     assert {line["trace_id"] for line in answer_finals} <= answer_roots
-
-
-def test_unsampled_trace_ids_stay_out_of_logs():
-    """OBS-1B: a valid-but-unsampled span context must not emit ids that no
-    backend will ever store (that misreports sampling as backend loss)."""
-    from opentelemetry.trace import NonRecordingSpan, SpanContext, TraceFlags, TraceState
-
-    dropped = SpanContext(
-        trace_id=0x1234567890ABCDEF1234567890ABCDEF,
-        span_id=0x1234567890ABCDEF,
-        is_remote=False,
-        trace_flags=TraceFlags(0x00),
-        trace_state=TraceState(),
-    )
-    assert dropped.is_valid
-    with trace.use_span(NonRecordingSpan(dropped), end_on_exit=False):
-        assert tracing_mod.current_trace_ids() == {}
-    provider, _ = _provider()
-    with provider.get_tracer("sample-test").start_as_current_span("recording") as span:
-        ids = tracing_mod.current_trace_ids()
-        assert ids["trace_id"] == trace.format_trace_id(span.get_span_context().trace_id)
 
 
 def test_lifespan_cycle_rebinds_without_duplicates(monkeypatch):

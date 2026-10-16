@@ -2,6 +2,7 @@
 
 import inspect
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -23,33 +24,27 @@ _INDEXED_FIELDS = {
 }
 
 
-def test_inventory_survives_torn_final_line(tmp_path):
+def test_inventory_is_crash_safe_latest_wins_and_typed(tmp_path):
     progress = tmp_path / "inventory.jsonl"
+    append_record(progress, InventoryRecord(path="a.pdf", sha256="1" * 64, status="dry", doc_id="A"))
     append_record(progress, InventoryRecord(path="a.pdf", sha256="1" * 64, status="upserted", doc_id="A"))
-    with open(progress, "a") as f:  # crash mid-write: torn final line
-        f.write('{"path": "b.pdf", "sha256": "22')
-    assert set(load_inventory(progress)) == {"a.pdf"}
-
-
-def test_inventory_latest_record_wins(tmp_path):
-    progress = tmp_path / "inventory.jsonl"
-    append_record(progress, InventoryRecord(path="a.pdf", sha256="1" * 64, status="dry"))
-    append_record(progress, InventoryRecord(path="a.pdf", sha256="1" * 64, status="upserted"))
-    assert load_inventory(progress)["a.pdf"].status == "upserted"
-
-
-def test_inventory_error_record_is_typed(tmp_path):
-    progress = tmp_path / "inventory.jsonl"
-    append_record(
-        progress,
-        InventoryRecord(
-            path="bad.pdf", sha256="", status="error",
-            error="cannot open broken document", error_type="RuntimeError",
-        ),
+    record = InventoryRecord(
+        path="book.pdf", sha256="f" * 64, doc_id="SC14-0000-00", pages=50, chunks=12,
+        status="error", error="Corrupt header", error_type="ValueError",
     )
-    rec = json.loads(progress.read_text().splitlines()[-1])
-    assert rec["error_type"] == "RuntimeError"
-    assert load_inventory(progress)["bad.pdf"].error_type == "RuntimeError"
+    append_record(progress, record)
+    assert json.loads(progress.read_text().splitlines()[-1])["error_type"] == "ValueError"
+    # Torn final line and corrupt/foreign lines are skipped, never fatal.
+    with open(progress, "a", encoding="utf-8") as f:
+        f.write('{"path": "b.pdf", "sha256": "22')
+        f.write("\n\nnot a json object\n")
+        f.write('{"invalid": "schema without required fields"}\n')
+        f.write('{"path": "incomplete.pdf", "sha256"\n')
+    records = load_inventory(progress)
+    assert set(records) == {"a.pdf", "book.pdf"}
+    assert records["a.pdf"].status == "upserted", "latest record wins"
+    assert records["book.pdf"].error_type == "ValueError"
+    assert records["book.pdf"].finished_at > 0
 
 
 def test_batch_size_stays_in_bounds():
@@ -93,27 +88,21 @@ def test_upsert_is_batched():
     assert client.upsert_sizes == [16, 16, 8]
 
 
-def test_existing_collection_still_gets_payload_indexes():
-    """Indexes-before-load holds on pre-existing collections: a collection
-    created before the index set existed must be brought up to date, not
-    scanned."""
-    client = RecordingClient(exists=True, vector_size=768)
-    ensure_collection(client, _settings(768))
-    assert {name for name, _ in client.indexes} >= _INDEXED_FIELDS
-
-
-def test_every_retrieve_filter_field_is_indexed():
-    """Cross-layer guard: any payload field retrieve filters on must be in the
-    payload-index set, or the filter silently degrades to a scan."""
+def test_payload_indexes_precede_load_and_cover_every_filter_field():
+    """Indexes-before-load holds on pre-existing collections (a collection
+    created before the index set existed is brought up to date, not scanned),
+    and any payload field retrieve filters on must be indexed or the filter
+    silently degrades to a scan."""
     from mainframe_rag.retrieve import filters as filters_mod
+
+    existing = RecordingClient(exists=True, vector_size=768)
+    ensure_collection(existing, _settings(768))
+    assert {name for name, _ in existing.indexes} >= _INDEXED_FIELDS
 
     client = RecordingClient(exists=False)
     ensure_collection(client, _settings(768))
     indexed = {name for name, _ in client.indexes}
-
-    filter_keys = set()
-    for m in __import__("re").finditer(r'key="(\w+)"', inspect.getsource(filters_mod)):
-        filter_keys.add(m.group(1))
+    filter_keys = set(re.findall(r'key="(\w+)"', inspect.getsource(filters_mod)))
     assert filter_keys, "no filter keys found — inspect.getsource broke"
     assert filter_keys <= indexed, f"unindexed filter fields: {filter_keys - indexed}"
 
@@ -161,33 +150,3 @@ def test_models_ipc_pickle_round_trip():
         restored = pickle.loads(pickle.dumps(obj))
         assert restored == obj
         assert type(restored) is type(obj)
-
-
-def test_inventory_json_pin_and_corrupt_line_handling(tmp_path):
-    progress = tmp_path / "inventory.jsonl"
-    record = InventoryRecord(
-        path="book.pdf",
-        sha256="f" * 64,
-        doc_id="SC14-0000-00",
-        pages=50,
-        chunks=12,
-        status="error",
-        error="Corrupt header",
-        error_type="ValueError",
-    )
-    append_record(progress, record)
-
-    # Corrupt lines and invalid JSON
-    with open(progress, "a", encoding="utf-8") as f:
-        f.write("\n")
-        f.write("not a json object\n")
-        f.write('{"invalid": "schema without required fields"}\n')
-        f.write('{"path": "incomplete.pdf", "sha256"\n')
-
-    records = load_inventory(progress)
-    assert len(records) == 1
-    loaded = records["book.pdf"]
-    assert loaded.doc_id == "SC14-0000-00"
-    assert loaded.status == "error"
-    assert loaded.error_type == "ValueError"
-    assert loaded.finished_at > 0

@@ -401,7 +401,7 @@ releases continue to use their own bundled scripts.
 
 | Retired comparison or implementation pin | Retained behavior owner |
 |---|---|
-| Agent inventory and base parity | `test_agent_inventory_matches`, `test_base_contract_with_independent_controls`: inventory, complete typed environment, credentials, image, probes, ports, resources and defaults |
+| Agent inventory and base parity | `test_base_contract_with_independent_controls`: inventory, complete typed environment, credentials, image, probes, ports, resources and defaults |
 | Gateway keys, pull Secret, service name, nondefault namespace/registry/rerank | Corresponding chart contract cases plus `test_map_values.py` and deploy/ingest producer round trips |
 | Gateway CA patch structure and old/new parity | `test_gateway_ca.py`: rendered app-only mounts, excluded OAuth/Jaeger containers, bad/absent names, API/key preflight and operator precedence |
 | OAuth overlay and Route parity | `test_route_oauth_contract`: redirect reference, sidecar args, Secret volumes, ports, certificate annotation, reencrypt policy, timeout and off state |

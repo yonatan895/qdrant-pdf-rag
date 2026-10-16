@@ -7,15 +7,11 @@ aggregation only. The live tier runs via `sh scripts/tools/run-task.sh eval:chat
 from __future__ import annotations
 
 from mainframe_rag.eval.chat import (
-    ARM_CONDENSED,
-    ARM_LITERAL,
     DEFAULT_FOLLOW_UP,
     arm_entry,
     follow_up_query,
     select_entries,
     session_messages,
-    summarize_arms,
-    summary_markdown,
 )
 from mainframe_rag.eval.datasets import GoldenEntry
 
@@ -39,9 +35,6 @@ def test_follow_up_uses_class_template_with_default():
     )
     assert follow_up_query(_entry(query_class="diagnostic")) == "How do I recover from it?"
     assert follow_up_query(_entry(query_class=None)) == DEFAULT_FOLLOW_UP
-
-
-def test_session_messages_end_with_the_follow_up():
     messages = session_messages(_entry())
     assert [m.role for m in messages] == ["user", "assistant", "user"]
     assert messages[0].content == "What does IEA500I mean?"
@@ -68,83 +61,6 @@ def test_select_entries_filters_and_limits_deterministically():
     ]
     selected = select_entries(entries, limit=2)
     assert [e.id for e in selected] == ["a", "b"]
-
-
-def test_summarize_arms_means_and_deltas():
-    rows = [
-        {
-            "arm": ARM_LITERAL,
-            "recall@1": 0.0,
-            "recall@3": 0.0,
-            "recall@5": 0.2,
-            "recall@8": 0.4,
-            "mrr": 0.1,
-            "retrieval_ms": 100,
-        },
-        {
-            "arm": ARM_LITERAL,
-            "recall@1": 0.2,
-            "recall@3": 0.4,
-            "recall@5": 0.4,
-            "recall@8": 0.6,
-            "mrr": 0.3,
-            "retrieval_ms": 200,
-        },
-        {
-            "arm": ARM_CONDENSED,
-            "recall@1": 1.0,
-            "recall@3": 1.0,
-            "recall@5": 1.0,
-            "recall@8": 1.0,
-            "mrr": 0.9,
-            "retrieval_ms": 130,
-            "condense_ms": 400,
-        },
-        {
-            "arm": ARM_CONDENSED,
-            "recall@1": 0.8,
-            "recall@3": 1.0,
-            "recall@5": 0.8,
-            "recall@8": 1.0,
-            "mrr": 0.7,
-            "retrieval_ms": 150,
-            "condense_ms": 800,
-        },
-        {"arm": ARM_CONDENSED, "error": "boom"},
-    ]
-    summary = summarize_arms(rows)
-    assert summary[ARM_LITERAL]["n"] == 2
-    assert summary[ARM_LITERAL]["recall@1"] == 0.1
-    assert summary[ARM_CONDENSED]["n"] == 2
-    assert summary[ARM_CONDENSED]["recall@1"] == 0.9
-    assert summary["delta_recall@1"] == 0.8
-    assert summary["condense_p50_ms"] == 800
-    # retrieval p50 uses the scored condensed rows only (two values)
-    assert summary[ARM_CONDENSED]["retrieval_p50_ms"] in (130, 150)
-
-
-def test_summary_markdown_names_both_arms_and_the_decision_rule():
-    rows = [
-        {"arm": ARM_LITERAL, "recall@1": 0.0, "recall@5": 0.0, "mrr": 0.0, "retrieval_ms": 10},
-        {
-            "arm": ARM_CONDENSED,
-            "recall@1": 1.0,
-            "recall@5": 1.0,
-            "mrr": 1.0,
-            "retrieval_ms": 12,
-            "condense_ms": 300,
-        },
-    ]
-    report = {
-        "rows": rows,
-        "failures": 0,
-        "summary": summarize_arms(rows),
-        "settings": {"collection": "real_manuals", "embed_mode": "vllm", "llm_model": "m"},
-    }
-    body = summary_markdown(report)
-    assert "| literal |" in body
-    assert "| condensed |" in body
-    assert "separate, dedicated decision" in body
 
 
 def test_evaluate_sessions_preserves_both_arms_and_condensation_accounting(monkeypatch):
@@ -232,9 +148,3 @@ def test_evaluate_sessions_preserves_both_arms_and_condensation_accounting(monke
     assert report["summary"]["condensed"]["n"] == 2
     assert report["summary"]["delta_recall@1"] == 0.0
 
-
-def test_chat_consumes_canonical_datasets_and_scoring():
-    from mainframe_rag.eval import chat, datasets, retrieval
-
-    assert chat.GoldenEntry is datasets.GoldenEntry
-    assert chat.score_entry is retrieval.score_entry

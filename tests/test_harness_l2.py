@@ -13,25 +13,20 @@ import pytest
 
 from mainframe_rag.eval.answer_tier import (
     _AlertCapture,
-    _by_complexity_truncation,
     apply_l2_measurements,
     gate_l2,
     summarize_l2,
     syntax_check,
 )
 from mainframe_rag.eval.judging import (
-    JUDGE_MAX_EVIDENCE_CHARS,
     JUDGE_REASONING_EFFORT,
     JudgeError,
-    citation_to_hit,
     cited_doc_ids,
-    evidence_for_citations,
     judge_chat,
     judge_messages,
     parse_judge_label,
     parse_relevance_label,
     precision_recall,
-    relevance_messages,
 )
 
 
@@ -47,14 +42,6 @@ HITS = [
 
 # ---------------------------------------------------------------- citation mapping
 
-def test_citation_to_hit_exact_cite_match():
-    assert citation_to_hit("[2] SC34-6428-08 CICS Sys Def, p. 55", HITS) == HITS[1]
-
-
-def test_citation_to_hit_none_when_absent():
-    assert citation_to_hit("[9] SA23-1385-70 JCL, p. 3", HITS) is None
-
-
 def test_cited_doc_ids_maps_and_records_unmatched():
     docs, unmatched = cited_doc_ids(
         ["[1] SA23-1380-70 z/OS MVS Init Tuning Ref, p. 100",
@@ -66,16 +53,6 @@ def test_cited_doc_ids_maps_and_records_unmatched():
 
 
 # ---------------------------------------------------------------- precision / recall
-
-def test_precision_recall_full_overlap():
-    assert precision_recall({"A", "B"}, {"A", "B"}) == (1.0, 1.0)
-
-
-def test_precision_recall_partial():
-    p, r = precision_recall({"A", "X", "Y"}, {"A", "B"})
-    assert p == pytest.approx(1 / 3)
-    assert r == 0.5
-
 
 def test_precision_recall_no_citations_zero_recall_not_none():
     # Zero validated citations on an answer row is a recall miss, not a
@@ -89,15 +66,6 @@ def test_precision_recall_no_gold_is_none():
 
 
 # ---------------------------------------------------------------- judge
-
-def test_parse_judge_label_plain_json():
-    assert parse_judge_label('{"label": "entailed"}') == "entailed"
-
-
-def test_parse_judge_label_fenced_with_prose():
-    reply = 'The judgment:\n```json\n{"label": "contradiction"}\n```\nDone.'
-    assert parse_judge_label(reply) == "contradiction"
-
 
 def test_run_l2_stays_on_server_default_temperature(monkeypatch):
     """Issue #596: run_l2 must send temperature=None (server default) — its
@@ -163,16 +131,6 @@ def test_run_l2_stays_on_server_default_temperature(monkeypatch):
     assert sent == [None]
 
 
-def test_parse_judge_label_unknown_label_fails_closed():
-    with pytest.raises(JudgeError):
-        parse_judge_label('{"label": "mostly_true"}')
-
-
-def test_parse_judge_label_garbage_fails_closed():
-    with pytest.raises(JudgeError):
-        parse_judge_label("I think the answer is supported.")
-
-
 def test_judge_messages_never_contain_citation_markers():
     # The agent's validator owns citation semantics; the judge sees only the
     # evidence text and the answer body. No bracket-index citation marker may
@@ -206,49 +164,9 @@ def test_judge_chat_pins_temperature_and_reasoning_effort():
     assert JUDGE_REASONING_EFFORT == "low"
 
 
-def test_evidence_bounded_for_judge_prompt():
-    hits = [_hit(f"c{i}", f"D{i}", "x" * 4000) for i in range(4)]
-    evidence, unmapped = evidence_for_citations([f"[{i}] c{i}" for i in range(4)], hits)
-    assert len(evidence) <= JUDGE_MAX_EVIDENCE_CHARS + 40
-    assert unmapped == []
-
-
 # ---------------------------------------------------------------- relevance judge
 
-def test_parse_relevance_label_plain_and_fenced():
-    assert parse_relevance_label('{"label": "relevant"}') == "relevant"
-    assert parse_relevance_label('```json\n{"label": "irrelevant"}\n```') == "irrelevant"
-
-
-def test_parse_relevance_label_fails_closed_on_unknown():
-    with pytest.raises(JudgeError):
-        parse_relevance_label('{"label": "mostly_right"}')
-    with pytest.raises(JudgeError):
-        parse_relevance_label("Looks relevant to me.")
-
-
-def test_relevance_messages_see_question_and_answer_only():
-    msgs = relevance_messages("What is LFAREA?", "Set LFAREA=(1M).")
-    assert "What is LFAREA?" in msgs[1].content
-    assert "Set LFAREA=(1M)." in msgs[1].content
-    assert all(re.search(r"\[\d+\]", m.content) is None for m in msgs)
-    assert msgs[0].role == "system" and msgs[1].role == "user"
-    assert "irrelevant" in msgs[0].content
-
-
 # ---------------------------------------------------------------- syntax gold
-
-def test_syntax_check_matches_body():
-    assert syntax_check(r"(?i)\bIEASYSxx\b", "Add LFAREA to IEASYSxx.", None) is True
-
-
-def test_syntax_check_matches_script():
-    assert syntax_check(r"(?m)^\s*//", "Here is the JCL:", "//DD1 DD DSN=X") is True
-
-
-def test_syntax_check_miss_is_false_not_error():
-    assert syntax_check(r"\)REQ", "A plain prose answer.", None) is False
-
 
 def test_syntax_check_invalid_pattern_fails_closed():
     with pytest.raises(JudgeError):
@@ -302,22 +220,6 @@ def test_apply_fail_closed_on_unmatched_citation():
     assert row["unmatched_citations"] == ["[2] GC34-6442-07 CICS, p. 9"]
 
 
-def test_apply_all_citations_mapped_keeps_pass():
-    row = _llm_row(citations=["[2] SC34-6428-08 CICS Sys Def, p. 55"])
-    apply_l2_measurements(row, _entry(gold=["SC34-6428-08"]), HITS, alerts={})
-    assert row["verdict"] == "pass"
-    assert row["citation_precision"] == 1.0 and row["citation_recall"] == 1.0
-    assert row["unmatched_citations"] == []
-
-
-def test_apply_zero_hits_path_skips_unmatched_fail():
-    # The canned zero-hits message has no citations and no model text; the
-    # answer-tier verdict already fired — no join to break.
-    row = _llm_row(path="zero_hits", citations=[], request_id="abc")
-    apply_l2_measurements(row, _entry(gold=["SA23-1380-70"]), HITS, alerts={})
-    assert row["verdict"] == "pass"
-
-
 def test_apply_missing_request_id_fails_closed():
     # A silent truncated=false on a missing join key would undercount the
     # truncation story — the row must fail instead.
@@ -328,26 +230,12 @@ def test_apply_missing_request_id_fails_closed():
     assert any("truncation unverifiable" in f for f in row["failures"])
 
 
-def test_apply_truncation_join():
-    row = _llm_row(request_id="abc")
-    apply_l2_measurements(row, _entry(gold=["SA23-1380-70"]), HITS, alerts={"abc": "length"})
-    assert row["truncated"] is True
-    assert row["verdict"] == "pass"
-
-
 def test_apply_syntax_miss_fails_row():
     row = _llm_row(answer="prose without the construct")
     apply_l2_measurements(row, _entry(gold=["SA23-1380-70"], pattern=r"\)REQ"), HITS, alerts={})
     assert row["syntax_ok"] is False
     assert row["verdict"] == "fail"
     assert any("syntax pattern missed" in f for f in row["failures"])
-
-
-def test_apply_abstain_row_gets_no_precision():
-    row = _llm_row(expected_behavior="abstain", query_class="negative", citations=[])
-    apply_l2_measurements(row, _entry(behavior="abstain", gold=[]), HITS, alerts={})
-    assert "citation_precision" not in row
-    assert row["verdict"] == "pass"
 
 
 # ---------------------------------------------------------------- summarize + gate
@@ -379,38 +267,6 @@ def test_summarize_rates_and_structural_counts():
     assert m["syntax_compliance"] == 1.0
 
 
-def test_summarize_carries_state_histogram_and_mismatches():
-    """Issue #365 acceptance shape: served states, opt-in expected-state
-    mismatches, and per-class claim support are report-only slices; rows
-    without the opt-in field never count as mismatches."""
-    rows = [
-        _row("A", query_class="syntax", verification_state="accepted",
-             expected_verification_state="accepted", judge_label="entailed"),
-        _row("B", query_class="version", verification_state="unverified_draft",
-             expected_verification_state="accepted", judge_label="neutral"),
-        _row("C", query_class="negative", expected_behavior="abstain",
-             verification_state="insufficient_evidence"),
-        _row("D", query_class="diagnostic", verification_state="accepted",
-             judge_label="entailed"),
-    ]
-    m = summarize_l2(rows)
-    assert m["by_verification_state"] == {
-        "accepted": 2, "insufficient_evidence": 1, "unverified_draft": 1,
-    }
-    assert m["state_mismatches"] == 1
-    assert m["faithfulness_by_class"]["syntax"]["entailed"] == 1.0
-    assert m["faithfulness_by_class"]["version"]["neutral"] == 1.0
-    assert m["faithfulness_by_class"]["negative"]["judged"] == 0
-
-
-def test_summarize_empty_is_none_not_crash():
-    m = summarize_l2([_row("A", path="zero_hits", citations=[])])
-    assert m["grounded_rate"] is None
-    assert m["citation_precision"] is None
-    assert m["faithfulness"]["entailed"] is None
-    assert m["syntax_compliance"] is None
-
-
 def test_gate_passes_on_rates_and_holds_on_fails():
     good = summarize_l2([_row("A", judge_label="entailed")])
     assert gate_l2(good) == ("pass", [])
@@ -430,54 +286,6 @@ def test_gate_holds_on_judge_error_alone():
     assert any("judge" in r for r in reasons)
 
 
-def test_summarize_relevance_block():
-    m = summarize_l2([
-        _row("A", relevance_label="relevant"),
-        _row("B", relevance_label="partial"),
-    ])
-    assert m["relevance"]["judged"] == 2
-    assert m["relevance"]["relevant"] == 0.5
-    assert m["relevance"]["partial"] == 0.5
-    assert m["relevance"]["irrelevant"] == 0.0
-
-
-def test_summarize_grounded_rate_excludes_inferred_citations():
-    # Issue #269: bracket-mapped cites are surfaced but never "grounded".
-    m = summarize_l2([
-        _row("A"),
-        _row("B", citations=["[1] c"], citations_inferred=True),
-    ])
-    assert m["grounded_rate"] == 0.5
-    assert m["inferred_citations"] == 1
-
-
-def test_summarize_answer_completeness_over_gold_rows():
-    # Issue #305: the gate is gold in the fetched pool; complete means the
-    # validated citations cover every expected doc (recall 1.0). Rows without
-    # the join stay out of the denominator.
-    m = summarize_l2([
-        _row("A", gold_retrieved=True, citation_recall=1.0),
-        _row("B", gold_retrieved=True, citation_recall=0.5),
-        _row("C", gold_retrieved=False, citation_recall=0.0),
-        _row("D"),  # no pool join at all
-    ])
-    assert m["answer_completeness_n"] == 2
-    assert m["answer_completeness"] == 0.5
-
-
-def test_summarize_answer_completeness_none_without_pool_join():
-    m = summarize_l2([_row("A")])
-    assert m["answer_completeness_n"] == 0
-    assert m["answer_completeness"] is None
-
-
-def test_gate_holds_on_relevance_judge_error():
-    m = summarize_l2([_row("A", relevance_error="JudgeError: unparseable")])
-    verdict, reasons = gate_l2(m)
-    assert verdict == "hold"
-    assert any("relevance judge error" in r for r in reasons)
-
-
 def test_apply_fails_vacuous_body_with_validated_citations():
     # Issue #192: a weak model emitting only a copied Citations: section
     # photographs healthy P/R over zero substance — the row must fail.
@@ -487,140 +295,9 @@ def test_apply_fails_vacuous_body_with_validated_citations():
     assert any("no substantive prose" in f for f in row["failures"])
 
 
-def test_apply_index_markers_only_body_fails():
-    row = _llm_row(answer="[1]", citations=["[2] SC34-6428-08 CICS Sys Def, p. 55"])
-    apply_l2_measurements(row, _entry(gold=["SC34-6428-08"]), HITS, alerts={})
-    assert row["verdict"] == "fail"
-    assert any("no substantive prose" in f for f in row["failures"])
-
-
-def test_apply_substantive_body_with_citations_passes():
-    row = _llm_row(
-        answer="Set the value in the member. [1]",
-        citations=["[2] SC34-6428-08 CICS Sys Def, p. 55"],
-    )
-    apply_l2_measurements(row, _entry(gold=["SC34-6428-08"]), HITS, alerts={})
-    assert row["verdict"] == "pass"
-    assert not any("no substantive prose" in f for f in row["failures"])
-
-
-def test_apply_vacuous_body_without_citations_not_floored():
-    # No cites: honest abstentions stay judged by the refusal verdict,
-    # never by the content floor.
-    row = _llm_row(answer="   ", citations=[])
-    apply_l2_measurements(row, _entry(gold=["SC34-6428-08"]), HITS, alerts={})
-    assert not any("no substantive prose" in f for f in row["failures"])
-
-
-def test_apply_script_answer_exempt_from_floor():
-    # Code carries the substance for syntax entries.
-    row = _llm_row(
-        answer="   ", script="//SYSIN DD *",
-        citations=["[2] SC34-6428-08 CICS Sys Def, p. 55"],
-    )
-    apply_l2_measurements(row, _entry(gold=["SC34-6428-08"]), HITS, alerts={})
-    assert not any("no substantive prose" in f for f in row["failures"])
-
-
-def test_apply_abstain_entry_exempt_from_floor():
-    row = _llm_row(
-        expected_behavior="abstain",
-        answer="   ", citations=["[2] SC34-6428-08 CICS Sys Def, p. 55"],
-    )
-    apply_l2_measurements(
-        row, _entry(behavior="abstain", gold=["SC34-6428-08"]), HITS, alerts={}
-    )
-    assert not any("no substantive prose" in f for f in row["failures"])
-
-
 # --------------------------------------------- issue #298 by-complexity slice
-def test_by_complexity_truncation_groups_unknown_last():
-    def rate(n, d):
-        return round(n / d, 4) if d else None
-
-    rows = [
-        _row("A", query_complexity="simple", truncated=False),
-        _row("B", query_complexity="simple", truncated=True),
-        _row("C", query_complexity="complex", truncated=True),
-        _row("D", truncated=False),  # no join -> unknown
-    ]
-    assert _by_complexity_truncation(rows, rate) == {
-        "complex": {"n": 1, "truncated": 1, "truncation_rate": 1.0},
-        "simple": {"n": 2, "truncated": 1, "truncation_rate": 0.5},
-        "unknown": {"n": 1, "truncated": 0, "truncation_rate": 0.0},
-    }
-
-
-def test_summarize_carries_by_complexity_slice():
-    rows = [
-        _row("A", query_complexity="complex", truncated=True),
-        _row("B", query_complexity="complex", truncated=False),
-    ]
-    m = summarize_l2(rows)
-    assert m["by_complexity"]["complex"] == {"n": 2, "truncated": 1, "truncation_rate": 0.5}
-
-
 # --------------------------------------------- issue #299 WHY aggregations
-def test_summarize_by_class_pr_means():
-    from mainframe_rag.eval.answer_tier import _by_class_pr
-    rows = [
-        _row("A", query_class="syntax", citation_precision=1.0, citation_recall=0.5),
-        _row("B", query_class="syntax", citation_precision=0.5, citation_recall=0.5),
-        _row("C", query_class="negative"),
-    ]
-    by_class = _by_class_pr(rows)
-    assert by_class["syntax"] == {"n": 2, "citation_precision": 0.75, "citation_recall": 0.5}
-    assert by_class["negative"] == {"n": 1, "citation_precision": None, "citation_recall": None}
-
-
-def test_summarize_by_failure_histogram():
-    from mainframe_rag.eval.answer_tier import _by_failure_histogram
-    rows = [
-        _row("A", verdict="fail", failures=["zero validated citations"]),
-        _row("B", verdict="fail", failures=["zero validated citations"]),
-        _row("C", verdict="pass"),
-    ]
-    assert _by_failure_histogram(rows) == {"zero validated citations": 2}
-
-
-def test_summarize_carries_why_slices():
-    rows = [_row("A", query_class="syntax", citation_precision=1.0, citation_recall=1.0,
-                 verdict="fail", failures=["zero validated citations"])]
-    m = summarize_l2(rows)
-    assert m["by_class"]["syntax"]["n"] == 1
-    assert m["by_failure"] == {"zero validated citations": 1}
-
-
-def test_summarize_by_why_modes_and_off_gold():
-    from mainframe_rag.eval.answer_tier import _by_why
-    rows = [
-        _row("A"),
-        _row("B", citations=[], truncated=True, citations_header_present=False),
-        _row("C", citations=[], cites_rejected_shape_bad=1),
-        _row("D", citations=["[1] c"], citations_inferred=True, inferred_indices=[1],
-             expected_doc_ids=["D1"], hit_doc_ids=["D1"]),
-        # Truncated with no capture signal: unknown, never 'before cites'.
-        _row("E", citations=[], truncated=True),
-    ]
-    assert _by_why(rows) == {
-        "cited_explicit": 1, "cited_inferred": 1,
-        "truncated_before_cites": 1, "malformed_shape_bad": 1, "unknown": 1,
-    }
-    m = summarize_l2(rows)
-    assert m["by_why"]["cited_explicit"] == 1
-    assert m["inferred_index_off_gold"] == 0
-
-
-def test_l2_and_l4_consume_canonical_runner():
-    from scripts import harness_l2, harness_l4
-
-    from mainframe_rag.eval import answer_tier
-
-    assert harness_l2.run_l2 is harness_l4.run_l2 is answer_tier.run_l2
-
-
-@pytest.mark.parametrize("relevance_enabled", [False, True])
-@pytest.mark.parametrize("search_failure", [False, True])
+@pytest.mark.parametrize("relevance_enabled,search_failure", [(True, False), (False, True)])
 def test_run_l2_http_sequence_attribution_and_next_run(monkeypatch, relevance_enabled, search_failure):
     import json
     from types import SimpleNamespace
@@ -714,3 +391,49 @@ def test_run_l2_http_sequence_attribution_and_next_run(monkeypatch, relevance_en
     assert metrics["structural_fails"] == 1
     assert logger.handlers == prior_handlers
     assert len(clients) == 2 and all(client.closed for client in clients)
+
+
+def test_precision_recall_semantics():
+    p, r = precision_recall({"A", "X", "Y"}, {"A", "B"})
+    assert p == pytest.approx(1 / 3) and r == 0.5
+    # Zero validated citations on an answer row is a recall miss, not a
+    # denominator gap; abstain rows (no gold) stay out of the denominators.
+    assert precision_recall(set(), {"A"}) == (None, 0.0)
+    assert precision_recall({"A"}, set()) == (None, None)
+
+
+def test_judge_labels_parse_and_fail_closed_on_junk():
+    assert parse_judge_label('The judgment:\n```json\n{"label": "contradiction"}\n```\nDone.') == "contradiction"
+    assert parse_relevance_label('```json\n{"label": "irrelevant"}\n```') == "irrelevant"
+    for parse in (parse_judge_label, parse_relevance_label):
+        for junk in ('{"label": "mostly_true"}', "I think the answer is supported."):
+            with pytest.raises(JudgeError):
+                parse(junk)
+
+
+def test_syntax_check_miss_is_false_and_bad_pattern_fails_closed():
+    assert syntax_check(r"(?m)^\s*//", "Here is the JCL:", "//DD1 DD DSN=X") is True
+    assert syntax_check(r"\)REQ", "A plain prose answer.", None) is False
+    with pytest.raises(JudgeError):
+        syntax_check(r"([unclosed", "answer", None)
+
+
+def test_apply_truncation_join_and_content_floor_exemptions():
+    cite = ["[2] SC34-6428-08 CICS Sys Def, p. 55"]
+    gold = _entry(gold=["SC34-6428-08"])
+    row = _llm_row(request_id="abc", answer="Set the value in the member. [1]", citations=cite)
+    apply_l2_measurements(row, gold, HITS, alerts={"abc": "length"})
+    assert row["truncated"] is True and row["verdict"] == "pass"
+    # Index markers alone are not substance; exempt: no cites, script, abstain.
+    row = _llm_row(answer="[1]", citations=cite)
+    apply_l2_measurements(row, gold, HITS, alerts={})
+    assert row["verdict"] == "fail"
+    for kw, entry in (
+        ({"answer": "   ", "citations": []}, gold),
+        ({"answer": "   ", "script": "//SYSIN DD *", "citations": cite}, gold),
+        ({"answer": "   ", "expected_behavior": "abstain", "citations": cite},
+         _entry(behavior="abstain", gold=["SC34-6428-08"])),
+    ):
+        row = _llm_row(**kw)
+        apply_l2_measurements(row, entry, HITS, alerts={})
+        assert not any("no substantive prose" in f for f in row["failures"]), kw

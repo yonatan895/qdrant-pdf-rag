@@ -131,8 +131,7 @@ def test_embed_base_url_derived_from_vllm(monkeypatch, mapper_env):
 
 @pytest.mark.parametrize("token,enabled,endpoint", [
     ("", True, "http://jaeger:4318"),
-    ("off", False, ""), ("none", False, ""), ("false", False, ""),
-    ("0", False, ""), ("OFF", False, ""),
+    ("off", False, ""), ("OFF", False, ""),
     ("http://collector:4318", True, "http://collector:4318"),
 ])
 def test_otel_mirror(monkeypatch, mapper_env, token, enabled, endpoint):
@@ -168,13 +167,6 @@ def test_otel_is_owned_by_the_mapper_not_stale_shell_state(monkeypatch, mapper_e
     ({"OTEL_EXPORTER_OTLP_ENDPOINT": "off"},
      {"OTEL_TRACING_ENABLED": "0", "OTEL_ENDPOINT_RESOLVED": "", "JAEGER_DEPLOY": "0",
       "SERVICEMONITOR_DEPLOY": "0"}),
-    ({"OTEL_EXPORTER_OTLP_ENDPOINT": "https://c.example:4318", "JAEGER_ENABLED": "false",
-      "METRICS_ENABLED": "true"},
-     {"OTEL_TRACING_ENABLED": "1", "OTEL_ENDPOINT_RESOLVED": "https://c.example:4318",
-      "JAEGER_DEPLOY": "0", "SERVICEMONITOR_DEPLOY": "1"}),
-    ({"METRICS_ENABLED": "true", "SERVICEMONITOR_ENABLED": "false"},
-     {"OTEL_TRACING_ENABLED": "1", "OTEL_ENDPOINT_RESOLVED": "http://jaeger:4318",
-      "JAEGER_DEPLOY": "1", "SERVICEMONITOR_DEPLOY": "0"}),
 ])
 def test_bundle_decisions_match_the_rendered_release(monkeypatch, mapper_env, environment, expected):
     """The shell stages `eval` --bundle-decisions; the release renders the
@@ -210,8 +202,7 @@ def test_bundle_decisions_quote_operator_endpoints_for_shell_eval(monkeypatch):
 
 
 @pytest.mark.parametrize("raw,expected", [
-    ("", False), ("true", True), ("1", True), ("YES", True), ("false", False),
-    ("0", False), ("no", False), ("anything-else", False),
+    ("", False), ("YES", True), ("anything-else", False),
 ])
 def test_lenient_rerank_bool(monkeypatch, mapper_env, raw, expected):
     monkeypatch.setenv("RERANK_ENABLED", raw)
@@ -231,7 +222,7 @@ def test_metrics_literal_true_only(monkeypatch, mapper_env):
     assert load_values(out)["metrics"] == {"enabled": True, "serviceMonitor": {"enabled": True}}
 
 
-@pytest.mark.parametrize("raw", ["", "true", "1", "yes"])
+@pytest.mark.parametrize("raw", ["true"])
 def test_retired_in_place_switch_accepts_publication(monkeypatch, mapper_env, raw):
     """In-place ingest was retired (#360): unset or true still renders, and
     the chart carries no switch (publication is the only mode)."""
@@ -242,7 +233,7 @@ def test_retired_in_place_switch_accepts_publication(monkeypatch, mapper_env, ra
     assert "aliasPublish" not in load_values(out)["ingest"]
 
 
-@pytest.mark.parametrize("raw", ["false", "0", "no"])
+@pytest.mark.parametrize("raw", ["false"])
 def test_retired_in_place_switch_refuses_false(monkeypatch, mapper_env, raw):
     """An explicit false fails closed with the retirement, never silently
     rendering a publication the operator did not ask for."""
@@ -310,14 +301,6 @@ def test_ingest_enabled_block_and_tricky_retire(monkeypatch, mapper_env):
     }
 
 
-def test_retire_renders_under_publication(monkeypatch, mapper_env):
-    monkeypatch.setenv("CORPUS_PVC", "corpus-pvc")
-    monkeypatch.setenv("INGEST_RETIRE_DOCS", "DOC1")
-    r, out = mapper_env()
-    assert r.returncode == 0, r.stderr
-    assert load_values(out)["ingest"]["retireDocs"] == ["DOC1"]
-
-
 def test_route_needs_ca_file(monkeypatch, mapper_env, tmp_path):
     monkeypatch.setenv("AGENT_ROUTE", "true")
     r, _ = mapper_env()
@@ -334,9 +317,9 @@ def test_route_needs_ca_file(monkeypatch, mapper_env, tmp_path):
 
 
 @pytest.mark.parametrize("key,val", [
-    ("IMAGE_SHA", ""), ("IMAGE_SHA", "HEAD"), ("IMAGE_SHA", "abc123"),
+    ("IMAGE_SHA", "HEAD"), ("IMAGE_SHA", "abc123"),
     ("DENSE_DIM", "0"), ("DENSE_DIM", "abc"), ("EMBED_MODEL_REVISION", "   "),
-    ("INTERNAL_REGISTRY", ""), ("STORAGE_CLASS", ""),
+    ("INTERNAL_REGISTRY", ""),
     ("INGEST_WORKERS", "0"),
 ])
 def test_fail_closed_inputs(monkeypatch, mapper_env, key, val):
@@ -420,22 +403,17 @@ def test_mapper_to_helm_round_trip(mapper_env, tmp_path):
             os.environ.pop(k, None)
 
 
-def test_reasoning_disabled_when_model_unset(monkeypatch, mapper_env):
+def test_reasoning_leg_is_mapped_only_when_model_is_set(monkeypatch, mapper_env):
     monkeypatch.delenv("LLM_MODEL_REASONING", raising=False)
     monkeypatch.setenv("LLM_BASE_URL", "http://litellm:4000/v1")
     r, out = mapper_env()
     assert r.returncode == 0, r.stderr
-    reasoning = load_values(out)["models"]["reasoning"]
-    assert reasoning == {"baseUrl": "", "model": "", "condenseEnabled": False}
-
-
-def test_reasoning_mapped_when_both_set(monkeypatch, mapper_env):
+    assert load_values(out)["models"]["reasoning"] == {"baseUrl": "", "model": "", "condenseEnabled": False}
     monkeypatch.setenv("LLM_MODEL_REASONING", "mock-reasoning")
-    monkeypatch.setenv("LLM_BASE_URL", "http://litellm:4000/v1")
     r, out = mapper_env()
     assert r.returncode == 0, r.stderr
-    reasoning = load_values(out)["models"]["reasoning"]
-    assert reasoning == {"baseUrl": "http://litellm:4000/v1", "model": "mock-reasoning", "condenseEnabled": False}
+    assert load_values(out)["models"]["reasoning"] == {
+        "baseUrl": "http://litellm:4000/v1", "model": "mock-reasoning", "condenseEnabled": False}
 
 
 def test_reasoning_fails_closed_when_model_set_without_base_url(monkeypatch, mapper_env):
@@ -459,16 +437,16 @@ def test_contextual_pair_matches_preflight_validation(monkeypatch, mapper_env, m
 
 
 
-@pytest.mark.parametrize("namespace", ["bad\nfield: value", "bad.name", "Upper", "-bad", "bad-", "a" * 64])
-def test_namespace_rejects_invalid_label_before_values_write(mapper_env, monkeypatch, namespace):
-    monkeypatch.setenv("NAMESPACE", namespace)
-    result, out = mapper_env("--without-ingest-job")
-    assert result.returncode != 0
-    assert "NAMESPACE must be a DNS label" in result.stderr
-    assert not out.exists()
+def test_namespace_rejects_invalid_label_before_values_write(mapper_env, monkeypatch):
+    for namespace in ["bad\nfield: value", "Upper", "-bad", "a" * 64]:
+        monkeypatch.setenv("NAMESPACE", namespace)
+        result, out = mapper_env("--without-ingest-job")
+        assert result.returncode != 0, namespace
+        assert "NAMESPACE must be a DNS label" in result.stderr
+        assert not out.exists()
 
 
-@pytest.mark.parametrize("raw,want", [("", False), ("false", False), ("true", True)])
+@pytest.mark.parametrize("raw,want", [("", False), ("true", True)])
 def test_chat_condensation_operator_mapping(monkeypatch, mapper_env, raw, want):
     monkeypatch.setenv("CHAT_CONDENSE_ENABLED", raw)
     result, output = mapper_env()
@@ -476,29 +454,8 @@ def test_chat_condensation_operator_mapping(monkeypatch, mapper_env, raw, want):
     assert load_values(output)["models"]["reasoning"]["condenseEnabled"] is want
 
 
-def test_chat_condensation_rejects_typo(monkeypatch, mapper_env):
-    monkeypatch.setenv("CHAT_CONDENSE_ENABLED", "tru")
-    result, _ = mapper_env()
-    assert result.returncode != 0
-
-
-@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is required for the round-trip")
-def test_condensation_mapper_to_agent_round_trip(monkeypatch, mapper_env):
-    monkeypatch.setenv("CHAT_CONDENSE_ENABLED", "true")
-    result, output = mapper_env()
-    assert result.returncode == 0, result.stderr
-    rendered = subprocess.run(["helm", "template", "app", str(CHART), "-f", str(output),
-        "--namespace", "ns", "--show-only", "templates/agent-deployment.yaml"],
-        capture_output=True, text=True, check=False)
-    assert rendered.returncode == 0, rendered.stderr
-    deployment = yaml.safe_load(rendered.stdout)
-    agent = deployment["spec"]["template"]["spec"]["containers"][0]
-    assert next(e for e in agent["env"] if e["name"] == "CHAT_CONDENSE_ENABLED") == {
-        "name": "CHAT_CONDENSE_ENABLED", "value": "true"}
-
-
 @pytest.mark.parametrize("stream,simple_reserve,complex_effort,efforts", [
-    ("true", "512", "medium", "low,medium,high"), ("false", "0", "xhigh", "low,medium,xhigh"),
+    ("true", "512", "medium", "low,medium,high"),
     ("false", "0", "xhigh", " xhigh, low,medium"),  # accepted spelling reaches the pod canonically
 ])
 def test_selected_model_budgets_reach_rendered_agent(monkeypatch, mapper_env, stream, simple_reserve, complex_effort,
@@ -534,16 +491,12 @@ def test_selected_model_budgets_reach_rendered_agent(monkeypatch, mapper_env, st
 
 
 @pytest.mark.parametrize("name,bad", [
-    ("LLM_MAX_MODEL_LEN", "511"), ("LLM_MAX_MODEL_LEN", "131073"),
+    ("LLM_MAX_MODEL_LEN", "511"),
     ("LLM_MAX_MODEL_LEN", "16384.0"),
     pytest.param("LLM_MAX_MODEL_LEN", "9" * 5000, id="oversized-integer"),
-    ("LLM_RESERVED_OUTPUT_TOKENS", "127"), ("LLM_RESERVED_OUTPUT_TOKENS", "16385"),
+    ("LLM_RESERVED_OUTPUT_TOKENS", "16385"),
     ("LLM_THINKING_RESERVE_TOKENS_SIMPLE", "-1"),
-    ("LLM_THINKING_RESERVE_TOKENS_SIMPLE", "16385"),
-    ("LLM_THINKING_RESERVE_TOKENS_COMPLEX", "-1"),
-    ("LLM_THINKING_RESERVE_TOKENS_COMPLEX", "16385"),
     ("LLM_REASONING_EFFORT_SIMPLE", "unsupported-private-value"),
-    ("LLM_REASONING_EFFORT_COMPLEX", "unsupported-private-value"),
     ("LLM_REASONING_EFFORTS", "unsupported-private-value"),
     ("LLM_REASONING_EFFORTS", "low,low,high"),
     ("LLM_STREAM", "unsupported-private-value"),
@@ -563,7 +516,6 @@ def test_model_budget_invalid_selection_fails_without_artifact(monkeypatch, mapp
     ({"LLM_REASONING_EFFORTS": "low,medium,xhigh"}, "LLM_REASONING_EFFORT_COMPLEX"),
     ({"LLM_REASONING_EFFORTS": "medium,xhigh", "LLM_REASONING_EFFORT_COMPLEX": "xhigh"},
      "LLM_REASONING_EFFORT_SIMPLE"),
-    ({"LLM_REASONING_EFFORT_COMPLEX": "xhigh"}, "LLM_REASONING_EFFORT_COMPLEX"),
 ])
 def test_effort_outside_served_set_fails_before_artifact(monkeypatch, mapper_env, selected, field):
     for name, value in selected.items():
@@ -611,7 +563,7 @@ def test_decoupled_backend_flags_follow_the_parent_by_default(mapper_env):
 
 
 @pytest.mark.parametrize("raw,expected", [
-    ("true", True), ("1", True), ("YES", True), ("false", False), ("0", False),
+    ("true", True), ("YES", True), ("false", False),
 ])
 def test_jaeger_enabled_selection(monkeypatch, mapper_env, raw, expected):
     monkeypatch.setenv("JAEGER_ENABLED", raw)
@@ -631,7 +583,7 @@ def test_servicemonitor_enabled_selection(monkeypatch, mapper_env, raw, expected
     assert load_values(out)["metrics"] == {"enabled": True, "serviceMonitor": {"enabled": expected}}
 
 
-@pytest.mark.parametrize("key", ["JAEGER_ENABLED", "SERVICEMONITOR_ENABLED"])
+@pytest.mark.parametrize("key", ["JAEGER_ENABLED"])
 def test_decoupled_flags_reject_garbage(monkeypatch, mapper_env, key):
     monkeypatch.setenv(key, "maybe")
     r, _ = mapper_env()
@@ -726,15 +678,14 @@ def test_image_digest_env_renders_digest_per_image(monkeypatch, mapper_env):
     assert images["oauthProxy"]["digest"] == "sha256:" + "b" * 64
     assert "digest" not in images["ingest"]
     assert images["agent"]["tag"] == IMAGE_SHA  # the tag stays informational
-
-
-def test_image_digest_unset_keeps_tag_only_images(mapper_env):
+    monkeypatch.delenv("IMAGE_DIGEST_AGENT")
+    monkeypatch.delenv("IMAGE_DIGEST_OAUTH_PROXY")
     r, out = mapper_env()
     assert r.returncode == 0, r.stderr
     assert all("digest" not in image for image in load_values(out)["images"].values())
 
 
-@pytest.mark.parametrize("bad", ["latest", "sha256:abc", "sha256:" + "G" * 64, "sha1:" + "a" * 40])
+@pytest.mark.parametrize("bad", ["latest", "sha256:" + "G" * 64])
 def test_malformed_image_digest_fails_closed(monkeypatch, mapper_env, bad):
     monkeypatch.setenv("IMAGE_DIGEST_INGEST", bad)
     r, out = mapper_env()

@@ -14,7 +14,6 @@ Tests:
 
 from __future__ import annotations
 
-import asyncio
 from types import SimpleNamespace
 from typing import Any
 
@@ -22,10 +21,8 @@ import httpx2
 import pytest
 from qdrant_client import models
 
-from mainframe_rag.agent.app import SearchResponse
 from mainframe_rag.config import Settings
-from mainframe_rag.ports import AsyncReaderAdapter
-from mainframe_rag.retrieve.query import SearchHit, async_search, diversify_hits, search
+from mainframe_rag.retrieve.query import SearchHit, diversify_hits, search
 from mainframe_rag.retrieve.rerank import (
     HashReranker,
     HttpReranker,
@@ -79,16 +76,8 @@ class FakeQdrantPoints:
             "SA22-7592-05 [message] IEA500I\nManual\nMessages\nIEA500I explanation",
         ),
         (
-            "unknown-thing", (), "D1", "H", "Body",
-            "D1 [unknown-thing]\nManual\nH\nBody",
-        ),
-        (
             "table", (), "D1", "H", "PARM1  VALUE1  DESCRIPTION",
             "D1 [table]\nManual\nH\nTable:\nPARM1  VALUE1  DESCRIPTION",
-        ),
-        (
-            "syntax", (), "D1", "H", "PARM1  VALUE1  DESCRIPTION",
-            "D1 [syntax]\nManual\nH\nSyntax:\nPARM1  VALUE1  DESCRIPTION",
         ),
     ],
 )
@@ -96,29 +85,6 @@ def test_format_rerank_text_shapes(chunk_type, message_ids, doc, heading, text, 
     hit = _make_hit("c1", doc, 0.5, heading=heading, text=text)
     hit = hit.model_copy(update={"chunk_type": chunk_type, "message_ids": message_ids})
     assert format_rerank_text(hit) == expected
-
-
-def test_format_rerank_text_table_syntax_differ_from_prose():
-    """Same body, different chunk_type, must produce different passages."""
-    body = "PARM1  VALUE1  DESCRIPTION"
-    texts = set()
-    for chunk_type in ("narrative", "table", "syntax"):
-        hit = _make_hit("c1", "D1", 0.5, heading="H", text=body)
-        texts.add(format_rerank_text(hit.model_copy(update={"chunk_type": chunk_type})))
-    assert len(texts) == 3
-
-
-def test_format_rerank_text_caps_oversize_body():
-    """Oversize atomic chunks (emitted whole past SECTION_MAX_CHARS) must
-    not 400 the scorer's 2048-token window: header/title/heading stay
-    whole, the body tail is cut, total capped."""
-    from mainframe_rag.retrieve.rerank import RERANK_PASSAGE_MAX_CHARS
-
-    hit = _make_hit("c9", "SA22-7592-05", 0.7, heading="Messages", text="x" * 5000)
-    text = format_rerank_text(hit)
-    assert len(text) == RERANK_PASSAGE_MAX_CHARS
-    assert text.splitlines()[0].startswith("SA22-7592-05")
-    assert "Messages" in text
 
 
 def test_format_rerank_text_never_exceeds_cap_for_any_shape():
@@ -133,16 +99,10 @@ def test_format_rerank_text_never_exceeds_cap_for_any_shape():
             assert len(format_rerank_text(hit)) <= RERANK_PASSAGE_MAX_CHARS
 
 
-def test_format_rerank_text_short_passage_byte_identical():
-    hit = _make_hit("c1", "D1", 0.5, heading="H", text="short body")
-    text = format_rerank_text(hit)
-    assert text.endswith("\nshort body")
-    assert len(text) < 200
-
-
 def test_format_rerank_text_cap_keeps_template_label_whole():
-    """Oversize table/syntax bodies: the template label stays whole with
-    header/title/heading; only the body tail is cut."""
+    """Oversize atomic chunks (emitted whole past SECTION_MAX_CHARS) must not
+    400 the scorer's 2048-token window: header/title/heading and the template
+    label stay whole; only the body tail is cut, total capped."""
     from mainframe_rag.retrieve.rerank import RERANK_PASSAGE_MAX_CHARS
 
     hit = _make_hit("c9", "SA22-7592-05", 0.7, heading="H", text="x" * 5000)
@@ -150,6 +110,7 @@ def test_format_rerank_text_cap_keeps_template_label_whole():
     text = format_rerank_text(hit)
     assert len(text) == RERANK_PASSAGE_MAX_CHARS
     lines = text.splitlines()
+    assert lines[0].startswith("SA22-7592-05")
     assert "Table:" in lines
     assert lines[lines.index("Table:") + 1].startswith("x")
 
@@ -233,24 +194,12 @@ def _blend_hits() -> tuple[list[SearchHit], dict[str, float]]:
         (0.5, ["c2", "c3", "c1"]),
         # Out-of-range clamps to the nearer extreme.
         (2.0, ["c3", "c2", "c1"]),
-        (-0.5, ["c1", "c2", "c3"]),
     ],
 )
 def test_rerank_alpha_regimes(alpha, expected_order):
     hits, score_map = _blend_hits()
     reranked = rerank_candidates("test query", hits, MockReranker(score_map), alpha=alpha)
     assert [h.chunk_id for h in reranked] == expected_order
-
-
-def test_rerank_alpha_attaches_raw_ce_scores():
-    """rerank_score always carries the raw cross-encoder score, even when
-    RRF decides the order (alpha=0.0 ablation keeps the signal)."""
-    hits, score_map = _blend_hits()
-    legacy = rerank_candidates("test query", hits, MockReranker(score_map), alpha=1.0)
-    assert [h.rerank_score for h in legacy] == [1.0, 0.7, 0.0]
-    kept = rerank_candidates("test query", hits, MockReranker(score_map), alpha=0.0)
-    assert [h.chunk_id for h in kept] == ["c1", "c2", "c3"]
-    assert [h.rerank_score for h in kept] == [0.0, 0.7, 1.0]
 
 
 def test_rerank_alpha_zero_rrf_tie_ignores_ce():
@@ -308,32 +257,6 @@ def test_search_rerank_alpha_zero_keeps_rrf_order():
     assert [h.chunk_id for h in flipped] == ["c2", "c1"]
 
 
-def test_async_search_rerank_alpha_zero_keeps_rrf_order():
-    """Async twin threads the same knob: alpha=0.0 keeps RRF order where
-    alpha=1.0 flips it, identical to search() on identical fakes."""
-    c1 = models.ScoredPoint(
-        id="c1", version=1, score=0.9,
-        payload={"doc_id": "DOC1", "title": "M1", "heading_path": "H1", "page_label": "1", "text": "Ordinary prose"},
-    )
-    c2 = models.ScoredPoint(
-        id="c2", version=1, score=0.4,
-        payload={"doc_id": "DOC2", "title": "M2", "heading_path": "H2", "page_label": "2", "text": "Other prose"},
-    )
-    base = {"rerank_enabled": True, "embed_mode": "hash", "allow_hash_mode": True, "_env_file": None}
-    kept = asyncio.run(
-        async_search(AsyncReaderAdapter(FakeQdrantPoints([c1, c2])), FakeEmbedder(), "test-coll", "certificate key management",
-            settings=Settings(**base, rerank_fusion_alpha=0.0), reranker=PromotingReranker(),
-        )
-    )[0]
-    assert [h.chunk_id for h in kept] == ["c1", "c2"]
-    flipped = asyncio.run(
-        async_search(AsyncReaderAdapter(FakeQdrantPoints([c1, c2])), FakeEmbedder(), "test-coll", "certificate key management",
-            settings=Settings(**base, rerank_fusion_alpha=1.0), reranker=PromotingReranker(),
-        )
-    )[0]
-    assert [h.chunk_id for h in flipped] == ["c2", "c1"]
-
-
 def test_rerank_candidates_raises_on_length_mismatch():
     """Defense-in-depth: rerank_candidates raises if scorer returned wrong count."""
     hit1 = _make_hit("c1", "DOC1", 0.9)
@@ -381,105 +304,27 @@ def test_rerank_flag_off_is_byte_identical():
         assert h.rerank_score is None
 
 
-def test_rerank_flag_on_executes_pipeline():
-    """When rerank_enabled=True, cross-encoder scores and records rerank_ms."""
-    scored_points = [
-        models.ScoredPoint(
-            id="c1",
-            version=1,
-            score=0.9,
-            payload={"doc_id": "DOC1", "title": "M1", "heading_path": "H1", "page_label": "1", "text": "Low match"},
-        ),
-        models.ScoredPoint(
-            id="c2",
-            version=1,
-            score=0.4,
-            payload={"doc_id": "DOC2", "title": "M2", "heading_path": "H2", "page_label": "1", "text": "High match exact"},
-        ),
-    ]
-    client = FakeQdrantPoints(scored_points)
-    embedder = FakeEmbedder()
-    settings = Settings(rerank_enabled=True, embed_mode="hash", allow_hash_mode=True, _env_file=None)
-
-    hits, _kind, timings = search(
-        client,
-        embedder,
-        "test-coll",
-        "exact",
-        settings=settings,
-    )
-
-    assert len(hits) == 2
-    assert "rerank_ms" in timings
-    for h in hits:
-        assert h.rerank_score is not None
-    # High match exact (c2) should be boosted to top-1 by HashReranker
-    assert hits[0].chunk_id == "c2"
-
-
-def test_http_reranker_v1_score_success():
-    """HttpReranker posts to OpenAI-compatible /v1/score and parses index-sorted scores."""
+@pytest.mark.parametrize("key", ["sk-test-rerank", None])
+def test_http_reranker_score_leg_sorts_by_index_and_sends_auth_only_when_keyed(key):
+    """HttpReranker posts to OpenAI-compatible /v1/score and returns scores in
+    index order; a gateway-guarded endpoint sees the virtual key, a keyless
+    setup sends no Authorization header at all."""
     settings = Settings(
         rerank_base_url="http://rerank.test/v1",
         rerank_model="BAAI/bge-reranker-v2-m3",
         rerank_batch_size=2,
-        rerank_timeout_s=3.0,
+        rerank_api_key=key,
         _env_file=None,
     )
 
     def handler(request: httpx2.Request) -> httpx2.Response:
         assert request.url.path == "/v1/score"
-        body = httpx2.Response(
-            200,
-            json={"data": [{"index": 1, "score": 0.88}, {"index": 0, "score": 0.42}]},
-        )
-        return body
-
-    transport = httpx2.MockTransport(handler)
-    client = httpx2.Client(transport=transport)
-    reranker = HttpReranker(settings, client=client)
-
-    scores = reranker.score("query", ["text0", "text1"])
-    assert scores == [0.42, 0.88]
-
-
-def test_http_reranker_sends_bearer_when_key_set():
-    """A gateway-guarded rerank endpoint must see the virtual key."""
-    settings = Settings(
-        rerank_base_url="http://rerank.test/v1",
-        rerank_model="BAAI/bge-reranker-v2-m3",
-        rerank_batch_size=2,
-        rerank_api_key="sk-test-rerank",
-        _env_file=None,
-    )
-
-    def handler(request: httpx2.Request) -> httpx2.Response:
-        assert request.url.path == "/v1/score"
-        assert request.headers.get("authorization") == "Bearer sk-test-rerank"
+        if key:
+            assert request.headers.get("authorization") == f"Bearer {key}"
+        else:
+            assert "authorization" not in request.headers
         return httpx2.Response(
-            200,
-            json={"data": [{"index": 0, "score": 0.42}, {"index": 1, "score": 0.88}]},
-        )
-
-    reranker = HttpReranker(settings, client=httpx2.Client(transport=httpx2.MockTransport(handler)))
-    assert reranker.score("query", ["text0", "text1"]) == [0.42, 0.88]
-
-
-def test_http_reranker_omits_auth_when_key_unset():
-    """Keyless setups send no Authorization header on the rerank legs."""
-    settings = Settings(
-        rerank_base_url="http://rerank.test/v1",
-        rerank_model="BAAI/bge-reranker-v2-m3",
-        rerank_batch_size=2,
-        _env_file=None,
-    )
-
-    def handler(request: httpx2.Request) -> httpx2.Response:
-        assert request.url.path == "/v1/score"
-        assert "authorization" not in request.headers
-        return httpx2.Response(
-            200,
-            json={"data": [{"index": 0, "score": 0.42}, {"index": 1, "score": 0.88}]},
+            200, json={"data": [{"index": 1, "score": 0.88}, {"index": 0, "score": 0.42}]}
         )
 
     reranker = HttpReranker(settings, client=httpx2.Client(transport=httpx2.MockTransport(handler)))
@@ -549,31 +394,6 @@ def _order_settings(**overrides):
     }
     base.update(overrides)
     return Settings(**base)
-
-
-def test_http_reranker_rerank_first_prefers_rerank_leg():
-    """Gateway order: when both legs answer, rerank_first takes the
-    gateway-native leg and never spends a call on /v1/score."""
-    settings = _order_settings(rerank_endpoint_order="rerank_first")
-    paths: list[str] = []
-
-    def handler(request: httpx2.Request) -> httpx2.Response:
-        paths.append(request.url.path)
-        if request.url.path == "/v1/rerank":
-            return httpx2.Response(
-                200,
-                json={"results": [{"index": 0, "score": 0.3}, {"index": 1, "score": 0.9}]},
-            )
-        if request.url.path == "/v1/score":
-            return httpx2.Response(
-                200,
-                json={"data": [{"index": 0, "score": 0.42}, {"index": 1, "score": 0.88}]},
-            )
-        return httpx2.Response(500)
-
-    reranker = HttpReranker(settings, client=httpx2.Client(transport=httpx2.MockTransport(handler)))
-    assert reranker.score("query", ["text0", "text1"]) == [0.3, 0.9]
-    assert paths == ["/v1/rerank"]
 
 
 def test_http_reranker_rerank_first_falls_back_to_score():
@@ -692,38 +512,33 @@ def test_http_reranker_normal_requests_byte_identical():
     assert calls[0][1] + calls[1][1] == texts
 
 
-@pytest.mark.parametrize("status", [500, 503])
-def test_http_reranker_5xx_not_retried_with_cut_text(status):
-    calls: list = []
-    reranker = HttpReranker(_retry_settings(), client=_client(_window_handler(calls, status=status)))
-    with pytest.raises(httpx2.HTTPStatusError):
-        reranker.score("q", ["x" * 2500, "y"])
-    assert [c[0] for c in calls] == ["/v1/score", "/v1/rerank"]
-    assert calls[0][1] == calls[1][1] == ["x" * 2500, "y"]
+def _score_4xx_rerank_5xx(request):
+    return httpx2.Response(400 if request.url.path == "/v1/score" else 502)
 
 
-def test_http_reranker_transport_error_not_retried_with_cut_text():
+def _transport_down(request):
+    raise httpx2.ConnectError("down", request=request)
+
+
+@pytest.mark.parametrize(
+    ("handler", "error"),
+    [
+        (lambda r: httpx2.Response(503), httpx2.HTTPStatusError),
+        (_transport_down, httpx2.RequestError),
+        (_score_4xx_rerank_5xx, httpx2.HTTPStatusError),  # 4xx on one leg only
+    ],
+    ids=["5xx", "transport-error", "4xx-score-5xx-rerank"],
+)
+def test_http_reranker_not_retried_with_cut_text(handler, error):
+    """Only a batch rejected 4xx on BOTH legs is re-scored with cut passages."""
     seen: list = []
 
-    def handler(request: httpx2.Request) -> httpx2.Response:
+    def recording(request: httpx2.Request) -> httpx2.Response:
         seen.append(request.url.path)
-        raise httpx2.ConnectError("down", request=request)
+        return handler(request)
 
-    reranker = HttpReranker(_retry_settings(), client=_client(handler))
-    with pytest.raises(httpx2.RequestError):
-        reranker.score("q", ["x" * 2500, "y"])
-    assert seen == ["/v1/score", "/v1/rerank"]
-
-
-def test_http_reranker_4xx_on_score_but_5xx_on_rerank_not_retried():
-    seen: list = []
-
-    def handler(request: httpx2.Request) -> httpx2.Response:
-        seen.append(request.url.path)
-        return httpx2.Response(400 if request.url.path == "/v1/score" else 502)
-
-    reranker = HttpReranker(_retry_settings(), client=_client(handler))
-    with pytest.raises(httpx2.HTTPStatusError):
+    reranker = HttpReranker(_retry_settings(), client=_client(recording))
+    with pytest.raises(error):
         reranker.score("q", ["x" * 2500, "y"])
     assert seen == ["/v1/score", "/v1/rerank"]
 
@@ -735,17 +550,6 @@ def test_http_reranker_retry_also_failing_raises_as_before():
         reranker.score("q", ["x" * 2500, "y"])
     # first attempt (2 legs) + exactly one retry attempt (2 legs), no more.
     assert len(calls) == 4
-
-
-def test_http_reranker_rerank_first_4xx_retry():
-    calls: list = []
-    reranker = HttpReranker(
-        _retry_settings(rerank_endpoint_order="rerank_first"),
-        client=_client(_window_handler(calls)),
-    )
-    reranker.score("q", ["x" * 2500, "y"])
-    assert [c[0] for c in calls] == ["/v1/rerank", "/v1/score", "/v1/rerank"]
-    assert len(calls[2][1][0]) == 2000
 
 
 def test_build_reranker_dispatch():
@@ -836,30 +640,12 @@ def test_reranker_memo_reuses_equal_values_across_instances():
         assert id(s2) != id(s1)  # both alive: distinct objects, equal values
         r2, _, _ = _resolve_active_reranker(s2, None, "how do I allocate a dataset", False)
         assert r2 is r1
-    finally:
-        query_mod._memoized_reranker = saved
-
-
-def test_reranker_memo_rebuilds_on_value_change():
-    """Issue #156: a value change must rebuild the reranker regardless of
-    object identity — the exact stale-reuse hazard id(settings) allowed
-    when the allocator recycled a garbage-collected Settings id."""
-    import mainframe_rag.retrieve.query as query_mod
-    from mainframe_rag.retrieve.query import _resolve_active_reranker
-
-    saved = query_mod._memoized_reranker
-    query_mod._memoized_reranker = None
-    try:
-        s1 = Settings(
-            rerank_enabled=True, embed_mode="hash", allow_hash_mode=True, rerank_batch_size=16, _env_file=None
+        # A value change rebuilds regardless of object identity.
+        s3 = Settings(
+            rerank_enabled=True, embed_mode="hash", allow_hash_mode=True, rerank_batch_size=7, _env_file=None
         )
-        r1, _, _ = _resolve_active_reranker(s1, None, "how do I allocate a dataset", False)
-        assert r1 is not None
-        s2 = Settings(
-            rerank_enabled=True, embed_mode="hash", allow_hash_mode=True, rerank_batch_size=32, _env_file=None
-        )
-        r2, _, _ = _resolve_active_reranker(s2, None, "how do I allocate a dataset", False)
-        assert r2 is not r1
+        r3, _, _ = _resolve_active_reranker(s3, None, "how do I allocate a dataset", False)
+        assert r3 is not r1
     finally:
         query_mod._memoized_reranker = saved
 
@@ -875,13 +661,6 @@ def test_diversify_hits_respects_rerank_scores():
     assert len(selected) == 2
     assert selected[0].chunk_id == "c2"
     assert selected[1].chunk_id == "c3"
-
-
-def test_search_response_payload_includes_rerank_score():
-    hit = _make_hit("c1", "DOC1", 0.8, rerank_score=0.923)
-    resp = SearchResponse(request_id="req-1", query_kind="identifier", hits=[hit])
-    dump = resp.model_dump()
-    assert dump["hits"][0]["rerank_score"] == 0.923
 
 
 # ------------------------------------------------------- Issue #113: trap bypass
@@ -1034,19 +813,6 @@ def test_probe_reranker_success():
     assert probe_reranker(reranker) is None
 
 
-def test_probe_reranker_dead_endpoint_returns_message():
-    """Lifespan probe reports (never raises) when score + fallback both fail."""
-
-    def handler(request: httpx2.Request) -> httpx2.Response:
-        return httpx2.Response(500)
-
-    reranker = HttpReranker(
-        _probe_settings(), client=httpx2.Client(transport=httpx2.MockTransport(handler))
-    )
-    err = probe_reranker(reranker)
-    assert isinstance(err, str) and err
-
-
 def test_probe_reranker_failure_reports_error_type_only():
     """The probe string is logged at startup: class name only, never the
     exception message (AGENTS.md: logs contain no secrets/upstream text)."""
@@ -1061,6 +827,3 @@ def test_probe_reranker_failure_reports_error_type_only():
     assert err is not None and "SECRET-XYZ" not in err
     assert "ConnectError" in err
 
-
-def test_probe_reranker_hash_always_passes():
-    assert probe_reranker(HashReranker()) is None

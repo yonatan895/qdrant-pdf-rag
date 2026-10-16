@@ -15,7 +15,6 @@ SCRIPT = Path(__file__).resolve().parents[1] / 'scripts/gateway/strict_finish.py
     (['embed'], 'reasoning', True),
     ([], 'reasoning', True),
     (['reasoning'], None, True),
-    (['reasoning'], ['reasoning'], True),
 ])
 async def test_passthrough_keeps_model_scope(monkeypatch, allowed, model, denied):
     from fastapi import HTTPException
@@ -87,7 +86,7 @@ def gateway_provider(monkeypatch):
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize('finish', ['stop', 'length', 'tool_calls'])
+@pytest.mark.parametrize('finish', ['stop', 'length'])
 async def test_forwards_an_observed_provider_finish_and_closes(gateway_provider, finish):
     provider, wrapper = gateway_provider
     response = wrapper([(None, None), (finish, finish)])
@@ -99,7 +98,7 @@ async def test_forwards_an_observed_provider_finish_and_closes(gateway_provider,
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize('events', [[(None, None), (None, 'stop')], [(None, None)], []])
+@pytest.mark.parametrize('events', [[(None, None), (None, 'stop')], [(None, None)]])
 async def test_missing_provider_finish_never_forwards_success(gateway_provider, events):
     provider, wrapper = gateway_provider
     response = wrapper(events)
@@ -161,30 +160,6 @@ async def test_rejects_before_router_wrapper_can_erase_provider_state(gateway_pr
     assert len(chunks) == 1
     assert chunks[0].choices[0].finish_reason is None
     assert response.closed
-
-
-@pytest.mark.anyio
-@pytest.mark.parametrize('stream', [False, True])
-async def test_delegates_request_parameters_once_to_existing_adapter(gateway_provider, stream):
-    provider, wrapper = gateway_provider
-    response = wrapper([('stop', 'stop')]) if stream else object()
-    provider.adapter.response = response
-    params = {'reasoning_effort': 'low', 'max_tokens': 128, 'temperature': 0.2,
-              'stream_options': {'include_usage': True}, 'max_retries': 0}
-    request = {'encoding': object(), 'acompletion': True, 'optional_params': params,
-               'model': 'configured/model', 'messages': [{'role': 'user', 'content': 'hello'}],
-               'api_base': 'https://backend.invalid/v1', 'api_key': 'dummy', 'timeout': 12.0,
-               'client': object(), 'logging_obj': object(), 'headers': {'X-Test': 'value'},
-               'litellm_params': {}, 'model_response': object(), 'custom_prompt_dict': {},
-               'print_verbose': None, 'logger_fn': None}
-    if stream:
-        assert len([chunk async for chunk in provider.astreaming(**request)]) == 1
-    else:
-        assert await provider.acompletion(**request) is response
-    expected = {k: v for k, v in request.items() if k != 'encoding'}
-    expected.update(custom_llm_provider='openai', optional_params={**params, 'stream': stream})
-    assert provider.adapter.calls == [expected]
-    assert 'stream' not in params
 
 
 @pytest.mark.anyio

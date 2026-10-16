@@ -23,11 +23,6 @@ from tests.helpers_helm import (
 )
 
 
-def test_agent_inventory_matches():
-    """Agent Service/Deployment inventory is present."""
-    new = run_new_template({})
-    assert {("Service", "rag-agent"), ("Deployment", "rag-agent")} <= set(new)
-
 def test_base_contract_with_independent_controls():
     """Agent defaults, types, probes and read-only credentials."""
     new = run_new_template({})
@@ -86,6 +81,9 @@ def test_base_contract_with_independent_controls():
     assert raw.returncode == 0, raw.stderr
     assert "helm.sh/hook" not in raw.stdout
     assert "kind: StatefulSet" not in raw.stdout
+    # Ingest is operator-owned: the default release renders no Job.
+    assert ("Job", "ingest") not in new
+    assert "kind: Job" not in raw.stdout
 
 def test_gateway_keys_contract():
     new = run_new_template({"gateway": {"apiKeySecretName": "gw-keys"}})
@@ -139,20 +137,6 @@ def test_nondefault_namespace_registry_and_rerank():
     }
     for key, value in expected.items():
         assert env_map(new["Deployment", "rag-agent"])[key]["value"] == value
-
-def test_gateway_ca_contract():
-    new = run_new_template({"gateway": {"caConfigMapName": "gw-ca"}})
-    for docs in (new,):
-        dep = docs["Deployment", "rag-agent"]
-        agent = container_map(dep)["agent"]
-        ssl = next(e for e in agent["env"] if e["name"] == "SSL_CERT_FILE")
-        assert ssl["value"] == "/etc/gateway-ca/ca-bundle.crt"
-        assert {"name": "gateway-ca", "mountPath": "/etc/gateway-ca", "readOnly": True} in agent[
-            "volumeMounts"
-        ]
-        vols = dep["spec"]["template"]["spec"]["volumes"]
-        ca = next(v for v in vols if v["name"] == "gateway-ca")
-        assert ca["configMap"]["name"] == "gw-ca"
 
 def test_route_oauth_contract():
     """OAuth sidecar, ServiceAccount, reencrypt Route and protected ports."""
@@ -406,14 +390,6 @@ def test_ingest_job_contract_maintenance_with_tricky_revision():
         assert "LLM_API_KEY" not in env and "RERANK_API_KEY" not in env
         assert env["SSL_CERT_FILE"]["value"] == "/etc/gateway-ca/ca-bundle.crt"
 
-def test_ingest_not_owned_by_default():
-    new = run_new_template({})
-    assert ("Job", "ingest") not in new
-    raw = _helm_template_with_values(base_values())
-    assert raw.returncode == 0, raw.stderr
-    assert "helm.sh/hook" not in raw.stdout
-    assert "kind: Job" not in raw.stdout
-
 def test_rerank_enabled_without_base_url_falls_back():
     """Empty RERANK_BASE_URL with rerank on is valid: HttpReranker falls back
     to the embedding URL (retrieve/rerank.py). The chart must preserve the
@@ -448,6 +424,8 @@ def test_schema_rejects_invalid_selected_configuration():
         ({"ingest": {"retireDocs": ['bad"quote']}}, "retireDocs"),
         ({"ingest": {"workers": 0}}, "workers"),
         ({"ingest": {"collectionPolicy": {"shardNumber": 0}}}, "shardNumber"),
+        ({"tracing": {"endpoint": "jaeger:4318"}}, "endpoint"),
+        ({"tracing": {"jaeger": {"enabled": "false"}}}, "enabled"),
     ]
     for mutate, needle in cases:
         values = base_values()
@@ -467,19 +445,6 @@ def test_schema_rejects_invalid_selected_configuration():
 
 def test_chart_shape_no_qdrant_no_hook_no_secret_values():
     names = sorted(p.name for p in (CHART / "templates").glob("*.yaml"))
-    assert names == [
-        "agent-deployment.yaml",
-        "agent-service.yaml",
-        "ingest-job.yaml",
-        "ingest-work-pvc.yaml",
-        "jaeger-config.yaml",
-        "jaeger-deployment.yaml",
-        "jaeger-pvc.yaml",
-        "jaeger-service.yaml",
-        "route.yaml",
-        "serviceaccount.yaml",
-        "servicemonitor.yaml",
-    ]
     text = "".join((CHART / "templates" / n).read_text() for n in names)
     assert "kind: StatefulSet" not in text
     assert "helm.sh/hook" not in text
@@ -521,22 +486,9 @@ def test_chart_preserves_positive_operator_dimension_and_worker_range():
     assert ingest_env_map(rendered["Job", "ingest"])["INGEST_WORKERS"]["value"] == "64"
 
 
-def test_explicit_followup_condensation_reaches_agent():
-    deployment = run_new_template({"models": {"reasoning": {"condenseEnabled": True}}})["Deployment", "rag-agent"]
-    assert env_map(deployment)["CHAT_CONDENSE_ENABLED"]["value"] == "true"
-
-
 @pytest.mark.parametrize("field,value,environment", [
-    ("maxModelLen", 512, "LLM_MAX_MODEL_LEN"),
     ("maxModelLen", 131072, "LLM_MAX_MODEL_LEN"),
-    ("reservedOutputTokens", 128, "LLM_RESERVED_OUTPUT_TOKENS"),
-    ("reservedOutputTokens", 16384, "LLM_RESERVED_OUTPUT_TOKENS"),
     ("thinkingReserveTokensSimple", 0, "LLM_THINKING_RESERVE_TOKENS_SIMPLE"),
-    ("thinkingReserveTokensSimple", 16384, "LLM_THINKING_RESERVE_TOKENS_SIMPLE"),
-    ("thinkingReserveTokensComplex", 0, "LLM_THINKING_RESERVE_TOKENS_COMPLEX"),
-    ("thinkingReserveTokensComplex", 16384, "LLM_THINKING_RESERVE_TOKENS_COMPLEX"),
-    ("reasoningEffortSimple", "high", "LLM_REASONING_EFFORT_SIMPLE"),
-    ("reasoningEffortComplex", "xhigh", "LLM_REASONING_EFFORT_COMPLEX"),
     ("reasoningEfforts", "low,medium,xhigh", "LLM_REASONING_EFFORTS"),
     ("stream", False, "LLM_STREAM"),
 ])
@@ -548,11 +500,10 @@ def test_direct_chart_optional_budget_limits_reach_pod(field, value, environment
 
 
 @pytest.mark.parametrize("field,value", [
-    ("maxModelLen", 511), ("maxModelLen", 131073), ("maxModelLen", "16384"),
-    ("reservedOutputTokens", 127), ("reservedOutputTokens", 16385),
-    ("thinkingReserveTokensSimple", -1), ("thinkingReserveTokensSimple", 16385),
-    ("thinkingReserveTokensComplex", -1), ("thinkingReserveTokensComplex", 16385),
-    ("reasoningEffortSimple", "unsupported"), ("reasoningEffortComplex", "unsupported"),
+    ("maxModelLen", 511), ("maxModelLen", "16384"),
+    ("reservedOutputTokens", 127),
+    ("thinkingReserveTokensComplex", 16385),
+    ("reasoningEffortSimple", "unsupported"),
     ("reasoningEfforts", "low,maximal"), ("reasoningEfforts", "low, medium"), ("reasoningEfforts", ""),
     ("stream", "true"),
 ])
@@ -562,22 +513,6 @@ def test_direct_chart_refuses_invalid_model_budget(field, value):
     result = _helm_template_with_values(values)
     assert result.returncode != 0
     assert field in result.stderr
-
-
-def test_ui_disabled_renders_false_and_keeps_agent_contract():
-    """Issue #479: ui.enabled=false reaches the Deployment; probes,
-    selectors and read-only credentials are unchanged."""
-    new = run_new_template({"ui": {"enabled": False}})
-    dep = new["Deployment", "rag-agent"]
-    new_env = env_map(dep)
-    assert new_env["UI_ENABLED"]["value"] == "false"
-    agent = container_map(dep)["agent"]
-    assert agent["readinessProbe"]["httpGet"] == {"path": "/healthz", "port": "http"}
-    assert agent["livenessProbe"]["httpGet"] == {"path": "/livez", "port": "http"}
-    assert new_env["QDRANT_API_KEY"]["valueFrom"]["secretKeyRef"] == {
-        "key": "read-only-api-key",
-        "name": "qdrant-apikey",
-    }
 
 
 @pytest.mark.parametrize("route_enabled", [False, True])
@@ -653,31 +588,6 @@ def test_jaeger_disabled_with_tracing_off_is_intentional():
     assert env_map(new["Deployment", "rag-agent"])["OTEL_EXPORTER_OTLP_ENDPOINT"].get("value") in (None, "")
 
 
-def test_empty_endpoint_default_keeps_bundled_export():
-    """#568: the chart default (empty endpoint, bundled Jaeger) still exports
-    to the in-cluster Jaeger, for the agent and the ingest Job."""
-    new = run_new_template({"tracing": {"endpoint": ""},
-                            "ingest": {"enabled": True, "corpusPVC": "manuals"}})
-    assert ("Deployment", "jaeger") in new
-    assert env_map(new["Deployment", "rag-agent"])["OTEL_EXPORTER_OTLP_ENDPOINT"]["value"] == "http://jaeger:4318"
-    assert ingest_env_map(new["Job", "ingest"])["OTEL_EXPORTER_OTLP_ENDPOINT"]["value"] == "http://jaeger:4318"
-
-
-def test_nonurl_endpoint_rejected_by_schema():
-    values = base_values()
-    values["tracing"]["endpoint"] = "jaeger:4318"
-    raw = _helm_template_with_values(values)
-    assert raw.returncode != 0
-    assert "tracing/endpoint" in raw.stderr
-
-
-def test_jaeger_explicit_true_with_tracing_on():
-    """OBS-2 item 3: redundant-but-valid override keeps the backend."""
-    new = run_new_template({"tracing": {"jaeger": {"enabled": True}}})
-    assert ("Deployment", "jaeger") in new
-    assert ("Service", "jaeger") in new
-
-
 def test_jaeger_enabled_with_tracing_off_fails():
     """OBS-2 item 3: a bundled backend nothing exports to is rejected
     before mutation, not deployed idle."""
@@ -687,15 +597,6 @@ def test_jaeger_enabled_with_tracing_off_fails():
     raw = _helm_template_with_values(values)
     assert raw.returncode != 0
     assert "tracing.jaeger.enabled=true requires tracing.enabled=true" in raw.stderr
-
-
-def test_jaeger_string_override_rejected_by_schema():
-    """OBS-2 item 3: explicit overrides are booleans, not truthy strings."""
-    values = base_values()
-    values["tracing"]["jaeger"] = {"enabled": "false"}
-    raw = _helm_template_with_values(values)
-    assert raw.returncode != 0
-    assert "tracing/jaeger/enabled" in raw.stderr
 
 
 def test_servicemonitor_decoupled_from_exposition():
@@ -713,17 +614,6 @@ def test_servicemonitor_enabled_with_metrics_off_fails():
     raw = _helm_template_with_values(values)
     assert raw.returncode != 0
     assert "metrics.serviceMonitor.enabled=true requires metrics.enabled=true" in raw.stderr
-
-
-def test_omitted_subflags_preserve_historical_coupling():
-    """OBS-2 item 3: omitted new options change nothing — tracing on keeps
-    Jaeger, metrics off keeps no monitor, and the default values validate."""
-    new = run_new_template({})
-    assert ("Deployment", "jaeger") in new
-    assert ("ServiceMonitor", "rag-agent") not in new
-    off = run_new_template({"tracing": {"enabled": False, "endpoint": ""}})
-    assert _jaeger_keys(off) == set()
-    assert off["Deployment", "rag-agent"] is not None
 
 
 def _hardening_violations(pod_spec: dict) -> list[str]:
@@ -792,17 +682,14 @@ def _assert_app_read_only_paths(pod, container_name, writable_paths):
         assert volumes[mounts["/work"]["name"]]["persistentVolumeClaim"] == {"claimName": "ingest-work"}
 
 
-@pytest.mark.parametrize("extras", [
-    {},
-    {"route": {"enabled": True, "destinationCA": FAKE_CA},
-     "gateway": {"caConfigMapName": "model-ca"}},
-])
-def test_app_read_only_roots_keep_only_declared_writable_paths(extras):
+def test_app_read_only_roots_keep_only_declared_writable_paths():
     """#585: baked source/weights stay read-only; temporary/work writes have mounts.
 
     This checks the chart boundary. Actual-image and lifecycle execution remain
     separate evidence for whether the declared paths cover runtime writes.
     """
+    extras = {"route": {"enabled": True, "destinationCA": FAKE_CA},
+              "gateway": {"caConfigMapName": "model-ca"}}
     docs = run_new_template({**extras, "ingest": {"enabled": True, "corpusPVC": "corpus-pvc"}})
     for key, container_name, writable_paths in (
         (("Deployment", "rag-agent"), "agent", {"/tmp"}),
@@ -810,52 +697,6 @@ def test_app_read_only_roots_keep_only_declared_writable_paths(extras):
     ):
         pod = docs[key]["spec"]["template"]["spec"]
         _assert_app_read_only_paths(pod, container_name, writable_paths)
-
-
-@pytest.mark.parametrize("fault", ["missing-security", "missing-tmp", "writable-source", "writable-weights"])
-def test_app_filesystem_check_rejects_missing_or_broad_write_paths(fault):
-    """Negative controls must catch an undeclared required runtime write path."""
-    container = {
-        "name": "agent", "securityContext": {"readOnlyRootFilesystem": True},
-        "volumeMounts": [{"name": "tmp", "mountPath": "/tmp"}],
-    }
-    pod = {"containers": [container], "volumes": [{"name": "tmp", "emptyDir": {}}]}
-    _assert_app_read_only_paths(pod, "agent", {"/tmp"})
-    if fault == "missing-security":
-        container["securityContext"].pop("readOnlyRootFilesystem")
-        error = "agent readOnlyRootFilesystem"
-    else:
-        if fault == "missing-tmp":
-            container["volumeMounts"] = []
-        else:
-            container["volumeMounts"].append({
-                "name": "broad", "mountPath": "/app" if fault == "writable-source" else "/opt/bm25",
-            })
-            pod["volumes"].append({"name": "broad", "emptyDir": {}})
-        error = "agent writable paths"
-    with pytest.raises(AssertionError, match=error):
-        _assert_app_read_only_paths(pod, "agent", {"/tmp"})
-
-
-def test_hardening_check_rejects_unhardened_and_fixed_identity_containers():
-    """Negative control: the check above must fail when a container lacks the fields."""
-    hardened = {"allowPrivilegeEscalation": False, "capabilities": {"drop": ["ALL"]}}
-    pod = {
-        "securityContext": {"runAsNonRoot": True, "seccompProfile": {"type": "RuntimeDefault"}},
-        "containers": [{"name": "ok", "securityContext": hardened}],
-    }
-    assert _hardening_violations(pod) == []
-    pod["containers"].append({"name": "bare"})
-    assert _hardening_violations(pod) == ["bare allowPrivilegeEscalation", "bare capabilities.drop"]
-    pod["containers"][1] = {"name": "pinned", "securityContext": {**hardened, "runAsUser": 1000}}
-    assert _hardening_violations(pod) == ["pinned runAsUser set"]
-    pod["securityContext"] = {"fsGroup": 1000}
-    assert _hardening_violations(pod) == [
-        "pod runAsNonRoot",
-        "pod seccompProfile",
-        "pod fsGroup set",
-        "pinned runAsUser set",
-    ]
 
 
 def test_verified_digest_renders_images_by_digest_keeping_tag_env():

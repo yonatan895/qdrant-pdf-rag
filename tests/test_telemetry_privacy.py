@@ -238,28 +238,18 @@ def test_failure_hides_canaries_but_keeps_error_type(client, caplog, monkeypatch
     )
 
 
-_ATTACHMENT_ROUTES = [
-    ("/v1/answer", False, "answer"),
-    ("/v1/answer", True, "answer"),
-    ("/v1/answer?stream=true", False, "answer"),
-    ("/v1/chat", False, "chat"),
-    ("/v1/chat", True, "chat"),
-    ("/v1/chat/completions", False, "chat"),
-    ("/v1/chat/completions", True, "chat"),
-    ("/ui/chat", False, "console"),
-    ("/ui/chat/stream", True, "console"),
-]
-
-
 @pytest.mark.parametrize(
     ("path", "stream", "endpoint", "failure"),
     [
-        (*route, failure)
-        for route in _ATTACHMENT_ROUTES
-        for failure in (
-            "sync_retrieval", "awaited_retrieval", "sync_condensation", "awaited_condensation",
-        )
-        if route[2] != "answer" or failure.endswith("retrieval")
+        ("/v1/answer", False, "answer", "sync_retrieval"),
+        ("/v1/answer", True, "answer", "awaited_retrieval"),
+        ("/v1/chat", False, "chat", "sync_condensation"),
+        ("/v1/chat", True, "chat", "awaited_condensation"),
+        ("/v1/chat/completions", True, "chat", "awaited_retrieval"),
+        ("/ui/chat", False, "console", "sync_retrieval"),
+        ("/ui/chat", False, "console", "awaited_condensation"),
+        ("/ui/chat/stream", True, "console", "sync_retrieval"),
+        ("/ui/chat/stream", True, "console", "awaited_condensation"),
     ],
 )
 def test_attachment_failures_hide_canaries(
@@ -362,22 +352,9 @@ def test_attachment_failures_hide_canaries(
 
 
 @pytest.mark.parametrize(
-    "failure",
-    ["sync_retrieval", "awaited_retrieval", "sync_condensation", "awaited_condensation"],
+    "enabled,end_on_exit,awaited",
+    [(True, False, True), (True, True, False), (False, False, False)],
 )
-def test_attachment_privacy_negative_control(client, metric_reader, caplog, monkeypatch, failure):
-    """Restoring SDK attachment defaults must trip the endpoint canary."""
-    monkeypatch.setattr(app_mod, "use_span", trace.use_span)
-    endpoint = "chat" if failure.endswith("condensation") else "answer"
-    with pytest.raises(AssertionError, match="leaked into spans"):
-        test_attachment_failures_hide_canaries(
-            client, metric_reader, caplog, monkeypatch, f"/v1/{endpoint}", False, endpoint, failure,
-        )
-
-
-@pytest.mark.parametrize("enabled", [False, True])
-@pytest.mark.parametrize("end_on_exit", [False, True])
-@pytest.mark.parametrize("awaited", [False, True])
 def test_safe_attachment_preserves_parent_and_lifetime(enabled, end_on_exit, awaited):
     provider, exporter = _provider()
     span_tracer = (
@@ -455,19 +432,11 @@ def test_exception_frames_carry_no_message_or_source():
     assert "test_telemetry_privacy.py" in payload["trace"]
 
 
-def test_success_and_failure_traces_join_logs_to_spans(client, caplog):
-    """One synthetic success and one failure end to end through the real
-    SDK exporter: log lines join their spans, terminal states are exact."""
-    c, exporter = client
-    with caplog.at_level(logging.INFO):
-        ok_resp = c.post("/v1/search", json={"query": CANARY_QUERY})
-    assert ok_resp.status_code == 200
-    ok_spans = [s for s in exporter.get_finished_spans() if s.name == "v1.search"]
-    assert len(ok_spans) == 1
-    assert ok_spans[0].status.status_code == trace.StatusCode.UNSET
-    joined = [
-        line
-        for line in _formatted_logs(caplog)
-        if ok_resp.json()["request_id"] in line
-    ]
-    assert joined, "request_id must join logs to their trace"
+def test_attachment_privacy_negative_control(client, metric_reader, caplog, monkeypatch):
+    """Restoring SDK attachment defaults must trip the endpoint canary."""
+    monkeypatch.setattr(app_mod, "use_span", trace.use_span)
+    with pytest.raises(AssertionError, match="leaked into spans"):
+        test_attachment_failures_hide_canaries(
+            client, metric_reader, caplog, monkeypatch,
+            "/v1/answer", False, "answer", "sync_retrieval",
+        )

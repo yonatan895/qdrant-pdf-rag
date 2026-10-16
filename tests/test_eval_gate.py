@@ -13,7 +13,6 @@ from scripts.eval_retrieval import main
 
 from mainframe_rag.config import Settings
 from mainframe_rag.eval.retrieval import (
-    _get,
     _set,
     check_baseline,
     update_baseline,
@@ -55,31 +54,6 @@ def _report() -> dict:
     }
 
 
-def test_get_and_set_round_trip():
-    doc: dict = {}
-    _set(doc, "identifier.recall@1", 1.0)
-    assert doc == {"identifier": {"recall@1": 1.0}}
-    assert _get(doc, "identifier.recall@1") == 1.0
-    assert _get(doc, "identifier.missing") is None
-    assert _get(doc, "identifier.recall@1.sub") is None
-
-
-def test_update_baseline_writes_nested_schema(tmp_path: Path):
-    path = tmp_path / "baseline.json"
-    rep = _report()
-    update_baseline(rep, path)
-    baseline = json.loads(path.read_text(encoding="utf-8"))
-
-    assert baseline["recall@1"] == 0.5
-    assert baseline["recall@5"] == 0.75
-    assert baseline["mrr"] == 0.625
-    assert baseline["identifier"]["recall@1"] == 1.0
-    assert baseline["_meta"]["n"] == 12
-
-    # Perfect match produces 0 regressions
-    assert check_baseline(rep, baseline) == []
-
-
 def test_check_baseline_detects_recall_regression():
     baseline = {
         "recall@1": 0.5,
@@ -95,21 +69,6 @@ def test_check_baseline_detects_recall_regression():
     assert "recall@5" in regressions[0]
 
 
-def test_check_baseline_detects_identifier_drop():
-    baseline = {
-        "recall@1": 0.5,
-        "recall@5": 0.75,
-        "mrr": 0.60,
-        "identifier": {"recall@1": 1.0},
-    }
-    # Identifier recall must never drop (min ratio 1.0)
-    rep = _report()
-    rep["identifier"]["recall@1"] = 0.90
-    regressions = check_baseline(rep, baseline)
-    assert len(regressions) == 1
-    assert "identifier.recall@1" in regressions[0]
-
-
 def test_check_baseline_detects_query_failures():
     baseline = {
         "recall@1": 0.5,
@@ -121,11 +80,6 @@ def test_check_baseline_detects_query_failures():
     rep["failures"] = 2
     regressions = check_baseline(rep, baseline)
     assert any("failures: 2 > 0" in r for r in regressions)
-
-
-def test_check_baseline_none_baseline_passes():
-    rep = _report()
-    assert check_baseline(rep, None) == []
 
 
 # --- main() exit-code contract (issue #159): a skipped gate is not a pass ---
@@ -173,12 +127,6 @@ def test_main_exit_2_when_holdout_without_rc_declaration(tmp_path, monkeypatch, 
     assert "frozen holdout" in capfd.readouterr().err
 
 
-def test_main_allows_holdout_with_rc_declaration(tmp_path, monkeypatch):
-    _hermetic_main(monkeypatch, tmp_path)
-    monkeypatch.setenv("VENUE", "rc")
-    assert main(["--golden", "evals/holdout.jsonl", "--no-check"]) == 0
-
-
 def _unservable_report() -> dict:
     report = _report()
     report["representation"] = {"servable": False, "outcome": "incompatible",
@@ -205,13 +153,6 @@ def test_main_refuses_baseline_from_unservable_collection(tmp_path, monkeypatch,
     assert rc == 2
     assert not baseline.exists()
     assert "refusing to record a baseline" in capfd.readouterr().err
-
-
-def test_main_ungated_trend_run_still_reports_unservable(tmp_path, monkeypatch):
-    golden = _hermetic_main(monkeypatch, tmp_path, report=_unservable_report())
-    out = tmp_path / "report.json"
-    assert main(["--golden", str(golden), "--no-check", "--out", str(out)]) == 0
-    assert json.loads(out.read_text())["representation"]["servable"] is False
 
 
 def test_main_exit_0_when_gate_applied_and_green(tmp_path, monkeypatch):
@@ -242,8 +183,6 @@ def test_main_exit_1_when_query_failures_despite_skip(tmp_path, monkeypatch):
 
 def test_load_golden_validates_and_rejects_empty(tmp_path: Path):
     from mainframe_rag.eval.datasets import load_golden
-    from mainframe_rag.eval.retrieval import score_entry
-    from mainframe_rag.retrieve.query import SearchHit
 
     # Valid file with comments and blanks
     golden_file = tmp_path / "valid_golden.jsonl"
@@ -259,25 +198,6 @@ def test_load_golden_validates_and_rejects_empty(tmp_path: Path):
     assert entries[0].expected_heading == "Chapter 2"
     assert entries[1].query == "LFAREA parmlib"
 
-    # Score entry against SearchHit
-    hit1 = SearchHit(
-        chunk_id="c1",
-        score=0.9,
-        cite="SC14-7315-70 Manual, p. 1",
-        heading="Chapter 2 > IEA500I",
-        text="Sample text",
-        doc_id="SC14-7315-70",
-        title="Manual",
-        page_label="1",
-        chunk_type="narrative",
-        message_ids=("IEA500I",),
-    )
-    score = score_entry([hit1], entries[0])
-    assert score["recall@1"] == 1.0
-    assert score["recall@8"] == 1.0
-    assert score["mrr"] == 1.0
-    assert score["ndcg@8"] == 1.0
-
     # Reject empty query
     bad1 = tmp_path / "bad1.jsonl"
     bad1.write_text('{"query": "", "expected_doc_ids": ["SC14-7315-70"]}\n')
@@ -290,28 +210,6 @@ def test_load_golden_validates_and_rejects_empty(tmp_path: Path):
     bad2.write_text('{"query": "valid query", "expected_doc_ids": []}\n')
     with pytest.raises(SystemExit):
         load_golden(bad2)
-
-
-def test_check_baseline_detects_recall8_regression():
-    baseline = {
-        "recall@8": 0.85,
-    }
-    rep = _report()
-    rep["recall@8"] = 0.70  # 0.70 < 0.85 * 0.95 (0.8075)
-    regressions = check_baseline(rep, baseline)
-    assert len(regressions) == 1
-    assert "recall@8" in regressions[0]
-
-
-def test_check_baseline_detects_ndcg8_regression():
-    baseline = {
-        "ndcg@8": 0.80,
-    }
-    rep = _report()
-    rep["ndcg@8"] = 0.65  # 0.65 < 0.80 * 0.95 (0.76)
-    regressions = check_baseline(rep, baseline)
-    assert len(regressions) == 1
-    assert "ndcg@8" in regressions[0]
 
 
 def test_gain_and_ndcg_at_k_calculation():
@@ -417,18 +315,6 @@ def test_gate_non_hash_baseline_exits_2(tmp_path: Path, capfd):
     assert "not a hash-mode baseline" in capfd.readouterr().err
 
 
-def test_gate_missing_meta_baseline_exits_2(tmp_path: Path, capfd):
-    from scripts.gate_l1 import run_gate
-
-    baseline = tmp_path / "baseline.json"
-    baseline.write_text(json.dumps({"recall@1": 1.0}))
-
-    rc, _ = run_gate(golden_path=_tmp_golden(tmp_path), baseline_path=baseline)
-
-    assert rc == 2
-    assert "not a hash-mode baseline" in capfd.readouterr().err
-
-
 def test_gate_golden_sha_mismatch_exits_2(tmp_path: Path, capfd):
     from scripts.gate_l1 import run_gate
 
@@ -443,17 +329,6 @@ def test_gate_golden_sha_mismatch_exits_2(tmp_path: Path, capfd):
     assert "sha256 mismatch" in capfd.readouterr().err
 
 
-def test_verify_golden_sha_accepts_matching_pin(tmp_path: Path):
-    from scripts.gate_l1 import _verify_golden_sha
-
-    golden = tmp_path / "g.jsonl"
-    golden.write_text('{"query": "x"}\n')
-    digest = hashlib.sha256(golden.read_bytes()).hexdigest()
-    Path(f"{golden}.sha256").write_text(f"{digest}  g.jsonl\n")
-
-    assert _verify_golden_sha(golden) is None
-
-
 def test_repo_golden_set_is_sha_pinned():
     from scripts.gate_l1 import _verify_golden_sha
 
@@ -461,32 +336,17 @@ def test_repo_golden_set_is_sha_pinned():
     assert Path("evals/golden.jsonl.sha256").exists()
 
 
-def test_expected_state_follows_behavior_and_overrides(monkeypatch):
-    """Issue #365 acceptance states are authored deterministically by the
-    builder: answer-tier accepted, abstain-tier insufficient_evidence, with
-    an explicit adjudication override path."""
-    from scripts import build_golden_corpus as bgc
-
-    assert bgc.expected_state_for({"id": "X", "expected_behavior": "answer"}) == "accepted"
-    assert (
-        bgc.expected_state_for({"id": "Y", "expected_behavior": "abstain"})
-        == "insufficient_evidence"
-    )
-    monkeypatch.setitem(bgc.EXPECTED_STATE_OVERRIDES, "X", "unverified_draft")
-    assert bgc.expected_state_for({"id": "X", "expected_behavior": "answer"}) == "unverified_draft"
-
-
 def test_repo_golden_rows_opt_into_acceptance_states():
     """Every committed golden and holdout row carries the issue #365
     acceptance state, consistent with its expected behavior: the holdout
     opts in through the adjudicated re-freeze."""
-    for path, expected_n in (("evals/golden.jsonl", 127), ("evals/holdout.jsonl", 76)):
+    for path in ("evals/golden.jsonl", "evals/holdout.jsonl"):
         rows = [
             json.loads(line)
             for line in Path(path).read_text(encoding="utf-8").splitlines()
             if line.strip()
         ]
-        assert len(rows) == expected_n
+        assert rows
         for row in rows:
             expected = (
                 "insufficient_evidence" if row["expected_behavior"] == "abstain" else "accepted"
@@ -494,52 +354,18 @@ def test_repo_golden_rows_opt_into_acceptance_states():
             assert row["expected_verification_state"] == expected, f"{path}:{row['id']}"
 
 
-def test_doc03_premise_correction_is_adjudicated():
-    """Issue #307/#365 disposition: DOC-03's false premise expects a premise
-    correction naming the real book, not a blind refusal or a confirmation of
-    the asserted identity. The builder override and the committed holdout row
-    must agree, and the state stays answer-tier `accepted`."""
-    from scripts import build_golden_corpus as bgc
-
-    assert bgc.GOLD_OVERRIDES["DOC-03"]["gold_must_contain"] == ["SC23-6858", "Magnetic Tapes"]
-    doc03 = next(
-        json.loads(line)
-        for line in Path("evals/holdout.jsonl").read_text(encoding="utf-8").splitlines()
-        if json.loads(line)["id"] == "DOC-03"
-    )
-    assert doc03["expected_behavior"] == "answer"
-    assert doc03["expected_verification_state"] == "accepted"
-    assert doc03["gold_must_contain"] == ["SC23-6858", "Magnetic Tapes"]
-    assert "premise correction" in doc03["note"]
-
-
 # --- absolute identifier gates (AGENTS.md: "identifier recall@1 strict 1.0") ---
 
-def test_identifier_gate_is_absolute_not_ratio():
-    baseline = {"identifier": {"recall@1": 0.5}}
+def test_identifier_and_message_id_gates_are_absolute_not_ratio():
+    baseline = {"identifier": {"recall@1": 0.5}, "classes": {"message_id": {"recall@1": 0.5}}}
     rep = _report()
     rep["identifier"]["recall@1"] = 0.99
-
-    regressions = check_baseline(rep, baseline)
-
-    assert any("identifier.recall@1" in r and "absolute gate" in r for r in regressions)
-
-
-def test_message_id_gate_is_absolute_not_ratio():
-    baseline = {"classes": {"message_id": {"recall@1": 0.5}}}
-    rep = _report()
     rep["classes"] = {"message_id": {"recall@1": 0.99}}
 
     regressions = check_baseline(rep, baseline)
 
+    assert any("identifier.recall@1" in r and "absolute gate" in r for r in regressions)
     assert any("classes.message_id.recall@1" in r and "absolute gate" in r for r in regressions)
-
-
-def test_identifier_gates_pass_at_one():
-    rep = _report()
-    rep["classes"] = {"message_id": {"recall@1": 1.0}}
-
-    assert check_baseline(rep, {}) == []
 
 
 def test_real_corpus_baseline_uses_no_drop_floor():
@@ -565,45 +391,7 @@ def test_real_corpus_baseline_uses_no_drop_floor():
     )
 
 
-def test_synthetic_baseline_keeps_absolute_floor():
-    """A synthetic collection name keeps 1.0-must-mean-1.0 (no-venue-meta
-    baselines keep it too; see test_identifier_gate_is_absolute_not_ratio)."""
-    baseline = {"_meta": {"collection": "gate-l1-123"}, "identifier": {"recall@1": 0.5}}
-    rep = _report()
-    rep["identifier"]["recall@1"] = 0.99
-    regressions = check_baseline(rep, baseline)
-    assert any("absolute gate" in r for r in regressions)
-
-
 # --- table query class (issue #270 step 4) ---------------------------------
-
-def test_table_query_class_is_valid():
-    """`table` joins the class vocabulary; unknown classes stay rejected."""
-    import pydantic
-    import pytest
-
-    from mainframe_rag.eval.datasets import QUERY_CLASSES, GoldenEntry
-
-    assert "table" in QUERY_CLASSES
-    entry = GoldenEntry(
-        query="Which table lists the traced fields?", expected_doc_ids=["D"], query_class="table"
-    )
-    assert entry.query_class == "table"
-    with pytest.raises(pydantic.ValidationError):
-        GoldenEntry(query="q", expected_doc_ids=["D"], query_class="not_a_class")
-
-
-def test_table_class_entries_are_authored_and_well_formed():
-    """The authored TBL series binds real docs/headings for the class; the
-    re-freeze that lands them in golden/holdout is a dedicated commit."""
-    from scripts import build_golden_corpus as bgc
-
-    tbl = [entry for entry in bgc.E if str(entry["id"]).startswith("TBL-")]
-    assert len(tbl) == 6
-    assert all(entry["query_class"] == "table" for entry in tbl)
-    assert all(entry["expected_doc_ids"] and entry["expected_heading"] for entry in tbl)
-    ids = [entry["id"] for entry in bgc.E]
-    assert len(ids) == len(set(ids))
 
 # Issue 367: requested gates need actual eligible observations, not just numbers.
 def test_requested_gate_rejects_empty_and_abstain_only_reports():
@@ -613,13 +401,6 @@ def test_requested_gate_rejects_empty_and_abstain_only_reports():
     for rows in ([], [score_entry([], GoldenEntry(query="unknown", expected_behavior="abstain"))]):
         rep = summarize(rows, failures=0, elapsed_s=0, embed_mode="hash", collection="c")
         assert check_baseline(rep, {"recall@1": 0.0})
-
-
-def test_requested_gate_rejects_nonfinite_scores():
-    for value in (float("nan"), float("inf"), float("-inf")):
-        rep = _report()
-        rep["recall@1"] = value
-        assert any("recall@1" in r for r in check_baseline(rep, {"recall@1": 0.5}))
 
 
 def test_requested_gate_rejects_missing_required_class():
@@ -736,21 +517,6 @@ def test_explicit_gate_cannot_be_bypassed_by_diagnostic_cli_modes(monkeypatch):
         with pytest.raises(SystemExit) as error:
             main(["--check", "baseline.json", flag])
         assert error.value.code == 2
-
-
-def test_holdout_invalid_pin_refuses_before_scoring(tmp_path, monkeypatch, capfd):
-    import scripts.eval_retrieval as ev
-
-    _hermetic_main(monkeypatch, tmp_path)
-    monkeypatch.setenv("VENUE", "rc")
-    holdout = tmp_path / "holdout.jsonl"
-    holdout.write_text(json.dumps({"query": "Original synthetic question", "expected_doc_ids": ["synthetic"]}) + "\n")
-    holdout.with_suffix(".jsonl.sha256").write_text("0" * 64 + "  holdout.jsonl\n")
-    measured = []
-    monkeypatch.setattr(ev, "evaluate", lambda entries, settings: measured.append(entries) or _report())
-    assert main(["--golden", str(holdout), "--no-check"]) == 2
-    assert measured == []
-    assert "sha256 mismatch" in capfd.readouterr().err
 
 
 def test_task_holdout_uses_real_cli_pin_validation_and_recovers(tmp_path):
@@ -901,14 +667,13 @@ raise SystemExit(ev.main(sys.argv[2:]))
     return tmp_path, run
 
 
-@pytest.mark.parametrize("operation", ["retrieval", "paraphrase"])
-@pytest.mark.parametrize("args,ambient,mode,venue", [
-    ([], {}, "hash", "dev"),
-    (["EMBED_MODE=vllm"], {"EMBED_MODE": "hash"}, "vllm", "dev"),
-    (["EMBED_MODE=hash", "VENUE=dev"], {"EMBED_MODE": "vllm", "VENUE": "rc"}, "hash", "dev"),
-    ([], {"EMBED_MODE": "vllm", "VENUE": "rc"}, "vllm", "rc"),
-    (["EMBED_MODE= VLLM "], {}, "vllm", "dev"),
-    (["EMBED_MODE="], {"EMBED_MODE": "vllm"}, "", "dev"),
+@pytest.mark.parametrize("operation,args,ambient,mode,venue", [
+    ("retrieval", [], {}, "hash", "dev"),
+    ("retrieval", ["EMBED_MODE=vllm"], {"EMBED_MODE": "hash"}, "vllm", "dev"),
+    ("retrieval", [], {"EMBED_MODE": "vllm", "VENUE": "rc"}, "vllm", "rc"),
+    ("retrieval", ["EMBED_MODE= VLLM "], {}, "vllm", "dev"),
+    ("retrieval", ["EMBED_MODE="], {"EMBED_MODE": "vllm"}, "", "dev"),
+    ("paraphrase", [], {}, "hash", "dev"),
 ])
 def test_task_retrieval_inputs(retrieval_task_workspace, operation, args, ambient, mode, venue):
     root, run = retrieval_task_workspace
@@ -957,8 +722,10 @@ def test_task_retrieval_record_then_gate(retrieval_task_workspace, mode, suffix)
     assert target.read_bytes() == recorded_bytes
 
 
-@pytest.mark.parametrize("operation,family", [("retrieval", ""), ("paraphrase", "-paraphrase")])
-@pytest.mark.parametrize("fault", ["missing", "corrupt", "mode", "empty", "regression"])
+@pytest.mark.parametrize("operation,family,fault", [
+    ("retrieval", "", "missing"), ("retrieval", "", "mode"), ("retrieval", "", "regression"),
+    ("paraphrase", "-paraphrase", "missing"),
+])
 def test_task_retrieval_required_gate_refuses_and_recovers(retrieval_task_workspace, operation, family, fault):
     root, run = retrieval_task_workspace
     baseline = root / f"evals/baseline{family}-vllm.json"

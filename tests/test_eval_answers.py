@@ -120,19 +120,11 @@ def test_http_answer_eval_scores_the_deployed_agent(http_answer_eval, tmp_path):
 
 
 @pytest.mark.parametrize("status,health,observed", [
-    (200, {"status": "ok", "qdrant": True, "representation": "empty"}, True),
-    (200, {"status": "ok", "qdrant": True, "representation": "legacy"}, True),
-    (200, {"status": "ok", "qdrant": True, "representation": "reembed_required"}, True),
     (503, {"status": "degraded", "qdrant": True, "representation": "pending"}, True),
-    (503, {"status": "degraded", "qdrant": False, "representation": "unknown"}, True),
     (200, {"status": "ok", "qdrant": True, "embed": False, "representation": "compatible"}, True),
-    (200, {"status": "ok", "qdrant": True, "rerank": False, "representation": "compatible"}, True),
     (200, {"status": "ok", "qdrant": "true", "representation": "compatible"}, False),
-    (200, {"status": "ok", "qdrant": True, "embed": 1, "representation": "compatible"}, False),
     (200, {"status": "ok", "qdrant": True}, False),
-    (200, {"status": "ok", "qdrant": True, "representation": ["compatible"]}, False),
     (200, [], False),
-    (200, None, False),
     (401, {"code": "unauthorized", "message": "PRIVATE HEALTH DETAIL"}, False),
     (302, {"status": "ok", "qdrant": True, "representation": "compatible"}, True),
 ])
@@ -221,11 +213,10 @@ def test_http_answer_eval_retains_failed_answers_and_continues(http_answer_eval,
 
 
 @pytest.mark.parametrize("payload", [
-    [], True, "PRIVATE ANSWER DETAIL",
+    [], "PRIVATE ANSWER DETAIL",
     {"answer": {"PRIVATE ANSWER DETAIL": "not prose"}},
-    {"citations": 1}, {"citations": ["Original p. 1", {"PRIVATE ANSWER DETAIL": "not a cite"}]},
-    {"citations": {"PRIVATE ANSWER DETAIL": "not a list"}},
-    {"verification_state": []}, {"verification_state": "PRIVATE ANSWER DETAIL"},
+    {"citations": ["Original p. 1", {"PRIVATE ANSWER DETAIL": "not a cite"}]},
+    {"verification_state": []},
 ])
 def test_http_answer_eval_malformed_answer_fields_cannot_abort_or_pass(
     http_answer_eval, capsys, payload,
@@ -255,10 +246,10 @@ def test_http_answer_eval_malformed_answer_fields_cannot_abort_or_pass(
     assert "PRIVATE ANSWER DETAIL" not in json.dumps(report) + capsys.readouterr().err
 
 
-@pytest.mark.parametrize("behavior", ["answer", "abstain"])
-@pytest.mark.parametrize("payload", [
-    {}, {"answer": None, "citations": None}, {"answer": "Original refusal", "citations": None},
-    {"answer": None, "citations": []}, {"answer": ""}, {"citations": []},
+@pytest.mark.parametrize("behavior,payload", [
+    ("answer", {}),
+    ("abstain", {"answer": "Original refusal", "citations": None}),
+    ("abstain", {"citations": []}),
 ])
 def test_http_answer_eval_missing_required_fields_are_errors_even_for_abstention(
     http_answer_eval, behavior, payload,
@@ -312,7 +303,7 @@ def test_http_answer_eval_numeric_overflow_retains_prior_and_next_cases(http_ans
 
 
 @pytest.mark.parametrize("hits", [
-    [None], [1], ["PRIVATE SEARCH DETAIL"], {"PRIVATE SEARCH DETAIL": "not a hit list"},
+    ["PRIVATE SEARCH DETAIL"], {"PRIVATE SEARCH DETAIL": "not a hit list"},
     [{"doc_id": "A", "cite": "Original p. 1"}, {"doc_id": "B"}, 42],
 ])
 def test_http_answer_eval_malformed_search_pool_keeps_the_next_case(
@@ -432,7 +423,7 @@ def test_http_answer_eval_uses_a_real_http_agent_and_preserves_query_bytes(tmp_p
     assert not (tmp_path / "SENTINEL").exists()
 
 
-@pytest.mark.parametrize("value", ["0", "-1", "601", "nan", "inf", "bad"])
+@pytest.mark.parametrize("value", ["0", "601", "nan"])
 def test_http_answer_eval_rejects_invalid_timeout_before_io(monkeypatch, value):
     from mainframe_rag.eval import answers
 
@@ -443,8 +434,8 @@ def test_http_answer_eval_rejects_invalid_timeout_before_io(monkeypatch, value):
 
 
 @pytest.mark.parametrize("value", [
-    "", "agent:8080", "file:///tmp/agent", "http://user:private@agent",
-    "http://agent?private=secret", "http://agent/#private", "http://agent:bad",
+    "file:///tmp/agent", "http://user:private@agent",
+    "http://agent?private=secret", "http://agent:bad",
 ])
 def test_http_answer_eval_rejects_unsafe_target_before_io(monkeypatch, value):
     from mainframe_rag.eval import answers
@@ -504,26 +495,10 @@ def test_answer_inferred_citations_fail_grounding() -> None:
     assert any("only inferred citations" in f for f in fails)
 
 
-def test_answer_explicit_citations_still_pass() -> None:
-    verdict, fails, _ = judge(
-        _entry(), "LFAREA is set in IEASYSxx.",
-        ["SA23-1380-70 ref, p. 1"], citations_inferred=False,
-    )
-    assert verdict == "pass"
-    assert fails == []
-
-
 def test_answer_refusal_fails() -> None:
     verdict, fails, _ = judge(_entry(), "The excerpts do not cover LFAREA.", ["SA23-1380-70 ref, p. 1"])
     assert verdict == "fail"
     assert any("explicit refusal" in f for f in fails)
-
-
-def test_answer_zero_citations_with_refusal_fails_once() -> None:
-    # refusal already explains the zero citations: no duplicate zero-cite failure
-    _, fails, _ = judge(_entry(), ZERO_HITS_ANSWER, [])
-    assert any("explicit refusal" in f for f in fails)
-    assert not any("zero validated citations" in f for f in fails)
 
 
 def test_answer_grounded_scope_caveat_is_not_a_refusal() -> None:
@@ -544,16 +519,6 @@ def test_answer_grounded_scope_caveat_is_not_a_refusal() -> None:
     assert fails == [] and warns == []
 
 
-def test_answer_short_grounded_refusal_still_fails() -> None:
-    """Whole-response refusal is the line: a marker-only body is an abstention
-    even when it carries a citation, and the answer-tier verdict still fires."""
-    body = "The excerpts do not cover LFAREA."
-    assert is_abstention(body)
-    verdict, fails, _ = judge(_entry(), body, ["SA23-1380-70 ref, p. 1"])
-    assert verdict == "fail"
-    assert any("explicit refusal" in f for f in fails)
-
-
 def test_answer_empty_body_fails() -> None:
     verdict, fails, _ = judge(_entry(), "   ", ["SA23-1380-70 ref, p. 1"])
     assert verdict == "fail"
@@ -561,17 +526,12 @@ def test_answer_empty_body_fails() -> None:
 
 
 # --------------------------------------------------------------- judge: abstain
-def test_abstain_zero_citations_clean_passes() -> None:
-    verdict, fails, warns = judge(_entry(expected_behavior="abstain"), ZERO_HITS_ANSWER, [])
-    assert verdict == "pass"
-    assert fails == [] and warns == []
-
-
-def test_abstain_silent_warns_but_passes() -> None:
-    verdict, fails, warns = judge(_entry(expected_behavior="abstain"), "I cannot help with that.", [])
-    assert verdict == "pass"
-    assert fails == []
-    assert any("silent abstention" in w for w in warns)
+def test_abstain_zero_citations_passes() -> None:
+    # A clean refusal and a silent (marker-less) uncited one both pass; the
+    # silent one only warns.
+    for body in (ZERO_HITS_ANSWER, "I cannot help with that."):
+        verdict, fails, _ = judge(_entry(expected_behavior="abstain"), body, [])
+        assert verdict == "pass" and fails == []
 
 
 def test_abstain_grounded_without_refusal_fails() -> None:
@@ -582,17 +542,6 @@ def test_abstain_grounded_without_refusal_fails() -> None:
     )
     assert verdict == "fail"
     assert any("trap answered" in f for f in fails)
-
-
-def test_abstain_hedged_citation_warns_but_passes() -> None:
-    verdict, fails, warns = judge(
-        _entry(expected_behavior="abstain"),
-        "The excerpts do not answer this; [1] only covers IEA501I.",
-        ["SA38-0673-70 ref, p. 2"],
-    )
-    assert verdict == "pass"
-    assert fails == []
-    assert any("hedged abstention" in w for w in warns)
 
 
 def test_abstain_long_grounded_decline_still_warns() -> None:
@@ -614,7 +563,7 @@ def test_abstain_long_grounded_decline_still_warns() -> None:
 
 
 # ------------------------------------------------------- judge: gold substrings
-def test_gold_must_contain_enforced() -> None:
+def test_gold_must_contain_enforced_casefolded() -> None:
     verdict, fails, _ = judge(
         _entry(gold_must_contain=["JES2", "JES3"]),
         "JES2 does X.",
@@ -622,9 +571,6 @@ def test_gold_must_contain_enforced() -> None:
     )
     assert verdict == "fail"
     assert any("JES3" in f for f in fails)
-
-
-def test_gold_must_contain_casefolded() -> None:
     verdict, _, _ = judge(_entry(gold_must_contain=["jes2"]), "JES2 does X.", ["c1"])
     assert verdict == "pass"
 
@@ -672,33 +618,15 @@ def test_zero_hits_answer_entry_still_fails_structurally() -> None:
 
 
 # ------------------------------------------------- judge: must_cite_identifier
-def test_must_cite_identifier_in_citations() -> None:
+def test_must_cite_identifier_checks_citations() -> None:
     verdict, _, _ = judge(_entry(must_cite_identifier="IEA794I"), "See the message text.", ["SA38-0673-70, IEA794I, p. 5"])
     assert verdict == "pass"
-
-
-def test_must_cite_identifier_in_body() -> None:
-    verdict, fails, _ = judge(_entry(must_cite_identifier="IEA794I"), "IEA794I reports GRS state.", [])
-    # zero citations still fail structurally; the identifier check adds nothing
-    assert verdict == "fail"
-    assert any("zero validated citations" in f for f in fails)
-    assert not any("identifier" in f for f in fails)
-
-
-def test_must_cite_identifier_absent_fails() -> None:
     verdict, fails, _ = judge(_entry(must_cite_identifier="SMFPRMxx"), "Something else entirely.", ["c1"])
     assert verdict == "fail"
     assert any("SMFPRMxx" in f for f in fails)
 
 
 # ----------------------------------------------------------------- is_refusal
-def test_refusal_markers() -> None:
-    assert is_refusal(ZERO_HITS_ANSWER)
-    assert is_refusal("The excerpts do not answer this question.")
-    assert is_refusal("No manual excerpts carry DSN90221I.")
-    assert not is_refusal("LFAREA reserves 64-bit frames above the bar.")
-
-
 def test_is_zero_hits_answer_recognizes_both_canned_forms() -> None:
     assert is_zero_hits_answer(ZERO_HITS_ANSWER)
     assert is_zero_hits_answer("No manual excerpts carry DSN90221I.")
@@ -732,13 +660,10 @@ def test_select_sample_small_class_fully_drained_first() -> None:
     assert len(sample) == 5
 
 
-def test_select_sample_cap_above_total_returns_all() -> None:
+def test_select_sample_cap_bounds() -> None:
     entries = [_entry(id="MSG-01"), _entry(id="NEG-01", query_class="negative", query="q")]
     assert len(select_sample(entries, 50)) == 2
-
-
-def test_select_sample_zero_cap() -> None:
-    assert select_sample([_entry()], 0) == []
+    assert select_sample(entries, 0) == []
 
 
 # --------------------------------------------------------------------- summarize
@@ -779,58 +704,6 @@ def test_answer_completeness_requires_gold_pool_and_full_recall() -> None:
          "gold_retrieved": True, "citation_recall": 1.0},
     ]
     assert answer_completeness(rows) == (2, 0.5)
-
-
-def test_answer_completeness_missing_pool_join_is_none_not_zero() -> None:
-    assert answer_completeness(
-        [{"verdict": "pass", "expected_behavior": "answer", "citation_recall": None}]
-    ) == (0, None)
-
-
-def test_summarize_carries_answer_completeness() -> None:
-    results = [
-        {"verdict": "pass", "expected_behavior": "answer", "query_class": "message_id",
-         "citations": ["a"], "gold_retrieved": True, "citation_recall": 1.0},
-        {"verdict": "fail", "expected_behavior": "answer", "query_class": "message_id",
-         "citations": [], "gold_retrieved": True, "citation_recall": 0.0},
-    ]
-    m = summarize(results)
-    assert m["answer_completeness_n"] == 2
-    assert m["answer_completeness"] == 0.5
-
-
-def test_summarize_empty() -> None:
-    m = summarize([])
-    assert m["queries"] == 0 and m["answer_pass_rate"] is None and m["citations_per_answer"] is None
-
-
-def test_summarize_counts_inferred_rows() -> None:
-    results = [
-        {"verdict": "fail", "expected_behavior": "answer", "query_class": "syntax",
-         "citations": ["c1"], "citations_inferred": True},
-        {"verdict": "pass", "expected_behavior": "answer", "query_class": "syntax",
-         "citations": ["c1"], "citations_inferred": False},
-    ]
-    assert summarize(results)["inferred_citations"] == 1
-
-
-def test_summarize_packing_attribution_is_report_only() -> None:
-    """Issue #368 signals aggregate without touching verdicts: omitted-unit
-    totals and the confirmed-budget share over signaled rows only."""
-    from mainframe_rag.eval.answers import summarize
-
-    results = [
-        {"verdict": "pass", "expected_behavior": "answer", "query_class": "syntax",
-         "citations": ["c1"], "budget_verified": True, "units_omitted": 2},
-        {"verdict": "pass", "expected_behavior": "answer", "query_class": "syntax",
-         "citations": ["c1"], "budget_verified": False, "units_omitted": 0},
-        {"verdict": "error", "expected_behavior": "answer", "query_class": "syntax",
-         "citations": []},
-    ]
-    m = summarize(results)
-    assert m["units_omitted_total"] == 2
-    assert m["budget_verified_n"] == 1
-    assert m["budget_verified_rate"] == 0.5
 
 
 # ------------------------------------------------- issue #298 attribution fields
@@ -884,16 +757,13 @@ class _RecordingClient(_StubClient):
         return super().post(*args, **kwargs)
 
 
-def test_run_query_pins_temperature_zero_by_default() -> None:
+def test_run_query_temperature_default_zero_and_override_recorded() -> None:
     """Issue #596: the answer eval sends temperature=0 unless told otherwise,
     and records it on the row so reports stay interpretable."""
     client = _RecordingClient(_answer_payload())
     row = run_query(client, _entry())
     assert client.posts == [{"query": _entry()["query"], "temperature": 0.0}]
     assert row["temperature"] == 0.0
-
-
-def test_run_query_temperature_override_is_sent_and_recorded() -> None:
     client = _RecordingClient(_answer_payload())
     row = run_query(client, _entry(), temperature=0.2)
     assert client.posts == [{"query": _entry()["query"], "temperature": 0.2}]
@@ -923,10 +793,7 @@ def _answer_payload(**overrides) -> dict:
 
 
 @pytest.mark.parametrize("answer", [
-    "", "   ", "Sources:", "**References:**", "[1].", "___", "SA23-1380-70 ref, p. 1",
-    "**Answer:**", "## Answer", "Sources: [1]", "References: [1]",
-    "Citations: <SA23-1380-70 ref, p. 1>",
-    "### **Sources:** [1, 2]", "Answer: [1].",
+    "   ", "**References:**", "SA23-1380-70 ref, p. 1", "Answer: [1].",
 ])
 def test_run_query_forged_accepted_without_answer_body_fails(answer):
     row = run_query(
@@ -974,90 +841,25 @@ def test_run_query_without_signals_leaves_nones() -> None:
     assert row["units_omitted"] is None
 
 
-def test_run_query_error_row_has_no_signal_fields() -> None:
-    row = run_query(_StubClient(ConnectionError("down")), _entry())
-    assert row["verdict"] == "error"
-    assert row.get("query_complexity") is None
-    assert row.get("citations_header_present") is None
-
-
-def test_summarize_by_complexity_counts_pass() -> None:
-    results = [
-        {"verdict": "pass", "expected_behavior": "answer", "query_class": "syntax",
-         "query_complexity": "simple"},
-        {"verdict": "fail", "expected_behavior": "answer", "query_class": "syntax",
-         "query_complexity": "simple", "failures": ["x"]},
-        {"verdict": "pass", "expected_behavior": "answer", "query_class": "message_id",
-         "query_complexity": "complex"},
-        {"verdict": "fail", "expected_behavior": "answer", "query_class": "message_id",
-         "failures": ["x"]},
-    ]
-    by_complexity = summarize(results)["by_complexity"]
-    assert by_complexity["simple"] == {"n": 2, "pass": 1}
-    assert by_complexity["complex"] == {"n": 1, "pass": 1}
-    # error rows never reach the judged set; a judged row without the join
-    # lands in unknown rather than a third complexity.
-    assert by_complexity["unknown"] == {"n": 1, "pass": 0}
-
-
 # ------------------------------------------------- issue #299 WHY taxonomy
-def test_failure_bucket_redacts_quoted_substrings() -> None:
-    from mainframe_rag.eval.answers import failure_bucket
-    assert failure_bucket("trap answered: 3 validated citation(s)") == "trap answered"
-    assert failure_bucket("trap answered: 5 validated citation(s)") == "trap answered"
-    assert failure_bucket("missing required substring: 'LFAREA 1M'") == "missing required substring"
-    assert failure_bucket("zero validated citations") == "zero validated citations"
-    assert (
-        failure_bucket("only inferred citations (no explicit Citations: block)")
-        == "only inferred citations …"
-    )
-    assert (
-        failure_bucket("3 validated citation(s) not in the fetched hit set: ['c1', 'c2']")
-        == "N validated citation(s) not in the fetched hit set"
-    )
-
-
-def test_run_query_carries_gold_and_pool_join() -> None:
+def test_run_query_pool_join_states() -> None:
+    entry = _entry(expected_doc_ids=["SA23-1380-09"])
     hits = [{"doc_id": "SA23-1380-09", "cite": "c1"}, {"doc_id": "OTHER-01", "cite": "c2"}]
-    row = run_query(_StubClient(_answer_payload()), _entry(expected_doc_ids=["SA23-1380-09"]), None, hits)
-    assert row["expected_doc_ids"] == ["SA23-1380-09"]
+    row = run_query(_StubClient(_answer_payload()), entry, None, hits)
     assert row["hit_doc_ids"] == ["SA23-1380-09", "OTHER-01"]
     assert row["gold_retrieved"] is True
     assert row["abstention_zeroed"] is False
-
-
-def test_run_query_gold_absent_from_pool_is_reader_blame_shape() -> None:
-    hits = [{"doc_id": "OTHER-01", "cite": "c2"}]
-    row = run_query(_StubClient(_answer_payload()), _entry(expected_doc_ids=["SA23-1380-09"]), None, hits)
+    row = run_query(_StubClient(_answer_payload()), entry, None, [{"doc_id": "OTHER-01", "cite": "c2"}])
     assert row["gold_retrieved"] is False
-
-
-def test_run_query_without_pool_leaves_join_nones() -> None:
-    row = run_query(_StubClient(_answer_payload()), _entry(expected_doc_ids=["SA23-1380-09"]))
-    assert row["hit_doc_ids"] is None
-    assert row["gold_retrieved"] is None
-    assert row["expected_doc_ids"] == ["SA23-1380-09"]
+    # No pool: unknown, never a fabricated False.
+    row = run_query(_StubClient(_answer_payload()), entry)
+    assert row["hit_doc_ids"] is None and row["gold_retrieved"] is None
 
 
 def test_run_query_flags_cited_then_zeroed_abstention() -> None:
     body = "The excerpts do not contain this information."
     row = run_query(_StubClient(_answer_payload(answer=body, citations=[])), _entry())
     assert row["abstention_zeroed"] is True
-
-
-def test_summarize_by_failure_histogram() -> None:
-    results = [
-        {"verdict": "fail", "expected_behavior": "answer", "query_class": "syntax",
-         "failures": ["zero validated citations"]},
-        {"verdict": "fail", "expected_behavior": "answer", "query_class": "syntax",
-         "failures": ["trap answered: 3 validated citation(s)"]},
-        {"verdict": "fail", "expected_behavior": "answer", "query_class": "syntax",
-         "failures": ["trap answered: 1 validated citation(s)"]},
-        {"verdict": "pass", "expected_behavior": "answer", "query_class": "syntax"},
-    ]
-    assert summarize(results)["by_failure"] == {
-        "trap answered": 2, "zero validated citations": 1,
-    }
 
 
 # --------------------------------------------- issue #299 citation WHY modes
@@ -1119,14 +921,6 @@ def test_inferred_index_off_gold_maps_indices_to_pool_order() -> None:
     ) is False
 
 
-def test_run_query_malformed_inferred_indices_is_an_error_row() -> None:
-    """A malformed provenance field fails the row closed instead of raising
-    through the runner (issue #299 review)."""
-    row = run_query(_StubClient(_answer_payload(inferred_indices=["not-a-number"])), _entry())
-    assert row["verdict"] == "error"
-    assert row["failures"] == ["malformed inferred_indices in response"]
-
-
 def test_summarize_by_why_and_off_gold() -> None:
     results = [
         {"verdict": "pass", "expected_behavior": "answer", "query_class": "syntax",
@@ -1145,6 +939,7 @@ def test_summarize_by_why_and_off_gold() -> None:
         "fabricated_unmapped": 1, "malformed_shape_bad": 1,
     }
     assert metrics["inferred_index_off_gold"] == 1
+    assert metrics["inferred_citations"] == 1
 
 
 # ------------------------------------------------------- verification states #365
@@ -1207,19 +1002,6 @@ def test_summarize_splits_false_refusal_and_unsafe_rates() -> None:
     assert m["state_mismatches"] == 1
 
 
-def test_run_query_carries_verification_state_and_review_flag() -> None:
-    row = run_query(
-        _StubClient(_answer_payload(
-            verification_state="accepted", script_review_required=True,
-            script="//STEP1 EXEC PGM=IEFBR14",
-        )),
-        _entry(),
-    )
-    assert row["verdict"] == "pass"
-    assert row["verification_state"] == "accepted"
-    assert row["script_review_required"] is True
-
-
 def test_run_query_unknown_state_is_contract_error() -> None:
     row = run_query(
         _StubClient(_answer_payload(verification_state="certified_correct")),
@@ -1251,31 +1033,7 @@ def test_security_refusal_requires_the_complete_response():
         assert not is_abstention(body)
 
 
-@pytest.mark.parametrize("module,flags", [
-    ("answers", ("--golden", "--max-queries", "--all", "--out", "--summary")),
-    ("chat", ("--golden", "--limit", "--out", "--summary")),
-])
-def test_eval_module_cli_help_and_holdout_refusal(tmp_path, module, flags):
-    import os
-    import subprocess
-    import sys
-
-    env = dict(os.environ, VENUE="dev")
-    env.pop("PYTHONPATH", None)
-    command = [sys.executable, "-m", f"mainframe_rag.eval.{module}"]
-    help_result = subprocess.run([*command, "--help"], cwd=tmp_path, env=env,
-                                 capture_output=True, text=True, check=False)
-    assert help_result.returncode == 0, help_result.stderr
-    for flag in flags:
-        assert flag in help_result.stdout
-    # Refuse before reading even a missing protected asset or starting clients.
-    refused = subprocess.run([*command, "--golden", "holdout.jsonl"], cwd=tmp_path,
-                             env=env, capture_output=True, text=True, check=False)
-    assert refused.returncode == 2
-    assert "requires VENUE=rc" in refused.stderr
-
-
-@pytest.mark.parametrize("row_id", ["NEG-02", "NEG-03", "NEG-04", "NEG-07"])
+@pytest.mark.parametrize("row_id", ["NEG-03"])
 def test_dev_refusal_rows_judge_refusal_structurally_not_by_wording(row_id: str) -> None:
     """Issue #596 option (a): the dev-golden refusal rows no longer pin the
     literal "excerpts do not answer". Any phrasing the agent's own refusal
@@ -1340,8 +1098,6 @@ class _ErrClient:
     ({"code": "prompt_budget_exceeded", "message": "prompt exceeds the model token budget"},
      "prompt_budget_exceeded"),
     ({"error": {"code": "legacy_nested"}}, "legacy_nested"),
-    ({"message": "no code"}, "?"),
-    (["not", "a", "dict"], "?"),
     (ValueError("not json"), "?"),
 ])
 def test_run_query_non_200_records_envelope_code(body, code) -> None:

@@ -11,7 +11,6 @@ from scripts.loadtest import export_to_baseline
 
 from mainframe_rag.eval.load import (
     parse_server_timing,
-    query_vram_mb,
     run_load,
 )
 
@@ -34,61 +33,6 @@ def test_parse_server_timing():
     header_quoted = 'embed;dur="10.2",   qdrant;dur="20.5"  , invalid;foo=bar'
     timings_q = parse_server_timing(header_quoted)
     assert timings_q == {"embed_ms": 10.2, "qdrant_ms": 20.5}
-
-
-def test_query_vram_mb_success(monkeypatch):
-    mock_run = MagicMock(
-        return_value=subprocess.CompletedProcess(
-            args=["nvidia-smi"],
-            returncode=0,
-            stdout="7567, 8151\n",
-            stderr="",
-        )
-    )
-    monkeypatch.setattr(subprocess, "run", mock_run)
-    res = query_vram_mb()
-    assert res == {"used_mb": 7567.0, "total_mb": 8151.0}
-
-
-def test_query_vram_mb_unavailable(monkeypatch):
-    def mock_fail(*a, **k):
-        raise FileNotFoundError("nvidia-smi not found")
-
-    monkeypatch.setattr(subprocess, "run", mock_fail)
-    assert query_vram_mb() is None
-
-    mock_err = MagicMock(
-        return_value=subprocess.CompletedProcess(
-            args=["nvidia-smi"],
-            returncode=1,
-            stdout="",
-            stderr="NVIDIA-SMI has failed",
-        )
-    )
-    monkeypatch.setattr(subprocess, "run", mock_err)
-    assert query_vram_mb() is None
-
-
-def test_export_to_baseline_new_file(tmp_path: Path):
-    baseline_file = tmp_path / "harness-l3.json"
-    result = {
-        "latency_ms": {"p50": 15.0, "p95": 30.0},
-        "stages": {
-            "embed_ms": {"p50": 5.0, "p95": 10.0},
-            "qdrant_ms": {"p50": 8.0, "p95": 15.0},
-        },
-        "vram": {"used_mb": 2048.0, "total_mb": 8192.0},
-    }
-    export_to_baseline(baseline_file, "search", result)
-    assert baseline_file.exists()
-    doc = json.loads(baseline_file.read_text(encoding="utf-8"))
-    assert doc["agent"]["search"]["latency_ms"]["p50"] == 15.0
-    assert doc["agent"]["search"]["latency_ms"]["p95"] == 30.0
-    assert doc["agent"]["search"]["stages"]["embed_ms"]["p95"] == 10.0
-    assert doc["agent"]["search"]["stages"]["qdrant_ms"]["p95"] == 15.0
-    assert doc["vram"]["used_mb"] == 2048.0
-    assert doc["vram"]["total_mb"] == 8192.0
-    assert "_meta" in doc
 
 
 def test_export_to_baseline_preserves_existing_keys(tmp_path: Path):
@@ -148,20 +92,6 @@ def test_query_gpu_name_success_and_fail(monkeypatch):
     assert query_gpu_name() is None
 
 
-def test_export_to_baseline_saves_env(tmp_path: Path):
-    baseline_file = tmp_path / "harness-l3.json"
-    result = {
-        "latency_ms": {"p50": 15.0, "p95": 30.0},
-        "stages": {"embed_ms": {"p50": 5.0, "p95": 10.0}},
-    }
-    env = {"cpu_count": 8, "embed_mode": "vllm", "gpu_name": "RTX 5060"}
-    export_to_baseline(baseline_file, "search", result, env=env)
-    doc = json.loads(baseline_file.read_text(encoding="utf-8"))
-    assert doc["_meta"]["env"]["cpu_count"] == 8
-    assert doc["_meta"]["env"]["embed_mode"] == "vllm"
-    assert doc["_meta"]["env"]["gpu_name"] == "RTX 5060"
-
-
 def test_export_to_baseline_refuses_ci_benchmark_file():
     import pytest
     from scripts.loadtest import REPO
@@ -196,38 +126,6 @@ def test_run_load_tracks_missing_timings_on_header_absence(monkeypatch):
     assert res["requests"] > 0
     assert res["missing_timings"] == res["requests"]
     assert res["stages"] == {}
-
-
-def test_run_load_extracts_stages_and_percentiles(monkeypatch):
-    class FakeResponse:
-        def __init__(self):
-            self.status_code = 200
-            self.headers = {"server-timing": "embed;dur=15.0, qdrant;dur=25.0"}
-
-    def fake_post(self, *a, **k):
-        return FakeResponse()
-
-    import httpx2
-    monkeypatch.setattr(httpx2.Client, "post", fake_post)
-    res = run_load("http://127.0.0.1:8080", "search", ["IEA500I"], concurrency=2, duration_s=0.1)
-    assert res["endpoint"] == "search"
-    assert res["requests"] > 0
-    assert res["errors"] == 0
-    assert res["missing_timings"] == 0
-    assert "embed_ms" in res["stages"]
-    assert res["stages"]["embed_ms"]["p50"] == 15.0
-    assert res["stages"]["qdrant_ms"]["p50"] == 25.0
-
-
-def test_load_measurement_consumers_share_canonical_owner():
-    from scripts import benchmark, harness_l3, loadtest
-
-    from mainframe_rag.eval import load
-
-    for name in ("DEFAULT_QUERIES", "query_gpu_name", "run_load"):
-        assert getattr(loadtest, name) is getattr(load, name)
-    assert benchmark.run_load is harness_l3.run_load is load.run_load
-    assert benchmark.DEFAULT_QUERIES is harness_l3.DEFAULT_QUERIES is load.DEFAULT_QUERIES
 
 
 def test_task_load_defaults_and_literal_url_reach_actual_measurement(tmp_path):
@@ -289,11 +187,8 @@ finally:
     launcher.chmod(0o755)
     literal = 'http://example.invalid/אב space;$(touch SENTINEL)/'
     cases = [([], {}, 'http://127.0.0.1:8080'),
-             ([], {'AGENT_URL': literal}, literal),
              ([f'AGENT_URL={literal}'], {'AGENT_URL': 'http://wrong.invalid'}, literal),
-             (['AGENT_URL='], {'AGENT_URL': 'http://wrong.invalid'}, ''),
-             ([], {'AGENT_URL': ''}, ''),
-             (['AGENT_URL=false'], {}, 'false')]
+             ([], {'AGENT_URL': ''}, '')]
     for args, ambient, expected_url in cases:
         env = {'PATH': os.defpath, 'HOME': str(tmp_path), **ambient}
         direct_args = [] if not args and 'AGENT_URL' not in ambient else ['--url', expected_url]

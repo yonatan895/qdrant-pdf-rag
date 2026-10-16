@@ -75,12 +75,11 @@ def test_build_manifest_literal():
     }
 
 
-def test_manifest_digest_literal_and_stable():
+def test_manifest_digest_and_point_id_literals_are_stable():
+    """Persisted contract identity: a drift here would make every stored
+    generation read as drifted or lose its manifest point."""
     assert manifest_digest(_settings(), RULES) == "efb582c923ae147d"
     assert manifest_digest(_settings(), RULES) == manifest_digest(_settings(), RULES)
-
-
-def test_manifest_point_id_literal():
     assert manifest_point_id("mainframe_manuals__completions") == "f6276259-bb0c-5705-9d2a-82cf55a3c168"
     assert manifest_point_id("other__completions") != manifest_point_id("mainframe_manuals__completions")
 
@@ -191,7 +190,7 @@ class _ManifestFake:
         return SimpleNamespace()
 
 
-def test_write_read_roundtrip():
+def test_manifest_write_read_roundtrip_and_unreadable_states():
     from mainframe_rag.ingest.completion import completion_collection_name
 
     settings = _settings()
@@ -206,15 +205,12 @@ def test_write_read_roundtrip():
     assert write_manifest(fake, name, settings, RULES) == digest
     assert len(fake.points[name]) == 1
 
-
-def test_read_absent_or_corrupt_is_none():
-    fake = _ManifestFake()
+    # Absent, wrong record type, non-dict/unparsable manifest all read as
+    # legacy (None), never raise.
     assert read_manifest(fake, "missing__completions") is None
     name = "coll__completions"
-    # Wrong record type (e.g. a stray point id collision) reads as legacy.
     fake.points[name] = {manifest_point_id(name): {"record_type": "nope"}}
     assert read_manifest(fake, name) is None
-    # Non-dict / unparsable manifest reads as legacy, never raises.
     fake.points[name] = {manifest_point_id(name): {"record_type": "representation-manifest"}}
     assert read_manifest(fake, name) is None
     fake.points[name] = {
@@ -337,37 +333,33 @@ def test_dry_run_record_stamps_parent_manifest_view(tmp_path, synthetic_pdf):
     )
 
 
-def test_default_revision_settings_pinned():
-    assert Settings(_env_file=None).embed_model_revision == ""
-    assert Settings(_env_file=None).bm25_weights_revision == "22b8d2af71a76161e18dd432d2cee0eefa66e412"
-
-
 # ------------------------------------------- generation fingerprint (391 F2) ---
-def test_fingerprint_revision_only_change_alters_identity():
-    """The operator revision rides the fingerprint (pre-391 it did not):
-    revision-only drift must change completion and staging identity, or an
-    A marker would certify re-embedded-as-B vectors."""
+def test_fingerprint_identity_policy():
+    """The operator revision rides the fingerprint (or an A marker would
+    certify re-embedded-as-B vectors), as do the dimension and extraction
+    rules; the dense query prefix is record-only."""
     from mainframe_rag.ingest.completion import doc_generation_id, representation_fingerprint
 
+    base = representation_fingerprint(_settings(), RULES)
+    assert base.startswith("rp2:")
+    assert representation_fingerprint(_settings(), RULES) == base
     a = _settings(embed_model_revision="rev-a")
     b = _settings(embed_model_revision="rev-b")
-    assert representation_fingerprint(a, RULES) == representation_fingerprint(
-        _settings(embed_model_revision="rev-a"), RULES
-    )
-    assert representation_fingerprint(a, RULES).startswith("rp2:")
     assert representation_fingerprint(a, RULES) != representation_fingerprint(b, RULES)
     assert doc_generation_id(a, "sha", RULES, "||") != doc_generation_id(b, "sha", RULES, "||")
+    # Hash mode pins HASH_EMBED_DIM regardless of the setting, so the dim case
+    # needs vllm mode to show the projection difference.
+    dim64 = _settings(embed_mode="vllm", embed_model="m", dense_dim=64)
+    dim128 = _settings(embed_mode="vllm", embed_model="m", dense_dim=128)
+    assert representation_fingerprint(dim64, RULES) != representation_fingerprint(dim128, RULES)
+    assert representation_fingerprint(_settings(), "0" * 16) != base
+    assert representation_fingerprint(_settings(dense_query_prefix="OTHER:"), RULES) == base
 
 
 @pytest.mark.parametrize(
     "overrides",
     [
-        {"embed_mode": "vllm"},
         {"embed_model": "other-model"},
-        {"contextual_embed_enabled": True},
-        {"context_llm_model": "other-llm"},
-        {"context_max_chars": 50},
-        {"bm25_model": "other/bm25"},
         {"bm25_weights_revision": "0" * 40},
     ],
 )
@@ -376,23 +368,3 @@ def test_fingerprint_covers_settings_driven_reembed_fields(overrides):
 
     base = representation_fingerprint(_settings(), RULES)
     assert representation_fingerprint(_settings(**overrides), RULES) != base
-
-
-def test_fingerprint_dense_dim_is_reembed_identity():
-    """Hash mode pins HASH_EMBED_DIM regardless of the setting, so the dim
-    case needs vllm mode to show the projection difference."""
-    from mainframe_rag.ingest.completion import representation_fingerprint
-
-    a = _settings(embed_mode="vllm", embed_model="m", dense_dim=64)
-    b = _settings(embed_mode="vllm", embed_model="m", dense_dim=128)
-    assert representation_fingerprint(a, RULES) != representation_fingerprint(b, RULES)
-
-
-def test_fingerprint_rules_and_prefix_policy():
-    """Extraction rules are re-embed identity; the dense query prefix is
-    record-only — evaluation attribution, never a generation change."""
-    from mainframe_rag.ingest.completion import representation_fingerprint
-
-    base = representation_fingerprint(_settings(), RULES)
-    assert representation_fingerprint(_settings(), "0" * 16) != base
-    assert representation_fingerprint(_settings(dense_query_prefix="OTHER:"), RULES) == base

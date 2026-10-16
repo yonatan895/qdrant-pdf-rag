@@ -6,17 +6,13 @@ from mainframe_rag.ingest.ibm_pdf import parse_pdf
 from mainframe_rag.ingest.walk import detect_vendor, infer_from_path
 
 
-def test_plain_pdf_uses_filename_stem_as_doc_id(plain_pdf):
+def test_plain_pdf_uses_filename_stem_and_chunks_without_outline(plain_pdf):
+    import pymupdf
+
     parsed = parse_pdf(plain_pdf)
     assert parsed.doc_id == "widget-guide"
     assert parsed.vendor == "unknown"
     assert parsed.title
-
-
-def test_plain_pdf_chunks_without_outline(plain_pdf):
-    import pymupdf
-
-    parsed = parse_pdf(plain_pdf)
     assert parsed.toc == ()
     doc = pymupdf.open(plain_pdf)
     try:

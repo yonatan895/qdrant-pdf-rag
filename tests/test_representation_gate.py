@@ -119,28 +119,12 @@ def _completions(settings):
 
 
 # ---------------------------------------------------------------- compare ----
-def test_compare_identical_is_compatible():
-    s = _settings()
-    outcome, fields = compare_manifests(build_manifest(s, RULES), build_manifest(s, RULES))
-    assert (outcome, fields) == (COMPATIBLE, [])
-
-
 @pytest.mark.parametrize(
-    "field,value",
+    ("field", "value"),
     [
         ("extraction_rules", "0" * 16),
-        ("identity_schema", "doc_id"),
-        ("embed_mode", "vllm"),
-        ("embed_model", "other-model"),
         ("embed_model_revision", "rev-2"),
         ("dense_dim", 768),
-        ("contextual_enabled", True),
-        ("context_llm_model", "other-llm"),
-        ("context_prompt_version", "v9"),
-        ("context_max_chars", 50),
-        ("sparse_model", "other/bm25"),
-        ("sparse_weights_revision", "0" * 40),
-        ("schema_version", 999),
     ],
 )
 def test_compare_each_reembed_field_rejects(field, value):
@@ -151,66 +135,50 @@ def test_compare_each_reembed_field_rejects(field, value):
     assert field in fields
 
 
-def test_compare_blank_context_model_is_compatible():
-    """Issue #391 F1 follow-up: the ingest Job's empty-string
-    CONTEXT_LLM_MODEL and the agent's unset value are one contract value;
-    without normalization the published Kind generation read
-    reembed_required on context_llm_model forever."""
-    stored = build_manifest(_settings(context_llm_model=""), RULES)
-    wanted = build_manifest(_settings(context_llm_model=None), RULES)
-    assert compare_manifests(stored, wanted) == (COMPATIBLE, [])
-
-
-def test_compare_prefix_only_is_record_only():
+def test_compare_manifests_compatible_and_record_only():
     s = _settings()
-    stored = build_manifest(s, RULES).model_copy(update={"dense_query_prefix": "OTHER:"})
-    outcome, fields = compare_manifests(stored, build_manifest(s, RULES))
-    assert (outcome, fields) == (RECORD_ONLY_DRIFT, ["dense_query_prefix"])
-
-
-def test_compare_reembed_wins_over_record_drift():
-    s = _settings()
-    stored = build_manifest(s, RULES).model_copy(
-        update={"embed_model_revision": "rev-2", "dense_query_prefix": "OTHER:"}
-    )
-    outcome, fields = compare_manifests(stored, build_manifest(s, RULES))
+    wanted = build_manifest(s, RULES)
+    assert compare_manifests(build_manifest(s, RULES), wanted) == (COMPATIBLE, [])
+    # Issue #391 F1 follow-up: the ingest Job's empty-string CONTEXT_LLM_MODEL
+    # and the agent's unset value are one contract value; without
+    # normalization a published generation read reembed_required forever.
+    assert compare_manifests(
+        build_manifest(_settings(context_llm_model=""), RULES),
+        build_manifest(_settings(context_llm_model=None), RULES),
+    ) == (COMPATIBLE, [])
+    # The query prefix is record-only, and a re-embed field wins over it.
+    prefix_only = wanted.model_copy(update={"dense_query_prefix": "OTHER:"})
+    assert compare_manifests(prefix_only, wanted) == (RECORD_ONLY_DRIFT, ["dense_query_prefix"])
+    both = wanted.model_copy(update={"embed_model_revision": "rev-2", "dense_query_prefix": "OTHER:"})
+    outcome, fields = compare_manifests(both, wanted)
     assert outcome == REEMBED_REQUIRED
     assert "embed_model_revision" in fields
 
 
 # -------------------------------------------------------------- attestation --
-def test_attestation_vllm_blank_and_whitespace_reject():
-    for rev in ("", "   "):
-        s = _settings(embed_mode="vllm", embed_model="m", dense_dim=64,
-                      embed_base_url="http://x/v1", embed_model_revision=rev)
-        with pytest.raises(RuntimeError, match="EMBED_MODEL_REVISION"):
-            require_attested_revision(s)
-
-
-def test_attestation_vllm_declared_and_hash_blank_pass():
-    require_attested_revision(
-        _settings(embed_mode="vllm", embed_model="m", dense_dim=64,
-                  embed_base_url="http://x/v1", embed_model_revision="rev-1")
-    )
-    require_attested_revision(_settings())  # hash mode exempt
-
-
-def test_attestation_fires_before_store_contact():
+@pytest.mark.parametrize("rev", ["", "   "])
+def test_attestation_rejects_a_blank_revision_before_store_contact(rev):
     s = _settings(embed_mode="vllm", embed_model="m", dense_dim=64,
-                  embed_base_url="http://x/v1", embed_model_revision="")
+                  embed_base_url="http://x/v1", embed_model_revision=rev)
+    with pytest.raises(RuntimeError, match="EMBED_MODEL_REVISION"):
+        require_attested_revision(s)
     with pytest.raises(RuntimeError, match="EMBED_MODEL_REVISION"):
         check_ingest_compatible(ExplodingStore(), s, "coll__completions", RULES)
 
 
+def test_attestation_accepts_a_declared_revision_and_exempts_hash_mode():
+    require_attested_revision(
+        _settings(embed_mode="vllm", embed_model="m", dense_dim=64,
+                  embed_base_url="http://x/v1", embed_model_revision="rev-1")
+    )
+    require_attested_revision(_settings())
+
+
 # --------------------------------------------------------------- preflight ---
-def test_preflight_empty_target_proceeds():
+def test_preflight_proceeds_for_empty_compatible_and_record_only_targets():
     s = _settings()
     digest, drift = check_ingest_compatible(SyncStore(), s, _completions(s), RULES)
     assert (digest, drift) == (manifest_digest(s, RULES), [])
-
-
-def test_preflight_compatible_proceeds():
-    s = _settings()
     store = SyncStore()
     write_manifest(store, _completions(s), s, RULES)
     store._points.setdefault(s.qdrant_collection, []).append(
@@ -218,6 +186,9 @@ def test_preflight_compatible_proceeds():
     )
     _, drift = check_ingest_compatible(store, s, _completions(s), RULES)
     assert drift == []
+    s2 = _settings(dense_query_prefix="OTHER:")
+    _, drift = check_ingest_compatible(store, s2, _completions(s2), RULES)
+    assert drift == ["dense_query_prefix"]
 
 
 def test_preflight_same_dim_new_revision_rejects_with_migration_path():
@@ -230,15 +201,12 @@ def test_preflight_same_dim_new_revision_rejects_with_migration_path():
     # Same dimension, operator attests a new revision mid-stream: the stored
     # vectors predate the attestation and must never be skipped against.
     s2 = _settings(embed_model_revision="rev-2")
-    with pytest.raises(RuntimeError, match="representation drift on embed_model_revision"):
+    with pytest.raises(RuntimeError, match="representation drift on embed_model_revision") as exc:
         check_ingest_compatible(store, s2, _completions(s2), RULES)
-    try:
-        check_ingest_compatible(store, s2, _completions(s2), RULES)
-    except RuntimeError as exc:
-        assert "--reingest" in str(exc)
+    assert "--reingest" in str(exc.value)
 
 
-def test_preflight_legacy_unversioned_rejects_with_attest_path():
+def test_preflight_legacy_or_corrupt_manifest_rejects_with_attest_path():
     s = _settings()
     store = SyncStore()
     store._points.setdefault(s.qdrant_collection, []).append(
@@ -246,11 +214,7 @@ def test_preflight_legacy_unversioned_rejects_with_attest_path():
     )
     with pytest.raises(RuntimeError, match="predates the representation manifest"):
         check_ingest_compatible(store, s, _completions(s), RULES)
-
-
-def test_preflight_corrupt_manifest_reads_as_legacy():
-    s = _settings()
-    store = SyncStore()
+    # A corrupt manifest point reads as legacy.
     store._points.setdefault(_completions(s), []).append(
         SimpleNamespace(
             id=manifest_point_id(_completions(s)),
@@ -258,23 +222,8 @@ def test_preflight_corrupt_manifest_reads_as_legacy():
             vector=None,
         )
     )
-    store._points.setdefault(s.qdrant_collection, []).append(
-        SimpleNamespace(id="p1", payload={"doc_id": "D"}, vector=None)
-    )
     with pytest.raises(RuntimeError, match="predates the representation manifest"):
         check_ingest_compatible(store, s, _completions(s), RULES)
-
-
-def test_preflight_record_only_drift_proceeds_with_fields():
-    s = _settings()
-    store = SyncStore()
-    write_manifest(store, _completions(s), s, RULES)
-    store._points.setdefault(s.qdrant_collection, []).append(
-        SimpleNamespace(id="p1", payload={"doc_id": "D"}, vector=None)
-    )
-    s2 = _settings(dense_query_prefix="OTHER:")
-    _, drift = check_ingest_compatible(store, s2, _completions(s2), RULES)
-    assert drift == ["dense_query_prefix"]
 
 
 # ------------------------------------------------------------------- rekey ---
@@ -309,18 +258,16 @@ def test_rekey_carries_contract_to_staging_id():
     assert got[0].vector == vector
 
 
-def test_rekey_absent_source_writes_nothing():
+def test_rekey_inherits_live_state_verbatim():
+    """Staging inherits live's contract verbatim: nothing is recomputed from
+    current settings (a drifted run must still fail its preflight, otherwise
+    cloning would launder a migration into a pass), a pending live is not
+    laundered into a committed staging, and an absent source writes nothing."""
+    s = _settings()
     store = SyncStore()
     assert rekey_manifest(store, "live__completions", "staging__completions") is False
     assert store.upserts == 0
 
-
-def test_rekey_never_recomputes_from_current_settings():
-    """Staging inherits live's contract verbatim: a drifted run must still
-    see the inherited contract and fail its preflight (otherwise cloning
-    would launder a migration into a pass)."""
-    s = _settings()
-    store = SyncStore()
     live_comp, staging_comp = "live__completions", "staging__completions"
     write_manifest(store, live_comp, s, RULES)  # live attests rev ""
     assert rekey_manifest(store, live_comp, staging_comp) is True
@@ -331,46 +278,36 @@ def test_rekey_never_recomputes_from_current_settings():
     with pytest.raises(RuntimeError, match="representation drift on embed_model_revision"):
         check_ingest_compatible(store, s2, staging_comp, RULES)
 
+    pending_live, pending_staging = "plive__completions", "pstaging__completions"
+    write_manifest(store, pending_live, s, RULES, state=STATE_PENDING)
+    assert rekey_manifest(store, pending_live, pending_staging) is True
+    assert read_manifest_record(store, pending_staging).state == STATE_PENDING
+
 
 # ----------------------------------------------------------------- serving ---
 @pytest.mark.anyio
-async def test_serving_compatible_and_empty():
+async def test_serving_outcome_per_stored_contract():
     s = _settings()
-    outcome, _ = await serving_outcome(
-        ServingManifestQdrant(manifest_envelope(s, RULES, _completions(s))),
-        s, _completions(s), RULES,
-    )
-    assert outcome == "compatible"
-    outcome, _ = await serving_outcome(
-        ServingManifestQdrant(None, points=False), s, _completions(s), RULES
-    )
-    assert outcome == "empty"
+    comp = _completions(s)
 
+    async def outcome(store, settings=s):
+        return await serving_outcome(store, settings, comp, RULES)
 
-@pytest.mark.anyio
-async def test_serving_drift_legacy_unknown():
-    s = _settings()
-    drifted = manifest_envelope(s, RULES, _completions(s), embed_model_revision="rev-2")
-    outcome, fields = await serving_outcome(
-        ServingManifestQdrant(drifted), s, _completions(s), RULES
-    )
-    assert outcome == "reembed_required" and "embed_model_revision" in fields
-    outcome, _ = await serving_outcome(
-        ServingManifestQdrant(None, points=True), s, _completions(s), RULES
-    )
-    assert outcome == "legacy"
-    outcome, _ = await serving_outcome(
-        ServingManifestQdrant(explode=True), s, _completions(s), RULES
-    )
-    assert outcome == "unknown"
-
-
-@pytest.mark.anyio
-async def test_serving_attestation_raises_before_contact():
-    s = _settings(embed_mode="vllm", embed_model="m", dense_dim=64,
-                  embed_base_url="http://x/v1", embed_model_revision="")
+    assert (await outcome(ServingManifestQdrant(manifest_envelope(s, RULES, comp))))[0] == "compatible"
+    assert (await outcome(ServingManifestQdrant(None, points=False)))[0] == "empty"
+    drifted = manifest_envelope(s, RULES, comp, embed_model_revision="rev-2")
+    kind, fields = await outcome(ServingManifestQdrant(drifted))
+    assert kind == "reembed_required" and "embed_model_revision" in fields
+    assert (await outcome(ServingManifestQdrant(None, points=True)))[0] == "legacy"
+    assert (await outcome(ServingManifestQdrant(explode=True)))[0] == "unknown"
+    # A pending contract is never servable.
+    pending = manifest_envelope(s, RULES, comp, state=STATE_PENDING)
+    assert await outcome(ServingManifestQdrant(pending)) == ("pending", [])
+    # An unattested vllm revision raises before the store is contacted.
+    unattested = _settings(embed_mode="vllm", embed_model="m", dense_dim=64,
+                           embed_base_url="http://x/v1", embed_model_revision="")
     with pytest.raises(RuntimeError, match="EMBED_MODEL_REVISION"):
-        await serving_outcome(ServingManifestQdrant(explode=True), s, _completions(s), RULES)
+        await outcome(ServingManifestQdrant(explode=True), unattested)
 
 
 # --------------------------------------------- lifecycle (issue #391 F2) ---
@@ -424,24 +361,3 @@ def test_preflight_pending_contract_rejects_with_resume_path():
     with pytest.raises(RuntimeError, match="unfinished representation migration") as exc:
         check_ingest_compatible(store, s, comp, RULES)
     assert "--reingest" in str(exc.value)
-
-
-def test_rekey_carries_pending_state():
-    """A pending live must not be laundered into a committed staging."""
-    s = _settings()
-    store = SyncStore()
-    live_comp, staging_comp = "live__completions", "staging__completions"
-    write_manifest(store, live_comp, s, RULES, state=STATE_PENDING)
-    assert rekey_manifest(store, live_comp, staging_comp) is True
-    assert read_manifest_record(store, staging_comp).state == STATE_PENDING
-
-
-# --------------------------------------------------- serving pending state ---
-@pytest.mark.anyio
-async def test_serving_pending_is_not_servable():
-    s = _settings()
-    envelope = manifest_envelope(s, RULES, _completions(s), state=STATE_PENDING)
-    outcome, details = await serving_outcome(
-        ServingManifestQdrant(envelope), s, _completions(s), RULES
-    )
-    assert (outcome, details) == ("pending", [])

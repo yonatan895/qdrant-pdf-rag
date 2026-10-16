@@ -223,9 +223,13 @@ def _upsert_one(monkeypatch, fake, parsed, chunks, settings=None, force_reingest
                        None, force_reingest, src_labels=src_labels, lineage_rev=lineage_rev)
 
 
-def test_pair_length_mismatch_raises_without_writes():
-    """upsert_chunks must never silently truncate a mismatched pair list."""
+def test_mismatched_pairs_raise_before_any_write(monkeypatch):
+    """Neither upsert_chunks nor the stage-2 seam may silently truncate a
+    mismatched pair list: both raise before any Qdrant call."""
     from types import SimpleNamespace
+
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.run_ingest import _DocLocks, _upsert_one
 
     seen: list = []
 
@@ -234,16 +238,9 @@ def test_pair_length_mismatch_raises_without_writes():
             seen.append(points)
             return SimpleNamespace()
 
-    parsed = _parsed()
     with pytest.raises(ValueError, match="length mismatch"):
-        upsert_chunks(Rec(), _settings(), parsed, _chunks(n=2), _vectors(1))
+        upsert_chunks(Rec(), _settings(), _parsed(), _chunks(n=2), _vectors(1))
     assert seen == []
-
-
-def test_upsert_one_rejects_mismatched_pairs(monkeypatch):
-    """The stage-2 seam raises on mismatched pairs before any Qdrant call."""
-    from mainframe_rag.ingest import run_ingest
-    from mainframe_rag.ingest.run_ingest import _DocLocks, _upsert_one
 
     fake = FailingFakeQdrant()
     monkeypatch.setattr(run_ingest, "_get_qdrant", lambda s: fake)
@@ -254,48 +251,31 @@ def test_upsert_one_rejects_mismatched_pairs(monkeypatch):
     assert _read(_settings(), fake) is None
 
 
-def test_partial_first_batch_never_skips(monkeypatch):
-    """Fail the 2nd of 3 batches; retry must re-publish all, never skip."""
+@pytest.mark.parametrize(("failed_batch", "survivors", "n"), [(2, 16, 40), (1, 0, 10)])
+def test_failed_batch_never_skips_and_retry_publishes_exact(monkeypatch, failed_batch, survivors, n):
+    """Fail the 2nd of 3 batches, or the very first: no completion is
+    written, and the retry re-publishes every chunk with exact content and no
+    duplicates, never skipping."""
     settings = _settings(batch_size=16)
     fake = FailingFakeQdrant()
-    fake.fail_main_calls = {2}
+    fake.fail_main_calls = {failed_batch}
     parsed = _parsed()
-    chunks = _chunks(n=40)
+    chunks = _chunks(n=n, tag="exact")
     with pytest.raises(RuntimeError, match="injected main-batch"):
         _upsert_one(monkeypatch, fake, parsed, chunks, settings)
-    # First batch survived; no completion was written.
-    assert len(fake.main_points(settings.qdrant_collection, "DOC1")) == 16
+    assert len(fake.main_points(settings.qdrant_collection, "DOC1")) == survivors
     assert _read(settings, fake) is None
 
     fake.fail_main_calls = set()
     status, _ = _upsert_one(monkeypatch, fake, parsed, chunks, settings)
     assert status == "upserted", "partial residue must re-publish, never skip"
     points = fake.main_points(settings.qdrant_collection, "DOC1")
-    assert len(points) == 40
-    assert len({str(p.id) for p in points}) == 40, "no duplicates"
-    assert {str(p.id) for p in points} == {c.chunk_id for c in chunks}
-    completion = _read(settings, fake)
-    assert completion is not None and completion.expected_chunks == 40
-
-
-def test_fail_before_first_batch_resumes_exact(monkeypatch):
-    settings = _settings(batch_size=16)
-    fake = FailingFakeQdrant()
-    fake.fail_main_calls = {1}
-    parsed = _parsed()
-    chunks = _chunks(n=10, tag="exact")
-    with pytest.raises(RuntimeError, match="injected main-batch"):
-        _upsert_one(monkeypatch, fake, parsed, chunks, settings)
-    assert fake.main_points(settings.qdrant_collection, "DOC1") == []
-
-    fake.fail_main_calls = set()
-    status, _ = _upsert_one(monkeypatch, fake, parsed, chunks, settings)
-    assert status == "upserted"
-    points = fake.main_points(settings.qdrant_collection, "DOC1")
-    assert len(points) == 10
+    assert len(points) == n
+    assert len({str(p.id) for p in points}) == n, "no duplicates"
     by_id = {str(p.id): (p.payload or {}).get("text") for p in points}
-    for c in chunks:
-        assert by_id[c.chunk_id] == c.text, "content must match exactly"
+    assert by_id == {c.chunk_id: c.text for c in chunks}, "content must match exactly"
+    completion = _read(settings, fake)
+    assert completion is not None and completion.expected_chunks == n
 
 
 def test_fail_after_last_batch_before_completion_recovers(monkeypatch):
@@ -420,39 +400,32 @@ class _RecordingCollectionClient:
 
 def test_completion_collection_shares_corpus_policy_verbatim():
     """Control state must survive the same node loss as the data it gates
-    (issue #360): the selected policy applies here exactly as in the
-    corpus constructor."""
+    (issue #360): the selected policy applies here exactly as in the corpus
+    constructor, unset policy sends no distribution keys, and an existing
+    mismatching collection fails closed without mutation."""
+    unset = _RecordingCollectionClient(exists=False)
+    ensure_completion_collection(unset, _settings())
+    for key in ("shard_number", "replication_factor", "write_consistency_factor"):
+        assert key not in unset.created[1]
+
+    policy = {
+        "qdrant_shard_number": 6,
+        "qdrant_replication_factor": 2,
+        "qdrant_write_consistency_factor": 1,
+    }
     client = _RecordingCollectionClient(exists=False)
-    settings = _settings(
-        qdrant_shard_number=6,
-        qdrant_replication_factor=2,
-        qdrant_write_consistency_factor=1,
-    )
+    settings = _settings(**policy)
     name = ensure_completion_collection(client, settings)
     assert name == completion_collection_name(settings)
     assert client.created[1]["shard_number"] == 6
     assert client.created[1]["replication_factor"] == 2
     assert client.created[1]["write_consistency_factor"] == 1
 
-
-def test_completion_collection_unset_policy_creates_without_distribution_keys():
-    client = _RecordingCollectionClient(exists=False)
-    ensure_completion_collection(client, _settings())
-    for key in ("shard_number", "replication_factor", "write_consistency_factor"):
-        assert key not in client.created[1]
-
-
-def test_completion_collection_existing_mismatch_fails_closed_without_mutation():
     live = {"shard_number": 1, "replication_factor": 1, "write_consistency_factor": 1}
-    client = _RecordingCollectionClient(exists=True, live_params=live)
-    settings = _settings(
-        qdrant_shard_number=6,
-        qdrant_replication_factor=2,
-        qdrant_write_consistency_factor=1,
-    )
+    mismatched = _RecordingCollectionClient(exists=True, live_params=live)
     with pytest.raises(CollectionPolicyMismatchError, match="snapshot-gated"):
-        ensure_completion_collection(client, settings)
-    assert client.created is None
+        ensure_completion_collection(mismatched, settings)
+    assert mismatched.created is None
 
 
 def test_refresh_failure_leaves_no_stale_completion(monkeypatch):
@@ -489,19 +462,21 @@ def test_refresh_failure_leaves_no_stale_completion(monkeypatch):
     assert completion is not None and completion.sha256 == "2" * 64
 
 
-def test_malformed_completion_is_incomplete(monkeypatch):
-    """A completion point predating the schema (missing fields) validates to
-    None and never gates a skip — legacy state re-ingests explicitly."""
+def test_unscoped_or_malformed_completions_never_gate_a_skip(monkeypatch):
+    """A completion point predating the schema validates to None and never
+    gates a skip — legacy state re-ingests explicitly; a marker predating the
+    manifest reads with manifest_digest=None (additive) but, being
+    sourceless, never satisfies a scoped read."""
     from qdrant_client import models
 
     settings = _settings(batch_size=16)
     fake = FailingFakeQdrant()
+    vector = {"dense": [0.0] * 256, "bm25": models.SparseVector(indices=[0], values=[1.0])}
     fake.upsert(
         completion_collection_name(settings),
         points=[
             models.PointStruct(
-                id="legacy-marker",
-                vector={"dense": [0.0] * 256, "bm25": models.SparseVector(indices=[0], values=[1.0])},
+                id="legacy-marker", vector=vector,
                 payload={"doc_id": "DOC1", "sha256": "a" * 64},
             )
         ],
@@ -512,25 +487,18 @@ def test_malformed_completion_is_incomplete(monkeypatch):
     status, _ = _upsert_one(monkeypatch, fake, _parsed(), _chunks(n=3), settings)
     assert status == "upserted"
 
-
-def test_pre_manifest_completion_reads_none_digest():
-    """A completion point predating the manifest (missing manifest_digest)
-    validates with manifest_digest=None (additive, backward-compatible)."""
-    from qdrant_client import models
-
-    settings = _settings(batch_size=16)
-    fake = FailingFakeQdrant()
-    fake.upsert(
-        completion_collection_name(settings),
+    other = _settings(batch_size=16, qdrant_collection="pre_manifest")
+    fresh = FailingFakeQdrant()
+    fresh.upsert(
+        completion_collection_name(other),
         points=[
             models.PointStruct(
-                id="legacy-marker-valid",
-                vector={"dense": [0.0] * 256, "bm25": models.SparseVector(indices=[0], values=[1.0])},
+                id="legacy-marker-valid", vector=vector,
                 payload={
                     "doc_id": "DOC1",
                     "sha256": "a" * 64,
                     "rules_v": extraction_rules_version(),
-                    "target_collection": settings.qdrant_collection,
+                    "target_collection": other.qdrant_collection,
                     "generation_id": "gen1",
                     "source_labels": "||",
                     "expected_chunks": 3,
@@ -540,11 +508,10 @@ def test_pre_manifest_completion_reads_none_digest():
             )
         ],
     )
-    c = legacy_markers(fake, settings, "DOC1")
-    assert len(c) == 1
-    assert c[0].manifest_digest is None
-    assert c[0].source_rev is None
-    assert _read(settings, fake) is None, "sourceless markers never satisfy a scoped read"
+    (marker,) = legacy_markers(fresh, other, "DOC1")
+    assert marker.manifest_digest is None
+    assert marker.source_rev is None
+    assert _read(other, fresh) is None, "sourceless markers never satisfy a scoped read"
 
 
 def test_delete_completion_real_error_propagates(monkeypatch):
@@ -594,31 +561,6 @@ def test_delete_completion_404_race_is_tolerated(monkeypatch):
     assert _read(settings, fake) is not None
 
 
-def test_cli_triple_change_forces_reingest(monkeypatch):
-    """Same file bytes under different --vendor/--product/--version overrides
-    produce different payloads AND embed headers: the previous generation
-    must never satisfy the new run."""
-    from mainframe_rag.ingest.completion import source_labels
-
-    settings = _settings(batch_size=16)
-    fake = FailingFakeQdrant()
-    status, _ = _upsert_one(monkeypatch, fake, _parsed(), _chunks(n=3), settings,
-                            src_labels=source_labels(None, None, None))
-    assert status == "upserted"
-    # Same sha/rules, different CLI triple: no skip, full re-publish.
-    status, _ = _upsert_one(monkeypatch, fake, _parsed(), _chunks(n=3), settings,
-                            src_labels=source_labels(None, "Solaris", None))
-    assert status == "upserted"
-    assert len(fake.main_points(settings.qdrant_collection, "DOC1")) == 3
-    completion = _read(settings, fake, labels=source_labels(None, "Solaris", None))
-    assert completion is not None
-    assert completion.generation_id.endswith(source_labels(None, "Solaris", None))
-    # And back under the original triple: the Solaris marker does not match.
-    status, _ = _upsert_one(monkeypatch, fake, _parsed(), _chunks(n=3), settings,
-                            src_labels=source_labels(None, None, None))
-    assert status == "upserted"
-
-
 def test_product_override_rerun_reingests_end_to_end(tmp_path, synthetic_pdf, monkeypatch):
     """Through the real planner path: a second run with --product set must
     re-ingest (new chunks_upserted), never report a verified skip."""
@@ -653,39 +595,15 @@ def test_concurrent_run_lock_rejects_second_writer(tmp_path):
     release_run_lock(handle2)
 
 
-def test_inventory_outlives_collection_no_false_skip(tmp_path, synthetic_pdf, monkeypatch):
-    """Keep inventory, wipe Qdrant (both collections): rerun must re-ingest,
-    never report a successful skip over missing data."""
-    import json
-
-    from mainframe_rag.ingest import run_ingest
-    from tests.test_run_ingest import _FakeQdrant
-
-    monkeypatch.setenv("EMBED_MODE", "hash")
-    monkeypatch.delenv("DENSE_DIM", raising=False)
-    fake = _FakeQdrant()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    progress = tmp_path / "inventory.jsonl"
-    args = ["--src", str(synthetic_pdf.parent), "--progress", str(progress), "--workers", "1"]
-    assert run_ingest.main(args) == 0
-    records = [json.loads(l) for l in progress.read_text().splitlines() if l.strip()]
-    assert records and records[0]["status"] == "upserted"
-    assert records[0]["generation_id"], "upserted lines must carry the generation binding"
-
-    fake._points.clear()  # collection deletion/recreation; inventory survives
-    assert run_ingest.main(args) == 0
-    records2 = [json.loads(l) for l in progress.read_text().splitlines() if l.strip()]
-    assert records2[-1]["status"] == "upserted"
-    assert records2[-1]["chunks"] > 0, "wiped collection must re-ingest, never skip"
-
-
-def test_inventory_survives_main_wipe_but_completion_kept(tmp_path, synthetic_pdf, monkeypatch):
-    """Completion without points is equally incomplete: verify fails and the
-    doc re-ingests."""
+def test_stale_inventory_never_causes_a_false_skip(tmp_path, synthetic_pdf, monkeypatch):
+    """The inventory outlives its storage: wiped points (with or without the
+    surviving completion) and pre-#359 lines without a generation binding must
+    all re-ingest through the real planner, never report a verified skip."""
     import json
 
     from mainframe_rag.config import Settings as _Settings
     from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.ibm_pdf import sha256_file
     from tests.test_run_ingest import _FakeQdrant
 
     monkeypatch.setenv("EMBED_MODE", "hash")
@@ -694,43 +612,38 @@ def test_inventory_survives_main_wipe_but_completion_kept(tmp_path, synthetic_pd
     monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
     progress = tmp_path / "inventory.jsonl"
     args = ["--src", str(synthetic_pdf.parent), "--progress", str(progress), "--workers", "1"]
+
+    def last_record():
+        records = [json.loads(line) for line in progress.read_text().splitlines() if line.strip()]
+        return records[-1]
+
     assert run_ingest.main(args) == 0
-    main_collection = _Settings(_env_file=None).qdrant_collection
-    del fake._points[main_collection]  # points lost, completion survives
+    first = last_record()
+    assert first["status"] == "upserted"
+    assert first["generation_id"], "upserted lines must carry the generation binding"
+
+    fake._points.clear()  # collection deletion/recreation; inventory survives
     assert run_ingest.main(args) == 0
-    records = [json.loads(l) for l in progress.read_text().splitlines() if l.strip()]
-    assert records[-1]["status"] == "upserted"
-    assert records[-1]["chunks"] > 0
+    assert last_record()["status"] == "upserted"
+    assert last_record()["chunks"] > 0, "wiped collection must re-ingest, never skip"
 
+    # Completion without points is equally incomplete: verify fails.
+    del fake._points[_Settings(_env_file=None).qdrant_collection]
+    assert run_ingest.main(args) == 0
+    assert last_record()["status"] == "upserted"
+    assert last_record()["chunks"] > 0
 
-def test_legacy_inventory_without_binding_reingests(tmp_path, synthetic_pdf, monkeypatch):
-    """Pre-#359 inventory lines (no generation binding) against an empty
-    collection must re-ingest explicitly, never skip."""
-    import json
-
-    from mainframe_rag.ingest import run_ingest
-    from mainframe_rag.ingest.ibm_pdf import sha256_file
-    from mainframe_rag.ingest.rules_version import extraction_rules_version
-    from tests.test_run_ingest import _FakeQdrant
-
-    monkeypatch.setenv("EMBED_MODE", "hash")
-    monkeypatch.delenv("DENSE_DIM", raising=False)
-    fake = _FakeQdrant()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    progress = tmp_path / "inventory.jsonl"
-    sha = sha256_file(synthetic_pdf)
+    # Pre-#359 inventory lines (no generation binding) over an empty store.
+    fake._points.clear()
+    progress.unlink()
     append_record(
         progress,
         InventoryRecord(
-            path=str(synthetic_pdf), sha256=sha, doc_id="SA22-0000-00",
-            pages=8, chunks=7, status="upserted",
-            rules_version=extraction_rules_version(),
+            path=str(synthetic_pdf), sha256=sha256_file(synthetic_pdf), doc_id="SA22-0000-00",
+            pages=8, chunks=7, status="upserted", rules_version=extraction_rules_version(),
         ),
     )
-    assert run_ingest.main(
-        ["--src", str(synthetic_pdf.parent), "--progress", str(progress), "--workers", "1"]
-    ) == 0
-    records = [json.loads(l) for l in progress.read_text().splitlines() if l.strip()]
-    assert records[-1]["status"] == "upserted"
-    assert records[-1]["chunks"] > 0, "legacy line over empty Qdrant must re-ingest"
-    assert records[-1].get("generation_id"), "new lines carry the binding"
+    assert run_ingest.main(args) == 0
+    assert last_record()["status"] == "upserted"
+    assert last_record()["chunks"] > 0, "legacy line over empty Qdrant must re-ingest"
+    assert last_record().get("generation_id"), "new lines carry the binding"

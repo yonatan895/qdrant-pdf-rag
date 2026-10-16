@@ -993,8 +993,8 @@ writers of the same revision can still target the same points.
 (including the closure pins: exact product/version filter partition plus
 family-citation round-trip over coexisting revisions, and an event-ordered
 threaded lock test proving same-revision exclusion with unblocked coexisting
-revisions), `tests/test_representation.py::test_fingerprint_revision_only_change_alters_identity`
-and `test_fingerprint_rules_and_prefix_policy` pin identity behavior, and
+revisions), `tests/test_representation.py::test_fingerprint_identity_policy`
+pins identity behavior (revision, dimension and rules; record-only prefix), and
 `tests/test_integration_sim.py::test_361_inplace_snapshot_restore_keeps_coexisting_revisions`
 proves coexistence, server-side revision scoping, and snapshot-restore
 rollback against a real server. They do not prove corpus-wide coverage or
@@ -1131,7 +1131,7 @@ repair as a distinct generation (no live mutation, resumable, reader-compatible
 mid-build: `test_publish_force_same_contract_repairs_distinct_generation`,
 `test_forced_repair_never_touches_live_during_build`,
 `test_interrupted_same_contract_repair_resumes_recorded_build`,
-`test_forced_repair_partial_corpus_refuses_and_preserves_live`) and rollback,
+`test_partial_walk_refuses_and_preserves_unretired_doc`) and rollback,
 plus the R1/R2 lifecycle: partial-walk refusal with
 preservation, explicit retirement with rollback history, fail-closed unknown
 and contradictory retirements, read-only residue audit, same-target writer
@@ -1140,8 +1140,8 @@ generation immutability, and the physical-target refusal
 (`test_publication_refuses_a_generation_targeted_by_name`). The #391 current-packet
 scope proof adds `tests/test_run_ingest.py::test_unmarked_searchable_point_blocks_migration_commit`
 (a walk that does not account for an unmarked old-rules point refuses and preserves it) and
-`test_ingest_publish.py::test_walked_doc_unapproved_legacy_stray_refuses` /
-`test_walked_doc_approved_legacy_stray_publishes` (content attribution, not a
+`test_ingest_publish.py::test_walked_doc_legacy_history_refuses_without_content_verification` /
+`test_walked_doc_approved_legacy_history_publishes` (content attribution, not a
 printed-doc_id match), plus the migration-with-retirement pair
 (`test_publish_migration_with_explicit_retire_single_run`,
 `test_publish_migration_retire_unapproved_stray_refuses`). Warm-cache mutation and

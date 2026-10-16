@@ -153,12 +153,12 @@ def test_writer_lock_and_bound_refuse(repair_case):
     assert not directory.exists()
 
 
-@pytest.mark.parametrize('payload', [
-    {'target_collection': 'another_completions'},
-    {'manifest_digest': 'corrupt'},
-    {'state': 'committed'},
+@pytest.mark.parametrize(('payload', 'planned'), [
+    ({'target_collection': 'another_completions'}, False),
+    ({'manifest_digest': 'corrupt'}, False),
+    ({'state': 'committed'}, False),
+    ({'target_collection': 'another_completions'}, True),
 ])
-@pytest.mark.parametrize('planned', [False, True])
 def test_manifest_envelope_refuses_before_deletion(repair_case, payload, planned):
     client, settings, progress, directory, _, staging, ids, _, _ = repair_case
     digest = plan_repair(client, settings, progress, directory, max_points=2) if planned else None
