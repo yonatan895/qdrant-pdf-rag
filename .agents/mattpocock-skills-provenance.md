@@ -7,31 +7,41 @@
   attribution and pin in `NOTICE.mattpocock-skills`.
 - Authority: the maintainer's 2026-10-09 request to add the three highest-ranked
   skills reviewed in this conversation; baseline was no installed engineering skills.
+  The maintainer's 2026-10-16 request added four more at the same pin; selection
+  and exclusions are recorded in
+  [issue #767](https://github.com/yonatan895/qdrant-pdf-rag/issues/767).
 
 ## Selected paths
 
-Verbatim copies of upstream `skills/engineering/<name>/**` live under
+Verbatim copies of upstream `skills/engineering/<name>/**` (and
+`skills/productivity/writing-for-agents/**`) live under
 `.agents/vendor/mattpocock-skills/<name>/`. Their byte digests are recorded in
 `mattpocock-skills.sha256` beside this file. Repository-owned entry points with
 the same names live under `.agents/skills/`; they state compatibility rules
 before linking the originals. The context checker validates the union of this
-allowlist and the independent [Qdrant allowlist](qdrant-skills-provenance.md).
+allowlist and the independent [Qdrant](qdrant-skills-provenance.md) and
+[pstack](pstack-skills-provenance.md) allowlists.
 
 <!-- skills-allowlist:start -->
 - codebase-design
+- code-review
 - diagnosing-bugs
+- domain-modeling
+- retro
 - tdd
+- writing-for-agents
 <!-- skills-allowlist:end -->
 
 Read skills on demand. Existing owner contracts establish testing interfaces,
 stored-content and lifecycle proof, coverage preservation, delegation limits,
-and review. Upstream references to `code-review` resolve to the repository's
-review protocol; no additional skill is implicitly installed. Root instructions
-and runtime/deployment behavior are unchanged.
+and review. Upstream references to `code-review` resolve to its local entry
+point, which keeps the repository's review protocol authoritative; the upstream
+`setup-matt-pocock-skills` tracker setup is not installed or needed. Root
+instructions and runtime/deployment behavior are unchanged.
 
 ## Updating
 
-Change the pin in a dedicated maintenance PR. Stage the same three upstream
+Change the pin in a dedicated maintenance PR. Stage the selected upstream
 directories with the skill-installer helper's `--ref <sha>` and `--dest <temp>`
 options, review their full diff and supporting files, then replace only these
 verbatim subtrees. Refresh the license, notice, byte-digest manifest and license

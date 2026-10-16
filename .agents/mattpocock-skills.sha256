@@ -1,3 +1,5 @@
+09eb147f793e4647949edd32dbad278f0554dfb56e0d46b699cd4c2c55bf0357  .agents/vendor/mattpocock-skills/code-review/SKILL.md
+8229ca854e11dc8e6aef2131ee03f31fb1561cf905fab9ccc325180cf3331352  .agents/vendor/mattpocock-skills/code-review/agents/openai.yaml
 f3dd099ce99289bd213914d8ee3e2429b78309c3957ca4583f7659551b1d53c1  .agents/vendor/mattpocock-skills/codebase-design/DEEPENING.md
 52b52e75655a27aea59c6966b410bac82448968ad46ef1ebb9f07c274e3ae010  .agents/vendor/mattpocock-skills/codebase-design/DESIGN-IT-TWICE.md
 2c20617f87ec8af6a434859f381b2f061a69b530444e74eb39e78bb016a6d1e2  .agents/vendor/mattpocock-skills/codebase-design/SKILL.md
@@ -5,7 +7,16 @@ edebc9e4fcfe102114012575eaa9600b9b5fd08c311664f389c36e7bc717740f  .agents/vendor
 849198df88cdb65fd0d97236604c1fca7ff2f22d2f705f9724a800d0266b118d  .agents/vendor/mattpocock-skills/diagnosing-bugs/SKILL.md
 3e430dbe4334a87597488c060cb3dc3786bb00c9182877d6f5ec41f62490e90b  .agents/vendor/mattpocock-skills/diagnosing-bugs/agents/openai.yaml
 35103539fc36873eea36074769ad454f9379d6fc8b2dc0e26ce987fd3bfe5503  .agents/vendor/mattpocock-skills/diagnosing-bugs/scripts/hitl-loop.template.sh
+944c92aa790e8fbdc9199640b170979abb8a34ba8d0fe18c2a01a63bce140ca0  .agents/vendor/mattpocock-skills/domain-modeling/ADR-FORMAT.md
+21dcc40cdec8e151a829b98ab1517c1867bc444e3665134a98c6983411996801  .agents/vendor/mattpocock-skills/domain-modeling/GLOSSARY-FORMAT.md
+7b925d7b1e341a2eeae33ad68a8a8c0ab889a38ddd22a7598e4c240e5a7556a3  .agents/vendor/mattpocock-skills/domain-modeling/SKILL.md
+f6bf2aa996c6e6f53fdd0708e18a0d16a56aed8322cca59fedbe3c0d2c75f06b  .agents/vendor/mattpocock-skills/domain-modeling/agents/openai.yaml
+33fbc28568e3146f20fd908b12998bc0ab30aa4f4c87288199a40793efa94696  .agents/vendor/mattpocock-skills/retro/SKILL.md
+cb6fb9d7e6b4be5975f41f6def1dd00a1255bad5d9b02696b124c924a8b8745c  .agents/vendor/mattpocock-skills/retro/agents/openai.yaml
 5505d25bbaa8fc14a79e4d20163936958992a2995b7f1dd1d6197edc9ed722e0  .agents/vendor/mattpocock-skills/tdd/SKILL.md
 ea6f01cf1b8c06a4b0f5b649d74b1b8ce8685e72af1b38d70d877693e092af0b  .agents/vendor/mattpocock-skills/tdd/agents/openai.yaml
 3ceb807fdf4a47d6a93d4d9a891e5ba6d362a6247bd08adc451feebfc17361ef  .agents/vendor/mattpocock-skills/tdd/mocking.md
 859f9e592c188fda4fc7277dd180e4ce9c7a2e13f6efe1f6f29eccc9d28c106a  .agents/vendor/mattpocock-skills/tdd/tests.md
+c768e6307c7c10728c401c213f2c4ba71c542127eeb7ad2956aabd15a0fa0059  .agents/vendor/mattpocock-skills/writing-for-agents/SKILL-MECHANICS.md
+551adca942227b44192edba88acd4e8db911f0121ce58ad16944ccf6a896a74a  .agents/vendor/mattpocock-skills/writing-for-agents/SKILL.md
+eacb24b2a618cfb81dacb0416f4fdd75ddf3a8060f8ddb99aae1b1e301907e4b  .agents/vendor/mattpocock-skills/writing-for-agents/agents/openai.yaml

@@ -21,5 +21,5 @@ through the repository's [test-design contract](../../../docs/testing.md):
 - Preserve regression coverage during refactoring; map consolidated cases to
   their retained owner or explain retirement of an implementation-only pin.
   Use [codebase-design](../codebase-design/SKILL.md) when interface design is needed.
-- Use the local [review protocol](../../../docs/agent-workflow.md#review-handoff)
-  instead of the upstream reference to an uninstalled `code-review` skill.
+- Upstream `code-review` resolves to the local [code-review](../code-review/SKILL.md)
+  entry point, under the [review protocol](../../../docs/agent-workflow.md#review-handoff).
