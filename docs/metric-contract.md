@@ -98,7 +98,7 @@ shape.
 ## Shipped queries
 
 `observability/queries/request-investigation.promql` (M1–M6) and the J1–J3
-Jaeger lookups embedded in `tests/test_metric_contract.py::test_jaeger_lookups_documented`
-as URL templates. `tests/test_metric_contract.py` pins this whole map in CI:
+Jaeger lookups defined in `tests/test_metric_contract.py` (`J1_TRACE_BY_REQUEST`,
+`J2_SLOW_ANSWERS`, `J3_ERROR_ROOTS`) as URL templates. `tests/test_metric_contract.py` pins this whole map in CI:
 instrument names/units/label keys, bucket boundaries, and that every
 `rag_*` name and label key in the PromQL file exists on the wire shape.
