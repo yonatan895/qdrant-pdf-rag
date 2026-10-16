@@ -4,7 +4,8 @@ Status: dated record for issue #769 (PR #770), 2026-10-16. Owner: [testing contr
 
 Each row is one test function kept after the #769 simplification. The record states the class, the
 guarantee that would be lost if the test were removed, and the owning contract. Parametrized cases
-share their function's row. The suite went from 6,466 to 3,587 collected items. Classes:
+share their function's row. The suite went from 6,466 to 3,587 collected items in #770, and to
+3,660 after the guarantee restoration in the addendum. Classes:
 
 - `core`: product behavior or data integrity;
 - `infra`: deployment, CI-gate or tooling contract;
@@ -15,11 +16,11 @@ This is a snapshot, not a working rule. New or changed tests justify themselves 
 
 | Class | Functions |
 |---|---:|
-| `core` | 1354 |
-| `infra` | 868 |
+| `core` | 1383 |
+| `infra` | 885 |
 | `noise-kept` | 27 |
 | `gate-control` | 127 |
-| total | 2376 |
+| total | 2422 |
 
 ## `tests/test_acceptance.py`
 
@@ -197,6 +198,7 @@ This is a snapshot, not a working rule. New or changed tests justify themselves 
 | `VendoredSkillsTests::test_provider_allowlists_cannot_claim_the_same_skill` | gate-control | Two providers claim the same skill name unnoticed. | AGENTS.md#hard-boundaries |
 | `VendoredSkillsTests::test_repository_entry_point_must_resolve_its_local_upstream_reference` | gate-control | A repository entry point references a missing vendored upstream file. | AGENTS.md#hard-boundaries |
 | `VendoredSkillsTests::test_repository_engineering_vendor_bytes_match_the_pinned_manifest` | gate-control | Vendored skill bytes change without a pin-bump PR. | AGENTS.md#hard-boundaries |
+| `ContextCheckTests::test_missing_map_marker_fails_the_check` | infra | Without it a deleted context-map marker makes the checker pass with no owners validated instead of failing the CI context gate. | docs/agent-workflow.md#context-map |
 
 ## `tests/test_agent_doctor.py`
 
@@ -217,6 +219,8 @@ This is a snapshot, not a working rule. New or changed tests justify themselves 
 | `HelmPreparationTests::test_wrong_member_digest_never_executes_or_installs` | infra | A Helm archive member with the wrong digest is executed or installed. | docs/deploy.md#deployment-policy |
 | `test_bm25_cache_checks_the_selected_revision_and_exact_bytes` | infra | The doctor accepts a BM25 cache for a different revision or with altered bytes. | docs/deploy.md#deployment-policy |
 | `test_simulator_missing_image_never_starts_or_pulls` | infra | The doctor starts or pulls a Qdrant image when the prepared one is missing. | AGENTS.md#hard-boundaries |
+| `DoctorTests::test_missing_or_tampered_cached_task_archive_is_not_ready` | infra | Without it the doctor reports Task ready when only the executable matches and the cached pinned archive is absent or tampered, so artifact packaging uses unattested bytes. | docs/agent-workflow.md#offline-check-format-and-prerequisite-diagnosis |
+| `DoctorTests::test_deploy_profile_requires_its_inputs_and_a_cluster_cli` | infra | Without it the deploy profile reports ready with a missing oc/kubectl or missing air-gap inputs and never contacts a service. | docs/agent-workflow.md#offline-check-format-and-prerequisite-diagnosis |
 
 ## `tests/test_airgap_bootstrap_sh.py`
 
@@ -565,6 +569,7 @@ This is a snapshot, not a working rule. New or changed tests justify themselves 
 | `test_semantically_invalid_reference_refuses_before_work` | gate-control | A structurally valid but semantically invalid reference starts a benchmark run before refusing. | docs/testing.md#harness-invariants-all-harness-tiers-l1l2l3l4 |
 | `test_real_empty_load_cannot_qualify_benchmark` | gate-control | A zero-request load run reports zero errors and zero latency and qualifies the benchmark. | docs/testing.md#harness-invariants-all-harness-tiers-l1l2l3l4 |
 | `test_required_measurements_have_positive_integer_request_counts` | gate-control | Non-integer or zero request counts qualify or record as a baseline. | docs/testing.md#harness-invariants-all-harness-tiers-l1l2l3l4 |
+| `test_docker_stats_memory_units_are_converted_to_mb` | infra | Without it a wrong unit factor skews the recorded Qdrant memory and every benchmark comparison against it. | docs/testing.md |
 
 ## `tests/test_bm25_weights.py`
 
@@ -611,6 +616,7 @@ This is a snapshot, not a working rule. New or changed tests justify themselves 
 | `test_unknown_role_fails_closed` | infra | Without it an unknown role prints something eval-able or exits zero. | docs/live-stack.md |
 | `test_check_pack_refuses_unfitting_pack_that_single_resolve_emits` | core | Without it a single server fitting alone is launched although the full pack does not fit. | docs/live-stack.md |
 | `test_deficit_host_override_fails_closed_with_remedies` | infra | Without it a what-if host deficit emits flags on stdout instead of failing nonzero. | docs/live-stack.md |
+| `test_check_pack_on_a_fitting_pack_emits_the_same_flags_as_single_resolve` | infra | Without it the --check-pack preflight can change or break the flag set the launcher evals for a pack that does fit. | docs/deploy.md#deployment-policy |
 
 ## `tests/test_capture_pool.py`
 
@@ -634,6 +640,10 @@ This is a snapshot, not a working rule. New or changed tests justify themselves 
 | `test_task_capture_holdout_refusal_and_recovery` | infra | A holdout capture runs with a bad pin or in dev venue and overwrites a good capture. | docs/testing.md#harness-invariants-all-harness-tiers-l1l2l3l4 |
 | `test_capture_explicit_cli_and_empty_inputs` | infra | Missing or empty golden/out arguments run a capture instead of failing. | docs/testing.md#harness-invariants-all-harness-tiers-l1l2l3l4 |
 | `test_capture_retry_records_the_pool_search_prefetches` | core | Capture records a pool search would never fetch, such as a known-wrong sibling code on the retry filter. | docs/testing.md |
+| `test_legs_to_record_empty_query_rejected` | core | Without it a capture with an empty query is recorded as a valid pool and later replay sweeps score a question nobody asked. | docs/testing.md#harness-invariants-all-harness-tiers-l1l2l3l4 |
+| `test_record_to_rows_refuses_out_of_range_leg_and_max_rank` | core | Without it replay silently selects a nonexistent leg or an invalid depth, so a sweep reports rankings from the wrong or unbounded prefetch pool. | docs/testing.md#harness-invariants-all-harness-tiers-l1l2l3l4 |
+| `test_capture_bundle_dir_defaults_golden_and_output_name_and_honors_max_queries` | core | Without it --bundle-dir reads the wrong golden file, writes pools outside the dated bundle name or ignores --max-queries, so capture bundles are unfindable or incomplete. | docs/testing.md#harness-invariants-all-harness-tiers-l1l2l3l4 |
+| `test_capture_records_failed_query_as_error_row_exits_nonzero_and_next_run_succeeds` | core | Without it a failing query aborts or hides in a capture run, or the run exits 0 with a missing pool, so a replay sweep silently drops queries. | docs/testing.md#harness-invariants-all-harness-tiers-l1l2l3l4 |
 
 ## `tests/test_chart_lifecycle_sh.py`
 
@@ -928,6 +938,7 @@ This is a snapshot, not a working rule. New or changed tests justify themselves 
 | `test_normal_allocation_cannot_bypass_unwritable_lock_creation_then_next_run_works` | infra | Without it allocation proceeds without its exclusive run lock. | docs/colab-playground.md#persistence-acceptance-and-recovery |
 | `test_private_key_unlink_failure_is_incomplete_after_exact_release_then_recovery_works` | infra | Without it a private SSH key left on disk after a failed unlink is reported as a complete cleanup. | docs/colab-playground.md#persistence-acceptance-and-recovery |
 | `test_manifest_and_diagnostic_sink_disk_full_cannot_interrupt_release_then_recovery_works` | infra | Without it a full disk for manifest and stderr interrupts the VM release. | docs/colab-playground.md#persistence-acceptance-and-recovery |
+| `test_closed_child_pipes_overflow_after_scheduler_pause_is_capped_then_next_command_works` | infra | Without it a paused scheduler lets command capture read past its byte cap (unbounded diagnostics) or lose the truncation flag, and later commands fail. | #755 |
 
 ## `tests/test_colab_corpus.py`
 
@@ -1246,6 +1257,7 @@ This is a snapshot, not a working rule. New or changed tests justify themselves 
 | `test_run_query_non_200_records_envelope_code` | core | The eval reports every non-200 as unknown code or records upstream message text in the row. | docs/testing.md#answer-tier (issue #307) |
 | `test_apply_pool_join_makes_completeness_computable` | core | Citation recall against the joined pool is not computed so completeness stays None or wrong. | docs/testing.md#answer-tier (issue #307) |
 | `test_apply_pool_join_never_fails_or_touches_other_rows` | core | The pool join changes verdicts of abstain, error or unmapped rows. | docs/testing.md#answer-tier (issue #307) |
+| `test_error_code_of_an_unstructured_error_body_is_unknown_and_never_the_body` | core | Without it a non-object error body leaks into the answer-eval report or crashes the row instead of recording the fixed unknown code. | docs/testing.md#answer-tier |
 
 ## `tests/test_eval_chat.py`
 
@@ -1291,6 +1303,7 @@ This is a snapshot, not a working rule. New or changed tests justify themselves 
 | `test_task_retrieval_record_then_gate` | infra | Recording a mode-keyed baseline and gating against it break, or recording touches other baselines. | docs/testing.md#evaluation |
 | `test_task_retrieval_required_gate_refuses_and_recovers` | infra | The retrieval Task passes with a missing, mismatched or regressed baseline, or does not recover after repair. | docs/testing.md#evaluation |
 | `test_retrieval_cli_explicit_paths_and_required_default` | infra | Explicit baseline and golden paths, empty-path refusal, conflicting flags and the required default behave wrongly, so a skipped gate can look green. | docs/testing.md#evaluation |
+| `test_ndcg_at_k_ignores_relevant_hits_ranked_past_k` | core | Without it nDCG@k credits relevant documents ranked beyond k, inflating the retrieval gate metric. | docs/testing.md#evaluation |
 
 ## `tests/test_eval_scoring.py`
 
@@ -1469,6 +1482,8 @@ This is a snapshot, not a working rule. New or changed tests justify themselves 
 | `test_harness_task_records_selected_dataset_then_next_gate` | infra | Recording writes the wrong mode's baseline or leaves a recorded baseline that the next ordinary gate cannot use. | docs/testing.md#harness-invariants-all-harness-tiers-l1l2l3l4 |
 | `test_harness_direct_explicit_dataset_and_baseline_remain_authoritative` | infra | Explicit --golden/--baseline paths are overridden by defaults or shell-interpreted, scoring the wrong data. | docs/testing.md#harness-invariants-all-harness-tiers-l1l2l3l4 |
 | `test_harness_task_refuses_invalid_inputs_before_external_effects` | infra | A missing baseline or corrupt holdout pin still contacts Qdrant or the embedder before refusing to score. | docs/testing.md#harness-invariants-all-harness-tiers-l1l2l3l4 |
+| `test_empty_classes_get_no_confidence_interval` | core | Without it an empty query class gets a fabricated confidence interval in the L1 promotion evidence. | docs/testing.md#evaluation |
+| `test_resolve_always_restores_the_recorded_pin_and_never_pins_live_state` | infra | Without it a gate run with --restore always restores or pins whatever snapshot happens to exist, promoting mutated live state as the baseline. | docs/testing.md#harness-invariants-all-harness-tiers-l1l2l3l4 |
 
 ## `tests/test_harness_l2.py`
 
@@ -1494,6 +1509,8 @@ This is a snapshot, not a working rule. New or changed tests justify themselves 
 | `test_judge_labels_parse_and_fail_closed_on_junk` | core | Judge output with unknown labels or prose is accepted as a label instead of raising. | docs/testing.md#harness-invariants-all-harness-tiers-l1l2l3l4 |
 | `test_syntax_check_miss_is_false_and_bad_pattern_fails_closed` | core | Syntax pattern matches via script are missed or a miss raises an error instead of a False row. | docs/testing.md |
 | `test_apply_truncation_join_and_content_floor_exemptions` | core | Truncation is not joined from alerts, or the content floor wrongly fails abstain, script or no-cite answers. | docs/testing.md |
+| `test_gate_holds_on_relevance_judge_error_alone` | core | Without it a failing relevance judge lets the answer-tier gate pass on an unjudged run. | docs/testing.md#answer-tier |
+| `test_judge_evidence_is_bounded_before_the_prompt` | core | Without it unbounded cited evidence is sent to the judge model, overflowing its window and failing the whole judged run. | docs/testing.md#answer-tier |
 
 ## `tests/test_harness_l3.py`
 
@@ -1508,6 +1525,7 @@ This is a snapshot, not a working rule. New or changed tests justify themselves 
 | `test_main_resolves_mode_baseline_per_invocation` | infra | L3 uses the baseline of a previous invocation's mode, gating hash numbers against vllm or vice versa. | docs/testing.md#harness-invariants-all-harness-tiers-l1l2l3l4 |
 | `test_task_l3_matches_actual_cli_baseline_decision` | infra | The Task and CLI choose different baselines, or an explicit/missing override is ignored or shell-evaluated. | docs/testing.md#harness-invariants-all-harness-tiers-l1l2l3l4 |
 | `test_task_l3_recording_only_updates_selected_synthetic_baseline` | infra | Recording an L3 baseline overwrites another mode's file or the next ordinary gate does not use the new baseline. | docs/testing.md#harness-invariants-all-harness-tiers-l1l2l3l4 |
+| `test_env_snapshot_records_run_provenance_the_gate_compares` | infra | Without it the L3 run env omits concurrency and GPU or records unset options as values, so the env-mismatch gate compares the wrong machine shape. | docs/testing.md#harness-invariants-all-harness-tiers-l1l2l3l4 |
 
 ## `tests/test_harness_l4.py`
 
@@ -1528,6 +1546,7 @@ This is a snapshot, not a working rule. New or changed tests justify themselves 
 | `test_review_queue_selects_weak_rows_only` | infra | The human-review queue omits borderline rows or floods with clean ones. | docs/testing.md |
 | `test_main_exit_2_when_reference_missing` | infra | The L4 CLI scores without a reference instead of exiting 2. | docs/testing.md#harness-invariants-all-harness-tiers-l1l2l3l4 |
 | `test_l4_repeats_preserve_sample_and_judge_legs` | infra | L4 repeats a different sample or disables judge legs, so repeat means do not measure the stated quality. | docs/testing.md |
+| `test_classify_max_direction_has_a_borderline_band_before_fail` | core | Without it a lower-is-better metric slightly over its reference is reported as a hard fail (or pass), changing the L4 gate verdict and review queue. | docs/testing.md#evaluation |
 
 ## `tests/test_hash_embed.py`
 
@@ -1627,6 +1646,7 @@ This is a snapshot, not a working rule. New or changed tests justify themselves 
 | `test_product_override_rerun_reingests_end_to_end` | core | Without it a changed --product override is reported as a verified skip and stale labels stay served. | docs/ingest.md#identity-contract |
 | `test_concurrent_run_lock_rejects_second_writer` | core | Without it two ingest runs write one progress file and target concurrently. | docs/ingest.md#publication-contract |
 | `test_stale_inventory_never_causes_a_false_skip` | core | Without it an inventory that outlived wiped or legacy storage reports a successful skip over missing data. | docs/ingest.md#publication-contract |
+| `test_no_completion_collection_means_no_marker_and_not_complete` | core | Without it the first ingest into a fresh deployment fails on the missing completion collection instead of treating every document as not yet complete. | docs/ingest.md#publication-contract |
 
 ## `tests/test_ingest_identity.py`
 
@@ -1728,6 +1748,7 @@ This is a snapshot, not a working rule. New or changed tests justify themselves 
 | `test_legacy_migration_retains_distributed_squatter_then_publishes` | core | Without it a distributed legacy collection is deleted before an exact retained copy exists. | docs/ingest.md#publication-contract |
 | `test_legacy_migration_refuses_a_mismatched_retained_copy` | core | Without it an interrupted or foreign retained copy is trusted and the squatter deleted. | docs/ingest.md#publication-contract |
 | `test_publication_checks_are_read_only_by_type` | infra | Without it publication resolution and verification helpers can acquire write capability and mutate storage during read-only checks. | docs/architecture.md |
+| `test_sealed_build_cannot_serve_until_published` | core | Without it a sealed but unpublished build can be served, exposing a half-built corpus to search and answers. | docs/ingest.md#publication-contract |
 
 ## `tests/test_ingest_repair.py`
 
@@ -1873,6 +1894,7 @@ This is a snapshot, not a working rule. New or changed tests justify themselves 
 | `test_export_to_baseline_refuses_faulty_run` | gate-control | A baseline is recorded from a run with request errors or missing Server-Timing. | docs/testing.md#harness-invariants-all-harness-tiers-l1l2l3l4 |
 | `test_run_load_tracks_missing_timings_on_header_absence` | gate-control | Responses without Server-Timing are not counted so the gate cannot detect lost headers. | docs/testing.md#harness-invariants-all-harness-tiers-l1l2l3l4 |
 | `test_task_load_defaults_and_literal_url_reach_actual_measurement` | infra | The load Task drops, defaults or shell-evaluates AGENT_URL, measuring the wrong endpoint. | docs/testing.md#harness-invariants-all-harness-tiers-l1l2l3l4 |
+| `test_export_to_baseline_creates_a_dedicated_file_recording_the_run_environment` | infra | Without it a new L3 baseline is written without the env (cpu, mode, GPU) that gate_verdict_l3 compares, so a later run is gated against an unknown machine. | docs/testing.md#harness-invariants-all-harness-tiers-l1l2l3l4 |
 
 ## `tests/test_local_gateway_sh.py`
 
@@ -2249,6 +2271,8 @@ This is a snapshot, not a working rule. New or changed tests justify themselves 
 | `test_completion_budget_default_environment_and_cli_precedence` | infra | Without it the CLI flag and environment budget precedence breaks and the probe uses the wrong max_tokens. | docs/agent.md#http-model-contract |
 | `test_invalid_completion_budget_fails_before_any_model_request` | infra | Without it an out-of-range budget sends model requests before being rejected. | docs/agent.md#http-model-contract |
 | `test_larger_budget_retains_strict_final_answer_gate` | infra | Without it a larger budget lets length-truncated or reasoning-only replies pass as answers. | docs/agent.md#http-model-contract |
+| `test_probe_models_flag_lists_ids_and_fails_on_a_dead_leg` | infra | Without it the --models readiness listing exits 0 while a gateway leg is down, so cutover proceeds against a dead endpoint. | docs/agent.md#http-model-contract |
+| `test_probe_stream_flag_accepts_a_complete_stream_with_usage_frame` | infra | Without it the stream probe rejects a valid OpenAI stream (usage-only trailer), blocking cutover, or the pass path is never proven. | docs/agent.md#http-model-contract |
 
 ## `tests/test_prompt_order.py`
 
@@ -2307,6 +2331,9 @@ This is a snapshot, not a working rule. New or changed tests justify themselves 
 | `test_projection_equals_shipped_slice_non_prefix_and_omits_unsupplied` | core | The supplied-evidence projection differs from the text actually sent or lists omitted chunks. | issue #635; docs/agent.md#answer-contract |
 | `test_projection_text_is_clipped_and_flagged_at_wire_bound` | core | Oversize projection text goes over the wire unclipped or unflagged. | issue #635; docs/agent.md#answer-contract |
 | `test_source_metadata_unknown_stays_unknown_and_is_one_line` | core | Source metadata is inferred from request context or can inject a newline into the prompt. | issue #635; docs/agent.md#answer-contract |
+| `test_stored_spans_past_the_cap_are_not_persisted` | core | Without it an oversize atomic-span list is stored on every chunk payload instead of being dropped for pack-time redetection, unbounding stored payload size. | docs/agent.md#answer-contract |
+| `test_build_messages_tokenizer_requires_settings` | core | Without it a tokenizer passed without settings crashes with an opaque AttributeError, or sizes the window from nothing, instead of the explicit refusal. | docs/agent.md#answer-contract |
+| `test_legacy_prefix_excerpt_derives_its_range_and_forged_body_is_dropped` | core | Without it an excerpt whose body is not the recorded source prefix survives the verification trim and ships as citable evidence it never was. | docs/agent.md#answer-contract |
 
 ## `tests/test_qdrant_auth.py`
 
@@ -2325,6 +2352,11 @@ This is a snapshot, not a working rule. New or changed tests justify themselves 
 | `test_require_docker_rejects_digest_mismatch_without_pull` | infra | Without it qa:ha could run against a substituted or unpinned Qdrant image and still report a passing HA verdict. | docs/testing.md#helm-coverage |
 | `test_require_docker_returns_immutable_id_after_digest_attestation` | infra | Without it the HA fixture could launch containers by a mutable tag instead of the attested immutable image ID. | docs/testing.md#helm-coverage |
 | `test_acknowledged_write_rejoin_refuses_permanent_loss_or_corruption` | gate-control | Without this negative control the qa:ha scenario could silently stop detecting lost or corrupted replica data and pass vacuously. | docs/testing.md#helm-coverage |
+| `test_require_docker_rejects_an_empty_inspection_record_without_pull` | infra | Without it an image inspection returning no record is not refused, so qa:ha could launch an unattested Qdrant image. | AGENTS.md#hard-boundaries |
+| `test_qdrant_image_pin_ignores_commented_and_blank_lines` | infra | Without it a commented-out or older qdrant line in images.txt becomes the pinned image used by the simulation and the doctor version check. | AGENTS.md#hard-boundaries |
+| `test_wait_cluster_ready_requires_every_endpoint_to_see_all_peers` | infra | Without it qa:ha starts its scenarios against a cluster where one endpoint still sees a partial or non-clustered membership, so HA results are attributed to a cluster that never formed. | docs/testing.md#helm-coverage |
+| `test_wait_collection_placement_counts_only_active_copies_on_distinct_peers` | infra | Without it qa:ha treats replicas still in Recovery (or several copies on one peer) as placed, so the 6/3/2 replication gate passes before replicas can serve. | docs/testing.md#helm-coverage |
+| `test_main_up_reports_cluster_failure_with_exit_one` | infra | Without it a failed disposable-cluster start exits 0, so an operator or CI step proceeds as if the HA fixture existed. | docs/testing.md#helm-coverage |
 
 ## `tests/test_qdrant_io.py`
 
@@ -2351,6 +2383,17 @@ This is a snapshot, not a working rule. New or changed tests justify themselves 
 | `test_resolve_runtime_settings_probes_send_gateway_keys` | core | Discovery probes omit the per-leg virtual key so auto-detect fails through the gateway or sends the wrong key. | AGENTS.md hard boundaries (per-leg keys) |
 | `test_resolve_runtime_settings_explicit_dense_dim_mismatch_fails_closed` | core | A wrong --dense-dim silently searches at the server's native dim. | issue #180 |
 | `test_execute_query_emits_v1_search_span` | core | Raw query text enters trace span attributes. | issue #529 |
+| `test_cli_limit_below_one_is_a_usage_error` | core | Without it --limit 0 or a negative value reaches search instead of exiting with a usage error. | docs/testing.md#evaluation |
+| `test_main_cli_search_json_is_the_machine_readable_hit_list` | core | Without it the JSON search output that scripts consume loses hits, kind or timings. | docs/testing.md#evaluation |
+| `test_search_html_escapes_manual_text_and_query` | core | Without it manual text, titles, message ids or the query inject markup into the saved inspection HTML that people open in a browser. | docs/testing.md#evaluation |
+| `test_answer_text_says_whether_citations_were_explicit_or_inferred` | core | Without it a reader cannot tell citations the model wrote from ones inferred from bracketed excerpt indices, overstating how verified an answer is. | issue #365 |
+| `test_answer_html_escapes_model_answer_citations_and_draft_script` | core | Without it model output (answer, citations, extracted script) injects markup into the saved answer HTML and the draft-script review warning is lost. | docs/testing.md#evaluation |
+| `test_resolve_runtime_settings_explicit_cli_overrides_beat_multi_model_discovery` | core | Without it auto-discovery of served models overrides the collection, endpoints, models or dense dimension the operator passed explicitly, so queries hit the wrong collection or model. | AGENTS.md#hard-boundaries |
+| `test_resolve_runtime_settings_explicit_model_resolves_to_served_basename` | core | Without it a short model name no longer resolves to the served id, so the request names a model the gateway rejects. | AGENTS.md#hard-boundaries |
+| `test_resolve_runtime_settings_unverifiable_dense_dim_warns_and_keeps_the_explicit_value` | core | Without it an unverifiable --dense-dim is silently dropped or aborts instead of warning and keeping the operator's value. | issue #180 |
+| `test_resolve_runtime_settings_otel_endpoint_precedence` | infra | Without it the tracing endpoint ignores the explicit flag, the off switch or the environment, so traces go to the wrong collector or leak when disabled. | issue #529 |
+| `test_resolve_runtime_settings_explicit_cli_values_survive_unreachable_discovery` | core | Without it explicit model and endpoint flags are lost when discovery probes fail, so a query silently runs against defaults. | AGENTS.md#hard-boundaries |
+| `test_resolve_runtime_settings_explicit_model_beats_a_lone_different_served_model` | core | Without it a gateway serving one different model replaces the model the operator asked for, so answers come from a model nobody selected. | AGENTS.md#hard-boundaries |
 
 ## `tests/test_query_filters.py`
 
@@ -2402,6 +2445,10 @@ This is a snapshot, not a working rule. New or changed tests justify themselves 
 | `test_report_invalid_input_preserves_output_and_recovers` | infra | A missing or corrupt input overwrites the previous report output, or the next ordinary run does not recover. | docs/task-runner.md |
 | `test_report_bundle_defaults_require_explicit_opt_in` | infra | Bundle default paths apply without an explicit bundle-dir or empty path overrides write into the bundle. | docs/task-runner.md |
 | `test_empty_report_bundle_preserves_root_relative_read_contract` | infra | An empty bundle-dir silently reads or writes unintended host-root files. | docs/task-runner.md |
+| `test_markdown_eval_report_escapes_cells_and_labels_every_row_kind` | core | Without it the markdown evidence a release reads can have a stray pipe shift table columns, or hide error and abstain rows and baseline deltas of the evaluation. | docs/testing.md#reports |
+| `test_non_html_bench_report_carries_every_measured_value` | core | Without it the text and markdown benchmark reports can drop or mislabel the RSS, Qdrant, RPS and p95 numbers acceptance evidence is read from. | docs/testing.md#reports |
+| `test_compare_eval_reports_routing_shifts_and_population_changes_in_every_format` | core | Without it an evaluation comparison can silently pass when a query was dropped from the evaluated set or a query changed routing, in any output format. | docs/testing.md#reports |
+| `test_compare_bench_throughput_collapse_is_a_regression_but_a_modest_drop_is_not` | core | Without it a throughput collapse (higher-is-better metric) passes the benchmark comparison and --fail-on-regression exits 0. | docs/testing.md#reports |
 
 ## `tests/test_replay.py`
 
@@ -3041,3 +3088,25 @@ This is a snapshot, not a working rule. New or changed tests justify themselves 
 | `test_ui_fragment_renders_supplied_excerpt_as_data` | core | Hostile excerpt markup would render as HTML, or an unknown source version would be replaced by the request's. | #635; docs/adr/0004-operator-console-htmx.md |
 | `test_ui_history_payload_never_carries_excerpt_text` | core | Excerpt text would be carried in browser history, persisting manual content beyond the current response. | #635 |
 | `test_console_js_keeps_excerpts_out_of_persistence` | core | Console JavaScript could persist or export excerpt text, or insert it into the DOM as HTML. | #635; docs/agent.md console browser contract |
+
+## Addendum: guarantee restoration after #770
+
+#770 removed the only unit coverage of some lines in `src/` and `scripts/`. A follow-up
+restored 73 mutation-verified collected items. Each new test failed when the line it protects was
+broken. Every line that lost unit coverage is now one of three things: covered again, covered by
+a named non-unit lane, or justified below as carrying no guarantee.
+
+| Lines | Decision | Reason or where it is proven |
+|---|---|---|
+| `scripts/mock_vllm.py` (165), `src/mainframe_rag/mcp/mock.py` (112), `scripts/init_mock_zos.py` (30) | test tooling | Stand-ins for the model server and z/OS. They are exercised by the sim lane (`tests/test_integration_sim.py`, `tests/test_mcp_sim.py`), the load lane, agent-probes and the e2e kind lanes, all of which fail if a stand-in misbehaves. Production refusal of `MCP_MOCK_DIR` is the hygiene gate in `tests/test_mcp_agent.py`. |
+| `scripts/build_golden_corpus.py` (188) | owning boundary elsewhere | Offline re-freeze builder. Its committed output is held by `tests/test_eval_gate.py::test_repo_golden_set_is_sha_pinned` and `::test_repo_golden_rows_opt_into_acceptance_states`. |
+| `scripts/qdrant_cluster.py` 50-52, 67-68, 73, 89-95, 202-236 | HA lane | Container start/stop, port and image plumbing reached by the `cluster` fixture of `tests/test_ha_cluster.py`. The readiness, placement and exit-code helpers have unit tests again. |
+| `src/mainframe_rag/eval/load.py` 144, 165-166 | load lane | Stage aggregation asserted by `tests/test_load_tier.py::test_search_load_has_zero_errors_and_full_timings`. |
+| `src/mainframe_rag/eval/load.py` 71-73 | no guarantee | `nvidia-smi` absent fallback; the VRAM figure is informational. |
+| `src/mainframe_rag/eval/answers.py` 192-193 | no guarantee | argparse already maps the bare `ValueError` to the same exit 2; only message text differs. |
+| `src/mainframe_rag/eval/chat.py` 254-278, `src/mainframe_rag/eval/performance.py` 147, `scripts/query_demo.py` 52-85 | no guarantee | Human-readable layout that no caller or gate parses. The machine contracts (JSON output, HTML escaping, verdicts) are tested. |
+| `src/mainframe_rag/eval/retrieval.py` 312-313 | no guarantee | Intermediate dict nodes for nested report keys; every caller passes flat keys. |
+| `src/mainframe_rag/serve/profiles.py` 205 | no guarantee | `list_profiles` is re-exported by `serve/__init__.py` but has no in-repo caller; it returns `sorted(PROFILES)`. |
+| `scripts/review_tooling.py` 254-263 | no guarantee | Advisory test-focus text for an LLM prompt; no verdict or exit code reads it. |
+| `scripts/verify_golden.py` 161, 171 | no guarantee | WARN lines; the exit code depends only on failures. |
+| `scripts/colab_runtime.py` 865 | no guarantee | Redundant type guard: the next statement raises the same `TypeError`, so it is an equivalent mutant. |
