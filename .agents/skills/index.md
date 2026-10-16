@@ -12,6 +12,10 @@ owns their source pin, license and allowlist.
 - [diagnosing-bugs](diagnosing-bugs/SKILL.md): reproducible diagnosis and regression proof.
 - [tdd](tdd/SKILL.md): one behavior at a time through approved testing interfaces.
 - [codebase-design](codebase-design/SKILL.md): module interfaces, dependency seams and testability.
+- [code-review](code-review/SKILL.md): separate Standards and Spec passes feeding the review protocol.
+- [domain-modeling](domain-modeling/SKILL.md): project terminology, glossary and ADR discipline.
+- [writing-for-agents](writing-for-agents/SKILL.md): skills, entry points and instruction files agents read.
+- [retro](retro/SKILL.md): session retrospective proposing environment improvements.
 
 ## Measurement, impact and lifecycle
 

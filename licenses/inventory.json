@@ -309,11 +309,11 @@
           {
             "notice": true,
             "path": "NOTICE.mattpocock-skills",
-            "sha256": "2fdca90895e267e9be05f5fef460b54d8fa065f5a8d1afccc24ca684215ffcfc"
+            "sha256": "610d0432b77867c8c749a02a74b291cc0c36837272cf224f0da644341468350d"
           },
           {
             "path": ".agents/mattpocock-skills.sha256",
-            "sha256": "ca2605188ec707cbf3778c1c8921bf24360dd1d48bd202c5c157cf6bba088f4c"
+            "sha256": "89f6783a25ea159ef1c14b9acb4cb6f682c010ce466ddcdac2191328ffba1049"
           }
         ]
       },
@@ -323,7 +323,7 @@
       "kind": "vendored-docs",
       "license_declared": "MIT (LICENSE.mattpocock-skills, attribution in NOTICE.mattpocock-skills)",
       "license_spdx": "MIT",
-      "name": "Matt Pocock engineering skills (three pinned upstream subtrees)",
+      "name": "Matt Pocock engineering skills (seven pinned upstream subtrees)",
       "ships_in": [
         "repo.bundle"
       ],
