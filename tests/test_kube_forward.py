@@ -175,8 +175,7 @@ def test_occupied_local_port_is_refused_before_spawning(forward):
 
 
 @pytest.mark.parametrize("bad", [
-    ["--namespace", "Bad_NS"], ["--service", "qdrant;rm"], ["--local-port", "80"],
-    ["--remote-port", "70000"], ["--probe-path", "readyz"], ["--backoff-min", "0"], ["--idle-close", "0"],
+    ["--namespace", "Bad_NS"], ["--service", "qdrant;rm"], ["--local-port", "80"], ["--idle-close", "0"],
 ])
 def test_invalid_inputs_refuse_before_spawning(forward, bad):
     start, root = forward

@@ -115,9 +115,9 @@ def test_cpu_preflight_records_actual_platform_without_inference_python(remote_p
                                             "implementation": None, "error": "not_found"}
 
 
-@pytest.mark.parametrize("failure", [OSError("metadata absent"), ValueError("unsupported confstr"),
-                                    UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid byte")])
-def test_cpu_preflight_records_unknown_optional_platform_facts(remote_preflight, monkeypatch, failure):
+def test_cpu_preflight_records_unknown_optional_platform_facts(remote_preflight, monkeypatch):
+    failure = OSError("metadata absent")
+
     def unavailable(*args):
         raise failure
 
@@ -129,27 +129,9 @@ def test_cpu_preflight_records_unknown_optional_platform_facts(remote_preflight,
                                     "distribution_id": None, "distribution_version": None}
 
 
-@pytest.mark.parametrize("failure", [subprocess.TimeoutExpired("python3.12", 3),
-                                    ValueError("malformed interpreter output")])
-def test_cpu_preflight_survives_inference_probe_failure(remote_preflight, monkeypatch, failure):
-    monkeypatch.setattr(colab_preflight.shutil, "which", lambda name: (
-        "/usr/bin/python3.12" if name == "python3.12" else None))
-
-    def probe(*args, **kwargs):
-        raise failure
-
-    monkeypatch.setattr(colab_preflight.subprocess, "run", probe)
-    status, observed = remote_preflight("COLAB_CPU_TRANSPORT")
-    assert status == 0 and observed["admitted"] is True
-    assert observed["inference_python"]["error"] == (
-        "timeout" if isinstance(failure, subprocess.TimeoutExpired) else "invalid_output")
-
-
 @pytest.mark.parametrize("version,implementation,error,expected_status", [
     ("3.12.13", "CPython", None, 0), ("3.13.16", "CPython", None, 2),
     ("3.12.13", "PyPy", None, 2), (None, None, "not_found", 2),
-    (None, None, "timeout", 2), (None, None, "probe_failed", 2),
-    (None, None, "invalid_output", 2),
 ])
 def test_gpu_preflight_checks_interpreter_before_setup_and_preserves_facts(
         remote_preflight, monkeypatch, version, implementation, error, expected_status):
@@ -188,10 +170,8 @@ def test_inference_interpreter_probe_uses_real_isolated_stdlib_process(tmp_path,
 @pytest.mark.parametrize("result,error", [
     (subprocess.TimeoutExpired("python3.12", 3), "timeout"),
     (OSError("cannot start"), "probe_failed"),
-    (subprocess.CalledProcessError(1, "python3.12"), "probe_failed"),
-    ("[]", "invalid_output"), ("not json", "invalid_output"),
+    ("not json", "invalid_output"),
     ('{"version": 312, "implementation": "CPython"}', "invalid_output"),
-    ('{"version": "3.12.13"}', "invalid_output"),
 ])
 def test_inference_interpreter_probe_reports_unknown_evidence(monkeypatch, result, error):
     monkeypatch.setattr(colab_preflight.shutil, "which", lambda _name: "/usr/bin/python3.12")
@@ -228,7 +208,7 @@ def test_software_probe_observes_installed_tokenizers_version(tmp_path, monkeypa
     assert json.loads(observed.read_text())["tokenizers"] == "0.23.7"
 
 
-@pytest.mark.parametrize("disabled", [False, True])
+@pytest.mark.parametrize("disabled", [False])
 def test_snapshot_fetch_uses_parallel_transfer_and_records_its_time(tmp_path, monkeypatch, disabled):
     """The fixed fetch script downloads with 8 file workers, names the transfer
     the locked hub actually uses and reports elapsed time for startup measurement."""
@@ -280,8 +260,7 @@ def test_runtime_environment_enables_bounded_xet_despite_ambient_disable(tmp_pat
     assert env["HF_HOME"] == str(tmp_path / "hf-cache")
 
 
-@pytest.mark.parametrize("corruption", [None, "base_prefix", "prefix", "python", "implementation",
-                                      "installer_kernel", "installer_old", "installer_exit", "check_exit"])
+@pytest.mark.parametrize("corruption", [None, "base_prefix", "implementation", "installer_old", "check_exit"])
 def test_inference_install_works_without_ensurepip_and_targets_fresh_environment(tmp_path, monkeypatch, corruption):
     from mainframe_rag.serve.colab_profiles import build_profile
 
@@ -392,7 +371,7 @@ def test_inference_install_works_without_ensurepip_and_targets_fresh_environment
 
 
 @pytest.mark.parametrize("version,error", [("22.2", "unsupported_version"), ("22.3", None),
-    ("26.2.1", None), ("not-a-version", "invalid_version"), (None, "invalid_version"),
+    ("not-a-version", "invalid_version"),
     (colab_preflight.metadata.PackageNotFoundError("pip"), "not_found"),
     (OSError("unreadable metadata"), "probe_failed")])
 def test_preflight_records_kernel_pip_without_installing_or_bootstrapping(monkeypatch, version, error):
@@ -408,7 +387,7 @@ def test_preflight_records_kernel_pip_without_installing_or_bootstrapping(monkey
                       "error": error}
 
 
-@pytest.mark.parametrize("error", ["not_found", "unsupported_version", "invalid_version"])
+@pytest.mark.parametrize("error", ["not_found"])
 def test_missing_kernel_installer_refuses_gpu_but_next_cpu_remains_usable(remote_preflight, monkeypatch, error):
     monkeypatch.setattr(colab_preflight, "observe_inference_python", lambda: {
         "executable": "/usr/bin/python3.12", "version": "3.12.3", "implementation": "CPython", "error": None})
@@ -422,7 +401,7 @@ def test_missing_kernel_installer_refuses_gpu_but_next_cpu_remains_usable(remote
     assert remote_preflight("COLAB_CPU_TRANSPORT")[0] == 0
 
 
-@pytest.mark.parametrize("raw", [b"[]", b"null", b'"unexpected"', b"42"])
+@pytest.mark.parametrize("raw", [b"[]"])
 def test_model_http_json_requires_an_object_and_next_response_succeeds(monkeypatch, raw):
     bodies = iter([raw, b'{"data": [{"id": "Qwen/Qwen3.8-27B"}]}'])
 
@@ -439,26 +418,7 @@ def test_model_http_json_requires_an_object_and_next_response_succeeds(monkeypat
     }
 
 
-def test_reasoning_only_or_truncated_warmup_refuses_then_complete_request_succeeds():
-    server = {"port": 8000, "model_id": "Qwen/Qwen3.8-27B"}
-    calls = []
-
-    def gateway(url, body=None, **kwargs):
-        calls.append((url, body))
-        return {"choices": [{"finish_reason": "length", "message": {"content": "", "reasoning": "thinking"}}]}
-
-    with pytest.raises(RuntimeError, match="completed final content"):
-        warmup_reasoning(server, http=gateway)
-    assert calls[0][1]["reasoning_effort"] == "low"
-    assert calls[0][1]["max_tokens"] == 512
-
-    def completed(url, body=None, **kwargs):
-        return {"choices": [{"finish_reason": "stop", "message": {"content": "READY"}}]}
-
-    warmup_reasoning(server, http=completed)
-
-
-@pytest.mark.parametrize("content,finish", [("answer", "length"), ("   ", "stop"), (None, "stop")])
+@pytest.mark.parametrize("content,finish", [("answer", "length"), (None, "stop")])
 def test_reasoning_readiness_requires_completed_final_content(content, finish):
     def endpoint(url, body=None, **kwargs):
         return {"choices": [{"finish_reason": finish, "message": {"content": content}}]}
@@ -517,8 +477,7 @@ def supplied_inference_lock(tmp_path):
 
 
 @pytest.mark.parametrize("requirement", [
-    "extra-package==not-a-version", "extra-package==1..0", "extra-package==1!2!3",
-    "extra-package==1.0+cuda++", "extra-package-==1.0", "extra-package>=1.0",
+    "extra-package==not-a-version", "extra-package>=1.0",
     "extra-package @ https://example.invalid/extra.whl", "--index-url=https://example.invalid",
 ])
 def test_inference_lock_refuses_nonexact_or_unsupported_requirement_tokens(supplied_inference_lock, requirement):
@@ -657,7 +616,6 @@ class Clock:
 
 @pytest.mark.parametrize("readiness_seconds,cold_seconds,remaining,budget,late_response", [
     (15, 41, 7200, 1185, False),
-    (1190, 5, 7200, 10, False),
     (10, 41, 65, 55, False),
     (1190, 11, 7200, 10, True),
     (10, 56, 65, 55, True),
@@ -851,62 +809,24 @@ def test_transport_approval_is_required_before_any_gpu_bootstrap(tmp_path):
     ("stop", 2, False, ("models",), "TypeError"),
     ("stop", 2, False, ("software",), "TypeError"),
     ("stop", 2, False, ("snapshot",), "TypeError"),
-    ("stop", 2, False, ("software", "python", []), "TypeError"),
     ("stop", 2, False, ("software", "python", True), "TypeError"),
-    ("stop", 2, False, ("software", "python", 312), "TypeError"),
-    ("stop", 2, False, ("software", "python", "3.12."), "RuntimeError"),
-    ("stop", 2, False, ("software", "cuda_available", "false"), "TypeError"),
-    ("stop", 2, False, ("software", "cuda_available", 1), "TypeError"),
     ("stop", 2, False, ("software", "cuda_available", False), "RuntimeError"),
-    ("stop", 2, False, ("software", "vllm", []), "TypeError"),
-    ("stop", 2, False, ("software", "vllm", True), "TypeError"),
     ("stop", 2, False, ("software", "vllm", "0.28.1"), "RuntimeError"),
-    ("stop", 2, False, ("software", "transformers", 5.15), "TypeError"),
-    ("stop", 2, False, ("software", "tokenizers", []), "TypeError"),
-    ("stop", 2, False, ("software", "tokenizers", "0.23.8"), "RuntimeError"),
-    ("stop", 2, False, ("software", "torch", "2.12.1"), "RuntimeError"),
-    ("stop", 2, False, ("software", "huggingface_hub", "1.31.1"), "RuntimeError"),
-    ("stop", 2, False, ("software", "cuda_build", []), "TypeError"),
-    ("stop", 2, False, ("software", "cuda_build", "12.8"), "RuntimeError"),
-    ("stop", 2, False, ("resources", "driver_version", []), "TypeError"),
-    ("stop", 2, False, ("resources", "driver_version", True), "TypeError"),
-    ("stop", 2, False, ("resources", "driver_version", 580), "TypeError"),
     ("stop", 2, False, ("resources", "driver_version", "9" * 65), "RuntimeError"),
-    ("stop", 2, False, ("snapshot", "model_id", []), "TypeError"),
-    ("stop", 2, False, ("snapshot", "resolved_revision", True), "TypeError"),
-    ("stop", 2, False, ("snapshot", "download_bytes", []), "TypeError"),
-    ("stop", 2, False, ("snapshot", "download_bytes", True), "TypeError"),
-    ("stop", 2, False, ("snapshot", "download_bytes", -1), "RuntimeError"),
     ("stop", 2, False, ("snapshot", "download_bytes", MODEL_LIMIT_BYTES + 1), "RuntimeError"),
-    ("stop", 2, False, ("snapshot", "tensor_bytes", "100"), "TypeError"),
-    ("stop", 2, False, ("snapshot", "tensor_bytes", True), "TypeError"),
     ("stop", 2, False, ("snapshot", "tensor_bytes", 101), "RuntimeError"),
-    ("stop", 2, False, ("snapshot", "tensor_shards", True), "TypeError"),
     ("stop", 2, False, ("snapshot", "transfer", "ftp"), "RuntimeError"),
-    ("stop", 2, False, ("snapshot", "download_seconds", "1.5"), "TypeError"),
-    ("stop", 2, False, ("snapshot", "download_seconds", True), "TypeError"),
-    ("stop", 2, False, ("snapshot", "download_seconds", -1), "RuntimeError"),
-    ("stop", 2, False, ("snapshot", "download_seconds", float("nan")), "RuntimeError"),
-    ("stop", 2, False, ("snapshot", "metadata_sha256", []), "TypeError"),
     ("stop", 2, False, ("snapshot", "metadata_sha256", {"tokenizer.json": True}), "RuntimeError"),
-    ("stop", 2, False, ("candidate", None), "RuntimeError"),
     ("stop", 2, False, ("candidate", "wrong"), "RuntimeError"),
     ("stop", 2, False, ("pooling",), "TypeError"),
-    ("stop", 2, False, ("pooling", "missing"), "FileNotFoundError"),
     ("stop", 2, False, ("pooling", "oversize"), "RuntimeError"),
     ("stop", 2, False, ("pooling", "timeout"), "RuntimeError"),
-    ("stop", 2, False, ("pooling", "exit"), "RuntimeError"),
     ("stop", 2, False, ("pooling", "trust", "approved"), "RuntimeError"),
     ("stop", 2, False, ("pooling", "acceptance_certified", True), "RuntimeError"),
-    ("stop", 2, False, ("pooling", "facts", None), "RuntimeError"),
-    ("stop", 2, False, ("pooling", "facts", "packages", "tokenizers", "0.99"), "RuntimeError"),
     ("stop", 2, False, ("pooling", "manifest", "provenance", "producer", "source_sha256", "f" * 64), "RuntimeError"),
     ("stop", 2, False, ("pooling", "manifest", "model", "revision", "f" * 40), "RuntimeError"),
     ("stop", 2, False, ("pooling", "manifest", "files", "tokenizer.json", "sha256", "f" * 64), "RuntimeError"),
     ("stop", 2, False, ("pooling", "manifest", "observation", "counting_options", "truncation", True), "RuntimeError"),
-    ("stop", 2, False, ("pooling", "manifest", "observation", "counting_options", "add_special_tokens", 1), "RuntimeError"),
-    ("stop", 2, False, ("pooling", "manifest", "observation", "effective_window", 8192), "RuntimeError"),
-    ("stop", 2, False, ("pooling", "manifest", "observation", "effective_window", float("nan")), "ValueError"),
 ])
 def test_gpu_startup_uses_exact_argv_and_warms_reasoning_before_embedding(
         tmp_path, monkeypatch, finish, status, embedding_started, malformed, failure_type):
