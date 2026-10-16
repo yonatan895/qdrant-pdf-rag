@@ -105,7 +105,7 @@ The 5-stage pipeline (`airgap:pack` -> `airgap:load` -> `airgap:deploy` -> `airg
 1. **Production (Air-Gapped OpenShift):** Full 3-replica Qdrant cluster, internal enterprise registry, `restricted-v2` SCC, cluster vLLM endpoints, sneakernet tarball verification.
 2. **Local Cluster Testing (Kind + Local Registry):** Local single-node Kind cluster using a local container registry (`localhost:5000` / `airgap-registry:5000`) and 1-replica overrides (`QDRANT_EXTRA_VALUES`). Runs the exact same packaging scripts, image archives, Helm charts, with explicit local sizing and identity overrides. Kind does not implement OpenShift SCC admission.
 3. **Continuous Integration (CI):** `sh scripts/tools/run-task.sh airgap:dryrun` validates applicable deployment changes without a cluster; product workflow path filters exclude markdown-only changes. The context workflow checks relevant docs separately. Published-bundle rehearsal runs on `main`/dispatch; enforced jobs and policy obligations are distinguished in [deploy](deploy.md#ci-policy).
-4. **Release verification (Windows OpenShift Local / CRC):** Published-main bundles must pass [the manual CRC gate](crc-release-verification.md) before production transfer. WSL retains the authenticated model gateway and GPU servers; CRC exercises the production Helm charts, real SCC admission, OAuth/Route, persistence, and runtime isolation. Transfer the identical tested bundle. Production version, identity, storage, and multi-node acceptance remain separate.
+4. **Release verification (Kind with both real models):** Published-main bundles must pass [the manual release gate](release-verification.md) before production transfer: a disposable Kind cluster runs the production Helm charts against both real models behind the authenticated TLS gateway, alongside the required CI jobs on the same signed bundle. Transfer the identical tested bundle. SCC admission, OAuth/Route, Service CA and runtime isolation are first verified on the site ([site OpenShift acceptance](install_and_ops.md#site-openshift-acceptance)); production version, identity, storage, and multi-node acceptance remain separate.
 
 Application and Qdrant resources use the same release charts. Local/CI platform stand-ins, synthetic corpus generators and sizing overrides remain separate test fixtures; their success does not establish production platform acceptance.
 
@@ -237,7 +237,7 @@ Local launch order, gateway handoff, GPU profiles and mode limits live in
 [live-stack](live-stack.md#operating-modes); installation, component-debugging,
 reports and REPL procedures live in [install and operations](install_and_ops.md).
 A local mocked run cannot certify release behavior or distributed HA. Published
-artifact/topology acceptance stays in [the CRC gate](crc-release-verification.md).
+artifact/topology acceptance stays in [the release gate](release-verification.md).
 
 ---
 

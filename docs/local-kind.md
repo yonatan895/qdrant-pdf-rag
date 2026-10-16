@@ -1,8 +1,8 @@
 # Fresh local Kind stack with real models
 
 This connected-host procedure starts from a new clone and the published-main
-bundle. It does not require a CRC installation, old containers, a retained
-registry database, or a previous `airgap.env`. It uses the same Helm deployment
+bundle. It does not require old containers, a retained registry database, or
+a previous `airgap.env`. It uses the same Helm deployment
 pipeline as production, with explicit single-node Kind overrides. Original
 manuals and an optional verified checkpoint are operator inputs outside Git.
 
@@ -46,7 +46,7 @@ Install the checksum-pinned Kind, kubectl and Helm clients from the
 [workflow](../.github/workflows/e2e.yml) into `$KIND_STATE/bin`, replacing its
 `/usr/local/bin` destination with that directory. Export that directory first in
 `PATH` and use `KUBECONFIG=$KIND_STATE/kubeconfig` explicitly. These tools must
-not reuse CRC adapters or alter the default kubeconfig.
+not alter the default kubeconfig.
 
 ## 2. Preserve the authorized checkpoint before teardown
 
@@ -74,18 +74,15 @@ ordinary [preserved-volume operations](local-real-corpus.md) do not.
 ## 3. Start named model servers and a fresh gateway
 
 Use the exact model revisions and immutable-view procedure in
-[the model runbook](local-crc-environment.md#3-pin-and-start-the-two-model-servers-sequentially).
-Only that model acquisition/profile section is shared with CRC; no CRC state is
-required. Retain `LOCAL_CRC_32GB` as the explicit existing profile identifier
-until its owner approves a rename; a profile label is not a running CRC service.
-Set `REASONING_VIEW` and `EMBED_VIEW` to newly prepared immutable local views.
+[the release guide](release-verification.md#pinned-models). Set `REASONING_VIEW`
+and `EMBED_VIEW` to newly prepared immutable local views.
 
 In retained tmux sessions, run from the development clone, first reasoning:
 
 ```sh
 sh scripts/tools/run-task.sh local:llm CONTAINER_NAME=rag-kind-reasoning \
   MODEL="$REASONING_VIEW" SERVED_NAME=google/gemma-4-E4B-it-qat-mobile-ct \
-  PORT=8000 BUDGET_PROFILE=LOCAL_CRC_32GB \
+  PORT=8000 BUDGET_PROFILE=LOCAL_RT_8GB \
   VLLM_IMAGE=vllm/vllm-openai@sha256:61fc8a896b0a4fbbbdc063bc4b0dbc25ce98e02b5050c24aeb7830ac02039b14
 ```
 
@@ -94,7 +91,7 @@ Wait for `http://127.0.0.1:8000/health`, then start embedding:
 ```sh
 sh scripts/tools/run-task.sh local:embed CONTAINER_NAME=rag-kind-embed \
   MODEL="$EMBED_VIEW" SERVED_NAME=Qwen/Qwen3-Embedding-0.6B \
-  PORT=8001 BUDGET_PROFILE=LOCAL_CRC_32GB \
+  PORT=8001 BUDGET_PROFILE=LOCAL_RT_8GB \
   VLLM_IMAGE=vllm/vllm-openai@sha256:61fc8a896b0a4fbbbdc063bc4b0dbc25ce98e02b5050c24aeb7830ac02039b14
 ```
 
@@ -102,35 +99,24 @@ Wait for embedding health before gateway probes. No model/window overrides are
 needed for naming. Keep reranking disabled for this two-model pack.
 
 Generate a new protected gateway restart file using
-[the gateway provisioning recipe](local-crc-environment.md#4-start-and-preserve-the-gateway),
+[the gateway provisioning recipe](release-verification.md#gateway),
 setting `LOCAL_STATE=$KIND_STATE`, `GATEWAY_NAME=rag-kind-gateway`,
 `PG_NAME=rag-kind-gateway-db`, `PG_VOLUME=rag-kind-gateway-data`,
 `PG_NET=rag-kind-models`, and `GATEWAY_ENV_FILE=$KIND_STATE/gateway.env`.
-Use fresh keys with this fresh database; do not import the old CRC restart file.
+Use fresh keys with this fresh database; do not import another stack's restart file.
 Run `local:gateway:up` in a retained tmux session with its output redirected to a
 private log. Source its handoff only in consumer shells and then explicitly set
 `RERANK_ENABLED=false`, `DENSE_DIM=1024`, and the immutable embedding revision.
 
 ## 4. TLS, registry and cluster
 
-Use the existing [TLS/registry recipe](local-crc-environment.md#5-tls-authenticated-registry-and-windows-clients)
-with this complete substitution table for a **new** identity:
-
-| Recipe input or literal | Fresh Kind value |
-|---|---|
-| `LOCAL_STATE` | `$KIND_STATE` |
-| CA common name | `Local Kind CA` |
-| `host.crc.testing` | `rag-kind.test` (including certificate SANs) |
-| `crc-loader` | `kind-loader` |
-| `crc-fit-registry` | `rag-kind-registry` |
-| `crc-fit-gateway-tls` | `rag-kind-gateway-tls` |
-| `crc-litellm-gateway` | `rag-kind-gateway` |
-| `crc-litellm-gateway-net` | `rag-kind-models` |
-
-Keep the pinned images, non-root TLS proxy, authenticated registry, and TLS
-verification. Registry host port is 5443; gateway host port is 8444. Neither
-service needs the old CRC containers. Use a generated registry password supplied
-to `htpasswd` on stdin; keep its protected auth JSON for the loader and pull Secret.
+Use the [TLS/registry recipe](release-verification.md#tls-services) with
+`LOCAL_STATE=$KIND_STATE` for a **new** identity. It uses the same container names
+as the release rehearsal; if those services already run, reuse them rather than
+creating a second set. Keep the pinned images, non-root TLS proxy, authenticated
+registry, and TLS verification. Registry host port is 5443; gateway host port is
+8444. Use a generated registry password supplied to `htpasswd` on stdin; keep its
+protected auth JSON for the loader and pull Secret.
 
 Set the adapter inputs explicitly:
 
@@ -145,15 +131,14 @@ export PATH="$KIND_BIN:$PATH"
 
 The fresh auth JSON must contain `auths["rag-kind.test:5000"]` and
 `auths["rag-kind.test:5443"]`, each with the base64-encoded
-`kind-loader:password` credential. Keep it mode 0600. Skip the fallback guide's
-copy-from-old-auth step: there is no old registry credential to reuse. Give the
+`kind-loader:password` credential. Keep it mode 0600. Give the
 Skopeo adapter a directory containing `ca.crt` at `/certs`; when the host path
 contains a colon (for example `rag-kind.test:5000`), use Docker's
 `--mount type=bind,src=...,dst=/certs,readonly`, not the colon-delimited `-v` form.
 Do not mount CA private keys into the loader.
 
-Follow [Kind network and node trust](local-release-fallback.md#32-reuse-authenticated-tls-services-without-changing-host-ports)
-through cluster creation using the same substitutions. Add read-only Kind node
+Follow [Kind network and node trust](release-verification.md#kind-cluster)
+through cluster creation, using this guide's `KIND_NAME` and `KIND_STATE`. Add read-only Kind node
 mounts for `$KIND_STATE/corpus` at `/mnt/rag-kind-corpus` and
 `$KIND_STATE/checkpoint` at `/mnt/rag-kind-checkpoint`. The corpus is a static
 read-only local PV; Qdrant data/scratch and Jaeger use writable local-path claims.
@@ -161,19 +146,10 @@ After both services join the `kind` network, the registry gets Docker DNS alias
 `rag-kind.test`; CoreDNS maps that same hostname to the TLS gateway address.
 The node registry and pod gateway use different ports and DNS paths.
 
-The TLS proxy may resolve the gateway dynamically through Docker DNS to survive
-its recreation without a stale upstream address. In its `http` block add
-`resolver 127.0.0.11 valid=10s ipv6=off;`, and replace the location's static
-`proxy_pass` with:
-
-```nginx
-set $gateway_backend rag-kind-gateway:4000;
-proxy_pass http://$gateway_backend;
-```
-
-Keep proxy buffering off and the existing streaming timeouts. Validate `nginx -t`
-and make a certificate-verified gateway request from an application pod after
-startup and after any gateway recreation.
+The TLS proxy resolves the gateway dynamically through Docker DNS, so it survives
+gateway recreation without a stale upstream address. Validate `nginx -t` and make
+a certificate-verified gateway request from an application pod after startup and
+after any gateway recreation.
 
 ## 5. Helm deployment and checkpoint restore
 
@@ -184,7 +160,7 @@ Qdrant key split; Helm creates `qdrant-apikey` on the first deployment. Do not
 pre-create that chart-owned Secret or pass its writer key to serving pods.
 
 Prepare a new `airgap.env` from its repository example. Set all operator inputs
-explicitly using [the deployment recipe](local-crc-environment.md#72-configure-and-deploy-the-same-candidate):
+explicitly using [the deployment recipe](release-verification.md#deploy-candidate):
 namespace `rag-kind`, registry `rag-kind.test:5000`, storage class `standard`,
 `AGENT_ROUTE=false`, the new pull/gateway Secret and CA names, model URLs
 `https://rag-kind.test:8444/v1`, exact served IDs and dimension 1024, immutable
@@ -261,8 +237,8 @@ browser host too. Replace Qdrant, agent and Jaeger pods, then repeat an ordinary
 search/answer and fetch the exact pre-replacement trace ID. Record imageIDs,
 PVC identities, corpus hashes, collection/control verification, RAM/VRAM and
 actual end-to-end timing. Keep the startup commands, protected credentials,
-kubeconfig and logs under `KIND_STATE` for repeatable restarts. Old CRC containers
-and anonymous model servers must not remain as hidden dependencies.
+kubeconfig and logs under `KIND_STATE` for repeatable restarts. Containers from
+other rehearsals and anonymous model servers must not remain as hidden dependencies.
 
 This verifies the local Kind deployment. It does not qualify OpenShift SCC,
 OAuth Routes, multi-node failure tolerance or production release promotion.

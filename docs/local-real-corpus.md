@@ -4,12 +4,10 @@ Use the exact published release with real reasoning and embedding models behind
 the authenticated TLS gateway. Preserve the original PDFs, verified snapshots,
 private configuration, credentials and persistent volumes. A successful historical
 restore is not acceptance of a newer application or representation contract.
-See the [dated Helm audit](deployment-audit-2026-09-20.md) for current observations;
-the [14 September record](crc-release-verification.md#recorded-candidate-14-september-2026)
-remains historical evidence for its own candidate.
+See the [dated Helm audit](deployment-audit-2026-09-20.md) for current observations.
 
 This is a single-node local operating profile, not production 6/3/2 acceptance.
-Keep CRC and unrelated rehearsal clusters stopped while both real models run.
+Keep unrelated rehearsal clusters stopped while both real models run.
 Never query a hash collection with real embeddings. Reranking stays explicitly
 disabled for the two-model 8 GiB GPU pack.
 
@@ -20,7 +18,7 @@ runbook's published-bundle and full-corpus acceptance.
 
 ## 1. Establish the candidate, data and resource budget
 
-Follow [the Kind setup](local-release-fallback.md#3-disposable-kind-with-both-real-models)
+Follow [the Kind setup](release-verification.md#kind-cluster)
 for checksum-pinned tools, the trusted signed release, registry/node trust,
 gateway DNS and Secret/CA references. Execute application operations from the
 verified bundle checkout. Do not rebuild, relabel old images as the new SHA,
@@ -39,8 +37,8 @@ and 452 distinct original PDF hashes. Those counts describe that backup, not a
 universal success threshold. Match **every** source hash before a full migration;
 a smaller convenient corpus cannot qualify the restored collection.
 
-Use the recorded immutable Gemma/Qwen revisions and `LOCAL_CRC_32GB` serving
-budget from [the model runbook](local-crc-environment.md#3-pin-and-start-the-two-model-servers-sequentially).
+Use the recorded immutable Gemma/Qwen revisions and `LOCAL_RT_8GB` serving
+budget from [the release guide](release-verification.md#pinned-models).
 Pass `SERVED_NAME` when `MODEL` is a local directory. Start reasoning, verify its
 served ID and health, then start embedding. Restore the same gateway keys and
 PostgreSQL volume. Measure Windows/WSL RAM, swap, GPU headroom and disk before
@@ -77,11 +75,11 @@ tmpfs, capabilities, security options and restart policy. Retain the certificate
 registry data and credentials; never prune volumes or regenerate keys as a fix.
 
 Reconnect the registry and TLS gateway to the Kind network as described in
-[the TLS service setup](local-release-fallback.md#32-reuse-authenticated-tls-services-without-changing-host-ports).
+[the Kind cluster setup](release-verification.md#kind-cluster).
 Restart the TLS proxy after recreating the LiteLLM container: nginx can retain
 the old upstream address even when Docker DNS already resolves the new one.
 Container addresses may change. Refresh only the selected cluster's existing
-`host.crc.testing` CoreDNS entry to the actual gateway address and wait for DNS
+`rag-kind.test` CoreDNS entry to the actual gateway address and wait for DNS
 convergence. The node's registry DNS and the pod's gateway DNS are distinct
 paths. Verify TLS/auth from both before attributing failures to model serving.
 
@@ -324,8 +322,8 @@ those recorded services and the selected cluster's workloads. After a restart,
 repeat readiness, TLS DNS, strict acceptance and Windows listener checks. Preserve the old generation until explicitly retired.
 
 Kind does not prove OpenShift SCC, OAuth/Route, Service CA or site network/storage
-controls. CRC skipped for insufficient memory remains **NOT RUN**, as does any
-unavailable internal GitLab/Quay/namespace qualification. Record the exact missing
+controls; those belong to [site OpenShift acceptance](install_and_ops.md#site-openshift-acceptance).
+Any unavailable internal GitLab/Quay/namespace qualification remains **NOT RUN**. Record the exact missing
 environment and closure checks in the dated evidence; never promote from a local
 search or the pipeline banner alone.
 

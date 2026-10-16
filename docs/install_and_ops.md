@@ -56,10 +56,9 @@ Mainframe RAG is a citation-first retrieval-augmented generation engine designed
 
 ## 3. Local Development & Simulation Workflow
 
-For the measured Windows/WSL + real-model OpenShift topology, use
-[local-crc-environment.md](local-crc-environment.md). It includes the host memory
-profile, registry, TLS, Windows clients and local sizing. The selected operating
-mode is the [complementary CRC/Kind rehearsal](local-release-fallback.md).
+For the release rehearsal with both real models, use
+[release-verification.md](release-verification.md). It owns the pinned model
+views, gateway, TLS registry and Kind cluster setup and the local sizing.
 
 ### 3.1 Setup Environment
 
@@ -273,7 +272,7 @@ The repository provides a hardened launcher script ([`scripts/run_local_vllm.sh`
   - Verify actual residency and long inputs on the selected GPU. Eager execution removes compilation/CUDA-graph workspace, but allocations alone do not establish fit.
   - *Solo Runs*: For dedicated reasoning benchmarks, `GPU_MEM=0.85 sh scripts/tools/run-task.sh local:llm` restores maximum KV cache capacity.
 * **8GB VRAM Optimizations**:
-  - `--limit-mm-per-prompt '{"image":0,"audio":0}'` rejects those modalities; it does not establish the memory saving. The opt-in `LOCAL_CRC_32GB` profile additionally uses `--language-model-only` and a zero multimodal processor cache.
+  - `--limit-mm-per-prompt '{"image":0,"audio":0}'` rejects those modalities; it does not establish the memory saving.
   - `--max-num-seqs 1`: Bounds concurrent sequence allocation to prevent out-of-memory spikes.
   - `--enable-prefix-caching`: on for the LOCAL reasoning server (Budget `prefix_cache`; vLLM already caches by default — the pin guards flips, hit rate measured for issue #80); off for embed.
   - `--max-num-batched-tokens` (embed server): capped at the Budget window so the memory-profiling peak stays bounded; it does not follow a `MAX_LEN` operator override (erring small is the safe side).
@@ -312,7 +311,6 @@ One server per Task invocation (each blocks its shell — run each in its own te
 | Goal | Profile (default `LOCAL_RT_8GB`) | Commands | Notes |
 |---|---|---|---|
 | Answer quality (big reasoning + embedding) | `LOCAL_RT_8GB` | `sh scripts/tools/run-task.sh local:llm` (:8000, E4B) + `sh scripts/tools/run-task.sh local:embed` (:8001) | Default pair. No room for a third leg (measured 7.0 GB resident). |
-| Windows CRC plus the current two models | `LOCAL_CRC_32GB` | Both launch targets with `BUDGET_PROFILE=LOCAL_CRC_32GB` | 0.54/0.43, eager, one sequence, 4096 tokens; [host setup and measurements](local-crc-environment.md). |
 | Full topology (reasoning + embedding + ranking) | `TRIPLE_8GB` | Above with `MODEL=Qwen/Qwen2.5-0.5B-Instruct GPU_MEM=0.20 MAX_LEN=4096 SEQS=1` on :8000, plus `sh scripts/tools/run-task.sh local:rerank` (:8002) | 0.5B answers are weak — plumbing/rerank coverage only. E4B triple demonstrably does not fit; resolve refuses it. |
 | Retrieval + ranking, no LLM | `RANK_EMBED_8GB` | `sh scripts/tools/run-task.sh local:embed` (:8001) + `sh scripts/tools/run-task.sh local:rerank` (:8002) | Rerank A/B and `--rerank` evals without spending VRAM on reasoning. |
 | Reasoning + ranking (no vLLM embed) | — | Unsupported | Hash embed mode pins `HashReranker` by design (determinism), so a GPU reranker is unreachable there — see issue #193. |
@@ -402,7 +400,7 @@ This is a separate platform-team model handoff, outside the application bundle.
 The platform team chooses and verifies model revisions, mirrors weights, and owns
 serving and gateway acceptance. The product consumes the resulting URLs, model
 IDs, dimensions and per-leg keys. For the exact pinned local model views used in
-the rehearsal, follow [the local guide](local-crc-environment.md#3-pin-and-start-the-two-model-servers-sequentially).
+the rehearsal, follow [the release guide](release-verification.md#pinned-models).
 
 The following export uses the measured local revisions as an example. Production
 model selection remains with the platform team:
@@ -553,9 +551,7 @@ mechanics only and does not authorize release transfer. Without a configured
 secret CI may label a package `signed: ephemeral`; reject it for promotion.
 
 `REDHAT_REGISTRY_USER` / `REDHAT_REGISTRY_PASSWORD` are the approved Red Hat
-registry service-account credentials. They are distinct from CRC's developer or
-kubeadmin credentials printed by `crc console --credentials`, and from the CRC
-pull-secret JSON. Do not paste any of these credentials into issue/PR text.
+registry service-account credentials. Do not paste them into issue/PR text.
 
 This generates `dist/qdrant-pdf-rag-<sha>.tar` and its digest `dist/qdrant-pdf-rag-<sha>.tar.sha256`, containing:
 1. Complete Git repository bundle (`repo.bundle`).
@@ -569,11 +565,11 @@ This generates `dist/qdrant-pdf-rag-<sha>.tar` and its digest `dist/qdrant-pdf-r
 
 ### 4.2 Transfer & Automated Bootstrap
 
-Before production transfer, complete [the Windows CRC release gate](crc-release-verification.md)
-and [verification record](crc-release-record.md) against the published-main
+Before production transfer, complete [the release gate](release-verification.md)
+and [verification record](release-record.md) against the published-main
 bundle. Missing or failed checks block transfer. Send the identical tested
 tarball; do not rebuild or repack after verification. The steps below are also
-used for the fresh local CRC bootstrap rehearsal.
+used for the fresh local Kind bootstrap rehearsal.
 
 Transfer the tarball and checksum file via approved sneakernet media to the air-gapped bastion host:
 
@@ -745,8 +741,8 @@ oc -n "$NAMESPACE" create secret generic internal-registry-pull-secret \
 
 Set `INSECURE_REGISTRY=false`. Provision the operator-supplied corpus PVC and
 OAuth cookie Secret before deployment. Use production storage and sizing;
-`QDRANT_EXTRA_VALUES`, `INGEST_EXTRA_PATCH` and the tiny CRC claims are local
-rehearsal overrides. [The local guide](local-crc-environment.md) owns those values.
+`QDRANT_EXTRA_VALUES`, `INGEST_EXTRA_PATCH` and the tiny rehearsal claims are local
+rehearsal overrides. [The release guide](release-verification.md#deploy-candidate) owns those values.
 
 ### 4.4 Load Images & Deploy Stack
 
@@ -769,8 +765,9 @@ Later repeat the full pipeline with identical configuration. Require a nonempty
 search, explicit cited answer, contextual follow-up and every streaming interface
 (including browser busy-state recovery), verified OAuth/Route certificates and
 persisted traces before declaring the installation operational. Preserve the
-site's SCC, identity, storage, registry and network acceptance evidence; a local
-CRC pass does not replace it.
+site's SCC, identity, storage, registry and network acceptance evidence
+([site OpenShift acceptance](#site-openshift-acceptance)); a local Kind pass does
+not replace it.
 
 #### Option B: Step-by-Step Modular Execution
 
@@ -800,7 +797,7 @@ only their cache and work directories group-0 writable.
 
 Require actual `restricted-v2` admission and successful data, snapshot,
 ingest-work and trace volume writes under
-[the CRC procedure](crc-release-verification.md#5-release-prerequisites-and-local-sizing).
+[site OpenShift acceptance](#site-openshift-acceptance).
 An admission or storage failure blocks promotion and requires a fix in the
 owning production configuration followed by a new bundle and verification.
 Do not grant `anyuid`, substitute another project's IDs, or hide security
@@ -899,7 +896,7 @@ OAuth-protected; enable it with `AGENT_ROUTE=true`:
    The GitHub pack job requires repository secrets `REDHAT_REGISTRY_USER` and
    `REDHAT_REGISTRY_PASSWORD` for a registry service account authorized to pull
    this image. Provision those before merging a recorded-pin change; the job
-   fails closed when credentials are absent or rejected. Keep personal CRC
+   fails closed when credentials are absent or rejected. Keep personal
    pull secrets on the workstation. The Docker archive omits unsupported
    upstream signature attachments; image digests and the offline bundle
    signature remain enforced.
@@ -1011,18 +1008,47 @@ is lost and is operational continuation, not qualification. A one-node
 rehearsal labels itself `VERDICT: non-ha` with `--expect-single-node` and
 never counts as distributed acceptance.
 
+<a id="site-openshift-acceptance"></a>
+#### Site OpenShift acceptance (before go-live)
+
+The [release gate](release-verification.md) has no local OpenShift lane, so these
+checks are **not run before transfer**. Run them on the site after the pipeline,
+against the transferred bundle, before users get access. Any failure blocks
+go-live and requires a fix in the owning production configuration and a new
+candidate; never grant `anyuid`, disable SCC, or hide a security fix in a
+site-only values file. Record evidence before replacing pods, so their original
+admission and image IDs stay attributable. Checks that need cluster-scoped access
+beyond the namespace record the platform team's evidence and owner instead.
+
+| Check | Required evidence |
+|---|---|
+| SCC and identities | Every product pod, completed ingest Job and console OAuth container has `openshift.io/scc` exactly `restricted-v2`; namespace UID/group ranges, admitted security contexts and actual process IDs match; no `anyuid` grant. A denied pod or unwritable volume blocks go-live. |
+| Images | Each running container's `imageID`, including OAuth, matches the loaded release artifacts under [the image-identity procedure](deploy.md#image-identity-across-archive-and-registry-formats). |
+| OAuth Route | A fresh unauthenticated `GET /ui` may show the provider chooser (403); `/oauth/start` redirects to OpenShift OAuth; login returns to `/ui`; a fresh session still requires authentication. No direct public API, Jaeger or Qdrant Route. |
+| Certificates | Browser and CLI verify the Route hostname and ingress chain without bypass. The Route is `reencrypt`, targets OAuth 8443 and trusts the Service CA; the serving Secret matches its service identity. |
+| Egress | Prove a public TCP destination is reachable from each application policy context first; after the namespace default-deny egress policy with narrow DNS, Qdrant, Jaeger, OAuth/API and gateway allows, a bounded direct-IP connection to that address fails while DNS and gateway calls succeed. Repeat ingest, gateway streaming probe, retrieval, tracing, OAuth login, cited answers and stream endings under the policy. An unresolved name or invalid certificate is not evidence of blocking. |
+| Node pulls | An uncached public image pull fails and an uncached internal-registry pull succeeds, recorded with digests and events. A cached image proves neither; NetworkPolicy success does not imply node isolation. |
+
+```sh
+oc -n "$NAMESPACE" get pods -o custom-columns='NAME:.metadata.name,SCC:.metadata.annotations.openshift\.io/scc,UID:.spec.securityContext.runAsUser,GROUP:.spec.securityContext.fsGroup'
+oc get namespace "$NAMESPACE" -o jsonpath='{.metadata.annotations.openshift\.io/sa\.scc\.uid-range}{"\n"}{.metadata.annotations.openshift\.io/sa\.scc\.supplemental-groups}{"\n"}'
+```
+
+Pod-level fields may be empty when a container has its own context; inspect both
+and run `id` where the image provides it. Save only sanitized resource metadata;
+never archive Secret YAML, token-bearing login commands or browser cookies.
+
 ### 4.7 Local Cluster Testing Standard (Kind + Local Registry)
 
 For a clean local deployment with real models and an optional full corpus
-checkpoint, start with [the fresh Kind guide](local-kind.md). It uses no retained
-CRC services or credentials.
+checkpoint, start with [the fresh Kind guide](local-kind.md).
 
 To test the deployment scripts and Kubernetes manifests locally without access to an OpenShift cluster, the project standardizes on **Kind** (Kubernetes-in-Docker) paired with a local registry container on port 5000.
 
-Kind remains the fast development rehearsal. Production release transfer
-requires [Windows CRC verification](crc-release-verification.md), including
-real OpenShift SCC, OAuth, Route, TLS, and isolation checks. Preserve Kind
-volumes and tested backups; stop its nodes while CRC runs.
+Kind is also the release rehearsal: production release transfer requires
+[the release gate](release-verification.md). OpenShift SCC, OAuth, Route, Service
+CA and isolation checks are not exercised in Kind; they run on the site under
+[site OpenShift acceptance](#site-openshift-acceptance).
 
 > [!NOTE]
 > Local cluster testing exercises the identical packaging scripts, container archives, Helm charts as production, but with adapted sizing and security contexts (1-replica Kind + mock/local vLLM rather than 3-replica OpenShift `restricted-v2`).
@@ -1074,20 +1100,17 @@ The current recipe differs from older HTTP/direct-mock examples:
 
 The exact setup YAML, image/tool pins, resource patches, authenticated registry
 configuration, corpus generator and cleanup are kept together in the workflow.
-The CRC variant uses [the local runbook's generator](local-crc-environment.md#72-configure-and-deploy-the-same-candidate)
-with `restricted-v2` and project-assigned IDs. No mock or test gateway belongs
-in production manifests or application images.
+The release rehearsal uses [the release guide's generator](release-verification.md#synthetic-corpus).
+No mock or test gateway belongs in production manifests or application images.
 
 Access Kind privately with `kubectl -n "$NAMESPACE" port-forward svc/rag-agent
 8080:8080` and open `http://localhost:8080/ui`. Kind supplies no OpenShift OAuth,
 Route, Service CA or SCC evidence. Only remove the newly created disposable
 cluster after retaining diagnostics and synthetic recovery evidence.
 
-If the CRC fit fails, the separate real-model Kind lane uses the same original
-bundle, the two current GPU models through the authenticated TLS gateway, and a
-separate real-vector collection. It must pass alongside the CRC mock lane and CI;
-[the fallback gate](crc-release-verification.md#11-bounded-simultaneous-fit-attempt-and-complementary-verification)
-keeps the missing combined OpenShift/live-model coverage explicit.
+The release gate's real-model Kind lane uses the same original bundle, the two
+current GPU models through the authenticated TLS gateway, and a separate
+real-vector collection; it must pass alongside CI.
 
 ---
 
@@ -1196,8 +1219,8 @@ Without an installed console script use `python -m mainframe_rag.ops ...`
 | **Qdrant Unready** | `/healthz` returns `503 qdrant_unready` | Check Qdrant pod logs (`oc logs qdrant-0`); check block PVC mount. |
 | **NFS Storage Refusal** | `sh scripts/tools/run-task.sh airgap:deploy` fails validation | Set `STORAGE_CLASS` to an RWO block driver (Ceph RBD / SAN / EBS). |
 | **Hash Mode in Prod** | Scripts fail closed with `EMBED_MODE=hash forbidden` | Remove `EMBED_MODE` from production environment; provide valid vLLM endpoint. |
-| **Registry Certificate Error** | `skopeo copy` fails with `x509: certificate signed by unknown authority` | Install the registry CA in the loader's trust store and configure node trust separately. Verify the certificate hostname; do not disable TLS verification for CRC release or production acceptance. The Kind HTTP registry is a development-only exception. |
-| **OpenShift SCC Rejection** | Pod `qdrant-0` fails with `unable to validate against any security context constraint` | Block promotion, capture admission evidence, and fix project-range compatibility in the owning production configuration. Verify PVC writes under `restricted-v2`; never grant `anyuid`. See [CRC verification](crc-release-verification.md). |
+| **Registry Certificate Error** | `skopeo copy` fails with `x509: certificate signed by unknown authority` | Install the registry CA in the loader's trust store and configure node trust separately. Verify the certificate hostname; do not disable TLS verification for release or production acceptance. The Kind HTTP registry is a development-only exception. |
+| **OpenShift SCC Rejection** | Pod `qdrant-0` fails with `unable to validate against any security context constraint` | Block promotion, capture admission evidence, and fix project-range compatibility in the owning production configuration. Verify PVC writes under `restricted-v2`; never grant `anyuid`. See [site OpenShift acceptance](#site-openshift-acceptance). |
 | **PVC Multi-Attach Error** | `job/ingest` fails with `Multi-Attach error for volume` on corpus PVC | Ensure any previous writer pod has released the PVC, or use a ReadOnlyMany volume. |
 | **Qdrant P2P CrashLoop** | Pod `qdrant-0` fails with `No such file or directory` looking for `cert.pem` | Ensure `config.cluster.p2p.enable_tls: false` in `values.yaml` (gossip is plaintext on CNI without `./tls/cert.pem`). |
 | **K8s Manifest Integer/Boolean Error** | `Invalid value: "string", expected integer/boolean` | Ensure numeric/boolean env vars (`DENSE_DIM`, `INGEST_WORKERS`, `RERANK_ENABLED`) are explicitly quoted in rendered manifests. |
@@ -1430,10 +1453,10 @@ and `qdrant-snapshots-qdrant-N` likewise), wait for `FileSystemResizePending` to
 `helm upgrade` (pods and claims are kept). Claims are never shrunk.
 
 **Not exercised by this repository.** Everything above is documented procedure
-plus the hermetic checks named in it; no OpenShift/CRC or site run of the
+plus the hermetic checks named in it; no OpenShift or site run of the
 snapshot, off-cluster copy, restore, rollback, Qdrant minor upgrade or PVC
 expansion has been recorded for it. Each needs a live rehearsal in the
-approved venue (CRC gate / site) before the corresponding operation is enabled;
+approved venue (site) before the corresponding operation is enabled;
 this is tracked on #272.
 
 #### Ownership and linkage

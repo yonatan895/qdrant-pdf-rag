@@ -41,10 +41,12 @@ works. Run the gateway probe before ingesting when using the
 modular commands. `sh scripts/tools/run-task.sh airgap:smoke` checks retrieval and tracing; use the
 console/answer checks in the operator runbook to verify the user experience.
 
-Production transfer additionally requires [the manual CRC release gate](crc-release-verification.md)
-and its [completed evidence record](crc-release-record.md). The existing scripts
+Production transfer additionally requires [the manual release gate](release-verification.md)
+and its [completed evidence record](release-record.md). The existing scripts
 do not enforce that record; their success banner is pipeline acceptance only.
-Missing or failed CRC checks block transfer of the candidate bundle.
+Missing or failed gate checks block transfer of the candidate bundle. OpenShift
+SCC, OAuth Route, Service CA and isolation checks have no pre-transfer lane; they
+block go-live under [site OpenShift acceptance](install_and_ops.md#site-openshift-acceptance).
 
 ## 2. Environment precedence
 
@@ -436,7 +438,7 @@ cannot schedule on one node — proven).
 - Prod Qdrant: 3 replicas, 500Gi data + 500Gi snapshots on RWO block,
   4 CPU/16Gi requests, 8 CPU/32Gi limits, project-assigned UID/GID and
   volume group from `restricted-v2`. Project-range
-  admission and volume writes must pass the CRC gate; fix demonstrated
+  admission and volume writes must pass site OpenShift acceptance; fix demonstrated
   incompatibilities in this production configuration, never by granting
   `anyuid` or hiding security changes in a local sizing override.
   `readOnlyApiKey`, PDB maxUnavailable 1,
@@ -496,7 +498,6 @@ cannot schedule on one node — proven).
   The current validator still contains legacy `anyuid` advice in its
   no-extra-values branch. Do not follow that advice: the owning production
   values remove fixed IDs and actual `restricted-v2` admission is required.
-  The CRC sizing-override path does not exercise that advisory branch.
 - Smoke needs only a namespace: it execs into the agent pod (no Route or
   port-forward required), fails closed on degraded `/healthz`, treats empty
   search results as SKIP (infrastructure ready, corpus not ingested) rather
@@ -674,7 +675,7 @@ order. Rejoin requires ACTIVE placement on three distinct peers, then exact
 corpus/control reads within the existing 60-second convergence waits before
 re-qualifying; ACTIVE placement alone is not data catch-up. Three
 containers on one host prove distributed software behavior, not
-independent-worker or site tolerance. Existing one-node CRC/Kind lanes and
+independent-worker or site tolerance. Existing one-node Kind lanes and
 the three-worker lifecycle lane are not distributed acceptance. The lane
 further demonstrates W=2 acknowledged writes under one-peer loss (exact
 corpus/control read-back via survivors and on every peer after rejoin),
@@ -802,7 +803,7 @@ bytes. Combined tag+digest refs are invalid — digest-only form is the pin.
   requires `skopeo login registry.redhat.io`; GitHub's `airgap-package` job
   requires `REDHAT_REGISTRY_USER` and `REDHAT_REGISTRY_PASSWORD` secrets
   belonging to a registry service account and fails closed if either is absent
-  or login fails. Personal CRC pull secrets stay local. The OAuth copy uses
+  or login fails. Personal pull secrets stay local. The OAuth copy uses
   `--remove-signatures` because Docker archives cannot store Red Hat's upstream
   signature attachments. Source digest verification, archive digests, and the
   offline bundle signature still apply; upstream signature attachments are not
@@ -953,7 +954,7 @@ include actual runner CPU, RAM and disk capacity; cleanup runs even after failur
 | `kind-lifecycle-chart` | Three-worker Kind; first-party chart fresh/repeat/update/failure/rollback/redeploy sequence with PVC guards, then the next ordinary pipeline |
 | `kind-lifecycle` | Independent three-worker Kind; synthetic snapshot recovery, PVC identity, Qdrant/agent/Jaeger replacement, old trace persistence and repeat pipeline |
 | `kind-shared-gateway` | Same live pipeline/probe/contracts/smoke but through the shared `GATEWAY_BASE_URL` fallback and the single `api-key` Secret data-key (issue #551); explicit per-operation URLs stay unset so fallback is exercised |
-| Manual Windows CRC | Actual SCC, Service CA, OAuth, Routes, node trust/pulls and runtime egress; record the fit outcome and fallback mode separately |
+| Manual release Kind lane | Both real models through the authenticated TLS gateway on the same signed bundle ([release gate](release-verification.md)); SCC, Service CA, OAuth, Routes, node pulls and egress are verified on the site |
 
 Only computation behind LiteLLM is deterministic in the Kind lanes. The existing
 `mock_vllm.py` uses explicit model IDs, 1024-dimensional embeddings, an explicit
@@ -1102,11 +1103,11 @@ per-leg Secret references, never plaintext keys in airgap.env.
 
 Install/bootstrap, pipeline, migration and recovery recipes stay in their existing
 owners: [install](install_and_ops.md), [ingest](ingest.md#publication-contract),
-[local recovery](local-real-corpus.md), [CRC gate](crc-release-verification.md).
+[local recovery](local-real-corpus.md), [release gate](release-verification.md).
 Qdrant 1.19 snapshot file URIs must be under the configured snapshot directory;
 require completed recovery, provenance/count/dimension and vector compatibility
 before an alias. Never mix synthetic cleanup with preserved real-corpus resources.
-Transfer the identical tested bundle; missing/failed manual CRC checks block
+Transfer the identical tested bundle; missing/failed release-gate checks block
 promotion. Sizing-only overrides do not establish SCC, residency or distributed HA.
 
 <a id="configuration-contract"></a>

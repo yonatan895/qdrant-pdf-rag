@@ -427,7 +427,7 @@ console follow-up, fresh traces, exact model/tokenizer identity, actual gateway
 transport, full corpus reconciliation, and concurrency 1 then 2. Keep full
 evidence private; publish only sanitized opaque identifiers and aggregates.
 The separate fresh published signed-bundle/Kind lane uses the existing
-[release procedure](local-release-fallback.md#3-disposable-kind-with-both-real-models)
+[release procedure](release-verification.md#kind-cluster)
 with explicit native-4096 model overrides and per-leg Secret/TLS wiring proven
 in the resulting pods. Historical small-model defaults are not Colab overrides.
 
