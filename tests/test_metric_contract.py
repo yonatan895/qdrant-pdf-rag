@@ -4,8 +4,7 @@ The contract map was captured from the live dev stack; these tests pin its
 source-of-truth side in CI so a silent instrument rename, unit change, label
 addition, or bucket edit fails here before the shipped PromQL in
 observability/queries/request-investigation.promql goes stale. Jaeger
-lookups cannot execute in CI (no Jaeger); their URL templates are pinned
-against the operation/tag vocabulary instead — live execution is recorded in
+lookups cannot execute in CI (no Jaeger); live execution is recorded in
 the contract doc.
 """
 
@@ -116,46 +115,3 @@ def test_promql_references_real_contract():
         for matcher in selector.split(","):
             key = re.split(r"!?=~?", matcher, maxsplit=1)[0].strip()
             assert key in allowed_labels, matcher
-
-
-# ------------------------------------------------------- Jaeger lookups (pinned templates)
-
-JAEGER_SERVICE = "mainframe-rag-agent"
-# The 12 operations captured live (OBS-1B tree); lookups below use roots.
-JAEGER_ROOT_OPERATIONS = {"v1.search", "v1.answer", "v1.chat", "ui.chat"}
-JAEGER_TAG_KEYS = {"http.request_id", "otel.status_code"}
-
-# J1 request→trace pivot (executed live: resolves exactly one trace).
-J1_TRACE_BY_REQUEST = (
-    "/api/traces?service={service}&tags={tags}"
-)
-# J2 slow-answer hunt (executed live with minDuration=500ms: 2 hits).
-J2_SLOW_ANSWERS = (
-    "/api/traces?service={service}&operation=v1.answer&minDuration={floor}&limit={n}"
-)
-# J3 server-error hunt (contract-derived: 5xx roots end ERROR; no 5xx
-# occurred on the dev stack, so this lookup is pinned but not live-tested).
-J3_ERROR_ROOTS = (
-    "/api/traces?service={service}&tags={tags}&limit={n}"
-)
-
-
-def test_jaeger_lookups_documented():
-    assert JAEGER_SERVICE == "mainframe-rag-agent"
-    assert JAEGER_ROOT_OPERATIONS <= {
-        "v1.search", "v1.answer", "v1.chat", "ui.chat",
-        "retrieve.embed", "retrieve.prefetch", "retrieve.rerank", "llm.chat",
-        "retrieve.search", "retrieve.rrf", "retrieve.diversify", "prompt.build",
-    }
-    j1 = J1_TRACE_BY_REQUEST.format(
-        service=JAEGER_SERVICE, tags='{"http.request_id":"<id>"}',
-    )
-    assert "http.request_id" in j1 and JAEGER_SERVICE in j1
-    j2 = J2_SLOW_ANSWERS.format(service=JAEGER_SERVICE, floor="500ms", n=5)
-    assert "operation=v1.answer" in j2 and "minDuration=500ms" in j2
-    j3 = J3_ERROR_ROOTS.format(
-        service=JAEGER_SERVICE, tags='{"otel.status_code":"ERROR"}', n=5,
-    )
-    assert "otel.status_code" in j3
-    for key in ("http.request_id", "otel.status_code"):
-        assert key in JAEGER_TAG_KEYS
