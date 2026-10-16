@@ -3093,15 +3093,16 @@ This is a snapshot, not a working rule. New or changed tests justify themselves 
 
 #770 removed the only unit coverage of some lines in `src/` and `scripts/`. A follow-up
 restored 73 mutation-verified collected items. Each new test failed when the line it protects was
-broken. Every line that lost unit coverage is now one of three things: covered again, covered by
-a named non-unit lane, or justified below as carrying no guarantee.
+broken. All 874 lines whose unit coverage #770 removed are accounted for at the restoration head:
+299 are covered by unit tests again, 277 were measured executing in the sim, load or HA lanes
+(coverage with subprocess and SIGTERM capture), and 298 are justified below. No line is unaccounted for.
 
 | Lines | Decision | Reason or where it is proven |
 |---|---|---|
-| `scripts/mock_vllm.py` (165), `src/mainframe_rag/mcp/mock.py` (112), `scripts/init_mock_zos.py` (30) | test tooling | Stand-ins for the model server and z/OS. They are exercised by the sim lane (`tests/test_integration_sim.py`, `tests/test_mcp_sim.py`), the load lane, agent-probes and the e2e kind lanes, all of which fail if a stand-in misbehaves. Production refusal of `MCP_MOCK_DIR` is the hygiene gate in `tests/test_mcp_agent.py`. |
+| `scripts/mock_vllm.py` (165), `src/mainframe_rag/mcp/mock.py` (112), `scripts/init_mock_zos.py` (30) | test tooling | Stand-ins for the model server and z/OS. Measured in the sim and load lanes: 127, 85 and 30 of these lines execute; the remaining 38 and 27 are mock features no measured lane uses. They are exercised by the sim lane (`tests/test_integration_sim.py`, `tests/test_mcp_sim.py`), the load lane, agent-probes and the e2e kind lanes, all of which fail if a stand-in misbehaves. Production refusal of `MCP_MOCK_DIR` is the hygiene gate in `tests/test_mcp_agent.py`. |
 | `scripts/build_golden_corpus.py` (188) | owning boundary elsewhere | Offline re-freeze builder. Its committed output is held by `tests/test_eval_gate.py::test_repo_golden_set_is_sha_pinned` and `::test_repo_golden_rows_opt_into_acceptance_states`. |
-| `scripts/qdrant_cluster.py` 50-52, 67-68, 73, 89-95, 202-236 | HA lane | Container start/stop, port and image plumbing reached by the `cluster` fixture of `tests/test_ha_cluster.py`. The readiness, placement and exit-code helpers have unit tests again. |
-| `src/mainframe_rag/eval/load.py` 144, 165-166 | load lane | Stage aggregation asserted by `tests/test_load_tier.py::test_search_load_has_zero_errors_and_full_timings`. |
+| `scripts/qdrant_cluster.py` 50-52, 67-68, 73, 89-95, 202-236 | HA lane | Container start/stop, port and image plumbing; all 31 lines measured executing in `tests/test_ha_cluster.py` (11/11). The readiness, placement and exit-code helpers have unit tests again. |
+| `src/mainframe_rag/eval/load.py` 144, 165-166 | load lane | Stage aggregation, measured executing in the load lane and asserted by `tests/test_load_tier.py::test_search_load_has_zero_errors_and_full_timings`. |
 | `src/mainframe_rag/eval/load.py` 71-73 | no guarantee | `nvidia-smi` absent fallback; the VRAM figure is informational. |
 | `src/mainframe_rag/eval/answers.py` 192-193 | no guarantee | argparse already maps the bare `ValueError` to the same exit 2; only message text differs. |
 | `src/mainframe_rag/eval/chat.py` 254-278, `src/mainframe_rag/eval/performance.py` 147, `scripts/query_demo.py` 52-85 | no guarantee | Human-readable layout that no caller or gate parses. The machine contracts (JSON output, HTML escaping, verdicts) are tested. |
