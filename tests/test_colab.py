@@ -1542,6 +1542,77 @@ def _assert_process_not_live(pid: int) -> None:
     pytest.fail("owned process remained live after bounded group termination")
 
 
+def test_closed_child_pipes_overflow_after_scheduler_pause_is_capped_then_next_command_works(lab, monkeypatch):
+    """A scheduler pause past the drain grace must still cap captured output
+    at the limit (reading only one overflow byte), flag the truncation and
+    leave the controller able to run the next command."""
+    _, state, _ = lab
+    run = controller.Run(state)
+    stdout = "complete | ordinary α\n".encode()
+    child = subprocess.Popen([sys.executable, "-c", f"import os; os.write(1, {stdout!r})"],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+    assert child.wait(timeout=3) == 0  # No descendants or live writer remain.
+    selector_factory = controller.selectors.DefaultSelector
+    clock = controller.time
+    offset = 0.0
+
+    class PauseAfterReady:
+        def __init__(self):
+            self.selector = selector_factory()
+            self.paused = False
+
+        def __enter__(self):
+            self.selector.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.selector.__exit__(*args)
+
+        def __getattr__(self, name):
+            return getattr(self.selector, name)
+
+        def select(self, timeout):
+            nonlocal offset
+            events = self.selector.select(timeout)
+            if events and not self.paused:
+                self.paused = True
+                offset += controller.PIPE_DRAIN_GRACE_SECONDS + .01
+            return events
+
+    monkeypatch.setattr(controller, "CAPTURE_LIMIT_BYTES", 16)
+    read = os.read
+    stdout_fd = child.stdout.fileno()
+    bytes_read = 0
+
+    def partial_first_read(fd, limit):
+        nonlocal bytes_read
+        if fd == stdout_fd and bytes_read == 0:
+            limit = min(limit, 8)
+        data = read(fd, limit)
+        if fd == stdout_fd:
+            bytes_read += len(data)
+        return data
+
+    reserved = run.output_budget.reserve("work")
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(controller.os, "read", partial_first_read)
+            patch.setattr(controller, "time", SimpleNamespace(monotonic=lambda: clock.monotonic() + offset))
+            patch.setattr(controller.selectors, "DefaultSelector", PauseAfterReady)
+            capture = run.capture(child, {name: state / f"paused.{name}.log" for name in ("stdout", "stderr")},
+                                  "work", reserved, retain=True)
+            capture.finish()
+    finally:
+        run.terminate(child)
+    assert offset > controller.PIPE_DRAIN_GRACE_SECONDS
+    assert bytes(capture.output["stdout"]) == stdout[:16]
+    assert capture.truncated == {"stdout": True, "stderr": False}
+    assert capture.held_pipes is True and capture.log_failed is False
+    assert (state / "paused.stdout.log").read_bytes() == stdout[:16]
+    assert bytes_read == 17, "final probing must read only the cap plus one overflow byte"
+    assert run.command([sys.executable, "-c", "print('ordinary')"], seconds=3).stdout == "ordinary\n"
+
+
 def test_late_scheduled_drain_keeps_complete_identity_output_then_next_command_works(lab, monkeypatch):
     """#755: on a loaded CI runner the drain thread started late, and finish()
     gave it only 0.1 s after forcing stop, failing a pre-allocation command with
