@@ -113,6 +113,16 @@ def test_gate_verdict_env_mismatch_fails_closed():
     assert gate_verdict_l3(report, baseline)[0] == "pass"
 
 
+def test_env_snapshot_records_run_provenance_the_gate_compares(monkeypatch):
+    from scripts import harness_l3
+
+    monkeypatch.setattr(harness_l3, "query_gpu_name", lambda: "RTX 5060")
+    env = harness_l3.env_snapshot(concurrency=4, duration_s=15, request_timeout_s=None)
+    assert env["gpu_name"] == "RTX 5060"
+    assert (env["concurrency"], env["duration_s"]) == (4, 15)
+    assert "request_timeout_s" not in env  # an unset option must not be recorded as a pin
+
+
 def test_gate_verdict_passes_within_tolerance():
     report = _sample_report()
     baseline = _sample_baseline()

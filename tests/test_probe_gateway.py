@@ -223,6 +223,32 @@ def test_probe_tokenize_absent_is_informational(monkeypatch, capsys):
 
 
 
+def test_probe_models_flag_lists_ids_and_fails_on_a_dead_leg(monkeypatch, capsys):
+    _, rc = _run(monkeypatch, _healthy_routes(), argv=["--models"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "embed /models" in out and "reasoning /models" in out and "rerank /models" in out
+    dead = [("ANY", "/models", 503, {}), *_healthy_routes()]
+    _, rc = _run(monkeypatch, dead, argv=["--models"])
+    assert rc == 1
+
+
+def test_probe_stream_flag_accepts_a_complete_stream_with_usage_frame(monkeypatch, capsys):
+    routes = [
+        ("STREAM", "/chat/completions", 200, [
+            'data: {"choices": [{"delta": {"content": "ok"}}]}',
+            'data: {"choices": [{"delta": {}, "finish_reason": "stop"}]}',
+            'data: {"choices": [], "usage": {"total_tokens": 2}}',
+            "data: [DONE]",
+        ]),
+        *_healthy_routes(),
+    ]
+    fake, rc = _run(monkeypatch, routes, argv=["--stream"])
+    assert rc == 0
+    assert "[DONE] ok" in capsys.readouterr().out
+    assert any(m == "STREAM" for m, _, _ in fake.calls)
+
+
 def test_probe_stream_without_done_fails(monkeypatch, capsys):
     routes = [r for r in _healthy_routes() if not (r[0] == "POST" and r[1] == "/chat/completions")]
     routes.append(
@@ -266,6 +292,8 @@ def test_models_listing_cannot_bypass_required_checks():
     (200, ["event: error", "data: [DONE]"]),
     (200, ["data: broken", "data: [DONE]"]),
     (200, ['data: {"choices": []}', "data: [DONE]"]),
+    (200, ["data: {}", "data: [DONE]"]),
+    (200, ['data: {"choices": [{"delta": {"content": 7}}]}', "data: [DONE]"]),
     (200, ['data: {"choices": [{"delta": null}]}', "data: [DONE]"]),
     (200, ['data: {"choices": [{"delta": {"content": "ok"}}]}', "data: [DONE]"]),
     (200, ['data: {"choices": [{"delta": {}, "finish_reason": "stop"}]}', "data: [DONE]"]),

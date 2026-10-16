@@ -10,6 +10,7 @@ import pytest
 from scripts.benchmark import (
     GATED_METRICS,
     _get,
+    _parse_size_mb,
     _set,
     aggregate_runs,
     check_baseline,
@@ -89,6 +90,14 @@ def test_baseline_missing_keys_refuse_required_gate(tmp_path):
     issues = check_baseline(_result(), json.loads(path.read_text()))
     assert len(issues) == 5
     assert "ingest.peak_rss_mb: required finite nonnegative number unavailable" in issues
+
+
+def test_docker_stats_memory_units_are_converted_to_mb():
+    # qdrant.mem_mb is a gated metric: a wrong unit factor skews every comparison.
+    assert _parse_size_mb("123.4MiB") == 123.4
+    assert _parse_size_mb("1.2GiB") == 1228.8
+    assert _parse_size_mb("512kB") == 0.5
+    assert _parse_size_mb("junk") is None
 
 
 def _pass(p95_search: float, errors: int = 0, rps: float = 200.0, note: str = "x") -> dict:
@@ -371,7 +380,7 @@ def test_invalid_pass_cannot_hide_in_aggregation_or_overwrite_outputs(
 
 
 @pytest.mark.parametrize("reference", [
-    {}, {**_result(), "_meta": {"env": "bad"}},
+    {}, [], {**_result(), "_meta": {"env": "bad"}},
 ])
 def test_semantically_invalid_reference_refuses_before_work(benchmark_cli, tmp_path, reference):
     benchmark, events, result = benchmark_cli

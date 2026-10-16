@@ -35,6 +35,23 @@ def test_parse_server_timing():
     assert timings_q == {"embed_ms": 10.2, "qdrant_ms": 20.5}
 
 
+def test_export_to_baseline_creates_a_dedicated_file_recording_the_run_environment(tmp_path: Path):
+    baseline_file = tmp_path / "harness-l3.json"
+    result = {
+        "latency_ms": {"p50": 15.0, "p95": 30.0},
+        "stages": {"embed_ms": {"p50": 5.0, "p95": 10.0}},
+        "vram": {"used_mb": 2048.0, "total_mb": 8192.0},
+    }
+    env = {"cpu_count": 8, "embed_mode": "vllm", "gpu_name": "RTX 5060"}
+    export_to_baseline(baseline_file, "search", result, env=env)
+    doc = json.loads(baseline_file.read_text(encoding="utf-8"))
+    # The env is what gate_verdict_l3 compares before trusting a recorded p95.
+    assert doc["_meta"]["env"] == env
+    assert doc["agent"]["search"]["latency_ms"] == {"p50": 15.0, "p95": 30.0}
+    assert doc["agent"]["search"]["stages"]["embed_ms"]["p95"] == 10.0
+    assert doc["vram"] == {"used_mb": 2048.0, "total_mb": 8192.0}
+
+
 def test_export_to_baseline_preserves_existing_keys(tmp_path: Path):
     baseline_file = tmp_path / "harness-l3.json"
     existing = {

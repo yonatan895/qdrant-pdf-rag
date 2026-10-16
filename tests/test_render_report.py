@@ -89,6 +89,54 @@ def test_html_reports_escape_untrusted_values():
     assert "<script>" not in html_out
 
 
+def test_markdown_eval_report_escapes_cells_and_labels_every_row_kind():
+    rep = _eval_report()
+    base = _eval_report()
+    base["recall@1"] = 0.25
+    rep["rows"][0]["query"] = "pipe|query\nwith newline"
+    rep["rows"][0]["hit_doc_ids"] = ["DOC|1"]
+    rep["rows"].append({"query": "broken", "error": "boom"})
+    rep["rows"].append({"query": "unanswerable", "expected_behavior": "abstain", "top_scores": [0.12]})
+    md = render_eval(rep, base, "markdown")
+    rows = [line for line in md.splitlines() if line.startswith("| ")]
+    # An unescaped pipe would add a cell and shift every column a reader parses.
+    assert "| pipe\\|query with newline |" in md and "DOC\\|1" in md
+    assert any(r.startswith("| broken |") and "| error |" in r and r.endswith("| boom |") for r in rows)
+    assert any(r.startswith("| unanswerable |") and "| abstain |" in r and r.endswith("| top score: 0.12 |") for r in rows)
+    assert any(r.startswith("| recall@1 | 0.5 |") and r.endswith("| (+0.25) |") for r in rows)
+    assert any(r.startswith("| recall@3 | 1.0 |") and r.endswith("| =0.0 |") for r in rows)
+    assert "> **Note:**" in md  # hash mode must not be read as semantic quality
+
+
+@pytest.mark.parametrize("fmt,needle", [("text", "BENCHMARK PERFORMANCE REPORT"), ("markdown", "## Benchmark Results")])
+def test_non_html_bench_report_carries_every_measured_value(fmt, needle):
+    base = _bench_report()
+    cur = _bench_report()
+    cur["agent"]["search"]["latency_ms"]["p95"] = 30.0
+    out = render_bench(cur, base, fmt)
+    assert needle in out
+    for value in ("120.0", "150.0", "400", "200", "40.0"):
+        assert value in out
+    if fmt == "markdown":
+        assert "| Search Latency p95 (ms) | 30.0 | 20.0 | (+10.0) |" in out
+
+
+@pytest.mark.parametrize("fmt,alert", [("text", "Regressions detected"), ("markdown", "Regression Detected"),
+                                       ("html", "REGRESSION DETECTED")])
+def test_compare_eval_reports_routing_shifts_and_population_changes_in_every_format(fmt, alert):
+    base = _eval_report()
+    cur = _eval_report()
+    cur["rows"][0]["kind"] = "nl"                      # routing shift
+    cur["rows"].append({"query": "brand new", "kind": "nl", "recall@1": 1.0, "recall@5": 1.0, "mrr": 1.0})
+    cur["rows"].pop(1)                                 # "system tuning" no longer evaluated
+    out, has_regression = compare_eval(base, cur, fmt)
+    # Silently dropping an evaluated query must fail the gate, whatever format renders it.
+    assert has_regression is True
+    for fragment in ("IEA500I", "identifier", "brand new", "system tuning"):
+        assert fragment in out
+    assert alert in out
+
+
 def test_compare_bench_regression_and_fail_flag(tmp_path: Path):
     base = _bench_report()
     cur = _bench_report()
@@ -105,6 +153,20 @@ def test_compare_bench_regression_and_fail_flag(tmp_path: Path):
     cur_p.write_text(json.dumps(cur), encoding="utf-8")
 
     assert main(["compare-bench", "--base", str(base_p), "--current", str(cur_p)]) == 0
+    assert main(["compare-bench", "--base", str(base_p), "--current", str(cur_p), "--fail-on-regression"]) == 1
+
+
+def test_compare_bench_throughput_collapse_is_a_regression_but_a_modest_drop_is_not(tmp_path: Path):
+    base = _bench_report()
+    cur = _bench_report()
+    cur["agent"]["search"]["rps"] = 250.0  # above the 0.5x floor of 400
+    assert compare_bench(base, cur, "text")[1] is False
+    cur["agent"]["search"]["rps"] = 100.0  # below it: higher-is-better metrics regress downward
+    text, has_reg = compare_bench(base, cur, "text")
+    assert has_reg is True and "Search RPS" in text
+    base_p, cur_p = tmp_path / "base.json", tmp_path / "cur.json"
+    base_p.write_text(json.dumps(base), encoding="utf-8")
+    cur_p.write_text(json.dumps(cur), encoding="utf-8")
     assert main(["compare-bench", "--base", str(base_p), "--current", str(cur_p), "--fail-on-regression"]) == 1
 
 

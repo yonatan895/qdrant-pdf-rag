@@ -34,6 +34,27 @@ def test_require_docker_rejects_digest_mismatch_without_pull(monkeypatch):
     assert calls[0][:3] == ["docker", "image", "inspect"]
 
 
+def test_require_docker_rejects_an_empty_inspection_record_without_pull(monkeypatch):
+    calls = []
+
+    def inspect(cmd, **kwargs):
+        calls.append(cmd)
+        return SimpleNamespace(returncode=0, stdout="[]")
+
+    monkeypatch.setattr(qdrant_pin.subprocess, "run", inspect)
+    with pytest.raises(cluster.QdrantClusterError):
+        cluster.require_docker("docker.io/qdrant/qdrant@sha256:" + "a" * 64)
+    assert len(calls) == 1 and calls[0][:3] == ["docker", "image", "inspect"]
+
+
+def test_qdrant_image_pin_ignores_commented_and_blank_lines(tmp_path):
+    images = tmp_path / "images.txt"
+    images.write_text("#docker.io/qdrant/qdrant:v0.0.1-unprivileged sha256:old\n\n   \n"
+                      "docker.io/other/tool:1 sha256:x\n"
+                      "docker.io/qdrant/qdrant:v1.19.0-unprivileged sha256:" + "a" * 64 + "\n", encoding="utf-8")
+    assert qdrant_pin.qdrant_image_pin(images) == "docker.io/qdrant/qdrant:v1.19.0-unprivileged"
+
+
 def test_require_docker_returns_immutable_id_after_digest_attestation(monkeypatch):
     reference = "docker.io/qdrant/qdrant@sha256:" + "a" * 64
     image_id = "sha256:" + "b" * 64
