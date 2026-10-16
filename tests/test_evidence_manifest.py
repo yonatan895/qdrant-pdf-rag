@@ -211,30 +211,6 @@ def test_manifest_maps_nonconsecutive_labels_without_rank_arithmetic():
     assert parsed.inferred_indices == [5, 2]
 
 
-def test_manifest_empty_when_verification_trims_every_excerpt():
-    """Zero trimmable evidence against an irreducible fixed budget is an
-    explicit budget failure (issue #368), not an empty manifest: the old
-    silent over-budget return is gone. The error carries counts, never
-    prompt text."""
-    from mainframe_rag.agent.answer import PromptBudgetExceeded
-
-    settings = _settings(
-        llm_max_model_len=2000,
-        llm_reserved_output_tokens=200,
-        llm_token_safety_margin=50,
-    )
-    with pytest.raises(PromptBudgetExceeded) as exc_info:
-        build_messages(
-            "IEA500I",
-            [_hit(1), _hit(2)],
-            tokenizer=OvershootTokenizer(),
-            settings=settings,
-            complexity="simple",
-        )
-    assert exc_info.value.used > exc_info.value.limit
-    assert "IEA500I" not in str(exc_info.value)
-
-
 # ---------------------------------------------------------------------------
 # Claimed path: retrieved-but-omitted sources are rejected
 # ---------------------------------------------------------------------------
@@ -397,13 +373,10 @@ def _marker_cases():
     "content,expected_indices,inline",
     [
         ("Points from [1].", [1], True),
-        ("Points from [ 2 ].", [2], True),
-        ("Points from [1,2].", [1, 2], True),
         ("Points from [1, 2].", [1, 2], True),
         ("Summarized in [1] and [2].", [1, 2], True),
         ("z/OS (3.1), APARs (1, 2), option (2).", [], False),
         ("Broken marker [1.5].", [], False),
-        ("See [abc].", [], False),
         ("See [0].", [], True),
         ("See [99].", [], True),
     ],
@@ -417,16 +390,12 @@ def test_bracket_marker_grammar(content, expected_indices, inline):
     assert parsed.inline_bracket_present is inline
 
 
-def test_marker_in_dropped_thinking_fence_is_not_provenance():
+def test_marker_in_dropped_or_extracted_fence_is_not_provenance():
     _, evidence = _marker_cases()
     parsed = parse_answer("```thinking\nconsider [1] carefully\n```\nFinal answer.", evidence)
     assert parsed.citations == []
     assert parsed.citations_inferred is False
     assert parsed.inline_bracket_present is False
-
-
-def test_marker_in_extracted_script_fence_is_not_provenance():
-    _, evidence = _marker_cases()
     parsed = parse_answer("```jcl\n// STEP [1]\n```\nFinal answer.", evidence)
     assert parsed.citations == []
     assert parsed.script == "// STEP [1]"

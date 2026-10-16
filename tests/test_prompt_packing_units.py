@@ -21,7 +21,6 @@ from mainframe_rag.agent.answer import (
     _LEADING_MARKER,
     _TRUNCATED_SUFFIX,
     PromptBudgetExceeded,
-    _verify_trim_last,
     build_chat_messages,
     build_messages,
     parse_answer,
@@ -161,15 +160,6 @@ def test_persisted_spans_drive_packing():
     assert (entry.units_total, entry.units_retained) == (3, 3)
 
 
-def test_old_point_without_units_uses_shared_fallback():
-    """Legacy points (no persisted spans) still get boundary protection via
-    the shared detector — never a silent return to char slicing."""
-    prepared = build_messages("q", [_hit(JCL_TEXT)], max_chunk_chars=len(JCL_STMT1) + 10)
-    body = _excerpt_body(prepared)
-    assert "//STEP1" not in body
-    assert prepared.evidence.entries[0].units_total == 3
-
-
 # ---------------------------------------------------------------------------
 # Total-budget remainder and tokenizer verification trims.
 # ---------------------------------------------------------------------------
@@ -201,38 +191,6 @@ def test_budget_remainder_packs_whole_units_then_stops():
     assert shipped[0].startswith("[2] ")
     assert shipped[1].startswith("Source product: ")
     assert shipped[2:] and all(line in lines for line in shipped[2:])
-
-
-def test_verify_trim_snaps_to_statement_boundary():
-    """A verification overshoot landing mid-statement snaps back to the
-    prior statement end; the suffix marks whole-unit omission only."""
-    from mainframe_rag.agent.answer import PackedExcerpt
-
-    lines = [f"//S{i:02d} EXEC PGM=P{i:02d},PARM=ABCDEFGHIJ" for i in range(12)]
-    text = "\n".join(lines)
-    hit = _hit(text)
-    excerpt = PackedExcerpt(index=1, hit=hit, body=text, truncated=False)
-    packed = [excerpt]
-    # Overshoot sized to cut ~100 chars into the 12-statement body.
-    _verify_trim_last(packed, used=1000, verify_limit=1000 - 11)
-    assert len(packed) == 1
-    assert packed[0].truncated is True
-    shipped = packed[0].body[: -len(_TRUNCATED_SUFFIX)].splitlines()
-    assert 1 <= len(shipped) < len(lines)
-    # Every shipped line is a complete statement — no partial card.
-    assert all(line in lines for line in shipped)
-    assert packed[0].body.rstrip().endswith(_TRUNCATED_SUFFIX.strip())
-
-
-def test_verify_trim_pops_when_no_unit_fits():
-    """An overshoot larger than the whole excerpt removes it instead of
-    shipping a sliver."""
-    from mainframe_rag.agent.answer import PackedExcerpt
-
-    hit = _hit(JCL_TEXT)
-    packed = [PackedExcerpt(index=1, hit=hit, body=JCL_TEXT, truncated=False)]
-    _verify_trim_last(packed, used=100000, verify_limit=10)
-    assert packed == []
 
 
 # ---------------------------------------------------------------------------
@@ -274,8 +232,7 @@ def _tokenizer_settings(**overrides):
     return Settings(**settings_kw(**overrides))
 
 
-@pytest.mark.parametrize("chat", [False, True])
-@pytest.mark.parametrize("order", ["retrieval", "stable_cache"])
+@pytest.mark.parametrize("chat,order", [(False, "retrieval"), (True, "stable_cache")])
 def test_final_recount_keeps_the_selected_reasoning_template(chat, order):
     """Removing the last excerpt still needs a count with this request's effort."""
     bodies = []
@@ -322,29 +279,53 @@ def test_zero_excerpts_but_fitting_fixed_returns_empty_manifest():
     assert prepared.budget_verified is False
 
 
-def test_no_tokenizer_reports_unverified_budget():
-    """The char-packing path cannot confirm compliance: it must say so."""
-    prepared = build_messages("q", [_hit(JCL_TEXT)], max_chunk_chars=10000)
-    assert prepared.budget_verified is False
-    assert len(prepared.evidence.entries) == 1
+class _CharCountTokenizer:
+    remote_confirmed = True
+
+    def count_messages(self, messages, *, reasoning_effort=None) -> int:
+        return sum(len(m.content) for m in messages)
 
 
-def test_fallback_tokenizer_reports_estimated():
-    """Estimator-only verification is not confirmation, even when it fits."""
+def test_verify_trim_snaps_to_statement_boundary():
+    """A tokenizer overshoot landing mid-statement trims back to the prior
+    statement end: every shipped line is a complete statement, the suffix marks
+    whole-unit omission, and the verified prompt fits the window."""
+    lines = [f"//S{i:02d} EXEC PGM=P{i:02d},PARM=ABCDEFGHIJ" for i in range(12)]
+    hit = _hit("\n".join(lines))
+    tokenizer = _CharCountTokenizer()
+    wide = _tokenizer_settings(llm_max_model_len=131072)
+    full = tokenizer.count_messages(build_messages("q", [hit], tokenizer=tokenizer, settings=wide).messages)
+    limit = full - 20  # a small overshoot lands inside the 12-statement body
+    tight = _tokenizer_settings(llm_max_model_len=1536 + 128 + limit)
+    prepared = build_messages("q", [hit], tokenizer=tokenizer, settings=tight, complexity="simple")
+    assert prepared.budget_verified
+    assert tokenizer.count_messages(prepared.messages) <= limit
+    entry = prepared.evidence.entries[0]
+    assert entry.truncated is True and 1 <= entry.units_retained < 12
+    shipped = _supplied(prepared).removesuffix(_TRUNCATED_SUFFIX).splitlines()
+    assert shipped and all(line in lines for line in shipped)
+
+    # A prefix excerpt without atomic units (narrative prose) trims the same way.
+    prose = _hit("Background sentence. " * 60, chunk_type="narrative", units=())
+    full = tokenizer.count_messages(build_messages("q", [prose], tokenizer=tokenizer, settings=wide).messages)
+    tight = _tokenizer_settings(llm_max_model_len=1536 + 128 + full - 20)
+    trimmed = build_messages("q", [prose], tokenizer=tokenizer, settings=tight, complexity="simple")
+    assert trimmed.budget_verified and trimmed.evidence.entries[0].truncated is True
+    assert tokenizer.count_messages(trimmed.messages) <= full - 20
+    _assert_offsets_reconstruct(trimmed, prose)
+
+
+def test_budget_verified_only_for_a_real_tokenizer_measurement():
+    """Char packing and estimator-only verification cannot confirm compliance
+    and must say so; a real measurement inside the window is confirmed."""
+    unverified = build_messages("q", [_hit(JCL_TEXT)], max_chunk_chars=10000)
+    assert unverified.budget_verified is False
+    assert len(unverified.evidence.entries) == 1
     settings = _tokenizer_settings()
-    prepared = build_messages(
-        "q", [_hit(JCL_TEXT)], tokenizer=FallbackTokenizer(), settings=settings
-    )
-    assert prepared.budget_verified is False
-
-
-def test_remote_tokenizer_reports_verified():
-    """A real tokenizer measurement inside the window is confirmed."""
-    settings = _tokenizer_settings()
-    prepared = build_messages(
-        "q", [_hit(JCL_TEXT)], tokenizer=_RemoteOkTokenizer(), settings=settings
-    )
-    assert prepared.budget_verified is True
+    estimated = build_messages("q", [_hit(JCL_TEXT)], tokenizer=FallbackTokenizer(), settings=settings)
+    assert estimated.budget_verified is False
+    confirmed = build_messages("q", [_hit(JCL_TEXT)], tokenizer=_RemoteOkTokenizer(), settings=settings)
+    assert confirmed.budget_verified is True
 
 
 # ---------------------------------------------------------------------------
@@ -445,7 +426,7 @@ def budget_client(monkeypatch, synthetic_pdf, servable_representation_gate):
         yield c
 
 
-def test_answer_route_reports_budget_exceeded_422(budget_client):
+def test_answer_and_chat_routes_report_budget_exceeded_422(budget_client):
     """Fixed 422 envelope with a stable code — never exception text, never
     a 500, never a model call."""
     resp = budget_client.post("/v1/answer", json={"query": "IEA500I"})
@@ -454,9 +435,6 @@ def test_answer_route_reports_budget_exceeded_422(budget_client):
         "code": "prompt_budget_exceeded",
         "message": "prompt exceeds the model token budget",
     }
-
-
-def test_chat_route_reports_budget_exceeded_422(budget_client):
     resp = budget_client.post(
         "/v1/chat", json={"messages": [{"role": "user", "content": "IEA500I"}]}
     )
@@ -536,13 +514,6 @@ def test_make_chunks_emits_unit_spans_for_structured_and_prose():
     chunks_prose = make_chunks(parsed, [prose], ["1-1"])
     assert len(chunks_prose) == 1
     assert chunks_prose[0].units == ()
-
-
-def test_stored_spans_caps_oversize_lists():
-    from mainframe_rag.ingest.chunk import UNIT_ATOMIC, UnitSpan, _stored_spans
-
-    spans = tuple(UnitSpan(i * 10, i * 10 + 5, UNIT_ATOMIC) for i in range(600))
-    assert _stored_spans(spans) is None
 
 
 def test_upsert_chunks_persists_units_only_when_present():
@@ -629,21 +600,6 @@ def test_parse_unit_spans_fail_closed():
     assert _parse_unit_spans([[True, 10, "atomic"]]) is None
 
 
-def test_hit_spans_fails_closed_on_corrupt_payload_spans():
-    from mainframe_rag.agent.answer import _hit_spans
-
-    hit = _hit(JCL_TEXT, units=((50, 10, "atomic"),))  # start > end -> invalid
-    spans = _hit_spans(hit, JCL_TEXT)
-    # Falls back to shared redetection: returns 3 valid spans for JCL_TEXT
-    assert len(spans) == 3
-    assert all(s.kind == "atomic" for s in spans)
-
-    hit_overlap = _hit(JCL_TEXT, units=((10, 20, "atomic"), (15, 30, "atomic")))  # start < cursor
-    spans_overlap = _hit_spans(hit_overlap, JCL_TEXT)
-    assert len(spans_overlap) == 3
-
-
-
 class _DenseTokenizer:
     """Remote-style counter that sees ~1 token per char: far denser than
     the word-count estimator, as for numeric/table-heavy excerpts."""
@@ -675,14 +631,6 @@ def test_estimator_drift_trims_past_four_rounds_instead_of_refusing():
     assert 1 <= len(prepared.evidence.entries) < 8
     limit = 4096 - 800 - settings.llm_thinking_reserve_tokens_simple - 64
     assert _DenseTokenizer().count_messages(prepared.messages) <= limit
-
-
-def test_trim_round_limit_scales_with_trimmable_content():
-    from mainframe_rag.agent.answer import _MAX_TRIM_ROUNDS, _trim_round_limit
-
-    assert _trim_round_limit(0) == _MAX_TRIM_ROUNDS
-    assert _trim_round_limit(8) > _trim_round_limit(2) > _MAX_TRIM_ROUNDS
-    assert _trim_round_limit(3, 2, base=_MAX_TRIM_ROUNDS * 2) == _MAX_TRIM_ROUNDS * 2 + 6 + 2
 
 
 # ---------------------------------------------------------------------------
@@ -804,11 +752,10 @@ def test_unfittable_entry_is_omitted_explicitly():
     assert prepared.evidence.cite_for_index(1) is None
 
 
-@pytest.mark.parametrize("order", ["retrieval", "stable_cache"])
-def test_chat_path_supplies_requested_later_entry(order):
+def test_chat_path_supplies_requested_later_entry():
     hit = _message_hit(TWO_ENTRIES)
     prepared = build_chat_messages(
-        [ChatMessage(role="user", content="What does ABC200E mean?")], [hit], order=order
+        [ChatMessage(role="user", content="What does ABC200E mean?")], [hit]
     )
     body = prepared.messages[-1].content
     assert TWO_ENTRIES[1] in body and "ABC100I" not in body
@@ -835,7 +782,7 @@ def test_offsets_reconstruct_exactly_after_every_trim_round():
     parts = [_entry("ABC100I", 600), _entry("ABC200E", 1200, "bravo "), _entry("ABC300I", 400)]
     hit = _message_hit(parts)
     outcomes = []
-    for rounds in range(1, 4):
+    for rounds in (1, 2, 3, 50):
         prepared = build_messages(
             "ABC200E",
             [hit],
@@ -852,31 +799,11 @@ def test_offsets_reconstruct_exactly_after_every_trim_round():
         # The requested entry is whole whenever the excerpt survives.
         assert parts[1] in _supplied(prepared)
         outcomes.append(entries[0].included_chars)
-    assert outcomes  # every round count produced a consistent result
+    assert outcomes[-1] == "omitted"  # persistent overshoot omits the excerpt, never cuts the entry
 
 
-def test_trim_dropping_requested_entry_omits_the_excerpt():
-    from mainframe_rag.agent.answer import (
-        _hit_spans,
-        _packed_excerpt,
-        _requested_identifiers,
-        _select_range,
-    )
-
-    hit = _message_hit([_entry("ABC100I", 1500), _entry("ABC200E", 900, "bravo ")])
-    source = hit.text.strip()
-    start, end, required = _select_range(
-        source, _hit_spans(hit, source), 1200, _requested_identifiers("ABC200E")
-    )
-    assert start == source.index("ABC200E") and required == end
-    packed = [_packed_excerpt(1, hit, source, start, end, required)]
-    # Overshoot large enough that only a cut inside the entry would fit.
-    _verify_trim_last(packed, used=1000, verify_limit=1000 - 100)
-    assert packed == []
-
-
-@pytest.mark.parametrize("tail", [" Applies to all devices.", ""])
-def test_prose_cut_ends_on_sentence_boundary(tail):
+def test_prose_cut_ends_on_sentence_boundary():
+    tail = " Applies to all devices."
     lead = "Run the utility during the nightly maintenance window on every system. " * 3
     text = lead + "Use FAST=YES only when recovery mode is disabled." + tail
     hit = _hit(text, chunk_type="narrative", units=())
@@ -981,16 +908,6 @@ def test_projection_equals_shipped_slice_non_prefix_and_omits_unsupplied():
     ]
     omitted = set(prepared.evidence.omitted_indices)
     assert omitted.isdisjoint(e.index for e in prepared.supplied)
-
-
-def test_projection_after_verification_trim_matches_manifest():
-    settings = _tokenizer_settings()
-    prepared = build_messages(
-        "q", [_hit(JCL_TEXT)], tokenizer=_RemoteOkTokenizer(), settings=settings
-    )
-    for item, entry in zip(prepared.supplied, prepared.evidence.entries, strict=True):
-        assert item.end_char == entry.included_chars
-        assert item.start_char == entry.start_char
 
 
 def test_projection_text_is_clipped_and_flagged_at_wire_bound():

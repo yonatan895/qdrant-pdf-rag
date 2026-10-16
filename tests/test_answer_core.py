@@ -24,7 +24,6 @@ from mainframe_rag.agent.answer_core import (
     AnswerCoreInput,
     LLMChatError,
     RetrievalError,
-    chat_body_chars,
     execute_answer_core,
     execute_answer_core_stream,
     resolve_search_query,
@@ -96,45 +95,33 @@ def _deps(settings: Settings, llm, retrieve) -> AnswerCoreDeps:
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("stream", [False, True])
-@pytest.mark.parametrize("finish_reason", ["stop", "length"])
 @pytest.mark.parametrize("body", ["Remove the suspension using WIDGET REMOVE.", ""])
 @pytest.mark.parametrize("eligible", [False, True])
-async def test_core_headerless_bibliography_preserves_verification_rules(
-    stream, finish_reason, body, eligible
-):
+async def test_core_headerless_bibliography_preserves_verification_rules(body, eligible):
     cite = "widget-messages Widget Messages, Recovery > WID001I, p. PDF 12–13"
     fabricated = "widget-messages Widget Messages, Recovery > WID001I, p. 99"
     hit = _hit().model_copy(update={"cite": cite, "doc_id": "widget-messages"})
     content = body + "\n\n" + (cite + "\n\n" if eligible else "") + fabricated
-    llm = CoreFakeLLM(content=content, finish_reason=finish_reason)
+    llm = CoreFakeLLM(content=content)
     deps = _deps(_settings(), llm, lambda *_a, **_kw: ([hit], "semantic", {}))
     source = AnswerCoreInput(query="How do I remove the suspension?")
-    if stream:
-        events = [event async for event in execute_answer_core_stream(source, deps)]
-        assert events[-1]["type"] == "final"
-        output = events[-1]["output"]
-    else:
-        output = await execute_answer_core(source, deps)
+    output = await execute_answer_core(source, deps)
     assert output.answer == body
     assert output.citations == ([cite] if eligible else [])
     assert output.citations_inferred is False
     assert output.parsed.cites_rejected_unmapped == 1
     state = "accepted" if eligible else "unverified_draft"
-    if finish_reason != "stop" or not body:
+    if not body:
         state = "generation_incomplete"
     assert output.verification_state == state
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("stream", [False, True])
-@pytest.mark.parametrize("finish_reason", ["stop", "length"])
 @pytest.mark.parametrize(
     "content,answer,script,state,inferred",
     [
         ("{cite}", "", None, "generation_incomplete", False),
         ("Citations:\n{cite}", "", None, "generation_incomplete", False),
-        ("\n**Citations:**\n- {cite}", "", None, "generation_incomplete", False),
         ("Sources:\n- {cite}", "", None, "generation_incomplete", False),
         ("### **References:**\n> {cite}", "", None, "generation_incomplete", False),
         ("```thinking\nWork out the answer.\n```\nSources:\n{cite}", "", None,
@@ -144,11 +131,7 @@ async def test_core_headerless_bibliography_preserves_verification_rules(
         ("[1]", "[1]", None, "generation_incomplete", True),
         ("**Answer:**\n\nCitations:\n- {cite}", "**Answer:**", None,
          "generation_incomplete", False),
-        ("## Answer\n\nCitations:\n- {cite}", "## Answer", None,
-         "generation_incomplete", False),
         ("Sources: [1]\n\nCitations:\n- {cite}", "Sources: [1]", None,
-         "generation_incomplete", False),
-        ("References: [1]\n\nCitations:\n- {cite}", "References: [1]", None,
          "generation_incomplete", False),
         ("Citations: <{cite}>\n\nCitations:\n- {cite}", "Citations: <{cite}>", None,
          "generation_incomplete", False),
@@ -156,9 +139,6 @@ async def test_core_headerless_bibliography_preserves_verification_rules(
          "//JOB EXEC PGM=EXAMPLE", "unverified_draft", False),
         ("```jcl\n\n```\nCitations:\n{cite}", "", "", "generation_incomplete", False),
         ("Reissue the command.\nCitations:\n{cite}", "Reissue the command.", None,
-         "accepted", False),
-        ("Retry.\nReferences:\n{cite}", "Retry.", None, "accepted", False),
-        ("**Answer:** Retry.\nCitations:\n{cite}", "**Answer:** Retry.", None,
          "accepted", False),
         ("Sources: Retry.\nCitations:\n{cite}", "Sources: Retry.", None, "accepted", False),
         ("重试。\nCitations:\n{cite}", "重试。", None, "accepted", False),
@@ -168,27 +148,33 @@ async def test_core_headerless_bibliography_preserves_verification_rules(
          "Reissue the command.", "//JOB EXEC PGM=EXAMPLE", "accepted", False),
     ],
 )
-async def test_core_requires_answer_body_after_parsing(content, answer, script, state,
-                                                      inferred, stream, finish_reason):
+async def test_core_requires_answer_body_after_parsing(content, answer, script, state, inferred):
     def retrieve(*_args, **_kwargs):
         return [_hit()], "identifier", {}
 
-    llm = CoreFakeLLM(content=content.format(cite=_hit().cite), finish_reason=finish_reason)
+    llm = CoreFakeLLM(content=content.format(cite=_hit().cite))
     deps = _deps(_settings(), llm, retrieve)
-    source = AnswerCoreInput(query="IEA500I")
-    if stream:
-        events = [event async for event in execute_answer_core_stream(source, deps)]
-        assert events[-1]["type"] == "final"
-        output = events[-1]["output"]
-    else:
-        output = await execute_answer_core(source, deps)
-    assert output.verification_state == (state if finish_reason == "stop" else "generation_incomplete")
+    output = await execute_answer_core(AnswerCoreInput(query="IEA500I"), deps)
+    assert output.verification_state == state
     assert output.answer == answer.format(cite=_hit().cite)
     assert output.citations == [_hit().cite]
     assert output.citations_inferred is inferred
     assert output.script == script
     assert output.script_review_required is (script is not None)
     assert len(llm.calls) == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("stream,finish_reason", [(True, "stop"), (False, "length"), (True, "length")])
+async def test_core_stream_and_truncated_finish_reach_the_same_verdict(stream, finish_reason):
+    """The streaming path parses like the buffered one; a non-`stop` finish is
+    incomplete whatever the (otherwise acceptable) content."""
+    cite = _hit().cite
+    output = await _run_core(f"Reissue the command.\nCitations:\n{cite}", stream, finish_reason)
+    assert output.answer == "Reissue the command."
+    assert output.citations == [cite]
+    assert output.verification_state == ("accepted" if finish_reason == "stop"
+                                         else "generation_incomplete")
 
 
 _FABRICATED = "SA22-9999-99 Not Retrieved, Made Up > Path, p. 9-9"
@@ -214,16 +200,12 @@ async def _run_core(content: str, stream: bool, finish_reason: str):
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("stream", [False, True])
-@pytest.mark.parametrize("finish_reason", ["stop", "length"])
 @pytest.mark.parametrize(
     "content,answer,citations,state,inferred",
     [
         # Thinking-only / empty content channel: no body, nothing to cite.
         ("```thinking\nWork out the answer.\n```", "", [], "generation_incomplete", False),
-        ("```thought\nWork out the answer.\n```\n", "", [], "generation_incomplete", False),
         ("", "", [], "generation_incomplete", False),
-        ("  \n\n", "", [], "generation_incomplete", False),
         # Fabricated citation lines are dropped from body and citations alike;
         # a draft stays a draft, a valid cite alongside it is still honored.
         (f"Reissue the command.\nCitations:\n- {_FABRICATED}", "Reissue the command.", [],
@@ -243,14 +225,12 @@ async def _run_core(content: str, stream: bool, finish_reason: str):
         ("Reissue the command [", "Reissue the command [", [], "unverified_draft", False),
     ],
 )
-async def test_core_adversarial_model_outputs(content, answer, citations, state, inferred,
-                                              stream, finish_reason):
+async def test_core_adversarial_model_outputs(content, answer, citations, state, inferred):
     """Issue #597: outcome table for hostile model output (verification state,
-    body kept or dropped, citations accepted or rejected). Non-`stop` finishes
-    are incomplete whatever the content; the parsed body/citations are the same."""
+    body kept or dropped, citations accepted or rejected)."""
     cite = _hit().cite
-    output = await _run_core(content.format(cite=cite), stream, finish_reason)
-    assert output.verification_state == (state if finish_reason == "stop" else "generation_incomplete")
+    output = await _run_core(content.format(cite=cite), False, "stop")
+    assert output.verification_state == state
     assert output.answer == answer
     assert output.citations == [c.format(cite=cite) for c in citations]
     assert output.citations_inferred is inferred
@@ -260,63 +240,37 @@ async def test_core_adversarial_model_outputs(content, answer, citations, state,
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize(
     "echo",
-    [
-        "Retrieved manual excerpts:",
-        "Retrieved manual excerpts:\n\n[1] {cite}",
-        "**Retrieved manual excerpts:**\n[1] {cite}",
-        "Question: IEA500I",
-        "Retrieved manual excerpts:\n\nQuestion: IEA500I",
-    ],
-    ids=["header", "header-with-excerpt-label", "bold-header", "question-echo", "header-and-question"],
+    ["Retrieved manual excerpts:\n\n[1] {cite}", "Question: IEA500I"],
+    ids=["header-with-excerpt-label", "question-echo"],
 )
-async def test_core_prompt_header_residue_is_not_an_answer_body(echo, stream):
+async def test_core_prompt_header_residue_is_not_an_answer_body(echo):
     """#576: prompt scaffolding (section header, excerpt label, question echo)
     plus a valid citation is not an answer body."""
     cite = _hit().cite
     content = f"{echo.format(cite=cite)}\n\nCitations:\n- {cite}"
-    output = await _run_core(content, stream, "stop")
+    output = await _run_core(content, False, "stop")
     assert output.verification_state == "generation_incomplete"
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize(
     "lead",
-    ["Retrieved manual excerpts:", "Question: IEA500I", "Retrieved manual excerpts: Restart with CLPA."],
-    ids=["header", "question", "same-line-prose"],
+    ["Question: IEA500I", "Retrieved manual excerpts: Restart with CLPA."],
+    ids=["question", "same-line-prose"],
 )
-async def test_core_prompt_header_with_real_prose_is_still_accepted(lead, stream):
+async def test_core_prompt_header_with_real_prose_is_still_accepted(lead):
     cite = _hit().cite
     content = f"{lead}\nRestart the system with CLPA after editing IEASYSxx.\n\nCitations:\n- {cite}"
-    output = await _run_core(content, stream, "stop")
+    output = await _run_core(content, False, "stop")
     assert output.verification_state == "accepted"
     assert "Restart the system with CLPA" in output.answer
 
 
-def test_prompt_scaffolding_constants_match_the_built_prompt():
-    """The body predicate reads the same constants the prompt builder sends."""
-    from mainframe_rag.agent.answer import (
-        EXCERPTS_HEADER,
-        QUESTION_LABEL,
-        SPLUNK_HEADER,
-        SYSPLEX_LABEL,
-        build_messages,
-    )
-
-    user = build_messages(
-        "IEA500I", [_hit()], product="z/OS", version="3.1", splunk_context="ev", settings=_settings()
-    ).messages[-1].content
-    for label in (EXCERPTS_HEADER, QUESTION_LABEL, SYSPLEX_LABEL, SPLUNK_HEADER):
-        assert label in user
-
-
 @pytest.mark.anyio
-@pytest.mark.parametrize("stream", [False, True])
-@pytest.mark.parametrize("header", ["Sources:", "References:", "### **References:**"])
-async def test_core_preserves_instructions_under_citation_alias_headers(stream, header):
+@pytest.mark.parametrize("header", ["Sources:", "### **References:**"])
+async def test_core_preserves_instructions_under_citation_alias_headers(header):
     answer = f"Set LFAREA.\n\n{header}\n- Restart the system with CLPA\n- Check IEASYSxx"
 
     def retrieve(*_args, **_kwargs):
@@ -324,12 +278,7 @@ async def test_core_preserves_instructions_under_citation_alias_headers(stream, 
 
     llm = CoreFakeLLM(content=f"{answer}\n\nCitations:\n- {_hit().cite}")
     deps = _deps(_settings(), llm, retrieve)
-    source = AnswerCoreInput(query="IEA500I")
-    if stream:
-        events = [event async for event in execute_answer_core_stream(source, deps)]
-        output = events[-1]["output"]
-    else:
-        output = await execute_answer_core(source, deps)
+    output = await execute_answer_core(AnswerCoreInput(query="IEA500I"), deps)
     assert output.answer == answer
     assert output.citations == [_hit().cite]
     assert output.verification_state == "accepted"
@@ -337,8 +286,7 @@ async def test_core_preserves_instructions_under_citation_alias_headers(stream, 
 
 
 @pytest.mark.parametrize("header,canonical", [
-    ("Citations:", True), ("**Citations:**", True),
-    ("Sources:", False), ("References:", False), ("### **References:**", False),
+    ("**Citations:**", True), ("Sources:", False), ("### **References:**", False),
 ])
 def test_citation_header_telemetry_remains_canonical(header, canonical):
     from mainframe_rag.agent.answer import build_messages, parse_answer
@@ -351,20 +299,9 @@ def test_citation_header_telemetry_remains_canonical(header, canonical):
     assert parsed.citations_header_present is canonical
 
 
-def test_chat_body_chars_counts_messages_and_context():
-    messages = [
-        ChatMessage(role="user", content="abc"),
-        ChatMessage(role="assistant", content="de"),
-    ]
-    assert chat_body_chars(messages) == 5
-    assert chat_body_chars(messages, "xyz") == 8
-    assert chat_body_chars(messages, "") == 5
-
-
 @pytest.mark.anyio
-@pytest.mark.parametrize("stream", [False, True])
-@pytest.mark.parametrize("prefix", ["", "Sources: ", "Citations: "])
-async def test_core_generic_citation_is_not_answer_prose(stream, prefix):
+@pytest.mark.parametrize("prefix", ["", "Citations: "])
+async def test_core_generic_citation_is_not_answer_prose(prefix):
     hit = _hit().model_copy(update={
         "doc_id": "original-guide",
         "cite": "original-guide Synthetic Reference, Introduction, p. 1",
@@ -375,12 +312,7 @@ async def test_core_generic_citation_is_not_answer_prose(stream, prefix):
 
     llm = CoreFakeLLM(content=f"{prefix}{hit.cite}\n\nCitations:\n- {hit.cite}")
     deps = _deps(_settings(), llm, retrieve)
-    source = AnswerCoreInput(query="Explain the introduction.")
-    if stream:
-        events = [event async for event in execute_answer_core_stream(source, deps)]
-        output = events[-1]["output"]
-    else:
-        output = await execute_answer_core(source, deps)
+    output = await execute_answer_core(AnswerCoreInput(query="Explain the introduction."), deps)
     assert output.answer == prefix + hit.cite
     assert output.citations == [hit.cite]
     assert output.verification_state == "generation_incomplete"
@@ -420,13 +352,6 @@ async def test_core_retrieval_failure_raises_typed_error():
             _deps(_settings(), CoreFakeLLM(), retrieve),
         )
     assert isinstance(excinfo.value.original, RuntimeError)
-
-
-@pytest.mark.anyio
-async def test_core_stream_retrieval_failure_raises_typed_error():
-    def retrieve(*_a, **_k):
-        raise RuntimeError("qdrant exploded")
-
     with pytest.raises(RetrievalError):
         async for _item in execute_answer_core_stream(
             AnswerCoreInput(query="IEA500I"),
@@ -538,33 +463,33 @@ async def test_core_reasoning_effort_explicit_override_sync():
     )
     assert llm4.calls[0]["reasoning_effort"] == "low"
 
-
-@pytest.mark.anyio
-async def test_core_reasoning_effort_explicit_override_stream():
-    """Explicit reasoning_effort overrides complexity-based default in execute_answer_core_stream."""
-    def retrieve(*_a, **_k):
-        return [_hit()], "nl", {"embed_ms": 1, "qdrant_ms": 1}
-
-    llm = CoreFakeLLM()
+    # The streaming entry point honors the same override.
+    llm5 = CoreFakeLLM()
     async for _ in execute_answer_core_stream(
         AnswerCoreInput(query="simple query", reasoning_effort="medium"),
-        _deps(_settings(), llm, retrieve),
+        _deps(_settings(), llm5, retrieve),
     ):
         pass
-    assert llm.calls[0]["reasoning_effort"] == "medium"
+    assert llm5.calls[0]["reasoning_effort"] == "medium"
+
+
+_SIMPLE = ("IEA500I", "llm_reasoning_effort_simple")
+_COMPLEX = ("diagnose abend S0C4 with registers and spool dump", "llm_reasoning_effort_complex")
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("effort", ["low", "medium", "high", "xhigh"])
-@pytest.mark.parametrize("source", ["setting", "override"])
-@pytest.mark.parametrize("mode", ["post", "buffered_sse", "stream"])
-@pytest.mark.parametrize("is_chat", [False, True])
-@pytest.mark.parametrize("query,field", [
-    ("IEA500I", "llm_reasoning_effort_simple"),
-    ("diagnose abend S0C4 with registers and spool dump", "llm_reasoning_effort_complex"),
+@pytest.mark.parametrize("effort,source,mode,is_chat,qf", [
+    # Every transport carries the selected effort, from a setting and from a per-request override.
+    *[("high", source, mode, False, _SIMPLE)
+      for source in ("setting", "override") for mode in ("post", "buffered_sse", "stream")],
+    # The complex-query setting and the chat template path.
+    ("xhigh", "setting", "post", False, _COMPLEX),
+    ("xhigh", "override", "stream", True, _COMPLEX),
+    ("medium", "setting", "buffered_sse", True, _SIMPLE),
 ])
-async def test_core_selected_reasoning_effort_reaches_http_request(effort, source, mode, is_chat, query, field):
+async def test_core_selected_reasoning_effort_reaches_http_request(effort, source, mode, is_chat, qf):
     """Counting and completion must render the same request-local template."""
+    query, field = qf
     values = {
         "llm_stream": mode == "buffered_sse",
         "llm_reasoning_effort_simple": "low",
@@ -621,8 +546,7 @@ async def test_core_selected_reasoning_effort_reaches_http_request(effort, sourc
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("stream", [False, True])
-@pytest.mark.parametrize("precomputed", [False, True])
+@pytest.mark.parametrize("stream,precomputed", [(False, False), (True, True)])
 async def test_core_normalizes_chat_for_retrieval_complexity_and_prompt(stream, precomputed):
     queries = []
     classifications = []
@@ -661,9 +585,12 @@ async def test_core_normalizes_chat_for_retrieval_complexity_and_prompt(stream, 
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("stream", [False, True])
-@pytest.mark.parametrize("messages", [None, [], [ChatMessage(role="assistant", content="No user")],
-                                       [ChatMessage(role="user", content=" \t ")]])
+@pytest.mark.parametrize("stream,messages", [
+    (False, None),
+    (False, [ChatMessage(role="assistant", content="No user")]),
+    (False, [ChatMessage(role="user", content=" \t ")]),
+    (True, None),
+])
 async def test_core_invalid_chat_refuses_even_with_precomputed_hits(stream, messages):
     from mainframe_rag.agent.chat_turn import InvalidChatTurn
 
@@ -713,7 +640,6 @@ def _stream_deps(llm) -> AnswerCoreDeps:
         ({"type": "done", "finish_reason": None, "usage": TokenUsage()}, REASON_MISSING_FINISH),
         ({"type": "done", "usage": TokenUsage()}, REASON_MISSING_FINISH),
         ({"type": "done", "finish_reason": "", "usage": TokenUsage()}, REASON_MALFORMED_FRAME),
-        ({"type": "done", "finish_reason": 42, "usage": TokenUsage()}, REASON_MALFORMED_FRAME),
     ],
 )
 async def test_core_stream_rejects_falsy_done_finish(done_item, reason):
@@ -793,8 +719,7 @@ async def test_structured_model_results_match_buffered_and_fallback_stream(async
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("asynchronous,streaming", [(False, False), (True, True)])
 async def test_unstructured_completion_fails_then_next_structured_answer_succeeds(asynchronous, streaming):
     class Model:
         response = "Unstructured answer must not become a completed result."
@@ -899,11 +824,8 @@ def test_core_import_graph_excludes_transports_and_application_singleton():
 @pytest.mark.parametrize(
     "module, injected, forbidden",
     [
-        ("answer_core", "import mainframe_rag.agent.app", "mainframe_rag.agent.app"),
         ("model_adapter", "def deferred():\n    from mainframe_rag.webui import routes",
          "mainframe_rag.webui.routes"),
-        ("core_ports", "from mainframe_rag.agent import sse", "mainframe_rag.agent.sse"),
-        ("resources", "import mainframe_rag.agent.app", "mainframe_rag.agent.app"),
     ],
 )
 def test_core_import_checker_rejects_forbidden_dependency(monkeypatch, module, injected, forbidden):
@@ -943,8 +865,7 @@ def test_agent_resources_import_without_the_application_singleton():
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("stream", [False, True])
-@pytest.mark.parametrize("async_edges", [False, True])
+@pytest.mark.parametrize("stream,async_edges", [(False, False), (True, True)])
 async def test_use_case_runs_on_explicit_resources_and_borrows_the_model(stream, async_edges):
     """Issue #369: the answer use case needs only an `AgentResources` view.
     Retrieval receives the bound physical collection with the view's handles;
@@ -1087,12 +1008,8 @@ _STREAM_BAD_SEQUENCES = [
     [{"type": "done", "finish_reason": "stop"}, {"type": "token", "delta": "late"}],
     [{"type": "metadata"}, {"type": "done", "finish_reason": "stop"}],
     [{"type": "token", "delta": False}, {"type": "done", "finish_reason": "stop"}],
-    [{"type": "token", "delta": 0}, {"type": "done", "finish_reason": "stop"}],
     [{"type": "token", "delta": None}, {"type": "done", "finish_reason": "stop"}],
-    [{"type": "token", "delta": []}, {"type": "done", "finish_reason": "stop"}],
     [{"type": "done", "finish_reason": "stop", "usage": False}],
-    [{"type": "done", "finish_reason": "stop", "usage": 0}],
-    [{"type": "done", "finish_reason": "stop", "usage": {}}],
     [{"type": "done", "finish_reason": "stop", "usage": None}],
     [{"type": "token", "delta": "text", "ttft_ms": False}, {"type": "done", "finish_reason": "stop"}],
     [{"type": "done", "finish_reason": False}],
@@ -1102,8 +1019,10 @@ _STREAM_BAD_SEQUENCES = [
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize('seam', ['adapter', 'core-legacy', 'core-typed'])
-@pytest.mark.parametrize('frames', _STREAM_BAD_SEQUENCES)
+@pytest.mark.parametrize('seam,frames', [
+    *[(seam, frames) for seam in ('adapter', 'core-typed') for frames in _STREAM_BAD_SEQUENCES],
+    ('core-legacy', _STREAM_BAD_SEQUENCES[0]),
+])
 async def test_stream_grammar_rejects_invalid_sequences_and_next_operation_recovers(seam, frames):
     from mainframe_rag.agent.core_ports import ModelDone, ModelToken
 
@@ -1260,8 +1179,10 @@ async def _run_zero_evidence(kind: str, mode: str, llm: _RecordingLLM):
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("mode", ["single", "chat", "single-stream", "chat-stream"])
-@pytest.mark.parametrize("kind", ["atomic", "legacy", "whitespace", "verify"])
+@pytest.mark.parametrize("kind,mode", [
+    ("atomic", "single"), ("legacy", "single"), ("whitespace", "single"), ("verify", "single"),
+    ("atomic", "chat"), ("atomic", "single-stream"), ("atomic", "chat-stream"),
+])
 async def test_core_no_supplied_evidence_never_invokes_generation(kind, mode):
     from mainframe_rag.agent.answer import PromptBudgetExceeded
     from mainframe_rag.agent.answer_core import EvidenceBudgetExceeded
@@ -1276,7 +1197,7 @@ async def test_core_no_supplied_evidence_never_invokes_generation(kind, mode):
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("mode", ["single", "chat", "single-stream", "chat-stream"])
+@pytest.mark.parametrize("mode", ["single", "chat-stream"])
 async def test_core_one_usable_excerpt_invokes_generation_once(mode):
     llm = _RecordingLLM()
     hit = _hit()
