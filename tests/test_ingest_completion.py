@@ -647,3 +647,19 @@ def test_stale_inventory_never_causes_a_false_skip(tmp_path, synthetic_pdf, monk
     assert last_record()["status"] == "upserted"
     assert last_record()["chunks"] > 0, "legacy line over empty Qdrant must re-ingest"
     assert last_record().get("generation_id"), "new lines carry the binding"
+
+
+def test_no_completion_collection_means_no_marker_and_not_complete():
+    """Before any document is certified the completion collection does not
+    exist: reads answer None/False rather than failing."""
+    class _NoCompletionCollection(FailingFakeQdrant):
+        def collection_exists(self, collection_name):
+            return False
+
+        def scroll(self, *a, **k):
+            raise RuntimeError("a missing collection must not be scrolled (404 upstream)")
+
+    fake = _NoCompletionCollection()
+    settings = _settings()
+    assert _read(settings, fake) is None
+    assert _complete(settings, fake) is False

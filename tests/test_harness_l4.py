@@ -263,3 +263,13 @@ def test_l4_repeats_preserve_sample_and_judge_legs(monkeypatch):
     result = harness_l4.run_l4(entries, 7, 3)
     assert calls == [(7, {"judge_enabled": True, "relevance_enabled": True})] * 3
     assert result == [{"rows": [{"repeat": n}], "metrics": {"queries": 1}} for n in (1, 2, 3)]
+
+
+def test_classify_max_direction_has_a_borderline_band_before_fail():
+    """A lower-is-better metric slightly over its reference is borderline (a
+    reviewer's call), clearly over is fail, at or under is pass."""
+    from mainframe_rag.eval.quality import classify
+
+    assert classify(0.10, 0.10, 0.05, "max") == "pass"
+    assert classify(0.13, 0.10, 0.05, "max") == "borderline"
+    assert classify(0.20, 0.10, 0.05, "max") == "fail"

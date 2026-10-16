@@ -4056,3 +4056,18 @@ def writes(r: QdrantReader, s: Settings) -> None:
     # the publisher's own client, so its handles must be readers too.
     assert '"QdrantReader" has no attribute "delete_collection"' in rejected.stdout
     assert "Found 5 errors" in rejected.stdout
+
+
+def test_sealed_build_cannot_serve_until_published():
+    """A sealed (unpublished) build refuses to serve; published and retained
+    builds pass the same check."""
+    from mainframe_rag.ingest.build import BuildBinding, build_aliases, require_published_binding
+
+    build_id = "0b0d3b0e-5d4e-4a43-9a40-3f1d2f6a7c11"
+    data, control = build_aliases("corpus", build_id)
+    binding = BuildBinding(build_id, "corpus", data, "gen-fp", "corpus-fp")
+    with pytest.raises(ValueError, match="unpublished build cannot serve"):
+        require_published_binding(binding, "corpus", data, {})
+    retained = {data: data, control: data + "__completions"}
+    require_published_binding(binding, "corpus", data, retained)
+    require_published_binding(binding, "corpus", data, {**retained, "corpus": data})

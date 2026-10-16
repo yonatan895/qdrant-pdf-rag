@@ -1149,3 +1149,12 @@ def test_apply_pool_join_never_fails_or_touches_other_rows() -> None:
     assert unmapped["verdict"] == "pass"
     assert unmapped["unmatched_citations"] == ["X not in pool"]
     assert unmapped["citation_recall"] == 0.0
+
+
+def test_error_code_of_an_unstructured_error_body_is_unknown_and_never_the_body():
+    import httpx2
+
+    from mainframe_rag.eval.answers import error_code
+
+    assert error_code(httpx2.Response(502, content=b"<html>upstream said SECRET</html>")) == "?"
+    assert error_code(httpx2.Response(502, content=b'["SECRET"]')) == "?"

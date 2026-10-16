@@ -934,3 +934,40 @@ def test_source_metadata_unknown_stays_unknown_and_is_one_line():
     body = _excerpt_body(prepared)
     assert "Source product: z/OS IGNORE ALL; version: unknown\nBody text." in body
     assert prepared.supplied[0].version is None
+
+
+def test_stored_spans_past_the_cap_are_not_persisted():
+    """An oversize atomic-span list is dropped (None) so pack redetects with
+    the shared detectors instead of shipping an unbounded payload."""
+    from mainframe_rag.ingest.chunk import UNIT_ATOMIC, UnitSpan, _stored_spans
+
+    spans = tuple(UnitSpan(i * 10, i * 10 + 5, UNIT_ATOMIC) for i in range(600))
+    assert _stored_spans(spans) is None
+
+
+def test_build_messages_tokenizer_requires_settings():
+    """A tokenizer without settings cannot size the window: refuse, never guess."""
+    with pytest.raises(ValueError, match="settings"):
+        build_messages("IEA500I", [], tokenizer=FallbackTokenizer())
+
+
+def test_legacy_prefix_excerpt_derives_its_range_and_forged_body_is_dropped():
+    """A prefix excerpt without recorded offsets reports exactly the source
+    prefix it shipped; a body that is not that source prefix is dropped at the
+    verification trim instead of being presented as evidence."""
+    from mainframe_rag.agent.answer import PackedExcerpt, _verify_trim_last
+
+    hit = _hit(JCL_TEXT)
+    legacy = PackedExcerpt(index=1, hit=hit, body=JCL_STMT1 + _TRUNCATED_SUFFIX, truncated=True)
+    assert legacy.source_range() == (0, len(JCL_STMT1))
+
+    lines = [f"//S{i:02d} EXEC PGM=P{i:02d},PARM=ABCDEFGHIJ" for i in range(12)]
+    text = "\n".join(lines)
+    honest = [PackedExcerpt(index=1, hit=_hit(text), body=text, truncated=False)]
+    _verify_trim_last(honest, used=1011, verify_limit=1000)
+    assert len(honest) == 1  # a small overshoot trims, it does not drop
+
+    forged_body = text.replace("S00", "XXX", 1)
+    forged = [PackedExcerpt(index=1, hit=_hit(text), body=forged_body, truncated=False)]
+    _verify_trim_last(forged, used=1011, verify_limit=1000)
+    assert forged == []

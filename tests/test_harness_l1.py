@@ -563,3 +563,9 @@ def test_harness_task_refuses_invalid_inputs_before_external_effects(harness_inp
     assert report is None
     assert effects == []
     assert (root / "benchmarks/harness.json").read_bytes() == before[root / "benchmarks/harness.json"]
+
+
+def test_empty_classes_get_no_confidence_interval():
+    """An empty class must render n/a, never a fabricated CI."""
+    assert ci95([]) is None
+    assert ci95_paired([]) is None
