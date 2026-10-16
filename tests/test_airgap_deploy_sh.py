@@ -148,7 +148,7 @@ def _run(tree, *extra_env):
         "EMBED_MODEL": "embed",
         "DENSE_DIM": "64",
         "EMBED_MODEL_REVISION": "rev-1",
-        "VLLM_BASE_URL": "http://vllm:8000",
+        "EMBED_BASE_URL": "http://vllm:8000/v1",
         "SKOPEO_REGISTRY": str(tmp_path / "registry"),
         "PODS_FILE": str(tmp_path / "pods.json"),
     }
@@ -785,6 +785,7 @@ def test_shared_gateway_aliases_and_secret_reach_requests(tree, from_file):
     from tests.helpers_airgap import rendered_container
 
     options = {
+        "EMBED_BASE_URL": "",  # no explicit override: the shared gateway applies
         "GATEWAY_BASE_URL": "https://sample-api/v1/",
         "GATEWAY_API_KEY_SECRET": "shared-gateway",
         "GATEWAY_API_KEY_SECRET_KEY": "api-key",
@@ -845,7 +846,7 @@ def test_shared_gateway_aliases_and_secret_reach_requests(tree, from_file):
 def test_shared_gateway_specific_url_and_caller_override_win(tree):
     path = tree[0] / "gateway.env"
     path.write_text("GATEWAY_BASE_URL=https://file-gateway/v1\nGATEWAY_API_KEY_SECRET_KEY=file-key\n")
-    result = _run(tree, ("AIRGAP_ENV", str(path)),
+    result = _run(tree, ("AIRGAP_ENV", str(path)), ("EMBED_BASE_URL", ""),
                   ("GATEWAY_BASE_URL", "https://caller-gateway/v1"),
                   ("LLM_BASE_URL", "https://reasoning-override/v1"),
                   ("LLM_MODEL_REASONING", "code"),

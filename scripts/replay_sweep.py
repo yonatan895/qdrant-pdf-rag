@@ -87,16 +87,14 @@ class HeadingJoinError(ValueError):
 
 
 def _recorded_depth(record: dict[str, Any]) -> int:
-    """Per-leg depth the pool was captured at. Legacy pools (no recorded
-    depth) prove only their longest recorded leg: Qdrant returns exactly
-    ``limit`` points unless the filtered corpus is smaller."""
+    """Per-leg depth the pool was captured at. Every capture records it; a
+    pool without one predates depth recording and is refused."""
     depth = (record.get("_meta") or {}).get("depth")
-    if type(depth) is int:
-        return depth
-    return max(
-        (len(leg.get(key) or []) for leg in record.get("legs") or [] for key in ("dense", "sparse")),
-        default=0,
-    )
+    if type(depth) is not int:
+        raise ValueError(
+            f"record {record.get('query')!r}: pool predates depth recording; recapture it"
+        )
+    return depth
 
 
 def unsupported_reason(records: list[dict], config: SweepConfig) -> str | None:

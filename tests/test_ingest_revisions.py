@@ -1,8 +1,8 @@
 """Issue #361 step 2: revision-keyed selectors, locks, completions, chunk ids.
 
 Two source revisions sharing a printed doc_id coexist; refresh replaces by
-inventory lineage; crash residue is swept; unattributable legacy residue
-fails closed. Every destructive test asserts the untouched sibling, not
+inventory lineage; crash residue is swept; revision-less (pre-revision)
+points refuse the refresh. Every destructive test asserts the untouched sibling, not
 just the changed revision.
 """
 
@@ -22,11 +22,10 @@ from mainframe_rag.ingest.completion import (
     doc_generation_id,
     is_doc_complete,
     is_revision_committed,
-    legacy_markers,
     read_completion,
 )
 from mainframe_rag.ingest.ibm_pdf import ParsedDoc
-from mainframe_rag.ingest.identity import AmbiguousRevisionError, source_rev_key
+from mainframe_rag.ingest.identity import UnsupportedLegacyDataError, source_rev_key
 from mainframe_rag.ingest.qdrant_io import delete_by_revision, stored_doc_revisions
 from mainframe_rag.ingest.rules_version import extraction_rules_version
 from tests.test_run_ingest import _filter_doc_id, _filter_match_value
@@ -347,112 +346,52 @@ def _legacy_points(doc_id, sha, rules_v, n=3, tag="legacy"):
     ]
 
 
-def test_legacy_sole_history_migrates_on_refresh(monkeypatch):
-    """Pre-361B residue (sourceless points + sourceless marker) is the sole
-    history: a changed refresh deletes it by doc_id and stamps the new
-    revision — the lazy in-place migration, no flags."""
-    settings = _settings()
-    fake = RevisionFake()
-    coll = settings.qdrant_collection
-    rules_v = extraction_rules_version()
-    fake.upsert(coll, points=_legacy_points("reference", SHA_A1, rules_v))
-    assert stored_doc_revisions(fake, settings, "reference") == {None}
-    status, _ = _upsert_one(
-        monkeypatch, fake,
-        _parsed(sha=SHA_B1, vendor="vendor-b", product="product-y", version="2.0"),
-        _chunks(rev=REV_B, tag="B-v1"), settings,
-    )
-    assert status == "upserted"
-    assert fake.main_revs(coll, "reference") == {REV_B}
-    assert "legacy-0" not in fake.main_ids(coll, "reference")
-    assert _complete(settings, fake, "reference", SHA_B1, REV_B)
-    assert legacy_markers(fake, settings, "reference") == []
-
-
-def test_legacy_unchanged_doc_skips_without_reingest(monkeypatch):
-    """Lazy upgrade: an unchanged legacy doc (sourceless points + matching
-    sourceless marker) skips — no mass re-ingest on upgrade."""
+def _sourceless_marker(settings, chunks, sha):
     from mainframe_rag.ingest.completion import expected_digests
 
-    settings = _settings()
-    fake = RevisionFake()
-    coll = settings.qdrant_collection
-    rules_v = extraction_rules_version()
-    chunks = _chunks(rev=REV_A, n=3, tag="A-v1")
-    ids = sorted(c.chunk_id for c in chunks)
-    points = [
-        models.PointStruct(
-            id=cid,
-            vector={"dense": [0.1] * 4, "bm25": models.SparseVector(indices=[1], values=[1.0])},
-            payload={
-                "doc_id": "reference", "sha256": SHA_A1, "rules_v": rules_v,
-                "text": next(c.text for c in chunks if c.chunk_id == cid),
-            },
-        )
-        for cid in ids
-    ]
-    fake.upsert(coll, points=points)
     n, ids_d, content_d = expected_digests(chunks)
-    gen = _gen_id(settings, SHA_A1)
-    fake.upsert(
-        completion_collection_name(settings),
-        points=[
-            models.PointStruct(
-                id="legacy-marker",
-                vector={"dense": [0.0] * 256,
-                        "bm25": models.SparseVector(indices=[0], values=[1.0])},
-                payload={
-                    "doc_id": "reference", "sha256": SHA_A1, "rules_v": rules_v,
-                    "target_collection": coll, "generation_id": gen,
-                    "expected_chunks": n, "chunk_ids_digest": ids_d,
-                    "content_digest": content_d, "embed_mode": "hash",
-                },
-            )
-        ],
+    return models.PointStruct(
+        id="sourceless-marker",
+        vector={"dense": [0.0] * 256, "bm25": models.SparseVector(indices=[0], values=[1.0])},
+        payload={
+            "doc_id": "reference", "sha256": sha, "rules_v": extraction_rules_version(),
+            "target_collection": settings.qdrant_collection,
+            "generation_id": _gen_id(settings, sha), "expected_chunks": n,
+            "chunk_ids_digest": ids_d, "content_digest": content_d, "embed_mode": "hash",
+        },
     )
-    upserts_before = fake.upserts
-    deletes_before = fake.deletes
-    status, _ = _upsert_one(
-        monkeypatch, fake,
-        _parsed(sha=SHA_A1, vendor="vendor-a", product="product-x", version="1.0"),
-        _chunks(rev=REV_A, n=3, tag="A-v1"), settings,
-    )
-    assert status == "skipped"
-    assert fake.upserts == upserts_before and fake.deletes == deletes_before
 
 
-def test_sourceless_residue_amid_named_raises(monkeypatch):
-    """Unattributable legacy residue beside a live revision fails closed:
-    deleting by doc_id could wipe the live revision."""
+@pytest.mark.parametrize("history", ["sole", "with-marker", "beside-named"])
+def test_sourceless_points_refuse_refresh_without_mutation(monkeypatch, history):
+    """Pre-revision points are unsupported: whether they are the sole history,
+    carry a matching sourceless marker (no lazy skip) or sit beside a named
+    revision, the refresh refuses before any delete or upsert. The report
+    names the document only — no point text or filesystem detail."""
     settings = _settings()
     fake = RevisionFake()
     coll = settings.qdrant_collection
     rules_v = extraction_rules_version()
-    _upsert_one(monkeypatch, fake, _parsed(sha=SHA_B1, vendor="vendor-b",
-                product="product-y", version="2.0"),
-                _chunks(rev=REV_B, tag="B-v1"), settings)
-    fake.upsert(coll, points=_legacy_points("reference", "ff" * 32, rules_v, tag="stray"))
-    deletes_before = fake.deletes
-    upserts_before = fake.upserts
-    with pytest.raises(AmbiguousRevisionError, match="reference"):
+    if history == "beside-named":
+        _upsert_one(monkeypatch, fake, _parsed(sha=SHA_B1, vendor="vendor-b",
+                    product="product-y", version="2.0"),
+                    _chunks(rev=REV_B, tag="B-v1"), settings)
+    fake.upsert(coll, points=_legacy_points("reference", SHA_A1, rules_v, tag="stray"))
+    if history == "with-marker":
+        fake.upsert(completion_collection_name(settings),
+                    points=[_sourceless_marker(settings, _chunks(rev=REV_A, n=3, tag="A-v1"), SHA_A1)])
+    deletes_before, upserts_before = fake.deletes, fake.upserts
+    with pytest.raises(UnsupportedLegacyDataError) as excinfo:
         _upsert_one(
             monkeypatch, fake,
-            _parsed(sha="cc" * 32, vendor="vendor-c", product="p", version="3"),
-            _chunks(rev=_rev("vendor-c", "p", "3", "cc" * 32), tag="C-v1"), settings,
+            _parsed(sha=SHA_A1, vendor="vendor-a", product="product-x", version="1.0"),
+            _chunks(rev=REV_A, n=3, tag="A-v1"), settings,
         )
     assert fake.deletes == deletes_before and fake.upserts == upserts_before
-    try:
-        _upsert_one(
-            monkeypatch, fake,
-            _parsed(sha="cc" * 32, vendor="vendor-c", product="p", version="3"),
-            _chunks(rev=_rev("vendor-c", "p", "3", "cc" * 32), tag="C-v1"), settings,
-        )
-        raised = None
-    except AmbiguousRevisionError as exc:
-        raised = str(exc)
-    assert raised is not None
-    assert "reference" in raised and "original --progress file" in raised
-    assert "/tmp" not in raised and "stray 0" not in raised
+    message = str(excinfo.value)
+    assert "reference" in message and "new collection" in message
+    assert "/tmp" not in message and "stray 0" not in message
+    assert {"legacy-0", "legacy-1", "legacy-2"} <= fake.main_ids(coll, "reference")
 
 
 def test_stored_doc_revisions_and_delete_by_revision(monkeypatch):
@@ -477,16 +416,16 @@ def test_plan_refresh_deletes_matrix(monkeypatch):
 
     settings = _settings()
     fake = RevisionFake()
-    # Empty store: nothing to delete, no legacy sweep.
-    assert plan_refresh_deletes(fake, settings, "reference", REV_A, None) == (set(), False)
+    # Empty store: nothing to delete.
+    assert plan_refresh_deletes(fake, settings, "reference", REV_A, None) == set()
     _upsert_one(monkeypatch, fake, _parsed(sha=SHA_A1, vendor="vendor-a",
                 product="product-x", version="1.0"),
                 _chunks(rev=REV_A, tag="A"), settings)
     # Stale current revision always replaced, even without lineage.
-    assert plan_refresh_deletes(fake, settings, "reference", REV_A, None) == ({REV_A}, False)
+    assert plan_refresh_deletes(fake, settings, "reference", REV_A, None) == {REV_A}
     # Lineage replaces precisely.
     rev_a2 = _rev("vendor-a", "product-x", "1.0", "a2" * 32)
-    assert plan_refresh_deletes(fake, settings, "reference", rev_a2, REV_A) == ({REV_A}, False)
+    assert plan_refresh_deletes(fake, settings, "reference", rev_a2, REV_A) == {REV_A}
 
 
 def test_triple_variant_refresh_retires_old_marker(monkeypatch):

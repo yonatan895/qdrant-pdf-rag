@@ -24,7 +24,6 @@ from mainframe_rag.ingest.completion import (
     doc_generation_id,
     ensure_completion_collection,
     is_doc_complete,
-    legacy_markers,
     read_completion,
     release_run_lock,
 )
@@ -331,7 +330,8 @@ def test_stale_single_point_never_skips(monkeypatch):
             models.PointStruct(
                 id="residue-point",
                 vector={"dense": [0.1] * 4, "bm25": models.SparseVector(indices=[1], values=[1.0])},
-                payload={"doc_id": "DOC1", "sha256": "a" * 64, "rules_v": rules_v, "text": "residue"},
+                payload={"doc_id": "DOC1", "sha256": "a" * 64, "rules_v": rules_v,
+                         "source_rev": _rev("a" * 64), "text": "residue"},
             )
         ],
     )
@@ -463,10 +463,9 @@ def test_refresh_failure_leaves_no_stale_completion(monkeypatch):
 
 
 def test_unscoped_or_malformed_completions_never_gate_a_skip(monkeypatch):
-    """A completion point predating the schema validates to None and never
-    gates a skip — legacy state re-ingests explicitly; a marker predating the
-    manifest reads with manifest_digest=None (additive) but, being
-    sourceless, never satisfies a scoped read."""
+    """A completion point predating the schema never gates a skip and
+    re-ingests explicitly; a sourceless pre-manifest marker fails validation
+    and never certifies either."""
     from qdrant_client import models
 
     settings = _settings(batch_size=16)
@@ -482,7 +481,6 @@ def test_unscoped_or_malformed_completions_never_gate_a_skip(monkeypatch):
         ],
     )
     assert _read(settings, fake) is None
-    assert legacy_markers(fake, settings, "DOC1") == [], "unparseable payloads read as absent"
     assert _complete(settings, fake) is False
     status, _ = _upsert_one(monkeypatch, fake, _parsed(), _chunks(n=3), settings)
     assert status == "upserted"
@@ -508,10 +506,8 @@ def test_unscoped_or_malformed_completions_never_gate_a_skip(monkeypatch):
             )
         ],
     )
-    (marker,) = legacy_markers(fresh, other, "DOC1")
-    assert marker.manifest_digest is None
-    assert marker.source_rev is None
     assert _read(other, fresh) is None, "sourceless markers never satisfy a scoped read"
+    assert _complete(other, fresh) is False
 
 
 def test_delete_completion_real_error_propagates(monkeypatch):

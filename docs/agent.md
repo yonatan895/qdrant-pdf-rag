@@ -424,7 +424,7 @@ select `complex`. Default is `simple`.
   whose first line starts with the requested identifier is an entry heading
   (an incidental mention or a longer near-miss token is not). The range starts
   at a heading only when it covers strictly more requested headings than the
-  legacy prefix; otherwise, and for queries without a heading match or with
+  plain prefix; otherwise, and for queries without a heading match or with
   absent/malformed spans, the prefix behavior is unchanged. A range that does
   not start at the chunk start leads with `[... earlier text omitted]`; a cut
   tail ends with the truncation suffix. A cut inside prose ends at a sentence
@@ -870,8 +870,9 @@ controls produce the existing fixed refusal. These are publication-lifetime
 checks; embedding-representation comparison remains unchanged. An alias advance
 between the representation read and build validation may leave the resolved
 physical retained: its complete immutable pair remains valid for the admitted
-reader. A subsequent fresh validation resolves the successor. Completed legacy
-generations retain their supported read contract without an invented build UUID.
+reader. A subsequent fresh validation resolves the successor. A generation
+without a build binding (a pre-build publication) is refused as `legacy`
+(`unbound_generation`); no build UUID is invented for it.
 
 The gate binds a request to a validated physical name, and aliases become visible
 after revalidation. Negative results are cached too. See
@@ -880,7 +881,7 @@ currently collapses and publication checks that remain incomplete.
 
 **Required assumptions and limits:** a physical name is not an immutable snapshot.
 Caching is safe with respect to alias movement only while the validated physical
-data/metadata remain stable for the entire request. A legacy repair outside
+data/metadata remain stable for the entire request. A repair outside
 ingest, an admin mutation or deletion can invalidate that assumption during a warm
 cache and after a request has obtained its target. Alias-mode forced repair
 builds a distinct non-live generation and retains the prior target, as described
@@ -1043,8 +1044,8 @@ verification trims all snap to whole atomic units — code statements, table
 rows, SYSIN records — or omit the excerpt with explicit omission metadata;
 a partial statement is never presented as a complete excerpt. Unit spans
 persist on structured chunk payloads (`units`, additive and unindexed;
-prose payloads are byte-identical to before) and legacy points redetect
-with the same chunk splitters, so no second prompt-side parser exists.
+prose payloads are byte-identical to before) and points without stored spans
+(an atomic-span list over the storage cap) redetect with the same chunk splitters, so no second prompt-side parser exists.
 Ordinary narrative keeps character truncation with the generic suffix; only
 procedural/atomic content is omit-or-whole. The manifest records
 `units_total`/`units_retained` per entry plus `omitted_indices`, and wholly

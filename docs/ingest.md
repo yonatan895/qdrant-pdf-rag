@@ -373,10 +373,9 @@ Opt-in via `CONTEXTUAL_EMBED_ENABLED` (default off).
   Records are `schema: 2` JSON lines (`v`, `doc_sha256`, `chunk_id`, `model`,
   `max_chars`, `input_sha256`, `context`); the loader recomputes the key from
   those fields and rejects wrong types or a context longer than its own cap.
-  Pre-#416 records (no `schema`) and malformed lines are misses (the first
-  logs `context_cache_legacy_records_ignored` with a count, the second
-  `context_cache_skip_line`); the file is append-only and is never rewritten or
-  required to be deleted. A hit that is not already whitespace-collapsed and
+  Records without the current `schema` (including pre-#416 lines) and malformed
+  lines are misses, each logged as `context_cache_skip_line`; the file is
+  append-only and is never rewritten or required to be deleted. A hit that is not already whitespace-collapsed and
   within the cap is regenerated.
   An append that finds a torn last line (parent killed mid-write) starts on a
   fresh line, so the partial fragment is a skipped line and the new record
@@ -488,8 +487,9 @@ Collection + indexes-before-load + batched idempotent upsert, behind the
   per-revision: the point id scopes to
   `(target, doc_id, source_rev, generation_id)` and the payload carries
   `source_rev`, so coexisting revisions under one `doc_id` verify
-  independently and a refresh retires exactly its lineage's markers (plus
-  sole-history legacy markers). The
+  independently and a refresh retires exactly its lineage's markers. Markers
+  without `source_rev` or `manifest_digest` (pre-#361/#362) fail validation and
+  read as absent. The
   generation binds source hash + the `representation_fingerprint` projection
   (field policy owned by `representation.REEMBED_FIELDS`) + CLI source
   triple (`vendor|product|version` overrides, `source_labels()`) + target
@@ -507,11 +507,9 @@ Collection + indexes-before-load + batched idempotent upsert, behind the
   targeting, coexistence) + keyword index; `context` → observability only.
 - `stored_doc_revisions` lists the distinct source revisions under a
   `doc_id` (paginated to exhaustion via the shared `scroll_all_points`
-  helper, page size `Settings.ingest_scan_page_size`, `None` for pre-361B
-  points) for the refresh plan; `delete_by_revision` deletes exactly one
-  revision with `wait=True`;
-  `delete_by_doc` remains for sole-history legacy residue only (never over
-  coexisting revisions).
+  helper, page size `Settings.ingest_scan_page_size`, `None` for a point
+  without a revision) for the refresh plan; `delete_by_revision` deletes
+  exactly one revision with `wait=True`. Nothing deletes by bare `doc_id`.
 
 Contract tests: `tests/test_qdrant_io.py`,
 `tests/test_ingest_robustness.py`.
@@ -543,12 +541,12 @@ thread pool.
   **and** verified points) before skipping; the upsert stream skips only on
    the same verified completion. A single sampled point proves nothing —
    `stored_doc_revisions` is a revision-scoped observer (the distinct
-   `source_rev` values under a `doc_id`, `None` for pre-361B points), not a
-   delete probe. Partial residue, wiped or
-  restored collections, and legacy marker-less state all re-ingest, never
-  skip. Inventory `upserted`/`skipped` lines carry the generation binding
-  (`generation_id`, `chunk_ids_digest`, `content_digest`); pre-#359 lines
-  without it re-verify in Qdrant.
+   `source_rev` values under a `doc_id`, `None` for a point without a
+   revision), not a delete probe. Partial residue and wiped or restored
+   collections re-ingest, never skip. Inventory `upserted`/`skipped` lines
+   carry the generation binding (`generation_id`, `chunk_ids_digest`,
+   `content_digest`) and `source_rev`; lines without them never skip on their
+   own and re-verify in Qdrant.
   Extraction rules version (`rules_v`) is a 16-hex SHA-256 over the 8 payload-producing
   modules (`regexes.py`, `ingest/ibm_pdf.py`, `ingest/chrome.py`, `ingest/chunk.py`,
   `ingest/classify.py`, `ingest/walk.py` (source labels), `ingest/identity.py`
@@ -561,7 +559,8 @@ thread pool.
   points in Qdrant are deleted and re-upserted.
   Additionally, `run_ingest` checks `stored_rules_version(client, settings)` at startup;
   if a non-empty collection has mismatched `rules_v`, it fails closed unless `--reingest`
-  is passed.
+  is passed. Points with no `rules_v` predate rules versioning: that data is
+  unsupported and is refused even under `--reingest` (build into a new collection).
 - **Stale-inventory hazard (closed):** the planner re-verifies every
   inventory skip against Qdrant, so an old `inventory.jsonl` against a
   wiped collection re-ingests instead of silently doing nothing.
@@ -589,14 +588,12 @@ thread pool.
 - **Migration lifecycle (issue #391 F2; scope proof from the #391 current
   packet):** the stored contract carries an envelope-level `state`. A run
   whose wanted contract differs from the stored committed one — or that
-  finds a fresh/legacy target — writes it `pending` before any
+  finds a fresh target — writes it `pending` before any
   delete/upsert and flips it `committed` only on the success path: zero
   document failures AND a read-only scope proof that (a) no completion
   marker under another `manifest_digest` remains and (b) every searchable
-  point is attributable to a verified walked document of this run. The
-  commit proof is strict: approved pre-361B legacy membership is not
-  accepted there, because a new contract may only be declared over vectors
-  this run re-embedded. Unmarked old data therefore blocks the commit and
+  point is attributable to a verified walked document of this run (a new
+  contract may only be declared over vectors this run re-embedded). Unmarked old data therefore blocks the commit and
   leaves the contract pending; points an explicit, lock-validated
   `--retire-doc` plan removes before the swap audit are excused at commit
   and enforced gone downstream. Unknown data is preserved, never deleted;
@@ -628,8 +625,12 @@ thread pool.
   outcomes: empty target proceeds (the run opens its contract pending);
   compatible or record-only drift proceeds (drift logs
   `action: representation_drift` — re-evaluation owed, never a re-ingest);
-  re-embed drift, legacy unversioned state, or a pending contract raises
-  with the `--reingest` remediation. `--reingest` is the one deliberate
+  re-embed drift or a pending contract raises with the `--reingest`
+  remediation. A target holding points but no contract (unversioned,
+  pre-#362 data) is refused as unsupported even under `--reingest`
+  (`reject_unversioned_target`): build the corpus into a new collection.
+  Every build declares its contract `pending` before its first point, so a
+  crashed current build never looks unversioned. `--reingest` is the one deliberate
   migration step (same override idiom as the #124 rules gate, which runs
   first so its error precedence is unchanged). Skip paths share the
   contract structurally: the preflight proves run-level compatibility
@@ -667,32 +668,11 @@ thread pool.
   the parent plan into the upsert stage). Committed coexisting revisions
   are left alone — replacing one needs its lineage, otherwise the write
   would be the overwrite bug. Completion-less residue is swept (crash-safe
-  retry); sole-history legacy residue migrates via `doc_id` delete; a
-  lineage-less run therefore ADDS revisions — keep the `--progress` file
-  (prod `/work` persists it) so refreshes replace. Unattributable
-  sourceless residue beside named revisions raises `AmbiguousRevisionError`
-  (doc id + revision/content ids, remediation included) before any delete.
-- **361B migration runbook (snapshot-gated, operator-driven, never
-  automatic):** (1) snapshot the collection (`create_snapshot` — the same
-  mechanism publish uses for safety snapshots); (2) re-ingest in place —
-  under the #391 F2 fingerprint (`rp2:`) every pre-rp2 marker is
-  unreachable, so this first pass re-ingests the whole walked corpus
-  (one fail-closed cycle, unchanged docs included); changed docs also
-  migrate their history precisely, and the representation manifest flips
-  to `identity_schema: source_rev`; (3) verify counts plus
-   `verify_all_complete` semantics (every walked doc revision-verified);
-   (4) roll back by restoring the snapshot — exercised in sim by
-   `tests/test_integration_sim.py::test_361_inplace_snapshot_restore_keeps_coexisting_revisions`
-   (snapshot → delete → upload-restore → counts/revisions/server-side
-   filters/resume-skip re-verified; alias rollback stays the primary
-   production path). Docs whose history predates
-  revision stamps AND share a `doc_id` with a named revision need one
-  explicit cleanup first (delete the stale revision's points by
-  `doc_id` + content-sha filter, then re-ingest) — the refresh error names
-  exactly that. Pre-rp2 completion markers read as absent, and the first
-  refresh of each lineage rewrites them scoped. Evaluation needs no
-  re-baseline: citations, filters, and goldens key on `doc_id`/text (see
-  the eval numbers in each 361B PR).
+  retry); a lineage-less run therefore ADDS revisions — keep the
+  `--progress` file (prod `/work` persists it) so refreshes replace. Any
+  point without a source revision under the document (pre-#361 data) raises
+  `UnsupportedLegacyDataError` (doc id + content ids, never text) before any
+  delete: that data is never migrated; build the corpus into a new collection.
 - **Refresh visibility — alias publication** (the only real-run mode; in-place
   ingest was retired in #360 and `INGEST_ALIAS_PUBLISH=false` fails closed; issue
   #359 req 4/5, `ingest/publish.py` + `qdrant_io` alias/snapshot helpers):
@@ -756,11 +736,10 @@ thread pool.
    cutover until the operator either restores the file or names an explicit
    approved removal (`--retire-doc DOCID[@SOURCEREV]`, repeatable, planned
    under the target lock against the freshest approved inventory and applied
-   to staging with revision-scoped deletes before verification). Whole-doc
-   retirement covers approved sourceless (pre-361B) history alongside named
-   revisions — the apply-time sole-history check (no named revision left in
-   staging) still guards the delete; a named-only retirement never takes
-   resolution — never a dead end). Retiring revision A (`--retire-doc DOCID@SOURCEREV`)
+   to staging with revision-scoped deletes before verification). Approved
+   history without a source revision is unsupported pre-#361 data and refuses
+   the plan; every refusal names the operator path (re-plan, retire the whole
+   document, or build into a new collection). Retiring revision A (`--retire-doc DOCID@SOURCEREV`)
    preserves sibling revision B across planning, walked-document conflict
    checks, migration commit exclusions, deletion, and residue audits.
    Retired document revisions that reappear in the walk (or whole documents
@@ -771,12 +750,7 @@ thread pool.
    if interrupted between swap and cleanup), ensuring subsequent ordinary runs
    recognize deliberate retirements without demanding missing chunks or allocating
    redundant generations.
-   The audit's legacy allowance is a compatibility bridge with digest-level
-   verification (issue #391 Q417-L1): a sourceless point is covered only when
-   it belongs to an approved legacy inventory record with verified chunk count,
-   chunk IDs, extraction rules, and excerpt text digests (`chunk_ids_digest`,
-   `content_digest`, `rules_version`) — matching `(doc_id, sha256)` alone is
-   not attribution. Unverifiable legacy data fails closed requiring `--reingest`.
+   A point without a source revision is never covered by the audit.
    Unexplained residue under walked, unwalked or retired docs refuses and is
    preserved. The prod Job reaches these modes through
    `scripts/airgap/ingest.sh` (issue #391 current packet):
@@ -800,18 +774,12 @@ thread pool.
    no distributed lock.
   During a migration retained markers block the commit until
   the operator re-ingests the complete corpus or cleans the stale
-  generation. First-publish cutover from a legacy physical layout copies the
-  squatter through the points API into the retained rollback generation
-  `<alias>__legacy_<build>` (verified by exact point ids; a retry of the same
-  build reuses only an exact copy), deletes it (brief documented maintenance
-  window), then creates the alias; this works on distributed layouts too.
-  A physical collection counts as a legacy layout only when it carries no
-  build binding and no alias targets it: `QDRANT_COLLECTION` naming a
-  published or retained generation's physical collection refuses before any
-  write (publish through the logical alias), since "migrating" it would delete
-  the collection the logical alias serves.
-  Stale-rules legacy content needs `--reingest` like any other rules
-  migration.
+  generation. A physical collection carrying the configured name with no
+  alias (the pre-publication layout) is unsupported and refuses before any
+  write: build the corpus into a new collection. `QDRANT_COLLECTION` naming a
+  published or retained generation's physical collection also refuses
+  (publish through the logical alias). A live generation without a build
+  binding (a pre-build publication) refuses the same way.
 - **Retained generations are never workspace (issue #405 R2):** a derived
   staging name that collides with a committed retained (non-live)
   generation allocates a suffixed candidate instead of reusing it, so
@@ -822,12 +790,10 @@ thread pool.
   fingerprints `(gen_fp, corpus_fp)` are committed to the generation's metadata
   (`<collection>__completions`), allowing subsequent ordinary runs to recognize
   successful repair generations as steady state without allocating further staging
-  generations (issue #391 Q418-R1). A completed legacy generation lacking a publication receipt
-  performs a one-time metadata write when verified as `already_live`; once the receipt
-  exists, subsequent ordinary runs perform zero writes (corpus, markers, and metadata remain
-  completely untouched). A post-cutover retry retains its build sidecar and
-  pending retirement inventory until representation, distribution, placement,
-  full coverage and any receipt backfill have succeeded. A failed revalidation
+  generations (issue #391 Q418-R1). Subsequent ordinary runs perform zero writes
+  (corpus, markers, and metadata remain completely untouched). A post-cutover
+  retry retains its build sidecar and pending retirement inventory until
+  representation, distribution, placement and full coverage have succeeded. A failed revalidation
   consumes neither recovery identity nor retirement authorization; after the
   underlying problem is resolved, retry finalizes that same generation before
   clearing the sidecar. The resume path deliberately checks no
@@ -838,7 +804,8 @@ thread pool.
   any swap, and never building into the serving generation. An existing
   recovery record is validated before replay: v1 requires an integer version,
   unambiguous JSON object keys, correctly typed retirement requests and complete
-  `revs`/boolean `legacy`/boolean `whole` plan entries. String-to-set and
+  `revs`/boolean `whole` plan entries (a plan entry still carrying the removed
+  `legacy` field is refused). String-to-set and
   truthiness coercions are forbidden. A plan with recorded requests must match
   their document/revision/whole-document scope; corrupt entries are never
   discarded. Older v1 records without either optional retirement field remain
@@ -867,8 +834,9 @@ thread pool.
   the serving alias. Existing build aliases are never rebound. A successor
   leaves the old pair and build aliases intact. Readers validate the binding
   and both immutable aliases; missing, redirected or unknown-version controls
-  refuse instead of downgrading to legacy behavior. Completed legacy generations
-  remain readable but acquire no full build UUID through metadata backfill.
+  refuse instead of downgrading to legacy behavior. A generation without a
+  build binding (a pre-build publication) is refused by ingest and serving;
+  nothing backfills a binding onto it.
   Publication refuses a physical or build-alias target that names one of these
   builds, including retained builds (publish through the logical alias). The
   builder writes only a publication staging generation, so nothing else can
@@ -986,8 +954,8 @@ context/status clarification authorized by #397 (15 September 2026).
 
 **Preconditions/failures:** identity attestation is supplied by the model owner;
 blank vLLM revision must fail even with force. Deduplication and collision checks
-precede destructive work; ambiguous legacy lineage fails rather than deleting a
-sibling. Revision-separated UUIDs prevent cross-revision collisions, but two
+precede destructive work; revision-less (pre-#361) points fail rather than
+deleting a sibling. Revision-separated UUIDs prevent cross-revision collisions, but two
 writers of the same revision can still target the same points.
 **Evidence:** `tests/test_ingest_identity.py`, `tests/test_ingest_revisions.py`
 (including the closure pins: exact product/version filter partition plus
@@ -1061,8 +1029,8 @@ readiness, retrieval, answer/chat/console, recovery tools and evaluation.
   1/1/1 profile judges its single copy through its one endpoint. Moving
   replicas to repair an under-replicated candidate remains the
   snapshot-gated migration slice, never automatic.
-  Update staging preparation and the legacy-layout migration copy through
-  the points API and are not limited by topology; no node-local snapshot is
+  Update staging preparation copies through the points API and is not
+  limited by topology; no node-local snapshot is
   a restore point ([deploy](deploy.md#distributed-recovery)).
   Supply the comma-separated non-secret URLs via the operator env file or
   caller environment/Task variable (caller takes precedence). The launcher
@@ -1072,23 +1040,20 @@ readiness, retrieval, answer/chat/console, recovery tools and evaluation.
 - Representation migration writes `pending`, then commits after no document
   failures, `stale_completion_markers` finds no differently stamped markers,
   and the read-only scope proof attributes every searchable point to a verified
-  walked document of this run (`verify_searchable_coverage`; strict at commit —
-  no legacy allowance). This detects marked residue AND unmarked data. An
+  walked document of this run (`verify_searchable_coverage`). This detects marked residue AND unmarked data. An
   explicitly approved removal planned under the target lock is excused at
   commit and enforced gone before the swap.
 - `verify_all_complete` checks the walked inventory, rejects a present pending
   contract, a missing/unreadable/drifted final manifest on a walked corpus,
-  and any searchable point no verified walked generation accounts for —
-  sourceless points only through verified approved legacy document digests
-  (read-only residue audit; explicit `--retire-doc` removals are the only
+  and any searchable point no verified walked generation accounts for — a
+  revision-less point never counts (read-only residue audit; explicit `--retire-doc` removals are the only
   deletions and are applied before verification).
 - Distinct staging plus the alias update isolates ordinary cutover and forced
   repair under the coverage and writer assumptions below; the serving
-  generation is never mutated in publish mode, and only first legacy-name
-  conversion has a brief documented maintenance window.
+  generation is never mutated in publish mode.
 - Corpus deletion is not automatic garbage collection. On a disposable synthetic
-  regenerated corpus, use an isolated fresh target; the legacy delete-and-rebuild
-  recipe is destructive and is not an instruction to delete a live collection.
+  regenerated corpus, use an isolated fresh target; a delete-and-rebuild is
+  destructive and is never an instruction to delete a live collection.
   Real-corpus recovery follows [its runbook](local-real-corpus.md).
 
 **Coordination/lifetime assumptions:** serialize the **entire** resolve/prepare/
@@ -1109,11 +1074,10 @@ claim follows from a single-node run.
 run is a publication, `INGEST_ALIAS_PUBLISH=false` fails closed (settings,
 values mapper and chart schema), and the builder refuses a real run without
 a publication staging generation. A pre-publication collection that still
-carries the logical name is migrated by its first publication into a
-retained copy. Repair of a legacy collection outside ingest (for example
-`ingest/repair.py`) still requires quiescing writers and draining affected
-readers first; setting a manifest pending or waiting a TTL alone does not
-drain in-flight requests. Alias-mode repair is a normal
+carries the logical name is unsupported and refused, never migrated. Any
+operator repair outside ingest still requires quiescing writers and draining
+affected readers first; setting a manifest pending or waiting a TTL alone does
+not drain in-flight requests. Alias-mode repair is a normal
 distinct-generation publish: the old physical keeps serving until the
 verified atomic swap, and is retained afterward. Preserve a restorable backup
 and the old physical **and its own metadata**. Alias rollback still needs
@@ -1140,9 +1104,8 @@ generation immutability, and the physical-target refusal
 (`test_publication_refuses_a_generation_targeted_by_name`). The #391 current-packet
 scope proof adds `tests/test_run_ingest.py::test_unmarked_searchable_point_blocks_migration_commit`
 (a walk that does not account for an unmarked old-rules point refuses and preserves it) and
-`test_ingest_publish.py::test_walked_doc_legacy_history_refuses_without_content_verification` /
-`test_walked_doc_approved_legacy_history_publishes` (content attribution, not a
-printed-doc_id match), plus the migration-with-retirement pair
+`test_ingest_publish.py::test_walked_doc_revision_less_point_refuses_without_deletion`
+(attribution needs a verified revision, not a printed-doc_id match), plus the migration-with-retirement pair
 (`test_publish_migration_with_explicit_retire_single_run`,
 `test_publish_migration_retire_unapproved_stray_refuses`). Warm-cache mutation and
 serving-reader draining remain #391 acceptance counterexamples; retain
@@ -1183,21 +1146,3 @@ whole-data coverage gaps under #391. Observability has a separate bounded fail-o
 policy ([agent logging/tracing](agent.md)); do not copy it into required metadata.
 
 
-### Narrow legacy staging recovery
-
-For an unfinished snapshot-cloned migration with duplicate sourceless points,
-the explicit `mainframe_rag.ingest.repair` plan/apply command can export and
-remove only exact duplicates retained in the rollback collection after their
-replacement completion and stored content verify. It refuses served staging,
-changed plan/backups/inputs, ambiguous replacement attribution and new residue.
-Both planning and applying validate the persisted pending manifest envelope: its
-target must be the staging completion collection and its stored digest must match
-the inner manifest. The validated target, state and digest are bound into the plan;
-corrupt metadata refuses before deletion. Other manifest readers retain their
-existing legacy decoding policy.
-It takes the existing publisher/run locks on the actual shared progress path;
-other writers must be stopped. It never edits controls, retires sources or
-publishes. See the [local repair procedure](local-real-corpus.md#explicit-recovery-of-duplicate-legacy-staging-points)
-for writer credentials, private backups, interrupted retries and the required
-ordinary ingest afterward. This is an explicit maintenance operation, never an
-automatic exception to the publication coverage gate.

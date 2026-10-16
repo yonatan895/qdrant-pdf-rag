@@ -183,9 +183,10 @@ def test_cache_round_trip_last_wins_and_skips_corrupt_lines(tmp_path, caplog):
     assert not (tmp_path / "c.jsonl").exists()
 
 
-def test_legacy_and_malformed_records_are_misses_not_errors(tmp_path, caplog):
-    """Pre-#416 records (no model/input/cap binding) and malformed schema-2
-    records never hit and never raise; the file is left untouched."""
+def test_unschematized_and_malformed_records_are_misses_not_errors(tmp_path, caplog):
+    """Records without the current schema (no model/input/cap binding) and
+    malformed schema-2 records never hit and never raise; each is a skipped
+    line, and the file is left untouched."""
     chunk = _chunk()
     binding = _binding()
     good = binding.record(chunk, "Good gist.")
@@ -208,8 +209,7 @@ def test_legacy_and_malformed_records_are_misses_not_errors(tmp_path, caplog):
     before = path.read_text()
     with caplog.at_level("WARNING", logger="ingest"):
         assert ctx_mod.load_context_cache(path) == {}
-    assert "context_cache_legacy_records_ignored" in caplog.text
-    assert caplog.text.count("context_cache_skip_line") == len(bad)
+    assert caplog.text.count("context_cache_skip_line") == len(bad) + 1
     assert path.read_text() == before  # user's cache never rewritten
 
     # A valid record appended after the legacy/garbage still loads and hits.

@@ -270,7 +270,7 @@ def test_unreadable_file_neither_causes_nor_hides_collision(tmp_path):
 def test_nondry_collision_writes_nothing(tmp_path, monkeypatch):
     """The claimed path: a real (non-dry) run aborts in planning with zero
     upserts and zero deletes — the second writer never reaches its
-    delete_by_doc."""
+    refresh delete."""
 
     class _RecordingFake:
         def __init__(self):

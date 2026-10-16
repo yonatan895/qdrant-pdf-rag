@@ -559,24 +559,20 @@ class PackedExcerpt:
     truncation suffix included when cut). One list carries identity and text
     through planning and every verification trim round, so the manifest
     cannot drift from the rendered prompt (issue #364). `start`/`end` are
-    the explicit source offsets of the retained range (issue #632); `end`
-    None means a legacy prefix whose range derives from the body.
+    the explicit source offsets of the retained range (issue #632).
     `required_end` is the end of the requested entry inside the range
     (0 when none): a trim that would cut it away drops the excerpt."""
 
     index: int
     hit: SearchHit
     body: str
+    end: int
     truncated: bool = False
     start: int = 0
-    end: int | None = None
     required_end: int = 0
 
     def source_range(self) -> tuple[int, int]:
-        if self.end is not None:
-            return self.start, self.end
-        included = len(self.body) - (len(_TRUNCATED_SUFFIX) if self.truncated else 0)
-        return 0, max(0, included)
+        return self.start, self.end
 
     def render(self) -> tuple[str, str]:
         return _excerpt_header(self.index, self.hit), self.body
@@ -979,13 +975,9 @@ def _verify_trim_last(
     last = packed[-1]
     source = last.hit.text.strip()
     start, end = last.source_range()
-    if last.end is None:
-        # Legacy prefix excerpt: the body must start with its source prefix.
-        consistent = last.body[:end] == source[:end]
-    else:
-        consistent = 0 <= start <= end <= len(source) and last.body == _compose_body(
-            source, start, end
-        )
+    consistent = 0 <= start <= end <= len(source) and last.body == _compose_body(
+        source, start, end
+    )
     if not consistent:
         # Defensive: the body does not reproduce its recorded range (should
         # be impossible) — drop the excerpt entirely to keep the whole-unit

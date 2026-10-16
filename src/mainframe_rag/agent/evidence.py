@@ -419,7 +419,7 @@ class EvidenceService:
         request. An exact read re-resolves the build through its immutable
         aliases, so a build retired after validation is refused there, never
         read from a successor. Empty when the generation is not servable, has
-        no build binding (legacy/in-place generations never mint), or binds
+        no build binding, or binds
         another logical corpus. A chunk whose stored payload cannot form a
         complete envelope is skipped, never given a partial reference."""
         ids = list(dict.fromkeys(chunk_ids))

@@ -497,7 +497,6 @@ INTERNAL_REGISTRY=rag-kind.test:5000
 NAMESPACE=$KIND_NAMESPACE
 STORAGE_CLASS=standard
 IMAGE_SHA=$IMAGE_SHA
-VLLM_BASE_URL=https://rag-kind.test:8444
 EMBED_BASE_URL=https://rag-kind.test:8444/v1
 LLM_BASE_URL=https://rag-kind.test:8444/v1
 EMBED_MODEL=Qwen/Qwen3-Embedding-0.6B

@@ -391,7 +391,7 @@ def test_published_bundle_entry_uses_resolved_operator_values(tmp_path):
         'IMAGE_SHA=' + 'a' * 40 + '\n'
         'STORAGE_CLASS=local-path\nEMBED_MODEL=mock-embed\n'
         'EMBED_MODEL_REVISION="revision with spaces | and pipes"\n'
-        'DENSE_DIM=1024\nVLLM_BASE_URL=https://test-gateway:4000\n'
+        'DENSE_DIM=1024\nEMBED_BASE_URL=https://test-gateway:4000/v1\n'
         'CORPUS_PVC=corpus\nPULL_SECRET=rehearsal-pull\n'
     )
     (root / 'scripts/ci/chart_lifecycle.sh').write_text(

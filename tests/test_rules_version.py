@@ -162,10 +162,20 @@ def _settings():
 
 
 # ---------------------------------------------------------------- ingest gate
-def _seed_legacy_doc(fake, collection, doc_id, sha, rules_v, n=3):
-    """Materialize stale pre-361B points (sourceless payloads): the fake's
-    seeded sampling marker models the startup-gate sample only — doc-level
-    reads observe stored points, so stale-payload tests store real ones."""
+def _walked_source_rev(path) -> str:
+    from mainframe_rag.ingest.ibm_pdf import parse_pdf
+    from mainframe_rag.ingest.identity import source_rev_key
+
+    parsed = parse_pdf(path)
+    return source_rev_key(parsed.vendor, parsed.product, parsed.version, parsed.sha256)
+
+
+def _seed_stale_doc(fake, collection, doc_id, sha, rules_v, source_rev, n=3):
+    """Materialize stale-rules points of a current-format revision: the
+    fake's seeded sampling marker models the startup-gate sample only —
+    doc-level reads observe stored points, so stale-payload tests store
+    real ones. Points without a source revision are unsupported data and
+    refuse instead (test_ingest_revisions.py)."""
     from qdrant_client import models
 
     fake._points.setdefault(collection, []).extend([
@@ -173,8 +183,8 @@ def _seed_legacy_doc(fake, collection, doc_id, sha, rules_v, n=3):
             id=f"stale-{i}",
             vector={"dense": [0.1] * 256,
                     "bm25": models.SparseVector(indices=[1], values=[1.0])},
-            payload={"doc_id": doc_id, "sha256": sha, "rules_v": rules_v,
-                     "text": f"stale payload {i}"},
+            payload={"doc_id": doc_id, "sha256": sha, "source_rev": source_rev,
+                     "rules_v": rules_v, "text": f"stale payload {i}"},
         )
         for i in range(n)
     ])
@@ -189,7 +199,8 @@ def _main_collection():
 def _seed_current_manifest(fake) -> None:
     """Commit the current run contract into the fake's completions: the
     representation preflight passes, so tests below the gate (rules,
-    skips) exercise their claimed path instead of tripping legacy."""
+    skips) exercise their claimed path instead of the unversioned-target
+    refusal."""
     from mainframe_rag.config import Settings as _Settings
     from mainframe_rag.ingest.completion import completion_collection_name
     from mainframe_rag.ingest.representation import write_manifest
@@ -210,8 +221,10 @@ def test_reingest_flag_reextracts_matching_sha(tmp_path, synthetic_pdf, monkeypa
     monkeypatch.setenv("EMBED_MODE", "hash")
     monkeypatch.delenv("DENSE_DIM", raising=False)
     fake = _FakeQdrant(stored_sha=sha256_file(synthetic_pdf), stored_rules_v="0123456789abcdef")
-    _seed_legacy_doc(fake, _main_collection(), "SA22-0000-00",
-                     sha256_file(synthetic_pdf), "0123456789abcdef")
+    _seed_current_manifest(fake)
+    _seed_stale_doc(fake, _main_collection(), "SA22-0000-00",
+                    sha256_file(synthetic_pdf), "0123456789abcdef",
+                    _walked_source_rev(synthetic_pdf))
     monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
     rc = run_ingest.main([
         "--src", str(synthetic_pdf.parent),
@@ -254,18 +267,19 @@ def test_qdrant_skip_gates_on_rules_version(tmp_path, synthetic_pdf, monkeypatch
     sha = sha256_file(synthetic_pdf)
 
     # Mixed collection (startup sample reads current, the doc itself is
-    # legacy-stale — exactly the state a partially-interrupted stamp run
+    # rules-stale — exactly the state a partially-interrupted stamp run
     # leaves): NOT skipped — delete + re-upsert. The manifest matches the
-    # current contract (crashed-migration state, not pre-manifest legacy),
+    # current contract (crashed-migration state, not pre-manifest data),
     # so the representation preflight passes and the rules gate fires.
     fake = _FakeQdrant(stored_sha=sha, stored_rules_v="",
                        sample_rules_v=extraction_rules_version())
     _seed_current_manifest(fake)
-    _seed_legacy_doc(fake, _main_collection(), "SA22-0000-00", sha, "")
+    _seed_stale_doc(fake, _main_collection(), "SA22-0000-00", sha, "",
+                    _walked_source_rev(synthetic_pdf))
     # A current-rules point from another doc: the startup sample (limit 1,
     # no filter) must observe the mixed collection as current-gated.
-    _seed_legacy_doc(fake, _main_collection(), "OTHER-DOC", "f" * 64,
-                     extraction_rules_version())
+    _seed_stale_doc(fake, _main_collection(), "OTHER-DOC", "f" * 64,
+                    extraction_rules_version(), "|||" + "f" * 64)
     # Order matters: the gate samples the first stored point.
     fake._points[_main_collection()].reverse()
     monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)

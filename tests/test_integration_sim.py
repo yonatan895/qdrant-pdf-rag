@@ -736,26 +736,23 @@ def test_migration_scope_proof_blocks_unmarked_point_on_real_server(
         client.close()
 
 
-def test_legacy_verification_refuses_corrupt_points_on_real_server(
+def test_revision_less_point_refuses_without_deletion_on_real_server(
     qdrant_url, corpus, tmp_path, monkeypatch
 ):
-    """Issue #391 Q417-L1 on real Qdrant server: sourceless legacy points
-    fail cutover if chunk IDs, text digests, or rules do not match approved
-    evidence. Once verifiable digests are present, the bridge allows cutover."""
-    import hashlib
-
+    """Pre-revision data is unsupported (no legacy bridge): on a real server a
+    point without `source_rev` under a walked doc_id refuses the ordinary
+    re-run before cutover. The point survives byte-for-byte and the alias
+    does not move."""
     from qdrant_client import QdrantClient, models
 
     from mainframe_rag.config import HASH_EMBED_DIM, Settings
     from mainframe_rag.ingest import run_ingest
-    from mainframe_rag.ingest.inventory import load_inventory
     from mainframe_rag.ingest.qdrant_io import resolve_live_collection
     from mainframe_rag.ingest.rules_version import extraction_rules_version
 
     _drop_publish_fixture(qdrant_url)
     monkeypatch.setenv("INGEST_ALIAS_PUBLISH", "true")
-    monkeypatch.setenv("EMBED_MODEL_REVISION", "")
-    local = tmp_path / "legacy-corpus"
+    local = tmp_path / "revision-less-corpus"
     local.mkdir()
     for pdf in corpus.iterdir():
         shutil.copy(pdf, local / pdf.name)
@@ -774,16 +771,13 @@ def test_legacy_verification_refuses_corrupt_points_on_real_server(
     try:
         live, _ = resolve_live_collection(client, settings)
         assert live is not None
-        # The bridge concerns completed pre-build generations, not mutation of
-        # newly sealed content. Construct that format explicitly on real storage.
-        from tests.test_ingest_publish import _make_completed_legacy_fixture
-        _make_completed_legacy_fixture(client, live, PUBLISH_ALIAS)
-        rules_v = extraction_rules_version()
         point_id = "00000000-0000-0000-0000-000000000392"
-        legacy_doc_id = "SA22-7777-01"
-        legacy_sha = "0" * 64
-
-        # 1. Insert a corrupt sourceless legacy point: text in point will not match digest
+        payload = {
+            "doc_id": "SA22-7777-01",
+            "sha256": "0" * 64,
+            "rules_v": extraction_rules_version(),
+            "text": "pre-revision text",
+        }
         client.upsert(
             live,
             points=[
@@ -793,84 +787,23 @@ def test_legacy_verification_refuses_corrupt_points_on_real_server(
                         "dense": [0.0] * HASH_EMBED_DIM,
                         "bm25": models.SparseVector(indices=[0], values=[1.0]),
                     },
-                    payload={
-                        "doc_id": legacy_doc_id,
-                        "sha256": legacy_sha,
-                        "rules_v": rules_v,
-                        "text": "corrupt text",
-                    },
+                    payload=payload,
                 )
             ],
             wait=True,
         )
-
-        # Record approved legacy with digest for expected text "original text"
-        h_ids = hashlib.sha256(point_id.encode("utf-8") + b"\0").hexdigest()
-        h_content = hashlib.sha256(
-            point_id.encode("utf-8") + b"\0" + b"original text" + b"\0"
-        ).hexdigest()
-
-        inv = load_inventory(progress)
-        template = next(iter(inv.values()))
-        legacy_rec = template.model_copy(
-            update={
-                "path": f"legacy/{legacy_doc_id}.pdf",
-                "doc_id": legacy_doc_id,
-                "sha256": legacy_sha,
-                "source_rev": None,
-                "chunks": 1,
-                "chunk_ids_digest": h_ids,
-                "content_digest": h_content,
-                "rules_version": rules_v,
-            }
-        )
-        with open(progress, "a", encoding="utf-8") as f:
-            f.write(legacy_rec.model_dump_json() + "\n")
-
-        # Re-run publish: should refuse because content_digest does not match "corrupt text"
         previous = run_ingest._worker_qdrant
         if previous is not None:
             previous.close()
         monkeypatch.setattr(run_ingest, "_worker_qdrant", None)
         monkeypatch.setattr(run_ingest, "_worker_embedder", None)
 
-        with pytest.raises(RuntimeError, match="fail content/digest verification"):
+        with pytest.raises(RuntimeError, match="unmarked residue"):
             run_ingest.main(["--src", str(local), "--progress", str(progress), "--workers", "1"])
 
-        # 2. Repair the point so its payload text matches the approved content_digest
-        client.upsert(
-            live,
-            points=[
-                models.PointStruct(
-                    id=point_id,
-                    vector={
-                        "dense": [0.0] * HASH_EMBED_DIM,
-                        "bm25": models.SparseVector(indices=[0], values=[1.0]),
-                    },
-                    payload={
-                        "doc_id": legacy_doc_id,
-                        "sha256": legacy_sha,
-                        "rules_v": rules_v,
-                        "text": "original text",
-                    },
-                )
-            ],
-            wait=True,
-        )
-
-        previous = run_ingest._worker_qdrant
-        if previous is not None:
-            previous.close()
-        monkeypatch.setattr(run_ingest, "_worker_qdrant", None)
-        monkeypatch.setattr(run_ingest, "_worker_embedder", None)
-
-        # Re-run publish: should succeed now that legacy point is verified
-        assert (
-            run_ingest.main(["--src", str(local), "--progress", str(progress), "--workers", "1"])
-            == 0
-        )
-        live_after, _ = resolve_live_collection(client, settings)
-        assert live_after == live
+        assert resolve_live_collection(client, settings)[0] == live, "refusal moves no alias"
+        kept = client.retrieve(live, ids=[point_id], with_payload=True)
+        assert [point.payload for point in kept] == [payload], "unsupported data is never deleted"
     finally:
         client.close()
         _drop_publish_fixture(qdrant_url)

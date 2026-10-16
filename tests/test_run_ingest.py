@@ -736,10 +736,18 @@ def test_unmarked_searchable_point_blocks_migration_commit(tmp_path, synthetic_p
             payload={"doc_id": "SA99-0000-00", "rules_v": "pre-rp2", "source_rev": "rev-old"},
         )
     ]
+    # A versioned collection under contract rev-A: the rev-B run is an
+    # ordinary re-embed migration, not unversioned data.
+    from mainframe_rag.ingest.representation import STATE_COMMITTED, write_manifest
+    from mainframe_rag.ingest.rules_version import extraction_rules_version
+
+    monkeypatch.setenv("EMBED_MODEL_REVISION", "rev-A")
+    write_manifest(fake, f"{collection}__completions", Settings(_env_file=None),
+                   extraction_rules_version(), state=STATE_COMMITTED)
     corpus = tmp_path / "corpus"
     corpus.mkdir()
     # Publication needs a non-empty corpus; the walked doc is not the
-    # unmarked legacy point, which stays unknown data.
+    # unmarked point, which stays unknown data.
     import shutil
 
     shutil.copy(synthetic_pdf, corpus / synthetic_pdf.name)

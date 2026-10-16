@@ -414,6 +414,19 @@ class ServingGateFake:
         self.invalidations += 1
 
 
+def published_build(alias, physical, build_id="12345678-1234-4234-8234-123456789abc"):
+    """Immutable build aliases and the publication control record for one
+    published generation, in the shape the serving gate validates. Returns
+    (aliases, publications) to merge into an AliasQdrant."""
+    control = physical + "__completions"
+    data_alias = f"{alias}__build_{build_id}"
+    aliases = {data_alias: physical, data_alias + "__completions": control}
+    publication = {"record_type": "publication-metadata", "target_collection": control,
+                   "build_schema": 1, "build_id": build_id, "logical_alias": alias,
+                   "data_collection": physical, "gen_fp": "recipe", "corpus_fp": "corpus"}
+    return aliases, {control: publication}
+
+
 class AliasQdrant:
     """Async Qdrant double for the F4 gate: scripted aliases, physical
     collections, and per-completions-collection manifest payloads.

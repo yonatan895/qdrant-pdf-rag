@@ -36,7 +36,7 @@ def gateway_rendered(tmp_path):
     }
     path = tmp_path / "airgap.env"
     example = "\n".join(line for line in (ROOT / "airgap.env.example").read_text().splitlines()
-                        if not line.startswith(("VLLM_BASE_URL=", "EMBED_BASE_URL=", "LLM_BASE_URL=")))
+                        if not line.startswith(("EMBED_BASE_URL=", "LLM_BASE_URL=")))
     path.write_text(example
                     + "\n" + "\n".join(f"{key}={value}" for key, value in selected.items()) + "\n")
     result = subprocess.run(["sh", "scripts/airgap/pipeline.sh", "--skip-load"], cwd=tmp_path,

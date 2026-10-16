@@ -391,6 +391,24 @@ def require_attested_revision(settings: Settings) -> None:
         )
 
 
+def reject_unversioned_target(
+    client: QdrantReader, settings: Settings, completions_collection: str
+) -> None:
+    """Refuse a target holding points but no representation contract. Every
+    build declares its contract `pending` before the first point is written
+    (`begin_manifest`), so points without one predate the manifest: that
+    data is unsupported and is never migrated, even under `--reingest`."""
+    if read_manifest_record(client, completions_collection) is not None:
+        return
+    points, _ = client.scroll(settings.qdrant_collection, limit=1, with_payload=False)
+    if points:
+        raise RuntimeError(
+            f"collection {settings.qdrant_collection!r} predates the representation "
+            "manifest (stored points but no contract): this data is no longer "
+            "supported — build the corpus into a new collection."
+        )
+
+
 def check_ingest_compatible(
     client: QdrantReader,
     settings: Settings,
@@ -403,29 +421,22 @@ def check_ingest_compatible(
     proceeds (caller logs the re-evaluation note). Raises RuntimeError
     with the stable remediation otherwise:
     - unattested vllm revision → declare EMBED_MODEL_REVISION;
-    - legacy unversioned target → `--reingest` to attest-and-migrate;
+    - unversioned target (points, no contract) → unsupported, build a new
+      collection (`reject_unversioned_target`, which callers also run
+      under `--reingest`);
     - re-embed drift → `--reingest` to re-embed every doc.
-    Callers bypass under `--reingest` (the one deliberate migration step,
-    same override idiom as the #124 rules gate). Fresh forced builds skip
+    Callers bypass the drift checks under `--reingest` (the one deliberate
+    migration step, same override idiom as the #124 rules gate). Fresh forced builds skip
     nothing; the publisher's same-build retry path separately proves exact
     contract and target-bound document checkpoints before retaining work.
     Never recreates a collection, never downgrades modes."""
     require_attested_revision(settings)
     wanted = build_manifest(settings, rules_v)
     digest = digest_of(wanted)
+    reject_unversioned_target(client, settings, completions_collection)
     stored = read_manifest_record(client, completions_collection)
     if stored is None:
-        points, _ = client.scroll(
-            settings.qdrant_collection, limit=1, with_payload=False
-        )
-        if not points:
-            return digest, []  # empty target: the run commits its manifest
-        raise RuntimeError(
-            f"collection {settings.qdrant_collection!r} predates the representation "
-            "manifest (stored points but no contract — legacy unversioned state). "
-            "Re-ingest required: re-run with --reingest to attest-and-migrate "
-            "(never skip against unattributed vectors)."
-        )
+        return digest, []  # empty target: the run commits its manifest
     if stored.state != STATE_COMMITTED:
         raise RuntimeError(
             f"collection {settings.qdrant_collection!r} has an unfinished representation "
@@ -456,8 +467,8 @@ def rekey_manifest(
     never recomputes from current settings, or a drifted run would see its
     own wanted contract and sail through its preflight; carrying the state
     means a pending live cannot be laundered into a committed staging.
-    Returns False when the source carries no manifest (legacy live: the
-    inner preflight then reports legacy explicitly).
+    Returns False when the source carries no manifest (an unversioned live:
+    the inner preflight then refuses it explicitly).
 
     The vector projection is explicit (issue #391 F5): `retrieve` defaults
     to `with_vectors=False`, so relying on the client default made this
@@ -577,7 +588,7 @@ async def resolve_serving_generation(
     )
     candidate = target if target is not None else alias
     exists = bool(await async_client.collection_exists(candidate))
-    physical, _legacy = live_collection_from(alias, target, exists)
+    physical, _layout = live_collection_from(alias, target, exists)
     if physical is None:
         return None, "empty", []
     bound = settings.model_copy(update={"qdrant_collection": physical})

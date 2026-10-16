@@ -40,6 +40,7 @@ from mainframe_rag.config import Settings, load_settings
 from mainframe_rag.ingest.bounds import require_document_within, require_embed_inputs_within
 from mainframe_rag.ingest.build import (
     BuildBinding,
+    UnboundGenerationError,
     build_phase,
     require_published_binding,
 )
@@ -100,7 +101,6 @@ from mainframe_rag.ingest.publish import (
     generation_fingerprint,
     plan_approved_removals,
     read_build_binding,
-    read_publication_metadata,
     read_publish_state,
     resolve_publish_staging,
     verify_all_complete,
@@ -112,11 +112,9 @@ from mainframe_rag.ingest.publish import (
     write_publish_state,
 )
 from mainframe_rag.ingest.qdrant_io import (
-    delete_by_doc,
     delete_by_revision,
     ensure_collection,
     resolve_live_collection,
-    retain_copy,
     set_bulk_indexing,
     stored_rules_version,
     swap_alias_to,
@@ -131,6 +129,7 @@ from mainframe_rag.ingest.representation import (
     commit_manifest,
     manifest_digest,
     read_manifest_record,
+    reject_unversioned_target,
     require_attested_revision,
 )
 from mainframe_rag.ingest.rules_version import extraction_rules_version
@@ -525,8 +524,8 @@ def _upsert_one(
         ):
             return "skipped", round(time.perf_counter() - started, 3)
         # Revision delete plan (issue #361): computed BEFORE any delete —
-        # raises on unattributable residue instead of guessing.
-        rev_deletes, legacy_delete = plan_refresh_deletes(
+        # raises on unsupported revision-less data instead of guessing.
+        rev_deletes = plan_refresh_deletes(
             client, settings, parsed.doc_id, revision, lineage_rev
         )
         # Invalidate this revision's markers (plus the lineage revision's
@@ -547,15 +546,12 @@ def _upsert_one(
                     settings,
                     parsed.doc_id,
                     source_rev=scope,
-                    include_legacy=legacy_delete,
                 )
         except UnexpectedResponse as exc:
             if exc.status_code != 404:
                 raise
         for stale_rev in sorted(rev_deletes):
             delete_by_revision(client, settings, stale_rev)
-        if legacy_delete:
-            delete_by_doc(client, settings, parsed.doc_id)
         upserted = upsert_chunks(client, settings, parsed, chunks, vectors, contexts)
         expected, ids_digest, content_digest = expected_digests(chunks)
         if upserted != expected:
@@ -940,17 +936,16 @@ def _preflight(
     # collection and desync the message_ids prefetch filter (the #120
     # failure mode). Fail closed with the remediation; --reingest is
     # the deliberate override that re-extracts every doc. Empty
-    # collection (None) needs no gate; legacy points (empty string)
-    # are a mismatch like any other version.
+    # collection (None) needs no gate. Points without rules_v predate
+    # rules versioning: unsupported, refused even under --reingest.
     stored_v = stored_rules_version(client, settings)
+    if stored_v == "":
+        raise RuntimeError(
+            f"collection {settings.qdrant_collection!r} predates extraction-rules "
+            "versioning (no rules_v on its points): this data is no longer supported — "
+            "build the corpus into a new collection."
+        )
     if stored_v is not None and stored_v != rules_v and not force_reingest:
-        if stored_v == "":
-            raise RuntimeError(
-                f"collection {settings.qdrant_collection!r} predates extraction-rules "
-                f"versioning (no rules_v on its points; this tree computes {rules_v!r}). "
-                "Re-ingest required: re-run with --reingest to stamp every doc "
-                "(never serve mixed-rule payloads)."
-            )
         raise RuntimeError(
             f"extraction-rules mismatch: collection {settings.qdrant_collection!r} holds "
             f"payloads extracted under rules {stored_v!r}, this tree computes {rules_v!r}. "
@@ -961,6 +956,9 @@ def _preflight(
     # bypasses rejection of stored data, never the requirement to name
     # the representation it writes.
     require_attested_revision(settings)
+    # Unversioned data (points, no contract) is refused even under
+    # --reingest: it is unsupported, never migrated.
+    reject_unversioned_target(client, settings, completion_collection_name(settings))
     # Force authorizes the migration; it must not discard this build's
     # durable document checkpoints on a retry. The publisher grants this
     # path only under its lock, for matching sidecar inputs and reused
@@ -1416,7 +1414,6 @@ def _commit_migration_representation(
         src_labels,
         pending_removals=pending_removals,
         retire_plan=retire_plan,
-        allow_approved_legacy=False,
     )
     if problems:
         raise RuntimeError(
@@ -1560,8 +1557,7 @@ def _run_publish_locked(
 @dataclass(frozen=True)
 class _Resolution:
     """What publication resolved before its first write (issue #583 S6):
-    the live generation and whether a legacy physical squats on the alias,
-    the input fingerprints, the bound publish state and live build binding,
+    the live generation, the input fingerprints, the bound publish state and live build binding,
     the observed aliases, the authorized removal plan and the staging
     target (`resumed` when an existing recorded build is continued). Every
     refusal while resolving happens before any storage, sidecar or
@@ -1569,7 +1565,6 @@ class _Resolution:
 
     labels: str
     live: str | None
-    legacy: bool
     gen_fp: str
     corp_fp: str
     state: dict | None
@@ -1611,11 +1606,10 @@ def _resolve_publication(
         )
     observed_aliases = {a.alias_name: a.collection_name for a in client.get_aliases().aliases}
     if legacy:
-        # A physical collection that carries the configured name is a legacy
-        # layout only when nothing identifies it as a build: a published or
-        # retained generation targeted by name must never be "migrated",
-        # which would copy it aside and delete the collection its logical
-        # alias still serves.
+        # A physical collection carries the configured name and no alias
+        # names it. A published or retained generation addressed by its
+        # physical name is an operator error; anything else is the
+        # unsupported pre-publication layout. Neither is migrated.
         assert live is not None
         targeted_by = sorted(
             name for name, target in observed_aliases.items()
@@ -1624,14 +1618,24 @@ def _resolve_publication(
         if targeted_by or read_build_binding(client, live + "__completions") is not None:
             raise RuntimeError(
                 f"{alias!r} is a published or retained generation (aliased by "
-                f"{targeted_by}), not a legacy layout: publish through its logical "
-                "alias, never by a generation's physical name"
+                f"{targeted_by}): publish through its logical alias, never by a "
+                "generation's physical name"
             )
+        raise RuntimeError(
+            f"{alias!r} is a physical collection with no publication alias: the "
+            "pre-publication layout is no longer supported — build the corpus into "
+            "a new collection."
+        )
     live_binding = None
     if live is not None:
         live_binding = read_build_binding(client, live + "__completions")
         try:
             require_published_binding(live_binding, alias, live, observed_aliases)
+        except UnboundGenerationError as exc:
+            raise RuntimeError(
+                f"live generation {live!r} has no build binding: pre-build publications "
+                "are no longer supported — build the corpus into a new collection."
+            ) from exc
         except ValueError as exc:
             raise RuntimeError("live build controls or immutable aliases are inconsistent") from exc
         if state is not None and state["staging"] == live:
@@ -1705,7 +1709,6 @@ def _resolve_publication(
     return _Resolution(
         labels=labels,
         live=live,
-        legacy=legacy,
         gen_fp=gen_fp,
         corp_fp=corp_fp,
         state=state,
@@ -1741,8 +1744,8 @@ def _certify_live(
     # query prefix keeps the same staging name — and is never a re-embed
     # trigger) is acknowledged, and it raises on a pending contract
     # (interrupted run of the same representation). Preserve the bound
-    # sidecar and uncommitted retirement inventory until every check and
-    # any receipt backfill succeeds: failed certification must retain the
+    # sidecar and uncommitted retirement inventory until every check
+    # succeeds: failed certification must retain the
     # exact build and removal authorization needed for another retry.
     _, record_drift = check_ingest_compatible(
         client,
@@ -1801,26 +1804,14 @@ def _recertify_live(
     rules_v: str,
 ) -> int:
     """The resolved generation already serves: re-verify it read-only
-    (_certify_live), backfill its publication receipt when a pre-build
-    generation has none, then finish the bound retirement inventory and
-    clear the sidecar."""
-    live, state, live_binding = res.live, res.state, res.live_binding
-    gen_fp, corp_fp = res.gen_fp, res.corp_fp
+    (_certify_live), then finish the bound retirement inventory and clear
+    the sidecar."""
+    live, state = res.live, res.state
     alias = settings.qdrant_collection
     staging_settings = settings.model_copy(update={"qdrant_collection": res.staging})
     _certify_live(
         res, client, progress, settings, staging_settings, prewalked=prewalked, rules_v=rules_v
     )
-    if live_binding is None and read_publication_metadata(
-        client, completion_collection_name(staging_settings)
-    ) is None:
-        write_publication_metadata(
-            client,
-            completion_collection_name(staging_settings),
-            staging_settings,
-            gen_fp=gen_fp,
-            corpus_fp=corp_fp,
-        )
     if state and state.get("retire_plan"):
         commit_retired_inventory(progress, load_inventory(progress), state["retire_plan"])
     if clear_publish_state(progress, alias):
@@ -1860,7 +1851,7 @@ def _build_and_cut_over(
     """A distinct staging generation: bind and record the build, prepare
     and build staging, apply approved removals, verify, then cut the alias
     over and finish the retirement inventory."""
-    live, legacy, state = res.live, res.legacy, res.state
+    live, state = res.live, res.state
     labels, retire_plan, gen_fp, corp_fp = res.labels, res.retire_plan, res.gen_fp, res.corp_fp
     staging, resumed, observed_aliases = res.staging, res.resumed, res.observed_aliases
     retired = frozenset(retire_plan)
@@ -1892,10 +1883,7 @@ def _build_and_cut_over(
                 raise ValueError("candidate was already published")
         except ValueError as exc:
             raise RuntimeError("candidate immutable aliases are inconsistent; refusing mutation") from exc
-    # A sealed legacy migration may have cleared the old physical name before
-    # its atomic alias operation. The verified pair can finish without rebuild.
-    if (state is not None and state["previous"] != live
-            and not (sealed and state["previous"] == alias and live is None)):
+    if state is not None and state["previous"] != live:
         raise RuntimeError("live target no longer matches the recorded build predecessor")
     write_publish_state(
         progress,
@@ -2022,25 +2010,9 @@ def _build_and_cut_over(
         )
     if not sealed and not verify_publication_seal(client, completion_collection_name(staging_settings)):
         raise RuntimeError("new publication lacks its content seal")
-    previous = live
-    migrated = None
-    if legacy and live is not None:
-        # A legacy physical squats on the alias name: keep a verified copy as
-        # the retained rollback generation, then clear the name (brief
-        # maintenance window, documented in docs/ingest.md). The copy goes
-        # through the points API, so distributed layouts migrate too (issue
-        # #360); a retry of this build reuses its verified copy.
-        retained = f"{live}__legacy_{build_id[:8]}"
-        retain_copy(client, settings, live, retained)
-        log.info(json.dumps({"action": "publish_migrate", "legacy": live, "retained": retained}))
-        client.delete_collection(live)
-        migrated = live
-        previous = None
-    summary = swap_alias_to(client, settings, staging, previous, build_id=build_id)
+    summary = swap_alias_to(client, settings, staging, live, build_id=build_id)
     summary["docs"] = str(len(prewalked))
     summary["staging_mode"] = mode
-    if migrated is not None:
-        summary["migrated_legacy"] = migrated
     if retire_plan:
         commit_retired_inventory(progress, load_inventory(progress), retire_plan)
     clear_publish_state(progress, alias)

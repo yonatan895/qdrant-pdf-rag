@@ -358,7 +358,7 @@ Green status and point count alone do not prove a usable recovery. Before removi
 the disposable restore target, compare actual stored payloads/vectors and control
 records with the backup evidence, validate the representation and alias binding,
 and prove the next ordinary search/ingest operation. A data-only historical backup
-may remain legacy and require the documented source migration. Stream large
+is unsupported legacy data that serving refuses; build the corpus into a new collection. Stream large
 snapshot downloads/uploads; do not load a multi-gigabyte snapshot into Python RAM
 using the small synthetic CI helper. Re-snapshot after any ingest that must survive.
 

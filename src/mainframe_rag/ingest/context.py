@@ -215,15 +215,14 @@ def _record_key(obj: Any) -> tuple[str, str] | None:
 def load_context_cache(path: Path) -> dict[str, str]:
     """Last-wins merge of the sidecar JSONL. A corrupt line is skipped with a
     warning and regenerated on demand — the cache is disposable, failing a
-    whole ingest over one bad line would be the wrong tradeoff. Legacy
-    (pre-schema-2) records are counted and skipped: they cannot prove which
-    model, input or cap produced them, so they are misses, left on disk."""
+    whole ingest over one bad line would be the wrong tradeoff. A record
+    without the current schema cannot prove which model, input or cap produced
+    it, so it is a skipped line and a miss, left on disk."""
     entries: dict[str, str] = {}
     try:
         raw = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return entries
-    legacy = 0
     for lineno, line in enumerate(raw.splitlines(), 1):
         line = line.strip()
         if not line:
@@ -232,13 +231,6 @@ def load_context_cache(path: Path) -> dict[str, str]:
             obj = json.loads(line)
         except ValueError:
             obj = None
-        if (
-            isinstance(obj, dict)
-            and "schema" not in obj
-            and {"v", "doc_sha256", "chunk_id"} <= obj.keys()
-        ):
-            legacy += 1
-            continue
         parsed = _record_key(obj)
         if parsed is None:
             log.warning(
@@ -252,16 +244,6 @@ def load_context_cache(path: Path) -> dict[str, str]:
             )
             continue
         entries[parsed[0]] = parsed[1]
-    if legacy:
-        log.warning(
-            json.dumps(
-                {
-                    "action": "context_cache_legacy_records_ignored",
-                    "path": str(path),
-                    "count": legacy,
-                }
-            )
-        )
     return entries
 
 

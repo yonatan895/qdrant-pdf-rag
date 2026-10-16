@@ -42,7 +42,7 @@ except Exception as e:
     sys.exit(1)
 PYEOF
 then
-    die "/healthz probe did not report ok — check the printed body: representation reembed_required/legacy/pending needs --reingest, unknown means the store is unreachable, otherwise Qdrant/embedder connectivity"
+    die "/healthz probe did not report ok — check the printed body: representation reembed_required/pending needs --reingest, legacy needs a new collection (unsupported stored data), unknown means the store is unreachable, otherwise Qdrant/embedder connectivity"
 fi
 
 # exit 3 from the pod = empty result = nothing ingested yet (skip, not fail).

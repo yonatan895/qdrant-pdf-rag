@@ -670,13 +670,13 @@ the site explicitly enables it:
 
 All model IDs below may be platform aliases. `GATEWAY_BASE_URL` supplies missing
 per-operation API bases. With `GATEWAY_API_KEY_SECRET_KEY` set, that shared data
-key replaces every per-leg key named in the table; leaving it unset preserves
-legacy Secret layouts.
+key replaces every per-leg key named in the table; leaving it unset keeps the
+default per-leg keys.
 
 | Role | URL key | Model key | Notes |
 |---|---|---|---|
 | Reasoning (answer, chat and console) | `LLM_BASE_URL` | `LLM_MODEL_REASONING` | Empty model = answers stay disabled. Raise `LLM_MAX_MODEL_LEN` past the 4096 default to the served context (tokenizer uses the server `/tokenize`, estimator fallback otherwise). Auth: `llm-api-key` from the `GATEWAY_API_KEY_SECRET` Secret (unset = keyless). |
-| Embed (`/v1/search`, ingest) | `EMBED_BASE_URL` (gateway first, then `VLLM_BASE_URL` + `/v1`) | `EMBED_MODEL` + `DENSE_DIM` + `EMBED_MODEL_REVISION` | `DENSE_DIM` is required and fail-closed: it must equal the served native dim (4096 for Qwen3-Embedding-8B). Collections are created at that width; a mismatch against an existing collection refuses with `DimMismatchError`. `EMBED_MODEL_REVISION` is the operator-declared immutable model/config revision (a gateway alias is mutable and a dimension is not an identity): blank/whitespace-only values fail pre-flight and refuse agent/ingest startup, and a revision change requires a deliberate `--reingest` migration. Auth: `embed-api-key` from the same Secret; the ingest Job reads it too. |
+| Embed (`/v1/search`, ingest) | `EMBED_BASE_URL` (defaults to `GATEWAY_BASE_URL`) | `EMBED_MODEL` + `DENSE_DIM` + `EMBED_MODEL_REVISION` | `DENSE_DIM` is required and fail-closed: it must equal the served native dim (4096 for Qwen3-Embedding-8B). Collections are created at that width; a mismatch against an existing collection refuses with `DimMismatchError`. `EMBED_MODEL_REVISION` is the operator-declared immutable model/config revision (a gateway alias is mutable and a dimension is not an identity): blank/whitespace-only values fail pre-flight and refuse agent/ingest startup, and a revision change requires a deliberate `--reingest` migration. Auth: `embed-api-key` from the same Secret; the ingest Job reads it too. |
 | Rerank (optional, default off) | `RERANK_BASE_URL` (defaults to `GATEWAY_BASE_URL`, no embed fallback) | `RERANK_MODEL` | Served via a vLLM pooling server (`--runner pooling`, `/v1/score`; TEI `/v1/rerank` fallback). Use the platform gateway rerank leg and its model ID; do not configure a direct-backend consumer shortcut. Lifespan logs a loud warning (never a refusal) when the endpoint is unreachable at startup. Auth: `rerank-api-key` from the same Secret. Leg order: run `probe_gateway.py` below to decide — `score_first` whenever the score leg answers (even on a gateway exposing both legs), `rerank_first` only when the score leg is unavailable. |
 
 Set the namespace to the same value chosen in `airgap.env` and create it if the
@@ -1079,8 +1079,7 @@ The current recipe differs from older HTTP/direct-mock examples:
 
 1. A digest-pinned registry uses TLS, bcrypt authentication and explicit node
    trust. The loader's protected auth file supplies the Kubernetes pull Secret.
-2. Both `VLLM_BASE_URL` and `EMBED_BASE_URL`/`LLM_BASE_URL` point through the
-   real TLS test gateway. `scripts/ci/deploy_test_gateway.sh` owns the test
+2. `EMBED_BASE_URL`/`LLM_BASE_URL` point through the real TLS test gateway. `scripts/ci/deploy_test_gateway.sh` owns the test
    LiteLLM/PostgreSQL deployment, CA and virtual-key Secrets.
 3. Only model computation uses `scripts/mock_vllm.py`, mounted from the fresh
    bundle's checkout. Set `MOCK_DIM=1024`, `EMBED_MODEL=mock-embed`,
@@ -1224,7 +1223,7 @@ Without an installed console script use `python -m mainframe_rag.ops ...`
 | **PVC Multi-Attach Error** | `job/ingest` fails with `Multi-Attach error for volume` on corpus PVC | Ensure any previous writer pod has released the PVC, or use a ReadOnlyMany volume. |
 | **Qdrant P2P CrashLoop** | Pod `qdrant-0` fails with `No such file or directory` looking for `cert.pem` | Ensure `config.cluster.p2p.enable_tls: false` in `values.yaml` (gossip is plaintext on CNI without `./tls/cert.pem`). |
 | **K8s Manifest Integer/Boolean Error** | `Invalid value: "string", expected integer/boolean` | Ensure numeric/boolean env vars (`DENSE_DIM`, `INGEST_WORKERS`, `RERANK_ENABLED`) are explicitly quoted in rendered manifests. |
-| **Degraded `/healthz` Smoke Failure** | `sh scripts/tools/run-task.sh airgap:smoke` exits 1 with `FAIL: /healthz probe did not report ok` | Pre-flight probe failed closed (non-`ok` body or non-200). Check Qdrant and vLLM connectivity, then the `representation` field: `reembed_required`/`legacy`/`pending` needs `--reingest`; `unknown` means the metadata store is unreachable. Requests refuse with `503 representation_unavailable` while this holds. |
+| **Degraded `/healthz` Smoke Failure** | `sh scripts/tools/run-task.sh airgap:smoke` exits 1 with `FAIL: /healthz probe did not report ok` | Pre-flight probe failed closed (non-`ok` body or non-200). Check Qdrant and vLLM connectivity, then the `representation` field: `reembed_required`/`pending` needs `--reingest`, `legacy` needs a new collection (unsupported stored data); `unknown` means the metadata store is unreachable. Requests refuse with `503 representation_unavailable` while this holds. |
 | **Qdrant 401 After Reinstall** | `/v1/search` fails with `401 Invalid API key or JWT` after Qdrant was reinstalled or re-`helm upgrade`d | The chart regenerates the `<release>-apikey` secret on reinstall while running agent pods keep the old key in env. Roll the agent: `kubectl -n <ns> rollout restart deploy/rag-agent` and wait for rollout before smoking again. |
 | **Stale dist/ MANIFEST** | `airgap:validate` / `airgap:deploy` / `airgap:ingest` / `airgap:dryrun` fail with `IMAGE_SHA=<sha> does not match packed MANIFEST sha` | `dist/` is gitignored build output that persists across checkouts — the MANIFEST inside is from an older pack (only `pack` regenerates it; the other steps just read it). Repack at the current HEAD, or clear the stale `dist/` before re-running. |
 | **Checkout/manifest mismatch** | `airgap:validate` / `airgap:deploy` / `airgap:ingest` / `airgap:load` fail with `executing checkout HEAD=<sha> does not match the packed MANIFEST sha` | The scripts run from a different checkout than the packed bundle (e.g. old code with a new `dist/`, or `IMAGE_SHA` overridden to the new SHA while old code executes). Run from the approved bundle checkout — overriding `IMAGE_SHA` alone never changes which code executes. Skipped in `AIRGAP_DRYRUN=1` previews and when no manifest is reachable (connected development). |
@@ -1315,9 +1314,8 @@ on three distinct peers again.
   distributed-restore or uninterrupted-HA promise is implied.
 - Update publications over a distributed (multi-shard or replicated) live
   generation prepare staging by an exact points-API copy, never a snapshot,
-  and a legacy layout (a physical collection squatting on the alias name)
-  is migrated by copying it into the retained `<alias>__legacy_<build>`
-  generation before it is removed (`deploy.md#distributed-recovery`). The site qualification steps and the
+  and a pre-publication layout (a physical collection squatting on the alias
+  name) is refused, never migrated (`deploy.md#distributed-recovery`). The site qualification steps and the
   sizing/HA-scope decision are in `deploy.md#site-qualification` and
   `deploy.md#sizing-note`.
 - Loss of publisher scratch state is not repaired by Qdrant replication:

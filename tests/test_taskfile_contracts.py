@@ -773,11 +773,10 @@ class TaskContractsTests(unittest.TestCase):
         argv = self.pip_calls()[0]["argv"]
         self.assertEqual(argv[argv.index("--baseline") + 1], "c.json")
 
-    def test_local_acceptance_and_repair_dispatch_exact_arguments(self):
+    def test_local_acceptance_dispatches_exact_arguments(self):
         self.prepare_controlled_runner()
         self.make_venv_fake()
-        for task, prefix in (("local:check", ["scripts/check_live.py"]),
-                             ("local:repair-staging", ["-m", "mainframe_rag.ingest.repair"])):
+        for task, prefix in (("local:check", ["scripts/check_live.py"]),):
             self.log.unlink(missing_ok=True)
             literal = "/private/a space;$(touch SENTINEL).json"
             result = self.run_controlled(task, "--", "--report", literal,
