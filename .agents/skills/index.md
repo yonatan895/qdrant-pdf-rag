@@ -13,6 +13,18 @@ owns their source pin, license and allowlist.
 - [tdd](tdd/SKILL.md): one behavior at a time through approved testing interfaces.
 - [codebase-design](codebase-design/SKILL.md): module interfaces, dependency seams and testability.
 
+## Measurement, impact and lifecycle
+
+These repository-owned entry points link unchanged upstream `pstack` references
+and state local compatibility rules; [provenance](../pstack-skills-provenance.md)
+owns their source pin, license and allowlist.
+
+- [benchmark-checklist](benchmark-checklist/SKILL.md): vet a measured performance number before reporting it.
+- [principle-explain-the-number](principle-explain-the-number/SKILL.md): name the limiter behind a perf or eval number.
+- [blast-radius](blast-radius/SKILL.md): breakage beyond the diff, with the safety fact proven by running code.
+- [principle-attack-the-premise](principle-attack-the-premise/SKILL.md): test the shared premise after repeated failed fixes.
+- [principle-make-operations-idempotent](principle-make-operations-idempotent/SKILL.md): converge after repeats, crashes and retries.
+
 ## Qdrant operations
 
 These directories are verbatim upstream content from `qdrant/skills`, pinned in

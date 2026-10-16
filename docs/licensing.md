@@ -123,8 +123,8 @@ then `pymupdf` stays `pending-owner-decision` and `check --release` fails.
 3. The bundle carries `THIRD-PARTY-NOTICES.txt` (signed member in `SHA256SUMS`,
    required by `bootstrap.sh`, copied to `dist/`): the license/class/status of every
    component and wheel, the open owner decisions, the approval state, and the full
-   texts of the project LICENSE, the Qdrant chart LICENSE, htmx, the Qdrant and
-   Matt Pocock skills licenses and notices, and Task (`task-LICENSE`). It is
+   texts of the project LICENSE, the Qdrant chart LICENSE, htmx, the Qdrant,
+   Matt Pocock and pstack skills licenses and notices, and Task (`task-LICENSE`). It is
    deterministic and readable without any tool beyond a text viewer.
 4. Python license texts travel inside each image (`<dist>.dist-info`), not in the
    notices file. Pack-time verification of license files inside the actual image
