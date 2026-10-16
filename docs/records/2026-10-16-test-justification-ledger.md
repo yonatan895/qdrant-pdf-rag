@@ -3091,23 +3091,30 @@ This is a snapshot, not a working rule. New or changed tests justify themselves 
 
 ## Addendum: guarantee restoration after #770
 
-#770 removed the only unit coverage of some lines in `src/` and `scripts/`. A follow-up
-restored 73 mutation-verified collected items. Each new test failed when the line it protects was
-broken. All 874 lines whose unit coverage #770 removed are accounted for at the restoration head:
-299 are covered by unit tests again, 277 were measured executing in the sim, load or HA lanes
-(coverage with subprocess and SIGTERM capture), and 298 are justified below. No line is unaccounted for.
+#770 removed the only unit coverage of 874 lines in `src/` and `scripts/`. The follow-up restored 73
+collected items, each shown to fail when the line it protects is mutated. At the restoration head the
+874 lines are accounted for as follows:
 
-| Lines | Decision | Reason or where it is proven |
+| Status | Lines | Evidence |
+|---|---:|---|
+| Unit-covered again | 299 | Full unit suite under coverage |
+| Executed by a product-path lane | 277 | Sim, load and HA lanes under coverage, with subprocess and SIGTERM capture: all 31 `qdrant_cluster` HA lines, 3 `eval/load`, 127 `mock_vllm`, 85 `mcp/mock`, 30 `init_mock_zos` (and `quality.py:47` from a targeted unit run) |
+| Not executed by any measured run | 298 | Traced below |
+
+The 298 lines were traced to the 43 base (`e272663`) tests that executed them. The trace ran those base
+test files with per-test coverage contexts. Each line below is either outside any product guarantee, or
+its guarantee has a current owner shown to catch the failure.
+
+| Lines | Only base tests that ran them | Decision and evidence |
 |---|---|---|
-| `scripts/mock_vllm.py` (165), `src/mainframe_rag/mcp/mock.py` (112), `scripts/init_mock_zos.py` (30) | test tooling | Stand-ins for the model server and z/OS. Measured in the sim and load lanes: 127, 85 and 30 of these lines execute; the remaining 38 and 27 are mock features no measured lane uses. They are exercised by the sim lane (`tests/test_integration_sim.py`, `tests/test_mcp_sim.py`), the load lane, agent-probes and the e2e kind lanes, all of which fail if a stand-in misbehaves. Production refusal of `MCP_MOCK_DIR` is the hygiene gate in `tests/test_mcp_agent.py`. |
-| `scripts/build_golden_corpus.py` (188) | owning boundary elsewhere | Offline re-freeze builder. Its committed output is held by `tests/test_eval_gate.py::test_repo_golden_set_is_sha_pinned` and `::test_repo_golden_rows_opt_into_acceptance_states`. |
-| `scripts/qdrant_cluster.py` 50-52, 67-68, 73, 89-95, 202-236 | HA lane | Container start/stop, port and image plumbing; all 31 lines measured executing in `tests/test_ha_cluster.py` (11/11). The readiness, placement and exit-code helpers have unit tests again. |
-| `src/mainframe_rag/eval/load.py` 144, 165-166 | load lane | Stage aggregation, measured executing in the load lane and asserted by `tests/test_load_tier.py::test_search_load_has_zero_errors_and_full_timings`. |
-| `src/mainframe_rag/eval/load.py` 71-73 | no guarantee | `nvidia-smi` absent fallback; the VRAM figure is informational. |
-| `src/mainframe_rag/eval/answers.py` 192-193 | no guarantee | argparse already maps the bare `ValueError` to the same exit 2; only message text differs. |
-| `src/mainframe_rag/eval/chat.py` 254-278, `src/mainframe_rag/eval/performance.py` 147, `scripts/query_demo.py` 52-85 | no guarantee | Human-readable layout that no caller or gate parses. The machine contracts (JSON output, HTML escaping, verdicts) are tested. |
-| `src/mainframe_rag/eval/retrieval.py` 312-313 | no guarantee | Intermediate dict nodes for nested report keys; every caller passes flat keys. |
-| `src/mainframe_rag/serve/profiles.py` 205 | no guarantee | `list_profiles` is re-exported by `serve/__init__.py` but has no in-repo caller; it returns `sorted(PROFILES)`. |
-| `scripts/review_tooling.py` 254-263 | no guarantee | Advisory test-focus text for an LLM prompt; no verdict or exit code reads it. |
-| `scripts/verify_golden.py` 161, 171 | no guarantee | WARN lines; the exit code depends only on failures. |
-| `scripts/colab_runtime.py` 865 | no guarantee | Redundant type guard: the next statement raises the same `TypeError`, so it is an equivalent mutant. |
+| `scripts/build_golden_corpus.py` (188) | `test_eval_gate::test_expected_state_follows_behavior_and_overrides` | Offline re-freeze builder; the guarantee is its committed output. A simulated re-freeze by a broken builder (abstain rows authored `accepted`) fails `tests/test_eval_gate.py::test_repo_golden_rows_opt_into_acceptance_states` even after the sha pin is re-recorded, and fails `::test_repo_golden_set_is_sha_pinned` when it is not. |
+| `scripts/mock_vllm.py` (38): fault-injection branches, 404/400 on bad requests, invalid-knob refusals, jitter, fallback text | `test_mock_vllm.*`, `test_mock_realism.*` (testing the test) | Mock behavior. The fault branches are verified by the e2e gateway fault lanes: `scripts/ci/gateway_faults.sh` requires each injected fault to fail the probe, so a mock that stopped injecting would fail that lane. Its contract is pinned by `tests/test_ci_gateway.py::test_fault_lane_requires_contract_failure_and_recovery`. `MOCK_JITTER_MS` has no user anywhere in the repository. The product client tests that used the mock as a backdrop (`test_httpx_llm_client_*`) are owned by `tests/test_stream_truncation.py` (`test_v1_chat_real_client_error_frame_is_incomplete_no_success_chunk`, `test_v1_answer_real_client_missing_finish_both_legs_is_502`, `test_chat_stream_failure_after_content_raises_without_replay`). |
+| `src/mainframe_rag/mcp/mock.py` (27): NLST/member/USS reads and their 550 errors | `test_mcp_mock.*` (testing the test) | Fixture backend for local MCP use. The product bridge's dataset, member and spool handling and its error mapping are owned by `tests/test_mcp_ftp_bridge.py` against `FakeFTP`. |
+| `src/mainframe_rag/eval/answers.py` 192-193 | `test_eval_answers::test_http_answer_eval_rejects_invalid_timeout_before_io` | Equivalent: with the `try/except` removed, that base test still passes 6/6, because argparse maps the bare `ValueError` to the same usage exit. |
+| `scripts/colab_runtime.py` 865 | `test_colab_runtime::test_gpu_startup_uses_exact_argv_and_warms_reasoning_before_embedding` | Equivalent: with the type guard removed, that base test still passes 61/61, because the next statement raises the same `TypeError`. |
+| `src/mainframe_rag/eval/retrieval.py` 312-313 | `test_eval_gate::test_get_and_set_round_trip` | Dead code: `eval/retrieval._set` has no caller (`scripts/benchmark.py` defines and tests its own `_set`). |
+| `scripts/query_demo.py` 52-85, `src/mainframe_rag/eval/chat.py` 254-278, `src/mainframe_rag/eval/performance.py` 147 | `test_query_demo::test_render_query_text`/`::test_format_text_hit`, `test_eval_chat::test_summary_markdown_names_both_arms_and_the_decision_rule`, `test_harness_l3::test_summary_markdown_renders_tables_and_vram` | Human-readable layout: the only consumers print it or write a step summary. Verdicts and machine output (JSON, `gate_verdict_l3`, HTML escaping) are tested. |
+| `scripts/review_tooling.py` 254-263 | `test_review_tooling::TestCandidateRuntimeManifest::test_test_focus_profile_resolution`, `::test_manifest_dirty_tree_flag` | Advisory `test_focus` string, consumed only as prompt text in `.github/workflows/opencode.yml`; no verdict or exit code reads it. |
+| `scripts/verify_golden.py` 161, 171 | `test_verify_golden::test_verify_entry_weak_trap_warns`, `::test_verify_entry_abstain_without_targets_or_note_warns` | WARN lines; `main()` exits on failures only. |
+| `src/mainframe_rag/eval/load.py` 71-73 | `test_loadtest::test_query_vram_mb_unavailable` | `nvidia-smi` absent fallback; the VRAM figure is informational. |
+| `src/mainframe_rag/serve/profiles.py` 205 | `test_budget::test_profiles_registered` | `list_profiles` is re-exported by `serve/__init__.py` but has no in-repo caller; it returns `sorted(PROFILES)`. |
