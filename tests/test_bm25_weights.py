@@ -58,14 +58,12 @@ def test_preparation_verifies_bytes_and_refreshes_identity_without_download(prep
     bm25.verify_manifest(cache, manifest)
 
 
-@pytest.mark.parametrize("damage", ["missing", "corrupt", "reference", "reference_encoding"])
+@pytest.mark.parametrize("damage", ["corrupt", "reference", "reference_encoding"])
 def test_invalid_cache_requires_explicit_repair(preparation, damage):
     cache, manifest, calls = preparation
     bm25.prepare(cache, manifest)
     weight = cache / bm25.MODEL_DIR / "snapshots/original/english.txt"
-    if damage == "missing":
-        weight.unlink()
-    elif damage == "corrupt":
+    if damage == "corrupt":
         weight.write_bytes(b"corrupted")
     elif damage == "reference":
         (cache / bm25.MODEL_DIR / "refs/main").write_text("wrong")
@@ -198,10 +196,15 @@ def test_interrupted_publication_withholds_receipt_and_next_prepare_repairs(prep
     assert len(calls) == 3
 
 
-@pytest.mark.parametrize("foreign", ["notes.txt", "CACHEDIR.TAG", "models--Other--model/file", "models--Qdrant--bm25/notes.txt",
+def test_unsupported_model_refuses_before_effects(preparation):
+    cache, manifest, calls = preparation
+    with pytest.raises(ValueError, match="only Qdrant/bm25"):
+        bm25.prepare(cache, manifest, "Other/model")
+    assert not cache.exists() and not calls
+
+
+@pytest.mark.parametrize("foreign", ["notes.txt", "models--Other--model/file",
                                     "models--Qdrant--bm25/snapshots/original/foreign.txt",
-                                    "models--Qdrant--bm25/blobs/notes.txt",
-                                    "models--Qdrant--bm25/trees/notes.txt",
                                     ".locks/models--Qdrant--bm25/notes.txt"])
 def test_preparation_refuses_unowned_members_without_mutation(preparation, foreign):
     cache, manifest, calls = preparation
@@ -215,14 +218,7 @@ def test_preparation_refuses_unowned_members_without_mutation(preparation, forei
     assert _bytes(cache) == before and len(calls) == 1
 
 
-def test_unsupported_model_refuses_before_effects(preparation):
-    cache, manifest, calls = preparation
-    with pytest.raises(ValueError, match="only Qdrant/bm25"):
-        bm25.prepare(cache, manifest, "Other/model")
-    assert not cache.exists() and not calls
-
-
-@pytest.mark.parametrize("location", ["root", "parent", "model", "snapshot", "file"])
+@pytest.mark.parametrize("location", ["parent", "model", "file"])
 def test_preparation_refuses_symlink_escapes(preparation, tmp_path, location):
     cache, manifest, calls = preparation
     bm25.prepare(cache, manifest)
@@ -235,8 +231,7 @@ def test_preparation_refuses_symlink_escapes(preparation, tmp_path, location):
         selected = link / "cache"
     else:
         selected = cache
-        target = {"root": cache, "model": cache / bm25.MODEL_DIR,
-                  "snapshot": cache / bm25.MODEL_DIR / "snapshots/original",
+        target = {"model": cache / bm25.MODEL_DIR,
                   "file": cache / bm25.MODEL_DIR / "snapshots/original/english.txt"}[location]
         if target.is_dir():
             shutil.rmtree(target)

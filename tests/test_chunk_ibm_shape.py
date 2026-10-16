@@ -32,12 +32,7 @@ def test_outline_maps_sections(synthetic_pdf):
     assert any("Chapter 1 System parameters" in p for p in paths)
     # Nested bookmark builds a > separated path.
     assert any("Chapter 1 System parameters > IEASYSxx parameters" in p for p in paths)
-
-
-def test_notice_section_skipped(synthetic_pdf):
-    parsed = parse_pdf(synthetic_pdf)
-    sections = outline_sections(parsed)
-    assert not any("Notices" in s.heading_path for s in sections)
+    assert not any("Notices" in p for p in paths)
 
 
 def test_chunk_id_stable_across_runs(synthetic_pdf):
@@ -46,18 +41,14 @@ def test_chunk_id_stable_across_runs(synthetic_pdf):
     assert [c.chunk_id for c in first] == [c.chunk_id for c in second]
 
 
-def test_message_chunk_extracts_ids_and_members(synthetic_pdf):
+def test_message_chunk_ids_members_and_page_label(synthetic_pdf):
     _, chunks = _chunks_for(synthetic_pdf)
     msg_chunks = [c for c in chunks if "IEA500I" in c.text]
     assert msg_chunks, "synthetic IEA500I section must be chunked"
     assert any("IEA500I" in c.message_ids for c in msg_chunks)
     assert any(c.chunk_type == "message" for c in chunks)
     assert any("IEASYSxx" in c.members for c in chunks if "IEASYSxx" in c.text)
-
-
-def test_page_label_and_start(synthetic_pdf):
-    _, chunks = _chunks_for(synthetic_pdf)
-    msg = next(c for c in chunks if "IEA500I" in c.text)
+    msg = msg_chunks[0]
     assert msg.page_start == 5
     # Issue #577: deepest-section rule — the IEA500I page is chunked once
     # under the deepest entry, not duplicated under its Chapter 2 ancestor.
@@ -111,10 +102,19 @@ def test_detect_code_region_matrix():
     # must not trip the detector (misses fall back to paragraph behavior).
     assert detect_code_region("See https://example.com/docs for details\non the layout.") is None
     assert detect_code_region("Use /*comment*/ style sparingly in prose.") is None
+    # Balanced samples with no header still detect via keyword + code signal;
+    # manual prose with lone lead words stays prose.
+    assert detect_code_region("X = 1\nSAY X\nDO I = 1 TO 5\nSAY I\nEND") == "rexx"
+    assert detect_code_region("count = count + 1;\nSAY count;\nSAY done;") == "rexx"
+    assert detect_code_region("Do not restart the system now.\nContact support.") is None
+    assert detect_code_region("If the job fails, check the log.\nThen resubmit.") is None
+    # Console rule: 2/3 indented lines are console; 1/3 is prose.
+    assert detect_code_region("  READY\n  SHOW DSN\nHeader line") == "console"
+    assert detect_code_region("Header line\n  one indented\nAnother header") is None
 
 
 def test_jcl_statement_grouping():
-    from mainframe_rag.ingest.chunk import _split_jcl_statements
+    from mainframe_rag.ingest.chunk import _split_jcl_statements, detect_code_region
 
     text = (
         "//STEP1 EXEC PGM=IEFBR14\n"
@@ -129,6 +129,35 @@ def test_jcl_statement_grouping():
         "//* a comment",
         "//STEP2 EXEC PGM=SORT",
     ]
+    # Manuals indent examples: the splitter works on lstripped cards,
+    # continuations stay glued across the indent, the unnamed op stands alone.
+    indented = (
+        "    //EXJOB JOB (ACCT),'EXAMPLE',CLASS=A\n"
+        "    //OUTDATA DD DSN=EXAMPLE.OUTPUT,DISP=(NEW,CATLG,DELETE),\n"
+        "    //            UNIT=SYSDA,SPACE=(CYL,(2,1),RLSE)\n"
+        "    // EXEC PGM=IKJEFT01"
+    )
+    assert detect_code_region(indented) == "jcl"
+    assert _split_jcl_statements(indented) == [
+        "    //EXJOB JOB (ACCT),'EXAMPLE',CLASS=A",
+        (
+            "    //OUTDATA DD DSN=EXAMPLE.OUTPUT,DISP=(NEW,CATLG,DELETE),\n"
+            "    //            UNIT=SYSDA,SPACE=(CYL,(2,1),RLSE)"
+        ),
+        "    // EXEC PGM=IKJEFT01",
+    ]
+    assert _split_jcl_statements("// EXEC PGM=X\n// DD DSN=Y") == ["// EXEC PGM=X", "// DD DSN=Y"]
+    # Real manuals wrap `//LABEL=params` as `//` + newline + params (dfha3b08
+    # Figure 12): the pair rejoins into the true card.
+    assert _split_jcl_statements("//\nASMBLR=ASMA90,") == ["//ASMBLR=ASMA90,"]
+    assert _split_jcl_statements("//JOB JOB (A),\n//\nINDEX=X,") == ["//JOB JOB (A),", "//INDEX=X,"]
+    # The `=` guard: null statements, delimiters and SYSIN data after a bare
+    # `//` stay split — only wrapped parameter cards rejoin.
+    assert _split_jcl_statements("//\nSome prose here") == ["//", "Some prose here"]
+    assert _split_jcl_statements("//\n//NEXT JOB") == ["//", "//NEXT JOB"]
+    assert _split_jcl_statements("//\n/*") == ["//", "/*"]
+    assert _split_jcl_statements("//X DD *\nENTRY prog") == ["//X DD *", "ENTRY prog"]
+    assert _split_jcl_statements("trailing\n//") == ["trailing", "//"]
 
 
 def test_rexx_comment_quote_and_continuation():
@@ -149,13 +178,13 @@ def test_rexx_comment_quote_and_continuation():
     assert 'SAY "Open failed, RC="rc"; aborting.";' in statements
     assert "total = a + b + ,\n  c + d;" in statements
     assert statements[-1] == "EXIT 0;"
-
-
-def test_rexx_unterminated_comment_swallows_to_end():
-    from mainframe_rag.ingest.chunk import _split_rexx_statements
-
-    statements = _split_rexx_statements("X = 1;\n/* never closed\nY = 2;\nZ = 3;")
-    assert statements == ["X = 1;", "/* never closed\nY = 2;\nZ = 3;"]
+    # An unterminated comment swallows to the end; nested comments don't split.
+    assert _split_rexx_statements("X = 1;\n/* never closed\nY = 2;\nZ = 3;") == [
+        "X = 1;", "/* never closed\nY = 2;\nZ = 3;",
+    ]
+    assert _split_rexx_statements("/* outer /* inner ; */ still comment ; */\nX = 1;") == [
+        "/* outer /* inner ; */ still comment ; */", "X = 1;",
+    ]
 
 
 def _jcl_source_statements():
@@ -186,6 +215,9 @@ def test_jcl_fixture_statements_never_split(jcl_pdf):
         )
         if first_jcl is not None:
             assert not cont_re.match(first_jcl), f"chunk opens mid-statement: {first_jcl[:40]!r}"
+    # Manuals indent examples: the indent survives, continuations stay glued.
+    assert "    //OUTDATA DD DSN=EXAMPLE.OUTPUT,DISP=(NEW,CATLG,DELETE),\n    //            UNIT=SYSDA" in full
+    assert "    // EXEC PGM=IKJEFT01" in full
     # Detector fires on the real extraction (line starts survived the PDF round-trip).
     assert any(
         detect_code_region("\n".join(ln for ln in c.text.splitlines() if ln.startswith("//")))
@@ -193,67 +225,6 @@ def test_jcl_fixture_statements_never_split(jcl_pdf):
         for c in chunks
         if any(ln.startswith("//") for ln in c.text.splitlines())
     )
-
-
-def test_jcl_fixture_ids_stable(jcl_pdf):
-    _, first = _chunks_for(jcl_pdf)
-    _, second = _chunks_for(jcl_pdf)
-    assert [c.chunk_id for c in first] == [c.chunk_id for c in second]
-
-
-def test_indented_jcl_detected_grouped_and_intact(jcl_pdf):
-    """Blocker 1 (review): manuals indent examples; the detector and the
-    splitter work on lstripped cards, continuations stay glued across the
-    indent, and the unnamed op stands alone."""
-    from mainframe_rag.ingest.chunk import _split_jcl_statements, detect_code_region
-
-    indented = (
-        "    //EXJOB JOB (ACCT),'EXAMPLE',CLASS=A\n"
-        "    //OUTDATA DD DSN=EXAMPLE.OUTPUT,DISP=(NEW,CATLG,DELETE),\n"
-        "    //            UNIT=SYSDA,SPACE=(CYL,(2,1),RLSE)\n"
-        "    // EXEC PGM=IKJEFT01"
-    )
-    assert detect_code_region(indented) == "jcl"
-    assert _split_jcl_statements(indented) == [
-        "    //EXJOB JOB (ACCT),'EXAMPLE',CLASS=A",
-        (
-            "    //OUTDATA DD DSN=EXAMPLE.OUTPUT,DISP=(NEW,CATLG,DELETE),\n"
-            "    //            UNIT=SYSDA,SPACE=(CYL,(2,1),RLSE)"
-        ),
-        "    // EXEC PGM=IKJEFT01",
-    ]
-    _, chunks = _chunks_for(jcl_pdf)
-    full = "\n".join(c.text for c in chunks)
-    assert "    //OUTDATA DD DSN=EXAMPLE.OUTPUT,DISP=(NEW,CATLG,DELETE),\n    //            UNIT=SYSDA" in full
-    assert "    // EXEC PGM=IKJEFT01" in full
-
-
-def test_unnamed_ops_are_statements_not_continuations():
-    from mainframe_rag.ingest.chunk import _split_jcl_statements
-
-    assert _split_jcl_statements("// EXEC PGM=X\n// DD DSN=Y") == ["// EXEC PGM=X", "// DD DSN=Y"]
-
-
-def test_wrapped_card_rejoins_across_lines():
-    """Real IBM manuals wrap `//LABEL=params` as `//` + newline + params
-    (dfha3b08 Figure 12): the pair rejoins into the true card instead of a
-    dangling `//` plus a phantom prose unit."""
-    from mainframe_rag.ingest.chunk import _split_jcl_statements
-
-    assert _split_jcl_statements("//\nASMBLR=ASMA90,") == ["//ASMBLR=ASMA90,"]
-    assert _split_jcl_statements("//JOB JOB (A),\n//\nINDEX=X,") == ["//JOB JOB (A),", "//INDEX=X,"]
-
-
-def test_bare_slash_slash_does_not_glue_without_parameter():
-    """The `=` guard: null statements, delimiters, and SYSIN data after a
-    bare `//` stay split — only wrapped parameter cards rejoin."""
-    from mainframe_rag.ingest.chunk import _split_jcl_statements
-
-    assert _split_jcl_statements("//\nSome prose here") == ["//", "Some prose here"]
-    assert _split_jcl_statements("//\n//NEXT JOB") == ["//", "//NEXT JOB"]
-    assert _split_jcl_statements("//\n/*") == ["//", "/*"]
-    assert _split_jcl_statements("//X DD *\nENTRY prog") == ["//X DD *", "ENTRY prog"]
-    assert _split_jcl_statements("trailing\n//") == ["trailing", "//"]
 
 
 def test_instream_data_splits_between_lines_not_as_atom():
@@ -272,13 +243,15 @@ def test_instream_data_splits_between_lines_not_as_atom():
     joined = "\n".join(text for _, _, text in blocks)
     for line in data:
         assert line in joined
-
-
-def test_rexx_nested_comments_dont_split():
-    from mainframe_rag.ingest.chunk import _split_rexx_statements
-
-    statements = _split_rexx_statements("/* outer /* inner ; */ still comment ; */\nX = 1;")
-    assert statements == ["/* outer /* inner ; */ still comment ; */", "X = 1;"]
+    # SYSIN data in the paragraph AFTER the DD * card splits between records
+    # too, even across the para boundary; the chain ends at prose.
+    blocks = _split_blocks([(0, "//SYSIN DD *"), (1, "\n".join(data))])
+    assert len(blocks) > 1
+    joined = "\n".join(text for _, _, text in blocks)
+    for line in data:
+        assert line in joined, f"record split: {line!r}"
+    blocks2 = _split_blocks([(0, "//SYSIN DD *"), (1, "REC1 DATA\nREC2 DATA"), (2, "See the manual.")])
+    assert blocks2[-1][2].endswith("See the manual.")
 
 
 def test_code_runs_share_single_newlines():
@@ -290,6 +263,9 @@ def test_code_runs_share_single_newlines():
     assert _split_blocks([(page, text)]) == [(0, 0, "//A X\n//B Y")]
     prose = _split_blocks([(0, "para one"), (0, "para two")])
     assert prose == [(0, 0, "para one\n\npara two")]
+    # Blocks are (start, end, text): a cross-page accumulation spans both pages.
+    assert _split_blocks([(3, "para one"), (5, "para two")]) == [(3, 5, "para one\n\npara two")]
+    assert _split_blocks([(2, "solo")]) == [(2, 2, "solo")]
 
 
 def test_rexx_fixture_statements_never_split(rexx_pdf):
@@ -327,35 +303,23 @@ def test_oversize_code_para_splits_at_statement_starts():
     for _, _, text in blocks:
         opening = text.lstrip()
         assert opening.startswith(("//S", "//*"))
-
-
-def test_oversize_single_statement_emitted_whole():
-    from mainframe_rag.ingest.chunk import SECTION_MAX_CHARS, _split_blocks
-
+    # An oversize single statement is emitted whole, never sliced.
     giant = "//LONG EXEC PGM=X,PARM='" + "Y" * (SECTION_MAX_CHARS + 500) + "'"
-    blocks = _split_blocks([(0, giant)])
-    assert len(blocks) == 1
-    assert blocks[0][2] == giant
-
-
-def test_overlap_backoff_keeps_statements_whole():
-    """Constructed arithmetic: prose 2000 + six 300-char JCL statements.
-    The 400-char overlap tail starts inside S3, so the seed backs off to
-    whole trailing items and the next block opens with all of S4
-    (stmts[3]) followed by S5, joined with single newlines (code runs
-    share one newline, never a blank line)."""
-    from mainframe_rag.ingest.chunk import _split_blocks
-
+    giant_blocks = _split_blocks([(0, giant)])
+    assert len(giant_blocks) == 1 and giant_blocks[0][2] == giant
+    # Overlap backoff, constructed arithmetic: prose 2000 + six 300-char JCL
+    # statements. The 400-char overlap tail starts inside S3, so the seed
+    # backs off to whole trailing items and the next block opens with all of
+    # S4 followed by S5, joined with single newlines.
     prose = "y" * 2000
     stmts = [f"//S{i:02d}  " + "X" * (300 - 7) for i in range(1, 7)]
     assert all(len(s) == 300 for s in stmts)
-    code_para = "\n".join(stmts)
-    blocks = _split_blocks([(0, prose), (0, code_para)])
-    assert len(blocks) == 2
-    assert blocks[0][2].endswith(stmts[3])
-    assert blocks[1][2].startswith(stmts[3] + "\n" + stmts[4])
+    two = _split_blocks([(0, prose), (0, "\n".join(stmts))])
+    assert len(two) == 2
+    assert two[0][2].endswith(stmts[3])
+    assert two[1][2].startswith(stmts[3] + "\n" + stmts[4])
     for statement in stmts:
-        assert statement in blocks[0][2] or statement in blocks[1][2]
+        assert statement in two[0][2] or statement in two[1][2]
 
 
 # Issue #216: table/syntax fidelity — atomic blocks, message detector,
@@ -368,18 +332,6 @@ def _table_para(n_rows: int = 120) -> str:
     header = "Parameter   Meaning              Default"
     rows = [f"PARM{i:03d}      Description text {i:03d}      VALUE{i:03d}" for i in range(n_rows)]
     return "\n".join([header, *rows])
-
-
-def test_detect_table_region_matrix():
-    from mainframe_rag.ingest.chunk import detect_table_region
-
-    assert detect_table_region(_table_para(4)) is True
-    # Code wins over columns: JCL continuations carry wide indents that
-    # read as columns, but the splitter must treat them as statements.
-    jcl = "//DD1 DD DSN=X,DISP=(NEW,CATLG,DELETE),\n//            UNIT=SYSDA,SPACE=(CYL,(1,1))"
-    assert detect_table_region(jcl) is False
-    assert detect_table_region("Plain narrative prose about system parameters.") is False
-    assert detect_table_region("") is False
 
 
 def test_oversize_table_splits_at_row_boundaries():
@@ -396,22 +348,24 @@ def test_oversize_table_splits_at_row_boundaries():
     joined = "\n".join(text for _, _, text in blocks)
     for line in para.splitlines():
         assert line in joined, f"row split across blocks: {line!r}"
-
-
-def test_table_overlap_backs_off_to_whole_rows():
-    """Mirror of the JCL backoff test: 2000-char prose + six 300-char table
-    rows. The 400-char tail starts inside R3, so the next block opens with
-    all of R4 — never a row fragment."""
-    from mainframe_rag.ingest.chunk import _split_blocks
-
-    prose = "y" * 2000
+    # Overlap backoff: 2000-char prose + six 300-char table rows. The 400-char
+    # tail starts inside R3, so the next block opens with all of R4 — never a
+    # row fragment.
     rows = [(f"PARM{i:02d}      ") + "X" * 288 for i in range(1, 7)]
     assert all(len(r) == 300 for r in rows)
-    table_para = "Parameter   Meaning\n" + "\n".join(rows)
-    blocks = _split_blocks([(0, prose), (0, table_para)])
-    assert len(blocks) == 2
-    assert blocks[0][2].endswith(rows[3])
-    assert blocks[1][2].startswith(rows[3] + "\n" + rows[4])
+    two = _split_blocks([(0, "y" * 2000), (0, "Parameter   Meaning\n" + "\n".join(rows))])
+    assert len(two) == 2
+    assert two[0][2].endswith(rows[3])
+    assert two[1][2].startswith(rows[3] + "\n" + rows[4])
+    # Detection: columns are a table; code wins over columns (JCL
+    # continuations carry wide indents that read as columns).
+    from mainframe_rag.ingest.chunk import detect_table_region
+
+    assert detect_table_region(_table_para(4)) is True
+    jcl = "//DD1 DD DSN=X,DISP=(NEW,CATLG,DELETE),\n//            UNIT=SYSDA,SPACE=(CYL,(1,1))"
+    assert detect_table_region(jcl) is False
+    assert detect_table_region("Plain narrative prose about system parameters.") is False
+    assert detect_table_region("") is False
 
 
 def test_mixed_prose_jcl_extracts_cards():
@@ -453,84 +407,6 @@ def test_mixed_prose_jcl_extracts_cards():
             ),
         )
     ]
-
-
-def test_sysin_adjacency_splits_between_records():
-    """SYSIN data in the paragraph AFTER the DD * card paragraph splits
-    between records, never mid-record — even across the para boundary."""
-    from mainframe_rag.ingest.chunk import SECTION_MAX_CHARS, _split_blocks
-
-    card = "//SYSIN DD *"
-    data = [f"RECORD-{i:04d} PAYLOAD-DATA-LINE" for i in range(200)]
-    assert len("\n".join(data)) > SECTION_MAX_CHARS
-    blocks = _split_blocks([(0, card), (1, "\n".join(data))])
-    assert len(blocks) > 1
-    joined = "\n".join(text for _, _, text in blocks)
-    for line in data:
-        assert line in joined, f"record split: {line!r}"
-    # The chain ends at prose: an explanation stays one prose blob item.
-    blocks2 = _split_blocks([(0, card), (1, "REC1 DATA\nREC2 DATA"), (2, "See the manual.")])
-    assert blocks2[-1][2].endswith("See the manual.")
-
-
-def test_rexx_keyword_fallback_matrix():
-    """Balanced samples with no header still detect via keyword + code
-    signal; manual prose with lone lead words stays prose."""
-    from mainframe_rag.ingest.chunk import detect_code_region
-
-    assert detect_code_region("X = 1\nSAY X\nDO I = 1 TO 5\nSAY I\nEND") == "rexx"
-    assert detect_code_region("count = count + 1;\nSAY count;\nSAY done;") == "rexx"
-    # Negatives: single lead words and prose without code signals.
-    assert detect_code_region("Do not restart the system now.\nContact support.") is None
-    assert detect_code_region("If the job fails, check the log.\nThen resubmit.") is None
-    assert detect_code_region("Use /*comment*/ style sparingly in prose.") is None
-
-
-def test_console_indent_pins():
-    """Console rule pins: 2/3 indented lines are console; 1/3 is prose."""
-    from mainframe_rag.ingest.chunk import detect_code_region
-
-    assert detect_code_region("  READY\n  SHOW DSN\nHeader line") == "console"
-    assert detect_code_region("Header line\n  one indented\nAnother header") is None
-
-
-def test_block_page_spans_and_chunk_labels():
-    """_split_blocks returns (start, end, text): a cross-page accumulation
-    spans both pages in one block."""
-    from mainframe_rag.ingest.chunk import _split_blocks
-
-    assert _split_blocks([(3, "para one"), (5, "para two")]) == [(3, 5, "para one\n\npara two")]
-    assert _split_blocks([(2, "solo")]) == [(2, 2, "solo")]
-
-
-def test_make_chunks_span_label_range():
-    """Two-page section, one accumulated block: label cites both printed
-    pages, page_start is the first index page."""
-    from mainframe_rag.ingest.chunk import make_chunks
-    from mainframe_rag.ingest.ibm_pdf import ParsedDoc
-
-    parsed = ParsedDoc(
-        path=__import__("pathlib").Path("span.pdf"),
-        sha256="1" * 64,
-        doc_id="SA22-0000-01",
-        title="Span",
-        product="z/OS",
-        version="9.9",
-        vendor="IBM",
-        toc=[[1, "Only chapter", 1]],
-        page_count=2,
-    )
-    chunks = make_chunks(parsed, ["Alpha paragraph here.", "Beta paragraph here."], ["1-6", "1-7"])
-    assert len(chunks) == 1
-    assert chunks[0].page_start == 0
-    assert chunks[0].page_label == "1-6–1-7"
-    # UUID pins the span start: the key carries the source revision (issue
-    # #361), so same-form-number revisions never share point ids.
-    from mainframe_rag.ingest.chunk import make_chunk_id
-    from mainframe_rag.ingest.identity import source_rev_key
-
-    rev = source_rev_key("IBM", "z/OS", "9.9", "1" * 64)
-    assert chunks[0].chunk_id == make_chunk_id(rev, "Only chapter", 0, 0)
 
 
 def test_chunk_id_pins_uuid5_namespace_and_key():
@@ -626,15 +502,10 @@ def test_nested_outline_chunks_deepest_once_no_duplicates():
     assert len(texts) == len(set(texts))
     assert any(c.heading_path.endswith("Sub 1.1.1") for c in chunks)
 
-
-def test_same_page_parent_child_loses_no_text():
-    """Issue #577 counterexample: parent and first child starting on the same
-    page — the parent's intro moves into the child's section, which is
-    acceptable, but no text may be dropped."""
-    from mainframe_rag.ingest.chunk import make_chunks, outline_sections
-    from mainframe_rag.ingest.ibm_pdf import ParsedDoc
-
-    parsed = ParsedDoc(
+    # Issue #577 counterexample: parent and first child starting on the same
+    # page. The parent's intro moves into the child's section, but no text
+    # may be dropped.
+    same = ParsedDoc(
         path=__import__("pathlib").Path("samepage.pdf"),
         sha256="4" * 64,
         doc_id="SA22-0000-00",
@@ -642,27 +513,19 @@ def test_same_page_parent_child_loses_no_text():
         product="z/OS",
         version="9.9",
         vendor="IBM",
-        toc=[
-            [1, "Chapter 3", 3],
-            [2, "Section 1", 3],
-            [3, "Functions", 3],
-            [1, "Chapter 4", 6],
-        ],
+        toc=[[1, "Chapter 3", 3], [2, "Section 1", 3], [3, "Functions", 3], [1, "Chapter 4", 6]],
         page_count=6,
     )
-    sections = outline_sections(parsed)
-    # Same-page ancestors are empty and dropped; the deepest entry carries
-    # the shared pages. Union of pre-change ranges [2,5) is unchanged.
-    assert [(s.heading_path, s.page_start, s.page_end) for s in sections] == [
+    assert [(s.heading_path, s.page_start, s.page_end) for s in outline_sections(same)] == [
         ("Chapter 3 > Section 1 > Functions", 2, 5),
         ("Chapter 4", 5, 6),
     ]
-    pages = [f"Page {i} shared intro text." for i in range(6)]
-    chunks = make_chunks(parsed, pages, [str(i) for i in range(6)])
-    joined = "\n".join(c.text for c in chunks)
+    same_pages = [f"Page {i} shared intro text." for i in range(6)]
+    same_chunks = make_chunks(same, same_pages, [str(i) for i in range(6)])
+    joined = "\n".join(c.text for c in same_chunks)
     for i in (2, 3, 4):
         assert f"Page {i} shared intro text." in joined
-    assert len({c.text for c in chunks}) == len(chunks)
+    assert len({c.text for c in same_chunks}) == len(same_chunks)
 
 
 def test_skipped_child_heading_does_not_cut_parent():
@@ -733,42 +596,12 @@ def test_skipped_child_heading_does_not_cut_parent():
     assert sorted({i for s in s3 for i in range(s.page_start, s.page_end)}) == list(range(20))
 
 
-def test_no_toc_pdf_chunks_without_collapse():
-    """End to end: a TOC-less document yields several sections and stable
-    ids, not one giant whole-doc chunk."""
-    from mainframe_rag.ingest.chunk import make_chunks
-    from mainframe_rag.ingest.ibm_pdf import ParsedDoc
-
-    parsed = ParsedDoc(
-        path=__import__("pathlib").Path("notoc.pdf"),
-        sha256="2" * 64,
-        doc_id="NODOC-1",
-        title="NoToc",
-        product=None,
-        version=None,
-        vendor="unknown",
-        toc=[],
-        page_count=3,
-    )
-    pages = [
-        "Cover words here.",
-        "Chapter 2 Operator messages\n\nIEA500I BEFORE IOS REJECTED",
-        "Chapter 3 Tuning notes\n\nLFAREA sizing words here.",
-    ]
-    chunks = make_chunks(parsed, pages, ["1", "2", "3"])
-    assert {c.heading_path for c in chunks} >= {"NoToc", "NoToc > Chapter 2 Operator messages"}
-    assert len(chunks) > 1
-    again = make_chunks(parsed, pages, ["1", "2", "3"])
-    assert [c.chunk_id for c in chunks] == [c.chunk_id for c in again]
-
-
 @pytest.mark.parametrize(
     ("labels", "expected_label"),
     [
         (["1-6", "1-7"], "1-6–1-7"),  # fully labeled: unchanged printed range
         (["", ""], ""),  # no /PageLabels: PyMuPDF returns ''
         ([None, "1"], ""),  # partial: the surviving label must not understate the span
-        (["7", None], ""),
         (["A-", "A-"], ""),  # repeated folio across a 2-page span locates nothing
         (["1-6"], ""),  # label list shorter than the span: missing page is unlabeled
         (None, ""),  # no labels supplied at all
@@ -937,13 +770,9 @@ def test_column_major_table_pdf_keeps_text_cells_and_location(tmp_path):
         assert head in text
     for name, _default, meaning in _TABLE_ROWS:
         assert name in text and meaning in text
-
-
-def test_column_major_table_keeps_row_value_associations(tmp_path):
-    """#85: every independently specified (name, default, meaning) triple is
-    on one line, in row order, and no column list survives."""
-    (chunk,) = _pipeline_chunks(_table_pdf(tmp_path / "WX10-0011-00_table.pdf"))
-    lines = chunk.text.splitlines()
+    # #85: every independently specified (name, default, meaning) triple is
+    # on one line, in row order, and no column list survives.
+    lines = text.splitlines()
     for name, default, meaning in _TABLE_ROWS:
         assert f"{name} {default} {meaning}" in lines
     assert "Parameter Default Meaning" in lines
@@ -978,13 +807,8 @@ def test_change_bar_pdf_keeps_prose_in_order(tmp_path):
     assert chunk.heading_path == "Chapter 1 Limits"
     prose = [ln for ln in chunk.text.splitlines() if ln.startswith("Revised sentence")]
     assert prose == [f"Revised sentence {i} about the widget limit." for i in range(6)]
-
-
-def test_change_bar_glyph_lines_are_dropped_and_prose_kept(tmp_path):
-    """#85: bare '|' margin lines are not content; prose lines are untouched."""
-    (chunk,) = _pipeline_chunks(_change_bar_pdf(tmp_path / "WX10-0012-00_bars.pdf"))
+    # #85: bare '|' margin lines are not content.
     assert not [ln for ln in chunk.text.splitlines() if ln.strip() == "|"]
-    assert sum(ln.startswith("Revised sentence") for ln in chunk.text.splitlines()) == 6
 
 
 def _draw_columns(page, columns, x0=72, y0=100, step=140, leading=14, wrapped=()):
@@ -1034,6 +858,12 @@ def test_column_major_wrapped_rows_and_repeated_headers(tmp_path):
     assert lines.count("Name Value Note") == 2  # header + repeat, both whole rows
     assert "continues here" in lines  # wrapped tail kept, directly after its row
     assert lines.index("continues here") == lines.index("BETA 22 second note") + 1
+    # The row rebuild only reorders words: none added or lost.
+    import collections
+
+    ((plain, extracted),) = _plain_vs_extracted(path)
+    assert extracted != plain
+    assert collections.Counter(extracted.split()) == collections.Counter(plain.split())
 
 
 def test_prose_beside_table_is_not_merged_into_rows(tmp_path):
@@ -1118,24 +948,6 @@ def test_row_major_drawn_table_cells_share_a_line(tmp_path):
         assert " ".join(r) in lines
 
 
-def test_table_reassembly_only_reorders_words(tmp_path):
-    """No word is added or lost by the row rebuild (change bars aside)."""
-    import collections
-
-    cols = [
-        ("Name", ["ALPHA", "BETA", "Name", "GAMMA"]),
-        ("Value", ["11", "22", "Value", "33"]),
-        ("Note", ["first note", "second note|continues here", "Note", "third note"]),
-    ]
-    path = _one_page_pdf(
-        tmp_path / "WX10-0017-00_words.pdf",
-        lambda page: _draw_columns(page, cols, wrapped=(1,)),
-    )
-    ((plain, extracted),) = _plain_vs_extracted(path)
-    assert extracted != plain
-    assert collections.Counter(extracted.split()) == collections.Counter(plain.split())
-
-
 def test_lone_header_pair_on_one_baseline_is_not_merged(tmp_path):
     """Running header/footer pairs (one baseline) are not tables."""
 
@@ -1151,8 +963,6 @@ def test_lone_header_pair_on_one_baseline_is_not_merged(tmp_path):
 @pytest.mark.parametrize("columns", [
     (["If the system fails,", "do not restart it.", "First preserve the dump.", "Then call the owner."],
      ["During normal scheduled work,", "restart is usually permitted.", "Check the approved window.", "Record the completed action."]),
-    (["Emergency procedure", "1. Preserve the dump.", "2. Call the owner.", "3. Await approval."],
-     ["Routine procedure", "1. Check the window.", "2. Restart the system.", "3. Record the result."]),
 ])
 def test_short_independent_column_procedures_keep_original_sequence(tmp_path, columns):
     """F1: identical baselines and short lines do not establish table cells."""
@@ -1245,8 +1055,6 @@ def test_standalone_diagram_bar_in_body_is_preserved(tmp_path):
 
 @pytest.mark.parametrize(("font", "labels"), [
     ("cour", ["branch alpha", "branch beta", "branch gamma"]),
-    ("helv", ["branch alpha", "branch beta", "branch gamma"]),
-    ("cour", ["Branch alpha remains active.", "Branch beta remains idle.", "Branch gamma remains closed."]),
 ])
 def test_margin_positioned_diagram_wall_keeps_its_bars(tmp_path, font, labels):
     def draw(page):

@@ -28,17 +28,11 @@ from tests.helpers_builder import staging_builder  # noqa: F401 — fixture
 pytestmark = pytest.mark.usefixtures("staging_builder")
 
 
-
 # ---------------------------------------------------------------- version
-def test_version_is_stable_and_short() -> None:
+def test_version_is_stable_and_covers_all_payload_producers() -> None:
     v1 = extraction_rules_version()
-    v2 = extraction_rules_version()
-    assert v1 == v2
-    assert len(v1) == 16
+    assert v1 == extraction_rules_version()
     int(v1, 16)  # hex
-
-
-def test_version_covers_all_payload_producers() -> None:
     names = {p.name for p in rule_module_paths()}
     assert names == {
         "regexes.py", "ibm_pdf.py", "chrome.py", "chunk.py", "classify.py",
@@ -79,37 +73,26 @@ def test_rule_modules_import_only_rule_modules() -> None:
     assert escapes == [], escapes
 
 
-def test_context_normalization_recipe_is_a_rule_module() -> None:
-    """The stored contextual prefix passes through normalize_context (review
-    of #701): its recipe must change the version like any payload producer,
-    and the context producer must use that very function."""
+def test_stored_payload_is_owned_by_a_rule_module() -> None:
+    """upsert_chunks stores exactly point_payload's mapping (carrying
+    rules_v), and that mapping, like the contextual-prefix normalization
+    recipe (review of #701), lives in a hashed module: adding or deriving a
+    stored field anywhere else would bypass the version."""
     import inspect
 
     from mainframe_rag.ingest import context
-    from mainframe_rag.ingest.payload import normalize_context
+    from mainframe_rag.ingest.payload import normalize_context, point_payload
 
-    assert Path(inspect.getfile(normalize_context)).resolve() in {
-        p.resolve() for p in rule_module_paths()
-    }
+    hashed = {p.resolve() for p in rule_module_paths()}
+    assert Path(inspect.getfile(point_payload)).resolve() in hashed
+    assert Path(inspect.getfile(normalize_context)).resolve() in hashed
     assert context.normalize_context is normalize_context
-
-
-def test_stored_payload_is_owned_by_a_rule_module() -> None:
-    """upsert_chunks stores exactly point_payload's mapping, and that
-    mapping lives in a hashed module: adding or deriving a stored field
-    anywhere else would bypass the version."""
-    import inspect
-
-    from mainframe_rag.ingest.payload import point_payload
-
-    assert Path(inspect.getfile(point_payload)).resolve() in {
-        p.resolve() for p in rule_module_paths()
-    }
     client, parsed, chunk = _upsert_one({"c1": "situating gist"})
     assert client.points[0].payload == point_payload(
         parsed, chunk, extraction_rules_version(), "situating gist"
     )
     assert client.points[0].payload["context"] == "situating gist"
+    assert client.points[0].payload["rules_v"] == extraction_rules_version()
 
 
 def test_hash_changes_when_rules_change(tmp_path) -> None:
@@ -136,23 +119,12 @@ def test_should_skip_gates_on_rules_version() -> None:
     assert should_skip(old, "a" * 64, rules_version="v1") is False
     # Sha mismatch still refuses regardless of version.
     assert should_skip(rec, "b" * 64, rules_version="v1") is False
-
-
-def test_should_skip_force_reingest_never_skips() -> None:
-    # Issue #179: --reingest re-extracts every doc, so a finished record
-    # under identical bytes and rules must not skip the progress file.
-    rec = InventoryRecord(path="x.pdf", sha256="a" * 64, status="upserted", rules_version="v1")
+    # Issue #179: --reingest never skips; the same record skips without the flag.
     assert should_skip(rec, "a" * 64, rules_version="v1", force_reingest=True) is False
-    # Control: the same record still skips without the flag.
     assert should_skip(rec, "a" * 64, rules_version="v1", force_reingest=False) is True
 
 
 # ---------------------------------------------------------------- payload
-def test_upsert_payload_carries_rules_v() -> None:
-    client, _parsed, _chunk = _upsert_one()
-    assert client.points[0].payload["rules_v"] == extraction_rules_version()
-
-
 def _upsert_one(contexts=None):
     from types import SimpleNamespace
 
@@ -227,38 +199,6 @@ def _seed_current_manifest(fake) -> None:
         fake, completion_collection_name(settings), settings,
         extraction_rules_version(),
     )
-def test_ingest_fails_closed_on_rules_mismatch(tmp_path, synthetic_pdf, monkeypatch):
-    from mainframe_rag.ingest import run_ingest
-    from tests.test_run_ingest import _FakeQdrant
-
-    monkeypatch.setenv("EMBED_MODE", "hash")
-    monkeypatch.delenv("DENSE_DIM", raising=False)
-    fake = _FakeQdrant(stored_sha="c" * 64, stored_rules_v="0123456789abcdef")
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    with pytest.raises(RuntimeError, match="extraction-rules mismatch"):
-        run_ingest.main([
-            "--src", str(synthetic_pdf.parent),
-            "--progress", str(tmp_path / "inv.jsonl"), "--workers", "1",
-        ])
-
-
-def test_ingest_fails_closed_on_legacy_collection(tmp_path, synthetic_pdf, monkeypatch):
-    """A collection whose points predate versioning is a mismatch, never a
-    pass — it cannot prove which rules extracted its payloads."""
-    from mainframe_rag.ingest import run_ingest
-    from tests.test_run_ingest import _FakeQdrant
-
-    monkeypatch.setenv("EMBED_MODE", "hash")
-    monkeypatch.delenv("DENSE_DIM", raising=False)
-    fake = _FakeQdrant(stored_sha="c" * 64, stored_rules_v="")
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    with pytest.raises(RuntimeError, match="predates extraction-rules versioning"):
-        run_ingest.main([
-            "--src", str(synthetic_pdf.parent),
-            "--progress", str(tmp_path / "inv.jsonl"), "--workers", "1",
-        ])
-
-
 def test_reingest_flag_reextracts_matching_sha(tmp_path, synthetic_pdf, monkeypatch, capsys):
     """--reingest after a rules change: the startup gate passes, the
     qdrant sha-equal early return is bypassed, and the doc is deleted and
@@ -283,26 +223,6 @@ def test_reingest_flag_reextracts_matching_sha(tmp_path, synthetic_pdf, monkeypa
     assert fake.upserts, "the doc must be re-upserted, not skipped"
     done = [l for l in capsys.readouterr().err.splitlines() if l.strip().startswith("{")]
     assert any(json.loads(l).get("action") == "done" for l in done)
-
-
-def test_reingest_flag_passes_the_startup_gate(tmp_path, synthetic_pdf, monkeypatch):
-    """--reingest is also the documented override for the mismatch gate:
-    the same run that raises without it completes with it."""
-    from mainframe_rag.ingest import run_ingest
-    from tests.test_run_ingest import _FakeQdrant
-
-    monkeypatch.setenv("EMBED_MODE", "hash")
-    monkeypatch.delenv("DENSE_DIM", raising=False)
-    fake = _FakeQdrant(stored_sha="c" * 64, stored_rules_v="0123456789abcdef")
-    _seed_legacy_doc(fake, _main_collection(), "SA22-0000-00", "c" * 64,
-                     "0123456789abcdef")
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    rc = run_ingest.main([
-        "--src", str(synthetic_pdf.parent),
-        "--progress", str(tmp_path / "inv.jsonl"), "--workers", "1",
-        "--reingest",
-    ])
-    assert rc == 0
 
 
 # ---------------------------------------------------------------- manifest

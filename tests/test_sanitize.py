@@ -12,29 +12,19 @@ from mainframe_rag.ingest import run_ingest
 from mainframe_rag.ingest.ibm_pdf import parse_pdf, sanitize_page_text
 
 
-def test_drops_c0_controls_and_del() -> None:
+def test_sanitize_page_text_drops_controls_and_keeps_content() -> None:
     assert sanitize_page_text("IEA500I\x00 BEFORE\x07 IOS\x7f END") == "IEA500I BEFORE IOS END"
 
-
-def test_strips_full_csi_sequences_not_just_esc() -> None:
     # Dropping lone ESC would leave "[31m" behind; the whole sequence goes.
     assert sanitize_page_text("\x1b[31mREJECTED\x1b[0m, REASON=12") == "REJECTED, REASON=12"
 
-
-def test_drops_bidi_overrides() -> None:
     assert sanitize_page_text("LFAREA\u202e\u2066 512M\u2069\u202c ok") == "LFAREA 512M ok"
 
-
-def test_drops_zero_width_and_bom() -> None:
     assert sanitize_page_text("\ufeffIEA\u200b500\u200cI\u200d!") == "IEA500I!"
 
-
-def test_preserves_whitespace_newlines_and_unicode() -> None:
     text = "    //OUTDATA DD DSN=X,\n\t//            UNIT=SYSDA\nGröße: 512M 日本語 🙂"
     assert sanitize_page_text(text) == text
 
-
-def test_empty_and_plain_passthrough() -> None:
     assert sanitize_page_text("") == ""
     assert sanitize_page_text("plain narrative prose.") == "plain narrative prose."
 
