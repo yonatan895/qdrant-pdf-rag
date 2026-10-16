@@ -1120,7 +1120,7 @@ and the old physical **and its own metadata**. Alias rollback still needs
 compatible settings and reader revalidation. Retain old state until readers
 have drained; GC is an explicit operator action, never automatic. See
 [serving lifetime](agent.md#serving-contract)
-and [release recovery](crc-release-verification.md).
+and [release recovery](release-verification.md#kind-acceptance).
 
 **Existing evidence:** `tests/test_ingest_completion.py` checks per-document failure
 boundaries; `tests/test_qdrant_io.py` checks corpus-constructor forwarding and

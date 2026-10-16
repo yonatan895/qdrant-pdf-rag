@@ -17,7 +17,7 @@ owns context, conflicts, task/review and handoff formats.
 | **extraction/ranking** (extraction, chunking, identifiers, filters, ranking, embedding representation) | Common checks (`sh scripts/tools/run-task.sh qa:check`); source-fidelity/retrieval tests; private stored-content census on real manuals (duplicate-text rate, page-label coverage, chunk type/length distribution, top hits for fixed real queries; counts and outcomes only); relevant L1 (`sh scripts/tools/run-task.sh eval:gate-l1`) / fresh-corpus regression (`sh scripts/tools/run-task.sh eval:paraphrase`); intended-mode semantic evaluation (`sh scripts/tools/run-task.sh eval:retrieval EMBED_MODE=vllm`) and before/after per-class attribution where retrieval behavior changes (full ladder rungs 1–7); chat/condensation requires `sh scripts/tools/run-task.sh eval:chat` | Real model/corpus evidence where semantics are claimed; synthetic/hash runs are not semantic acceptance; disposable simulation / mock vLLM for plumbing, GPU or live gateway for semantic evaluation |
 | **HTTP/lifecycle** (HTTP/MCP/browser lifecycle) | Common checks (`sh scripts/tools/run-task.sh qa:check`); Rung 6 live agent probes: actual relevant client/transport behavior, `/healthz`/`/livez`, trap refusal (0 citations), legit query grounded (≥1 citation), overlong 422 fixed envelope, SSE chunk token/final integrity, cancellation and finalization; browser execution only for browser behavior | Controllable test server/source; running agent + disposable Qdrant + mock/real gateway + local Jaeger; no live z/OS/Splunk by default |
 | **packaging/deploy** (packaging/deployment/defaults/identity) | Applicable union plus existing artifact/render/bootstrap/migration checks (`sh scripts/tools/run-task.sh qa:check` including `tests/test_airgap_*.py`, `sh scripts/tools/run-task.sh airgap:dryrun` with zero leftover placeholders, string quoting checks, storage class checks refusing NFS for block data, gateway Secret references) and explicit compatibility decision; operational changes select relevant topology acceptance | Preserve air-gap and authorized site boundaries; hermetic shell stubs, local Kind cluster, or ephemeral lab namespace |
-| **release promotion** (release promotion) | Exact bundle/image, configuration, corpus/model and supported topology acceptance from release runbooks (`docs/crc-release-verification.md`); `probe_gateway.py --stream` from pod; frozen holdout evaluation under `VENUE=rc` (`sh scripts/tools/run-task.sh eval:holdout`); layered harness L1–L4 where applicable | Operator-authorized site / CRC acceptance cluster, platform model pool, real corpus; separate from ordinary PR merge; no substitution with a mock or skipped release lane |
+| **release promotion** (release promotion) | Exact bundle/image, configuration, corpus/model and supported topology acceptance from release runbooks (`docs/release-verification.md`, then site OpenShift acceptance in `docs/install_and_ops.md`); `probe_gateway.py --stream` from pod; frozen holdout evaluation under `VENUE=rc` (`sh scripts/tools/run-task.sh eval:holdout`); layered harness L1–L4 where applicable | Operator-authorized site and the release gate's Kind lane, platform model pool, real corpus; separate from ordinary PR merge; no substitution with a mock or skipped release lane |
 
 **Data invariant protection (cross-cutting):** Defaults, UUID5 chunk keys, 4-type `chunk_type` vocabulary (`message`, `syntax`, `table`, `narrative`), residue audit, fail-closed contracts, and production constants require a dedicated approved concern split from features, evaluated against mode-keyed baselines with full A/B evidence. Documentation, tooling, or refactoring PRs cannot silently alter, suppress, or waive data invariants.
 
@@ -92,7 +92,7 @@ and `--basetemp` trees there consumed gigabytes of RAM (check with
 | Disposable Qdrant simulation | Owned disposable container and generated corpus; deterministic model stand-in | Real client/server projection, storage and API behavior; not real-model quality or distributed HA |
 | Gateway-shaped local development | Explicitly selected local backends behind real pinned gateway, Qdrant/Jaeger/agent and authorized scratch corpus | Model/gateway/application integration and relevant eval; no production topology claim |
 | Published-bundle Kind | Fresh disposable cluster/registry and the downloaded bundle, documented sizing overrides | Same deployment pipeline/artifact; deterministic computation lanes prove plumbing. Single-node runs do not prove distributed HA |
-| Production / CRC acceptance | Operator-authorized site resources and exact candidate; private data under its runbook | Real SCC/TLS/identity/storage/model/corpus checks; CRC fit/fallback and missing combined coverage must be recorded |
+| Production acceptance | Operator-authorized site resources and exact candidate; private data under its runbook | Real SCC/TLS/identity/storage/model/corpus checks; OpenShift checks are first exercised on the site and must be recorded |
 
 The current task's prerequisite check is `sh scripts/tools/run-task.sh dev:doctor` (default unit).
 It diagnoses tools/runtime, not application acceptance. Explicit `sim`, `load`
@@ -104,8 +104,8 @@ reconfigure, ingest into or test a private/live deployment. Keep synthetic
 rehearsal cleanup away from [preserved real-corpus resources](local-real-corpus.md).
 
 Local cluster procedure: [install and operations](install_and_ops.md).
-Release transfer requires [CRC verification](crc-release-verification.md) and
-its exact-bundle record; Kind and dry-run success cannot replace it.
+Release transfer requires [the release gate](release-verification.md) and
+its exact-bundle record; ordinary Kind and dry-run success cannot replace it.
 
 ### Component-debug bring-up (GPU / dev only)
 
@@ -449,15 +449,14 @@ Use [the shared review format](agent-workflow.md#review-handoff) and
 [PR template](../.github/pull_request_template.md). Record exact SHA, commands,
 exit codes, relevant counts, evidence locations and anything not run.
 
-## Windows CRC alongside both real models
+## Release rehearsal with both real models
 
-[local-crc-environment.md](local-crc-environment.md) owns the exact 32 GiB host
-setup: `LOCAL_CRC_32GB`, sequential model starts, WSL reclamation, authenticated
-TLS gateway/registry, Windows API clients and the approved small synthetic
-workload sizing. Reranking is explicitly disabled. This profile does not change
+[release-verification.md](release-verification.md) owns the release gate and its
+setup: pinned model views under `LOCAL_RT_8GB`, sequential model starts, the
+authenticated TLS gateway/registry, the disposable Kind cluster and the small
+synthetic workload sizing. Reranking is explicitly disabled. This does not change
 production settings or model ownership.
 
-The release gate is [crc-release-verification.md](crc-release-verification.md).
 Require `probe_gateway.py --require-reasoning --stream` from an actual application
 pod and preserve the exact tested bundle. The local/CI strict-finish provider
 protects against LiteLLM converting a missing provider finish into success;
