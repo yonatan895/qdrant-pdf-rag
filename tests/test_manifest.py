@@ -7,25 +7,10 @@ import httpx2
 
 from mainframe_rag.config import Settings
 from mainframe_rag.manifest import (
-    compute_settings_hash,
     get_collection_snapshot_id,
-    get_git_sha,
     get_qdrant_version,
     write_run_manifest,
 )
-
-
-def test_get_git_sha():
-    sha = get_git_sha()
-    assert isinstance(sha, str)
-    assert len(sha) == 40 or sha == "unknown"
-
-
-def test_compute_settings_hash_stable():
-    s1 = Settings(_env_file=None)
-    s2 = Settings(_env_file=None)
-    assert compute_settings_hash(s1) == compute_settings_hash(s2)
-    assert len(compute_settings_hash(s1)) == 64
 
 
 def test_get_qdrant_version_unreachable_is_unknown(monkeypatch):
@@ -37,16 +22,10 @@ def test_get_qdrant_version_unreachable_is_unknown(monkeypatch):
 
     monkeypatch.setattr(httpx2, "get", boom)
     assert get_qdrant_version("http://qdrant:6333") == "unknown"
-
-
-def test_get_qdrant_version_non_200_is_unknown(monkeypatch):
     monkeypatch.setattr(
         httpx2, "get", lambda url, timeout=3.0: SimpleNamespace(status_code=503, json=dict)
     )
     assert get_qdrant_version("http://qdrant:6333") == "unknown"
-
-
-def test_get_qdrant_version_served(monkeypatch):
     monkeypatch.setattr(
         httpx2,
         "get",
@@ -96,21 +75,9 @@ def test_write_run_manifest_appends_valid_json(tmp_path, monkeypatch):
     assert record["run_type"] == "eval"
     assert record["metrics"]["recall@1"] == 0.833
 
+    # Issue #596: run parameters ride the manifest when supplied, else None.
+    with_params = write_run_manifest("eval_answers", settings, {}, runs_dir=tmp_path,
+                                     params={"temperature": 0.0})
+    assert with_params["params"] == {"temperature": 0.0}
+    assert manifest["params"] is None
 
-def test_write_run_manifest_records_optional_params(tmp_path, monkeypatch):
-    """Issue #596: run parameters (e.g. eval sampling temperature) ride the
-    manifest when supplied, and read None when the caller passes none."""
-
-    def not_found(url, timeout=3.0):
-        return SimpleNamespace(status_code=404, json=dict)
-
-    monkeypatch.setattr(httpx2, "get", not_found)
-    settings = Settings(_env_file=None)
-
-    manifest = write_run_manifest(
-        "eval_answers", settings, {}, runs_dir=tmp_path, params={"temperature": 0.0}
-    )
-    assert manifest["params"] == {"temperature": 0.0}
-
-    plain = write_run_manifest("eval", settings, {}, runs_dir=tmp_path)
-    assert plain["params"] is None

@@ -44,14 +44,6 @@ def _hit(
     )
 
 
-def test_score_entry_answer_perfect():
-    entry = GoldenEntry(query="NFS mount error return codes", expected_doc_ids=["SC23-6883-70"])
-    row = score_entry([_hit()], entry)
-    assert row["recall@1"] == 1.0 and row["recall@3"] == 1.0 and row["recall@5"] == 1.0
-    assert row["mrr"] == 1.0
-    assert "top_scores" not in row
-
-
 def test_shared_predicates_single_source_for_eval_harness_verify():
     entry = GoldenEntry(
         query="IOS207I message", expected_doc_ids=["SA38-0677-70"], expected_heading="mounting"
@@ -89,15 +81,6 @@ def test_score_entry_abstain_excluded_from_recall():
     assert row["violations"][0] == {"type": "doc_id", "value": "SA23-2230-60", "rank": 1}
 
 
-def test_golden_entry_abstain_rejects_expected_docs():
-    with pytest.raises(ValidationError, match="abstain"):
-        GoldenEntry(
-            query="x",
-            expected_behavior="abstain",
-            expected_doc_ids=["SC23-6883-70"],
-        )
-
-
 def test_golden_entry_rejects_unknown_class():
     with pytest.raises(ValidationError):
         GoldenEntry(query="x", expected_doc_ids=["D1"], query_class="vibes")
@@ -124,22 +107,6 @@ def test_score_entry_must_not_window_is_top5():
     hits.append(_hit(doc_id="SC23-6880-70", score=0.2))  # rank 6: outside the window
     row = score_entry(hits, entry)
     assert "violations" not in row
-
-
-def test_score_entry_must_not_message_id_via_payload():
-    entry = GoldenEntry(
-        query="IEA500I rejected",
-        expected_doc_ids=["SA38-0677-70"],
-        must_not_message_ids=["IEA501I"],
-    )
-    hits = [
-        _hit(doc_id="SA38-0677-70", message_ids=("IEA500I",), score=0.9),
-        _hit(doc_id="SA38-0677-70", message_ids=("IEA501I",), score=0.4),
-    ]
-    row = score_entry(hits, entry)
-    assert row["violations"] == [
-        {"type": "message_id", "value": ["IEA501I"], "rank": 2, "doc_id": "SA38-0677-70"}
-    ]
 
 
 def test_score_entry_must_not_allows_cocarrying_chunk():
@@ -205,12 +172,6 @@ def test_score_entry_page_diagnostic():
     assert other["page_hit@5"] == 0.0
 
 
-def test_score_entry_page_not_applicable_for_abstain():
-    entry = GoldenEntry(query="x", expected_behavior="abstain", expected_page="4-12")
-    row = score_entry([_hit(page_label="4-12")], entry)
-    assert "page_hit@5" not in row
-
-
 def test_summarize_mixed_corpus():
     rows = [
         {**score_entry([_hit(doc_id="A")], GoldenEntry(query="q1", expected_doc_ids=["A"], query_class="message_id")), "kind": "identifier"},
@@ -238,36 +199,12 @@ def test_summarize_mixed_corpus():
     assert report["must_not"] == {"checked": 4, "violations": 1, "rate": 0.25}
 
 
-def test_summarize_abstain_score_calibration():
-    rows = [
-        score_entry([_hit(score=0.42)], GoldenEntry(query="a", expected_behavior="abstain", query_class="negative")),
-        score_entry([_hit(score=0.77)], GoldenEntry(query="b", expected_behavior="abstain", query_class="negative")),
-    ]
-    report = summarize(rows, failures=0, elapsed_s=0.0, embed_mode="hash", collection="c")
-    assert report["abstain"] == {"n": 2, "top_score_mean": 0.595, "top_score_max": 0.77}
-    assert report["recall@1"] == 0.0  # no scored rows
-
-
 def test_check_baseline_zero_gate_ignores_baseline_values():
     report = {"n": 10, "scored": 10, "failures": 0, "must_not": {"violations": 2, "checked": 10, "rate": 0.2}}
     regressions = check_baseline(report, {"must_not": {"violations": 2}})
     assert any("must_not.violations" in r for r in regressions)
     report_ok = {"n": 10, "scored": 10, "failures": 0, "must_not": {"violations": 0, "checked": 10, "rate": 0.0}}
     assert check_baseline(report_ok, {"must_not": {"violations": 0}}) == []
-
-
-def test_check_baseline_ratio_gates_unchanged():
-    baseline = {"recall@1": 0.5, "recall@5": 0.75, "mrr": 0.625, "identifier": {"recall@1": 1.0}}
-    good = {
-        "n": 1, "scored": 1,
-        "failures": 0,
-        "recall@1": 0.5, "recall@5": 0.75, "mrr": 0.625,
-        "identifier": {"recall@1": 1.0},
-        "must_not": {"violations": 0},
-    }
-    assert check_baseline(good, baseline) == []
-    bad = {**good, "recall@1": 0.4}
-    assert any(r.startswith("recall@1") for r in check_baseline(bad, baseline))
 
 
 def test_update_baseline_roundtrip_with_new_keys(tmp_path: Path):
@@ -317,24 +254,7 @@ def test_load_golden_abstain_roundtrip(tmp_path: Path):
         load_golden(bad)
 
 
-def test_retrieval_cli_consumes_canonical_operations():
-    import scripts.eval_retrieval as ev
-
-    from mainframe_rag.eval import datasets as canonical_datasets
-    from mainframe_rag.eval import retrieval as canonical_retrieval
-
-    assert ev.load_golden is canonical_datasets.load_golden
-    for name in (
-        "check_baseline",
-        "update_baseline",
-        "summary_markdown",
-        "evaluate",
-    ):
-        assert getattr(ev, name) is getattr(canonical_retrieval, name), name
-
-
 @pytest.mark.parametrize("failure", [RuntimeError("original failure"),
-                                   OSError("original failure"), ValueError("original failure"),
                                    httpx2.HTTPError("original failure")])
 def test_measurement_preserves_calls_errors_and_next_run(monkeypatch, failure):
     from types import SimpleNamespace

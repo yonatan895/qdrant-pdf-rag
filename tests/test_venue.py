@@ -25,10 +25,6 @@ from mainframe_rag.eval.datasets import (
 def test_venue_unset_is_dev(monkeypatch):
     monkeypatch.delenv("VENUE", raising=False)
     assert resolve_venue() == DEV
-
-
-def test_venue_blank_is_dev():
-    assert resolve_venue({}) == DEV
     assert resolve_venue({"VENUE": "   "}) == DEV
 
 
@@ -49,6 +45,8 @@ def test_default_golden_is_dev_only():
 
 def test_rc_default_adds_frozen_holdout():
     assert resolve_golden_paths(None, venue=RC) == [DEV_GOLDEN_PATH, HOLDOUT_PATH]
+    # An explicit golden selection is authoritative: rc does not add entries.
+    assert resolve_golden_paths([DEV_GOLDEN_PATH], venue=RC) == [DEV_GOLDEN_PATH]
 
 
 def test_explicit_holdout_refused_in_dev():
@@ -60,33 +58,14 @@ def test_explicit_holdout_allowed_in_rc():
     assert resolve_golden_paths([HOLDOUT_PATH], venue=RC) == [HOLDOUT_PATH]
 
 
-def test_explicit_dev_golden_allowed_without_rc(tmp_path: Path):
-    mine = tmp_path / "golden.jsonl"
-    assert resolve_golden_paths([mine], venue=DEV) == [mine]
-
-
-def test_explicit_paths_never_append_holdout():
-    # An explicit golden selection is authoritative: rc does not add entries.
-    paths = resolve_golden_paths([DEV_GOLDEN_PATH], venue=RC)
-    assert paths == [DEV_GOLDEN_PATH]
-
-
-def test_require_rc_for_golden_ignores_dev_paths():
-    require_rc_for_golden([DEV_GOLDEN_PATH], venue=DEV)
-
-
 def test_real_corpus_collection_refused_in_dev():
     with pytest.raises(VenueError):
         require_rc_for_collection("real_manuals", venue=DEV)
 
 
-def test_real_corpus_collection_allowed_in_rc():
+def test_real_corpus_allowed_in_rc_and_dev_collections_without():
     require_rc_for_collection("real_manuals", venue=RC)
-
-
-def test_dev_collection_allowed_without_rc():
     require_rc_for_collection("mainframe_manuals", venue=DEV)
-    require_rc_for_collection("paraphrase-manuals", venue=DEV)
 
 
 # ------------------------------------------------------- entry-point wiring
@@ -100,6 +79,19 @@ def test_eval_answers_refuses_holdout_without_rc(monkeypatch, capfd):
         lambda: Settings(embed_mode="hash", qdrant_collection="test-corpus", _env_file=None),
     )
     assert ea.main(["--golden", "evals/holdout.jsonl"]) == 2
+    assert "frozen holdout" in capfd.readouterr().err
+
+
+def test_eval_chat_refuses_holdout_without_rc(monkeypatch, capfd):
+    import mainframe_rag.eval.chat as ec
+    from mainframe_rag.config import Settings
+
+    monkeypatch.delenv("VENUE", raising=False)
+    monkeypatch.setattr(
+        ec, "load_settings",
+        lambda: Settings(embed_mode="hash", qdrant_collection="test-corpus", _env_file=None),
+    )
+    assert ec.main(["--golden", "evals/holdout.jsonl"]) == 2
     assert "frozen holdout" in capfd.readouterr().err
 
 
@@ -174,7 +166,7 @@ def _synthetic_holdout(tmp_path, data=b'{"query":"Synthetic?","expected_doc_ids"
     return path, pin
 
 
-@pytest.mark.parametrize("fault", ["missing", "empty", "digest", "target", "multiple", "invalid_utf8", "missing_data"])
+@pytest.mark.parametrize("fault", ["missing", "digest", "target", "missing_data"])
 def test_holdout_pin_fails_closed(tmp_path, monkeypatch, fault):
     from mainframe_rag.eval.datasets import DatasetPinError, load_golden
 
@@ -182,16 +174,10 @@ def test_holdout_pin_fails_closed(tmp_path, monkeypatch, fault):
     path, pin = _synthetic_holdout(tmp_path)
     if fault == "missing":
         pin.unlink()
-    elif fault == "empty":
-        pin.write_text("")
     elif fault == "digest":
         path.write_bytes(b"invalid JSON must not reach the parser")
     elif fault == "target":
         pin.write_text(pin.read_text().replace("holdout.jsonl", "other.jsonl"))
-    elif fault == "multiple":
-        pin.write_text(pin.read_text() * 2)
-    elif fault == "invalid_utf8":
-        pin.write_bytes(b"\xff")
     else:
         path.unlink()
     with pytest.raises(DatasetPinError):

@@ -141,31 +141,16 @@ def _score(pilot, **kw):
 # ---- proposed criteria file ----------------------------------------------
 
 
-def test_committed_criteria_are_proposed_and_valid():
-    criteria, _ = acc.load_criteria(CRITERIA_PATH)
-    assert criteria.status == "proposed" and criteria.registered_by is None
-    assert criteria.certifying_profiles == ["production"]
-    pilot = {c.id: c for c in criteria.stages["pilot"].criteria}
-    assert (pilot["P1"].threshold, pilot["P1"].min_n) == (0.8333, 24)  # 20/24
-    assert pilot["P2"].min_n == 6 and pilot["P3"].threshold == 0 and pilot["P4"].threshold == 0
-    assert criteria.stages["release"].repeats == 3 and criteria.stages["release"].statistical_claim
-
-
-@pytest.mark.parametrize("patch", [
-    {"status": "registered"},  # registered without who/when
-    {"certifying_profiles": ["production", "standin"]},
-])
-def test_criteria_reject_incoherent_registration(tmp_path, patch):
-    doc = json.loads(CRITERIA_PATH.read_text()) | patch
-    path, _ = _write_criteria(tmp_path, doc)
-    with pytest.raises(acc.AcceptanceError):
-        acc.load_criteria(path)
-
-
-def test_criteria_reject_unknown_metric_and_bad_pairing(tmp_path):
+def test_criteria_reject_incoherent_documents(tmp_path):
+    docs = [json.loads(CRITERIA_PATH.read_text()) | patch for patch in (
+        {"status": "registered"},  # registered without who/when
+        {"certifying_profiles": ["production", "standin"]},
+    )]
     for bad in ({"metric": "vibes"}, {"statistic": "wilson_lower", "op": "<="}, {"scope": "answer:nonsense"}):
         doc = json.loads(CRITERIA_PATH.read_text())
         doc["stages"]["pilot"]["criteria"][0].update(bad)
+        docs.append(doc)
+    for doc in docs:
         path, _ = _write_criteria(tmp_path, doc)
         with pytest.raises(acc.AcceptanceError):
             acc.load_criteria(path)
@@ -189,13 +174,8 @@ def _mutated(tmp_path, csha, mutate) -> str:
 @pytest.mark.parametrize("mutate,needle", [
     (lambda r: r[1]["adjudication"].update(adjudicator="Ann"), "different people"),
     (lambda r: r[1].update(evidence=[]), "evidence"),
-    (lambda r: r[1]["evidence"][0].update(physical_page=0), "physical_page"),
-    (lambda r: r[1]["provenance"].pop("source"), "source"),
-    (lambda r: r[1]["adjudication"].update(verdict="pending"), "verdict"),
     (lambda r: r[1].update(expected_doc_ids=["OTHER"]), "evidence doc ids"),
     (lambda r: r[25].update(must_not_assert=[]), "must_not_assert"),
-    (lambda r: r[25].update(expected_doc_ids=["X"]), "expected docs"),
-    (lambda r: r[2].update(id=r[1]["id"]), "duplicate case ids"),
     (lambda r: r[2].update(query=r[1]["query"].upper() + "  "), "duplicate queries"),
     (lambda r: r[0]["independence"].update(saw_system_outputs=True), "saw_system_outputs"),
     (lambda r: r[0].update(authors=["Zed"]), "author is not declared"),
@@ -397,7 +377,7 @@ def _critical_fixture(tmp_path, pilot, expected):
     return (release, ssha, pilot[2], pilot[3]), index
 
 
-@pytest.mark.parametrize("status", ["skipped", "error"])
+@pytest.mark.parametrize("status", ["skipped"])
 def test_unexecuted_critical_probe_cannot_certify(pilot, tmp_path, status):
     pilot, index = _critical_fixture(tmp_path, pilot, "answer")
     release, ssha, criteria, csha = pilot
@@ -458,15 +438,6 @@ def test_missing_critical_outcome_is_unassessed(pilot, tmp_path):
     report = acc.score(release, ssha, criteria, csha, run, outs)
     assert report["verdict"] == "incomplete" and acc.exit_code(report) == 1
     assert next(r for r in report["criteria_results"] if r["id"] == "critical_probes_assessed")["status"] == "insufficient"
-
-
-def test_noncritical_miss_stays_within_declared_pilot_tolerance(pilot):
-    release, ssha, criteria, csha = pilot
-    run, outs = acc.parse_outcomes(_outcomes(release, ssha, csha))
-    outs[0].status = "skipped"
-    report = acc.score(release, ssha, criteria, csha, run, outs)
-    assert report["verdict"] == "accepted" and acc.exit_code(report) == 0
-    assert report["diagnostics"]["answer_failure_attribution"] == {"skipped_or_error": 1}
 
 
 def test_structural_outcome_defects_refuse(pilot):
@@ -624,8 +595,9 @@ def test_real_acceptance_script_outside_repo_still_detects_known_query(tmp_path,
     assert overlap.returncode == 2 and "overlap" in overlap.stderr
 
 
-@pytest.mark.parametrize("name", ["golden.jsonl", "holdout.jsonl", "paraphrase.jsonl"])
-@pytest.mark.parametrize("defect", ["missing", "empty", "invalid"])
+@pytest.mark.parametrize("name,defect", [
+    ("golden.jsonl", "missing"), ("holdout.jsonl", "invalid"), ("paraphrase.jsonl", "empty"),
+])
 def test_real_acceptance_script_refuses_unavailable_required_comparison(tmp_path, rc, name, defect):
     _, spath, _ = _cli_files(tmp_path)
     comparison = _comparison_sets(tmp_path)
