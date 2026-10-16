@@ -2,7 +2,7 @@
 
 Tests validate.sh in dry-run mode against hermetic stubs:
 - Required env vars fail-closed when unset.
-- Format checks: positive integer DENSE_DIM, http/https VLLM_BASE_URL.
+- Format checks: positive integer DENSE_DIM, http/https EMBED_BASE_URL.
 - Storage class checks: NFS-looking names refused.
 - Missing CLI tools fail-closed.
 - Clean configuration exits 0.
@@ -65,7 +65,7 @@ def _run(tree, extra_env=None):
         "EMBED_MODEL": "ibm-granite/granite-embedding-125m-english",
         "DENSE_DIM": "768",
         "EMBED_MODEL_REVISION": "rev-1",
-        "VLLM_BASE_URL": "http://vllm:8000/v1",
+        "EMBED_BASE_URL": "http://vllm:8000/v1",
         # Issue #360: fixtures select the explicit single-node 1/1/1 profile;
         # the production preset is exercised by its own test below.
         "QDRANT_SHARD_NUMBER": "1",
@@ -97,8 +97,10 @@ def test_validate_clean_exits_zero(tree):
                  id='validate_write_above_replication_fails_closed'),
     pytest.param({'OTEL_EXPORTER_OTLP_ENDPOINT': 'jaeger:4318'}, None, ('must be http(s) or off',),
                  id='validate_tracing_bad_endpoint_fails_closed'),
-    pytest.param({'INTERNAL_REGISTRY': None, 'REGISTRY_INTERNAL': None, 'STORAGE_CLASS': None, 'EMBED_MODEL_REVISION': None}, None, ('INTERNAL_REGISTRY', 'STORAGE_CLASS', 'EMBED_MODEL_REVISION', 'required variables unset'),
+    pytest.param({'INTERNAL_REGISTRY': None, 'STORAGE_CLASS': None, 'EMBED_MODEL_REVISION': None}, None, ('INTERNAL_REGISTRY', 'STORAGE_CLASS', 'EMBED_MODEL_REVISION', 'required variables unset'),
                  id='validate_lists_all_missing_vars_at_once'),
+    pytest.param({'INTERNAL_REGISTRY': None, 'REGISTRY_INTERNAL': 'old.example:5000'}, None, ('INTERNAL_REGISTRY', 'required variables unset'),
+                 id='validate_removed_registry_alias_is_not_honored'),
     pytest.param({'STORAGE_CLASS': 'nfs-client'}, None, ('looks like NFS',),
                  id='validate_nfs_storage_refused'),
     pytest.param({'DENSE_DIM': 'not-a-number'}, None, ('DENSE_DIM must be a positive integer',),
@@ -109,8 +111,8 @@ def test_validate_clean_exits_zero(tree):
                  id='validate_whitespace_embed_revision_fails'),
     pytest.param({'RERANK_ENDPOINT_ORDER': 'bogus'}, None, ('RERANK_ENDPOINT_ORDER must be score_first or rerank_first',),
                  id='validate_rerank_endpoint_order_bad_value_refused'),
-    pytest.param({'VLLM_BASE_URL': 'ftp://vllm:8000'}, None, ('VLLM_BASE_URL must begin with http:// or https://',),
-                 id='validate_vllm_url_bad_scheme_refused'),
+    pytest.param({'EMBED_BASE_URL': 'ftp://vllm:8000'}, None, ('EMBED_BASE_URL must begin with http:// or https://',),
+                 id='validate_embed_url_bad_scheme_refused'),
     pytest.param({'GATEWAY_API_KEY_SECRET': 'Bad_Name!'}, None, ('GATEWAY_API_KEY_SECRET must be a DNS-subdomain name',),
                  id='validate_gateway_secret_bad_name_fails_closed'),
     pytest.param({'GATEWAY_BASE_URL': 'sample-api/v1'}, None, ('GATEWAY_BASE_URL must begin with http:// or https://',),
@@ -210,7 +212,7 @@ STORAGE_CLASS=nfs-client
 EMBED_MODEL=file-model
 EMBED_MODEL_REVISION=file-rev-should-lose
 DENSE_DIM=not-a-number
-VLLM_BASE_URL=ftp://file-vllm:8000
+EMBED_BASE_URL=ftp://file-vllm:8000
 GATEWAY_API_KEY_SECRET=file-secret-should-lose
 """
 
@@ -221,7 +223,7 @@ STORAGE_CLASS=standard
 EMBED_MODEL=ibm-granite/granite-embedding-125m-english
 EMBED_MODEL_REVISION=file-rev-1
 DENSE_DIM=768
-VLLM_BASE_URL=http://vllm:8000/v1
+EMBED_BASE_URL=http://vllm:8000/v1
 """
 
 
@@ -267,13 +269,12 @@ def test_env_file_feeds_unset_and_empty_vars_from_path_with_spaces(tree):
         {
             "AIRGAP_ENV": str(spaced),
             "INTERNAL_REGISTRY": "",
-            "REGISTRY_INTERNAL": None,
             "NAMESPACE": None,
             "STORAGE_CLASS": None,
             "EMBED_MODEL": None,
             "EMBED_MODEL_REVISION": None,
             "DENSE_DIM": None,
-            "VLLM_BASE_URL": None,
+            "EMBED_BASE_URL": None,
         },
     )
     assert r.returncode == 0, r.stderr
@@ -766,7 +767,7 @@ def test_model_validation_preserves_caller_over_file_precedence(tree):
     path = tree / "selected.env"
     path.write_text("LLM_BASE_URL=invalid-file-url\nLLM_MODEL_REASONING=code\nGATEWAY_BASE_URL=https://file-gateway/v1\n")
     result = _run(tree, {"AIRGAP_ENV": str(path), "LLM_BASE_URL": "https://caller-reasoning/v1",
-                         "GATEWAY_BASE_URL": "https://caller-gateway/v1"})
+                         "GATEWAY_BASE_URL": "https://caller-gateway/v1", "EMBED_BASE_URL": None})
     assert result.returncode == 0, result.stderr
     assert "EMBED_BASE_URL:    https://caller-gateway/v1" in result.stdout
     result = _run(tree, {"AIRGAP_ENV": str(path), "LLM_BASE_URL": "private-invalid-url"})
@@ -791,7 +792,7 @@ def test_shipped_example_model_mode_is_explicit(tree, shared):
     contents = (REPO / "airgap.env.example").read_text()
     contents += "\nGATEWAY_BASE_URL=https://shared.example/v1\n" if shared else "\nLLM_MODEL_REASONING=\n"
     path.write_text(contents)
-    result = _run(tree, {"AIRGAP_ENV": str(path)})
+    result = _run(tree, {"AIRGAP_ENV": str(path), **({"EMBED_BASE_URL": None} if shared else {})})
     assert result.returncode == 0, result.stderr
     expected = "https://shared.example/v1" if shared else "http://vllm:8000/v1"
     assert f"EMBED_BASE_URL:    {expected}" in result.stdout

@@ -47,6 +47,8 @@ def _settings(**overrides):
 
 
 def _record(dense_ids, ce=None, meta=None, second_leg=None, docs=None):
+    # Every capture records its per-leg depth; 200 is the capture default.
+    meta = {"depth": 200, **(meta or {})}
     docs = docs or {}
     if second_leg is None and docs:
         legs = [{"effective_text": "q", "dense": [_cp(pid, docs.get(pid, pid)) for pid in dense_ids],
@@ -80,9 +82,11 @@ def test_replay_limits_truncate_and_refuse_beyond_the_recorded_pool():
     deep = replace(SweepConfig(label="deep"), prefetch_limit=100)
     with pytest.raises(ValueError, match="exceeds the recorded pool depth 50"):
         replay_record(_record(["c0"], meta={"depth": 50}), deep, _settings())
-    # Legacy pool (no recorded depth) proves only its longest leg.
-    with pytest.raises(ValueError, match="recorded pool depth 2"):
-        replay_record(_record(["c0", "c1"]), deep, _settings())
+    # A pool without a recorded depth predates depth recording: refused.
+    undated = _record(["c0", "c1"])
+    del undated["_meta"]["depth"]
+    with pytest.raises(ValueError, match="predates depth recording"):
+        replay_record(undated, deep, _settings())
     # run_config skips (never scores) an unsupported config.
     records = [_record(["c0"], meta={"depth": 50}), {"query": "broken", "error": "x"}]
     assert unsupported_reason(records, SweepConfig(label="p")) is None
@@ -104,7 +108,7 @@ def test_replay_split_modes_merge_differently():
             {"effective_text": "q2", "dense": legs[1], "sparse": []},
         ],
         {},
-        {"split_mode": "comparative"},
+        {"split_mode": "comparative", "depth": 200},
     )
     config = SweepConfig(label="t")
     assert replay_record(rec, config, _settings())[0].chunk_id == "a"
@@ -200,19 +204,19 @@ def test_replay_page_cap_buckets_by_physical_page_like_live():
     """Unlabelled pages share the printed label ''; live diversification
     (query._page_key) buckets by physical page, so replay must too."""
     pts = [_cp("a", "D", "", page_start=10), _cp("c", "D", "", page_start=10), _cp("b", "D", "", page_start=11)]
-    record = legs_to_record("q", "nl", [{"effective_text": "q", "dense": pts, "sparse": []}], {}, {})
+    record = legs_to_record("q", "nl", [{"effective_text": "q", "dense": pts, "sparse": []}], {}, {"depth": 200})
     config = SweepConfig(label="p", max_per_page=1, max_per_doc=3)
     # The same-page "c" is deferred behind the next page, not ranked second.
     assert [h.chunk_id for h in replay_record(record, config, _settings())] == ["a", "b", "c"]
-    legacy_pts = [_cp(p, "D", "", page_start=None) for p in "acb"]
-    legacy = legs_to_record("q", "nl", [{"effective_text": "q", "dense": legacy_pts, "sparse": []}], {}, {})
+    unpaged_pts = [_cp(p, "D", "", page_start=None) for p in "acb"]
+    unpaged = legs_to_record("q", "nl", [{"effective_text": "q", "dense": unpaged_pts, "sparse": []}], {}, {"depth": 200})
     # Without a physical page every unlabelled chunk shares one bucket: RRF order stands.
-    assert [h.chunk_id for h in replay_record(legacy, config, _settings())] == ["a", "c", "b"]
+    assert [h.chunk_id for h in replay_record(unpaged, config, _settings())] == ["a", "c", "b"]
 
 
 def test_join_headings_refuses_a_moved_physical_page():
     pts = [_cp("c1", "D", "", page_start=5)]
-    record = legs_to_record("q", "nl", [{"effective_text": "q", "dense": pts, "sparse": []}], {}, {})
+    record = legs_to_record("q", "nl", [{"effective_text": "q", "dense": pts, "sparse": []}], {}, {"depth": 200})
     same = {"c1": {"doc_id": "D", "page_label": "", "page_start": 5, "heading_path": "H"}}
     assert join_headings([record], _RetrieveClient(same), "local") == {"c1": "H"}
     moved = {"c1": {**same["c1"], "page_start": 6}}

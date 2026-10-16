@@ -121,12 +121,19 @@ def test_full_mapping_table(mapper_env):
     assert v["replicaCount"] == 2
 
 
-def test_embed_base_url_derived_from_vllm(monkeypatch, mapper_env):
+def test_removed_legacy_env_names_are_not_honored(monkeypatch, mapper_env):
+    """The removed aliases no longer stand in for the current inputs: a
+    VLLM_BASE_URL origin never supplies the embedding URL, and
+    REGISTRY_INTERNAL never supplies the registry."""
     monkeypatch.delenv("EMBED_BASE_URL")
-    monkeypatch.setenv("VLLM_BASE_URL", "http://vllm:8000/v1///")
-    r, out = mapper_env()
-    assert r.returncode == 0, r.stderr
-    assert load_values(out)["models"]["embedding"]["baseUrl"] == "http://vllm:8000/v1"
+    monkeypatch.setenv("VLLM_BASE_URL", "http://vllm:8000/v1")
+    r, _ = mapper_env()
+    assert r.returncode != 0 and "EMBED_BASE_URL is required" in r.stderr
+    monkeypatch.setenv("EMBED_BASE_URL", "http://vllm:8000/v1")
+    monkeypatch.delenv("INTERNAL_REGISTRY", raising=False)
+    monkeypatch.setenv("REGISTRY_INTERNAL", "old.example:5000")
+    r, _ = mapper_env()
+    assert r.returncode != 0 and "INTERNAL_REGISTRY is not set" in r.stderr
 
 
 @pytest.mark.parametrize("token,enabled,endpoint", [

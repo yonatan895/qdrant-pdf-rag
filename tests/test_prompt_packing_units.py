@@ -951,23 +951,19 @@ def test_build_messages_tokenizer_requires_settings():
         build_messages("IEA500I", [], tokenizer=FallbackTokenizer())
 
 
-def test_legacy_prefix_excerpt_derives_its_range_and_forged_body_is_dropped():
-    """A prefix excerpt without recorded offsets reports exactly the source
-    prefix it shipped; a body that is not that source prefix is dropped at the
-    verification trim instead of being presented as evidence."""
+def test_forged_excerpt_body_is_dropped_at_the_verification_trim():
+    """A body that does not reproduce its recorded source range is dropped at
+    the verification trim instead of being presented as evidence; an honest
+    body with a small overshoot is trimmed, not dropped."""
     from mainframe_rag.agent.answer import PackedExcerpt, _verify_trim_last
-
-    hit = _hit(JCL_TEXT)
-    legacy = PackedExcerpt(index=1, hit=hit, body=JCL_STMT1 + _TRUNCATED_SUFFIX, truncated=True)
-    assert legacy.source_range() == (0, len(JCL_STMT1))
 
     lines = [f"//S{i:02d} EXEC PGM=P{i:02d},PARM=ABCDEFGHIJ" for i in range(12)]
     text = "\n".join(lines)
-    honest = [PackedExcerpt(index=1, hit=_hit(text), body=text, truncated=False)]
+    honest = [PackedExcerpt(index=1, hit=_hit(text), body=text, end=len(text))]
     _verify_trim_last(honest, used=1011, verify_limit=1000)
     assert len(honest) == 1  # a small overshoot trims, it does not drop
 
     forged_body = text.replace("S00", "XXX", 1)
-    forged = [PackedExcerpt(index=1, hit=_hit(text), body=forged_body, truncated=False)]
+    forged = [PackedExcerpt(index=1, hit=_hit(text), body=forged_body, end=len(text))]
     _verify_trim_last(forged, used=1011, verify_limit=1000)
     assert forged == []

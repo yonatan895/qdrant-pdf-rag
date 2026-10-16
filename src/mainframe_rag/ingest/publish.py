@@ -43,18 +43,15 @@ from mainframe_rag.config import Settings
 from mainframe_rag.ingest.build import (
     BUILD_SCHEMA,
     BuildBinding,
+    UnboundGenerationError,
     canonical_build_id,
     decode_build_binding,
 )
 from mainframe_rag.ingest.completion import (
-    _doc_id_filter,
-    _verify_batch,
     completion_collection_for,
     completion_collection_name,
     delete_completion,
-    delete_legacy_markers,
     is_doc_complete,
-    legacy_markers,
     plan_retire_deletes,
     representation_fingerprint,
 )
@@ -201,19 +198,18 @@ def _validate_recorded_retirements(state: dict) -> None:
     for doc_id, entry in plan.items():
         if not isinstance(doc_id, str) or not doc_id.strip() or not isinstance(entry, dict):
             raise ValueError("invalid recorded retirement entry")
-        if set(entry) != {"revs", "legacy", "whole"}:
+        if set(entry) != {"revs", "whole"}:
             raise ValueError("invalid recorded retirement fields")
         revs = entry["revs"]
         if (
             not isinstance(revs, list)
             or any(not isinstance(rev, str) or not rev.strip() for rev in revs)
-            or type(entry["legacy"]) is not bool
             or type(entry["whole"]) is not bool
         ):
             raise ValueError("invalid recorded retirement types")
-        if len(set(revs)) != len(revs) or (entry["legacy"] and not entry["whole"]):
+        if len(set(revs)) != len(revs):
             raise ValueError("invalid recorded retirement scope")
-        if not revs and not entry["legacy"]:
+        if not revs:
             raise ValueError("empty recorded retirement selection")
         normalized[doc_id] = {**entry, "revs": set(revs)}
     if requests is not None:
@@ -292,18 +288,13 @@ def commit_retired_inventory(
     count = 0
     for doc_id, plan in sorted(retire_plan.items()):
         whole = bool(plan.get("whole", False))
-        legacy = bool(plan.get("legacy", False))
         raw_revs = plan.get("revs")
         revs: set[str] = set(raw_revs) if isinstance(raw_revs, (set, frozenset, list)) else set()
         for rec in inventory.values():
             if rec.doc_id != doc_id or rec.status not in ("upserted", "skipped"):
                 continue
             should_retire = False
-            if (
-                whole
-                or (legacy and rec.source_rev is None)
-                or (rec.source_rev is not None and rec.source_rev in revs)
-            ):
+            if whole or (rec.source_rev is not None and rec.source_rev in revs):
                 should_retire = True
             if should_retire:
                 append_record(
@@ -346,12 +337,13 @@ def write_publication_metadata(
     *,
     gen_fp: str,
     corpus_fp: str,
-    build_id: str | None = None,
-    logical_alias: str | None = None,
+    build_id: str,
+    logical_alias: str,
 ) -> None:
-    """Record publication fingerprints on cutover (issue #391 Q418-R1).
-    Allows subsequent ordinary runs to recognize successful repair generations
-    as steady state."""
+    """Record publication fingerprints and the build binding on cutover
+    (issue #391 Q418-R1). Allows subsequent ordinary runs to recognize
+    successful repair generations as steady state. Every receipt binds its
+    build; unbound receipts are not written."""
     from qdrant_client import models
 
     try:
@@ -359,17 +351,15 @@ def write_publication_metadata(
     except RuntimeError:
         dim = None
     dummy_dim = dim or 1
-    build_fields = {}
-    if build_id is not None:
-        if not logical_alias:
-            raise ValueError("new builds require their logical alias")
-        build_fields = {"build_schema": BUILD_SCHEMA, "build_id": canonical_build_id(build_id),
-                        "logical_alias": logical_alias, "data_collection": settings.qdrant_collection}
-        build_fields["content_seal"] = capture_content_seal(
-            client, build_id=build_id, alias=logical_alias, physical=settings.qdrant_collection,
-            gen_fp=gen_fp, corpus_fp=corpus_fp,
-            receipt_id=publication_metadata_point_id(completions_collection),
-        )
+    if not logical_alias:
+        raise ValueError("new builds require their logical alias")
+    build_fields = {"build_schema": BUILD_SCHEMA, "build_id": canonical_build_id(build_id),
+                    "logical_alias": logical_alias, "data_collection": settings.qdrant_collection}
+    build_fields["content_seal"] = capture_content_seal(
+        client, build_id=build_id, alias=logical_alias, physical=settings.qdrant_collection,
+        gen_fp=gen_fp, corpus_fp=corpus_fp,
+        receipt_id=publication_metadata_point_id(completions_collection),
+    )
     client.upsert(
         completions_collection,
         points=[
@@ -408,6 +398,11 @@ def decode_publication_record(payload: dict, completions_collection: str) -> dic
         raise RuntimeError("invalid publication control record")
     try:
         decode_build_binding(payload, completions_collection)
+    except UnboundGenerationError as exc:
+        raise RuntimeError(
+            f"{completions_collection!r} holds a pre-build publication record: unsupported — "
+            "build the corpus into a new collection."
+        ) from exc
     except (ValueError, TypeError) as exc:
         raise RuntimeError("invalid or unsupported build control record") from exc
     return payload
@@ -416,15 +411,14 @@ def decode_publication_record(payload: dict, completions_collection: str) -> dic
 def verify_publication_seal(client: QdrantReader, completions_collection: str) -> bool:
     """Compare retained content independently of surviving completions/inventory.
 
-    Older completed receipts remain readable, without acquiring this capability.
-    A future rollback consumer must require True, never backfill a missing seal.
+    Schema-1 receipts (bound, unsealed) remain readable without acquiring this
+    capability. A future rollback consumer must require True, never backfill a
+    missing seal.
     """
     payload = read_publication_record(client, completions_collection)
     if payload is None or "content_seal" not in payload:
         return False
     binding = decode_build_binding(payload, completions_collection)
-    if binding is None:
-        raise RuntimeError("content seal lacks build identity")
     observed = capture_content_seal(
         client, build_id=binding.build_id, alias=binding.alias, physical=binding.physical,
         gen_fp=binding.gen_fp, corpus_fp=binding.corpus_fp,
@@ -631,9 +625,9 @@ def ensure_staging(
     staging data collection whose manifest is unreadable under the staging
     id. Existence alone is not completed preparation — when live carries a
     contract, the completions collection is re-copied (count-verified) from
-    live and the manifest re-keyed verbatim. Genuinely legacy live (no
-    completions collection or no manifest point) transfers nothing: absence
-    is the explicit inner-preflight outcome, not a repair. Live data and
+    live and the manifest re-keyed verbatim. An unversioned live (no
+    completions collection or no manifest point) transfers nothing: the inner
+    preflight refuses it as unsupported, never a repair. Live data and
     metadata are never modified.
     """
     from mainframe_rag.ingest.qdrant_io import clone_collection
@@ -669,7 +663,7 @@ def _transfer_staging_metadata(
     readable and identical afterward — model AND envelope state (a pending
     live must not be laundered into a committed staging via the copy).
     Otherwise preparation is incomplete and the inner preflight would
-    misread inherited state as legacy (or, worse, a publish would verify
+    misread inherited state as unversioned (or, worse, a publish would verify
     against the wrong contract). An existing but unreadable staging
     completions collection is a partial copy or a pre-re-key clone: it is
     discarded and re-copied from live, so the transferred metadata is
@@ -684,7 +678,7 @@ def _transfer_staging_metadata(
     staging_completions = completion_collection_name(staging_settings)
     live_record = read_manifest_record(client, live_completions)
     if live_record is None:
-        return  # legacy live: absence is explicit downstream, never repaired here
+        return  # unversioned live: refused by the inner preflight, never repaired here
     if client.collection_exists(staging_completions):
         # Staging-only cleanup: live is the source and is never touched, and
         # the inner run re-creates any marker it needs.
@@ -719,22 +713,16 @@ def verify_searchable_coverage(
     retired: frozenset[str] = frozenset(),
     retire_plan: dict[str, dict[str, set[str] | bool]] | None = None,
     pending_removals: frozenset[str] = frozenset(),
-    allow_approved_legacy: bool = False,
 ) -> list[str]:
     """One read-only coverage rule: every walked document verifies and every
     searchable point is attributable to a verified walked generation
-    (issue #391 current packet). Empty means attributable.
-
-    Two callers, one policy:
-    - the alias-swap gate (`verify_all_complete`) allows approved pre-361B
-      legacy membership, because a compatible committed generation may carry
-      lazily migrated history;
-    - the migration commit (`_commit_migration_representation`) is strict
-      (`allow_approved_legacy=False`): a new contract may only be declared
-      over vectors this run re-embedded. `pending_removals` are points under
-      a lock-validated `--retire-doc` plan that applies before the swap
-      audit, so the commit does not block on data whose removal is already
-      approved and enforced downstream. Never deletes."""
+    (issue #391 current packet). Empty means attributable. Shared by the
+    alias-swap gate (`verify_all_complete`) and the migration commit
+    (`_commit_migration_representation`): a contract may only be declared
+    over vectors attributable to this walk. `pending_removals` are points
+    under a lock-validated `--retire-doc` plan that applies before the swap
+    audit, so the commit does not block on data whose removal is already
+    approved and enforced downstream. Never deletes."""
     problems: list[str] = []
     for path_str, sha in walked:
         rec = inventory.get(path_str)
@@ -758,18 +746,6 @@ def verify_searchable_coverage(
             source_rev=rec.source_rev,
         ):
             problems.append(path_str)
-    legacy_ids: set[str] = set()
-    if allow_approved_legacy:
-        legacy_ids, legacy_problems = verify_approved_legacy_points(
-            client,
-            settings,
-            inventory,
-            rules_v,
-            walked_paths={p for p, _ in walked},
-            retired=retired,
-            retire_plan=retire_plan,
-        )
-        problems.extend(legacy_problems)
     problems.extend(
         audit_unmarked_residue(
             client,
@@ -780,8 +756,6 @@ def verify_searchable_coverage(
             retired,
             retire_plan,
             pending_removals=pending_removals,
-            allow_approved_legacy=allow_approved_legacy,
-            verified_legacy_ids=legacy_ids,
         )
     )
     return problems
@@ -838,7 +812,6 @@ def verify_all_complete(
             src_labels,
             retired=retired,
             retire_plan=retire_plan,
-            allow_approved_legacy=True,
         )
     )
     return problems
@@ -1109,9 +1082,7 @@ def _is_point_retired(
     if entry.get("whole"):
         return True
     revs = entry.get("revs")
-    if source_rev is not None and isinstance(revs, (set, frozenset)) and source_rev in revs:
-        return True
-    return bool(source_rev is None and entry.get("legacy"))
+    return source_rev is not None and isinstance(revs, (set, frozenset)) and source_rev in revs
 
 
 def _retired_still_present(
@@ -1124,24 +1095,14 @@ def _retired_still_present(
 ) -> str:
     """Name the exact gap when an approved removal did not fully land
     (issue #405 R1, #391 R-REV): every refusal names the operator path through,
-    never a dead end. Inspects what remains live under the retired doc_id:
-
-    - named revision(s) remain outside the walked corpus: staging changed
-      after planning (or the plan covered only part of the document) — rerun
-      to re-plan, or retire the whole document;
-    - only sourceless legacy remains after a whole-document retirement that
-      covered it: the apply-time sole-history check saw staging change —
-      rerun to re-plan;
-    - only sourceless legacy remains outside the approved removal: a
-      partial retirement never takes legacy points — whole-document
-      --retire-doc covers approved sourceless history, anything else needs
-      manual resolution.
+    never a dead end. Named revision(s) remaining outside the walked corpus
+    mean staging changed after planning (or the plan covered only part of the
+    document) — rerun to re-plan, or retire the whole document. Remaining
+    revision-less points are unsupported pre-revision data.
     """
     from mainframe_rag.ingest.qdrant_io import stored_doc_revisions
 
     remaining = stored_doc_revisions(client, staging_settings, doc_id)
-    entry = (retire_plan or {}).get(doc_id, {})
-    is_whole = bool(entry.get("whole", False))
     valid = valid_pairs or set()
     named = sorted(str(r) for r in remaining if r is not None and (doc_id, r) not in valid)
     if named:
@@ -1150,160 +1111,11 @@ def _retired_still_present(
             f"{named} — the approved removal no longer matches staging: rerun to "
             "re-plan against the current inventory, or retire the whole document."
         )
-    if entry.get("legacy"):
-        return (
-            f"{staging}: retired document {doc_id!r} still present after its approved "
-            "removal covered sourceless history — staging changed after the delete: "
-            "rerun to re-plan against the current inventory."
-        )
-    if is_whole:
-        return (
-            f"{staging}: retired document {doc_id!r} persists as sourceless legacy "
-            "point(s) with no approved sourceless history — whole-document retirement "
-            "already ran and covered nothing sourceless: resolve manually, never by "
-            "re-running the same flag."
-        )
     return (
-        f"{staging}: retired document {doc_id!r} persists as sourceless legacy "
-        f"point(s) outside the approved (partial) removal — a named-only retirement "
-        f"never takes legacy points: use whole-document --retire-doc {doc_id!r} to "
-        "cover approved sourceless history, or resolve manually."
+        f"{staging}: retired document {doc_id!r} persists as point(s) without a source "
+        "revision — pre-revision data is unsupported: build the corpus into a new "
+        "collection."
     )
-
-
-def approved_legacy_membership(
-    inventory: dict[str, InventoryRecord],
-) -> set[tuple[str, str]]:
-    """(doc_id, sha256) of approved sourceless pre-361B history: inventory
-    lines with no revision stamp, a content sha, and an approved status.
-    Kept for backward compatibility; publication verification uses
-    `verify_approved_legacy_points` for digest-level verification."""
-    return {
-        (rec.doc_id, rec.sha256)
-        for rec in inventory.values()
-        if rec.doc_id
-        and rec.sha256
-        and rec.source_rev is None
-        and rec.status in ("upserted", "skipped")
-    }
-
-
-def verify_approved_legacy_points(
-    client: QdrantReader,
-    staging_settings: Settings,
-    inventory: dict[str, InventoryRecord],
-    rules_v: str,
-    *,
-    walked_paths: set[str] | frozenset[str] = frozenset(),
-    retired: frozenset[str] = frozenset(),
-    retire_plan: dict[str, dict[str, set[str] | bool]] | None = None,
-) -> tuple[set[str], list[str]]:
-    """Verify stored pre-361B legacy points against approved digests (issue #391 Q417-L1).
-
-    Every sourceless point permitted by the publication compatibility bridge must
-    belong to an approved, verifiable legacy document: expected chunk count, chunk
-    IDs, extraction rules, and stored excerpt text must match approved digests.
-    Unverifiable history fails closed with an explicit --reingest remediation;
-    unexpected points carrying an approved source-file hash are refused.
-
-    Returns (verified_point_ids, problems).
-    """
-    from mainframe_rag.ingest.qdrant_io import scroll_all_points
-
-    staging = staging_settings.qdrant_collection
-    if not client.collection_exists(staging):
-        return set(), []
-
-    walked_doc_ids = {rec.doc_id for p in walked_paths if (rec := inventory.get(p)) and rec.doc_id}
-    approved_legacy: dict[tuple[str, str], InventoryRecord] = {}
-    for rec in inventory.values():
-        if (
-            rec.doc_id
-            and rec.sha256
-            and rec.source_rev is None
-            and rec.status in ("upserted", "skipped")
-        ):
-            if rec.path in walked_paths:
-                continue
-            if retire_plan and rec.doc_id in retire_plan:
-                entry = retire_plan[rec.doc_id]
-                if entry.get("whole") or entry.get("legacy"):
-                    continue
-                if rec.doc_id not in walked_doc_ids:
-                    continue
-            elif rec.doc_id in retired:
-                continue
-            approved_legacy[(rec.doc_id, rec.sha256)] = rec
-
-    if not approved_legacy:
-        return set(), []
-
-    verified_ids: set[str] = set()
-    problems: list[str] = []
-
-    for (doc_id, sha256), rec in sorted(approved_legacy.items()):
-        expected_chunks = rec.chunks
-        chunk_ids_digest = rec.chunk_ids_digest
-        content_digest = rec.content_digest
-        expected_rules = rec.rules_version
-
-        if not chunk_ids_digest or not content_digest or expected_chunks < 1:
-            markers = [
-                m for m in legacy_markers(client, staging_settings, doc_id) if m.sha256 == sha256
-            ]
-            if markers:
-                m = markers[0]
-                expected_chunks = m.expected_chunks
-                chunk_ids_digest = m.chunk_ids_digest
-                content_digest = m.content_digest
-                expected_rules = m.rules_v
-
-        if not chunk_ids_digest or not content_digest or expected_chunks < 1:
-            problems.append(
-                f"{staging}: legacy document {doc_id!r} has no verifiable chunk/content "
-                "digest — re-ingest with --reingest to upgrade to the current representation."
-            )
-            continue
-
-        if expected_rules != rules_v:
-            problems.append(
-                f"{staging}: legacy document {doc_id!r} extraction rules {expected_rules!r} "
-                f"mismatch current rules {rules_v!r} — re-ingest with --reingest to upgrade."
-            )
-            continue
-
-        doc_points = scroll_all_points(
-            client,
-            staging,
-            scroll_filter=_doc_id_filter(doc_id),
-            with_payload=["doc_id", "source_rev", "sha256", "rules_v", "text"],
-            page_size=staging_settings.ingest_scan_page_size,
-        )
-        legacy_pts = [
-            p
-            for p in doc_points
-            if (p.payload or {}).get("source_rev") is None
-            and (p.payload or {}).get("sha256") == sha256
-        ]
-
-        if len(legacy_pts) != expected_chunks:
-            problems.append(
-                f"{staging}: legacy document {doc_id!r} chunk count mismatch: expected "
-                f"{expected_chunks}, found {len(legacy_pts)} — refusing cutover without "
-                "complete verified evidence."
-            )
-            continue
-
-        if not _verify_batch(legacy_pts, sha256, rules_v, "", chunk_ids_digest, content_digest):
-            problems.append(
-                f"{staging}: legacy document {doc_id!r} stored points fail content/digest "
-                "verification — refusing cutover without verified evidence."
-            )
-            continue
-
-        verified_ids.update(str(p.id) for p in legacy_pts)
-
-    return verified_ids, problems
 
 
 def audit_unmarked_residue(
@@ -1316,16 +1128,12 @@ def audit_unmarked_residue(
     retire_plan: dict[str, dict[str, set[str] | bool]] | None = None,
     *,
     pending_removals: frozenset[str] = frozenset(),
-    allow_approved_legacy: bool = False,
-    verified_legacy_ids: set[str] | None = None,
 ) -> list[str]:
-    """Read-only coverage audit (issue #405 R1, #391 Q417-L1): every searchable
-    point in the candidate generation must be attributable to the walked corpus.
-    A point counts as covered when its (doc_id, source_rev) has a verified
-    walked inventory record, or — when `allow_approved_legacy` — when it is a
-    sourceless pre-revision point verified against approved legacy digests
-    (content and chunk-identity verification, never merely a shared file hash;
-    issue #391 Q417-L1). `pending_removals` are doc_ids under a lock-validated
+    """Read-only coverage audit (issue #405 R1): every searchable point in the
+    candidate generation must be attributable to the walked corpus. A point
+    counts as covered only when its (doc_id, source_rev) has a verified walked
+    inventory record; a point without a source revision is never covered.
+    `pending_removals` are doc_ids under a lock-validated
     removal plan applied before the swap audit; their points are excused here
     and enforced gone by the retired check once the plan is applied. Anything
     else (including points for explicitly retired documents, which must already
@@ -1346,18 +1154,6 @@ def audit_unmarked_residue(
         and rec.rules_version == rules_v
         and rec.status in ("upserted", "skipped")
     }
-    if verified_legacy_ids is None and allow_approved_legacy:
-        verified_legacy_ids, legacy_probs = verify_approved_legacy_points(
-            client,
-            staging_settings,
-            inventory,
-            rules_v,
-            walked_paths={p for p, _ in walked},
-            retired=retired,
-            retire_plan=retire_plan,
-        )
-        if legacy_probs:
-            return legacy_probs
     residue = 0
     sample: list[str] = []
     for p in scroll_all_points(
@@ -1371,13 +1167,6 @@ def audit_unmarked_residue(
         doc_id = payload.get("doc_id")
         source_rev = payload.get("source_rev")
         if (doc_id, source_rev) in valid_pairs:
-            continue
-        if (
-            source_rev is None
-            and allow_approved_legacy
-            and verified_legacy_ids is not None
-            and str(p.id) in verified_legacy_ids
-        ):
             continue
         if doc_id is not None and doc_id in retired:
             return [
@@ -1402,8 +1191,7 @@ def audit_unmarked_residue(
             (
                 f"{staging}: unmarked residue detected ({residue} point(s)"
                 f"{', e.g. ' + ', '.join(sample) if sample else ''}) — a searchable "
-                "point must match a verified walked generation (or, for sourceless "
-                "legacy history, verified legacy document digests); refusing "
+                "point must match a verified walked generation; refusing "
                 "cutover without an explicit approved removal."
             )
         ]
@@ -1443,17 +1231,9 @@ def apply_approved_removals(
 ) -> dict[str, int]:
     """Delete explicitly approved retirements from staging (issue #405 R1).
     Named revisions go through server-side revision-filtered deletes plus
-    their marker invalidation; legacy sourceless points go only with an
-    explicit whole-document retirement covering approved sourceless history
-    (named and mixed-history documents alike), and only when no named
-    revision remains in staging afterwards (checked live, mirroring the
-    refresh sole-history rule). Returns {doc_id: deleted revision count}
-    for the run log."""
-    from mainframe_rag.ingest.qdrant_io import (
-        delete_by_doc,
-        delete_by_revision,
-        stored_doc_revisions,
-    )
+    their marker invalidation. Returns {doc_id: deleted revision count} for
+    the run log."""
+    from mainframe_rag.ingest.qdrant_io import delete_by_revision
 
     removed: dict[str, int] = {}
     for doc_id in sorted(plan):
@@ -1462,12 +1242,5 @@ def apply_approved_removals(
         for rev in sorted(str(r) for r in revs):
             delete_completion(client, staging_settings, doc_id, source_rev=rev)
             delete_by_revision(client, staging_settings, rev)
-        count = len(revs)
-        if plan[doc_id]["legacy"]:
-            remaining = stored_doc_revisions(client, staging_settings, doc_id)
-            if remaining <= {None}:
-                delete_by_doc(client, staging_settings, doc_id)
-                delete_legacy_markers(client, staging_settings, doc_id)
-                count += 1
-        removed[doc_id] = count
+        removed[doc_id] = len(revs)
     return removed

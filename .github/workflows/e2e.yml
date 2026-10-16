@@ -376,7 +376,6 @@ jobs:
             -e 's|^EMBED_MODEL=.*|EMBED_MODEL=embed-from-airgap-env|' \
             -e 's|^EMBED_MODEL_REVISION=.*|EMBED_MODEL_REVISION=acceptance-rev-1|' \
             -e 's|^DENSE_DIM=.*|DENSE_DIM=768|' \
-            -e 's|^VLLM_BASE_URL=.*|VLLM_BASE_URL=http://vllm:8000|' \
             -e 's|^GATEWAY_BASE_URL=.*|GATEWAY_BASE_URL=http://gateway:4000/v1|' \
             -e 's|^LLM_MODEL_REASONING=.*|LLM_MODEL_REASONING=code|' \
             -e 's|^CORPUS_PVC=.*|CORPUS_PVC=corpus|' \
@@ -390,7 +389,7 @@ jobs:
             INTERNAL_REGISTRY=ghcr.io/acceptance-standin NAMESPACE=acceptance \
             STORAGE_CLASS=standard EMBED_MODEL=embed-from-airgap-env DENSE_DIM=768 \
             EMBED_MODEL_REVISION=acceptance-rev-1 \
-            VLLM_BASE_URL=http://vllm:8000 GATEWAY_BASE_URL=http://gateway:4000/v1 \
+            GATEWAY_BASE_URL=http://gateway:4000/v1 \
             LLM_MODEL_REASONING=code CORPUS_PVC=corpus \
             sh scripts/airgap/pipeline.sh --dry-run
           test -f dist/agent-rendered.yaml
@@ -403,6 +402,7 @@ jobs:
           sed -i \
             -e 's|^PULL_SECRET=.*|PULL_SECRET=acceptance-pull|' \
             -e 's|^GATEWAY_BASE_URL=.*|GATEWAY_BASE_URL=|' \
+            -e 's|^EMBED_BASE_URL=.*|EMBED_BASE_URL=http://vllm:8000/v1|' \
             -e 's|^LLM_MODEL_REASONING=.*|LLM_MODEL_REASONING=|' airgap.env
           AIRGAP_DRYRUN=1 sh scripts/tools/run-task.sh airgap:pipeline
           grep -q "name: acceptance-pull" dist/agent-rendered.yaml
@@ -595,7 +595,6 @@ jobs:
             -e 's|^EMBED_MODEL=.*|EMBED_MODEL=mock-embed|' \
             -e 's|^EMBED_MODEL_REVISION=.*|EMBED_MODEL_REVISION=mock-embed@ci|' \
             -e 's|^DENSE_DIM=.*|DENSE_DIM=1024|' \
-            -e 's|^VLLM_BASE_URL=.*|VLLM_BASE_URL=https://test-gateway:4000|' \
             -e 's|^CORPUS_PVC=.*|CORPUS_PVC=corpus|' \
             -e 's|^QDRANT_SHARD_NUMBER=.*|QDRANT_SHARD_NUMBER=1|' \
             -e 's|^QDRANT_REPLICATION_FACTOR=.*|QDRANT_REPLICATION_FACTOR=1|' \
@@ -606,7 +605,7 @@ jobs:
             # and the single shared Secret key live. Explicit per-operation URLs
             # stay unset so common.sh must resolve them from the shared base;
             # per-leg keys remain in the Secret for the other lanes.
-            sed -i -e '/^VLLM_BASE_URL=/d' -e '/^EMBED_BASE_URL=/d' -e '/^LLM_BASE_URL=/d' airgap.env
+            sed -i -e '/^EMBED_BASE_URL=/d' -e '/^LLM_BASE_URL=/d' airgap.env
             cat >> airgap.env <<'EOF'
           GATEWAY_BASE_URL=https://test-gateway:4000/v1
           LLM_MODEL_REASONING=mock-reasoning
@@ -625,7 +624,7 @@ jobs:
           GATEWAY_CA_CONFIGMAP=test-gateway-ca
           EOF
           fi
-          grep -E "^(INTERNAL_REGISTRY|NAMESPACE|STORAGE_CLASS|IMAGE_SHA|EMBED_MODEL|EMBED_MODEL_REVISION|DENSE_DIM|VLLM_BASE_URL|CORPUS_PVC|INSECURE_REGISTRY)" airgap.env
+          grep -E "^(INTERNAL_REGISTRY|NAMESPACE|STORAGE_CLASS|IMAGE_SHA|EMBED_MODEL|EMBED_MODEL_REVISION|DENSE_DIM|EMBED_BASE_URL|CORPUS_PVC|INSECURE_REGISTRY)" airgap.env
 
       - name: Write Kind-scale Qdrant overrides (runner quota only; git prod values untouched)
         run: |
@@ -987,7 +986,7 @@ jobs:
           EMBED_MODEL: embed-from-airgap-env
           DENSE_DIM: "768"
           EMBED_MODEL_REVISION: dryrun-rev-1
-          VLLM_BASE_URL: http://vllm:8000
+          EMBED_BASE_URL: http://vllm:8000/v1
           QDRANT_STORAGE_SIZE: 1Gi
         run: |
           export PATH="/usr/local/bin:$PATH"
@@ -1011,7 +1010,7 @@ jobs:
           EMBED_MODEL: embed-from-airgap-env
           DENSE_DIM: "768"
           EMBED_MODEL_REVISION: dryrun-rev-1
-          VLLM_BASE_URL: http://vllm:8000
+          EMBED_BASE_URL: http://vllm:8000/v1
           QDRANT_STORAGE_SIZE: 1Gi
         run: |
           export PATH="/usr/local/bin:$PATH"
@@ -1037,7 +1036,7 @@ jobs:
           EMBED_MODEL: embed-from-airgap-env
           DENSE_DIM: "768"
           EMBED_MODEL_REVISION: dryrun-rev-1
-          VLLM_BASE_URL: http://vllm:8000
+          EMBED_BASE_URL: http://vllm:8000/v1
           PULL_SECRET: ci-pull
           QDRANT_STORAGE_SIZE: 1Gi
         run: |
@@ -1059,7 +1058,7 @@ jobs:
           EMBED_MODEL: embed-from-airgap-env
           DENSE_DIM: "768"
           EMBED_MODEL_REVISION: dryrun-rev-1
-          VLLM_BASE_URL: http://vllm:8000
+          EMBED_BASE_URL: http://vllm:8000/v1
           QDRANT_EXTRA_VALUES: /nonexistent/vals.yaml
         run: |
           export PATH="/usr/local/bin:$PATH"
@@ -1079,7 +1078,7 @@ jobs:
           EMBED_MODEL: embed-from-airgap-env
           DENSE_DIM: "768"
           EMBED_MODEL_REVISION: dryrun-rev-1
-          VLLM_BASE_URL: http://vllm:8000
+          EMBED_BASE_URL: http://vllm:8000/v1
           OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
           QDRANT_STORAGE_SIZE: 1Gi
         run: |
@@ -1101,7 +1100,7 @@ jobs:
           EMBED_MODEL: embed-from-airgap-env
           DENSE_DIM: "768"
           EMBED_MODEL_REVISION: dryrun-rev-1
-          VLLM_BASE_URL: http://vllm:8000
+          EMBED_BASE_URL: http://vllm:8000/v1
           METRICS_ENABLED: "true"
           OTEL_EXPORTER_OTLP_ENDPOINT: off
           QDRANT_STORAGE_SIZE: 1Gi
@@ -1132,7 +1131,7 @@ jobs:
           EMBED_MODEL: embed-from-airgap-env
           DENSE_DIM: "768"
           EMBED_MODEL_REVISION: dryrun-rev-1
-          VLLM_BASE_URL: http://vllm:8000
+          EMBED_BASE_URL: http://vllm:8000/v1
           INGEST_WORK_SIZE: 2Gi
         run: |
           export PATH="/usr/local/bin:$PATH"
@@ -1161,7 +1160,7 @@ jobs:
           EMBED_MODEL: embed-from-airgap-env
           DENSE_DIM: "768"
           EMBED_MODEL_REVISION: dryrun-rev-1
-          VLLM_BASE_URL: http://vllm:8000
+          EMBED_BASE_URL: http://vllm:8000/v1
           CORPUS_PVC: corpus
         run: |
           export PATH="/usr/local/bin:$PATH"
@@ -1377,7 +1376,7 @@ jobs:
           EMBED_MODEL: mock-embed
           DENSE_DIM: "1024"
           EMBED_MODEL_REVISION: mock-embed@ci
-          VLLM_BASE_URL: http://vllm-mock:8000
+          EMBED_BASE_URL: http://vllm-mock:8000/v1
           LLM_BASE_URL: http://vllm-mock:8000/v1
           LLM_MODEL_REASONING: mock-reasoning
           QDRANT_STORAGE_SIZE: 1Gi
@@ -1435,7 +1434,7 @@ jobs:
           EMBED_MODEL: mock-embed
           DENSE_DIM: "1024"
           EMBED_MODEL_REVISION: mock-embed@ci
-          VLLM_BASE_URL: http://vllm-mock:8000
+          EMBED_BASE_URL: http://vllm-mock:8000/v1
           LLM_BASE_URL: http://vllm-mock:8000/v1
           LLM_MODEL_REASONING: mock-reasoning
           INGEST_WORK_SIZE: 2Gi

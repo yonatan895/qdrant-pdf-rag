@@ -47,13 +47,19 @@ class BuildBinding:
     corpus_fp: str
 
 
-def decode_build_binding(payload: dict, control: str) -> BuildBinding | None:
-    """Absent build fields mean the supported pre-build format, never a new ID."""
+class UnboundGenerationError(ValueError):
+    """A generation with no build binding and no build aliases: a pre-build
+    publication, which is unsupported."""
+
+
+def decode_build_binding(payload: dict, control: str) -> BuildBinding:
+    """Decode a publication control record's build binding. A record without
+    build fields is a pre-build (unbound) publication: unsupported."""
     fields = {"build_schema", "build_id", "logical_alias", "data_collection"}
     if not fields.intersection(payload):
         if "content_seal" in payload:
             raise ValueError("content seal lacks build identity")
-        return None
+        raise UnboundGenerationError("publication record has no build binding: unsupported")
     if type(payload.get("build_schema")) is not int or payload["build_schema"] not in (1, BUILD_SCHEMA):
         raise ValueError("unsupported build schema")
     if (
@@ -106,7 +112,7 @@ def require_published_binding(
             for name, target in aliases.items()
         ):
             raise ValueError("immutable build aliases lack their control record")
-        return  # Completed legacy generations keep their existing read contract.
+        raise UnboundGenerationError("generation has no build binding: pre-build publications are unsupported")
     if binding.physical != physical or configured not in (binding.alias, physical):
         raise ValueError("build control names another logical or physical corpus")
     if build_phase(binding, aliases) not in ("published", "retained"):

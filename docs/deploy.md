@@ -62,13 +62,13 @@ restores the snapshot over whatever the file assigned; empty stays unset
   closed before any mutation (issue #478) — a missing selection never
   silently becomes an environment/default-only run. Relative selections
   resolve from the repository root; paths with spaces load as data.
-- Alias resolution: `INTERNAL_REGISTRY` falls back to `REGISTRY_INTERNAL`,
-  `NAMESPACE` to `OPENSHIFT_NAMESPACE` (default `mainframe-rag`),
-  `QDRANT_RELEASE` defaults to `qdrant`, empty `IMAGE_SHA` resolves from
-  `git rev-parse HEAD`. Explicit model-operation URLs win over
-  `GATEWAY_BASE_URL`, a shared API base including `/v1`; the legacy
-  `EMBED_BASE_URL` fallback derives from the vLLM URL with
-  trailing slashes and a trailing `/v1` stripped.
+- Defaults: `NAMESPACE` defaults to `mainframe-rag`, `QDRANT_RELEASE` to
+  `qdrant`, and an empty `IMAGE_SHA` resolves from `git rev-parse HEAD`.
+  Explicit model-operation URLs win over `GATEWAY_BASE_URL`, a shared API
+  base including `/v1`. The removed aliases `REGISTRY_INTERNAL`,
+  `OPENSHIFT_NAMESPACE` and the `VLLM_BASE_URL` embedding-origin fallback are
+  not read: set `INTERNAL_REGISTRY`, `NAMESPACE` and `EMBED_BASE_URL` (or
+  `GATEWAY_BASE_URL`).
 - `require_env` collects **all** missing keys before failing, so one run
   tells the operator everything to fill in. `EMBED_MODEL_REVISION` is a
   required key on every air-gap launch path (vllm mode refuses a blank
@@ -693,11 +693,9 @@ prepare staging: `qdrant_io.clone_collection` copies every point (id, named
 vectors, payload) and completion marker through the points API into a new
 collection created with the selected policy, and refuses unless the copy
 holds exactly the source's point ids; the cutover gates then verify the
-staging pair's distribution and placement. The legacy-layout migration in
-`run_ingest` uses the same copy: a physical collection squatting on the alias
-name is copied into the retained generation `<alias>__legacy_<build>` and
-verified before it is deleted, so its rollback is a real collection, not a
-node-local snapshot. Supported recovery from lost distributed storage is
+staging pair's distribution and placement. A physical collection squatting
+on the alias name (the pre-publication layout) is unsupported and refused,
+never migrated. Supported recovery from lost distributed storage is
 still a fresh complete generation rebuilt from the protected originals
 (accepted downtime). Node-addressed restore, replacement-peer
 join and replica repair stay unqualified until site evidence exists. The
@@ -823,8 +821,8 @@ convention; replace the example URL with the platform endpoint. The operator
 loader resolves unset `EMBED_BASE_URL`, `LLM_BASE_URL`, `RERANK_BASE_URL` and
 `CONTEXT_LLM_BASE_URL` to it before rendering. Explicit operation-specific
 URLs take precedence. A caller value beats the operator file for the same
-setting. With no shared setting, the legacy vLLM embedding-origin fallback
-and existing per-operation behavior remain available. Clients append operation
+setting. With no shared setting, the explicit per-operation URLs apply
+(`EMBED_BASE_URL` is required). Clients append operation
 paths without adding another `/v1`.
 
 Model settings are opaque gateway aliases: for example `EMBED_MODEL=embedding-v1`
@@ -837,8 +835,8 @@ requires the existing deliberate migration.
 `GATEWAY_API_KEY_SECRET_KEY=api-key` selects one data key in the Secret named by
 `GATEWAY_API_KEY_SECRET`. Helm exposes that same Secret reference through the
 existing per-operation runtime variables, including contextual ingestion.
-Direct Helm users set `gateway.apiKeySecretKey`; an empty value preserves legacy
-per-leg data keys. The API key value never enters Helm values or `airgap.env`.
+Direct Helm users set `gateway.apiKeySecretKey`; an empty value keeps the
+default per-leg data keys. The API key value never enters Helm values or `airgap.env`.
 
 ## 7. CI inventory
 
@@ -911,7 +909,7 @@ live in `.github/workflows/e2e.yml`.
   `airgap-package` (main/dispatch): pack + 90-day bundle artifact (PRs
   skip). `airgap-acceptance` (main/dispatch): black-box handoff in a fresh
   dir — digest verify, unpack, bootstrap, manifest/SHA assertions, dry-run
-  pipeline with explicit shared-gateway reasoning and legacy embedding-only
+  pipeline with explicit shared-gateway reasoning and embedding-only
   (reasoning explicitly disabled) configurations, both pull-secret branches.
   `kind-live-rehearsal` (main/dispatch) is an eleven-lane matrix described below.
   The lab OpenShift rehearsal remains secret-gated, and PRs never touch the lab cluster.
@@ -946,7 +944,7 @@ include actual runner CPU, RAM and disk capacity; cleanup runs even after failur
 
 | Job / lane | Real services and assertions |
 |---|---|
-| `airgap-acceptance` | Fresh bundle integrity/bootstrap, manifest SHA, explicit shared-reasoning and legacy embedding-only configurations, and both pull-secret render branches |
+| `airgap-acceptance` | Fresh bundle integrity/bootstrap, manifest SHA, explicit shared-reasoning and embedding-only configurations, and both pull-secret render branches |
 | `kind-pipeline` | Authenticated registry, real product containers, real LiteLLM/PostgreSQL, synthetic ingest, search and application streams |
 | `kind-gateway-chat-{upstream,malformed,truncated}` | Three isolated clusters, one reasoning fault each through real LiteLLM, application failure contracts and healthy recovery |
 | `kind-gateway-embed-{upstream,malformed,dimension}` | Three isolated clusters, one embedding fault each through real LiteLLM and healthy recovery |

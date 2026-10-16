@@ -34,7 +34,7 @@ Do not print keys, manual text or vectors into shared evidence.
 Verify the backup checksum and an isolated restore before destroying any only
 copy. The preserved real corpus used by the September audit has 435,057 points
 and 452 distinct original PDF hashes. Those counts describe that backup, not a
-universal success threshold. Match **every** source hash before a full migration;
+universal success threshold. Match **every** source hash before a full rebuild;
 a smaller convenient corpus cannot qualify the restored collection.
 
 Use the recorded immutable Gemma/Qwen revisions and `LOCAL_RT_8GB` serving
@@ -107,14 +107,16 @@ A current generation includes its data **and** its physical
 Restore consistent records under their original physical identities; do not
 invent, rename or copy a current manifest onto unattributed old vectors.
 Aliases must resolve to the generation whose own contract is validated.
-See [publication and migration](ingest.md#publication-contract).
+See [the publication contract](ingest.md#publication-contract).
 
 The historical real-manual snapshot contains only data. Counts, dimension
 matching and three similar fresh vectors do not supply the missing generation
 contract. The current agent correctly reports `representation=legacy` and refuses
-serving. The supported remedy is a complete real-source re-ingest under the
-attested embedding revision. Keep the old physical collection and snapshot for
-rollback; never manufacture completion markers or weaken the gate.
+serving. Such data is unsupported and is never migrated in place: the only remedy
+is a complete real-source build into a new collection (an unused
+`QDRANT_COLLECTION` alias) under the attested embedding revision. Keep the old
+physical collection and snapshot for rollback; never manufacture completion
+markers or weaken the gate.
 
 Prepare a read-only corpus PVC containing the complete hash-matched originals.
 For Kind, a separately inventoried node directory and retained static corpus PV
@@ -136,17 +138,18 @@ sh scripts/tools/run-task.sh airgap:load
 sh scripts/tools/run-task.sh airgap:deploy
 ```
 
-On a legacy corpus, the application release can install successfully while the
-bounded agent readiness wait fails. Record that nonzero deployment result. This
-is not permission to disable probes or declare readiness; Qdrant must be ready
-before proceeding with the explicit migration:
+While the configured collection still names unsupported data, the application
+release can install successfully while the bounded agent readiness wait fails.
+Record that nonzero deployment result. This is not permission to disable probes
+or declare readiness. Point `QDRANT_COLLECTION` at a new, unused name in the
+protected operator inputs; Qdrant must be ready before the first full build:
 
 ```sh
 INGEST_REINGEST=true INGEST_TIMEOUT=86400 \
   sh scripts/tools/run-task.sh airgap:ingest
 ```
 
-These are deliberate migration inputs, not new defaults. The Job has a 24-hour
+These are deliberate first-build inputs, not new defaults. The Job has a 24-hour
 active deadline; choose a suitable operator wait within that boundary. Preserve
 logs and publication state on failure, inspect the actual Job before retrying,
 and resume through the same supported operation. Do not start overlapping writers.
@@ -185,7 +188,7 @@ existing same-build resume and full-coverage publication gates remain authoritat
 These are operating requirements for the playground; GPU teardown and actual
 persistent-volume restart still need its recorded live acceptance.
 
-After successful migration, perform the next ordinary operation without forcing
+After a successful first build, perform the next ordinary operation without forcing
 another re-embed:
 
 ```sh
@@ -196,59 +199,8 @@ sh scripts/tools/run-task.sh airgap:smoke
 
 Require all walked files complete, no failures, a committed physical contract,
 correct alias, stable point membership on the ordinary repeat, and compatible
-agent readiness. Changed chunk counts after a documented identity migration need
+agent readiness. Chunk counts that differ from the historical snapshot need a
 source/coverage explanation; historical vector counts alone are not the oracle.
-
-### Explicit recovery of duplicate legacy staging points
-
-A completed replacement can coexist with obsolete sourceless points inherited
-from the old snapshot. Coverage must still refuse that mixture. Do not clear
-publication state, mark the manifest committed, retire the whole document, or
-turn off the coverage gate to get past it.
-
-The candidate's `mainframe_rag.ingest.repair` module handles only this narrow
-case. Stop writers and use the same writer credentials, configuration and shared
-`/work/inventory.jsonl` as the recorded build. The publisher and run locks are
-cooperative filesystem locks; they do not exclude an unrelated admin writing
-through another progress mount. Maintenance requires one authorized writer.
-Use an ingest image that actually contains this module and record its imageID;
-older published images do not acquire the command by changing their tag.
-
-For a local Kind maintenance Job, retain the rendered ingest Job's environment,
-Secret references, volumes and security settings. The existing
-`INGEST_EXTRA_PATCH` local rehearsal input can replace the `ingest` container's
-command with `["python3", "-m", "mainframe_rag.ingest.repair"]` and its args with
-the following **plan** arguments. Use a new directory on the retained work PVC:
-
-```text
-plan --progress /work/inventory.jsonl --directory /work/repair-<run-id> --max-points <reviewed-upper-bound>
-```
-
-Run it through `airgap:ingest` with the same recorded candidate/configuration.
-A successful plan is read-only in Qdrant and prints a plan SHA256. Privately
-inspect `plan.json`, `points.json`, the inventory and publication-state backups;
-copy them off the work PVC and verify checksums. They contain corpus data and
-must never enter Git. Replace the maintenance args with:
-
-```text
-apply --progress /work/inventory.jsonl --directory /work/repair-<run-id> --approve-plan <reviewed-sha256>
-```
-
-Each phase locks and rechecks the actual pending manifest, alias, inventory,
-replacement completion and stored replacement content. Every exported point's
-payload **and vectors** must also match its retained live copy. Apply refuses
-changed inputs or newly discovered residue and deletes only the approved IDs
-from the unserved staging collection. An interrupted apply can retry the same
-plan: already deleted IDs are allowed, changed survivors are not. It neither
-edits completion records nor publishes. A local process with the actual shared
-progress mount can invoke the same operation through
-`sh scripts/tools/run-task.sh local:repair-staging -- ...`.
-
-Remove the maintenance command override before resuming the ordinary ingest
-Job. Resume the same forced build if it is pending, then run the unforced
-operation in section 3. Require unchanged live rollback content, full source
-coverage, a committed replacement, alias cutover and stable membership on that
-next ordinary operation. A repair receipt alone is not publication acceptance.
 
 ## 4. Verify and retain the complete live stack
 

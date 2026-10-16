@@ -177,7 +177,7 @@ async def test_gate_zero_ttl_validates_every_request_and_caches_refusals(monkeyp
     "damage,direct,schema",
     [(None, direct, schema) for direct in (False, True) for schema in (1, 2)]
     + [(d, False, 1) for d in ("version", "uuid", "pair", "logical", "missing-record",
-                               "missing-data-alias", "missing-control-alias", "redirect-control",
+                               "unbound-record", "missing-data-alias", "missing-control-alias", "redirect-control",
                                "seal-missing", "seal-schema", "seal-count")]
     + [("pair", True, 2)],
 )
@@ -217,6 +217,9 @@ async def test_serving_requires_full_published_build_pair(damage, direct, schema
         payload["logical_alias"] = "another-corpus"
     elif damage == "missing-record":
         qd.publications.clear()
+    elif damage == "unbound-record":
+        for key in ("build_schema", "build_id", "logical_alias", "data_collection"):
+            del payload[key]
     elif damage == "missing-data-alias":
         del qd.aliases[data_alias]
     elif damage == "missing-control-alias":
@@ -228,8 +231,14 @@ async def test_serving_requires_full_published_build_pair(damage, direct, schema
 
     generation = await ServingGate(ttl_s=0).generation(qd, configured, RULES)
     assert generation.physical == physical
-    assert generation.outcome == ("compatible" if damage is None else "unknown")
-    assert generation.details == (() if damage is None else ("build_control",))
+    if damage is None:
+        assert (generation.outcome, generation.details) == ("compatible", ())
+    elif damage in ("missing-record", "unbound-record"):
+        # No publication control, or one without build fields: an unbound
+        # (pre-build) generation.
+        assert (generation.outcome, generation.details) == ("legacy", ("unbound_generation",))
+    else:
+        assert (generation.outcome, generation.details) == ("unknown", ("build_control",))
     # Search mints exact-evidence references from this binding, so only a
     # validated build pair may hand one out.
     if damage is None:
@@ -278,18 +287,23 @@ async def test_publication_during_validation_preserves_resolved_reader(monkeypat
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("alias", ["corpus__build_notes"])
-async def test_legacy_corpus_name_with_build_substring_remains_readable(alias):
+async def test_flat_unbound_collection_is_refused_as_legacy():
+    """The pre-publication layout (a physical collection under the configured
+    name, no alias, no build binding) is unsupported: even with a valid
+    manifest the gate refuses it as legacy and mints no references."""
     from mainframe_rag.agent.serving import ServingGate
 
-    settings = _settings(qdrant_collection=alias)
-    physical = alias + "__legacy"
-    controls = physical + "__completions"
-    client = AliasQdrant(aliases={alias: physical}, points={physical},
-                        manifests={controls: manifest_envelope(settings, RULES, controls)})
-    generation = await ServingGate(ttl_s=0).generation(client, settings, RULES)
-    assert generation.physical == physical and generation.servable
-    assert not client.writes
+    s = _settings()
+    alias = s.qdrant_collection
+    flat = AliasQdrant(
+        manifests={f"{alias}__completions": manifest_envelope(s, RULES, f"{alias}__completions")},
+        points={alias},
+    )
+    generation = await ServingGate(ttl_s=0).generation(flat, s, RULES)
+    assert (generation.physical, generation.outcome) == (alias, "legacy")
+    assert generation.details == ("unbound_generation",)
+    assert not generation.servable and generation.binding is None
+    assert not flat.writes
 
 
 def test_serving_read_surface_accepts_real_clients_and_rejects_writes(tmp_path):

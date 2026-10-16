@@ -647,19 +647,21 @@ def test_gate_degrades_after_metadata_drift_and_recovers(client, monkeypatch):
     state. Restoring the contract restores service, again without a restart."""
     from mainframe_rag.agent.serving import ServingGate
     from mainframe_rag.ingest.rules_version import extraction_rules_version
-    from tests.fakes import AliasQdrant, manifest_envelope
+    from tests.fakes import AliasQdrant, manifest_envelope, published_build
 
     s = app_mod.settings
     rules = extraction_rules_version()
     alias, physical = s.qdrant_collection, f"{s.qdrant_collection}__gengrow"
+    build_aliases, publications = published_build(alias, physical)
     qd = AliasQdrant(
-        aliases={alias: physical},
+        aliases={alias: physical, **build_aliases},
         manifests={
             f"{physical}__completions": manifest_envelope(
                 s, rules, f"{physical}__completions"
             )
         },
         points={physical},
+        publications=publications,
     )
     calls: list[tuple] = []
 
@@ -732,20 +734,25 @@ def test_request_binds_validated_physical_and_alias_switch_revalidates(client, m
     queried."""
     from mainframe_rag.agent.serving import ServingGate
     from mainframe_rag.ingest.rules_version import extraction_rules_version
-    from tests.fakes import AliasQdrant, manifest_envelope
+    from tests.fakes import AliasQdrant, manifest_envelope, published_build
 
     s = app_mod.settings
     rules = extraction_rules_version()
     alias = s.qdrant_collection
     physical_a, physical_b = f"{alias}__genA", f"{alias}__genB"
+    aliases_a, publications_a = published_build(alias, physical_a)
+    aliases_b, publications_b = published_build(
+        alias, physical_b, build_id="87654321-4321-4321-8321-cba987654321"
+    )
     qd = AliasQdrant(
-        aliases={alias: physical_a},
+        aliases={alias: physical_a, **aliases_a},
         manifests={
             f"{physical_a}__completions": manifest_envelope(
                 s, rules, f"{physical_a}__completions"
             )
         },
         points={physical_a},
+        publications=publications_a,
     )
     seen: list[str] = []
 
@@ -761,6 +768,8 @@ def test_request_binds_validated_physical_and_alias_switch_revalidates(client, m
     assert seen == [physical_a]
 
     qd.aliases[alias] = physical_b
+    qd.aliases.update(aliases_b)
+    qd.publications.update(publications_b)
     qd.manifests[f"{physical_b}__completions"] = manifest_envelope(
         s, rules, f"{physical_b}__completions"
     )

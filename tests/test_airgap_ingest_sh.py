@@ -65,7 +65,7 @@ def _run_ingest(tree, *extra_env, policy: tuple[str, str, str] | None = ("1", "1
         "EMBED_MODEL": "test-embed",
         "DENSE_DIM": "768",
         "EMBED_MODEL_REVISION": "rev-1",
-        "VLLM_BASE_URL": "http://vllm:8000/v1",
+        "EMBED_BASE_URL": "http://vllm:8000/v1",
         "AIRGAP_DRYRUN": "1",
     }
     if policy is not None:
@@ -605,7 +605,7 @@ def test_shared_gateway_ingest_and_context_refs(ingest_tree, via_task):
             return subprocess.run([str(REPO / ".tools/bin/task"), "airgap:ingest", *cli],
                                   env=env, cwd=cwd, text=True, capture_output=True, check=False)
 
-    result = _run_ingest(ingest_tree, ("AIRGAP_ENV", str(path)), ("VLLM_BASE_URL", ""),
+    result = _run_ingest(ingest_tree, ("AIRGAP_ENV", str(path)), ("EMBED_BASE_URL", ""),
                          ("GATEWAY_BASE_URL", "https://sample-api/v1"),
                          ("GATEWAY_API_KEY_SECRET", "shared"), ("GATEWAY_API_KEY_SECRET_KEY", "api-key"),
                          ("EMBED_MODEL", "embedding-v1"), ("CONTEXTUAL_EMBED_ENABLED", "true"),

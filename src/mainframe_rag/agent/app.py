@@ -869,12 +869,17 @@ async def lifespan(_app: FastAPI):
         except Exception as exc:  # noqa: BLE001 — exotic transports report unknown
             generation = ServingGeneration(None, "unknown", (type(exc).__name__,))
         if generation.outcome in ("reembed_required", "legacy", "pending"):
+            remedy = (
+                "this stored data is no longer supported — build the corpus into a new "
+                "collection"
+                if generation.outcome == "legacy"
+                else "re-run ingest with --reingest under these settings to re-embed"
+            )
             raise RuntimeError(
                 f"agent refuses a {generation.outcome} collection "
                 f"{settings.qdrant_collection!r} "
                 f"({', '.join(generation.details) or 'no contract'}): "
-                "re-run ingest with --reingest under these settings to re-embed, then restart "
-                "(never serve queries against incompatible vectors)."
+                f"{remedy}, then restart (never serve queries against incompatible vectors)."
             )
         if generation.outcome in ("record_only_drift", "unknown"):
             log.warning(

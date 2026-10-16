@@ -618,8 +618,8 @@ production; the default records exactly the production prefetch, and a
 capture is never shallower. Cross-encoder scores stop at 100 per leg (the
 `rerank_candidates` ceiling, the deepest pool replay can rerank). Records
 carry `_meta.depth`/`_meta.ce_depth`; replay refuses a config deeper than
-the recorded depth (legacy pools prove only their longest leg), and the
-sweep reports such configs as skipped. `rerank100` in the grid needs
+the recorded depth, and the sweep reports such configs as skipped. A pool
+without `_meta.depth` predates depth recording and refuses outright: recapture it. `rerank100` in the grid needs
 `DEPTH>=100`.
 
 **Page bucket.** Pools record each chunk's physical first page

@@ -354,7 +354,8 @@ data directory. A committed ledger proceeds through ordinary preparation; it is
 never overwritten by initialization. After a hard process/host kill, inspect any
 occupied local port or `.retained-index-binding-*.tmp` residue explicitly; no
 unidentified process or residue is adopted or deleted automatically. Preserve
-legacy collections and snapshots; rebuild/adoption remains a separate decision.
+pre-contract collections and snapshots for rollback; they are never adopted or
+migrated: build the corpus into a new collection.
 
 ```sh
 sh scripts/tools/run-task.sh local:colab:prepare \

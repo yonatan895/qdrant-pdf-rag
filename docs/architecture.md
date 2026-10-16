@@ -264,7 +264,6 @@ src/mainframe_rag/
     run_ingest.py     # Ingest CLI worker orchestration
     build.py          # Versioned immutable build binding
     placement.py      # Replica-placement evaluation for HA acceptance
-    repair.py         # Explicit removal of duplicate legacy points from unfinished builds
     rules_version.py  # Extraction-rules version (issue #124)
     seal.py           # Stored-content certificate for immutable builds
   retrieve/

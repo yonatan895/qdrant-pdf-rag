@@ -10,7 +10,9 @@ explicit completion point in a separate collection derived from the target:
 The completion is written only after every expected batch is acknowledged
 and the stored points verify (count + chunk-ID/content digests). Every skip
 path requires a valid completion tied to the actual target generation;
-missing, legacy, or mismatched completions re-ingest, never skip.
+missing or mismatched completions re-ingest, never skip. Pre-revision
+(sourceless) markers and points are unsupported: markers fail validation and
+read as absent, and refresh planning refuses documents carrying such points.
 
 A refresh deletes before re-upserting inside the staging generation, so a
 crash mid-refresh leaves no completion (safe retry); readers keep the old
@@ -35,7 +37,7 @@ from qdrant_client import models
 
 from mainframe_rag.config import Settings
 from mainframe_rag.ingest.chunk import Chunk
-from mainframe_rag.ingest.identity import AmbiguousRevisionError
+from mainframe_rag.ingest.identity import UnsupportedLegacyDataError
 from mainframe_rag.ingest.qdrant_io import (
     check_collection_distribution,
     collection_vector_configs,
@@ -76,17 +78,17 @@ class CompletionRecord(BaseModel):
     embed_model: str | None = None
     dense_dim: int | None = None
     # Representation contract this generation was verified under (issue
-    # #362): ties the completion to the manifest. Pre-manifest markers
-    # carry None — an explicit legacy outcome in the 362B gate, never a pass.
+    # #362): ties the completion to the manifest. Required: pre-manifest
+    # markers fail validation and read as absent, never a pass.
     # Skip eligibility rides the generation identity (the versioned
     # REEMBED_FIELDS fingerprint, issue #391 F2), never this digest: a
     # record-only query-prefix change must keep skipping. The digest is the
     # commit-time residue proof for a representation migration.
-    manifest_digest: str | None = None
+    manifest_digest: str
     # Source revision this marker certifies (issue #361): markers are
     # per-revision, so coexisting revisions under one doc_id verify
-    # independently. Pre-361B markers carry None (legacy).
-    source_rev: str | None = None
+    # independently. Required: sourceless markers read as absent.
+    source_rev: str
     finished_at: float = Field(default_factory=time.time)
 
 
@@ -219,8 +221,7 @@ def _doc_id_filter(doc_id: str) -> models.Filter:
 
 def _doc_markers(client: QdrantReader, settings: Settings, doc_id: str) -> list[CompletionRecord]:
     """All parseable markers under a doc_id, paginated to exhaustion.
-    Corrupt payloads read as absent — a corrupt marker is a legacy outcome,
-    not a crash."""
+    Corrupt or pre-revision payloads read as absent, not a crash."""
     name = completion_collection_name(settings)
     if not client.collection_exists(name):
         return []
@@ -259,12 +260,6 @@ def read_completion(
         ):
             return m
     return None
-
-
-def legacy_markers(client: QdrantReader, settings: Settings, doc_id: str) -> list[CompletionRecord]:
-    """Pre-361B markers (no source_rev) under a doc_id. Only
-    is_doc_complete's legacy rule interprets them."""
-    return [m for m in _doc_markers(client, settings, doc_id) if m.source_rev is None]
 
 
 def write_completion(
@@ -321,14 +316,11 @@ def delete_completion(
     doc_id: str,
     *,
     source_rev: str,
-    include_legacy: bool = False,
 ) -> None:
     """Invalidate a revision's markers before its refresh deletes/replaces
     points. Markers are selected client-side and deleted by point id —
     precise, never doc_id-wide (a doc_id-wide delete would wipe coexisting
-    revisions' markers). include_legacy additionally drops sourceless
-    pre-361B markers; callers set it only when the refresh plan proved sole
-    history (plan_refresh_deletes), never beside named others.
+    revisions' markers).
 
     A failed refresh must leave NO valid completion (safe retry), never a
     stale marker over partial data.
@@ -345,8 +337,7 @@ def delete_completion(
     )
     ids: list[int | str | uuid.UUID] = []
     for p in points:
-        rev = (p.payload or {}).get("source_rev")
-        if rev == source_rev or (include_legacy and rev is None):
+        if (p.payload or {}).get("source_rev") == source_rev:
             ids.append(p.id)
     if ids:
         client.delete(
@@ -402,13 +393,9 @@ def verify_doc_points(
     """True only when the stored points exactly match the expected revision
     generation.
 
-    Scoped path first: a revision-keyed scroll (limit = expected + 1, so
-    any surplus is observed, not paged past) — coexisting sibling revisions
-    under the same doc_id never disturb the count. A stamped point from a
-    DIFFERENT revision fails the verify (mixed generations must never
-    verify). When nothing is stamped (pure legacy history), the doc_id
-    scroll applies the same checks while tolerating absent stamps — the
-    legacy-sole admission rule lives in is_doc_complete, not here.
+    A revision-keyed scroll (limit = expected + 1, so any surplus is
+    observed, not paged past) — coexisting sibling revisions under the same
+    doc_id never disturb the count. Sourceless points never verify.
     """
     if expected_chunks < 1:
         return False
@@ -418,19 +405,9 @@ def verify_doc_points(
         limit=expected_chunks + 1,
         with_payload=["sha256", "rules_v", "source_rev", "text"],
     )
-    if scoped:
-        if len(scoped) != expected_chunks:
-            return False
-        return _verify_batch(scoped, sha256, rules_v, source_rev, chunk_ids_digest, content_digest)
-    points, _ = client.scroll(
-        settings.qdrant_collection,
-        scroll_filter=_doc_id_filter(doc_id),
-        limit=expected_chunks + 1,
-        with_payload=["sha256", "rules_v", "source_rev", "text"],
-    )
-    if len(points) != expected_chunks:
+    if len(scoped) != expected_chunks:
         return False
-    return _verify_batch(points, sha256, rules_v, source_rev, chunk_ids_digest, content_digest)
+    return _verify_batch(scoped, sha256, rules_v, source_rev, chunk_ids_digest, content_digest)
 
 
 def _verify_batch(
@@ -448,8 +425,7 @@ def _verify_batch(
         payload = p.payload or {}
         if payload.get("sha256") != sha256 or payload.get("rules_v") != rules_v:
             return False
-        rev = payload.get("source_rev")
-        if rev is not None and rev != source_rev:
+        if payload.get("source_rev") != source_rev:
             return False
         pid = str(p.id)
         ids.append(pid)
@@ -475,11 +451,8 @@ def is_doc_complete(
     (issue #391 F2): a revision-only change alters `expected_gen`, so an A
     marker can never satisfy a B run. `m.manifest_digest` deliberately does
     NOT gate here — it covers record-only fields, and query-prefix drift
-    must keep skipping. Scoped path: the revision's own marker for the
-    expected generation. Legacy path (lazy upgrade — unchanged docs skip
-    without mass re-ingest): a sourceless marker certifies only when no
-    named revision other than this one lives under the doc_id; mixed
-    legacy+named fails toward re-ingest, never a wrong skip.
+    must keep skipping. Only the revision's own marker for the expected
+    generation certifies a skip.
 
     A forced-build resume supplies required_manifest_digest: only a scoped
     checkpoint written under that exact contract can save migration work.
@@ -489,47 +462,23 @@ def is_doc_complete(
     scoped = read_completion(
         client, settings, doc_id, source_rev=source_rev, generation_id=expected_gen
     )
-    if scoped is not None:
-        if required_manifest_digest is not None and scoped.manifest_digest != required_manifest_digest:
-            return False
-        if scoped.sha256 != sha256 or scoped.rules_v != rules_v:
-            return False
-        return verify_doc_points(
-            client,
-            settings,
-            doc_id,
-            sha256=sha256,
-            rules_v=rules_v,
-            source_rev=source_rev,
-            expected_chunks=scoped.expected_chunks,
-            chunk_ids_digest=scoped.chunk_ids_digest,
-            content_digest=scoped.content_digest,
-        )
-    if required_manifest_digest is not None:
+    if scoped is None:
         return False
-    for marker in legacy_markers(client, settings, doc_id):
-        if (
-            marker.target_collection != settings.qdrant_collection
-            or marker.sha256 != sha256
-            or marker.rules_v != rules_v
-            or marker.generation_id != expected_gen
-        ):
-            continue
-        revisions = stored_doc_revisions(client, settings, doc_id)
-        if any(r is not None and r != source_rev for r in revisions):
-            return False
-        return verify_doc_points(
-            client,
-            settings,
-            doc_id,
-            sha256=sha256,
-            rules_v=rules_v,
-            source_rev=source_rev,
-            expected_chunks=marker.expected_chunks,
-            chunk_ids_digest=marker.chunk_ids_digest,
-            content_digest=marker.content_digest,
-        )
-    return False
+    if required_manifest_digest is not None and scoped.manifest_digest != required_manifest_digest:
+        return False
+    if scoped.sha256 != sha256 or scoped.rules_v != rules_v:
+        return False
+    return verify_doc_points(
+        client,
+        settings,
+        doc_id,
+        sha256=sha256,
+        rules_v=rules_v,
+        source_rev=source_rev,
+        expected_chunks=scoped.expected_chunks,
+        chunk_ids_digest=scoped.chunk_ids_digest,
+        content_digest=scoped.content_digest,
+    )
 
 
 def is_revision_committed(
@@ -572,9 +521,7 @@ def _is_marker_excluded(
     if entry.get("whole"):
         return True
     revs = entry.get("revs")
-    if source_rev is not None and isinstance(revs, (set, frozenset)) and source_rev in revs:
-        return True
-    return bool(source_rev is None and entry.get("legacy"))
+    return source_rev is not None and isinstance(revs, (set, frozenset)) and source_rev in revs
 
 
 def stale_completion_markers(
@@ -590,8 +537,7 @@ def stale_completion_markers(
     commit-time scope proof for a representation migration (issue #391 F2).
 
     After a migration re-embeds the walked corpus, every remaining marker
-    whose `manifest_digest` differs (including legacy markers with none)
-    certifies vectors under another contract: those docs were not re-embedded
+    whose `manifest_digest` differs (or is missing) certifies vectors under another contract: those docs were not re-embedded
     by this run (corpus deletions, retained sibling revisions, `--limit`
     holes) and their vectors may still be searchable. The caller refuses to
     commit while any remain. `exclude_doc_ids` and `retire_plan` name documents
@@ -622,7 +568,7 @@ def stale_completion_markers(
             continue
         count += 1
         if len(labels) < sample:
-            labels.append(f"{doc_id}@{payload.get('source_rev') or 'legacy'}")
+            labels.append(f"{doc_id}@{payload.get('source_rev') or 'unknown'}")
     return count, labels
 
 
@@ -632,10 +578,10 @@ def plan_refresh_deletes(
     doc_id: str,
     source_rev: str,
     lineage_rev: str | None,
-) -> tuple[set[str], bool]:
-    """Delete plan for a refresh (issue #361). Returns (revision deletes,
-    legacy_doc_delete). Raises BEFORE any delete — callers delete only
-    after this returns:
+) -> set[str]:
+    """Delete plan for a refresh (issue #361). Returns the revisions to
+    delete. Raises BEFORE any delete — callers delete only after this
+    returns:
 
     - a stale current revision is always replaced (a valid one would have
       skipped already, except under --reingest);
@@ -644,33 +590,28 @@ def plan_refresh_deletes(
     - committed coexisting revisions are left alone — replacing one needs
       its lineage (replacement without lineage would be the overwrite bug);
     - completion-less residue is deleted (crash-safe retry);
-    - unattributable sourceless residue beside named revisions raises
-      AmbiguousRevisionError (fail closed: deleting by doc_id could wipe a
-      live revision, leaving it serves mixed generations).
+    - sourceless points under the document raise UnsupportedLegacyDataError
+      (pre-revision data is unsupported; nothing is deleted or migrated).
     """
     present = stored_doc_revisions(client, settings, doc_id)
-    dels = {source_rev} if source_rev in present else set()
-    rest = present - {source_rev}
-    named = {r for r in rest if r is not None}
-    legacy = None in rest
+    if None in present:
+        raise UnsupportedLegacyDataError(doc_id, _stray_sha16s(client, settings, doc_id))
+    named = {r for r in present if r is not None}
+    dels = {source_rev} if source_rev in named else set()
     if lineage_rev is not None:
-        if lineage_rev != source_rev and lineage_rev in present:
+        if lineage_rev != source_rev and lineage_rev in named:
             dels.add(lineage_rev)
-        return dels, False
-    if legacy and not named:
-        return dels, True
-    if legacy:
-        raise AmbiguousRevisionError(doc_id, sorted(named), _stray_sha16s(client, settings, doc_id))
+        return dels
     # No lineage: committed others are coexistence (leave); residue goes.
-    for other in sorted(named):
+    for other in sorted(named - {source_rev}):
         if not is_revision_committed(client, settings, doc_id, other):
             dels.add(other)
-    return dels, False
+    return dels
 
 
 def _stray_sha16s(client: QdrantReader, settings: Settings, doc_id: str) -> list[str]:
-    """Distinct content ids of sourceless points under a doc_id (raise path
-    only): paginated to exhaustion like the revision scan, deterministic
+    """Distinct content ids of sourceless points under a doc_id (refusal
+    report only): paginated to exhaustion like the revision scan, deterministic
     order."""
     shas: set[str] = set()
     points = scroll_all_points(
@@ -761,22 +702,16 @@ def plan_retire_deletes(
     R1). `approved_revs` maps doc_id to the revisions in the last approved
     inventory; `requested` maps doc_id to the revisions named by
     --retire-doc (None in the set means the whole document). Returns
-    {doc_id: {"revs": named revisions to delete, "legacy": approved
-    sourceless history goes too, "whole": whole-document retirement}}.
-    Raises BEFORE any delete — callers apply only after this returns:
+    {doc_id: {"revs": named revisions to delete, "whole": whole-document
+    retirement}}. Raises BEFORE any delete — callers apply only after this
+    returns:
 
     - retiring an unknown document or a revision with no approved history
       fails closed (typo guard), never a silent success;
     - named revisions delete precisely, coexisting retained revisions are
       never selected;
-    - legacy sourceless points go only with an explicit whole-document
-      retirement covering approved sourceless history — including
-      mixed-history documents (named revisions plus approved sourceless
-      history retire together). The live sole-history check at apply time
-      (no named revision left in staging) still guards the delete, mirroring
-      refresh planning; a partial (named-only) retirement never takes
-      legacy points, and unapproved sourceless residue stays for the
-      fail-closed audit instead of guessing.
+    - approved history without a source revision is unsupported pre-revision
+      data and refuses the plan; it is never deleted by guess.
     """
     plan: dict[str, dict[str, set[str] | bool]] = {}
     for doc_id in sorted(requested):
@@ -786,11 +721,16 @@ def plan_retire_deletes(
                 "in the last approved inventory may be retired explicitly."
             )
         approved = approved_revs[doc_id]
+        if None in approved:
+            raise RuntimeError(
+                f"--retire-doc {doc_id!r}: approved history includes a revision-less "
+                "inventory record; pre-revision data is unsupported — build the corpus "
+                "into a new collection."
+            )
         named_approved = {r for r in approved if r is not None}
         want = requested[doc_id]
         if None in want:
             revs = set(named_approved)
-            legacy = None in approved
             whole = True
         else:
             unknown = set(want) - named_approved
@@ -801,35 +741,6 @@ def plan_retire_deletes(
                     f"{sorted(named_approved)}."
                 )
             revs = {str(r) for r in want}
-            legacy = False
             whole = False
-        plan[doc_id] = {"revs": revs, "legacy": legacy, "whole": whole}
+        plan[doc_id] = {"revs": revs, "whole": whole}
     return plan
-
-
-def delete_legacy_markers(client: QdrantPoints, settings: Settings, doc_id: str) -> None:
-    """Drop sourceless pre-361B completion markers under one explicitly
-    retired document. Same per-doc scroll + point-id delete pattern as
-    delete_completion (bounded by the document's markers); callers invoke it
-    only for whole-document retirements covering approved sourceless
-    history, never beside retained named markers."""
-    name = completion_collection_name(settings)
-    if not client.collection_exists(name):
-        return
-    points = scroll_all_points(
-        client,
-        name,
-        scroll_filter=_doc_id_filter(doc_id),
-        with_payload=["source_rev"],
-        page_size=settings.ingest_scan_page_size,
-    )
-    ids: list[int | str | uuid.UUID] = []
-    for p in points:
-        if (p.payload or {}).get("source_rev") is None:
-            ids.append(p.id)
-    if ids:
-        client.delete(
-            name,
-            points_selector=models.PointIdsList(points=ids),
-            wait=True,
-        )

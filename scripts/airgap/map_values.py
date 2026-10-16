@@ -206,10 +206,10 @@ def emit_scalar(val) -> str:
 
 
 def build_values(deploy_only: bool = False) -> dict:
-    internal_registry = env("INTERNAL_REGISTRY") or env("REGISTRY_INTERNAL")
+    internal_registry = env("INTERNAL_REGISTRY")
     if not internal_registry:
         die("INTERNAL_REGISTRY is not set (copy airgap.env.example to airgap.env)")
-    namespace = env("NAMESPACE") or env("OPENSHIFT_NAMESPACE") or "mainframe-rag"
+    namespace = env("NAMESPACE") or "mainframe-rag"
     if len(namespace) > 63 or not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?", namespace):
         die("NAMESPACE must be a DNS label of at most 63 characters")
     qdrant_release = env("QDRANT_RELEASE") or "qdrant"
@@ -220,8 +220,6 @@ def build_values(deploy_only: bool = False) -> dict:
         die(f"IMAGE_SHA must be a full git SHA (got {image_sha!r})")
 
     embed_base = env("EMBED_BASE_URL")
-    if not embed_base and env("VLLM_BASE_URL"):
-        embed_base = re.sub(r"(/v1)?/*$", "", env("VLLM_BASE_URL")) + "/v1"
     model_config = {name: env(name) for name in MODEL_CONFIG_KEYS}
     model_config["EMBED_BASE_URL"] = embed_base
     try:

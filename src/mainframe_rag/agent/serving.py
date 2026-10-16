@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from mainframe_rag.config import Settings
 from mainframe_rag.ingest.build import (
     BuildBinding,
+    UnboundGenerationError,
     decode_build_binding,
     require_published_binding,
 )
@@ -47,7 +48,7 @@ class ServingGeneration:
     """One validated serving target: the resolved physical collection (None
     when nothing is published), its representation outcome, and the build
     binding the gate validated as published or retained. `binding` is None
-    for completed legacy generations, which never mint evidence references."""
+    only for a generation that is not servable."""
 
     physical: str | None
     outcome: str
@@ -75,7 +76,14 @@ async def resolve_published_generation(
         payload = (records[0].payload or {}) if records else None
         if payload is not None and payload.get("record_type") != "publication-metadata":
             raise ValueError("invalid publication control record")
-        binding = decode_build_binding(payload, control) if payload is not None else None
+        if payload is None:
+            # No publication control: a pre-build (unbound) generation.
+            # Unsupported stored state, refused like any legacy layout.
+            return ServingGeneration(physical, "legacy", ("unbound_generation",))
+        try:
+            binding = decode_build_binding(payload, control)
+        except UnboundGenerationError:
+            return ServingGeneration(physical, "legacy", ("unbound_generation",))
         # Publication may advance after representation validation. The
         # already resolved old physical remains valid as a retained build.
         require_published_binding(binding, settings.qdrant_collection, physical,

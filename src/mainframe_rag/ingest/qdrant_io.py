@@ -242,23 +242,6 @@ def stored_rules_version(client: QdrantReader, settings: Settings) -> str | None
     return str((points[0].payload or {}).get("rules_v") or "")
 
 
-def delete_by_doc(client: QdrantPoints, settings: Settings, doc_id: str) -> None:
-    """Delete every point under a printed doc_id. Legacy-sole-migration use
-    only (issue #361): sourceless pre-361B residue that the planner proved
-    is the sole history under the doc_id. Named revisions always delete by
-    their own revision — a doc_id-wide delete over coexisting revisions is
-    the overwrite bug, not a refresh."""
-    client.delete(
-        settings.qdrant_collection,
-        points_selector=models.FilterSelector(
-            filter=models.Filter(
-                must=[models.FieldCondition(key="doc_id", match=models.MatchValue(value=doc_id))]
-            )
-        ),
-        wait=True,
-    )
-
-
 def delete_by_revision(client: QdrantPoints, settings: Settings, source_rev: str) -> None:
     """Delete exactly one source revision's points (issue #361): the only
     destructive point selector for named revisions. Coexisting revisions
@@ -298,7 +281,8 @@ def resolve_live_collection(client: QdrantReader, settings: Settings) -> tuple[s
     Returns (physical, legacy): (name, False) for the alias target, (None,
     False) when neither alias nor collection exists (first publish), and
     (name, True) when a physical collection carries the alias name with no
-    alias defined (pre-publication legacy layout — migration required). A
+    alias defined (the pre-publication layout — unsupported; callers refuse
+    it). A
     dangling alias (target deleted) resolves as absent so a fresh staging
     can be published over it.
     """
@@ -387,21 +371,6 @@ def clone_collection(
         )
 
 
-def retain_copy(client: QdrantPoints, settings: Settings, src: str, dst: str) -> None:
-    """Keep an exact copy of src at dst before src is removed (issue #360):
-    copy it through the points API, or accept a dst from an interrupted
-    earlier attempt only when it holds exactly src's point ids. Anything
-    else refuses, so src is never deleted without its verified copy."""
-    if not client.collection_exists(dst):
-        clone_collection(client, settings, src, dst)
-        return
-    if _point_ids(client, settings, dst) != _point_ids(client, settings, src):
-        raise RuntimeError(
-            f"retained copy {dst!r} does not hold exactly {src!r}'s points — refusing to "
-            "remove the source; inspect or remove the copy explicitly, then rerun."
-        )
-
-
 def swap_alias_to(
     client: QdrantPoints, settings: Settings, new_physical: str, old_physical: str | None,
     *, build_id: str | None = None,
@@ -411,9 +380,9 @@ def swap_alias_to(
     see the complete old or the complete new generation — a failed swap
     leaves the previous live generation serving. The superseded physical is
     KEPT (plus a safety snapshot): rollback and GC are operator actions.
-    A legacy physical squatting on the alias name must be snapshotted and
-    deleted by the caller first (a delete-alias op for a non-existent alias
-    would fail the batch). Returns the publication summary for the run log."""
+    Callers refuse a physical collection squatting on the alias name before
+    any write, so `old_physical` is always a published alias target or None.
+    Returns the publication summary for the run log."""
     alias = settings.qdrant_collection
     from mainframe_rag.ingest.build import build_aliases
 
