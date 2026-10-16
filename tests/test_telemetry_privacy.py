@@ -430,3 +430,13 @@ def test_exception_frames_carry_no_message_or_source():
     assert payload["error_type"] == "ValueError"
     assert CANARY_EXC not in line
     assert "test_telemetry_privacy.py" in payload["trace"]
+
+
+def test_attachment_privacy_negative_control(client, metric_reader, caplog, monkeypatch):
+    """Restoring SDK attachment defaults must trip the endpoint canary."""
+    monkeypatch.setattr(app_mod, "use_span", trace.use_span)
+    with pytest.raises(AssertionError, match="leaked into spans"):
+        test_attachment_failures_hide_canaries(
+            client, metric_reader, caplog, monkeypatch,
+            "/v1/answer", False, "answer", "sync_retrieval",
+        )
