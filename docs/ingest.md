@@ -993,7 +993,7 @@ writers of the same revision can still target the same points.
 (including the closure pins: exact product/version filter partition plus
 family-citation round-trip over coexisting revisions, and an event-ordered
 threaded lock test proving same-revision exclusion with unblocked coexisting
-revisions), `tests/test_representation.py::test_fingerprint_revision_only_change_alters_identity`
+revisions), `tests/test_representation.py::test_fingerprint_identity_policy`
 and `test_fingerprint_rules_and_prefix_policy` pin identity behavior, and
 `tests/test_integration_sim.py::test_361_inplace_snapshot_restore_keeps_coexisting_revisions`
 proves coexistence, server-side revision scoping, and snapshot-restore
