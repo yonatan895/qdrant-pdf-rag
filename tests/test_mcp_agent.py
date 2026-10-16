@@ -346,3 +346,27 @@ def test_mock_mode_never_reaches_prod_manifests() -> None:
             if suffix_ok and "MCP_MOCK_DIR" in path.read_text(encoding="utf-8", errors="replace"):
                 hits.append(str(path.relative_to(repo)))
     assert hits == []
+
+
+def test_dead_bridge_is_warn_only_and_never_blocks_agent_startup(monkeypatch, capsys) -> None:
+    """The lifespan probe is warn-only: an unreachable bridge is logged as
+    zowe_mcp_unreachable and the agent still serves."""
+    from fastapi.testclient import TestClient
+
+    from mainframe_rag.agent import app as app_mod
+
+    for key, value in {
+        "QDRANT_URL": "http://localhost:6333",
+        "EMBED_MODE": "hash",
+        "ALLOW_HASH_MODE": "true",
+        "LLM_BASE_URL": "http://llm.internal/v1",
+        "LLM_MODEL_REASONING": "test-reasoning-model",
+        "ZOWE_MCP_ENABLED": "true",
+        "ZOWE_MCP_BASE_URL": "http://127.0.0.1:9",  # discard port: connection refused
+    }.items():
+        monkeypatch.setenv(key, value)
+    with TestClient(app_mod.app) as client:
+        # Listening and answering: 503 here is only the (absent) Qdrant, never the bridge.
+        assert client.get("/healthz").status_code == 503
+    warnings = [x for x in capsys.readouterr().err.splitlines() if "zowe_mcp_unreachable" in x]
+    assert len(warnings) == 1 and "127.0.0.1" not in warnings[0]
