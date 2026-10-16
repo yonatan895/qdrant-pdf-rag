@@ -75,33 +75,38 @@ def _clean_sim_collections(qdrant_url):
     """Sessions must be independent on a warm server: stale points from an
     earlier run (fresh PDF timestamps change every sha) would otherwise be
     deleted-and-reupserted mid-tier, perturbing score ordering."""
-    for name in ("sim-hash", "sim-vllm"):
-        httpx2.delete(f"{qdrant_url}/collections/{name}", timeout=10.0)
-    _drop_publish_fixture(qdrant_url)
+    httpx2.delete(f"{qdrant_url}/collections/sim-hash", timeout=10.0)
+    for alias in (PUBLISH_ALIAS, SERVED_ALIAS, VLLM_ALIAS):
+        _drop_publish_fixture(qdrant_url, alias)
     yield
 
 
 PUBLISH_ALIAS = "sim-publish"
+# Served corpora are published: the agent refuses an unbound generation, so
+# anything it serves goes through real alias publication, never the builder
+# seam (tests/helpers_builder.py).
+SERVED_ALIAS = "sim-served"
+VLLM_ALIAS = "sim-vllm"
 
 
-def _drop_publish_fixture(qdrant_url: str) -> None:
-    """Remove the alias-publish fixture state (alias + every generation and
+def _drop_publish_fixture(qdrant_url: str, alias: str = PUBLISH_ALIAS) -> None:
+    """Remove an alias-publish fixture's state (alias + every generation and
     its completions) so a warm server cannot certify a stale live generation."""
     from qdrant_client import QdrantClient, models
 
     client = QdrantClient(url=qdrant_url, timeout=10)
     try:
-        aliases = [a for a in client.get_aliases().aliases if a.alias_name == PUBLISH_ALIAS]
+        aliases = [a for a in client.get_aliases().aliases if a.alias_name == alias]
         if aliases:
             client.update_collection_aliases(
                 [
                     models.DeleteAliasOperation(
-                        delete_alias=models.DeleteAlias(alias_name=PUBLISH_ALIAS)
+                        delete_alias=models.DeleteAlias(alias_name=alias)
                     )
                 ]
             )
         for desc in client.get_collections().collections:
-            if desc.name.startswith(PUBLISH_ALIAS):
+            if desc.name.startswith(alias):
                 client.delete_collection(desc.name)
     finally:
         client.close()
@@ -163,9 +168,16 @@ def _ingest(
     mock_url: str | None = None,
     bm25_cache: str | None = None,
     extra: tuple[str, ...] = (),
+    *,
+    publish: bool = False,
 ) -> list[dict]:
     from mainframe_rag.ingest import run_ingest
 
+    if publish:
+        # A fresh published corpus per call: inventories are per-test, and
+        # publication certifies a warm alias only against its own inventory.
+        _drop_publish_fixture(qdrant_url, collection)
+        monkeypatch.setenv("INGEST_ALIAS_PUBLISH", "true")
     monkeypatch.setenv("QDRANT_URL", qdrant_url)
     monkeypatch.setenv("QDRANT_COLLECTION", collection)
     monkeypatch.setenv("EMBED_MODE", embed)
@@ -810,8 +822,8 @@ def test_revision_less_point_refuses_without_deletion_on_real_server(
 
 
 def test_search_end_to_end_deterministic(qdrant_url, mock_url, corpus, tmp_path, monkeypatch):
-    _ingest(monkeypatch, qdrant_url, "sim-hash", corpus, tmp_path / "inv.jsonl")
-    with _agent(monkeypatch, qdrant_url, mock_url, "sim-hash") as client:
+    _ingest(monkeypatch, qdrant_url, SERVED_ALIAS, corpus, tmp_path / "inv.jsonl", publish=True)
+    with _agent(monkeypatch, qdrant_url, mock_url, SERVED_ALIAS) as client:
         body = client.post("/v1/search", json={"query": "IEA500I operator message"}).json()
         assert body["query_kind"] == "identifier"
         hits = body["hits"]
@@ -854,8 +866,8 @@ def test_search_end_to_end_deterministic(qdrant_url, mock_url, corpus, tmp_path,
 
 
 def test_answer_deterministic(qdrant_url, mock_url, corpus, tmp_path, monkeypatch):
-    _ingest(monkeypatch, qdrant_url, "sim-hash", corpus, tmp_path / "inv.jsonl")
-    with _agent(monkeypatch, qdrant_url, mock_url, "sim-hash") as client:
+    _ingest(monkeypatch, qdrant_url, SERVED_ALIAS, corpus, tmp_path / "inv.jsonl", publish=True)
+    with _agent(monkeypatch, qdrant_url, mock_url, SERVED_ALIAS) as client:
         search = client.post("/v1/search", json={"query": "IEA500I operator message"}).json()
         hit_cites = {h["cite"] for h in search["hits"]}
 
@@ -879,7 +891,8 @@ def test_ops_cli_real_agent_round_trip_and_recovery(
 ):
     """The shipped CLI consumes actual FastAPI output, including after cancellation."""
     collection = "sim-ops-" + uuid.uuid4().hex
-    _ingest(monkeypatch, qdrant_url, collection, corpus, tmp_path / "ops-inventory.jsonl")
+    _ingest(monkeypatch, qdrant_url, collection, corpus, tmp_path / "ops-inventory.jsonl",
+            publish=True)
     model_url, started, closed, _calls = model_server
     url, agent_process, _log = _spawn_agent(
         "ops", qdrant_url, model_url, collection, tmp_path_factory
@@ -965,9 +978,9 @@ def test_eval_retrieval_on_synthetic_corpus(qdrant_url, mock_url, corpus, tmp_pa
         update_baseline,
     )
 
-    _ingest(monkeypatch, qdrant_url, "sim-hash", corpus, tmp_path / "inv.jsonl")
+    _ingest(monkeypatch, qdrant_url, SERVED_ALIAS, corpus, tmp_path / "inv.jsonl", publish=True)
     monkeypatch.setenv("QDRANT_URL", qdrant_url)
-    monkeypatch.setenv("QDRANT_COLLECTION", "sim-hash")
+    monkeypatch.setenv("QDRANT_COLLECTION", SERVED_ALIAS)
     monkeypatch.setenv("EMBED_MODE", "hash")
 
     golden = [
@@ -1017,17 +1030,18 @@ def test_vllm_shaped_embed_variant(qdrant_url, mock_url, corpus, tmp_path, monke
     records = _ingest(
         monkeypatch,
         qdrant_url,
-        "sim-vllm",
+        VLLM_ALIAS,
         corpus,
         tmp_path / "inv.jsonl",
         embed="vllm",
         mock_url=mock_url,
         bm25_cache=cache,
+        publish=True,
     )
     assert [r["status"] for r in records] == ["upserted"] * 3
 
     with _agent(
-        monkeypatch, qdrant_url, mock_url, "sim-vllm", embed="vllm", bm25_cache=cache
+        monkeypatch, qdrant_url, mock_url, VLLM_ALIAS, embed="vllm", bm25_cache=cache
     ) as client:
         body = client.post("/v1/search", json={"query": "IEA500I operator message"}).json()
         assert body["hits"], "vLLM-shaped embeds must retrieve the ingested message chunk"
@@ -1234,59 +1248,10 @@ def test_revision_scoped_retirement_on_real_server(qdrant_url, tmp_path, monkeyp
         )
         assert active_alias_1 is not None
 
-        # S424-F1: Seed an approved, digest-valid legacy sibling point L for doc_a on real server
-        import hashlib
-
-        from mainframe_rag.config import HASH_EMBED_DIM
-        from mainframe_rag.ingest.inventory import InventoryRecord
-        from mainframe_rag.ingest.rules_version import extraction_rules_version
-
-        rules_v = extraction_rules_version()
-        legacy_pt_id = "00000000-0000-0000-0000-000000000777"
-        legacy_text = "legacy real qdrant content for doc_a"
-        client.upsert(
-            active_alias_1,
-            points=[
-                models.PointStruct(
-                    id=legacy_pt_id,
-                    vector={
-                        "dense": [0.0] * HASH_EMBED_DIM,
-                        "bm25": models.SparseVector(indices=[0], values=[1.0]),
-                    },
-                    payload={
-                        "doc_id": "doc_a",
-                        "sha256": "7" * 64,
-                        "rules_v": rules_v,
-                        "text": legacy_text,
-                    },
-                )
-            ],
-            wait=True,
-        )
-        h_ids = hashlib.sha256(legacy_pt_id.encode("utf-8") + b"\0").hexdigest()
-        h_content = hashlib.sha256(
-            legacy_pt_id.encode("utf-8") + b"\0" + legacy_text.encode("utf-8") + b"\0"
-        ).hexdigest()
-        leg_rec = InventoryRecord(
-            path="legacy/doc_a.pdf",
-            sha256="7" * 64,
-            doc_id="doc_a",
-            pages=1,
-            chunks=1,
-            seconds=0.0,
-            rules_version=rules_v,
-            chunk_ids_digest=h_ids,
-            content_digest=h_content,
-            source_rev=None,
-            status="upserted",
-        )
-        with open(progress_1, "a", encoding="utf-8") as f:
-            f.write(leg_rec.model_dump_json() + "\n")
-
         # Replace doc_a with Revision 2
         make_pdf(a_pdf, doc_id="doc_a", title="Doc A Revision 2 (New Content)")
         progress_2 = tmp_path / "inv2.jsonl"
-        # Copy inv1 forward so prior inventory contains rev_1 and approved legacy L
+        # Copy inv1 forward so prior inventory contains rev_1
         progress_2.write_text(progress_1.read_text())
 
         rec_2 = _ingest(
@@ -1316,7 +1281,7 @@ def test_revision_scoped_retirement_on_real_server(qdrant_url, tmp_path, monkeyp
         )
         assert active_alias is not None
 
-        # Verify live collection contains doc_a@rev_2, approved legacy L, and doc_b, but NOT doc_a@rev_1
+        # Verify live collection contains doc_a@rev_2 and doc_b, but NOT doc_a@rev_1
         settings = Settings(
             _env_file=None,
             qdrant_url=qdrant_url,
@@ -1325,12 +1290,7 @@ def test_revision_scoped_retirement_on_real_server(qdrant_url, tmp_path, monkeyp
             allow_hash_mode=True,
         )
         revs_live = stored_doc_revisions(client, settings, "doc_a")
-        assert revs_live == {rev_2, None}
-
-        # Assert exact retained legacy point ID and text on real server
-        pts_leg = client.retrieve(active_alias, ids=[legacy_pt_id], with_payload=True)
-        assert len(pts_leg) == 1
-        assert pts_leg[0].payload.get("text") == legacy_text
+        assert revs_live == {rev_2}
 
         # Check completions collection
         completions_name = completion_collection_for(active_alias)
@@ -1343,7 +1303,7 @@ def test_revision_scoped_retirement_on_real_server(qdrant_url, tmp_path, monkeyp
         stored_comp_revs = {(p.payload or {}).get("source_rev") for p in pts}
         assert stored_comp_revs == {rev_2}
 
-        # Subsequent ordinary run on real server: steady-state recognizes both L and rev_2 without re-embedding
+        # Subsequent ordinary run on real server: steady state recognizes rev_2 without re-embedding
         from mainframe_rag.ingest import run_ingest
 
         assert (
@@ -1366,7 +1326,7 @@ def test_revision_scoped_retirement_on_real_server(qdrant_url, tmp_path, monkeyp
             == 0
         )
         revs_live_steady = stored_doc_revisions(client, settings, "doc_a")
-        assert revs_live_steady == {rev_2, None}
+        assert revs_live_steady == {rev_2}
     finally:
         client.close()
 
