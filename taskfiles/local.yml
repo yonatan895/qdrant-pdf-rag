@@ -231,7 +231,9 @@ tasks:
       `scripts/kube_forward.py` (issue #751): binds 127.0.0.1 only, refuses
       an occupied port, restarts `kubectl port-forward` with bounded backoff
       when it exits or its /readyz probe keeps failing, and stops on Ctrl-C.
-      The Service stays ClusterIP. Inputs: QDRANT_FORWARD_NAMESPACE (required),
+      A loopback relay replaces a forwarded stream idle 4 s after the
+      server's last data, below Qdrant's 5 s keep-alive (#762). The Service
+      stays ClusterIP. Inputs: QDRANT_FORWARD_NAMESPACE (required),
       QDRANT_FORWARD_SERVICE (default qdrant), QDRANT_FORWARD_PORT (default
       16333), QDRANT_FORWARD_KUBECONFIG, QDRANT_FORWARD_CONTEXT,
       QDRANT_FORWARD_KUBECTL (default kubectl). Foreground; never mutates the

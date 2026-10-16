@@ -205,8 +205,14 @@ sh scripts/tools/run-task.sh local:qdrant:forward \
 It binds `127.0.0.1` only, so the Service stays ClusterIP. It restarts
 `kubectl port-forward` with bounded backoff when the forward exits or `/readyz`
 keeps failing. The agent then recovers within seconds instead of staying
-`qdrant_unready`. An ingest interrupted by a drop retries the affected
-documents on the next resume.
+`qdrant_unready`. Clients reach kubectl through a loopback relay (#762). Qdrant
+closes idle keep-alive connections after 5 s, and through a forward the client
+never sees that close, so reusing the connection near 5 s would fail the request.
+The relay keeps the client connection but drops its forwarded stream once it
+has been idle 4 s (`--idle-close`) after Qdrant's last response; the next request
+opens a fresh stream. A stream still awaiting its response is never dropped.
+An ingest interrupted by a drop retries the affected documents on the next
+resume.
 
 End the session with `touch "$COLAB_STATE/sandbox-stop"`. The hold also ends
 itself 15 seconds before the work deadline. Either way the run completes
