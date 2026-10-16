@@ -13,28 +13,19 @@ def _record(msg: str, exc_info=None) -> logging.LogRecord:
     )
 
 
-def test_json_message_merges_into_payload():
-    line = JsonFormatter().format(_record('{"action": "upsert", "doc_id": "SA22-0000-00"}'))
-    payload = json.loads(line)
-    assert payload["action"] == "upsert"
-    assert payload["doc_id"] == "SA22-0000-00"
-    assert payload["level"] == "INFO"
-    assert payload["logger"] == "ingest"
-    assert "ts" in payload
-
-
-def test_plain_message_is_wrapped():
-    payload = json.loads(JsonFormatter().format(_record("plain text")))
-    assert payload["message"] == "plain text"
-
-
-def test_envelope_wins_over_event_fields():
+def test_json_and_plain_messages_become_one_payload_and_envelope_wins():
     payload = json.loads(
+        JsonFormatter().format(_record('{"action": "upsert", "doc_id": "SA22-0000-00"}'))
+    )
+    assert payload["action"] == "upsert" and payload["doc_id"] == "SA22-0000-00"
+    assert payload["level"] == "INFO" and payload["logger"] == "ingest" and "ts" in payload
+
+    assert json.loads(JsonFormatter().format(_record("plain text")))["message"] == "plain text"
+
+    clash = json.loads(
         JsonFormatter().format(_record('{"ts": "fake", "level": "BOGUS", "doc_id": "d"}'))
     )
-    assert payload["ts"] != "fake"
-    assert payload["level"] == "INFO"
-    assert payload["doc_id"] == "d"
+    assert clash["ts"] != "fake" and clash["level"] == "INFO" and clash["doc_id"] == "d"
 
 
 def test_invalid_level_fails_with_clear_message():
@@ -71,46 +62,26 @@ def test_configure_logging_is_idempotent(monkeypatch):
     assert isinstance(root.handlers[0].formatter, JsonFormatter)
 
 
-def test_trace_ids_stamped_under_active_span():
-    """Issue #185: a log line emitted inside a span carries that span's ids,
-    joining JSON logs to Jaeger traces."""
-    import json as _json
-
+def test_trace_ids_follow_the_active_span_and_caller_values_win():
+    """Issue #185: a line inside a span carries its ids (joining logs to
+    traces); no span means no new keys; an explicit caller value is never
+    overwritten by the ambient span."""
+    from opentelemetry import trace as trace_api
     from opentelemetry.sdk.trace import TracerProvider
 
     from mainframe_rag import tracing as tracing_mod
 
     tracer = TracerProvider().get_tracer("test")
     with tracer.start_as_current_span("op") as span:
-        line = JsonFormatter().format(_record('{"request_id": "abc"}'))
-    payload = _json.loads(line)
+        stamped = json.loads(JsonFormatter().format(_record('{"request_id": "abc"}')))
+        caller = json.loads(
+            JsonFormatter().format(_record('{"trace_id": "caller", "span_id": "s"}'))
+        )
     ctx = span.get_span_context()
-    from opentelemetry import trace as trace_api
-
-    assert payload["trace_id"] == trace_api.format_trace_id(ctx.trace_id)
-    assert payload["span_id"] == trace_api.format_span_id(ctx.span_id)
+    assert stamped["trace_id"] == trace_api.format_trace_id(ctx.trace_id)
+    assert stamped["span_id"] == trace_api.format_span_id(ctx.span_id)
+    assert caller["trace_id"] == "caller" and caller["span_id"] == "s"
     assert tracing_mod.current_trace_ids() == {}
 
-
-def test_trace_ids_omitted_without_span():
-    """Issue #185: tracing off -> log shape unchanged (no new keys)."""
-    import json as _json
-
-    payload = _json.loads(JsonFormatter().format(_record('{"request_id": "abc"}')))
-    assert "trace_id" not in payload
-    assert "span_id" not in payload
-
-
-def test_caller_trace_id_wins_over_ambient_span():
-    """Issue #185: an explicit caller value (e.g. propagated across a
-    process boundary) is never overwritten by the ambient span."""
-    import json as _json
-
-    from opentelemetry.sdk.trace import TracerProvider
-
-    tracer = TracerProvider().get_tracer("test")
-    with tracer.start_as_current_span("op"):
-        line = JsonFormatter().format(_record('{"trace_id": "caller", "span_id": "s"}'))
-    payload = _json.loads(line)
-    assert payload["trace_id"] == "caller"
-    assert payload["span_id"] == "s"
+    bare = json.loads(JsonFormatter().format(_record('{"request_id": "abc"}')))
+    assert "trace_id" not in bare and "span_id" not in bare

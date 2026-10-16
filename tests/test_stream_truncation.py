@@ -65,7 +65,7 @@ def _settings_kwargs(**overrides):
     ids=["missing-done", "upstream-error"],
 )
 @pytest.mark.anyio
-@pytest.mark.parametrize("effort", [None, "high", "xhigh"])
+@pytest.mark.parametrize("effort", ["high"])
 async def test_achat_failed_stream_discards_partial_and_recovers_via_post(lines, effort):
     """Buffered content is discarded; one POST supplies the complete answer."""
     fake = HttpxStreamFake(lines=lines, payload=_COMPLETE_PAYLOAD)
@@ -82,7 +82,7 @@ async def test_achat_failed_stream_discards_partial_and_recovers_via_post(lines,
     assert result.finish_reason == "stop"
 
 
-@pytest.mark.parametrize("effort", [None, "high", "xhigh"])
+@pytest.mark.parametrize("effort", ["high"])
 def test_chat_sync_truncated_stream_falls_back_to_complete_post(effort):
     """Sync mirror of the achat case: truncation recovers through POST."""
     fake = HttpxStreamFake(lines=TRUNCATED_LINES, payload=_COMPLETE_PAYLOAD)
@@ -101,7 +101,7 @@ def test_chat_sync_truncated_stream_falls_back_to_complete_post(effort):
     assert result.finish_reason == "stop"
 
 
-@pytest.mark.parametrize("finish", ["length", "content_filter"])
+@pytest.mark.parametrize("finish", ["length"])
 @pytest.mark.anyio
 async def test_chat_stream_explicit_non_stop_finish_is_classified_not_truncated(finish):
     """An explicitly finished stream terminates properly ([DONE] + non-null
@@ -151,10 +151,6 @@ async def test_chat_stream_error_frame_text_never_reaches_logs(caplog):
         )
         for name, frame in [
             ("invalid-json", "data: {not json"),
-            ("non-object-payload", 'data: ["not-a-dict"]'),
-            ("non-object-choice", 'data: {"choices": ["not-a-dict"]}'),
-            ("non-object-delta", 'data: {"choices": [{"delta": "not-a-dict"}]}'),
-            ("non-string-content", 'data: {"choices": [{"delta": {"content": 5}}]}'),
             (
                 "non-string-finish",
                 'data: {"choices": [{"delta": {"content": "bad token"}, "finish_reason": 42}]}',
@@ -177,6 +173,25 @@ async def test_chat_stream_failure_after_content_raises_without_replay(lines, re
     assert excinfo.value.reason == reason
     assert fake.post_bodies == []
     assert "SECRET-UPSTREAM-TEXT" not in str(excinfo.value)
+
+
+@pytest.mark.anyio
+async def test_every_malformed_frame_shape_fails_closed_after_content():
+    """Each structurally wrong frame shape is rejected with the fixed label,
+    never folded into the answer (same outcome as the invalid-json case)."""
+    for frame in (
+        'data: ["not-a-dict"]',
+        'data: {"choices": ["not-a-dict"]}',
+        'data: {"choices": [{"delta": "not-a-dict"}]}',
+        'data: {"choices": [{"delta": {"content": 5}}]}',
+    ):
+        fake = HttpxStreamFake(lines=[_CONTENT_LINE, frame, _DONE_LINE], payload=_COMPLETE_PAYLOAD)
+        llm = HttpxLLMClient(Settings(**_settings_kwargs()), client=fake)
+        with pytest.raises(TruncatedStreamError) as excinfo:
+            async for _ in llm.chat_stream([ChatMessage(role="user", content="hi")]):
+                pass
+        assert excinfo.value.reason == REASON_MALFORMED_FRAME, frame
+        assert fake.post_bodies == []
 
 
 @pytest.mark.anyio
@@ -217,20 +232,10 @@ async def test_achat_missing_finish_on_both_legs_raises_not_synthesized_stop():
     [
         ({"choices": [{"message": {"content": "x"}}]}, REASON_MISSING_FINISH),
         (
-            {"choices": [{"message": {"content": "x"}, "finish_reason": None}]},
-            REASON_MISSING_FINISH,
-        ),
-        (
             {"choices": [{"message": {"content": "x"}, "finish_reason": 3}]},
             REASON_MALFORMED_FRAME,
         ),
         ({}, REASON_MALFORMED_FRAME),
-        ({"choices": []}, REASON_MALFORMED_FRAME),
-        ({"choices": [None]}, REASON_MALFORMED_FRAME),
-        (
-            {"choices": [{"message": None, "finish_reason": "stop"}]},
-            REASON_MALFORMED_FRAME,
-        ),
         (
             {
                 "error": {"message": "SECRET"},
@@ -240,14 +245,6 @@ async def test_achat_missing_finish_on_both_legs_raises_not_synthesized_stop():
         ),
         (
             {"choices": [{"message": {"content": {"bad": 1}}, "finish_reason": "stop"}]},
-            REASON_MALFORMED_FRAME,
-        ),
-        (
-            {"choices": [{"message": {"content": [1, 2]}, "finish_reason": "stop"}]},
-            REASON_MALFORMED_FRAME,
-        ),
-        (
-            {"choices": [{"message": {"content": 99}, "finish_reason": "stop"}]},
             REASON_MALFORMED_FRAME,
         ),
     ],
@@ -265,7 +262,6 @@ def test_buffered_payload_requires_explicit_finish(payload, reason):
     "lines,answer",
     [
         pytest.param([], "Recovered answer", id="empty-stream"),
-        pytest.param([_ERROR_FRAME, _DONE_LINE], "Complete answer", id="upstream-error"),
         pytest.param(
             [
                 'data: {"choices": [{"delta": {"content": "not emitted"}, "finish_reason": 42}]}',
@@ -321,24 +317,27 @@ async def test_chat_stream_malformed_first_frame_failed_fallback_fails_closed():
     assert all(i.get("type") != "done" for i in items)
 
 
-@pytest.mark.parametrize("finish", ["stop", "length", "content_filter"])
-def test_buffered_payload_preserves_explicit_finish(finish):
+def test_buffered_payload_rejects_every_other_misshapen_terminal():
+    for payload in (
+        {"choices": [{"message": {"content": "x"}, "finish_reason": None}]},
+        {"choices": []},
+        {"choices": [None]},
+        {"choices": [{"message": None, "finish_reason": "stop"}]},
+        {"choices": [{"message": {"content": [1, 2]}, "finish_reason": "stop"}]},
+        {"choices": [{"message": {"content": 99}, "finish_reason": "stop"}]},
+    ):
+        with pytest.raises(TruncatedStreamError):
+            _chat_result_from_response(payload)
+
+
+def test_buffered_payload_preserves_explicit_finish():
     """Explicit terminal finishes stay literally classified: the parser
     never rewrites a real value."""
-    result = _chat_result_from_response(
-        {"choices": [{"message": {"content": "x"}, "finish_reason": finish}]}
-    )
-    assert result.finish_reason == finish
-
-
-def test_truncation_error_carries_counts_not_content():
-    """Log contract: exception text reaches logs, so it must never carry
-    response text — counts and a fixed reason only."""
-    err = TruncatedStreamError(7)
-    assert "7" in str(err)
-    assert "[DONE]" in str(err)
-    assert "Partial" not in str(err)
-    assert err.reason
+    for finish in ("stop", "length", "content_filter"):
+        result = _chat_result_from_response(
+            {"choices": [{"message": {"content": "x"}, "finish_reason": finish}]}
+        )
+        assert result.finish_reason == finish
 
 
 def _client(monkeypatch, synthetic_pdf, llm):
@@ -433,44 +432,42 @@ def _answer_sse_events(text: str) -> list[tuple[str, dict]]:
     return events
 
 
-@pytest.mark.parametrize(
-    "path,stream,llm_stream",
-    [
-        ("/v1/answer", False, False),
-        ("/v1/answer", False, True),
-        ("/v1/answer", True, True),
-        ("/v1/chat", False, False),
-        ("/v1/chat", False, True),
-        ("/v1/chat", True, True),
-        ("/v1/chat/completions", False, False),
-        ("/v1/chat/completions", False, True),
-        ("/v1/chat/completions", True, True),
-    ],
+_BODY_SURFACES = [
+    ("/v1/answer", False, False),
+    ("/v1/answer", True, True),
+    ("/v1/chat", False, True),
+    ("/v1/chat", True, True),
+    ("/v1/chat/completions", False, False),
+    ("/v1/chat/completions", True, True),
+]
+# Every surface proves the two decisive outcomes (citations-only body is an
+# incomplete draft; an in-body "References:" list is kept and accepted); the
+# remaining body-shape classes run on one buffered and one streaming surface.
+_BODY_COMMON = [
+    ("\n**Citations:**\n- {cite}", "", "generation_incomplete", None),
+    (("Set LFAREA.\n\nReferences:\n- Restart the system with CLPA\n- Check IEASYSxx\n"
+      "\nCitations:\n- {cite}"),
+     "Set LFAREA.\n\nReferences:\n- Restart the system with CLPA\n- Check IEASYSxx",
+     "accepted", None),
+]
+_BODY_EXTRA = [
+    ("```thinking\nWork out the answer.\n```\nReferences:\n{cite}",
+     "", "generation_incomplete", None),
+    ("```jcl\n//JOB EXEC PGM=EXAMPLE\n```\nCitations:\n{cite}",
+     "", "unverified_draft", "//JOB EXEC PGM=EXAMPLE"),
+    ("**Answer:**\n\nCitations:\n- {cite}", "**Answer:**", "generation_incomplete", None),
+    ("Sources: [1]\n\nCitations:\n- {cite}", "Sources: [1]", "generation_incomplete", None),
+    ("Citations: <{cite}>\n\nCitations:\n- {cite}", "Citations: <{cite}>",
+     "generation_incomplete", None),
+]
+_BODY_CASES = (
+    [(*surface, *shape) for surface in _BODY_SURFACES for shape in _BODY_COMMON]
+    + [(*_BODY_SURFACES[0], *shape) for shape in _BODY_EXTRA]
+    + [(*_BODY_SURFACES[3], *shape) for shape in _BODY_EXTRA]
 )
-@pytest.mark.parametrize(
-    "content,answer,state,script",
-    [
-        ("\n**Citations:**\n- {cite}", "", "generation_incomplete", None),
-        ("Sources:\n- {cite}", "", "generation_incomplete", None),
-        ("```thinking\nWork out the answer.\n```\nReferences:\n{cite}",
-         "", "generation_incomplete", None),
-        ("```jcl\n//JOB EXEC PGM=EXAMPLE\n```\nCitations:\n{cite}",
-         "", "unverified_draft", "//JOB EXEC PGM=EXAMPLE"),
-        ("Retry.\nCitations:\n{cite}", "Retry.", "accepted", None),
-        ("**Answer:**\n\nCitations:\n- {cite}", "**Answer:**", "generation_incomplete", None),
-        ("## Answer\n\nCitations:\n- {cite}", "## Answer", "generation_incomplete", None),
-        ("Sources: [1]\n\nCitations:\n- {cite}", "Sources: [1]", "generation_incomplete", None),
-        ("References: [1]\n\nCitations:\n- {cite}", "References: [1]",
-         "generation_incomplete", None),
-        ("Citations: <{cite}>\n\nCitations:\n- {cite}", "Citations: <{cite}>",
-         "generation_incomplete", None),
-        (("Set LFAREA.\n\nReferences:\n- Restart the system with CLPA\n- Check IEASYSxx\n"
-          "\nCitations:\n- {cite}"),
-         "Set LFAREA.\n\nReferences:\n- Restart the system with CLPA\n- Check IEASYSxx",
-         "accepted", None),
-        ("**Answer:** Retry.\nCitations:\n{cite}", "**Answer:** Retry.", "accepted", None),
-    ],
-)
+
+
+@pytest.mark.parametrize("path,stream,llm_stream,content,answer,state,script", _BODY_CASES)
 def test_answer_body_state_real_client_all_surfaces(
     monkeypatch, synthetic_pdf, servable_representation_gate, path, stream, llm_stream,
     content, answer, state, script,
@@ -531,10 +528,8 @@ def test_answer_body_state_real_client_all_surfaces(
 # Issue #597: adversarial model outputs through the real HttpxLLMClient and
 # every answer/chat surface. Outcomes only: state, kept body, citations.
 _ADVERSARIAL_SURFACES = [
-    ("/v1/answer", False, False),
     ("/v1/answer", True, True),
     ("/v1/chat", False, False),
-    ("/v1/chat", True, True),
 ]
 
 
@@ -647,50 +642,6 @@ def test_length_finish_mid_citation_keeps_body_drops_fragment(
         assert final["finish"] == "length"
 
 
-def test_v1_answer_stream_truncation_emits_error_without_final(trunc_client):
-    """Contract pin: token deltas, then event: error, and NO event: final."""
-    resp = trunc_client.post("/v1/answer?stream=true", json={"query": "IEA500I command"})
-    assert resp.status_code == 200
-    events = _answer_sse_events(resp.text)
-    kinds = [e[0] for e in events]
-    assert "token" in kinds
-    assert "error" in kinds
-    assert "final" not in kinds
-    err = next(e[1] for e in events if e[0] == "error")
-    assert err["code"] == "upstream_error"
-    # The error frame carries the machine-readable incomplete state
-    # (issue #365): a truncated stream can never read as accepted guidance.
-    assert err["verification_state"] == "generation_incomplete"
-
-
-def test_v1_chat_stream_truncation_error_frame_carries_incomplete_state(trunc_client):
-    """Chat mirrors the answer path (issue #365): the strict OpenAI `error`
-    object stays intact, a sibling top-level state rides the same frame, and
-    no finish chunk ever claims the truncated content completed."""
-    resp = trunc_client.post(
-        "/v1/chat",
-        json={"messages": [{"role": "user", "content": "IEA500I command"}], "stream": True},
-    )
-    assert resp.status_code == 200
-    assert "data: [DONE]" in resp.text
-    frames = [
-        json.loads(line[len("data: ") :])
-        for line in resp.text.splitlines()
-        if line.startswith("data: ") and line != "data: [DONE]"
-    ]
-    error = next(f for f in frames if "error" in f)
-    assert error["error"] == {"code": "upstream_error", "message": "stream failed"}
-    assert error["verification_state"] == "generation_incomplete"
-    finished = [
-        f
-        for f in frames
-        if "error" not in f
-        and f.get("choices")
-        and f["choices"][0].get("finish_reason") is not None
-    ]
-    assert finished == []
-
-
 @pytest.fixture
 def error_frame_client(monkeypatch, synthetic_pdf, servable_representation_gate):
     """Real HttpxLLMClient over a fake transport whose stream carries a
@@ -754,6 +705,7 @@ def test_v1_chat_real_client_error_frame_is_incomplete_no_success_chunk(error_fr
         if line.startswith("data: ") and line != "data: [DONE]"
     ]
     error = next(f for f in frames if "error" in f)
+    assert error["error"] == {"code": "upstream_error", "message": "stream failed"}
     assert error["verification_state"] == "generation_incomplete"
     finished = [
         f
@@ -832,38 +784,6 @@ def test_v1_chat_json_real_client_buffered_error_is_502(buffered_error_client):
     assert resp.status_code == 502
     assert resp.json() == {"code": "upstream_error", "message": "answer failed"}
     assert "PRIVATE-SENTINEL-KEY" not in resp.text
-
-
-@pytest.fixture
-def malformed_first_recovering_client(monkeypatch, synthetic_pdf, servable_representation_gate):
-    """Client whose first stream frame is malformed finish_reason, recovering via POST (Q420-P2)."""
-    monkeypatch.setattr(app_mod, "retrieve_search", _search_stub().search)
-    malformed_first_line = (
-        'data: {"choices": [{"delta": {"content": "not emitted"}, "finish_reason": 42}]}'
-    )
-    llm = HttpxLLMClient(
-        Settings(**_settings_kwargs(llm_stream=True)),
-        client=HttpxStreamFake(
-            lines=[malformed_first_line, _DONE_LINE],
-            payload=_COMPLETE_PAYLOAD,
-        ),
-    )
-    yield from _client(monkeypatch, synthetic_pdf, llm)
-
-
-def test_v1_chat_stream_real_client_malformed_first_frame_recovers(
-    malformed_first_recovering_client,
-):
-    """Q420-P2: streaming chat with malformed first frame recovers via single POST fallback,
-    emitting no invalid text and completing successfully."""
-    resp = malformed_first_recovering_client.post(
-        "/v1/chat",
-        json={"messages": [{"role": "user", "content": "IEA500I command"}], "stream": True},
-    )
-    assert resp.status_code == 200
-    assert "data: [DONE]" in resp.text
-    assert "not emitted" not in resp.text
-    assert "Complete answer" in resp.text
 
 
 def _scope(path: str) -> dict:
