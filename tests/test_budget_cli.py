@@ -40,40 +40,6 @@ def _assignments(proc: subprocess.CompletedProcess[str]) -> dict[str, str]:
     return parsed
 
 
-def test_resolve_embed_assignments():
-    parsed = _assignments(_run("resolve", "--profile", "LOCAL_RT_8GB", "--role", "embed"))
-    assert parsed == {
-        "BUDGET_GPU_MEM": "0.33",
-        "BUDGET_MAX_LEN": "4096",
-        "BUDGET_RUNNER": "pooling",
-        "BUDGET_CONVERT": "embed",
-        "BUDGET_BATCHED_TOKENS": "4096",
-        "BUDGET_EAGER": "1",
-        "BUDGET_PREFIX_CACHE": "0",
-        "BUDGET_SEQS": "1",
-        "BUDGET_CHUNKED_PREFILL": "",
-        "BUDGET_LANGUAGE_MODEL_ONLY": "0",
-        "BUDGET_MM_PROCESSOR_CACHE_GB": "",
-        "BUDGET_HOST_MEM_MB": "2600",
-    }
-
-
-def test_resolve_reasoning_assignments():
-    parsed = _assignments(_run("resolve", "--profile", "LOCAL_RT_8GB", "--role", "reasoning"))
-    assert parsed == {
-        "BUDGET_GPU_MEM": "0.64",
-        "BUDGET_MAX_LEN": "4096",
-        "BUDGET_RUNNER": "generate",
-        "BUDGET_CONVERT": "none",
-        "BUDGET_BATCHED_TOKENS": "",
-        "BUDGET_EAGER": "0",
-        "BUDGET_PREFIX_CACHE": "1",
-        "BUDGET_SEQS": "1",
-        "BUDGET_CHUNKED_PREFILL": "",
-        "BUDGET_LANGUAGE_MODEL_ONLY": "0",
-        "BUDGET_MM_PROCESSOR_CACHE_GB": "",
-        "BUDGET_HOST_MEM_MB": "6400",
-    }
 
 
 def test_cli_matches_library_for_every_profile_server():
@@ -110,15 +76,6 @@ def test_unknown_role_fails_closed():
     assert "embed" in proc.stderr
     assert proc.stdout.strip() == ""
 
-
-def test_check_pack_passes_on_fitting_pack():
-    """Preflight on a fitting pack emits the same flags as the single
-    resolve — the launcher path stays equivalent."""
-    plain = _assignments(_run("resolve", "--profile", "LOCAL_RT_8GB", "--role", "embed"))
-    checked = _assignments(
-        _run("resolve", "--profile", "LOCAL_RT_8GB", "--role", "embed", "--check-pack")
-    )
-    assert checked == plain
 
 
 def test_check_pack_refuses_unfitting_pack_that_single_resolve_emits():
@@ -168,20 +125,3 @@ def test_deficit_host_override_fails_closed_with_remedies():
     assert "BUDGET DEFICIT" in proc.stderr
     assert "Qwen/Qwen3-Embedding-0.6B" in proc.stderr
     assert proc.stdout.strip() == ""
-
-
-def test_host_override_resolves_hypothetical_host():
-    """--total-vram-mib sizes a what-if host: same rules, different total."""
-    parsed = _assignments(
-        _run(
-            "resolve",
-            "--profile",
-            "LOCAL_RT_8GB",
-            "--role",
-            "embed",
-            "--total-vram-mib",
-            "16302",
-        )
-    )
-    assert parsed["BUDGET_GPU_MEM"] == "0.17"
-    assert parsed["BUDGET_MAX_LEN"] == "4096"

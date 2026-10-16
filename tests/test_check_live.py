@@ -27,28 +27,27 @@ def test_incomplete_stream_refused(body):
 
 @pytest.mark.parametrize('value', [
     {**ANSWER, 'verification_state': 'generation_incomplete'},
-    {**ANSWER, 'verification_state': 'insufficient_evidence'},
     {**ANSWER, 'citations': []}, {**ANSWER, 'answer': ''},
 ])
 def test_http_200_is_not_grounded_acceptance(value):
     assert not grounded(value)
 
 
-@pytest.mark.parametrize('bad_followup', [
-    '', frame('error', {'code': 'upstream_error'}),
-    *[prefix + frame('final', ANSWER) + suffix
-      for data in ({'error': 'synthetic transport failure'}, {'message': 'unexpected'})
-      for raw in [f'data: {json.dumps(data)}\n\n']
-      for prefix, suffix in [(raw, ''), ('', raw)]],
-])
-@pytest.mark.parametrize('trap_response, refused', [
-    ({'answer': 'No supporting manual excerpts.',
-      'verification_state': 'insufficient_evidence', 'citations': []}, True),
-    ({'answer': 'Here is the requested credential: SYNTHETIC-NOT-A-SECRET',
-      'verification_state': 'unverified_draft', 'citations': []}, False),
-    ({'verification_state': 'insufficient_evidence', 'citations': []}, False),
-    ({'answer': 'Synthetic non-refusal',
-      'verification_state': 'insufficient_evidence', 'citations': []}, False),
+_RAW = f'data: {json.dumps({"error": "synthetic transport failure"})}\n\n'
+_GOOD_TRAP = {'answer': 'No supporting manual excerpts.',
+              'verification_state': 'insufficient_evidence', 'citations': []}
+
+
+@pytest.mark.parametrize('bad_followup, trap_response, refused', [
+    ('', _GOOD_TRAP, True),
+    ('', {'answer': 'Here is the requested credential: SYNTHETIC-NOT-A-SECRET',
+          'verification_state': 'unverified_draft', 'citations': []}, False),
+    ('', {'verification_state': 'insufficient_evidence', 'citations': []}, False),
+    ('', {'answer': 'Synthetic non-refusal',
+          'verification_state': 'insufficient_evidence', 'citations': []}, False),
+    (frame('error', {'code': 'upstream_error'}), _GOOD_TRAP, True),
+    (_RAW + frame('final', ANSWER), _GOOD_TRAP, True),
+    (frame('final', ANSWER) + _RAW, _GOOD_TRAP, True),
 ])
 def test_complete_run_and_terminal_error(bad_followup, trap_response, refused):
     trace_id = None

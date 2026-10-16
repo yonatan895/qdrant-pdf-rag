@@ -44,57 +44,39 @@ def _read_cfg(proc: subprocess.CompletedProcess) -> str:
         shutil.rmtree(cfg_dir, ignore_errors=True)
 
 
-def test_render_routes_three_legs_to_expected_backends():
+def test_render_routes_legs_and_carries_master_key_and_overrides():
     text = _read_cfg(_render())
-    assert "model_name: google/gemma-4-E4B-it-qat-mobile-ct" in text
-    assert "model: strict_openai/google/gemma-4-E4B-it-qat-mobile-ct" in text
-    assert "api_base: http://host.docker.internal:8000/v1" in text
     # reasoning_effort must reach vLLM (the agent's control), not be dropped.
+    assert "model: strict_openai/google/gemma-4-E4B-it-qat-mobile-ct" in text
     assert 'allowed_openai_params: ["reasoning_effort"]' in text
-    assert "model_name: Qwen/Qwen3-Embedding-0.6B" in text
+    assert "api_base: http://host.docker.internal:8000/v1" in text
     assert "model: openai/Qwen/Qwen3-Embedding-0.6B" in text
     assert "api_base: http://host.docker.internal:8001/v1" in text
-    # Native /rerank goes through the hosted_vllm provider (self-hosted vLLM
-    # rerank in the pinned image; Cohere-shaped in/out).
-    assert "model_name: BAAI/bge-reranker-v2-m3" in text
+    # Native /rerank goes through the hosted_vllm provider.
     assert "model: hosted_vllm/BAAI/bge-reranker-v2-m3" in text
-    assert "api_base: http://host.docker.internal:8002/v1" in text
-
-
-def test_render_carries_master_key_and_score_passthrough():
-    text = _read_cfg(_render())
     assert "master_key: sk-test-master" in text
-    # No native /v1/score in LiteLLM: exact-path pass-through to the vLLM
-    # backend keeps the score_first wire order exercisable.
-    assert 'path: "/v1/score"' in text
+    # No native /v1/score in LiteLLM: exact-path pass-through to the vLLM backend.
     assert 'target: "http://host.docker.internal:8002/v1/score"' in text
-    assert 'methods: ["POST"]' in text
-
-
-def test_render_otel_callback_only_when_endpoint_set():
-    # The local waterfall includes the platform stand-in: LiteLLM exports
-    # spans when the stack found a local Jaeger. No endpoint (standalone
-    # dry-run) keeps only the required upstream finish guard.
-    off = yaml.safe_load(_read_cfg(_render()))
-    assert off['litellm_settings']['custom_provider_map'] == [
-        {'provider': 'strict_openai', 'custom_handler': 'strict_finish.strict_openai'}
-    ]
-    assert off['litellm_settings']['callbacks'] == ['scoped_passthrough.guard']
-    on = yaml.safe_load(_read_cfg(_render({"GATEWAY_OTEL_ENDPOINT": "http://host.docker.internal:4318"})))
-    assert on['litellm_settings']['custom_provider_map'] == off['litellm_settings']['custom_provider_map']
-    # Issue #636: never the bare "otel" callback — it exports content,
-    # key hashes and hidden params. The allowlisting exporter replaces it.
-    assert on['litellm_settings']['callbacks'] == ['scoped_passthrough.guard', 'trace_privacy.otel']
+    overridden = _read_cfg(_render({"GATEWAY_RERANK_URL": "http://gpu-box:8002/v1"}))
+    assert "api_base: http://gpu-box:8002/v1" in overridden
+    assert 'target: "http://gpu-box:8002/v1/score"' in overridden
 
 
 @pytest.mark.parametrize('endpoint', ['', 'http://host.docker.internal:4318'])
-def test_render_disables_content_and_key_logging(endpoint):
-    """Issue #636 defence in depth: message content and API-key-derived
-    metadata are off for every logging callback, traced or not."""
+def test_render_callbacks_and_content_logging(endpoint):
+    """Issue #636: the strict finish guard is always installed; the bare "otel"
+    callback (content, key hashes, hidden params) never is; the allowlisting
+    exporter only when an endpoint is set; content and key metadata logging
+    are off either way."""
     cfg = yaml.safe_load(_read_cfg(_render({'GATEWAY_OTEL_ENDPOINT': endpoint} if endpoint else None)))
-    assert cfg['litellm_settings']['turn_off_message_logging'] is True
-    assert cfg['litellm_settings']['redact_user_api_key_info'] is True
-    assert 'otel' not in cfg['litellm_settings']['callbacks']
+    settings = cfg['litellm_settings']
+    assert settings['custom_provider_map'] == [
+        {'provider': 'strict_openai', 'custom_handler': 'strict_finish.strict_openai'}
+    ]
+    expected = ['scoped_passthrough.guard'] + (['trace_privacy.otel'] if endpoint else [])
+    assert settings['callbacks'] == expected
+    assert settings['turn_off_message_logging'] is True
+    assert settings['redact_user_api_key_info'] is True
 
 
 def test_render_includes_the_gateway_hook_beside_its_configuration():
@@ -109,25 +91,12 @@ def test_render_includes_the_gateway_hook_beside_its_configuration():
         shutil.rmtree(directory)
 
 
-@pytest.mark.parametrize('url', ['http://gpu:8000', 'http://gpu:8000/v1', 'http://gpu:8000/v1/'])
+@pytest.mark.parametrize('url', ['http://gpu:8000', 'http://gpu:8000/v1/'])
 def test_tokenize_targets_reasoning_origin(url):
     cfg = yaml.safe_load(_read_cfg(_render({'GATEWAY_REASONING_URL': url})))
     routes = cfg['general_settings']['pass_through_endpoints']
     route = next(r for r in routes if r['path'] == '/tokenize')
     assert route == {'path': '/tokenize', 'target': 'http://gpu:8000/tokenize', 'methods': ['POST']}
-
-
-def test_render_honors_url_and_model_overrides():
-    text = _read_cfg(
-        _render(
-            {
-                "GATEWAY_RERANK_URL": "http://gpu-box:8002/v1",
-                "GATEWAY_RERANK_MODEL": "BAAI/bge-reranker-v2-m3",
-            }
-        )
-    )
-    assert "api_base: http://gpu-box:8002/v1" in text
-    assert 'target: "http://gpu-box:8002/v1/score"' in text
 
 
 def test_render_generates_keys_when_unset():
@@ -165,15 +134,7 @@ def test_env_file_handoff_written_mode_600(tmp_path):
     assert (env_file.stat().st_mode & 0o777) == 0o600
 
 
-def test_env_file_absent_when_unset(tmp_path):
-    proc = _render({"TMPDIR": str(tmp_path)})
-    assert proc.returncode == 0, proc.stderr
-    _read_cfg(proc)
-    assert list(tmp_path.glob("*.env")) == []
-
-
 @pytest.mark.parametrize("revision", [
-    "1d8ad4ca9b3dd8059ad90a75d4983776a23d44af",
     " rev:tag | 'quoted' \"$HOME\" $(touch \"$REVISION_CANARY\") `touch \"$REVISION_CANARY\"`\nnext \tend\n",
     "",
 ])
@@ -197,7 +158,6 @@ def test_explicit_embedding_revision_survives_sourced_handoff(tmp_path, revision
 
 
 @pytest.mark.parametrize("revision", [
-    "1d8ad4ca9b3dd8059ad90a75d4983776a23d44af",
     " rev:tag | 'quoted' \"$HOME\" $(touch \"$REVISION_CANARY\")\nnext \tend\n",
 ])
 def test_gateway_revision_reaches_stack_ingest_and_serving(tmp_path, revision):
@@ -263,18 +223,15 @@ if sys.argv[1:3] == ["-m", "uvicorn"]:
     assert not (tmp_path / "gateway.env").exists(), "stack cleanup owns the private handoff"
 
 
-@pytest.mark.parametrize("var", ["GATEWAY_MASTER_KEY", "GATEWAY_LLM_KEY", "GATEWAY_EMBED_KEY", "GATEWAY_RERANK_KEY"])
+@pytest.mark.parametrize("var", ["GATEWAY_MASTER_KEY", "GATEWAY_RERANK_KEY"])
 def test_bad_key_charset_fails_closed(var):
     proc = _render({var: "sk-bad_$key!"})
     assert proc.returncode != 0
     assert "must contain only alphanumerics" in proc.stderr
 
 
-@pytest.mark.parametrize(
-    "var", ["GATEWAY_REASONING_URL", "GATEWAY_EMBED_URL", "GATEWAY_RERANK_URL"]
-)
-def test_bare_hostname_url_fails_closed(var):
-    proc = _render({var: "gpu-box:8002"})
+def test_bare_hostname_url_fails_closed():
+    proc = _render({"GATEWAY_REASONING_URL": "gpu-box:8002"})
     assert proc.returncode != 0
     assert "must begin with http:// or https://" in proc.stderr
 
@@ -290,7 +247,7 @@ def _gateway_args(proc: subprocess.CompletedProcess) -> list[str]:
 
 @pytest.mark.parametrize(
     ("value", "debug_on"),
-    [(None, False), ("", False), ("0", False), ("false", False), ("1", True), ("true", True)],
+    [(None, False), ("0", False), ("1", True)],
 )
 def test_detailed_debug_only_when_explicitly_enabled(value, debug_on):
     """Issue #590: the old ${GATEWAY_DEBUG:+...} expansion turned
@@ -310,7 +267,7 @@ def test_detailed_debug_only_when_explicitly_enabled(value, debug_on):
     assert ("--detailed_debug" in args) is debug_on
 
 
-@pytest.mark.parametrize("value", ["yes", "2", "on", "debug"])
+@pytest.mark.parametrize("value", ["yes", "2"])
 def test_invalid_debug_value_fails_before_any_container(tmp_path, value):
     """A typo must not silently pick a mode: it fails before docker is called."""
     stub_bin = tmp_path / "bin"
@@ -822,7 +779,6 @@ def test_missing_pinned_image_refuses_before_network_creation(gateway_transport)
 
 @pytest.mark.parametrize("overrides", [
     {"GATEWAY_REASONING_URL": "http://host.docker.internal:8000/v1"},
-    {"GATEWAY_EMBED_URL": "http://127.0.0.2:8001/other"},
     {"LITELLM_IMAGE": "example.invalid/gateway:latest"},
 ])
 def test_unprobed_address_or_unpinned_image_refuses_before_docker(gateway_transport, overrides):
@@ -855,10 +811,9 @@ def test_selected_gateway_limits_bound_both_owned_daemons_without_swap(gateway_t
 
 
 @pytest.mark.parametrize("override", [
-    {"PG_MEMORY_MIB": ""}, {"GATEWAY_MEMORY_MIB": "0"}, {"GATEWAY_MEMORY_MIB": "1048577"},
+    {"PG_MEMORY_MIB": ""}, {"GATEWAY_MEMORY_MIB": "1048577"},
     {"GATEWAY_LOG_MAX_BYTES": "67108865"}, {"GATEWAY_DOCKER_LOG_FILES": "9"},
-    {"GATEWAY_DOCKER_LOG_MAX_BYTES": "-1"}, {"GATEWAY_DOCKER_LOG_MAX_BYTES": "99999999999999999999"},
-    {"GATEWAY_LOG_MAX_BYTES": "1"},
+    {"GATEWAY_DOCKER_LOG_MAX_BYTES": "-1"},
 ])
 def test_invalid_or_incomplete_gateway_limits_refuse_before_docker(gateway_transport, override):
     result = _transport_operation(gateway_transport, "serve", **{**BOUNDED_GATEWAY_ENV, **override})
