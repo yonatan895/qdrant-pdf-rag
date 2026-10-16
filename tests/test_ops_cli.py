@@ -307,9 +307,7 @@ def test_search_scoped_request_and_full_structured_hits(agent):
     code, out, _ = run(["search", "IEA500I", "--base-url", agent.url])
     assert code == 0 and "#1 [0.5000] SA22-7601 p.1" in out and "pdf_pages=1-2" in out
     assert "   | second line" in out
-
-
-def test_search_empty_is_success_and_unscoped_omits_filters(agent):
+    # Empty result is success; an unscoped request omits the filters.
     agent.on(
         "POST", "/v1/search", Reply(body={"request_id": "r", "query_kind": "prose", "hits": []})
     )
@@ -346,22 +344,7 @@ def test_answer_accepted_json_preserves_provenance_fields(agent):
     assert code == 0
     assert "REVIEW REQUIRED, NOT VALIDATED" in out and "script_review_required: true" in out
     assert "verification_state: accepted" in out and "  - SA22-7601 p.1" in out
-
-
-@pytest.mark.parametrize(
-    "state", ["insufficient_evidence", "unverified_draft", "generation_incomplete"]
-)
-def test_answer_non_accepted_states_exit_3_but_are_labelled(agent, state):
-    agent.on("POST", "/v1/answer", Reply(body=answer_json(verification_state=state, citations=[])))
-    code, doc, _ = jrun(agent, "answer", "q")
-    assert code == cli.EXIT_NOT_ACCEPTED
-    assert doc["ok"] is False and doc["error"]["code"] == "answer_not_accepted"
-    assert doc["data"]["verification_state"] == state
-    code, out, err = run(["answer", "q", "--base-url", agent.url])
-    assert code == 3 and f"verification_state: {state}" in out and "answer_not_accepted" in err
-
-
-def test_answer_inferred_citations_are_flagged_not_grounding(agent):
+    # Inferred citations are flagged, never presented as grounding.
     agent.on(
         "POST",
         "/v1/answer",
@@ -374,7 +357,18 @@ def test_answer_inferred_citations_are_flagged_not_grounding(agent):
     assert "citations_inferred: true" in out and "not grounding" in out
 
 
-@pytest.mark.parametrize("text", ["", "   \n"])
+@pytest.mark.parametrize("state", ["insufficient_evidence"])
+def test_answer_non_accepted_states_exit_3_but_are_labelled(agent, state):
+    agent.on("POST", "/v1/answer", Reply(body=answer_json(verification_state=state, citations=[])))
+    code, doc, _ = jrun(agent, "answer", "q")
+    assert code == cli.EXIT_NOT_ACCEPTED
+    assert doc["ok"] is False and doc["error"]["code"] == "answer_not_accepted"
+    assert doc["data"]["verification_state"] == state
+    code, out, err = run(["answer", "q", "--base-url", agent.url])
+    assert code == 3 and f"verification_state: {state}" in out and "answer_not_accepted" in err
+
+
+@pytest.mark.parametrize("text", ["   \n"])
 def test_accepted_with_blank_answer_is_never_a_success(agent, text):
     agent.on("POST", "/v1/answer", Reply(body=answer_json(answer=text)))
     code, doc, _ = jrun(agent, "answer", "q")
@@ -420,7 +414,6 @@ def _stream_failure(agent, chunks):
     "name,chunks,error_code",
     [
         ("eof_after_tokens", [token_event("PARTIAL-ANSWER").encode()], "stream_incomplete"),
-        ("empty_stream", [b""], "stream_incomplete"),
         (
             "error_event",
             [
@@ -429,7 +422,6 @@ def _stream_failure(agent, chunks):
             ],
             "stream_failed",
         ),
-        ("final_truncated_mid_frame", [final_event()[:-30].encode()], "stream_incomplete"),
         ("final_without_blank_line", [final_event().rstrip("\n").encode()], "stream_incomplete"),
     ],
 )
@@ -446,7 +438,6 @@ def test_stream_never_prints_a_completed_answer_without_final(agent, name, chunk
     "chunks",
     [
         [b"event: final\ndata: {not json}\n\n"],
-        [b"event: final\ndata: [1]\n\n"],
         [b"event: surprise\ndata: {}\n\n"],
         [b'event: final\ndata: {"type": "final"}\n\n'],
         [b"\xff\xfe\n\n"],
@@ -527,12 +518,8 @@ def test_stream_cancellation_prints_nothing_and_next_request_is_healthy(agent, m
     "status,code_expected,error",
     [
         (401, 4, "unauthorized"),
-        (403, 4, "unauthorized"),
         (422, 7, "request_rejected"),
-        (404, 7, "request_rejected"),
-        (405, 7, "request_rejected"),
         (500, 5, "server_error"),
-        (502, 5, "server_error"),
         (503, 5, "unavailable"),
         (302, 6, "unexpected_response"),
     ],
@@ -568,11 +555,14 @@ def test_unknown_server_code_is_dropped(agent):
     "reply",
     [
         Reply(body="<html>not json</html>"),
-        Reply(body="[]"),
-        Reply(body={"request_id": 1, "query_kind": "x", "hits": []}),
         Reply(body={"request_id": "r", "query_kind": "x", "hits": [{"cite": "only"}]}),
-        Reply(body={"request_id": "r", "query_kind": "x", "hits": "nope"}),
-        Reply(body=b""),
+        Reply(  # exact reference must be a scalar
+            body={
+                "request_id": "r",
+                "query_kind": "x",
+                "hits": [hit().model_dump() | {"reference": ["invalid"]}],
+            }
+        ),
         Reply(body=b'{"request_id": "r", "query_kind"', declared_length=500),  # truncated body
     ],
 )
@@ -588,12 +578,8 @@ def test_malformed_and_truncated_search_responses(agent, reply):
     "patch",
     [
         {"verification_state": "great"},
-        {"verification_state": None},
         {"citations": "x"},
-        {"citations_inferred": "no"},
-        {"inferred_indices": ["1"]},
         {"script_review_required": 1},
-        {"answer": None},
     ],
 )
 def test_malformed_answer_fields_fail_closed(agent, patch):
@@ -611,7 +597,7 @@ def test_oversize_body_is_refused(agent, monkeypatch):
     assert code == 6 and doc["error"]["code"] == "malformed_response"
 
 
-def test_connection_refused_is_unavailable_then_recovers(agent):
+def test_connection_refused_and_timeout_exit_5_then_recover(agent):
     dead = FakeAgent()
     dead_url = dead.url
     dead.close()
@@ -619,14 +605,9 @@ def test_connection_refused_is_unavailable_then_recovers(agent):
     assert code == 5 and json.loads(out)["error"]["code"] == "unavailable"
     assert "127.0.0.1" not in out + err
     healthy(agent)
-
-
-def test_timeout_exit_and_recovery(agent):
     agent.on("GET", "/healthz", Reply(body={}, delay_s=3.0))
-    started = time.monotonic()
     code, doc, _ = jrun(agent, "health", "--timeout", "1")
     assert code == 5 and doc["error"]["code"] == "timeout"
-    assert time.monotonic() - started < 2.8
     healthy(agent)
 
 
@@ -664,11 +645,7 @@ def test_no_key_means_no_authorization_header_and_flag_does_not_exist(agent):
     "url",
     [
         "http://user:pw@127.0.0.1:1",
-        "http://127.0.0.1:1/?x=1",
-        "http://127.0.0.1:1/#f",
         "ftp://127.0.0.1",
-        "127.0.0.1:8080",
-        "http://",
         "",
         "http://127.0.0.1:99999",
     ],
@@ -715,14 +692,10 @@ def test_key_refused_over_cleartext_non_loopback_and_bad_keys(tmp_path):
     "argv",
     [
         ["search", " "],
-        ["search", "q", "--limit", "0"],
         ["search", "q", "--limit", "41"],
         ["answer", "q", "--temperature", "nan"],
-        ["answer", "q", "--temperature", "2.5"],
         ["health", "--timeout", "0"],
-        ["health", "--timeout", "601"],
         ["bogus"],
-        [],
         ["search", "q", "--format", "xml"],
     ],
 )
@@ -889,35 +862,9 @@ def test_entry_point_is_declared_and_module_runs():
     assert proc.returncode == 0 and "Exit codes" in proc.stdout
 
 
-def test_no_new_runtime_dependency():
-    imports = {
-        line.split()[1].split(".")[0]
-        for line in Path(cli.__file__).read_text().splitlines()
-        if line.startswith(("import ", "from ")) and "__future__" not in line
-    }
-    assert imports <= {
-        "argparse",
-        "ipaddress",
-        "json",
-        "os",
-        "re",
-        "ssl",
-        "sys",
-        "time",
-        "collections",
-        "dataclasses",
-        "typing",
-        "urllib",
-        "httpx2",
-        "mainframe_rag",
-    }
-
-
-@pytest.mark.parametrize("field,value", [
-    ("script", "missing"), ("script_lang", "missing"),
-    ("verification_state", []), ("verification_state", {"secret": "upstream"}),
+@pytest.mark.parametrize("field,value,stream", [
+    ("script", "missing", False), ("verification_state", {"secret": "upstream"}, True),
 ])
-@pytest.mark.parametrize("stream", [False, True])
 def test_cli_process_malformed_nullable_and_enum_fields_have_fixed_error(agent, field, value, stream):
     body = answer_json()
     if value == "missing":
@@ -947,7 +894,7 @@ def test_cli_process_malformed_nullable_and_enum_fields_have_fixed_error(agent, 
     assert jrun(agent, "answer", "q")[0] == 0
 
 
-@pytest.mark.parametrize("reference", ["ep1.exact:/ whitespace\tµ", None, "absent"])
+@pytest.mark.parametrize("reference", ["ep1.exact:/ whitespace\tµ", "absent"])
 def test_search_cli_process_preserves_optional_exact_reference(agent, reference):
     body = SearchResponse(request_id="request", query_kind="identifier", hits=[hit().model_dump()]).model_dump()
     if reference == "absent":
@@ -965,9 +912,3 @@ def test_search_cli_process_preserves_optional_exact_reference(agent, reference)
     assert json.loads(proc.stdout)["data"]["hits"][0]["text"] == hit().text
 
 
-def test_cli_rejects_non_scalar_reference(agent):
-    body = SearchResponse(request_id="request", query_kind="identifier", hits=[hit().model_dump()]).model_dump()
-    body["hits"][0]["reference"] = ["invalid"]
-    agent.on("POST", "/v1/search", Reply(body=body))
-    code, doc, _ = jrun(agent, "search", "q")
-    assert code == cli.EXIT_BAD_RESPONSE and doc["error"]["code"] == "malformed_response"

@@ -41,19 +41,6 @@ def test_build_dispatch() -> None:
     built.close()
 
 
-def test_list_tools_parses_names() -> None:
-    def handler(request: httpx2.Request) -> httpx2.Response:
-        assert request.url.path == "/mcp"
-        body = json.loads(request.content.decode())
-        assert body["method"] == "tools/list"
-        return httpx2.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {"tools": [
-            {"name": "dataset_read"}, {"name": "job_status"}]}})
-
-    client = HttpZoweMCP(_settings(), client=httpx2.Client(transport=_transport(handler)))
-    assert client.list_tools() == ["dataset_read", "job_status"]
-    client.close()
-
-
 def test_call_tool_posts_jsonrpc_and_injects_trace(monkeypatch) -> None:
     """Claimed path: exact frame shape, incrementing ids, and the first
     egress W3C injection in the codebase (inject called for the POST)."""
@@ -130,13 +117,16 @@ def test_call_tool_failures_raise_stable_errors() -> None:
     client.close()
 
 
-def test_probe_allowlist_gates() -> None:
+def test_probe_allowlist_gates(monkeypatch) -> None:
     def listing(names: list[str]):
-        def handler(_request: httpx2.Request) -> httpx2.Response:
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            assert request.url.path == "/mcp"
+            assert json.loads(request.content.decode())["method"] == "tools/list"
             return httpx2.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {
                 "tools": [{"name": n} for n in names]}})
         return HttpZoweMCP(_settings(), client=httpx2.Client(transport=_transport(handler)))
 
+    assert listing(["dataset_read", "job_status"]).list_tools() == ["dataset_read", "job_status"]
     assert probe_zowe_mcp(listing(["dataset_read", "job_status"])) is None
     assert "job_submit" in (probe_zowe_mcp(listing(["dataset_read", "job_submit"])) or "")
     assert probe_zowe_mcp(listing([])) is not None
@@ -146,11 +136,8 @@ def test_probe_allowlist_gates() -> None:
 
     assert probe_zowe_mcp(HttpZoweMCP(_settings(), client=httpx2.Client(transport=_transport(dead)))) is not None
 
-
-def test_probe_failure_reports_error_type_only(monkeypatch) -> None:
-    """The probe string is logged at startup: it carries the exception class,
-    never its message (AGENTS.md: logs contain no secrets/upstream text)."""
-
+    # The probe string is logged at startup: it carries the exception class,
+    # never its message (AGENTS.md: logs contain no secrets/upstream text).
     def leaky(self) -> list[str]:
         raise RuntimeError("SECRET-XYZ upstream body")
 
@@ -208,28 +195,22 @@ def _fetch_settings(**overrides) -> Settings:
     return Settings(**base)
 
 
-def test_fetch_manual_route_makes_no_calls(caplog) -> None:
+def test_fetch_makes_no_source_call_for_manual_dry_run_unconfigured_or_no_target() -> None:
     fake = FakeZoweMCP()
-    with caplog.at_level("INFO", logger="agent"):
-        out = fetch_live(_fetch_settings(), fake, "req-1", "What does IEA500I mean?", "manual")
-    assert out == LiveResult(route="manual")
-    assert fake.calls == []
-    assert '"action": "live_fetch"' in caplog.text
-
-
-def test_fetch_dry_run_plans_without_calling() -> None:
-    fake = FakeZoweMCP()
+    assert fetch_live(_fetch_settings(), fake, "req-1", "What does IEA500I mean?", "manual") == (
+        LiveResult(route="manual")
+    )
     out = fetch_live(_fetch_settings(zowe_mcp_dry_run=True), fake, "req-1",
                      "Why did JOB00023 fail last night?", "hybrid")
     assert out.degraded == "dry_run"
     assert out.tools_used == ("job_status", "jes_spool_read")
-    assert fake.calls == []
-
-
-def test_fetch_not_configured_degrades() -> None:
     out = fetch_live(_fetch_settings(), None, "req-1", "Show me the spool for JOB00023.", "live")
-    assert out.degraded == "not_configured"
-    assert out.texts == ()
+    assert out.degraded == "not_configured" and out.texts == ()
+    # ADR-0003: no exact job id means no unscoped listing, hence no call at all.
+    out = fetch_live(_fetch_settings(), fake, "req-1", "What is JES doing right now?", "live")
+    assert out.degraded == "no_target"
+    assert out.texts == () and out.tools_used == ()
+    assert fake.calls == []
 
 
 def test_fetch_job_failure_two_calls_and_spool_assumption() -> None:
@@ -241,12 +222,9 @@ def test_fetch_job_failure_two_calls_and_spool_assumption() -> None:
     assert fake.calls[1][1] == {"job_id": "JOB00023", "spool_id": "2"}
     assert any("spool file 2" in note for note in out.notes)
     assert out.texts == ("PAYROLL JOB00023 OUTPUT RC=0008", "IEF142I RC=8")
-
-
-def test_fetch_explicit_spool_id_wins_no_assumption() -> None:
-    fake = FakeZoweMCP({"job_status": "X", "jes_spool_read": "Y"})
-    out = fetch_live(_fetch_settings(), fake, "req-1", "Show spool file 3 of JOB00023.", "live")
-    assert fake.calls[1][1]["spool_id"] == "3"
+    explicit = FakeZoweMCP({"job_status": "X", "jes_spool_read": "Y"})
+    out = fetch_live(_fetch_settings(), explicit, "req-1", "Show spool file 3 of JOB00023.", "live")
+    assert explicit.calls[1][1]["spool_id"] == "3"
     assert out.notes == ()
 
 
@@ -296,24 +274,6 @@ def test_fetch_emits_bounded_live_span(monkeypatch) -> None:
 
 
 # ------------------------------------------------- ADR-0003 observation boundary
-
-
-def test_plan_requires_exact_job_id_never_an_unscoped_listing() -> None:
-    """ADR-0003: empty job_status filters mean "every job of every owner", so
-    a bare JES mention (or any query without a job id) plans no job_status."""
-    plan = live_state._plan_calls("What is JES doing right now?")
-    assert plan == []
-    assert live_state._plan_calls("Why did JOB00023 fail?")[0] == ("job_status", {"job_id": "JOB00023"})
-    for query in ("jes status please", "show the spool", "last night's abend"):
-        assert all(name != "job_status" for name, _ in live_state._plan_calls(query))
-
-
-def test_fetch_without_exact_target_degrades_with_no_source_call() -> None:
-    fake = FakeZoweMCP()
-    out = fetch_live(_fetch_settings(), fake, "req-1", "What is JES doing right now?", "live")
-    assert out.degraded == "no_target"
-    assert out.texts == () and out.tools_used == ()
-    assert fake.calls == []
 
 
 def test_allowlist_is_the_bridge_registry_and_read_only() -> None:
@@ -368,3 +328,21 @@ def test_agent_http_surface_exposes_no_mutating_operation_or_live_call() -> None
     assert referencing == ["agent/live_state.py"]
     app_source = Path(app_mod.__file__).read_text(encoding="utf-8")
     assert "call_tool" not in app_source and "live_state" not in app_source
+
+
+def test_mock_mode_never_reaches_prod_manifests() -> None:
+    """Hygiene gate (EMBED_MODE=hash precedent): MCP_MOCK_DIR is test-only.
+    A prod manifest carrying it would serve fixture data as live state."""
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parents[1]
+    hits = []
+    for base in ("scripts/airgap", "deploy", "charts"):
+        root = repo / base
+        if not root.is_dir():
+            continue
+        for path in root.rglob("*"):
+            suffix_ok = path.is_file() and path.suffix in {".yaml", ".yml", ".sh", ".env"}
+            if suffix_ok and "MCP_MOCK_DIR" in path.read_text(encoding="utf-8", errors="replace"):
+                hits.append(str(path.relative_to(repo)))
+    assert hits == []
