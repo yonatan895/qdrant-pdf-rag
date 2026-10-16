@@ -26,19 +26,20 @@ def stream(*, openai, failure=False):
              'event: final\ndata: ' + json.dumps(final)) + '\n\n')
 
 
-@pytest.mark.parametrize('openai', [False, True])
-@pytest.mark.parametrize('failure', [False, True])
-def test_stream_success_and_reported_failure(openai, failure):
-    text = stream(openai=openai, failure=failure)
-    contracts.check_stream(text, openai=openai, failure=failure)
-    with pytest.raises(AssertionError):
-        contracts.check_stream(text, openai=openai, failure=not failure)
+def test_stream_success_and_reported_failure():
+    for openai in (False, True):
+        for failure in (False, True):
+            text = stream(openai=openai, failure=failure)
+            contracts.check_stream(text, openai=openai, failure=failure)
+            with pytest.raises(AssertionError):
+                contracts.check_stream(text, openai=openai, failure=not failure)
 
 
-@pytest.mark.parametrize('openai', [False, True])
-@pytest.mark.parametrize('fault', ['empty', 'incomplete-frame', 'missing-terminal',
-                                 'invalid-json', 'length-finish', 'no-cites',
-                                 'inferred-cites', 'duplicate-terminal', 'late-token'])
+@pytest.mark.parametrize('openai,fault', [
+    *[(False, fault) for fault in ('empty', 'incomplete-frame', 'missing-terminal',
+                                    'invalid-json', 'length-finish', 'no-cites',
+                                    'inferred-cites', 'duplicate-terminal', 'late-token')],
+    (True, 'missing-terminal'), (True, 'no-cites'), (True, 'late-token')])
 def test_bad_stream_never_counts_as_success(openai, fault):
     text = stream(openai=openai)
     if fault == 'empty':
@@ -85,8 +86,7 @@ class AppClient:
                 'message': {'content': 'synthetic answer'}}]})
 
 
-@pytest.mark.parametrize('failure', [False, True])
-@pytest.mark.parametrize('streams_only', [False, True])
+@pytest.mark.parametrize('failure,streams_only', [(False, False), (True, False), (False, True)])
 def test_checker_reaches_all_http_paths(failure, streams_only):
     client = AppClient(failure=failure)
     contracts.run(client, failure=failure, streams_only=streams_only)

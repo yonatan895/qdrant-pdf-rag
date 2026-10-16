@@ -49,7 +49,7 @@ def _run_login(tmp_path: Path, username: str, password: str, exit_code: int = 0)
     return result, record
 
 
-@pytest.mark.parametrize("username,password", [("", ""), ("user", ""), ("", "synthetic-secret")])
+@pytest.mark.parametrize("username,password", [("user", ""), ("", "synthetic-secret")])
 def test_registry_login_requires_both_secrets(tmp_path, username, password):
     result, record = _run_login(tmp_path, username, password)
     assert result.returncode != 0

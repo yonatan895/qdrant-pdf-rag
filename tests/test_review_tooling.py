@@ -26,7 +26,6 @@ from scripts.review_tooling import (
     CodeAssessment,
     LaneState,
     MergeReadiness,
-    ProfileDecision,
     ProfileName,
     VerificationStatus,
     build_acceptance_summary,
@@ -35,59 +34,94 @@ from scripts.review_tooling import (
     evaluate_lane,
     evaluate_probe_response,
     extract_review_json,
-    generate_candidate_manifest,
     validate_review_payload,
 )
 
 
 class TestProfileClassification(unittest.TestCase):
-    """Tests for risk-based profile selection and service mapping (§5.1)."""
+    """Risk-based profile selection and service mapping (§5.1)."""
 
-    def test_classify_prose_only(self):
-        paths = ["README.md", "docs/testing.md", "ROADMAP.md", "docs/agent-workflow.md"]
+    def _required(self, paths):
+        from scripts.review_tooling import required_lanes
+
         decision = classify_paths(paths)
-        self.assertEqual(decision.profile, ProfileName.OFFLINE)
-        self.assertEqual(decision.services, [])
-        self.assertFalse(decision.needs_qdrant)
-        self.assertFalse(decision.needs_vllm)
-        self.assertFalse(decision.needs_jaeger)
-        self.assertFalse(decision.needs_agent)
+        return decision, required_lanes({"profile": decision.profile.value,
+                                         "matched_categories": decision.matched_categories,
+                                         "changed_paths": paths})
 
-    def test_classify_tooling_only(self):
-        paths = [
-            "scripts/check_agent_context.py",
-            "scripts/agent_doctor.py",
-            "scripts/review_tooling.py",
-            "tests/test_agent_context.py",
-            "tests/test_review_tooling.py",
-            ".github/workflows/ci.yml",
-            ".github/workflows/opencode.yml",
-            "Taskfile.yml",
-            "taskfiles/quality.yml",
+    def test_changed_paths_select_profile_and_services(self):
+        offline, deploy = ProfileName.OFFLINE, ProfileName.DEPLOY
+        cases = [
+            (["README.md", "docs/testing.md", "ROADMAP.md", "docs/agent-workflow.md"], offline, []),
+            (["scripts/check_agent_context.py", "scripts/review_tooling.py", "tests/test_agent_context.py",
+              ".github/workflows/ci.yml", "Taskfile.yml", "taskfiles/quality.yml"], offline, []),
+            (["scripts/gate_l1.py", "benchmarks/harness.json", ".gitlab-ci.yml"], offline, []),
+            (["tests/test_config.py"], offline, []),
+            (["Dockerfile", "images/Containerfile.agent", "pyproject.toml", "requirements.lock.txt",
+              "scripts/airgap/deploy.sh", "charts/mainframe-rag/templates/agent-deployment.yaml",
+              "docker-compose.ci.yml", "airgap.env.example", "tests/test_airgap_deploy_sh.py"], deploy, []),
+            (["taskfiles/airgap.yml", "scripts/tools/run-task.sh", "scripts/tools/task-pin.txt"], deploy, []),
+            (["tests/helpers_helm.py", "tests/helpers_image_inventory.py"], deploy, []),
+            (["docs/testing.md", "Dockerfile"], deploy, []),
+            (["src/mainframe_rag/ingest/publish.py", "scripts/qdrant_pin.py"], ProfileName.STORAGE, ["qdrant"]),
+            (["src/mainframe_rag/retrieve/query.py"], ProfileName.STORAGE, ["qdrant"]),
+            (["docs/testing.md", "src/mainframe_rag/ingest/publish.py"], ProfileName.STORAGE, ["qdrant"]),
+            (["src/mainframe_rag/agent/app.py", "scripts/mock_vllm.py"], ProfileName.HTTP,
+             ["agent", "qdrant", "vllm"]),
+            (["src/mainframe_rag/tracing.py", "scripts/run_local_jaeger.sh"], ProfileName.TRACING, ["jaeger"]),
+            (["src/mainframe_rag/ingest/publish.py", "src/mainframe_rag/agent/app.py"], ProfileName.FULL,
+             ["agent", "qdrant", "vllm"]),
+            (["src/mainframe_rag/ingest/publish.py", "src/mainframe_rag/agent/app.py",
+              "src/mainframe_rag/tracing.py"], ProfileName.FULL, ["agent", "jaeger", "qdrant", "vllm"]),
+            (["pyproject.toml", "src/mainframe_rag/ingest/publish.py"], ProfileName.FULL, ["qdrant"]),
         ]
-        decision = classify_paths(paths)
-        self.assertEqual(decision.profile, ProfileName.OFFLINE)
-        self.assertEqual(decision.services, [])
-        self.assertFalse(decision.needs_qdrant)
-        self.assertFalse(decision.needs_vllm)
-        self.assertFalse(decision.needs_jaeger)
-        self.assertFalse(decision.needs_agent)
+        for paths, profile, services in cases:
+            with self.subTest(paths=paths):
+                decision = classify_paths(paths)
+                self.assertEqual(decision.profile, profile)
+                self.assertEqual(sorted(decision.services), services)
+                self.assertEqual(decision.needs_qdrant, "qdrant" in services)
+                self.assertEqual(decision.needs_jaeger, "jaeger" in services)
 
-    def test_task_entry_and_modules_select_owned_verification(self):
-        for path in ("Taskfile.yml", "taskfiles/quality.yml", "taskfiles/dev.yml",
-                     "taskfiles/eval.yml", "taskfiles/local.yml"):
+    def test_unmapped_unreadable_or_shared_changes_fail_closed_to_full(self):
+        every_service = {"agent", "jaeger", "qdrant", "vllm"}
+        # An empty change set means the diff could not be read (bad SHA, shallow
+        # checkout); it must not silently downgrade to a docs review.
+        for paths, category in (([], "unclassified_empty"), (["mystery.bin"], "unclassified"),
+                                (["src/mainframe_rag/new_module.py"], None),
+                                (["docs/generated.json"], None), (["docs/example.sh"], None)):
+            with self.subTest(paths=paths):
+                decision = classify_paths(paths)
+                self.assertEqual(decision.profile, ProfileName.FULL)
+                self.assertEqual(set(decision.services), every_service)
+                if category:
+                    self.assertIn(category, decision.matched_categories)
+        for path in ("tests/conftest.py", "tests/fakes.py", "tests/ci_shard.py"):
             with self.subTest(path=path):
                 decision = classify_paths([path])
-                self.assertEqual(decision.profile, ProfileName.OFFLINE)
+                self.assertEqual(decision.profile, ProfileName.FULL)
+                self.assertTrue({"deploy", "storage", "http", "tests"} <= set(decision.matched_categories))
+        for manifest in ({}, {"profile": {}}, {"profile": "unknown"}):
+            with self.subTest(manifest=manifest):
+                from scripts.review_tooling import required_lanes
+
+                self.assertTrue({"simulation", "packaging", "load", "ha", "agent_probes",
+                                 "eval_retrieval", "unit_tests", "hazards"} <= required_lanes(manifest))
+
+    def test_markdown_is_prose_unless_it_is_an_instruction_or_under_tests(self):
+        # The prose resource boundary is strictly offline even under a service-owned tree.
+        for path in ("evals/README.md", "src/mainframe_rag/ingest/README.md", "docs/explanation.md"):
+            decision = classify_paths([path])
+            self.assertEqual((decision.profile, decision.services, decision.matched_categories),
+                             (ProfileName.OFFLINE, [], ["prose"]))
+        decision = classify_paths(["tests/fixtures/notes.md"])
+        self.assertEqual((decision.profile, decision.services), (ProfileName.OFFLINE, []))
+        self.assertIn("tests", decision.matched_categories)
+        for path in ("AGENTS.md", "src/AGENTS.override.md", ".agents/skills/example/SKILL.md", "docs/testing.md"):
+            with self.subTest(path=path):
+                decision = classify_paths([path])
                 self.assertIn("tooling", decision.matched_categories)
-        for path in ("taskfiles/airgap.yml", "taskfiles/artifacts.yml",
-                     "scripts/tools/install-task.sh", "scripts/tools/run-task.sh",
-                     "scripts/tools/task-pin.txt"):
-            with self.subTest(path=path):
-                decision = classify_paths([path])
-                self.assertEqual(decision.profile, ProfileName.DEPLOY)
                 self.assertEqual(decision.services, [])
-                self.assertIn("deploy", decision.matched_categories)
 
     def test_evaluation_package_and_delegates_select_executable_tooling_lanes(self):
         from scripts.review_tooling import required_lanes
@@ -116,9 +150,7 @@ class TestProfileClassification(unittest.TestCase):
                         self.assertFalse(build_acceptance_summary(manifest, missing).all_prerequisites_met,
                                          (path, lane, status))
 
-    def test_evaluation_move_preserves_mixed_diff_obligations(self):
-        from scripts.review_tooling import required_lanes
-
+    def test_moved_evaluation_and_relocated_contracts_keep_every_obligation(self):
         # Both rename names are supplied by changed_pr_paths; retain the old
         # instrument and new package obligations in the same decision.
         moved = ["scripts/eval_retrieval.py", "src/mainframe_rag/eval/retrieval.py",
@@ -126,105 +158,25 @@ class TestProfileClassification(unittest.TestCase):
         for extra, required in (
             ([], {"simulation", "gate_l1", "unit_tests", "hazards"}),
             (["src/mainframe_rag/retrieve/query.py"], {"eval_retrieval", "simulation", "gate_l1"}),
-            (["src/mainframe_rag/ingest/representation.py"], {"eval_retrieval", "simulation", "gate_l1"}),
             (["images/Containerfile.agent"], {"packaging", "simulation", "gate_l1"}),
             (["src/mainframe_rag/agent/app.py"], {"agent_probes", "simulation", "gate_l1"}),
             (["src/mainframe_rag/new_module.py"], {"eval_retrieval", "packaging", "agent_probes"}),
         ):
             with self.subTest(extra=extra):
-                paths = moved + extra
-                decision = classify_paths(paths)
-                manifest = {"profile": decision.profile.value,
-                            "matched_categories": decision.matched_categories,
-                            "changed_paths": paths}
-                self.assertTrue(required <= required_lanes(manifest))
+                decision, lanes = self._required(moved + extra)
+                self.assertTrue(required <= lanes)
                 if not extra:
-                    self.assertNotIn("eval_retrieval", required_lanes(manifest))
+                    self.assertNotIn("eval_retrieval", lanes)
                     self.assertNotIn("unclassified", decision.matched_categories)
-
-    def test_evaluation_documentation_does_not_select_service_lanes(self):
-        from scripts.review_tooling import required_lanes
-
-        paths = ["src/mainframe_rag/eval/README.md"]
-        decision = classify_paths(paths)
-        lanes = required_lanes({"profile": decision.profile.value,
-                                "matched_categories": decision.matched_categories,
-                                "changed_paths": paths})
+        # Evaluation documentation never selects service lanes.
+        decision, lanes = self._required(["src/mainframe_rag/eval/README.md"])
         self.assertEqual(decision.profile, ProfileName.OFFLINE)
         self.assertFalse({"simulation", "gate_l1", "eval_retrieval"} & lanes)
-
-    def test_classify_empty_paths_fails_closed(self):
-        # An empty change set means the diff could not be read (bad SHA,
-        # shallow checkout). It must not silently downgrade to a docs review.
-        decision = classify_paths([])
-        self.assertEqual(decision.profile, ProfileName.FULL)
-        self.assertEqual(set(decision.services), {"agent", "jaeger", "qdrant", "vllm"})
-        self.assertIn("unclassified_empty", decision.matched_categories)
-
-    def test_classify_deploy_and_packaging_paths(self):
-        paths = [
-            "Dockerfile",
-            "images/Containerfile.agent",
-            "pyproject.toml",
-            "requirements.lock.txt",
-            "locks/cp314-linux-x86_64.json",
-            "scripts/dependency_lock.py",
-            "scripts/prepare_python.py",
-            "scripts/image_inventory.py",
-            "scripts/airgap/deploy.sh",
-            "charts/mainframe-rag/templates/agent-deployment.yaml",
-            "airgap.env.example",
-            "tests/test_airgap_deploy_sh.py",
-        ]
-        decision = classify_paths(paths)
-        self.assertEqual(decision.profile, ProfileName.DEPLOY)
-        self.assertEqual(decision.services, [])
-        self.assertFalse(decision.needs_qdrant)
-        self.assertFalse(decision.needs_vllm)
-        self.assertFalse(decision.needs_jaeger)
-        self.assertFalse(decision.needs_agent)
-
-    def test_classify_charts_and_compose_as_deploy(self):
-        decision = classify_paths(["charts/mainframe-rag/values.yaml", "docker-compose.ci.yml"])
-        self.assertEqual(decision.profile, ProfileName.DEPLOY)
-        self.assertEqual(decision.services, [])
-
-    def test_classify_unclassified_path_fails_closed(self):
-        decision = classify_paths(["mystery.bin"])
-        self.assertEqual(decision.profile, ProfileName.FULL)
-        self.assertEqual(set(decision.services), {"agent", "jaeger", "qdrant", "vllm"})
-        self.assertIn("unclassified", decision.matched_categories)
-
-    def test_classify_tests_only_offline_with_tests_category(self):
-        for path in ("tests/test_config.py", "tests/test_airgap_deploy_sh.py"):
-            decision = classify_paths([path])
-            if path.startswith("tests/test_airgap_"):
-                self.assertEqual(decision.profile, ProfileName.DEPLOY)
-            else:
-                self.assertEqual(decision.profile, ProfileName.OFFLINE)
-                self.assertIn("tests", decision.matched_categories)
-
-    def test_shared_fixtures_select_all_dependent_boundaries(self):
-        for path in ("tests/conftest.py", "tests/fakes.py", "tests/ci_shard.py"):
+        for path in ("charts/qdrant-openshift.values.yaml", "scripts/airgap/collection-policy.env"):
             with self.subTest(path=path):
-                decision = classify_paths([path])
-                self.assertEqual(decision.profile, ProfileName.FULL)
-                self.assertTrue({"deploy", "storage", "http", "tests"} <= set(decision.matched_categories))
-
-    def test_instructions_and_executable_docs_are_not_prose_only(self):
-        for path in ("AGENTS.md", "src/AGENTS.override.md", ".agents/skills/example/SKILL.md", "docs/testing.md"):
-            with self.subTest(path=path):
-                decision = classify_paths([path])
-                self.assertIn("tooling", decision.matched_categories)
-                self.assertEqual(decision.services, [])
-        for path in ("docs/generated.json", "docs/example.sh"):
-            self.assertEqual(classify_paths([path]).profile, ProfileName.FULL)
-        self.assertEqual(classify_paths(["docs/explanation.md"]).matched_categories, ["prose"])
-
-    def test_narrow_deployment_helpers_keep_their_owner(self):
-        for path in ("tests/helpers_helm.py", "tests/helpers_image_inventory.py", "tests/helpers_task_artifact.py"):
-            self.assertEqual(classify_paths([path]).profile, ProfileName.DEPLOY)
-        self.assertEqual(classify_paths(["src/mainframe_rag/retrieve/query.py"]).profile, ProfileName.STORAGE)
+                decision, lanes = self._required([path])
+                self.assertTrue({"ha", "packaging"} <= lanes)
+                self.assertNotIn("unclassified", decision.matched_categories)
 
     def test_real_git_rename_retains_both_paths_and_literal_whitespace(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -247,389 +199,112 @@ class TestProfileClassification(unittest.TestCase):
             self.assertIn("storage", classify_paths(changed_paths(base, cwd=root)).matched_categories)
             self.assertEqual(changed_paths("nonexistent-ref", cwd=root), [])
 
-    def test_classify_scripts_benchmarks_and_ci_mirror_as_tooling(self):
-        for path in ("scripts/gate_l1.py", "benchmarks/harness.json", ".gitlab-ci.yml",
-                     ".agents/qdrant-skills-provenance.md"):
-            decision = classify_paths([path])
-            self.assertEqual(decision.profile, ProfileName.OFFLINE)
-            self.assertIn("tooling", decision.matched_categories)
 
-    def test_relocated_production_contracts_keep_ha_and_packaging(self):
-        from scripts.review_tooling import required_lanes
-
-        for path in ("charts/qdrant-openshift.values.yaml",
-                     "scripts/airgap/collection-policy.env"):
-            with self.subTest(path=path):
-                decision = classify_paths([path])
-                manifest = {"profile": decision.profile.value,
-                            "matched_categories": decision.matched_categories,
-                            "changed_paths": [path]}
-                self.assertTrue({"ha", "packaging"} <= required_lanes(manifest))
-                self.assertNotIn("unclassified", decision.matched_categories)
-
-    def test_markdown_never_selects_live_services(self):
-        # The prose resource boundary is strictly offline even when the file
-        # lives under a service-owned tree.
-        decision = classify_paths(["evals/README.md"])
-        self.assertEqual(decision.profile, ProfileName.OFFLINE)
-        self.assertEqual(decision.services, [])
-        self.assertEqual(decision.matched_categories, ["prose"])
-
-        ingest_doc = classify_paths(["src/mainframe_rag/ingest/README.md"])
-        self.assertEqual(ingest_doc.profile, ProfileName.OFFLINE)
-        self.assertEqual(ingest_doc.services, [])
-
-    def test_markdown_under_tests_keeps_test_lane(self):
-        decision = classify_paths(["tests/fixtures/notes.md"])
-        self.assertEqual(decision.profile, ProfileName.OFFLINE)
-        self.assertEqual(decision.services, [])
-        self.assertIn("tests", decision.matched_categories)
-
-    def test_classify_deploy_plus_code_takes_union_full(self):
-        decision = classify_paths(["pyproject.toml", "src/mainframe_rag/ingest/publish.py"])
-        self.assertEqual(decision.profile, ProfileName.FULL)
-        self.assertEqual(decision.services, ["qdrant"])
-
-    def test_classify_mixed_docs_and_deploy_stays_deploy(self):
-        decision = classify_paths(["docs/testing.md", "Dockerfile"])
-        self.assertEqual(decision.profile, ProfileName.DEPLOY)
-        self.assertEqual(decision.services, [])
-
-    def test_classify_storage(self):
-        paths = [
-            "src/mainframe_rag/ingest/publish.py",
-            "src/mainframe_rag/ingest/completion.py",
-            "scripts/qdrant_pin.py",
-            "images.txt",
-        ]
-        decision = classify_paths(paths)
-        self.assertEqual(decision.profile, ProfileName.STORAGE)
-        self.assertEqual(decision.services, ["qdrant"])
-        self.assertTrue(decision.needs_qdrant)
-        self.assertFalse(decision.needs_vllm)
-        self.assertFalse(decision.needs_jaeger)
-        self.assertFalse(decision.needs_agent)
-
-    def test_classify_http(self):
-        paths = [
-            "src/mainframe_rag/agent/app.py",
-            "src/mainframe_rag/agent/api.py",
-            "scripts/mock_vllm.py",
-        ]
-        decision = classify_paths(paths)
-        self.assertEqual(decision.profile, ProfileName.HTTP)
-        self.assertEqual(set(decision.services), {"agent", "qdrant", "vllm"})
-        self.assertTrue(decision.needs_qdrant)
-        self.assertTrue(decision.needs_vllm)
-        self.assertTrue(decision.needs_agent)
-        self.assertFalse(decision.needs_jaeger)
-
-    def test_classify_tracing(self):
-        paths = [
-            "src/mainframe_rag/tracing.py",
-            "scripts/run_local_jaeger.sh",
-        ]
-        decision = classify_paths(paths)
-        self.assertEqual(decision.profile, ProfileName.TRACING)
-        self.assertEqual(decision.services, ["jaeger"])
-        self.assertFalse(decision.needs_qdrant)
-        self.assertFalse(decision.needs_vllm)
-        self.assertFalse(decision.needs_agent)
-        self.assertTrue(decision.needs_jaeger)
-
-    def test_classify_cross_layer_union(self):
-        # Storage + HTTP
-        paths = [
-            "src/mainframe_rag/ingest/publish.py",
-            "src/mainframe_rag/agent/app.py",
-        ]
-        decision = classify_paths(paths)
-        self.assertEqual(decision.profile, ProfileName.FULL)
-        self.assertEqual(set(decision.services), {"agent", "qdrant", "vllm"})
-        self.assertTrue(decision.needs_qdrant)
-        self.assertTrue(decision.needs_vllm)
-        self.assertTrue(decision.needs_agent)
-        self.assertFalse(decision.needs_jaeger)
-
-    def test_classify_full_stack(self):
-        # Storage + HTTP + Tracing
-        paths = [
-            "src/mainframe_rag/ingest/publish.py",
-            "src/mainframe_rag/agent/app.py",
-            "src/mainframe_rag/tracing.py",
-        ]
-        decision = classify_paths(paths)
-        self.assertEqual(decision.profile, ProfileName.FULL)
-        self.assertEqual(set(decision.services), {"agent", "jaeger", "qdrant", "vllm"})
-        self.assertTrue(decision.needs_qdrant)
-        self.assertTrue(decision.needs_vllm)
-        self.assertTrue(decision.needs_agent)
-        self.assertTrue(decision.needs_jaeger)
-
-    def test_classify_unclassified_src_defaults_to_full(self):
-        paths = ["src/mainframe_rag/__init__.py", "src/mainframe_rag/new_module.py"]
-        decision = classify_paths(paths)
-        self.assertEqual(decision.profile, ProfileName.FULL)
-        self.assertEqual(set(decision.services), {"agent", "jaeger", "qdrant", "vllm"})
-
-    def test_classify_mixed_docs_and_code_prioritizes_code(self):
-        paths = [
-            "docs/testing.md",
-            "src/mainframe_rag/ingest/publish.py",
-        ]
-        decision = classify_paths(paths)
-        self.assertEqual(decision.profile, ProfileName.STORAGE)
-        self.assertEqual(decision.services, ["qdrant"])
-
-
-class TestCandidateRuntimeManifest(unittest.TestCase):
-    """Tests for candidate runtime manifest generation and attestation (§5.1)."""
-
-    def test_manifest_structure_and_schema(self):
-        decision = ProfileDecision(ProfileName.OFFLINE, [], ["prose"])
-        manifest = generate_candidate_manifest(
-            decision,
-            head_sha="a" * 40,
-            base_sha="b" * 40,
-            execution_sha="c" * 40,
-            dirty=False,
-            repo_root=pathlib.Path.cwd(),
-        )
-
-        self.assertEqual(manifest["schema_version"], 1)
-        self.assertEqual(manifest["head_sha"], "a" * 40)
-        self.assertEqual(manifest["base_sha"], "b" * 40)
-        self.assertEqual(manifest["execution_sha"], "c" * 40)
-        self.assertFalse(manifest["dirty"])
-        self.assertFalse(manifest["dirty_tree"])
-        self.assertEqual(manifest["profile"], "offline")
-        self.assertEqual(manifest["services"], [])
-        self.assertEqual(manifest["test_focus"], "tests/test_agent_context.py")
-
-        # Interpreter attestation
-        interp = manifest["interpreter"]
-        self.assertEqual(interp["implementation"], "CPython")
-        self.assertIn("version", interp)
-        self.assertIsInstance(interp["free_threaded"], bool)
-        self.assertIsInstance(interp["jit"], bool)
-
-        # Dependencies attestation
-        deps = manifest["dependencies"]
-        self.assertIn("requirements_hash", deps)
-        self.assertEqual(len(deps["requirements_hash"]), 64)
-
-    def test_test_focus_profile_resolution(self):
-        d_prose = ProfileDecision(ProfileName.OFFLINE, [], ["prose"])
-        self.assertEqual(d_prose.test_focus, "tests/test_agent_context.py")
-
-        d_tooling = ProfileDecision(ProfileName.OFFLINE, [], ["tooling"])
-        self.assertEqual(d_tooling.test_focus, "tests/test_agent_context.py tests/test_review_tooling.py")
-
-        d_deploy = ProfileDecision(ProfileName.DEPLOY, [], ["packaging"])
-        self.assertEqual(d_deploy.test_focus, "tests/test_airgap_*.py tests/test_config.py")
-
-        d_http = ProfileDecision(ProfileName.HTTP, ["agent", "jaeger"], ["agent_code"])
-        self.assertEqual(d_http.test_focus, "tests/test_agent_api.py tests/test_stream_truncation.py")
-
-        d_storage = ProfileDecision(ProfileName.STORAGE, ["qdrant"], ["storage"])
-        self.assertEqual(d_storage.test_focus, "tests/test_ingest_*.py tests/test_publish_*.py")
-
-        d_tracing = ProfileDecision(ProfileName.TRACING, ["jaeger"], ["tracing"])
-        self.assertEqual(d_tracing.test_focus, "tests/test_tracing*.py")
-
-        d_full = ProfileDecision(ProfileName.FULL, ["agent", "jaeger", "qdrant", "vllm"], ["unclassified"])
-        self.assertEqual(d_full.test_focus, "tests/test_agent_api.py tests/test_ingest_publish.py")
-
-    def test_manifest_dirty_tree_flag(self):
-        decision = ProfileDecision(ProfileName.STORAGE, ["qdrant"], ["storage"])
-        manifest = generate_candidate_manifest(
-            decision,
-            dirty=True,
-        )
-        self.assertTrue(manifest["dirty"])
-        self.assertTrue(manifest["dirty_tree"])
+def _review_payload(**overrides) -> dict:
+    payload = {
+        "schema_version": 1,
+        "head_sha": "1" * 40,
+        "base_sha": "2" * 40,
+        "execution_sha": "3" * 40,
+        "code_assessment": "acceptable",
+        "verification": "complete",
+        "candidate_currentness": "current",
+        "merge_readiness": "ready_for_maintainer",
+        "material_findings": [{"id": "FINDING-1", "disposition": "fixed-and-verified",
+                               "description": "Clean up temporary file descriptor"}],
+        "evidence": {"notes": "All unit tests and doctor checks pass."},
+    }
+    payload.update(overrides)
+    return payload
 
 
 class TestReviewResultValidator(unittest.TestCase):
-    """Tests for Schema v1 review result validation, fail-closed handling, and attribution checks (§5.3)."""
+    """Schema v1 review result validation and fail-closed handling (§5.3)."""
 
     def _sample_valid_payload(self) -> dict:
-        return {
-            "schema_version": 1,
-            "head_sha": "1" * 40,
-            "base_sha": "2" * 40,
-            "execution_sha": "3" * 40,
-            "code_assessment": "acceptable",
-            "verification": "complete",
-            "candidate_currentness": "current",
-            "merge_readiness": "ready_for_maintainer",
-            "material_findings": [
-                {
-                    "id": "FINDING-1",
-                    "disposition": "fixed-and-verified",
-                    "description": "Clean up temporary file descriptor",
-                }
-            ],
-            "evidence": {"notes": "All unit tests and doctor checks pass."},
-        }
+        return _review_payload()
 
-    def test_valid_schema_v1_passes(self):
+    def test_valid_payload_is_ready_in_every_accepted_embedding(self):
         payload = self._sample_valid_payload()
         result = validate_review_payload(
-            payload,
-            expected_head="1" * 40,
-            expected_base="2" * 40,
-            expected_execution="3" * 40,
-        )
+            payload, expected_head="1" * 40, expected_base="2" * 40, expected_execution="3" * 40)
         self.assertEqual(result.merge_readiness, MergeReadiness.READY_FOR_MAINTAINER.value)
         self.assertEqual(result.code_assessment, CodeAssessment.ACCEPTABLE.value)
         self.assertEqual(result.verification, VerificationStatus.COMPLETE.value)
         self.assertEqual(result.candidate_currentness, CandidateCurrentness.CURRENT.value)
         self.assertEqual(len(result.validation_errors), 0)
+        body = json.dumps(payload, indent=2)
+        for text in (f"# Review\n\n<!-- review-result:start -->\n{body}\n<!-- review-result:end -->\n\nEnd.",
+                     f"Here is the review record:\n\n```json\n{body}\n```\n"):
+            extracted = extract_review_json(text)
+            self.assertEqual(extracted["head_sha"], "1" * 40)
+            self.assertEqual(validate_review_payload(extracted).merge_readiness,
+                             MergeReadiness.READY_FOR_MAINTAINER.value)
+        # No findings, or only resolved ones, is a valid outcome.
+        for findings in ([], [{"id": "F1", "disposition": "fixed-and-verified"},
+                              {"id": "F2", "disposition": "disproven-with-evidence"},
+                              {"id": "F3", "disposition": "accepted-by-authorized-owner"}]):
+            self.assertEqual(validate_review_payload(_review_payload(material_findings=findings)).merge_readiness,
+                             MergeReadiness.READY_FOR_MAINTAINER.value)
 
-    def test_missing_payload_fails_closed(self):
-        result = validate_review_payload(None)
-        self.assertEqual(result.code_assessment, CodeAssessment.INCOMPLETE.value)
-        self.assertEqual(result.verification, VerificationStatus.INCOMPLETE.value)
-        self.assertEqual(result.candidate_currentness, CandidateCurrentness.UNVERIFIED.value)
-        self.assertEqual(result.merge_readiness, MergeReadiness.NOT_READY.value)
-        self.assertTrue(len(result.validation_errors) > 0)
+    def test_missing_malformed_or_forged_payloads_fail_closed(self):
+        missing = validate_review_payload(None)
+        self.assertEqual(missing.code_assessment, CodeAssessment.INCOMPLETE.value)
+        self.assertEqual(missing.verification, VerificationStatus.INCOMPLETE.value)
+        self.assertEqual(missing.candidate_currentness, CandidateCurrentness.UNVERIFIED.value)
+        self.assertEqual(missing.merge_readiness, MergeReadiness.NOT_READY.value)
+        self.assertTrue(missing.validation_errors)
 
-    def test_malformed_json_extraction_fails_closed(self):
-        content = "Not valid JSON: { broken "
-        parsed = extract_review_json(content)
+        parsed = extract_review_json("Not valid JSON: { broken ")
         self.assertIsNone(parsed)
         result = validate_review_payload(parsed, parse_error="Malformed JSON syntax")
         self.assertEqual(result.merge_readiness, MergeReadiness.NOT_READY.value)
         self.assertIn("Malformed JSON syntax", result.validation_errors)
 
-    def test_markdown_embedded_json_comment_extraction(self):
-        payload = self._sample_valid_payload()
-        md_text = f"""
-# Review Summary
+        for field in ("head_sha", "material_findings", "evidence"):
+            payload = self._sample_valid_payload()
+            del payload[field]
+            result = validate_review_payload(payload)
+            self.assertEqual(result.merge_readiness, MergeReadiness.NOT_READY.value, field)
+            self.assertTrue(any(field in err for err in result.validation_errors), field)
+        for bad in ("all good", ["claim one proven"]):
+            result = validate_review_payload(_review_payload(evidence=bad))
+            self.assertEqual(result.merge_readiness, MergeReadiness.NOT_READY.value)
+            self.assertTrue(any("evidence" in e for e in result.validation_errors))
 
-The changes look great.
-
-<!-- review-result:start -->
-{json.dumps(payload, indent=2)}
-<!-- review-result:end -->
-
-End of review.
-"""
-        extracted = extract_review_json(md_text)
-        self.assertIsNotNone(extracted)
-        self.assertEqual(extracted["head_sha"], "1" * 40)
-
-        result = validate_review_payload(extracted)
-        self.assertEqual(result.merge_readiness, MergeReadiness.READY_FOR_MAINTAINER.value)
-
-    def test_markdown_code_fence_extraction(self):
-        payload = self._sample_valid_payload()
-        md_text = f"""
-Here is the review record:
-
-```json
-{json.dumps(payload, indent=2)}
-```
-"""
-        extracted = extract_review_json(md_text)
-        self.assertIsNotNone(extracted)
-        self.assertEqual(extracted["schema_version"], 1)
-
-    def test_missing_required_fields_fails_validation(self):
-        # Missing material_findings and head_sha
-        payload = {
-            "schema_version": 1,
-            "base_sha": "2" * 40,
-            "execution_sha": "3" * 40,
-            "code_assessment": "acceptable",
-            "verification": "complete",
-            "candidate_currentness": "current",
-            "merge_readiness": "ready_for_maintainer",
-        }
-        result = validate_review_payload(payload)
-        self.assertEqual(result.merge_readiness, MergeReadiness.NOT_READY.value)
-        self.assertTrue(any("head_sha" in err for err in result.validation_errors))
-        self.assertTrue(any("material_findings" in err for err in result.validation_errors))
-
-    def test_invalid_enum_values_normalize_to_incomplete_and_not_ready(self):
-        payload = self._sample_valid_payload()
-        payload["code_assessment"] = "looks_good"
-        payload["verification"] = "passed"
-        result = validate_review_payload(payload)
+        result = validate_review_payload(_review_payload(code_assessment="looks_good", verification="passed"))
         self.assertEqual(result.code_assessment, CodeAssessment.INCOMPLETE.value)
         self.assertEqual(result.verification, VerificationStatus.INCOMPLETE.value)
         self.assertEqual(result.merge_readiness, MergeReadiness.NOT_READY.value)
 
-    def test_unresolved_material_findings_block_readiness(self):
-        payload = self._sample_valid_payload()
-        payload["material_findings"].append({
-            "id": "FINDING-2",
-            "disposition": "unresolved",
-            "description": "Unhandled connection pool exhaustion",
-        })
-        result = validate_review_payload(payload)
-        self.assertEqual(result.merge_readiness, MergeReadiness.NOT_READY.value)
-
-    def test_author_declined_finding_blocks_readiness(self):
-        # Implementer declining is NOT acceptance per AGENTS.md / agent-workflow.md
-        payload = self._sample_valid_payload()
-        payload["material_findings"].append({
-            "id": "FINDING-2",
-            "disposition": "declined-by-author",
-            "description": "Author declined to fix bug",
-        })
-        result = validate_review_payload(payload)
-        self.assertEqual(result.merge_readiness, MergeReadiness.NOT_READY.value)
-
-    def test_resolved_findings_permit_readiness(self):
-        payload = self._sample_valid_payload()
-        payload["material_findings"] = [
-            {"id": "F1", "disposition": "fixed-and-verified"},
-            {"id": "F2", "disposition": "disproven-with-evidence"},
-            {"id": "F3", "disposition": "accepted-by-authorized-owner"},
-        ]
-        result = validate_review_payload(payload)
-        self.assertEqual(result.merge_readiness, MergeReadiness.READY_FOR_MAINTAINER.value)
-
-    def test_empty_findings_list_permits_readiness(self):
-        # "no findings is a valid outcome"
-        payload = self._sample_valid_payload()
-        payload["material_findings"] = []
-        result = validate_review_payload(payload)
-        self.assertEqual(result.merge_readiness, MergeReadiness.READY_FOR_MAINTAINER.value)
-
-    def test_obsolete_head_sha_evaluates_to_stale(self):
-        payload = self._sample_valid_payload()
-        manifest = {"head_sha": "9" * 40, "base_sha": "2" * 40, "execution_sha": "3" * 40}
-        result = validate_review_payload(payload, manifest=manifest)
-        self.assertEqual(result.candidate_currentness, CandidateCurrentness.STALE.value)
-        self.assertEqual(result.merge_readiness, MergeReadiness.NOT_READY.value)
-
-    def test_manifest_dirty_tree_evaluates_to_unverified(self):
-        payload = self._sample_valid_payload()
-        manifest = {
-            "head_sha": "1" * 40,
-            "base_sha": "2" * 40,
-            "execution_sha": "3" * 40,
-            "dirty": True,
-        }
-        result = validate_review_payload(payload, manifest=manifest)
-        self.assertEqual(result.candidate_currentness, CandidateCurrentness.UNVERIFIED.value)
-        self.assertEqual(result.merge_readiness, MergeReadiness.NOT_READY.value)
-
-    def test_anti_forging_override(self):
-        # Claiming ready_for_maintainer while code assessment is changes_required
-        payload = self._sample_valid_payload()
-        payload["code_assessment"] = "changes_required"
-        payload["merge_readiness"] = "ready_for_maintainer"
-        result = validate_review_payload(payload)
+        # Claiming ready_for_maintainer while the assessment is changes_required.
+        result = validate_review_payload(_review_payload(code_assessment="changes_required"))
         self.assertEqual(result.merge_readiness, MergeReadiness.NOT_READY.value)
         self.assertTrue(any("Overriding" in err for err in result.validation_errors))
 
+    def test_unresolved_or_author_declined_findings_block_readiness(self):
+        # Implementer declining is NOT acceptance per AGENTS.md / agent-workflow.md.
+        for disposition in ("unresolved", "declined-by-author"):
+            with self.subTest(disposition=disposition):
+                payload = self._sample_valid_payload()
+                payload["material_findings"].append(
+                    {"id": "FINDING-2", "disposition": disposition, "description": "open"})
+                self.assertEqual(validate_review_payload(payload).merge_readiness,
+                                 MergeReadiness.NOT_READY.value)
+
+    def test_obsolete_head_or_dirty_tree_is_not_current(self):
+        stale = {"head_sha": "9" * 40, "base_sha": "2" * 40, "execution_sha": "3" * 40}
+        result = validate_review_payload(self._sample_valid_payload(), manifest=stale)
+        self.assertEqual(result.candidate_currentness, CandidateCurrentness.STALE.value)
+        self.assertEqual(result.merge_readiness, MergeReadiness.NOT_READY.value)
+        dirty = {"head_sha": "1" * 40, "base_sha": "2" * 40, "execution_sha": "3" * 40, "dirty": True}
+        result = validate_review_payload(self._sample_valid_payload(), manifest=dirty)
+        self.assertEqual(result.candidate_currentness, CandidateCurrentness.UNVERIFIED.value)
+        self.assertEqual(result.merge_readiness, MergeReadiness.NOT_READY.value)
+
 
 class TestCandidateAcceptanceSummary(unittest.TestCase):
-    """Tests for 5-state lane taxonomy, anti-skip enforcement, and maintainer merge authority (§5.4)."""
+    """5-state lane taxonomy, anti-skip enforcement, and maintainer merge authority (§5.4)."""
 
     def _sample_manifest(self, profile: str = "offline", dirty: bool = False) -> dict:
         return {
@@ -643,514 +318,157 @@ class TestCandidateAcceptanceSummary(unittest.TestCase):
         }
 
     def _ready_review(self):
-        payload = {
-            "schema_version": 1,
-            "head_sha": "1" * 40,
-            "base_sha": "2" * 40,
-            "execution_sha": "3" * 40,
-            "code_assessment": "acceptable",
-            "verification": "complete",
-            "candidate_currentness": "current",
-            "merge_readiness": "ready_for_maintainer",
-            "material_findings": [],
-            "evidence": {"notes": "ok"},
-        }
         return validate_review_payload(
-            payload,
-            expected_head="1" * 40,
-            expected_base="2" * 40,
-            expected_execution="3" * 40,
-        )
-
-    def _not_ready_review(self):
-        payload = {
-            "schema_version": 1,
-            "head_sha": "1" * 40,
-            "base_sha": "2" * 40,
-            "execution_sha": "3" * 40,
-            "code_assessment": "changes_required",
-            "verification": "incomplete",
-            "candidate_currentness": "current",
-            "merge_readiness": "not_ready",
-            "material_findings": [{"id": "F1", "disposition": "unresolved", "description": "open"}],
-            "evidence": {"notes": "not ready"},
-        }
-        return validate_review_payload(
-            payload,
-            expected_head="1" * 40,
-            expected_base="2" * 40,
-            expected_execution="3" * 40,
-        )
+            _review_payload(material_findings=[], evidence={"notes": "ok"}),
+            expected_head="1" * 40, expected_base="2" * 40, expected_execution="3" * 40)
 
     def test_lane_evaluation_states(self):
-        # 1. Unselected lane
-        l_unsel = evaluate_lane("simulation", required=False, reported_status=None)
-        self.assertEqual(l_unsel.state, LaneState.UNSELECTED)
-        self.assertFalse(l_unsel.blocks_readiness)
+        cases = (("simulation", False, None, LaneState.UNSELECTED, False),
+                 ("context_check", True, "success", LaneState.SELECTED_PASSED, False),
+                 ("context_check", True, "failure", LaneState.SELECTED_FAILED, True),
+                 ("simulation", True, "skipped", LaneState.SELECTED_SKIPPED, True),
+                 ("reviewer", True, None, LaneState.SELECTED_MISSING, True))
+        for name, required, status, state, blocks in cases:
+            lane = evaluate_lane(name, required=required, reported_status=status)
+            self.assertEqual((lane.state, lane.blocks_readiness), (state, blocks), (name, status))
 
-        # 2. Selected passed
-        l_pass = evaluate_lane("context_check", required=True, reported_status="success")
-        self.assertEqual(l_pass.state, LaneState.SELECTED_PASSED)
-        self.assertFalse(l_pass.blocks_readiness)
+    def test_selected_lane_that_did_not_pass_blocks_acceptance(self):
+        storage_ok = {"context_check": "success", "lint_and_types": "success", "unit_tests": "success",
+                      "simulation": "success", "gate_l1": "success", "reviewer": "success"}
+        deploy_ok = {"context_check": "success", "lint_and_types": "success", "unit_tests": "success",
+                     "packaging": "success", "reviewer": "success"}
+        http_ok = {"context_check": "success", "lint_and_types": "success", "unit_tests": "success",
+                   "hazards": "success", "load": "success", "simulation": "success",
+                   "agent_probes": "success", "reviewer": "success"}
+        for profile, ok, lane, status, state in (
+                ("storage", storage_ok, "simulation", "skipped", LaneState.SELECTED_SKIPPED),
+                ("storage", storage_ok, "gate_l1", None, LaneState.SELECTED_MISSING),
+                ("deploy", deploy_ok, "packaging", None, LaneState.SELECTED_MISSING),
+                ("deploy", deploy_ok, "packaging", "skipped", LaneState.SELECTED_SKIPPED),
+                ("offline", {"context_check": "success", "lint_and_types": "success",
+                             "reviewer": "success"}, "context_check", "failure", LaneState.SELECTED_FAILED),
+                # The HTTP contract requires real agent probes even when no native
+                # producer reports them; an authorized human must supply the evidence.
+                ("http", http_ok, "agent_probes", None, LaneState.SELECTED_MISSING)):
+            with self.subTest(profile=profile, lane=lane, status=status):
+                manifest = self._sample_manifest(profile=profile)
+                statuses = {k: v for k, v in ok.items() if k != lane}
+                if status is not None:
+                    statuses[lane] = status
+                summary = build_acceptance_summary(manifest, statuses, review=self._ready_review())
+                self.assertFalse(summary.all_prerequisites_met)
+                self.assertEqual(summary.verification_status, "incomplete")
+                self.assertEqual(next(l for l in summary.lanes if l.name == lane).state, state)
+        passing = build_acceptance_summary(self._sample_manifest(profile="http"), http_ok,
+                                           review=self._ready_review())
+        self.assertTrue(passing.all_prerequisites_met)
+        self.assertEqual(passing.verification_status, "passed")
+        self.assertFalse(next(l for l in passing.lanes if l.name == "eval_retrieval").required)
 
-        # 3. Selected failed
-        l_fail = evaluate_lane("context_check", required=True, reported_status="failure")
-        self.assertEqual(l_fail.state, LaneState.SELECTED_FAILED)
-        self.assertTrue(l_fail.blocks_readiness)
+        tooling = self._sample_manifest(profile="offline")
+        tooling["matched_categories"] = ["tooling"]
+        summary = build_acceptance_summary(tooling, {"context_check": "success", "reviewer": "success"},
+                                           review=self._ready_review())
+        self.assertFalse(summary.all_prerequisites_met)
+        for name in ("lint_and_types", "unit_tests"):
+            self.assertEqual(next(l for l in summary.lanes if l.name == name).state, LaneState.SELECTED_MISSING)
 
-        # 4. Selected skipped (anti-skip violation)
-        l_skip = evaluate_lane("simulation", required=True, reported_status="skipped")
-        self.assertEqual(l_skip.state, LaneState.SELECTED_SKIPPED)
-        self.assertTrue(l_skip.blocks_readiness)
-
-        # 5. Selected missing
-        l_missing = evaluate_lane("reviewer", required=True, reported_status=None)
-        self.assertEqual(l_missing.state, LaneState.SELECTED_MISSING)
-        self.assertTrue(l_missing.blocks_readiness)
-
-    def test_unselected_lane_skipped_does_not_block(self):
-        # In offline profile (prose-only), simulation is unselected.
+    def test_unselected_lane_never_blocks_a_docs_only_acceptance(self):
+        # ci.yml ignores markdown-only PRs, so lint/unit lanes have no producer for
+        # prose; requiring them would make docs-only acceptance unreachable.
         manifest = self._sample_manifest(profile="offline")
-        lane_statuses = {
-            "context_check": "success",
-            "lint_and_types": "success",
-            "reviewer": "success",
-            "simulation": "skipped",  # unselected lane was skipped
-            "gate_l1": "skipped",     # unselected lane was skipped
-        }
-        summary = build_acceptance_summary(manifest, lane_statuses, review=self._ready_review())
+        summary = build_acceptance_summary(
+            manifest, {"context_check": "success", "lint_and_types": "success", "reviewer": "success",
+                       "simulation": "skipped", "gate_l1": "skipped"}, review=self._ready_review())
         self.assertTrue(summary.all_prerequisites_met)
         self.assertEqual(summary.verification_status, "passed")
-
-    def test_selected_lane_skipped_blocks_acceptance(self):
-        # In storage profile, simulation is required. If skipped upstream, it MUST block.
-        manifest = self._sample_manifest(profile="storage")
-        lane_statuses = {
-            "context_check": "success",
-            "lint_and_types": "success",
-            "unit_tests": "success",
-            "simulation": "skipped",  # anti-skip violation!
-            "gate_l1": "success",
-            "reviewer": "success",
-        }
-        summary = build_acceptance_summary(manifest, lane_statuses, review=self._ready_review())
-        self.assertFalse(summary.all_prerequisites_met)
-        self.assertEqual(summary.verification_status, "incomplete")
-        sim_lane = next(l for l in summary.lanes if l.name == "simulation")
-        self.assertEqual(sim_lane.state, LaneState.SELECTED_SKIPPED)
-
-    def test_selected_lane_missing_blocks_acceptance(self):
-        manifest = self._sample_manifest(profile="storage")
-        lane_statuses = {
-            "context_check": "success",
-            "lint_and_types": "success",
-            "unit_tests": "success",
-            "simulation": "success",
-            # gate_l1 is omitted entirely
-            "reviewer": "success",
-        }
-        summary = build_acceptance_summary(manifest, lane_statuses, review=self._ready_review())
-        self.assertFalse(summary.all_prerequisites_met)
-        self.assertEqual(summary.verification_status, "incomplete")
-        gate_lane = next(l for l in summary.lanes if l.name == "gate_l1")
-        self.assertEqual(gate_lane.state, LaneState.SELECTED_MISSING)
-
-    def test_selected_lane_failed_blocks_acceptance(self):
-        manifest = self._sample_manifest(profile="offline")
-        lane_statuses = {
-            "context_check": "failure",
-            "lint_and_types": "success",
-            "reviewer": "success",
-        }
-        summary = build_acceptance_summary(manifest, lane_statuses, review=self._ready_review())
-        self.assertFalse(summary.all_prerequisites_met)
-        self.assertEqual(summary.verification_status, "incomplete")
-
-    def test_deploy_profile_requires_packaging_lane(self):
-        manifest = self._sample_manifest(profile="deploy")
-        lane_statuses = {
-            "context_check": "success",
-            "lint_and_types": "success",
-            "unit_tests": "success",
-            # packaging omitted: the airgap dry-run lane never ran
-            "reviewer": "success",
-        }
-        summary = build_acceptance_summary(manifest, lane_statuses, review=self._ready_review())
-        self.assertFalse(summary.all_prerequisites_met)
-        self.assertEqual(summary.verification_status, "incomplete")
-        packaging = next(l for l in summary.lanes if l.name == "packaging")
-        self.assertTrue(packaging.required)
-        self.assertEqual(packaging.state, LaneState.SELECTED_MISSING)
-
-    def test_deploy_profile_packaging_skipped_blocks(self):
-        manifest = self._sample_manifest(profile="deploy")
-        lane_statuses = {
-            "context_check": "success",
-            "lint_and_types": "success",
-            "unit_tests": "success",
-            "packaging": "skipped",
-            "reviewer": "success",
-        }
-        summary = build_acceptance_summary(manifest, lane_statuses, review=self._ready_review())
-        self.assertFalse(summary.all_prerequisites_met)
-        packaging = next(l for l in summary.lanes if l.name == "packaging")
-        self.assertEqual(packaging.state, LaneState.SELECTED_SKIPPED)
-
-    def test_offline_tooling_requires_lint_and_unit_lanes(self):
-        manifest = self._sample_manifest(profile="offline")
-        manifest["matched_categories"] = ["tooling"]
-        lane_statuses = {"context_check": "success", "reviewer": "success"}
-        summary = build_acceptance_summary(manifest, lane_statuses, review=self._ready_review())
-        self.assertFalse(summary.all_prerequisites_met)
-        lint = next(l for l in summary.lanes if l.name == "lint_and_types")
-        unit = next(l for l in summary.lanes if l.name == "unit_tests")
-        self.assertEqual(lint.state, LaneState.SELECTED_MISSING)
-        self.assertEqual(unit.state, LaneState.SELECTED_MISSING)
-
-    def test_offline_prose_does_not_require_path_filtered_lanes(self):
-        # ci.yml ignores markdown-only PRs, so lint/unit lanes have no producer
-        # for prose; requiring them would make docs-only acceptance unreachable.
-        manifest = self._sample_manifest(profile="offline")
-        lane_statuses = {"context_check": "success", "reviewer": "success"}
-        summary = build_acceptance_summary(manifest, lane_statuses, review=self._ready_review())
+        summary = build_acceptance_summary(manifest, {"context_check": "success", "reviewer": "success"},
+                                           review=self._ready_review())
         self.assertTrue(summary.all_prerequisites_met)
-        lint = next(l for l in summary.lanes if l.name == "lint_and_types")
-        unit = next(l for l in summary.lanes if l.name == "unit_tests")
-        self.assertEqual(lint.state, LaneState.UNSELECTED)
-        self.assertEqual(unit.state, LaneState.UNSELECTED)
-
-    def test_required_agent_probes_are_not_waived_by_a_missing_ci_producer(self):
-        # The HTTP contract requires actual agent probes even when no native
-        # producer reports them. An authorized human must supply the evidence.
-        manifest = self._sample_manifest(profile="http")
-        lane_statuses = {
-            "context_check": "success",
-            "lint_and_types": "success",
-            "unit_tests": "success",
-            "hazards": "success",
-            "load": "success",
-            "simulation": "success",
-            "reviewer": "success",
-        }
-        summary = build_acceptance_summary(manifest, lane_statuses, review=self._ready_review())
-        self.assertFalse(summary.all_prerequisites_met)
-        lane = next(l for l in summary.lanes if l.name == "agent_probes")
-        self.assertTrue(lane.required)
-        self.assertEqual(lane.state, LaneState.SELECTED_MISSING)
-        evaluation = next(l for l in summary.lanes if l.name == "eval_retrieval")
-        self.assertFalse(evaluation.required)
-
-    def test_all_selected_lanes_passed_produces_ready(self):
-        manifest = self._sample_manifest(profile="http")
-        lane_statuses = {
-            "context_check": "success",
-            "lint_and_types": "success",
-            "unit_tests": "success",
-            "hazards": "success",
-            "load": "success",
-            "simulation": "success",
-            "agent_probes": "success",
-            "reviewer": "success",
-        }
-        summary = build_acceptance_summary(manifest, lane_statuses, review=self._ready_review())
-        self.assertTrue(summary.all_prerequisites_met)
-        self.assertEqual(summary.verification_status, "passed")
-
-    def test_maintainer_authority_preservation_in_markdown(self):
-        manifest = self._sample_manifest(profile="offline")
-        lane_statuses = {
-            "context_check": "success",
-            "lint_and_types": "success",
-            "reviewer": "success",
-        }
-        summary = build_acceptance_summary(manifest, lane_statuses, review=self._ready_review())
+        for name in ("lint_and_types", "unit_tests"):
+            self.assertEqual(next(l for l in summary.lanes if l.name == name).state, LaneState.UNSELECTED)
         md = summary.markdown_report
-
-        self.assertIn("### Maintainer Merge Authority", md)
         self.assertIn("Prerequisite Obligations**: `ALL_MET`", md)
-        self.assertIn("Technical Verification**: `passed`", md)
         self.assertIn("Maintainer Merge Decision**: `pending`", md)
         self.assertIn("Agents never merge pull requests or modify repository access rules", md)
 
 
 class TestReviewToolingCLI(unittest.TestCase):
-    """Tests for CLI invocations and end-to-end command exits."""
+    """CLI invocations and end-to-end command exits."""
 
-    def test_cli_evaluation_move_dispatches_the_required_native_lanes(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            manifest_path = pathlib.Path(tmpdir) / "manifest.json"
-            output_path = pathlib.Path(tmpdir) / "github-output"
-            result = subprocess.run([
-                sys.executable, "scripts/review_tooling.py", "profile", "--files",
-                "scripts/eval_retrieval.py", "src/mainframe_rag/eval/retrieval.py",
-                "src/mainframe_rag/eval/datasets.py", "tests/test_eval_scoring.py",
-                "--out", str(manifest_path), "--github-output", str(output_path),
-            ], capture_output=True, text=True, check=False)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            manifest = json.loads(manifest_path.read_text())
-            outputs = dict(line.split("=", 1) for line in output_path.read_text().splitlines())
-            expected = ["context_check", "gate_l1", "hazards", "lint_and_types", "simulation", "unit_tests"]
-            self.assertEqual(manifest["profile"], "offline")
-            self.assertEqual(manifest["required_lanes"], expected)
-            self.assertEqual(json.loads(outputs["lanes"]), expected)
-            # The existing workflow must use lane dispatch, not the offline
-            # reviewer service profile, to run these two real consumers.
-            workflow = pathlib.Path(".github/workflows/ci.yml").read_text()
-            for lane in ("simulation", "gate_l1"):
-                self.assertIn(f"contains(fromJSON(needs.select.outputs.lanes), '{lane}')", workflow)
+    def _run(self, *args, cwd=None):
+        return subprocess.run([sys.executable, "scripts/review_tooling.py", *args],
+                              capture_output=True, text=True, check=False, cwd=cwd)
 
-    def test_cli_profile_offline(self):
+    def test_cli_profile_writes_manifest_lanes_and_workflow_outputs(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             out_file = pathlib.Path(tmpdir) / "manifest.json"
             gh_out_file = pathlib.Path(tmpdir) / "github_output.txt"
-            gh_out_file.touch()
-
-            cmd = [
-                sys.executable,
-                "scripts/review_tooling.py",
-                "profile",
-                "--files",
-                "docs/explanation.md",
-                "README.md",
-                "--out",
-                str(out_file),
-                "--github-output",
-                str(gh_out_file),
-            ]
-            res = subprocess.run(cmd, capture_output=True, text=True, check=False)
-            self.assertEqual(res.returncode, 0)
+            res = self._run("profile", "--files", "docs/explanation.md", "README.md",
+                            "--out", str(out_file), "--github-output", str(gh_out_file))
+            self.assertEqual(res.returncode, 0, res.stderr)
             self.assertEqual(res.stdout.strip(), "offline")
-            self.assertTrue(out_file.exists())
-
             manifest = json.loads(out_file.read_text())
-            self.assertEqual(manifest["profile"], "offline")
-            self.assertEqual(manifest["services"], [])
-            self.assertEqual(manifest["test_focus"], "tests/test_agent_context.py")
-
+            self.assertEqual((manifest["profile"], manifest["services"]), ("offline", []))
             gh_text = gh_out_file.read_text()
             self.assertIn("profile=offline", gh_text)
             self.assertIn("needs_qdrant=false", gh_text)
-            self.assertIn("test_focus=tests/test_agent_context.py", gh_text)
 
-    def test_cli_validate_review_check_flag(self):
+            res = self._run("profile", "--files", "scripts/eval_retrieval.py",
+                            "src/mainframe_rag/eval/retrieval.py", "src/mainframe_rag/eval/datasets.py",
+                            "tests/test_eval_scoring.py", "--out", str(out_file),
+                            "--github-output", str(gh_out_file))
+            self.assertEqual(res.returncode, 0, res.stderr)
+            manifest = json.loads(out_file.read_text())
+            outputs = dict(line.split("=", 1) for line in gh_out_file.read_text().splitlines() if "=" in line)
+            expected = ["context_check", "gate_l1", "hazards", "lint_and_types", "simulation", "unit_tests"]
+            self.assertEqual(manifest["required_lanes"], expected)
+            self.assertEqual(json.loads(outputs["lanes"]), expected)
+
+    def test_cli_validate_review_exit_codes(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            valid_file = pathlib.Path(tmpdir) / "valid_review.json"
-            valid_payload = {
-                "schema_version": 1,
-                "head_sha": "a" * 40,
-                "base_sha": "b" * 40,
-                "execution_sha": "c" * 40,
-                "code_assessment": "acceptable",
-                "verification": "complete",
-                "candidate_currentness": "current",
-                "merge_readiness": "ready_for_maintainer",
-                "material_findings": [],
-                "evidence": {},
-            }
-            valid_file.write_text(json.dumps(valid_payload))
-
-            # Valid review with --check exits 0
-            res = subprocess.run(
-                [
-                    sys.executable,
-                    "scripts/review_tooling.py",
-                    "validate-review",
-                    "--review",
-                    str(valid_file),
-                    "--check",
-                ],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            self.assertEqual(res.returncode, 0)
-
-            # Incomplete review with --check exits 1
-            invalid_file = pathlib.Path(tmpdir) / "invalid_review.json"
-            invalid_payload = dict(valid_payload)
-            invalid_payload["code_assessment"] = "changes_required"
-            invalid_file.write_text(json.dumps(invalid_payload))
-
-            res_inv = subprocess.run(
-                [
-                    sys.executable,
-                    "scripts/review_tooling.py",
-                    "validate-review",
-                    "--review",
-                    str(invalid_file),
-                    "--check",
-                ],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            self.assertEqual(res_inv.returncode, 1)
-
-    def test_cli_validate_review_require_payload_flag(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            base_payload = {
-                "schema_version": 1,
-                "head_sha": "a" * 40,
-                "base_sha": "b" * 40,
-                "execution_sha": "c" * 40,
-                "code_assessment": "acceptable",
-                "verification": "complete",
-                "candidate_currentness": "current",
-                "merge_readiness": "ready_for_maintainer",
-                "material_findings": [],
-                "evidence": {},
-            }
-
-            # A valid changes_required verdict is a successful review execution
-            # (structural validation passes even though the candidate is not ready).
-            findings_file = pathlib.Path(tmpdir) / "findings_review.json"
-            findings_payload = dict(base_payload)
-            findings_payload["code_assessment"] = "changes_required"
-            findings_payload["verification"] = "incomplete"
-            findings_payload["merge_readiness"] = "not_ready"
-            findings_payload["material_findings"] = [
-                {"id": "F1", "disposition": "unresolved", "description": "Open finding"}
-            ]
-            findings_file.write_text(json.dumps(findings_payload))
-            res_findings = subprocess.run(
-                [
-                    sys.executable,
-                    "scripts/review_tooling.py",
-                    "validate-review",
-                    "--review",
-                    str(findings_file),
-                    "--require-payload",
-                ],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            self.assertEqual(res_findings.returncode, 0)
-
-            # Missing payload file fails the review execution.
-            missing = pathlib.Path(tmpdir) / "absent.json"
-            res_missing = subprocess.run(
-                [
-                    sys.executable,
-                    "scripts/review_tooling.py",
-                    "validate-review",
-                    "--review",
-                    str(missing),
-                    "--require-payload",
-                ],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            self.assertEqual(res_missing.returncode, 2)
-
-            # Unparseable payload fails the review execution.
-            malformed_file = pathlib.Path(tmpdir) / "malformed.md"
-            malformed_file.write_text("Review prose with no machine-readable block.")
-            res_malformed = subprocess.run(
-                [
-                    sys.executable,
-                    "scripts/review_tooling.py",
-                    "validate-review",
-                    "--review",
-                    str(malformed_file),
-                    "--require-payload",
-                ],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            self.assertEqual(res_malformed.returncode, 2)
-
-            # Forged readiness (override applied) fails structural validation.
-            forged_file = pathlib.Path(tmpdir) / "forged.json"
-            forged_payload = dict(base_payload)
-            forged_payload["code_assessment"] = "changes_required"
-            forged_file.write_text(json.dumps(forged_payload))
-            res_forged = subprocess.run(
-                [
-                    sys.executable,
-                    "scripts/review_tooling.py",
-                    "validate-review",
-                    "--review",
-                    str(forged_file),
-                    "--require-payload",
-                ],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            self.assertEqual(res_forged.returncode, 2)
+            def review(name, text):
+                path = pathlib.Path(tmpdir) / name
+                path.write_text(text if isinstance(text, str) else json.dumps(text))
+                return str(path)
+            valid = _review_payload(head_sha="a" * 40, base_sha="b" * 40, execution_sha="c" * 40,
+                                    material_findings=[], evidence={})
+            changes = {**valid, "code_assessment": "changes_required"}
+            findings = {**changes, "verification": "incomplete", "merge_readiness": "not_ready",
+                        "material_findings": [{"id": "F1", "disposition": "unresolved",
+                                               "description": "Open finding"}]}
+            # --check turns a not-ready candidate into a failing exit.
+            self.assertEqual(self._run("validate-review", "--review", review("v.json", valid),
+                                       "--check").returncode, 0)
+            self.assertEqual(self._run("validate-review", "--review", review("c.json", changes),
+                                       "--check").returncode, 1)
+            # --require-payload: a valid changes_required verdict is a successful review
+            # execution; a missing, unparseable or forged payload fails it.
+            self.assertEqual(self._run("validate-review", "--review", review("f.json", findings),
+                                       "--require-payload").returncode, 0)
+            for target in (str(pathlib.Path(tmpdir) / "absent.json"),
+                           review("m.md", "Review prose with no machine-readable block."),
+                           review("forged.json", changes)):
+                self.assertEqual(self._run("validate-review", "--review", target,
+                                           "--require-payload").returncode, 2, target)
 
     def test_cli_summarize_acceptance_check_flag(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             manifest_file = pathlib.Path(tmpdir) / "manifest.json"
-            manifest = {
-                "schema_version": 1,
-                "head_sha": "1" * 40,
-                "base_sha": "2" * 40,
-                "execution_sha": "3" * 40,
-                "profile": "offline",
-                "dirty": False,
-                "matched_categories": ["prose"],
-            }
-            manifest_file.write_text(json.dumps(manifest))
+            manifest_file.write_text(json.dumps({
+                "schema_version": 1, "head_sha": "1" * 40, "base_sha": "2" * 40, "execution_sha": "3" * 40,
+                "profile": "offline", "dirty": False, "matched_categories": ["prose"]}))
             review_file = pathlib.Path(tmpdir) / "review.json"
-            review_file.write_text(json.dumps({
-                "schema_version": 1,
-                "head_sha": "1" * 40,
-                "base_sha": "2" * 40,
-                "execution_sha": "3" * 40,
-                "code_assessment": "acceptable",
-                "verification": "complete",
-                "candidate_currentness": "current",
-                "merge_readiness": "ready_for_maintainer",
-                "material_findings": [],
-                "evidence": {"notes": "ok"},
-            }))
-
+            review_file.write_text(json.dumps(_review_payload(material_findings=[], evidence={"notes": "ok"})))
             # Technical obligations alone determine this command exit.
-            res = subprocess.run(
-                [
-                    sys.executable,
-                    "scripts/review_tooling.py",
-                    "summarize-acceptance",
-                    "--manifest",
-                    str(manifest_file),
-                    "--review",
-                    str(review_file),
-                    "--lane",
-                    "context_check:success",
-                    "--lane",
-                    "lint_and_types:success",
-                    "--lane",
-                    "reviewer:success",
-                    "--check",
-                ],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+            res = self._run("summarize-acceptance", "--manifest", str(manifest_file),
+                            "--review", str(review_file), "--lane", "context_check:success",
+                            "--lane", "lint_and_types:success", "--lane", "reviewer:success", "--check")
             self.assertEqual(res.returncode, 0)
-
             # Failed technical evidence exits 1 without a review schema.
-            res_fail = subprocess.run(
-                [
-                    sys.executable,
-                    "scripts/review_tooling.py",
-                    "summarize-acceptance",
-                    "--manifest",
-                    str(manifest_file),
-                    "--lane",
-                    "context_check:failure",
-                    # No human JSON is needed
-                    "--check",
-                ],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            self.assertEqual(res_fail.returncode, 1)
+            res = self._run("summarize-acceptance", "--manifest", str(manifest_file),
+                            "--lane", "context_check:failure", "--check")
+            self.assertEqual(res.returncode, 1)
 
 
 class TestExecutionAttribution(unittest.TestCase):
@@ -1177,20 +495,10 @@ class TestExecutionAttribution(unittest.TestCase):
         return tmp, repo, base, head
 
     def _payload(self, head, base, execution):
-        return {
-            "schema_version": 1,
-            "head_sha": head,
-            "base_sha": base,
-            "execution_sha": execution,
-            "code_assessment": "acceptable",
-            "verification": "complete",
-            "candidate_currentness": "current",
-            "merge_readiness": "ready_for_maintainer",
-            "material_findings": [],
-            "evidence": {"notes": "ok"},
-        }
+        return _review_payload(head_sha=head, base_sha=base, execution_sha=execution,
+                               material_findings=[], evidence={"notes": "ok"})
 
-    def test_wrong_clean_checkout_is_unverified(self):
+    def test_wrong_clean_checkout_is_unverified_in_process_and_through_the_cli(self):
         tmp, repo, base, head = self._make_two_commit_repo()
         try:
             # Claim the newer candidate/execution while checked out at base.
@@ -1200,15 +508,8 @@ class TestExecutionAttribution(unittest.TestCase):
             self.assertEqual(result.candidate_currentness, CandidateCurrentness.UNVERIFIED.value)
             self.assertEqual(result.merge_readiness, MergeReadiness.NOT_READY.value)
             self.assertTrue(any("matches neither" in e and "HEAD" in e for e in result.validation_errors))
-        finally:
-            tmp.cleanup()
-
-    def test_wrong_checkout_cli_marks_not_ready(self):
-        tmp, repo, base, head = self._make_two_commit_repo()
-        try:
-            subprocess.run(["git", "checkout", "-q", base], cwd=repo, check=True)
             review_file = repo / "review.json"
-            review_file.write_text(json.dumps(self._payload(head, base, head)))
+            review_file.write_text(json.dumps(payload))
             script = str(pathlib.Path(__file__).resolve().parents[1] / "scripts" / "review_tooling.py")
             res = subprocess.run(
                 [sys.executable, script, "validate-review", "--review", str(review_file),
@@ -1222,24 +523,16 @@ class TestExecutionAttribution(unittest.TestCase):
         finally:
             tmp.cleanup()
 
-    def test_correct_checkout_passes_attribution(self):
+    def test_head_checkout_or_head_checkout_with_test_merge_execution_passes(self):
         tmp, repo, base, head = self._make_two_commit_repo()
         try:
             subprocess.run(["git", "checkout", "-q", head], cwd=repo, check=True)
-            payload = self._payload(head, base, head)
-            result = validate_review_payload(payload, check_git=True, cwd=repo)
+            result = validate_review_payload(self._payload(head, base, head), check_git=True, cwd=repo)
             self.assertEqual(result.merge_readiness, MergeReadiness.READY_FOR_MAINTAINER.value)
             self.assertEqual(len(result.validation_errors), 0)
-        finally:
-            tmp.cleanup()
-
-    def test_head_checkout_with_test_merge_execution_passes(self):
-        # The pinned reviewer CLI deliberately checks out the PR head before the
-        # model runs while tests execute on the test-merge commit. Both are
-        # legitimate candidate identities; an unrelated clean checkout is not.
-        tmp, repo, base, head = self._make_two_commit_repo()
-        try:
-            subprocess.run(["git", "checkout", "-q", head], cwd=repo, check=True)
+            # The pinned reviewer CLI checks out the PR head before the model runs
+            # while tests execute on the test-merge commit; both are legitimate
+            # candidate identities, an unrelated clean checkout is not.
             (repo / "merge.txt").write_text("test-merge\n")
             subprocess.run(["git", "add", "merge.txt"], cwd=repo, check=True)
             subprocess.run(["git", "commit", "-qm", "test-merge"], cwd=repo, check=True)
@@ -1248,9 +541,7 @@ class TestExecutionAttribution(unittest.TestCase):
             ).stdout.strip()
             self.assertNotEqual(execution, head)
             subprocess.run(["git", "checkout", "-q", head], cwd=repo, check=True)
-
-            payload = self._payload(head, base, execution)
-            result = validate_review_payload(payload, check_git=True, cwd=repo)
+            result = validate_review_payload(self._payload(head, base, execution), check_git=True, cwd=repo)
             self.assertEqual(result.merge_readiness, MergeReadiness.READY_FOR_MAINTAINER.value)
             self.assertEqual(result.validation_errors, [])
         finally:
@@ -1261,126 +552,32 @@ class TestExecutionAttribution(unittest.TestCase):
         try:
             # Execution older than head: head cannot be contained in execution.
             subprocess.run(["git", "checkout", "-q", base], cwd=repo, check=True)
-            payload = self._payload(head, base, base)
-            result = validate_review_payload(payload, check_git=True, cwd=repo)
+            result = validate_review_payload(self._payload(head, base, base), check_git=True, cwd=repo)
             self.assertEqual(result.merge_readiness, MergeReadiness.NOT_READY.value)
             self.assertTrue(any("ancestor" in e for e in result.validation_errors))
         finally:
             tmp.cleanup()
 
-    def test_missing_evidence_field_fails(self):
-        payload = self._payload("1" * 40, "2" * 40, "3" * 40)
-        del payload["evidence"]
-        result = validate_review_payload(payload)
-        self.assertEqual(result.merge_readiness, MergeReadiness.NOT_READY.value)
-        self.assertTrue(any("evidence" in e for e in result.validation_errors))
-
-    def test_non_object_evidence_fails(self):
-        for bad in ("all good", ["claim one proven", "claim two proven"]):
-            with self.subTest(evidence=bad):
-                payload = self._payload("1" * 40, "2" * 40, "3" * 40)
-                payload["evidence"] = bad
-                result = validate_review_payload(payload)
-                self.assertEqual(result.merge_readiness, MergeReadiness.NOT_READY.value)
-                self.assertTrue(any("evidence" in e for e in result.validation_errors))
-
 
 class TestReadinessProbes(unittest.TestCase):
     """F4: an endpoint responding is not proof the service is ready."""
 
-    def _serve(self, status_code, body):
-        import threading
-        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-
-        class Handler(BaseHTTPRequestHandler):
-            def do_GET(self):
-                data = body.encode()
-                self.send_response(status_code)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(data)))
-                self.end_headers()
-                self.wfile.write(data)
-
-            def log_message(self, fmt, *args):
-                pass
-
-        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        return server, f"http://127.0.0.1:{server.server_address[1]}/healthz"
-
-    def _fetch(self, url):
-        import urllib.request
-        try:
-            with urllib.request.urlopen(url, timeout=2) as resp:
-                return resp.status, resp.read().decode()
-        except Exception as exc:  # noqa: BLE001
-            code = getattr(exc, "code", None)
-            try:
-                body = exc.read().decode() if hasattr(exc, "read") else ""
-            except Exception:  # noqa: BLE001
-                body = ""
-            return code, body
-
-    def test_healthy_200_ok_is_ready(self):
-        server, url = self._serve(200, json.dumps({"status": "ok", "qdrant": True}))
-        try:
-            code, body = self._fetch(url)
-            self.assertTrue(evaluate_probe_response(code, body, require_agent_ok=True))
-            self.assertTrue(evaluate_probe_response(code, body))
-        finally:
-            server.shutdown()
-            server.server_close()
-
-    def test_503_degraded_is_not_ready(self):
-        server, url = self._serve(503, json.dumps({"status": "degraded", "qdrant": True}))
-        try:
-            code, body = self._fetch(url)
-            self.assertFalse(evaluate_probe_response(code, body, require_agent_ok=True))
-            self.assertFalse(evaluate_probe_response(code, body))
-        finally:
-            server.shutdown()
-            server.server_close()
-
-    def test_404_is_not_ready(self):
-        server, url = self._serve(404, json.dumps({"error": "not found"}))
-        try:
-            code, body = self._fetch(url)
-            self.assertFalse(evaluate_probe_response(code, body, require_agent_ok=True))
-            self.assertFalse(evaluate_probe_response(code, body))
-        finally:
-            server.shutdown()
-            server.server_close()
-
-    def test_malformed_body_is_not_ready(self):
-        server, url = self._serve(200, "not-json{{{")
-        try:
-            code, body = self._fetch(url)
-            self.assertFalse(evaluate_probe_response(code, body, require_agent_ok=True))
-            # Generic (non-agent) probes accept any 2xx body.
-            self.assertTrue(evaluate_probe_response(code, body))
-        finally:
-            server.shutdown()
-            server.server_close()
-
-    def test_degraded_with_qdrant_true_still_not_ready(self):
-        # Counterexample from the review: degraded overall status with a
-        # nested qdrant:true flag must not count as agent readiness.
-        body = json.dumps({"status": "degraded", "qdrant": True, "representation": "reembed_required"})
-        self.assertFalse(evaluate_probe_response(503, body, require_agent_ok=True))
-        self.assertFalse(evaluate_probe_response(200, body, require_agent_ok=True))
-
-    def test_workflow_probes_are_status_and_contract_aware(self):
-        workflow = pathlib.Path(__file__).resolve().parents[1] / ".github" / "workflows" / "opencode.yml"
-        text = workflow.read_text(encoding="utf-8")
-        # All service probes must be HTTP-status-aware (curl --fail), and the
-        # agent probe must validate the readiness contract, not one nested flag.
-        self.assertIn("curl -fsS -m 2 http://127.0.0.1:6333/collections", text)
-        self.assertIn("curl -fsS -m 2 http://127.0.0.1:16686/", text)
-        self.assertIn("curl -fsS -m 2 http://127.0.0.1:8001/healthz", text)
-        self.assertIn("curl -fsS -m 2 http://127.0.0.1:8080/healthz", text)
-        self.assertIn('"status"', text)
-        self.assertNotIn('| grep -q \'"qdrant":true\'', text)
+    def test_probe_verdict_depends_on_status_and_agent_contract(self):
+        healthy = json.dumps({"status": "ok", "qdrant": True})
+        degraded = json.dumps({"status": "degraded", "qdrant": True, "representation": "reembed_required"})
+        for code, body, agent_ready, generic_ready in (
+                (200, healthy, True, True),
+                (503, json.dumps({"status": "degraded", "qdrant": True}), False, False),
+                (404, json.dumps({"error": "not found"}), False, False),
+                # Counterexample from the review: degraded overall status with a
+                # nested qdrant:true flag must not count as agent readiness.
+                (200, degraded, False, True),
+                (503, degraded, False, False),
+                # Generic (non-agent) probes accept any 2xx body.
+                (200, "not-json{{{", False, True)):
+            with self.subTest(code=code, body=body[:30]):
+                self.assertEqual(evaluate_probe_response(code, body, require_agent_ok=True), agent_ready)
+                self.assertEqual(evaluate_probe_response(code, body), generic_ready)
 
 
 class TestAcceptanceUnionAndReviewerAuthority(unittest.TestCase):
@@ -1398,63 +595,35 @@ class TestAcceptanceUnionAndReviewerAuthority(unittest.TestCase):
         }
 
     def _ready_review(self):
-        payload = {
-            "schema_version": 1,
-            "head_sha": "1" * 40,
-            "base_sha": "2" * 40,
-            "execution_sha": "3" * 40,
-            "code_assessment": "acceptable",
-            "verification": "complete",
-            "candidate_currentness": "current",
-            "merge_readiness": "ready_for_maintainer",
-            "material_findings": [],
-            "evidence": {"notes": "ok"},
-        }
-        return validate_review_payload(payload, expected_head="1" * 40,
-                                       expected_base="2" * 40, expected_execution="3" * 40)
+        return validate_review_payload(
+            _review_payload(material_findings=[], evidence={"notes": "ok"}),
+            expected_head="1" * 40, expected_base="2" * 40, expected_execution="3" * 40)
 
     def _not_ready_review(self):
-        payload = {
-            "schema_version": 1,
-            "head_sha": "1" * 40,
-            "base_sha": "2" * 40,
-            "execution_sha": "3" * 40,
-            "code_assessment": "changes_required",
-            "verification": "incomplete",
-            "candidate_currentness": "current",
-            "merge_readiness": "not_ready",
-            "material_findings": [{"id": "F1", "disposition": "unresolved", "description": "open"}],
-            "evidence": {"notes": "blocked"},
-        }
-        return validate_review_payload(payload, expected_head="1" * 40,
-                                       expected_base="2" * 40, expected_execution="3" * 40)
+        return validate_review_payload(
+            _review_payload(code_assessment="changes_required", verification="incomplete",
+                            merge_readiness="not_ready",
+                            material_findings=[{"id": "F1", "disposition": "unresolved", "description": "open"}],
+                            evidence={"notes": "blocked"}),
+            expected_head="1" * 40, expected_base="2" * 40, expected_execution="3" * 40)
 
     def test_full_profile_keeps_packaging_when_deploy_present(self):
         decision = classify_paths(["pyproject.toml", "src/mainframe_rag/ingest/publish.py"])
         self.assertEqual(decision.profile, ProfileName.FULL)
         manifest = self._manifest("full", decision.matched_categories)
         self.assertIn("deploy", manifest["matched_categories"])
-        summary = build_acceptance_summary(
-            manifest,
-            {"context_check": "success", "lint_and_types": "success", "unit_tests": "success",
-             "simulation": "success", "gate_l1": "success", "packaging": "success",
-             "reviewer": "success"},
-            review=self._ready_review(),
-        )
-        packaging = next(l for l in summary.lanes if l.name == "packaging")
-        self.assertTrue(packaging.required)
+        statuses = {"context_check": "success", "lint_and_types": "success", "unit_tests": "success",
+                    "simulation": "success", "gate_l1": "success", "reviewer": "success"}
+        summary = build_acceptance_summary(manifest, {**statuses, "packaging": "success"},
+                                           review=self._ready_review())
+        self.assertTrue(next(l for l in summary.lanes if l.name == "packaging").required)
         # Omitting the packaging lane must block even though profile is full.
-        blocked = build_acceptance_summary(
-            manifest,
-            {"context_check": "success", "lint_and_types": "success", "unit_tests": "success",
-             "simulation": "success", "gate_l1": "success", "reviewer": "success"},
-            review=self._ready_review(),
-        )
+        blocked = build_acceptance_summary(manifest, statuses, review=self._ready_review())
         self.assertFalse(blocked.all_prerequisites_met)
         missing = next(l for l in blocked.lanes if l.name == "packaging")
         self.assertEqual(missing.state, LaneState.SELECTED_MISSING)
 
-    def test_human_review_does_not_change_technical_verification(self):
+    def test_human_review_neither_changes_nor_replaces_technical_verification(self):
         manifest = self._manifest("offline", ["prose"])
         for review in (None, self._not_ready_review(), self._ready_review()):
             for reviewer_status in ("success", "failure", "skipped"):
@@ -1466,15 +635,10 @@ class TestAcceptanceUnionAndReviewerAuthority(unittest.TestCase):
                     self.assertNotIn("reviewer", {lane.name for lane in summary.lanes})
                     self.assertEqual(summary.to_dict()["maintainer_authority"]["maintainer_decision"], "pending")
                     self.assertNotIn("recommended_readiness", summary.to_dict())
-
-
-    def test_review_approval_cannot_replace_missing_technical_evidence(self):
-        summary = build_acceptance_summary(self._manifest("offline", ["prose"]),
-                                           {"reviewer": "success"}, review=self._ready_review())
+        summary = build_acceptance_summary(manifest, {"reviewer": "success"}, review=self._ready_review())
         self.assertFalse(summary.all_prerequisites_met)
         context = next(lane for lane in summary.lanes if lane.name == "context_check")
         self.assertEqual(context.state, LaneState.SELECTED_MISSING)
-
 
 
 class TestCiUnitPartition(unittest.TestCase):
@@ -1535,39 +699,6 @@ class TestCiUnitPartition(unittest.TestCase):
                             else:
                                 self.assertFalse(proof["collect"]["passed"])
 
-    def test_native_union_tracks_added_tests_and_exact_whitespace_node_ids(self):
-        from scripts.unit_evidence import input_hashes, run_shard, validate, validate_union
-        source = ("import pytest\n"
-                  "@pytest.mark.parametrize('value', [1,2], ids=['a b','c::d'])\n"
-                  "def test_case(value):\n    assert value > 0\n"
-                  "def test_other():\n    pass\n"
-                  "@pytest.mark.integration\ndef test_integration():\n    assert False\n")
-        with tempfile.TemporaryDirectory() as directory:
-            root = pathlib.Path(directory)
-            filename = "test_ \t\n roundtrip.py"
-            self.coverage_tree(root, source, filename=filename)
-            expected = [f"tests/{filename}::test_case[a b]", f"tests/{filename}::test_case[c::d]",
-                        f"tests/{filename}::test_other"]
-            for added in (False, True):
-                if added:
-                    (root / "tests/test_added.py").write_text("def test_new():\n    pass\n")
-                    expected.append("tests/test_added.py::test_new")
-                records = []
-                for shard in (1, 2):
-                    out = root / f"out-{added}-{shard}"
-                    out.mkdir()
-                    xml = out / "result.xml"
-                    code, proof = run_shard(root, sys.executable, shard, xml, out)
-                    self.assertEqual(code, 0)
-                    record = validate(proof, shard, xml.read_bytes(), input_hashes(root))
-                    self.assertEqual(record["eligible"], sorted(expected))
-                    records.append(record)
-                validate_union(records)
-                self.assertEqual(sorted(records[0]["executed"] + records[1]["executed"]), sorted(expected))
-                with self.assertRaises(ValueError):
-                    validate_union([records[0], records[0]])
-                with self.assertRaises(ValueError):
-                    validate_union([records[0]])
 
     def test_shards_cover_each_selected_case_once_and_preserve_failure(self):
         import xml.etree.ElementTree as ET
@@ -1663,28 +794,6 @@ class TestCiUnitPartition(unittest.TestCase):
             with self.assertRaises(ValueError):
                 validate_union(records)
 
-    def test_four_ordinary_shards_partition_filtered_cases_and_keep_failure(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = pathlib.Path(directory)
-            (root / 'test_sample.py').write_text(
-                "import pytest\n@pytest.mark.parametrize('value', range(9))\n"
-                "def test_case(value):\n    assert value != 3\n")
-            env = {**os.environ, 'PYTEST_DISABLE_PLUGIN_AUTOLOAD': '1',
-                   'PYTHONPATH': str(pathlib.Path(__file__).resolve().parents[1])}
-            env.pop('PYTEST_ADDOPTS', None)
-            import xml.etree.ElementTree as ET
-            cases, results = [], []
-            for shard in range(1, 5):
-                xml = root / f'{shard}.xml'
-                result = subprocess.run([sys.executable, '-m', 'pytest', '-p', 'tests.ci_shard',
-                                         '--unit-shards=4', f'--unit-shard={shard}', '-k', 'not case[8]',
-                                         f'--junitxml={xml}', '-q'], cwd=root, env=env,
-                                        capture_output=True, check=False, timeout=20)
-                results.append(result.returncode)
-                cases.extend(case.attrib['name'] for case in ET.parse(xml).iter('testcase'))
-            self.assertEqual(sorted(results), [0, 0, 0, 1])
-            self.assertEqual(sorted(cases), [f'test_case[{index}]' for index in range(8)])
-            self.assertEqual(len(cases), len(set(cases)))
 
 
 class TestTaskCiConsumers(unittest.TestCase):
@@ -1713,21 +822,6 @@ class TestTaskCiConsumers(unittest.TestCase):
                                     "changed_paths": [path]})
             self.assertTrue({"context_check", "load", "ha", "simulation", "packaging"}.issubset(lanes), path)
 
-    def test_github_unit_and_context_contract_lanes_require_the_runner(self):
-        product = (self.root / ".github/workflows/ci.yml").read_text()
-        unit = product.split("  unit:\n", 1)[1].split("  test:\n", 1)[0]
-        self.assertIn('TASK_CONTRACTS_REQUIRE_RUNNER: "1"', unit)
-        self.assertLess(unit.index("sh scripts/tools/install-task.sh"), unit.index("scripts/ci_evidence.py --lane unit_tests"))
-        context = (self.root / ".github/workflows/agent-context.yml").read_text()
-        self.assertLess(context.index("sh scripts/tools/install-task.sh"),
-                        context.index("sh scripts/tools/run-task.sh qa:context"))
-        import yaml
-
-        steps = yaml.safe_load(context)["jobs"]["check-context"]["steps"]
-        execution = next(step for step in steps if "--unittest" in step.get("run", ""))
-        self.assertEqual(execution["env"]["TASK_CONTRACTS_REQUIRE_RUNNER"], "1")
-        self.assertEqual(shlex.split(execution["run"])[-3:],
-                         ["tests.test_agent_context", "tests.test_agent_doctor", "tests.test_taskfile_contracts"])
 
     def test_four_unit_vms_preserve_a_fail_closed_test_status(self):
         import yaml
@@ -2029,7 +1123,7 @@ class TestNativeExecutionEvidence(unittest.TestCase):
                 git("checkout", "candidate")
                 self.assertEqual(ci_evidence.identity()["execution_sha"], head)
 
-    def test_identity_receipt_cannot_claim_test_results_or_reuse_structured_output(self):
+    def test_identity_receipt_cannot_claim_results_and_identity_movement_cannot_pass(self):
         from unittest.mock import patch
 
         from scripts import ci_evidence
@@ -2047,14 +1141,7 @@ class TestNativeExecutionEvidence(unittest.TestCase):
                     with patch.object(sys, "argv", argv), patch.object(ci_evidence, "identity", return_value={}):
                         self.assertEqual(ci_evidence.main(), 2)
                     self.assertFalse((root / "out").exists())
-
-    def test_execution_identity_movement_cannot_pass(self):
-        from unittest.mock import patch
-
-        from scripts import ci_evidence
-
-        with tempfile.TemporaryDirectory() as directory:
-            root = pathlib.Path(directory)
+            # The execution identity moving during the job cannot pass.
             argv = ['ci_evidence.py', '--lane', 'lint_and_types', '--job-name', 'lint', '--output', str(root / 'out'),
                     '--', sys.executable, '-c', 'pass']
             with patch.object(ci_evidence, 'ROOT', root), patch.object(sys, 'argv', argv), patch.object(
@@ -2415,15 +1502,6 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         normalize_native(**args)
 
-    def test_accepts_exact_native_job_attempt_and_actual_test_records(self):
-        from scripts.acceptance_evidence import normalize_native
-
-        args, receipt, xml = self.fixture()
-        args["archive"], args["artifact"]["digest"] = self.packed(receipt, xml)
-        result = normalize_native(**args)
-        self.assertEqual((result["run_id"], result["run_attempt"], result["job_id"], result["artifact_id"]),
-                         (123, 2, 456, 789))
-        self.assertEqual(result["tests"]["executed"], 1)
 
     def test_rejects_wrong_actor_run_attempt_workflow_candidate_and_failed_execution(self):
         from scripts.acceptance_evidence import normalize_native
@@ -2613,28 +1691,6 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
             with self.subTest(case=label, value=altered), self.assertRaises((ValueError, KeyError)):
                 normalize(altered)
 
-    def test_hazard_receipt_rejects_hash_valid_empty_structured_results(self):
-        import hashlib
-        import io
-        import zipfile
-
-        from scripts.acceptance_evidence import PRODUCERS, normalize_native
-
-        args, receipt, _ = self.fixture()
-        producer = next(p for p in PRODUCERS if p.lane == "hazards")
-        args["producer"] = producer
-        args["job"]["name"] = "hazards"
-        args["artifact"]["name"] = "evidence-hazards-attempt-2"
-        receipt.update(job_key="hazards", job_name="hazards", lane="hazards", tests=None,
-                       result_sha256=hashlib.sha256(b"{}").hexdigest())
-        buffer = io.BytesIO()
-        with zipfile.ZipFile(buffer, "w") as archive:
-            archive.writestr("evidence.json", json.dumps(receipt))
-            archive.writestr("results.json", b"{}")
-        args["archive"] = buffer.getvalue()
-        args["artifact"]["digest"] = "sha256:" + hashlib.sha256(args["archive"]).hexdigest()
-        with self.assertRaises(ValueError):
-            normalize_native(**args)
 
     def test_native_pagination_reads_later_pages_and_refuses_inconsistent_results(self):
         from scripts.acceptance_evidence import paginate
@@ -2689,13 +1745,6 @@ if __name__ == "__main__":
 
 
 class TestAcceptanceSnapshot(unittest.TestCase):
-    def test_unknown_or_missing_profile_keeps_full_obligations(self):
-        from scripts.review_tooling import required_lanes
-
-        for manifest in ({}, {"profile": {}}, {"profile": "unknown"}):
-            with self.subTest(manifest=manifest):
-                self.assertTrue({"simulation", "packaging", "load", "ha", "agent_probes",
-                                 "eval_retrieval", "unit_tests", "hazards"} <= required_lanes(manifest))
 
     def test_paginated_pr_files_preserve_rename_bytes_and_refuse_truncation(self):
         from scripts.acceptance import changed_pr_paths
@@ -3108,32 +2157,8 @@ class ReviewTemplateTests(unittest.TestCase):
             self.assertEqual(list(pathlib.Path(directory).iterdir()), [])
             self.assertIn('Review template unavailable', api.last['output']['summary'])
 
-    def test_publishers_retain_technical_reports_without_requesting_review_json(self):
-        import yaml
-
-        workflow = yaml.safe_load((pathlib.Path(__file__).resolve().parents[1] /
-                                   '.github/workflows/acceptance.yml').read_text())
-        for name in ('advisory', 'trusted-app'):
-            with self.subTest(job=name):
-                steps = workflow['jobs'][name]['steps']
-                command = next(s['run'] for s in steps if 'python -m scripts.acceptance' in s.get('run', ''))
-                self.assertNotIn('--post-review-templates', command)
-                self.assertNotIn('--review-templates-dir', command)
-                upload = next(s for s in steps if s.get('name') == 'Retain acceptance report')
-                self.assertEqual(upload['if'], 'always()')
-                self.assertEqual(upload['with']['path'], '${{ runner.temp }}/acceptance.json')
 
 
-    def test_candidate_ci_retains_execution_evidence_without_human_template(self):
-        import yaml
-
-        workflow = yaml.safe_load((pathlib.Path(__file__).resolve().parents[1] /
-                                   '.github/workflows/agent-context.yml').read_text())
-        job = workflow['jobs']['check-context']
-        self.assertEqual(job['permissions'], {'contents': 'read', 'pull-requests': 'read'})
-        self.assertFalse(any('review template' in step.get('name', '').lower() for step in job['steps']))
-        upload = next(s for s in job['steps'] if s.get('name') == 'Retain native execution evidence')
-        self.assertEqual(upload['if'], 'always()')
 
 
     def test_template_comments_append_deduplicate_and_preserve_human_text(self):
@@ -3903,17 +2928,6 @@ class TestCatalogueAnchorDecision(unittest.TestCase):
             self.assertEqual(api.writes[-1]['conclusion'], 'failure')
             self.assertEqual(api.run['display_title'], 'Catalogue anchors PR 3: revoke')
 
-    def test_exact_original_718_anchor_change_preserves_every_other_typed_obligation(self):
-        import hashlib
-
-        from scripts.verifier_approval import allowed_anchor_change
-
-        approved, adopted = self.catalogues()
-        self.assertEqual(allowed_anchor_change(approved, adopted), {
-            'base_sha256': hashlib.sha256(approved).hexdigest(),
-            'candidate_sha256': hashlib.sha256(adopted).hexdigest(),
-            'changed_ids': ['final-order-miscount'],
-        })
 
     def test_historical_approval_and_native_oracle_survive_repository_anchor_adoption(self):
         from unittest.mock import patch

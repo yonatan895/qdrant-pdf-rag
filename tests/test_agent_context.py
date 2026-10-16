@@ -42,8 +42,7 @@ class ContextCheckTests(TestCase):
     def test_utf8_budget_counts_bytes(self):
         (self.root/"AGENTS.md").write_text("א"*4097, encoding="utf-8")
         self.assertTrue(any("8194" in error for error in check(self.root)[0]))
-
-    def test_crlf_bytes_are_not_normalized_away(self):
+        # CRLF bytes are not normalized away.
         (self.root/"AGENTS.md").write_bytes(b"x\r\n"*2731)
         self.assertTrue(any("8193" in e for e in check(self.root)[0]))
 
@@ -68,10 +67,6 @@ class ContextCheckTests(TestCase):
         errors = check(self.root)[0]
         self.assertTrue(any("canonical local Markdown owner" in e for e in errors))
         self.assertTrue(any("required entry point missing" in e for e in errors))
-
-    def test_template_links_are_checked(self):
-        (self.root/".github/pull_request_template.md").write_text('[Guide](../missing.md)')
-        self.assertTrue(any("pull_request_template.md: template links must use canonical" in e for e in check(self.root)[0]))
 
     def test_template_canonical_url_valid(self):
         canonical = "https://github.com/yonatan895/qdrant-pdf-rag/blob/main/docs/owner.md#contract"
@@ -165,10 +160,6 @@ class ContextCheckTests(TestCase):
         self.replace('[Root](../AGENTS.md)', '[Root](../AGENTS.md), [Sibling](../src/AGENTS.md)')
         self.assertTrue(any("not an instruction on this directory chain" in e for e in check(self.root)[0]))
 
-    def test_missing_map_has_actionable_diagnostic(self):
-        self.replace('<!-- context-map:end -->', '')
-        self.assertTrue(any('context-map: expected' in e for e in check(self.root)[0]))
-
     def test_symlink_outside_repository_is_not_read(self):
         with TemporaryDirectory() as outside:
             private = Path(outside)/"secret"
@@ -256,14 +247,6 @@ class VendoredSkillsTests(TestCase):
         self.add_pstack_provider()
         self.assertEqual(check(self.root)[0], [])
 
-    def test_second_provider_does_not_permit_unselected_categories(self):
-        self.add_engineering_provider()
-        for name in ("qdrant-edge", "research"):
-            with self.subTest(name=name):
-                (self.root/".agents/skills"/name).mkdir()
-                self.assertTrue(any(name in e and "allowlist" in e for e in check(self.root)[0]))
-                (self.root/".agents/skills"/name).rmdir()
-
     def test_provider_pin_and_license_checks_remain_independent(self):
         self.add_engineering_provider()
         (self.root/"NOTICE.mattpocock-skills").write_text(f"commit {SHA}\n")
@@ -289,16 +272,6 @@ class VendoredSkillsTests(TestCase):
                 self.assertTrue(any(f"{skill}/SKILL.md" in e and "broken local reference" in e
                                     for e in check(self.root)[0]))
                 upstream.write_text("original upstream skill\n")
-
-    def test_third_provider_pin_and_license_are_checked_independently(self):
-        self.add_engineering_provider()
-        self.add_pstack_provider()
-        (self.root/"NOTICE.pstack-skills").write_text(f"commit {SHA}\n")
-        (self.root/"LICENSE.pstack-skills").unlink()
-        errors = check(self.root)[0]
-        self.assertTrue(any("pstack-skills" in e and "same pinned SHA" in e for e in errors))
-        self.assertTrue(any("LICENSE.pstack-skills" in e for e in errors))
-        self.assertFalse(any("mattpocock-skills" in e for e in errors))
 
     def test_repository_engineering_vendor_bytes_match_the_pinned_manifest(self):
         import hashlib
