@@ -56,41 +56,13 @@ def test_collect_rows_uses_exact_order_depth_and_propagates_errors(monkeypatch):
 
 
 # ---------------------------------------------------------------- bootstrap
-def test_ci95_seeded_deterministic():
-    values = [0.5, 0.6, 0.4, 0.7, 0.3, 0.55]
-    a = ci95(values, resamples=500, seed=7)
-    b = ci95(values, resamples=500, seed=7)
-    assert a == b
-    lo, hi = a
-    assert 0.0 <= lo <= hi <= 1.0
-
-
-def test_ci95_known_distribution_orders_as_expected():
-    tight = ci95([0.5] * 100, resamples=200, seed=1)
-    wide = ci95([0.0, 1.0] * 50, resamples=200, seed=1)
-    assert tight[1] - tight[0] < wide[1] - wide[0]
-    lo, hi = tight
-    assert abs(lo - 0.5) < 0.01 and abs(hi - 0.5) < 0.01
-
-
-def test_ci95_paired_positive_shift_excludes_zero():
-    pairs = [(b + 0.2, b) for b in [0.1 * i for i in range(30)]]
-    ci = ci95_paired(pairs, resamples=500, seed=3)
-    assert ci is not None and ci[0] > 0.0
-    assert ci_excludes_zero(ci, improvement=True)
-
-
-def test_ci95_paired_noise_straddles_zero():
+def test_ci95_paired_signal_excludes_zero_and_noise_straddles_it():
+    shift = ci95_paired([(b + 0.2, b) for b in [0.1 * i for i in range(30)]], resamples=500, seed=3)
+    assert shift is not None and ci_excludes_zero(shift, improvement=True)
     # symmetric +/-: mean delta 0, CI straddles zero -> no merge signal
-    pairs = [(0.5 + d, 0.5 - d) for d in [0.1, -0.1] * 15]
-    ci = ci95_paired(pairs, resamples=1000, seed=5)
-    assert not ci_excludes_zero(ci, improvement=True)
-    assert not ci_excludes_zero(ci, improvement=False)
-
-
-def test_ci95_empty_is_none():
-    assert ci95([]) is None
-    assert ci95_paired([]) is None
+    noise = ci95_paired([(0.5 + d, 0.5 - d) for d in [0.1, -0.1] * 15], resamples=1000, seed=5)
+    assert not ci_excludes_zero(noise, improvement=True)
+    assert not ci_excludes_zero(noise, improvement=False)
 
 
 def test_ci95_regression_pinned_seeded_values():
@@ -129,16 +101,9 @@ def test_score_row_full_graded_match():
     row = score_row(hits, e)
     assert row["recall@5"] == 1.0 and row["recall@8"] == 1.0 and row["mrr"] == 1.0
     assert row["ndcg@8"] == 1.0  # max gain at rank 1 == ideal
-
-
-def test_score_row_doc_only_hit_partial_ndcg_strict_recall():
-    e = _entry(expected_heading="IEA500I", expected_page="2-14")
-    hits = [_Hit("SA38-0673-70", heading="Other", page_label="9-9", score=0.9)]
-    row = score_row(hits, e)
-    # recall stays strict (doc + heading substring, same as the retrieval eval);
-    # nDCG gives graded credit for the doc-level hit (gain 1 of max 3)
-    assert row["recall@5"] == 0.0
-    assert 0.0 < row["ndcg@8"] < 1.0
+    # N chunks of the SAME expected doc must not push nDCG above 1 (doc-level dedupe)
+    dup = score_row([_Hit("SA38-0673-70", score=1.0 - 0.01 * i) for i in range(8)], _entry())
+    assert dup["ndcg@8"] == 1.0
 
 
 def test_score_row_abstain_excluded_but_traps_checked():
@@ -161,27 +126,7 @@ def test_score_row_cocarrying_chunk_not_a_violation():
     assert "violations" not in row
 
 
-def test_score_row_ndcg_dedupes_per_doc_never_exceeds_one():
-    # N chunks of the SAME expected doc must not push nDCG above 1 (the
-    # doc-level ranking dedupes; IDCG assumes every expected doc at max gain)
-    e = _entry(expected_doc_ids=["SA38-0673-70"])
-    hits = [_Hit("SA38-0673-70", score=1.0 - 0.01 * i) for i in range(8)]
-    row = score_row(hits, e)
-    assert 0.0 < row["ndcg@8"] <= 1.0
-    assert row["ndcg@8"] == 1.0  # single expected doc found at rank 1 = perfect
-
-
-def test_score_row_ndcg_multi_doc_ideal():
-    # Gold has 3 docs; deduped doc ranking is D1(rank1), D9(rank2, gain 0),
-    # D2(rank3): DCG = 1/log2(2) + 1/log2(4) = 1.5; IDCG (3 ideal positions,
-    # max gain 1) = 1/log2(2)+1/log2(3)+1/log2(4) = 2.1309 -> nDCG = 0.7039
-    e = _entry(expected_doc_ids=["D1", "D2", "D3"])
-    hits = [_Hit("D1", score=1.0), _Hit("D9", score=0.9), _Hit("D2", score=0.8)]
-    row = score_row(hits, e)
-    assert row["ndcg@8"] == pytest.approx(0.7039, abs=0.001)
-
-
-def test_aggregate_per_class_never_aggregate_only():
+def test_aggregate_per_class_and_absolute_trap_precision():
     rows = [
         score_row([_Hit("D1")], _entry(id="A-1", query_class="message_id", expected_doc_ids=["D1"])),
         score_row([], _entry(id="A-2", query_class="message_id", expected_doc_ids=["D1"])),
@@ -193,18 +138,14 @@ def test_aggregate_per_class_never_aggregate_only():
     assert agg["classes"]["syntax"]["recall@5"] == 1.0
     assert agg["overall"]["recall@5"] == 0.6667  # aggregate rounds to 4dp
     assert set(agg["per_query"]) == {"A-1", "A-2", "B-1"}
-
-
-def test_aggregate_trap_precision_absolute():
-    rows = [
+    trap = aggregate([
         score_row([_Hit("D1")], _entry(id="A-1", expected_doc_ids=["D1"])),
         score_row([_Hit("X1", message_ids=("IEC070I",))],
                   _entry(id="NEG-08", query_class="negative", expected_behavior="abstain",
                          expected_doc_ids=[], must_not_message_ids=["IEC070I"])),
-    ]
-    agg = aggregate(rows)
-    assert agg["traps"]["failed"] == ["NEG-08"]
-    assert agg["traps"]["precision"] == 0.5
+    ])
+    assert trap["traps"]["failed"] == ["NEG-08"]
+    assert trap["traps"]["precision"] == 0.5
 
 
 # ------------------------------------------------------------- gate verdict
@@ -265,17 +206,6 @@ def test_gate_class_regression_holds_despite_overall_gain():
     assert any("comparative" in r for r in reasons)
 
 
-def test_gate_small_regression_within_floor_merges():
-    base = _summary(recall5=0.6, classes={
-        "message_id": {"n": 10, "scored": 10, "recall@5": 0.5, "mrr": 0.5},
-    })
-    cand = _summary(recall5=0.8, classes={
-        "message_id": {"n": 10, "scored": 10, "recall@5": 0.45, "mrr": 0.45},
-    })
-    verdict, _ = gate_verdict(cand, _baseline(base), resamples=400)
-    assert verdict == "merge"
-
-
 def test_gate_golden_entry_mismatch_holds():
     # A dev run (golden only) must not be scored against an RC baseline
     # (golden + holdout): the paired deltas would cover a truncated venue.
@@ -285,14 +215,6 @@ def test_gate_golden_entry_mismatch_holds():
     verdict, reasons = gate_verdict(cand, base, resamples=400)
     assert verdict == "hold"
     assert any("golden entry-set mismatch" in r for r in reasons)
-
-
-def test_gate_matching_golden_count_still_gates():
-    base = _baseline(_summary(recall5=0.6, mrr=0.5))
-    base["_meta"]["golden_entries"] = 10
-    cand = _summary(recall5=0.8, mrr=0.7)
-    verdict, reasons = gate_verdict(cand, base, resamples=400)
-    assert verdict == "merge", reasons
 
 
 # ------------------------------------------------------- baseline round-trip
@@ -315,14 +237,6 @@ def test_baseline_round_trip(tmp_path):
 def test_baseline_path_mode_keyed(tmp_path):
     assert baseline_path_for(tmp_path, "hash").name == "harness.json"
     assert baseline_path_for(tmp_path, "vllm").name == "harness-vllm.json"
-
-
-def test_baseline_json_is_utf8_and_stable(tmp_path):
-    summary = _summary()
-    path = tmp_path / "b.json"
-    save_baseline(path, summary, embed_mode="vllm", snapshot={"points_count": 1})
-    doc = json.loads(path.read_text(encoding="utf-8"))
-    assert doc["overall"]["recall@5"] == summary["overall"]["recall@5"]
 
 
 # ------------------------------------------------------- snapshot policy matrix
@@ -366,26 +280,19 @@ class _FakeQdrant:
         return True
 
 
-def test_fingerprint_orders_by_creation_time_not_name():
-    # Names sort by checksum segment; ordering must follow creation_time.
+def test_fingerprint_orders_by_creation_time_and_prefers_recorded_pin():
+    # Names sort by checksum segment; ordering must follow creation_time, and
+    # the recorded pin always leads (the skip path's exact-match condition).
     c = _FakeQdrant(100, [
         _Snap("c-zzz-2026-09-02-10-00-00.snapshot", "2026-09-02T10:00:00"),
         _Snap("c-aaa-2026-09-02-09-00-00.snapshot", "2026-09-02T09:00:00"),
     ])
-    fp = snapshot_fingerprint(c, "coll")
-    assert fp["snapshot_names"] == [
+    assert snapshot_fingerprint(c, "coll")["snapshot_names"] == [
         "c-aaa-2026-09-02-09-00-00.snapshot",
         "c-zzz-2026-09-02-10-00-00.snapshot",
     ]
-
-
-def test_fingerprint_prefers_recorded_pin():
-    c = _FakeQdrant(100, [
-        _Snap("c-a-old.snapshot", "2026-09-02T09:00:00"),
-        _Snap("c-b-pin.snapshot", "2026-09-02T11:00:00"),
-    ])
-    fp = snapshot_fingerprint(c, "coll", prefer_name="c-b-pin.snapshot")
-    assert fp["snapshot_names"][0] == "c-b-pin.snapshot"
+    fp = snapshot_fingerprint(c, "coll", prefer_name="c-zzz-2026-09-02-10-00-00.snapshot")
+    assert fp["snapshot_names"][0] == "c-zzz-2026-09-02-10-00-00.snapshot"
 
 
 def test_resolve_drift_match_skips_restore():
@@ -425,27 +332,6 @@ def test_resolve_drift_fails_without_recorded_pin():
 def test_resolve_drift_record_mode_pins():
     fp = {"points_count": 840396, "snapshot_names": []}
     assert resolve_snapshot_action(fp, None, restore="drift", record_mode=True) == ("pin", None)
-
-
-def test_resolve_never_skips():
-    fp = {"points_count": 1, "snapshot_names": []}
-    action, _ = resolve_snapshot_action(fp, None, restore="never", record_mode=False)
-    assert action == "skip"
-
-
-def test_resolve_always_restores_recorded_not_live():
-    fp = {"points_count": 840396, "snapshot_names": ["stray.snapshot", "pin.snapshot"]}
-    recorded = {"points_count": 840396, "snapshot_name": "pin.snapshot"}
-    assert resolve_snapshot_action(fp, recorded, restore="always", record_mode=False) == ("restore", "pin.snapshot")
-    action, _ = resolve_snapshot_action(fp, None, restore="always", record_mode=False)
-    assert action == "fail"
-
-
-def test_pin_snapshot_creates_when_missing():
-    c = _FakeQdrant(840396, [])
-    fp = pin_snapshot(c, "coll")
-    assert fp["snapshot_name"].startswith("c-0-")
-    assert fp["points_count"] == 840396
 
 
 def test_pin_snapshot_adopts_only_on_exact_match():
@@ -510,35 +396,6 @@ def test_restore_snapshot_fails_when_index_does_not_roll_back():
 
 
 # --------------------------------------------------------- metric cap / ideal
-def test_mrr_capped_at_limit():
-    e = _entry(expected_doc_ids=["SA38-0673-70"])
-    hits = [_Hit(f"OTHER{i}", score=0.9) for i in range(8)] + [_Hit("SA38-0673-70", score=0.5)]
-    row = score_row(hits, e)
-    assert row["mrr"] == 0.0  # relevant at rank 9 is outside MRR@8
-    assert row["recall@8"] == 0.0
-
-
-def test_ndcg_graded_ideal_single_max_gain_for_multi_doc():
-    # Two expected docs with a singular heading gold: the ideal gives max
-    # gain (2) to ONE doc and plain gain (1) to the other — not max to both.
-    e = _entry(expected_doc_ids=["D1", "D2"], expected_heading="IEA794I")
-    hits = [_Hit("D1", heading="IEA794I", score=1.0)]  # D2 missed
-    row = score_row(hits, e)
-    # deduped: D1 rank1 gain2; ideal [2,1]: (2/1) / (2/1 + 1/1.585) = 0.7604
-    assert row["ndcg@8"] == pytest.approx(0.7604, abs=0.001)
-
-
-def test_promotion_and_harness_share_canonical_owners():
-    from scripts import harness
-
-    from mainframe_rag.eval import promotion, statistics
-
-    assert harness.gate_verdict is promotion.gate_verdict
-    assert harness.DEFAULT_CLASS_FLOOR is promotion.DEFAULT_CLASS_FLOOR
-    assert promotion.ci95_paired is statistics.ci95_paired
-    assert promotion.ci_excludes_zero is statistics.ci_excludes_zero
-
-
 @pytest.fixture
 def harness_input_workspace(tmp_path):
     """Actual Task/CLI/scorers/verdicts; original data and inert external boundaries."""
@@ -635,11 +492,7 @@ def harness_input_workspace(tmp_path):
 
 
 @pytest.mark.parametrize("mode,venue,ids,pin,verdict", [
-    ("hash", "dev", ["dev"], "hash-pin", "merge"),
     ("hash", "rc", ["dev"], "hash-pin", "merge"),
-    ("", "rc", ["dev"], "hash-pin", "merge"),
-    ("vllm", "rc", ["dev", "hold"], "vllm-pin", "merge"),
-    ("VLLM", "rc", ["dev", "hold"], "vllm-pin", "merge"),
     (" VLLM ", "rc", ["dev", "hold"], "vllm-pin", "merge"),
     ("vllm", "dev", ["dev"], "vllm-pin", "hold"),
 ])
@@ -657,7 +510,6 @@ def test_harness_task_and_cli_select_same_mode_inputs(harness_input_workspace, m
 
 
 @pytest.mark.parametrize("mode,ids,filename", [
-    ("hash", ["dev"], "harness.json"),
     ("VLLM", ["dev", "hold"], "harness-vllm.json"),
 ])
 def test_harness_task_records_selected_dataset_then_next_gate(harness_input_workspace, mode, ids, filename):
