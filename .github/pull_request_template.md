@@ -17,7 +17,8 @@ Defaults, API/schema, identities, operational requirements, and rollback impact.
 Link the acceptance summary and CI receipts for lane results, counts and SHAs instead of
 restating them; prose states the claim, the counterexample considered and the limits.
 Distinguish observed results, static reasoning, proposed tests, and checks not run.
-For test consolidation: old case → retained behavior/new owner, or retirement reason.
+Tests ([admission](https://github.com/yonatan895/qdrant-pdf-rag/blob/main/docs/testing.md#test-admission)): added → owner or why none, mutation killed;
+removed → owner or retirement, uncovered lines.
 Group related evidence; no artifact is required for every trivial assertion.
 [Verification minimums](https://github.com/yonatan895/qdrant-pdf-rag/blob/main/docs/live-stack.md#verification-minimums).
 
