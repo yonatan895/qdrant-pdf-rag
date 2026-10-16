@@ -512,13 +512,35 @@ def test_http_reranker_normal_requests_byte_identical():
     assert calls[0][1] + calls[1][1] == texts
 
 
-def test_http_reranker_5xx_not_retried_with_cut_text():
-    calls: list = []
-    reranker = HttpReranker(_retry_settings(), client=_client(_window_handler(calls, status=503)))
-    with pytest.raises(httpx2.HTTPStatusError):
+def _score_4xx_rerank_5xx(request):
+    return httpx2.Response(400 if request.url.path == "/v1/score" else 502)
+
+
+def _transport_down(request):
+    raise httpx2.ConnectError("down", request=request)
+
+
+@pytest.mark.parametrize(
+    ("handler", "error"),
+    [
+        (lambda r: httpx2.Response(503), httpx2.HTTPStatusError),
+        (_transport_down, httpx2.RequestError),
+        (_score_4xx_rerank_5xx, httpx2.HTTPStatusError),  # 4xx on one leg only
+    ],
+    ids=["5xx", "transport-error", "4xx-score-5xx-rerank"],
+)
+def test_http_reranker_not_retried_with_cut_text(handler, error):
+    """Only a batch rejected 4xx on BOTH legs is re-scored with cut passages."""
+    seen: list = []
+
+    def recording(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request.url.path)
+        return handler(request)
+
+    reranker = HttpReranker(_retry_settings(), client=_client(recording))
+    with pytest.raises(error):
         reranker.score("q", ["x" * 2500, "y"])
-    assert [c[0] for c in calls] == ["/v1/score", "/v1/rerank"]
-    assert calls[0][1] == calls[1][1] == ["x" * 2500, "y"]
+    assert seen == ["/v1/score", "/v1/rerank"]
 
 
 def test_http_reranker_retry_also_failing_raises_as_before():
