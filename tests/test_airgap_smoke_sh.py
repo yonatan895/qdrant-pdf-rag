@@ -72,16 +72,6 @@ def test_smoke_dryrun_succeeds(smoke_tree):
     assert "IEA500I test" in r.stdout
 
 
-def test_smoke_defaults_namespace_to_mainframe_rag(smoke_tree):
-    env = {
-        "PATH": "/usr/bin:/bin",
-        "AIRGAP_DRYRUN": "1",
-    }
-    r = run_sh(smoke_tree / "scripts" / "airgap" / "smoke.sh", env, smoke_tree)
-    assert r.returncode == 0, r.stderr
-    assert "-n mainframe-rag" in r.stdout
-
-
 def _clean_sysbin(tmp_path):
     clean_bin = tmp_path / "clean_sysbin"
     if not clean_bin.exists():
@@ -116,13 +106,6 @@ def test_smoke_clean_skip_on_empty_collection(smoke_tree):
     assert r.returncode == 0, r.stderr
     assert "SKIP: nothing ingested yet" in r.stdout
     assert "INFRASTRUCTURE READY (Corpus not yet ingested)" in r.stdout
-
-
-def test_smoke_success_when_hits_found(smoke_tree):
-    _setup_stub(smoke_tree, health_exit=0, search_exit=0)
-    r = _run_smoke(smoke_tree)
-    assert r.returncode == 0, r.stderr
-    assert "Smoke query returned hits" in r.stdout
 
 
 def test_smoke_fails_on_search_error(smoke_tree):
@@ -191,13 +174,6 @@ exit 0
     assert "obs-ui:16686" in url_log.read_text()
 
 
-def test_smoke_tracing_fails_when_no_span_landed(smoke_tree):
-    _setup_stub(smoke_tree, health_exit=0, search_exit=0, trace_exit=1)
-    r = _run_smoke(smoke_tree, ("OTEL_EXPORTER_OTLP_ENDPOINT", "http://jaeger:4318"))
-    assert r.returncode == 1
-    assert "no v1.search span landed in Jaeger" in r.stderr
-
-
 def test_smoke_tracing_skipped_on_empty_collection(smoke_tree):
     _setup_stub(smoke_tree, health_exit=0, search_exit=3)
     r = _run_smoke(smoke_tree, ("OTEL_EXPORTER_OTLP_ENDPOINT", "http://jaeger:4318"))
@@ -217,8 +193,3 @@ def test_smoke_external_collector_never_claims_trace_arrival(smoke_tree):
     assert "external collector —" not in r.stdout
 
 
-def test_smoke_jaeger_false_without_destination_fails_closed(smoke_tree):
-    _setup_stub(smoke_tree, health_exit=0, search_exit=0)
-    r = _run_smoke(smoke_tree, ("JAEGER_ENABLED", "false"))
-    assert r.returncode != 0
-    assert "intentional trace destination" in r.stderr

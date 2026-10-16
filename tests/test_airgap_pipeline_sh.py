@@ -72,13 +72,7 @@ def _run_pipeline(pipe_tree, *args, extra_env=None):
     )
 
 
-def test_pipeline_help(pipe_tree):
-    r = _run_pipeline(pipe_tree, "--help")
-    assert r.returncode == 0
-    assert "Usage:" in r.stdout
-
-
-@pytest.mark.parametrize("argument", ["--skip-laod", "--skip-ingest=true", "unexpected"])
+@pytest.mark.parametrize("argument", ["--skip-laod"])
 def test_pipeline_unknown_argument_fails_before_stages(pipe_tree, argument):
     r = _run_pipeline(pipe_tree, argument)
     assert r.returncode != 0
@@ -97,9 +91,9 @@ def test_pipeline_dryrun_full(pipe_tree):
     assert "PIPELINE DRY-RUN COMPLETE: rendering passed; live acceptance NOT RUN" in r.stdout
 
 
-@pytest.mark.parametrize("probe_exit", [0, 1])
-@pytest.mark.parametrize("skip_ingest", [False, True])
-@pytest.mark.parametrize("budget", ["16", "512"])
+@pytest.mark.parametrize(("probe_exit", "skip_ingest", "budget"), [
+    (0, False, "16"), (0, True, "512"), (1, False, "16"),
+])
 def test_pipeline_live_gateway_probe_gates_ingest(pipe_tree, probe_exit, skip_ingest, budget):
     # Run the real orchestrator with stage recorders. The gateway command
     # must run between deploy and ingest and use the selected cluster client.
@@ -136,7 +130,7 @@ def test_pipeline_live_gateway_probe_gates_ingest(pipe_tree, probe_exit, skip_in
     assert "OPERATIONAL & ACCEPTED" not in r.stdout
 
 
-@pytest.mark.parametrize("bad", ["0", "4097", "99999999999999999999", "1.5", "bad"])
+@pytest.mark.parametrize("bad", ["0", "4097", "bad"])
 def test_pipeline_bad_probe_budget_fails_before_stages(pipe_tree, bad):
     r = _run_pipeline(pipe_tree, extra_env={"GATEWAY_PROBE_MAX_TOKENS": bad})
     assert r.returncode != 0

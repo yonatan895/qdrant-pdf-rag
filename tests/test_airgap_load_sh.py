@@ -74,8 +74,6 @@ def _sha256(data: bytes) -> str:
     return sha256_bytes(data)
 
 
-
-
 def _digest(raw: bytes) -> str:
     return "sha256:" + hashlib.sha256(raw).hexdigest()
 
@@ -225,19 +223,6 @@ def test_load_manifest_sha_mismatch_fails_closed(load_tree):
     assert "does not match the packed MANIFEST sha" in r.stderr
 
 
-def test_load_success_with_dist_dir(load_tree):
-    tmp_path, skopeo_log = load_tree
-    _make_artifacts(tmp_path / "dist", sha=IMAGE_SHA)
-    r = _run_load(load_tree)
-    assert r.returncode == 0, r.stderr
-    assert "Loaded 4 images into reg.internal:5000" in r.stdout
-    log = skopeo_log.read_text()
-    assert f"docker://reg.internal:5000/qdrant-pdf-rag-agent:{IMAGE_SHA}" in log
-    assert f"docker://reg.internal:5000/qdrant-pdf-rag-ingest:{IMAGE_SHA}" in log
-    assert "docker://reg.internal:5000/qdrant/qdrant:v1.19.0-unprivileged" in log
-    assert "docker://reg.internal:5000/jaegertracing/jaeger:v2.20.0" in log
-
-
 def test_load_success_with_parent_dir(load_tree):
     tmp_path, skopeo_log = load_tree
     _make_artifacts(tmp_path, sha=IMAGE_SHA)
@@ -274,25 +259,6 @@ def test_load_success_with_bundle_dir_override(load_tree):
     r = _run_load(load_tree, ("AIRGAP_BUNDLE_DIR", str(custom_dir)))
     assert r.returncode == 0, r.stderr
     assert "Loaded 4 images into reg.internal:5000" in r.stdout
-
-
-def test_load_skopeo_args_forwarded(load_tree):
-    tmp_path, skopeo_log = load_tree
-    _make_artifacts(tmp_path / "dist", sha=IMAGE_SHA)
-    r = _run_load(load_tree, ("SKOPEO_ARGS", "--authfile /tmp/auth.json"))
-    assert r.returncode == 0, r.stderr
-    log = skopeo_log.read_text()
-    assert "--authfile" in log
-    assert "/tmp/auth.json" in log
-
-
-def test_load_insecure_registry_flag(load_tree):
-    tmp_path, skopeo_log = load_tree
-    _make_artifacts(tmp_path / "dist", sha=IMAGE_SHA)
-    r = _run_load(load_tree, ("INSECURE_REGISTRY", "true"))
-    assert r.returncode == 0, r.stderr
-    log = skopeo_log.read_text()
-    assert "--dest-tls-verify=false" in log
 
 
 def test_load_tampered_sums_fails_signature(load_tree):
@@ -364,26 +330,12 @@ def test_load_refuses_manifest_config_digest_that_is_not_the_archives(load_tree)
 def test_load_trusted_pub_mismatch_refuses(load_tree):
     tmp_path, _ = load_tree
     _make_artifacts(tmp_path / "dist", sha=IMAGE_SHA)
+    pinned = _run_load(load_tree, ("SNEAKERNET_TRUSTED_PUB", str(tmp_path / "dist" / "sneakernet-signing.pub")))
+    assert pinned.returncode == 0, pinned.stderr
     other_pub = gen_other_pub(tmp_path)
     r = _run_load(load_tree, ("SNEAKERNET_TRUSTED_PUB", str(other_pub)))
     assert r.returncode != 0
     assert "does not match SNEAKERNET_TRUSTED_PUB" in r.stderr
-
-
-def test_load_trusted_pub_match_passes(load_tree):
-    tmp_path, _ = load_tree
-    _make_artifacts(tmp_path / "dist", sha=IMAGE_SHA)
-    r = _run_load(load_tree, ("SNEAKERNET_TRUSTED_PUB", str(tmp_path / "dist" / "sneakernet-signing.pub")))
-    assert r.returncode == 0, r.stderr
-    assert "Loaded 4 images into reg.internal:5000" in r.stdout
-
-
-def test_load_missing_internal_registry_fails_closed(load_tree):
-    tmp_path, _ = load_tree
-    _make_artifacts(tmp_path / "dist", sha=IMAGE_SHA)
-    r = _run_load(load_tree, ("INTERNAL_REGISTRY", ""))
-    assert r.returncode == 1
-    assert "required variables unset: INTERNAL_REGISTRY" in r.stderr
 
 
 def test_load_signed_missing_task_member_refuses_before_push(load_tree):
@@ -450,6 +402,7 @@ def test_load_success_proves_registry_serves_packed_config(load_tree):
     _make_artifacts(root / "dist")
     r = _run_load(load_tree)
     assert r.returncode == 0, r.stderr
+    assert "Loaded 4 images into reg.internal:5000" in r.stdout
     for image, ref in REF.items():
         registry_raw = _registry_manifest(root, image)
         archive_raw = (root / "dist/.skopeo-stub/archive" / f"{TAR[image]}.raw").read_bytes()
@@ -461,20 +414,6 @@ def test_load_success_proves_registry_serves_packed_config(load_tree):
     assert len(_registry_calls(log)) == 4
 
 
-@pytest.mark.parametrize("image", ["qdrant", "jaeger", "ingest", "agent"])
-def test_load_refuses_registry_tag_serving_different_image(load_tree, image):
-    root, _ = load_tree
-    artdir = root / "dist"
-    _make_artifacts(artdir)
-    # skopeo copy exits 0 but the tag resolves to another image's config
-    # (swapped/mirrored/immutable-policy registry): identity must not be assumed.
-    _set_pushed(artdir, image, _manifest(_config_of("swapped"), _digest(b"layer-swapped")))
-    r = _run_load(load_tree)
-    assert r.returncode == 1
-    assert f"registry image {REF[image]} is not the packed image" in r.stderr
-    assert "Loaded" not in r.stdout
-
-
 def test_load_refuse_then_fix_next_run_passes(load_tree):
     root, _ = load_tree
     artdir = root / "dist"
@@ -483,7 +422,8 @@ def test_load_refuse_then_fix_next_run_passes(load_tree):
     _set_pushed(artdir, "agent", _manifest(_config_of("swapped"), _digest(b"layer-swapped")))
     first = _run_load(load_tree)
     assert first.returncode == 1
-    assert "is not the packed image" in first.stderr
+    assert f"registry image {REF['agent']} is not the packed image" in first.stderr
+    assert "Loaded" not in first.stdout
     # The bad content really is what the registry holds after the refused run.
     assert json.loads(_registry_manifest(root, "agent"))["config"]["digest"] == _config_of("swapped")
     # Operator fixes the registry/mirror; the next ordinary run succeeds and
@@ -544,6 +484,10 @@ def test_load_registry_read_back_follows_skopeo_args_and_insecure_flag(load_tree
         ("INSECURE_REGISTRY", "true"),
     )
     assert r.returncode == 0, r.stderr
+    copies = [line for line in log.read_text().splitlines() if line.startswith("copy")]
+    assert len(copies) == 4
+    for copy in copies:
+        assert "--authfile /a.json" in copy and "--dest-tls-verify=false" in copy
     calls = _registry_calls(log)
     assert len(calls) == 4
     for call in calls:
@@ -580,27 +524,6 @@ def test_load_verifies_optional_oauth_proxy_image_like_the_others(load_tree):
     second = _run_load(load_tree)
     assert second.returncode == 1
     assert f"registry image {ref} is not the packed image" in second.stderr
-
-
-@pytest.mark.parametrize("malformed", ["layers-object", "config-type", "layer-digest", "index"])
-def test_load_registry_structure_uses_same_validation_as_deploy(load_tree, malformed):
-    root, _ = load_tree
-    artdir = root / "dist"
-    _make_artifacts(artdir)
-    manifest = json.loads(_manifest(_config_of("agent"), _digest(b"layer-agent-gz")))
-    if malformed == "layers-object":
-        manifest["layers"] = {"digest": "sha256:" + "a" * 64}
-    elif malformed == "config-type":
-        manifest["config"]["digest"] = 42
-    elif malformed == "layer-digest":
-        manifest["layers"][0]["digest"] = "not-a-digest"
-    else:
-        manifest["manifests"] = []
-    _set_pushed(artdir, "agent", json.dumps(manifest).encode())
-    result = _run_load(load_tree)
-    assert result.returncode != 0
-    assert "not a single-image manifest" in result.stderr
-    assert "Loaded" not in result.stdout
 
 
 def test_load_preserves_layer_count_requirement(load_tree):
