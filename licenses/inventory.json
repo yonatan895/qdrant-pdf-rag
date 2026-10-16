@@ -335,6 +335,39 @@
       "bind": {
         "files": [
           {
+            "notice": true,
+            "path": "LICENSE.pstack-skills",
+            "sha256": "bc957ca6bee02792566a1a028d105e02e247c6e77cf057061674273da77b200e"
+          },
+          {
+            "notice": true,
+            "path": "NOTICE.pstack-skills",
+            "sha256": "94722292fc6337b50705c02b19fb2774647ae8d0253df97cca83067100461333"
+          },
+          {
+            "path": ".agents/pstack-skills.sha256",
+            "sha256": "2044d53d4a58176dc5f83ab44c00d43f426e88571b683c23a4fb1dc9c93c9790"
+          }
+        ]
+      },
+      "class": "permissive",
+      "distributed_by_repo": true,
+      "id": "skills:pstack",
+      "kind": "vendored-docs",
+      "license_declared": "MIT (LICENSE.pstack-skills, attribution in NOTICE.pstack-skills)",
+      "license_spdx": "MIT",
+      "name": "pstack skills (five pinned upstream subtrees)",
+      "ships_in": [
+        "repo.bundle"
+      ],
+      "spdx_basis": "license-file-text",
+      "status": "declared"
+    },
+    {
+      "approval_ref": null,
+      "bind": {
+        "files": [
+          {
             "path": "bm25-weights.sha256",
             "sha256": "4318c7ca21881d3c8afa8bfc5b9ee23bf3e2ba439e1f71e8b0eaad1e526ff006"
           }

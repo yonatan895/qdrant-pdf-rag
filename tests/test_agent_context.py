@@ -234,23 +234,26 @@ class VendoredSkillsTests(TestCase):
     def test_repository_skills_tree_matches_its_allowlist(self):
         self.assertEqual([e for e in check(REAL_ROOT)[0] if "skill" in e.lower()], [])
 
-    def add_engineering_provider(self):
-        pin = "b" * 40
-        (self.root/".agents/mattpocock-skills-provenance.md").write_text(
-            f"pin `{pin}`\n<!-- skills-allowlist:start -->\n- tdd\n<!-- skills-allowlist:end -->\n")
-        (self.root/"NOTICE.mattpocock-skills").write_text(f"commit {pin}\n")
-        (self.root/"LICENSE.mattpocock-skills").write_text("MIT\n")
-        wrapper = self.root/".agents/skills/tdd/SKILL.md"
+    def add_engineering_provider(self, provider="mattpocock-skills", skill="tdd", pin="b" * 40):
+        (self.root/f".agents/{provider}-provenance.md").write_text(
+            f"pin `{pin}`\n<!-- skills-allowlist:start -->\n- {skill}\n<!-- skills-allowlist:end -->\n")
+        (self.root/f"NOTICE.{provider}").write_text(f"commit {pin}\n")
+        (self.root/f"LICENSE.{provider}").write_text("MIT\n")
+        wrapper = self.root/f".agents/skills/{skill}/SKILL.md"
         wrapper.parent.mkdir()
-        wrapper.write_text("[Upstream](../../vendor/mattpocock-skills/tdd/SKILL.md)\n")
-        upstream = self.root/".agents/vendor/mattpocock-skills/tdd/SKILL.md"
+        wrapper.write_text(f"[Upstream](../../vendor/{provider}/{skill}/SKILL.md)\n")
+        upstream = self.root/f".agents/vendor/{provider}/{skill}/SKILL.md"
         upstream.parent.mkdir(parents=True)
         upstream.write_text("original upstream skill\n")
         with (self.root/".agents/skills/index.md").open("a") as index:
-            index.write("[TDD](tdd/SKILL.md)\n")
+            index.write(f"[{skill}]({skill}/SKILL.md)\n")
+
+    def add_pstack_provider(self):
+        self.add_engineering_provider("pstack-skills", "blast-radius", "c" * 40)
 
     def test_independently_pinned_providers_can_share_the_skills_directory(self):
         self.add_engineering_provider()
+        self.add_pstack_provider()
         self.assertEqual(check(self.root)[0], [])
 
     def test_second_provider_does_not_permit_unselected_categories(self):
@@ -278,16 +281,35 @@ class VendoredSkillsTests(TestCase):
 
     def test_repository_entry_point_must_resolve_its_local_upstream_reference(self):
         self.add_engineering_provider()
-        (self.root/".agents/vendor/mattpocock-skills/tdd/SKILL.md").unlink()
-        self.assertTrue(any("tdd/SKILL.md" in e and "broken local reference" in e for e in check(self.root)[0]))
+        self.add_pstack_provider()
+        for provider, skill in (("mattpocock-skills", "tdd"), ("pstack-skills", "blast-radius")):
+            with self.subTest(provider=provider):
+                upstream = self.root/f".agents/vendor/{provider}/{skill}/SKILL.md"
+                upstream.unlink()
+                self.assertTrue(any(f"{skill}/SKILL.md" in e and "broken local reference" in e
+                                    for e in check(self.root)[0]))
+                upstream.write_text("original upstream skill\n")
+
+    def test_third_provider_pin_and_license_are_checked_independently(self):
+        self.add_engineering_provider()
+        self.add_pstack_provider()
+        (self.root/"NOTICE.pstack-skills").write_text(f"commit {SHA}\n")
+        (self.root/"LICENSE.pstack-skills").unlink()
+        errors = check(self.root)[0]
+        self.assertTrue(any("pstack-skills" in e and "same pinned SHA" in e for e in errors))
+        self.assertTrue(any("LICENSE.pstack-skills" in e for e in errors))
+        self.assertFalse(any("mattpocock-skills" in e for e in errors))
 
     def test_repository_engineering_vendor_bytes_match_the_pinned_manifest(self):
         import hashlib
 
-        manifest = REAL_ROOT/".agents/mattpocock-skills.sha256"
-        recorded = {path: digest for digest, path in (line.split("  ", 1) for line in manifest.read_text().splitlines())}
-        vendor = REAL_ROOT/".agents/vendor/mattpocock-skills"
-        actual = {p.relative_to(REAL_ROOT).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
-                  for p in vendor.rglob("*") if p.is_file()}
-        self.assertTrue(recorded)
-        self.assertEqual(actual, recorded)
+        for provider in ("mattpocock-skills", "pstack-skills"):
+            with self.subTest(provider=provider):
+                manifest = REAL_ROOT/f".agents/{provider}.sha256"
+                recorded = {path: digest for digest, path in
+                            (line.split("  ", 1) for line in manifest.read_text().splitlines())}
+                vendor = REAL_ROOT/f".agents/vendor/{provider}"
+                actual = {p.relative_to(REAL_ROOT).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
+                          for p in vendor.rglob("*") if p.is_file()}
+                self.assertTrue(recorded)
+                self.assertEqual(actual, recorded)

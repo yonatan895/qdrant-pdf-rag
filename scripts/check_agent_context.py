@@ -27,7 +27,11 @@ PROVENANCE = Path(".agents/qdrant-skills-provenance.md")
 SKILL_PROVIDERS = (
     (PROVENANCE, "qdrant-skills"),
     (Path(".agents/mattpocock-skills-provenance.md"), "mattpocock-skills"),
+    (Path(".agents/pstack-skills-provenance.md"), "pstack-skills"),
 )
+# Providers whose .agents/skills entries are repository-owned entry points
+# linking local vendored copies; their links must resolve.
+ENTRY_POINT_PROVIDERS = {"mattpocock-skills", "pstack-skills"}
 ALLOWLIST = re.compile(r"<!-- skills-allowlist:start -->\n(.*?)<!-- skills-allowlist:end -->", re.DOTALL)
 SHA = re.compile(r"\b[0-9a-f]{40}\b")
 LINK = re.compile(r"\[([^\]\n]+)\]\(([^()\s]+)\)")
@@ -216,7 +220,7 @@ def check(root: Path, client_limit: int | None = None) -> tuple[list[str], list[
                 skill = root/SKILLS/name/"SKILL.md"
                 if not skill.is_file():
                     errors.append(f"{record}: allowlisted skill {name} missing from {SKILLS}")
-                elif provider == "mattpocock-skills":
+                elif provider in ENTRY_POINT_PROVIDERS:
                     links(skill, read(skill))
         present = {path.name for path in (root/SKILLS).iterdir() if path.is_dir()}
         for name in sorted(present - allowed):
