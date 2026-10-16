@@ -644,12 +644,15 @@ hits omitted by budget packing, and the tail's example cite, are rejected:
   inside code are kept; `thought`/`thinking` fences are dropped; other
   fences unwrap to body. Validating scripts would corrupt JCL/REXX;
   treating them as cited provenance would hallucinate it.
-- Abstention zero-cite (issues #135/#305): `parse_answer` clears citations
-  and inferred indices when `is_abstention` holds — at least one explicit
-  refusal marker **and** under 200 chars of non-refusal remainder. Marker
-  alone would zero a grounded answer that quotes one hedging sentence;
-  shape alone would miss a refusal citing real-but-unsupporting chunks. It
-  applies to every consumer (JSON, SSE final, chat, `/ui`).
+- Abstention zero-cite (issues #135/#630/#764): `parse_answer` clears
+  citations and inferred indices when `is_abstention` holds. That is either
+  the structured decline (the first prose sentence is exactly system rule 4's
+  `The excerpts do not answer this question.`, whatever coverage note follows)
+  or a whole-response refusal (every substantive clause refuses). Marker
+  presence alone would zero a grounded answer that scopes one caveat; the
+  whole-response rule alone missed verbose declines that explain what the
+  excerpts do cover (#764). It applies to every consumer (JSON, SSE final,
+  chat, `/ui`).
 
 ## 6. Lifespan, pools, timeouts
 
@@ -1075,14 +1078,20 @@ from the finalized parse plus the transport outcome — one rule,
 | State | Meaning | Never means |
 |---|---|---|
 | `accepted` | Nonempty substantive parsed prose, eligible non-inferred citations and generation finished (`stop`) | Semantic proof of any claim or certification of an extracted script |
-| `insufficient_evidence` | Whole-response evidence/security refusal (every substantive clause refuses; any answer clause makes it mixed) with a `stop` finish, or the empty-hits short-circuit (no generation) | A failed request (still 200 + explicit text) |
+| `insufficient_evidence` | Structured decline (first prose sentence is exactly rule 4's decline sentence; a coverage note may follow) or whole-response evidence/security refusal (every substantive clause refuses; any answer clause makes it mixed) with a `stop` finish, or the empty-hits short-circuit (no generation) | A failed request (still 200 + explicit text) |
 | `unverified_draft` | Non-abstention prose with zero eligible citations (absent, rejected, or inferred-only), or a finished nonempty script with no prose | An error (still 200 — the draft label is the signal) |
 | `generation_incomplete` | Non-`stop` finish after generation (including a cut-off refusal fragment; this outranks refusal), neither substantive parsed prose nor a nonempty script after fallbacks, absent/`null` terminal finish, upstream `error` frame, malformed frame, or stream error/cancel/disconnect | An accepted answer (terminal wire shape may still be complete) |
 
 State precedence (#630): empty-hits short circuit, then non-`stop` finish,
-then whole-response refusal, then body/citation outcome. Mixed answers (an
-answer clause plus a missing-detail caveat) are not refusals at any length and
-keep their eligible citations.
+then refusal (structured decline or whole-response), then body/citation
+outcome. Mixed answers (an answer clause plus a missing-detail caveat) are not
+refusals at any length and keep their eligible citations. Rule 4 forbids a
+partial answer from opening with the decline sentence (#764); only that exact,
+leading, unquoted sentence counts, so the sentence quoted, extended ("... this
+question directly") or placed after an answer clause leaves the whole-response
+rule in charge. A model that opens with it and then answers anyway breaks the
+contract and is classified `insufficient_evidence` with citations zeroed: the
+conservative outcome, never a false `accepted`.
 
 Body presence is shared with the answer eval (#576): empty `Answer` headings,
 citation labels (including inline labels followed only by bracket indices or

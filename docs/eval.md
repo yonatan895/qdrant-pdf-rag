@@ -481,10 +481,10 @@ bit-deterministic, so expect few verdict flips across repeats, not zero:
   body-presence predicate, #576, including empty `Answer` headings and citation
   labels followed only by indices or a citation, even when the server labels the
   row `accepted`; substantive text after labels still counts as prose),
-  true abstentions (the shared
-  marker + shape-floor predicate that also zeroes citations, #135/#305: a
-  grounded partial answer whose scope caveat carries a refusal phrase is
-  not an abstention; a short marker-only body still fails), zero validated
+  true abstentions (the agent's shared `is_abstention`, which also zeroes
+  citations, #135/#630/#764: the structured decline sentence leading the
+  response, or a whole-response refusal; a grounded partial answer whose scope
+  caveat carries a refusal phrase is not an abstention), zero validated
   citations, or **only inferred citations** (the agent mapped bare `[n]`
   markers with no explicit citation line; issue #269). The run report
   counts `inferred_citations` so fabrication is visible, never silently

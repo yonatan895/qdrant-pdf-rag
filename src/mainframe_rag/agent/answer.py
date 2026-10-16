@@ -172,16 +172,24 @@ class PromptBudgetExceeded(Exception):
         self.limit = limit
 
 
+# The structured decline (issue #764): one fixed sentence the model must lead
+# with when nothing in the excerpts answers. Recognition keys on this exact
+# sentence, not on refusal phrasing, so a decline followed by a note on what
+# the excerpts do cover is still a decline, while a partial answer (which the
+# prompt forbids from opening with it) keeps the #630 whole-response rule.
+DECLINE_SENTENCE = "The excerpts do not answer this question."
+
 SYSTEM_PROMPT = (
     "You are a mainframe operations expert (z/OS, CICS, Db2, IMS, JES2/3, RACF, "
     "z/VM, VTAM, OPS/MVS). Answer operational questions. Rules:\n"
     "1. Only assert facts and parameters that the supplied excerpts support. Do not invent fictitious keywords or commands.\n"
     "2. When asked how to code or configure a specific case, apply the syntax templates, grammars, and parameter rules documented in the excerpts to the user's scenario. Do not refuse to synthesize code, JCL, rules, or commands simply because the manual lacks an identical verbatim example for the user's specific values.\n"
     "3. If manuals disagree between versions, say which version each statement comes from.\n"
-    "4. If the excerpts answer part of the question, give that part with citations and say briefly what they do not cover; only when nothing in the excerpts answers the question, refuse explicitly with \"the excerpts do not contain ...\" and cite nothing for what you cannot answer. Never supply secrets, credentials, or key material: decline such requests in one sentence with no citations.\n"
+    "4. If the excerpts answer part of the question, give that part with citations and say briefly what they do not cover; never begin a partial answer with the decline sentence below. Only when nothing in the excerpts answers the question, begin your reply with exactly this sentence on its own line: "
+    f"\"{DECLINE_SENTENCE}\" You may follow it with at most two sentences on what the excerpts do cover; cite nothing. Never supply secrets, credentials, or key material: decline such requests in one sentence with no citations.\n"
     "5. When you propose JCL, REXX, rule definitions, or operator steps, put them in a fenced code block and explain how they map to the documented syntax. Scripts are examples, not production-ready without review.\n"
     "6. If the query is only a document number, message identifier, or short name, identify it from the excerpt citations and summarize the documented topics it covers; do not refuse for lack of a question.\n"
-    "7. You MUST always end your reply with a 'Citations:' section listing the exact citation strings of the excerpts you used; when you refused per rule 4, the section lists nothing, for example:\n"
+    "7. You MUST always end your reply with a 'Citations:' section listing the exact citation strings of the excerpts you used; when you declined per rule 4, the section lists nothing, for example:\n"
     "Citations:\n"
     "SA22-7592-05 z/OS MVS Initialization and Tuning Reference, IEASYSxx > LFAREA, p. 1-17\n"
 )
@@ -255,12 +263,41 @@ def _is_refusal_clause(clause: str) -> bool:
     return is_refusal(_INLINE_INDEX_RE.sub("", unquoted).strip())
 
 
+# Markdown emphasis only: backticks quote (as in _QUOTED_SPAN_RE), so a
+# backticked sentence is quoted text, never the response declining.
+_EMPHASIS_RE = re.compile(r"[*_]+")
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+
+
+def _sentence_key(text: str) -> str:
+    """Case, whitespace and terminal-punctuation insensitive form."""
+    return " ".join(text.split()).casefold().rstrip(".!")
+
+
+_DECLINE_KEY = _sentence_key(DECLINE_SENTENCE)
+
+
+def is_structured_decline(answer_body: str, citations: Sequence[str] = ()) -> bool:
+    """True when the first sentence of parsed prose (after citation/label
+    scaffolding) is exactly DECLINE_SENTENCE (issue #764). Quoted, reworded or
+    extended sentences ("... this question directly") do not qualify; what
+    follows the sentence is the permitted note on excerpt coverage."""
+    first = next(_prose_lines(answer_body, citations), None)
+    if first is None:
+        return False
+    lead = _SENTENCE_SPLIT_RE.split(_EMPHASIS_RE.sub("", first).strip(), maxsplit=1)[0]
+    return _sentence_key(lead) == _DECLINE_KEY
+
+
 def is_abstention(answer_body: str, citations: Sequence[str] = ()) -> bool:
-    """True only when the whole response is a refusal: it carries an explicit
-    refusal and every substantive clause (after dropping citation/label
-    scaffolding, bare "See [n]" pointers) is a refusal clause. `citations` are
-    the validated citation lines, so scaffolding is recognized exactly as
+    """True when the response leads with the structured decline (#764), or
+    when the whole response is a refusal: it carries an explicit refusal and
+    every substantive clause (after dropping citation/label scaffolding, bare
+    "See [n]" pointers) is a refusal clause (#630). `citations` are the
+    validated citation lines, so scaffolding is recognized exactly as
     has_answer_body does."""
+    if is_structured_decline(answer_body, citations):
+        return True
     if not is_refusal(answer_body):
         return False
     clauses = [

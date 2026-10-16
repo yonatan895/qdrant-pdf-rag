@@ -519,6 +519,20 @@ def test_answer_grounded_scope_caveat_is_not_a_refusal() -> None:
     assert fails == [] and warns == []
 
 
+def test_structured_decline_with_coverage_note_is_judged_as_a_decline() -> None:
+    """Issue #764: the leading decline sentence plus a note on what the
+    excerpts cover passes an abstain row cleanly and fails an answer row as
+    an explicit refusal; the eval and the agent share one predicate."""
+    from mainframe_rag.agent.answer import DECLINE_SENTENCE
+
+    body = f"{DECLINE_SENTENCE} The excerpts describe LFAREA syntax for IEASYSxx only."
+    verdict, fails, warns = judge(_entry(expected_behavior="abstain"), body, [])
+    assert verdict == "pass" and fails == [] and warns == []
+    verdict, fails, _ = judge(_entry(), body, ["SA23-1380-70 ref, p. 1"])
+    assert verdict == "fail"
+    assert any("explicit refusal" in f for f in fails)
+
+
 def test_answer_empty_body_fails() -> None:
     verdict, fails, _ = judge(_entry(), "   ", ["SA23-1380-70 ref, p. 1"])
     assert verdict == "fail"

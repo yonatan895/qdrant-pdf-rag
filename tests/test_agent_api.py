@@ -13,7 +13,12 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from mainframe_rag.agent import app as app_mod
-from mainframe_rag.agent.answer import is_abstention, parse_answer, verification_state_for
+from mainframe_rag.agent.answer import (
+    DECLINE_SENTENCE,
+    is_abstention,
+    parse_answer,
+    verification_state_for,
+)
 from mainframe_rag.agent.tokenizer import FallbackTokenizer
 from mainframe_rag.ports import ChatResult, TokenUsage
 from mainframe_rag.retrieve.query import SearchHit
@@ -1796,9 +1801,10 @@ def test_build_messages_tokenizer_budget_respected():
             heading=f"Heading {i}",
             text="word " * 160,  # ~175 tokens with the [i] header; the
             # refusal-anchored system prompt (issue #135, regrown by #305's
-            # partial-answer/identifier rules) grew the fixed overhead, so the
-            # fixture window widened to keep the knife-edge scenario (5
-            # excerpts fit, the last truncated) reachable.
+            # partial-answer/identifier rules, then +30 by #764's structured
+            # decline) grew the fixed overhead, so the fixture window widened
+            # to keep the knife-edge scenario (5 excerpts fit, the last
+            # truncated) reachable.
             doc_id=f"DOC{i}",
             title="Title",
             page_label=str(i),
@@ -1809,7 +1815,7 @@ def test_build_messages_tokenizer_budget_respected():
     ]
 
     settings = Settings(
-        llm_max_model_len=1580,
+        llm_max_model_len=1610,
         llm_reserved_output_tokens=250,
         llm_thinking_reserve_tokens_simple=0,  # knife edge independent of #777 defaults
         llm_token_safety_margin=100,
@@ -3515,6 +3521,37 @@ def test_is_abstention_whole_response_controls():
         assert is_abstention(body) is True, body
 
 
+def test_structured_decline_leads_and_partial_answers_keep_the_whole_response_rule():
+    """Issue #764: a response whose first prose sentence is exactly the
+    prompt's decline sentence is an abstention, whatever coverage note
+    follows. Only the leading, exact, unquoted sentence counts: anywhere
+    else, extended or quoted, the #630 whole-response rule decides."""
+    from mainframe_rag.agent.answer import SYSTEM_PROMPT, is_structured_decline
+
+    assert SYSTEM_PROMPT.count(DECLINE_SENTENCE) == 1, "rule 4 anchors the exact sentence"
+    declines = [
+        DECLINE_SENTENCE,
+        f"{DECLINE_SENTENCE}\nThe excerpts describe IEASYSxx LFAREA syntax, not the retry limit.",
+        f"**{DECLINE_SENTENCE}** They cover only the IEA500I message text.",
+        f"Answer: {DECLINE_SENTENCE.lower()}",
+        f"{DECLINE_SENTENCE} The supplied excerpts cover JES2 checkpoint sizing [1].",
+    ]
+    not_declines = [
+        "The excerpts do not answer this question directly, but the documented limit is 2 MB [1].",
+        f'The operator saw "{DECLINE_SENTENCE}" in the console log.',
+        f"Run CHECK first. {DECLINE_SENTENCE}",
+        f"Set RETRY=5 [1].\n{DECLINE_SENTENCE}",
+        "The excerpts do not answer this question in full; set RETRY=5 [1].",
+        f"`{DECLINE_SENTENCE}` is printed when RETRY=0 [1].",
+    ]
+    for body in declines:
+        assert is_structured_decline(body) is True, body
+        assert is_abstention(body) is True, body
+    for body in not_declines:
+        assert is_structured_decline(body) is False, body
+        assert is_abstention(body) is False, body
+
+
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("content, finish, state, cites", [
     (f"Run CHECK first.\n{_MIXED_CAVEAT}\n\nCitations:\n{_ACCEPTED_CITE}", "stop",
@@ -3522,6 +3559,11 @@ def test_is_abstention_whole_response_controls():
     (f"The excerpts do not contain the retry limit.\n\nCitations:\n{_ACCEPTED_CITE}", "stop",
      "insufficient_evidence", []),
     ("The excerpts do not contain", "length", "generation_incomplete", []),
+    ((f"{DECLINE_SENTENCE}\nThe excerpts describe the IEA500I message text only.\n\n"
+      f"Citations:\n{_ACCEPTED_CITE}"), "stop", "insufficient_evidence", []),
+    (f"Run CHECK first.\n{DECLINE_SENTENCE}\n\nCitations:\n{_ACCEPTED_CITE}", "stop",
+     "accepted", [_ACCEPTED_CITE]),
+    (DECLINE_SENTENCE, "length", "generation_incomplete", []),
 ])
 def test_answer_partial_and_interrupted_refusal_state_json_and_sse(
     client, monkeypatch, stream, content, finish, state, cites
