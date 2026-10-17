@@ -9,7 +9,7 @@
   <script src="/ui/static/vendor/htmx.min.js" defer></script>
   <script src="/ui/static/js/console.js" defer></script>
 </head>
-<body class="theme-dark">
+<body class="theme-dark" data-feedback="{{ "on" if feedback_enabled else "off" }}">
   <header class="topbar">
     <div class="brand">
       <span class="brand-mark" aria-hidden="true">&#8250;_</span>

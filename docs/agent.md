@@ -234,6 +234,10 @@ Retention policy as shipped (no default changed by #372):
   context (JES spool/SYSLOG) and assistant answers quoting manual excerpts. Never
   in cookies, `sessionStorage`, IndexedDB, or server logs (server logs carry
   request id, query kind, counts, error type only; both pinned by tests).
+  With answer feedback enabled (#780), an assistant turn also keeps its server
+  `request_id` and the operator's rating label. A sent rating (rating, reason
+  codes, comment) leaves the browser for the protected feedback store; see
+  [Answer feedback](#answer-feedback).
 - **How long:** until the operator clears it, capped at 30 incidents (oldest
   idle incident evicted first; the incidents open in this tab are protected).
   There is no time-based expiry, no logout/user-switch clearing and no account
@@ -278,6 +282,42 @@ is deliberately not a live region), WCAG AA text contrast in both themes, and no
 horizontal scroll at 1280/640/375/320 CSS px (stand-ins for 100/200/400% zoom).
 Not covered: other browsers, real screen readers, forced-colors/OS high
 contrast, native browser zoom.
+
+<a id="answer-feedback"></a>
+### Answer feedback (issue #780)
+
+Off unless `FEEDBACK_ENABLED` (which then requires `FEEDBACK_URL` and
+`FEEDBACK_API_KEY`). When off, no feedback client exists, nothing is recorded,
+no call is made, and the console offers no rating. Data boundaries and
+retention: [observability](observability.md#data-tiers).
+
+- **Records:** every finalized answer is handed, exactly once, to the
+  single-writer feedback service: `/v1/answer` JSON (`answer`) and SSE
+  (`answer_stream`), `/v1/chat` JSON (`chat`) and SSE (`chat_stream`), and both
+  console paths (`console`). A record holds:
+  - the request's own query (the latest user turn for chat and console);
+  - the final answer, script and validated citations;
+  - a scalar telemetry snapshot: the finalized log fields plus the effort the
+    answer was generated at and the model identities.
+- **Never on the critical path:** records go into a bounded in-memory queue
+  (`FEEDBACK_QUEUE_SIZE`) drained by one background task. A full queue or a
+  failed delivery is counted on `rag.feedback.records` and logged by error type
+  only; the answer is unchanged. Shutdown drains for at most 2 s.
+- **Ratings:** `POST /ui/feedback {request_id, rating, reasons, comment}`.
+  - `request_id` must be the 12-hex server id; extra fields, such as an answer
+    text, are refused with 422.
+  - The store attaches the rating to its own record and refuses unknown ids:
+    404 `unknown_answer`.
+  - Other fixed codes: 422 `invalid_request`, 503 `feedback_unavailable`,
+    404 `feedback_disabled`.
+  - The rater identity (OAuth proxy `X-Forwarded-User`) is stored only when
+    `FEEDBACK_RECORD_RATER=true`.
+- **Store and service** (`mainframe_rag.feedback`): SQLite in WAL mode, owned
+  by one process. The first record per `request_id` wins, so a rated answer is
+  never rewritten. Bearer token, fixed client errors, logs carry `request_id`
+  and counts only. Purge is an explicit operator action
+  (`FeedbackStore.purge(retention_days=…)`, 180-day policy). Deployment (the
+  single-replica StatefulSet, PVC and Secret) is phase 1 PR B.
 
 ## 2. Error contract
 
@@ -717,6 +757,8 @@ readers:
 | `otel_exporter_otlp_endpoint` / `otel_sample_ratio` / `otel_export_queue_size` / `otel_export_timeout_ms` | unset = tracing off / 1.0 / 2048 / 5000 | tracing setup |
 | `metrics_enabled` | `false` = /metrics 404s | Prometheus exposition for UWM scrapes |
 | `ui_enabled` | `false` (fail-closed 404) | webui router gate (`/ui*`); the production chart sets it true |
+| `feedback_enabled` / `feedback_url` / `feedback_api_key` | `false` / unset / unset (enabled requires both) | answer records and console ratings (#780); the key is a Secret reference, never logged |
+| `feedback_queue_size` / `feedback_timeout_s` / `feedback_record_rater` | 256 / 2.0 / `false` | bounded record queue (full = dropped and counted); service call timeout; store the OAuth rater identity |
 | `rerank_enabled` / `rerank_model` / `rerank_base_url` / `rerank_api_key` / `rerank_endpoint_order` / `rerank_fusion_alpha` / `rerank_candidates` / `rerank_batch_size` / `rerank_timeout_s` | false / `BAAI/bge-reranker-v2-m3` / gateway URL (no embed fallback; unset when no gateway) / unset (keyless) / `score_first` (see install §4.4 `probe_gateway.py`: `rerank_first` only when the score leg is unavailable) / 1.0 / 50 / 32 / 5.0 | rerank dispatch → retrieve (see `retrieval.md` §6) |
 | `rrf_k` / `rrf_weight_*` / `rrf_sparse_boost_syntax` / `rrf_sparse_boost_table` / `retrieve_max_chunks_per_page|doc` | 2 / 1.0,1.0 – 1.0,3.0 / 1.0 / 1.0 / 1, 3 | retrieve fusion + diversification |
 | `acronym_expansion_enabled` / `comparative_split_enabled` / `diagnostic_dualpath_enabled` | `false` / `true` / `false` | rewrite + multipath (see `retrieval.md` §§3b,7) |

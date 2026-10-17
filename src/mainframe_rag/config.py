@@ -241,6 +241,19 @@ class Settings(BaseSettings):
     chat_max_prior_turn_chars: int = Field(default=1000, ge=200, le=5000)
     ui_enabled: bool = False
 
+    # Console answer feedback (issue #780). Off by default: no record, no
+    # call, no behavior change. When on, finalized answers are sent best-effort
+    # to the single-writer feedback service (never on the answer's critical
+    # path) and the console can rate them. The bearer token is a Secret
+    # reference, never logged. Rater identity is stored only when explicitly
+    # enabled (taken from the OAuth proxy's forwarded-user header).
+    feedback_enabled: bool = False
+    feedback_url: str | None = None
+    feedback_api_key: str | None = None
+    feedback_queue_size: int = Field(default=256, ge=1, le=10000)
+    feedback_timeout_s: float = Field(default=2.0, gt=0.0, le=30.0)
+    feedback_record_rater: bool = False
+
     # Request admission and total deadline (issue #374). EVERY value defaults
     # to the pre-#374 behaviour (0 = no limit / no deadline): selecting a
     # numeric envelope needs measurements on the real site, so no default
@@ -355,6 +368,12 @@ class Settings(BaseSettings):
     # remains only so an explicit INGEST_ALIAS_PUBLISH=false fails closed
     # instead of being silently ignored.
     ingest_alias_publish: bool = True
+
+    @model_validator(mode="after")
+    def _feedback_endpoint_when_enabled(self) -> Settings:
+        if self.feedback_enabled and not (self.feedback_url and self.feedback_api_key):
+            raise ValueError("FEEDBACK_ENABLED requires FEEDBACK_URL and FEEDBACK_API_KEY")
+        return self
 
     @model_validator(mode="after")
     def _efforts_match_served_template(self) -> Settings:

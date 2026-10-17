@@ -24,10 +24,10 @@ import re
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Form, Request
-from fastapi.responses import FileResponse, HTMLResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.templating import Jinja2Templates
 from opentelemetry.trace import SpanKind
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -104,6 +104,28 @@ def _require_ui() -> None:
 
 
 router = APIRouter(prefix="/ui", tags=["ui"], dependencies=[Depends(_require_ui)])
+
+
+class UiFeedbackRequest(BaseModel):
+    """Console rating of one recorded answer (issue #780). The answer itself
+    is never sent: the store attaches the rating to its own record."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str = Field(pattern=r"^[0-9a-f]{12}$")
+    rating: Literal["good", "neutral", "bad"]
+    reasons: list[
+        Literal["wrong", "incomplete", "missing_or_wrong_citation", "should_have_declined",
+                "wrongly_declined", "too_slow", "other"]
+    ] = Field(default_factory=list, max_length=7)
+    comment: str = Field(default="", max_length=2000)
+
+
+_FEEDBACK_ERRORS = {
+    "unknown": (404, "unknown_answer", "this answer was not recorded, so it cannot be rated"),
+    "invalid": (422, "invalid_request", "the rating is invalid"),
+    "unavailable": (503, "feedback_unavailable", "feedback is temporarily unavailable"),
+}
 
 
 class UiChatRequest(BaseModel):
@@ -617,8 +639,15 @@ def _render_page(
         version=(form or {}).get("version", ""),
         reasoning_effort=selected,
         reasoning_efforts=[(effort, _EFFORT_LABELS[effort]) for effort in offered],
+        feedback_enabled=_feedback_client() is not None,
     )
     return _secure(HTMLResponse(body, status_code=status_code))
+
+
+def _feedback_client():
+    from mainframe_rag.agent import app as app_mod
+
+    return app_mod.feedback
 
 
 def _render_pair(
@@ -650,7 +679,9 @@ async def _run_turn(request: Request, req: UiChatRequest, root_span):
 
     _require_offered_effort(req.reasoning_effort)
     request_id = getattr(request.state, "request_id", "ui")
+    turn_started = time.monotonic()  # feedback elapsed: from the turn, not admission
     turn = app_mod.prepare_chat_request(request_id, req.messages, req.splunk_context)
+    request.state.feedback_query = turn.query
     # Serving gate before any retrieval (issues #391 F3/F4): the console
     # refuses with the same stable 503 as the API when the generation is
     # unverified.
@@ -679,6 +710,8 @@ async def _run_turn(request: Request, req: UiChatRequest, root_span):
                 verification_state=output.verification_state,
             )
         )
+        app_mod._record_feedback(request, "console", output, app_mod._output_log_fields(
+            output, output.query_kind, output.timings, turn_started, stream=False))
         return output
 
 
@@ -855,6 +888,7 @@ async def _console_stream_response(req, owner):
     started = owner.started
     _require_offered_effort(req.reasoning_effort)
     turn = app_mod.prepare_chat_request(request_id, req.messages, req.splunk_context)
+    request.state.feedback_query = turn.query
     # Serving gate before the stream opens (issues #391 F3/F4): a non-servable
     # generation is the same stable 503 JSON the API returns, never an SSE
     # error frame after a 200 was already committed.
@@ -903,6 +937,8 @@ async def _console_stream_response(req, owner):
                             stream=True,
                         )
                     )
+                    app_mod._record_feedback(request, "console", output, app_mod._output_log_fields(
+                        output, output.query_kind, output.timings, started, stream=True))
                     yield format_sse_event(
                         "final", output_final_payload(request_id, output, output.query_kind)
                     )
@@ -943,6 +979,28 @@ async def _console_stream_response(req, owner):
     headers["X-Accel-Buffering"] = "no"
 
     return owner.stream(events(), media_type="text/event-stream", headers=headers)
+
+
+@router.post("/feedback")
+async def ui_feedback(request: Request, req: UiFeedbackRequest) -> Response:
+    """Forward one console rating to the feedback store (issue #780). Fixed
+    client messages and stable codes; the rater identity is recorded only
+    when FEEDBACK_RECORD_RATER is set (from the OAuth proxy's header)."""
+    from mainframe_rag.agent import app as app_mod
+    from mainframe_rag.feedback.store import Rating
+
+    client = _feedback_client()
+    if client is None:
+        return _secure(JSONResponse(status_code=404, content={
+            "code": "feedback_disabled", "message": "feedback is not enabled on this deployment"}))
+    rater = request.headers.get("x-forwarded-user") if app_mod.settings.feedback_record_rater else None
+    outcome = await client.rate(Rating(request_id=req.request_id, rating=req.rating,
+                                       reasons=list(req.reasons), comment=req.comment,
+                                       rater=(rater or None) and rater[:256]))
+    if outcome == "ok":
+        return _secure(JSONResponse(status_code=201, content={"status": "recorded"}))
+    status, code, message = _FEEDBACK_ERRORS[outcome]
+    return _secure(JSONResponse(status_code=status, content={"code": code, "message": message}))
 
 
 @router.get("/static/{path:path}")

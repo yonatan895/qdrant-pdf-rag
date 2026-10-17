@@ -673,3 +673,32 @@ input::placeholder, textarea::placeholder { color: var(--faint); opacity: 1; }
   .thinking { animation: none; opacity: 0.8; }
   #send-btn { transition: none; }
 }
+
+/* Answer feedback (issue #780): compact rating row under an assistant turn. */
+.turn-feedback {
+  margin-top: 0.5rem;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.85rem;
+  opacity: 0.9;
+}
+.turn-feedback .feedback-details {
+  flex-basis: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.turn-feedback .feedback-reasons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  border: none;
+  padding: 0;
+  margin: 0;
+}
+.turn-feedback .feedback-comment {
+  min-height: 3rem;
+  resize: vertical;
+}

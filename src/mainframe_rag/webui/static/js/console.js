@@ -732,7 +732,121 @@
     stateBadges(article, turn);
     const meta = renderMeta(turn);
     if (meta) article.appendChild(meta);
+    const rating = renderFeedback(turn);
+    if (rating) article.appendChild(rating);
     return article;
+  }
+
+  /* Answer feedback (issue #780): rate a recorded answer by its server
+   * request id. Only the id, rating, reason codes and comment are sent; the
+   * server attaches them to its own record, never to client-supplied text.
+   * Rendered only when the deployment enables feedback. */
+  const FEEDBACK_RATINGS = [["good", "Good"], ["neutral", "Neutral"], ["bad", "Bad"]];
+  const FEEDBACK_REASONS = [
+    ["wrong", "Wrong"], ["incomplete", "Incomplete"],
+    ["missing_or_wrong_citation", "Missing or wrong citation"],
+    ["should_have_declined", "Should have declined"], ["wrongly_declined", "Wrongly declined"],
+    ["too_slow", "Too slow"], ["other", "Other"],
+  ];
+  const FEEDBACK_ERROR_TEXT = "The rating could not be sent.";
+
+  function renderFeedback(turn) {
+    if (document.body.dataset.feedback !== "on" || turn.role !== "assistant") return null;
+    if (typeof turn.request_id !== "string" || !/^[0-9a-f]{12}$/.test(turn.request_id)) return null;
+    const box = el("div", "turn-feedback");
+    if (turn.feedback) {
+      box.textContent = "Rated: " + turn.feedback;
+      return box;
+    }
+    box.appendChild(el("span", "feedback-label", "Rate this answer:"));
+    const details = el("div", "feedback-details");
+    details.hidden = true;
+    let chosen = null;
+    for (const [value, label] of FEEDBACK_RATINGS) {
+      const button = el("button", "seg feedback-rating", label);
+      button.type = "button";
+      button.setAttribute("data-rating", value);
+      button.setAttribute("aria-pressed", "false");
+      button.addEventListener("click", () => {
+        chosen = value;
+        box.querySelectorAll(".feedback-rating").forEach((other) => {
+          other.setAttribute("aria-pressed", String(other === button));
+        });
+        details.hidden = false;
+      });
+      box.appendChild(button);
+    }
+    const reasons = el("fieldset", "feedback-reasons");
+    reasons.appendChild(el("legend", null, "Reasons (optional)"));
+    for (const [value, label] of FEEDBACK_REASONS) {
+      const option = el("label");
+      const box2 = document.createElement("input");
+      box2.type = "checkbox";
+      box2.value = value;
+      option.appendChild(box2);
+      option.appendChild(document.createTextNode(" " + label));
+      reasons.appendChild(option);
+    }
+    details.appendChild(reasons);
+    const comment = el("textarea", "feedback-comment");
+    comment.maxLength = 2000;
+    comment.placeholder = "Comment (optional)";
+    comment.setAttribute("aria-label", "Comment (optional)");
+    details.appendChild(comment);
+    const submit = el("button", "btn feedback-submit", "Send rating");
+    submit.type = "button";
+    const status = el("span", "feedback-status");
+    status.setAttribute("role", "status");
+    submit.addEventListener("click", async () => {
+      if (!chosen) return;
+      submit.disabled = true;
+      let ok = false;
+      let message = FEEDBACK_ERROR_TEXT;
+      try {
+        const response = await fetch("/ui/feedback", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            request_id: turn.request_id,
+            rating: chosen,
+            reasons: Array.from(reasons.querySelectorAll("input:checked")).map((input) => input.value),
+            comment: comment.value,
+          }),
+        });
+        ok = response.status === 201;
+        if (!ok) {
+          try {
+            const envelope = await response.json();
+            if (envelope && typeof envelope.message === "string") message = envelope.message;
+          } catch (err) {
+            /* fixed fallback text */
+          }
+        }
+      } catch (err) {
+        ok = false;
+      }
+      if (!ok) {
+        status.textContent = message;
+        submit.disabled = false;
+        return;
+      }
+      const rated = chosen;
+      await mutate((store) => {
+        for (const session of Object.values(store.sessions)) {
+          for (const stored of session.turns || []) {
+            if (stored.request_id === turn.request_id) stored.feedback = rated;
+          }
+        }
+        return true;
+      });
+      turn.feedback = rated;
+      box.replaceChildren(document.createTextNode("Rated: " + rated));
+      announce("Rating sent.");
+    });
+    details.appendChild(submit);
+    details.appendChild(status);
+    box.appendChild(details);
+    return box;
   }
 
   const EMPTY_EXAMPLES = [
@@ -1177,6 +1291,8 @@
       }
       assistantTurn.citations = finalPayload.citations || [];
       assistantTurn.citations_inferred = !!finalPayload.citations_inferred;
+      // The server request id (12 hex, no content): the key a rating attaches to (#780).
+      if (typeof finalPayload.request_id === "string") assistantTurn.request_id = finalPayload.request_id;
       assistantTurn.verification_state = finalPayload.verification_state || "unverified_draft";
       assistantTurn.script_review_required = !!finalPayload.script_review_required;
       assistantTurn.meta = {
