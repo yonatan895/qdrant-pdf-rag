@@ -31,8 +31,10 @@
 - **Amends (maintainer decision, 2026-10-17, #780):** with `FEEDBACK_ENABLED`
   (default off) the agent originates exactly two kinds of stored-data write,
   both to the feedback service and nowhere else (never the corpus or Qdrant,
-  never a source system). Its existing outbound calls (model gateway, OTLP
-  telemetry) are unchanged and store no feedback data:
+  never a source system). Its other outbound calls never carry feedback
+  content: the model gateway is unchanged, and OTLP telemetry gains only the
+  bounded-label feedback counters (`rag.feedback.ratings`,
+  `rag.feedback.records`; no text, no ids):
   1. **Answer records, outbound from the answer, chat and console routes**
      (never `/v1/search`). On every
      finalized answer of `/v1/answer`, `/v1/chat` (with `/v1/chat/completions`),

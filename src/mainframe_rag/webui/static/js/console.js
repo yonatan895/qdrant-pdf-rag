@@ -962,7 +962,7 @@
               return true;
             });
           } catch (err) {
-            /* recorded server-side; the label survives this page only */
+            /* recorded server-side; the label lasts until the next rebuild */
           }
           announce("Rating sent.");
         } else {
