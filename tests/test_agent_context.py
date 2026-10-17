@@ -195,15 +195,66 @@ class VendoredSkillsTests(TestCase):
         (self.root/"docs/o.md").write_text("owner\n")
         skills = self.root/".agents/skills"
         (skills/"qdrant-sizing").mkdir(parents=True)
-        (skills/"qdrant-sizing/SKILL.md").write_text("vendor\n")
+        (skills/"qdrant-sizing/SKILL.md").write_text(
+            "---\nname: qdrant-sizing\ndescription: Size it.\nallowed-tools:\n  - Read\n---\nvendor\n")
+        self.register("qdrant-sizing", "Size it.")
         (skills/"index.md").write_text("[sizing](qdrant-sizing/SKILL.md)\n")
         (self.root/".agents/qdrant-skills-provenance.md").write_text(
             f"pin `{SHA}`\n<!-- skills-allowlist:start -->\n- qdrant-sizing\n<!-- skills-allowlist:end -->\n")
         (self.root/"NOTICE.qdrant-skills").write_text(f"commit {SHA}\n")
         (self.root/"LICENSE.qdrant-skills").write_text("Apache-2.0\n")
 
+    def register(self, skill, description, name=None):
+        """A Claude Code registration wrapper pointing at the entry point (#787)."""
+        name = name or skill
+        wrapper = self.root/".claude/skills"/name/"SKILL.md"
+        wrapper.parent.mkdir(parents=True, exist_ok=True)
+        wrapper.write_text(f"---\nname: {name}\ndescription: {description}\n---\n\n"
+                           f"Follow the [entry point](../../../.agents/skills/{skill}/SKILL.md).\n")
+        return wrapper
+
     def test_curated_tree_is_valid(self):
         self.assertEqual(check(self.root)[0], [])
+
+    def test_every_skill_is_registered_once_with_its_description_and_entry_link(self):
+        wrapper = self.root/".claude/skills/qdrant-sizing/SKILL.md"
+        cases = {
+            "not registered": lambda: wrapper.unlink(),
+            "description differs": lambda: self.register("qdrant-sizing", "Something else."),
+            "must link": lambda: wrapper.write_text(
+                "---\nname: qdrant-sizing\ndescription: Size it.\n---\nCopied body.\n"),
+            "only name and description": lambda: wrapper.write_text(
+                "---\nname: qdrant-sizing\ndescription: Size it.\nallowed-tools:\n  - Bash\n---\n"
+                "Follow the [entry point](../../../.agents/skills/qdrant-sizing/SKILL.md).\n"),
+            "no .agents/skills entry": lambda: self.register("qdrant-edge", "Stray."),
+        }
+        for expected, damage in cases.items():
+            with self.subTest(expected=expected):
+                damage()
+                errors = check(self.root)[0]
+                self.assertTrue(any(expected in e for e in errors), errors)
+                for stray in (self.root/".claude/skills").iterdir():
+                    if stray.name != "qdrant-sizing":
+                        (stray/"SKILL.md").unlink()
+                        stray.rmdir()
+                self.register("qdrant-sizing", "Size it.")
+        self.assertEqual(check(self.root)[0], [])
+
+    def test_repository_code_review_registers_under_a_distinct_name(self):
+        """The built-in Claude Code /code-review must never shadow the repository
+        protocol entry point (#787): it registers as repo-code-review."""
+        entry = self.root/".agents/skills/code-review/SKILL.md"
+        entry.parent.mkdir()
+        entry.write_text("---\nname: code-review\ndescription: Review it.\n---\n")
+        (self.root/".agents/qdrant-skills-provenance.md").write_text(
+            f"pin `{SHA}`\n<!-- skills-allowlist:start -->\n- qdrant-sizing\n- code-review\n"
+            "<!-- skills-allowlist:end -->\n")
+        self.register("code-review", "Review it.")
+        self.assertTrue(any("repo-code-review" in e for e in check(self.root)[0]))
+        (self.root/".claude/skills/code-review/SKILL.md").unlink()
+        (self.root/".claude/skills/code-review").rmdir()
+        self.register("code-review", "Review it.", name="repo-code-review")
+        self.assertEqual([e for e in check(self.root)[0] if "claude" in e], [])
 
     def test_excluded_skill_cannot_be_reintroduced_by_pin_refresh(self):
         for name in ("qdrant-model-migration", "qdrant-search-quality", "qdrant-edge"):
@@ -236,7 +287,9 @@ class VendoredSkillsTests(TestCase):
         (self.root/f"LICENSE.{provider}").write_text("MIT\n")
         wrapper = self.root/f".agents/skills/{skill}/SKILL.md"
         wrapper.parent.mkdir()
-        wrapper.write_text(f"[Upstream](../../vendor/{provider}/{skill}/SKILL.md)\n")
+        wrapper.write_text(f"---\nname: {skill}\ndescription: Do it.\n---\n"
+                           f"[Upstream](../../vendor/{provider}/{skill}/SKILL.md)\n")
+        self.register(skill, "Do it.")
         upstream = self.root/f".agents/vendor/{provider}/{skill}/SKILL.md"
         upstream.parent.mkdir(parents=True)
         upstream.write_text("original upstream skill\n")

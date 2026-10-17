@@ -19,5 +19,7 @@ when the document is a skill. Apply these repository-specific interpretations:
   adaptations in the repository-owned entry point and keep one source of truth:
   an entry point links owner contracts instead of restating them.
 - The upstream `disable-model-invocation` and invocation choices describe
-  Claude Code and Codex packaging; this repository reaches skills through the
-  [skill index](../index.md) on demand and adds no automatic instruction chain.
+  Claude Code and Codex packaging; this repository registers each entry point
+  through a name-and-description wrapper in `.claude/skills` (no permissions,
+  checked by `qa:context`), routes them through the [skill index](../index.md),
+  and adds no automatic instruction chain.

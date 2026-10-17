@@ -1,6 +1,6 @@
 # Curated skills reference (repository-owned)
 
-Read skills on demand. Project contracts, approved issues, pinned runtime
+Invoke a registered skill (`.claude/skills`; code-review is `repo-code-review`) or read it here on demand. Project contracts, approved issues, pinned runtime
 behavior and executed evidence govern their use. Use the local paths below.
 
 ## Engineering
