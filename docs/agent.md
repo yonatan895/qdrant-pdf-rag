@@ -238,7 +238,8 @@ Retention policy as shipped (no default changed by #372):
   `request_id` and the operator's rating label. **The server also keeps, for
   every finalized console answer, the question and answer text** (with
   citations and telemetry) as a quality record in the protected feedback
-  store until purged under its 180-day retention window (an explicit purge,
+  store until purged under its configured retention window
+  (`FEEDBACK_RETENTION_DAYS`, default 180 days; an explicit purge,
   scheduled in PR B), and a sent rating (rating, reason codes, comment) joins
   it. Clearing the
   browser's incidents does not remove those records; retention and purge are
@@ -325,9 +326,11 @@ retention: [observability](observability.md#data-tiers).
   (choice, reasons, comment, in-flight send, last error) whenever the articles
   are rebuilt, and focus and caret inside it are restored; nothing is stored.
   A send uses a snapshot and locks every control until it settles, so the
-  "Rated" state shown and saved is exactly what the service recorded (if the
-  browser save itself fails, the label lasts only until the next rebuild; the
-  service still holds the rating). The lock
+  "Rated" state shown and saved is exactly what the service recorded. (Rare
+  case: if the browser's locked store write itself rejects, the label lasts
+  only until the next rebuild, which shows the box unrated; the service still
+  holds the rating, and a resend is recorded as a re-rating. A storage quota
+  failure does not lose it: the console falls back to page memory.) The lock
   marks the controls `aria-disabled` (the comment read-only) and keeps them in
   place, so focus never drops; it is released after the store write, always.
   Redrawing a box keeps focus on the same control, moves it to the box when

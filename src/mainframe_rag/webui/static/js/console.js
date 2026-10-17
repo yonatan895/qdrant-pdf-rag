@@ -962,7 +962,7 @@
               return true;
             });
           } catch (err) {
-            /* recorded server-side; the label lasts until the next rebuild */
+            /* recorded server-side; a rejected locked write keeps the label only until the next rebuild */
           }
           announce("Rating sent.");
         } else {

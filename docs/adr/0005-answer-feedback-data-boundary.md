@@ -9,7 +9,8 @@
   are read-only.
 - **Decision:** question, answer and comment text live **only** in a dedicated
   feedback store, SQLite owned by one service process on its own RWO block PVC
-  with 180-day retention. Telemetry (metrics, traces, logs) never holds content;
+  with a 180-day retention window (`FEEDBACK_RETENTION_DAYS`) enforced by an
+  explicit purge (scheduled in PR B; nothing deletes implicitly). Telemetry (metrics, traces, logs) never holds content;
   `request_id` is the only join key. Ratings surface as bounded-label metrics
   plus a periodic report from a read-only export of the store.
 - **Consequences / rules:**
@@ -32,7 +33,8 @@
   (default off) the agent originates exactly two kinds of stored-data write,
   both to the feedback service and nowhere else (never the corpus or Qdrant,
   never a source system). Its other outbound calls never carry feedback
-  content: the model gateway is unchanged, and OTLP telemetry gains only the
+  ratings or comments: the model gateway call is unchanged (it carries the
+  question and returns the answer, as before), and OTLP telemetry gains only the
   bounded-label feedback counters (`rag.feedback.ratings`,
   `rag.feedback.records`; no text, no ids):
   1. **Answer records, outbound from the answer, chat and console routes**
@@ -58,7 +60,7 @@
     the agent.
   - **ADR-0004, non-goal 3, scoped.** Console question and answer text is
     stored server-side, as quality records in the feedback store, for every
-    console turn while feedback is enabled. That is not session state: the
+    finalized console answer while feedback is enabled. That is not session state: the
     console never reads it back, and dialogue history, incidents and
     preferences stay in browser `localStorage`. The agent pod keeps no
     persistent volume and no database; its existing non-persistent mounts
