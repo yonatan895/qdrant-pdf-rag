@@ -320,9 +320,11 @@ retention: [observability](observability.md#data-tiers).
   (choice, reasons, comment, in-flight send, last error) whenever the articles
   are rebuilt, and focus and caret inside it are restored; nothing is stored.
   A send uses a snapshot and locks every control until it settles, so the
-  "Rated" state shown and saved is exactly what the service recorded. A failed
-  send unlocks the box; focus that the lock dropped returns to the send
-  control for a retry, and focus elsewhere (another answer's box) is never moved.
+  "Rated" state shown and saved is exactly what the service recorded. The lock
+  marks the controls `aria-disabled` (the comment read-only) and keeps them in
+  place, so focus never drops; it is released after the store write, always.
+  Redrawing a box keeps focus on the same control, moves it to the box when
+  the box becomes "Rated", and never moves focus that is elsewhere.
   - `request_id` must be the 12-hex server id; extra fields, such as an answer
     text, are refused with 422.
   - The store attaches the rating to its own record and refuses unknown ids:

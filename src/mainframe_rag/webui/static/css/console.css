@@ -699,6 +699,15 @@ input::placeholder, textarea::placeholder { color: var(--faint); opacity: 1; }
   padding: 0;
   margin: 0;
 }
+.turn-feedback [aria-disabled="true"],
+.turn-feedback .feedback-comment[readonly] {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.turn-feedback:focus {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}
 .turn-feedback .feedback-comment {
   flex-basis: 100%;
   min-height: 3rem;

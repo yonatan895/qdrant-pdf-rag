@@ -96,7 +96,7 @@ class FeedbackClient:
             return "unavailable"
         if response.status_code == 201:
             labels = _json_object(response)  # metric labels only; the rating is stored
-            record_feedback_rating(rating.rating, list(rating.reasons), endpoint=str(labels.get("endpoint")),
+            record_feedback_rating(rating.rating, list(rating.reasons), endpoint=str(labels.get("endpoint") or "unknown"),
                                    verification_state=labels.get("verification_state"))
             return "ok"
         if response.status_code == 404 and _code(response) == "unknown_answer":

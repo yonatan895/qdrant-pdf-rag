@@ -209,7 +209,7 @@ async def test_accepted_rating_with_an_odd_body_is_still_ok(monkeypatch, body):
         client = FeedbackClient(_settings(), client=http)
         assert await client.rate(Rating(request_id=RID, rating="good")) == "ok"
         await client.aclose()
-    assert len(counted) == 1  # counted once; the bounded labels fall back inside metrics
+    assert counted == [{"endpoint": "unknown", "verification_state": None}]  # bounded fallback labels
 
 
 @pytest.mark.anyio

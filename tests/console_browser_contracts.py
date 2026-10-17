@@ -1313,6 +1313,30 @@ def test_typing_in_a_rating_comment_survives_a_turn_completing(console, browser,
                         FIRST_RATING) == "half a sentence"
 
 
+LOCKS_JS = (
+    "var b=document.querySelector(arguments[0]);return [b.querySelector('.feedback-submit').getAttribute('aria-disabled'),"
+    " b.querySelector('[data-rating=good]').getAttribute('aria-disabled'),"
+    " b.querySelector('.feedback-reasons input').getAttribute('aria-disabled'),"
+    " b.querySelector('.feedback-comment').readOnly]"
+)
+LOCKED = ["true", "true", "true", True]
+UNLOCKED = ["false", "false", "false", False]
+
+
+def _in_flight(browser, box):
+    browser.wait("return document.querySelector(arguments[0]+' .feedback-submit').getAttribute('aria-disabled')==='true'",
+                 box, what="send in flight")
+
+
+def _wait_reached(feedback, n=1):
+    import time
+
+    deadline = time.monotonic() + 15
+    while len(feedback.ratings) < n:  # the request reached the (gated) client
+        assert time.monotonic() < deadline, "rating never reached the client"
+        time.sleep(0.02)
+
+
 def test_a_rebuild_during_an_in_flight_rating_keeps_the_live_box_truthful(console, browser, monkeypatch):
     feedback = _with_feedback(console, browser, monkeypatch, outcome="unknown")
     send(browser, "What is IEA500I?")
@@ -1320,36 +1344,60 @@ def test_a_rebuild_during_an_in_flight_rating_keeps_the_live_box_truthful(consol
     browser.click(_reach(browser, FIRST_RATING + ' .feedback-rating[data-rating="bad"]'))
     feedback.gate.clear()
     browser.click(_reach(browser, FIRST_RATING + " .feedback-submit"))
-    import time
-
-    deadline = time.monotonic() + 15
-    while not feedback.ratings:  # the request reached the (gated) client: in flight
-        assert time.monotonic() < deadline, "rating never reached the client"
-        time.sleep(0.02)
+    _wait_reached(feedback)
     send(browser, "Again")  # rebuilds the articles while the rating is pending
     wait_state(browser, "complete", 2)
-    assert browser.eval(  # the rebuilt box is locked too, from the state
-        "var b=document.querySelector(arguments[0]);return [b.querySelector('.feedback-submit').disabled,"
-        " b.querySelector('[data-rating=good]').disabled, b.querySelector('.feedback-reasons input').disabled,"
-        " b.querySelector('.feedback-comment').readOnly]", FIRST_RATING,
-    ) == [True, True, True, True]
+    assert browser.eval(LOCKS_JS, FIRST_RATING) == LOCKED  # the rebuilt box is locked too, from the state
     feedback.gate.set()
     browser.wait("return document.querySelector(arguments[0]+' .feedback-status').textContent===arguments[1]",
                  FIRST_RATING, UNKNOWN_TEXT, what="failure shown in the live box")
-    assert browser.eval("return document.querySelector(arguments[0]+' .feedback-submit').disabled",
-                        FIRST_RATING) is False
+    assert browser.eval(LOCKS_JS, FIRST_RATING) == UNLOCKED
 
 
-def test_a_failed_send_returns_focus_to_the_send_control_for_a_retry(console, browser, monkeypatch):
-    _with_feedback(console, browser, monkeypatch, outcome="unavailable")
+def test_focus_stays_on_the_send_control_through_a_failed_send(console, browser, monkeypatch):
+    feedback = _with_feedback(console, browser, monkeypatch, outcome="unavailable")
     send(browser, "What is IEA500I?")
     wait_state(browser, "complete")
     browser.click(_reach(browser, FIRST_RATING + ' .feedback-rating[data-rating="bad"]'))
+    feedback.gate.clear()
     browser.eval("document.querySelector(arguments[0]+' .feedback-submit').focus()", FIRST_RATING)
     browser.keys("ENTER")  # keyboard send
+    _in_flight(browser, FIRST_RATING)
+    on_submit = "return document.activeElement === document.querySelector(arguments[0]+' .feedback-submit')"
+    assert browser.eval(on_submit, FIRST_RATING) is True  # the lock never drops focus
+    feedback.gate.set()
     browser.wait("return document.querySelector(arguments[0]+' .feedback-status').textContent.length>0",
                  FIRST_RATING, what="failure shown")
-    assert browser.eval("return document.activeElement === document.querySelector(arguments[0]+' .feedback-submit')",
+    assert browser.eval(on_submit, FIRST_RATING) is True
+    browser.keys("ENTER")  # retry from the keyboard, no tabbing back
+    _wait_reached(feedback, 2)
+
+
+def test_focus_on_the_page_is_never_pulled_into_a_settling_box(console, browser, monkeypatch):
+    feedback = _with_feedback(console, browser, monkeypatch, outcome="unavailable")
+    send(browser, "What is IEA500I?")
+    wait_state(browser, "complete")
+    browser.click(_reach(browser, FIRST_RATING + ' .feedback-rating[data-rating="bad"]'))
+    feedback.gate.clear()
+    browser.click(_reach(browser, FIRST_RATING + " .feedback-submit"))
+    _in_flight(browser, FIRST_RATING)
+    browser.eval("document.activeElement.blur()")  # the operator clicks blank page space
+    feedback.gate.set()
+    browser.wait("return document.querySelector(arguments[0]+' .feedback-status').textContent.length>0",
+                 FIRST_RATING, what="failure shown")
+    assert browser.eval("return document.activeElement === document.body") is True
+
+
+def test_a_successful_keyboard_send_leaves_focus_on_the_rated_box(console, browser, monkeypatch):
+    _with_feedback(console, browser, monkeypatch)
+    send(browser, "What is IEA500I?")
+    wait_state(browser, "complete")
+    browser.click(_reach(browser, FIRST_RATING + ' .feedback-rating[data-rating="good"]'))
+    browser.eval("document.querySelector(arguments[0]+' .feedback-submit').focus()", FIRST_RATING)
+    browser.keys("ENTER")
+    browser.wait("return document.querySelector(arguments[0]).textContent === 'Rated: good'", FIRST_RATING,
+                 what="rated")
+    assert browser.eval("return document.activeElement === document.querySelector(arguments[0])",
                         FIRST_RATING) is True
 
 
@@ -1365,18 +1413,20 @@ def test_controls_are_locked_while_a_rating_is_in_flight_and_the_sent_rating_is_
     browser.type(_reach(browser, FIRST_RATING + " .feedback-comment"), "SENT")
     feedback.gate.clear()
     browser.click(_reach(browser, FIRST_RATING + " .feedback-submit"))
-    browser.wait("return document.querySelector(arguments[0]+' .feedback-submit').disabled", FIRST_RATING,
-                 what="send in flight")
+    _in_flight(browser, FIRST_RATING)
+    assert browser.eval(LOCKS_JS, FIRST_RATING) == LOCKED
+    # Edits while locked change nothing.
+    browser.click(_reach(browser, FIRST_RATING + ' .feedback-rating[data-rating="bad"]'))
+    browser.click(_reach(browser, FIRST_RATING + ' .feedback-reasons input[value="wrong"]'))
     assert browser.eval(
-        "var b=document.querySelector(arguments[0]);return [b.querySelector('[data-rating=bad]').disabled,"
-        " b.querySelector('.feedback-reasons input').disabled, b.querySelector('.feedback-comment').readOnly]",
-        FIRST_RATING,
-    ) == [True, True, True]
+        "var b=document.querySelector(arguments[0]);return [b.querySelector('[data-rating=good]').getAttribute('aria-pressed'),"
+        " b.querySelector('.feedback-reasons input[value=wrong]').checked]", FIRST_RATING,
+    ) == ["true", False]
     feedback.gate.set()
     browser.wait("return document.querySelector(arguments[0]).textContent === 'Rated: good'", FIRST_RATING,
                  what="rated as sent")
     [rating] = feedback.ratings
-    assert (rating.rating, rating.comment) == ("good", "SENT")
+    assert (rating.rating, rating.reasons, rating.comment) == ("good", [], "SENT")
     first = store(browser)["sessions"][store(browser)["active"]]["turns"][1]
     assert first["feedback"] == "good"
 
@@ -1393,8 +1443,7 @@ def test_a_settling_send_never_moves_focus_out_of_another_answers_box(console, b
     feedback.gate.clear()
     browser.eval("document.querySelector(arguments[0]+' .feedback-submit').focus()", box_a)
     browser.keys("ENTER")
-    browser.wait("return document.querySelector(arguments[0]+' .feedback-submit').disabled", box_a,
-                 what="A in flight")
+    _in_flight(browser, box_a)
     browser.click(_reach(browser, box_b + ' .feedback-rating[data-rating="good"]'))
     browser.type(_reach(browser, box_b + " .feedback-comment"), "typing in B")
     feedback.gate.set()
@@ -1402,4 +1451,6 @@ def test_a_settling_send_never_moves_focus_out_of_another_answers_box(console, b
                  what="A's failure shown")
     assert browser.eval("return document.activeElement === document.querySelector(arguments[0]+' .feedback-comment')",
                         box_b) is True
-    assert len(feedback.ratings) == 1  # nothing re-sent A's rating
+    browser.keys("SPACE")  # the next keystroke lands in B and never resends A
+    assert browser.eval("return document.querySelector(arguments[0]+' .feedback-comment').value", box_b) == "typing in B "
+    assert len(feedback.ratings) == 1

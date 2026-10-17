@@ -800,12 +800,37 @@
     }
   }
 
+  function feedbackBox(id) {
+    return messagesEl.querySelector('[data-feedback-for="' + id + '"]');
+  }
+
+  // The answer's turn as the store holds it now (another tab may have rated
+  // it meanwhile), falling back to the caller's copy.
+  function storedTurn(id, fallback) {
+    for (const session of Object.values(loadStore().sessions)) {
+      for (const stored of session.turns || []) if (stored.request_id === id) return stored;
+    }
+    return fallback;
+  }
+
+  // Replace one live box from the state. Focus inside it stays on the same
+  // control; when that control no longer exists (the box became "Rated"),
+  // focus moves to the box itself, never to <body>. Focus elsewhere is
+  // never touched.
   function redrawFeedback(turn) {
-    const live = messagesEl.querySelector('[data-feedback-for="' + turn.request_id + '"]');
+    const live = feedbackBox(turn.request_id);
     if (!live) return;
+    const active = document.activeElement;
+    const saved = active && live.contains(active) ? captureFeedbackFocus() : null;
     const next = renderFeedback(turn);
-    if (next) live.replaceWith(next);
-    else live.remove();
+    if (!next) {
+      live.remove();
+      return;
+    }
+    live.replaceWith(next);
+    if (!saved) return;
+    restoreFeedbackFocus(saved);
+    if (!next.contains(document.activeElement)) next.focus({ preventScroll: true });
   }
 
   function renderFeedback(turn) {
@@ -814,12 +839,18 @@
     const id = turn.request_id;
     const box = el("div", "turn-feedback");
     box.dataset.feedbackFor = id;
+    box.tabIndex = -1;  // a focus target when its control is gone
     if (turn.feedback) {
       feedbackDrafts.delete(id);
       box.textContent = "Rated: " + turn.feedback;
       return box;
     }
     const draft = feedbackDrafts.get(id) || EMPTY_DRAFT;
+    // Locked while a send is in flight. Controls stay in place and focusable
+    // (aria-disabled, read-only comment): disabling a focused node would drop
+    // focus to <body>. Every handler refuses input while locked.
+    const locked = () => (feedbackDrafts.get(id) || EMPTY_DRAFT).sending;
+    const lockState = String(draft.sending);
     box.appendChild(el("span", "feedback-label", "Rate this answer:"));
     const details = el("div", "feedback-details");
     details.hidden = !draft.rating;
@@ -828,8 +859,9 @@
       button.type = "button";
       button.setAttribute("data-rating", value);
       button.setAttribute("aria-pressed", String(draft.rating === value));
-      button.disabled = draft.sending;
+      button.setAttribute("aria-disabled", lockState);
       button.addEventListener("click", () => {
+        if (locked()) return;
         editDraft(id).rating = value;
         box.querySelectorAll(".feedback-rating").forEach((other) => {
           other.setAttribute("aria-pressed", String(other === button));
@@ -846,7 +878,10 @@
       checkbox.type = "checkbox";
       checkbox.value = value;
       checkbox.checked = draft.reasons.includes(value);
-      checkbox.disabled = draft.sending;
+      checkbox.setAttribute("aria-disabled", lockState);
+      checkbox.addEventListener("click", (event) => {
+        if (locked()) event.preventDefault();
+      });
       checkbox.addEventListener("change", () => {
         editDraft(id).reasons = Array.from(reasons.querySelectorAll("input:checked")).map((input) => input.value);
       });
@@ -867,7 +902,7 @@
     details.appendChild(comment);
     const submit = el("button", "btn feedback-submit", "Send rating");
     submit.type = "button";
-    submit.disabled = draft.sending;
+    submit.setAttribute("aria-disabled", lockState);
     const status = el("span", "feedback-status", draft.status);
     status.setAttribute("role", "status");
     submit.addEventListener("click", async () => {
@@ -877,62 +912,63 @@
       // the render derives every control from): what is shown and saved
       // afterwards is exactly what the service recorded.
       const sent = { rating: sending.rating, reasons: sending.reasons.slice(), comment: sending.comment };
-      const returnFocus = captureFeedbackFocus();
       sending.sending = true;
       sending.status = "";
       redrawFeedback(turn);
-      let ok = false;
-      let message = FEEDBACK_ERROR_TEXT;
       try {
-        const response = await fetch("/ui/feedback", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            request_id: id,
-            rating: sent.rating,
-            reasons: sent.reasons,
-            comment: sent.comment,
-          }),
-        });
-        ok = response.status === 201;
-        if (!ok) {
-          try {
-            const envelope = await response.json();
-            if (envelope && typeof envelope.message === "string") message = envelope.message;
-          } catch (err) {
-            /* fixed fallback text */
-          }
-        }
-      } catch (err) {
-        ok = false;
-      }
-      if (ok) {
-        const rated = sent.rating;
-        await mutate((store) => {
-          for (const session of Object.values(store.sessions)) {
-            for (const stored of session.turns || []) {
-              if (stored.request_id === id) stored.feedback = rated;
+        let ok = false;
+        let message = FEEDBACK_ERROR_TEXT;
+        try {
+          const response = await fetch("/ui/feedback", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              request_id: id,
+              rating: sent.rating,
+              reasons: sent.reasons,
+              comment: sent.comment,
+            }),
+          });
+          ok = response.status === 201;
+          if (!ok) {
+            try {
+              const envelope = await response.json();
+              if (envelope && typeof envelope.message === "string") message = envelope.message;
+            } catch (err) {
+              /* fixed fallback text */
             }
           }
-          return true;
-        });
-        turn.feedback = rated;
-        announce("Rating sent.");
-      } else {
-        sending.status = message;
+        } catch (err) {
+          ok = false;
+        }
+        if (ok) {
+          const rated = sent.rating;
+          await mutate((store) => {
+            for (const session of Object.values(store.sessions)) {
+              for (const stored of session.turns || []) {
+                if (stored.request_id === id) stored.feedback = rated;
+              }
+            }
+            return true;
+          });
+          turn.feedback = rated;
+          announce("Rating sent.");
+        } else {
+          // The draft may have been replaced or pruned meanwhile: write the
+          // error into whatever state is current.
+          const current = feedbackDrafts.get(id);
+          if (current) current.status = message;
+        }
+      } finally {
+        // Unlocked only once settled (after the store write), and always,
+        // even if the store write fails.
+        const current = feedbackDrafts.get(id);
+        if (current) current.sending = false;
+        // The article may have been rebuilt, or the answer rated in another
+        // tab, while the request was in flight: redraw the live box from the
+        // stored turn.
+        redrawFeedback(storedTurn(id, turn));
       }
-      // Unlocked only now: a rebuild while the store write waits stays locked.
-      sending.sending = false;
-      // The article may have been rebuilt while the request was in flight:
-      // redraw whichever box is live now. Focus inside that box is kept;
-      // focus that fell to <body> (the send control was disabled) returns to
-      // the control that sent; focus anywhere else is never moved.
-      const live = messagesEl.querySelector('[data-feedback-for="' + id + '"]');
-      const active = document.activeElement;
-      const keep = live && active && live.contains(active) ? captureFeedbackFocus() : null;
-      redrawFeedback(turn);
-      if (keep) restoreFeedbackFocus(keep);
-      else if (!active || active === document.body) restoreFeedbackFocus(returnFocus);
     });
     details.appendChild(submit);
     details.appendChild(status);
