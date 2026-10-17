@@ -83,3 +83,88 @@ extend-select = ["B", "SIM", "RET"]
 python_version = "3.14"
 mypy_path = "src"
 ignore_missing_imports = true
+
+# Strict ratchet (#584): modules listed here are --strict clean and must stay
+# so. mypy's "strict = true" is global-only (inside an override it applies to
+# every module), so the per-module-capable strict flags are spelled out.
+# warn_redundant_casts and warn_unused_configs are global-only and cannot be
+# set here. Add a module when it goes clean; never delete one to get green.
+[[tool.mypy.overrides]]
+module = [
+    "mainframe_rag",
+    "mainframe_rag.agent",
+    "mainframe_rag.agent.admission",
+    "mainframe_rag.agent.answer",
+    "mainframe_rag.agent.answer_core",
+    "mainframe_rag.agent.chat_turn",
+    "mainframe_rag.agent.cites",
+    "mainframe_rag.agent.core_ports",
+    "mainframe_rag.agent.evidence",
+    "mainframe_rag.agent.live_state",
+    "mainframe_rag.agent.metrics",
+    "mainframe_rag.agent.model_adapter",
+    "mainframe_rag.agent.resources",
+    "mainframe_rag.agent.serving",
+    "mainframe_rag.agent.sse",
+    "mainframe_rag.config",
+    "mainframe_rag.eval",
+    "mainframe_rag.eval.acceptance",
+    "mainframe_rag.eval.answer_tier",
+    "mainframe_rag.eval.datasets",
+    "mainframe_rag.eval.load",
+    "mainframe_rag.eval.performance",
+    "mainframe_rag.eval.promotion",
+    "mainframe_rag.eval.quality",
+    "mainframe_rag.eval.statistics",
+    "mainframe_rag.feedback",
+    "mainframe_rag.feedback.client",
+    "mainframe_rag.feedback.service",
+    "mainframe_rag.feedback.store",
+    "mainframe_rag.ingest",
+    "mainframe_rag.ingest.bounds",
+    "mainframe_rag.ingest.chrome",
+    "mainframe_rag.ingest.chunk",
+    "mainframe_rag.ingest.classify",
+    "mainframe_rag.ingest.context",
+    "mainframe_rag.ingest.identity",
+    "mainframe_rag.ingest.inventory",
+    "mainframe_rag.ingest.payload",
+    "mainframe_rag.ingest.placement",
+    "mainframe_rag.ingest.qdrant_io",
+    "mainframe_rag.ingest.rules_version",
+    "mainframe_rag.ingest.walk",
+    "mainframe_rag.manifest",
+    "mainframe_rag.mcp",
+    "mainframe_rag.mcp.__main__",
+    "mainframe_rag.ops",
+    "mainframe_rag.ops.__main__",
+    "mainframe_rag.ops.cli",
+    "mainframe_rag.regexes",
+    "mainframe_rag.retrieve",
+    "mainframe_rag.retrieve.filters",
+    "mainframe_rag.retrieve.rerank",
+    "mainframe_rag.retrieve.rewrite",
+    "mainframe_rag.retrieve.screen",
+    "mainframe_rag.retrieve.split",
+    "mainframe_rag.serve",
+    "mainframe_rag.serve.__main__",
+    "mainframe_rag.serve.budget",
+    "mainframe_rag.serve.cli",
+    "mainframe_rag.serve.colab_corpus",
+    "mainframe_rag.serve.colab_production",
+    "mainframe_rag.serve.colab_profiles",
+    "mainframe_rag.serve.profiles",
+    "mainframe_rag.webui",
+]
+disallow_any_generics = true
+disallow_subclassing_any = true
+disallow_untyped_calls = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+warn_unused_ignores = true
+warn_return_any = true
+no_implicit_reexport = true
+strict_equality = true
+extra_checks = true

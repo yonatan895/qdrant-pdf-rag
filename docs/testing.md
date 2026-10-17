@@ -20,6 +20,7 @@ consumers and interaction tests; unrelated expensive tiers are not useful.
 
 `pytest` is the gate. `sh scripts/tools/run-task.sh qa:check` runs `ruff check`, `mypy src`, and the
 unit suite. Ruff runs its default rule set plus the B, SIM and RET families (`extend-select` in `pyproject.toml`).
+Modules listed in the `[[tool.mypy.overrides]]` block of `pyproject.toml` are held `--strict` clean; add a module there when it goes clean.
 Tests generate original PDFs at runtime
 (`scripts/make_synthetic_pdf.py`). No binary fixtures in git.
 CI must fail if `git ls-files` matches `.pdf` / `.pdx` / `.idx`.
