@@ -28,17 +28,34 @@
     platform mandate.
   - Not adopted: content in SigNoz or ClickHouse, content in Qdrant (it would
     need write credentials on the serving path), and append-only files.
-- **Amends (maintainer decision, 2026-10-17, #780):**
+- **Amends (maintainer decision, 2026-10-17, #780):** with `FEEDBACK_ENABLED`
+  (default off) the agent originates exactly two kinds of write, both to the
+  feedback service and nowhere else (never the corpus or Qdrant, never a model,
+  never a source system):
+  1. **Answer records, outbound from the existing query routes.** On every
+     finalized answer of `/v1/answer`, `/v1/chat` (with `/v1/chat/completions`),
+     `/ui/chat` and their streams, the agent sends one record carrying the
+     question, answer, script, citations, supplied-evidence citations and a
+     scalar telemetry snapshot. No rating is needed. This is the content flow
+     this ADR exists for, best effort and off the answer's critical path.
+  2. **Ratings, inbound on two new console routes.** `/ui/feedback` and
+     `/ui/feedback/form` forward a bounded rating (vocabulary codes plus a
+     comment of at most 2000 characters) for an already recorded answer.
+
+  The amendments are:
   - **ADR-0003, agent-surface clause.** The agent's POST set adds the two
-    console rating routes, `/ui/feedback` and `/ui/feedback/form`. They are the
-    only writes the agent originates: a bounded rating (vocabulary codes plus a
-    comment) forwarded to the feedback service, default off. They never write
-    the corpus or Qdrant, never call a model and never reach a source system.
-    No PUT/PATCH/DELETE and no `fetch_live` reference still hold, with
-    `tests/test_mcp_agent.py` pinning the exact POST set.
-  - **ADR-0004, non-goals 2 and 3, scoped.** Console session state (dialogue,
-    incidents, preferences) stays in browser `localStorage`, and the agent pod
-    stays stateless with no volume. Answer-quality records are not session
-    state. They live in a separate single-writer feedback service with its own
-    PVC (deployed in PR B), never as a process alongside the agent and never as
-    agent-side tables.
+    rating routes. No PUT/PATCH/DELETE and no `fetch_live` reference still
+    hold, and `tests/test_mcp_agent.py` pins the exact POST set. The query
+    routes gain the outbound answer-record write above, but no new inbound
+    operation.
+  - **ADR-0004, non-goal 2, scoped.** The feedback service is a separate
+    single-replica deployment (PR B) that the agent calls over ClusterIP. It
+    is not a Backend-for-Frontend, serves no UI, and runs no process alongside
+    the agent.
+  - **ADR-0004, non-goal 3, scoped.** Console question and answer text is
+    stored server-side, as quality records in the feedback store, for every
+    console turn while feedback is enabled. That is not session state: the
+    console never reads it back, and dialogue history, incidents and
+    preferences stay in browser `localStorage`. The agent pod keeps no
+    persistent volume and no database; its existing non-persistent mounts
+    (the `/tmp` emptyDir, CA, TLS and OAuth volumes) are unchanged.

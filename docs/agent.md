@@ -1293,8 +1293,10 @@ deterministic and trap queries stay on the manuals path.
 
 - **Surface:** the agent HTTP API is read-only query traffic (no PUT/PATCH/
   DELETE; POST only on search/answer/chat and console chat), plus the console
-  rating forward (`/ui/feedback`, `/ui/feedback/form`; ADR-0005, default off),
-  which writes only a bounded rating to the feedback service. The source port is
+  rating forward (`/ui/feedback`, `/ui/feedback/form`; ADR-0005, default off).
+  With feedback enabled, the agent writes only to the feedback service: a
+  bounded rating from those two routes, and one answer record (question,
+  answer, citations, telemetry) per finalized answer from the query routes. The source port is
   separate from manual evidence and is not a query/command proxy.
 - **Approved operation:** `job_status` for one exact job id. The other three
   bridge tools (`dataset_read`, `uss_read`, `jes_spool_read`) are allowlisted in

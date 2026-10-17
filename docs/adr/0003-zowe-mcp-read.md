@@ -80,8 +80,10 @@
     (`tests/test_mcp_ftp_bridge.py`); the client allowlist equals the bridge
     registry and no tool name is a mutating verb; the agent HTTP surface has no
     PUT/PATCH/DELETE, its POST set is exactly the query routes plus the two
-    console rating routes (amendment, ADR-0005: a bounded rating forwarded to
-    the feedback service, never the corpus or a source), and no endpoint module
+    console rating routes (amendment, ADR-0005: with answer feedback enabled,
+    the rating routes forward a bounded rating and the query routes send one
+    answer record with question and answer text, both only to the feedback
+    service, never the corpus or a source), and no endpoint module
     references `fetch_live` (`tests/test_mcp_agent.py`);
     `job_status` is never planned without an exact job id; defaults are off
     (`tests/test_config.py`). Audit records carry request id, route, tool
