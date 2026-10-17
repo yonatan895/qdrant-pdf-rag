@@ -419,6 +419,10 @@ jobs:
   # CI-only sizing (single replica, Gi sizes): a CI runner cannot schedule
   # the 3x16Gi prod Qdrant (proven: Insufficient memory on one node), so the
   # documented local-testing overrides apply; git prod values are untouched.
+  # Issue #809: public egress is blocked at the packet filter before the bundle
+  # is bootstrapped (scripts/ci/egress_gate.sh); bootstrap, image import, deploy,
+  # the A/repeat/B/failed-B/rollback chart sequence (lifecycle-chart lane) and the
+  # next ordinary deploy all run behind it. Contract: docs/deploy.md.
   kind-live-rehearsal:
     needs: [build, airgap-package]
     if: >-
@@ -491,34 +495,21 @@ jobs:
           name: sneakernet-bundle-${{ env.SHA }}
           path: gapbox/
 
-      - name: Black-box handoff (verify, unpack, bootstrap)
-        env:
-          IMAGE_SHA: ${{ env.SHA }}
-        run: |
-          export PATH="/usr/local/bin:$PATH"
-          cd gapbox
-          sha256sum -c "qdrant-pdf-rag-${SHA}.tar.sha256"
-          tar xf "qdrant-pdf-rag-${SHA}.tar"
-          AIRGAP_WORKSPACE=qdrant-pdf-rag sh bootstrap.sh
-          test -f qdrant-pdf-rag/dist/SHA256SUMS
-          (cd qdrant-pdf-rag/dist && sha256sum -c SHA256SUMS)
-          test -f qdrant-pdf-rag/dist/sbom.json
-          test -f qdrant-pdf-rag/dist/SHA256SUMS.sig
-          test -f qdrant-pdf-rag/dist/sneakernet-signing.pub
-          test -f qdrant-pdf-rag/dist/task_linux_amd64.tar.gz
-          test -f qdrant-pdf-rag/dist/task-pin.txt
-          test -f qdrant-pdf-rag/dist/task-LICENSE
-          test -s qdrant-pdf-rag/dist/THIRD-PARTY-NOTICES.txt
-          grep -q "^task_version: " qdrant-pdf-rag/dist/MANIFEST.txt
-          grep -q "go-task/task" qdrant-pdf-rag/dist/sbom.json
-          test "$(git -C qdrant-pdf-rag rev-parse HEAD)" = "$SHA"
-          test "$(awk '/^sha: /{print $2}' qdrant-pdf-rag/dist/MANIFEST.txt)" = "$SHA"
+      # Rehearsal infrastructure only (test TLS, registry/gateway stand-ins, the
+      # egress gate and probe): none of this is shipped to the operator, whose
+      # workspace comes solely from the bundle, bootstrapped behind the boundary.
+      - name: Check out rehearsal infrastructure scripts (CI helpers, not the operator workspace)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          path: rehearsal-infra
+          fetch-depth: 1
+          persist-credentials: false
 
       - name: Start authenticated TLS registry + Kind
         run: |
           export PATH="/usr/local/bin:$PATH"
           TLS_DIR="$RUNNER_TEMP/registry-tls"
-          sh gapbox/qdrant-pdf-rag/scripts/ci/create_test_tls.sh "$TLS_DIR" kind-registry
+          sh rehearsal-infra/scripts/ci/create_test_tls.sh "$TLS_DIR" kind-registry
           # Keep credentials out of arguments, logs and retained diagnostics.
           umask 077
           openssl rand -hex 24 > "$TLS_DIR/password"
@@ -579,9 +570,91 @@ jobs:
           /usr/local/bin/kubectl -n local-path-storage rollout status deploy/local-path-provisioner --timeout=180s
           /usr/local/bin/kubectl get storageclass local-path
 
+      # Everything that needs the public network is finished before the boundary
+      # closes: tool installs, the Kind node image, the registry image, the
+      # provisioner and the platform stand-ins' third-party images. In a real gap
+      # these are the platform's (gateway, database, storage helper) and exist
+      # before the operator arrives. Only bundle images may be pulled afterwards.
+      - name: Rehearsal platform stand-ins (public images, before the boundary)
+        run: |
+          export PATH="/usr/local/bin:$PATH"
+          NS="rag-kind-$(echo "$SHA" | cut -c1-12)"
+          echo "NS=$NS" >> "$GITHUB_ENV"
+          /usr/local/bin/kubectl create namespace "$NS"
+          # The provisioner's helper pod pulls this image on the first PVC; put it on
+          # every node now so storage never needs the public network later.
+          HELPER_IMAGE="$(awk '$1 == "image:" && $2 ~ /busybox/ {print $2; exit}' "$RUNNER_TEMP/local-path.yaml")"
+          test -n "$HELPER_IMAGE"
+          for node in $(/usr/local/bin/kind get nodes --name gapbox); do
+            docker exec "$node" crictl pull "$HELPER_IMAGE"
+          done
+          # Real LiteLLM + PostgreSQL (platform-owned in production); images are
+          # pulled by the nodes now. Model computation arrives later from the bundle.
+          sh rehearsal-infra/scripts/ci/deploy_test_gateway.sh "$NS"
+
+      # Close the boundary: from here the shipped operator flow runs under a
+      # kernel-enforced block. Outside it: the GitHub runner agent, the Docker
+      # daemon and its embedded DNS, the infrastructure steps above, and the
+      # post-mortem/teardown steps below. Nothing is mocked: every probe is a
+      # real connect() that the packet filter must reject.
+      - name: Close the network boundary (block public egress, prove it)
+        run: |
+          export PATH="/usr/local/bin:$PATH"
+          GATE="sh rehearsal-infra/scripts/ci/egress_gate.sh"
+          PROBE=rehearsal-infra/scripts/ci/egress_probe.py
+          # Control: the public network answers right now, so a failure after
+          # the gate is caused by the gate and not by an outage.
+          python3 "$PROBE" reachable-any 1.1.1.1:443 8.8.8.8:443 9.9.9.9:443
+          KIND_CIDRS="$(docker network inspect kind -f '{{range .IPAM.Config}}{{.Subnet}} {{end}}')"
+          RULE_ARGS=""
+          for cidr in $KIND_CIDRS; do
+            case "$cidr" in *:*) continue ;; esac
+            RULE_ARGS="$RULE_ARGS --allow $cidr --block-source $cidr"
+          done
+          test -n "$RULE_ARGS"
+          # shellcheck disable=SC2086
+          $GATE install $RULE_ARGS
+          # Counterexamples behind the boundary: these must all fail.
+          $GATE run python3 "$PROBE" blocked 1.1.1.1:443 8.8.8.8:443 9.9.9.9:443 github.com:443 get.helm.sh:443
+          if $GATE run curl -sS --max-time 10 -o /dev/null https://get.helm.sh/; then
+            echo "::error::a public download succeeded behind the boundary"
+            exit 1
+          fi
+          # Controls: the prepared local services still answer through the gate.
+          code="$($GATE run curl -sS --max-time 10 --cacert "$RUNNER_TEMP/registry-tls/ca.crt" -o /dev/null -w '%{http_code}' https://kind-registry:5000/v2/)"
+          test "$code" = 401
+          $GATE run /usr/local/bin/kubectl get nodes
+          $GATE require-hits host
+          $GATE status | tee diagnostics/egress-gate-installed.txt
+
+      - name: Black-box handoff (verify, unpack, bootstrap) with public egress blocked
+        env:
+          IMAGE_SHA: ${{ env.SHA }}
+        shell: sh rehearsal-infra/scripts/ci/egress_gate.sh run bash -e {0}
+        run: |
+          export PATH="/usr/local/bin:$PATH"
+          cd gapbox
+          sha256sum -c "qdrant-pdf-rag-${SHA}.tar.sha256"
+          tar xf "qdrant-pdf-rag-${SHA}.tar"
+          AIRGAP_WORKSPACE=qdrant-pdf-rag sh bootstrap.sh
+          test -f qdrant-pdf-rag/dist/SHA256SUMS
+          (cd qdrant-pdf-rag/dist && sha256sum -c SHA256SUMS)
+          test -f qdrant-pdf-rag/dist/sbom.json
+          test -f qdrant-pdf-rag/dist/SHA256SUMS.sig
+          test -f qdrant-pdf-rag/dist/sneakernet-signing.pub
+          test -f qdrant-pdf-rag/dist/task_linux_amd64.tar.gz
+          test -f qdrant-pdf-rag/dist/task-pin.txt
+          test -f qdrant-pdf-rag/dist/task-LICENSE
+          test -s qdrant-pdf-rag/dist/THIRD-PARTY-NOTICES.txt
+          grep -q "^task_version: " qdrant-pdf-rag/dist/MANIFEST.txt
+          grep -q "go-task/task" qdrant-pdf-rag/dist/sbom.json
+          test "$(git -C qdrant-pdf-rag rev-parse HEAD)" = "$SHA"
+          test "$(awk '/^sha: /{print $2}' qdrant-pdf-rag/dist/MANIFEST.txt)" = "$SHA"
+
       - name: Operator airgap.env (Kind stand-ins, never prod values)
         env:
           IMAGE_SHA: ${{ env.SHA }}
+        shell: sh rehearsal-infra/scripts/ci/egress_gate.sh run bash -e {0}
         run: |
           export PATH="/usr/local/bin:$PATH"
           cd gapbox/qdrant-pdf-rag
@@ -650,15 +723,17 @@ jobs:
           echo "INGEST_EXTRA_PATCH=$RUNNER_TEMP/ingest-kind-scale.json" >> "$GITHUB_ENV"
 
       - name: airgap-load (fill the Kind registry BEFORE any pod pulls it)
+        shell: sh rehearsal-infra/scripts/ci/egress_gate.sh run bash -e {0}
         run: |
           export PATH="/usr/local/bin:$PATH"
           cd gapbox/qdrant-pdf-rag
           sh scripts/tools/run-task.sh airgap:load
 
       - name: Create registry pull secret before the first node pull
+        shell: sh rehearsal-infra/scripts/ci/egress_gate.sh run bash -e {0}
         run: |
           export PATH="/usr/local/bin:$PATH"
-          /usr/local/bin/kubectl create namespace "$NS"
+          /usr/local/bin/kubectl create namespace "$NS" --dry-run=client -o yaml | /usr/local/bin/kubectl apply -f -
           /usr/local/bin/kubectl -n "$NS" create secret generic rehearsal-pull \
             --type=kubernetes.io/dockerconfigjson \
             --from-file=.dockerconfigjson="$REGISTRY_AUTH_FILE"
@@ -667,6 +742,7 @@ jobs:
           sed -i 's|^PULL_SECRET=.*|PULL_SECRET=rehearsal-pull|' gapbox/qdrant-pdf-rag/airgap.env
 
       - name: Deploy mock vLLM (deterministic embeddings stand-in)
+        shell: sh rehearsal-infra/scripts/ci/egress_gate.sh run bash -e {0}
         run: |
           export PATH="/usr/local/bin:$PATH"
           cd gapbox/qdrant-pdf-rag
@@ -717,19 +793,30 @@ jobs:
           EOF
           /usr/local/bin/kubectl -n "$NS" rollout status deploy/vllm-mock --timeout=180s
 
-      - name: Real test gateway and database (mock computation only)
+      # Pods and nodes: the mock pod runs a bundle image, so this probe is a real
+      # connect() from inside the cluster's own network path.
+      - name: Prove node and pod egress is blocked (mock vLLM pod, real sockets)
+        shell: sh rehearsal-infra/scripts/ci/egress_gate.sh run bash -e {0}
         run: |
           export PATH="/usr/local/bin:$PATH"
-          cd gapbox/qdrant-pdf-rag
-          sh scripts/ci/deploy_test_gateway.sh "$NS"
+          PROBE=rehearsal-infra/scripts/ci/egress_probe.py
+          /usr/local/bin/kubectl -n "$NS" exec -i deploy/vllm-mock -- python3 - reachable kubernetes.default.svc:443 < "$PROBE"
+          /usr/local/bin/kubectl -n "$NS" exec -i deploy/vllm-mock -- python3 - blocked 1.1.1.1:443 8.8.8.8:443 9.9.9.9:443 < "$PROBE"
+
+      - name: Assert the boundary rejected real traffic (host and pods)
+        run: |
+          sh rehearsal-infra/scripts/ci/egress_gate.sh require-hits host
+          sh rehearsal-infra/scripts/ci/egress_gate.sh require-hits nodes
 
       - name: airgap-validate LIVE (cluster, StorageClass, MANIFEST match)
+        shell: sh rehearsal-infra/scripts/ci/egress_gate.sh run bash -e {0}
         run: |
           export PATH="/usr/local/bin:$PATH"
           cd gapbox/qdrant-pdf-rag
           sh scripts/tools/run-task.sh airgap:validate
 
       - name: Generate corpus PVC + demo PDFs (operator-supplied corpus step)
+        shell: sh rehearsal-infra/scripts/ci/egress_gate.sh run bash -e {0}
         run: |
           export PATH="/usr/local/bin:$PATH"
           cd gapbox/qdrant-pdf-rag
@@ -774,6 +861,7 @@ jobs:
           QDRANT_STORAGE_SIZE: 1Gi
           INGEST_WORK_SIZE: 2Gi
           INGEST_TIMEOUT: "900"
+        shell: sh rehearsal-infra/scripts/ci/egress_gate.sh run bash -e {0}
         run: |
           export PATH="/usr/local/bin:$PATH"
           cd gapbox/qdrant-pdf-rag
@@ -782,8 +870,17 @@ jobs:
           # second push — same flag an operator re-running pipeline uses.
           sh scripts/airgap/pipeline.sh --skip-load
 
+      - name: Application pod egress is blocked (agent pod, real sockets)
+        shell: sh rehearsal-infra/scripts/ci/egress_gate.sh run bash -e {0}
+        run: |
+          export PATH="/usr/local/bin:$PATH"
+          PROBE=rehearsal-infra/scripts/ci/egress_probe.py
+          /usr/local/bin/kubectl -n "$NS" exec -i deploy/rag-agent -- python3 - reachable test-gateway:4000 qdrant:6333 < "$PROBE"
+          /usr/local/bin/kubectl -n "$NS" exec -i deploy/rag-agent -- python3 - blocked 1.1.1.1:443 8.8.8.8:443 9.9.9.9:443 < "$PROBE"
+
       - name: Assert shared-gateway rendering (no explicit URLs, one key)
         if: matrix.lane == 'shared-gateway'
+        shell: sh rehearsal-infra/scripts/ci/egress_gate.sh run bash -e {0}
         run: |
           export PATH="/usr/local/bin:$PATH"
           cd gapbox/qdrant-pdf-rag
@@ -797,18 +894,21 @@ jobs:
             --diagnostics "$GITHUB_WORKSPACE/diagnostics/shared-gateway-rendering.json"
 
       - name: Require reasoning and complete streams from the application pod
+        shell: sh rehearsal-infra/scripts/ci/egress_gate.sh run bash -e {0}
         run: |
           export PATH="/usr/local/bin:$PATH"
           /usr/local/bin/kubectl -n "$NS" exec deploy/rag-agent -- \
             python3 /app/scripts/probe_gateway.py --require-reasoning --stream
 
       - name: Cited answers, follow-up chat and every application stream
+        shell: sh rehearsal-infra/scripts/ci/egress_gate.sh run bash -e {0}
         run: |
           export PATH="/usr/local/bin:$PATH"
           /usr/local/bin/kubectl -n "$NS" exec -i deploy/rag-agent -- python3 - \
             < gapbox/qdrant-pdf-rag/scripts/ci/application_contracts.py
 
       - name: Expected-substring acceptance
+        shell: sh rehearsal-infra/scripts/ci/egress_gate.sh run bash -e {0}
         run: |
           export PATH="/usr/local/bin:$PATH"
           cd gapbox/qdrant-pdf-rag
@@ -824,6 +924,7 @@ jobs:
         if: startsWith(matrix.lane, 'gateway-')
         env:
           FAULT_LANE: ${{ matrix.lane }}
+        shell: sh rehearsal-infra/scripts/ci/egress_gate.sh run bash -e {0}
         run: |
           export PATH="/usr/local/bin:$PATH"
           cd gapbox/qdrant-pdf-rag
@@ -835,6 +936,7 @@ jobs:
           QDRANT_STORAGE_SIZE: 1Gi
           INGEST_WORK_SIZE: 2Gi
           INGEST_TIMEOUT: "900"
+        shell: sh rehearsal-infra/scripts/ci/egress_gate.sh run bash -e {0}
         run: |
           export PATH="/usr/local/bin:$PATH"
           cd gapbox/qdrant-pdf-rag
@@ -847,12 +949,20 @@ jobs:
           QDRANT_STORAGE_SIZE: 1Gi
           INGEST_WORK_SIZE: 2Gi
           INGEST_TIMEOUT: "900"
+        shell: sh rehearsal-infra/scripts/ci/egress_gate.sh run bash -e {0}
         run: |
           export PATH="/usr/local/bin:$PATH"
           cd gapbox/qdrant-pdf-rag
           test "$(/usr/local/bin/kubectl get nodes -l '!node-role.kubernetes.io/control-plane' --no-headers | wc -l)" -eq 3
           sh scripts/ci/check_lifecycle.sh "$NS"
           sh scripts/airgap/pipeline.sh --skip-load
+
+      - name: Record the egress boundary state
+        if: always()
+        run: |
+          mkdir -p diagnostics
+          sh rehearsal-infra/scripts/ci/egress_gate.sh status > diagnostics/egress-gate-final.txt 2>&1 || true
+          cat diagnostics/egress-gate-final.txt
 
       - name: Failure diagnostics (pods, events, logs)
         if: failure()
@@ -887,6 +997,7 @@ jobs:
           export PATH="/usr/local/bin:$PATH"
           /usr/local/bin/kind delete cluster --name gapbox || true
           docker rm -f kind-registry || true
+          sh rehearsal-infra/scripts/ci/egress_gate.sh remove || true
 
   # ------------------------------------------------- secret gate (fork-safe)
   e2e-secrets-check:
