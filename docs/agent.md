@@ -646,11 +646,12 @@ hits omitted by budget packing, and the tail's example cite, are rejected:
   treating them as cited provenance would hallucinate it.
 - Abstention zero-cite (issues #135/#630/#764): `parse_answer` clears
   citations and inferred indices when `is_abstention` holds. That is either
-  the structured decline (the first prose sentence is system rule 4's fixed
-  prefix `Not covered by the supplied excerpts:` followed by a non-empty
-  subject, the identifier or topic it cannot answer, whatever coverage note
-  follows; naming the subject satisfies identifier abstention rows, which
-  require the identifier and forbid the generic "excerpts do not answer")
+  the structured decline (the response leads with system rule 4's fixed
+  whole-question prefix `Nothing in the supplied excerpts answers this question
+  about` followed by a subject naming the identifier or topic, whatever
+  coverage note follows; naming the subject satisfies identifier abstention
+  rows, which require the identifier and forbid the generic "excerpts do not
+  answer")
   or a whole-response refusal (every substantive clause refuses). Marker
   presence alone would zero a grounded answer that scopes one caveat; the
   whole-response rule alone missed verbose declines that explain what the
@@ -1081,7 +1082,7 @@ from the finalized parse plus the transport outcome — one rule,
 | State | Meaning | Never means |
 |---|---|---|
 | `accepted` | Nonempty substantive parsed prose, eligible non-inferred citations and generation finished (`stop`) | Semantic proof of any claim or certification of an extracted script |
-| `insufficient_evidence` | Structured decline (first prose sentence is exactly rule 4's decline sentence; a coverage note may follow) or whole-response evidence/security refusal (every substantive clause refuses; any answer clause makes it mixed) with a `stop` finish, or the empty-hits short-circuit (no generation) | A failed request (still 200 + explicit text) |
+| `insufficient_evidence` | Structured decline (the response leads with rule 4's whole-question decline prefix plus a subject that names something; a coverage note may follow) or whole-response evidence/security refusal (every substantive clause refuses; any answer clause makes it mixed) with a `stop` finish, or the empty-hits short-circuit (no generation) | A failed request (still 200 + explicit text) |
 | `unverified_draft` | Non-abstention prose with zero eligible citations (absent, rejected, or inferred-only), or a finished nonempty script with no prose | An error (still 200 — the draft label is the signal) |
 | `generation_incomplete` | Non-`stop` finish after generation (including a cut-off refusal fragment; this outranks refusal), neither substantive parsed prose nor a nonempty script after fallbacks, absent/`null` terminal finish, upstream `error` frame, malformed frame, or stream error/cancel/disconnect | An accepted answer (terminal wire shape may still be complete) |
 
@@ -1089,10 +1090,13 @@ State precedence (#630): empty-hits short circuit, then non-`stop` finish,
 then refusal (structured decline or whole-response), then body/citation
 outcome. Mixed answers (an answer clause plus a missing-detail caveat) are not
 refusals at any length and keep their eligible citations. Rule 4 forbids a
-partial answer from opening with the decline sentence (#764); only that exact,
-leading, unquoted sentence counts, so the sentence quoted, extended ("... this
-question directly") or placed after an answer clause leaves the whole-response
-rule in charge. A model that opens with it and then answers anyway breaks the
+partial answer from opening with the decline (#764). Only the exact prefix,
+leading and unquoted, with a subject that names something counts (a leading
+Markdown heading is scaffolding; a bare prefix line takes its subject from the
+next line). The prefix says nothing answers the question, so a scope caveat
+leading a partial answer ("X is not covered by the excerpts; ...") is a mixed
+answer, and the prefix quoted, subject-less or placed after an answer clause
+leaves the whole-response rule in charge. A model that opens with it and then answers anyway breaks the
 contract and is classified `insufficient_evidence` with citations zeroed: the
 conservative outcome, never a false `accepted`.
 

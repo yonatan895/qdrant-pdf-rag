@@ -482,8 +482,8 @@ bit-deterministic, so expect few verdict flips across repeats, not zero:
   labels followed only by indices or a citation, even when the server labels the
   row `accepted`; substantive text after labels still counts as prose),
   true abstentions (the agent's shared `is_abstention`, which also zeroes
-  citations, #135/#630/#764: the structured decline (the fixed prefix plus the
-  missing subject) leading the response, or a whole-response refusal; a grounded partial answer whose scope
+  citations, #135/#630/#764: the structured decline (the fixed whole-question
+  prefix plus the missing subject) leading the response, or a whole-response refusal; a grounded partial answer whose scope
   caveat carries a refusal phrase is not an abstention), zero validated
   citations, or **only inferred citations** (the agent mapped bare `[n]`
   markers with no explicit citation line; issue #269). The run report

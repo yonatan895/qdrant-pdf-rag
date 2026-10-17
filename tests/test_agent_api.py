@@ -1802,7 +1802,7 @@ def test_build_messages_tokenizer_budget_respected():
             text="word " * 160,  # ~175 tokens with the [i] header; the
             # refusal-anchored system prompt (issue #135, regrown by #305's
             # partial-answer/identifier rules, then +30 by #764's structured
-            # decline and +11 when it named the missing subject) grew the
+            # decline and +19 when it named the missing subject) grew the
             # fixed overhead, so the fixture window widened
             # to keep the knife-edge scenario (5 excerpts fit, the last
             # truncated) reachable.
@@ -1816,7 +1816,7 @@ def test_build_messages_tokenizer_budget_respected():
     ]
 
     settings = Settings(
-        llm_max_model_len=1621,
+        llm_max_model_len=1629,
         llm_reserved_output_tokens=250,
         llm_thinking_reserve_tokens_simple=0,  # knife edge independent of #777 defaults
         llm_token_safety_margin=100,
@@ -3523,11 +3523,14 @@ def test_is_abstention_whole_response_controls():
 
 
 def test_structured_decline_leads_and_partial_answers_keep_the_whole_response_rule():
-    """Issue #764: a response whose first prose sentence is the prompt's
-    fixed decline prefix followed by the missing identifier or topic is an
-    abstention, whatever coverage note follows. Only the leading, unquoted
-    prefix with a non-empty subject counts: anywhere else, quoted, or
-    without a subject, the #630 whole-response rule decides."""
+    """Issue #764: a response that leads with rule 4's whole-question decline
+    prefix followed by the missing identifier or topic is an abstention,
+    whatever coverage note follows. The prefix states that nothing answers
+    the question, so a scope caveat before a partial answer ("X is not
+    covered") never matches it. Only the leading, unquoted prefix with a
+    subject that names something counts (the subject may sit on the next
+    line, and a leading Markdown heading is scaffolding); anywhere else,
+    quoted, or without a subject, the #630 whole-response rule decides."""
     from mainframe_rag.agent.answer import SYSTEM_PROMPT, is_structured_decline
 
     assert SYSTEM_PROMPT.count(DECLINE_PREFIX) == 1, "rule 4 anchors the exact prefix"
@@ -3537,13 +3540,19 @@ def test_structured_decline_leads_and_partial_answers_keep_the_whole_response_ru
         f"**{DECLINE_PREFIX} IEA500I.** They cover only the message text.",
         f"Answer: {DECLINE_PREFIX.lower()} CSQW100I",
         f"{DECLINE_PREFIX} JES2 checkpoint retries. The supplied excerpts cover JES2 checkpoint sizing [1].",
+        f"{DECLINE_PREFIX}\nIEA500I",  # subject on the next line
+        f"**{DECLINE_PREFIX}**\n**CSQW100I**",
+        f"## {DECLINE_PREFIX} CSQW100I\nThe excerpts cover CSQ6SYSP parameters only.",
+        f"### Diagnosis\n{DECLINE_PREFIX} CSQW100I.",  # complex-query heading first
     ]
     not_declines = [
         f'The operator saw "{DECLINE_PREFIX} IEA500I." in the console log.',
         f"Run CHECK first. {DECLINE_PREFIX} IEA500I.",
         f"Set RETRY=5 [1].\n{DECLINE_PREFIX} IEA500I.",
         f"`{DECLINE_PREFIX} IEA500I.` is printed when RETRY=0 [1].",
-        "Not covered by the supplied excerpts in full; set RETRY=5 [1].",
+        # A scope caveat leading a partial answer stays a mixed answer (#630).
+        "Not covered by the supplied excerpts: EDSALIMIT. MXT is set in the SIT as MXT=nnn [1].",
+        "EDSALIMIT is not covered by the supplied excerpts; MXT is set in the SIT as MXT=nnn [1].",
         # The retired #764 sentence no longer qualifies on its own lead.
         "The excerpts do not answer this question.\nThey cover JES2 checkpoint sizing [1].",
     ]
@@ -3553,10 +3562,19 @@ def test_structured_decline_leads_and_partial_answers_keep_the_whole_response_ru
     for body in not_declines:
         assert is_structured_decline(body) is False, body
         assert is_abstention(body) is False, body
-    # A bare prefix names nothing: not the structured form, though as a
-    # whole-response refusal (#630) it still abstains.
-    assert is_structured_decline(DECLINE_PREFIX) is False
+    # A subject must name something: punctuation or a bare index does not.
+    for body in (DECLINE_PREFIX, f"{DECLINE_PREFIX} —.", f"{DECLINE_PREFIX} [1]."):
+        assert is_structured_decline(body) is False, body
+    # The bare prefix is still a whole-response refusal (#630).
     assert is_abstention(DECLINE_PREFIX) is True
+
+
+def test_a_lead_decline_followed_by_an_answer_is_the_conservative_abstention():
+    """docs/agent.md state precedence: a model that leads with the decline and
+    then answers anyway breaks rule 4 and is classified as an abstention
+    (citations zeroed), never a false accepted."""
+    body = f"{DECLINE_PREFIX} IEA500I.\nSet RETRY=5 in IEASYSxx [1]. Then restart the task [2]."
+    assert is_abstention(body) is True
 
 
 @pytest.mark.parametrize("stream", [False, True])
