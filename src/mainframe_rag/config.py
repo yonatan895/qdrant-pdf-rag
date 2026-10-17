@@ -210,8 +210,10 @@ class Settings(BaseSettings):
     # Context budgeting via tokenizer accounting:
     # budget = max_model_len - reserved_output_tokens - measured_system_prompt - safety_margin
     # Must not exceed the served window (#777: 32768 for Qwen3.8-27B; the
-    # model's native 262144 is not served). The reserves only shape the prompt
-    # budget: no max_tokens is sent, so generation is bounded by the server.
+    # model's native 262144 is not served). With a server-verified prompt
+    # count, the answer reserve plus the path's thinking reserve is also sent
+    # as max_tokens, so a runaway generation ends as `length` instead of
+    # running to the window (answer_core._output_cap).
     # Visible answers reached 2331 tokens in #759, above the old 1536 reserve.
     llm_max_model_len: int = Field(default=32768, ge=512, le=131072)
     llm_reserved_output_tokens: int = Field(default=2560, ge=128, le=16384)

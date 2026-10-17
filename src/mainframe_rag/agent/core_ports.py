@@ -56,10 +56,10 @@ type ModelEvent = ModelToken | ModelDone
 class AnswerModel(Protocol):
     async def chat(
         self, messages: list[ChatMessage], reasoning_effort: str | None = None,
-        temperature: float | None = None,
+        temperature: float | None = None, max_tokens: int | None = None,
     ) -> ChatResult: ...
 
     def stream(
         self, messages: list[ChatMessage], reasoning_effort: str,
-        temperature: float,
+        temperature: float, max_tokens: int | None = None,
     ) -> AsyncGenerator[ModelEvent]: ...

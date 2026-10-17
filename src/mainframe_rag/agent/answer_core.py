@@ -222,6 +222,24 @@ def _resolve_reasoning_effort(
     )
 
 
+def _output_cap(settings: Settings, complexity: str, prepared: PreparedPrompt) -> int | None:
+    """Completion cap (#777): the answer reserve plus the path's thinking
+    reserve, exactly the terms the prompt budget priced, so a runaway
+    generation ends as `length` (generation_incomplete) instead of running to
+    the served window. Sent only when the prompt count was verified against
+    the server tokenizer: then prompt + cap <= window - safety margin, and the
+    server cannot reject it. An estimator-only prompt keeps no cap rather
+    than risk an over-window request."""
+    if not prepared.budget_verified:
+        return None
+    thinking = (
+        settings.llm_thinking_reserve_tokens_complex
+        if complexity == "complex"
+        else settings.llm_thinking_reserve_tokens_simple
+    )
+    return settings.llm_reserved_output_tokens + thinking
+
+
 async def _build_prepared_prompt(
     input_data: AnswerCoreInput,
     deps: AnswerCoreDeps,
@@ -446,6 +464,7 @@ async def execute_answer_core(
                 prepared.messages,
                 reasoning_effort=effort,
                 temperature=temperature,
+                max_tokens=_output_cap(settings, complexity, prepared),
             )
             llm_span.set_attributes(
                 {
@@ -521,7 +540,9 @@ async def execute_answer_core_stream(
     finish_reason: str | None = None
     usage = TokenUsage()
 
-    stream_gen = deps.llm.stream(prepared.messages, effort, temperature)
+    stream_gen = deps.llm.stream(
+        prepared.messages, effort, temperature, _output_cap(settings, complexity, prepared)
+    )
 
     with start_as_current_span(
         tracer,
