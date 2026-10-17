@@ -90,11 +90,14 @@ def create_app(store: FeedbackStore, token: str, *, retention_days: int = 180) -
         return {"id": rating_id, "endpoint": endpoint, "verification_state": state}
 
     @app.post("/v1/purge")
-    def purge() -> dict[str, int]:
-        """Enforce the retention window (explicit operator action, ADR-0005)."""
-        counts = store.purge(retention_days=retention_days)
-        log.info(json_log("feedback", "feedback_purge", **counts))
-        return counts
+    def purge() -> dict[str, int | bool]:
+        """Enforce the retention window (explicit operator action, ADR-0005).
+        `wal_truncated: false` means a concurrent reader deferred removing the
+        purged text from disk; rerun the purge after it (idempotent)."""
+        result = store.purge(retention_days=retention_days)
+        level = logging.INFO if result["wal_truncated"] else logging.WARNING
+        log.log(level, json_log("feedback", "feedback_purge", **result))
+        return result
 
     return app
 

@@ -40,7 +40,7 @@ def store(tmp_path):
 def test_answer_and_rating_round_trip_exactly(store):
     assert store.record_answer(_record()) is True
     rid = store.add_rating(Rating(request_id=RID, rating="bad", reasons=["incomplete", "too_slow"],
-                                  comment=COMMENT, rater=None))
+                                  comment=COMMENT))
     answer = store.answer(RID)
     assert answer is not None
     assert (answer["query"], answer["answer"], answer["endpoint"]) == (QUERY, ANSWER, "console")
@@ -48,8 +48,8 @@ def test_answer_and_rating_round_trip_exactly(store):
     assert answer["telemetry"]["prompt_tokens"] == 5460 and answer["telemetry"]["budget_verified"] is True
     rating = store.rating(RID)
     assert rating["id"] == rid
-    assert (rating["rating"], rating["reasons"], rating["comment"], rating["rater"]) == (
-        "bad", ["incomplete", "too_slow"], COMMENT, None)
+    assert rating == {"id": rid, "created_at": rating["created_at"], "rating": "bad",
+                      "reasons": ["incomplete", "too_slow"], "comment": COMMENT}
 
 
 def test_first_record_wins_so_a_rated_answer_is_never_rewritten(store):
@@ -99,7 +99,7 @@ def test_purge_removes_expired_answers_with_their_ratings_only(tmp_path):
     s.add_rating(Rating(request_id="aaaaaaaaaaaa", rating="bad"))
     now[0] = 200 * 86400.0
     s.record_answer(_record("bbbbbbbbbbbb"))
-    assert s.purge(retention_days=180) == {"answers": 1, "ratings": 1}
+    assert s.purge(retention_days=180) == {"answers": 1, "ratings": 1, "wal_truncated": True}
     assert s.answer("aaaaaaaaaaaa") is None and s.rating("aaaaaaaaaaaa") is None
     assert s.answer("bbbbbbbbbbbb") is not None
     # The next ordinary operation after cleanup still works.
@@ -157,7 +157,7 @@ def test_service_owns_purge_and_the_next_write_still_works(tmp_path):
     auth = {"Authorization": f"Bearer {TOKEN}"}
     client.post("/v1/answers", json=_record("aaaaaaaaaaaa").model_dump(), headers=auth)
     now[0] = 181 * 86400.0
-    assert client.post("/v1/purge", headers=auth).json() == {"answers": 1, "ratings": 0}
+    assert client.post("/v1/purge", headers=auth).json() == {"answers": 1, "ratings": 0, "wal_truncated": True}
     assert s.answer("aaaaaaaaaaaa") is None
     assert client.post("/v1/answers", json=_record("bbbbbbbbbbbb").model_dump(), headers=auth).json() == {
         "recorded": True}
@@ -191,7 +191,7 @@ def test_purged_and_replaced_text_does_not_survive_on_disk(tmp_path):
     store.add_rating(Rating(request_id="aaaaaaaaaaaa", rating="bad", comment="PURGED-COMMENT-CANARY"))
     store.add_rating(Rating(request_id="bbbbbbbbbbbb", rating="bad", comment="REPLACED-COMMENT-CANARY"))
     store.add_rating(Rating(request_id="bbbbbbbbbbbb", rating="good", comment="kept"))
-    assert store.purge(retention_days=180) == {"answers": 1, "ratings": 1}
+    assert store.purge(retention_days=180) == {"answers": 1, "ratings": 1, "wal_truncated": True}
     on_disk = b"".join(p.read_bytes() for p in tmp_path.iterdir() if p.is_file())
     for canary in (b"PURGED-QUERY-CANARY", b"PURGED-ANSWER-CANARY", b"PURGED-COMMENT-CANARY",
                    b"REPLACED-COMMENT-CANARY"):
@@ -200,3 +200,44 @@ def test_purged_and_replaced_text_does_not_survive_on_disk(tmp_path):
     assert store.record_answer(AnswerRecord(request_id="cccccccccccc", endpoint="chat", query="q2",
                                             answer="a2"))
     store.close()
+
+
+def test_purge_under_a_held_reader_reports_the_wal_untruncated_fast_then_the_retry_completes(tmp_path):
+    """A concurrent read snapshot (WAL lets an export run alongside) blocks the
+    WAL truncation: purge must say so at once, not report success after
+    stalling every writer, and the next purge, once the reader is gone,
+    removes the text from disk."""
+    import sqlite3
+    import time
+
+    now = [10_000_000.0]
+    path = tmp_path / "feedback.sqlite3"
+    store = FeedbackStore(path, clock=lambda: now[0])
+    store.record_answer(AnswerRecord(request_id="aaaaaaaaaaaa", endpoint="answer", query="HELD-CANARY",
+                                     answer="a", finalized_at=now[0] - 200 * 86400))
+    reader = sqlite3.connect(str(path))
+    reader.execute("BEGIN")
+    reader.execute("SELECT COUNT(*) FROM answers").fetchone()
+    started = time.monotonic()
+    assert store.purge(retention_days=180) == {"answers": 1, "ratings": 0, "wal_truncated": False}
+    assert time.monotonic() - started < 1.0
+    assert store.record_answer(AnswerRecord(request_id="bbbbbbbbbbbb", endpoint="chat", query="q",
+                                            answer="a"))  # writers are not stalled
+    reader.rollback()
+    reader.close()
+    assert store.purge(retention_days=180) == {"answers": 0, "ratings": 0, "wal_truncated": True}
+    on_disk = b"".join(p.read_bytes() for p in tmp_path.iterdir() if p.is_file())
+    assert b"HELD-CANARY" not in on_disk
+    assert store.answer("bbbbbbbbbbbb") is not None
+    store.close()
+
+
+def test_service_refuses_a_rater_field(store):
+    """No attribution until its provenance is proven (PR B): a token holder
+    cannot write an unverified rater."""
+    store.record_answer(_record())
+    client = TestClient(create_app(store, TOKEN))
+    response = client.post("/v1/ratings", json={"request_id": RID, "rating": "good", "rater": "someone"},
+                           headers={"Authorization": f"Bearer {TOKEN}"})
+    assert (response.status_code, response.json()["code"]) == (422, "invalid_request")
+    assert store.rating(RID) is None

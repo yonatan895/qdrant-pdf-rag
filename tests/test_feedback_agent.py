@@ -178,10 +178,14 @@ async def test_rating_outcomes_are_fixed_and_counted_only_when_accepted(monkeypa
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("status", [401, 405, 500])
-async def test_unexpected_rating_status_is_unavailable_and_logged_by_status(caplog, status):
+@pytest.mark.parametrize("status,code", [(401, "unauthorized"), (405, "method_not_allowed"),
+                                         (500, "internal_error"), (404, "not_found")])
+async def test_unexpected_rating_status_is_unavailable_and_logged_by_status(caplog, status, code):
+    """Only the service's unknown_answer 404 means "not recorded"; a route 404
+    (a wrong FEEDBACK_URL prefix) is a misconfiguration and must be visible."""
     async with httpx2.AsyncClient(transport=httpx2.MockTransport(
-            lambda request: httpx2.Response(status, json={"message": "SYNTHETIC-UPSTREAM"}))) as http:
+            lambda request: httpx2.Response(status, json={"code": code,
+                                                          "message": "SYNTHETIC-UPSTREAM"}))) as http:
         client = FeedbackClient(_settings(), client=http)
         with caplog.at_level("WARNING", logger="feedback"):
             result = await client.rate(Rating(request_id=RID, rating="bad", comment="SYNTHETIC-COMMENT"))
@@ -234,7 +238,8 @@ def test_rater_is_never_taken_from_a_forwarded_header(feedback_client):
     user header proves nothing: no rater is recorded (deferred to PR B)."""
     feedback_client.post("/ui/feedback", json={"request_id": RID, "rating": "good"},
                          headers={"X-Forwarded-User": "operator-a"})
-    assert RecordingFeedback.instances[0].ratings[-1].rater is None
+    forwarded = RecordingFeedback.instances[0].ratings[-1].model_dump()
+    assert "rater" not in forwarded and "operator-a" not in json.dumps(forwarded)
 
 
 @pytest.mark.parametrize("route", ["json", "form"])
@@ -252,7 +257,7 @@ def test_duplicate_reasons_are_a_fixed_422_never_a_500(feedback_client, route):
 
 
 @pytest.mark.parametrize("outcome,text", [
-    ("unknown", "not recorded yet"),
+    ("unknown", "not recorded, or not yet"),
     ("unavailable", "feedback is temporarily unavailable"),
 ])
 def test_htmx_rating_failures_are_swappable_and_say_why(feedback_client, outcome, text):
@@ -262,7 +267,25 @@ def test_htmx_rating_failures_are_swappable_and_say_why(feedback_client, outcome
     response = feedback_client.post("/ui/feedback/form", data={"request_id": RID, "rating": "bad"},
                                     headers={"HX-Request": "true"})
     assert response.status_code == 200 and text in response.text
-    assert "<html" not in response.text
+    assert "<html" not in response.text and "<div" not in response.text  # text for the status slot
+
+
+def test_htmx_rating_form_keeps_itself_so_a_failed_rating_can_be_retried(feedback_client):
+    page = feedback_client.post("/ui/chat", data={"message": QUERY, "messages": ""},
+                                headers={"HX-Request": "true"})
+    form = page.text[page.text.index('<form class="turn-feedback"'):]
+    form = form[:form.index("</form>")]
+    assert 'hx-target="find .feedback-status"' in form and 'hx-swap="innerHTML"' in form
+    assert 'class="feedback-status" role="status"' in form and "outerHTML" not in form
+
+
+def test_every_rate_outcome_has_a_fixed_console_response():
+    from typing import get_args
+
+    from mainframe_rag.feedback.client import RateOutcome
+    from mainframe_rag.webui.routes import _FEEDBACK_OUTCOMES
+
+    assert set(_FEEDBACK_OUTCOMES) == set(get_args(RateOutcome))
 
 
 def test_no_js_rating_opens_a_full_page_and_keeps_the_console(feedback_client):

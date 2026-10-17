@@ -311,25 +311,31 @@ retention: [observability](observability.md#data-tiers).
   `FEEDBACK_DRAIN_TIMEOUT_S` and counts whatever is left as dropped.
 - **Ratings:** `POST /ui/feedback {request_id, rating, reasons, comment}` from
   the streaming console, and `POST /ui/feedback/form` (form-encoded) from the
-  fallback console, with the same validation and codes. An htmx request gets a
-  fragment that replaces the form, always status 200 like the `/ui/chat` banner
-  (htmx 1.9 never swaps a 4xx/5xx). A native post without JS opens in a new tab,
-  so the console page and its conversation stay, and gets a full page with the
-  real status. An unsent rating (choice, reasons, comment) survives the
-  console's re-renders in page memory; it is never stored.
+  fallback console, with the same validation and codes. An htmx request gets the
+  result text for the form's status slot, always status 200 like the `/ui/chat`
+  banner (htmx 1.9 never swaps a 4xx/5xx); the form stays, so a failed rating
+  can be retried. A native post without JS opens in a new tab, so the console
+  page and its conversation stay, and gets a full page with the real status.
+  In the streaming console the rating box is re-derived from page-memory state
+  (choice, reasons, comment, in-flight send, last error) whenever the articles
+  are rebuilt, and focus and caret inside it are restored; nothing is stored.
   - `request_id` must be the 12-hex server id; extra fields, such as an answer
     text, are refused with 422.
   - The store attaches the rating to its own record and refuses unknown ids:
     404 `unknown_answer`. One rating per answer: a resend converges and
     re-rating replaces it, so retries and double submits are idempotent.
-    Delivery is asynchronous, so the message says "not recorded yet" rather
-    than claiming the refusal is final.
+    Delivery is asynchronous and records can be dropped or purged, so the
+    message ("not recorded, or not yet") promises neither a final refusal nor a
+    successful retry. Only the service's `unknown_answer` 404 maps here; any
+    other 404 (such as a wrong `FEEDBACK_URL` path) is `feedback_unavailable`
+    and logged.
   - Reasons must be distinct.
   - Other fixed codes: 422 `invalid_request`, 503 `feedback_unavailable` (an
     unexpected service status is logged by status only), 404 `feedback_disabled`.
-  - No rater identity is recorded. The agent port is reachable without the
-    OAuth proxy, so a forwarded-user header proves nothing. Attribution needs
-    proven header provenance from the deployment (PR B).
+  - No rater identity is recorded or accepted: the service refuses a `rater`
+    field (422). The agent port is reachable without the OAuth proxy, so a
+    forwarded-user header proves nothing; attribution needs proven header
+    provenance from the deployment (PR B).
   - `rag.feedback.ratings` counts accepted submissions, re-ratings included;
     the store (latest rating per answer) is the authority on rated answers.
 - **Store and service** (`mainframe_rag.feedback`): SQLite in WAL mode, owned
@@ -341,8 +347,11 @@ retention: [observability](observability.md#data-tiers).
   `not_found`, `method_not_allowed`, `internal_error`); JSON-line logs with
   `request_id` and counts only. Retention is enforced by the authenticated
   `POST /v1/purge`, an explicit operator action and never implicit. The store
-runs with `secure_delete` and the purge truncates the WAL, so purged text does
-not survive on disk. The JSONL
+runs with `secure_delete` and the purge then truncates the WAL, so purged text
+leaves the disk. A concurrent read snapshot (an export) makes the truncation
+busy: the purge does not wait (writers would stall), returns
+`wal_truncated: false` and logs a warning, and rerunning it afterwards
+completes the removal. The JSONL
   export/import, which also makes a later Postgres move testable, is phase 2.
   Deployment (the single-replica StatefulSet, PVC, Secret and purge schedule)
   is phase 1 PR B.
@@ -371,10 +380,10 @@ status (`/ui` failures render HTML banners instead, §1):
 | `invalid_request` / `request body failed validation` | 422 | Pydantic failure, the shared query guard (overlong, empty after `str.strip()`, or containing NUL/C0 controls other than `\t\n\r`, issue #579; or, when `embed_max_input_chars` is set, a query whose dense text — prefix plus query — exceeds it, issue #374: refused before any model call, never truncated; an effective query that only grows past the bound after expansion/condensation is refused by the embedder with the same envelope), and a chat/console active `user` turn that is missing, blank, control-character or overlong (one message, every 422 path) |
 | `overloaded` / `the service is at capacity; retry later` | 503 + `Retry-After: 1` | Request admission refused (issue #374): all `request_max_concurrent` slots busy and the bounded wait queue full or its wait expired. Raised first, before validation, the serving gate and any retrieval/model work; only when a limit is selected. `/ui/chat` renders its fixed banner; `/ui/chat/stream` returns this envelope |
 | `deadline_exceeded` / `request deadline exceeded` | 504 | Total request deadline (`request_deadline_s`, issue #374) expired before the response began; on an already-open stream it is an `error` event (no `final`, `generation_incomplete`) instead. Only when a deadline is selected |
-| `unknown_answer` / `this answer is not recorded yet; try again in a moment` | 404 | Console rating (`/ui/feedback`, issue #780) for a `request_id` the feedback store never recorded (record dropped, failed or purged) |
+| `unknown_answer` / `this answer is not recorded, or not yet; it cannot be rated now` | 404 | Console rating (`/ui/feedback`, issue #780) for a `request_id` the feedback store does not hold: still queued, or dropped, failed or purged |
 | `feedback_disabled` / `feedback is not enabled on this deployment` | 404 | `/ui/feedback` while `FEEDBACK_ENABLED` is false |
 | `feedback_unavailable` / `feedback is temporarily unavailable` | 503 | `/ui/feedback`: the feedback service is unreachable, times out or answers an unexpected status (type logged only) |
-| `invalid_request` / `the rating is invalid` | 422 | `/ui/feedback`: the feedback service refused the rating shape. The form fallback `/ui/feedback/form` renders the same fixed texts as HTML: status 200 for htmx, the real status for a native post |
+| `invalid_request` / `the rating is invalid` | 422 | `/ui/feedback`: the feedback service refused the rating shape. The form fallback `/ui/feedback/form` renders the same fixed texts: status 200 text for the htmx status slot, a full page with the real status for a native post |
 | `prompt_budget_exceeded` / `prompt exceeds the model token budget` | 422 | Irreducible token-budget overflow (issue #368): fixed content alone exceeds the window with nothing left to trim, or (issue #634) hits were retrieved but final packing supplied no usable excerpt (atomic-unit omission, verification trimming, whitespace-only text); the second case is the `EvidenceBudgetExceeded` subtype, logged/spanned under that type but identical on the wire; raised before any model call on JSON/chat, as an `error` event (no `final`) on already-open streams; `/ui/chat` renders its fixed banner |
 | `unsupported_reasoning_effort` / `the reasoning effort is not offered by this deployment` | 422 | Console only (#748): the requested effort is outside `LLM_REASONING_EFFORTS`; refused before any model call. `/ui/chat` renders its fixed banner; `/ui/chat/stream` returns this envelope |
 | `metrics_unavailable` / `metrics are not available` | 503 | `/metrics` scrape failure while enabled |

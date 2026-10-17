@@ -1204,15 +1204,22 @@ class _RecordingFeedback:
     """Feedback-client double installed after lifespan: what the console sends."""
 
     def __init__(self, outcome: str = "ok") -> None:
+        import threading
+
         self.outcome = outcome
         self.ratings: list = []
         self.records: list = []
+        self.gate = threading.Event()  # cleared = the rating request stays in flight
+        self.gate.set()
 
     def submit(self, record) -> None:
         self.records.append(record)
 
     async def rate(self, rating) -> str:
+        import asyncio
+
         self.ratings.append(rating)
+        await asyncio.to_thread(self.gate.wait, 15)
         return self.outcome
 
 
@@ -1227,6 +1234,7 @@ def _with_feedback(console, browser, monkeypatch, outcome: str = "ok") -> _Recor
 
 
 FIRST_RATING = "#messages .turn-assistant .turn-feedback"  # querySelector: the first answer
+UNKNOWN_TEXT = "this answer is not recorded, or not yet; it cannot be rated now"
 
 
 def _reach(b: Browser, css: str) -> str:
@@ -1260,8 +1268,8 @@ def test_unsent_rating_draft_survives_a_rerender_then_sends_once_and_persists(
                  what="rated state")
     [rating] = feedback.ratings
     first_id = store(browser)["sessions"][store(browser)["active"]]["turns"][1]["request_id"]
-    assert (rating.request_id, rating.rating, rating.reasons, rating.comment, rating.rater) == (
-        first_id, "bad", ["incomplete"], "SYNTHETIC draft comment", None)
+    assert (rating.request_id, rating.rating, rating.reasons, rating.comment) == (
+        first_id, "bad", ["incomplete"], "SYNTHETIC draft comment")
     browser.reload()
     browser.wait("return document.querySelectorAll('#messages .turn-assistant').length==2")
     assert text(browser, FIRST_RATING) == "Rated: bad"
@@ -1277,10 +1285,53 @@ def test_rating_failure_shows_the_fixed_reason_and_keeps_the_draft(console, brow
     browser.click(_reach(browser, FIRST_RATING + " .feedback-submit"))
     browser.wait("return document.querySelector(arguments[0]+' .feedback-status').textContent.length>0",
                  FIRST_RATING, what="failure status")
-    assert text(browser, FIRST_RATING + " .feedback-status") == (
-        "this answer is not recorded yet; try again in a moment")
+    assert text(browser, FIRST_RATING + " .feedback-status") == UNKNOWN_TEXT
     feedback.outcome = "ok"
     browser.click(_reach(browser, FIRST_RATING + " .feedback-submit"))
     browser.wait("return document.querySelector(arguments[0]).textContent === 'Rated: good'", FIRST_RATING,
                  what="rated on retry")
     assert [r.comment for r in feedback.ratings] == ["SYNTHETIC", "SYNTHETIC"]
+
+
+def test_typing_in_a_rating_comment_survives_a_turn_completing(console, browser, monkeypatch):
+    _with_feedback(console, browser, monkeypatch)
+    send(browser, "What is IEA500I?")
+    wait_state(browser, "complete")
+    console.llm.queue(("token", "Second answer. "), ("gate", "second"), ("token", FINAL_ANSWER), ("done",))
+    send(browser, "Again")
+    browser.wait("return !!document.querySelector('.turn-assistant[data-state=streaming] .md p')")
+    browser.click(_reach(browser, FIRST_RATING + ' .feedback-rating[data-rating="neutral"]'))
+    browser.type(_reach(browser, FIRST_RATING + " .feedback-comment"), "half a sen")
+    console.llm.release("second")  # completion rebuilds every article
+    wait_state(browser, "complete", 2)
+    assert browser.eval(
+        "var a=document.activeElement;return [a.classList.contains('feedback-comment'), a.selectionStart,"
+        " a.closest('[data-feedback-for]')===document.querySelector(arguments[0])]", FIRST_RATING,
+    ) == [True, len("half a sen"), True]
+    browser.keys(*"tence")  # keystrokes after the rebuild land in the same field
+    assert browser.eval("return document.querySelector(arguments[0]+' .feedback-comment').value",
+                        FIRST_RATING) == "half a sentence"
+
+
+def test_a_rebuild_during_an_in_flight_rating_keeps_the_live_box_truthful(console, browser, monkeypatch):
+    feedback = _with_feedback(console, browser, monkeypatch, outcome="unknown")
+    send(browser, "What is IEA500I?")
+    wait_state(browser, "complete")
+    browser.click(_reach(browser, FIRST_RATING + ' .feedback-rating[data-rating="bad"]'))
+    feedback.gate.clear()
+    browser.click(_reach(browser, FIRST_RATING + " .feedback-submit"))
+    import time
+
+    deadline = time.monotonic() + 15
+    while not feedback.ratings:  # the request reached the (gated) client: in flight
+        assert time.monotonic() < deadline, "rating never reached the client"
+        time.sleep(0.02)
+    send(browser, "Again")  # rebuilds the articles while the rating is pending
+    wait_state(browser, "complete", 2)
+    assert browser.eval("return document.querySelector(arguments[0]+' .feedback-submit').disabled",
+                        FIRST_RATING) is True
+    feedback.gate.set()
+    browser.wait("return document.querySelector(arguments[0]+' .feedback-status').textContent===arguments[1]",
+                 FIRST_RATING, UNKNOWN_TEXT, what="failure shown in the live box")
+    assert browser.eval("return document.querySelector(arguments[0]+' .feedback-submit').disabled",
+                        FIRST_RATING) is False

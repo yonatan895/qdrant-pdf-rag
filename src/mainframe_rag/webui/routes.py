@@ -127,10 +127,12 @@ class UiFeedbackRequest(BaseModel):
 
 
 _FEEDBACK_DISABLED_TEXT = "feedback is not enabled on this deployment"
-_FEEDBACK_ERRORS = {
-    # The record may still be queued (delivery is asynchronous) or was
-    # dropped/purged: the text must not claim the refusal is final.
-    "unknown": (404, "unknown_answer", "this answer is not recorded yet; try again in a moment"),
+# One fixed console response per client outcome (status, code, message); a
+# test pins the keys to RateOutcome. The unknown text covers both a record
+# still queued and one dropped or purged, so it promises neither.
+_FEEDBACK_OUTCOMES: dict[str, tuple[int, str | None, str]] = {
+    "ok": (201, None, "Rated"),
+    "unknown": (404, "unknown_answer", "this answer is not recorded, or not yet; it cannot be rated now"),
     "invalid": (422, "invalid_request", "the rating is invalid"),
     "unavailable": (503, "feedback_unavailable", "feedback is temporarily unavailable"),
 }
@@ -1020,19 +1022,20 @@ async def ui_feedback(request: Request, req: UiFeedbackRequest) -> Response:
     if client is None:
         return _secure(JSONResponse(status_code=404, content={
             "code": "feedback_disabled", "message": _FEEDBACK_DISABLED_TEXT}))
-    outcome = await _submit_rating(client, req)
-    if outcome == "ok":
-        return _secure(JSONResponse(status_code=201, content={"status": "recorded"}))
-    status, code, message = _FEEDBACK_ERRORS[outcome]
+    status, code, message = await _rate(client, req)
+    if code is None:
+        return _secure(JSONResponse(status_code=status, content={"status": "recorded"}))
     return _secure(JSONResponse(status_code=status, content={"code": code, "message": message}))
 
 
 @router.post("/feedback/form", response_class=HTMLResponse)
 async def ui_feedback_form(request: Request) -> Response:
     """Fallback console rating (#780): the same validation, store call and
-    fixed texts as /ui/feedback. An htmx request gets a fragment that replaces
-    the form, always 200 like the /ui/chat banner (htmx 1.9 never swaps a 4xx/5xx);
-    a native post (no JS, opened in a new tab) gets a full page with the real status."""
+    fixed texts as /ui/feedback. An htmx request gets the result text for the
+    form's status slot, always 200 like the /ui/chat banner (htmx 1.9 never
+    swaps a 4xx/5xx); the form stays, so a failed rating can be retried and a
+    re-rating replaces the last. A native post (no JS, opened in a new tab)
+    gets a full page with the real status."""
     client = _feedback_client()
     if client is None:
         return _feedback_result(request, _FEEDBACK_DISABLED_TEXT, 404)
@@ -1044,29 +1047,28 @@ async def ui_feedback_form(request: Request) -> Response:
             "comment": str(form.get("comment", "")),
         })
     except ValidationError:
-        status, _code, message = _FEEDBACK_ERRORS["invalid"]
+        status, _code, message = _FEEDBACK_OUTCOMES["invalid"]
         return _feedback_result(request, message, status)
-    outcome = await _submit_rating(client, req)
-    if outcome == "ok":
-        return _feedback_result(request, f"Rated: {req.rating}", 201)
-    status, _code, message = _FEEDBACK_ERRORS[outcome]
+    status, _code, message = await _rate(client, req)
     return _feedback_result(request, message, status)
 
 
-async def _submit_rating(client: Any, req: UiFeedbackRequest) -> str:
+async def _rate(client: Any, req: UiFeedbackRequest) -> tuple[int, str | None, str]:
+    """Submit the rating and resolve the client's outcome to its one fixed response."""
     from mainframe_rag.feedback.store import Rating
 
-    return str(await client.rate(Rating(request_id=req.request_id, rating=req.rating,
-                                        reasons=list(req.reasons), comment=req.comment)))
+    outcome = await client.rate(Rating(request_id=req.request_id, rating=req.rating,
+                                       reasons=list(req.reasons), comment=req.comment))
+    status, code, message = _FEEDBACK_OUTCOMES[outcome]
+    return status, code, f"Rated: {req.rating}" if code is None else message
 
 
 def _feedback_result(request: Request, text: str, status: int) -> Response:
-    fragment = f'<div class="turn-feedback" role="status">{html.escape(text)}</div>'
     if request.headers.get("HX-Request") == "true":
-        return _secure(HTMLResponse(fragment, status_code=200))
+        return _secure(HTMLResponse(html.escape(text), status_code=200))
     page = ('<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Answer rating</title>'
             '<link rel="stylesheet" href="/ui/static/css/console.css"></head>'
-            f'<body class="theme-dark"><main class="feedback-result">{fragment}'
+            f'<body class="theme-dark"><main class="feedback-result"><p role="status">{html.escape(text)}</p>'
             '<p>You can close this tab and return to the console.</p></main></body></html>')
     return _secure(HTMLResponse(page, status_code=status))
 

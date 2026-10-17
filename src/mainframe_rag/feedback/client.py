@@ -26,6 +26,14 @@ log = logging.getLogger("feedback")
 RateOutcome = Literal["ok", "unknown", "invalid", "unavailable"]
 
 
+def _code(response: Any) -> str | None:
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    return body.get("code") if isinstance(body, dict) else None
+
+
 class FeedbackClient:
     def __init__(self, settings: Settings, *, client: Any = None) -> None:
         if not (settings.feedback_url and settings.feedback_api_key):
@@ -84,11 +92,12 @@ class FeedbackClient:
             record_feedback_rating(rating.rating, list(rating.reasons), endpoint=str(body.get("endpoint")),
                                    verification_state=body.get("verification_state"))
             return "ok"
-        if response.status_code == 404:
+        if response.status_code == 404 and _code(response) == "unknown_answer":
             return "unknown"
         if response.status_code == 422:
             return "invalid"
-        # A token mismatch (401) or service fault must not look like silence.
+        # A token mismatch (401), a wrong FEEDBACK_URL path (route 404) or a
+        # service fault must not look like silence.
         log.warning(json_log(rating.request_id, "feedback_rating", error="status",
                              status=response.status_code))
         return "unavailable"

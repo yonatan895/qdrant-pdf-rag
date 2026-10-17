@@ -749,24 +749,70 @@
     ["too_slow", "Too slow"], ["other", "Other"],
   ];
   const FEEDBACK_ERROR_TEXT = "The rating could not be sent.";
-  // Unsent rating drafts by request id: renderMessages() rebuilds every
-  // article (another turn completing, a cross-tab write), and an operator's
-  // half-written rating must survive that. Page memory only, never stored.
+  // Unsent rating state by request id (choice, reasons, comment, in-flight
+  // send, last error): renderMessages() rebuilds every article (another turn
+  // completing, a cross-tab write), and the box is re-derived from this state.
+  // Page memory only, never stored; an entry exists only once the operator
+  // edits, and is dropped when the answer is rated or leaves every incident.
   const feedbackDrafts = new Map();
+  const EMPTY_DRAFT = Object.freeze({ rating: null, reasons: [], comment: "", sending: false, status: "" });
+
+  function editDraft(id) {
+    if (!feedbackDrafts.has(id)) feedbackDrafts.set(id, { ...EMPTY_DRAFT, reasons: [] });
+    return feedbackDrafts.get(id);
+  }
+
+  function pruneDrafts(store) {
+    const known = new Set();
+    for (const session of Object.values(store.sessions)) {
+      for (const stored of session.turns || []) {
+        if (typeof stored.request_id === "string" && !stored.feedback) known.add(stored.request_id);
+      }
+    }
+    for (const id of Array.from(feedbackDrafts.keys())) if (!known.has(id)) feedbackDrafts.delete(id);
+  }
+
+  // Focus inside a rating box survives a rebuild: renderMessages() captures
+  // the control before replacing the articles and restores it (and the caret)
+  // after, so keystrokes are not lost to <body>.
+  function captureFeedbackFocus() {
+    const active = document.activeElement;
+    const box = active && active.closest ? active.closest("[data-feedback-for]") : null;
+    if (!box) return null;
+    let selector = ".feedback-submit";
+    if (active.matches(".feedback-comment")) selector = ".feedback-comment";
+    else if (active.dataset.rating) selector = '.feedback-rating[data-rating="' + active.dataset.rating + '"]';
+    else if (active.type === "checkbox") selector = '.feedback-reasons input[value="' + active.value + '"]';
+    return {
+      id: box.dataset.feedbackFor, selector,
+      start: active.selectionStart, end: active.selectionEnd,
+    };
+  }
+
+  function restoreFeedbackFocus(saved) {
+    if (!saved) return;
+    const box = messagesEl.querySelector('[data-feedback-for="' + saved.id + '"]');
+    const target = box ? box.querySelector(saved.selector) : null;
+    if (!target) return;
+    target.focus();
+    if (typeof saved.start === "number" && target.setSelectionRange) {
+      target.setSelectionRange(saved.start, saved.end);
+    }
+  }
 
   function renderFeedback(turn) {
     if (document.body.dataset.feedback !== "on" || turn.role !== "assistant") return null;
     if (typeof turn.request_id !== "string" || !/^[0-9a-f]{12}$/.test(turn.request_id)) return null;
+    const id = turn.request_id;
     const box = el("div", "turn-feedback");
+    box.dataset.feedbackFor = id;
     if (turn.feedback) {
+      feedbackDrafts.delete(id);
       box.textContent = "Rated: " + turn.feedback;
       return box;
     }
+    const draft = feedbackDrafts.get(id) || EMPTY_DRAFT;
     box.appendChild(el("span", "feedback-label", "Rate this answer:"));
-    if (!feedbackDrafts.has(turn.request_id)) {
-      feedbackDrafts.set(turn.request_id, { rating: null, reasons: [], comment: "" });
-    }
-    const draft = feedbackDrafts.get(turn.request_id);
     const details = el("div", "feedback-details");
     details.hidden = !draft.rating;
     for (const [value, label] of FEEDBACK_RATINGS) {
@@ -775,7 +821,7 @@
       button.setAttribute("data-rating", value);
       button.setAttribute("aria-pressed", String(draft.rating === value));
       button.addEventListener("click", () => {
-        draft.rating = value;
+        editDraft(id).rating = value;
         box.querySelectorAll(".feedback-rating").forEach((other) => {
           other.setAttribute("aria-pressed", String(other === button));
         });
@@ -792,7 +838,7 @@
       checkbox.value = value;
       checkbox.checked = draft.reasons.includes(value);
       checkbox.addEventListener("change", () => {
-        draft.reasons = Array.from(reasons.querySelectorAll("input:checked")).map((input) => input.value);
+        editDraft(id).reasons = Array.from(reasons.querySelectorAll("input:checked")).map((input) => input.value);
       });
       option.appendChild(checkbox);
       option.appendChild(document.createTextNode(" " + label));
@@ -805,16 +851,21 @@
     comment.setAttribute("aria-label", "Comment (optional)");
     comment.value = draft.comment;
     comment.addEventListener("input", () => {
-      draft.comment = comment.value;
+      editDraft(id).comment = comment.value;
     });
     details.appendChild(comment);
     const submit = el("button", "btn feedback-submit", "Send rating");
     submit.type = "button";
-    const status = el("span", "feedback-status");
+    submit.disabled = draft.sending;
+    const status = el("span", "feedback-status", draft.status);
     status.setAttribute("role", "status");
     submit.addEventListener("click", async () => {
-      if (!draft.rating) return;
+      const sending = editDraft(id);
+      if (!sending.rating || sending.sending) return;
+      sending.sending = true;
+      sending.status = "";
       submit.disabled = true;
+      status.textContent = "";
       let ok = false;
       let message = FEEDBACK_ERROR_TEXT;
       try {
@@ -822,10 +873,10 @@
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            request_id: turn.request_id,
-            rating: draft.rating,
-            reasons: draft.reasons,
-            comment: draft.comment,
+            request_id: id,
+            rating: sending.rating,
+            reasons: sending.reasons,
+            comment: sending.comment,
           }),
         });
         ok = response.status === 201;
@@ -840,24 +891,30 @@
       } catch (err) {
         ok = false;
       }
-      if (!ok) {
-        status.textContent = message;
-        submit.disabled = false;
-        return;
-      }
-      const rated = draft.rating;
-      feedbackDrafts.delete(turn.request_id);
-      await mutate((store) => {
-        for (const session of Object.values(store.sessions)) {
-          for (const stored of session.turns || []) {
-            if (stored.request_id === turn.request_id) stored.feedback = rated;
+      sending.sending = false;
+      if (ok) {
+        const rated = sending.rating;
+        await mutate((store) => {
+          for (const session of Object.values(store.sessions)) {
+            for (const stored of session.turns || []) {
+              if (stored.request_id === id) stored.feedback = rated;
+            }
           }
-        }
-        return true;
-      });
-      turn.feedback = rated;
-      box.replaceChildren(document.createTextNode("Rated: " + rated));
-      announce("Rating sent.");
+          return true;
+        });
+        turn.feedback = rated;
+        announce("Rating sent.");
+      } else {
+        sending.status = message;
+      }
+      // The article may have been rebuilt while the request was in flight:
+      // redraw whichever box is live now, from the state.
+      const live = messagesEl.querySelector('[data-feedback-for="' + id + '"]');
+      if (live) {
+        const saved = captureFeedbackFocus();
+        live.replaceWith(renderFeedback(turn));
+        restoreFeedbackFocus(saved);
+      }
     });
     details.appendChild(submit);
     details.appendChild(status);
@@ -952,6 +1009,7 @@
   function renderMessages() {
     const current = currentSession();
     const session = current.session;
+    const feedbackFocus = captureFeedbackFocus();
     messagesEl.replaceChildren();
     if (!session.turns.length) {
       const empty = el("div", "empty-state");
@@ -975,6 +1033,8 @@
     if (streamingHere) messagesEl.appendChild(inflight.article);
     stick = true;
     messagesEl.scrollIntoView({ block: "end" });
+    pruneDrafts(loadStore());
+    restoreFeedbackFocus(feedbackFocus);
   }
 
   function startRename(id, row, openBtn) {

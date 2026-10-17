@@ -22,9 +22,10 @@ import time
 from pathlib import Path
 from typing import Annotated, Any, Literal, get_args
 
-from pydantic import AfterValidator, BaseModel, Field, field_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator
 
 SCHEMA_VERSION = 1
+_BUSY_TIMEOUT_MS = 5000  # sqlite3.connect's default; restored after the purge checkpoint
 
 # The one owner of the feedback vocabularies (issue #780): metrics labels, the
 # console route and console.js derive from these (a test pins console.js).
@@ -38,7 +39,6 @@ ENDPOINTS: tuple[str, ...] = get_args(Endpoint)
 REQUEST_ID_PATTERN = r"[0-9a-f]{12}"  # the agent's server-minted request id
 REQUEST_ID_RE = re.compile(REQUEST_ID_PATTERN)
 COMMENT_MAX_CHARS = 2000
-RATER_MAX_CHARS = 256
 
 Scalar = int | float | str | bool | None
 
@@ -86,13 +86,15 @@ class AnswerRecord(BaseModel):
 
 
 class Rating(BaseModel):
-    """One human rating of a recorded answer."""
+    """One human rating of a recorded answer. No rater identity: attribution
+    waits for proven header provenance (PR B), so an extra field is refused."""
+
+    model_config = ConfigDict(extra="forbid")
 
     request_id: str
     rating: RatingValue
     reasons: Reasons = Field(default_factory=list)
     comment: str = Field(default="", max_length=COMMENT_MAX_CHARS)
-    rater: str | None = Field(default=None, max_length=RATER_MAX_CHARS)
 
     @field_validator("request_id")
     @classmethod
@@ -123,8 +125,7 @@ CREATE TABLE IF NOT EXISTS ratings (
     created_at REAL NOT NULL,
     rating TEXT NOT NULL,
     reasons TEXT NOT NULL,
-    comment TEXT NOT NULL,
-    rater TEXT
+    comment TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS answers_created ON answers(created_at);
 """
@@ -137,7 +138,8 @@ class FeedbackStore:
     def __init__(self, path: Path, *, clock: Any = time.time) -> None:
         self._clock = clock
         self._lock = threading.Lock()
-        self._db = sqlite3.connect(str(path), check_same_thread=False, isolation_level=None)
+        self._db = sqlite3.connect(str(path), check_same_thread=False, isolation_level=None,
+                                   timeout=_BUSY_TIMEOUT_MS / 1000)
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute("PRAGMA foreign_keys=ON")
         self._db.execute("PRAGMA synchronous=NORMAL")
@@ -183,12 +185,12 @@ class FeedbackStore:
             if known is None:
                 raise UnknownAnswerError(rating.request_id)
             self._db.execute(
-                "INSERT INTO ratings (request_id, created_at, rating, reasons, comment, rater)"
-                " VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (request_id) DO UPDATE SET"
+                "INSERT INTO ratings (request_id, created_at, rating, reasons, comment)"
+                " VALUES (?, ?, ?, ?, ?) ON CONFLICT (request_id) DO UPDATE SET"
                 " created_at = excluded.created_at, rating = excluded.rating,"
-                " reasons = excluded.reasons, comment = excluded.comment, rater = excluded.rater",
+                " reasons = excluded.reasons, comment = excluded.comment",
                 (rating.request_id, self._clock(), rating.rating, json.dumps(rating.reasons),
-                 rating.comment, rating.rater),
+                 rating.comment),
             )
             row = self._db.execute(
                 "SELECT id FROM ratings WHERE request_id = ?", (rating.request_id,)
@@ -215,13 +217,13 @@ class FeedbackStore:
         """The answer's single rating (latest submission), or None."""
         with self._lock:
             r = self._db.execute(
-                "SELECT id, created_at, rating, reasons, comment, rater FROM ratings"
+                "SELECT id, created_at, rating, reasons, comment FROM ratings"
                 " WHERE request_id = ?", (request_id,)
             ).fetchone()
         if r is None:
             return None
         return {"id": r[0], "created_at": r[1], "rating": r[2], "reasons": json.loads(r[3]),
-                "comment": r[4], "rater": r[5]}
+                "comment": r[4]}
 
     def answer_labels(self, request_id: str) -> tuple[str, str | None] | None:
         """Bounded labels of a recorded answer (endpoint, verification state)
@@ -235,9 +237,12 @@ class FeedbackStore:
         state = json.loads(row[1]).get("verification_state")
         return row[0], state if isinstance(state, str) else None
 
-    def purge(self, *, retention_days: int) -> dict[str, int]:
+    def purge(self, *, retention_days: int) -> dict[str, int | bool]:
         """Delete answers (and, by cascade, their ratings) older than the
-        retention window. Explicit operator action, never implicit."""
+        retention window, then fold the WAL into the zeroed file and truncate
+        it. Explicit operator action, never implicit, and idempotent: a purge
+        that met a concurrent reader reports `wal_truncated: false` at once
+        (no busy wait that would stall writers) and the next purge completes."""
         if retention_days < 1:
             raise ValueError("retention_days must be at least 1")
         cutoff = self._clock() - retention_days * 86400
@@ -247,7 +252,11 @@ class FeedbackStore:
                 " (SELECT request_id FROM answers WHERE created_at < ?)", (cutoff,)
             ).fetchone()[0]
             answers = self._db.execute("DELETE FROM answers WHERE created_at < ?", (cutoff,)).rowcount
-            # Fold the WAL (which still holds pre-delete page images) into the
-            # zeroed database file and truncate it.
-            self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        return {"answers": int(answers), "ratings": int(ratings)}
+            # The WAL still holds pre-delete page images; a held read snapshot
+            # makes TRUNCATE busy, so do not wait (writers share this lock).
+            self._db.execute("PRAGMA busy_timeout=0")
+            try:
+                busy = self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0]
+            finally:
+                self._db.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
+        return {"answers": int(answers), "ratings": int(ratings), "wal_truncated": busy == 0}
