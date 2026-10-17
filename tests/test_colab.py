@@ -1336,16 +1336,39 @@ def test_snapshot_recovery_releases_owned_session_despite_changed_origin_then_ne
 
 
 @pytest.mark.parametrize("lab", ["COLAB_CPU_TRANSPORT"], indirect=True)
-def test_separate_run_states_share_assignment_ownership_and_allow_next_run(lab, monkeypatch):
+def test_separate_run_states_share_assignment_ownership_and_allow_next_run(lab, monkeypatch, capsys):
     root, state, _ = lab
     second = _prepare_new(state, root / "second-private-run")
     entered = []
     monkeypatch.setattr(controller.Run, "run", lambda self, approval, workload: entered.append(self.state) or 0)
     with controller.assignment_lock():
+        capsys.readouterr()
         assert _controller_call(["run", "--state", str(second), "--approve-cu", "20"]) == 2
         assert entered == [], "a distinct state bypassed assignment ownership"
+        # #789: the refusal names the holder instead of the generic prerequisite refusal.
+        refusal = capsys.readouterr().err
+        assert f"Colab assignment lock is held by PID {os.getpid()}; no allocation attempted." in refusal
+        assert "refused invalid/missing prerequisites" not in refusal
     assert _controller_call(["run", "--state", str(second), "--approve-cu", "20"]) == 0
     assert entered == [second]
+
+
+@pytest.mark.parametrize("lab", ["COLAB_CPU_TRANSPORT"], indirect=True)
+def test_assignment_holder_without_recorded_pid_is_still_named_busy(lab, monkeypatch, capsys):
+    import fcntl
+    root, state, _ = lab
+    second = _prepare_new(state, root / "unrecorded-holder-run")
+    monkeypatch.setattr(controller.Run, "run", lambda self, approval, workload: 0)
+    lock_path = Path("/tmp") / f"mainframe-rag-colab-{os.geteuid()}" / "assignment.lock"
+    lock_path.parent.mkdir(mode=0o700, exist_ok=True)
+    with os.fdopen(os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600), "r+b") as holder:
+        holder.truncate(0)
+        fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        capsys.readouterr()
+        assert _controller_call(["run", "--state", str(second), "--approve-cu", "20"]) == 2
+        assert "Colab assignment lock is held by an unrecorded PID; no allocation attempted." in capsys.readouterr().err
+    assert _controller_call(["run", "--state", str(second), "--approve-cu", "20"]) == 0
+    assert lock_path.read_bytes() == f"{os.getpid()}\n".encode()
 
 
 def test_slow_diagnostics_poll_is_not_ready_then_run_completes_and_next_run_works(lab, monkeypatch):

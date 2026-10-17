@@ -107,6 +107,14 @@ class LabError(RuntimeError):
     """Fixed local diagnostic; upstream text is preserved privately only."""
 
 
+class AssignmentBusy(LabError):
+    """Another controller holds the host assignment lock (#789)."""
+
+    def __init__(self, pid: int | None) -> None:
+        super().__init__("another controller owns Colab on this host; no allocation attempted")
+        self.pid = pid
+
+
 class ToolFailure(LabError):
     """A local tool exited nonzero: possibly transient, unlike controller refusals (#746)."""
 
@@ -303,15 +311,19 @@ def assignment_lock():
     info = directory.lstat()
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
         raise LabError("Colab assignment lock directory must be private and owned")
-    descriptor = os.open(directory / "assignment.lock", os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
-    with os.fdopen(descriptor, "w") as lock:
+    # Never truncate on open: the holder's PID is replaced only after flock succeeds.
+    descriptor = os.open(directory / "assignment.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    with os.fdopen(descriptor, "r+b", buffering=0) as lock:
         info = os.fstat(lock.fileno())
         if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
             raise LabError("Colab assignment lock must be private and owned")
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
-            raise LabError("another controller owns Colab on this host; no allocation attempted") from exc
+            recorded = lock.read(32).strip()
+            raise AssignmentBusy(int(recorded) if recorded.isdigit() else None) from exc
+        lock.truncate(0)
+        lock.write(f"{os.getpid()}\n".encode())
         yield
 
 
@@ -1952,6 +1964,10 @@ def main(argv: list[str] | None = None, *, bootstrap: bool = True, source_root: 
             signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
             workload = args.workload[1:] if args.workload[:1] == ["--"] else args.workload
             return run.run(args.approve_cu, workload)
+    except AssignmentBusy as exc:
+        holder = f"PID {exc.pid}" if exc.pid is not None else "an unrecorded PID"
+        print_diagnostic(f"Colab assignment lock is held by {holder}; no allocation attempted.", error=True)
+        return 2
     except (LabError, OSError, ValueError, KeyError, subprocess.SubprocessError):
         print_diagnostic("Colab controller refused invalid/missing prerequisites; no acceptance claimed.", error=True)
         return 2
