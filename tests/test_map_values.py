@@ -599,9 +599,10 @@ def test_preflight_effort_mirror_matches_settings():
 
     assert model_config.REASONING_EFFORTS == REASONING_EFFORTS
     fields = Settings.model_fields
-    assert model_config.REASONING_EFFORT_DEFAULTS == {
+    expected = {
         name.upper(): fields[name].default
         for name in ("llm_reasoning_effort_simple", "llm_reasoning_effort_complex", "llm_reasoning_efforts")}
+    assert expected == model_config.REASONING_EFFORT_DEFAULTS
 
 
 def test_empty_model_budget_inputs_preserve_application_defaults(monkeypatch, mapper_env):

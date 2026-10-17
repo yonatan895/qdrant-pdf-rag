@@ -134,7 +134,8 @@ def model_server():
                 self.wfile.flush()
                 return
             if CANCEL_QUERY not in json.dumps(request):
-                return super()._chat_completions()
+                super()._chat_completions()  # base returns None; keep every exit value-free
+                return
             assert request.get("stream") is True
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")

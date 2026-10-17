@@ -5,6 +5,7 @@ NFS storage refusal, INGEST_WORKERS, contextual embed placeholders,
 PULL_SECRET wiring, and strategic merge patches without a cluster.
 """
 
+import contextlib
 import re
 import shutil
 import subprocess
@@ -266,10 +267,8 @@ elif 'pods' in a:
                 assert not Path(f"/proc/{pid}").exists(), f"owned observer {pid} survived"
         finally:
             # Bounded harness cleanup also contains failures against the old code.
-            try:
+            with contextlib.suppress(ProcessLookupError):
                 os.killpg(proc.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
             proc.communicate(timeout=5)
 
 

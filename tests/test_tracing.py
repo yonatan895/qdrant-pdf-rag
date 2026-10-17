@@ -272,7 +272,8 @@ def test_stream_cancellation_finishes_root_and_closes_owned_io(
                 if operation.startswith("disconnect"):
                     await (sending if operation == "disconnect_send" else entered).wait()
                     return {"type": "http.disconnect"}
-                await asyncio.Event().wait()
+                await asyncio.Event().wait()  # never set: blocks until cancelled
+                raise AssertionError("receive() must block until cancelled")
 
             async def send(message):
                 if message["type"] == "http.response.body":

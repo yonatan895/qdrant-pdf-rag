@@ -19,6 +19,7 @@ log-and-drop, and telemetry never gates serving.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sys
@@ -99,10 +100,8 @@ def _run_tool(name: str, args: dict, config: bridge.FTPConfig, connect: ConnectF
                 raise ValueError("job_id and spool_id (required) must be strings")
             return bridge.jes_spool_read(session, job_id, spool_id)
     finally:
-        try:
+        with contextlib.suppress(Exception):  # best-effort close only
             session.ftp.quit()
-        except Exception:  # noqa: BLE001, S110 — best-effort close only
-            pass
     raise KeyError(name)
 
 

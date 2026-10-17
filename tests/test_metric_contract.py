@@ -73,7 +73,7 @@ def test_contract_instruments_pinned(monkeypatch):
     )
     found = _metrics(reader)
     assert set(INSTRUMENTS) <= set(found)
-    for otel_name, (wire, unit) in INSTRUMENTS.items():
+    for otel_name, (_wire, unit) in INSTRUMENTS.items():
         assert found[otel_name].unit == unit
 
 

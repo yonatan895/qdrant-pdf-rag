@@ -158,13 +158,12 @@ def extract_body_and_citations(
                 pending_header = None
                 block_has_cites = True
                 continue
-            else:
-                in_citations = False
-                if pending_header is not None:
-                    body_lines.append(pending_header)
-                    pending_header = None
-                body_lines.append(line)
-                continue
+            in_citations = False
+            if pending_header is not None:
+                body_lines.append(pending_header)
+                pending_header = None
+            body_lines.append(line)
+            continue
         body_lines.append(line)
 
     return "\n".join(body_lines), raw_citation_lines
