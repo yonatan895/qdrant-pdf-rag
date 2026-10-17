@@ -23,7 +23,7 @@ allowlist. Read relevant [roadmap decisions](../ROADMAP.md) and
 | publication | [Coverage and publication](ingest.md#publication-contract) | [Orchestrator](../src/mainframe_rag/ingest/run_ingest.py), [publish](../src/mainframe_rag/ingest/publish.py), [completion](../src/mainframe_rag/ingest/completion.py), [Qdrant IO](../src/mainframe_rag/ingest/qdrant_io.py), [serving](../src/mainframe_rag/agent/serving.py) | [Publication tests](../tests/test_ingest_publish.py), [completion tests](../tests/test_ingest_completion.py) |
 | exact-evidence design | [Identity, access and retirement](evidence-contract.md#evidence-contract) | [Publication](../src/mainframe_rag/ingest/publish.py), [serving](../src/mainframe_rag/agent/serving.py), [evidence service](../src/mainframe_rag/agent/evidence.py), [MCP adapter](../src/mainframe_rag/mcp/knowledge.py), [core](../src/mainframe_rag/agent/answer_core.py), [ports](../src/mainframe_rag/ports.py) | [Stored-payload profile](evidence-contract.md#stored-payload-profile), [evidence tests](../tests/test_evidence_service.py), [MCP tests](../tests/test_mcp_knowledge.py), [four design walks](evidence-contract.md#four-design-walks-and-implementation-witnesses); remaining proof stays with #405/#391/#373/#360 |
 | metadata | [Representation states](ingest.md#metadata-contract) | [Representation](../src/mainframe_rag/ingest/representation.py), [inventory](../src/mainframe_rag/ingest/inventory.py), [serving gate](../src/mainframe_rag/agent/serving.py) | [Representation tests](../tests/test_representation_gate.py) |
-| reader-lifetime | [Serving and cache](agent.md#serving-contract) | [Serving](../src/mainframe_rag/agent/serving.py), [HTTP routes](../src/mainframe_rag/agent/app.py), [console](../src/mainframe_rag/webui/routes.py), [retrieval](../src/mainframe_rag/retrieve/query.py), [writer](../src/mainframe_rag/ingest/run_ingest.py) | [Gate tests](../tests/test_serving_gate.py), [API tests](../tests/test_agent_api.py) |
+| reader-lifetime | [Serving and cache](agent.md#serving-contract) | [Serving](../src/mainframe_rag/agent/serving.py), [HTTP routes](../src/mainframe_rag/agent/app.py), [console](../src/mainframe_rag/webui/routes.py), [ADR-0003](adr/0003-zowe-mcp-read.md), [ADR-0004](adr/0004-operator-console-htmx.md), [retrieval](../src/mainframe_rag/retrieve/query.py), [writer](../src/mainframe_rag/ingest/run_ingest.py) | [Gate tests](../tests/test_serving_gate.py), [API tests](../tests/test_agent_api.py), [POST set](../tests/test_mcp_agent.py) |
 | answers | [Evidence and answer states](agent.md#answer-contract) | [Prompt and parser](../src/mainframe_rag/agent/answer.py), [shared core](../src/mainframe_rag/agent/answer_core.py), [SSE](../src/mainframe_rag/agent/sse.py), [browser](../src/mainframe_rag/webui/static/js/console.js), [answer eval](../src/mainframe_rag/eval/answers.py) | [Answer tests](../tests/test_agent_api.py), [console tests](../tests/test_webui.py) |
 | http-model | [Transport and lifecycle](agent.md#http-model-contract) | [Model client](../src/mainframe_rag/agent/answer.py), [tokenizer](../src/mainframe_rag/agent/tokenizer.py), [gateway probe](../scripts/probe_gateway.py), [rerank](../src/mainframe_rag/retrieve/rerank.py) | [Transport tests](../tests/test_agent_api.py), [gateway tests](../tests/test_probe_gateway.py) |
 | retrieval | [Retrieval contracts](retrieval.md) | [Query](../src/mainframe_rag/retrieve/query.py), [screen](../src/mainframe_rag/retrieve/screen.py), [embed](../src/mainframe_rag/ingest/embed.py), [answer core](../src/mainframe_rag/agent/answer_core.py) | [Evaluation](eval.md), [query tests](../tests/test_query_filters.py) |
@@ -74,8 +74,8 @@ change cannot close runtime acceptance under #391, #361, #365 or other owners.
 
 Inspect `git status`, current branch and base SHA before editing. On a clean
 connected checkout, fetch `origin/main` and create `feat/`, `fix/` or `docs/`
-`<issue>-<short>` from it. If the workspace belongs to another task, preserve it
-and use an isolated worktree. In the gap use the approved transferred history
+`<issue>-<short>` from it. Preserve another task's workspace and use an isolated
+worktree: link the main checkout's `.tools`, then run `dev:setup`. In the gap use the approved transferred history
 and baseline from [bootstrap](install_and_ops.md); do not require internet.
 Do not reuse an already-merged branch. Do not switch a tree used by running
 spawn workers. Experiments and temporary artifacts belong outside the tree.
@@ -84,7 +84,7 @@ Create every PR as a draft (`gh pr create --draft`). Only the human maintainer
 `yonatan895` marks it ready, formally requests changes, or merges; agents leave
 it in draft and never run `gh pr ready`, submit APPROVE/REQUEST_CHANGES or
 merge, even on the maintainer's account, and passing CI authorizes none of
-these. Findings and suggested corrections are comments, not maintainer
+these. Findings are comments, not maintainer
 decisions. Shared credentials make this a working agreement, not account-level
 enforcement. Repository access/ruleset changes remain maintainer-owned.
 
@@ -93,7 +93,7 @@ necessary tests/docs in one PR. No application
 fixes in a docs-only PR. Rebase on the approved current main before requesting
 review; no merge commits unless requested. Force-push a feature branch only
 after rebase and before review comments exist; never force-push main. Commits
-use imperative wording and explain why when it is not obvious.
+use imperative wording and explain non-obvious reasons.
 
 Update the PR/MR body in the same push as the code. Include issue, outcome,
 air-gap/copyright impact, and every changed default, constant, timeout, retry,
