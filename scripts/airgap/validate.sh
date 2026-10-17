@@ -32,6 +32,7 @@ check_secret_name "${PULL_SECRET:-}" PULL_SECRET
 check_secret_name "${GATEWAY_CA_CONFIGMAP:-}" GATEWAY_CA_CONFIGMAP
 resolve_observability
 resolve_agent_route
+resolve_network_policy
 
 case "${RERANK_ENDPOINT_ORDER:-score_first}" in
     score_first|rerank_first) ;;
@@ -74,6 +75,7 @@ if [ "$AGENT_ROUTE" = "true" ]; then
 else
     echo "    Console Route:     off (ClusterIP only)"
 fi
+echo "    NetworkPolicy:     $(describe_network_policy)"
 
 echo "==> 2. Validating required CLI tools"
 command -v skopeo >/dev/null 2>&1 || die "skopeo is required on the air-gap bastion"

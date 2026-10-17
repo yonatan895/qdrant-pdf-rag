@@ -711,3 +711,149 @@ def test_verified_digest_renders_images_by_digest_keeping_tag_env():
     assert f"reg.internal/openshift4/ose-oauth-proxy@{digests['oauthProxy']}" in text
     assert f"qdrant-pdf-rag-agent:{IMAGE_SHA}" not in text
     assert env_map(docs[("Deployment", "rag-agent")])["IMAGE_SHA"]["value"] == IMAGE_SHA  # informational tag stays
+
+
+# ------------------------------------------------- agent NetworkPolicy (#373)
+
+POLICY_KEY = ("NetworkPolicy", "rag-agent-ingress")
+ROUTER_LABEL = {"network.openshift.io/policy-group": "ingress"}
+MONITORING_LABEL = {"network.openshift.io/policy-group": "monitoring"}
+UWM_NAME = {"kubernetes.io/metadata.name": "openshift-user-workload-monitoring"}
+
+
+def _route_values(**extra):
+    return {"route": {"enabled": True, "destinationCA": FAKE_CA}, **extra}
+
+
+def _allows(policy, source_ns, source_ns_labels, port, release_ns="ns"):
+    """Independent re-implementation of NetworkPolicy ingress semantics for one
+    pod of `source_ns` reaching an agent pod on TCP `port` (peers within one
+    rule are OR-ed; a rule's ports must also match). It checks the rendered
+    object's meaning; enforcement is the CNI's and stays site evidence."""
+    for rule in policy["spec"]["ingress"]:
+        if port not in {p["port"] for p in rule["ports"] if p["protocol"] == "TCP"}:
+            continue
+        for peer in rule["from"]:
+            if peer == {"podSelector": {}}:
+                if source_ns == release_ns:
+                    return True
+            elif set(peer) == {"namespaceSelector"}:
+                match = peer["namespaceSelector"]["matchLabels"]
+                if all(source_ns_labels.get(k) == v for k, v in match.items()):
+                    return True
+            else:
+                raise AssertionError(f"unexpected peer shape: {peer}")
+    return False
+
+
+def _ns(name, **labels):
+    return name, {"kubernetes.io/metadata.name": name, **labels}
+
+
+def test_networkpolicy_default_on_is_agent_only_ingress_only():
+    docs = run_new_template({"_namespace": "rag-ns"})
+    policy = docs[POLICY_KEY]
+    assert policy["apiVersion"] == "networking.k8s.io/v1"
+    assert policy["metadata"]["namespace"] == "rag-ns"
+    assert policy["spec"]["podSelector"] == {"matchLabels": {"app": "rag-agent"}}
+    assert policy["spec"]["policyTypes"] == ["Ingress"]
+    # Route off, metrics off: only same-namespace traffic to the HTTP port.
+    assert policy["spec"]["ingress"] == [
+        {"from": [{"podSelector": {}}], "ports": [{"protocol": "TCP", "port": 8080}]}
+    ]
+    assert [k for k in docs if k[0] == "NetworkPolicy"] == [POLICY_KEY]
+    # The selector is the Deployment's pod label, so Qdrant/Jaeger/ingest are not selected.
+    labels = docs["Deployment", "rag-agent"]["spec"]["template"]["metadata"]["labels"]
+    assert labels == policy["spec"]["podSelector"]["matchLabels"]
+    jaeger = docs["Deployment", "jaeger"]["spec"]["template"]["metadata"]["labels"]
+    assert not set(policy["spec"]["podSelector"]["matchLabels"].items()) <= set(jaeger.items())
+
+
+def test_networkpolicy_route_adds_router_to_oauth_port_only():
+    policy = run_new_template(_route_values())[POLICY_KEY]
+    assert policy["spec"]["ingress"] == [
+        {"from": [{"podSelector": {}}],
+         "ports": [{"protocol": "TCP", "port": 8080}, {"protocol": "TCP", "port": 8443}]},
+        {"from": [{"namespaceSelector": {"matchLabels": ROUTER_LABEL}}],
+         "ports": [{"protocol": "TCP", "port": 8443}]},
+    ]
+
+
+def test_networkpolicy_metrics_admits_monitoring_by_label_or_uwm_name():
+    policy = run_new_template({"metrics": {"enabled": True}})[POLICY_KEY]
+    assert policy["spec"]["ingress"][1:] == [
+        {"from": [{"namespaceSelector": {"matchLabels": MONITORING_LABEL}},
+                  {"namespaceSelector": {"matchLabels": UWM_NAME}}],
+         "ports": [{"protocol": "TCP", "port": 8080}]},
+    ]
+    # Keyed on exposition, not on the ServiceMonitor: a platform-owned scrape
+    # (SERVICEMONITOR_ENABLED=false) still needs the port.
+    scraped = run_new_template({"metrics": {"enabled": True, "serviceMonitor": {"enabled": False}}})
+    assert ("ServiceMonitor", "rag-agent") not in scraped
+    assert scraped[POLICY_KEY]["spec"]["ingress"] == policy["spec"]["ingress"]
+    assert len(run_new_template({})[POLICY_KEY]["spec"]["ingress"]) == 1
+
+
+def test_networkpolicy_allowed_namespaces_reach_http_only():
+    names = ["mcp", "tools-1"]
+    policy = run_new_template(
+        _route_values(networkPolicy={"allowedNamespaces": names}))[POLICY_KEY]
+    assert policy["spec"]["ingress"][-1] == {
+        "from": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": n}}}
+                 for n in names],
+        "ports": [{"protocol": "TCP", "port": 8080}],
+    }
+
+
+def test_networkpolicy_semantics_for_the_documented_counterexamples():
+    policy = run_new_template(_route_values(
+        metrics={"enabled": True}, networkPolicy={"allowedNamespaces": ["mcp"]}))[POLICY_KEY]
+    router = _ns("openshift-ingress", **ROUTER_LABEL)
+    monitoring = _ns("openshift-monitoring", **MONITORING_LABEL)
+    uwm = _ns("openshift-user-workload-monitoring")  # admitted by name, no label needed
+    mcp = _ns("mcp")
+    stranger = _ns("someone-else")
+    # The router reaches the OAuth port and nothing else.
+    assert _allows(policy, *router, 8443)
+    assert not _allows(policy, *router, 8080)
+    # Monitoring scrapes /metrics on 8080 only.
+    for source in (monitoring, uwm):
+        assert _allows(policy, *source, 8080)
+        assert not _allows(policy, *source, 8443)
+    # Same-namespace consumers keep both ports.
+    assert _allows(policy, "ns", {"kubernetes.io/metadata.name": "ns"}, 8080)
+    assert _allows(policy, "ns", {"kubernetes.io/metadata.name": "ns"}, 8443)
+    # An allowed namespace reaches the HTTP port only.
+    assert _allows(policy, *mcp, 8080)
+    assert not _allows(policy, *mcp, 8443)
+    # Any other namespace is denied on both ports.
+    assert not _allows(policy, *stranger, 8080)
+    assert not _allows(policy, *stranger, 8443)
+    # Only the exact policy-group value counts.
+    assert not _allows(policy, *_ns("x", **{"network.openshift.io/policy-group": "other"}), 8443)
+
+
+def test_networkpolicy_disabled_renders_nothing_and_leaves_the_rest_unchanged():
+    on = run_new_template(_route_values(metrics={"enabled": True}))
+    off = run_new_template(_route_values(
+        metrics={"enabled": True}, networkPolicy={"enabled": False}))
+    assert POLICY_KEY in on and POLICY_KEY not in off
+    assert {k: v for k, v in on.items() if k != POLICY_KEY} == off
+
+
+@pytest.mark.parametrize("mutate", [
+    {"networkPolicy": {"enabled": "false"}},
+    {"networkPolicy": {"allowedNamespaces": ["Bad_Name"]}},
+    {"networkPolicy": {"allowedNamespaces": ["mcp", "mcp"]}},
+    {"networkPolicy": {"allowedNamespaces": ["a" * 64]}},
+    {"networkPolicy": {"allowedNamespaces": [""]}},
+    {"networkPolicy": {"allowedNamespaces": "mcp"}},
+    {"networkPolicy": {"enabled": False, "allowedNamespaces": ["mcp"]}},
+    {"networkPolicy": {"extra": True}},
+])
+def test_networkpolicy_schema_refuses_invalid_selection(mutate):
+    values = base_values()
+    values["networkPolicy"].update(mutate["networkPolicy"])
+    r = _helm_template_with_values(values)
+    assert r.returncode != 0
+    assert "networkPolicy" in r.stderr

@@ -32,6 +32,7 @@ from pathlib import Path
 try:
     from scripts.airgap.model_config import (
         MODEL_CONFIG_KEYS,
+        network_policy,
         parse_strict_bool,
         reasoning_overrides,
         require_in_place_retired,
@@ -40,6 +41,7 @@ try:
 except ModuleNotFoundError:
     from model_config import (  # type: ignore[no-redef]  # Direct bastion-script execution.
         MODEL_CONFIG_KEYS,
+        network_policy,
         parse_strict_bool,
         reasoning_overrides,
         require_in_place_retired,
@@ -241,6 +243,13 @@ def build_values(deploy_only: bool = False) -> dict:
     # AGENT_ROUTE — disabling the UI never touches Route/OAuth/TLS wiring.
     ui_enabled = strict_bool("UI_ENABLED", env("UI_ENABLED"), True)
 
+    # Issue #373: agent ingress NetworkPolicy, default on. Strict like the
+    # other operator booleans; the allow-list is validated by its one owner.
+    try:
+        policy_enabled, policy_namespaces = network_policy(os.environ)
+    except ValueError as exc:
+        die(str(exc))
+
     agent_route = env("AGENT_ROUTE") == "true"
     route_ca = ""
     if agent_route:
@@ -385,6 +394,7 @@ def build_values(deploy_only: bool = False) -> dict:
             "serviceMonitor": {"enabled": monitor_deploy},
         },
         "ui": {"enabled": ui_enabled},
+        "networkPolicy": {"enabled": policy_enabled, "allowedNamespaces": policy_namespaces},
         "route": {
             "enabled": agent_route,
             "timeoutSeconds": 300,

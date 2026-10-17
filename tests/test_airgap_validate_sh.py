@@ -119,6 +119,14 @@ def test_validate_clean_exits_zero(tree):
                  id='shared_gateway_invalid_url_refuses'),
     pytest.param({'AGENT_ROUTE': 'maybe'}, None, ('AGENT_ROUTE must be true/false',),
                  id='validate_route_invalid_boolean_refused_even_in_dryrun'),
+    pytest.param({'AGENT_NETWORK_POLICY': 'maybe'}, None, ('AGENT_NETWORK_POLICY must be true/false',),
+                 id='validate_network_policy_invalid_boolean_refused'),
+    pytest.param({'AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES': 'ok, spaced'}, None,
+                 ('AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES must be comma-separated namespace names',),
+                 id='validate_network_policy_namespace_list_strict'),
+    pytest.param({'AGENT_NETWORK_POLICY': 'false', 'AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES': 'mcp'}, None,
+                 ('requires AGENT_NETWORK_POLICY to be enabled',),
+                 id='validate_network_policy_allow_list_needs_the_policy'),
 ])
 def test_invalid_configuration_fails_closed(tree, extra_env, exit_code, messages):
     result = _run(tree, extra_env)
@@ -1084,6 +1092,16 @@ def _routes_file(tree, *backends):
     path = tree / "routes.json"
     path.write_text(json.dumps({"kind": "List", "items": items}))
     return str(path)
+
+
+def test_validate_reports_the_networkpolicy_selection(tree):
+    on = _run(tree, {'AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES': 'mcp'})
+    assert on.returncode == 0, on.stderr
+    assert "NetworkPolicy:     rag-agent-ingress: agent HTTP 8080 only from this namespace" in on.stdout
+    assert "(mcp)" in on.stdout
+    off = _run(tree, {'AGENT_NETWORK_POLICY': 'false'})
+    assert off.returncode == 0, off.stderr
+    assert "NetworkPolicy:     off (AGENT_NETWORK_POLICY=false)" in off.stdout
 
 
 def test_validate_route_dryrun_accepts_recorded_consistent_pin(tree):

@@ -22,6 +22,7 @@ check_secret_name "${PULL_SECRET:-}" PULL_SECRET
 check_secret_name "${GATEWAY_CA_CONFIGMAP:-}" GATEWAY_CA_CONFIGMAP
 resolve_observability
 resolve_agent_route
+resolve_network_policy
 case "$IMAGE_SHA" in
     ""|HEAD) die "IMAGE_SHA must be the packed git SHA (see dist/MANIFEST.txt)" ;;
 esac
@@ -61,6 +62,10 @@ if [ "$AGENT_ROUTE" = "true" ]; then
     require_oauth_pin
     echo "==> Notice: the console Route authenticates any OpenShift user (oauth-proxy --email-domain=*, no SAR); restrict the cohort with the site's approved mechanism (issue #373)"
 fi
+
+# Issue #373: the agent's unauthenticated HTTP port is namespace-scoped by
+# default. Enforcement and coexistence with site policies are site evidence.
+echo "==> NetworkPolicy $(describe_network_policy)"
 
 refuse_nfs_storage
 SNAPSHOT_STORAGE_CLASS=${SNAPSHOT_STORAGE_CLASS:-$STORAGE_CLASS}
