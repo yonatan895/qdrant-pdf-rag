@@ -56,6 +56,9 @@ relative_files = true
 patch = ["subprocess"]
 
 [tool.coverage.report]
+# Repository code only: tests copy the package to tmp dirs (e.g. Colab run
+# snapshots) and subprocess tracing would otherwise count those copies.
+include = ["src/mainframe_rag/*"]
 precision = 1
 sort = "Cover"
 skip_covered = false
