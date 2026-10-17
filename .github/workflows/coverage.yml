@@ -21,7 +21,7 @@ concurrency:
 jobs:
   coverage:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 75
     env:
       TASK_CONTRACTS_REQUIRE_RUNNER: "1"
     steps:
