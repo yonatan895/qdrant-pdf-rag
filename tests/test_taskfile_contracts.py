@@ -133,6 +133,9 @@ class TaskContractsTests(unittest.TestCase):
     def run_task(self, *args: str, cwd: Path | None = None, extra_env: dict | None = None) -> subprocess.CompletedProcess:
         env = dict(os.environ)
         env.pop("TASK_BIN", None)
+        # An exported value overrides a task's `env:` binding, so an ambient
+        # PYTHONPATH (worktree setups) would mask the bound one asserted here (#789).
+        env.pop("PYTHONPATH", None)
         # Mirror the documented session-local setup (install script prints the
         # export): the pinned binary's directory leads PATH so nested
         # `task --list` discovery resolves to the same verified runner.
