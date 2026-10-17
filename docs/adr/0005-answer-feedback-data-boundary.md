@@ -29,10 +29,12 @@
   - Not adopted: content in SigNoz or ClickHouse, content in Qdrant (it would
     need write credentials on the serving path), and append-only files.
 - **Amends (maintainer decision, 2026-10-17, #780):** with `FEEDBACK_ENABLED`
-  (default off) the agent originates exactly two kinds of write, both to the
-  feedback service and nowhere else (never the corpus or Qdrant, never a model,
-  never a source system):
-  1. **Answer records, outbound from the existing query routes.** On every
+  (default off) the agent originates exactly two kinds of stored-data write,
+  both to the feedback service and nowhere else (never the corpus or Qdrant,
+  never a source system). Its existing outbound calls (model gateway, OTLP
+  telemetry) are unchanged and store no feedback data:
+  1. **Answer records, outbound from the answer, chat and console routes**
+     (never `/v1/search`). On every
      finalized answer of `/v1/answer`, `/v1/chat` (with `/v1/chat/completions`),
      `/ui/chat` and their streams, the agent sends one record carrying the
      question, answer, script, citations, supplied-evidence citations and a
@@ -45,9 +47,9 @@
   The amendments are:
   - **ADR-0003, agent-surface clause.** The agent's POST set adds the two
     rating routes. No PUT/PATCH/DELETE and no `fetch_live` reference still
-    hold, and `tests/test_mcp_agent.py` pins the exact POST set. The query
-    routes gain the outbound answer-record write above, but no new inbound
-    operation.
+    hold, and `tests/test_mcp_agent.py` pins the exact POST set. The answer,
+    chat and console routes gain the outbound answer-record write above, but
+    no new inbound operation; `/v1/search` is unchanged.
   - **ADR-0004, non-goal 2, scoped.** The feedback service is a separate
     single-replica deployment (PR B) that the agent calls over ClusterIP. It
     is not a Backend-for-Frontend, serves no UI, and runs no process alongside

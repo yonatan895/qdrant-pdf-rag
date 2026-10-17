@@ -1454,3 +1454,24 @@ def test_a_settling_send_never_moves_focus_out_of_another_answers_box(console, b
     browser.keys("SPACE")  # the next keystroke lands in B and never resends A
     assert browser.eval("return document.querySelector(arguments[0]+' .feedback-comment').value", box_b) == "typing in B "
     assert len(feedback.ratings) == 1
+
+
+def test_focus_on_a_rated_box_survives_a_rebuild_and_unrated_boxes_take_no_focus(console, browser, monkeypatch):
+    _with_feedback(console, browser, monkeypatch)
+    send(browser, "What is IEA500I?")
+    wait_state(browser, "complete")
+    # An unrated box is not itself focusable: clicking its blank area saves no
+    # control that a rebuild could later move focus onto.
+    assert browser.eval("return document.querySelector(arguments[0]).hasAttribute('tabindex')", FIRST_RATING) is False
+    console.llm.queue(("token", "Second answer. "), ("gate", "second"), ("token", FINAL_ANSWER), ("done",))
+    send(browser, "Again")
+    browser.wait("return !!document.querySelector('.turn-assistant[data-state=streaming] .md p')")
+    browser.click(_reach(browser, FIRST_RATING + ' .feedback-rating[data-rating="good"]'))
+    browser.eval("document.querySelector(arguments[0]+' .feedback-submit').focus()", FIRST_RATING)
+    browser.keys("ENTER")
+    browser.wait("return document.querySelector(arguments[0]).textContent === 'Rated: good'", FIRST_RATING,
+                 what="rated")
+    console.llm.release("second")  # completion rebuilds every article
+    wait_state(browser, "complete", 2)
+    assert browser.eval("return document.activeElement === document.querySelector(arguments[0])",
+                        FIRST_RATING) is True

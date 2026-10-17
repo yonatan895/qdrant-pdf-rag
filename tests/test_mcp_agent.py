@@ -291,11 +291,12 @@ def test_allowlist_is_the_bridge_registry_and_read_only() -> None:
 
 
 def test_agent_http_surface_exposes_no_mutating_operation_or_live_call() -> None:
-    """The agent HTTP surface is read-only query traffic: no PUT/PATCH/DELETE
-    anywhere, the POST set is exactly the query routes plus the two console
-    rating routes (ADR-0005 amendment of ADR-0003: a bounded rating forwarded
-    to the feedback service, never the corpus or a source), and no endpoint
-    module reaches the live-observation fetch (default-off, unwired by
+    """No PUT/PATCH/DELETE anywhere; the POST set is exactly the query routes
+    plus the two console rating routes (ADR-0005 amendment of ADR-0003: with
+    feedback enabled the agent's only stored-data writes go to the feedback
+    service, a bounded rating from these routes and one answer record from the
+    answer, chat and console routes, never the corpus or a source); and no
+    endpoint module reaches the live-observation fetch (default-off, unwired by
     decision; wiring it needs the ADR-0003 observation contract and its own concern)."""
     from pathlib import Path
 

@@ -779,8 +779,9 @@
     const active = document.activeElement;
     const box = active && active.closest ? active.closest("[data-feedback-for]") : null;
     if (!box) return null;
-    let selector = ".feedback-submit";
+    let selector = null;  // null: the box itself (a focusable "Rated" box)
     if (active.matches(".feedback-comment")) selector = ".feedback-comment";
+    else if (active.matches(".feedback-submit")) selector = ".feedback-submit";
     else if (active.dataset.rating) selector = '.feedback-rating[data-rating="' + active.dataset.rating + '"]';
     else if (active.type === "checkbox") selector = '.feedback-reasons input[value="' + active.value + '"]';
     return {
@@ -792,8 +793,15 @@
   function restoreFeedbackFocus(saved) {
     if (!saved) return;
     const box = messagesEl.querySelector('[data-feedback-for="' + saved.id + '"]');
-    const target = box ? box.querySelector(saved.selector) : null;
-    if (!target) return;
+    if (!box) return;
+    // The saved control, else the box when it is focusable ("Rated"); never
+    // a different control than the one that had focus.
+    const target = saved.selector ? box.querySelector(saved.selector) : null;
+    const fallback = box.hasAttribute("tabindex") ? box : null;
+    if (!target) {
+      if (fallback) fallback.focus({ preventScroll: true });
+      return;
+    }
     target.focus({ preventScroll: true });
     if (typeof saved.start === "number" && target.setSelectionRange) {
       target.setSelectionRange(saved.start, saved.end);
@@ -828,9 +836,7 @@
       return;
     }
     live.replaceWith(next);
-    if (!saved) return;
-    restoreFeedbackFocus(saved);
-    if (!next.contains(document.activeElement)) next.focus({ preventScroll: true });
+    if (saved) restoreFeedbackFocus(saved);
   }
 
   function renderFeedback(turn) {
@@ -839,9 +845,9 @@
     const id = turn.request_id;
     const box = el("div", "turn-feedback");
     box.dataset.feedbackFor = id;
-    box.tabIndex = -1;  // a focus target when its control is gone
     if (turn.feedback) {
       feedbackDrafts.delete(id);
+      box.tabIndex = -1;  // the focus target once its controls are gone
       box.textContent = "Rated: " + turn.feedback;
       return box;
     }
@@ -943,15 +949,21 @@
         }
         if (ok) {
           const rated = sent.rating;
-          await mutate((store) => {
-            for (const session of Object.values(store.sessions)) {
-              for (const stored of session.turns || []) {
-                if (stored.request_id === id) stored.feedback = rated;
-              }
-            }
-            return true;
-          });
+          // The service recorded it: show "Rated" even if the local save
+          // fails (the operator must not resend a recorded rating).
           turn.feedback = rated;
+          try {
+            await mutate((store) => {
+              for (const session of Object.values(store.sessions)) {
+                for (const stored of session.turns || []) {
+                  if (stored.request_id === id) stored.feedback = rated;
+                }
+              }
+              return true;
+            });
+          } catch (err) {
+            /* recorded server-side; the label survives this page only */
+          }
           announce("Rating sent.");
         } else {
           // The draft may have been replaced or pruned meanwhile: write the
@@ -967,7 +979,8 @@
         // The article may have been rebuilt, or the answer rated in another
         // tab, while the request was in flight: redraw the live box from the
         // stored turn.
-        redrawFeedback(storedTurn(id, turn));
+        const stored = storedTurn(id, turn);
+        redrawFeedback(turn.feedback && !stored.feedback ? turn : stored);
       }
     });
     details.appendChild(submit);

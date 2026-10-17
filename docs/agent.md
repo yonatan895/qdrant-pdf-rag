@@ -235,9 +235,12 @@ Retention policy as shipped (no default changed by #372):
   in cookies, `sessionStorage`, IndexedDB, or server logs (server logs carry
   request id, query kind, counts, error type only; both pinned by tests).
   With answer feedback enabled (#780), an assistant turn also keeps its server
-  `request_id` and the operator's rating label. A sent rating (rating, reason
-  codes, comment) leaves the browser for the protected feedback store; see
-  [Answer feedback](#answer-feedback).
+  `request_id` and the operator's rating label. **The server also keeps, for
+  every console turn, the question and answer text** (with citations and
+  telemetry) as a quality record in the protected feedback store for 180 days,
+  and a sent rating (rating, reason codes, comment) joins it. Clearing the
+  browser's incidents does not remove those records; retention and purge are
+  the store's (ADR-0005). See [Answer feedback](#answer-feedback).
 - **How long:** until the operator clears it, capped at 30 incidents (oldest
   idle incident evicted first; the incidents open in this tab are protected).
   There is no time-based expiry, no logout/user-switch clearing and no account
@@ -1293,12 +1296,14 @@ accepted, **capability off and unwired**. No endpoint calls
 manual-only POC makes zero source calls. Search never calls an LLM; routing is
 deterministic and trap queries stay on the manuals path.
 
-- **Surface:** the agent HTTP API is read-only query traffic (no PUT/PATCH/
-  DELETE; POST only on search/answer/chat and console chat), plus the console
-  rating forward (`/ui/feedback`, `/ui/feedback/form`; ADR-0005, default off).
-  With feedback enabled, the agent writes only to the feedback service: a
-  bounded rating from those two routes, and one answer record (question,
-  answer, citations, telemetry) per finalized answer from the query routes. The source port is
+- **Surface:** the agent HTTP API is query traffic (no PUT/PATCH/DELETE; POST
+  only on search/answer/chat and console chat) plus the console rating forward
+  (`/ui/feedback`, `/ui/feedback/form`; ADR-0005, default off). It never
+  writes the corpus or a source.
+  With feedback enabled, the agent's only stored-data writes go to the
+  feedback service: a bounded rating from those two routes, and one answer
+  record (question, answer, citations, telemetry) per finalized answer from
+  the answer, chat and console routes (never `/v1/search`). The source port is
   separate from manual evidence and is not a query/command proxy.
 - **Approved operation:** `job_status` for one exact job id. The other three
   bridge tools (`dataset_read`, `uss_read`, `jes_spool_read`) are allowlisted in
