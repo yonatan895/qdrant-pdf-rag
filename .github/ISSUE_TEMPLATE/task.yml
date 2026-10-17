@@ -1,0 +1,60 @@
+name: Task
+description: One bounded outcome with fixed scope and verifiable completion criteria
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Scope is fixed once work starts: a new goal is a new linked issue, never an edit here.
+        Status comments report against the completion criteria. If a criterion cannot be met as
+        written, close this issue as superseded and link its replacement.
+        [Scope lock](https://github.com/yonatan895/qdrant-pdf-rag/blob/main/docs/agent-workflow.md#task-packet).
+  - type: textarea
+    id: justification
+    attributes:
+      label: Justification
+      description: The metric this moves (baseline and expected direction), the escaped defect, or a link to the maintainer request.
+    validations:
+      required: true
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: One observable outcome, in one sentence.
+    validations:
+      required: true
+  - type: textarea
+    id: requirements
+    attributes:
+      label: Requirements
+      description: What must hold, and at least one forbidden outcome (a counterexample the change must not allow).
+    validations:
+      required: true
+  - type: textarea
+    id: out-of-scope
+    attributes:
+      label: Out of scope
+      description: Adjacent work this issue will not do, with its owner issue where one exists.
+    validations:
+      required: true
+  - type: textarea
+    id: completion
+    attributes:
+      label: Completion criteria
+      description: |
+        A checklist of verifiable conditions, each naming its evidence (test, command, CI run or
+        measurement). The issue closes when every box is checked.
+        [Verification minimums](https://github.com/yonatan895/qdrant-pdf-rag/blob/main/docs/live-stack.md#verification-minimums).
+      value: |
+        - [ ] <condition>. Evidence: <test / command / run>
+    validations:
+      required: true
+  - type: dropdown
+    id: size
+    attributes:
+      label: Size
+      description: Larger work is split into separate issues under a tracker.
+      options:
+        - One PR
+        - Up to 3 PRs, listed in the completion criteria
+    validations:
+      required: true

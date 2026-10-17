@@ -106,35 +106,29 @@ New product scope requires an issue decision, not a silent expansion.
 <a id="author-packet"></a>
 ## Task packet
 
-Use the [issue form](../.github/ISSUE_TEMPLATE/agent-task.md), or these same fields
-in a GitLab issue. Before implementation, authors record the compact 6-question
-author input packet. Value comes first: correctness rigor on the wrong change is
-still waste. For a small fix, short answers and evidence links suffice (`N/A` needs a one-sentence reason):
+File work with the [Task form](../.github/ISSUE_TEMPLATE/task.yml) (or its fields in
+GitLab): justification, one-sentence goal, requirements with a forbidden outcome, out
+of scope, completion criteria naming their evidence, and size (one PR or up to
+three). Coordination uses the [Tracker form](../.github/ISSUE_TEMPLATE/tracker.yml):
+child Tasks only, no goals of their own.
+
+**Scope lock.** Goal and completion criteria are fixed once work starts. A new goal
+is a new linked issue, never an edit to an open one; status comments report against
+the criteria. An issue whose criteria cannot be met as written closes as superseded
+and links its replacement.
+
+Before implementation, the impact note answers (short answers for small fixes;
+`N/A` needs a reason):
 
 ```text
-Outcome metric:
-The quality-tracker scoreboard number or robustness item this moves, its
-baseline and expected direction; otherwise the escaped defect or maintainer
-request that justifies the work.
-
-Outcome and supported domain:
-One observable change; identify the actual producer/contract of its inputs.
-
-Boundary proof:
-For each material changed guarantee, select the smallest case that a plausible
-wrong implementation could pass locally but fail end-to-end. Reuse existing tests.
-
-Next operation:
-For persisted/lifecycle changes, show success -> cleanup -> next ordinary action,
-not only failure -> retry. Include only relevant reset/restart/rollback interactions.
-
-State/transport distinction:
-Where multiple paths implement the same rule, compare equivalent allowed and
-forbidden inputs. Keep deliberately different retry/emission policies explicit.
-
-Evidence and limits:
-Name the test and exact candidate; distinguish executed proof, static reasoning,
-and required evidence not available. Record any compatibility decision separately.
+Boundary proof: for each changed guarantee, the smallest case a plausible wrong
+implementation passes locally but fails end-to-end.
+Next operation: for persisted/lifecycle changes, success -> cleanup -> next
+ordinary action, not only failure -> retry.
+State/transport distinction: where several paths implement one rule, compare
+equivalent allowed and forbidden inputs; keep deliberate policy differences explicit.
+Evidence and limits: test and candidate; executed proof vs static reasoning vs
+unavailable evidence; compatibility decisions recorded separately.
 ```
 
 No mandatory checklist of every failure mode for a trivial change. Settle design first: take each trade-off against its owner contracts to the maintainer before code. Settled decisions link their existing owner; reopen only a specific demonstrated conflict. An agent must not independently choose deletion, retention, permission, or publication semantics while generating tests.
