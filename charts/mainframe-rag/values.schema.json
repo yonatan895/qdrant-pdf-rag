@@ -241,6 +241,29 @@
         "enabled": { "type": "boolean" }
       }
     },
+    "networkPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "allowedNamespaces": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "maxLength": 63,
+            "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+          }
+        }
+      },
+      "if": {
+        "properties": { "enabled": { "const": false } },
+        "required": ["enabled"]
+      },
+      "then": {
+        "properties": { "allowedNamespaces": { "maxItems": 0 } }
+      }
+    },
     "route": {
       "type": "object",
       "additionalProperties": false,

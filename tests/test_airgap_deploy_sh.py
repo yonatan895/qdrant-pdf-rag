@@ -593,6 +593,93 @@ def test_agent_route_fails_closed_on_pending_oauth_pin(tree):
     assert "sha256:PENDING" in r.stderr
 
 
+def _policy_inventory(tree, **meta_extra):
+    meta = {"name": "rag-agent-ingress", "namespace": "ns", **meta_extra}
+    path = tree[0] / "existing-policy.json"
+    path.write_text(json.dumps({"apiVersion": "v1", "kind": "List", "items": [
+        {"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": meta},
+    ]}))
+    return str(path)
+
+
+def test_agent_networkpolicy_is_rendered_by_default_and_announced(tree):
+    """Issue #373: default ON, in the one rendered application manifest."""
+    r = _run(tree)
+    assert r.returncode == 0, r.stderr
+    rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
+    assert "kind: NetworkPolicy" in rendered and "name: rag-agent-ingress" in rendered
+    assert "==> NetworkPolicy rag-agent-ingress: agent HTTP 8080 only from this namespace" in r.stdout
+
+
+def test_next_ordinary_deploy_adopts_the_owned_networkpolicy(tree):
+    """The second deploy finds the release's own policy in the live inventory.
+    Without it in check_app_ownership.ALLOWED the preflight refused the
+    deploy that created it (lifecycle, not just first install)."""
+    inventory = _policy_inventory(tree, annotations={
+        "meta.helm.sh/release-name": "mainframe-rag", "meta.helm.sh/release-namespace": "ns"},
+        labels={"app.kubernetes.io/managed-by": "Helm"})
+    r = _run(tree, ("OWNERSHIP_FILE", inventory))
+    assert r.returncode == 0, r.stderr
+    log = _helm_log(tree)
+    assert "upgrade" in log and "ownership preflight refused" not in r.stderr
+
+
+@pytest.mark.parametrize("foreign", [
+    {"annotations": {"meta.helm.sh/release-name": "other"}},
+    {"annotations": {"meta.helm.sh/release-namespace": "elsewhere"}},
+    {"ownerReferences": [{"name": "operator"}]},
+    {"labels": {"app.kubernetes.io/managed-by": "other"}},
+])
+def test_foreign_networkpolicy_is_refused_before_any_mutation(tree, foreign):
+    r = _run(tree, ("OWNERSHIP_FILE", _policy_inventory(tree, **foreign)))
+    assert r.returncode != 0
+    assert "ownership preflight refused" in r.stderr
+    assert "upgrade" not in _helm_log(tree)
+
+
+def test_other_networkpolicy_names_are_not_application_inventory(tree):
+    path = tree[0] / "existing.json"
+    path.write_text(json.dumps({"apiVersion": "v1", "kind": "List", "items": [
+        {"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy",
+         "metadata": {"name": "site-default-deny", "namespace": "ns"}}]}))
+    r = _run(tree, ("OWNERSHIP_FILE", str(path)))
+    assert r.returncode != 0
+    assert "upgrade" not in _helm_log(tree)
+
+
+def test_disabling_the_networkpolicy_leaves_removal_to_the_release(tree):
+    """Helm owns the policy it created: the disabled render omits it, the
+    release upgrade prunes it, and the deploy needs no extra cleanup entry
+    (the disabled-cleanup inventory stays for pre-Helm legacy objects)."""
+    r = _run(tree, ("AGENT_NETWORK_POLICY", "false"))
+    assert r.returncode == 0, r.stderr
+    assert "kind: NetworkPolicy" not in (tree[0] / "dist" / "agent-rendered.yaml").read_text()
+    assert "off (AGENT_NETWORK_POLICY=false)" in r.stdout
+    assert "upgrade" in _helm_log(tree)
+    assert "NetworkPolicy" not in (tree[0] / "dist/app-disabled-cleanup.json").read_text()
+
+
+def test_networkpolicy_allowed_namespaces_reach_the_rendered_manifest(tree):
+    r = _run(tree, ("AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES", "mcp,tools-1"))
+    assert r.returncode == 0, r.stderr
+    rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
+    assert 'kubernetes.io/metadata.name: "mcp"' in rendered
+    assert 'kubernetes.io/metadata.name: "tools-1"' in rendered
+    assert "AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES (mcp,tools-1)" in r.stdout
+
+
+@pytest.mark.parametrize("env", [
+    (("AGENT_NETWORK_POLICY", "maybe"),),
+    (("AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES", "Bad_Name"),),
+    (("AGENT_NETWORK_POLICY", "false"), ("AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES", "mcp")),
+])
+def test_invalid_networkpolicy_selection_fails_before_any_mutation(tree, env):
+    r = _run(tree, *env)
+    assert r.returncode != 0
+    log = _helm_log(tree)
+    assert "upgrade" not in log and "new-project" not in log
+
+
 @pytest.mark.parametrize("ownership", ["legacy", "ours", "other-release", "controller", "other-manager"])
 def test_app_adoption_checks_ownership_before_any_release_mutation(tree, ownership):
     import json

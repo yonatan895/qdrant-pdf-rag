@@ -34,8 +34,14 @@ MODEL_CONFIG_KEYS = (
 # for preflight and the values mapper (map_values.strict_bool wraps it).
 OPERATOR_BOOL_KEYS = (
     "UI_ENABLED", "CONTEXTUAL_EMBED_ENABLED", "INGEST_ALIAS_PUBLISH",
-    "INGEST_REINGEST", "CHAT_CONDENSE_ENABLED", "LLM_STREAM",
+    "INGEST_REINGEST", "CHAT_CONDENSE_ENABLED", "LLM_STREAM", "AGENT_NETWORK_POLICY",
 )
+
+# Agent ingress NetworkPolicy (issue #373): default ON; the allow-list names
+# extra namespaces that may reach the agent HTTP port.
+NETWORK_POLICY_KEY = "AGENT_NETWORK_POLICY"
+NETWORK_POLICY_NAMESPACES_KEY = "AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES"
+_DNS_LABEL = re.compile(r"[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?")
 
 
 def parse_strict_bool(name: str, raw: str, default: bool) -> bool:
@@ -59,6 +65,31 @@ def require_in_place_retired(raw: str) -> None:
             "in-place ingest was retired (#360): alias publication is the only "
             "ingest mode; unset INGEST_ALIAS_PUBLISH"
         )
+
+
+def network_policy(values: Mapping[str, str]) -> tuple[bool, list[str]]:
+    """(enabled, allowed namespaces) for the agent ingress NetworkPolicy.
+
+    The list is comma-separated DNS-1123 labels with no spaces, empty entries
+    or repeats; anything else fails closed (a typo must not silently widen or
+    narrow the policy). A list with the policy disabled is contradictory.
+    Diagnostics name the key, never the value."""
+    enabled = parse_strict_bool(NETWORK_POLICY_KEY, values.get(NETWORK_POLICY_KEY, ""), True)
+    raw = values.get(NETWORK_POLICY_NAMESPACES_KEY, "")
+    names = raw.split(",") if raw != "" else []
+    if any(_DNS_LABEL.fullmatch(name) is None for name in names):
+        raise ValueError(
+            f"{NETWORK_POLICY_NAMESPACES_KEY} must be comma-separated namespace names "
+            "(lowercase DNS-1123 labels, no spaces)"
+        )
+    if len(set(names)) != len(names):
+        raise ValueError(f"{NETWORK_POLICY_NAMESPACES_KEY} must not repeat a namespace")
+    if names and not enabled:
+        raise ValueError(
+            f"{NETWORK_POLICY_NAMESPACES_KEY} requires {NETWORK_POLICY_KEY} to be enabled: "
+            "refusing an allow-list for a policy that is not rendered"
+        )
+    return enabled, names
 
 
 def validate_operator_booleans(values: Mapping[str, str]) -> None:
@@ -133,6 +164,7 @@ def validate_model_config(values: Mapping[str, str]) -> None:
 def main() -> int:
     try:
         validate_operator_booleans(os.environ)
+        network_policy(os.environ)
         validate_model_config(os.environ)
     except ValueError as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
