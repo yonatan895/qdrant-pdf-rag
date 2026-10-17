@@ -89,16 +89,19 @@ tasks:
         echo "coverage reports: $out"
 
   local:
-    desc: Hermetic local verification of an explicit selection, with a receipt (#796)
+    desc: Hermetic local verification of the change (T0/T1/T2) with a receipt (#796)
     summary: |
-      `task qa:local -- tests/test_x.py[::node]` runs exactly that selection
-      against this worktree's code in an allowlisted environment, on disk,
-      under a memory cap, and writes <run>/receipt.json outside the repository
-      ($XDG_STATE_HOME/mainframe-rag/local-verify by default).
-      Refuses (exit 2) when the interpreter imports another tree's src, the
-      Colab assignment lock is held, or pytest already runs from this tree.
-      A dirty tree runs but is marked "not evidence". Never a substitute for
-      the CI unit lane, which owns the full suite.
+      `task qa:local` selects tests from the diff against origin/main plus
+      dirty paths, runs T0 (ruff/mypy on changed files) and then T1, or T2 for
+      broad changes (`--t2` forces it). An unmapped src/scripts change refuses
+      until `-- --select tests/<file>` covers it. `task qa:local --
+      tests/test_x.py[::node]` runs exactly that selection instead.
+      Runs in an allowlisted environment, on disk outside the repository,
+      under a memory cap, and writes a receipt under
+      $XDG_STATE_HOME/mainframe-rag/local-verify. Refuses (exit 2) when the
+      interpreter imports another tree's src, the Colab assignment lock is
+      held, or pytest already runs from this tree. Never a substitute for the
+      CI unit lane, which owns the full suite.
     cmds:
       - 'python3 -I scripts/local_verify.py {{.CLI_ARGS}}'
 
