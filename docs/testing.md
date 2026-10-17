@@ -153,6 +153,49 @@ pass. A dirty tree runs but is labeled "uncommitted, not evidence". The receipt
 covers the selection only: the CI `unit_tests` lane remains the authority for
 the full suite, and the receipt lists what it did not verify.
 
+<a id="advisory-coverage"></a>
+### Advisory branch coverage (`sh scripts/tools/run-task.sh qa:coverage`, `.github/workflows/coverage.yml`, #587)
+
+Runs the unit selection under `coverage` with `branch = true` over the
+`mainframe_rag` package (`[tool.coverage.*]` in `pyproject.toml`; no `omit`, no
+`fail_under`, modules no test imports report at 0%). It writes a terminal
+summary, `coverage.json`, `coverage.xml` and the data file to `OUT`, which
+defaults to `${XDG_STATE_HOME:-$HOME/.local/state}/mainframe-rag/coverage`
+and is refused inside the repository. `-- tests/test_x.py -q` replaces the
+default `tests -q` selection exactly as in `qa:unit`; `PYTEST_ADDOPTS` stays
+unset. The workflow runs weekly, on dispatch and on changes to its own file,
+uploads the reports as the `coverage-report` artifact, is not a required
+status and is not an acceptance producer.
+
+What it measures: which branches of `src/mainframe_rag` executed in-process
+during the unit selection. What it does not: that any behavior is correct. A
+branch can run without an assertion about its outcome, and a covered branch is
+not a verified one. Subprocess-only code, `scripts/`, `tests/` and integration
+tiers are not measured. A partial selection (the `qa:coverage -- ...` form)
+reports low percentages by construction. The CI `unit_tests` lane and
+acceptance remain the verification authority; a percentage never substitutes
+for a behavior-discriminating test or a required check. Per-package ratchets
+or deltas are a maintainer decision after reviewing the baseline below.
+
+Per-package branch coverage from `coverage.json` (package = first directory
+under `src/mainframe_rag/`, top-level modules grouped as `(top level)`):
+
+```sh
+python3 -I - "$OUT/coverage.json" <<'PY'
+import json, sys, collections
+files = json.load(open(sys.argv[1]))["files"]
+tot = collections.defaultdict(lambda: [0, 0])
+for path, f in files.items():
+    parts = path.split("/")[2:]  # drop src/mainframe_rag
+    pkg = parts[0] if len(parts) > 1 else "(top level)"
+    s = f["summary"]
+    tot[pkg][0] += s["covered_branches"]
+    tot[pkg][1] += s["num_branches"]
+for pkg, (c, n) in sorted(tot.items(), key=lambda kv: kv[1][0] / max(kv[1][1], 1)):
+    print(f"{pkg:16} {c:6}/{n:6}  {100 * c / max(n, 1):5.1f}%")
+PY
+```
+
 <a id="airgap-tier"></a>
 ### Air-gap deployment tier (`sh scripts/tools/run-task.sh airgap:dryrun`, `tests/test_airgap_*.py`, local Kind)
 

@@ -1,0 +1,53 @@
+name: coverage
+# Advisory branch-coverage measurement (#587). Not a required check and not an
+# acceptance producer: it reads source, it never gates it. The CI unit lane and
+# acceptance remain the authority. The pull_request path filter is only so a
+# change to this file produces its own baseline run.
+on:
+  schedule:
+    - cron: "23 4 * * 1" # weekly, Monday, off the hour
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/coverage.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: coverage-${{ github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      TASK_CONTRACTS_REQUIRE_RUNNER: "1"
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0; Python packages use the target hash lock below
+        with:
+          python-version: "3.14"
+      # Explicit preparation (verification never installs): qa:coverage runs on
+      # the prepared .venv/bin/python, as the load lane does.
+      - run: python scripts/prepare_python.py --venv .venv --wheelhouse .tools/python-wheels/dev --connected --download-workers 8
+      - name: Install pinned Task runner
+        run: sh scripts/tools/install-task.sh
+      - name: Install checksum-pinned Helm for deployment render tests
+        run: |
+          sh scripts/tools/install-helm.sh
+          echo "$GITHUB_WORKSPACE/.tools/bin" >> "$GITHUB_PATH"
+      - name: Measure branch coverage of the full unit selection (advisory)
+        run: sh scripts/tools/run-task.sh qa:coverage OUT="$RUNNER_TEMP/coverage"
+      - name: Retain coverage reports
+        if: always()
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
+        with:
+          name: coverage-report
+          path: ${{ runner.temp }}/coverage
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 30
