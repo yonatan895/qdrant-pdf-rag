@@ -56,6 +56,20 @@ tasks:
       - task: prerequisites
       - '.venv/bin/python -m pytest {{if .CLI_ARGS}}{{.CLI_ARGS}}{{else}}tests -v{{end}}'
 
+  local:
+    desc: Hermetic local verification of an explicit selection, with a receipt (#796)
+    summary: |
+      `task qa:local -- tests/test_x.py[::node]` runs exactly that selection
+      against this worktree's code in an allowlisted environment, on disk,
+      under a memory cap, and writes <run>/receipt.json outside the repository
+      ($XDG_STATE_HOME/mainframe-rag/local-verify by default).
+      Refuses (exit 2) when the interpreter imports another tree's src, the
+      Colab assignment lock is held, or pytest already runs from this tree.
+      A dirty tree runs but is marked "not evidence". Never a substitute for
+      the CI unit lane, which owns the full suite.
+    cmds:
+      - 'python3 -I scripts/local_verify.py {{.CLI_ARGS}}'
+
   hazards:
     desc: Prove sensitivity to the selected critical historical hazards
     summary: |
