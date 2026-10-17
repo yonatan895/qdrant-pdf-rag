@@ -78,9 +78,9 @@ exec env "$@"
 '''
 
 GETENT_STUB = '''#!/bin/sh
-[ "$1" = group ] && [ -f "$STATE/group" ] && { echo "$2:x:%s:"; exit 0; }
+[ "$1" = group ] && [ -f "$STATE/group" ] && { echo "$2:x:@GID@:"; exit 0; }
 exit 2
-''' % GID
+'''.replace('@GID@', str(GID))
 
 GROUPADD_STUB = '''#!/bin/sh
 echo "$@" >> "$STATE/groupadd.log"
