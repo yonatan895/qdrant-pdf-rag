@@ -20,9 +20,9 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
-from typing import Any, Literal, get_args
+from typing import Annotated, Any, Literal, get_args
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import AfterValidator, BaseModel, Field, field_validator
 
 SCHEMA_VERSION = 1
 
@@ -41,6 +41,17 @@ COMMENT_MAX_CHARS = 2000
 RATER_MAX_CHARS = 256
 
 Scalar = int | float | str | bool | None
+
+
+def _distinct(reasons: list[str]) -> list[str]:
+    if len(set(reasons)) != len(reasons):
+        raise ValueError("reasons must be distinct")
+    return reasons
+
+
+# Distinct reason codes; the console request and the stored rating share it,
+# so one cannot accept what the other refuses.
+Reasons = Annotated[list[Reason], AfterValidator(_distinct), Field(max_length=len(REASONS))]
 
 
 def _request_id(value: str) -> str:
@@ -79,7 +90,7 @@ class Rating(BaseModel):
 
     request_id: str
     rating: RatingValue
-    reasons: list[Reason] = Field(default_factory=list, max_length=len(REASONS))
+    reasons: Reasons = Field(default_factory=list)
     comment: str = Field(default="", max_length=COMMENT_MAX_CHARS)
     rater: str | None = Field(default=None, max_length=RATER_MAX_CHARS)
 
@@ -87,13 +98,6 @@ class Rating(BaseModel):
     @classmethod
     def _check_id(cls, v: str) -> str:
         return _request_id(v)
-
-    @field_validator("reasons")
-    @classmethod
-    def _distinct(cls, v: list[str]) -> list[str]:
-        if len(set(v)) != len(v):
-            raise ValueError("reasons must be distinct")
-        return v
 
 
 class UnknownAnswerError(LookupError):
@@ -137,6 +141,9 @@ class FeedbackStore:
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute("PRAGMA foreign_keys=ON")
         self._db.execute("PRAGMA synchronous=NORMAL")
+        # Deleted or replaced content is overwritten, not left in free pages:
+        # retention (ADR-0005) must hold on disk, not only for reads.
+        self._db.execute("PRAGMA secure_delete=ON")
         with self._lock:
             self._db.executescript(_SCHEMA)
             row = self._db.execute("SELECT value FROM meta WHERE key='schema'").fetchone()
@@ -240,4 +247,7 @@ class FeedbackStore:
                 " (SELECT request_id FROM answers WHERE created_at < ?)", (cutoff,)
             ).fetchone()[0]
             answers = self._db.execute("DELETE FROM answers WHERE created_at < ?", (cutoff,)).rowcount
+            # Fold the WAL (which still holds pre-delete page images) into the
+            # zeroed database file and truncate it.
+            self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         return {"answers": int(answers), "ratings": int(ratings)}

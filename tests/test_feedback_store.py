@@ -176,3 +176,27 @@ def test_schema_version_mismatch_refuses_to_open(tmp_path):
     db.close()
     with pytest.raises(RuntimeError, match="schema"):
         FeedbackStore(path)
+
+
+def test_purged_and_replaced_text_does_not_survive_on_disk(tmp_path):
+    """Retention holds on disk, not only for reads: purged answers and a
+    replaced comment leave no bytes in the database file or the WAL."""
+    now = [10_000_000.0]
+    path = tmp_path / "feedback.sqlite3"
+    store = FeedbackStore(path, clock=lambda: now[0])
+    old = AnswerRecord(request_id="aaaaaaaaaaaa", endpoint="answer", query="PURGED-QUERY-CANARY",
+                       answer="PURGED-ANSWER-CANARY", finalized_at=now[0] - 200 * 86400)
+    keep = AnswerRecord(request_id="bbbbbbbbbbbb", endpoint="answer", query="q", answer="a")
+    assert store.record_answer(old) and store.record_answer(keep)
+    store.add_rating(Rating(request_id="aaaaaaaaaaaa", rating="bad", comment="PURGED-COMMENT-CANARY"))
+    store.add_rating(Rating(request_id="bbbbbbbbbbbb", rating="bad", comment="REPLACED-COMMENT-CANARY"))
+    store.add_rating(Rating(request_id="bbbbbbbbbbbb", rating="good", comment="kept"))
+    assert store.purge(retention_days=180) == {"answers": 1, "ratings": 1}
+    on_disk = b"".join(p.read_bytes() for p in tmp_path.iterdir() if p.is_file())
+    for canary in (b"PURGED-QUERY-CANARY", b"PURGED-ANSWER-CANARY", b"PURGED-COMMENT-CANARY",
+                   b"REPLACED-COMMENT-CANARY"):
+        assert canary not in on_disk, canary
+    assert store.rating("bbbbbbbbbbbb")["comment"] == "kept"
+    assert store.record_answer(AnswerRecord(request_id="cccccccccccc", endpoint="chat", query="q2",
+                                            answer="a2"))
+    store.close()

@@ -169,7 +169,8 @@ def create_instruments(meter: Meter | None = None) -> Instruments:
         ),
         feedback_ratings=meter.create_counter(
             "rag.feedback.ratings",
-            description="Console answer ratings by rating, reason, endpoint and answer state (issue #780)",
+            description=("Accepted console rating submissions (re-ratings included; the store keeps the "
+                         "latest per answer) by rating, reason, endpoint and answer state (issue #780)"),
             unit="1",
         ),
         feedback_records=meter.create_counter(
@@ -257,30 +258,29 @@ def record_admission_rejected(endpoint: str, reason: str) -> None:
         log.debug("otel record_admission_rejected dropped: %s", error_type(exc))
 
 
-# Bounded feedback vocabularies (issue #780), owned by the feedback store:
-# labels never carry text or ids.
-FEEDBACK_RATINGS = RATINGS
-FEEDBACK_REASONS = REASONS
-FEEDBACK_ENDPOINTS = ENDPOINTS
+# Feedback labels (issue #780) come from the store's bounded vocabularies
+# (RATINGS, REASONS, ENDPOINTS): never text or ids.
 FEEDBACK_RECORD_OUTCOMES = ("recorded", "duplicate", "dropped", "failed")
 
 
 def record_feedback_rating(
     rating: str, reasons: list[str], *, endpoint: str, verification_state: str | None
 ) -> None:
-    """One accepted rating: one count per reason (`none` when no reason).
-    Unknown values fall to `unknown`, never a new series."""
+    """One accepted rating submission: one count per reason (`none` when no
+    reason). A re-rating counts again, so this is submission volume and mix;
+    the feedback store (latest rating per answer) is the authority on rated
+    answers. Unknown values fall to `unknown`, never a new series."""
     instruments = _instruments
     if instruments is None:
         return
     try:
         base = {
-            "rating": rating if rating in FEEDBACK_RATINGS else "unknown",
-            "endpoint": endpoint if endpoint in FEEDBACK_ENDPOINTS else "unknown",
+            "rating": rating if rating in RATINGS else "unknown",
+            "endpoint": endpoint if endpoint in ENDPOINTS else "unknown",
             "verification_state": (verification_state if isinstance(verification_state, str)
                                    and verification_state in VERIFICATION_STATES else "unknown"),
         }
-        for reason in [r for r in reasons if r in FEEDBACK_REASONS] or ["none"]:
+        for reason in [r for r in reasons if r in REASONS] or ["none"]:
             instruments.feedback_ratings.add(1, {**base, "reason": reason})
     except Exception as exc:  # noqa: BLE001
         log.debug("otel record_feedback_rating dropped: %s", error_type(exc))

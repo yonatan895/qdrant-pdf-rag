@@ -749,6 +749,10 @@
     ["too_slow", "Too slow"], ["other", "Other"],
   ];
   const FEEDBACK_ERROR_TEXT = "The rating could not be sent.";
+  // Unsent rating drafts by request id: renderMessages() rebuilds every
+  // article (another turn completing, a cross-tab write), and an operator's
+  // half-written rating must survive that. Page memory only, never stored.
+  const feedbackDrafts = new Map();
 
   function renderFeedback(turn) {
     if (document.body.dataset.feedback !== "on" || turn.role !== "assistant") return null;
@@ -759,16 +763,19 @@
       return box;
     }
     box.appendChild(el("span", "feedback-label", "Rate this answer:"));
+    if (!feedbackDrafts.has(turn.request_id)) {
+      feedbackDrafts.set(turn.request_id, { rating: null, reasons: [], comment: "" });
+    }
+    const draft = feedbackDrafts.get(turn.request_id);
     const details = el("div", "feedback-details");
-    details.hidden = true;
-    let chosen = null;
+    details.hidden = !draft.rating;
     for (const [value, label] of FEEDBACK_RATINGS) {
       const button = el("button", "seg feedback-rating", label);
       button.type = "button";
       button.setAttribute("data-rating", value);
-      button.setAttribute("aria-pressed", "false");
+      button.setAttribute("aria-pressed", String(draft.rating === value));
       button.addEventListener("click", () => {
-        chosen = value;
+        draft.rating = value;
         box.querySelectorAll(".feedback-rating").forEach((other) => {
           other.setAttribute("aria-pressed", String(other === button));
         });
@@ -783,6 +790,10 @@
       const checkbox = document.createElement("input");
       checkbox.type = "checkbox";
       checkbox.value = value;
+      checkbox.checked = draft.reasons.includes(value);
+      checkbox.addEventListener("change", () => {
+        draft.reasons = Array.from(reasons.querySelectorAll("input:checked")).map((input) => input.value);
+      });
       option.appendChild(checkbox);
       option.appendChild(document.createTextNode(" " + label));
       reasons.appendChild(option);
@@ -792,13 +803,17 @@
     comment.maxLength = 2000;
     comment.placeholder = "Comment (optional)";
     comment.setAttribute("aria-label", "Comment (optional)");
+    comment.value = draft.comment;
+    comment.addEventListener("input", () => {
+      draft.comment = comment.value;
+    });
     details.appendChild(comment);
     const submit = el("button", "btn feedback-submit", "Send rating");
     submit.type = "button";
     const status = el("span", "feedback-status");
     status.setAttribute("role", "status");
     submit.addEventListener("click", async () => {
-      if (!chosen) return;
+      if (!draft.rating) return;
       submit.disabled = true;
       let ok = false;
       let message = FEEDBACK_ERROR_TEXT;
@@ -808,9 +823,9 @@
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             request_id: turn.request_id,
-            rating: chosen,
-            reasons: Array.from(reasons.querySelectorAll("input:checked")).map((input) => input.value),
-            comment: comment.value,
+            rating: draft.rating,
+            reasons: draft.reasons,
+            comment: draft.comment,
           }),
         });
         ok = response.status === 201;
@@ -830,7 +845,8 @@
         submit.disabled = false;
         return;
       }
-      const rated = chosen;
+      const rated = draft.rating;
+      feedbackDrafts.delete(turn.request_id);
       await mutate((store) => {
         for (const session of Object.values(store.sessions)) {
           for (const stored of session.turns || []) {

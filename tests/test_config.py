@@ -296,7 +296,6 @@ PINNED_SETTING_DEFAULTS: dict[str, object] = {
     "feedback_api_key": None,
     "feedback_queue_size": 256,
     "feedback_timeout_s": 2.0,
-    "feedback_record_rater": False,
     "feedback_drain_timeout_s": 2.0,
     "feedback_store_path": "/data/feedback.sqlite3",
     "feedback_service_token": None,

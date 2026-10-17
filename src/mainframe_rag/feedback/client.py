@@ -88,6 +88,9 @@ class FeedbackClient:
             return "unknown"
         if response.status_code == 422:
             return "invalid"
+        # A token mismatch (401) or service fault must not look like silence.
+        log.warning(json_log(rating.request_id, "feedback_rating", error="status",
+                             status=response.status_code))
         return "unavailable"
 
     async def aclose(self) -> None:

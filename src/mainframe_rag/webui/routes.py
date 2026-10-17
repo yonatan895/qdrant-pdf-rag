@@ -41,12 +41,11 @@ from mainframe_rag.agent.sse import error_payload, format_sse_event, output_fina
 from mainframe_rag.config import ReasoningEffort
 from mainframe_rag.feedback.store import (
     COMMENT_MAX_CHARS,
-    RATER_MAX_CHARS,
     RATINGS,
     REASONS,
     REQUEST_ID_PATTERN,
     RatingValue,
-    Reason,
+    Reasons,
 )
 from mainframe_rag.ingest.bounds import EmbedInputTooLarge
 from mainframe_rag.ingest.chunk import detect_code_region
@@ -123,12 +122,15 @@ class UiFeedbackRequest(BaseModel):
 
     request_id: str = Field(pattern=f"^{REQUEST_ID_PATTERN}$")
     rating: RatingValue
-    reasons: list[Reason] = Field(default_factory=list, max_length=len(REASONS))
+    reasons: Reasons = Field(default_factory=list)
     comment: str = Field(default="", max_length=COMMENT_MAX_CHARS)
 
 
+_FEEDBACK_DISABLED_TEXT = "feedback is not enabled on this deployment"
 _FEEDBACK_ERRORS = {
-    "unknown": (404, "unknown_answer", "this answer was not recorded, so it cannot be rated"),
+    # The record may still be queued (delivery is asynchronous) or was
+    # dropped/purged: the text must not claim the refusal is final.
+    "unknown": (404, "unknown_answer", "this answer is not recorded yet; try again in a moment"),
     "invalid": (422, "invalid_request", "the rating is invalid"),
     "unavailable": (503, "feedback_unavailable", "feedback is temporarily unavailable"),
 }
@@ -650,14 +652,6 @@ def _render_page(
     return _secure(HTMLResponse(body, status_code=status_code))
 
 
-def _rater(request: Request, record_rater: bool) -> str | None:
-    """The OAuth proxy's forwarded user, only when FEEDBACK_RECORD_RATER is set."""
-    if not record_rater:
-        return None
-    forwarded = request.headers.get("x-forwarded-user", "").strip()
-    return forwarded[:RATER_MAX_CHARS] or None
-
-
 _FEEDBACK_LABELS = {
     "good": "Good", "neutral": "Neutral", "bad": "Bad",
     "wrong": "Wrong", "incomplete": "Incomplete",
@@ -1019,18 +1013,14 @@ async def _console_stream_response(req, owner):
 @router.post("/feedback")
 async def ui_feedback(request: Request, req: UiFeedbackRequest) -> Response:
     """Forward one console rating to the feedback store (issue #780). Fixed
-    client messages and stable codes; the rater identity is recorded only
-    when FEEDBACK_RECORD_RATER is set (from the OAuth proxy's header)."""
-    from mainframe_rag.agent import app as app_mod
-    from mainframe_rag.feedback.store import Rating
-
+    client messages and stable codes. No rater identity is recorded: the agent
+    port is reachable without the OAuth proxy, so a forwarded-user header
+    proves nothing (attribution is deferred to the deployment, PR B)."""
     client = _feedback_client()
     if client is None:
         return _secure(JSONResponse(status_code=404, content={
-            "code": "feedback_disabled", "message": "feedback is not enabled on this deployment"}))
-    outcome = await client.rate(Rating(request_id=req.request_id, rating=req.rating,
-                                       reasons=list(req.reasons), comment=req.comment,
-                                       rater=_rater(request, app_mod.settings.feedback_record_rater)))
+            "code": "feedback_disabled", "message": _FEEDBACK_DISABLED_TEXT}))
+    outcome = await _submit_rating(client, req)
     if outcome == "ok":
         return _secure(JSONResponse(status_code=201, content={"status": "recorded"}))
     status, code, message = _FEEDBACK_ERRORS[outcome]
@@ -1039,15 +1029,13 @@ async def ui_feedback(request: Request, req: UiFeedbackRequest) -> Response:
 
 @router.post("/feedback/form", response_class=HTMLResponse)
 async def ui_feedback_form(request: Request) -> Response:
-    """Fallback (no-streaming) console rating (#780): the same validation,
-    store call and fixed texts as /ui/feedback, rendered as a small fragment
-    that replaces the form."""
-    from mainframe_rag.agent import app as app_mod
-    from mainframe_rag.feedback.store import Rating
-
+    """Fallback console rating (#780): the same validation, store call and
+    fixed texts as /ui/feedback. An htmx request gets a fragment that replaces
+    the form, always 200 like the /ui/chat banner (htmx 1.9 never swaps a 4xx/5xx);
+    a native post (no JS, opened in a new tab) gets a full page with the real status."""
     client = _feedback_client()
     if client is None:
-        return _feedback_fragment("feedback is not enabled on this deployment", 404)
+        return _feedback_result(request, _FEEDBACK_DISABLED_TEXT, 404)
     form = await request.form()
     try:
         req = UiFeedbackRequest.model_validate({
@@ -1056,19 +1044,31 @@ async def ui_feedback_form(request: Request) -> Response:
             "comment": str(form.get("comment", "")),
         })
     except ValidationError:
-        return _feedback_fragment(_FEEDBACK_ERRORS["invalid"][2], 422)
-    outcome = await client.rate(Rating(request_id=req.request_id, rating=req.rating,
-                                       reasons=list(req.reasons), comment=req.comment,
-                                       rater=_rater(request, app_mod.settings.feedback_record_rater)))
+        status, _code, message = _FEEDBACK_ERRORS["invalid"]
+        return _feedback_result(request, message, status)
+    outcome = await _submit_rating(client, req)
     if outcome == "ok":
-        return _feedback_fragment(f"Rated: {req.rating}", 201)
+        return _feedback_result(request, f"Rated: {req.rating}", 201)
     status, _code, message = _FEEDBACK_ERRORS[outcome]
-    return _feedback_fragment(message, status)
+    return _feedback_result(request, message, status)
 
 
-def _feedback_fragment(text: str, status: int) -> Response:
-    return _secure(HTMLResponse(
-        f'<div class="turn-feedback" role="status">{html.escape(text)}</div>', status_code=status))
+async def _submit_rating(client: Any, req: UiFeedbackRequest) -> str:
+    from mainframe_rag.feedback.store import Rating
+
+    return str(await client.rate(Rating(request_id=req.request_id, rating=req.rating,
+                                        reasons=list(req.reasons), comment=req.comment)))
+
+
+def _feedback_result(request: Request, text: str, status: int) -> Response:
+    fragment = f'<div class="turn-feedback" role="status">{html.escape(text)}</div>'
+    if request.headers.get("HX-Request") == "true":
+        return _secure(HTMLResponse(fragment, status_code=200))
+    page = ('<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Answer rating</title>'
+            '<link rel="stylesheet" href="/ui/static/css/console.css"></head>'
+            f'<body class="theme-dark"><main class="feedback-result">{fragment}'
+            '<p>You can close this tab and return to the console.</p></main></body></html>')
+    return _secure(HTMLResponse(page, status_code=status))
 
 
 @router.get("/static/{path:path}")

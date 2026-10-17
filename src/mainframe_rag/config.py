@@ -245,14 +245,13 @@ class Settings(BaseSettings):
     # call, no behavior change. When on, finalized answers are sent best-effort
     # to the single-writer feedback service (never on the answer's critical
     # path) and the console can rate them. The bearer token is a Secret
-    # reference, never logged. Rater identity is stored only when explicitly
-    # enabled (taken from the OAuth proxy's forwarded-user header).
+    # reference, never logged. No rater identity is recorded (the agent port
+    # is reachable without the OAuth proxy; attribution is PR B's to prove).
     feedback_enabled: bool = False
     feedback_url: str | None = None
     feedback_api_key: str | None = None
     feedback_queue_size: int = Field(default=256, ge=1, le=10000)
     feedback_timeout_s: float = Field(default=2.0, gt=0.0, le=30.0)
-    feedback_record_rater: bool = False
     # Bounded shutdown drain of queued records; what is left is counted dropped.
     feedback_drain_timeout_s: float = Field(default=2.0, ge=0.0, le=30.0)
     # Feedback SERVICE process only (the single SQLite writer): store path on

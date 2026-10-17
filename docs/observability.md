@@ -26,8 +26,9 @@ would widen access to manual text beyond the protected feedback volume.
 
 ## Display and analysis
 
-- **Rating metrics:** `rag.feedback.ratings` (rating, reason, endpoint,
-  verification state) and `rag.feedback.records` (recorded, duplicate, dropped,
+- **Rating metrics:** `rag.feedback.ratings` (accepted submissions, re-ratings
+  included, by rating, reason, endpoint and verification state; the store is the
+  authority on rated answers) and `rag.feedback.records` (recorded, duplicate, dropped,
   failed) on the existing `/metrics`. Bounded labels only, never ids or text.
   Shown beside the request, latency and admission panels.
 - **Periodic analysis report** (#780 phase 2), from a read-only export of the

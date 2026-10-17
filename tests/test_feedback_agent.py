@@ -178,6 +178,21 @@ async def test_rating_outcomes_are_fixed_and_counted_only_when_accepted(monkeypa
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("status", [401, 405, 500])
+async def test_unexpected_rating_status_is_unavailable_and_logged_by_status(caplog, status):
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(
+            lambda request: httpx2.Response(status, json={"message": "SYNTHETIC-UPSTREAM"}))) as http:
+        client = FeedbackClient(_settings(), client=http)
+        with caplog.at_level("WARNING", logger="feedback"):
+            result = await client.rate(Rating(request_id=RID, rating="bad", comment="SYNTHETIC-COMMENT"))
+        await client.aclose()
+    assert result == "unavailable"
+    [line] = [json.loads(r.getMessage()) for r in caplog.records]
+    assert (line["action"], line["error"], line["status"]) == ("feedback_rating", "status", status)
+    assert "SYNTHETIC" not in caplog.text
+
+
+@pytest.mark.anyio
 async def test_unreachable_service_is_unavailable_and_logs_no_text(caplog):
     def handler(request):
         raise httpx2.ConnectError("refused", request=request)
@@ -214,12 +229,59 @@ def test_console_rating_maps_store_outcomes_to_fixed_responses(feedback_client, 
         RID, "bad", ["incomplete"], "SYNTHETIC")
 
 
-@pytest.mark.parametrize("record_rater,expected", [(False, None), (True, "operator-a")])
-def test_rater_identity_is_recorded_only_when_enabled(monkeypatch, feedback_client, record_rater, expected):
-    monkeypatch.setattr(app_mod.settings, "feedback_record_rater", record_rater)
+def test_rater_is_never_taken_from_a_forwarded_header(feedback_client):
+    """The agent port is reachable without the OAuth proxy, so a forwarded
+    user header proves nothing: no rater is recorded (deferred to PR B)."""
     feedback_client.post("/ui/feedback", json={"request_id": RID, "rating": "good"},
                          headers={"X-Forwarded-User": "operator-a"})
-    assert RecordingFeedback.instances[0].ratings[-1].rater == expected
+    assert RecordingFeedback.instances[0].ratings[-1].rater is None
+
+
+@pytest.mark.parametrize("route", ["json", "form"])
+def test_duplicate_reasons_are_a_fixed_422_never_a_500(feedback_client, route):
+    if route == "json":
+        response = feedback_client.post("/ui/feedback", json={
+            "request_id": RID, "rating": "bad", "reasons": ["wrong", "wrong"]})
+        assert (response.status_code, response.json()["code"]) == (422, "invalid_request")
+    else:
+        response = feedback_client.post("/ui/feedback/form", data={
+            "request_id": RID, "rating": "bad", "reasons": ["wrong", "wrong"]},
+            headers={"HX-Request": "true"})
+        assert response.status_code == 200 and "the rating is invalid" in response.text
+    assert RecordingFeedback.instances[0].ratings == []
+
+
+@pytest.mark.parametrize("outcome,text", [
+    ("unknown", "not recorded yet"),
+    ("unavailable", "feedback is temporarily unavailable"),
+])
+def test_htmx_rating_failures_are_swappable_and_say_why(feedback_client, outcome, text):
+    """htmx 1.9 swaps only 2xx/3xx (not 204): a failure fragment must be 200,
+    exactly like the /ui/chat banner, or the operator sees nothing."""
+    RecordingFeedback.instances[0].outcome = outcome
+    response = feedback_client.post("/ui/feedback/form", data={"request_id": RID, "rating": "bad"},
+                                    headers={"HX-Request": "true"})
+    assert response.status_code == 200 and text in response.text
+    assert "<html" not in response.text
+
+
+def test_no_js_rating_opens_a_full_page_and_keeps_the_console(feedback_client):
+    """Without JS the form posts natively into a new tab (the console page and
+    its conversation stay), and the answer is a full page, not a bare fragment."""
+    page = feedback_client.post("/ui/chat", data={"message": QUERY, "messages": ""},
+                                headers={"HX-Request": "true"})
+    assert 'action="/ui/feedback/form"' in page.text and 'target="_blank"' in page.text
+    [record] = _records()
+    RecordingFeedback.instances[0].outcome = "unavailable"
+    failed = feedback_client.post("/ui/feedback/form", data={"request_id": record.request_id,
+                                                             "rating": "bad"})
+    assert failed.status_code == 503
+    assert failed.text.startswith("<!doctype html>") and "feedback is temporarily unavailable" in failed.text
+    RecordingFeedback.instances[0].outcome = "ok"
+    rated = feedback_client.post("/ui/feedback/form", data={"request_id": record.request_id,
+                                                            "rating": "good"})
+    assert rated.status_code == 201 and rated.text.startswith("<!doctype html>")
+    assert "Rated: good" in rated.text
 
 
 @pytest.mark.parametrize("body", [
@@ -291,12 +353,14 @@ def test_fallback_console_answer_renders_a_rating_form_that_round_trips(feedback
     rated = feedback_client.post("/ui/feedback/form", data={
         "request_id": record.request_id, "rating": "bad", "reasons": ["incomplete", "too_slow"],
         "comment": "SYNTHETIC"}, headers={"HX-Request": "true"})
-    assert rated.status_code == 201 and "Rated: bad" in rated.text
+    assert rated.status_code == 200 and "Rated: bad" in rated.text
     [rating] = RecordingFeedback.instances[0].ratings
     assert (rating.request_id, rating.rating, rating.reasons) == (record.request_id, "bad",
                                                                    ["incomplete", "too_slow"])
-    invalid = feedback_client.post("/ui/feedback/form", data={"request_id": "nope", "rating": "bad"})
-    assert invalid.status_code == 422 and len(RecordingFeedback.instances[0].ratings) == 1
+    invalid = feedback_client.post("/ui/feedback/form", data={"request_id": "nope", "rating": "bad"},
+                                   headers={"HX-Request": "true"})
+    assert invalid.status_code == 200 and "the rating is invalid" in invalid.text
+    assert len(RecordingFeedback.instances[0].ratings) == 1
 
 
 def test_fallback_console_renders_no_rating_form_when_disabled(monkeypatch, synthetic_pdf,

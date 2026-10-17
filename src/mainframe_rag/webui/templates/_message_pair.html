@@ -69,7 +69,9 @@
   </div>
   {% endif %}
   {% if feedback_enabled and turn.role == "assistant" and turn.request_id %}
-  <form class="turn-feedback" method="post" action="/ui/feedback/form"
+  {# Without JS the native post opens in a new tab so this page and its
+     conversation stay; htmx swaps the result fragment in place. #}
+  <form class="turn-feedback" method="post" action="/ui/feedback/form" target="_blank"
         hx-post="/ui/feedback/form" hx-swap="outerHTML">
     <input type="hidden" name="request_id" value="{{ turn.request_id }}">
     <fieldset class="feedback-ratings">

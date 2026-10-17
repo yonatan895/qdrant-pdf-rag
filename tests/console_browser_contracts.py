@@ -1195,3 +1195,92 @@ def test_supplied_excerpts_expand_as_data_for_current_response_only(console, pag
     assert page.eval("return document.querySelector('.evidence[data-evidence=unavailable]') !== null")
     assert page.eval("return document.querySelector('.evidence-view')") is None
     assert "not available" in text(page, ".evidence-unavailable")
+
+
+# -- answer feedback (#780) ----------------------------------------------------
+
+
+class _RecordingFeedback:
+    """Feedback-client double installed after lifespan: what the console sends."""
+
+    def __init__(self, outcome: str = "ok") -> None:
+        self.outcome = outcome
+        self.ratings: list = []
+        self.records: list = []
+
+    def submit(self, record) -> None:
+        self.records.append(record)
+
+    async def rate(self, rating) -> str:
+        self.ratings.append(rating)
+        return self.outcome
+
+
+def _with_feedback(console, browser, monkeypatch, outcome: str = "ok") -> _RecordingFeedback:
+    from mainframe_rag.agent import app as app_mod
+
+    feedback = _RecordingFeedback(outcome)
+    monkeypatch.setattr(app_mod, "feedback", feedback)
+    browser.get(console.url)
+    browser.wait("return document.body.dataset.feedback === 'on'", what="feedback-enabled console")
+    return feedback
+
+
+FIRST_RATING = "#messages .turn-assistant .turn-feedback"  # querySelector: the first answer
+
+
+def _reach(b: Browser, css: str) -> str:
+    """Scroll the control above the sticky composer, as an operator would."""
+    b.eval("document.querySelector(arguments[0]).scrollIntoView({block:'center'})", css)
+    return css
+
+
+def test_unsent_rating_draft_survives_a_rerender_then_sends_once_and_persists(
+    console, browser, monkeypatch
+):
+    feedback = _with_feedback(console, browser, monkeypatch)
+    send(browser, "What is IEA500I?")
+    wait_state(browser, "complete")
+    browser.click(_reach(browser, FIRST_RATING + ' .feedback-rating[data-rating="bad"]'))
+    browser.click(_reach(browser, FIRST_RATING + ' .feedback-reasons input[value="incomplete"]'))
+    browser.type(_reach(browser, FIRST_RATING + " .feedback-comment"), "SYNTHETIC draft comment")
+
+    # Another turn completing rebuilds every article; the draft must survive.
+    send(browser, "Again")
+    wait_state(browser, "complete", 2)
+    assert browser.eval(
+        "var b=document.querySelector(arguments[0]);return [b.querySelector('.feedback-rating[aria-pressed=true]').dataset.rating,"
+        "Array.from(b.querySelectorAll('.feedback-reasons input:checked')).map(i=>i.value),"
+        "b.querySelector('.feedback-comment').value, b.querySelector('.feedback-details').hidden]",
+        FIRST_RATING,
+    ) == ["bad", ["incomplete"], "SYNTHETIC draft comment", False]
+
+    browser.click(_reach(browser, FIRST_RATING + " .feedback-submit"))
+    browser.wait("return document.querySelector(arguments[0]).textContent === 'Rated: bad'", FIRST_RATING,
+                 what="rated state")
+    [rating] = feedback.ratings
+    first_id = store(browser)["sessions"][store(browser)["active"]]["turns"][1]["request_id"]
+    assert (rating.request_id, rating.rating, rating.reasons, rating.comment, rating.rater) == (
+        first_id, "bad", ["incomplete"], "SYNTHETIC draft comment", None)
+    browser.reload()
+    browser.wait("return document.querySelectorAll('#messages .turn-assistant').length==2")
+    assert text(browser, FIRST_RATING) == "Rated: bad"
+    assert len(feedback.ratings) == 1
+
+
+def test_rating_failure_shows_the_fixed_reason_and_keeps_the_draft(console, browser, monkeypatch):
+    feedback = _with_feedback(console, browser, monkeypatch, outcome="unknown")
+    send(browser, "What is IEA500I?")
+    wait_state(browser, "complete")
+    browser.click(_reach(browser, FIRST_RATING + ' .feedback-rating[data-rating="good"]'))
+    browser.type(_reach(browser, FIRST_RATING + " .feedback-comment"), "SYNTHETIC")
+    browser.click(_reach(browser, FIRST_RATING + " .feedback-submit"))
+    browser.wait("return document.querySelector(arguments[0]+' .feedback-status').textContent.length>0",
+                 FIRST_RATING, what="failure status")
+    assert text(browser, FIRST_RATING + " .feedback-status") == (
+        "this answer is not recorded yet; try again in a moment")
+    feedback.outcome = "ok"
+    browser.click(_reach(browser, FIRST_RATING + " .feedback-submit"))
+    browser.wait("return document.querySelector(arguments[0]).textContent === 'Rated: good'", FIRST_RATING,
+                 what="rated on retry")
+    assert [r.comment for r in feedback.ratings] == ["SYNTHETIC", "SYNTHETIC"]
