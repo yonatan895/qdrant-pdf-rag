@@ -17,6 +17,7 @@ from qdrant_client import models
 from mainframe_rag.config import Settings
 from mainframe_rag.ingest.chunk import Chunk, make_chunk_id
 from mainframe_rag.ingest.completion import (
+    UnsupportedLegacyDataError,
     completion_collection_name,
     completion_point_id,
     doc_generation_id,
@@ -25,7 +26,7 @@ from mainframe_rag.ingest.completion import (
     read_completion,
 )
 from mainframe_rag.ingest.ibm_pdf import ParsedDoc
-from mainframe_rag.ingest.identity import UnsupportedLegacyDataError, source_rev_key
+from mainframe_rag.ingest.identity import source_rev_key
 from mainframe_rag.ingest.qdrant_io import delete_by_revision, stored_doc_revisions
 from mainframe_rag.ingest.rules_version import extraction_rules_version
 from tests.test_run_ingest import _filter_doc_id, _filter_match_value

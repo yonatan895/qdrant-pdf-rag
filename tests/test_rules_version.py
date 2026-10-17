@@ -40,6 +40,22 @@ def test_version_is_stable_and_covers_all_payload_producers() -> None:
     }
 
 
+# The version is the bytes of the rule modules, so ANY edit to one (even an
+# exception rename) marks every stored corpus reembed_required. #776 did that
+# silently (94d7c565 -> ef1c7f19, restored here). A real extraction change
+# updates this pin deliberately under its own approved concern (AGENTS.md:
+# no silent baseline changes); unrelated code belongs outside rule modules.
+RULES_VERSION_PIN = "94d7c565b4cdceaa"
+
+
+def test_rules_version_changes_only_deliberately() -> None:
+    assert extraction_rules_version() == RULES_VERSION_PIN, (
+        "a rule module changed: every stored corpus now needs a re-embed. Revert the "
+        "edit or move non-extraction code out of the rule modules; update the pin only "
+        "under an approved extraction change."
+    )
+
+
 def _package_imports(path) -> set[str]:
     """Every `mainframe_rag.*` module a source file imports, at any depth
     (function-local and TYPE_CHECKING imports included: conservative)."""
