@@ -16,6 +16,7 @@ are scripted doubles (gateway-shaped streams).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import re
 import shutil
@@ -366,10 +367,8 @@ class Browser:
         self._cmd("DELETE", "/window")
 
     def close(self) -> None:
-        try:
+        with contextlib.suppress(httpx.HTTPError):
             self._http.request("DELETE", f"/session/{self.sid}")
-        except httpx.HTTPError:
-            pass
         self._http.close()
         self._proc.terminate()
         try:

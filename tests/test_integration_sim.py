@@ -23,7 +23,7 @@ import subprocess
 import sys
 import threading
 import uuid
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 
 import httpx2
@@ -1794,10 +1794,8 @@ def test_publisher_process_death_resumes_same_build(
                 if c.name.startswith(PUBLISH_ALIAS)}
 
     def kill_owned_group(process):
-        try:
+        with suppress(ProcessLookupError):
             os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
         process.wait(timeout=10)
 
     old = target()

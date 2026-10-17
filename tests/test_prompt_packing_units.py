@@ -697,7 +697,7 @@ TWO_ENTRIES = [_entry("ABC100I", 2550), _entry("ABC200E", 800, "bravo ")]
 @pytest.mark.parametrize("tokenized", [False, True])
 def test_requested_later_entry_is_supplied_not_unrelated_prefix(tokenized):
     hit = _message_hit(TWO_ENTRIES)
-    assert 3400 < len(hit.text) and hit.text.index("ABC200E") > 2500
+    assert len(hit.text) > 3400 and hit.text.index("ABC200E") > 2500
     kwargs = (
         {"tokenizer": FallbackTokenizer(), "settings": _tokenizer_settings()}
         if tokenized

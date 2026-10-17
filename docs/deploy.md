@@ -849,6 +849,61 @@ bytes. Combined tag+digest refs are invalid — digest-only form is the pin.
 - Application transfer uses the signed bundle and verified `skopeo` loading
   path above; this repository ships no alternate mirroring configuration.
 
+<a id="quay-image-roles"></a>
+### Quay image roles and platform compatibility (issue #808)
+
+Application images are built once in the connected factory and promoted as the
+tested bytes through the signed bundle. The air-gapped GitLab never builds,
+rebuilds or tags an application image; it only runs the gates. Every path below
+is relative to an operator registry path and contains no hostname; operators set
+the real values in `airgap.env` (`INTERNAL_REGISTRY`, written by `load.sh`) and in
+protected GitLab CI/CD variables (`CI_APPROVED_REGISTRY`, read only by
+`.gitlab-ci.yml`). The two may name different Quay organizations: runtime images
+and CI tooling have different owners and pull credentials.
+
+| Role | Path under the registry | Identity | Written by | Read by |
+|---|---|---|---|---|
+| Agent | `qdrant-pdf-rag-agent:<IMAGE_SHA>` | packed config digest, then deployed by registry manifest digest | `load.sh` | cluster pods |
+| Ingest | `qdrant-pdf-rag-ingest:<IMAGE_SHA>` | as the agent | `load.sh` | ingest Job |
+| Qdrant | `qdrant/qdrant:v1.19.0-unprivileged` | tag (the vendored chart cannot render a digest); running `imageID` compared | `load.sh` | cluster pods |
+| Jaeger | `jaegertracing/jaeger:v2.20.0` | as the agent | `load.sh` | cluster pods |
+| OAuth sidecar (optional) | `openshift4/ose-oauth-proxy:v4.14` | as the agent; absent while `images.txt` says `sha256:PENDING` | `load.sh` | cluster pods |
+| CI job image | `ci/python:3.14`, or a complete `CI_PYTHON_IMAGE` | mirrored UBI Python 3.14 (GIL) with git, pip, tar, sha256sum | platform or factory mirror, not this repository | GitLab runner |
+| CI Qdrant service | `qdrant/qdrant@sha256:<images.txt digest>` | the `images.txt` manifest digest, so a tag is never enough | registry-to-registry copy that preserves the digest | GitLab runner (`sim`, `gate-l1`) |
+
+The CI Qdrant service is a different role from the runtime Qdrant image. `load.sh`
+pushes from a Docker archive, whose registry manifest digest can differ from the
+upstream pin (see above), so a digest reference only resolves for a copy made
+registry to registry. Prove it with `skopeo inspect` against the `images.txt`
+digest before relying on it; a repository shared by both roles must satisfy both
+forms. Registry-side tag immutability, retention and scanning remain Quay policy,
+not repository behavior.
+
+Release pipelines run from a protected tag: the tag pipeline runs the same jobs as
+a merge-request pipeline, and `hygiene` fails a tag pipeline whose ref is not
+protected. Protect the release tag pattern and limit creation to release owners in
+GitLab; the repository cannot enforce that setting. `CI_APPROVED_REGISTRY` has no
+default, so with it unset the job images do not resolve and every job fails to
+start. The tag name pattern is an operator choice.
+
+Platform compatibility profile. These are requirements to verify, not recorded
+site facts. The site records the installed value, the person who supplied it and
+the date in its protected release record; unknown rows block only their dependent
+lane, and an unknown executor is never assumed to provide Docker, privileged
+containers, a writable host or cluster access.
+
+| Area | Requirement | Used by |
+|---|---|---|
+| GitLab | Release version recorded; protected tags; `CI_COMMIT_TAG` and `CI_COMMIT_REF_PROTECTED`; variables expanded in `image`, `services` and `tags` | tag pipelines |
+| Runner | Tag `CI_RUNNER_TAG` (default `airgap`); linux-amd64; an executor that starts job and service images from the approved registry with a service alias; reads `CI_TASK_ARCHIVE`, `CI_HELM_ARCHIVE` and `CI_BM25_CACHE_DIR` from the runner; no route to PyPI, Docker Hub or GitHub | all GitLab jobs |
+| Python packages | `PIP_FIND_LINKS` wheelhouse or `PIP_INDEX_URL` internal index, never a public index | `.py-base` |
+| Quay | Release version recorded; Docker v2 API reachable by `skopeo`; a push identity for the five runtime paths; pull access for cluster and runner; organization layout may differ from upstream paths | `load.sh`, runner |
+| OpenShift | Namespace-scoped deployer; `restricted-v2` SCC with no `anyuid`; RWO block storage for Qdrant (NFS only for the read-only corpus); ClusterIP-only Qdrant; Route only with OAuth | deploy, ingest |
+| Models | Platform-owned HTTP gateway and per-leg Secret references; no models hosted here | agent, ingest |
+
+Site qualification of the actual versions and permissions is #446 packets C/D and
+is not claimed by this table.
+
 ### Shared LiteLLM configuration
 
 `GATEWAY_BASE_URL=https://sample-api/v1` illustrates the shared API-base
@@ -925,6 +980,9 @@ live in `.github/workflows/e2e.yml`.
   do not pay for three containers.
 - `browser.yml`: path-allowlisted to the console and dependency locks; runs
   the browser contracts against a digest-pinned Chrome for Testing, fail-closed on skips.
+- `coverage.yml`: nightly + dispatch + PRs touching only its own file; runs
+  `qa:coverage` over the full unit selection and uploads the reports. Advisory:
+  never a required check or an acceptance producer.
 - `bench.yml`: push-to-main + nightly + dispatch (baseline update with
   repeats); never a PR gate.
   Measurement passes and search/answer load phases stay sequential on their
@@ -1319,7 +1377,9 @@ Known metadata/publication gaps remain #391; broader CI enforcement remains #370
 ## CI and reviewer maintenance policy
 
 Keep root `.gitlab-ci.yml` and GitHub `ci.yml`; shared product hygiene/test meaning
-changes together. GitLab uses mirrored CI_PYTHON_IMAGE/CI_RUNNER_TAG and internal
+changes together. GitLab runs merge-request, branch and protected-tag pipelines with
+the same jobs, uses images from the operator-set CI_APPROVED_REGISTRY (never the
+GitLab registry; CI_PYTHON_IMAGE overrides the job image), CI_RUNNER_TAG and internal
 PIP_INDEX_URL or PIP_FIND_LINKS, failing closed without a package source. No
 public network, GHCR, deploy/pack/image-build or opencode reviewer in GitLab.
 Issue #397 authorizes the offline context check in hygiene and a small GitHub

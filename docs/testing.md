@@ -19,7 +19,9 @@ Read sections relevant to the actual impact, including affected unchanged
 consumers and interaction tests; unrelated expensive tiers are not useful.
 
 `pytest` is the gate. `sh scripts/tools/run-task.sh qa:check` runs `ruff check`, `mypy src`, and the
-unit suite. Tests generate original PDFs at runtime
+unit suite. Ruff runs its default rule set plus the B, SIM and RET families (`extend-select` in `pyproject.toml`).
+Modules listed in the `[[tool.mypy.overrides]]` block of `pyproject.toml` are held `--strict` clean; add a module there when it goes clean.
+Tests generate original PDFs at runtime
 (`scripts/make_synthetic_pdf.py`). No binary fixtures in git.
 CI must fail if `git ls-files` matches `.pdf` / `.pdx` / `.idx`.
 Cover IBM-shaped synthetics (form number, message id, outline) **and**
@@ -165,6 +167,106 @@ allowlist; `--pass-env` adds a named variable and is recorded. The receipt
 tree is "uncommitted, not evidence", and the CI `unit_tests` lane remains the
 authority for the full suite. Dynamic dispatch the static rules cannot see is
 the known gap.
+
+<a id="advisory-coverage"></a>
+### Advisory branch coverage (`sh scripts/tools/run-task.sh qa:coverage`, `.github/workflows/coverage.yml`, #587)
+
+Runs the unit selection under `coverage` with `branch = true` over the
+`mainframe_rag` package (`[tool.coverage.*]` in `pyproject.toml`; no `omit`, no
+`fail_under`, modules no test imports report at 0%). It writes a terminal
+summary, `coverage.json`, `coverage.xml` and the data file to `OUT`, which
+defaults to `${XDG_STATE_HOME:-$HOME/.local/state}/mainframe-rag/coverage`
+and is refused inside the repository. `-- tests/test_x.py -q` replaces the
+default `tests -q` selection exactly as in `qa:unit`; `PYTEST_ADDOPTS` stays
+unset. The workflow runs nightly, on dispatch and on changes to its own file,
+uploads the reports as the `coverage-report` artifact, is not a required
+status and is not an acceptance producer. It measures and does not verify: a
+failing test never fails the task. Failures are listed from `junit.xml` with a
+`tests failed under coverage tracing: N` line, because timing-sensitive tests
+can fail under tracing overhead; the task exits non-zero only when the
+measurement itself failed (no tests collected, interruption, usage or internal
+error, a missing report).
+
+What it measures: which branches of `src/mainframe_rag` executed in-process
+during the unit selection. What it does not: that any behavior is correct. A
+branch can run without an assertion about its outcome, and a covered branch is
+not a verified one. Python subprocesses the tests spawn are traced
+(`patch = ["subprocess"]`; per-process data files are written next to the
+data file in `OUT` and combined before reporting), but only when the child
+keeps the `COVERAGE_PROCESS_*` environment; `scripts/`, `tests/`, non-Python
+processes and integration tiers are not measured. A partial selection (the `qa:coverage -- ...` form)
+reports low percentages by construction. The CI `unit_tests` lane and
+acceptance remain the verification authority; a percentage never substitutes
+for a behavior-discriminating test or a required check. Per-package ratchets
+or deltas are a maintainer decision after reviewing the baseline below.
+
+Per-package branch coverage from `coverage.json` (package = first directory
+under `src/mainframe_rag/`, top-level modules grouped as `(top level)`):
+
+```sh
+python3 -I - "$OUT/coverage.json" <<'PY'
+import json, sys, collections
+files = json.load(open(sys.argv[1]))["files"]
+tot = collections.defaultdict(lambda: [0, 0])
+for path, f in files.items():
+    parts = path.split("/")[2:]  # drop src/mainframe_rag
+    pkg = parts[0] if len(parts) > 1 else "(top level)"
+    s = f["summary"]
+    tot[pkg][0] += s["covered_branches"]
+    tot[pkg][1] += s["num_branches"]
+for pkg, (c, n) in sorted(tot.items(), key=lambda kv: kv[1][0] / max(kv[1][1], 1)):
+    print(f"{pkg:16} {c:6}/{n:6}  {100 * c / max(n, 1):5.1f}%")
+PY
+```
+
+#### Branch-coverage baseline (2026-10-17)
+
+Run [39058640133](https://github.com/yonatan895/qdrant-pdf-rag/actions/runs/39058640133)
+(`coverage.yml`, pull request #800) at `cb0b3f5098bb8970b885a59e7006d809fe2d9d87`;
+full unit selection on one `ubuntu-latest` runner, 37 minutes, subprocesses
+traced. **Overall: 4168 of 4844 branches, 86.0%** (statements 93.0%) over the
+90 files of `src/mainframe_rag`. Three timing-sensitive tests failed under
+tracing and passed in the unit lane, so `serve/colab_*` and `ops` figures are
+slightly understated:
+`tests/test_colab.py::test_fresh_http_progress_cannot_extend_absolute_deadline[slow-chunk]`,
+`::test_slow_stop_upload_still_exports_artifacts_and_issues_cpu_receipt_then_next_run_works[COLAB_CPU_TRANSPORT]`
+and `::test_probe_ownership_survives_timeout_or_interrupt_before_transport_ok[timeout]`.
+That run also counted 53 temporary copies of `snapshot_probe.py` made by Colab
+tests (0 branches); the table excludes them and `[tool.coverage.report] include`
+now does too.
+
+| Package | Files | Branches covered | Branch % | Statement % |
+|---|---|---|---|---|
+| `mcp` | 6 | 161 / 258 | 62.4% | 72.4% |
+| `serve` | 9 | 373 / 452 | 82.5% | 92.3% |
+| `feedback` | 4 | 38 / 46 | 82.6% | 94.0% |
+| `eval` | 14 | 903 / 1076 | 83.9% | 89.6% |
+| `retrieve` | 7 | 298 / 348 | 85.6% | 95.0% |
+| `ops` | 3 | 165 / 190 | 86.8% | 94.5% |
+| `ingest` | 21 | 1248 / 1400 | 89.1% | 94.6% |
+| `(top level)` | 7 | 90 / 100 | 90.0% | 94.9% |
+| `agent` | 17 | 803 / 880 | 91.2% | 97.4% |
+| `webui` | 2 | 89 / 94 | 94.7% | 98.8% |
+
+Ten lowest-covered modules by branch % (files with at least 10 branches), as
+triage candidates only, not a target list; a low figure may mean an untested
+mock or an entry point, not a defect:
+
+| # | Module | Branches covered | Branch % | Missing |
+|---|---|---|---|---|
+| 1 | `mcp/mock.py` | 0 / 56 | 0.0% | 56 |
+| 2 | `eval/chat.py` | 10 / 20 | 50.0% | 10 |
+| 3 | `manifest.py` | 9 / 16 | 56.2% | 7 |
+| 4 | `eval/load.py` | 22 / 32 | 68.8% | 10 |
+| 5 | `feedback/service.py` | 7 / 10 | 70.0% | 3 |
+| 6 | `serve/cli.py` | 14 / 20 | 70.0% | 6 |
+| 7 | `retrieve/split.py` | 88 / 120 | 73.3% | 32 |
+| 8 | `eval/statistics.py` | 9 / 12 | 75.0% | 3 |
+| 9 | `mcp/knowledge.py` | 77 / 100 | 77.0% | 23 |
+| 10 | `serve/colab_production.py` | 202 / 260 | 77.7% | 58 |
+
+A per-package ratchet or delta check is deliberately not part of this baseline;
+it follows the maintainer's review of these numbers.
 
 <a id="airgap-tier"></a>
 ### Air-gap deployment tier (`sh scripts/tools/run-task.sh airgap:dryrun`, `tests/test_airgap_*.py`, local Kind)

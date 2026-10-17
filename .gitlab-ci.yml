@@ -11,19 +11,33 @@
 # the other in the same PR (AGENTS.md); tests/test_ci_gitlab_parity.py pins the
 # correspondence and the failure propagation. Intentional differences: GitLab
 # runs the complete unit suite in one job (GitHub partitions it into four
-# shards), runs every lane on every pipeline (no review_tooling lane
-# selection), and runs the simulation tier against the mirrored Qdrant service
-# without tests/test_qdrant_auth.py, which drives a local Docker daemon.
+# shards), runs every lane on every pipeline, including tag pipelines (issue
+# #808; no review_tooling lane selection), and runs the simulation tier
+# against the mirrored Qdrant service without tests/test_qdrant_auth.py, which
+# drives a local Docker daemon.
 #
 # GitHub product CI ignores markdown-only changes; agent-context.yml checks
 # relevant docs/instructions separately. GitLab keeps local hygiene/context checks
 # on every MR; no deployment or external access is added.
 #
+# Pipelines run for merge requests, branches and tags (issue #808). A tag
+# pipeline runs exactly the same jobs as a branch pipeline: nothing is rule-gated
+# per ref. A release is built from an immutable tag, so the hygiene job refuses
+# a tag pipeline whose ref is not protected (protect the release tag pattern in
+# Settings > Repository > Protected tags, with creation limited to release
+# owners; a protected tag cannot be moved or deleted by developers).
+#
 # GitLab admin setup (Settings > CI/CD > Variables) — names only, no secrets:
-#   CI_PYTHON_IMAGE  (recommended)  mirrored UBI/Python 3.14 image (issue #5:
-#                                   3.14 GIL, no 3.14t), e.g.
-#                                   "${CI_REGISTRY}/ci/python:3.14". The default
-#                                   below is a placeholder for that mirror; the
+#   CI_APPROVED_REGISTRY (required) operator-approved registry path that holds every
+#                                   job and service image, e.g. the Quay
+#                                   organization for CI tooling. There is no
+#                                   default: unset, job images do not resolve and
+#                                   every job fails to start. It is deliberately
+#                                   not derived from the GitLab registry.
+#   CI_PYTHON_IMAGE  (optional)     complete mirrored UBI/Python 3.14 image
+#                                   reference (issue #5: 3.14 GIL, no 3.14t) that
+#                                   replaces the default
+#                                   "$CI_APPROVED_REGISTRY/ci/python:3.14"; the
 #                                   image must contain git, python3, pip, tar,
 #                                   sha256sum and install.
 #   CI_TASK_ARCHIVE (required for test) path to the approved pinned linux-amd64
@@ -57,14 +71,15 @@ workflow:
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
     - if: '$CI_COMMIT_BRANCH'
+    - if: '$CI_COMMIT_TAG'
 
 stages: [hygiene, test]
 
 variables:
-  # Placeholder default; overridden by the project-level CI_PYTHON_IMAGE
-  # variable pointing at the mirrored internal image (YAML vars have the
-  # lowest precedence in GitLab).
-  CI_PYTHON_IMAGE: "$CI_REGISTRY/ci/python:3.14"
+  # CI_APPROVED_REGISTRY is operator-set and has no default here (see the admin
+  # setup above). A project-level CI_PYTHON_IMAGE overrides this derived default
+  # (YAML vars have the lowest precedence in GitLab).
+  CI_PYTHON_IMAGE: "$CI_APPROVED_REGISTRY/ci/python:3.14"
   CI_RUNNER_TAG: "airgap"
 
 default:
@@ -97,6 +112,13 @@ hygiene:
   stage: hygiene
   script:
     - python3 scripts/check_agent_context.py
+    - |
+      set -eu
+      if [ -n "${CI_COMMIT_TAG:-}" ] && [ "${CI_COMMIT_REF_PROTECTED:-}" != "true" ]; then
+        echo "FAIL: tag ${CI_COMMIT_TAG} is not a protected tag." >&2
+        echo "A release pipeline is built only from an immutable (protected) tag." >&2
+        exit 1
+      fi
     - |
       set -eu
       echo "Refusing committed binaries: .pdf / .pdx / .idx"
@@ -159,7 +181,7 @@ sim:
   extends: .py-base
   stage: test
   services:
-    - name: ${CI_REGISTRY}/qdrant/qdrant@sha256:a0e04fe623cb064502cd869cefc1dc7ce359d8edd481063b5bd351c0a0a2c91e
+    - name: ${CI_APPROVED_REGISTRY}/qdrant/qdrant@sha256:a0e04fe623cb064502cd869cefc1dc7ce359d8edd481063b5bd351c0a0a2c91e
       alias: qdrant
   variables:
     QDRANT_SIM_URL: "http://qdrant:6333"
@@ -188,7 +210,7 @@ gate-l1:
   stage: test
   services:
     # Mirror the existing approved images.txt bytes; a mutable tag is insufficient.
-    - name: ${CI_REGISTRY}/qdrant/qdrant@sha256:a0e04fe623cb064502cd869cefc1dc7ce359d8edd481063b5bd351c0a0a2c91e
+    - name: ${CI_APPROVED_REGISTRY}/qdrant/qdrant@sha256:a0e04fe623cb064502cd869cefc1dc7ce359d8edd481063b5bd351c0a0a2c91e
       alias: qdrant
   variables:
     QDRANT_SIM_URL: "http://qdrant:6333"

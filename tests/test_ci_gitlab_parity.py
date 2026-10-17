@@ -59,10 +59,52 @@ def ignores(command):
     return {t.split('=', 1)[1] for t in shlex.split(command) if t.startswith('--ignore=')}
 
 
+SCENARIOS = {
+    'merge request': {'CI_PIPELINE_SOURCE': 'merge_request_event'},
+    'branch': {'CI_PIPELINE_SOURCE': 'push', 'CI_COMMIT_BRANCH': 'main'},
+    'tag': {'CI_PIPELINE_SOURCE': 'push', 'CI_COMMIT_TAG': 'v1.2.3'},
+}
+
+
+def admits(doc, variables):
+    """Evaluate the workflow rules for the two expression forms the file may use."""
+    for rule in doc['workflow']['rules']:
+        expression = rule['if'].strip()
+        equal = re.fullmatch(r'\$(\w+) == "([^"]*)"', expression)
+        bare = re.fullmatch(r'\$(\w+)', expression)
+        assert equal or bare, f'unsupported workflow expression {expression!r}'
+        matched = variables.get(equal.group(1)) == equal.group(2) if equal \
+            else bool(variables.get(bare.group(1)))
+        if matched:
+            return rule.get('when', 'always') != 'never'
+    return False
+
+
+def image_references(doc):
+    default = doc.get('default', {}).get('image')
+    refs = {'default image': default, 'CI_PYTHON_IMAGE': doc['variables']['CI_PYTHON_IMAGE']}
+    for name, job in jobs(doc).items():
+        if 'image' in job:
+            refs[f'{name} image'] = job['image']
+        for index, service in enumerate(job.get('services', [])):
+            refs[f'{name} service {index}'] = service if isinstance(service, str) else service['name']
+    return refs
+
+
 def violations(doc):
     """Every rule the GitLab definition must satisfy; empty means conforming."""
     found = []
     all_jobs = jobs(doc)
+    for label, variables in SCENARIOS.items():
+        if not admits(doc, variables):
+            found.append(f'{label} pipelines are not admitted')
+    for label, ref in image_references(doc).items():
+        if 'CI_REGISTRY' in ref:
+            found.append(f'{label}: derived from the GitLab registry, not the approved registry')
+    if 'CI_APPROVED_REGISTRY' not in doc['variables']['CI_PYTHON_IMAGE']:
+        found.append('CI_PYTHON_IMAGE default is not derived from CI_APPROVED_REGISTRY')
+    if 'CI_APPROVED_REGISTRY' in doc['variables']:
+        found.append('CI_APPROVED_REGISTRY must be operator-set, with no default')
     for missing in sorted(REQUIRED_JOBS - set(all_jobs)):
         found.append(f'missing job {missing}')
     for name, job in all_jobs.items():
@@ -87,6 +129,8 @@ def violations(doc):
     if lines(all_jobs['lint']) != expected:
         found.append('lint commands differ from the GitHub lint job')
     hygiene = '\n'.join(lines(all_jobs['hygiene']))
+    if not tag_guard(doc) or 'CI_COMMIT_REF_PROTECTED' not in tag_guard(doc):
+        found.append('hygiene: tag pipelines are not restricted to protected tags')
     pdf = re.search(r"grep -Ei '([^']+)'", github_step('unit', 'git ls-files')['run'])
     if 'scripts/check_agent_context.py' not in hygiene or not pdf or pdf.group(1) not in hygiene:
         found.append('hygiene lost the context check or the binary refusal')
@@ -141,6 +185,10 @@ def violations(doc):
         if not any(digest in s.get('name', '') for s in all_jobs[name].get('services', [])):
             found.append(f'{name}: Qdrant service is not the approved digest')
     return found
+
+
+def tag_guard(doc):
+    return next((s for s in lines(jobs(doc)['hygiene']) if 'CI_COMMIT_TAG' in s), None)
 
 
 def mutated(mutator):
@@ -200,7 +248,20 @@ NEGATIVE_CONTROLS = {
     'sim narrowed beyond docker-only': lambda d: extend(d['sim'], 'pytest ',
                                                          ' --ignore=tests/test_mcp_sim.py'),
     'sim service not approved digest': lambda d: d['sim']['services'][0].update(
-        name='${CI_REGISTRY}/qdrant/qdrant:latest'),
+        name='${CI_APPROVED_REGISTRY}/qdrant/qdrant:latest'),
+    'sim service from the GitLab registry': lambda d: d['sim']['services'][0].update(
+        name=d['sim']['services'][0]['name'].replace('CI_APPROVED_REGISTRY', 'CI_REGISTRY')),
+    'job image from the GitLab registry': lambda d: d['variables'].update(
+        CI_PYTHON_IMAGE='$CI_REGISTRY/ci/python:3.14'),
+    'hardcoded registry host for the job image': lambda d: d['variables'].update(
+        CI_PYTHON_IMAGE='registry.example.invalid/ci/python:3.14'),
+    'approved registry given a default': lambda d: d['variables'].update(
+        CI_APPROVED_REGISTRY='$CI_REGISTRY/ci'),
+    'tag pipelines not admitted': lambda d: d['workflow']['rules'].pop(),
+    'branch pipelines not admitted': lambda d: d['workflow']['rules'].pop(1),
+    'tag guard removed': lambda d: d['hygiene']['script'].remove(tag_guard(d)),
+    'tag guard ignores protection': lambda d: d['hygiene']['script'].__setitem__(
+        d['hygiene']['script'].index(tag_guard(d)), tag_guard(d).replace('CI_COMMIT_REF_PROTECTED', 'X')),
     'gate-l1 args changed': lambda d: d['gate-l1']['script'].__setitem__(
         0, d['gate-l1']['script'][0].replace('--delta eval-delta.md', '')),
     'hazards removed': lambda d: d.pop('hazards'),
@@ -390,3 +451,61 @@ def test_junit_gate_uses_the_github_evidence_counting_rule():
             counts = None
         clean = counts is not None and not any(counts[k] for k in ('failed', 'errors', 'skipped'))
         assert clean is (kind == 'clean'), kind
+
+
+# ---- release pipelines from immutable tags and approved-registry images (#808) --
+
+def test_every_ref_kind_runs_the_same_jobs_and_nothing_else_is_admitted():
+    for label, variables in SCENARIOS.items():
+        assert admits(GITLAB, variables), label
+    # A pipeline with no MR, branch or tag ref (for example a schedule-less API
+    # trigger without a ref) is not admitted by accident.
+    assert not admits(GITLAB, {'CI_PIPELINE_SOURCE': 'api'})
+    # Tag pipelines are not a reduced lane: no job is rule-gated per ref, so the
+    # job set a tag runs is the full set a merge request runs.
+    assert not [name for name, job in jobs(GITLAB).items()
+                if {'rules', 'only', 'except'} & set(job)]
+    assert set(jobs(GITLAB)) >= REQUIRED_JOBS
+
+
+@pytest.mark.parametrize('env, passes', [
+    ({}, True),                                                   # branch / MR pipeline
+    ({'CI_COMMIT_TAG': 'v1.2.3', 'CI_COMMIT_REF_PROTECTED': 'true'}, True),
+    ({'CI_COMMIT_TAG': 'v1.2.3', 'CI_COMMIT_REF_PROTECTED': 'false'}, False),
+    ({'CI_COMMIT_TAG': 'v1.2.3'}, False),                         # protection unknown
+])
+def test_hygiene_refuses_a_tag_pipeline_unless_the_tag_is_protected(tmp_path, env, passes):
+    base = {k: v for k, v in os.environ.items() if not k.startswith('CI_')}
+    proc = subprocess.run(['sh', '-e', '-c', tag_guard(GITLAB)], cwd=tmp_path, check=False,
+                          env={**base, **env}, capture_output=True, text=True)
+    assert (proc.returncode == 0) is passes, proc.stderr
+    if not passes:
+        assert 'v1.2.3' in proc.stderr and 'protected' in proc.stderr
+
+
+def test_job_and_service_images_come_only_from_the_operator_set_registry():
+    references = image_references(GITLAB)
+    assert references['default image'] == '$CI_PYTHON_IMAGE'
+    assert references['CI_PYTHON_IMAGE'] == '$CI_APPROVED_REGISTRY/ci/python:3.14'
+    services = {k: v for k, v in references.items() if 'service' in k}
+    assert set(services) == {'sim service 0', 'gate-l1 service 0'}
+    for ref in services.values():
+        assert ref.startswith('${CI_APPROVED_REGISTRY}/qdrant/qdrant@sha256:')
+    text = (ROOT / '.gitlab-ci.yml').read_text()
+    code = '\n'.join(l for l in text.splitlines() if not l.lstrip().startswith('#'))
+    assert 'CI_REGISTRY' not in code
+    # The registry is an operator variable: no host, URL or credential in the file.
+    assert not re.search(r'https?://(?!qdrant:6333)|\.(internal|local|corp)\b|glpat-', text)
+
+
+def test_documented_quay_roles_match_the_image_paths_load_sh_pushes():
+    load = (ROOT / 'scripts/airgap/load.sh').read_text()
+    paths = set(re.findall(r'\$INTERNAL_REGISTRY/([\w./-]+)(?::|\b)', load))
+    assert {'qdrant/qdrant', 'jaegertracing/jaeger', 'qdrant-pdf-rag-ingest',
+            'qdrant-pdf-rag-agent', 'openshift4/ose-oauth-proxy'} <= paths
+    deploy = (ROOT / 'docs/deploy.md').read_text()
+    example = (ROOT / 'airgap.env.example').read_text()
+    for path in sorted(paths):
+        assert f'`{path}' in deploy, path
+    assert 'CI_APPROVED_REGISTRY' in deploy and 'CI_APPROVED_REGISTRY' in example
+    assert 'INTERNAL_REGISTRY' in deploy

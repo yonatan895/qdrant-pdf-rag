@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ast
+import contextlib
 import fcntl
 import hashlib
 import json
@@ -1703,10 +1704,8 @@ def test_root_exit_with_descendant_held_pipes_is_bounded_and_next_command_works(
         assert run.command([sys.executable, "-c", "print('ordinary')"], seconds=3).stdout == "ordinary\n"
     finally:
         if descendant_pid.exists():
-            try:
+            with contextlib.suppress(ProcessLookupError):
                 os.kill(int(descendant_pid.read_text()), signal.SIGKILL)
-            except ProcessLookupError:
-                pass
 
 
 def test_cli_timeout_reaps_an_uncooperative_root_and_allows_next_command(lab):

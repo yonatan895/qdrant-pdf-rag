@@ -37,6 +37,7 @@ Knobs (CI-sane defaults, override locally): ``LOAD_SEARCH_CONCURRENCY``,
 
 from __future__ import annotations
 
+import contextlib
 import http.client
 import json
 import os
@@ -212,10 +213,8 @@ def ingested(qdrant_url, corpus, tmp_path_factory) -> str:
     from mainframe_rag.ingest import run_ingest
 
     progress = tmp_path_factory.mktemp("load-progress") / "inv.jsonl"
-    try:
+    with contextlib.suppress(httpx2.HTTPError):
         httpx2.delete(f"{qdrant_url}/collections/{COLLECTION}", timeout=10.0)
-    except httpx2.HTTPError:
-        pass
     saved = dict(os.environ)
     os.environ.update(
         {

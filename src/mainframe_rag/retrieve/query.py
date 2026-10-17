@@ -205,7 +205,7 @@ def rrf_fuse(
 ) -> list[SearchHit]:
     by_id: dict[str, models.ScoredPoint] = {}
     scores: dict[str, float] = defaultdict(float)
-    for weight, points, leg in zip(weights, (dense, sparse), ("dense", "bm25")):
+    for weight, points, leg in zip(weights, (dense, sparse), ("dense", "bm25"), strict=True):
         for rank, point in enumerate(points):
             key = str(point.id)
             by_id[key] = point
@@ -239,7 +239,7 @@ def merge_split_hits(
     """
     by_id: dict[str, SearchHit] = {}
     scores: dict[str, float] = defaultdict(float)
-    for weight, hits in zip(weights, lists):
+    for weight, hits in zip(weights, lists, strict=True):
         for rank, hit in enumerate(hits):
             key = hit.chunk_id
             if key not in by_id:
@@ -772,7 +772,7 @@ async def async_search(
             rrf_limit = settings.rerank_candidates if settings else 50
             fused_lists = [
                 _fuse_with_span(dp, sp, w, k, rrf_limit, type_boosts=boosts)
-                for (dp, sp), w in zip(zip(leg_dense_points, leg_sparse_points), leg_weights)
+                for (dp, sp), w in zip(zip(leg_dense_points, leg_sparse_points, strict=True), leg_weights, strict=True)
             ]
             if split_mode == "single":
                 fused = fused_lists[0]
@@ -805,7 +805,7 @@ async def async_search(
             fuse_limit = max(limit * 3, 24)
             fused_lists = [
                 _fuse_with_span(dp, sp, w, k, fuse_limit, type_boosts=boosts)
-                for (dp, sp), w in zip(zip(leg_dense_points, leg_sparse_points), leg_weights)
+                for (dp, sp), w in zip(zip(leg_dense_points, leg_sparse_points, strict=True), leg_weights, strict=True)
             ]
             if split_mode == "single":
                 fused = fused_lists[0]
