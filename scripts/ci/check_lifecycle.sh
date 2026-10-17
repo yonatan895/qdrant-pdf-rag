@@ -5,6 +5,7 @@ set -eu
 NS="$1"
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 # Snapshot creation/recovery is administrative: the serving agent stays read-only.
+# Restores the data and completions pair into scratch names and compares stored content.
 python3 "$SCRIPT_DIR/check_snapshot.py" "$NS"
 # Existing trace must survive Jaeger replacement, not merely a newly sent span.
 _trace_id="$(kubectl -n "$NS" exec -i deploy/rag-agent -- python3 - <<'PY_TRACE'
