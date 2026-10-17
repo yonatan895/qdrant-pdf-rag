@@ -431,7 +431,7 @@ def test_shutdown_unpublishes_the_client(monkeypatch, synthetic_pdf, servable_re
     monkeypatch.setenv("FEEDBACK_URL", "http://feedback.internal")
     monkeypatch.setenv("FEEDBACK_API_KEY", "feedback-test-token")
     monkeypatch.setattr(app_mod, "FeedbackClient", RecordingFeedback)
-    for _client_ in _client(monkeypatch, ui_enabled=True, synthetic_pdf=synthetic_pdf):
+    for _ in _client(monkeypatch, ui_enabled=True, synthetic_pdf=synthetic_pdf):
         assert app_mod.feedback is not None
     assert app_mod.feedback is None
 

@@ -763,7 +763,7 @@ def test_every_control_is_reachable_by_tab_with_a_visible_focus_indicator(consol
         )
     )
     reached, no_ring = set(), []
-    for step in range(len(expected) + 10):
+    for _ in range(len(expected) + 10):
         page.keys("TAB")
         info = page.eval(
             ident
@@ -932,7 +932,7 @@ def test_layout_has_no_horizontal_scroll_and_composer_stays_reachable(console, p
         assert metrics[span][0] >= 0 and metrics[span][1] <= metrics["inner"], (span, metrics)
     page.type("#message", "more")
     send_box = page.eval("var b=document.getElementById('send-btn').getBoundingClientRect();return [b.left,b.right]")
-    assert 0 <= send_box[0] and send_box[1] <= width
+    assert send_box[0] >= 0 and send_box[1] <= width
 
 
 @pytest.mark.parametrize("theme", ["theme-3270", "theme-dark"])

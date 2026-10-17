@@ -251,16 +251,15 @@ class ProfileDecision:
             if "tooling" in self.matched_categories or "tests" in self.matched_categories:
                 return "tests/test_agent_context.py tests/test_review_tooling.py"
             return "tests/test_agent_context.py"
-        elif self.profile == ProfileName.DEPLOY:
+        if self.profile == ProfileName.DEPLOY:
             return "tests/test_airgap_*.py tests/test_config.py"
-        elif self.profile == ProfileName.HTTP:
+        if self.profile == ProfileName.HTTP:
             return "tests/test_agent_api.py tests/test_stream_truncation.py"
-        elif self.profile == ProfileName.STORAGE:
+        if self.profile == ProfileName.STORAGE:
             return "tests/test_ingest_*.py tests/test_publish_*.py"
-        elif self.profile == ProfileName.TRACING:
+        if self.profile == ProfileName.TRACING:
             return "tests/test_tracing*.py"
-        else:
-            return "tests/test_agent_api.py tests/test_ingest_publish.py"
+        return "tests/test_agent_api.py tests/test_ingest_publish.py"
 
 
 ALL_SERVICES = ["agent", "jaeger", "qdrant", "vllm"]
@@ -336,15 +335,14 @@ def classify_paths(paths: Iterable[str]) -> ProfileDecision:
     # Determine profile name based on active code categories
     if code_categories == {"deploy"}:
         return ProfileDecision(ProfileName.DEPLOY, sorted(services), sorted_cats)
-    elif code_categories == {"storage"}:
+    if code_categories == {"storage"}:
         return ProfileDecision(ProfileName.STORAGE, sorted(services), sorted_cats)
-    elif code_categories == {"http"}:
+    if code_categories == {"http"}:
         return ProfileDecision(ProfileName.HTTP, sorted(services), sorted_cats)
-    elif code_categories == {"tracing"}:
+    if code_categories == {"tracing"}:
         return ProfileDecision(ProfileName.TRACING, sorted(services), sorted_cats)
-    else:
-        # Cross-layer union or full
-        return ProfileDecision(ProfileName.FULL, sorted(services), sorted_cats)
+    # Cross-layer union or full
+    return ProfileDecision(ProfileName.FULL, sorted(services), sorted_cats)
 
 
 # -----------------------------------------------------------------------------
@@ -387,10 +385,7 @@ def probe_interpreter() -> dict[str, Any]:
 
 def probe_dependencies(root: pathlib.Path) -> dict[str, str]:
     lockfile = root / "requirements.lock.txt"
-    if lockfile.exists():
-        req_hash = hashlib.sha256(lockfile.read_bytes()).hexdigest()
-    else:
-        req_hash = "0" * 64
+    req_hash = hashlib.sha256(lockfile.read_bytes()).hexdigest() if lockfile.exists() else "0" * 64
     return {
         "requirements_hash": req_hash,
         "lockfile_sha256": req_hash,
@@ -1099,10 +1094,7 @@ def changed_paths(base: str | None, head: str = "HEAD", *, cwd: pathlib.Path | N
 
 def cmd_profile(args: argparse.Namespace) -> int:
     # 1. Resolve paths
-    if args.files:
-        paths = args.files
-    else:
-        paths = changed_paths(args.base, args.head or "HEAD")
+    paths = args.files or changed_paths(args.base, args.head or "HEAD")
 
     decision = classify_paths(paths)
     manifest = generate_candidate_manifest(

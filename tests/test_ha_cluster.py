@@ -19,6 +19,7 @@ host); a missing prerequisite fails rather than silently skipping.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import shutil
 import subprocess
 import time
@@ -707,10 +708,8 @@ def test_operator_job_publishes_exact_corpus_on_three_peers(cluster, ingest_tree
             try:
                 code = process.wait(timeout=120)
             finally:
-                try:
+                with contextlib.suppress(ProcessLookupError):
                     os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
                 process.wait(timeout=10)
         return subprocess.CompletedProcess(command, code, log.read_text(), "")
 
