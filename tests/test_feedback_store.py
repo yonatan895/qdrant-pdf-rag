@@ -58,6 +58,21 @@ def test_first_record_wins_so_a_rated_answer_is_never_rewritten(store):
     assert store.answer(RID)["answer"] == ANSWER
 
 
+def test_rating_converges_to_one_per_answer_across_resends_and_changes(store):
+    """Idempotent submission (#780): a resend after a lost response, or a
+    double click, must not create a second rating; changing one's mind
+    replaces it. The answer's single rating is always the latest submission."""
+    store.record_answer(_record())
+    first = store.add_rating(Rating(request_id=RID, rating="bad", reasons=["wrong"], comment=COMMENT))
+    resend = store.add_rating(Rating(request_id=RID, rating="bad", reasons=["wrong"], comment=COMMENT))
+    assert resend == first
+    assert [r["rating"] for r in store.ratings(RID)] == ["bad"]
+    changed = store.add_rating(Rating(request_id=RID, rating="good"))
+    assert changed == first
+    [rating] = store.ratings(RID)
+    assert (rating["rating"], rating["reasons"], rating["comment"]) == ("good", [], "")
+
+
 def test_rating_for_an_unrecorded_answer_is_refused_and_not_stored(store):
     with pytest.raises(UnknownAnswerError):
         store.add_rating(Rating(request_id=RID, rating="good"))

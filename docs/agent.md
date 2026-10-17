@@ -307,7 +307,8 @@ retention: [observability](observability.md#data-tiers).
   - `request_id` must be the 12-hex server id; extra fields, such as an answer
     text, are refused with 422.
   - The store attaches the rating to its own record and refuses unknown ids:
-    404 `unknown_answer`.
+    404 `unknown_answer`. One rating per answer: a resend converges and
+    re-rating replaces it, so retries and double submits are idempotent.
   - Other fixed codes: 422 `invalid_request`, 503 `feedback_unavailable`,
     404 `feedback_disabled`.
   - The rater identity (OAuth proxy `X-Forwarded-User`) is stored only when

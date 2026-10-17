@@ -1,9 +1,12 @@
 # Observability and data boundaries
 
-Decision record for what the system collects, where each signal lives, how
+Contract owner for what the system collects, where each signal lives, how
 long it is kept and how it is analyzed. Owners: #529 (observability backend and
-signals), #780 (answer feedback), #782 (backend qualification). Maintainer
-decisions of 2026-10-17 unless noted.
+signals), #780 (answer feedback), #782 (backend qualification). Decisions:
+[ADR-0002](adr/0002-otel-backend-posture.md) (Jaeger posture; replacing the
+backend needs a superseding ADR) and
+[ADR-0005](adr/0005-answer-feedback-data-boundary.md) (content only in the
+feedback store). Maintainer decisions of 2026-10-17 unless noted.
 
 ## Data tiers
 

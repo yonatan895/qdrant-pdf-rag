@@ -3,8 +3,8 @@
 Two tables. `answers` holds one row per finalized answer, keyed by the agent's
 server-minted request_id (12 lowercase hex); the first record wins, so a
 replayed or duplicated delivery cannot rewrite what was rated. `ratings`
-holds human ratings, each attached to an existing answer row only: a rating
-can never carry or invent answer text. Question and answer text live here and
+holds at most one human rating per answer (re-rating replaces it), attached to
+an existing answer row only: a rating can never carry or invent answer text. Question and answer text live here and
 nowhere else (never in logs or traces); the volume is the protected store.
 
 SQL stays portable (standard `ON CONFLICT DO NOTHING`, JSON as text) and the
@@ -119,7 +119,7 @@ CREATE TABLE IF NOT EXISTS answers (
 );
 CREATE TABLE IF NOT EXISTS ratings (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    request_id TEXT NOT NULL REFERENCES answers(request_id) ON DELETE CASCADE,
+    request_id TEXT NOT NULL UNIQUE REFERENCES answers(request_id) ON DELETE CASCADE,
     created_at REAL NOT NULL,
     rating TEXT NOT NULL,
     reasons TEXT NOT NULL,
@@ -127,7 +127,6 @@ CREATE TABLE IF NOT EXISTS ratings (
     rater TEXT
 );
 CREATE INDEX IF NOT EXISTS answers_created ON answers(created_at);
-CREATE INDEX IF NOT EXISTS ratings_request ON ratings(request_id);
 """
 
 
@@ -166,20 +165,27 @@ class FeedbackStore:
             return cursor.rowcount == 1
 
     def add_rating(self, rating: Rating) -> int:
-        """Attach a rating to a recorded answer; refuses unknown request ids."""
+        """Attach the answer's rating; refuses unknown request ids. One rating
+        per answer: a resend converges and a change replaces it (latest wins),
+        keeping the same id, so retries and double submits are idempotent."""
         with self._lock:
             known = self._db.execute(
                 "SELECT 1 FROM answers WHERE request_id = ?", (rating.request_id,)
             ).fetchone()
             if known is None:
                 raise UnknownAnswerError(rating.request_id)
-            cursor = self._db.execute(
+            self._db.execute(
                 "INSERT INTO ratings (request_id, created_at, rating, reasons, comment, rater)"
-                " VALUES (?, ?, ?, ?, ?, ?)",
+                " VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (request_id) DO UPDATE SET"
+                " created_at = excluded.created_at, rating = excluded.rating,"
+                " reasons = excluded.reasons, comment = excluded.comment, rater = excluded.rater",
                 (rating.request_id, self._clock(), rating.rating, json.dumps(rating.reasons),
                  rating.comment, rating.rater),
             )
-            return int(cursor.lastrowid or 0)
+            row = self._db.execute(
+                "SELECT id FROM ratings WHERE request_id = ?", (rating.request_id,)
+            ).fetchone()
+            return int(row[0])
 
     def answer(self, request_id: str) -> dict[str, Any] | None:
         with self._lock:
