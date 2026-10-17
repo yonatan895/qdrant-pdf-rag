@@ -178,6 +178,47 @@ and a fresh full inventory/source check agree; failed preparation cannot create
 the completion marker. Separate
 concurrent setup/build processes must not share one environment/output directory.
 
+<a id="local-resource-safety"></a>
+## Shared-host verification
+
+Reuse the existing local memory guard from [#580](https://github.com/yonatan895/qdrant-pdf-rag/issues/580),
+alongside the model and ingest protections in [live-stack](live-stack.md#full-local-simulation).
+The prepared `guarded.sh` checks available RAM plus 2048 MiB headroom and memory/IO
+pressure, then runs its command in a `MemoryMax`/`MemorySwapMax=0` user cgroup.
+It is a host prerequisite, not a bundled tool; select its existing absolute path
+with `LOCAL_RESOURCE_GUARD`. Do not replace missing containment with a direct run.
+
+One integration owner starts heavy work on a shared host. Use the same lock across
+all worktrees, run focused checks, and keep only one prepared development environment
+for the current checkout. Parallel investigations do not authorize concurrent full
+suites, environment installations or corpus processing. `qa:check` orders tools
+within one invocation; it does not coordinate separate invocations.
+
+For a bounded focused check on the reference Linux/WSL host:
+
+```sh
+: "${LOCAL_RESOURCE_GUARD:?select the existing prepared guarded.sh}"
+test -r "$LOCAL_RESOURCE_GUARD" || exit 2
+SCRATCH_DIR="$HOME/.cache/agent-tmp"
+mkdir -p "$SCRATCH_DIR/checks"
+df -T "$SCRATCH_DIR"  # verify disk-backed storage, rather than tmpfs
+TMPDIR="$SCRATCH_DIR/checks" flock -n -E 75 \
+  "$SCRATCH_DIR/mainframe-rag-heavy.lock" \
+  sh "$LOCAL_RESOURCE_GUARD" 2048 -- \
+  timeout --signal=TERM --kill-after=5 180 \
+  sh scripts/tools/run-task.sh qa:unit -- tests/test_local_stack_sh.py -q \
+  --basetemp="$SCRATCH_DIR/checks/pytest"
+```
+
+The 2048 MiB cap and 180-second deadline are focused-check limits, not measured
+capacity for a full suite or live stack. The stale-scratch watchdog warns and
+removes unused old files; it does not bound active writes or reserve RAM. Inspect
+scratch growth and host pressure between checks, remove only owned generated
+outputs, and retain receipts outside disposable basetemp. Required checks remain
+required; interruption or resource refusal is not a pass. Delegate full-suite
+verification to the existing CI lanes where applicable. A necessary local full
+suite needs its own serialized, measured resource and scratch budget first.
+
 <a id="safety"></a>
 ## Safety boundaries
 

@@ -522,6 +522,9 @@ interfaces/state. Delegate bounded investigations or separate worktrees; never
 let independent agents mutate the same workspace or redefine one contract.
 Supply each subagent its relevant task packet explicitly. No orchestration
 service is required by this workflow.
+The integration owner alone starts heavy shared-host work; use the existing guard
+and shared lock in [shared-host verification](task-runner.md#local-resource-safety).
+Parallel code work must not become concurrent full suites, installs or corpus runs.
 
 ## Engineering skills
 
