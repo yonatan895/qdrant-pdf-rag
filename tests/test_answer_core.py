@@ -478,6 +478,36 @@ _SIMPLE = ("IEA500I", "llm_reasoning_effort_simple")
 _COMPLEX = ("diagnose abend S0C4 with registers and spool dump", "llm_reasoning_effort_complex")
 
 
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", ["post", "stream"])
+async def test_estimator_only_budget_sends_no_output_cap(mode):
+    """Without a server token count the prompt total is an estimate, so a cap
+    could push prompt + max_tokens past the served window: none is sent (#777)."""
+    settings = _settings(llm_stream=False)
+    content = "Reissue the command.\n\nCitations:\n- " + _hit().cite
+    transport = HttpxStreamFake(
+        lines=[
+            "data: " + json.dumps({"choices": [{"delta": {"content": content}}]}),
+            'data: {"choices": [{"delta": {}, "finish_reason": "stop"}]}',
+            "data: [DONE]",
+        ],
+        payload={"choices": [{"message": {"content": content}, "finish_reason": "stop"}]},
+    )
+
+    def retrieve(*_a, **_k):
+        return [_hit()], "nl", {}
+
+    deps = _deps(settings, HttpxLLMClient(settings, client=transport), retrieve)
+    if mode == "stream":
+        events = [event async for event in execute_answer_core_stream(AnswerCoreInput(query="IEA500I"), deps)]
+        output = events[-1]["output"]
+    else:
+        output = await execute_answer_core(AnswerCoreInput(query="IEA500I"), deps)
+    bodies = transport.post_bodies if mode == "post" else transport.stream_bodies
+    assert output.finish_reason == "stop" and not output.budget_verified
+    assert len(bodies) == 1 and "max_tokens" not in bodies[0]
+
 @pytest.mark.anyio
 @pytest.mark.parametrize("effort,source,mode,is_chat,qf", [
     # Every transport carries the selected effort, from a setting and from a per-request override.
@@ -496,6 +526,10 @@ async def test_core_selected_reasoning_effort_reaches_http_request(effort, sourc
         "llm_reasoning_effort_simple": "low",
         "llm_reasoning_effort_complex": "medium",
         "llm_reasoning_efforts": "low,medium,high,xhigh",  # transport covers the whole vocabulary
+        # Distinct path reserves, so the output cap proves it priced this path (#777).
+        "llm_reserved_output_tokens": 2000,
+        "llm_thinking_reserve_tokens_simple": 3000,
+        "llm_thinking_reserve_tokens_complex": 5000,
     }
     if source == "setting":
         values[field] = effort
@@ -539,6 +573,9 @@ async def test_core_selected_reasoning_effort_reaches_http_request(effort, sourc
     bodies = transport.post_bodies if mode == "post" else transport.stream_bodies
     assert len(bodies) == 1
     assert bodies[0]["reasoning_effort"] == effort
+    # Verified budget: the cap is the answer reserve plus this path's thinking
+    # reserve, the terms the prompt budget priced (#777).
+    assert bodies[0]["max_tokens"] == 2000 + (5000 if qf is _COMPLEX else 3000)
     assert output.budget_verified
     assert tokenized
     assert all(body["chat_template_kwargs"] == {"reasoning_effort": effort, "enable_thinking": True}

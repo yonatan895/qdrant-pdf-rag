@@ -1409,9 +1409,10 @@ def _chat_body(
     temperature: float | None,
     *,
     stream: bool,
+    max_tokens: int | None = None,
 ) -> dict[str, Any]:
     """Single builder for chat-completion request bodies: model + messages,
-    optional reasoning_effort/temperature, and the streaming flags
+    optional reasoning_effort/temperature/max_tokens, and the streaming flags
     (stream + usage ask). Every chat path (achat, chat_stream, _chat_sync,
     stream and fallback legs) funnels through here so a request-shape change
     cannot diverge copies."""
@@ -1420,6 +1421,8 @@ def _chat_body(
         body["reasoning_effort"] = reasoning_effort
     if temperature is not None:
         body["temperature"] = temperature
+    if max_tokens is not None:
+        body["max_tokens"] = max_tokens
     if stream:
         body["stream"] = True
         body["stream_options"] = {"include_usage": True}
@@ -1548,6 +1551,10 @@ class HttpxLLMClient:
     shot — a retry would re-ask a reasoning model that may already be
     thinking, and answers are not idempotent (issue #20 PR C)."""
 
+    # Output-cap capability (#777): ModelAdapter forwards max_tokens only to
+    # clients that declare it, the same duck-typed seam as chat_stream.
+    supports_max_tokens = True
+
     def __init__(
         self,
         settings: Settings,
@@ -1614,32 +1621,34 @@ class HttpxLLMClient:
         messages: list[ChatMessage],
         reasoning_effort: str | None = None,
         temperature: float | None = None,
+        max_tokens: int | None = None,
     ) -> ChatResult | Awaitable[ChatResult]:
         if isinstance(self._client, httpx2.AsyncClient):
-            return self.achat(messages, reasoning_effort=reasoning_effort, temperature=temperature)
+            return self.achat(messages, reasoning_effort=reasoning_effort, temperature=temperature, max_tokens=max_tokens)
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             loop = None
         if loop is not None and loop.is_running():
-            return self.achat(messages, reasoning_effort=reasoning_effort, temperature=temperature)
-        return self._chat_sync(messages, reasoning_effort=reasoning_effort, temperature=temperature)
+            return self.achat(messages, reasoning_effort=reasoning_effort, temperature=temperature, max_tokens=max_tokens)
+        return self._chat_sync(messages, reasoning_effort=reasoning_effort, temperature=temperature, max_tokens=max_tokens)
 
     async def achat(
         self,
         messages: list[ChatMessage],
         reasoning_effort: str | None = None,
         temperature: float | None = None,
+        max_tokens: int | None = None,
     ) -> ChatResult:
         base_url, model = assert_reasoning_model(self._settings)
         headers = bearer_auth_headers(self._settings.llm_api_key)
         serialized = [m.model_dump() for m in messages]
-        body = _chat_body(model, serialized, reasoning_effort, temperature, stream=False)
+        body = _chat_body(model, serialized, reasoning_effort, temperature, max_tokens=max_tokens, stream=False)
         if getattr(self._settings, "llm_stream", False):
             try:
                 t0 = time.monotonic()
                 state = _SseStreamState()
-                body_stream = _chat_body(model, serialized, reasoning_effort, temperature, stream=True)
+                body_stream = _chat_body(model, serialized, reasoning_effort, temperature, max_tokens=max_tokens, stream=True)
                 async with self._stream_http(
                     "POST",
                     f"{base_url.rstrip('/')}/chat/completions",
@@ -1690,11 +1699,12 @@ class HttpxLLMClient:
         messages: list[ChatMessage],
         reasoning_effort: str | None = None,
         temperature: float | None = None,
+        max_tokens: int | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         base_url, model = assert_reasoning_model(self._settings)
         headers = bearer_auth_headers(self._settings.llm_api_key)
         serialized = [m.model_dump() for m in messages]
-        body = _chat_body(model, serialized, reasoning_effort, temperature, stream=True)
+        body = _chat_body(model, serialized, reasoning_effort, temperature, max_tokens=max_tokens, stream=True)
 
         t0 = time.monotonic()
         state = _SseStreamState()
@@ -1746,7 +1756,7 @@ class HttpxLLMClient:
             # Issue #363: the fallback must re-ask with stream=False. Reusing
             # the streaming body makes a spec-compliant backend answer SSE,
             # which resp.json() cannot parse.
-            fallback_body = _chat_body(model, serialized, reasoning_effort, temperature, stream=False)
+            fallback_body = _chat_body(model, serialized, reasoning_effort, temperature, max_tokens=max_tokens, stream=False)
             resp = await self._async_http().post(
                 f"{base_url.rstrip('/')}/chat/completions",
                 json=fallback_body,
@@ -1787,13 +1797,14 @@ class HttpxLLMClient:
         messages: list[ChatMessage],
         reasoning_effort: str | None = None,
         temperature: float | None = None,
+        max_tokens: int | None = None,
     ) -> ChatResult:
         base_url, model = assert_reasoning_model(self._settings)
         headers = bearer_auth_headers(self._settings.llm_api_key)
         serialized = [m.model_dump() for m in messages]
-        body = _chat_body(model, serialized, reasoning_effort, temperature, stream=False)
+        body = _chat_body(model, serialized, reasoning_effort, temperature, max_tokens=max_tokens, stream=False)
         if getattr(self._settings, "llm_stream", False) and hasattr(self._sync_http(), "stream"):
-            body_stream = _chat_body(model, serialized, reasoning_effort, temperature, stream=True)
+            body_stream = _chat_body(model, serialized, reasoning_effort, temperature, max_tokens=max_tokens, stream=True)
             try:
                 t0 = time.monotonic()
                 state = _SseStreamState()

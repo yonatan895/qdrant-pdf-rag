@@ -27,25 +27,34 @@ class ModelAdapter:
     def __init__(self, client: LLMClient) -> None:
         self._client = client
 
+    def _cap(self, max_tokens: int | None) -> dict[str, int]:
+        """Forward the output cap (#777) only to clients that declare it."""
+        if max_tokens is None or getattr(self._client, "supports_max_tokens", False) is not True:
+            return {}
+        return {"max_tokens": max_tokens}
+
     async def chat(
         self, messages: list[ChatMessage], reasoning_effort: str | None = None,
-        temperature: float | None = None,
+        temperature: float | None = None, max_tokens: int | None = None,
     ) -> ChatResult:
         result = self._client.chat(
-            messages, reasoning_effort=reasoning_effort, temperature=temperature
+            messages, reasoning_effort=reasoning_effort, temperature=temperature,
+            **self._cap(max_tokens),
         )
         return as_chat_result(await maybe_await(result))
 
     async def stream(
         self, messages: list[ChatMessage], reasoning_effort: str, temperature: float,
+        max_tokens: int | None = None,
     ) -> AsyncGenerator[ModelEvent]:
         if not isinstance(self._client, StreamingClient):
-            result = await self.chat(messages, reasoning_effort, temperature)
+            result = await self.chat(messages, reasoning_effort, temperature, max_tokens)
             yield ModelToken(result.content, result.ttft_ms)
             yield ModelDone(result.finish_reason, result.usage, result.ttft_ms)
             return
         stream = self._client.chat_stream(
-            messages, reasoning_effort=reasoning_effort, temperature=temperature
+            messages, reasoning_effort=reasoning_effort, temperature=temperature,
+            **self._cap(max_tokens),
         )
         tokens = 0
         done = False
