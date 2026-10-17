@@ -13,75 +13,177 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 
 
-@pytest.mark.parametrize('fault', ['', 'count', 'query'])
-def test_snapshot_check_restores_and_compares_data(monkeypatch, tmp_path, fault):
-    calls = []
+class Response:
+    def __init__(self, result, status=200, content=b''):
+        # A wire response is a copy: later store changes must not rewrite what was read.
+        self.result, self.status_code, self.content = copy.deepcopy(result), status, content
 
-    class Response:
-        status_code = 200
-        content = b'synthetic snapshot bytes'
+    def raise_for_status(self):
+        assert self.status_code < 400
 
-        def __init__(self, result):
-            self.result = result
+    def json(self):
+        return {'result': self.result}
 
-        def raise_for_status(self):
-            pass
 
-        def json(self):
-            return {'result': self.result}
+class FakeQdrant:
+    """In-memory stand-in for the Qdrant REST surface the snapshot check uses.
+
+    A snapshot is the JSON of a collection, so an upload really recreates it,
+    and each `fault` models a restore (or cleanup) that brings back less, or
+    different, state than the source holds.
+    """
+
+    def __init__(self, fault):
+        self.fault = fault
+        vectors = {'dense': [1.0, 0.0], 'bm25': {'indices': [0], 'values': [1.0]}}
+        zero = {'dense': [0.0, 0.0], 'bm25': {'indices': [0], 'values': [1.0]}}
+        manifest = {'record_type': 'representation-manifest', 'state': 'committed', 'manifest': {'dim': 2}}
+        if fault == 'uncommitted-source':
+            manifest['state'] = 'pending'
+        self.collections = {
+            'physical': {f'd{i}': ({'doc_id': 'a', 'text': f'synthetic {i}'}, vectors) for i in range(5)},
+            'physical__completions': {
+                'm': (manifest, zero),
+                'p': ({'record_type': 'publication-metadata', 'target_collection': 'physical__completions'}, zero),
+                'c': ({'doc_id': 'a', 'chunk_ids_digest': 'x' * 8, 'expected_chunks': 5}, zero),
+            },
+        }
+        self.aliases = {'synthetic': 'physical', 'physical__build_1': 'physical'}
+        self.calls = []
+
+    @staticmethod
+    def name(url):
+        return url.split('/collections/')[1].split('/')[0].split('?')[0]
+
+    def get(self, url):
+        self.calls.append(('get', url))
+        if url.endswith('/aliases'):
+            return Response({'aliases': [{'alias_name': a, 'collection_name': c} for a, c in self.aliases.items()]})
+        name = self.name(url)
+        if '/snapshots/' in url:
+            return Response({}, content=json.dumps(self.collections[name]).encode())
+        if name not in self.collections:
+            return Response({}, status=404)
+        count = len(self.collections[name])
+        return Response({'points_count': 0 if self.fault == 'count' and name.startswith('ci-restore-') else count})
+
+    def post(self, url, **kwargs):
+        self.calls.append(('post', url))
+        name = self.name(url)
+        points = self.collections.get(name, {})
+        if '/snapshots/upload' in url:
+            assert url.endswith('?priority=snapshot') and name.startswith('ci-restore-')
+            restored = {k: (copy.deepcopy(v[0]), v[1])
+                        for k, v in json.loads(kwargs['files']['snapshot'][1]).items()}
+            if name.endswith('__completions'):
+                if self.fault == 'no-control-restored':
+                    return Response({})
+                if self.fault == 'no-completion-records':
+                    del restored['c']
+                if self.fault == 'no-manifest':
+                    del restored['m']
+                if self.fault == 'completion-drift':
+                    restored['c'][0]['chunk_ids_digest'] = 'tampered'
+                if self.fault == 'manifest-drift':
+                    restored['m'][0]['state'] = 'pending'
+            elif self.fault == 'data-drift':
+                restored['d1'][0]['text'] = 'tampered'
+            self.collections[name] = restored
+            return Response({})
+        if url.endswith('/snapshots'):
+            return Response({'name': name + '.snapshot'})
+        if url.endswith('/points/scroll'):
+            assert kwargs['json']['with_vector'] is True and kwargs['json']['with_payload'] is True
+            ids = list(points)
+            start = ids.index(kwargs['json']['offset']) if 'offset' in kwargs['json'] else 0
+            more = ids[start + 2] if start + 2 < len(ids) else None  # small pages exercise pagination
+            return Response({'points': [{'id': i, 'payload': points[i][0], 'vector': points[i][1]}
+                                        for i in ids[start:start + 2]], 'next_page_offset': more})
+        if url.endswith('/points/query'):
+            assert kwargs['json']['params']['exact'] is True
+            assert kwargs['json']['query'] == [1.0, 0.0]
+            ids = list(points)[:5]
+            if self.fault == 'query' and name.startswith('ci-restore-'):
+                ids.reverse()
+            return Response({'points': [{'id': i} for i in ids]})
+        assert url.endswith('/points')
+        assert kwargs['json']['with_vector'] is True and kwargs['json']['with_payload'] is True
+        return Response([{'id': i, 'payload': points[i][0], 'vector': points[i][1]}
+                         for i in kwargs['json']['ids'] if i in points])
+
+    def delete(self, url):
+        self.calls.append(('delete', url))
+        assert '/ci-restore-' in url, 'only scratch collections may be deleted'
+        self.collections.pop(self.name(url), None)
+        if self.fault == 'cleanup-hits-source':
+            self.collections['physical__completions']['c'][0]['chunk_ids_digest'] = 'tampered'
+        return Response({})
+
+
+def run_snapshot_check(monkeypatch, tmp_path, fault):
+    qdrant = FakeQdrant(fault)
 
     class Client:
         def __init__(self, **kwargs):
             assert kwargs['headers'] == {'api-key': 'test-only'}
 
         def __enter__(self):
-            return self
+            return qdrant
 
         def __exit__(self, *args):
             pass
-
-        def get(self, url):
-            calls.append(('get', url))
-            if '/snapshots/' in url:
-                return Response({})
-            count = 0 if fault == 'count' and '/ci-restore-' in url else 7
-            return Response({'points_count': count})
-
-        def post(self, url, **kwargs):
-            calls.append(('post', url))
-            if '/snapshots/upload' in url:
-                assert kwargs['files']['snapshot'][1] == Response.content
-                assert url.endswith('?priority=snapshot')
-                return Response({})
-            if url.endswith('/points/scroll'):
-                assert kwargs['json']['with_vector'] is True
-                return Response({'points': [{'vector': {'dense': [1.0, 0.0]}}]})
-            if url.endswith('/points/query'):
-                assert kwargs['json']['params']['exact'] is True
-                assert kwargs['json']['query'] == [1.0, 0.0]
-                ids = [9] if fault == 'query' and '/ci-restore-' in url else [1, 2]
-                return Response({'points': [{'id': i} for i in ids]})
-            assert url.endswith('/snapshots')
-            return Response({'name': 'synthetic.snapshot'})
-
-        def delete(self, url):
-            calls.append(('delete', url))
-            assert '/ci-restore-' in url
-            return Response({})
 
     settings = SimpleNamespace(qdrant_url='http://qdrant', qdrant_collection='synthetic', qdrant_api_key='test-only')
     monkeypatch.setitem(sys.modules, 'httpx2', SimpleNamespace(Client=Client))
     monkeypatch.setitem(sys.modules, 'mainframe_rag.config', SimpleNamespace(load_settings=lambda: settings))
     script = runpy.run_path(str(ROOT / 'scripts/ci/check_snapshot.py'))['SNAPSHOT_CHECK']
-    executable = tmp_path / "snapshot_check.py"
+    executable = tmp_path / 'snapshot_check.py'
     executable.write_text(script)
-    if fault:
-        with pytest.raises(AssertionError):
-            runpy.run_path(str(executable))
-    else:
+    return qdrant, executable
+
+
+def test_snapshot_check_proves_data_completions_and_representation_restore(monkeypatch, tmp_path, capsys):
+    qdrant, executable = run_snapshot_check(monkeypatch, tmp_path, '')
+    before = copy.deepcopy(qdrant.collections)
+    runpy.run_path(str(executable))
+    out = capsys.readouterr().out
+    assert 'data-only restore refused' in out and 'next query and snapshot succeeded' in out
+    assert 'synthetic 0' not in out  # stored text is never printed
+    # Source pair and aliases untouched; every scratch collection removed again.
+    assert qdrant.collections == before and qdrant.aliases['synthetic'] == 'physical'
+    scratch = sorted(qdrant.name(url) for method, url in qdrant.calls if method == 'post' and '/snapshots/upload' in url)
+    assert len(scratch) == 2 and scratch[1] == scratch[0] + '__completions' and scratch[0].startswith('ci-restore-')
+    assert sorted(qdrant.name(url) for method, url in qdrant.calls if method == 'delete') == scratch
+    # The source pair is snapshotted for the restore, and once more after cleanup.
+    snapshots = [qdrant.name(url) for method, url in qdrant.calls if method == 'post' and url.endswith('/snapshots')]
+    assert snapshots == ['physical', 'physical__completions', 'physical']
+    assert not any('/aliases' in url for method, url in qdrant.calls if method != 'get')
+
+
+@pytest.mark.parametrize('fault, reason', [
+    ('count', 'restored point count differs'),
+    ('query', 'restored exact query differs'),
+    ('data-drift', 'restored sampled payload differs'),
+    # Counterexample: the points come back but not the matching completions state.
+    ('no-control-restored', 'restored completions collection missing'),
+    ('no-completion-records', 'restored completions or representation points differ'),
+    ('no-manifest', 'restored completions or representation points differ'),
+    ('completion-drift', 'restored completion or representation payload differs'),
+    ('manifest-drift', 'restored completion or representation payload differs'),
+    ('cleanup-hits-source', 'source completions or representation changed'),
+    ('uncommitted-source', 'source representation manifest is not committed'),
+])
+def test_snapshot_check_refuses_incomplete_or_damaging_restore(monkeypatch, tmp_path, fault, reason):
+    qdrant, executable = run_snapshot_check(monkeypatch, tmp_path, fault)
+    with pytest.raises(AssertionError) as failure:
         runpy.run_path(str(executable))
-    assert any(method == 'post' and '/snapshots/upload' in url for method, url in calls)
-    assert calls[-1][0] == 'delete'
+    assert str(failure.value) == reason
+    # Even a refused restore removes its scratch collections and only ever writes to them.
+    assert not any(name.startswith('ci-restore-') for name in qdrant.collections)
+    assert all('/ci-restore-' in url for method, url in qdrant.calls if method in ('delete',) or
+               (method == 'post' and '/snapshots/upload' in url))
+    if fault == 'uncommitted-source':
+        assert not any('/snapshots' in url for method, url in qdrant.calls if method == 'post')
 
 
 def ingest_job():
