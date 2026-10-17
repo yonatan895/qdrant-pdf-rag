@@ -4,6 +4,7 @@ Hermetic tests: tests dryrun preview, empty collection clean skip (exit code 3),
 search success path, search failure path, and namespace validation.
 """
 
+import contextlib
 from pathlib import Path
 
 import pytest
@@ -82,10 +83,8 @@ def _clean_sysbin(tmp_path):
                 continue
             for item in p_dir.iterdir():
                 if item.name not in ("kubectl", "oc") and not (clean_bin / item.name).exists():
-                    try:
+                    with contextlib.suppress(OSError):
                         (clean_bin / item.name).symlink_to(item)
-                    except OSError:
-                        pass
     return clean_bin
 
 

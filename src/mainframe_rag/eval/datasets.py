@@ -91,7 +91,7 @@ def parse_golden_text(text: str) -> list[GoldenEntry]:
         try:
             entry = GoldenEntry.model_validate_json(line)
         except (ValidationError, ValueError) as exc:
-            raise SystemExit(f"invalid golden entry: {line[:120]} ({exc})")
+            raise SystemExit(f"invalid golden entry: {line[:120]} ({exc})") from exc
         entries.append(entry)
     return entries
 

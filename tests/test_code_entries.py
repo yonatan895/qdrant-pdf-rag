@@ -182,7 +182,7 @@ def test_strip_chrome_keeps_entry_lines_and_strips_only_chrome():
     from mainframe_rag.ingest.chrome import strip_chrome
 
     pages = _entry_pages()
-    for page, code in zip(strip_chrome(pages), _ENTRY_CODES * 3):
+    for page, code in zip(strip_chrome(pages), _ENTRY_CODES * 3, strict=True):
         lines = page.splitlines()
         assert code in lines
         assert lines[lines.index(code) + 1] == "Explanation:"

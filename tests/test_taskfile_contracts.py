@@ -19,6 +19,7 @@ private config. Only stdlib (runnable with the system interpreter).
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -402,10 +403,8 @@ class TaskContractsTests(unittest.TestCase):
                     self.assertTrue((self.root / "cleaned").exists())
                     self.assertFalse((self.root / "owned-resource").exists())
                 finally:
-                    try:
+                    with contextlib.suppress(ProcessLookupError):
                         os.killpg(proc.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
                     proc.communicate(timeout=10)
                 (self.root / "ready").unlink()
                 (self.root / "cleaned").unlink()

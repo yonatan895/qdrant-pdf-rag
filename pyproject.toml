@@ -43,9 +43,41 @@ markers = [
     "integration: end-to-end tiers against a docker Qdrant server + loopback mocks (correctness via `sh scripts/tools/run-task.sh qa:sim`, load tier via `sh scripts/tools/run-task.sh qa:load`)",
 ]
 
+# Advisory branch coverage (#587), run only by `task qa:coverage` / coverage.yml.
+# `source_pkgs` (not a path) because tests/conftest.py puts the worktree `src/`
+# first on sys.path; importable-but-never-imported modules still report at 0%.
+# No `omit`, no `fail_under`: nothing is silently excluded or gated.
+[tool.coverage.run]
+branch = true
+source_pkgs = ["mainframe_rag"]
+relative_files = true
+# Trace python subprocesses the tests spawn (parallel data files, combined by
+# pytest-cov / `coverage combine`); `patch` implies `parallel = true`.
+patch = ["subprocess"]
+
+[tool.coverage.report]
+# Repository code only: tests copy the package to tmp dirs (e.g. Colab run
+# snapshots) and subprocess tracing would otherwise count those copies.
+include = ["src/mainframe_rag/*"]
+precision = 1
+sort = "Cover"
+skip_covered = false
+skip_empty = false
+
 [tool.ruff]
 line-length = 100
 src = ["src", "tests"]
+
+[tool.ruff.lint]
+# extend-select (not select) keeps the default rule set; see #584.
+extend-select = ["B", "SIM", "RET"]
+
+[tool.ruff.lint.per-file-ignores]
+# Rule module: its bytes are the extraction rules version (see
+# tests/test_rules_version.py), so even a lint-only edit forces a corpus
+# re-embed. Keep the unused enumerate index (B007) until chunk.py is next
+# changed under an approved extraction concern, then drop this entry.
+"src/mainframe_rag/ingest/chunk.py" = ["B007"]
 
 [tool.mypy]
 python_version = "3.14"

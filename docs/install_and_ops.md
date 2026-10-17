@@ -1386,14 +1386,26 @@ corpus, never in git. Unverified copies (`sha256sum -c SNAPSHOTS.sha256` fails)
 are not backups.
 
 **2. Isolated restore proof (never over the source).** Before relying on a
-snapshot, restore one peer's file into a *new* collection name on a scratch
-Qdrant, compare `points_count` and exact-query results with the source, then
-delete only the scratch collection. `scripts/ci/check_snapshot.py` is this
-check for the synthetic lifecycle lane (restore under `ci-restore-<uuid>`, exact
-query equivalence, source untouched). A source collection is never deleted or
-reset to "reingest": completion markers, representation and inventory move with
-publication (`ingest.md`), so recovery is by alias re-pointing or by the
-publication contract, not by deleting live data.
+snapshot, restore one peer's data and `<physical>__completions` files into *new*
+collection names on a scratch Qdrant, compare `points_count`, exact-query results,
+sampled payloads and vectors, and the whole completions collection (every
+completion record, the representation manifest and the publication record) with
+the source, then delete only the scratch collections. A data-only restore is not
+a recovery: without its completions pair the check must fail.
+`scripts/ci/check_snapshot.py` is this check for the synthetic lifecycle lane
+(`scripts/ci/check_lifecycle.sh`): it restores both snapshots as
+`ci-restore-<uuid>` and `ci-restore-<uuid>__completions`, asserts equal stored
+content, proves on the live service that a data-only restore is refused, and
+after cleanup confirms the source pair and aliases are unchanged and that a
+further query and snapshot on the source still succeed. It prints fixed messages
+only, never stored text. It does not cover, and the site must still rehearse:
+the off-cluster copy and its checksums, restore on a different cluster or Qdrant
+peer, distributed multi-peer restore and peer replacement (#360), the filesystem
+behavior of the real snapshot storage class, and the application serving the
+restored pair (the lane exercises the live pair, not the scratch copy).
+A source collection is never deleted or reset to "reingest": completion markers,
+representation and inventory move with publication (`ingest.md`), so recovery is
+by alias re-pointing or by the publication contract, not by deleting live data.
 
 **3. Application upgrade (candidate bundle B over A).** In a fresh workspace for
 B (`bootstrap.sh`, never advance A's workspace), then:

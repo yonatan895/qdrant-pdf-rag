@@ -22,6 +22,7 @@ Invariants (each has a test in tests/test_admission.py):
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections import deque
 
 REASON_QUEUE_FULL = "queue_full"
@@ -99,10 +100,8 @@ class AdmissionController:
                 self._release()
             else:
                 fut.cancel()
-                try:
+                with contextlib.suppress(ValueError):
                     self._waiters.remove(fut)
-                except ValueError:
-                    pass
             if isinstance(exc, TimeoutError):
                 raise AdmissionRejected(REASON_QUEUE_TIMEOUT) from exc
             raise
