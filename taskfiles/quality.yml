@@ -56,6 +56,38 @@ tasks:
       - task: prerequisites
       - '.venv/bin/python -m pytest {{if .CLI_ARGS}}{{.CLI_ARGS}}{{else}}tests -v{{end}}'
 
+  coverage:
+    desc: Advisory branch coverage of the unit selection, reports outside the repo (#587)
+    summary: |
+      Measures branch coverage of `mainframe_rag` while running the same
+      selection as `task qa:unit`: default `tests -q` (pyproject addopts
+      deselect integration); `task qa:coverage -- tests/test_config.py -q`
+      replaces it once (trusted developer input, shell word-splitting applies).
+      Writes the terminal summary, coverage.json, coverage.xml and the data
+      file into OUT, default ${XDG_STATE_HOME:-$HOME/.local/state}/mainframe-rag/coverage;
+      an OUT inside the repository is refused. Advisory: no percentage ever
+      fails the task (only a failing test or prerequisite does), and it is
+      neither verification nor acceptance evidence. PYTEST_ADDOPTS stays
+      unset. Python subprocesses the tests spawn are traced (data files stay in OUT). Fails closed when the
+      prepared interpreter or verified tools are unavailable.
+    env:
+      TASK_COVERAGE_OUT: '{{if hasKey . "OUT"}}{{.OUT}}{{end}}'
+    cmds:
+      - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
+      - task: prerequisites
+      - |
+        out="${TASK_COVERAGE_OUT:-${XDG_STATE_HOME:-$HOME/.local/state}/mainframe-rag/coverage}"
+        out="$(realpath -m "$out")"
+        case "$out/" in
+          "$(pwd -P)"/*) echo "coverage output must be outside the repository: $out" >&2; exit 2 ;;
+        esac
+        mkdir -p "$out"
+        COVERAGE_FILE="$out/.coverage" .venv/bin/python -m pytest \
+          --cov --cov-report=term \
+          --cov-report="json:$out/coverage.json" --cov-report="xml:$out/coverage.xml" \
+          {{if .CLI_ARGS}}{{.CLI_ARGS}}{{else}}tests -q{{end}}
+        echo "coverage reports: $out"
+
   local:
     desc: Hermetic local verification of the change (T0/T1/T2) with a receipt (#796)
     summary: |
