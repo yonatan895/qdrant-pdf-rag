@@ -140,18 +140,31 @@ Required tier selection and commands are maintained only in
 how those instruments work and what their results can establish.
 
 <a id="local-verification"></a>
-### Local verification (`sh scripts/tools/run-task.sh qa:local -- <tests>`, #796)
+### Local verification (`sh scripts/tools/run-task.sh qa:local`, #796)
 
-Runs exactly the named selection against this worktree's code and writes
-`<run>/receipt.json` outside the repository (default
-`$XDG_STATE_HOME/mainframe-rag/local-verify`, also where `TMPDIR` and basetemp live). It refuses (exit 2) instead of running when
-the interpreter imports another tree's `src`, the output directory is inside
-the repository or RAM-backed, the Colab assignment lock is held, or pytest already runs from this
-tree. The environment comes from an allowlist, never inheritance; `--pass-env`
-adds a named variable and the receipt records it. A skip is incomplete, not a
-pass. A dirty tree runs but is labeled "uncommitted, not evidence". The receipt
-covers the selection only: the CI `unit_tests` lane remains the authority for
-the full suite, and the receipt lists what it did not verify.
+With no arguments it selects from the diff against `origin/main` plus dirty
+paths (`scripts/local_selection.py`), prints the selection, runs T0 (ruff and
+mypy on changed files within CI's lint scope), then the tests:
+
+- **T1:** test modules whose imports reach a changed module, tests whose string
+  literals name a changed file (path, module name, or script/asset basename),
+  and the context map's evidence suites for a changed boundary.
+- **T2:** all unit modules except `test_colab` and `test_ingest_publish` (they run
+  only when selected), required when a shared test input, dependency lock or
+  Task file changes, or forced with `--t2`.
+- **Unmapped:** a changed `src/` or `scripts/` file with no selected test refuses
+  until `--select tests/<file>` covers it; the receipt records the override.
+- **Explicit:** `qa:local -- tests/<file>[::node]` runs exactly those tests.
+
+It refuses (exit 2) when the interpreter imports another tree's `src`, the run
+directory is inside the repository or RAM-backed, the Colab assignment lock is
+held, or pytest already runs from this tree. The environment comes from an
+allowlist; `--pass-env` adds a named variable and is recorded. The receipt
+(`$XDG_STATE_HOME/mainframe-rag/local-verify/<run>/receipt.json`, also home of
+`TMPDIR` and basetemp) covers the selection only. A skip is incomplete, a dirty
+tree is "uncommitted, not evidence", and the CI `unit_tests` lane remains the
+authority for the full suite. Dynamic dispatch the static rules cannot see is
+the known gap.
 
 <a id="airgap-tier"></a>
 ### Air-gap deployment tier (`sh scripts/tools/run-task.sh airgap:dryrun`, `tests/test_airgap_*.py`, local Kind)
