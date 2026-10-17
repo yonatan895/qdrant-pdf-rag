@@ -660,6 +660,12 @@ PULL_SECRET=internal-registry-pull-secret
 # rag-agent-oauth-cookie (see §4.4.2). Without it the console is still served
 # in-cluster at /ui on the ClusterIP 8080 port.
 #AGENT_ROUTE=true
+
+# Default ON (issue #373): the agent's unauthenticated 8080 is reachable only
+# from this namespace, monitoring and the namespaces listed here; other
+# namespaces calling rag-agent:8080 (for example an MCP server) are denied.
+# AGENT_NETWORK_POLICY=false renders no policy. See deploy.md#agent-networkpolicy.
+#AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES=mcp
 ```
 
 #### Platform model endpoints (reasoning / embed / optional rerank)
@@ -918,8 +924,11 @@ OAuth-protected; enable it with `AGENT_ROUTE=true`:
 4. Reach it: `oc -n mainframe-rag get route rag-agent` → unauthenticated
    browser requests may show a provider chooser (403); `/oauth/start` redirects
    to OpenShift OAuth; `/healthz` bypasses OAuth for
-   probes. In-cluster tools keep using the ClusterIP 8080 port (unauthenticated
-   by design, no Route).
+   probes. In-cluster tools of the release namespace (and of
+   `AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES`) keep using the ClusterIP 8080 port
+   (unauthenticated by design, no Route); other namespaces are denied by the
+   default-on `rag-agent-ingress` NetworkPolicy (set `AGENT_NETWORK_POLICY=false`
+   to opt out; [rules](deploy.md#agent-networkpolicy)).
 
 `sh scripts/tools/run-task.sh airgap:validate` with `AGENT_ROUTE=true` checks the
 recorded and chart/bundle-consistent oauth-proxy pin (static, also in dry-run),
@@ -1027,6 +1036,7 @@ beyond the namespace record the platform team's evidence and owner instead.
 | Images | Each running container's `imageID`, including OAuth, matches the loaded release artifacts under [the image-identity procedure](deploy.md#image-identity-across-archive-and-registry-formats). |
 | OAuth Route | A fresh unauthenticated `GET /ui` may show the provider chooser (403); `/oauth/start` redirects to OpenShift OAuth; login returns to `/ui`; a fresh session still requires authentication. No direct public API, Jaeger or Qdrant Route. |
 | Certificates | Browser and CLI verify the Route hostname and ingress chain without bypass. The Route is `reencrypt`, targets OAuth 8443 and trusts the Service CA; the serving Secret matches its service identity. |
+| Agent ingress | `oc -n "$NAMESPACE" get networkpolicy rag-agent-ingress` exists (or `AGENT_NETWORK_POLICY=false` is a recorded site decision). Pods stay Ready after it is applied (probes). From a pod in a **different, unlisted** namespace, `rag-agent:8080` and the pod IP `:8080` fail while the same call from this namespace succeeds; the Route login still works (router to 8443) and a UWM scrape of `/metrics` succeeds when metrics are on. Record that the router and monitoring namespaces carry the `network.openshift.io/policy-group` labels (cluster-scoped read: platform evidence) and that no site allow-all policy selects the agent pods (policies are additive and would void the restriction). Repository tests prove the rendered rules only, not enforcement. |
 | Egress | Prove a public TCP destination is reachable from each application policy context first; after the namespace default-deny egress policy with narrow DNS, Qdrant, Jaeger, OAuth/API and gateway allows, a bounded direct-IP connection to that address fails while DNS and gateway calls succeed. Repeat ingest, gateway streaming probe, retrieval, tracing, OAuth login, cited answers and stream endings under the policy. An unresolved name or invalid certificate is not evidence of blocking. |
 | Node pulls | An uncached public image pull fails and an uncached internal-registry pull succeeds, recorded with digests and events. A cached image proves neither; NetworkPolicy success does not imply node isolation. |
 

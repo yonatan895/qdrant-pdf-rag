@@ -40,7 +40,7 @@ MAPPER_KEYS = [
     "OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_ENDPOINT_RESOLVED", "OTEL_TRACING_ENABLED",
     "OTEL_DEPLOYMENT_ENVIRONMENT", "OTEL_SERVICE_NAME", "JAEGER_ENABLED",
     "METRICS_ENABLED", "SERVICEMONITOR_ENABLED", "AGENT_ROUTE", "ROUTE_DESTINATION_CA_FILE",
-    "UI_ENABLED",
+    "UI_ENABLED", "AGENT_NETWORK_POLICY", "AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES",
     "IMAGE_DIGEST_AGENT", "IMAGE_DIGEST_INGEST", "IMAGE_DIGEST_JAEGER", "IMAGE_DIGEST_OAUTH_PROXY",
     "STORAGE_CLASS", "CORPUS_PVC", "INGEST_WORKERS", "INGEST_WORK_SIZE",
     "INGEST_ALIAS_PUBLISH", "INGEST_REINGEST", "INGEST_RETIRE_DOCS",
@@ -278,6 +278,62 @@ def test_ui_enabled_rejects_garbage(monkeypatch, mapper_env):
     assert r.returncode != 0
     assert "UI_ENABLED must be true/false" in r.stderr
     assert "maybe" not in r.stderr  # the key is named, the value is not echoed
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("", True), ("true", True), ("1", True), ("YES", True),
+    ("false", False), ("0", False), ("no", False),
+])
+def test_agent_network_policy_selection_defaults_on(monkeypatch, mapper_env, raw, expected):
+    # Issue #373: the policy is default ON; only an explicit false turns it off.
+    monkeypatch.setenv("AGENT_NETWORK_POLICY", raw)
+    r, out = mapper_env()
+    assert r.returncode == 0, r.stderr
+    assert load_values(out)["networkPolicy"] == {"enabled": expected, "allowedNamespaces": []}
+
+
+def test_agent_network_policy_rejects_garbage(monkeypatch, mapper_env):
+    monkeypatch.setenv("AGENT_NETWORK_POLICY", "maybe")
+    r, _ = mapper_env()
+    assert r.returncode != 0
+    assert "AGENT_NETWORK_POLICY must be true/false" in r.stderr
+    assert "maybe" not in r.stderr  # the key is named, the value is not echoed
+
+
+def test_agent_network_policy_allowed_namespaces_round_trip(monkeypatch, mapper_env):
+    monkeypatch.setenv("AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES", "mcp,tools-1,a")
+    r, out = mapper_env()
+    assert r.returncode == 0, r.stderr
+    assert load_values(out)["networkPolicy"] == {
+        "enabled": True, "allowedNamespaces": ["mcp", "tools-1", "a"]}
+
+
+@pytest.mark.parametrize("raw", [
+    " mcp", "mcp ", "mcp, tools", "mcp,", ",mcp", "mcp,,tools", "MCP", "mcp_tools",
+    "-mcp", "mcp-", "mcp.tools", "a" * 64, "mcp,mcp", "*", "mcp;tools",
+])
+def test_agent_network_policy_allowed_namespaces_are_strict(monkeypatch, mapper_env, raw):
+    monkeypatch.setenv("AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES", raw)
+    r, out = mapper_env()
+    assert r.returncode != 0
+    assert "AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES must" in r.stderr
+    assert not out.exists()
+
+
+def test_agent_network_policy_allowed_namespaces_accept_the_63_char_limit(monkeypatch, mapper_env):
+    monkeypatch.setenv("AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES", "a" * 63)
+    r, out = mapper_env()
+    assert r.returncode == 0, r.stderr
+    assert load_values(out)["networkPolicy"]["allowedNamespaces"] == ["a" * 63]
+
+
+def test_agent_network_policy_allow_list_requires_the_policy(monkeypatch, mapper_env):
+    monkeypatch.setenv("AGENT_NETWORK_POLICY", "false")
+    monkeypatch.setenv("AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES", "mcp")
+    r, out = mapper_env()
+    assert r.returncode != 0
+    assert "requires AGENT_NETWORK_POLICY to be enabled" in r.stderr
+    assert not out.exists()
 
 
 def test_contextual_embed_invalid_value_is_refused_not_false(monkeypatch, mapper_env):

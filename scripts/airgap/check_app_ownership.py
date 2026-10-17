@@ -16,6 +16,7 @@ ALLOWED = {
     ('v1', 'ServiceAccount', 'rag-agent'),
     ('route.openshift.io/v1', 'Route', 'rag-agent'),
     ('monitoring.coreos.com/v1', 'ServiceMonitor', 'rag-agent'),
+    ('networking.k8s.io/v1', 'NetworkPolicy', 'rag-agent-ingress'),
     ('apps/v1', 'Deployment', 'jaeger'),
     ('v1', 'Service', 'jaeger'),
     ('v1', 'ConfigMap', 'jaeger-config'),
