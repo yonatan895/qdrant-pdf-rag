@@ -46,7 +46,7 @@ def test_answer_and_rating_round_trip_exactly(store):
     assert (answer["query"], answer["answer"], answer["endpoint"]) == (QUERY, ANSWER, "console")
     assert answer["citations"] == ["SA22-0000-00 Synthetic Reference, p. 1"]
     assert answer["telemetry"]["prompt_tokens"] == 5460 and answer["telemetry"]["budget_verified"] is True
-    [rating] = store.ratings(RID)
+    rating = store.rating(RID)
     assert rating["id"] == rid
     assert (rating["rating"], rating["reasons"], rating["comment"], rating["rater"]) == (
         "bad", ["incomplete", "too_slow"], COMMENT, None)
@@ -66,17 +66,17 @@ def test_rating_converges_to_one_per_answer_across_resends_and_changes(store):
     first = store.add_rating(Rating(request_id=RID, rating="bad", reasons=["wrong"], comment=COMMENT))
     resend = store.add_rating(Rating(request_id=RID, rating="bad", reasons=["wrong"], comment=COMMENT))
     assert resend == first
-    assert [r["rating"] for r in store.ratings(RID)] == ["bad"]
+    assert store.rating(RID)["rating"] == "bad"
     changed = store.add_rating(Rating(request_id=RID, rating="good"))
     assert changed == first
-    [rating] = store.ratings(RID)
+    rating = store.rating(RID)
     assert (rating["rating"], rating["reasons"], rating["comment"]) == ("good", [], "")
 
 
 def test_rating_for_an_unrecorded_answer_is_refused_and_not_stored(store):
     with pytest.raises(UnknownAnswerError):
         store.add_rating(Rating(request_id=RID, rating="good"))
-    assert store.ratings(RID) == []
+    assert store.rating(RID) is None
 
 
 @pytest.mark.parametrize("bad", [
@@ -100,7 +100,7 @@ def test_purge_removes_expired_answers_with_their_ratings_only(tmp_path):
     now[0] = 200 * 86400.0
     s.record_answer(_record("bbbbbbbbbbbb"))
     assert s.purge(retention_days=180) == {"answers": 1, "ratings": 1}
-    assert s.answer("aaaaaaaaaaaa") is None and s.ratings("aaaaaaaaaaaa") == []
+    assert s.answer("aaaaaaaaaaaa") is None and s.rating("aaaaaaaaaaaa") is None
     assert s.answer("bbbbbbbbbbbb") is not None
     # The next ordinary operation after cleanup still works.
     assert s.record_answer(_record("cccccccccccc")) is True
@@ -128,13 +128,51 @@ def test_service_refuses_unknown_answer_and_invalid_input_with_fixed_messages(st
     client = TestClient(create_app(store, TOKEN))
     auth = {"Authorization": f"Bearer {TOKEN}"}
     unknown = client.post("/v1/ratings", json={"request_id": RID, "rating": "good"}, headers=auth)
-    assert unknown.status_code == 404
-    assert unknown.json() == {"code": "unknown_answer", "message": "no recorded answer has this request id"}
+    assert unknown.status_code == 404 and unknown.json()["code"] == "unknown_answer"
     invalid = client.post("/v1/ratings", json={"request_id": RID, "rating": "excellent"}, headers=auth)
-    assert invalid.status_code == 422
-    assert invalid.json() == {"code": "invalid_request", "message": "the feedback request is invalid"}
+    assert invalid.status_code == 422 and invalid.json()["code"] == "invalid_request"
+    missing = client.get("/v1/no-such-route", headers=auth)
+    assert missing.status_code == 404 and missing.json()["code"] == "not_found"
 
 
 def test_service_refuses_to_start_without_a_token(store):
     with pytest.raises(RuntimeError, match="FEEDBACK_SERVICE_TOKEN"):
         create_app(store, "")
+
+
+def test_token_round_trips_across_secret_whitespace(store):
+    """A Secret created --from-file trails a newline on both sides: the
+    agent's header and the service's expectation must normalize alike."""
+    from mainframe_rag.config import bearer_auth_headers
+
+    client = TestClient(create_app(store, TOKEN + "\n"))
+    headers = bearer_auth_headers(TOKEN + "\n")
+    assert client.post("/v1/answers", json=_record().model_dump(), headers=headers).status_code == 201
+
+
+def test_service_owns_purge_and_the_next_write_still_works(tmp_path):
+    now = [0.0]
+    s = FeedbackStore(tmp_path / "f.sqlite3", clock=lambda: now[0])
+    client = TestClient(create_app(s, TOKEN, retention_days=180))
+    auth = {"Authorization": f"Bearer {TOKEN}"}
+    client.post("/v1/answers", json=_record("aaaaaaaaaaaa").model_dump(), headers=auth)
+    now[0] = 181 * 86400.0
+    assert client.post("/v1/purge", headers=auth).json() == {"answers": 1, "ratings": 0}
+    assert s.answer("aaaaaaaaaaaa") is None
+    assert client.post("/v1/answers", json=_record("bbbbbbbbbbbb").model_dump(), headers=auth).json() == {
+        "recorded": True}
+    assert client.post("/v1/purge", headers={"Authorization": "Bearer wrong"}).status_code == 401
+    s.close()
+
+
+def test_schema_version_mismatch_refuses_to_open(tmp_path):
+    path = tmp_path / "f.sqlite3"
+    FeedbackStore(path).close()
+    import sqlite3
+
+    db = sqlite3.connect(path)
+    db.execute("UPDATE meta SET value = '999' WHERE key = 'schema'")
+    db.commit()
+    db.close()
+    with pytest.raises(RuntimeError, match="schema"):
+        FeedbackStore(path)

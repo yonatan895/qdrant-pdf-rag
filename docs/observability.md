@@ -55,7 +55,7 @@ trace-arrival query in `scripts/airgap/smoke.sh` and `check_live.py`'s
 
 SQLite in a single-replica service with its own RWO block PVC (never NFS).
 The store keeps a narrow interface (`record_answer`, `add_rating`, `answer`,
-`ratings`, `purge`) and portable SQL (`ON CONFLICT DO NOTHING`, JSON as text),
+`rating`, `answer_labels`, `purge`) and portable SQL (`ON CONFLICT DO NOTHING`, JSON as text),
 so a later move to the platform's Crunchy Postgres is a backend swap plus a
 tested export and import. Triggers for that move: an availability requirement
 for feedback (the single replica drops records best-effort during a

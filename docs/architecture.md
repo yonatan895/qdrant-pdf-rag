@@ -289,6 +289,10 @@ src/mainframe_rag/
     core_ports.py     # Typed operations supplied to the answer use case
     model_adapter.py  # Normalizes legacy chat/stream seams; never owns the shared client
     resources.py      # Per-request read-only view of lifespan-owned clients; retrieval wiring + core deps
+  feedback/           # Answer feedback (issue #780, ADR-0005)
+    store.py          # SQLite store and vocabulary owner: answers, one rating per answer, purge
+    service.py        # Single-writer HTTP service over the store (bearer token, fixed error codes)
+    client.py         # Agent-side best-effort client: bounded queue, counted drops, console ratings
   webui/
     routes.py         # Operator console routes (/ui): fail-closed gate, HTMX form/SSE, CSP
     templates/        # Jinja2 shell + message pair (server-rendered, no external assets)

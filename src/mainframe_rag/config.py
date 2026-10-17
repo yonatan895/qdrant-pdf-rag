@@ -253,6 +253,15 @@ class Settings(BaseSettings):
     feedback_queue_size: int = Field(default=256, ge=1, le=10000)
     feedback_timeout_s: float = Field(default=2.0, gt=0.0, le=30.0)
     feedback_record_rater: bool = False
+    # Bounded shutdown drain of queued records; what is left is counted dropped.
+    feedback_drain_timeout_s: float = Field(default=2.0, ge=0.0, le=30.0)
+    # Feedback SERVICE process only (the single SQLite writer): store path on
+    # its RWO block PVC, its bearer token (Secret reference, never logged; the
+    # agents' FEEDBACK_API_KEY carries the same value) and the retention
+    # window its purge action enforces (ADR-0005: 180 days).
+    feedback_store_path: str = "/data/feedback.sqlite3"
+    feedback_service_token: str | None = None
+    feedback_retention_days: int = Field(default=180, ge=1, le=3650)
 
     # Request admission and total deadline (issue #374). EVERY value defaults
     # to the pre-#374 behaviour (0 = no limit / no deadline): selecting a
@@ -371,7 +380,9 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _feedback_endpoint_when_enabled(self) -> Settings:
-        if self.feedback_enabled and not (self.feedback_url and self.feedback_api_key):
+        if self.feedback_enabled and not (
+            self.feedback_url and self.feedback_api_key and self.feedback_api_key.strip()
+        ):
             raise ValueError("FEEDBACK_ENABLED requires FEEDBACK_URL and FEEDBACK_API_KEY")
         return self
 

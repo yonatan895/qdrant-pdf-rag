@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
 import logging
 from typing import Any, Literal
 
@@ -20,14 +19,11 @@ import httpx2
 from mainframe_rag.agent.metrics import record_feedback_rating, record_feedback_record
 from mainframe_rag.config import Settings, bearer_auth_headers
 from mainframe_rag.feedback.store import AnswerRecord, Rating
+from mainframe_rag.logs import error_type, json_log
 
 log = logging.getLogger("feedback")
 
 RateOutcome = Literal["ok", "unknown", "invalid", "unavailable"]
-
-
-def _error_type(exc: BaseException) -> str:
-    return type(exc).__name__
 
 
 class FeedbackClient:
@@ -39,6 +35,7 @@ class FeedbackClient:
         self._queue: asyncio.Queue[AnswerRecord] = asyncio.Queue(maxsize=settings.feedback_queue_size)
         self._client = client or httpx2.AsyncClient(timeout=settings.feedback_timeout_s)
         self._owned = client is None
+        self._drain_timeout_s = settings.feedback_drain_timeout_s
         self._worker: asyncio.Task[None] | None = None
 
     def start(self) -> None:
@@ -63,12 +60,15 @@ class FeedbackClient:
                     record_feedback_record("recorded" if recorded else "duplicate")
                 else:
                     record_feedback_record("failed")
-                    log.warning(json.dumps({"request_id": record.request_id, "action": "feedback_record",
-                                            "error": "status", "status": response.status_code}))
+                    log.warning(json_log(record.request_id, "feedback_record", error="status",
+                                         status=response.status_code))
+            except asyncio.CancelledError:
+                # Shutdown cut the in-flight delivery: a counted drop, never silent.
+                record_feedback_record("dropped")
+                raise
             except Exception as exc:  # noqa: BLE001 — best-effort by contract
                 record_feedback_record("failed")
-                log.warning(json.dumps({"request_id": record.request_id, "action": "feedback_record",
-                                        "error": _error_type(exc)}))
+                log.warning(json_log(record.request_id, "feedback_record", error=error_type(exc)))
             finally:
                 self._queue.task_done()
 
@@ -77,8 +77,7 @@ class FeedbackClient:
             response = await self._client.post(f"{self._base}/v1/ratings", json=rating.model_dump(),
                                                headers=self._headers)
         except Exception as exc:  # noqa: BLE001
-            log.warning(json.dumps({"request_id": rating.request_id, "action": "feedback_rating",
-                                    "error": _error_type(exc)}))
+            log.warning(json_log(rating.request_id, "feedback_rating", error=error_type(exc)))
             return "unavailable"
         if response.status_code == 201:
             body = response.json()
@@ -91,14 +90,19 @@ class FeedbackClient:
             return "invalid"
         return "unavailable"
 
-    async def aclose(self, drain_timeout_s: float = 2.0) -> None:
-        """Bounded drain on shutdown, then stop; never blocks shutdown longer."""
+    async def aclose(self) -> None:
+        """Bounded drain on shutdown (FEEDBACK_DRAIN_TIMEOUT_S), then stop.
+        Records still queued, or cut in flight, are counted as dropped."""
         if self._worker is not None:
             with contextlib.suppress(asyncio.TimeoutError):
-                await asyncio.wait_for(self._queue.join(), drain_timeout_s)
+                await asyncio.wait_for(self._queue.join(), self._drain_timeout_s)
             self._worker.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._worker
             self._worker = None
+        while not self._queue.empty():
+            self._queue.get_nowait()
+            self._queue.task_done()
+            record_feedback_record("dropped")
         if self._owned:
             await self._client.aclose()

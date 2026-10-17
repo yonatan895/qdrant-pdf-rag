@@ -24,6 +24,12 @@ import traceback
 from mainframe_rag.tracing import current_trace_ids
 
 
+def json_log(request_id: str, action: str, **fields: object) -> str:
+    """One JSON log line body: request id, action, then bounded fields. Callers
+    pass counts, labels and error types only, never query/answer/manual text."""
+    return json.dumps({"request_id": request_id, "action": action, **fields})
+
+
 def error_type(exc: BaseException | None) -> str:
     """Stable telemetry label for a failure: the exception class name only.
 

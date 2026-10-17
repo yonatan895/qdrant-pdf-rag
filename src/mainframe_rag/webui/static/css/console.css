@@ -690,6 +690,7 @@ input::placeholder, textarea::placeholder { color: var(--faint); opacity: 1; }
   flex-direction: column;
   gap: 0.4rem;
 }
+.turn-feedback .feedback-ratings,
 .turn-feedback .feedback-reasons {
   display: flex;
   flex-wrap: wrap;
@@ -699,6 +700,7 @@ input::placeholder, textarea::placeholder { color: var(--faint); opacity: 1; }
   margin: 0;
 }
 .turn-feedback .feedback-comment {
+  flex-basis: 100%;
   min-height: 3rem;
   resize: vertical;
 }

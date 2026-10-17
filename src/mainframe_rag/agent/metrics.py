@@ -54,6 +54,7 @@ from opentelemetry.sdk.metrics.view import ExplicitBucketHistogramAggregation, V
 from prometheus_client import GCCollector, PlatformCollector, ProcessCollector
 
 from mainframe_rag.agent.answer import VERIFICATION_STATES
+from mainframe_rag.feedback.store import ENDPOINTS, RATINGS, REASONS
 from mainframe_rag.logs import error_type
 
 log = logging.getLogger("otel.metrics")
@@ -256,11 +257,11 @@ def record_admission_rejected(endpoint: str, reason: str) -> None:
         log.debug("otel record_admission_rejected dropped: %s", error_type(exc))
 
 
-# Bounded feedback vocabularies (issue #780): labels never carry text or ids.
-FEEDBACK_RATINGS = ("good", "neutral", "bad")
-FEEDBACK_REASONS = ("wrong", "incomplete", "missing_or_wrong_citation", "should_have_declined",
-                    "wrongly_declined", "too_slow", "other")
-FEEDBACK_ENDPOINTS = ("answer", "answer_stream", "chat", "chat_stream", "console")
+# Bounded feedback vocabularies (issue #780), owned by the feedback store:
+# labels never carry text or ids.
+FEEDBACK_RATINGS = RATINGS
+FEEDBACK_REASONS = REASONS
+FEEDBACK_ENDPOINTS = ENDPOINTS
 FEEDBACK_RECORD_OUTCOMES = ("recorded", "duplicate", "dropped", "failed")
 
 

@@ -780,10 +780,10 @@
     reasons.appendChild(el("legend", null, "Reasons (optional)"));
     for (const [value, label] of FEEDBACK_REASONS) {
       const option = el("label");
-      const box2 = document.createElement("input");
-      box2.type = "checkbox";
-      box2.value = value;
-      option.appendChild(box2);
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.value = value;
+      option.appendChild(checkbox);
       option.appendChild(document.createTextNode(" " + label));
       reasons.appendChild(option);
     }
@@ -1291,8 +1291,11 @@
       }
       assistantTurn.citations = finalPayload.citations || [];
       assistantTurn.citations_inferred = !!finalPayload.citations_inferred;
-      // The server request id (12 hex, no content): the key a rating attaches to (#780).
-      if (typeof finalPayload.request_id === "string") assistantTurn.request_id = finalPayload.request_id;
+      // The server request id (12 hex, no content): the key a rating attaches to
+      // (#780). Kept only when feedback is enabled: disabled means no change.
+      if (document.body.dataset.feedback === "on" && typeof finalPayload.request_id === "string") {
+        assistantTurn.request_id = finalPayload.request_id;
+      }
       assistantTurn.verification_state = finalPayload.verification_state || "unverified_draft";
       assistantTurn.script_review_required = !!finalPayload.script_review_required;
       assistantTurn.meta = {

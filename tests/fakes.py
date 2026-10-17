@@ -11,6 +11,7 @@ Test-only: never imported by src/.
 
 from __future__ import annotations
 
+import json
 import sys
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
@@ -531,3 +532,19 @@ def embedding_mock(dim: int = 1024):
         return mock_resp
 
     return mock_post
+
+
+def parse_sse_events(text: str) -> list[tuple[str, dict]]:
+    """(event name, JSON data) pairs of an SSE body, in order."""
+    events = []
+    for frame in text.split("\n\n"):
+        name = None
+        data = None
+        for line in frame.split("\n"):
+            if line.startswith("event: "):
+                name = line[7:].strip()
+            elif line.startswith("data: "):
+                data = line[6:]
+        if name and data:
+            events.append((name, json.loads(data)))
+    return events

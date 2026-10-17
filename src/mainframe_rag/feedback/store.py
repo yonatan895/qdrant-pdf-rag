@@ -20,28 +20,27 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
 from pydantic import BaseModel, Field, field_validator
 
 SCHEMA_VERSION = 1
-REQUEST_ID_RE = re.compile(r"[0-9a-f]{12}")
-RATINGS = ("good", "neutral", "bad")
-REASONS = (
-    "wrong",
-    "incomplete",
-    "missing_or_wrong_citation",
-    "should_have_declined",
-    "wrongly_declined",
-    "too_slow",
-    "other",
-)
+
+# The one owner of the feedback vocabularies (issue #780): metrics labels, the
+# console route and console.js derive from these (a test pins console.js).
+RatingValue = Literal["good", "neutral", "bad"]
+Reason = Literal["wrong", "incomplete", "missing_or_wrong_citation", "should_have_declined",
+                 "wrongly_declined", "too_slow", "other"]
+Endpoint = Literal["answer", "answer_stream", "chat", "chat_stream", "console"]
+RATINGS: tuple[str, ...] = get_args(RatingValue)
+REASONS: tuple[str, ...] = get_args(Reason)
+ENDPOINTS: tuple[str, ...] = get_args(Endpoint)
+REQUEST_ID_PATTERN = r"[0-9a-f]{12}"  # the agent's server-minted request id
+REQUEST_ID_RE = re.compile(REQUEST_ID_PATTERN)
 COMMENT_MAX_CHARS = 2000
 RATER_MAX_CHARS = 256
-ENDPOINTS = ("answer", "answer_stream", "chat", "chat_stream", "console")
 
 Scalar = int | float | str | bool | None
-Endpoint = Literal["answer", "answer_stream", "chat", "chat_stream", "console"]
 
 
 def _request_id(value: str) -> str:
@@ -59,9 +58,15 @@ class AnswerRecord(BaseModel):
     answer: str
     script: str | None = None
     citations: list[str] = Field(default_factory=list)
+    # Citations of the excerpts actually supplied to the model (#635 projection),
+    # so analysis can tell a retrieval miss from a reader miss.
+    supplied: list[str] = Field(default_factory=list)
     # Numeric/label telemetry only (the agent's finalized log fields plus
     # effort and identities): never text, so the shape stays log-safe.
     telemetry: dict[str, Scalar] = Field(default_factory=dict)
+    # When the agent finalized the answer (epoch seconds, agent clock); the
+    # retention window counts from it. None falls back to receipt time.
+    finalized_at: float | None = None
 
     @field_validator("request_id")
     @classmethod
@@ -73,18 +78,8 @@ class Rating(BaseModel):
     """One human rating of a recorded answer."""
 
     request_id: str
-    rating: Literal["good", "neutral", "bad"]
-    reasons: list[
-        Literal[
-            "wrong",
-            "incomplete",
-            "missing_or_wrong_citation",
-            "should_have_declined",
-            "wrongly_declined",
-            "too_slow",
-            "other",
-        ]
-    ] = Field(default_factory=list, max_length=len(REASONS))
+    rating: RatingValue
+    reasons: list[Reason] = Field(default_factory=list, max_length=len(REASONS))
     comment: str = Field(default="", max_length=COMMENT_MAX_CHARS)
     rater: str | None = Field(default=None, max_length=RATER_MAX_CHARS)
 
@@ -115,6 +110,7 @@ CREATE TABLE IF NOT EXISTS answers (
     answer TEXT NOT NULL,
     script TEXT,
     citations TEXT NOT NULL,
+    supplied TEXT NOT NULL,
     telemetry TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS ratings (
@@ -158,9 +154,14 @@ class FeedbackStore:
         (the first record wins; a rated answer is never rewritten)."""
         with self._lock:
             cursor = self._db.execute(
-                "INSERT INTO answers VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
-                (record.request_id, self._clock(), record.endpoint, record.query, record.answer,
-                 record.script, json.dumps(record.citations), json.dumps(record.telemetry, sort_keys=True)),
+                "INSERT INTO answers (request_id, created_at, endpoint, query, answer, script,"
+                " citations, supplied, telemetry) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT DO NOTHING",
+                (record.request_id,
+                 record.finalized_at if record.finalized_at is not None else self._clock(),
+                 record.endpoint, record.query, record.answer, record.script,
+                 json.dumps(record.citations), json.dumps(record.supplied),
+                 json.dumps(record.telemetry, sort_keys=True)),
             )
             return cursor.rowcount == 1
 
@@ -190,25 +191,42 @@ class FeedbackStore:
     def answer(self, request_id: str) -> dict[str, Any] | None:
         with self._lock:
             row = self._db.execute(
-                "SELECT request_id, created_at, endpoint, query, answer, script, citations, telemetry"
-                " FROM answers WHERE request_id = ?", (request_id,)
+                "SELECT request_id, created_at, endpoint, query, answer, script, citations, supplied,"
+                " telemetry FROM answers WHERE request_id = ?", (request_id,)
             ).fetchone()
         if row is None:
             return None
-        keys = ("request_id", "created_at", "endpoint", "query", "answer", "script", "citations", "telemetry")
+        keys = ("request_id", "created_at", "endpoint", "query", "answer", "script", "citations",
+                "supplied", "telemetry")
         out = dict(zip(keys, row, strict=True))
         out["citations"] = json.loads(out["citations"])
+        out["supplied"] = json.loads(out["supplied"])
         out["telemetry"] = json.loads(out["telemetry"])
         return out
 
-    def ratings(self, request_id: str) -> list[dict[str, Any]]:
+    def rating(self, request_id: str) -> dict[str, Any] | None:
+        """The answer's single rating (latest submission), or None."""
         with self._lock:
-            rows = self._db.execute(
+            r = self._db.execute(
                 "SELECT id, created_at, rating, reasons, comment, rater FROM ratings"
-                " WHERE request_id = ? ORDER BY id", (request_id,)
-            ).fetchall()
-        return [{"id": r[0], "created_at": r[1], "rating": r[2], "reasons": json.loads(r[3]),
-                 "comment": r[4], "rater": r[5]} for r in rows]
+                " WHERE request_id = ?", (request_id,)
+            ).fetchone()
+        if r is None:
+            return None
+        return {"id": r[0], "created_at": r[1], "rating": r[2], "reasons": json.loads(r[3]),
+                "comment": r[4], "rater": r[5]}
+
+    def answer_labels(self, request_id: str) -> tuple[str, str | None] | None:
+        """Bounded labels of a recorded answer (endpoint, verification state)
+        for metrics, without reading its text."""
+        with self._lock:
+            row = self._db.execute(
+                "SELECT endpoint, telemetry FROM answers WHERE request_id = ?", (request_id,)
+            ).fetchone()
+        if row is None:
+            return None
+        state = json.loads(row[1]).get("verification_state")
+        return row[0], state if isinstance(state, str) else None
 
     def purge(self, *, retention_days: int) -> dict[str, int]:
         """Delete answers (and, by cascade, their ratings) older than the

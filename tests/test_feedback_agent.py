@@ -15,7 +15,8 @@ from mainframe_rag.agent import app as app_mod
 from mainframe_rag.config import Settings
 from mainframe_rag.feedback.client import FeedbackClient
 from mainframe_rag.feedback.store import REQUEST_ID_RE, AnswerRecord, Rating
-from tests.test_webui import _client, _parse_sse_events
+from tests.fakes import parse_sse_events as _parse_sse_events
+from tests.test_webui import _client
 
 QUERY = "IEA500I"
 
@@ -122,8 +123,9 @@ def test_enabled_feedback_requires_its_endpoint_and_token():
 
 
 def _settings(**overrides):
-    return Settings(_env_file=None, feedback_enabled=True, feedback_url="http://feedback.internal",
-                    feedback_api_key="feedback-test-token", **overrides)
+    values = {"feedback_url": "http://feedback.internal", "feedback_api_key": "feedback-test-token",
+              **overrides}
+    return Settings(_env_file=None, feedback_enabled=True, **values)
 
 
 def _record(rid="0123456789ab"):
@@ -238,3 +240,201 @@ def test_console_page_offers_rating_only_when_enabled(feedback_client, monkeypat
     assert 'data-feedback="off"' in feedback_client.get("/ui").text
     response = feedback_client.post("/ui/feedback", json={"request_id": RID, "rating": "good"})
     assert response.status_code == 404 and response.json()["code"] == "feedback_disabled"
+
+
+_CALLS = [
+    ("answer", lambda c: c.post("/v1/answer", json={"query": QUERY})),
+    ("answer_stream", lambda c: c.post("/v1/answer?stream=true", json={"query": QUERY})),
+    ("chat", lambda c: c.post("/v1/chat", json={"messages": [{"role": "user", "content": QUERY}]})),
+    ("chat_stream", lambda c: c.post("/v1/chat", json={"messages": [{"role": "user", "content": QUERY}],
+                                                         "stream": True})),
+    ("console", lambda c: c.post("/ui/chat/stream", json={"messages": [{"role": "user", "content": QUERY}]})),
+    ("console", lambda c: c.post("/ui/chat", data={"message": QUERY, "messages": ""},
+                                 headers={"HX-Request": "true"})),
+]
+
+
+@pytest.mark.parametrize("endpoint,call", _CALLS)
+def test_zero_hit_declines_are_recorded_on_every_path(feedback_client, monkeypatch, endpoint, call):
+    """A no-evidence decline is exactly the answer `wrongly_declined` rates:
+    it must be recorded like any other finalized answer (review S1)."""
+    monkeypatch.setattr(app_mod, "retrieve_search",
+                        lambda *a, **k: ([], "nl", {"embed_ms": 1, "qdrant_ms": 2}))
+    response = call(feedback_client)
+    assert response.status_code == 200
+    [record] = _records()
+    assert record.endpoint == endpoint and record.query == QUERY
+    assert record.telemetry["verification_state"] == "insufficient_evidence"
+    assert record.telemetry["hits"] == 0
+
+
+def test_record_carries_supplied_evidence_identities_and_finalize_time(feedback_client, monkeypatch):
+    import time
+
+    monkeypatch.setenv("IMAGE_SHA", "a" * 40)
+    before = time.time()
+    feedback_client.post("/v1/answer", json={"query": QUERY})
+    [record] = _records()
+    assert record.supplied and all(isinstance(c, str) for c in record.supplied)
+    assert before <= record.finalized_at <= time.time()
+    assert record.telemetry["release"] == "a" * 40
+    from mainframe_rag.ingest.rules_version import extraction_rules_version
+
+    assert record.telemetry["extraction_rules_version"] == extraction_rules_version()
+
+
+def test_fallback_console_answer_renders_a_rating_form_that_round_trips(feedback_client):
+    page = feedback_client.post("/ui/chat", data={"message": QUERY, "messages": ""},
+                                headers={"HX-Request": "true"})
+    [record] = _records()
+    assert f'name="request_id" value="{record.request_id}"' in page.text
+    rated = feedback_client.post("/ui/feedback/form", data={
+        "request_id": record.request_id, "rating": "bad", "reasons": ["incomplete", "too_slow"],
+        "comment": "SYNTHETIC"}, headers={"HX-Request": "true"})
+    assert rated.status_code == 201 and "Rated: bad" in rated.text
+    [rating] = RecordingFeedback.instances[0].ratings
+    assert (rating.request_id, rating.rating, rating.reasons) == (record.request_id, "bad",
+                                                                   ["incomplete", "too_slow"])
+    invalid = feedback_client.post("/ui/feedback/form", data={"request_id": "nope", "rating": "bad"})
+    assert invalid.status_code == 422 and len(RecordingFeedback.instances[0].ratings) == 1
+
+
+def test_fallback_console_renders_no_rating_form_when_disabled(monkeypatch, synthetic_pdf,
+                                                               servable_representation_gate):
+    monkeypatch.delenv("FEEDBACK_ENABLED", raising=False)
+    for client in _client(monkeypatch, ui_enabled=True, synthetic_pdf=synthetic_pdf):
+        page = client.post("/ui/chat", data={"message": QUERY, "messages": ""}, headers={"HX-Request": "true"})
+        assert page.status_code == 200 and "feedback/form" not in page.text
+
+
+def test_shutdown_unpublishes_the_client(monkeypatch, synthetic_pdf, servable_representation_gate):
+    monkeypatch.setenv("FEEDBACK_ENABLED", "true")
+    monkeypatch.setenv("FEEDBACK_URL", "http://feedback.internal")
+    monkeypatch.setenv("FEEDBACK_API_KEY", "feedback-test-token")
+    monkeypatch.setattr(app_mod, "FeedbackClient", RecordingFeedback)
+    for _client_ in _client(monkeypatch, ui_enabled=True, synthetic_pdf=synthetic_pdf):
+        assert app_mod.feedback is not None
+    assert app_mod.feedback is None
+
+
+def test_answer_path_logs_never_carry_query_or_answer_text(feedback_client, caplog):
+    canary = "SYNTHETIC-CANARY-QUERY-7731"
+    with caplog.at_level("DEBUG"):
+        feedback_client.post("/v1/answer", json={"query": f"{QUERY} {canary}"})
+        feedback_client.post("/ui/chat/stream", json={"messages": [{"role": "user",
+                                                                    "content": f"{QUERY} {canary}"}]})
+    assert [r.query for r in _records()] == [f"{QUERY} {canary}"] * 2
+    assert canary not in caplog.text
+
+
+@pytest.mark.anyio
+async def test_shutdown_counts_every_undelivered_record_as_dropped(monkeypatch):
+    outcomes = []
+    monkeypatch.setattr("mainframe_rag.feedback.client.record_feedback_record", outcomes.append)
+    gate = asyncio.Event()
+
+    async def hang(request):
+        await gate.wait()
+        return httpx2.Response(201, json={"recorded": True})
+
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(hang)) as http:
+        client = FeedbackClient(_settings(feedback_drain_timeout_s=0.05), client=http)
+        client.start()
+        for rid in ("aaaaaaaaaaaa", "bbbbbbbbbbbb", "cccccccccccc"):
+            client.submit(_record(rid))
+        await asyncio.sleep(0.05)  # the worker is now blocked on the first delivery
+        await client.aclose()
+    assert outcomes == ["dropped"] * 3
+
+
+def test_console_js_vocabulary_matches_the_store():
+    import re
+    from pathlib import Path
+
+    from mainframe_rag.feedback.store import RATINGS, REASONS
+
+    js = (Path(app_mod.__file__).parents[1] / "webui/static/js/console.js").read_text()
+
+    def values(name):
+        block = re.search(name + r" = \[(.*?)\];", js, re.DOTALL).group(1)
+        return tuple(re.findall(r'\["([a-z_]+)",', block))
+
+    assert values("FEEDBACK_RATINGS") == RATINGS
+    assert values("FEEDBACK_REASONS") == REASONS
+
+
+@pytest.mark.anyio
+async def test_client_and_service_agree_over_real_http(tmp_path, monkeypatch):
+    """S4: the real FeedbackClient against the real service on loopback HTTP
+    (no transport doubles): path, bearer token, status and body contracts,
+    proven by the stored content, and a wrong token is a counted failure."""
+    import socket
+    import threading
+    import time
+
+    import uvicorn
+
+    from mainframe_rag.feedback.service import create_app
+    from mainframe_rag.feedback.store import FeedbackStore
+
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    store = FeedbackStore(tmp_path / "feedback.sqlite3")
+    # The service strips Secret whitespace exactly as the agent's header does.
+    server = uvicorn.Server(uvicorn.Config(create_app(store, "feedback-test-token\n"),
+                                           host="127.0.0.1", port=port, log_level="warning"))
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 15
+    while not server.started:
+        assert time.monotonic() < deadline, "feedback service did not start"
+        await asyncio.sleep(0.02)
+    url = f"http://127.0.0.1:{port}"
+    outcomes: list[str] = []
+    monkeypatch.setattr("mainframe_rag.feedback.client.record_feedback_record", outcomes.append)
+    try:
+        client = FeedbackClient(_settings(feedback_url=url + "/"))
+        client.start()
+        record = AnswerRecord(request_id=RID, endpoint="chat", query="q text", answer="a text",
+                              citations=["c1"], supplied=["c1", "c2"],
+                              telemetry={"verification_state": "accepted", "ttft_ms": 12.5},
+                              finalized_at=1_000.0)
+        client.submit(record)
+        client.submit(record)  # a duplicate delivery: first record wins
+        await asyncio.wait_for(client._queue.join(), 5)
+        assert await client.rate(Rating(request_id=RID, rating="neutral")) == "ok"
+        assert await client.rate(Rating(request_id=RID, rating="bad", reasons=["incomplete"],
+                                        comment="c")) == "ok"
+        assert await client.rate(Rating(request_id="ffffffffffff", rating="good")) == "unknown"
+        await client.aclose()
+        assert outcomes == ["recorded", "duplicate"]
+
+        stored = store.answer(RID)
+        assert stored is not None
+        assert {k: stored[k] for k in ("endpoint", "query", "answer", "citations", "supplied",
+                                       "telemetry", "created_at")} == {
+            "endpoint": "chat", "query": "q text", "answer": "a text", "citations": ["c1"],
+            "supplied": ["c1", "c2"], "telemetry": {"verification_state": "accepted", "ttft_ms": 12.5},
+            "created_at": 1_000.0}
+        rated = store.rating(RID)
+        assert rated is not None
+        assert (rated["rating"], rated["reasons"], rated["comment"]) == ("bad", ["incomplete"], "c")
+        assert store.rating("ffffffffffff") is None
+
+        outcomes.clear()
+        wrong = FeedbackClient(_settings(feedback_url=url, feedback_api_key="not-the-token"))
+        wrong.start()
+        try:
+            wrong.submit(_record("bbbbbbbbbbbb"))
+            await asyncio.wait_for(wrong._queue.join(), 5)
+            assert await wrong.rate(Rating(request_id=RID, rating="good")) == "unavailable"
+        finally:
+            await wrong.aclose()
+        assert outcomes == ["failed"]
+        assert store.answer("bbbbbbbbbbbb") is None
+        assert store.rating(RID)["rating"] == "bad"
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)
+        store.close()

@@ -291,19 +291,27 @@ Off unless `FEEDBACK_ENABLED` (which then requires `FEEDBACK_URL` and
 no call is made, and the console offers no rating. Data boundaries and
 retention: [observability](observability.md#data-tiers).
 
-- **Records:** every finalized answer is handed, exactly once, to the
-  single-writer feedback service: `/v1/answer` JSON (`answer`) and SSE
+- **Records:** every finalized answer, including zero-evidence declines, is
+  handed once to the single-writer feedback service. Delivery is at most once:
+  never duplicated (the first record wins), never retried; a failed delivery
+  is counted, not raised. The paths are: `/v1/answer` JSON (`answer`) and SSE
   (`answer_stream`), `/v1/chat` JSON (`chat`) and SSE (`chat_stream`), and both
   console paths (`console`). A record holds:
   - the request's own query (the latest user turn for chat and console);
   - the final answer, script and validated citations;
+  - the citations of the excerpts actually supplied to the model;
   - a scalar telemetry snapshot: the finalized log fields plus the effort the
-    answer was generated at and the model identities.
+    answer was generated at, the model identities, the extraction-rules version
+    and the release (`IMAGE_SHA`);
+  - the agent's finalize time, from which retention counts.
 - **Never on the critical path:** records go into a bounded in-memory queue
   (`FEEDBACK_QUEUE_SIZE`) drained by one background task. A full queue or a
   failed delivery is counted on `rag.feedback.records` and logged by error type
-  only; the answer is unchanged. Shutdown drains for at most 2 s.
-- **Ratings:** `POST /ui/feedback {request_id, rating, reasons, comment}`.
+  only; the answer is unchanged. Shutdown drains for at most
+  `FEEDBACK_DRAIN_TIMEOUT_S` and counts whatever is left as dropped.
+- **Ratings:** `POST /ui/feedback {request_id, rating, reasons, comment}` from
+  the streaming console, and `POST /ui/feedback/form` (form-encoded, htmx
+  fragment) from the fallback console, with the same validation and codes.
   - `request_id` must be the 12-hex server id; extra fields, such as an answer
     text, are refused with 422.
   - The store attaches the rating to its own record and refuses unknown ids:
@@ -315,10 +323,16 @@ retention: [observability](observability.md#data-tiers).
     `FEEDBACK_RECORD_RATER=true`.
 - **Store and service** (`mainframe_rag.feedback`): SQLite in WAL mode, owned
   by one process. The first record per `request_id` wins, so a rated answer is
-  never rewritten. Bearer token, fixed client errors, logs carry `request_id`
-  and counts only. Purge is an explicit operator action
-  (`FeedbackStore.purge(retention_days=…)`, 180-day policy). Deployment (the
-  single-replica StatefulSet, PVC and Secret) is phase 1 PR B.
+  never rewritten. Configuration comes from `Settings`: `FEEDBACK_STORE_PATH`,
+  `FEEDBACK_SERVICE_TOKEN` (the agents' `FEEDBACK_API_KEY` value; both sides
+  strip whitespace) and `FEEDBACK_RETENTION_DAYS` (180, ADR-0005). Fixed client
+  errors with stable codes (`unauthorized`, `invalid_request`, `unknown_answer`,
+  `not_found`, `method_not_allowed`, `internal_error`); JSON-line logs with
+  `request_id` and counts only. Retention is enforced by the authenticated
+  `POST /v1/purge`, an explicit operator action and never implicit. The JSONL
+  export/import, which also makes a later Postgres move testable, is phase 2.
+  Deployment (the single-replica StatefulSet, PVC, Secret and purge schedule)
+  is phase 1 PR B.
 
 ## 2. Error contract
 
@@ -344,6 +358,10 @@ status (`/ui` failures render HTML banners instead, §1):
 | `invalid_request` / `request body failed validation` | 422 | Pydantic failure, the shared query guard (overlong, empty after `str.strip()`, or containing NUL/C0 controls other than `\t\n\r`, issue #579; or, when `embed_max_input_chars` is set, a query whose dense text — prefix plus query — exceeds it, issue #374: refused before any model call, never truncated; an effective query that only grows past the bound after expansion/condensation is refused by the embedder with the same envelope), and a chat/console active `user` turn that is missing, blank, control-character or overlong (one message, every 422 path) |
 | `overloaded` / `the service is at capacity; retry later` | 503 + `Retry-After: 1` | Request admission refused (issue #374): all `request_max_concurrent` slots busy and the bounded wait queue full or its wait expired. Raised first, before validation, the serving gate and any retrieval/model work; only when a limit is selected. `/ui/chat` renders its fixed banner; `/ui/chat/stream` returns this envelope |
 | `deadline_exceeded` / `request deadline exceeded` | 504 | Total request deadline (`request_deadline_s`, issue #374) expired before the response began; on an already-open stream it is an `error` event (no `final`, `generation_incomplete`) instead. Only when a deadline is selected |
+| `unknown_answer` / `this answer was not recorded, so it cannot be rated` | 404 | Console rating (`/ui/feedback`, issue #780) for a `request_id` the feedback store never recorded (record dropped, failed or purged) |
+| `feedback_disabled` / `feedback is not enabled on this deployment` | 404 | `/ui/feedback` while `FEEDBACK_ENABLED` is false |
+| `feedback_unavailable` / `feedback is temporarily unavailable` | 503 | `/ui/feedback`: the feedback service is unreachable, times out or answers an unexpected status (type logged only) |
+| `invalid_request` / `the rating is invalid` | 422 | `/ui/feedback`: the feedback service refused the rating shape. The form fallback `/ui/feedback/form` returns the same status and fixed text as an HTML fragment |
 | `prompt_budget_exceeded` / `prompt exceeds the model token budget` | 422 | Irreducible token-budget overflow (issue #368): fixed content alone exceeds the window with nothing left to trim, or (issue #634) hits were retrieved but final packing supplied no usable excerpt (atomic-unit omission, verification trimming, whitespace-only text); the second case is the `EvidenceBudgetExceeded` subtype, logged/spanned under that type but identical on the wire; raised before any model call on JSON/chat, as an `error` event (no `final`) on already-open streams; `/ui/chat` renders its fixed banner |
 | `unsupported_reasoning_effort` / `the reasoning effort is not offered by this deployment` | 422 | Console only (#748): the requested effort is outside `LLM_REASONING_EFFORTS`; refused before any model call. `/ui/chat` renders its fixed banner; `/ui/chat/stream` returns this envelope |
 | `metrics_unavailable` / `metrics are not available` | 503 | `/metrics` scrape failure while enabled |
@@ -602,8 +620,9 @@ HTTP pool and one sync HTTP pool (bounded connections/keepalive, embed
 timeout, connect-only retries — retries never resend a request), the
 embedder/tokenizer/reranker sharing the sync pool (they are sync protocols
 called via `asyncio.to_thread`), the reasoning client `HttpxLLMClient` with
-its own pool and the long answer timeout, and one async Qdrant client on
-the query timeout.
+its own pool and the long answer timeout, one async Qdrant client on
+the query timeout, and, when `FEEDBACK_ENABLED`, the feedback client's own
+async pool on `FEEDBACK_TIMEOUT_S` (issue #780; closed after a bounded drain).
 
 - Startup fail-fast order: reject unknown `embed_mode`; refuse
   hash-without-`ALLOW_HASH_MODE`; in vLLM mode require dim + endpoint. The
@@ -759,7 +778,8 @@ readers:
 | `metrics_enabled` | `false` = /metrics 404s | Prometheus exposition for UWM scrapes |
 | `ui_enabled` | `false` (fail-closed 404) | webui router gate (`/ui*`); the production chart sets it true |
 | `feedback_enabled` / `feedback_url` / `feedback_api_key` | `false` / unset / unset (enabled requires both) | answer records and console ratings (#780); the key is a Secret reference, never logged |
-| `feedback_queue_size` / `feedback_timeout_s` / `feedback_record_rater` | 256 / 2.0 / `false` | bounded record queue (full = dropped and counted); service call timeout; store the OAuth rater identity |
+| `feedback_queue_size` / `feedback_timeout_s` / `feedback_record_rater` / `feedback_drain_timeout_s` | 256 / 2.0 / `false` / 2.0 | bounded record queue (full = dropped and counted); service call timeout; store the OAuth rater identity; shutdown drain bound |
+| `feedback_store_path` / `feedback_service_token` / `feedback_retention_days` | `/data/feedback.sqlite3` / unset / 180 | feedback service process only (#780, ADR-0005); the token is a Secret reference, never logged |
 | `rerank_enabled` / `rerank_model` / `rerank_base_url` / `rerank_api_key` / `rerank_endpoint_order` / `rerank_fusion_alpha` / `rerank_candidates` / `rerank_batch_size` / `rerank_timeout_s` | false / `BAAI/bge-reranker-v2-m3` / gateway URL (no embed fallback; unset when no gateway) / unset (keyless) / `score_first` (see install §4.4 `probe_gateway.py`: `rerank_first` only when the score leg is unavailable) / 1.0 / 50 / 32 / 5.0 | rerank dispatch → retrieve (see `retrieval.md` §6) |
 | `rrf_k` / `rrf_weight_*` / `rrf_sparse_boost_syntax` / `rrf_sparse_boost_table` / `retrieve_max_chunks_per_page|doc` | 2 / 1.0,1.0 – 1.0,3.0 / 1.0 / 1.0 / 1, 3 | retrieve fusion + diversification |
 | `acronym_expansion_enabled` / `comparative_split_enabled` / `diagnostic_dualpath_enabled` | `false` / `true` / `false` | rewrite + multipath (see `retrieval.md` §§3b,7) |

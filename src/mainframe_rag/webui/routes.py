@@ -24,7 +24,7 @@ import re
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
@@ -39,6 +39,15 @@ from mainframe_rag.agent.answer_core import (
 )
 from mainframe_rag.agent.sse import error_payload, format_sse_event, output_final_payload
 from mainframe_rag.config import ReasoningEffort
+from mainframe_rag.feedback.store import (
+    COMMENT_MAX_CHARS,
+    RATER_MAX_CHARS,
+    RATINGS,
+    REASONS,
+    REQUEST_ID_PATTERN,
+    RatingValue,
+    Reason,
+)
 from mainframe_rag.ingest.bounds import EmbedInputTooLarge
 from mainframe_rag.ingest.chunk import detect_code_region
 from mainframe_rag.logs import error_type
@@ -112,13 +121,10 @@ class UiFeedbackRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    request_id: str = Field(pattern=r"^[0-9a-f]{12}$")
-    rating: Literal["good", "neutral", "bad"]
-    reasons: list[
-        Literal["wrong", "incomplete", "missing_or_wrong_citation", "should_have_declined",
-                "wrongly_declined", "too_slow", "other"]
-    ] = Field(default_factory=list, max_length=7)
-    comment: str = Field(default="", max_length=2000)
+    request_id: str = Field(pattern=f"^{REQUEST_ID_PATTERN}$")
+    rating: RatingValue
+    reasons: list[Reason] = Field(default_factory=list, max_length=len(REASONS))
+    comment: str = Field(default="", max_length=COMMENT_MAX_CHARS)
 
 
 _FEEDBACK_ERRORS = {
@@ -639,9 +645,35 @@ def _render_page(
         version=(form or {}).get("version", ""),
         reasoning_effort=selected,
         reasoning_efforts=[(effort, _EFFORT_LABELS[effort]) for effort in offered],
-        feedback_enabled=_feedback_client() is not None,
+        **_feedback_context(),
     )
     return _secure(HTMLResponse(body, status_code=status_code))
+
+
+def _rater(request: Request, record_rater: bool) -> str | None:
+    """The OAuth proxy's forwarded user, only when FEEDBACK_RECORD_RATER is set."""
+    if not record_rater:
+        return None
+    forwarded = request.headers.get("x-forwarded-user", "").strip()
+    return forwarded[:RATER_MAX_CHARS] or None
+
+
+_FEEDBACK_LABELS = {
+    "good": "Good", "neutral": "Neutral", "bad": "Bad",
+    "wrong": "Wrong", "incomplete": "Incomplete",
+    "missing_or_wrong_citation": "Missing or wrong citation",
+    "should_have_declined": "Should have declined", "wrongly_declined": "Wrongly declined",
+    "too_slow": "Too slow", "other": "Other",
+}
+
+
+def _feedback_context() -> dict[str, Any]:
+    """Template inputs for the rating controls (#780), from the store's vocabulary."""
+    return {
+        "feedback_enabled": _feedback_client() is not None,
+        "feedback_ratings": [(value, _FEEDBACK_LABELS[value]) for value in RATINGS],
+        "feedback_reasons": [(value, _FEEDBACK_LABELS[value]) for value in REASONS],
+    }
 
 
 def _feedback_client():
@@ -657,8 +689,9 @@ def _render_pair(
     history_json: str,
     error: str | None = None,
 ) -> Response:
+    feedback = _feedback_context()
     body = "".join(
-        templates.get_template("_message_pair.html").render(request=request, turn=turn)
+        templates.get_template("_message_pair.html").render(request=request, turn=turn, **feedback)
         for turn in turns
     )
     if error:
@@ -672,14 +705,13 @@ def _render_pair(
     return _secure(HTMLResponse(body))
 
 
-async def _run_turn(request: Request, req: UiChatRequest, root_span):
+async def _run_turn(request: Request, req: UiChatRequest, root_span, started: float):
     """Run one console turn through the shared answer core; the caller owns
     client-facing error mapping (fixed text, detail to logs only)."""
     from mainframe_rag.agent import app as app_mod
 
     _require_offered_effort(req.reasoning_effort)
     request_id = getattr(request.state, "request_id", "ui")
-    turn_started = time.monotonic()  # feedback elapsed: from the turn, not admission
     turn = app_mod.prepare_chat_request(request_id, req.messages, req.splunk_context)
     request.state.feedback_query = turn.query
     # Serving gate before any retrieval (issues #391 F3/F4): the console
@@ -711,7 +743,7 @@ async def _run_turn(request: Request, req: UiChatRequest, root_span):
             )
         )
         app_mod._record_feedback(request, "console", output, app_mod._output_log_fields(
-            output, output.query_kind, output.timings, turn_started, stream=False))
+            output, output.query_kind, output.timings, started, stream=False))
         return output
 
 
@@ -787,7 +819,7 @@ async def ui_chat(
             # (issue #374); a refusal renders the fixed banner like any
             # other console failure, with the stable code in RED.
             await app_mod._admit(owner)
-            output = await app_mod._within_deadline(owner, _run_turn(request, req, root_span))
+            output = await app_mod._within_deadline(owner, _run_turn(request, req, root_span, started))
         except Exception as exc:  # noqa: BLE001 — fixed banner to the operator, detail to logs
             from mainframe_rag.agent.answer import PromptBudgetExceeded
 
@@ -853,6 +885,9 @@ async def ui_chat(
             supplied_evidence=list(output.supplied),
             evidence_omitted=len(output.evidence.omitted_indices),
         )
+        if _feedback_client() is not None:
+            # The fallback fragment's rating form attaches to this record (#780).
+            assistant_turn["request_id"] = request_id
         turns.append(assistant_turn)
         if is_htmx:
             return _render_pair(request, [user_turn, assistant_turn], history_json=_history_json(turns))
@@ -993,14 +1028,47 @@ async def ui_feedback(request: Request, req: UiFeedbackRequest) -> Response:
     if client is None:
         return _secure(JSONResponse(status_code=404, content={
             "code": "feedback_disabled", "message": "feedback is not enabled on this deployment"}))
-    rater = request.headers.get("x-forwarded-user") if app_mod.settings.feedback_record_rater else None
     outcome = await client.rate(Rating(request_id=req.request_id, rating=req.rating,
                                        reasons=list(req.reasons), comment=req.comment,
-                                       rater=(rater or None) and rater[:256]))
+                                       rater=_rater(request, app_mod.settings.feedback_record_rater)))
     if outcome == "ok":
         return _secure(JSONResponse(status_code=201, content={"status": "recorded"}))
     status, code, message = _FEEDBACK_ERRORS[outcome]
     return _secure(JSONResponse(status_code=status, content={"code": code, "message": message}))
+
+
+@router.post("/feedback/form", response_class=HTMLResponse)
+async def ui_feedback_form(request: Request) -> Response:
+    """Fallback (no-streaming) console rating (#780): the same validation,
+    store call and fixed texts as /ui/feedback, rendered as a small fragment
+    that replaces the form."""
+    from mainframe_rag.agent import app as app_mod
+    from mainframe_rag.feedback.store import Rating
+
+    client = _feedback_client()
+    if client is None:
+        return _feedback_fragment("feedback is not enabled on this deployment", 404)
+    form = await request.form()
+    try:
+        req = UiFeedbackRequest.model_validate({
+            "request_id": str(form.get("request_id", "")), "rating": str(form.get("rating", "")),
+            "reasons": [str(value) for value in form.getlist("reasons")],
+            "comment": str(form.get("comment", "")),
+        })
+    except ValidationError:
+        return _feedback_fragment(_FEEDBACK_ERRORS["invalid"][2], 422)
+    outcome = await client.rate(Rating(request_id=req.request_id, rating=req.rating,
+                                       reasons=list(req.reasons), comment=req.comment,
+                                       rater=_rater(request, app_mod.settings.feedback_record_rater)))
+    if outcome == "ok":
+        return _feedback_fragment(f"Rated: {req.rating}", 201)
+    status, _code, message = _FEEDBACK_ERRORS[outcome]
+    return _feedback_fragment(message, status)
+
+
+def _feedback_fragment(text: str, status: int) -> Response:
+    return _secure(HTMLResponse(
+        f'<div class="turn-feedback" role="status">{html.escape(text)}</div>', status_code=status))
 
 
 @router.get("/static/{path:path}")
