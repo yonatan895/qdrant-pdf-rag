@@ -75,7 +75,7 @@ class ContextCheckTests(TestCase):
     def test_template_canonical_url_valid(self):
         canonical = "https://github.com/yonatan895/qdrant-pdf-rag/blob/main/docs/owner.md#contract"
         (self.root/".github/pull_request_template.md").write_text(f'[Owner]({canonical})')
-        (self.root/".github/ISSUE_TEMPLATE/agent-task.md").write_text(f'[Owner]({canonical})')
+        (self.root/".github/ISSUE_TEMPLATE/task.yml").write_text(f'[Owner]({canonical})')
         self.assertEqual(check(self.root)[0], [])
 
     def test_template_canonical_missing_file_and_anchor(self):
