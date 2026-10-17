@@ -1379,3 +1379,27 @@ def test_controls_are_locked_while_a_rating_is_in_flight_and_the_sent_rating_is_
     assert (rating.rating, rating.comment) == ("good", "SENT")
     first = store(browser)["sessions"][store(browser)["active"]]["turns"][1]
     assert first["feedback"] == "good"
+
+
+def test_a_settling_send_never_moves_focus_out_of_another_answers_box(console, browser, monkeypatch):
+    feedback = _with_feedback(console, browser, monkeypatch, outcome="unavailable")
+    send(browser, "What is IEA500I?")
+    wait_state(browser, "complete")
+    send(browser, "Again")
+    wait_state(browser, "complete", 2)
+    turns = store(browser)["sessions"][store(browser)["active"]]["turns"]
+    box_a, box_b = (f'#messages [data-feedback-for="{t["request_id"]}"]' for t in turns if t["role"] == "assistant")
+    browser.click(_reach(browser, box_a + ' .feedback-rating[data-rating="bad"]'))
+    feedback.gate.clear()
+    browser.eval("document.querySelector(arguments[0]+' .feedback-submit').focus()", box_a)
+    browser.keys("ENTER")
+    browser.wait("return document.querySelector(arguments[0]+' .feedback-submit').disabled", box_a,
+                 what="A in flight")
+    browser.click(_reach(browser, box_b + ' .feedback-rating[data-rating="good"]'))
+    browser.type(_reach(browser, box_b + " .feedback-comment"), "typing in B")
+    feedback.gate.set()
+    browser.wait("return document.querySelector(arguments[0]+' .feedback-status').textContent.length>0", box_a,
+                 what="A's failure shown")
+    assert browser.eval("return document.activeElement === document.querySelector(arguments[0]+' .feedback-comment')",
+                        box_b) is True
+    assert len(feedback.ratings) == 1  # nothing re-sent A's rating

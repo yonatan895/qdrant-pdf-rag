@@ -802,7 +802,10 @@
 
   function redrawFeedback(turn) {
     const live = messagesEl.querySelector('[data-feedback-for="' + turn.request_id + '"]');
-    if (live) live.replaceWith(renderFeedback(turn));
+    if (!live) return;
+    const next = renderFeedback(turn);
+    if (next) live.replaceWith(next);
+    else live.remove();
   }
 
   function renderFeedback(turn) {
@@ -903,7 +906,6 @@
       } catch (err) {
         ok = false;
       }
-      sending.sending = false;
       if (ok) {
         const rated = sent.rating;
         await mutate((store) => {
@@ -919,12 +921,18 @@
       } else {
         sending.status = message;
       }
+      // Unlocked only now: a rebuild while the store write waits stays locked.
+      sending.sending = false;
       // The article may have been rebuilt while the request was in flight:
-      // redraw whichever box is live now; focus returns to the control that
-      // sent (it was disabled meanwhile), so a failed send can be retried.
+      // redraw whichever box is live now. Focus inside that box is kept;
+      // focus that fell to <body> (the send control was disabled) returns to
+      // the control that sent; focus anywhere else is never moved.
+      const live = messagesEl.querySelector('[data-feedback-for="' + id + '"]');
+      const active = document.activeElement;
+      const keep = live && active && live.contains(active) ? captureFeedbackFocus() : null;
       redrawFeedback(turn);
-      const now = document.activeElement;
-      if (!now || now === document.body || now.closest("[data-feedback-for]")) restoreFeedbackFocus(returnFocus);
+      if (keep) restoreFeedbackFocus(keep);
+      else if (!active || active === document.body) restoreFeedbackFocus(returnFocus);
     });
     details.appendChild(submit);
     details.appendChild(status);
