@@ -644,12 +644,19 @@ hits omitted by budget packing, and the tail's example cite, are rejected:
   inside code are kept; `thought`/`thinking` fences are dropped; other
   fences unwrap to body. Validating scripts would corrupt JCL/REXX;
   treating them as cited provenance would hallucinate it.
-- Abstention zero-cite (issues #135/#305): `parse_answer` clears citations
-  and inferred indices when `is_abstention` holds — at least one explicit
-  refusal marker **and** under 200 chars of non-refusal remainder. Marker
-  alone would zero a grounded answer that quotes one hedging sentence;
-  shape alone would miss a refusal citing real-but-unsupporting chunks. It
-  applies to every consumer (JSON, SSE final, chat, `/ui`).
+- Abstention zero-cite (issues #135/#630/#764): `parse_answer` clears
+  citations and inferred indices when `is_abstention` holds. That is either
+  the structured decline (the response leads with system rule 4's fixed
+  whole-question prefix `Nothing in the supplied excerpts answers this question
+  about` followed by a subject naming the identifier or topic, whatever
+  coverage note follows; naming the subject satisfies identifier abstention
+  rows, which require the identifier and forbid the generic "excerpts do not
+  answer")
+  or a whole-response refusal (every substantive clause refuses). Marker
+  presence alone would zero a grounded answer that scopes one caveat; the
+  whole-response rule alone missed verbose declines that explain what the
+  excerpts do cover (#764). It applies to every consumer (JSON, SSE final,
+  chat, `/ui`).
 
 ## 6. Lifespan, pools, timeouts
 
@@ -1075,14 +1082,39 @@ from the finalized parse plus the transport outcome — one rule,
 | State | Meaning | Never means |
 |---|---|---|
 | `accepted` | Nonempty substantive parsed prose, eligible non-inferred citations and generation finished (`stop`) | Semantic proof of any claim or certification of an extracted script |
-| `insufficient_evidence` | Whole-response evidence/security refusal (every substantive clause refuses; any answer clause makes it mixed) with a `stop` finish, or the empty-hits short-circuit (no generation) | A failed request (still 200 + explicit text) |
+| `insufficient_evidence` | Structured decline (the response leads with rule 4's whole-question decline prefix plus a subject that names something; a coverage note may follow) or whole-response evidence/security refusal (every substantive clause refuses; any answer clause makes it mixed) with a `stop` finish, or the empty-hits short-circuit (no generation) | A failed request (still 200 + explicit text) |
 | `unverified_draft` | Non-abstention prose with zero eligible citations (absent, rejected, or inferred-only), or a finished nonempty script with no prose | An error (still 200 — the draft label is the signal) |
 | `generation_incomplete` | Non-`stop` finish after generation (including a cut-off refusal fragment; this outranks refusal), neither substantive parsed prose nor a nonempty script after fallbacks, absent/`null` terminal finish, upstream `error` frame, malformed frame, or stream error/cancel/disconnect | An accepted answer (terminal wire shape may still be complete) |
 
 State precedence (#630): empty-hits short circuit, then non-`stop` finish,
-then whole-response refusal, then body/citation outcome. Mixed answers (an
-answer clause plus a missing-detail caveat) are not refusals at any length and
-keep their eligible citations.
+then refusal (structured decline or whole-response), then body/citation
+outcome. Mixed answers (an answer clause plus a missing-detail caveat) are not
+refusals at any length and keep their eligible citations. Rule 4 forbids a
+partial answer from opening with the decline (#764). Only the exact prefix,
+leading, with a subject that names something counts (a leading Markdown
+heading is scaffolding; a prefix line without a subject takes its subject
+from the next line). The prefix says nothing answers the question, so a scope
+caveat leading a partial answer ("X is not covered by the excerpts; ...") is a
+mixed answer; the prefix inside a sentence, subject-less or placed after an
+answer clause leaves the whole-response rule in charge. The decline cites
+nothing: inline citation markers anywhere after the lead mean cited claims,
+so the whole-response rule decides and a mixed answer keeps its citations.
+Uncited text after the decline is the coverage note, so a model that leads
+with the decline and then answers without citing is classified
+`insufficient_evidence`: the conservative outcome, never a false `accepted`.
+
+Maintainer decision (2026-10-17, #764): "cites" means inline `[n]` markers,
+not the trailing `Citations:` list. On the G4 r2 run every real decline
+(14/14) still listed citations and none used inline markers, so treating the
+list as cited content would turn every decline back into `accepted`.
+Accepted residuals:
+- An answer that breaks rule 4 by leading with the decline, then answers
+  while citing only in the `Citations:` list, is classified
+  `insufficient_evidence` with its citations zeroed.
+- A decline whose coverage note mentions an excerpt index ("[2] covers only
+  ...") falls to the whole-response rule.
+
+The G4 measurement of this wording records how often either occurs.
 
 Body presence is shared with the answer eval (#576): empty `Answer` headings,
 citation labels (including inline labels followed only by bracket indices or
