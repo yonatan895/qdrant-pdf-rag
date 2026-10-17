@@ -139,6 +139,19 @@ Required tier selection and commands are maintained only in
 `HTTP/lifecycle`, `packaging/deploy`, `release promotion`). The sections below describe
 how those instruments work and what their results can establish.
 
+<a id="local-verification"></a>
+### Local verification (`sh scripts/tools/run-task.sh qa:local -- <tests>`, #796)
+
+Runs exactly the named selection against this worktree's code and writes
+`.local-verify/<run>/receipt.json`. It refuses (exit 2) instead of running when
+the interpreter imports another tree's `src`, the output directory is
+RAM-backed, the Colab assignment lock is held, or pytest already runs from this
+tree. The environment comes from an allowlist, never inheritance; `--pass-env`
+adds a named variable and the receipt records it. A skip is incomplete, not a
+pass. A dirty tree runs but is labeled "uncommitted, not evidence". The receipt
+covers the selection only: the CI `unit_tests` lane remains the authority for
+the full suite, and the receipt lists what it did not verify.
+
 <a id="airgap-tier"></a>
 ### Air-gap deployment tier (`sh scripts/tools/run-task.sh airgap:dryrun`, `tests/test_airgap_*.py`, local Kind)
 
