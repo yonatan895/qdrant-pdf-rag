@@ -5,7 +5,7 @@ name: coverage
 # change to this file produces its own baseline run.
 on:
   schedule:
-    - cron: "23 4 * * 1" # weekly, Monday, off the hour
+    - cron: "23 3 * * *" # nightly, off the hour
   workflow_dispatch:
   pull_request:
     paths:

@@ -51,6 +51,9 @@ markers = [
 branch = true
 source_pkgs = ["mainframe_rag"]
 relative_files = true
+# Trace python subprocesses the tests spawn (parallel data files, combined by
+# pytest-cov / `coverage combine`); `patch` implies `parallel = true`.
+patch = ["subprocess"]
 
 [tool.coverage.report]
 precision = 1

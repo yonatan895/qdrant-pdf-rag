@@ -68,7 +68,7 @@ tasks:
       an OUT inside the repository is refused. Advisory: no percentage ever
       fails the task (only a failing test or prerequisite does), and it is
       neither verification nor acceptance evidence. PYTEST_ADDOPTS stays
-      unset. Subprocess-only code is not measured. Fails closed when the
+      unset. Python subprocesses the tests spawn are traced (data files stay in OUT). Fails closed when the
       prepared interpreter or verified tools are unavailable.
     env:
       TASK_COVERAGE_OUT: '{{if hasKey . "OUT"}}{{.OUT}}{{end}}'

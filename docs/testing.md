@@ -176,15 +176,18 @@ summary, `coverage.json`, `coverage.xml` and the data file to `OUT`, which
 defaults to `${XDG_STATE_HOME:-$HOME/.local/state}/mainframe-rag/coverage`
 and is refused inside the repository. `-- tests/test_x.py -q` replaces the
 default `tests -q` selection exactly as in `qa:unit`; `PYTEST_ADDOPTS` stays
-unset. The workflow runs weekly, on dispatch and on changes to its own file,
+unset. The workflow runs nightly, on dispatch and on changes to its own file,
 uploads the reports as the `coverage-report` artifact, is not a required
 status and is not an acceptance producer.
 
 What it measures: which branches of `src/mainframe_rag` executed in-process
 during the unit selection. What it does not: that any behavior is correct. A
 branch can run without an assertion about its outcome, and a covered branch is
-not a verified one. Subprocess-only code, `scripts/`, `tests/` and integration
-tiers are not measured. A partial selection (the `qa:coverage -- ...` form)
+not a verified one. Python subprocesses the tests spawn are traced
+(`patch = ["subprocess"]`; per-process data files are written next to the
+data file in `OUT` and combined before reporting), but only when the child
+keeps the `COVERAGE_PROCESS_*` environment; `scripts/`, `tests/`, non-Python
+processes and integration tiers are not measured. A partial selection (the `qa:coverage -- ...` form)
 reports low percentages by construction. The CI `unit_tests` lane and
 acceptance remain the verification authority; a percentage never substitutes
 for a behavior-discriminating test or a required check. Per-package ratchets
