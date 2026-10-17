@@ -13,7 +13,12 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from mainframe_rag.agent import app as app_mod
-from mainframe_rag.agent.answer import is_abstention, parse_answer, verification_state_for
+from mainframe_rag.agent.answer import (
+    DECLINE_PREFIX,
+    is_abstention,
+    parse_answer,
+    verification_state_for,
+)
 from mainframe_rag.agent.tokenizer import FallbackTokenizer
 from mainframe_rag.ports import ChatResult, TokenUsage
 from mainframe_rag.retrieve.query import SearchHit
@@ -1796,9 +1801,11 @@ def test_build_messages_tokenizer_budget_respected():
             heading=f"Heading {i}",
             text="word " * 160,  # ~175 tokens with the [i] header; the
             # refusal-anchored system prompt (issue #135, regrown by #305's
-            # partial-answer/identifier rules) grew the fixed overhead, so the
-            # fixture window widened to keep the knife-edge scenario (5
-            # excerpts fit, the last truncated) reachable.
+            # partial-answer/identifier rules, then +30 by #764's structured
+            # decline and +19 when it named the missing subject) grew the
+            # fixed overhead, so the fixture window widened
+            # to keep the knife-edge scenario (5 excerpts fit, the last
+            # truncated) reachable.
             doc_id=f"DOC{i}",
             title="Title",
             page_label=str(i),
@@ -1809,7 +1816,7 @@ def test_build_messages_tokenizer_budget_respected():
     ]
 
     settings = Settings(
-        llm_max_model_len=1580,
+        llm_max_model_len=1629,
         llm_reserved_output_tokens=250,
         llm_thinking_reserve_tokens_simple=0,  # knife edge independent of #777 defaults
         llm_token_safety_margin=100,
@@ -3515,6 +3522,74 @@ def test_is_abstention_whole_response_controls():
         assert is_abstention(body) is True, body
 
 
+def test_structured_decline_leads_and_partial_answers_keep_the_whole_response_rule():
+    """Issue #764: a response that leads with rule 4's whole-question decline
+    prefix followed by the missing identifier or topic is an abstention,
+    whatever coverage note follows. The prefix states that nothing answers
+    the question, so a scope caveat before a partial answer ("X is not
+    covered") never matches it. Only the leading, unquoted prefix with a
+    subject that names something counts (the subject may sit on the next
+    line, and a leading Markdown heading is scaffolding); anywhere else,
+    quoted, or without a subject, the #630 whole-response rule decides."""
+    from mainframe_rag.agent.answer import SYSTEM_PROMPT, is_structured_decline
+
+    assert SYSTEM_PROMPT.count(DECLINE_PREFIX) == 1, "rule 4 anchors the exact prefix"
+    declines = [
+        f"{DECLINE_PREFIX} IEA500I.",
+        f"{DECLINE_PREFIX} the LFAREA retry limit.\nThe excerpts describe IEASYSxx LFAREA syntax, not the retry limit.",
+        f"**{DECLINE_PREFIX} IEA500I.** They cover only the message text.",
+        f"Answer: {DECLINE_PREFIX.lower()} CSQW100I",
+        f"{DECLINE_PREFIX}\nIEA500I",  # subject on the next line
+        f"{DECLINE_PREFIX}:\nIEA500I.",
+        f"{DECLINE_PREFIX} -\nIEA500I.",
+        f"**{DECLINE_PREFIX}**\n**CSQW100I**",
+        f"## {DECLINE_PREFIX} CSQW100I\nThe excerpts cover CSQ6SYSP parameters only.",
+        f"### Diagnosis\n{DECLINE_PREFIX} CSQW100I.",  # complex-query heading first
+    ]
+    not_declines = [
+        f'The operator saw "{DECLINE_PREFIX} IEA500I." in the console log.',
+        f"Run CHECK first. {DECLINE_PREFIX} IEA500I.",
+        f"Set RETRY=5 [1].\n{DECLINE_PREFIX} IEA500I.",
+        f"`{DECLINE_PREFIX} IEA500I.` is printed when RETRY=0 [1].",
+        # A scope caveat leading a partial answer stays a mixed answer (#630).
+        "Not covered by the supplied excerpts: EDSALIMIT. MXT is set in the SIT as MXT=nnn [1].",
+        "EDSALIMIT is not covered by the supplied excerpts; MXT is set in the SIT as MXT=nnn [1].",
+        # Rule 4: a decline cites nothing. Inline citations after the lead mean
+        # cited claims, so the whole-response rule decides (mixed answers keep
+        # their citations): a decline scoping one sub-part, a sectioned answer
+        # whose first section declines, a cited coverage note.
+        f"{DECLINE_PREFIX} the TIMEOUT keyword; the excerpts do show IEA500I means X [1].",
+        f"## Diagnosis\n{DECLINE_PREFIX} the root cause.\n\n## Recovery\nVARY the device offline [1].",
+        f"{DECLINE_PREFIX} JES2 checkpoint retries. The supplied excerpts cover JES2 checkpoint sizing [1].",
+        # A bare prefix followed by a cited line is cited content, not a subject.
+        f"{DECLINE_PREFIX}\nIEA500I means the device is offline [1].",
+        f"{DECLINE_PREFIX}\n## Recovery\nVARY the device offline [1].",
+        # The retired #764 sentence no longer qualifies on its own lead.
+        "The excerpts do not answer this question.\nThey cover JES2 checkpoint sizing [1].",
+    ]
+    for body in declines:
+        assert is_structured_decline(body) is True, body
+        assert is_abstention(body) is True, body
+    for body in not_declines:
+        assert is_structured_decline(body) is False, body
+        assert is_abstention(body) is False, body
+    # A subject must name something: punctuation or a bare index does not.
+    for body in (DECLINE_PREFIX, f"{DECLINE_PREFIX} —.", f"{DECLINE_PREFIX} [1]."):
+        assert is_structured_decline(body) is False, body
+    # The bare prefix is still a whole-response refusal (#630).
+    assert is_abstention(DECLINE_PREFIX) is True
+
+
+def test_a_lead_decline_then_an_answer_is_judged_by_whether_it_cites():
+    """docs/agent.md state precedence: text after the decline that cites
+    nothing is the coverage note (an uncited answer after the decline is the
+    conservative abstention, never a false accepted); text that cites inline
+    breaks rule 4's "cite nothing", so the whole-response rule decides and a
+    mixed answer keeps its citations (#630)."""
+    assert is_abstention(f"{DECLINE_PREFIX} IEA500I.\nSet RETRY=5 in IEASYSxx and restart the task.") is True
+    assert is_abstention(f"{DECLINE_PREFIX} IEA500I.\nSet RETRY=5 in IEASYSxx [1]. Then restart the task [2].") is False
+
+
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("content, finish, state, cites", [
     (f"Run CHECK first.\n{_MIXED_CAVEAT}\n\nCitations:\n{_ACCEPTED_CITE}", "stop",
@@ -3522,6 +3597,11 @@ def test_is_abstention_whole_response_controls():
     (f"The excerpts do not contain the retry limit.\n\nCitations:\n{_ACCEPTED_CITE}", "stop",
      "insufficient_evidence", []),
     ("The excerpts do not contain", "length", "generation_incomplete", []),
+    ((f"{DECLINE_PREFIX} the IEA500I retry limit.\nThe excerpts describe the IEA500I message text only.\n\n"
+      f"Citations:\n{_ACCEPTED_CITE}"), "stop", "insufficient_evidence", []),
+    (f"Run CHECK first.\n{DECLINE_PREFIX} IEA500I.\n\nCitations:\n{_ACCEPTED_CITE}", "stop",
+     "accepted", [_ACCEPTED_CITE]),
+    (f"{DECLINE_PREFIX} IEA500I.", "length", "generation_incomplete", []),
 ])
 def test_answer_partial_and_interrupted_refusal_state_json_and_sse(
     client, monkeypatch, stream, content, finish, state, cites
