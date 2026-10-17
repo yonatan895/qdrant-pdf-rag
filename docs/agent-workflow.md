@@ -529,7 +529,10 @@ lifecycle skills through repository-owned entry points to pinned local upstream
 copies. Each provider record ([engineering](../.agents/mattpocock-skills-provenance.md),
 [pstack](../.agents/pstack-skills-provenance.md)) owns its allowlist, license and
 updates. Reach for the matching skill at each step it covers, unprompted; their
-compatibility rules retain existing testing, coverage and review contracts. No upstream workflow bundle or automatic
+compatibility rules retain existing testing, coverage and review contracts. Each
+entry point is registered for Claude Code by a name-and-description wrapper in
+`.claude/skills` (code-review as `repo-code-review`, distinct from the built-in),
+kept in sync by `qa:context` (#787). No upstream workflow bundle or automatic
 instruction chain is installed.
 
 <a id="qdrant-skills"></a>
@@ -540,7 +543,7 @@ intentionally incomplete subset for server operations that are hard to reconstru
 offline. Its first-party [index](../.agents/skills/index.md) and the pin,
 allowlist and notices in
 [.agents/qdrant-skills-provenance.md](../.agents/qdrant-skills-provenance.md)
-own the contents. Skills are on-demand reads, never part of the automatic
+own the contents. Skills are invoked or read on demand, never part of the automatic
 instruction chain, and never override repository contracts, approved issues,
 pinned runtime behavior, security policy or executed evidence. Do not fetch
 `skills.qdrant.tech`, `/llms.txt`, snippet APIs, Cloud console or `qcloud-cli`.

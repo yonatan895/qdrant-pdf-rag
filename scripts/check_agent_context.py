@@ -29,6 +29,13 @@ SKILL_PROVIDERS = (
     (Path(".agents/mattpocock-skills-provenance.md"), "mattpocock-skills"),
     (Path(".agents/pstack-skills-provenance.md"), "pstack-skills"),
 )
+# Claude Code registration (#787): one thin wrapper per .agents/skills entry,
+# carrying only its name and description and linking the entry point, which
+# stays the single source of truth. code-review registers under a distinct
+# name so Claude Code's built-in /code-review can never shadow it.
+REGISTERED = Path(".claude/skills")
+REGISTERED_NAMES = {"code-review": "repo-code-review"}
+FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n", re.DOTALL)
 # Providers whose .agents/skills entries are repository-owned entry points
 # linking local vendored copies; their links must resolve.
 ENTRY_POINT_PROVIDERS = {"mattpocock-skills", "pstack-skills"}
@@ -41,6 +48,17 @@ INSTRUCTION_NAMES = {"AGENTS.md", "AGENTS.override.md", "CLAUDE.md", "GEMINI.md"
 # Generated/third-party trees are not first-party workflow policy.
 EXCLUDED = {".git", ".venv", ".agents", "vendor", "dist", "bundles", "node_modules",
             "__pycache__", ".mypy_cache", ".pytest_cache", ".ruff_cache", "output"}
+
+
+def frontmatter(text: str) -> dict[str, str]:
+    """Top-level `key: value` lines of a SKILL.md frontmatter (nested lines skipped)."""
+    block = FRONTMATTER.match(text)
+    fields: dict[str, str] = {}
+    for line in (block[1].splitlines() if block else []):
+        key, sep, value = line.partition(":")
+        if sep and key and not key.startswith((" ", "-")):
+            fields[key] = value.strip()
+    return fields
 
 
 def local_target(root: Path, source: Path, target: str) -> tuple[Path, str]:
@@ -230,6 +248,24 @@ def check(root: Path, client_limit: int | None = None) -> tuple[list[str], list[
             errors.append(f"{SKILLS}/index.md: repository-owned index missing")
         else:
             links(index, read(index))
+        expected = {REGISTERED_NAMES.get(name, name): name for name in present}
+        registered = ({path.name for path in (root/REGISTERED).iterdir() if (path/"SKILL.md").is_file()}
+                      if (root/REGISTERED).is_dir() else set())
+        for name in sorted(set(expected) - registered):
+            errors.append(f"{REGISTERED/name}: skill {expected[name]} not registered")
+        for name in sorted(registered - set(expected)):
+            errors.append(f"{REGISTERED/name}: registered skill has no .agents/skills entry")
+        for name in sorted(registered & set(expected)):
+            wrapper, entry = root/REGISTERED/name/"SKILL.md", root/SKILLS/expected[name]/"SKILL.md"
+            text = read(wrapper)
+            fields = frontmatter(text)
+            if set(fields) != {"name", "description"} or fields["name"] != name:
+                errors.append(f"{REGISTERED/name}/SKILL.md: frontmatter must carry only name and description, name {name}")
+            if fields.get("description") != frontmatter(read(entry)).get("description"):
+                errors.append(f"{REGISTERED/name}/SKILL.md: description differs from {SKILLS/expected[name]}")
+            if f"../../../{SKILLS.as_posix()}/{expected[name]}/SKILL.md" not in text:
+                errors.append(f"{REGISTERED/name}/SKILL.md: must link {SKILLS/expected[name]}/SKILL.md")
+            links(wrapper, text)
 
     for directory, dirs, names in os.walk(root):
         dirs[:] = [name for name in dirs if name not in EXCLUDED and not Path(directory, name).is_symlink()]
