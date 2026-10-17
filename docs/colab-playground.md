@@ -56,7 +56,7 @@ path. Reuse the shared host serialization lock at
 `$HOME/.cache/agent-tmp/mainframe-rag-heavy.lock`; do not create another general
 resource runner. The caller holds this lock around the entire heavy controller
 workload. The controller's Colab ownership lock has a different purpose and must
-not reacquire the host lock. A busy host lock is a refusal, not permission to
+not reacquire the host lock; a busy ownership lock is refused naming the holder's PID. A busy host lock is a refusal, not permission to
 run another lane. Keep unrelated heavy work stopped.
 
 The following CPU example uses the existing 2048 MiB guard envelope, a private

@@ -831,7 +831,7 @@ def test_accessibility_tree_names_roles_and_announcements(console, page):
     pressed = "return Array.from(document.querySelectorAll('.segmented .seg')).map(b => b.getAttribute('aria-pressed'))"
     assert page.eval(pressed) == ["true", "false", "false"]
     assert page.eval("return document.querySelector('.reasoning-control').getAttribute('role')") == "group"
-    page.click('.segmented .seg[data-effort="high"]')
+    page.click('.segmented .seg[data-effort="xhigh"]')
     assert page.eval(pressed) == ["false", "false", "true"]
 
     console.llm.queue(("token", "Partial "), ("fail",))
@@ -841,13 +841,13 @@ def test_accessibility_tree_names_roles_and_announcements(console, page):
 
 
 def test_reasoning_effort_choice_reaches_the_model_and_survives_reload(console, page):
-    page.click('.segmented .seg[data-effort="high"]')
+    page.click('.segmented .seg[data-effort="xhigh"]')
     send(page, "What is IEA500I?")
     wait_state(page, "complete")
-    assert console.llm.efforts[-1] == "high"
+    assert console.llm.efforts[-1] == "xhigh"
     page.reload()
     page.wait("return document.querySelectorAll('#messages .turn').length==2")
-    assert page.eval("return document.querySelector('.segmented .seg[aria-pressed=\"true\"]').dataset.effort") == "high"
+    assert page.eval("return document.querySelector('.segmented .seg[aria-pressed=\"true\"]').dataset.effort") == "xhigh"
     page.click('.segmented .seg[data-effort="low"]')
     send(page, "Again")
     wait_state(page, "complete", 2)
