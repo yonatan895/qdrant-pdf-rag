@@ -78,6 +78,7 @@ def base_values() -> dict:
         },
         "metrics": {"enabled": False},
         "ui": {"enabled": True},
+        "networkPolicy": {"enabled": True, "allowedNamespaces": []},
         "route": {"enabled": False, "timeoutSeconds": 300, "destinationCA": ""},
         "storage": {"className": BASE_ENV["STORAGE_CLASS"]},
         "ingest": {

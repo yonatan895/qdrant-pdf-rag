@@ -26,7 +26,7 @@ initialize every result as `NOT RUN`.
 
 **Not checked before transfer.** OpenShift-specific behavior (`restricted-v2`
 SCC admission and assigned identities, the OAuth console Route, Service CA and
-reencrypt certificates, namespace egress NetworkPolicy and node image-pull
+reencrypt certificates, agent ingress and namespace egress NetworkPolicy and node image-pull
 isolation) has no local lane. It is verified on the site, after transfer and
 before go-live, by [site OpenShift acceptance](install_and_ops.md#site-openshift-acceptance).
 A failure there blocks go-live and requires a new candidate. Kind evidence never
