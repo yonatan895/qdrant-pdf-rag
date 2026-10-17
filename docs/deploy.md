@@ -1006,7 +1006,8 @@ live in `.github/workflows/e2e.yml`.
   dir — digest verify, unpack, bootstrap, manifest/SHA assertions, dry-run
   pipeline with explicit shared-gateway reasoning and embedding-only
   (reasoning explicitly disabled) configurations, both pull-secret branches.
-  `kind-live-rehearsal` (main/dispatch) is an eleven-lane matrix described below.
+  `kind-live-rehearsal` (main/dispatch) is an eleven-lane matrix described below;
+  its operator flow runs behind an [egress boundary](#kind-egress-boundary).
   The lab OpenShift rehearsal remains secret-gated, and PRs never touch the lab cluster.
   `airgap-rehearsal` downloads and bootstraps the published bundle; it does not
   independently repack. It retains both outline-message and generic widget
@@ -1039,15 +1040,61 @@ include actual runner CPU, RAM and disk capacity; cleanup runs even after failur
 
 | Job / lane | Real services and assertions |
 |---|---|
-| `airgap-acceptance` | Fresh bundle integrity/bootstrap, manifest SHA, explicit shared-reasoning and embedding-only configurations, and both pull-secret render branches |
+| `airgap-acceptance` | Static dry-run (no cluster, no egress block): fresh bundle integrity/bootstrap, manifest SHA, explicit shared-reasoning and embedding-only configurations, and both pull-secret render branches |
 | `kind-pipeline` | Authenticated registry, real product containers, real LiteLLM/PostgreSQL, synthetic ingest, search and application streams |
 | `kind-gateway-chat-{upstream,malformed,truncated}` | Three isolated clusters, one reasoning fault each through real LiteLLM, application failure contracts and healthy recovery |
 | `kind-gateway-embed-{upstream,malformed,dimension}` | Three isolated clusters, one embedding fault each through real LiteLLM and healthy recovery |
 | `kind-gateway-auth` | Wrong/missing credentials, untrusted CA, hostname mismatch and reasoning deadline, followed by healthy gateway/application recovery |
-| `kind-lifecycle-chart` | Three-worker Kind; first-party chart fresh/repeat/update/failure/rollback/redeploy sequence with PVC guards, then the next ordinary pipeline |
+| `kind-lifecycle-chart` | Three-worker Kind; first-party chart fresh/repeat/update/failure/rollback/redeploy sequence with PVC guards, then the next ordinary pipeline, all behind the egress boundary |
 | `kind-lifecycle` | Independent three-worker Kind; synthetic snapshot recovery, PVC identity, Qdrant/agent/Jaeger replacement, old trace persistence and repeat pipeline |
 | `kind-shared-gateway` | Same live pipeline/probe/contracts/smoke but through the shared `GATEWAY_BASE_URL` fallback and the single `api-key` Secret data-key (issue #551); explicit per-operation URLs stay unset so fallback is exercised |
 | Manual release Kind lane | Both real models through the authenticated TLS gateway on the same signed bundle ([release gate](release-verification.md)); SCC, Service CA, OAuth, Routes, node pulls and egress are verified on the site |
+
+<a id="kind-egress-boundary"></a>
+#### Egress boundary in the Kind lanes (issue #809)
+
+Every Kind lane bootstraps the signed bundle and runs the operator flow (image
+import, validate, deploy, ingest, smoke, application contracts, fault and
+lifecycle sequences) with public egress blocked by the kernel packet filter,
+not by mocking. `scripts/ci/egress_gate.sh` owns the rules and
+`scripts/ci/egress_probe.py` owns the probe.
+
+- **Before the boundary** (public network allowed): tool installs, the Kind
+  node image, the registry image, the provisioner and the platform stand-ins'
+  third-party images (real LiteLLM and PostgreSQL; the provisioner's helper
+  image is pre-pulled on every node). These stand in for what the platform
+  already provides in the gap. The helper scripts come from a separate
+  checkout, never from the operator workspace.
+- **Behind the boundary**: bundle verification, extraction and `bootstrap.sh`
+  (a fresh workspace from the bundle only), every later operator step, and all
+  pods. Host processes run with a dedicated primary group whose `iptables`
+  OUTPUT owner-match accepts only loopback and the Kind network and REJECTs
+  everything else, DNS included. A `DOCKER-USER` rule REJECTs traffic leaving
+  the Kind network, which covers node image pulls and pod egress. Only bundle
+  images, loaded into the lane's authenticated TLS registry, can be pulled.
+- **Not blocked**: the GitHub runner agent, the Docker daemon and its embedded
+  resolver (a pod can resolve a public name but cannot connect), the setup
+  steps, and the post-mortem and teardown steps. IPv6 is gated only when
+  `ip6tables` exists (a warning otherwise). This is a rehearsal boundary, not a
+  security control; gated commands run with `no_new_privs` so they cannot lift it.
+- **Proof in each run**: a public-reachability control before the gate; a probe
+  that must fail for public addresses and names, and a failed public download,
+  behind it; the registry and API controls that must still succeed; the same
+  blocked probe from the mock-vLLM pod and the application pod, with an
+  in-cluster control; and non-zero REJECT packet counters for both rule
+  classes. `egress_gate.sh run` refuses to start when the rules are absent.
+  The counters and rules are retained as `diagnostics/egress-gate-*.txt`.
+- **Maintenance**: a step added after the boundary must use the gated `shell:`
+  or be listed as post-mortem in `tests/test_egress_gate.py`. A new public
+  dependency of the operator flow fails the lane by design; supply it from the
+  bundle or the platform stand-ins, never by loosening the rules.
+
+The `kind-lifecycle-chart` lane behind the boundary is the single A to repeat A
+to B to failed B to rollback sequence: the injected failed B fails at the image
+pull against the internal registry, rollback restores A, B is redeployed, A is
+redeployed explicitly, and the next ordinary `pipeline.sh` deploy then succeeds.
+A and B differ by one rollout mark on the same signed images and chart;
+two separately signed releases and the hotfix import loop remain #446 D work.
 
 Only computation behind LiteLLM is deterministic in the Kind lanes. The existing
 `mock_vllm.py` uses explicit model IDs, 1024-dimensional embeddings, an explicit
@@ -1348,7 +1395,8 @@ and third-party sharing off. Existing enforcement gaps are not permission to
 claim compliance. Reviewer install steps remain inline: local composite actions
 can re-resolve a moved checkout during post-processing.
 
-Rehearsal lanes bootstrap the same downloaded bundle in fresh directories; never
+Rehearsal lanes bootstrap the same downloaded bundle in fresh directories behind the
+[egress boundary](#kind-egress-boundary); never
 repack. Bracket every injected fault with healthy control/recovery. Retire the
 old mock pod and verify requested state through its Service from the gateway pod;
 readiness alone cannot prove which fault is served. Project gateway config/modules
