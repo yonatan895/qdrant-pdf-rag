@@ -319,6 +319,9 @@ retention: [observability](observability.md#data-tiers).
   In the streaming console the rating box is re-derived from page-memory state
   (choice, reasons, comment, in-flight send, last error) whenever the articles
   are rebuilt, and focus and caret inside it are restored; nothing is stored.
+  A send uses a snapshot and locks every control until it settles, so the
+  "Rated" state shown and saved is exactly what the service recorded; a failed
+  send unlocks the box and returns focus to it for a retry.
   - `request_id` must be the 12-hex server id; extra fields, such as an answer
     text, are refused with 422.
   - The store attaches the rating to its own record and refuses unknown ids:

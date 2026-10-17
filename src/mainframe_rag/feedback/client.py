@@ -26,12 +26,18 @@ log = logging.getLogger("feedback")
 RateOutcome = Literal["ok", "unknown", "invalid", "unavailable"]
 
 
-def _code(response: Any) -> str | None:
+def _json_object(response: Any) -> dict[str, Any]:
+    """The response's JSON object, or {} for an empty, non-JSON or non-object body."""
     try:
         body = response.json()
     except ValueError:
-        return None
-    return body.get("code") if isinstance(body, dict) else None
+        return {}
+    return body if isinstance(body, dict) else {}
+
+
+def _code(response: Any) -> str | None:
+    code = _json_object(response).get("code")
+    return code if isinstance(code, str) else None
 
 
 class FeedbackClient:
@@ -64,8 +70,9 @@ class FeedbackClient:
                 response = await self._client.post(f"{self._base}/v1/answers", json=record.model_dump(),
                                                    headers=self._headers)
                 if response.status_code == 201:
-                    recorded = bool(response.json().get("recorded"))
-                    record_feedback_record("recorded" if recorded else "duplicate")
+                    body = _json_object(response)
+                    # 201 means stored; only an explicit recorded=false is a duplicate.
+                    record_feedback_record("duplicate" if body.get("recorded") is False else "recorded")
                 else:
                     record_feedback_record("failed")
                     log.warning(json_log(record.request_id, "feedback_record", error="status",
@@ -88,11 +95,7 @@ class FeedbackClient:
             log.warning(json_log(rating.request_id, "feedback_rating", error=error_type(exc)))
             return "unavailable"
         if response.status_code == 201:
-            try:
-                body = response.json()
-            except ValueError:
-                body = None
-            labels = body if isinstance(body, dict) else {}  # labels only; the rating is stored
+            labels = _json_object(response)  # metric labels only; the rating is stored
             record_feedback_rating(rating.rating, list(rating.reasons), endpoint=str(labels.get("endpoint")),
                                    verification_state=labels.get("verification_state"))
             return "ok"

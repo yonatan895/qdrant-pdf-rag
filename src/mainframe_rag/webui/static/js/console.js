@@ -800,6 +800,11 @@
     }
   }
 
+  function redrawFeedback(turn) {
+    const live = messagesEl.querySelector('[data-feedback-for="' + turn.request_id + '"]');
+    if (live) live.replaceWith(renderFeedback(turn));
+  }
+
   function renderFeedback(turn) {
     if (document.body.dataset.feedback !== "on" || turn.role !== "assistant") return null;
     if (typeof turn.request_id !== "string" || !/^[0-9a-f]{12}$/.test(turn.request_id)) return null;
@@ -865,14 +870,14 @@
     submit.addEventListener("click", async () => {
       const sending = editDraft(id);
       if (!sending.rating || sending.sending) return;
-      // Lock the controls and send a snapshot: what is shown and saved
+      // Send a snapshot and lock the box through the state (the one source
+      // the render derives every control from): what is shown and saved
       // afterwards is exactly what the service recorded.
       const sent = { rating: sending.rating, reasons: sending.reasons.slice(), comment: sending.comment };
+      const returnFocus = captureFeedbackFocus();
       sending.sending = true;
       sending.status = "";
-      box.querySelectorAll("button, input").forEach((control) => { control.disabled = true; });
-      comment.readOnly = true;
-      status.textContent = "";
+      redrawFeedback(turn);
       let ok = false;
       let message = FEEDBACK_ERROR_TEXT;
       try {
@@ -915,13 +920,11 @@
         sending.status = message;
       }
       // The article may have been rebuilt while the request was in flight:
-      // redraw whichever box is live now, from the state.
-      const live = messagesEl.querySelector('[data-feedback-for="' + id + '"]');
-      if (live) {
-        const saved = captureFeedbackFocus();
-        live.replaceWith(renderFeedback(turn));
-        restoreFeedbackFocus(saved);
-      }
+      // redraw whichever box is live now; focus returns to the control that
+      // sent (it was disabled meanwhile), so a failed send can be retried.
+      redrawFeedback(turn);
+      const now = document.activeElement;
+      if (!now || now === document.body || now.closest("[data-feedback-for]")) restoreFeedbackFocus(returnFocus);
     });
     details.appendChild(submit);
     details.appendChild(status);

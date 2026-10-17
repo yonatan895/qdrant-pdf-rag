@@ -1061,7 +1061,7 @@ async def _rate(client: Any, req: UiFeedbackRequest) -> tuple[int, str | None, s
     outcome = await client.rate(Rating(request_id=req.request_id, rating=req.rating,
                                        reasons=list(req.reasons), comment=req.comment))
     status, code, message = _FEEDBACK_OUTCOMES[outcome]
-    return status, code, message.format(rating=req.rating) if code is None else message
+    return status, code, message.format(rating=req.rating) if outcome == "ok" else message
 
 
 def _feedback_result(request: Request, text: str, status: int) -> Response:

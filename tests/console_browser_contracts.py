@@ -1328,13 +1328,29 @@ def test_a_rebuild_during_an_in_flight_rating_keeps_the_live_box_truthful(consol
         time.sleep(0.02)
     send(browser, "Again")  # rebuilds the articles while the rating is pending
     wait_state(browser, "complete", 2)
-    assert browser.eval("return document.querySelector(arguments[0]+' .feedback-submit').disabled",
-                        FIRST_RATING) is True
+    assert browser.eval(  # the rebuilt box is locked too, from the state
+        "var b=document.querySelector(arguments[0]);return [b.querySelector('.feedback-submit').disabled,"
+        " b.querySelector('[data-rating=good]').disabled, b.querySelector('.feedback-reasons input').disabled,"
+        " b.querySelector('.feedback-comment').readOnly]", FIRST_RATING,
+    ) == [True, True, True, True]
     feedback.gate.set()
     browser.wait("return document.querySelector(arguments[0]+' .feedback-status').textContent===arguments[1]",
                  FIRST_RATING, UNKNOWN_TEXT, what="failure shown in the live box")
     assert browser.eval("return document.querySelector(arguments[0]+' .feedback-submit').disabled",
                         FIRST_RATING) is False
+
+
+def test_a_failed_send_returns_focus_to_the_send_control_for_a_retry(console, browser, monkeypatch):
+    _with_feedback(console, browser, monkeypatch, outcome="unavailable")
+    send(browser, "What is IEA500I?")
+    wait_state(browser, "complete")
+    browser.click(_reach(browser, FIRST_RATING + ' .feedback-rating[data-rating="bad"]'))
+    browser.eval("document.querySelector(arguments[0]+' .feedback-submit').focus()", FIRST_RATING)
+    browser.keys("ENTER")  # keyboard send
+    browser.wait("return document.querySelector(arguments[0]+' .feedback-status').textContent.length>0",
+                 FIRST_RATING, what="failure shown")
+    assert browser.eval("return document.activeElement === document.querySelector(arguments[0]+' .feedback-submit')",
+                        FIRST_RATING) is True
 
 
 def test_controls_are_locked_while_a_rating_is_in_flight_and_the_sent_rating_is_shown(

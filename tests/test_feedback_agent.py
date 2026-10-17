@@ -197,6 +197,38 @@ async def test_unexpected_rating_status_is_unavailable_and_logged_by_status(capl
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("body", [b"", b"<html>proxy</html>", b"[1, 2]", b"null"])
+async def test_accepted_rating_with_an_odd_body_is_still_ok(monkeypatch, body):
+    """A 201 means the service stored the rating; an unparseable body only
+    loses the metric labels, never turns a stored rating into a 500."""
+    counted = []
+    monkeypatch.setattr("mainframe_rag.feedback.client.record_feedback_rating",
+                        lambda *a, **k: counted.append(k))
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(
+            lambda request: httpx2.Response(201, content=body))) as http:
+        client = FeedbackClient(_settings(), client=http)
+        assert await client.rate(Rating(request_id=RID, rating="good")) == "ok"
+        await client.aclose()
+    assert counted == [{"endpoint": "None", "verification_state": None}]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("body,outcome", [(b"", "recorded"), (b'{"recorded": true}', "recorded"),
+                                          (b'{"recorded": false}', "duplicate"), (b"[]", "recorded")])
+async def test_delivered_record_is_labelled_by_the_body_only_when_it_says_so(monkeypatch, body, outcome):
+    outcomes = []
+    monkeypatch.setattr("mainframe_rag.feedback.client.record_feedback_record", outcomes.append)
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(
+            lambda request: httpx2.Response(201, content=body))) as http:
+        client = FeedbackClient(_settings(), client=http)
+        client.start()
+        client.submit(_record())
+        await asyncio.wait_for(client._queue.join(), 2)
+        await client.aclose()
+    assert outcomes == [outcome]
+
+
+@pytest.mark.anyio
 async def test_unreachable_service_is_unavailable_and_logs_no_text(caplog):
     def handler(request):
         raise httpx2.ConnectError("refused", request=request)
