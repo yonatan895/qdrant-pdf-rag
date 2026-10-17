@@ -370,6 +370,7 @@ docker stop qdrant-restore-test && docker rm qdrant-restore-test
 
 ## 5. GPU rules (8 GB box)
 
+- Application defaults are sized for Qwen3.8-27B at a 32768-token window (#777); the local lane serves 4096. `local:stack`, `local:query` and `local:ask` source `scripts/local_lane_budget.sh`, which pins this lane's budget (4096 window, 1536 answer and 0/1000 thinking reserves, `low`/`high` efforts, 4096-era excerpt caps) for every key the caller left unset, unless the caller declares `LLM_MAX_MODEL_LEN`, as the Colab lane does.
 - Co-residency budget is tight by design (reasoning 0.64 + embed 0.33). Never launch a third server alongside the `LOCAL_RT_8GB` pair: stop `:8000` before serving anything else (e.g. the reranker on `:8002`) — or run the `TRIPLE_8GB` pack (0.5B reasoning stand-in + embed + rerank) when the third leg is required. Restore afterwards with `sh scripts/tools/run-task.sh local:llm`, verify `/v1/models`.
 - Reranker recipe (vLLM pooling, offline weights): mirror the embed container flags with `--runner pooling` and **no** `--convert` (v0.28 auto-detects sequence-classification); serve `/v1/score`; smoke-test discrimination (relevant vs irrelevant score gap, correct direction) before any A/B.
 - Crashed vLLM inits can leak VRAM across container restarts; repeated launch failures with shrinking headroom mean stop retrying — a host reboot is the reset. Do §4 first.

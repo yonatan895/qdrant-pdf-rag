@@ -62,13 +62,14 @@ models:
     baseUrl: ""
     model: ""
     # Optional bounded app overrides (#706); absent keys preserve Settings
-    # defaults. Explicit zero thinking reserves and stream: false are retained.
-    # maxModelLen: 16384
-    # reservedOutputTokens: 2048
-    # thinkingReserveTokensSimple: 512
-    # thinkingReserveTokensComplex: 2048
-    # reasoningEffortSimple: low
-    # reasoningEffortComplex: medium
+    # defaults (shown, #777). Explicit zero thinking reserves and stream: false
+    # are retained. maxModelLen must not exceed the served model window.
+    # maxModelLen: 32768
+    # reservedOutputTokens: 2560
+    # thinkingReserveTokensSimple: 8192
+    # thinkingReserveTokensComplex: 8192
+    # reasoningEffortSimple: xhigh
+    # reasoningEffortComplex: xhigh
     # Efforts the served template accepts; the console offers exactly these and
     # both efforts above must be members. Stock Qwen3.8 needs low,medium,xhigh.
     # reasoningEfforts: low,medium,xhigh

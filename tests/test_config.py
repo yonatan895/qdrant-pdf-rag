@@ -117,8 +117,11 @@ def test_served_efforts_parse_in_vocabulary_order(monkeypatch, efforts, simple, 
 
 
 @pytest.mark.parametrize(("overrides", "field"), [
-    # #748: Qwen3.8's domain with the default complex "high" must not start.
-    ({"llm_reasoning_efforts": "low,medium,xhigh"}, "LLM_REASONING_EFFORT_COMPLEX"),
+    # #748/#777: a served domain without the default xhigh must not start,
+    # on either path.
+    ({"llm_reasoning_efforts": "low,medium,high"}, "LLM_REASONING_EFFORT_SIMPLE"),
+    ({"llm_reasoning_efforts": "low,medium,high", "llm_reasoning_effort_simple": "low"},
+     "LLM_REASONING_EFFORT_COMPLEX"),
     ({"llm_reasoning_efforts": "low,low,high"}, "LLM_REASONING_EFFORTS"),
     ({"llm_reasoning_efforts": "low,maximal-private,high"}, "LLM_REASONING_EFFORTS"),
     ({"llm_reasoning_efforts": ""}, "LLM_REASONING_EFFORTS"),
@@ -201,8 +204,8 @@ def test_simple_thinking_reserve_loads_from_env(monkeypatch, reserve):
     monkeypatch.setenv("LLM_THINKING_RESERVE_TOKENS_SIMPLE", str(reserve))
     settings = Settings(_env_file=None)
     assert settings.llm_thinking_reserve_tokens_simple == reserve
-    assert settings.llm_thinking_reserve_tokens_complex == 1000
-    assert settings.llm_max_model_len == 4096
+    assert settings.llm_thinking_reserve_tokens_complex == 8192
+    assert settings.llm_max_model_len == 32768
 
 
 @pytest.mark.parametrize("reserve", [-1, 16385])
@@ -242,17 +245,17 @@ PINNED_SETTING_DEFAULTS: dict[str, object] = {
     "embed_base_url": None,
     "embed_model": None,
     "embed_api_key": None,
-    "dense_dim": None,
+    "dense_dim": 4096,
     "embed_timeout_s": 60.0,
     "embed_model_revision": "",
     "llm_base_url": None,
     "llm_model_reasoning": None,
     "llm_api_key": None,
     "answer_timeout_s": 300.0,
-    "prompt_max_context_chars": 8000,
-    "prompt_max_context_chars_complex": 4500,
-    "prompt_max_chunk_chars": 3000,
-    "prompt_max_chunk_chars_complex": 1100,
+    "prompt_max_context_chars": 32000,
+    "prompt_max_context_chars_complex": 32000,
+    "prompt_max_chunk_chars": 4000,
+    "prompt_max_chunk_chars_complex": 4000,
     "query_max_chars": 2000,
     "splunk_context_max_chars": 4000,
     "prompt_order": "retrieval",
@@ -271,16 +274,16 @@ PINNED_SETTING_DEFAULTS: dict[str, object] = {
     "rrf_sparse_boost_table": 1.0,
     "retrieve_max_chunks_per_page": 1,
     "retrieve_max_chunks_per_doc": 3,
-    "llm_reasoning_effort_simple": "low",
-    "llm_reasoning_effort_complex": "high",
-    "llm_reasoning_efforts": "low,medium,high",
+    "llm_reasoning_effort_simple": "xhigh",
+    "llm_reasoning_effort_complex": "xhigh",
+    "llm_reasoning_efforts": "low,medium,xhigh",
     "llm_temperature": 0.2,
-    "llm_max_model_len": 4096,
-    "llm_reserved_output_tokens": 1536,
-    "llm_thinking_reserve_tokens_simple": 0,
-    "llm_thinking_reserve_tokens_complex": 1000,
+    "llm_max_model_len": 32768,
+    "llm_reserved_output_tokens": 2560,
+    "llm_thinking_reserve_tokens_simple": 8192,
+    "llm_thinking_reserve_tokens_complex": 8192,
     "llm_token_safety_margin": 128,
-    "llm_max_chunk_tokens_narrative": 350,
+    "llm_max_chunk_tokens_narrative": 1200,
     "llm_tokenize_timeout_s": 5.0,
     "llm_stream": False,
     "chat_condense_enabled": False,

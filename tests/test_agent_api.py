@@ -1421,22 +1421,27 @@ def test_answer_dispatches_reasoning_effort_by_complexity(client, monkeypatch):
     fake = FakeLLM()
     monkeypatch.setattr(app_mod, "llm", fake)
 
-    # Simple query dispatches simple reasoning effort (low) and configured temperature
-    resp_simple = client.post("/v1/answer", json={"query": "IEA500I"})
-    assert resp_simple.status_code == 200
-    assert fake.last_reasoning_effort == "low"
+    simple_query = {"query": "IEA500I"}
+    complex_query = {
+        "query": "How do I diagnose and recover when DFSMShsm journal fills up during migration?"
+    }
+    # Defaults (#777): xhigh on both paths; complexity still selects the prompt.
+    assert client.post("/v1/answer", json=simple_query).status_code == 200
+    assert fake.last_reasoning_effort == "xhigh"
     assert fake.last_temperature == 0.2
     assert fake.last_messages[0].content == SYSTEM_PROMPT
-
-    # Complex query dispatches complex reasoning effort (high) and configured temperature
-    resp_complex = client.post(
-        "/v1/answer",
-        json={"query": "How do I diagnose and recover when DFSMShsm journal fills up during migration?"},
-    )
-    assert resp_complex.status_code == 200
-    assert fake.last_reasoning_effort == "high"
-    assert fake.last_temperature == 0.2
+    assert client.post("/v1/answer", json=complex_query).status_code == 200
+    assert fake.last_reasoning_effort == "xhigh"
     assert SYSTEM_PROMPT_COMPLEX_EXTENSION in fake.last_messages[0].content
+
+    # Distinct configured efforts prove routing by complexity, not a constant.
+    monkeypatch.setattr(app_mod.settings, "llm_reasoning_effort_simple", "low")
+    monkeypatch.setattr(app_mod.settings, "llm_reasoning_effort_complex", "medium")
+    assert client.post("/v1/answer", json=simple_query).status_code == 200
+    assert fake.last_reasoning_effort == "low"
+    assert client.post("/v1/answer", json=complex_query).status_code == 200
+    assert fake.last_reasoning_effort == "medium"
+    assert fake.last_temperature == 0.2
 
 
 @pytest.mark.parametrize("stream,query,field", [
@@ -1806,6 +1811,7 @@ def test_build_messages_tokenizer_budget_respected():
     settings = Settings(
         llm_max_model_len=1580,
         llm_reserved_output_tokens=250,
+        llm_thinking_reserve_tokens_simple=0,  # knife edge independent of #777 defaults
         llm_token_safety_margin=100,
         _env_file=None,
     )
@@ -1872,7 +1878,11 @@ def test_build_messages_complex_budget_prices_thinking_reserve():
     settings = Settings(
         llm_max_model_len=1500,
         llm_reserved_output_tokens=250,
+        # Knife-edge scenario pinned independently of the 27B-sized defaults
+        # (#777): zero simple term, 300 complex, the pre-#777 narrative cap.
+        llm_thinking_reserve_tokens_simple=0,
         llm_thinking_reserve_tokens_complex=300,
+        llm_max_chunk_tokens_narrative=350,
         llm_token_safety_margin=100,
         _env_file=None,
     )

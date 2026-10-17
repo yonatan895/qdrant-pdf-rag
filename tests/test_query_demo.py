@@ -208,6 +208,7 @@ def test_resolve_runtime_settings_fallback_to_hash(monkeypatch):
 def test_resolve_runtime_settings_probes_send_gateway_keys(monkeypatch):
     """Gateway-guarded discovery probes (/models, /embeddings) must carry
     the matching leg's virtual key so auto-detect works through LiteLLM."""
+    monkeypatch.delenv("DENSE_DIM", raising=False)
     monkeypatch.delenv("EMBED_MODE", raising=False)
     monkeypatch.delenv("EMBED_BASE_URL", raising=False)
     monkeypatch.delenv("LLM_BASE_URL", raising=False)
@@ -233,6 +234,9 @@ def test_resolve_runtime_settings_probes_send_gateway_keys(monkeypatch):
     with patch("httpx2.get", side_effect=mock_get), patch("httpx2.post", side_effect=mock_post):
         settings = resolve_runtime_settings()
         assert settings.embed_mode == "vllm"
+        # #777: the 4096 default never stands in for the discovered server's
+        # native dimension; only an operator-set DENSE_DIM skips the probe.
+        assert settings.dense_dim == 1024
 
     assert get_headers["http://localhost:8001/v1/models"] == {
         "Authorization": "Bearer sk-test-embed"

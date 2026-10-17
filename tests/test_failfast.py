@@ -16,9 +16,12 @@ def _clean_embed_env(monkeypatch):
         monkeypatch.delenv(var, raising=False)
 
 
-def test_refuses_vllm_without_dense_dim(monkeypatch):
+def test_refuses_vllm_with_nonpositive_dense_dim(monkeypatch):
+    """DENSE_DIM defaults to the production 4096 (#777); an explicit
+    non-positive value still refuses startup before any embed call."""
     _clean_embed_env(monkeypatch)
     monkeypatch.setenv("QDRANT_URL", "http://localhost:6333")
+    monkeypatch.setenv("DENSE_DIM", "0")
     with pytest.raises(RuntimeError, match="DENSE_DIM"), TestClient(app_mod.app):
         pass
 

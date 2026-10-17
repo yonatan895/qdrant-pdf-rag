@@ -169,7 +169,7 @@ def test_gateway_revision_reaches_stack_ingest_and_serving(tmp_path, revision):
     """
     scripts = tmp_path / "checkout" / "scripts"
     scripts.mkdir(parents=True)
-    for name in ("run_local_gateway.sh", "run_local_stack.sh"):
+    for name in ("run_local_gateway.sh", "run_local_stack.sh", "local_lane_budget.sh"):
         shutil.copyfile(REPO / "scripts" / name, scripts / name)
     shutil.copytree(REPO / "scripts" / "gateway", scripts / "gateway")
     bindir = tmp_path / "bin"

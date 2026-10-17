@@ -751,13 +751,14 @@ def test_ui_chat_passes_reasoning_effort(ui_client, monkeypatch):
     fake_llm = UiFakeLLM()
     monkeypatch.setattr(app_mod, "llm", fake_llm)
 
-    resp_high = ui_client.post(
+    # xhigh: a member of the default served domain (#777)
+    resp_xhigh = ui_client.post(
         "/ui/chat",
-        data={"message": "What is IEA500I?", "messages": "", "reasoning_effort": "high"},
+        data={"message": "What is IEA500I?", "messages": "", "reasoning_effort": "xhigh"},
         headers={"HX-Request": "true"},
     )
-    assert resp_high.status_code == 200
-    assert fake_llm.calls[-1]["reasoning_effort"] == "high"
+    assert resp_xhigh.status_code == 200
+    assert fake_llm.calls[-1]["reasoning_effort"] == "xhigh"
 
     resp_low = ui_client.post(
         "/ui/chat",
@@ -794,6 +795,9 @@ def test_console_offers_only_served_efforts_and_refuses_others_before_the_model(
     fake_llm = UiFakeLLM()
     monkeypatch.setattr(app_mod, "llm", fake_llm)
     monkeypatch.setattr(app_mod.settings, "llm_reasoning_efforts", "low,medium,xhigh")
+    # A non-default simple effort, so "omitted takes the server default" is
+    # distinguishable from the explicit xhigh request below (#777).
+    monkeypatch.setattr(app_mod.settings, "llm_reasoning_effort_simple", "low")
     monkeypatch.setattr(app_mod.settings, "llm_reasoning_effort_complex", "medium")
 
     body = ui_client.get("/ui").text

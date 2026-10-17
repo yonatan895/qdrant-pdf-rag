@@ -19,8 +19,8 @@ REASONING_EFFORT_FIELDS = {
 }
 REASONING_EFFORTS = ("low", "medium", "high", "xhigh")
 # Mirrors config.Settings defaults; tests pin both sides (#748).
-REASONING_EFFORT_DEFAULTS = {"LLM_REASONING_EFFORT_SIMPLE": "low", "LLM_REASONING_EFFORT_COMPLEX": "high",
-                             "LLM_REASONING_EFFORTS": "low,medium,high"}
+REASONING_EFFORT_DEFAULTS = {"LLM_REASONING_EFFORT_SIMPLE": "xhigh", "LLM_REASONING_EFFORT_COMPLEX": "xhigh",
+                             "LLM_REASONING_EFFORTS": "low,medium,xhigh"}
 REASONING_ENV_KEYS = (*REASONING_INTEGER_FIELDS, *REASONING_EFFORT_FIELDS, "LLM_REASONING_EFFORTS", "LLM_STREAM")
 
 MODEL_CONFIG_KEYS = (

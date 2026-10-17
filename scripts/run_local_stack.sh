@@ -397,6 +397,10 @@ done
 # The handoff defaults to a full gateway; retain the caller's consumer choice.
 export RERANK_ENABLED="$LOCAL_RERANK_ENABLED"
 export DENSE_DIM QDRANT_URL QDRANT_COLLECTION
+# The local 8 GB lane's reasoning budget, unless the caller declares the
+# served window (#777; one owner shared with local:query/local:ask).
+# shellcheck source=scripts/local_lane_budget.sh
+. "$REPO_ROOT/scripts/local_lane_budget.sh"
 # Tracing is on for every process this stack starts (the local Jaeger above).
 export OTEL_EXPORTER_OTLP_ENDPOINT="$OTEL_ENDPOINT"
 export OTEL_DEPLOYMENT_ENVIRONMENT="${OTEL_DEPLOYMENT_ENVIRONMENT:-local}"

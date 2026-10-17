@@ -226,10 +226,20 @@ class _RemoteOkTokenizer:
         return 5
 
 
+# Packing mechanics are pinned to the budget their windows were drawn against,
+# independent of the 27B-sized application defaults (#777).
+_MECHANICS_BUDGET = {
+    "llm_reserved_output_tokens": 1536,
+    "llm_thinking_reserve_tokens_simple": 0,
+    "llm_thinking_reserve_tokens_complex": 1000,
+    "llm_max_chunk_tokens_narrative": 350,
+}
+
+
 def _tokenizer_settings(**overrides):
     from mainframe_rag.config import Settings
 
-    return Settings(**settings_kw(**overrides))
+    return Settings(**settings_kw(**{**_MECHANICS_BUDGET, **overrides}))
 
 
 @pytest.mark.parametrize("chat,order", [(False, "retrieval"), (True, "stable_cache")])

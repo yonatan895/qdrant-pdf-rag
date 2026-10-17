@@ -65,6 +65,7 @@ def test_persistent_progress_reaches_ingest_after_stack_cleanup_and_restart(tmp_
     scripts = tmp_path / "checkout" / "scripts"
     scripts.mkdir(parents=True)
     shutil.copyfile(SCRIPT, scripts / SCRIPT.name)
+    shutil.copyfile(SCRIPT.parent / "local_lane_budget.sh", scripts / "local_lane_budget.sh")
     gateway = scripts / "run_local_gateway.sh"
     gateway.write_text('#!/bin/sh\nprintf "export EMBED_MODEL=fixture\\n" > "$GATEWAY_ENV_FILE"\nexec sleep 30\n')
     bindir = tmp_path / "bin"
@@ -137,6 +138,7 @@ def test_authenticated_stack_hands_writer_only_to_ingest_and_readonly_to_agent(
     scripts = tmp_path / "checkout" / "scripts"
     scripts.mkdir(parents=True)
     shutil.copyfile(SCRIPT, scripts / SCRIPT.name)
+    shutil.copyfile(SCRIPT.parent / "local_lane_budget.sh", scripts / "local_lane_budget.sh")
     (scripts / "run_local_gateway.sh").write_text('''#!/bin/sh
 "$PY" --fixture-gateway
 printf 'export EMBED_MODEL=fixture\\n' > "$GATEWAY_ENV_FILE"
@@ -217,6 +219,7 @@ def test_qdrant_credential_enumerator_failure_refuses_before_service_children(tm
     scripts = tmp_path / "checkout" / "scripts"
     scripts.mkdir(parents=True)
     shutil.copyfile(SCRIPT, scripts / SCRIPT.name)
+    shutil.copyfile(SCRIPT.parent / "local_lane_budget.sh", scripts / "local_lane_budget.sh")
     (scripts / "run_local_gateway.sh").write_text('#!/bin/sh\nprintf "gateway\\n" >> "$SERVICE_CALLS"\nexit 23\n')
     bindir = tmp_path / "bin"
     bindir.mkdir()
@@ -263,6 +266,7 @@ def test_unsafe_qdrant_role_inputs_refuse_before_service_children(tmp_path, cred
     scripts = tmp_path / "checkout" / "scripts"
     scripts.mkdir(parents=True)
     shutil.copyfile(SCRIPT, scripts / SCRIPT.name)
+    shutil.copyfile(SCRIPT.parent / "local_lane_budget.sh", scripts / "local_lane_budget.sh")
     (scripts / "run_local_gateway.sh").write_text('#!/bin/sh\nprintf "gateway\\n" >> "$SERVICE_CALLS"\nexit 23\n')
     bindir = tmp_path / "bin"
     bindir.mkdir()
@@ -326,6 +330,7 @@ def test_two_backend_live_path_preserves_flag_after_gateway_handoff(tmp_path):
     scripts = tmp_path / 'checkout' / 'scripts'
     scripts.mkdir(parents=True)
     (scripts / SCRIPT.name).write_text(SCRIPT.read_text())
+    (scripts / "local_lane_budget.sh").write_text((SCRIPT.parent / "local_lane_budget.sh").read_text())
     (scripts / 'run_local_gateway.sh').write_text('''#!/bin/sh
 printf 'export RERANK_ENABLED=true\\n' > "$GATEWAY_ENV_FILE"
 ''')
@@ -353,6 +358,60 @@ exit 23
     assert '8000/v1/models' in calls and '8001/v1/models' in calls
     assert '8002' not in calls
     assert 'probe-rerank=false' in calls
+
+
+_BUDGET_KEYS = ("LLM_MAX_MODEL_LEN", "LLM_RESERVED_OUTPUT_TOKENS", "LLM_THINKING_RESERVE_TOKENS_SIMPLE",
+                "LLM_THINKING_RESERVE_TOKENS_COMPLEX", "LLM_REASONING_EFFORT_SIMPLE",
+                "LLM_REASONING_EFFORT_COMPLEX", "LLM_REASONING_EFFORTS", "LLM_MAX_CHUNK_TOKENS_NARRATIVE",
+                "PROMPT_MAX_CONTEXT_CHARS", "PROMPT_MAX_CONTEXT_CHARS_COMPLEX", "PROMPT_MAX_CHUNK_CHARS",
+                "PROMPT_MAX_CHUNK_CHARS_COMPLEX")
+_LOCAL_8GB_BUDGET = {"LLM_MAX_MODEL_LEN": "4096", "LLM_RESERVED_OUTPUT_TOKENS": "1536",
+                     "LLM_THINKING_RESERVE_TOKENS_SIMPLE": "0", "LLM_THINKING_RESERVE_TOKENS_COMPLEX": "1000",
+                     "LLM_REASONING_EFFORT_SIMPLE": "low", "LLM_REASONING_EFFORT_COMPLEX": "high",
+                     "LLM_REASONING_EFFORTS": "low,medium,high", "LLM_MAX_CHUNK_TOKENS_NARRATIVE": "350",
+                     "PROMPT_MAX_CONTEXT_CHARS": "8000", "PROMPT_MAX_CONTEXT_CHARS_COMPLEX": "4500",
+                     "PROMPT_MAX_CHUNK_CHARS": "3000", "PROMPT_MAX_CHUNK_CHARS_COMPLEX": "1100"}
+
+
+@pytest.mark.parametrize(("caller", "expected"), [
+    # No declared window: the stack fronts the local 4096-token vLLM lane.
+    ({}, _LOCAL_8GB_BUDGET),
+    # A caller-set key survives; the rest of the lane budget is still pinned.
+    ({"LLM_REASONING_EFFORT_COMPLEX": "medium"},
+     {**_LOCAL_8GB_BUDGET, "LLM_REASONING_EFFORT_COMPLEX": "medium"}),
+    # A declared window (the Colab lane) leaves every other key to Settings.
+    ({"LLM_MAX_MODEL_LEN": "32768"},
+     {key: ("32768" if key == "LLM_MAX_MODEL_LEN" else "") for key in _BUDGET_KEYS}),
+])
+def test_local_lane_budget_is_pinned_unless_the_window_is_declared(tmp_path, caller, expected):
+    """#777: application defaults are sized for a 32k Qwen3.8-27B window; the
+    agent the local stack starts must never price that against the 4k local
+    vLLM lane, while a caller that declares the served window keeps them."""
+    scripts = tmp_path / 'checkout' / 'scripts'
+    scripts.mkdir(parents=True)
+    (scripts / SCRIPT.name).write_text(SCRIPT.read_text())
+    (scripts / "local_lane_budget.sh").write_text((SCRIPT.parent / "local_lane_budget.sh").read_text())
+    (scripts / 'run_local_gateway.sh').write_text(
+        "#!/bin/sh\nprintf 'export RERANK_ENABLED=false\\n' > \"$GATEWAY_ENV_FILE\"\n")
+    bindir = tmp_path / 'bin'
+    bindir.mkdir()
+    log = tmp_path / 'calls'
+    (bindir / 'curl').write_text("#!/bin/sh\nprintf '200'\n")
+    (bindir / 'docker').write_text('#!/bin/sh\nexit 99\n')
+    py = bindir / 'python'
+    py.write_text('#!/bin/sh\n' + ''.join(
+        f'printf "{key}=%s\\n" "${{{key}:-}}" >> "$CALLS"\n' for key in _BUDGET_KEYS) + 'exit 23\n')
+    for file in bindir.iterdir():
+        file.chmod(0o755)
+    clean = {k: v for k, v in os.environ.items() if k not in _BUDGET_KEYS}
+    result = subprocess.run(['sh', str(scripts / SCRIPT.name)], capture_output=True, text=True, check=False,
+        env={**clean, 'PATH': str(bindir) + ':' + os.environ['PATH'], 'CALLS': str(log),
+             'LOCAL_STACK_DRYRUN': '0', 'RERANK_ENABLED': 'false', 'PY': str(py),
+             'GATEWAY_ENV_FILE': str(tmp_path / 'gateway.env'), 'LOCAL_STACK_LOG_DIR': str(tmp_path),
+             **caller})
+    assert result.returncode == 23, result.stderr
+    seen = dict(line.split('=', 1) for line in log.read_text().splitlines())
+    assert seen == expected
 
 
 # --- Local ingest host-RAM budget (issue #580) -------------------------------
@@ -429,6 +488,7 @@ def _live(tmp_path: Path, host: dict[str, str], extra: dict[str, str] | None = N
     scripts = tmp_path / "checkout" / "scripts"
     scripts.mkdir(parents=True)
     (scripts / SCRIPT.name).write_text(SCRIPT.read_text())
+    (scripts / "local_lane_budget.sh").write_text((SCRIPT.parent / "local_lane_budget.sh").read_text())
     (scripts / "run_local_gateway.sh").write_text(
         "#!/bin/sh\nprintf 'export RERANK_ENABLED=true\\n' > \"$GATEWAY_ENV_FILE\"\n"
     )

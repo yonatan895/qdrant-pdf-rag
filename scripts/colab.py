@@ -1522,8 +1522,8 @@ class Run:
                        GATEWAY_REASONING_MODEL=self.profile["servers"][0]["model_id"],
                        GATEWAY_EMBED_MODEL=self.profile["servers"][1]["model_id"],
                        GATEWAY_EMBED_MODEL_REVISION=self.profile["servers"][1]["revision"],
-                       DENSE_DIM="4096", RERANK_ENABLED="false", LLM_MAX_MODEL_LEN="16384",
-                       LLM_REASONING_EFFORT_SIMPLE="low", LLM_REASONING_EFFORT_COMPLEX="medium",
+                       DENSE_DIM="4096", RERANK_ENABLED="false", LLM_MAX_MODEL_LEN="32768",
+                       LLM_REASONING_EFFORT_SIMPLE="xhigh", LLM_REASONING_EFFORT_COMPLEX="xhigh",
                        LLM_REASONING_EFFORTS="low,medium,xhigh",  # Qwen3.8 template domain (#748)
                        GATEWAY_PROBE_MAX_TOKENS="512", LITELLM_IMAGE=self.config["gateway_image"],
                        GATEWAY_ENV_FILE=str(self.state / "gateway.env"),
@@ -1900,7 +1900,7 @@ def parser() -> argparse.ArgumentParser:
     prep.add_argument("--reasoning-port", type=int, default=8000)
     prep.add_argument("--embedding-port", type=int, default=8001)
     prep.add_argument("--qdrant-port", type=int, default=16333)
-    prep.add_argument("--embedding-max-len", type=int, default=4096)
+    prep.add_argument("--embedding-max-len", type=int, default=8192)
     prep.add_argument("--deadline-seconds", type=int, default=7200)
     prep.add_argument("--cu-cap", type=float, default=20)
     prep.add_argument("--cu-floor", type=float, default=10)
@@ -1918,7 +1918,7 @@ def parser() -> argparse.ArgumentParser:
         fresh.add_argument("--" + name, required=True)
     fresh.add_argument("--kubectl", default="kubectl")
     fresh.add_argument("--qdrant-port", type=int, default=16333)
-    fresh.add_argument("--embedding-max-len", type=int, default=4096)
+    fresh.add_argument("--embedding-max-len", type=int, default=8192)
     fresh.add_argument("--deadline-seconds", type=int, default=180)
     for name in ("run", "stop"):
         command = commands.add_parser(name)

@@ -297,6 +297,7 @@ tasks:
         if [ -n "${TASK_MODEL:-}" ]; then set -- "$@" --model "$TASK_MODEL"; fi;
         if [ -n "${TASK_VLLM_URL:-}" ]; then set -- "$@" --vllm-url "$TASK_VLLM_URL"; fi;
         if [ -n "${TASK_OTEL_ENDPOINT:-}" ]; then set -- "$@" --otel-endpoint "$TASK_OTEL_ENDPOINT"; fi;
+        . scripts/local_lane_budget.sh;
         exec .venv/bin/python scripts/query_demo.py "$@"
 
   ask:

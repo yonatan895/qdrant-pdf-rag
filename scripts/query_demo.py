@@ -369,7 +369,11 @@ def resolve_runtime_settings(
             if m_resp.status_code == 200:
                 chosen_embed_model = _select_served_model(m_resp.json(), embed_model, settings.embed_model)
 
-                resolved_dim = dense_dim or settings.dense_dim
+                # Only an operator-set DENSE_DIM is trusted without a probe: the
+                # 4096 default (#777) describes the production embedder, not
+                # whatever local server this tool discovered.
+                operator_dim = settings.dense_dim if "dense_dim" in settings.model_fields_set else None
+                resolved_dim = dense_dim or operator_dim
                 server_dim: int | None = None
                 if (resolved_dim is None or dense_dim is not None) and chosen_embed_model:
                     try:

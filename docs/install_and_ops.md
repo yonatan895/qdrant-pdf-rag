@@ -240,12 +240,13 @@ When running local tooling (`sh scripts/tools/run-task.sh local:ask`, `sh script
 | **`ALLOW_HASH_MODE`** | `"true"` (auto-set for local test utilities) | `false` (fails closed to prevent hash retrieval in prod) |
 | **`LLM_BASE_URL`** | Source the real gateway's `GATEWAY_ENV_FILE` (`http://localhost:4000/v1`) | Platform gateway endpoint from `airgap.env` |
 | **`LLM_MODEL_REASONING`** | Auto-resolved from `/v1/models` on local server | Dedicated reasoning model specified in `airgap.env` |
-| **`LLM_REASONING_EFFORT_SIMPLE`** | `"low"` | `"low"` (preserves latency on factoid lookups) |
-| **`LLM_REASONING_EFFORT_COMPLEX`** | `"high"` | `"high"` (enforces deep multi-step deliberation) |
-| **`LLM_REASONING_EFFORTS`** | `"low,medium,high"` | The served template's efforts; Qwen3.8 needs `"low,medium,xhigh"` with a member complex effort (#748) |
+| **`LLM_REASONING_EFFORT_SIMPLE`** | `"low"` (local 8 GB lane pin) | `"xhigh"` (default, #777) |
+| **`LLM_REASONING_EFFORT_COMPLEX`** | `"high"` (local 8 GB lane pin) | `"xhigh"` (default, #777) |
+| **`LLM_REASONING_EFFORTS`** | `"low,medium,high"` (local 8 GB lane pin) | `"low,medium,xhigh"` (default; the Qwen3.8 template's efforts, #748) |
 | **`LLM_TEMPERATURE`** | `0.2` | `0.2` (deterministic, grounded technical reasoning) |
-| **`PROMPT_MAX_CONTEXT_CHARS`** | `8000` | `8000` (for simple queries) |
-| **`PROMPT_MAX_CONTEXT_CHARS_COMPLEX`** | `4500` | `4500` (reserves ~2.6k token headroom for reasoning) |
+| **`PROMPT_MAX_CONTEXT_CHARS`** | `8000` (local 8 GB lane pin) | `32000` (default; no-tokenizer fallback, #777) |
+| **`PROMPT_MAX_CONTEXT_CHARS_COMPLEX`** | `4500` (local 8 GB lane pin: ~2.6k tokens of reasoning headroom in a 4096 window) | `32000` (default, #777) |
+| **`LLM_MAX_MODEL_LEN`** | `4096` (local 8 GB lane pin, unless the caller declares a window) | `32768` (default; must not exceed the served `--max-model-len`, #777) |
 | **`RERANK_ENABLED`** | `false` | `false` (cross-encoder rerank ships default-off; see §3.11) |
 | **`RERANK_BASE_URL`** | Gateway handoff URL | Platform gateway scoring/rerank leg (required when `RERANK_ENABLED=true`) |
 | **`RERANK_MODEL`** | `BAAI/bge-reranker-v2-m3` | Must match the served reranker model |
@@ -675,7 +676,7 @@ default per-leg keys.
 
 | Role | URL key | Model key | Notes |
 |---|---|---|---|
-| Reasoning (answer, chat and console) | `LLM_BASE_URL` | `LLM_MODEL_REASONING` | Empty model = answers stay disabled. Raise `LLM_MAX_MODEL_LEN` past the 4096 default to the served context (tokenizer uses the server `/tokenize`, estimator fallback otherwise). Auth: `llm-api-key` from the `GATEWAY_API_KEY_SECRET` Secret (unset = keyless). |
+| Reasoning (answer, chat and console) | `LLM_BASE_URL` | `LLM_MODEL_REASONING` | Empty model = answers stay disabled. `LLM_MAX_MODEL_LEN` defaults to 32768 and must not exceed the served context: lower it when the platform serves a smaller window, because nothing in the request path can read the served window through the gateway (tokenizer uses the server `/tokenize`, estimator fallback otherwise). Auth: `llm-api-key` from the `GATEWAY_API_KEY_SECRET` Secret (unset = keyless). |
 | Embed (`/v1/search`, ingest) | `EMBED_BASE_URL` (defaults to `GATEWAY_BASE_URL`) | `EMBED_MODEL` + `DENSE_DIM` + `EMBED_MODEL_REVISION` | `DENSE_DIM` is required and fail-closed: it must equal the served native dim (4096 for Qwen3-Embedding-8B). Collections are created at that width; a mismatch against an existing collection refuses with `DimMismatchError`. `EMBED_MODEL_REVISION` is the operator-declared immutable model/config revision (a gateway alias is mutable and a dimension is not an identity): blank/whitespace-only values fail pre-flight and refuse agent/ingest startup, and a revision change requires a deliberate `--reingest` migration. Auth: `embed-api-key` from the same Secret; the ingest Job reads it too. |
 | Rerank (optional, default off) | `RERANK_BASE_URL` (defaults to `GATEWAY_BASE_URL`, no embed fallback) | `RERANK_MODEL` | Served via a vLLM pooling server (`--runner pooling`, `/v1/score`; TEI `/v1/rerank` fallback). Use the platform gateway rerank leg and its model ID; do not configure a direct-backend consumer shortcut. Lifespan logs a loud warning (never a refusal) when the endpoint is unreachable at startup. Auth: `rerank-api-key` from the same Secret. Leg order: run `probe_gateway.py` below to decide — `score_first` whenever the score leg answers (even on a gateway exposing both legs), `rerank_first` only when the score leg is unavailable. |
 
