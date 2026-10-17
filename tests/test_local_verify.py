@@ -240,3 +240,24 @@ def test_explicit_mode_rejects_auto_mode_options(tmp_path, capsys):
     args = ['--no-memory-cap', '--out-dir', str(tmp_path), '--t2', 'tests/test_local_verify.py']
     assert lv.main(args, lock=tmp_path / 'no-lock') == 2
     assert 'apply to auto mode' in capsys.readouterr().err
+
+
+def test_colab_lock_matters_only_for_selections_that_exercise_the_controller():
+    assert lv.colab_lock_sensitive(['tests/test_config.py', 'tests/test_local_selection.py']) == []
+    assert lv.colab_lock_sensitive(['tests/test_colab.py::test_x', 'tests/test_config.py']) == ['tests/test_colab.py']
+    assert 'tests/test_local_verify.py' in lv.colab_lock_sensitive(['tests/test_local_verify.py'])
+
+
+def test_held_lock_refuses_a_controller_selection_but_not_an_unrelated_one(tmp_path, capsys):
+    lock = tmp_path / 'assignment.lock'
+    common = ['--no-memory-cap', '--python', sys.executable, '--out-dir', str(tmp_path / 'out')]
+    unrelated = 'tests/test_local_selection.py::test_selection_is_deterministic_and_sorted'
+    with open(lock, 'w+b') as holder:
+        holder.write(b'4242\n')
+        holder.flush()
+        fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        assert lv.main([*common, 'tests/test_colab.py::test_x'], lock=lock) == 2
+        assert 'held by PID 4242 and the selection runs tests/test_colab.py' in capsys.readouterr().err
+        assert lv.main([*common, unrelated], lock=lock) == 0
+    (run,) = [p for p in (tmp_path / 'out').iterdir() if (p / 'receipt.json').exists()]
+    assert json.loads((run / 'receipt.json').read_text())['colab_lock_checked'] is False

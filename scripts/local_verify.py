@@ -10,8 +10,8 @@ suite; a receipt never substitutes for it. Each guarantee fails closed:
 - G2 owned environment: the child environment is built from an allowlist
   (never inherited), temp files live on disk outside the repository, and
   memory is capped.
-- G3 no interference: no other holder of the Colab assignment lock and no
-  other pytest running from this tree.
+- G3 no interference: no other holder of the Colab assignment lock when the
+  selection exercises scripts/colab.py, and no other pytest running from this tree.
 - G4/G5 selection: without explicit tests, scripts/local_selection.py derives
   T1 (or T2 for broad changes) from the diff against origin/main plus dirty
   paths, printed before running. An unmapped src/scripts change refuses unless
@@ -147,6 +147,14 @@ def assignment_lock_holder(lock: Path) -> str | None:
     return None
 
 
+def colab_lock_sensitive(tests: list[str]) -> list[str]:
+    """Selected test modules that exercise scripts/colab.py, and so its host lock (G3)."""
+    # Importers take the lock in-process; test_colab* modules also drive it via subprocesses.
+    importers = local_selection.importing_tests(local_selection.build_graph(ROOT), 'scripts.colab')
+    selected = {t.split('::', 1)[0] for t in tests}
+    return sorted(t for t in selected if t in importers or Path(t).name.startswith('test_colab'))
+
+
 def _ancestors() -> set[int]:
     pids, pid = set(), os.getpid()
     while pid > 1:
@@ -256,7 +264,7 @@ def result_of(code: int, counts: dict | None, t0: dict | None = None, ran: bool 
 def build_receipt(*, state: dict, tier: str, selection: dict, command: list[str], env: dict[str, str],
                   dropped: list[str], passed: list[str], memory_max: int | None, code: int,
                   counts: dict | None, started: float, finished: float, t0: dict | None = None,
-                  ran: bool = True) -> dict:
+                  ran: bool = True, colab_lock_checked: bool = True) -> dict:
     result = result_of(code, counts, t0, ran)
     evidence = result == 'passed' and not state['dirty'] and state['head'] is not None
     return {
@@ -273,6 +281,7 @@ def build_receipt(*, state: dict, tier: str, selection: dict, command: list[str]
                         'set': {k: env[k] for k in ('TMPDIR', 'TASK_CONTRACTS_REQUIRE_RUNNER',
                                                      'PYTEST_DISABLE_PLUGIN_AUTOLOAD')}},
         'memory_max_mib': memory_max,
+        'colab_lock_checked': colab_lock_checked,
         'command': command,
         'exit_code': code,
         'counts': counts,
@@ -337,9 +346,11 @@ def main(argv: list[str] | None = None, *, lock: Path | None = None) -> int:
         dropped = sorted(set(os.environ) - set(env))
         python = args.python
         check_interpreter(ROOT, python, env)
-        holder = assignment_lock_holder(lock)
+        lock_sensitive = colab_lock_sensitive(tests)
+        holder = assignment_lock_holder(lock) if lock_sensitive else None
         if holder:
-            raise Refusal(f'Colab assignment lock is held by {holder}; stop that run first')
+            raise Refusal(f'Colab assignment lock is held by {holder} and the selection runs '
+                          f'{", ".join(lock_sensitive)}; stop that run first')
         strays = stray_pytest(ROOT)
         if strays:
             raise Refusal(f'pytest already running from this tree: PID {", ".join(map(str, strays))}')
@@ -374,7 +385,8 @@ def main(argv: list[str] | None = None, *, lock: Path | None = None) -> int:
     finished = time.time()
     receipt = build_receipt(state=state, tier=tier, selection=selection, command=command, env=env,
                             dropped=dropped, passed=args.pass_env, memory_max=memory_max, code=code,
-                            counts=counts, started=started, finished=finished, t0=t0, ran=ran)
+                            counts=counts, started=started, finished=finished, t0=t0, ran=ran,
+                            colab_lock_checked=bool(lock_sensitive))
     (run / 'receipt.json').write_text(json.dumps(receipt, indent=2) + '\n')
     print(f'local verification: {receipt["result"]} ({receipt["label"]})')
     print(f'receipt: {run / "receipt.json"}')

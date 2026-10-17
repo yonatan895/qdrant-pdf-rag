@@ -144,6 +144,12 @@ def _closure(graph: Graph, starts: set[str]) -> set[str]:
     return seen
 
 
+def importing_tests(graph: Graph, module: str) -> set[str]:
+    """Test module paths whose import closure reaches `module` (no string references)."""
+    return {graph.paths[m] for m in _closure(graph, {module})
+            if m in graph.paths and is_test_module(graph.paths[m])}
+
+
 def _tokens(path: str) -> list[re.Pattern[str]]:
     words = [path]
     name = module_name(path)
