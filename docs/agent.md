@@ -1103,6 +1103,19 @@ Uncited text after the decline is the coverage note, so a model that leads
 with the decline and then answers without citing is classified
 `insufficient_evidence`: the conservative outcome, never a false `accepted`.
 
+Maintainer decision (2026-10-17, #764): "cites" means inline `[n]` markers,
+not the trailing `Citations:` list. On the G4 r2 run every real decline
+(14/14) still listed citations and none used inline markers, so treating the
+list as cited content would turn every decline back into `accepted`.
+Accepted residuals:
+- An answer that breaks rule 4 by leading with the decline, then answers
+  while citing only in the `Citations:` list, is classified
+  `insufficient_evidence` with its citations zeroed.
+- A decline whose coverage note mentions an excerpt index ("[2] covers only
+  ...") falls to the whole-response rule.
+
+The G4 measurement of this wording records how often either occurs.
+
 Body presence is shared with the answer eval (#576): empty `Answer` headings,
 citation labels (including inline labels followed only by bracket indices or
 a citation), citation headers, standalone citation-shaped or validated lines (including generic
