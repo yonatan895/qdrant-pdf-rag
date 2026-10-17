@@ -34,6 +34,26 @@ from tests.test_run_ingest import _filter_doc_id
 ALIAS = "mainframe_manuals"
 
 
+@pytest.fixture(autouse=True)
+def _parse_in_threads(monkeypatch):
+    """Parse in worker threads instead of a spawned process pool.
+
+    Every real `run_ingest.main` here would otherwise pay a fresh interpreter
+    plus a full package import (about 0.9 s). The pool is not what these tests
+    claim: they prove publication, cutover and recovery against the storage
+    double. The spawn pool stays covered by the unpatched ingest suites
+    (tests/test_run_ingest.py, tests/test_ingest_robustness.py).
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    from mainframe_rag.ingest import run_ingest
+
+    monkeypatch.setattr(
+        run_ingest, "ProcessPoolExecutor",
+        lambda max_workers, mp_context: ThreadPoolExecutor(max_workers=max_workers),
+    )
+
+
 def _settings(**overrides):
     kw = {"embed_mode": "hash", "_env_file": None}
     kw.update(overrides)
@@ -3446,8 +3466,6 @@ def checks(r: QdrantReader, real: qdrant_client.QdrantClient, s: Settings) -> No
                                retire_docs=None, rules_v="rules")
     _certify_live(res, r, Path("progress"), s, s, prewalked=[], rules_v="rules")
 """)
-    accepted = subprocess.run([*command, str(good)], capture_output=True, text=True, check=False)
-    assert accepted.returncode == 0, accepted.stdout + accepted.stderr
 
     bad = tmp_path / "bad.py"
     bad.write_text(imports + """
@@ -3465,8 +3483,12 @@ def writes(r: QdrantReader, s: Settings) -> None:
             for peer in placement.values():
                 peer.delete_collection("staging")
 """)
-    rejected = subprocess.run([*command, str(bad)], capture_output=True, text=True, check=False)
+    # One strict run checks both files (a cold mypy start-up dominates the
+    # cost): the reader-only file must produce no diagnostic at all, and the
+    # writer-requiring file exactly the five below.
+    rejected = subprocess.run([*command, str(good), str(bad)], capture_output=True, text=True, check=False)
     assert rejected.returncode == 1, rejected.stdout + rejected.stderr
+    assert str(good) not in rejected.stdout + rejected.stderr, rejected.stdout + rejected.stderr
     for name in ("ensure_staging", "delete_by_revision", "swap_alias_to"):
         assert (f'Argument 1 to "{name}" has incompatible type "QdrantReader"; '
                 'expected "QdrantPoints"') in rejected.stdout

@@ -78,7 +78,8 @@ restores the snapshot over whatever the file assigned; empty stays unset
   `STORAGE_CLASS` and `SNAPSHOT_STORAGE_CLASS` are checked (the latter
   defaults to the former); the corpus PVC is not.
 - Operator booleans `UI_ENABLED`, `CONTEXTUAL_EMBED_ENABLED`,
-  `INGEST_ALIAS_PUBLISH`, `INGEST_REINGEST`, `CHAT_CONDENSE_ENABLED` and `LLM_STREAM`
+  `INGEST_ALIAS_PUBLISH`, `INGEST_REINGEST`, `CHAT_CONDENSE_ENABLED`, `LLM_STREAM`
+  and `AGENT_NETWORK_POLICY` (default **true**, unlike the others)
   accept only `true/1/yes` or `false/0/no` (any case; unset keeps the
   default). `INGEST_ALIAS_PUBLISH` may only be unset or true: in-place ingest
   was retired (#360) and an explicit false fails closed.
@@ -203,8 +204,42 @@ Compatibility and lifecycle decisions under #448:
   existing owned Route is deleted before the first release mutation, not after
   the rollout wait. Not covered here (site evidence, see the issue): the OAuth
   login itself, who is authorized (`--email-domain=*` admits any authenticated
-  cluster user; deploy prints a notice) and the unauthenticated 8080 Service
-  port.
+  cluster user; deploy prints a notice; the opt-in SAR cohort check is deferred
+  under #373) and, for the unauthenticated 8080 Service port, whether the
+  agent ingress NetworkPolicy below is actually enforced and not widened by
+  site policies.
+
+<a id="agent-networkpolicy"></a>
+- Agent ingress NetworkPolicy (issue #373, **default on**, a maintainer-approved
+  default change). The chart renders `NetworkPolicy/rag-agent-ingress` unless
+  `AGENT_NETWORK_POLICY=false` (strict boolean; `networkPolicy.enabled`). It
+  selects only `app: rag-agent` pods and only `Ingress` (Qdrant, Jaeger, the
+  ingest Job and all egress are untouched). Rules: pods of the release
+  namespace reach 8080 (and 8443 when `AGENT_ROUTE=true`); the OpenShift
+  router (`network.openshift.io/policy-group: ingress`) reaches 8443 only;
+  with `METRICS_ENABLED=true` the monitoring namespaces
+  (`policy-group: monitoring` or namespace
+  `openshift-user-workload-monitoring`) reach 8080, whether or not the chart
+  ServiceMonitor is deployed; each namespace in
+  `AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES` (comma-separated DNS-1123 labels,
+  no spaces or repeats, empty by default, matched by
+  `kubernetes.io/metadata.name`) reaches 8080 only. Anything else, including
+  another namespace calling `rag-agent:8080` such as an out-of-namespace MCP
+  server, is denied until listed or the policy is disabled. A malformed
+  selection, or a list with the policy disabled, fails before any mutation.
+  Kubelet probes and the sidecar's loopback hop are expected to be unaffected
+  (pod readiness after the policy is site acceptance). Missing platform labels
+  show as the router's 503 on the Route or failed scrapes while pods stay Ready;
+  `AGENT_NETWORK_POLICY=false` is the opt-out. The policy is
+  a member of the fixed ownership inventory (`check_app_ownership.py`), so the
+  next ordinary deploy adopts its own policy; disabling it makes Helm remove the
+  owned object with the release upgrade (no extra cleanup entry). Not proven by
+  this repository, and site-gated under #447: CNI enforcement, the platform
+  labels on the router/monitoring namespaces, denial from another namespace
+  (service and pod IP), and coexistence with site policies. NetworkPolicies
+  are additive, so a site allow-all or broad allow policy that also selects the
+  agent pods voids the restriction; a site default-deny is not satisfied by
+  this policy for Qdrant or Jaeger.
 
 - `check_app_ownership.py` accepts only the fixed first-party resource inventory
   in the selected namespace. Existing unmanaged Kustomize resources can be
@@ -1095,6 +1130,13 @@ Agent and ingest image roots (source and baked BM25 snapshot included) are
 read-only; only `/tmp` and ingest's existing `/work` mount accept writes.
 Never repair admission with `anyuid`. Verify an old trace survives replacement.
 
+The agent's unauthenticated HTTP port is namespace-scoped by default through
+the chart's ingress NetworkPolicy (rules, escape hatches and site-gated proof:
+[compatibility decisions](#agent-networkpolicy)).
+Never replace it with a Qdrant or agent Route, `anyuid` or a cluster-scoped
+grant; a site that cannot use it sets `AGENT_NETWORK_POLICY=false` and records
+its own restriction.
+
 Keep placeholders in git, render fails closed on leftover tokens, quote scalar
 environment values, and wire PULL_SECRET to Qdrant **and** agent/ingest. Deploy
 and ingest arguments reject unknown flags before operations. Snapshot administration
@@ -1178,6 +1220,16 @@ required ACTIVE copies on both collections. No peer endpoints are inferred
 from the Service or replica count. An unset list remains unconfigured and
 cannot certify RF>1 placement. Peer clients use the existing ingest credential;
 the serving Deployment does not receive this writer-side setting.
+
+**Agent ingress policy (issue #373):** `AGENT_NETWORK_POLICY` (default true) and
+`AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES` (default empty) follow the same path:
+`airgap.env.example`, `OPERATOR_ENV_KEYS` snapshot/restore and the Task
+`TASK_*` bridge, validation by the one owner (`model_config.network_policy`,
+used by `validate.sh` and `map_values.py`), generated `networkPolicy.enabled` /
+`networkPolicy.allowedNamespaces`, schema validation, and the chart template.
+It renders only into the application release (the ingest Job render does not
+depend on it). The default-on change is documented under the console Route
+bullet in the compatibility decisions above, which owns the rules.
 
 **Absent/blank semantics:** `common.sh` currently gives non-empty explicit env
 precedence and otherwise permits file/default resolution; required attestation

@@ -32,7 +32,7 @@ IMAGE = "example.invalid/gateway@sha256:" + "a" * 64
 # really binds the four requested local sockets; Docker's host-gateway fake
 # probes those sockets rather than declaring them reachable by fiat.
 FAKE = r'''
-import http.server, json, os, pathlib, shlex, signal, socketserver, subprocess, sys, threading, time
+import json, os, pathlib, sys, time
 root=pathlib.Path(os.environ['FAKE_COLAB_ROOT'])
 with (root/'fake-pids').open('a') as f: f.write(str(os.getpid())+'\n')
 name=pathlib.Path(sys.argv[0]).name
@@ -171,6 +171,7 @@ if name=='colab':
             path('/content/colab-artifacts.tgz').write_bytes(b'private-fake-diagnostics')
     else: raise AssertionError('unsupported real CLI command: '+cmd)
 elif name=='ssh':
+    import http.server, shlex, subprocess, threading
     assert '-N' in args and args.count('-L')==4
     configuration=pathlib.Path(args[args.index('-F')+1]).read_text()
     proxy=shlex.split(next(line.strip().removeprefix('ProxyCommand ') for line in configuration.splitlines()
@@ -241,6 +242,7 @@ elif name=='docker':
             assert network in networks.values()
             if scenario=='gateway_network_fail': sys.exit(19)
             if scenario=='gateway_network_probe_hang': time.sleep(30)
+        import subprocess
         code_at=args.index('-c')+1
         code=args[code_at].replace('host.docker.internal','127.0.0.2')
         subprocess.run([sys.executable,'-c',code,*args[code_at+1:]],check=True)
@@ -275,6 +277,7 @@ elif name=='kubectl':
         print('ORIGINAL-FAKE-CONFIG-STDERR',file=sys.stderr)
     elif rest[0]=='port-forward':
         assert rest[:4]==['port-forward','--address','127.0.0.1','pod/qdrant-0']
+        import http.server, signal
         local,remote_port=rest[4].split(':'); assert remote_port=='6333'
         if os.environ.get('FAKE_FRESH_API')=='resist-cleanup':
             signal.signal(signal.SIGTERM,lambda *_: (root/'fresh-forward-term').touch())
@@ -363,6 +366,17 @@ def _prepare_new(source_state, state, *, profile="COLAB_CPU_TRANSPORT", extra=()
     argv, source = _prepare_arguments(source_state, state, profile=profile, extra=extra)
     assert _controller_call(argv, source_root=source) == 0
     return state
+
+
+# A persistent stop failure is retried until the run deadline (#746), so such a
+# test lasts one deadline. Preparing the failing run with this shorter,
+# still-ordinary deadline keeps the retry-until-deadline path under test (the
+# work window stays several times a normal run) without waiting 30 s.
+SHORT_DEADLINE_SECONDS = "12"
+
+
+def _prepare_short_deadline(source_state, state):
+    return _prepare_new(source_state, state, extra=("--deadline-seconds", SHORT_DEADLINE_SECONDS))
 
 
 def test_ingest_reingest_is_refused_outside_production_before_state(lab):
@@ -916,12 +930,13 @@ def storage_lab(lab, retained, original_inputs, monkeypatch):
             run.terminate(child)
 
 
-def _prepare_production_again(run, name, *, extra=()):
+def _prepare_production_again(run, name, *, extra=(), approval=None):
     extra = list(extra)
     for field in ("corpus", "golden", "inventory", "source_inventory", "embedding_evidence", "production_approval",
                   "data_state", "kubeconfig", "kube_context", "namespace", "qdrant_service",
                   "inference_lock", "transport_receipt", "qdrant_port"):
-        extra += ["--" + field.replace("_", "-"), str(run.config[field])]
+        value = approval if field == "production_approval" and approval is not None else run.config[field]
+        extra += ["--" + field.replace("_", "-"), str(value)]
     extra += ["--dataset", "production", "--kubectl", run.tools["kubectl"]]
     return _prepare_new(run.state, run.state.parent / name, profile="COLAB_G4_BF16", extra=extra)
 
@@ -1304,9 +1319,10 @@ def test_prepare_copy_enforces_separate_source_and_tool_caps_without_allocating(
 
 
 def test_snapshot_recovery_releases_owned_session_despite_changed_origin_then_next_run_works(lab, monkeypatch):
-    root, state, command = lab
+    root, base, command = lab
+    state = _prepare_short_deadline(base, root / "short-deadline-run")
     monkeypatch.setenv("FAKE_COLAB_SCENARIO", "stop_fail")
-    # A persistent stop failure is retried until the 30 s run deadline (#746).
+    # A persistent stop failure is retried until the run deadline (#746).
     failed = subprocess.run(command + ["run", "--state", str(state), "--approve-cu", "20", "--", "/bin/true"],
                             capture_output=True, text=True, timeout=60, check=False)
     assert failed.returncode == 1
@@ -1434,10 +1450,13 @@ def test_failed_poll_right_after_allocation_cannot_bound_cap_and_fails_closed(la
 
 
 @pytest.mark.parametrize("failed", [{"stop": [0]}, {"sessions": [4, 5]}])
-def test_transient_release_failure_is_retried_until_absence_then_next_run_works(lab, failed):
+def test_transient_release_failure_is_retried_until_absence_then_next_run_works(lab, failed, monkeypatch):
     """#746: a failed stop or absence check during an outage is retried within
     the hard deadline instead of leaving the session billing unverified."""
     root, state, _ = lab
+    # The retry pause is a delay, not the behavior under test; the run is
+    # in-process, so a short pause exercises the same retry-until-absence loop.
+    monkeypatch.setattr(controller, "RELEASE_RETRY_SECONDS", .2)
     # sessions calls 0-2 precede/prove allocation and transport, 3 is export
     # ownership, so 4 and 5 are the release's ownership and absence checks.
     (root / "fail-calls.json").write_text(json.dumps(failed))
@@ -1932,6 +1951,8 @@ def test_sandbox_hold_hands_off_without_snapshot_interpreter_then_releases_and_n
 @pytest.mark.parametrize("failure", ["workload", "download_fail", "stop_fail"])
 def test_failed_cpu_run_has_no_receipt_and_recovery_allows_a_fresh_normal_run(lab, monkeypatch, failure):
     root, state, _ = lab
+    if failure == "stop_fail":  # retried until the run deadline (#746)
+        state = _prepare_short_deadline(state, root / "short-deadline-run")
     monkeypatch.setenv("FAKE_COLAB_SCENARIO", "success" if failure == "workload" else failure)
     assert _run_fake(state, ("/bin/false",) if failure == "workload" else ("/bin/true",)) != 0
     assert not (state / "transport-receipt.json").exists()
@@ -2272,16 +2293,25 @@ def test_production_drift_and_wrappers_refuse_before_native_workload_then_next_n
 
 def test_malformed_production_sidecar_cannot_block_exact_recovery_then_next_native_run_works(storage_lab, monkeypatch):
     root, run, _ = storage_lab
+    # A persistent stop failure is retried until the run deadline (#746). The
+    # failing run is prepared with an equally valid approval whose source-scan
+    # ceiling (it must fit inside the deadline) is lowered, so that its deadline
+    # can be the short one instead of the fixture's 30 s.
+    approval = json.loads(Path(run.config["production_approval"]).read_text())
+    approval["source_scan"]["deadline_seconds"] = 8
+    short_approval = root / "short-scan-production-approval.json"
+    test_colab_production._json(short_approval, approval)
+    state = _prepare_production_again(run, "short-deadline-sidecar-run", approval=short_approval,
+                                      extra=("--deadline-seconds", SHORT_DEADLINE_SECONDS))
     monkeypatch.setenv("FAKE_COLAB_SCENARIO", "stop_fail")
-    # A persistent stop failure is retried until the 30 s run deadline (#746).
-    failed = _production_cli(run.state, timeout=60)
+    failed = _production_cli(state, timeout=60)
     assert failed.returncode == 1, failed.stdout + failed.stderr
-    manifest = json.loads((run.state / "manifest.json").read_text())
+    manifest = json.loads((state / "manifest.json").read_text())
     assert manifest["workload_succeeded"] is True
     assert json.loads((root / "sessions.json").read_text()) == {manifest["session"]: "endpoint-owned"}
-    (run.state / "production-expected.json").write_text("{original broken synthetic sidecar\n")
+    (state / "production-expected.json").write_text("{original broken synthetic sidecar\n")
     monkeypatch.setenv("FAKE_COLAB_SCENARIO", "success")
-    recovered = _production_cli(run.state, stop=True)
+    recovered = _production_cli(state, stop=True)
     assert recovered.returncode == 0, recovered.stdout + recovered.stderr
     assert json.loads((root / "sessions.json").read_text()) == {}
     stopped = [argv[-1] for kind, argv in _events(root) if kind == "colab" and argv[2] == "stop"]
@@ -2289,7 +2319,7 @@ def test_malformed_production_sidecar_cannot_block_exact_recovery_then_next_nati
     # recovery stop all target only the owned session.
     assert set(stopped) == {manifest["session"]} and len(stopped) >= 2
     assert json.loads((root / "gateway-networks.json").read_text()) == {}
-    assert not (run.state / "transport-receipt.json").exists()
+    assert not (state / "transport-receipt.json").exists()
     next_state = _prepare_production_again(run, "ordinary-native-production-after-sidecar-recovery")
     ordinary = _production_cli(next_state)
     assert ordinary.returncode == 0, ordinary.stdout + ordinary.stderr
