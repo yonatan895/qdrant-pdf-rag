@@ -8,7 +8,8 @@ suite; a receipt never substitutes for it. Each guarantee fails closed:
 - G1 right code: the prepared interpreter imports `mainframe_rag` from this
   worktree's `src`.
 - G2 owned environment: the child environment is built from an allowlist
-  (never inherited), temp files live on disk, and memory is capped.
+  (never inherited), temp files live on disk outside the repository, and
+  memory is capped.
 - G3 no interference: no other holder of the Colab assignment lock and no
   other pytest running from this tree.
 - G6 receipt: tier, SHAs, selection, counts, exit code and the fixed list of
@@ -98,6 +99,18 @@ def filesystem_type(path: Path, mounts: str) -> str | None:
         if (target == point or target.startswith(point.rstrip('/') + '/')) and len(point) > len(best):
             best, kind = point, fields[2]
     return kind
+
+
+def default_out_dir(environ: dict[str, str]) -> Path:
+    state = environ.get('XDG_STATE_HOME') or str(Path(environ.get('HOME', '~')).expanduser() / '.local/state')
+    return Path(state) / 'mainframe-rag' / 'local-verify'
+
+
+def check_outside_tree(path: Path, root: Path) -> None:
+    """Tests assume temp files live outside any checkout (pack, gateway-env and checkout guards)."""
+    target, top = path.resolve(), root.resolve()
+    if target == top or top in target.parents:
+        raise Refusal(f'{path} is inside the repository; choose an --out-dir outside it')
 
 
 def check_disk_backed(path: Path, mounts: str) -> None:
@@ -222,7 +235,9 @@ def build_receipt(*, state: dict, selectors: list[str], command: list[str], env:
 
 def main(argv: list[str] | None = None, *, lock: Path | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split('\n\n', 1)[0])
-    parser.add_argument('--out-dir', type=Path, default=ROOT / '.local-verify')
+    parser.add_argument('--out-dir', type=Path, default=default_out_dir(dict(os.environ)),
+                        help='run directory root, outside the repository '
+                             '(default $XDG_STATE_HOME/mainframe-rag/local-verify)')
     parser.add_argument('--python', type=Path, default=ROOT / '.venv/bin/python',
                         help='prepared interpreter (default .venv/bin/python; recorded)')
     parser.add_argument('--pass-env', action='append', default=[], metavar='NAME',
@@ -242,6 +257,7 @@ def main(argv: list[str] | None = None, *, lock: Path | None = None) -> int:
         state = tree_state(ROOT)
         run = args.out_dir / (time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())
                               + f'-{(state["head"] or "nohead")[:12]}' + ('-dirty' if state['dirty'] else ''))
+        check_outside_tree(run, ROOT)
         (run / 'tmp').mkdir(parents=True)
         check_disk_backed(run, Path('/proc/self/mounts').read_text())
         env = child_env(dict(os.environ), ROOT, run / 'tmp', args.pass_env)

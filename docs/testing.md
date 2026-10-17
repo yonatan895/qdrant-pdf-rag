@@ -143,9 +143,10 @@ how those instruments work and what their results can establish.
 ### Local verification (`sh scripts/tools/run-task.sh qa:local -- <tests>`, #796)
 
 Runs exactly the named selection against this worktree's code and writes
-`.local-verify/<run>/receipt.json`. It refuses (exit 2) instead of running when
-the interpreter imports another tree's `src`, the output directory is
-RAM-backed, the Colab assignment lock is held, or pytest already runs from this
+`<run>/receipt.json` outside the repository (default
+`$XDG_STATE_HOME/mainframe-rag/local-verify`, also where `TMPDIR` and basetemp live). It refuses (exit 2) instead of running when
+the interpreter imports another tree's `src`, the output directory is inside
+the repository or RAM-backed, the Colab assignment lock is held, or pytest already runs from this
 tree. The environment comes from an allowlist, never inheritance; `--pass-env`
 adds a named variable and the receipt records it. A skip is incomplete, not a
 pass. A dirty tree runs but is labeled "uncommitted, not evidence". The receipt

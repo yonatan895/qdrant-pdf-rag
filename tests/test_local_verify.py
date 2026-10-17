@@ -144,8 +144,18 @@ def test_receipt_is_evidence_only_for_a_clean_complete_pass(state, code, counts,
     assert receipt['not_verified'][0].startswith('full unit suite')
 
 
-def test_run_writes_a_receipt_for_exactly_the_selection_and_drops_ambient_env(monkeypatch):
-    out = ROOT / '.local-verify' / f'test-{uuid.uuid4().hex}'
+def test_out_dir_inside_the_repository_refuses_and_default_is_outside(tmp_path):
+    with pytest.raises(lv.Refusal, match='inside the repository'):
+        lv.check_outside_tree(ROOT / '.local-verify' / 'run', ROOT)
+    with pytest.raises(lv.Refusal, match='inside the repository'):
+        lv.check_outside_tree(ROOT, ROOT)
+    lv.check_outside_tree(tmp_path / 'run', ROOT)
+    assert lv.default_out_dir({'XDG_STATE_HOME': '/s', 'HOME': '/h'}) == Path('/s/mainframe-rag/local-verify')
+    assert lv.default_out_dir({'HOME': '/h'}) == Path('/h/.local/state/mainframe-rag/local-verify')
+
+
+def test_run_writes_a_receipt_for_exactly_the_selection_and_drops_ambient_env(monkeypatch, tmp_path):
+    out = tmp_path / f'out-{uuid.uuid4().hex}'
     node = 'tests/test_local_verify.py::test_selection_accepts_files_and_node_ids_and_refuses_empty'
     monkeypatch.setenv('EMBED_MODE', 'dense')
     monkeypatch.setenv('PYTHONPATH', '/other/src')
