@@ -81,17 +81,15 @@ Do not reuse an already-merged branch. Do not switch a tree used by running
 spawn workers. Experiments and temporary artifacts belong outside the tree.
 
 Create every PR as a draft (`gh pr create --draft`). Only the human maintainer
-`yonatan895` may mark it ready for review, submit a formal request for changes,
-or merge it. Agents leave PRs in draft after verification and report evidence
-and findings; passing CI never authorizes a lifecycle transition. Agents must
-not use `gh pr ready`, submit APPROVE/REQUEST_CHANGES reviews, or merge, even
-when using the maintainer's GitHub account. Findings and suggested corrections
-are allowed as comments; they are not a maintainer decision. Shared credentials
-cannot distinguish a human action from an agent action at the GitHub API, so
-this working agreement is not represented as an account-level enforcement
-mechanism. Repository access/ruleset changes remain maintainer-owned.
+`yonatan895` marks it ready, formally requests changes, or merges; agents leave
+it in draft and never run `gh pr ready`, submit APPROVE/REQUEST_CHANGES or
+merge, even on the maintainer's account, and passing CI authorizes none of
+these. Findings and suggested corrections are comments, not maintainer
+decisions. Shared credentials make this a working agreement, not account-level
+enforcement. Repository access/ruleset changes remain maintainer-owned.
 
-Keep a bounded behavior and its necessary tests/docs in one PR. No application
+Keep one bounded behavior, the smallest that delivers the outcome, and its
+necessary tests/docs in one PR. No application
 fixes in a docs-only PR. Rebase on the approved current main before requesting
 review; no merge commits unless requested. Force-push a feature branch only
 after rebase and before review comments exist; never force-push main. Commits
@@ -139,7 +137,7 @@ Name the test and exact candidate; distinguish executed proof, static reasoning,
 and required evidence not available. Record any compatibility decision separately.
 ```
 
-No mandatory checklist of every failure mode for a trivial change. One end-to-end invariant may need several files; a PR is not too broad merely because it updates the necessary consumer and documentation. Settled decisions link their existing owner; reopen only a specific demonstrated conflict. An agent must not independently choose deletion, retention, permission, or publication semantics while generating tests.
+No mandatory checklist of every failure mode for a trivial change. Settle design first: take each trade-off against its owner contracts to the maintainer before code. Settled decisions link their existing owner; reopen only a specific demonstrated conflict. An agent must not independently choose deletion, retention, permission, or publication semantics while generating tests.
 
 <a id="process-budget"></a>
 ## Process budget
@@ -226,13 +224,14 @@ Report separately:
 Ready requires acceptable code, complete required verification, current candidate
 attribution, and no unresolved material contract conflict. Missing required
 checks are not successes; report them without inventing a product defect.
-No findings is a valid outcome. Summarize high-impact findings first, but never
-hide a verified blocker to meet a quota. Group common-root-cause findings.
-Style preferences and unrelated improvements do not block a useful change.
-A finding blocks only when it is in scope and changes a user-visible outcome,
-data integrity or a security boundary. Record other findings in the parking-lot
-issue (#588); after two review rounds, remaining non-blocking items move there
-rather than holding the PR.
+No findings is a valid outcome. Group common-root-cause findings. A finding
+blocks only when it is in scope and changes a user-visible outcome, data
+integrity or a security boundary; record every other finding in the parking-lot
+issue (#588). Report at most three blockers; if there seem to be more, the scope
+or design needs rethinking: stop and say so. Re-review runs only after blocking
+fixes, at most twice, and marks the prior blockers alone: it files no new
+blocker, and a fix that regresses stays unresolved. A blocker unresolved after two re-reviews goes to
+the maintainer as a decision (#785).
 If time/tool limits leave material review incomplete, report incomplete rather
 than approval by default.
 
@@ -529,8 +528,8 @@ The [skill index](../.agents/skills/index.md) routes engineering, measurement an
 lifecycle skills through repository-owned entry points to pinned local upstream
 copies. Each provider record ([engineering](../.agents/mattpocock-skills-provenance.md),
 [pstack](../.agents/pstack-skills-provenance.md)) owns its allowlist, license and
-updates. Use them on demand; their compatibility rules retain existing testing,
-coverage and review contracts. No upstream workflow bundle or automatic
+updates. Reach for the matching skill at each step it covers, unprompted; their
+compatibility rules retain existing testing, coverage and review contracts. No upstream workflow bundle or automatic
 instruction chain is installed.
 
 <a id="qdrant-skills"></a>
