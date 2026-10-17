@@ -28,3 +28,17 @@
     platform mandate.
   - Not adopted: content in SigNoz or ClickHouse, content in Qdrant (it would
     need write credentials on the serving path), and append-only files.
+- **Amends (maintainer decision, 2026-10-17, #780):**
+  - **ADR-0003, agent-surface clause.** The agent's POST set adds the two
+    console rating routes, `/ui/feedback` and `/ui/feedback/form`. They are the
+    only writes the agent originates: a bounded rating (vocabulary codes plus a
+    comment) forwarded to the feedback service, default off. They never write
+    the corpus or Qdrant, never call a model and never reach a source system.
+    No PUT/PATCH/DELETE and no `fetch_live` reference still hold, with
+    `tests/test_mcp_agent.py` pinning the exact POST set.
+  - **ADR-0004, non-goals 2 and 3, scoped.** Console session state (dialogue,
+    incidents, preferences) stays in browser `localStorage`, and the agent pod
+    stays stateless with no volume. Answer-quality records are not session
+    state. They live in a separate single-writer feedback service with its own
+    PVC (deployed in PR B), never as a process alongside the agent and never as
+    agent-side tables.

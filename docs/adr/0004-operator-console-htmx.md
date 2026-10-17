@@ -61,6 +61,9 @@
      (BFF), and no auxiliary container processes alongside the agent.
   3. **No server-side user/session DB:** No SQLite, PostgreSQL, MySQL, Redis, or
      stateful PVCs for UI data; zero server database tables.
+     *(Amendment, ADR-0005:* answer-quality ratings are not session state; a
+     separate single-writer feedback service owns them on its own PVC. The
+     agent pod stays stateless and session state stays in `localStorage`.*)*
   4. **No application-level authentication:** FastAPI implements no custom login forms,
      credential hashing, or session cookie generation; authentication and RBAC are
      delegated entirely to the OpenShift `oauth-proxy` sidecar.

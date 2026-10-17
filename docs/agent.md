@@ -320,8 +320,9 @@ retention: [observability](observability.md#data-tiers).
   (choice, reasons, comment, in-flight send, last error) whenever the articles
   are rebuilt, and focus and caret inside it are restored; nothing is stored.
   A send uses a snapshot and locks every control until it settles, so the
-  "Rated" state shown and saved is exactly what the service recorded; a failed
-  send unlocks the box and returns focus to it for a retry.
+  "Rated" state shown and saved is exactly what the service recorded. A failed
+  send unlocks the box; focus that the lock dropped returns to the send
+  control for a retry, and focus elsewhere (another answer's box) is never moved.
   - `request_id` must be the 12-hex server id; extra fields, such as an answer
     text, are refused with 422.
   - The store attaches the rating to its own record and refuses unknown ids:
@@ -1291,7 +1292,9 @@ manual-only POC makes zero source calls. Search never calls an LLM; routing is
 deterministic and trap queries stay on the manuals path.
 
 - **Surface:** the agent HTTP API is read-only query traffic (no PUT/PATCH/
-  DELETE; POST only on search/answer/chat and console chat). The source port is
+  DELETE; POST only on search/answer/chat and console chat), plus the console
+  rating forward (`/ui/feedback`, `/ui/feedback/form`; ADR-0005, default off),
+  which writes only a bounded rating to the feedback service. The source port is
   separate from manual evidence and is not a query/command proxy.
 - **Approved operation:** `job_status` for one exact job id. The other three
   bridge tools (`dataset_read`, `uss_read`, `jes_spool_read`) are allowlisted in
