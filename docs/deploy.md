@@ -980,6 +980,9 @@ live in `.github/workflows/e2e.yml`.
   do not pay for three containers.
 - `browser.yml`: path-allowlisted to the console and dependency locks; runs
   the browser contracts against a digest-pinned Chrome for Testing, fail-closed on skips.
+- `coverage.yml`: nightly + dispatch + PRs touching only its own file; runs
+  `qa:coverage` over the full unit selection and uploads the reports. Advisory:
+  never a required check or an acceptance producer.
 - `bench.yml`: push-to-main + nightly + dispatch (baseline update with
   repeats); never a PR gate.
   Measurement passes and search/answer load phases stay sequential on their
