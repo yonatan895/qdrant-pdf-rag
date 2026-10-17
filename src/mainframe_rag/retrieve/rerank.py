@@ -396,7 +396,7 @@ def rerank_candidates(
     ce_norm = _minmax(scores)
     rrf_norm = _minmax([c.score for c in candidates])
     ranked: list[tuple[float, float, float, str, SearchHit]] = []
-    for cand, ce, cn, rn in zip(candidates, scores, ce_norm, rrf_norm):
+    for cand, ce, cn, rn in zip(candidates, scores, ce_norm, rrf_norm, strict=True):
         blend = alpha * cn + (1.0 - alpha) * rn
         ranked.append((blend, ce, cand.score, cand.chunk_id, cand.model_copy(update={"rerank_score": ce})))
     # Stable sort: blended score descending. At alpha=0.0 the blend IS the

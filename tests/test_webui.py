@@ -3,6 +3,7 @@ SSE streaming, static-asset pin verification, and traversal defense."""
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import html
 import json
@@ -148,10 +149,8 @@ def test_ui_disabled_blocks_stream_and_history_with_zero_model_calls(
             assert resp.status_code == 404, path
             assert resp.json() == {"code": "not_found", "message": "not found"}, path
     finally:
-        try:
+        with contextlib.suppress(StopIteration):
             next(gen)
-        except StopIteration:
-            pass
     assert llm.calls == []
     assert llm.stream_calls == []
     assert client.mock_search.calls == []

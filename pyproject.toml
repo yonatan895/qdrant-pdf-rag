@@ -47,6 +47,17 @@ markers = [
 line-length = 100
 src = ["src", "tests"]
 
+[tool.ruff.lint]
+# extend-select (not select) keeps the default rule set; see #584.
+extend-select = ["B", "SIM", "RET"]
+
+[tool.ruff.lint.per-file-ignores]
+# Rule module: its bytes are the extraction rules version (see
+# tests/test_rules_version.py), so even a lint-only edit forces a corpus
+# re-embed. Keep the unused enumerate index (B007) until chunk.py is next
+# changed under an approved extraction concern, then drop this entry.
+"src/mainframe_rag/ingest/chunk.py" = ["B007"]
+
 [tool.mypy]
 python_version = "3.14"
 mypy_path = "src"

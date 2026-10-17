@@ -212,4 +212,4 @@ def embed_batch(
     dense = embedder.dense(dense_texts)
     sparse_texts = [chunk_embed_text(c, product, version, title) for c in chunks]
     sparse = embedder.sparse(sparse_texts)
-    return list(zip(dense, sparse))
+    return list(zip(dense, sparse, strict=True))

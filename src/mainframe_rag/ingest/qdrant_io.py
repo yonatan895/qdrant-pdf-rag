@@ -449,7 +449,7 @@ def upsert_chunks(
             f"{len(vectors)} vectors — refusing to truncate."
         )
     points: list[models.PointStruct] = []
-    for chunk, (dense, (sparse_idx, sparse_val)) in zip(chunks, vectors):
+    for chunk, (dense, (sparse_idx, sparse_val)) in zip(chunks, vectors, strict=True):
         context = contexts.get(chunk.chunk_id) if contexts else None
         payload = point_payload(parsed, chunk, rules_v, context)
         points.append(

@@ -15,6 +15,7 @@ site-specific ids here.
 
 from __future__ import annotations
 
+import contextlib
 import ftplib
 import io
 import socket
@@ -80,10 +81,8 @@ def _capped_retr(ftp: ftplib.FTP, command: str, max_bytes: int) -> tuple[bytes, 
     try:
         ftp.retrbinary(command, _sink)
     except _CapExceeded:
-        try:
+        with contextlib.suppress(Exception):  # best-effort abort only
             ftp.abort()
-        except Exception:  # noqa: BLE001, S110 — best-effort abort only
-            pass
         return buf.getvalue(), True
     return buf.getvalue(), False
 
