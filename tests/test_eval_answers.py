@@ -520,17 +520,36 @@ def test_answer_grounded_scope_caveat_is_not_a_refusal() -> None:
 
 
 def test_structured_decline_with_coverage_note_is_judged_as_a_decline() -> None:
-    """Issue #764: the leading decline sentence plus a note on what the
-    excerpts cover passes an abstain row cleanly and fails an answer row as
-    an explicit refusal; the eval and the agent share one predicate."""
-    from mainframe_rag.agent.answer import DECLINE_SENTENCE
+    """Issue #764: the leading decline prefix naming the missing subject plus
+    a note on what the excerpts cover passes an abstain row cleanly and fails
+    an answer row as an explicit refusal; the eval and the agent share one
+    predicate."""
+    from mainframe_rag.agent.answer import DECLINE_PREFIX
 
-    body = f"{DECLINE_SENTENCE} The excerpts describe LFAREA syntax for IEASYSxx only."
+    body = f"{DECLINE_PREFIX} the LFAREA retry limit. The excerpts describe LFAREA syntax for IEASYSxx only."
     verdict, fails, warns = judge(_entry(expected_behavior="abstain"), body, [])
     assert verdict == "pass" and fails == [] and warns == []
     verdict, fails, _ = judge(_entry(), body, ["SA23-1380-70 ref, p. 1"])
     assert verdict == "fail"
     assert any("explicit refusal" in f for f in fails)
+
+
+@pytest.mark.parametrize("row_id", ["DIA-08", "MSG-01"])
+def test_structured_decline_naming_the_identifier_meets_identifier_abstention_rows(row_id: str) -> None:
+    """Issue #764 x dev golden: identifier abstention rows require the
+    identifier and forbid the generic "excerpts do not answer" refusal; the
+    structured decline names the identifier and passes them unchanged."""
+    from pathlib import Path
+
+    from mainframe_rag.agent.answer import DECLINE_PREFIX, verification_state_for
+
+    golden = Path(__file__).resolve().parents[1] / "evals" / "golden.jsonl"
+    entry = next(json.loads(line) for line in golden.read_text().splitlines()
+                 if line.strip() and json.loads(line)["id"] == row_id)
+    body = f"{DECLINE_PREFIX} {entry['must_cite_identifier']}."
+    state = verification_state_for(answer=body, citations=[], citations_inferred=False,
+                                   finish_reason="stop", abstained=is_abstention(body), empty_hits=False)
+    assert judge(entry, body, [], verification_state=state)[:2] == ("pass", [])
 
 
 def test_answer_empty_body_fails() -> None:

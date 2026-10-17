@@ -646,8 +646,11 @@ hits omitted by budget packing, and the tail's example cite, are rejected:
   treating them as cited provenance would hallucinate it.
 - Abstention zero-cite (issues #135/#630/#764): `parse_answer` clears
   citations and inferred indices when `is_abstention` holds. That is either
-  the structured decline (the first prose sentence is exactly system rule 4's
-  `The excerpts do not answer this question.`, whatever coverage note follows)
+  the structured decline (the first prose sentence is system rule 4's fixed
+  prefix `Not covered by the supplied excerpts:` followed by a non-empty
+  subject, the identifier or topic it cannot answer, whatever coverage note
+  follows; naming the subject satisfies identifier abstention rows, which
+  require the identifier and forbid the generic "excerpts do not answer")
   or a whole-response refusal (every substantive clause refuses). Marker
   presence alone would zero a grounded answer that scopes one caveat; the
   whole-response rule alone missed verbose declines that explain what the

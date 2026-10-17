@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 
 from mainframe_rag.agent import app as app_mod
 from mainframe_rag.agent.answer import (
-    DECLINE_SENTENCE,
+    DECLINE_PREFIX,
     is_abstention,
     parse_answer,
     verification_state_for,
@@ -1802,7 +1802,8 @@ def test_build_messages_tokenizer_budget_respected():
             text="word " * 160,  # ~175 tokens with the [i] header; the
             # refusal-anchored system prompt (issue #135, regrown by #305's
             # partial-answer/identifier rules, then +30 by #764's structured
-            # decline) grew the fixed overhead, so the fixture window widened
+            # decline and +11 when it named the missing subject) grew the
+            # fixed overhead, so the fixture window widened
             # to keep the knife-edge scenario (5 excerpts fit, the last
             # truncated) reachable.
             doc_id=f"DOC{i}",
@@ -1815,7 +1816,7 @@ def test_build_messages_tokenizer_budget_respected():
     ]
 
     settings = Settings(
-        llm_max_model_len=1610,
+        llm_max_model_len=1621,
         llm_reserved_output_tokens=250,
         llm_thinking_reserve_tokens_simple=0,  # knife edge independent of #777 defaults
         llm_token_safety_margin=100,
@@ -3522,27 +3523,29 @@ def test_is_abstention_whole_response_controls():
 
 
 def test_structured_decline_leads_and_partial_answers_keep_the_whole_response_rule():
-    """Issue #764: a response whose first prose sentence is exactly the
-    prompt's decline sentence is an abstention, whatever coverage note
-    follows. Only the leading, exact, unquoted sentence counts: anywhere
-    else, extended or quoted, the #630 whole-response rule decides."""
+    """Issue #764: a response whose first prose sentence is the prompt's
+    fixed decline prefix followed by the missing identifier or topic is an
+    abstention, whatever coverage note follows. Only the leading, unquoted
+    prefix with a non-empty subject counts: anywhere else, quoted, or
+    without a subject, the #630 whole-response rule decides."""
     from mainframe_rag.agent.answer import SYSTEM_PROMPT, is_structured_decline
 
-    assert SYSTEM_PROMPT.count(DECLINE_SENTENCE) == 1, "rule 4 anchors the exact sentence"
+    assert SYSTEM_PROMPT.count(DECLINE_PREFIX) == 1, "rule 4 anchors the exact prefix"
     declines = [
-        DECLINE_SENTENCE,
-        f"{DECLINE_SENTENCE}\nThe excerpts describe IEASYSxx LFAREA syntax, not the retry limit.",
-        f"**{DECLINE_SENTENCE}** They cover only the IEA500I message text.",
-        f"Answer: {DECLINE_SENTENCE.lower()}",
-        f"{DECLINE_SENTENCE} The supplied excerpts cover JES2 checkpoint sizing [1].",
+        f"{DECLINE_PREFIX} IEA500I.",
+        f"{DECLINE_PREFIX} the LFAREA retry limit.\nThe excerpts describe IEASYSxx LFAREA syntax, not the retry limit.",
+        f"**{DECLINE_PREFIX} IEA500I.** They cover only the message text.",
+        f"Answer: {DECLINE_PREFIX.lower()} CSQW100I",
+        f"{DECLINE_PREFIX} JES2 checkpoint retries. The supplied excerpts cover JES2 checkpoint sizing [1].",
     ]
     not_declines = [
-        "The excerpts do not answer this question directly, but the documented limit is 2 MB [1].",
-        f'The operator saw "{DECLINE_SENTENCE}" in the console log.',
-        f"Run CHECK first. {DECLINE_SENTENCE}",
-        f"Set RETRY=5 [1].\n{DECLINE_SENTENCE}",
-        "The excerpts do not answer this question in full; set RETRY=5 [1].",
-        f"`{DECLINE_SENTENCE}` is printed when RETRY=0 [1].",
+        f'The operator saw "{DECLINE_PREFIX} IEA500I." in the console log.',
+        f"Run CHECK first. {DECLINE_PREFIX} IEA500I.",
+        f"Set RETRY=5 [1].\n{DECLINE_PREFIX} IEA500I.",
+        f"`{DECLINE_PREFIX} IEA500I.` is printed when RETRY=0 [1].",
+        "Not covered by the supplied excerpts in full; set RETRY=5 [1].",
+        # The retired #764 sentence no longer qualifies on its own lead.
+        "The excerpts do not answer this question.\nThey cover JES2 checkpoint sizing [1].",
     ]
     for body in declines:
         assert is_structured_decline(body) is True, body
@@ -3550,6 +3553,10 @@ def test_structured_decline_leads_and_partial_answers_keep_the_whole_response_ru
     for body in not_declines:
         assert is_structured_decline(body) is False, body
         assert is_abstention(body) is False, body
+    # A bare prefix names nothing: not the structured form, though as a
+    # whole-response refusal (#630) it still abstains.
+    assert is_structured_decline(DECLINE_PREFIX) is False
+    assert is_abstention(DECLINE_PREFIX) is True
 
 
 @pytest.mark.parametrize("stream", [False, True])
@@ -3559,11 +3566,11 @@ def test_structured_decline_leads_and_partial_answers_keep_the_whole_response_ru
     (f"The excerpts do not contain the retry limit.\n\nCitations:\n{_ACCEPTED_CITE}", "stop",
      "insufficient_evidence", []),
     ("The excerpts do not contain", "length", "generation_incomplete", []),
-    ((f"{DECLINE_SENTENCE}\nThe excerpts describe the IEA500I message text only.\n\n"
+    ((f"{DECLINE_PREFIX} the IEA500I retry limit.\nThe excerpts describe the IEA500I message text only.\n\n"
       f"Citations:\n{_ACCEPTED_CITE}"), "stop", "insufficient_evidence", []),
-    (f"Run CHECK first.\n{DECLINE_SENTENCE}\n\nCitations:\n{_ACCEPTED_CITE}", "stop",
+    (f"Run CHECK first.\n{DECLINE_PREFIX} IEA500I.\n\nCitations:\n{_ACCEPTED_CITE}", "stop",
      "accepted", [_ACCEPTED_CITE]),
-    (DECLINE_SENTENCE, "length", "generation_incomplete", []),
+    (f"{DECLINE_PREFIX} IEA500I.", "length", "generation_incomplete", []),
 ])
 def test_answer_partial_and_interrupted_refusal_state_json_and_sse(
     client, monkeypatch, stream, content, finish, state, cites
