@@ -119,7 +119,8 @@ def test_selection_accepts_files_and_node_ids_and_refuses_empty():
 
 
 def _receipt(state: dict, code: int, counts: dict | None) -> dict:
-    return lv.build_receipt(state=state, selectors=['tests/t.py'], command=['pytest'],
+    return lv.build_receipt(state=state, tier='explicit', selection={'mode': 'explicit', 'selectors': ['tests/t.py']},
+                            command=['pytest'],
                             env={'TMPDIR': '/t', 'TASK_CONTRACTS_REQUIRE_RUNNER': '1',
                                  'PYTEST_DISABLE_PLUGIN_AUTOLOAD': '1'},
                             dropped=['PYTHONPATH'], passed=[], memory_max=3072, code=code,
@@ -173,3 +174,69 @@ def test_run_writes_a_receipt_for_exactly_the_selection_and_drops_ambient_env(mo
     assert {'EMBED_MODE', 'PYTHONPATH'} <= set(receipt['environment']['dropped'])
     assert receipt['memory_max_mib'] is None
     assert receipt['evidence'] == (not receipt['tree']['dirty'])
+
+
+def test_t0_targets_follow_the_ci_lint_scope():
+    changed = ['scripts/colab.py', 'scripts/review_tooling.py', 'src/mainframe_rag/config.py',
+               'tests/test_local_verify.py', 'docs/testing.md', 'src/mainframe_rag/deleted.py']
+    assert lv.t0_targets(ROOT, changed) == {
+        'ruff': ['scripts/review_tooling.py', 'src/mainframe_rag/config.py', 'tests/test_local_verify.py'],
+        'mypy_src': ['src'], 'mypy_scripts': ['scripts/review_tooling.py']}
+    assert lv.t0_targets(ROOT, ['scripts/colab.py']) == {'ruff': [], 'mypy_src': [], 'mypy_scripts': []}
+
+
+def test_t0_script_scope_matches_the_ci_lint_step():
+    import yaml
+    workflow = yaml.safe_load((ROOT / '.github/workflows/ci.yml').read_text())
+    step = next(s['run'] for s in workflow['jobs']['lint']['steps'] if 'ruff check src tests' in s.get('run', ''))
+    ruff_line = next(line for line in step.splitlines() if 'ruff check src tests' in line)
+    assert tuple(word for word in ruff_line.split() if word.startswith('scripts/')) == lv.CI_LINT_SCRIPTS
+
+
+def _git(cwd: Path, *args: str) -> str:
+    return subprocess.run(['git', *args], cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
+
+
+def test_changed_paths_are_committed_plus_dirty_including_both_sides_of_a_rename(tmp_path):
+    _git(tmp_path, 'init', '-q', '-b', 'main')
+    for name in ('kept.txt', 'old.txt'):
+        (tmp_path / name).write_text('x\n')
+    _git(tmp_path, 'add', '.')
+    _git(tmp_path, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'base')
+    base = _git(tmp_path, 'rev-parse', 'HEAD')
+    (tmp_path / 'committed.txt').write_text('y\n')
+    _git(tmp_path, 'add', '.')
+    _git(tmp_path, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'change')
+    _git(tmp_path, 'mv', 'old.txt', 'new.txt')
+    (tmp_path / 'untracked.txt').write_text('z\n')
+    state = lv.tree_state(tmp_path)
+    assert state['dirty'] == ['new.txt', 'old.txt', 'untracked.txt']
+    assert lv.changed_paths(tmp_path, {**state, 'base': {'ref': 'origin/main', 'sha': base}}) == [
+        'committed.txt', 'new.txt', 'old.txt', 'untracked.txt']
+    with pytest.raises(lv.Refusal, match='no merge-base'):
+        lv.changed_paths(tmp_path, {**state, 'base': {'ref': 'origin/main', 'sha': None}})
+
+
+def test_unmapped_change_refuses_then_a_select_override_runs_and_is_recorded(monkeypatch, tmp_path, capsys):
+    from scripts import local_selection
+    orphan = 'src/mainframe_rag/not_a_real_module.py'
+    monkeypatch.setattr(lv, 'changed_paths', lambda root, state: [orphan])
+    monkeypatch.setattr(local_selection, 'select', lambda changed, force_t2=False: local_selection.Selection(
+        'T1', (), {}, (), (orphan,)))
+    common = ['--no-memory-cap', '--python', sys.executable, '--out-dir', str(tmp_path / 'out')]
+    assert lv.main(common, lock=tmp_path / 'no-lock') == 2
+    assert f'unmapped change(s) with no test: {orphan}' in capsys.readouterr().err
+    node = 'tests/test_local_verify.py::test_selection_accepts_files_and_node_ids_and_refuses_empty'
+    assert lv.main([*common, '--select', node], lock=tmp_path / 'no-lock') == 0
+    (run,) = [p for p in (tmp_path / 'out').iterdir() if p.is_dir() and (p / 'receipt.json').exists()]
+    receipt = json.loads((run / 'receipt.json').read_text())
+    assert (receipt['tier'], receipt['selection']['mode'], receipt['selection']['tests']) == ('T1', 'auto', [node])
+    assert receipt['selection']['override'] == {'select': [node], 'unmapped': [orphan]}
+    assert receipt['t0'] == {'files': [], 'ruff': None, 'mypy_src': None, 'mypy_scripts': None}
+    assert receipt['counts']['executed'] == 1 and receipt['result'] == 'passed'
+
+
+def test_explicit_mode_rejects_auto_mode_options(tmp_path, capsys):
+    args = ['--no-memory-cap', '--out-dir', str(tmp_path), '--t2', 'tests/test_local_verify.py']
+    assert lv.main(args, lock=tmp_path / 'no-lock') == 2
+    assert 'apply to auto mode' in capsys.readouterr().err

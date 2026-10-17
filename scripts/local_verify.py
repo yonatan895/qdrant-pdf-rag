@@ -12,10 +12,15 @@ suite; a receipt never substitutes for it. Each guarantee fails closed:
   memory is capped.
 - G3 no interference: no other holder of the Colab assignment lock and no
   other pytest running from this tree.
+- G4/G5 selection: without explicit tests, scripts/local_selection.py derives
+  T1 (or T2 for broad changes) from the diff against origin/main plus dirty
+  paths, printed before running. An unmapped src/scripts change refuses unless
+  `--select` covers it; the override is recorded. T0 (ruff, mypy on changed
+  files) runs first and fails fast.
 - G6 receipt: tier, SHAs, selection, counts, exit code and the fixed list of
   what was not verified. A dirty tree runs but is marked "not evidence".
 
-Selection is explicit in this increment; automatic selection follows (#796).
+Positional test paths keep explicit mode: exactly those tests, no diff analysis.
 Exit codes: 0 passed, 1 failed or incomplete, 2 refused before running.
 """
 from __future__ import annotations
@@ -31,11 +36,13 @@ import sys
 import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from scripts import local_selection
 from scripts.ci_evidence import junit_bytes
 
 ENV_ALLOWLIST = ('PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'LANGUAGE', 'TERM', 'TZ',
@@ -189,13 +196,54 @@ def git(root: Path, *args: str) -> str:
 
 def tree_state(root: Path) -> dict:
     status = git(root, 'status', '--porcelain', '--untracked-files=normal')
-    dirty = sorted(line[3:] for line in status.splitlines() if line)
+    dirty = sorted({part for line in status.splitlines() if line for part in line[3:].split(' -> ')})
     return {'head': git(root, 'rev-parse', 'HEAD') or None,
             'base': {'ref': 'origin/main', 'sha': git(root, 'merge-base', 'HEAD', 'origin/main') or None},
             'dirty': dirty}
 
 
-def result_of(code: int, counts: dict | None) -> str:
+def changed_paths(root: Path, state: dict) -> list[str]:
+    """Committed changes since the merge-base plus every dirty path (G4 input)."""
+    if not state['base']['sha']:
+        raise Refusal('no merge-base with origin/main; fetch origin or name tests explicitly')
+    committed = git(root, 'diff', '--name-only', state['base']['sha'], 'HEAD').splitlines()
+    return sorted({p for p in committed if p} | set(state['dirty']))
+
+
+# The CI lint_and_types scope (.github/workflows/ci.yml): T0 never flags what CI accepts.
+CI_LINT_SCRIPTS = ('scripts/eval_retrieval.py', 'scripts/review_tooling.py', 'scripts/ci_evidence.py',
+                   'scripts/acceptance_evidence.py')
+
+
+def t0_targets(root: Path, changed: list[str]) -> dict[str, list[str]]:
+    """Changed files within CI's lint scope; mypy covers all of src, as CI does."""
+    files = [p for p in changed if p.endswith('.py') and (root / p).is_file()
+             and (p.startswith(('src/', 'tests/')) or p in CI_LINT_SCRIPTS)]
+    return {'ruff': files, 'mypy_src': ['src'] if any(p.startswith('src/') for p in files) else [],
+            'mypy_scripts': [p for p in files if p in CI_LINT_SCRIPTS]}
+
+
+def run_t0(root: Path, python: Path, env: dict[str, str], changed: list[str]) -> dict:
+    """Seconds-tier static checks; a tool with no targets is None (not applicable)."""
+    targets = t0_targets(root, changed)
+    commands = {'ruff': ['ruff', 'check'], 'mypy_src': ['mypy'], 'mypy_scripts': ['mypy', '--follow-imports=silent']}
+    record: dict = {'files': targets['ruff']}
+    for key, args in commands.items():
+        record[key] = (subprocess.run([str(python), '-m', *args, *targets[key]], cwd=root, env=env,
+                                      check=False).returncode if targets[key] else None)
+    return record
+
+
+def t0_failures(t0: dict | None) -> list[str]:
+    return [k for k in ('ruff', 'mypy_src', 'mypy_scripts') if t0 and t0.get(k)]
+
+
+def result_of(code: int, counts: dict | None, t0: dict | None = None, ran: bool = True) -> str:
+    failed_t0 = t0_failures(t0)
+    if failed_t0:
+        return 'failed: T0 ' + ', '.join(failed_t0)
+    if not ran:
+        return 'nothing selected: no test maps to the change'
     if counts is None:
         return 'failed: no readable test report'
     if code != 0 or counts['failed'] or counts['errors']:
@@ -205,15 +253,17 @@ def result_of(code: int, counts: dict | None) -> str:
     return 'passed'
 
 
-def build_receipt(*, state: dict, selectors: list[str], command: list[str], env: dict[str, str],
+def build_receipt(*, state: dict, tier: str, selection: dict, command: list[str], env: dict[str, str],
                   dropped: list[str], passed: list[str], memory_max: int | None, code: int,
-                  counts: dict | None, started: float, finished: float) -> dict:
-    result = result_of(code, counts)
+                  counts: dict | None, started: float, finished: float, t0: dict | None = None,
+                  ran: bool = True) -> dict:
+    result = result_of(code, counts, t0, ran)
     evidence = result == 'passed' and not state['dirty'] and state['head'] is not None
     return {
-        'schema_version': 1,
-        'tier': 'explicit',
-        'selection': {'mode': 'explicit', 'selectors': selectors},
+        'schema_version': 2,
+        'tier': tier,
+        'selection': selection,
+        't0': t0,
         'tree': state,
         'evidence': evidence,
         'label': ('local verification of the selection only' if evidence else
@@ -245,7 +295,10 @@ def main(argv: list[str] | None = None, *, lock: Path | None = None) -> int:
     cap = parser.add_mutually_exclusive_group()
     cap.add_argument('--memory-max', type=int, default=DEFAULT_MEMORY_MAX_MIB, metavar='MIB')
     cap.add_argument('--no-memory-cap', action='store_true', help='run uncapped (recorded)')
-    parser.add_argument('selectors', nargs='*')
+    parser.add_argument('--select', action='append', default=[], metavar='TEST',
+                        help='auto mode: add tests; required to cover unmapped changes (recorded)')
+    parser.add_argument('--t2', action='store_true', help='auto mode: force T2')
+    parser.add_argument('selectors', nargs='*', help='explicit mode: run exactly these tests')
     args = parser.parse_args(argv)
     lock = lock or colab_assignment_lock()
     try:
@@ -253,8 +306,28 @@ def main(argv: list[str] | None = None, *, lock: Path | None = None) -> int:
             raise Refusal('the process and lock checks need Linux /proc')
         if any(not ENV_NAME.fullmatch(name) for name in args.pass_env):
             raise Refusal('--pass-env takes variable names only')
-        validate_selectors(ROOT, args.selectors)
+        if args.selectors and (args.select or args.t2):
+            raise Refusal('--select and --t2 apply to auto mode; explicit mode runs exactly the named tests')
+        for given in (args.selectors, args.select):
+            if given:
+                validate_selectors(ROOT, given)
         state = tree_state(ROOT)
+        selection: dict[str, Any]
+        if args.selectors:
+            tier, tests, changed = 'explicit', list(args.selectors), []
+            selection = {'mode': 'explicit', 'selectors': tests}
+        else:
+            changed = changed_paths(ROOT, state)
+            if not changed:
+                raise Refusal('no change against origin/main; name tests explicitly')
+            chosen = local_selection.select(changed, force_t2=args.t2)
+            if chosen.unmapped and not args.select:
+                raise Refusal('unmapped change(s) with no test: ' + ', '.join(chosen.unmapped)
+                              + '; cover them with --select tests/<file> (recorded in the receipt)')
+            tier, tests = chosen.tier, sorted(set(chosen.tests) | set(args.select))
+            selection = {'mode': 'auto', 'changed': changed, **chosen.as_record(), 'tests': tests,
+                         'override': ({'select': args.select, 'unmapped': list(chosen.unmapped)}
+                                      if args.select else None)}
         run = args.out_dir / (time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())
                               + f'-{(state["head"] or "nohead")[:12]}' + ('-dirty' if state['dirty'] else ''))
         check_outside_tree(run, ROOT)
@@ -278,22 +351,30 @@ def main(argv: list[str] | None = None, *, lock: Path | None = None) -> int:
     except (Refusal, OSError) as exc:
         print(f'REFUSED: {exc}', file=sys.stderr)
         return 2
+    print(f'selection: {tier}, {len(tests)} test module(s)')
+    for test in tests:
+        why: list[str] = selection.get('reasons', {}).get(test, [])
+        print(f'  {test}' + (f'  <- {", ".join(why[:3])}' + (' ...' if len(why) > 3 else '') if why else ''))
     junit = run / 'junit.xml'
     command = [str(python), '-m', 'pytest', '-p', 'anyio.pytest_plugin', '-p', 'no:cacheprovider',
-               '--basetemp', str(run / 'bt'), '--junitxml', str(junit), *args.selectors]
+               '--basetemp', str(run / 'bt'), '--junitxml', str(junit), *tests]
     if memory_max is not None:
         command = ['systemd-run', '--user', '--scope', '-q', '-p', f'MemoryMax={memory_max}M',
                    '-p', 'MemorySwapMax=0', *command]
     started = time.time()
-    code = subprocess.run(command, cwd=ROOT, env=env, check=False).returncode
+    t0 = run_t0(ROOT, python, env, changed) if selection['mode'] == 'auto' else None
+    ran = bool(tests) and not t0_failures(t0)
+    code, counts = 0, None
+    if ran:
+        code = subprocess.run(command, cwd=ROOT, env=env, check=False).returncode
+        try:
+            counts = junit_bytes(junit.read_bytes())
+        except (OSError, ValueError, ET.ParseError):
+            counts = None
     finished = time.time()
-    try:
-        counts: dict | None = junit_bytes(junit.read_bytes())
-    except (OSError, ValueError, ET.ParseError):
-        counts = None
-    receipt = build_receipt(state=state, selectors=args.selectors, command=command, env=env,
+    receipt = build_receipt(state=state, tier=tier, selection=selection, command=command, env=env,
                             dropped=dropped, passed=args.pass_env, memory_max=memory_max, code=code,
-                            counts=counts, started=started, finished=finished)
+                            counts=counts, started=started, finished=finished, t0=t0, ran=ran)
     (run / 'receipt.json').write_text(json.dumps(receipt, indent=2) + '\n')
     print(f'local verification: {receipt["result"]} ({receipt["label"]})')
     print(f'receipt: {run / "receipt.json"}')
