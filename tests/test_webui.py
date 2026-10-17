@@ -17,6 +17,7 @@ from mainframe_rag.agent import app as app_mod
 from mainframe_rag.agent.tokenizer import FallbackTokenizer
 from mainframe_rag.ports import ChatResult, TokenUsage
 from mainframe_rag.retrieve.query import SearchHit
+from tests.fakes import parse_sse_events
 
 _VENDOR_DIR = Path(app_mod.__file__).parents[1] / "webui" / "static" / "vendor"
 
@@ -122,19 +123,7 @@ def ui_disabled_client(monkeypatch, synthetic_pdf, servable_representation_gate)
     yield from _client(monkeypatch, ui_enabled=False, synthetic_pdf=synthetic_pdf)
 
 
-def _parse_sse_events(text: str) -> list[tuple[str, dict]]:
-    events = []
-    for frame in text.split("\n\n"):
-        name = None
-        data = None
-        for line in frame.split("\n"):
-            if line.startswith("event: "):
-                name = line[7:].strip()
-            elif line.startswith("data: "):
-                data = line[6:]
-        if name and data:
-            events.append((name, json.loads(data)))
-    return events
+_parse_sse_events = parse_sse_events  # one shared parser (tests/fakes.py)
 
 
 def test_ui_disabled_blocks_stream_and_history_with_zero_model_calls(

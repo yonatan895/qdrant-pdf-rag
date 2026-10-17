@@ -94,6 +94,7 @@ complete its answer-context integration; see the workload status table below.
 | `ingest` | One-Shot Job | 1 | High CPU, worker pool, RWO scratch |
 | `zowe-mcp` | Proposed sidecar (ADR-0003); absent from the current Helm chart | Not deployed | Bridge/client code exists; answer-context integration and deployment wiring remain incomplete. Default-off; enabling requires the ADR-0003 reactivation gate, separate site credentials and written site acceptance |
 | `jaeger` | Deployment (default on; `off` sentinel disables; disabling only the backend needs an explicit collector endpoint or `off`) | 1 | Jaeger v2 all-in-one, Badger RWO block PVC, tracing backend |
+| `feedback` | Proposed single-replica service (ADR-0005, #780 PR B); absent from the current Helm chart | Not deployed | Single SQLite writer for answer-quality records on its own RWO block PVC (never NFS); bearer token from a Secret; ClusterIP only; agents send to it best-effort when `FEEDBACK_ENABLED` (default off). Not console session state, which stays in browser `localStorage` (ADR-0004) |
 | `bm25-weights` | Baked in images | — | FastEmbed `Qdrant/bm25`; no runtime download |
 
 - **Storage Constraint:** Qdrant persistent data volume **must** be RWO Block storage (NFS and object storage are refused). Ingest work volume is also RWO Block. The corpus volume may be mounted as read-only NFS or PVC.
@@ -289,6 +290,10 @@ src/mainframe_rag/
     core_ports.py     # Typed operations supplied to the answer use case
     model_adapter.py  # Normalizes legacy chat/stream seams; never owns the shared client
     resources.py      # Per-request read-only view of lifespan-owned clients; retrieval wiring + core deps
+  feedback/           # Answer feedback (issue #780, ADR-0005)
+    store.py          # SQLite store and vocabulary owner: answers, one rating per answer, purge
+    service.py        # Single-writer HTTP service over the store (bearer token, fixed error codes)
+    client.py         # Agent-side best-effort client: bounded queue, counted drops, console ratings
   webui/
     routes.py         # Operator console routes (/ui): fail-closed gate, HTMX form/SSE, CSP
     templates/        # Jinja2 shell + message pair (server-rendered, no external assets)

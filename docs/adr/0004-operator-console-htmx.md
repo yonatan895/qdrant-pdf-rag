@@ -59,8 +59,16 @@
      JavaScript bundlers in production container images or packaging pipelines.
   2. **No secondary backend service:** No Streamlit server, no Backend-for-Frontend
      (BFF), and no auxiliary container processes alongside the agent.
+     *(Amendment, ADR-0005: the answer-feedback service is a separate
+     deployment the agent calls; it is not a BFF, serves no UI and runs no
+     process alongside the agent.)*
   3. **No server-side user/session DB:** No SQLite, PostgreSQL, MySQL, Redis, or
      stateful PVCs for UI data; zero server database tables.
+     *(Amendment, ADR-0005: while answer feedback is enabled, console question
+     and answer text and ratings are stored as quality records by a separate
+     single-writer feedback service on its own PVC. They are never read back
+     as session state; dialogue history stays in `localStorage`, and the agent
+     pod keeps no persistent volume or database.)*
   4. **No application-level authentication:** FastAPI implements no custom login forms,
      credential hashing, or session cookie generation; authentication and RBAC are
      delegated entirely to the OpenShift `oauth-proxy` sidecar.

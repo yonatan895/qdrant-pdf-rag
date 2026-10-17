@@ -192,6 +192,9 @@ class AnswerCoreOutput:
     # Bounded supplied-evidence projection (issue #635), derived from the
     # same finalized prepared prompt as `evidence`; empty on no-hits paths.
     supplied: tuple[SuppliedExcerpt, ...] = ()
+    # The effort this answer was generated at (issue #780 answer records);
+    # None on the empty-hits path, where no generation ran.
+    reasoning_effort: str | None = None
 
 
 class CoreToken(TypedDict):
@@ -345,6 +348,7 @@ def _finalize_answer(
     usage: TokenUsage,
     llm_ms: int,
     ttft_ms: int | None,
+    reasoning_effort: str | None = None,
 ) -> AnswerCoreOutput:
     """One finalize owner for the JSON and streaming executors: citation
     parsing consumes the prepared evidence manifest, and the output carries
@@ -381,6 +385,7 @@ def _finalize_answer(
         evidence=prepared.evidence,
         budget_verified=prepared.budget_verified,
         supplied=prepared.supplied,
+        reasoning_effort=reasoning_effort,
     )
 
 
@@ -489,6 +494,7 @@ async def execute_answer_core(
         kind=kind,
         timings=timings,
         complexity=complexity,
+        reasoning_effort=effort,
         finish_reason=chat_res.finish_reason,
         usage=chat_res.usage,
         llm_ms=llm_ms,
@@ -605,6 +611,7 @@ async def execute_answer_core_stream(
         kind=kind,
         timings=timings,
         complexity=complexity,
+        reasoning_effort=effort,
         finish_reason=finish_reason,
         usage=usage,
         llm_ms=llm_ms,

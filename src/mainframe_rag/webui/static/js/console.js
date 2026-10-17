@@ -732,7 +732,261 @@
     stateBadges(article, turn);
     const meta = renderMeta(turn);
     if (meta) article.appendChild(meta);
+    const rating = renderFeedback(turn);
+    if (rating) article.appendChild(rating);
     return article;
+  }
+
+  /* Answer feedback (issue #780): rate a recorded answer by its server
+   * request id. Only the id, rating, reason codes and comment are sent; the
+   * server attaches them to its own record, never to client-supplied text.
+   * Rendered only when the deployment enables feedback. */
+  const FEEDBACK_RATINGS = [["good", "Good"], ["neutral", "Neutral"], ["bad", "Bad"]];
+  const FEEDBACK_REASONS = [
+    ["wrong", "Wrong"], ["incomplete", "Incomplete"],
+    ["missing_or_wrong_citation", "Missing or wrong citation"],
+    ["should_have_declined", "Should have declined"], ["wrongly_declined", "Wrongly declined"],
+    ["too_slow", "Too slow"], ["other", "Other"],
+  ];
+  const FEEDBACK_ERROR_TEXT = "The rating could not be sent.";
+  // Unsent rating state by request id (choice, reasons, comment, in-flight
+  // send, last error): renderMessages() rebuilds every article (another turn
+  // completing, a cross-tab write), and the box is re-derived from this state.
+  // Page memory only, never stored; an entry exists only once the operator
+  // edits, and is dropped when the answer is rated or leaves every incident.
+  const feedbackDrafts = new Map();
+  const EMPTY_DRAFT = Object.freeze({ rating: null, reasons: [], comment: "", sending: false, status: "" });
+
+  function editDraft(id) {
+    if (!feedbackDrafts.has(id)) feedbackDrafts.set(id, { ...EMPTY_DRAFT, reasons: [] });
+    return feedbackDrafts.get(id);
+  }
+
+  function pruneDrafts(store) {
+    const known = new Set();
+    for (const session of Object.values(store.sessions)) {
+      for (const stored of session.turns || []) {
+        if (typeof stored.request_id === "string" && !stored.feedback) known.add(stored.request_id);
+      }
+    }
+    for (const id of Array.from(feedbackDrafts.keys())) if (!known.has(id)) feedbackDrafts.delete(id);
+  }
+
+  // Focus inside a rating box survives a rebuild: renderMessages() captures
+  // the control before replacing the articles and restores it (and the caret)
+  // after, so keystrokes are not lost to <body>.
+  function captureFeedbackFocus() {
+    const active = document.activeElement;
+    const box = active && active.closest ? active.closest("[data-feedback-for]") : null;
+    if (!box) return null;
+    let selector = null;  // null: the box itself (a focusable "Rated" box)
+    if (active.matches(".feedback-comment")) selector = ".feedback-comment";
+    else if (active.matches(".feedback-submit")) selector = ".feedback-submit";
+    else if (active.dataset.rating) selector = '.feedback-rating[data-rating="' + active.dataset.rating + '"]';
+    else if (active.type === "checkbox") selector = '.feedback-reasons input[value="' + active.value + '"]';
+    return {
+      id: box.dataset.feedbackFor, selector,
+      start: active.selectionStart, end: active.selectionEnd,
+    };
+  }
+
+  function restoreFeedbackFocus(saved) {
+    if (!saved) return;
+    const box = messagesEl.querySelector('[data-feedback-for="' + saved.id + '"]');
+    if (!box) return;
+    // The saved control, else the box when it is focusable ("Rated"); never
+    // a different control than the one that had focus.
+    const target = saved.selector ? box.querySelector(saved.selector) : null;
+    const fallback = box.hasAttribute("tabindex") ? box : null;
+    if (!target) {
+      if (fallback) fallback.focus({ preventScroll: true });
+      return;
+    }
+    target.focus({ preventScroll: true });
+    if (typeof saved.start === "number" && target.setSelectionRange) {
+      target.setSelectionRange(saved.start, saved.end);
+    }
+  }
+
+  function feedbackBox(id) {
+    return messagesEl.querySelector('[data-feedback-for="' + id + '"]');
+  }
+
+  // The answer's turn as the store holds it now (another tab may have rated
+  // it meanwhile), falling back to the caller's copy.
+  function storedTurn(id, fallback) {
+    for (const session of Object.values(loadStore().sessions)) {
+      for (const stored of session.turns || []) if (stored.request_id === id) return stored;
+    }
+    return fallback;
+  }
+
+  // Replace one live box from the state. Focus inside it stays on the same
+  // control; when that control no longer exists (the box became "Rated"),
+  // focus moves to the box itself, never to <body>. Focus elsewhere is
+  // never touched.
+  function redrawFeedback(turn) {
+    const live = feedbackBox(turn.request_id);
+    if (!live) return;
+    const active = document.activeElement;
+    const saved = active && live.contains(active) ? captureFeedbackFocus() : null;
+    const next = renderFeedback(turn);
+    if (!next) {
+      live.remove();
+      return;
+    }
+    live.replaceWith(next);
+    if (saved) restoreFeedbackFocus(saved);
+  }
+
+  function renderFeedback(turn) {
+    if (document.body.dataset.feedback !== "on" || turn.role !== "assistant") return null;
+    if (typeof turn.request_id !== "string" || !/^[0-9a-f]{12}$/.test(turn.request_id)) return null;
+    const id = turn.request_id;
+    const box = el("div", "turn-feedback");
+    box.dataset.feedbackFor = id;
+    if (turn.feedback) {
+      feedbackDrafts.delete(id);
+      box.tabIndex = -1;  // the focus target once its controls are gone
+      box.textContent = "Rated: " + turn.feedback;
+      return box;
+    }
+    const draft = feedbackDrafts.get(id) || EMPTY_DRAFT;
+    // Locked while a send is in flight. Controls stay in place and focusable
+    // (aria-disabled, read-only comment): disabling a focused node would drop
+    // focus to <body>. Every handler refuses input while locked.
+    const locked = () => (feedbackDrafts.get(id) || EMPTY_DRAFT).sending;
+    const lockState = String(draft.sending);
+    box.appendChild(el("span", "feedback-label", "Rate this answer:"));
+    const details = el("div", "feedback-details");
+    details.hidden = !draft.rating;
+    for (const [value, label] of FEEDBACK_RATINGS) {
+      const button = el("button", "seg feedback-rating", label);
+      button.type = "button";
+      button.setAttribute("data-rating", value);
+      button.setAttribute("aria-pressed", String(draft.rating === value));
+      button.setAttribute("aria-disabled", lockState);
+      button.addEventListener("click", () => {
+        if (locked()) return;
+        editDraft(id).rating = value;
+        box.querySelectorAll(".feedback-rating").forEach((other) => {
+          other.setAttribute("aria-pressed", String(other === button));
+        });
+        details.hidden = false;
+      });
+      box.appendChild(button);
+    }
+    const reasons = el("fieldset", "feedback-reasons");
+    reasons.appendChild(el("legend", null, "Reasons (optional)"));
+    for (const [value, label] of FEEDBACK_REASONS) {
+      const option = el("label");
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.value = value;
+      checkbox.checked = draft.reasons.includes(value);
+      checkbox.setAttribute("aria-disabled", lockState);
+      checkbox.addEventListener("click", (event) => {
+        if (locked()) event.preventDefault();
+      });
+      checkbox.addEventListener("change", () => {
+        editDraft(id).reasons = Array.from(reasons.querySelectorAll("input:checked")).map((input) => input.value);
+      });
+      option.appendChild(checkbox);
+      option.appendChild(document.createTextNode(" " + label));
+      reasons.appendChild(option);
+    }
+    details.appendChild(reasons);
+    const comment = el("textarea", "feedback-comment");
+    comment.maxLength = 2000;
+    comment.placeholder = "Comment (optional)";
+    comment.setAttribute("aria-label", "Comment (optional)");
+    comment.value = draft.comment;
+    comment.readOnly = draft.sending;
+    comment.addEventListener("input", () => {
+      editDraft(id).comment = comment.value;
+    });
+    details.appendChild(comment);
+    const submit = el("button", "btn feedback-submit", "Send rating");
+    submit.type = "button";
+    submit.setAttribute("aria-disabled", lockState);
+    const status = el("span", "feedback-status", draft.status);
+    status.setAttribute("role", "status");
+    submit.addEventListener("click", async () => {
+      const sending = editDraft(id);
+      if (!sending.rating || sending.sending) return;
+      // Send a snapshot and lock the box through the state (the one source
+      // the render derives every control from): what is shown and saved
+      // afterwards is exactly what the service recorded.
+      const sent = { rating: sending.rating, reasons: sending.reasons.slice(), comment: sending.comment };
+      sending.sending = true;
+      sending.status = "";
+      redrawFeedback(turn);
+      try {
+        let ok = false;
+        let message = FEEDBACK_ERROR_TEXT;
+        try {
+          const response = await fetch("/ui/feedback", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              request_id: id,
+              rating: sent.rating,
+              reasons: sent.reasons,
+              comment: sent.comment,
+            }),
+          });
+          ok = response.status === 201;
+          if (!ok) {
+            try {
+              const envelope = await response.json();
+              if (envelope && typeof envelope.message === "string") message = envelope.message;
+            } catch (err) {
+              /* fixed fallback text */
+            }
+          }
+        } catch (err) {
+          ok = false;
+        }
+        if (ok) {
+          const rated = sent.rating;
+          // The service recorded it: show "Rated" even if the local save
+          // fails (the operator must not resend a recorded rating).
+          turn.feedback = rated;
+          try {
+            await mutate((store) => {
+              for (const session of Object.values(store.sessions)) {
+                for (const stored of session.turns || []) {
+                  if (stored.request_id === id) stored.feedback = rated;
+                }
+              }
+              return true;
+            });
+          } catch (err) {
+            /* recorded server-side; a rejected locked write keeps the label only until the next rebuild */
+          }
+          announce("Rating sent.");
+        } else {
+          // The draft may have been replaced or pruned meanwhile: write the
+          // error into whatever state is current.
+          const current = feedbackDrafts.get(id);
+          if (current) current.status = message;
+        }
+      } finally {
+        // Unlocked only once settled (after the store write), and always,
+        // even if the store write fails.
+        const current = feedbackDrafts.get(id);
+        if (current) current.sending = false;
+        // The article may have been rebuilt, or the answer rated in another
+        // tab, while the request was in flight: redraw the live box from the
+        // stored turn.
+        const stored = storedTurn(id, turn);
+        redrawFeedback(turn.feedback && !stored.feedback ? turn : stored);
+      }
+    });
+    details.appendChild(submit);
+    details.appendChild(status);
+    box.appendChild(details);
+    return box;
   }
 
   const EMPTY_EXAMPLES = [
@@ -822,6 +1076,7 @@
   function renderMessages() {
     const current = currentSession();
     const session = current.session;
+    const feedbackFocus = captureFeedbackFocus();
     messagesEl.replaceChildren();
     if (!session.turns.length) {
       const empty = el("div", "empty-state");
@@ -845,6 +1100,8 @@
     if (streamingHere) messagesEl.appendChild(inflight.article);
     stick = true;
     messagesEl.scrollIntoView({ block: "end" });
+    pruneDrafts(loadStore());
+    restoreFeedbackFocus(feedbackFocus);
   }
 
   function startRename(id, row, openBtn) {
@@ -1177,6 +1434,11 @@
       }
       assistantTurn.citations = finalPayload.citations || [];
       assistantTurn.citations_inferred = !!finalPayload.citations_inferred;
+      // The server request id (12 hex, no content): the key a rating attaches to
+      // (#780). Kept only when feedback is enabled: disabled means no change.
+      if (document.body.dataset.feedback === "on" && typeof finalPayload.request_id === "string") {
+        assistantTurn.request_id = finalPayload.request_id;
+      }
       assistantTurn.verification_state = finalPayload.verification_state || "unverified_draft";
       assistantTurn.script_review_required = !!finalPayload.script_review_required;
       assistantTurn.meta = {

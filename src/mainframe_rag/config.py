@@ -241,6 +241,27 @@ class Settings(BaseSettings):
     chat_max_prior_turn_chars: int = Field(default=1000, ge=200, le=5000)
     ui_enabled: bool = False
 
+    # Console answer feedback (issue #780). Off by default: no record, no
+    # call, no behavior change. When on, finalized answers are sent best-effort
+    # to the single-writer feedback service (never on the answer's critical
+    # path) and the console can rate them. The bearer token is a Secret
+    # reference, never logged. No rater identity is recorded (the agent port
+    # is reachable without the OAuth proxy; attribution is PR B's to prove).
+    feedback_enabled: bool = False
+    feedback_url: str | None = None
+    feedback_api_key: str | None = None
+    feedback_queue_size: int = Field(default=256, ge=1, le=10000)
+    feedback_timeout_s: float = Field(default=2.0, gt=0.0, le=30.0)
+    # Bounded shutdown drain of queued records; what is left is counted dropped.
+    feedback_drain_timeout_s: float = Field(default=2.0, ge=0.0, le=30.0)
+    # Feedback SERVICE process only (the single SQLite writer): store path on
+    # its RWO block PVC, its bearer token (Secret reference, never logged; the
+    # agents' FEEDBACK_API_KEY carries the same value) and the retention
+    # window its purge action enforces (ADR-0005: 180 days).
+    feedback_store_path: str = "/data/feedback.sqlite3"
+    feedback_service_token: str | None = None
+    feedback_retention_days: int = Field(default=180, ge=1, le=3650)
+
     # Request admission and total deadline (issue #374). EVERY value defaults
     # to the pre-#374 behaviour (0 = no limit / no deadline): selecting a
     # numeric envelope needs measurements on the real site, so no default
@@ -355,6 +376,14 @@ class Settings(BaseSettings):
     # remains only so an explicit INGEST_ALIAS_PUBLISH=false fails closed
     # instead of being silently ignored.
     ingest_alias_publish: bool = True
+
+    @model_validator(mode="after")
+    def _feedback_endpoint_when_enabled(self) -> Settings:
+        if self.feedback_enabled and not (
+            self.feedback_url and self.feedback_api_key and self.feedback_api_key.strip()
+        ):
+            raise ValueError("FEEDBACK_ENABLED requires FEEDBACK_URL and FEEDBACK_API_KEY")
+        return self
 
     @model_validator(mode="after")
     def _efforts_match_served_template(self) -> Settings:

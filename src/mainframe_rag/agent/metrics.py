@@ -54,6 +54,7 @@ from opentelemetry.sdk.metrics.view import ExplicitBucketHistogramAggregation, V
 from prometheus_client import GCCollector, PlatformCollector, ProcessCollector
 
 from mainframe_rag.agent.answer import VERIFICATION_STATES
+from mainframe_rag.feedback.store import ENDPOINTS, RATINGS, REASONS
 from mainframe_rag.logs import error_type
 
 log = logging.getLogger("otel.metrics")
@@ -101,6 +102,8 @@ class Instruments:
     admission_inflight: UpDownCounter
     admission_wait: Histogram
     admission_rejected: Counter
+    feedback_ratings: Counter
+    feedback_records: Counter
 
 
 _instruments: Instruments | None = None
@@ -162,6 +165,17 @@ def create_instruments(meter: Meter | None = None) -> Instruments:
         admission_rejected=meter.create_counter(
             "rag.admission.rejected",
             description="Requests refused by admission, by endpoint and reason",
+            unit="1",
+        ),
+        feedback_ratings=meter.create_counter(
+            "rag.feedback.ratings",
+            description=("Accepted console rating submissions (re-ratings included; the store keeps the "
+                         "latest per answer) by rating, reason, endpoint and answer state (issue #780)"),
+            unit="1",
+        ),
+        feedback_records=meter.create_counter(
+            "rag.feedback.records",
+            description="Answer records sent to the feedback store, by outcome (issue #780)",
             unit="1",
         ),
     )
@@ -242,6 +256,45 @@ def record_admission_rejected(endpoint: str, reason: str) -> None:
         instruments.admission_rejected.add(1, {"endpoint": endpoint, "reason": reason})
     except Exception as exc:  # noqa: BLE001
         log.debug("otel record_admission_rejected dropped: %s", error_type(exc))
+
+
+# Feedback labels (issue #780) come from the store's bounded vocabularies
+# (RATINGS, REASONS, ENDPOINTS): never text or ids.
+FEEDBACK_RECORD_OUTCOMES = ("recorded", "duplicate", "dropped", "failed")
+
+
+def record_feedback_rating(
+    rating: str, reasons: list[str], *, endpoint: str, verification_state: str | None
+) -> None:
+    """One accepted rating submission: one count per reason (`none` when no
+    reason). A re-rating counts again, so this is submission volume and mix;
+    the feedback store (latest rating per answer) is the authority on rated
+    answers. Unknown values fall to `unknown`, never a new series."""
+    instruments = _instruments
+    if instruments is None:
+        return
+    try:
+        base = {
+            "rating": rating if rating in RATINGS else "unknown",
+            "endpoint": endpoint if endpoint in ENDPOINTS else "unknown",
+            "verification_state": (verification_state if isinstance(verification_state, str)
+                                   and verification_state in VERIFICATION_STATES else "unknown"),
+        }
+        for reason in [r for r in reasons if r in REASONS] or ["none"]:
+            instruments.feedback_ratings.add(1, {**base, "reason": reason})
+    except Exception as exc:  # noqa: BLE001
+        log.debug("otel record_feedback_rating dropped: %s", error_type(exc))
+
+
+def record_feedback_record(outcome: str) -> None:
+    """One answer-record delivery outcome (feedback pipeline health)."""
+    instruments = _instruments
+    if instruments is None or outcome not in FEEDBACK_RECORD_OUTCOMES:
+        return
+    try:
+        instruments.feedback_records.add(1, {"outcome": outcome})
+    except Exception as exc:  # noqa: BLE001
+        log.debug("otel record_feedback_record dropped: %s", error_type(exc))
 
 
 def setup_metrics(enabled: bool) -> MeterProvider | None:

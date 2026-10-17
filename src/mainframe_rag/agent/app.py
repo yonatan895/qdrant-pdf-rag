@@ -17,8 +17,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
 import logging
+import os
 import time
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterable, Iterator
@@ -94,11 +94,14 @@ from mainframe_rag.agent.sse import (
 from mainframe_rag.agent.tokenizer import build_tokenizer
 from mainframe_rag.agent.zowe_mcp import build_zowe_mcp, probe_zowe_mcp
 from mainframe_rag.config import Settings, bearer_auth_headers, load_settings
+from mainframe_rag.feedback.client import FeedbackClient
+from mainframe_rag.feedback.store import AnswerRecord
+from mainframe_rag.feedback.store import Endpoint as FeedbackEndpoint
 from mainframe_rag.ingest.bounds import EmbedInputTooLarge
 from mainframe_rag.ingest.embed import build_embedder
 from mainframe_rag.ingest.representation import require_attested_revision
 from mainframe_rag.ingest.rules_version import extraction_rules_version
-from mainframe_rag.logs import configure_logging, error_type
+from mainframe_rag.logs import configure_logging, error_type, json_log
 from mainframe_rag.ports import (
     AsyncQdrantReader,
     ChatMessage,
@@ -137,6 +140,9 @@ reranker: Reranker | None = None
 # Reset at lifespan startup so one lifespan's verdict never leaks into the next.
 rerank_health: tuple[float, bool] | None = None
 zowe_mcp: ZoweMCP | None = None
+# Answer feedback client (issue #780): built in lifespan only when
+# FEEDBACK_ENABLED; None means no record and no call on any path.
+feedback: FeedbackClient | None = None
 # Serving-generation gate (issues #391 F3/F4): created in lifespan from
 # Settings, or injected by tests before startup (never overwritten then).
 serving_gate: ServingGate | None = None
@@ -681,6 +687,43 @@ def _output_log_fields(
     return fields
 
 
+def _unpublish_feedback() -> None:
+    global feedback
+    feedback = None
+
+
+def _record_feedback(
+    request: Request, endpoint: FeedbackEndpoint, output: AnswerCoreOutput, fields: dict
+) -> None:
+    """Hand one finalized answer to the feedback client (issue #780). The
+    query is the one this request's core input carried (request.state, set by
+    the route); telemetry is the finalized log fields (scalars only) plus the
+    model identities. Best-effort: nothing here may slow or fail the answer."""
+    client = feedback
+    query = getattr(request.state, "feedback_query", None)
+    if client is None or not isinstance(query, str):
+        return
+    request_id = request.state.request_id
+    try:
+        telemetry = {k: v for k, v in fields.items() if v is None or isinstance(v, (bool, int, float, str))}
+        telemetry.update(
+            reasoning_effort=output.reasoning_effort,
+            llm_model=settings.llm_model_reasoning,
+            embed_model=settings.embed_model,
+            embed_model_revision=settings.embed_model_revision or None,
+            extraction_rules_version=extraction_rules_version(),
+            release=os.environ.get("IMAGE_SHA", "").strip() or None,
+        )
+        client.submit(AnswerRecord(
+            request_id=request_id, endpoint=endpoint, query=query, answer=output.answer,
+            script=output.script, citations=list(output.citations),
+            supplied=[excerpt.citation for excerpt in output.supplied],
+            telemetry=telemetry, finalized_at=time.time(),
+        ))
+    except Exception as exc:  # noqa: BLE001 — best-effort by contract
+        log.warning(json_log(request_id, "feedback_record", error=error_type(exc)))
+
+
 def _alert_finish_reason_non_stop(request_id: str, finish_reason: str) -> None:
     """Per-request alert when the reasoning model stops abnormally: the JSON
     warning is the real, worker-safe log signal; the countable signal is the
@@ -746,7 +789,7 @@ async def _close_client(client: object) -> None:
 async def lifespan(_app: FastAPI):
     global settings, http, http_sync, qdrant, embedder, llm, tokenizer, reranker, zowe_mcp
     global rerank_health
-    global serving_gate, admission
+    global serving_gate, admission, feedback
     settings = load_settings()
     configure_logging(settings.log_level)
     # Startup fail-fast (issue #20 PR D): the agent refuses to listen on a
@@ -906,6 +949,16 @@ async def lifespan(_app: FastAPI):
         # UWM scrapes of GET /metrics. Pull model — nothing to flush, so no
         # shutdown step; idempotent across lifespan re-entry.
         setup_metrics(settings.metrics_enabled)
+        # Feedback (issue #780): last in, first out — the bounded drain runs
+        # before the shared clients close on shutdown.
+        feedback = None
+        if settings.feedback_enabled:
+            feedback_client = FeedbackClient(settings)
+            feedback_client.start()
+            owned.push_async_callback(feedback_client.aclose)
+            # LIFO: unpublish first, so no late submit lands in a closing queue.
+            owned.callback(_unpublish_feedback)
+            feedback = feedback_client
         yield
 
 
@@ -1807,6 +1860,8 @@ def _answer_final_frames(
                 request_id, "answer", query_kind=kind, hits=0, rerank_ms=timings.get("rerank_ms")
             )
         )
+        _record_feedback(owner.request, "answer_stream", output,
+                         _output_log_fields(output, kind, timings, owner.started, stream=True))
         yield format_sse_event(
             "final",
             empty_final_payload(
@@ -1821,13 +1876,9 @@ def _answer_final_frames(
 
     _alert_finish_reason_non_stop(request_id, output.finish_reason)
 
-    log.info(
-        json_log(
-            request_id,
-            "answer",
-            **_output_log_fields(output, kind, timings, owner.started, stream=True),
-        )
-    )
+    fields = _output_log_fields(output, kind, timings, owner.started, stream=True)
+    log.info(json_log(request_id, "answer", **fields))
+    _record_feedback(owner.request, "answer_stream", output, fields)
 
     final = output_final_payload(request_id, output, kind)
     root_span.set_attributes(
@@ -1899,6 +1950,7 @@ async def _answer_response(req, response, is_stream, owner):
     except Exception as exc:
         raise _retrieval_failed(owner, "answer", "answer", exc) from exc
 
+    owner.request.state.feedback_query = req.query
     core_input = AnswerCoreInput(
         query=req.query,
         product=req.product,
@@ -1933,6 +1985,8 @@ async def _answer_response(req, response, is_stream, owner):
                         rerank_ms=timings.get("rerank_ms"),
                     )
                 )
+            _record_feedback(owner.request, "answer", output,
+                             _output_log_fields(output, kind, timings, started, stream=False))
             return AnswerResponse(
                 request_id=request_id,
                 answer=output.answer,
@@ -1942,13 +1996,9 @@ async def _answer_response(req, response, is_stream, owner):
         _set_server_timing(response.headers, timings, llm_ms=output.llm_ms, ttft_ms=output.ttft_ms)
 
         with use_span(root_span, end_on_exit=False):
-            log.info(
-                json_log(
-                    request_id,
-                    "answer",
-                    **_output_log_fields(output, kind, timings, started, stream=False),
-                )
-            )
+            fields = _output_log_fields(output, kind, timings, started, stream=False)
+            log.info(json_log(request_id, "answer", **fields))
+            _record_feedback(owner.request, "answer", output, fields)
             root_span.set_attributes(
                 _answer_span_attrs(
                     kind,
@@ -2043,6 +2093,8 @@ def _chat_final_frames(
         root_span.set_attributes({"rag.query_kind": kind, "rag.hits": 0})
         _record_no_hits(owner, "chat", kind, output)
         log.info(json_log(request_id, "chat", query_kind=kind, hits=0, stream=True))
+        _record_feedback(owner.request, "chat_stream", output,
+                         _output_log_fields(output, kind, timings, owner.started, stream=True))
         yield format_openai_chunk(chat_id, llm_model, finish_reason="stop", extra=extra_meta)
         yield format_openai_done()
         return
@@ -2053,13 +2105,9 @@ def _chat_final_frames(
 
     extra_meta = _answer_metadata(output, hits=[h.model_dump() for h in output.hits])
     _record_answered(owner, "chat", kind, output, llm_model)
-    log.info(
-        json_log(
-            request_id,
-            "chat",
-            **_output_log_fields(output, kind, timings, owner.started, stream=True),
-        )
-    )
+    fields = _output_log_fields(output, kind, timings, owner.started, stream=True)
+    log.info(json_log(request_id, "chat", **fields))
+    _record_feedback(owner.request, "chat_stream", output, fields)
     yield format_openai_chunk(
         chat_id, llm_model, finish_reason=output.finish_reason, extra=extra_meta
     )
@@ -2086,6 +2134,7 @@ async def _chat_response(req, response, owner):
     rsc = resources()
     deps = await serving_deps(rsc)
 
+    owner.request.state.feedback_query = turn.query
     core_input = AnswerCoreInput(
         query=turn.query,
         messages=turn.messages,
@@ -2123,6 +2172,8 @@ async def _chat_response(req, response, owner):
             with use_span(root_span, end_on_exit=False):
                 root_span.set_attributes({"rag.query_kind": kind, "rag.hits": 0})
                 log.info(json_log(request_id, "chat", query_kind=kind, hits=0))
+            _record_feedback(owner.request, "chat", output,
+                             _output_log_fields(output, kind, timings, started, stream=False))
             return ChatCompletionsResponse(
                 id=f"chatcmpl-{request_id}",
                 created=int(time.time()),
@@ -2144,13 +2195,9 @@ async def _chat_response(req, response, owner):
             content += "\n\n**Citations:**\n" + "\n".join(f"- {c}" for c in output.citations)
 
         with use_span(root_span, end_on_exit=False):
-            log.info(
-                json_log(
-                    request_id,
-                    "chat",
-                    **_output_log_fields(output, kind, timings, started, stream=False),
-                )
-            )
+            fields = _output_log_fields(output, kind, timings, started, stream=False)
+            log.info(json_log(request_id, "chat", **fields))
+            _record_feedback(owner.request, "chat", output, fields)
         _record_answered(owner, "chat", kind, output, llm_model)
 
         return ChatCompletionsResponse(
@@ -2191,5 +2238,3 @@ async def _chat_response(req, response, owner):
     )
 
 
-def json_log(request_id: str, action: str, **fields) -> str:
-    return json.dumps({"request_id": request_id, "action": action, **fields})

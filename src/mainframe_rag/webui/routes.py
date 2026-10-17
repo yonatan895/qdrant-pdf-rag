@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, Form, Request
-from fastapi.responses import FileResponse, HTMLResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.templating import Jinja2Templates
 from opentelemetry.trace import SpanKind
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -39,6 +39,14 @@ from mainframe_rag.agent.answer_core import (
 )
 from mainframe_rag.agent.sse import error_payload, format_sse_event, output_final_payload
 from mainframe_rag.config import ReasoningEffort
+from mainframe_rag.feedback.store import (
+    COMMENT_MAX_CHARS,
+    RATINGS,
+    REASONS,
+    REQUEST_ID_PATTERN,
+    RatingValue,
+    Reasons,
+)
 from mainframe_rag.ingest.bounds import EmbedInputTooLarge
 from mainframe_rag.ingest.chunk import detect_code_region
 from mainframe_rag.logs import error_type
@@ -104,6 +112,31 @@ def _require_ui() -> None:
 
 
 router = APIRouter(prefix="/ui", tags=["ui"], dependencies=[Depends(_require_ui)])
+
+
+class UiFeedbackRequest(BaseModel):
+    """Console rating of one recorded answer (issue #780). The answer itself
+    is never sent: the store attaches the rating to its own record."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str = Field(pattern=f"^{REQUEST_ID_PATTERN}$")
+    rating: RatingValue
+    reasons: Reasons = Field(default_factory=list)
+    comment: str = Field(default="", max_length=COMMENT_MAX_CHARS)
+
+
+_FEEDBACK_DISABLED_TEXT = "feedback is not enabled on this deployment"
+# One fixed console response per client outcome (status, code, message; ok
+# carries no code and its message is built from the rating); a test pins the
+# keys to RateOutcome. The unknown text covers both a record
+# still queued and one dropped or purged, so it promises neither.
+_FEEDBACK_OUTCOMES: dict[str, tuple[int, str | None, str]] = {
+    "ok": (201, None, "Rated: {rating}"),
+    "unknown": (404, "unknown_answer", "this answer is not recorded, or not yet; it cannot be rated now"),
+    "invalid": (422, "invalid_request", "the rating is invalid"),
+    "unavailable": (503, "feedback_unavailable", "feedback is temporarily unavailable"),
+}
 
 
 class UiChatRequest(BaseModel):
@@ -617,8 +650,33 @@ def _render_page(
         version=(form or {}).get("version", ""),
         reasoning_effort=selected,
         reasoning_efforts=[(effort, _EFFORT_LABELS[effort]) for effort in offered],
+        **_feedback_context(),
     )
     return _secure(HTMLResponse(body, status_code=status_code))
+
+
+_FEEDBACK_LABELS = {
+    "good": "Good", "neutral": "Neutral", "bad": "Bad",
+    "wrong": "Wrong", "incomplete": "Incomplete",
+    "missing_or_wrong_citation": "Missing or wrong citation",
+    "should_have_declined": "Should have declined", "wrongly_declined": "Wrongly declined",
+    "too_slow": "Too slow", "other": "Other",
+}
+
+
+def _feedback_context() -> dict[str, Any]:
+    """Template inputs for the rating controls (#780), from the store's vocabulary."""
+    return {
+        "feedback_enabled": _feedback_client() is not None,
+        "feedback_ratings": [(value, _FEEDBACK_LABELS[value]) for value in RATINGS],
+        "feedback_reasons": [(value, _FEEDBACK_LABELS[value]) for value in REASONS],
+    }
+
+
+def _feedback_client():
+    from mainframe_rag.agent import app as app_mod
+
+    return app_mod.feedback
 
 
 def _render_pair(
@@ -628,8 +686,9 @@ def _render_pair(
     history_json: str,
     error: str | None = None,
 ) -> Response:
+    feedback = _feedback_context()
     body = "".join(
-        templates.get_template("_message_pair.html").render(request=request, turn=turn)
+        templates.get_template("_message_pair.html").render(request=request, turn=turn, **feedback)
         for turn in turns
     )
     if error:
@@ -643,7 +702,7 @@ def _render_pair(
     return _secure(HTMLResponse(body))
 
 
-async def _run_turn(request: Request, req: UiChatRequest, root_span):
+async def _run_turn(request: Request, req: UiChatRequest, root_span, started: float):
     """Run one console turn through the shared answer core; the caller owns
     client-facing error mapping (fixed text, detail to logs only)."""
     from mainframe_rag.agent import app as app_mod
@@ -651,6 +710,7 @@ async def _run_turn(request: Request, req: UiChatRequest, root_span):
     _require_offered_effort(req.reasoning_effort)
     request_id = getattr(request.state, "request_id", "ui")
     turn = app_mod.prepare_chat_request(request_id, req.messages, req.splunk_context)
+    request.state.feedback_query = turn.query
     # Serving gate before any retrieval (issues #391 F3/F4): the console
     # refuses with the same stable 503 as the API when the generation is
     # unverified.
@@ -679,6 +739,8 @@ async def _run_turn(request: Request, req: UiChatRequest, root_span):
                 verification_state=output.verification_state,
             )
         )
+        app_mod._record_feedback(request, "console", output, app_mod._output_log_fields(
+            output, output.query_kind, output.timings, started, stream=False))
         return output
 
 
@@ -754,7 +816,7 @@ async def ui_chat(
             # (issue #374); a refusal renders the fixed banner like any
             # other console failure, with the stable code in RED.
             await app_mod._admit(owner)
-            output = await app_mod._within_deadline(owner, _run_turn(request, req, root_span))
+            output = await app_mod._within_deadline(owner, _run_turn(request, req, root_span, started))
         except Exception as exc:  # noqa: BLE001 — fixed banner to the operator, detail to logs
             from mainframe_rag.agent.answer import PromptBudgetExceeded
 
@@ -820,6 +882,9 @@ async def ui_chat(
             supplied_evidence=list(output.supplied),
             evidence_omitted=len(output.evidence.omitted_indices),
         )
+        if _feedback_client() is not None:
+            # The fallback fragment's rating form attaches to this record (#780).
+            assistant_turn["request_id"] = request_id
         turns.append(assistant_turn)
         if is_htmx:
             return _render_pair(request, [user_turn, assistant_turn], history_json=_history_json(turns))
@@ -855,6 +920,7 @@ async def _console_stream_response(req, owner):
     started = owner.started
     _require_offered_effort(req.reasoning_effort)
     turn = app_mod.prepare_chat_request(request_id, req.messages, req.splunk_context)
+    request.state.feedback_query = turn.query
     # Serving gate before the stream opens (issues #391 F3/F4): a non-servable
     # generation is the same stable 503 JSON the API returns, never an SSE
     # error frame after a 200 was already committed.
@@ -903,6 +969,8 @@ async def _console_stream_response(req, owner):
                             stream=True,
                         )
                     )
+                    app_mod._record_feedback(request, "console", output, app_mod._output_log_fields(
+                        output, output.query_kind, output.timings, started, stream=True))
                     yield format_sse_event(
                         "final", output_final_payload(request_id, output, output.query_kind)
                     )
@@ -943,6 +1011,67 @@ async def _console_stream_response(req, owner):
     headers["X-Accel-Buffering"] = "no"
 
     return owner.stream(events(), media_type="text/event-stream", headers=headers)
+
+
+@router.post("/feedback")
+async def ui_feedback(request: Request, req: UiFeedbackRequest) -> Response:
+    """Forward one console rating to the feedback store (issue #780). Fixed
+    client messages and stable codes. No rater identity is recorded: the agent
+    port is reachable without the OAuth proxy, so a forwarded-user header
+    proves nothing (attribution is deferred to the deployment, PR B)."""
+    client = _feedback_client()
+    if client is None:
+        return _secure(JSONResponse(status_code=404, content={
+            "code": "feedback_disabled", "message": _FEEDBACK_DISABLED_TEXT}))
+    status, code, message = await _rate(client, req)
+    if code is None:
+        return _secure(JSONResponse(status_code=status, content={"status": "recorded"}))
+    return _secure(JSONResponse(status_code=status, content={"code": code, "message": message}))
+
+
+@router.post("/feedback/form", response_class=HTMLResponse)
+async def ui_feedback_form(request: Request) -> Response:
+    """Fallback console rating (#780): the same validation, store call and
+    fixed texts as /ui/feedback. An htmx request gets the result text for the
+    form's status slot, always 200 like the /ui/chat banner (htmx 1.9 never
+    swaps a 4xx/5xx); the form stays, so a failed rating can be retried and a
+    re-rating replaces the last. A native post (no JS, opened in a new tab)
+    gets a full page with the real status."""
+    client = _feedback_client()
+    if client is None:
+        return _feedback_result(request, _FEEDBACK_DISABLED_TEXT, 404)
+    form = await request.form()
+    try:
+        req = UiFeedbackRequest.model_validate({
+            "request_id": str(form.get("request_id", "")), "rating": str(form.get("rating", "")),
+            "reasons": [str(value) for value in form.getlist("reasons")],
+            "comment": str(form.get("comment", "")),
+        })
+    except ValidationError:
+        status, _code, message = _FEEDBACK_OUTCOMES["invalid"]
+        return _feedback_result(request, message, status)
+    status, _code, message = await _rate(client, req)
+    return _feedback_result(request, message, status)
+
+
+async def _rate(client: Any, req: UiFeedbackRequest) -> tuple[int, str | None, str]:
+    """Submit the rating and resolve the client's outcome to its one fixed response."""
+    from mainframe_rag.feedback.store import Rating
+
+    outcome = await client.rate(Rating(request_id=req.request_id, rating=req.rating,
+                                       reasons=list(req.reasons), comment=req.comment))
+    status, code, message = _FEEDBACK_OUTCOMES[outcome]
+    return status, code, message.format(rating=req.rating) if outcome == "ok" else message
+
+
+def _feedback_result(request: Request, text: str, status: int) -> Response:
+    if request.headers.get("HX-Request") == "true":
+        return _secure(HTMLResponse(html.escape(text), status_code=200))
+    page = ('<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Answer rating</title>'
+            '<link rel="stylesheet" href="/ui/static/css/console.css"></head>'
+            f'<body class="theme-dark"><main class="feedback-result"><p role="status">{html.escape(text)}</p>'
+            '<p>You can close this tab and return to the console.</p></main></body></html>')
+    return _secure(HTMLResponse(page, status_code=status))
 
 
 @router.get("/static/{path:path}")

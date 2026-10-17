@@ -68,4 +68,24 @@
     </details>
   </div>
   {% endif %}
+  {% if feedback_enabled and turn.role == "assistant" and turn.request_id %}
+  {# Without JS the native post opens in a new tab so this page and its
+     conversation stay; htmx writes the result into the status slot and keeps
+     the form, so a failed rating can be retried. #}
+  <form class="turn-feedback" method="post" action="/ui/feedback/form" target="_blank"
+        hx-post="/ui/feedback/form" hx-target="find .feedback-status" hx-swap="innerHTML">
+    <input type="hidden" name="request_id" value="{{ turn.request_id }}">
+    <fieldset class="feedback-ratings">
+      <legend>Rate this answer</legend>
+      {% for value, label in feedback_ratings %}<label><input type="radio" name="rating" value="{{ value }}" required> {{ label }}</label>{% endfor %}
+    </fieldset>
+    <fieldset class="feedback-reasons">
+      <legend>Reasons (optional)</legend>
+      {% for value, label in feedback_reasons %}<label><input type="checkbox" name="reasons" value="{{ value }}"> {{ label }}</label>{% endfor %}
+    </fieldset>
+    <textarea class="feedback-comment" name="comment" maxlength="2000" aria-label="Comment (optional)" placeholder="Comment (optional)"></textarea>
+    <button class="btn feedback-submit" type="submit">Send rating</button>
+    <span class="feedback-status" role="status"></span>
+  </form>
+  {% endif %}
 </article>
