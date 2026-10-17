@@ -88,9 +88,13 @@ class FeedbackClient:
             log.warning(json_log(rating.request_id, "feedback_rating", error=error_type(exc)))
             return "unavailable"
         if response.status_code == 201:
-            body = response.json()
-            record_feedback_rating(rating.rating, list(rating.reasons), endpoint=str(body.get("endpoint")),
-                                   verification_state=body.get("verification_state"))
+            try:
+                body = response.json()
+            except ValueError:
+                body = None
+            labels = body if isinstance(body, dict) else {}  # labels only; the rating is stored
+            record_feedback_rating(rating.rating, list(rating.reasons), endpoint=str(labels.get("endpoint")),
+                                   verification_state=labels.get("verification_state"))
             return "ok"
         if response.status_code == 404 and _code(response) == "unknown_answer":
             return "unknown"

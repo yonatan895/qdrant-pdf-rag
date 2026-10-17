@@ -794,7 +794,7 @@
     const box = messagesEl.querySelector('[data-feedback-for="' + saved.id + '"]');
     const target = box ? box.querySelector(saved.selector) : null;
     if (!target) return;
-    target.focus();
+    target.focus({ preventScroll: true });
     if (typeof saved.start === "number" && target.setSelectionRange) {
       target.setSelectionRange(saved.start, saved.end);
     }
@@ -820,6 +820,7 @@
       button.type = "button";
       button.setAttribute("data-rating", value);
       button.setAttribute("aria-pressed", String(draft.rating === value));
+      button.disabled = draft.sending;
       button.addEventListener("click", () => {
         editDraft(id).rating = value;
         box.querySelectorAll(".feedback-rating").forEach((other) => {
@@ -837,6 +838,7 @@
       checkbox.type = "checkbox";
       checkbox.value = value;
       checkbox.checked = draft.reasons.includes(value);
+      checkbox.disabled = draft.sending;
       checkbox.addEventListener("change", () => {
         editDraft(id).reasons = Array.from(reasons.querySelectorAll("input:checked")).map((input) => input.value);
       });
@@ -850,6 +852,7 @@
     comment.placeholder = "Comment (optional)";
     comment.setAttribute("aria-label", "Comment (optional)");
     comment.value = draft.comment;
+    comment.readOnly = draft.sending;
     comment.addEventListener("input", () => {
       editDraft(id).comment = comment.value;
     });
@@ -862,9 +865,13 @@
     submit.addEventListener("click", async () => {
       const sending = editDraft(id);
       if (!sending.rating || sending.sending) return;
+      // Lock the controls and send a snapshot: what is shown and saved
+      // afterwards is exactly what the service recorded.
+      const sent = { rating: sending.rating, reasons: sending.reasons.slice(), comment: sending.comment };
       sending.sending = true;
       sending.status = "";
-      submit.disabled = true;
+      box.querySelectorAll("button, input").forEach((control) => { control.disabled = true; });
+      comment.readOnly = true;
       status.textContent = "";
       let ok = false;
       let message = FEEDBACK_ERROR_TEXT;
@@ -874,9 +881,9 @@
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             request_id: id,
-            rating: sending.rating,
-            reasons: sending.reasons,
-            comment: sending.comment,
+            rating: sent.rating,
+            reasons: sent.reasons,
+            comment: sent.comment,
           }),
         });
         ok = response.status === 201;
@@ -893,7 +900,7 @@
       }
       sending.sending = false;
       if (ok) {
-        const rated = sending.rating;
+        const rated = sent.rating;
         await mutate((store) => {
           for (const session of Object.values(store.sessions)) {
             for (const stored of session.turns || []) {

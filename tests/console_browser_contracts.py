@@ -1335,3 +1335,31 @@ def test_a_rebuild_during_an_in_flight_rating_keeps_the_live_box_truthful(consol
                  FIRST_RATING, UNKNOWN_TEXT, what="failure shown in the live box")
     assert browser.eval("return document.querySelector(arguments[0]+' .feedback-submit').disabled",
                         FIRST_RATING) is False
+
+
+def test_controls_are_locked_while_a_rating_is_in_flight_and_the_sent_rating_is_shown(
+    console, browser, monkeypatch
+):
+    """What the console shows and saves is exactly what was sent: no edit can
+    slip into the draft between the request and its 201."""
+    feedback = _with_feedback(console, browser, monkeypatch)
+    send(browser, "What is IEA500I?")
+    wait_state(browser, "complete")
+    browser.click(_reach(browser, FIRST_RATING + ' .feedback-rating[data-rating="good"]'))
+    browser.type(_reach(browser, FIRST_RATING + " .feedback-comment"), "SENT")
+    feedback.gate.clear()
+    browser.click(_reach(browser, FIRST_RATING + " .feedback-submit"))
+    browser.wait("return document.querySelector(arguments[0]+' .feedback-submit').disabled", FIRST_RATING,
+                 what="send in flight")
+    assert browser.eval(
+        "var b=document.querySelector(arguments[0]);return [b.querySelector('[data-rating=bad]').disabled,"
+        " b.querySelector('.feedback-reasons input').disabled, b.querySelector('.feedback-comment').readOnly]",
+        FIRST_RATING,
+    ) == [True, True, True]
+    feedback.gate.set()
+    browser.wait("return document.querySelector(arguments[0]).textContent === 'Rated: good'", FIRST_RATING,
+                 what="rated as sent")
+    [rating] = feedback.ratings
+    assert (rating.rating, rating.comment) == ("good", "SENT")
+    first = store(browser)["sessions"][store(browser)["active"]]["turns"][1]
+    assert first["feedback"] == "good"

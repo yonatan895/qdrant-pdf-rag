@@ -127,11 +127,12 @@ class UiFeedbackRequest(BaseModel):
 
 
 _FEEDBACK_DISABLED_TEXT = "feedback is not enabled on this deployment"
-# One fixed console response per client outcome (status, code, message); a
-# test pins the keys to RateOutcome. The unknown text covers both a record
+# One fixed console response per client outcome (status, code, message; ok
+# carries no code and its message is built from the rating); a test pins the
+# keys to RateOutcome. The unknown text covers both a record
 # still queued and one dropped or purged, so it promises neither.
 _FEEDBACK_OUTCOMES: dict[str, tuple[int, str | None, str]] = {
-    "ok": (201, None, "Rated"),
+    "ok": (201, None, "Rated: {rating}"),
     "unknown": (404, "unknown_answer", "this answer is not recorded, or not yet; it cannot be rated now"),
     "invalid": (422, "invalid_request", "the rating is invalid"),
     "unavailable": (503, "feedback_unavailable", "feedback is temporarily unavailable"),
@@ -1060,7 +1061,7 @@ async def _rate(client: Any, req: UiFeedbackRequest) -> tuple[int, str | None, s
     outcome = await client.rate(Rating(request_id=req.request_id, rating=req.rating,
                                        reasons=list(req.reasons), comment=req.comment))
     status, code, message = _FEEDBACK_OUTCOMES[outcome]
-    return status, code, f"Rated: {req.rating}" if code is None else message
+    return status, code, message.format(rating=req.rating) if code is None else message
 
 
 def _feedback_result(request: Request, text: str, status: int) -> Response:
