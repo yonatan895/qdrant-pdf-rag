@@ -291,13 +291,19 @@ def _lead_sentence(line: str) -> str:
     return _sentence_key(_SENTENCE_SPLIT_RE.split(text, maxsplit=1)[0])
 
 
+def _names_something(subject: str) -> bool:
+    return _LETTER_RE.search(_INLINE_INDEX_RE.sub("", subject)) is not None
+
+
 def is_structured_decline(answer_body: str, citations: Sequence[str] = ()) -> bool:
     """True when the response leads with DECLINE_PREFIX followed by a subject
-    that names something (issue #764). Leading Markdown headings that are not
-    the decline are scaffolding (the complex-query extension asks for
-    headings), and a bare prefix line takes its subject from the next prose
-    line. Quoted, reworded or subject-less forms do not qualify; what follows
-    is the permitted note on excerpt coverage."""
+    that names something and cites nothing (issue #764). Leading Markdown
+    headings that are not the decline are scaffolding (the complex-query
+    extension asks for headings); a prefix line without a subject takes its
+    subject from the next prose line. Rule 4's decline cites nothing, so inline
+    citation markers after the lead mean cited claims and leave the #630
+    whole-response rule in charge; uncited text that follows is the permitted
+    note on excerpt coverage."""
     lines = list(_prose_lines(answer_body, citations))
     while lines and _HEADING_RE.match(lines[0].strip()) and not _lead_sentence(lines[0]).startswith(_DECLINE_KEY):
         lines.pop(0)
@@ -307,9 +313,11 @@ def is_structured_decline(answer_body: str, citations: Sequence[str] = ()) -> bo
     if not lead.startswith(_DECLINE_KEY):
         return False
     subject = lead[len(_DECLINE_KEY):]
-    if not subject.strip() and len(lines) > 1:
+    if not _names_something(subject) and len(lines) > 1:
         subject = _lead_sentence(lines[1])
-    return _LETTER_RE.search(_INLINE_INDEX_RE.sub("", subject)) is not None
+    if not _names_something(subject):
+        return False
+    return not any(_INLINE_INDEX_RE.search(line) for line in lines)
 
 
 def is_abstention(answer_body: str, citations: Sequence[str] = ()) -> bool:

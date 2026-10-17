@@ -1091,14 +1091,17 @@ then refusal (structured decline or whole-response), then body/citation
 outcome. Mixed answers (an answer clause plus a missing-detail caveat) are not
 refusals at any length and keep their eligible citations. Rule 4 forbids a
 partial answer from opening with the decline (#764). Only the exact prefix,
-leading and unquoted, with a subject that names something counts (a leading
-Markdown heading is scaffolding; a bare prefix line takes its subject from the
-next line). The prefix says nothing answers the question, so a scope caveat
-leading a partial answer ("X is not covered by the excerpts; ...") is a mixed
-answer, and the prefix quoted, subject-less or placed after an answer clause
-leaves the whole-response rule in charge. A model that opens with it and then answers anyway breaks the
-contract and is classified `insufficient_evidence` with citations zeroed: the
-conservative outcome, never a false `accepted`.
+leading, with a subject that names something counts (a leading Markdown
+heading is scaffolding; a prefix line without a subject takes its subject
+from the next line). The prefix says nothing answers the question, so a scope
+caveat leading a partial answer ("X is not covered by the excerpts; ...") is a
+mixed answer; the prefix inside a sentence, subject-less or placed after an
+answer clause leaves the whole-response rule in charge. The decline cites
+nothing: inline citation markers anywhere after the lead mean cited claims,
+so the whole-response rule decides and a mixed answer keeps its citations.
+Uncited text after the decline is the coverage note, so a model that leads
+with the decline and then answers without citing is classified
+`insufficient_evidence`: the conservative outcome, never a false `accepted`.
 
 Body presence is shared with the answer eval (#576): empty `Answer` headings,
 citation labels (including inline labels followed only by bracket indices or

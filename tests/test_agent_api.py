@@ -3539,8 +3539,9 @@ def test_structured_decline_leads_and_partial_answers_keep_the_whole_response_ru
         f"{DECLINE_PREFIX} the LFAREA retry limit.\nThe excerpts describe IEASYSxx LFAREA syntax, not the retry limit.",
         f"**{DECLINE_PREFIX} IEA500I.** They cover only the message text.",
         f"Answer: {DECLINE_PREFIX.lower()} CSQW100I",
-        f"{DECLINE_PREFIX} JES2 checkpoint retries. The supplied excerpts cover JES2 checkpoint sizing [1].",
         f"{DECLINE_PREFIX}\nIEA500I",  # subject on the next line
+        f"{DECLINE_PREFIX}:\nIEA500I.",
+        f"{DECLINE_PREFIX} -\nIEA500I.",
         f"**{DECLINE_PREFIX}**\n**CSQW100I**",
         f"## {DECLINE_PREFIX} CSQW100I\nThe excerpts cover CSQ6SYSP parameters only.",
         f"### Diagnosis\n{DECLINE_PREFIX} CSQW100I.",  # complex-query heading first
@@ -3553,6 +3554,16 @@ def test_structured_decline_leads_and_partial_answers_keep_the_whole_response_ru
         # A scope caveat leading a partial answer stays a mixed answer (#630).
         "Not covered by the supplied excerpts: EDSALIMIT. MXT is set in the SIT as MXT=nnn [1].",
         "EDSALIMIT is not covered by the supplied excerpts; MXT is set in the SIT as MXT=nnn [1].",
+        # Rule 4: a decline cites nothing. Inline citations after the lead mean
+        # cited claims, so the whole-response rule decides (mixed answers keep
+        # their citations): a decline scoping one sub-part, a sectioned answer
+        # whose first section declines, a cited coverage note.
+        f"{DECLINE_PREFIX} the TIMEOUT keyword; the excerpts do show IEA500I means X [1].",
+        f"## Diagnosis\n{DECLINE_PREFIX} the root cause.\n\n## Recovery\nVARY the device offline [1].",
+        f"{DECLINE_PREFIX} JES2 checkpoint retries. The supplied excerpts cover JES2 checkpoint sizing [1].",
+        # A bare prefix followed by a cited line is cited content, not a subject.
+        f"{DECLINE_PREFIX}\nIEA500I means the device is offline [1].",
+        f"{DECLINE_PREFIX}\n## Recovery\nVARY the device offline [1].",
         # The retired #764 sentence no longer qualifies on its own lead.
         "The excerpts do not answer this question.\nThey cover JES2 checkpoint sizing [1].",
     ]
@@ -3569,12 +3580,14 @@ def test_structured_decline_leads_and_partial_answers_keep_the_whole_response_ru
     assert is_abstention(DECLINE_PREFIX) is True
 
 
-def test_a_lead_decline_followed_by_an_answer_is_the_conservative_abstention():
-    """docs/agent.md state precedence: a model that leads with the decline and
-    then answers anyway breaks rule 4 and is classified as an abstention
-    (citations zeroed), never a false accepted."""
-    body = f"{DECLINE_PREFIX} IEA500I.\nSet RETRY=5 in IEASYSxx [1]. Then restart the task [2]."
-    assert is_abstention(body) is True
+def test_a_lead_decline_then_an_answer_is_judged_by_whether_it_cites():
+    """docs/agent.md state precedence: text after the decline that cites
+    nothing is the coverage note (an uncited answer after the decline is the
+    conservative abstention, never a false accepted); text that cites inline
+    breaks rule 4's "cite nothing", so the whole-response rule decides and a
+    mixed answer keeps its citations (#630)."""
+    assert is_abstention(f"{DECLINE_PREFIX} IEA500I.\nSet RETRY=5 in IEASYSxx and restart the task.") is True
+    assert is_abstention(f"{DECLINE_PREFIX} IEA500I.\nSet RETRY=5 in IEASYSxx [1]. Then restart the task [2].") is False
 
 
 @pytest.mark.parametrize("stream", [False, True])
