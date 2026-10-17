@@ -465,7 +465,7 @@ def test_every_ref_kind_runs_the_same_jobs_and_nothing_else_is_admitted():
     # job set a tag runs is the full set a merge request runs.
     assert not [name for name, job in jobs(GITLAB).items()
                 if {'rules', 'only', 'except'} & set(job)]
-    assert REQUIRED_JOBS <= set(jobs(GITLAB))
+    assert set(jobs(GITLAB)) >= REQUIRED_JOBS
 
 
 @pytest.mark.parametrize('env, passes', [
