@@ -158,7 +158,10 @@ as `chatcmpl-<request_id>`). The ops endpoints carry none: `/healthz`,
   `UI_ENABLED` is false; the oauth-proxy sidecar authenticates external ingress
   when `AGENT_ROUTE=true` (ADR-0004 §3). The production chart sets
   `UI_ENABLED=true`, so only the external Route is OAuth-protected — the
-  ClusterIP 8080 `/ui` stays reachable to in-cluster tools.
+  ClusterIP 8080 `/ui` stays reachable to in-cluster tools of the release
+  namespace and of `AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES`; other
+  namespaces are denied by the default-on ingress NetworkPolicy
+  ([deploy.md](deploy.md#agent-networkpolicy)).
 - `GET /metrics` — Prometheus text exposition, opt-in via `metrics_enabled`
   (disabled serves the stable `404 not_found` envelope; a scrape failure is
   `503 metrics_unavailable` / `metrics are not available`). No trace span by
@@ -349,7 +352,8 @@ retention: [observability](observability.md#data-tiers).
   - Other fixed codes: 422 `invalid_request`, 503 `feedback_unavailable` (an
     unexpected service status is logged by status only), 404 `feedback_disabled`.
   - No rater identity is recorded or accepted: the service refuses a `rater`
-    field (422). The agent port is reachable without the OAuth proxy, so a
+    field (422). The agent port is reachable without the OAuth proxy (from the
+    release namespace and any allowed namespace), so a
     forwarded-user header proves nothing; attribution needs proven header
     provenance from the deployment (PR B).
   - `rag.feedback.ratings` counts accepted submissions, re-ratings included;

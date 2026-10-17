@@ -12,8 +12,9 @@ from urllib.parse import unquote, urlsplit
 ROOT_BUDGET = 8192
 CHAIN_BUDGET = 24576
 REQUIRED = (
-    "AGENTS.md", "docs/agent-workflow.md", ".github/ISSUE_TEMPLATE/agent-task.md",
-    ".github/pull_request_template.md", "scripts/check_agent_context.py",
+    "AGENTS.md", "docs/agent-workflow.md", ".github/ISSUE_TEMPLATE/task.yml",
+    ".github/pull_request_template.md", ".github/ISSUE_TEMPLATE/tracker.yml",
+    ".github/ISSUE_TEMPLATE/config.yml", "scripts/check_agent_context.py",
     "scripts/agent_doctor.py",
     "Taskfile.yml", "taskfiles/quality.yml", "taskfiles/dev.yml",
     "taskfiles/artifacts.yml", "taskfiles/eval.yml", "taskfiles/local.yml",
@@ -156,7 +157,7 @@ def check(root: Path, client_limit: int | None = None) -> tuple[list[str], list[
         errors.append(f"AGENTS.md: root budget requires 1..{ROOT_BUDGET} bytes; got {size}")
     workflow = root / "docs/agent-workflow.md"
     content = read(workflow)
-    for name in REQUIRED[:4]:
+    for name in REQUIRED[:5]:
         links(root / name, read(root / name))
 
     try:

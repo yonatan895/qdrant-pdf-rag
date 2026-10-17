@@ -146,6 +146,20 @@ route:
   timeoutSeconds: 300
   destinationCA: ""
 
+# Ingress NetworkPolicy for the agent pods (issue #373). Default ON: the
+# unauthenticated agent HTTP port (8080) is reachable only from this
+# namespace, the monitoring namespaces (when metrics.enabled) and the
+# namespaces listed in allowedNamespaces; the OAuth port (8443, route.enabled)
+# is additionally reachable from the OpenShift router. Ingress only; Qdrant,
+# Jaeger and the ingest Job are not selected. Policies are additive: whether a
+# site's own policies widen this is site acceptance evidence, not a chart
+# claim. enabled=false renders no policy (and allowedNamespaces must be empty).
+# allowedNamespaces: DNS-1123 namespace names (matched by the immutable
+# kubernetes.io/metadata.name label) that may also reach 8080.
+networkPolicy:
+  enabled: true
+  allowedNamespaces: []
+
 # RWO block storage class for Jaeger Badger and ingest-work scratch.
 # NFS refusal stays owned by shell preflight; schema additionally rejects
 # nfs-looking names fail-closed.

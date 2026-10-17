@@ -1,0 +1,35 @@
+name: Tracker
+description: Coordination only; lists child Task issues and has no goals of its own
+labels: ["tracker"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A tracker owns no requirements or implementation. Work lives in child Task issues, each
+        with its own completion criteria. Add a child by filing a Task and linking it here.
+        [Scope lock](https://github.com/yonatan895/qdrant-pdf-rag/blob/main/docs/agent-workflow.md#task-packet).
+  - type: textarea
+    id: purpose
+    attributes:
+      label: Purpose
+      description: The decision or milestone these children serve, and who records it.
+    validations:
+      required: true
+  - type: textarea
+    id: children
+    attributes:
+      label: Child issues
+      description: One line per child Task issue.
+      value: |
+        - [ ] #<issue>
+    validations:
+      required: true
+  - type: textarea
+    id: completion
+    attributes:
+      label: Completion criteria
+      description: Normally "all children closed"; name any recorded decision this tracker exists for.
+      value: |
+        - [ ] All child issues closed
+    validations:
+      required: true
