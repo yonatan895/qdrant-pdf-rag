@@ -888,6 +888,8 @@ live in `.github/workflows/e2e.yml`.
   collection-policy/placement surface and runs the three-peer fixture
   (`qa:ha`) fail-closed (no skips, at least one pass); unrelated changes
   do not pay for three containers.
+- `browser.yml`: path-allowlisted to the console and dependency locks; runs
+  the browser contracts against a digest-pinned Chrome for Testing, fail-closed on skips.
 - `bench.yml`: push-to-main + nightly + dispatch (baseline update with
   repeats); never a PR gate.
   Measurement passes and search/answer load phases stay sequential on their

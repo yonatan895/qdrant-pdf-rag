@@ -224,7 +224,7 @@ cleared. Executed by `tests/console_browser_contracts.py` (real Chrome, shipped
 `console.js`, scripted gateway-shaped LLM; `pytest -m browser`, skips without
 an offline Chrome for Testing + matching chromedriver via
 `CONSOLE_BROWSER_CHROME`/`CONSOLE_BROWSER_CHROMEDRIVER` or the selenium-manager
-cache; nothing is downloaded). Hermetic structure pins live in
+cache; nothing is downloaded; CI: `browser.yml`). Hermetic structure pins live in
 `tests/test_webui.py`.
 
 Retention policy as shipped (no default changed by #372):
