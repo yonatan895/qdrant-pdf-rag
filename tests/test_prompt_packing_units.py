@@ -265,6 +265,37 @@ def test_final_recount_keeps_the_selected_reasoning_template(chat, order):
     assert all(entry.included_chars == 0 for entry in prepared.evidence.entries)
 
 
+def test_budget_verification_resumes_after_a_transient_tokenize_failure():
+    """Issue #835 at the answer boundary: a request built during a /tokenize
+    outage is estimated (budget_verified false), and the next ordinary
+    request after the retry window is verified again by the remote count."""
+    from mainframe_rag.agent.tokenizer import TOKENIZE_RETRY_AFTER_S
+
+    now = [0.0]
+    outage = [True]
+    calls = []
+
+    def count(request):
+        calls.append(request)
+        return httpx2.Response(503) if outage[0] else httpx2.Response(200, json={"count": 10})
+
+    with httpx2.Client(transport=httpx2.MockTransport(count)) as client:
+        tokenizer = VllmTokenizer("http://synthetic/v1", "reasoning", client=client, clock=lambda: now[0])
+        settings = _tokenizer_settings()
+        during = build_messages("Original synthetic question", [_hit(JCL_TEXT)],
+                                tokenizer=tokenizer, settings=settings)
+        outage[0] = False
+        still_in_window = build_messages("Original synthetic question", [_hit(JCL_TEXT)],
+                                         tokenizer=tokenizer, settings=settings)
+        now[0] += TOKENIZE_RETRY_AFTER_S
+        after = build_messages("Original synthetic question", [_hit(JCL_TEXT)],
+                               tokenizer=tokenizer, settings=settings)
+    assert (during.budget_verified, still_in_window.budget_verified, after.budget_verified) == (
+        False, False, True,
+    )
+    assert len(calls) == 2  # the failed count, then the probe that verified
+
+
 def test_irreducible_fixed_overflow_raises_before_generation():
     """Fixed content alone over the window: no model call may happen; the
     failure is an explicit budget error carrying counts, never content."""
