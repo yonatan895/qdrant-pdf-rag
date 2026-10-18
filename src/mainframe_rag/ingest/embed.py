@@ -112,6 +112,10 @@ class HashEmbedder:
     def sparse(self, texts: list[str]) -> list[SparseVector]:
         return hash_sparse_embed(texts)
 
+    def sparse_query(self, queries: list[str]) -> list[SparseVector]:
+        # Identical to sparse, like dense_query: the hash baselines stay put.
+        return self.sparse(queries)
+
 
 # ------------------------------------------------------- vLLM implementation
 @functools.lru_cache(maxsize=1)
@@ -180,6 +184,19 @@ class VllmEmbedder:
             return []
         model = _bm25_model(self._bm25_model_name, self._bm25_cache_dir)
         return [(doc.indices.tolist(), doc.values.tolist()) for doc in model.embed(texts)]
+
+    def sparse_query(self, queries: list[str]) -> list[SparseVector]:
+        """BM25 query encoding (issue #836): each distinct query term at
+        weight 1, and Qdrant applies IDF. `sparse` is the document encoder
+        (term-frequency saturation, length normalization) and must never
+        encode a query."""
+        if not queries:
+            return []
+        model = _bm25_model(self._bm25_model_name, self._bm25_cache_dir)
+        return [
+            (q.indices.tolist(), [float(v) for v in q.values.tolist()])
+            for q in model.query_embed(queries)
+        ]
 
 
 def build_embedder(settings: Settings, client: httpx2.Client | None = None) -> Embedder:

@@ -646,6 +646,9 @@ class _RecordingEmbedder:
         self.sparse_texts.extend(texts)
         return self._inner.sparse(texts)
 
+    def sparse_query(self, queries):
+        return self._inner.sparse_query(queries)
+
 
 def test_model_swap_embeds_new_prefix_and_leaves_sparse_unchanged(
     synthetic_pdf, tmp_path, monkeypatch

@@ -131,9 +131,9 @@ class _RecordingEmbedder:
         self.dense_inputs.extend(queries)
         return [[0.1] * 16 for _ in queries]
 
-    def sparse(self, texts: list[str]) -> list[tuple[list[int], list[float]]]:
-        self.sparse_inputs.extend(texts)
-        return [([1, 2], [1.0, 0.5]) for _ in texts]
+    def sparse_query(self, queries: list[str]) -> list[tuple[list[int], list[float]]]:
+        self.sparse_inputs.extend(queries)
+        return [([1, 2], [1.0, 0.5]) for _ in queries]
 
 
 class _FakePoints:

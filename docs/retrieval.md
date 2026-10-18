@@ -29,7 +29,7 @@ Stage order:
 4. `_effective_query` applies acronym expansion, if enabled (§7), per leg.
    Identifiers, the filter, and the returned `query_kind` always stay on the
    operator's original query.
-5. `embedder.dense_query` + `embedder.sparse` embed each leg (one embed per
+5. `embedder.dense_query` + `embedder.sparse_query` embed each leg (one embed per
    path, sequential for determinism).
 6. `_build_prefetch_requests` issues one dense + one BM25 prefetch per leg
    in one batched `query_batch_points` call (taking `filter=flt` on each

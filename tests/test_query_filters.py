@@ -272,9 +272,9 @@ async def test_async_search_offloads_blocking_embed_from_event_loop():
             seen["dense"] = threading.get_ident()
             return super().dense_query(queries)
 
-        def sparse(self, texts):
+        def sparse_query(self, queries):
             seen["sparse"] = threading.get_ident()
-            return super().sparse(texts)
+            return super().sparse_query(queries)
 
     await async_search(
         AsyncReaderAdapter(FakeQdrant(dense=[_point("d1")], sparse=[_point("s1")])),
@@ -282,6 +282,24 @@ async def test_async_search_offloads_blocking_embed_from_event_loop():
     )
     assert set(seen) == {"dense", "sparse"}
     assert loop_thread not in seen.values()
+
+
+@pytest.mark.parametrize("query", ["IEA500I rejected", "compare JES2 and JES3 checkpoint"])
+def test_bm25_prefetch_carries_the_query_encoding_never_the_document_one(query):
+    """Issue #836: every retrieval leg's BM25 prefetch is the query encoder's
+    vector; reaching the document encoder for a query fails the search."""
+
+    class QueryOnlySparse(FakeEmbedder):
+        def sparse(self, texts):
+            raise AssertionError("document BM25 encoder used for a query")
+
+        def sparse_query(self, queries):
+            return [([11, 22], [1.0, 1.0]) for _ in queries]
+
+    fake = FakeQdrant(dense=[_point("d1")], sparse=[_point("s1")])
+    search(fake, QueryOnlySparse(), "mainframe_manuals", query, limit=5)
+    bm25 = [r.query for r in fake.batch_requests if r.using == "bm25"]
+    assert bm25 and all((q.indices, q.values) == ([11, 22], [1.0, 1.0]) for q in bm25)
 
 
 class FilterAwareFakeQdrant(FakeQdrant):

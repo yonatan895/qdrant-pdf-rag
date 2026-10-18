@@ -406,8 +406,10 @@ Contract tests: `tests/test_contextual.py`.
 
 ## 7. Embeddings (`embed.py`)
 
-One `Embedder` (`dense`, `dense_query`, `sparse`) built once by
-`build_embedder` — callers never branch on `embed_mode`.
+One `Embedder` (`dense`, `dense_query`, `sparse`, `sparse_query`) built once by
+`build_embedder` — callers never branch on `embed_mode`. `dense` and `sparse`
+encode documents; retrieval encodes queries only with `dense_query` and
+`sparse_query`.
 
 - Embed text: a header of product/version/doc_id, then title, heading path,
   optional context, and body, joined by newlines with falsy parts dropped.
@@ -420,8 +422,8 @@ One `Embedder` (`dense`, `dense_query`, `sparse`) built once by
   dropped); `blake2b` buckets with `dense`/`spars` domain separators; dense
   `1.0+log(count)` L2-normalized, sparse raw counts with sorted indices and
   buckets mod 2³¹ (Qdrant applies IDF). `dense_query` is identical to
-  `dense` — no prefix. The hash dim is fixed at 256 so CI never depends on a
-  vLLM dim.
+  `dense` — no prefix — and `sparse_query` to `sparse`. The hash dim is
+  fixed at 256 so CI never depends on a vLLM dim.
 - vLLM leg: lazy endpoint validation; 60s client timeout with connect
   retries only (no POST retry); `POST {base}/embeddings` with `{model,
   input}`, results resorted by `index`.
@@ -439,7 +441,10 @@ One `Embedder` (`dense`, `dense_query`, `sparse`) built once by
 - The sparse BM25 model is a process-wide single (one-entry cache) loaded
   from `BM25_MODEL` (`Qdrant/bm25`); `BM25_CACHE_DIR` overrides the weight
   location (images set it to the baked `/opt/bm25`, unset = library
-  default cache).
+  default cache). `sparse` is FastEmbed's BM25 document encoder
+  (term-frequency saturation, length normalization); `sparse_query` is its
+  query encoder (each distinct term at weight 1; Qdrant applies IDF), so a
+  repeated query term is not weighted like a document's (issue #836).
 - Timeouts: embed calls 60s (`embed_timeout_s`); ingest-side Qdrant calls
   use a 120s timeout vs 30s on the query side — split because the call
   shapes differ.

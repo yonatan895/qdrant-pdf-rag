@@ -50,9 +50,9 @@ class SplitAwareEmbedder:
         self.dense_calls += len(queries)
         return [[self._marker(q)] * 4 for q in queries]
 
-    def sparse(self, texts: list[str]) -> list[tuple[list[int], list[float]]]:
-        self.sparse_calls += len(texts)
-        return [([int(self._marker(t) * 10) or 7], [1.0]) for t in texts]
+    def sparse_query(self, queries: list[str]) -> list[tuple[list[int], list[float]]]:
+        self.sparse_calls += len(queries)
+        return [([int(self._marker(q) * 10) or 7], [1.0]) for q in queries]
 
 
 class SplitAwareFakeQdrant:

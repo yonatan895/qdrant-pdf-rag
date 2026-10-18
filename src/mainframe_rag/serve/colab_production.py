@@ -570,7 +570,7 @@ def _recipes(root: Path, corpus: Path, values: Object, runtime: Object, scan: _S
         read(package / name, native=True)
     embed = ast.parse(read(package / "ingest/embed.py", native=True))
     selected = []
-    query_method = None
+    query_methods: dict[str, str] = {}
     functions = {"build_embed_text", "chunk_embed_text", "embed_batch", "build_embedder", "_bm25_model"}
     methods = {"__init__", "_resolve", "_http", "dense", "sparse"}
     for node in embed.body:
@@ -582,9 +582,9 @@ def _recipes(root: Path, corpus: Path, values: Object, runtime: Object, scan: _S
                 if isinstance(method, ast.FunctionDef) and method.name in methods:
                     selected.append(ast.dump(method, include_attributes=False))
                     methods.remove(method.name)
-                elif isinstance(method, ast.FunctionDef) and method.name == "dense_query":
-                    query_method = ast.dump(method, include_attributes=False)
-    if functions or methods or query_method is None:
+                elif isinstance(method, ast.FunctionDef) and method.name in ("dense_query", "sparse_query"):
+                    query_methods[method.name] = ast.dump(method, include_attributes=False)
+    if functions or methods or len(query_methods) != 2:
         raise ProductionAdmissionError("native embedding recipe source boundary changed; explicit review required")
     # Conservative closure: whole native ingest owner and application lock can
     # reject control-only changes there. Controller/query source is excluded.
@@ -602,7 +602,8 @@ def _recipes(root: Path, corpus: Path, values: Object, runtime: Object, scan: _S
                  "retrieve/filters.py", "retrieve/screen.py", "regexes.py",
                  f"retrieve/acronyms_{ACRONYM_GLOSSARY_VERSION}.json"):
         query_sources[name] = hashlib.sha256(read(package / name, native=True)).hexdigest()
-    query = {"schema": 1, "sources": query_sources, "dense_query": query_method,
+    query = {"schema": 1, "sources": query_sources, "dense_query": query_methods["dense_query"],
+             "sparse_query": query_methods["sparse_query"],
              "settings": {name: values[name] for name in (
                  "dense_query_prefix", "acronym_expansion_enabled", "comparative_split_enabled",
                  "diagnostic_dualpath_enabled", "query_max_chars")}}
