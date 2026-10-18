@@ -547,10 +547,15 @@ same corpus. The diagnostic must cover every row class of the run, and
 model or agent. A row that appears in two answer reports, or that is outside
 the expected golden set (`--golden`, default dev golden), refuses the join.
 A golden row with no answer is `not_run`, never a pass, and makes the exit
-code 1.
+code 1. Pass the same `--golden` set to the answer run, the packing diagnostic
+and the taxonomy: under `VENUE=rc` an answer run without `--golden` adds
+`evals/holdout.jsonl`, and the join refuses with exit 2 (for the dev baseline,
+use `--golden evals/golden.jsonl` on the answer run).
 
 The first matching class is the primary one: `pass`; `timeout` (client
-`ReadTimeout` or the agent's 504 `deadline_exceeded`); `error`;
+`ReadTimeout` or the agent's 504 `deadline_exceeded`); `packing_loss` for a
+served 422 `prompt_budget_exceeded` (the estimator-only diagnostic under-reports
+these rows); `error` (any other request or HTTP error);
 `unsafe_answer` (abstain row, trap answered); `retrieval_miss` (served
 zero-hits path, or a gold target never retrieved); `packing_loss` (retrieved
 but not packed); `unattributed` (a failing answer row without a diagnostic
@@ -562,7 +567,10 @@ model behavior, because the model cannot be judged on evidence it never saw;
 to retrieve, so the diagnostic is not read for them. `pool_disagrees` marks rows where
 the answer run's own `/v1/search` pool and the diagnostic disagree about gold
 presence (corpus or settings drift). The report holds identifiers, classes and
-redacted failure buckets only.
+redacted failure buckets only. For a row whose expected docs are alternatives
+(any one is relevant), the diagnostic still makes one target per doc, so a
+partially retrieved row is `retrieval_miss` and `gold_gaps` shows which doc is
+missing (currently DIA-17 and DIA-23).
 
 ### Claim-level support (#365)
 

@@ -105,7 +105,7 @@ _OK = _diag("ok", [("doc", GOLD, "retrieved_packed")])
         pytest.param(
             _entry(), _payload(DECLINE, (), "insufficient_evidence"), 200,
             _diag("partial_retrieval", [("doc", GOLD, "retrieved_packed"), ("doc", OTHER, "not_retrieved")]),
-            tax.RETRIEVAL_MISS, [tax.REFUSAL_GOLD_PRESENT], id="refusal-but-gold-never-retrieved",
+            tax.RETRIEVAL_MISS, [tax.REFUSAL_GOLD_PRESENT], id="refusal-with-a-diagnostic-target-not-retrieved",
         ),
         pytest.param(
             _entry(), _payload(DECLINE, (), "insufficient_evidence"), 200,
@@ -136,6 +136,14 @@ _OK = _diag("ok", [("doc", GOLD, "retrieved_packed")])
         pytest.param(
             _entry(), {"code": "deadline_exceeded", "message": "m"}, 504, _OK, tax.TIMEOUT, [],
             id="agent-deadline",
+        ),
+        pytest.param(
+            _entry(), {"code": "prompt_budget_exceeded", "message": "m"}, 422, _OK, tax.PACKING_LOSS, [],
+            id="agent-prompt-budget",
+        ),
+        pytest.param(
+            _entry(), {"code": "invalid_request", "message": "m"}, 422, _OK, tax.ERROR, [],
+            id="agent-other-422-stays-error",
         ),
         pytest.param(_entry(), httpx2.ConnectTimeout("down"), 200, _OK, tax.ERROR, [], id="unreachable"),
         pytest.param(

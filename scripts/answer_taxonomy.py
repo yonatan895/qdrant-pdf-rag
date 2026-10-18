@@ -20,6 +20,8 @@ Primary class of a row, first match wins:
 
   pass                  the answer eval judged the row a pass
   timeout               client read timeout, or the agent's 504 deadline_exceeded
+  packing_loss          the agent's 422 prompt_budget_exceeded (evidence did not
+                        fit the prompt budget)
   error                 any other request, HTTP or malformed-response error
   unsafe_answer         abstain row: the trap was answered with citations
   retrieval_miss        answer row: the served path found no hits, or the
@@ -119,6 +121,10 @@ _STATE_MISMATCH_RE = re.compile(r"^verification state .+ != expected ")
 # mean the generation outlived its budget; a connect or pool timeout is an
 # unreachable agent, an error.
 _TIMEOUT_RE = re.compile(r"^(request error: ReadTimeout|HTTP 504 \(deadline_exceeded\))$")
+# The agent's 422 prompt_budget_exceeded means the evidence did not fit the
+# prompt budget. The diagnostic only estimates packing, so it under-reports
+# these rows; the served status is the stronger signal.
+_PROMPT_BUDGET_RE = re.compile(r"^HTTP 422 \(prompt_budget_exceeded\)$")
 
 # Packing diagnostic row categories (scripts/packing_diagnostic.py).
 _PACKING_RETRIEVAL = {"not_retrieved", "partial_retrieval"}
@@ -209,7 +215,12 @@ def classify(row: dict[str, Any], packing: dict[str, Any] | None) -> RowClass:
     if verdict == "pass":
         return out
     if verdict != "fail":
-        out.primary = TIMEOUT if any(_TIMEOUT_RE.match(f) for f in failures) else ERROR
+        if any(_TIMEOUT_RE.match(f) for f in failures):
+            out.primary = TIMEOUT
+        elif any(_PROMPT_BUDGET_RE.match(f) for f in failures):
+            out.primary = PACKING_LOSS
+        else:
+            out.primary = ERROR
         return out
 
     model = _model_classes(row)
