@@ -7,8 +7,9 @@ The endpoint lives at the SERVER ORIGIN: LLM_BASE_URL is .../v1, and vLLM
 serves /tokenize next to /v1, not under it (a LiteLLM front may not expose
 it at all). A failed call is logged as a warning and the instance answers
 from the in-process estimator. An endpoint that is not served or answers
-without a usable count (404/405/501, or a 200 without a count) pins the
-estimator for the life of the instance. A transient failure (transport
+without a usable count (404/405/501, a 200 without a count, or any other
+non-transient non-200 such as 400/401/403) pins the estimator for the life
+of the instance. A transient failure (transport
 error, timeout, 408/429/5xx) downgrades only for TOKENIZE_RETRY_AFTER_S;
 then one call probes the endpoint again (issue #835). Never a silent
 per-call fallback, never repeated doomed RPCs. Callers plan prompt packing
