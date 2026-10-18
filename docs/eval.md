@@ -536,6 +536,42 @@ bit-deterministic, so expect few verdict flips across repeats, not zero:
   judge never re-parses citations (the agent validator is the single source
   of truth).
 
+### Failure taxonomy (#830)
+
+`scripts/answer_taxonomy.py` gives every golden row one primary failure class.
+It joins one or more answer reports (`--out` above; a run split across
+sessions passes several) with one
+[packing diagnostic](records/2026-10-17-packing-diagnostic.md) report from the
+same corpus. The diagnostic must cover every row class of the run, and
+`--profile` must name the served planner profile. It runs offline: no Qdrant,
+model or agent. A row that appears in two answer reports, or that is outside
+the expected golden set (`--golden`, default dev golden), refuses the join.
+A golden row with no answer is `not_run`, never a pass, and makes the exit
+code 1. Pass the same `--golden` set to the answer run, the packing diagnostic
+and the taxonomy: under `VENUE=rc` an answer run without `--golden` adds
+`evals/holdout.jsonl`, and the join refuses with exit 2 (for the dev baseline,
+use `--golden evals/golden.jsonl` on the answer run).
+
+The first matching class is the primary one: `pass`; `timeout` (client
+`ReadTimeout` or the agent's 504 `deadline_exceeded`); `packing_loss` for a
+served 422 `prompt_budget_exceeded` (the estimator-only diagnostic under-reports
+these rows); `error` (any other request or HTTP error);
+`unsafe_answer` (abstain row, trap answered); `retrieval_miss` (served
+zero-hits path, or a gold target never retrieved); `packing_loss` (retrieved
+but not packed); `unattributed` (a failing answer row without a diagnostic
+row); `refusal_gold_present`; `generation_incomplete`; `citation_format`
+(empty body, no validated or only inferred citations, or another state
+mismatch); `content_miss` (a gold substring or identifier check failed). Retrieval and packing come before
+model behavior, because the model cannot be judged on evidence it never saw;
+`also` keeps the model classes a row shows as well. Abstain rows have no gold
+to retrieve, so the diagnostic is not read for them. `pool_disagrees` marks rows where
+the answer run's own `/v1/search` pool and the diagnostic disagree about gold
+presence (corpus or settings drift). The report holds identifiers, classes and
+redacted failure buckets only. For a row whose expected docs are alternatives
+(any one is relevant), the diagnostic still makes one target per doc, so a
+partially retrieved row is `retrieval_miss` and `gold_gaps` shows which doc is
+missing (currently DIA-17 and DIA-23).
+
 ### Claim-level support (#365)
 
 Claim support is evaluated offline, never asserted at runtime. A verification
