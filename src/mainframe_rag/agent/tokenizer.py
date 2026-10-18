@@ -5,8 +5,12 @@ in-process fallback for air-gapped operations, offline testing, and CI.
 
 The endpoint lives at the SERVER ORIGIN: LLM_BASE_URL is .../v1, and vLLM
 serves /tokenize next to /v1, not under it (a LiteLLM front may not expose
-it at all). The first failed call is logged as a warning and the instance
-permanently downgrades to the in-process estimator — never a silent
+it at all). A failed call is logged as a warning and the instance answers
+from the in-process estimator. An endpoint that is not served or answers
+without a usable count (404/405/501, or a 200 without a count) pins the
+estimator for the life of the instance. A transient failure (transport
+error, timeout, 408/429/5xx) downgrades only for TOKENIZE_RETRY_AFTER_S;
+then one call probes the endpoint again (issue #835). Never a silent
 per-call fallback, never repeated doomed RPCs. Callers plan prompt packing
 with the estimator and use the real tokenizer only to verify the packed
 prompt (see answer.build_messages).
@@ -16,6 +20,9 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
+import time
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 import httpx2
@@ -30,6 +37,13 @@ if TYPE_CHECKING:
 log = logging.getLogger("agent.tokenizer")
 
 _TOKEN_PATTERN = re.compile(r"\w+|[^\w\s]", re.UNICODE)
+
+# Issue #835: after a transient /tokenize failure the estimator answers for
+# this long, then one call probes the endpoint again. An outage therefore
+# stalls at most one request per window by the call timeout.
+TOKENIZE_RETRY_AFTER_S = 60.0
+# The endpoint answered but is not served: no window can make it usable.
+_ABSENT_STATUSES = frozenset({404, 405, 501})
 
 
 def estimate_tokens(text: str) -> int:
@@ -58,10 +72,17 @@ class FallbackTokenizer:
 class VllmTokenizer:
     """Counts tokens via vLLM's /tokenize endpoint at the server origin.
 
-    On the first failure — connection error, non-200, or a body without a
-    usable count — logs one warning and pins the in-process estimator for
-    the life of this instance. A LiteLLM front without /tokenize therefore
-    costs exactly one failed request per process, never per answer.
+    A failure logs one warning and answers from the in-process estimator.
+    An endpoint that is not served or returns no usable count pins the
+    estimator for the life of this instance, so a LiteLLM front without
+    /tokenize costs exactly one failed request per process, never per
+    answer. A transient failure (transport error, timeout, 408, 429, 5xx)
+    downgrades for ``retry_after_s``; the first count after that claims one
+    probe, and success resumes remote counting (issue #835).
+
+    ``remote_confirmed`` describes the calling thread's most recent count,
+    not the instance: a probe that succeeds on another thread must never
+    certify a count this thread took from the estimator.
     """
 
     def __init__(
@@ -71,6 +92,8 @@ class VllmTokenizer:
         timeout_s: float = 5.0,
         client: httpx2.Client | None = None,
         api_key: str | None = None,
+        retry_after_s: float = TOKENIZE_RETRY_AFTER_S,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         # vLLM serves /tokenize at the server root; /v1/tokenize is a 404.
@@ -80,17 +103,26 @@ class VllmTokenizer:
         self._client = client
         self._api_key = api_key
         self._fallback = FallbackTokenizer()
-        self._downgraded = False
+        self._retry_after_s = retry_after_s
+        self._clock = clock
+        # One tokenizer serves concurrent turns on worker threads: the lock
+        # guards the downgrade state, and the per-thread flag records whether
+        # that thread's last count came from the endpoint.
+        self._lock = threading.Lock()
+        self._pinned = False
+        self._retry_at: float | None = None
+        self._local = threading.local()
 
     @property
     def remote_confirmed(self) -> bool:
-        """True while /tokenize answers remotely (issue #368): a prompt-size
-        verdict from this instance confirms compliance only in that state —
-        after the one-shot downgrade it is estimator-based like the
-        fallback."""
-        return not self._downgraded
+        """True when this thread's most recent count came from /tokenize
+        (issue #368): only then does a prompt-size verdict confirm
+        compliance. Estimator counts, and a thread that has not counted,
+        read False."""
+        return bool(getattr(self._local, "remote", False))
 
     def count_tokens(self, text: str) -> int:
+        self._local.remote = False
         if not text:
             return 0
         count = self._remote_count({"model": self._model, "prompt": text})
@@ -103,6 +135,7 @@ class VllmTokenizer:
     ) -> int:
         """Chat-template-aware count: what /tokenize reports for the message
         list is what actually consumes max_model_len."""
+        self._local.remote = False
         if not messages:
             return 0
         payload: dict[str, Any] = {
@@ -124,10 +157,20 @@ class VllmTokenizer:
         return self._fallback.count_messages(messages, reasoning_effort=reasoning_effort)
 
     def _remote_count(self, payload: dict[str, Any]) -> int | None:
-        """One /tokenize call; None means the endpoint failed and this
-        tokenizer is now pinned to the in-process estimator."""
-        if self._downgraded:
-            return None
+        """One /tokenize call, or None for the estimator: the endpoint is
+        pinned off, inside a retry window, or this call failed."""
+        with self._lock:
+            if self._pinned:
+                return None
+            retry_at = self._retry_at
+            probing = retry_at is not None
+            if retry_at is not None:
+                now = self._clock()
+                if now < retry_at:
+                    return None
+                # Claim the probe: concurrent counts keep the estimator
+                # instead of each paying the call timeout.
+                self._retry_at = now + self._retry_after_s
         url = f"{self._origin}/tokenize"
         headers = bearer_auth_headers(self._api_key)
         try:
@@ -135,26 +178,50 @@ class VllmTokenizer:
                 resp = self._client.post(url, json=payload, timeout=self._timeout_s, headers=headers)
             else:
                 resp = httpx2.post(url, json=payload, timeout=self._timeout_s, headers=headers)
-            if resp.status_code == 200:
+            status = resp.status_code
+            if status == 200:
                 data = resp.json()
                 if isinstance(data, dict):
+                    count = None
                     if type(data.get("count")) is int and data["count"] >= 0:
-                        return data["count"]
-                    if "count" not in data and isinstance(data.get("tokens"), list):
-                        return len(data["tokens"])
-            log.warning(
-                "vLLM /tokenize unusable at %s (status %s); pinning in-process token estimation",
-                url,
-                getattr(resp, "status_code", "?"),
-            )
+                        count = data["count"]
+                    elif "count" not in data and isinstance(data.get("tokens"), list):
+                        count = len(data["tokens"])
+                    if count is not None:
+                        self._recovered(url, probing)
+                        return count
+            transient = status in (408, 429) or (status >= 500 and status not in _ABSENT_STATUSES)
+            self._downgrade(url, f"status {status}", transient=transient)
         except Exception as exc:  # noqa: BLE001
-            log.warning(
-                "vLLM /tokenize unreachable at %s (%s); pinning in-process token estimation",
-                url,
-                type(exc).__name__,
-            )
-        self._downgraded = True
+            self._downgrade(url, type(exc).__name__, transient=True)
         return None
+
+    def _recovered(self, url: str, probing: bool) -> None:
+        with self._lock:
+            self._retry_at = None
+        self._local.remote = True
+        if probing:
+            log.info("vLLM /tokenize at %s answers again; remote token counting resumed", url)
+
+    def _downgrade(self, url: str, reason: str, *, transient: bool) -> None:
+        with self._lock:
+            if transient:
+                self._retry_at = self._clock() + self._retry_after_s
+            else:
+                self._pinned = True
+        if transient:
+            log.warning(
+                "vLLM /tokenize failed at %s (%s); in-process token estimation for %.0f s",
+                url,
+                reason,
+                self._retry_after_s,
+            )
+        else:
+            log.warning(
+                "vLLM /tokenize unusable at %s (%s); pinning in-process token estimation",
+                url,
+                reason,
+            )
 
 
 def build_tokenizer(
