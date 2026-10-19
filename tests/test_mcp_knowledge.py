@@ -53,7 +53,7 @@ def mcp(http):  # noqa: F811
 def test_framing_and_tool_catalog():
     reply = asyncio.run(handle_request({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, None))
     names = {t["name"] for t in reply["result"]["tools"]}
-    assert names == {"knowledge_search", "evidence_read"}, "read-only knowledge tools only"
+    assert names == {"knowledge_search", "evidence_read", "sources_list"}, "read-only knowledge tools only"
     init = asyncio.run(handle_request(
         {"id": 2, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}}, None))
     assert init["result"]["capabilities"] == {"tools": {}}
@@ -72,6 +72,11 @@ def test_framing_and_tool_catalog():
     ("knowledge_search", {"query": "x", "product": 7}),
     ("evidence_read", {"reference": ""}),
     ("evidence_read", {"reference": "r", "max_bytes": 2_000_000}),
+    ("sources_list", {"limit": 0}),
+    ("sources_list", {"limit": 201}),
+    ("sources_list", {"limit": True}),
+    ("sources_list", {"cursor": 7}),
+    ("sources_list", {"product": ["synthos"]}),
 ])
 def test_bad_arguments_are_protocol_errors_before_any_upstream_call(name, args):
     class Boom:
@@ -200,7 +205,70 @@ def test_adapter_has_no_storage_model_or_service_internals_to_bypass_with():
     forbidden = ("qdrant_client", "mainframe_rag.agent", "mainframe_rag.ingest",
                  "mainframe_rag.retrieve", "mainframe_rag.config", "mainframe_rag.ports")
     assert not [m for m in imported if m.startswith(forbidden)], imported
-    assert {t for t in knowledge.TOOL_SCHEMAS} == {"knowledge_search", "evidence_read"}
+    assert {t for t in knowledge.TOOL_SCHEMAS} == {"knowledge_search", "evidence_read", "sources_list"}
+
+
+def _list_outcome(mcp, **arguments):
+    is_error, body = _payload_of(_call(mcp.backend, "sources_list", arguments))
+    return is_error, body, mcp.client.get("/v1/sources", params=arguments)
+
+
+def test_sources_list_matches_the_http_listing_page_for_page(mcp):
+    """#828 parity: the same pages, cursors and entries over both transports,
+    with the cursor and filters round-tripping through query encoding."""
+    cursor, revisions = None, []
+    while True:
+        args = {"limit": 1, **({"cursor": cursor} if cursor else {})}
+        is_error, via_mcp, via_http = _list_outcome(mcp, **args)
+        assert is_error is False and via_http.status_code == 200
+        expected = via_http.json()
+        assert via_mcp.pop("request_id") and expected.pop("request_id")
+        assert via_mcp == expected
+        revisions += [s["source_revision"] for s in via_mcp["sources"]]
+        cursor = via_mcp["next_cursor"]
+        if cursor is None:
+            break
+    assert len(revisions) == len(set(revisions)) == 3
+    filtered = _list_outcome(mcp, product="synthos", version="2")[1]
+    assert [s["version"] for s in filtered["sources"]] == ["2"]
+
+
+def test_sources_list_failures_have_identical_status_code_and_message_over_both_transports(mcp):
+    from mainframe_rag.agent.evidence import encode_sources_cursor
+
+    access = _Access()
+    mcp.monkeypatch.setattr(mcp.app, "evidence_access", access)
+    unknown = encode_sources_cursor(BUILD_B, "00000000-0000-4000-8000-000000000001")
+    for label, arguments, setup in (
+        ("malformed", {"cursor": "ls1.nope"}, lambda: None),
+        ("unknown", {"cursor": unknown}, lambda: None),
+        ("policy_down", {}, lambda: setattr(access, "unavailable", True)),
+        ("no_identity", {}, lambda: (setattr(access, "unavailable", False),
+                                     setattr(access, "unauthenticated", True))),
+    ):
+        setup()
+        is_error, body, resp = _list_outcome(mcp, **arguments)
+        assert is_error and resp.status_code == body["status"], label
+        assert (body["code"], body["message"]) == (resp.json()["code"], resp.json()["message"]), label
+    access.unauthenticated, access.allow = False, False  # everything denied: an empty page
+    is_error, body, _ = _list_outcome(mcp)
+    assert is_error is False and body["sources"] == [] and body["next_cursor"] is None
+    assert mcp.llm.calls == 0
+
+
+def test_sources_list_maps_to_one_get_with_its_own_fallback_message():
+    client = _RecordingClient(body={"ok": 1})
+    backend = HttpKnowledgeBackend("http://agent", client=client)
+    assert _call(backend, "sources_list", {"cursor": "ls1.a b", "product": "z/OS"})
+    method, url, kw = client.requests[0]
+    assert (method, url) == ("GET", "/v1/sources")
+    assert kw["params"] == {"limit": 50, "cursor": "ls1.a b", "product": "z/OS"}
+    for broken in (_RecordingClient(error=httpx2.ConnectError("internal-host-secret")),
+                   _RecordingClient(status=500, body={"detail": "upstream-secret"})):
+        reply = _call(HttpKnowledgeBackend("http://agent", client=broken), "sources_list", {})
+        body = json.loads(reply["result"]["content"][0]["text"])
+        assert reply["result"]["isError"] and "secret" not in json.dumps(reply)
+        assert (body["code"], body["message"]) == ("upstream_error", "sources listing failed")
 
 
 def _tool_message(request_id=7, reference="a"):

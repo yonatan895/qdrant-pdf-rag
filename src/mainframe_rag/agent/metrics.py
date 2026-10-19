@@ -78,6 +78,7 @@ HITS_BOUNDARIES: tuple[float, ...] = (0.0, 1.0, 2.0, 3.0, 5.0, 8.0, 13.0, 21.0, 
 _METRIC_ENDPOINTS: dict[str, tuple[str, ...]] = {
     "search": ("/v1/search",),
     "evidence": (),  # prefix route /v1/evidence/{reference}, see endpoint_for_path
+    "sources": ("/v1/sources",),
     "answer": ("/v1/answer",),
     "chat": ("/v1/chat", "/v1/chat/completions"),
     "console": ("/ui/chat", "/ui/chat/stream"),

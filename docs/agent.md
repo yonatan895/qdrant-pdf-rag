@@ -25,6 +25,19 @@ as `chatcmpl-<request_id>`). The ops endpoints carry none: `/healthz`,
   uses the build binding the serving gate validated and reads only the served
   hits; it is best-effort and read-only, and a fault there yields nulls,
   never a failed search.
+- `GET /v1/sources?limit&cursor&product&version` — the served build's sources
+  from its publish-time catalog (issue #828): `SourcesResponse{request_id,
+  build_id, sources[{source_revision, source_sha256, doc_id, title, product,
+  version, chunk_count, physical_pages{first,last} (one-based),
+  page_labels{first,last} (null = no honest label), indexed_pages}],
+  next_cursor}`. `limit` 1–200 (default 50); `next_cursor: null` is the only
+  end signal, there is no total, and denied sources are omitted uncounted.
+  The first page lists the build the serving gate validated; a cursor (`ls1.`)
+  pins its build through the immutable per-build aliases, so alias movement
+  cannot change a listing in flight. Catalog metadata only (one projected
+  scroll of the control collection per page, no chunk text, no model call);
+  builds published before #827 carry no catalog and answer 503. Contract:
+  [evidence contract, Sources](evidence-contract.md#sources-profile).
 - `GET /v1/evidence/{reference}?max_bytes&product&version` — exact stored
   evidence for one cited chunk (issue #405): `EvidenceResponse{request_id,
   reference, digest, completeness ("complete"), build_id, chunk_id,
@@ -38,7 +51,7 @@ as `chatcmpl-<request_id>`). The ops endpoints carry none: `/healthz`,
   chunk or an explicit refusal, never a prefix. Contract, outcome mapping and
   limits: [stored-payload profile](evidence-contract.md#stored-payload-profile).
   The downstream MCP consumer is `python -m mainframe_rag.mcp.knowledge`
-  (tools `knowledge_search`, `evidence_read`) over this HTTP surface.
+  (tools `knowledge_search`, `evidence_read`, `sources_list`) over this HTTP surface.
 - `POST /v1/answer` — `AnswerRequest{query, product?, version?,
   splunk_context?, stream (default false), temperature?}` → `AnswerResponse{request_id,
   answer, citations, citations_inferred, inferred_indices, script,
@@ -397,6 +410,10 @@ status (`/ui` failures render HTML banners instead, §1):
 | `evidence_budget_exceeded` / `the evidence exceeds the requested size budget` | 413 | Whole chunk larger than `max_bytes` or `EVIDENCE_MAX_BYTES` |
 | `evidence_timeout` / `the evidence read timed out` | 504 | Evidence read exceeded `EVIDENCE_TIMEOUT_S` |
 | `upstream_error` / `evidence read failed` | 502 | Storage fault during an evidence read (type logged only) |
+| `invalid_sources_cursor` / `the sources cursor is not valid` | 400 | `GET /v1/sources`: malformed or non-canonical `ls1.` cursor (no storage contact) |
+| `sources_unavailable` / `the requested sources are not available` | 404 / 503 | 404: the cursor's build is unknown or no longer retained (never a successor's entries); 503: the build has no catalog (published before #827), missing/redirected controls, or a malformed catalog entry the caller may see |
+| `sources_timeout` / `the sources listing timed out` | 504 | Listing exceeded `EVIDENCE_TIMEOUT_S` |
+| `upstream_error` / `sources listing failed` | 502 | Storage fault during a listing (type logged only); `authentication_required` / `access_unavailable` apply to listings as to reads |
 | `invalid_request` / `request body failed validation` | 422 | Pydantic failure, the shared query guard (overlong, empty after `str.strip()`, or containing NUL/C0 controls other than `\t\n\r`, issue #579; or, when `embed_max_input_chars` is set, a query whose dense text — prefix plus query — exceeds it, issue #374: refused before any model call, never truncated; an effective query that only grows past the bound after expansion/condensation is refused by the embedder with the same envelope), and a chat/console active `user` turn that is missing, blank, control-character or overlong (one message, every 422 path) |
 | `overloaded` / `the service is at capacity; retry later` | 503 + `Retry-After: 1` | Request admission refused (issue #374): all `request_max_concurrent` slots busy and the bounded wait queue full or its wait expired. Raised first, before validation, the serving gate and any retrieval/model work; only when a limit is selected. `/ui/chat` renders its fixed banner; `/ui/chat/stream` returns this envelope |
 | `deadline_exceeded` / `request deadline exceeded` | 504 | Total request deadline (`request_deadline_s`, issue #374) expired before the response began; on an already-open stream it is an `error` event (no `final`, `generation_incomplete`) instead. Only when a deadline is selected |
@@ -718,7 +735,7 @@ site procedure at the end of this section. **Decision owners:** `agent/admission
 `ingest/bounds.py`.
 
 - **Admission** (`request_max_concurrent` > 0): `/v1/search`, `/v1/evidence/*`,
-  `/v1/answer`, `/v1/chat*` and `/ui/chat*` share one pool and take one slot as
+  `/v1/sources`, `/v1/answer`, `/v1/chat*` and `/ui/chat*` share one pool and take one slot as
   the first step of the handler. Buffered responses release on handler return;
   SSE releases when its response closes, including disconnect and error. Up to `request_queue_max`
   more wait FIFO for at most `request_queue_wait_s` (and never beyond the
@@ -820,7 +837,7 @@ readers:
 | `http_connect_retries` / `http_max_connections` / `http_max_keepalive_connections` | 2 (connect-only) / 200 / 100 | both pools, embed/context clients |
 | `health_qdrant_timeout_s` / `health_embed_timeout_s` | 5.0 / 10.0 | healthz only |
 | `health_rerank_timeout_s` / `health_rerank_ttl_s` | 5.0 / 15.0 (ttl 0 = probe every scrape) | healthz rerank probe bound and outcome cache; only when `rerank_enabled` |
-| `evidence_max_bytes` / `evidence_timeout_s` | 65536 (1024–1048576) / 10.0 | exact-evidence read: server cap on one whole chunk, total read deadline |
+| `evidence_max_bytes` / `evidence_timeout_s` | 65536 (1024–1048576) / 10.0 | exact-evidence read: server cap on one whole chunk; total storage deadline of one read or one source-listing page |
 | `representation_cache_ttl_s` | 5.0 (0 = validate every request) | serving generation gate: alias resolution + contract validation cache |
 | `allow_hash_mode` / `log_level` | `false` / INFO | lifespan hash gate / logging |
 | `otel_exporter_otlp_endpoint` / `otel_sample_ratio` / `otel_export_queue_size` / `otel_export_timeout_ms` | unset = tracing off / 1.0 / 2048 / 5000 | tracing setup |

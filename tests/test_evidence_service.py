@@ -13,6 +13,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import uuid
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -85,16 +86,79 @@ def _expected_ref(build_id: str, envelope: bytes) -> str:
     return "ep1." + base64.urlsafe_b64encode(raw).decode().rstrip("=")
 
 
-def _control_payload(build_id: str, physical: str) -> dict:
+def _control_payload(build_id: str, physical: str, catalog: list | None = None) -> dict:
     control = physical + "__completions"
     digest = "0" * 64
-    return {
+    payload = {
         "record_type": "publication-metadata", "target_collection": control,
         "build_schema": 2, "build_id": build_id, "logical_alias": LOGICAL,
         "data_collection": physical, "gen_fp": "0123456789abcdef", "corpus_fp": "c" * 12,
         "content_seal": {"schema": 1, "data": {"count": 1, "sha256": digest},
                          "control": {"count": 1, "sha256": digest}},
     }
+    if catalog is not None:  # a #827 receipt: schema 3 binds the catalog summary
+        from mainframe_rag.ingest.catalog import catalog_summary
+
+        payload.update(build_schema=3, source_catalog=catalog_summary(catalog))
+    return payload
+
+
+# Catalog sources (#828). Two revisions share a doc id; two products; one
+# source with no product/version and no honest page labels. Entries are the
+# catalog's stored shape (0-based pages); the expected wire shape is written
+# out separately below.
+SHA2, SHA3 = "b" * 64, "c" * 64
+REV2 = f"synthetic|guide|2|{SHA2}"
+REV3 = f"unknown|||{SHA3}"
+
+
+def _entry(rev, sha, doc_id, title, product, version, pages, labels, chunks, indexed):
+    return {"source_revision": rev, "source_sha256": sha, "doc_id": doc_id, "title": title,
+            "product": product, "version": version, "chunk_count": chunks,
+            "pages": {"first": pages[0], "last": pages[1]},
+            "page_labels": {"first": labels[0], "last": labels[1]}, "indexed_pages": indexed}
+
+
+SOURCES = [
+    _entry(REV, SHA, "SYN-0001-00", "Synthetic Guide", "synthos", "1", (2, 3), ("iii", "iv"), 1, 2),
+    _entry(REV2, SHA2, "SYN-0001-00", "Synthetic Guide", "synthos", "2", (0, 9), ("1", "10"), 4, 10),
+    _entry(REV3, SHA3, "OTHER-02", "Other Manual", None, None, (4, 4), (None, None), 1, 1),
+]
+# Independent wire witness: one-based physical pages, labels verbatim.
+WIRE = {
+    REV: {"source_revision": REV, "source_sha256": SHA, "doc_id": "SYN-0001-00",
+          "title": "Synthetic Guide", "product": "synthos", "version": "1", "chunk_count": 1,
+          "physical_pages": {"first": 3, "last": 4}, "page_labels": {"first": "iii", "last": "iv"},
+          "indexed_pages": 2},
+    REV2: {"source_revision": REV2, "source_sha256": SHA2, "doc_id": "SYN-0001-00",
+           "title": "Synthetic Guide", "product": "synthos", "version": "2", "chunk_count": 4,
+           "physical_pages": {"first": 1, "last": 10}, "page_labels": {"first": "1", "last": "10"},
+           "indexed_pages": 10},
+    REV3: {"source_revision": REV3, "source_sha256": SHA3, "doc_id": "OTHER-02",
+           "title": "Other Manual", "product": None, "version": None, "chunk_count": 1,
+           "physical_pages": {"first": 5, "last": 5}, "page_labels": {"first": None, "last": None},
+           "indexed_pages": 1},
+}
+
+
+def _catalog_id(physical: str, rev: str) -> str:
+    """The #827 point id, derived here from its documented recipe."""
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"source-catalog|{physical}__completions|{rev}"))
+
+
+def _listing_order(physical: str, revs) -> list[str]:
+    """Qdrant scrolls UUID ids in integer order (checked on the real server)."""
+    return sorted(revs, key=lambda r: uuid.UUID(_catalog_id(physical, r)).int)
+
+
+def _matches(payload: dict, flt) -> bool:
+    for cond in (flt.must if flt is not None else None) or []:
+        value: object = payload
+        for part in cond.key.split("."):
+            value = value.get(part) if isinstance(value, dict) else None
+        if type(cond).__name__ != "FieldCondition" or value != cond.match.value:
+            return False
+    return True
 
 
 class EvidenceQdrant:
@@ -105,14 +169,24 @@ class EvidenceQdrant:
         self.aliases: dict[str, str] = {}
         self.collections: dict[str, dict[str, dict]] = {}
         self.calls: list[str] = []
+        self.scroll_projections: list[object] = []
         self.before_retrieve = None  # async hook(name, ids)
+        self.before_scroll = None  # async hook(name)
 
-    def publish(self, build_id, physical, payloads, *, serving=False, retained_aliases=True):
+    def publish(self, build_id, physical, payloads, *, serving=False, retained_aliases=True,
+                catalog=None):
         self.collections[physical] = dict(payloads)
         control = physical + "__completions"
         self.collections[control] = {
-            publication_metadata_point_id(control): _control_payload(build_id, physical)
+            publication_metadata_point_id(control): _control_payload(build_id, physical, catalog),
+            # A completion marker: listing must filter it out.
+            str(uuid.UUID(int=1)): {"doc_id": "SYN-0001-00", "source_rev": REV, "sha256": SHA,
+                                    "expected_chunks": 1, "target_collection": physical},
         }
+        for entry in catalog or []:
+            self.collections[control][_catalog_id(physical, entry["source_revision"])] = {
+                "record_type": "source-catalog-entry", "catalog_schema": 1, "entry": dict(entry),
+            }
         if retained_aliases:
             data_alias, control_alias = build_aliases(LOGICAL, build_id)
             self.aliases[data_alias] = physical
@@ -142,6 +216,29 @@ class EvidenceQdrant:
             raise ConnectionError("collection missing: storage-secret-detail")
         store = self.collections[name]
         return [SimpleNamespace(id=i, payload=store[i], vector=None) for i in ids if i in store]
+
+    async def scroll(self, name, *, scroll_filter=None, limit=10, with_payload, offset=None):
+        """Faithful to the pinned server (verified read-only on a real build):
+        integer UUID order, inclusive offset that may name an absent or
+        non-matching id, next_page_offset = next matching id, top-level
+        payload projection."""
+        self.calls.append("scroll")
+        self.scroll_projections.append(with_payload)
+        if self.before_scroll is not None:
+            await self.before_scroll(name)
+        await asyncio.sleep(0)
+        if name not in self.collections:
+            raise ConnectionError("collection missing: storage-secret-detail")
+        store = self.collections[name]
+        ids = sorted(store, key=lambda i: uuid.UUID(i).int)
+        if offset is not None:
+            ids = [i for i in ids if uuid.UUID(i).int >= uuid.UUID(str(offset)).int]
+        matching = [i for i in ids if _matches(store[i], scroll_filter)]
+        page, rest = matching[:limit], matching[limit:]
+        keep = (lambda k: True) if with_payload is True else (lambda k: k in with_payload)
+        return ([SimpleNamespace(id=i, payload={k: v for k, v in store[i].items() if keep(k)},
+                                 vector=None) for i in page],
+                rest[0] if rest else None)
 
 
 def _world(payload=None, build=BUILD_A, physical="wt405_gen_a", **publish_kw):
@@ -537,6 +634,224 @@ def test_public_failure_table_is_fixed_and_leaks_nothing():
     assert PUBLIC_FAILURES["unavailable"][2] == PUBLIC_FAILURES["corrupt"][2]
 
 
+# ------------------------------------------------------------- listing (#828)
+
+PHYS = "wt405_gen_a"
+
+
+def _listing_world(catalog=SOURCES, **publish_kw):
+    return _world(catalog=catalog, **publish_kw)
+
+
+async def _walk(svc, *, limit, served=BUILD_A, **kw):
+    """Every page of one listing until the only end signal, null cursor."""
+    pages, cursor = [], None
+    while True:
+        page = await svc.list_sources(CALLER, limit=limit, cursor=cursor,
+                                      served_build=None if cursor else served, **kw)
+        pages.append(page)
+        cursor = page.next_cursor
+        if cursor is None:
+            return pages
+
+
+@pytest.mark.anyio
+async def test_listing_returns_catalog_entries_in_id_order_and_stays_read_only():
+    qd = _listing_world()
+    page = await _service(qd).list_sources(CALLER, limit=50, served_build=BUILD_A)
+    order = _listing_order(PHYS, [REV, REV2, REV3])
+    assert [e.wire() for e in page.sources] == [WIRE[r] for r in order]
+    assert page.build_id == BUILD_A and page.next_cursor is None
+    # Catalog metadata only: one projected scroll, never the data collection.
+    assert set(qd.calls) <= {"get_aliases", "collection_exists", "retrieve", "scroll"}
+    assert qd.scroll_projections == [["record_type", "catalog_schema", "entry"]]
+
+
+@pytest.mark.anyio
+async def test_limit_one_walk_returns_every_source_once_and_ends_on_null_cursor():
+    pages = await _walk(_service(_listing_world()), limit=1)
+    seen = [e.source_revision for p in pages for e in p.sources]
+    assert seen == _listing_order(PHYS, [REV, REV2, REV3]) and len(pages) == 3
+    assert all(p.build_id == BUILD_A for p in pages)
+    assert [p.next_cursor is None for p in pages] == [False, False, True]
+
+
+@pytest.mark.anyio
+async def test_filters_only_narrow_by_exact_stored_labels():
+    svc = _service(_listing_world())
+
+    async def revs(**kw):
+        return [e.source_revision for p in await _walk(svc, limit=50, **kw) for e in p.sources]
+
+    assert sorted(await revs(product="synthos")) == sorted([REV, REV2])
+    assert await revs(product="synthos", version="2") == [REV2]
+    assert await revs(product="SYNTHOS") == []  # exact equality, no case folding
+    page = await svc.list_sources(CALLER, limit=50, served_build=BUILD_A, product="none")
+    assert page.sources == () and page.next_cursor is None
+
+
+class _ByRevision(_Access):
+    """Grants per source revision."""
+
+    def __init__(self, denied=()):
+        super().__init__()
+        self.denied = set(denied)
+
+    async def authorize(self, caller, scope):
+        grant = await super().authorize(caller, scope)
+        return None if scope.source_revision in self.denied else grant
+
+
+@pytest.mark.anyio
+async def test_denied_sources_are_omitted_without_any_count_or_marker():
+    qd = _listing_world()
+    page = await _service(qd, _ByRevision({REV2})).list_sources(CALLER, limit=50, served_build=BUILD_A)
+    assert [e.source_revision for e in page.sources] == _listing_order(PHYS, [REV, REV3])
+    everything_denied = await _service(qd, _ByRevision({REV, REV2, REV3})).list_sources(
+        CALLER, limit=50, served_build=BUILD_A)
+    no_match = await _service(qd).list_sources(CALLER, limit=50, served_build=BUILD_A, product="none")
+    assert everything_denied == no_match  # identical shape: empty page, null cursor
+    # A short page keeps its cursor: denials never end a listing early.
+    walk = await _walk(_service(qd, _ByRevision({REV, REV2, REV3})), limit=1)
+    assert len(walk) == 3 and all(p.sources == () for p in walk)
+
+
+@pytest.mark.anyio
+async def test_a_corrupt_visible_source_fails_the_page_and_a_corrupt_denied_one_is_unobservable():
+    qd = _listing_world()
+    control = PHYS + "__completions"
+    qd.collections[control][_catalog_id(PHYS, REV2)]["entry"]["chunk_count"] = 0
+    failure = await _refusal(_service(qd).list_sources(CALLER, limit=50, served_build=BUILD_A))
+    assert (failure.kind, failure.reason) == ("corrupt", "catalog_entry")
+    page = await _service(qd, _ByRevision({REV2})).list_sources(CALLER, limit=50, served_build=BUILD_A)
+    assert REV2 not in [e.source_revision for e in page.sources]
+    # An entry stored under another revision's point id is corrupt too.
+    qd = _listing_world()
+    store = qd.collections[control]
+    store[_catalog_id(PHYS, REV)]["entry"], store[_catalog_id(PHYS, REV2)]["entry"] = (
+        store[_catalog_id(PHYS, REV2)]["entry"], store[_catalog_id(PHYS, REV)]["entry"])
+    failure = await _refusal(_service(qd).list_sources(CALLER, limit=50, served_build=BUILD_A))
+    assert failure.kind == "corrupt"
+
+
+@pytest.mark.anyio
+async def test_a_build_without_a_catalog_lists_nothing_and_refuses():
+    qd = _world()  # a pre-#827 receipt (schema 2), the same data
+    failure = await _refusal(_service(qd).list_sources(CALLER, limit=50, served_build=BUILD_A))
+    assert (failure.kind, failure.reason) == ("corrupt", "no_catalog")
+    assert "scroll" not in qd.calls
+
+
+@pytest.mark.anyio
+async def test_a_listing_stays_on_its_build_across_an_alias_move_and_never_reads_the_successor():
+    qd = _listing_world(serving=True)
+    svc = _service(qd)
+    first = await svc.list_sources(CALLER, limit=1, served_build=BUILD_A)
+    qd.publish(BUILD_B, "wt405_gen_b", {}, serving=True, catalog=[SOURCES[2]])
+    cursor, seen = first.next_cursor, [e.source_revision for e in first.sources]
+    while cursor is not None:
+        page = await svc.list_sources(CALLER, limit=1, cursor=cursor)
+        assert page.build_id == BUILD_A
+        seen += [e.source_revision for e in page.sources]
+        cursor = page.next_cursor
+    assert seen == _listing_order(PHYS, [REV, REV2, REV3])
+    # A fresh listing of the new served build lists B only.
+    fresh = await svc.list_sources(CALLER, limit=50, served_build=BUILD_B)
+    assert [e.source_revision for e in fresh.sources] == [REV3] and fresh.build_id == BUILD_B
+    # Once A is gone, its cursor is unavailable, never B's entries.
+    for name in build_aliases(LOGICAL, BUILD_A):
+        del qd.aliases[name]
+    failure = await _refusal(svc.list_sources(CALLER, limit=1, cursor=first.next_cursor))
+    assert (failure.kind, failure.reason) == ("unavailable", "unknown_build")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("cursor", [
+    "", "ls1.", "ep1." + "A" * 43, "ls1." + "A" * 42, "ls1." + "A" * 43 + "=",
+    "ls1." + "A" * 43,  # zero build
+    "ls1." + "_" * 43,  # non-canonical trailing bits
+    "ls1." + "é" * 43,
+])
+async def test_malformed_cursors_refuse_before_any_storage_contact(cursor):
+    qd = _listing_world()
+    failure = await _refusal(_service(qd).list_sources(CALLER, limit=5, cursor=cursor))
+    assert failure.kind == "invalid_cursor" and qd.calls == []
+
+
+def test_cursor_roundtrip_is_canonical():
+    from mainframe_rag.agent.evidence import encode_sources_cursor, parse_sources_cursor
+
+    point = _catalog_id(PHYS, REV)
+    token = encode_sources_cursor(BUILD_A, point)
+    raw = bytes.fromhex(BUILD_A.replace("-", "")) + bytes.fromhex(point.replace("-", ""))
+    assert token == "ls1." + base64.urlsafe_b64encode(raw).decode().rstrip("=") and len(token) == 47
+    assert parse_sources_cursor(token) == (BUILD_A, point)
+
+
+@pytest.mark.anyio
+async def test_page_byte_budget_ends_a_page_early_and_the_cursor_resumes_at_that_entry():
+    big = [dict(e, title=e["title"] + "x" * 150_000) for e in SOURCES]
+    svc = _service(_listing_world(catalog=big))
+    pages = await _walk(svc, limit=50)
+    assert [len(p.sources) for p in pages] == [1, 1, 1]  # first entry always included
+    assert [e.source_revision for p in pages for e in p.sources] == _listing_order(PHYS, [REV, REV2, REV3])
+
+
+@pytest.mark.anyio
+async def test_a_policy_change_before_the_response_is_redecided():
+    class Revoking(_ByRevision):
+        async def current_version(self):
+            if self.version == "v1":
+                self.version, self.denied = "v2", {REV2}
+            return self.version
+
+    page = await _service(_listing_world(), Revoking()).list_sources(CALLER, limit=50, served_build=BUILD_A)
+    assert REV2 not in [e.source_revision for e in page.sources] and len(page.sources) == 2
+
+
+@pytest.mark.anyio
+async def test_listing_fails_closed_on_policy_outage_identity_storage_fault_and_timeout():
+    qd = _listing_world()
+    access = _Access()
+    access.unavailable = True
+    assert (await _refusal(_service(qd, access).list_sources(
+        CALLER, limit=5, served_build=BUILD_A))).kind == "access_unavailable"
+    access.unavailable, access.unauthenticated = False, True
+    assert (await _refusal(_service(qd, access).list_sources(
+        CALLER, limit=5, served_build=BUILD_A))).kind == "unauthenticated"
+
+    async def boom(name):
+        raise ConnectionError("storage-secret-detail")
+
+    qd.before_scroll = boom
+    failure = await _refusal(_service(qd).list_sources(CALLER, limit=5, served_build=BUILD_A))
+    assert failure.kind == "upstream" and "storage-secret-detail" not in failure.reason
+
+    async def stall(name):
+        await asyncio.sleep(5)
+
+    qd.before_scroll = stall
+    failure = await _refusal(_service(qd, evidence_timeout_s=0.05).list_sources(
+        CALLER, limit=5, served_build=BUILD_A))
+    assert failure.kind == "timeout"
+    qd.before_scroll = None  # the next ordinary listing recovers
+    assert len((await _service(qd).list_sources(CALLER, limit=5, served_build=BUILD_A)).sources) == 3
+
+
+def test_sources_failure_table_is_fixed_and_leaks_nothing():
+    from mainframe_rag.agent.evidence import SOURCES_PUBLIC_FAILURES
+
+    assert SOURCES_PUBLIC_FAILURES == {
+        "invalid_cursor": (400, "invalid_sources_cursor", "the sources cursor is not valid"),
+        "unauthenticated": (401, "authentication_required", "authentication is required"),
+        "unavailable": (404, "sources_unavailable", "the requested sources are not available"),
+        "corrupt": (503, "sources_unavailable", "the requested sources are not available"),
+        "access_unavailable": (503, "access_unavailable", "access policy is not available"),
+        "timeout": (504, "sources_timeout", "the sources listing timed out"),
+        "upstream": (502, "upstream_error", "sources listing failed"),
+    }
+
+
 # --------------------------------------------------------------------- HTTP
 
 
@@ -571,7 +886,7 @@ def http(monkeypatch, synthetic_pdf, servable_representation_gate):
         return [hit], "semantic", {"embed_ms": 1, "qdrant_ms": 1}
 
     with TestClient(app_mod.app) as client:
-        qd = _world(serving=True)
+        qd = _world(serving=True, catalog=SOURCES)
         monkeypatch.setattr(app_mod, "qdrant", qd)
         monkeypatch.setattr(app_mod, "retrieve_search", search)
         monkeypatch.setattr(app_mod, "llm", Llm())
@@ -693,3 +1008,107 @@ def test_evidence_endpoint_is_counted_with_a_bounded_label():
     assert endpoint_for_path("/v1/evidence/ep1.AAAA") == "evidence"
     assert endpoint_for_path("/v1/evidence") is None
     assert endpoint_for_path("/v1/search") == "search"
+
+
+# ---------------------------------------------------------- HTTP listing (#828)
+
+
+def _sources(http, **params):
+    return http.client.get("/v1/sources", params=params)
+
+
+def _sources_error(r, status, code):
+    from mainframe_rag.agent.evidence import SOURCES_PUBLIC_FAILURES
+
+    assert r.status_code == status, r.text
+    body = r.json()
+    assert set(body) == {"code", "message"} and body["code"] == code
+    assert body["message"] in {m for _, c, m in SOURCES_PUBLIC_FAILURES.values() if c == code} | {
+        "the retrieval generation is not available"}
+    return body
+
+
+def test_http_sources_page_shape_walk_and_no_model_call(http):
+    r = _sources(http)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert set(body) == {"request_id", "build_id", "sources", "next_cursor"}
+    assert body["build_id"] == BUILD_A and body["next_cursor"] is None
+    assert body["sources"] == [WIRE[rev] for rev in _listing_order(PHYS, [REV, REV2, REV3])]
+    seen, cursor = [], None
+    while True:
+        page = _sources(http, limit=1, **({"cursor": cursor} if cursor else {})).json()
+        seen += [s["source_revision"] for s in page["sources"]]
+        cursor = page["next_cursor"]
+        if cursor is None:
+            break
+    assert seen == _listing_order(PHYS, [REV, REV2, REV3])
+    assert http.llm.calls == 0 and TEXT not in json.dumps(body)
+
+
+def test_http_sources_bounds_and_cursor_envelopes(http):
+    assert _sources(http, limit=0).status_code == 422
+    assert _sources(http, limit=201).status_code == 422
+    assert _sources(http, cursor="x" * 65).status_code == 422
+    calls = len(http.qd.calls)
+    _sources_error(_sources(http, cursor="ls1.not-a-cursor"), 400, "invalid_sources_cursor")
+    assert len(http.qd.calls) == calls  # refused before any storage contact
+    from mainframe_rag.agent.evidence import encode_sources_cursor
+
+    unknown = encode_sources_cursor(BUILD_B, _catalog_id(PHYS, REV))
+    _sources_error(_sources(http, cursor=unknown), 404, "sources_unavailable")
+
+
+def test_http_sources_on_a_build_without_a_catalog_is_503(http):
+    qd = _world(serving=True)  # pre-#827 receipt
+    http.monkeypatch.setattr(http.app, "qdrant", qd)
+    _sources_error(_sources(http), 503, "sources_unavailable")
+
+
+def test_http_sources_refuses_a_non_servable_generation(http):
+    http.app.serving_gate.outcome = "reembed_required"
+    _sources_error(_sources(http), 503, "representation_unavailable")
+
+
+def test_http_sources_access_outcomes_map_per_contract(http):
+    access = _ByRevision({REV2})
+    http.monkeypatch.setattr(http.app, "evidence_access", access)
+    assert [s["source_revision"] for s in _sources(http).json()["sources"]] == _listing_order(
+        PHYS, [REV, REV3])
+    access.denied = {REV, REV2, REV3}
+    denied, no_match = _sources(http).json(), _sources(http, product="none").json()
+    denied.pop("request_id"), no_match.pop("request_id")
+    assert denied == no_match == {"build_id": BUILD_A, "sources": [], "next_cursor": None}
+    access.denied, access.unavailable = set(), True
+    _sources_error(_sources(http), 503, "access_unavailable")
+    access.unavailable, access.unauthenticated = False, True
+    _sources_error(_sources(http), 401, "authentication_required")
+    access.unauthenticated = False
+    assert len(_sources(http).json()["sources"]) == 3  # the next ordinary listing recovers
+
+
+def test_http_sources_storage_fault_and_deadline_use_fixed_envelopes(http):
+    async def boom(name):
+        raise ConnectionError("storage-secret-detail")
+
+    http.qd.before_scroll = boom
+    body = _sources_error(_sources(http), 502, "upstream_error")
+    assert "storage-secret-detail" not in json.dumps(body)
+
+    async def stall(name):
+        await asyncio.sleep(5)
+
+    http.qd.before_scroll = stall
+    http.monkeypatch.setattr(http.app.settings, "evidence_timeout_s", 0.05)
+    _sources_error(_sources(http), 504, "sources_timeout")
+    http.qd.before_scroll = None
+    http.monkeypatch.setattr(http.app.settings, "evidence_timeout_s", 10.0)
+    assert _sources(http).status_code == 200
+
+
+def test_sources_endpoint_is_counted_with_a_bounded_label():
+    from mainframe_rag.agent.metrics import endpoint_for_path
+
+    assert endpoint_for_path("/v1/sources") == "sources"
+    assert endpoint_for_path("/v1/sources/") == "sources"
+    assert endpoint_for_path("/v1/sources/x") is None

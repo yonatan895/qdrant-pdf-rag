@@ -237,6 +237,46 @@ def write_source_catalog(client: QdrantPoints, physical: str, entries: list[dict
         client.upsert(control, points=points[i : i + _PAGE_SIZE], wait=True)
 
 
+def _opt_text(value: object) -> bool:
+    return value is None or isinstance(value, str)
+
+
+def _span_ok(value: object, kind: type) -> bool:
+    return isinstance(value, dict) and set(value) == {"first", "last"} and all(
+        (v is None or type(v) is kind) if kind is str else type(v) is kind for v in value.values()
+    )
+
+
+def decode_catalog_point(control: str, point_id: object, payload: object) -> dict:
+    """One stored catalog point, validated exactly as the writer produces it:
+    the three payload keys, the schema, every entry field's type, a sane page
+    span, and the point id bound to `(control, source_revision)`. Returns the
+    entry; anything else raises SourceCatalogError. Shared by publication
+    readback and the serving-side listing (#828)."""
+    if not isinstance(payload, dict) or set(payload) != {"record_type", "catalog_schema", "entry"}:
+        raise SourceCatalogError("a stored source catalog entry is malformed")
+    entry = payload["entry"]
+    if (payload["record_type"] != CATALOG_RECORD_TYPE
+            or type(payload["catalog_schema"]) is not int or payload["catalog_schema"] != CATALOG_SCHEMA
+            or not isinstance(entry, dict) or set(entry) != _ENTRY_KEYS):
+        raise SourceCatalogError("a stored source catalog entry is malformed")
+    rev, sha = entry["source_revision"], entry["source_sha256"]
+    if (not isinstance(rev, str) or not rev or not isinstance(sha, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", sha) or not rev.endswith("|" + sha)
+            or not isinstance(entry["doc_id"], str) or not isinstance(entry["title"], str)
+            or not _opt_text(entry["product"]) or not _opt_text(entry["version"])
+            or type(entry["chunk_count"]) is not int or entry["chunk_count"] < 1
+            or not _span_ok(entry["pages"], int) or not _span_ok(entry["page_labels"], str)
+            or type(entry["indexed_pages"]) is not int):
+        raise SourceCatalogError("a stored source catalog entry is malformed")
+    first, last = entry["pages"]["first"], entry["pages"]["last"]
+    if not 0 <= first <= last or not 1 <= entry["indexed_pages"] <= last - first + 1:
+        raise SourceCatalogError("a stored source catalog entry is malformed")
+    if str(point_id) != catalog_point_id(control, rev):
+        raise SourceCatalogError("a stored source catalog entry is malformed")
+    return entry
+
+
 def read_source_catalog(client: QdrantReader, control: str) -> list[dict]:
     """Every stored entry, validated and sorted. A malformed entry raises."""
     entries: list[dict] = []
@@ -247,14 +287,7 @@ def read_source_catalog(client: QdrantReader, control: str) -> list[dict]:
             payload = record.payload or {}
             if payload.get("record_type") != CATALOG_RECORD_TYPE:
                 continue
-            entry = payload.get("entry")
-            if (set(payload) != {"record_type", "catalog_schema", "entry"}
-                    or payload["catalog_schema"] != CATALOG_SCHEMA
-                    or not isinstance(entry, dict) or set(entry) != _ENTRY_KEYS
-                    or not isinstance(entry["source_revision"], str)
-                    or str(record.id) != catalog_point_id(control, entry["source_revision"])):
-                raise SourceCatalogError("a stored source catalog entry is malformed")
-            entries.append(entry)
+            entries.append(decode_catalog_point(control, record.id, payload))
         if offset is None or not records:
             break
     return sorted(entries, key=lambda e: e["source_revision"])

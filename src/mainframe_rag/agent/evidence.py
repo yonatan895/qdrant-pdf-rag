@@ -1,4 +1,5 @@
-"""Exact-evidence service (issue #405 E1): references and read-only exact reads.
+"""Exact-evidence service (issue #405 E1): references, read-only exact reads,
+and source listing from the publish-time catalog (issue #828).
 
 One shared, async, LLM-free use case that HTTP (`GET /v1/evidence/{reference}`,
 references on `POST /v1/search` hits) and the downstream knowledge MCP adapter
@@ -20,9 +21,13 @@ needs a byte-to-page location map the ingest path does not retain, so this
 profile reports the stored chunk page span only; and there is no retirement
 tombstone writer yet, so an absent build is "unavailable", never "retired".
 
+Source listing (#828) reads only the pinned build's catalog entries
+(`ingest/catalog.py`, #827) from its control collection: one filtered,
+projected `scroll` per page, never chunk text or the data collection.
+
 Read-only by construction: the service touches only `get_aliases`,
-`collection_exists` and `retrieve`, so the serving (read-only) credential
-suffices. It performs no model, embed or rerank call.
+`collection_exists`, `retrieve` and `scroll`, so the serving (read-only)
+credential suffices. It performs no model, embed or rerank call.
 """
 
 from __future__ import annotations
@@ -46,6 +51,11 @@ from mainframe_rag.ingest.build import (
     build_aliases,
     decode_build_binding,
 )
+from mainframe_rag.ingest.catalog import (
+    CATALOG_RECORD_TYPE,
+    SourceCatalogError,
+    decode_catalog_point,
+)
 from mainframe_rag.ingest.classify import ChunkType
 from mainframe_rag.ingest.publish import publication_metadata_point_id
 from mainframe_rag.logs import error_type
@@ -63,6 +73,7 @@ _HEX64 = frozenset("0123456789abcdef")
 
 FailureKind = Literal[
     "invalid_reference",
+    "invalid_cursor",
     "unauthenticated",
     "unavailable",
     "corrupt",
@@ -88,6 +99,29 @@ PUBLIC_FAILURES: dict[FailureKind, tuple[int, str, str]] = {
     "timeout": (504, "evidence_timeout", "the evidence read timed out"),
     "upstream": (502, "upstream_error", "evidence read failed"),
 }
+
+# The source listing's own table (#828): same shape, listing wording. A cursor
+# for an unknown or no-longer-retained build is 404; missing catalog,
+# redirected controls or a malformed visible entry is 503 (same code).
+SOURCES_PUBLIC_FAILURES: dict[FailureKind, tuple[int, str, str]] = {
+    "invalid_cursor": (400, "invalid_sources_cursor", "the sources cursor is not valid"),
+    "unauthenticated": (401, "authentication_required", "authentication is required"),
+    "unavailable": (404, "sources_unavailable", "the requested sources are not available"),
+    "corrupt": (503, "sources_unavailable", "the requested sources are not available"),
+    "access_unavailable": (503, "access_unavailable", "access policy is not available"),
+    "timeout": (504, "sources_timeout", "the sources listing timed out"),
+    "upstream": (502, "upstream_error", "sources listing failed"),
+}
+
+SOURCES_CURSOR_PREFIX = "ls1."
+_CURSOR_BYTES = 16 + 16
+_CURSOR_LEN = len(SOURCES_CURSOR_PREFIX) + (_CURSOR_BYTES * 4 + 2) // 3
+SOURCES_LIMIT_MAX = 200
+# Bounds (#828 D4): catalog records examined per request, and serialized
+# entries per page (the first entry is always included).
+SOURCES_SCAN_CAP = 200
+SOURCES_PAGE_BYTES = 256 * 1024
+_CATALOG_FIELDS = ["record_type", "catalog_schema", "entry"]
 
 
 class EvidenceFailure(Exception):
@@ -227,6 +261,101 @@ def parse_reference(token: object) -> ParsedReference:
     if build.int == 0:
         raise bad()
     return ParsedReference(str(build), str(chunk), raw[32:])
+
+
+def encode_sources_cursor(build_id: str, next_point: str) -> str:
+    """`ls1.` + URL-safe base64 of the build UUID and the next catalog point
+    id to examine. A position, never a grant: every page re-authorizes."""
+    raw = uuid.UUID(_canonical_uuid(build_id)).bytes + uuid.UUID(_canonical_uuid(next_point)).bytes
+    return SOURCES_CURSOR_PREFIX + base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+
+def parse_sources_cursor(token: object) -> tuple[str, str]:
+    """Strict, canonical-only decode to (build_id, next point id). Raises
+    EvidenceFailure(invalid_cursor) before any storage contact."""
+
+    def bad() -> EvidenceFailure:
+        return EvidenceFailure("invalid_cursor", "malformed")
+
+    if not isinstance(token, str) or len(token) != _CURSOR_LEN or not token.isascii():
+        raise bad()
+    if not token.startswith(SOURCES_CURSOR_PREFIX):
+        raise bad()
+    body = token[len(SOURCES_CURSOR_PREFIX):]
+    try:
+        raw = base64.urlsafe_b64decode(body + "=" * (-len(body) % 4))
+    except (binascii.Error, ValueError) as exc:
+        raise bad() from exc
+    if len(raw) != _CURSOR_BYTES or base64.urlsafe_b64encode(raw).rstrip(b"=").decode() != body:
+        raise bad()
+    build = uuid.UUID(bytes=raw[:16])
+    if build.int == 0:
+        raise bad()
+    return str(build), str(uuid.UUID(bytes=raw[16:]))
+
+
+@dataclass(frozen=True)
+class SourceEntry:
+    """One published source revision of the pinned build (catalog entry).
+    Pages are one-based physical, like exact reads; labels are printed
+    labels, None where no honest label exists (#271)."""
+
+    source_revision: str
+    source_sha256: str
+    doc_id: str
+    title: str
+    product: str | None
+    version: str | None
+    chunk_count: int
+    physical_page_first: int
+    physical_page_last: int
+    page_label_first: str | None
+    page_label_last: str | None
+    indexed_pages: int
+
+    def wire(self) -> dict[str, Any]:
+        return {
+            "source_revision": self.source_revision, "source_sha256": self.source_sha256,
+            "doc_id": self.doc_id, "title": self.title, "product": self.product,
+            "version": self.version, "chunk_count": self.chunk_count,
+            "physical_pages": {"first": self.physical_page_first, "last": self.physical_page_last},
+            "page_labels": {"first": self.page_label_first, "last": self.page_label_last},
+            "indexed_pages": self.indexed_pages,
+        }
+
+
+@dataclass(frozen=True)
+class SourcePage:
+    build_id: str
+    sources: tuple[SourceEntry, ...]
+    next_cursor: str | None
+
+
+def _source_entry(entry: Mapping[str, Any]) -> SourceEntry:
+    return SourceEntry(
+        source_revision=entry["source_revision"], source_sha256=entry["source_sha256"],
+        doc_id=entry["doc_id"], title=entry["title"], product=entry["product"],
+        version=entry["version"], chunk_count=entry["chunk_count"],
+        physical_page_first=entry["pages"]["first"] + 1,
+        physical_page_last=entry["pages"]["last"] + 1,
+        page_label_first=entry["page_labels"]["first"],
+        page_label_last=entry["page_labels"]["last"],
+        indexed_pages=entry["indexed_pages"],
+    )
+
+
+def _catalog_scope(payload: Mapping[str, Any]) -> EvidenceScope:
+    """Just the labels an entitlement decision needs, so authorization runs
+    before the entry's other fields are judged (a corrupt but denied entry
+    stays unobservable)."""
+    entry = payload.get("entry")
+    if not isinstance(entry, dict):
+        raise EvidenceFailure("corrupt", "catalog_entry")
+    rev = entry.get("source_revision")
+    if not isinstance(rev, str) or not rev:
+        raise EvidenceFailure("corrupt", "source_revision")
+    return EvidenceScope(rev, _str(entry.get("doc_id")),
+                         _opt_str(entry.get("product")), _opt_str(entry.get("version")))
 
 
 def _int(value: object) -> int | None:
@@ -390,7 +519,9 @@ class EvidenceService:
         listing = await self._client.get_aliases()
         return {a.alias_name: a.collection_name for a in listing.aliases}
 
-    async def _binding(self, physical: str) -> BuildBinding | None:
+    async def _binding(self, physical: str) -> tuple[BuildBinding, bool] | None:
+        """The build binding and whether its receipt binds a source catalog
+        (build schema 3, #827); `decode_build_binding` validates both."""
         control = _control_of(physical)
         if not await self._client.collection_exists(control):
             return None
@@ -403,7 +534,7 @@ class EvidenceService:
         if payload.get("record_type") != "publication-metadata":
             raise EvidenceFailure("corrupt", "control_record")
         try:
-            return decode_build_binding(payload, control)
+            return decode_build_binding(payload, control), "source_catalog" in payload
         except (ValueError, TypeError) as exc:
             raise EvidenceFailure("corrupt", "control_binding") from exc
 
@@ -502,12 +633,115 @@ class EvidenceService:
             await self._authorize(caller, scope)
         return evidence
 
-    async def _pinned_build(self, build_id: str) -> tuple[BuildBinding, str]:
+    # -- source listing (#828)
+
+    async def list_sources(
+        self,
+        caller: TrustedCaller,
+        *,
+        limit: int,
+        cursor: str | None = None,
+        served_build: str | None = None,
+        product: str | None = None,
+        version: str | None = None,
+    ) -> SourcePage:
+        """One page of the pinned build's sources, or a typed EvidenceFailure.
+
+        The first page lists `served_build` (the serving gate's validated
+        build); later pages list the cursor's build only, resolved through
+        its immutable aliases, so an alias move cannot redirect a listing in
+        flight. `product`/`version` narrow by exact label equality only.
+        Denied sources are omitted with no count; a malformed visible entry
+        fails the whole page."""
+        if cursor is not None:
+            build_id, offset = parse_sources_cursor(cursor)  # no storage contact before this
+        elif served_build is not None:
+            build_id, offset = served_build, None
+        else:
+            raise EvidenceFailure("unavailable", "no_served_build")
+        if not 1 <= limit <= SOURCES_LIMIT_MAX:
+            raise ValueError("limit out of range")
+        try:
+            async with asyncio.timeout(self._settings.evidence_timeout_s):
+                return await self._list(caller, build_id, offset, limit, product, version)
+        except TimeoutError as exc:
+            raise EvidenceFailure("timeout", "deadline") from exc
+        except EvidenceFailure:
+            raise
+        except Exception as exc:
+            raise EvidenceFailure("upstream", error_type(exc)) from exc
+
+    async def _list(
+        self,
+        caller: TrustedCaller,
+        build_id: str,
+        offset: str | None,
+        limit: int,
+        product: str | None,
+        version: str | None,
+    ) -> SourcePage:
+        from qdrant_client import models
+
+        _, physical = await self._pinned_build(build_id, require_catalog=True)
+        control = _control_of(physical)
+        must: list[models.Condition] = [
+            models.FieldCondition(key="record_type", match=models.MatchValue(value=CATALOG_RECORD_TYPE))
+        ]
+        for key, value in (("entry.product", product), ("entry.version", version)):
+            if value is not None:
+                must.append(models.FieldCondition(key=key, match=models.MatchValue(value=value)))
+        records, after = await self._client.scroll(
+            control, scroll_filter=models.Filter(must=must), limit=min(limit, SOURCES_SCAN_CAP),
+            offset=offset, with_payload=_CATALOG_FIELDS,
+        )
+        kept: list[tuple[SourceEntry, EvidenceScope, AccessGrant]] = []
+        used = 0
+        next_point = None if after is None else str(after)
+        for record in records:
+            payload = record.payload or {}
+            scope = _catalog_scope(payload)
+            grant = await self._authorize_listing(caller, scope)
+            if grant is None:
+                continue  # denied: omitted, never counted
+            try:
+                entry = _source_entry(decode_catalog_point(control, record.id, payload))
+            except SourceCatalogError as exc:
+                raise EvidenceFailure("corrupt", "catalog_entry") from exc
+            size = len(json.dumps(entry.wire(), ensure_ascii=False).encode("utf-8"))
+            if kept and used + size > SOURCES_PAGE_BYTES:
+                next_point = str(record.id)  # inclusive resume at this entry
+                break
+            used += size
+            kept.append((entry, scope, grant))
+        # A policy change since admission is re-decided before responding.
+        current = await self._current_version()
+        if any(grant.policy_version != current for _, _, grant in kept):
+            kept = [k for k in kept if await self._authorize_listing(caller, k[1]) is not None]
+        return SourcePage(
+            build_id=build_id,
+            sources=tuple(entry for entry, _, _ in kept),
+            next_cursor=None if next_point is None else encode_sources_cursor(build_id, next_point),
+        )
+
+    async def _authorize_listing(
+        self, caller: TrustedCaller, scope: EvidenceScope
+    ) -> AccessGrant | None:
+        try:
+            return await self._authorize(caller, scope)
+        except EvidenceFailure as exc:
+            if exc.kind == "unavailable":
+                return None
+            raise
+
+    async def _pinned_build(
+        self, build_id: str, *, require_catalog: bool = False
+    ) -> tuple[BuildBinding, str]:
         """Resolve the build through its immutable aliases and verify the pair.
 
         Reads `settings.qdrant_collection` as the logical corpus only to NAME
         the per-build aliases; the ordinary serving alias is never consulted,
-        so it moving (or being repaired/retired) cannot redirect this read."""
+        so it moving (or being repaired/retired) cannot redirect this read.
+        `require_catalog` refuses a build whose receipt binds no catalog."""
         logical = self._settings.qdrant_collection
         data_alias, control_alias = build_aliases(logical, build_id)
         aliases = await self._aliases()
@@ -516,7 +750,8 @@ class EvidenceService:
             raise EvidenceFailure("unavailable", "unknown_build")
         if physical is None or control != _control_of(physical):
             raise EvidenceFailure("corrupt", "build_aliases")
-        binding = await self._binding(physical)
+        bound = await self._binding(physical)
+        binding = bound[0] if bound is not None else None
         if (
             binding is None
             or binding.build_id != build_id
@@ -524,6 +759,8 @@ class EvidenceService:
             or binding.alias != logical
         ):
             raise EvidenceFailure("corrupt", "control_mismatch")
+        if require_catalog and not (bound is not None and bound[1]):
+            raise EvidenceFailure("corrupt", "no_catalog")
         return binding, physical
 
     async def _authorize(self, caller: TrustedCaller, scope: EvidenceScope) -> AccessGrant:

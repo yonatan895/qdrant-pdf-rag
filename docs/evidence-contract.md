@@ -13,9 +13,11 @@ and [deployment](deploy.md#deployment-policy). No runtime behavior changes here.
 
 Current main has shared answer preparation/finalization, scoped retrieval,
 revision-separated chunk identity, alias publication/repair, a TTL-cached
-physical serving binding, and (#405 E1/MCP1) the
+physical serving binding, (#405 E1/MCP1) the
 [stored-payload exact-evidence profile](#stored-payload-profile) below with its
-HTTP route and read-only knowledge MCP adapter. It does **not** implement the
+HTTP route and read-only knowledge MCP adapter, and (#828) the
+[source listing](#sources-profile) over the publish-time catalog (#827). It
+does **not** implement the
 full `e1.` profile (byte-to-page location map), retirement tombstones,
 a per-source caller-entitlement service, admitted-reader leases or automatic
 safe GC. The remaining mechanisms are implementation obligations for
@@ -315,7 +317,7 @@ GET /v1/evidence/<reference>[?max_bytes=..&product=..&version=..]
 ```
 
 The downstream consumer is `mcp/knowledge.py` (tools `knowledge_search`,
-`evidence_read`): an adapter over this HTTP surface with no Qdrant, model,
+`evidence_read`, `sources_list`): an adapter over this HTTP surface with no Qdrant, model,
 entitlement or reference code, no forwarded incoming credentials and no SDK
 dependency (hand-rolled JSON-RPC like the FTP bridge). It speaks as its own
 deployment identity to `KNOWLEDGE_API_BASE_URL`; approving that trusted-caller
@@ -350,8 +352,55 @@ A disposable-Qdrant exercise of the same read path ran on 6333 with a `wt405_`
 prefix and was deleted (see the PR record). Known gaps: `e1.` location map,
 tombstones/410 and retention (#391), per-source entitlement and revocation
 timing approval (#373), restore/rollback (#360), hosting of the MCP adapter,
-and `list_sources` (not delivered; schema-3 builds now carry the sealed
-per-build source catalog it will read, see [ingest](ingest.md) "Source catalog" and #828).
+and listing of builds published before #827 (they carry no catalog; see
+[Sources](#sources-profile)).
+
+<a id="sources-profile"></a>
+## Sources profile (implemented, #828)
+
+**Status:** implemented for builds whose publication receipt binds a source
+catalog (`build_schema` 3, #827). **Decision owner:** `agent.evidence`
+(`EvidenceService.list_sources`, `SOURCES_PUBLIC_FAILURES`); catalog format
+and its strict point decoder: [ingest](ingest.md) "Source catalog"
+(`ingest/catalog.decode_catalog_point`). Maintainer decisions D1–D8 on #405
+and #828.
+
+| Aspect | Decision |
+|---|---|
+| What a source is | One catalog entry of the listed build: a published, completion-verified source revision. Fields: `source_revision`, `source_sha256`, `doc_id`, `title`, `product`, `version`, `chunk_count`, `physical_pages{first,last}` (one-based, the exact-read convention; the catalog stores zero-based), `page_labels{first,last}` (printed labels, null where no honest label exists, #271), `indexed_pages`. No path, no text, no per-chunk address. |
+| Which build | Only the currently served build: the first page lists the build the serving gate validated (`503 representation_unavailable` otherwise, as for search); a cursor page resolves the cursor's build only through its immutable per-build aliases and verifies the paired control. The serving alias moving mid-listing cannot skip, repeat or redirect entries; a removed cursor build is `404`, never a successor's entries. No client build selector. |
+| Data path | Require the receipt to bind a catalog (else `503`); one `scroll` of `<physical>__completions` per page, filtered to `record_type: source-catalog-entry` plus optional exact `entry.product`/`entry.version` equality (narrowing only), ordered by point id, projected to `record_type`, `catalog_schema`, `entry`. The data collection is never read. |
+| Integrity (D7) | Every visible entry is strictly decoded (exact keys, schema, field types, page span, point id bound to `(control, source_revision)`); a malformed visible entry fails the page with `503`. The receipt's catalog digest is not re-verified per request: like exact reads, listing relies on the content seal verified at publication and certification, and assumes no out-of-band mutation of a published physical. |
+| Cursor | `ls1.` + unpadded URL-safe base64 of the build UUID and the next catalog point id to examine (47 ASCII characters); canonical-only decode, malformed or zero-build cursors are `400` before any storage contact. A position, never a grant: every page re-authorizes, and the cursor does not bind `limit` or filters. Qdrant's scroll offset is inclusive and may name an absent id (verified read-only on the pinned server). |
+| Bounds (D4) | `limit` 1–200 (default 50, `422` outside); at most 200 catalog records examined per request; serialized entries at most 256 KiB per page with the first entry always included, the cursor then resumes at the entry that did not fit. Short or empty pages with a non-null cursor are legal; `next_cursor: null` is the only end signal. `EVIDENCE_TIMEOUT_S` bounds one page; HTTP listings share the admission pool and request deadline. |
+| Access (D3, D5) | The same `EvidenceAccess.authorize` call as exact reads, with `EvidenceScope` taken from the entry's stored labels, decided before the entry's other fields are judged: a denied source is omitted with no count or marker, so an all-denied page equals a no-match page, and a corrupt denied entry is unobservable. Always on; under shared-corpus mode the title inventory is enumerable by any caller who reaches the Service (approved, D3). Policy outage `503 access_unavailable`, missing identity `401`, and a policy-version change before the response re-decides the page. |
+
+Public outcomes: 200 page; 400 `invalid_sources_cursor`; 401
+`authentication_required`; 404 / 503 `sources_unavailable`; 503
+`access_unavailable`; 503 `representation_unavailable` (first page only); 504
+`sources_timeout`; 502 `upstream_error` / `sources listing failed`; 422
+`invalid_request` for out-of-range `limit` or an overlong cursor.
+
+```text
+GET /v1/sources?limit=50[&cursor=ls1....&product=..&version=..]
+  -> 200 {"build_id":"00000000-0000-4000-8000-00000000000a",
+          "sources":[{"source_revision":"synthetic|guide|1|aaaa...","doc_id":"SYN-0001-00",
+                      "title":"Synthetic Guide","product":"synthos","version":"1",
+                      "chunk_count":1,"physical_pages":{"first":3,"last":4},
+                      "page_labels":{"first":"iii","last":"iv"},"indexed_pages":2, ...}],
+          "next_cursor":null}
+```
+
+**Evidence:** `tests/test_evidence_service.py` (independent literal entries and
+point-id order, limit-1 walk, exact-label filters, denied omission and its
+indistinguishable empty page, corrupt visible vs denied, swapped point ids, no
+catalog, alias move with cursor pinning and removed build, malformed cursors
+with zero storage calls, canonical cursor bytes, byte budget, policy change,
+outage, identity, storage fault, timeout, HTTP shape and envelopes, metrics
+label) and `tests/test_mcp_knowledge.py` (`sources_list` parity page for page,
+failure parity, argument validation, per-tool fallback). Not covered by tests:
+the 256 KiB bound with real titles (catalog titles are short; the bound is
+exercised with synthetic 150 KB titles).
 
 <a id="four-design-walks-and-implementation-witnesses"></a>
 ## Four design walks and implementation witnesses

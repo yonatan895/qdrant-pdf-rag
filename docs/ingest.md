@@ -911,7 +911,11 @@ thread pool.
   sealed retry and steady re-certification check the stored entries against
   it. Entries nest their fields under `entry` and carry no top-level
   `doc_id`: control readers treat a top-level `doc_id` as a completion marker.
-  The staging clone's inherited entries are replaced, like its receipt. No
+  The staging clone's inherited entries are replaced, like its receipt.
+  Publication readback and the serving-side listing (`GET /v1/sources`, MCP
+  `sources_list`, [Sources profile](evidence-contract.md#sources-profile))
+  share one strict point decoder, `decode_catalog_point` (exact keys, schema,
+  field types, page span, point-id binding). No
   chunk payload or rule module changes, so the extraction rules version and
   stored vectors are unchanged. Schema-1 and schema-2 builds stay servable
   without a catalog and nothing backfills one; an unfinished sealed schema-2
