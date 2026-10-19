@@ -222,3 +222,70 @@ def test_join_headings_refuses_a_moved_physical_page():
     moved = {"c1": {**same["c1"], "page_start": 6}}
     with pytest.raises(HeadingJoinError, match="1 with a different"):
         join_headings([record], _RetrieveClient(moved), "local")
+
+
+def _fusion_record(dense, sparse, text="q", kind="nl"):
+    """One leg with explicit dense/BM25 lists; every chunk is its own doc."""
+    legs = [{"effective_text": text, "dense": [_cp(p, p) for p in dense], "sparse": [_cp(p, p) for p in sparse]}]
+    return legs_to_record(text, kind, legs, {}, {"depth": 200})
+
+
+def test_replay_rrf_k_override_reaches_fusion():
+    """#845: `a` is rank 1 in one list only, `m` rank 5 in both. With k=2 the
+    lone rank 1 wins (1/3 > 2/7); with k=60 the double rank 5 wins (2/65 > 1/61)."""
+    rec = _fusion_record(["a", "d1", "d2", "d3", "m"], ["s1", "s2", "s3", "s4", "m"])
+    assert replay_record(rec, SweepConfig(label="k2", rrf_k=2), _settings())[0].chunk_id == "a"
+    assert replay_record(rec, SweepConfig(label="k60", rrf_k=60), _settings())[0].chunk_id == "m"
+    # None keeps the Settings value.
+    assert replay_record(rec, SweepConfig(label="p"), _settings(rrf_k=60))[0].chunk_id == "m"
+
+
+def test_replay_sparse_weight_overrides_follow_the_leg_kind():
+    """An NL leg ties dense and BM25 rank 1 at (1, 1); doubling the NL sparse
+    weight lifts the BM25 hit. Identifier legs keep (1, 3) unless their own
+    override applies, and the NL override never touches them."""
+    nl = _fusion_record(["a"], ["b"])
+    assert replay_record(nl, SweepConfig(label="p"), _settings())[0].chunk_id == "a"
+    assert replay_record(nl, SweepConfig(label="w", sparse_weight_nl=2.0), _settings())[0].chunk_id == "b"
+    assert replay_record(nl, SweepConfig(label="i", sparse_weight_identifier=1.0), _settings())[0].chunk_id == "a"
+
+    ident = _fusion_record(["a"], ["b"], text="What does IEA500I mean?", kind="identifier")
+    assert replay_record(ident, SweepConfig(label="p"), _settings())[0].chunk_id == "b"
+    assert replay_record(ident, SweepConfig(label="w", sparse_weight_nl=5.0), _settings())[0].chunk_id == "b"
+    assert replay_record(ident, SweepConfig(label="i", sparse_weight_identifier=1.0), _settings())[0].chunk_id == "a"
+
+
+def test_rrf_grid_sweeps_each_kind_against_production():
+    from scripts.replay_sweep import RRF_GRID_K, RRF_GRID_SPARSE_WEIGHT, rrf_grid_configs
+
+    configs = rrf_grid_configs(_settings())
+    assert configs[0] == candidate_configs(_settings())[0]
+    grid = configs[1:]
+    assert len(grid) == 2 * len(RRF_GRID_K) * len(RRF_GRID_SPARSE_WEIGHT) == 40
+    assert len({c.label for c in configs}) == len(configs)
+    assert {c.rrf_k for c in grid} == {2, 5, 10, 30, 60}
+    # Exactly one kind's weight varies per config; the other stays production.
+    assert all((c.sparse_weight_nl is None) != (c.sparse_weight_identifier is None) for c in grid)
+    assert {c.sparse_weight_nl for c in grid} - {None} == {c.sparse_weight_identifier for c in grid} - {None} == {
+        1.0, 2.0, 3.0, 5.0
+    }
+
+
+def test_run_config_reports_identifier_and_nl_separately():
+    entries = {
+        "q": GoldenEntry(id="NL-1", query="q", query_class="syntax", expected_doc_ids=["a"]),
+        "What does IEA500I mean?": GoldenEntry(
+            id="ID-1", query="What does IEA500I mean?", query_class="message_id", expected_doc_ids=["a"]
+        ),
+    }
+    records = [
+        _fusion_record(["a"], ["b"]),
+        _fusion_record(["a"], ["b"], text="What does IEA500I mean?", kind="identifier"),
+    ]
+    result = run_config(records, entries, SweepConfig(label="p"), _settings())
+    # NL ties keep dense first (a, relevant); the identifier leg's 3x BM25 puts b first.
+    assert result["kinds"] == {
+        "identifier": {"n": 1, "recall@1": 0.0, "recall@5": 1.0, "mrr": 0.5},
+        "nl": {"n": 1, "recall@1": 1.0, "recall@5": 1.0, "mrr": 1.0},
+    }
+    assert [r["kind"] for r in result["rows"]] == ["nl", "identifier"]

@@ -181,6 +181,11 @@ top is extremely heavy compared to the industry-default `k=60`.
   recall, and the small `k` is what makes rank 1 dominate. Both are
   `Settings`-overridable (`rrf_weight_*`, `rrf_k`); without settings the
   module constants apply.
+  First sweep on the current-rules production-profile corpus (#845,
+  2026-10-19, offline replay of dev pools; `eval.md` record): `rrf_k` 60
+  with these weights beats `k=2` on dev and the section probes, and a
+  lower identifier sparse weight costs exact-code r@5. No default changed;
+  a `k` change needs its own concern and live confirmation.
 - Per-type sparse boost (issue #216, default 1.0 = off): the BM25
   contribution of a `syntax`/`table` chunk multiplies by
   `Settings.rrf_sparse_boost_syntax` / `rrf_sparse_boost_table` (read off
