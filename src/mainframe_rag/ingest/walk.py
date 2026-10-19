@@ -21,13 +21,16 @@ _IGNORED_DIRS = {"__MACOSX", "lost+found"}
 
 
 def infer_from_path(pdf: Path, root: Path) -> tuple[str, str, str]:
-    """If corpus is root/vendor/product/version/*.pdf, use that. Else unknown."""
+    """If the file is exactly root/vendor/product/version/file.pdf, use that.
+    Else unknown: a deeper tree (an IBM kit's kit/form/doc/pdf folders) is
+    not this layout, and reading it as one stores folder names as product
+    and version (issue #849)."""
     try:
         rel = pdf.resolve().relative_to(root.resolve())
     except ValueError:
         return "unknown", "unknown", ""
     parts = rel.parts
-    if len(parts) >= 4:
+    if len(parts) == 4:
         return parts[0], parts[1], parts[2]
     return "unknown", "unknown", ""
 

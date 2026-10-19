@@ -43,6 +43,25 @@ def test_path_layout_vendor_product_version(tmp_path, plain_pdf):
     assert parsed.version == "1.0"
 
 
+
+def test_path_layout_applies_only_at_exactly_four_levels(tmp_path, plain_pdf):
+    """Issue #849: an IBM kit tree (kit/form/doc/pdf/x.pdf) is not the
+    vendor/product/version layout. Before the fix any depth >= 4 was read as
+    one, storing the kit's folder names as product and version; now only
+    root/vendor/product/version/file.pdf is, and other depths fall back to
+    text detection (none in this synthetic PDF)."""
+    import shutil
+
+    kit = ("zos_v22_pdfs", "zosv2r2kitpdfs", "c27843006", "SC27-8430-06", "pdf")
+    for depth in (6, 5, 3, 2, 1):
+        root = tmp_path / f"depth{depth}"
+        dest = root.joinpath(*kit[: depth - 1], "guide.pdf")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(plain_pdf, dest)
+        assert infer_from_path(dest, root) == ("unknown", "unknown", ""), depth
+        parsed = parse_pdf(dest, corpus_root=root)
+        assert (parsed.product, parsed.version) == (None, None), depth
+
 def test_detect_vendor_default_unknown(tmp_path):
     p = tmp_path / "notes.pdf"
     p.write_bytes(b"%PDF-1.4")
