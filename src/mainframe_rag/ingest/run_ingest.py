@@ -44,6 +44,12 @@ from mainframe_rag.ingest.build import (
     build_phase,
     require_published_binding,
 )
+from mainframe_rag.ingest.catalog import (
+    build_source_catalog,
+    catalog_summary,
+    read_source_catalog,
+    write_source_catalog,
+)
 from mainframe_rag.ingest.chrome import strip_chrome
 from mainframe_rag.ingest.chunk import Chunk, make_chunks
 from mainframe_rag.ingest.completion import (
@@ -104,6 +110,7 @@ from mainframe_rag.ingest.publish import (
     read_publish_state,
     resolve_publish_staging,
     verify_all_complete,
+    verify_build_catalog,
     verify_publication_seal,
     verify_searchable_coverage,
     verify_staging_distribution,
@@ -1794,6 +1801,9 @@ def _certify_live(
             f"path(s) (e.g. {problems[0]!r}) — operator intervention required."
         )
     verify_publication_seal(client, completion_collection_name(staging_settings))
+    # A schema-3 build's catalog must still match its receipt; an older live
+    # build has none and keeps serving (issue #827).
+    verify_build_catalog(client, completion_collection_name(staging_settings))
 
 
 def _recertify_live(
@@ -1875,7 +1885,8 @@ def _build_and_cut_over(
                           for target in observed_aliases.values()):
         raise RuntimeError("candidate has aliases but lacks its build control; refusing mutation")
     if sealed:
-        if not verify_publication_seal(client, completion_collection_name(staging_settings)):
+        if not (verify_publication_seal(client, completion_collection_name(staging_settings))
+                and verify_build_catalog(client, completion_collection_name(staging_settings))):
             raise RuntimeError("unfinished old-format build: finish with its release or explicitly abandon")
         expected = BuildBinding(build_id, alias, staging, gen_fp, corp_fp)
         if candidate_binding != expected:
@@ -2002,16 +2013,35 @@ def _build_and_cut_over(
             "the current live generation."
         )
     if not sealed:
+        # Source catalog (issue #827): built from the verified staging pair,
+        # written before the receipt so the seal covers it, and read back.
+        # Inherited ancestor entries are replaced, like the receipt below.
+        controls = completion_collection_name(staging_settings)
+        catalog = build_source_catalog(client, staging)
+        built = catalog_summary(catalog)
+        try:
+            catalog_dim = staging_settings.require_dense_dim()
+        except RuntimeError:
+            catalog_dim = 1
+        write_source_catalog(client, staging, catalog, catalog_dim)
+        if catalog_summary(read_source_catalog(client, controls)) != built:
+            raise RuntimeError(
+                f"staging {staging!r} source catalog did not read back — alias untouched, "
+                f"{live!r} still live."
+            )
         # Remove only staging copies of the ancestor's publication receipt.
         # The new receipt seals this exact pair; retries verify it read-only.
-        delete_publication_metadata(client, completion_collection_name(staging_settings),
+        delete_publication_metadata(client, controls,
                                     ancestor_completions=live + "__completions" if live else None)
         write_publication_metadata(
-            client, completion_collection_name(staging_settings), staging_settings,
+            client, controls, staging_settings,
             gen_fp=gen_fp, corpus_fp=corp_fp, build_id=build_id, logical_alias=alias,
+            source_catalog=built,
         )
     if not sealed and not verify_publication_seal(client, completion_collection_name(staging_settings)):
         raise RuntimeError("new publication lacks its content seal")
+    if not verify_build_catalog(client, completion_collection_name(staging_settings)):
+        raise RuntimeError("new publication lacks its source catalog")
     summary = swap_alias_to(client, settings, staging, live, build_id=build_id)
     summary["docs"] = str(len(prewalked))
     summary["staging_mode"] = mode

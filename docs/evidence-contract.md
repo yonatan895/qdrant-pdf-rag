@@ -350,7 +350,8 @@ A disposable-Qdrant exercise of the same read path ran on 6333 with a `wt405_`
 prefix and was deleted (see the PR record). Known gaps: `e1.` location map,
 tombstones/410 and retention (#391), per-source entitlement and revocation
 timing approval (#373), restore/rollback (#360), hosting of the MCP adapter,
-and `list_sources` (not delivered: no bounded source index exists yet).
+and `list_sources` (not delivered; schema-3 builds now carry the sealed
+per-build source catalog it will read, see [ingest](ingest.md) "Source catalog" and #828).
 
 <a id="four-design-walks-and-implementation-witnesses"></a>
 ## Four design walks and implementation witnesses

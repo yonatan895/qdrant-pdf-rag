@@ -2854,7 +2854,7 @@ def _exercise_build_uuid_recovery(tmp_path, monkeypatch, fake, alias):
     receipts = [p for p, _ in frozen[1].values() if p.get("record_type") == "publication-metadata"]
     assert len(receipts) == 1
     assert receipts[0]["build_id"] == build_id
-    assert receipts[0]["build_schema"] == 2
+    assert receipts[0]["build_schema"] == 3
     assert receipts[0]["data_collection"] == physical
     assert receipts[0]["logical_alias"] == alias
 
@@ -3186,6 +3186,7 @@ def test_completed_binding_without_seal_is_not_retroactively_certified(tmp_path,
     receipt = next(p for p in fake.collections[control] if p.payload.get("record_type") == "publication-metadata")
     receipt.payload["build_schema"] = 1
     del receipt.payload["content_seal"]
+    del receipt.payload["source_catalog"]  # a real schema-1 receipt never had one (#827)
     before = deepcopy(fake.collections), dict(fake.aliases)
     assert verify_publication_seal(fake, control) is False
     assert _run_main(monkeypatch, corpus, progress) == 0
@@ -3243,6 +3244,7 @@ def test_unfinished_schema_one_sealed_build_requires_its_old_release(tmp_path, m
     receipt = next(p for p in fake.collections[control] if p.payload.get("record_type") == "publication-metadata")
     receipt.payload["build_schema"] = 1
     del receipt.payload["content_seal"]
+    del receipt.payload["source_catalog"]  # a real schema-1 receipt never had one (#827)
     before = deepcopy(fake.collections), sidecar.read_bytes(), progress.read_bytes()
     fake.fail_swap = None
     with pytest.raises(RuntimeError, match="old-format"):
@@ -3513,3 +3515,303 @@ def test_sealed_build_cannot_serve_until_published():
     retained = {data: data, control: data + "__completions"}
     require_published_binding(binding, "corpus", data, retained)
     require_published_binding(binding, "corpus", data, {**retained, "corpus": data})
+
+
+# ------------------------------------------------ source catalog (#827)
+def _marker(physical, doc_id, sha, rev, expected, *, target=None):
+    from mainframe_rag.ingest.completion import CompletionRecord
+
+    return CompletionRecord(
+        doc_id=doc_id, sha256=sha, rules_v="rules", target_collection=target or physical,
+        generation_id=f"{sha}|gen|", expected_chunks=expected, chunk_ids_digest="c", content_digest="d",
+        manifest_digest="m", source_rev=rev,
+    ).model_dump()
+
+
+def _chunk(i, rev, doc_id, sha, title, product, version, start, end, label):
+    return SimpleNamespace(id=f"00000000-0000-4000-8000-{i:012d}", vector=None, payload={
+        "source_rev": rev, "doc_id": doc_id, "sha256": sha, "title": title, "product": product,
+        "version": version, "page_start": start, "page_end": end, "page_label": label,
+        "text": f"SENTINEL manual text {i}", "heading_path": "SENTINEL heading",
+    })
+
+
+class _ProjectionFake(PublishFake):
+    """Records each scroll's payload projection, and projects like the server."""
+
+    def __init__(self):
+        super().__init__()
+        self.projections: list[tuple[str, object]] = []
+
+    def scroll(self, collection, *, scroll_filter=None, limit=10, with_payload=None, with_vectors=False,
+               offset=None):
+        self.projections.append((collection, with_payload))
+        page, nxt = super().scroll(collection, scroll_filter=scroll_filter, limit=limit,
+                                   with_payload=with_payload, offset=offset)
+        if isinstance(with_payload, list):
+            page = [SimpleNamespace(id=p.id, vector=None,
+                                    payload={k: v for k, v in (p.payload or {}).items() if k in with_payload})
+                    for p in page]
+        return page, nxt
+
+
+def _catalog_store():
+    """Three published revisions (two share a doc_id), an inherited ancestor
+    marker and the manifest point; independent literal page facts."""
+    phys = "corpus__gen_catalog"
+    sha_a, sha_b, sha_c = "a" * 64, "b" * 64, "c" * 64
+    r1, r2, r3 = f"ibm|z/os|2.5|{sha_a}", f"ibm|z/os|3.1|{sha_b}", f"||4.5|{sha_c}"
+    fake = _ProjectionFake()
+    fake.collections[phys] = [
+        _chunk(1, r1, "SC27-1", sha_a, "Guide", "z/OS", "2.5", 0, 0, "i"),
+        _chunk(2, r1, "SC27-1", sha_a, "Guide", "z/OS", "2.5", 1, 2, "ii–1"),
+        _chunk(3, r1, "SC27-1", sha_a, "Guide", "z/OS", "2.5", 5, 5, "4"),
+        _chunk(4, r2, "SC27-1", sha_b, "Guide", "z/OS", "3.1", 3, 3, ""),
+        _chunk(5, r2, "SC27-1", sha_b, "Guide", "z/OS", "3.1", 3, 4, ""),
+        _chunk(6, r3, "GC31-2", sha_c, "Codes", None, "4.5", 10, 12, "A-1–A-3"),
+    ]
+    fake.collections[phys + "__completions"] = [
+        SimpleNamespace(id="m1", vector=None, payload=_marker(phys, "SC27-1", sha_a, r1, 3)),
+        SimpleNamespace(id="m2", vector=None, payload=_marker(phys, "SC27-1", sha_b, r2, 2)),
+        SimpleNamespace(id="m3", vector=None, payload=_marker(phys, "GC31-2", sha_c, r3, 1)),
+        SimpleNamespace(id="m4", vector=None, payload=_marker(phys, "OLD-1", "d" * 64, "x|y|z|" + "d" * 64, 9,
+                                                              target="corpus__gen_ancestor")),
+        SimpleNamespace(id="man", vector=None, payload={"record_type": "representation-manifest"}),
+    ]
+    expected = [
+        {"source_revision": r1, "source_sha256": sha_a, "doc_id": "SC27-1", "title": "Guide", "product": "z/OS",
+         "version": "2.5", "chunk_count": 3, "pages": {"first": 0, "last": 5},
+         "page_labels": {"first": "i", "last": "4"}, "indexed_pages": 4},
+        {"source_revision": r2, "source_sha256": sha_b, "doc_id": "SC27-1", "title": "Guide", "product": "z/OS",
+         "version": "3.1", "chunk_count": 2, "pages": {"first": 3, "last": 4},
+         "page_labels": {"first": None, "last": None}, "indexed_pages": 2},
+        {"source_revision": r3, "source_sha256": sha_c, "doc_id": "GC31-2", "title": "Codes", "product": None,
+         "version": "4.5", "chunk_count": 1, "pages": {"first": 10, "last": 12},
+         "page_labels": {"first": "A-1", "last": "A-3"}, "indexed_pages": 3},
+    ]
+    return fake, phys, expected
+
+
+def test_source_catalog_entries_are_exact_and_read_labels_and_pages_only():
+    """Issue #827: one entry per revision bound to this build (an inherited
+    ancestor marker is not a source), with the physical extent, the printed
+    labels at its two ends (None where no chunk locates them honestly) and
+    the pages that carry text (gaps visible). The data scan projects only
+    identity and page fields: manual text never enters the catalog."""
+    from mainframe_rag.ingest.catalog import DATA_FIELDS, build_source_catalog
+
+    fake, phys, expected = _catalog_store()
+    entries = build_source_catalog(fake, phys)
+    assert entries == expected
+    data_scans = [proj for coll, proj in fake.projections if coll == phys]
+    assert data_scans and all(proj == list(DATA_FIELDS) for proj in data_scans)
+    assert "SENTINEL" not in repr(entries)
+
+
+@pytest.mark.parametrize("damage", [
+    "marker-without-data", "data-without-marker", "count", "doc-id", "label-disagrees",
+    "page-span", "duplicate-marker", "no-markers", "sha",
+])
+def test_source_catalog_refuses_a_build_it_cannot_account_for(damage):
+    from mainframe_rag.ingest.catalog import SourceCatalogError, build_source_catalog
+
+    fake, phys, _ = _catalog_store()
+    data, control = fake.collections[phys], fake.collections[phys + "__completions"]
+    if damage == "marker-without-data":
+        fake.collections[phys] = [p for p in data if p.payload["doc_id"] != "GC31-2"]
+    elif damage == "data-without-marker":
+        fake.collections[phys + "__completions"] = [p for p in control if p.id != "m3"]
+    elif damage == "count":
+        control[0].payload["expected_chunks"] = 4
+    elif damage == "doc-id":
+        data[0].payload["doc_id"] = "SC27-9"
+    elif damage == "label-disagrees":
+        data[1].payload["version"] = "2.4"
+    elif damage == "page-span":
+        data[2].payload["page_end"] = 4
+    elif damage == "duplicate-marker":
+        control.append(SimpleNamespace(id="m1b", vector=None, payload=dict(control[0].payload)))
+    elif damage == "no-markers":
+        fake.collections[phys + "__completions"] = control[3:]
+    elif damage == "sha":
+        control[2].payload["sha256"] = "e" * 64
+    with pytest.raises(SourceCatalogError):
+        build_source_catalog(fake, phys)
+
+
+def test_receipt_schemas_bind_the_source_catalog_summary():
+    """Schema 3 requires an exact catalog summary; schema 1 and 2 receipts
+    still decode (their builds serve without a catalog) and cannot carry one."""
+    from mainframe_rag.ingest.build import decode_build_binding
+    from mainframe_rag.ingest.catalog import catalog_summary
+
+    control = "corpus__gen_x__completions"
+    seal = {"schema": 1, "data": {"count": 1, "sha256": "a" * 64}, "control": {"count": 2, "sha256": "b" * 64}}
+    base = {"record_type": "publication-metadata", "target_collection": control, "build_schema": 3,
+            "build_id": "12345678-1234-4234-8234-123456789abc", "logical_alias": "corpus",
+            "data_collection": "corpus__gen_x", "gen_fp": "g", "corpus_fp": "c", "content_seal": seal}
+    summary = catalog_summary(_catalog_store()[2])
+    assert decode_build_binding({**base, "source_catalog": summary}, control).physical == "corpus__gen_x"
+    for bad in (None, {**summary, "count": 0}, {**summary, "sha256": "x"}, {**summary, "schema": 2},
+                {**summary, "extra": 1}):
+        payload = {**base, "source_catalog": bad} if bad is not None else dict(base)
+        with pytest.raises(ValueError):
+            decode_build_binding(payload, control)
+    assert decode_build_binding({**base, "build_schema": 2}, control).build_id == base["build_id"]
+    with pytest.raises(ValueError, match="schema 3"):
+        decode_build_binding({**base, "build_schema": 2, "source_catalog": summary}, control)
+
+
+def _catalog_entries(fake, physical):
+    from mainframe_rag.ingest.catalog import read_source_catalog
+
+    return read_source_catalog(fake, physical + "__completions")
+
+
+def test_publication_seals_its_source_catalog_and_the_next_runs_keep_it_exact(tmp_path, monkeypatch):
+    """Publication writes one entry per source before the receipt, binds
+    the summary in a schema-3 receipt, and the content seal covers the
+    entries. An ordinary rerun re-certifies read-only; a tampered entry is
+    refused; a changed corpus replaces the inherited entries and a retired
+    document disappears from the next build's catalog."""
+    from copy import deepcopy
+
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.catalog import (
+        CATALOG_RECORD_TYPE,
+        build_source_catalog,
+        catalog_summary,
+    )
+    from mainframe_rag.ingest.completion import stale_completion_markers
+    from mainframe_rag.ingest.publish import read_publication_record
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _build_doc_with_id(corpus, "doc_a", DOC_A)
+    progress = tmp_path / "inventory.jsonl"
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    first = fake.aliases[ALIAS]
+    entries = _catalog_entries(fake, first)
+    assert [e["doc_id"] for e in entries] == [DOC_A]
+    assert entries == build_source_catalog(fake, first)
+    markers = [p.payload for p in fake.collections[first + "__completions"]
+               if p.payload.get("target_collection") == first and "record_type" not in p.payload]
+    assert entries[0]["chunk_count"] == markers[0]["expected_chunks"]
+    assert entries[0]["source_revision"] == markers[0]["source_rev"]
+    receipt = read_publication_record(fake, first + "__completions")
+    assert receipt["build_schema"] == 3 and receipt["source_catalog"] == catalog_summary(entries)
+    # Entries never look like completion markers to the control readers.
+    entry_points = [p for p in fake.collections[first + "__completions"]
+                    if p.payload.get("record_type") == CATALOG_RECORD_TYPE]
+    assert len(entry_points) == 1 and "doc_id" not in entry_points[0].payload
+    settings = _settings(qdrant_collection=first)
+    assert stale_completion_markers(fake, settings, receipt["gen_fp"])[0] == 1  # only the real marker
+
+    before = deepcopy(fake.collections), dict(fake.aliases)
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    assert (fake.collections, fake.aliases) == before
+
+    entry_points[0].payload["entry"]["title"] = "tampered"
+    with pytest.raises(RuntimeError):
+        _run_main(monkeypatch, corpus, progress)
+    entry_points[0].payload["entry"] = deepcopy(entries[0])
+
+    _build_doc_with_id(corpus, "doc_b", DOC_B)
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    second = fake.aliases[ALIAS]
+    assert second != first
+    assert sorted(e["doc_id"] for e in _catalog_entries(fake, second)) == [DOC_A, DOC_B]
+    assert _catalog_entries(fake, first) == entries  # the retained build is untouched
+
+    (corpus / "doc_a.pdf").unlink()
+    assert _run_main(monkeypatch, corpus, progress, "--retire-doc", DOC_A) == 0
+    third = fake.aliases[ALIAS]
+    assert [e["doc_id"] for e in _catalog_entries(fake, third)] == [DOC_B]
+
+
+@pytest.mark.parametrize("damage", ["lost-entry", "altered-entry"])
+def test_a_catalog_that_does_not_read_back_is_never_sealed(tmp_path, monkeypatch, damage):
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.catalog import CATALOG_RECORD_TYPE
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    upsert = fake.upsert
+
+    def damaged(collection, *, points, wait=True):
+        if any((p.payload or {}).get("record_type") == CATALOG_RECORD_TYPE for p in points):
+            if damage == "lost-entry":
+                return SimpleNamespace()
+            points[0].payload["entry"]["indexed_pages"] += 1
+        return upsert(collection, points=points, wait=wait)
+
+    monkeypatch.setattr(fake, "upsert", damaged)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _build_doc_with_id(corpus, "doc_a", DOC_A)
+    with pytest.raises(RuntimeError, match="source catalog"):
+        _run_main(monkeypatch, corpus, tmp_path / "inventory.jsonl")
+    assert not fake.aliases and not fake.alias_calls
+    # Checked before the receipt, so the damage was never sealed: an
+    # ordinary retry rewrites the entries and publishes them exactly.
+    monkeypatch.setattr(fake, "upsert", upsert)
+    assert _run_main(monkeypatch, corpus, tmp_path / "inventory.jsonl") == 0
+    published = fake.aliases[ALIAS]
+    from mainframe_rag.ingest.catalog import build_source_catalog
+
+    assert _catalog_entries(fake, published) == build_source_catalog(fake, published)
+
+
+def test_interrupted_catalog_publication_resumes_with_identical_entries(tmp_path, monkeypatch):
+    """A crash after the entries are written and before the receipt leaves
+    the alias untouched; the retry rebuilds byte-identical entries and
+    publishes. A sealed schema-2 candidate (an older release's interrupted
+    build) has no catalog and is refused as old-format, without mutation."""
+    import json
+    from copy import deepcopy
+
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.publish import publish_state_path
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _build_doc_with_id(corpus, "doc_a", DOC_A)
+    progress = tmp_path / "inventory.jsonl"
+    with monkeypatch.context() as patch:
+        def crash(*args, **kwargs):
+            raise RuntimeError("injected crash before the receipt")
+        patch.setattr(run_ingest, "write_publication_metadata", crash)
+        with pytest.raises(RuntimeError, match="injected crash"):
+            _run_main(monkeypatch, corpus, progress)
+    staging = json.loads(publish_state_path(progress, ALIAS).read_text())["staging"]
+    written = _catalog_entries(fake, staging)
+    assert written and not fake.aliases
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    assert fake.aliases[ALIAS] == staging
+    assert _catalog_entries(fake, staging) == written
+
+    fake = PublishFake()  # a separate store: an older release's interrupted, sealed build
+    other = tmp_path / "other"
+    other.mkdir()
+    _build_doc_with_id(other, "doc_b", DOC_B)
+    progress_b = tmp_path / "inventory_b.jsonl"
+    fake.fail_swap = "raise"
+    with pytest.raises(RuntimeError, match="injected swap failure"):
+        _run_main(monkeypatch, other, progress_b)
+    sidecar = publish_state_path(progress_b, ALIAS)
+    control = json.loads(sidecar.read_text())["staging"] + "__completions"
+    receipt = next(p for p in fake.collections[control] if p.payload.get("record_type") == "publication-metadata")
+    receipt.payload["build_schema"] = 2
+    del receipt.payload["source_catalog"]
+    before = deepcopy(fake.collections), dict(fake.aliases), sidecar.read_bytes()
+    fake.fail_swap = None
+    with pytest.raises(RuntimeError, match="old-format"):
+        _run_main(monkeypatch, other, progress_b)
+    assert (fake.collections, fake.aliases, sidecar.read_bytes()) == before

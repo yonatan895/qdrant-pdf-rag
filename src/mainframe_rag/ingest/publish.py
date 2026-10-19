@@ -47,6 +47,7 @@ from mainframe_rag.ingest.build import (
     canonical_build_id,
     decode_build_binding,
 )
+from mainframe_rag.ingest.catalog import decode_catalog_summary, verify_source_catalog
 from mainframe_rag.ingest.completion import (
     completion_collection_for,
     completion_collection_name,
@@ -339,11 +340,14 @@ def write_publication_metadata(
     corpus_fp: str,
     build_id: str,
     logical_alias: str,
+    source_catalog: dict,
 ) -> None:
     """Record publication fingerprints and the build binding on cutover
     (issue #391 Q418-R1). Allows subsequent ordinary runs to recognize
     successful repair generations as steady state. Every receipt binds its
-    build; unbound receipts are not written."""
+    build; unbound receipts are not written. `source_catalog` is the summary
+    of the entries already written to this control collection (issue #827);
+    the seal captured here covers those entries."""
     from qdrant_client import models
 
     try:
@@ -354,7 +358,8 @@ def write_publication_metadata(
     if not logical_alias:
         raise ValueError("new builds require their logical alias")
     build_fields = {"build_schema": BUILD_SCHEMA, "build_id": canonical_build_id(build_id),
-                    "logical_alias": logical_alias, "data_collection": settings.qdrant_collection}
+                    "logical_alias": logical_alias, "data_collection": settings.qdrant_collection,
+                    "source_catalog": decode_catalog_summary(source_catalog)}
     build_fields["content_seal"] = capture_content_seal(
         client, build_id=build_id, alias=logical_alias, physical=settings.qdrant_collection,
         gen_fp=gen_fp, corpus_fp=corpus_fp,
@@ -426,6 +431,16 @@ def verify_publication_seal(client: QdrantReader, completions_collection: str) -
     )
     if observed != payload["content_seal"]:
         raise RuntimeError("stored build content does not match its seal")
+    return True
+
+
+def verify_build_catalog(client: QdrantReader, completions_collection: str) -> bool:
+    """A schema-3 build's stored source catalog must equal its receipt's
+    summary (issue #827). False for an older build, which has no catalog."""
+    payload = read_publication_record(client, completions_collection)
+    if payload is None or "source_catalog" not in payload:
+        return False
+    verify_source_catalog(client, completions_collection, payload["source_catalog"])
     return True
 
 

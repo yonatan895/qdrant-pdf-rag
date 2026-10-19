@@ -845,7 +845,7 @@ thread pool.
   full canonical UUID plus the observed predecessor under the target lock before
   collection writes. The UUID is independent of representation and chunk UUID5
   identity and survives retries. After complete coverage and placement checks,
-  the paired publication receipt records `build_schema: 2`, that UUID, logical
+  the paired publication receipt records `build_schema: 3`, that UUID, logical
   corpus, physical pair and input fingerprints. This seals the candidate: retry
   re-verifies it without rewriting its stored data or controls, even with
   `--reingest`. One atomic alias operation creates
@@ -881,12 +881,41 @@ thread pool.
   seal is retroactively inferred or backfilled. An unfinished sealed schema-1
   candidate must finish with its matching release or be explicitly abandoned.
   A newly verified successor gains the capability. Deploy readers that support
-  schema 2 before publishing it; older readers fail closed on the new version.
+  schema 2 (and, for the source catalog, schema 3) before publishing it; older
+  readers fail closed on the new version.
   The seal assumes the existing single authorized writer and immutable retained
   storage boundary; it is not protection against an administrator rewriting both
   content and its certificate. It grants no rollback, access or deletion policy.
   Sidecar persistence uses atomic replacement for process-crash recovery; this
   is not qualification of power-loss or storage-device durability.
+- **Source catalog (issue #827, `ingest/catalog.py`):** build schema 3 adds one
+  catalog entry per published source revision to the build's control
+  collection, so listings (#828) read a sealed per-build index instead of
+  scanning chunks. After the coverage, placement and staging checks pass, the
+  writer reads the completion markers bound to the staging physical (inherited
+  ancestor markers are not sources of this build) and one payload-only pass
+  over the staging data (`source_rev`, `doc_id`, `sha256`, `title`, `product`,
+  `version`, `page_start`, `page_end`, `page_label`; never text, headings or
+  context). Each entry records the revision key and sha256, `doc_id`, `title`,
+  `product`, `version`, `chunk_count` (equal to the marker's
+  `expected_chunks`), `pages` (first and last physical page, 0-based
+  inclusive, as stored), `page_labels` (the printed label of each end, or
+  null when no chunk locates it unambiguously) and `indexed_pages` (pages
+  that carry indexed text, so gaps such as skipped front matter stay
+  visible). It is the indexed extent, not the PDF's page count. Publication
+  refuses, alias untouched, when the stored revisions and the bound markers
+  differ, a count or identity disagrees, a page span is invalid, or the
+  entries do not read back. Entries are written before the receipt, so the
+  content seal covers them; the receipt binds `source_catalog`
+  (`schema`, `count`, `sha256` over the sorted canonical entries), and cutover,
+  sealed retry and steady re-certification check the stored entries against
+  it. Entries nest their fields under `entry` and carry no top-level
+  `doc_id`: control readers treat a top-level `doc_id` as a completion marker.
+  The staging clone's inherited entries are replaced, like its receipt. No
+  chunk payload or rule module changes, so the extraction rules version and
+  stored vectors are unchanged. Schema-1 and schema-2 builds stay servable
+  without a catalog and nothing backfills one; an unfinished sealed schema-2
+  candidate is refused as old-format, like an unsealed one.
 - **Fingerprint-format upgrade (one-time, fail-closed):** the pre-#391
   fingerprint omitted the operator revision and other re-embed-required
   fields, so it cannot be trusted for skip eligibility. Existing

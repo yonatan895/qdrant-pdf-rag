@@ -1467,6 +1467,20 @@ def test_post_cutover_missing_control_preserves_retry_on_real_server(
             _write_source(corpus, name, text)
         assert run() == 0
         old = target()
+        # Source catalog (#827) through the real client: one sealed entry per
+        # one-page source, bound by the receipt, chunk counts from the store.
+        from mainframe_rag.ingest.catalog import read_source_catalog
+        from mainframe_rag.ingest.publish import verify_build_catalog
+
+        catalog = {e["doc_id"]: e for e in read_source_catalog(client, old + "__completions")}
+        assert set(catalog) == set(TEXTS)
+        for name, entry in catalog.items():
+            assert (entry["pages"], entry["page_labels"], entry["indexed_pages"]) == (
+                {"first": 0, "last": 0}, {"first": None, "last": None}, 1)
+            stored = client.count(old, count_filter=models.Filter(must=[models.FieldCondition(
+                key="doc_id", match=models.MatchValue(value=name))]), exact=True).count
+            assert entry["chunk_count"] == stored >= 1
+        assert verify_build_catalog(client, old + "__completions") is True
         retained = (_records(client, old), _records(client, old + "__completions"))
         (corpus / "beta.pdf").unlink()
         original_swap = run_ingest.swap_alias_to
