@@ -184,7 +184,8 @@ decision has since been measured OFF on real-corpus record-replay pools
 Runs real `retrieve_search(limit=8)` — the 8 gives recall@5 headroom —
 over a live collection and scores doc-level against the golden entries.
 Retrieval runs with `comparative_split_enabled=True` by default, activating
-multi-path retrieval for comparative queries with `max_split_hits` fusion,
+multi-path retrieval for comparative queries with the per-side document merge
+(`interleave_split_hits`, `retrieval.md` §3b),
 while `diagnostic_dualpath_enabled` remains default-off.
 
 - **Relevance:** doc id in `expected_doc_ids`, plus the heading substring

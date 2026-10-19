@@ -37,10 +37,13 @@ Stage order:
    it). Every leg shares the ORIGINAL filter: splitting changes
    ranking text only, never the constraint allowlist.
 7. `rrf_fuse` merges the legs per path (§4); paths merge when split —
-   comparative peers by best evidence (`max_split_hits`: each doc's maximum
-   `1/(k+rank+1)` across paths, so shared-context noise ranking mid in both
-   legs cannot outscore an entity-focused rank-1 the way an RRF sum lets it;
-   ties keep leg order), diagnostic by rank sum 2:1 symptom-first
+   comparative peers by distinct document per side (`interleave_split_hits`,
+   issue #825: the sides take turns placing their next document not yet
+   shown, each by its best chunk, then the remaining chunks follow in
+   best-evidence `max_split_hits` order — each doc's maximum `1/(k+rank+1)`
+   across paths, so shared-context noise ranking mid in both legs cannot
+   outscore an entity-focused rank-1 the way an RRF sum lets it; ties keep
+   leg order), diagnostic by rank sum 2:1 symptom-first
    (`merge_split_hits`); `rerank_candidates` optionally rescores the merged pool
    against the original question (§6); `diversify_hits` enforces coverage
    caps (§8). The split lands on the trace as `rag.split_paths` (1–2) and
@@ -147,7 +150,18 @@ MRR 0.655→0.643, overall r@5 0.873→0.857, overall MRR 0.700→0.697
   (`A/B`) deliberately never split (ambiguous joint-"both" vs "versus").
   Sub-queries are built by removal (original minus marker minus the other
   entity), so shared context is verbatim; first marker only, cap 2 paths.
-  Paths merge by best evidence (`max_split_hits`).
+  Paths merge by distinct document per side (`interleave_split_hits`,
+  issue #825). Merging chunks by best evidence alone placed a side's
+  second-best manual near rank 2r, behind extra chunks of manuals already
+  shown, and the caps (§8) then filled the 8 slots without it. Top-1 is
+  unchanged by construction (both orders start with the first side's
+  rank-1 chunk). **Offline replay verdict (2026-10-19, dev only, pools
+  captured on `colab_manuals_qwen3_8b_4096_c47352b2`, rerank off, replay
+  reproducing the live eval row for row):** dev r@5 0.912→0.921, MRR
+  0.763→0.766, r@1 unchanged; comparative class r@5 0.833→0.917, MRR
+  0.514→0.542 (CMP-06 r@5 0→1; CMP-10/11/17 rank 4→3); no row worse;
+  section probes unchanged. The frozen holdout's comparative rows were not
+  used and are measured live once in the next G4 session.
 - Diagnostic (identifier query + failure/recovery signal words, excluding
   pure `what does X mean` factoids): symptom leg (original text, identifier
   weights) + cause leg (identifiers stripped, NL weights), merged 2:1
