@@ -595,3 +595,67 @@ def test_revision_locks_serialize_same_revision_only():
     assert not t.is_alive()
     assert locks.get(REV_A).acquire(blocking=False) is True
     locks.get(REV_A).release()
+
+
+def _planned_and_published_revs(monkeypatch, root: Path, pdf: Path, progress: Path):
+    """Issue #839: the source revision the build path stores for `pdf`
+    (planned task -> worker parse, as `_parse_one` calls it) and whether
+    publication recognizes that revision when its retirement is requested
+    while the file is still walked."""
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.ibm_pdf import sha256_file
+    from mainframe_rag.ingest.inventory import InventoryRecord, append_record
+
+    settings = _settings()
+    rules_v = extraction_rules_version()
+    plan = run_ingest._plan(
+        root, progress, settings, client=None, prewalked=None, limit=None, dry_run=True,
+        rules_v=rules_v, src_labels="||", force_reingest=False, resume_checkpoints=False,
+        vendor=None, product=None, version=None, cache_path=None,
+    )
+    [task] = plan.tasks
+    parsed = run_ingest.parse_pdf(
+        Path(task.path), vendor=task.vendor, product=task.product, version=task.version,
+        corpus_root=Path(task.corpus_root), sha256=task.sha256,
+    )
+    built = source_rev_key(parsed.vendor, parsed.product, parsed.version, task.sha256)
+    append_record(progress, InventoryRecord(
+        path=task.path, sha256=task.sha256, doc_id=parsed.doc_id, status="upserted",
+        source_rev=built,
+    ))
+
+    def missed(*args, **kwargs):
+        raise AssertionError("publication did not recognize the walked file's revision")
+
+    monkeypatch.setattr(run_ingest, "resolve_publish_staging", missed)
+    reader = SimpleNamespace(
+        get_aliases=lambda: SimpleNamespace(aliases=[]),
+        collection_exists=lambda name: False,
+    )
+    with pytest.raises(RuntimeError, match="still present in the walked corpus"):
+        run_ingest._resolve_publication(
+            reader, root, progress, settings, vendor=None, product=None, version=None,
+            force_reingest=False, prewalked=[(str(pdf), sha256_file(pdf))],
+            retire_docs=(f"{parsed.doc_id}@{built}",), rules_v=rules_v,
+        )
+    return built
+
+
+def test_vendor_is_resolved_below_the_corpus_root_on_both_ingest_paths(monkeypatch, tmp_path, plain_pdf):
+    """Issue #839: one file under the same corpus-relative path gets one
+    source revision whatever the mount is called, and publication computes
+    the revision the build path stored. Before the fix the build path
+    matched vendor markers against the absolute path ("precisely" in the
+    mount gave Precisely) while publication took the layout's IBM, so a
+    retirement of the walked revision went unnoticed."""
+    import shutil
+
+    revs = {}
+    for mount in ("precisely", "plain"):
+        root = tmp_path / mount
+        pdf = root / "IBM" / "zOS" / "2.5" / "guide.pdf"
+        pdf.parent.mkdir(parents=True)
+        shutil.copy(plain_pdf, pdf)
+        revs[mount] = _planned_and_published_revs(monkeypatch, root, pdf, tmp_path / f"{mount}.jsonl")
+    sha = revs["plain"].rsplit("|", 1)[1]
+    assert revs["precisely"] == revs["plain"] == source_rev_key("IBM", "zOS", "2.5", sha)

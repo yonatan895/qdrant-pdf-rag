@@ -133,7 +133,7 @@ from mainframe_rag.ingest.representation import (
     require_attested_revision,
 )
 from mainframe_rag.ingest.rules_version import extraction_rules_version
-from mainframe_rag.ingest.walk import detect_vendor, walk_pdfs
+from mainframe_rag.ingest.walk import walk_pdfs
 from mainframe_rag.logs import configure_logging
 from mainframe_rag.ports import QdrantPoints, QdrantReader, SparseVector
 from mainframe_rag.tracing import setup_tracing, shutdown_tracing, start_as_current_span, start_span
@@ -876,10 +876,12 @@ def _plan(
         # the --dry-run contract (parse + chunk only, no embeddings).
         # Cache path travels with the task because spawn workers share no
         # memory with the parent (None when contextual ingest is off).
+        # The vendor is the CLI value or None: parse_pdf resolves it below
+        # the corpus root, as publication does (issue #839).
         tasks.append(
             ParseTask(
                 path_str,
-                vendor or detect_vendor(Path(path_str)),
+                vendor,
                 product,
                 version,
                 str(src),
