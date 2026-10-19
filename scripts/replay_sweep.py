@@ -70,6 +70,10 @@ class SweepConfig:
     max_per_doc: int = 3
     limit: int = 8
     prefetch_limit: int | None = None  # None -> production depth for the path
+    # Fusion overrides (issue #845); None -> the Settings value.
+    rrf_k: int | None = None
+    sparse_weight_nl: float | None = None
+    sparse_weight_identifier: float | None = None
 
 
 class _RecordedReranker:
@@ -84,6 +88,22 @@ class _RecordedReranker:
 
 class HeadingJoinError(ValueError):
     """Captured chunk ids do not resolve to the same chunks locally."""
+
+
+def _ranking_settings(settings, config: SweepConfig):
+    """Settings with the config's fusion overrides applied, so every
+    production ranking function reads them exactly as it reads live
+    Settings (per-leg weights, rrf_fuse k, the split merges' k)."""
+    update = {
+        key: value
+        for key, value in (
+            ("rrf_k", config.rrf_k),
+            ("rrf_weight_sparse_nl", config.sparse_weight_nl),
+            ("rrf_weight_sparse_identifier", config.sparse_weight_identifier),
+        )
+        if value is not None
+    }
+    return settings.model_copy(update=update) if update else settings
 
 
 def _recorded_depth(record: dict[str, Any]) -> int:
@@ -135,6 +155,7 @@ def replay_record(
     )
     from mainframe_rag.retrieve.rerank import format_rerank_text, rerank_candidates
 
+    settings = _ranking_settings(settings, config)
     meta = record.get("_meta") or {}
     mode = str(meta.get("split_mode") or "single")
     rerank_active = bool(config.rerank) and meta.get("ce_scored") is True
@@ -236,6 +257,10 @@ def summarize(rows: list[dict]) -> dict:
         classes[cls] = {"n": len(sub)}
         for key in ("recall@1", "recall@5", "mrr"):
             classes[cls][key] = mean(sub, key)
+    kinds: dict[str, dict] = {}
+    for kind in sorted({r["kind"] for r in rows if r.get("kind")}):
+        sub = [r for r in rows if r.get("kind") == kind]
+        kinds[kind] = {"n": len(sub), **{key: mean(sub, key) for key in ("recall@1", "recall@5", "mrr")}}
     violations = [v for r in rows for v in r.get("violations", [])]
     return {
         "n": len(rows),
@@ -244,6 +269,7 @@ def summarize(rows: list[dict]) -> dict:
         "mrr": mean(rows, "mrr"),
         "violations": len(violations),
         "classes": classes,
+        "kinds": kinds,
     }
 
 
@@ -272,6 +298,8 @@ def run_config(
         hits = replay_record(record, config, settings, headings)
         row = score_hits(hits, entry, section_level=headings is not None)
         if row is not None:
+            # The captured query kind (identifier / nl), the live eval's split.
+            row["kind"] = str(record.get("query_kind") or "")
             rows.append(row)
     return {
         "label": config.label, "scoring": scoring, "failures": failures, "unmatched": unmatched,
@@ -298,6 +326,27 @@ def candidate_configs(settings) -> list[SweepConfig]:
         configs.append(replace(base, label=f"alpha{alpha:g}", rerank=True, alpha=alpha))
     # The rerank_candidates ceiling: needs pools captured with --depth >= 100.
     configs.append(replace(base, label="rerank100", rerank=True, prefetch_limit=100, fuse_limit=100))
+    return configs
+
+
+RRF_GRID_K = (2, 5, 10, 30, 60)
+RRF_GRID_SPARSE_WEIGHT = (1.0, 2.0, 3.0, 5.0)
+
+
+def rrf_grid_configs(settings) -> list[SweepConfig]:
+    """The #845 grid: rrf_k x sparse weight, swept separately for NL and
+    identifier queries (the other kind keeps its production weight). Dev
+    pools only; adoption goes through a dedicated default-change concern."""
+    base = SweepConfig(
+        label="production",
+        max_per_page=settings.retrieve_max_chunks_per_page,
+        max_per_doc=settings.retrieve_max_chunks_per_doc,
+    )
+    configs = [base]
+    for kind, field in (("nl", "sparse_weight_nl"), ("id", "sparse_weight_identifier")):
+        for k in RRF_GRID_K:
+            for weight in RRF_GRID_SPARSE_WEIGHT:
+                configs.append(replace(base, label=f"k{k}-{kind}{weight:g}", rrf_k=k, **{field: weight}))
     return configs
 
 
@@ -350,6 +399,10 @@ def main(argv: list[str] | None = None) -> int:
         "--headings-from", default=None, metavar="COLLECTION",
         help="join captured ids to this local collection's headings for section-level scoring",
     )
+    parser.add_argument(
+        "--grid", choices=("default", "rrf"), default="default",
+        help="default: the pre-registered axes; rrf: rrf_k x sparse weight per query kind (#845)",
+    )
     args = parser.parse_args(argv)
 
     from mainframe_rag.eval.datasets import (
@@ -394,19 +447,25 @@ def main(argv: list[str] | None = None) -> int:
 
     results = [
         run_config(records, entries_by_query, cfg, settings, headings)
-        for cfg in candidate_configs(settings)
+        for cfg in (rrf_grid_configs(settings) if args.grid == "rrf" else candidate_configs(settings))
     ]
     print(f"scoring: {'section-level (headings joined)' if headings is not None else 'doc-level'}")
-    header = f"{'config':<12} {'n':>4} {'r@1':>6} {'r@5':>6} {'mrr':>6} {'viol':>4} {'fail':>4}"
+    header = (
+        f"{'config':<12} {'n':>4} {'r@1':>6} {'r@5':>6} {'mrr':>6} {'viol':>4} {'fail':>4}"
+        f" {'id r@1':>6} {'id mrr':>6} {'nl r@1':>6} {'nl mrr':>6}"
+    )
     print(header)
     for result in results:
         if "skipped" in result:
             print(f"{result['label']:<12} skipped: {result['skipped']}")
             continue
+        kinds = result["kinds"]
+        ident, nl = kinds.get("identifier", {}), kinds.get("nl", {})
         print(
             f"{result['label']:<12} {result['n']:>4} {result['recall@1']!s:>6} "
             f"{result['recall@5']!s:>6} {result['mrr']!s:>6} {result['violations']:>4} "
-            f"{result['failures']:>4}"
+            f"{result['failures']:>4} {ident.get('recall@1')!s:>6} {ident.get('mrr')!s:>6} "
+            f"{nl.get('recall@1')!s:>6} {nl.get('mrr')!s:>6}"
         )
     if args.json:
         args.json.parent.mkdir(parents=True, exist_ok=True)
