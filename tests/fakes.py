@@ -168,6 +168,9 @@ class EmbedderFake:
     def sparse(self, texts):
         return [([3], [1.0]) for _ in texts]
 
+    def sparse_query(self, queries):
+        return self.sparse(queries)
+
 
 class RerankerFake:
     def __init__(self, score_map: dict[str, float] | None = None) -> None:

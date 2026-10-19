@@ -714,8 +714,9 @@ async def async_search(
     )
 
     with start_as_current_span(tracer, "retrieve.search", attributes=span_attrs) as span:
-        # dense_query is a sync HTTP POST to the embed server and sparse is
-        # CPU-bound FastEmbed/BM25; both are sync by protocol. Offload to a worker
+        # dense_query is a sync HTTP POST to the embed server and sparse_query
+        # is CPU-bound FastEmbed/BM25 (the query encoder, never the document
+        # one: issue #836); both are sync by protocol. Offload to a worker
         # thread — running them on the event loop would block every in-flight
         # request for the duration of the embed call (review S1).
         with start_as_current_span(
@@ -730,7 +731,7 @@ async def async_search(
             leg_vecs: list[tuple[list[float], list[int], list[float]]] = []
             for eq in eff_legs:
                 dense_vec = (await asyncio.to_thread(embedder.dense_query, [eq]))[0]
-                sparse_idx, sparse_val = (await asyncio.to_thread(embedder.sparse, [eq]))[0]
+                sparse_idx, sparse_val = (await asyncio.to_thread(embedder.sparse_query, [eq]))[0]
                 leg_vecs.append((dense_vec, sparse_idx, sparse_val))
             timings["embed_ms"] = int((time.monotonic() - t0) * 1000)
 

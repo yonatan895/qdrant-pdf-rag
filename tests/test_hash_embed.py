@@ -85,6 +85,49 @@ def test_vllm_embedder_dense_query_prepends_prefix():
     assert captured_inputs == ["Instruct: query prefix\nQuery: user search query"]
 
 
+def test_vllm_embedder_encodes_queries_and_documents_with_their_own_bm25_encoder(monkeypatch):
+    """Issue #836: FastEmbed BM25 has a document encoder (term-frequency
+    saturation, length normalization) and a query encoder (each distinct
+    term at weight 1). Ingest keeps the document encoder; a query must never
+    go through it, or a repeated query term is weighted like a document's."""
+    from types import SimpleNamespace
+
+    import numpy as np
+
+    from mainframe_rag.ingest import embed as embed_mod
+
+    calls: list[tuple[str, list[str]]] = []
+
+    class FakeBm25:
+        def embed(self, texts):
+            calls.append(("embed", list(texts)))
+            return [SimpleNamespace(indices=np.array([7, 9]), values=np.array([1.899, 1.67])) for _ in texts]
+
+        def query_embed(self, queries):
+            calls.append(("query_embed", list(queries)))
+            return [SimpleNamespace(indices=np.array([7, 9]), values=np.array([1, 1])) for _ in queries]
+
+    monkeypatch.setattr(embed_mod, "_bm25_model", lambda name, cache_dir: FakeBm25())
+    embedder = embed_mod.VllmEmbedder(Settings(embed_mode="vllm", _env_file=None))
+
+    assert embedder.sparse(["IEFBR14 abend IEFBR14 abend code"]) == [([7, 9], [1.899, 1.67])]
+    queries = embedder.sparse_query(["IEFBR14 abend IEFBR14 abend code"])
+    assert queries == [([7, 9], [1.0, 1.0])]
+    assert all(type(v) is float for _, values in queries for v in values)
+    assert calls == [
+        ("embed", ["IEFBR14 abend IEFBR14 abend code"]),
+        ("query_embed", ["IEFBR14 abend IEFBR14 abend code"]),
+    ]
+    assert embedder.sparse_query([]) == [] and len(calls) == 2
+
+
+def test_hash_sparse_query_matches_sparse_so_hash_baselines_hold():
+    """The hash leg has one sparse encoding for both sides, like dense_query."""
+    embedder = build_embedder(_hash_settings())
+    text = "torque the widget screws; torque specs"
+    assert embedder.sparse_query([text]) == embedder.sparse([text]) == hash_sparse_embed([text])
+
+
 def _header_capturing_embedder(api_key):
     """VllmEmbedder double recording the headers kwarg of its /embeddings POST."""
     from types import SimpleNamespace

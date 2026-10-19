@@ -44,13 +44,17 @@ class ChatMessage(BaseModel):
 class Embedder(Protocol):
     """Dense + sparse text embedding. Two implementations: VllmEmbedder
     (prod) and HashEmbedder (CI/dev only). Callers never branch on
-    embed_mode — dispatch happens once in build_embedder()."""
+    embed_mode — dispatch happens once in build_embedder(). `dense` and
+    `sparse` encode documents; retrieval encodes queries with `dense_query`
+    and `sparse_query` only."""
 
     def dense(self, texts: list[str]) -> list[list[float]]: ...
 
     def dense_query(self, queries: list[str]) -> list[list[float]]: ...
 
     def sparse(self, texts: list[str]) -> list[SparseVector]: ...
+
+    def sparse_query(self, queries: list[str]) -> list[SparseVector]: ...
 
 
 @runtime_checkable

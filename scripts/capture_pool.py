@@ -345,7 +345,7 @@ def capture_query(
     leg_vecs = []
     for eq in eff_legs:
         dense_vec = embedder.dense_query([eq])[0]
-        sparse_idx, sparse_val = embedder.sparse([eq])[0]
+        sparse_idx, sparse_val = embedder.sparse_query([eq])[0]
         leg_vecs.append((dense_vec, sparse_idx, sparse_val))
     prefetched = asyncio.run(_prefetch_leg_points(
         AsyncReaderAdapter(client), collection, leg_vecs, flt, fallback_flt, prefetch_limit
