@@ -6,9 +6,13 @@ import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from mainframe_rag.ingest.catalog import decode_catalog_summary
 from mainframe_rag.ingest.seal import decode_content_seal
 
-BUILD_SCHEMA = 2
+# 2: mandatory content seal; 3: mandatory source catalog summary (issue #827).
+# Older receipts stay readable: their builds serve, they just have no catalog.
+BUILD_SCHEMA = 3
+_SUPPORTED_SCHEMAS = (1, 2, BUILD_SCHEMA)
 
 
 def canonical_build_id(value: object) -> str:
@@ -60,7 +64,7 @@ def decode_build_binding(payload: dict, control: str) -> BuildBinding:
         if "content_seal" in payload:
             raise ValueError("content seal lacks build identity")
         raise UnboundGenerationError("publication record has no build binding: unsupported")
-    if type(payload.get("build_schema")) is not int or payload["build_schema"] not in (1, BUILD_SCHEMA):
+    if type(payload.get("build_schema")) is not int or payload["build_schema"] not in _SUPPORTED_SCHEMAS:
         raise ValueError("unsupported build schema")
     if (
         payload.get("record_type") != "publication-metadata"
@@ -72,10 +76,14 @@ def decode_build_binding(payload: dict, control: str) -> BuildBinding:
             raise ValueError("invalid build control fields")
     if payload["data_collection"] + "__completions" != control:
         raise ValueError("invalid build control pair")
-    if payload["build_schema"] == BUILD_SCHEMA and "content_seal" not in payload:
+    if payload["build_schema"] >= 2 and "content_seal" not in payload:
         raise ValueError("build lacks mandatory content seal")
     if "content_seal" in payload:
         decode_content_seal(payload["content_seal"])
+    if payload["build_schema"] >= 3:
+        decode_catalog_summary(payload.get("source_catalog"))
+    elif "source_catalog" in payload:
+        raise ValueError("source catalog requires build schema 3")
     return BuildBinding(
         canonical_build_id(payload.get("build_id")),
         payload["logical_alias"],
