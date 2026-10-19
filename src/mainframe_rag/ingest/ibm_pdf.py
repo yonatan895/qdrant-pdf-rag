@@ -165,10 +165,13 @@ def parse_pdf(
     try:
         doc_id = extract_doc_id(doc, path) or path.stem
         text_product, text_version = extract_product_version(doc)
-        lv, lp, lver = ("unknown", "unknown", "")
+        lp, lver = ("unknown", "")
         if corpus_root is not None:
-            lv, lp, lver = infer_from_path(path, corpus_root)
-        vendor_f = vendor or (lv if lv != "unknown" else detect_vendor(path))
+            _, lp, lver = infer_from_path(path, corpus_root)
+        # The layout's vendor segment is not used (issue #839): vendor comes
+        # from markers below the root only, the rule the build path has
+        # always stored.
+        vendor_f = vendor or detect_vendor(path, corpus_root)
         product_f = product or (lp if lp != "unknown" else text_product)
         version_f = version or lver or text_version
         return ParsedDoc(

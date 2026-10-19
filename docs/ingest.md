@@ -33,14 +33,21 @@ a sample (a real run is a publication of the whole corpus and refuses `--limit`)
   `red-hat`, `redhat`. Order matters: a path containing both `ca-` and `ibm`
   reports Broadcom. `bmc`/`ca-` can false-positive on unrelated names —
   known limitation, reason unknown.
-- `detect_vendor` lowercases and normalizes `\` → `/`, default `"unknown"`.
+- `detect_vendor(path, root)` searches only the path **below the corpus
+  root**, prefixed with `/` so `/ca/` matches a top-level directory; with no
+  root, only the file name. It lowercases, normalizes `\` → `/`, and defaults
+  to `"unknown"` (also for a path outside the root). The mount's own name
+  never decides a vendor, so moving the corpus keeps every source revision
+  (issue #839).
 - `infer_from_path` requires the layout `root/vendor/product/version/*.pdf`
   (at least 4 path parts after resolving against the root); anything else —
   including unresolvable paths — yields `("unknown", "unknown", "")`. Note
   the empty-string (not `None`) version.
 
 Contract tests: `tests/test_generic_pdf.py` (`detect_vendor`,
-`infer_from_path`), `tests/test_parser_ibm_shape.py` (walker filtering).
+`infer_from_path`), `tests/test_parser_ibm_shape.py` (walker filtering),
+`tests/test_ingest_revisions.py` (one source revision on both ingest paths
+and under any mount name).
 
 ## 2. Parsing and metadata (`ibm_pdf.py`)
 
@@ -65,10 +72,15 @@ PyMuPDF is the only parser. `parse_pdf` returns a frozen, slots `ParsedDoc`.
   a generic version returns `(None, "X.Y")`; title prefers the PDF metadata
   title, then the first non-identifier line of the first 10 lines, then
   `doc_id`, then `"Untitled"`.
-- Final precedence for vendor/product/version/title:
+- Final precedence for product/version/title:
   CLI > path layout (when not `unknown`/`""`) > text detection >
-  `unknown`/`None`; empty version becomes `None`, empty vendor becomes
-  `"unknown"`; title is sanitized; the TOC comes from `get_toc(simple=True)`;
+  `unknown`/`None`. Vendor: CLI > `detect_vendor` below the corpus root >
+  `"unknown"`; the layout's vendor segment is not used. `parse_pdf` is the
+  one place that resolves it, for the build workers and for publication's
+  retirement check alike (issue #839: the build path used to match markers
+  against the absolute path while publication took the layout's vendor, so
+  the two could compute different source revisions). Empty version becomes
+  `None`, empty vendor becomes `"unknown"`; title is sanitized; the TOC comes from `get_toc(simple=True)`;
   the document is closed in a `finally`.
 - `sanitize_page_text` drops CSI sequences, C0 controls, bidi marks, and
   zero-width chars **in that order**, preserving `\t` and `\n`; all other

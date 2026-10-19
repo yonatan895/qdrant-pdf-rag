@@ -32,8 +32,20 @@ def infer_from_path(pdf: Path, root: Path) -> tuple[str, str, str]:
     return "unknown", "unknown", ""
 
 
-def detect_vendor(path: Path) -> str:
-    p = str(path).lower().replace("\\", "/")
+def detect_vendor(path: Path, root: Path | None) -> str:
+    """Vendor from VENDOR_MARKERS, searched only in the path below the corpus
+    root (issue #839): the mount's own name never decides a file's vendor, so
+    moving the corpus keeps every source revision. With no root, only the
+    file name is searched; a path outside the root is unknown."""
+    if root is None:
+        rel = path.name
+    else:
+        try:
+            rel = path.resolve().relative_to(root.resolve()).as_posix()
+        except ValueError:
+            return "unknown"
+    # The leading "/" lets the "/ca/" marker match a top-level directory.
+    p = "/" + rel.lower().replace("\\", "/")
     for marker, vendor in VENDOR_MARKERS.items():
         if marker in p:
             return vendor
