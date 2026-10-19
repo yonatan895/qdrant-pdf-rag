@@ -40,8 +40,10 @@ a sample (a real run is a publication of the whole corpus and refuses `--limit`)
   never decides a vendor, so moving the corpus keeps every source revision
   (issue #839).
 - `infer_from_path` requires the layout `root/vendor/product/version/*.pdf`
-  (at least 4 path parts after resolving against the root); anything else —
-  including unresolvable paths — yields `("unknown", "unknown", "")`. Note
+  (exactly 4 path parts after resolving against the root); anything else —
+  deeper trees, shallower paths and unresolvable paths — yields
+  `("unknown", "unknown", "")`. Deeper trees used to count too, which read
+  an IBM kit's folder names as product and version (issue #849). Note
   the empty-string (not `None`) version.
 
 Contract tests: `tests/test_generic_pdf.py` (`detect_vendor`,
