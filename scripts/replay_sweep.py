@@ -129,7 +129,7 @@ def replay_record(
         SPLIT_MERGE_DIAGNOSTIC,
         _type_boosts,
         diversify_hits,
-        max_split_hits,
+        interleave_split_hits,
         merge_split_hits,
         rrf_fuse,
     )
@@ -166,7 +166,7 @@ def replay_record(
     if len(fused_lists) == 1:
         fused = fused_lists[0]
     elif mode == "comparative":
-        fused = max_split_hits(fused_lists, settings.rrf_k, fuse_limit)
+        fused = interleave_split_hits(fused_lists, settings.rrf_k, fuse_limit)
     else:
         fused = merge_split_hits(fused_lists, SPLIT_MERGE_DIAGNOSTIC, settings.rrf_k, fuse_limit)
 

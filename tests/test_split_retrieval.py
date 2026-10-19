@@ -215,6 +215,96 @@ def test_max_fusion_prefers_focused_rank1_over_shared_noise():
     assert len(max_split_hits([[_hit("a1", "A", 0.9)], [_hit("b1", "B", 0.9), _hit("b2", "B", 0.8)]], k=2, limit=2)) == 2
 
 
+def _chunks(doc_id: str, n: int) -> list[Any]:
+    """n chunks of one manual on distinct physical pages (the page cap alone
+    must not be what limits a manual's chunks)."""
+    return [
+        _hit(f"{doc_id.lower()}{i}", doc_id, 0.9 - i / 100).model_copy(update={"page_start": i, "page_end": i})
+        for i in range(1, n + 1)
+    ]
+
+
+def test_comparative_merge_gives_each_side_its_next_distinct_document():
+    """#825 (dev CMP-06 shape): a side's second document sits past rank 8 by
+    chunks because both sides lead with many chunks of one manual. Chunk-level
+    max merging interleaves those chunks and the caps fill the 8 slots without
+    it; the document merge alternates the sides' distinct documents first."""
+    from mainframe_rag.retrieve.query import diversify_hits, interleave_split_hits
+
+    side1 = _chunks("A", 4) + _chunks("G", 4) + _chunks("X", 1)
+    side2 = _chunks("B", 8) + _chunks("C", 1)
+    # Control: today's chunk-level merge loses C from the final 8.
+    before = diversify_hits(max_split_hits([side1, side2], k=2, limit=24), limit=8)
+    assert "C" not in {h.doc_id for h in before}
+
+    merged = interleave_split_hits([side1, side2], k=2, limit=24)
+    assert [h.doc_id for h in merged[:5]] == ["A", "B", "G", "C", "X"]
+    final = diversify_hits(merged, limit=8)
+    assert {"A", "B", "G", "C", "X"} <= {h.doc_id for h in final}
+    # Top-1 unchanged: both merges start with the first side's rank-1 chunk.
+    assert merged[0].chunk_id == max_split_hits([side1, side2], k=2, limit=1)[0].chunk_id == "a1"
+    # One monotone scale for the diversify backfill and rerank fusion.
+    assert [h.score for h in merged[:3]] == [1.0 / 3, 1.0 / 4, 1.0 / 5]
+    # Every chunk survives once (head documents, then best-evidence order).
+    assert sorted(h.chunk_id for h in merged) == sorted(h.chunk_id for h in side1 + side2)
+    assert len(interleave_split_hits([side1, side2], k=2, limit=6)) == 6
+
+
+def test_comparative_merge_skips_documents_already_shown():
+    """A manual both sides lead with is shown once; the second side's turn
+    goes to its next document, and the duplicate chunk follows later."""
+    from mainframe_rag.retrieve.query import interleave_split_hits
+
+    merged = interleave_split_hits(
+        [[_hit("s1", "S", 0.9), _hit("a1", "A", 0.8)], [_hit("s2", "S", 0.9), _hit("b1", "B", 0.8)]],
+        k=2, limit=8,
+    )
+    assert [h.chunk_id for h in merged] == ["s1", "b1", "a1", "s2"]
+    # Shared chunk ids dedupe; an empty side returns the other side.
+    merged = interleave_split_hits([[_hit("x", "A", 0.9)], [_hit("x", "A", 0.9), _hit("z", "C", 0.8)]], k=2, limit=8)
+    assert [h.chunk_id for h in merged] == ["x", "z"]
+    assert [h.chunk_id for h in interleave_split_hits([[], [_hit("b1", "B", 0.9)]], k=2, limit=2)] == ["b1"]
+
+
+def test_comparative_merge_keeps_shared_noise_below_focused_documents():
+    """The CMP-14 pin holds for the document merge: a mid-rank document both
+    sides share stays behind each side's focused documents."""
+    from mainframe_rag.retrieve.query import interleave_split_hits
+
+    side1 = [_hit("focusA", "A", 0.9), _hit("x", "X", 0.5), _hit("noise", "N", 0.4)]
+    side2 = [_hit("focusB", "B", 0.9), _hit("y", "Y", 0.5), _hit("noise", "N", 0.4)]
+    merged = interleave_split_hits([side1, side2], k=2, limit=8)
+    assert [h.chunk_id for h in merged] == ["focusA", "focusB", "x", "y", "noise"]
+
+
+class ManyChunkSplitQdrant(SplitAwareFakeQdrant):
+    """Each comparative leg leads with many chunks of one manual, its second
+    manual ranked behind them (the dev CMP-06 shape), on both dense and BM25."""
+
+    def _docs_for(self, key: float) -> list[models.ScoredPoint]:
+        def chunks(doc_id: str, n: int, prefix: str) -> list[models.ScoredPoint]:
+            out = []
+            for i in range(1, n + 1):
+                p = _doc_point(f"{prefix}{i}", doc_id, 0.9 - i / 100)
+                payload = {**(p.payload or {}), "page_start": i, "page_end": i, "page_label": str(i)}
+                out.append(p.model_copy(update={"payload": payload}))
+            return out
+
+        if key == 1.0:
+            return chunks("JES2-GUIDE", 4, "a") + chunks("JES2-CMDS", 4, "g")
+        if key == 2.0:
+            return chunks("JES3-DIAG", 8, "b") + chunks("JES3-REF", 1, "c")
+        return super()._docs_for(key)
+
+
+def test_comparative_search_shows_each_sides_second_manual():
+    """Wiring: the comparative path of `search` merges by document, so the
+    JES3 side's second manual reaches the final hits."""
+    hits = search(ManyChunkSplitQdrant(), SplitAwareEmbedder(), "coll", COMPARATIVE_QUERY, settings=_split_settings())[0]
+    assert {"JES2-GUIDE", "JES2-CMDS", "JES3-DIAG", "JES3-REF"} <= {h.doc_id for h in hits}
+    assert hits[0].doc_id == "JES2-GUIDE"
+
+
 def test_merge_diagnostic_weights_favor_symptom_leg():
     # Same ranks both legs: symptom leg (weight 2) outranks cause (weight 1).
     merged = merge_split_hits(

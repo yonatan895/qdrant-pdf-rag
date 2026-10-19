@@ -52,8 +52,9 @@ RRF_WEIGHTS_IDENTIFIER = (1.0, 3.0)  # (dense, bm25): identifiers favor exact te
 RRF_WEIGHTS_NL = (1.0, 1.0)
 
 # Second-level fusion across split retrieval paths (issue #214): comparative
-# peers merge by best evidence (max_split_hits); diagnostic legs merge by
-# rank sum favoring the symptom anchor (anchor trust, issue #117).
+# peers merge by distinct document per side (interleave_split_hits, #825);
+# diagnostic legs merge by rank sum favoring the symptom anchor (anchor
+# trust, issue #117).
 SPLIT_MERGE_DIAGNOSTIC: tuple[float, float] = (2.0, 1.0)
 
 
@@ -275,6 +276,57 @@ def max_split_hits(
                 scores[key] = score
     ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)[:limit]
     return [by_id[key].model_copy(update={"score": score}) for key, score in ranked]
+
+
+def interleave_split_hits(
+    lists: list[list[SearchHit]],
+    k: int = RRF_K,
+    limit: int = 8,
+) -> list[SearchHit]:
+    """Comparative merge by distinct document per side (issue #825).
+
+    Each side's chunks collapse to its documents in rank order (a document's
+    best chunk); the sides then take turns, each placing its next document
+    not yet shown. The remaining chunks follow in best-evidence order
+    (`max_split_hits`). Chunk-level max merging put a side's second-best
+    document near rank 2r, behind extra chunks of documents already shown
+    (dev CMP-06: rank 22, outside the top 8). Top-1 is unchanged: both orders
+    start with the first side's rank-1 chunk. Scores become 1/(k+position+1)
+    so downstream legs (diversify backfill, rerank fusion) see one scale.
+    """
+    per_side: list[list[SearchHit]] = []
+    for hits in lists:
+        docs: set[str] = set()
+        best: list[SearchHit] = []
+        for hit in hits:
+            if hit.doc_id not in docs:
+                docs.add(hit.doc_id)
+                best.append(hit)
+        per_side.append(best)
+    head: list[SearchHit] = []
+    shown: set[str] = set()
+    cursors = [0] * len(per_side)
+    placed = True
+    while placed:
+        placed = False
+        for side, best in enumerate(per_side):
+            while cursors[side] < len(best) and best[cursors[side]].doc_id in shown:
+                cursors[side] += 1
+            if cursors[side] < len(best):
+                hit = best[cursors[side]]
+                cursors[side] += 1
+                shown.add(hit.doc_id)
+                head.append(hit)
+                placed = True
+    head_ids = {hit.chunk_id for hit in head}
+    tail = [
+        hit for hit in max_split_hits(lists, k, sum(len(hits) for hits in lists))
+        if hit.chunk_id not in head_ids
+    ]
+    return [
+        hit.model_copy(update={"score": 1.0 / (k + position + 1)})
+        for position, hit in enumerate((head + tail)[:limit])
+    ]
 
 
 def _page_key(h: SearchHit) -> tuple[str, str]:
@@ -778,7 +830,7 @@ async def async_search(
             if split_mode == "single":
                 fused = fused_lists[0]
             elif split_mode == "comparative":
-                fused = max_split_hits(fused_lists, k, rrf_limit)
+                fused = interleave_split_hits(fused_lists, k, rrf_limit)
             else:
                 fused = merge_split_hits(fused_lists, SPLIT_MERGE_DIAGNOSTIC, k, rrf_limit)
             t_rr = time.monotonic()
@@ -811,7 +863,7 @@ async def async_search(
             if split_mode == "single":
                 fused = fused_lists[0]
             elif split_mode == "comparative":
-                fused = max_split_hits(fused_lists, k, fuse_limit)
+                fused = interleave_split_hits(fused_lists, k, fuse_limit)
             else:
                 fused = merge_split_hits(fused_lists, SPLIT_MERGE_DIAGNOSTIC, k, fuse_limit)
 
