@@ -67,6 +67,8 @@ from mainframe_rag.agent.chat_turn import (
 )
 from mainframe_rag.agent.evidence import (
     PUBLIC_FAILURES,
+    SOURCES_LIMIT_MAX,
+    SOURCES_PUBLIC_FAILURES,
     EvidenceAccess,
     EvidenceFailure,
     EvidenceService,
@@ -1035,6 +1037,43 @@ class EvidenceResponse(BaseModel):
     location: EvidenceLocation
 
 
+class SourcePages(BaseModel):
+    """One-based physical pages, inclusive (the exact-read convention)."""
+
+    first: int
+    last: int
+
+
+class SourceLabels(BaseModel):
+    """Printed labels at the span edges; null where no honest label exists."""
+
+    first: str | None
+    last: str | None
+
+
+class SourceItem(BaseModel):
+    source_revision: str
+    source_sha256: str
+    doc_id: str
+    title: str
+    product: str | None
+    version: str | None
+    chunk_count: int
+    physical_pages: SourcePages
+    page_labels: SourceLabels
+    indexed_pages: int
+
+
+class SourcesResponse(BaseModel):
+    """One page of the served build's sources (#828). `next_cursor: null` is
+    the only end signal; there is no total and no count of omitted sources."""
+
+    request_id: str
+    build_id: str
+    sources: list[SourceItem]
+    next_cursor: str | None
+
+
 class AnswerRequest(BaseModel):
     query: str = Field(min_length=1)
     product: str | None = None
@@ -1604,6 +1643,64 @@ async def _evidence_response(owner, reference, max_bytes, product, version):
             physical_page_end=evidence.physical_page_end,
             printed_label=evidence.printed_label,
         ),
+    )
+
+@app.get("/v1/sources", response_model=SourcesResponse)
+async def v1_sources(
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=SOURCES_LIMIT_MAX),
+    cursor: str | None = Query(default=None, max_length=64),
+    product: str | None = None,
+    version: str | None = None,
+) -> SourcesResponse:
+    """Sources of the served build from its publish-time catalog: metadata
+    only, no model, embed, rerank or search call; read-only storage access
+    (docs/evidence-contract.md, Sources)."""
+    request_id = request.state.request_id
+    started = time.monotonic()
+    root_span = start_span(
+        tracer,
+        "v1.sources",
+        context=parent_context(request.headers),
+        kind=SpanKind.SERVER,
+        attributes={"http.request_id": request_id},
+    )
+    with _request_span(request, root_span, "sources", started) as owner:
+        await _admit(owner)
+        return await _within_deadline(
+            owner, _sources_response(owner, limit, cursor, product, version)
+        )
+
+
+async def _sources_response(owner, limit, cursor, product, version):
+    request = owner.request
+    request_id, started = request.state.request_id, owner.started
+    # The first page lists the build the serving gate validated; a cursor
+    # page never consults the serving alias (the cursor pins its build).
+    served = None
+    if cursor is None:
+        generation = await serving_generation()
+        if generation.binding is None:  # servable generations are bound; never guess
+            raise AppError(503, "representation_unavailable", _REPRESENTATION_UNAVAILABLE)
+        served = generation.binding.build_id
+    try:
+        page = await evidence_service().list_sources(
+            TrustedCaller(), limit=limit, cursor=cursor, served_build=served,
+            product=product, version=version,
+        )
+    except EvidenceFailure as exc:
+        status, code, message = SOURCES_PUBLIC_FAILURES[exc.kind]
+        log.warning(json_log(request_id, "sources", outcome=code, reason=exc.reason))
+        _record_endpoint(request, "sources", code, started)
+        raise AppError(status, code, message) from exc
+    log.info(json_log(request_id, "sources", outcome="ok", sources=len(page.sources),
+                      more=page.next_cursor is not None))
+    _record_endpoint(request, "sources", "ok", started)
+    return SourcesResponse(
+        request_id=request_id,
+        build_id=page.build_id,
+        sources=[SourceItem.model_validate(entry.wire()) for entry in page.sources],
+        next_cursor=page.next_cursor,
     )
 
 # Orchestration shared by /v1/answer and /v1/chat (issue #583). Each helper

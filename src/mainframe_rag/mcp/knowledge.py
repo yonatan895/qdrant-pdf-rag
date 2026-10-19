@@ -1,11 +1,12 @@
 """Read-only knowledge MCP adapter over the agent's exact-evidence HTTP service
 (issue #405 MCP1).
 
-Thin on purpose. It maps two tools onto the agent's existing routes and nothing
-else:
+Thin on purpose. It maps three tools onto the agent's existing routes and
+nothing else:
 
 - `knowledge_search`  -> POST /v1/search   (no LLM; hits carry `reference`)
 - `evidence_read`     -> GET  /v1/evidence/{reference}
+- `sources_list`      -> GET  /v1/sources  (catalog metadata, cursor-paginated)
 
 There is no Qdrant client, no embedder, no entitlement or reference logic, no
 database or query surface and no write capability here: retrieval, reference
@@ -66,6 +67,10 @@ class KnowledgeBackend(Protocol):
         self, reference: str, max_bytes: int | None, product: str | None, version: str | None
     ) -> tuple[int, dict]: ...
 
+    async def list_sources(
+        self, limit: int, cursor: str | None, product: str | None, version: str | None
+    ) -> tuple[int, dict]: ...
+
 
 class HttpKnowledgeBackend:
     """The shared service over its additive HTTP surface. The client is
@@ -78,13 +83,15 @@ class HttpKnowledgeBackend:
             base_url=base_url, timeout=timeout_s
         )
 
-    async def _json(self, response: Any) -> tuple[int, dict]:
+    async def _json(
+        self, response: Any, failure: str = "evidence read failed"
+    ) -> tuple[int, dict]:
         if len(response.content) > MAX_RESPONSE_BYTES:
-            return 502, {"code": "upstream_error", "message": "evidence read failed"}
+            return 502, {"code": "upstream_error", "message": failure}
         try:
             body = response.json()
         except ValueError:
-            return 502, {"code": "upstream_error", "message": "evidence read failed"}
+            return 502, {"code": "upstream_error", "message": failure}
         return response.status_code, body if isinstance(body, dict) else {}
 
     async def search(self, query, product, version, limit):
@@ -101,6 +108,14 @@ class HttpKnowledgeBackend:
                   if v is not None}
         url = "/v1/evidence/" + quote(reference, safe="")
         return await self._json(await self._client.get(url, params=params))
+
+    async def list_sources(self, limit, cursor, product, version):
+        params = {k: v for k, v in
+                  (("limit", limit), ("cursor", cursor), ("product", product), ("version", version))
+                  if v is not None}
+        return await self._json(
+            await self._client.get("/v1/sources", params=params), "sources listing failed"
+        )
 
     async def aclose(self) -> None:
         if self._owns_client and not self._closed:
@@ -139,6 +154,29 @@ TOOL_SCHEMAS: dict[str, dict] = {
             "required": ["reference"],
         },
     },
+    "sources_list": {
+        "description": "List the sources (published manual revisions) of the served build: "
+        "revision, document id, title, product, version, chunk count and page range. Metadata "
+        "only. Follow `next_cursor` until it is null; a short or empty page with a cursor is "
+        "not the end. There is no total.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "minimum": 1, "maximum": 200},
+                "cursor": {"type": "string"},
+                "product": {"type": "string"},
+                "version": {"type": "string"},
+            },
+        },
+    },
+}
+
+# The adapter's own fixed message when an upstream refusal is not the
+# service's {code, message} envelope (one per tool, never upstream text).
+_FALLBACK_MESSAGES = {
+    "knowledge_search": "evidence read failed",
+    "evidence_read": "evidence read failed",
+    "sources_list": "sources listing failed",
 }
 
 
@@ -166,14 +204,14 @@ def _int(args: dict, name: str, lo: int, hi: int, default: int | None) -> int | 
     return value
 
 
-def _result(status: int, body: dict) -> dict:
+def _result(status: int, body: dict, fallback: str = "evidence read failed") -> dict:
     """One MCP result. Success carries the service body verbatim; every refusal
     carries only the service's fixed {code, message} envelope."""
     if 200 <= status < 300:
         return {"content": [{"type": "text", "text": json.dumps(body, ensure_ascii=False)}]}
     code, message = body.get("code"), body.get("message")
     if not isinstance(code, str) or not isinstance(message, str):
-        code, message = "upstream_error", "evidence read failed"
+        code, message = "upstream_error", fallback
     envelope = {"code": code, "message": message, "status": status}
     return {"isError": True, "content": [{"type": "text", "text": json.dumps(envelope)}]}
 
@@ -195,13 +233,20 @@ async def run_tool(name: str, args: dict, backend: KnowledgeBackend) -> dict:
         max_bytes = _int(args, "max_bytes", 1, 1048576, None)
         product, version = _opt_str(args, "product"), _opt_str(args, "version")
         call = backend.read(reference, max_bytes, product, version)
+    elif name == "sources_list":
+        limit = _int(args, "limit", 1, 200, 50)
+        assert limit is not None
+        cursor = _opt_str(args, "cursor")
+        product, version = _opt_str(args, "product"), _opt_str(args, "version")
+        call = backend.list_sources(limit, cursor, product, version)
     else:
         raise KeyError(name)
+    fallback = _FALLBACK_MESSAGES[name]
     try:
         status, body = await call
     except (httpx2.HTTPError, OSError):
-        return _result(502, {})
-    return _result(status, body)
+        return _result(502, {}, fallback)
+    return _result(status, body, fallback)
 
 
 async def handle_request(message: Any, backend: KnowledgeBackend) -> dict | None:
