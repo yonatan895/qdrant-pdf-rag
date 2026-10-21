@@ -159,21 +159,28 @@ def test_crashed_parse_worker_blocks_publication_and_the_next_run_publishes(
     assert "SA22-7010-00" in stored
 
 
-def test_parse_workers_that_keep_dying_abort_the_run_unpublished(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("workers", "recorded"),
+    [
+        (1, 2),  # window 2 -> the floor of 3 crashes in a row
+        (2, 3),  # window 4 -> 4 crashes in a row
+    ],
+)
+def test_parse_workers_that_keep_dying_abort_the_run_unpublished(
+    tmp_path, monkeypatch, workers, recorded
+):
     """#841: when fresh single-worker pools keep dying, the failure is not
-    one bad file: the run stops after a bounded number of rebuilds instead
-    of spawning a pool per document, and nothing is recorded as parsed."""
-    from mainframe_rag.ingest import run_ingest
-
+    bad files: the run stops after max(3, window) crashes in a row instead
+    of spawning a pool per document, and nothing is recorded as parsed. The
+    crash that reaches the bound raises before it is recorded."""
     corpus, _ = _crash_corpus(
         tmp_path, monkeypatch, ["SA22-7000-00", "SA22-7010-00", "SA22-7020-00", "SA22-7030-00"])
     progress = tmp_path / "inventory.jsonl"
     with pytest.raises(RuntimeError, match="parse workers keep dying"):
-        main(["--src", str(corpus), "--progress", str(progress), "--workers", "1", "--dry-run"])
+        main(["--src", str(corpus), "--progress", str(progress), "--workers", str(workers),
+              "--dry-run"])
     records = [json.loads(l) for l in progress.read_text().splitlines() if l.strip()]
-    # The bound-th crash in a row raises before it is recorded, so the run
-    # stops before every document gets its own pool.
-    assert len(records) == run_ingest._MAX_CONSECUTIVE_PARSE_CRASHES - 1 < 4, records
+    assert len(records) == recorded, records
     assert all(r["status"] == "error" for r in records)
 
 
@@ -191,7 +198,7 @@ def test_crashes_separated_by_returned_parses_never_reach_the_bound(tmp_path, mo
         build(corpus / f"{stem}.pdf", doc_id=stem, title=f"Synthetic Reference {n}",
               message_id=f"IEA{n}00I")
     bad = stems[1::2]  # three crashers, each with a good neighbour in its window
-    assert len(bad) == run_ingest._MAX_CONSECUTIVE_PARSE_CRASHES
+    assert len(bad) == run_ingest._MIN_PARSE_CRASH_LIMIT  # the limit at --workers 1
     monkeypatch.setattr(run_ingest, "_parse_one", crashing_parse_one)
     monkeypatch.setenv(CRASH_PARSE_STEMS_ENV, ",".join(bad))
     progress = tmp_path / "inventory.jsonl"

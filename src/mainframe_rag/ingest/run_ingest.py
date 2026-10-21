@@ -158,10 +158,12 @@ _worker_context_cache_path: str | None = None
 
 
 # A document that kills its parse worker on its own is recorded and skipped
-# (#841); this many in a row, with no parse surviving in between, means the
-# workers cannot run at all (OOM at spawn, broken interpreter), so the run
-# stops unpublished instead of spawning a pool per document.
-_MAX_CONSECUTIVE_PARSE_CRASHES = 3
+# (#841). max(this, window) such crashes in a row, with no parse returning in
+# between, mean the workers cannot run at all (OOM at spawn, broken
+# interpreter), so the run stops unpublished instead of spawning a pool per
+# document. One pool crash requeues at most a window of files and any good
+# one resets the streak, so a few bad neighbours never reach the limit.
+_MIN_PARSE_CRASH_LIMIT = 3
 
 
 class ParseTask(NamedTuple):
@@ -1039,6 +1041,7 @@ def _execute(
     # at window so slow upserts never let the parent hold unbounded
     # parsed/embedded docs and vectors in RAM.
     window = max(2, workers * 2)
+    crash_limit = max(_MIN_PARSE_CRASH_LIMIT, window)
     task_iter = iter(tasks)
     locks = _DocLocks()
     # Stage 2: dedicated upsert streams (ingest_upsert_streams, bounded
@@ -1129,7 +1132,7 @@ def _execute(
                             refill_parse()
                             continue
                         consecutive_crashes += 1
-                        if consecutive_crashes >= _MAX_CONSECUTIVE_PARSE_CRASHES:
+                        if consecutive_crashes >= crash_limit:
                             raise RuntimeError(
                                 f"parse workers keep dying: {consecutive_crashes} documents in a "
                                 "row each killed a fresh single-worker pool; stopping the run "

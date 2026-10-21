@@ -971,7 +971,7 @@ thread pool.
   exactly once; the one that breaks the pool alone gets a
   `BrokenProcessPool` error record and is not retried. Like any error, it
   blocks the migration commit and exits non-zero. If
-  `_MAX_CONSECUTIVE_PARSE_CRASHES` (3) documents in a row each kill a fresh
+  `max(3, window)` documents in a row (floor `_MIN_PARSE_CRASH_LIMIT`) each kill a fresh
   pool, with no parse returning in between, the run raises unpublished,
   because the workers cannot run at all.
 - Result accounting: `skipped` + `upserted` both count as files-ok; only
