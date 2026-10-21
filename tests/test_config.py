@@ -357,8 +357,10 @@ PINNED_SETTING_DEFAULTS: dict[str, object] = {
 }
 
 
-def test_every_setting_default_is_pinned():
-    import multiprocessing
+def test_every_setting_default_is_pinned(tmp_path, monkeypatch):
+    import os
+
+    from mainframe_rag import config
 
     fields = Settings.model_fields
     factory_fields = {name for name, f in fields.items() if f.default_factory is not None}
@@ -370,5 +372,71 @@ def test_every_setting_default_is_pinned():
         got = fields[name].get_default()
         assert got == want, f"{name} default changed: {got!r} != pinned {want!r}"
     # Host-dependent by design: pin the factory, not the machine's core count.
-    workers = fields["ingest_workers"].get_default(call_default_factory=True)
-    assert workers == max(1, (multiprocessing.cpu_count() or 2) - 1)
+    # Without a cgroup quota the default stays CPU-1 (#840).
+    monkeypatch.setattr(config, "_CGROUP_ROOT", tmp_path)
+    monkeypatch.setattr(config, "_PROC_CGROUP", tmp_path / "absent")
+    monkeypatch.setattr(os, "process_cpu_count", lambda: 8)
+    assert fields["ingest_workers"].get_default(call_default_factory=True) == 7
+
+
+def _cgroup(root, files):
+    for rel, text in files.items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text(text)
+    return root
+
+
+@pytest.mark.parametrize(
+    ("files", "affinity", "expected"),
+    [
+        ({}, 64, 64),  # no cgroup files: affinity/cpu_count only
+        ({"cpu.max": "max 100000\n"}, 64, 64),  # v2, unlimited
+        ({"cpu.max": "200000 100000\n"}, 64, 2),  # v2, 2 CPUs
+        ({"cpu.max": "150000 100000\n"}, 64, 1),  # fractional quota rounds down
+        ({"cpu.max": "50000 100000\n"}, 64, 1),  # never below one
+        ({"cpu.max": "800000 100000\n"}, 4, 4),  # affinity lower than quota
+        ({"cpu.max": "garbage\n"}, 64, 64),  # unreadable quota is ignored
+        ({"cpu/cpu.cfs_quota_us": "300000\n", "cpu/cpu.cfs_period_us": "100000\n"}, 64, 3),  # v1
+        ({"cpu/cpu.cfs_quota_us": "-1\n", "cpu/cpu.cfs_period_us": "100000\n"}, 64, 64),  # v1, unlimited
+        # Not namespaced: this process's own cgroup, where a parent's quota binds.
+        ({"proc": "0::/pods/job\n", "pods/cpu.max": "300000 100000\n",
+          "pods/job/cpu.max": "max 100000\n", "cpu.max": "max 100000\n"}, 64, 3),
+        ({"proc": "0::/pods/job\n", "pods/job/cpu.max": "200000 100000\n"}, 64, 2),
+    ],
+)
+def test_available_cpus_takes_the_lowest_of_quota_and_affinity(
+    tmp_path, monkeypatch, files, affinity, expected
+):
+    """#840: the cgroup CPU quota (v2 cpu.max or v1 cfs quota/period) and the
+    process affinity both bound the CPUs ingest may use."""
+    import os
+
+    from mainframe_rag.config import available_cpus
+
+    monkeypatch.setattr(os, "process_cpu_count", lambda: affinity)
+    root = _cgroup(tmp_path / "cgroup", {k: v for k, v in files.items() if k != "proc"})
+    proc = tmp_path / "proc-self-cgroup"
+    if "proc" in files:
+        proc.write_text(files["proc"])
+    assert available_cpus(root, proc) == expected
+
+
+def test_two_cpu_quota_bounds_default_workers_and_the_cap(tmp_path, monkeypatch):
+    """#840: on a 64-core node, an ingest Job limited to 2 CPUs defaults to
+    one parse worker and clamps any count to 2 * 2; an explicit
+    INGEST_WORKERS inside that clamp is used as given."""
+    import os
+
+    from mainframe_rag import config
+    from mainframe_rag.ingest.run_ingest import resolve_workers
+
+    monkeypatch.setattr(config, "_CGROUP_ROOT", _cgroup(tmp_path, {"cpu.max": "200000 100000\n"}))
+    monkeypatch.setattr(config, "_PROC_CGROUP", tmp_path / "absent")
+    monkeypatch.setattr(os, "process_cpu_count", lambda: 64)
+    monkeypatch.delenv("INGEST_WORKERS", raising=False)
+    settings = Settings(_env_file=None)
+    assert settings.ingest_workers == 1
+    assert resolve_workers(None, settings) == 1
+    assert resolve_workers(10_000, settings) == 4
+    monkeypatch.setenv("INGEST_WORKERS", "3")
+    assert resolve_workers(None, Settings(_env_file=None)) == 3
