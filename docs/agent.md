@@ -592,11 +592,13 @@ select `complex`. Default is `simple`.
   tokenize RPCs.
 - Planning and verification both charge reserved output, the selected complexity's
   thinking reserve and safety margin, for both single-turn answers and chat.
-  `llm_thinking_reserve_tokens_simple` accounts for low-effort reasoning separately
+  `llm_thinking_reserve_tokens_simple` accounts for simple-path reasoning separately
   from `llm_thinking_reserve_tokens_complex`; setting the simple reserve to `0`
   reproduces its earlier budget. Increasing a reserve leaves less space for
-  excerpts and chat history. It does not cap model thinking or guarantee completion;
-  `finish_reason=length` still produces `generation_incomplete`.
+  excerpts and chat history. Only a server-verified prompt count also sends
+  reserved output plus the path's thinking reserve as `max_tokens`
+  (`answer_core._output_cap`); an estimator-only prompt sends no cap. Neither
+  guarantees completion; `finish_reason=length` still produces `generation_incomplete`.
 - `splunk_context` truncates at 4000 chars with a suffix before packing, so
   caller context can never starve excerpts.
 - Evidence manifest (issue #364): `build_messages` / `build_chat_messages`
@@ -846,7 +848,7 @@ readers:
 | `feedback_enabled` / `feedback_url` / `feedback_api_key` | `false` / unset / unset (enabled requires both) | answer records and console ratings (#780); the key is a Secret reference, never logged |
 | `feedback_queue_size` / `feedback_timeout_s` / `feedback_drain_timeout_s` | 256 / 2.0 / 2.0 | bounded record queue (full = dropped and counted); service call timeout; shutdown drain bound |
 | `feedback_store_path` / `feedback_service_token` / `feedback_retention_days` | `/data/feedback.sqlite3` / unset / 180 | feedback service process only (#780, ADR-0005); the token is a Secret reference, never logged |
-| `rerank_enabled` / `rerank_model` / `rerank_base_url` / `rerank_api_key` / `rerank_endpoint_order` / `rerank_fusion_alpha` / `rerank_candidates` / `rerank_batch_size` / `rerank_timeout_s` | false / `BAAI/bge-reranker-v2-m3` / gateway URL (no embed fallback; unset when no gateway) / unset (keyless) / `score_first` (see install §4.4 `probe_gateway.py`: `rerank_first` only when the score leg is unavailable) / 1.0 / 50 / 32 / 5.0 | rerank dispatch → retrieve (see `retrieval.md` §6) |
+| `rerank_enabled` / `rerank_model` / `rerank_base_url` / `rerank_api_key` / `rerank_endpoint_order` / `rerank_fusion_alpha` / `rerank_candidates` / `rerank_batch_size` / `rerank_timeout_s` | false / `BAAI/bge-reranker-v2-m3` / gateway URL (no embed fallback; unset when no gateway) / unset (keyless) / `score_first` (see install §4.5 `probe_gateway.py`: `rerank_first` only when the score leg is unavailable) / 1.0 / 50 / 32 / 5.0 | rerank dispatch → retrieve (see `retrieval.md` §6) |
 | `rrf_k` / `rrf_weight_*` / `rrf_sparse_boost_syntax` / `rrf_sparse_boost_table` / `retrieve_max_chunks_per_page|doc` | 2 / 1.0,1.0 – 1.0,3.0 / 1.0 / 1.0 / 1, 3 | retrieve fusion + diversification |
 | `acronym_expansion_enabled` / `comparative_split_enabled` / `diagnostic_dualpath_enabled` | `false` / `true` / `false` | rewrite + multipath (see `retrieval.md` §§3b,7) |
 | `ingest_max_pdf_bytes` / `ingest_max_doc_pages` / `ingest_max_doc_chunks` | 0 / 0 / 0 (unbounded) | per-document ingest refusal (`docs/ingest.md` §9, issue #374) |
@@ -1262,7 +1264,7 @@ are above. **Authority:** ADR-0001/0004, #363 and existing transport contracts;
 `HttpxLLMClient`, `VllmTokenizer`, `HttpReranker`, `http_client` and lifespan.
 
 `LLM_REASONING_EFFORT_SIMPLE` and `LLM_REASONING_EFFORT_COMPLEX` accept `low`,
-`medium`, `high` and explicit `xhigh`; their defaults remain `low` and `high`.
+`medium`, `high` and explicit `xhigh`; their defaults are `xhigh` and `xhigh` (#777).
 Shared-core overrides accept the same values. The selected effort reaches the
 reasoning HTTP request verbatim for buffered, streamed and permitted fallback
 calls; `high` is never translated to `xhigh`, and an omitted direct-client effort
@@ -1271,7 +1273,7 @@ remains omitted. Support depends on the served chat template: the stock
 accepts `low`, `medium` and `xhigh` when thinking, so that profile must explicitly
 select compatible settings ([#707](https://github.com/yonatan895/qdrant-pdf-rag/issues/707)).
 `LLM_REASONING_EFFORTS` declares the efforts the served template accepts
-(default `low,medium,high`; stock Qwen3.8 needs `low,medium,xhigh`). Settings and
+(default `low,medium,xhigh`, the stock Qwen3.8 set; the local 8 GB lane pins `low,medium,high`). Settings and
 air-gap preflight refuse a simple/complex effort outside it, naming the field
 ([#748](https://github.com/yonatan895/qdrant-pdf-rag/issues/748)). The console
 renders exactly these choices (`xhigh` as "Extra high") and refuses any other
