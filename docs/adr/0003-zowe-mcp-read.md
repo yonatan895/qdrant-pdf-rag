@@ -100,7 +100,7 @@
   - No submit, write, console, TSO, SPL, job control or arbitrary command.
     Untrusted content cannot enable the feature or widen the allowlist: both
     are operator configuration.
-- **Reactivation gate:** (a) the POC names a specific investigation that
+- <a id="reactivation-gate"></a>**Reactivation gate:** (a) the POC names a specific investigation that
   manuals and caller-supplied Splunk context cannot answer, and (b) the source
   owner approves the read capability and the FTP posture in writing. Only then
   does one bounded implementation (#91) wire `job_status` into the answer
