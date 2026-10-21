@@ -258,6 +258,8 @@ src/mainframe_rag/
     representation.py # Stored contract, migration state, reader compatibility
     completion.py     # Per-document verification and progress lock
     publish.py        # Staging and final publication checks
+    catalog.py        # Publish-time source catalog, one entry per published revision (issue #827)
+    bounds.py         # Opt-in embed-input and per-document size bounds; refuse, never truncate (issue #374)
     inventory.py      # Ingest progress tracking
     embed.py          # vLLM dense & FastEmbed BM25 embedder; embed-text builder
     qdrant_io.py      # Collection creation & upsert batching
@@ -280,6 +282,8 @@ src/mainframe_rag/
     answer.py         # Reasoning LLM client (sync/async/SSE), prompt construction, condensation & citation grounding
     answer_core.py    # Shared engine: retrieval(optional), prompt budget, LLM, citation parse
     serving.py        # Read-only physical-generation gate and TTL cache
+    evidence.py       # Exact-evidence service: references, exact reads, source listing (issues #405, #828)
+    admission.py      # Bounded request admission slots and FIFO wait queue (issue #374)
     sse.py            # SSE payloads: /v1/answer events + OpenAI chat chunks/errors/[DONE]
     tokenizer.py      # vLLM /tokenize counting with estimator fallback
     cites.py          # Citation shape validation & extraction
@@ -302,6 +306,7 @@ src/mainframe_rag/
   eval/               # Evaluation measurement core: datasets, retrieval scoring, answers/answer-tier, judging, chat A/B, performance/quality gates, promotion verdicts, reports, statistics, load
   mcp/
     server.py         # MCP framing: JSON-RPC dispatch, tool schemas, transports
+    knowledge.py      # Read-only knowledge MCP adapter over the agent's search, evidence and sources routes (issue #405)
     bridge.py         # FTP transport for the read-only Zowe MCP bridge (ADR-0003)
     mock.py           # Filesystem-backed mock z/OS backend (test-only)
   config.py           # Pydantic Settings & environment validation
