@@ -123,10 +123,11 @@ collections need a re-ingest.**
   positions. Short independent procedures alone do not establish a table.
   Ambiguous regions and pages whose blocks do not exactly reproduce plain text
   stay in stream order, including whitespace-only blocks.
-- A standalone `|` is removed only as part of a repeated aligned run at a
-  page margin, separated from the text body's horizontal extent and paired
-  with at least three nonmonospaced prose sentences. Monospaced glyphs,
-  bars within the body, short-label diagram walls and lone margin glyphs
+- A standalone `|` is removed only as part of a repeated aligned run in
+  whitespace (a page margin or a column gutter: no text on the bar's own
+  row within half a line height, issue #864), paired with at least three
+  nonmonospaced prose sentences. Monospaced glyphs, bars within a line,
+  short-label diagram walls, bars beside table cells and lone margin glyphs
   retain content. These geometry/typography signals are heuristic: they do
   not establish the author's semantic intent or guarantee every diagram
   shape. Source-fidelity qualification still needs SME review.

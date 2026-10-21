@@ -222,11 +222,17 @@ def _margin_bar_lines(
     blocks: list,
     line_boxes: dict[tuple[int, int], tuple[float, float, float, float]],
 ) -> set[tuple[int, int]]:
-    """Only repeated isolated bars outside the text body and at a page margin.
+    """Only repeated isolated bars in whitespace beside prose: a page margin or
+    a column gutter.
 
-    A run must also accompany nonmonospaced prose sentences. A standalone
-    glyph in code/diagrams, a lone margin glyph, and ambiguous runs remain
-    content. Margin position alone does not establish revision markup.
+    A bar is a candidate when no text on its own row comes within half a line
+    height of it (or its row holds no text), so it sits in whitespace, not in
+    a line. Issue #864: the earlier rule (left of every body line and inside
+    the outer 10% of the page) missed bars beside an indented body under
+    hanging headings and bars in a two-column gutter. A run must also
+    accompany nonmonospaced prose sentences. A standalone glyph in
+    code/diagrams, a lone margin glyph, and ambiguous runs remain content.
+    Margin position alone does not establish revision markup.
     """
     bars = {
         (b[5], i) for b in blocks for i, ln in enumerate(b[4].split("\n"))
@@ -247,15 +253,15 @@ def _margin_bar_lines(
         if len(ln.split()) >= 4 and ln.rstrip().endswith((".", "?", "!"))
         and (b[5], i) not in monospaced and (b[5], i) in line_boxes
     }
-    left, right = min(b[0] for b in body), max(b[2] for b in body)
     candidates = []
     for key in bars:
         if key in monospaced:
             continue
         x0, y0, x1, y1 = line_boxes[key]
         height = y1 - y0
-        if ((x1 <= left - height and x1 <= page.rect.x0 + page.rect.width * 0.1)
-                or (x0 >= right + height and x0 >= page.rect.x1 - page.rect.width * 0.1)):
+        clear = height / 2
+        on_row = [box for box in body if min(y1, box[3]) - max(y0, box[1]) > 0.3 * height]
+        if all(box[2] <= x0 - clear or box[0] >= x1 + clear for box in on_row):
             candidates.append((key, x0, y0, y1))
     accepted: set[tuple[int, int]] = set()
     remaining = {c[0] for c in candidates}

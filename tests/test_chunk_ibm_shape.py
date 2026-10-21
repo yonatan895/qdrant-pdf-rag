@@ -811,6 +811,60 @@ def test_change_bar_pdf_keeps_prose_in_order(tmp_path):
     assert not [ln for ln in chunk.text.splitlines() if ln.strip() == "|"]
 
 
+def _bars_beside(page, bar_x, text_x, y0, lines, leading=14):
+    for i, line in enumerate(lines):
+        page.insert_text((bar_x, y0 + leading * i), "|", fontsize=10)
+        page.insert_text((text_x, y0 + leading * i), line, fontsize=10)
+
+
+def test_change_bars_past_ten_percent_beside_hanging_headings_are_removed(tmp_path):
+    """Issue #864: manuals that hang headings left of an indented body put the
+    revision bar at about 10% of the page width. The old rule wanted the bar
+    left of every body line and inside the outer 10%, so it kept these bars
+    (GC19-2974-20: 21,708 bare-bar lines on 759 of 1,063 pages)."""
+    prose = [f"Revised sentence {i} about the widget limit." for i in range(5)]
+
+    def draw(page):
+        page.insert_text((40, 86), "Hanging heading", fontsize=11)
+        _bars_beside(page, 64, 160, 100, prose)
+
+    (chunk,) = _pipeline_chunks(_one_page_pdf(tmp_path / "WX10-0013-00_hang.pdf", draw))
+    assert not [ln for ln in chunk.text.splitlines() if ln.strip() == "|"]
+    assert [ln for ln in chunk.text.splitlines() if ln.startswith("Revised")] == prose
+
+
+def test_change_bars_in_a_column_gutter_are_removed(tmp_path):
+    """Issue #864: two-column manuals put the bar for the right column in the
+    gutter, mid-page (GC34-6442-07: median bar at 49% of the width). The
+    detector knew page margins only."""
+    left = [f"Left column sentence {i} stays as it was." for i in range(5)]
+    right = [f"Right column sentence {i} was revised." for i in range(5)]
+
+    def draw(page):
+        for i, line in enumerate(left):
+            page.insert_text((60, 100 + 14 * i), line, fontsize=9)
+        _bars_beside(page, 300, 312, 100, right)
+
+    (chunk,) = _pipeline_chunks(_one_page_pdf(tmp_path / "WX10-0014-00_gutter.pdf", draw))
+    lines = chunk.text.splitlines()
+    assert not [ln for ln in lines if ln.strip() == "|"]
+    assert all(s in lines for s in left + right)
+
+
+def test_gutter_bars_beside_table_cells_are_kept(tmp_path):
+    """Counterexample for #864: bars between two columns of short cells are
+    not beside prose sentences, so they stay content, as before."""
+    cells = ["LFAREA", "PROGxx", "IEASYSxx", "SMFPRMxx", "CONSOLxx"]
+
+    def draw(page):
+        for i, cell in enumerate(cells):
+            page.insert_text((60, 100 + 14 * i), cell, fontsize=10)
+        _bars_beside(page, 300, 312, 100, [f"value {i}" for i in range(5)])
+
+    (chunk,) = _pipeline_chunks(_one_page_pdf(tmp_path / "WX10-0015-00_cells.pdf", draw))
+    assert chunk.text.splitlines().count("|") == 5
+
+
 def _draw_columns(page, columns, x0=72, y0=100, step=140, leading=14, wrapped=()):
     """Column-major draw: each column whole, one text object per line. A '|'
     inside a cell starts a continuation line; rows listed in `wrapped`
