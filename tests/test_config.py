@@ -396,12 +396,16 @@ def _cgroup(root, files):
         ({"cpu.max": "50000 100000\n"}, 64, 1),  # never below one
         ({"cpu.max": "800000 100000\n"}, 4, 4),  # affinity lower than quota
         ({"cpu.max": "garbage\n"}, 64, 64),  # unreadable quota is ignored
+        ({"cpu.max": "200000 0\n"}, 64, 64),  # a zero period is unreadable too
         ({"cpu/cpu.cfs_quota_us": "300000\n", "cpu/cpu.cfs_period_us": "100000\n"}, 64, 3),  # v1
         ({"cpu/cpu.cfs_quota_us": "-1\n", "cpu/cpu.cfs_period_us": "100000\n"}, 64, 64),  # v1, unlimited
         # Not namespaced: this process's own cgroup, where a parent's quota binds.
         ({"proc": "0::/pods/job\n", "pods/cpu.max": "300000 100000\n",
           "pods/job/cpu.max": "max 100000\n", "cpu.max": "max 100000\n"}, 64, 3),
         ({"proc": "0::/pods/job\n", "pods/job/cpu.max": "200000 100000\n"}, 64, 2),
+        # Quotas on both levels: the tighter one binds, wherever it sits.
+        ({"proc": "0::/pods/job\n", "pods/cpu.max": "300000 100000\n",
+          "pods/job/cpu.max": "400000 100000\n"}, 64, 3),
     ],
 )
 def test_available_cpus_takes_the_lowest_of_quota_and_affinity(

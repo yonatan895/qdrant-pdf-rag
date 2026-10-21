@@ -36,9 +36,12 @@ def _quota_v2(cpu_max: Path) -> float | None:
     """`cpu.max` is "<quota> <period>"; quota "max" means none."""
     try:
         quota, period = cpu_max.read_text().split()
-        return None if quota == "max" else int(quota) / int(period)
+        if quota == "max":
+            return None
+        quota_us, period_us = int(quota), int(period)
     except (OSError, ValueError):
         return None
+    return quota_us / period_us if quota_us > 0 and period_us > 0 else None
 
 
 def _cgroup_cpu_quota(root: Path, proc_cgroup: Path) -> float | None:
