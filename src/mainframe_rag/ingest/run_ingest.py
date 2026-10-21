@@ -24,8 +24,10 @@ import sys
 import threading
 import time
 import uuid
+from collections import deque
 from collections.abc import Iterator
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
@@ -153,6 +155,15 @@ _worker_settings: Settings | None = None
 _worker_context_client: ContextLLMClient | None = None
 _worker_context_cache: dict[str, str] | None = None
 _worker_context_cache_path: str | None = None
+
+
+# A document that kills its parse worker on its own is recorded and skipped
+# (#841). max(this, window) such crashes in a row, with no parse returning in
+# between, mean the workers cannot run at all (OOM at spawn, broken
+# interpreter), so the run stops unpublished instead of spawning a pool per
+# document. One pool crash requeues at most a window of files and any good
+# one resets the streak, so a few bad neighbours never reach the limit.
+_MIN_PARSE_CRASH_LIMIT = 3
 
 
 class ParseTask(NamedTuple):
@@ -1030,12 +1041,23 @@ def _execute(
     # at window so slow upserts never let the parent hold unbounded
     # parsed/embedded docs and vectors in RAM.
     window = max(2, workers * 2)
+    crash_limit = max(_MIN_PARSE_CRASH_LIMIT, window)
     task_iter = iter(tasks)
     locks = _DocLocks()
     # Stage 2: dedicated upsert streams (ingest_upsert_streams, bounded
     # in Settings). Embedding is done in stage-1 workers; these
     # threads are I/O-bound against Qdrant. Skipped during dry runs.
-    parse_pending: dict[concurrent.futures.Future, str] = {}
+    parse_pending: dict[concurrent.futures.Future, ParseTask] = {}
+    # A dead worker (e.g. OOM-killed) breaks the whole pool and fails every
+    # in-flight parse with BrokenProcessPool, so the culprit is unknown
+    # (#841). Those tasks become suspects: once the broken pool's futures
+    # have all drained, a fresh pool re-parses them one at a time, and a
+    # suspect that breaks the pool alone is the culprit. Each suspect is
+    # resubmitted exactly once; new tasks wait until the suspects clear.
+    suspects: deque[ParseTask] = deque()
+    isolated: concurrent.futures.Future | None = None
+    pool_broken = False
+    consecutive_crashes = 0
     # Upsert futures carry their inventory record plus the precomputed
     # generation binding (parent has chunks before submitting; the
     # worker thread must not recompute digests divergently).
@@ -1044,12 +1066,27 @@ def _execute(
         tuple[InventoryRecord, str | None, str | None, str | None],
     ] = {}
 
+    pool = ProcessPoolExecutor(max_workers=workers, mp_context=ctx)
+
     def refill_parse() -> None:
+        nonlocal pool, pool_broken, isolated
+        if pool_broken:
+            if parse_pending:
+                return  # the broken pool's remaining futures fail promptly
+            pool.shutdown(wait=True)
+            pool = ProcessPoolExecutor(max_workers=workers, mp_context=ctx)
+            pool_broken = False
+        if suspects or isolated is not None:
+            if suspects and not parse_pending:
+                task = suspects.popleft()
+                isolated = pool.submit(_parse_one, task)
+                parse_pending[isolated] = task
+            return
         while len(parse_pending) + len(upsert_pending) < window:
             next_task = next(task_iter, None)
             if next_task is None:
                 break
-            parse_pending[pool.submit(_parse_one, next_task)] = next_task.path
+            parse_pending[pool.submit(_parse_one, next_task)] = next_task
 
     upsert_ctx = (
         ThreadPoolExecutor(max_workers=settings.ingest_upsert_streams)
@@ -1057,8 +1094,16 @@ def _execute(
         else nullcontext()
     )
 
+    @contextmanager
+    def parse_pool() -> Iterator[None]:
+        # refill_parse replaces a broken pool; shut down whichever is current.
+        try:
+            yield
+        finally:
+            pool.shutdown(wait=True)
+
     with (
-        ProcessPoolExecutor(max_workers=workers, mp_context=ctx) as pool,
+        parse_pool(),
         upsert_ctx as upsert_pool,
     ):
         refill_parse()
@@ -1070,9 +1115,36 @@ def _execute(
             )
             for future in done:
                 if future in parse_pending:
-                    path_str = parse_pending.pop(future)
+                    task = parse_pending.pop(future)
+                    path_str = task.path
+                    alone = future is isolated
+                    if alone:
+                        isolated = None
                     try:
                         record, parsed, chunks, vectors, contexts = future.result()
+                        consecutive_crashes = 0  # a returned parse proves workers run
+                    except BrokenProcessPool:
+                        pool_broken = True
+                        if not alone:
+                            # Any in-flight parse may have killed the pool.
+                            suspects.append(task)
+                            log.warning(json.dumps({"path": path_str, "action": "parse_requeued"}))
+                            refill_parse()
+                            continue
+                        consecutive_crashes += 1
+                        if consecutive_crashes >= crash_limit:
+                            raise RuntimeError(
+                                f"parse workers keep dying: {consecutive_crashes} documents in a "
+                                "row each killed a fresh single-worker pool; stopping the run "
+                                "unpublished."
+                            ) from None
+                        record = InventoryRecord(
+                            path=path_str,
+                            sha256=task.sha256,
+                            status="error",
+                            error="parse worker died while parsing this document alone; not retried",
+                            error_type=BrokenProcessPool.__name__,
+                        )
                     except Exception as exc:  # noqa: BLE001 — one bad PDF must not kill the run
                         record = InventoryRecord(
                             path=path_str,

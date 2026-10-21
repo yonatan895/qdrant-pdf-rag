@@ -4,6 +4,7 @@ No Qdrant, no embeddings (air-gap Job does that; CI uses --dry-run).
 """
 
 import json
+from typing import ClassVar
 
 import pytest
 
@@ -85,6 +86,243 @@ def test_corrupt_pdf_writes_typed_error_record(tmp_path, synthetic_pdf, capsys):
     done = [l for l in _stderr_json(capsys) if l.get("action") == "done"]
     assert len(done) == 1
     assert done[0]["files_failed"] == 1
+
+
+def _crash_corpus(tmp_path, monkeypatch, crash_stems):
+    """Four synthetic manuals parsed by real spawn workers whose parse
+    exits the process for `crash_stems` (#841)."""
+    from scripts.make_synthetic_pdf import build
+
+    from mainframe_rag.ingest import run_ingest
+    from tests.helpers_ingest_crash_worker import CRASH_PARSE_STEMS_ENV, crashing_parse_one
+
+    corpus = tmp_path / "corpus"
+    stems = [f"SA22-70{n}0-00" for n in range(4)]
+    for n, stem in enumerate(stems):
+        build(corpus / f"{stem}.pdf", doc_id=stem, title=f"Synthetic Reference {n}",
+              message_id=f"IEA{n}00I")
+    monkeypatch.setattr(run_ingest, "_parse_one", crashing_parse_one)
+    monkeypatch.setenv(CRASH_PARSE_STEMS_ENV, ",".join(crash_stems))
+    return corpus, {stem: str(corpus / f"{stem}.pdf") for stem in stems}
+
+
+def test_crashed_parse_worker_is_quarantined_and_the_run_continues(tmp_path, monkeypatch, capsys):
+    """#841: a worker that dies breaks the whole pool and fails every
+    in-flight parse. The run rebuilds the pool, re-parses each pending file
+    exactly once, records only the file that kills a worker on its own, and
+    still parses the files queued after it."""
+    corpus, paths = _crash_corpus(tmp_path, monkeypatch, ["SA22-7000-00"])
+    progress = tmp_path / "inventory.jsonl"
+    rc = main(["--src", str(corpus), "--progress", str(progress), "--workers", "1", "--dry-run"])
+    assert rc == 1
+    records = [json.loads(l) for l in progress.read_text().splitlines() if l.strip()]
+    by_path = {r["path"]: r for r in records}
+    assert len(records) == len(by_path) == 4, records  # each file recorded exactly once
+    crashed = by_path[paths["SA22-7000-00"]]
+    assert (crashed["status"], crashed["error_type"]) == ("error", "BrokenProcessPool")
+    assert [by_path[paths[s]]["status"] for s in ("SA22-7010-00", "SA22-7020-00", "SA22-7030-00")] == [
+        "dry", "dry", "dry"]
+    done = [l for l in _stderr_json(capsys) if l.get("action") == "done"]
+    assert len(done) == 1 and done[0]["files_failed"] == 1
+
+
+def test_crashed_parse_worker_blocks_publication_and_the_next_run_publishes(
+    tmp_path, monkeypatch
+):
+    """#841: a real run keeps the existing failed-document gate (the crashing
+    file writes no points or completion, and the migration stays pending),
+    and once the cause is gone the forced re-run ingests every file."""
+    from mainframe_rag.ingest import run_ingest
+    from tests.helpers_ingest_crash_worker import CRASH_PARSE_STEMS_ENV
+
+    corpus, paths = _crash_corpus(tmp_path, monkeypatch, ["SA22-7010-00"])
+    fake = _FakeQdrant()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    monkeypatch.setenv("EMBED_MODE", "hash")
+    monkeypatch.delenv("DENSE_DIM", raising=False)
+    progress = tmp_path / "inventory.jsonl"
+    assert main(_migration_args(corpus, progress)) == 1
+    records = [json.loads(l) for l in progress.read_text().splitlines() if l.strip()]
+    assert {r["path"]: r["status"] for r in records} == {
+        paths["SA22-7000-00"]: "upserted",
+        paths["SA22-7010-00"]: "error",
+        paths["SA22-7020-00"]: "upserted",
+        paths["SA22-7030-00"]: "upserted",
+    }
+    stored = {(p.payload or {}).get("doc_id") for pts in fake._points.values() for p in pts}
+    assert "SA22-7010-00" not in stored
+    assert {"SA22-7000-00", "SA22-7020-00", "SA22-7030-00"} <= stored
+
+    monkeypatch.delenv(CRASH_PARSE_STEMS_ENV)
+    assert main(_migration_args(corpus, progress, "--reingest")) == 0
+    stored = {(p.payload or {}).get("doc_id") for pts in fake._points.values() for p in pts}
+    assert "SA22-7010-00" in stored
+
+
+@pytest.mark.parametrize(
+    ("workers", "recorded"),
+    [
+        (1, 2),  # window 2 -> the floor of 3 crashes in a row
+        (2, 3),  # window 4 -> 4 crashes in a row
+    ],
+)
+def test_parse_workers_that_keep_dying_abort_the_run_unpublished(
+    tmp_path, monkeypatch, workers, recorded
+):
+    """#841: when fresh single-worker pools keep dying, the failure is not
+    bad files: the run stops after max(3, window) crashes in a row instead
+    of spawning a pool per document, and nothing is recorded as parsed. The
+    crash that reaches the bound raises before it is recorded."""
+    corpus, _ = _crash_corpus(
+        tmp_path, monkeypatch, ["SA22-7000-00", "SA22-7010-00", "SA22-7020-00", "SA22-7030-00"])
+    progress = tmp_path / "inventory.jsonl"
+    with pytest.raises(RuntimeError, match="parse workers keep dying"):
+        main(["--src", str(corpus), "--progress", str(progress), "--workers", str(workers),
+              "--dry-run"])
+    records = [json.loads(l) for l in progress.read_text().splitlines() if l.strip()]
+    assert len(records) == recorded, records
+    assert all(r["status"] == "error" for r in records)
+
+
+def test_crashes_separated_by_returned_parses_never_reach_the_bound(tmp_path, monkeypatch):
+    """#841: the bound counts crashes in a row. Three bad files with good
+    files parsed between them are three error records, not an abort."""
+    from scripts.make_synthetic_pdf import build
+
+    from mainframe_rag.ingest import run_ingest
+    from tests.helpers_ingest_crash_worker import CRASH_PARSE_STEMS_ENV, crashing_parse_one
+
+    corpus = tmp_path / "corpus"
+    stems = [f"SA22-70{n}0-00" for n in range(7)]
+    for n, stem in enumerate(stems):
+        build(corpus / f"{stem}.pdf", doc_id=stem, title=f"Synthetic Reference {n}",
+              message_id=f"IEA{n}00I")
+    bad = stems[1::2]  # three crashers, each with a good neighbour in its window
+    assert len(bad) == run_ingest._MIN_PARSE_CRASH_LIMIT  # the limit at --workers 1
+    monkeypatch.setattr(run_ingest, "_parse_one", crashing_parse_one)
+    monkeypatch.setenv(CRASH_PARSE_STEMS_ENV, ",".join(bad))
+    progress = tmp_path / "inventory.jsonl"
+    assert main(["--src", str(corpus), "--progress", str(progress), "--workers", "1",
+                 "--dry-run"]) == 1
+    records = [json.loads(l) for l in progress.read_text().splitlines() if l.strip()]
+    assert sorted((r["path"].rsplit("/", 1)[1][:-4], r["status"]) for r in records) == sorted(
+        (s, "error" if s in bad else "dry") for s in stems)
+
+
+class _CrashSemanticsPool:
+    """In-process ProcessPoolExecutor stand-in with its crash semantics
+    (#841): one worker thread runs submissions in order; a listed stem
+    "kills the worker", failing every pending future with BrokenProcessPool,
+    and the pool then refuses submits. A resubmitted task (a suspect) waits
+    before running, so other work can finish while it runs alone.
+    `submissions` records, per submit: (stem, is_resubmission, in-flight
+    [(stem, is_resubmission)]) for that pool."""
+
+    crash_stems: ClassVar[frozenset[str]] = frozenset()
+    submissions: ClassVar[list[tuple[str, bool, list[tuple[str, bool]]]]] = []
+    seen: ClassVar[set[str]] = set()
+
+    def __init__(self, max_workers=None, mp_context=None):
+        import queue
+        import threading
+
+        self.lock = threading.Lock()
+        self.queue: queue.Queue = queue.Queue()
+        self.in_flight: list = []
+        self.broken = False
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def submit(self, fn, task):
+        from concurrent.futures import Future
+        from concurrent.futures.process import BrokenProcessPool
+        from pathlib import Path
+
+        stem = Path(task.path).stem
+        with self.lock:
+            if self.broken:
+                raise BrokenProcessPool("pool is broken")
+            resubmission = stem in self.seen
+            self.seen.add(stem)
+            self.in_flight = [entry for entry in self.in_flight if not entry[0].done()]
+            self.submissions.append((stem, resubmission, [(s, r) for _, s, r in self.in_flight]))
+            future: Future = Future()
+            self.in_flight.append((future, stem, resubmission))
+        self.queue.put((future, fn, task, stem, resubmission))
+        return future
+
+    def _run(self):
+        import time
+        from concurrent.futures.process import BrokenProcessPool
+
+        while (item := self.queue.get()) is not None:
+            future, fn, task, stem, resubmission = item
+            if future.done():
+                continue
+            if resubmission:
+                time.sleep(0.5)
+            if stem in self.crash_stems:
+                with self.lock:
+                    self.broken = True
+                    for pending, _, _ in self.in_flight:
+                        if not pending.done():
+                            pending.set_exception(BrokenProcessPool("worker died"))
+                return
+            try:
+                future.set_result(fn(task))
+            except Exception as exc:  # noqa: BLE001 — surfaced through the future
+                future.set_exception(exc)
+
+    def shutdown(self, wait=True):
+        self.queue.put(None)
+        if wait:
+            self.thread.join()
+
+
+def test_no_file_starts_while_a_suspect_parses_alone(tmp_path, monkeypatch):
+    """#841: attribution rests on a suspect being the only parse in its pool.
+    An upsert that finishes while the suspect runs must not start new files
+    beside it: if one of those crashed, the innocent suspect would be
+    recorded as the culprit."""
+    import time
+
+    from mainframe_rag.ingest import run_ingest
+
+    real_parse = run_ingest._parse_one
+    corpus, paths = _crash_corpus(tmp_path, monkeypatch, [])
+    monkeypatch.setattr(run_ingest, "_parse_one", real_parse)  # in-process; the pool crashes
+    monkeypatch.setattr(_CrashSemanticsPool, "crash_stems", frozenset({"SA22-7010-00"}))
+    monkeypatch.setattr(_CrashSemanticsPool, "submissions", [])
+    monkeypatch.setattr(_CrashSemanticsPool, "seen", set())
+    monkeypatch.setattr(run_ingest, "ProcessPoolExecutor", _CrashSemanticsPool)
+    real_upsert = run_ingest._upsert_one
+
+    def slow_upsert(*args, **kwargs):
+        time.sleep(0.1)  # still in flight when the suspect starts, done before it ends
+        return real_upsert(*args, **kwargs)
+
+    monkeypatch.setattr(run_ingest, "_upsert_one", slow_upsert)
+    fake = _FakeQdrant()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    monkeypatch.setenv("EMBED_MODE", "hash")
+    monkeypatch.delenv("DENSE_DIM", raising=False)
+    progress = tmp_path / "inventory.jsonl"
+    assert main(_migration_args(corpus, progress)) == 1
+
+    submissions = _CrashSemanticsPool.submissions
+    assert ("SA22-7010-00", True) in {(stem, resub) for stem, resub, _ in submissions}
+    beside_a_suspect = [
+        (stem, in_flight) for stem, resub, in_flight in submissions
+        if in_flight and (resub or any(r for _, r in in_flight))
+    ]
+    assert beside_a_suspect == [], beside_a_suspect
+    records = [json.loads(l) for l in progress.read_text().splitlines() if l.strip()]
+    assert {r["path"]: r["status"] for r in records} == {
+        paths["SA22-7000-00"]: "upserted",
+        paths["SA22-7010-00"]: "error",
+        paths["SA22-7020-00"]: "upserted",
+        paths["SA22-7030-00"]: "upserted",
+    }
 
 
 def _stderr_json(capsys) -> list[dict]:

@@ -964,6 +964,16 @@ thread pool.
   empty sha. One bad PDF never kills the run. Records must stay picklable across spawn
   IPC (no exception objects — unpicklable exceptions like `httpx2.HTTPStatusError` from
   contextual LLM calls would crash `ProcessPoolExecutor` across process boundaries).
+- A worker that dies (e.g. OOM-killed, #841) breaks the pool and fails every
+  in-flight parse with `BrokenProcessPool`. Those files are requeued
+  (`parse_requeued` log line) and, once the broken pool has drained, re-parsed
+  one at a time in a fresh pool before any new file starts. Each is resubmitted
+  exactly once; the one that breaks the pool alone gets a
+  `BrokenProcessPool` error record and is not retried. Like any error, it
+  blocks the migration commit and exits non-zero. If
+  `max(3, window)` documents in a row (floor `_MIN_PARSE_CRASH_LIMIT`) each kill a fresh
+  pool, with no parse returning in between, the run raises unpublished,
+  because the workers cannot run at all.
 - Result accounting: `skipped` + `upserted` both count as files-ok; only
   `upserted` adds upserted chunks. `empty` (zero-chunk doc, issue #359) and
   `error` count as failed and exit nonzero. Bulk mode applies to real runs only,
