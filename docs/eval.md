@@ -728,7 +728,9 @@ split (LEG entries always dev).
   FAIL alone).
 - Re-freeze process: rebuild, `verify-golden` 0 FAIL, new holdout sha,
   re-record baselines — one dedicated commit. Never iterate the holdout to
-  tune.
+  tune. Exposure: 71 of the 76 current rows informed shipped choices, so the
+  holdout is a regression ruler, not an independent one
+  ([contamination audit](records/2026-10-21-holdout-contamination-audit.md), #844).
 - Acceptance states (issue #365): the builder stamps
   `expected_verification_state` on every generated row (answer-tier
   `accepted`, abstain-tier `insufficient_evidence`; adjudicated exceptions in
