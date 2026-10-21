@@ -425,10 +425,11 @@ def test_available_cpus_takes_the_lowest_of_quota_and_affinity(
     assert available_cpus(root, proc) == expected
 
 
-def test_two_cpu_quota_bounds_default_workers_and_the_cap(tmp_path, monkeypatch):
-    """#840: on a 64-core node, an ingest Job limited to 2 CPUs defaults to
-    one parse worker and clamps any count to 2 * 2; an explicit
-    INGEST_WORKERS inside that clamp is used as given."""
+def test_two_cpu_quota_bounds_the_default_not_an_explicit_count(tmp_path, monkeypatch):
+    """#840: an ingest Job limited to 2 CPUs on a larger node defaults to one
+    parse worker, while an explicit INGEST_WORKERS above the quota is used as
+    given: the operator may oversubscribe a network-bound ingest."""
+    import multiprocessing
     import os
 
     from mainframe_rag import config
@@ -441,6 +442,6 @@ def test_two_cpu_quota_bounds_default_workers_and_the_cap(tmp_path, monkeypatch)
     settings = Settings(_env_file=None)
     assert settings.ingest_workers == 1
     assert resolve_workers(None, settings) == 1
-    assert resolve_workers(10_000, settings) == 4
-    monkeypatch.setenv("INGEST_WORKERS", "3")
-    assert resolve_workers(None, Settings(_env_file=None)) == 3
+    monkeypatch.setattr(multiprocessing, "cpu_count", lambda: 64)  # the node
+    monkeypatch.setenv("INGEST_WORKERS", "8")
+    assert resolve_workers(None, Settings(_env_file=None)) == 8

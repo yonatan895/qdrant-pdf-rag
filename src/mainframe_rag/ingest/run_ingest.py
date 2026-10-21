@@ -36,7 +36,7 @@ from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
 from qdrant_client.http.exceptions import UnexpectedResponse
 
-from mainframe_rag.config import Settings, available_cpus, load_settings
+from mainframe_rag.config import Settings, load_settings
 from mainframe_rag.ingest.bounds import require_document_within, require_embed_inputs_within
 from mainframe_rag.ingest.build import (
     BuildBinding,
@@ -338,10 +338,12 @@ def _parse_one(
 
 def resolve_workers(requested: int | None, settings: Settings) -> int:
     """INGEST_WORKERS (or the CLI override) is a cap, never 'spawn unbounded':
-    clamp into [1, 2*CPU], counting the CPUs the process can actually use
-    (cgroup quota and affinity, #840). The pool is bounded either way; this
-    keeps a bad env value from fanning out beyond the box."""
-    cap = max(1, 2 * available_cpus())
+    clamp into [1, 2*CPU]. The pool is bounded either way; this keeps a bad
+    env value from fanning out beyond the box. The clamp counts the node's
+    CPUs on purpose: it bounds runaway values, it is not sizing. Only the
+    default (Settings.ingest_workers) follows the CPUs the process can use,
+    so an operator may oversubscribe a network-bound ingest (#840)."""
+    cap = max(1, 2 * (mp.cpu_count() or 2))
     base = settings.ingest_workers if requested is None else requested
     return max(1, min(int(base), cap))
 

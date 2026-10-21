@@ -950,14 +950,17 @@ thread pool.
   mid-run. Per-worker cached settings/embedder/context-client/cache/Qdrant
   (ingest timeout); env inherited under spawn.
 - `resolve_workers`: capped to `[1, 2*CPU]`; `Settings.ingest_workers`
-  defaults to `CPU-1`; `--workers 0` means default. CPU means the CPUs the
-  process can use (`config.available_cpus`, #840): the lowest of the affinity
+  defaults to `CPU-1`; `--workers 0` means default. For the default, CPU means
+  the CPUs the process can use (`config.available_cpus`, #840): the lowest of the affinity
   mask (`os.process_cpu_count()`) and the cgroup CPU quota (v2 `cpu.max`
   from the process's own cgroup up to the mount root, else v1
   `cfs_quota_us/cfs_period_us`), rounded down, at least 1. So a Job limited
   to 2 CPUs on a 64-core node defaults to 1 worker. Without a quota it is
-  the affinity count. An explicit `INGEST_WORKERS` inside the cap is used as
-  given.
+  the affinity count. The `2*CPU` cap deliberately counts the node's CPUs: it
+  bounds runaway values, it is not sizing, so an explicit `INGEST_WORKERS`
+  above the quota is used as given. Workers wait on the embedding (and
+  context) endpoints, so oversubscribing can raise throughput. Memory, not
+  CPU, is the OOM risk (#374).
 - In-flight window `max(2, workers*2)` caps pending parse+upsert work so
   slow upserts never let the parent hold unbounded vectors in RAM;
   first-completed pump; upsert streams default 4 (bounds 1–8).
