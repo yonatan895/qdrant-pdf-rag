@@ -439,6 +439,35 @@ def extract_page_text(page: pymupdf.Page) -> str:
     return "".join(out)
 
 
+# A /PageLabels prefix written as a PDF hex string: get_label() returns it
+# verbatim ("<FEFF0033002D>1"), the printed label being "3-1" (issue #863).
+_HEX_LABEL_PREFIX_RE = re.compile(r"<([0-9A-Fa-f\s]+)>")
+
+
+def _decode_hex_label_prefix(label: str) -> str | None:
+    """Decode a leading PDF hex-string prefix. get_label() renders a literal
+    prefix "(<B>)" and a hex one "<B>" the same way, so only unambiguous forms
+    decode: UTF-16BE after the FEFF byte-order mark (no printed label starts
+    with it; a final odd digit is padded with 0, as the PDF spec says), or an
+    even-length PDFDocEncoding string that decodes to printable ASCII.
+    Undecodable UTF-16 is absent (None), never guessed; anything else is
+    returned unchanged."""
+    match = _HEX_LABEL_PREFIX_RE.match(label)
+    if match is None:
+        return label
+    digits = re.sub(r"\s", "", match.group(1))
+    rest = label[match.end():]
+    if digits[:4].upper() == "FEFF":
+        try:
+            return bytes.fromhex(digits[4:] + "0" * (len(digits) % 2)).decode("utf-16-be") + rest
+        except UnicodeDecodeError:
+            return None
+    if len(digits) % 2:
+        return label
+    prefix = bytes.fromhex(digits).decode("latin-1")
+    return prefix + rest if prefix.isascii() and prefix.isprintable() else label
+
+
 def _page_label(page: pymupdf.Page) -> str | None:
     """Printed label, or None when the page has none (issue #271).
 
@@ -446,11 +475,13 @@ def _page_label(page: pymupdf.Page) -> str | None:
     earlier pages unlabeled, and PyMuPDF's get_label() raises IndexError on
     them instead of returning ''. Treat that page's label as absent rather
     than failing the whole document: chunking cites a physical-page
-    fallback for any span that is not fully labeled."""
+    fallback for any span that is not fully labeled. A hex-string prefix is
+    decoded to the printed text (issue #863)."""
     try:
-        return page.get_label()
+        label = page.get_label()
     except IndexError:
         return None
+    return _decode_hex_label_prefix(label) if label else label
 
 
 def _extract_page_texts(doc: pymupdf.Document) -> tuple[list[str], list[str | None]]:
