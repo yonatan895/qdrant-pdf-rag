@@ -209,7 +209,9 @@
   /* Verification-state presentation (issue #365): one label table and one
    * citations-title rule shared by restored turns and streamed turns, so a
    * reload can never promote a draft to accepted. Titles mirror the server
-   * fragment: only accepted, non-inferred cites read "Verified". */
+   * fragment: only accepted, non-inferred cites read "Source-matched".
+   * Accepted means each citation names a supplied excerpt, not that the
+   * excerpt supports the claim (#838), so no label says "Verified". */
   const STATE_LABELS = {
     insufficient_evidence: "Insufficient evidence — not operational guidance",
     unverified_draft: "Unverified draft — no eligible citation",
@@ -223,7 +225,7 @@
       return "Inferred citations (" + n + ") — bracket provenance, not grounding";
     }
     if (turn.verification_state === "accepted") {
-      return "Verified manual citations (" + n + ")";
+      return "Source-matched manual citations (" + n + ")";
     }
     const state = turn.verification_state ? turn.verification_state.replace(/_/g, " ") : "unverified";
     return "Citations (" + n + ") — " + state;
@@ -248,7 +250,7 @@
     if (turn.role !== "assistant" || turn.verification_state !== "accepted") return;
     if (!turn.citations || !turn.citations.length || turn.citations_inferred) return;
     const n = turn.citations.length;
-    const chip = el("span", "state-chip state-chip-ok", "Verified \u00b7 " + n + (n === 1 ? " citation" : " citations"));
+    const chip = el("span", "state-chip state-chip-ok", "Source-matched \u00b7 " + n + (n === 1 ? " citation" : " citations"));
     const role = article.querySelector(".turn-head .turn-role");
     if (role) role.after(chip);
   }
@@ -1511,7 +1513,7 @@
         ? "Stopped. Partial answer kept; incomplete and not verified."
         : "Answer incomplete: the stream failed. Partial text kept; not verified.";
     }
-    if (turn.verification_state === "accepted") return "Answer complete. Citations verified.";
+    if (turn.verification_state === "accepted") return "Answer complete. Citations source-matched.";
     return "Answer complete. State: " + String(turn.verification_state).replace(/_/g, " ") + ".";
   }
 

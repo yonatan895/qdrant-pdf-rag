@@ -132,10 +132,11 @@ def test_send_shows_provisional_then_verified_final(console, page):
     console.llm.release("mid")
     wait_state(page, "complete")
     assert page.eval("return document.querySelectorAll('.state-provisional').length") == 0
-    assert text(page, ".citations-title") == "Verified manual citations (1)"
+    assert text(page, ".citations-title") == "Source-matched manual citations (1)"
     assert page.eval("return document.getElementById('send-btn').getAttribute('aria-label')") == "Send"
     assert page.eval("return document.getElementById('messages').hasAttribute('aria-busy')") is False
-    wait_status(page, "Answer complete. Citations verified.")
+    wait_status(page, "Answer complete. Citations source-matched.")
+    assert "Verified" not in text(page, "#messages")
     (session,) = store(page)["sessions"].values()
     assert [t["role"] for t in session["turns"]] == ["user", "assistant"]
     assert session["turns"][1]["verification_state"] == "accepted"
@@ -166,7 +167,7 @@ def test_filename_bibliography_renders_separately_and_survives_reload_export_cop
 
     def assert_citations():
         assert text(page, ".turn-assistant .turn-content") == answer
-        assert text(page, ".citations-title") == "Verified manual citations (2)"
+        assert text(page, ".citations-title") == "Source-matched manual citations (2)"
         assert page.eval(
             "return Array.from(document.querySelectorAll('.citations li > span')).map(e=>e.textContent)"
         ) == [first, second]
@@ -295,7 +296,7 @@ def test_transport_splits_utf8_and_frame_boundaries(console, page):
     wait_state(page, "complete")
     assert "Réémettre 🙂 世界 — ok." in text(page, ".turn-assistant .turn-content")
     assert "�" not in text(page, "#messages")
-    assert text(page, ".citations-title") == "Verified manual citations (1)"
+    assert text(page, ".citations-title") == "Source-matched manual citations (1)"
 
 
 # -- sessions: delete / new / rename / cross-tab races ---------------------------
@@ -888,7 +889,7 @@ def test_console_offers_only_served_efforts_and_explains_a_refused_stale_choice(
 
 
 def test_answer_status_reads_before_the_answer_it_qualifies(console, page):
-    """Verified answers carry a header chip; an unverified answer's warning
+    """Accepted answers carry a source-matched header chip; an unverified answer's warning
     sits above its text, both when streamed and after reload."""
     send(page, "What is IEA500I?")
     wait_state(page, "complete")
@@ -904,7 +905,7 @@ def test_answer_status_reads_before_the_answer_it_qualifies(console, page):
         verified, draft = page.eval(order)
         assert verified[:2] == ["turn-head", "turn-content"] and "citations" in verified
         assert draft[:3] == ["turn-head", "state-badge", "turn-content"]
-        assert page.eval(chips) == ["Verified \u00b7 1 citation"]
+        assert page.eval(chips) == ["Source-matched \u00b7 1 citation"]
         page.reload()
         page.wait("return document.querySelectorAll('#messages .turn-assistant').length==2")
 

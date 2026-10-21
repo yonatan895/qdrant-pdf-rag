@@ -9,7 +9,7 @@
     <span class="avatar" aria-hidden="true">{% if turn.role == "user" %}O{% else %}C{% endif %}</span>
     <span class="turn-role">{% if turn.role == "user" %}Operator{% else %}Copilot{% endif %}</span>
     {% if turn.role == "assistant" and turn.verification_state == "accepted" and turn.citations and not turn.citations_inferred %}
-    <span class="state-chip state-chip-ok">Verified &middot; {{ turn.citations | length }} citation{{ "" if turn.citations | length == 1 else "s" }}</span>
+    <span class="state-chip state-chip-ok">Source-matched &middot; {{ turn.citations | length }} citation{{ "" if turn.citations | length == 1 else "s" }}</span>
     {% endif %}
     {% if turn.created_at %}
     <time class="turn-time" data-ts="{{ turn.created_at }}">{{ turn.created_at[11:16] }} UTC</time>
@@ -36,7 +36,7 @@
     {% if turn.citations_inferred %}
     <div class="citations-title">Inferred citations ({{ turn.citations | length }}) — bracket provenance, not grounding</div>
     {% elif turn.verification_state == "accepted" %}
-    <div class="citations-title">Verified manual citations ({{ turn.citations | length }})</div>
+    <div class="citations-title">Source-matched manual citations ({{ turn.citations | length }})</div>
     {% else %}
     <div class="citations-title">Citations ({{ turn.citations | length }}) — {{ turn.verification_state | replace("_", " ") if turn.verification_state else "unverified" }}</div>
     {% endif %}

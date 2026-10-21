@@ -633,7 +633,7 @@ def test_ui_chat_fragment_renders_markdown_not_markers(ui_client, monkeypatch):
     assert "###" not in assistant
     # The operator's own markup renders inert inside a plain <pre>.
     assert '<pre class="turn-content">Diff &lt;b&gt;bold&lt;/b&gt;?</pre>' in body
-    assert "Verified manual citations" in body
+    assert "Source-matched manual citations" in body
 
 
 def test_markdown_subset_highlights_jcl():
@@ -841,15 +841,18 @@ class RefusalUiLLM:
 
 
 def test_ui_fragment_verification_state_presentation(ui_client, monkeypatch):
-    """Accepted + script (MarkdownFakeLLM): the verified title is preserved
-    exactly, no draft badge appears, and the script carries its review badge."""
+    """Accepted + script (MarkdownFakeLLM): the source-matched title is
+    preserved exactly, nothing claims the citations were verified (#838), no
+    draft badge appears, and the script carries its review badge."""
     monkeypatch.setattr(app_mod, "llm", MarkdownFakeLLM())
     body = ui_client.post(
         "/ui/chat",
         data={"message": "What is IKJEFT01?", "messages": ""},
         headers={"HX-Request": "true"},
     ).text
-    assert "Verified manual citations (1)" in body
+    assert "Source-matched manual citations (1)" in body
+    assert "Source-matched &middot; 1 citation" in body
+    assert "Verified" not in body
     assert "state-unverified_draft" not in body
     assert "state-insufficient_evidence" not in body
     assert "state-generation_incomplete" not in body
@@ -863,7 +866,8 @@ def test_ui_fragment_verification_state_presentation(ui_client, monkeypatch):
         headers={"HX-Request": "true"},
     ).text
     assert "Unverified draft" in body
-    assert "Verified manual citations" not in body
+    assert "Source-matched manual citations" not in body
+    assert "Verified" not in body
     assert "Inferred citations" not in body
 
     monkeypatch.setattr(app_mod, "llm", RefusalUiLLM())
@@ -873,7 +877,8 @@ def test_ui_fragment_verification_state_presentation(ui_client, monkeypatch):
         headers={"HX-Request": "true"},
     ).text
     assert "Insufficient evidence" in body
-    assert "Verified manual citations" not in body
+    assert "Source-matched manual citations" not in body
+    assert "Verified" not in body
 
 
 def test_ui_stream_missing_user_is_fixed_validation_error(ui_client):
