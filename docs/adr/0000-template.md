@@ -5,5 +5,5 @@
 - **Decision:** one or two sentences
 - **Consequences:** what this locks in / costs
 
-Open questions in docs/ROADMAP.md get a one-line ADR here plus a
+Open questions in ROADMAP.md get a one-line ADR here plus a
 comment in `airgap.env.example` once answered.

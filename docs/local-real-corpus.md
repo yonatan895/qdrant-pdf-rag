@@ -181,7 +181,7 @@ The Colab lane requires corpus/representation-keyed state under
 `COLAB_DATA_STATE` (controller admission belongs to #706 WP5); never reuse a
 checkpoint to claim compatibility with changed
 weights, rules, dimensions or recipes. Reuse the selected persistent Kind/Helm
-Qdrant endpoint through `COLAB_QDRANT_URL`; a reachable ephemeral simulation
+Qdrant service through `COLAB_NAMESPACE` and `COLAB_QDRANT_SERVICE`; a reachable ephemeral simulation
 container does not qualify for production-corpus acceptance. A deadline must
 interrupt the build before cutover rather than certify a partial subset. The
 existing same-build resume and full-coverage publication gates remain authoritative.
