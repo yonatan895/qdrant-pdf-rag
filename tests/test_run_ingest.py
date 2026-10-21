@@ -87,6 +87,94 @@ def test_corrupt_pdf_writes_typed_error_record(tmp_path, synthetic_pdf, capsys):
     assert done[0]["files_failed"] == 1
 
 
+def _crash_corpus(tmp_path, monkeypatch, crash_stems):
+    """Four synthetic manuals parsed by real spawn workers whose parse
+    exits the process for `crash_stems` (#841)."""
+    from scripts.make_synthetic_pdf import build
+
+    from mainframe_rag.ingest import run_ingest
+    from tests.helpers_ingest_crash_worker import CRASH_PARSE_STEMS_ENV, crashing_parse_one
+
+    corpus = tmp_path / "corpus"
+    stems = [f"SA22-70{n}0-00" for n in range(4)]
+    for n, stem in enumerate(stems):
+        build(corpus / f"{stem}.pdf", doc_id=stem, title=f"Synthetic Reference {n}",
+              message_id=f"IEA{n}00I")
+    monkeypatch.setattr(run_ingest, "_parse_one", crashing_parse_one)
+    monkeypatch.setenv(CRASH_PARSE_STEMS_ENV, ",".join(crash_stems))
+    return corpus, {stem: str(corpus / f"{stem}.pdf") for stem in stems}
+
+
+def test_crashed_parse_worker_is_quarantined_and_the_run_continues(tmp_path, monkeypatch, capsys):
+    """#841: a worker that dies breaks the whole pool and fails every
+    in-flight parse. The run rebuilds the pool, re-parses each pending file
+    exactly once, records only the file that kills a worker on its own, and
+    still parses the files queued after it."""
+    corpus, paths = _crash_corpus(tmp_path, monkeypatch, ["SA22-7000-00"])
+    progress = tmp_path / "inventory.jsonl"
+    rc = main(["--src", str(corpus), "--progress", str(progress), "--workers", "1", "--dry-run"])
+    assert rc == 1
+    records = [json.loads(l) for l in progress.read_text().splitlines() if l.strip()]
+    by_path = {r["path"]: r for r in records}
+    assert len(records) == len(by_path) == 4, records  # each file recorded exactly once
+    crashed = by_path[paths["SA22-7000-00"]]
+    assert (crashed["status"], crashed["error_type"]) == ("error", "BrokenProcessPool")
+    assert [by_path[paths[s]]["status"] for s in ("SA22-7010-00", "SA22-7020-00", "SA22-7030-00")] == [
+        "dry", "dry", "dry"]
+    done = [l for l in _stderr_json(capsys) if l.get("action") == "done"]
+    assert len(done) == 1 and done[0]["files_failed"] == 1
+
+
+def test_crashed_parse_worker_blocks_publication_and_the_next_run_publishes(
+    tmp_path, monkeypatch
+):
+    """#841: a real run keeps the existing failed-document gate (the crashing
+    file writes no points or completion, and the migration stays pending),
+    and once the cause is gone the forced re-run ingests every file."""
+    from mainframe_rag.ingest import run_ingest
+    from tests.helpers_ingest_crash_worker import CRASH_PARSE_STEMS_ENV
+
+    corpus, paths = _crash_corpus(tmp_path, monkeypatch, ["SA22-7010-00"])
+    fake = _FakeQdrant()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    monkeypatch.setenv("EMBED_MODE", "hash")
+    monkeypatch.delenv("DENSE_DIM", raising=False)
+    progress = tmp_path / "inventory.jsonl"
+    assert main(_migration_args(corpus, progress)) == 1
+    records = [json.loads(l) for l in progress.read_text().splitlines() if l.strip()]
+    assert {r["path"]: r["status"] for r in records} == {
+        paths["SA22-7000-00"]: "upserted",
+        paths["SA22-7010-00"]: "error",
+        paths["SA22-7020-00"]: "upserted",
+        paths["SA22-7030-00"]: "upserted",
+    }
+    stored = {(p.payload or {}).get("doc_id") for pts in fake._points.values() for p in pts}
+    assert "SA22-7010-00" not in stored
+    assert {"SA22-7000-00", "SA22-7020-00", "SA22-7030-00"} <= stored
+
+    monkeypatch.delenv(CRASH_PARSE_STEMS_ENV)
+    assert main(_migration_args(corpus, progress, "--reingest")) == 0
+    stored = {(p.payload or {}).get("doc_id") for pts in fake._points.values() for p in pts}
+    assert "SA22-7010-00" in stored
+
+
+def test_parse_workers_that_keep_dying_abort_the_run_unpublished(tmp_path, monkeypatch):
+    """#841: when fresh single-worker pools keep dying, the failure is not
+    one bad file: the run stops after a bounded number of rebuilds instead
+    of spawning a pool per document, and nothing is recorded as parsed."""
+    from mainframe_rag.ingest import run_ingest
+
+    corpus, _ = _crash_corpus(
+        tmp_path, monkeypatch, ["SA22-7000-00", "SA22-7010-00", "SA22-7020-00", "SA22-7030-00"])
+    progress = tmp_path / "inventory.jsonl"
+    with pytest.raises(RuntimeError, match="parse workers keep dying"):
+        main(["--src", str(corpus), "--progress", str(progress), "--workers", "1", "--dry-run"])
+    records = [json.loads(l) for l in progress.read_text().splitlines() if l.strip()]
+    # The bound stops the run before every document gets its own pool.
+    assert len(records) <= run_ingest._MAX_CONSECUTIVE_PARSE_CRASHES < 4, records
+    assert all(r["status"] == "error" for r in records)
+
+
 def _stderr_json(capsys) -> list[dict]:
     out = capsys.readouterr().err
     lines = []

@@ -1,4 +1,5 @@
-"""Test-only publisher process: terminate after an acknowledged durable boundary."""
+"""Test-only crash injection for ingest: a publisher process that terminates
+after an acknowledged durable boundary, and a parse worker that dies mid-run."""
 from __future__ import annotations
 
 import argparse
@@ -80,6 +81,23 @@ def main():
 
     setattr(owner, name, interrupted)
     return run_ingest.main(ingest_args)
+
+
+# Names a file stem whose parse kills its worker process. Spawn workers
+# inherit the parent's environment, so a test sets it before the run.
+CRASH_PARSE_STEMS_ENV = "TEST_CRASH_PARSE_STEMS"
+
+
+def crashing_parse_one(task):
+    """Stand-in for run_ingest._parse_one in a spawn worker (#841): exits the
+    worker process abruptly for a listed stem, as an OOM kill would, and
+    parses everything else for real."""
+    from mainframe_rag.ingest import run_ingest
+
+    stems = os.environ.get(CRASH_PARSE_STEMS_ENV, "").split(",")
+    if Path(task.path).stem in stems:
+        os._exit(70)  # No exception, no cleanup: the pool sees a dead process.
+    return run_ingest._parse_one(task)
 
 
 if __name__ == "__main__":
