@@ -1070,7 +1070,9 @@ the markdown export, gone on reload); earlier turns show an explicit
 "not available" note and are never rebuilt by a new search. Opening the view
 makes no request. Excerpt text enters the DOM as text only. Citation wording:
 a citation is *source-matched* (it names a supplied excerpt); that is not a
-semantic-support check (see the table below).
+semantic-support check (see the table below). The console labels accepted
+citations "Source-matched" (chip, citations title, completion announcement),
+never "Verified" (#838).
 
 <a id="answer-contract"></a>
 ## Supplied evidence and answer states
