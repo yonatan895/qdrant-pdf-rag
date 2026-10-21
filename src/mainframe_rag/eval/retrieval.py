@@ -37,7 +37,10 @@ SEARCH_LIMIT = 8  # headroom for recall@5
 MUST_NOT_WINDOW = 5  # must_not violations are gated inside the top-5
 
 L1_LIMIT = 8  # recall@8 headroom; matches the answer path's retrieval depth
-L1_KEYS = ("recall@5", "recall@8", "mrr", "ndcg@8")
+# Reported per class, overall and per query. The promotion gate reads only
+# its own metrics (eval.promotion); recall@1 is reported here (#837) and
+# gates only once a recorded baseline carries it.
+L1_KEYS = ("recall@1", "recall@5", "recall@8", "mrr", "ndcg@8")
 
 
 def is_sibling_exception(query_ids: set[str], doc_message_ids) -> bool:
@@ -513,6 +516,7 @@ def score_row(hits: Sequence[Any], entry: GoldenEntry) -> dict[str, Any]:
         if is_relevant_hit(hit.doc_id, hit.heading, entry):
             reciprocal_rank = 1.0 / rank
             break
+    row["recall@1"] = 1.0 if hits and is_relevant_hit(hits[0].doc_id, hits[0].heading, entry) else 0.0
     row["recall@5"] = 1.0 if any(is_relevant_hit(h.doc_id, h.heading, entry) for h in hits[:5]) else 0.0
     row["recall@8"] = 1.0 if any(is_relevant_hit(h.doc_id, h.heading, entry) for h in hits[:L1_LIMIT]) else 0.0
     row["mrr"] = reciprocal_rank

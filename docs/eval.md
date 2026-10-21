@@ -333,9 +333,11 @@ verdict.
   MRR) improving with a paired-bootstrap 95% CI excluding zero (2000
   resamples, seeded). Pure parity refactors hold by design.
 - **L1 metrics:** `L1_LIMIT=8` (matches the answer path's retrieval depth);
-  recall@5/@8, MRR@8, shared nDCG@8 helper (no @1/@3 here, unlike the
+  recall@1/@5/@8, MRR@8, shared nDCG@8 helper (no @3 here, unlike the
   eval); abstain rows contribute traps only; trap precision divides by all
-  rows.
+  rows. recall@1 (#837) is reported per class, overall and per query but
+  not yet gated: the verdict reads recall@5 and MRR only, and the recorded
+  baselines predate the key.
 - **L2 (answer tier):** reuses the answer-eval runner and adds citation
   precision/recall over exact cite-string joins (precision averages cited
   rows, recall counts zero-cite rows at 0; unmapped citations fail the

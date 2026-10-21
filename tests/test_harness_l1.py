@@ -99,6 +99,7 @@ def test_score_row_full_graded_match():
     e = _entry(expected_heading="IEA500I", expected_page="2-14")
     hits = [_Hit("SA38-0673-70", heading="IEA500I", page_label="2-14", score=1.0)]
     row = score_row(hits, e)
+    assert row["recall@1"] == 1.0
     assert row["recall@5"] == 1.0 and row["recall@8"] == 1.0 and row["mrr"] == 1.0
     assert row["ndcg@8"] == 1.0  # max gain at rank 1 == ideal
     # N chunks of the SAME expected doc must not push nDCG above 1 (doc-level dedupe)
@@ -111,8 +112,15 @@ def test_score_row_abstain_excluded_but_traps_checked():
                must_not_message_ids=["IEC070I"])
     hits = [_Hit("SA38-0674-70", message_ids=("IEC070I",), score=0.7)]
     row = score_row(hits, e)
-    assert "recall@5" not in row and "ndcg@8" not in row
+    assert "recall@1" not in row and "recall@5" not in row and "ndcg@8" not in row
     assert row["violations"]  # sibling-only bait chunk violates
+
+
+def test_score_row_recall_at_1_counts_only_the_first_hit():
+    """#837: a relevant hit at rank 2 keeps recall@5 and loses recall@1, the
+    first-rank loss the top-5 metrics cannot see."""
+    row = score_row([_Hit("SA38-0000-00"), _Hit("SA38-0673-70")], _entry())
+    assert (row["recall@1"], row["recall@5"], row["mrr"]) == (0.0, 1.0, 0.5)
 
 
 def test_score_row_cocarrying_chunk_not_a_violation():
@@ -124,6 +132,21 @@ def test_score_row_cocarrying_chunk_not_a_violation():
     ]
     row = score_row(hits, e)
     assert "violations" not in row
+
+
+def test_aggregate_reports_recall_at_1_per_class_overall_and_per_query():
+    """#837: recall@1 sits next to the existing L1 metrics in every block."""
+    rows = [
+        score_row([_Hit("X1"), _Hit("D1")], _entry(id="A-1", expected_doc_ids=["D1"])),
+        score_row([_Hit("D1")], _entry(id="A-2", expected_doc_ids=["D1"])),
+        score_row([_Hit("D2")], _entry(id="B-1", query_class="syntax", expected_doc_ids=["D2"])),
+    ]
+    agg = aggregate(rows)
+    assert agg["classes"]["message_id"]["recall@1"] == 0.5
+    assert agg["classes"]["message_id"]["recall@5"] == 1.0
+    assert agg["classes"]["syntax"]["recall@1"] == 1.0
+    assert (agg["overall"]["recall@1"], agg["overall"]["recall@5"]) == (0.6667, 1.0)
+    assert agg["per_query"]["A-1"]["recall@1"] == 0.0
 
 
 def test_aggregate_per_class_and_absolute_trap_precision():
