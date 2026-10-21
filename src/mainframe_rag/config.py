@@ -9,7 +9,8 @@ feature hashing, no network, no model weights. Never the default in prod.
 """
 
 import contextlib
-import multiprocessing
+import os
+from pathlib import Path
 from typing import Literal, get_args
 
 from opentelemetry import propagate
@@ -24,6 +25,67 @@ HASH_EMBED_DIM = 256
 # verbatim; LLM_REASONING_EFFORTS declares the subset the served template accepts.
 ReasoningEffort = Literal["low", "medium", "high", "xhigh"]
 REASONING_EFFORTS: tuple[ReasoningEffort, ...] = get_args(ReasoningEffort)
+
+
+# cgroup mount and this process's membership file (#840).
+_CGROUP_ROOT = Path("/sys/fs/cgroup")
+_PROC_CGROUP = Path("/proc/self/cgroup")
+
+
+def _quota_v2(cpu_max: Path) -> float | None:
+    """`cpu.max` is "<quota> <period>"; quota "max" means none."""
+    try:
+        quota, period = cpu_max.read_text().split()
+        if quota == "max":
+            return None
+        quota_us, period_us = int(quota), int(period)
+    except (OSError, ValueError):
+        return None
+    return quota_us / period_us if quota_us > 0 and period_us > 0 else None
+
+
+def _cgroup_cpu_quota(root: Path, proc_cgroup: Path) -> float | None:
+    """CPUs granted by the cgroup quota, or None when there is none or it
+    cannot be read. v2: the lowest `cpu.max` from this process's own cgroup
+    (the `0::` line of /proc/self/cgroup; "/" inside a cgroup namespace) up
+    to the mount root, since a parent's quota binds its children. v1:
+    `cpu/cpu.cfs_quota_us` / `cpu.cfs_period_us` (-1 means none)."""
+    own = "/"
+    with contextlib.suppress(OSError):
+        own = next(
+            (l[3:] for l in proc_cgroup.read_text().splitlines() if l.startswith("0::")), "/"
+        )
+    node = root / own.strip("/")
+    quotas = []
+    for directory in (node, *node.parents):
+        quota = _quota_v2(directory / "cpu.max")
+        if quota is not None:
+            quotas.append(quota)
+        if directory == root:
+            break
+    if quotas:
+        return min(quotas)
+    try:
+        quota_us = int((root / "cpu" / "cpu.cfs_quota_us").read_text())
+        period_us = int((root / "cpu" / "cpu.cfs_period_us").read_text())
+    except (OSError, ValueError):
+        return None
+    return quota_us / period_us if quota_us > 0 and period_us > 0 else None
+
+
+def available_cpus(cgroup_root: Path | None = None, proc_cgroup: Path | None = None) -> int:
+    """CPUs this process can actually use: the lowest of its affinity mask
+    and the cgroup CPU quota, rounded down, at least 1. A container limited
+    to 2 CPUs on a 64-core node reports 2, not 64 (#840). Without a quota
+    this is `os.process_cpu_count()`."""
+    cpus = os.process_cpu_count() or 2
+    quota = _cgroup_cpu_quota(
+        _CGROUP_ROOT if cgroup_root is None else cgroup_root,
+        _PROC_CGROUP if proc_cgroup is None else proc_cgroup,
+    )
+    if quota is not None:
+        cpus = min(cpus, int(quota))
+    return max(1, cpus)
 
 
 def bearer_auth_headers(api_key: str | None) -> dict[str, str]:
@@ -351,7 +413,7 @@ class Settings(BaseSettings):
     # owned by docs/ingest.md and enforced here so no call site can grow a
     # magic number outside them.
     ingest_workers: int = Field(
-        default_factory=lambda: max(1, (multiprocessing.cpu_count() or 2) - 1)
+        default_factory=lambda: max(1, available_cpus() - 1)
     )
     batch_size: int = Field(default=128, ge=16, le=256)
     # Embed+upsert ran serially in the parent process (274s of a 281s corpus

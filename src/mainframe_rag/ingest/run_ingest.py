@@ -350,7 +350,10 @@ def _parse_one(
 def resolve_workers(requested: int | None, settings: Settings) -> int:
     """INGEST_WORKERS (or the CLI override) is a cap, never 'spawn unbounded':
     clamp into [1, 2*CPU]. The pool is bounded either way; this keeps a bad
-    env value from fanning out beyond the box."""
+    env value from fanning out beyond the box. The clamp counts the node's
+    CPUs on purpose: it bounds runaway values, it is not sizing. Only the
+    default (Settings.ingest_workers) follows the CPUs the process can use,
+    so an operator may oversubscribe a network-bound ingest (#840)."""
     cap = max(1, 2 * (mp.cpu_count() or 2))
     base = settings.ingest_workers if requested is None else requested
     return max(1, min(int(base), cap))
