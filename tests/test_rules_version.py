@@ -47,7 +47,7 @@ def test_version_is_stable_and_covers_all_payload_producers() -> None:
 # no silent baseline changes); unrelated code belongs outside rule modules.
 # #839 (vendor resolved below the corpus root) moved it 94d7c565 -> 765dfe66;
 # #849 (path layout only at exactly four levels) moved it -> c47352b2.
-RULES_VERSION_PIN = "c47352b258f9f94f"
+RULES_VERSION_PIN = "6475418c100af4ec"
 
 
 def test_rules_version_changes_only_deliberately() -> None:
