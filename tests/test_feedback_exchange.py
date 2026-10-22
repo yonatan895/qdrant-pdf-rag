@@ -466,3 +466,144 @@ def test_probe_sees_an_idle_open_connection_but_is_only_point_in_time(tmp_path):
     late = FeedbackStore(db)  # a service starting after the probe: not prevented
     assert store_in_use(db) is True  # visible only to the next probe
     late.close()
+
+
+# --- hand-edited files with a recomputed hash (integrity is not authenticity) ------------
+
+
+def _with_created_at(good_lines, idx, literal: bytes):
+    """Replace line idx's created_at with a raw JSON literal and recompute the hash."""
+    row = json.loads(good_lines[idx])
+    marker = json.dumps(row["created_at"]).encode()
+    line = good_lines[idx].replace(b'"created_at":' + marker, b'"created_at":' + literal)
+    assert line != good_lines[idx]
+    out = list(good_lines)
+    out[idx] = line
+    return _rehash(out)
+
+
+@pytest.mark.parametrize("literal", [b"Infinity", b"-Infinity", b"NaN", b"1e400", b"1e12",
+                                     b"1000000000000000000000000000000", b"5000301"])
+@pytest.mark.parametrize("kind", ["answer", "rating"])
+def test_non_finite_or_future_timestamps_are_refused(source, tmp_path, capsys, kind, literal):
+    _good, lines = _tampered(source, tmp_path)
+    idx = next(i for i, ln in enumerate(lines) if f'"kind":"{kind}"'.encode() in ln)
+    db2 = tmp_path / "dst.sqlite3"
+    assert _import(_write(tmp_path, _with_created_at(lines, idx, literal)), db2) == 2
+    cap = capsys.readouterr()
+    assert f"invalid_{kind}_line_{idx + 1}" in cap.err and cap.out == ""
+    assert NASTY not in cap.err
+    s = FeedbackStore(db2)
+    assert s.is_empty()
+    s.close()
+
+
+def test_timestamp_within_the_skew_is_accepted_and_purge_applies_the_rule(source, tmp_path,
+                                                                          capsys):
+    _good, lines = _tampered(source, tmp_path)
+    idx = next(i for i, ln in enumerate(lines) if b'"kind":"answer"' in ln)
+    edge = _with_created_at(lines, idx, str(NOW + exchange.MAX_FUTURE_SKEW_S).encode())
+    db2 = tmp_path / "dst.sqlite3"
+    assert _import(_write(tmp_path, edge), db2) == 0
+    capsys.readouterr()
+    # purge deletes exactly what the retention rule says, edge row included once due
+    s = FeedbackStore(db2, clock=lambda: NOW + 10 * 86400)
+    assert s.purge(retention_days=1) == {"answers": 3, "ratings": 2, "wal_truncated": True}
+    assert s.is_empty()
+    s.close()
+
+
+def test_header_exported_at_and_retention_are_checked(source, tmp_path, capsys):
+    _good, lines = _tampered(source, tmp_path)
+    for changes in ({"exported_at": float("inf")}, {"exported_at": 1e12},
+                    {"retention_days": 10**9}, {"retention_days": True}):
+        assert _import(_write(tmp_path, _rehash(_mutate(lines, 0, **changes))),
+                       tmp_path / "d.sqlite3") == 2
+        assert "bad_format" in capsys.readouterr().err
+
+
+def test_non_finite_telemetry_is_refused(source, tmp_path, capsys):
+    _good, lines = _tampered(source, tmp_path)
+    row = json.loads(lines[1])
+    row["telemetry"] = {"ttft_ms": float("nan")}
+    out = list(lines)
+    out[1] = json.dumps(row, sort_keys=True).encode()
+    assert _import(_write(tmp_path, _rehash(out)), tmp_path / "d.sqlite3") == 2
+    assert "invalid_answer_line_2" in capsys.readouterr().err
+
+
+def test_deeply_nested_line_is_a_fixed_refusal_not_a_traceback(source, tmp_path, capsys):
+    _good, lines = _tampered(source, tmp_path)
+    out = list(lines)
+    out.insert(1, b"[" * 100_000)
+    assert _import(_write(tmp_path, _rehash(out)), tmp_path / "d.sqlite3") == 2
+    err = capsys.readouterr().err
+    assert err == "feedback-exchange: refused: bad_format\n"
+
+
+def test_store_errors_during_import_are_a_fixed_refusal(source, tmp_path, capsys, monkeypatch):
+    good = tmp_path / "a.jsonl"
+    assert _export(source, good) == 0
+
+    def boom(self, *a, **k):
+        raise sqlite3.IntegrityError(f"NOT NULL failed: {SENTINEL}")
+
+    monkeypatch.setattr(FeedbackStore, "import_records", boom)
+    assert _import(good, tmp_path / "d.sqlite3") == 2
+    cap = capsys.readouterr()
+    assert "store_unwritable" in cap.err and SENTINEL not in cap.err + cap.out
+
+
+# --- redirected stdout (F3) --------------------------------------------------------------
+
+
+def _export_to_stdout_file(db, target: Path, mode: int):
+    fd = os.open(target, os.O_WRONLY | os.O_CREAT, mode)
+    os.fchmod(fd, mode)
+    try:
+        return subprocess.run(
+            [sys.executable, "-m", "mainframe_rag.feedback.exchange", "export", "--db", str(db),
+             "--out", "-", "--retention-days", "180"], stdout=fd, stderr=subprocess.PIPE,
+            env={**os.environ, "PYTHONPATH": str(SRC)}, check=False)
+    finally:
+        os.close(fd)
+
+
+def test_export_to_a_redirected_stdout_file_must_be_private_and_outside_git(source, tmp_path):
+    ok = _export_to_stdout_file(source, tmp_path / "ok.jsonl", 0o600)
+    assert ok.returncode == 0 and (tmp_path / "ok.jsonl").stat().st_size > 0
+    wide = _export_to_stdout_file(source, tmp_path / "wide.jsonl", 0o644)
+    assert wide.returncode == 2 and b"output_not_private" in wide.stderr
+    assert (tmp_path / "wide.jsonl").stat().st_size == 0
+    (tmp_path / "repo" / ".git").mkdir(parents=True)
+    ingit = _export_to_stdout_file(source, tmp_path / "repo" / "x.jsonl", 0o600)
+    assert ingit.returncode == 2 and b"output_in_git_worktree" in ingit.stderr
+    assert (tmp_path / "repo" / "x.jsonl").stat().st_size == 0
+
+
+def test_records_later_than_the_header_exported_at_are_refused(source, tmp_path, capsys):
+    _good, lines = _tampered(source, tmp_path)
+    latest = max(json.loads(ln)["created_at"] for ln in lines[1:-1])
+    # header at the latest record (+ the skew) is genuine; just past the skew is not
+    ok = _rehash(_mutate(lines, 0, exported_at=latest))
+    assert _import(_write(tmp_path, ok), tmp_path / "ok.sqlite3") == 0
+    forged = _rehash(_mutate(lines, 0, exported_at=latest - exchange.MAX_FUTURE_SKEW_S - 1))
+    capsys.readouterr()
+    assert _import(_write(tmp_path, forged), tmp_path / "bad.sqlite3") == 2
+    assert "invalid_" in capsys.readouterr().err
+    assert not (tmp_path / "bad.sqlite3").exists() or FeedbackStore(tmp_path / "bad.sqlite3").is_empty()
+
+
+def test_import_applies_the_importers_retention_not_the_forged_header(source, tmp_path, capsys):
+    """A header claiming 3650 days must not extend retention: `expired` and the
+    next purge use the importer's configured window (here 180)."""
+    _good, lines = _tampered(source, tmp_path)
+    forged = _write(tmp_path, _rehash(_mutate(lines, 0, retention_days=3650)))
+    db2 = tmp_path / "dst.sqlite3"
+    late = 20_000_000.0  # records are ~1_000_000: far past 180 days, inside 3650
+    assert exchange.main(["import", "--in", str(forged), "--db", str(db2),
+                          "--retention-days", "180"], clock=lambda: late) == 0
+    assert json.loads(capsys.readouterr().out)["expired"] == 3
+    s = FeedbackStore(db2, clock=lambda: late)
+    assert s.purge(retention_days=180) == {"answers": 3, "ratings": 2, "wal_truncated": True}
+    s.close()
