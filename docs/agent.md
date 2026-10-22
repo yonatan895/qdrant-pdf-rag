@@ -405,8 +405,38 @@ retention: [observability](observability.md#data-tiers).
   Single replica, single uvicorn worker only (one SQLite writer, one
   scheduler, one per-process registry). The service entry point is
   `python -m uvicorn --factory mainframe_rag.feedback.service:app_from_env`;
-  `tests/test_feedback_store.py` launches that command. The JSONL
-  export/import, which also makes a later Postgres move testable, is phase 2.
+  `tests/test_feedback_store.py` launches that command.
+  **Export and import** (#805, ADR-0005; operator CLI, no HTTP route):
+  `python -m mainframe_rag.feedback.exchange export --db P --out FILE|-` and
+  `import --in FILE|- --db P [--merge] [--keep-existing]`. The file is canonical
+  JSONL v1: a `header` (format, version, store_schema, `exported_at`,
+  `retention_days`), `answer` lines then `rating` lines in request_id order
+  (sorted keys, ASCII-escaped; ratings carry no local id), and a `trailer` with
+  the counts and the sha256 of every preceding byte (integrity, not
+  authenticity). Export opens the store read-only (`mode=ro`: it never writes
+  the live file or takes the write lock), reads one consistent snapshot into
+  memory and closes it before any output is written, so it cannot pin the WAL
+  and defer the purge. The output is created `O_EXCL` with mode 0600, refused
+  inside a git work tree or on a terminal; with `--out -` a redirected regular
+  file must be private (no group/other bits) and outside a git work tree, while
+  a pipe cannot be inspected (the runbook's `umask 077` covers the receiving
+  file). It holds question, answer and
+  comment text and escapes the 180-day purge: the operator deletes it. Import
+  validates the whole file first (hash, counts, version, schema, finite timestamps no later than the importer's clock and the header's `exported_at`, each plus 300 s, so a hand-edited file cannot outlive the retention window, finite telemetry, the live
+  `AnswerRecord`/`Rating` models, unknown fields, duplicate ids, a rating
+  needs an answer in the file or the target), refuses a group/world-readable
+  input, then applies it in one transaction preserving `created_at`. The
+  service must be stopped first (runbook: scale to 0). Defence in depth, not a
+  guarantee: an exclusive-lock probe (`store_in_use`, refusal `store_in_use`)
+  sees any connection that holds the WAL store at that moment, an idle open
+  service included, but it is point-in-time (a service started afterwards is not
+  seen) and unreliable across hosts or NFS. The target is empty unless `--merge`. An answer already present is never rewritten
+  (identical is a duplicate, different a conflict); a rating that differs is
+  replaced when newer, kept when older, a conflict at equal `created_at`. Any
+  conflict refuses the whole import unless `--keep-existing`. Refusals are a
+  fixed code on stderr and exit 2 (never row text); the header's `retention_days` is informational, import uses the importer's own; success prints counts
+  (`inserted`, `duplicate`, `conflict`, `superseded`, `expired`; `expired` rows
+  are removed by the next purge). Tests: `tests/test_feedback_exchange.py`. Local tasks: `feedback:export DB= OUT=`, `feedback:import IN= DB= [MERGE=1] [KEEP_EXISTING=1]`.
   Deployment (the single-replica StatefulSet `rag-feedback`, the kept claim
   `rag-feedback-data`, the operator Secret and the agent-only NetworkPolicy,
   default off) is in the chart: [deploy.md](deploy.md#feedback-service).
@@ -1169,8 +1199,13 @@ from the next line). The prefix says nothing answers the question, so a scope
 caveat leading a partial answer ("X is not covered by the excerpts; ...") is a
 mixed answer; the prefix inside a sentence, subject-less or placed after an
 answer clause leaves the whole-response rule in charge. The decline cites
-nothing: inline citation markers anywhere after the lead mean cited claims,
-so the whole-response rule decides and a mixed answer keeps its citations.
+nothing: inline citation markers anywhere after the lead, and a line that
+begins with `[n]`, also behind bullets, `>` or numbered markers (#877; the only list-style marker that counts as a
+citation), mean cited claims, so the whole-response rule decides and a mixed
+answer keeps its citations. `0)`, `1.` and `-` without a leading `[n]` stay list scaffolding around the
+uncited coverage note. A decline wrapped whole-line in straight or curly quotes,
+backticks or a blockquote is peeled like any list marker and still declines;
+the same text quoted inside a sentence does not.
 Uncited text after the decline is the coverage note, so a model that leads
 with the decline and then answers without citing is classified
 `insufficient_evidence`: the conservative outcome, never a false `accepted`.
@@ -1183,8 +1218,8 @@ Accepted residuals:
 - An answer that breaks rule 4 by leading with the decline, then answers
   while citing only in the `Citations:` list, is classified
   `insufficient_evidence` with its citations zeroed.
-- A decline whose coverage note mentions an excerpt index ("[2] covers only
-  ...") falls to the whole-response rule.
+- A decline whose coverage note mentions an excerpt index, inline or at the
+  start of a line ("[2] covers only ..."), falls to the whole-response rule.
 
 The G4 measurement of this wording records how often either occurs.
 

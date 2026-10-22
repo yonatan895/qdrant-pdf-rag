@@ -27,12 +27,17 @@
       "status": "declared"
     },
     {
-      "approval_ref": null,
+      "approval_ref": "gh:yonatan895/qdrant-pdf-rag#376 maintainer decisions comment 2026-10-23",
       "bind": {
         "digest": "sha256:a0e04fe623cb064502cd869cefc1dc7ce359d8edd481063b5bd351c0a0a2c91e",
         "images_txt": "docker.io/qdrant/qdrant:v1.19.0-unprivileged"
       },
       "class": "permissive",
+      "decision": {
+        "date": "2026-10-23",
+        "disposition": "approved on the upstream project license (Apache-2.0); base-OS and bundled-module layer inventory is follow-up #371",
+        "owner": "yonatan895"
+      },
       "distributed_by_repo": true,
       "id": "image:qdrant",
       "kind": "image",
@@ -44,15 +49,20 @@
         "qdrant-image.tar"
       ],
       "spdx_basis": "upstream-project-license",
-      "status": "pending-owner-decision"
+      "status": "approved"
     },
     {
-      "approval_ref": null,
+      "approval_ref": "gh:yonatan895/qdrant-pdf-rag#376 maintainer decisions comment 2026-10-23",
       "bind": {
         "digest": "sha256:46a886260e04002d8f45e213fc39063fa11a50446048fdaa64786fc0840cb9f8",
         "images_txt": "cr.jaegertracing.io/jaegertracing/jaeger:2.20.0"
       },
       "class": "permissive",
+      "decision": {
+        "date": "2026-10-23",
+        "disposition": "approved on the upstream project license (Apache-2.0); base-OS and bundled-module layer inventory is follow-up #371",
+        "owner": "yonatan895"
+      },
       "distributed_by_repo": true,
       "id": "image:jaeger",
       "kind": "image",
@@ -64,48 +74,66 @@
         "jaeger-image.tar"
       ],
       "spdx_basis": "upstream-project-license",
-      "status": "pending-owner-decision"
+      "status": "approved"
     },
     {
-      "approval_ref": null,
+      "approval_ref": "gh:yonatan895/qdrant-pdf-rag#376 maintainer decisions comment 2026-10-23",
       "bind": {
         "digest": "sha256:1e4b43488508216fee35b87e6b5425f4ef475eacf9c113f5b901e27af3844fba",
+        "files": [
+          {
+            "notice": true,
+            "path": "licenses/ubi9-python-314-minimal.rpms.txt",
+            "sha256": "8962143bc2ed97fdbc756750cc29b68cd48022979d84a3f2a97d9fc80616d16b"
+          }
+        ],
         "images_txt": "registry.access.redhat.com/ubi9/python-314-minimal:9.8"
       },
       "class": "proprietary",
+      "decision": {
+        "date": "2026-10-23",
+        "disposition": "approved on the Red Hat UBI EULA after RPM-list extraction from the pinned digest (116 packages, name/version/license tag, 2026-10-23)",
+        "owner": "yonatan895"
+      },
       "distributed_by_repo": true,
       "id": "image:ubi9-python-314-minimal",
       "kind": "image",
       "license_declared": "Red Hat Universal Base Image EULA plus the license of each packaged component",
       "license_spdx": "LicenseRef-Red-Hat-UBI-EULA",
       "name": "Red Hat UBI 9 python-314-minimal (base of both application images)",
-      "obligation": "Redistribution terms of the UBI EULA and the license of every RPM in the base layers (including GPL/LGPL packages and any source-offer duties) are an owner decision; the RPM inventory is not yet extracted from the actual archive.",
+      "obligation": "UBI EULA redistribution terms apply. The per-RPM license tags (including GPL/LGPL packages) are listed in licenses/ubi9-python-314-minimal.rpms.txt; any source offer would be a separately approved packaging change.",
       "ships_in": [
         "app-agent image",
         "app-ingest image"
       ],
       "spdx_basis": "upstream-project-license",
-      "status": "pending-owner-decision"
+      "status": "approved"
     },
     {
-      "approval_ref": null,
+      "approval_ref": "gh:yonatan895/qdrant-pdf-rag#376 maintainer decisions comment 2026-10-23",
       "bind": {
         "digest": "sha256:b86cefe58f2f74904a71d0c1a064beb7a2a94caa979f4c472e6b936eec79850d",
         "images_txt": "registry.redhat.io/openshift4/ose-oauth-proxy:v4.14"
       },
       "class": "proprietary",
+      "decision": {
+        "date": "2026-10-23",
+        "disposition": "approved for transfer as an external dependency: shipped as the Red Hat image, not built or modified by this repository; if transfer becomes a problem the maintainer raises it with the platform team",
+        "escalation": "maintainer -> platform team",
+        "owner": "yonatan895"
+      },
       "distributed_by_repo": true,
       "id": "image:oauth-proxy",
       "kind": "image",
       "license_declared": "Apache-2.0 upstream project, pulled from registry.redhat.io under Red Hat registry terms",
       "license_spdx": "Apache-2.0 AND LicenseRef-Red-Hat-Registry-Terms",
       "name": "OpenShift oauth-proxy sidecar",
-      "obligation": "Whether Red Hat registry/subscription terms permit transferring this image into the air gap is an owner decision; image layer licenses are not enumerated.",
+      "obligation": "External dependency: the Red Hat image is transferred unmodified and not built here; image layer licenses are not enumerated (#371).",
       "ships_in": [
         "oauth-proxy-image.tar (when bundled)"
       ],
       "spdx_basis": "upstream-project-license",
-      "status": "pending-owner-decision"
+      "status": "approved"
     },
     {
       "approval_ref": null,
@@ -189,7 +217,7 @@
       "status": "declared"
     },
     {
-      "approval_ref": null,
+      "approval_ref": "gh:yonatan895/qdrant-pdf-rag#376 maintainer decisions comment 2026-10-23",
       "bind": {
         "files": [
           {
@@ -223,21 +251,26 @@
           }
         ]
       },
-      "class": "unknown",
+      "class": "permissive",
+      "decision": {
+        "date": "2026-10-23",
+        "disposition": "approved (OFL-1.1; files unmodified, LICENSE.ibm-plex travels with them)",
+        "owner": "yonatan895"
+      },
       "distributed_by_repo": true,
       "id": "asset:ibm-plex",
       "kind": "vendored-font",
       "license_declared": "SIL Open Font License 1.1 (vendored LICENSE.ibm-plex; npm @ibm/plex-sans 1.1.0, @ibm/plex-mono 2.5.0)",
       "license_spdx": "OFL-1.1",
       "name": "IBM Plex Sans and Mono (console fonts)",
-      "obligation": "SIL OFL 1.1: the fonts may be bundled and redistributed with the software if the copyright notice and license (LICENSE.ibm-plex) travel with them; they may not be sold on their own, and a modified version may not use the Reserved Font Name \"Plex\". The files ship unmodified. OFL-1.1 is not in this checker's license-class table, so classifying it is an owner decision.",
+      "obligation": "SIL OFL 1.1: the fonts may be bundled and redistributed with the software if the copyright notice and license (LICENSE.ibm-plex) travel with them; they may not be sold on their own, and a modified version may not use the Reserved Font Name \"Plex\". The files ship unmodified. OFL-1.1 is a permissive class in this checker.",
       "ships_in": [
         "app-agent image",
         "app-ingest image",
         "repo.bundle"
       ],
       "spdx_basis": "license-file-text",
-      "status": "pending-owner-decision"
+      "status": "approved"
     },
     {
       "approval_ref": null,
@@ -364,7 +397,7 @@
       "status": "declared"
     },
     {
-      "approval_ref": null,
+      "approval_ref": "gh:yonatan895/qdrant-pdf-rag#376 maintainer decisions comment 2026-10-23",
       "bind": {
         "files": [
           {
@@ -373,20 +406,27 @@
           }
         ]
       },
-      "class": "unknown",
+      "class": "permissive",
+      "decision": {
+        "checked": "2026-10-23",
+        "date": "2026-10-23",
+        "disposition": "approved: model card license is clearly Apache-2.0 at the pinned revision",
+        "evidence": "https://huggingface.co/api/models/Qdrant/bm25/revision/22b8d2af71a76161e18dd432d2cee0eefa66e412",
+        "owner": "yonatan895"
+      },
       "distributed_by_repo": true,
       "id": "model:bm25-sparse-weights",
       "kind": "model-asset",
-      "license_declared": "No license file in the snapshot; the Hugging Face model-card license was not captured",
-      "license_spdx": "NOASSERTION",
+      "license_declared": "Apache-2.0 per the Hugging Face model card (cardData.license) of Qdrant/bm25 at revision 22b8d2af71a76161e18dd432d2cee0eefa66e412, fetched 2026-10-23: https://huggingface.co/api/models/Qdrant/bm25/revision/22b8d2af71a76161e18dd432d2cee0eefa66e412 (README.md front matter 'license: apache-2.0')",
+      "license_spdx": "Apache-2.0",
       "name": "FastEmbed Qdrant/bm25 sparse weights (revision 22b8d2af71a7)",
-      "obligation": "The license of these weights is unverified from the shipped bytes. Confirm the upstream model-card license on a connected host and record it before release.",
+      "obligation": "No license file ships in the snapshot; the license rests on the model-card metadata at the pinned revision.",
       "ships_in": [
         "app-agent image",
         "app-ingest image"
       ],
-      "spdx_basis": "not-verified",
-      "status": "pending-owner-decision"
+      "spdx_basis": "upstream-project-license",
+      "status": "approved"
     },
     {
       "approval_ref": null,
@@ -636,19 +676,35 @@
       "wheel": "filelock-3.32.6-py3-none-any.whl"
     },
     {
-      "approval_ref": null,
+      "approval_ref": "gh:yonatan895/qdrant-pdf-rag#376 maintainer decisions comment 2026-10-23",
       "binary_wheel": false,
+      "bind": {
+        "files": [
+          {
+            "fetched": "2026-10-23",
+            "notice": true,
+            "path": "licenses/texts/flatbuffers.LICENSE",
+            "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+            "source_url": "https://raw.githubusercontent.com/google/flatbuffers/v25.12.19/LICENSE"
+          }
+        ]
+      },
       "class": "permissive",
+      "decision": {
+        "date": "2026-10-23",
+        "disposition": "approved; upstream license text added to THIRD-PARTY-NOTICES.txt",
+        "owner": "yonatan895"
+      },
       "declared_source": "License",
       "evidence": "wheel-bytes",
       "license_declared": "Apache 2.0",
       "license_files": [],
       "license_spdx": "Apache-2.0",
       "name": "flatbuffers",
-      "obligation": "The wheel ships no license text under dist-info, so the image does not carry the license/notice text this license class expects to accompany copies. Supply the upstream text into the notices on a connected host, or record why it is not required.",
+      "obligation": "Upstream license text for the locked version's tag is carried in THIRD-PARTY-NOTICES.txt (the wheel ships none under dist-info).",
       "sha256": "7634f50c427838bb021c2d66a3d1168e9d199b0607e6329399f04846d42e20b4",
       "spdx_basis": "normalized-license-field",
-      "status": "pending-owner-decision",
+      "status": "approved",
       "version": "25.12.19",
       "wheel": "flatbuffers-25.12.19-py2.py3-none-any.whl"
     },
@@ -968,19 +1024,35 @@
       "wheel": "jinja2-3.1.6-py3-none-any.whl"
     },
     {
-      "approval_ref": null,
+      "approval_ref": "gh:yonatan895/qdrant-pdf-rag#376 maintainer decisions comment 2026-10-23",
       "binary_wheel": false,
+      "bind": {
+        "files": [
+          {
+            "fetched": "2026-10-23",
+            "notice": true,
+            "path": "licenses/texts/loguru.LICENSE",
+            "sha256": "b35d026cc7aca9d5859a02eb87ddf7a386a24c986838651bd1f283f94e003327",
+            "source_url": "https://raw.githubusercontent.com/Delgan/loguru/0.7.3/LICENSE"
+          }
+        ]
+      },
       "class": "permissive",
+      "decision": {
+        "date": "2026-10-23",
+        "disposition": "approved; upstream license text added to THIRD-PARTY-NOTICES.txt",
+        "owner": "yonatan895"
+      },
       "declared_source": "Classifier",
       "evidence": "wheel-bytes",
       "license_declared": "License :: OSI Approved :: MIT License",
       "license_files": [],
       "license_spdx": "MIT",
       "name": "loguru",
-      "obligation": "The wheel ships no license text under dist-info, so the image does not carry the license/notice text this license class expects to accompany copies. Supply the upstream text into the notices on a connected host, or record why it is not required.",
+      "obligation": "Upstream license text for the locked version's tag is carried in THIRD-PARTY-NOTICES.txt (the wheel ships none under dist-info).",
       "sha256": "31a33c10c8e1e10422bfd431aeb5d351c7cf7fa671e3c4df004162264b28220c",
       "spdx_basis": "normalized-classifier",
-      "status": "pending-owner-decision",
+      "status": "approved",
       "version": "0.7.3",
       "wheel": "loguru-0.7.3-py3-none-any.whl"
     },
@@ -1112,19 +1184,35 @@
       "wheel": "numpy-2.5.3-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl"
     },
     {
-      "approval_ref": null,
+      "approval_ref": "gh:yonatan895/qdrant-pdf-rag#376 maintainer decisions comment 2026-10-23",
       "binary_wheel": true,
+      "bind": {
+        "files": [
+          {
+            "fetched": "2026-10-23",
+            "notice": true,
+            "path": "licenses/texts/onnxruntime.LICENSE",
+            "sha256": "2f07c72751aed99790b8a4869cf2311df85a860b22ded05fa22803587a48922c",
+            "source_url": "https://raw.githubusercontent.com/microsoft/onnxruntime/v1.30.0/LICENSE"
+          }
+        ]
+      },
       "class": "permissive",
+      "decision": {
+        "date": "2026-10-23",
+        "disposition": "approved; upstream license text added to THIRD-PARTY-NOTICES.txt",
+        "owner": "yonatan895"
+      },
       "declared_source": "License",
       "evidence": "wheel-bytes",
       "license_declared": "MIT License",
       "license_files": [],
       "license_spdx": "MIT",
       "name": "onnxruntime",
-      "obligation": "The wheel ships no license text under dist-info, so the image does not carry the license/notice text this license class expects to accompany copies. Supply the upstream text into the notices on a connected host, or record why it is not required.",
+      "obligation": "Upstream license text for the locked version's tag is carried in THIRD-PARTY-NOTICES.txt (the wheel ships none under dist-info).",
       "sha256": "8b611d24db2954545ce6bd9acd4670183cb368e4642450de7a9ab6474eb374ec",
       "spdx_basis": "normalized-license-field",
-      "status": "pending-owner-decision",
+      "status": "approved",
       "version": "1.30.0",
       "wheel": "onnxruntime-1.30.0-cp314-cp314-manylinux_2_28_x86_64.whl"
     },
@@ -1522,8 +1610,16 @@
     {
       "approval_ref": null,
       "binary_wheel": true,
-      "class": "election-required",
+      "class": "network-copyleft",
+      "decision": {
+        "date": "2026-10-23",
+        "disposition": "election A: rely on AGPL-3.0, scoped to the ingest path",
+        "legal_confirmation": "pending",
+        "owner": "yonatan895",
+        "scope": "ingest"
+      },
       "declared_source": "License",
+      "elected": "AGPL-3.0-only",
       "evidence": "wheel-bytes",
       "license_declared": "Dual Licensed - GNU AFFERO GPL 3.0 or Artifex Commercial License",
       "license_files": [
@@ -1534,7 +1630,7 @@
       ],
       "license_spdx": "AGPL-3.0-only OR LicenseRef-Artifex-Commercial",
       "name": "pymupdf",
-      "note": "METADATA does not state AGPL only versus or-later; recorded as only (the conservative reading). Imported by the ingest path only; the serving agent is designed not to import it (see ingest/chunk.py comment) although the wheel is installed in both images.",
+      "note": "METADATA does not state AGPL only versus or-later; recorded as only (the conservative reading). Imported by the ingest path only; the serving agent is designed not to import it (see ingest/chunk.py comment) although the wheel is installed in both images. Maintainer election 2026-10-23: AGPL-3.0, scoped to ingest. LEGAL CONFIRMATION PENDING: status stays pending-owner-decision until the qualified legal owner confirms; this is not a legal approval.",
       "obligation": "Dual license (AGPL-3.0 or Artifex commercial). Which license governs this distribution, and any AGPL source/network-use duties or commercial-grant coverage, is an owner decision (docs/licensing.md, PyMuPDF decision record). The wheel carries only a one-line declaration, not license text.",
       "sha256": "397d6715c1f0df7548a92d0afd8ce370fc48fa47aeefac16be2bc04a16a8227f",
       "spdx_basis": "normalized-license-field",
@@ -1673,19 +1769,35 @@
       "wheel": "starlette-1.6.0-py3-none-any.whl"
     },
     {
-      "approval_ref": null,
+      "approval_ref": "gh:yonatan895/qdrant-pdf-rag#376 maintainer decisions comment 2026-10-23",
       "binary_wheel": true,
+      "bind": {
+        "files": [
+          {
+            "fetched": "2026-10-23",
+            "notice": true,
+            "path": "licenses/texts/tokenizers.LICENSE",
+            "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+            "source_url": "https://raw.githubusercontent.com/huggingface/tokenizers/v0.23.2/LICENSE"
+          }
+        ]
+      },
       "class": "permissive",
+      "decision": {
+        "date": "2026-10-23",
+        "disposition": "approved; upstream license text added to THIRD-PARTY-NOTICES.txt",
+        "owner": "yonatan895"
+      },
       "declared_source": "Classifier",
       "evidence": "wheel-bytes",
       "license_declared": "License :: OSI Approved :: Apache Software License",
       "license_files": [],
       "license_spdx": "Apache-2.0",
       "name": "tokenizers",
-      "obligation": "The wheel ships no license text under dist-info, so the image does not carry the license/notice text this license class expects to accompany copies. Supply the upstream text into the notices on a connected host, or record why it is not required.",
+      "obligation": "Upstream license text for the locked version's tag is carried in THIRD-PARTY-NOTICES.txt (the wheel ships none under dist-info).",
       "sha256": "41c2f84d172449b4dadb9cdc508e3e364076613c35b16e76ecfe47a60d1e3305",
       "spdx_basis": "normalized-classifier",
-      "status": "pending-owner-decision",
+      "status": "approved",
       "version": "0.23.2",
       "wheel": "tokenizers-0.23.2-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
     },

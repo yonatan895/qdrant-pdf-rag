@@ -44,6 +44,8 @@ _MARKER_RE = re.compile(r"^(?:[-*•]\s+|\d+[.)]\s+|\[\d+\]:?\s*)+")
 # Enclosing markup peeled pairwise (with repetition, so **x** and __x__
 # resolve cleanly): bold, italic/underscore, inline code, quotes.
 _WRAP_CHARS = "`\"'*_"
+# Curly quotes wrap as open/close pairs (#877), unlike the symmetric chars.
+_WRAP_PAIRS = {"\u201c": "\u201d", "\u2018": "\u2019"}
 
 # Pasted heading-path fragments: the model sometimes copies excerpt
 # boilerplate (related-document table rows, "About this document > Table
@@ -87,7 +89,7 @@ def normalize_citation_line(line: str) -> str:
     the answer-body scanner) so a wrapped fabricated cite can never be clean
     in one path and leaked by the other. Supported wrappers, each peeled
     cleanly to the bare citation: list markers (bullet or number + [.)]),
-    blockquote '>', enclosing pairs (** __ * ` " '), angle brackets <...>,
+    blockquote '>', enclosing pairs (** __ * ` " ' and curly quotes), angle brackets <...>,
     markdown links [x](url), and parentheses. Only CITATION_LINE_RE matches
     act, and the body scanner keeps the original line in the output."""
     candidate = line.strip()
@@ -100,6 +102,8 @@ def normalize_citation_line(line: str) -> str:
         if candidate.startswith(">"):
             candidate = candidate.lstrip(">").strip()
         if len(candidate) >= 2 and candidate[0] == candidate[-1] and candidate[0] in _WRAP_CHARS:
+            candidate = candidate[1:-1].strip()
+        if len(candidate) >= 2 and _WRAP_PAIRS.get(candidate[0]) == candidate[-1]:
             candidate = candidate[1:-1].strip()
         if candidate.startswith("[") and candidate.endswith(")"):
             idx = candidate.find("](")

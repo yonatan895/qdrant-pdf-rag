@@ -549,6 +549,15 @@ embed (hash embedding is GIL-bound — a thread pool would serialize it), so
 parsing runs in a `spawn` process pool while check-delete-upsert runs in a
 thread pool.
 
+- **Reserved label delimiter** (issue #878): `|` separates the
+  `source_rev_key` fields, so `_parse_one` refuses a document whose resolved
+  vendor, product or version (path layout or `--vendor/--product/--version`)
+  contains `|`. The inventory record is an `error` with `error_type`
+  `LabelDelimiterRefused` and the fixed message `label_delimiter: ...` (no label,
+  path or text); other documents continue and the run exits non-zero. The labels
+  are refused, never sanitized or escaped: the guard lives in `run_ingest.py`,
+  outside the rules-version modules, so existing keys, chunk ids and the rules
+  version are unchanged. Escaping waits for the next planned rules bump.
 - **Per-document bounds** (issue #374; `ingest_max_pdf_bytes`,
   `ingest_max_doc_pages`, `ingest_max_doc_chunks`, default 0 = unbounded):
   `_parse_one` refuses an over-bound document with a typed
@@ -1028,7 +1037,7 @@ context/status clarification authorized by #397 (15 September 2026).
 | Identity / input | Producer → persisted state → consumers | Lifetime / distinction |
 |---|---|---|
 | Printed document identity | Parser → payload `doc_id` → citation formatting, family filters, eval | A printed family key is not a destructive revision selector |
-| Source revision | `source_rev_key` → chunk payload, inventory, completion → locks/deletes/refresh planning | Normalized labels and source content; mount location is not identity |
+| Source revision | `source_rev_key` → chunk payload, inventory, completion → locks/deletes/refresh planning | Normalized labels and source content; mount location is not identity; labels containing `\|` are refused at ingest (§9) |
 | Representation | `representation.build_manifest` and `compare_manifests` → fixed-ID contract and completion digest → ingest preflight, serving | `REEMBED_FIELDS` in code is the authoritative field policy; no second hash-field list here |
 | Physical build/publication | `doc_generation_id`, publication fingerprints → physical collection, its completion collection, alias → reader gate | Deterministic naming binds inputs; it neither makes storage immutable nor serializes publishers |
 | Query-only configuration | `compare_manifests` record-only classification → manifest/log evidence → query embedding/evaluation | Query-only drift can require evaluation without re-embedding stored documents |

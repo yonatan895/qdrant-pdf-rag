@@ -301,12 +301,13 @@ def is_structured_decline(answer_body: str, citations: Sequence[str] = ()) -> bo
     headings that are not the decline are scaffolding (the complex-query
     extension asks for headings); a prefix line without a subject takes its
     subject from the next prose line. Rule 4's decline cites nothing, so inline
-    citation markers after the lead mean cited claims and leave the #630
-    whole-response rule in charge; uncited text that follows is the permitted
+    citation markers after the lead, including a line-leading [n] (#877), mean
+    cited claims and leave the #630 whole-response rule in charge; uncited text that follows is the permitted
     note on excerpt coverage."""
-    lines = list(_prose_lines(answer_body, citations))
-    while lines and _HEADING_RE.match(lines[0].strip()) and not _lead_sentence(lines[0]).startswith(_DECLINE_KEY):
-        lines.pop(0)
+    pairs = list(_prose_line_pairs(answer_body, citations))
+    while pairs and _HEADING_RE.match(pairs[0][1].strip()) and not _lead_sentence(pairs[0][1]).startswith(_DECLINE_KEY):
+        pairs.pop(0)
+    lines = [candidate for _raw, candidate in pairs]
     if not lines:
         return False
     lead = _lead_sentence(lines[0])
@@ -316,6 +317,8 @@ def is_structured_decline(answer_body: str, citations: Sequence[str] = ()) -> bo
     if not _names_something(subject) and len(lines) > 1:
         subject = _lead_sentence(lines[1])
     if not _names_something(subject):
+        return False
+    if any(_LEADING_INDEX_RE.match(raw) for raw, _candidate in pairs[1:]):
         return False
     return not any(_INLINE_INDEX_RE.search(line) for line in lines)
 
@@ -383,8 +386,8 @@ _PROMPT_ECHO_LINE_RE = re.compile(
 )
 
 
-def _prose_lines(answer: str, citations: Sequence[str]) -> Iterator[str]:
-    """Lines of parsed prose beyond citation scaffolding, labels removed."""
+def _prose_line_pairs(answer: str, citations: Sequence[str]) -> Iterator[tuple[str, str]]:
+    """(raw line, normalized prose) pairs beyond citation scaffolding."""
     from mainframe_rag.agent.cites import (
         CITATION_LINE_RE,
         normalize_citation_line,
@@ -402,7 +405,18 @@ def _prose_lines(answer: str, citations: Sequence[str]) -> Iterator[str]:
         ):
             continue
         if re.search(r"[^\W_]", _INLINE_INDEX_RE.sub("", candidate)):
-            yield candidate
+            yield line, candidate
+
+
+def _prose_lines(answer: str, citations: Sequence[str]) -> Iterator[str]:
+    """Lines of parsed prose beyond citation scaffolding, labels removed."""
+    for _raw, candidate in _prose_line_pairs(answer, citations):
+        yield candidate
+
+
+# A line-leading [n] (optionally behind bullets, blockquote or numbered markers) is a citation
+# marker the marker normalizer peels, so the raw line is checked (#877).
+_LEADING_INDEX_RE = re.compile(r"^(?:\s*(?:[>*•-]|\d+[.)]))*\s*\[\s*\d+(?:\s*,\s*\d+)*\s*\]")
 
 
 def has_answer_body(answer: str, citations: list[str]) -> bool:

@@ -3549,7 +3549,8 @@ def test_structured_decline_leads_and_partial_answers_keep_the_whole_response_ru
     prefix followed by the missing identifier or topic is an abstention,
     whatever coverage note follows. The prefix states that nothing answers
     the question, so a scope caveat before a partial answer ("X is not
-    covered") never matches it. Only the leading, unquoted prefix with a
+    covered") never matches it. Only the leading prefix (alone on a line, or wrapped whole-line in
+    quotes, which are peeled like list markers) with a
     subject that names something counts (the subject may sit on the next
     line, and a leading Markdown heading is scaffolding); anywhere else,
     quoted, or without a subject, the #630 whole-response rule decides."""
@@ -3567,6 +3568,17 @@ def test_structured_decline_leads_and_partial_answers_keep_the_whole_response_ru
         f"**{DECLINE_PREFIX}**\n**CSQW100I**",
         f"## {DECLINE_PREFIX} CSQW100I\nThe excerpts cover CSQ6SYSP parameters only.",
         f"### Diagnosis\n{DECLINE_PREFIX} CSQW100I.",  # complex-query heading first
+        # #877 D1: only a line-leading [n] is a cited claim; other list markers
+        # after the lead stay scaffolding around the uncited coverage note.
+        f"{DECLINE_PREFIX} IEA500I.\n0) Set RETRY=5",
+        f"{DECLINE_PREFIX} IEA500I.\n1. Set RETRY=5",
+        f"{DECLINE_PREFIX} IEA500I.\n- Set RETRY=5",
+        f"{DECLINE_PREFIX} IEA500I.\n   2) Set RETRY=5",
+        f"{DECLINE_PREFIX} IEA500I.\n- 1. Set RETRY=5 in IEASYSxx",
+        # #877 D2: curly-quoted whole-line declines are recognized like straight ones.
+        f"\u201c{DECLINE_PREFIX} IEA500I.\u201d",
+        f"\u2018{DECLINE_PREFIX} IEA500I.\u2019",
+        f'"{DECLINE_PREFIX} IEA500I."',
     ]
     not_declines = [
         f'The operator saw "{DECLINE_PREFIX} IEA500I." in the console log.',
@@ -3586,6 +3598,14 @@ def test_structured_decline_leads_and_partial_answers_keep_the_whole_response_ru
         # A bare prefix followed by a cited line is cited content, not a subject.
         f"{DECLINE_PREFIX}\nIEA500I means the device is offline [1].",
         f"{DECLINE_PREFIX}\n## Recovery\nVARY the device offline [1].",
+        # #877 D1: a line-leading [n] after the decline is a cited claim.
+        f"{DECLINE_PREFIX} IEA500I.\n[1] Set RETRY=5",
+        f"{DECLINE_PREFIX} IEA500I.\n- [1] Set RETRY=5",
+        f"{DECLINE_PREFIX} IEA500I.\n> [2] Set RETRY=5",
+        # N3: [n] behind a numbered marker (any indentation) is cited like "- [1]".
+        f"{DECLINE_PREFIX} IEA500I.\n1. [1] Set RETRY=5",
+        f"{DECLINE_PREFIX} IEA500I.\n   2) [3] Set RETRY=5",
+        f"{DECLINE_PREFIX} IEA500I.\n- 1. [1] Set RETRY=5",
         # The retired #764 sentence no longer qualifies on its own lead.
         "The excerpts do not answer this question.\nThey cover JES2 checkpoint sizing [1].",
     ]
@@ -3624,6 +3644,17 @@ def test_a_lead_decline_then_an_answer_is_judged_by_whether_it_cites():
     (f"Run CHECK first.\n{DECLINE_PREFIX} IEA500I.\n\nCitations:\n{_ACCEPTED_CITE}", "stop",
      "accepted", [_ACCEPTED_CITE]),
     (f"{DECLINE_PREFIX} IEA500I.", "length", "generation_incomplete", []),
+    # #877 D1: a line-leading [n] after the decline is a cited claim and keeps its citation.
+    (f"{DECLINE_PREFIX} IEA500I.\n[1] Set RETRY=5.\n\nCitations:\n{_ACCEPTED_CITE}", "stop",
+     "accepted", [_ACCEPTED_CITE]),
+    # Other list markers stay the uncited coverage note: decline, citations zeroed.
+    (f"{DECLINE_PREFIX} IEA500I.\n1. Set RETRY=5.\n\nCitations:\n{_ACCEPTED_CITE}", "stop",
+     "insufficient_evidence", []),
+    # #877 D2: a curly-quoted decline line is a decline like a straight-quoted one.
+    (f"\u201c{DECLINE_PREFIX} IEA500I.\u201d\n\nCitations:\n{_ACCEPTED_CITE}", "stop",
+     "insufficient_evidence", []),
+    (f'"{DECLINE_PREFIX} IEA500I."\n\nCitations:\n{_ACCEPTED_CITE}', "stop",
+     "insufficient_evidence", []),
 ])
 def test_answer_partial_and_interrupted_refusal_state_json_and_sse(
     client, monkeypatch, stream, content, finish, state, cites
@@ -3742,7 +3773,7 @@ _FABRICATED_CITES = (
     "DOC9 Other, X > Y, p. 1",
     "SA22-7592-05 About > Table 1",  # docno-led pasted fragment, no page tail
 )
-_CITE_WRAPPERS = ("{}", "- {}", "1. {}", "> {}", "**{}**", "`{}`", "({})", "<{}>", "[x]({})", '"{}"')
+_CITE_WRAPPERS = ("{}", "- {}", "1. {}", "> {}", "**{}**", "`{}`", "({})", "<{}>", "[x]({})", '"{}"', "\u201c{}\u201d", "\u2018{}\u2019")
 _ANSWER_FRAGMENTS = (
     "Citations:", "Sources:", "## Citations", "**Citations:**", "Answer:", "See [1].", "[2]", "[1, 2]", "[99]", "",
     "```jcl\n//A JOB\n```", "```thinking\nnote [1]\n```", "```\nplain [2]\n```",
@@ -3790,7 +3821,7 @@ def test_parse_answer_never_raises_and_grounds_citations_in_supplied_evidence(co
             assert candidate in supplied, line
 
 
-_NESTING_WRAPPERS = st.sampled_from(["*{}*", "**{}**", "`{}`", "({})", "> {}", "_{}_"])
+_NESTING_WRAPPERS = st.sampled_from(["*{}*", "**{}**", "`{}`", "({})", "> {}", "_{}_", "\u201c{}\u201d", "\u2018{}\u2019"])
 
 
 @_PROPERTY
@@ -3807,6 +3838,20 @@ def test_citation_normalization_is_idempotent_at_any_nesting_depth(cite, wrapper
     once = normalize_citation_line(line)
     assert normalize_citation_line(once) == once
     assert once == cite, line
+
+
+@pytest.mark.parametrize("wrap", ['"{}"', "\u201c{}\u201d", "\u2018{}\u2019"])
+def test_quoted_citations_are_handled_identically_for_straight_and_curly_quotes(wrap):
+    """#877 D2 side effect: normalize_citation_line (used by the Citations: list
+    parser, the trailing-citation scan, the body scanner and the prose check)
+    treats curly pairs exactly like straight quotes: a quoted supplied cite is
+    accepted, a quoted fabricated cite is stripped from the body."""
+    evidence = make_evidence([_SUPPLIED_CITES[1]])
+    good = wrap.format(_SUPPLIED_CITES[1])
+    bad = wrap.format(_FABRICATED_CITES[0])
+    parsed = parse_answer(f"Set LFAREA [1].\n{bad}\n\nCitations:\n{good}", evidence)
+    assert parsed.citations == [_SUPPLIED_CITES[1]]
+    assert _FABRICATED_CITES[0] not in parsed.answer
 
 
 _DECLINE_LEADS = st.sampled_from([
@@ -3857,3 +3902,31 @@ def test_a_decline_quoted_inside_a_sentence_is_never_recognized(word, middle, qu
     sentence is quoted text, not the response declining (#630, #764)."""
     body = f"{word}{middle} " + quote.format(f"{lead} {subject}.") + f" {tail}"
     assert is_structured_decline(body) is False, body
+
+
+@_PROPERTY
+@given(_DECLINE_LEADS, _DECLINE_SUBJECTS, _SEPARATORS, _INDEX_MARKERS, _LEAD_WORDS, _ONE_LINE,
+       st.sampled_from(["", "- ", "> ", "1. ", "2) ", "  3. ", "- 1. ", "1. - "]))
+@example(DECLINE_PREFIX, "IEA500I", "\n", "[1]", "wSet", " RETRY=5", "1. ")
+def test_a_line_leading_index_after_the_decline_is_a_cited_claim(lead, subject, sep, marker, word, rest, prefix):
+    """#877 D1: a line-leading [n] is a citation marker, not a list marker, so
+    the decline followed by it is not a structured decline."""
+    body = f"{lead} {subject}.\n{prefix}{marker} {word}{rest}"
+    assert is_structured_decline(body) is False, body
+
+
+@_PROPERTY
+@given(_DECLINE_LEADS, _DECLINE_SUBJECTS, st.sampled_from(["0)", "1.", "-", "*", "12)", "- 1.", "1. -", "  2)"]), _LEAD_WORDS)
+def test_other_list_markers_after_the_decline_stay_scaffolding(lead, subject, marker, word):
+    """#877 D1: only [n] is a citation marker; numbered and bullet markers
+    around the uncited coverage note keep the decline."""
+    body = f"{lead} {subject}.\n{marker} {word}"
+    assert is_structured_decline(body) is True, body
+
+
+@_PROPERTY
+@given(st.sampled_from(["\u201c{}\u201d", "\u2018{}\u2019", '"{}"', "'{}'", "`{}`"]), _DECLINE_SUBJECTS, st.sampled_from(["", "\nNote words"]))
+def test_a_whole_line_quoted_decline_is_recognized_in_every_quote_style(quote, subject, tail):
+    """#877 D2: wrapper peeling treats curly and straight quotes alike."""
+    body = quote.format(f"{DECLINE_PREFIX} {subject}.") + tail
+    assert is_structured_decline(body) is True, body

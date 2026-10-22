@@ -1,0 +1,46 @@
+# Feedback export/import tasks — issue #805 (ADR-0005).
+#
+# Dispatch only: mainframe_rag.feedback.exchange owns validation, the file
+# format, refusals and exit codes. These run the CLI against a LOCAL store file
+# (a scratch copy or a restored volume); the in-cluster export is the `oc exec`
+# runbook in docs/install_and_ops.md. Caller values reach the module through
+# `env:` bridges and quoted expansion. No input has a default: DB, OUT and IN
+# are required and an empty value fails in the module (missing --db/--out).
+# Included with `dir: .` from the root Taskfile: always runs at repo root.
+version: '3'
+
+tasks:
+  export:
+    desc: Export a feedback store to a canonical hashed JSONL file (mode 0600)
+    summary: |
+      `python -m mainframe_rag.feedback.exchange export --db "$DB" --out "$OUT"`.
+      Opens the store read-only and writes a NEW file (refused if it exists, is
+      inside a git work tree, or is `-` on a terminal). The file holds question,
+      answer and comment text: keep it out of git, logs and CI, and delete it
+      when done. Inputs: DB (store file), OUT (new file). Optional
+      RETENTION_DAYS (header value; default FEEDBACK_RETENTION_DAYS).
+    env:
+      TASK_DB: '{{.DB}}'
+      TASK_OUT: '{{.OUT}}'
+      TASK_RETENTION_DAYS: '{{.RETENTION_DAYS}}'
+    cmds:
+      - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
+      - .venv/bin/python -m mainframe_rag.feedback.exchange export --db "$TASK_DB" --out "$TASK_OUT" {{if .RETENTION_DAYS}}--retention-days "$TASK_RETENTION_DAYS"{{end}}
+
+  import:
+    desc: Import a feedback export (stop the service first)
+    summary: |
+      `python -m mainframe_rag.feedback.exchange import --in "$IN" --db "$DB"`.
+      Validates the whole file first; an empty target by default. MERGE=1 allows
+      a populated target and KEEP_EXISTING=1 keeps the target's rows on
+      conflicts instead of refusing. Stop the service first (docs/install_and_ops.md);
+      the module's lock probe is a point-in-time check, not a guarantee.
+      Inputs: IN (export file), DB (store file); optional MERGE, KEEP_EXISTING,
+      RETENTION_DAYS.
+    env:
+      TASK_IN: '{{.IN}}'
+      TASK_DB: '{{.DB}}'
+      TASK_RETENTION_DAYS: '{{.RETENTION_DAYS}}'
+    cmds:
+      - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
+      - .venv/bin/python -m mainframe_rag.feedback.exchange import --in "$TASK_IN" --db "$TASK_DB" {{if .MERGE}}--merge{{end}} {{if .KEEP_EXISTING}}--keep-existing{{end}} {{if .RETENTION_DAYS}}--retention-days "$TASK_RETENTION_DAYS"{{end}}

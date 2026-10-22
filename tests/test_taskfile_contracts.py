@@ -756,6 +756,34 @@ class TaskContractsTests(unittest.TestCase):
         self.assertEqual(argv[argv.index("--golden") + 1], "g.jsonl")
         self.assertEqual(argv[argv.index("--depth") + 1], "200")
 
+    def test_feedback_tasks_transport_paths_and_flags_exactly(self):
+        self.make_venv_fake()
+        env = self.tool_env()
+        proc = self.run_task("feedback:export", "DB=/d/a b.sqlite3", "OUT=/o/x y.jsonl",
+                             extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        argv = self.pip_calls()[0]["argv"]
+        self.assertEqual(argv[:3], ["-m", "mainframe_rag.feedback.exchange", "export"])
+        self.assertEqual(argv[argv.index("--db") + 1], "/d/a b.sqlite3")
+        self.assertEqual(argv[argv.index("--out") + 1], "/o/x y.jsonl")
+        self.assertNotIn("--retention-days", argv)
+        self.log.unlink()
+        proc = self.run_task("feedback:import", "IN=/o/x y.jsonl", "DB=/d/a b.sqlite3",
+                             "MERGE=1", "KEEP_EXISTING=1", "RETENTION_DAYS=30", extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        argv = self.pip_calls()[0]["argv"]
+        self.assertEqual(argv[:3], ["-m", "mainframe_rag.feedback.exchange", "import"])
+        self.assertEqual(argv[argv.index("--in") + 1], "/o/x y.jsonl")
+        self.assertEqual(argv[argv.index("--db") + 1], "/d/a b.sqlite3")
+        self.assertEqual(argv[argv.index("--retention-days") + 1], "30")
+        self.assertIn("--merge", argv)
+        self.assertIn("--keep-existing", argv)
+        self.log.unlink()
+        proc = self.run_task("feedback:import", "IN=a", "DB=b", extra_env=env)
+        argv = self.pip_calls()[0]["argv"]
+        self.assertNotIn("--merge", argv)
+        self.assertNotIn("--keep-existing", argv)
+
     def test_harness_l3_transports_only_explicit_baseline(self):
         self.make_venv_fake()
         env = self.tool_env()
