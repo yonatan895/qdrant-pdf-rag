@@ -61,3 +61,8 @@ package-lock.json
 
 # --- Independent release set (#367): SME-authored, kept outside git like the corpora ---
 release_set.jsonl
+
+# --- Sphinx API reference (issue #889): generated stubs and local output ---
+site-src/reference/api/
+site-src/reference/_build/
+site/reference/

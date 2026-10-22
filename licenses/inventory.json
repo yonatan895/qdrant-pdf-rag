@@ -520,11 +520,11 @@
       "license_spdx": "MPL-2.0",
       "name": "certifi",
       "obligation": "MPL-2.0 file-level copyleft: keep the license text with distributions; source of MPL files must stay available if they are modified. Not modified in this repository.",
-      "sha256": "62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775",
+      "sha256": "42d35340cc5b9ba78e818ddbff0c5b1c2b779de448a340fd1b989f5fa8670e1b",
       "spdx_basis": "normalized-license-field",
       "status": "declared",
-      "version": "2026.7.22",
-      "wheel": "certifi-2026.7.22-py3-none-any.whl"
+      "version": "2026.10.19",
+      "wheel": "certifi-2026.10.19-py3-none-any.whl"
     },
     {
       "approval_ref": null,
