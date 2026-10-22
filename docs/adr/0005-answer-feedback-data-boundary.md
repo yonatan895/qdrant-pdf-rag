@@ -10,7 +10,7 @@
 - **Decision:** question, answer and comment text live **only** in a dedicated
   feedback store, SQLite owned by one service process on its own RWO block PVC
   with a 180-day retention window (`FEEDBACK_RETENTION_DAYS`) enforced by an
-  explicit purge (scheduled in PR B; nothing deletes implicitly). Telemetry (metrics, traces, logs) never holds content;
+  explicit purge (scheduled in-process by the service, #804; nothing deletes implicitly). Telemetry (metrics, traces, logs) never holds content;
   `request_id` is the only join key. Ratings surface as bounded-label metrics
   plus a periodic report from a read-only export of the store.
 - **Consequences / rules:**

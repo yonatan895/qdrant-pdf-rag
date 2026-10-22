@@ -326,6 +326,11 @@ class Settings(BaseSettings):
     feedback_store_path: str = "/data/feedback.sqlite3"
     feedback_service_token: str | None = None
     feedback_retention_days: int = Field(default=180, ge=1, le=3650)
+    # The service schedules its own purge (ADR-0005, #804): the first attempt
+    # this long after start, then every interval. Truncation retries are a
+    # protected ladder in feedback/purge.py, not configuration.
+    feedback_purge_first_delay_s: float = Field(default=30.0, ge=0.0, le=3600.0)
+    feedback_purge_interval_s: float = Field(default=86400.0, ge=60.0, le=604800.0)
 
     # Request admission and total deadline (issue #374). EVERY value defaults
     # to the pre-#374 behaviour (0 = no limit / no deadline): selecting a

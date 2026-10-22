@@ -241,3 +241,323 @@ def test_service_refuses_a_rater_field(store):
                            headers={"Authorization": f"Bearer {TOKEN}"})
     assert (response.status_code, response.json()["code"]) == (422, "invalid_request")
     assert store.rating(RID) is None
+
+
+# --- Scheduled purge and its entry point (issue #804) -----------------------
+
+
+def _launch_service(tmp_path, port, extra_env):
+    """The real uvicorn command the chart will run, with only the env the
+    service needs (no FEEDBACK_ENABLED, no Qdrant or model env)."""
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    src = str(Path(__file__).resolve().parents[1] / "src")
+    env = {"PATH": os.environ.get("PATH", ""), "PYTHONPATH": src,
+           "FEEDBACK_STORE_PATH": str(tmp_path / "feedback.sqlite3"),
+           "FEEDBACK_SERVICE_TOKEN": TOKEN + "\n", **extra_env}
+    return subprocess.Popen(
+        [sys.executable, "-m", "uvicorn", "--factory", "mainframe_rag.feedback.service:app_from_env",
+         "--host", "127.0.0.1", "--port", str(port)],
+        env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+
+
+def _free_port() -> int:
+    import socket
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def _wait_until(predicate, timeout=30.0):
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        value = predicate()
+        if value:
+            return value
+        time.sleep(0.1)
+    raise AssertionError("condition not reached in time")
+
+
+def test_launch_entry_serves_records_and_purges_on_its_own_schedule(tmp_path):
+    """The real `uvicorn --factory ...:app_from_env` command with the chart's
+    env: it serves, authenticates /metrics, and its scheduler (first attempt at
+    once here) removes an expired record from the files, with the outcome
+    visible on /metrics. A broken entry point or an unwired scheduler fails
+    here, which the agent image's own CMD cannot catch."""
+    import subprocess
+    import time
+
+    import httpx2
+
+    old = AnswerRecord(request_id="aaaaaaaaaaaa", endpoint="answer", query="LAUNCH-OLD-CANARY",
+                       answer="a", finalized_at=time.time() - 3 * 86400)
+    seed = FeedbackStore(tmp_path / "feedback.sqlite3")
+    assert seed.record_answer(old)
+    seed.close()
+    port = _free_port()
+    base = f"http://127.0.0.1:{port}"
+    proc = _launch_service(tmp_path, port, {
+        "FEEDBACK_RETENTION_DAYS": "1", "METRICS_ENABLED": "true",
+        "FEEDBACK_PURGE_FIRST_DELAY_S": "0"})
+    auth = {"Authorization": f"Bearer {TOKEN}"}
+    try:
+        _wait_until(lambda: proc.poll() is not None or _healthy(base))
+        assert proc.poll() is None, proc.stdout.read()
+        assert httpx2.get(f"{base}/metrics").status_code == 401
+        assert httpx2.post(f"{base}/v1/answers", json=_record("bbbbbbbbbbbb").model_dump(),
+                           headers=auth).json() == {"recorded": True}
+        assert httpx2.post(f"{base}/v1/ratings", json={"request_id": "bbbbbbbbbbbb", "rating": "good"},
+                           headers=auth).status_code == 201
+
+        def purged():
+            text = httpx2.get(f"{base}/metrics", headers=auth).text
+            return 'rag_feedback_purge_total{outcome="truncated"} 1.0' in text and text
+
+        text = _wait_until(purged)
+        assert 'rag_feedback_purged_rows_total{kind="answers"} 1.0' in text
+        assert 'rag_feedback_purge_total{outcome="error"} 0.0' in text
+        on_disk = b"".join(p.read_bytes() for p in tmp_path.iterdir() if p.is_file())
+        assert b"LAUNCH-OLD-CANARY" not in on_disk
+        assert b"SYNTHETIC-QUERY-TEXT" in on_disk  # the unexpired record is still stored
+    finally:
+        proc.terminate()
+        try:
+            output, _ = proc.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            output, _ = proc.communicate()
+    for text in (QUERY, ANSWER, "LAUNCH-OLD-CANARY"):
+        assert text not in output  # uvicorn's access log: method, path, status only
+
+
+def _healthy(base: str) -> bool:
+    import httpx2
+
+    try:
+        return httpx2.get(f"{base}/healthz", timeout=1.0).status_code == 200
+    except httpx2.TransportError:
+        return False
+
+
+def test_launch_entry_metrics_are_404_when_disabled(tmp_path):
+    import httpx2
+
+    port = _free_port()
+    base = f"http://127.0.0.1:{port}"
+    proc = _launch_service(tmp_path, port, {})
+    try:
+        _wait_until(lambda: proc.poll() is not None or _healthy(base))
+        assert proc.poll() is None, proc.stdout.read()
+        denied = httpx2.get(f"{base}/metrics", headers={"Authorization": f"Bearer {TOKEN}"})
+        assert denied.status_code == 404 and denied.json()["code"] == "not_found"
+    finally:
+        proc.terminate()
+        proc.communicate(timeout=10)
+
+
+class _Stop(Exception):
+    """Ends the otherwise endless schedule from the injected sleep."""
+
+
+def _drive(runner, schedule, on_sleep):
+    """Run the schedule with a sleep that records its argument and lets the
+    test act between attempts; returns the requested sleeps."""
+    import asyncio
+
+    from mainframe_rag.feedback.purge import run_schedule
+
+    sleeps: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        on_sleep(len(sleeps), seconds)
+
+    with pytest.raises(_Stop):
+        asyncio.run(run_schedule(runner, schedule, sleep=sleep))
+    return sleeps
+
+
+def _series(metrics, name, **labels):
+    return metrics.registry.get_sample_value(name, labels)
+
+
+def _disk(tmp_path) -> bytes:
+    return b"".join(p.read_bytes() for p in tmp_path.iterdir() if p.is_file())
+
+
+def test_purge_retries_an_untruncated_wal_on_the_ladder_then_hourly_until_it_truncates(tmp_path):
+    """`wal_truncated: false` is a retry, never success: sleeps are 30 (first),
+    60, 300, 900, then hourly catch-up; the success gauge stays unset and the
+    expired text is really still on disk until the reader is gone; the next
+    attempt truncates, records success and the text leaves both files; the
+    next ordinary operations then work."""
+    import sqlite3
+
+    from mainframe_rag.feedback.purge import FeedbackMetrics, PurgeRunner, PurgeSchedule
+
+    now = [10_000_000.0]
+    path = tmp_path / "feedback.sqlite3"
+    store = FeedbackStore(path, clock=lambda: now[0])
+    store.record_answer(AnswerRecord(request_id="aaaaaaaaaaaa", endpoint="answer",
+                                     query="RETRY-CANARY", answer="a",
+                                     finalized_at=now[0] - 200 * 86400))
+    reader = sqlite3.connect(str(path))
+    reader.execute("BEGIN")
+    reader.execute("SELECT COUNT(*) FROM answers").fetchone()
+    metrics = FeedbackMetrics()
+    runner = PurgeRunner(store, 180, metrics, clock=lambda: 1234.5)
+    seen: dict[str, object] = {}
+
+    def on_sleep(n: int, seconds: float) -> None:
+        if n == 5:  # before the first hourly catch-up attempt
+            seen["deferred"] = _series(metrics, "rag_feedback_purge_total", outcome="deferred")
+            seen["gauge_while_deferred"] = _series(
+                metrics, "rag_feedback_purge_last_success_timestamp_seconds")
+            seen["text_still_on_disk"] = b"RETRY-CANARY" in _disk(tmp_path)
+            reader.rollback()
+            reader.close()
+        if n == 6:  # the daily sleep after success
+            raise _Stop
+
+    sleeps = _drive(runner, PurgeSchedule(interval_s=86400.0), on_sleep)
+    assert sleeps == [30.0, 60.0, 300.0, 900.0, 3600.0, 86400.0]
+    assert seen == {"deferred": 4.0, "gauge_while_deferred": 0.0, "text_still_on_disk": True}
+    assert _series(metrics, "rag_feedback_purge_total", outcome="truncated") == 1.0
+    assert _series(metrics, "rag_feedback_purge_total", outcome="error") == 0.0
+    assert _series(metrics, "rag_feedback_purge_last_success_timestamp_seconds") == 1234.5
+    assert _series(metrics, "rag_feedback_purged_rows_total", kind="answers") == 1.0
+    assert b"RETRY-CANARY" not in _disk(tmp_path)
+    # Next ordinary operations after the cleanup.
+    assert store.record_answer(AnswerRecord(request_id="bbbbbbbbbbbb", endpoint="chat", query="q",
+                                            answer="a"))
+    store.add_rating(Rating(request_id="bbbbbbbbbbbb", rating="good"))
+    assert runner.run() == ("truncated", {"answers": 0, "ratings": 0, "wal_truncated": True})
+    store.close()
+
+
+def test_a_truncated_first_attempt_waits_the_interval_without_retrying(tmp_path):
+    from mainframe_rag.feedback.purge import FeedbackMetrics, PurgeRunner, PurgeSchedule
+
+    store = FeedbackStore(tmp_path / "f.sqlite3")
+    metrics = FeedbackMetrics()
+
+    def on_sleep(n: int, seconds: float) -> None:
+        if n == 3:
+            raise _Stop
+
+    sleeps = _drive(PurgeRunner(store, 180, metrics), PurgeSchedule(interval_s=120.0, first_delay_s=1.0),
+                    on_sleep)
+    assert sleeps == [1.0, 120.0, 120.0]
+    assert _series(metrics, "rag_feedback_purge_total", outcome="truncated") == 2.0
+    store.close()
+
+
+def test_a_failing_purge_is_an_error_outcome_the_loop_survives_and_logs_only_the_type(tmp_path, caplog):
+    import sqlite3
+
+    from mainframe_rag.feedback.purge import FeedbackMetrics, PurgeRunner, PurgeSchedule
+
+    store = FeedbackStore(tmp_path / "f.sqlite3")
+    store.record_answer(_record())
+    real_purge = store.purge
+    calls = {"n": 0}
+
+    def flaky(**kwargs):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise sqlite3.OperationalError(f"database is locked {QUERY}")
+        return real_purge(**kwargs)
+
+    store.purge = flaky  # type: ignore[method-assign]
+    metrics = FeedbackMetrics()
+
+    def on_sleep(n: int, seconds: float) -> None:
+        if n == 4:
+            raise _Stop
+
+    with caplog.at_level(logging.INFO, logger="feedback"):
+        sleeps = _drive(PurgeRunner(store, 180, metrics), PurgeSchedule(interval_s=86400.0), on_sleep)
+    assert sleeps == [30.0, 60.0, 300.0, 86400.0]
+    assert _series(metrics, "rag_feedback_purge_total", outcome="error") == 2.0
+    assert _series(metrics, "rag_feedback_purge_total", outcome="truncated") == 1.0
+    assert "OperationalError" in caplog.text
+    assert QUERY not in caplog.text and "locked" not in caplog.text
+    store.close()
+
+
+def test_manual_purge_shares_the_outcome_accounting_and_metrics_hold_no_text(tmp_path, caplog):
+    """POST /v1/purge goes through the same runner as the schedule; neither
+    the logs nor the exposition ever carry question, answer or comment text,
+    also not after a deferred purge."""
+    import sqlite3
+
+    now = [10_000_000.0]
+    path = tmp_path / "f.sqlite3"
+    store = FeedbackStore(path, clock=lambda: now[0])
+    client = TestClient(create_app(store, TOKEN, retention_days=180, metrics_enabled=True))
+    auth = {"Authorization": f"Bearer {TOKEN}"}
+    old = _record("aaaaaaaaaaaa").model_copy(update={"finalized_at": now[0] - 200 * 86400})
+    client.post("/v1/answers", json=old.model_dump(), headers=auth)
+    client.post("/v1/answers", json=_record().model_dump(), headers=auth)
+    client.post("/v1/ratings", json={"request_id": RID, "rating": "bad", "comment": COMMENT},
+                headers=auth)
+    reader = sqlite3.connect(str(path))
+    reader.execute("BEGIN")
+    reader.execute("SELECT COUNT(*) FROM answers").fetchone()
+    with caplog.at_level(logging.INFO, logger="feedback"):
+        deferred = client.post("/v1/purge", headers=auth)
+        reader.rollback()
+        reader.close()
+        done = client.post("/v1/purge", headers=auth)
+    assert deferred.json() == {"answers": 1, "ratings": 0, "wal_truncated": False}
+    assert done.json() == {"answers": 0, "ratings": 0, "wal_truncated": True}
+    body = client.get("/metrics", headers=auth).text
+    assert 'rag_feedback_purge_total{outcome="deferred"} 1.0' in body
+    assert 'rag_feedback_purge_total{outcome="truncated"} 1.0' in body
+    for text in (QUERY, ANSWER, COMMENT):
+        assert text not in caplog.text and text not in body
+    purges = [r for r in caplog.records if '"feedback_purge"' in r.getMessage()]
+    assert [r.levelname for r in purges] == ["WARNING", "INFO"]
+    store.close()
+
+
+def test_scheduler_runs_with_the_app_and_stops_with_it(tmp_path):
+    """The lifespan owns the task: it starts a schedule on the loop and
+    cancels it on shutdown, and an app without a schedule starts none."""
+    import asyncio
+
+    from mainframe_rag.feedback.purge import PurgeSchedule
+
+    store = FeedbackStore(tmp_path / "f.sqlite3")
+    started: list[float] = []
+
+    async def sleeping(seconds: float) -> None:
+        started.append(seconds)
+        await asyncio.sleep(3600)
+
+    app = create_app(store, TOKEN, schedule=PurgeSchedule(interval_s=86400.0, first_delay_s=7.0),
+                     sleep=sleeping)
+    with TestClient(app) as client:
+        assert client.get("/healthz").status_code == 200
+        assert _wait_until(lambda: started) == [7.0]
+    plain = create_app(store, TOKEN)
+    with TestClient(plain):
+        pass
+    assert started == [7.0]
+    store.close()
+
+
+def test_metrics_endpoint_requires_the_token_and_is_404_when_off(store):
+    off = TestClient(create_app(store, TOKEN))
+    on = TestClient(create_app(store, TOKEN, metrics_enabled=True))
+    auth = {"Authorization": f"Bearer {TOKEN}"}
+    assert off.get("/metrics", headers=auth).status_code == 404
+    assert on.get("/metrics").status_code == 401
+    assert on.get("/metrics", headers=auth).status_code == 200
+    assert on.get("/healthz").status_code == 200

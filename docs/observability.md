@@ -31,6 +31,13 @@ would widen access to manual text beyond the protected feedback volume.
   authority on rated answers) and `rag.feedback.records` (recorded, duplicate, dropped,
   failed) on the existing `/metrics`. Bounded labels only, never ids or text.
   Shown beside the request, latency and admission panels.
+- **Purge metrics (feedback service `/metrics`, #804):** the service schedules
+  its own retention purge and exports `rag_feedback_purge_total{outcome}`
+  (`truncated`, `deferred`, `error`), `rag_feedback_purge_last_success_timestamp_seconds`
+  and `rag_feedback_purged_rows_total{kind}` (bearer-protected, 404 unless
+  `METRICS_ENABLED`). Only `truncated` is success; alert on
+  `time() - rag_feedback_purge_last_success_timestamp_seconds > 2 * 86400`
+  (platform-owned, not shipped). No text, ids or request labels.
 - **Periodic analysis report** (#780 phase 2), from a read-only export of the
   feedback store: failure clusters, candidate golden cases, and `request_id`
   links to traces.
