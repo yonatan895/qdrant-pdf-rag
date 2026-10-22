@@ -3767,7 +3767,7 @@ _FABRICATED_CITES = (
     "DOC9 Other, X > Y, p. 1",
     "SA22-7592-05 About > Table 1",  # docno-led pasted fragment, no page tail
 )
-_CITE_WRAPPERS = ("{}", "- {}", "1. {}", "> {}", "**{}**", "`{}`", "({})", "<{}>", "[x]({})", '"{}"')
+_CITE_WRAPPERS = ("{}", "- {}", "1. {}", "> {}", "**{}**", "`{}`", "({})", "<{}>", "[x]({})", '"{}"', "\u201c{}\u201d", "\u2018{}\u2019")
 _ANSWER_FRAGMENTS = (
     "Citations:", "Sources:", "## Citations", "**Citations:**", "Answer:", "See [1].", "[2]", "[1, 2]", "[99]", "",
     "```jcl\n//A JOB\n```", "```thinking\nnote [1]\n```", "```\nplain [2]\n```",
@@ -3815,7 +3815,7 @@ def test_parse_answer_never_raises_and_grounds_citations_in_supplied_evidence(co
             assert candidate in supplied, line
 
 
-_NESTING_WRAPPERS = st.sampled_from(["*{}*", "**{}**", "`{}`", "({})", "> {}", "_{}_"])
+_NESTING_WRAPPERS = st.sampled_from(["*{}*", "**{}**", "`{}`", "({})", "> {}", "_{}_", "\u201c{}\u201d", "\u2018{}\u2019"])
 
 
 @_PROPERTY
@@ -3832,6 +3832,20 @@ def test_citation_normalization_is_idempotent_at_any_nesting_depth(cite, wrapper
     once = normalize_citation_line(line)
     assert normalize_citation_line(once) == once
     assert once == cite, line
+
+
+@pytest.mark.parametrize("wrap", ['"{}"', "\u201c{}\u201d", "\u2018{}\u2019"])
+def test_quoted_citations_are_handled_identically_for_straight_and_curly_quotes(wrap):
+    """#877 D2 side effect: normalize_citation_line (used by the Citations: list
+    parser, the trailing-citation scan, the body scanner and the prose check)
+    treats curly pairs exactly like straight quotes: a quoted supplied cite is
+    accepted, a quoted fabricated cite is stripped from the body."""
+    evidence = make_evidence([_SUPPLIED_CITES[1]])
+    good = wrap.format(_SUPPLIED_CITES[1])
+    bad = wrap.format(_FABRICATED_CITES[0])
+    parsed = parse_answer(f"Set LFAREA [1].\n{bad}\n\nCitations:\n{good}", evidence)
+    assert parsed.citations == [_SUPPLIED_CITES[1]]
+    assert _FABRICATED_CITES[0] not in parsed.answer
 
 
 _DECLINE_LEADS = st.sampled_from([
