@@ -275,7 +275,7 @@ executed. Prefix current tasks with `sh scripts/tools/run-task.sh`. Task
 | `chart`, `pull-chart`, `helm-template`, `helm-lint`, `build-images` | `artifacts:chart-check`, `artifacts:chart-fetch`, `artifacts:helm-render`, `artifacts:helm-lint`, `artifacts:images` | Helm, Docker and artifact owners |
 | `sim`, `loadtest-mock` | `qa:sim`, `qa:load`, `qa:ha` (new multi-peer lane) | existing suites/scripts; `qa:ha` is the issue #360 three-peer fixture |
 | `sim-qdrant`, `sim-clean` | `local:qdrant:up`, `local:qdrant:down` | `sim_qdrant.sh`, shared Qdrant helpers |
-| (new, #805) | `feedback:export`, `feedback:import` | `mainframe_rag.feedback.exchange` against a local store file; in-cluster use is the `oc exec` runbook |
+| (new, #805) | `feedback:export`, `feedback:import`, `feedback:report` | `mainframe_rag.feedback.exchange` against a local store file (in-cluster use is the `oc exec` runbook); `mainframe_rag.feedback.report` reads an export file only |
 | `eval`, `eval-baseline`, `eval-draft`, `eval-holdout`, `eval-paraphrase` | `eval:retrieval`, `eval:baseline`, `eval:draft`, `eval:holdout`, `eval:paraphrase` | retrieval scripts, mode-keyed baselines |
 | `verify-golden`, `gate-l1`, `capture-pool`, `eval-answers`, `eval-chat` | `eval:verify-golden`, `eval:gate-l1`, `eval:capture-pool`, `eval:answers`, `eval:chat` | existing evaluation scripts |
 | `harness-gate`, `harness-baseline`, `harness-l2`, `harness-l3`, `harness-l3-baseline`, `harness-l4`, `harness-l4-record` | `eval:harness:gate`, `eval:harness:baseline`, `eval:harness:l2`, `eval:harness:l3`, `eval:harness:l3-baseline`, `eval:harness:l4`, `eval:harness:l4-record` | harness scripts and separate tier baselines |

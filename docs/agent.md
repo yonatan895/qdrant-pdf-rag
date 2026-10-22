@@ -437,6 +437,22 @@ retention: [observability](observability.md#data-tiers).
   fixed code on stderr and exit 2 (never row text); the header's `retention_days` is informational, import uses the importer's own; success prints counts
   (`inserted`, `duplicate`, `conflict`, `superseded`, `expired`; `expired` rows
   are removed by the next purge). Tests: `tests/test_feedback_exchange.py`. Local tasks: `feedback:export DB= OUT=`, `feedback:import IN= DB= [MERGE=1] [KEEP_EXISTING=1]`.
+  **Report** (`python -m mainframe_rag.feedback.report --in FILE|- [--out FILE|-] [--format md|json]`,
+  task `feedback:report IN= [OUT=] [FORMAT=]`, D5): reads an export file only, never the live store, through
+  the same `parse_export` as import (so it refuses what import refuses, same codes, plus `dangling_rating`
+  for a rating whose answer is not in the file), and calls no model. It prints counts and bounded labels:
+  coverage (answers, ratings, rated share, first/last date), ratings by rating, reason, endpoint,
+  verification state, finish reason, query kind/complexity, reasoning effort, date and model/release/rules
+  identity; bad share per cell (query kind x verification state, effort, `units_omitted`, `budget_verified`,
+  evidence, `has_script`; `low_n` below 5, no significance claim); top reason and verification codes of bad
+  ratings; median/p95 of latency and token telemetry for bad vs good; and a review queue of the
+  `request_id`s of bad ratings (newest first, at most 200) as the trace join key. Only allow-listed telemetry
+  keys are read; a value outside its closed vocabulary is `other`, an absent one `unknown`; identity labels
+  must be identifier-shaped and only the 8 most frequent are named. No question, answer, comment, script or
+  citation text is ever read into output. The output is a monitoring view, never an evaluation or a release
+  input (#806 D6): it has no pass rate and no gate. Output is deterministic for a file except `stale` and
+  `trace_expected`, which compare with the run-time clock. `--out FILE` is created `O_EXCL`, mode 0600, and
+  refused inside a git work tree. Tests: `tests/test_feedback_report.py`.
   Deployment (the single-replica StatefulSet `rag-feedback`, the kept claim
   `rag-feedback-data`, the operator Secret and the agent-only NetworkPolicy,
   default off) is in the chart: [deploy.md](deploy.md#feedback-service).
