@@ -295,6 +295,33 @@
         }
       ]
     },
+    "feedback": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "secretName": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^$|^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$",
+          "description": "Operator-created Secret holding data key service-token; never key material (D7). Required when enabled."
+        },
+        "storageSize": { "type": "string", "pattern": "^[1-9][0-9]*(Mi|Gi|Ti)$" },
+        "retentionDays": { "type": "integer", "minimum": 1, "maximum": 3650 }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "enabled": { "const": true } },
+            "required": ["enabled"]
+          },
+          "then": {
+            "properties": { "secretName": { "minLength": 1 } },
+            "required": ["secretName"]
+          }
+        }
+      ]
+    },
     "storage": {
       "type": "object",
       "additionalProperties": false,
@@ -399,6 +426,10 @@
         "agent": {
           "type": "object",
           "description": "Kubernetes resource requests/limits for the agent container."
+        },
+        "feedback": {
+          "type": "object",
+          "description": "Kubernetes resource requests/limits for the feedback service container."
         }
       }
     }

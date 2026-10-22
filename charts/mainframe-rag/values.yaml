@@ -160,7 +160,24 @@ networkPolicy:
   enabled: true
   allowedNamespaces: []
 
-# RWO block storage class for Jaeger Badger and ingest-work scratch.
+# Answer-feedback service (ADR-0005, issue #804). Default OFF: nothing below
+# renders and the agent Deployment is unchanged. True renders a single-replica
+# StatefulSet (the existing agent image, one uvicorn worker), a kept RWO claim
+# rag-feedback-data, a ClusterIP Service and the agent-only NetworkPolicy
+# rag-feedback-ingress, and wires FEEDBACK_ENABLED/URL/API_KEY into the agent.
+# secretName names an operator-created Secret with data key service-token (the
+# bearer token for both sides); never a chart value. Requires
+# networkPolicy.enabled. Disabling removes the workload but KEEPS the claim and
+# its content: nothing purges while disabled until the operator deletes the
+# claim (docs/deploy.md). The purge schedule is protected in the service.
+feedback:
+  enabled: false
+  secretName: ""
+  storageSize: 10Gi
+  retentionDays: 180
+
+# RWO block storage class for Jaeger Badger, ingest-work scratch and the
+# feedback store.
 # NFS refusal stays owned by shell preflight; schema additionally rejects
 # nfs-looking names fail-closed.
 storage:
@@ -215,3 +232,10 @@ resources:
     limits:
       cpu: 500m
       memory: 512Mi
+  feedback:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi

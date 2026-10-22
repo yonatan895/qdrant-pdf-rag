@@ -65,3 +65,21 @@ use {{- if include ... }} directly (a "false" string would be truthy).
 {{- end -}}
 {{- if $enabled -}}true{{- end -}}
 {{- end -}}
+
+{{/*
+Feedback service (issue #804, ADR-0005). Default off; "true" or nothing, like
+the helpers above. The content store's ingress limit is the agent-only
+NetworkPolicy, so enabling the service without that policy would leave the
+bearer token as the only control: refuse at render, before any mutation.
+*/}}
+{{- define "mainframe-rag.feedbackEnabled" -}}
+{{- if .Values.feedback.enabled -}}
+{{- if not .Values.networkPolicy.enabled -}}
+{{- fail "feedback.enabled=true requires networkPolicy.enabled=true: the feedback store's agent-only ingress limit is the NetworkPolicy; refusing to expose it on a bearer token alone" -}}
+{{- end -}}
+{{- if not .Values.feedback.secretName -}}
+{{- fail "feedback.secretName is required when feedback.enabled=true" -}}
+{{- end -}}
+true
+{{- end -}}
+{{- end -}}

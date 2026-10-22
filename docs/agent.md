@@ -407,7 +407,9 @@ retention: [observability](observability.md#data-tiers).
   `python -m uvicorn --factory mainframe_rag.feedback.service:app_from_env`;
   `tests/test_feedback_store.py` launches that command. The JSONL
   export/import, which also makes a later Postgres move testable, is phase 2.
-  Deployment (the single-replica StatefulSet, PVC and Secret) is #804 PR 2.
+  Deployment (the single-replica StatefulSet `rag-feedback`, the kept claim
+  `rag-feedback-data`, the operator Secret and the agent-only NetworkPolicy,
+  default off) is in the chart: [deploy.md](deploy.md#feedback-service).
 
 ## 2. Error contract
 

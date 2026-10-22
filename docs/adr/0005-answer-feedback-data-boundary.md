@@ -65,3 +65,14 @@
     preferences stay in browser `localStorage`. The agent pod keeps no
     persistent volume and no database; its existing non-persistent mounts
     (the `/tmp` emptyDir, CA, TLS and OAuth volumes) are unchanged.
+- **Amends (maintainer decision, 2026-10-18, #804):** the feedback service is
+  deployed by the application chart as the single-replica StatefulSet
+  `rag-feedback` on a kept standalone RWO claim, default off. Its purge is
+  scheduled in-process by the service (first attempt 30 s after start, then every
+  24 h; `wal_truncated: false` and errors are retried, never success); the
+  authenticated `POST /v1/purge` remains the manual action. Its network boundary
+  is its own ingress NetworkPolicy admitting agent pods only (monitoring only
+  with metrics, still bearer-protected) plus the operator-created bearer token,
+  so enabling it without the agent NetworkPolicy is refused. Disabling it keeps
+  the claim and its content, unpurged until the operator deletes the claim.
+  Rater attribution stays deferred (D5).

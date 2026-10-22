@@ -1,0 +1,44 @@
+{{- /*
+Ingress NetworkPolicy for the feedback pods (issue #804, ADR-0005). The agent
+policy selects only app: rag-agent, and a pod selected by no policy is open
+to the whole cluster, so the content store needs its own. Data peer: agent
+pods only (not the ingest Job, debug pods or allowedNamespaces). Monitoring
+is admitted to the same port only when metrics are exposed; /metrics and
+every data route still require the bearer token. Ingress only; egress is
+untouched (a site that default-denies egress must allow agent -> feedback).
+*/ -}}
+{{- if include "mainframe-rag.feedbackEnabled" . }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: rag-feedback-ingress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: rag-feedback
+spec:
+  podSelector:
+    matchLabels:
+      app: rag-feedback
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: rag-agent
+      ports:
+        - protocol: TCP
+          port: 8080
+    {{- if .Values.metrics.enabled }}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              network.openshift.io/policy-group: monitoring
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: openshift-user-workload-monitoring
+      ports:
+        - protocol: TCP
+          port: 8080
+    {{- end }}
+{{- end }}

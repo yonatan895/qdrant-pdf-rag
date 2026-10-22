@@ -38,6 +38,8 @@ would widen access to manual text beyond the protected feedback volume.
   `METRICS_ENABLED`). Only `truncated` is success; alert on
   `time() - rag_feedback_purge_last_success_timestamp_seconds > 2 * 86400`
   (platform-owned, not shipped). No text, ids or request labels.
+  The chart ServiceMonitor `rag-feedback` (with `metrics.enabled`, same decision
+  as the agent's) scrapes with the service bearer token from the operator Secret.
 - **Periodic analysis report** (#780 phase 2), from a read-only export of the
   feedback store: failure clusters, candidate golden cases, and `request_id`
   links to traces.

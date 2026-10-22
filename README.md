@@ -22,7 +22,7 @@ Models (reasoning, dense embed, reranker) are served by the **platform team's in
 | `src/mainframe_rag/retrieve/` | Hybrid search (dense + BM25 prefetch, batched query, weighted RRF), query-class screen, optional cross-encoder rerank (`RERANK_ENDPOINT_ORDER`), diversification, filters |
 | `src/mainframe_rag/agent/` | Async FastAPI `/healthz` + `/livez`, `/v1/search`, `/v1/answer`, multi-turn `/v1/chat` + `/v1/chat/completions` (shared `answer_core`, optional SSE streaming), exact-evidence `GET /v1/evidence/{reference}` and `GET /v1/sources` (contract: `docs/evidence-contract.md`), opt-in `GET /metrics` |
 | `src/mainframe_rag/webui/` | Operator console served at `/ui` (ADR-0004): Jinja2 + vendored HTMX/SSE, browser-only state, strict CSP, `UI_ENABLED` fail-closed |
-| `src/mainframe_rag/feedback/` | Answer-feedback store, single-writer service and agent-side client (ADR-0005, #780); default off, service not in the Helm chart |
+| `src/mainframe_rag/feedback/` | Answer-feedback store, single-writer service and agent-side client (ADR-0005, #780, #804); default off; the service is an optional chart StatefulSet (`FEEDBACK_ENABLED`) |
 | `src/mainframe_rag/mcp/` | Read-only Zowe live-state bridge (default off; mock backend for sim; serve via `python -m mainframe_rag.mcp`) |
 | `src/mainframe_rag/ops/` | Read-only operations CLI (`mainframe-rag-ops health, search, answer`; HTTP consumer of `/healthz`, `/v1/search`, `/v1/answer` only; contract: `docs/agent.md` Operations CLI) |
 | `src/mainframe_rag/serve/` | Local vLLM VRAM budget profiles (`LOCAL_RT_8GB`, …) + `resolve` CLI (`python -m mainframe_rag.serve resolve …`) |

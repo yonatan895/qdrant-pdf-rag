@@ -127,6 +127,22 @@ def test_validate_clean_exits_zero(tree):
     pytest.param({'AGENT_NETWORK_POLICY': 'false', 'AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES': 'mcp'}, None,
                  ('requires AGENT_NETWORK_POLICY to be enabled',),
                  id='validate_network_policy_allow_list_needs_the_policy'),
+    pytest.param({'FEEDBACK_ENABLED': 'maybe'}, None, ('FEEDBACK_ENABLED must be true/false',),
+                 id='validate_feedback_invalid_boolean_refused'),
+    pytest.param({'FEEDBACK_ENABLED': 'true'}, None, ('FEEDBACK_SECRET is required',),
+                 id='validate_feedback_needs_a_secret_name'),
+    pytest.param({'FEEDBACK_ENABLED': 'true', 'FEEDBACK_SECRET': 'fb', 'AGENT_NETWORK_POLICY': 'false'}, None,
+                 ('FEEDBACK_ENABLED=true requires AGENT_NETWORK_POLICY to be enabled',),
+                 id='validate_feedback_needs_the_network_policy'),
+    pytest.param({'FEEDBACK_ENABLED': 'true', 'FEEDBACK_SECRET': 'fb', 'FEEDBACK_RETENTION_DAYS': '0'}, None,
+                 ('FEEDBACK_RETENTION_DAYS must be an integer from 1 to 3650',),
+                 id='validate_feedback_retention_bounds'),
+    pytest.param({'FEEDBACK_ENABLED': 'true', 'FEEDBACK_SECRET': 'fb', 'FEEDBACK_STORAGE_SIZE': 'big'}, None,
+                 ('FEEDBACK_STORAGE_SIZE must be a quantity',),
+                 id='validate_feedback_storage_quantity'),
+    pytest.param({'FEEDBACK_ENABLED': 'true', 'FEEDBACK_SECRET': 'Bad_Name!'}, None,
+                 ('FEEDBACK_SECRET must be a DNS-subdomain',),
+                 id='validate_feedback_secret_name_fails_closed'),
 ])
 def test_invalid_configuration_fails_closed(tree, extra_env, exit_code, messages):
     result = _run(tree, extra_env)
@@ -1032,6 +1048,51 @@ def test_validate_live_scc_failure_is_not_standard_kubernetes(tree, text):
     assert "cluster type is NOT determined" in r.stdout
 
 
+# ------------------------------------------------ feedback service (#804)
+
+FEEDBACK_KUBECTL = """#!/bin/sh
+case "$*" in
+  *'get secret fb-secret'*'go-template='*)
+    [ "${MISSING_KEY:-}" = 1 ] || echo present ;;
+  *'get secret fb-secret'*)
+    case "${FB_SECRET:-ok}" in
+      notfound) echo 'Error from server (NotFound): secrets "fb-secret" not found' >&2; exit 1 ;;
+      forbidden) echo 'Error from server (Forbidden): secrets is forbidden' >&2; exit 1 ;;
+    esac ;;
+esac
+exit 0
+"""
+
+
+def _feedback_live(tree, **env):
+    write_stub(tree / "bin" / "kubectl", FEEDBACK_KUBECTL)
+    return _live(tree, FEEDBACK_ENABLED="true", FEEDBACK_SECRET="fb-secret", **env)
+
+
+def test_validate_live_verifies_the_feedback_secret_key(tree):
+    r = _feedback_live(tree)
+    assert r.returncode == 0, r.stderr
+    assert "Feedback Secret 'fb-secret' has a nonempty service-token key" in r.stdout
+
+
+@pytest.mark.parametrize(("env", "message"), [
+    ({"FB_SECRET": "notfound"}, "Secret 'fb-secret' not found"),
+    ({"FB_SECRET": "forbidden"}, "may not read Secret 'fb-secret'"),
+    ({"MISSING_KEY": "1"}, "required Secret key is missing or empty: service-token"),
+])
+def test_validate_live_feedback_secret_problems_fail(tree, env, message):
+    r = _feedback_live(tree, **env)
+    assert r.returncode != 0
+    assert message in r.stderr
+
+
+def test_validate_live_feedback_off_reads_no_feedback_secret(tree):
+    write_stub(tree / "bin" / "kubectl", _kubectl_stub("fb-secret", NOT_FOUND))
+    r = _live(tree)
+    assert r.returncode == 0, r.stderr
+    assert "Feedback Secret" not in r.stdout
+
+
 # ----------------------------------------------------- console Route (#373)
 
 GOOD_PIN = "sha256:" + "b" * 64
@@ -1102,6 +1163,16 @@ def test_validate_reports_the_networkpolicy_selection(tree):
     off = _run(tree, {'AGENT_NETWORK_POLICY': 'false'})
     assert off.returncode == 0, off.stderr
     assert "NetworkPolicy:     off (AGENT_NETWORK_POLICY=false)" in off.stdout
+
+
+def test_validate_reports_the_feedback_selection(tree):
+    off = _run(tree, {})
+    assert off.returncode == 0, off.stderr
+    assert "Feedback service:  off (FEEDBACK_ENABLED=false)" in off.stdout
+    on = _run(tree, {'FEEDBACK_ENABLED': 'true', 'FEEDBACK_SECRET': 'fb', 'FEEDBACK_RETENTION_DAYS': '90'})
+    assert on.returncode == 0, on.stderr
+    assert "Feedback service:  on: StatefulSet rag-feedback (1 replica)" in on.stdout
+    assert "retention 90 days, token from Secret fb (key service-token)" in on.stdout
 
 
 def test_validate_route_dryrun_accepts_recorded_consistent_pin(tree):
