@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Evaluation - Mainframe RAG</title>
+<meta name="description" content="Evaluation method and dated measured results.">
+<meta name="color-scheme" content="light dark">
+<link rel="stylesheet" href="css/site.css">
+<script src="js/site.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="site"><div class="wrap">
+<a class="brand" href="index.html">Mainframe RAG</a>
+<nav aria-label="Primary"><ul><li><a href="index.html">Home</a></li><li><a href="architecture.html">Architecture</a></li><li><a href="evaluation.html" aria-current="page">Evaluation</a></li><li><a href="engineering.html">Engineering</a></li><li><a href="reference/">Reference</a></li></ul></nav>
+</div></header>
+<main id="main"><div class="wrap">
+
+<h1>Evaluation</h1>
+<p class="lede">Quality claims here are tied to a dated measurement, a commit and a record. Where a measurement has a known weakness, the weakness is stated next to it.</p>
+
+<h2>Method</h2>
+<h3>Two rulers</h3>
+<p>The <strong>dev golden set</strong> (127 rows) is the set the project tunes against. The <strong>frozen holdout</strong> (76 rows, sha256-pinned) is meant to catch regressions and is never iterated on. Both are built from a seed set plus payload mining, split deterministically by class. Tests use synthetic documents only. See <a href="https://github.com/yonatan895/qdrant-pdf-rag/blob/main/docs/eval.md">docs/eval.md</a>, section 7.</p>
+<div class="callout">
+<strong>Holdout exposure.</strong> A contamination audit (<a href="https://github.com/yonatan895/qdrant-pdf-rag/issues/859">#859</a>, <a href="https://github.com/yonatan895/qdrant-pdf-rag/blob/main/docs/records/2026-10-21-holdout-contamination-audit.md">record</a>) found that 71 of the 76 holdout rows informed shipped choices. The holdout remains a valid regression gate, because each candidate is compared with its own recorded baseline, but it is no longer an independent quality estimate. <strong>No holdout-derived number is shown on this site.</strong> All results below are dev-set numbers, and the dev set is the tuning set, so they are not independent estimates either.
+</div>
+<h3>Pre-registered adoption rules</h3>
+<p>A default changes only if a rule written before the measurement is met. For example, the move of the fusion constant <code>rrf_k</code> from 2 to 60 followed a rule registered in <a href="https://github.com/yonatan895/qdrant-pdf-rag/issues/860">#860</a>, checked on the dev set in one session. The retrieval gate requires zero trap failures, no per-class regression beyond a floor, and at least one primary metric improving with a paired-bootstrap 95% interval that excludes zero (2000 seeded resamples).</p>
+<h3>Paired statistics and live noise</h3>
+<p>Candidates are compared with paired bootstrap on the same rows. Live runs against real models and a real index carry a few rows of noise, so A/B comparisons run as ABBA replicates (A, B, B, A) to separate the effect from drift. The search-parameter measurement in <a href="https://github.com/yonatan895/qdrant-pdf-rag/issues/842">#842</a> used that design. Record-replay of captured candidate pools lets ranking changes be swept offline without a GPU.</p>
+<h3>Answer tier and failure taxonomy</h3>
+<p>Answer evaluation checks that answers cite, and that abstain rows are not answered. A failure taxonomy (<a href="https://github.com/yonatan895/qdrant-pdf-rag/issues/830">#830</a>, in progress) assigns every failing row one primary class, checking retrieval and packing before blaming model behavior: <code>retrieval_miss</code>, <code>packing_loss</code>, <code>refusal_gold_present</code>, <code>citation_format</code>, <code>content_miss</code> and others. A row with no answer is <code>not_run</code>, never a pass.</p>
+<h3>Release acceptance</h3>
+<p>Absolute release criteria on an independent, expert-authored set are specified (<a href="https://github.com/yonatan895/qdrant-pdf-rag/blob/main/docs/eval.md">section 11, #367</a>) but still <strong>proposed</strong>, not registered. Until then no run certifies anything.</p>
+
+<h2>Results</h2>
+<p>Every row carries its date, commit, model profile and source. Retrieval rows are dev-set measurements on a real corpus of 452 documents.</p>
+<div class="tablewrap">
+<table>
+<thead><tr><th scope="col">Measurement</th><th scope="col">Value</th><th scope="col">Date</th><th scope="col">Commit</th><th scope="col">Profile</th><th scope="col">Source</th><th scope="col">Note</th></tr></thead>
+<tbody id="results-body"><tr><td colspan="7">Loading results&hellip;</td></tr></tbody>
+</table>
+</div>
+<p class="nojs" hidden>Numbers could not be loaded here. Read them directly in <a href="data/results.json">data/results.json</a>.</p>
+<p>Dense ANN overlap compares approximate search results with exact search on 144 real queries. The abstention row is a small sample (13 rows) whose written record is still pending. The answer-tier baseline has no numbers yet.</p>
+<p>Earlier dated results, including the superseded ones, are in the <a href="https://github.com/yonatan895/qdrant-pdf-rag/blob/main/docs/eval.md">run log in docs/eval.md</a>.</p>
+
+</div></main>
+<footer class="site"><div class="wrap">
+<p><a href="https://github.com/yonatan895/qdrant-pdf-rag">Source repository</a> &middot; <a href="https://github.com/yonatan895/qdrant-pdf-rag/blob/main/docs/licensing.md">Licensing</a> &middot; <a href="data/results.json">Results data (JSON)</a></p>
+<p>Repository code is licensed under Apache-2.0 (see <code>LICENSE</code>), although GitHub lists the repository license as &ldquo;Other&rdquo;. The third-party licensing review (<a href="https://github.com/yonatan895/qdrant-pdf-rag/issues/376">#376</a>) is still open and no owner disposition is recorded; see <a href="https://github.com/yonatan895/qdrant-pdf-rag/blob/main/docs/licensing.md">docs/licensing.md</a> for what is and is not established.</p>
+<p>No vendor manual text, documents or real-corpus answers appear on this site. Product names appear nominatively. No cookies, no analytics, no third-party scripts.</p>
+</div></footer>
+</body>
+</html>
