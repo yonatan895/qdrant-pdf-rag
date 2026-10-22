@@ -1006,7 +1006,7 @@ live in `.github/workflows/e2e.yml`.
   dir — digest verify, unpack, bootstrap, manifest/SHA assertions, dry-run
   pipeline with explicit shared-gateway reasoning and embedding-only
   (reasoning explicitly disabled) configurations, both pull-secret branches.
-  `kind-live-rehearsal` (main/dispatch) is an eleven-lane matrix described below;
+  `kind-live-rehearsal` (main/dispatch) is a twelve-lane matrix described below;
   its operator flow runs behind an [egress boundary](#kind-egress-boundary).
   The lab OpenShift rehearsal remains secret-gated, and PRs never touch the lab cluster.
   `airgap-rehearsal` downloads and bootstraps the published bundle; it does not
@@ -1048,7 +1048,43 @@ include actual runner CPU, RAM and disk capacity; cleanup runs even after failur
 | `kind-lifecycle-chart` | Three-worker Kind; first-party chart fresh/repeat/update/failure/rollback/redeploy sequence with PVC guards, then the next ordinary pipeline, all behind the egress boundary |
 | `kind-lifecycle` | Independent three-worker Kind; synthetic snapshot recovery, PVC identity, Qdrant/agent/Jaeger replacement, old trace persistence and repeat pipeline |
 | `kind-shared-gateway` | Same live pipeline/probe/contracts/smoke but through the shared `GATEWAY_BASE_URL` fallback and the single `api-key` Secret data-key (issue #551); explicit per-operation URLs stay unset so fallback is exercised |
+| `kind-rerank` | Same live pipeline behind the egress boundary with `RERANK_ENABLED=true` through the test gateway: the minted per-leg `rerank-api-key` reaches the pod through its Secret reference, the gateway refuses a wrong, absent or other-leg key on both rerank routes, one scoped search is one stand-in call, the score route being unavailable is served by the rerank route, a scoped search with rerank on differs from rerank off only by the stand-in's scores (gateway call count the causal check), and with every rerank route down non-identifier search fails closed with the fixed `retrieval failed` message while `/healthz` is 503 with the rerank leg unready, then recovers (issue #815) |
 | Manual release Kind lane | Both real models through the authenticated TLS gateway on the same signed bundle ([release gate](release-verification.md)); SCC, Service CA, OAuth, Routes, node pulls and egress are verified on the site |
+
+<a id="kind-rerank-lane"></a>
+#### Rerank rehearsal (`kind-rerank`, issue #815)
+
+Owners: `scripts/ci/test-gateway.yaml` (the `mock-rerank` model and the
+`/v1/score` pass-through, shaped like `scripts/run_local_gateway.sh`),
+`scripts/ci/mint_gateway_keys.py` (a real key scoped to `mock-rerank`),
+`scripts/mock_vllm.py` (the stand-in and its request counters) and
+`scripts/ci/rerank_rehearsal.sh`. Only this lane sets `RERANK_ENABLED=true`
+(per-leg keys, `RERANK_BASE_URL` the test gateway, `RERANK_MODEL=mock-rerank`);
+every other lane keeps rerank off and its expected results.
+
+The stand-in scores candidate *i* of *n* as *(i+1)/n*, so reranking exactly
+reverses the order the agent hands over.
+
+What the lane proves: the Deployment carries a distinct per-leg rerank key from
+its Secret reference; the real gateway accepts it on `/v1/score` and
+`/v1/rerank` and refuses a wrong, absent or other-leg key before the stand-in
+sees a request; with `score_first` one scoped search is one `/v1/score` call and
+a score route that is unavailable is served by `/v1/rerank` with the same
+scores; a scoped `/v1/search` with rerank on is the exact reversal of the same
+search with rerank off (same candidates, fusion scores unchanged, stand-in call
+count 1 versus 0); with every rerank route unavailable, non-identifier search
+returns the fixed `502 upstream_error "retrieval failed"`, identifier lookups
+still serve (they bypass rerank), and `/healthz` is `503` with `rerank: false`;
+the leg and the next search recover when the routes return. Both endpoint
+orders and their fallbacks are pinned in `tests/test_rerank.py`.
+
+What stays site-only: the real rerank endpoint, its key and TLS, its model and
+latency, and ranking quality (golden-set evaluation owns that; the stand-in
+carries no relevance signal). Fail-closed on exhaustion is the current contract
+([serving contract](agent.md#serving-contract)); the lane asserts it and does not
+change it. The lane's assertions run only in a `workflow_dispatch` or `main`
+Kind run; the same scripts' logic is covered hermetically by
+`tests/test_ci_gateway.py`.
 
 <a id="kind-egress-boundary"></a>
 #### Egress boundary in the Kind lanes (issue #809)

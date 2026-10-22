@@ -16,11 +16,24 @@ data:
           model: openai/mock-embed
           api_base: http://vllm-mock:8000/v1
           api_key: dummy
+      # Rerank stand-in (issue #815), same shape as scripts/run_local_gateway.sh:
+      # native /v1/rerank through the self-hosted vLLM rerank provider, and
+      # the vLLM-only /v1/score as a pass-through below (LiteLLM serves no
+      # native /v1/score). Both reach scripts/mock_vllm.py; ranking quality
+      # is not modelled.
+      - model_name: mock-rerank
+        litellm_params:
+          model: hosted_vllm/mock-rerank
+          api_base: http://vllm-mock:8000/v1
+          api_key: dummy
     general_settings:
       master_key: os.environ/GATEWAY_MASTER_KEY
       pass_through_endpoints:
         - path: /tokenize
           target: http://vllm-mock:8000/tokenize
+          methods: [POST]
+        - path: /v1/score
+          target: http://vllm-mock:8000/v1/score
           methods: [POST]
     router_settings:
       num_retries: 0
