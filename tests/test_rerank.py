@@ -418,6 +418,75 @@ def test_http_reranker_rerank_first_falls_back_to_score():
     assert paths == ["/v1/rerank", "/v1/score"]
 
 
+_GATEWAY_KEY = "sk-test-rerank-leg"
+_SCORE_OK = {"data": [{"index": 0, "score": 0.42}, {"index": 1, "score": 0.88}]}
+_RERANK_OK = {"results": [{"index": 0, "relevance_score": 0.3}, {"index": 1, "relevance_score": 0.9}]}
+
+
+def _gateway_handler(calls: list[tuple[str, str | None]], *, score_status=200, rerank_status=200):
+    """Gateway-shaped upstream: records (path, Authorization) per request and
+    answers each leg with its scripted status."""
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        calls.append((request.url.path, request.headers.get("authorization")))
+        if request.url.path == "/v1/score":
+            if score_status != 200:
+                return httpx2.Response(score_status, json={"error": "unavailable"})
+            return httpx2.Response(200, json=_SCORE_OK)
+        if request.url.path == "/v1/rerank":
+            if rerank_status != 200:
+                return httpx2.Response(rerank_status, json={"error": "unavailable"})
+            return httpx2.Response(200, json=_RERANK_OK)
+        return httpx2.Response(500)
+
+    return handler
+
+
+@pytest.mark.parametrize(
+    ("order", "first_leg", "expected"),
+    [
+        ("score_first", "/v1/score", [0.42, 0.88]),
+        ("rerank_first", "/v1/rerank", [0.3, 0.9]),
+    ],
+)
+def test_http_reranker_endpoint_order_is_honoured_with_one_keyed_call(order, first_leg, expected):
+    """Issue #815: each configured order sends exactly one request, to its own
+    leg first, and a healthy first leg means the other leg is never called.
+    The per-leg key rides the call."""
+    calls: list[tuple[str, str | None]] = []
+    settings = _order_settings(rerank_endpoint_order=order, rerank_api_key=_GATEWAY_KEY)
+    transport = httpx2.MockTransport(_gateway_handler(calls))
+    reranker = HttpReranker(settings, client=httpx2.Client(transport=transport))
+    assert reranker.score("query", ["text0", "text1"]) == expected
+    assert calls == [(first_leg, f"Bearer {_GATEWAY_KEY}")]
+
+
+@pytest.mark.parametrize(
+    ("order", "dead_leg", "live_leg", "expected"),
+    [
+        ("score_first", "/v1/score", "/v1/rerank", [0.3, 0.9]),
+        ("rerank_first", "/v1/rerank", "/v1/score", [0.42, 0.88]),
+    ],
+)
+def test_http_reranker_falls_back_to_the_other_leg_in_both_orders(
+    order, dead_leg, live_leg, expected
+):
+    """Issue #815: a gateway that lacks the first leg (404 on the vLLM-only
+    /v1/score, or a dead /v1/rerank) is served by the other leg, in the
+    configured order, and the fallback call carries the same key."""
+    calls: list[tuple[str, str | None]] = []
+    settings = _order_settings(rerank_endpoint_order=order, rerank_api_key=_GATEWAY_KEY)
+    handler = _gateway_handler(
+        calls,
+        score_status=404 if dead_leg == "/v1/score" else 200,
+        rerank_status=404 if dead_leg == "/v1/rerank" else 200,
+    )
+    reranker = HttpReranker(settings, client=httpx2.Client(transport=httpx2.MockTransport(handler)))
+    assert reranker.score("query", ["text0", "text1"]) == expected
+    bearer = f"Bearer {_GATEWAY_KEY}"
+    assert calls == [(dead_leg, bearer), (live_leg, bearer)]
+
+
 def test_http_reranker_rerank_first_both_spent_fails_closed():
     """Gateway order with both legs unusable fails closed (never empty
     scores), like the legacy order does."""
