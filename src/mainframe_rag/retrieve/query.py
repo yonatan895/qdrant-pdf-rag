@@ -47,7 +47,7 @@ tracer = trace.get_tracer("mainframe-rag.retrieve")
 bind_module_tracer(__name__, "tracer", "mainframe-rag.retrieve")
 
 PREFETCH_LIMIT = 40
-RRF_K = 2
+RRF_K = 60  # equals Settings.rrf_k (#860); also the default k of the split merges
 RRF_WEIGHTS_IDENTIFIER = (1.0, 3.0)  # (dense, bm25): identifiers favor exact terms
 RRF_WEIGHTS_NL = (1.0, 1.0)
 
