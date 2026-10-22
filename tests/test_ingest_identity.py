@@ -15,6 +15,8 @@ from types import SimpleNamespace
 
 import pymupdf
 import pytest
+from hypothesis import example, given, settings
+from hypothesis import strategies as st
 
 from mainframe_rag.config import HASH_EMBED_DIM
 from mainframe_rag.ingest.identity import (
@@ -93,6 +95,30 @@ def test_label_normalization_and_revision_key_identity():
     # Outside the root: bare filename, never the absolute layout.
     assert corpus_relpath("/mnt/secret/other.pdf", Path("/mnt/a/corpus")) == "other.pdf"
 
+
+
+# Property tests (issue #817). Budget: 200 examples per property (about 1 ms
+# each, measured in the PR). `derandomize=True` makes the example set a pure
+# function of the test, `database=None` stops Hypothesis writing into the
+# working tree, and `deadline=None` is justified because the examples are pure
+# string functions bounded by the example count, not by wall-clock noise.
+_PROPERTY = settings(max_examples=200, derandomize=True, database=None, deadline=None)
+
+
+@_PROPERTY
+@given(st.one_of(st.none(), st.text(max_size=40)))
+@example("\u00df  \u0130\u00a0\u2003X")
+@example("\x1c\x85 A \x1f")
+def test_label_normalization_is_idempotent_with_a_constrained_alphabet(value):
+    """One rule per concept: re-normalizing a stored label never changes it,
+    and the output alphabet is closed: case-folded, no whitespace other than
+    single interior ASCII spaces, empty for a missing or blank label."""
+    label = normalize_label(value)
+    assert normalize_label(label) == label
+    assert label == label.casefold()
+    assert all(not ch.isspace() or ch == " " for ch in label), repr(label)
+    assert label == label.strip(" ") and "  " not in label
+    assert (label == "") == (value is None or not value.strip())
 
 # ---------------------------------------------------------------------------
 # plan_duplicates: byte-identical copies elect the lexicographic winner

@@ -5,6 +5,11 @@ a 3-hex code, followed within two lines by description text rather than
 another bare code. This excludes index runs.
 """
 
+import re
+
+from hypothesis import example, given, settings
+from hypothesis import strategies as st
+
 from mainframe_rag.ingest.chunk import (
     _canonical_code,
     _code_entries,
@@ -342,3 +347,92 @@ def test_oversize_entry_in_a_code_section_is_cut_at_line_boundaries():
     chunks = make_chunks(_parsed(((1, "Completion codes", 1),), 1), [entry])
     assert max(len(c.text) for c in chunks) <= SECTION_MAX_CHARS + SPLIT_OVERLAP_CHARS
     assert "0C4" in {code for c in chunks for code in c.system_codes}
+
+
+# --- Property tests (issue #817) ---------------------------------------------
+# Budget: 200 examples per property (about 1 ms each, measured in the PR).
+# `derandomize=True` makes the example set a pure function of the test,
+# `database=None` stops Hypothesis writing into the working tree, and
+# `deadline=None` is justified because the examples are pure string functions
+# bounded by the example count, not by wall-clock noise on a shared runner.
+_PROPERTY = settings(max_examples=200, derandomize=True, database=None, deadline=None)
+
+_HEX_CODES = st.text(alphabet="0123456789ABCDEF", min_size=3, max_size=3)
+_DIGIT_HEX_CODES = _HEX_CODES.filter(lambda code: any(ch.isdigit() for ch in code))
+_LETTER_HEX_CODES = st.text(alphabet="ABCDEF", min_size=3, max_size=3)
+_USER_CODES = st.integers(0, 9999).map("U{:04d}".format)
+_STORED_FORM = re.compile(r"U\d{4}|W?[0-9A-F]{3}")
+
+
+def _stored_codes(code: str, wait_state: bool) -> list[str]:
+    """What ingest records for a labelled entry whose first line is `code`."""
+    return _extract_system_codes(f"{code}\nExplanation:\nSomething happened.\n", wait_state=wait_state)
+
+
+@_PROPERTY
+@given(st.one_of(_HEX_CODES, _USER_CODES), st.booleans())
+@example("U4038", True)
+@example("064", True)
+def test_canonical_code_is_a_stable_stored_form(code, wait_state):
+    """The stored form is a fixed point of canonicalization (a re-run over
+    stored codes never rewrites them), has one of the three shapes the query
+    parser emits, is case-insensitive in its input, and only a bare 3-hex
+    entry is ever W-prefixed (#591)."""
+    stored = _canonical_code(code, wait_state)
+    assert _STORED_FORM.fullmatch(stored), stored
+    assert _canonical_code(stored, False) == stored
+    assert _canonical_code(code.lower(), wait_state) == stored
+    assert stored.startswith("W") == (wait_state and not code.startswith("U"))
+
+
+@_PROPERTY
+@given(
+    _DIGIT_HEX_CODES,
+    st.sampled_from([
+        "abend {}", "abend S{}", "S{} abend", "what does S{} mean", "completion code {}",
+        "system completion code {}", "X'{}' abend",
+    ]),
+    st.booleans(),
+)
+@example("370", "abend S{}", False)
+def test_query_and_stored_completion_codes_agree(code, template, lower):
+    """Producer-to-consumer round trip (#591): for any 3-hex completion code
+    the string the query parser emits equals the string ingest stores, in any
+    supported phrasing and either case. `S370`/`S390` are reviewed model
+    numbers the parser deliberately blanks (regexes._SYSCODE_MODEL_RE), so
+    only their S-prefixed spelling yields no filter; the bare form agrees."""
+    from mainframe_rag.retrieve.filters import parse_query
+
+    stored = _stored_codes(code, wait_state=False)
+    assert stored == [code]
+    query = template.format(code.lower() if lower else code)
+    expected = [] if code in ("370", "390") and "S{}" in template else stored
+    assert parse_query(query).system_codes == expected, query
+
+
+@_PROPERTY
+@given(_LETTER_HEX_CODES, st.sampled_from(["abend {}", "abend S{}", "completion code {}", "system code S{}"]))
+def test_query_and_stored_all_letter_codes_agree_after_a_code_phrase(code, template):
+    """An all-letter code (AFB) reads as an ordinary word, so the query parser
+    accepts it only uppercase and right after a code phrase; there it must
+    still agree with what ingest stores."""
+    from mainframe_rag.retrieve.filters import parse_query
+
+    assert parse_query(template.format(code)).system_codes == _stored_codes(code, wait_state=False)
+
+
+@_PROPERTY
+@given(_USER_CODES, st.sampled_from(["user completion code {}", "abend {}", "{}", "what is {}"]))
+def test_query_and_stored_user_codes_agree(code, template):
+    from mainframe_rag.retrieve.filters import parse_query
+
+    assert parse_query(template.format(code)).system_codes == _stored_codes(code, wait_state=False)
+
+
+@_PROPERTY
+@given(_HEX_CODES, st.sampled_from(["wait state {}", "disabled wait state {} occurred", "WAIT STATE {}"]))
+def test_query_and_stored_wait_state_codes_agree(code, template):
+    """A wait-state section stores the W-prefixed form the query parser emits."""
+    from mainframe_rag.retrieve.filters import parse_query
+
+    assert parse_query(template.format(code)).system_codes == _stored_codes(code, wait_state=True) == ["W" + code]
