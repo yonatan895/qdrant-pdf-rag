@@ -26,6 +26,7 @@ import argparse
 import hashlib
 import hmac
 import json
+import math
 import os
 import sqlite3
 import stat
@@ -52,6 +53,9 @@ from mainframe_rag.feedback.store import (
 FORMAT = "feedback-export"
 VERSION = 1
 EXIT_REFUSED = 2
+# A timestamp may lead the importer's clock by this much (clock skew); anything
+# later would outlive the retention window (ADR-0005), so it is refused.
+MAX_FUTURE_SKEW_S = 300.0
 
 _ANSWER_KEYS = frozenset({"kind", "request_id", "created_at", "endpoint", "query", "answer",
                           "script", "citations", "supplied", "telemetry"})
@@ -89,7 +93,7 @@ def build_export(answers: list[dict[str, Any]], ratings: list[dict[str, Any]], *
 def _load(raw: bytes) -> dict[str, Any]:
     try:
         obj = json.loads(raw)
-    except ValueError:
+    except (ValueError, RecursionError):
         raise Refused("bad_format") from None
     if not isinstance(obj, dict):
         raise Refused("bad_format")
@@ -104,11 +108,24 @@ def _validate(model: type[BaseModel], fields: dict[str, Any], code: str, n: int)
         raise Refused(f"{code}_line_{n}") from None
 
 
-def _number(value: Any) -> bool:
-    return isinstance(value, int | float) and not isinstance(value, bool)
+def _timestamp(value: Any, limit: float) -> float | None:
+    """The value as a finite float no later than `limit`, else None. The hash
+    is integrity, not authenticity, so a hand-edited file can carry Infinity,
+    NaN, 1e400 or 10**400: a timestamp the purge would never reach."""
+    if not isinstance(value, int | float) or isinstance(value, bool):
+        return None
+    try:
+        out = float(value)
+    except OverflowError:
+        return None
+    return out if math.isfinite(out) and out <= limit else None
 
 
-def parse_export(data: bytes) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def _finite_scalars(values: dict[str, Any]) -> bool:
+    return all(not isinstance(v, float) or math.isfinite(v) for v in values.values())
+
+
+def parse_export(data: bytes, *, now: float) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Validate a whole export; return (answers, ratings) as store rows."""
     if not data.endswith(b"\n"):
         raise Refused("no_trailer")
@@ -126,6 +143,11 @@ def parse_export(data: bytes) -> tuple[list[dict[str, Any]], list[dict[str, Any]
     if header.get("kind") != "header" or header.get("format") != FORMAT \
             or set(header) != _HEADER_KEYS:
         raise Refused("bad_format")
+    limit = now + MAX_FUTURE_SKEW_S
+    retention = header["retention_days"]
+    if (_timestamp(header["exported_at"], limit) is None or isinstance(retention, bool)
+            or not isinstance(retention, int) or not 1 <= retention <= 3650):
+        raise Refused("bad_format")
     if header["version"] != VERSION:
         raise Refused("unsupported_version")
     if header["store_schema"] != SCHEMA_VERSION:
@@ -139,17 +161,19 @@ def parse_export(data: bytes) -> tuple[list[dict[str, Any]], list[dict[str, Any]
         if kind not in ("answer", "rating"):
             raise Refused(f"bad_format_line_{n}")
         if set(row) != (_ANSWER_KEYS if kind == "answer" else _RATING_KEYS) \
-                or not _number(row["created_at"]):
+                or (created := _timestamp(row["created_at"], limit)) is None:
             raise Refused(f"invalid_{kind}_line_{n}")
         fields = {k: v for k, v in row.items() if k not in ("kind", "created_at")}
         out: dict[str, Any]
         if kind == "answer":
-            rec = _validate(AnswerRecord, {**fields, "finalized_at": row["created_at"]},
+            rec = _validate(AnswerRecord, {**fields, "finalized_at": created},
                             "invalid_answer", n)
-            out = {**rec.model_dump(exclude={"finalized_at"}), "created_at": float(row["created_at"])}
+            out = {**rec.model_dump(exclude={"finalized_at"}), "created_at": created}
+            if not _finite_scalars(out["telemetry"]):
+                raise Refused(f"invalid_answer_line_{n}")
         else:
             rat = _validate(Rating, fields, "invalid_rating", n)
-            out = {**rat.model_dump(), "created_at": float(row["created_at"])}
+            out = {**rat.model_dump(), "created_at": created}
         key = (kind, out["request_id"])
         if key in seen:
             raise Refused(f"duplicate_id_line_{n}")
@@ -197,9 +221,32 @@ def _read_input(source: str) -> bytes:
         raise Refused("input_unreadable") from None
 
 
-def run_export(db: Path, out: str, *, retention_days: int, clock: Callable[[], float]) -> None:
-    if out == "-" and sys.stdout.isatty():
+def _check_stdout() -> None:
+    """A redirected stdout is a file the operator chose with their umask: refuse
+    a terminal, a regular file readable by group/other, or one inside a git
+    work tree. A pipe (`oc exec ... > file` happens on the operator's side) is
+    not inspectable here; the runbook's `umask 077` covers that."""
+    if sys.stdout.isatty():
         raise Refused("output_is_terminal")
+    try:
+        st = os.fstat(sys.stdout.fileno())
+    except (OSError, ValueError):  # no real descriptor (embedded/captured stdout)
+        return
+    if not stat.S_ISREG(st.st_mode):
+        return
+    if st.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
+        raise Refused("output_not_private")
+    try:
+        target = Path(os.readlink(f"/proc/self/fd/{sys.stdout.fileno()}"))
+    except OSError:
+        return
+    if _inside_git_worktree(target):
+        raise Refused("output_in_git_worktree")
+
+
+def run_export(db: Path, out: str, *, retention_days: int, clock: Callable[[], float]) -> None:
+    if out == "-":
+        _check_stdout()
     if out != "-" and _inside_git_worktree(Path(out)):
         raise Refused("output_in_git_worktree")
     try:
@@ -219,7 +266,7 @@ def run_export(db: Path, out: str, *, retention_days: int, clock: Callable[[], f
 
 def run_import(src: str, db: Path, *, merge: bool, keep_existing: bool, retention_days: int,
                clock: Callable[[], float]) -> dict[str, int]:
-    answers, ratings = parse_export(_read_input(src))
+    answers, ratings = parse_export(_read_input(src), now=clock())
     if db.exists() and store_in_use(db):
         raise Refused("store_in_use")
     try:
@@ -238,6 +285,8 @@ def run_import(src: str, db: Path, *, merge: bool, keep_existing: bool, retentio
             raise Refused(f"conflict_{e.counts['conflict']}") from None
         except UnknownAnswerError:
             raise Refused("dangling_rating") from None
+        except sqlite3.Error:
+            raise Refused("store_unwritable") from None
     finally:
         store.close()
 

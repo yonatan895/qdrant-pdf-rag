@@ -417,9 +417,12 @@ retention: [observability](observability.md#data-tiers).
   the live file or takes the write lock), reads one consistent snapshot into
   memory and closes it before any output is written, so it cannot pin the WAL
   and defer the purge. The output is created `O_EXCL` with mode 0600, refused
-  inside a git work tree or on a terminal. It holds question, answer and
+  inside a git work tree or on a terminal; with `--out -` a redirected regular
+  file must be private (no group/other bits) and outside a git work tree, while
+  a pipe cannot be inspected (the runbook's `umask 077` covers the receiving
+  file). It holds question, answer and
   comment text and escapes the 180-day purge: the operator deletes it. Import
-  validates the whole file first (hash, counts, version, schema, the live
+  validates the whole file first (hash, counts, version, schema, finite timestamps no later than the importer's clock plus 300 s so a hand-edited file cannot outlive the retention window, finite telemetry, the live
   `AnswerRecord`/`Rating` models, unknown fields, duplicate ids, a rating
   needs an answer in the file or the target), refuses a group/world-readable
   input, then applies it in one transaction preserving `created_at`. The
