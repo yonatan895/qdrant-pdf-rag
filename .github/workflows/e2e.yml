@@ -432,7 +432,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        lane: [pipeline, gateway-chat-upstream, gateway-chat-malformed, gateway-chat-truncated, gateway-embed-upstream, gateway-embed-malformed, gateway-embed-dimension, gateway-auth, lifecycle-chart, lifecycle, shared-gateway]
+        lane: [pipeline, gateway-chat-upstream, gateway-chat-malformed, gateway-chat-truncated, gateway-embed-upstream, gateway-embed-malformed, gateway-embed-dimension, gateway-auth, lifecycle-chart, lifecycle, shared-gateway, rerank]
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -697,6 +697,17 @@ jobs:
           GATEWAY_CA_CONFIGMAP=test-gateway-ca
           EOF
           fi
+          if [ "${{ matrix.lane }}" = "rerank" ]; then
+            # Rerank rehearsal (issue #815): only this lane enables the leg, behind
+            # the same gateway, with the stand-in model and the per-leg Secret key.
+            # Every other lane keeps RERANK_ENABLED=false and its expected results.
+            sed -i -e 's|^RERANK_ENABLED=false$|RERANK_ENABLED=true|' airgap.env
+            cat >> airgap.env <<'EOF'
+          RERANK_BASE_URL=https://test-gateway:4000/v1
+          RERANK_MODEL=mock-rerank
+          EOF
+            grep -qx 'RERANK_ENABLED=true' airgap.env
+          fi
           grep -E "^(INTERNAL_REGISTRY|NAMESPACE|STORAGE_CLASS|IMAGE_SHA|EMBED_MODEL|EMBED_MODEL_REVISION|DENSE_DIM|EMBED_BASE_URL|CORPUS_PVC|INSECURE_REGISTRY)" airgap.env
 
       - name: Write Kind-scale Qdrant overrides (runner quota only; git prod values untouched)
@@ -929,6 +940,14 @@ jobs:
           export PATH="/usr/local/bin:$PATH"
           cd gapbox/qdrant-pdf-rag
           sh scripts/ci/gateway_faults.sh "$NS" "${FAULT_LANE#gateway-}"
+
+      - name: Rerank leg rehearsal (key, order, fallback, call count, fail-closed)
+        if: matrix.lane == 'rerank'
+        shell: sh rehearsal-infra/scripts/ci/egress_gate.sh run bash -e {0}
+        run: |
+          export PATH="/usr/local/bin:$PATH"
+          cd gapbox/qdrant-pdf-rag
+          sh scripts/ci/rerank_rehearsal.sh "$NS"
 
       - name: First-party Helm chart lifecycle from the published bundle
         if: matrix.lane == 'lifecycle-chart'
