@@ -239,8 +239,11 @@ class Settings(BaseSettings):
     comparative_split_enabled: bool = True
     diagnostic_dualpath_enabled: bool = False
 
-    # Hybrid retrieval fusion (local RRF) and diversity parameters
-    rrf_k: int = Field(default=2, ge=1, le=100)
+    # Hybrid retrieval fusion (local RRF) and diversity parameters. rrf_k 60
+    # (issue #860): live dev on the production retrieval profile, 2026-10-21,
+    # r@1 0.658->0.702, r@5 0.930->0.956, message_id r@1 0.786->0.857 (r@5
+    # 1.0 held), section r@5 0.353->0.471, must_not 0. Moves with RRF_K.
+    rrf_k: int = Field(default=60, ge=1, le=100)
     rrf_weight_dense_nl: float = Field(default=1.0, gt=0.0, le=10.0)
     rrf_weight_sparse_nl: float = Field(default=1.0, gt=0.0, le=10.0)
     rrf_weight_dense_identifier: float = Field(default=1.0, gt=0.0, le=10.0)

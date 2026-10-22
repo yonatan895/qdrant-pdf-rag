@@ -173,19 +173,23 @@ MRR 0.655→0.643, overall r@5 0.873→0.857, overall MRR 0.700→0.697
 
 Fusion is local, not server-side: Qdrant's RRF exposes no per-leg weights,
 and this pipeline needs them. Each leg contributes `weight / (k + rank + 1)`
-with 0-based ranks — rank 0 with `k=2` is worth `1/3`, rank 1 `1/4`, so the
-top is extremely heavy compared to the industry-default `k=60`.
+with 0-based ranks. The default is `k=60` (issue #860; it was `k=2`, where
+rank 0 is worth `1/3` and rank 1 `1/4`, so one leg's top hit dominated).
 
 - Identifier queries fuse with weights `(dense 1.0, sparse 3.0)`; NL
   queries use `(1.0, 1.0)`. The 3× sparse boost is what decides exact-code
-  recall, and the small `k` is what makes rank 1 dominate. Both are
+  recall; with `k=60` a document both legs rank well outranks one leg's
+  lone rank-1 hit. Both are
   `Settings`-overridable (`rrf_weight_*`, `rrf_k`); without settings the
   module constants apply.
   First sweep on the current-rules production-profile corpus (#845,
   2026-10-19, offline replay of dev pools; `eval.md` record): `rrf_k` 60
   with these weights beats `k=2` on dev and the section probes, and a
-  lower identifier sparse weight costs exact-code r@5. No default changed;
-  a `k` change needs its own concern and live confirmation.
+  lower identifier sparse weight costs exact-code r@5. Adopted by #860 after
+  a live dev confirmation (2026-10-21, same session, `eval.md` record): dev
+  r@1 0.658→0.702, r@5 0.930→0.956, `message_id` r@1 0.786→0.857 with r@5
+  held at 1.0, section r@5 0.353→0.471, `must_not` 0; the weights are
+  unchanged. The frozen holdout was not used (it is exposed, #859).
 - Per-type sparse boost (issue #216, default 1.0 = off): the BM25
   contribution of a `syntax`/`table` chunk multiplies by
   `Settings.rrf_sparse_boost_syntax` / `rrf_sparse_boost_table` (read off

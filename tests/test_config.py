@@ -265,7 +265,7 @@ PINNED_SETTING_DEFAULTS: dict[str, object] = {
     "acronym_expansion_enabled": False,
     "comparative_split_enabled": True,
     "diagnostic_dualpath_enabled": False,
-    "rrf_k": 2,
+    "rrf_k": 60,
     "rrf_weight_dense_nl": 1.0,
     "rrf_weight_sparse_nl": 1.0,
     "rrf_weight_dense_identifier": 1.0,
