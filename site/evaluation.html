@@ -22,7 +22,7 @@
 
 <h2>Method</h2>
 <h3>Two rulers</h3>
-<p>The <strong>dev golden set</strong> (127 rows) is the set the project tunes against. The <strong>frozen holdout</strong> (76 rows, sha256-pinned) is meant to catch regressions and is never iterated on. Both are built from a seed set plus payload mining, split deterministically by class. Tests use synthetic documents only. See <a href="https://github.com/yonatan895/qdrant-pdf-rag/blob/main/docs/eval.md">docs/eval.md</a>, section 7.</p>
+<p>The <strong>dev golden set</strong> (127 rows) is the set the project tunes against. The <strong>frozen holdout</strong> (76 rows, sha256-pinned) is meant to catch regressions and is meant never to be iterated on. Both are built from a seed set plus payload mining, split deterministically by class. Tests use synthetic documents only. See <a href="https://github.com/yonatan895/qdrant-pdf-rag/blob/main/docs/eval.md">docs/eval.md</a>, section 7.</p>
 <div class="callout">
 <strong>Holdout exposure.</strong> A contamination audit (<a href="https://github.com/yonatan895/qdrant-pdf-rag/issues/859">#859</a>, <a href="https://github.com/yonatan895/qdrant-pdf-rag/blob/main/docs/records/2026-10-21-holdout-contamination-audit.md">record</a>) found that 71 of the 76 holdout rows informed shipped choices. The holdout remains a valid regression gate, because each candidate is compared with its own recorded baseline, but it is no longer an independent quality estimate. <strong>No holdout-derived number is shown on this site.</strong> All results below are dev-set numbers, and the dev set is the tuning set, so they are not independent estimates either.
 </div>
@@ -43,8 +43,8 @@
 <tbody id="results-body"><tr><td colspan="7">Loading results&hellip;</td></tr></tbody>
 </table>
 </div>
-<p class="nojs" hidden>Numbers could not be loaded here. Read them directly in <a href="data/results.json">data/results.json</a>.</p>
-<p>Dense ANN overlap compares approximate search results with exact search on 144 real queries. The abstention row is a small sample (13 rows) whose docs/eval.md entry is still pending. The answer-tier baseline has no numbers yet.</p>
+<p class="nojs">Numbers on this page are rendered from JSON; if they do not appear, read them directly in <a href="data/results.json">data/results.json</a>.</p>
+<p>Dense ANN overlap compares approximate search results with exact search on 144 real queries. The abstention row is a small sample (13 rows) whose written record is still pending. The answer-tier baseline has no numbers yet.</p>
 <p>Earlier dated results, including the superseded ones, are in the <a href="https://github.com/yonatan895/qdrant-pdf-rag/blob/main/docs/eval.md">run log in docs/eval.md</a>.</p>
 
 </div></main>

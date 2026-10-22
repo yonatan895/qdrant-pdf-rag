@@ -96,7 +96,7 @@
     "commit": "308f70b",
     "profile": "Qwen3.8-27B at xhigh reasoning; Qwen3-Embedding-8B dim 4096; corpus alias colab_manuals_qwen3_8b_4096_ced400a7; rerank off",
     "source_url": "https://github.com/yonatan895/qdrant-pdf-rag/issues/798#issuecomment-6350578190",
-    "note": "measured 2026-10-22 (G4 session S2), single run; docs/eval.md entry pending with #830"
+    "note": "measured 2026-10-22 (G4 session S2), single run; docs/eval.md entry pending with #830; frozen holdout not read"
   },
   {
     "id": "answer-baseline-830",

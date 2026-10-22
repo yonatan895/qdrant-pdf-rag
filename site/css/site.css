@@ -65,3 +65,4 @@ footer.site { border-top: 1px solid var(--line); background: var(--surface); pad
 footer.site p { max-width: 72ch; margin: .4rem 0; }
 .nojs { color: var(--muted); font-size: .9rem; }
 @media (max-width: 480px) { main { padding-top: 1.25rem; } th, td { padding: .45rem .5rem; } }
+@media (min-width: 900px) { .cards.four { grid-template-columns: repeat(4, 1fr); } }

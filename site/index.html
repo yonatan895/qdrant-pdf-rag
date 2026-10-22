@@ -26,7 +26,7 @@
 <li class="stat" data-result="ann-overlap-shipped"><span class="num">&hellip;</span><span class="lbl">Dense ANN overlap@8 with exact search</span><span class="meta"><a href="data/results.json">data/results.json</a></span></li>
 <li class="stat" data-result="corpus-points"><span class="num">&hellip;</span><span class="lbl">Indexed points in the corpus</span><span class="meta"><a href="data/results.json">data/results.json</a></span></li>
 </ul>
-<p class="nojs" hidden>Numbers could not be loaded here. Read them directly in <a href="data/results.json">data/results.json</a>.</p>
+<p class="nojs">Numbers on this page are rendered from JSON; if they do not appear, read them directly in <a href="data/results.json">data/results.json</a>.</p>
 <p class="callout"><strong>Read these as development-set numbers.</strong> They come from the dev golden set, which informed tuning decisions, on one embedding profile and one date. They are not an independent quality estimate. <a href="evaluation.html">Method, exposure and the full dated table</a>.</p>
 
 <figure id="demo" hidden>
@@ -38,7 +38,7 @@
 </figure>
 
 <h2>What it does</h2>
-<div class="cards">
+<div class="cards four">
 <div class="card"><h3>Hybrid retrieval</h3><p>Dense embeddings and BM25 sparse vectors in Qdrant, fused with weighted reciprocal rank fusion. Search itself never calls a language model.</p></div>
 <div class="card"><h3>Evidence-first answers</h3><p>A reasoning model drafts the answer from supplied evidence. The service labels the outcome and declines with an explicit state when the evidence is insufficient.</p></div>
 <div class="card"><h3>Air-gap native</h3><p>Pinned images, wheels and BM25 weights, delivered as a signed bundle. Models are consumed over HTTP through the platform team&rsquo;s gateway.</p></div>
