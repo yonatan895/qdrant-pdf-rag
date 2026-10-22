@@ -259,7 +259,7 @@ class TaskContractsTests(unittest.TestCase):
         (self.root / "locks").mkdir(exist_ok=True)
         (self.root / "locks/cp314-linux-x86_64.json").write_text(json.dumps({
             "schema_version": 1, "target": "cp314-gil-linux-x86_64-glibc2.34",
-            "resolver": {"name": "pip", "version": "26.2.1"},
+            "resolver": {"name": "pip", "version": "26.2.2"},
             "profiles": {"runtime": {"requirements": "requirements.lock.txt",
                 "sha256": hashlib.sha256(requirement.encode()).hexdigest(), "packages": ["fake-pkg"]}},
             "packages": {"fake-pkg": {"version": "1.0.0",

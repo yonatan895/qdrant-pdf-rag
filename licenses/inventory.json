@@ -520,11 +520,11 @@
       "license_spdx": "MPL-2.0",
       "name": "certifi",
       "obligation": "MPL-2.0 file-level copyleft: keep the license text with distributions; source of MPL files must stay available if they are modified. Not modified in this repository.",
-      "sha256": "62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775",
+      "sha256": "42d35340cc5b9ba78e818ddbff0c5b1c2b779de448a340fd1b989f5fa8670e1b",
       "spdx_basis": "normalized-license-field",
       "status": "declared",
-      "version": "2026.7.22",
-      "wheel": "certifi-2026.7.22-py3-none-any.whl"
+      "version": "2026.10.19",
+      "wheel": "certifi-2026.10.19-py3-none-any.whl"
     },
     {
       "approval_ref": null,
@@ -1143,11 +1143,53 @@
       ],
       "license_spdx": "Apache-2.0",
       "name": "opentelemetry-api",
-      "sha256": "94b98c893a91b88657eaac1e3ba89618cdb85be6918196705354f34728b2cdef",
+      "sha256": "b31553efa588ae44bc306f863c785c5333a9ecc091248c6ee68b4b6c87fdedfb",
       "spdx_basis": "declared-expression",
       "status": "declared",
-      "version": "1.44.0",
-      "wheel": "opentelemetry_api-1.44.0-py3-none-any.whl"
+      "version": "1.45.1",
+      "wheel": "opentelemetry_api-1.45.1-py3-none-any.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": false,
+      "class": "permissive",
+      "declared_source": "License-Expression",
+      "evidence": "wheel-bytes",
+      "license_declared": "Apache-2.0",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+        }
+      ],
+      "license_spdx": "Apache-2.0",
+      "name": "opentelemetry-exporter-http-transport",
+      "sha256": "2f95404bdee7f9d2d529c7de56c7bd86d014d774d8fbf137810e0167f8a492bf",
+      "spdx_basis": "declared-expression",
+      "status": "declared",
+      "version": "0.66b1",
+      "wheel": "opentelemetry_exporter_http_transport-0.66b1-py3-none-any.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": false,
+      "class": "permissive",
+      "declared_source": "License-Expression",
+      "evidence": "wheel-bytes",
+      "license_declared": "Apache-2.0",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+        }
+      ],
+      "license_spdx": "Apache-2.0",
+      "name": "opentelemetry-exporter-otlp-common",
+      "sha256": "00ff8592c3a7cb729ff3fdc7ffa12372c243bdf2163e80c180994d0c7bd83ee9",
+      "spdx_basis": "declared-expression",
+      "status": "declared",
+      "version": "0.66b1",
+      "wheel": "opentelemetry_exporter_otlp_common-0.66b1-py3-none-any.whl"
     },
     {
       "approval_ref": null,
@@ -1164,11 +1206,11 @@
       ],
       "license_spdx": "Apache-2.0",
       "name": "opentelemetry-exporter-otlp-proto-common",
-      "sha256": "9a9fe61bba73d802904bc989f1d6b4a7b1ee40f06c40e98d6f85af65aaebb694",
+      "sha256": "2f446183ae7047b036226f1d846c41a834b0e8755ad13b51a51dd38952eb466c",
       "spdx_basis": "declared-expression",
       "status": "declared",
-      "version": "1.44.0",
-      "wheel": "opentelemetry_exporter_otlp_proto_common-1.44.0-py3-none-any.whl"
+      "version": "1.45.1",
+      "wheel": "opentelemetry_exporter_otlp_proto_common-1.45.1-py3-none-any.whl"
     },
     {
       "approval_ref": null,
@@ -1185,11 +1227,11 @@
       ],
       "license_spdx": "Apache-2.0",
       "name": "opentelemetry-exporter-otlp-proto-http",
-      "sha256": "838592fce774c1c8bb7b9a0a7facbfa82e17be5a8a4e94cef10cb84ae026bae3",
+      "sha256": "24a97cf3753c7fb52fad44a696e452ff371686339e2acf3309e2eda3d0230700",
       "spdx_basis": "declared-expression",
       "status": "declared",
-      "version": "1.44.0",
-      "wheel": "opentelemetry_exporter_otlp_proto_http-1.44.0-py3-none-any.whl"
+      "version": "1.45.1",
+      "wheel": "opentelemetry_exporter_otlp_proto_http-1.45.1-py3-none-any.whl"
     },
     {
       "approval_ref": null,
@@ -1206,11 +1248,11 @@
       ],
       "license_spdx": "Apache-2.0",
       "name": "opentelemetry-exporter-prometheus",
-      "sha256": "3b3d24b586d0ad9712c7b52b7d19c8a9dfbb318b9b284121b5f95e90ed019367",
+      "sha256": "a938e6af7295d5bacf82da9ca845cab9a9cb1c5f565abe39f54ef8bf511c05d9",
       "spdx_basis": "declared-expression",
       "status": "declared",
-      "version": "0.65b0",
-      "wheel": "opentelemetry_exporter_prometheus-0.65b0-py3-none-any.whl"
+      "version": "0.66b1",
+      "wheel": "opentelemetry_exporter_prometheus-0.66b1-py3-none-any.whl"
     },
     {
       "approval_ref": null,
@@ -1227,11 +1269,11 @@
       ],
       "license_spdx": "Apache-2.0",
       "name": "opentelemetry-proto",
-      "sha256": "898b155a0e1557afd867478fb6158e8122a46329ca0bb8dc53cc55e98f017f56",
+      "sha256": "f38e2a8413053c180cd3d2637fbb279673ec2f6a6e09c995aafa2f452c52b46e",
       "spdx_basis": "declared-expression",
       "status": "declared",
-      "version": "1.44.0",
-      "wheel": "opentelemetry_proto-1.44.0-py3-none-any.whl"
+      "version": "1.45.1",
+      "wheel": "opentelemetry_proto-1.45.1-py3-none-any.whl"
     },
     {
       "approval_ref": null,
@@ -1248,11 +1290,11 @@
       ],
       "license_spdx": "Apache-2.0",
       "name": "opentelemetry-sdk",
-      "sha256": "df081c4c6bcfdb1211e3e86140376792643128a25f8d72d1d27675936e7e96ad",
+      "sha256": "c604c11dc429810812348989115fa44bd558772a3d7442afc43d024f2c250ca4",
       "spdx_basis": "declared-expression",
       "status": "declared",
-      "version": "1.44.0",
-      "wheel": "opentelemetry_sdk-1.44.0-py3-none-any.whl"
+      "version": "1.45.1",
+      "wheel": "opentelemetry_sdk-1.45.1-py3-none-any.whl"
     },
     {
       "approval_ref": null,
@@ -1269,11 +1311,11 @@
       ],
       "license_spdx": "Apache-2.0",
       "name": "opentelemetry-semantic-conventions",
-      "sha256": "1cacde7b0ad306f84c5ef08c3dbe1bbaf20165bba6f8bff43b670e555a086bcb",
+      "sha256": "d4cddeb4315490b35213f55e2bdc9ac54bb1e4d318927475bed62b35545e581b",
       "spdx_basis": "declared-expression",
       "status": "declared",
-      "version": "0.65b0",
-      "wheel": "opentelemetry_semantic_conventions-0.65b0-py3-none-any.whl"
+      "version": "0.66b1",
+      "wheel": "opentelemetry_semantic_conventions-0.66b1-py3-none-any.whl"
     },
     {
       "approval_ref": null,

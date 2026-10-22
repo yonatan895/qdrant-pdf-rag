@@ -31,7 +31,7 @@ PROFILE_FILES = {
     "dev": "requirements.dev.lock.txt",
     "build": "requirements.build.lock.txt",
 }
-PIP_VERSION = "26.2.1"
+PIP_VERSION = "26.2.2"
 BASE_IMAGE = (
     "registry.access.redhat.com/ubi9/python-314-minimal@sha256:"
     "1e4b43488508216fee35b87e6b5425f4ef475eacf9c113f5b901e27af3844fba"

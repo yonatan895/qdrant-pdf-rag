@@ -8,6 +8,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import time
 from typing import ClassVar
 
 import pytest
@@ -16,6 +17,7 @@ from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from starlette.datastructures import Headers
 
 from mainframe_rag import tracing as tracing_mod
 from mainframe_rag.agent import answer_core as answer_core_mod
@@ -1380,6 +1382,72 @@ def test_parent_context_headers(headers, expect_valid, expect_ids):
         assert remote.is_remote
         assert remote.trace_id == _UP_TRACE_ID
         assert remote.span_id == _UP_SPAN_ID
+
+
+def _tracestate_of(ctx):
+    return trace.get_current_span(ctx).get_span_context().trace_state
+
+
+@pytest.mark.parametrize("pad", [" ", "\t"])
+def test_parent_context_bounds_oversized_tracestate(pad):
+    """GHSA-xcq7-p3pf-p88h: opentelemetry-api 1.44.0 TraceState.from_header is
+    O(N^2) on a whitespace run. Measured unguarded with a 16 KiB value:
+    ~0.12 s (spaces), ~0.16 s (tabs), per request, on the event loop. The
+    oversized value is dropped before extraction; the trace id still joins."""
+    start = time.perf_counter()
+    ctx = tracing_mod.parent_context(
+        {"traceparent": _traceparent(), "tracestate": pad * 16384}
+    )
+    assert time.perf_counter() - start < 0.05
+    remote = _remote_context(ctx)
+    assert remote.is_valid and remote.trace_id == _UP_TRACE_ID
+    assert len(_tracestate_of(ctx)) == 0
+
+
+def test_parent_context_oversized_tracestate_skips_otel_parse(monkeypatch):
+    # Version-independent: the unguarded parser must never see the value.
+    def boom(*_a, **_k):
+        raise AssertionError("TraceState.from_header reached")
+
+    monkeypatch.setattr("opentelemetry.trace.TraceState.from_header", boom)
+    ctx = tracing_mod.parent_context(
+        Headers(
+            raw=[
+                (b"traceparent", _traceparent().encode()),
+                (b"TraceState", b" " * 513),
+            ]
+        )
+    )
+    assert _remote_context(ctx).trace_id == _UP_TRACE_ID
+
+
+def test_parent_context_repeated_tracestate_counts_combined():
+    headers = Headers(
+        raw=[
+            (b"traceparent", _traceparent().encode()),
+            (b"tracestate", b"a=" + b"x" * 300),
+            (b"TraceState", b"b=" + b"y" * 300),
+        ]
+    )
+    ctx = tracing_mod.parent_context(headers)
+    assert _remote_context(ctx).trace_id == _UP_TRACE_ID
+    assert len(_tracestate_of(ctx)) == 0
+
+
+def test_parent_context_short_tracestate_propagates_unchanged():
+    headers = Headers(
+        raw=[
+            (b"traceparent", _traceparent().encode()),
+            (b"tracestate", b"vendor=abc"),
+            (b"TraceState", b"other=def"),
+        ]
+    )
+    ts = _tracestate_of(tracing_mod.parent_context(headers))
+    assert ts.to_header() == "vendor=abc,other=def"
+
+
+def test_parent_context_no_headers_is_new_root():
+    assert not _remote_context(tracing_mod.parent_context({})).is_valid
 
 
 @pytest.mark.parametrize(

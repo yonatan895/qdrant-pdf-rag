@@ -52,7 +52,7 @@
 #   PIP_FIND_LINKS  (recommended)   path to a wheelhouse directory on the runner
 #                                   (e.g. /wheelhouse) built from requirements.dev.lock.txt
 #   PIP_INDEX_URL   (alternative)   internal HTTPS PyPI-compatible index; prepared
-#                                   image must contain lock-qualified pip 26.2.1
+#                                   image must contain lock-qualified pip 26.2.2
 #
 # Air-gap contract: runners must not reach pypi.org, Docker Hub, or GitHub.
 # If neither PIP_FIND_LINKS nor PIP_INDEX_URL is set, jobs FAIL CLOSED.

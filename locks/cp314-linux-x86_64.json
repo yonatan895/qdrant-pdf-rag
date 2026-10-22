@@ -31,10 +31,10 @@
       "wheel": "ast_serialize-0.11.1-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
     },
     "certifi": {
-      "sha256": "62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775",
-      "url": "https://files.pythonhosted.org/packages/0b/a7/71ac2cff56fec219ed242bb11b8efb69fcc4bec75db06fb7bfe35de520e6/certifi-2026.7.22-py3-none-any.whl",
-      "version": "2026.7.22",
-      "wheel": "certifi-2026.7.22-py3-none-any.whl"
+      "sha256": "42d35340cc5b9ba78e818ddbff0c5b1c2b779de448a340fd1b989f5fa8670e1b",
+      "url": "https://files.pythonhosted.org/packages/c4/51/29046e48f693c54e5b7412216d447a1d8362c9653148d98c02cdf65fa733/certifi-2026.10.19-py3-none-any.whl",
+      "version": "2026.10.19",
+      "wheel": "certifi-2026.10.19-py3-none-any.whl"
     },
     "charset-normalizer": {
       "sha256": "15f024313246a4ed976c60f440bb8d257815513a681d212ff74fd46f7d715a90",
@@ -229,46 +229,58 @@
       "wheel": "onnxruntime-1.30.0-cp314-cp314-manylinux_2_28_x86_64.whl"
     },
     "opentelemetry-api": {
-      "sha256": "94b98c893a91b88657eaac1e3ba89618cdb85be6918196705354f34728b2cdef",
-      "url": "https://files.pythonhosted.org/packages/ca/6f/a04e900f465ff3221ccc395522503e2d10e79fa21f2723c8e177aae1e0d1/opentelemetry_api-1.44.0-py3-none-any.whl",
-      "version": "1.44.0",
-      "wheel": "opentelemetry_api-1.44.0-py3-none-any.whl"
+      "sha256": "b31553efa588ae44bc306f863c785c5333a9ecc091248c6ee68b4b6c87fdedfb",
+      "url": "https://files.pythonhosted.org/packages/1e/41/f7dcf80b81ee8e71c1a2b59f14208bc723edbd89ed027a73b175abf6348e/opentelemetry_api-1.45.1-py3-none-any.whl",
+      "version": "1.45.1",
+      "wheel": "opentelemetry_api-1.45.1-py3-none-any.whl"
+    },
+    "opentelemetry-exporter-http-transport": {
+      "sha256": "2f95404bdee7f9d2d529c7de56c7bd86d014d774d8fbf137810e0167f8a492bf",
+      "url": "https://files.pythonhosted.org/packages/04/69/6af86ff66492b481c6a4c05dcfd68beb47ed8ba046440a26a2aac76b95c7/opentelemetry_exporter_http_transport-0.66b1-py3-none-any.whl",
+      "version": "0.66b1",
+      "wheel": "opentelemetry_exporter_http_transport-0.66b1-py3-none-any.whl"
+    },
+    "opentelemetry-exporter-otlp-common": {
+      "sha256": "00ff8592c3a7cb729ff3fdc7ffa12372c243bdf2163e80c180994d0c7bd83ee9",
+      "url": "https://files.pythonhosted.org/packages/fc/39/8c23d67665c762aa51840fa06f86e902e8f6f1693bc8d7e3d98cd6e2f753/opentelemetry_exporter_otlp_common-0.66b1-py3-none-any.whl",
+      "version": "0.66b1",
+      "wheel": "opentelemetry_exporter_otlp_common-0.66b1-py3-none-any.whl"
     },
     "opentelemetry-exporter-otlp-proto-common": {
-      "sha256": "9a9fe61bba73d802904bc989f1d6b4a7b1ee40f06c40e98d6f85af65aaebb694",
-      "url": "https://files.pythonhosted.org/packages/5e/71/65fd9d54c10b860f87c045ccee1264cab7011268895d3528818a29c1172a/opentelemetry_exporter_otlp_proto_common-1.44.0-py3-none-any.whl",
-      "version": "1.44.0",
-      "wheel": "opentelemetry_exporter_otlp_proto_common-1.44.0-py3-none-any.whl"
+      "sha256": "2f446183ae7047b036226f1d846c41a834b0e8755ad13b51a51dd38952eb466c",
+      "url": "https://files.pythonhosted.org/packages/84/aa/92f225d353904e7f70b8b3e3c1b02db0cf56f744c2e83c581dc372e78873/opentelemetry_exporter_otlp_proto_common-1.45.1-py3-none-any.whl",
+      "version": "1.45.1",
+      "wheel": "opentelemetry_exporter_otlp_proto_common-1.45.1-py3-none-any.whl"
     },
     "opentelemetry-exporter-otlp-proto-http": {
-      "sha256": "838592fce774c1c8bb7b9a0a7facbfa82e17be5a8a4e94cef10cb84ae026bae3",
-      "url": "https://files.pythonhosted.org/packages/cd/d0/fdeb1a98d8d3a6205f5f297c51b4a9bfe65126ab60339669bbe3dd54c2e2/opentelemetry_exporter_otlp_proto_http-1.44.0-py3-none-any.whl",
-      "version": "1.44.0",
-      "wheel": "opentelemetry_exporter_otlp_proto_http-1.44.0-py3-none-any.whl"
+      "sha256": "24a97cf3753c7fb52fad44a696e452ff371686339e2acf3309e2eda3d0230700",
+      "url": "https://files.pythonhosted.org/packages/aa/1f/517eaa0187ba106a9da97160ce2add3a371812681dc440930b267f714e42/opentelemetry_exporter_otlp_proto_http-1.45.1-py3-none-any.whl",
+      "version": "1.45.1",
+      "wheel": "opentelemetry_exporter_otlp_proto_http-1.45.1-py3-none-any.whl"
     },
     "opentelemetry-exporter-prometheus": {
-      "sha256": "3b3d24b586d0ad9712c7b52b7d19c8a9dfbb318b9b284121b5f95e90ed019367",
-      "url": "https://files.pythonhosted.org/packages/82/0d/d7cdc030edeed0fea03448446b88f1a1f8c4a565bad30dac0f5477ebe290/opentelemetry_exporter_prometheus-0.65b0-py3-none-any.whl",
-      "version": "0.65b0",
-      "wheel": "opentelemetry_exporter_prometheus-0.65b0-py3-none-any.whl"
+      "sha256": "a938e6af7295d5bacf82da9ca845cab9a9cb1c5f565abe39f54ef8bf511c05d9",
+      "url": "https://files.pythonhosted.org/packages/4d/8a/5e7262d970586a8d69dd159bebc68fbee7457088883b179599a562881a6f/opentelemetry_exporter_prometheus-0.66b1-py3-none-any.whl",
+      "version": "0.66b1",
+      "wheel": "opentelemetry_exporter_prometheus-0.66b1-py3-none-any.whl"
     },
     "opentelemetry-proto": {
-      "sha256": "898b155a0e1557afd867478fb6158e8122a46329ca0bb8dc53cc55e98f017f56",
-      "url": "https://files.pythonhosted.org/packages/d1/7c/8be563d68e93bbefa5c8affb82ddcff91b3ad858ce49957ba7b16fd3e0ab/opentelemetry_proto-1.44.0-py3-none-any.whl",
-      "version": "1.44.0",
-      "wheel": "opentelemetry_proto-1.44.0-py3-none-any.whl"
+      "sha256": "f38e2a8413053c180cd3d2637fbb279673ec2f6a6e09c995aafa2f452c52b46e",
+      "url": "https://files.pythonhosted.org/packages/ab/9a/42ec8180a769516ae757e893b69736826efceac7332553915b4528a91c6d/opentelemetry_proto-1.45.1-py3-none-any.whl",
+      "version": "1.45.1",
+      "wheel": "opentelemetry_proto-1.45.1-py3-none-any.whl"
     },
     "opentelemetry-sdk": {
-      "sha256": "df081c4c6bcfdb1211e3e86140376792643128a25f8d72d1d27675936e7e96ad",
-      "url": "https://files.pythonhosted.org/packages/e7/23/ff077e61886ee020a17ce9c8b6fa11c601c8d8345b09ea24f605445df62a/opentelemetry_sdk-1.44.0-py3-none-any.whl",
-      "version": "1.44.0",
-      "wheel": "opentelemetry_sdk-1.44.0-py3-none-any.whl"
+      "sha256": "c604c11dc429810812348989115fa44bd558772a3d7442afc43d024f2c250ca4",
+      "url": "https://files.pythonhosted.org/packages/95/3c/87c42b4bd6dd297536f04cd9383d212ac557ecd49f2cbdcd46da1c9ef5c8/opentelemetry_sdk-1.45.1-py3-none-any.whl",
+      "version": "1.45.1",
+      "wheel": "opentelemetry_sdk-1.45.1-py3-none-any.whl"
     },
     "opentelemetry-semantic-conventions": {
-      "sha256": "1cacde7b0ad306f84c5ef08c3dbe1bbaf20165bba6f8bff43b670e555a086bcb",
-      "url": "https://files.pythonhosted.org/packages/a6/0e/49df70d9b81fb5cbae4bbf2a49d865b09bcbcbc4eb53f5851b1027738d78/opentelemetry_semantic_conventions-0.65b0-py3-none-any.whl",
-      "version": "0.65b0",
-      "wheel": "opentelemetry_semantic_conventions-0.65b0-py3-none-any.whl"
+      "sha256": "d4cddeb4315490b35213f55e2bdc9ac54bb1e4d318927475bed62b35545e581b",
+      "url": "https://files.pythonhosted.org/packages/bc/14/67f8aa798857f8cf686f515bf93d9bb877ce952ddc8efae0fa25b45ce0d6/opentelemetry_semantic_conventions-0.66b1-py3-none-any.whl",
+      "version": "0.66b1",
+      "wheel": "opentelemetry_semantic_conventions-0.66b1-py3-none-any.whl"
     },
     "packaging": {
       "sha256": "d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c",
@@ -289,10 +301,10 @@
       "wheel": "pillow-12.3.0-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl"
     },
     "pip": {
-      "sha256": "71138adf1f4ca900cdb7d289c21b7494329f2332b6d85f0e1c42108c0384ed3e",
-      "url": "https://files.pythonhosted.org/packages/f3/6e/1736e5b4ae2b778ef2f81c47d797de9f891d4d8acb047a24ca37a60294dd/pip-26.2.1-py3-none-any.whl",
-      "version": "26.2.1",
-      "wheel": "pip-26.2.1-py3-none-any.whl"
+      "sha256": "fd7f4dfa8190e014013b9f08f3e973f4e4c26ffd179a204895533a7254813a70",
+      "url": "https://files.pythonhosted.org/packages/3f/06/3e4420302363fbb71be3c7f35ce042f54bfca330e3e66b3a2e3c4cca579f/pip-26.2.2-py3-none-any.whl",
+      "version": "26.2.2",
+      "wheel": "pip-26.2.2-py3-none-any.whl"
     },
     "pluggy": {
       "sha256": "e920276dd6813095e9377c0bc5566d94c932c33b27a3e3945d8389c374dd4746",
@@ -478,7 +490,7 @@
         "wheel"
       ],
       "requirements": "requirements.build.lock.txt",
-      "sha256": "6b0da2a2d743447da9424730f2a5cd2cab3c591d7d1e593c1f1e4fff1f9e161c"
+      "sha256": "18ba95dd373047ddf50eb8da8f7957f188e9461dece5c9030044efbfdeb3fc54"
     },
     "dev": {
       "packages": [
@@ -520,6 +532,8 @@
         "numpy",
         "onnxruntime",
         "opentelemetry-api",
+        "opentelemetry-exporter-http-transport",
+        "opentelemetry-exporter-otlp-common",
         "opentelemetry-exporter-otlp-proto-common",
         "opentelemetry-exporter-otlp-proto-http",
         "opentelemetry-exporter-prometheus",
@@ -561,7 +575,7 @@
         "wheel"
       ],
       "requirements": "requirements.dev.lock.txt",
-      "sha256": "42a3fb8b3294fd58b5828a3bc1508cf960c1f3eccc351c0694415cb6f5b90ade"
+      "sha256": "d23a3a3a1bc722df3e410c1a99979950821ef6bb3b8dadc2085c51a2ce5330ce"
     },
     "runtime": {
       "packages": [
@@ -596,6 +610,8 @@
         "numpy",
         "onnxruntime",
         "opentelemetry-api",
+        "opentelemetry-exporter-http-transport",
+        "opentelemetry-exporter-otlp-common",
         "opentelemetry-exporter-otlp-proto-common",
         "opentelemetry-exporter-otlp-proto-http",
         "opentelemetry-exporter-prometheus",
@@ -627,12 +643,12 @@
         "uvicorn"
       ],
       "requirements": "requirements.lock.txt",
-      "sha256": "8cdddadb98de5b63aa423909a1ef35525dbd97b89851bda7e0bc0039d026acb4"
+      "sha256": "80d0eb1f1eb87dd3b7ebfac3ae95d4ec1ba5d4ccbc0e0cc930a998e0fe02e665"
     }
   },
   "resolver": {
     "name": "pip",
-    "version": "26.2.1"
+    "version": "26.2.2"
   },
   "schema_version": 1,
   "target": "cp314-gil-linux-x86_64-glibc2.34"
