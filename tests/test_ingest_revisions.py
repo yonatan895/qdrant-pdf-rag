@@ -688,6 +688,11 @@ def test_retirement_check_skips_a_walked_file_refused_for_a_pipe_label(monkeypat
     )
     append_record(progress, old)
 
+    # _parse_one caches per-worker state in module globals; isolate them so the
+    # in-process call cannot leak a Settings/embedder into later tests.
+    for name in ("_worker_settings", "_worker_embedder", "_worker_context_client",
+                 "_worker_context_cache", "_worker_context_cache_path", "_worker_qdrant"):
+        monkeypatch.setattr(run_ingest, name, None)
     reached = []
     monkeypatch.setattr(
         run_ingest, "resolve_publish_staging", lambda *a, **k: reached.append(1) or ("staging", False)
