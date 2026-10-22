@@ -343,6 +343,24 @@ def test_strip_unauthorized_removes_fabricated_cites_in_every_wrapping():
     assert valid_citations("Citations:\n- **" + _hit().cite + "**", allowed) == [_hit().cite]
 
 
+def test_citation_unwrapping_has_no_depth_limit():
+    """Issue #876 (found by the #817 property tests): unwrapping stopped after
+    six levels, so a 7-deep wrapped fabricated cite stayed in the body while a
+    6-deep one was stripped. Normalization now reaches a fixed point at any
+    depth and is idempotent."""
+    from mainframe_rag.agent.cites import normalize_citation_line, strip_unauthorized_citations
+
+    allowed = {_hit().cite}
+    fabricated = "SA22-9999-99 Not Retrieved, Made Up > Path, p. 9-9"
+    for depth in (6, 7, 12):
+        line = "*" * depth + fabricated + "*" * depth
+        assert normalize_citation_line(line) == fabricated
+        assert fabricated not in strip_unauthorized_citations(line, allowed)
+    nested = "> " * 4 + "`" * 3 + "(" * 3 + fabricated + ")" * 3 + "`" * 3
+    once = normalize_citation_line(nested)
+    assert once == fabricated and normalize_citation_line(once) == once
+
+
 def test_strip_unauthorized_leaves_prose_and_inline_mentions():
     """Standalone-line rule: only a line that IS a citation (or a pasted
     docno-led heading path) is stripped; prose, inline mentions and
