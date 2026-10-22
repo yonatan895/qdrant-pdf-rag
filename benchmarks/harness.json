@@ -3,24 +3,27 @@
   "note": "Harness promotion baseline; re-record via `sh scripts/tools/run-task.sh eval:harness:baseline` (dedicated PR, AGENTS.md).",
   "embed_mode": "hash",
   "snapshot": {
-   "points_count": 208,
-   "snapshot_name": "mainframe_manuals-2007008481010860-2026-09-06-06-06-18.snapshot"
+   "points_count": 135,
+   "snapshot_name": "mainframe_manuals__gen94e05d25f7c9c1344b5aa9137e9e-279217298361320-2026-10-22-07-24-35.snapshot"
   },
   "class_regression_floor": 0.05,
-  "updated": "2026-09-06"
+  "golden_entries": 127,
+  "updated": "2026-10-22"
  },
  "overall": {
-  "n": 104,
-  "scored": 104,
-  "recall@5": 0.9712,
-  "recall@8": 0.9712,
-  "mrr": 0.9712,
-  "ndcg@8": 0.9712
+  "n": 114,
+  "scored": 114,
+  "recall@1": 1.0,
+  "recall@5": 1.0,
+  "recall@8": 1.0,
+  "mrr": 1.0,
+  "ndcg@8": 0.9737
  },
  "classes": {
   "comparative": {
    "n": 12,
    "scored": 12,
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
@@ -29,6 +32,7 @@
   "diagnostic": {
    "n": 27,
    "scored": 27,
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
@@ -37,22 +41,25 @@
   "doc_number": {
    "n": 14,
    "scored": 14,
-   "recall@5": 0.7857,
-   "recall@8": 0.7857,
-   "mrr": 0.7857,
-   "ndcg@8": 0.7857
-  },
-  "message_id": {
-   "n": 23,
-   "scored": 22,
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
+  "message_id": {
+   "n": 29,
+   "scored": 28,
+   "recall@1": 1.0,
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 0.8929
+  },
   "negative": {
    "n": 8,
    "scored": 0,
+   "recall@1": null,
    "recall@5": null,
    "recall@8": null,
    "mrr": null,
@@ -61,6 +68,16 @@
   "syntax": {
    "n": 25,
    "scored": 24,
+   "recall@1": 1.0,
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 1.0
+  },
+  "table": {
+   "n": 4,
+   "scored": 4,
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
@@ -69,6 +86,7 @@
   "version": {
    "n": 8,
    "scored": 5,
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
@@ -76,102 +94,118 @@
   }
  },
  "traps": {
-  "checked": 117,
+  "checked": 127,
   "failed": [],
   "precision": 1.0
  },
  "per_query": {
   "CMP-01": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "CMP-02": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "CMP-05": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "CMP-06": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "CMP-07": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "CMP-10": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "CMP-11": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "CMP-12": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "CMP-15": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "CMP-16": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "CMP-17": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "DIA-01": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "DIA-02": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "DIA-05": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "DIA-06": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "DIA-07": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
@@ -179,228 +213,266 @@
   },
   "DIA-08": {},
   "DIA-11": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "DIA-12": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "DIA-13": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "DIA-16": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "DIA-17": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "DIA-18": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "DIA-21": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "DIA-22": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "DIA-23": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "DIA-26": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "DIA-27": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "DIA-28": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "DIA-31": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "DIA-32": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "DIA-33": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "DOC-01": {
-   "recall@5": 0.0,
-   "recall@8": 0.0,
-   "mrr": 0.0,
-   "ndcg@8": 0.0
+   "recall@1": 1.0,
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "DOC-02": {
-   "recall@5": 0.0,
-   "recall@8": 0.0,
-   "mrr": 0.0,
-   "ndcg@8": 0.0
+   "recall@1": 1.0,
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "DOC-05": {
-   "recall@5": 0.0,
-   "recall@8": 0.0,
-   "mrr": 0.0,
-   "ndcg@8": 0.0
+   "recall@1": 1.0,
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "DOC-07": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "DOC-08": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "DOC-11": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "DOC-12": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "DOC-13": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "DOC-16": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "DOC-17": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "DOC-18": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "LEG-01": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "LEG-02": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "LEG-03": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "LEG-04": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "LEG-05": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "LEG-06": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "LEG-07": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "LEG-08": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "LEG-09": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "LEG-10": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "LEG-11": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "LEG-12": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
@@ -408,78 +480,91 @@
   },
   "MSG-01": {},
   "MSG-02": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "MSG-03": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "MSG-06": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "MSG-08": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "MSG-09": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "MSG-12": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "MSG-13": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "MSG-14": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "MSG-17": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "MSG-18": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "MSG-19": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "MSG-22": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "MSG-23": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
@@ -487,54 +572,63 @@
   },
   "MSG-24": {},
   "MSG-27": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "MSG-28": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "MSG-29": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "MSG-32": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "MSG-33": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "MSG-34": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "MSG-37": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "MSG-38": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "MSG-39": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
@@ -547,114 +641,133 @@
   "NEG-08": {},
   "NEG-09": {},
   "SYN-01": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "SYN-02": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "SYN-05": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "SYN-06": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "SYN-07": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "SYN-10": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "SYN-11": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "SYN-12": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "SYN-15": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "SYN-16": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "SYN-17": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "SYN-20": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "SYN-21": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "SYN-22": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "SYN-25": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "SYN-26": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "SYN-27": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "SYN-30": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "SYN-31": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
@@ -662,42 +775,119 @@
   },
   "SYN-32": {},
   "SYN-35": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "SYN-36": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "SYN-37": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "SYN-40": {
+   "recall@1": 1.0,
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 1.0
+  },
+  "SYS-02": {
+   "recall@1": 1.0,
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 0.5
+  },
+  "SYS-03": {
+   "recall@1": 1.0,
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 0.5
+  },
+  "SYS-04": {
+   "recall@1": 1.0,
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 0.5
+  },
+  "SYS-07": {
+   "recall@1": 1.0,
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 0.5
+  },
+  "SYS-08": {
+   "recall@1": 1.0,
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 0.5
+  },
+  "SYS-09": {
+   "recall@1": 1.0,
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 0.5
+  },
+  "TBL-01": {
+   "recall@1": 1.0,
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 1.0
+  },
+  "TBL-02": {
+   "recall@1": 1.0,
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 1.0
+  },
+  "TBL-05": {
+   "recall@1": 1.0,
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 1.0
+  },
+  "TBL-06": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "VER-01": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "VER-02": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "VER-06": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
@@ -707,12 +897,14 @@
   "VER-08": {},
   "VER-11": {},
   "VER-12": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
   "VER-13": {
+   "recall@1": 1.0,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
