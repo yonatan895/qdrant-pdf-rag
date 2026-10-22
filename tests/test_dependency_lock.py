@@ -80,6 +80,20 @@ def test_urllib3_security_pin_covers_project_and_runtime_profiles():
         assert packages["urllib3"]["wheel"] == f"urllib3-{version}-py3-none-any.whl"
 
 
+def test_hypothesis_is_a_dev_only_dependency():
+    """Property tests (#817) must not reach the runtime wheelhouse, either image or the build profile."""
+    root = Path(__file__).resolve().parents[1]
+    _, dev = locks.load(root, "dev")
+    assert dev["hypothesis"]["wheel"] == f"hypothesis-{dev['hypothesis']['version']}-py3-none-any.whl"
+    assert "sortedcontainers" in dev
+    for profile in ("runtime", "build"):
+        _, packages = locks.load(root, profile)
+        assert not {"hypothesis", "sortedcontainers"} & set(packages)
+    project = tomllib.loads((root / "pyproject.toml").read_text())["project"]
+    assert "hypothesis" not in {Requirement(value).name for value in project["dependencies"]}
+    assert "hypothesis" in {Requirement(value).name for value in project["optional-dependencies"]["dev"]}
+
+
 def test_wheelhouse_rejects_missing_extra_tampered_and_symlink(locked):
     root, _, wheels = locked
     receipt = locks.verify_wheelhouse(root, "dev", wheels)
