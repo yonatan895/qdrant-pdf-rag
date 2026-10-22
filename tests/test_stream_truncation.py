@@ -34,7 +34,7 @@ from mainframe_rag.agent.answer import (
 from mainframe_rag.agent.tokenizer import FallbackTokenizer
 from mainframe_rag.config import Settings
 from mainframe_rag.ports import ChatMessage
-from tests.fakes import HttpxStreamFake, settings_kw
+from tests.fakes import HttpxStreamFake, SlowOpenAIUpstream, settings_kw
 
 TRUNCATED_LINES = [
     'data: {"choices": [{"delta": {"role": "assistant", "content": "Partial "}}]}',
@@ -985,3 +985,159 @@ def test_v1_answer_stream_post_header_exception_single_observation(blast_client,
          "events": [(e.name, dict(e.attributes)) for e in (roots[0].events or [])],
          "status": roots[0].status.description}
     )
+
+
+# ---------------------------------------------------------------------------
+# Issue #868: the answer path has one model-leg budget and never re-asks a
+# generation that already ended or already ran out of time. A real-socket
+# upstream stands in for the gateway so abandonment is observable as a closed
+# connection, which is what the model server sees.
+# ---------------------------------------------------------------------------
+
+_BUDGET_SURFACES = [
+    pytest.param("/v1/answer", False, id="answer-buffered"),
+    pytest.param("/v1/answer", True, id="answer-stream"),
+    pytest.param("/v1/chat", False, id="chat-buffered"),
+    pytest.param("/v1/chat", True, id="chat-stream"),
+]
+_MODEL_TIMEOUT = {"code": "model_timeout", "message": "model response timed out"}
+
+
+def _socket_llm(upstream, **overrides):
+    return HttpxLLMClient(
+        Settings(**settings_kw(llm_base_url=upstream.base_url, **overrides))
+    )
+
+
+def _post_surface(client, path, stream):
+    if path == "/v1/answer":
+        return client.post(path + ("?stream=true" if stream else ""), json={"query": "IEA500I"})
+    return client.post(
+        path, json={"messages": [{"role": "user", "content": "IEA500I"}], "stream": stream}
+    )
+
+
+def _stream_error(path, text):
+    """The one terminal error object of a stream, in each surface's shape."""
+    if path == "/v1/answer":
+        events = _answer_sse_events(text)
+        assert [kind for kind, _ in events][-1] == "error"
+        assert "final" not in [kind for kind, _ in events]
+        payload = events[-1][1]
+        return {"code": payload["code"], "message": payload["message"]}
+    frames = [json.loads(line[6:]) for line in text.splitlines()
+              if line.startswith("data: ") and line != _DONE_LINE]
+    errors = [frame for frame in frames if "error" in frame]
+    assert len(errors) == 1
+    assert errors[0]["verification_state"] == "generation_incomplete"
+    return errors[0]["error"]
+
+
+@pytest.mark.anyio
+async def test_achat_length_without_content_is_final_and_not_reasked():
+    """A stream that ended with an explicit `length` finish and only
+    reasoning text is a complete (incomplete-generation) result. Asking
+    again would run the same generation to the same cut, so there is no
+    recovery POST."""
+    with SlowOpenAIUpstream(stream="length_reasoning_only", post="stall") as upstream:
+        llm = _socket_llm(upstream, llm_stream=True, answer_timeout_s=2.0)
+        result = await llm.achat([ChatMessage(role="user", content="hi")])
+        await llm.aclose()
+    assert (result.content, result.finish_reason) == ("", "length")
+    assert [r["stream"] for r in upstream.requests] == [True]
+
+
+@pytest.mark.anyio
+async def test_chat_stream_length_without_content_ends_with_length_done():
+    with SlowOpenAIUpstream(stream="length_reasoning_only", post="stall") as upstream:
+        llm = _socket_llm(upstream, answer_timeout_s=2.0)
+        items = [i async for i in llm.chat_stream([ChatMessage(role="user", content="hi")])]
+        await llm.aclose()
+    assert [i["type"] for i in items] == ["done"]
+    assert items[0]["finish_reason"] == "length"
+    assert [r["stream"] for r in upstream.requests] == [True]
+
+
+@pytest.mark.parametrize("path,stream", _BUDGET_SURFACES)
+def test_length_with_reasoning_only_is_incomplete_not_a_gateway_failure(
+    monkeypatch, synthetic_pdf, servable_representation_gate, path, stream,
+):
+    """Issue #868 counterexample: xhigh reasoning consumes the whole output
+    cap, the model finishes `length` with empty content. Every surface reports
+    an incomplete generation (never 502), after exactly one model request."""
+    monkeypatch.setattr(app_mod, "retrieve_search", _search_stub().search)
+    with SlowOpenAIUpstream(stream="length_reasoning_only", post="stall") as upstream:
+        llm = _socket_llm(upstream, llm_stream=True, answer_timeout_s=2.0)
+        for client in _client(monkeypatch, synthetic_pdf, llm):
+            final, error = _drive_surface(client, path, stream)
+    assert error is None
+    assert final["state"] == "generation_incomplete"
+    assert final["citations"] == []
+    if final["finish"] is not None:
+        assert final["finish"] == "length"
+    assert [r["stream"] for r in upstream.requests] == [True]
+
+
+@pytest.mark.parametrize("path,stream", _BUDGET_SURFACES)
+@pytest.mark.parametrize("llm_stream", [False, True], ids=["pool-post", "pool-stream"])
+def test_model_wait_expiry_is_model_timeout_and_closes_the_connection(
+    monkeypatch, synthetic_pdf, servable_representation_gate, path, stream, llm_stream,
+):
+    """answer_timeout_s expiry is a stable `model_timeout` (504 on JSON, the
+    terminal error on a stream), never `upstream_error`; the model server sees
+    the disconnect, and the timed-out request is not asked a second time."""
+    monkeypatch.setattr(app_mod, "retrieve_search", _search_stub().search)
+    script = "token_then_stall" if stream else "stall"
+    with SlowOpenAIUpstream(stream=script, post="stall") as upstream:
+        llm = _socket_llm(upstream, llm_stream=llm_stream, answer_timeout_s=0.3)
+        for client in _client(monkeypatch, synthetic_pdf, llm):
+            resp = _post_surface(client, path, stream)
+        assert upstream.wait_for(lambda u: u.disconnects >= 1)
+    if stream:
+        assert resp.status_code == 200
+        assert _stream_error(path, resp.text) == _MODEL_TIMEOUT
+    else:
+        assert resp.status_code == 504
+        assert resp.json() == _MODEL_TIMEOUT
+    assert len(upstream.requests) == 1
+    assert upstream.finished == 0
+
+
+@pytest.mark.parametrize("path,stream", _BUDGET_SURFACES)
+def test_request_deadline_expiry_closes_the_model_connection(
+    monkeypatch, synthetic_pdf, servable_representation_gate, path, stream,
+):
+    """The documented total budget (`request_deadline_s`) abandons the model
+    request by closing its connection, on JSON and stream, answer and chat."""
+    monkeypatch.setattr(app_mod, "retrieve_search", _search_stub().search)
+    monkeypatch.setenv("REQUEST_DEADLINE_S", "0.4")
+    script = "token_then_stall" if stream else "stall"
+    with SlowOpenAIUpstream(stream=script, post="stall") as upstream:
+        llm = _socket_llm(upstream, llm_stream=stream, answer_timeout_s=60.0)
+        for client in _client(monkeypatch, synthetic_pdf, llm):
+            resp = _post_surface(client, path, stream)
+        assert upstream.wait_for(lambda u: u.disconnects >= 1)
+    if stream:
+        assert resp.status_code == 200
+        assert "final" not in resp.text
+    else:
+        assert resp.status_code == 504
+        assert resp.json()["code"] == "deadline_exceeded"
+    assert len(upstream.requests) == 1
+
+
+def test_chat_sync_length_without_content_is_final_and_not_reasked():
+    """Sync mirror of the achat case (issue #868)."""
+    fake = HttpxStreamFake(
+        lines=[
+            'data: {"choices": [{"delta": {"reasoning_content": "thinking"}}]}',
+            'data: {"choices": [{"delta": {}, "finish_reason": "length"}]}',
+            _DONE_LINE,
+        ],
+        payload=_COMPLETE_PAYLOAD,
+    )
+    fake.stream = fake.stream_sync
+    llm = HttpxLLMClient(Settings(**_settings_kwargs(llm_stream=True)), client=fake)
+    result = llm.chat([ChatMessage(role="user", content="hi")])
+    assert (result.content, result.finish_reason) == ("", "length")
+    assert fake.post_bodies == []

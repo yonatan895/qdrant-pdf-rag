@@ -32,6 +32,7 @@ from fastapi.templating import Jinja2Templates
 from opentelemetry.trace import SpanKind
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from mainframe_rag.agent.answer import is_model_timeout
 from mainframe_rag.agent.answer_core import (
     AnswerCoreInput,
     execute_answer_core,
@@ -995,11 +996,13 @@ async def _console_stream_response(req, owner):
                 if isinstance(exc, PromptBudgetExceeded)
                 else "deadline_exceeded"
                 if isinstance(exc, app_mod.RequestDeadlineExceeded)
+                else "model_timeout"
+                if is_model_timeout(exc)
                 else "upstream_error",
                 started,
                 verification_state="generation_incomplete",
             )
-            yield format_sse_event("error", error_payload())
+            yield format_sse_event("error", error_payload(*app_mod.stream_error_fields(exc)))
 
         finally:
             await bounded.aclose()
