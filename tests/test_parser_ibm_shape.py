@@ -104,6 +104,35 @@ def test_extract_page_texts_label_tree_starting_after_page_zero(tmp_path):
     assert [t.strip() for t in texts] == [f"Widget page {i + 1}" for i in range(5)]
 
 
+def test_extract_page_texts_decodes_hex_string_label_prefixes(tmp_path):
+    """Issue #863: a /PageLabels prefix written as a PDF hex string comes back
+    from PyMuPDF's get_label() verbatim ("<FEFF0033002D>1"). Extraction stores
+    the printed label: UTF-16BE after a byte-order mark, PDFDocEncoding
+    otherwise, an empty <FEFF> prefix as nothing. A literal prefix is
+    untouched, and an undecodable one is absent, never guessed."""
+    import pymupdf
+
+    from mainframe_rag.ingest.run_ingest import _extract_page_texts
+
+    path = tmp_path / "WX10-0003-00.pdf"
+    doc = pymupdf.open()
+    for i in range(7):
+        doc.new_page().insert_text((72, 72), f"Widget page {i + 1}")
+    doc.xref_set_key(
+        doc.pdf_catalog(),
+        "PageLabels",
+        "<</Nums [0 <</S /r /P <FEFF>>> 2 <</S /D /P <FEFF0033002D>>> "
+        "4 <</S /D /P <412D>>> 5 <</S /D /P (<B>)>> 6 <</S /D /P <FEFF00>>>]>>",
+    )
+    doc.save(path)
+    doc.close()
+
+    with pymupdf.open(path) as reopened:
+        assert reopened[2].get_label() == "<FEFF0033002D>1"  # the library behavior
+        _, labels = _extract_page_texts(reopened)
+    assert labels == ["i", "ii", "3-1", "3-2", "A-1", "<B>1", None]
+
+
 def test_extract_page_texts_lives_in_a_hashed_rule_module():
     """Payload-changing extraction (#85 table rows) must sit in a module that
     extraction_rules_version hashes; run_ingest only re-exports it."""

@@ -330,7 +330,11 @@ for citations and filters.
   `p. PDF n–m`, see [retrieval §1](retrieval.md)). A `/PageLabels` tree whose
   first rule starts after page 0 makes PyMuPDF's `get_label()` raise
   `IndexError` on the earlier pages; extraction treats those labels as absent
-  (`ibm_pdf._page_label`) instead of failing the document.
+  (`ibm_pdf._page_label`) instead of failing the document. A rule prefix
+  written as a PDF hex string comes back verbatim (`<FEFF0033002D>1`) and is
+  decoded to the printed label (`3-1`, issue #863): UTF-16BE after the `FEFF`
+  byte-order mark, or an even-length string that decodes to printable ASCII.
+  Any other `<…>` prefix is kept as printed, and undecodable UTF-16 is absent.
 - Per chunk, `classify` (§5) plus message/member extraction run and land in
   the payload (§8).
 
