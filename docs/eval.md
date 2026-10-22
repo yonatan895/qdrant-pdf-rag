@@ -329,15 +329,21 @@ verdict.
   query text by corpus design ("deliberate lexical competitors"). Both venues: collection + hash-vs-vllm pairing is
   operator env (the baseline pins the snapshot, not the collection name).
 - **Verdict:** zero trap failures AND no per-class regression beyond the
-  baseline floor (default 0.05) AND at least one primary metric (recall@5,
-  MRR) improving with a paired-bootstrap 95% CI excluding zero (2000
-  resamples, seeded). Pure parity refactors hold by design.
+  baseline floor (default 0.05) in recall@1, recall@5 or MRR AND at least one
+  primary metric (recall@5, MRR) improving with a paired-bootstrap 95% CI
+  excluding zero (2000 resamples, seeded). Pure parity refactors hold by
+  design. recall@1 (#837) takes part only in the per-class regression check,
+  and only where the baseline class block records it: a baseline without the
+  key (or with a null) reads as missing, never as 0. It is deliberately not a
+  paired-CI primary metric: that would let a first-rank gain promote while
+  recall@5 and MRR are flat, and would hold every baseline recorded before
+  the key ("no paired values"), so primary metrics and thresholds are unchanged.
 - **L1 metrics:** `L1_LIMIT=8` (matches the answer path's retrieval depth);
   recall@1/@5/@8, MRR@8, shared nDCG@8 helper (no @3 here, unlike the
   eval); abstain rows contribute traps only; trap precision divides by all
-  rows. recall@1 (#837) is reported per class, overall and per query but
-  not yet gated: the verdict reads recall@5 and MRR only, and the recorded
-  baselines predate the key.
+  rows. recall@1 (#837) is reported per class, overall and per query and is
+  compared per class where the baseline records it (see Verdict); a
+  baseline recorded before the key is not gated on it until re-recorded.
 - **L2 (answer tier):** reuses the answer-eval runner and adds citation
   precision/recall over exact cite-string joins (precision averages cited
   rows, recall counts zero-cite rows at 0; unmapped citations fail the
