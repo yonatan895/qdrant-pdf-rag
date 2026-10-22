@@ -3790,6 +3790,25 @@ def test_parse_answer_never_raises_and_grounds_citations_in_supplied_evidence(co
             assert candidate in supplied, line
 
 
+_NESTING_WRAPPERS = st.sampled_from(["*{}*", "**{}**", "`{}`", "({})", "> {}", "_{}_"])
+
+
+@_PROPERTY
+@given(st.sampled_from(_SUPPLIED_CITES + _FABRICATED_CITES), st.lists(_NESTING_WRAPPERS, max_size=16))
+@example(_FABRICATED_CITES[0], ["*{}*"] * 7)  # #876: the seventh level survived
+def test_citation_normalization_is_idempotent_at_any_nesting_depth(cite, wrappers):
+    """normalize_citation_line reaches a fixed point (#817 property, #876):
+    normalizing twice equals normalizing once, and wrapping a citation in
+    any stack of emphasis, code, parenthesis or quote markers unwraps to the
+    bare citation, so depth cannot smuggle a fabricated cite past the strip."""
+    line = cite
+    for wrapper in wrappers:
+        line = wrapper.format(line)
+    once = normalize_citation_line(line)
+    assert normalize_citation_line(once) == once
+    assert once == cite, line
+
+
 _DECLINE_LEADS = st.sampled_from([
     DECLINE_PREFIX, DECLINE_PREFIX.lower(), DECLINE_PREFIX.upper(), f"**{DECLINE_PREFIX}**",
     f"## {DECLINE_PREFIX}", f"Answer: {DECLINE_PREFIX}",

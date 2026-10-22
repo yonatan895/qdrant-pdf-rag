@@ -115,7 +115,9 @@ so lexical and semantic candidates are scoped identically before any fusion.
   2.0 oversampling raised dense overlap with exact search at 8 from 0.984 to
   1.000 and at 40 from 0.983 to 0.9997 (stored-vector queries, 2026-10-22,
   [record](records/2026-10-22-search-params.md)). A `None` setting omits that
-  field (server default); the BM25 leg never carries params. Changing a value
+  field (server default); `None` is a code default, not an env value
+  (`DENSE_*=none` is refused), so restoring the server default is a
+  default change. The BM25 leg never carries params. Changing a value
   needs a new measurement against exact search, not a reasoning argument.
 - The legs are named `dense` and `bm25`, dense first. Each leg passes
   `requests=[QueryRequest(filter=flt, ...)]` into one `query_batch_points`

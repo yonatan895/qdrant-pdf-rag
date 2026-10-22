@@ -80,7 +80,7 @@ Pinned as `Settings` defaults and sent on every dense query: `dense_hnsw_ef = 12
 - Rescore on with oversampling 2.0 **is a behavior change**: the dense candidate lists move from the quantized order
   to the near-exact order (43.5% of unfiltered and 45% of filtered queries change their top-8 id order versus the
   server default). It follows the measured ranking against exact search and does not change identity, payload,
-  collection or index configuration. To restore today's behavior set the defaults back to
+  collection or index configuration. To restore today's behavior change the code defaults (env cannot express `None`) back to
   `dense_quant_rescore = false` and `dense_quant_oversampling = None` (the measured `rescore=false` setting; rescore
   off with oversampling 2.0 was not measured).
 
