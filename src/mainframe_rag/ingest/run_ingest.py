@@ -210,6 +210,32 @@ class _StagingBuild:
     resume_verified: bool
 
 
+LABEL_DELIMITER_CODE = "label_delimiter"
+
+
+class LabelDelimiterRefused(ValueError):
+    """A vendor, product or version label contains `|`, the `source_rev_key`
+    field delimiter (issue #878). Fixed message and stable code: no label,
+    path or manual text ever appears in it."""
+
+    code = LABEL_DELIMITER_CODE
+
+    def __init__(self) -> None:
+        super().__init__(
+            f"{LABEL_DELIMITER_CODE}: vendor, product or version label contains the "
+            "reserved character '|'; document refused"
+        )
+
+
+def require_delimiter_free_labels(parsed: ParsedDoc) -> None:
+    """Refuse (never sanitize) a document whose resolved labels contain `|`,
+    so `vendor|product|version|sha256` stays unambiguous. This guard sits
+    outside the rules-version modules on purpose: it adds no key escaping,
+    so every existing key and chunk id is unchanged (no re-embed)."""
+    if any("|" in (label or "") for label in (parsed.vendor, parsed.product, parsed.version)):
+        raise LabelDelimiterRefused
+
+
 def _parse_one(
     args: ParseTask,
 ) -> tuple[
@@ -242,6 +268,7 @@ def _parse_one(
             corpus_root=Path(corpus_root) if corpus_root else None,
             sha256=sha,
         )
+        require_delimiter_free_labels(parsed)
         require_document_within("pages", parsed.page_count, settings.ingest_max_doc_pages)
         doc = pymupdf.open(path)
         try:
@@ -1764,6 +1791,10 @@ def _resolve_publication(
                 corpus_root=src,
                 sha256=sha,
             )
+            if "|" in "".join(
+                label or "" for label in (parsed_walked.vendor, parsed_walked.product, parsed_walked.version)
+            ):
+                continue  # refused at ingest (#878): no key exists to retire
             doc_id = parsed_walked.doc_id
             source_rev = source_rev_key(
                 parsed_walked.vendor, parsed_walked.product, parsed_walked.version, sha

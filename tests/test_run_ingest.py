@@ -4,6 +4,7 @@ No Qdrant, no embeddings (air-gap Job does that; CI uses --dry-run).
 """
 
 import json
+from pathlib import Path
 from typing import ClassVar
 
 import pytest
@@ -1112,6 +1113,85 @@ def test_oversize_document_is_never_upserted_or_completed_and_next_run_succeeds(
     monkeypatch.delenv("INGEST_MAX_DOC_CHUNKS")
     assert main([*args, "--reingest"]) == 0
     assert sum(fake.upserts) > 0
+
+
+@pytest.mark.parametrize(
+    ("parts", "cli"),
+    [
+        (("IBM", "zOS|x", "2.5"), {}),
+        (("IBM", "zOS", "2|5"), {}),
+        (("IBM", "zOS", "2.5"), {"vendor": "a|b"}),
+        (("IBM", "zOS", "2.5"), {"product": "p|q"}),
+        (("IBM", "zOS", "2.5"), {"version": "1|2"}),
+    ],
+)
+def test_pipe_in_a_label_is_refused_with_a_fixed_error_on_the_worker_path(
+    plain_pdf, tmp_path, monkeypatch, parts, cli
+):
+    """Issue #878: `|` delimits source_rev_key, so a label containing it (path
+    layout or CLI flag) is refused before any chunk, embed or key exists. The
+    error record is fixed text: no label, path or manual text."""
+    import shutil
+
+    from mainframe_rag.config import Settings
+    from mainframe_rag.ingest import run_ingest
+
+    pdf = tmp_path.joinpath(*parts, "guide.pdf")
+    pdf.parent.mkdir(parents=True)
+    shutil.copy(plain_pdf, pdf)
+    monkeypatch.setattr(
+        run_ingest, "_load_worker_settings", lambda: Settings(embed_mode="hash", _env_file=None)
+    )
+    embed_calls = _spy_embed(monkeypatch)
+    task = (str(pdf), cli.get("vendor"), cli.get("product"), cli.get("version"), str(tmp_path), "d" * 64, True, None)
+    record, _parsed, chunks, vectors, contexts = run_ingest._parse_one(task)
+    assert record.status == "error"
+    assert record.error_type == "LabelDelimiterRefused"
+    assert record.error == (
+        "label_delimiter: vendor, product or version label contains the reserved "
+        "character '|'; document refused"
+    )
+    assert (chunks, vectors, contexts) == ([], [], {})
+    assert embed_calls == []
+
+
+def test_pipe_label_document_is_refused_run_continues_and_valid_labels_keep_their_key(
+    tmp_path, synthetic_pdf, plain_pdf, monkeypatch
+):
+    """Issue #878 end to end through main(): the refused document is an error
+    record, the valid document in the same run is ingested with the same
+    source_rev key as before (independently spelled), and once the label is
+    fixed the forced re-run ingests it."""
+    import shutil
+
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.ibm_pdf import sha256_file
+
+    root = tmp_path / "corpus"
+    good = root / "IBM" / "zOS" / "2.5" / "good.pdf"
+    bad = root / "IBM" / "zOS|x" / "2.5" / "bad.pdf"
+    for dest, src in ((good, plain_pdf), (bad, synthetic_pdf)):
+        dest.parent.mkdir(parents=True)
+        shutil.copy(src, dest)
+    fake = _FakeQdrant()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    monkeypatch.setenv("EMBED_MODE", "hash")
+    monkeypatch.delenv("DENSE_DIM", raising=False)
+    progress = tmp_path / "inventory.jsonl"
+    args = ["--src", str(root), "--progress", str(progress), "--workers", "1"]
+    assert main(args) == 1
+    records = {Path(r["path"]).name: r for r in map(json.loads, progress.read_text().splitlines()) if r}
+    assert records["bad.pdf"]["status"] == "error"
+    assert records["bad.pdf"]["error_type"] == "LabelDelimiterRefused"
+    assert "zOS|x" not in records["bad.pdf"]["error"] and "bad.pdf" not in records["bad.pdf"]["error"]
+    assert records["good.pdf"]["status"] == "upserted"
+    assert records["good.pdf"]["source_rev"] == f"ibm|zos|2.5|{sha256_file(good)}"
+
+    shutil.move(str(bad.parent.parent), str(root / "IBM" / "zOS2"))
+    assert main([*args, "--reingest"]) == 0
+    last = {Path(r["path"]).name: r for r in map(json.loads, progress.read_text().splitlines()) if r}
+    assert last["bad.pdf"]["status"] == "upserted"
+    assert last["bad.pdf"]["source_rev"].startswith("ibm|zos2|2.5|")
 
 
 @pytest.mark.parametrize(
