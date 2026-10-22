@@ -42,6 +42,9 @@ log = logging.getLogger("otel")
 
 DEFAULT_SERVICE_NAME: Final = "mainframe-rag-agent"
 DEFAULT_OTLP_TRACES_PATH: Final = "/v1/traces"
+# Inbound tracestate longer than this is dropped before extraction
+# (GHSA-xcq7-p3pf-p88h: the SDK's parser is O(N^2) on whitespace runs).
+MAX_TRACESTATE_CHARS: Final = 512
 
 
 def start_as_current_span(tracer, name: str, **kwargs):
@@ -130,9 +133,24 @@ def parent_context(headers) -> Context:
     it returns an empty Context — a new root, today's behavior. Never
     raises: a bad header must not fail the request. Composes with the
     lifespan sampler (ParentBased): an upstream sampled flag is honored,
-    an unsampled parent stays dropped."""
+    an unsampled parent stays dropped.
+
+    An inbound tracestate over MAX_TRACESTATE_CHARS (repeated headers
+    combined, as the W3C spec joins them) is discarded before the SDK
+    parses it; traceparent is kept, so the trace still joins. The value is
+    never logged."""
     try:
-        return propagate.extract(dict(headers))
+        carrier: dict[str, str] = {}
+        state: list[str] = []
+        for name, value in headers.items():
+            if name.lower() == "tracestate":
+                state.append(value)
+            else:
+                carrier[name] = value
+        combined = ",".join(state)
+        if state and len(combined) <= MAX_TRACESTATE_CHARS:
+            carrier["tracestate"] = combined
+        return propagate.extract(carrier)
     except Exception:  # noqa: BLE001
         log.debug("otel ingress extract failed; starting a new root")
         return Context()
