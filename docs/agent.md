@@ -1169,8 +1169,13 @@ from the next line). The prefix says nothing answers the question, so a scope
 caveat leading a partial answer ("X is not covered by the excerpts; ...") is a
 mixed answer; the prefix inside a sentence, subject-less or placed after an
 answer clause leaves the whole-response rule in charge. The decline cites
-nothing: inline citation markers anywhere after the lead mean cited claims,
-so the whole-response rule decides and a mixed answer keeps its citations.
+nothing: inline citation markers anywhere after the lead, and a line that
+begins with `[n]` (#877; the only list-style marker that counts as a
+citation), mean cited claims, so the whole-response rule decides and a mixed
+answer keeps its citations. `0)`, `1.` and `-` stay list scaffolding around the
+uncited coverage note. A decline wrapped whole-line in straight or curly quotes,
+backticks or a blockquote is peeled like any list marker and still declines;
+the same text quoted inside a sentence does not.
 Uncited text after the decline is the coverage note, so a model that leads
 with the decline and then answers without citing is classified
 `insufficient_evidence`: the conservative outcome, never a false `accepted`.
@@ -1183,8 +1188,8 @@ Accepted residuals:
 - An answer that breaks rule 4 by leading with the decline, then answers
   while citing only in the `Citations:` list, is classified
   `insufficient_evidence` with its citations zeroed.
-- A decline whose coverage note mentions an excerpt index ("[2] covers only
-  ...") falls to the whole-response rule.
+- A decline whose coverage note mentions an excerpt index, inline or at the
+  start of a line ("[2] covers only ..."), falls to the whole-response rule.
 
 The G4 measurement of this wording records how often either occurs.
 

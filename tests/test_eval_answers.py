@@ -542,6 +542,23 @@ def test_structured_decline_with_coverage_note_is_judged_as_a_decline() -> None:
     assert any("explicit refusal" in f for f in fails)
 
 
+def test_decline_edge_cases_are_scored_by_the_shared_predicate() -> None:
+    """Issue #877: a decline followed by a line-leading [n] is a cited claim
+    (an answer row is not failed as an explicit refusal); a
+    curly-quoted decline scores as a decline like a straight-quoted one."""
+    from mainframe_rag.agent.answer import DECLINE_PREFIX
+
+    cited = f"{DECLINE_PREFIX} IEA500I.\n[1] Set RETRY=5 in IEASYSxx."
+    assert is_abstention(cited) is False
+    verdict, fails, _ = judge(_entry(), cited, ["SA23-1380-70 ref, p. 1"])
+    assert not any("explicit refusal" in f for f in fails), (verdict, fails)
+    for quoted in (f"\u201c{DECLINE_PREFIX} IEA500I.\u201d", f'"{DECLINE_PREFIX} IEA500I."'):
+        assert is_abstention(quoted) is True
+        assert judge(_entry(expected_behavior="abstain"), quoted, [])[:2] == ("pass", [])
+        verdict, fails, _ = judge(_entry(), quoted, ["SA23-1380-70 ref, p. 1"])
+        assert verdict == "fail" and any("explicit refusal" in f for f in fails)
+
+
 @pytest.mark.parametrize("row_id", ["DIA-08", "MSG-01"])
 def test_structured_decline_naming_the_identifier_meets_identifier_abstention_rows(row_id: str) -> None:
     """Issue #764 x dev golden: identifier abstention rows require the
