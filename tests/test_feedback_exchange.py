@@ -446,3 +446,23 @@ def test_import_refuses_while_the_store_is_in_use_and_works_after(source, tmp_pa
         p.communicate("\n", timeout=10)
     assert store_in_use(db2) is False
     assert _import(out, db2, "--merge") == 0  # the next ordinary operation succeeds
+
+
+def test_probe_sees_an_idle_open_connection_but_is_only_point_in_time(tmp_path):
+    """What the probe does and does not promise (#805, D3): the single-writer
+    rule is the runbook step (stop the service); the probe is a backstop. A WAL
+    store held open by an idle connection (no transaction) IS detected; it holds
+    nothing afterwards, so a holder that starts later is not seen at all."""
+    db = tmp_path / "held.sqlite3"
+    env = {**os.environ, "PYTHONPATH": str(SRC)}
+    p = subprocess.Popen([sys.executable, "-c", _HOLDER, str(db)], env=env, text=True,
+                         stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    try:
+        assert p.stdout.readline().strip() == "ready"  # constructed, committed, idle
+        assert store_in_use(db) is True
+    finally:
+        p.communicate("\n", timeout=10)
+    assert store_in_use(db) is False
+    late = FeedbackStore(db)  # a service starting after the probe: not prevented
+    assert store_in_use(db) is True  # visible only to the next probe
+    late.close()

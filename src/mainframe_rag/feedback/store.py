@@ -191,10 +191,15 @@ def read_snapshot(path: Path, *, connect: Any = None) -> tuple[list[dict[str, An
 
 
 def store_in_use(path: Path) -> bool:
-    """True when another connection (a running service) holds the store file.
+    """True when another connection holds the store file right now.
+
     Probes for an exclusive lock without waiting; it writes nothing. A WAL
-    database open anywhere else cannot be taken exclusively, so this is the
-    guard behind `import`: a second writer on a live store is refused (#805)."""
+    database keeps a lock for as long as a connection is open, so a running
+    service is detected even when idle (no transaction). Limits: it is a
+    point-in-time check, not a lock held during the import; a service started
+    after the probe is not seen; and file locks are not reliable across hosts
+    or on NFS. It supports the single-writer rule (stop the service first,
+    docs/install_and_ops.md); it is not a replacement for it (#805)."""
     db = sqlite3.connect(str(path), isolation_level=None, timeout=0)
     try:
         db.execute("PRAGMA locking_mode=EXCLUSIVE")

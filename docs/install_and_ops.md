@@ -1007,9 +1007,11 @@ upload it.
   target must not be served. Copy the file into a pod that mounts the claim
   with the service stopped, then run `... exchange import --in FILE --db
   /data/feedback.sqlite3`. A non-empty target is refused.
-- **`--merge` into a populated store:** first stop the writer, because it is
-  the only guard against a second writer on the live store besides the
-  exclusive-lock probe (which refuses with `store_in_use`): `oc -n "$NAMESPACE"
+- **`--merge` into a populated store:** first stop the writer. Stopping it is
+  the control against a second writer on the live store. The import's
+  exclusive-lock probe (refusal `store_in_use`) is only a backstop: it sees a
+  connection held at that moment, not one started afterwards, and is unreliable
+  across hosts or NFS: `oc -n "$NAMESPACE"
   scale statefulset/rag-feedback --replicas=0`, wait for the pod to end, run
   the import from a one-off pod mounting `rag-feedback-data` with the
   application image and the same restricted security context, delete that pod,

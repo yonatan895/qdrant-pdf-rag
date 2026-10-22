@@ -13,8 +13,10 @@ Export opens the store read-only and releases it before writing (store.
 read_snapshot), so it neither writes the live file nor pins a WAL snapshot
 that would defer the purge. Import validates the whole file with the live
 models before it touches the target, then applies it in one transaction
-(store.FeedbackStore.import_records). It needs a store that no service holds,
-and an empty one unless `--merge`. Every refusal is a fixed code on stderr and
+(store.FeedbackStore.import_records). The service must be stopped first (the
+runbook scales it to 0); a lock probe refuses an import when another connection
+holds the store at that moment, but it is a point-in-time check, not a guarantee.
+The target must be empty unless `--merge`. Every refusal is a fixed code on stderr and
 exit 2; no message or count ever carries row text.
 """
 
@@ -255,7 +257,7 @@ def main(argv: list[str] | None = None, *, clock: Callable[[], float] = time.tim
     exp.add_argument("--out", required=True, help="new file (mode 0600) or - for stdout")
     exp.add_argument("--retention-days", type=int,
                      help="recorded in the header (default FEEDBACK_RETENTION_DAYS)")
-    imp = sub.add_parser("import", help="restore an export; the service must be stopped")
+    imp = sub.add_parser("import", help="restore an export; stop the service first (a lock probe refuses only if the store is held at that moment)")
     imp.add_argument("--in", dest="src", required=True, help="export file or - for stdin")
     imp.add_argument("--db", help="store file (default FEEDBACK_STORE_PATH)")
     imp.add_argument("--merge", action="store_true", help="allow a populated target")

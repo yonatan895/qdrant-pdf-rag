@@ -422,15 +422,18 @@ retention: [observability](observability.md#data-tiers).
   validates the whole file first (hash, counts, version, schema, the live
   `AnswerRecord`/`Rating` models, unknown fields, duplicate ids, a rating
   needs an answer in the file or the target), refuses a group/world-readable
-  input, then applies it in one transaction preserving `created_at`. It needs a
-  store no service holds (an exclusive-lock probe; `store_in_use`) and an empty
-  one unless `--merge`. An answer already present is never rewritten
+  input, then applies it in one transaction preserving `created_at`. The
+  service must be stopped first (runbook: scale to 0). Defence in depth, not a
+  guarantee: an exclusive-lock probe (`store_in_use`, refusal `store_in_use`)
+  sees any connection that holds the WAL store at that moment, an idle open
+  service included, but it is point-in-time (a service started afterwards is not
+  seen) and unreliable across hosts or NFS. The target is empty unless `--merge`. An answer already present is never rewritten
   (identical is a duplicate, different a conflict); a rating that differs is
   replaced when newer, kept when older, a conflict at equal `created_at`. Any
   conflict refuses the whole import unless `--keep-existing`. Refusals are a
   fixed code on stderr and exit 2 (never row text); success prints counts
   (`inserted`, `duplicate`, `conflict`, `superseded`, `expired`; `expired` rows
-  are removed by the next purge). Tests: `tests/test_feedback_exchange.py`.
+  are removed by the next purge). Tests: `tests/test_feedback_exchange.py`. Local tasks: `feedback:export DB= OUT=`, `feedback:import IN= DB= [MERGE=1] [KEEP_EXISTING=1]`.
   Deployment (the single-replica StatefulSet `rag-feedback`, the kept claim
   `rag-feedback-data`, the operator Secret and the agent-only NetworkPolicy,
   default off) is in the chart: [deploy.md](deploy.md#feedback-service).
