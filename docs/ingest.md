@@ -162,10 +162,12 @@ Frequency-based running header/footer removal, computed **once per document**
   bare completion-code line such as `806` was deleted as a folio, and
   repeating labels as running chrome).
 - A line becomes chrome when it appears in the edge lines of at least
-  `max(3, int(0.35 * n_pages))` sampled pages. Documents under 8 pages skip
+  `max(3, int(0.35 * n_pages))` pages. Documents under 8 pages skip
   chrome removal entirely — a minimum-1 threshold would wipe short PDFs.
-- Sampling: up to 64 pages → all pages; larger docs → uniform sampled
-  indices, deduped.
+- Every page is counted (issue #864). The earlier fixed-step sample of 64
+  pages took only even pages whenever its step was an even integer (128, 384
+  or 640 pages), so a running footer on alternate pages, the usual book
+  layout, was never counted.
 - Each page votes once per line (per-page deduped set before counting), so a
   line repeated 50× on one page counts once.
 - Matching is case- and whitespace-insensitive (whitespace collapsed,
