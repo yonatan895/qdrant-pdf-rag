@@ -7,6 +7,7 @@ import fcntl
 import hashlib
 import json
 import os
+import shlex
 import signal
 import socket
 import subprocess
@@ -3033,3 +3034,91 @@ def test_manifest_and_diagnostic_sink_disk_full_cannot_interrupt_release_then_re
     (root / "sessions.json").write_text("{}")
     ordinary = _prepare_new(state, root / "ordinary-after-diagnostic-sink-recovery")
     assert _run_fake(ordinary) == 0
+
+
+def _sandbox_env(state):
+    """Parse the private sandbox handoff exactly as the operator's shell sees it."""
+    values = {}
+    for line in (state / "sandbox.env").read_text().splitlines():
+        key, _, raw = line.removeprefix("export ").partition("=")
+        (values[key],) = shlex.split(raw) or [""]
+    return values
+
+
+@pytest.mark.parametrize("lab", ["COLAB_G4_BF16"], indirect=True)
+def test_reasoning_profile_sandbox_handoff_keeps_its_exact_routing(lab):
+    """#862 characterization: the two-model reference's handoff is unchanged."""
+    _, state, _ = lab
+    assert _run_fake(state, ("scripts/colab_hold.py",)) == 0
+    manifest = json.loads((state / "manifest.json").read_text())
+    config, profile, bridge = manifest["config"], manifest["profile"], manifest["transport"]["bridge"]
+    env = _sandbox_env(state)
+    assert env.pop("GATEWAY_RUN_OWNER") == manifest["session"]
+    assert env.pop("GATEWAY_TRANSPORT_NETWORK_ID") == manifest["gateway_network"]["network_id"]
+    assert env.pop("GATEWAY_ENV_FILE") == str(state / "gateway.env")
+    assert env.pop("LOCAL_STACK_LOG_DIR") == str(state)
+    assert env.pop("GATEWAY_DOCKER_BIN") == manifest["tools"]["docker"]
+    assert env.pop("LITELLM_IMAGE") == IMAGE
+    assert env.pop("PG_NET") == config["gateway_network"] and env.pop("GATEWAY_NAME") == config["gateway_name"]
+    assert env == {
+        "GATEWAY_DEBUG": "0", "GATEWAY_TRANSPORT_NETWORK_CREATED": "1",
+        "GATEWAY_MEMORY_MIB": "2048", "PG_MEMORY_MIB": "512", "GATEWAY_LOG_MAX_BYTES": "8388608",
+        "GATEWAY_DOCKER_LOG_MAX_BYTES": "8388608", "GATEWAY_DOCKER_LOG_FILES": "2",
+        "GATEWAY_REASONING_URL": f"http://{bridge}:{config['reasoning_port']}/v1",
+        "GATEWAY_EMBED_URL": f"http://{bridge}:{config['embedding_port']}/v1",
+        "GATEWAY_REASONING_MODEL": "Qwen/Qwen3.8-27B", "GATEWAY_EMBED_MODEL": "Qwen/Qwen3-Embedding-8B",
+        "GATEWAY_EMBED_MODEL_REVISION": profile["servers"][1]["revision"],
+        "DENSE_DIM": "4096", "RERANK_ENABLED": "false", "LLM_MAX_MODEL_LEN": "32768",
+        "LLM_REASONING_EFFORT_SIMPLE": "xhigh", "LLM_REASONING_EFFORT_COMPLEX": "xhigh",
+        "LLM_REASONING_EFFORTS": "low,medium,xhigh", "GATEWAY_PROBE_MAX_TOKENS": "512",
+    }
+
+
+@pytest.mark.parametrize("lab", ["COLAB_G4_RERANK_8B", "COLAB_G4_RERANK_4B"], indirect=True)
+def test_rerank_profile_sandbox_routes_embed_and_rerank_legs_without_a_reasoning_leg(lab):
+    """#862: the reranker is routed through the real gateway on the first model
+    slot (so the CPU receipt's :8000/:8001 transport proves it); no reasoning leg."""
+    root, state, _ = lab
+    assert _run_fake(state, ("scripts/colab_hold.py",)) == 0
+    manifest = json.loads((state / "manifest.json").read_text())
+    assert manifest["workload_succeeded"] is True and manifest["released"] is True
+    config, profile, bridge = manifest["config"], manifest["profile"], manifest["transport"]["bridge"]
+    embedding, reranker = profile["servers"]
+    assert [server["role"] for server in profile["servers"]] == ["embed", "rerank"]
+    env = _sandbox_env(state)
+    assert env["GATEWAY_REASONING"] == "off"
+    assert env["GATEWAY_RERANK_URL"] == f"http://{bridge}:{config['reasoning_port']}/v1"
+    assert env["GATEWAY_RERANK_MODEL"] == reranker["model_id"]
+    assert env["GATEWAY_EMBED_URL"] == f"http://{bridge}:{config['embedding_port']}/v1"
+    assert (env["GATEWAY_EMBED_MODEL"], env["GATEWAY_EMBED_MODEL_REVISION"]) == (
+        "Qwen/Qwen3-Embedding-8B", embedding["revision"])
+    assert env["DENSE_DIM"] == "4096" and env["RERANK_ENABLED"] == "true"
+    assert env["GATEWAY_ENV_FILE"] == str(state / "gateway.env")
+    # Nothing may point a stack, gateway or consumer at a reasoning model.
+    leaked = {name for name in env if "REASONING" in name or name.startswith("LLM_")} - {"GATEWAY_REASONING"}
+    assert leaked == set()
+    # The transport the CPU receipt proved is unchanged: the same two forwards.
+    assert [(item["local_port"], item["remote_port"]) for item in manifest["transport"]["forwards"]] == [
+        (config["reasoning_port"], 8000), (config["reasoning_port"], 8000),
+        (config["embedding_port"], 8001), (config["embedding_port"], 8001)]
+    # The next ordinary run still works after this one released.
+    assert json.loads((root / "sessions.json").read_text()) == {}
+    assert _run_fake(_prepare_new(state, root / "ordinary-after-rerank-sandbox")) == 0
+
+
+def test_rerank_profiles_are_refused_for_production_and_fresh_index_initialization(lab):
+    root, base, _ = lab
+    state = root / "production-rerank"
+    argv, source = _prepare_arguments(base, state, profile="COLAB_G4_RERANK_8B")
+    argv[argv.index("--dataset") + 1] = "production"
+    # The controller prints only a generic refusal; the fixed reason is the
+    # LabError itself, and it must precede every missing-input refusal.
+    with pytest.raises(controller.LabError, match="retrieval-only"):
+        controller.prepare(controller.parser().parse_args(argv), source_root=source)
+    assert _controller_call(argv, source_root=source) == 2
+    assert not state.exists()
+    with pytest.raises(SystemExit):
+        controller.main(["initialize-fresh", "--state", str(root / "fresh"), "--collection", "x",
+                         "--profile", "COLAB_G4_RERANK_4B"], bootstrap=False)
+    # The ordinary profile still prepares afterwards.
+    assert _prepare_new(base, root / "ordinary-after-refusal") == root / "ordinary-after-refusal"
