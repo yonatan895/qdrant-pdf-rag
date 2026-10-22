@@ -983,6 +983,44 @@ Rules, lifecycle and limits: [deploy.md](deploy.md#feedback-service).
 5. Rotating the token: replace the Secret value, then restart both sides:
    `oc -n "$NAMESPACE" rollout restart statefulset/rag-feedback deployment/rag-agent`.
 
+#### Exporting and importing feedback records (#805, ADR-0005)
+
+An export holds question, answer and comment text. It is created inside the
+pod, so the content travels only over the `oc exec` stream into a file you
+create with `umask 077`, outside any git work tree. It escapes the 180-day
+purge, so **you delete it** when done (`shred -u FILE` or equivalent); the
+header records `exported_at` and `retention_days`. Never paste, attach or
+upload it.
+
+- **Export** (service running; read-only, takes no write lock):
+
+  ```sh
+  (umask 077; oc -n "$NAMESPACE" exec rag-feedback-0 -- \
+    python -m mainframe_rag.feedback.exchange export --db /data/feedback.sqlite3 --out - \
+    > feedback-export.jsonl)
+  ```
+
+  It reads one snapshot and closes the store before writing. Exporting at the
+  instant the scheduled purge fires can add one `deferred` purge count; the
+  retry ladder converges.
+- **Import into an empty store** (a new claim or a Postgres-move rehearsal): the
+  target must not be served. Copy the file into a pod that mounts the claim
+  with the service stopped, then run `... exchange import --in FILE --db
+  /data/feedback.sqlite3`. A non-empty target is refused.
+- **`--merge` into a populated store:** first stop the writer. Stopping it is
+  the control against a second writer on the live store. The import's
+  exclusive-lock probe (refusal `store_in_use`) is only a backstop: it sees a
+  connection held at that moment, not one started afterwards, and is unreliable
+  across hosts or NFS: `oc -n "$NAMESPACE"
+  scale statefulset/rag-feedback --replicas=0`, wait for the pod to end, run
+  the import from a one-off pod mounting `rag-feedback-data` with the
+  application image and the same restricted security context, delete that pod,
+  then `--replicas=1`. Conflicts refuse the import (exit 2); rerun with
+  `--keep-existing` only if keeping the target's rows is intended. Rows past the
+  retention window (`expired` in the counts) are removed by the first purge
+  after restart (about 30 s).
+- Stdout of import is counts only. Delete the file and any copy afterwards.
+
 ### 4.5 Corpus Ingestion
 
 #### Gateway readiness probe

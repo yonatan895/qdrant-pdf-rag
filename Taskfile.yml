@@ -38,6 +38,9 @@ includes:
   airgap:
     taskfile: ./taskfiles/airgap.yml
     dir: .
+  feedback:
+    taskfile: ./taskfiles/feedback.yml
+    dir: .
 
 tasks:
   default:
