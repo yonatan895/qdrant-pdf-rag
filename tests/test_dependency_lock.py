@@ -16,7 +16,7 @@ from scripts import prepare_python
 
 def _report(items):
     return {
-        "version": "1", "pip_version": "26.2.1",
+        "version": "1", "pip_version": "26.2.2",
         "environment": {"python_version": "3.14", "platform_python_implementation": "CPython",
                         "sys_platform": "linux", "platform_machine": "x86_64"},
         "install": items,
@@ -30,7 +30,7 @@ def locked(tmp_path):
     wheels = tmp_path / "wheels"
     wheels.mkdir()
     items = {}
-    for name, version in (("example", "1.0"), ("pip", "26.2.1")):
+    for name, version in (("example", "1.0"), ("pip", "26.2.2")):
         wheel = f"{name}-{version}-py3-none-any.whl"
         content = f"original synthetic wheel stand-in: {name}".encode()
         (wheels / wheel).write_bytes(content)
@@ -60,7 +60,7 @@ def test_supported_wheel_target(wheel, compatible):
 def test_lockfile_and_manifest_must_agree(locked):
     root, _, _ = locked
     _, packages = locks.load(root, "dev")
-    assert {name: entry["version"] for name, entry in packages.items()} == {"example": "1.0", "pip": "26.2.1"}
+    assert {name: entry["version"] for name, entry in packages.items()} == {"example": "1.0", "pip": "26.2.2"}
     requirement = root / "requirements.dev.lock.txt"
     requirement.write_text(requirement.read_text().replace("example==1.0", "example==2.0"))
     with pytest.raises(locks.LockError, match="disagree"):
@@ -97,7 +97,7 @@ def test_hypothesis_is_a_dev_only_dependency():
 def test_wheelhouse_rejects_missing_extra_tampered_and_symlink(locked):
     root, _, wheels = locked
     receipt = locks.verify_wheelhouse(root, "dev", wheels)
-    assert set(receipt["wheels"]) == {"example-1.0-py3-none-any.whl", "pip-26.2.1-py3-none-any.whl"}
+    assert set(receipt["wheels"]) == {"example-1.0-py3-none-any.whl", "pip-26.2.2-py3-none-any.whl"}
     target = wheels / "example-1.0-py3-none-any.whl"
     original = target.read_bytes()
     target.unlink()
@@ -258,7 +258,7 @@ def test_parallel_preparation_is_explicitly_connected_only(locked, monkeypatch):
 
 def test_internal_index_has_no_inherited_extra_index_or_public_fallback(locked, monkeypatch):
     root, _, wheels = locked
-    monkeypatch.setattr(prepare_python.importlib.metadata, 'version', lambda _: '26.2.1')
+    monkeypatch.setattr(prepare_python.importlib.metadata, 'version', lambda _: '26.2.2')
     monkeypatch.setenv('PIP_EXTRA_INDEX_URL', 'https://pypi.org/simple')
     monkeypatch.setenv('PIP_TRUSTED_HOST', 'untrusted.invalid')
     calls = []
@@ -285,7 +285,7 @@ def test_preparation_uses_verified_pip_and_no_isolated_build_resolution(locked, 
     monkeypatch.setattr(prepare_python.subprocess, 'run', lambda *a, **kw: calls.append((a[0], kw)))
     prepare_python.prepare(root, wheels, python, None, False)
     install = calls[1][0]
-    assert str(wheels / 'pip-26.2.1-py3-none-any.whl') in install
+    assert str(wheels / 'pip-26.2.2-py3-none-any.whl') in install
     assert '--require-hashes' in install and '--no-index' in install
     project = calls[2][0]
     assert project[-2:] == ['-e', str(root)]

@@ -22,7 +22,7 @@ only; they are in neither the runtime nor the build closure, nor any image.
 | build | `requirements.build.lock.txt` | Controlled project build tools, included in dev |
 
 The dev closure contains the identical runtime and build closures plus test and
-lint/type tools. It pins pip 26.2.1, setuptools and wheel. Runtime images keep
+lint/type tools. It pins pip 26.2.2, setuptools and wheel. Runtime images keep
 the existing digest-pinned UBI base's pip 24.2; that inherited difference is
 explicit in the manifest and inventory, rather than upgrading production pip
 implicitly. Application source still runs through `/app/src` and `PYTHONPATH`;
@@ -59,7 +59,7 @@ explicit `--connected` operation and verifies downloads before replacement.
 
 GitHub uses the same helper and manifest. GitLab accepts `PIP_FIND_LINKS` as a
 local complete dev wheelhouse, or explicitly selects `--internal-index` using
-an internal HTTPS `PIP_INDEX_URL`. The latter requires pip 26.2.1 already in
+an internal HTTPS `PIP_INDEX_URL`. The latter requires pip 26.2.2 already in
 the prepared CI image, downloads only hash-approved wheels, ignores inherited
 extra indexes/configuration, and suppresses download diagnostics that could
 contain mirror credentials. Neither mode has a public-index fallback. Internal
@@ -110,9 +110,20 @@ JS, charts, skills or model/knowledge assets. Their license inventory, bundled
 notices and open owner decisions are owned by [licensing](licensing.md) (#376);
 `scripts/license_inventory.py check` reconciles that record with these locks.
 
+## Trust-store inputs (#894)
+
+Two locked wheels carry a CA bundle: `certifi` and `pip` (`pip/_vendor/certifi`).
+Both pins move together with the base image CA store, proven by bundle content,
+not version. Production gateway TLS uses `SSL_CERT_FILE` from the site CA
+ConfigMap when `gateway.caConfigMapName` is set (chart); certifi is the fallback
+otherwise. certifi 2026.10.19 and pip 26.2.2 drop only "emSign ECC Root CA - G3";
+the G1, C1 and C3 roots remain. The pinned UBI digest and the current `9.8` tag
+ship the same `ca-certificates` 2025.2.80_v9.0.305-91.el9 bundle with all four
+emSign roots; no workaround is applied. Re-inspect on each base-image refresh.
+
 ## Reproduce, refresh and roll back
 
-Generation uses the existing pip 26.2.1 report format, not a new package manager.
+Generation uses the existing pip 26.2.2 report format, not a new package manager.
 In a qualified target environment, reproduce the current profiles without
 installing or changing the environment:
 
