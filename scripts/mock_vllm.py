@@ -28,6 +28,17 @@ byte-identical server):
 Scope: chat only. Embeddings, /tokenize, /healthz and /models stay instant
 and infallible so eval/sim determinism never depends on load noise.
 
+Rerank stand-in (issue #815, CI gateway lane only): POST .../score (vLLM
+`text_1`/`text_2` shape) and POST .../rerank (Cohere/TEI `query`/`documents`
+shape). Its one opinion is positional: candidate i of n scores (i+1)/n, so
+reranking exactly reverses the order the agent hands over. That proves the
+leg engaged and the returned scores reached the right candidates; it says
+nothing about relevance or ranking quality. GET /stats counts requests per
+route, split into the agent's readiness probe (a single "probe"/"probe"
+pair) and search batches. MOCK_RERANK_FAULT: score_unavailable (the score
+route answers 404, like a gateway without the vLLM-only route) or
+unavailable (both routes answer 503).
+
     MOCK_DIM=64 PORT=8000 python3 scripts/mock_vllm.py
 """
 
@@ -63,6 +74,9 @@ if CHAT_FAULT not in ("healthy", "upstream", "malformed", "truncated", "error_fr
     raise ValueError("invalid MOCK_CHAT_FAULT")
 if EMBED_FAULT not in ("healthy", "upstream", "malformed", "dimension"):
     raise ValueError("invalid MOCK_EMBED_FAULT")
+RERANK_FAULT = os.environ.get("MOCK_RERANK_FAULT", "healthy")
+if RERANK_FAULT not in ("healthy", "score_unavailable", "unavailable"):
+    raise ValueError("invalid MOCK_RERANK_FAULT")
 
 if TTFT_MS < 0 or TOKEN_INTERVAL_MS < 0 or JITTER_MS < 0 or not 0.0 <= ERROR_RATE <= 1.0:
     raise ValueError(
@@ -81,6 +95,23 @@ _rng_lock = threading.Lock()
 # pacing happens live, so only TTFT is knowable up front). Seeded replay
 # reproduces these strings exactly — pacing is pinned without wall-clock
 # assertions.
+
+# Rerank request counters (issue #815): requests received per route, split
+# into the agent's /healthz probe and real search batches. Counted before any
+# fault is applied, so a faulted attempt still shows as an attempt.
+_rerank_stats = {route: {"search": 0, "probe": 0} for route in ("score", "rerank")}
+_rerank_stats_lock = threading.Lock()
+
+
+def _count_rerank(route: str, query: object, documents: object) -> None:
+    probe = query == "probe" and documents == ["probe"]
+    with _rerank_stats_lock:
+        _rerank_stats[route]["probe" if probe else "search"] += 1
+
+
+def _rerank_scores(count: int) -> list[float]:
+    return [round((i + 1) / count, 6) for i in range(count)]
+
 
 # Fixed-shape injected failure: no internals, no request echo.
 _INJECTED_FAILURE = {"error": {"message": "mock injected failure"}}
@@ -206,7 +237,12 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # http.server API requires this camelCase name
         if self.path in ("/healthz", "/health"):
             self._send(200, {"status": "ok", "chat_fault": CHAT_FAULT,
-                             "embed_fault": EMBED_FAULT, "ttft_ms": TTFT_MS})
+                             "embed_fault": EMBED_FAULT, "ttft_ms": TTFT_MS,
+                             "rerank_fault": RERANK_FAULT})
+        elif self.path == "/stats":
+            with _rerank_stats_lock:
+                snapshot = {route: dict(counts) for route, counts in _rerank_stats.items()}
+            self._send(200, {**snapshot, "rerank_fault": RERANK_FAULT})
         elif self.path.endswith("/models"):
             self._send(
                 200,
@@ -226,6 +262,10 @@ class Handler(BaseHTTPRequestHandler):
             self._chat_completions()
         elif self.path.endswith("/embeddings"):
             self._embeddings()
+        elif self.path.endswith("/score"):
+            self._score()
+        elif self.path.endswith("/rerank"):
+            self._rerank()
         elif self.path == "/tokenize":
             # Exact origin-root route on purpose (vLLM serves /tokenize next
             # to /v1, not under it): a wrong-URL client regression must 404,
@@ -335,6 +375,60 @@ class Handler(BaseHTTPRequestHandler):
                 "usage": usage,
             },
             headers=pace_headers,
+        )
+
+    def _score(self) -> None:
+        req = self._read_json()
+        if req is None:
+            return
+        documents = req.get("text_2")
+        _count_rerank("score", req.get("text_1"), documents)
+        if RERANK_FAULT == "score_unavailable":
+            self._send(404, _INJECTED_FAILURE)
+            return
+        if RERANK_FAULT == "unavailable":
+            self._send(503, _INJECTED_FAILURE)
+            return
+        if not isinstance(req.get("text_1"), str) or not isinstance(documents, list):
+            self._send(400, {"error": {"message": "'text_1' and 'text_2' are required"}})
+            return
+        self._send(
+            200,
+            {
+                "id": "score-mock",
+                "object": "list",
+                "model": req.get("model", "mock-rerank"),
+                "data": [
+                    {"index": i, "object": "score", "score": score}
+                    for i, score in enumerate(_rerank_scores(len(documents)))
+                ],
+                "usage": {"prompt_tokens": 0, "total_tokens": 0},
+            },
+        )
+
+    def _rerank(self) -> None:
+        req = self._read_json()
+        if req is None:
+            return
+        documents = req.get("documents")
+        _count_rerank("rerank", req.get("query"), documents)
+        if RERANK_FAULT == "unavailable":
+            self._send(503, _INJECTED_FAILURE)
+            return
+        if not isinstance(req.get("query"), str) or not isinstance(documents, list):
+            self._send(400, {"error": {"message": "'query' and 'documents' are required"}})
+            return
+        self._send(
+            200,
+            {
+                "id": "rerank-mock",
+                "model": req.get("model", "mock-rerank"),
+                "results": [
+                    {"index": i, "relevance_score": score}
+                    for i, score in enumerate(_rerank_scores(len(documents)))
+                ],
+                "meta": {"billed_units": {"search_units": 1}},
+            },
         )
 
     def _tokenize(self) -> None:

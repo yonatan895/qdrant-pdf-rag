@@ -37,15 +37,23 @@ _CSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _BIDI_RE = re.compile(r"[\u202a-\u202e\u2066-\u2069]")
 _ZERO_WIDTH_RE = re.compile(r"[\u200b-\u200d\ufeff]")
+# Typographic ligatures some fonts emit inside words ("con\ufb01guration"):
+# spelled out so a typed query matches (#870). Only U+FB00-FB06; blanket NFKC
+# would also rewrite full-width, superscript and other forms the corpus uses.
+_LIGATURES = str.maketrans({
+    "\ufb00": "ff", "\ufb01": "fi", "\ufb02": "fl", "\ufb03": "ffi",
+    "\ufb04": "ffl", "\ufb05": "st", "\ufb06": "st",
+})
 
 
 def sanitize_page_text(text: str) -> str:
     """Drop control, bidi-override, and zero-width characters from text
-    extracted from a PDF page. Printable content is untouched."""
+    extracted from a PDF page, and spell typographic ligatures out (#870).
+    Other printable content is untouched."""
     text = _CSI_RE.sub("", text)
     text = _CONTROL_RE.sub("", text)
     text = _BIDI_RE.sub("", text)
-    return _ZERO_WIDTH_RE.sub("", text)
+    return _ZERO_WIDTH_RE.sub("", text).translate(_LIGATURES)
 
 
 @dataclass(frozen=True, slots=True)
@@ -222,11 +230,17 @@ def _margin_bar_lines(
     blocks: list,
     line_boxes: dict[tuple[int, int], tuple[float, float, float, float]],
 ) -> set[tuple[int, int]]:
-    """Only repeated isolated bars outside the text body and at a page margin.
+    """Only repeated isolated bars in whitespace beside prose: a page margin or
+    a column gutter.
 
-    A run must also accompany nonmonospaced prose sentences. A standalone
-    glyph in code/diagrams, a lone margin glyph, and ambiguous runs remain
-    content. Margin position alone does not establish revision markup.
+    A bar is a candidate when no text on its own row comes within half a line
+    height of it (or its row holds no text), so it sits in whitespace, not in
+    a line. Issue #864: the earlier rule (left of every body line and inside
+    the outer 10% of the page) missed bars beside an indented body under
+    hanging headings and bars in a two-column gutter. A run must also
+    accompany nonmonospaced prose sentences. A standalone glyph in
+    code/diagrams, a lone margin glyph, and ambiguous runs remain content.
+    Margin position alone does not establish revision markup.
     """
     bars = {
         (b[5], i) for b in blocks for i, ln in enumerate(b[4].split("\n"))
@@ -247,15 +261,15 @@ def _margin_bar_lines(
         if len(ln.split()) >= 4 and ln.rstrip().endswith((".", "?", "!"))
         and (b[5], i) not in monospaced and (b[5], i) in line_boxes
     }
-    left, right = min(b[0] for b in body), max(b[2] for b in body)
     candidates = []
     for key in bars:
         if key in monospaced:
             continue
         x0, y0, x1, y1 = line_boxes[key]
         height = y1 - y0
-        if ((x1 <= left - height and x1 <= page.rect.x0 + page.rect.width * 0.1)
-                or (x0 >= right + height and x0 >= page.rect.x1 - page.rect.width * 0.1)):
+        clear = height / 2
+        on_row = [box for box in body if min(y1, box[3]) - max(y0, box[1]) > 0.3 * height]
+        if all(box[2] <= x0 - clear or box[0] >= x1 + clear for box in on_row):
             candidates.append((key, x0, y0, y1))
     accepted: set[tuple[int, int]] = set()
     remaining = {c[0] for c in candidates}

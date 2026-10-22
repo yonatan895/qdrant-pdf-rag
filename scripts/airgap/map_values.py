@@ -32,6 +32,7 @@ from pathlib import Path
 try:
     from scripts.airgap.model_config import (
         MODEL_CONFIG_KEYS,
+        feedback_config,
         network_policy,
         parse_strict_bool,
         reasoning_overrides,
@@ -41,6 +42,7 @@ try:
 except ModuleNotFoundError:
     from model_config import (  # type: ignore[no-redef]  # Direct bastion-script execution.
         MODEL_CONFIG_KEYS,
+        feedback_config,
         network_policy,
         parse_strict_bool,
         reasoning_overrides,
@@ -250,6 +252,14 @@ def build_values(deploy_only: bool = False) -> dict:
     except ValueError as exc:
         die(str(exc))
 
+    # Issue #804: the answer-feedback service, default off. Validated by its
+    # one owner; the block (and its resources) is emitted only when enabled,
+    # so a deployment that never sets FEEDBACK_ENABLED renders what it did.
+    try:
+        feedback = feedback_config(os.environ)
+    except ValueError as exc:
+        die(str(exc))
+
     agent_route = env("AGENT_ROUTE") == "true"
     route_ca = ""
     if agent_route:
@@ -330,6 +340,19 @@ def build_values(deploy_only: bool = False) -> dict:
     reasoning_model = env("LLM_MODEL_REASONING")
     reasoning_base = env("LLM_BASE_URL") if reasoning_model else ""
 
+    resources: dict = {
+        "agent": {
+            "requests": {"cpu": "100m", "memory": "256Mi"},
+            "limits": {"cpu": "500m", "memory": "512Mi"},
+        }
+    }
+    if feedback:
+        # Protected defaults (D8: unmeasured, 10Gi included); not operator keys.
+        resources["feedback"] = {
+            "requests": {"cpu": "50m", "memory": "64Mi"},
+            "limits": {"cpu": "250m", "memory": "256Mi"},
+        }
+
     return {
         "replicaCount": 2,
         "images": {
@@ -395,6 +418,7 @@ def build_values(deploy_only: bool = False) -> dict:
         },
         "ui": {"enabled": ui_enabled},
         "networkPolicy": {"enabled": policy_enabled, "allowedNamespaces": policy_namespaces},
+        **({"feedback": feedback} if feedback else {}),
         "route": {
             "enabled": agent_route,
             "timeoutSeconds": 300,
@@ -403,12 +427,7 @@ def build_values(deploy_only: bool = False) -> dict:
         "storage": {"className": storage_class},
         "ingest": ingest_block,
         "pullSecret": {"name": env("PULL_SECRET")},
-        "resources": {
-            "agent": {
-                "requests": {"cpu": "100m", "memory": "256Mi"},
-                "limits": {"cpu": "500m", "memory": "512Mi"},
-            }
-        },
+        "resources": resources,
         "_meta": {"namespace": namespace},
     }
 

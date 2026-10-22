@@ -10,6 +10,9 @@ from typing import Any
 from mainframe_rag.eval.statistics import ci95_paired, ci_excludes_zero
 
 PRIMARY_METRICS = ("recall@5", "mrr")
+# Per-class regression metrics. recall@1 (#837) is compared only where the
+# baseline records it; it is deliberately not a paired-CI primary metric.
+CLASS_REGRESSION_METRICS = ("recall@1", "recall@5", "mrr")
 DEFAULT_CLASS_FLOOR = 0.05
 
 
@@ -51,7 +54,7 @@ def gate_verdict(
     base_classes = baseline.get("classes", {})
     cand_classes = candidate.get("classes", {})
     for cls in sorted(set(base_classes) & set(cand_classes)):
-        for metric in ("recall@5", "mrr"):
+        for metric in CLASS_REGRESSION_METRICS:
             b = base_classes[cls].get(metric)
             c = cand_classes[cls].get(metric)
             if b is None or c is None:

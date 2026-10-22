@@ -66,7 +66,11 @@ def main():
             raise RuntimeError('gateway accepted invalid credentials')
     # Deploy's optional key Secret references all configured fields.
     keys['context-llm-api-key'] = keys['llm-api-key']
-    keys['rerank-api-key'] = 'sk-unused-rerank-disabled'
+    # Rerank leg (issue #815): a real per-leg key scoped to the rerank stand-in
+    # alone, so the gateway can refuse the other legs' keys on the rerank routes.
+    rerank = call('/key/generate', master, {'models': ['mock-rerank']})['key']
+    call('/v1/models', rerank)
+    keys['rerank-api-key'] = rerank
     print(json.dumps(keys))
 
 

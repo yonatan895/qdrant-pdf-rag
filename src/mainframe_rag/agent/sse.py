@@ -24,6 +24,10 @@ if TYPE_CHECKING:
 # literals): fixed code + message client-side, detail stays in logs.
 SSE_ERROR_CODE = "upstream_error"
 SSE_ERROR_MESSAGE = "stream failed"
+# The model leg ran out of `answer_timeout_s` (issue #868): the one stable
+# code and fixed message for it on JSON (504) and on an open stream.
+MODEL_TIMEOUT_CODE = "model_timeout"
+MODEL_TIMEOUT_MESSAGE = "model response timed out"
 
 
 def format_sse_event(name: str, payload: dict[str, Any]) -> str:
@@ -31,7 +35,9 @@ def format_sse_event(name: str, payload: dict[str, Any]) -> str:
     return f"event: {name}\ndata: {json.dumps(payload)}\n\n"
 
 
-def error_payload() -> dict[str, str]:
+def error_payload(
+    code: str = SSE_ERROR_CODE, message: str = SSE_ERROR_MESSAGE
+) -> dict[str, str]:
     """Mid-stream `error` event. The stream never produced a finalized
     answer, so the state is always `generation_incomplete` (issue #365):
     partial tokens already sent are provisional and cannot be retracted.
@@ -39,8 +45,8 @@ def error_payload() -> dict[str, str]:
     relabel a failed stream as accepted."""
     return {
         "type": "error",
-        "code": SSE_ERROR_CODE,
-        "message": SSE_ERROR_MESSAGE,
+        "code": code,
+        "message": message,
         "verification_state": "generation_incomplete",
     }
 

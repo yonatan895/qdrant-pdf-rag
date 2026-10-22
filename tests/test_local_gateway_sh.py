@@ -889,3 +889,77 @@ def test_failed_gateway_log_destination_still_drains_without_exception_text(tmp_
     )
     assert result.returncode == 1
     assert result.stdout == b"" and result.stderr == b"Gateway host log capture failed.\n"
+
+
+# --- #862: retrieval-only gateway (embed + rerank legs, no reasoning leg) ----
+RERANK_ENV = {"GATEWAY_REASONING": "off", "GATEWAY_EMBED_MODEL": "Qwen/Qwen3-Embedding-8B",
+              "GATEWAY_RERANK_MODEL": "Qwen/Qwen3-Reranker-8B",
+              "GATEWAY_RERANK_URL": "http://172.17.0.1:8000/v1",
+              "GATEWAY_EMBED_URL": "http://172.17.0.1:8001/v1"}
+
+
+def test_reasoning_off_renders_embed_and_rerank_routes_only():
+    cfg = yaml.safe_load(_read_cfg(_render(RERANK_ENV)))
+    assert [(item["model_name"], item["litellm_params"]["model"], item["litellm_params"]["api_base"])
+            for item in cfg["model_list"]] == [
+        ("Qwen/Qwen3-Embedding-8B", "openai/Qwen/Qwen3-Embedding-8B", "http://172.17.0.1:8001/v1"),
+        ("Qwen/Qwen3-Reranker-8B", "hosted_vllm/Qwen/Qwen3-Reranker-8B", "http://172.17.0.1:8000/v1"),
+    ]
+    # /tokenize targets the reasoning server and /v1/score the reranker: only
+    # the latter exists in this profile, and it must reach the rerank backend.
+    assert cfg["general_settings"]["pass_through_endpoints"] == [
+        {"path": "/v1/score", "target": "http://172.17.0.1:8000/v1/score", "methods": ["POST"]}]
+    assert cfg["litellm_settings"]["callbacks"] == ["scoped_passthrough.guard"]
+
+
+@pytest.mark.parametrize("value", [None, "", "on"])
+def test_reasoning_leg_is_on_by_default_and_explicit_on_is_identical(value):
+    baseline = _read_cfg(_render())
+    explicit = _read_cfg(_render({"GATEWAY_REASONING": value} if value else None))
+    assert explicit == baseline and "gemma-4-E4B" in explicit and '"/tokenize"' in explicit
+
+
+@pytest.mark.parametrize("value", ["false", "OFF", "0", "no"])
+def test_reasoning_switch_accepts_only_on_or_off(value):
+    proc = _render({"GATEWAY_REASONING": value})
+    assert proc.returncode == 1 and "GATEWAY_REASONING must be on or off" in proc.stderr
+
+
+def test_reasoning_off_env_file_has_per_leg_embed_and_rerank_keys_but_no_llm_leg(tmp_path):
+    env_file = tmp_path / "gateway.env"
+    proc = _render({**RERANK_ENV, "GATEWAY_ENV_FILE": str(env_file),
+                    "GATEWAY_EMBED_MODEL_REVISION": "1d8ad4ca9b3dd8059ad90a75d4983776a23d44af"})
+    _read_cfg(proc)
+    body = env_file.read_text()
+    for line in (
+        "export EMBED_BASE_URL=http://localhost:4000/v1", "export EMBED_MODEL=Qwen/Qwen3-Embedding-8B",
+        "export EMBED_API_KEY=sk-test-embed",
+        "export EMBED_MODEL_REVISION=1d8ad4ca9b3dd8059ad90a75d4983776a23d44af",
+        "export RERANK_ENABLED=true", "export RERANK_BASE_URL=http://localhost:4000/v1",
+        "export RERANK_MODEL=Qwen/Qwen3-Reranker-8B", "export RERANK_API_KEY=sk-test-rerank",
+    ):
+        assert line in body, line
+    assert "LLM_" not in body and "sk-test-llm" not in body and "master" not in body
+    assert (env_file.stat().st_mode & 0o777) == 0o600
+
+
+def test_reasoning_off_launch_checks_only_the_embed_and_rerank_keys_and_next_default_launch_works(gateway_transport):
+    root, _, _, _ = gateway_transport
+    off = _transport_operation(gateway_transport, "serve", **RERANK_ENV)
+    assert off.returncode == 0, off.stderr
+    config = yaml.safe_load((root / "rendered-gateway.yaml").read_text())
+    assert [item["model_name"] for item in config["model_list"]] == [
+        "Qwen/Qwen3-Embedding-8B", "Qwen/Qwen3-Reranker-8B"]
+    curl = [args for kind, args in (json.loads(line) for line in (root / "calls.jsonl").read_text().splitlines())
+            if kind == "curl"]
+    assert curl and not any("sk-test-llm" in " ".join(args) for args in curl)
+    assert {key for args in curl for key in ("sk-test-embed", "sk-test-rerank") if f"Bearer {key}" in " ".join(args)} == {
+        "sk-test-embed", "sk-test-rerank"}
+    assert "LLM_" not in (root / "gateway.env").read_text()
+    # The next ordinary launch keeps the reasoning leg.
+    (root / "calls.jsonl").unlink()
+    on = _transport_operation(gateway_transport, "serve")
+    assert on.returncode == 0, on.stderr
+    assert any("Bearer sk-test-llm" in " ".join(args)
+               for args in (json.loads(line)[1] for line in (root / "calls.jsonl").read_text().splitlines()))
+    assert "LLM_API_KEY=sk-test-llm" in (root / "gateway.env").read_text()

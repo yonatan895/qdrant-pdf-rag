@@ -18,6 +18,9 @@ ROLE_TARGETS = {
     "agent": ("Deployment", "rag-agent", "agent"),
     "jaeger": ("Deployment", "jaeger", "jaeger"),
     "oauth_proxy": ("Deployment", "rag-agent", "oauth-proxy"),
+    # The feedback service runs the agent image (#804): same repository and
+    # digest as the "agent" role, its own workload.
+    "feedback": ("StatefulSet", "rag-feedback", "feedback"),
 }
 REVISION = "deployment.kubernetes.io/revision"
 

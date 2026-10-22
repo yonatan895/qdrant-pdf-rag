@@ -91,7 +91,10 @@ def normalize_citation_line(line: str) -> str:
     markdown links [x](url), and parentheses. Only CITATION_LINE_RE matches
     act, and the body scanner keeps the original line in the output."""
     candidate = line.strip()
-    for _ in range(6):  # bounded: '> "11. cite"' style nesting is shallow
+    # Peel to a fixed point (#876): a fixed depth let a 7-deep wrapped cite
+    # escape. Every pass that changes the line removes characters, so the
+    # line's length bounds the loop.
+    for _ in range(len(candidate) + 1):
         before = candidate
         candidate = _MARKER_RE.sub("", candidate)
         if candidate.startswith(">"):

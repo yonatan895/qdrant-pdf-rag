@@ -155,6 +155,21 @@ def test_split_legs_share_original_filter():
     assert "message_ids" in keys
 
 
+def test_split_legs_each_send_the_dense_search_params():
+    """#842: every split leg's dense request carries the pin."""
+    fake = SplitAwareFakeQdrant()
+    search(fake, SplitAwareEmbedder(), "coll", COMPARATIVE_QUERY,
+           settings=_split_settings(dense_hnsw_ef=96, dense_quant_rescore=True,
+                                    dense_quant_oversampling=1.5))
+    want = models.SearchParams(
+        hnsw_ef=96, quantization=models.QuantizationSearchParams(rescore=True, oversampling=1.5)
+    )
+    dense = [r for r in fake.batch_requests if r.using == "dense"]
+    assert len(dense) == 2
+    assert [r.params for r in dense] == [want, want]
+    assert all(r.params is None for r in fake.batch_requests if r.using == "bm25")
+
+
 def test_trap_and_exact_anchor_comparatives_stay_single():
     """Bypass under enabled flags: trap and exact-anchor (doc/message-code)
     comparatives cost exactly one leg (2 batch requests, 1 embed each).

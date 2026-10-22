@@ -256,7 +256,7 @@ Retention policy as shipped (no default changed by #372):
   citations and telemetry) as a quality record in the protected feedback
   store until purged under its configured retention window
   (`FEEDBACK_RETENTION_DAYS`, default 180 days; an explicit purge,
-  scheduled in PR B), and a sent rating (rating, reason codes, comment) joins
+  scheduled in-process by the feedback service, #804), and a sent rating (rating, reason codes, comment) joins
   it. Clearing the
   browser's incidents does not remove those records; retention and purge are
   the store's (ADR-0005). See [Answer feedback](#answer-feedback).
@@ -378,16 +378,38 @@ retention: [observability](observability.md#data-tiers).
   strip whitespace) and `FEEDBACK_RETENTION_DAYS` (180, ADR-0005). Fixed client
   errors with stable codes (`unauthorized`, `invalid_request`, `unknown_answer`,
   `not_found`, `method_not_allowed`, `internal_error`); JSON-line logs with
-  `request_id` and counts only. Retention is enforced by the authenticated
-  `POST /v1/purge`, an explicit operator action and never implicit. The store
-runs with `secure_delete` and the purge then truncates the WAL, so purged text
-leaves the disk. A concurrent read snapshot (an export) makes the truncation
-busy: the purge does not wait (writers would stall), returns
-`wal_truncated: false` and logs a warning, and rerunning it afterwards
-completes the removal. The JSONL
+  `request_id` and counts only. Retention is enforced by the service itself
+  (ADR-0005, #804): one in-process task, started with the app, runs the purge
+  `FEEDBACK_PURGE_FIRST_DELAY_S` (30 s) after start and then every
+  `FEEDBACK_PURGE_INTERVAL_S` (24 h); the authenticated `POST /v1/purge` stays
+  as the manual operator action and runs the same attempt. The store runs with
+  `secure_delete` and the purge then truncates the WAL, so purged text leaves
+  the disk. Only a result with `wal_truncated: true` is success. A concurrent
+  read snapshot (an export) makes the truncation busy: the purge does not wait
+  (writers would stall), returns `wal_truncated: false` (outcome `deferred`) and
+  an exception such as `database is locked` is outcome `error`. Both are
+  retried, never counted as done: after 60, 300 and 900 seconds within the
+  cycle, then one attempt per hour until a truncated result, then the daily
+  cadence again (the ladder is a code constant, not configuration). Each
+  attempt repeats the same idempotent delete and checkpoint, so a restart or a
+  retry converges; each non-truncated attempt logs a WARNING with counts, the
+  boolean and the exception type only.
+  `GET /metrics` is 404 unless `METRICS_ENABLED`, and needs the service bearer
+  token like every route except `/healthz`. It exposes
+  `rag_feedback_purge_total{outcome="truncated|deferred|error"}`,
+  `rag_feedback_purge_last_success_timestamp_seconds` (set only on `truncated`;
+  0 until the first success) and `rag_feedback_purged_rows_total{kind="answers|ratings"}`,
+  from the service's own registry: no request- or content-derived labels.
+  Suggested platform-owned alert:
+  `time() - rag_feedback_purge_last_success_timestamp_seconds > 2 * 86400`.
+  Single replica, single uvicorn worker only (one SQLite writer, one
+  scheduler, one per-process registry). The service entry point is
+  `python -m uvicorn --factory mainframe_rag.feedback.service:app_from_env`;
+  `tests/test_feedback_store.py` launches that command. The JSONL
   export/import, which also makes a later Postgres move testable, is phase 2.
-  Deployment (the single-replica StatefulSet, PVC, Secret and purge schedule)
-  is phase 1 PR B.
+  Deployment (the single-replica StatefulSet `rag-feedback`, the kept claim
+  `rag-feedback-data`, the operator Secret and the agent-only NetworkPolicy,
+  default off) is in the chart: [deploy.md](deploy.md#feedback-service).
 
 ## 2. Error contract
 
@@ -399,6 +421,7 @@ status (`/ui` failures render HTML banners instead, §1):
 |---|---|---|
 | `upstream_error` / `retrieval failed` | 502 | Any retrieval fault, identical on both endpoints |
 | `upstream_error` / `answer failed` | 502 | LLM call or response-parse fault |
+| `model_timeout` / `model response timed out` | 504 | The reasoning leg spent its `answer_timeout_s` wait (connect, write, read or pool) on `/v1/answer` or `/v1/chat`; on an already-open stream it is the terminal `error` event (no `final`, `generation_incomplete`) with this code and message instead of `upstream_error` / `stream failed` (issue #868). A model that *finished* with `length` is never this error: it is a `generation_incomplete` answer |
 | `internal` / `internal error` | 500 | Prompt-build failure and any unhandled exception |
 | `not_configured` / `reasoning model…` | 503 | `/v1/answer` or `/v1/chat` without `LLM_BASE_URL` + reasoning model (pre-retrieval) |
 | `qdrant_unready` / `qdrant…` | 503 | `/healthz` Qdrant exception |
@@ -453,7 +476,9 @@ terminal chunk with `finish_reason` carrying `citations`,
 `evidence_omitted` (chat chunks carry no
 `usage`), then `data: [DONE]`. A mid-stream failure emits one
 `data: {"error": {"code": "upstream_error", "message": "stream failed"}, "verification_state": "generation_incomplete"}`
-frame (the strict `error` object plus the additive sibling state, issue #365)
+frame (the strict `error` object plus the additive sibling state, issue #365;
+the code and message are `model_timeout` / `model response timed out` when the
+model wait expired, issue #868)
 **followed by** `data: [DONE]` — never a fake `finish_reason`; clients
 must treat an error frame as failure even though `[DONE]` still arrives. The
 strict stream-end rule above is the upstream reasoning wire and the
@@ -716,6 +741,26 @@ async pool on `FEEDBACK_TIMEOUT_S` (issue #780; closed after a bounded drain).
   and `agent/resources.py` imports no transport or application module.
 - No sync fallback on the event loop: healthz and retrieval use the pooled
   clients only; a missing pool is a startup bug.
+- **Answer-path budgets (issue #868).** Two budgets bound the model leg, and
+  nothing else does:
+  `answer_timeout_s` (default 300 s) is how long the agent waits on one model
+  I/O: connect, write, the next read and the pool. A buffered POST sends no
+  byte until the whole generation is done, so for it the wait is the whole
+  generation; on a stream, every reasoning or content frame renews it, so it
+  bounds a stall, not the total. `request_deadline_s` (default off, §6a) is the
+  only wall-clock bound across a streamed generation. Expiry of the first is
+  `504 model_timeout`; expiry of the second is `504 deadline_exceeded`. In
+  both cases the awaiting task is cancelled, which closes the upstream
+  connection, so the model server sees the disconnect and can abort (proved
+  against a real-socket upstream in `tests/test_stream_truncation.py`; a
+  gateway must still propagate it to the engine, which is a platform check).
+  Neither expiry is ever followed by a second model ask, and a model that
+  finished with an explicit non-`stop` reason (`length`, `content_filter`) with
+  no content is returned as that finish
+  (`generation_incomplete`), not re-asked: the empty-content recovery POST
+  would run the same generation again and then wait out `answer_timeout_s`
+  (issue #868). The default is shorter than a long xhigh generation; changing
+  defaults belongs to #843/#777.
 - The reasoning client never retries at the transport (sync and async,
   `retries=0`) — answers are non-idempotent; a retry would re-think. The
   permitted second asks are the per-operation streaming fallbacks documented
@@ -828,7 +873,7 @@ readers:
 | `chat_max_turns` / `chat_max_prior_turn_chars` | 10 / 1000 | chat history packing caps |
 | `prompt_order` | `retrieval` (`stable_cache` alt) | block ordering |
 | `llm_base_url` / `llm_model_reasoning` / `llm_api_key` | unset (answer stays disabled; key unset = keyless) | per-request assertion, LLM client, tokenizer |
-| `answer_timeout_s` | 300.0 | reasoning client; no transport retries, explicit fallback policy below |
+| `answer_timeout_s` | 300.0 | reasoning client wait per model I/O (not a total on a stream), expiry is `504 model_timeout`; no transport retries, explicit fallback policy below; budgets in §6 |
 | `llm_reasoning_effort_simple` / `_complex` / `llm_temperature` | xhigh / xhigh / 0.2 | answer path (#777) |
 | `llm_reasoning_efforts` | `low,medium,xhigh` | served template's effort domain (Qwen3.8): console choices; both efforts above must be members (#748) |
 | `llm_max_model_len` / `llm_reserved_output_tokens` / `llm_thinking_reserve_tokens_complex` / `llm_token_safety_margin` / `llm_max_chunk_tokens_narrative` / `llm_tokenize_timeout_s` | 32768 / 2560 / 8192 / 128 / 1200 / 5.0 | tokenizer-path budgeting (#298, #777). `llm_max_model_len` must not exceed the served `--max-model-len`. With a server-verified prompt count the reserved output plus the path's thinking reserve is sent as `max_tokens` (prompt + cap stays inside the window minus the margin), so a runaway xhigh generation ends as `finish_reason: length` → `generation_incomplete`; an estimator-only prompt sends no cap |
@@ -848,8 +893,10 @@ readers:
 | `feedback_enabled` / `feedback_url` / `feedback_api_key` | `false` / unset / unset (enabled requires both) | answer records and console ratings (#780); the key is a Secret reference, never logged |
 | `feedback_queue_size` / `feedback_timeout_s` / `feedback_drain_timeout_s` | 256 / 2.0 / 2.0 | bounded record queue (full = dropped and counted); service call timeout; shutdown drain bound |
 | `feedback_store_path` / `feedback_service_token` / `feedback_retention_days` | `/data/feedback.sqlite3` / unset / 180 | feedback service process only (#780, ADR-0005); the token is a Secret reference, never logged |
+| `feedback_purge_first_delay_s` / `feedback_purge_interval_s` | 30 / 86400 | feedback service only (#804): first scheduled purge after start, then every interval (60 s to 7 days); the 60/300/900 s then hourly retry ladder is a code constant |
 | `rerank_enabled` / `rerank_model` / `rerank_base_url` / `rerank_api_key` / `rerank_endpoint_order` / `rerank_fusion_alpha` / `rerank_candidates` / `rerank_batch_size` / `rerank_timeout_s` | false / `BAAI/bge-reranker-v2-m3` / gateway URL (no embed fallback; unset when no gateway) / unset (keyless) / `score_first` (see install §4.5 `probe_gateway.py`: `rerank_first` only when the score leg is unavailable) / 1.0 / 50 / 32 / 5.0 | rerank dispatch → retrieve (see `retrieval.md` §6) |
 | `rrf_k` / `rrf_weight_*` / `rrf_sparse_boost_syntax` / `rrf_sparse_boost_table` / `retrieve_max_chunks_per_page|doc` | 60 / 1.0,1.0 – 1.0,3.0 / 1.0 / 1.0 / 1, 3 | retrieve fusion + diversification |
+| `dense_hnsw_ef` / `dense_quant_rescore` / `dense_quant_oversampling` | 128 / `true` / 2.0 (env sets values only; `None`, which omits the field for the server default, is reachable in code, not through env) | dense-leg `SearchParams` on every dense query (#842; `retrieval.md` §2; measured in `records/2026-10-22-search-params.md`) |
 | `acronym_expansion_enabled` / `comparative_split_enabled` / `diagnostic_dualpath_enabled` | `false` / `true` / `false` | rewrite + multipath (see `retrieval.md` §§3b,7) |
 | `ingest_max_pdf_bytes` / `ingest_max_doc_pages` / `ingest_max_doc_chunks` | 0 / 0 / 0 (unbounded) | per-document ingest refusal (`docs/ingest.md` §9, issue #374) |
 | ingest-only (`ingest_workers` = CPU-1, counting the cgroup quota and affinity (#840), `batch_size` 128, `ingest_upsert_streams` 4, `ingest_bulk_load` false, `bm25_model`, `bm25_cache_dir` unset, `contextual_*` incl. `context_llm_timeout_s` 30.0 / `context_max_chars` 500 / `context_cache_path` unset) | — | ingest; see `docs/ingest.md` §§6–9 |
@@ -1286,8 +1333,8 @@ generation flags; this change does not establish effort-dependent token counts.
 | Operation | Current permitted recovery / failure boundary |
 |---|---|
 | Reasoning transport | Sync/async reasoning pools use `retries=0`; no connection-level automatic repeat |
-| Buffered `achat` / `_chat_sync` with `LLM_STREAM` | Empty content, caught stream/protocol failures, missing `[DONE]`, upstream error/malformed frame, or missing explicit finish lead to one non-streaming POST; accumulated content is discarded, even if a prefix was buffered. The POST must itself carry an explicit finish, have no top-level error, and have valid string content (issue #365) |
-| Client-visible `chat_stream` | No-content or pre-output stream failure (malformed first frame, pre-output error, missing finish/done before any emitted token) can make one non-streaming ask; malformed/rejected/empty/no-finish fallback fails. Missing `[DONE]`, an upstream error frame, a malformed frame, or `[DONE]` without an explicit finish after actually emitted content raises truncation; no replay after those tokens. The shared core applies the same gate to the terminal `done` item itself: a falsy/missing `done` finish, or a token-only stream with no `done`, raises truncation and never synthesizes `stop` (issue #365) |
+| Buffered `achat` / `_chat_sync` with `LLM_STREAM` | Empty content *with a `stop` finish*, caught stream/protocol failures, missing `[DONE]`, upstream error/malformed frame, or missing explicit finish lead to one non-streaming POST; accumulated content is discarded, even if a prefix was buffered. The POST must itself carry an explicit finish, have no top-level error, and have valid string content (issue #365). Never recovered (issue #868): a stream that ended with an explicit non-`stop` finish (`length`, `content_filter`) and no content is returned as that finish, and an `httpx` timeout (`answer_timeout_s` spent) propagates as `model_timeout` instead of starting a second ask |
+| Client-visible `chat_stream` | No-content (`stop` finish) or pre-output stream failure (malformed first frame, pre-output error, missing finish/done before any emitted token) can make one non-streaming ask; malformed/rejected/empty/no-finish fallback fails. Missing `[DONE]`, an upstream error frame, a malformed frame, or `[DONE]` without an explicit finish after actually emitted content raises truncation; no replay after those tokens. The shared core applies the same gate to the terminal `done` item itself: a falsy/missing `done` finish, or a token-only stream with no `done`, raises truncation and never synthesizes `stop` (issue #365). A validated stream with zero content deltas and an explicit non-`stop` finish ends with that `done` and no recovery POST (issue #868); timeouts propagate |
 | Tokenizer | Plan locally, verify whole messages per trim round. No per-chunk RPCs; gateway may lack `/tokenize`. An endpoint that is not served or gives no usable count (404/405/501, a 200 without a count, or any other non-transient non-200 such as 400/401/403) warns once and pins the estimator until restart. A transient failure (transport error, timeout, 408/429/5xx) warns and uses the estimator for `TOKENIZE_RETRY_AFTER_S` (60 s); the first count after that is the one probe, and success resumes remote counts (issue #835). `budget_verified` reads the counting thread's own last count, so a probe on another thread never confirms an estimated prompt |
 | Embed/context/health pools | Bounded Settings connect-only retries, no generic POST replay policy |
 | Rerank | Configured score/rerank endpoint order plus alternate endpoint fallback; exhaustion fails closed; a batch rejected on both legs with HTTP 4xx (not 5xx/transport/shape) is re-scored once with passages cut to `RERANK_RETRY_PASSAGE_MAX_CHARS` (2000), and a failing retry fails closed (issue #664); [retrieval](retrieval.md) owns dispatch |

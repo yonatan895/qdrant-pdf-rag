@@ -26,7 +26,7 @@ dependencies = [
 mainframe-rag-ops = "mainframe_rag.ops.cli:main"
 
 [project.optional-dependencies]
-dev = ["pytest", "pytest-cov", "mypy", "ruff"]
+dev = ["pytest", "pytest-cov", "hypothesis", "mypy", "ruff"]
 
 [build-system]
 requires = ["setuptools>=75"]

@@ -41,6 +41,7 @@ MAPPER_KEYS = [
     "OTEL_DEPLOYMENT_ENVIRONMENT", "OTEL_SERVICE_NAME", "JAEGER_ENABLED",
     "METRICS_ENABLED", "SERVICEMONITOR_ENABLED", "AGENT_ROUTE", "ROUTE_DESTINATION_CA_FILE",
     "UI_ENABLED", "AGENT_NETWORK_POLICY", "AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES",
+    "FEEDBACK_ENABLED", "FEEDBACK_SECRET", "FEEDBACK_STORAGE_SIZE", "FEEDBACK_RETENTION_DAYS",
     "IMAGE_DIGEST_AGENT", "IMAGE_DIGEST_INGEST", "IMAGE_DIGEST_JAEGER", "IMAGE_DIGEST_OAUTH_PROXY",
     "STORAGE_CLASS", "CORPUS_PVC", "INGEST_WORKERS", "INGEST_WORK_SIZE",
     "INGEST_ALIAS_PUBLISH", "INGEST_REINGEST", "INGEST_RETIRE_DOCS",
@@ -758,3 +759,94 @@ def test_malformed_image_digest_fails_closed(monkeypatch, mapper_env, bad):
     assert r.returncode == 1
     assert "IMAGE_DIGEST_INGEST must be a sha256 manifest digest" in r.stderr
     assert not out.exists()
+
+
+# ------------------------------------------------ feedback service (#804)
+
+FEEDBACK_ON = {"FEEDBACK_ENABLED": "true", "FEEDBACK_SECRET": "fb-secret"}
+
+
+def test_feedback_is_absent_from_the_release_values_by_default(mapper_env):
+    r, out = mapper_env()
+    assert r.returncode == 0, r.stderr
+    values = load_values(out)
+    assert "feedback" not in values and set(values["resources"]) == {"agent"}
+    assert "feedback" not in out.read_text().lower()
+
+
+def test_feedback_selection_round_trips_with_independent_defaults(monkeypatch, mapper_env):
+    for key, value in FEEDBACK_ON.items():
+        monkeypatch.setenv(key, value)
+    r, out = mapper_env()
+    assert r.returncode == 0, r.stderr
+    values = load_values(out)
+    # ADR-0005 retention and the D8 size are applied when the operator is silent.
+    assert values["feedback"] == {"enabled": True, "secretName": "fb-secret",
+                                  "storageSize": "10Gi", "retentionDays": 180}
+    assert values["resources"]["feedback"] == {"requests": {"cpu": "50m", "memory": "64Mi"},
+                                               "limits": {"cpu": "250m", "memory": "256Mi"}}
+    monkeypatch.setenv("FEEDBACK_STORAGE_SIZE", "1Ti")
+    monkeypatch.setenv("FEEDBACK_RETENTION_DAYS", "3650")
+    r, out = mapper_env()
+    assert r.returncode == 0, r.stderr
+    assert load_values(out)["feedback"] == {"enabled": True, "secretName": "fb-secret",
+                                            "storageSize": "1Ti", "retentionDays": 3650}
+
+
+@pytest.mark.parametrize("env,message", [
+    ({"FEEDBACK_ENABLED": "maybe"}, "FEEDBACK_ENABLED must be true/false"),
+    ({"FEEDBACK_ENABLED": "true"}, "FEEDBACK_SECRET is required"),
+    ({**FEEDBACK_ON, "FEEDBACK_SECRET": "Bad_Name"}, "FEEDBACK_SECRET must be"),
+    ({**FEEDBACK_ON, "FEEDBACK_SECRET": "a" * 254}, "FEEDBACK_SECRET must be"),
+    ({**FEEDBACK_ON, "FEEDBACK_STORAGE_SIZE": "10"}, "FEEDBACK_STORAGE_SIZE must be"),
+    ({**FEEDBACK_ON, "FEEDBACK_STORAGE_SIZE": "0Gi"}, "FEEDBACK_STORAGE_SIZE must be"),
+    ({**FEEDBACK_ON, "FEEDBACK_STORAGE_SIZE": "10 Gi"}, "FEEDBACK_STORAGE_SIZE must be"),
+    ({**FEEDBACK_ON, "FEEDBACK_RETENTION_DAYS": "0"}, "FEEDBACK_RETENTION_DAYS must be"),
+    ({**FEEDBACK_ON, "FEEDBACK_RETENTION_DAYS": "3651"}, "FEEDBACK_RETENTION_DAYS must be"),
+    ({**FEEDBACK_ON, "FEEDBACK_RETENTION_DAYS": "1e2"}, "FEEDBACK_RETENTION_DAYS must be"),
+    ({**FEEDBACK_ON, "FEEDBACK_RETENTION_DAYS": "-5"}, "FEEDBACK_RETENTION_DAYS must be"),
+    ({**FEEDBACK_ON, "AGENT_NETWORK_POLICY": "false"}, "requires AGENT_NETWORK_POLICY to be enabled"),
+    # Shapes are checked even while the feature is off: a typo fails today.
+    ({"FEEDBACK_RETENTION_DAYS": "forever"}, "FEEDBACK_RETENTION_DAYS must be"),
+])
+def test_feedback_selection_is_strict_and_writes_nothing(monkeypatch, mapper_env, env, message):
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    r, out = mapper_env()
+    assert r.returncode != 0
+    assert message in r.stderr
+    assert not out.exists()
+    for value in env.values():
+        if len(value) > 4:
+            assert value not in r.stderr  # the key is named, the value is not echoed
+
+
+def test_feedback_off_with_the_network_policy_off_is_still_accepted(monkeypatch, mapper_env):
+    monkeypatch.setenv("AGENT_NETWORK_POLICY", "false")
+    r, out = mapper_env()
+    assert r.returncode == 0, r.stderr
+    assert "feedback" not in load_values(out)
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is required for the round-trip")
+def test_feedback_mapper_to_helm_round_trip(monkeypatch, mapper_env, tmp_path):
+    """Producer-to-consumer: operator env -> values -> helm template -> the pod
+    and claim the operator asked for, and the default env renders no feedback."""
+    for key, value in {**FEEDBACK_ON, "FEEDBACK_STORAGE_SIZE": "30Gi", "FEEDBACK_RETENTION_DAYS": "45",
+                       "METRICS_ENABLED": "true"}.items():
+        monkeypatch.setenv(key, value)
+    r, out = mapper_env()
+    assert r.returncode == 0, r.stderr
+    rendered = subprocess.run(["helm", "template", "app", str(CHART), "-f", str(out), "--namespace", "ns"],
+                              capture_output=True, text=True, cwd=REPO, check=False)
+    assert rendered.returncode == 0, rendered.stderr
+    docs = {(d["kind"], d["metadata"]["name"]): d for d in yaml.safe_load_all(rendered.stdout) if d}
+    pvc = docs["PersistentVolumeClaim", "rag-feedback-data"]
+    assert pvc["spec"]["resources"]["requests"]["storage"] == "30Gi"
+    assert pvc["spec"]["storageClassName"] == "standard"
+    pod = docs["StatefulSet", "rag-feedback"]["spec"]["template"]["spec"]["containers"][0]
+    env = {e["name"]: e for e in pod["env"]}
+    assert env["FEEDBACK_RETENTION_DAYS"]["value"] == "45"
+    assert env["FEEDBACK_SERVICE_TOKEN"]["valueFrom"]["secretKeyRef"] == {
+        "key": "service-token", "name": "fb-secret"}
+    assert ("ServiceMonitor", "rag-feedback") in docs and ("NetworkPolicy", "rag-feedback-ingress") in docs

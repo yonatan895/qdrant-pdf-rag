@@ -1,0 +1,28 @@
+{{- /*
+Feedback store claim (issue #804, ADR-0005). Standalone and kept, not
+volumeClaimTemplates: a StatefulSet's templates are immutable (a size change
+would fail helm upgrade) and template-created claims never enter the
+ownership preflight inventory. Single-node RWO block volume; NFS refused by
+shell preflight and schema. `keep` retains the claim and its content when
+the feature is disabled or the release is removed: nothing purges while it
+is unmounted, so retiring the feature for good means an explicit
+`oc delete pvc rag-feedback-data` (docs/deploy.md); no deploy path deletes it.
+*/ -}}
+{{- if include "mainframe-rag.feedbackEnabled" . }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: rag-feedback-data
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    helm.sh/resource-policy: keep
+  labels:
+    app: rag-feedback
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: {{ .Values.storage.className }}
+  resources:
+    requests:
+      storage: {{ .Values.feedback.storageSize | quote }}
+{{- end }}

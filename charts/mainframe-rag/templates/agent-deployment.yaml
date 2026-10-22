@@ -113,6 +113,19 @@ spec:
                   key: {{ .Values.gateway.apiKeySecretKey | default "rerank-api-key" | quote }}
                   name: {{ .Values.gateway.apiKeySecretName }}
             {{- end }}
+            {{- if include "mainframe-rag.feedbackEnabled" . }}
+            # Answer feedback (issue #804): emitted only when the service
+            # renders, so the default render has no FEEDBACK_* at all.
+            - name: FEEDBACK_ENABLED
+              value: "true"
+            - name: FEEDBACK_URL
+              value: http://rag-feedback:8080
+            - name: FEEDBACK_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: service-token
+                  name: {{ .Values.feedback.secretName }}
+            {{- end }}
             {{- if .Values.gateway.caConfigMapName }}
             - name: SSL_CERT_FILE
               value: /etc/gateway-ca/ca-bundle.crt

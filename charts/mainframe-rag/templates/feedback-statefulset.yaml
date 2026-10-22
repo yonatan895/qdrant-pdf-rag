@@ -1,0 +1,105 @@
+{{- /*
+Answer-feedback service (issue #804, ADR-0005). Rendered only when
+feedback.enabled (the feedbackEnabled helper also refuses it without the
+NetworkPolicy). The single SQLite writer: exactly one replica and one uvicorn
+worker (one writer, one purge scheduler, one metrics registry). The existing
+agent image, so no new image or pin; the image CMD starts the agent, so the
+service entry point is the command. The env is exactly the set pinned by the
+render test: no FEEDBACK_ENABLED (that is the agent's client switch), no
+Qdrant, model, gateway or OTLP settings, and no ServiceAccount token. Data
+lives on the kept RWO claim rag-feedback-data (never NFS); /tmp is the only
+other writable path. restricted-v2 assigns UID and volume group (no fixed
+IDs). Rolling update means delete-then-create, never two writers.
+*/ -}}
+{{- if include "mainframe-rag.feedbackEnabled" . }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: rag-feedback
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: rag-feedback
+spec:
+  replicas: 1
+  serviceName: rag-feedback
+  podManagementPolicy: OrderedReady
+  selector:
+    matchLabels:
+      app: rag-feedback
+  template:
+    metadata:
+      labels:
+        app: rag-feedback
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      {{- if .Values.pullSecret.name }}
+      imagePullSecrets:
+        - name: {{ .Values.pullSecret.name }}
+      {{- else }}
+      imagePullSecrets: []
+      {{- end }}
+      containers:
+        - name: feedback
+          image: {{ include "mainframe-rag.image" (dict "name" "agent" "image" .Values.images.agent) }}
+          imagePullPolicy: {{ .Values.images.agent.pullPolicy | default "IfNotPresent" }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          command: [python3, -m, uvicorn]
+          args:
+            - --factory
+            - mainframe_rag.feedback.service:app_from_env
+            - --host
+            - 0.0.0.0
+            - --port
+            - "8080"
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: FEEDBACK_STORE_PATH
+              value: /data/feedback.sqlite3
+            - name: FEEDBACK_RETENTION_DAYS
+              value: {{ .Values.feedback.retentionDays | toString | quote }}
+            - name: METRICS_ENABLED
+              value: {{ .Values.metrics.enabled | toString | quote }}
+            - name: FEEDBACK_SERVICE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  key: service-token
+                  name: {{ .Values.feedback.secretName }}
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          # A long first purge after a long disable must not restart the only
+          # writer: six consecutive 20 s misses.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            failureThreshold: 6
+          resources:
+            {{- toYaml .Values.resources.feedback | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: data
+          persistentVolumeClaim:
+            claimName: rag-feedback-data
+{{- end }}

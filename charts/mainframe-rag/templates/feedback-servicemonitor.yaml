@@ -1,0 +1,28 @@
+{{- /*
+ServiceMonitor for the feedback service /metrics (issue #804). Same two-flag
+decision as the agent monitor (serviceMonitorEnabled), and only while the
+service renders. The scrape authenticates with the service bearer token from
+the same operator Secret.
+*/ -}}
+{{- if and (include "mainframe-rag.feedbackEnabled" .) (include "mainframe-rag.serviceMonitorEnabled" .) }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: rag-feedback
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: rag-feedback
+spec:
+  selector:
+    matchLabels:
+      app: rag-feedback
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 30s
+      scrapeTimeout: 10s
+      authorization:
+        credentials:
+          name: {{ .Values.feedback.secretName }}
+          key: service-token
+{{- end }}

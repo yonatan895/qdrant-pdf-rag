@@ -85,8 +85,10 @@ PyMuPDF is the only parser. `parse_pdf` returns a frozen, slots `ParsedDoc`.
   `None`, empty vendor becomes `"unknown"`; title is sanitized; the TOC comes from `get_toc(simple=True)`;
   the document is closed in a `finally`.
 - `sanitize_page_text` drops CSI sequences, C0 controls, bidi marks, and
-  zero-width chars **in that order**, preserving `\t` and `\n`; all other
-  printable bytes (including JCL padding) are byte-identical. Sanitizing
+  zero-width chars **in that order**, preserving `\t` and `\n`, then spells
+  the typographic ligatures U+FB00–FB06 out as letters (`ﬁ` → `fi`, #870) so
+  typed queries match; all other printable bytes (including JCL padding,
+  full-width forms and private-use glyphs) are byte-identical. Sanitizing
   happens **before** chrome stripping — fractured control bytes would
   otherwise break line matching.
 - `sha256_file` reads in 1 MiB chunks. The parent hashes each PDF once for
@@ -123,10 +125,11 @@ collections need a re-ingest.**
   positions. Short independent procedures alone do not establish a table.
   Ambiguous regions and pages whose blocks do not exactly reproduce plain text
   stay in stream order, including whitespace-only blocks.
-- A standalone `|` is removed only as part of a repeated aligned run at a
-  page margin, separated from the text body's horizontal extent and paired
-  with at least three nonmonospaced prose sentences. Monospaced glyphs,
-  bars within the body, short-label diagram walls and lone margin glyphs
+- A standalone `|` is removed only as part of a repeated aligned run in
+  whitespace (a page margin or a column gutter: no text on the bar's own
+  row within half a line height, issue #864), paired with at least three
+  nonmonospaced prose sentences. Monospaced glyphs, bars within a line,
+  short-label diagram walls, bars beside table cells and lone margin glyphs
   retain content. These geometry/typography signals are heuristic: they do
   not establish the author's semantic intent or guarantee every diagram
   shape. Source-fidelity qualification still needs SME review.

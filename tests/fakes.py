@@ -11,6 +11,7 @@ Test-only: never imported by src/.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sys
 from contextlib import asynccontextmanager, contextmanager
@@ -310,6 +311,160 @@ class HttpxStreamFake:
         self.capture["headers"] = headers
         self.post_bodies.append(json)
         return PostResp(self.payload)
+
+
+class SlowOpenAIUpstream:
+    """Real-socket OpenAI-compatible chat upstream on 127.0.0.1 (issue #868).
+
+    Scripted per request kind (`stream` for `"stream": true` bodies, `post`
+    otherwise); each script is one of:
+      "length_reasoning_only" - reasoning deltas, no content, finish `length`
+      "stall"                 - accept the request, never answer
+      "token_then_stall"      - one content delta, then silence
+      "answer"                - a complete `stop` answer
+    It records every request body and notices when the client closes the
+    connection while the script is still running, which is how a real model
+    server learns that its caller gave up. Test-only; no shared state between
+    instances."""
+
+    ANSWER = (
+        "Reissue the command.\n\nCitations:\n"
+        "- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6"
+    )
+
+    def __init__(self, stream: str = "answer", post: str = "answer", step_s: float = 0.02):
+        import threading
+
+        self.scripts = {True: stream, False: post}
+        self.step_s = step_s
+        self.requests: list[dict] = []
+        self.disconnects = 0
+        self.finished = 0
+        self._changed = threading.Condition()
+        self._loop = None
+        self._server = None
+        self._thread = None
+        self.port = 0
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.port}/v1"
+
+    def __enter__(self):
+        import asyncio
+        import threading
+
+        ready = threading.Event()
+
+        async def main():
+            self._loop = asyncio.get_running_loop()
+            self._server = await asyncio.start_server(self._handle, "127.0.0.1", 0)
+            self.port = self._server.sockets[0].getsockname()[1]
+            ready.set()
+            async with self._server:
+                await self._server.serve_forever()
+
+        def run():
+            with contextlib.suppress(asyncio.CancelledError):
+                asyncio.run(main())
+
+        self._thread = threading.Thread(target=run, daemon=True)
+        self._thread.start()
+        assert ready.wait(5)
+        return self
+
+    def __exit__(self, *exc):
+        import asyncio
+
+        async def stop():
+            self._server.close()
+            for task in asyncio.all_tasks():
+                if task is not asyncio.current_task():
+                    task.cancel()
+
+        asyncio.run_coroutine_threadsafe(stop(), self._loop)
+        self._thread.join(5)
+
+    def wait_for(self, predicate, timeout: float = 5.0) -> bool:
+        with self._changed:
+            return self._changed.wait_for(lambda: predicate(self), timeout)
+
+    def _note(self, **delta) -> None:
+        with self._changed:
+            for key, value in delta.items():
+                setattr(self, key, getattr(self, key) + value)
+            self._changed.notify_all()
+
+    async def _handle(self, reader, writer) -> None:
+        import asyncio
+
+        try:
+            head = await reader.readuntil(b"\r\n\r\n")
+            length = 0
+            for line in head.split(b"\r\n"):
+                if line.lower().startswith(b"content-length:"):
+                    length = int(line.split(b":")[1])
+            body = json.loads(await reader.readexactly(length))
+        except (asyncio.IncompleteReadError, ConnectionError):
+            writer.close()
+            return
+        is_stream = bool(body.get("stream"))
+        with self._changed:
+            self.requests.append({"stream": is_stream, "body": body})
+            self._changed.notify_all()
+        script = self.scripts[is_stream]
+        # EOF on the read side while a script is running = the caller left.
+        watcher = asyncio.ensure_future(reader.read())
+
+        async def pause(seconds: float) -> bool:
+            done, _ = await asyncio.wait({watcher}, timeout=seconds)
+            return not done
+
+        async def send(data: str) -> None:
+            writer.write(data.encode())
+            await writer.drain()
+
+        def sse(delta: dict, finish: str | None = None) -> str:
+            frame = {"choices": [{"delta": delta, "finish_reason": finish}]}
+            return f"data: {json.dumps(frame)}\n\n"
+
+        try:
+            if is_stream:
+                await send("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
+                           "Connection: close\r\n\r\n")
+            if script == "stall":
+                alive = await pause(3600)
+            elif script == "token_then_stall":
+                await send(sse({"content": "Partial "}))
+                alive = await pause(3600)
+            elif script == "length_reasoning_only":
+                alive = True
+                if is_stream:
+                    for _ in range(3):
+                        await send(sse({"reasoning_content": "thinking "}))
+                        alive = alive and await pause(self.step_s)
+                    await send(sse({}, "length") + "data: [DONE]\n\n")
+                else:
+                    await self._json(send, {"content": "", "reasoning_content": "x"}, "length")
+            else:  # "answer"
+                alive = True
+                if is_stream:
+                    await send(sse({"content": self.ANSWER}))
+                    await send(sse({}, "stop") + "data: [DONE]\n\n")
+                else:
+                    await self._json(send, {"content": self.ANSWER}, "stop")
+            self._note(finished=1) if alive else self._note(disconnects=1)
+        except (ConnectionError, asyncio.CancelledError):
+            self._note(disconnects=1)
+        finally:
+            watcher.cancel()
+            writer.close()
+
+    @staticmethod
+    async def _json(send, message: dict, finish: str) -> None:
+        payload = json.dumps({"choices": [{"message": message, "finish_reason": finish}]})
+        await send("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                   f"Content-Length: {len(payload)}\r\nConnection: close\r\n\r\n{payload}")
 
 
 # ---------------------------------------------------------------------------

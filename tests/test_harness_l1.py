@@ -229,6 +229,77 @@ def test_gate_class_regression_holds_despite_overall_gain():
     assert any("comparative" in r for r in reasons)
 
 
+def _recall1_classes(message_id, comparative=0.3):
+    """Per-class blocks as aggregate() emits them once the baseline records
+    recall@1; message_id/comparative differ only in recall@1 and recall@5."""
+    return {
+        "message_id": {"n": 10, "scored": 10, "recall@1": message_id, "recall@5": 0.9, "mrr": 0.9},
+        "comparative": {"n": 10, "scored": 10, "recall@1": comparative, "recall@5": 0.3, "mrr": 0.3},
+    }
+
+
+def test_gate_class_recall_at_1_regression_holds_where_baseline_records_it():
+    # #837: first-rank hits lost while recall@5 and MRR hold must hold the
+    # promotion; the overall primary metrics improve so only the class check
+    # can be the reason.
+    base = _summary(recall5=0.6, mrr=0.5, classes=_recall1_classes(message_id=0.8))
+    cand = _summary(recall5=0.8, mrr=0.7, classes=_recall1_classes(message_id=0.6))
+    verdict, reasons = gate_verdict(cand, _baseline(base), resamples=400)
+    assert verdict == "hold"
+    assert any(
+        "class regression" in r and "message_id" in r and "recall@1" in r and "0.8 -> 0.6" in r
+        for r in reasons
+    ), reasons
+    assert not any("comparative" in r for r in reasons)
+
+
+def test_gate_class_recall_at_1_within_floor_is_not_a_regression():
+    base = _summary(recall5=0.6, mrr=0.5, classes=_recall1_classes(message_id=0.8))
+    cand = _summary(recall5=0.8, mrr=0.7, classes=_recall1_classes(message_id=0.76))
+    verdict, reasons = gate_verdict(cand, _baseline(base), resamples=400)
+    assert verdict == "merge", reasons
+
+
+def test_gate_baseline_without_recall_at_1_reads_missing_not_zero():
+    # A baseline recorded before recall@1 (key absent, or null for a class
+    # with no scored rows) must not gate it: the candidate's recall@1 is
+    # irrelevant, never compared against an implied 0.
+    base = _summary(recall5=0.6, mrr=0.5)  # classes carry no recall@1 key
+    cand = _summary(recall5=0.8, mrr=0.7, classes=_recall1_classes(message_id=0.0, comparative=0.0))
+    verdict, reasons = gate_verdict(cand, _baseline(base), resamples=400)
+    assert verdict == "merge", reasons
+    null_base = _summary(recall5=0.6, mrr=0.5, classes=_recall1_classes(message_id=None, comparative=None))
+    verdict, reasons = gate_verdict(cand, _baseline(null_base), resamples=400)
+    assert verdict == "merge", reasons
+
+
+def test_gate_candidate_without_recall_at_1_is_not_gated():
+    base = _summary(recall5=0.6, mrr=0.5, classes=_recall1_classes(message_id=0.8))
+    cand_classes = {
+        cls: {k: v for k, v in block.items() if k != "recall@1"}
+        for cls, block in _recall1_classes(message_id=0.0).items()
+    }
+    cand = _summary(recall5=0.8, mrr=0.7, classes=cand_classes)  # no recall@1 key
+    verdict, reasons = gate_verdict(cand, _baseline(base), resamples=400)
+    assert verdict == "merge", reasons
+
+
+def test_gate_recall_at_1_alone_is_not_a_primary_improvement():
+    # Decision (#837): recall@1 joins the per-class regression check only.
+    # Counting it as a paired-CI primary metric would let a first-rank gain
+    # promote while recall@5 and MRR are flat, and would hold every baseline
+    # that predates the key ("no paired values"). The thresholds stay as they were.
+    base = _summary(recall5=0.8, mrr=0.7)
+    cand = _summary(recall5=0.8, mrr=0.7)
+    for eid in cand["per_query"]:
+        base["per_query"][eid]["recall@1"] = 0.0
+        cand["per_query"][eid]["recall@1"] = 1.0
+    verdict, reasons = gate_verdict(cand, _baseline(base), resamples=400)
+    assert verdict == "hold"
+    assert any("no primary metric improved" in r for r in reasons), reasons
+    assert not any("no paired values" in r for r in reasons)
+
+
 def test_gate_golden_entry_mismatch_holds():
     # A dev run (golden only) must not be scored against an RC baseline
     # (golden + holdout): the paired deltas would cover a truncated venue.

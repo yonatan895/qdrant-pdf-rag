@@ -1,24 +1,37 @@
 """Feedback service (issue #780, ADR-0005): the single writer of the feedback store.
 
 Agents (any replica) POST finalized answer records and forwarded console
-ratings with a dedicated bearer token; an operator task POSTs the purge that
-enforces the retention window. Client errors carry fixed messages and stable
-codes, never exception or upstream text; logs follow the agent's JSON-line
-contract and carry the request_id and counts only, never query, answer or
-comment text. Handlers are synchronous so FastAPI runs the blocking SQLite
-calls in its threadpool, off the event loop.
+ratings with a dedicated bearer token. The retention window is enforced by the
+service's own scheduled purge (feedback/purge.py, #804) and, as a manual
+operator action, by the authenticated `POST /v1/purge`. Client errors carry
+fixed messages and stable codes, never exception or upstream text; logs follow
+the agent's JSON-line contract and carry the request_id and counts only, never
+query, answer or comment text. `GET /metrics` (404 unless `METRICS_ENABLED`)
+needs the same bearer token as every route except `/healthz`. Handlers are
+synchronous so FastAPI runs the blocking SQLite calls in its threadpool, off
+the event loop.
 """
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import logging
+from collections.abc import Awaitable, Callable
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from mainframe_rag.feedback.purge import (
+    FeedbackMetrics,
+    PurgeRunner,
+    PurgeSchedule,
+    run_schedule,
+)
 from mainframe_rag.feedback.store import AnswerRecord, FeedbackStore, Rating, UnknownAnswerError
 from mainframe_rag.logs import error_type, json_log
 
@@ -35,11 +48,36 @@ def _bearer(token: str | None) -> bytes:
     return f"Bearer {(token or '').strip()}".encode()
 
 
-def create_app(store: FeedbackStore, token: str, *, retention_days: int = 180) -> FastAPI:
+def create_app(
+    store: FeedbackStore,
+    token: str,
+    *,
+    retention_days: int = 180,
+    metrics_enabled: bool = False,
+    schedule: PurgeSchedule | None = None,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> FastAPI:
+    """`schedule` starts the in-process purge with the app (single replica,
+    single worker: one scheduler); None starts none (unit tests, tools)."""
     if not (token and token.strip()):
         raise RuntimeError("FEEDBACK_SERVICE_TOKEN is required")
     expected = _bearer(token)
-    app = FastAPI(title="mainframe-rag feedback", docs_url=None, redoc_url=None, openapi_url=None)
+    metrics = FeedbackMetrics()
+    runner = PurgeRunner(store, retention_days, metrics)
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):  # type: ignore[no-untyped-def]
+        task = (asyncio.create_task(run_schedule(runner, schedule, sleep=sleep))
+                if schedule is not None else None)
+        try:
+            yield
+        finally:
+            if task is not None:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+    app = FastAPI(title="mainframe-rag feedback", docs_url=None, redoc_url=None, openapi_url=None,
+                  lifespan=lifespan)
 
     @app.middleware("http")
     async def authorize(request: Request, call_next):  # type: ignore[no-untyped-def]
@@ -89,15 +127,18 @@ def create_app(store: FeedbackStore, token: str, *, retention_days: int = 180) -
         # Bounded labels for the agent's rating counter; never text.
         return {"id": rating_id, "endpoint": endpoint, "verification_state": state}
 
+    @app.get("/metrics")
+    def scrape() -> Response:
+        if not metrics_enabled:
+            return _error(404, "not_found", "no such feedback operation")
+        return Response(content=generate_latest(metrics.registry), media_type=CONTENT_TYPE_LATEST)
+
     @app.post("/v1/purge")
     def purge() -> dict[str, int | bool]:
-        """Enforce the retention window (explicit operator action, ADR-0005).
-        `wal_truncated: false` means a concurrent reader deferred removing the
-        purged text from disk; rerun the purge after it (idempotent)."""
-        result = store.purge(retention_days=retention_days)
-        level = logging.INFO if result["wal_truncated"] else logging.WARNING
-        log.log(level, json_log("feedback", "feedback_purge", **result))
-        return result
+        """Manual retention purge (ADR-0005), the same attempt the schedule
+        runs. `wal_truncated: false` means a concurrent reader deferred
+        removing the purged text from disk; rerun it afterwards (idempotent)."""
+        return runner.run()[1]
 
     return app
 
@@ -111,6 +152,11 @@ def app_from_env() -> FastAPI:
 
     settings = load_settings()
     configure_logging(settings.log_level)
-    return create_app(FeedbackStore(Path(settings.feedback_store_path)),
-                      settings.feedback_service_token or "",
-                      retention_days=settings.feedback_retention_days)
+    return create_app(
+        FeedbackStore(Path(settings.feedback_store_path)),
+        settings.feedback_service_token or "",
+        retention_days=settings.feedback_retention_days,
+        metrics_enabled=settings.metrics_enabled,
+        schedule=PurgeSchedule(interval_s=settings.feedback_purge_interval_s,
+                               first_delay_s=settings.feedback_purge_first_delay_s),
+    )

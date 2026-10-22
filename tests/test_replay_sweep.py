@@ -289,3 +289,36 @@ def test_run_config_reports_identifier_and_nl_separately():
         "nl": {"n": 1, "recall@1": 1.0, "recall@5": 1.0, "mrr": 1.0},
     }
     assert [r["kind"] for r in result["rows"]] == ["nl", "identifier"]
+
+
+def test_rerank_grid_is_the_pre_registered_862_axes_against_production():
+    from scripts.replay_sweep import rerank_grid_configs
+
+    configs = rerank_grid_configs(_settings())
+    assert configs[0] == candidate_configs(_settings())[0]
+    assert len({c.label for c in configs}) == len(configs) and all(len(c.label) <= 12 for c in configs)
+    off = [c for c in configs[1:] if not c.rerank]
+    grid = [c for c in configs[1:] if c.rerank]
+    assert [c.rrf_k for c in off] == [2, 60]
+    assert len(grid) == 2 * 3 * 5
+    assert {(c.rrf_k, c.prefetch_limit, c.alpha) for c in grid} == {
+        (k, depth, alpha) for k in (2, 60) for depth in (20, 30, 50)
+        for alpha in (0.0, 0.25, 0.5, 0.75, 1.0)}
+    # Candidate depth is both the per-leg prefetch and the fused set reranked,
+    # exactly what RERANK_CANDIDATES sets in production; never beyond 50.
+    assert all(c.fuse_limit == c.prefetch_limit <= 50 for c in grid)
+
+
+def test_rerank_grid_depth_bounds_which_candidates_the_cross_encoder_can_promote():
+    from scripts.replay_sweep import rerank_grid_configs
+
+    ids = [f"c{i:03d}" for i in range(30)]
+    ce = {cid: 0.1 for cid in ids}
+    ce["c025"] = 0.99   # beyond the depth-20 candidate set
+    ce["c010"] = 0.9
+    record = _record(ids, ce=ce, meta={"depth": 50, "ce_scored": True, "ce_depth": 50})
+    by_label = {c.label: c for c in rerank_grid_configs(_settings())}
+    assert replay_record(record, by_label["k60d20a1"], _settings())[0].chunk_id == "c010"
+    assert replay_record(record, by_label["k60d30a1"], _settings())[0].chunk_id == "c025"
+    # alpha 0 keeps the first-stage order whatever the cross-encoder says.
+    assert replay_record(record, by_label["k60d30a0"], _settings())[0].chunk_id == "c000"

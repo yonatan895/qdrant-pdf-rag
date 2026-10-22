@@ -21,6 +21,15 @@ ALLOWED = {
     ('v1', 'Service', 'jaeger'),
     ('v1', 'ConfigMap', 'jaeger-config'),
     ('v1', 'PersistentVolumeClaim', 'jaeger-badger'),
+    # Answer-feedback service (#804): the next ordinary deploy must find its own
+    # objects in the live inventory. None is a disabled-cleanup entry: the
+    # release prunes the workload, Service, policy and monitor, and the claim
+    # (helm.sh/resource-policy: keep) is never deleted by any deploy path.
+    ('apps/v1', 'StatefulSet', 'rag-feedback'),
+    ('v1', 'Service', 'rag-feedback'),
+    ('v1', 'PersistentVolumeClaim', 'rag-feedback-data'),
+    ('networking.k8s.io/v1', 'NetworkPolicy', 'rag-feedback-ingress'),
+    ('monitoring.coreos.com/v1', 'ServiceMonitor', 'rag-feedback'),
 }
 
 

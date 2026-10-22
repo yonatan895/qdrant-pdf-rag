@@ -112,10 +112,14 @@ verify_running_images() {
     image_identity_enforced || return 0
     _vp_pairs=""
     for _vp_role in "$@"; do
-        _vp_upper=$(printf '%s' "$_vp_role" | tr 'a-z' 'A-Z')
+        # The feedback workload (#804) runs the agent image: it carries the
+        # agent's verified digest, bound to its own StatefulSet.
+        _vp_src=$_vp_role
+        [ "$_vp_role" != feedback ] || _vp_src=agent
+        _vp_upper=$(printf '%s' "$_vp_src" | tr 'a-z' 'A-Z')
         eval "_vp_digest=\${IMAGE_DIGEST_${_vp_upper}:-}"
         [ -n "$_vp_digest" ] || die "internal: no verified digest for $_vp_role"
-        _vp_ref=$(image_role_ref "$_vp_role")
+        _vp_ref=$(image_role_ref "$_vp_src")
         _vp_pairs="$_vp_pairs $_vp_role=${_vp_ref%:*}@$_vp_digest"
     done
     _vp_tmp=$(mktemp) || die "cannot create a temporary file"

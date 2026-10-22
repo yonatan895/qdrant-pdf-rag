@@ -1,0 +1,22 @@
+{{- /*
+Feedback Service (issue #804). ClusterIP only; never a Route (the Route
+exposure preflight treats rag-feedback as a protected Service). Selector and
+port name track the StatefulSet, the NetworkPolicy and the ServiceMonitor.
+*/ -}}
+{{- if include "mainframe-rag.feedbackEnabled" . }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: rag-feedback
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: rag-feedback
+spec:
+  type: ClusterIP
+  selector:
+    app: rag-feedback
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+{{- end }}

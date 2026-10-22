@@ -38,7 +38,8 @@ Instruments (all `rag.` prefixed; Prometheus renders dots as underscores):
 - rag.admission.rejected (counter): refusals by endpoint x reason
   (`queue_full` | `queue_timeout`). Rejected and deadline-expired requests
   also appear in rag.requests.total with outcome `overloaded` /
-  `deadline_exceeded`.
+  `deadline_exceeded`; an expired model wait has outcome `model_timeout`
+  (issue #868).
 """
 
 from __future__ import annotations

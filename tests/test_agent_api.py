@@ -11,14 +11,18 @@ import time
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from hypothesis import example, given, settings
+from hypothesis import strategies as st
 
 from mainframe_rag.agent import app as app_mod
 from mainframe_rag.agent.answer import (
     DECLINE_PREFIX,
     is_abstention,
+    is_structured_decline,
     parse_answer,
     verification_state_for,
 )
+from mainframe_rag.agent.cites import is_citation_shaped, normalize_citation_line
 from mainframe_rag.agent.tokenizer import FallbackTokenizer
 from mainframe_rag.ports import ChatResult, TokenUsage
 from mainframe_rag.retrieve.query import SearchHit
@@ -341,6 +345,24 @@ def test_strip_unauthorized_removes_fabricated_cites_in_every_wrapping():
     assert valid_citations("Citations:\n> " + _hit().cite, allowed) == [_hit().cite]
     assert valid_citations("Citations:\n`" + _hit().cite + "`", allowed) == [_hit().cite]
     assert valid_citations("Citations:\n- **" + _hit().cite + "**", allowed) == [_hit().cite]
+
+
+def test_citation_unwrapping_has_no_depth_limit():
+    """Issue #876 (found by the #817 property tests): unwrapping stopped after
+    six levels, so a 7-deep wrapped fabricated cite stayed in the body while a
+    6-deep one was stripped. Normalization now reaches a fixed point at any
+    depth and is idempotent."""
+    from mainframe_rag.agent.cites import normalize_citation_line, strip_unauthorized_citations
+
+    allowed = {_hit().cite}
+    fabricated = "SA22-9999-99 Not Retrieved, Made Up > Path, p. 9-9"
+    for depth in (6, 7, 12):
+        line = "*" * depth + fabricated + "*" * depth
+        assert normalize_citation_line(line) == fabricated
+        assert fabricated not in strip_unauthorized_citations(line, allowed)
+    nested = "> " * 4 + "`" * 3 + "(" * 3 + fabricated + ")" * 3 + "`" * 3
+    once = normalize_citation_line(nested)
+    assert once == fabricated and normalize_citation_line(once) == once
 
 
 def test_strip_unauthorized_leaves_prose_and_inline_mentions():
@@ -3698,3 +3720,140 @@ def test_answer_same_display_citation_two_versions_stay_distinct(client, monkeyp
     prompt = fake.last_messages[-1].content
     assert "Source product: z/OS; version: 1.0" in prompt
     assert "Source product: z/OS; version: 2.0" in prompt
+
+
+# --- Property tests (issue #817) ---------------------------------------------
+# Hypothesis generates the inputs; each property pins an invariant the example
+# tests above only sample. Budget: 200 examples per property (about 1 ms each,
+# measured in the PR); `derandomize=True` makes the example set a pure function
+# of the test, `database=None` keeps Hypothesis from writing into the working
+# tree, and `deadline=None` is justified because the examples are pure string
+# functions whose cost is bounded by the example count, not by wall-clock noise
+# on a shared runner.
+_PROPERTY = settings(max_examples=200, derandomize=True, database=None, deadline=None)
+
+_SUPPLIED_CITES = (
+    "DOC1 Stem Guide, Intro > Part, p. 4",  # filename-stem doc id (make_evidence names entry 1 DOC1)
+    "SA22-7592-05 z/OS MVS Initialization and Tuning Reference, IEASYSxx > LFAREA, p. 1-17",
+    "SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. PDF 4\u20135",
+)
+_FABRICATED_CITES = (
+    "SA22-9999-99 Fake Title, A > B, p. 3",
+    "DOC9 Other, X > Y, p. 1",
+    "SA22-7592-05 About > Table 1",  # docno-led pasted fragment, no page tail
+)
+_CITE_WRAPPERS = ("{}", "- {}", "1. {}", "> {}", "**{}**", "`{}`", "({})", "<{}>", "[x]({})", '"{}"')
+_ANSWER_FRAGMENTS = (
+    "Citations:", "Sources:", "## Citations", "**Citations:**", "Answer:", "See [1].", "[2]", "[1, 2]", "[99]", "",
+    "```jcl\n//A JOB\n```", "```thinking\nnote [1]\n```", "```\nplain [2]\n```",
+    DECLINE_PREFIX + " IEA500I.", "The excerpts do not contain this.",
+)
+
+
+@st.composite
+def _answer_line(draw):
+    kind = draw(st.integers(0, 2))
+    if kind == 0:
+        return draw(st.text(max_size=40))
+    if kind == 1:
+        cite = draw(st.sampled_from(_SUPPLIED_CITES + _FABRICATED_CITES))
+        return draw(st.sampled_from(_CITE_WRAPPERS)).format(cite)
+    return draw(st.sampled_from(_ANSWER_FRAGMENTS))
+
+
+_ANSWER_TEXT = st.one_of(st.text(), st.lists(_answer_line(), max_size=8).map("\n".join))
+_EVIDENCE_CITES = st.lists(st.sampled_from(_SUPPLIED_CITES), unique=True, max_size=3)
+
+
+@_PROPERTY
+@given(_ANSWER_TEXT, _EVIDENCE_CITES)
+@example("Retry.\n\nCitations:\n> SA22-9999-99 Fake Title, A > B, p. 3", [])
+@example("Per [2] and [7].", [_SUPPLIED_CITES[1]])
+@example(f"{DECLINE_PREFIX} IEA500I.\n\nCitations:\n{_SUPPLIED_CITES[1]}", [_SUPPLIED_CITES[1]])
+def test_parse_answer_never_raises_and_grounds_citations_in_supplied_evidence(content, supplied):
+    """parse_answer takes free-form model output: it never raises, every
+    citation it returns (listed or inferred from [n]) is one of the supplied
+    excerpts' citations, and no standalone citation-shaped line outside that
+    set survives in the answer body (#364, #299)."""
+    evidence = make_evidence(supplied)
+    parsed = parse_answer(content, evidence)
+    assert set(parsed.citations) <= set(supplied)
+    assert len(set(parsed.citations)) == len(parsed.citations)
+    assert parsed.citations_inferred == bool(parsed.inferred_indices)
+    assert all(evidence.cite_for_index(i) in parsed.citations for i in parsed.inferred_indices)
+    if parsed.abstained:  # an abstention ships no citations (#135)
+        assert parsed.citations == [] and not parsed.citations_inferred
+    doc_ids = frozenset(e.doc_id for e in evidence.entries)
+    for line in parsed.answer.splitlines():
+        candidate = normalize_citation_line(line)
+        if is_citation_shaped(candidate, doc_ids):
+            assert candidate in supplied, line
+
+
+_NESTING_WRAPPERS = st.sampled_from(["*{}*", "**{}**", "`{}`", "({})", "> {}", "_{}_"])
+
+
+@_PROPERTY
+@given(st.sampled_from(_SUPPLIED_CITES + _FABRICATED_CITES), st.lists(_NESTING_WRAPPERS, max_size=16))
+@example(_FABRICATED_CITES[0], ["*{}*"] * 7)  # #876: the seventh level survived
+def test_citation_normalization_is_idempotent_at_any_nesting_depth(cite, wrappers):
+    """normalize_citation_line reaches a fixed point (#817 property, #876):
+    normalizing twice equals normalizing once, and wrapping a citation in
+    any stack of emphasis, code, parenthesis or quote markers unwraps to the
+    bare citation, so depth cannot smuggle a fabricated cite past the strip."""
+    line = cite
+    for wrapper in wrappers:
+        line = wrapper.format(line)
+    once = normalize_citation_line(line)
+    assert normalize_citation_line(once) == once
+    assert once == cite, line
+
+
+_DECLINE_LEADS = st.sampled_from([
+    DECLINE_PREFIX, DECLINE_PREFIX.lower(), DECLINE_PREFIX.upper(), f"**{DECLINE_PREFIX}**",
+    f"## {DECLINE_PREFIX}", f"Answer: {DECLINE_PREFIX}",
+])
+_DECLINE_SUBJECTS = st.sampled_from(["IEA500I", "the LFAREA retry limit", "CSQW100I", "S0C4"])
+_WORDS = st.text(alphabet=st.characters(categories=("Lu", "Ll", "Nd")), min_size=1, max_size=8)
+_PROSE = st.lists(_WORDS, min_size=1, max_size=5).map(" ".join)
+_SEPARATORS = st.sampled_from([" ", "\n", "\n\n", ". "])
+_ONE_LINE = st.text(alphabet=st.characters(blacklist_categories=("Cc", "Cs", "Zl", "Zp")), max_size=30)
+_INDEX_MARKERS = st.sampled_from(["[1]", "[2]", "[12]", "[1, 2]", "[ 3 ]"])
+# The line carrying the marker opens with ordinary prose. A line that opens with a
+# list marker or section label ("[1] ...", "2) ...", "Answer: ...") is citation
+# scaffolding by design (cites.normalize_citation_line), not an inline index.
+_LEAD_WORDS = st.text(alphabet=st.characters(categories=("Lu", "Ll")), max_size=7).map("w".__add__)
+
+
+@_PROPERTY
+@given(_DECLINE_LEADS, _DECLINE_SUBJECTS, _SEPARATORS, _PROSE)
+def test_uncited_structured_decline_is_recognized_whatever_note_follows(lead, subject, sep, note):
+    """Positive control for the two negative properties below: the generated
+    shape really is a decline when it cites nothing (#764), so the negatives
+    cannot pass by never producing a decline."""
+    body = f"{lead} {subject}.{sep}{note}"
+    assert is_structured_decline(body) is True, body
+    assert is_abstention(body) is True, body
+
+
+@_PROPERTY
+@given(_DECLINE_LEADS, _DECLINE_SUBJECTS, _SEPARATORS, _LEAD_WORDS, _ONE_LINE, _INDEX_MARKERS, _ONE_LINE)
+@example(DECLINE_PREFIX, "IEA500I", "\n", "Set", " RETRY=5", "[1]", ". Then restart")
+def test_structured_decline_followed_by_an_inline_index_is_never_a_decline(
+    lead, subject, sep, word, before, marker, after
+):
+    """Rule 4's decline cites nothing: an inline [n] anywhere after the lead
+    (same line or any later prose line) means cited claims, so the response is
+    not a structured decline whatever surrounds the marker (#764)."""
+    body = f"{lead} {subject}.{sep}{word}{before} {marker} {after}"
+    assert is_structured_decline(body) is False, body
+
+
+@_PROPERTY
+@given(_WORDS, _ONE_LINE, st.sampled_from(['"{}"', "`{}`", "\u201c{}\u201d", "'{}'"]), _DECLINE_LEADS, _DECLINE_SUBJECTS, _ONE_LINE)
+@example("The", " log said", '"{}"', DECLINE_PREFIX, "IEA500I", " when RETRY=0")
+def test_a_decline_quoted_inside_a_sentence_is_never_recognized(word, middle, quote, lead, subject, tail):
+    """Only a leading, unquoted prefix declines: the same text quoted inside a
+    sentence is quoted text, not the response declining (#630, #764)."""
+    body = f"{word}{middle} " + quote.format(f"{lead} {subject}.") + f" {tail}"
+    assert is_structured_decline(body) is False, body

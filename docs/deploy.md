@@ -79,7 +79,7 @@ restores the snapshot over whatever the file assigned; empty stays unset
   defaults to the former); the corpus PVC is not.
 - Operator booleans `UI_ENABLED`, `CONTEXTUAL_EMBED_ENABLED`,
   `INGEST_ALIAS_PUBLISH`, `INGEST_REINGEST`, `CHAT_CONDENSE_ENABLED`, `LLM_STREAM`
-  and `AGENT_NETWORK_POLICY` (default **true**, unlike the others)
+  `FEEDBACK_ENABLED` and `AGENT_NETWORK_POLICY` (default **true**, unlike the others)
   accept only `true/1/yes` or `false/0/no` (any case; unset keeps the
   default). `INGEST_ALIAS_PUBLISH` may only be unset or true: in-place ingest
   was retired (#360) and an explicit false fails closed.
@@ -240,6 +240,77 @@ Compatibility and lifecycle decisions under #448:
   are additive, so a site allow-all or broad allow policy that also selects the
   agent pods voids the restriction; a site default-deny is not satisfied by
   this policy for Qdrant or Jaeger.
+
+<a id="feedback-service"></a>
+- Answer-feedback service (issue #804, ADR-0005, **default off**). With
+  `FEEDBACK_ENABLED=true` the application release renders `StatefulSet/rag-feedback`
+  (one replica, the agent image started as
+  `python3 -m uvicorn --factory mainframe_rag.feedback.service:app_from_env`, one
+  worker; no Qdrant, model, gateway or OTLP settings and no ServiceAccount token),
+  the standalone claim `PersistentVolumeClaim/rag-feedback-data`
+  (`FEEDBACK_STORAGE_SIZE`, default 10Gi, RWO on `STORAGE_CLASS`, never NFS,
+  `helm.sh/resource-policy: keep`), a ClusterIP `Service/rag-feedback` (never a
+  Route: the Route exposure preflight treats it as protected whether or not the
+  feature is on) and `NetworkPolicy/rag-feedback-ingress`. The agent Deployment
+  then gains `FEEDBACK_ENABLED=true`, `FEEDBACK_URL=http://rag-feedback:8080` and
+  `FEEDBACK_API_KEY`. When off, nothing is rendered and the default render is
+  unchanged byte for byte.
+  - **Secret.** `FEEDBACK_SECRET` names an operator-created Secret with data key
+    `service-token`, the bearer token the service reads as
+    `FEEDBACK_SERVICE_TOKEN` and each agent pod as `FEEDBACK_API_KEY` (never a
+    chart value; the chart renders no Secret). `validate.sh` and `deploy.sh` check
+    that the key exists, without reading it, before any mutation. Rotation:
+    replace the Secret value, then restart the StatefulSet and the agent
+    Deployment; a mismatch shows as agent `feedback_record status=401` warnings
+    and `rag.feedback.records{outcome="failed"}`, never as an answer failure.
+  - **Network.** Policies are additive and a pod selected by none is open to the
+    namespace network, so the content store has its own policy. Data peer: pods
+    labelled `app: rag-agent` of this namespace on 8080 only (not the ingest Job,
+    debug pods or `AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES`). With
+    `METRICS_ENABLED=true` the monitoring namespaces (same two selectors as the
+    agent policy) may also reach 8080; `/metrics` and every data route still
+    require the bearer token, and the chart ServiceMonitor `rag-feedback`
+    (same decision as the agent's) scrapes with that token. Because the bearer
+    token would otherwise be the only control, `FEEDBACK_ENABLED=true` with
+    `AGENT_NETWORK_POLICY=false` is refused before any mutation (and by the chart
+    at render). Egress is untouched: a site that default-denies egress must allow
+    agent to `rag-feedback:8080`.
+  - **Purge.** The service purges its own retention window
+    (`FEEDBACK_RETENTION_DAYS`, default 180, 1..3650): 30 s after start, then
+    every 24 h, with `wal_truncated: false` and errors retried at 60/300/900 s
+    then hourly ([agent.md](agent.md#answer-feedback)). Outcomes are on the
+    bearer-protected `/metrics`; the suggested alert
+    (`time() - rag_feedback_purge_last_success_timestamp_seconds > 2 * 86400`)
+    is platform-owned and not shipped.
+  - **Lifecycle.** The pod runs the same image as the agent, so every release
+    restarts it; records sent meanwhile are dropped and counted and ratings
+    return `feedback_unavailable` (ADR-0005). The deploy waits for
+    `statefulset/rag-feedback` and, on the release path, binds that StatefulSet
+    to the verified agent digest after rollout. All five objects
+    (`StatefulSet`, `Service`, `PersistentVolumeClaim`, `NetworkPolicy`,
+    `ServiceMonitor`) are in `check_app_ownership.ALLOWED`, so the next ordinary
+    deploy adopts its own objects. **Disabling** removes the workload, Service,
+    policy and monitor with the release upgrade (no cleanup entry) but keeps the
+    claim: **nothing purges while the service is off, so question and answer
+    text stays on the volume past the retention window until the operator
+    deletes the claim** (`oc delete pvc rag-feedback-data`, an explicit action;
+    no deploy path ever deletes it, and retiring the feature for good means
+    deleting it). **Re-enabling** adopts the retained claim and the first
+    scheduled purge, 30 s after start, removes whatever aged out meanwhile.
+  - **Backups.** A CSI snapshot of the claim, or SQLite's online backup API run
+    inside the pod and copied out, contains question and answer text: store it
+    with the claim's protection and expire it no later than the retention
+    window, otherwise purged text survives in the backup. A restore can bring
+    back records and ratings made after the backup; the startup purge re-expires
+    anything past the window. Portable export/import is #805.
+  - Sizing is unmeasured: 10Gi, 50m/64Mi requests and 250m/256Mi limits are the
+    maintainer's accepted starting defaults (D8, #804); measure real bytes per
+    record before relying on them. Not proven by this repository, and site-gated
+    under #447: CNI enforcement of the feedback policy and denial from another
+    pod, RWO claim binding and restricted-v2 group write on the site storage
+    class, expansion and reclaim policy, snapshots, the bearer-authenticated
+    scrape and monitoring-namespace labels, and the site egress policy.
+  - Rater attribution is deferred (D5): ratings are stored anonymously.
 
 - `check_app_ownership.py` accepts only the fixed first-party resource inventory
   in the selected namespace. Existing unmanaged Kustomize resources can be
@@ -556,6 +627,9 @@ values; the three Qdrant peers each get their own claims):
 | Ingest scratch `ingest-work` (`INGEST_WORK_SIZE`) | 100Gi | 1 | 100Gi |
 | Jaeger Badger (when enabled) | 10Gi | 1 | 10Gi |
 | **Provisioned PVC capacity** | | | **3110Gi = 3.04TiB** |
+
+The optional feedback claim (`FEEDBACK_STORAGE_SIZE`, default 10Gi, unmeasured,
+only with `FEEDBACK_ENABLED`) is not in this total.
 
 Qdrant alone is `3 * (500Gi + 500Gi) = 3000Gi = 2.93TiB`, not 500Gi. The
 read-only corpus PVC is caller-owned and not counted. This is provisioned
@@ -1006,7 +1080,7 @@ live in `.github/workflows/e2e.yml`.
   dir — digest verify, unpack, bootstrap, manifest/SHA assertions, dry-run
   pipeline with explicit shared-gateway reasoning and embedding-only
   (reasoning explicitly disabled) configurations, both pull-secret branches.
-  `kind-live-rehearsal` (main/dispatch) is an eleven-lane matrix described below;
+  `kind-live-rehearsal` (main/dispatch) is a twelve-lane matrix described below;
   its operator flow runs behind an [egress boundary](#kind-egress-boundary).
   The lab OpenShift rehearsal remains secret-gated, and PRs never touch the lab cluster.
   `airgap-rehearsal` downloads and bootstraps the published bundle; it does not
@@ -1048,7 +1122,43 @@ include actual runner CPU, RAM and disk capacity; cleanup runs even after failur
 | `kind-lifecycle-chart` | Three-worker Kind; first-party chart fresh/repeat/update/failure/rollback/redeploy sequence with PVC guards, then the next ordinary pipeline, all behind the egress boundary |
 | `kind-lifecycle` | Independent three-worker Kind; synthetic snapshot recovery, PVC identity, Qdrant/agent/Jaeger replacement, old trace persistence and repeat pipeline |
 | `kind-shared-gateway` | Same live pipeline/probe/contracts/smoke but through the shared `GATEWAY_BASE_URL` fallback and the single `api-key` Secret data-key (issue #551); explicit per-operation URLs stay unset so fallback is exercised |
+| `kind-rerank` | Same live pipeline behind the egress boundary with `RERANK_ENABLED=true` through the test gateway: the minted per-leg `rerank-api-key` reaches the pod through its Secret reference, the gateway refuses a wrong, absent or other-leg key on both rerank routes, one scoped search is one stand-in call, the score route being unavailable is served by the rerank route, a scoped search with rerank on differs from rerank off only by the stand-in's scores (gateway call count the causal check), and with every rerank route down non-identifier search fails closed with the fixed `retrieval failed` message while `/healthz` is 503 with the rerank leg unready, then recovers (issue #815) |
 | Manual release Kind lane | Both real models through the authenticated TLS gateway on the same signed bundle ([release gate](release-verification.md)); SCC, Service CA, OAuth, Routes, node pulls and egress are verified on the site |
+
+<a id="kind-rerank-lane"></a>
+#### Rerank rehearsal (`kind-rerank`, issue #815)
+
+Owners: `scripts/ci/test-gateway.yaml` (the `mock-rerank` model and the
+`/v1/score` pass-through, shaped like `scripts/run_local_gateway.sh`),
+`scripts/ci/mint_gateway_keys.py` (a real key scoped to `mock-rerank`),
+`scripts/mock_vllm.py` (the stand-in and its request counters) and
+`scripts/ci/rerank_rehearsal.sh`. Only this lane sets `RERANK_ENABLED=true`
+(per-leg keys, `RERANK_BASE_URL` the test gateway, `RERANK_MODEL=mock-rerank`);
+every other lane keeps rerank off and its expected results.
+
+The stand-in scores candidate *i* of *n* as *(i+1)/n*, so reranking exactly
+reverses the order the agent hands over.
+
+What the lane proves: the Deployment carries a distinct per-leg rerank key from
+its Secret reference; the real gateway accepts it on `/v1/score` and
+`/v1/rerank` and refuses a wrong, absent or other-leg key before the stand-in
+sees a request; with `score_first` one scoped search is one `/v1/score` call and
+a score route that is unavailable is served by `/v1/rerank` with the same
+scores; a scoped `/v1/search` with rerank on is the exact reversal of the same
+search with rerank off (same candidates, fusion scores unchanged, stand-in call
+count 1 versus 0); with every rerank route unavailable, non-identifier search
+returns the fixed `502 upstream_error "retrieval failed"`, identifier lookups
+still serve (they bypass rerank), and `/healthz` is `503` with `rerank: false`;
+the leg and the next search recover when the routes return. Both endpoint
+orders and their fallbacks are pinned in `tests/test_rerank.py`.
+
+What stays site-only: the real rerank endpoint, its key and TLS, its model and
+latency, and ranking quality (golden-set evaluation owns that; the stand-in
+carries no relevance signal). Fail-closed on exhaustion is the current contract
+([serving contract](agent.md#serving-contract)); the lane asserts it and does not
+change it. The lane's assertions run only in a `workflow_dispatch` or `main`
+Kind run; the same scripts' logic is covered hermetically by
+`tests/test_ci_gateway.py`.
 
 <a id="kind-egress-boundary"></a>
 #### Egress boundary in the Kind lanes (issue #809)
@@ -1332,6 +1442,18 @@ used by `validate.sh` and `map_values.py`), generated `networkPolicy.enabled` /
 It renders only into the application release (the ingest Job render does not
 depend on it). The default-on change is documented under the console Route
 bullet in the compatibility decisions above, which owns the rules.
+
+**Feedback service (issue #804):** `FEEDBACK_ENABLED` (default false),
+`FEEDBACK_SECRET`, `FEEDBACK_STORAGE_SIZE` (default 10Gi) and
+`FEEDBACK_RETENTION_DAYS` (default 180) follow the same path:
+`airgap.env.example`, `OPERATOR_ENV_KEYS` and the Task `TASK_*` bridge (pinned
+equal by `test_bridge_set_matches_operator_keys`), the one validation owner
+(`model_config.feedback_config`, used by `validate.sh` and `map_values.py`),
+generated `feedback.*` values (emitted only when enabled, with the protected
+`resources.feedback`), schema validation and the chart templates. Storage class
+reuses `STORAGE_CLASS`; the purge cadence and retry ladder are protected defaults
+in the service, not keys. Rules and lifecycle:
+[feedback service](#feedback-service).
 
 **Absent/blank semantics:** `common.sh` currently gives non-empty explicit env
 precedence and otherwise permits file/default resolution; required attestation

@@ -37,6 +37,11 @@ LOCK_LIMIT_BYTES = 1024 * 1024
 MAX_DISK_GROWTH_BYTES = 112 * 1024**3
 MIN_DISK_FREE_BYTES = 8 * 1024**3
 MODEL_LIMIT_BYTES = 80 * 1024**3
+RERANK_REFERENCES = {"COLAB_G4_RERANK_8B": "Qwen/Qwen3-Reranker-8B",
+                     "COLAB_G4_RERANK_4B": "Qwen/Qwen3-Reranker-4B"}
+RERANK_OVERRIDES = {"architectures": ["Qwen3ForSequenceClassification"],
+                    "classifier_from_token": ["no", "yes"], "is_original_qwen3_reranker": True}
+MODEL_DIRECTORIES = {"reasoning": "reasoning", "embed": "embedding", "rerank": "reranker"}
 MAX_CHILDREN = 12
 SAMPLE_INTERVAL_SECONDS = 5
 DIAGNOSTIC_INTERVAL_SECONDS = 30
@@ -89,6 +94,28 @@ def warmup_embedding(server: dict, *, http=request_json, timeout: float = 30) ->
     norm = math.sqrt(sum(value * value for value in vector))
     if not math.isclose(norm, 1, abs_tol=1e-3):
         raise RuntimeError("embedding warmup requires normalized vectors")
+
+
+def warmup_rerank(server: dict, *, http=request_json, timeout: float = 30) -> None:
+    """Score one relevant and one unrelated document through the application's
+    own `/v1/score` shape. vLLM 0.28.0 applies the score template only when it
+    was configured, so a pair the model cannot order means the original
+    Qwen3-Reranker overrides or template are not in effect. The score scale is
+    not asserted: only finiteness and order are established by the readiness."""
+    result = http(f"http://127.0.0.1:{server['port']}/v1/score", {
+        "model": server["model_id"], "text_1": "What is the capital of France?",
+        "text_2": ["Paris is the capital and largest city of France.",
+                   "Bananas are rich in potassium and grow in tropical climates."],
+    }, timeout=timeout)
+    items = result.get("data")
+    if not isinstance(items, list) or len(items) != 2 or not all(
+            isinstance(item, dict) and type(item.get("index")) is int for item in items):
+        raise RuntimeError("rerank warmup requires exactly two indexed scores")
+    scores = [item.get("score") for item in sorted(items, key=lambda item: item["index"])]
+    if not all(type(score) in (int, float) and math.isfinite(score) for score in scores):
+        raise RuntimeError("rerank warmup requires finite numeric scores")
+    if not scores[0] > scores[1]:
+        raise RuntimeError("rerank warmup requires the relevant document to outscore the unrelated one")
 
 
 def validate_inference_lock(path: Path, expected_digest: str | None) -> dict[str, str]:
@@ -425,6 +452,8 @@ if model == "Qwen/Qwen3-Embedding-8B":
     pooling = [module["path"] for module in modules if module["type"].endswith(".Pooling")]
     if not pooling or any(not (root / path / "config.json").is_file() for path in pooling):
         raise RuntimeError("pinned snapshot pooling files are missing")
+if model.startswith("Qwen/Qwen3-Reranker-") and not (root / "chat_template.jinja").is_file():
+    raise RuntimeError("pinned reranker snapshot lacks its score template")
 hashes = {}
 hashed_bytes = 0
 for path in sorted(root.rglob("*")):
@@ -986,7 +1015,7 @@ class RemoteRuntime:
         budget = MODEL_LIMIT_BYTES
         for server in self.profile["servers"]:
             self.tick()
-            local = self.root / "models" / ("reasoning" if server["role"] == "reasoning" else "embedding")
+            local = self.root / "models" / MODEL_DIRECTORIES[server["role"]]
             if str(local) != server["local_dir"]:
                 raise RuntimeError("model destination differs from the exact profile argv")
             observed = self.root / ("snapshot-" + server["role"] + ".json")
@@ -1148,6 +1177,9 @@ class RemoteRuntime:
             if server["role"] == "reasoning":
                 warmup_reasoning(server, http=self.http, timeout=timeout)
                 stage = "reasoning_warmed"
+            elif server["role"] == "rerank":
+                warmup_rerank(server, http=self.http, timeout=timeout)
+                stage = "reranker_warmed"
             else:
                 warmup_embedding(server, http=self.http, timeout=timeout)
                 stage = "embedding_warmed"
@@ -1155,6 +1187,24 @@ class RemoteRuntime:
             if self.clock() >= startup_deadline:
                 raise RuntimeError("model startup exceeded its readiness and warmup deadline")
             self.write_report(stage)
+
+    @staticmethod
+    def validate_reranker_argv(server: dict) -> None:
+        """The original Qwen3-Reranker serves correctly only with its pooling
+        runner, the classifier overrides and an explicit score template; vLLM
+        0.28.0 silently scores a bare concatenation without the template."""
+        argv = server["argv"]
+        def single(flag: str) -> str:
+            if argv.count(flag) != 1 or argv.index(flag) + 1 == len(argv):
+                raise RuntimeError("reranker argv weakened the reference score configuration")
+            return argv[argv.index(flag) + 1]
+        try:
+            overrides = json.loads(single("--hf-overrides"))
+        except ValueError:
+            raise RuntimeError("reranker argv weakened the reference score configuration") from None
+        if (single("--runner") != "pooling" or overrides != RERANK_OVERRIDES
+                or single("--chat-template") != server["local_dir"] + "/chat_template.jinja"):
+            raise RuntimeError("reranker argv weakened the reference score configuration")
 
     def validate_profile(self) -> None:
         duration = self.profile.get("deadline_seconds")
@@ -1166,28 +1216,41 @@ class RemoteRuntime:
             if self.profile.get("name") != "COLAB_CPU_TRANSPORT" or self.profile.get("servers"):
                 raise RuntimeError("CPU transport cannot contain model processes")
             return
-        if (self.profile.get("name"), self.profile.get("accelerator")) not in (
-                ("COLAB_G4_BF16", "G4"), ("COLAB_A100_80GB_BF16", "A100")):
+        name = self.profile.get("name")
+        if (name, self.profile.get("accelerator")) not in (
+                ("COLAB_G4_BF16", "G4"), ("COLAB_A100_80GB_BF16", "A100"),
+                *((rerank, "G4") for rerank in RERANK_REFERENCES)):
             raise RuntimeError("unknown named GPU reference")
         if self.profile.get("python_version") != "3.12" or self.profile.get("cuda_build") != "13.0":
             raise RuntimeError("unsupported inference Python/CUDA reference")
         servers = self.profile.get("servers", [])
-        if [server.get("role") for server in servers] != ["reasoning", "embed"]:
-            raise RuntimeError("reference requires reasoning followed by embedding")
-        for server, model, port, leaf in zip(servers,
-                ("Qwen/Qwen3.8-27B", "Qwen/Qwen3-Embedding-8B"), (8000, 8001), ("reasoning", "embedding")):
+        if name in RERANK_REFERENCES:
+            # #862 retrieval-only profiles: no reasoning server; the reranker
+            # takes the first model slot so the :8000/:8001 transport holds.
+            expected = (("embed", "Qwen/Qwen3-Embedding-8B", 8001, "embedding"),
+                        ("rerank", RERANK_REFERENCES[name], 8000, "reranker"))
+            if [server.get("role") for server in servers] != ["embed", "rerank"]:
+                raise RuntimeError("reference requires embedding followed by reranker")
+        else:
+            expected = (("reasoning", "Qwen/Qwen3.8-27B", 8000, "reasoning"),
+                        ("embed", "Qwen/Qwen3-Embedding-8B", 8001, "embedding"))
+            if [server.get("role") for server in servers] != ["reasoning", "embed"]:
+                raise RuntimeError("reference requires reasoning followed by embedding")
+        for server, (_role, model, port, leaf) in zip(servers, expected):
             if (server["model_id"] != model or server["port"] != port
                     or not re.fullmatch(r"[0-9a-f]{40}", server["revision"])
                     or server["local_dir"] != str(self.root / "models" / leaf)
                     or server["argv"][:3] != [str(self.root / "rag-vllm/bin/vllm"), "serve", server["local_dir"]]
                     or not all(isinstance(value, str) and "\x00" not in value for value in server["argv"])):
                 raise RuntimeError("model launch identity differs from the exact reference profile")
-            for flag, expected in (("--host", "127.0.0.1"), ("--port", str(port)),
-                                   ("--served-model-name", model), ("--dtype", "bfloat16"),
-                                   ("--tensor-parallel-size", "1")):
+            for flag, expected_value in (("--host", "127.0.0.1"), ("--port", str(port)),
+                                         ("--served-model-name", model), ("--dtype", "bfloat16"),
+                                         ("--tensor-parallel-size", "1")):
                 argv = server["argv"]
-                if argv.count(flag) != 1 or argv.index(flag) + 1 == len(argv) or argv[argv.index(flag) + 1] != expected:
+                if argv.count(flag) != 1 or argv.index(flag) + 1 == len(argv) or argv[argv.index(flag) + 1] != expected_value:
                     raise RuntimeError("model argv weakened the loopback/reference identity")
+            if server["role"] == "rerank":
+                self.validate_reranker_argv(server)
         validate_inference_lock(self.root / "inference.lock", self.profile.get("inference_lock_sha256"))
 
     def run(self) -> int:
