@@ -399,6 +399,7 @@ status (`/ui` failures render HTML banners instead, §1):
 |---|---|---|
 | `upstream_error` / `retrieval failed` | 502 | Any retrieval fault, identical on both endpoints |
 | `upstream_error` / `answer failed` | 502 | LLM call or response-parse fault |
+| `model_timeout` / `model response timed out` | 504 | The reasoning leg spent its `answer_timeout_s` wait (connect, write, read or pool) on `/v1/answer` or `/v1/chat`; on an already-open stream it is the terminal `error` event (no `final`, `generation_incomplete`) with this code and message instead of `upstream_error` / `stream failed` (issue #868). A model that *finished* with `length` is never this error: it is a `generation_incomplete` answer |
 | `internal` / `internal error` | 500 | Prompt-build failure and any unhandled exception |
 | `not_configured` / `reasoning model…` | 503 | `/v1/answer` or `/v1/chat` without `LLM_BASE_URL` + reasoning model (pre-retrieval) |
 | `qdrant_unready` / `qdrant…` | 503 | `/healthz` Qdrant exception |
@@ -453,7 +454,9 @@ terminal chunk with `finish_reason` carrying `citations`,
 `evidence_omitted` (chat chunks carry no
 `usage`), then `data: [DONE]`. A mid-stream failure emits one
 `data: {"error": {"code": "upstream_error", "message": "stream failed"}, "verification_state": "generation_incomplete"}`
-frame (the strict `error` object plus the additive sibling state, issue #365)
+frame (the strict `error` object plus the additive sibling state, issue #365;
+the code and message are `model_timeout` / `model response timed out` when the
+model wait expired, issue #868)
 **followed by** `data: [DONE]` — never a fake `finish_reason`; clients
 must treat an error frame as failure even though `[DONE]` still arrives. The
 strict stream-end rule above is the upstream reasoning wire and the
@@ -716,6 +719,26 @@ async pool on `FEEDBACK_TIMEOUT_S` (issue #780; closed after a bounded drain).
   and `agent/resources.py` imports no transport or application module.
 - No sync fallback on the event loop: healthz and retrieval use the pooled
   clients only; a missing pool is a startup bug.
+- **Answer-path budgets (issue #868).** Two budgets bound the model leg, and
+  nothing else does:
+  `answer_timeout_s` (default 300 s) is how long the agent waits on one model
+  I/O: connect, write, the next read and the pool. A buffered POST sends no
+  byte until the whole generation is done, so for it the wait is the whole
+  generation; on a stream, every reasoning or content frame renews it, so it
+  bounds a stall, not the total. `request_deadline_s` (default off, §6a) is the
+  only wall-clock bound across a streamed generation. Expiry of the first is
+  `504 model_timeout`; expiry of the second is `504 deadline_exceeded`. In
+  both cases the awaiting task is cancelled, which closes the upstream
+  connection, so the model server sees the disconnect and can abort (proved
+  against a real-socket upstream in `tests/test_stream_truncation.py`; a
+  gateway must still propagate it to the engine, which is a platform check).
+  Neither expiry is ever followed by a second model ask, and a model that
+  finished with an explicit non-`stop` reason (`length`, `content_filter`) with
+  no content is returned as that finish
+  (`generation_incomplete`), not re-asked: the empty-content recovery POST
+  would run the same generation again and then wait out `answer_timeout_s`
+  (issue #868). The default is shorter than a long xhigh generation; changing
+  defaults belongs to #843/#777.
 - The reasoning client never retries at the transport (sync and async,
   `retries=0`) — answers are non-idempotent; a retry would re-think. The
   permitted second asks are the per-operation streaming fallbacks documented
@@ -828,7 +851,7 @@ readers:
 | `chat_max_turns` / `chat_max_prior_turn_chars` | 10 / 1000 | chat history packing caps |
 | `prompt_order` | `retrieval` (`stable_cache` alt) | block ordering |
 | `llm_base_url` / `llm_model_reasoning` / `llm_api_key` | unset (answer stays disabled; key unset = keyless) | per-request assertion, LLM client, tokenizer |
-| `answer_timeout_s` | 300.0 | reasoning client; no transport retries, explicit fallback policy below |
+| `answer_timeout_s` | 300.0 | reasoning client wait per model I/O (not a total on a stream), expiry is `504 model_timeout`; no transport retries, explicit fallback policy below; budgets in §6 |
 | `llm_reasoning_effort_simple` / `_complex` / `llm_temperature` | xhigh / xhigh / 0.2 | answer path (#777) |
 | `llm_reasoning_efforts` | `low,medium,xhigh` | served template's effort domain (Qwen3.8): console choices; both efforts above must be members (#748) |
 | `llm_max_model_len` / `llm_reserved_output_tokens` / `llm_thinking_reserve_tokens_complex` / `llm_token_safety_margin` / `llm_max_chunk_tokens_narrative` / `llm_tokenize_timeout_s` | 32768 / 2560 / 8192 / 128 / 1200 / 5.0 | tokenizer-path budgeting (#298, #777). `llm_max_model_len` must not exceed the served `--max-model-len`. With a server-verified prompt count the reserved output plus the path's thinking reserve is sent as `max_tokens` (prompt + cap stays inside the window minus the margin), so a runaway xhigh generation ends as `finish_reason: length` → `generation_incomplete`; an estimator-only prompt sends no cap |
@@ -1286,8 +1309,8 @@ generation flags; this change does not establish effort-dependent token counts.
 | Operation | Current permitted recovery / failure boundary |
 |---|---|
 | Reasoning transport | Sync/async reasoning pools use `retries=0`; no connection-level automatic repeat |
-| Buffered `achat` / `_chat_sync` with `LLM_STREAM` | Empty content, caught stream/protocol failures, missing `[DONE]`, upstream error/malformed frame, or missing explicit finish lead to one non-streaming POST; accumulated content is discarded, even if a prefix was buffered. The POST must itself carry an explicit finish, have no top-level error, and have valid string content (issue #365) |
-| Client-visible `chat_stream` | No-content or pre-output stream failure (malformed first frame, pre-output error, missing finish/done before any emitted token) can make one non-streaming ask; malformed/rejected/empty/no-finish fallback fails. Missing `[DONE]`, an upstream error frame, a malformed frame, or `[DONE]` without an explicit finish after actually emitted content raises truncation; no replay after those tokens. The shared core applies the same gate to the terminal `done` item itself: a falsy/missing `done` finish, or a token-only stream with no `done`, raises truncation and never synthesizes `stop` (issue #365) |
+| Buffered `achat` / `_chat_sync` with `LLM_STREAM` | Empty content *with a `stop` finish*, caught stream/protocol failures, missing `[DONE]`, upstream error/malformed frame, or missing explicit finish lead to one non-streaming POST; accumulated content is discarded, even if a prefix was buffered. The POST must itself carry an explicit finish, have no top-level error, and have valid string content (issue #365). Never recovered (issue #868): a stream that ended with an explicit non-`stop` finish (`length`, `content_filter`) and no content is returned as that finish, and an `httpx` timeout (`answer_timeout_s` spent) propagates as `model_timeout` instead of starting a second ask |
+| Client-visible `chat_stream` | No-content (`stop` finish) or pre-output stream failure (malformed first frame, pre-output error, missing finish/done before any emitted token) can make one non-streaming ask; malformed/rejected/empty/no-finish fallback fails. Missing `[DONE]`, an upstream error frame, a malformed frame, or `[DONE]` without an explicit finish after actually emitted content raises truncation; no replay after those tokens. The shared core applies the same gate to the terminal `done` item itself: a falsy/missing `done` finish, or a token-only stream with no `done`, raises truncation and never synthesizes `stop` (issue #365). A validated stream with zero content deltas and an explicit non-`stop` finish ends with that `done` and no recovery POST (issue #868); timeouts propagate |
 | Tokenizer | Plan locally, verify whole messages per trim round. No per-chunk RPCs; gateway may lack `/tokenize`. An endpoint that is not served or gives no usable count (404/405/501, a 200 without a count, or any other non-transient non-200 such as 400/401/403) warns once and pins the estimator until restart. A transient failure (transport error, timeout, 408/429/5xx) warns and uses the estimator for `TOKENIZE_RETRY_AFTER_S` (60 s); the first count after that is the one probe, and success resumes remote counts (issue #835). `budget_verified` reads the counting thread's own last count, so a probe on another thread never confirms an estimated prompt |
 | Embed/context/health pools | Bounded Settings connect-only retries, no generic POST replay policy |
 | Rerank | Configured score/rerank endpoint order plus alternate endpoint fallback; exhaustion fails closed; a batch rejected on both legs with HTTP 4xx (not 5xx/transport/shape) is re-scored once with passages cut to `RERANK_RETRY_PASSAGE_MAX_CHARS` (2000), and a failing retry fails closed (issue #664); [retrieval](retrieval.md) owns dispatch |

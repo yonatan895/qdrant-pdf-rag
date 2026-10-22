@@ -1544,6 +1544,24 @@ def _completed_finish_reason(state: _SseStreamState) -> str:
     return state.finish_reason
 
 
+def is_model_timeout(exc: BaseException) -> bool:
+    """True when the reasoning leg ran out of its `answer_timeout_s` wait
+    (connect, write, read or pool). The one classification behind the stable
+    `model_timeout` client code and behind "never re-ask a timed-out call"
+    (issue #868)."""
+    return isinstance(exc, httpx2.TimeoutException)
+
+
+def _ended_without_content(state: _SseStreamState) -> bool:
+    """A validated stream that finished with an explicit non-`stop` reason
+    (`length`, `content_filter`, ...) and no content. The generation itself
+    ended that way; a second ask would run the same generation to the same
+    end, so it is returned as the result, never recovered (issue #868). A
+    `stop` finish with no content stays a server-side channel defect and
+    keeps its one recovery POST."""
+    return not state.content_parts and state.finish_reason not in (None, "stop")
+
+
 def _feed_sse_line(state: _SseStreamState, line: str, t0: float) -> str | None:
     """Fold one raw SSE line into the stream state; returns the content delta
     when the line carries one, else None. Blank lines, `:` comments, and
@@ -1737,11 +1755,15 @@ class HttpxLLMClient:
                     # partial prefix is discarded.
                     raise TruncatedStreamError(len(state.content_parts), reason)
                 content = "".join(state.content_parts)
-                if not content:
+                if not content and not _ended_without_content(state):
                     log.warning("streaming chat returned empty content; falling back to non-streaming POST")
                 else:
                     usage = _token_usage_from_dict(state.usage_data)
                     return ChatResult(content=content, finish_reason=_completed_finish_reason(state), usage=usage, ttft_ms=state.ttft_ms)
+            except httpx2.TimeoutException:
+                # The wait budget is spent; a recovery POST would start a
+                # second full think under a second budget (issue #868).
+                raise
             except (httpx2.HTTPError, json.JSONDecodeError, KeyError, ValueError, OSError, TruncatedStreamError) as exc:
                 log.warning("streaming chat failed (%s); falling back to non-streaming POST", error_type(exc))
 
@@ -1810,7 +1832,11 @@ class HttpxLLMClient:
         finish_reason = state.finish_reason
         usage_data = state.usage_data
         ttft_ms = state.ttft_ms
-        if yielded_tokens == 0:
+        if yielded_tokens == 0 and reason is None and _ended_without_content(state):
+            # An explicit non-stop finish with nothing to show (reasoning
+            # filled the output cap): final as it is, no second ask (#868).
+            pass
+        elif yielded_tokens == 0:
             # Empty-content recovery: a reasoning model whose whole output
             # lands in the reasoning channel yields zero content deltas.
             # A pre-output error/truncation/missing-finish also lands here:
@@ -1896,11 +1922,15 @@ class HttpxLLMClient:
                     # partial prefix is discarded.
                     raise TruncatedStreamError(len(state.content_parts), reason)
                 content = "".join(state.content_parts)
-                if not content:
+                if not content and not _ended_without_content(state):
                     log.warning("streaming chat returned empty content; falling back to non-streaming POST")
                 else:
                     usage = _token_usage_from_dict(state.usage_data)
                     return ChatResult(content=content, finish_reason=_completed_finish_reason(state), usage=usage, ttft_ms=state.ttft_ms)
+            except httpx2.TimeoutException:
+                # The wait budget is spent; a recovery POST would start a
+                # second full think under a second budget (issue #868).
+                raise
             except (httpx2.HTTPError, json.JSONDecodeError, KeyError, ValueError, OSError, TruncatedStreamError) as exc:
                 log.warning("streaming chat failed (%s); falling back to non-streaming POST", error_type(exc))
 

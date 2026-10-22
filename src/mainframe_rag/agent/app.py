@@ -48,6 +48,7 @@ from mainframe_rag.agent.answer import (
     build_chat_messages,
     build_messages,
     classify_query_complexity,
+    is_model_timeout,
     truncation_alert_detail,
 )
 from mainframe_rag.agent.answer_core import (
@@ -85,6 +86,10 @@ from mainframe_rag.agent.metrics import (
 from mainframe_rag.agent.resources import AgentResources
 from mainframe_rag.agent.serving import ServingGate, ServingGeneration
 from mainframe_rag.agent.sse import (
+    MODEL_TIMEOUT_CODE,
+    MODEL_TIMEOUT_MESSAGE,
+    SSE_ERROR_CODE,
+    SSE_ERROR_MESSAGE,
     empty_final_payload,
     error_payload,
     format_openai_chunk,
@@ -1794,17 +1799,22 @@ async def _execute_core_or_raise(
             422, "prompt_budget_exceeded", "prompt exceeds the model token budget"
         ) from exc
     except LLMChatError as exc:
+        timed_out = is_model_timeout(exc.original)
         _span_error(root_span, exc.original)
         with use_span(root_span, end_on_exit=False):
-            log.error(json_log(request_id, action, error=error_type(exc)))
+            (log.warning if timed_out else log.error)(
+                json_log(request_id, action, error=error_type(exc))
+            )
         _record_endpoint(
             owner.request,
             endpoint,
-            "upstream_error",
+            "model_timeout" if timed_out else "upstream_error",
             owner.started,
             query_class=kind,
             hits=hit_count,
         )
+        if timed_out:
+            raise AppError(504, MODEL_TIMEOUT_CODE, MODEL_TIMEOUT_MESSAGE) from exc
         raise AppError(502, "upstream_error", "answer failed") from exc
 
 
@@ -1870,6 +1880,7 @@ def _record_stream_failure(
     _span_error(owner.span, exc)
     budget = isinstance(exc, PromptBudgetExceeded)
     expired = isinstance(exc, RequestDeadlineExceeded)
+    timed_out = is_model_timeout(exc)
     if expired:
         owner.deadline_failed()
     if isinstance(exc, TruncatedStreamError):
@@ -1888,15 +1899,26 @@ def _record_stream_failure(
         if budget
         else "deadline_exceeded"
         if expired
+        else "model_timeout"
+        if timed_out
         else "upstream_error",
         owner.started,
         query_class=kind,
         hits=hit_count,
         verification_state="generation_incomplete",
     )
-    (log.warning if budget or expired else log.error)(
+    (log.warning if budget or expired or timed_out else log.error)(
         json_log(request_id, action, error=error_type(exc))
     )
+
+
+def stream_error_fields(exc: BaseException) -> tuple[str, str]:
+    """Fixed (code, message) of a stream's terminal error frame: a model wait
+    that expired is `model_timeout` (issue #868); every other fault keeps the
+    generic stream failure. Never derived from exception text."""
+    if is_model_timeout(exc):
+        return MODEL_TIMEOUT_CODE, MODEL_TIMEOUT_MESSAGE
+    return SSE_ERROR_CODE, SSE_ERROR_MESSAGE
 
 
 async def _stream_answer_core(
@@ -1910,7 +1932,7 @@ async def _stream_answer_core(
     hit_count: int,
     token_frame: Callable[[str], str],
     final_frames: Callable[[AnswerCoreOutput], Iterator[str]],
-    error_frames: Callable[[], Iterable[str]],
+    error_frames: Callable[[str, str], Iterable[str]],
 ) -> AsyncIterator[str]:
     """The one SSE generator behind /v1/answer and /v1/chat. The route
     supplies only the wire mapping (token frame, the final frames with their
@@ -1935,7 +1957,7 @@ async def _stream_answer_core(
                     yield frame
     except Exception as exc:  # noqa: BLE001 — streaming SSE generator traps upstream error
         _record_stream_failure(owner, endpoint, action, kind, hit_count, exc)
-        for frame in error_frames():
+        for frame in error_frames(*stream_error_fields(exc)):
             yield frame
     finally:
         await bounded.aclose()
@@ -2133,7 +2155,9 @@ async def _answer_response(req, response, is_stream, owner):
             final_frames=lambda output: _answer_final_frames(
                 owner, kind, timings, llm_model, output
             ),
-            error_frames=lambda: (format_sse_event("error", error_payload()),),
+            error_frames=lambda code, message: (
+                format_sse_event("error", error_payload(code, message)),
+            ),
         ),
         query_class=kind,
         hits=len(hits),
@@ -2327,7 +2351,9 @@ async def _chat_response(req, response, owner):
             final_frames=lambda output: _chat_final_frames(
                 owner, chat_id, kind, timings, llm_model, output
             ),
-            error_frames=lambda: (format_openai_error(), format_openai_done()),
+            error_frames=lambda code, message: (
+                format_openai_error(code, message), format_openai_done()
+            ),
         ),
         query_class=kind,
         hits=len(hits),
