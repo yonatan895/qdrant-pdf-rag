@@ -484,6 +484,12 @@ def release_findings(inventory: dict, unresolved: list[str]) -> tuple[str, list[
     """(state, release blockers) for the recorded owner approval of this inventory."""
     approval = inventory.get("release_approval") or {}
     blockers = list(unresolved)
+    # A recorded election can await legal confirmation after its status flips
+    # (#376 pymupdf); the status alone must not release it.
+    for group in ("python", "components"):
+        for entry in inventory.get(group) or []:
+            if (entry.get("decision") or {}).get("legal_confirmation") == "pending":
+                blockers.append(f"{entry.get('name', '?')}: legal confirmation of the recorded decision is pending")
     if not approval.get("approval_ref"):
         state = "absent"
         blockers.append("release approval: no owner approval is recorded for this inventory")

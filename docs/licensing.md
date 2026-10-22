@@ -126,8 +126,9 @@ agreement already cover this use.
 
 **Maintainer's decision (2026-10-23): A, scoped to ingest.** The election is
 recorded (`elected: AGPL-3.0-only`). **Legal confirmation is pending** and recorded
-as such: `pymupdf` stays `pending-owner-decision` and `check --release` fails until
-the qualified legal owner confirms that handing the images to the enterprise plus a
+as such: `pymupdf` stays `pending-owner-decision`, and `check --release` also refuses
+any entry whose `decision.legal_confirmation` is `pending`, even after its status is
+flipped, until the qualified legal owner confirms that handing the images to the enterprise plus a
 source offer is acceptable (otherwise option B). Not a legal approval.
 
 ## What a release must satisfy

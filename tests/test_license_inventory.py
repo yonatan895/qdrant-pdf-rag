@@ -195,6 +195,23 @@ def resolve_everything(inventory):
             if entry["status"] == "pending-owner-decision":
                 entry["status"] = "approved"
                 entry["approval_ref"] = "protected-record-ref"
+            if (entry.get("decision") or {}).get("legal_confirmation") == "pending":
+                entry["decision"]["legal_confirmation"] = "confirmed"
+
+
+def test_release_refuses_a_pending_legal_confirmation_even_when_approved_and_current():
+    """#376: pymupdf's election is approved only pending legal confirmation. Flipping its
+    status and recording a current release approval must still not release it."""
+    inventory = real_inventory()
+    resolve_everything(inventory)
+    pymupdf = next(e for e in inventory["python"] if e["name"] == "pymupdf")
+    pymupdf["decision"]["legal_confirmation"] = "pending"
+    inventory["release_approval"] = {"approval_ref": "protected-record-ref", "approved_digest": li.scope_digest(inventory)}
+    problems, unresolved, state = problems_for(inventory, release=True)
+    assert state == "current" and unresolved == []
+    assert problems == ["pymupdf: legal confirmation of the recorded decision is pending"]
+    pymupdf["decision"]["legal_confirmation"] = "confirmed"
+    assert problems_for(inventory, release=True) == ([], [], "current")
 
 
 def test_release_approval_is_bound_to_the_exact_inventory_and_goes_stale():
