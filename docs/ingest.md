@@ -85,8 +85,10 @@ PyMuPDF is the only parser. `parse_pdf` returns a frozen, slots `ParsedDoc`.
   `None`, empty vendor becomes `"unknown"`; title is sanitized; the TOC comes from `get_toc(simple=True)`;
   the document is closed in a `finally`.
 - `sanitize_page_text` drops CSI sequences, C0 controls, bidi marks, and
-  zero-width chars **in that order**, preserving `\t` and `\n`; all other
-  printable bytes (including JCL padding) are byte-identical. Sanitizing
+  zero-width chars **in that order**, preserving `\t` and `\n`, then spells
+  the typographic ligatures U+FB00–FB06 out as letters (`ﬁ` → `fi`, #870) so
+  typed queries match; all other printable bytes (including JCL padding,
+  full-width forms and private-use glyphs) are byte-identical. Sanitizing
   happens **before** chrome stripping — fractured control bytes would
   otherwise break line matching.
 - `sha256_file` reads in 1 MiB chunks. The parent hashes each PDF once for

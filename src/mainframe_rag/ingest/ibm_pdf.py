@@ -37,15 +37,23 @@ _CSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _BIDI_RE = re.compile(r"[\u202a-\u202e\u2066-\u2069]")
 _ZERO_WIDTH_RE = re.compile(r"[\u200b-\u200d\ufeff]")
+# Typographic ligatures some fonts emit inside words ("con\ufb01guration"):
+# spelled out so a typed query matches (#870). Only U+FB00-FB06; blanket NFKC
+# would also rewrite full-width, superscript and other forms the corpus uses.
+_LIGATURES = str.maketrans({
+    "\ufb00": "ff", "\ufb01": "fi", "\ufb02": "fl", "\ufb03": "ffi",
+    "\ufb04": "ffl", "\ufb05": "st", "\ufb06": "st",
+})
 
 
 def sanitize_page_text(text: str) -> str:
     """Drop control, bidi-override, and zero-width characters from text
-    extracted from a PDF page. Printable content is untouched."""
+    extracted from a PDF page, and spell typographic ligatures out (#870).
+    Other printable content is untouched."""
     text = _CSI_RE.sub("", text)
     text = _CONTROL_RE.sub("", text)
     text = _BIDI_RE.sub("", text)
-    return _ZERO_WIDTH_RE.sub("", text)
+    return _ZERO_WIDTH_RE.sub("", text).translate(_LIGATURES)
 
 
 @dataclass(frozen=True, slots=True)
