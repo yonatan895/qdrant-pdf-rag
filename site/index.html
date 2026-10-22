@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mainframe RAG</title>
+<meta name="description" content="Citation-first answers over mainframe manuals on an air-gapped OpenShift cluster.">
+<meta name="color-scheme" content="light dark">
+<link rel="stylesheet" href="css/site.css">
+<script src="js/site.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="site"><div class="wrap">
+<a class="brand" href="index.html">Mainframe RAG</a>
+<nav aria-label="Primary"><ul><li><a href="index.html" aria-current="page">Home</a></li><li><a href="architecture.html">Architecture</a></li><li><a href="evaluation.html">Evaluation</a></li><li><a href="engineering.html">Engineering</a></li><li><a href="reference/">Reference</a></li></ul></nav>
+</div></header>
+<main id="main"><div class="wrap">
+
+<h1>Cited answers over mainframe manuals, inside an air-gapped cluster</h1>
+<p class="lede">Mainframe RAG is a citation-first question-answering service for a large private corpus of mainframe manuals. It runs on air-gapped OpenShift with no runtime downloads and no cloud inference, and every answer carries exact citations: document number, title, heading path and printed page label.</p>
+
+<ul class="stats" aria-label="Headline measurements">
+<li class="stat" data-result="dev-recall-at-5"><span class="num">&hellip;</span><span class="lbl">Dev retrieval recall@5</span><span class="meta"><a href="data/results.json">data/results.json</a></span></li>
+<li class="stat" data-result="dev-mrr"><span class="num">&hellip;</span><span class="lbl">Dev retrieval MRR</span><span class="meta"><a href="data/results.json">data/results.json</a></span></li>
+<li class="stat" data-result="ann-overlap-shipped"><span class="num">&hellip;</span><span class="lbl">Dense ANN overlap@8 with exact search</span><span class="meta"><a href="data/results.json">data/results.json</a></span></li>
+<li class="stat" data-result="corpus-points"><span class="num">&hellip;</span><span class="lbl">Indexed points in the corpus</span><span class="meta"><a href="data/results.json">data/results.json</a></span></li>
+</ul>
+<p class="nojs">Numbers on this page are rendered from JSON; if they do not appear, read them directly in <a href="data/results.json">data/results.json</a>.</p>
+<p class="callout"><strong>Read these as development-set numbers.</strong> They come from the dev golden set, which informed tuning decisions, on one embedding profile and one date. They are not an independent quality estimate. <a href="evaluation.html">Method, exposure and the full dated table</a>.</p>
+
+<figure id="demo" hidden>
+<video controls preload="metadata" poster="media/poster.svg" width="1280" height="720">
+<source src="media/demo.webm" type="video/webm">
+<source src="media/demo.mp4" type="video/mp4">
+</video>
+<figcaption>Scripted demo on a synthetic corpus.</figcaption>
+</figure>
+
+<h2>What it does</h2>
+<div class="cards four">
+<div class="card"><h3>Hybrid retrieval</h3><p>Dense embeddings and BM25 sparse vectors in Qdrant, fused with weighted reciprocal rank fusion. Search itself never calls a language model.</p></div>
+<div class="card"><h3>Evidence-first answers</h3><p>A reasoning model drafts the answer from supplied evidence. The service labels the outcome and declines with an explicit state when the evidence is insufficient.</p></div>
+<div class="card"><h3>Air-gap native</h3><p>Pinned images, wheels and BM25 weights, delivered as a signed bundle. Models are consumed over HTTP through the platform team&rsquo;s gateway.</p></div>
+<div class="card"><h3>Measured, not asserted</h3><p>A dev golden set, a frozen holdout, pre-registered adoption rules and paired statistics decide what ships.</p></div>
+</div>
+
+<h2>Where to go next</h2>
+<ul>
+<li><a href="architecture.html">Architecture</a>: the system diagram and the design decisions behind it.</li>
+<li><a href="evaluation.html">Evaluation</a>: how quality is measured and what has been measured.</li>
+<li><a href="engineering.html">Engineering</a>: testing, supply chain and air-gap delivery.</li>
+<li><a href="reference/">API reference</a>: generated from the source (published separately).</li>
+</ul>
+
+</div></main>
+<footer class="site"><div class="wrap">
+<p><a href="https://github.com/yonatan895/qdrant-pdf-rag">Source repository</a> &middot; <a href="https://github.com/yonatan895/qdrant-pdf-rag/blob/main/docs/licensing.md">Licensing</a> &middot; <a href="data/results.json">Results data (JSON)</a></p>
+<p>Repository code is licensed under Apache-2.0 (see <code>LICENSE</code>), although GitHub lists the repository license as &ldquo;Other&rdquo;. The third-party licensing review (<a href="https://github.com/yonatan895/qdrant-pdf-rag/issues/376">#376</a>) is still open and no owner disposition is recorded; see <a href="https://github.com/yonatan895/qdrant-pdf-rag/blob/main/docs/licensing.md">docs/licensing.md</a> for what is and is not established.</p>
+<p>No vendor manual text, documents or real-corpus answers appear on this site. Product names appear nominatively. No cookies, no analytics, no third-party scripts.</p>
+</div></footer>
+</body>
+</html>

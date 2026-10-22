@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Engineering - Mainframe RAG</title>
+<meta name="description" content="Testing, supply chain and air-gap delivery.">
+<meta name="color-scheme" content="light dark">
+<link rel="stylesheet" href="css/site.css">
+<script src="js/site.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="site"><div class="wrap">
+<a class="brand" href="index.html">Mainframe RAG</a>
+<nav aria-label="Primary"><ul><li><a href="index.html">Home</a></li><li><a href="architecture.html">Architecture</a></li><li><a href="evaluation.html">Evaluation</a></li><li><a href="engineering.html" aria-current="page">Engineering</a></li><li><a href="reference/">Reference</a></li></ul></nav>
+</div></header>
+<main id="main"><div class="wrap">
+
+<h1>Engineering</h1>
+<p class="lede">How the code is tested, how its supply chain is pinned, and what delivering into an air gap taught the design.</p>
+
+<h2>Testing approach</h2>
+<div class="cards">
+<div class="card"><h3>Hermetic by default</h3><p>Unit tests run without a cluster, a GPU or a network. Air-gap shell tooling is exercised with real Helm rendering and stubbed cluster commands. See <a href="https://github.com/yonatan895/qdrant-pdf-rag/blob/main/docs/testing.md">docs/testing.md</a>.</p></div>
+<div class="card"><h3>Fakes behind the real gateway</h3><p>Local simulation puts local model servers behind the real, digest-pinned gateway, so the production wire contract (single origin, model-id routing, per-leg keys) is what gets tested. CI rehearses deployment with a documented mock model server.</p></div>
+<div class="card"><h3>Property tests</h3><p>Hypothesis property tests sit in the parser&rsquo;s own suite, with a bounded dev profile.</p></div>
+<div class="card"><h3>Executed browser contracts</h3><p>The shipped console scripts and templates run in a real headless Chrome against the real routes with a scripted model. Chrome for Testing and its driver are pinned by version and archive digest, and any skipped test fails the job.</p></div>
+</div>
+<p>Principles recorded in the testing guide: tests lock the claimed path, shared test doubles share builders and pin behavior, and a skipped required check is never counted as a pass.</p>
+
+<h2>Supply chain</h2>
+<ul>
+<li>Container images are pinned by digest, Python dependencies by locked, pinned wheels, and the BM25 weights are baked into the image, so nothing is downloaded at runtime.</li>
+<li>Release bundles carry a checksum manifest with an offline signature. Load re-verifies the signature, then the checksums, then the image digests.</li>
+<li>A license inventory with bundled notices is generated from the pinned artifacts. It records what can be established and explicitly is not a legal approval (<a href="https://github.com/yonatan895/qdrant-pdf-rag/issues/376">#376</a>, <a href="https://github.com/yonatan895/qdrant-pdf-rag/blob/main/docs/licensing.md">docs/licensing.md</a>).</li>
+<li>CI actions are pinned by commit SHA, including the one that deploys this site.</li>
+</ul>
+<p>Sources: <a href="https://github.com/yonatan895/qdrant-pdf-rag/blob/main/docs/deploy.md">deployment contract</a>, <a href="https://github.com/yonatan895/qdrant-pdf-rag/blob/main/docs/licensing.md">licensing</a>.</p>
+
+<h2>Air-gap delivery</h2>
+<p>Delivery is a five-stage pipeline: pack on a connected host, load into the target environment, deploy, ingest, smoke test, with a pre-flight validation step before any cluster change. The same scripts are rehearsed on a local single-node cluster and in CI without a cluster, so the delivery path is exercised long before it meets a real site.</p>
+<ul>
+<li><strong>Rehearse what you can, name what you cannot.</strong> A local cluster does not implement OpenShift security constraints, so those are first verified on site and documented as such.</li>
+<li><strong>Prove each model leg before ingesting.</strong> A gateway probe checks every leg from inside the cluster and recommends the rerank ordering.</li>
+<li><strong>Secrets by reference.</strong> Per-leg keys live in one operator-created Secret referenced from the manifests, never in the environment file.</li>
+<li><strong>Fail closed.</strong> Storage classes that cannot satisfy the Qdrant contract are refused, and unpinned optional components refuse to render.</li>
+</ul>
+<p>Sources: <a href="https://github.com/yonatan895/qdrant-pdf-rag/blob/main/docs/architecture.md">architecture guide, section 3</a>, <a href="https://github.com/yonatan895/qdrant-pdf-rag/blob/main/docs/install_and_ops.md">install and operations guide</a>.</p>
+
+</div></main>
+<footer class="site"><div class="wrap">
+<p><a href="https://github.com/yonatan895/qdrant-pdf-rag">Source repository</a> &middot; <a href="https://github.com/yonatan895/qdrant-pdf-rag/blob/main/docs/licensing.md">Licensing</a> &middot; <a href="data/results.json">Results data (JSON)</a></p>
+<p>Repository code is licensed under Apache-2.0 (see <code>LICENSE</code>), although GitHub lists the repository license as &ldquo;Other&rdquo;. The third-party licensing review (<a href="https://github.com/yonatan895/qdrant-pdf-rag/issues/376">#376</a>) is still open and no owner disposition is recorded; see <a href="https://github.com/yonatan895/qdrant-pdf-rag/blob/main/docs/licensing.md">docs/licensing.md</a> for what is and is not established.</p>
+<p>No vendor manual text, documents or real-corpus answers appear on this site. Product names appear nominatively. No cookies, no analytics, no third-party scripts.</p>
+</div></footer>
+</body>
+</html>
