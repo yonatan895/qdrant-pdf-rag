@@ -32,6 +32,7 @@ def problems_for(inventory, root=REPO, release=False, found=None):
     ("GPL-3.0-or-later", "strong-copyleft"),
     ("GPL-2.0-only WITH Classpath-exception-2.0", "strong-copyleft"),
     ("AGPL-3.0-only", "network-copyleft"),
+    ("OFL-1.1", "permissive"),
     ("(MIT OR Apache-2.0) AND MPL-2.0", "weak-copyleft"),
     ("AGPL-3.0-only OR LicenseRef-Artifex-Commercial", "election-required"),
     ("MIT AND LicenseRef-Vendor-EULA", "proprietary"),
@@ -67,9 +68,54 @@ def test_every_locked_runtime_wheel_has_a_record_with_its_exact_identity():
             entry["version"], entry["wheel"], entry["sha256"])
 
 
+def test_pymupdf_election_is_recorded_but_legal_confirmation_keeps_it_unresolved():
+    inventory = real_inventory()
+    entry = next(e for e in inventory["python"] if e["name"] == "pymupdf")
+    assert entry["decision"]["owner"] == "yonatan895" and entry["decision"]["date"] == "2026-10-23"
+    assert entry["decision"]["legal_confirmation"] == "pending"
+    assert entry["status"] == "pending-owner-decision"
+    _, unresolved, _ = problems_for(inventory)
+    assert [u for u in unresolved if "pymupdf" in u] and len(unresolved) == 1
+    entry["decision"] = {"owner": "yonatan895"}
+    problems, _, _ = problems_for(inventory)
+    assert any("decision record needs owner, date and disposition" in p for p in problems)
+
+
+def test_recorded_decisions_match_the_maintainer_dispositions():
+    inventory = real_inventory()
+    by_name = {e["name"]: e for e in inventory["python"]}
+    by_id = {e["id"]: e for e in inventory["components"]}
+    for name in ("flatbuffers", "loguru", "onnxruntime", "tokenizers"):
+        entry = by_name[name]
+        assert entry["status"] == "approved" and entry["approval_ref"]
+        bound = entry["bind"]["files"][0]
+        assert bound["notice"] and bound["source_url"].startswith("https://raw.githubusercontent.com/")
+    for cid in ("image:qdrant", "image:jaeger", "image:ubi9-python-314-minimal", "image:oauth-proxy",
+                "asset:ibm-plex", "model:bm25-sparse-weights"):
+        assert by_id[cid]["status"] == "approved" and by_id[cid]["decision"]["owner"] == "yonatan895"
+    assert by_id["asset:ibm-plex"]["class"] == "permissive"
+    assert by_id["image:oauth-proxy"]["decision"]["escalation"] == "maintainer -> platform team"
+    assert by_id["model:bm25-sparse-weights"]["license_spdx"] == "Apache-2.0"
+    rpm_list = REPO / "licenses/ubi9-python-314-minimal.rpms.txt"
+    assert len([ln for ln in rpm_list.read_text().splitlines() if ln and not ln.startswith("#")]) == 116
+
+
+def test_altered_python_notice_text_is_flagged_and_notices_carry_the_four_texts(tmp_path):
+    inventory = notice_inventory(tmp_path)
+    text = li.render_notices(REPO, inventory, tmp_path)
+    for name in ("flatbuffers", "loguru", "onnxruntime", "tokenizers"):
+        assert f"### python:{name}: licenses/texts/{name}.LICENSE" in text
+    assert "Permission is hereby granted, free of charge" in text
+    inventory["python"][[e["name"] for e in inventory["python"]].index("loguru")]["bind"]["files"][0]["sha256"] = "0" * 64
+    problems, _, _ = problems_for(inventory)
+    assert any("python:loguru" in p and "differs from the recorded hash" in p for p in problems)
+    with pytest.raises(li.InventoryError):
+        li.render_notices(REPO, inventory, tmp_path)
+
+
 def test_pymupdf_cannot_be_recorded_as_a_declared_permissive_dependency():
     entry = next(e for e in real_inventory()["python"] if e["name"] == "pymupdf")
-    assert entry["class"] == "election-required"
+    assert entry["elected"] == "AGPL-3.0-only" and entry["class"] == "network-copyleft"
     assert entry["status"] in {"pending-owner-decision", "approved"}
     assert "AGPL" in entry["license_spdx"]
     inventory = real_inventory()
