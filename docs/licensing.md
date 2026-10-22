@@ -8,8 +8,9 @@ may be distributed or used. Decisions marked **owner decision** belong to the
 maintainer and the organization's qualified legal/open-source owner.
 
 Status: partially implemented. The record, the check and the bundled notices
-exist; no owner disposition is recorded yet, so `release_approval` is absent and
-the unresolved list below is open.
+exist. The maintainer recorded dispositions on 2026-10-23 (issue #376 comment);
+only `pymupdf` stays unresolved (legal confirmation pending) and `release_approval`
+is absent, so `check --release` still fails.
 Source of authority: #376 and its triage comments (19 and 24 September, 1 October
 2026): close on a documented owner disposition, never on CI alone.
 Decision owners: `licenses/inventory.json` (the record),
@@ -52,8 +53,8 @@ License classes (conservative, from `license_inventory.py`): `permissive`,
 `election-required` (dual license without a recorded election), `proprietary`
 (`LicenseRef-*`), `unknown`. AND takes the most restrictive operand; an OR whose
 alternatives differ needs a recorded `elected` value. Runtime wheel result: 57
-permissive, 2 weak-copyleft (`certifi`, `tqdm`: MPL-2.0), 1 election-required
-(`pymupdf`). 14 wheels are binary; their declared license may not describe native
+permissive, 2 weak-copyleft (`certifi`, `tqdm`: MPL-2.0), 1 network-copyleft
+(`pymupdf`, AGPL elected; legal confirmation pending). 14 wheels are binary; their declared license may not describe native
 libraries vendored inside them (numpy lists 17 license files; most others one).
 The dev/build profiles are not shipped and are not inventoried.
 
@@ -68,25 +69,32 @@ used by the build), Jinja2/Pygments-family BSD, `certifi` MPL-2.0, `requests`
 Apache-2.0, `typing_extensions` PSF-2.0. The published HTML embeds Sphinx and
 Furo static assets (BSD-2-Clause, MIT) and credits both in its footer.
 
-## Unresolved items (owner decisions open)
+## Owner decisions
 
-| Component | Why unresolved |
+Recorded by the maintainer (owner of record: yonatan895) on 2026-10-23, issue #376.
+Each entry in `licenses/inventory.json` carries `status`, an opaque `approval_ref`
+and a `decision` object (`owner`, `date`, `disposition`, plus item-specific fields);
+`decision` does not move the scope digest. The maintainer is not the qualified legal
+owner: these are maintainer dispositions, not legal approvals.
+
+| Component | Recorded state |
 |---|---|
-| `pymupdf` 1.28.2 | Dual AGPL/commercial; see the decision record. |
-| `flatbuffers`, `loguru`, `onnxruntime`, `tokenizers` | The wheel ships no license text under dist-info, so the image does not carry the text this class of license expects to accompany copies. Supply upstream text on a connected host or record why it is not needed. |
-| UBI 9 base image | UBI EULA and the license of every RPM (including GPL/LGPL packages and any source-offer duty) are not enumerated; RPM inventory has not been extracted from the actual archive (external to this host: needs the shipped archive and `rpm` data, #371). |
-| Qdrant, Jaeger images | Upstream project license recorded; base-OS and bundled-module layers not enumerated. |
-| oauth-proxy image | Red Hat registry/subscription terms for transferring the image are an owner decision. |
-| BM25 weights (`Qdrant/bm25`, rev `22b8d2af71a7`) | No license file in the snapshot and the model-card license was never captured. Confirm on a connected host. |
+| `pymupdf` 1.28.2 | `elected: AGPL-3.0-only`, scoped to ingest. **Legal confirmation pending**: status stays `pending-owner-decision` (the one remaining unresolved item) until the qualified legal owner confirms. |
+| `flatbuffers`, `loguru`, `onnxruntime`, `tokenizers` | `approved`. Upstream license texts (locked version's tag, source URLs in the inventory) are in `licenses/texts/` and rendered into `THIRD-PARTY-NOTICES.txt`. |
+| Qdrant, Jaeger images | `approved` on the upstream Apache-2.0 license. Layer inventory is follow-up #371. |
+| UBI 9 base image | `approved` on the UBI EULA after RPM-list extraction: 116 packages (name, version, license tag) from the rpmdb of the pinned digest in `licenses/ubi9-python-314-minimal.rpms.txt` (hash-bound, rendered into the notices). License tags are declared RPM metadata; any source offer would be a separately approved packaging change. |
+| oauth-proxy image | `approved` to transfer as an **external dependency**: the Red Hat image is shipped unmodified, not built here (`distributed_by_repo` stays true because the bundle carries it). Escalation, if transfer becomes a problem: maintainer, then platform team. |
+| IBM Plex fonts | `approved`; `OFL-1.1` is a permissive class in the checker. |
+| BM25 weights (`Qdrant/bm25`, rev `22b8d2af71a7`) | `approved`: the Hugging Face model card at that revision declares `license: apache-2.0` (`https://huggingface.co/api/models/Qdrant/bm25/revision/22b8d2af71a76161e18dd432d2cee0eefa66e412`, checked 2026-10-23). Re-check if the revision changes. |
 | Corpus rights | Out of scope here by design; recorded as an excluded boundary. |
 
-`python3 scripts/license_inventory.py check` prints these as `UNRESOLVED` on every
+`python3 scripts/license_inventory.py check` prints open items as `UNRESOLVED` on every
 run so they stay visible; `check --release` fails while any remain.
 
 <a id="pymupdf"></a>
 ## PyMuPDF decision record
 
-Status: **open, owner decision.** The repository does not choose, purchase,
+Status: **election recorded, legal confirmation pending.** The repository does not choose, purchase,
 replace or relicense anything. This section lays out facts and options.
 
 Observed facts (source inspection and package metadata, 2 October 2026):
@@ -116,8 +124,11 @@ agreement already cover this use.
 | C. Replace the parser | A different PDF library or a separately authorized rewrite. | Large: ingest parsing is extraction-rule code (`extraction_rules_version` change, forced re-ingest, golden/holdout re-baselining); needs its own approved issue. |
 | D. Exclude or scope | Do not ship the ingest image/path to this enterprise, or ship only where the owner decides no distribution occurs. | Release scoping change; `status: excluded` with the reason. |
 
-**Maintainer's decision:** choose among A-D (or another), then record it. Until
-then `pymupdf` stays `pending-owner-decision` and `check --release` fails.
+**Maintainer's decision (2026-10-23): A, scoped to ingest.** The election is
+recorded (`elected: AGPL-3.0-only`). **Legal confirmation is pending** and recorded
+as such: `pymupdf` stays `pending-owner-decision` and `check --release` fails until
+the qualified legal owner confirms that handing the images to the enterprise plus a
+source offer is acceptable (otherwise option B). Not a legal approval.
 
 ## What a release must satisfy
 
@@ -129,8 +140,10 @@ then `pymupdf` stays `pending-owner-decision` and `check --release` fails.
 2. `check --release` passes: no `pending-owner-decision` entry and a
    `release_approval` whose `approved_digest` equals the current inventory scope
    digest. Any later dependency, license or asset change makes the approval stale.
-   `pack.sh` does not enforce `--release`: whether packing itself should block until
-   decisions are recorded is the maintainer's decision (one flag in `pack.sh`).
+   `pack.sh` deliberately does not run `--release` (maintainer decision 2026-10-23),
+   so a draft bundle can still be built. Running `check --release` on the packed
+   commit is an explicit handoff step, recorded in the sign-off list of
+   [release-record](release-record.md#sign-off-and-handoff).
 3. The bundle carries `THIRD-PARTY-NOTICES.txt` (signed member in `SHA256SUMS`,
    required by `bootstrap.sh`, copied to `dist/`): the license/class/status of every
    component and wheel, the open owner decisions, the approval state, and the full

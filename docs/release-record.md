@@ -85,6 +85,9 @@ explicitly unresolved and prevent claims of production compatibility.
 - Transfer decision: BLOCKED (change only after all required evidence passes).
 - Operator / UTC sign-off: NOT RECORDED.
 - Approved tarball SHA256: NOT RECORDED.
+- Licensing gate: `python3 scripts/license_inventory.py check --release` result
+  (exit code, unresolved count, `release_approval` state) NOT RECORDED; it must pass
+  on the packed commit before transfer ([licensing](licensing.md#what-a-release-must-satisfy)).
 - Open blockers and their owners: NOT RECORDED.
 - Transfer receipt and destination checksum: NOT RECORDED.
 - Air-gap bootstrap / pipeline / site OpenShift acceptance evidence: NOT RUN.

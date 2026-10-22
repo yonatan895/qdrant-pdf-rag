@@ -84,7 +84,12 @@ def copy_license_inputs(tmp_path: Path) -> None:
         for p in (REPO / "src/mainframe_rag/webui/static/vendor").iterdir()
         if p.is_file()
     )
-    for relative in ("licenses/inventory.json", "scripts/license_inventory.py", "pyproject.toml", "LICENSE",
+    notices = sorted(
+        p.relative_to(REPO).as_posix()
+        for p in (REPO / "licenses").rglob("*")
+        if p.is_file() and p.name != "inventory.json"
+    )
+    for relative in ("licenses/inventory.json", *notices, "scripts/license_inventory.py", "pyproject.toml", "LICENSE",
                      "LICENSE.qdrant-skills", "NOTICE.qdrant-skills",
                      "LICENSE.mattpocock-skills", "NOTICE.mattpocock-skills",
                      ".agents/mattpocock-skills.sha256",

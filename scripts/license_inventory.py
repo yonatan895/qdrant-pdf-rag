@@ -56,7 +56,7 @@ SPDX_BASES = ("declared-expression", "normalized-license-field", "normalized-cla
               "license-file-text", "upstream-project-license", "not-verified")
 
 PERMISSIVE = {"MIT", "MIT-CMU", "BSD-2-Clause", "BSD-3-Clause", "0BSD", "Apache-2.0", "ISC",
-              "PSF-2.0", "Zlib", "CC0-1.0", "Unlicense", "HPND", "BSL-1.0"}
+              "PSF-2.0", "Zlib", "CC0-1.0", "Unlicense", "HPND", "BSL-1.0", "OFL-1.1"}
 WEAK = {"MPL-2.0", "LGPL-2.1-only", "LGPL-2.1-or-later", "LGPL-3.0-only", "LGPL-3.0-or-later"}
 STRONG = {"GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later"}
 NETWORK = {"AGPL-3.0-only", "AGPL-3.0-or-later"}
@@ -300,7 +300,7 @@ def seed_spdx(declared: str, source: str) -> tuple[str, str]:
 
 # --- inventory checks -------------------------------------------------------
 
-VOLATILE = frozenset({"status", "approval_ref", "note"})
+VOLATILE = frozenset({"status", "approval_ref", "note", "decision"})
 
 
 def load_inventory(root: Path, path: Path | None = None) -> dict:
@@ -342,6 +342,10 @@ def check_policy(entry: dict, label: str, problems: list[str], unresolved: list[
         return
     if status == "approved" and not entry.get("approval_ref"):
         problems.append(f"{label}: approved status requires a protected approval_ref")
+    decision = entry.get("decision")
+    if decision is not None and not (isinstance(decision, dict) and decision.get("owner") and decision.get("date")
+                                     and decision.get("disposition")):
+        problems.append(f"{label}: decision record needs owner, date and disposition")
     if expected in RESTRICTED and status == "declared":
         problems.append(f"{label}: class {expected} cannot rest on declared metadata; record an owner decision state")
     if expected == "weak-copyleft" and not entry.get("obligation"):
@@ -377,6 +381,9 @@ def check_python(root: Path, inventory: dict, problems: list[str], unresolved: l
             if entry.get(key) != lock[key]:
                 problems.append(f"{label}: recorded {key} differs from the lock; re-review licenses")
         check_policy(entry, label, problems, unresolved)
+        for item in (entry.get("bind") or {}).get("files", []):
+            if not file_matches(root, item["path"], item["sha256"]):
+                problems.append(f"{label}: {item['path']} is missing or differs from the recorded hash")
         if not entry.get("license_files") and entry.get("status") == "declared":
             problems.append(f"{label}: wheel carries no license text; record an owner decision state for the missing notice")
         if found is not None:
@@ -505,6 +512,10 @@ def run_check(root: Path, inventory: dict, found, release: bool) -> tuple[list[s
 def render_notices(root: Path, inventory: dict, bundle_dir: Path | None) -> str:
     problems: list[str] = []
     check_components(root, inventory, problems, [])
+    for entry in inventory["python"]:
+        for item in (entry.get("bind") or {}).get("files", []):
+            if not file_matches(root, item["path"], item["sha256"]):
+                problems.append("bound python notice file differs")
     if problems:
         raise InventoryError("notice materials are missing or differ from the license record")
     state, _ = release_findings(inventory, [])
@@ -539,6 +550,10 @@ def render_notices(root: Path, inventory: dict, bundle_dir: Path | None) -> str:
         if entry.get("obligation"):
             lines.append(f"    obligation: {entry['obligation']}")
     lines += ["", "NOTICE TEXTS", "-" * 78]
+    for entry in inventory["python"]:
+        for item in (entry.get("bind") or {}).get("files", []):
+            if item.get("notice"):
+                lines += ["", f"### python:{entry['name']}: {item['path']}", (root / item["path"]).read_text(encoding="utf-8").rstrip()]
     for entry in inventory["components"]:
         bind = entry.get("bind") or {}
         for item in bind.get("files", []):
@@ -606,7 +621,7 @@ def generate(root: Path, inventory: dict | None, found) -> tuple[dict, list[str]
             "license_spdx": spdx, "spdx_basis": basis,
         }
         entry["class"] = expression_class(spdx, old.get("elected")) if spdx != "UNRECORDED" else "unknown"
-        for key in ("elected", "obligation", "note"):
+        for key in ("elected", "obligation", "note", "decision", "bind"):
             if old.get(key):
                 entry[key] = old[key]
         entry["status"] = old.get("status", "declared")
