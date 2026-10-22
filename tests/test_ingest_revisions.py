@@ -659,3 +659,50 @@ def test_vendor_is_resolved_below_the_corpus_root_on_both_ingest_paths(monkeypat
         revs[mount] = _planned_and_published_revs(monkeypatch, root, pdf, tmp_path / f"{mount}.jsonl")
     sha = revs["plain"].rsplit("|", 1)[1]
     assert revs["precisely"] == revs["plain"] == source_rev_key("IBM", "zOS", "2.5", sha)
+
+
+def test_retirement_check_skips_a_walked_file_refused_for_a_pipe_label(monkeypatch, tmp_path, plain_pdf):
+    """Issue #878: a published document whose file moved under a directory
+    containing `|` is refused at ingest, so it has no source revision for the
+    retirement-conflict check to compare. Retiring the old document must neither
+    crash nor be blocked by the refused file, the old inventory record stays
+    untouched, and the worker records the refusal."""
+    import shutil
+
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.ibm_pdf import sha256_file
+    from mainframe_rag.ingest.inventory import InventoryRecord, append_record, load_inventory
+
+    root = tmp_path / "corpus"
+    pdf = root / "IBM" / "zOS|x" / "2.5" / "guide.pdf"
+    pdf.parent.mkdir(parents=True)
+    shutil.copy(plain_pdf, pdf)
+    sha = sha256_file(pdf)
+    doc_id = run_ingest.parse_pdf(
+        pdf, vendor=None, product=None, version=None, corpus_root=root, sha256=sha
+    ).doc_id
+    progress = tmp_path / "inventory.jsonl"
+    old = InventoryRecord(
+        path=str(root / "IBM" / "zOS" / "2.5" / "guide.pdf"), sha256=sha, doc_id=doc_id,
+        status="upserted", source_rev=source_rev_key("IBM", "zOS", "2.5", sha),
+    )
+    append_record(progress, old)
+
+    reached = []
+    monkeypatch.setattr(
+        run_ingest, "resolve_publish_staging", lambda *a, **k: reached.append(1) or ("staging", False)
+    )
+    reader = SimpleNamespace(
+        get_aliases=lambda: SimpleNamespace(aliases=[]),
+        collection_exists=lambda name: False,
+    )
+    res = run_ingest._resolve_publication(
+        reader, root, progress, _settings(), vendor=None, product=None, version=None,
+        force_reingest=False, prewalked=[(str(pdf), sha)], retire_docs=(doc_id,),
+        rules_v=extraction_rules_version(),
+    )
+    assert reached == [1] and doc_id in res.retire_plan
+    assert load_inventory(progress)[old.path].source_rev == old.source_rev
+
+    record, *_ = run_ingest._parse_one((str(pdf), None, None, None, str(root), sha, False, None))
+    assert (record.status, record.error_type) == ("error", "LabelDelimiterRefused")
