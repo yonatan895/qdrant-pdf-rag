@@ -6,6 +6,7 @@ source tree; third-party runtime dependencies are mocked so the build needs
 nothing but Sphinx and cannot reach Qdrant, models or secrets.
 """
 
+import logging
 import sys
 from pathlib import Path
 
@@ -72,9 +73,23 @@ html_show_sourcelink = False
 # version), so these are filtered here rather than edited. Real failures stay
 # fatal under -W: import errors (autodoc.import_object), unresolved toctree
 # entries and broken references to documented objects.
-#   docutils   - prose-vs-RST markup findings (25 of 25 warnings at adoption)
-#   ref.python - ambiguous short names such as the ``type`` dataclass field
-suppress_warnings = ["docutils", "ref.python"]
+#   docutils - prose-vs-RST markup findings (23 of 25 warnings at adoption)
+# The ambiguous ``type`` cross-reference between the TypedDicts CoreToken.type
+# and CoreFinal.type is dropped by one exact-message filter below, so the
+# ``ref.python`` category stays fatal for every other broken reference.
+suppress_warnings = ["docutils"]
+
+
+# Missing Python cross-references only warn when nitpicky. Turn that on so a
+# broken reference to this package fails -W, and ignore targets that cannot be
+# resolved offline: everything outside mainframe_rag (no intersphinx, so the
+# stdlib and mocked third-party types have no inventory) and private
+# (underscore) names that are intentionally not documented.
+nitpicky = True
+nitpick_ignore_regex = [
+    (r"py:.*", r"(?!mainframe_rag\.).*"),
+    (r"py:.*", r".*\._.*"),
+]
 
 
 def _skip_mock_artifacts(app, what, name, obj, skip, options):
@@ -89,5 +104,25 @@ def _skip_mock_artifacts(app, what, name, obj, skip, options):
     return skip
 
 
+_KNOWN_AMBIGUOUS = (
+    "more than one target found for cross-reference 'type': "
+    "mainframe_rag.agent.answer_core.CoreToken.type, "
+    "mainframe_rag.agent.answer_core.CoreFinal.type"
+)
+
+
+class _DropKnownAmbiguity(logging.Filter):
+    def filter(self, record):
+        return _KNOWN_AMBIGUOUS not in record.getMessage()
+
+
+def _install_filter(app):
+    # Handlers (not the logger) carry Sphinx's -W counting; put ours first.
+    for handler in logging.getLogger("sphinx").handlers:
+        handler.addFilter(_DropKnownAmbiguity())
+        handler.filters.insert(0, handler.filters.pop())
+
+
 def setup(app):
     app.connect("autodoc-skip-member", _skip_mock_artifacts)
+    app.connect("builder-inited", _install_filter)
