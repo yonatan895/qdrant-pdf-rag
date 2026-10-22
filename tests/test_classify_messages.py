@@ -1,5 +1,7 @@
 """Classification and chrome-stripping tests (synthetic strings only)."""
 
+import pytest
+
 from mainframe_rag.ingest.chrome import chrome_lines, strip_page
 from mainframe_rag.ingest.classify import classify
 
@@ -57,6 +59,57 @@ def test_chrome_strip():
     stripped = strip_page(pages[0], chrome)
     assert "IEA500I Manual" not in stripped
     assert "body line 0" in stripped
+
+
+@pytest.mark.parametrize("page_count", [128, 384, 200])
+def test_chrome_lines_find_alternating_footers_at_any_page_count(page_count):
+    """Issue #864: book layouts put the running footer on alternate pages. A
+    fixed-step sample of 64 pages took only even pages whenever the step was
+    an even integer (128, 384 or 640 pages), so a footer on odd pages was
+    never counted and survived on half the manual (GA32-0983-01: 190 of 384
+    pages)."""
+    pages = [
+        f"Entry {i} heading\nbody line {i}\n" + ("Synthetic Guide: Data Areas" if i % 2 else f"Chapter {i // 40 + 1}. Part")
+        for i in range(page_count)
+    ]
+    chrome = chrome_lines(pages)
+    assert "synthetic guide: data areas" in chrome
+    assert strip_page(pages[1], chrome) == "Entry 1 heading\nbody line 1"
+
+
+def test_chrome_lines_skip_labels_that_also_repeat_in_page_bodies():
+    """Issue #864 (#604 guard): counting every page found real footers, but
+    also made structural labels chrome whenever they sat at a page edge on
+    35% of pages ("Explanation:", "Return code", "Offset"). A running footer
+    never appears in a page body; a label does (bpx1mc10: "explanation:" on
+    360 edge pages and 519 body pages), so it stays content."""
+    def page(i: int) -> str:
+        filler = [f"Detail line {i}.{j} of the entry text." for j in range(5)]
+        top = ["Explanation:"] if i % 2 else []  # a continued entry starts the page
+        return "\n".join([*top, f"Entry {i}", *filler, "Explanation:", *filler, "Synthetic Messages Guide"])
+
+    pages = [page(i) for i in range(40)]
+    chrome = chrome_lines(pages)
+    assert "synthetic messages guide" in chrome
+    assert "explanation:" not in chrome
+    assert strip_page(pages[1], chrome).startswith("Explanation:\nEntry 1")
+
+
+def test_strip_page_drops_copyright_notices_at_page_edges():
+    """Issue #864: a copyright notice prints on chapter-opening pages only
+    (18-35% of pages in small manuals), under the frequency threshold. At a
+    page edge, a line shaped like a notice (an optional copyright sign,
+    "copyright" and a year) is chrome; in the body, and without a year, it
+    stays."""
+    body = "\n".join(f"Generated body line {i}." for i in range(6))
+    for notice in ("© Copyright IBM Corp. 1990, 2017", "(C) Copyright Synthetic Corp 2026",
+                   " Copyright Example Corporation 1988, 2015", "Copyright Synthetic Corp. 2001"):
+        assert strip_page(f"{body}\n{notice}", set()) == body
+        assert strip_page(f"{notice}\n{body}", set()) == body
+    middle = "a.\nb.\nc.\nd.\n© Copyright IBM Corp. 1990, 2017\ne.\nf.\ng.\nh."
+    assert "© Copyright IBM Corp. 1990, 2017" in strip_page(middle, set())
+    for kept in ("Copyright notices are listed in Appendix B", "The COPYRIGHT keyword sets the owner"):
+        assert strip_page(f"{body}\n{kept}", set()) == f"{body}\n{kept}"
 
 
 def test_strip_page_keeps_roman_letter_words():

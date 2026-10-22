@@ -1,7 +1,8 @@
 """Running header/footer stripping by line frequency.
 
-A line that appears (normalized) on >= 35% of sampled pages, within the first
-or last EDGE_LINES text lines of those pages, is page chrome. Folios and
+A line that appears (normalized) on >= 35% of pages, within the first or last
+EDGE_LINES text lines of those pages, is page chrome. Every page is counted: a
+fixed-step sample aliased with alternate-page footers (issue #864). Folios and
 folio ranges are likewise only recognized at the page edges: a bare number in
 the page body is content (a completion code, a table value), never a folio.
 Short documents must not use a threshold of 1 (that would delete every line).
@@ -13,9 +14,13 @@ import re
 from collections import Counter
 
 FREQUENCY_THRESHOLD = 0.35
-SAMPLE_TARGET = 64
 MIN_PAGES_FOR_CHROME = 8
 MIN_HITS = 3
+# A running header/footer never prints in a page body; a structural label does
+# ("Explanation:", a table's "Offset" column head). A frequent edge line is
+# chrome only while its body pages stay at or under this share of its edge
+# pages (#864: footers measured 0-0.3%, labels 14% and up).
+BODY_SHARE_MAX = 0.05
 # Running headers/footers sit at the page edges. Counting only the first/last
 # EDGE_LINES text lines keeps structural labels that repeat in the body
 # ("Explanation:") and bare code lines ("806") from being read as chrome.
@@ -45,6 +50,11 @@ _DECIMAL_PAGE_RE = re.compile(r"[0-9]+(?:-[0-9]+)?[-.]?")
 # ordinary words out ("Yes • No", "TSO • ISPF").
 _ENTRY_TOKEN = r"(?:[0-9A-F][0-9A-Fx]{1,7}|[A-Z]{1,8}[0-9][0-9A-Zx]{0,10})"
 _ENTRY_RANGE_RE = re.compile(rf"{_ENTRY_TOKEN} \u2022 {_ENTRY_TOKEN}")
+# A copyright notice line: an optional sign ("\u00a9", "(c)" or the private-use
+# glyph some fonts map it to), "copyright", then a year. Chapter-opening pages
+# carry it, too rarely for the frequency rule (#864), so it goes at an edge by
+# shape, like an entry range; a body line stays.
+_COPYRIGHT_RE = re.compile(r"(?:\u00a9|\(c\)|\uf6d9)?\s*copyright\b.*\b(?:19|20)\d\d\b", re.IGNORECASE)
 
 
 def _normalize(line: str) -> str:
@@ -60,6 +70,10 @@ def _is_page_number(line: str) -> bool:
     )
 
 
+def _is_copyright_notice(line: str) -> bool:
+    return bool(_COPYRIGHT_RE.match(line.strip()))
+
+
 def _is_entry_range(line: str) -> bool:
     return bool(_ENTRY_RANGE_RE.fullmatch(_WHITESPACE_RE.sub(" ", line.strip())))
 
@@ -72,25 +86,27 @@ def _edges(lines: list[str]) -> tuple[set[int], set[int]]:
     return set(text[:EDGE_LINES]), set(text[-EDGE_LINES:])
 
 
-def _sample_indices(page_count: int) -> list[int]:
-    if page_count <= SAMPLE_TARGET:
-        return list(range(page_count))
-    step = page_count / SAMPLE_TARGET
-    return sorted({min(page_count - 1, int(i * step)) for i in range(SAMPLE_TARGET)})
-
-
 def chrome_lines(page_texts: list[str]) -> set[str]:
-    """Normalized page-edge lines that appear on >= 35% of sampled pages."""
-    pages = [page_texts[i] for i in _sample_indices(len(page_texts))]
+    """Normalized page-edge lines that appear on >= 35% of pages. All pages
+    count: book layouts put running headers/footers on alternate pages, and a
+    fixed-step sample of 64 took only even pages whenever its step was an even
+    integer (128, 384, 640 pages), so such a footer was never seen (#864)."""
+    pages = page_texts
     if len(pages) < MIN_PAGES_FOR_CHROME:
         return set()
     counts: Counter[str] = Counter()
+    body_counts: Counter[str] = Counter()
     for text in pages:
         raw = text.splitlines()
         top, bottom = _edges(raw)
-        counts.update({ln for i in top | bottom if (ln := _normalize(raw[i]))})
+        edge = top | bottom
+        counts.update({ln for i in edge if (ln := _normalize(raw[i]))})
+        body_counts.update({ln for i, line in enumerate(raw) if i not in edge and (ln := _normalize(line))})
     threshold = max(MIN_HITS, int(FREQUENCY_THRESHOLD * len(pages)))
-    return {line for line, n in counts.items() if n >= threshold}
+    return {
+        line for line, n in counts.items()
+        if n >= threshold and body_counts[line] <= BODY_SHARE_MAX * n
+    }
 
 
 def strip_page(text: str, chrome: set[str]) -> str:
@@ -113,7 +129,7 @@ def strip_page(text: str, chrome: set[str]) -> str:
         # An entry range is never body text, so unlike a bare number it goes
         # at either edge: message manuals put it in the header above a footer
         # folio, where the one-folio rule kept it.
-        if (i in top or i in bottom) and _is_entry_range(line):
+        if (i in top or i in bottom) and (_is_entry_range(line) or _is_copyright_notice(line)):
             continue
         kept.append(line)
     return "\n".join(kept).strip("\n")
