@@ -57,6 +57,17 @@ permissive, 2 weak-copyleft (`certifi`, `tqdm`: MPL-2.0), 1 election-required
 libraries vendored inside them (numpy lists 17 license files; most others one).
 The dev/build profiles are not shipped and are not inventoried.
 
+## Docs-only tooling (not in the inventory)
+
+The Sphinx API reference (#889) is built from `site-src/reference/requirements.docs.lock.txt`
+(28 wheels, `--require-hashes`) by the Pages workflow only. It is not in any
+image, wheelhouse, bundle or `locks/`, so `licenses/inventory.json` does not
+list it. Declared licenses of the tools: Sphinx BSD-2-Clause, Furo MIT,
+docutils (public domain/BSD; its metadata also lists GPL for optional parts, not
+used by the build), Jinja2/Pygments-family BSD, `certifi` MPL-2.0, `requests`
+Apache-2.0, `typing_extensions` PSF-2.0. The published HTML embeds Sphinx and
+Furo static assets (BSD-2-Clause, MIT) and credits both in its footer.
+
 ## Unresolved items (owner decisions open)
 
 | Component | Why unresolved |
