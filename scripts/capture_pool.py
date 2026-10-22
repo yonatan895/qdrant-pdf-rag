@@ -319,6 +319,7 @@ def capture_query(
     from mainframe_rag.ports import AsyncReaderAdapter
     from mainframe_rag.retrieve.filters import parse_query, query_kind
     from mainframe_rag.retrieve.query import (
+        _dense_search_params,
         _effective_query,
         _prefetch_leg_points,
         _prefetch_limit_for,
@@ -348,7 +349,8 @@ def capture_query(
         sparse_idx, sparse_val = embedder.sparse_query([eq])[0]
         leg_vecs.append((dense_vec, sparse_idx, sparse_val))
     prefetched = asyncio.run(_prefetch_leg_points(
-        AsyncReaderAdapter(client), collection, leg_vecs, flt, fallback_flt, prefetch_limit
+        AsyncReaderAdapter(client), collection, leg_vecs, flt, fallback_flt, prefetch_limit,
+        _dense_search_params(settings),
     ))
     legs: list[dict[str, Any]] = [
         {"effective_text": eq, "filter_fallback": retried, "dense": dense, "sparse": sparse}

@@ -244,6 +244,17 @@ class Settings(BaseSettings):
     # r@1 0.658->0.702, r@5 0.930->0.956, message_id r@1 0.786->0.857 (r@5
     # 1.0 held), section r@5 0.353->0.471, must_not 0. Moves with RRF_K.
     rrf_k: int = Field(default=60, ge=1, le=100)
+    # Dense-leg search-time params (issue #842), sent on every dense query;
+    # None omits the field (server default). Chosen from the 2026-10-22
+    # measurement against exact search on the current-rules corpus
+    # (docs/records/2026-10-22-search-params.md): ef 128 equals the server's
+    # effective default (ef_construct), so it only pins it; the server's
+    # default does NOT rescore on this collection, and rescore with
+    # oversampling 2.0 lifts dense overlap@8 0.984 -> 1.000 and @40
+    # 0.983 -> 0.9997 for ~+1 ms p50.
+    dense_hnsw_ef: int | None = Field(default=128, ge=1, le=4096)
+    dense_quant_rescore: bool | None = True
+    dense_quant_oversampling: float | None = Field(default=2.0, ge=1.0, le=10.0)
     rrf_weight_dense_nl: float = Field(default=1.0, gt=0.0, le=10.0)
     rrf_weight_sparse_nl: float = Field(default=1.0, gt=0.0, le=10.0)
     rrf_weight_dense_identifier: float = Field(default=1.0, gt=0.0, le=10.0)
