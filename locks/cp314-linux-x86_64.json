@@ -31,10 +31,10 @@
       "wheel": "ast_serialize-0.11.1-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
     },
     "certifi": {
-      "sha256": "62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775",
-      "url": "https://files.pythonhosted.org/packages/0b/a7/71ac2cff56fec219ed242bb11b8efb69fcc4bec75db06fb7bfe35de520e6/certifi-2026.7.22-py3-none-any.whl",
-      "version": "2026.7.22",
-      "wheel": "certifi-2026.7.22-py3-none-any.whl"
+      "sha256": "42d35340cc5b9ba78e818ddbff0c5b1c2b779de448a340fd1b989f5fa8670e1b",
+      "url": "https://files.pythonhosted.org/packages/c4/51/29046e48f693c54e5b7412216d447a1d8362c9653148d98c02cdf65fa733/certifi-2026.10.19-py3-none-any.whl",
+      "version": "2026.10.19",
+      "wheel": "certifi-2026.10.19-py3-none-any.whl"
     },
     "charset-normalizer": {
       "sha256": "15f024313246a4ed976c60f440bb8d257815513a681d212ff74fd46f7d715a90",
@@ -289,10 +289,10 @@
       "wheel": "pillow-12.3.0-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl"
     },
     "pip": {
-      "sha256": "71138adf1f4ca900cdb7d289c21b7494329f2332b6d85f0e1c42108c0384ed3e",
-      "url": "https://files.pythonhosted.org/packages/f3/6e/1736e5b4ae2b778ef2f81c47d797de9f891d4d8acb047a24ca37a60294dd/pip-26.2.1-py3-none-any.whl",
-      "version": "26.2.1",
-      "wheel": "pip-26.2.1-py3-none-any.whl"
+      "sha256": "fd7f4dfa8190e014013b9f08f3e973f4e4c26ffd179a204895533a7254813a70",
+      "url": "https://files.pythonhosted.org/packages/3f/06/3e4420302363fbb71be3c7f35ce042f54bfca330e3e66b3a2e3c4cca579f/pip-26.2.2-py3-none-any.whl",
+      "version": "26.2.2",
+      "wheel": "pip-26.2.2-py3-none-any.whl"
     },
     "pluggy": {
       "sha256": "e920276dd6813095e9377c0bc5566d94c932c33b27a3e3945d8389c374dd4746",
@@ -478,7 +478,7 @@
         "wheel"
       ],
       "requirements": "requirements.build.lock.txt",
-      "sha256": "6b0da2a2d743447da9424730f2a5cd2cab3c591d7d1e593c1f1e4fff1f9e161c"
+      "sha256": "18ba95dd373047ddf50eb8da8f7957f188e9461dece5c9030044efbfdeb3fc54"
     },
     "dev": {
       "packages": [
@@ -561,7 +561,7 @@
         "wheel"
       ],
       "requirements": "requirements.dev.lock.txt",
-      "sha256": "42a3fb8b3294fd58b5828a3bc1508cf960c1f3eccc351c0694415cb6f5b90ade"
+      "sha256": "9fb48297e4695a60584aa6e7538d07e606ece7305726158ee955466d4015c45f"
     },
     "runtime": {
       "packages": [
@@ -627,12 +627,12 @@
         "uvicorn"
       ],
       "requirements": "requirements.lock.txt",
-      "sha256": "8cdddadb98de5b63aa423909a1ef35525dbd97b89851bda7e0bc0039d026acb4"
+      "sha256": "b852bd22461acb2adcb5e5ec3abce86a0102acc1af558f2fb39c32e81be5c581"
     }
   },
   "resolver": {
     "name": "pip",
-    "version": "26.2.1"
+    "version": "26.2.2"
   },
   "schema_version": 1,
   "target": "cp314-gil-linux-x86_64-glibc2.34"
