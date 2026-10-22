@@ -21,6 +21,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Annotated, Any, Literal, get_args
+from urllib.parse import quote
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator
 
@@ -106,6 +107,19 @@ class UnknownAnswerError(LookupError):
     """A rating named a request_id with no recorded answer."""
 
 
+class StoreSchemaError(RuntimeError):
+    """The store file was written by an unsupported schema version."""
+
+
+class ImportConflictError(Exception):
+    """An import met rows that differ from the target's; nothing was written.
+    `counts` is the plan (numbers only, never row content)."""
+
+    def __init__(self, counts: dict[str, int]) -> None:
+        super().__init__("import conflicts")
+        self.counts = counts
+
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS answers (
@@ -131,6 +145,69 @@ CREATE INDEX IF NOT EXISTS answers_created ON answers(created_at);
 """
 
 
+_ANSWER_COLUMNS = ("request_id, created_at, endpoint, query, answer, script, citations, supplied,"
+                   " telemetry")
+_RATING_COLUMNS = "request_id, created_at, rating, reasons, comment"
+
+
+def _answer_row(row: tuple[Any, ...]) -> dict[str, Any]:
+    keys = ("request_id", "created_at", "endpoint", "query", "answer", "script", "citations",
+            "supplied", "telemetry")
+    out = dict(zip(keys, row, strict=True))
+    for key in ("citations", "supplied", "telemetry"):
+        out[key] = json.loads(out[key])
+    return out
+
+
+def _rating_row(row: tuple[Any, ...]) -> dict[str, Any]:
+    return {"request_id": row[0], "created_at": row[1], "rating": row[2],
+            "reasons": json.loads(row[3]), "comment": row[4]}
+
+
+def read_snapshot(path: Path, *, connect: Any = None) -> tuple[list[dict[str, Any]],
+                                                                         list[dict[str, Any]]]:
+    """Every answer and rating as one consistent snapshot, for export (#805).
+
+    Opens the file read-only (`mode=ro`: it cannot alter a live store, take
+    the write lock or run the constructor's WAL/schema writes), reads inside a
+    single transaction into memory, and closes the connection before returning,
+    so no read snapshot outlives the call and pins the WAL (the purge needs
+    that, ADR-0005). Rows are ordered by request_id; ratings carry no local id."""
+    db = (connect or sqlite3.connect)(f"file:{quote(str(path))}?mode=ro", uri=True, isolation_level=None,
+                 timeout=_BUSY_TIMEOUT_MS / 1000)
+    try:
+        db.execute("BEGIN")
+        row = db.execute("SELECT value FROM meta WHERE key='schema'").fetchone()
+        if row is None or row[0] != str(SCHEMA_VERSION):
+            raise StoreSchemaError("feedback store schema is not supported by this version")
+        answers = [_answer_row(r) for r in db.execute(
+            f"SELECT {_ANSWER_COLUMNS} FROM answers ORDER BY request_id").fetchall()]
+        ratings = [_rating_row(r) for r in db.execute(
+            f"SELECT {_RATING_COLUMNS} FROM ratings ORDER BY request_id").fetchall()]
+        db.execute("COMMIT")
+    finally:
+        db.close()
+    return answers, ratings
+
+
+def store_in_use(path: Path) -> bool:
+    """True when another connection (a running service) holds the store file.
+    Probes for an exclusive lock without waiting; it writes nothing. A WAL
+    database open anywhere else cannot be taken exclusively, so this is the
+    guard behind `import`: a second writer on a live store is refused (#805)."""
+    db = sqlite3.connect(str(path), isolation_level=None, timeout=0)
+    try:
+        db.execute("PRAGMA locking_mode=EXCLUSIVE")
+        db.execute("SELECT count(*) FROM sqlite_master").fetchall()
+        db.execute("BEGIN EXCLUSIVE")
+        db.execute("ROLLBACK")
+        return False
+    except sqlite3.OperationalError:
+        return True
+    finally:
+        db.close()
+
+
 class FeedbackStore:
     """Thread-safe single-connection store; the owning process is the only
     writer (WAL lets a read-only export run alongside)."""
@@ -152,7 +229,7 @@ class FeedbackStore:
             if row is None:
                 self._db.execute("INSERT INTO meta VALUES ('schema', ?)", (str(SCHEMA_VERSION),))
             elif row[0] != str(SCHEMA_VERSION):
-                raise RuntimeError("feedback store schema is not supported by this version")
+                raise StoreSchemaError("feedback store schema is not supported by this version")
 
     def close(self) -> None:
         with self._lock:
@@ -199,19 +276,13 @@ class FeedbackStore:
 
     def answer(self, request_id: str) -> dict[str, Any] | None:
         with self._lock:
-            row = self._db.execute(
-                "SELECT request_id, created_at, endpoint, query, answer, script, citations, supplied,"
-                " telemetry FROM answers WHERE request_id = ?", (request_id,)
-            ).fetchone()
-        if row is None:
-            return None
-        keys = ("request_id", "created_at", "endpoint", "query", "answer", "script", "citations",
-                "supplied", "telemetry")
-        out = dict(zip(keys, row, strict=True))
-        out["citations"] = json.loads(out["citations"])
-        out["supplied"] = json.loads(out["supplied"])
-        out["telemetry"] = json.loads(out["telemetry"])
-        return out
+            return self._answer_unlocked(request_id)
+
+    def _answer_unlocked(self, request_id: str) -> dict[str, Any] | None:
+        row = self._db.execute(
+            f"SELECT {_ANSWER_COLUMNS} FROM answers WHERE request_id = ?", (request_id,)
+        ).fetchone()
+        return None if row is None else _answer_row(row)
 
     def rating(self, request_id: str) -> dict[str, Any] | None:
         """The answer's single rating (latest submission), or None."""
@@ -224,6 +295,79 @@ class FeedbackStore:
             return None
         return {"id": r[0], "created_at": r[1], "rating": r[2], "reasons": json.loads(r[3]),
                 "comment": r[4]}
+
+    def is_empty(self) -> bool:
+        with self._lock:
+            return self._db.execute("SELECT 1 FROM answers LIMIT 1").fetchone() is None
+
+    def import_records(self, answers: list[dict[str, Any]], ratings: list[dict[str, Any]], *,
+                       keep_existing: bool = False, retention_days: int = 180) -> dict[str, int]:
+        """Restore validated export rows in one transaction (#805), preserving
+        created_at. Mirrors the live rules: an answer already present is never
+        rewritten (identical is a duplicate, different is a conflict); a rating
+        that differs is replaced when newer, kept when older, and a conflict at
+        equal created_at. Any conflict refuses the whole import unless
+        `keep_existing`, which keeps the target's rows and skips the incoming
+        ones (ratings of a conflicting answer included). A rating must name an
+        answer in the target or the batch. All or nothing; the result is
+        counts only. `expired` counts inserted answers already past retention
+        (the next purge removes them)."""
+        counts = {"inserted": 0, "duplicate": 0, "conflict": 0, "superseded": 0, "expired": 0}
+        cutoff = self._clock() - retention_days * 86400
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                skipped: set[str] = set()
+                for a in answers:
+                    existing = self._answer_unlocked(a["request_id"])
+                    if existing is None:
+                        self._db.execute(
+                            "INSERT INTO answers (request_id, created_at, endpoint, query, answer,"
+                            " script, citations, supplied, telemetry) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            (a["request_id"], a["created_at"], a["endpoint"], a["query"], a["answer"],
+                             a["script"], json.dumps(a["citations"]), json.dumps(a["supplied"]),
+                             json.dumps(a["telemetry"], sort_keys=True)))
+                        counts["inserted"] += 1
+                        counts["expired"] += a["created_at"] < cutoff
+                    elif existing == a:
+                        counts["duplicate"] += 1
+                    else:
+                        counts["conflict"] += 1
+                        skipped.add(a["request_id"])
+                for r in ratings:
+                    if r["request_id"] in skipped:
+                        counts["conflict"] += 1
+                        continue
+                    if self._db.execute("SELECT 1 FROM answers WHERE request_id = ?",
+                                        (r["request_id"],)).fetchone() is None:
+                        raise UnknownAnswerError(r["request_id"])
+                    row = self._db.execute(
+                        f"SELECT {_RATING_COLUMNS} FROM ratings WHERE request_id = ?",
+                        (r["request_id"],)).fetchone()
+                    values = (r["created_at"], r["rating"], json.dumps(r["reasons"]), r["comment"])
+                    if row is None:
+                        self._db.execute(
+                            "INSERT INTO ratings (request_id, created_at, rating, reasons, comment)"
+                            " VALUES (?, ?, ?, ?, ?)", (r["request_id"], *values))
+                        counts["inserted"] += 1
+                    elif _rating_row(row) == r:
+                        counts["duplicate"] += 1
+                    elif r["created_at"] > row[1]:
+                        self._db.execute(
+                            "UPDATE ratings SET created_at = ?, rating = ?, reasons = ?, comment = ?"
+                            " WHERE request_id = ?", (*values, r["request_id"]))
+                        counts["inserted"] += 1
+                    elif r["created_at"] < row[1]:
+                        counts["superseded"] += 1
+                    else:
+                        counts["conflict"] += 1
+                if counts["conflict"] and not keep_existing:
+                    raise ImportConflictError(counts)
+            except BaseException:
+                self._db.execute("ROLLBACK")
+                raise
+            self._db.execute("COMMIT")
+        return counts
 
     def answer_labels(self, request_id: str) -> tuple[str, str | None] | None:
         """Bounded labels of a recorded answer (endpoint, verification state)

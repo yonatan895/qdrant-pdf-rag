@@ -405,8 +405,32 @@ retention: [observability](observability.md#data-tiers).
   Single replica, single uvicorn worker only (one SQLite writer, one
   scheduler, one per-process registry). The service entry point is
   `python -m uvicorn --factory mainframe_rag.feedback.service:app_from_env`;
-  `tests/test_feedback_store.py` launches that command. The JSONL
-  export/import, which also makes a later Postgres move testable, is phase 2.
+  `tests/test_feedback_store.py` launches that command.
+  **Export and import** (#805, ADR-0005; operator CLI, no HTTP route):
+  `python -m mainframe_rag.feedback.exchange export --db P --out FILE|-` and
+  `import --in FILE|- --db P [--merge] [--keep-existing]`. The file is canonical
+  JSONL v1: a `header` (format, version, store_schema, `exported_at`,
+  `retention_days`), `answer` lines then `rating` lines in request_id order
+  (sorted keys, ASCII-escaped; ratings carry no local id), and a `trailer` with
+  the counts and the sha256 of every preceding byte (integrity, not
+  authenticity). Export opens the store read-only (`mode=ro`: it never writes
+  the live file or takes the write lock), reads one consistent snapshot into
+  memory and closes it before any output is written, so it cannot pin the WAL
+  and defer the purge. The output is created `O_EXCL` with mode 0600, refused
+  inside a git work tree or on a terminal. It holds question, answer and
+  comment text and escapes the 180-day purge: the operator deletes it. Import
+  validates the whole file first (hash, counts, version, schema, the live
+  `AnswerRecord`/`Rating` models, unknown fields, duplicate ids, a rating
+  needs an answer in the file or the target), refuses a group/world-readable
+  input, then applies it in one transaction preserving `created_at`. It needs a
+  store no service holds (an exclusive-lock probe; `store_in_use`) and an empty
+  one unless `--merge`. An answer already present is never rewritten
+  (identical is a duplicate, different a conflict); a rating that differs is
+  replaced when newer, kept when older, a conflict at equal `created_at`. Any
+  conflict refuses the whole import unless `--keep-existing`. Refusals are a
+  fixed code on stderr and exit 2 (never row text); success prints counts
+  (`inserted`, `duplicate`, `conflict`, `superseded`, `expired`; `expired` rows
+  are removed by the next purge). Tests: `tests/test_feedback_exchange.py`.
   Deployment (the single-replica StatefulSet `rag-feedback`, the kept claim
   `rag-feedback-data`, the operator Secret and the agent-only NetworkPolicy,
   default off) is in the chart: [deploy.md](deploy.md#feedback-service).
