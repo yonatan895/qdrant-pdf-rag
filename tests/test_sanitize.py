@@ -29,6 +29,23 @@ def test_sanitize_page_text_drops_controls_and_keeps_content() -> None:
     assert sanitize_page_text("plain narrative prose.") == "plain narrative prose."
 
 
+def test_sanitize_page_text_spells_out_typographic_ligatures() -> None:
+    """Issue #870: fonts emit U+FB00-FB06 ligatures inside words
+    ("con\ufb01guration", "certi\ufb01cate"; 525 in e0z2n161), which a typed
+    query can never match in the BM25 leg. Exactly those seven code points
+    become their letters; the characters next to them, full-width and
+    superscript forms (what blanket NFKC would rewrite) and private-use
+    glyphs stay as extracted."""
+    assert sanitize_page_text("con\ufb01guration certi\ufb01cate tra\ufb00ic \ufb02ow") == (
+        "configuration certificate traffic flow")
+    pairs = {"\ufb00": "ff", "\ufb01": "fi", "\ufb02": "fl", "\ufb03": "ffi", "\ufb04": "ffl",
+             "\ufb05": "st", "\ufb06": "st"}
+    for lig, letters in pairs.items():
+        assert sanitize_page_text(f"a{lig}b") == f"a{letters}b"
+    kept = "\uff21\uff22 x\u00b2 \uf6d9 \ufb07 \ufaff \ufb13"
+    assert sanitize_page_text(kept) == kept
+
+
 class _StubPage:
     def __init__(self, text: str, label: str | None = None) -> None:
         self._text = text
@@ -60,10 +77,11 @@ def test_extract_page_texts_sanitizes_and_preserves_labels() -> None:
         _StubPage("clean page one", "1"),
         _StubPage("IEA500I\x00 BEFORE\x1b[1m IOS\u202e\u200b", "2"),
         _StubPage("", None),
+        _StubPage("Con\ufb01gure the \ufb01le", "3"),
     ])
     texts, labels = run_ingest._extract_page_texts(doc)  # type: ignore[arg-type]
-    assert texts == ["clean page one", "IEA500I BEFORE IOS", ""]
-    assert labels == ["1", "2", None]
+    assert texts == ["clean page one", "IEA500I BEFORE IOS", "", "Configure the file"]
+    assert labels == ["1", "2", None, "3"]
 
 
 def test_parse_pdf_sanitizes_metadata_title(monkeypatch, tmp_path) -> None:
