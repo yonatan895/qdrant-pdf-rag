@@ -414,9 +414,9 @@ def _prose_lines(answer: str, citations: Sequence[str]) -> Iterator[str]:
         yield candidate
 
 
-# A line-leading [n] (optionally behind a bullet or blockquote) is a citation
+# A line-leading [n] (optionally behind bullets, blockquote or numbered markers) is a citation
 # marker the marker normalizer peels, so the raw line is checked (#877).
-_LEADING_INDEX_RE = re.compile(r"^[\s>*•-]*\[\s*\d+(?:\s*,\s*\d+)*\s*\]")
+_LEADING_INDEX_RE = re.compile(r"^(?:\s*(?:[>*•-]|\d+[.)]))*\s*\[\s*\d+(?:\s*,\s*\d+)*\s*\]")
 
 
 def has_answer_body(answer: str, citations: list[str]) -> bool:
