@@ -148,6 +148,11 @@ def parse_export(data: bytes, *, now: float) -> tuple[list[dict[str, Any]], list
     if (_timestamp(header["exported_at"], limit) is None or isinstance(retention, bool)
             or not isinstance(retention, int) or not 1 <= retention <= 3650):
         raise Refused("bad_format")
+    # A genuine export holds nothing newer than its own header, and the header
+    # is as forgeable as the rows: bound records by the earlier of the two.
+    limit = min(limit, header["exported_at"] + MAX_FUTURE_SKEW_S)
+    # header["retention_days"] is informational only: import applies the
+    # importer's own configured retention (run_import's argument), never this.
     if header["version"] != VERSION:
         raise Refused("unsupported_version")
     if header["store_schema"] != SCHEMA_VERSION:

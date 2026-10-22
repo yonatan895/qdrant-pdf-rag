@@ -422,7 +422,7 @@ retention: [observability](observability.md#data-tiers).
   a pipe cannot be inspected (the runbook's `umask 077` covers the receiving
   file). It holds question, answer and
   comment text and escapes the 180-day purge: the operator deletes it. Import
-  validates the whole file first (hash, counts, version, schema, finite timestamps no later than the importer's clock plus 300 s so a hand-edited file cannot outlive the retention window, finite telemetry, the live
+  validates the whole file first (hash, counts, version, schema, finite timestamps no later than the importer's clock and the header's `exported_at`, each plus 300 s, so a hand-edited file cannot outlive the retention window, finite telemetry, the live
   `AnswerRecord`/`Rating` models, unknown fields, duplicate ids, a rating
   needs an answer in the file or the target), refuses a group/world-readable
   input, then applies it in one transaction preserving `created_at`. The
@@ -434,7 +434,7 @@ retention: [observability](observability.md#data-tiers).
   (identical is a duplicate, different a conflict); a rating that differs is
   replaced when newer, kept when older, a conflict at equal `created_at`. Any
   conflict refuses the whole import unless `--keep-existing`. Refusals are a
-  fixed code on stderr and exit 2 (never row text); success prints counts
+  fixed code on stderr and exit 2 (never row text); the header's `retention_days` is informational, import uses the importer's own; success prints counts
   (`inserted`, `duplicate`, `conflict`, `superseded`, `expired`; `expired` rows
   are removed by the next purge). Tests: `tests/test_feedback_exchange.py`. Local tasks: `feedback:export DB= OUT=`, `feedback:import IN= DB= [MERGE=1] [KEEP_EXISTING=1]`.
   Deployment (the single-replica StatefulSet `rag-feedback`, the kept claim

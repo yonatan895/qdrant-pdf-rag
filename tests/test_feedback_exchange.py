@@ -579,3 +579,31 @@ def test_export_to_a_redirected_stdout_file_must_be_private_and_outside_git(sour
     ingit = _export_to_stdout_file(source, tmp_path / "repo" / "x.jsonl", 0o600)
     assert ingit.returncode == 2 and b"output_in_git_worktree" in ingit.stderr
     assert (tmp_path / "repo" / "x.jsonl").stat().st_size == 0
+
+
+def test_records_later_than_the_header_exported_at_are_refused(source, tmp_path, capsys):
+    _good, lines = _tampered(source, tmp_path)
+    latest = max(json.loads(ln)["created_at"] for ln in lines[1:-1])
+    # header at the latest record (+ the skew) is genuine; just past the skew is not
+    ok = _rehash(_mutate(lines, 0, exported_at=latest))
+    assert _import(_write(tmp_path, ok), tmp_path / "ok.sqlite3") == 0
+    forged = _rehash(_mutate(lines, 0, exported_at=latest - exchange.MAX_FUTURE_SKEW_S - 1))
+    capsys.readouterr()
+    assert _import(_write(tmp_path, forged), tmp_path / "bad.sqlite3") == 2
+    assert "invalid_" in capsys.readouterr().err
+    assert not (tmp_path / "bad.sqlite3").exists() or FeedbackStore(tmp_path / "bad.sqlite3").is_empty()
+
+
+def test_import_applies_the_importers_retention_not_the_forged_header(source, tmp_path, capsys):
+    """A header claiming 3650 days must not extend retention: `expired` and the
+    next purge use the importer's configured window (here 180)."""
+    _good, lines = _tampered(source, tmp_path)
+    forged = _write(tmp_path, _rehash(_mutate(lines, 0, retention_days=3650)))
+    db2 = tmp_path / "dst.sqlite3"
+    late = 20_000_000.0  # records are ~1_000_000: far past 180 days, inside 3650
+    assert exchange.main(["import", "--in", str(forged), "--db", str(db2),
+                          "--retention-days", "180"], clock=lambda: late) == 0
+    assert json.loads(capsys.readouterr().out)["expired"] == 3
+    s = FeedbackStore(db2, clock=lambda: late)
+    assert s.purge(retention_days=180) == {"answers": 3, "ratings": 2, "wal_truncated": True}
+    s.close()
