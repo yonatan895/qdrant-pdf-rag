@@ -334,6 +334,98 @@ class FilterAwareFakeQdrant(FakeQdrant):
         ]
 
 
+def _search_param_settings(**overrides) -> Settings:
+    base = {
+        "qdrant_url": "http://localhost:6333",
+        "qdrant_collection": "mainframe_manuals",
+        "dense_dim": 768,
+        "embed_base_url": "http://localhost:8000/v1",
+        "embed_model": "test-embed",
+        "bm25_model": "Qdrant/bm25",
+        "dense_hnsw_ef": 200,
+        "dense_quant_rescore": True,
+        "dense_quant_oversampling": 2.0,
+    }
+    base.update(overrides)
+    return Settings(**base)
+
+
+def _expected_dense_params() -> models.SearchParams:
+    return models.SearchParams(
+        hnsw_ef=200,
+        quantization=models.QuantizationSearchParams(rescore=True, oversampling=2.0),
+    )
+
+
+def test_dense_search_params_are_sent_on_every_dense_query_and_only_there(embedder):
+    """#842: the dense request carries the pinned SearchParams; the BM25
+    request carries none (HNSW/quantization do not apply to a sparse leg)."""
+    fake = FakeQdrant(dense=[_point("d1")], sparse=[_point("s1")])
+    search(fake, embedder, "mainframe_manuals", "sample query", limit=5,
+           settings=_search_param_settings())
+    dense_req, sparse_req = fake.batch_requests
+    assert dense_req.using == "dense" and dense_req.params == _expected_dense_params()
+    assert sparse_req.using == "bm25" and sparse_req.params is None
+
+
+def test_default_settings_pin_the_measured_dense_search_params(embedder):
+    """The shipped defaults (ef 128, rescore on, oversampling 2.0 - the
+    2026-10-22 record) reach the wire without any override."""
+    fake = FakeQdrant(dense=[_point("d1")], sparse=[_point("s1")])
+    search(fake, embedder, "mainframe_manuals", "sample query", limit=5, settings=_settings())
+    assert fake.batch_requests[0].params == models.SearchParams(
+        hnsw_ef=128,
+        quantization=models.QuantizationSearchParams(rescore=True, oversampling=2.0),
+    )
+
+
+def test_dense_search_params_are_sent_by_the_async_core(embedder):
+    from mainframe_rag.retrieve.query import async_search
+
+    fake = FakeQdrant(dense=[_point("d1")], sparse=[_point("s1")])
+    asyncio.run(async_search(AsyncReaderAdapter(fake), embedder, "mainframe_manuals",
+                             "sample query", limit=5, settings=_search_param_settings()))
+    assert [r.params for r in fake.batch_requests if r.using == "dense"] == [
+        _expected_dense_params()
+    ]
+
+
+def test_dense_search_params_follow_the_settings_values(embedder):
+    """Independent values: a partial pin sends exactly the pinned fields and
+    nothing else, and no pin at all sends no params object."""
+    fake = FakeQdrant(dense=[_point("d1")], sparse=[_point("s1")])
+    search(fake, embedder, "mainframe_manuals", "sample query", limit=5,
+           settings=_search_param_settings(dense_hnsw_ef=64, dense_quant_rescore=None,
+                                           dense_quant_oversampling=None))
+    assert fake.batch_requests[0].params == models.SearchParams(hnsw_ef=64)
+
+    fake = FakeQdrant(dense=[_point("d1")], sparse=[_point("s1")])
+    search(fake, embedder, "mainframe_manuals", "sample query", limit=5,
+           settings=_search_param_settings(dense_hnsw_ef=None, dense_quant_rescore=False,
+                                           dense_quant_oversampling=None))
+    assert fake.batch_requests[0].params == models.SearchParams(
+        quantization=models.QuantizationSearchParams(rescore=False)
+    )
+
+    fake = FakeQdrant(dense=[_point("d1")], sparse=[_point("s1")])
+    search(fake, embedder, "mainframe_manuals", "sample query", limit=5,
+           settings=_search_param_settings(dense_hnsw_ef=None, dense_quant_rescore=None,
+                                           dense_quant_oversampling=None))
+    assert fake.batch_requests[0].params is None
+
+
+def test_dense_search_params_ride_the_filter_fallback_retry(embedder):
+    """The empty-filtered retry is a second dense query; it must carry the
+    same pin, not the server defaults."""
+    fake = FilterAwareFakeQdrant(dense=[_point("d1")], sparse=[_point("s1")])
+    search(fake, embedder, "mainframe_manuals", "Identify SC23-6862", limit=5,
+           settings=_search_param_settings())
+    dense_reqs = [r for r in fake.batch_requests if r.using == "dense"]
+    assert len(dense_reqs) == 2
+    assert [r.params for r in dense_reqs] == [_expected_dense_params()] * 2
+    assert all(r.params is None for r in fake.batch_requests if r.using == "bm25")
+
+
 def test_search_filter_fallback_recovers_unfiltered_hits(embedder):
     """Claimed path: exact doc-id stem (SC23-6862 vs SC23-6862-00) matches
     zero filtered points; the single unfiltered retry must return hits."""

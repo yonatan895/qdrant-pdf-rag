@@ -532,18 +532,39 @@ def _retrieve_span_attrs(
     return attrs
 
 
+def _dense_search_params(settings: Settings | None) -> models.SearchParams | None:
+    """The pinned search-time params of the dense leg (issue #842): HNSW
+    `ef` and the INT8 quantization rescore/oversampling. One owner for every
+    dense query (first attempt, filter-fallback retry, every split leg, pool
+    capture); an unset field is omitted so the server default stays in force
+    for it, and no pinned field at all sends no params object."""
+    if settings is None:
+        return None
+    quantization = None
+    if settings.dense_quant_rescore is not None or settings.dense_quant_oversampling is not None:
+        quantization = models.QuantizationSearchParams(
+            rescore=settings.dense_quant_rescore,
+            oversampling=settings.dense_quant_oversampling,
+        )
+    if settings.dense_hnsw_ef is None and quantization is None:
+        return None
+    return models.SearchParams(hnsw_ef=settings.dense_hnsw_ef, quantization=quantization)
+
+
 def _build_prefetch_requests(
     dense_vec,
     sparse_idx,
     sparse_val,
     flt: models.Filter | None,
     prefetch_limit: int,
+    dense_params: models.SearchParams | None = None,
 ) -> tuple[models.QueryRequest, models.QueryRequest]:
     dense_req = models.QueryRequest(
         query=dense_vec,
         using="dense",
         limit=prefetch_limit,
         filter=flt,
+        params=dense_params,
         with_payload=list(RETRIEVE_PAYLOAD_FIELDS),
     )
     sparse_req = models.QueryRequest(
@@ -700,24 +721,26 @@ async def _prefetch_leg_points(
     flt: models.Filter | None,
     fallback_flt: models.Filter | None,
     prefetch_limit: int,
+    dense_params: models.SearchParams | None = None,
 ) -> list[tuple[list[models.ScoredPoint], list[models.ScoredPoint], bool]]:
     """The production prefetch, one owner for search and pool capture: per
     leg, one batched dense + BM25 query under the ORIGINAL filter (splitting
     changes ranking text only, never the constraint allowlist, so a stripped
     cause leg cannot surface must_not docs the symptom filter excluded), and
     the empty-filtered retry under the relaxed filter. Returns (dense,
-    sparse, retried) per leg."""
+    sparse, retried) per leg. `dense_params` rides every dense request,
+    the retry included."""
     legs = []
     for dense_vec, sparse_idx, sparse_val in leg_vecs:
         dense_req, sparse_req = _build_prefetch_requests(
-            dense_vec, sparse_idx, sparse_val, flt, prefetch_limit
+            dense_vec, sparse_idx, sparse_val, flt, prefetch_limit, dense_params
         )
         responses = await client.query_batch_points(collection, requests=[dense_req, sparse_req])
         dense_points, sparse_points = responses[0].points, responses[1].points
         retried = _needs_filter_fallback(dense_points, sparse_points, flt, fallback_flt)
         if retried:
             dense_req, sparse_req = _build_prefetch_requests(
-                dense_vec, sparse_idx, sparse_val, fallback_flt, prefetch_limit
+                dense_vec, sparse_idx, sparse_val, fallback_flt, prefetch_limit, dense_params
             )
             responses = await client.query_batch_points(
                 collection, requests=[dense_req, sparse_req]
@@ -800,7 +823,13 @@ async def async_search(
         ):
             t0 = time.monotonic()
             prefetched = await _prefetch_leg_points(
-                client, collection, leg_vecs, flt, fallback_flt, prefetch_limit
+                client,
+                collection,
+                leg_vecs,
+                flt,
+                fallback_flt,
+                prefetch_limit,
+                _dense_search_params(settings),
             )
             leg_dense_points = [dense for dense, _, _ in prefetched]
             leg_sparse_points = [sparse for _, sparse, _ in prefetched]

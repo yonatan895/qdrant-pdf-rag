@@ -106,6 +106,17 @@ so lexical and semantic candidates are scoped identically before any fusion.
   Non-empty
   filtered results never pay the second call. The retry lands on the trace
   as boolean `rag.filter_fallback` (bounded, never free text).
+- Every dense request (first attempt, empty-filtered retry, each split leg,
+  pool capture) carries `SearchParams` from `_dense_search_params`:
+  `dense_hnsw_ef` 128 (equals the server's effective default, the
+  collection's `ef_construct`), `dense_quant_rescore` true and
+  `dense_quant_oversampling` 2.0. The INT8 collection's server default does
+  not rescore; rescoring against the stored full-precision vectors with
+  2.0 oversampling raised dense overlap with exact search at 8 from 0.984 to
+  1.000 and at 40 from 0.983 to 0.9997 (stored-vector queries, 2026-10-22,
+  [record](records/2026-10-22-search-params.md)). A `None` setting omits that
+  field (server default); the BM25 leg never carries params. Changing a value
+  needs a new measurement against exact search, not a reasoning argument.
 - The legs are named `dense` and `bm25`, dense first. Each leg passes
   `requests=[QueryRequest(filter=flt, ...)]` into one `query_batch_points`
   call (builders in `_build_prefetch_requests`).
