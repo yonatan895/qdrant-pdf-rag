@@ -519,6 +519,9 @@ A test earns its place:
    alias semantics (absent batch capability differs from raising), without
    normalized return shapes or a universal fake framework ([shared doubles](#shared-doubles-share-builders-pin-behavior)).
 6. **Findings name the owning test to extend.**
+7. **Property tests** (Hypothesis, dev profile only) sit in the parser's own suite
+   with `derandomize=True, database=None`, a stated example budget and a
+   justified `deadline`; a found counterexample is kept as an `@example`.
 
 Homes: completion/publication/representation/serving suites own those
 boundaries; API/chat/webui/stream suites own adapters; air-gap shell suites own

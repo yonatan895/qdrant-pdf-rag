@@ -156,6 +156,12 @@
       "version": "6.1.0",
       "wheel": "hyperframe-6.1.0-py3-none-any.whl"
     },
+    "hypothesis": {
+      "sha256": "9f634bdb1f9e9b8ab6ba09431cf2deedb750c96978125a6fb3c5a0f6c6db4131",
+      "url": "https://files.pythonhosted.org/packages/01/f8/c151e196d4f397ed9436a071e52666c70a2f021138dea828b0a461e245db/hypothesis-6.155.7-py3-none-any.whl",
+      "version": "6.155.7",
+      "wheel": "hypothesis-6.155.7-py3-none-any.whl"
+    },
     "idna": {
       "sha256": "815e7be7a7806d54abb586dc943addc79e8b2ee16915059658cbeff4b1b43bf4",
       "url": "https://files.pythonhosted.org/packages/57/b0/0e52c878c53f245edd3a11020f20979b3f490f245af532c7cae3027754b5/idna-3.19-py3-none-any.whl",
@@ -402,6 +408,12 @@
       "version": "84.0.0",
       "wheel": "setuptools-84.0.0-py3-none-any.whl"
     },
+    "sortedcontainers": {
+      "sha256": "a163dcaede0f1c021485e957a39245190e74249897e2ae4b2aa38595db237ee0",
+      "url": "https://files.pythonhosted.org/packages/32/46/9cb0e58b2deb7f82b84065f37f3bffeb12413f947f9388e4cac22c4621ce/sortedcontainers-2.4.0-py2.py3-none-any.whl",
+      "version": "2.4.0",
+      "wheel": "sortedcontainers-2.4.0-py2.py3-none-any.whl"
+    },
     "starlette": {
       "sha256": "a86dd39d14bb45f85a3d18525215a9ef0cfd1f192ac793220e72598c90335f0c",
       "url": "https://files.pythonhosted.org/packages/c8/cb/6a6a47d5b464bd08695d254f3da6e7986cc70c9fa5d778eda57538edfe56/starlette-1.6.0-py3-none-any.whl",
@@ -495,6 +507,7 @@
         "httpx2",
         "huggingface-hub",
         "hyperframe",
+        "hypothesis",
         "idna",
         "iniconfig",
         "jinja2",
@@ -536,6 +549,7 @@
         "requests",
         "ruff",
         "setuptools",
+        "sortedcontainers",
         "starlette",
         "tokenizers",
         "tqdm",
@@ -547,7 +561,7 @@
         "wheel"
       ],
       "requirements": "requirements.dev.lock.txt",
-      "sha256": "9d73c58963643cebc06a4fa410d7e9f4eda80d2bd12dafbea8ac7e446fb78592"
+      "sha256": "42a3fb8b3294fd58b5828a3bc1508cf960c1f3eccc351c0694415cb6f5b90ade"
     },
     "runtime": {
       "packages": [

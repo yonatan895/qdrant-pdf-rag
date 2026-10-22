@@ -12,6 +12,8 @@ version, SHA-256 and public origin. Existing direct versions remain unchanged;
 transitive versions were taken from the qualified development environment.
 The `urllib3` security pin is also explicit in `pyproject.toml`; its runtime/dev
 lock entries and wheel identity must agree with that project dependency.
+`hypothesis` (property tests, #817) and its `sortedcontainers` dependency are dev-profile
+only; they are in neither the runtime nor the build closure, nor any image.
 
 | Profile | File | Consumers |
 |---|---|---|
