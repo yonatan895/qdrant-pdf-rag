@@ -3573,6 +3573,8 @@ def test_structured_decline_leads_and_partial_answers_keep_the_whole_response_ru
         f"{DECLINE_PREFIX} IEA500I.\n0) Set RETRY=5",
         f"{DECLINE_PREFIX} IEA500I.\n1. Set RETRY=5",
         f"{DECLINE_PREFIX} IEA500I.\n- Set RETRY=5",
+        f"{DECLINE_PREFIX} IEA500I.\n   2) Set RETRY=5",
+        f"{DECLINE_PREFIX} IEA500I.\n- 1. Set RETRY=5 in IEASYSxx",
         # #877 D2: curly-quoted whole-line declines are recognized like straight ones.
         f"\u201c{DECLINE_PREFIX} IEA500I.\u201d",
         f"\u2018{DECLINE_PREFIX} IEA500I.\u2019",
@@ -3600,6 +3602,10 @@ def test_structured_decline_leads_and_partial_answers_keep_the_whole_response_ru
         f"{DECLINE_PREFIX} IEA500I.\n[1] Set RETRY=5",
         f"{DECLINE_PREFIX} IEA500I.\n- [1] Set RETRY=5",
         f"{DECLINE_PREFIX} IEA500I.\n> [2] Set RETRY=5",
+        # N3: [n] behind a numbered marker (any indentation) is cited like "- [1]".
+        f"{DECLINE_PREFIX} IEA500I.\n1. [1] Set RETRY=5",
+        f"{DECLINE_PREFIX} IEA500I.\n   2) [3] Set RETRY=5",
+        f"{DECLINE_PREFIX} IEA500I.\n- 1. [1] Set RETRY=5",
         # The retired #764 sentence no longer qualifies on its own lead.
         "The excerpts do not answer this question.\nThey cover JES2 checkpoint sizing [1].",
     ]
@@ -3899,17 +3905,18 @@ def test_a_decline_quoted_inside_a_sentence_is_never_recognized(word, middle, qu
 
 
 @_PROPERTY
-@given(_DECLINE_LEADS, _DECLINE_SUBJECTS, _SEPARATORS, _INDEX_MARKERS, _LEAD_WORDS, _ONE_LINE)
-@example(DECLINE_PREFIX, "IEA500I", "\n", "[1]", "wSet", " RETRY=5")
-def test_a_line_leading_index_after_the_decline_is_a_cited_claim(lead, subject, sep, marker, word, rest):
+@given(_DECLINE_LEADS, _DECLINE_SUBJECTS, _SEPARATORS, _INDEX_MARKERS, _LEAD_WORDS, _ONE_LINE,
+       st.sampled_from(["", "- ", "> ", "1. ", "2) ", "  3. ", "- 1. ", "1. - "]))
+@example(DECLINE_PREFIX, "IEA500I", "\n", "[1]", "wSet", " RETRY=5", "1. ")
+def test_a_line_leading_index_after_the_decline_is_a_cited_claim(lead, subject, sep, marker, word, rest, prefix):
     """#877 D1: a line-leading [n] is a citation marker, not a list marker, so
     the decline followed by it is not a structured decline."""
-    body = f"{lead} {subject}.\n{marker} {word}{rest}"
+    body = f"{lead} {subject}.\n{prefix}{marker} {word}{rest}"
     assert is_structured_decline(body) is False, body
 
 
 @_PROPERTY
-@given(_DECLINE_LEADS, _DECLINE_SUBJECTS, st.sampled_from(["0)", "1.", "-", "*", "12)"]), _LEAD_WORDS)
+@given(_DECLINE_LEADS, _DECLINE_SUBJECTS, st.sampled_from(["0)", "1.", "-", "*", "12)", "- 1.", "1. -", "  2)"]), _LEAD_WORDS)
 def test_other_list_markers_after_the_decline_stay_scaffolding(lead, subject, marker, word):
     """#877 D1: only [n] is a citation marker; numbered and bullet markers
     around the uncited coverage note keep the decline."""

@@ -1170,9 +1170,9 @@ caveat leading a partial answer ("X is not covered by the excerpts; ...") is a
 mixed answer; the prefix inside a sentence, subject-less or placed after an
 answer clause leaves the whole-response rule in charge. The decline cites
 nothing: inline citation markers anywhere after the lead, and a line that
-begins with `[n]` (#877; the only list-style marker that counts as a
+begins with `[n]`, also behind bullets, `>` or numbered markers (#877; the only list-style marker that counts as a
 citation), mean cited claims, so the whole-response rule decides and a mixed
-answer keeps its citations. `0)`, `1.` and `-` stay list scaffolding around the
+answer keeps its citations. `0)`, `1.` and `-` without a leading `[n]` stay list scaffolding around the
 uncited coverage note. A decline wrapped whole-line in straight or curly quotes,
 backticks or a blockquote is peeled like any list marker and still declines;
 the same text quoted inside a sentence does not.
