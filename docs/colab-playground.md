@@ -13,6 +13,7 @@ GPU fit, full-corpus quality, deployment acceptance or production parity.
 | `COLAB_CPU_TRANSPORT` | CPU | Tiny health servers; no inference install or model download |
 | `COLAB_G4_BF16` | RTX PRO 6000 Blackwell, 96 GB | Primary two-model reference, measured commissioning required |
 | `COLAB_A100_80GB_BF16` | A100, 80 GB | Separate reduced-concurrency commissioning; never an automatic fallback |
+| `COLAB_G4_RERANK_8B`, `COLAB_G4_RERANK_4B` | RTX PRO 6000 Blackwell, 96 GB | Retrieval-only reranker measurement (#862): Qwen3-Embedding-8B plus one Qwen3-Reranker, no reasoning model; synthetic dataset only |
 
 The BF16 reference pins `Qwen/Qwen3.8-27B` at
 `1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0` and
@@ -48,6 +49,83 @@ evidence before inference setup and retains the measured facts in private
 it. These facts do not establish wheel/import/CUDA compatibility; the inference
 stage still verifies the installed environment. Collect metadata in this native
 preflight/runtime path: Colab can reject a second active SSH connection.
+
+## Reranker measurement lane (#862)
+
+A reranker earns its serving cost only if it beats rerank-off on the production
+retrieval profile. An 8B reranker cannot co-reside with the 27B, so
+`COLAB_G4_RERANK_8B` and `COLAB_G4_RERANK_4B` serve the reference
+`Qwen/Qwen3-Embedding-8B` (identical argv, `:8001`) and one reranker, with no
+reasoning model. Choose the arm with the profile; each arm is its own session.
+
+| Arm | Model | Revision (Hub `main`, 2026-10-22) | Port | GPU share |
+| --- | --- | --- | --- | --- |
+| 8B | `Qwen/Qwen3-Reranker-8B` | `77d193c791ed757ca307ee72715aa132723da912` | 8000 | 0.30 |
+| 4B | `Qwen/Qwen3-Reranker-4B` | `22e683669bc0f0bd69640a1354a6d0aebcfeede5` | 8000 | 0.30 |
+
+The reranker takes the first model slot, the forward the other profiles give to
+reasoning, so the CPU transport receipt for `:8000`/`:8001` proves this
+transport unchanged and `--reasoning-port` names that slot. Window 8192, 32
+sequences (the `rerank_batch_size` default). Fit is an estimate, not a
+measurement: on the 90 GiB admission floor the embedder's 0.24 (21.6 GiB, 14.1
+GiB of weights, as in the reference) plus the reranker's 0.30 (27.0 GiB; 15.3
+GiB of weights for 8B, 7.5 GiB for 4B; KV is 0.14 MiB per token) is 0.54, inside
+the 0.90 the 27B reference already uses. The first session records the measured
+peak.
+
+The original Qwen3-Reranker loads in vLLM 0.28.0 only with the classifier
+overrides (`--hf-overrides`: `Qwen3ForSequenceClassification`, tokens
+`["no","yes"]`, `is_original_qwen3_reranker`), and vLLM applies a score template
+only when `--chat-template` is passed; without it the pair is scored as bare
+concatenated text. The profile therefore passes the snapshot's own pinned
+`chat_template.jinja` (the model owner's reference prompt; vLLM's example
+`qwen3_reranker.jinja` is the same text except it ends one newline shorter after
+`</think>`). The runtime refuses weakened argv, refuses a snapshot without the
+template, and its readiness check scores a relevant and an unrelated document
+through `/v1/score`: both scores must be finite and the relevant one must win.
+Verified from the vLLM 0.28.0 docs and sources, not yet on a GPU.
+
+Prepare and run as in the sandbox lane with `COLAB_PROFILE=COLAB_G4_RERANK_8B`
+(or `_4B`), `COLAB_DATASET=synthetic` and a CPU receipt for the same candidate;
+`production` is refused (no reasoning model, no answer lane). The hold's
+`sandbox.env` routes only the embed and rerank legs: `GATEWAY_REASONING=off`
+makes `run_local_gateway.sh` serve no reasoning route, `/tokenize` pass-through
+or LLM key, and its leg env (`gateway.env`) carries `EMBED_*` and `RERANK_*`
+with per-leg keys only. Start the gateway alone, not `local:stack`, which needs
+the reasoning leg, and not `probe_gateway.py`, which probes it:
+
+```sh
+. "$COLAB_STATE/sandbox.env"
+sh scripts/tools/run-task.sh local:gateway:up     # terminal 2; writes $COLAB_STATE/gateway.env
+```
+
+Then, per arm, against the retained current-rules collection over the
+supervised read-only Qdrant forward, with `. "$COLAB_STATE/gateway.env"` and the
+frozen representation settings of that build. The real-corpus collection needs
+`VENUE=rc` on these commands. Never read the frozen holdout.
+
+```sh
+# 1. Pools with cross-encoder scores, dev and section probes (one capture each).
+#    RERANK_TIMEOUT_S=30 is the maximum: 50 passages of up to 3000 characters
+#    through an 8B model may exceed the 5 s default. Record that separately.
+VENUE=rc RERANK_ENABLED=true RERANK_TIMEOUT_S=30 RERANK_CANDIDATES=50 \
+  .venv/bin/python scripts/capture_pool.py --golden evals/golden.jsonl --depth 50 --out "$OUT/pools-dev-8b.jsonl"
+VENUE=rc RERANK_ENABLED=true RERANK_TIMEOUT_S=30 RERANK_CANDIDATES=50 \
+  .venv/bin/python scripts/capture_pool.py --golden evals/sections.jsonl --depth 50 --out "$OUT/pools-sections-8b.jsonl"
+# 2. Offline replay (no GPU): rrf_k x candidate depth x fusion alpha, per arm.
+VENUE=rc .venv/bin/python scripts/replay_sweep.py --grid rerank --pools "$OUT/pools-dev-8b.jsonl" \
+  --golden evals/golden.jsonl --headings-from "$COLLECTION" --json "$OUT/sweep-dev-8b.json"
+VENUE=rc .venv/bin/python scripts/replay_sweep.py --grid rerank --pools "$OUT/pools-sections-8b.jsonl" \
+  --golden evals/sections.jsonl --headings-from "$COLLECTION" --json "$OUT/sweep-sections-8b.json"
+```
+
+`--grid rerank` replays `rrf_k` in {2, 60}, depth in {20, 30, 50} and
+`rerank_fusion_alpha` in {0, 0.25, 0.5, 0.75, 1}, plus a rerank-off row per
+`rrf_k`. Latency is live: run two agents from the same checkout against the
+gateway (`RERANK_ENABLED` true and false, no LLM settings needed for `/v1/search`)
+and drive each with `scripts/loadtest.py --endpoint search` over natural-language
+dev queries at concurrency 1 and 4; its `rerank` stage is the added cost. The
+measurement is a record: it changes no default, and `rerank_enabled` stays false.
 
 ## Keep the existing host resource owner
 

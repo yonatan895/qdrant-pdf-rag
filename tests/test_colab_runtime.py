@@ -29,6 +29,7 @@ from scripts.colab_runtime import (
     validate_inference_lock,
     warmup_embedding,
     warmup_reasoning,
+    warmup_rerank,
 )
 
 
@@ -1023,3 +1024,187 @@ def test_gpu_startup_uses_exact_argv_and_warms_reasoning_before_embedding(
         assert recovery_report["transport_verified"] is True
         assert recovery_report["stage"] == "stopped"
         assert all(server.closed and server.stopped.is_set() for server in listeners)
+
+
+# --- #862 retrieval-only rerank profiles -------------------------------------
+RERANK_NAMES = ("COLAB_G4_RERANK_8B", "COLAB_G4_RERANK_4B")
+
+
+def _relocated_rerank_runtime(tmp_path, name):
+    from mainframe_rag.serve.colab_profiles import build_profile
+
+    profile = build_profile(name, deadline_seconds=3600)
+    for server in profile["servers"]:
+        server["local_dir"] = server["local_dir"].replace("/content", str(tmp_path), 1)
+        server["argv"] = [value.replace("/content", str(tmp_path), 1) for value in server["argv"]]
+    lock = ("vllm==0.28.0 --hash=sha256:" + "a" * 64 + "\n"
+            "transformers==5.15.0 --hash=sha256:" + "b" * 64 + "\n"
+            "torch==2.12.0 --hash=sha256:" + "c" * 64 + "\n"
+            "huggingface-hub==1.31.0 --hash=sha256:" + "d" * 64 + "\n")
+    (tmp_path / "inference.lock").write_text(lock)
+    profile["inference_lock_sha256"] = hashlib.sha256(lock.encode()).hexdigest()
+    clock = Clock()
+    profile["expires_at"] = clock() + 3600
+    runtime = RemoteRuntime(profile, root=tmp_path, clock=clock, sleep=clock.sleep,
+                            development_sha="a" * 40)
+    return runtime, profile, clock
+
+
+def test_rerank_readiness_requires_finite_ordered_scores_from_the_template_scored_endpoint():
+    server = {"port": 8000, "model_id": "Qwen/Qwen3-Reranker-8B"}
+    calls = []
+    response = {"data": [{"index": 0, "score": 0.97}, {"index": 1, "score": 0.02}]}
+
+    def endpoint(url, body=None, **kwargs):
+        calls.append((url, body))
+        return response
+
+    warmup_rerank(server, http=endpoint)
+    url, body = calls[0]
+    assert url == "http://127.0.0.1:8000/v1/score"
+    assert body["model"] == "Qwen/Qwen3-Reranker-8B" and len(body["text_2"]) == 2
+    # The relevant document is sent first: a missing template scores a bare
+    # concatenation and cannot reliably order the pair.
+    assert "Paris" in body["text_2"][0] and "Paris" not in body["text_2"][1]
+    for bad in (
+        {"data": [{"index": 0, "score": 0.1}, {"index": 1, "score": 0.9}]},   # inverted
+        {"data": [{"index": 0, "score": 0.9}, {"index": 1, "score": 0.9}]},   # tie
+        {"data": [{"index": 0, "score": float("nan")}, {"index": 1, "score": 0.1}]},
+        {"data": [{"index": 0, "score": True}, {"index": 1, "score": 0.1}]},
+        {"data": [{"index": 0, "score": 0.9}]},                                # shape
+        {"data": "x"},
+    ):
+        response = bad
+        with pytest.raises(RuntimeError, match="rerank warmup"):
+            warmup_rerank(server, http=endpoint)
+    # The score scale is not part of the contract: logits are fine if ordered.
+    response = {"data": [{"index": 0, "score": 4.2}, {"index": 1, "score": -3.1}]}
+    warmup_rerank(server, http=endpoint)
+    # Out-of-order indices are sorted like the application client does.
+    response = {"data": [{"index": 1, "score": 0.02}, {"index": 0, "score": 0.97}]}
+    warmup_rerank(server, http=endpoint)
+
+
+@pytest.mark.parametrize("name", RERANK_NAMES)
+def test_rerank_profile_passes_the_exact_reference_validation(tmp_path, name):
+    runtime, *_ = _relocated_rerank_runtime(tmp_path, name)
+    runtime.validate_profile()
+
+
+def _set_flag(argv, flag, value):
+    argv[argv.index(flag) + 1] = value
+
+
+@pytest.mark.parametrize("weaken", [
+    lambda p: p["servers"].reverse(),                                       # role order
+    lambda p: p["servers"].pop(),                                           # embed only
+    lambda p: p["servers"][1].update(port=8002),                            # transport slot
+    lambda p: p["servers"][1].update(model_id="Qwen/Qwen3-Reranker-0.6B"),
+    lambda p: p.update(name="COLAB_G4_BF16"),                               # roles vs name
+    lambda p: _set_flag(p["servers"][1]["argv"], "--hf-overrides", "{}"),
+    lambda p: _set_flag(p["servers"][1]["argv"], "--hf-overrides", "not json"),
+    lambda p: _set_flag(p["servers"][1]["argv"], "--chat-template", "/tmp/other.jinja"),
+    lambda p: p["servers"][1]["argv"].__delitem__(
+        slice(p["servers"][1]["argv"].index("--chat-template"), p["servers"][1]["argv"].index("--chat-template") + 2)),
+    lambda p: p["servers"][1]["argv"].extend(["--chat-template", "/tmp/other.jinja"]),
+    lambda p: _set_flag(p["servers"][1]["argv"], "--runner", "generate"),
+    lambda p: _set_flag(p["servers"][1]["argv"], "--host", "0.0.0.0"),
+])
+def test_rerank_profile_refuses_weakened_or_mismatched_launch_identity(tmp_path, weaken):
+    runtime, profile, _ = _relocated_rerank_runtime(tmp_path, "COLAB_G4_RERANK_8B")
+    weaken(profile)
+    with pytest.raises(RuntimeError):
+        runtime.validate_profile()
+
+
+def test_reasoning_profiles_still_refuse_a_reranker_in_the_reasoning_slot(tmp_path):
+    from mainframe_rag.serve.colab_profiles import build_profile
+
+    runtime, rerank, _ = _relocated_rerank_runtime(tmp_path, "COLAB_G4_RERANK_8B")
+    runtime.profile = dict(build_profile("COLAB_G4_BF16", deadline_seconds=3600),
+                           inference_lock_sha256=rerank["inference_lock_sha256"])
+    runtime.profile["servers"] = rerank["servers"][::-1]
+    with pytest.raises(RuntimeError, match="reasoning followed by embedding"):
+        runtime.validate_profile()
+
+
+@pytest.mark.parametrize("name", RERANK_NAMES)
+def test_rerank_models_download_into_their_own_directories_and_start_embedding_then_reranker(
+        tmp_path, monkeypatch, name):
+    runtime, profile, _ = _relocated_rerank_runtime(tmp_path, name)
+    destinations, started, requests = [], [], []
+
+    def run(argv, label, *, seconds):
+        assert argv[1:3] == ["-c", SNAPSHOT_FETCH]
+        destinations.append((argv[3], argv[4], argv[5]))
+        Path(argv[-1]).write_text(json.dumps({
+            "model_id": argv[3], "resolved_revision": argv[4], "download_bytes": 100, "tensor_bytes": 100,
+            "tensor_shards": 1, "metadata_sha256": {"tokenizer.json": "e" * 64},
+            "transfer": "xet", "download_seconds": 1.5}))
+
+    monkeypatch.setattr(runtime.processes, "run", run)
+    monkeypatch.setattr(runtime, "tick", runtime.check)
+    runtime.download_models(Path("/tools/python"))
+    embedding, reranker = profile["servers"]
+    assert destinations == [(embedding["model_id"], embedding["revision"], str(tmp_path / "models/embedding")),
+                            (reranker["model_id"], reranker["revision"], str(tmp_path / "models/reranker"))]
+    assert [model["model_id"] for model in runtime.report["models"]] == [
+        embedding["model_id"], reranker["model_id"]]
+
+    def endpoint(url, body=None, *, timeout):
+        if url.endswith("/health"):
+            return {}
+        if url.endswith("/v1/models"):
+            return {"data": [{"id": embedding["model_id"] if ":8001/" in url else reranker["model_id"]}]}
+        requests.append(url)
+        if url.endswith("/v1/embeddings"):
+            return {"data": [{"embedding": [1.0] + [0.0] * 4095}]}
+        return {"data": [{"index": 0, "score": 0.9}, {"index": 1, "score": 0.1}]}
+
+    def start(argv, role):
+        started.append((role, argv))
+        return SimpleNamespace(process=SimpleNamespace(poll=lambda: None), error=None)
+
+    runtime.http = endpoint
+    monkeypatch.setattr(runtime.processes, "start", start)
+    runtime.start_models()
+    assert started == [("embed", embedding["argv"]), ("rerank", reranker["argv"])]
+    assert requests == ["http://127.0.0.1:8001/v1/embeddings", "http://127.0.0.1:8000/v1/score"]
+    assert [event["stage"] for event in runtime.report["events"]] == [
+        "models_downloaded", "embedding_warmed", "reranker_warmed"]
+    assert all("server_argv_sha256" in model for model in runtime.report["models"])
+
+
+def test_reranker_snapshot_without_its_pinned_score_template_is_refused(tmp_path, monkeypatch):
+    destination = tmp_path / "models" / "reranker"
+    destination.mkdir(parents=True)
+    files = {"model-00001-of-00001.safetensors": b"w" * 64, "config.json": b"{}",
+             "tokenizer.json": b"{}", "tokenizer_config.json": b"{}",
+             "model.safetensors.index.json": json.dumps({"metadata": {"total_size": 64},
+                 "weight_map": {"layer": "model-00001-of-00001.safetensors"}}).encode()}
+
+    def fetch(model, with_template):
+        names = dict(files, **({"chat_template.jinja": b"{{ messages }}"} if with_template else {}))
+
+        def snapshot_download(_model, **kwargs):
+            for name, raw in names.items():
+                (destination / name).write_bytes(raw)
+
+        siblings = [SimpleNamespace(rfilename=name, size=len(raw)) for name, raw in names.items()]
+        api = SimpleNamespace(model_info=lambda model, **_: SimpleNamespace(sha="a" * 40, siblings=siblings))
+        hub = SimpleNamespace(HfApi=lambda: api, snapshot_download=snapshot_download,
+                              constants=SimpleNamespace(HF_HUB_DISABLE_XET=False))
+        monkeypatch.setitem(sys.modules, "huggingface_hub", hub)
+        monkeypatch.setattr("importlib.util.find_spec", lambda name: object() if name == "hf_xet" else None)
+        report = tmp_path / f"snapshot-{with_template}.json"
+        monkeypatch.setattr(sys, "argv", ["snapshot", model, "a" * 40, str(destination),
+                                          str(MODEL_LIMIT_BYTES), str(report)])
+        exec(SNAPSHOT_FETCH, {})  # noqa: S102 - Execute the fixed repository script with hub fakes.
+        return json.loads(report.read_text())
+
+    with pytest.raises(RuntimeError, match="score template"):
+        fetch("Qwen/Qwen3-Reranker-8B", with_template=False)
+    for stale in destination.iterdir():
+        stale.unlink()
+    observed = fetch("Qwen/Qwen3-Reranker-8B", with_template=True)
+    assert observed["metadata_sha256"]["chat_template.jinja"] == hashlib.sha256(b"{{ messages }}").hexdigest()

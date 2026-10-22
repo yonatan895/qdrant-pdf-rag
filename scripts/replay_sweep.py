@@ -350,6 +350,35 @@ def rrf_grid_configs(settings) -> list[SweepConfig]:
     return configs
 
 
+RERANK_GRID_K = (2, 60)
+RERANK_GRID_DEPTH = (20, 30, 50)
+RERANK_GRID_ALPHA = (0.0, 0.25, 0.5, 0.75, 1.0)
+
+
+def rerank_grid_configs(settings) -> list[SweepConfig]:
+    """The #862 grid: rrf_k x candidate depth x rerank_fusion_alpha over
+    pools that carry cross-encoder scores, plus a rerank-off baseline per
+    rrf_k. The reranker axis is the pool file: capture once per arm and
+    replay each arm separately. Depth is both the per-leg prefetch and the
+    fused set the cross-encoder reorders (RERANK_CANDIDATES), never above 50.
+    Identifier and trap queries stay CE-less in the pools and so unchanged."""
+    base = SweepConfig(
+        label="production",
+        max_per_page=settings.retrieve_max_chunks_per_page,
+        max_per_doc=settings.retrieve_max_chunks_per_doc,
+    )
+    configs = [base]
+    for k in RERANK_GRID_K:
+        configs.append(replace(base, label=f"k{k}-off", rrf_k=k))
+    for k in RERANK_GRID_K:
+        for depth in RERANK_GRID_DEPTH:
+            for alpha in RERANK_GRID_ALPHA:
+                configs.append(replace(
+                    base, label=f"k{k}d{depth}a{alpha:g}", rrf_k=k, rerank=True, alpha=alpha,
+                    prefetch_limit=depth, fuse_limit=depth))
+    return configs
+
+
 def join_headings(records: list[dict], client, collection: str) -> dict[str, str]:
     """Map every captured chunk id to its local ``heading_path``.
 
@@ -400,8 +429,9 @@ def main(argv: list[str] | None = None) -> int:
         help="join captured ids to this local collection's headings for section-level scoring",
     )
     parser.add_argument(
-        "--grid", choices=("default", "rrf"), default="default",
-        help="default: the pre-registered axes; rrf: rrf_k x sparse weight per query kind (#845)",
+        "--grid", choices=("default", "rrf", "rerank"), default="default",
+        help="default: the pre-registered axes; rrf: rrf_k x sparse weight per query kind (#845); "
+        "rerank: rrf_k x candidate depth x fusion alpha over CE-scored pools (#862)",
     )
     args = parser.parse_args(argv)
 
@@ -447,7 +477,8 @@ def main(argv: list[str] | None = None) -> int:
 
     results = [
         run_config(records, entries_by_query, cfg, settings, headings)
-        for cfg in (rrf_grid_configs(settings) if args.grid == "rrf" else candidate_configs(settings))
+        for cfg in {"rrf": rrf_grid_configs, "rerank": rerank_grid_configs}.get(
+            args.grid, candidate_configs)(settings)
     ]
     print(f"scoring: {'section-level (headings joined)' if headings is not None else 'doc-level'}")
     header = (

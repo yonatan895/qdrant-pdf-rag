@@ -33,7 +33,13 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from mainframe_rag.serve.colab_profiles import COLAB_PROFILES, admit, build_profile
+from mainframe_rag.serve.colab_profiles import (
+    COLAB_PROFILES,
+    COLAB_RERANK_PROFILES,
+    admit,
+    build_profile,
+    profile_server,
+)
 from mainframe_rag.serve.colab_storage import prove_qdrant_storage
 
 if TYPE_CHECKING:
@@ -607,7 +613,7 @@ def production_runtime(profile: dict, inference_lock: Path) -> tuple[Settings, d
         from scripts.colab_runtime import validate_inference_lock
     else:
         from colab_runtime import validate_inference_lock
-    server = profile["servers"][1]
+    server = profile_server(profile, "embed")
     model = {"EMBED_MODE": "vllm", "EMBED_MODEL": server["model_id"],
              "EMBED_MODEL_REVISION": server["revision"], "DENSE_DIM": str(profile["dense_dim"])}
     if any(name.upper() in model and value != model[name.upper()] for name, value in os.environ.items()):
@@ -642,6 +648,9 @@ def prepare(args: argparse.Namespace, *, source_root: Path | None = None) -> int
         raise LabError("native bounded gateway capture source is required before preparing a run")
     profile = build_profile(args.profile, embed_max_len=args.embedding_max_len,
                             deadline_seconds=args.deadline_seconds)
+    if args.profile in COLAB_RERANK_PROFILES and args.dataset == "production":
+        # #862: no reasoning server, so no answer lane, census admission or ingest.
+        raise LabError("rerank measurement profiles are retrieval-only and synthetic; production needs a reasoning profile")
     if not re.fullmatch(r"[^\s]+@sha256:[0-9a-f]{64}", args.gateway_image):
         raise LabError("gateway image must be the existing gateway owner's digest pin")
     docker_gateway = None
@@ -1528,12 +1537,28 @@ class Run:
 
     def environment(self, bridge: str) -> dict[str, str]:
         env = self.gateway_environment(bridge)
-        if self.profile["accelerator"]:
+        if self.profile["accelerator"] and self.profile["name"] in COLAB_RERANK_PROFILES:
+            # #862 retrieval-only sandbox: embed + rerank legs through the real
+            # gateway, no reasoning leg. The reranker owns the first model slot
+            # (the :8000 forward), so GATEWAY_REASONING_URL, which transport
+            # operations use for that slot, is not a handoff name here.
+            embedding, reranker = profile_server(self.profile, "embed"), profile_server(self.profile, "rerank")
+            env.pop("GATEWAY_REASONING_URL", None)
+            env.update(GATEWAY_REASONING="off",
+                       GATEWAY_RERANK_URL=f"http://{bridge}:{self.config['reasoning_port']}/v1",
+                       GATEWAY_RERANK_MODEL=reranker["model_id"],
+                       GATEWAY_EMBED_URL=f"http://{bridge}:{self.config['embedding_port']}/v1",
+                       GATEWAY_EMBED_MODEL=embedding["model_id"],
+                       GATEWAY_EMBED_MODEL_REVISION=embedding["revision"],
+                       DENSE_DIM="4096", RERANK_ENABLED="true", LITELLM_IMAGE=self.config["gateway_image"],
+                       GATEWAY_ENV_FILE=str(self.state / "gateway.env"),
+                       LOCAL_STACK_LOG_DIR=str(self.state))
+        elif self.profile["accelerator"]:
             env.update(GATEWAY_REASONING_URL=f"http://{bridge}:{self.config['reasoning_port']}/v1",
                        GATEWAY_EMBED_URL=f"http://{bridge}:{self.config['embedding_port']}/v1",
-                       GATEWAY_REASONING_MODEL=self.profile["servers"][0]["model_id"],
-                       GATEWAY_EMBED_MODEL=self.profile["servers"][1]["model_id"],
-                       GATEWAY_EMBED_MODEL_REVISION=self.profile["servers"][1]["revision"],
+                       GATEWAY_REASONING_MODEL=profile_server(self.profile, "reasoning")["model_id"],
+                       GATEWAY_EMBED_MODEL=profile_server(self.profile, "embed")["model_id"],
+                       GATEWAY_EMBED_MODEL_REVISION=profile_server(self.profile, "embed")["revision"],
                        DENSE_DIM="4096", RERANK_ENABLED="false", LLM_MAX_MODEL_LEN="32768",
                        LLM_REASONING_EFFORT_SIMPLE="xhigh", LLM_REASONING_EFFORT_COMPLEX="xhigh",
                        LLM_REASONING_EFFORTS="low,medium,xhigh",  # Qwen3.8 template domain (#748)
@@ -1551,8 +1576,8 @@ class Run:
                 "LOCAL_INGEST_PROGRESS": self.manifest["production_progress"], "LOCAL_STACK_DRYRUN": "0",
                 "LOCAL_INGEST_REINGEST": "1" if self.config.get("ingest_reingest") is True else "0",
                 "PY": self.manifest["execution"]["interpreter"], "PYTHONPATH": str(self.execution_root / "src"),
-                "GATEWAY_EMBED_MODEL": self.profile["servers"][1]["model_id"],
-                "GATEWAY_EMBED_MODEL_REVISION": self.profile["servers"][1]["revision"],
+                "GATEWAY_EMBED_MODEL": profile_server(self.profile, "embed")["model_id"],
+                "GATEWAY_EMBED_MODEL_REVISION": profile_server(self.profile, "embed")["revision"],
                 "RERANK_ENABLED": "false",
             }
             # The native gateway generates these canonical Settings exports
@@ -1909,6 +1934,7 @@ def parser() -> argparse.ArgumentParser:
     for name, default in (("colab", "colab"), ("ssh", "ssh"), ("ssh-keygen", "ssh-keygen"),
                           ("docker", "docker"), ("kubectl", "kubectl")):
         prep.add_argument("--" + name, default=default)
+    # First model slot (remote :8000): reasoning, or the reranker in the #862 profiles.
     prep.add_argument("--reasoning-port", type=int, default=8000)
     prep.add_argument("--embedding-port", type=int, default=8001)
     prep.add_argument("--qdrant-port", type=int, default=16333)
@@ -1922,7 +1948,8 @@ def parser() -> argparse.ArgumentParser:
     fresh = commands.add_parser("initialize-fresh")
     fresh.add_argument("--state", type=Path, required=True)
     fresh.add_argument("--collection", required=True)
-    fresh.add_argument("--profile", choices=COLAB_PROFILES[1:], default="COLAB_G4_BF16")
+    fresh.add_argument("--profile", default="COLAB_G4_BF16",
+                       choices=[name for name in COLAB_PROFILES[1:] if name not in COLAB_RERANK_PROFILES])
     for name in ("corpus", "golden", "inventory", "source-inventory", "embedding-evidence", "production-approval",
                  "data-state", "kubeconfig", "inference-lock"):
         fresh.add_argument("--" + name, type=Path, required=True)
