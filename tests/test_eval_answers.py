@@ -423,7 +423,7 @@ def test_http_answer_eval_uses_a_real_http_agent_and_preserves_query_bytes(tmp_p
     assert not (tmp_path / "SENTINEL").exists()
 
 
-@pytest.mark.parametrize("value", ["0", "601", "nan"])
+@pytest.mark.parametrize("value", ["0", "1801", "nan", "inf"])
 def test_http_answer_eval_rejects_invalid_timeout_before_io(monkeypatch, value):
     from mainframe_rag.eval import answers
 
@@ -431,6 +431,14 @@ def test_http_answer_eval_rejects_invalid_timeout_before_io(monkeypatch, value):
     with pytest.raises(SystemExit) as exc:
         answers.main(["--agent-url", "http://agent:8080", "--request-timeout", value])
     assert exc.value.code == 2
+
+
+@pytest.mark.parametrize(("raw", "expected"), [("1", 1.0), ("300", 300.0), ("950", 950.0), ("1800", 1800.0)])
+def test_http_answer_eval_accepts_long_generation_timeout(raw, expected):
+    """Issue #843: a client waiting out a 16384-token thinking reserve at ~22 tok/s needs more than 600 s."""
+    from mainframe_rag.eval import answers
+
+    assert answers._request_timeout(raw) == expected
 
 
 @pytest.mark.parametrize("value", [
