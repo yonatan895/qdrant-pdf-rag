@@ -915,8 +915,9 @@ instrumented, including corruption, recovery, precedence and literal paths.
 
 ## 11. Release acceptance: independent set and pre-registered criteria (#367)
 
-**Status: PROPOSED.** The criteria in `evals/acceptance-criteria.json` are
-proposals awaiting maintainer/SME sign-off. They are policy choices, not
+**Status: PROPOSED in the machine file; accepted by the maintainer (see the
+2026-10-23 registration record below).** The criteria in
+`evals/acceptance-criteria.json` are policy choices, not
 measured production performance; the 2026-09-16 stand-in rows in §10 are not
 evidence for or against them. Until `status` is `registered` (with
 `registered_by`/`registered_at`, in a dedicated PR before any scored run),
@@ -1023,6 +1024,52 @@ reported separately). The maintainer must select and register a statistical
 unit/method in the dedicated criteria decision; the scorer does not invent a
 binary reduction or change thresholds. A single-repeat binary case remains
 eligible for the existing Wilson calculation.
+
+### Registration record, 2026-10-23 (#367 D1-D6)
+
+Maintainer decisions of yonatan895 on the 2026-10-22 proposal; they bind this
+section. This record precedes any scored run, and scoring may only start after
+the PR carrying it merges. Dated; amend by a new dated record, not in place.
+
+- **Criteria registered as proposed (D3).** The pilot and release criteria in
+  the table above, with the thresholds in `evals/acceptance-criteria.json`,
+  are accepted unchanged, with two amendments: the abstain count (D4) and the
+  profile binding (D5). Nothing else is invented or tuned. Open numbers: the
+  statistical unit/method for repeated-case means (see "Proposed criteria")
+  remains unselected, so a release-stage statistical claim stays
+  non-certifying until the maintainer registers it.
+- **Build path B (D1).** Run the 30-case pilot first as the go/no-go for the
+  authoring spend, then grow to a release set of about 130 rows (100 answer
+  plus 40 abstain). Fresh-manual split (option C) is deferred unless the pilot
+  shows the corpus is too narrow. Reusing the exposed holdout is rejected.
+- **Roles (D2).** Adjudicator: yonatan895. Author: **not yet named**; must be
+  a different person (the validator rejects author equal to adjudicator). The
+  set cannot be built until the author is named; #367 stays blocked on that.
+- **Abstain composition (D4).** 40 abstain rows in the release set (pilot
+  keeps 6), so one miss is tolerable: R2 (Wilson lower >= 0.85) at n=30 needs
+  30/30, at n=40 it tolerates one miss. Mix of `insufficient_evidence` and
+  `wrong_premise` is the author's, declared in the manifest before scoring.
+  The release answer count stays at least 100.
+- **Model-profile binding (D5).** The criteria certify one named `production`
+  profile: reasoning model and effort, embed and rerank model, corpus
+  collection/revision, image and git SHA (the run record fields above). A change
+  to any of them, notably the reasoning model, invalidates the verdict and
+  requires a re-run of the release stage against the new profile.
+- **Feedback rows excluded (D6).** Rows derived from user feedback (#806) never
+  enter the release set or the pilot; they have seen system output.
+- **Independence from the frozen holdout (#859).** The #859 audit found that
+  71 of the 76 frozen holdout rows informed shipped choices, so the holdout is
+  a regression ruler only and cannot be the independent instrument. This set is
+  independent of it because it is authored outside the tuning loop by a person
+  who has not seen system outputs, adjudicated by a second person, held outside
+  git behind the `VENUE=rc` pin, refused by every golden reader, and checked
+  for query overlap against the dev golden, paraphrase and holdout sets.
+
+- **Machine file not yet flipped.** `evals/acceptance-criteria.json` keeps
+  `status: proposed` (and release abstain `min_n` 30) in this PR; every result
+  stays non-certifying until the maintainer sets `registered`,
+  `registered_by`/`registered_at` and the 40-row abstain `min_n` with the set
+  binding, before the first scored run.
 
 ### Decision procedure
 
