@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Architecture - Mainframe RAG</title>
+<meta name="description" content="System diagram and key design decisions of Mainframe RAG.">
+<meta name="color-scheme" content="light dark">
+<link rel="stylesheet" href="css/site.css">
+<script src="js/site.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="site"><div class="wrap">
+<a class="brand" href="index.html">Mainframe RAG</a>
+<nav aria-label="Primary"><ul><li><a href="index.html">Home</a></li><li><a href="architecture.html" aria-current="page">Architecture</a></li><li><a href="evaluation.html">Evaluation</a></li><li><a href="engineering.html">Engineering</a></li><li><a href="reference/">Reference</a></li></ul></nav>
+</div></header>
+<main id="main"><div class="wrap">
+
+<h1>Architecture</h1>
+<p class="lede">An ingest job builds a hybrid index in Qdrant. The agent serves search, answers and chat on top of it. Models live on a separate platform tier and are consumed over HTTP.</p>
+
+<figure>
+
+<svg class="diagram" viewBox="0 0 860 470" role="img" aria-labelledby="dt dd" xmlns="http://www.w3.org/2000/svg">
+<title id="dt">System architecture</title>
+<desc id="dd">Corpus feeds an ingest job that writes dense and BM25 sparse vectors into Qdrant. The agent queries Qdrant with hybrid search and weighted reciprocal rank fusion. Ingest and the agent call the platform gateway, which routes to vLLM reasoning, embedding and optional rerank models. Clients and the operator console call the agent. A read-only Zowe MCP bridge is optional and off by default.</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="arrowhead"/></marker></defs>
+<rect class="zone" x="10" y="34" width="620" height="426" rx="10"/>
+<text class="zonelabel" x="24" y="54">Air-gapped OpenShift: this repository</text>
+<rect class="zone" x="650" y="34" width="200" height="426" rx="10"/>
+<text class="zonelabel" x="662" y="54">Platform tier (other team)</text>
+
+<rect class="node" x="30" y="76" width="130" height="56" rx="6"/>
+<text x="95" y="100" text-anchor="middle">Corpus</text><text class="sub" x="95" y="118" text-anchor="middle">NFS or PVC, read-only OK</text>
+
+<rect class="node" x="210" y="76" width="150" height="56" rx="6"/>
+<text x="285" y="100" text-anchor="middle">Ingest job</text><text class="sub" x="285" y="118" text-anchor="middle">parse, chunk, embed</text>
+
+<rect class="core" x="210" y="196" width="150" height="104" rx="6"/>
+<text x="285" y="222" text-anchor="middle">Qdrant</text>
+<text class="sub" x="285" y="242" text-anchor="middle">dense + BM25 sparse</text>
+<text class="sub" x="285" y="258" text-anchor="middle">weighted RRF fusion</text>
+<text class="sub" x="285" y="280" text-anchor="middle">ClusterIP only</text>
+
+<rect class="core" x="410" y="196" width="170" height="124" rx="6"/>
+<text x="495" y="222" text-anchor="middle">Agent (FastAPI)</text>
+<text class="sub" x="495" y="242" text-anchor="middle">/v1/search</text>
+<text class="sub" x="495" y="258" text-anchor="middle">/v1/answer, /v1/chat</text>
+<text class="sub" x="495" y="278" text-anchor="middle">citations, evidence,</text>
+<text class="sub" x="495" y="294" text-anchor="middle">verification state</text>
+
+<rect class="node" x="410" y="364" width="170" height="56" rx="6"/>
+<text x="495" y="388" text-anchor="middle">Console and clients</text><text class="sub" x="495" y="406" text-anchor="middle">HTTP, OAuth when routed</text>
+
+<rect class="node opt" x="210" y="364" width="150" height="56" rx="6"/>
+<text x="285" y="388" text-anchor="middle">Zowe MCP bridge</text><text class="sub" x="285" y="406" text-anchor="middle">optional, off by default</text>
+
+<rect class="node" x="30" y="364" width="150" height="76" rx="6"/>
+<text class="sub" x="105" y="386" text-anchor="middle">Search path:</text><text class="sub" x="105" y="402" text-anchor="middle">embed, retrieve, rank.</text><text class="sub" x="105" y="418" text-anchor="middle">No LLM call.</text>
+
+<rect class="core" x="670" y="76" width="160" height="150" rx="6"/>
+<text x="750" y="102" text-anchor="middle">LiteLLM gateway</text>
+<text class="sub" x="750" y="122" text-anchor="middle">single origin</text>
+<text class="sub" x="750" y="138" text-anchor="middle">model-id routing</text>
+<text class="sub" x="750" y="154" text-anchor="middle">per-leg keys</text>
+
+<rect class="node" x="670" y="290" width="160" height="130" rx="6"/>
+<text x="750" y="316" text-anchor="middle">vLLM</text>
+<text class="sub" x="750" y="336" text-anchor="middle">reasoning model</text>
+<text class="sub" x="750" y="352" text-anchor="middle">dense embedding model</text>
+<text class="sub" x="750" y="368" text-anchor="middle">rerank (off by default)</text>
+
+<path class="edge" d="M160 104 H208"/>
+<path class="edge" d="M285 132 V194"/>
+<text class="sub" x="292" y="168">vectors</text>
+<path class="edge" d="M408 258 H362"/>
+<text class="sub" x="364" y="250">hybrid</text>
+<path class="edge" d="M360 104 H668"/>
+<text class="sub" x="470" y="97">embed leg</text>
+<path class="edge" d="M580 232 H625 V190 H668"/>
+<text class="sub" x="586" y="224">models</text>
+<path class="edge" d="M750 226 V288"/>
+<path class="edge" d="M495 362 V322"/>
+<path class="edge opt" d="M360 392 L420 322"/>
+</svg>
+<figcaption>Hand-drawn from the architecture guide. The dashed Zowe MCP bridge has client code but is not part of the current deployment. Tracing (Jaeger) and the optional feedback service are omitted for clarity.</figcaption>
+</figure>
+
+<h2>How a query flows</h2>
+<ol>
+<li>The agent classifies the query (identifier-like or natural language), which sets the fusion weights.</li>
+<li>It embeds the query through the gateway&rsquo;s embedding leg, then asks Qdrant for dense and BM25 sparse candidates in one batched query, fused with weighted RRF.</li>
+<li>Optional steps (cross-encoder rerank, which is off by default; diversification; filters) shape the ranked evidence. <code>/v1/search</code> stops here.</li>
+<li><code>/v1/answer</code> and chat pass the evidence to the reasoning model, then validate citations and compute a verification state before replying.</li>
+</ol>
+<p>Sources: <a href="https://github.com/yonatan895/qdrant-pdf-rag/blob/main/docs/architecture.md">architecture guide</a>, <a href="https://github.com/yonatan895/qdrant-pdf-rag/blob/main/docs/retrieval.md">retrieval contract</a>, <a href="https://github.com/yonatan895/qdrant-pdf-rag/blob/main/docs/agent.md">agent contract</a>.</p>
+
+<h2>Key decisions</h2>
+<div class="cards">
+<div class="card"><h3>Search never calls an LLM</h3><p>Only answers, chat and the console use the designated reasoning model. Retrieval is deterministic code, so ranking is testable without a model.</p><p><a href="https://github.com/yonatan895/qdrant-pdf-rag/blob/main/docs/agent.md#http-model-contract">HTTP and model contract</a></p></div>
+<div class="card"><h3>Read-only serving credentials</h3><p>Serving paths hold read-only Qdrant credentials. Ingest and admin actions use separate writer credentials.</p><p><a href="https://github.com/yonatan895/qdrant-pdf-rag/blob/main/AGENTS.md">Hard boundaries in AGENTS.md</a></p></div>
+<div class="card"><h3>Stable chunk identity, four chunk types</h3><p>Chunk ids are deterministic UUID5 keys, derived from the source rather than assigned at random. The chunk-type vocabulary is fixed at four types.</p><p><a href="https://github.com/yonatan895/qdrant-pdf-rag/blob/main/docs/architecture.md">Architecture guide</a></p></div>
+<div class="card"><h3>Abstain on insufficient evidence</h3><p>Answers carry a verification state. A structured decline is reported as <code>insufficient_evidence</code>, never as an accepted answer.</p><p><a href="https://github.com/yonatan895/qdrant-pdf-rag/blob/main/docs/agent.md">Verification states in the agent contract</a></p></div>
+<div class="card"><h3>Fixed client error codes</h3><p>Clients receive fixed messages and stable error codes, never exception or upstream text. Logs carry no secrets or manual text.</p><p><a href="https://github.com/yonatan895/qdrant-pdf-rag/blob/main/docs/agent.md#2-error-contract">Error contract</a></p></div>
+<div class="card"><h3>Pinned air-gap delivery</h3><p>Images, wheels and BM25 weights are pinned and baked in. There are no runtime downloads, and the bundle is checked offline before it is loaded.</p><p><a href="https://github.com/yonatan895/qdrant-pdf-rag/blob/main/docs/deploy.md#deployment-policy">Deployment policy</a></p></div>
+<div class="card"><h3>Models are someone else&rsquo;s tier</h3><p>Production reasoning, embedding and rerank models are owned by the platform team behind one gateway. This repository ships no vLLM or gateway on a product path.</p><p><a href="https://github.com/yonatan895/qdrant-pdf-rag/blob/main/docs/architecture.md">Ownership contract</a></p></div>
+<div class="card"><h3>Baseline decisions recorded as an ADR</h3><p>Qdrant on block storage, FastEmbed BM25, local RRF, and context-in rather than crawl for live state.</p><p><a href="https://github.com/yonatan895/qdrant-pdf-rag/blob/main/docs/adr/0001-baseline-decisions.md">ADR-0001</a></p></div>
+</div>
+
+<h2>Deployment shape</h2>
+<ul>
+<li>Qdrant runs as a three-replica StatefulSet, unprivileged, on block storage, reachable only inside the cluster. There is no public Qdrant route.</li>
+<li>The agent runs as a two-replica Deployment. An OAuth-protected console route is optional.</li>
+<li>Ingest is a one-shot job; the corpus volume may be read-only NFS or a PVC.</li>
+<li>Jaeger tracing is on by default for this repository&rsquo;s components.</li>
+</ul>
+<p>Source: <a href="https://github.com/yonatan895/qdrant-pdf-rag/blob/main/docs/architecture.md">architecture guide, workloads</a>. Other ADRs: <a href="https://github.com/yonatan895/qdrant-pdf-rag/blob/main/docs/adr/0003-zowe-mcp-read.md">ADR-0003 read-only live state</a>, <a href="https://github.com/yonatan895/qdrant-pdf-rag/blob/main/docs/adr/0004-operator-console-htmx.md">ADR-0004 operator console</a>, <a href="https://github.com/yonatan895/qdrant-pdf-rag/blob/main/docs/adr/0005-answer-feedback-data-boundary.md">ADR-0005 feedback data boundary</a>.</p>
+
+</div></main>
+<footer class="site"><div class="wrap">
+<p><a href="https://github.com/yonatan895/qdrant-pdf-rag">Source repository</a> &middot; <a href="https://github.com/yonatan895/qdrant-pdf-rag/blob/main/docs/licensing.md">Licensing</a> &middot; <a href="data/results.json">Results data (JSON)</a></p>
+<p>Repository code is licensed under Apache-2.0 (see <code>LICENSE</code>), although GitHub lists the repository license as &ldquo;Other&rdquo;. The third-party licensing review (<a href="https://github.com/yonatan895/qdrant-pdf-rag/issues/376">#376</a>) is still open and no owner disposition is recorded; see <a href="https://github.com/yonatan895/qdrant-pdf-rag/blob/main/docs/licensing.md">docs/licensing.md</a> for what is and is not established.</p>
+<p>No vendor manual text, documents or real-corpus answers appear on this site. Product names appear nominatively. No cookies, no analytics, no third-party scripts.</p>
+</div></footer>
+</body>
+</html>
