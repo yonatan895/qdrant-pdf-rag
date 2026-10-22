@@ -186,13 +186,20 @@ def _agent_url(raw: str) -> str:
     return f"{parts.scheme}://{parts.netloc}{parts.path.rstrip('/')}"
 
 
+# Upper bound of the per-request client timeout. It must exceed the longest
+# answer a deliberate measurement waits for (xhigh with the maximum thinking
+# reserve, issue #843); it is not a default and does not change any agent limit.
+_MAX_REQUEST_TIMEOUT_S = 1800
+
+
 def _request_timeout(raw: str) -> float:
+    message = f"request timeout must be 1–{_MAX_REQUEST_TIMEOUT_S} seconds"
     try:
         value = float(raw)
     except ValueError:
-        raise argparse.ArgumentTypeError("request timeout must be 1–600 seconds") from None
-    if not math.isfinite(value) or not 1 <= value <= 600:
-        raise argparse.ArgumentTypeError("request timeout must be 1–600 seconds")
+        raise argparse.ArgumentTypeError(message) from None
+    if not math.isfinite(value) or not 1 <= value <= _MAX_REQUEST_TIMEOUT_S:
+        raise argparse.ArgumentTypeError(message)
     return value
 
 
@@ -892,7 +899,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--agent-url", type=_agent_url, default=None,
                         help="evaluate an already deployed HTTP agent instead of local TestClient")
     parser.add_argument("--request-timeout", type=_request_timeout, default=300.0,
-                        help="HTTP-mode request timeout in seconds (1–600, default 300)")
+                        help=f"HTTP-mode request timeout in seconds (1–{_MAX_REQUEST_TIMEOUT_S}, default 300)")
     parser.add_argument("--temperature", type=float, default=0.0,
                         help="sampling temperature sent per request (default 0 for stable "
                              "comparisons, issue #596; pass the production setting explicitly "

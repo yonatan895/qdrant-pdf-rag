@@ -451,7 +451,7 @@ measurement. The agent URL accepts an HTTP(S) base with an optional Route
 prefix; URL credentials, query strings and fragments are rejected. Use the
 authorized local forward or trusted TLS endpoint. Redirects and environment
 proxy routing are disabled. `--request-timeout` sets the HTTP client timeout
-for search/answer calls (1–600 seconds, default 300); the pre-scoring health
+for search/answer calls (1–1800 seconds, default 300); the pre-scoring health
 call uses 10 seconds. The owning run controller supplies the overall deadline.
 Requests are single-shot, without retries. For long generations (for example
 `xhigh`), set the agent's `REQUEST_DEADLINE_S` below `--request-timeout`: a
