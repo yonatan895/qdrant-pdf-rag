@@ -116,6 +116,8 @@ Reading the tables:
   rows (SYS-02 rank 5, SYS-08 rank 4, SYS-09 ranks 3, 7, 8), and no retrieved gold-document hit names the requested code. The corpus has no
   code-entry chunks, so this is retrieval or representation (stale rules), not packing. The #591 question (did 806 and AFB lose their entry
   unit to packing) stays open until a rerun on a current-rules corpus.
+  *Resolved 2026-10-19:* on the current-rules corpus all six code rows are retrieved and packed with 0 drops
+  ([code-row diagnostic](2026-10-19-code-row-diagnostic.md), #826).
 
 ## Per-row tables (CMP, TBL, SYS)
 
