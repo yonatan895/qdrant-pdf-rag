@@ -300,6 +300,8 @@ PINNED_SETTING_DEFAULTS: dict[str, object] = {
     "feedback_store_path": "/data/feedback.sqlite3",
     "feedback_service_token": None,
     "feedback_retention_days": 180,
+    "feedback_purge_first_delay_s": 30.0,
+    "feedback_purge_interval_s": 86400.0,
     "request_max_concurrent": 0,
     "request_queue_max": 0,
     "request_queue_wait_s": 5.0,

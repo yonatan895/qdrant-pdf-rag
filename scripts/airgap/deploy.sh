@@ -23,6 +23,7 @@ check_secret_name "${GATEWAY_CA_CONFIGMAP:-}" GATEWAY_CA_CONFIGMAP
 resolve_observability
 resolve_agent_route
 resolve_network_policy
+resolve_feedback
 case "$IMAGE_SHA" in
     ""|HEAD) die "IMAGE_SHA must be the packed git SHA (see dist/MANIFEST.txt)" ;;
 esac
@@ -66,6 +67,10 @@ fi
 # Issue #373: the agent's unauthenticated HTTP port is namespace-scoped by
 # default. Enforcement and coexistence with site policies are site evidence.
 echo "==> NetworkPolicy $(describe_network_policy)"
+# Issue #804: the answer-feedback service is default off; enabling it refuses
+# (in map_values.py, before any mutation) a missing Secret name or a disabled
+# agent NetworkPolicy. Content stays on the kept claim even when disabled later.
+echo "==> Feedback service $(describe_feedback)"
 
 refuse_nfs_storage
 SNAPSHOT_STORAGE_CLASS=${SNAPSHOT_STORAGE_CLASS:-$STORAGE_CLASS}
@@ -84,6 +89,10 @@ DEPLOY_IMAGES="qdrant agent"
 [ "$AGENT_ROUTE" != "true" ] || DEPLOY_IMAGES="$DEPLOY_IMAGES oauth_proxy"
 # shellcheck disable=SC2086
 verify_registry_images $DEPLOY_IMAGES
+# The feedback pod runs the agent image: no extra registry read-back, but its
+# own StatefulSet is bound to the verified agent digest after rollout.
+RUNNING_IMAGES=$DEPLOY_IMAGES
+[ "$FEEDBACK_ENABLED" != "true" ] || RUNNING_IMAGES="$RUNNING_IMAGES feedback"
 
 KC=${KC:-$(kc)}
 check_gateway_ca
@@ -118,6 +127,10 @@ fi
 
 require_gateway_secret_keys llm-api-key embed-api-key rerank-api-key
 require_secret_keys "${PULL_SECRET:-}" .dockerconfigjson
+# Operator-created, never rendered: the bearer token both the service and the
+# agent read. Checked before any mutation (a missing key would otherwise show
+# as CreateContainerConfigError after the release).
+[ "$FEEDBACK_ENABLED" != "true" ] || require_secret_keys "$FEEDBACK_SECRET" service-token
 # Only first-party objects listed by this render may be adopted. Never take
 # resources belonging to a different release/controller. All deployments
 # in the owned namespace must be serialized by the operator.
@@ -282,10 +295,13 @@ else
     if [ "$JAEGER_DEPLOY" = "1" ]; then
         wait_rollout "deploy/jaeger" 120
     fi
+    if [ "$FEEDBACK_ENABLED" = "true" ]; then
+        wait_rollout "statefulset/rag-feedback" 120
+    fi
     # Tags can move after the registry read-back: the running pods must report
     # the verified digests (fail closed; legacy cleanup below is skipped).
     # shellcheck disable=SC2086
-    verify_running_images $DEPLOY_IMAGES
+    verify_running_images $RUNNING_IMAGES
     # Reconcile disabled legacy resources only after the selected workloads
     # are ready. PVCs are never members of this validated cleanup inventory.
     if [ -s dist/app-disabled-cleanup.json ]; then

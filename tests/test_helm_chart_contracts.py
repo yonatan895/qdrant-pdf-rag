@@ -22,6 +22,8 @@ from tests.helpers_helm import (
     run_new_template,
 )
 
+FEEDBACK_ON = {"feedback": {"enabled": True, "secretName": "fb-secret"}}
+
 
 def test_base_contract_with_independent_controls():
     """Agent defaults, types, probes and read-only credentials."""
@@ -446,7 +448,10 @@ def test_schema_rejects_invalid_selected_configuration():
 def test_chart_shape_no_qdrant_no_hook_no_secret_values():
     names = sorted(p.name for p in (CHART / "templates").glob("*.yaml"))
     text = "".join((CHART / "templates" / n).read_text() for n in names)
-    assert "kind: StatefulSet" not in text
+    # The only StatefulSet the chart owns is the feedback service (#804);
+    # Qdrant's is the vendored chart's.
+    stateful = [n for n in names if "kind: StatefulSet" in (CHART / "templates" / n).read_text()]
+    assert stateful == ["feedback-statefulset.yaml"]
     assert "helm.sh/hook" not in text
     assert "qdrant" in text.lower()
     schema_text = (CHART / "values.schema.json").read_text()
@@ -647,18 +652,22 @@ def test_every_rendered_pod_is_hardened_without_fixed_identities():
         {
             "route": {"enabled": True, "destinationCA": FAKE_CA},
             "ingest": {"enabled": True, "corpusPVC": "corpus-pvc"},
+            **FEEDBACK_ON,
         }
     )
+    # Every workload kind that carries a PodSpec, so a new kind cannot escape.
     pods = {
         key: doc["spec"]["template"]["spec"]
         for key, doc in docs.items()
-        if key[0] in ("Deployment", "Job")
+        if key[0] in ("Deployment", "StatefulSet", "Job", "DaemonSet", "CronJob")
     }
     assert set(pods) == {
         ("Deployment", "rag-agent"),
         ("Deployment", "jaeger"),
+        ("StatefulSet", "rag-feedback"),
         ("Job", "ingest"),
     }
+    assert pods["StatefulSet", "rag-feedback"]["automountServiceAccountToken"] is False
     assert {c["name"] for c in pods["Deployment", "rag-agent"]["containers"]} == {
         "agent",
         "oauth-proxy",
@@ -677,6 +686,9 @@ def _assert_app_read_only_paths(pod, container_name, writable_paths):
     assert actual_writable == writable_paths, f"{container_name} writable paths"
     volumes = {volume["name"]: volume for volume in pod["volumes"]}
     assert volumes[mounts["/tmp"]["name"]] == {"name": mounts["/tmp"]["name"], "emptyDir": {}}
+    if container_name == "feedback":
+        assert volumes[mounts["/data"]["name"]]["persistentVolumeClaim"] == {
+            "claimName": "rag-feedback-data"}
     if container_name == "ingest":
         assert mounts["/corpus"]["readOnly"] is True
         assert volumes[mounts["/work"]["name"]]["persistentVolumeClaim"] == {"claimName": "ingest-work"}
@@ -689,11 +701,12 @@ def test_app_read_only_roots_keep_only_declared_writable_paths():
     separate evidence for whether the declared paths cover runtime writes.
     """
     extras = {"route": {"enabled": True, "destinationCA": FAKE_CA},
-              "gateway": {"caConfigMapName": "model-ca"}}
+              "gateway": {"caConfigMapName": "model-ca"}, **FEEDBACK_ON}
     docs = run_new_template({**extras, "ingest": {"enabled": True, "corpusPVC": "corpus-pvc"}})
     for key, container_name, writable_paths in (
         (("Deployment", "rag-agent"), "agent", {"/tmp"}),
         (("Job", "ingest"), "ingest", {"/tmp", "/work"}),
+        (("StatefulSet", "rag-feedback"), "feedback", {"/tmp", "/data"}),
     ):
         pod = docs[key]["spec"]["template"]["spec"]
         _assert_app_read_only_paths(pod, container_name, writable_paths)
@@ -857,3 +870,220 @@ def test_networkpolicy_schema_refuses_invalid_selection(mutate):
     r = _helm_template_with_values(values)
     assert r.returncode != 0
     assert "networkPolicy" in r.stderr
+
+
+# ------------------------------------------------ feedback service (#804)
+
+FEEDBACK_KEYS = [
+    ("StatefulSet", "rag-feedback"), ("PersistentVolumeClaim", "rag-feedback-data"),
+    ("Service", "rag-feedback"), ("NetworkPolicy", "rag-feedback-ingress"),
+]
+FEEDBACK_POLICY = ("NetworkPolicy", "rag-feedback-ingress")
+
+
+def test_feedback_off_by_default_renders_nothing_and_changes_nothing():
+    """Default off: no feedback object, no FEEDBACK_* on the agent, and an
+    explicit enabled=false renders exactly the default (byte-identical)."""
+    default = run_new_template({})
+    assert not [k for k in default if "feedback" in k[1]]
+    assert not [n for n in env_map(default["Deployment", "rag-agent"]) if n.startswith("FEEDBACK")]
+    assert run_new_template({"feedback": {"enabled": False}}) == default
+    # Settings made while disabled do not leak a thing into the render.
+    assert run_new_template({"feedback": {"enabled": False, "secretName": "x", "storageSize": "1Ti"}}) == default
+    raw = _helm_template_with_values(base_values())
+    assert "rag-feedback" not in raw.stdout and "FEEDBACK" not in raw.stdout
+
+
+def test_feedback_enabled_workload_contract():
+    docs = run_new_template({**FEEDBACK_ON, "_namespace": "rag-ns"})
+    assert {k for k in docs if "feedback" in k[1]} == set(FEEDBACK_KEYS)
+    sts = docs["StatefulSet", "rag-feedback"]
+    assert sts["metadata"]["namespace"] == "rag-ns"
+    spec = sts["spec"]
+    # Single writer: one replica, ordered, selector = pod label = Service/policy selector.
+    assert spec["replicas"] == 1 and spec["podManagementPolicy"] == "OrderedReady"
+    assert spec["serviceName"] == "rag-feedback"
+    assert spec["selector"]["matchLabels"] == {"app": "rag-feedback"}
+    assert spec["template"]["metadata"]["labels"] == {"app": "rag-feedback"}
+    assert "volumeClaimTemplates" not in spec  # standalone, kept claim (D2)
+    container = container_map(sts)["feedback"]
+    assert list(container_map(sts)) == ["feedback"]
+    # The existing agent image, started through the service entry point with
+    # exactly one uvicorn worker (no --workers).
+    assert container["image"] == f"reg.internal/qdrant-pdf-rag-agent:{IMAGE_SHA}"
+    assert container["command"] == ["python3", "-m", "uvicorn"]
+    assert container["args"] == ["--factory", "mainframe_rag.feedback.service:app_from_env",
+                                 "--host", "0.0.0.0", "--port", "8080"]
+    env = env_map(sts, "feedback")
+    # Exactly this env set (no Qdrant, model, gateway or OTLP settings, and no
+    # FEEDBACK_ENABLED, which is the agent's client switch).
+    assert set(env) == {"FEEDBACK_STORE_PATH", "FEEDBACK_RETENTION_DAYS", "METRICS_ENABLED",
+                        "FEEDBACK_SERVICE_TOKEN"}
+    assert {k: v["value"] for k, v in env.items() if "value" in v} == {
+        "FEEDBACK_STORE_PATH": "/data/feedback.sqlite3", "FEEDBACK_RETENTION_DAYS": "180",
+        "METRICS_ENABLED": "false"}
+    assert env["FEEDBACK_SERVICE_TOKEN"]["valueFrom"]["secretKeyRef"] == {
+        "key": "service-token", "name": "fb-secret"}
+    assert container["readinessProbe"]["httpGet"] == {"path": "/healthz", "port": "http"}
+    assert container["livenessProbe"]["httpGet"] == {"path": "/healthz", "port": "http"}
+    assert container["livenessProbe"]["failureThreshold"] == 6
+    assert container["resources"] == {"requests": {"cpu": "50m", "memory": "64Mi"},
+                                      "limits": {"cpu": "250m", "memory": "256Mi"}}
+    assert spec["template"]["spec"]["imagePullSecrets"] == []
+    assert "serviceAccountName" not in spec["template"]["spec"]
+
+
+def test_feedback_claim_service_and_agent_wiring():
+    docs = run_new_template({"feedback": {**FEEDBACK_ON["feedback"], "storageSize": "20Gi",
+                                          "retentionDays": 30},
+                             "storage": {"className": "fast-block"}, "metrics": {"enabled": True}})
+    pvc = docs["PersistentVolumeClaim", "rag-feedback-data"]
+    assert pvc["metadata"]["annotations"]["helm.sh/resource-policy"] == "keep"
+    assert pvc["spec"] == {"accessModes": ["ReadWriteOnce"], "storageClassName": "fast-block",
+                           "resources": {"requests": {"storage": "20Gi"}}}
+    env = env_map(docs["StatefulSet", "rag-feedback"], "feedback")
+    assert env["FEEDBACK_RETENTION_DAYS"]["value"] == "30" and env["METRICS_ENABLED"]["value"] == "true"
+    svc = docs["Service", "rag-feedback"]
+    assert svc["spec"]["type"] == "ClusterIP" and svc["spec"]["selector"] == {"app": "rag-feedback"}
+    assert svc["spec"]["ports"] == [{"name": "http", "port": 8080, "targetPort": "http"}]
+    assert not [k for k in docs if k[0] in ("Route", "Ingress")]
+    # The agent reaches the Service by short name with the same Secret key.
+    agent = env_map(docs["Deployment", "rag-agent"])
+    assert agent["FEEDBACK_ENABLED"]["value"] == "true"
+    assert agent["FEEDBACK_URL"]["value"] == "http://rag-feedback:8080"
+    assert agent["FEEDBACK_API_KEY"]["valueFrom"]["secretKeyRef"] == {
+        "key": "service-token", "name": "fb-secret"}
+    claim = docs["StatefulSet", "rag-feedback"]["spec"]["template"]["spec"]["volumes"]
+    assert {"name": "data", "persistentVolumeClaim": {"claimName": "rag-feedback-data"}} in claim
+
+
+def test_feedback_pod_holds_no_credential_other_than_its_own_token():
+    docs = run_new_template({**FEEDBACK_ON, "gateway": {"apiKeySecretName": "gw-keys"},
+                             "tracing": {"deploymentEnvironment": "prod"}})
+    text = json.dumps(docs["StatefulSet", "rag-feedback"])
+    for forbidden in ("QDRANT", "gw-keys", "LLM_", "EMBED_", "RERANK", "OTEL", "apikey"):
+        assert forbidden not in text, forbidden
+    assert text.count("secretKeyRef") == 1
+
+
+def test_feedback_policy_admits_agent_pods_only_and_monitoring_only_with_metrics():
+    docs = run_new_template({**FEEDBACK_ON, "networkPolicy": {"allowedNamespaces": ["mcp"]}})
+    policy = docs[FEEDBACK_POLICY]
+    assert policy["spec"]["podSelector"] == {"matchLabels": {"app": "rag-feedback"}}
+    assert policy["spec"]["policyTypes"] == ["Ingress"]
+    assert policy["spec"]["ingress"] == [
+        {"from": [{"podSelector": {"matchLabels": {"app": "rag-agent"}}}],
+         "ports": [{"protocol": "TCP", "port": 8080}]}]
+    # The agent policy is unchanged by the feedback service and does not select it.
+    assert docs[POLICY_KEY]["spec"]["podSelector"] == {"matchLabels": {"app": "rag-agent"}}
+    with_metrics = run_new_template({**FEEDBACK_ON, "metrics": {"enabled": True}})[FEEDBACK_POLICY]
+    assert with_metrics["spec"]["ingress"][1:] == [
+        {"from": [{"namespaceSelector": {"matchLabels": MONITORING_LABEL}},
+                  {"namespaceSelector": {"matchLabels": UWM_NAME}}],
+         "ports": [{"protocol": "TCP", "port": 8080}]}]
+
+
+def _feedback_allows(policy, source_ns, ns_labels, pod_labels, port, release_ns="ns"):
+    """Independent NetworkPolicy ingress semantics for one pod (in namespace
+    `source_ns` with `ns_labels`, carrying `pod_labels`) reaching a feedback
+    pod. A podSelector peer matches pods of the release namespace only; a
+    namespaceSelector peer matches any pod of a matching namespace; the rule's
+    ports must match too. Enforcement is the CNI's and stays site evidence."""
+    for rule in policy["spec"]["ingress"]:
+        if port not in {p["port"] for p in rule["ports"] if p["protocol"] == "TCP"}:
+            continue
+        for peer in rule["from"]:
+            if set(peer) == {"podSelector"}:
+                want = peer["podSelector"].get("matchLabels", {})
+                if source_ns == release_ns and all(pod_labels.get(k) == v for k, v in want.items()):
+                    return True
+            elif set(peer) == {"namespaceSelector"}:
+                want = peer["namespaceSelector"]["matchLabels"]
+                if all(ns_labels.get(k) == v for k, v in want.items()):
+                    return True
+            else:
+                raise AssertionError(f"unexpected peer shape: {peer}")
+    return False
+
+
+def test_feedback_policy_semantics_for_the_documented_counterexamples():
+    policy = run_new_template({**FEEDBACK_ON, "metrics": {"enabled": True},
+                               "networkPolicy": {"allowedNamespaces": ["mcp"]}})[FEEDBACK_POLICY]
+    agent = {"app": "rag-agent"}
+    here = {"kubernetes.io/metadata.name": "ns"}
+    # Agent pod of the release namespace: allowed on 8080 only.
+    assert _feedback_allows(policy, "ns", here, agent, 8080)
+    assert not _feedback_allows(policy, "ns", here, agent, 9090)
+    # The ingest Job, a debug pod and any other pod of the same namespace: denied
+    # (unlike rag-agent-ingress, which admits podSelector {}).
+    for labels in ({"app": "rag-ingest"}, {"job-name": "ingest"}, {}):
+        assert not _feedback_allows(policy, "ns", here, labels, 8080)
+    # An agent-labelled pod in another namespace, and an allowedNamespaces
+    # namespace (admitted to the agent, not to feedback): denied.
+    assert not _feedback_allows(policy, "elsewhere", {"kubernetes.io/metadata.name": "elsewhere"}, agent, 8080)
+    assert not _feedback_allows(policy, "mcp", {"kubernetes.io/metadata.name": "mcp"}, {}, 8080)
+    # Monitoring namespaces (metrics on): admitted by label or by UWM name, 8080 only.
+    for name, labels in (("openshift-monitoring", MONITORING_LABEL),
+                         ("openshift-user-workload-monitoring", UWM_NAME)):
+        assert _feedback_allows(policy, name, labels, {}, 8080)
+        assert not _feedback_allows(policy, name, labels, {}, 8443)
+    assert not _feedback_allows(policy, "other", {"kubernetes.io/metadata.name": "other"}, {}, 8080)
+    # Metrics off: monitoring is not admitted.
+    off = run_new_template({**FEEDBACK_ON})[FEEDBACK_POLICY]
+    assert not _feedback_allows(off, "openshift-monitoring", MONITORING_LABEL, {}, 8080)
+
+
+def test_feedback_servicemonitor_follows_the_agent_decision_and_authenticates():
+    key = ("ServiceMonitor", "rag-feedback")
+    docs = run_new_template({**FEEDBACK_ON, "metrics": {"enabled": True}})
+    assert docs[key]["spec"]["selector"] == {"matchLabels": {"app": "rag-feedback"}}
+    assert docs[key]["spec"]["endpoints"] == [{
+        "port": "http", "path": "/metrics", "interval": "30s", "scrapeTimeout": "10s",
+        "authorization": {"credentials": {"name": "fb-secret", "key": "service-token"}}}]
+    # Metrics off, monitor explicitly off, or feedback off: no monitor.
+    assert key not in run_new_template({**FEEDBACK_ON})
+    assert key not in run_new_template({**FEEDBACK_ON, "metrics": {"enabled": True, "serviceMonitor": {"enabled": False}}})
+    assert key not in run_new_template({"metrics": {"enabled": True}})
+    # The agent's own contract is untouched by the feedback monitor.
+    assert ("ServiceMonitor", "rag-agent") in docs
+
+
+@pytest.mark.parametrize("mutate", [
+    {"feedback": {"enabled": "true", "secretName": "s"}},
+    {"feedback": {"enabled": True, "secretName": ""}},
+    {"feedback": {"enabled": True, "secretName": "Bad_Name"}},
+    {"feedback": {"enabled": True, "secretName": "s", "storageSize": "ten"}},
+    {"feedback": {"enabled": True, "secretName": "s", "storageSize": "0Gi"}},
+    {"feedback": {"enabled": True, "secretName": "s", "retentionDays": 0}},
+    {"feedback": {"enabled": True, "secretName": "s", "retentionDays": 3651}},
+    {"feedback": {"enabled": True, "secretName": "s", "retentionDays": "180"}},
+    {"feedback": {"enabled": True, "secretName": "s", "extra": 1}},
+])
+def test_feedback_schema_refuses_invalid_selection(mutate):
+    values = base_values()
+    values.update(mutate)
+    r = _helm_template_with_values(values)
+    assert r.returncode != 0 and "feedback" in r.stderr
+
+
+def test_feedback_requires_the_networkpolicy_and_a_secret():
+    values = base_values()
+    values["feedback"] = {"enabled": True, "secretName": "s"}
+    values["networkPolicy"] = {"enabled": False, "allowedNamespaces": []}
+    r = _helm_template_with_values(values)
+    assert r.returncode != 0 and "requires networkPolicy.enabled=true" in r.stderr
+    # Not enabled: the policy switch stays independent.
+    values["feedback"] = {"enabled": False}
+    assert _helm_template_with_values(values).returncode == 0
+
+
+def test_feedback_claim_is_the_only_object_retained_when_disabled():
+    """Disabling renders no feedback object at all (Helm prunes workload,
+    Service, policy and monitor); the claim's keep policy is what retains it."""
+    on = run_new_template({**FEEDBACK_ON, "metrics": {"enabled": True}})
+    off = run_new_template({"metrics": {"enabled": True}})
+    assert {k for k in on if "feedback" in k[1]} == {
+        *FEEDBACK_KEYS, ("ServiceMonitor", "rag-feedback")}
+    assert not [k for k in off if "feedback" in k[1]]
+    assert on["PersistentVolumeClaim", "rag-feedback-data"]["metadata"]["annotations"] == {
+        "helm.sh/resource-policy": "keep"}

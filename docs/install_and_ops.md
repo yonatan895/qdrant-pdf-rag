@@ -666,6 +666,13 @@ PULL_SECRET=internal-registry-pull-secret
 # namespaces calling rag-agent:8080 (for example an MCP server) are denied.
 # AGENT_NETWORK_POLICY=false renders no policy. See deploy.md#agent-networkpolicy.
 #AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES=mcp
+
+# Optional, default OFF (issue #804, ADR-0005): the answer-feedback service.
+# Needs the Secret below and AGENT_NETWORK_POLICY=true (the default). See §4.4.3.
+#FEEDBACK_ENABLED=true
+#FEEDBACK_SECRET=rag-feedback-token
+#FEEDBACK_STORAGE_SIZE=10Gi
+#FEEDBACK_RETENTION_DAYS=180
 ```
 
 #### Platform model endpoints (reasoning / embed / optional rerank)
@@ -942,6 +949,40 @@ contract (details: `docs/deploy.md`).
 > `sh scripts/tools/run-task.sh artifacts:wheelhouse artifacts:bm25` plus a connected image rebuild/push and a
 > fresh pack — air-gap images install only from the baked wheelhouse.
 
+### 4.4.3 Answer-feedback service (optional, default off, ADR-0005)
+
+The console can rate answers and keep them as quality records. The records hold
+question and answer text, so they live only in the feedback service's own claim.
+Rules, lifecycle and limits: [deploy.md](deploy.md#feedback-service).
+
+1. Create the token Secret once, in the release namespace. The value never goes
+   into `airgap.env`, values or git:
+
+   ```sh
+   oc -n "$NAMESPACE" create secret generic rag-feedback-token \
+     --from-literal=service-token="$(openssl rand -hex 32)"
+   ```
+
+2. Set `FEEDBACK_ENABLED=true` and `FEEDBACK_SECRET=rag-feedback-token` (and, if
+   wanted, `FEEDBACK_STORAGE_SIZE` and `FEEDBACK_RETENTION_DAYS`), then run
+   `airgap:validate` and `airgap:deploy`. Validation refuses a missing Secret
+   name or key, a malformed size or retention, and `AGENT_NETWORK_POLICY=false`
+   before anything changes. The deploy waits for `statefulset/rag-feedback`.
+3. Check: `oc -n "$NAMESPACE" get statefulset,pvc,networkpolicy rag-feedback
+   rag-feedback-data rag-feedback-ingress`; the pod is Ready; rate an answer in
+   the console and confirm the next ordinary answer is recorded (the rating
+   control works for it). With `METRICS_ENABLED=true` the service's
+   `rag_feedback_purge_total{outcome="truncated"}` rises after the first purge
+   (about 30 s after the pod starts); `deferred` or `error` series that keep
+   growing mean expired text may still be on the volume.
+4. Disabling (`FEEDBACK_ENABLED=false`) removes the workload but **keeps the
+   claim and its content, and nothing purges while it is off**. To retire the
+   feature for good, delete the claim yourself: `oc -n "$NAMESPACE" delete pvc
+   rag-feedback-data`. Any backup or snapshot of the claim also holds question
+   and answer text and must expire within the retention window.
+5. Rotating the token: replace the Secret value, then restart both sides:
+   `oc -n "$NAMESPACE" rollout restart statefulset/rag-feedback deployment/rag-agent`.
+
 ### 4.5 Corpus Ingestion
 
 #### Gateway readiness probe
@@ -1037,6 +1078,7 @@ beyond the namespace record the platform team's evidence and owner instead.
 | OAuth Route | A fresh unauthenticated `GET /ui` may show the provider chooser (403); `/oauth/start` redirects to OpenShift OAuth; login returns to `/ui`; a fresh session still requires authentication. No direct public API, Jaeger or Qdrant Route. |
 | Certificates | Browser and CLI verify the Route hostname and ingress chain without bypass. The Route is `reencrypt`, targets OAuth 8443 and trusts the Service CA; the serving Secret matches its service identity. |
 | Agent ingress | `oc -n "$NAMESPACE" get networkpolicy rag-agent-ingress` exists (or `AGENT_NETWORK_POLICY=false` is a recorded site decision). Pods stay Ready after it is applied (probes). From a pod in a **different, unlisted** namespace, `rag-agent:8080` and the pod IP `:8080` fail while the same call from this namespace succeeds; the Route login still works (router to 8443) and a UWM scrape of `/metrics` succeeds when metrics are on. Record that the router and monitoring namespaces carry the `network.openshift.io/policy-group` labels (cluster-scoped read: platform evidence) and that no site allow-all policy selects the agent pods (policies are additive and would void the restriction). Repository tests prove the rendered rules only, not enforcement. |
+| Feedback ingress (only with `FEEDBACK_ENABLED`) | `oc -n "$NAMESPACE" get networkpolicy rag-feedback-ingress` exists. From an agent pod, `rag-feedback:8080/healthz` answers; from the ingest Job pod, a debug pod and a pod in another namespace, `rag-feedback:8080` and the pod IP fail; an unauthenticated request to an agent-reachable data route is 401. The claim `rag-feedback-data` is Bound on the intended block class and the pod writes it under `restricted-v2`. Record that no site allow-all policy selects the feedback pod (policies are additive) and, for a default-deny egress site, that agent to feedback is allowed. Repository tests prove the rendered rules only, not enforcement. |
 | Egress | Prove a public TCP destination is reachable from each application policy context first; after the namespace default-deny egress policy with narrow DNS, Qdrant, Jaeger, OAuth/API and gateway allows, a bounded direct-IP connection to that address fails while DNS and gateway calls succeed. Repeat ingest, gateway streaming probe, retrieval, tracing, OAuth login, cited answers and stream endings under the policy. An unresolved name or invalid certificate is not evidence of blocking. |
 | Node pulls | An uncached public image pull fails and an uncached internal-registry pull succeeds, recorded with digests and events. A cached image proves neither; NetworkPolicy success does not imply node isolation. |
 

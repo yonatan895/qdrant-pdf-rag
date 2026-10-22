@@ -1112,6 +1112,8 @@ def test_route_refusal_then_corrected_run_succeeds(tree):
 
 @pytest.mark.parametrize(("backend", "enabled"), [
     ("rag-agent", True), ("rag-agent", False), ("qdrant", False), ("qdrant-headless", False),
+    # #804: the content store is a protected Service whether or not it is enabled.
+    ("rag-feedback", False), ("rag-feedback", True),
 ])
 def test_other_routes_to_agent_or_qdrant_refuse_before_any_mutation(tree, backend, enabled):
     routes = _route_list(tree, _route("public-console", to=backend))
@@ -1463,3 +1465,181 @@ def test_post_release_operator_ownership_is_not_deleted_on_route_drift(tree):
     assert "ownership is not established" in result.stderr
     assert "exposure is NOT verified" in result.stderr
     assert "delete" not in _helm_log(tree)
+
+
+# ------------------------------------------------ feedback service (#804)
+
+FEEDBACK_ENV = (("FEEDBACK_ENABLED", "true"), ("FEEDBACK_SECRET", "fb-secret"))
+FEEDBACK_OBJECTS = [
+    ("apps/v1", "StatefulSet", "rag-feedback"),
+    ("v1", "Service", "rag-feedback"),
+    ("v1", "PersistentVolumeClaim", "rag-feedback-data"),
+    ("networking.k8s.io/v1", "NetworkPolicy", "rag-feedback-ingress"),
+    ("monitoring.coreos.com/v1", "ServiceMonitor", "rag-feedback"),
+]
+HELM_OWNED = {"annotations": {"meta.helm.sh/release-name": "mainframe-rag",
+                              "meta.helm.sh/release-namespace": "ns"},
+              "labels": {"app.kubernetes.io/managed-by": "Helm"}}
+
+
+def _live_inventory(tree, objects, **meta_extra):
+    path = tree[0] / "existing-feedback.json"
+    path.write_text(json.dumps({"apiVersion": "v1", "kind": "List", "items": [
+        {"apiVersion": api, "kind": kind, "metadata": {"name": name, "namespace": "ns", **meta_extra}}
+        for api, kind, name in objects]}))
+    return str(path)
+
+
+def test_feedback_is_off_by_default_and_the_deploy_is_unchanged(tree):
+    r = _run(tree)
+    assert r.returncode == 0, r.stderr
+    assert "==> Feedback service off (FEEDBACK_ENABLED=false)" in r.stdout
+    rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
+    assert "rag-feedback" not in rendered and "FEEDBACK" not in rendered
+    assert "rag-feedback" not in _helm_log(tree)
+    assert "rag-feedback" not in (tree[0] / "dist" / "mainframe-rag-release-values.yaml").read_text()
+
+
+def test_feedback_enabled_renders_checks_the_secret_key_and_waits_for_the_statefulset(tree):
+    r = _run(tree, *FEEDBACK_ENV, ("METRICS_ENABLED", "true"), ("FEEDBACK_RETENTION_DAYS", "90"),
+             ("FEEDBACK_STORAGE_SIZE", "20Gi"))
+    assert r.returncode == 0, r.stderr
+    assert "==> Feedback service on: StatefulSet rag-feedback (1 replica)" in r.stdout
+    assert "token from Secret fb-secret (key service-token)" in r.stdout
+    values = (tree[0] / "dist" / "mainframe-rag-release-values.yaml").read_text()
+    assert 'secretName: "fb-secret"' in values and "retentionDays: 90" in values
+    assert 'storageSize: "20Gi"' in values
+    rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
+    for kind, name in (("StatefulSet", "rag-feedback"), ("Service", "rag-feedback"),
+                       ("PersistentVolumeClaim", "rag-feedback-data"),
+                       ("NetworkPolicy", "rag-feedback-ingress"), ("ServiceMonitor", "rag-feedback")):
+        assert re.search(rf"kind: {kind}\nmetadata:\n  name: {name}\n", rendered), (kind, name)
+    assert "FEEDBACK_URL" in rendered and "name: FEEDBACK_API_KEY" in rendered
+    log = _helm_log(tree)
+    assert "get secret fb-secret" in log.replace("\n", " ")  # key presence only, via go-template
+    assert "statefulset/rag-feedback" in log
+    # The agent rollout is still waited for and the PVC is never a delete target.
+    assert "deploy/rag-agent" in log and "persistentvolumeclaim" not in log.lower()
+
+
+def test_missing_feedback_service_token_key_blocks_before_mutation(tree):
+    r = _run(tree, *FEEDBACK_ENV, ("MISSING_KEY", "service-token"))
+    assert r.returncode != 0
+    assert "required Secret key is missing or empty: service-token" in r.stderr
+    assert "upgrade" not in _helm_log(tree)
+
+
+@pytest.mark.parametrize(("env", "message"), [
+    ((("FEEDBACK_ENABLED", "true"),), "FEEDBACK_SECRET is required"),
+    ((("FEEDBACK_ENABLED", "maybe"),), "FEEDBACK_ENABLED must be true/false"),
+    ((("FEEDBACK_ENABLED", "true"), ("FEEDBACK_SECRET", "Bad_Name")), "FEEDBACK_SECRET must be"),
+    (FEEDBACK_ENV + (("AGENT_NETWORK_POLICY", "false"),), "requires AGENT_NETWORK_POLICY to be enabled"),
+    (FEEDBACK_ENV + (("FEEDBACK_STORAGE_SIZE", "ten"),), "FEEDBACK_STORAGE_SIZE must be"),
+    (FEEDBACK_ENV + (("FEEDBACK_RETENTION_DAYS", "0"),), "FEEDBACK_RETENTION_DAYS must be"),
+    (FEEDBACK_ENV + (("FEEDBACK_RETENTION_DAYS", "3651"),), "FEEDBACK_RETENTION_DAYS must be"),
+])
+def test_invalid_feedback_selection_fails_before_any_mutation(tree, env, message):
+    r = _run(tree, *env)
+    assert r.returncode != 0
+    assert message in r.stderr
+    log = _helm_log(tree)
+    assert "upgrade" not in log and "new-project" not in log
+
+
+def test_next_ordinary_deploy_adopts_every_owned_feedback_object(tree):
+    """The deploy after the one that created the feedback service finds all five
+    objects in the live inventory. Without them in check_app_ownership.ALLOWED
+    the preflight refused the deploy that created them (lifecycle, not first
+    install: the #812 failure)."""
+    inventory = _live_inventory(tree, FEEDBACK_OBJECTS, **HELM_OWNED)
+    r = _run(tree, *FEEDBACK_ENV, ("METRICS_ENABLED", "true"), ("OWNERSHIP_FILE", inventory))
+    assert r.returncode == 0, r.stderr
+    assert "ownership preflight refused" not in r.stderr
+    assert "upgrade" in _helm_log(tree)
+
+
+@pytest.mark.parametrize("foreign", [
+    {"annotations": {"meta.helm.sh/release-name": "other"}},
+    {"annotations": {"meta.helm.sh/release-namespace": "elsewhere"}},
+    {"ownerReferences": [{"name": "operator"}]},
+    {"labels": {"app.kubernetes.io/managed-by": "other"}},
+])
+@pytest.mark.parametrize("obj", FEEDBACK_OBJECTS, ids=[o[1] for o in FEEDBACK_OBJECTS])
+def test_foreign_feedback_objects_are_refused_before_any_mutation(tree, obj, foreign):
+    inventory = _live_inventory(tree, [obj], **foreign)
+    r = _run(tree, *FEEDBACK_ENV, ("OWNERSHIP_FILE", inventory))
+    assert r.returncode != 0
+    assert "ownership preflight refused" in r.stderr
+    assert "upgrade" not in _helm_log(tree)
+
+
+def test_unlisted_feedback_name_is_not_application_inventory(tree):
+    inventory = _live_inventory(tree, [("v1", "PersistentVolumeClaim", "rag-feedback-data-old")])
+    r = _run(tree, *FEEDBACK_ENV, ("OWNERSHIP_FILE", inventory))
+    assert r.returncode != 0 and "upgrade" not in _helm_log(tree)
+
+
+def test_disable_keeps_the_claim_and_re_enable_adopts_it(tree):
+    """D6 lifecycle: disabling renders no feedback object and adds no cleanup
+    entry (a PVC is never in the cleanup inventory), the claim survives, and the
+    next ordinary enabling deploy adopts the retained claim and proceeds."""
+    disabled = _run(tree)
+    assert disabled.returncode == 0, disabled.stderr
+    assert "rag-feedback" not in (tree[0] / "dist" / "agent-rendered.yaml").read_text()
+    cleanup = (tree[0] / "dist" / "app-disabled-cleanup.json")
+    assert not cleanup.exists() or "rag-feedback" not in cleanup.read_text()
+    assert "delete" not in _helm_log(tree).split()
+    # Only the retained claim is live (workload, Service and policy were pruned).
+    retained = _live_inventory(
+        tree, [("v1", "PersistentVolumeClaim", "rag-feedback-data")], **HELM_OWNED)
+    enabled = _run(tree, *FEEDBACK_ENV, ("OWNERSHIP_FILE", retained))
+    assert enabled.returncode == 0, enabled.stderr
+    assert "--take-ownership" in _helm_log(tree)
+    assert "kind: PersistentVolumeClaim\nmetadata:\n  name: rag-feedback-data" in (
+        tree[0] / "dist" / "agent-rendered.yaml").read_text()
+
+
+def _write_feedback_pod(tree, digest: str, *, replicas: int = 1) -> None:
+    pods = json.loads((tree[0] / "pods.json").read_text())
+    repo = ROLE_REPOS["agent"]
+    spec = {"containers": [{"name": "feedback", "image": f"{repo}:tag"}]}
+    pods["items"].append({
+        "kind": "StatefulSet", "metadata": {"name": "rag-feedback", "namespace": "ns", "uid": "fb-sts"},
+        "spec": {"replicas": 1, "selector": {"matchLabels": {"app": "rag-feedback"}},
+                 "template": {"spec": spec}}, "status": {"updateRevision": "fb-rev"}})
+    for n in range(replicas):
+        pods["items"].append({
+            "kind": "Pod", "metadata": {"name": f"rag-feedback-{n}", "namespace": "ns",
+                "labels": {"app": "rag-feedback", "controller-revision-hash": "fb-rev"},
+                "ownerReferences": [{"kind": "StatefulSet", "uid": "fb-sts", "controller": True}]},
+            "spec": spec, "status": {"phase": "Running", "containerStatuses": [
+                {"name": "feedback", "imageID": f"{repo}@{digest}"}]}})
+    (tree[0] / "pods.json").write_text(json.dumps(pods))
+
+
+def test_release_path_verifies_the_feedback_pod_against_the_agent_digest(tree):
+    digests = _release(tree)
+    _write_feedback_pod(tree, digests["agent"])
+    r = _run(tree, *FEEDBACK_ENV)
+    assert r.returncode == 0, r.stderr
+    assert "running images match the verified registry digests (4 roles)" in r.stdout
+    values = (tree[0] / "dist" / "mainframe-rag-release-values.yaml").read_text()
+    assert f'digest: "{digests["agent"]}"' in values
+    rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
+    assert rendered.count(f"image: reg.internal/qdrant-pdf-rag-agent@{digests['agent']}") == 2
+
+
+@pytest.mark.parametrize("problem", ["wrong-digest", "missing-pod"])
+def test_feedback_pod_with_another_image_or_no_pod_fails_after_rollout(tree, problem):
+    digests = _release(tree)
+    if problem == "wrong-digest":
+        _write_feedback_pod(tree, "sha256:" + "9" * 64)
+    else:
+        _write_feedback_pod(tree, digests["agent"], replicas=0)
+    r = _run(tree, *FEEDBACK_ENV)
+    assert r.returncode != 0
+    assert "running pods do not use the verified registry images" in r.stderr
+    if problem == "wrong-digest":
+        assert "pod rag-feedback-0 container feedback runs sha256:" + "9" * 64 in r.stderr
+    else:
+        assert "StatefulSet rag-feedback has 0 current pods, expected 1" in r.stderr

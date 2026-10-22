@@ -197,3 +197,27 @@ def test_oauth_proxy_requires_its_own_container_status():
     assert mod.check(document, expected, "ns", "qdrant") == []
 
 
+
+
+def test_feedback_statefulset_is_bound_to_its_own_workload_and_digest():
+    """#804: the feedback pod runs the agent image but is a different workload;
+    it is verified through its own StatefulSet, never through rag-agent."""
+    document = rollout(name="rag-feedback", container="feedback")
+    assert check(document, role="feedback") == []
+    assert check(document, role="feedback", digest=OTHER) == [
+        f"pod rag-feedback-0 container feedback runs {DIGEST}, expected {OTHER}"]
+    # The Deployment-shaped agent role does not find a StatefulSet by that name.
+    assert check(document, role="agent") == ["missing or ambiguous Deployment rag-agent"]
+    # The feedback role requires its StatefulSet to exist at all.
+    assert check({"items": []}, role="feedback") == ["missing or ambiguous StatefulSet rag-feedback"]
+
+
+def test_feedback_container_with_another_repository_is_rejected():
+    document = rollout(name="rag-feedback", container="feedback")
+    for item in document["items"]:
+        spec = item.get("spec", {})
+        containers = spec.get("template", {}).get("spec", {}).get("containers", []) + spec.get("containers", [])
+        for c in containers:
+            c["image"] = "registry.example/other/image:v1"
+    problems = check(document, role="feedback")
+    assert problems and all("unexpected repository" in p for p in problems)

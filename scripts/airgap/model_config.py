@@ -35,6 +35,7 @@ MODEL_CONFIG_KEYS = (
 OPERATOR_BOOL_KEYS = (
     "UI_ENABLED", "CONTEXTUAL_EMBED_ENABLED", "INGEST_ALIAS_PUBLISH",
     "INGEST_REINGEST", "CHAT_CONDENSE_ENABLED", "LLM_STREAM", "AGENT_NETWORK_POLICY",
+    "FEEDBACK_ENABLED",
 )
 
 # Agent ingress NetworkPolicy (issue #373): default ON; the allow-list names
@@ -90,6 +91,53 @@ def network_policy(values: Mapping[str, str]) -> tuple[bool, list[str]]:
             "refusing an allow-list for a policy that is not rendered"
         )
     return enabled, names
+
+
+# Answer-feedback service (issue #804, ADR-0005), default OFF. The enabled flag
+# is a strict boolean; the secret is the operator-created Secret holding the
+# bearer token; size and retention are the operator's data decisions. One
+# validation owner for validate.sh and map_values.py, like network_policy.
+FEEDBACK_KEYS = ("FEEDBACK_ENABLED", "FEEDBACK_SECRET", "FEEDBACK_STORAGE_SIZE",
+                 "FEEDBACK_RETENTION_DAYS")
+FEEDBACK_DEFAULT_STORAGE_SIZE = "10Gi"
+FEEDBACK_DEFAULT_RETENTION_DAYS = 180  # ADR-0005; Settings bounds 1..3650
+_DNS_SUBDOMAIN = re.compile(r"[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?")
+_QUANTITY = re.compile(r"[1-9][0-9]*(?:Mi|Gi|Ti)")
+
+
+def feedback_config(values: Mapping[str, str]) -> dict[str, object] | None:
+    """The feedback service selection, or None while it is off.
+
+    Shapes are checked whenever a key is set (a typo must not wait for the day
+    the feature is enabled); the secret is required only when enabled. The
+    store's ingress limit is the agent NetworkPolicy, so enabling the service
+    without it fails closed (the bearer token alone would be the only control).
+    Diagnostics name the key, never the value."""
+    enabled = parse_strict_bool("FEEDBACK_ENABLED", values.get("FEEDBACK_ENABLED", ""), False)
+    secret = values.get("FEEDBACK_SECRET", "")
+    if secret and (len(secret) > 253 or _DNS_SUBDOMAIN.fullmatch(secret) is None):
+        raise ValueError("FEEDBACK_SECRET must be a DNS-subdomain Secret name")
+    size = values.get("FEEDBACK_STORAGE_SIZE", "") or FEEDBACK_DEFAULT_STORAGE_SIZE
+    if _QUANTITY.fullmatch(size) is None:
+        raise ValueError("FEEDBACK_STORAGE_SIZE must be a quantity such as 10Gi (Mi, Gi or Ti)")
+    raw_days = values.get("FEEDBACK_RETENTION_DAYS", "")
+    days = FEEDBACK_DEFAULT_RETENTION_DAYS
+    if raw_days != "":
+        if re.fullmatch(r"[0-9]+", raw_days) is None or not 1 <= int(raw_days) <= 3650:
+            raise ValueError("FEEDBACK_RETENTION_DAYS must be an integer from 1 to 3650")
+        days = int(raw_days)
+    if not enabled:
+        return None
+    if not secret:
+        raise ValueError("FEEDBACK_SECRET is required when FEEDBACK_ENABLED=true "
+                         "(operator-created Secret with data key service-token)")
+    if not parse_strict_bool(NETWORK_POLICY_KEY, values.get(NETWORK_POLICY_KEY, ""), True):
+        raise ValueError(
+            f"FEEDBACK_ENABLED=true requires {NETWORK_POLICY_KEY} to be enabled: the "
+            "feedback store's agent-only ingress limit is the NetworkPolicy; refusing to "
+            "expose it on a bearer token alone"
+        )
+    return {"enabled": True, "secretName": secret, "storageSize": size, "retentionDays": days}
 
 
 def validate_operator_booleans(values: Mapping[str, str]) -> None:
@@ -165,6 +213,7 @@ def main() -> int:
     try:
         validate_operator_booleans(os.environ)
         network_policy(os.environ)
+        feedback_config(os.environ)
         validate_model_config(os.environ)
     except ValueError as exc:
         print(f"FAIL: {exc}", file=sys.stderr)

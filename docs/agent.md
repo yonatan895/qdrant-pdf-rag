@@ -256,7 +256,7 @@ Retention policy as shipped (no default changed by #372):
   citations and telemetry) as a quality record in the protected feedback
   store until purged under its configured retention window
   (`FEEDBACK_RETENTION_DAYS`, default 180 days; an explicit purge,
-  scheduled in PR B), and a sent rating (rating, reason codes, comment) joins
+  scheduled in-process by the feedback service, #804), and a sent rating (rating, reason codes, comment) joins
   it. Clearing the
   browser's incidents does not remove those records; retention and purge are
   the store's (ADR-0005). See [Answer feedback](#answer-feedback).
@@ -378,16 +378,38 @@ retention: [observability](observability.md#data-tiers).
   strip whitespace) and `FEEDBACK_RETENTION_DAYS` (180, ADR-0005). Fixed client
   errors with stable codes (`unauthorized`, `invalid_request`, `unknown_answer`,
   `not_found`, `method_not_allowed`, `internal_error`); JSON-line logs with
-  `request_id` and counts only. Retention is enforced by the authenticated
-  `POST /v1/purge`, an explicit operator action and never implicit. The store
-runs with `secure_delete` and the purge then truncates the WAL, so purged text
-leaves the disk. A concurrent read snapshot (an export) makes the truncation
-busy: the purge does not wait (writers would stall), returns
-`wal_truncated: false` and logs a warning, and rerunning it afterwards
-completes the removal. The JSONL
+  `request_id` and counts only. Retention is enforced by the service itself
+  (ADR-0005, #804): one in-process task, started with the app, runs the purge
+  `FEEDBACK_PURGE_FIRST_DELAY_S` (30 s) after start and then every
+  `FEEDBACK_PURGE_INTERVAL_S` (24 h); the authenticated `POST /v1/purge` stays
+  as the manual operator action and runs the same attempt. The store runs with
+  `secure_delete` and the purge then truncates the WAL, so purged text leaves
+  the disk. Only a result with `wal_truncated: true` is success. A concurrent
+  read snapshot (an export) makes the truncation busy: the purge does not wait
+  (writers would stall), returns `wal_truncated: false` (outcome `deferred`) and
+  an exception such as `database is locked` is outcome `error`. Both are
+  retried, never counted as done: after 60, 300 and 900 seconds within the
+  cycle, then one attempt per hour until a truncated result, then the daily
+  cadence again (the ladder is a code constant, not configuration). Each
+  attempt repeats the same idempotent delete and checkpoint, so a restart or a
+  retry converges; each non-truncated attempt logs a WARNING with counts, the
+  boolean and the exception type only.
+  `GET /metrics` is 404 unless `METRICS_ENABLED`, and needs the service bearer
+  token like every route except `/healthz`. It exposes
+  `rag_feedback_purge_total{outcome="truncated|deferred|error"}`,
+  `rag_feedback_purge_last_success_timestamp_seconds` (set only on `truncated`;
+  0 until the first success) and `rag_feedback_purged_rows_total{kind="answers|ratings"}`,
+  from the service's own registry: no request- or content-derived labels.
+  Suggested platform-owned alert:
+  `time() - rag_feedback_purge_last_success_timestamp_seconds > 2 * 86400`.
+  Single replica, single uvicorn worker only (one SQLite writer, one
+  scheduler, one per-process registry). The service entry point is
+  `python -m uvicorn --factory mainframe_rag.feedback.service:app_from_env`;
+  `tests/test_feedback_store.py` launches that command. The JSONL
   export/import, which also makes a later Postgres move testable, is phase 2.
-  Deployment (the single-replica StatefulSet, PVC, Secret and purge schedule)
-  is phase 1 PR B.
+  Deployment (the single-replica StatefulSet `rag-feedback`, the kept claim
+  `rag-feedback-data`, the operator Secret and the agent-only NetworkPolicy,
+  default off) is in the chart: [deploy.md](deploy.md#feedback-service).
 
 ## 2. Error contract
 
@@ -871,6 +893,7 @@ readers:
 | `feedback_enabled` / `feedback_url` / `feedback_api_key` | `false` / unset / unset (enabled requires both) | answer records and console ratings (#780); the key is a Secret reference, never logged |
 | `feedback_queue_size` / `feedback_timeout_s` / `feedback_drain_timeout_s` | 256 / 2.0 / 2.0 | bounded record queue (full = dropped and counted); service call timeout; shutdown drain bound |
 | `feedback_store_path` / `feedback_service_token` / `feedback_retention_days` | `/data/feedback.sqlite3` / unset / 180 | feedback service process only (#780, ADR-0005); the token is a Secret reference, never logged |
+| `feedback_purge_first_delay_s` / `feedback_purge_interval_s` | 30 / 86400 | feedback service only (#804): first scheduled purge after start, then every interval (60 s to 7 days); the 60/300/900 s then hourly retry ladder is a code constant |
 | `rerank_enabled` / `rerank_model` / `rerank_base_url` / `rerank_api_key` / `rerank_endpoint_order` / `rerank_fusion_alpha` / `rerank_candidates` / `rerank_batch_size` / `rerank_timeout_s` | false / `BAAI/bge-reranker-v2-m3` / gateway URL (no embed fallback; unset when no gateway) / unset (keyless) / `score_first` (see install §4.5 `probe_gateway.py`: `rerank_first` only when the score leg is unavailable) / 1.0 / 50 / 32 / 5.0 | rerank dispatch → retrieve (see `retrieval.md` §6) |
 | `rrf_k` / `rrf_weight_*` / `rrf_sparse_boost_syntax` / `rrf_sparse_boost_table` / `retrieve_max_chunks_per_page|doc` | 60 / 1.0,1.0 – 1.0,3.0 / 1.0 / 1.0 / 1, 3 | retrieve fusion + diversification |
 | `acronym_expansion_enabled` / `comparative_split_enabled` / `diagnostic_dualpath_enabled` | `false` / `true` / `false` | rewrite + multipath (see `retrieval.md` §§3b,7) |
