@@ -46,6 +46,16 @@ would widen access to manual text beyond the protected feedback volume.
 - **Deferred:** an admin UI over the feedback store, until the report proves
   insufficient.
 
+## Inbound trace context
+
+`tracing.parent_context` extracts the caller's W3C `traceparent` and
+`tracestate` on every agent and MCP HTTP request, whether or not tracing is
+enabled. A `tracestate` longer than 512 characters (repeated headers combined,
+names matched case-insensitively) is discarded before the SDK parses it, whose
+parser is quadratic on whitespace runs (GHSA-xcq7-p3pf-p88h). `traceparent` is
+kept, so the trace still joins the caller's; shorter values propagate
+unchanged. Header contents are never logged.
+
 ## Backend status
 
 | Component | Status |
