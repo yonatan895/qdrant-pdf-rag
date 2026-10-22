@@ -1,0 +1,112 @@
+[
+  {
+    "id": "dev-recall-at-1",
+    "label": "Dev retrieval recall@1",
+    "value": 0.711,
+    "unit": "fraction",
+    "date": "2026-10-22",
+    "commit": "308f70b",
+    "profile": "Qwen3-Embedding-8B dim 4096; corpus alias colab_manuals_qwen3_8b_4096_ced400a7; rerank off",
+    "source_url": "https://github.com/yonatan895/qdrant-pdf-rag/issues/842#issuecomment-6350544880",
+    "note": "Dev golden, 114 of 127 rows scored; frozen holdout not read."
+  },
+  {
+    "id": "dev-recall-at-5",
+    "label": "Dev retrieval recall@5",
+    "value": 0.956,
+    "unit": "fraction",
+    "date": "2026-10-22",
+    "commit": "308f70b",
+    "profile": "Qwen3-Embedding-8B dim 4096; corpus alias colab_manuals_qwen3_8b_4096_ced400a7; rerank off",
+    "source_url": "https://github.com/yonatan895/qdrant-pdf-rag/issues/842#issuecomment-6350544880",
+    "note": "Dev golden, 114 of 127 rows scored; frozen holdout not read."
+  },
+  {
+    "id": "dev-mrr",
+    "label": "Dev retrieval MRR",
+    "value": 0.802,
+    "unit": "fraction",
+    "date": "2026-10-22",
+    "commit": "308f70b",
+    "profile": "Qwen3-Embedding-8B dim 4096; corpus alias colab_manuals_qwen3_8b_4096_ced400a7; rerank off",
+    "source_url": "https://github.com/yonatan895/qdrant-pdf-rag/issues/842#issuecomment-6350544880",
+    "note": "Dev golden, 114 of 127 rows scored; frozen holdout not read."
+  },
+  {
+    "id": "sections-recall-at-5",
+    "label": "Sections suite recall@5",
+    "value": 0.471,
+    "unit": "fraction",
+    "date": "2026-10-22",
+    "commit": "308f70b",
+    "profile": "Qwen3-Embedding-8B dim 4096; corpus alias colab_manuals_qwen3_8b_4096_ced400a7; rerank off",
+    "source_url": "https://github.com/yonatan895/qdrant-pdf-rag/issues/825#issuecomment-6350545358",
+    "note": "Sections suite, 17 queries; heading-level targets."
+  },
+  {
+    "id": "ann-overlap-shipped",
+    "label": "Dense ANN overlap@8 with exact search, shipped search params",
+    "value": 0.991,
+    "unit": "fraction",
+    "date": "2026-10-22",
+    "commit": "308f70b",
+    "profile": "Qwen3-Embedding-8B dim 4096; corpus alias colab_manuals_qwen3_8b_4096_ced400a7; rerank off",
+    "source_url": "https://github.com/yonatan895/qdrant-pdf-rag/issues/842#issuecomment-6350544880",
+    "note": "144 real queries; shipped search-time parameters."
+  },
+  {
+    "id": "ann-overlap-default",
+    "label": "Dense ANN overlap@8 with exact search, server default",
+    "value": 0.968,
+    "unit": "fraction",
+    "date": "2026-10-22",
+    "commit": "308f70b",
+    "profile": "Qwen3-Embedding-8B dim 4096; corpus alias colab_manuals_qwen3_8b_4096_ced400a7; rerank off",
+    "source_url": "https://github.com/yonatan895/qdrant-pdf-rag/issues/842#issuecomment-6350544880",
+    "note": "Same 144 real queries; server-default search parameters."
+  },
+  {
+    "id": "corpus-documents",
+    "label": "Indexed corpus: documents",
+    "value": 452,
+    "unit": "documents",
+    "date": "2026-10-22",
+    "commit": "308f70b",
+    "profile": "Qwen3-Embedding-8B dim 4096; corpus alias colab_manuals_qwen3_8b_4096_ced400a7; rerank off",
+    "source_url": "https://github.com/yonatan895/qdrant-pdf-rag/issues/865",
+    "note": "Re-embed record."
+  },
+  {
+    "id": "corpus-points",
+    "label": "Indexed corpus: points",
+    "value": 234610,
+    "unit": "points",
+    "date": "2026-10-22",
+    "commit": "308f70b",
+    "profile": "Qwen3-Embedding-8B dim 4096; corpus alias colab_manuals_qwen3_8b_4096_ced400a7; rerank off",
+    "source_url": "https://github.com/yonatan895/qdrant-pdf-rag/issues/865",
+    "note": "Re-embed record."
+  },
+  {
+    "id": "abstention-correct-declines",
+    "label": "Abstention: correct declines (13 rows)",
+    "value": "7/13",
+    "unit": "declines",
+    "date": "2026-10-22",
+    "commit": "308f70b",
+    "profile": "Qwen3.8-27B at xhigh reasoning; Qwen3-Embedding-8B dim 4096; corpus alias colab_manuals_qwen3_8b_4096_ced400a7; rerank off",
+    "source_url": "https://github.com/yonatan895/qdrant-pdf-rag/issues/798#issuecomment-6350578190",
+    "note": "measured 2026-10-22 (G4 session S2), single run; docs/eval.md entry pending with #830; frozen holdout not read"
+  },
+  {
+    "id": "answer-baseline-830",
+    "label": "Answer-tier baseline (failure taxonomy)",
+    "value": "in progress",
+    "unit": "status",
+    "date": "2026-10-22",
+    "commit": "308f70b",
+    "profile": "Qwen3-Embedding-8B dim 4096; corpus alias colab_manuals_qwen3_8b_4096_ced400a7; rerank off",
+    "source_url": "https://github.com/yonatan895/qdrant-pdf-rag/issues/830",
+    "note": "No numbers yet."
+  }
+]
