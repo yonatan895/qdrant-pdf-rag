@@ -13,7 +13,7 @@ docker.io/qdrant/qdrant:v1.19.2-unprivileged                           sha256:ef
 # OpenObserve is the only trace backend (#956); Jaeger is no longer pinned.
 docker.io/openobserve/openobserve:v1.1.2                               sha256:4a154849432f75c4fb024de32fe34163c02406c905dab22bf8d213d2e3386392
 docker.io/otel/opentelemetry-collector-contrib:0.160.0                 sha256:799dc6cf12c96192af37b5bdba804da8c10b3bc563b43cb90c3f3c58d9572ad6
-registry.access.redhat.com/ubi9/python-314-minimal:9.8                 sha256:1e4b43488508216fee35b87e6b5425f4ef475eacf9c113f5b901e27af3844fba
+registry.access.redhat.com/ubi9/python-314-minimal:9.8                 sha256:638914ba78de063c53cb179342518a0b39abe910cc7d36d8a434b7c4d4fa81fd
 # ADR-0004 operator console: Red Hat oauth-proxy sidecar terminates external
 # ingress on 8443. Pulling it needs a Red Hat registry login (unlike the
 # access.redhat.com UBI pin above), so record the digest on the connected host
