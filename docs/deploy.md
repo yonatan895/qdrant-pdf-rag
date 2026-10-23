@@ -1013,7 +1013,8 @@ reports reject any skipped or xfailed test (`scripts/check_junit_clean.py`);
 `tests/test_ci_gitlab_parity.py` pins the correspondence and failure propagation. Job meaning stays aligned across the two files; only e2e-scale jobs
 live in `.github/workflows/e2e.yml`.
 
-- GitHub product `ci.yml` runs on every PR/push; `e2e.yml` runs its light jobs
+- GitHub product `ci.yml` runs on every PR and nightly on `main` (`schedule`,
+  plus `workflow_dispatch`), not on push to `main`; `e2e.yml` runs its light jobs
   on every PR/push, while the heavy jobs (`airgap-package`, `airgap-acceptance`,
   the `kind-live-rehearsal` matrix, `airgap-rehearsal`) run only nightly on `main`
   HEAD (`schedule`) or by `workflow_dispatch` (use it on a branch for Kind-lane
@@ -1047,11 +1048,12 @@ live in `.github/workflows/e2e.yml`.
   deselected, split across four runner VMs with an aggregate `test` status
   requiring every shard), sim (docker Qdrant, fail-closed on skips/zero-pass), gate-l1
   with PR delta comment. Least-privilege permissions, timeouts, and
-  a top-level concurrency group (cancel-in-progress on PRs); third-party actions SHA-pinned.
+  a top-level concurrency group (cancel-in-progress on PRs; main schedule/dispatch
+  runs share `ci-main` and never cancel); third-party actions SHA-pinned.
   Hazard pairs run in four isolated processes; baseline, mutation and cleanup
   remain ordered within each pair. Connected Python acquisition explicitly
   uses eight bounded download workers across GitHub workflows.
-- Post-merge cadence (maintainer decision 2026-10-23): `load.yml`, `ha.yml`,
+- Post-merge cadence (maintainer decision 2026-10-23): `ci.yml`, `load.yml`, `ha.yml`,
   `agent-probes.yml` and `browser.yml` run on `pull_request` (the merge gate,
   unchanged) and nightly on `main` by `schedule` (staggered UTC, off the hour)
   plus `workflow_dispatch`; they no longer run on every push to `main`, so an
@@ -1061,7 +1063,8 @@ live in `.github/workflows/e2e.yml`.
   not a PR check. Candidate acceptance reads only `pull_request`-event runs, so
   it is unaffected. Pull-request runs of `ha`/`load` cancel superseded runs of
   the same PR. Their `select` job runs only on pull requests; schedule and
-  dispatch run the lane unconditionally.
+  dispatch run the lane unconditionally. `ci.yml` keeps its `select` job on every
+  event; with no base SHA on schedule/dispatch the profile is `full`, so every lane runs.
 - `load.yml`: path-allowlisted to agent/retrieve/ingest/mock/sim/loadtest
   surface and shared dependency/Task inputs — other paths run nothing. `ha.yml` is path-allowlisted to the
   collection-policy/placement surface and runs the three-peer fixture
