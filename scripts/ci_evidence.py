@@ -95,6 +95,8 @@ def main() -> int:
     parser.add_argument('--junit', type=Path)
     parser.add_argument('--unit-shard', type=int, choices=tuple(range(1, 9)))
     parser.add_argument('--unit-shards', type=int, choices=(2, 4, 8), default=2)
+    parser.add_argument('--unit-durations', type=Path,
+                        help='repo-relative durations file selecting the balanced shard rule')
     parser.add_argument('--identity-only', action='store_true')
     parser.add_argument('--result-json', type=Path)
     parser.add_argument('--unittest', nargs='+', dest='modules')
@@ -127,7 +129,8 @@ def main() -> int:
                 from scripts.unit_evidence import run_shard
                 with tempfile.TemporaryDirectory(prefix='native-unit-') as directory:
                     code, unit_coverage = run_shard(ROOT, sys.executable, args.unit_shard,
-                                                    args.junit.absolute(), Path(directory), shards=args.unit_shards)
+                                                    args.junit.absolute(), Path(directory), shards=args.unit_shards,
+                                                    durations=args.unit_durations)
             else:
                 code = subprocess.run(command, cwd=ROOT, check=False).returncode
             if args.junit:

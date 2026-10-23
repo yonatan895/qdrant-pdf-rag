@@ -11,13 +11,15 @@ import tomllib
 from pathlib import Path
 
 import pytest
-from scripts.unit_evidence import POLICY, input_hashes
+from scripts.unit_evidence import POLICY, input_hashes, rule_record, select_nodes
 
 
 def pytest_addoption(parser):
     parser.addoption('--unit-evidence')
     parser.addoption('--unit-phase', choices=('collect', 'execute'))
     parser.addoption('--unit-shards', type=int, choices=(2, 4, 8), default=2)
+    parser.addoption('--unit-durations', default=None,
+                     help='Repo-relative durations file: balance shards by recorded test time.')
     parser.addoption(
         "--unit-shard", type=int, choices=tuple(range(1, 9)), default=None,
         help="Run one shard of the selected tests (omit to run all tests).",
@@ -35,11 +37,25 @@ def pytest_collection_modifyitems(config, items):
     shards = config.getoption('--unit-shards')
     if shard > shards:
         raise pytest.UsageError('unit shard exceeds the configured shard count')
-    selected = ordered[shard - 1::shards]
-    selected_ids = {item.nodeid for item in selected}
+    selected_ids = set(select_nodes([item.nodeid for item in ordered], shard, shards,
+                                    durations_text(config)))
+    selected = [item for item in ordered if item.nodeid in selected_ids]
+    assert len(selected) == len(selected_ids)
     deselected = [item for item in ordered if item.nodeid not in selected_ids]
     config.hook.pytest_deselected(items=deselected)
     items[:] = selected
+
+
+def durations_text(config):
+    """The durations file's text, or None for the round-robin rule. Must stay inside the rootdir."""
+    option = config.getoption('--unit-durations')
+    if option is None:
+        return None
+    root = Path(config.rootpath).resolve()
+    path = (root / option).resolve()
+    if not path.is_relative_to(root) or not path.is_file():
+        raise pytest.UsageError('unit durations file must be a file inside the repository')
+    return path.read_text(encoding='utf-8')
 
 
 def pytest_configure(config):
@@ -57,6 +73,7 @@ class UnitCoverage:
         self.shards = config.getoption('--unit-shards')
         self.executed = []
         self.record = None
+        self.durations = durations_text(config)
         if (self.output.exists() or self.phase is None or self.shard is None
                 or not 1 <= self.shard <= self.shards):
             raise pytest.UsageError('native unit coverage needs fresh output and explicit phase/shard')
@@ -109,10 +126,13 @@ class UnitCoverage:
         if before != after or len({node for node, _ in before}) != len(before) or plugins != self.plugins():
             raise pytest.UsageError('collection hook removed, duplicated or changed required items')
         eligible = [node for node, integration in before if not integration]
-        selected = eligible if self.phase == 'collect' else eligible[self.shard - 1::self.shards]
+        selected = eligible if self.phase == 'collect' else select_nodes(
+            eligible, self.shard, self.shards, self.durations)
         self.record = {'phase': self.phase, 'inputs': self.inputs, 'policy': self.policy, 'versions': self.versions,
                        'plugins': plugins, 'all': [node for node, _ in before], 'eligible': eligible,
                        'integration': [node for node, integration in before if integration], 'selected': selected}
+        if self.durations is not None:
+            self.record['rule'] = rule_record(self.durations)
         by_id = {item.nodeid: item for item in items}
         excluded = [item for item in items if item.nodeid not in set(selected)]
         self.config.hook.pytest_deselected(items=excluded)
