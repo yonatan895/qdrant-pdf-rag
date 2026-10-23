@@ -47,6 +47,59 @@ def test_get_collection_snapshot_id_with_fake(monkeypatch):
     assert snap == "snap-123"
 
 
+def _auth_fake(key):
+    """Fake Qdrant that answers 401 unless the api-key header matches."""
+    seen = []
+
+    def get(url, timeout=3.0, headers=None):
+        seen.append(headers)
+        if (headers or {}).get("api-key") != key:
+            return SimpleNamespace(status_code=401, json=dict)
+        if "snapshots" in url:
+            return SimpleNamespace(status_code=200, json=lambda: {"result": []})
+        if "/collections/" in url:
+            return SimpleNamespace(
+                status_code=200, json=lambda: {"result": {"points_count": 7}}
+            )
+        return SimpleNamespace(status_code=200, json=lambda: {"version": "1.19.0"})
+
+    return get, seen
+
+
+def test_manifest_helpers_send_api_key_to_authenticated_qdrant(monkeypatch):
+    get, seen = _auth_fake("s3cret")
+    monkeypatch.setattr(httpx2, "get", get)
+    assert get_qdrant_version("http://q:6333", api_key="s3cret") == "1.19.0"
+    assert get_collection_snapshot_id("http://q:6333", "col", api_key="s3cret") == "col:7"
+    assert all(h == {"api-key": "s3cret"} for h in seen)
+    # Wrong or missing key: fixed fallbacks, and the key is not echoed back.
+    assert get_qdrant_version("http://q:6333", api_key="wrong") == "unknown"
+    assert get_qdrant_version("http://q:6333") == "unknown"
+    assert get_collection_snapshot_id("http://q:6333", "col") is None
+
+
+def test_manifest_helpers_without_key_send_no_auth_header(monkeypatch):
+    calls = []
+
+    def get(url, timeout=3.0, **kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(status_code=200, json=lambda: {"version": "1.19.0"})
+
+    monkeypatch.setattr(httpx2, "get", get)
+    assert get_qdrant_version("http://q:6333") == "1.19.0"
+    assert calls == [{}]
+
+
+def test_write_run_manifest_uses_settings_key_and_never_records_it(tmp_path, monkeypatch):
+    get, _ = _auth_fake("s3cret")
+    monkeypatch.setattr(httpx2, "get", get)
+    settings = Settings(_env_file=None, qdrant_api_key="s3cret")
+    manifest = write_run_manifest("eval", settings, {}, runs_dir=tmp_path)
+    assert manifest["qdrant_version"] == "1.19.0"
+    assert manifest["collection_snapshot_id"] == f"{settings.qdrant_collection}:7"
+    assert "s3cret" not in (tmp_path / "eval_runs.jsonl").read_text(encoding="utf-8")
+
+
 def test_write_run_manifest_appends_valid_json(tmp_path, monkeypatch):
     """With Qdrant unreachable (all httpx2.get fail), the manifest must still
     be written, with qdrant_version="unknown" and no snapshot id."""

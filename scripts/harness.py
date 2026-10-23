@@ -284,7 +284,7 @@ def main(argv: list[str] | None = None) -> int:
 
     from mainframe_rag.ingest.embed import build_embedder
 
-    qdrant = QdrantClient(url=settings.qdrant_url, timeout=60)
+    qdrant = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key, timeout=60)
     embedder = build_embedder(settings, None)
 
     recorded = (baseline or {}).get("_meta", {}).get("snapshot", {})
