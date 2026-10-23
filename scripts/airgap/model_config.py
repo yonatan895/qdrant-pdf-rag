@@ -24,8 +24,7 @@ REASONING_EFFORT_DEFAULTS = {"LLM_REASONING_EFFORT_SIMPLE": "medium", "LLM_REASO
 REASONING_ENV_KEYS = (*REASONING_INTEGER_FIELDS, *REASONING_EFFORT_FIELDS, "LLM_REASONING_EFFORTS", "LLM_STREAM")
 
 # Request admission and total deadline (#374 handoff, #843 D1). Empty keeps the
-# chart default (deadline 270; admission unset, i.e. off until the D4 stepped
-# run); zero is an explicit selection. Limits match config.Settings and the
+# chart default (deadline 270; admission 4/4/30, #843); zero is an explicit selection. Limits match config.Settings and the
 # chart schema. The route timeout is the mapper's fixed 300 s.
 ROUTE_TIMEOUT_SECONDS = 300
 REQUEST_INTEGER_FIELDS = {

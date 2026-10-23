@@ -15,16 +15,19 @@ replicaCount: 2
 # 2026-10-23, 270 s so it stays strictly below the 300 s route, client and answer
 # timeouts; handoff owned by #374): expiry is 504 deadline_exceeded instead
 # of a silent route cut. 0 disables. Settings keeps 0 for local/CI (#843 D5).
-# Admission limits are not part of this value.
+# Admission limits are separate values (below).
 requestDeadlineSeconds: 270
 
 # Request admission (#374, agent REQUEST_MAX_CONCURRENT / REQUEST_QUEUE_MAX /
-# REQUEST_QUEUE_WAIT_S). Deliberately unset: absent renders no env, so the
-# application default (no limit) applies until a measured envelope is approved
-# (#843 D4). A value of 0 is an explicit selection. Limits are per agent replica.
-# requestMaxConcurrent: 0      # 0..1000
-# requestQueueMax: 0           # 0..1000
-# requestQueueWaitSeconds: 5   # 0..300
+# REQUEST_QUEUE_WAIT_S). Ships ON in the supported deployment (#843, maintainer
+# decision 2026-10-23, G4 S10 D4): excess load is an immediate 503 instead of a
+# 270 s 504. Sizing rule: requestMaxConcurrent = 2 x the engine's concurrent
+# sequence slots; the site overrides via the #374 handoff. Settings keeps 0 (off)
+# for local/CI. 0 is an explicit selection (wait must be > 0 while concurrency
+# is > 0). Limits are per agent replica.
+requestMaxConcurrent: 4      # 0..1000
+requestQueueMax: 4           # 0..1000
+requestQueueWaitSeconds: 30  # 0..300
 
 # Packed image identity. The tag is the full git SHA (deploy.sh fail-closes
 # on empty/HEAD; the same rule is enforced by values.schema.json). The

@@ -119,9 +119,11 @@ restores the snapshot over whatever the file assigned; empty stays unset
   `requestDeadlineSeconds`, `requestMaxConcurrent`, `requestQueueMax` and
   `requestQueueWaitSeconds` via `model_config.request_overrides` (preflight and
   mapper share it; diagnostics name the key, not the value). Empty means no
-  override: the deadline stays 270 and admission is not rendered, so no limit
-  applies until the D4 stepped run approves numbers; `0` is an explicit
-  selection. Limits are per agent replica.
+  override: the deadline stays 270 and admission ships ON at 4/4/30 (#843);
+  `0` is an explicit selection (queue wait must stay above 0 while concurrency
+  is above 0; the chart schema refuses it). Limits are per agent replica.
+  Sizing rule: `REQUEST_MAX_CONCURRENT` = 2 x the engine's concurrent sequence
+  slots; the site sets it from its own engine numbers.
 - Optional application budgets (`LLM_MAX_MODEL_LEN`, `LLM_RESERVED_OUTPUT_TOKENS`,
   `LLM_THINKING_RESERVE_TOKENS_SIMPLE` / `COMPLEX`), reasoning efforts
   (`LLM_REASONING_EFFORT_SIMPLE` / `COMPLEX`) and `LLM_STREAM` follow that same
