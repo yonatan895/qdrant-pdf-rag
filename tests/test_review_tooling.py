@@ -817,8 +817,9 @@ class TestTaskCiConsumers(unittest.TestCase):
             self.assertNotIn("push", triggers) if workflow == "load.yml" else None
             for event in events:
                 self.assertIn(event, triggers)
-                self.assertFalse((triggers[event] or {}).get("paths"))
-                self.assertFalse((triggers[event] or {}).get("paths-ignore"))
+                if isinstance(triggers[event], dict):
+                    self.assertFalse(triggers[event].get("paths"))
+                    self.assertFalse(triggers[event].get("paths-ignore"))
         for path in changes:
             decision = classify_paths([path])
             lanes = required_lanes({"profile": decision.profile.value,
