@@ -98,6 +98,7 @@ case "$*" in
   *'get deployments,statefulsets,replicasets,pods -o json'*)
     [ -z "${{PODS_FILE:-}}" ] || cat "$PODS_FILE" ;;
   *'get secret openobserve-credentials '*'jsonpath='*)
+    [ "${{OO_SECRET_ABSENT:-}}" != 1 ] || {{ echo 'Error from server (NotFound): secret "openobserve-credentials" not found' >&2; exit 1; }}
     case "$*" in *root-user-email*) printf 'dGVzdC11c2Vy' ;; *) printf '%s' "${{OO_PASSWORD_B64:-VGVzdC1wYXNzMQ==}}" ;; esac ;;
   *'get secret '*'go-template='*)
     if [ -n "${{MISSING_KEY:-}}" ]; then
@@ -1769,3 +1770,19 @@ def test_task_runner_empty_trace_query_vars_get_bundled_defaults(tree):
     given = subprocess.run(["sh", "-c", script], cwd=tree[0], capture_output=True, text=True, check=False,
                            env={**env, "TRACE_QUERY_URL": "http://x:1", "TRACE_QUERY_USER": "u", "TRACE_QUERY_PASSWORD": "p"})
     assert given.stdout == "http://x:1|u|p"
+
+
+@pytest.mark.parametrize("given", [{}, {"TRACE_QUERY_USER": "operator-user-sentinel"}])
+def test_smoke_trace_query_with_bundled_backend_and_absent_secret_fails_fixed(tree, given):
+    """#588: the smoke-time branch of resolve_trace_query. With the bundled
+    backend and no openobserve-credentials Secret, it dies with the fixed
+    code and prints no credential, operator-given or from the cluster."""
+    script = ('. scripts/airgap/common.sh; NAMESPACE=ns; KC=kubectl; OTEL_TRACING_ENABLED=1; OTEL_BUNDLED=1; '
+              'resolve_trace_query; printf "%s|%s" "${TRACE_QUERY_USER-}" "${TRACE_QUERY_PASSWORD-}"')
+    env = {"PATH": f"{tree[0] / 'bin'}:/usr/bin:/bin", "HELM_LOG": str(tree[1]), "OO_SECRET_ABSENT": "1", **given}
+    r = subprocess.run(["sh", "-c", script], cwd=tree[0], env=env, capture_output=True, text=True, check=False)
+    assert r.returncode != 0
+    assert r.stdout == ""
+    assert "E_OPENOBSERVE_CREDENTIALS: cannot read root-user-email and root-user-password from Secret openobserve-credentials" in r.stderr
+    for value in ("test-user", "Test-pass1", "operator-user-sentinel", "NotFound"):
+        assert value not in r.stdout + r.stderr
