@@ -49,8 +49,16 @@ def _rule_module_paths() -> list[str]:
     root = pathlib.Path(__file__).resolve().parent.parent
     tree = ast.parse((root / "src/mainframe_rag/ingest/rules_version.py").read_text(encoding="utf-8"))
     for node in tree.body:
-        if isinstance(node, ast.AnnAssign) and getattr(node.target, "id", "") == "_RULE_MODULES":
-            return ["src/mainframe_rag/" + rel for rel in ast.literal_eval(node.value)]
+        targets: list[ast.expr]
+        value: ast.expr | None
+        if isinstance(node, ast.AnnAssign):
+            targets, value = [node.target], node.value
+        elif isinstance(node, ast.Assign):
+            targets, value = node.targets, node.value
+        else:
+            continue
+        if value is not None and any(getattr(t, "id", "") == "_RULE_MODULES" for t in targets):
+            return ["src/mainframe_rag/" + rel for rel in ast.literal_eval(value)]
     raise RuntimeError("_RULE_MODULES not found in rules_version.py")
 
 
