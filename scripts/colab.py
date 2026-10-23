@@ -125,6 +125,12 @@ class ToolFailure(LabError):
     """A local tool exited nonzero: possibly transient, unlike controller refusals (#746)."""
 
 
+# Test-only seam (#588): a test sets this to capture the exception behind the
+# fixed refusal line. Production never sets it, so the cause stays out of every
+# user-visible stream.
+refusal_cause_sink: Callable[[BaseException], None] | None = None
+
+
 def print_diagnostic(message: str, *, error: bool = False) -> None:
     """A closed/full diagnostic sink cannot interrupt owned release control."""
     try:
@@ -1998,7 +2004,9 @@ def main(argv: list[str] | None = None, *, bootstrap: bool = True, source_root: 
         holder = f"PID {exc.pid}" if exc.pid is not None else "an unrecorded PID"
         print_diagnostic(f"Colab assignment lock is held by {holder}; no allocation attempted.", error=True)
         return 2
-    except (LabError, OSError, ValueError, KeyError, subprocess.SubprocessError):
+    except (LabError, OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
+        if refusal_cause_sink is not None:
+            refusal_cause_sink(exc)
         print_diagnostic("Colab controller refused invalid/missing prerequisites; no acceptance claimed.", error=True)
         return 2
 

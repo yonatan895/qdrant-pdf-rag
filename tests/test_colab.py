@@ -3122,3 +3122,23 @@ def test_rerank_profiles_are_refused_for_production_and_fresh_index_initializati
                          "--profile", "COLAB_G4_RERANK_4B"], bootstrap=False)
     # The ordinary profile still prepares afterwards.
     assert _prepare_new(base, root / "ordinary-after-refusal") == root / "ordinary-after-refusal"
+
+
+@pytest.mark.parametrize("lab", ["COLAB_CPU_TRANSPORT"], indirect=True)
+def test_refusal_cause_reaches_only_the_test_sink_never_the_user_message(lab, monkeypatch, capsys):
+    """#588: the fixed refusal hides the cause from users; a test can still read it."""
+    root, state, _ = lab
+    second = _prepare_new(state, root / "second-private-run")
+
+    def boom(self, approval, workload):
+        raise controller.LabError("CAUSE-MARKER-xyz")
+
+    causes = []
+    monkeypatch.setattr(controller.Run, "run", boom)
+    monkeypatch.setattr(controller, "refusal_cause_sink", causes.append)
+    capsys.readouterr()
+    assert _controller_call(["run", "--state", str(second), "--approve-cu", "20"]) == 2
+    captured = capsys.readouterr()
+    assert "Colab controller refused invalid/missing prerequisites; no acceptance claimed." in captured.err
+    assert "CAUSE-MARKER-xyz" not in captured.out + captured.err
+    assert [str(c) for c in causes] == ["CAUSE-MARKER-xyz"]
