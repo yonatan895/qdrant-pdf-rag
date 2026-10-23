@@ -22,10 +22,17 @@ containerSecurityContext:
   runAsGroup: null
   allowPrivilegeEscalation: false
   readOnlyRootFilesystem: true
+  # Vanilla PSA "restricted" needs these; restricted-v2 supplies the same.
+  capabilities:
+    drop: [ALL]
+  seccompProfile:
+    type: RuntimeDefault
 
 podSecurityContext:
   fsGroup: null
   fsGroupChangePolicy: Always
+  seccompProfile:
+    type: RuntimeDefault
 
 persistence:
   accessModes: ["ReadWriteOnce"]

@@ -98,6 +98,7 @@ case "$*" in
   *'get deployments,statefulsets,replicasets,pods -o json'*)
     [ -z "${{PODS_FILE:-}}" ] || cat "$PODS_FILE" ;;
   *'get secret openobserve-credentials '*'jsonpath='*)
+    [ "${{OO_SECRET_ABSENT:-}}" != 1 ] || {{ echo 'Error from server (NotFound): secret "openobserve-credentials" not found' >&2; exit 1; }}
     case "$*" in *root-user-email*) printf 'dGVzdC11c2Vy' ;; *) printf '%s' "${{OO_PASSWORD_B64:-VGVzdC1wYXNzMQ==}}" ;; esac ;;
   *'get secret '*'go-template='*)
     if [ -n "${{MISSING_KEY:-}}" ]; then
@@ -1769,3 +1770,49 @@ def test_task_runner_empty_trace_query_vars_get_bundled_defaults(tree):
     given = subprocess.run(["sh", "-c", script], cwd=tree[0], capture_output=True, text=True, check=False,
                            env={**env, "TRACE_QUERY_URL": "http://x:1", "TRACE_QUERY_USER": "u", "TRACE_QUERY_PASSWORD": "p"})
     assert given.stdout == "http://x:1|u|p"
+
+
+@pytest.mark.parametrize("given", [{}, {"TRACE_QUERY_USER": "operator-user-sentinel"}])
+def test_smoke_trace_query_with_bundled_backend_and_absent_secret_fails_fixed(tree, given):
+    """#588: the smoke-time branch of resolve_trace_query. With the bundled
+    backend and no openobserve-credentials Secret, it dies with the fixed
+    code and prints no credential, operator-given or from the cluster."""
+    script = ('. scripts/airgap/common.sh; NAMESPACE=ns; KC=kubectl; OTEL_TRACING_ENABLED=1; OTEL_BUNDLED=1; '
+              'resolve_trace_query; printf "%s|%s" "${TRACE_QUERY_USER-}" "${TRACE_QUERY_PASSWORD-}"')
+    env = {"PATH": f"{tree[0] / 'bin'}:/usr/bin:/bin", "HELM_LOG": str(tree[1]), "OO_SECRET_ABSENT": "1", **given}
+    r = subprocess.run(["sh", "-c", script], cwd=tree[0], env=env, capture_output=True, text=True, check=False)
+    assert r.returncode != 0
+    assert r.stdout == ""
+    assert "E_OPENOBSERVE_CREDENTIALS: cannot read root-user-email and root-user-password from Secret openobserve-credentials" in r.stderr
+    for value in ("test-user", "Test-pass1", "operator-user-sentinel", "NotFound"):
+        assert value not in r.stdout + r.stderr
+
+
+def _pw_run(tree, password):
+    import base64
+    return _run(tree, ("OO_PASSWORD_B64", base64.b64encode(password.encode()).decode()))
+
+
+@pytest.mark.parametrize("password", ["Aa1!" + "x" * 4, "Aa1!" + "x" * 124])
+def test_openobserve_password_length_limits_are_inclusive(tree, password):
+    """#588: exactly 8 and exactly 128 characters are accepted."""
+    assert len(password) in (8, 128)
+    r = _pw_run(tree, password)
+    assert r.returncode == 0, r.stderr
+
+
+@pytest.mark.parametrize("password,accepted", [
+    ("Aa1!" + "é" * 3, False),     # 7 chars but 10 bytes
+    ("Aa1!" + "é" * 4, True),      # 8 chars, 12 bytes
+    ("Aa1!" + "é" * 124, True),    # 128 chars, 252 bytes
+    ("Aa1!" + "é" * 125, False),   # 129 chars
+])
+def test_openobserve_password_length_counts_characters_not_bytes(tree, password, accepted):
+    r = _pw_run(tree, password)
+    if accepted:
+        assert r.returncode == 0, r.stderr
+    else:
+        assert r.returncode != 0
+        assert "E_OPENOBSERVE_WEAK_PASSWORD" in r.stderr
+        assert password not in r.stdout + r.stderr
+        assert _mutations(tree) == []
