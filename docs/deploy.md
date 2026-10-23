@@ -1013,7 +1013,11 @@ reports reject any skipped or xfailed test (`scripts/check_junit_clean.py`);
 `tests/test_ci_gitlab_parity.py` pins the correspondence and failure propagation. Job meaning stays aligned across the two files; only e2e-scale jobs
 live in `.github/workflows/e2e.yml`.
 
-- GitHub product `ci.yml`/`e2e.yml` run on every PR/push with no markdown-only
+- GitHub product `ci.yml` runs on every PR/push; `e2e.yml` runs its light jobs
+  on every PR/push, while the heavy jobs (`airgap-package`, `airgap-acceptance`,
+  the `kind-live-rehearsal` matrix, `airgap-rehearsal`) run only nightly on `main`
+  HEAD (`schedule`) or by `workflow_dispatch` (use it on a branch for Kind-lane
+  PRs). Neither is gated by a markdown-only
   ignore (only `bench.yml` carries a `paths-ignore` for docs). The
   `agent-context.yml` lane likewise runs on every PR/push with no `paths:`
   filter: it always runs `qa:context` plus the dependency-free context
@@ -1076,7 +1080,7 @@ live in `.github/workflows/e2e.yml`.
   both complete images; fault and lifecycle transitions remain ordered inside
   each isolated rehearsal case. No GPU work is added.
 - `e2e.yml build`: local images retagged to full-SHA GHCR refs; push only
-  on `main`/dispatch (PRs build, never push — fork-safe).
+  on `main` push/schedule/dispatch (PRs build, never push — fork-safe).
   Runtime wheels and BM25 weights prepare in two independent `build-inputs`
   runners; runtime acquisition needs no full dev install. Verified bytes move
   through full-SHA-named, workflow-run-scoped artifacts into two independent
