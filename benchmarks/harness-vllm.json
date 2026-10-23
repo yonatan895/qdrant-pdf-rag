@@ -8,6 +8,7 @@
   },
   "class_regression_floor": 0.05,
   "golden_entries": 127,
+  "golden_sha256": "0f2982565a5115d8b72e21940308efb5e5e447037fc7243ef426361cf2ecadd7",
   "updated": "2026-10-23"
  },
  "overall": {
