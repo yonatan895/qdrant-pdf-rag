@@ -370,14 +370,16 @@ def node_probe(tmp_path, curl_exit, nodes='gapbox-control-plane'):
                                'CURL_EXIT': str(curl_exit)})
 
 
-@pytest.mark.parametrize('code', [6, 7, 28, 35, 56])
+# Only pre-handshake failures (resolve 6, refused/unreachable 7, timeout 28) count as
+# blocked; 35 (TLS) and 56 (recv) mean the TCP handshake completed (#920 review F1).
+@pytest.mark.parametrize('code', [6, 7, 28])
 def test_node_probe_accepts_network_failures_as_blocked(tmp_path, code):
     result = node_probe(tmp_path, code)
     assert result.returncode == 0, result.stdout
     assert 'node egress probe blocked: ok' in result.stdout
 
 
-@pytest.mark.parametrize('code', [0, 1, 2, 22, 125, 126, 127])
+@pytest.mark.parametrize('code', [0, 1, 2, 22, 35, 56, 125, 126, 127])
 def test_node_probe_fails_when_connected_or_not_run(tmp_path, code):
     result = node_probe(tmp_path, code)
     assert result.returncode == 1

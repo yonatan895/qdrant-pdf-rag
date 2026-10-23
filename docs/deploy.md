@@ -1236,7 +1236,10 @@ not by mocking. `scripts/ci/egress_gate.sh` owns the rules and
   were seen to miss a pod connect to a public address.
   Because that policy stops pod connects before the host, a probe from each Kind
   node's own network namespace (outside NetworkPolicy) exercises the host rule, so
-  `require-hits nodes` still passes for the right reason.
+  `require-hits nodes` proves the host and node-forward rules; the pod-level
+  NetworkPolicy is proven by the pod probes only (no counter). The
+  `kind-lifecycle-chart` lane's `$NS-chart` namespace has no egress policy and
+  relies on the host rules alone.
   The counters and rules are retained as `diagnostics/egress-gate-*.txt`.
 - **Maintenance**: a step added after the boundary must use the gated `shell:`
   or be listed as post-mortem in `tests/test_egress_gate.py`. A new public
