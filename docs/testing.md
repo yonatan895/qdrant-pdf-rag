@@ -631,18 +631,20 @@ when selected; #411 owns maintainer enforcement.
 
 ## Native CI execution evidence
 
+PR CI runs on the merge ref, not the PR head. `ci_evidence.py` `identity()`
+requires that commit's parents to equal the event's `[base, head]`, else it
+fails with `checkout does not bind the event head and base`.
+
 The existing review-tooling suite owns candidate selection, CI invocation and
-native receipt regression cases. It exercises real temporary Git merge histories
-and child processes, plus independently specified native API records and ZIP
-bytes. It rejects wrong producer/run/attempt/candidate identities, empty, skipped or
+native receipt regression cases. It exercises real temporary Git merge histories,
+child processes, and independently specified native API records and ZIP bytes. It rejects wrong producer/run/attempt/candidate identities, empty, skipped or
 xfail test reports, changed raw results, unsafe ZIP entries, and incomplete
 pagination. These local cases establish parser and attribution behavior, not a deployed
 acceptance check, human review, or merge-rule enforcement; #411's real PR trials do.
 
 The consumer cases also execute file pagination with both rename paths. Legacy
 review-parser tests retain optional diagnostic compatibility; native technical
-verification ignores human comments and draft state. Only the maintainer controls
-ready/review/merge decisions. Publication tests
+verification ignores human comments and draft state. Publication tests
 require pending before collection and failure after a failed currentness recheck.
 A controlled curl stub executes the GitLab report shell and verifies literal-body
 POST behavior. The posted GitHub report belongs to the native PR trial: compare the posted
@@ -652,8 +654,7 @@ source inspection alone does not prove it.
 The publisher's independent API reads compare candidate producer/policy bytes
 with approved base bytes, rather than believing receipt hashes. Tests also
 exercise a candidate producer that claims the original digest. This establishes
-that particular refusal, not immunity to arbitrary malicious candidate code or
-proof that candidate-authored tests are sufficient independent review.
+that refusal, not immunity to malicious candidate code.
 
 The acceptance normalizer additionally checks the contents of the critical
 hazard report against the approved catalogue: complete membership, candidate and
@@ -671,11 +672,9 @@ jobs still fails acceptance. Selector updates additionally exercise the actual
 decision-artifact to native-receipt round-trip: approved candidate selector
 digests are accepted as provenance, old or unapproved digests are rejected, and
 candidate selector code is never executed by the consumer. The acceptance lane
-set still comes from the approved base, including missing semantic requirements
-that the candidate might remove. Missing/stale/revoked decisions fail closed.
+set still comes from the approved base. Missing/stale/revoked decisions fail closed.
 Hazard-catalogue changes remain excluded. A successful decision records trust
-in bytes, not passing tests, adoption of proposed selection rules or permission
-to merge.
+in bytes, not passing tests or permission to merge.
 
 
 <a id="unit-coverage"></a>
