@@ -21,15 +21,14 @@ sh scripts/tools/run-task.sh qa:unit -- tests/test_agent_context.py -q
 The entry resolves the repository's verified `.tools/bin/task`, fixes the root
 Taskfile and working directory, and disables remote Taskfile access. From a
 subdirectory, invoke the entry by its relative or absolute script path; task
-inputs still resolve from the repository root. Paths with spaces are supported.
+inputs still resolve from the repository root.
 No task name prints the list. Discovery and summaries install nothing, read no
 private operator configuration and launch no service.
 
 The launcher refuses inherited/local `.taskrc.yml` / `.taskrc.yaml` and XDG Task
-configuration before executing Task; it does not read their contents or edit
-user configuration. It clears Task runner controls/experiments that could change
-dispatch. Use a host without those configuration files, or the documented owner
-scripts directly when appropriate. It accepts discovery/summary/JSON/help/version,
+configuration before executing Task, without reading or editing it. It clears
+Task runner controls/experiments that could change dispatch. Use a host without
+those files, or the documented owner scripts. It accepts discovery/summary/JSON/help/version,
 `--exit-code`, command preview (`--dry`) and focused arguments after `--`;
 path/global/remote/parallel/force runner options are unsupported and fail closed.
 Raw `task` can be used for development after explicitly adding the pinned
@@ -85,6 +84,10 @@ selects `.tools/bin` on PATH. For direct commands select that same directory on
 PATH explicitly; the doctor hashes the actual PATH-selected Helm without running
 it. Rendering uses the local chart and needs no cluster or chart repository.
 
+New worktree: symlink `.tools` from main and set `SIM_BM25_CACHE_DIR` (the
+default `bundles/` is untracked). A venv shared from main is an editable install
+of main's `src`; subprocesses need `PYTHONPATH=<worktree>/src`.
+
 `qa:prerequisites` runs the read-only doctor before `qa:unit` and before any
 `qa:check` tools. Missing/foreign Helm fails before pytest collection. Python
 must be **CPython 3.14 GIL with experimental JIT disabled**; a later minor is not
@@ -121,11 +124,10 @@ for authorization/rotation tests even with an external main server.
 
 These checks establish prerequisites, not application acceptance or an untested
 internal registry/runner's identity. GitLab's service provisioning stays runner
-owned, separate from the local Docker preparation path; its internal mirror must
-serve the approved repository digest used by the gate-L1 service reference.
+owned; its internal mirror must serve the approved repository digest used by the gate-L1 service reference.
 
-Discovery, doctor and verification never provision tools. Missing or foreign
-workspace binaries fail with remediation; installation is an explicit action.
+Discovery, doctor and verification never provision tools; missing or foreign
+workspace binaries fail with remediation.
 
 <a id="inputs"></a>
 ## Variables, arguments, cwd and exit codes

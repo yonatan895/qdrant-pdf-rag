@@ -6,6 +6,7 @@ Owner: this file. Design overview: `docs/architecture.md` §4.3. Eval gates:
 > One fact, one owner — this file owns retrieval internals. Code is named by
 > module and function, never by line number.
 
+<a id="query-data-flow"></a>
 ## 1. Query data-flow
 
 `async_search()` in `retrieve/query.py` is the single implementation; the
@@ -71,6 +72,7 @@ single-page. Both forms keep the `, p. <page>` tail that
 `cites.is_citation_shaped` validates (doc-number or supplied filename-stem
 doc id).
 
+<a id="prefetch-filters"></a>
 ## 2. Prefetch and filters
 
 Filters go in prefetch, never after ANN. Both legs carry the same filter
@@ -123,6 +125,7 @@ so lexical and semantic candidates are scoped identically before any fusion.
   `requests=[QueryRequest(filter=flt, ...)]` into one `query_batch_points`
   call (builders in `_build_prefetch_requests`).
 
+<a id="identifiers-query-kind"></a>
 ## 3. Identifiers and query kind
 
 `parse_query` unions matches from the raw query and its uppercased copy for
@@ -140,6 +143,7 @@ suffix), so `ieasysxx` and `IEASYSXX` both filter on `IEASYSxx` (see §10).
 lone member or completion code flips it too), else `nl`. The kind drives RRF
 weights and the rerank bypass — but never the filter shape.
 
+<a id="multi-path"></a>
 ## 3b. Multi-path splitting
 
 `split_query` (`retrieve/split.py`, issue #214) decomposes comparative and
@@ -182,6 +186,7 @@ MRR 0.655→0.643, overall r@5 0.873→0.857, overall MRR 0.700→0.697
 - Trap queries never split. `query_kind`, filters, and rerank scoring stay
   on the original question; per-leg weights follow per-leg text.
 
+<a id="rrf-fusion"></a>
 ## 4. RRF fusion
 
 Fusion is local, not server-side: Qdrant's RRF exposes no per-leg weights,
@@ -255,6 +260,7 @@ rank 0 is worth `1/3` and rank 1 `1/4`, so one leg's top hit dominated).
   Reopen gate: a signal with measured hit/miss separation on
   post-freeze pools.
 
+<a id="injection-screen"></a>
 ## 5. Injection screen
 
 `screen_query` classifies each query as `answerable` or `trap` with
@@ -283,6 +289,7 @@ Two ordering rules matter:
   `answerable` for retrieval; abstention happens separately in the answer
   layer. The rerank bypass (§6) therefore never starves legitimate traffic.
 
+<a id="rerank-dispatch"></a>
 ## 6. Rerank dispatch
 
 Reranking ships default-off. When enabled, the fused top candidates
@@ -350,6 +357,7 @@ a tuple of 8 configuration values (`embed_mode`, `rerank_base_url`, `embed_base_
 `http_connect_retries`) in `retrieve/query.py` consumed by `build_reranker()`
 and `HttpReranker`, resolving the GC address-reuse limitation of `id(settings)`.
 
+<a id="acronym-rewrite"></a>
 ## 7. Acronym rewrite
 
 Deterministic, model-free, default-off (`acronym_expansion_enabled`). Known
@@ -385,6 +393,7 @@ measured variant: PR-12 stays will-not-pursue. Reopen gate: a variant
 with measured positive headroom plus a trigger with measured separation,
 with per-query attribution on post-freeze pools.
 
+<a id="diversification"></a>
 ## 8. Diversification
 
 `diversify_hits` caps coverage at 1 chunk per page and 3 per document
@@ -403,6 +412,7 @@ per-page cap silently became per-document. Hits without a projected
 So "max 1 per page" holds until the pool runs dry, then completeness wins.
 Callers must not assume page-diversity in short pools.
 
+<a id="identifier-patterns"></a>
 ## Appendix A — Identifier patterns
 
 One shared pattern set (`regexes.py`) feeds both ingest payloads and query

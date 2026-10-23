@@ -3,10 +3,8 @@
 Retrieval scoring and measured execution are owned by
 `mainframe_rag.eval.retrieval`: `evaluate` constructs the configured clients,
 measures each selected query and reports query failures; `collect_rows` uses
-the caller's clients for L1 and propagates query failures. Both retain their
-existing query depth and scoring rules. The retrieval CLI, simulator gate and
-promotion harness consume the canonical operations directly. Client imports
-occur when an operation is called. CLI handling, label drafting, simulator lifecycle and
+the caller's clients for L1 and propagates query failures. The retrieval CLI, simulator gate and
+promotion harness consume the canonical operations directly. CLI handling, label drafting, simulator lifecycle and
 snapshot/restore orchestration remain in their operational scripts.
 
 Answer-tier measurement is owned by `mainframe_rag.eval.answers`: deterministic
@@ -16,7 +14,6 @@ and report writing share that import identity with L2. The supported
 installation. Supply explicit `--golden`, `--out`, and `--summary` paths outside
 a workspace; default datasets remain relative to the working directory and
 missing files fail without acquisition. Venue guards apply before live work.
-L2 judgment and L4 quality policy remain separate.
 
 L2 judge prompts, bounded evidence assembly, citation mapping, label parsing and
 judge-call parameters live in `mainframe_rag.eval.judging`. L2 orchestration and
@@ -24,9 +21,7 @@ L4 repeated quality gates remain distinct; both consume the canonical labels.
 L2 row enrichment, request-attributed alert capture, aggregation, structural
 verdicts and measured execution live in `mainframe_rag.eval.answer_tier`.
 L4 imports this runner directly. L2's CLI retains dataset/venue resolution and
-output/manifest composition. Importing the measurement package does not
-start the app or connect to model/storage services; execution does so only
-when explicitly requested. The synthetic HTTP runner test covers per-run search
+output/manifest composition. The synthetic HTTP runner test covers per-run search
 caching, judge-leg order/eligibility, request attribution, cleanup and the next run.
 
 L4 threshold validation, repeat aggregation, quality verdicts and recorded
@@ -37,21 +32,16 @@ quality owner directly; moving ownership does not change
 rate thresholds, structural failure gates, sampling or repeat counts.
 
 Seeded bootstrap intervals are owned by `mainframe_rag.eval.statistics`.
-The promotion policy imports that owner directly. Resampling, pairing, seeds,
-percentile bounds and the promotion decision remain unchanged.
+The promotion policy imports that owner directly.
 
 Pure promotion verdicts and their metric/floor constants are owned by
 `mainframe_rag.eval.promotion`. The harness calls that owner; baseline persistence,
-snapshots and CLI execution stay in `scripts/harness.py`. Trap rejection, class floors, paired
-improvement criteria and reason strings retain their existing behavior.
+snapshots and CLI execution stay in `scripts/harness.py`.
 
 Multi-turn condensation A/B measurement is owned by `mainframe_rag.eval.chat`,
 using the shared dataset and retrieval scorers. `python -m mainframe_rag.eval.chat`
-runs its `main` in a prepared installation. Both literal
-and condensed arms, templates, scoring, call accounting and report fields are
-unchanged. Outside a workspace, supply explicit golden/output paths; the default
-`evals/golden.jsonl` stays relative to the working directory. Importing the
-module does not execute a session or connect to services.
+runs its `main` in a prepared installation.  Outside a workspace, supply explicit golden/output paths; the default
+`evals/golden.jsonl` stays relative to the working directory.
 
 Reusable concurrent HTTP load measurement, Server-Timing parsing, percentiles
 and optional GPU observations are owned by `mainframe_rag.eval.load`. The L3
@@ -132,6 +122,7 @@ Owner: this file. Test-writing rules: `docs/testing.md`. Live ladder:
 > One fact, one owner — this file owns eval internals. Code is named by
 > module and script, never by line number.
 
+<a id="tier-map"></a>
 ## 1. Tier map
 
 Each tier answers a different question; baselines, venues, and gates never
@@ -179,6 +170,7 @@ boost (default 1.0) was unmeasurable outside the real corpus; its ON
 decision has since been measured OFF on real-corpus record-replay pools
 (see `retrieval.md` §4 for the verdict and reopen gate).
 
+<a id="retrieval-eval"></a>
 ## 2. Retrieval eval (`eval_retrieval.py`)
 
 Runs real `retrieve_search(limit=8)` — the 8 gives recall@5 headroom —
@@ -268,6 +260,7 @@ while `diagnostic_dualpath_enabled` remains default-off.
   `must_not`/failures/per-query are intentionally omitted (the zero-gate is
   absolute).
 
+<a id="l1-gate"></a>
 ## 3. L1 gate (`gate_l1.py`)
 
 The required PR check: starts an ephemeral Qdrant simulator, generates one
@@ -288,6 +281,7 @@ legs; gateway-order A/Bs run the same gate with the env var set, after
 `probe_gateway.py` recommends it). The paraphrase branch builds pages from
 `answer_text` without echoing the query (see §6).
 
+<a id="layered-harness"></a>
 ## 4. Layered harness (`harness.py`, `harness_l2/l3/l4.py`)
 
 Release-candidate promotion gate, never a PR gate. Fingerprint, restore, or
@@ -412,6 +406,7 @@ verdict.
   percentiles — note the load-tier percentile below is nearest-rank, so
   cross-tier "p95" values are incomparable by construction.
 
+<a id="answer-eval"></a>
 ## 5. Answer eval (`python -m mainframe_rag.eval.answers`)
 
 Sample/repeat defaults belong to the Python parsers: answers and L2/L4 use
@@ -610,6 +605,7 @@ citation membership claims that a claim follows from the evidence.
   universal truth validator or a mandatory second judge call — stays a #365
   non-goal requiring a separate measured decision.
 
+<a id="paraphrase"></a>
 ## 6. Paraphrase instrument
 
 The main golden set echoes query text into target pages, so header-only
@@ -716,6 +712,7 @@ pin rank order, not content). Pools stay in `bundles/`/scratch — never
 committed (the real-corpus venue guard refuses `real_manuals` without
 `VENUE=rc`; §10).
 
+<a id="golden-corpus"></a>
 ## 7. Golden corpus discipline
 
 `golden.jsonl` (127 dev) and `holdout.jsonl` (76, sha256-pinned, verified
@@ -723,7 +720,8 @@ by the Python dataset owner before protected parsing/scoring) are built from
 `expert_golden_seed.jsonl` plus payload mining by `build_golden_corpus.py`:
 manual bindings for out-of-pattern families, authored corrections,
 forced-abstain ids, absent-trap ids, then a deterministic ~60/40 per-class
-split (LEG entries always dev).
+split (LEG entries always dev). The builder also rewrites `evals/holdout.jsonl`: run it in a
+scratch checkout and compare only the holdout sha with its pin.
 
 - `verify_golden` scrolls live payload and FAILs on missing
   expected/`must_not` docs, absent headings/pages, unbound message-id
@@ -746,6 +744,7 @@ split (LEG entries always dev).
   the frozen holdout receives it only in an adjudicated re-freeze, so dev
   acceptance and holdout acceptance stay separate rulers.
 
+<a id="benchmarks"></a>
 ## 8. Benchmarks (`benchmark.py`, `loadtest.py`)
 
 `sh scripts/tools/run-task.sh eval:bench` ingests a generated corpus (distinct bodies with unique
@@ -791,6 +790,7 @@ latencies.
   aborted per stream, one `stream_truncated` alert each), and a TTFT floor
   under a paced mock. Fail-closed: no skips, agent stdout to a file.
 
+<a id="mock-fidelity"></a>
 ## 9. Mock fidelity limits
 
 `mock_vllm.py` is the only stand-in, and green-with-mock is plumbing
@@ -810,6 +810,7 @@ evidence, not quality evidence:
   `mock_finish_reason` backdoor) default to byte-identical zeros; scope is
   chat-only, with embeddings/tokenize/health/models instant and infallible.
 
+<a id="real-corpus-cadence"></a>
 ## 10. Real-corpus cadence (RC)
 
 The per-PR gate runs hash mode on a synthetic corpus that saturates; the
@@ -919,6 +920,7 @@ changes. Tests live in `test_venue.py` and `test_eval_gate.py`; the latter
 executes actual Task and the actual retrieval CLI with runtime effects
 instrumented, including corruption, recovery, precedence and literal paths.
 
+<a id="release-acceptance"></a>
 ## 11. Release acceptance: independent set and pre-registered criteria (#367)
 
 **Status: PROPOSED in the machine file; accepted by the maintainer (see the
