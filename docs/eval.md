@@ -642,7 +642,9 @@ competitors (sibling docs sharing vocabulary, intra-doc section pairs).
 Paraphrase measures semantic movement on synthetic pools; record-replay
 measures ranking movement on real pools without needing prod models
 locally. Capture runs where the models live (RC/gap), replay runs
-anywhere (`tests/test_replay.py`, `scripts/capture_pool.py`):
+anywhere (`tests/test_replay.py`, `scripts/capture_pool.py`). A single live A/B
+pair is noise (dense retrieval is nondeterministic, #836): capture once, then
+compare configs on those pools with `replay_sweep`.
 
 ```bash
 # 1. Capture (RC/gap, live Qdrant + platform embed/rerank endpoints):
