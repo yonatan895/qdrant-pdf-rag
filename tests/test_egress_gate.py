@@ -8,6 +8,7 @@ the rules actually reject packets is the lane's own probe steps in e2e.yml.
 """
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -293,6 +294,30 @@ def test_every_operator_step_after_the_boundary_runs_through_the_gate():
         if step.get('shell') != GATED_SHELL:
             ungated.append(step.get('name'))
     assert set(ungated) == UNGATED_AFTER_BOUNDARY, sorted(set(ungated) ^ UNGATED_AFTER_BOUNDARY)
+
+
+# The gate's uid/gid owner rule filters the operator's own processes; the docker
+# daemon makes network calls (pull, push, build, run) as root, outside that rule,
+# so it cannot be gated. The only docker verb a gated step may use is `exec`
+# into a Kind node (the probe that proves the boundary), never a daemon fetch.
+DOCKER_VERB = re.compile(r'(?:^|[\s;&|(`])(?:/usr/(?:local/)?bin/)?docker(?:\s+-\S+)*\s+([a-z][a-z-]*)')
+
+
+def test_gated_steps_never_reach_the_docker_daemon_except_node_exec():
+    """Docker verbs run by the daemon bypass the egress gate (#822, #588)."""
+    offenders = {}
+    for step in kind_steps():
+        if step.get('shell') != GATED_SHELL:
+            continue
+        verbs = set(DOCKER_VERB.findall(step['run'])) - {'exec'}
+        if verbs:
+            offenders[step['name']] = sorted(verbs)
+    assert offenders == {}, offenders
+    # The matcher itself: refuses daemon verbs, tolerates the probe's exec.
+    for run in ('docker pull x', 'sudo docker -H u run x', '/usr/bin/docker build .', 'a && docker push i',
+                'docker\tload -i f'):
+        assert DOCKER_VERB.search(run), run
+    assert set(DOCKER_VERB.findall('docker exec "$n" curl x')) == {'exec'}
 
 
 def test_the_bundle_is_bootstrapped_only_behind_the_boundary():
