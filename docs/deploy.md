@@ -1414,6 +1414,31 @@ before an alias. Never mix synthetic cleanup with preserved real-corpus resource
 Transfer the identical tested bundle; missing/failed release-gate checks block
 promotion. Sizing-only overrides do not establish SCC, residency or distributed HA.
 
+<a id="trace-backend"></a>
+## Trace backend selection (ADR-0006, #956)
+
+`tracing.backend` is `jaeger` (default, rendered as before) or `openobserve`.
+Selecting `openobserve` replaces the bundled Jaeger with a single-node OpenObserve
+OSS Deployment (local mode, replicas 1, `Recreate`, RWO PVC `openobserve-data`,
+default `openobserve.storage.size` 10Gi, ClusterIP Service on 5080, no Route or
+Ingress). Required settings, each failing the render when missing:
+
+- `images.openobserve.repository` and `images.openobserve.digest` (`sha256:...`):
+  digest-only, no tag. The chart ships no digest; the pin lands through its own
+  pin PR, and packaging (`images.txt`, `pack.sh`, `load.sh`) follows it.
+- `openobserve.credentialsSecretName`: an existing Secret with keys
+  `root-user-email`, `root-user-password` and `otlp-headers` (the full
+  `Authorization=Basic <base64>` value). The agent reads the last as
+  `OTEL_EXPORTER_OTLP_HEADERS`; no credential value is in values.
+- `tracing.endpoint` empty; the agent exports to
+  `http://openobserve:5080/api/default`. Export stays fail-open.
+
+The pod sets `ZO_TELEMETRY=false`, `ZO_MODEL_PRICING_ENABLED=false` and
+`ZO_MMDB_DISABLE_DOWNLOAD=true`, and uses the restricted-v2 form (non-root, no
+privilege escalation, drop ALL, seccomp RuntimeDefault, read-only root, no fixed
+IDs). Metrics forwarding, the disk-full alert and the smoke trace check are later
+steps of #956; the console is reached by port-forward only.
+
 <a id="configuration-contract"></a>
 ## Operator configuration propagation contract
 

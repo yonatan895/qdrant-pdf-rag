@@ -57,6 +57,7 @@
   - **Not run:** Phase B (`kind load` failed with "failed to detect containerd
     snapshotter"), the upgrade of a volume by a later release, and logs (S3).
     Not tested: SSO, RBAC and audit gaps in OSS.
+  - **Named gap:** volume upgrade by a later release: untested; test when a later release is pinned via its own pin PR.
   - AGPL-3.0 is accepted for the unmodified upstream binary as a separate
     service ([licensing](../licensing.md)). No modification of Enterprise
     behaviour or limits.

@@ -29,6 +29,8 @@ URL, the former hostname included) or turn tracing off.
 {{ .Values.tracing.endpoint }}
 {{- else if include "mainframe-rag.jaegerEnabled" . -}}
 http://jaeger:4318
+{{- else if include "mainframe-rag.openobserveEnabled" . -}}
+http://openobserve:5080/api/default
 {{- else -}}
 {{- fail "tracing.jaeger.enabled=false needs an intentional trace destination: set tracing.endpoint to the external collector's http(s) URL, or tracing.enabled=false" -}}
 {{- end -}}
@@ -46,6 +48,12 @@ use {{- if include ... }} directly (a "false" string would be truthy).
 */}}
 {{- define "mainframe-rag.jaegerEnabled" -}}
 {{- $enabled := .Values.tracing.enabled -}}
+{{- if eq (include "mainframe-rag.tracingBackend" .) "openobserve" -}}
+{{- if eq (.Values.tracing.jaeger.enabled | toString) "true" -}}
+{{- fail "tracing.jaeger.enabled=true contradicts tracing.backend=openobserve: one bundled trace backend" -}}
+{{- end -}}
+{{- $enabled = false -}}
+{{- end -}}
 {{- if kindIs "bool" .Values.tracing.jaeger.enabled -}}
 {{- $enabled = .Values.tracing.jaeger.enabled -}}
 {{- end -}}
@@ -53,6 +61,38 @@ use {{- if include ... }} directly (a "false" string would be truthy).
 {{- fail "tracing.jaeger.enabled=true requires tracing.enabled=true: refusing to deploy a bundled Jaeger nothing exports to" -}}
 {{- end -}}
 {{- if $enabled -}}true{{- end -}}
+{{- end -}}
+
+{{/*
+Trace backend selector (issue #956). Default jaeger; the schema enum is the
+only other value. A missing key reads as jaeger so existing values keep
+rendering byte-identically.
+*/}}
+{{- define "mainframe-rag.tracingBackend" -}}
+{{- .Values.tracing.backend | default "jaeger" -}}
+{{- end -}}
+
+{{/*
+Bundled OpenObserve (issue #956, ADR-0006): "true" or nothing. Needs tracing
+on (nothing else exports to it) and an empty tracing.endpoint (#568 rule:
+a bundled backend only when the endpoint is the bundled one).
+*/}}
+{{- define "mainframe-rag.openobserveEnabled" -}}
+{{- if and (eq (include "mainframe-rag.tracingBackend" .) "openobserve") .Values.tracing.enabled -}}
+{{- if .Values.tracing.endpoint -}}
+{{- fail "tracing.backend=openobserve renders the bundled backend: leave tracing.endpoint empty" -}}
+{{- end -}}
+true
+{{- end -}}
+{{- end -}}
+
+{{- define "mainframe-rag.openobserveSecretName" -}}
+{{ required "openobserve.credentialsSecretName is required (Secret with root-user-email, root-user-password, otlp-headers)" .Values.openobserve.credentialsSecretName }}
+{{- end -}}
+
+{{/* Digest-only image reference; a tag is never accepted (ADR-0006). */}}
+{{- define "mainframe-rag.openobserveImage" -}}
+{{ required "images.openobserve.repository is required" .Values.images.openobserve.repository }}@{{ required "images.openobserve.digest is required: set the pinned sha256 digest (pin PR, issue #956)" .Values.images.openobserve.digest }}
 {{- end -}}
 
 {{- define "mainframe-rag.serviceMonitorEnabled" -}}

@@ -49,6 +49,12 @@ images:
     repository: jaegertracing/jaeger
     tag: v2.20.0
     pullPolicy: IfNotPresent
+  # OpenObserve OSS (issue #956, ADR-0006). Used only with
+  # tracing.backend=openobserve. Digest-only: no tag; render fails while the
+  # digest is unset (the pin lands through its own pin PR).
+  openobserve:
+    repository: openobserve/openobserve
+    pullPolicy: IfNotPresent
   # OAuth proxy sidecar for the optional console Route (ADR-0004). Ref is the
   # internal retag (load.sh pushes the packed image under
   # <registry>/openshift4/ose-oauth-proxy:v4.14); digest pinned in images.txt.
@@ -115,6 +121,9 @@ tracing:
   # valid while the bundled Jaeger renders (issue #568).
   enabled: true
   endpoint: ""
+  # jaeger (default) or openobserve (ADR-0006, issue #956). Flipping the
+  # default is a separate approved concern.
+  backend: jaeger
   jaeger:
     # Bundled Jaeger all-in-one backend (issue #529 OBS-2). Null (default)
     # follows tracing.enabled, preserving the historical coupling. Set false
@@ -130,6 +139,14 @@ tracing:
   # Optional service name; empty strips the entry entirely so the agent
   # default stands (a blank value would override it with "").
   serviceName: ""
+
+# Bundled OpenObserve (tracing.backend=openobserve). Credentials are only
+# ever a Secret reference: keys root-user-email, root-user-password and
+# otlp-headers (the full "Authorization=Basic <b64>" header value).
+openobserve:
+  credentialsSecretName: ""
+  storage:
+    size: 10Gi
 
 metrics:
   # False renders METRICS_ENABLED="false" (/metrics 404s) and skips the

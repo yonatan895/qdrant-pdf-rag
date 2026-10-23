@@ -4,6 +4,7 @@ The retired differential oracle is replaced by explicit expectations for
 agent, OAuth/Route, Jaeger, ServiceMonitor and explicit ingest profiles.
 Operator-to-render round trips also live in test_map_values and airgap suites.
 """
+import copy
 import json
 
 import pytest
@@ -1160,3 +1161,111 @@ def test_direct_chart_refuses_invalid_admission_values(key, bad):
     result = _helm_template_with_values(values)
     assert result.returncode != 0
     assert key in result.stderr
+
+
+# OpenObserve backend (issue #956, ADR-0006). Synthetic digest: the real pin
+# lands through its own pin PR, so no production digest is asserted here.
+OO_DIGEST = "sha256:" + "ab" * 32
+OO_ON = {
+    "tracing": {"backend": "openobserve", "endpoint": ""},
+    "openobserve": {"credentialsSecretName": "oo-creds"},
+    "images": {"openobserve": {"repository": "reg.internal/openobserve/openobserve", "digest": OO_DIGEST}},
+}
+
+
+def test_default_backend_renders_jaeger_unchanged():
+    default = run_new_template({})
+    explicit = run_new_template({"tracing": {"backend": "jaeger"}})
+    assert default == explicit
+    assert not [k for k in default if "openobserve" in k[1]]
+    assert env_map(default["Deployment", "rag-agent"])["OTEL_EXPORTER_OTLP_ENDPOINT"]["value"] == "http://jaeger:4318"
+    assert "OTEL_EXPORTER_OTLP_HEADERS" not in env_map(default["Deployment", "rag-agent"])
+
+
+def test_openobserve_backend_contract():
+    docs = run_new_template(OO_ON)
+    assert not [k for k in docs if k[1].startswith("jaeger")]
+    assert not [k for k in docs if k[0] in ("Route", "Ingress")]
+    dep = docs["Deployment", "openobserve"]
+    assert dep["spec"]["replicas"] == 1
+    assert dep["spec"]["strategy"]["type"] == "Recreate"
+    pod = dep["spec"]["template"]["spec"]
+    assert pod["securityContext"] == {"runAsNonRoot": True, "seccompProfile": {"type": "RuntimeDefault"}}
+    c = pod["containers"][0]
+    assert c["image"] == f"reg.internal/openobserve/openobserve@{OO_DIGEST}"
+    assert c["securityContext"] == {
+        "allowPrivilegeEscalation": False,
+        "readOnlyRootFilesystem": True,
+        "capabilities": {"drop": ["ALL"]},
+    }
+    assert "runAsUser" not in c["securityContext"] and "runAsUser" not in pod["securityContext"]
+    env = {e["name"]: e for e in c["env"]}
+    assert env["ZO_TELEMETRY"]["value"] == "false"
+    assert env["ZO_MODEL_PRICING_ENABLED"]["value"] == "false"
+    assert env["ZO_MMDB_DISABLE_DOWNLOAD"]["value"] == "true"
+    assert env["ZO_LOCAL_MODE"]["value"] == "true"
+    assert env["ZO_LOCAL_MODE_STORAGE"]["value"] == "disk"
+    for name, key in (("ZO_ROOT_USER_EMAIL", "root-user-email"), ("ZO_ROOT_USER_PASSWORD", "root-user-password")):
+        assert "value" not in env[name]
+        assert env[name]["valueFrom"]["secretKeyRef"] == {"name": "oo-creds", "key": key}
+    svc = docs["Service", "openobserve"]
+    assert svc["spec"]["type"] == "ClusterIP"
+    assert [p["port"] for p in svc["spec"]["ports"]] == [5080]
+    pvc = docs["PersistentVolumeClaim", "openobserve-data"]
+    assert pvc["spec"]["accessModes"] == ["ReadWriteOnce"]
+    assert pvc["spec"]["resources"]["requests"]["storage"] == "10Gi"
+    assert pvc["metadata"]["annotations"]["helm.sh/resource-policy"] == "keep"
+
+
+def test_openobserve_agent_exports_to_it_with_secret_headers():
+    agent_env = env_map(run_new_template(OO_ON)["Deployment", "rag-agent"])
+    assert agent_env["OTEL_EXPORTER_OTLP_ENDPOINT"]["value"] == "http://openobserve:5080/api/default"
+    assert "value" not in agent_env["OTEL_EXPORTER_OTLP_HEADERS"]
+    assert agent_env["OTEL_EXPORTER_OTLP_HEADERS"]["valueFrom"]["secretKeyRef"] == {
+        "name": "oo-creds", "key": "otlp-headers",
+    }
+
+
+def test_openobserve_storage_size_is_configurable():
+    docs = run_new_template({**OO_ON, "openobserve": {"credentialsSecretName": "oo-creds", "storage": {"size": "20Gi"}}})
+    assert docs["PersistentVolumeClaim", "openobserve-data"]["spec"]["resources"]["requests"]["storage"] == "20Gi"
+
+
+def _oo_values(**patch):
+    values = base_values()
+    for key, val in copy.deepcopy(OO_ON).items():
+        if isinstance(val, dict) and isinstance(values.get(key), dict):
+            values[key].update(val)
+        else:
+            values[key] = val
+    values["images"]["openobserve"] = dict(OO_ON["images"]["openobserve"])
+    for path, val in patch.items():
+        node = values
+        *parents, leaf = path.split(".")
+        for p in parents:
+            node = node.setdefault(p, {})
+        if val is None:
+            node.pop(leaf, None)
+        else:
+            node[leaf] = val
+    return values
+
+
+@pytest.mark.parametrize("patch,needle", [
+    ({"images.openobserve.digest": None}, "digest is required"),
+    ({"images.openobserve.tag": "v1.0.4", "images.openobserve.digest": None}, "tag"),
+    ({"openobserve.credentialsSecretName": ""}, "credentialsSecretName is required"),
+    ({"tracing.endpoint": "http://elsewhere:4318"}, "tracing.endpoint empty"),
+    ({"tracing.jaeger.enabled": True}, "contradicts"),
+    ({"tracing.backend": "tempo"}, "backend"),
+])
+def test_openobserve_refuses_unsafe_values(patch, needle):
+    result = _helm_template_with_values(_oo_values(**patch))
+    assert result.returncode != 0
+    assert needle in result.stderr
+
+
+def test_openobserve_off_when_tracing_disabled():
+    docs = run_new_template({**OO_ON, "tracing": {"backend": "openobserve", "enabled": False}})
+    assert not [k for k in docs if "openobserve" in k[1]]
+    assert env_map(docs["Deployment", "rag-agent"])["OTEL_EXPORTER_OTLP_ENDPOINT"]["value"] == ""
