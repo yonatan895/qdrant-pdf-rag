@@ -58,7 +58,7 @@ if [ "$OTEL_TRACING_ENABLED" = "1" ]; then
 else
     echo "    Tracing:           OFF (OTEL_EXPORTER_OTLP_ENDPOINT=off)"
 fi
-if [ "$OTEL_TRACING_ENABLED" = "1" ]; then
+if [ "$OTEL_BUNDLED" = "1" ]; then
     echo "    Trace backend:     OpenObserve (bundled)"
 else
     echo "    Trace backend:     not deployed"

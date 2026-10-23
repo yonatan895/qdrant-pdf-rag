@@ -1666,3 +1666,19 @@ def test_default_smoke_gets_trace_query_settings_without_manual_env(tree):
     off = subprocess.run(["sh", "-c", script.replace("OTEL_TRACING_ENABLED=1", "OTEL_TRACING_ENABLED=0")],
                          cwd=tree[0], env=env, capture_output=True, text=True, check=False)
     assert off.stdout == "||"
+
+
+def test_external_otlp_endpoint_has_no_bundled_trace_query_default(tree):
+    """#956: with tracing.endpoint set there is no bundled OpenObserve, so smoke
+    must be given TRACE_QUERY_URL explicitly instead of defaulting to a service
+    that is not rendered."""
+    base = ('. scripts/airgap/common.sh; NAMESPACE=ns; KC=kubectl; OTEL_TRACING_ENABLED=1; OTEL_BUNDLED=0; '
+            'resolve_trace_query; printf "%s|%s" "${TRACE_QUERY_URL-}" "${TRACE_QUERY_USER-}"')
+    env = {"PATH": f"{tree[0] / 'bin'}:/usr/bin:/bin", "HELM_LOG": str(tree[1])}
+    refused = subprocess.run(["sh", "-c", base], cwd=tree[0], env=env, capture_output=True, text=True, check=False)
+    assert refused.returncode != 0 and "TRACE_QUERY_URL is required" in refused.stderr
+    given = subprocess.run(
+        ["sh", "-c", base], cwd=tree[0], capture_output=True, text=True, check=False,
+        env={**env, "TRACE_QUERY_URL": "http://oo.platform:5080", "TRACE_QUERY_USER": "u", "TRACE_QUERY_PASSWORD": "p"})
+    assert given.returncode == 0, given.stderr
+    assert given.stdout == "http://oo.platform:5080|u"

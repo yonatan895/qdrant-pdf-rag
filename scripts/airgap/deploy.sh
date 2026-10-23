@@ -87,7 +87,7 @@ QDRANT_URL="http://${QDRANT_RELEASE}:6333"
 DEPLOY_IMAGES="qdrant agent"
 # OpenObserve is the only trace backend (ADR-0006, #956): with tracing on, the
 # chart renders it and the otelcol collector, so both are identity-checked.
-[ "$OTEL_TRACING_ENABLED" != "1" ] || DEPLOY_IMAGES="$DEPLOY_IMAGES openobserve otelcol"
+[ "$OTEL_BUNDLED" != "1" ] || DEPLOY_IMAGES="$DEPLOY_IMAGES openobserve otelcol"
 [ "$AGENT_ROUTE" != "true" ] || DEPLOY_IMAGES="$DEPLOY_IMAGES oauth_proxy"
 # shellcheck disable=SC2086
 verify_registry_images $DEPLOY_IMAGES
@@ -117,7 +117,7 @@ cat dist/app-helm-render/mainframe-rag/templates/*.yaml > dist/agent-rendered.ya
 fail_on_placeholders dist/agent-rendered.yaml agent
 check_agent_qdrant_key dist/agent-rendered.yaml agent
 rm -f dist/openobserve-rendered.yaml dist/servicemonitor-rendered.yaml dist/agent-route.yaml
-if [ "$OTEL_TRACING_ENABLED" = "1" ]; then
+if [ "$OTEL_BUNDLED" = "1" ]; then
     cat dist/app-helm-render/mainframe-rag/templates/openobserve-*.yaml > dist/openobserve-rendered.yaml
 fi
 if [ "$SERVICEMONITOR_DEPLOY" = "1" ]; then
@@ -130,7 +130,7 @@ fi
 require_gateway_secret_keys llm-api-key embed-api-key rerank-api-key
 # Operator-created OpenObserve credentials (ADR-0006, #956), checked before any
 # mutation. Only presence of keys is read; values are never printed.
-if [ "$OTEL_TRACING_ENABLED" = "1" ] && [ "${AIRGAP_DRYRUN:-0}" != "1" ]; then
+if [ "$OTEL_BUNDLED" = "1" ] && [ "${AIRGAP_DRYRUN:-0}" != "1" ]; then
     for _oo_key in root-user-email root-user-password otlp-headers metrics-auth; do
         _oo_present=$($KC -n "$NAMESPACE" get secret openobserve-credentials \
             -o "go-template={{if index .data \"$_oo_key\"}}present{{end}}" 2>/dev/null) || _oo_present=""
@@ -274,7 +274,7 @@ if [ "$AGENT_ROUTE" = "true" ]; then
     verify_agent_route "${ROUTE_DESTINATION_CA_FILE:-}"
 fi
 [ "${METRICS_ENABLED:-false}" = "true" ] || echo "==> Metrics off: ServiceMonitor not deployed"
-[ "$OTEL_TRACING_ENABLED" = "1" ] || echo "==> Tracing off: OpenObserve not deployed"
+[ "$OTEL_BUNDLED" = "1" ] || echo "==> OpenObserve not deployed (tracing off or external OTLP endpoint)"
 
 wait_rollout() {
     target=$1
@@ -298,7 +298,7 @@ if [ "${AIRGAP_DRYRUN:-0}" = "1" ]; then
 else
     wait_rollout "statefulset/$QDRANT_RELEASE" 600
     wait_rollout "deploy/rag-agent" 300
-    if [ "$OTEL_TRACING_ENABLED" = "1" ]; then
+    if [ "$OTEL_BUNDLED" = "1" ]; then
         wait_rollout "deploy/openobserve" 120
         wait_rollout "deploy/otelcol" 120
     fi

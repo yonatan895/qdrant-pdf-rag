@@ -177,8 +177,9 @@ check_secret_name() {
 # Observability decisions (issues #83, #529 OBS-2, #568): one owner for
 # deploy / validate / smoke / ingest and the chart values — the values mapper
 # (scripts/airgap/map_values.py observability()). Sets OTEL_ENDPOINT_RESOLVED
-# (empty = the bundled OpenObserve, or tracing off), OTEL_TRACING_ENABLED and
-# SERVICEMONITOR_DEPLOY (1/0); invalid or contradictory operator input fails
+# (empty = the bundled OpenObserve, or tracing off), OTEL_TRACING_ENABLED, OTEL_BUNDLED
+# (1 = tracing on with the chart-rendered OpenObserve and otelcol; 0 = off or an
+# external OTLP endpoint) and SERVICEMONITOR_DEPLOY (1/0); invalid or contradictory operator input fails
 # before any manifest is rendered. The same function renders the chart's
 # explicit booleans, so the shell gates and the release can never disagree.
 resolve_observability() {
@@ -188,7 +189,7 @@ resolve_observability() {
         die "observability configuration refused (see the message above)"
     eval "$_decisions"
     unset _decisions
-    export OTEL_ENDPOINT_RESOLVED OTEL_TRACING_ENABLED SERVICEMONITOR_DEPLOY
+    export OTEL_ENDPOINT_RESOLVED OTEL_TRACING_ENABLED OTEL_BUNDLED SERVICEMONITOR_DEPLOY
 }
 
 # Trace-arrival query settings for airgap:smoke (ADR-0006, #956). With tracing
@@ -205,8 +206,13 @@ _read_oo_secret_key() {
 resolve_trace_query() {
     [ "${OTEL_TRACING_ENABLED:-0}" = "1" ] || return 0
     [ "${AIRGAP_DRYRUN:-0}" != "1" ] || { TRACE_QUERY_URL=${TRACE_QUERY_URL:-http://openobserve:5080}; export TRACE_QUERY_URL; return 0; }
+    if [ "${OTEL_BUNDLED:-1}" != "1" ] && [ -z "${TRACE_QUERY_URL:-}" ]; then
+        die "TRACE_QUERY_URL is required when OTEL_EXPORTER_OTLP_ENDPOINT is an external collector (no bundled OpenObserve to query)"
+    fi
     TRACE_QUERY_URL=${TRACE_QUERY_URL:-http://openobserve:5080}
     if [ -z "${TRACE_QUERY_USER:-}" ] || [ -z "${TRACE_QUERY_PASSWORD:-}" ]; then
+        [ "${OTEL_BUNDLED:-1}" = "1" ] ||
+            die "TRACE_QUERY_USER and TRACE_QUERY_PASSWORD are required with an external OTLP endpoint"
         TRACE_QUERY_USER=$(_read_oo_secret_key root-user-email) &&
             TRACE_QUERY_PASSWORD=$(_read_oo_secret_key root-user-password) ||
             die "E_OPENOBSERVE_CREDENTIALS: cannot read root-user-email and root-user-password from Secret openobserve-credentials"

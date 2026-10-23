@@ -342,11 +342,12 @@ def build_values(deploy_only: bool = False) -> dict:
         }
 
     # OpenObserve and otelcol (ADR-0006, #956) are the only trace/metrics
-    # backend: present whenever tracing is on, absent when off. Like every other
+    # backend: present only for the bundled backend (tracing on, empty endpoint); a set
+    # endpoint is the external-collector escape hatch and renders neither. Like every other
     # chart image they carry repository and tag only; the pinned digests live in
     # images.txt and are enforced at pack/load and by the pod-image check.
     tracing_images = {}
-    if tracing_enabled:
+    if tracing_enabled and not otel_endpoint:
         tracing_images["openobserve"] = {
             "repository": f"{internal_registry}/openobserve/openobserve",
             "tag": "v1.1.2",
@@ -440,6 +441,7 @@ def print_bundle_decisions() -> None:
     tracing, endpoint, monitor = observability()
     print(f"OTEL_TRACING_ENABLED={int(tracing)}")
     print(f"OTEL_ENDPOINT_RESOLVED={shlex.quote(endpoint)}")
+    print(f"OTEL_BUNDLED={int(tracing and not endpoint)}")
     print(f"SERVICEMONITOR_DEPLOY={int(monitor)}")
 
 

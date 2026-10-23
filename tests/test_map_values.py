@@ -669,10 +669,19 @@ def test_retired_jaeger_switch_is_ignored(monkeypatch, mapper_env):
     assert "jaeger" not in v["images"]
 
 
-@pytest.mark.parametrize("endpoint,enabled", [("", True), ("http://collector.platform:4318", True), ("off", False)])
+@pytest.mark.parametrize("endpoint,enabled", [("", True), ("http://collector.platform:4318", False), ("off", False)])
 def test_openobserve_and_otelcol_images_follow_tracing(monkeypatch, mapper_env, endpoint, enabled):
-    """#956: tracing on always emits images.openobserve and images.otelcol
-    (repository, tag, pullPolicy; never a digest, which lives in images.txt); tracing off emits neither."""
+    """#956: the bundled backend (tracing on, empty endpoint) emits images.openobserve and
+    images.otelcol (repository, tag, pullPolicy; never a digest, which lives in images.txt).
+    Tracing off and an external endpoint (the chart renders no backend) emit neither, and
+    the shell gates' OTEL_BUNDLED decision agrees with the images."""
+    bundled = enabled
+    decisions = subprocess.run(
+        [sys.executable, "scripts/airgap/map_values.py", "--bundle-decisions"],
+        capture_output=True, text=True, cwd=REPO,
+        env={**os.environ, "OTEL_EXPORTER_OTLP_ENDPOINT": endpoint})
+    assert decisions.returncode == 0, decisions.stderr
+    assert f"OTEL_BUNDLED={int(bundled)}" in decisions.stdout.split()
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint)
     monkeypatch.setenv("IMAGE_DIGEST_OPENOBSERVE", "sha256:" + "c" * 64)
     monkeypatch.setenv("IMAGE_DIGEST_OTELCOL", "sha256:" + "d" * 64)
@@ -681,6 +690,7 @@ def test_openobserve_and_otelcol_images_follow_tracing(monkeypatch, mapper_env, 
     images = load_values(out)["images"]
     if not enabled:
         assert "openobserve" not in images and "otelcol" not in images
+        assert load_values(out)["tracing"]["endpoint"] == (endpoint if endpoint != "off" else "")
         return
     assert images["openobserve"] == {
         "repository": "reg.internal/openobserve/openobserve", "tag": "v1.1.2",
