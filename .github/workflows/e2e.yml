@@ -847,13 +847,21 @@ jobs:
         shell: sh rehearsal-infra/scripts/ci/egress_gate.sh run bash -e {0}
         run: |
           export PATH="/usr/local/bin:$PATH"
-          for node in $(/usr/local/bin/kind get nodes --name gapbox); do
+          NODES="$(/usr/local/bin/kind get nodes --name gapbox)"
+          test -n "$NODES" || { echo "VIOLATED: no Kind node found; the probe did not run"; exit 1; }
+          for node in $NODES; do
             for target in 1.1.1.1 8.8.8.8 9.9.9.9; do
-              if docker exec "$node" curl -sS --max-time 5 -o /dev/null "https://$target/" 2>/dev/null; then
-                echo "VIOLATED: $node reached $target:443"
-                exit 1
-              fi
-              echo "unreachable $node -> $target:443"
+              rc=0
+              docker exec "$node" curl -sS --max-time 5 -o /dev/null "https://$target/" 2>/dev/null || rc=$?
+              # Only a network failure counts as blocked: 6 resolve, 7 refused or
+              # unreachable (REJECT's ICMP port-unreachable), 28 timeout, 35/56 TLS
+              # or receive failure. 0 means it connected; docker exec failures
+              # (125-127, no such container) and anything else mean it never ran.
+              case "$rc" in
+                6|7|28|35|56) echo "unreachable $node -> $target:443 (curl exit $rc)" ;;
+                0) echo "VIOLATED: $node reached $target:443"; exit 1 ;;
+                *) echo "VIOLATED: probe did not run on $node for $target (exit $rc)"; exit 1 ;;
+              esac
             done
           done
           echo "node egress probe blocked: ok"

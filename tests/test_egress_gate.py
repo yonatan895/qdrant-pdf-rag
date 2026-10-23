@@ -352,3 +352,40 @@ def test_a_node_probe_exercises_the_host_rule_before_require_hits_nodes():
     assert 'docker exec "$node" curl' in step['run']
     assert all(ip in step['run'] for ip in ('1.1.1.1', '8.8.8.8', '9.9.9.9'))
     assert 'exit 1' in step['run']
+
+
+def node_probe(tmp_path, curl_exit, nodes='gapbox-control-plane'):
+    """Run the workflow's node-probe script against stub kind/docker."""
+    step = next(s for s in kind_steps()
+                if s.get('name') == 'Prove node egress is blocked (Kind node network namespace, real sockets)')
+    bindir = tmp_path / 'bin'
+    bindir.mkdir()
+    (tmp_path / 'kind').write_text('#!/bin/sh\nprintf "%s" "$NODES"\n')
+    (tmp_path / 'kind').chmod(0o755)
+    (bindir / 'docker').write_text('#!/bin/sh\nexit "$CURL_EXIT"\n')
+    (bindir / 'docker').chmod(0o755)
+    script = step['run'].replace('/usr/local/bin/kind', str(tmp_path / 'kind'))
+    return subprocess.run(['bash', '-ec', script], capture_output=True, text=True, check=False,
+                          env={**os.environ, 'PATH': f'{bindir}:/usr/bin:/bin', 'NODES': nodes,
+                               'CURL_EXIT': str(curl_exit)})
+
+
+@pytest.mark.parametrize('code', [6, 7, 28, 35, 56])
+def test_node_probe_accepts_network_failures_as_blocked(tmp_path, code):
+    result = node_probe(tmp_path, code)
+    assert result.returncode == 0, result.stdout
+    assert 'node egress probe blocked: ok' in result.stdout
+
+
+@pytest.mark.parametrize('code', [0, 1, 2, 22, 125, 126, 127])
+def test_node_probe_fails_when_connected_or_not_run(tmp_path, code):
+    result = node_probe(tmp_path, code)
+    assert result.returncode == 1
+    assert 'VIOLATED' in result.stdout
+    assert 'blocked: ok' not in result.stdout
+
+
+def test_node_probe_fails_without_any_node(tmp_path):
+    result = node_probe(tmp_path, 7, nodes='')
+    assert result.returncode == 1
+    assert 'no Kind node found' in result.stdout
