@@ -865,6 +865,24 @@ def test_gutter_bars_beside_table_cells_are_kept(tmp_path):
     assert chunk.text.splitlines().count("|") == 5
 
 
+def test_gutter_bars_beside_table_prose_cells_are_removed(tmp_path):
+    """Issue #864, prose-cell column: when a table's description column holds
+    full sentences, bars in the whitespace beside it are revision marks, unlike
+    the short-label cells above. The key column and every sentence survive."""
+    keys = ["LFAREA", "PROGxx", "IEASYSxx", "SMFPRMxx", "CONSOLxx"]
+    sentences = [f"Setting {i} controls the storage limit." for i in range(5)]
+
+    def draw(page):
+        for i, key in enumerate(keys):
+            page.insert_text((60, 100 + 14 * i), key, fontsize=10)
+        _bars_beside(page, 200, 212, 100, sentences)
+
+    (chunk,) = _pipeline_chunks(_one_page_pdf(tmp_path / "WX10-0016-00_prose_cells.pdf", draw))
+    lines = chunk.text.splitlines()
+    assert "|" not in [ln.strip() for ln in lines]
+    assert all(any(s in ln for ln in lines) for s in sentences + keys)
+
+
 def _draw_columns(page, columns, x0=72, y0=100, step=140, leading=14, wrapped=()):
     """Column-major draw: each column whole, one text object per line. A '|'
     inside a cell starts a continuation line; rows listed in `wrapped`
