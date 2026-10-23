@@ -64,6 +64,7 @@ def test_base_contract_with_independent_controls():
         "RERANK_ENDPOINT_ORDER": "score_first",
         "LLM_REASONING_EFFORT_SIMPLE": "medium",  # chart default, #917
         "LLM_REASONING_EFFORT_COMPLEX": "medium",
+        "REQUEST_DEADLINE_S": "270",  # chart default, #843
     }
     assert {key: env["value"] for key, env in new_env.items() if "value" in env} == expected_scalars
     assert set(new_env) == set(expected_scalars) | {"QDRANT_API_KEY"}
@@ -1104,3 +1105,34 @@ def test_default_chart_carries_medium_effort_matching_settings():
         {"models": {"reasoning": {"reasoningEffortComplex": "xhigh"}}})["Deployment", "rag-agent"])
     assert override["LLM_REASONING_EFFORT_COMPLEX"]["value"] == "xhigh"
     assert override["LLM_REASONING_EFFORT_SIMPLE"]["value"] == "medium"
+
+
+def test_chart_ships_request_deadline_270_and_reaches_settings(monkeypatch):
+    """#843 D6: chart value -> rendered env -> Settings; Settings default stays 0 (D5)."""
+    from mainframe_rag.config import Settings
+
+    pod = env_map(run_new_template({})["Deployment", "rag-agent"])
+    assert pod["REQUEST_DEADLINE_S"]["value"] == "270"
+    monkeypatch.setenv("REQUEST_DEADLINE_S", pod["REQUEST_DEADLINE_S"]["value"])
+    assert Settings(_env_file=None).request_deadline_s == 270.0
+    monkeypatch.delenv("REQUEST_DEADLINE_S")
+    assert Settings(_env_file=None).request_deadline_s == 0.0
+    # Explicit zero is retained (deadline off); admission names are not rendered.
+    off = env_map(run_new_template({"requestDeadlineSeconds": 0})["Deployment", "rag-agent"])
+    assert off["REQUEST_DEADLINE_S"]["value"] == "0"
+    assert not any(name.startswith("REQUEST_") and name != "REQUEST_DEADLINE_S" for name in pod)
+
+
+def test_chart_request_deadline_stays_strictly_below_the_route_timeout():
+    values = yaml.safe_load((CHART / "values.yaml").read_text())
+    # Strict: a deadline equal to the route timeout races the route cut (#843).
+    assert 0 < values["requestDeadlineSeconds"] < values["route"]["timeoutSeconds"]
+
+
+@pytest.mark.parametrize("bad", [-1, 3601, "300", 1.5])
+def test_direct_chart_refuses_invalid_request_deadline(bad):
+    values = base_values()
+    values["requestDeadlineSeconds"] = bad
+    result = _helm_template_with_values(values)
+    assert result.returncode != 0
+    assert "requestDeadlineSeconds" in result.stderr

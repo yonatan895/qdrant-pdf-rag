@@ -836,12 +836,25 @@ async pool on `FEEDBACK_TIMEOUT_S` (issue #780; closed after a bounded drain).
 ## 6a. Request admission, total deadline and embed-input bound (issue #374)
 
 **Status:** implemented with hermetic tests (`tests/test_request_bounds.py`,
-`tests/test_hash_embed.py`, `tests/test_run_ingest.py`); **every limit defaults
-off** (0), so behaviour is unchanged until an operator selects values. No
-numeric limit is approved or measured for production: choosing them needs the
-site procedure at the end of this section. **Decision owners:** `agent/admission.py`
+`tests/test_hash_embed.py`, `tests/test_run_ingest.py`); **every `Settings` limit
+defaults off** (0), so local and CI behaviour is unchanged. Only the 270 s
+deadline is approved for the supported deployment (below, #843 D6); no admission
+limit is approved or measured, and choosing one needs the site procedure at the
+end of this section. **Decision owners:** `agent/admission.py`
 (`AdmissionController`), `app._admit` / `_within_deadline` / `_deadline_iter`,
 `ingest/bounds.py`.
+
+**Approved envelope (2026-10-23, #843 D6; handoff owned by #374).** The supported
+deployment ships `REQUEST_DEADLINE_S=270` through the chart value
+`requestDeadlineSeconds` (so the air-gap render carries it); the `Settings`
+default stays 0 for local and CI (#843 D5). It is chosen from the medium-effort
+record (#917: p95 162 s, max 232 s on 126 dev rows), so the supported route sees
+no 504 at that effort, while a longer generation ends as `504 deadline_exceeded`
+instead of a silent route cut. 270 s is strictly below the route `timeoutSeconds`
+and the default client and `answer_timeout_s` waits (300 each), so the agent's
+504 arrives before the route cut; a test requires deadline < route timeout. Admission
+numbers (`request_max_concurrent`, queue) are **not** approved; they wait for the
+stepped-concurrency run (#843 D4).
 
 - **Admission** (`request_max_concurrent` > 0): `/v1/search`, `/v1/evidence/*`,
   `/v1/sources`, `/v1/answer`, `/v1/chat*` and `/ui/chat*` share one pool and take one slot as
@@ -890,9 +903,11 @@ site procedure at the end of this section. **Decision owners:** `agent/admission
 - **Propagation:** these are `Settings` fields read from the environment
   (`REQUEST_MAX_CONCURRENT`, `REQUEST_QUEUE_MAX`, `REQUEST_QUEUE_WAIT_S`,
   `REQUEST_DEADLINE_S`, `EMBED_MAX_INPUT_CHARS`, `INGEST_MAX_PDF_BYTES`,
-  `INGEST_MAX_DOC_PAGES`, `INGEST_MAX_DOC_CHUNKS`). The operator-file ->
-  Task/shell -> Helm handoff is **not** added in this change; until a
-  reviewed handoff exists, setting them is a local/CI experiment, not a
+  `INGEST_MAX_DOC_PAGES`, `INGEST_MAX_DOC_CHUNKS`). Only `REQUEST_DEADLINE_S`
+  has a handoff: the chart value `requestDeadlineSeconds` (default 270, rendered
+  as the pod env; a direct Helm caller may set 0..3600, 0 disables). There is no
+  operator-file key for it yet (that needs the Task `TASK_OP_KEYS` list to move
+  with `OPERATOR_ENV_KEYS`). The other names stay a local/CI experiment, not a
   deployment change (same rule as `LLM_THINKING_RESERVE_TOKENS_SIMPLE`).
 
 **Local evidence (labelled by scope):** full re-ingest on 2026-10-02 —
@@ -941,7 +956,7 @@ readers:
 | `llm_max_model_len` / `llm_reserved_output_tokens` / `llm_thinking_reserve_tokens_complex` / `llm_token_safety_margin` / `llm_max_chunk_tokens_narrative` / `llm_tokenize_timeout_s` | 32768 / 2560 / 8192 / 128 / 1200 / 5.0 | tokenizer-path budgeting (#298, #777). `llm_max_model_len` must not exceed the served `--max-model-len`. With a server-verified prompt count the reserved output plus the path's thinking reserve is sent as `max_tokens` (prompt + cap stays inside the window minus the margin), so a runaway xhigh generation ends as `finish_reason: length` → `generation_incomplete`; an estimator-only prompt sends no cap |
 | `llm_thinking_reserve_tokens_simple` | 8192 | reasoning headroom in single-turn and chat prompt budgets (provisional for xhigh, #777); environment input `LLM_THINKING_RESERVE_TOKENS_SIMPLE` |
 | `llm_stream` | `false` | TTFT measurement and streaming recovery policy for server-side reasoning calls (the wire is a stream either way, #868) |
-| `request_max_concurrent` / `request_queue_max` / `request_queue_wait_s` / `request_deadline_s` | 0 (unlimited) / 0 / 5.0 (used only with a queue) / 0.0 (no deadline) | request admission and total deadline (§6a); issue #374, **no numeric envelope approved** — values come from site measurement |
+| `request_max_concurrent` / `request_queue_max` / `request_queue_wait_s` / `request_deadline_s` | 0 (unlimited) / 0 / 5.0 (used only with a queue) / 0.0 (no deadline; the chart ships 270, #843) | request admission and total deadline (§6a); issue #374; only the 270 s deadline is approved for the supported deployment, **no admission envelope approved** — values come from site measurement |
 | `embed_max_input_chars` | 0 (unbounded) | refuse an over-bound dense embed input before the call, query path and ingest (§6a, `docs/ingest.md` §7) |
 | `http_connect_retries` / `http_max_connections` / `http_max_keepalive_connections` | 2 (connect-only) / 200 / 100 | both pools, embed/context clients |
 | `health_qdrant_timeout_s` / `health_embed_timeout_s` | 5.0 / 10.0 | healthz only |

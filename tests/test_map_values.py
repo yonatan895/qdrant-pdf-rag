@@ -871,3 +871,20 @@ def test_unset_efforts_render_medium_on_the_agent_pod(monkeypatch, mapper_env):
     agent = yaml.safe_load(rendered.stdout)["spec"]["template"]["spec"]["containers"][0]
     actual = {entry["name"]: entry.get("value") for entry in agent["env"]}
     assert actual["LLM_REASONING_EFFORT_SIMPLE"] == actual["LLM_REASONING_EFFORT_COMPLEX"] == "medium"
+
+
+def test_airgap_render_carries_the_request_deadline(mapper_env):
+    """#843 D6: the mapped release values add no override, so the chart's 300 s reaches the pod."""
+    result, output = mapper_env()
+    assert result.returncode == 0, result.stderr
+    assert "requestDeadlineSeconds" not in load_values(output)
+    rendered = subprocess.run(
+        [str(REPO / ".tools/bin/helm"), "template", "app", str(CHART), "-f", str(output),
+         "--namespace", "ns", "--show-only", "templates/agent-deployment.yaml"],
+        capture_output=True, text=True, check=False,
+    )
+    assert rendered.returncode == 0, rendered.stderr
+    agent = yaml.safe_load(rendered.stdout)["spec"]["template"]["spec"]["containers"][0]
+    actual = {entry["name"]: entry.get("value") for entry in agent["env"]}
+    assert actual["REQUEST_DEADLINE_S"] == "270"
+    assert yaml.safe_load(output.read_text())["route"]["timeoutSeconds"] > int(actual["REQUEST_DEADLINE_S"])
