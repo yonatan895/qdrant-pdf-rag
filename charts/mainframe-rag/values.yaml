@@ -44,15 +44,17 @@ images:
     tag: "0000000000000000000000000000000000000000"
     pullPolicy: IfNotPresent
   # OpenObserve OSS (issue #956, ADR-0006), the bundled trace/metrics backend.
-  # Digest-only: no tag; render fails while the digest is unset (the pin
-  # lands through its own pin PR and the operator mapping).
+  # Tag form like the other images; the digest is pinned in images.txt and
+  # enforced at pack/load (#960), never in the manifest.
   openobserve:
     repository: openobserve/openobserve
+    tag: v1.1.2
     pullPolicy: IfNotPresent
   # Stateless otelcol-contrib that scrapes the agent /metrics and forwards to
-  # OpenObserve. Digest-only, same fail-closed rule.
+  # OpenObserve. Same tag-plus-images.txt pin rule.
   otelcol:
     repository: otel/opentelemetry-collector-contrib
+    tag: 0.160.0
     pullPolicy: IfNotPresent
   # OAuth proxy sidecar for the optional console Route (ADR-0004). Ref is the
   # internal retag (load.sh pushes the packed image under
@@ -128,8 +130,10 @@ tracing:
 # Bundled OpenObserve. Credentials are only ever a Secret reference: keys
 # root-user-email, root-user-password, otlp-headers and metrics-auth (each
 # header value is the full "Basic <b64>" form the consumer sends).
+# The Secret must exist at deploy time (#960/deploy.sh checks it); emptying
+# the name fails the render.
 openobserve:
-  credentialsSecretName: ""
+  credentialsSecretName: openobserve-credentials
   storage:
     size: 10Gi
 

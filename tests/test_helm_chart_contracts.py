@@ -1050,10 +1050,8 @@ def test_direct_chart_refuses_invalid_admission_values(key, bad):
     assert key in result.stderr
 
 
-# OpenObserve is the only trace backend (issue #956, ADR-0006). The synthetic
-# digests in base_values stand in for the pins that land through the pin PR.
-OO_DIGEST = "sha256:" + "ab" * 32
-OTELCOL_DIGEST = "sha256:" + "cd" * 32
+# OpenObserve is the only trace backend (issue #956, ADR-0006). Tags in
+# base_values; the digest pin is enforced at pack/load (#960).
 METRICS_ON = {"metrics": {"enabled": True}}
 
 
@@ -1062,7 +1060,7 @@ def test_default_render_is_openobserve_only():
     assert not [k for k in docs if "jaeger" in k[1]]
     job = run_new_job_only({"ingest": {"corpusPVC": "c"}})["Job", "ingest"]
     assert ingest_env_map(job)["OTEL_EXPORTER_OTLP_HEADERS"]["valueFrom"]["secretKeyRef"] == {
-        "name": "oo-creds", "key": "otlp-headers",
+        "name": "openobserve-credentials", "key": "otlp-headers",
     }
     assert not [k for k in docs if k[0] in ("Route", "Ingress")]
     assert {k for k in docs if "openobserve" in k[1]} == {
@@ -1076,7 +1074,7 @@ def test_default_render_is_openobserve_only():
     env = env_map(docs["Deployment", "rag-agent"])
     assert env["OTEL_EXPORTER_OTLP_ENDPOINT"]["value"] == "http://openobserve:5080/api/default"
     assert env["OTEL_EXPORTER_OTLP_HEADERS"]["valueFrom"]["secretKeyRef"] == {
-        "name": "oo-creds", "key": "otlp-headers",
+        "name": "openobserve-credentials", "key": "otlp-headers",
     }
 
 
@@ -1088,7 +1086,7 @@ def test_openobserve_backend_contract():
     pod = dep["spec"]["template"]["spec"]
     assert pod["securityContext"] == {"runAsNonRoot": True, "seccompProfile": {"type": "RuntimeDefault"}}
     c = pod["containers"][0]
-    assert c["image"] == f"reg.internal/openobserve/openobserve@{OO_DIGEST}"
+    assert c["image"] == f"reg.internal/openobserve/openobserve:v1.1.2"
     assert c["securityContext"] == {
         "allowPrivilegeEscalation": False,
         "readOnlyRootFilesystem": True,
@@ -1109,7 +1107,7 @@ def test_openobserve_backend_contract():
     }
     for name, key in (("ZO_ROOT_USER_EMAIL", "root-user-email"), ("ZO_ROOT_USER_PASSWORD", "root-user-password")):
         assert "value" not in env[name]
-        assert env[name]["valueFrom"]["secretKeyRef"] == {"name": "oo-creds", "key": key}
+        assert env[name]["valueFrom"]["secretKeyRef"] == {"name": "openobserve-credentials", "key": key}
     svc = docs["Service", "openobserve"]
     assert svc["spec"]["type"] == "ClusterIP"
     assert [p["port"] for p in svc["spec"]["ports"]] == [5080]
@@ -1143,7 +1141,6 @@ def test_external_endpoint_is_the_generic_otlp_escape_hatch():
 def test_tracing_off_renders_no_backend_and_needs_no_openobserve_values():
     values = base_values()
     values["tracing"]["enabled"] = False
-    del values["images"]["openobserve"]["digest"]
     del values["openobserve"]
     result = _helm_template_with_values(values)
     assert result.returncode == 0, result.stderr
@@ -1170,13 +1167,9 @@ def _values_with(**patch):
 
 
 @pytest.mark.parametrize("patch,needle", [
-    ({"images.openobserve.digest": None}, "images.openobserve.digest is required"),
-    ({"images.openobserve.tag": "v1.1.2", "images.openobserve.digest": None}, "tag"),
-    ({"images.openobserve": None}, "images.openobserve"),
+    ({"images.openobserve.tag": ""}, "tag"),
+    ({"images.otelcol.tag": ""}, "tag"),
     ({"openobserve.credentialsSecretName": ""}, "credentialsSecretName is required"),
-    ({"images.otelcol.digest": None}, "images.otelcol.digest is required"),
-    ({"images.otelcol.tag": "0.160.0", "images.otelcol.digest": None}, "tag"),
-    ({"images.otelcol.digest": "sha256:abc"}, "digest"),
 ])
 def test_openobserve_and_collector_fail_closed(patch, needle):
     result = _helm_template_with_values(_values_with(**patch))
@@ -1215,12 +1208,10 @@ def test_collector_contract():
     assert pod["securityContext"] == {"runAsNonRoot": True, "seccompProfile": {"type": "RuntimeDefault"}}
     assert _hardening_violations(pod) == []
     (c,) = pod["containers"]
-    # Digest-only: the reference carries the digest and no tag.
-    assert c["image"] == f"reg.internal/otel/opentelemetry-collector-contrib@{OTELCOL_DIGEST}"
-    assert ":" not in c["image"].split("@")[0].rsplit("/", 1)[1]
+    assert c["image"] == f"reg.internal/otel/opentelemetry-collector-contrib:0.160.0"
     assert c["securityContext"]["readOnlyRootFilesystem"] is True
     assert c["env"] == [
-        {"name": "O2_AUTH", "valueFrom": {"secretKeyRef": {"name": "oo-creds", "key": "metrics-auth"}}}
+        {"name": "O2_AUTH", "valueFrom": {"secretKeyRef": {"name": "openobserve-credentials", "key": "metrics-auth"}}}
     ]
     assert {v["mountPath"] for v in c["volumeMounts"] if not v.get("readOnly")} == {"/tmp"}
     assert not [v for v in pod["volumes"] if "persistentVolumeClaim" in v]
@@ -1235,7 +1226,7 @@ def test_collector_contract():
     assert cfg["service"]["pipelines"] == {
         "metrics": {"receivers": ["prometheus"], "exporters": ["otlp_http"]}
     }
-    assert "oo-creds" not in cfg_text and "Basic" not in cfg_text
+    assert "openobserve-credentials" not in cfg_text and "Basic" not in cfg_text
 
 
 def test_collector_egress_allows_only_openobserve_agent_and_dns():

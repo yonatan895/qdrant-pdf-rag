@@ -44,11 +44,6 @@ Needs tracing on and an empty tracing.endpoint.
 {{ required "openobserve.credentialsSecretName is required (Secret with root-user-email, root-user-password, otlp-headers, metrics-auth)" .Values.openobserve.credentialsSecretName }}
 {{- end -}}
 
-{{/* Digest-only image reference; a tag is never accepted (ADR-0006). */}}
-{{- define "mainframe-rag.openobserveImage" -}}
-{{ required "images.openobserve.repository is required" .Values.images.openobserve.repository }}@{{ required "images.openobserve.digest is required: set the pinned sha256 digest (pin PR, issue #956)" .Values.images.openobserve.digest }}
-{{- end -}}
-
 {{/*
 Metrics collector: "true" or nothing. Null metrics.collector.enabled follows
 (bundled OpenObserve and metrics.enabled); an explicit boolean overrides, and
@@ -65,11 +60,6 @@ or nothing receives).
 {{- fail "metrics.collector.enabled=true requires metrics.enabled=true and the bundled OpenObserve (tracing.enabled=true, empty tracing.endpoint)" -}}
 {{- end -}}
 {{- if $enabled -}}true{{- end -}}
-{{- end -}}
-
-{{/* Digest-only collector image reference (ADR-0006). */}}
-{{- define "mainframe-rag.otelcolImage" -}}
-{{ required "images.otelcol.repository is required" .Values.images.otelcol.repository }}@{{ required "images.otelcol.digest is required: set the pinned sha256 digest (pin PR, issue #956)" .Values.images.otelcol.digest }}
 {{- end -}}
 
 {{- define "mainframe-rag.serviceMonitorEnabled" -}}

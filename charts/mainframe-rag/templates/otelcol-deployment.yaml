@@ -33,7 +33,7 @@ spec:
       {{- end }}
       containers:
         - name: otelcol
-          image: {{ include "mainframe-rag.otelcolImage" . }}
+          image: {{ include "mainframe-rag.image" (dict "name" "otelcol" "image" .Values.images.otelcol) }}
           imagePullPolicy: {{ .Values.images.otelcol.pullPolicy | default "IfNotPresent" }}
           args: ["--config", "/etc/otelcol-contrib/config.yaml"]
           securityContext:

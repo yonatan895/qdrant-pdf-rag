@@ -37,7 +37,7 @@ spec:
       {{- end }}
       containers:
         - name: openobserve
-          image: {{ include "mainframe-rag.openobserveImage" . }}
+          image: {{ include "mainframe-rag.image" (dict "name" "openobserve" "image" .Values.images.openobserve) }}
           imagePullPolicy: {{ .Values.images.openobserve.pullPolicy | default "IfNotPresent" }}
           securityContext:
             allowPrivilegeEscalation: false

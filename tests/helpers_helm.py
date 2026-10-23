@@ -44,12 +44,12 @@ def base_values() -> dict:
             },
             "openobserve": {
                 "repository": f"{BASE_ENV['INTERNAL_REGISTRY']}/openobserve/openobserve",
-                "digest": "sha256:" + "ab" * 32,
+                "tag": "v1.1.2",
                 "pullPolicy": "IfNotPresent",
             },
             "otelcol": {
                 "repository": f"{BASE_ENV['INTERNAL_REGISTRY']}/otel/opentelemetry-collector-contrib",
-                "digest": "sha256:" + "cd" * 32,
+                "tag": "0.160.0",
                 "pullPolicy": "IfNotPresent",
             },
             "oauthProxy": {
@@ -81,7 +81,7 @@ def base_values() -> dict:
             "deploymentEnvironment": "",
             "serviceName": "",
         },
-        "openobserve": {"credentialsSecretName": "oo-creds"},
+        "openobserve": {"credentialsSecretName": "openobserve-credentials"},
         "metrics": {"enabled": False},
         "ui": {"enabled": True},
         "networkPolicy": {"enabled": True, "allowedNamespaces": []},

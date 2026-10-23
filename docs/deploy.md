@@ -1422,14 +1422,15 @@ Service on 5080 (no Route or Ingress) and an egress-deny NetworkPolicy. The pod 
 Egress is denied (DNS included) by the policy as well as by those settings; the policy needs an
 enforcing CNI. The console is reached by port-forward only.
 
-Required, each failing the render when missing (tracing off needs none of them):
+Settings (tracing off needs none of them):
 
-- `images.openobserve` and `images.otelcol`: `repository` plus a `sha256:` `digest`; tags are
-  refused. The chart ships no digest; the pins arrive through the pin PR and the operator mapping.
-- `openobserve.credentialsSecretName`: an existing Secret with keys `root-user-email`,
-  `root-user-password`, `otlp-headers` (`Authorization=Basic <b64>`, read by the agent and ingest
-  Job as `OTEL_EXPORTER_OTLP_HEADERS`) and `metrics-auth` (`Basic <b64>`, read by the collector).
-  No credential value is in values or the ConfigMap.
+- `images.openobserve` (`v1.1.2`) and `images.otelcol` (`0.160.0`): repository plus tag, like the
+  other images; the digest pin lives in `images.txt` and is enforced at pack/load (#960).
+- `openobserve.credentialsSecretName` (default `openobserve-credentials`; an emptied name fails the
+  render): the Secret must exist at deploy time (#960/`deploy.sh` checks it) with keys
+  `root-user-email`, `root-user-password`, `otlp-headers` (`Authorization=Basic <b64>`, read by the
+  agent and ingest Job as `OTEL_EXPORTER_OTLP_HEADERS`) and `metrics-auth` (`Basic <b64>`, read by
+  the collector). No credential value is in values or the ConfigMap.
 
 `tracing.endpoint` set is the generic OTLP/HTTP escape hatch: the agent exports there, and no
 OpenObserve or collector renders. Export stays fail-open.
