@@ -827,11 +827,11 @@ class TestTaskCiConsumers(unittest.TestCase):
         import yaml
 
         jobs = yaml.safe_load((self.root / ".github/workflows/ci.yml").read_text())["jobs"]
-        self.assertEqual(jobs["unit"]["strategy"]["matrix"], {"shard": [1, 2, 3, 4]})
+        self.assertEqual(jobs["unit"]["strategy"]["matrix"], {"shard": [1, 2, 3, 4, 5, 6, 7, 8]})
         self.assertIs(jobs["unit"]["strategy"]["fail-fast"], False)
         command = next(s["run"] for s in jobs["unit"]["steps"] if s.get("name") == "Run unit shard")
         self.assertIn("--unit-shard=${{ matrix.shard }}", command)
-        self.assertIn("--unit-shards=4", command)
+        self.assertIn("--unit-shards=8", command)
         self.assertIn("scripts/ci_evidence.py --lane unit_tests", command)
         self.assertNotIn("-- python -m pytest", command)
         gate = jobs["test"]

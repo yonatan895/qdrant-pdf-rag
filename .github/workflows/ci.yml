@@ -7,8 +7,11 @@ on:
 permissions:
   contents: read
 
+# PR runs: one per ref, superseded runs cancelled. Pushes to main share one
+# group (`ci-main`) that never cancels a running job: one main run in flight,
+# the newest pending one wins, so post-merge runs queue behind PR feedback.
 concurrency:
-  group: ci-${{ github.ref || github.run_id }}
+  group: ${{ github.event_name == 'pull_request' && format('ci-{0}', github.ref) || 'ci-main' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -66,11 +69,11 @@ jobs:
   unit:
     needs: select
     if: contains(fromJSON(needs.select.outputs.lanes), 'unit_tests')
-    name: unit (${{ matrix.shard }}/4)
+    name: unit (${{ matrix.shard }}/8)
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     env:
       TASK_CONTRACTS_REQUIRE_RUNNER: "1"
     runs-on: ubuntu-latest
@@ -99,9 +102,9 @@ jobs:
         run: python scripts/agent_doctor.py --python "$(command -v python)"
       - name: Run unit shard
         run: >-
-          python scripts/ci_evidence.py --lane unit_tests --job-name 'unit (${{ matrix.shard }}/4)'
+          python scripts/ci_evidence.py --lane unit_tests --job-name 'unit (${{ matrix.shard }}/8)'
           --output "$RUNNER_TEMP/evidence-unit-${{ matrix.shard }}" --junit "$RUNNER_TEMP/unit-${{ matrix.shard }}.xml"
-          --unit-shard=${{ matrix.shard }} --unit-shards=4
+          --unit-shard=${{ matrix.shard }} --unit-shards=8
       - name: Retain native execution evidence
         if: always()
         uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
@@ -119,7 +122,7 @@ jobs:
     timeout-minutes: 2
     permissions: {}
     steps:
-      - name: Require all four unit shards
+      - name: Require all eight unit shards
         env:
           SELECT_RESULT: ${{ needs.select.result }}
           UNIT_REQUIRED: ${{ contains(fromJSON(needs.select.outputs.lanes || '[]'), 'unit_tests') }}
