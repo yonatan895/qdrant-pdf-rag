@@ -29,7 +29,7 @@ def input_hashes(root: Path) -> dict[str, str]:
 def run_shard(root: Path, python: str, shard: int, junit: Path, output: Path,
               *, shards: int = 2) -> tuple[int, dict]:
     """Independent full collection, then execution in a fresh pytest process."""
-    require(type(shards) is int and shards in (2, 4)
+    require(type(shards) is int and shards in (2, 4, 8)
             and type(shard) is int and 1 <= shard <= shards and not junit.exists())
     require(not os.environ.get('PYTEST_ADDOPTS') and not os.environ.get('PYTEST_PLUGINS'))
     env = {**os.environ, 'PYTEST_DISABLE_PLUGIN_AUTOLOAD': '1'}
@@ -61,7 +61,7 @@ def node_list(value: object) -> list[str]:
 
 
 def validate(proof: dict, shard: int, xml: bytes, inputs: dict[str, str], *, shards: int = 2) -> dict:
-    require(type(shards) is int and shards in (2, 4)
+    require(type(shards) is int and shards in (2, 4, 8)
             and type(shard) is int and 1 <= shard <= shards)
     require(type(proof.get('schema_version')) is int and proof['schema_version'] == 1
             and type(proof.get('shard')) is int and proof['shard'] == shard)
@@ -101,7 +101,7 @@ def validate(proof: dict, shard: int, xml: bytes, inputs: dict[str, str], *, sha
 
 
 def validate_union(records: list[dict], *, shards: int = 2) -> None:
-    require(type(shards) is int and shards in (2, 4) and len(records) == shards)
+    require(type(shards) is int and shards in (2, 4, 8) and len(records) == shards)
     ordered = sorted(records, key=lambda record: record['shard'])
     require(all(type(record['shard']) is int for record in ordered))
     require([record['shard'] for record in ordered] == list(range(1, shards + 1)))
