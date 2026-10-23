@@ -80,7 +80,7 @@ def legs_to_record(
         raise ValueError("record needs a non-empty query string")
     if not isinstance(legs, list) or not legs:
         raise ValueError("record needs at least one leg")
-    chunks: dict[str, dict[str, str]] = {}
+    chunks: dict[str, dict[str, Any]] = {}
     leg_rows = []
     for pos, leg in enumerate(legs):
         if not isinstance(leg, dict):
@@ -354,7 +354,7 @@ def capture_query(
     ))
     legs: list[dict[str, Any]] = [
         {"effective_text": eq, "filter_fallback": retried, "dense": dense, "sparse": sparse}
-        for eq, (dense, sparse, retried) in zip(eff_legs, prefetched)
+        for eq, (dense, sparse, retried) in zip(eff_legs, prefetched, strict=False)
     ]
 
     ce_by_id: dict[str, float] = {}
@@ -377,7 +377,7 @@ def capture_query(
             raise RuntimeError(
                 f"Reranker returned {len(scores)} scores for {len(hits)} captured hits"
             )
-        ce_by_id = {hit.chunk_id: float(score) for hit, score in zip(hits, scores)}
+        ce_by_id = {hit.chunk_id: float(score) for hit, score in zip(hits, scores, strict=False)}
         ce_scored = True
     # Else: bypassed queries (trap/identifier) and flag-off runs record
     # CE-less pools for RRF-only replay — never fabricated scores.

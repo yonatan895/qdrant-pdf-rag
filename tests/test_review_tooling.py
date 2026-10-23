@@ -38,6 +38,24 @@ from scripts.review_tooling import (
 )
 
 
+class TestOpencodeWorkflowContract(unittest.TestCase):
+    """The /oc comment agent runs only for trusted commenters (#588)."""
+
+    def test_comment_trigger_requires_a_trusted_author_association(self):
+        import yaml
+
+        path = pathlib.Path(__file__).resolve().parents[1] / ".github/workflows/opencode.yml"
+        condition = " ".join(yaml.safe_load(path.read_text())["jobs"]["gate"]["if"].split())
+        # The pull_request branch is the only one allowed to skip the check.
+        comment_branch = condition.split("github.event_name == 'pull_request' ||", 1)[1]
+        self.assertIn("github.event.comment.author_association", comment_branch)
+        self.assertIn("""fromJSON('["OWNER","MEMBER","COLLABORATOR"]')""", comment_branch)
+        for untrusted in ("CONTRIBUTOR", "NONE", "FIRST_TIMER", "FIRST_TIME_CONTRIBUTOR", "MANNEQUIN"):
+            self.assertNotIn(untrusted, condition)
+        # The check sits inside the same && chain as the /oc match, before it.
+        self.assertLess(comment_branch.index("author_association"), comment_branch.index("'/oc'"))
+
+
 class TestProfileClassification(unittest.TestCase):
     """Risk-based profile selection and service mapping (§5.1)."""
 
@@ -122,6 +140,29 @@ class TestProfileClassification(unittest.TestCase):
                 decision = classify_paths([path])
                 self.assertIn("tooling", decision.matched_categories)
                 self.assertEqual(decision.services, [])
+
+    def test_every_rule_module_change_selects_the_retrieval_eval_lane(self):
+        """The lane list is derived from `_RULE_MODULES`, not hard-coded (#588)."""
+        from mainframe_rag.ingest.rules_version import _RULE_MODULES
+
+        self.assertGreaterEqual(len(_RULE_MODULES), 8)
+        for rel in _RULE_MODULES:
+            path = f"src/mainframe_rag/{rel}"
+            with self.subTest(path=path):
+                self.assertTrue((pathlib.Path(__file__).resolve().parents[1] / path).is_file())
+                _, lanes = self._required([path])
+                self.assertIn("eval_retrieval", lanes)
+
+    def test_site_only_changes_are_docs_like_and_offline(self):
+        for paths in (["site/index.html"], ["site/js/app.js", "site/data/x.json", "site/css/a.css"]):
+            with self.subTest(paths=paths):
+                decision, lanes = self._required(paths)
+                self.assertEqual((decision.profile, decision.services), (ProfileName.OFFLINE, []))
+                self.assertEqual(decision.matched_categories, ["prose"])
+                self.assertNotIn("unclassified", decision.matched_categories)
+                self.assertFalse({"simulation", "load", "ha", "packaging", "eval_retrieval"} & lanes)
+        # A sibling that merely shares the prefix stays fail-closed.
+        self.assertEqual(self._required(["sitemap/x.py"])[0].profile, ProfileName.FULL)
 
     def test_evaluation_package_and_delegates_select_executable_tooling_lanes(self):
         from scripts.review_tooling import required_lanes

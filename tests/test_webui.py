@@ -42,7 +42,7 @@ def _hit() -> SearchHit:
 
 class MockSearch:
     def __init__(self, return_hits: bool = True):
-        self.calls = []
+        self.calls: list[dict] = []
 
     def search(self, qdrant, embedder, collection, query, product=None, version=None, limit=8, *args, **kwargs):
         self.calls.append({"query": query})
@@ -327,6 +327,31 @@ def test_ui_chat_retrieval_failure_renders_fixed_banner(ui_client, monkeypatch):
     assert "The reasoning agent could not complete this request." in resp.text
     assert "qdrant exploded" not in resp.text
     assert "<html" not in resp.text
+
+
+def test_ui_chat_nonstream_timeout_is_model_timeout(monkeypatch, synthetic_pdf, servable_representation_gate):
+    """#588: the non-stream console labels a model wait timeout `model_timeout`
+    (as the stream path does), still behind the fixed banner."""
+    import httpx2 as httpx
+
+    recorded = []
+    real = app_mod._record_endpoint
+
+    def spy(request, endpoint, outcome, *a, **k):
+        recorded.append((endpoint, outcome))
+        return real(request, endpoint, outcome, *a, **k)
+
+    class TimingOutLLM:
+        async def chat(self, messages, reasoning_effort=None, temperature=None):
+            raise httpx.ReadTimeout("read timed out: internal detail")
+
+    ui_client = next(_client(monkeypatch, ui_enabled=True, synthetic_pdf=synthetic_pdf, llm=TimingOutLLM()))
+    monkeypatch.setattr(app_mod, "_record_endpoint", spy)
+    resp = ui_client.post("/ui/chat", data={"message": "What is IEA500I?", "messages": ""})
+    assert resp.status_code == 502
+    assert "The reasoning agent could not complete this request." in resp.text
+    assert "internal detail" not in resp.text
+    assert recorded == [("console", "model_timeout")]
 
 
 def test_ui_chat_body_cap_counts_splunk_context(ui_client, monkeypatch):

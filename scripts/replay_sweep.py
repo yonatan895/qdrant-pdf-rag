@@ -346,7 +346,8 @@ def rrf_grid_configs(settings) -> list[SweepConfig]:
     for kind, field in (("nl", "sparse_weight_nl"), ("id", "sparse_weight_identifier")):
         for k in RRF_GRID_K:
             for weight in RRF_GRID_SPARSE_WEIGHT:
-                configs.append(replace(base, label=f"k{k}-{kind}{weight:g}", rrf_k=k, **{field: weight}))
+                override: dict[str, Any] = {field: weight}
+                configs.append(replace(base, label=f"k{k}-{kind}{weight:g}", rrf_k=k, **override))
     return configs
 
 
@@ -419,6 +420,20 @@ def join_headings(records: list[dict], client, collection: str) -> dict[str, str
     return headings
 
 
+NO_CE_SCORED_WARNING = (
+    "WARN: --grid rerank found no ce_scored pools; every rerank config replays RRF-only, "
+    "so its rows equal the baseline. Capture CE-scored pools to measure rerank."
+)
+
+
+def warn_if_no_ce_scored(grid: str, records: list[dict]) -> bool:
+    """Fixed stderr warning when the rerank grid has no CE-scored pool to act on (#588)."""
+    if grid != "rerank" or any((r.get("_meta") or {}).get("ce_scored") is True for r in records):
+        return False
+    print(NO_CE_SCORED_WARNING, file=sys.stderr)
+    return True
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--pools", type=Path, required=True, help="capture_pool.py output JSONL")
@@ -461,6 +476,7 @@ def main(argv: list[str] | None = None) -> int:
         if line:
             records.append(json.loads(line))
     entries_by_query = {entry.query: entry for entry in entries}
+    warn_if_no_ce_scored(args.grid, records)
 
     headings = None
     if args.headings_from is not None:

@@ -9,6 +9,7 @@ are printed. Production model serving remains platform-owned.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import fcntl
 import hashlib
 import ipaddress
@@ -125,12 +126,16 @@ class ToolFailure(LabError):
     """A local tool exited nonzero: possibly transient, unlike controller refusals (#746)."""
 
 
+# Test-only seam (#588): a test sets this to capture the exception behind the
+# fixed refusal line. Production never sets it, so the cause stays out of every
+# user-visible stream.
+refusal_cause_sink: Callable[[BaseException], None] | None = None
+
+
 def print_diagnostic(message: str, *, error: bool = False) -> None:
     """A closed/full diagnostic sink cannot interrupt owned release control."""
-    try:
+    with contextlib.suppress(OSError, ValueError):
         print(message, file=sys.stderr if error else sys.stdout, flush=True)
-    except (OSError, ValueError):
-        pass
 
 
 class CaptureBudget:
@@ -1243,19 +1248,13 @@ class Run:
     def terminate(self, child: subprocess.Popen) -> None:
         try:
             if child not in self.reaped_groups:
-                try:
+                with contextlib.suppress(ProcessLookupError):
                     os.killpg(child.pid, signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
                 if child.poll() is None:
-                    try:
+                    with contextlib.suppress(subprocess.TimeoutExpired):
                         child.wait(timeout=min(2, max(.01, self.expiry - time.time())))
-                    except subprocess.TimeoutExpired:
-                        pass
-                try:
+                with contextlib.suppress(ProcessLookupError):
                     os.killpg(child.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
                 child.wait(timeout=.25)
                 self.reaped_groups.add(child)
         finally:
@@ -1680,10 +1679,8 @@ class Run:
                     if self.runtime:
                         wait = min(5, self.cleanup_phase_expiry - time.time())
                         if wait > 0:
-                            try:
+                            with contextlib.suppress(subprocess.TimeoutExpired):
                                 self.runtime.wait(timeout=wait)
-                            except subprocess.TimeoutExpired:
-                                pass
                     result = self.colab("download", "-s", session, "/content/colab-artifacts.tgz",
                                         str(self.state / "colab-artifacts.tgz"), cleanup=True,
                                         seconds=max(.1, self.cleanup_phase_expiry - time.time()),
@@ -1998,7 +1995,9 @@ def main(argv: list[str] | None = None, *, bootstrap: bool = True, source_root: 
         holder = f"PID {exc.pid}" if exc.pid is not None else "an unrecorded PID"
         print_diagnostic(f"Colab assignment lock is held by {holder}; no allocation attempted.", error=True)
         return 2
-    except (LabError, OSError, ValueError, KeyError, subprocess.SubprocessError):
+    except (LabError, OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
+        if refusal_cause_sink is not None:
+            refusal_cause_sink(exc)
         print_diagnostic("Colab controller refused invalid/missing prerequisites; no acceptance claimed.", error=True)
         return 2
 

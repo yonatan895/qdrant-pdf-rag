@@ -1,10 +1,10 @@
+{{- if .Values.networkPolicy.enabled }}
 # Ingress NetworkPolicy for the agent pods (issue #373). Agent-only and
 # ingress-only: Qdrant, OpenObserve and the ingest Job are not selected and egress
 # is untouched. Rendered unless networkPolicy.enabled is false. The pod
 # selector, ports and peers track the Deployment (app: rag-agent), the Service
 # ports (http 8080, oauth 8443) and the ServiceMonitor. Kubelet probes and the
 # oauth-proxy -> 127.0.0.1:8080 hop are not pod-network ingress.
-{{- if .Values.networkPolicy.enabled }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
