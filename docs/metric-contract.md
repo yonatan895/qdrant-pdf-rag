@@ -101,7 +101,7 @@ shape.
 trace lookups, run in the OpenObserve trace search (`type=traces`, stream
 `default`; [ADR-0006](adr/0006-openobserve-traces-metrics-backend.md)):
 
-- J1, trace by request: `SELECT * FROM "default" WHERE http_request_id = '<id>'`, then `SELECT _timestamp, operation_name, span_status, duration FROM "default" WHERE trace_id = '<trace id>'` for the tree
+- J1, trace by request: `SELECT * FROM "default" WHERE http_request_id = '<id>'`, then `SELECT operation_name, span_status, duration FROM "default" WHERE trace_id = '<trace id>'` for the tree (the trial also selected `_timestamp`, which its record does not show running; `_timestamp` is unverified until the re-qualification runs it)
 - J2, slow answers: `SELECT trace_id, duration FROM "default" WHERE operation_name = 'v1.answer' AND duration > 500000 ORDER BY duration DESC LIMIT 5` (`duration` in microseconds)
 - J3, server errors: `SELECT trace_id FROM "default" WHERE span_status = 'ERROR' LIMIT 5`
 

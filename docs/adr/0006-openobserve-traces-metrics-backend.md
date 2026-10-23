@@ -40,7 +40,7 @@
     `sha256:d4a878fac1f6c56003764f7f2a1625668917388f167e222c8c810de3f54c56ba`,
     amd64); no tag references, no runtime downloads.
   - No external egress: the three `ZO_*` settings above, plus an egress-deny
-    NetworkPolicy so the pod cannot reach a public destination even if a setting
+    NetworkPolicy (maintainer decision, [#956 comment](https://github.com/yonatan895/qdrant-pdf-rag/issues/956#issuecomment-6369025102)) so the pod cannot reach a public destination even if a setting
     is missed. The names of the two egress settings were found in the binary, not
     vendor documentation; verify them when the pin is made.
   - Credentials from a Secret; the console, query and ingest paths all require
