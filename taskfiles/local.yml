@@ -432,24 +432,29 @@ tasks:
         docker stop "$GATEWAY_NAME" "$PG_NAME" 2>/dev/null || true;
         docker network rm "$PG_NET" 2>/dev/null || true
 
-  jaeger:up:
-    desc: Start the local Jaeger v2 backend (or reuse a running one)
+  openobserve:up:
+    desc: Start the local OpenObserve trace/metrics backend (or reuse a running one)
     summary: |
-      `sh scripts/run_local_jaeger.sh`, replacing the retired `make local-jaeger`.
-      Starts only when nothing answers on :16686; an already-running Jaeger
-      is reused, never stopped by us.
+      `sh scripts/run_local_openobserve.sh` (ADR-0006), replacing the retired
+      `local:jaeger:up`. Starts only when nothing answers on :5080; an
+      already-running OpenObserve is reused, never stopped by us. Root
+      credentials live in a 0600 env file (O2_ENV_FILE), created on first start.
+      O2_COLLECTOR=1 also starts the pinned otelcol metrics scraper.
     cmds:
-      - sh scripts/run_local_jaeger.sh
+      - sh scripts/run_local_openobserve.sh
 
-  jaeger:down:
-    desc: Stop the local Jaeger container (ignores an absent one)
+  openobserve:down:
+    desc: Stop the local OpenObserve and collector containers (ignores absent ones)
     summary: |
-      `docker stop` over the Jaeger name, replacing the retired `make local-jaeger-stop`.
-      Input: JAEGER_NAME (default local-jaeger).
+      `docker stop` over the OpenObserve and collector names. The data volume
+      (O2_VOLUME, default local-openobserve-data) is kept.
+      Input: O2_NAME (default local-openobserve), O2_COLLECTOR_NAME (default local-otelcol).
     env:
-      TASK_JAEGER_NAME: '{{.JAEGER_NAME}}'
+      TASK_O2_NAME: '{{.O2_NAME}}'
+      TASK_O2_COLLECTOR_NAME: '{{.O2_COLLECTOR_NAME}}'
     cmds:
-      - docker stop "${TASK_JAEGER_NAME:-${JAEGER_NAME:-local-jaeger}}" 2>/dev/null || true
+      - docker stop "${TASK_O2_COLLECTOR_NAME:-${O2_COLLECTOR_NAME:-local-otelcol}}" 2>/dev/null || true
+      - docker stop "${TASK_O2_NAME:-${O2_NAME:-local-openobserve}}" 2>/dev/null || true
 
   stack:
     desc: Run the full local production simulation (supervisor)
@@ -459,9 +464,9 @@ tasks:
       LOCAL_INGEST_REINGEST (explicit 1 passes ingest --reingest, the
       contract's resumption of a pending build; unset/0 keeps the default),
       GATEWAY_PORT, GATEWAY_PROBE_MAX_TOKENS (default 16, range 1–4096),
-      LOCAL_AGENT_PORT, JAEGER_PORT and LOCAL_STACK_DRYRUN
+      LOCAL_AGENT_PORT, O2_PORT and LOCAL_STACK_DRYRUN
       forwarded, replacing the retired `make local-stack`. The supervisor owns
-      gateway/Jaeger/agent lifetime (traps, readiness probes, trace check);
+      gateway/OpenObserve/agent lifetime (traps, readiness probes, trace check);
       Qdrant falls back to scripts/sim_qdrant.sh. LOCAL_STACK_DRYRUN=1
       prints the plan without Docker/network. Needs docker, the three
       backends and .venv (checked by the script, not here — same as Make).
@@ -472,7 +477,7 @@ tasks:
       TASK_GATEWAY_PORT: '{{.GATEWAY_PORT}}'
       TASK_LOCAL_AGENT_PORT: '{{.LOCAL_AGENT_PORT}}'
       TASK_GATEWAY_PROBE_MAX_TOKENS: '{{.GATEWAY_PROBE_MAX_TOKENS}}'
-      TASK_JAEGER_PORT: '{{.JAEGER_PORT}}'
+      TASK_O2_PORT: '{{.O2_PORT}}'
       TASK_LOCAL_STACK_DRYRUN: '{{.LOCAL_STACK_DRYRUN}}'
     cmds:
       - >-
@@ -482,7 +487,7 @@ tasks:
         if [ -n "${TASK_GATEWAY_PORT:-}" ]; then export GATEWAY_PORT="$TASK_GATEWAY_PORT"; fi;
         if [ -n "${TASK_LOCAL_AGENT_PORT:-}" ]; then export LOCAL_AGENT_PORT="$TASK_LOCAL_AGENT_PORT"; fi;
         if [ -n "${TASK_GATEWAY_PROBE_MAX_TOKENS:-}" ]; then export GATEWAY_PROBE_MAX_TOKENS="$TASK_GATEWAY_PROBE_MAX_TOKENS"; else unset GATEWAY_PROBE_MAX_TOKENS; fi;
-        if [ -n "${TASK_JAEGER_PORT:-}" ]; then export JAEGER_PORT="$TASK_JAEGER_PORT"; fi;
+        if [ -n "${TASK_O2_PORT:-}" ]; then export O2_PORT="$TASK_O2_PORT"; fi;
         if [ -n "${TASK_LOCAL_STACK_DRYRUN:-}" ]; then export LOCAL_STACK_DRYRUN="$TASK_LOCAL_STACK_DRYRUN"; fi;
         sh scripts/run_local_stack.sh
 
@@ -507,12 +512,15 @@ tasks:
   check:
     desc: Require grounded answers, completed console follow-up and a fresh trace
     summary: |
-      Read-only acceptance against existing agent/Jaeger listeners; runs real
-      model requests sequentially. Requires --agent, --jaeger, --query,
+      Read-only acceptance against existing agent/OpenObserve listeners; runs real
+      model requests sequentially. Requires --agent, --trace-url, --query,
       --followup and a new private --report path after --. Nonzero on incomplete
       answers, insufficient evidence, stream errors or a missing fresh trace.
       Does not launch services or replace gateway/TLS/model identity checks.
-      CLI_ARGS are trusted operator shell arguments, as in qa:unit.
+      OpenObserve credentials come from TRACE_QUERY_USER and TRACE_QUERY_PASSWORD
+      in the caller environment (the local root user in O2_ENV_FILE); they are
+      never taken from CLI_ARGS. CLI_ARGS are trusted operator shell arguments,
+      as in qa:unit.
     cmds:
       - .venv/bin/python scripts/check_live.py {{.CLI_ARGS}}
 

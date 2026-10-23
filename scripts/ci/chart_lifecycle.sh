@@ -202,7 +202,7 @@ helm_values "$VALUES_A" install "$RELEASE" "$CHART_DIR" -n "$NS" --wait --timeou
 REV1="$(revision)"
 echo "A installed at revision $REV1"
 CHART_PVC="$(pvc_uids "$NS")"
-[ -n "$CHART_PVC" ] || die "no PVCs after install (Jaeger Badger claim expected)"
+[ -n "$CHART_PVC" ] || die "no PVCs after install (OpenObserve data claim expected)"
 guards "$CHART_PVC"
 smoke
 expect_mark_a

@@ -62,6 +62,15 @@ def test_render_routes_legs_and_carries_master_key_and_overrides():
     assert 'target: "http://gpu-box:8002/v1/score"' in overridden
 
 
+@pytest.fixture(autouse=True)
+def _o2_credentials(tmp_path_factory, monkeypatch):
+    """The stack reads the 0600 OpenObserve env file; tests never touch the real one."""
+    path = tmp_path_factory.mktemp("o2") / "o2.env"
+    path.write_text("ZO_ROOT_USER_EMAIL=r@x.invalid\nZO_ROOT_USER_PASSWORD=fixture\nO2_BASIC_AUTH=Zm9v\n")
+    path.chmod(0o600)
+    monkeypatch.setenv("O2_ENV_FILE", str(path))
+
+
 @pytest.mark.parametrize('endpoint', ['', 'http://host.docker.internal:4318'])
 def test_render_callbacks_and_content_logging(endpoint):
     """Issue #636: the strict finish guard is always installed; the bare "otel"

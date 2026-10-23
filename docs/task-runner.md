@@ -285,7 +285,7 @@ executed. Prefix current tasks with `sh scripts/tools/run-task.sh`. Task
 | `bench`, `bench-baseline`, `bench-report`, `bench-html`, `bench-compare`, `loadtest` | `eval:bench`, `eval:bench-baseline`, `eval:bench-report`, `eval:bench-html`, `eval:bench-compare`, `eval:load` | benchmark/load/report scripts |
 | `query-demo`, `ask`, `run-agent` | `local:query`, `local:ask`, `local:agent` | query script and agent |
 | `local-vllm`, `local-vllm-embed`, `local-vllm-rerank`, `local-stack` | `local:llm`, `local:embed`, `local:rerank`, `local:stack` | existing launchers/supervisor |
-| `local-gateway`, `local-gateway-stop`, `local-jaeger`, `local-jaeger-stop` | `local:gateway:up`, `local:gateway:down`, `local:jaeger:up`, `local:jaeger:down` | existing component owners |
+| `local-gateway`, `local-gateway-stop`, `local-jaeger`, `local-jaeger-stop` | `local:gateway:up`, `local:gateway:down`, `local:openobserve:up`, `local:openobserve:down` | existing component owners |
 | `airgap-pack`, `airgap-validate`, `airgap-load`, `airgap-deploy`, `airgap-ingest`, `airgap-smoke`, `airgap-pipeline`, `airgap-dryrun` | `airgap:pack`, `airgap:validate`, `airgap:load`, `airgap:deploy`, `airgap:ingest`, `airgap:smoke`, `airgap:pipeline`, `airgap:dryrun` | `scripts/airgap/` stages/pipeline |
 | `e2e-demo-pdfs`, `clean` | `dev:demo-pdfs`, `dev:clean` | existing synthetic-document and cleanup owners |
 
@@ -324,9 +324,10 @@ operational permission change is authorized by the runner migration.
 
 ### Retained local Helm acceptance and maintenance
 
-`local:check -- --agent URL --jaeger URL --query '...' --followup '...'
+`local:check -- --agent URL --trace-url URL --query '...' --followup '...'
 --report /private/new-report.json` checks existing listeners with real model
-requests and fails on non-grounded answers or incomplete streams. It neither
+requests (OpenObserve credentials from TRACE_QUERY_USER and TRACE_QUERY_PASSWORD in the
+environment) and fails on non-grounded answers or incomplete streams. It neither
 starts services nor proves an exact release identity. It accepts trusted
 operator shell arguments, like `qa:unit`; never feed untrusted text into Task
 CLI_ARGS. See [the owner runbook](local-real-corpus.md) for prerequisites,

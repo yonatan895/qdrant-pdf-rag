@@ -230,15 +230,16 @@ then verify collection/control state, next ordinary search/answer and the exact
 ```sh
 kubectl -n "$KIND_NAMESPACE" port-forward --address 127.0.0.1 svc/rag-agent 8087:8080
 # Separate terminal:
-kubectl -n "$KIND_NAMESPACE" port-forward --address 127.0.0.1 svc/jaeger 16686:16686
+kubectl -n "$KIND_NAMESPACE" port-forward --address 127.0.0.1 svc/openobserve 5080:5080
 ```
 
 With both port-forwards running, execute the strict check from the candidate
 source checkout (requires the prepared development environment):
 
 ```sh
-sh scripts/tools/run-task.sh local:check -- \
-  --agent http://127.0.0.1:8087 --jaeger http://127.0.0.1:16686 \
+TRACE_QUERY_USER=<root email> TRACE_QUERY_PASSWORD=<root password> \
+  sh scripts/tools/run-task.sh local:check -- \
+  --agent http://127.0.0.1:8087 --trace-url http://127.0.0.1:5080 \
   --query 'What should the LFAREA parameter be set to in IEASYSxx?' \
   --followup 'What is the purpose of that parameter? Please cite the manual.' \
   --report "$STATE/live-check-<run-id>.json"
