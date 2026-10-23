@@ -68,6 +68,18 @@ def test_actual_inline_probe_refuses_invalid_identity_before_inference(tmp_path)
     assert not list(tmp_path.iterdir())
 
 
+@pytest.mark.parametrize("name", ["COLAB_G4_BF16", "COLAB_G4_RERANK_8B", "COLAB_G4_RERANK_4B"])
+def test_actual_inline_probe_accepts_every_qualified_gpu_profile(tmp_path, name):
+    from mainframe_rag.serve.colab_profiles import build_profile
+
+    (tmp_path / "model-profile.json").write_text(json.dumps(build_profile(name, embed_max_len=4096)))
+    for leaf in ("software-observed.json", "snapshot-embed.json"):
+        (tmp_path / leaf).write_text("{}")
+    result = subprocess.run([sys.executable, "-c", POOLING_PROBE, str(tmp_path), "a" * 40],
+                            capture_output=True, text=True, timeout=5, check=False)
+    assert json.loads(result.stdout)["code"] != "unsupported_native_profile"
+
+
 @pytest.fixture
 def remote_preflight(tmp_path, monkeypatch):
     from mainframe_rag.serve import colab_profiles
