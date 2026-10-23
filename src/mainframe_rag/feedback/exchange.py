@@ -122,7 +122,12 @@ def _timestamp(value: Any, limit: float) -> float | None:
 
 
 def _finite_scalars(values: dict[str, Any]) -> bool:
-    return all(not isinstance(v, float) or math.isfinite(v) for v in values.values())
+    """Telemetry numbers must be finite floats or ints within signed 64 bits
+    (what the store could hold; a 10**400 int is not representable as float)."""
+    return all(
+        (math.isfinite(v) if isinstance(v, float)
+         else -(2**63) <= v < 2**63 if isinstance(v, int) and not isinstance(v, bool) else True)
+        for v in values.values())
 
 
 def parse_export(data: bytes, *, now: float) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:

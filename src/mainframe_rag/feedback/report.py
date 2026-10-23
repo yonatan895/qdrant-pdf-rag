@@ -7,9 +7,9 @@ same parser as `exchange import` (`exchange.parse_export`), so it refuses
 exactly what import refuses, with the same fixed codes.
 
 Only allow-listed telemetry keys are read. Every label is bucketed against a
-closed vocabulary (anything else is `other`, an absent value `unknown`), so a
-new telemetry key, a hostile value, or any question, answer, comment, script or
-citation text can never reach the output. The only per-record values printed
+closed vocabulary or a hex pattern of at most 40 characters (anything else is
+`other`, an absent value `unknown`), so a new telemetry key or a free-text field
+is never read, and the only strings that reach the output are those labels. The only per-record values printed
 are the 12-hex request ids of `bad` ratings (the trace join key, ADR-0005).
 
 This is a monitoring view, not an evaluation: feedback rows have seen system
@@ -42,7 +42,7 @@ LOW_N = 5  # a cell with fewer rated answers is flagged, never trusted
 TOP_N = 5
 QUEUE_LIMIT = 200
 TRACE_WINDOW_DAYS = 14  # observability.md: traces expire after this
-MAX_MODEL_LABELS = 8
+MAX_IDENTITY_LABELS = 8
 _MIN_DATE = datetime(2000, 1, 1, tzinfo=UTC).timestamp()
 
 # Closed vocabularies for telemetry labels. Pinned to their owners by tests.
@@ -51,10 +51,9 @@ VERIFICATION_STATES = ("insufficient_evidence", "unverified_draft", "generation_
 QUERY_KINDS = ("identifier", "nl")
 COMPLEXITIES = ("simple", "complex")
 FINISH_REASONS = ("stop", "length", "content_filter", "tool_calls", "function_call")
-# Identity labels (model, release, rules version) are operator configuration,
-# not a vocabulary: accept only identifier-shaped tokens (no spaces, no
-# slashes), keep the most frequent few, bucket the rest.
-_MODEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+# Identity labels (release, rules version) are not a vocabulary: accept only
+# 6-40 lowercase hex characters, keep the most frequent few, bucket the rest.
+# Model names are deliberately not reported (the approved proposal lists none).
 _HEX_RE = re.compile(r"[0-9a-f]{6,40}")
 _UNKNOWN = "\0unknown"
 _NUMERIC_KEYS = ("elapsed_ms", "ttft_ms", "prompt_tokens", "completion_tokens", "total_tokens")
@@ -73,7 +72,11 @@ def _tri(value: Any) -> str:
 def _number(value: Any) -> float | None:
     if isinstance(value, bool) or not isinstance(value, int | float):
         return None
-    return float(value) if math.isfinite(value) else None
+    try:
+        out = float(value)
+    except OverflowError:
+        return None
+    return out if math.isfinite(out) else None
 
 
 def _date(ts: float) -> str:
@@ -95,10 +98,10 @@ def _sorted(counter: Counter[str]) -> dict[str, int]:
 
 def _identity_buckets(raw: Counter[str], pattern: re.Pattern[str]) -> dict[str, int]:
     """Counts per identity token: well-formed tokens ranked by count then name,
-    beyond MAX_MODEL_LABELS or malformed -> `other`; absent -> `unknown`."""
+    beyond MAX_IDENTITY_LABELS or malformed -> `other`; absent -> `unknown`."""
     unknown = raw.get(_UNKNOWN, 0)
     wellformed = {k: c for k, c in raw.items() if k != _UNKNOWN and pattern.fullmatch(k)}
-    keep = sorted(wellformed, key=lambda k: (-wellformed[k], k))[:MAX_MODEL_LABELS]
+    keep = sorted(wellformed, key=lambda k: (-wellformed[k], k))[:MAX_IDENTITY_LABELS]
     out = {k: wellformed[k] for k in keep}
     other = sum(raw.values()) - unknown - sum(out.values())
     for label, n in (("other", other), ("unknown", unknown)):
@@ -144,8 +147,6 @@ def build_report(answers: list[dict[str, Any]], ratings: list[dict[str, Any]], *
     reasons: Counter[str] = Counter()
     for r, _ in joined:
         reasons.update(_label(x, REASONS) for x in r["reasons"])
-    models = {k: Counter(_identity_raw(t.get(k)) for _, t in tele)
-              for k in ("llm_model", "embed_model")}
     ratings_by: dict[str, Any] = {
         "rating": count(lambda r, a, t: _label(r["rating"], RATINGS)),
         "reason": _sorted(reasons),
@@ -157,9 +158,7 @@ def build_report(answers: list[dict[str, Any]], ratings: list[dict[str, Any]], *
         "query_complexity": count(lambda r, a, t: _label(t.get("query_complexity"), COMPLEXITIES)),
         "reasoning_effort": count(lambda r, a, t: _label(t.get("reasoning_effort"),
                                                          REASONING_EFFORTS)),
-        "model_profile": {
-            "llm_model": _identity_buckets(models["llm_model"], _MODEL_RE),
-            "embed_model": _identity_buckets(models["embed_model"], _MODEL_RE),
+        "identity": {
             "release": _identity_buckets(Counter(_identity_raw(t.get("release")) for _, t in tele),
                                          _HEX_RE),
             "extraction_rules_version": _identity_buckets(
@@ -256,9 +255,9 @@ def render_markdown(rep: dict[str, Any]) -> str:
            f"- first / last answer date: {cov['first_date']} / {cov['last_date']}",
            f"- low n: {str(cov['low_n']).lower()}", "", "## Ratings by label", ""]
     for name, d in rep["ratings_by"].items():
-        if name == "model_profile":
+        if name == "identity":
             for sub, dd in d.items():
-                out += _md_counts(f"model_profile.{sub}", dd)
+                out += _md_counts(f"identity.{sub}", dd)
         else:
             out += _md_counts(name, d)
     out += [f"## Failure clusters (bad share per cell; low_n marks n < {LOW_N}; no claim)", ""]
@@ -293,7 +292,9 @@ def render(rep: dict[str, Any], fmt: str) -> bytes:
 
 
 def run_report(src: str, out: str, fmt: str, *, clock: Callable[[], float]) -> None:
-    if out != "-" and exchange._inside_git_worktree(Path(out)):
+    if out == "-":
+        exchange._check_stdout()
+    elif exchange._inside_git_worktree(Path(out)):
         raise Refused("output_in_git_worktree")
     data = exchange._read_input(src)
     now = clock()

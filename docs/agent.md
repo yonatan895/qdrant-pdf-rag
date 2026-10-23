@@ -442,14 +442,17 @@ retention: [observability](observability.md#data-tiers).
   the same `parse_export` as import (so it refuses what import refuses, same codes, plus `dangling_rating`
   for a rating whose answer is not in the file), and calls no model. It prints counts and bounded labels:
   coverage (answers, ratings, rated share, first/last date), ratings by rating, reason, endpoint,
-  verification state, finish reason, query kind/complexity, reasoning effort, date and model/release/rules
-  identity; bad share per cell (query kind x verification state, effort, `units_omitted`, `budget_verified`,
+  verification state, finish reason, query kind/complexity, reasoning effort, date and release / extraction-rules
+  version (model names are not reported); bad share per cell (query kind x verification state, effort, `units_omitted`, `budget_verified`,
   evidence, `has_script`; `low_n` below 5, no significance claim); top reason and verification codes of bad
   ratings; median/p95 of latency and token telemetry for bad vs good; and a review queue of the
   `request_id`s of bad ratings (newest first, at most 200) as the trace join key. Only allow-listed telemetry
-  keys are read; a value outside its closed vocabulary is `other`, an absent one `unknown`; identity labels
-  must be identifier-shaped and only the 8 most frequent are named. No question, answer, comment, script or
-  citation text is ever read into output. The output is a monitoring view, never an evaluation or a release
+  keys are read; a value outside its closed vocabulary is `other`, an absent one `unknown`; release and rules-version
+  labels must be 6-40 lowercase hex characters and only the 8 most frequent are named, so those are the only
+  free-form strings that can appear (at most 40 hex characters each). Question, answer, comment, script and
+  citation fields are never read. Numeric telemetry outside finite floats or signed 64-bit ints is refused by
+  the shared parser (`invalid_answer_line_N`). `--out -` applies export's stdout checks (terminal, group/other
+  readable file, git work tree). The output is a monitoring view, never an evaluation or a release
   input (#806 D6): it has no pass rate and no gate. Output is deterministic for a file except `stale` and
   `trace_expected`, which compare with the run-time clock. `--out FILE` is created `O_EXCL`, mode 0600, and
   refused inside a git work tree. Tests: `tests/test_feedback_report.py`.

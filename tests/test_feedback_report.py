@@ -103,8 +103,8 @@ def test_counts_match_the_independent_answer_key(export_file, tmp_path):
     assert by["reasoning_effort"] == {"low": 1, "other": 1, "unknown": 2, "xhigh": 2}
     assert by["endpoint"] == {"console": 6}
     assert by["date"] == {"2026-09-21": 6}
-    assert by["model_profile"]["llm_model"] == {"other": 1, "qwen-27b": 3, "unknown": 2}
-    assert by["model_profile"]["release"] == {"abcdef123456": 2, "unknown": 4}
+    assert "llm_model" not in json.dumps(by) and "qwen" not in json.dumps(rep)
+    assert by["identity"]["release"] == {"abcdef123456": 2, "unknown": 4}
     cl = rep["failure_clusters"]
     assert cl["reasoning_effort"]["xhigh"] == {"n": 2, "bad": 1, "bad_share": 0.5, "low_n": True}
     assert cl["units_omitted"]["gt0"]["bad"] == 1 and cl["units_omitted"]["0"]["n"] == 2
@@ -152,12 +152,12 @@ def test_vocabularies_match_their_owners():
     assert set(REASONING_EFFORTS) == {"low", "medium", "high", "xhigh"}
 
 
-def test_identity_labels_are_capped_and_bucketed(tmp_path):
-    rows = [(f"{i:012x}", {"llm_model": f"m{i}"}, "good", []) for i in range(1, 13)]
-    rows.append(("0000000000ff", {"llm_model": "with space"}, "bad", []))
-    out = _json(_export(_make_db(tmp_path / "m.sqlite3", rows), tmp_path / "m.jsonl"), tmp_path)
-    models = out["ratings_by"]["model_profile"]["llm_model"]
-    assert len(models) == 9 and models["other"] == 5 and sum(models.values()) == 13
+def test_identity_labels_are_hex_only_and_capped(tmp_path):
+    rows = [(f"{i:012x}", {"release": f"{i:012x}"}, "good", []) for i in range(1, 13)]
+    rows.append(("0000000000ff", {"release": f"{SENTINEL} x"}, "bad", []))
+    rep = _json(_export(_make_db(tmp_path / "m.sqlite3", rows), tmp_path / "m.jsonl"), tmp_path)
+    rel = rep["ratings_by"]["identity"]["release"]
+    assert len(rel) == 9 and rel["other"] == 5 and sum(rel.values()) == 13
 
 
 def test_empty_and_unrated_exports(tmp_path, capsys):
@@ -268,3 +268,48 @@ def test_module_runs_as_a_subprocess_and_stdin_input(export_file, tmp_path):
                           capture_output=True, check=False)
     assert proc.returncode == 0 and json.loads(proc.stdout)["coverage"]["answers"] == 7
     assert SENTINEL.encode() not in proc.stdout + proc.stderr
+
+
+@pytest.mark.parametrize("key", ["elapsed_ms", "units_omitted", "evidence", "total_tokens"])
+def test_huge_int_telemetry_is_refused_by_import_and_report(export_file, tmp_path, capsys, key):
+    lines = _lines(export_file)
+    row = json.loads(lines[1])
+    row["telemetry"][key] = 10**400
+    lines[1] = json.dumps(row, sort_keys=True, separators=(",", ":")).encode()
+    bad = tmp_path / "huge.jsonl"
+    bad.write_bytes(_rehash(lines))
+    bad.chmod(0o600)
+    assert report.main(["--in", str(bad)], clock=lambda: NOW) == 2
+    assert capsys.readouterr().err == "feedback-report: refused: invalid_answer_line_2\n"
+    assert exchange.main(["import", "--in", str(bad), "--db", str(tmp_path / "d.sqlite3"),
+                          "--retention-days", "180"], clock=lambda: NOW) == 2
+    assert "invalid_answer_line_2" in capsys.readouterr().err
+    # defense in depth: the helper itself treats an unrepresentable int as absent
+    assert report._number(10**400) is None
+
+
+def _redirect(export_file, target_fd_path, env_extra=None):
+    env = {**os.environ, "PYTHONPATH": str(SRC)}
+    with open(target_fd_path, "wb") as sink:
+        return subprocess.run([sys.executable, "-m", "mainframe_rag.feedback.report", "--in",
+                               str(export_file)], env=env, stdout=sink,
+                              stderr=subprocess.PIPE, check=False)
+
+
+def test_stdout_redirect_checks_match_export(export_file, tmp_path):
+    open_target = tmp_path / "open.md"
+    open_target.write_bytes(b"")
+    open_target.chmod(0o644)
+    proc = _redirect(export_file, open_target)
+    assert proc.returncode == 2 and b"output_not_private" in proc.stderr
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    in_git = repo / "r.md"
+    in_git.write_bytes(b"")
+    in_git.chmod(0o600)
+    proc = _redirect(export_file, in_git)
+    assert proc.returncode == 2 and b"output_in_git_worktree" in proc.stderr
+    ok = tmp_path / "ok.md"
+    ok.write_bytes(b"")
+    ok.chmod(0o600)
+    assert _redirect(export_file, ok).returncode == 0 and ok.read_bytes().startswith(b"# Feedback")
