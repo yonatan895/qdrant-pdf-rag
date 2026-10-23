@@ -141,6 +141,18 @@ class TestProfileClassification(unittest.TestCase):
                 self.assertIn("tooling", decision.matched_categories)
                 self.assertEqual(decision.services, [])
 
+    def test_every_rule_module_change_selects_the_retrieval_eval_lane(self):
+        """The lane list is derived from `_RULE_MODULES`, not hard-coded (#588)."""
+        from mainframe_rag.ingest.rules_version import _RULE_MODULES
+
+        self.assertGreaterEqual(len(_RULE_MODULES), 8)
+        for rel in _RULE_MODULES:
+            path = f"src/mainframe_rag/{rel}"
+            with self.subTest(path=path):
+                self.assertTrue((pathlib.Path(__file__).resolve().parents[1] / path).is_file())
+                _, lanes = self._required([path])
+                self.assertIn("eval_retrieval", lanes)
+
     def test_evaluation_package_and_delegates_select_executable_tooling_lanes(self):
         from scripts.review_tooling import required_lanes
 
