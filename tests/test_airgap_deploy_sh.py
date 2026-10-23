@@ -512,7 +512,16 @@ def test_tracing_on_deploys_openobserve_and_off_removes_it(tree):
     assert not (tree[0] / "dist" / "openobserve-rendered.yaml").exists()
     rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
     assert rendered_env(rendered, "agent")["OTEL_EXPORTER_OTLP_ENDPOINT"] == ""
-    assert "Tracing off" in off.stdout
+    assert "OpenObserve not deployed" in off.stdout
+    # An external OTLP endpoint (tracing.endpoint escape hatch) renders no
+    # backend either: no Secret check, identity check, render or rollout wait.
+    ext = _run(tree, ("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector.platform:4318"))
+    assert ext.returncode == 0, ext.stderr
+    assert not (tree[0] / "dist" / "openobserve-rendered.yaml").exists()
+    rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
+    assert rendered_env(rendered, "agent")["OTEL_EXPORTER_OTLP_ENDPOINT"] == "http://collector.platform:4318"
+    assert "name: openobserve" not in rendered and "name: otelcol" not in rendered
+    assert "OpenObserve not deployed" in ext.stdout
 
 
 @pytest.mark.parametrize("role", ["openobserve", "otelcol"])
@@ -681,7 +690,12 @@ def test_disabling_the_networkpolicy_leaves_removal_to_the_release(tree):
     (the disabled-cleanup inventory stays for pre-Helm legacy objects)."""
     r = _run(tree, ("AGENT_NETWORK_POLICY", "false"))
     assert r.returncode == 0, r.stderr
-    assert "kind: NetworkPolicy" not in (tree[0] / "dist" / "agent-rendered.yaml").read_text()
+    rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
+    # AGENT_NETWORK_POLICY governs only the agent ingress policy (docs/deploy.md
+    # #agent-networkpolicy); the OpenObserve egress-deny policy is its own
+    # object and stays rendered.
+    assert "name: rag-agent-ingress" not in rendered
+    assert "name: openobserve-egress-deny" in rendered
     assert "off (AGENT_NETWORK_POLICY=false)" in r.stdout
     assert "upgrade" in _helm_log(tree)
     assert "NetworkPolicy" not in (tree[0] / "dist/app-disabled-cleanup.json").read_text()

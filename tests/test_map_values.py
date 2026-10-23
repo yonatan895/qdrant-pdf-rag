@@ -173,10 +173,13 @@ def test_otel_is_owned_by_the_mapper_not_stale_shell_state(monkeypatch, mapper_e
 
 @pytest.mark.parametrize(("environment", "expected"), [
     ({}, {"OTEL_TRACING_ENABLED": "1", "OTEL_ENDPOINT_RESOLVED": "",
-          "SERVICEMONITOR_DEPLOY": "0"}),
+          "OTEL_BUNDLED": "1", "SERVICEMONITOR_DEPLOY": "0"}),
     ({"OTEL_EXPORTER_OTLP_ENDPOINT": "off"},
      {"OTEL_TRACING_ENABLED": "0", "OTEL_ENDPOINT_RESOLVED": "",
-      "SERVICEMONITOR_DEPLOY": "0"}),
+      "OTEL_BUNDLED": "0", "SERVICEMONITOR_DEPLOY": "0"}),
+    ({"OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector.platform:4318"},
+     {"OTEL_TRACING_ENABLED": "1", "OTEL_ENDPOINT_RESOLVED": "http://collector.platform:4318",
+      "OTEL_BUNDLED": "0", "SERVICEMONITOR_DEPLOY": "0"}),
 ])
 def test_bundle_decisions_match_the_rendered_release(monkeypatch, mapper_env, environment, expected):
     """The shell stages `eval` --bundle-decisions; the release renders the
@@ -193,7 +196,7 @@ def test_bundle_decisions_match_the_rendered_release(monkeypatch, mapper_env, en
     r2, out = mapper_env()
     assert r2.returncode == 0, r2.stderr
     v = load_values(out)
-    assert ("openobserve" in v["images"]) is (expected["OTEL_TRACING_ENABLED"] == "1")
+    assert ("openobserve" in v["images"]) is (expected["OTEL_BUNDLED"] == "1")
     assert v["metrics"]["serviceMonitor"]["enabled"] is (expected["SERVICEMONITOR_DEPLOY"] == "1")
 
 
