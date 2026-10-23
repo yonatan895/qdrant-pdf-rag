@@ -941,7 +941,8 @@ jobs:
           # Values come from files in a private directory, never argv; random per run.
           D="$(mktemp -d)"; chmod 700 "$D"
           printf 'ci@openobserve.invalid' > "$D/root-user-email"
-          od -An -N24 -tx1 /dev/urandom | tr -d ' \n' > "$D/root-user-password"
+          # OpenObserve v1.1.2 refuses a weak root password: keep upper+lower+digit+special.
+          { od -An -N24 -tx1 /dev/urandom | tr -d ' \n'; printf 'Aa1!'; } > "$D/root-user-password"
           B64="$(printf '%s:%s' "$(cat "$D/root-user-email")" "$(cat "$D/root-user-password")" | base64 | tr -d '\n')"
           printf 'Authorization=Basic %s' "$B64" > "$D/otlp-headers"
           printf 'Basic %s' "$B64" > "$D/metrics-auth"

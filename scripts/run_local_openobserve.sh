@@ -100,7 +100,7 @@ fi
 if [ ! -e "$O2_ENV_FILE" ]; then
     mkdir -p "$(dirname "$O2_ENV_FILE")"
     ( umask 077
-      _pw="$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')"
+      _pw="$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')Aa1!"  # v1.1.2 needs upper+lower+digit+special
       _email="local@openobserve.invalid"
       _b64="$(printf '%s:%s' "$_email" "$_pw" | base64 | tr -d '\n')"
       printf 'ZO_ROOT_USER_EMAIL=%s\nZO_ROOT_USER_PASSWORD=%s\nO2_BASIC_AUTH=%s\n' "$_email" "$_pw" "$_b64" > "$O2_ENV_FILE" )

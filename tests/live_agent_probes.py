@@ -51,7 +51,7 @@ def o2_backend(tmp_path_factory):
     tag, digest = line.split()[:2]
     image = tag.rsplit(":", 1)[0] + "@" + digest
     subprocess.run(["docker", "image", "inspect", image], check=True, capture_output=True)
-    user, password = "probe@openobserve.invalid", uuid.uuid4().hex + uuid.uuid4().hex
+    user, password = "probe@openobserve.invalid", uuid.uuid4().hex + uuid.uuid4().hex + "Aa1!"  # v1.1.2 refuses a weak root password
     env_file = tmp_path_factory.mktemp("o2") / "o2.env"
     env_file.touch(mode=0o600)
     env_file.write_text(

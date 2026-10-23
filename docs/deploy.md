@@ -1443,7 +1443,7 @@ Settings (tracing off needs none of them):
   render): the Secret must exist at deploy time (#960/`deploy.sh` checks it) with keys
   `root-user-email`, `root-user-password`, `otlp-headers` (`Authorization=Basic <b64>`, read by the
   agent and ingest Job as `OTEL_EXPORTER_OTLP_HEADERS`) and `metrics-auth` (`Basic <b64>`, read by
-  the collector). No credential value is in values or the ConfigMap.
+  the collector). No credential value is in values or the ConfigMap. OpenObserve v1.1.2 refuses to start with a weak root password: `root-user-password` must be 8-128 characters with a lowercase letter, an uppercase letter, a digit and a special character.
 
 `tracing.endpoint` set is the generic OTLP/HTTP escape hatch: the agent exports there, and no
 OpenObserve or collector renders. Export stays fail-open.

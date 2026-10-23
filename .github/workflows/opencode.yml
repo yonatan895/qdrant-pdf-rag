@@ -193,7 +193,7 @@ jobs:
             # (never on a command line or in the prompt), no telemetry, loopback only.
             o2_env="$RUNNER_TEMP/openobserve-review.env"
             ( umask 077
-              printf 'ZO_ROOT_USER_EMAIL=review@openobserve.invalid\nZO_ROOT_USER_PASSWORD=%s\nZO_DATA_DIR=/data\nZO_LOCAL_MODE=true\nZO_TELEMETRY=false\nZO_MODEL_PRICING_ENABLED=false\nZO_MMDB_DISABLE_DOWNLOAD=true\nZO_HTTP_ADDR=0.0.0.0\nHOME=/tmp\n' "$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')" > "$o2_env" )
+              printf 'ZO_ROOT_USER_EMAIL=review@openobserve.invalid\nZO_ROOT_USER_PASSWORD=%s\nZO_DATA_DIR=/data\nZO_LOCAL_MODE=true\nZO_TELEMETRY=false\nZO_MODEL_PRICING_ENABLED=false\nZO_MMDB_DISABLE_DOWNLOAD=true\nZO_HTTP_ADDR=0.0.0.0\nHOME=/tmp\n' "$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')Aa1!" > "$o2_env" )
             docker run -d --name openobserve-review --rm --memory 1g --memory-swap 1g --read-only --cap-drop ALL --security-opt no-new-privileges --tmpfs /tmp:rw,size=64m --tmpfs /data:rw,size=512m --env-file "$o2_env" -p 127.0.0.1:5080:5080 "docker.io/openobserve/openobserve@sha256:4a154849432f75c4fb024de32fe34163c02406c905dab22bf8d213d2e3386392"
             openobserve_ready=false
             for i in $(seq 1 30); do
