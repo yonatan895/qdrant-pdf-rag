@@ -45,17 +45,22 @@
     but spans from roughly the last 6 s before the kill were not visible (4 of
     119). Traces accept losing about the last 6 s on a hard kill.
   - **S7 is unchanged:** 400 acknowledged, 159 stored on v1.1.2 (161 on v1.0.4),
-    still silent loss with HTTP 200. The alert mitigation is tracked in the
-    #956 follow-up; see the finding below.
+    still silent loss with HTTP 200. Mitigation: headroom plus a required
+    site-side alert (finding below).
   - **Disk-full signal finding (2026-10-23):** OpenObserve OSS has alerting
     (`/api/{org}/{stream}/alerts`, SQL or PromQL over ingested streams) and its
     `/metrics` exposes `zo_node_disk_total` and `zo_node_disk_usage`. Run
     against the v1.1.2 binary with the data directory on a 128 MiB tmpfs and 60
     MiB written there, both series stayed at the host root filesystem figures
-    and did not move. They do not measure the data volume, so an alert on them
-    cannot see the PVC filling. A usable volume signal needs a source that
-    mounts or reads the PVC; none is in the chart yet. No PrometheusRule
-    (maintainer decision).
+    and did not move: they do not measure the data volume. The built-in
+    `ZO_DISK_CIRCUIT_BREAKER_ENABLED=true` was also tested (same method;
+    threshold 50 with the tmpfs at 68%, and thresholds 30 and 0.3 with the root
+    filesystem near 41%): JSON ingest kept returning HTTP 200 and no request
+    was refused, so it gives no visible refusal. Decision (maintainer): no
+    PrometheusRule and no in-app signal. S7 stays silent loss at the
+    product level, mitigated by headroom and a required site-side alert on the
+    platform's kubelet volume metrics for `openobserve-data`
+    ([deploy](../deploy.md#trace-backend)).
 - **Required configuration (the supported deployment must set all of these):**
   - `ZO_TELEMETRY=false`, `ZO_MODEL_PRICING_ENABLED=false` and
     `ZO_MMDB_DISABLE_DOWNLOAD=true`. With `ZO_TELEMETRY=false` alone, the default
@@ -102,7 +107,7 @@
     behaviour or limits.
   - **Open site checks before production use:** `restricted-v2` SCC and Pod
     Security admission; real namespace quota; platform forwarding of metrics and
-    traces; a 14-day soak; Enterprise offline licence answers (issue, renewal,
+    traces; the kubelet-volume-stats alert on `openobserve-data` above 70% used (#807); a 14-day soak; Enterprise offline licence answers (issue, renewal,
     50 GB/day enforcement, expiry behaviour); disk-full behaviour on the site volume.
   - Dashboards and alerts are later work under #529, using the M1-M6 PromQL
     (ran unmodified except M2, not numerically verified) and the J1-J3 queries
