@@ -956,7 +956,8 @@ pin (one record naming the basename). Passages are referenced, never quoted:
   `required_facts`, `required_conditions`. Abstain cases add `abstain_reason`
   (`insufficient_evidence`/`wrong_premise`) and `must_not_assert`, and carry no
   docs/evidence.
-- The validator rejects unknown fields, author equal to adjudicator, authors or
+- The validator rejects unknown fields, an `adjudicated_at` that is not a later day
+  than `authored_at` (D2 amendment: adjudication is a separate pass), authors or
   adjudicators absent from the manifest, duplicate ids or case/whitespace-folded
   queries, malformed dates/hashes, and any unadjudicated case. The CLI also
   refuses a set whose queries overlap the required `golden.jsonl`,
@@ -1048,6 +1049,17 @@ the PR carrying it merges. Dated; amend by a new dated record, not in place.
 - **Roles (D2).** Adjudicator: yonatan895. Author: **not yet named**; must be
   a different person (the validator rejects author equal to adjudicator). The
   set cannot be built until the author is named; #367 stays blocked on that.
+- **D2 amended, 2026-10-23 (yonatan895).** Supersedes the Roles (D2) line above
+  (kept as the dated original). Author: **yonatan895**, also the adjudicator;
+  the "different person" condition is dropped and #367 is no longer blocked on
+  an author. Independence now means: the release set is separate from
+  development, and **agents never author, read, score against or tune on it**
+  (the rule of the frozen holdout, #859); only its denominators and ids are
+  published. The second-person check is replaced by the written authoring
+  checklist and by adjudication in a separate pass after authoring, not while
+  writing (enforced as `adjudicated_at` later than `authored_at`). The
+  "adjudicated by a second person" clause in the #859 paragraph below is
+  superseded accordingly.
 - **Abstain composition (D4).** 40 abstain rows in the release set (pilot
   keeps 6), so one miss is tolerable: R2 (Wilson lower >= 0.85) at n=30 needs
   30/30, at n=40 it tolerates one miss. Mix of `insufficient_evidence` and
@@ -1073,6 +1085,59 @@ the PR carrying it merges. Dated; amend by a new dated record, not in place.
   stays non-certifying until the maintainer sets `registered`,
   `registered_by`/`registered_at` and the 40-row abstain `min_n` with the set
   binding, before the first scored run.
+
+### Pilot authoring kit (#367, 2026-10-23)
+
+Tooling and rules for the maintainer; agents never write, read or run it on
+real rows. It reuses the registered `release_set.jsonl` schema and loaders in
+`mainframe_rag.eval.acceptance` (no second format); `scripts/release_kit.py`
+(`mainframe_rag.eval.release_kit`) adds authoring-time checks. Tests:
+`tests/test_release_kit.py`, `tests/test_acceptance.py`, synthetic only.
+
+- **Private storage.** `~/.config/mainframe-rag/release-set/` (mode 700, outside
+  the working tree, never committed, never under the agent scratch cache):
+  `release_set.jsonl` plus its adjacent `.sha256` pin. The kit refuses a path
+  inside the repository and flags a group/other-accessible directory. Back it up
+  with the other durable records in `~/.config/mainframe-rag/`.
+- **Row template.** `python scripts/release_kit.py template` prints a placeholder
+  manifest, one answer row and one abstain row generated from the schema fields.
+  Ids use a `REL-` prefix; never reuse a dev golden id.
+- **Check while authoring.** `python scripts/release_kit.py check` (default
+  `--set` is the private path) validates the schema, ids, the stage counts
+  (pilot 24 answer + 6 abstain, covering the criteria's per-class
+  `case_count` minimums; release at least 100 answer and exactly 40 abstain),
+  the manifest `criteria_sha256`, one `required_facts` entry per answer row,
+  `excerpt_sha256` on every evidence item, and no id or normalized-query overlap
+  with `golden.jsonl` and `paraphrase.jsonl`. It prints ids and counts only,
+  never query text. The pinned holdout overlap is checked by the final
+  `--validate-only` run, not here.
+- **Freeze.** `python scripts/release_kit.py pin` writes the `.sha256` pin; then
+  `VENUE=rc python scripts/eval_acceptance.py --set <path> --validate-only`
+  (adds holdout overlap). Run scoring only after the criteria are registered.
+- **Authoring checklist (replaces the second-person check).**
+  1. Write from the manual page, never from system output or the dev golden set;
+     do not paraphrase a dev row.
+  2. One fact per answer row (`required_facts` has one entry); side conditions
+     go in `required_conditions`.
+  3. Record the source passage: `doc_id`, `release`, physical page, locator and
+     `excerpt_sha256` of the passage (hash only, never the text).
+  4. The question must have one answer supportable by the cited passage alone,
+     and must not name the expected fact.
+  5. Abstain rows: choose `insufficient_evidence` (the corpus plausibly lacks
+     the answer; confirm absence by reading the manuals, not by querying the
+     system) or `wrong_premise` (a false assumption the manuals contradict);
+     `must_not_assert` lists the specific fabrication to catch. Abstain rows
+     carry no docs or evidence. Declare the mix in the manifest `independence.statement` before
+     scoring.
+  6. Cooling-off: finish authoring, wait at least one full day, then adjudicate
+     each row cold against the cited passage in a separate sitting. Record the
+     adjudication date; same-day adjudication is rejected.
+  7. Reject, do not repair, a row that needed changing after adjudication
+     reading; rewrite and re-adjudicate it on a later day.
+  8. No feedback-derived rows (D6); no row written after seeing a system answer
+     to it (set `saw_system_outputs` false only if true).
+  9. After the first scored run, a defect found through the set is fixed against
+     the dev golden and the row is re-adjudicated or retired, never tuned on.
 
 ### Decision procedure
 

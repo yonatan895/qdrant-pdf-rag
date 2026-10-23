@@ -187,8 +187,10 @@ class ReleaseCase(_Strict):
     def _shape(self) -> ReleaseCase:
         if (self.critical_probe is None) != (self.critical_expected_outcome is None):
             raise ValueError("critical_probe and critical_expected_outcome must be declared together")
-        if self.provenance.author.casefold() == self.adjudication.adjudicator.casefold():
-            raise ValueError("author and adjudicator must be different people")
+        # D2 amended 2026-10-23: author and adjudicator may be the same person;
+        # the second-person check is replaced by a separate, later adjudication pass.
+        if date.fromisoformat(self.adjudication.adjudicated_at) <= date.fromisoformat(self.provenance.authored_at):
+            raise ValueError("adjudicated_at must be a later day than authored_at (separate adjudication pass)")
         if self.expected_behavior == "answer":
             if self.abstain_reason is not None or self.must_not_assert:
                 raise ValueError("answer cases take no abstain_reason/must_not_assert")

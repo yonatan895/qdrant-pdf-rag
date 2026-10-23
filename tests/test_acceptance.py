@@ -172,7 +172,8 @@ def _mutated(tmp_path, csha, mutate) -> str:
 
 
 @pytest.mark.parametrize("mutate,needle", [
-    (lambda r: r[1]["adjudication"].update(adjudicator="Ann"), "different people"),
+    (lambda r: r[1]["adjudication"].update(adjudicated_at="2026-10-01"), "separate adjudication pass"),
+    (lambda r: r[1]["adjudication"].update(adjudicated_at="2026-09-30"), "separate adjudication pass"),
     (lambda r: r[1].update(evidence=[]), "evidence"),
     (lambda r: r[1].update(expected_doc_ids=["OTHER"]), "evidence doc ids"),
     (lambda r: r[25].update(must_not_assert=[]), "must_not_assert"),
@@ -187,6 +188,14 @@ def _mutated(tmp_path, csha, mutate) -> str:
 def test_validator_rejects(tmp_path, mutate, needle):
     with pytest.raises(acc.AcceptanceError, match=needle):
         acc.parse_release_set(_mutated(tmp_path, "0" * 64, mutate))
+
+
+def test_same_person_may_author_and_adjudicate_in_a_later_pass(tmp_path):
+    rows = _pilot_rows("0" * 64)
+    rows[0].update(authors=["Ann"], adjudicators=["Ann"])
+    for r in rows[1:]:
+        r["adjudication"]["adjudicator"] = "Ann"
+    assert len(acc.parse_release_set("\n".join(json.dumps(r) for r in rows)).cases) == 30
 
 
 def test_overlap_with_tuning_queries_is_detected(pilot):
