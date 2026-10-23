@@ -4,7 +4,7 @@
 
 Citation-first expert mainframe agent: hybrid retrieval over ~100 GB of IBM-style manuals (IBM, Broadcom/CA, BMC, Precisely) on **air-gapped OpenShift**, answering operational questions with exact citations — document number, title, heading path, printed page label — plus optional JCL/REXX/operator steps from a reasoning model.
 
-Models (reasoning, dense embed, reranker) are served by the **platform team's internal vLLM / LiteLLM gateway** on a separate cluster — in production this repo only consumes that tier over HTTP; locally `sh scripts/tools/run-task.sh local:stack` simulates the full topology (vLLM behind the real LiteLLM gateway + Qdrant + Jaeger + agent, with tracing verified end to end). See [Model Gateway & Ownership Contract](#model-gateway--ownership-contract) below.
+Models (reasoning, dense embed, reranker) are served by the **platform team's internal vLLM / LiteLLM gateway** on a separate cluster — in production this repo only consumes that tier over HTTP; locally `sh scripts/tools/run-task.sh local:stack` simulates the full topology (vLLM behind the real LiteLLM gateway + Qdrant + OpenObserve + agent, with tracing verified end to end). See [Model Gateway & Ownership Contract](#model-gateway--ownership-contract) below.
 
 - **Design & Architecture:** [docs/architecture.md](docs/architecture.md) (source of truth)
 - **Installation & Operations Guide:** [docs/install_and_ops.md](docs/install_and_ops.md) (step-by-step local & air-gap runbook)
@@ -17,7 +17,7 @@ Models (reasoning, dense embed, reranker) are served by the **platform team's in
 |---|---|
 | `charts/qdrant-*.tgz` | Vendored Qdrant Helm chart (Apache-2.0); never `helm repo add` in the air-gap |
 | `charts/qdrant-openshift.values.yaml` | Qdrant OpenShift values: 3-replica StatefulSet, unprivileged, RWO block, ClusterIP only |
-| `charts/mainframe-rag/` | 2-replica agent Deployment, one-shot ingest Job, Jaeger (tracing on by default); `AGENT_ROUTE=true` renders the OAuth sidecar and a reencrypt Route — fails closed while the oauth-proxy pin is `sha256:PENDING` |
+| `charts/mainframe-rag/` | 2-replica agent Deployment, one-shot ingest Job, OpenObserve (tracing on by default); `AGENT_ROUTE=true` renders the OAuth sidecar and a reencrypt Route — fails closed while the oauth-proxy pin is `sha256:PENDING` |
 | `src/mainframe_rag/ingest/` | PDF walk, IBM-style parse, chrome strip, chunk, classify, embed, Qdrant IO |
 | `src/mainframe_rag/retrieve/` | Hybrid search (dense + BM25 prefetch, batched query, weighted RRF), query-class screen, optional cross-encoder rerank (`RERANK_ENDPOINT_ORDER`), diversification, filters |
 | `src/mainframe_rag/agent/` | Async FastAPI `/healthz` + `/livez`, `/v1/search`, `/v1/answer`, multi-turn `/v1/chat` + `/v1/chat/completions` (shared `answer_core`, optional SSE streaming), exact-evidence `GET /v1/evidence/{reference}` and `GET /v1/sources` (contract: `docs/evidence-contract.md`), opt-in `GET /metrics` |
@@ -34,9 +34,9 @@ Models (reasoning, dense embed, reranker) are served by the **platform team's in
 
 ## Model Gateway & Ownership Contract
 
-**Production (air-gap):** the platform team owns the model tier — reasoning, dense embed, and rerank served by vLLM behind a LiteLLM gateway on a separate cluster. This repo owns Qdrant + ingest + retrieval + the FastAPI agent and consumes the model tier **over HTTP only**; it never installs, deploys, or Helm-charts vLLM / LiteLLM / GPU operators on a product path. All model legs go through the gateway — there is no direct-to-vLLM product path. Tracing is **on by default**: the deploy ships Jaeger for this repo's components (agent + ingest) and `airgap.env` can set `OTEL_EXPORTER_OTLP_ENDPOINT` to a custom collector or to `off` to disable; the model tier's monitoring stays the platform team's.
+**Production (air-gap):** the platform team owns the model tier — reasoning, dense embed, and rerank served by vLLM behind a LiteLLM gateway on a separate cluster. This repo owns Qdrant + ingest + retrieval + the FastAPI agent and consumes the model tier **over HTTP only**; it never installs, deploys, or Helm-charts vLLM / LiteLLM / GPU operators on a product path. All model legs go through the gateway — there is no direct-to-vLLM product path. Tracing is **on by default**: the deploy ships OpenObserve for this repo's components (agent + ingest) and `airgap.env` can set `OTEL_EXPORTER_OTLP_ENDPOINT` to a custom collector or to `off` to disable; the model tier's monitoring stays the platform team's.
 
-**Local dev/test:** `sh scripts/tools/run-task.sh local:stack` simulates the *complete* production topology on one machine — this repo's Qdrant + agent + Jaeger, plus a **platform stand-in**: local vLLM backends behind the **real** (digest-pinned) LiteLLM gateway. Agent and ingest still reach models through the gateway, so the production wire contract (single origin, model-id routing, per-leg virtual keys) is what gets tested, and a `v1.search` span must land in the local Jaeger before the stack reports up. The console is on by default (`UI_ENABLED=true`, `GET /ui` smoke-checked; set `UI_ENABLED=false` for the fail-closed route set). The local model/gateway simulation scripts are local-only — never in the air gap or Helm (CI's separate `airgap-rehearsal` uses the documented `scripts/mock_vllm.py` stand-in). See [docs/install_and_ops.md](docs/install_and_ops.md) §3.6.
+**Local dev/test:** `sh scripts/tools/run-task.sh local:stack` simulates the *complete* production topology on one machine — this repo's Qdrant + agent + OpenObserve, plus a **platform stand-in**: local vLLM backends behind the **real** (digest-pinned) LiteLLM gateway. Agent and ingest still reach models through the gateway, so the production wire contract (single origin, model-id routing, per-leg virtual keys) is what gets tested, and a `v1.search` span must land in the local OpenObserve before the stack reports up. The console is on by default (`UI_ENABLED=true`, `GET /ui` smoke-checked; set `UI_ENABLED=false` for the fail-closed route set). The local model/gateway simulation scripts are local-only — never in the air gap or Helm (CI's separate `airgap-rehearsal` uses the documented `scripts/mock_vllm.py` stand-in). See [docs/install_and_ops.md](docs/install_and_ops.md) §3.6.
 
 Production wiring — all three legs in `airgap.env` (see [docs/install_and_ops.md](docs/install_and_ops.md) §4.3):
 
@@ -136,9 +136,9 @@ the same tool without network access. Start with
 | **Local vLLM & GPU** | `sh scripts/tools/run-task.sh local:llm` | Run local vLLM reasoning server on GPU (port 8000, Gemma-4, Budget `GPU_MEM=0.64`) |
 | | `sh scripts/tools/run-task.sh local:embed` | Run local vLLM dense embedding server on GPU (port 8001, Qwen3-Embedding-0.6B, `GPU_MEM=0.33`, `--runner pooling --convert embed --enforce-eager`) |
 | | `sh scripts/tools/run-task.sh local:rerank` | Run local vLLM reranker server on GPU (port 8002, `BAAI/bge-reranker-v2-m3`) |
-| | `sh scripts/tools/run-task.sh local:stack` | Canonical full local simulation (Qdrant + Jaeger + LiteLLM gateway + agent + console; `UI_ENABLED=true` by default) |
+| | `sh scripts/tools/run-task.sh local:stack` | Canonical full local simulation (Qdrant + OpenObserve + LiteLLM gateway + agent + console; `UI_ENABLED=true` by default) |
 | | `sh scripts/tools/run-task.sh local:gateway:up` / `sh scripts/tools/run-task.sh local:gateway:down` | Foreground LiteLLM gateway (port 4000) / stop it and its key store |
-| | `sh scripts/tools/run-task.sh local:jaeger:up` / `sh scripts/tools/run-task.sh local:jaeger:down` | Jaeger v2 trace backend (UI :16686) / stop it |
+| | `sh scripts/tools/run-task.sh local:jaeger:up` / `sh scripts/tools/run-task.sh local:jaeger:down` | OpenObserve trace backend / stop it |
 | | `sh scripts/tools/run-task.sh local:agent` | Start the agent with `LLM_STREAM=true` (reasoning SSE streaming for TTFT) on port 8080; serves `/ui` when `UI_ENABLED=true` |
 | | `sh scripts/tools/run-task.sh local:check -- --agent URL --jaeger URL --query TEXT --followup TEXT --report PATH` | Verify grounded answers, console follow-up and a fresh search trace against an existing stack |
 | **Cluster recipe** | `sh scripts/tools/run-task.sh artifacts:chart-fetch` / `sh scripts/tools/run-task.sh artifacts:helm-render` / `sh scripts/tools/run-task.sh artifacts:helm-lint` | Fetch / render / lint the vendored Qdrant chart against OpenShift values |
@@ -148,7 +148,7 @@ the same tool without network access. Start with
 | **Packaging & Standard Deployment** | `sh scripts/tools/run-task.sh airgap:pack` | Build sneakernet package (`dist/qdrant-pdf-rag-<sha>.tar`) on connected host |
 | | `sh scripts/tools/run-task.sh airgap:validate` | Pre-flight validation of tools, env, storage class, and OpenShift SCC |
 | | `sh scripts/tools/run-task.sh airgap:load` | Load image archives and push to `${INTERNAL_REGISTRY}` (in air-gap or local test registry) |
-| | `sh scripts/tools/run-task.sh airgap:deploy` | Deploy Qdrant cluster, Jaeger v2 tracing, and Agent via separate Helm releases |
+| | `sh scripts/tools/run-task.sh airgap:deploy` | Deploy Qdrant cluster, OpenObserve tracing, and Agent via separate Helm releases |
 | | `sh scripts/tools/run-task.sh airgap:ingest` | Launch one-shot ingest Job against `CORPUS_PVC=<pvc>` |
 | | `sh scripts/tools/run-task.sh airgap:smoke` | Smoke test in-cluster search endpoint with fail-closed `/healthz` probe |
 | | `sh scripts/tools/run-task.sh airgap:pipeline` | Single master orchestrator running validate -> load -> deploy -> ingest -> smoke |
@@ -213,7 +213,7 @@ The hardened 5-stage deployment pipeline (`airgap:validate` -> `airgap:load` -> 
 
    # Option B: Or execute step-by-step:
    sh scripts/tools/run-task.sh airgap:load                   # Push the 4 base image archives (+ the oauth-proxy sidecar archive) to the internal registry
-   sh scripts/tools/run-task.sh airgap:deploy                 # Deploy Qdrant StatefulSet + Agent + Jaeger (tracing on by default)
+   sh scripts/tools/run-task.sh airgap:deploy                 # Deploy Qdrant StatefulSet + Agent + OpenObserve (tracing on by default)
    # Prove the gateway from inside the cluster, apply its leg-order recommendation:
    kubectl -n mainframe-rag exec deploy/rag-agent -- python3 /app/scripts/probe_gateway.py
    sh scripts/tools/run-task.sh airgap:ingest CORPUS_PVC=<pvc> # Ingest corpus from storage PVC
@@ -249,7 +249,7 @@ See **[docs/install_and_ops.md](docs/install_and_ops.md#47-local-cluster-testing
 
 ## Endpoints
 
-The agent listens on port 8080 (ClusterIP `rag-agent:8080` in-cluster; the external console Route is `AGENT_ROUTE=true`). Local ports: Qdrant 6333, reasoning 8000, embed 8001, rerank 8002, LiteLLM gateway 4000 (`sh scripts/tools/run-task.sh local:stack`), Jaeger 16686.
+The agent listens on port 8080 (ClusterIP `rag-agent:8080` in-cluster; the external console Route is `AGENT_ROUTE=true`). Local ports: Qdrant 6333, reasoning 8000, embed 8001, rerank 8002, LiteLLM gateway 4000 (`sh scripts/tools/run-task.sh local:stack`), OpenObserve (port per `local:stack`).
 
 ```bash
 # Readiness: {"status":"ok","qdrant":true,"embed":true,"representation":"compatible","rerank":null} (degraded = HTTP 503; rerank is true/false when RERANK_ENABLED=true)

@@ -22,7 +22,7 @@ initialize every result as `NOT RUN`.
 | Lane | Required real components and coverage |
 |---|---|
 | Required GitHub jobs | Fresh bootstrap of the published bundle, real application containers, registry, gateway/database and Kubernetes; deterministic computation and the gateway fault contracts (upstream, malformed, dimension, timeout, truncated stream, credentials) |
-| Disposable local Kind | The same product images and pipeline, both real GPU models behind the authenticated TLS gateway, Qdrant, ingest, Jaeger; citations, follow-up chat, all streams, lifecycle and recovery |
+| Disposable local Kind | The same product images and pipeline, both real GPU models behind the authenticated TLS gateway, Qdrant, ingest, OpenObserve; citations, follow-up chat, all streams, lifecycle and recovery |
 
 **Not checked before transfer.** OpenShift-specific behavior (`restricted-v2`
 SCC admission and assigned identities, the OAuth console Route, Service CA and
@@ -653,14 +653,14 @@ coverage against the same bundle.
 | Check | Required evidence |
 |---|---|
 | Images | Requested image refs and each running container's `imageID` match loaded release artifacts. Account for manifest-list/platform and archive/registry compression differences using [the image-identity procedure](deploy.md#image-identity-across-archive-and-registry-formats). |
-| Storage writes | Bound PVCs, successful ingest scratch/data writes, Qdrant snapshot creation and Jaeger span persistence. |
-| Pod replacement | Replace one Qdrant pod and one agent pod, recording old/new UIDs. PVC identity, exact point count, representative hit IDs/citations and health survive. Restart Jaeger and verify an earlier trace remains queryable. |
+| Storage writes | Bound PVCs, successful ingest scratch/data writes, Qdrant snapshot creation and OpenObserve span persistence. |
+| Pod replacement | Replace one Qdrant pod and one agent pod, recording old/new UIDs. PVC identity, exact point count, representative hit IDs/citations and health survive. Restart OpenObserve and verify an earlier trace remains queryable. |
 | Repeat deployment | Repeat `sh scripts/tools/run-task.sh airgap:pipeline` on the same bundle/env; require rollout, new ingest Job completion, unchanged synthetic point count/IDs, healthy search and tracing. |
 | Snapshot recovery | Snapshot only the synthetic collection, export and checksum it outside Git, restore into an isolated empty collection with the same Qdrant version and vector config, and verify exact count, sampled payload/point IDs and equivalent queries. Never commit snapshot bytes. |
 | Cited answer | Ask `What does IEA500I mean?`; verify the answer and non-inferred citation against the generated PDF, with no error/degraded response. A transport-only success is insufficient. |
 | Follow-up | A contextual follow-up completes coherently with a valid synthetic citation. Record the condensation setting; do not flip its default. |
 | Streams | `/v1/answer`: exactly one successful terminal `final`, no `error`. `/v1/chat` and `/v1/chat/completions`: successful finish chunk plus `[DONE]`, no error frame. `/ui`: terminal completion and cleared busy state. |
-| Tracing | Search and answer/chat traces appear in Jaeger with retrieval and reasoning children where applicable. |
+| Tracing | Search and answer/chat traces appear in OpenObserve with retrieval and reasoning children where applicable. |
 | TLS, credentials, long input | The controls below pass from both the agent and ingest images. |
 
 For persistence and redeployment run

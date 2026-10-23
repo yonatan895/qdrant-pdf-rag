@@ -397,7 +397,7 @@ selects the reviewer environment and the acceptance lanes; it does not waive any
 
 **Resource boundaries & invariant protection:** Prose/docs and test/tooling PRs
 must respect their resource boundary and avoid starting heavy services (GPU, Qdrant,
-model gateways, Jaeger). Documentation or tooling changes cannot silently waive,
+model gateways, OpenObserve). Documentation or tooling changes cannot silently waive,
 alter, or bypass core data invariants (UUID5 chunk keys, 4-type vocabulary, residue
 audit, fail-closed contracts).
 

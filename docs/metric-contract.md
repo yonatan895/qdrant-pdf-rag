@@ -4,8 +4,8 @@ Status: investigation queries, not dashboards. Every name, label, operation,
 and tag below was captured from the live dev stack (agent on `origin/main`
 plus the uncommitted dev-only `METRICS_ENABLED` passthrough; no app-code
 change) and every query was verified against that live data: PromQL by
-label-existence plus bucket-shape math over parsed exposition, Jaeger lookups
-by executing them. No Prometheus runs in dev, so PromQL was not executed by
+label-existence plus bucket-shape math over parsed exposition, trace lookups
+by executing them (on Jaeger at capture; J1–J3 below now target OpenObserve). No Prometheus runs in dev, so PromQL was not executed by
 an engine; no 5xx occurred, so the ERROR-status lookup is contract-derived,
 not live-tested.
 
@@ -45,7 +45,7 @@ Buckets (pinned in `metrics.py`, verified cumulative on the wire):
 Privacy (verified by grep over full exposition): no query text, headings,
 doc ids, keys, or tokens appear in any series.
 
-## Trace contract (Jaeger service `mainframe-rag-agent`)
+## Trace contract (OpenObserve service `mainframe-rag-agent`)
 
 Operations and Kinds (13, matching the OBS-1B tree plus `chat.condense`):
 
@@ -98,7 +98,19 @@ shape.
 ## Shipped queries
 
 `observability/queries/request-investigation.promql` (M1–M6) and the J1–J3
-Jaeger lookups defined in `tests/test_metric_contract.py` (`J1_TRACE_BY_REQUEST`,
-`J2_SLOW_ANSWERS`, `J3_ERROR_ROOTS`) as URL templates. `tests/test_metric_contract.py` pins this whole map in CI:
+trace lookups, run in the OpenObserve trace search (`type=traces`, stream
+`default`; [ADR-0006](adr/0006-openobserve-traces-metrics-backend.md)):
+
+- J1, trace by request: `SELECT * FROM "default" WHERE http_request_id = '<id>'`, then `SELECT operation_name, span_status, duration FROM "default" WHERE trace_id = '<trace id>'` for the tree (the trial also selected `_timestamp`, which its record does not show running; `_timestamp` is unverified until the re-qualification runs it)
+- J2, slow answers: `SELECT trace_id, duration FROM "default" WHERE operation_name = 'v1.answer' AND duration > 500000 ORDER BY duration DESC LIMIT 5` (`duration` in microseconds)
+- J3, server errors: `SELECT trace_id FROM "default" WHERE span_status = 'ERROR' LIMIT 5`
+
+These are the #782 trial queries, run against OpenObserve v1.0.4 (J1 100 of
+100, J2 70 slow answers; J3 returned ERROR spans, but its equality with ground
+truth is unverified: no 5xx occurred, see the
+[trial record](records/2026-10-23-openobserve-oss-qualification.md)). Add
+`service_name = 'mainframe-rag-agent'` to scope them; `scripts/trace_arrival.py`
+filters on it. Not yet re-run on v1.1.2.
+`tests/test_metric_contract.py` pins this whole map in CI:
 instrument names/units/label keys, bucket boundaries, and that every
 `rag_*` name and label key in the PromQL file exists on the wire shape.
