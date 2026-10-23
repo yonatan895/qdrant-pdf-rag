@@ -29,14 +29,14 @@ Decision owners: `licenses/inventory.json` (the record),
 
 ## What is recorded and how it is derived
 
-`licenses/inventory.json` holds one record per locked runtime wheel (60) and per
-non-Python component (15, including the three non-distributed boundaries above).
+`licenses/inventory.json` holds one record per locked runtime wheel (62) and per
+non-Python component (17, including the three non-distributed boundaries above).
 
-- **Python wheels** are derived offline from the exact locked wheel bytes (59,
+- **Python wheels** are derived offline from the exact locked wheel bytes (61,
   METADATA `License-Expression`, `License` field or classifier, plus license-file
   names and SHA-256) or, where the locked wheel was not on the host, from a
   version-matching installed dist-info (1: `urllib3` 2.8.0). `evidence` says which.
-  `license_spdx` is the normalized value and `spdx_basis` says how: 39 declared
+  `license_spdx` is the normalized value and `spdx_basis` says how: 41 declared
   expressions, 17 normalized from the `License` field, 3 from classifiers, 1 from
   license-file text (`py-rust-stemmers` declares nothing). A reviewer must treat
   normalized values as claims to confirm, not as findings.
@@ -52,11 +52,15 @@ License classes (conservative, from `license_inventory.py`): `permissive`,
 `weak-copyleft` (MPL, LGPL), `strong-copyleft` (GPL), `network-copyleft` (AGPL),
 `election-required` (dual license without a recorded election), `proprietary`
 (`LicenseRef-*`), `unknown`. AND takes the most restrictive operand; an OR whose
-alternatives differ needs a recorded `elected` value. Runtime wheel result: 57
-permissive, 2 weak-copyleft (`certifi`, `tqdm`: MPL-2.0), 1 network-copyleft
+alternatives differ needs a recorded `elected` value. Runtime wheel result: 59
+permissive, 2 weak-copyleft (`certifi`: MPL-2.0; `tqdm`: MPL-2.0 AND MIT), 1 network-copyleft
 (`pymupdf`, AGPL elected; legal confirmation pending). 14 wheels are binary; their declared license may not describe native
 libraries vendored inside them (numpy lists 17 license files; most others one).
-The dev/build profiles are not shipped and are not inventoried.
+The dev/build profiles are not shipped and are not inventoried;
+`check` fails if a locked runtime wheel has no record or a record has no locked wheel,
+so the 62 are exactly the runtime profile of `locks/cp314-linux-x86_64.json`.
+Four wheels (`flatbuffers`, `loguru`, `onnxruntime`, `tokenizers`) ship no license
+file; their upstream texts are bound in `licenses/texts/` and rendered into the notices.
 
 ## Docs-only tooling (not in the inventory)
 
@@ -90,6 +94,45 @@ owner: these are maintainer dispositions, not legal approvals.
 
 `python3 scripts/license_inventory.py check` prints open items as `UNRESOLVED` on every
 run so they stay visible; `check --release` fails while any remain.
+
+## Obligations by license class
+
+What the license texts themselves require when a copy is passed on. Section numbers
+are those of the standard texts (SPDX identifiers in the inventory). This is a reading
+of the texts for planning, **not legal advice or a settled conclusion**; whether an
+obligation is triggered by a given delivery is an owner decision (next section).
+"Transfer" means putting the images or bundle in the enterprise's hands.
+
+| Class (inventory count) | Conditions the text states | What the bundle carries today |
+|---|---|---|
+| Permissive: MIT, BSD-2/3, 0BSD, Zlib, CC0, MIT-CMU, PSF-2.0, OFL-1.1 (59 wheels; htmx, Task, skills, Plex, BM25 declared) | Keep the copyright notice and permission/license text with copies (MIT, MIT-CMU, PSF-2.0; BSD-2/3 for binary form in the documentation or other materials supplied). BSD-3 adds no use of the author's name to endorse. Zlib: mark altered versions. OFL-1.1: keep copyright and license with each copy; the font is not sold on its own; Reserved Font Names unusable for modified versions. 0BSD and CC0 state none. | Wheel license files stay in each image under `<dist>.dist-info`; the four wheels without one have bound texts. Vendored asset licenses are in the notices file. |
+| Apache-2.0 (21 wheels, counting expressions that include it; Qdrant and Jaeger images, chart, project) | Section 4: give recipients a copy of the License; keep copyright, patent, trademark and attribution notices; if the Work has a NOTICE file, carry its attribution text in a NOTICE file, in documentation or in a display; mark changed files. | License files in `dist-info`; chart `LICENSE`, project `LICENSE` in the notices. Three wheels (`fastembed`, `prometheus-client`, `requests`) carry a `licenses/NOTICE` file, which stays in their `dist-info`; NOTICE content of image layers is not enumerated (#371). |
+| Weak copyleft: MPL-2.0 (`certifi`; MPL part of `tqdm`) | Section 3.1: Covered Software stays under MPL in Source Code Form. Section 3.2: for an Executable Form, the recipient must be told how to obtain the Source Code Form by reasonable means, in a timely manner, at no more than the cost of distribution. Section 3.3: a larger work may carry other terms if the MPL rights in the covered files are not restricted. File-level scope. | The wheels are unmodified upstream bytes; their license files are in `dist-info`. No source pointer or source copy is carried. |
+| LGPL (no wheel; 43 of 116 UBI RPMs carry an LGPL tag) | LGPL-2.1 sections 4 to 6 and LGPL-3.0 sections 4 to 6: notice, license text, source for the library (or an offer), and the recipient's ability to relink or replace the library. | RPM names, versions and declared tags in `licenses/ubi9-python-314-minimal.rpms.txt` (rendered into the notices); not the license texts or sources. |
+| Strong copyleft: GPL (no wheel; 23 UBI RPMs tagged GPL without LGPL, such as `bash`, `coreutils-single`, `grep`, `sed`) | GPL-2.0 section 3 and GPL-3.0 section 6: pass object code only with the Corresponding Source, or with a written offer for it (GPL-3.0: valid for at least three years), or the other means the section lists. | Same RPM list. No source and no offer. Whether these base-layer packages trigger the duty for this delivery is the open source-offer question below. |
+| Network copyleft: AGPL-3.0 (`pymupdf`, if elected) | Sections 4 and 5: keep notices and the license text; a modified work is licensed as a whole under the AGPL. Section 6: object code is conveyed with the Corresponding Source by one of the listed means. Section 13: if the Program is modified, users who interact with it remotely must be offered its Corresponding Source. The "combined work" and "interacting remotely" readings are the owner's. | The wheel's one license file is a single line naming both licenses; it holds no AGPL text. The notices file does not carry AGPL-3.0 text or any source. |
+| Proprietary or terms-bound: Red Hat UBI EULA, Red Hat registry terms (oauth-proxy), Artifex Commercial | Defined by the agreement, not by a standard text. None of those texts is in the repository; none was fetched. | Recorded as a license reference and owner decision only. Contracts stay in protected records. |
+| Not transferred: platform models, local simulation weights, vendor corpus | Governed by their own agreements; excluded boundaries in the inventory. | Nothing. |
+
+Facts the table rests on: counts come from `licenses/inventory.json` (declared metadata,
+not findings); the UBI counts come from the RPM header tags, which are declared metadata
+too and use free-form strings. `numpy` and other binary wheels may vendor native
+libraries under licenses their top-level metadata does not name (numpy's metadata lists
+17 license files); pack-time inspection of those is not implemented.
+
+## What the owners must decide
+
+These are legal or maintainer calls. Nothing here is decided by the repository.
+
+| # | Decision | Who | Options | What each implies for the bundle |
+|---|---|---|---|---|
+| 1 | PyMuPDF: AGPL-3.0 or Artifex commercial (see the record below) | Qualified legal owner; maintainer has recorded A, scoped to ingest, legal confirmation pending | A: AGPL. B: commercial. C: replace the parser. D: exclude the ingest path. | A: add the AGPL-3.0 text to the notices, and a source mechanism that works offline (a hash-pinned source archive of the exact PyMuPDF and MuPDF version in the bundle, or a written offer the enterprise accepts); the owner decides which means and whether the project's own code is covered. B: no AGPL text or source; record an approval reference, change `elected`, no contract or key in git. C and D: separate approved issues. |
+| 2 | Does transferring the images or bundle to the enterprise count as distribution or conveying, and does the enterprise's own operation count as network use? | Qualified legal owner | Internal use only, conveyed to a separate legal entity, or something else | If conveying: source duties of the table apply to PyMuPDF, MPL wheels and the GPL/LGPL base-layer RPMs. If not: notices only. |
+| 3 | Source offer for base-layer GPL/LGPL RPMs and MPL-2.0 wheels | Qualified legal owner; packaging is a separate approved change | Carry sources or an offer; rely on the base image provider's offer; conclude no duty | Carrying sources makes the bundle larger and adds hashed members to `SHA256SUMS`; relying on a provider needs that provider's terms recorded. |
+| 4 | Combination with Apache-2.0 project code | Qualified legal owner | Accept the combination under the elected license; keep ingest as a separate program boundary | No code change; the answer only sets what the notices and any offer say. |
+| 5 | Final release approval for this exact inventory | Maintainer with the legal owner | Record `release_approval` with `approved_digest` | `check --release` stays failing until decisions 1 to 3 are recorded; any later change to a dependency, pin or notice voids the approval. |
+| 6 | oauth-proxy transfer terms (Red Hat registry terms) | Maintainer, escalating to the platform team | Ship unmodified as an external dependency (recorded), or exclude | Excluding drops the image from the bundle. |
+| 7 | Corpus rights | Corpus owner | Out of scope of this inventory | None; the corpus never enters a bundle. |
 
 <a id="pymupdf"></a>
 ## PyMuPDF decision record
