@@ -30,6 +30,7 @@ jobs:
         with:
           python-version: "3.14"
       - run: python scripts/prepare_python.py --python "$(command -v python)" --wheelhouse .tools/python-wheels/dev --connected --download-workers 8
+        timeout-minutes: 4
       - name: Prepare approved Qdrant image explicitly
         run: python scripts/qdrant_pin.py --prepare
       - name: run benchmark (real ingest + Qdrant + agent; mock LLM)
