@@ -974,6 +974,48 @@ class TestTaskCiConsumers(unittest.TestCase):
                              {"schema_version": 1, "default_ms": 5,
                               "ms": {"tests/a.py::slow[x y]": 1234}})
 
+    def test_unit_durations_dedupes_reruns_to_the_latest_attempt(self):
+        import base64
+        import tempfile
+
+        from scripts.unit_durations import durations
+
+        def junit(text, seconds):
+            value = base64.b64encode(text.encode()).decode()
+            return (f'<testsuite><testcase time="{seconds}"><properties><property name="native_nodeid" '
+                    f'value="{value}"/></properties></testcase></testsuite>')
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            for name, seconds in (("evidence-unit-1-attempt-1", "0.5"), ("evidence-unit-1-attempt-2", "0.9"),
+                                  ("evidence-unit-2-attempt-1", "0.3")):
+                (root / name).mkdir()
+                node = "tests/a.py::one" if name.startswith("evidence-unit-1") else "tests/b.py::two"
+                (root / name / "tests.xml").write_text(junit(node, seconds))
+            self.assertEqual(durations([root])["ms"], {"tests/a.py::one": 900, "tests/b.py::two": 300})
+
+    def test_unit_durations_malformed_input_exits_with_a_fixed_message(self):
+        import subprocess
+        import sys
+        import tempfile
+
+        valid = ('<testsuite><testcase time="%s"><properties><property name="native_nodeid" '
+                 'value="%s"/></properties></testcase></testsuite>')
+        cases = {
+            "not xml": "<testsuite",
+            "bad base64": valid % ("1", "***"),
+            "bad time": valid % ("fast", "dGVzdHMvYS5weTo6eA=="),
+            "no nodeid": '<testsuite><testcase time="1"/></testsuite>',
+        }
+        for label, text in cases.items():
+            with self.subTest(label), tempfile.TemporaryDirectory() as directory:
+                (pathlib.Path(directory) / "tests.xml").write_text(text)
+                run = subprocess.run([sys.executable, str(self.root / "scripts/unit_durations.py"), directory],
+                                     capture_output=True, text=True, cwd=self.root, check=False)
+                self.assertEqual(run.returncode, 1)
+                self.assertNotIn("Traceback", run.stderr)
+                self.assertEqual(len(run.stderr.strip().splitlines()), 1)
+
     def test_four_unit_vms_preserve_a_fail_closed_test_status(self):
         import yaml
 

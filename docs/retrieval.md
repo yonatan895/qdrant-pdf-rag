@@ -309,7 +309,7 @@ pools only — identifier queries bypass): every blend loses to RRF on
 recall@1 for the NL head (`alpha` 1.0/0.75/0.5/0.25/0.0 → 0.635/0.615/
 0.635/0.635/0.673 vs 0.683 RRF-only), so **rerank stays default-off and
 the alpha stays 1.0**; reopen with real-corpus pools where CE ordering
-beats RRF's head.
+beats RRF's head. The 2026-10-24 S7 A/B (#862; `eval.md` §10) re-confirmed no-adopt for both 8B and 4B cross-encoders on the current corpus: rerank stays default-off.
 
 Dispatch (`_resolve_active_reranker`): an explicitly passed reranker wins,
 else the flag-built memoized one. Then the bypass applies — and it

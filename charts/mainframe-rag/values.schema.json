@@ -8,6 +8,7 @@
     "required": ["requestMaxConcurrent"]
   },
   "then": {
+    "required": ["requestQueueWaitSeconds"],
     "properties": { "requestQueueWaitSeconds": { "exclusiveMinimum": 0 } }
   },
   "required": ["replicaCount", "images", "qdrantRelease", "models", "gateway", "tracing", "metrics", "ui", "route", "storage", "ingest", "pullSecret", "resources"],
