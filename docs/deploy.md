@@ -1057,9 +1057,7 @@ live in `.github/workflows/e2e.yml`.
   not a PR check. Candidate acceptance reads only `pull_request`-event runs, so
   it is unaffected. Pull-request runs of `ha`/`load` cancel superseded runs of
   the same PR. Their `select` job runs only on pull requests; schedule and
-  dispatch run the lane unconditionally. The advisory wheelhouse cache
-  (`actions/cache`, key = hash of the dev lock and target lock) only avoids
-  re-downloads; acquisition still re-verifies every wheel digest.
+  dispatch run the lane unconditionally.
 - `load.yml`: path-allowlisted to agent/retrieve/ingest/mock/sim/loadtest
   surface and shared dependency/Task inputs — other paths run nothing. `ha.yml` is path-allowlisted to the
   collection-policy/placement surface and runs the three-peer fixture
