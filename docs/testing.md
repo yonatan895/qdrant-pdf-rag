@@ -44,6 +44,15 @@ Reproduce a GitHub shard with
 `sh scripts/tools/run-task.sh qa:unit -- -p tests.ci_shard --unit-shards=4 --unit-shard=1`
 (or `2`, `3`, `4`). Invalid shard numbers and empty selections fail through pytest.
 Without the option, local and air-gapped GitLab runs retain the full suite.
+
+GitHub CI balances shards by recorded duration (`--unit-durations
+tests/unit-durations.json`, rule in [unit-coverage](#unit-coverage)) so the
+slowest shard tracks the average. Refresh the file when shard times drift
+apart by more than about 15% or after large test changes; stale or missing
+entries only cost balance:
+`gh run download <green ci run id> -p 'evidence-unit-*' -D "$DIR"` then
+`python scripts/unit_durations.py "$DIR" > tests/unit-durations.json`. Unlisted
+(fast or new) tests weigh `default_ms` and still land in exactly one shard.
 No extra pytest dependency or runtime model/service is needed.
 Request-counter assertions compare the scrape before and after each request:
 the metrics provider persists across lifespans, so an absolute total of one

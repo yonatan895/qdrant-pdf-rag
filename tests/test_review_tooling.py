@@ -935,6 +935,30 @@ class TestTaskCiConsumers(unittest.TestCase):
             self.assertTrue({"context_check", "load", "ha", "simulation", "packaging"}.issubset(lanes), path)
 
 
+    def test_committed_unit_durations_parse_and_regenerate_from_junit_shape(self):
+        import base64
+        import tempfile
+
+        from scripts.unit_durations import durations
+        from scripts.unit_evidence import parse_durations
+
+        default_ms, ms = parse_durations((self.root / "tests/unit-durations.json").read_text())
+        self.assertGreaterEqual(default_ms, 1)
+        self.assertTrue(ms and all(node.startswith("tests/") for node in ms))
+        with tempfile.TemporaryDirectory() as directory:
+            case = ('<testcase time="%s"><properties><property name="native_nodeid" value="%s"/>'
+                    '</properties></testcase>')
+            def node(text):
+                return base64.b64encode(text.encode()).decode()
+
+            (pathlib.Path(directory) / "evidence-unit-1-attempt-1").mkdir()
+            (pathlib.Path(directory) / "evidence-unit-1-attempt-1/tests.xml").write_text(
+                "<testsuite>" + case % ("1.2345", node("tests/a.py::slow[x y]")) +
+                case % ("0.004", node("tests/a.py::fast")) + "</testsuite>")
+            self.assertEqual(durations([pathlib.Path(directory)]),
+                             {"schema_version": 1, "default_ms": 5,
+                              "ms": {"tests/a.py::slow[x y]": 1234}})
+
     def test_four_unit_vms_preserve_a_fail_closed_test_status(self):
         import yaml
 
@@ -944,6 +968,7 @@ class TestTaskCiConsumers(unittest.TestCase):
         command = next(s["run"] for s in jobs["unit"]["steps"] if s.get("name") == "Run unit shard")
         self.assertIn("--unit-shard=${{ matrix.shard }}", command)
         self.assertIn("--unit-shards=8", command)
+        self.assertIn("--unit-durations tests/unit-durations.json", command)
         self.assertIn("scripts/ci_evidence.py --lane unit_tests", command)
         self.assertNotIn("-- python -m pytest", command)
         gate = jobs["test"]
