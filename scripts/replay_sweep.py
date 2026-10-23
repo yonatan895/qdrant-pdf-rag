@@ -346,7 +346,8 @@ def rrf_grid_configs(settings) -> list[SweepConfig]:
     for kind, field in (("nl", "sparse_weight_nl"), ("id", "sparse_weight_identifier")):
         for k in RRF_GRID_K:
             for weight in RRF_GRID_SPARSE_WEIGHT:
-                configs.append(replace(base, label=f"k{k}-{kind}{weight:g}", rrf_k=k, **{field: weight}))
+                override: dict[str, Any] = {field: weight}
+                configs.append(replace(base, label=f"k{k}-{kind}{weight:g}", rrf_k=k, **override))
     return configs
 
 

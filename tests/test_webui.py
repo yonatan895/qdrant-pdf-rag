@@ -42,7 +42,7 @@ def _hit() -> SearchHit:
 
 class MockSearch:
     def __init__(self, return_hits: bool = True):
-        self.calls = []
+        self.calls: list[dict] = []
 
     def search(self, qdrant, embedder, collection, query, product=None, version=None, limit=8, *args, **kwargs):
         self.calls.append({"query": query})

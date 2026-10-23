@@ -9,6 +9,7 @@ are printed. Production model serving remains platform-owned.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import fcntl
 import hashlib
 import ipaddress
@@ -133,10 +134,8 @@ refusal_cause_sink: Callable[[BaseException], None] | None = None
 
 def print_diagnostic(message: str, *, error: bool = False) -> None:
     """A closed/full diagnostic sink cannot interrupt owned release control."""
-    try:
+    with contextlib.suppress(OSError, ValueError):
         print(message, file=sys.stderr if error else sys.stdout, flush=True)
-    except (OSError, ValueError):
-        pass
 
 
 class CaptureBudget:
@@ -1249,19 +1248,13 @@ class Run:
     def terminate(self, child: subprocess.Popen) -> None:
         try:
             if child not in self.reaped_groups:
-                try:
+                with contextlib.suppress(ProcessLookupError):
                     os.killpg(child.pid, signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
                 if child.poll() is None:
-                    try:
+                    with contextlib.suppress(subprocess.TimeoutExpired):
                         child.wait(timeout=min(2, max(.01, self.expiry - time.time())))
-                    except subprocess.TimeoutExpired:
-                        pass
-                try:
+                with contextlib.suppress(ProcessLookupError):
                     os.killpg(child.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
                 child.wait(timeout=.25)
                 self.reaped_groups.add(child)
         finally:
@@ -1686,10 +1679,8 @@ class Run:
                     if self.runtime:
                         wait = min(5, self.cleanup_phase_expiry - time.time())
                         if wait > 0:
-                            try:
+                            with contextlib.suppress(subprocess.TimeoutExpired):
                                 self.runtime.wait(timeout=wait)
-                            except subprocess.TimeoutExpired:
-                                pass
                     result = self.colab("download", "-s", session, "/content/colab-artifacts.tgz",
                                         str(self.state / "colab-artifacts.tgz"), cleanup=True,
                                         seconds=max(.1, self.cleanup_phase_expiry - time.time()),
