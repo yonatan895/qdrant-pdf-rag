@@ -611,13 +611,34 @@ jobs:
             case "$cidr" in *:*) continue ;; esac
             RULE_ARGS="$RULE_ARGS --allow $cidr --block-source $cidr"
           done
-          # Interface rule: blocks whatever leaves the Kind bridge, whatever its
-          # source address. The pod CIDR (Kind default; the config sets no
-          # podSubnet) is a backstop for a pod SYN that escapes the node masquerade.
-          RULE_ARGS="$RULE_ARGS --block-network kind --block-source 10.244.0.0/16"
           test -n "$RULE_ARGS"
           # shellcheck disable=SC2086
           $GATE install $RULE_ARGS
+          # Pod egress is closed inside the cluster too: a pod SYN to a public
+          # address was seen to leave through no host FORWARD rule at all (runs
+          # 39936150839, 39942787786, 39945681590), so the host rules cannot be
+          # the only enforcement. kindnet enforces NetworkPolicy including egress.
+          # Allowed: cluster DNS, pods of this namespace (stand-in gateway, mock
+          # vLLM, Qdrant, agent, ingest) and the API server on the Kind network.
+          KIND_V4=""
+          for cidr in $KIND_CIDRS; do case "$cidr" in *:*) ;; *) KIND_V4="$cidr" ;; esac; done
+          test -n "$KIND_V4"
+          /usr/local/bin/kubectl -n "$NS" apply -f - <<EOF
+          apiVersion: networking.k8s.io/v1
+          kind: NetworkPolicy
+          metadata: {name: rehearsal-default-deny-egress}
+          spec:
+            podSelector: {}
+            policyTypes: [Egress]
+            egress:
+              - to:
+                  - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}
+                    podSelector: {matchLabels: {k8s-app: kube-dns}}
+                ports: [{port: 53, protocol: UDP}, {port: 53, protocol: TCP}]
+              - to: [{podSelector: {}}]
+              - to: [{ipBlock: {cidr: "${KIND_V4}"}}]
+                ports: [{port: 6443, protocol: TCP}]
+          EOF
           # Counterexamples behind the boundary: these must all fail.
           $GATE run python3 "$PROBE" blocked 1.1.1.1:443 8.8.8.8:443 9.9.9.9:443 github.com:443 get.helm.sh:443
           if $GATE run curl -sS --max-time 10 -o /dev/null https://get.helm.sh/; then

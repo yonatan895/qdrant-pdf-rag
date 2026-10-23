@@ -87,17 +87,6 @@ echo "$@" >> "$STATE/groupadd.log"
 : > "$STATE/group"
 '''
 
-DOCKER_STUB = '''#!/bin/sh
-# docker network inspect NET -f TEMPLATE, answered from $STATE/docker.<field>
-[ "$1 $2" = "network inspect" ] || exit 2
-[ "$3" = "${NETWORK:-kind}" ] || exit 1
-case "$5" in
-    *bridge.name*) [ -f "$STATE/docker.bridge" ] && cat "$STATE/docker.bridge" || echo '<no value>' ;;
-    *.Id*) cat "$STATE/docker.id" ;;
-    *) exit 2 ;;
-esac
-'''
-
 
 @pytest.fixture
 def stubs(tmp_path):
@@ -106,13 +95,11 @@ def stubs(tmp_path):
     state = tmp_path / 'state'
     state.mkdir()
     for name, body in (('iptables', IPTABLES_STUB), ('ip6tables', IPTABLES_STUB), ('sudo', SUDO_STUB),
-                       ('setpriv', SETPRIV_STUB), ('getent', GETENT_STUB), ('groupadd', GROUPADD_STUB),
-                       ('docker', DOCKER_STUB)):
+                       ('setpriv', SETPRIV_STUB), ('getent', GETENT_STUB), ('groupadd', GROUPADD_STUB)):
         (bindir / name).write_text(body)
         (bindir / name).chmod(0o755)
     env = {**os.environ, 'PATH': f'{bindir}:/usr/bin:/bin', 'STATE': str(state)}
     env.pop('EGRESS_GATE_GROUP', None)
-    (state / 'docker.id').write_text('0123456789abcdef0123456789abcdef\n')
 
     def gate(*args, **overrides):
         return subprocess.run(['sh', str(GATE), *args], env={**env, **overrides},
@@ -158,57 +145,6 @@ def test_install_is_idempotent_and_remove_leaves_foreign_rules(stubs):
     assert stubs('remove').returncode == 0
     assert stubs.rules() == [f'OUTPUT {foreign}']
     assert stubs.rules('ip6tables') == []
-
-
-def test_block_network_rejects_by_bridge_interface_whatever_the_source(stubs):
-    result = stubs('install', '--block-network', 'kind', '--block-source', '172.18.0.0/16',
-                   '--block-source', '10.244.0.0/16')
-    assert result.returncode == 0, result.stderr
-    assert stubs.rules()[-3:] == [
-        f'DOCKER-USER -s 172.18.0.0/16 ! -d 172.18.0.0/16 {TAGGED}:nodes -j REJECT',
-        f'DOCKER-USER -s 10.244.0.0/16 ! -d 10.244.0.0/16 {TAGGED}:nodes -j REJECT',
-        f'DOCKER-USER -i br-0123456789ab ! -o br-0123456789ab {TAGGED}:nodes -j REJECT',
-    ]
-    assert 'node bridges: br-0123456789ab' in result.stdout
-
-
-def test_block_network_alone_installs_the_interface_rule(stubs):
-    assert stubs('install', '--block-network', 'kind').returncode == 0
-    assert stubs.rules()[-1] == f'DOCKER-USER -i br-0123456789ab ! -o br-0123456789ab {TAGGED}:nodes -j REJECT'
-
-
-def test_block_network_prefers_the_explicit_bridge_name_option(stubs):
-    (stubs.state / 'docker.bridge').write_text('kindbr0\n')
-    assert stubs('install', '--block-network', 'kind').returncode == 0
-    assert stubs.rules()[-1] == f'DOCKER-USER -i kindbr0 ! -o kindbr0 {TAGGED}:nodes -j REJECT'
-
-
-@pytest.mark.parametrize('bridge', ['bad name', 'br;reboot', 'a-bridge-name-over-fifteen'])
-def test_block_network_rejects_unusable_bridge_names_before_any_rule(stubs, bridge):
-    (stubs.state / 'docker.bridge').write_text(bridge + '\n')
-    result = stubs('install', '--block-network', 'kind')
-    assert result.returncode == 1
-    assert 'invalid bridge interface' in result.stderr
-    assert stubs.rules() == []
-
-
-def test_block_network_fails_for_an_unknown_network_before_any_rule(stubs):
-    result = stubs('install', '--block-network', 'nope')
-    assert result.returncode == 1
-    assert 'cannot inspect Docker network' in result.stderr
-    assert stubs.rules() == []
-
-
-def test_interface_rule_is_reported_counted_and_removed(stubs):
-    assert stubs('install', '--block-network', 'kind').returncode == 0
-    status = stubs('status')
-    assert status.returncode == 0
-    assert 'node/pod rejected packets: 0' in status.stdout
-    # The interface rule alone satisfies the nodes hit requirement.
-    (stubs.state / 'counters.json').write_text(json.dumps({'airgap-egress-gate:nodes': 5}))
-    assert 'rejected 5 packet' in stubs('require-hits', 'nodes').stdout
-    assert stubs('remove').returncode == 0
-    assert stubs.rules() == []
 
 
 @pytest.mark.parametrize('flag', ['--allow', '--block-source'])
@@ -371,7 +307,34 @@ def test_the_bundle_is_bootstrapped_only_behind_the_boundary():
         assert 'bootstrap.sh' not in step.get('run', ''), step.get('name')
 
 
-def test_the_boundary_step_blocks_the_kind_bridge_and_the_pod_cidr():
+def boundary_policy():
     step = next(s for s in kind_steps() if s.get('name') == 'Close the network boundary (block public egress, prove it)')
-    assert '--block-network kind' in step['run']
-    assert '--block-source 10.244.0.0/16' in step['run']
+    run = step['run']
+    assert run.index('$GATE install') < run.index('kind: NetworkPolicy')
+    body = run.split('apply -f - <<EOF\n', 1)[1].split('\nEOF', 1)[0]
+    return yaml.safe_load(body.replace('${KIND_V4}', '172.18.0.0/16'))
+
+
+def test_the_boundary_step_denies_pod_egress_inside_the_cluster():
+    # The host rules were seen not to see a leaked pod SYN (runs 39936150839,
+    # 39942787786, 39945681590); kindnet enforces this policy in the node.
+    policy = boundary_policy()
+    assert policy['kind'] == 'NetworkPolicy'
+    assert policy['spec']['podSelector'] == {}
+    assert policy['spec']['policyTypes'] == ['Egress']
+
+
+def test_the_egress_policy_allows_only_dns_namespace_pods_and_the_api_server():
+    rules = boundary_policy()['spec']['egress']
+    assert rules[0]['to'][0]['podSelector'] == {'matchLabels': {'k8s-app': 'kube-dns'}}
+    assert {(p['port'], p['protocol']) for p in rules[0]['ports']} == {(53, 'UDP'), (53, 'TCP')}
+    assert rules[1] == {'to': [{'podSelector': {}}]}
+    assert rules[2] == {'to': [{'ipBlock': {'cidr': '172.18.0.0/16'}}], 'ports': [{'port': 6443, 'protocol': 'TCP'}]}
+    assert len(rules) == 3
+
+
+def test_the_pod_probes_still_run_after_the_policy():
+    names = [s.get('name', '') for s in kind_steps()]
+    boundary = names.index('Close the network boundary (block public egress, prove it)')
+    assert names.index('Prove node and pod egress is blocked (mock vLLM pod, real sockets)') > boundary
+    assert names.index('Application pod egress is blocked (agent pod, real sockets)') > boundary

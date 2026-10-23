@@ -1179,8 +1179,8 @@ not by mocking. `scripts/ci/egress_gate.sh` owns the rules and
   (a fresh workspace from the bundle only), every later operator step, and all
   pods. Host processes run with a dedicated primary group whose `iptables`
   OUTPUT owner-match accepts only loopback and the Kind network and REJECTs
-  everything else, DNS included. `DOCKER-USER` rules REJECT traffic leaving
-  the Kind network (by source address and by its bridge interface), which covers node image pulls and pod egress. Only bundle
+  everything else, DNS included. A `DOCKER-USER` rule REJECTs traffic leaving
+  the Kind network, which covers node image pulls and pod egress. Only bundle
   images, loaded into the lane's authenticated TLS registry, can be pulled.
 - **Not blocked**: the GitHub runner agent, the Docker daemon and its embedded
   resolver (a pod can resolve a public name but cannot connect), the setup
@@ -1193,6 +1193,11 @@ not by mocking. `scripts/ci/egress_gate.sh` owns the rules and
   blocked probe from the mock-vLLM pod and the application pod, with an
   in-cluster control; and non-zero REJECT packet counters for both rule
   classes. `egress_gate.sh run` refuses to start when the rules are absent.
+  Pod egress is also denied in the cluster: the boundary step applies a default-deny
+  egress NetworkPolicy (kindnet, the Kind CNI, enforces egress) to the lane namespace
+  allowing only cluster DNS, pods of that namespace and the API server (a
+  CI-only manifest; the product chart has no egress option). The host rules alone
+  were seen to miss a pod connect to a public address.
   The counters and rules are retained as `diagnostics/egress-gate-*.txt`.
 - **Maintenance**: a step added after the boundary must use the gated `shell:`
   or be listed as post-mortem in `tests/test_egress_gate.py`. A new public
