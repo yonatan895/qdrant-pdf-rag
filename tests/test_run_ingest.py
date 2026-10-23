@@ -1308,3 +1308,15 @@ def test_combined_in_flight_window_bounds_parse_and_upsert_work(tmp_path, monkey
     assert state["submitted"] == 8  # 4 parses + 4 upserts
     assert state["peak"] <= 2, state  # workers=1 -> window = max(2, 1 * 2)
     assert state["in_flight"] == 0
+
+
+def test_synthetic_corp_manuals_ingest_dry_run(tmp_path, capsys):
+    """The #890 demo corpus is original, parses generically (filename-stem
+    identity, no IBM signals) and every manual fits its pages."""
+    from scripts.make_synthetic_pdf import CORP_MANUALS, build_corp_manuals
+
+    corpus = tmp_path / "corp"
+    paths = build_corp_manuals(corpus)
+    assert [p.stem for p in paths] == sorted(CORP_MANUALS)
+    assert main(["--src", str(corpus), "--dry-run", "--progress", str(tmp_path / "inv.jsonl")]) == 0
+    assert '"pdfs":3' in capsys.readouterr().err
