@@ -199,6 +199,16 @@ def test_oauth_proxy_requires_its_own_container_status():
 
 
 
+def test_openobserve_deployment_is_bound_to_its_own_workload_and_digest():
+    """ADR-0006 (#956): OpenObserve is verified through the Deployment and
+    container the chart names `openobserve`, never through another workload."""
+    document = rollout("Deployment", name="openobserve", container="openobserve")
+    assert check(document, role="openobserve") == []
+    assert check(document, role="openobserve", digest=OTHER) == [
+        f"pod openobserve-0 container openobserve runs {DIGEST}, expected {OTHER}"]
+    assert check({"items": []}, role="openobserve") == ["missing or ambiguous Deployment openobserve"]
+
+
 def test_feedback_statefulset_is_bound_to_its_own_workload_and_digest():
     """#804: the feedback pod runs the agent image but is a different workload;
     it is verified through its own StatefulSet, never through rag-agent."""

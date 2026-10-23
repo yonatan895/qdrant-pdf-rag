@@ -22,7 +22,7 @@ Decision owners: `licenses/inventory.json` (the record),
 | Category | What it is | Who is responsible |
 |---|---|---|
 | Public code | This repository, Apache-2.0 per `pyproject.toml` and `LICENSE`. Its license does not cover dependencies. | Maintainer |
-| Transferred artifacts | Both app images (wheels, base layers, htmx, BM25 weights), Qdrant/Jaeger/oauth-proxy images, vendored chart, Task binary, repo bundle. Only these are what a release gives to the enterprise. | Release owner; obligations below |
+| Transferred artifacts | Both app images (wheels, base layers, htmx, BM25 weights), Qdrant/Jaeger/OpenObserve/otelcol-contrib/oauth-proxy images, vendored chart, Task binary, repo bundle. Only these are what a release gives to the enterprise. | Release owner; obligations below |
 | Local model simulation | Weights a developer downloads for local gateway/embed runs. Not in any image, chart or bundle. | Each developer or CI owner, per upstream model license |
 | Platform model service | Production reasoning/embed/rerank models behind the gateway. This repo consumes HTTP endpoints; it does not redistribute weights. | Platform team and its consumption agreement |
 | Protected corpus | Vendor manuals/runbooks. Never in git or a bundle. Rights to hold and process them are a separate corpus-governance decision. | Corpus owner; protected records |
@@ -86,6 +86,8 @@ owner: these are maintainer dispositions, not legal approvals.
 | `pymupdf` 1.28.2 | `elected: AGPL-3.0-only`, scoped to ingest. **Legal confirmation pending**: status stays `pending-owner-decision` (the one remaining unresolved item) until the qualified legal owner confirms. |
 | `flatbuffers`, `loguru`, `onnxruntime`, `tokenizers` | `approved`. Upstream license texts (locked version's tag, source URLs in the inventory) are in `licenses/texts/` and rendered into `THIRD-PARTY-NOTICES.txt`. |
 | Qdrant, Jaeger images | `approved` on the upstream Apache-2.0 license. Layer inventory is follow-up #371. |
+| OpenObserve OSS v1.0.4 image | `approved` (ADR-0006, #956): AGPL-3.0 (`network-copyleft`) accepted for the unmodified upstream binary run as a separate service; it is transferred unchanged with the source reference upstream v1.0.4, and any modification or Enterprise-feature change needs a new decision. Layer inventory is follow-up #371. |
+| otelcol-contrib 0.160.0 image | `approved` on the upstream Apache-2.0 license; NOTICE content of image layers is not enumerated (#371). |
 | UBI 9 base image | `approved` on the UBI EULA after RPM-list extraction: 116 packages (name, version, license tag) from the rpmdb of the pinned digest in `licenses/ubi9-python-314-minimal.rpms.txt` (hash-bound, rendered into the notices). License tags are declared RPM metadata; any source offer would be a separately approved packaging change. |
 | oauth-proxy image | `approved` to transfer as an **external dependency**: the Red Hat image is shipped unmodified, not built here (`distributed_by_repo` stays true because the bundle carries it). Escalation, if transfer becomes a problem: maintainer, then platform team. |
 | IBM Plex fonts | `approved`; `OFL-1.1` is a permissive class in the checker. |

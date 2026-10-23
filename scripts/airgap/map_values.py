@@ -355,9 +355,22 @@ def build_values(deploy_only: bool = False) -> dict:
             "limits": {"cpu": "250m", "memory": "256Mi"},
         }
 
+    # OpenObserve (ADR-0006, #956) is digest-only and rendered only by a chart
+    # that declares images.openobserve; the key appears only once the identity
+    # check has verified a digest for it, so releases without it are unchanged.
+    openobserve_image = image_digest("OPENOBSERVE")
+    optional_images = {}
+    if openobserve_image:
+        optional_images["openobserve"] = {
+            "repository": f"{internal_registry}/openobserve/openobserve",
+            "pullPolicy": "IfNotPresent",
+            **openobserve_image,
+        }
+
     return {
         "replicaCount": 2,
         "images": {
+            **optional_images,
             "agent": {
                 "repository": f"{internal_registry}/qdrant-pdf-rag-agent",
                 "tag": image_sha,

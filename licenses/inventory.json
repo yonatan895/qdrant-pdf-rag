@@ -77,6 +77,56 @@
       "status": "approved"
     },
     {
+      "approval_ref": "gh:yonatan895/qdrant-pdf-rag#956 maintainer approval 2026-10-23; ADR-0006",
+      "bind": {
+        "digest": "sha256:d4a878fac1f6c56003764f7f2a1625668917388f167e222c8c810de3f54c56ba",
+        "images_txt": "docker.io/openobserve/openobserve:v1.0.4"
+      },
+      "class": "network-copyleft",
+      "decision": {
+        "date": "2026-10-23",
+        "disposition": "AGPL-3.0 accepted in ADR-0006 for the unmodified upstream OSS binary run as a separate service; no modification of Enterprise behaviour or limits",
+        "owner": "yonatan895"
+      },
+      "distributed_by_repo": true,
+      "id": "image:openobserve",
+      "kind": "image",
+      "license_declared": "AGPL-3.0 upstream OSS edition; Enterprise features are not enabled or modified",
+      "license_spdx": "AGPL-3.0-only",
+      "name": "OpenObserve OSS v1.0.4",
+      "obligation": "AGPL-3.0 sections 4-6: the image is transferred unmodified with its notices and license; the Corresponding Source is the upstream v1.0.4 source and is not bundled here. Section 13 applies only if the program is modified, which ADR-0006 forbids. Base layer and bundled-module licenses inside the image are not enumerated (#371).",
+      "ships_in": [
+        "openobserve-image.tar"
+      ],
+      "spdx_basis": "upstream-project-license",
+      "status": "approved"
+    },
+    {
+      "approval_ref": "gh:yonatan895/qdrant-pdf-rag#956 maintainer approval 2026-10-23; ADR-0006",
+      "bind": {
+        "digest": "sha256:799dc6cf12c96192af37b5bdba804da8c10b3bc563b43cb90c3f3c58d9572ad6",
+        "images_txt": "docker.io/otel/opentelemetry-collector-contrib:0.160.0"
+      },
+      "class": "permissive",
+      "decision": {
+        "date": "2026-10-23",
+        "disposition": "approved on the upstream project license (Apache-2.0); base-OS and bundled-module layer inventory is follow-up #371",
+        "owner": "yonatan895"
+      },
+      "distributed_by_repo": true,
+      "id": "image:otelcol-contrib",
+      "kind": "image",
+      "license_declared": "Apache-2.0 upstream project; the image carries no license label",
+      "license_spdx": "Apache-2.0",
+      "name": "OpenTelemetry Collector Contrib 0.160.0",
+      "obligation": "Image-level license inventory is not extracted: the upstream project license is recorded, but bundled Go module and base layer licenses, and any NOTICE content of image layers, are not enumerated (#371).",
+      "ships_in": [
+        "otelcol-image.tar"
+      ],
+      "spdx_basis": "upstream-project-license",
+      "status": "approved"
+    },
+    {
       "approval_ref": "gh:yonatan895/qdrant-pdf-rag#376 maintainer decisions comment 2026-10-23",
       "bind": {
         "digest": "sha256:1e4b43488508216fee35b87e6b5425f4ef475eacf9c113f5b901e27af3844fba",

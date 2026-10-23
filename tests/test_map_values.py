@@ -44,7 +44,7 @@ MAPPER_KEYS = [
     "METRICS_ENABLED", "SERVICEMONITOR_ENABLED", "AGENT_ROUTE", "ROUTE_DESTINATION_CA_FILE",
     "UI_ENABLED", "AGENT_NETWORK_POLICY", "AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES",
     "FEEDBACK_ENABLED", "FEEDBACK_SECRET", "FEEDBACK_STORAGE_SIZE", "FEEDBACK_RETENTION_DAYS",
-    "IMAGE_DIGEST_AGENT", "IMAGE_DIGEST_INGEST", "IMAGE_DIGEST_JAEGER", "IMAGE_DIGEST_OAUTH_PROXY",
+    "IMAGE_DIGEST_AGENT", "IMAGE_DIGEST_INGEST", "IMAGE_DIGEST_JAEGER", "IMAGE_DIGEST_OPENOBSERVE", "IMAGE_DIGEST_OAUTH_PROXY",
     "STORAGE_CLASS", "CORPUS_PVC", "INGEST_WORKERS", "INGEST_WORK_SIZE",
     "INGEST_ALIAS_PUBLISH", "INGEST_REINGEST", "INGEST_RETIRE_DOCS",
     "CONTEXTUAL_EMBED_ENABLED", "CONTEXT_LLM_BASE_URL", "CONTEXT_LLM_MODEL",
@@ -754,6 +754,21 @@ def test_image_digest_env_renders_digest_per_image(monkeypatch, mapper_env):
     r, out = mapper_env()
     assert r.returncode == 0, r.stderr
     assert all("digest" not in image for image in load_values(out)["images"].values())
+
+
+def test_openobserve_image_is_digest_only_and_absent_until_verified(monkeypatch, mapper_env):
+    """ADR-0006 (#956): the chart reference is repository@digest with no tag, and
+    releases that verified no OpenObserve image render no images.openobserve key."""
+    r, out = mapper_env()
+    assert r.returncode == 0, r.stderr
+    assert "openobserve" not in load_values(out)["images"]
+    digest = "sha256:" + "c" * 64
+    monkeypatch.setenv("IMAGE_DIGEST_OPENOBSERVE", digest)
+    r, out = mapper_env()
+    assert r.returncode == 0, r.stderr
+    image = load_values(out)["images"]["openobserve"]
+    assert image["digest"] == digest and "tag" not in image
+    assert image["repository"].endswith("/openobserve/openobserve")
 
 
 @pytest.mark.parametrize("bad", ["latest", "sha256:" + "G" * 64])

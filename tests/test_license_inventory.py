@@ -94,6 +94,11 @@ def test_recorded_decisions_match_the_maintainer_dispositions():
                 "asset:ibm-plex", "model:bm25-sparse-weights"):
         assert by_id[cid]["status"] == "approved" and by_id[cid]["decision"]["owner"] == "yonatan895"
     assert by_id["asset:ibm-plex"]["class"] == "permissive"
+    # ADR-0006 (#956): AGPL OpenObserve is network-copyleft but approved for the
+    # unmodified binary; otelcol-contrib is permissive. Both are bound to images.txt.
+    assert by_id["image:openobserve"]["class"] == "network-copyleft"
+    assert by_id["image:openobserve"]["status"] == "approved" and by_id["image:openobserve"]["obligation"]
+    assert by_id["image:otelcol-contrib"]["license_spdx"] == "Apache-2.0"
     assert by_id["image:oauth-proxy"]["decision"]["escalation"] == "maintainer -> platform team"
     assert by_id["model:bm25-sparse-weights"]["license_spdx"] == "Apache-2.0"
     rpm_list = REPO / "licenses/ubi9-python-314-minimal.rpms.txt"
