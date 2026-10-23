@@ -269,6 +269,10 @@ with the failure and next action when validation is blocked.
 6. Live agent probes — `sh scripts/tools/run-task.sh local:agent` (or equivalent uvicorn) against the real stack, then the copy-paste probes below (agent on `:8087` in these examples; `Q` is the query). Green: trap refuses with zero validated citations, legit answers grounded with ≥1 citation, overlong 422s with the fixed envelope. `sh scripts/tools/run-task.sh local:stack` enables the operator console by default (`UI_ENABLED=true`, console at `/ui`, smoke-checked in the up sequence; the banner prints the URL, and `UI_ENABLED=false sh scripts/tools/run-task.sh local:stack` exercises the fail-closed route set); `sh scripts/tools/run-task.sh local:agent` honors `UI_ENABLED` (`UI_ENABLED=true sh scripts/tools/run-task.sh local:agent`; unset keeps the app fail-closed).
 7. Feature A/B numbers in the PR body — any retrieval/ranking change ships measured deltas (2×2 where applicable: off/on × base/context), per-query attribution for every moved query, must_not hard-zero.
 
+Kind lanes run the site-matched Kubernetes version: the site is Kubernetes 1.33 on
+OpenShift 4.19/4.20, so CI pins kind v0.32.0 (the newest kind release publishing a
+1.33 node image), `kindest/node:v1.33.12` by digest, and kubectl v1.33.12.
+
 ### kind-observability lane
 
 `e2e.yml` lane `kind-observability` (dispatch and nightly, like the other Kind

@@ -92,13 +92,20 @@ GATEWAY_DOCKER_LOG_FILES="${GATEWAY_DOCKER_LOG_FILES:-}"
 # the leg env (URLs, model ids, per-leg keys) is written there mode 600.
 # Contains ephemeral keys — never a repo path, never committed.
 GATEWAY_ENV_FILE="${GATEWAY_ENV_FILE:-}"
-# Gateway-side tracing (local simulation only): when a Jaeger OTLP port is
-# reachable, LiteLLM's otel callback exports its spans there so the local
-# waterfall shows the platform-stand-in hop. Prod platform config is theirs
-# and untouched. GATEWAY_OTEL_ENDPOINT overrides the auto-detect (container
-# address — host.docker.internal); empty means tracing off.
+# Gateway-side tracing (local simulation only): when the local OpenObserve
+# container (scripts/run_local_openobserve.sh) is running, LiteLLM's otel
+# callback exports its spans there so the local waterfall shows the
+# platform-stand-in hop. The gateway joins that script's docker network and
+# authenticates with the basic-auth value from its 0600 env file (handed over
+# through a private --env-file, never argv). Prod platform config is theirs and
+# untouched. GATEWAY_OTEL_ENDPOINT overrides the auto-detect (container
+# address, no credential added); empty with no local OpenObserve means off.
 GATEWAY_OTEL_ENDPOINT="${GATEWAY_OTEL_ENDPOINT:-}"
-GATEWAY_OTEL_OTLP_PORT="${GATEWAY_OTEL_OTLP_PORT:-4318}"
+O2_NAME="${O2_NAME:-local-openobserve}"
+O2_NETWORK="${O2_NETWORK:-local-openobserve-net}"
+O2_ENV_FILE="${O2_ENV_FILE:-${HOME:-/nonexistent}/.config/mainframe-rag/local-openobserve.env}"
+GATEWAY_O2_AUTH=""
+OTEL_ENV_TMP=""
 GATEWAY_OTEL_SERVICE_NAME="${GATEWAY_OTEL_SERVICE_NAME:-litellm-local}"
 BASE="http://localhost:${GATEWAY_PORT}"
 
@@ -377,11 +384,15 @@ _TOKENIZE_BASE="${GATEWAY_REASONING_URL%/}"
 TOKENIZE_TARGET="${_TOKENIZE_BASE%/v1}/tokenize"
 unset _TOKENIZE_BASE
 
-# Gateway-side tracing (local only): auto-detect the local Jaeger OTLP port
+# Gateway-side tracing (local only): auto-detect the running local OpenObserve.
 # when no explicit endpoint was given. Dry-run stays hermetic (no probe).
 if [ -z "$GATEWAY_OTEL_ENDPOINT" ] && [ "$GATEWAY_DRYRUN" != "1" ]; then
-    if curl -s -m 2 -o /dev/null "http://127.0.0.1:${GATEWAY_OTEL_OTLP_PORT}/v1/traces" 2>/dev/null; then
-        GATEWAY_OTEL_ENDPOINT="http://host.docker.internal:${GATEWAY_OTEL_OTLP_PORT}"
+    if [ "$("$GATEWAY_DOCKER_BIN" inspect -f '{{.State.Running}}' "$O2_NAME" 2>/dev/null || true)" = "true" ] &&
+        [ -f "$O2_ENV_FILE" ]; then
+        GATEWAY_O2_AUTH="$(sed -n 's/^O2_BASIC_AUTH=//p' "$O2_ENV_FILE")"
+        if [ -n "$GATEWAY_O2_AUTH" ]; then
+            GATEWAY_OTEL_ENDPOINT="http://${O2_NAME}:5080/api/default"
+        fi
     fi
 fi
 
@@ -495,7 +506,7 @@ if [ "$GATEWAY_DRYRUN" = "1" ]; then
     exit 0
 fi
 command -v "$GATEWAY_DOCKER_BIN" >/dev/null 2>&1 || die "docker is required for the local gateway"
-trap 'rm -rf "$CFG_DIR"' EXIT
+trap 'rm -rf "$CFG_DIR"; [ -z "${OTEL_ENV_TMP:-}" ] || rm -f "$OTEL_ENV_TMP"' EXIT
 [ -n "$GATEWAY_RUN_OWNER" ] || GATEWAY_RUN_OWNER="$(python3 -c 'import uuid; print("gateway-" + uuid.uuid4().hex)')"
 
 for _taken in "$GATEWAY_NAME" "$PG_NAME"; do
@@ -513,7 +524,7 @@ fi
 # Arm cleanup before either daemon container or network can be created.
 # The controller's finite group-KILL may interrupt this trap; recovery uses the
 # same admitted label and exact network ID without a surviving local process.
-trap 'stop_gateway || true; stop_log_capture; rm -rf "$CFG_DIR"' EXIT
+trap 'stop_gateway || true; stop_log_capture; rm -rf "$CFG_DIR"; [ -z "${OTEL_ENV_TMP:-}" ] || rm -f "$OTEL_ENV_TMP"' EXIT
 trap 'exit 130' INT TERM
 if [ "$GATEWAY_RESET_KEYS" = "1" ]; then
     gateway_docker volume rm "$PG_VOLUME" >/dev/null 2>&1 || true
@@ -556,12 +567,17 @@ if [ "$GATEWAY_LIMITS_ENABLED" = 1 ]; then
         < "$GATEWAY_OUTPUT") &
     LOG_CAPTURE_PID=$!
 fi
-# OTel env only when a local Jaeger was found: container reaches the host
-# collector via the host.docker.internal mapping added above.
+# OTel env only when tracing is on. An explicit endpoint is reached as given; the
+# auto-detected local OpenObserve is reached by name once the gateway joins its network.
 OTEL_RUN_ARGS=""
 if [ -n "$GATEWAY_OTEL_ENDPOINT" ]; then
     echo "==> Gateway tracing on: OTLP $GATEWAY_OTEL_ENDPOINT (service $GATEWAY_OTEL_SERVICE_NAME)"
     OTEL_RUN_ARGS="-e OTEL_EXPORTER_OTLP_ENDPOINT=$GATEWAY_OTEL_ENDPOINT -e OTEL_SERVICE_NAME=$GATEWAY_OTEL_SERVICE_NAME"
+    if [ -n "$GATEWAY_O2_AUTH" ]; then
+        OTEL_ENV_TMP="$(umask 077; mktemp "${TMPDIR:-/tmp}/local-gateway-otel.XXXXXX")"
+        printf 'OTEL_EXPORTER_OTLP_HEADERS=Authorization=Basic%%20%s\n' "$GATEWAY_O2_AUTH" > "$OTEL_ENV_TMP"
+        OTEL_RUN_ARGS="$OTEL_RUN_ARGS --env-file $OTEL_ENV_TMP"
+    fi
 fi
 # shellcheck disable=SC2086
 service_docker "$GATEWAY_MEMORY_MIB" --rm --name "$GATEWAY_NAME" --network "$GATEWAY_NETWORK_TARGET" \
@@ -575,6 +591,15 @@ service_docker "$GATEWAY_MEMORY_MIB" --rm --name "$GATEWAY_NAME" --network "$GAT
     --config /app/gateway/config.yaml ${GATEWAY_DEBUG_ARGS} \
     >>"$GATEWAY_OUTPUT" 2>&1 &
 DOCKER_PID=$!
+# The auto-detected OpenObserve is reachable only on its own docker network.
+if [ -n "$GATEWAY_O2_AUTH" ]; then
+    _n=0
+    until gateway_docker network connect "$O2_NETWORK" "$GATEWAY_NAME" >/dev/null 2>&1; do
+        _n=$((_n + 1))
+        [ "$_n" -lt 30 ] || { echo "WARN: gateway could not join $O2_NETWORK; gateway spans will not export" >&2; break; }
+        sleep 1
+    done
+fi
 # The earlier trap owns both labelled daemon containers during readiness too.
 
 echo "==> Waiting for $BASE/v1/models (up to 90s)"

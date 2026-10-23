@@ -188,19 +188,24 @@ jobs:
             fi
           fi
 
-          if [ "${{ steps.profile.outputs.needs_jaeger }}" = "true" ]; then
-            docker run -d --name jaeger-review --rm -p 127.0.0.1:4318:4318 -p 127.0.0.1:16686:16686 "cr.jaegertracing.io/jaegertracing/jaeger:2.20.0@sha256:46a886260e04002d8f45e213fc39063fa11a50446048fdaa64786fc0840cb9f8"
-            jaeger_ready=false
+          if [ "${{ steps.profile.outputs.needs_openobserve }}" = "true" ]; then
+            # Throwaway review instance: random root password in a private env file
+            # (never on a command line or in the prompt), no telemetry, loopback only.
+            o2_env="$RUNNER_TEMP/openobserve-review.env"
+            ( umask 077
+              printf 'ZO_ROOT_USER_EMAIL=review@openobserve.invalid\nZO_ROOT_USER_PASSWORD=%s\nZO_DATA_DIR=/data\nZO_LOCAL_MODE=true\nZO_TELEMETRY=false\nZO_MODEL_PRICING_ENABLED=false\nZO_MMDB_DISABLE_DOWNLOAD=true\nZO_HTTP_ADDR=0.0.0.0\nHOME=/tmp\n' "$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')" > "$o2_env" )
+            docker run -d --name openobserve-review --rm --memory 1g --memory-swap 1g --read-only --cap-drop ALL --security-opt no-new-privileges --tmpfs /tmp:rw,size=64m --tmpfs /data:rw,size=512m --env-file "$o2_env" -p 127.0.0.1:5080:5080 "docker.io/openobserve/openobserve@sha256:4a154849432f75c4fb024de32fe34163c02406c905dab22bf8d213d2e3386392"
+            openobserve_ready=false
             for i in $(seq 1 30); do
-              if curl -fsS -m 2 http://127.0.0.1:16686/ >/dev/null; then
-                jaeger_ready=true
+              if curl -fsS -m 2 http://127.0.0.1:5080/healthz >/dev/null; then
+                openobserve_ready=true
                 break
               fi
               sleep 2
             done
-            if [ "$jaeger_ready" != "true" ]; then
-              echo "jaeger review service failed to become ready — refusing a degraded review"
-              docker logs jaeger-review 2>&1 | tail -20 || true
+            if [ "$openobserve_ready" != "true" ]; then
+              echo "openobserve review service failed to become ready — refusing a degraded review"
+              docker logs openobserve-review 2>&1 | tail -20 || true
               exit 1
             fi
           fi
@@ -325,7 +330,7 @@ jobs:
               * Agent: http://127.0.0.1:8080 (/healthz, /v1/search, /v1/answer?stream=true)
               * Qdrant: http://127.0.0.1:6333 (collection `review-corpus`, hash embed mode)
               * Mock vLLM: http://127.0.0.1:8001 (proves plumbing, NEVER semantics)
-              * Jaeger v2 UI: http://127.0.0.1:16686 (OTLP/HTTP traces on port 4318)
+              * OpenObserve: http://127.0.0.1:5080 (OTLP/HTTP on /api/default; throwaway root credential is not provided to you)
 
             Required output dimensions (report each separately):
             - Code assessment: acceptable / changes_required / incomplete

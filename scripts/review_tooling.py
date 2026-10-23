@@ -133,7 +133,7 @@ HTTP_PATTERNS = [
 
 TRACING_PATTERNS = [
     "src/mainframe_rag/tracing.py",
-    "scripts/run_local_jaeger.sh",
+    "scripts/run_local_openobserve.sh",
     "tests/test_tracing*.py",
 ]
 
@@ -238,8 +238,8 @@ class ProfileDecision:
         return "vllm" in self.services
 
     @property
-    def needs_jaeger(self) -> bool:
-        return "jaeger" in self.services
+    def needs_openobserve(self) -> bool:
+        return "openobserve" in self.services
 
     @property
     def needs_agent(self) -> bool:
@@ -262,7 +262,7 @@ class ProfileDecision:
         return "tests/test_agent_api.py tests/test_ingest_publish.py"
 
 
-ALL_SERVICES = ["agent", "jaeger", "qdrant", "vllm"]
+ALL_SERVICES = ["agent", "openobserve", "qdrant", "vllm"]
 
 
 def classify_paths(paths: Iterable[str]) -> ProfileDecision:
@@ -313,7 +313,7 @@ def classify_paths(paths: Iterable[str]) -> ProfileDecision:
                 matched = True
             if _match_any(path, TRACING_PATTERNS):
                 categories.add("tracing")
-                services.add("jaeger")
+                services.add("openobserve")
                 matched = True
 
         if not matched:
@@ -1118,7 +1118,7 @@ def cmd_profile(args: argparse.Namespace) -> int:
             f.write(f"profile={decision.profile.value}\n")
             f.write(f"needs_qdrant={str(decision.needs_qdrant).lower()}\n")
             f.write(f"needs_vllm={str(decision.needs_vllm).lower()}\n")
-            f.write(f"needs_jaeger={str(decision.needs_jaeger).lower()}\n")
+            f.write(f"needs_openobserve={str(decision.needs_openobserve).lower()}\n")
             f.write(f"needs_agent={str(decision.needs_agent).lower()}\n")
             f.write(f"test_focus={decision.test_focus}\n")
 

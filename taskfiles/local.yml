@@ -521,8 +521,6 @@ tasks:
       in the caller environment (the local root user in O2_ENV_FILE); they are
       never taken from CLI_ARGS. CLI_ARGS are trusted operator shell arguments,
       as in qa:unit.
-    env:
-      TRACE_BACKEND: openobserve
     cmds:
       - .venv/bin/python scripts/check_live.py {{.CLI_ARGS}}
 

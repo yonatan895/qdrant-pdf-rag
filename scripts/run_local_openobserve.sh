@@ -31,6 +31,7 @@ O2_AGENT_PORT="${O2_AGENT_PORT:-8080}"
 O2_NAME="${O2_NAME:-local-openobserve}"
 O2_COLLECTOR_NAME="${O2_COLLECTOR_NAME:-local-otelcol}"
 O2_VOLUME="${O2_VOLUME:-local-openobserve-data}"
+O2_NETWORK="${O2_NETWORK:-local-openobserve-net}"
 # Digests pinned from images.txt (OpenObserve v1.1.2, otelcol-contrib 0.160.0). Bump deliberately.
 O2_IMAGE="${O2_IMAGE:-docker.io/openobserve/openobserve@sha256:4a154849432f75c4fb024de32fe34163c02406c905dab22bf8d213d2e3386392}"
 O2_COLLECTOR_IMAGE="${O2_COLLECTOR_IMAGE:-docker.io/otel/opentelemetry-collector-contrib@sha256:799dc6cf12c96192af37b5bdba804da8c10b3bc563b43cb90c3f3c58d9572ad6}"
@@ -55,7 +56,7 @@ case "$O2_MEMORY" in
     *) die "O2_MEMORY must look like 512m or 1g, got '$O2_MEMORY'" ;;
 esac
 case "$O2_COLLECTOR" in 0|1) ;; *) die "O2_COLLECTOR must be 0 or 1, got '$O2_COLLECTOR'" ;; esac
-for _pair in "O2_NAME:$O2_NAME" "O2_COLLECTOR_NAME:$O2_COLLECTOR_NAME" "O2_VOLUME:$O2_VOLUME"; do
+for _pair in "O2_NAME:$O2_NAME" "O2_COLLECTOR_NAME:$O2_COLLECTOR_NAME" "O2_VOLUME:$O2_VOLUME" "O2_NETWORK:$O2_NETWORK"; do
     _name="${_pair%%:*}"; _val="${_pair#*:}"
     case "$_val" in
         ''|-*|*[!A-Za-z0-9_.-]*) die "$_name must be a plain docker name, got '$_val'" ;;
@@ -72,7 +73,7 @@ o2_healthy() { curl -s -m 3 "$BASE/healthz" 2>/dev/null | grep -q '"status" *: *
 HARDEN="--read-only --cap-drop ALL --security-opt no-new-privileges --tmpfs /tmp:rw,size=64m --pids-limit 512"
 
 if [ "$O2_DRYRUN" = "1" ]; then
-    echo "[plan] local OpenObserve: docker run --rm --name $O2_NAME --memory $O2_MEMORY --memory-swap $O2_MEMORY $HARDEN --env-file <$O2_ENV_FILE, mode 0600> -e HOME=/tmp -e ZO_DATA_DIR=/data -e ZO_LOCAL_MODE=true -e ZO_HTTP_ADDR=0.0.0.0 -e ZO_TELEMETRY=false -e ZO_MODEL_PRICING_ENABLED=false -e ZO_MMDB_DISABLE_DOWNLOAD=true -v $O2_VOLUME:/data -p 127.0.0.1:$O2_PORT:5080 $O2_IMAGE"
+    echo "[plan] local OpenObserve: docker run --rm --name $O2_NAME --memory $O2_MEMORY --memory-swap $O2_MEMORY $HARDEN --env-file <$O2_ENV_FILE, mode 0600> -e HOME=/tmp -e ZO_DATA_DIR=/data -e ZO_LOCAL_MODE=true -e ZO_HTTP_ADDR=0.0.0.0 -e ZO_TELEMETRY=false -e ZO_MODEL_PRICING_ENABLED=false -e ZO_MMDB_DISABLE_DOWNLOAD=true -v $O2_VOLUME:/data --network $O2_NETWORK -p 127.0.0.1:$O2_PORT:5080 $O2_IMAGE"
     if [ "$O2_COLLECTOR" = "1" ]; then
         echo "[plan] local collector: docker run -d --rm --name $O2_COLLECTOR_NAME --network host --memory 256m $HARDEN scrape 127.0.0.1:$O2_AGENT_PORT/metrics -> $BASE/api/default $O2_COLLECTOR_IMAGE"
     fi
@@ -112,6 +113,9 @@ for _key in ZO_ROOT_USER_EMAIL ZO_ROOT_USER_PASSWORD O2_BASIC_AUTH; do
 done
 unset _key
 
+# A user-defined network lets the local gateway container reach OpenObserve by name
+# while the published port stays loopback-only.
+docker network inspect "$O2_NETWORK" >/dev/null 2>&1 || docker network create "$O2_NETWORK" >/dev/null
 echo "==> Starting local OpenObserve ($O2_NAME, UI $BASE/web/, OTLP $BASE/api/default, memory $O2_MEMORY, volume $O2_VOLUME, log $O2_LOG)"
 # shellcheck disable=SC2086
 docker run --rm --name "$O2_NAME" \
@@ -119,7 +123,7 @@ docker run --rm --name "$O2_NAME" \
     --env-file "$O2_ENV_FILE" \
     -e HOME=/tmp -e ZO_DATA_DIR=/data -e ZO_LOCAL_MODE=true -e ZO_HTTP_ADDR=0.0.0.0 \
     -e ZO_TELEMETRY=false -e ZO_MODEL_PRICING_ENABLED=false -e ZO_MMDB_DISABLE_DOWNLOAD=true \
-    -v "$O2_VOLUME:/data" \
+    -v "$O2_VOLUME:/data" --network "$O2_NETWORK" \
     -p "127.0.0.1:${O2_PORT}:5080" \
     "$O2_IMAGE" >"$O2_LOG" 2>&1 &
 DOCKER_PID=$!

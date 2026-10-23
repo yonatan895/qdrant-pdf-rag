@@ -15,8 +15,8 @@
 # to report up until a v1.search span has landed. Credentials come from the
 # 0600 env file that script owns (O2_ENV_FILE), never from a command line.
 # METRICS_ENABLED=true also starts the pinned otelcol scraper (/metrics ->
-# OpenObserve). Gateway-side spans are not exported (the gateway holds no
-# OpenObserve credential).
+# OpenObserve). The gateway auto-detects the running container and exports its
+# spans there too (run_local_gateway.sh owns that hand-off).
 #
 # Prereqs: docker; the three backends already serving (sh scripts/tools/run-task.sh local:llm,
 # local:embed, local:rerank); .venv. Qdrant is started via
@@ -470,11 +470,11 @@ fi
 # search API through the shared arrival check (batch export means spans arrive
 # seconds after the request). Credentials go over stdin, never argv.
 step "Trace check: waiting for a v1.search span (service $AGENT_SERVICE_NAME)"
-printf '%s:%s\n' "$_O2_USER" "$_O2_PASS" | "$PY" "$REPO_ROOT/scripts/trace_arrival.py" --backend openobserve \
+printf '%s:%s\n' "$_O2_USER" "$_O2_PASS" | "$PY" "$REPO_ROOT/scripts/trace_arrival.py" \
     --url "$O2_URL" --service "$AGENT_SERVICE_NAME" --operation v1.search --timeout "$OTEL_TRACE_TIMEOUT" --auth-stdin ||
     die "no v1.search trace landed in OpenObserve within ${OTEL_TRACE_TIMEOUT}s — check $O2_URL and $LOG_DIR/local-stack-agent.log"
 if [ -n "$CORPUS_DIR" ]; then
-    printf '%s:%s\n' "$_O2_USER" "$_O2_PASS" | "$PY" "$REPO_ROOT/scripts/trace_arrival.py" --backend openobserve \
+    printf '%s:%s\n' "$_O2_USER" "$_O2_PASS" | "$PY" "$REPO_ROOT/scripts/trace_arrival.py" \
         --url "$O2_URL" --service "$INGEST_SERVICE_NAME" --operation ingest.run --timeout "$OTEL_TRACE_TIMEOUT" --auth-stdin ||
         die "no $INGEST_SERVICE_NAME trace in OpenObserve — ingest tracing did not export"
     step "Trace check: ingest traces present (service $INGEST_SERVICE_NAME)"
