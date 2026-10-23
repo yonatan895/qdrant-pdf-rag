@@ -57,8 +57,8 @@ def final_event(body: str) -> dict:
     return events[-1][1]
 
 
-def check(client: httpx2.Client, jaeger: httpx2.Client, query: str, followup: str,
-          *, trace_wait: float = 30, trace_backend: str = 'jaeger',
+def check(client: httpx2.Client, trace_client: httpx2.Client, query: str, followup: str,
+          *, trace_wait: float = 30,
           trace_auth: tuple[str, str] | None = None) -> dict:
     checks: dict[str, dict] = {}
     trace_id = uuid4().hex
@@ -129,7 +129,7 @@ def check(client: httpx2.Client, jaeger: httpx2.Client, query: str, followup: st
 
     def trace():
         found = trace_arrival.wait(
-            trace_backend, jaeger, timeout=trace_wait, interval=1, trace_id=trace_id, auth=trace_auth)
+            trace_client, timeout=trace_wait, interval=1, trace_id=trace_id, auth=trace_auth)
         return found is not None, {'trace_id': trace_id}
     record('fresh_search_trace', trace)
     return {'passed': all(c['status'] == 'PASS' for c in checks.values()), 'checks': checks}
@@ -138,27 +138,23 @@ def check(client: httpx2.Client, jaeger: httpx2.Client, query: str, followup: st
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--agent', required=True)
-    parser.add_argument('--trace-url', '--jaeger', dest='trace_url', required=True,
-                        help='trace query API URL (--jaeger is the original alias)')
-    parser.add_argument('--trace-backend', choices=trace_arrival.BACKENDS,
-                        default=os.environ.get('TRACE_BACKEND', 'jaeger'),
-                        help='must match the chart tracing.backend; OpenObserve credentials come from '
-                             'TRACE_QUERY_USER and TRACE_QUERY_PASSWORD')
+    parser.add_argument('--trace-url', required=True,
+                        help='OpenObserve API URL; credentials come from TRACE_QUERY_USER and '
+                             'TRACE_QUERY_PASSWORD')
     parser.add_argument('--query', required=True)
     parser.add_argument('--followup', required=True)
     parser.add_argument('--report', required=True, type=Path)
     parser.add_argument('--timeout', type=float, default=240)
     args = parser.parse_args()
     trace_auth = trace_arrival.credentials_from_env()
-    if args.trace_backend == 'openobserve' and trace_auth is None:
-        parser.error('openobserve trace backend needs TRACE_QUERY_USER and TRACE_QUERY_PASSWORD')
+    if trace_auth is None:
+        parser.error('OpenObserve needs TRACE_QUERY_USER and TRACE_QUERY_PASSWORD')
     # Reserve private evidence before requests, refusing accidental overwrite.
     descriptor = os.open(args.report, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(descriptor, 'w') as output:
         with httpx2.Client(base_url=args.agent, timeout=args.timeout) as client, \
-                httpx2.Client(base_url=args.trace_url, timeout=10) as jaeger:
-            report = check(client, jaeger, args.query, args.followup,
-                           trace_backend=args.trace_backend, trace_auth=trace_auth)
+                httpx2.Client(base_url=args.trace_url, timeout=10) as trace_client:
+            report = check(client, trace_client, args.query, args.followup, trace_auth=trace_auth)
         json.dump(report, output, indent=2)
     for name, result in report['checks'].items():
         print(f"{name}: {result['status']}")

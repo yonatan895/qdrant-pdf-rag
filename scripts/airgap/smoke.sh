@@ -11,33 +11,15 @@ require_env NAMESPACE
 KC=${KC:-$(kc)}
 QUERY=${QUERY:-IEA500I operator message}
 TRACE_TIMEOUT=${TRACE_TIMEOUT:-60}
-JAEGER_QUERY_URL=${JAEGER_QUERY_URL:-http://jaeger:16686}
-# Trace backend: must match the chart's tracing.backend (jaeger|openobserve).
-# OpenObserve needs TRACE_QUERY_URL plus TRACE_QUERY_USER/TRACE_QUERY_PASSWORD
-# (from the Secret; sent to the pod on stdin, never on a command line).
-TRACE_BACKEND=${TRACE_BACKEND:-jaeger}
-case "$TRACE_BACKEND" in
-    jaeger) TRACE_QUERY_URL=${TRACE_QUERY_URL:-$JAEGER_QUERY_URL}; TRACE_LABEL=Jaeger ;;
-    openobserve)
-        [ -n "${TRACE_QUERY_URL:-}" ] || die "TRACE_BACKEND=openobserve requires TRACE_QUERY_URL"
-        TRACE_LABEL=OpenObserve ;;
-    *) die "TRACE_BACKEND must be jaeger or openobserve" ;;
-esac
-# Jaeger runs only against the bundled instance; an explicit OpenObserve
-# selection always runs its check (the operator named the query endpoint).
-if [ "$TRACE_BACKEND" = "jaeger" ] && [ "$JAEGER_DEPLOY" != "1" ]; then
-    TRACE_CHECK=0
-else
-    TRACE_CHECK=1
-fi
+# Trace arrival is checked in OpenObserve (issue #956). TRACE_QUERY_URL and
+# TRACE_QUERY_USER/TRACE_QUERY_PASSWORD (from the Secret; sent to the pod on
+# stdin, never on a command line) are required whenever tracing is enabled.
 
 if [ "${AIRGAP_DRYRUN:-0}" = "1" ]; then
     echo "[dryrun] $KC -n $NAMESPACE exec -i deploy/rag-agent -- python3 -c '... check /healthz ...'"
     echo "[dryrun] $KC -n $NAMESPACE exec -i deploy/rag-agent -- python3 - \"$QUERY\""
-    if [ "$OTEL_TRACING_ENABLED" = "1" ] && [ "$TRACE_CHECK" = "1" ]; then
-        echo "[dryrun] $KC -n $NAMESPACE exec -i deploy/rag-agent -- python3 - '... poll $TRACE_QUERY_URL for a v1.search trace ...'"
-    elif [ "$OTEL_TRACING_ENABLED" = "1" ]; then
-        echo "[dryrun] tracing check skipped (bundled Jaeger off — trace arrival NOT VERIFIED)"
+    if [ "$OTEL_TRACING_ENABLED" = "1" ]; then
+        echo "[dryrun] $KC -n $NAMESPACE exec -i deploy/rag-agent -- python3 /app/scripts/trace_arrival.py --url ${TRACE_QUERY_URL:-<TRACE_QUERY_URL>} --operation v1.search --auth-stdin"
     else
         echo "[dryrun] tracing check skipped (OTEL_EXPORTER_OTLP_ENDPOINT=off)"
     fi
@@ -81,10 +63,8 @@ fi
 
 if [ "$status" -eq 3 ]; then
     echo "SKIP: nothing ingested yet — run sh scripts/tools/run-task.sh airgap:ingest CORPUS_PVC=<pvc> first"
-    if [ "$OTEL_TRACING_ENABLED" = "1" ] && [ "$JAEGER_DEPLOY" = "1" ]; then
+    if [ "$OTEL_TRACING_ENABLED" = "1" ]; then
         TRACING_LINE="Tracing:       SKIPPED (nothing ingested — no request traced yet)"
-    elif [ "$OTEL_TRACING_ENABLED" = "1" ]; then
-        TRACING_LINE="Tracing:       SKIPPED (bundled Jaeger off — trace arrival NOT VERIFIED; qualify the external collector separately)"
     else
         TRACING_LINE="Tracing:       OFF (disabled)"
     fi
@@ -103,38 +83,28 @@ elif [ "$status" -ne 0 ]; then
     die "search request failed (status $status)"
 fi
 
-# Tracing check (OTel Phase 3): tracing is ON by default, so the search above
-# must have landed a v1.search span in the bundled Jaeger query API —
-# /healthz alone renders green with a broken endpoint/URL. Polls from the
-# agent pod (same net as the OTLP exporter); the export batch interval means
-# spans arrive seconds after the request. Only an explicit off sentinel or
-# a disabled bundled backend skips the check. That skip proves nothing about
-# the configured collector (issue #568): trace arrival stays NOT VERIFIED
-# until its own backend check runs (qualification, not this smoke).
-# The query runs scripts/trace_arrival.py shipped in the agent image.
+# Tracing check: with tracing enabled the search above must have landed a
+# v1.search span in OpenObserve — /healthz alone renders green with a broken
+# endpoint/URL. Polls from the agent pod (same net as the OTLP exporter) with
+# scripts/trace_arrival.py from the agent image; spans arrive seconds after
+# the request (export batch interval).
 run_trace_check() {
-    if [ "$TRACE_BACKEND" = "openobserve" ]; then
-        [ -n "${TRACE_QUERY_USER:-}" ] && [ -n "${TRACE_QUERY_PASSWORD:-}" ] ||
-            die "TRACE_BACKEND=openobserve requires TRACE_QUERY_USER and TRACE_QUERY_PASSWORD"
-        printf '%s:%s\n' "$TRACE_QUERY_USER" "$TRACE_QUERY_PASSWORD" |
-            $KC -n "$NAMESPACE" exec -i deploy/rag-agent -- python3 /app/scripts/trace_arrival.py \
-                --backend "$TRACE_BACKEND" --url "$TRACE_QUERY_URL" --timeout "$TRACE_TIMEOUT" \
-                --operation v1.search --auth-stdin
-    else
+    printf '%s:%s\n' "$TRACE_QUERY_USER" "$TRACE_QUERY_PASSWORD" |
         $KC -n "$NAMESPACE" exec -i deploy/rag-agent -- python3 /app/scripts/trace_arrival.py \
-            --backend "$TRACE_BACKEND" --url "$TRACE_QUERY_URL" --timeout "$TRACE_TIMEOUT" \
-            --operation v1.search </dev/null
-    fi
+            --url "$TRACE_QUERY_URL" --timeout "$TRACE_TIMEOUT" --operation v1.search --auth-stdin
 }
 
 if [ "$OTEL_TRACING_ENABLED" != "1" ]; then
     TRACING_LINE="Tracing:       OFF (disabled)"
-elif [ "$TRACE_CHECK" != "1" ]; then
-    TRACING_LINE="Tracing:       SKIPPED (bundled Jaeger off — trace arrival NOT VERIFIED; qualify the external collector separately)"
-elif run_trace_check; then
-    TRACING_LINE="Tracing:       OK (recent v1.search span in $TRACE_LABEL)"
 else
-    die "no v1.search span landed in $TRACE_LABEL within ${TRACE_TIMEOUT}s — check OTEL_EXPORTER_OTLP_ENDPOINT and the $TRACE_LABEL deployment"
+    [ -n "${TRACE_QUERY_URL:-}" ] || die "tracing is enabled: TRACE_QUERY_URL is required"
+    [ -n "${TRACE_QUERY_USER:-}" ] && [ -n "${TRACE_QUERY_PASSWORD:-}" ] ||
+        die "tracing is enabled: TRACE_QUERY_USER and TRACE_QUERY_PASSWORD are required"
+    if run_trace_check; then
+        TRACING_LINE="Tracing:       OK (recent v1.search span in OpenObserve)"
+    else
+        die "no v1.search span landed in OpenObserve within ${TRACE_TIMEOUT}s — check OTEL_EXPORTER_OTLP_ENDPOINT and the OpenObserve deployment"
+    fi
 fi
 
 echo "Smoke query returned hits. For an expected-substring check run:"

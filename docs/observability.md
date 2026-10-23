@@ -3,10 +3,10 @@
 Contract owner for what the system collects, where each signal lives, how
 long it is kept and how it is analyzed. Owners: #529 (observability backend and
 signals), #780 (answer feedback), #782 (backend qualification). Decisions:
-[ADR-0002](adr/0002-otel-backend-posture.md) (Jaeger posture; sampling and
-exemplar rules still apply),
-[ADR-0006](adr/0006-openobserve-traces-metrics-backend.md) (OpenObserve OSS for
-traces and metrics; not yet deployed) and
+[ADR-0002](adr/0002-otel-backend-posture.md) (sampling and exemplar rules still
+apply),
+[ADR-0006](adr/0006-openobserve-traces-metrics-backend.md) (OpenObserve OSS, the
+only trace backend) and
 [ADR-0005](adr/0005-answer-feedback-data-boundary.md) (content only in the
 feedback store). Maintainer decisions of 2026-10-17 unless noted.
 
@@ -14,7 +14,7 @@ feedback store). Maintainer decisions of 2026-10-17 unless noted.
 
 | Tier | Signals and store | Content | Retention | Used for |
 |---|---|---|---|---|
-| 1. Operational telemetry | `/metrics` (Prometheus exposition); OTLP traces; sanitized JSON logs on stdout | **Never** question, answer or excerpt text (OBS-1A, #554) | Traces 14 days (bundled Jaeger Badger TTL); logs per the platform's Splunk policy | Latency, failures, root-cause analysis |
+| 1. Operational telemetry | `/metrics` (Prometheus exposition); OTLP traces; sanitized JSON logs on stdout | **Never** question, answer or excerpt text (OBS-1A, #554) | Traces per the OpenObserve retention setting (chart-owned); logs per the platform's Splunk policy | Latency, failures, root-cause analysis |
 | 2. Quality records | #780 feedback store (SQLite, protected PVC) | **The only runtime home** of question and answer text, plus ratings and comments. Each record carries its own telemetry snapshot, so quality analysis outlives trace expiry | 180 days, explicit purge | Rated-answer analysis |
 | 3. Evaluation | Private golden sets and eval reports (outside git) | Manual-derived text | Manual | #367 metrics; adjudicated `bad` ratings feed it (#780 phase 3) |
 
@@ -64,21 +64,22 @@ unchanged. Header contents are never logged.
 
 | Component | Status |
 |---|---|
-| Traces | Bundled Jaeger all-in-one with Badger on an RWO PVC, 14-day TTL. Remains the development and CI backend (one small pod) whatever production chooses. |
+| Traces | OpenObserve OSS, the only trace backend (development, CI and production). |
 | Metrics, dashboards, alerts | Prometheus exposition; the chart renders a `ServiceMonitor` for OpenShift user-workload monitoring when `metrics.enabled`. |
 | Logs | Sanitized JSON on stdout, through the platform's log forwarding to Splunk. |
-| Single-pane backend | **Accepted ([ADR-0006](adr/0006-openobserve-traces-metrics-backend.md); [2026-10-23 record](records/2026-10-23-openobserve-oss-qualification.md), #782); no deployment change until the follow-up Task lands.** Evaluated: OpenObserve local mode (single binary, local volume; AGPL-3.0 OSS edition first; no modification of Enterprise behaviour or limits). Baseline if it does not qualify: Jaeger, user-workload monitoring and Splunk, with no new stateful service. |
+| Single-pane backend | **Accepted ([ADR-0006](adr/0006-openobserve-traces-metrics-backend.md); [2026-10-23 record](records/2026-10-23-openobserve-oss-qualification.md), #782).** OpenObserve local mode (single binary, local volume; AGPL-3.0 OSS edition; no modification of Enterprise behaviour or limits). |
 | SigNoz | Deprioritized: ClickHouse plus Keeper operations, version migrations, `restricted-v2` admission risk, SSO in paid editions, too heavy for CI. Reconsider only if the platform operates it. |
 
-Trace arrival is checked by `scripts/trace_arrival.py`, used by
-`scripts/airgap/smoke.sh` and `check_live.py`'s `fresh_search_trace`. The backend is
-explicit (`TRACE_BACKEND` / `--trace-backend`, `jaeger` default; it must match the
-chart's `tracing.backend`). Jaeger uses its query API unchanged. OpenObserve uses
-`POST /api/default/_search?type=traces` with basic auth from `TRACE_QUERY_USER` and
-`TRACE_QUERY_PASSWORD` (smoke sends them to the agent pod on stdin, never on a command
-line), by trace id or by service since a lookback. A refusal (401/403) fails at once
-with a fixed message; credentials are never printed. `smoke.sh` needs
-`TRACE_QUERY_URL` for OpenObserve (`JAEGER_QUERY_URL` stays the Jaeger default).
+Trace arrival is checked against OpenObserve by `scripts/trace_arrival.py`, used by
+`scripts/airgap/smoke.sh` and `check_live.py`'s `fresh_search_trace`. It posts to
+`/api/default/_search?type=traces` with basic auth from `TRACE_QUERY_USER` and
+`TRACE_QUERY_PASSWORD`, by trace id or by service since a lookback. Identifiers are
+validated before any query. `smoke.sh` requires `TRACE_QUERY_URL` and both credentials
+whenever tracing is enabled and sends the credentials to the agent pod on stdin,
+never on a command line; `check_live.py` takes `--trace-url`. A refusal (401/403)
+fails at once with a fixed message; any other failed poll prints
+`trace backend poll error` once and retries until the timeout. Credentials and
+upstream text are never printed.
 
 ## Feedback store backend
 
