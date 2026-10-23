@@ -9,13 +9,18 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import time
+import sys
 from pathlib import Path
 from uuid import uuid4
 
 import httpx2
 
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))  # direct script entry imports its sibling helper
+
 from mainframe_rag.agent.answer import is_abstention
+from scripts import trace_arrival
 
 
 def grounded(value: dict) -> bool:
@@ -52,8 +57,9 @@ def final_event(body: str) -> dict:
     return events[-1][1]
 
 
-def check(client: httpx2.Client, jaeger: httpx2.Client, query: str, followup: str,
-          *, trace_wait: float = 30) -> dict:
+def check(client: httpx2.Client, trace_client: httpx2.Client, query: str, followup: str,
+          *, trace_wait: float = 30,
+          trace_auth: tuple[str, str] | None = None) -> dict:
     checks: dict[str, dict] = {}
     trace_id = uuid4().hex
 
@@ -122,17 +128,9 @@ def check(client: httpx2.Client, jaeger: httpx2.Client, query: str, followup: st
     record('trap', trap)
 
     def trace():
-        deadline = time.monotonic() + trace_wait
-        while True:
-            response = jaeger.get(f'/api/traces/{trace_id}')
-            data = response.json().get('data', [])
-            if response.status_code == 200 and any(
-                    t.get('traceID') == trace_id and any(
-                        s.get('operationName') == 'v1.search' for s in t.get('spans', [])) for t in data):
-                return True, {'trace_id': trace_id}
-            if time.monotonic() >= deadline:
-                return False, {'trace_id': trace_id}
-            time.sleep(min(1, max(0, deadline - time.monotonic())))
+        found = trace_arrival.wait(
+            trace_client, timeout=trace_wait, interval=1, trace_id=trace_id, auth=trace_auth)
+        return found is not None, {'trace_id': trace_id}
     record('fresh_search_trace', trace)
     return {'passed': all(c['status'] == 'PASS' for c in checks.values()), 'checks': checks}
 
@@ -140,18 +138,23 @@ def check(client: httpx2.Client, jaeger: httpx2.Client, query: str, followup: st
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--agent', required=True)
-    parser.add_argument('--jaeger', required=True)
+    parser.add_argument('--trace-url', required=True,
+                        help='OpenObserve API URL; credentials come from TRACE_QUERY_USER and '
+                             'TRACE_QUERY_PASSWORD')
     parser.add_argument('--query', required=True)
     parser.add_argument('--followup', required=True)
     parser.add_argument('--report', required=True, type=Path)
     parser.add_argument('--timeout', type=float, default=240)
     args = parser.parse_args()
+    trace_auth = trace_arrival.credentials_from_env()
+    if trace_auth is None:
+        parser.error('OpenObserve needs TRACE_QUERY_USER and TRACE_QUERY_PASSWORD')
     # Reserve private evidence before requests, refusing accidental overwrite.
     descriptor = os.open(args.report, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(descriptor, 'w') as output:
         with httpx2.Client(base_url=args.agent, timeout=args.timeout) as client, \
-                httpx2.Client(base_url=args.jaeger, timeout=10) as jaeger:
-            report = check(client, jaeger, args.query, args.followup)
+                httpx2.Client(base_url=args.trace_url, timeout=10) as trace_client:
+            report = check(client, trace_client, args.query, args.followup, trace_auth=trace_auth)
         json.dump(report, output, indent=2)
     for name, result in report['checks'].items():
         print(f"{name}: {result['status']}")
