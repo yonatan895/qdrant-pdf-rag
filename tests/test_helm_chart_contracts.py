@@ -1067,6 +1067,20 @@ def test_direct_chart_refuses_zero_queue_wait_while_admission_is_on():
     assert "requestQueueWaitSeconds" in result.stderr
 
 
+def test_direct_chart_requires_queue_wait_when_override_omits_it_while_admission_is_on():
+    """#588: a null override drops the key (Helm deletes it from the merge), so the
+    schema itself must require it whenever requestMaxConcurrent > 0."""
+    values = base_values()
+    values["requestMaxConcurrent"] = 4
+    values["requestQueueWaitSeconds"] = None
+    result = _helm_template_with_values(values)
+    assert result.returncode != 0
+    assert "requestQueueWaitSeconds" in result.stderr
+    values["requestMaxConcurrent"] = 0
+    off = _helm_template_with_values(values)
+    assert off.returncode == 0, off.stderr
+
+
 @pytest.mark.parametrize("key,bad", [
     ("requestMaxConcurrent", -1), ("requestMaxConcurrent", 1001), ("requestMaxConcurrent", "2"),
     ("requestQueueMax", 1.5), ("requestQueueWaitSeconds", 301), ("requestQueueWaitSeconds", -1),
