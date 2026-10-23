@@ -55,12 +55,13 @@
     "images": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["agent", "ingest", "jaeger", "oauthProxy"],
+      "required": ["agent", "ingest", "oauthProxy"],
       "properties": {
         "agent": { "$ref": "#/definitions/appImage" },
         "ingest": { "$ref": "#/definitions/appImage" },
-        "jaeger": { "$ref": "#/definitions/image" },
-        "oauthProxy": { "$ref": "#/definitions/image" }
+        "oauthProxy": { "$ref": "#/definitions/image" },
+        "openobserve": { "$ref": "#/definitions/image" },
+        "otelcol": { "$ref": "#/definitions/image" }
       }
     },
     "qdrantRelease": {
@@ -195,13 +196,6 @@
       "properties": {
         "enabled": { "type": "boolean" },
         "endpoint": { "type": "string" },
-        "jaeger": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "enabled": { "type": ["boolean", "null"] }
-          }
-        },
         "deploymentEnvironment": { "type": "string" },
         "serviceName": {
           "type": "string",
@@ -222,12 +216,36 @@
         }
       ]
     },
+    "openobserve": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "credentialsSecretName": {
+          "type": "string",
+          "pattern": "^$|^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$"
+        },
+        "storage": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "size": { "type": "string", "pattern": "^[1-9][0-9]*(Mi|Gi|Ti)$" }
+          }
+        }
+      }
+    },
     "metrics": {
       "type": "object",
       "additionalProperties": false,
       "required": ["enabled"],
       "properties": {
         "enabled": { "type": "boolean" },
+        "collector": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": ["boolean", "null"] }
+          }
+        },
         "serviceMonitor": {
           "type": "object",
           "additionalProperties": false,

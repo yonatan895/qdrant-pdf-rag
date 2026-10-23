@@ -355,7 +355,7 @@ Compatibility and lifecycle decisions under #448:
   failure, and every Route, Jaeger and ServiceAccount read failure, still stops
   before mutation.
 - Disabled optional workloads, Routes and monitors are removed on upgrades of
-  the Helm release. The Jaeger PVC has `helm.sh/resource-policy: keep`: disabling
+  the Helm release. The OpenObserve PVC has `helm.sh/resource-policy: keep`: disabling
   tracing or removing the app release retains its data. Re-enabling tracing
   reuses that claim; moving to an external collector sets the destination in
   the same release that removes the backend, and the backend objects are
@@ -598,14 +598,9 @@ cannot schedule on one node — proven).
   coverage. The pinned OAuth sidecar retains the four original controls;
   its read-only-root/write-path qualification and actual `restricted-v2`
   admission remain separate acceptance under #585/#373/#447.
-- Jaeger is on by default (unset `OTEL_EXPORTER_OTLP_ENDPOINT` resolves to
-  `http://jaeger:4318`; the off sentinel disables both tracing and this
-  deployment; `JAEGER_ENABLED=false` skips only the deployment and is
-  refused unless `OTEL_EXPORTER_OTLP_ENDPOINT` names a collector or `off`,
-  in preflight, mapper and chart alike): 1 replica,
-  project-assigned UID and volume group from `restricted-v2` for Badger, 10Gi volume with 14-day span TTL, OTLP/HTTP 4318 only (the configured exporter uses HTTP;
-  the Qdrant client independently brings a transitive `grpcio` wheel), UI on
-  port-forward only, no archive store (debug data, not records).
+- OpenObserve is the bundled trace backend (see [Trace and metrics backend](#trace-backend)):
+  1 replica, project-assigned UID and volume group from `restricted-v2`, 10Gi RWO volume, OTLP/HTTP
+  on 5080 only, UI on port-forward only. Tracing off disables it.
 - Validate is read-only pre-flight: required keys, non-blank
   `EMBED_MODEL_REVISION` (the vllm attestation ingest/serving refuse when
   blank), `DENSE_DIM` positive
@@ -643,7 +638,7 @@ values; the three Qdrant peers each get their own claims):
 | Qdrant data (RWO block) | 500Gi | 3 peers | 1500Gi |
 | Qdrant snapshots (RWO block, node-local) | 500Gi | 3 peers | 1500Gi |
 | Ingest scratch `ingest-work` (`INGEST_WORK_SIZE`) | 100Gi | 1 | 100Gi |
-| Jaeger Badger (when enabled) | 10Gi | 1 | 10Gi |
+| OpenObserve data (when tracing is on) | 10Gi | 1 | 10Gi |
 | **Provisioned PVC capacity** | | | **3110Gi = 3.04TiB** |
 
 The optional feedback claim (`FEEDBACK_STORAGE_SIZE`, default 10Gi, unmeasured,
@@ -1413,6 +1408,41 @@ require completed recovery, provenance/count/dimension and vector compatibility
 before an alias. Never mix synthetic cleanup with preserved real-corpus resources.
 Transfer the identical tested bundle; missing/failed release-gate checks block
 promotion. Sizing-only overrides do not establish SCC, residency or distributed HA.
+
+<a id="trace-backend"></a>
+## Trace and metrics backend: OpenObserve (ADR-0006, #956)
+
+OpenObserve OSS is the only bundled backend; Jaeger is gone from the chart (an approved
+default change, #956). With `tracing.enabled=true` and an empty `tracing.endpoint` the chart
+renders a single-node Deployment (local mode, replicas 1, `Recreate`, RWO PVC
+`openobserve-data`, `openobserve.storage.size` default 10Gi, kept on uninstall), a ClusterIP
+Service on 5080 (no Route or Ingress) and an egress-deny NetworkPolicy. The pod is restricted-v2
+(non-root, no fixed IDs, drop ALL, seccomp RuntimeDefault, read-only root) and sets
+`ZO_TELEMETRY=false`, `ZO_MODEL_PRICING_ENABLED=false`, `ZO_MMDB_DISABLE_DOWNLOAD=true`.
+Egress is denied (DNS included) by the policy as well as by those settings; the policy needs an
+enforcing CNI. The console is reached by port-forward only.
+
+Settings (tracing off needs none of them):
+
+- `images.openobserve` (`v1.1.2`) and `images.otelcol` (`0.160.0`): repository plus tag, like the
+  other images; the digest pin lives in `images.txt` and is enforced at pack/load (#960).
+- `openobserve.credentialsSecretName` (default `openobserve-credentials`; an emptied name fails the
+  render): the Secret must exist at deploy time (#960/`deploy.sh` checks it) with keys
+  `root-user-email`, `root-user-password`, `otlp-headers` (`Authorization=Basic <b64>`, read by the
+  agent and ingest Job as `OTEL_EXPORTER_OTLP_HEADERS`) and `metrics-auth` (`Basic <b64>`, read by
+  the collector). No credential value is in values or the ConfigMap.
+
+`tracing.endpoint` set is the generic OTLP/HTTP escape hatch: the agent exports there, and no
+OpenObserve or collector renders. Export stays fail-open.
+
+**Metrics collector.** With `metrics.enabled=true` (and the bundled OpenObserve) the chart adds a
+stateless `otelcol-contrib` Deployment (no PVC, no Service, same hardening). It scrapes
+`rag-agent:8080/metrics` every 15s and forwards over OTLP/HTTP to
+`http://openobserve:5080/api/default` with `Authorization` from `metrics-auth`.
+`NetworkPolicy/otelcol-egress` allows only OpenObserve 5080, the agent 8080 and cluster DNS
+(`openshift-dns`, `kube-system`), never the internet. `metrics.collector.enabled=false` skips it
+(platform forwarding); `true` without metrics and the bundled backend fails the render.
+The disk-full alert and the smoke trace check are later steps of #956.
 
 <a id="configuration-contract"></a>
 ## Operator configuration propagation contract

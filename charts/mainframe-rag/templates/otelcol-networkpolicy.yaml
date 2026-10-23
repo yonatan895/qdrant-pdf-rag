@@ -1,0 +1,50 @@
+{{/*
+Collector egress allow-list (issue #956, ADR-0006): only the OpenObserve pod
+(5080), the agent pods (8080) and cluster DNS. Never the open internet. DNS is
+limited to the DNS namespaces by name. Egress-only; needs an enforcing CNI.
+*/}}
+{{- if include "mainframe-rag.otelcolEnabled" . }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: otelcol-egress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: otelcol
+spec:
+  podSelector:
+    matchLabels:
+      app: otelcol
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: openobserve
+      ports:
+        - protocol: TCP
+          port: 5080
+    - to:
+        - podSelector:
+            matchLabels:
+              app: rag-agent
+      ports:
+        - protocol: TCP
+          port: 8080
+    - to:
+        - namespaceSelector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: In
+                values: [openshift-dns, kube-system]
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+        - protocol: UDP
+          port: 5353
+        - protocol: TCP
+          port: 5353
+{{- end }}

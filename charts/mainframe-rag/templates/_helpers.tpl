@@ -18,39 +18,46 @@ http://{{ required "qdrantRelease is required" .Values.qdrantRelease }}:6333
 {{- end -}}
 
 {{/*
-Export destination (issue #568). An empty endpoint selects the bundled
-Jaeger Service and is valid only while that backend renders; with the
-bundled backend disabled the operator must name a collector (any http(s)
-URL, the former hostname included) or turn tracing off.
+Export destination. An empty tracing.endpoint selects the bundled OpenObserve
+(ADR-0006); a set endpoint is the generic OTLP/HTTP escape hatch (external
+collector, no bundled backend and no collector). Tracing off exports nowhere.
 */}}
 {{- define "mainframe-rag.otelEndpoint" -}}
 {{- if .Values.tracing.enabled -}}
 {{- if .Values.tracing.endpoint -}}
 {{ .Values.tracing.endpoint }}
-{{- else if include "mainframe-rag.jaegerEnabled" . -}}
-http://jaeger:4318
 {{- else -}}
-{{- fail "tracing.jaeger.enabled=false needs an intentional trace destination: set tracing.endpoint to the external collector's http(s) URL, or tracing.enabled=false" -}}
+http://openobserve:5080/api/default
 {{- end -}}
 {{- end -}}
 {{- end -}}
 
 {{/*
-Decoupled backend choices (issue #529 OBS-2): whether to deploy the bundled
-Jaeger and whether to render the ServiceMonitor are independent of export
-and exposition. A null sub-flag follows its parent leg (the historical
-coupling); an explicit boolean overrides. kindIs (not default) reads the
-override: Helm's default treats an explicit false as empty. Contradictions
-fail the render before any mutation. Renders "true" or nothing so callers
-use {{- if include ... }} directly (a "false" string would be truthy).
+Bundled OpenObserve: "true" or nothing (a "false" string would be truthy).
+Needs tracing on and an empty tracing.endpoint.
 */}}
-{{- define "mainframe-rag.jaegerEnabled" -}}
-{{- $enabled := .Values.tracing.enabled -}}
-{{- if kindIs "bool" .Values.tracing.jaeger.enabled -}}
-{{- $enabled = .Values.tracing.jaeger.enabled -}}
+{{- define "mainframe-rag.openobserveEnabled" -}}
+{{- if and .Values.tracing.enabled (not .Values.tracing.endpoint) -}}true{{- end -}}
 {{- end -}}
-{{- if and $enabled (not .Values.tracing.enabled) -}}
-{{- fail "tracing.jaeger.enabled=true requires tracing.enabled=true: refusing to deploy a bundled Jaeger nothing exports to" -}}
+
+{{- define "mainframe-rag.openobserveSecretName" -}}
+{{ required "openobserve.credentialsSecretName is required (Secret with root-user-email, root-user-password, otlp-headers, metrics-auth)" .Values.openobserve.credentialsSecretName }}
+{{- end -}}
+
+{{/*
+Metrics collector: "true" or nothing. Null metrics.collector.enabled follows
+(bundled OpenObserve and metrics.enabled); an explicit boolean overrides, and
+true without both prerequisites fails the render (a collector nothing scrapes
+or nothing receives).
+*/}}
+{{- define "mainframe-rag.otelcolEnabled" -}}
+{{- $prereq := and .Values.metrics.enabled (include "mainframe-rag.openobserveEnabled" .) -}}
+{{- $enabled := $prereq -}}
+{{- if kindIs "bool" .Values.metrics.collector.enabled -}}
+{{- $enabled = .Values.metrics.collector.enabled -}}
+{{- end -}}
+{{- if and $enabled (not $prereq) -}}
+{{- fail "metrics.collector.enabled=true requires metrics.enabled=true and the bundled OpenObserve (tracing.enabled=true, empty tracing.endpoint)" -}}
 {{- end -}}
 {{- if $enabled -}}true{{- end -}}
 {{- end -}}

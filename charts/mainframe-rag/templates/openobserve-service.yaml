@@ -1,0 +1,22 @@
+{{/*
+OpenObserve Service (issue #956, ADR-0006). ClusterIP only: 5080 serves the
+OTLP/HTTP ingest path and the console (port-forward with cluster RBAC).
+No Route, no Ingress, ever.
+*/}}
+{{- if include "mainframe-rag.openobserveEnabled" . }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: openobserve
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: openobserve
+spec:
+  type: ClusterIP
+  selector:
+    app: openobserve
+  ports:
+    - name: http
+      port: 5080
+      targetPort: http
+{{- end }}

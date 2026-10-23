@@ -16,6 +16,7 @@ def test_ca_mount_targets_only_application_containers():
         'gateway': {'caConfigMapName': 'test-gateway-ca'},
         'route': {'enabled': True, 'destinationCA': FAKE_CA},
         'ingest': {'enabled': True, 'corpusPVC': 'corpus'},
+        'metrics': {'enabled': True},
     })
     for kind, name, container in [('Deployment', 'rag-agent', 'agent'), ('Job', 'ingest', 'ingest')]:
         pod = docs[(kind, name)]['spec']['template']['spec']
@@ -28,8 +29,13 @@ def test_ca_mount_targets_only_application_containers():
             if other['name'] != container:
                 assert not any(e['name'] == 'SSL_CERT_FILE' for e in other.get('env', []))
                 assert not any(v['name'] == 'gateway-ca' for v in other.get('volumeMounts', []))
-    jaeger = docs[('Deployment', 'jaeger')]['spec']['template']['spec']
-    assert not any(v['name'] == 'gateway-ca' for v in jaeger['volumes'])
+    # The observability pods call no gateway: no CA volume, mount or env.
+    for name in ('openobserve', 'otelcol'):
+        pod = docs[('Deployment', name)]['spec']['template']['spec']
+        assert not any(v['name'] == 'gateway-ca' for v in pod['volumes'])
+        for c in pod['containers']:
+            assert not any(v['name'] == 'gateway-ca' for v in c.get('volumeMounts', []))
+            assert not any(e['name'] == 'SSL_CERT_FILE' for e in c.get('env', []))
 
 
 @pytest.mark.parametrize('name', ['', 'BadName', 'x|y'])

@@ -1,0 +1,39 @@
+{{/*
+Metrics collector config (issue #956, ADR-0006): scrape the agent /metrics and
+forward to OpenObserve over OTLP/HTTP. The Authorization header comes from the
+environment (Secret key metrics-auth), never from this ConfigMap. The agent's
+exposition is plain text on the Service port, so no scheme or TLS settings.
+*/}}
+{{- if include "mainframe-rag.otelcolEnabled" . }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otelcol-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: otelcol
+data:
+  config.yaml: |
+    receivers:
+      prometheus:
+        config:
+          scrape_configs:
+            - job_name: rag-agent
+              scrape_interval: 15s
+              metrics_path: /metrics
+              static_configs:
+                - targets: ["rag-agent:8080"]
+    exporters:
+      otlp_http:
+        endpoint: http://openobserve:5080/api/default
+        headers:
+          Authorization: "${env:O2_AUTH}"
+    service:
+      telemetry:
+        metrics:
+          level: none
+      pipelines:
+        metrics:
+          receivers: [prometheus]
+          exporters: [otlp_http]
+{{- end }}

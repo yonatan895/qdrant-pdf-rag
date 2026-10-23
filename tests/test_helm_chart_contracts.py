@@ -1,9 +1,10 @@
 """First-party Helm render contracts: independent expected behavior.
 
 The retired differential oracle is replaced by explicit expectations for
-agent, OAuth/Route, Jaeger, ServiceMonitor and explicit ingest profiles.
+agent, OAuth/Route, OpenObserve, collector, ServiceMonitor and explicit ingest profiles.
 Operator-to-render round trips also live in test_map_values and airgap suites.
 """
+import copy
 import json
 
 import pytest
@@ -52,7 +53,7 @@ def test_base_contract_with_independent_controls():
         "EMBED_MODEL_REVISION": "rev-1",
         "LLM_BASE_URL": "",
         "LLM_MODEL_REASONING": "",
-        "OTEL_EXPORTER_OTLP_ENDPOINT": "http://jaeger:4318",
+        "OTEL_EXPORTER_OTLP_ENDPOINT": "http://openobserve:5080/api/default",
         "IMAGE_SHA": IMAGE_SHA,
         "OTEL_DEPLOYMENT_ENVIRONMENT": "",
         "METRICS_ENABLED": "false",
@@ -67,7 +68,7 @@ def test_base_contract_with_independent_controls():
         "REQUEST_DEADLINE_S": "270",  # chart default, #843
     }
     assert {key: env["value"] for key, env in new_env.items() if "value" in env} == expected_scalars
-    assert set(new_env) == set(expected_scalars) | {"QDRANT_API_KEY"}
+    assert set(new_env) == set(expected_scalars) | {"QDRANT_API_KEY", "OTEL_EXPORTER_OTLP_HEADERS"}
     assert new_env["QDRANT_URL"]["value"] == "http://qdrant:6333"
     assert new_env["QDRANT_API_KEY"]["valueFrom"]["secretKeyRef"] == {
         "key": "read-only-api-key",
@@ -111,7 +112,7 @@ def test_pull_secret_and_service_name_and_tracing_off():
     assert new_dep["spec"]["template"]["spec"]["imagePullSecrets"] == [{"name": "ghcr-pull"}]
     assert env_map(new_dep)["OTEL_SERVICE_NAME"]["value"] == "my-rag-prod"
     assert env_map(new_dep)["OTEL_EXPORTER_OTLP_ENDPOINT"].get("value") in (None, "")
-    assert not [k for k in new if k[0] in ("Deployment", "Service") and k[1] == "jaeger"]
+    assert not [k for k in new if "openobserve" in k[1] or "otelcol" in k[1]]
 
 def test_nondefault_namespace_registry_and_rerank():
     sha = "b" * 40
@@ -217,71 +218,6 @@ def test_route_oauth_contract():
     assert ("Route", "rag-agent") not in off
     assert "serviceAccountName" not in off["Deployment", "rag-agent"]["spec"]["template"]["spec"]
 
-def test_jaeger_contract():
-    new = run_new_template({"pullSecret": {"name": "ghcr-pull"}})
-    for key in (
-        ("Deployment", "jaeger"),
-        ("Service", "jaeger"),
-        ("PersistentVolumeClaim", "jaeger-badger"),
-        ("ConfigMap", "jaeger-config"),
-    ):
-        assert key in new, f"missing new {key}"
-    new_dep = new["Deployment", "jaeger"]
-    new_c = next(
-        c for c in new_dep["spec"]["template"]["spec"]["containers"] if c["name"] == "jaeger"
-    )
-    assert new_c["image"] == "reg.internal/jaegertracing/jaeger:v2.20.0"
-    assert new_c["args"] == ["--config", "/etc/jaeger/config-badger.yaml"]
-    assert new_dep["spec"]["template"]["spec"]["imagePullSecrets"] == [{"name": "ghcr-pull"}]
-    assert new_dep["spec"]["strategy"] == {"type": "Recreate", "rollingUpdate": None}
-    new_svc = new["Service", "jaeger"]
-    assert new_svc["spec"]["type"] == "ClusterIP"
-    new_pvc = new["PersistentVolumeClaim", "jaeger-badger"]
-    assert new_pvc["spec"]["storageClassName"] == "standard"
-    assert new_pvc["spec"]["resources"]["requests"] == {"storage": "10Gi"}
-    assert new_c["ports"] == [
-        {"containerPort": 4318, "name": "otlp-http"},
-        {"containerPort": 16686, "name": "ui"},
-    ]
-    assert new_c["readinessProbe"] == {
-        "httpGet": {"path": "/", "port": "ui"},
-        "initialDelaySeconds": 5,
-        "periodSeconds": 10,
-    }
-    assert new_c["resources"] == {
-        "requests": {"cpu": "50m", "memory": "128Mi"},
-        "limits": {"cpu": "500m", "memory": "512Mi"},
-    }
-    assert new_c["volumeMounts"] == [
-        {"name": "config", "mountPath": "/etc/jaeger", "readOnly": True},
-        {"name": "badger", "mountPath": "/badger"},
-    ]
-    assert new_svc["spec"]["ports"] == [
-        {"name": "otlp-http", "port": 4318, "targetPort": "otlp-http"},
-        {"name": "ui", "port": 16686, "targetPort": "ui"},
-    ]
-    new_cfg = yaml.safe_load(new["ConfigMap", "jaeger-config"]["data"]["config-badger.yaml"])
-    assert new_cfg["service"]["pipelines"]["traces"] == {
-        "receivers": ["otlp"],
-        "processors": ["batch"],
-        "exporters": ["jaeger_storage_exporter"],
-    }
-    assert new_cfg["service"]["extensions"] == ["jaeger_storage", "jaeger_query", "healthcheckv2"]
-    assert new_cfg["extensions"]["jaeger_storage"]["backends"]["badger_store"]["badger"] == {
-        "directories": {"keys": "/badger/keys", "values": "/badger/values"},
-        "ephemeral": False,
-        "ttl": {"spans": "336h"},
-        "metrics_update_interval": "10s",
-    }
-    assert new_cfg["extensions"]["jaeger_query"]["storage"] == {"traces": "badger_store"}
-    assert new_cfg["receivers"] == {"otlp": {"protocols": {"http": {"endpoint": "0.0.0.0:4318"}}}}
-    assert new_cfg["exporters"] == {"jaeger_storage_exporter": {"trace_storage": "badger_store"}}
-    assert "4317" not in yaml.safe_dump(new_cfg)
-    assert (
-        env_map(new["Deployment", "rag-agent"])["OTEL_EXPORTER_OTLP_ENDPOINT"]["value"]
-        == "http://jaeger:4318"
-    )
-
 def test_servicemonitor_contract():
     new = run_new_template({"metrics": {"enabled": True}})
     key = ("ServiceMonitor", "rag-agent")
@@ -323,7 +259,7 @@ def test_ingest_job_contract_normal():
         "DENSE_DIM": "768",
         "EMBED_MODEL_REVISION": "rev-1",
         "IMAGE_SHA": IMAGE_SHA,
-        "OTEL_EXPORTER_OTLP_ENDPOINT": "http://jaeger:4318",
+        "OTEL_EXPORTER_OTLP_ENDPOINT": "http://openobserve:5080/api/default",
         "OTEL_SERVICE_NAME": "mainframe-rag-ingest",
         "OTEL_DEPLOYMENT_ENVIRONMENT": "",
         "INGEST_WORKERS": "4",
@@ -332,7 +268,7 @@ def test_ingest_job_contract_normal():
         "CONTEXT_LLM_MODEL": "",
     }
     assert {key: env["value"] for key, env in new_env.items() if "value" in env} == expected_scalars
-    assert set(new_env) == set(expected_scalars) | {"QDRANT_API_KEY"}
+    assert set(new_env) == set(expected_scalars) | {"QDRANT_API_KEY", "OTEL_EXPORTER_OTLP_HEADERS"}
     assert new_env["QDRANT_API_KEY"]["valueFrom"]["secretKeyRef"] == {
         "name": "qdrant-apikey",
         "key": "api-key",
@@ -414,7 +350,7 @@ def test_schema_rejects_invalid_selected_configuration():
         ({"images": {"agent": {"tag": "HEAD"}}}, "tag"),
         ({"images": {"ingest": {"tag": "latest"}}}, "ingest"),
         ({"images": {"agent": {"digest": "sha256:abc"}}}, "digest"),
-        ({"images": {"jaeger": {"digest": "v2.20.0"}}}, "digest"),
+        ({"images": {"openobserve": {"digest": "v1.1.2"}}}, "digest"),
         ({"gateway": {"apiKeySecretName": "Bad_Name!"}}, "apiKeySecretName"),
         ({"models": {"rerank": {"endpointOrder": "nope"}}}, "endpointOrder"),
         ({"metrics": {"enabled": "false"}}, "metrics"),
@@ -429,8 +365,11 @@ def test_schema_rejects_invalid_selected_configuration():
         ({"ingest": {"retireDocs": ['bad"quote']}}, "retireDocs"),
         ({"ingest": {"workers": 0}}, "workers"),
         ({"ingest": {"collectionPolicy": {"shardNumber": 0}}}, "shardNumber"),
-        ({"tracing": {"endpoint": "jaeger:4318"}}, "endpoint"),
-        ({"tracing": {"jaeger": {"enabled": "false"}}}, "enabled"),
+        ({"tracing": {"endpoint": "oo:4318"}}, "endpoint"),
+        ({"tracing": {"backend": "jaeger"}}, "backend"),
+        ({"tracing": {"jaeger": {"enabled": False}}}, "jaeger"),
+        ({"images": {"jaeger": {"repository": "x", "tag": "v1"}}}, "jaeger"),
+        ({"metrics": {"collector": {"enabled": "false"}}}, "enabled"),
     ]
     for mutate, needle in cases:
         values = base_values()
@@ -474,13 +413,6 @@ def test_numeric_looking_release_sha_remains_an_exact_env_string():
     job = run_new_job_only({"images": images, "ingest": {"corpusPVC": "corpus"}})["Job", "ingest"]
     assert env_map(agent)["IMAGE_SHA"]["value"] == sha
     assert env_map(job, "ingest")["IMAGE_SHA"]["value"] == sha
-
-def test_jaeger_claim_is_retained_across_release_removal():
-    docs = run_new_template({})
-    claim = docs["PersistentVolumeClaim", "jaeger-badger"]
-    assert claim["metadata"]["annotations"]["helm.sh/resource-policy"] == "keep"
-    disabled = run_new_template({"tracing": {"enabled": False}})
-    assert not any((name.startswith("jaeger") for _, name in disabled))
 
 def test_chart_preserves_positive_operator_dimension_and_worker_range():
     rendered = run_new_template(
@@ -563,50 +495,6 @@ def test_direct_peers_are_typed_and_ingest_only():
     assert "peerUrls" in rejected.stderr
 
 
-def _jaeger_keys(docs):
-    return {k for k in docs if k[1] in ("jaeger", "jaeger-badger", "jaeger-config")}
-
-
-def test_jaeger_decoupled_from_export():
-    """OBS-2 item 3 / #568: external export without the bundled backend. The
-    explicitly named collector stays wired (the former bundled hostname is
-    allowed when chosen) while every Jaeger object disappears."""
-    for endpoint in ("http://jaeger:4318", "http://collector.platform:4318"):
-        new = run_new_template({"tracing": {"endpoint": endpoint, "jaeger": {"enabled": False}}})
-        assert _jaeger_keys(new) == set()
-        env = env_map(new["Deployment", "rag-agent"])
-        assert env["OTEL_EXPORTER_OTLP_ENDPOINT"]["value"] == endpoint
-
-
-def test_jaeger_disabled_without_destination_fails():
-    """#568: the empty endpoint means the bundled Jaeger; with that backend
-    disabled the render fails closed instead of exporting to a Service
-    nothing deploys."""
-    values = base_values()
-    values["tracing"]["endpoint"] = ""
-    values["tracing"]["jaeger"] = {"enabled": False}
-    raw = _helm_template_with_values(values)
-    assert raw.returncode != 0
-    assert "tracing.jaeger.enabled=false needs an intentional trace destination" in raw.stderr
-
-
-def test_jaeger_disabled_with_tracing_off_is_intentional():
-    new = run_new_template({"tracing": {"enabled": False, "endpoint": "", "jaeger": {"enabled": False}}})
-    assert _jaeger_keys(new) == set()
-    assert env_map(new["Deployment", "rag-agent"])["OTEL_EXPORTER_OTLP_ENDPOINT"].get("value") in (None, "")
-
-
-def test_jaeger_enabled_with_tracing_off_fails():
-    """OBS-2 item 3: a bundled backend nothing exports to is rejected
-    before mutation, not deployed idle."""
-    values = base_values()
-    values["tracing"]["enabled"] = False
-    values["tracing"]["jaeger"] = {"enabled": True}
-    raw = _helm_template_with_values(values)
-    assert raw.returncode != 0
-    assert "tracing.jaeger.enabled=true requires tracing.enabled=true" in raw.stderr
-
-
 def test_servicemonitor_decoupled_from_exposition():
     """OBS-2 item 3: exposition without the monitor (platform-UWM modes).
     METRICS_ENABLED stays true while the object disappears."""
@@ -666,7 +554,7 @@ def test_every_rendered_pod_is_hardened_without_fixed_identities():
     }
     assert set(pods) == {
         ("Deployment", "rag-agent"),
-        ("Deployment", "jaeger"),
+        ("Deployment", "openobserve"),
         ("StatefulSet", "rag-feedback"),
         ("Job", "ingest"),
     }
@@ -718,12 +606,12 @@ def test_app_read_only_roots_keep_only_declared_writable_paths():
 def test_verified_digest_renders_images_by_digest_keeping_tag_env():
     """Issue #272: a digest makes the pod image repository@digest; the SHA tag
     stays only the informational release identity (GIT_SHA-style env)."""
-    digests = {k: "sha256:" + c * 64 for k, c in (("agent", "a"), ("jaeger", "b"), ("oauthProxy", "c"))}
+    digests = {k: "sha256:" + c * 64 for k, c in (("agent", "a"), ("openobserve", "b"), ("oauthProxy", "c"))}
     extra = {"images": {k: {"digest": v} for k, v in digests.items()}, "route": {"enabled": True, "destinationCA": FAKE_CA}}
     docs = run_new_template(extra)
     text = json.dumps(list(docs.values()), default=str)
     assert f"reg.internal/qdrant-pdf-rag-agent@{digests['agent']}" in text
-    assert f"reg.internal/jaegertracing/jaeger@{digests['jaeger']}" in text
+    assert f"reg.internal/openobserve/openobserve@{digests['openobserve']}" in text
     assert f"reg.internal/openshift4/ose-oauth-proxy@{digests['oauthProxy']}" in text
     assert f"qdrant-pdf-rag-agent:{IMAGE_SHA}" not in text
     assert env_map(docs[("Deployment", "rag-agent")])["IMAGE_SHA"]["value"] == IMAGE_SHA  # informational tag stays
@@ -777,12 +665,12 @@ def test_networkpolicy_default_on_is_agent_only_ingress_only():
     assert policy["spec"]["ingress"] == [
         {"from": [{"podSelector": {}}], "ports": [{"protocol": "TCP", "port": 8080}]}
     ]
-    assert [k for k in docs if k[0] == "NetworkPolicy"] == [POLICY_KEY]
-    # The selector is the Deployment's pod label, so Qdrant/Jaeger/ingest are not selected.
+    assert [k for k in docs if k[0] == "NetworkPolicy"] == [POLICY_KEY, ("NetworkPolicy", "openobserve-egress-deny")]
+    # The selector is the Deployment's pod label, so Qdrant/OpenObserve/ingest are not selected.
     labels = docs["Deployment", "rag-agent"]["spec"]["template"]["metadata"]["labels"]
     assert labels == policy["spec"]["podSelector"]["matchLabels"]
-    jaeger = docs["Deployment", "jaeger"]["spec"]["template"]["metadata"]["labels"]
-    assert not set(policy["spec"]["podSelector"]["matchLabels"].items()) <= set(jaeger.items())
+    oo = docs["Deployment", "openobserve"]["spec"]["template"]["metadata"]["labels"]
+    assert not set(policy["spec"]["podSelector"]["matchLabels"].items()) <= set(oo.items())
 
 
 def test_networkpolicy_route_adds_router_to_oauth_port_only():
@@ -1160,3 +1048,213 @@ def test_direct_chart_refuses_invalid_admission_values(key, bad):
     result = _helm_template_with_values(values)
     assert result.returncode != 0
     assert key in result.stderr
+
+
+# OpenObserve is the only trace backend (issue #956, ADR-0006). Tags in
+# base_values; the digest pin is enforced at pack/load (#960).
+METRICS_ON = {"metrics": {"enabled": True}}
+
+
+def test_default_render_is_openobserve_only():
+    docs = run_new_template({})
+    assert not [k for k in docs if "jaeger" in k[1]]
+    job = run_new_job_only({"ingest": {"corpusPVC": "c"}})["Job", "ingest"]
+    assert ingest_env_map(job)["OTEL_EXPORTER_OTLP_HEADERS"]["valueFrom"]["secretKeyRef"] == {
+        "name": "openobserve-credentials", "key": "otlp-headers",
+    }
+    assert not [k for k in docs if k[0] in ("Route", "Ingress")]
+    assert {k for k in docs if "openobserve" in k[1]} == {
+        ("Deployment", "openobserve"),
+        ("Service", "openobserve"),
+        ("PersistentVolumeClaim", "openobserve-data"),
+        ("NetworkPolicy", "openobserve-egress-deny"),
+    }
+    # Metrics are off by default, so no collector objects.
+    assert not [k for k in docs if "otelcol" in k[1]]
+    env = env_map(docs["Deployment", "rag-agent"])
+    assert env["OTEL_EXPORTER_OTLP_ENDPOINT"]["value"] == "http://openobserve:5080/api/default"
+    assert env["OTEL_EXPORTER_OTLP_HEADERS"]["valueFrom"]["secretKeyRef"] == {
+        "name": "openobserve-credentials", "key": "otlp-headers",
+    }
+
+
+def test_openobserve_backend_contract():
+    docs = run_new_template({})
+    dep = docs["Deployment", "openobserve"]
+    assert dep["spec"]["replicas"] == 1
+    assert dep["spec"]["strategy"]["type"] == "Recreate"
+    pod = dep["spec"]["template"]["spec"]
+    assert pod["securityContext"] == {"runAsNonRoot": True, "seccompProfile": {"type": "RuntimeDefault"}}
+    c = pod["containers"][0]
+    assert c["image"] == f"reg.internal/openobserve/openobserve:v1.1.2"
+    assert c["securityContext"] == {
+        "allowPrivilegeEscalation": False,
+        "readOnlyRootFilesystem": True,
+        "capabilities": {"drop": ["ALL"]},
+    }
+    assert "runAsUser" not in c["securityContext"] and "runAsUser" not in pod["securityContext"]
+    for probe in ("readinessProbe", "livenessProbe"):
+        assert c[probe]["httpGet"] == {"path": "/healthz", "port": "http"}
+    assert c["livenessProbe"]["failureThreshold"] >= 3
+    env = {e["name"]: e for e in c["env"]}
+    assert {n: e["value"] for n, e in env.items() if "value" in e} == {
+        "ZO_LOCAL_MODE": "true",
+        "ZO_LOCAL_MODE_STORAGE": "disk",
+        "ZO_DATA_DIR": "/data",
+        "ZO_TELEMETRY": "false",
+        "ZO_MODEL_PRICING_ENABLED": "false",
+        "ZO_MMDB_DISABLE_DOWNLOAD": "true",
+    }
+    for name, key in (("ZO_ROOT_USER_EMAIL", "root-user-email"), ("ZO_ROOT_USER_PASSWORD", "root-user-password")):
+        assert "value" not in env[name]
+        assert env[name]["valueFrom"]["secretKeyRef"] == {"name": "openobserve-credentials", "key": key}
+    svc = docs["Service", "openobserve"]
+    assert svc["spec"]["type"] == "ClusterIP"
+    assert [p["port"] for p in svc["spec"]["ports"]] == [5080]
+    pvc = docs["PersistentVolumeClaim", "openobserve-data"]
+    assert pvc["spec"]["accessModes"] == ["ReadWriteOnce"]
+    assert pvc["spec"]["storageClassName"] == "standard"
+    assert pvc["spec"]["resources"]["requests"]["storage"] == "10Gi"
+    assert pvc["metadata"]["annotations"]["helm.sh/resource-policy"] == "keep"
+
+
+def test_openobserve_storage_size_is_configurable():
+    docs = run_new_template({"openobserve": {"storage": {"size": "20Gi"}}})
+    assert docs["PersistentVolumeClaim", "openobserve-data"]["spec"]["resources"]["requests"]["storage"] == "20Gi"
+
+
+def test_openobserve_egress_policy_denies_all():
+    spec = run_new_template({})["NetworkPolicy", "openobserve-egress-deny"]["spec"]
+    assert spec["podSelector"] == {"matchLabels": {"app": "openobserve"}}
+    assert spec["policyTypes"] == ["Egress"]
+    assert "egress" not in spec and "ingress" not in spec
+
+
+def test_external_endpoint_is_the_generic_otlp_escape_hatch():
+    docs = run_new_template({"tracing": {"endpoint": "http://collector.platform:4318"}, **METRICS_ON})
+    assert not [k for k in docs if "openobserve" in k[1] or "otelcol" in k[1] or "jaeger" in k[1]]
+    env = env_map(docs["Deployment", "rag-agent"])
+    assert env["OTEL_EXPORTER_OTLP_ENDPOINT"]["value"] == "http://collector.platform:4318"
+    assert "OTEL_EXPORTER_OTLP_HEADERS" not in env
+
+
+def test_tracing_off_renders_no_backend_and_needs_no_openobserve_values():
+    values = base_values()
+    values["tracing"]["enabled"] = False
+    del values["openobserve"]
+    result = _helm_template_with_values(values)
+    assert result.returncode == 0, result.stderr
+    kinds = [d["metadata"]["name"] for d in yaml.safe_load_all(result.stdout) if d]
+    assert not [n for n in kinds if "openobserve" in n or "otelcol" in n]
+    docs = run_new_template({"tracing": {"enabled": False}, **METRICS_ON})
+    assert not [k for k in docs if "openobserve" in k[1] or "otelcol" in k[1]]
+    assert env_map(docs["Deployment", "rag-agent"])["OTEL_EXPORTER_OTLP_ENDPOINT"].get("value") in (None, "")
+
+
+def _values_with(**patch):
+    values = base_values()
+    values["metrics"] = {"enabled": True}
+    for path, val in patch.items():
+        node = values
+        *parents, leaf = path.split(".")
+        for p in parents:
+            node = node.setdefault(p, {})
+        if val is None:
+            node.pop(leaf, None)
+        else:
+            node[leaf] = val
+    return values
+
+
+@pytest.mark.parametrize("patch,needle", [
+    ({"images.openobserve.tag": ""}, "tag"),
+    ({"images.otelcol.tag": ""}, "tag"),
+    ({"openobserve.credentialsSecretName": ""}, "credentialsSecretName is required"),
+])
+def test_openobserve_and_collector_fail_closed(patch, needle):
+    result = _helm_template_with_values(_values_with(**patch))
+    assert result.returncode != 0
+    assert needle in result.stderr
+
+
+def test_collector_forced_on_without_prerequisites_fails():
+    for patch in (
+        {"metrics.enabled": False, "metrics.collector": {"enabled": True}},
+        {"tracing.endpoint": "http://collector.platform:4318", "metrics.collector": {"enabled": True}},
+    ):
+        result = _helm_template_with_values(_values_with(**patch))
+        assert result.returncode != 0
+        assert "metrics.collector.enabled=true requires" in result.stderr
+
+
+def test_collector_can_be_switched_off_while_metrics_stay_on():
+    docs = run_new_template({"metrics": {"enabled": True, "collector": {"enabled": False}}})
+    assert not [k for k in docs if "otelcol" in k[1]]
+    assert env_map(docs["Deployment", "rag-agent"])["METRICS_ENABLED"]["value"] == "true"
+
+
+def test_collector_contract():
+    docs = run_new_template(METRICS_ON)
+    assert {k for k in docs if "otelcol" in k[1]} == {
+        ("Deployment", "otelcol"),
+        ("ConfigMap", "otelcol-config"),
+        ("NetworkPolicy", "otelcol-egress"),
+    }
+    # Stateless and unexposed: no Service, no PVC beyond the existing claims.
+    assert ("Service", "otelcol") not in docs
+    assert "otelcol" not in "".join(k[1] for k in docs if k[0] == "PersistentVolumeClaim")
+    dep = docs["Deployment", "otelcol"]
+    pod = dep["spec"]["template"]["spec"]
+    assert pod["securityContext"] == {"runAsNonRoot": True, "seccompProfile": {"type": "RuntimeDefault"}}
+    assert _hardening_violations(pod) == []
+    (c,) = pod["containers"]
+    assert c["image"] == f"reg.internal/otel/opentelemetry-collector-contrib:0.160.0"
+    assert c["securityContext"]["readOnlyRootFilesystem"] is True
+    assert c["env"] == [
+        {"name": "O2_AUTH", "valueFrom": {"secretKeyRef": {"name": "openobserve-credentials", "key": "metrics-auth"}}}
+    ]
+    assert {v["mountPath"] for v in c["volumeMounts"] if not v.get("readOnly")} == {"/tmp"}
+    assert not [v for v in pod["volumes"] if "persistentVolumeClaim" in v]
+    cfg_text = docs["ConfigMap", "otelcol-config"]["data"]["config.yaml"]
+    cfg = yaml.safe_load(cfg_text)
+    (job,) = cfg["receivers"]["prometheus"]["config"]["scrape_configs"]
+    assert job["metrics_path"] == "/metrics"
+    assert job["static_configs"] == [{"targets": ["rag-agent:8080"]}]
+    exp = cfg["exporters"]["otlp_http"]
+    assert exp["endpoint"] == "http://openobserve:5080/api/default"
+    assert exp["headers"] == {"Authorization": "${env:O2_AUTH}"}
+    assert cfg["service"]["pipelines"] == {
+        "metrics": {"receivers": ["prometheus"], "exporters": ["otlp_http"]}
+    }
+    assert "openobserve-credentials" not in cfg_text and "Basic" not in cfg_text
+
+
+def test_collector_egress_allows_only_openobserve_agent_and_dns():
+    spec = run_new_template(METRICS_ON)["NetworkPolicy", "otelcol-egress"]["spec"]
+    assert spec["podSelector"] == {"matchLabels": {"app": "otelcol"}}
+    assert spec["policyTypes"] == ["Egress"]
+    assert "ingress" not in spec
+    rules = spec["egress"]
+    assert len(rules) == 3
+    assert rules[0] == {
+        "to": [{"podSelector": {"matchLabels": {"app": "openobserve"}}}],
+        "ports": [{"protocol": "TCP", "port": 5080}],
+    }
+    assert rules[1] == {
+        "to": [{"podSelector": {"matchLabels": {"app": "rag-agent"}}}],
+        "ports": [{"protocol": "TCP", "port": 8080}],
+    }
+    (dns_peer,) = rules[2]["to"]
+    assert set(dns_peer) == {"namespaceSelector"}
+    (expr,) = dns_peer["namespaceSelector"]["matchExpressions"]
+    assert expr["values"] == ["openshift-dns", "kube-system"]
+    assert {p["port"] for p in rules[2]["ports"]} == {53, 5353}
+    # No rule has an ipBlock or an empty (everything) peer.
+    assert all("ipBlock" not in peer and peer for r in rules for peer in r["to"])
+
+
+def test_agent_ingress_policy_admits_the_collector_scrape():
+    docs = run_new_template(METRICS_ON)
+    first = docs[POLICY_KEY]["spec"]["ingress"][0]
+    assert first["from"] == [{"podSelector": {}}]
+    assert {"protocol": "TCP", "port": 8080} in first["ports"]

@@ -1,0 +1,22 @@
+{{/*
+OpenObserve data PVC (issue #956, ADR-0006). Single-node RWO block volume;
+NFS refused by shell preflight and schema. Kept on uninstall.
+*/}}
+{{- if include "mainframe-rag.openobserveEnabled" . }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: openobserve-data
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    helm.sh/resource-policy: keep
+  labels:
+    app: openobserve
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: {{ .Values.storage.className }}
+  resources:
+    requests:
+      storage: {{ .Values.openobserve.storage.size }}
+{{- end }}
