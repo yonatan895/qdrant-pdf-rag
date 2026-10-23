@@ -108,6 +108,12 @@ restores the snapshot over whatever the file assigned; empty stays unset
   its value. Python 3 is required on the bastion for this check as well as
   mapping. URL resolution and caller/file precedence remain `common.sh`-owned;
   rerank's existing embedding-URL/model fallback is unchanged.
+- Total request deadline (#843 D6, handoff owned by #374): the chart value
+  `requestDeadlineSeconds` defaults to 270 and renders `REQUEST_DEADLINE_S=270`
+  on the agent pod, so every air-gap render carries it (the mapper emits no
+  override). `Settings` keeps 0 for local/CI. 270 s is strictly below the route
+  `timeoutSeconds`, client and `answer_timeout_s` (300 each); a test pins this. Probes are never admitted or limited.
+  Admission limits are not set here (they wait for the D4 stepped run).
 - Optional application budgets (`LLM_MAX_MODEL_LEN`, `LLM_RESERVED_OUTPUT_TOKENS`,
   `LLM_THINKING_RESERVE_TOKENS_SIMPLE` / `COMPLEX`), reasoning efforts
   (`LLM_REASONING_EFFORT_SIMPLE` / `COMPLEX`) and `LLM_STREAM` follow that same
@@ -116,7 +122,11 @@ restores the snapshot over whatever the file assigned; empty stays unset
   the `low/medium/high/xhigh` effort domain, `LLM_REASONING_EFFORTS` membership
   of both efforts (explicit or default, #748) and strict streaming booleans; chart
   schema also enforces these types and ranges for direct Helm callers, whose pod
-  then refuses non-member efforts at Settings startup. `xhigh`
+  then refuses non-member efforts at Settings startup. The shipped effort is
+  `medium` on both routes (#917, maintainer decision 2026-10-23): it is the
+  `Settings` default, the `model_config` mirror and the explicit chart values
+  `reasoningEffortSimple/Complex`, so a rendered pod always carries it unless the
+  operator selects another. `xhigh`
   needs an application build with #707 support. Unset/empty operator values omit
   the new pod env entries, preserving application defaults; explicit zero
   thinking reserves and streaming false remain present. These are application

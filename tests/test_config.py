@@ -117,11 +117,14 @@ def test_served_efforts_parse_in_vocabulary_order(monkeypatch, efforts, simple, 
 
 
 @pytest.mark.parametrize(("overrides", "field"), [
-    # #748/#777: a served domain without the default xhigh must not start,
-    # on either path.
-    ({"llm_reasoning_efforts": "low,medium,high"}, "LLM_REASONING_EFFORT_SIMPLE"),
-    ({"llm_reasoning_efforts": "low,medium,high", "llm_reasoning_effort_simple": "low"},
-     "LLM_REASONING_EFFORT_COMPLEX"),
+    # #748/#777/#917: a served domain without a selected effort must not start,
+    # on either path. medium is now the default and a member of every shipped
+    # domain, so the counterexample selects xhigh explicitly.
+    ({"llm_reasoning_efforts": "low,medium,high", "llm_reasoning_effort_simple": "xhigh"},
+     "LLM_REASONING_EFFORT_SIMPLE"),
+    ({"llm_reasoning_efforts": "low,medium,high", "llm_reasoning_effort_simple": "low",
+      "llm_reasoning_effort_complex": "xhigh"}, "LLM_REASONING_EFFORT_COMPLEX"),
+    ({"llm_reasoning_efforts": "low,high"}, "LLM_REASONING_EFFORT_SIMPLE"),  # default medium not served
     ({"llm_reasoning_efforts": "low,low,high"}, "LLM_REASONING_EFFORTS"),
     ({"llm_reasoning_efforts": "low,maximal-private,high"}, "LLM_REASONING_EFFORTS"),
     ({"llm_reasoning_efforts": ""}, "LLM_REASONING_EFFORTS"),
@@ -277,8 +280,8 @@ PINNED_SETTING_DEFAULTS: dict[str, object] = {
     "rrf_sparse_boost_table": 1.0,
     "retrieve_max_chunks_per_page": 1,
     "retrieve_max_chunks_per_doc": 3,
-    "llm_reasoning_effort_simple": "xhigh",
-    "llm_reasoning_effort_complex": "xhigh",
+    "llm_reasoning_effort_simple": "medium",  # #917, was xhigh (#777)
+    "llm_reasoning_effort_complex": "medium",
     "llm_reasoning_efforts": "low,medium,xhigh",
     "llm_temperature": 0.2,
     "llm_max_model_len": 32768,
@@ -450,3 +453,10 @@ def test_two_cpu_quota_bounds_the_default_not_an_explicit_count(tmp_path, monkey
     monkeypatch.setattr(multiprocessing, "cpu_count", lambda: 64)  # the node
     monkeypatch.setenv("INGEST_WORKERS", "8")
     assert resolve_workers(None, Settings(_env_file=None)) == 8
+
+
+def test_shipped_reasoning_effort_default_is_medium_and_served():
+    """#917: medium on both routes, a member of the default served domain."""
+    settings = Settings(_env_file=None)
+    assert (settings.llm_reasoning_effort_simple, settings.llm_reasoning_effort_complex) == ("medium", "medium")
+    assert "medium" in settings.reasoning_efforts()

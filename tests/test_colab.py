@@ -3069,7 +3069,7 @@ def test_reasoning_profile_sandbox_handoff_keeps_its_exact_routing(lab):
         "GATEWAY_REASONING_MODEL": "Qwen/Qwen3.8-27B", "GATEWAY_EMBED_MODEL": "Qwen/Qwen3-Embedding-8B",
         "GATEWAY_EMBED_MODEL_REVISION": profile["servers"][1]["revision"],
         "DENSE_DIM": "4096", "RERANK_ENABLED": "false", "LLM_MAX_MODEL_LEN": "32768",
-        "LLM_REASONING_EFFORT_SIMPLE": "xhigh", "LLM_REASONING_EFFORT_COMPLEX": "xhigh",
+        "LLM_REASONING_EFFORT_SIMPLE": "medium", "LLM_REASONING_EFFORT_COMPLEX": "medium",
         "LLM_REASONING_EFFORTS": "low,medium,xhigh", "GATEWAY_PROBE_MAX_TOKENS": "512",
     }
 

@@ -1560,7 +1560,7 @@ class Run:
                        GATEWAY_EMBED_MODEL=profile_server(self.profile, "embed")["model_id"],
                        GATEWAY_EMBED_MODEL_REVISION=profile_server(self.profile, "embed")["revision"],
                        DENSE_DIM="4096", RERANK_ENABLED="false", LLM_MAX_MODEL_LEN="32768",
-                       LLM_REASONING_EFFORT_SIMPLE="xhigh", LLM_REASONING_EFFORT_COMPLEX="xhigh",
+                       LLM_REASONING_EFFORT_SIMPLE="medium", LLM_REASONING_EFFORT_COMPLEX="medium",  # #917
                        LLM_REASONING_EFFORTS="low,medium,xhigh",  # Qwen3.8 template domain (#748)
                        GATEWAY_PROBE_MAX_TOKENS="512", LITELLM_IMAGE=self.config["gateway_image"],
                        GATEWAY_ENV_FILE=str(self.state / "gateway.env"),
