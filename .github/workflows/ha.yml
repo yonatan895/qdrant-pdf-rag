@@ -66,6 +66,7 @@ jobs:
       # Explicit preparation (verification never installs): the lane runs on
       # the explicitly prepared .venv/bin/python.
       - run: python scripts/prepare_python.py --venv .venv --wheelhouse .tools/python-wheels/dev --connected --download-workers 8
+        timeout-minutes: 4
       - run: sh scripts/tools/install-helm.sh
       - run: echo "$GITHUB_WORKSPACE/.tools/bin" >> "$GITHUB_PATH"
       - name: Prepare approved Qdrant image explicitly

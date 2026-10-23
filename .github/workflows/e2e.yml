@@ -97,6 +97,7 @@ jobs:
         run: |
           python scripts/prepare_python.py --venv .venv --wheelhouse .tools/python-wheels/dev --connected --download-workers 8
           sh scripts/tools/run-task.sh artifacts:bm25
+        timeout-minutes: 10
       - name: Retain verified build input bytes
         uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
         with:

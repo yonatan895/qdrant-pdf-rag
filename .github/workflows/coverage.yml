@@ -34,6 +34,7 @@ jobs:
       # Explicit preparation (verification never installs): qa:coverage runs on
       # the prepared .venv/bin/python, as the load lane does.
       - run: python scripts/prepare_python.py --venv .venv --wheelhouse .tools/python-wheels/dev --connected --download-workers 8
+        timeout-minutes: 4
       - name: Install pinned Task runner
         run: sh scripts/tools/install-task.sh
       - name: Install checksum-pinned Helm for deployment render tests
