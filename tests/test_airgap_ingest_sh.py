@@ -112,11 +112,13 @@ def test_ingest_dryrun_renders_clean_manifest(ingest_tree):
     assert '"--reingest"' not in rendered
     assert '"--retire-doc"' not in rendered
     assert re.search(r'(?m)^\s*value: "false"$', rendered)
-    assert 'value: "http://jaeger:4318"' in rendered
+    assert 'value: "http://openobserve:5080/api/default"' in rendered
     assert "value: mainframe-rag-ingest" in rendered
     assert "imagePullSecrets: []" in rendered
     assert "name: custom-registry-secret" not in rendered
-    assert rendered.count("secretKeyRef") == 1
+    # Qdrant writer key plus the OpenObserve OTLP auth header (bundled backend, #957).
+    assert rendered.count("secretKeyRef") == 2
+    assert "name: openobserve-credentials" in rendered
     assert "EMBED_API_KEY" not in rendered
     assert "CONTEXT_LLM_API_KEY" not in rendered
     assert "RERANK_API_KEY" not in rendered
@@ -497,14 +499,14 @@ def test_production_preset_is_the_owner_decision():
         assert line in text.splitlines()
 
 
-def test_ingest_jaeger_false_requires_intentional_destination(ingest_tree):
-    # Issue #568: the Job must not inherit the defaulted bundled hostname
-    # when the bundled backend is disabled.
+def test_ingest_retired_jaeger_switch_is_ignored(ingest_tree):
+    # #956: JAEGER_ENABLED no longer exists; the Job follows the same tracing
+    # decision as the agent (bundled OpenObserve unless an endpoint is given).
     r = _run_ingest(ingest_tree, ("JAEGER_ENABLED", "false"))
-    assert r.returncode != 0
-    assert "intentional trace destination" in r.stderr
-    r = _run_ingest(ingest_tree, ("JAEGER_ENABLED", "false"),
-                    ("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector.platform:4318"))
+    assert r.returncode == 0, r.stderr
+    rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
+    assert rendered_env(rendered, "ingest")["OTEL_EXPORTER_OTLP_ENDPOINT"] == "http://openobserve:5080/api/default"
+    r = _run_ingest(ingest_tree, ("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector.platform:4318"))
     assert r.returncode == 0, r.stderr
     rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
     assert rendered_env(rendered, "ingest")["OTEL_EXPORTER_OTLP_ENDPOINT"] == "http://collector.platform:4318"
