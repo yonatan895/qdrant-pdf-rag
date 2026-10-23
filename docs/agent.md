@@ -584,6 +584,14 @@ packing, verification and evidence construction. Chat normalizes and caps
 history first; existing history, trim-round and character-packing policies
 remain distinct.
 
+Resolved system code (#944): when `find_system_codes` normalizes a query token
+that is written with an `S` prefix or as `X'hhh'` (SAFB -> AFB, S0C4 -> 0C4,
+SB37 -> B37, X'0C4' -> 0C4), the question frame gets one extra line after the
+`Question:` line, on both paths and both orders:
+`Resolved system code: SAFB = AFB` (several pairs join with `; `). It carries
+only the query's own token and the normalized code, never chunk text, and is
+absent when every code is written as looked up. Decline wording is unchanged.
+
 Complexity (`classify_query_complexity`) drives three things: max context
 chars, reasoning effort, and the system prompt variant. Rules: message-id
 queries stay `simple` unless a deep root appears; complex roots are

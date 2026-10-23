@@ -41,7 +41,7 @@ from mainframe_rag.ports import (
     TokenUsage,
     maybe_await,
 )
-from mainframe_rag.regexes import find_message_ids
+from mainframe_rag.regexes import find_message_ids, find_system_codes
 from mainframe_rag.retrieve.filters import parse_query
 from mainframe_rag.retrieve.query import SearchHit
 
@@ -366,6 +366,7 @@ VERIFICATION_STATES: frozenset[str] = frozenset(
 EXCERPTS_HEADER = "Retrieved manual excerpts:"
 QUESTION_LABEL = "Question:"
 SYSPLEX_LABEL = "Sysplex context:"
+RESOLVED_CODE_LABEL = "Resolved system code:"
 SPLUNK_HEADER = "Splunk context (live system observation; join key is the message ID):"
 
 _ANSWER_BODY_LABEL_RE = re.compile(
@@ -1186,6 +1187,22 @@ def _split_history_turns(history: list[ChatMessage]) -> list[list[ChatMessage]]:
     return turns
 
 
+def resolved_code_note(query: str) -> str:
+    """One question-frame line naming each system code whose retrieval form
+    differs from the literal query token (issue #944): `SAFB` is looked up as
+    `AFB`, `X'0C4'` as `0C4`. Empty when every code is written as looked up.
+    Only normalized codes and the query's own tokens appear, never chunk text.
+    """
+    pairs: list[str] = []
+    for code in find_system_codes(query):
+        for pattern in (rf"\bS{re.escape(code)}\b", rf"\bX'{re.escape(code)}'"):
+            for m in re.finditer(pattern, query, re.IGNORECASE):
+                pair = f"{m.group(0)} = {code}"
+                if pair not in pairs:
+                    pairs.append(pair)
+    return f"{RESOLVED_CODE_LABEL} " + "; ".join(pairs) if pairs else ""
+
+
 def _build_prompt(
     query: str,
     hits: list[SearchHit],
@@ -1232,6 +1249,8 @@ def _build_prompt(
             splunk_text = splunk_text[:splunk_context_max_chars].rstrip() + _TRUNCATED_SUFFIX
         context_entries.append(f"{SPLUNK_HEADER}\n" + splunk_text)
     question_text = f"{QUESTION_LABEL} " + query
+    if resolved_note := resolved_code_note(query):
+        question_text += "\n" + resolved_note
     # Pre-excerpt user parts, exactly as before: the estimator below counts
     # this shape, so it stays character-identical.
     parts = [*context_entries, question_text]
