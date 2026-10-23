@@ -33,6 +33,7 @@ from opentelemetry.trace import SpanKind
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from mainframe_rag.agent.answer import is_model_timeout
+from mainframe_rag.agent.answer_core import LLMChatError
 from mainframe_rag.agent.answer_core import (
     AnswerCoreInput,
     execute_answer_core,
@@ -842,6 +843,8 @@ async def ui_chat(
                 if isinstance(exc, app_mod.AppError)
                 else "invalid_request"
                 if isinstance(exc, ValidationError | EmbedInputTooLarge)
+                else "model_timeout"
+                if is_model_timeout(exc.original if isinstance(exc, LLMChatError) else exc)
                 else "upstream_error"
             )
             app_mod._record_endpoint(request, "console", outcome, started)
