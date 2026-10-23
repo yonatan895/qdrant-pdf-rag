@@ -433,8 +433,8 @@ they do not authorize production promotion.
 
 ## 4. Signing and provenance
 
-The connected host packs one tarball: git bundle, Qdrant + Jaeger + ingest
-+ agent image archives (plus the oauth-proxy sidecar image once its
+The connected host packs one tarball: git bundle, Qdrant + Jaeger + OpenObserve
++ otelcol-contrib + ingest + agent image archives (plus the oauth-proxy sidecar image once its
 `images.txt` digest is recorded), vendored chart, bootstrap script,
 `MANIFEST.txt`, `PACKING_RECORD.txt`, digest enumeration, `THIRD-PARTY-NOTICES.txt`
 ([licensing](licensing.md); pack fails closed on an unrecorded dependency, image
@@ -460,10 +460,12 @@ checksums **after**.
   tarball. Without a pinned pubkey, verification is TOFU: it binds members
   together but proves nothing about *which* key signed.
 - Load re-verifies the signature, then checksums, then the `IMAGE_SHA`
-  against the manifest, then all four base image digests (plus the
+  against the manifest, then all six base image digests (plus the
   oauth-proxy digest when the bundle carries it) — and pushes under fixed
   names: `qdrant/qdrant:v1.19.0-unprivileged`,
   `jaegertracing/jaeger:v2.20.0` (retag note: upstream tag `2.20.0`),
+  `openobserve/openobserve:v1.0.4`,
+  `otel/opentelemetry-collector-contrib:0.160.0`,
   `qdrant-pdf-rag-ingest:<SHA>`, `qdrant-pdf-rag-agent:<SHA>`, and
   `openshift4/ose-oauth-proxy:v4.14` when bundled. Full SHA only, never
   `latest` or short SHAs. `INSECURE_REGISTRY=true` disables TLS
@@ -930,6 +932,15 @@ bytes. Combined tag+digest refs are invalid — digest-only form is the pin.
   part of the handoff. The explicit PENDING state still skips the member and
   makes `AGENT_ROUTE=true` fail closed. A tag bump for `ose-oauth-proxy`
   must change all three sites: `images.txt`, `deploy.sh`, `load.sh`.
+- OpenObserve OSS v1.0.4 (`docker.io/openobserve/openobserve`,
+  `sha256:d4a878fa...54ba`, amd64 manifest list) and otelcol-contrib 0.160.0
+  (`docker.io/otel/opentelemetry-collector-contrib`, `sha256:799dc6cf...2ad6`)
+  are pinned and bundled by [ADR-0006](adr/0006-openobserve-traces-metrics-backend.md)
+  (#956); the [qualification record](records/2026-10-23-openobserve-oss-qualification.md)
+  names both digests. Neither pin changes what deploys until the chart backend
+  selection (#957) lands. OpenObserve is AGPL-3.0, otelcol-contrib Apache-2.0
+  ([licensing](licensing.md)). A bump of either changes `images.txt`, the
+  `licenses/inventory.json` bind, `load.sh` and `image_identity.sh` together.
 - `METRICS_ENABLED=true` additionally renders/applies
   the first-party chart ServiceMonitor so the OpenShift UWM stack scrapes
   `/metrics` (prerequisite and sizing in `docs/install_and_ops.md`).
@@ -954,6 +965,8 @@ and CI tooling have different owners and pull credentials.
 | Ingest | `qdrant-pdf-rag-ingest:<IMAGE_SHA>` | as the agent | `load.sh` | ingest Job |
 | Qdrant | `qdrant/qdrant:v1.19.0-unprivileged` | tag (the vendored chart cannot render a digest); running `imageID` compared | `load.sh` | cluster pods |
 | Jaeger | `jaegertracing/jaeger:v2.20.0` | as the agent | `load.sh` | cluster pods |
+| OpenObserve OSS (ADR-0006) | `openobserve/openobserve:v1.0.4` | as the agent; the chart references it by digest only (`images.openobserve.digest`) | `load.sh` | cluster pods once the chart backend lands (#957) |
+| otelcol-contrib (ADR-0006) | `otel/opentelemetry-collector-contrib:0.160.0` | as the agent | `load.sh` | no workload yet; the metrics scraper/forwarder's chart owner is a follow-up |
 | OAuth sidecar (optional) | `openshift4/ose-oauth-proxy:v4.14` | as the agent; absent while `images.txt` says `sha256:PENDING` | `load.sh` | cluster pods |
 | CI job image | `ci/python:3.14`, or a complete `CI_PYTHON_IMAGE` | mirrored UBI Python 3.14 (GIL) with git, pip, tar, sha256sum | platform or factory mirror, not this repository | GitLab runner |
 | CI Qdrant service | `qdrant/qdrant@sha256:<images.txt digest>` | the `images.txt` manifest digest, so a tag is never enough | registry-to-registry copy that preserves the digest | GitLab runner (`sim`, `gate-l1`) |

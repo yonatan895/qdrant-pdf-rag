@@ -86,7 +86,9 @@ def test_validate_clean_exits_zero(tree):
     assert r.returncode == 0, r.stderr
     assert "SUCCESS: Pre-flight validation passed (dry-run mode)." in r.stdout
     assert "Collection policy: S=1 RF=1 W=1" in r.stdout
-    assert "Tracing:           ON (http://jaeger:4318)" in r.stdout
+    assert "Tracing:           ON (bundled OpenObserve)" in r.stdout
+    assert "Trace backend:     OpenObserve (bundled)" in r.stdout
+    assert "jaeger" not in r.stdout.lower()
     assert "EMBED_MODEL_REVISION: rev-1" in r.stdout
 
 
@@ -204,12 +206,14 @@ def test_validate_ingest_copresent_readonly_key_fails_closed(tree):
     assert "read-only" in r.stderr
 
 
-def test_validate_jaeger_false_requires_intentional_destination(tree):
-    # Issue #568: disabling the bundled backend alone is not a destination.
-    r = _run(tree, {"JAEGER_ENABLED": "false"})
-    assert r.returncode != 0
-    assert "intentional trace destination" in r.stderr
-    ok = _run(tree, {"JAEGER_ENABLED": "false", "OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector.platform:4318"})
+def test_validate_tracing_off_deploys_no_trace_backend_and_explicit_collector_passes_through(tree):
+    # OpenObserve is the only bundled backend (#956): off removes it, an
+    # explicit http(s) collector is reported as given, the retired
+    # JAEGER_ENABLED switch has no effect.
+    off = _run(tree, {"OTEL_EXPORTER_OTLP_ENDPOINT": "off"})
+    assert off.returncode == 0, off.stderr
+    assert "Trace backend:     not deployed" in off.stdout
+    ok = _run(tree, {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector.platform:4318", "JAEGER_ENABLED": "false"})
     assert ok.returncode == 0, ok.stderr
     assert "Tracing:           ON (http://collector.platform:4318)" in ok.stdout
 

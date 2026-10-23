@@ -85,7 +85,9 @@ QDRANT_URL="http://${QDRANT_RELEASE}:6333"
 # deployed image must be the packed one. First-party images are then rendered
 # as repository@digest; the Qdrant digest is checked against the pods below.
 DEPLOY_IMAGES="qdrant agent"
-[ "$JAEGER_DEPLOY" != "1" ] || DEPLOY_IMAGES="$DEPLOY_IMAGES jaeger"
+# OpenObserve is the only trace backend (ADR-0006, #956): with tracing on, the
+# chart renders it and the otelcol collector, so both are identity-checked.
+[ "$OTEL_TRACING_ENABLED" != "1" ] || DEPLOY_IMAGES="$DEPLOY_IMAGES openobserve otelcol"
 [ "$AGENT_ROUTE" != "true" ] || DEPLOY_IMAGES="$DEPLOY_IMAGES oauth_proxy"
 # shellcheck disable=SC2086
 verify_registry_images $DEPLOY_IMAGES
@@ -114,9 +116,9 @@ helm template mainframe-rag charts/mainframe-rag -f dist/mainframe-rag-release-v
 cat dist/app-helm-render/mainframe-rag/templates/*.yaml > dist/agent-rendered.yaml
 fail_on_placeholders dist/agent-rendered.yaml agent
 check_agent_qdrant_key dist/agent-rendered.yaml agent
-rm -f dist/jaeger-rendered.yaml dist/servicemonitor-rendered.yaml dist/agent-route.yaml
-if [ "$JAEGER_DEPLOY" = "1" ]; then
-    cat dist/app-helm-render/mainframe-rag/templates/jaeger-*.yaml > dist/jaeger-rendered.yaml
+rm -f dist/openobserve-rendered.yaml dist/servicemonitor-rendered.yaml dist/agent-route.yaml
+if [ "$OTEL_TRACING_ENABLED" = "1" ]; then
+    cat dist/app-helm-render/mainframe-rag/templates/openobserve-*.yaml > dist/openobserve-rendered.yaml
 fi
 if [ "$SERVICEMONITOR_DEPLOY" = "1" ]; then
     cp dist/app-helm-render/mainframe-rag/templates/servicemonitor.yaml dist/servicemonitor-rendered.yaml
@@ -126,6 +128,16 @@ if [ "$AGENT_ROUTE" = "true" ]; then
 fi
 
 require_gateway_secret_keys llm-api-key embed-api-key rerank-api-key
+# Operator-created OpenObserve credentials (ADR-0006, #956), checked before any
+# mutation. Only presence of keys is read; values are never printed.
+if [ "$OTEL_TRACING_ENABLED" = "1" ] && [ "${AIRGAP_DRYRUN:-0}" != "1" ]; then
+    for _oo_key in root-user-email root-user-password otlp-headers metrics-auth; do
+        _oo_present=$($KC -n "$NAMESPACE" get secret openobserve-credentials \
+            -o "go-template={{if index .data \"$_oo_key\"}}present{{end}}" 2>/dev/null) || _oo_present=""
+        [ "$_oo_present" = present ] ||
+            die "E_OPENOBSERVE_CREDENTIALS: Secret openobserve-credentials must exist with non-empty keys root-user-email, root-user-password, otlp-headers and metrics-auth"
+    done
+fi
 require_secret_keys "${PULL_SECRET:-}" .dockerconfigjson
 # Operator-created, never rendered: the bearer token both the service and the
 # agent read. Checked before any mutation (a missing key would otherwise show
@@ -143,9 +155,9 @@ if [ "${AIRGAP_DRYRUN:-0}" != "1" ]; then
     # inventory selected for removal. Failed discovery/reads stop deployment.
     _app_apis=$($KC api-resources -o name) || die "cannot discover optional application APIs"
     set --
-    if [ "$JAEGER_DEPLOY" != "1" ]; then
-        set -- "$@" deployment.apps/jaeger service/jaeger configmap/jaeger-config
-    fi
+    # Jaeger is retired (ADR-0006, #956): a leftover from an earlier release is
+    # removed through the validated cleanup inventory (PVCs are never members).
+    set -- "$@" deployment.apps/jaeger service/jaeger configmap/jaeger-config
     if [ "$AGENT_ROUTE" != "true" ]; then
         set -- "$@" serviceaccount/rag-agent
         if printf '%s\n' "$_app_apis" | grep -qx 'routes.route.openshift.io'; then
@@ -261,14 +273,8 @@ if [ "$AGENT_ROUTE" = "true" ]; then
     # and refuse unknown/unreadable exposure without claiming verification.
     verify_agent_route "${ROUTE_DESTINATION_CA_FILE:-}"
 fi
-JAEGER_UI_HINT=""
 [ "${METRICS_ENABLED:-false}" = "true" ] || echo "==> Metrics off: ServiceMonitor not deployed"
-[ "$OTEL_TRACING_ENABLED" = "1" ] || echo "==> Tracing off: Jaeger not deployed"
-[ "$OTEL_TRACING_ENABLED" != "1" ] || [ "$JAEGER_DEPLOY" = "1" ] ||
-    echo "==> Bundled Jaeger off: exporting to the configured external collector; trace arrival there is not verified by this repo"
-if [ "$JAEGER_DEPLOY" = "1" ]; then
-    JAEGER_UI_HINT="   |   traces UI: $KC -n $NAMESPACE port-forward svc/jaeger 16686:16686"
-fi
+[ "$OTEL_TRACING_ENABLED" = "1" ] || echo "==> Tracing off: OpenObserve not deployed"
 
 wait_rollout() {
     target=$1
@@ -292,8 +298,9 @@ if [ "${AIRGAP_DRYRUN:-0}" = "1" ]; then
 else
     wait_rollout "statefulset/$QDRANT_RELEASE" 600
     wait_rollout "deploy/rag-agent" 300
-    if [ "$JAEGER_DEPLOY" = "1" ]; then
-        wait_rollout "deploy/jaeger" 120
+    if [ "$OTEL_TRACING_ENABLED" = "1" ]; then
+        wait_rollout "deploy/openobserve" 120
+        wait_rollout "deploy/otelcol" 120
     fi
     if [ "$FEEDBACK_ENABLED" = "true" ]; then
         wait_rollout "statefulset/rag-feedback" 120
@@ -312,4 +319,4 @@ if [ "$AGENT_ROUTE" = "true" ]; then
     echo "Route rag-agent -> svc port oauth, reencrypt, timeout 300s"
 fi
 
-next_step "corpus ready? sh scripts/tools/run-task.sh airgap:ingest CORPUS_PVC=<pvc>   |   smoke: sh scripts/tools/run-task.sh airgap:smoke$JAEGER_UI_HINT"
+next_step "corpus ready? sh scripts/tools/run-task.sh airgap:ingest CORPUS_PVC=<pvc>   |   smoke: sh scripts/tools/run-task.sh airgap:smoke"

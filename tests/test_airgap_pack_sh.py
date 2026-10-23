@@ -225,7 +225,8 @@ def test_pack_success_builds_verified_tarball(pack_tree):
         "repo.bundle",
         TASK_ASSET, "task-pin.txt", "task-LICENSE",
         "qdrant-image.tar",
-        "jaeger-image.tar",
+        "openobserve-image.tar",
+        "otelcol-image.tar",
         f"app-ingest-{head}.tar",
         f"app-agent-{head}.tar",
         "MANIFEST.txt",
@@ -270,11 +271,12 @@ def test_pack_success_builds_verified_tarball(pack_tree):
     assert f"task_sha256: {TASK_SHA256}" in manifest
     assert f"task_binary_sha256: {TASK_BINARY_SHA256}" in manifest
     log = skopeo_log.read_text()
-    assert log.splitlines().count("copy") == 4
-    assert log.count("inspect") == 8  # digest + raw config read per image
+    assert log.splitlines().count("copy") == 5
+    assert log.count("inspect") == 10  # digest + raw config read per image
     for role, stem in (
         ("qdrant", "qdrant-image"),
-        ("jaeger", "jaeger-image"),
+        ("openobserve", "openobserve-image"),
+        ("otelcol", "otelcol-image"),
         ("ingest", f"app-ingest-{head}"),
         ("agent", f"app-agent-{head}"),
     ):
@@ -287,8 +289,8 @@ def test_pack_success_builds_verified_tarball(pack_tree):
     # sbom.json enumerates the pinned inputs as valid JSON.
     sbom = json.loads((dist / "sbom.json").read_text())
     assert sbom["image_sha"] == head
-    assert {img["name"] for img in sbom["images"]} == {"qdrant", "jaeger", "app-ingest", "app-agent"}
-    assert sbom["images"][2]["digest"] == STUB_DIGEST
+    assert {img["name"] for img in sbom["images"]} == {"qdrant", "openobserve", "otelcol", "app-ingest", "app-agent"}
+    assert sbom["images"][4]["digest"] == STUB_DIGEST
     assert sbom["host_tools"][0]["sha256"] == TASK_SHA256
     assert sbom["host_tools"][0]["license"] == "MIT"
     assert sbom["host_tools"][0]["license_file"] == "task-LICENSE"
@@ -296,7 +298,7 @@ def test_pack_success_builds_verified_tarball(pack_tree):
     with tarfile.open(dist / f"qdrant-pdf-rag-{head}.tar") as archive:
         assert set(archive.getnames()) == {
             "bootstrap.sh", "repo.bundle", TASK_ASSET, "task-pin.txt", "task-LICENSE",
-            "qdrant-image.tar", "jaeger-image.tar", f"app-ingest-{head}.tar", f"app-agent-{head}.tar",
+            "qdrant-image.tar", "openobserve-image.tar", "otelcol-image.tar", f"app-ingest-{head}.tar", f"app-agent-{head}.tar",
             "MANIFEST.txt", "PACKING_RECORD.txt", "sbom.json", "THIRD-PARTY-NOTICES.txt",
             "sneakernet-signing.pub", "SHA256SUMS", "SHA256SUMS.sig",
         }
@@ -346,7 +348,8 @@ fi
     sbom = json.loads((dist / "sbom.json").read_text())
     assert {img["name"] for img in sbom["images"]} == {
         "qdrant",
-        "jaeger",
+        "openobserve",
+        "otelcol",
         "app-ingest",
         "app-agent",
         "oauth-proxy",

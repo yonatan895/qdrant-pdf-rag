@@ -9,6 +9,7 @@ resolve_aliases
 resolve_observability
 require_env NAMESPACE
 KC=${KC:-$(kc)}
+resolve_trace_query
 QUERY=${QUERY:-IEA500I operator message}
 TRACE_TIMEOUT=${TRACE_TIMEOUT:-60}
 # Trace arrival is checked in OpenObserve (issue #956). TRACE_QUERY_URL and
