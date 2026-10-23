@@ -49,10 +49,10 @@
       "wheel": "click-8.5.0-py3-none-any.whl"
     },
     "coverage": {
-      "sha256": "f98d438add63546745e5e847192e3e9ab897ed6f2ca96f8281e2f5a15958ae62",
-      "url": "https://files.pythonhosted.org/packages/a3/9c/a1bda6439c19c4783d50df896142b67b9e7d432db36675d339a32778669d/coverage-7.16.0-cp314-cp314-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl",
-      "version": "7.16.0",
-      "wheel": "coverage-7.16.0-cp314-cp314-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl"
+      "sha256": "35f37886699cb9abd29958247d718628d5bc6f39e623dff66a09e546c42a7e03",
+      "url": "https://files.pythonhosted.org/packages/a8/d4/a306940c81c6ae759e82fff27d20b7fdc6896e422b821f51313cce212b6c/coverage-7.16.2-cp314-cp314-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl",
+      "version": "7.16.2",
+      "wheel": "coverage-7.16.2-cp314-cp314-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl"
     },
     "fastapi": {
       "sha256": "bfb91aa2d334c61cb35ba9a116fc123b3d3df31640b801cf57a7a78ec3f603b3",
@@ -337,16 +337,16 @@
       "wheel": "py_rust_stemmers-0.1.8-cp314-cp314-manylinux_2_28_x86_64.whl"
     },
     "pydantic": {
-      "sha256": "45a282cde31d808236fd7ea9d919b128653c8b38b393d1c4ab335c62924d9aba",
-      "url": "https://files.pythonhosted.org/packages/fd/7b/122376b1fd3c62c1ed9dc80c931ace4844b3c55407b6fb2d199377c9736f/pydantic-2.13.4-py3-none-any.whl",
-      "version": "2.13.4",
-      "wheel": "pydantic-2.13.4-py3-none-any.whl"
+      "sha256": "346a034f080da3755d8e9cb5e00e8b07de1d39e4f6e2c87d8ab7cafa0b269a73",
+      "url": "https://files.pythonhosted.org/packages/eb/47/c95ffc2009878c7aac0c5e08528022dcb885933252a88b5f170058014464/pydantic-2.13.5-py3-none-any.whl",
+      "version": "2.13.5",
+      "wheel": "pydantic-2.13.5-py3-none-any.whl"
     },
     "pydantic-core": {
-      "sha256": "7a5f930472650a82629163023e630d160863fce524c616f4e5186e5de9d9a49b",
-      "url": "https://files.pythonhosted.org/packages/89/1d/8eff589b45bb8190a9d12c49cfad0f176a5cbd1534908a6b5125e2886239/pydantic_core-2.46.4-cp314-cp314-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
-      "version": "2.46.4",
-      "wheel": "pydantic_core-2.46.4-cp314-cp314-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
+      "sha256": "54d510bac3ee52247af28ed4bb18a1e799f040ac60fd2bf5ccd4c92f1fbe786f",
+      "url": "https://files.pythonhosted.org/packages/2c/9b/59634b7ac631c63b2a37760eb6943af3e29573d6b59a4abc5e7f019d4cee/pydantic_core-2.46.5-cp314-cp314-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+      "version": "2.46.5",
+      "wheel": "pydantic_core-2.46.5-cp314-cp314-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
     },
     "pydantic-settings": {
       "sha256": "0ba092c291c94baceb5eff768aa0d56400a457585bc0175925a5a5510303da42",
@@ -575,7 +575,7 @@
         "wheel"
       ],
       "requirements": "requirements.dev.lock.txt",
-      "sha256": "d23a3a3a1bc722df3e410c1a99979950821ef6bb3b8dadc2085c51a2ce5330ce"
+      "sha256": "769972e283f8d4ac9444d4226bb62d2e0cc0c8e23234482383ed7818859629e8"
     },
     "runtime": {
       "packages": [
@@ -643,7 +643,7 @@
         "uvicorn"
       ],
       "requirements": "requirements.lock.txt",
-      "sha256": "80d0eb1f1eb87dd3b7ebfac3ae95d4ec1ba5d4ccbc0e0cc930a998e0fe02e665"
+      "sha256": "b6dd61b7c00abdaf5ddbbbc50dffb848587697b41e718d9afbfe99c4eb186363"
     }
   },
   "resolver": {

@@ -1559,11 +1559,11 @@
       ],
       "license_spdx": "MIT",
       "name": "pydantic",
-      "sha256": "45a282cde31d808236fd7ea9d919b128653c8b38b393d1c4ab335c62924d9aba",
+      "sha256": "346a034f080da3755d8e9cb5e00e8b07de1d39e4f6e2c87d8ab7cafa0b269a73",
       "spdx_basis": "declared-expression",
       "status": "declared",
-      "version": "2.13.4",
-      "wheel": "pydantic-2.13.4-py3-none-any.whl"
+      "version": "2.13.5",
+      "wheel": "pydantic-2.13.5-py3-none-any.whl"
     },
     {
       "approval_ref": null,
@@ -1580,11 +1580,11 @@
       ],
       "license_spdx": "MIT",
       "name": "pydantic-core",
-      "sha256": "7a5f930472650a82629163023e630d160863fce524c616f4e5186e5de9d9a49b",
+      "sha256": "54d510bac3ee52247af28ed4bb18a1e799f040ac60fd2bf5ccd4c92f1fbe786f",
       "spdx_basis": "declared-expression",
       "status": "declared",
-      "version": "2.46.4",
-      "wheel": "pydantic_core-2.46.4-cp314-cp314-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
+      "version": "2.46.5",
+      "wheel": "pydantic_core-2.46.5-cp314-cp314-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
     },
     {
       "approval_ref": null,
