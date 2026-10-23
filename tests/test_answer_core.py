@@ -504,7 +504,8 @@ async def test_estimator_only_budget_sends_no_output_cap(mode):
         output = events[-1]["output"]
     else:
         output = await execute_answer_core(AnswerCoreInput(query="IEA500I"), deps)
-    bodies = transport.post_bodies if mode == "post" else transport.stream_bodies
+    bodies = transport.stream_bodies  # buffered callers read the stream too (#868)
+    assert not transport.post_bodies
     assert output.finish_reason == "stop" and not output.budget_verified
     assert len(bodies) == 1 and "max_tokens" not in bodies[0]
 
@@ -570,7 +571,8 @@ async def test_core_selected_reasoning_effort_reaches_http_request(effort, sourc
     assert output.finish_reason == "stop"
     assert output.answer == "Reissue the command."
     assert transport.capture["url"] == "http://llm.internal/v1/chat/completions"
-    bodies = transport.post_bodies if mode == "post" else transport.stream_bodies
+    bodies = transport.stream_bodies  # buffered callers read the stream too (#868)
+    assert not transport.post_bodies
     assert len(bodies) == 1
     assert bodies[0]["reasoning_effort"] == effort
     # Verified budget: the cap is the answer reserve plus this path's thinking

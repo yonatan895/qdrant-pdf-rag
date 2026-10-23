@@ -544,9 +544,13 @@ strict stream-end rule above is the upstream reasoning wire and the
   reasons are fixed labels (`missing [DONE]`, `upstream error frame`,
   `malformed frame`, `missing finish reason`) — upstream error bodies are
   never copied into client responses, logs, or exception text.
-- `LLM_STREAM` (default off) routes every server-side reasoning call over
-  the streaming wire and measures TTFT on the first content token; the JSON
-  paths still return one answer. `sh scripts/tools/run-task.sh local:agent` and `sh scripts/tools/run-task.sh local:stack` set
+- `LLM_STREAM` (default off) opts the server-side reasoning calls into TTFT
+  measurement on the first content token and the streaming recovery policy in
+  the HTTP/model contract; the JSON paths still return one answer. Since #868
+  the upstream wire is a stream either way: a buffered caller reads the stream
+  and assembles the same `ChatResult`, because a gateway forwards a client
+  disconnect to the engine for a stream but not for a buffered POST (live check
+  2026-10-23: the buffered engine kept generating >112 s after `model_timeout`). `sh scripts/tools/run-task.sh local:agent` and `sh scripts/tools/run-task.sh local:stack` set
   it; client-visible SSE is requested per call (`stream=true`). The SSE
   generator ends the root span in a `finally` so disconnects stay in the
   same trace.
@@ -782,8 +786,16 @@ async pool on `FEEDBACK_TIMEOUT_S` (issue #780; closed after a bounded drain).
   `504 model_timeout`; expiry of the second is `504 deadline_exceeded`. In
   both cases the awaiting task is cancelled, which closes the upstream
   connection, so the model server sees the disconnect and can abort (proved
-  against a real-socket upstream in `tests/test_stream_truncation.py`; a
-  gateway must still propagate it to the engine, which is a platform check).
+  against a real-socket upstream in `tests/test_stream_truncation.py`). For
+  the engine to see it the gateway must propagate the disconnect, which it does
+  for a streamed request only, so every reasoning call is read from the stream
+  (#868). A caller that wanted one buffered answer still gets a total
+  `answer_timeout_s` for the whole generation (the stream's own per-read wait
+  renews on every frame, so the total is enforced by the client; on the sync
+  path it is checked per frame). The recovery POST after a failed `LLM_STREAM`
+  stream, and the second leg of any other fallback, remain buffered and are not
+  cancelled upstream; the live check of the stream vs. buffered abort counts is
+  still owed per session.
   Neither expiry is ever followed by a second model ask, and a model that
   finished with an explicit non-`stop` reason (`length`, `content_filter`) with
   no content is returned as that finish
@@ -903,12 +915,12 @@ readers:
 | `chat_max_turns` / `chat_max_prior_turn_chars` | 10 / 1000 | chat history packing caps |
 | `prompt_order` | `retrieval` (`stable_cache` alt) | block ordering |
 | `llm_base_url` / `llm_model_reasoning` / `llm_api_key` | unset (answer stays disabled; key unset = keyless) | per-request assertion, LLM client, tokenizer |
-| `answer_timeout_s` | 300.0 | reasoning client wait per model I/O (not a total on a stream), expiry is `504 model_timeout`; no transport retries, explicit fallback policy below; budgets in §6 |
+| `answer_timeout_s` | 300.0 | reasoning client wait per model I/O (not a total on a stream; a buffered caller still gets a total), expiry is `504 model_timeout`; no transport retries, explicit fallback policy below; budgets in §6 |
 | `llm_reasoning_effort_simple` / `_complex` / `llm_temperature` | xhigh / xhigh / 0.2 | answer path (#777) |
 | `llm_reasoning_efforts` | `low,medium,xhigh` | served template's effort domain (Qwen3.8): console choices; both efforts above must be members (#748) |
 | `llm_max_model_len` / `llm_reserved_output_tokens` / `llm_thinking_reserve_tokens_complex` / `llm_token_safety_margin` / `llm_max_chunk_tokens_narrative` / `llm_tokenize_timeout_s` | 32768 / 2560 / 8192 / 128 / 1200 / 5.0 | tokenizer-path budgeting (#298, #777). `llm_max_model_len` must not exceed the served `--max-model-len`. With a server-verified prompt count the reserved output plus the path's thinking reserve is sent as `max_tokens` (prompt + cap stays inside the window minus the margin), so a runaway xhigh generation ends as `finish_reason: length` → `generation_incomplete`; an estimator-only prompt sends no cap |
 | `llm_thinking_reserve_tokens_simple` | 8192 | reasoning headroom in single-turn and chat prompt budgets (provisional for xhigh, #777); environment input `LLM_THINKING_RESERVE_TOKENS_SIMPLE` |
-| `llm_stream` | `false` | server-side reasoning SSE |
+| `llm_stream` | `false` | TTFT measurement and streaming recovery policy for server-side reasoning calls (the wire is a stream either way, #868) |
 | `request_max_concurrent` / `request_queue_max` / `request_queue_wait_s` / `request_deadline_s` | 0 (unlimited) / 0 / 5.0 (used only with a queue) / 0.0 (no deadline) | request admission and total deadline (§6a); issue #374, **no numeric envelope approved** — values come from site measurement |
 | `embed_max_input_chars` | 0 (unbounded) | refuse an over-bound dense embed input before the call, query path and ingest (§6a, `docs/ingest.md` §7) |
 | `http_connect_retries` / `http_max_connections` / `http_max_keepalive_connections` | 2 (connect-only) / 200 / 100 | both pools, embed/context clients |
@@ -1368,6 +1380,7 @@ generation flags; this change does not establish effort-dependent token counts.
 | Operation | Current permitted recovery / failure boundary |
 |---|---|
 | Reasoning transport | Sync/async reasoning pools use `retries=0`; no connection-level automatic repeat |
+| Buffered `achat` / `_chat_sync` without `LLM_STREAM` | One streamed request assembled into the buffered result (#868); no recovery POST, as before. An upstream error or malformed frame, a missing `[DONE]` or a missing explicit finish is `TruncatedStreamError`; an empty `stop` completion is an empty result; `length`/`content_filter` is returned as that finish. Total wait is `answer_timeout_s`, expiry `model_timeout` |
 | Buffered `achat` / `_chat_sync` with `LLM_STREAM` | Empty content *with a `stop` finish*, caught stream/protocol failures, missing `[DONE]`, upstream error/malformed frame, or missing explicit finish lead to one non-streaming POST; accumulated content is discarded, even if a prefix was buffered. The POST must itself carry an explicit finish, have no top-level error, and have valid string content (issue #365). Never recovered (issue #868): a stream that ended with an explicit non-`stop` finish (`length`, `content_filter`) and no content is returned as that finish, and an `httpx` timeout (`answer_timeout_s` spent) propagates as `model_timeout` instead of starting a second ask |
 | Client-visible `chat_stream` | No-content (`stop` finish) or pre-output stream failure (malformed first frame, pre-output error, missing finish/done before any emitted token) can make one non-streaming ask; malformed/rejected/empty/no-finish fallback fails. Missing `[DONE]`, an upstream error frame, a malformed frame, or `[DONE]` without an explicit finish after actually emitted content raises truncation; no replay after those tokens. The shared core applies the same gate to the terminal `done` item itself: a falsy/missing `done` finish, or a token-only stream with no `done`, raises truncation and never synthesizes `stop` (issue #365). A validated stream with zero content deltas and an explicit non-`stop` finish ends with that `done` and no recovery POST (issue #868); timeouts propagate |
 | Tokenizer | Plan locally, verify whole messages per trim round. No per-chunk RPCs; gateway may lack `/tokenize`. An endpoint that is not served or gives no usable count (404/405/501, a 200 without a count, or any other non-transient non-200 such as 400/401/403) warns once and pins the estimator until restart. A transient failure (transport error, timeout, 408/429/5xx) warns and uses the estimator for `TOKENIZE_RETRY_AFTER_S` (60 s); the first count after that is the one probe, and success resumes remote counts (issue #835). `budget_verified` reads the counting thread's own last count, so a probe on another thread never confirms an estimated prompt |

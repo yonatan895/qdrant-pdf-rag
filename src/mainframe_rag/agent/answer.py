@@ -1558,6 +1558,33 @@ def _completed_finish_reason(state: _SseStreamState) -> str:
     return state.finish_reason
 
 
+def _buffered_result_from_stream(state: _SseStreamState) -> ChatResult:
+    """The buffered `ChatResult` for a stream consumed on behalf of a caller
+    that asked for one whole answer (issue #868). Same acceptance as a
+    non-streaming payload (#365): an upstream error or malformed frame, a
+    missing [DONE] or a missing explicit finish is an incomplete completion
+    (`TruncatedStreamError`, fixed label), never a synthesized `stop`; an
+    empty `stop` completion stays an empty result, as the buffered body was.
+    `ttft_ms` stays unset: TTFT is what `LLM_STREAM` opts into."""
+    reason = state.incomplete_reason()
+    if reason is not None:
+        raise TruncatedStreamError(len(state.content_parts), reason)
+    return ChatResult(
+        content="".join(state.content_parts),
+        finish_reason=_completed_finish_reason(state),
+        usage=_token_usage_from_dict(state.usage_data),
+    )
+
+
+def _is_json_response(resp: Any) -> bool:
+    """True when a streamed request was answered with a JSON body instead of
+    SSE: an endpoint that ignores `stream: true`. The buffered caller takes it
+    through the buffered-payload parser, as the plain POST did (issue #868)."""
+    headers = getattr(resp, "headers", None)
+    content_type = str(headers.get("content-type", "")).lower() if headers is not None else ""
+    return "json" in content_type and "event-stream" not in content_type
+
+
 def is_model_timeout(exc: BaseException) -> bool:
     """True when the reasoning leg ran out of its `answer_timeout_s` wait
     (connect, write, read or pool). The one classification behind the stable
@@ -1733,6 +1760,50 @@ class HttpxLLMClient:
             return self.achat(messages, reasoning_effort=reasoning_effort, temperature=temperature, max_tokens=max_tokens)
         return self._chat_sync(messages, reasoning_effort=reasoning_effort, temperature=temperature, max_tokens=max_tokens)
 
+    async def _achat_buffered_over_stream(
+        self,
+        base_url: str,
+        headers: dict[str, str],
+        body_stream: dict[str, Any],
+    ) -> ChatResult:
+        """One buffered answer read from the streamed wire (issue #868). A
+        gateway forwards a client disconnect to the model engine for a stream
+        but not for a buffered POST, so an abandoned buffered call kept the
+        engine generating. The wait stays what a buffered POST had: a total
+        `answer_timeout_s` for the whole generation (a stream's own timeout
+        renews on every frame and would otherwise lift the bound), reported
+        as the same `ReadTimeout`. No recovery POST (the buffered path never
+        had one); expiry and cancellation close the stream."""
+        state = _SseStreamState()
+        json_body: bytes | None = None
+        t0 = time.monotonic()
+        budget = asyncio.timeout(self._settings.answer_timeout_s)
+        try:
+            async with (
+                budget,
+                self._stream_http(
+                    "POST",
+                    f"{base_url.rstrip('/')}/chat/completions",
+                    json=body_stream,
+                    headers=headers,
+                ) as stream_resp,
+            ):
+                stream_resp.raise_for_status()
+                if _is_json_response(stream_resp):
+                    json_body = await stream_resp.aread()
+                else:
+                    async for line in stream_resp.aiter_lines():
+                        _feed_sse_line(state, line, t0)
+                        if state.terminal_seen():
+                            break
+        except TimeoutError:
+            if budget.expired():
+                raise httpx2.ReadTimeout("buffered model call exceeded answer_timeout_s") from None
+            raise
+        if json_body is not None:
+            return _chat_result_from_response(json.loads(json_body))
+        return _buffered_result_from_stream(state)
+
     async def achat(
         self,
         messages: list[ChatMessage],
@@ -1744,42 +1815,47 @@ class HttpxLLMClient:
         headers = bearer_auth_headers(self._settings.llm_api_key)
         serialized = [m.model_dump() for m in messages]
         body = _chat_body(model, serialized, reasoning_effort, temperature, max_tokens=max_tokens, stream=False)
-        if getattr(self._settings, "llm_stream", False):
-            try:
-                t0 = time.monotonic()
-                state = _SseStreamState()
-                body_stream = _chat_body(model, serialized, reasoning_effort, temperature, max_tokens=max_tokens, stream=True)
-                async with self._stream_http(
-                    "POST",
-                    f"{base_url.rstrip('/')}/chat/completions",
-                    json=body_stream,
-                    headers=headers,
-                ) as stream_resp:
-                    stream_resp.raise_for_status()
-                    async for line in stream_resp.aiter_lines():
-                        _feed_sse_line(state, line, t0)
-                        if state.terminal_seen():
-                            break
-                reason = state.incomplete_reason()
-                if reason is not None:
-                    # Transport truncation, upstream error/malformed frame, or
-                    # [DONE] without an explicit finish (issue #365): not a
-                    # complete answer. The except below recovers through the
-                    # non-streaming POST, which returns whole content — the
-                    # partial prefix is discarded.
-                    raise TruncatedStreamError(len(state.content_parts), reason)
-                content = "".join(state.content_parts)
-                if not content and not _ended_without_content(state):
-                    log.warning("streaming chat returned empty content; falling back to non-streaming POST")
-                else:
-                    usage = _token_usage_from_dict(state.usage_data)
-                    return ChatResult(content=content, finish_reason=_completed_finish_reason(state), usage=usage, ttft_ms=state.ttft_ms)
-            except httpx2.TimeoutException:
-                # The wait budget is spent; a recovery POST would start a
-                # second full think under a second budget (issue #868).
-                raise
-            except (httpx2.HTTPError, json.JSONDecodeError, KeyError, ValueError, OSError, TruncatedStreamError) as exc:
-                log.warning("streaming chat failed (%s); falling back to non-streaming POST", error_type(exc))
+        if not getattr(self._settings, "llm_stream", False):
+            return await self._achat_buffered_over_stream(
+                base_url,
+                headers,
+                _chat_body(model, serialized, reasoning_effort, temperature, max_tokens=max_tokens, stream=True),
+            )
+        try:
+            t0 = time.monotonic()
+            state = _SseStreamState()
+            body_stream = _chat_body(model, serialized, reasoning_effort, temperature, max_tokens=max_tokens, stream=True)
+            async with self._stream_http(
+                "POST",
+                f"{base_url.rstrip('/')}/chat/completions",
+                json=body_stream,
+                headers=headers,
+            ) as stream_resp:
+                stream_resp.raise_for_status()
+                async for line in stream_resp.aiter_lines():
+                    _feed_sse_line(state, line, t0)
+                    if state.terminal_seen():
+                        break
+            reason = state.incomplete_reason()
+            if reason is not None:
+                # Transport truncation, upstream error/malformed frame, or
+                # [DONE] without an explicit finish (issue #365): not a
+                # complete answer. The except below recovers through the
+                # non-streaming POST, which returns whole content — the
+                # partial prefix is discarded.
+                raise TruncatedStreamError(len(state.content_parts), reason)
+            content = "".join(state.content_parts)
+            if not content and not _ended_without_content(state):
+                log.warning("streaming chat returned empty content; falling back to non-streaming POST")
+            else:
+                usage = _token_usage_from_dict(state.usage_data)
+                return ChatResult(content=content, finish_reason=_completed_finish_reason(state), usage=usage, ttft_ms=state.ttft_ms)
+        except httpx2.TimeoutException:
+            # The wait budget is spent; a recovery POST would start a
+            # second full think under a second budget (issue #868).
+            raise
+        except (httpx2.HTTPError, json.JSONDecodeError, KeyError, ValueError, OSError, TruncatedStreamError) as exc:
+            log.warning("streaming chat failed (%s); falling back to non-streaming POST", error_type(exc))
 
         # Fallback note: this re-asks the reasoning model — a second full
         # think. Accepted on purpose: empty/failed content channels are a
@@ -1911,6 +1987,36 @@ class HttpxLLMClient:
         headers = bearer_auth_headers(self._settings.llm_api_key)
         serialized = [m.model_dump() for m in messages]
         body = _chat_body(model, serialized, reasoning_effort, temperature, max_tokens=max_tokens, stream=False)
+        if not getattr(self._settings, "llm_stream", False) and hasattr(self._sync_http(), "stream"):
+            # Issue #868: read the buffered answer from the streamed wire so
+            # an abandoned call is visible to the engine through the gateway.
+            # Total wait stays `answer_timeout_s`, checked per frame (a sync
+            # thread cannot be interrupted; the per-read timeout covers
+            # silence); no recovery POST, as before.
+            state = _SseStreamState()
+            json_body: bytes | None = None
+            t0 = time.monotonic()
+            with self._sync_http().stream(
+                "POST",
+                f"{base_url.rstrip('/')}/chat/completions",
+                json=_chat_body(model, serialized, reasoning_effort, temperature, max_tokens=max_tokens, stream=True),
+                headers=headers,
+            ) as stream_resp:
+                stream_resp.raise_for_status()
+                if _is_json_response(stream_resp):
+                    json_body = stream_resp.read()
+                    if time.monotonic() - t0 > self._settings.answer_timeout_s:
+                        raise httpx2.ReadTimeout("buffered model call exceeded answer_timeout_s")
+                else:
+                    for line in stream_resp.iter_lines():
+                        _feed_sse_line(state, line, t0)
+                        if state.terminal_seen():
+                            break
+                        if time.monotonic() - t0 > self._settings.answer_timeout_s:
+                            raise httpx2.ReadTimeout("buffered model call exceeded answer_timeout_s")
+            if json_body is not None:
+                return _chat_result_from_response(json.loads(json_body))
+            return _buffered_result_from_stream(state)
         if getattr(self._settings, "llm_stream", False) and hasattr(self._sync_http(), "stream"):
             body_stream = _chat_body(model, serialized, reasoning_effort, temperature, max_tokens=max_tokens, stream=True)
             try:
