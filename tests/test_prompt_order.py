@@ -373,3 +373,76 @@ def test_chat_budget_standalone_and_scope_change_follow_same_policy():
     # The latest turn (stale[-2:]) is the antecedent; older turns are gone.
     assert [m.content for m in prepared.messages[1:3]] == [m.content for m in stale[-2:]]
     assert len(prepared.messages) == 4
+
+
+# Issue #944: the question frame names the code the retrieval resolved when it
+# differs from the literal query token. Expected strings are written out, not
+# derived from the producer.
+_RESOLVED_CASES = [
+    ("abend SAFB", "Question: abend SAFB\nResolved system code: SAFB = AFB"),
+    ("What is S0C4?", "Question: What is S0C4?\nResolved system code: S0C4 = 0C4"),
+    ("explain SB37", "Question: explain SB37\nResolved system code: SB37 = B37"),
+    ("abend X'0C4' meaning", "Question: abend X'0C4' meaning\nResolved system code: X'0C4' = 0C4"),
+    (
+        "S0C4 vs X'0C4'",
+        "Question: S0C4 vs X'0C4'\nResolved system code: S0C4 = 0C4; X'0C4' = 0C4",
+    ),
+]
+_UNCHANGED = [
+    "abend 370 on S370",
+    "abend ABC and sabc","abend 0C4", "What does IEA500I mean?", "completion code 806", "U4038 abend"]
+
+
+@pytest.mark.parametrize("order", ["retrieval", "stable_cache"])
+@pytest.mark.parametrize("query,frame", _RESOLVED_CASES)
+def test_resolved_code_note_single_turn_and_chat(query, frame, order):
+    from mainframe_rag.agent.answer import build_chat_messages
+    from mainframe_rag.ports import ChatMessage
+
+    hits = [_hit("SA22-0000-00 Ref, p. 1-6", "Body.")]
+    single = build_messages(query, hits, complexity="simple", order=order).messages[-1].content
+    chat = build_chat_messages(
+        [ChatMessage(role="user", content=query)], hits, complexity="simple", order=order
+    ).messages[-1].content
+    for user in (single, chat):
+        assert frame in user
+        assert user.count("Resolved system code:") == 1
+
+
+@pytest.mark.parametrize("query", _UNCHANGED)
+def test_resolved_code_note_absent_when_nothing_differs(query):
+    from mainframe_rag.agent.answer import build_chat_messages
+    from mainframe_rag.ports import ChatMessage
+
+    hits = [_hit("SA22-0000-00 Ref, p. 1-6", "Body.")]
+    single = build_messages(query, hits, complexity="simple").messages[-1].content
+    chat = build_chat_messages(
+        [ChatMessage(role="user", content=query)], hits, complexity="simple"
+    ).messages[-1].content
+    assert "Resolved system code" not in single
+    assert "Resolved system code" not in chat
+    assert f"Question: {query}\n" in single
+
+
+def test_resolved_code_note_is_the_line_after_the_question_and_has_no_chunk_text():
+    hits = [_hit("SA22-0000-00 Ref, p. 1-6", "CHUNK-SECRET-TEXT")]
+    user = build_messages("abend SAFB", hits, complexity="simple").messages[-1].content
+    line = "Resolved system code: SAFB = AFB"
+    assert f"Question: abend SAFB\n{line}\n" in user
+    assert "CHUNK-SECRET-TEXT" not in line
+
+
+@pytest.mark.parametrize(
+    "query,note",
+    [
+        ("abend SAFB and S0C4 s0c4", "Resolved system code: S0C4 = 0C4; SAFB = AFB"),
+        ("S0C4 S0C4 s0c4", "Resolved system code: S0C4 = 0C4"),
+        ("s0c4 S0C4", "Resolved system code: s0c4 = 0C4"),
+        ("abend 370 on S370", ""),
+        ("abend ABC and sabc", ""),
+    ],
+)
+def test_resolved_code_note_exact_and_only_what_retrieval_resolved(query, note):
+    from mainframe_rag.agent.answer import resolved_code_note
+
+    assert resolved_code_note(query) == note
