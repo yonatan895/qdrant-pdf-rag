@@ -41,9 +41,10 @@
   was inconclusive at that scale. The pin stays v1.1.2; no fall-back to v1.0.4.
   - **Upgrade gap closed:** the volume upgrade is no longer untested; it is the
     1.0.4 to 1.1.2 run above. A later release still needs its own pin-bump run.
-  - **kill -9 trade-off:** the 107 of 107 spans present before the kill survive,
-    but spans from roughly the last 6 s before the kill were not visible (4 of
-    119). Traces accept losing about the last 6 s on a hard kill.
+  - **kill -9 trade-off:** G4 tracked 119 requests before the kill. The 107
+    sent before the final window were all visible after restart (0 missing). Of
+    the other 12, sent in the last window before the kill (about 6 s), 4 were
+    not visible. Traces accept losing about the last 6 s on a hard kill.
   - **S7 is unchanged:** 400 acknowledged, 159 stored on v1.1.2 (161 on v1.0.4),
     still silent loss with HTTP 200. Mitigation: headroom plus a required
     site-side alert (finding below).
@@ -56,7 +57,9 @@
     `ZO_DISK_CIRCUIT_BREAKER_ENABLED=true` was also tested (same method;
     threshold 50 with the tmpfs at 68%, and thresholds 30 and 0.3 with the root
     filesystem near 41%): JSON ingest kept returning HTTP 200 and no request
-    was refused, so it gives no visible refusal. Decision (maintainer): no
+    was refused, so it gives no visible refusal on that path. OTLP refusal was not
+    tested: the OTLP probe returned a 206 partial-success on a stale timestamp,
+    not a refusal. Decision (maintainer, [#956 comment](https://github.com/yonatan895/qdrant-pdf-rag/issues/956#issuecomment-6373896870)): the disk-full criterion moves to a documented site check (#807); no
     PrometheusRule and no in-app signal. S7 stays silent loss at the
     product level, mitigated by headroom and a required site-side alert on the
     platform's kubelet volume metrics for `openobserve-data`
