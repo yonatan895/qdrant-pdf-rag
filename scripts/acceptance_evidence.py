@@ -63,7 +63,7 @@ def unit_producers(source: bytes, digest: str) -> tuple[NativeProducer, ...]:
     """Select only a supported layout from independently approved workflow bytes."""
     require(hashlib.sha256(source).hexdigest() == digest)
     text = source.decode('utf-8')
-    names = re.findall(r'^    name: unit \(\$\{\{ matrix\.shard \}\}/([24])\)$', text, re.MULTILINE)
+    names = re.findall(r'^    name: unit \(\$\{\{ matrix\.shard \}\}/([248])\)$', text, re.MULTILINE)
     matrices = re.findall(r'^        shard: \[([^\n]+)\]$', text, re.MULTILINE)
     require(len(names) == len(matrices) == 1)
     shards = int(names[0])
@@ -277,7 +277,7 @@ def normalize_native(
     if producer.lane == 'unit_tests':
         if unit_policy is None:
             raise ValueError("native unit selection policy is required")
-        layout = re.fullmatch(r'unit \(([1-4])/([24])\)', producer.job)
+        layout = re.fullmatch(r'unit \(([1-8])/([248])\)', producer.job)
         require(layout is not None)
         assert layout is not None
         shard, shards = map(int, layout.groups())

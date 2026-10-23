@@ -827,11 +827,11 @@ class TestTaskCiConsumers(unittest.TestCase):
         import yaml
 
         jobs = yaml.safe_load((self.root / ".github/workflows/ci.yml").read_text())["jobs"]
-        self.assertEqual(jobs["unit"]["strategy"]["matrix"], {"shard": [1, 2, 3, 4]})
+        self.assertEqual(jobs["unit"]["strategy"]["matrix"], {"shard": [1, 2, 3, 4, 5, 6, 7, 8]})
         self.assertIs(jobs["unit"]["strategy"]["fail-fast"], False)
         command = next(s["run"] for s in jobs["unit"]["steps"] if s.get("name") == "Run unit shard")
         self.assertIn("--unit-shard=${{ matrix.shard }}", command)
-        self.assertIn("--unit-shards=4", command)
+        self.assertIn("--unit-shards=8", command)
         self.assertIn("scripts/ci_evidence.py --lane unit_tests", command)
         self.assertNotIn("-- python -m pytest", command)
         gate = jobs["test"]
@@ -1200,7 +1200,7 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
 
         from scripts.acceptance_evidence import unit_producers
 
-        for shards in (2, 4):
+        for shards in (2, 4, 8):
             source = (f'    name: unit (${{{{ matrix.shard }}}}/{shards})\n'
                       '        shard: [' + ', '.join(map(str, range(1, shards + 1))) + ']\n').encode()
             producers = unit_producers(source, hashlib.sha256(source).hexdigest())
@@ -1209,7 +1209,7 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
             self.assertEqual([producer.artifact for producer in producers],
                              [f'unit-{shard}' for shard in range(1, shards + 1)])
             for invalid in (source + source, source.replace(b'shard: [1, 2', b'shard: [1, 1'),
-                            source.replace(b'/4)', b'/3)').replace(b'/2)', b'/3)'), b'unknown'):
+                            source.replace(f'/{shards})'.encode(), b'/3)'), b'unknown'):
                 with self.assertRaises(ValueError):
                     unit_producers(invalid, hashlib.sha256(invalid).hexdigest())
             with self.assertRaises(ValueError):
