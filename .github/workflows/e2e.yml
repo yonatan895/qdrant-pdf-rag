@@ -28,7 +28,7 @@ permissions:
 
 concurrency:
   group: e2e-${{ github.ref || github.run_id }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   INGEST_IMAGE_LOCAL: mainframe-rag/ingest
@@ -291,6 +291,7 @@ jobs:
             dist/qdrant-pdf-rag-*.tar.sha256
             dist/PACKING_RECORD.txt
             dist/MANIFEST.txt
+          compression-level: 0
           retention-days: 90
 
   # --------------------------- air-gap handoff acceptance (black box)
