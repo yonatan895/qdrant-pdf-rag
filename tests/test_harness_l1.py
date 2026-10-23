@@ -11,7 +11,11 @@ import pytest
 from scripts.harness import (
     GOLDEN_SHA_LEGACY_WARNING,
     GOLDEN_SHA_MISMATCH_MESSAGE,
+    HOLDOUT_PIN_LEGACY_WARNING,
+    HOLDOUT_PIN_MISMATCH_MESSAGE,
     baseline_path_for,
+    check_holdout_pin,
+    holdout_pin_sha256,
     load_baseline,
     pin_snapshot,
     resolve_snapshot_action,
@@ -747,6 +751,67 @@ def test_golden_sha_never_reads_the_holdout(tmp_path):
     from scripts.harness import golden_sha256
 
     assert golden_sha256([tmp_path / "holdout.jsonl"]) is None  # absent file: not opened
+
+
+def _holdout_dir(tmp_path, pin="a" * 64):
+    d = tmp_path / "evals"
+    d.mkdir()
+    (d / "holdout.jsonl.sha256").write_text(f"{pin}  evals/holdout.jsonl\n")
+    return d / "holdout.jsonl"  # deliberately not created
+
+
+def test_holdout_pin_read_from_pin_file_and_holdout_never_opened(tmp_path, monkeypatch):
+    import builtins
+    from pathlib import Path
+
+    holdout = _holdout_dir(tmp_path)
+    opened: list[str] = []
+    real_open, real_read_text, real_read_bytes = builtins.open, Path.read_text, Path.read_bytes
+
+    def spy_open(f, *a, **k):
+        opened.append(str(f))
+        return real_open(f, *a, **k)
+
+    def spy_text(self, *a, **k):
+        opened.append(str(self))
+        return real_read_text(self, *a, **k)
+
+    def spy_bytes(self, *a, **k):
+        opened.append(str(self))
+        return real_read_bytes(self, *a, **k)
+
+    monkeypatch.setattr(builtins, "open", spy_open)
+    monkeypatch.setattr(Path, "read_text", spy_text)
+    monkeypatch.setattr(Path, "read_bytes", spy_bytes)
+    from scripts.harness import golden_sha256
+
+    assert holdout_pin_sha256([holdout]) == "a" * 64
+    assert golden_sha256([holdout]) is None
+    assert opened and all(not o.endswith("holdout.jsonl") for o in opened)
+
+
+def test_holdout_pin_match_passes():
+    assert check_holdout_pin({"_meta": {"holdout_pin_sha256": "a" * 64}}, "a" * 64) is None
+
+
+def test_holdout_pin_mismatch_refuses_with_its_own_code():
+    msg = check_holdout_pin({"_meta": {"holdout_pin_sha256": "a" * 64}}, "b" * 64)
+    assert msg == HOLDOUT_PIN_MISMATCH_MESSAGE
+    assert msg.startswith("FAIL [HARNESS_HOLDOUT_PIN_MISMATCH]")
+
+
+def test_holdout_pin_legacy_baseline_warns():
+    assert check_holdout_pin({"_meta": {}}, "a" * 64) == HOLDOUT_PIN_LEGACY_WARNING
+
+
+def test_dev_only_runs_are_unaffected_by_holdout_pin(tmp_path):
+    assert check_holdout_pin({"_meta": {}}, None) is None
+    path = tmp_path / "b.json"
+    save_baseline(path, _summary(), embed_mode="hash", snapshot={"points_count": 1}, golden_sha="c" * 64)
+    assert "holdout_pin_sha256" not in load_baseline(path)["_meta"]
+    save_baseline(path, _summary(), embed_mode="vllm", snapshot={"points_count": 1},
+                  golden_sha="c" * 64, holdout_pin="a" * 64)
+    assert load_baseline(path)["_meta"]["holdout_pin_sha256"] == "a" * 64
 
 
 _AUTH_SECRET = "s3cret-harness-key-950"

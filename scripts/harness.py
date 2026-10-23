@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -94,9 +95,42 @@ def check_golden_sha(baseline: dict[str, Any], run_sha: str | None) -> str | Non
     return None
 
 
+HOLDOUT_PIN_MISMATCH_CODE = "HARNESS_HOLDOUT_PIN_MISMATCH"
+HOLDOUT_PIN_MISMATCH_MESSAGE = (
+    f"FAIL [{HOLDOUT_PIN_MISMATCH_CODE}]: the frozen-holdout pin used for this run differs from "
+    "the pin the baseline was recorded on; refusing to compare or promote."
+)
+HOLDOUT_PIN_LEGACY_WARNING = (
+    "warn [HARNESS_HOLDOUT_PIN_UNRECORDED]: the baseline records no holdout_pin_sha256 (legacy); "
+    "the holdout pin cannot be verified. Continuing."
+)
+
+
+def holdout_pin_sha256(paths: list[Path]) -> str | None:
+    """The holdout's PINNED sha256, read from its adjacent .sha256 file only;
+    holdout.jsonl itself is never opened (#859). None for dev-only runs."""
+    for p in paths:
+        if p.name == HOLDOUT_FILENAME or p.resolve().name == HOLDOUT_FILENAME:
+            pin = p.resolve().with_name(HOLDOUT_FILENAME + ".sha256")
+            m = re.match(r"([0-9a-fA-F]{64})\b", pin.read_text(encoding="utf-8"))
+            return m[1].lower() if m else None
+    return None
+
+
+def check_holdout_pin(baseline: dict[str, Any], run_pin: str | None) -> str | None:
+    """Mismatch message, legacy warning (run has a pin, baseline none), or
+    None. A dev-only run against a dev-only baseline is unaffected."""
+    recorded = (baseline.get("_meta") or {}).get("holdout_pin_sha256")
+    if recorded is None and run_pin is None:
+        return None
+    if recorded is None:
+        return HOLDOUT_PIN_LEGACY_WARNING
+    return None if recorded == run_pin else HOLDOUT_PIN_MISMATCH_MESSAGE
+
+
 def save_baseline(
     path: Path, summary: dict[str, Any], *, embed_mode: str, snapshot: dict[str, Any],
-    golden_sha: str | None = None,
+    golden_sha: str | None = None, holdout_pin: str | None = None,
 ) -> None:
     doc = {
         "_meta": {
@@ -110,6 +144,8 @@ def save_baseline(
         },
         **summary,
     }
+    if holdout_pin:
+        doc["_meta"]["holdout_pin_sha256"] = holdout_pin
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(doc, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
 
@@ -317,6 +353,7 @@ def main(argv: list[str] | None = None) -> int:
               "Record it first: sh scripts/tools/run-task.sh eval:harness:baseline", file=sys.stderr)
         return 1
     run_golden_sha = golden_sha256(golden_paths)
+    run_holdout_pin = holdout_pin_sha256(golden_paths)
     if baseline is not None and not args.update_baseline:
         note = check_golden_sha(baseline, run_golden_sha)
         if note == GOLDEN_SHA_MISMATCH_MESSAGE:
@@ -324,6 +361,12 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         if note:
             print(note, file=sys.stderr)
+        pin_note = check_holdout_pin(baseline, run_holdout_pin)
+        if pin_note == HOLDOUT_PIN_MISMATCH_MESSAGE:
+            print(pin_note, file=sys.stderr)
+            return 1
+        if pin_note:
+            print(pin_note, file=sys.stderr)
     print(f"[*] harness L1: {len(entries)} entries, collection {collection!r}, "
           f"embed_mode={settings.embed_mode}, baseline={baseline_path.name}", file=sys.stderr)
 
@@ -389,7 +432,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.update_baseline:
         save_baseline(baseline_path, summary, embed_mode=settings.embed_mode, snapshot=pin,
-                      golden_sha=run_golden_sha)
+                      golden_sha=run_golden_sha, holdout_pin=run_holdout_pin)
         print(f"[*] baseline recorded: {baseline_path}", file=sys.stderr)
         verdict, reasons = "baseline", ["baseline recorded"]
     else:
