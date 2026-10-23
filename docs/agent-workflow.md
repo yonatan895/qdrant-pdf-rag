@@ -317,8 +317,11 @@ the dispatch record plus a `comment` binding (id, creation time, head SHA);
 the consumer re-reads that comment and requires it to still match the current
 head. Because the comment itself updates the PR timestamp, the head-SHA
 binding replaces the dispatch path's "updated before dispatch" rule. The run
-reacts to the comment and replies with the recorded SHA; completing it
-re-evaluates candidate-acceptance exactly as a dispatched run does. Deleting
+stays one read-only `record-decision` job (the consumer accepts exactly one
+successful job); completing it re-evaluates candidate-acceptance exactly as a
+dispatched run does. A separate `verifier-feedback.yml`, triggered when that
+run completes, reacts to the comment and replies with the recorded SHA, or
+reports that nothing was recorded; it never records or validates a decision. Deleting
 or editing the comment withdraws the approval. Comment runs by anyone else are
 skipped and ignored. Dispatch remains the fallback.
 The workflow does not mark ready, submit a PR review, merge, or change settings.

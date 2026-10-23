@@ -33,6 +33,8 @@ permissions:
   contents: read
   pull-requests: read
 jobs:
+  # Exactly one job: scripts/verifier_approval.py accepts a run with one successful
+  # record-decision job and nothing else. Comment feedback lives in verifier-feedback.yml.
   record-decision:
     if: >-
       github.ref == 'refs/heads/main' && github.actor == 'yonatan895' && github.triggering_actor == 'yonatan895'
@@ -79,33 +81,3 @@ jobs:
           name: ${{ (steps.dispatch.outputs.kind || steps.comment.outputs.kind) == 'catalogue-anchors' && 'catalogue-anchor-decision' || 'verifier-decision' }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/evidence.json
           if-no-files-found: error
-  acknowledge:
-    # Feedback only: a reaction and a fixed-format reply. No checkout, no PR data in a shell.
-    needs: record-decision
-    if: always() && github.event_name == 'issue_comment' && needs.record-decision.result != 'skipped'
-    runs-on: ubuntu-latest
-    timeout-minutes: 2
-    permissions:
-      issues: write
-    steps:
-      - name: React and reply
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPOSITORY: ${{ github.repository }}
-          COMMENT_ID: ${{ github.event.comment.id }}
-          PR_NUMBER: ${{ github.event.issue.number }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          RESULT: ${{ needs.record-decision.result }}
-          DECISION: ${{ needs.record-decision.outputs.decision }}
-          HEAD_SHA: ${{ needs.record-decision.outputs.head_sha }}
-        run: |
-          case "$HEAD_SHA" in *[!0-9a-f]*) HEAD_SHA="" ;; esac
-          if [ "$RESULT" = success ] && [ "${#HEAD_SHA}" = 40 ] && { [ "$DECISION" = approve ] || [ "$DECISION" = revoke ]; }; then
-            gh api -X POST "repos/$REPOSITORY/issues/comments/$COMMENT_ID/reactions" -f content='+1' >/dev/null
-            gh api -X POST "repos/$REPOSITORY/issues/$PR_NUMBER/comments" \
-              -f body="Verifier decision recorded: $DECISION for head \`$HEAD_SHA\`. The acceptance check re-evaluates after this run. Any push needs a new decision. $RUN_URL" >/dev/null
-          else
-            gh api -X POST "repos/$REPOSITORY/issues/comments/$COMMENT_ID/reactions" -f content='-1' >/dev/null
-            gh api -X POST "repos/$REPOSITORY/issues/$PR_NUMBER/comments" \
-              -f body="Verifier decision NOT recorded (stale or unknown head, bad command, or not the maintainer). Usage: \`/verifier approve <head-sha> [catalogue-anchors]\` or \`/verifier revoke [catalogue-anchors]\`. $RUN_URL" >/dev/null
-          fi

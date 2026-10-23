@@ -1,0 +1,60 @@
+# Feedback for "/verifier" PR comments (#929). It runs after the Verifier update
+# decision run completes, so that run stays a single read-only job (its
+# validator accepts exactly one successful record-decision job). Feedback only:
+# it never records, changes or validates a decision, and reads no PR code.
+name: Verifier comment feedback
+on:
+  workflow_run:
+    workflows: ['Verifier update decision']
+    types: [completed]
+permissions: {}
+jobs:
+  feedback:
+    if: >-
+      github.event.workflow_run.event == 'issue_comment'
+      && github.event.workflow_run.head_branch == 'main'
+      && (github.event.workflow_run.conclusion == 'success' || github.event.workflow_run.conclusion == 'failure')
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      actions: read
+      issues: write
+      pull-requests: write
+    steps:
+      - name: React and reply from the completed decision run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 -I - <<'PY'
+          import io, json, os, re, subprocess, zipfile
+          event = json.load(open(os.environ['GITHUB_EVENT_PATH']))
+          run = event['workflow_run']
+          repo = event['repository']['full_name']
+          title = re.fullmatch(r'(?:Verifier|Catalogue anchors) PR ([0-9]{1,7}): (approve|revoke)', run.get('display_title', ''))
+          if not title or not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repo):
+              raise SystemExit(0)
+          pr, decision = title.group(1), title.group(2)
+          def api(*args, data=None):
+              return subprocess.run(['gh', 'api', *args], check=True, capture_output=True, input=data).stdout
+          url = run['html_url']
+          if run['conclusion'] == 'success':
+              arts = json.loads(api(f"repos/{repo}/actions/runs/{run['id']}/artifacts"))['artifacts']
+              names = [a for a in arts if re.fullmatch(r'(verifier|catalogue-anchor)-decision-[0-9]+', a['name'])]
+              if len(names) != 1:
+                  raise SystemExit(0)
+              raw = api(f"repos/{repo}/actions/artifacts/{names[0]['id']}/zip")
+              record = json.loads(zipfile.ZipFile(io.BytesIO(raw)).read('evidence.json'))
+              comment = record.get('comment') or {}
+              cid, head = comment.get('id'), str(comment.get('head_sha', ''))
+              if type(cid) is not int or not re.fullmatch(r'[0-9a-f]{40}', head):
+                  raise SystemExit(0)
+              api('-X', 'POST', f'repos/{repo}/issues/comments/{cid}/reactions', '-f', 'content=+1')
+              api('-X', 'POST', f'repos/{repo}/issues/{pr}/comments', '-f',
+                  f'body=Verifier decision recorded: {decision} for head `{head}`. '
+                  f'The acceptance check re-evaluates after this run. Any push needs a new decision. {url}')
+          else:
+              api('-X', 'POST', f'repos/{repo}/issues/{pr}/comments', '-f',
+                  'body=Verifier decision NOT recorded (stale or unknown head, bad command, or not the maintainer). '
+                  'Usage: `/verifier approve <head-sha> [catalogue-anchors]` or `/verifier revoke [catalogue-anchors]`. '
+                  + url)
+          PY
