@@ -42,9 +42,14 @@ def base_values() -> dict:
                 "tag": IMAGE_SHA,
                 "pullPolicy": "IfNotPresent",
             },
-            "jaeger": {
-                "repository": f"{BASE_ENV['INTERNAL_REGISTRY']}/jaegertracing/jaeger",
-                "tag": "v2.20.0",
+            "openobserve": {
+                "repository": f"{BASE_ENV['INTERNAL_REGISTRY']}/openobserve/openobserve",
+                "tag": "v1.1.2",
+                "pullPolicy": "IfNotPresent",
+            },
+            "otelcol": {
+                "repository": f"{BASE_ENV['INTERNAL_REGISTRY']}/otel/opentelemetry-collector-contrib",
+                "tag": "0.160.0",
                 "pullPolicy": "IfNotPresent",
             },
             "oauthProxy": {
@@ -72,10 +77,11 @@ def base_values() -> dict:
         "gateway": {"apiKeySecretName": "", "caConfigMapName": ""},
         "tracing": {
             "enabled": True,
-            "endpoint": "http://jaeger:4318",
+            "endpoint": "",
             "deploymentEnvironment": "",
             "serviceName": "",
         },
+        "openobserve": {"credentialsSecretName": "openobserve-credentials"},
         "metrics": {"enabled": False},
         "ui": {"enabled": True},
         "networkPolicy": {"enabled": True, "allowedNamespaces": []},

@@ -320,22 +320,22 @@ Reranked search also needs `RERANK_ENABLED=true RERANK_BASE_URL=http://127.0.0.1
 
 #### Local Production Simulation (`sh scripts/tools/run-task.sh local:stack`)
 
-The ownership contract is explicit: in production the platform team owns the model tier (vLLM + LiteLLM) and this repo owns Qdrant + ingest + retrieval + the agent, reaching every model leg only over the gateway HTTP contract. `sh scripts/tools/run-task.sh local:stack` reproduces that **complete topology on one machine** — pinned Qdrant + Jaeger + the real LiteLLM gateway (digest-pinned) in front of the enabled local vLLM backends + the FastAPI agent — and probes every leg through the gateway **and verifies a trace landed in Jaeger** before declaring the stack up. Agent and ingest never call vLLM directly, so the wire contract under test is the production one.
+The ownership contract is explicit: in production the platform team owns the model tier (vLLM + LiteLLM) and this repo owns Qdrant + ingest + retrieval + the agent, reaching every model leg only over the gateway HTTP contract. `sh scripts/tools/run-task.sh local:stack` reproduces that **complete topology on one machine** — pinned Qdrant + OpenObserve + the real LiteLLM gateway (digest-pinned) in front of the enabled local vLLM backends + the FastAPI agent — and probes every leg through the gateway **and verifies a trace landed in OpenObserve** before declaring the stack up. Agent and ingest never call vLLM directly, so the wire contract under test is the production one.
 
 Prerequisites: Docker, `.venv`, reasoning on :8000 and embeddings on :8001. Start reranking on :8002 only when enabled. The current two-model rehearsal explicitly uses `RERANK_ENABLED=false`. Qdrant is started via `sh scripts/tools/run-task.sh local:qdrant:up` (the pinned-image owner) when unreachable; `sh scripts/tools/run-task.sh local:qdrant:down` stops it.
 
 ```bash
-# Full stack: Qdrant -> Jaeger -> gateway -> probe -> (optional ingest) -> agent -> smoke -> trace check
+# Full stack: Qdrant -> OpenObserve -> gateway -> probe -> (optional ingest) -> agent -> smoke -> trace check
 RERANK_ENABLED=false sh scripts/tools/run-task.sh local:stack
 RERANK_ENABLED=false CORPUS_DIR=output/demo-pdfs sh scripts/tools/run-task.sh local:stack     # also ingest through the gateway
 LOCAL_STACK_DRYRUN=1 sh scripts/tools/run-task.sh local:stack            # ordered plan only; no docker/network
 ```
 
-Tracing is part of the stack, not a flag: the agent and (when `CORPUS_DIR` is set) the ingest run export OTLP to Jaeger, and a `v1.search` span must land before the stack reports up. Jaeger reuses an instance already answering on the UI port (an operator-managed one is left alone) or starts the digest-pinned owner (`scripts/run_local_jaeger.sh`); the real local LiteLLM gateway also exports its spans there so the gateway hop appears in the waterfall. Gateway spans leave the gateway only through an attribute allowlist (`scripts/gateway/trace_privacy.py`, #636): operation, model, token usage, HTTP/DB status and error type are kept; request/response content, API-key-derived metadata, `hidden_params`, key-management records, exception text, events and status descriptions are dropped, and `turn_off_message_logging` / `redact_user_api_key_info` are set for every logging callback. An owned Jaeger keeps at most `JAEGER_MAX_TRACES` traces (default 20000, oldest evicted) in a container capped at `JAEGER_MEMORY` (default `1g`, no swap); a reused Jaeger keeps whatever bounds it was started with. The Jaeger **browser UI** is at `http://127.0.0.1:16686`.
+Tracing is part of the stack, not a flag: the agent and (when `CORPUS_DIR` is set) the ingest run export OTLP to OpenObserve, and a `v1.search` span must land before the stack reports up. OpenObserve reuses an instance already answering on its port (an operator-managed one is left alone) or starts the digest-pinned owner (`scripts/run_local_openobserve.sh`); the real local LiteLLM gateway also exports its spans there so the gateway hop appears in the waterfall. Gateway spans leave the gateway only through an attribute allowlist (`scripts/gateway/trace_privacy.py`, #636): operation, model, token usage, HTTP/DB status and error type are kept; request/response content, API-key-derived metadata, `hidden_params`, key-management records, exception text, events and status descriptions are dropped, and `turn_off_message_logging` / `redact_user_api_key_info` are set for every logging callback. An owned OpenObserve runs in a container capped at `O2_MEMORY` (default `1g`, no swap) with its data in the named volume `O2_VOLUME`; a reused one keeps whatever bounds it was started with. The OpenObserve **browser UI** is at `http://127.0.0.1:5080`.
 
 The operator console (ADR-0004) is part of the stack by default: the agent starts with `UI_ENABLED=true`, the up sequence smoke-checks `GET /ui` (HTTP 200), and the banner prints the console URL (`http://127.0.0.1:8080/ui`). Set `UI_ENABLED=false` to exercise the fail-closed 404 route set; `sh scripts/tools/run-task.sh local:agent` alone honors `UI_ENABLED` without a default.
 
-On exit (Ctrl-C) the agent, the gateway, and an owned Jaeger stop; Qdrant stays for `sh scripts/tools/run-task.sh local:qdrant:down`. Ports: agent 8080 (`LOCAL_AGENT_PORT`), gateway 4000 (`GATEWAY_PORT`), Jaeger UI 16686 / OTLP 4318 (`JAEGER_PORT`, `JAEGER_OTLP_PORT`), Qdrant `QDRANT_URL` (default `http://127.0.0.1:6333`). Ephemeral keys are written mode 600 to a temp env file (`GATEWAY_ENV_FILE`, default `/tmp/local-stack-gateway-<port>.env`) — never inside the repo, never committed.
+On exit (Ctrl-C) the agent, the gateway, and an owned OpenObserve stop; Qdrant stays for `sh scripts/tools/run-task.sh local:qdrant:down`. Ports: agent 8080 (`LOCAL_AGENT_PORT`), gateway 4000 (`GATEWAY_PORT`), OpenObserve UI and OTLP 5080 (`O2_PORT`), Qdrant `QDRANT_URL` (default `http://127.0.0.1:6333`). Ephemeral keys are written mode 600 to a temp env file (`GATEWAY_ENV_FILE`, default `/tmp/local-stack-gateway-<port>.env`) — never inside the repo, never committed.
 
 The gateway contract the stack exercises:
 
@@ -344,7 +344,7 @@ The gateway contract the stack exercises:
 * **Both rerank legs**: native `/v1/rerank` via the `hosted_vllm/` provider, plus a `/v1/score` pass-through to the vLLM backend (LiteLLM has no native score route). `scripts/probe_gateway.py` prints the recommended `RERANK_ENDPOINT_ORDER` after probing both.
 * **Tokenizer**: `/tokenize` stays 404 behind the gateway — the agent pins its in-process estimator after one warning (expected, not a fault).
 
-For single-component debugging, `sh scripts/tools/run-task.sh local:jaeger:up` / `sh scripts/tools/run-task.sh local:jaeger:down` manage just the trace backend, and `sh scripts/tools/run-task.sh local:gateway:up` keeps the gateway in the foreground (`sh scripts/tools/run-task.sh local:gateway:down` stops it and its key store); then export the printed keys and run `scripts/probe_gateway.py --require-reasoning --stream` and `sh scripts/tools/run-task.sh local:agent` yourself. The key store is a throwaway Postgres container + named volume (LiteLLM `/key/generate` needs a database): env-passed keys survive restarts, minted keys rotate per start (`GATEWAY_RESET_KEYS=1` wipes the store). `scripts/run_local_gateway.sh` owns gateway config rendering; the LiteLLM image is pinned by digest there. The model/gateway launcher is local-only. CI supplies its own gateway deployment and deterministic model computation; neither deployment belongs on a product path. The shared strict-finish module has a gateway-only LiteLLM import exception and is excluded from application images.
+For single-component debugging, `sh scripts/tools/run-task.sh local:openobserve:up` / `sh scripts/tools/run-task.sh local:openobserve:down` manage just the trace backend, and `sh scripts/tools/run-task.sh local:gateway:up` keeps the gateway in the foreground (`sh scripts/tools/run-task.sh local:gateway:down` stops it and its key store); then export the printed keys and run `scripts/probe_gateway.py --require-reasoning --stream` and `sh scripts/tools/run-task.sh local:agent` yourself. The key store is a throwaway Postgres container + named volume (LiteLLM `/key/generate` needs a database): env-passed keys survive restarts, minted keys rotate per start (`GATEWAY_RESET_KEYS=1` wipes the store). `scripts/run_local_gateway.sh` owns gateway config rendering; the LiteLLM image is pinned by digest there. The model/gateway launcher is local-only. CI supplies its own gateway deployment and deterministic model computation; neither deployment belongs on a product path. The shared strict-finish module has a gateway-only LiteLLM import exception and is excluded from application images.
 
 ---
 
@@ -371,10 +371,10 @@ CORPUS_DIR=output/demo-pdfs sh scripts/tools/run-task.sh local:stack
 ```
 
 Check an existing stack with `sh scripts/tools/run-task.sh local:check --
---agent URL --jaeger URL --query TEXT --followup TEXT --report PATH`; the
+--agent URL --trace-url URL --query TEXT --followup TEXT --report PATH`; the
 [retained-stack runbook](local-real-corpus.md#4-verify-and-retain-the-complete-live-stack)
 owns endpoint and private-report selection. It requires grounded first and
-follow-up answers, complete SSE and a fresh search trace. Representation
+follow-up answers, complete SSE and a fresh search trace (`--trace-backend` per [observability](observability.md#backend-status)); the OpenObserve credentials come from `TRACE_QUERY_USER` and `TRACE_QUERY_PASSWORD` in the environment. Representation
 changes use the [snapshot-gated ingestion migration](ingest.md#metadata-contract).
 For semantic answer quality on the configured live GPU stack, run
 `sh scripts/tools/run-task.sh eval:answers` under the [answer-tier contract](testing.md#answer-tier).
@@ -557,7 +557,7 @@ registry service-account credentials. Do not paste them into issue/PR text.
 This generates `dist/qdrant-pdf-rag-<sha>.tar` and its digest `dist/qdrant-pdf-rag-<sha>.tar.sha256`, containing:
 1. Complete Git repository bundle (`repo.bundle`).
 2. App container images (`qdrant-pdf-rag-agent`, `qdrant-pdf-rag-ingest`), with per-image digests bound in `MANIFEST.txt` and re-verified on load.
-3. Vendored third-party Qdrant unprivileged image and Jaeger v2 image (tag + digest pinned in `images.txt`).
+3. Vendored third-party Qdrant unprivileged image, OpenObserve OSS v1.1.2 image and otelcol-contrib 0.160.0 image (tag + digest pinned in `images.txt`; no Jaeger image).
 4. Vendored Helm chart (`charts/qdrant-1.19.2.tgz`).
 5. Self-contained extraction bootstrap script (`bootstrap.sh`).
 6. Manifest (`MANIFEST.txt`), Packing Record (`PACKING_RECORD.txt`), digest enumeration (`sbom.json`), third-party notices and license review status (`THIRD-PARTY-NOTICES.txt`, see [licensing](licensing.md); declared licenses only, not a legal approval), offline signature (`SHA256SUMS.sig` + `sneakernet-signing.pub`), and member `SHA256SUMS`.
@@ -806,7 +806,7 @@ sh scripts/tools/run-task.sh airgap:smoke
 
 The production and CI OpenShift values explicitly remove the chart's fixed UID,
 GID and fsGroup defaults. `restricted-v2` assigns the namespace identity and
-volume group. Jaeger also leaves IDs to admission. Application images make
+volume group. OpenObserve also leaves IDs to admission. Application images make
 only their cache and work directories group-0 writable.
 
 Require actual `restricted-v2` admission and successful data, snapshot,
@@ -835,18 +835,16 @@ Acceptance Criteria:
 ### 4.4.1 Tracing (active by default, issue #83)
 
 Tracing is **on by default**: leaving `OTEL_EXPORTER_OTLP_ENDPOINT` unset
-resolves to the in-cluster `http://jaeger:4318`, and `sh scripts/tools/run-task.sh airgap:deploy`
-renders and installs the Jaeger templates in `charts/mainframe-rag` (Jaeger v2 all-in-one, badger
-storage on a 10Gi RWO block PVC, 14-day span TTL, ClusterIP only) and wires
-the endpoint into the agent and the ingest Job. To disable tracing — and skip
-the Jaeger deployment entirely — set `OTEL_EXPORTER_OTLP_ENDPOINT=off` (also
-`none`, `false`, or `0`) in `airgap.env`. A custom `http(s)` OTLP/HTTP
-collector origin is accepted in place of the in-cluster Jaeger; anything else
-fails closed before a manifest is rendered. To keep exporting while skipping the
-bundled backend (`JAEGER_ENABLED=false`), also set `OTEL_EXPORTER_OTLP_ENDPOINT`
-to the external collector (the former `http://jaeger:4318` is fine when a
-platform-owned service really lives there) or to `off`; the unset default is
-refused in preflight, the values mapper and the chart (`tracing.endpoint`). `sh scripts/tools/run-task.sh airgap:validate` prints the
+selects the bundled OpenObserve OSS backend (ADR-0006, #956; the only trace
+backend, Jaeger is retired), and `sh scripts/tools/run-task.sh airgap:deploy`
+renders and installs it with its otelcol collector from `charts/mainframe-rag`,
+wires the export into the agent and the ingest Job, and checks both images
+against the packed digests (registry read-back before the release, running pods
+after rollout). To disable tracing and skip both workloads, set
+`OTEL_EXPORTER_OTLP_ENDPOINT=off` (also `none`, `false`, or `0`) in
+`airgap.env`. A custom `http(s)` origin is passed through unchanged; anything
+else fails closed before a manifest is rendered. `JAEGER_ENABLED` and
+`JAEGER_QUERY_URL` no longer exist. `sh scripts/tools/run-task.sh airgap:validate` prints the
 resolved mode.
 
 This traces **this repo's components only** (agent, retrieval, ingest); the
@@ -855,17 +853,22 @@ carry W3C `traceparent` so their gateway can correlate its spans with ours
 when it is tracing-enabled — nothing from this repo configures or deploys
 their monitoring.
 
-The sneakernet bundle always carries the Jaeger image (`images.txt` is a
+The sneakernet bundle always carries the OpenObserve and otelcol images (`images.txt` is a
 pack-wide contract — every pin with a recorded digest is mirrored on every
 pack; the oauth-proxy pin is skipped while `sha256:PENDING`), so the
 default-on path works in a disconnected install. The endpoint may be given
 with or without the `/v1/traces` path — the agent accepts both.
 `sh scripts/tools/run-task.sh airgap:smoke` proves a `v1.search` span landed before reporting
-acceptance (empty-collection runs and a disabled bundled Jaeger report tracing
-as skipped, trace arrival NOT VERIFIED); it polls the
-Jaeger query API at `JAEGER_QUERY_URL` (default `http://jaeger:16686`) —
-change that only when a custom collector exposes a Jaeger-compatible query
-API.
+acceptance (empty-collection runs report tracing as skipped, trace arrival NOT
+VERIFIED). With no manual env, smoke queries `http://openobserve:5080` and reads
+the credentials from the `openobserve-credentials` Secret at run time (never
+printed); `TRACE_QUERY_URL`, `TRACE_QUERY_USER` and `TRACE_QUERY_PASSWORD` override.
+
+**Bundle size (#956).** Jaeger v2.20.0 leaves the bundle and OpenObserve v1.1.2
+plus otelcol-contrib 0.160.0 enter it. By registry layer sizes read with
+`skopeo inspect --raw` for linux/amd64 (compressed): Jaeger -50.2 MB,
+OpenObserve +161.8 MB, otelcol +110.8 MB, net +222.4 MB. The docker-archive
+tars inside the bundle hold uncompressed layers, so the on-disk growth is larger.
 
 Every exported span carries deploy identity as resource attributes:
 `service.version` is the packed `IMAGE_SHA` for the agent Deployment, and
@@ -877,11 +880,11 @@ no `service.version` (issue #315). The agent also honors the standard
 `OTEL_RESOURCE_ATTRIBUTES` mapping underneath these explicit keys, and joins
 an upstream W3C `traceparent` when the caller sends one.
 
-View traces (port-forward only — Jaeger has no public Route, like Qdrant):
+View traces (port-forward only — OpenObserve has no public Route, like Qdrant):
 
 ```bash
-oc -n mainframe-rag port-forward svc/jaeger 16686:16686
-# open http://localhost:16686, service "mainframe-rag-agent" (rename via OTEL_SERVICE_NAME
+oc -n mainframe-rag port-forward svc/openobserve 5080:5080
+# open http://localhost:5080, service "mainframe-rag-agent" (rename via OTEL_SERVICE_NAME
 # in airgap.env — deploy.sh renders it, and strips the entry when unset so the
 # agent default stands)
 ```
@@ -1117,7 +1120,7 @@ beyond the namespace record the platform team's evidence and owner instead.
 | Certificates | Browser and CLI verify the Route hostname and ingress chain without bypass. The Route is `reencrypt`, targets OAuth 8443 and trusts the Service CA; the serving Secret matches its service identity. |
 | Agent ingress | `oc -n "$NAMESPACE" get networkpolicy rag-agent-ingress` exists (or `AGENT_NETWORK_POLICY=false` is a recorded site decision). Pods stay Ready after it is applied (probes). From a pod in a **different, unlisted** namespace, `rag-agent:8080` and the pod IP `:8080` fail while the same call from this namespace succeeds; the Route login still works (router to 8443) and a UWM scrape of `/metrics` succeeds when metrics are on. Record that the router and monitoring namespaces carry the `network.openshift.io/policy-group` labels (cluster-scoped read: platform evidence) and that no site allow-all policy selects the agent pods (policies are additive and would void the restriction). Repository tests prove the rendered rules only, not enforcement. |
 | Feedback ingress (only with `FEEDBACK_ENABLED`) | `oc -n "$NAMESPACE" get networkpolicy rag-feedback-ingress` exists. From an agent pod, `rag-feedback:8080/healthz` answers; from the ingest Job pod, a debug pod and a pod in another namespace, `rag-feedback:8080` and the pod IP fail; an unauthenticated request to an agent-reachable data route is 401. The claim `rag-feedback-data` is Bound on the intended block class and the pod writes it under `restricted-v2`. Record that no site allow-all policy selects the feedback pod (policies are additive) and, for a default-deny egress site, that agent to feedback is allowed. Repository tests prove the rendered rules only, not enforcement. |
-| Egress | Prove a public TCP destination is reachable from each application policy context first; after the namespace default-deny egress policy with narrow DNS, Qdrant, Jaeger, OAuth/API and gateway allows, a bounded direct-IP connection to that address fails while DNS and gateway calls succeed. Repeat ingest, gateway streaming probe, retrieval, tracing, OAuth login, cited answers and stream endings under the policy. An unresolved name or invalid certificate is not evidence of blocking. |
+| Egress | Prove a public TCP destination is reachable from each application policy context first; after the namespace default-deny egress policy with narrow DNS, Qdrant, OpenObserve, OAuth/API and gateway allows, a bounded direct-IP connection to that address fails while DNS and gateway calls succeed. Repeat ingest, gateway streaming probe, retrieval, tracing, OAuth login, cited answers and stream endings under the policy. An unresolved name or invalid certificate is not evidence of blocking. |
 | Node pulls | An uncached public image pull fails and an uncached internal-registry pull succeeds, recorded with digests and events. A cached image proves neither; NetworkPolicy success does not imply node isolation. |
 
 ```sh

@@ -286,7 +286,7 @@ it follows the maintainer's review of these numbers.
 ### Air-gap deployment tier (`sh scripts/tools/run-task.sh airgap:dryrun`, `tests/test_airgap_*.py`, local Kind)
 
 The canonical 5-stage deployment pipeline (`airgap:validate` -> `airgap:load` -> `airgap:deploy` -> `airgap:ingest` -> `airgap:smoke`; `airgap:pack` is the connected-host pre-step) is verified across three complementary tiers:
-1. **Hermetic Test Suite (`pytest tests/test_airgap_*.py`):** Fast unit tests running without a cluster or Docker daemon. Exercises `scripts/airgap/*.sh` using real Helm for rendering and stubs for cluster mutations, `kubectl`, `oc`, and `skopeo`. Verifies pre-flight environment validation (`validate.sh`), sneakernet extraction and bootstrap (`bootstrap.sh`), pipeline orchestration (`pipeline.sh`), manifest rendering, string quoting of integers and booleans (`DENSE_DIM`, `INGEST_WORKERS`, `RERANK_ENABLED`), storage class checks (refusing NFS), Jaeger v2 wiring, conditional gateway Secret-reference rendering plus plaintext-key refusal and Secret verification, and fail-closed behavior on `/healthz` probe failures.
+1. **Hermetic Test Suite (`pytest tests/test_airgap_*.py`):** Fast unit tests running without a cluster or Docker daemon. Exercises `scripts/airgap/*.sh` using real Helm for rendering and stubs for cluster mutations, `kubectl`, `oc`, and `skopeo`. Verifies pre-flight environment validation (`validate.sh`), sneakernet extraction and bootstrap (`bootstrap.sh`), pipeline orchestration (`pipeline.sh`), manifest rendering, string quoting of integers and booleans (`DENSE_DIM`, `INGEST_WORKERS`, `RERANK_ENABLED`), storage class checks (refusing NFS), OpenObserve wiring, conditional gateway Secret-reference rendering plus plaintext-key refusal and Secret verification, and fail-closed behavior on `/healthz` probe failures.
 2. **CI Pre-Flight Dry-Run (`sh scripts/tools/run-task.sh airgap:dryrun`):** runs in GitHub Actions only when the `packaging` lane is selected — renders production Helm templates using test parameters, verifying that all placeholders are substituted and zero leftover `__[A-Z0-9_]+__` patterns remain.
 3. **Local Cluster & E2E Rehearsal:** In local development, operators test the complete pipeline against a single-node Kind cluster and local registry container on port 5000 (`localhost:5000`). In CI, `airgap-rehearsal` runs on `main` against an ephemeral namespace in the lab OpenShift cluster, validating the real sneakernet tarball unpack, image push, StatefulSet rollout, and smoke queries.
 
@@ -397,7 +397,7 @@ selects the reviewer environment and the acceptance lanes; it does not waive any
 
 **Resource boundaries & invariant protection:** Prose/docs and test/tooling PRs
 must respect their resource boundary and avoid starting heavy services (GPU, Qdrant,
-model gateways, Jaeger). Documentation or tooling changes cannot silently waive,
+model gateways, OpenObserve). Documentation or tooling changes cannot silently waive,
 alter, or bypass core data invariants (UUID5 chunk keys, 4-type vocabulary, residue
 audit, fail-closed contracts).
 
@@ -557,9 +557,9 @@ releases continue to use their own bundled scripts.
 |---|---|
 | Agent inventory and base parity | `test_base_contract_with_independent_controls`: inventory, complete typed environment, credentials, image, probes, ports, resources and defaults |
 | Gateway keys, pull Secret, service name, nondefault namespace/registry/rerank | Corresponding chart contract cases plus `test_map_values.py` and deploy/ingest producer round trips |
-| Gateway CA patch structure and old/new parity | `test_gateway_ca.py`: rendered app-only mounts, excluded OAuth/Jaeger containers, bad/absent names, API/key preflight and operator precedence |
+| Gateway CA patch structure and old/new parity | `test_gateway_ca.py`: rendered app-only mounts, excluded OAuth/OpenObserve containers, bad/absent names, API/key preflight and operator precedence |
 | OAuth overlay and Route parity | `test_route_oauth_contract`: redirect reference, sidecar args, Secret volumes, ports, certificate annotation, reencrypt policy, timeout and off state |
-| Jaeger parity | `test_jaeger_contract`: image, args, probes, ports, resource limits, volume mounts, Badger directories/retention, pipelines and storage/exporter linkage; identity checks in `test_openshift_identities.py` |
+| OpenObserve backend | `test_openobserve_backend_contract`: image, probes, ports, resource limits, volume mounts, storage and egress policy; identity checks in `test_openshift_identities.py` |
 | ServiceMonitor parity | `test_servicemonitor_contract`: selector, HTTP port/path, interval, timeout and disabled state |
 | Ingest and maintenance parity | `test_ingest_job_contract_normal`, `test_ingest_job_contract_maintenance_with_tricky_revision`: complete typed environment, writer key, resources, read-only corpus, scratch, exact argument arrays and per-leg Secret references |
 | Feedback service (#804) | `test_helm_chart_contracts.py::test_feedback_*`: default-off byte identity, exact pod env/command/probes/resources, kept claim, agent-only policy semantics, monitor, schema and NetworkPolicy refusals; the hardening and read-only-roots tests cover every workload kind including the StatefulSet. Operator path: `test_map_values.py`, `test_airgap_validate_sh.py`, `test_airgap_deploy_sh.py` (next ordinary deploy, disable then re-enable, protected Route, rollout and image identity), `test_check_pod_images.py` |
@@ -570,7 +570,7 @@ releases continue to use their own bundled scripts.
 | Three ingest overlay-source pins (Qdrant key, policy placeholders, gateway comment block) | Explicit Job contracts and `test_airgap_ingest_sh.py` policy, key-refusal and model/key rendering cases |
 | Direct hash-only `openshift-e2e` workflow | Existing published-bundle `airgap-rehearsal`: same two original synthetic PDFs, outline-message and generic widget expected-substring searches, Qdrant/agent readiness and explicit ingestion; HTTP mock computation replaces the redundant hash-only lane |
 
-The byte-for-byte parsed Jaeger config comparison is narrowed to its storage,
+The byte-for-byte parsed backend config comparison is narrowed to its storage,
 receiver, exporter and pipeline contracts. Log verbosity and mapping layout
 are implementation details; their current values are unchanged. Lifecycle
 scripts separately exercise live adoption, upgrade/failure/rollback, readiness

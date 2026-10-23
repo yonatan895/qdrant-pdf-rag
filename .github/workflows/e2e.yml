@@ -336,9 +336,9 @@ jobs:
       - name: Install pinned kubectl (CI patch --local)
         run: |
           export PATH="/usr/local/bin:$PATH"
-          KUBECTL_VERSION=v1.37.0
+          KUBECTL_VERSION=v1.33.12
           # sha256 recorded in-repo (AGENTS.md §6): dl.k8s.io checksum file.
-          KUBECTL_SHA256=6129359f4e1f3848a5572ccb0b26cf28b8ca08cef38c95a765b2f64a2c961a2f
+          KUBECTL_SHA256=fe80ae4133b44fa2077db4af144e80765eb1b3b2eede55fbff6933c4374d8c6e
           curl -fsSL -o /tmp/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
           echo "${KUBECTL_SHA256}  /tmp/kubectl" | sha256sum -c -
           sudo install -o root -g root -m 0755 /tmp/kubectl /usr/local/bin/kubectl
@@ -439,7 +439,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        lane: [pipeline, gateway-chat-upstream, gateway-chat-malformed, gateway-chat-truncated, gateway-embed-upstream, gateway-embed-malformed, gateway-embed-dimension, gateway-auth, lifecycle-chart, lifecycle, shared-gateway, rerank]
+        lane: [pipeline, gateway-chat-upstream, gateway-chat-malformed, gateway-chat-truncated, gateway-embed-upstream, gateway-embed-malformed, gateway-embed-dimension, gateway-auth, lifecycle-chart, lifecycle, shared-gateway, rerank, observability]
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -470,9 +470,9 @@ jobs:
       - name: Install pinned kubectl (CI patch --local)
         run: |
           export PATH="/usr/local/bin:$PATH"
-          KUBECTL_VERSION=v1.37.0
+          KUBECTL_VERSION=v1.33.12
           # sha256 recorded in-repo (AGENTS.md §6): dl.k8s.io checksum file.
-          KUBECTL_SHA256=6129359f4e1f3848a5572ccb0b26cf28b8ca08cef38c95a765b2f64a2c961a2f
+          KUBECTL_SHA256=fe80ae4133b44fa2077db4af144e80765eb1b3b2eede55fbff6933c4374d8c6e
           curl -fsSL -o /tmp/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
           echo "${KUBECTL_SHA256}  /tmp/kubectl" | sha256sum -c -
           sudo install -o root -g root -m 0755 /tmp/kubectl /usr/local/bin/kubectl
@@ -488,9 +488,9 @@ jobs:
       - name: Install pinned kind (ephemeral air-gap-like cluster)
         run: |
           export PATH="/usr/local/bin:$PATH"
-          KIND_VERSION=v0.33.0
+          KIND_VERSION=v0.32.0
           # sha256 recorded in-repo (AGENTS.md §6): kind-linux-amd64 release asset digest.
-          KIND_SHA256=aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d
+          KIND_SHA256=50030de23cf40a18505f20426f6a8506bedf13c6e509244bd1fa9463721b0f54
           curl -fsSL -o /tmp/kind "https://github.com/kubernetes-sigs/kind/releases/download/${KIND_VERSION}/kind-linux-amd64"
           echo "${KIND_SHA256}  /tmp/kind" | sha256sum -c -
           sudo install -o root -g root -m 0755 /tmp/kind /usr/local/bin/kind
@@ -560,7 +560,7 @@ jobs:
           Path(sys.argv[1]).write_text(json.dumps(config))
           PY_KIND
           /usr/local/bin/kind create cluster --name gapbox --config "$RUNNER_TEMP/kind-config.yaml" \
-            --image "kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5"
+            --image "kindest/node:v1.33.12@sha256:3f5c8443c620245e4d355cfe09e96a91ead32ceaa569d3f1ca9edf0cb2fe2ff4"
           docker network connect kind kind-registry
           /usr/local/bin/kubectl cluster-info
 
@@ -740,6 +740,14 @@ jobs:
           EOF
             grep -qx 'RERANK_ENABLED=true' airgap.env
           fi
+          if [ "${{ matrix.lane }}" = "observability" ]; then
+            # Metrics on so the chart renders the otelcol collector; Kind has no
+            # ServiceMonitor CRD, so the monitor stays off.
+            cat >> airgap.env <<'EOF'
+          METRICS_ENABLED=true
+          SERVICEMONITOR_ENABLED=false
+          EOF
+          fi
           grep -E "^(INTERNAL_REGISTRY|NAMESPACE|STORAGE_CLASS|IMAGE_SHA|EMBED_MODEL|EMBED_MODEL_REVISION|DENSE_DIM|EMBED_BASE_URL|CORPUS_PVC|INSECURE_REGISTRY)" airgap.env
 
       - name: Write Kind-scale Qdrant overrides (runner quota only; git prod values untouched)
@@ -750,12 +758,17 @@ jobs:
           # Qdrant (Insufficient memory on one node — proven locally).
           replicaCount: 1
           # Kind has no SCC to supply a volume group for the init emptyDir.
-          podSecurityContext: {fsGroup: 3000}
+          # Kind has no SCC to add what PSA "restricted" requires (the observability
+          # lane enforces it): drop all capabilities, RuntimeDefault seccomp.
+          podSecurityContext: {fsGroup: 3000, seccompProfile: {type: RuntimeDefault}}
+          containerSecurityContext: {capabilities: {drop: [ALL]}}
           resources:
             requests: {cpu: "200m", memory: 512Mi}
             limits: {cpu: "2", memory: 2Gi}
           EOF
           echo "QDRANT_EXTRA_VALUES=$RUNNER_TEMP/qdrant-kind-scale.yaml" >> "$GITHUB_ENV"
+          # Kind has no SCC to assign a UID and the OpenObserve image runs as root.
+          echo "OPENOBSERVE_RUN_AS_ID=10001" >> "$GITHUB_ENV"
 
       - name: Write Kind-scale ingest patch (same quota; prod Job asks 4cpu/8Gi)
         run: |
@@ -925,6 +938,33 @@ jobs:
           EOF
           /usr/local/bin/kubectl -n "$NS" wait --for=condition=complete job/corpus-gen --timeout=300s
 
+      - name: OpenObserve credentials Secret (operator-created, ADR-0006)
+        shell: sh rehearsal-infra/scripts/ci/egress_gate.sh run bash -e {0}
+        run: |
+          export PATH="/usr/local/bin:$PATH"
+          # Tracing is on by default, so every lane needs the Secret deploy.sh checks.
+          # Values come from files in a private directory, never argv; random per run.
+          D="$(mktemp -d)"; chmod 700 "$D"
+          printf 'ci@openobserve.invalid' > "$D/root-user-email"
+          # OpenObserve v1.1.2 refuses a weak root password: keep upper+lower+digit+special.
+          { od -An -N24 -tx1 /dev/urandom | tr -d ' \n'; printf 'Aa1!'; } > "$D/root-user-password"
+          B64="$(printf '%s:%s' "$(cat "$D/root-user-email")" "$(cat "$D/root-user-password")" | base64 | tr -d '\n')"
+          printf 'Authorization=Basic %s' "$B64" > "$D/otlp-headers"
+          printf 'Basic %s' "$B64" > "$D/metrics-auth"
+          /usr/local/bin/kubectl -n "$NS" create secret generic openobserve-credentials \
+            --from-file=root-user-email="$D/root-user-email" --from-file=root-user-password="$D/root-user-password" \
+            --from-file=otlp-headers="$D/otlp-headers" --from-file=metrics-auth="$D/metrics-auth"
+          rm -rf "$D"
+
+      - name: Enforce PSA restricted on the namespace (observability lane)
+        if: matrix.lane == 'observability'
+        shell: sh rehearsal-infra/scripts/ci/egress_gate.sh run bash -e {0}
+        run: |
+          export PATH="/usr/local/bin:$PATH"
+          # Existing stand-in pods are not evicted by an enforce label; every
+          # pod the pipeline admits from here (OpenObserve, otelcol) must pass it.
+          /usr/local/bin/kubectl label namespace "$NS" pod-security.kubernetes.io/enforce=restricted --overwrite
+
       - name: airgap-pipeline LIVE (deploy, ingest, smoke; registry pre-loaded)
         env:
           IMAGE_SHA: ${{ env.SHA }}
@@ -1034,6 +1074,14 @@ jobs:
           test "$(/usr/local/bin/kubectl get nodes -l '!node-role.kubernetes.io/control-plane' --no-headers | wc -l)" -eq 3
           sh scripts/ci/check_lifecycle.sh "$NS"
           sh scripts/airgap/pipeline.sh --skip-load
+
+      - name: OpenObserve admission, trace + metric arrival and canary scan (ADR-0006)
+        if: matrix.lane == 'observability'
+        shell: sh rehearsal-infra/scripts/ci/egress_gate.sh run bash -e {0}
+        run: |
+          export PATH="/usr/local/bin:$PATH"
+          cd gapbox/qdrant-pdf-rag
+          sh scripts/ci/observability_lane.sh "$NS"
 
       - name: Record the egress boundary state
         if: always()
@@ -1150,9 +1198,9 @@ jobs:
       - name: Install pinned kubectl (CI patch --local)
         run: |
           export PATH="/usr/local/bin:$PATH"
-          KUBECTL_VERSION=v1.37.0
+          KUBECTL_VERSION=v1.33.12
           # sha256 recorded in-repo (AGENTS.md §6): dl.k8s.io checksum file.
-          KUBECTL_SHA256=6129359f4e1f3848a5572ccb0b26cf28b8ca08cef38c95a765b2f64a2c961a2f
+          KUBECTL_SHA256=fe80ae4133b44fa2077db4af144e80765eb1b3b2eede55fbff6933c4374d8c6e
           curl -fsSL -o /tmp/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
           echo "${KUBECTL_SHA256}  /tmp/kubectl" | sha256sum -c -
           sudo install -o root -g root -m 0755 /tmp/kubectl /usr/local/bin/kubectl
@@ -1189,10 +1237,10 @@ jobs:
           grep -q "ghcr.io/dryrun-standin/qdrant-pdf-rag-agent:${SHA}" dist/agent-rendered.yaml
           ! grep -Eq "__[A-Z][A-Z0-9_]*__" dist/agent-rendered.yaml
           # Tracing defaults ON: an unset endpoint resolves to the in-cluster
-          # Jaeger (issue #83), so the default deploy renders it too.
-          test -f dist/jaeger-rendered.yaml
-          grep -Eq 'value: "?http://jaeger:4318"?$' dist/agent-rendered.yaml
-          ! grep -Eq "__[A-Z][A-Z0-9_]*__" dist/jaeger-rendered.yaml
+          # OpenObserve (issue #956, ADR-0006), so the default deploy renders it too.
+          test -f dist/openobserve-rendered.yaml
+          grep -Eq 'value: "?http://openobserve:5080/api/default"?$' dist/agent-rendered.yaml
+          ! grep -Eq "__[A-Z][A-Z0-9_]*__" dist/openobserve-rendered.yaml
 
       - name: First-party release inventory assertions
         env:
@@ -1262,7 +1310,7 @@ jobs:
           fi
           grep -q "QDRANT_EXTRA_VALUES file not found" err.log
 
-      - name: airgap-deploy dry-run with tracing enabled (Jaeger render, issue #83)
+      - name: airgap-deploy dry-run with tracing on (bundled OpenObserve + otelcol render, issue #956)
         env:
           IMAGE_SHA: ${{ env.SHA }}
           AIRGAP_DRYRUN: "1"
@@ -1273,16 +1321,17 @@ jobs:
           DENSE_DIM: "768"
           EMBED_MODEL_REVISION: dryrun-rev-1
           EMBED_BASE_URL: http://vllm:8000/v1
-          OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+          METRICS_ENABLED: "true"
           QDRANT_STORAGE_SIZE: 1Gi
         run: |
           export PATH="/usr/local/bin:$PATH"
           sh scripts/tools/run-task.sh airgap:deploy
-          test -f dist/jaeger-rendered.yaml
-          grep -q "ghcr.io/dryrun-standin/jaegertracing/jaeger:v2.20.0" dist/jaeger-rendered.yaml
-          grep -q "storageClassName: standard" dist/jaeger-rendered.yaml
-          grep -Eq 'value: "?http://jaeger:4318"?$' dist/agent-rendered.yaml
-          ! grep -Eq "__[A-Z][A-Z0-9_]*__" dist/jaeger-rendered.yaml
+          test -f dist/openobserve-rendered.yaml
+          # Chart images carry repository:tag; the v1.1.2 digest is enforced from images.txt.
+          grep -q "ghcr.io/dryrun-standin/openobserve/openobserve:v1.1.2" dist/openobserve-rendered.yaml
+          grep -q "storageClassName: standard" dist/openobserve-rendered.yaml
+          grep -Eq 'value: "?http://openobserve:5080/api/default"?$' dist/agent-rendered.yaml
+          ! grep -Eq "__[A-Z][A-Z0-9_]*__" dist/openobserve-rendered.yaml
 
       - name: airgap-deploy dry-run with metrics enabled (ServiceMonitor render, issue #187)
         env:
@@ -1303,8 +1352,8 @@ jobs:
           # Hermetic w.r.t. sibling dry-run steps sharing this workspace, and
           # focused: tracing defaults ON (asserted by the prod-render step), so
           # this step uses the off sentinel — metrics-on does not depend on
-          # tracing and must not drag Jaeger along.
-          rm -f dist/jaeger-rendered.yaml
+          # tracing and must not drag OpenObserve along.
+          rm -f dist/openobserve-rendered.yaml
           sh scripts/tools/run-task.sh airgap:deploy
           test -f dist/servicemonitor-rendered.yaml
           grep -q "kind: ServiceMonitor" dist/servicemonitor-rendered.yaml
@@ -1312,7 +1361,7 @@ jobs:
           grep -q "namespace: airgap-dryrun" dist/servicemonitor-rendered.yaml
           grep -A1 'name: METRICS_ENABLED' dist/agent-rendered.yaml | grep -q 'value: "true"'
           ! grep -Eq "__[A-Z][A-Z0-9_]*__" dist/servicemonitor-rendered.yaml
-          test ! -f dist/jaeger-rendered.yaml
+          test ! -f dist/openobserve-rendered.yaml
 
       - name: airgap-ingest dry-run (prod ingest render + patch knob)
         env:

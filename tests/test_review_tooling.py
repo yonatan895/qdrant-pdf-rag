@@ -68,11 +68,11 @@ class TestProfileClassification(unittest.TestCase):
             (["docs/testing.md", "src/mainframe_rag/ingest/publish.py"], ProfileName.STORAGE, ["qdrant"]),
             (["src/mainframe_rag/agent/app.py", "scripts/mock_vllm.py"], ProfileName.HTTP,
              ["agent", "qdrant", "vllm"]),
-            (["src/mainframe_rag/tracing.py", "scripts/run_local_jaeger.sh"], ProfileName.TRACING, ["jaeger"]),
+            (["src/mainframe_rag/tracing.py", "scripts/run_local_openobserve.sh"], ProfileName.TRACING, ["openobserve"]),
             (["src/mainframe_rag/ingest/publish.py", "src/mainframe_rag/agent/app.py"], ProfileName.FULL,
              ["agent", "qdrant", "vllm"]),
             (["src/mainframe_rag/ingest/publish.py", "src/mainframe_rag/agent/app.py",
-              "src/mainframe_rag/tracing.py"], ProfileName.FULL, ["agent", "jaeger", "qdrant", "vllm"]),
+              "src/mainframe_rag/tracing.py"], ProfileName.FULL, ["agent", "openobserve", "qdrant", "vllm"]),
             (["pyproject.toml", "src/mainframe_rag/ingest/publish.py"], ProfileName.FULL, ["qdrant"]),
         ]
         for paths, profile, services in cases:
@@ -81,10 +81,10 @@ class TestProfileClassification(unittest.TestCase):
                 self.assertEqual(decision.profile, profile)
                 self.assertEqual(sorted(decision.services), services)
                 self.assertEqual(decision.needs_qdrant, "qdrant" in services)
-                self.assertEqual(decision.needs_jaeger, "jaeger" in services)
+                self.assertEqual(decision.needs_openobserve, "openobserve" in services)
 
     def test_unmapped_unreadable_or_shared_changes_fail_closed_to_full(self):
-        every_service = {"agent", "jaeger", "qdrant", "vllm"}
+        every_service = {"agent", "openobserve", "qdrant", "vllm"}
         # An empty change set means the diff could not be read (bad SHA, shallow
         # checkout); it must not silently downgrade to a docs review.
         for paths, category in (([], "unclassified_empty"), (["mystery.bin"], "unclassified"),

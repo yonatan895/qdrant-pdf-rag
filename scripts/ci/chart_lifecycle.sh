@@ -186,6 +186,10 @@ copy_secret() {
 }
 copy_secret "$QDRANT_RELEASE-apikey"
 copy_secret "$GATEWAY_SECRET"
+# The bundled OpenObserve and the agent/ingest OTLP auth header read the
+# operator-created credentials Secret (ADR-0006, #956); without it both pods stay
+# in CreateContainerConfigError in the isolated namespace.
+[ "${OTEL_BUNDLED:-0}" != 1 ] || copy_secret "${OPENOBSERVE_SECRET:-openobserve-credentials}"
 kubectl get configmap "$GATEWAY_CA" -n "$DATA_NS" -o yaml | sed \
     -e "s/^  namespace: .*/  namespace: $NS/" \
     -e '/^  uid: /d' -e '/^  resourceVersion: /d' -e '/^  creationTimestamp: /d' \
@@ -202,7 +206,7 @@ helm_values "$VALUES_A" install "$RELEASE" "$CHART_DIR" -n "$NS" --wait --timeou
 REV1="$(revision)"
 echo "A installed at revision $REV1"
 CHART_PVC="$(pvc_uids "$NS")"
-[ -n "$CHART_PVC" ] || die "no PVCs after install (Jaeger Badger claim expected)"
+[ -n "$CHART_PVC" ] || die "no PVCs after install (OpenObserve data claim expected)"
 guards "$CHART_PVC"
 smoke
 expect_mark_a

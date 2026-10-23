@@ -270,3 +270,53 @@ def rendered_container(rendered: str, name: str) -> dict:
 def rendered_env(rendered: str, name: str) -> dict:
     return {entry['name']: entry.get('value', entry.get('valueFrom'))
             for entry in rendered_container(rendered, name)['env']}
+
+
+class FakeHttpServer:
+    """Loopback HTTP server for trace-backend tests; records every request.
+
+    `respond(request) -> (status, json_body)`, where request is a dict with
+    method, path, query (parse_qs), headers and body (decoded JSON or None).
+    """
+
+    def __init__(self, respond):
+        import http.server
+        import threading
+        from urllib.parse import parse_qs, urlsplit
+
+        self.requests: list[dict] = []
+        outer = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def _handle(self):
+                length = int(self.headers.get("Content-Length") or 0)
+                raw = self.rfile.read(length) if length else b""
+                parts = urlsplit(self.path)
+                request = {
+                    "method": self.command, "path": parts.path, "query": parse_qs(parts.query),
+                    "headers": {k.lower(): v for k, v in self.headers.items()},
+                    "body": json.loads(raw) if raw else None,
+                }
+                outer.requests.append(request)
+                status, body = respond(request)
+                data = json.dumps(body).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            do_GET = do_POST = _handle
+
+            def log_message(self, *args):
+                pass
+
+        self._server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self._server.server_address[1]}"
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+
+    def close(self):
+        self._server.shutdown()
+        self._server.server_close()
+        self._thread.join(timeout=5)

@@ -62,8 +62,10 @@ AGENT_IMAGE="${APP_REGISTRY}/qdrant-pdf-rag-agent:${IMAGE_SHA}"
 # Third-party pins come from images.txt (name column); digest applies when recorded.
 QDRANT_REF=$(pin_from_images_txt qdrant)
 
-# Jaeger v2 trace-backend pin (issue #83): same pin discipline.
-JAEGER_REF=$(pin_from_images_txt jaeger)
+# ADR-0006 trace/metrics backend (#956): OpenObserve OSS and the stateless
+# otelcol-contrib scraper, same pin discipline.
+OPENOBSERVE_REF=$(pin_from_images_txt openobserve)
+OTELCOL_REF=$(pin_from_images_txt opentelemetry-collector-contrib)
 
 # Operator console (ADR-0004): bundle the oauth-proxy sidecar image only once
 # the connected host recorded a real digest — sha256:PENDING is skipped here
@@ -99,7 +101,8 @@ task_extract_verified "$TASK_SOURCE" "$TASK_TMP"
 [ "$TASK_SOURCE" -ef "$DIST/$TASK_ASSET" ] || cp "$TASK_SOURCE" "$DIST/$TASK_ASSET"
 cp "$TASK_PIN" "$DIST/task-pin.txt"
 cp "$TASK_TMP/LICENSE" "$DIST/task-LICENSE"
-rm -f "$DIST"/repo.bundle "$DIST"/qdrant-image.tar "$DIST"/jaeger-image.tar "$DIST"/app-*.tar \
+rm -f "$DIST"/repo.bundle "$DIST"/qdrant-image.tar \
+      "$DIST"/openobserve-image.tar "$DIST"/otelcol-image.tar "$DIST"/app-*.tar \
       "$DIST"/MANIFEST.txt "$DIST"/THIRD-PARTY-NOTICES.txt "$DIST"/SHA256SUMS "$OUT_TARBALL" "$OUT_TARBALL.sha256"
 # shellcheck disable=SC2086
 rm -f $OAUTH_TAR
@@ -118,7 +121,9 @@ fi
 # shellcheck disable=SC2086
 skopeo copy $extra_args "docker://$QDRANT_REF" "docker-archive:$DIST/qdrant-image.tar"
 # shellcheck disable=SC2086
-skopeo copy $extra_args "docker://$JAEGER_REF" "docker-archive:$DIST/jaeger-image.tar"
+skopeo copy $extra_args "docker://$OPENOBSERVE_REF" "docker-archive:$DIST/openobserve-image.tar"
+# shellcheck disable=SC2086
+skopeo copy $extra_args "docker://$OTELCOL_REF" "docker-archive:$DIST/otelcol-image.tar"
 # shellcheck disable=SC2086
 skopeo copy $extra_args "docker://$INGEST_IMAGE" "docker-archive:$DIST/app-ingest-$IMAGE_SHA.tar"
 # shellcheck disable=SC2086
@@ -141,7 +146,8 @@ echo "==> Image digests (bound into MANIFEST, verified on load)"
 INGEST_DIGEST=$(skopeo inspect "docker-archive:$DIST/app-ingest-$IMAGE_SHA.tar" --format '{{.Digest}}')
 AGENT_DIGEST=$(skopeo inspect "docker-archive:$DIST/app-agent-$IMAGE_SHA.tar" --format '{{.Digest}}')
 QDRANT_DIGEST=$(skopeo inspect "docker-archive:$DIST/qdrant-image.tar" --format '{{.Digest}}')
-JAEGER_DIGEST=$(skopeo inspect "docker-archive:$DIST/jaeger-image.tar" --format '{{.Digest}}')
+OPENOBSERVE_DIGEST=$(skopeo inspect "docker-archive:$DIST/openobserve-image.tar" --format '{{.Digest}}')
+OTELCOL_DIGEST=$(skopeo inspect "docker-archive:$DIST/otelcol-image.tar" --format '{{.Digest}}')
 OAUTH_DIGEST=""
 if [ -n "$OAUTH_TAR" ]; then
     OAUTH_DIGEST=$(skopeo inspect "docker-archive:$DIST/$OAUTH_TAR" --format '{{.Digest}}')
@@ -152,7 +158,8 @@ fi
 INGEST_CONFIG_DIGEST=$(archive_config_digest "$DIST/app-ingest-$IMAGE_SHA.tar")
 AGENT_CONFIG_DIGEST=$(archive_config_digest "$DIST/app-agent-$IMAGE_SHA.tar")
 QDRANT_CONFIG_DIGEST=$(archive_config_digest "$DIST/qdrant-image.tar")
-JAEGER_CONFIG_DIGEST=$(archive_config_digest "$DIST/jaeger-image.tar")
+OPENOBSERVE_CONFIG_DIGEST=$(archive_config_digest "$DIST/openobserve-image.tar")
+OTELCOL_CONFIG_DIGEST=$(archive_config_digest "$DIST/otelcol-image.tar")
 OAUTH_CONFIG_DIGEST=""
 if [ -n "$OAUTH_TAR" ]; then
     OAUTH_CONFIG_DIGEST=$(archive_config_digest "$DIST/$OAUTH_TAR")
@@ -175,9 +182,12 @@ CHART_SHA256=$(sha256sum charts/qdrant-*.tgz | awk '{print $1}')
     echo "qdrant: $QDRANT_REF"
     echo "qdrant_digest: $QDRANT_DIGEST"
     echo "qdrant_config_digest: $QDRANT_CONFIG_DIGEST"
-    echo "jaeger: $JAEGER_REF"
-    echo "jaeger_digest: $JAEGER_DIGEST"
-    echo "jaeger_config_digest: $JAEGER_CONFIG_DIGEST"
+    echo "openobserve: $OPENOBSERVE_REF"
+    echo "openobserve_digest: $OPENOBSERVE_DIGEST"
+    echo "openobserve_config_digest: $OPENOBSERVE_CONFIG_DIGEST"
+    echo "otelcol: $OTELCOL_REF"
+    echo "otelcol_digest: $OTELCOL_DIGEST"
+    echo "otelcol_config_digest: $OTELCOL_CONFIG_DIGEST"
     if [ -n "$OAUTH_TAR" ]; then
         echo "oauth_proxy: $OAUTH_PROXY_REF"
         echo "oauth_proxy_digest: $OAUTH_DIGEST"
@@ -206,7 +216,8 @@ cat "$DIST/MANIFEST.txt"
 
 echo "==> SBOM (digest enumeration of every pinned input)"
 SBOM_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-export SBOM_DATE IMAGE_SHA QDRANT_REF QDRANT_DIGEST JAEGER_REF JAEGER_DIGEST
+export SBOM_DATE IMAGE_SHA QDRANT_REF QDRANT_DIGEST
+export OPENOBSERVE_REF OPENOBSERVE_DIGEST OTELCOL_REF OTELCOL_DIGEST
 export INGEST_IMAGE INGEST_DIGEST AGENT_IMAGE AGENT_DIGEST UBI_REF UBI_DIGEST
 export OAUTH_PROXY_REF OAUTH_DIGEST CHART_VERSION CHART_SHA256 DIST REPO_ROOT
 export TASK_VERSION TASK_ASSET TASK_SHA256 TASK_BINARY_SHA256 TASK_LICENSE_SHA256 TASK_ORIGIN
@@ -233,7 +244,8 @@ sbom = {
     "image_sha": os.environ["IMAGE_SHA"],
     "images": [
         {"name": "qdrant", "ref": os.environ["QDRANT_REF"], "digest": os.environ["QDRANT_DIGEST"]},
-        {"name": "jaeger", "ref": os.environ["JAEGER_REF"], "digest": os.environ["JAEGER_DIGEST"]},
+        {"name": "openobserve", "ref": os.environ["OPENOBSERVE_REF"], "digest": os.environ["OPENOBSERVE_DIGEST"]},
+        {"name": "otelcol", "ref": os.environ["OTELCOL_REF"], "digest": os.environ["OTELCOL_DIGEST"]},
         {"name": "app-ingest", "ref": os.environ["INGEST_IMAGE"], "digest": os.environ["INGEST_DIGEST"]},
         {"name": "app-agent", "ref": os.environ["AGENT_IMAGE"], "digest": os.environ["AGENT_DIGEST"]},
     ],
@@ -290,7 +302,8 @@ chmod +x "$DIST/bootstrap.sh"
     echo "  - Task pin/license:    task-pin.txt / task-LICENSE (MIT)"
     echo "  - Git Bundle:          repo.bundle (complete git history)"
     echo "  - Qdrant Image:        $QDRANT_REF"
-    echo "  - Jaeger Image:        $JAEGER_REF"
+    echo "  - OpenObserve Image:   $OPENOBSERVE_REF"
+    echo "  - otelcol-contrib:     $OTELCOL_REF"
     if [ -n "$OAUTH_TAR" ]; then
         echo "  - oauth-proxy Image:   $OAUTH_PROXY_REF"
     fi
@@ -303,7 +316,7 @@ chmod +x "$DIST/bootstrap.sh"
     echo "  - Bundle signature:    SHA256SUMS.sig (openssl dgst; pubkey sneakernet-signing.pub)"
     echo "  - Signing key (pub):   $(openssl pkey -in "$SNEAKERNET_SIGNING_KEY" -pubout | openssl sha256)"
     echo "  - Digest binding:      MANIFEST *_digest lines are post-copy tar manifest digests;"
-    echo "                           qdrant:/jaeger: refs carry the images.txt list pins they were pulled by."
+    echo "                           qdrant:/openobserve:/otelcol: refs carry the images.txt list pins they were pulled by."
     echo ""
     echo "INSPECTION & BOOTSTRAP INSTRUCTIONS:"
     echo "  1. Verify root archive digest:"
@@ -320,8 +333,8 @@ openssl pkey -in "$SNEAKERNET_SIGNING_KEY" -pubout -out "$DIST/sneakernet-signin
 (
     cd "$DIST"
     # shellcheck disable=SC2086
-    sha256sum bootstrap.sh repo.bundle "$TASK_ASSET" task-pin.txt task-LICENSE qdrant-image.tar jaeger-image.tar \
-              app-ingest-"$IMAGE_SHA".tar app-agent-"$IMAGE_SHA".tar $OAUTH_TAR \
+    sha256sum bootstrap.sh repo.bundle "$TASK_ASSET" task-pin.txt task-LICENSE qdrant-image.tar \
+              openobserve-image.tar otelcol-image.tar app-ingest-"$IMAGE_SHA".tar app-agent-"$IMAGE_SHA".tar $OAUTH_TAR \
               MANIFEST.txt PACKING_RECORD.txt sbom.json THIRD-PARTY-NOTICES.txt sneakernet-signing.pub > SHA256SUMS
 )
 
@@ -333,8 +346,8 @@ openssl dgst -sha256 -sign "$SNEAKERNET_SIGNING_KEY" \
 
 echo "==> Tarball + tarball digest"
 # shellcheck disable=SC2086
-tar -C "$DIST" -cf "$OUT_TARBALL" bootstrap.sh repo.bundle "$TASK_ASSET" task-pin.txt task-LICENSE qdrant-image.tar jaeger-image.tar \
-    app-ingest-"$IMAGE_SHA".tar app-agent-"$IMAGE_SHA".tar $OAUTH_TAR MANIFEST.txt PACKING_RECORD.txt sbom.json THIRD-PARTY-NOTICES.txt sneakernet-signing.pub SHA256SUMS SHA256SUMS.sig
+tar -C "$DIST" -cf "$OUT_TARBALL" bootstrap.sh repo.bundle "$TASK_ASSET" task-pin.txt task-LICENSE qdrant-image.tar \
+    openobserve-image.tar otelcol-image.tar app-ingest-"$IMAGE_SHA".tar app-agent-"$IMAGE_SHA".tar $OAUTH_TAR MANIFEST.txt PACKING_RECORD.txt sbom.json THIRD-PARTY-NOTICES.txt sneakernet-signing.pub SHA256SUMS SHA256SUMS.sig
 # shellcheck disable=SC2016
 ( cd "$DIST" && sha256sum "$(basename "$OUT_TARBALL")" ) > "$OUT_TARBALL.sha256"
 

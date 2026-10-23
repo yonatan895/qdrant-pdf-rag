@@ -1,6 +1,7 @@
 """OpenShift must select identities; chart defaults must not reintroduce IDs."""
 from pathlib import Path
 
+import pytest
 import yaml
 
 from tests.helpers_helm import run_new_template
@@ -37,13 +38,18 @@ def test_production_qdrant_requires_hard_worker_separation():
     assert rules[0]['labelSelector']['matchLabels'] == {'app.kubernetes.io/name': 'qdrant'}
 
 
-def test_jaeger_accepts_assigned_identity_with_restricted_security():
-    pod = run_new_template({})[('Deployment', 'jaeger')]['spec']['template']['spec']
+@pytest.mark.parametrize('name', ['openobserve', 'otelcol'])
+def test_observability_pods_accept_assigned_identity_with_restricted_security(name):
+    docs = run_new_template({'metrics': {'enabled': True}})
+    pod = docs[('Deployment', name)]['spec']['template']['spec']
     assert 'fsGroup' not in pod['securityContext']
+    assert 'runAsUser' not in pod['securityContext'] and 'runAsGroup' not in pod['securityContext']
+    assert pod['securityContext']['runAsNonRoot'] is True
     assert pod['securityContext']['seccompProfile']['type'] == 'RuntimeDefault'
     for container in pod['containers']:
         security = container['securityContext']
         assert 'runAsUser' not in security and 'runAsGroup' not in security
         assert security['allowPrivilegeEscalation'] is False
+        assert security['readOnlyRootFilesystem'] is True
         assert security['capabilities']['drop'] == ['ALL']
 

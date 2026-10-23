@@ -84,7 +84,7 @@
 <path class="edge" d="M495 362 V322"/>
 <path class="edge opt" d="M360 392 L420 322"/>
 </svg>
-<figcaption>Hand-drawn from the architecture guide. The dashed Zowe MCP bridge has client code but is not part of the current deployment. Tracing (Jaeger) and the optional feedback service are omitted for clarity.</figcaption>
+<figcaption>Hand-drawn from the architecture guide. The dashed Zowe MCP bridge has client code but is not part of the current deployment. Tracing (OpenObserve) and the optional feedback service are omitted for clarity.</figcaption>
 </figure>
 
 <h2>How a query flows</h2>
@@ -113,7 +113,7 @@
 <li>Qdrant runs as a three-replica StatefulSet, unprivileged, on block storage, reachable only inside the cluster. There is no public Qdrant route.</li>
 <li>The agent runs as a two-replica Deployment. An OAuth-protected console route is optional.</li>
 <li>Ingest is a one-shot job; the corpus volume may be read-only NFS or a PVC.</li>
-<li>Jaeger tracing is on by default for this repository&rsquo;s components.</li>
+<li>OpenObserve tracing is on by default for this repository&rsquo;s components.</li>
 </ul>
 <p>Source: <a href="https://github.com/yonatan895/qdrant-pdf-rag/blob/main/docs/architecture.md">architecture guide, workloads</a>. Other ADRs: <a href="https://github.com/yonatan895/qdrant-pdf-rag/blob/main/docs/adr/0003-zowe-mcp-read.md">ADR-0003 read-only live state</a>, <a href="https://github.com/yonatan895/qdrant-pdf-rag/blob/main/docs/adr/0004-operator-console-htmx.md">ADR-0004 operator console</a>, <a href="https://github.com/yonatan895/qdrant-pdf-rag/blob/main/docs/adr/0005-answer-feedback-data-boundary.md">ADR-0005 feedback data boundary</a>.</p>
 

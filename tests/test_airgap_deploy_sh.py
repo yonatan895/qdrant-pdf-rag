@@ -97,6 +97,8 @@ case "$*" in
 
   *'get deployments,statefulsets,replicasets,pods -o json'*)
     [ -z "${{PODS_FILE:-}}" ] || cat "$PODS_FILE" ;;
+  *'get secret openobserve-credentials '*'jsonpath='*)
+    case "$*" in *root-user-email*) printf 'dGVzdC11c2Vy' ;; *) printf '%s' "${{OO_PASSWORD_B64:-VGVzdC1wYXNzMQ==}}" ;; esac ;;
   *'get secret '*'go-template='*)
     if [ -n "${{MISSING_KEY:-}}" ]; then
       case "$*" in *"$MISSING_KEY"*) exit 0 ;; esac
@@ -268,12 +270,14 @@ def test_agent_qdrant_write_key_fails_closed(tree):
 ROLE_REFS = {
     "qdrant": "reg.internal/qdrant/qdrant:v1.19.2-unprivileged",
     "agent": f"reg.internal/qdrant-pdf-rag-agent:{IMAGE_SHA}",
-    "jaeger": "reg.internal/jaegertracing/jaeger:v2.20.0",
+    "openobserve": "reg.internal/openobserve/openobserve:v1.1.2",
+    "otelcol": "reg.internal/otel/opentelemetry-collector-contrib:0.160.0",
 }
 ROLE_REPOS = {
     "qdrant": "reg.internal/qdrant/qdrant",
     "agent": "reg.internal/qdrant-pdf-rag-agent",
-    "jaeger": "reg.internal/jaegertracing/jaeger",
+    "openobserve": "reg.internal/openobserve/openobserve",
+    "otelcol": "reg.internal/otel/opentelemetry-collector-contrib",
 }
 
 
@@ -430,8 +434,6 @@ def test_missing_production_values_fails_before_mutation(tree):
                  id='tracing_bad_endpoint_fails_closed'),
     pytest.param({'GATEWAY_API_KEY_SECRET': 'Bad_Name!'}, None, ('GATEWAY_API_KEY_SECRET must be a DNS-subdomain name',),
                  id='gateway_secret_bad_name_fails_closed'),
-    pytest.param({'JAEGER_ENABLED': 'maybe'}, None, ('JAEGER_ENABLED must be true/false',),
-                 id='jaeger_garbage_fails_closed'),
 ])
 def test_invalid_configuration_fails_closed(tree, extra_env, exit_code, messages):
     result = _run(tree, *extra_env.items())
@@ -469,8 +471,7 @@ def test_rendered_manifest_substituted_and_written(tree):
     assert re.search(r"(?m)^\s*key: read-only-api-key$", block)
     assert not re.search(r"(?m)^\s*key: api-key$", block)
     assert "not release-verified" in r.stdout
-    assert (tree[0] / "dist" / "jaeger-rendered.yaml").exists()
-    assert 'value: "http://jaeger:4318"' in rendered
+    assert (tree[0] / "dist" / "openobserve-rendered.yaml").exists()
     assert "Tracing off" not in r.stdout
     assert rendered_env(rendered, "agent")["IMAGE_SHA"] == IMAGE_SHA
     assert rendered_env(rendered, "agent")["OTEL_DEPLOYMENT_ENVIRONMENT"] == ""
@@ -491,27 +492,89 @@ def test_rendered_manifest_substituted_and_written(tree):
     assert "Gateway keys off" in r.stdout
 
 
-# ------------------------------------------------------- Jaeger / tracing (#83)
+# --------------------------------------------- OpenObserve / tracing (#83, #956)
 
 
-def test_tracing_enabled_deploys_jaeger_and_wires_endpoint(tree):
-    r = _run(tree, ("OTEL_EXPORTER_OTLP_ENDPOINT", "http://jaeger:4318"))
+def test_tracing_on_deploys_openobserve_and_off_removes_it(tree):
+    r = _run(tree)
     assert r.returncode == 0, r.stderr
-    jaeger = (tree[0] / "dist" / "jaeger-rendered.yaml").read_text()
+    oo = (tree[0] / "dist" / "openobserve-rendered.yaml").read_text()
     agent = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
-    assert "reg.internal/jaegertracing/jaeger:v2.20.0" in jaeger
-    assert "storageClassName: standard" in jaeger
-    assert "namespace: ns" in jaeger
-    assert_no_placeholders(jaeger)
-    assert rendered_env(agent, "agent")["OTEL_EXPORTER_OTLP_ENDPOINT"] == "http://jaeger:4318"
+    assert "reg.internal/openobserve/openobserve:v1.1.2" in oo
+    assert "namespace: ns" in oo
+    assert_no_placeholders(oo)
     assert_no_placeholders(agent)
-    # The off sentinel renders an empty endpoint and no Jaeger backend.
+    assert "deploy/openobserve" in _helm_log(tree)
+    # The collector scrapes /metrics: metrics off renders no otelcol, so no wait
+    # and no image check for it; metrics on waits for it.
+    assert "deploy/otelcol" not in _helm_log(tree)
+    on = _run(tree, ("METRICS_ENABLED", "true"))
+    assert on.returncode == 0, on.stderr
+    assert "deploy/otelcol" in _helm_log(tree)
+    assert "name: otelcol" in (tree[0] / "dist" / "agent-rendered.yaml").read_text()
+    assert "name: otelcol" not in agent
+    # The off sentinel renders no backend and waits for none.
     off = _run(tree, ("OTEL_EXPORTER_OTLP_ENDPOINT", "off"))
     assert off.returncode == 0, off.stderr
-    assert not (tree[0] / "dist" / "jaeger-rendered.yaml").exists()
+    assert not (tree[0] / "dist" / "openobserve-rendered.yaml").exists()
     rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
     assert rendered_env(rendered, "agent")["OTEL_EXPORTER_OTLP_ENDPOINT"] == ""
-    assert "Tracing off" in off.stdout
+    assert "OpenObserve not deployed" in off.stdout
+    # An external OTLP endpoint (tracing.endpoint escape hatch) renders no
+    # backend either: no Secret check, identity check, render or rollout wait.
+    ext = _run(tree, ("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector.platform:4318"))
+    assert ext.returncode == 0, ext.stderr
+    assert not (tree[0] / "dist" / "openobserve-rendered.yaml").exists()
+    rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
+    assert rendered_env(rendered, "agent")["OTEL_EXPORTER_OTLP_ENDPOINT"] == "http://collector.platform:4318"
+    assert "name: openobserve" not in rendered and "name: otelcol" not in rendered
+    assert "OpenObserve not deployed" in ext.stdout
+
+
+@pytest.mark.parametrize("role", ["openobserve", "otelcol"])
+def test_openobserve_and_otelcol_are_identity_checked_when_tracing_is_on(tree, role):
+    """#956: DEPLOY_IMAGES carries both, so a missing registry image refuses
+    before any mutation, and the next run with the image loaded deploys."""
+    _release(tree)
+    _put_registry(tree, role, None)
+    metrics = (("METRICS_ENABLED", "true"),)  # otelcol renders only with metrics on
+    refused = _run(tree, *metrics)
+    assert refused.returncode != 0
+    assert f"cannot read back registry image {ROLE_REFS[role]}" in refused.stderr
+    assert _mutations(tree) == []
+    _load_all(tree)
+    ok = _run(tree, *metrics)
+    assert ok.returncode == 0, ok.stderr
+
+
+@pytest.mark.parametrize("password", ["abcdef0123456789abcdef", "Short1!", "NOLOWER-123", "nodigit-Aaaa", "NoSpecial123x", "x" * 129 + "Aa1!"])
+def test_weak_openobserve_root_password_refuses_before_any_mutation(tree, password):
+    """OpenObserve v1.1.2 crash-loops on a weak root password: refuse it up front
+    with a stable code and never echo the value."""
+    import base64
+    r = _run(tree, ("OO_PASSWORD_B64", base64.b64encode(password.encode()).decode()))
+    assert r.returncode != 0
+    assert "E_OPENOBSERVE_WEAK_PASSWORD" in r.stderr
+    assert password not in r.stdout + r.stderr and base64.b64encode(password.encode()).decode() not in r.stdout + r.stderr
+    assert _mutations(tree) == []
+    assert _helm_log(tree) == "" or "upgrade" not in _helm_log(tree)
+    ok = _run(tree, ("OO_PASSWORD_B64", base64.b64encode(b"Strong-pass-1").decode()))
+    assert ok.returncode == 0, ok.stderr
+    # Tracing off or an external endpoint never reads the Secret.
+    off = _run(tree, ("OTEL_EXPORTER_OTLP_ENDPOINT", "off"), ("OO_PASSWORD_B64", base64.b64encode(password.encode()).decode()))
+    assert off.returncode == 0, off.stderr
+
+
+@pytest.mark.parametrize("missing_key", ["root-user-email", "root-user-password", "otlp-headers", "metrics-auth"])
+def test_missing_openobserve_credentials_refuse_before_any_mutation(tree, missing_key):
+    r = _run(tree, ("MISSING_KEY", missing_key))
+    assert r.returncode != 0
+    assert "E_OPENOBSERVE_CREDENTIALS" in r.stderr
+    assert "openobserve-credentials" in r.stderr
+    assert _mutations(tree) == []
+    # Tracing off does not need the Secret; the next ordinary run succeeds.
+    ok = _run(tree, ("OTEL_EXPORTER_OTLP_ENDPOINT", "off"), ("MISSING_KEY", missing_key))
+    assert ok.returncode == 0, ok.stderr
 
 
 # ------------------------------------------------------- deploy identity (Phase 2b)
@@ -653,7 +716,12 @@ def test_disabling_the_networkpolicy_leaves_removal_to_the_release(tree):
     (the disabled-cleanup inventory stays for pre-Helm legacy objects)."""
     r = _run(tree, ("AGENT_NETWORK_POLICY", "false"))
     assert r.returncode == 0, r.stderr
-    assert "kind: NetworkPolicy" not in (tree[0] / "dist" / "agent-rendered.yaml").read_text()
+    rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
+    # AGENT_NETWORK_POLICY governs only the agent ingress policy (docs/deploy.md
+    # #agent-networkpolicy); the OpenObserve egress-deny policy is its own
+    # object and stays rendered.
+    assert "name: rag-agent-ingress" not in rendered
+    assert "name: openobserve-egress-deny" in rendered
     assert "off (AGENT_NETWORK_POLICY=false)" in r.stdout
     assert "upgrade" in _helm_log(tree)
     assert "NetworkPolicy" not in (tree[0] / "dist/app-disabled-cleanup.json").read_text()
@@ -970,37 +1038,18 @@ def test_invalid_shared_gateway_key_refuses_before_commands(tree, key, secret):
 # --------------------------------- Decoupled backends (issue #529 OBS-2)
 
 
-def test_jaeger_false_without_destination_fails_before_mutation(tree):
-    # Issue #568: the defaulted http://jaeger:4318 belongs to the bundled
-    # backend. Disabling it without naming a collector (or turning tracing
-    # off) must fail in preflight, before any render or cluster command.
-    r = _run(tree, ("JAEGER_ENABLED", "false"))
-    assert r.returncode != 0
-    assert "JAEGER_ENABLED=false needs an intentional trace destination" in r.stderr
-    assert not tree[1].exists()
-    assert not (tree[0] / "dist").exists()
-    # Next ordinary run after correcting the config: nothing was left behind.
-    ok = _run(tree, ("JAEGER_ENABLED", "false"), ("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector.platform:4318"))
-    assert ok.returncode == 0, ok.stderr
-    assert "upgrade" in _helm_log(tree)
-
-
-@pytest.mark.parametrize("endpoint", ["http://jaeger:4318"])
-def test_jaeger_false_with_explicit_collector_exports_to_it(tree, endpoint):
-    # The former hostname stays possible when it is chosen intentionally.
-    r = _run(tree, ("JAEGER_ENABLED", "false"), ("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint))
+def test_retired_jaeger_switch_is_ignored_and_external_collector_passes_through(tree):
+    # #956: OpenObserve is the only bundled backend; JAEGER_ENABLED is gone.
+    r = _run(tree, ("JAEGER_ENABLED", "false"), ("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector.platform:4318"))
     assert r.returncode == 0, r.stderr
-    assert not (tree[0] / "dist" / "jaeger-rendered.yaml").exists()
-    rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
-    assert rendered_env(rendered, "agent")["OTEL_EXPORTER_OTLP_ENDPOINT"] == endpoint
-    assert "kind: Deployment\nmetadata:\n  name: jaeger" not in rendered
-    assert "deploy/jaeger" not in _helm_log(tree)  # no rollout wait for a backend not deployed
+    values = (tree[0] / "dist" / "mainframe-rag-release-values.yaml").read_text()
+    assert 'endpoint: "http://collector.platform:4318"' in values
+    assert "jaeger" not in values.lower()
 
 
-def test_upgrade_from_bundled_jaeger_selects_destination_before_removal(tree):
-    # Existing bundled Jaeger objects are removed only after the release is
-    # upgraded with the explicit destination and the workloads rolled out; the
-    # retained Jaeger PVC is never part of the cleanup inventory.
+def test_upgrade_from_bundled_jaeger_removes_it_after_rollout(tree):
+    # Leftover Jaeger objects are removed only after the release is upgraded
+    # and the workloads rolled out; the retained Jaeger PVC is never listed.
     import json
 
     path = tree[0] / "disabled.json"
@@ -1008,12 +1057,8 @@ def test_upgrade_from_bundled_jaeger_selects_destination_before_removal(tree):
         {"apiVersion": "apps/v1", "kind": "Deployment",
          "metadata": {"name": "jaeger", "namespace": "ns"}},
     ]}))
-    r = _run(tree, ("JAEGER_ENABLED", "false"),
-             ("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector.platform:4318"),
-             ("DISABLED_FILE", str(path)))
+    r = _run(tree, ("DISABLED_FILE", str(path)))
     assert r.returncode == 0, r.stderr
-    values = (tree[0] / "dist" / "mainframe-rag-release-values.yaml").read_text()
-    assert 'endpoint: "http://collector.platform:4318"' in values
     cleanup = json.loads((tree[0] / "dist/app-disabled-cleanup.json").read_text())
     assert [i["kind"] for i in cleanup["items"]] == ["Deployment"]
     log = _helm_log(tree)
@@ -1239,23 +1284,25 @@ def test_release_renders_first_party_images_by_verified_digest(tree):
     assert result.returncode == 0, result.stderr
     values = (tree[0] / "dist" / "mainframe-rag-release-values.yaml").read_text()
     assert f'digest: "{digests["agent"]}"' in values
-    assert f'digest: "{digests["jaeger"]}"' in values
+    # Chart values carry repository and tag only; the digests are enforced at
+    # pack/load and by the registry and running-pod checks (#956).
+    assert 'repository: "reg.internal/openobserve/openobserve"' in values
+    assert 'tag: "v1.1.2"' in values
+    assert digests["openobserve"] not in values and digests["otelcol"] not in values
     rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
     assert f"image: reg.internal/qdrant-pdf-rag-agent@{digests['agent']}" in rendered
     assert f"reg.internal/qdrant-pdf-rag-agent:{IMAGE_SHA}" not in rendered
-    jaeger = (tree[0] / "dist" / "jaeger-rendered.yaml").read_text()
-    assert f"image: reg.internal/jaegertracing/jaeger@{digests['jaeger']}" in jaeger
     assert "running images match the verified registry digests" in result.stdout
     # The vendored Qdrant chart cannot render a digest: its tag stays, the pods are compared.
     assert "image.tag=v1.19.2" in _helm_log(tree)
 
 
-@pytest.mark.parametrize("role", ["jaeger"])
+@pytest.mark.parametrize("role", ["openobserve", "otelcol"])
 def test_missing_registry_image_refuses_before_any_mutation(tree, role):
     """pipeline --skip-load / standalone deploy against an empty or partial registry."""
     _release(tree)
     _put_registry(tree, role, None)
-    result = _run(tree)
+    result = _run(tree, ("METRICS_ENABLED", "true"))  # otelcol renders only with metrics on
     assert result.returncode != 0
     assert f"cannot read back registry image {ROLE_REFS[role]}" in result.stderr
     assert _mutations(tree) == []
@@ -1548,6 +1595,37 @@ def test_invalid_feedback_selection_fails_before_any_mutation(tree, env, message
     assert "upgrade" not in log and "new-project" not in log
 
 
+OPENOBSERVE_OBJECTS = [
+    ("apps/v1", "Deployment", "openobserve"),
+    ("v1", "Service", "openobserve"),
+    ("v1", "PersistentVolumeClaim", "openobserve-data"),
+    ("networking.k8s.io/v1", "NetworkPolicy", "openobserve-egress-deny"),
+    ("apps/v1", "Deployment", "otelcol"),
+    ("v1", "ConfigMap", "otelcol-config"),
+    ("networking.k8s.io/v1", "NetworkPolicy", "otelcol-egress"),
+]
+
+
+def test_next_ordinary_deploy_adopts_every_owned_openobserve_object(tree):
+    """Lifecycle, not first install: the deploy after the one that created
+    OpenObserve and otelcol finds all seven objects live and must proceed
+    (kind-lifecycle: 'application ownership preflight refused')."""
+    inventory = _live_inventory(tree, OPENOBSERVE_OBJECTS, **HELM_OWNED)
+    r = _run(tree, ("METRICS_ENABLED", "true"), ("OWNERSHIP_FILE", inventory))
+    assert r.returncode == 0, r.stderr
+    assert "ownership preflight refused" not in r.stderr
+    assert "upgrade" in _helm_log(tree)
+
+
+@pytest.mark.parametrize("obj", OPENOBSERVE_OBJECTS, ids=[o[2] for o in OPENOBSERVE_OBJECTS])
+def test_foreign_openobserve_objects_are_refused_before_any_mutation(tree, obj):
+    inventory = _live_inventory(tree, [obj], annotations={"meta.helm.sh/release-name": "other"})
+    r = _run(tree, ("METRICS_ENABLED", "true"), ("OWNERSHIP_FILE", inventory))
+    assert r.returncode != 0
+    assert "ownership preflight refused" in r.stderr
+    assert "upgrade" not in _helm_log(tree)
+
+
 def test_next_ordinary_deploy_adopts_every_owned_feedback_object(tree):
     """The deploy after the one that created the feedback service finds all five
     objects in the live inventory. Without them in check_app_ownership.ALLOWED
@@ -1645,3 +1723,49 @@ def test_feedback_pod_with_another_image_or_no_pod_fails_after_rollout(tree, pro
         assert "pod rag-feedback-0 container feedback runs sha256:" + "9" * 64 in r.stderr
     else:
         assert "StatefulSet rag-feedback has 0 current pods, expected 1" in r.stderr
+
+
+def test_default_smoke_gets_trace_query_settings_without_manual_env(tree):
+    """#956: with tracing on, airgap smoke needs no TRACE_QUERY_* env: the URL
+    is the in-cluster OpenObserve and the credentials come from the Secret."""
+    script = ('. scripts/airgap/common.sh; NAMESPACE=ns; KC=kubectl; OTEL_TRACING_ENABLED=1; '
+              'resolve_trace_query; printf "%s|%s|%s" "${TRACE_QUERY_URL-}" "${TRACE_QUERY_USER-}" "${TRACE_QUERY_PASSWORD-}"')
+    env = {"PATH": f"{tree[0] / 'bin'}:/usr/bin:/bin", "HELM_LOG": str(tree[1])}
+    r = subprocess.run(["sh", "-c", script], cwd=tree[0], env=env, capture_output=True, text=True, check=False)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "http://openobserve:5080|test-user|Test-pass1"
+    off = subprocess.run(["sh", "-c", script.replace("OTEL_TRACING_ENABLED=1", "OTEL_TRACING_ENABLED=0")],
+                         cwd=tree[0], env=env, capture_output=True, text=True, check=False)
+    assert off.stdout == "||"
+
+
+def test_external_otlp_endpoint_has_no_bundled_trace_query_default(tree):
+    """#956: with tracing.endpoint set there is no bundled OpenObserve, so no
+    default URL or Secret read is applied; operator values pass through and
+    smoke refuses empty ones."""
+    base = ('. scripts/airgap/common.sh; NAMESPACE=ns; KC=kubectl; OTEL_TRACING_ENABLED=1; OTEL_BUNDLED=0; '
+            'resolve_trace_query; printf "%s|%s" "${TRACE_QUERY_URL-}" "${TRACE_QUERY_USER-}"')
+    env = {"PATH": f"{tree[0] / 'bin'}:/usr/bin:/bin", "HELM_LOG": str(tree[1])}
+    unset = subprocess.run(["sh", "-c", base], cwd=tree[0], env=env, capture_output=True, text=True, check=False)
+    assert unset.returncode == 0 and unset.stdout == "|"
+    given = subprocess.run(
+        ["sh", "-c", base], cwd=tree[0], capture_output=True, text=True, check=False,
+        env={**env, "TRACE_QUERY_URL": "http://oo.platform:5080", "TRACE_QUERY_USER": "u", "TRACE_QUERY_PASSWORD": "p"})
+    assert given.returncode == 0, given.stderr
+    assert given.stdout == "http://oo.platform:5080|u"
+
+
+def test_task_runner_empty_trace_query_vars_get_bundled_defaults(tree):
+    """The task runner exports every operator key, empty when unset: on the
+    bundled path empty means unset (defaults and Secret credentials), while a
+    non-empty operator value still wins."""
+    script = ('. scripts/airgap/common.sh; NAMESPACE=ns; KC=kubectl; OTEL_TRACING_ENABLED=1; OTEL_BUNDLED=1; '
+              'resolve_trace_query; printf "%s|%s|%s" "${TRACE_QUERY_URL-}" "${TRACE_QUERY_USER-}" "${TRACE_QUERY_PASSWORD-}"')
+    env = {"PATH": f"{tree[0] / 'bin'}:/usr/bin:/bin", "HELM_LOG": str(tree[1])}
+    empty = subprocess.run(["sh", "-c", script], cwd=tree[0], capture_output=True, text=True, check=False,
+                           env={**env, "TRACE_QUERY_URL": "", "TRACE_QUERY_USER": "", "TRACE_QUERY_PASSWORD": ""})
+    assert empty.returncode == 0, empty.stderr
+    assert empty.stdout == "http://openobserve:5080|test-user|Test-pass1"
+    given = subprocess.run(["sh", "-c", script], cwd=tree[0], capture_output=True, text=True, check=False,
+                           env={**env, "TRACE_QUERY_URL": "http://x:1", "TRACE_QUERY_USER": "u", "TRACE_QUERY_PASSWORD": "p"})
+    assert given.stdout == "http://x:1|u|p"

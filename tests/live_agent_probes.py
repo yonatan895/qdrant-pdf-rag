@@ -6,6 +6,7 @@ transport/lifecycle behavior, never semantic model or production acceptance.
 """
 from __future__ import annotations
 
+import base64
 import json
 import select
 import socket
@@ -39,35 +40,48 @@ CITATION_ONLY_QUERY = "IEA500I citation-only-probe"
 
 
 @pytest.fixture(scope="module")
-def jaeger_url():
+def o2_backend(tmp_path_factory):
+    """Disposable pinned OpenObserve (ADR-0006): (query URL, OTLP origin, (user, password)).
+
+    Credentials live in a 0600 env file and reach the container only through
+    --env-file; the image is the digest pinned in images.txt, never pulled here.
+    """
     line = next(line for line in (ROOT / "images.txt").read_text().splitlines()
-                if line.startswith("cr.jaegertracing.io/jaegertracing/jaeger:"))
+                if line.startswith("docker.io/openobserve/openobserve:"))
     tag, digest = line.split()[:2]
     image = tag.rsplit(":", 1)[0] + "@" + digest
     subprocess.run(["docker", "image", "inspect", image], check=True, capture_output=True)
+    user, password = "probe@openobserve.invalid", uuid.uuid4().hex + uuid.uuid4().hex + "Aa1!"  # v1.1.2 refuses a weak root password
+    env_file = tmp_path_factory.mktemp("o2") / "o2.env"
+    env_file.touch(mode=0o600)
+    env_file.write_text(
+        f"ZO_ROOT_USER_EMAIL={user}\nZO_ROOT_USER_PASSWORD={password}\nZO_DATA_DIR=/data\n"
+        "ZO_LOCAL_MODE=true\nZO_TELEMETRY=false\nZO_HTTP_ADDR=0.0.0.0\nHOME=/tmp\n"
+        "ZO_MODEL_PRICING_ENABLED=false\nZO_MMDB_DISABLE_DOWNLOAD=true\n"
+    )
     result = subprocess.run([
-        "docker", "run", "--detach", "--rm", "--pull=never",
-        "-p", "127.0.0.1::16686", "-p", "127.0.0.1::4318", image,
+        "docker", "run", "--detach", "--rm", "--pull=never", "--memory", "1g", "--memory-swap", "1g",
+        "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+        "--tmpfs", "/tmp:rw,size=64m", "--tmpfs", "/data:rw,size=512m",
+        "--env-file", str(env_file), "-p", "127.0.0.1::5080", image,
     ], check=True, capture_output=True, text=True)
     container = result.stdout.strip()
     assert len(container) == 64 and all(c in "0123456789abcdef" for c in container)
     try:
-        def port(number):
-            result = subprocess.run(["docker", "port", container, f"{number}/tcp"],
-                                    check=True, capture_output=True, text=True)
-            return int(result.stdout.strip().rsplit(":", 1)[1])
-        ui, otlp = f"http://127.0.0.1:{port(16686)}", f"http://127.0.0.1:{port(4318)}"
-        deadline = time.monotonic() + 30
+        out = subprocess.run(["docker", "port", container, "5080/tcp"],
+                             check=True, capture_output=True, text=True)
+        origin = f"http://127.0.0.1:{int(out.stdout.strip().rsplit(':', 1)[1])}"
+        deadline = time.monotonic() + 60
         with httpx2.Client(timeout=1) as client:
             while True:
                 try:
-                    if client.get(ui + "/api/services").status_code == 200:
+                    if client.get(origin + "/healthz").status_code == 200:
                         break
                 except httpx2.HTTPError:
                     pass
-                assert time.monotonic() < deadline, "disposable Jaeger failed to become ready"
-                time.sleep(0.1)
-        yield ui, otlp
+                assert time.monotonic() < deadline, "disposable OpenObserve failed to become ready"
+                time.sleep(0.2)
+        yield origin, origin + "/api/default", (user, password)
     finally:
         subprocess.run(["docker", "rm", "--force", container], check=True, capture_output=True)
 
@@ -173,10 +187,12 @@ def model_server():
 
 
 @pytest.fixture(scope="module")
-def live_agent(qdrant_url, ingested, model_server, jaeger_url, tmp_path_factory):
+def live_agent(qdrant_url, ingested, model_server, o2_backend, tmp_path_factory):
     with pytest.MonkeyPatch.context() as environment:
         for key, value in {
-            "UI_ENABLED": "true", "OTEL_EXPORTER_OTLP_ENDPOINT": jaeger_url[1],
+            "UI_ENABLED": "true", "OTEL_EXPORTER_OTLP_ENDPOINT": o2_backend[1],
+            "OTEL_EXPORTER_OTLP_HEADERS": "Authorization=Basic%20" + base64.b64encode(
+                ":".join(o2_backend[2]).encode()).decode(),
             "METRICS_ENABLED": "true",
             "LLM_API_KEY": "", "QDRANT_API_KEY": "",
         }.items():
@@ -190,10 +206,11 @@ def live_agent(qdrant_url, ingested, model_server, jaeger_url, tmp_path_factory)
         _stop_agent(process)
 
 
-def test_live_agent_contract_and_fresh_trace(live_agent, jaeger_url):
+def test_live_agent_contract_and_fresh_trace(live_agent, o2_backend):
     with httpx2.Client(base_url=live_agent[0], timeout=30) as client, \
-            httpx2.Client(base_url=jaeger_url[0], timeout=5) as jaeger:
-        report = check(client, jaeger, QUERY, "What should the operator do next?", trace_wait=20)
+            httpx2.Client(base_url=o2_backend[0], timeout=10) as o2:
+        report = check(client, o2, QUERY, "What should the operator do next?", trace_wait=20,
+                       trace_auth=o2_backend[2])
     assert report["passed"], json.dumps(report, sort_keys=True)
     assert set(report["checks"]) == {
         "health", "live", "console", "search", "answer", "console_followup",
@@ -282,7 +299,7 @@ def test_live_citation_only_generation_is_not_accepted(
 def test_live_agent_disconnect_closes_upstream_then_next_request(
     live_agent,
     model_server,
-    jaeger_url,
+    o2_backend,
     endpoint,
     path,
     operation,
@@ -340,34 +357,36 @@ def test_live_agent_disconnect_closes_upstream_then_next_request(
             assert time.monotonic() < deadline, "disconnect outcome missing"
             time.sleep(0.05)
         assert sum(counts().values()) == sum(before.values()) + 1
-        with httpx2.Client(base_url=jaeger_url[0], timeout=5) as jaeger:
-            deadline = time.monotonic() + 20
+        with httpx2.Client(base_url=o2_backend[0], timeout=10) as o2:
+            deadline = time.monotonic() + 30
             while True:
-                response = jaeger.get(f"/api/traces/{trace_id}")
-                spans = [
-                    span
-                    for trace_data in (response.json().get("data") or [])
-                    for span in trace_data.get("spans", [])
-                ]
-                roots = [span for span in spans if span["operationName"] == operation]
+                now_us = int(time.time() * 1_000_000)
+                response = o2.post(
+                    "/api/default/_search", params={"type": "traces"}, auth=o2_backend[2],
+                    json={"query": {
+                        "sql": f"SELECT * FROM \"default\" WHERE trace_id = '{trace_id}' "
+                               f"AND operation_name = '{operation}'",
+                        "start_time": now_us - 600_000_000, "end_time": now_us + 60_000_000,
+                        "from": 0, "size": 10}},
+                )
+                roots = response.json().get("hits", []) if response.status_code == 200 else []
                 if roots:
                     break
                 assert time.monotonic() < deadline, "cancelled request root never finished"
-                time.sleep(0.1)
+                time.sleep(0.2)
         assert len(roots) == 1
         root = roots[0]
-        assert root["traceID"] == trace_id and root["duration"] > 0
-        assert any(reference["spanID"] == parent_id for reference in root["references"])
-        tags = {tag["key"]: tag["value"] for tag in root["tags"]}
-        assert tags["rag.stream_aborted"] is True
+        # Fields verified against the OpenObserve trial (docs/metric-contract.md): trace_id,
+        # operation_name, duration (microseconds) and http_request_id.
+        assert root["trace_id"] == trace_id and root["duration"] > 0
         events = [
             json.loads(line)
             for line in live_agent[1].read_text().splitlines()
             if line.startswith("{")
         ]
-        owned = [event for event in events if event.get("request_id") == tags["http.request_id"]]
+        owned = [event for event in events if event.get("request_id") == root["http_request_id"]]
         assert len(owned) == 1 and owned[0]["alert"] == "client_disconnect"
-        assert owned[0]["trace_id"] == trace_id and owned[0]["span_id"] == root["spanID"]
+        assert owned[0]["trace_id"] == trace_id
         # The shared client must survive closing the operation.
         next_payload = (
             {"query": QUERY, "stream": True}

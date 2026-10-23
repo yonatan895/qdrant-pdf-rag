@@ -1,0 +1,109 @@
+{{/*
+OpenObserve OSS Deployment (issue #956, ADR-0006). Rendered only when
+the bundled-backend condition (tracing on, empty endpoint). Local mode on one RWO block volume, replicas 1
+with Recreate (single writer), ClusterIP only, no Route. Project UID/volume
+group from restricted-v2 (no fixed IDs). Credentials come from a Secret.
+*/}}
+{{- if include "mainframe-rag.openobserveEnabled" . }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: openobserve
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: openobserve
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+    rollingUpdate: null
+  selector:
+    matchLabels:
+      app: openobserve
+  template:
+    metadata:
+      labels:
+        app: openobserve
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        {{- if .Values.openobserve.runAsId }}
+        runAsUser: {{ .Values.openobserve.runAsId }}
+        runAsGroup: {{ .Values.openobserve.runAsId }}
+        fsGroup: {{ .Values.openobserve.runAsId }}
+        {{- end }}
+        seccompProfile:
+          type: RuntimeDefault
+      {{- if .Values.pullSecret.name }}
+      imagePullSecrets:
+        - name: {{ .Values.pullSecret.name }}
+      {{- else }}
+      imagePullSecrets: []
+      {{- end }}
+      containers:
+        - name: openobserve
+          image: {{ include "mainframe-rag.image" (dict "name" "openobserve" "image" .Values.images.openobserve) }}
+          imagePullPolicy: {{ .Values.images.openobserve.pullPolicy | default "IfNotPresent" }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          env:
+            - name: ZO_LOCAL_MODE
+              value: "true"
+            - name: ZO_LOCAL_MODE_STORAGE
+              value: "disk"
+            - name: ZO_DATA_DIR
+              value: "/data"
+            - name: ZO_TELEMETRY
+              value: "false"
+            - name: ZO_MODEL_PRICING_ENABLED
+              value: "false"
+            - name: ZO_MMDB_DISABLE_DOWNLOAD
+              value: "true"
+            - name: ZO_ROOT_USER_EMAIL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mainframe-rag.openobserveSecretName" . }}
+                  key: root-user-email
+            - name: ZO_ROOT_USER_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mainframe-rag.openobserveSecretName" . }}
+                  key: root-user-password
+          ports:
+            - containerPort: 5080
+              name: http
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: openobserve-data
+        - name: tmp
+          emptyDir: {}
+{{- end }}

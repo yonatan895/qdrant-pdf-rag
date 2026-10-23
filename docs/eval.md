@@ -298,10 +298,11 @@ verdict.
   (a gate never pins live state); `drift` restores only on exact
   name-and-count match. Re-adoption creates a new snapshot and prunes
   strays. Restore verifies the post-restore point count.
-- **Mode-keyed venues:** `benchmarks/harness-vllm.json` (vllm venue: golden
-  + holdout, 203 entries, over the snapshot-pinned **real** corpus
-  `manuals_b5c1756` — 190440 pts, `VENUE=rc` + `QDRANT_COLLECTION=manuals_b5c1756`,
-  re-recorded 2026-10-03 on the re-frozen set) and `benchmarks/harness.json`
+- **Mode-keyed venues:** `benchmarks/harness-vllm.json` (vllm venue: **dev
+  golden set only**, 127 entries, over the snapshot-pinned G4 corpus
+  `colab_manuals_qwen3_8b_4096_ced400a7` — 234,610 pts, Qwen3-Embedding-8B dim
+  4096; re-recorded 2026-10-23, see the §10 row; a gate run that adds the
+  holdout under `VENUE=rc` does not match its entry set, #859) and `benchmarks/harness.json`
   (hash venue: **dev golden set only**, `evals/golden.jsonl`, over the
   snapshot-pinned synthetic hash corpus; re-recorded 2026-10-22, see the §10 row). Python now selects both the
   mode baseline and this dataset default for Task and direct invocations
@@ -340,9 +341,9 @@ verdict.
   eval); abstain rows contribute traps only; trap precision divides by all
   rows. recall@1 (#837) is reported per class, overall and per query and is
   compared per class where the baseline records it (see Verdict).
-  `benchmarks/harness.json` records it (re-recorded 2026-10-22);
-  `benchmarks/harness-vllm.json` predates the key and is not gated on it
-  until its RC re-record (G4 session).
+  `benchmarks/harness.json` (re-recorded 2026-10-22) and
+  `benchmarks/harness-vllm.json` (re-recorded 2026-10-23) both record it, so
+  both are gated on it per class.
 - **L2 (answer tier):** reuses the answer-eval runner and adds citation
   precision/recall over exact cite-string joins (precision averages cited
   rows, recall counts zero-cite rows at 0; unmapped citations fail the
@@ -893,6 +894,7 @@ committed row is the pointer, the manifest is the detail.
 | 2026-10-22 | 308f70b (G4 sandbox) | `colab_manuals_qwen3_8b_4096_ced400a7` (rules `ced400a7`, 234,610 pts, Qwen3-Embedding-8B dim 4096, shipped defaults, rerank off) | #825 live dev and section evaluation of the per-document comparative merge (#852); two identical replicates; holdout not read (#859) | dev (114 scored) r@1 0.711, r@5 0.956, MRR 0.802; comparative (12) r@1 0.333, r@5 0.917, MRR 0.583; sections (17) r@1 0.235, r@5 0.471, MRR 0.333; 0 `must_not`. CMP-05, CMP-17 retrieved at rank 3, CMP-06 rank 2, CMP-01 not in top 8 (label question). No regression versus the 2026-10-21 live row; not a controlled comparison (corpus rules and search params differ). Detail: [record](records/2026-10-22-comparative-live-eval.md) |
 | 2026-10-23 | 308f70b (G4 sandbox) | `colab_manuals_qwen3_8b_4096_ced400a7` (rules `ced400a7`, 234,610 pts, Qwen3.8-27B, Qwen3-Embedding-8B dim 4096, rerank off, deadline 570 s / client 600 s) | `eval-answers` 127 dev rows, xhigh versus low `LLM_REASONING_EFFORT_{SIMPLE,COMPLEX}` (only difference), plus the #843 thinking-reserve 16384 arm on the capped rows; holdout excluded (#859) - #831 | xhigh 88/127, low 116/127; p50 221.0 s vs 70.4 s; over 300 s 55 vs 0. Paired: both 84, low only 32, xhigh only 4 (NEG-02, SYN-01, SYS-07, TBL-02), both fail 7; McNemar p < 0.001. Low passes 31 of the 32 xhigh-truncated rows; on the 95 completed rows 88 vs 85 (not significant). Reserve arm: 11/16 vs low 15/16, p50 658 s vs 110 s. **Recommendation only (no default changed):** `low` for both routes as its own concern. Per-class table: [record](records/2026-10-23-effort-arms.md) |
 | 2026-10-23 | 308f70b (G4 sandbox) | `colab_manuals_qwen3_8b_4096_ced400a7` (rules `ced400a7`, 234,610 pts, Qwen3.8-27B, Qwen3-Embedding-8B dim 4096, rerank off, deadline 570 s / client 600 s) | `eval-answers` 126 of 127 dev rows (SYS-09 not run, session time), `LLM_REASONING_EFFORT_{SIMPLE,COMPLEX}` medium (only difference), paired with low and xhigh on the same 126 rows; holdout excluded (#859) - #917 | medium 119/126, low 115, xhigh 88; abstain declined 9/13 vs 7/13 vs 7/13; p50 / p95 / max 87.5 / 163.3 / 232.3 s; 0 timeouts, 0 `generation_incomplete`, 0 over 300 s. Paired: medium vs low 115 both, medium only 4 (NEG-02, SYN-01, TBL-02, VER-07), low only 0, p = 0.125; medium vs xhigh 87 both, medium only 32, xhigh only 1 (SYS-07), p < 0.001. Failures: MSG-13, SYN-07, SYS-07 (#916, #922 / #931), NEG-04, VER-08, VER-11 (#915), NEG-03. **No default changed; recommendation pending maintainer decision (#917).** Per-class table: [record](records/2026-10-23-medium-effort-arm.md) |
+| 2026-10-23 | 170ac64 (G4 session S10) | `colab_manuals_qwen3_8b_4096_ced400a7` (rules `ced400a7`, 234,610 pts, Qwen3-Embedding-8B dim 4096, rerank off); pin `colab_manuals_qwen3_8b_4096_ced400a7__gen9acd068bf9b914d12d10f9f0f592-2773425469235116-2026-10-23-14-14-36.snapshot` | `harness.py --update-baseline` equivalent (`EMBED_MODE=vllm`, dev golden 127 entries, golden sha `0f298256`, frozen holdout not used, #859) - #837 | `benchmarks/harness-vllm.json` re-recorded and pinned (`snapshot_name` set, `points_count` 234610), replacing the 203-entry dev-plus-holdout record of 2026-10-03: 117 scored, overall r@1 0.7265, r@5 0.9573, r@8 0.9658, MRR 0.815, nDCG@8 0.8344, 0 trap failures; recall@1 recorded overall and per class, so the promotion gate compares it per class. Snapshot count 1 before and after, pin still listed. Supersedes the unpinned 2026-10-22 S6 record (114 scored), which predated the VER-08, VER-11 and NEG-03 relabels |
 | 2026-10-23 | `170ac64` (A) vs `bed6897` (B, #953) (G4 sandbox, session S11) | `colab_manuals_qwen3_8b_4096_ced400a7` (rules `ced400a7`, 234,610 pts, Qwen3.8-27B, Qwen3-Embedding-8B dim 4096, rerank off, `REQUEST_DEADLINE_S` 270) | #944 paired A/B of the #953 resolved-system-code note: the six SYS rows plus the 13 abstain-class rows, `LLM_REASONING_EFFORT_{SIMPLE,COMPLEX}` low and medium, A and B interleaved per row, one scorer; holdout excluded (#859) | SYS-07 fail (`insufficient_evidence`) to pass (`accepted`) at both efforts; SYS rows passing 5 to 6 of 6 at both. Abstain-class rows passing: low 11 to 11, medium 12 to 11; the only difference is SYN-32 at medium (A declined, B answered), whose A and B prompts were identical because the note did not fire, so it is sampling variance (known variance row, #915). The note fired on exactly 3 rows (`S806`, `SB37`, `SAFB` codes) and on no A prompt. Errors 0 in all four arms. Maintainer accepted criterion 2 of #944 on 2026-10-23. Ids and verdicts only. |
 
 **2026-10-23 default decision (#917).** The maintainer adopted `medium` reasoning effort on both routes as the shipped default after the S9 medium arm (126 dev rows: 119 pass against 115 low and 88 xhigh; 0 `generation_incomplete`; latency p50 87.5 s, p95 162 s, max 232 s). The measured record is #932; this note carries no new run. The xhigh and low rows above stay as the history they measured. Live confirmation of the changed default on G4 has not been run.

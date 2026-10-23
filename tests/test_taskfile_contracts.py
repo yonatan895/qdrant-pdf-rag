@@ -47,7 +47,7 @@ REQUIRE_RUNNER = os.environ.get("TASK_CONTRACTS_REQUIRE_RUNNER") == "1"
 # tuple, so the logged set cannot drift between copies.
 LOGGED_ENV_KEYS = ("EMBED_MODE", "VENUE", "PYTHONPATH", "LLM_STREAM", "UI_ENABLED",
                    "ROLE", "MODEL", "SERVED_NAME", "CONTAINER_NAME", "PORT", "BUDGET_PROFILE", "BUDGET_PYTHON",
-                   "GATEWAY_PORT", "GATEWAY_PROBE_MAX_TOKENS", "CORPUS_DIR", "LOCAL_INGEST_PROGRESS", "LOCAL_INGEST_REINGEST", "LOCAL_AGENT_PORT", "JAEGER_PORT",
+                   "GATEWAY_PORT", "GATEWAY_PROBE_MAX_TOKENS", "CORPUS_DIR", "LOCAL_INGEST_PROGRESS", "LOCAL_INGEST_REINGEST", "LOCAL_AGENT_PORT", "O2_PORT",
                    "SIM_CONTAINER", "SIM_PORT",
                    "GPU_MEM", "MAX_LEN", "SEQS", "LOCAL_STACK_DRYRUN",
                    "LLM_MAX_MODEL_LEN", "LLM_REASONING_EFFORT_COMPLEX")
@@ -1004,7 +1004,7 @@ class TaskContractsTests(unittest.TestCase):
         self.assertEnvSubset(calls[0], {"CORPUS_DIR": "/data", "GATEWAY_PORT": "4001",
                                         "GATEWAY_PROBE_MAX_TOKENS": "512",
                                         "LOCAL_INGEST_PROGRESS": "/private state/inventory.jsonl",
-                                        "LOCAL_AGENT_PORT": None, "JAEGER_PORT": None,
+                                        "LOCAL_AGENT_PORT": None, "O2_PORT": None,
                                         "LOCAL_STACK_DRYRUN": None})
         if (self.log).exists():
             self.log.unlink()

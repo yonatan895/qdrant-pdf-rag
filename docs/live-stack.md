@@ -9,13 +9,13 @@ owns context, conflicts, task/review and handoff formats.
 
 | Actual change | Required merge evidence | Resource boundary |
 |---|---|---|
-| **prose-only** (prose/navigation only) | `sh scripts/tools/run-task.sh qa:context`, cited-path and semantic review of claims; generated config or executable examples select their affected row too | Strictly offline/CPU: NO GPU, NO Qdrant, NO model gateway (LiteLLM/vLLM), NO Jaeger, and NO live source |
+| **prose-only** (prose/navigation only) | `sh scripts/tools/run-task.sh qa:context`, cited-path and semantic review of claims; generated config or executable examples select their affected row too | Strictly offline/CPU: NO GPU, NO Qdrant, NO model gateway (LiteLLM/vLLM), NO OpenObserve, and NO live source |
 | **console JS/template/CSS** (`webui/static`, `webui/templates`) | `pytest -m browser tests/console_browser_contracts.py` in an environment with an offline Chrome for Testing + chromedriver (a skip is not a pass; see [console contract](agent.md#console-browser-contract-retention-and-accessibility-372)), plus `tests/test_webui.py` | one headless Chrome (~500 MB); run under the memory guard |
-| **test/tool-only** (test/tool/workflow only) | Relevant tool checks, lint/types for affected Python, focused test/selector checks (`pytest tests/test_agent_context.py tests/test_agent_doctor.py`, plus `tests/test_taskfile_contracts.py` where the agent-context lane runs it), CI workflow YAML validation; changes to a shared fixture select dependent suites | Hermetic local/CI: pure checks by default; forbid heavy services (GPU, Qdrant, LiteLLM/vLLM gateways, Jaeger) unless the specific integration tier is under test |
+| **test/tool-only** (test/tool/workflow only) | Relevant tool checks, lint/types for affected Python, focused test/selector checks (`pytest tests/test_agent_context.py tests/test_agent_doctor.py`, plus `tests/test_taskfile_contracts.py` where the agent-context lane runs it), CI workflow YAML validation; changes to a shared fixture select dependent suites | Hermetic local/CI: pure checks by default; forbid heavy services (GPU, Qdrant, LiteLLM/vLLM gateways, OpenObserve) unless the specific integration tier is under test |
 | **publication/retirement lifecycle** (publication, retirement, completion, locks, restore ordering) | [Common checks](#common-checks) including `test_ingest_publish` / `test_ingest_completion`; focused transition/fault tests; real non-dry control path against faithful fakes; read-only residue audit; retirement inventory validation; writer concurrency/locking (`publish-<alias>.lock`) and recheck verification; disposable Qdrant boundary exercise; existing inexpensive L1 plumbing gate (`sh scripts/tools/run-task.sh eval:gate-l1`) while applicable | Real storage/protocol semantics and deterministic embeddings; CPU / disposable Qdrant simulation or faithful fakes; NO GPU; NO live platform model pool; generic search success is not publication acceptance |
 | **multi-peer HA** (collection distribution policy, placement, peer loss/rejoin, migration) | [Common checks](#common-checks); policy propagation/precedence tests (`test_config`, `test_airgap_ingest_sh`, `test_airgap_validate_sh`, `test_openshift_identities`); strict fake/observed-topology suite (`test_placement`); `sh scripts/tools/run-task.sh qa:ha` three-peer pinned-image fixture (real 6/3/2 placement, false-HA refusal, degraded reads and healthy rejoin; fails on missing docker/image or skips); `sh scripts/tools/run-task.sh airgap:dryrun` when render/preset paths change; recorded production node-loss/site qualification stays separate | Disposable pinned three-peer Qdrant on CPU (docker); no GPU/model gateway; three containers prove distributed software behavior only, never independent-worker or site tolerance |
 | **extraction/ranking** (extraction, chunking, identifiers, filters, ranking, embedding representation) | [Common checks](#common-checks); source-fidelity/retrieval tests; private stored-content census on real manuals (duplicate-text rate, page-label coverage, chunk type/length distribution, top hits for fixed real queries; counts and outcomes only); relevant L1 (`sh scripts/tools/run-task.sh eval:gate-l1`) / fresh-corpus regression (`sh scripts/tools/run-task.sh eval:paraphrase`); intended-mode semantic evaluation (`sh scripts/tools/run-task.sh eval:retrieval EMBED_MODE=vllm`) and before/after per-class attribution where retrieval behavior changes (full ladder rungs 1–7); chat/condensation requires `sh scripts/tools/run-task.sh eval:chat` | Real model/corpus evidence where semantics are claimed; synthetic/hash runs are not semantic acceptance; disposable simulation / mock vLLM for plumbing, GPU or live gateway for semantic evaluation |
-| **HTTP/lifecycle** (HTTP/MCP/browser lifecycle) | [Common checks](#common-checks); Rung 6 live agent probes: actual relevant client/transport behavior, `/healthz`/`/livez`, trap refusal (0 citations), legit query grounded (≥1 citation), overlong 422 fixed envelope, SSE chunk token/final integrity, cancellation and finalization; browser execution only for browser behavior | Controllable test server/source; running agent + disposable Qdrant + mock/real gateway + local Jaeger; no live z/OS/Splunk by default |
+| **HTTP/lifecycle** (HTTP/MCP/browser lifecycle) | [Common checks](#common-checks); Rung 6 live agent probes: actual relevant client/transport behavior, `/healthz`/`/livez`, trap refusal (0 citations), legit query grounded (≥1 citation), overlong 422 fixed envelope, SSE chunk token/final integrity, cancellation and finalization; browser execution only for browser behavior | Controllable test server/source; running agent + disposable Qdrant + mock/real gateway + local OpenObserve; no live z/OS/Splunk by default |
 | **packaging/deploy** (packaging/deployment/defaults/identity) | Applicable union plus existing artifact/render/bootstrap/migration checks (`sh scripts/tools/run-task.sh qa:check` including `tests/test_airgap_*.py`, `sh scripts/tools/run-task.sh airgap:dryrun` with zero leftover placeholders, string quoting checks, storage class checks refusing NFS for block data, gateway Secret references) and explicit compatibility decision; operational changes select relevant topology acceptance | Preserve air-gap and authorized site boundaries; hermetic shell stubs, local Kind cluster, or ephemeral lab namespace |
 | **release promotion** (release promotion) | Exact bundle/image, configuration, corpus/model and supported topology acceptance from release runbooks (`docs/release-verification.md`, then site OpenShift acceptance in `docs/install_and_ops.md`); `probe_gateway.py --stream` from pod; frozen holdout evaluation under `VENUE=rc` (`sh scripts/tools/run-task.sh eval:holdout`); layered harness L1–L4 where applicable | Operator-authorized site and the release gate's Kind lane, platform model pool, real corpus; separate from ordinary PR merge; no substitution with a mock or skipped release lane |
 
@@ -74,7 +74,7 @@ Four separate phases:
 For Increment A of #411 (and #397), docs need context/link/semantic review (`sh scripts/tools/run-task.sh qa:context`);
 tooling/Task/CI additions need focused tests (`pytest tests/test_agent_context.py tests/test_agent_doctor.py`)
 and `sh scripts/tools/run-task.sh qa:check`. Application behavior is outside this issue, so no GPU, Qdrant,
-model gateway, or Jaeger services are permitted.
+model gateway, or OpenObserve services are permitted.
 
 Conventions below: `$SNAPSHOT_DIR` is persistent disk outside the repo
 (e.g. `export SNAPSHOT_DIR=$HOME/qdrant-snapshots`); `$CORPUS_ROOT` is
@@ -94,7 +94,7 @@ and `--basetemp` trees there consumed gigabytes of RAM (check with
 |---|---|---|
 | Unit / explicit dev hash | Temporary synthetic files and mocked clients | Contracts/fault paths; no live services or semantic model evidence |
 | Disposable Qdrant simulation | Owned disposable container and generated corpus; deterministic model stand-in | Real client/server projection, storage and API behavior; not real-model quality or distributed HA |
-| Gateway-shaped local development | Explicitly selected local backends behind real pinned gateway, Qdrant/Jaeger/agent and authorized scratch corpus | Model/gateway/application integration and relevant eval; no production topology claim |
+| Gateway-shaped local development | Explicitly selected local backends behind real pinned gateway, Qdrant/OpenObserve/agent and authorized scratch corpus | Model/gateway/application integration and relevant eval; no production topology claim |
 | Published-bundle Kind | Fresh disposable cluster/registry and the downloaded bundle, documented sizing overrides | Same deployment pipeline/artifact; deterministic computation lanes prove plumbing. Single-node runs do not prove distributed HA |
 | Production acceptance | Operator-authorized site resources and exact candidate; private data under its runbook | Real SCC/TLS/identity/storage/model/corpus checks; OpenShift checks are first exercised on the site and must be recorded |
 
@@ -136,7 +136,7 @@ curl -s -m 10 http://127.0.0.1:8002/v1/models | head -c 200
 <a id="full-local-simulation"></a>
 ### Full local simulation (`sh scripts/tools/run-task.sh local:stack`)
 
-`sh scripts/tools/run-task.sh local:stack` is the canonical full simulation: Qdrant → Jaeger → real
+`sh scripts/tools/run-task.sh local:stack` is the canonical full simulation: Qdrant → OpenObserve → real
 LiteLLM gateway → probe → optional ingest → agent → smoke → trace check.
 `LOCAL_STACK_DRYRUN=1` prints the plan without Docker/network. Choose a compatible
 GPU pack before starting component servers; the default pair uses
@@ -182,8 +182,8 @@ notice. This is local tooling only: the ingest CLI default (CPU-1), production
 Jobs and the air-gap `INGEST_WORKERS` are unchanged.
 
 The supervisor sources the private `GATEWAY_ENV_FILE`, owns the gateway it starts,
-and reuses reachable Jaeger without claiming ownership. Component lifecycle stays
-in `run_local_gateway.sh` (gateway/Postgres), `run_local_jaeger.sh`,
+and reuses a reachable OpenObserve without claiming ownership. Component lifecycle stays
+in `run_local_gateway.sh` (gateway/Postgres), `run_local_openobserve.sh` (credentials in a 0600 env file, `O2_COLLECTOR=1` adds the pinned otelcol scraper),
 `run_local_vllm.sh`, and `qdrant_sim.py`/`qdrant_pin.py`; do not fork these owners.
 An existing gateway container makes the supervisor fail closed; resolve ownership
 before stopping it. The native gateway arms cleanup before Postgres readiness
@@ -269,14 +269,29 @@ with the failure and next action when validation is blocked.
 6. Live agent probes — `sh scripts/tools/run-task.sh local:agent` (or equivalent uvicorn) against the real stack, then the copy-paste probes below (agent on `:8087` in these examples; `Q` is the query). Green: trap refuses with zero validated citations, legit answers grounded with ≥1 citation, overlong 422s with the fixed envelope. `sh scripts/tools/run-task.sh local:stack` enables the operator console by default (`UI_ENABLED=true`, console at `/ui`, smoke-checked in the up sequence; the banner prints the URL, and `UI_ENABLED=false sh scripts/tools/run-task.sh local:stack` exercises the fail-closed route set); `sh scripts/tools/run-task.sh local:agent` honors `UI_ENABLED` (`UI_ENABLED=true sh scripts/tools/run-task.sh local:agent`; unset keeps the app fail-closed).
 7. Feature A/B numbers in the PR body — any retrieval/ranking change ships measured deltas (2×2 where applicable: off/on × base/context), per-query attribution for every moved query, must_not hard-zero.
 
+Kind lanes run the site-matched Kubernetes version: the site is Kubernetes 1.33 on
+OpenShift 4.19/4.20, so CI pins kind v0.32.0 (the newest kind release publishing a
+1.33 node image), `kindest/node:v1.33.12` by digest, and kubectl v1.33.12.
+
+### kind-observability lane
+
+`e2e.yml` lane `kind-observability` (dispatch and nightly, like the other Kind
+lanes; never `kind load`: images come from the bundle through the authenticated
+`kind-registry:5000` path) runs the pipeline in a PSA `restricted` namespace and
+then `scripts/ci/observability_lane.sh`: OpenObserve and the otelcol collector are
+admitted and running, a v1.search trace arrives, `rag_requests_total` arrives
+through the collector, and a canary scan of every stream in the `default` and
+`_meta` orgs plus the backend and collector container logs finds 0 hits. Record
+the run id and GHCR tags in the PR.
+
 ### Native transport and lifecycle probes
 
-`agent-probes.yml` explicitly prepares pinned Qdrant and Jaeger images before
+`agent-probes.yml` explicitly prepares pinned Qdrant and OpenObserve images before
 running the five tests in `tests/live_agent_probes.py`. With the approved dev
 wheelhouse, Task/Helm tools and those images already prepared, the local entry is
 `ALLOW_HASH_MODE=1 sh scripts/tools/run-task.sh qa:unit -- -m integration tests/live_agent_probes.py -v`.
 Verification uses `--pull=never`, original synthetic PDFs, actual agent HTTP and
-fresh Jaeger traces. The model stand-in scripts grounded text and trap refusal;
+fresh OpenObserve traces. The model stand-in scripts grounded text and trap refusal;
 this proves application transport, citation labeling and cleanup, not semantic
 model quality. A waiting upstream must observe the actual downstream disconnect,
 and the next ordinary answer must succeed. The dedicated filename avoids adding
@@ -471,7 +486,7 @@ the platform-owned production gateway needs equivalent failure behavior.
 ### Strict retained-local acceptance
 
 The [real-corpus runbook](local-real-corpus.md#4-verify-and-retain-the-complete-live-stack)
-uses `local:check` against existing agent/Jaeger listeners. A grounded first
+uses `local:check` against existing agent/OpenObserve listeners (`--trace-url`, credentials in `TRACE_QUERY_USER`/`TRACE_QUERY_PASSWORD`). A grounded first
 answer, grounded console follow-up, one terminal final without errors and a
 fresh matching search trace are required; HTTP success, a refusal or historical
 traces do not pass. Preserve the failing original question on recheck. Record

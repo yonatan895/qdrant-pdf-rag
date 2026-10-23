@@ -6,8 +6,13 @@
 #
 # name                                                                  digest
 docker.io/qdrant/qdrant:v1.19.2-unprivileged                           sha256:efb96a9425a90d2d5a1a0a474156280df1892dcdf1af3e8515bd2589b1bfd88b
-# Upstream Jaeger tag is 2.20.0; load.sh and the Jaeger template use v2.20.0.
-cr.jaegertracing.io/jaegertracing/jaeger:2.20.0                         sha256:46a886260e04002d8f45e213fc39063fa11a50446048fdaa64786fc0840cb9f8
+# ADR-0006 trace/metrics backend (#956): OpenObserve OSS v1.1.2 (AGPL-3.0,
+# unmodified upstream binary, released 2026-10-20) and the stateless otelcol-contrib
+# scraper/forwarder from the #782 qualification trial. Both digests are manifest
+# lists; the OpenObserve one was read with skopeo inspect --raw on docker.io.
+# OpenObserve is the only trace backend (#956); Jaeger is no longer pinned.
+docker.io/openobserve/openobserve:v1.1.2                               sha256:4a154849432f75c4fb024de32fe34163c02406c905dab22bf8d213d2e3386392
+docker.io/otel/opentelemetry-collector-contrib:0.160.0                 sha256:799dc6cf12c96192af37b5bdba804da8c10b3bc563b43cb90c3f3c58d9572ad6
 registry.access.redhat.com/ubi9/python-314-minimal:9.8                 sha256:1e4b43488508216fee35b87e6b5425f4ef475eacf9c113f5b901e27af3844fba
 # ADR-0004 operator console: Red Hat oauth-proxy sidecar terminates external
 # ingress on 8443. Pulling it needs a Red Hat registry login (unlike the

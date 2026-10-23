@@ -91,6 +91,13 @@ spec:
               value: {{ .Values.images.ingest.tag | quote }}
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: {{ include "mainframe-rag.otelEndpoint" . | quote }}
+            {{- if include "mainframe-rag.openobserveEnabled" . }}
+            - name: OTEL_EXPORTER_OTLP_HEADERS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mainframe-rag.openobserveSecretName" . }}
+                  key: otlp-headers
+            {{- end }}
             - name: OTEL_SERVICE_NAME
               value: mainframe-rag-ingest
             - name: OTEL_DEPLOYMENT_ENVIRONMENT

@@ -9,7 +9,13 @@ import json
 
 import pytest
 from scripts.harness import (
+    GOLDEN_SHA_LEGACY_WARNING,
+    GOLDEN_SHA_MISMATCH_MESSAGE,
+    HOLDOUT_PIN_LEGACY_WARNING,
+    HOLDOUT_PIN_MISMATCH_MESSAGE,
     baseline_path_for,
+    check_holdout_pin,
+    holdout_pin_sha256,
     load_baseline,
     pin_snapshot,
     resolve_snapshot_action,
@@ -681,6 +687,133 @@ def test_empty_classes_get_no_confidence_interval():
 
 
 # ------------------------------------------------- Qdrant API key (#950)
+def _golden_sha_run(tmp_path, monkeypatch, capsys, recorded):
+    import hashlib
+
+    from scripts import harness
+
+    golden = tmp_path / "g.jsonl"
+    golden.write_text(json.dumps({"id": "a", "query": "q", "query_class": "syntax",
+                                  "expected_doc_ids": ["d"]}) + "\n")
+    meta = {"golden_entries": 1}
+    if recorded == "match":
+        meta["golden_sha256"] = hashlib.sha256(golden.read_bytes()).hexdigest()
+    elif recorded == "differ":
+        meta["golden_sha256"] = "0" * 64
+    baseline = tmp_path / "b.json"
+    baseline.write_text(json.dumps({"_meta": meta, "classes": {}, "per_query": {}}))
+    for name, val in (("EMBED_MODE", "hash"), ("ALLOW_HASH_MODE", "true"), ("VENUE", "dev"),
+                      ("QDRANT_URL", "http://127.0.0.1:1"), ("QDRANT_COLLECTION", "c")):
+        monkeypatch.setenv(name, val)
+    monkeypatch.delenv("QDRANT_API_KEY", raising=False)
+    rc = harness.main(["--golden", str(golden), "--baseline", str(baseline)])
+    return rc, capsys.readouterr().err
+
+
+def test_golden_sha_mismatch_refuses_before_any_qdrant_call(tmp_path, monkeypatch, capsys):
+    rc, err = _golden_sha_run(tmp_path, monkeypatch, capsys, "differ")
+    assert rc == 1
+    assert GOLDEN_SHA_MISMATCH_MESSAGE in err
+    assert GOLDEN_SHA_MISMATCH_MESSAGE.startswith("FAIL [HARNESS_GOLDEN_SHA_MISMATCH]")
+    assert "unreachable" not in err  # never reached the Qdrant step
+
+
+def test_golden_sha_match_passes_without_warning(tmp_path, monkeypatch, capsys):
+    _, err = _golden_sha_run(tmp_path, monkeypatch, capsys, "match")
+    assert GOLDEN_SHA_MISMATCH_MESSAGE not in err
+    assert GOLDEN_SHA_LEGACY_WARNING not in err
+    assert "unreachable; refusing to evaluate" in err  # got past the sha check
+
+
+def test_golden_sha_legacy_baseline_warns_and_continues(tmp_path, monkeypatch, capsys):
+    _, err = _golden_sha_run(tmp_path, monkeypatch, capsys, "legacy")
+    assert GOLDEN_SHA_LEGACY_WARNING in err
+    assert GOLDEN_SHA_MISMATCH_MESSAGE not in err
+    assert "unreachable; refusing to evaluate" in err
+
+
+def test_save_baseline_records_golden_sha_and_matches_pin_file_digest(tmp_path):
+    import hashlib
+    from pathlib import Path
+
+    from scripts.harness import golden_sha256
+
+    dev = Path(__file__).resolve().parents[1] / "evals" / "golden.jsonl"
+    sha = golden_sha256([dev])
+    pin = (dev.parent / "golden.jsonl.sha256").read_text().split()[0]
+    assert sha == pin == hashlib.sha256(dev.read_bytes()).hexdigest()
+    path = tmp_path / "b.json"
+    save_baseline(path, _summary(), embed_mode="vllm", snapshot={"points_count": 1}, golden_sha=sha)
+    assert load_baseline(path)["_meta"]["golden_sha256"] == sha
+
+
+def test_golden_sha_never_reads_the_holdout(tmp_path):
+    from scripts.harness import golden_sha256
+
+    assert golden_sha256([tmp_path / "holdout.jsonl"]) is None  # absent file: not opened
+
+
+def _holdout_dir(tmp_path, pin="a" * 64):
+    d = tmp_path / "evals"
+    d.mkdir()
+    (d / "holdout.jsonl.sha256").write_text(f"{pin}  evals/holdout.jsonl\n")
+    return d / "holdout.jsonl"  # deliberately not created
+
+
+def test_holdout_pin_read_from_pin_file_and_holdout_never_opened(tmp_path, monkeypatch):
+    import builtins
+    from pathlib import Path
+
+    holdout = _holdout_dir(tmp_path)
+    opened: list[str] = []
+    real_open, real_read_text, real_read_bytes = builtins.open, Path.read_text, Path.read_bytes
+
+    def spy_open(f, *a, **k):
+        opened.append(str(f))
+        return real_open(f, *a, **k)
+
+    def spy_text(self, *a, **k):
+        opened.append(str(self))
+        return real_read_text(self, *a, **k)
+
+    def spy_bytes(self, *a, **k):
+        opened.append(str(self))
+        return real_read_bytes(self, *a, **k)
+
+    monkeypatch.setattr(builtins, "open", spy_open)
+    monkeypatch.setattr(Path, "read_text", spy_text)
+    monkeypatch.setattr(Path, "read_bytes", spy_bytes)
+    from scripts.harness import golden_sha256
+
+    assert holdout_pin_sha256([holdout]) == "a" * 64
+    assert golden_sha256([holdout]) is None
+    assert opened and all(not o.endswith("holdout.jsonl") for o in opened)
+
+
+def test_holdout_pin_match_passes():
+    assert check_holdout_pin({"_meta": {"holdout_pin_sha256": "a" * 64}}, "a" * 64) is None
+
+
+def test_holdout_pin_mismatch_refuses_with_its_own_code():
+    msg = check_holdout_pin({"_meta": {"holdout_pin_sha256": "a" * 64}}, "b" * 64)
+    assert msg == HOLDOUT_PIN_MISMATCH_MESSAGE
+    assert msg.startswith("FAIL [HARNESS_HOLDOUT_PIN_MISMATCH]")
+
+
+def test_holdout_pin_legacy_baseline_warns():
+    assert check_holdout_pin({"_meta": {}}, "a" * 64) == HOLDOUT_PIN_LEGACY_WARNING
+
+
+def test_dev_only_runs_are_unaffected_by_holdout_pin(tmp_path):
+    assert check_holdout_pin({"_meta": {}}, None) is None
+    path = tmp_path / "b.json"
+    save_baseline(path, _summary(), embed_mode="hash", snapshot={"points_count": 1}, golden_sha="c" * 64)
+    assert "holdout_pin_sha256" not in load_baseline(path)["_meta"]
+    save_baseline(path, _summary(), embed_mode="vllm", snapshot={"points_count": 1},
+                  golden_sha="c" * 64, holdout_pin="a" * 64)
+    assert load_baseline(path)["_meta"]["holdout_pin_sha256"] == "a" * 64
+
+
 _AUTH_SECRET = "s3cret-harness-key-950"
 
 

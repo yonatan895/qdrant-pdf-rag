@@ -1,0 +1,21 @@
+{{/*
+OpenObserve egress NetworkPolicy (issue #956, ADR-0006): default-deny all
+egress for the OpenObserve pod, DNS included (local mode has no outbound peers).
+Egress-only: ingress stays unrestricted here. Needs a CNI that enforces
+NetworkPolicy; the ZO_* settings remain the first egress control.
+*/}}
+{{- if include "mainframe-rag.openobserveEnabled" . }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: openobserve-egress-deny
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: openobserve
+spec:
+  podSelector:
+    matchLabels:
+      app: openobserve
+  policyTypes:
+    - Egress
+{{- end }}

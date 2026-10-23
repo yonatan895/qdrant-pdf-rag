@@ -155,7 +155,7 @@ metadata:
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: jaeger-badger
+  name: openobserve-data
 '''
 
 MANIFEST_STS = MANIFEST_CLEAN + '''---
@@ -282,6 +282,24 @@ def test_full_sequence_green(harness):
     assert len(copies) >= 3
     assert all('uid:' not in a and 'resourceVersion:' not in a for a in copies)
     assert 'chart lifecycle complete' in result.stdout
+
+
+def test_bundled_openobserve_credentials_are_copied_into_the_chart_namespace(harness):
+    """kind-lifecycle-chart: OpenObserve and the agent OTLP header read the
+    operator Secret, which lives in the data-plane namespace; the isolated chart
+    namespace needs its copy or both pods stay in CreateContainerConfigError."""
+    def copied(calls):
+        return [c for c in kubectl_calls(calls, 'get')
+                if 'secret' in c['args'] and 'openobserve-credentials' in c['args']]
+    on, calls = run_harness(harness, ('OTEL_BUNDLED', '1'))
+    assert on.returncode == 0, on.stderr
+    assert len(copied(calls)) == 1 and '-n' in copied(calls)[0]['args']
+    assert any('openobserve-credentials' in c['input'] and 'namespace: chart-ns' in c['input']
+               for c in kubectl_calls(calls, 'apply', 'create'))
+    harness[2].write_text('')
+    off, calls = run_harness(harness, ('OTEL_BUNDLED', '0'))
+    assert off.returncode == 0, off.stderr
+    assert copied(calls) == []
 
 
 def test_fault_unexpected_success_fails(harness):
