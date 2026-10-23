@@ -312,7 +312,10 @@ def assignment_lock():
     This is independent of the caller's existing host resource lock. Keep the
     inode stable: deleting a held lock would permit two concurrent owners.
     """
-    directory = Path("/tmp") / f"mainframe-rag-colab-{os.geteuid()}"
+    # COLAB_ASSIGNMENT_LOCK_DIR lets the test suite give each test a private
+    # lock directory; unset, the host-wide path is unchanged.
+    override = os.environ.get("COLAB_ASSIGNMENT_LOCK_DIR")
+    directory = Path(override) if override else Path("/tmp") / f"mainframe-rag-colab-{os.geteuid()}"
     directory.mkdir(mode=0o700, exist_ok=True)
     info = directory.lstat()
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
