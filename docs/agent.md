@@ -702,7 +702,7 @@ select `complex`. Default is `simple`.
 - The tail's worked example is `hits[0].cite` even when packing dropped that
   hit: it is prompt furniture, never a manifest entry, so echoing it is
   rejected. The system prompt's seven rules (ground-only, synthesize-from-templates,
-  version-disagree attribution, admit-gap, fenced scripts as examples,
+  version-disagree attribution, admit-gap (rule 4 also counts a request for config or code on an undocumented non-mainframe platform, such as Kubernetes manifests, as "nothing answers": #915), fenced scripts as examples,
   identify-a-doc-number/message-id/short-name query instead of refusing,
   mandatory `Citations:` with a few-shot example) plus the complex-query
   extension (decompose, cross-examine, verified fences,

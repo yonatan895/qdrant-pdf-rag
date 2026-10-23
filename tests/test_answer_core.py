@@ -1303,3 +1303,14 @@ async def test_core_no_hits_remains_deterministic_not_budget_error():
     out = await execute_answer_core(AnswerCoreInput(query="obscure thing", hits=[]), deps)
     assert out.verification_state == "insufficient_evidence"
     assert (llm.chat_calls, llm.stream_calls) == (0, 0)
+
+
+def test_platform_decline_is_a_decline_and_a_partial_answer_is_not():
+    # #915: the platform-scope sentence in rule 4 produces the existing decline
+    # shape; the classifier is unchanged (a partial answer stays accepted).
+    from mainframe_rag.agent.answer import DECLINE_PREFIX, is_structured_decline
+
+    decline = f"{DECLINE_PREFIX} a Kubernetes HorizontalPodAutoscaler.\nThe excerpts cover WLM and LPAR CPU management only."
+    assert is_structured_decline(decline)
+    partial = "A HorizontalPodAutoscaler is not documented, but WLM LPAR CPU management works like this [1]."
+    assert not is_structured_decline(partial, ["SC34-2662-05 x"])

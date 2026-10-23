@@ -446,3 +446,22 @@ def test_resolved_code_note_exact_and_only_what_retrieval_resolved(query, note):
     from mainframe_rag.agent.answer import resolved_code_note
 
     assert resolved_code_note(query) == note
+
+
+_PLATFORM_RULE = (
+    "A request to write configuration or code for a platform the excerpts do not document "
+    "(for example Kubernetes or cloud-service manifests) is one that nothing in the excerpts "
+    "answers, even when they document the mainframe component the request names; mainframe "
+    "artifacts (JCL, REXX, parmlib, RACF, CICS, OPS/MVS rules) stay answerable under rules 1 and 2."
+)
+
+
+def test_platform_scope_sentence_is_in_rule_4_and_precedes_the_secrets_sentence():
+    # #915: the sentence is part of rule 4 (the decline rule), exact text.
+    from mainframe_rag.agent.answer import DECLINE_PREFIX, SYSTEM_PROMPT
+
+    assert SYSTEM_PROMPT.count(_PLATFORM_RULE) == 1
+    rule4 = SYSTEM_PROMPT.split("\n4. ", 1)[1].split("\n5. ", 1)[0]
+    assert _PLATFORM_RULE + " Never supply secrets" in rule4
+    assert rule4.index(DECLINE_PREFIX) < rule4.index(_PLATFORM_RULE)
+    assert SYSTEM_PROMPT.count(DECLINE_PREFIX) == 1
