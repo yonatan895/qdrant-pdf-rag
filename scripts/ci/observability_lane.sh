@@ -15,9 +15,11 @@ _ready="$(kubectl -n "$NS" get deploy openobserve -o 'jsonpath={.status.readyRep
 [ "${_ready:-0}" -ge 1 ] || { echo "openobserve has no ready replica" >&2; exit 1; }
 _phase="$(kubectl -n "$NS" get pods -l app=openobserve -o 'jsonpath={.items[*].status.phase}')"
 [ "$_phase" = "Running" ] || { echo "openobserve pod phase: '$_phase'" >&2; exit 1; }
-_collector="$(kubectl -n "$NS" get deploy -o name | grep -i otel || true)"
-[ -n "$_collector" ] || { echo "no otelcol collector deployment" >&2; exit 1; }
-for _d in $_collector; do kubectl -n "$NS" rollout status "$_d" --timeout=300s; done
+# Chart templates: Deployment otelcol (otelcol-deployment.yaml), label app=otelcol.
+_collector=deploy/otelcol
+kubectl -n "$NS" rollout status "$_collector" --timeout=300s
+_cphase="$(kubectl -n "$NS" get pods -l app=otelcol -o 'jsonpath={.items[*].status.phase}')"
+[ "$_cphase" = "Running" ] || { echo "otelcol pod phase: '$_cphase'" >&2; exit 1; }
 echo "admission: openobserve and collector running under PSA restricted"
 
 # 2. Trace + metric arrival and the canary scan, run inside the agent pod.
