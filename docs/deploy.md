@@ -1456,7 +1456,22 @@ stateless `otelcol-contrib` Deployment (no PVC, no Service, same hardening). It 
 `NetworkPolicy/otelcol-egress` allows only OpenObserve 5080, the agent 8080 and cluster DNS
 (`openshift-dns`, `kube-system`), never the internet. `metrics.collector.enabled=false` skips it
 (platform forwarding); `true` without metrics and the bundled backend fails the render.
-The disk-full alert and the smoke trace check are later steps of #956.
+
+**Disk-full headroom and the required site alert (S7).** A full `openobserve-data` volume makes
+OpenObserve acknowledge writes (HTTP 200) while silently dropping records (400 acknowledged, 159
+stored on v1.1.2). The product has no in-app signal for it: `zo_node_disk_usage` measures the
+node root filesystem, not the data volume, and `ZO_DISK_CIRCUIT_BREAKER_ENABLED` refused nothing in
+the v1.1.2 test (ADR-0006). Two controls are therefore required, and the chart ships no
+PrometheusRule (it would depend on user-workload monitoring, which ADR-0006 replaces).
+- **Headroom.** The retention budget is about 90 bytes per span: 14 days at the ADR-0002 bound is
+  about 0.6 GB (6% of the 10Gi default; 30% with a 5x margin for less repetitive real spans).
+  Keep `openobserve.storage.size` so the budget stays at or below 30% of the volume; re-measure on
+  the site and grow the PVC before the budget passes that.
+- **Alert (site-owned).** Alert on the platform's kubelet volume metrics for PVC `openobserve-data`:
+  `kubelet_volume_stats_used_bytes / kubelet_volume_stats_capacity_bytes` above 0.70 (the margin
+  between the 30% budget and a full volume), routed to the site's on-call destination. This is a
+  required item on the site-check list below the ADR-0006 open checks (#807).
+The smoke trace check is a later step of #956.
 
 <a id="configuration-contract"></a>
 ## Operator configuration propagation contract

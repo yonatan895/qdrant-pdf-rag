@@ -376,9 +376,11 @@ def test_live_agent_disconnect_closes_upstream_then_next_request(
                 time.sleep(0.2)
         assert len(roots) == 1
         root = roots[0]
-        # Fields verified against the OpenObserve trial (docs/metric-contract.md): trace_id,
-        # operation_name, duration (microseconds) and http_request_id.
+        # Fields verified on OpenObserve v1.0.4 and v1.1.2 (#956 re-qualification):
+        # attributes are flattened to underscore column names.
         assert root["trace_id"] == trace_id and root["duration"] > 0
+        assert root["reference_parent_span_id"] == parent_id
+        assert root["rag_stream_aborted"] in (True, "true")
         events = [
             json.loads(line)
             for line in live_agent[1].read_text().splitlines()
@@ -386,7 +388,7 @@ def test_live_agent_disconnect_closes_upstream_then_next_request(
         ]
         owned = [event for event in events if event.get("request_id") == root["http_request_id"]]
         assert len(owned) == 1 and owned[0]["alert"] == "client_disconnect"
-        assert owned[0]["trace_id"] == trace_id
+        assert owned[0]["trace_id"] == trace_id and owned[0]["span_id"] == root["span_id"]
         # The shared client must survive closing the operation.
         next_payload = (
             {"query": QUERY, "stream": True}
