@@ -119,6 +119,7 @@
     "release": {
       "repeats": 3,
       "statistical_claim": true,
+      "case_reduction": "majority",
       "confidence": 0.95,
       "criteria": [
         {

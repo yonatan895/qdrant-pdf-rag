@@ -278,3 +278,36 @@ def test_requested_id_named_only_inside_other_text_is_a_mention_target():
     assert row.hits[0].mention_ids == ["ZZQ100I"]
     absent = trace_row("MSG-78", _golden("MSG-78", "What does ZZQ999I mean?", ["SA00-0001-01"]), [hit], settings)
     assert next(t for t in absent.targets if t.kind.startswith("entry-")).kind == "entry-none"
+
+
+def test_chapter_title_heading_is_not_an_entry_for_a_message_row():
+    """Issue #922: every hit of a chapter carries the chapter title, which
+    names the range endpoint. A heading match there must not stand in for the
+    entry-headed unit of the requested id."""
+    settings = _settings()
+    title = "Chapter 6. ZZQ messages (ZZQ100I - ZZQ699I)"
+    other = _hit("SA00-0001-01", [_entry_text("ZZQ250I", 10), f"Running header {title}"], "c1")
+    other = other.model_copy(update={"heading": title})
+    entry = _hit("SA00-0001-01", [_entry_text("ZZQ100I", 10)], "c2").model_copy(update={"heading": title})
+    golden = _golden(
+        "MSG-90", "ZZQ100I showed up at IPL. What condition is described?", ["SA00-0001-01"],
+        expected_heading="ZZQ100I",
+    )
+    miss = trace_row("MSG-90", golden, [other], settings)
+    assert miss.hits[0].heading_match is True
+    assert miss.category == CAT_NOT_RETRIEVED
+    assert [(t.kind, t.outcome) for t in miss.targets] == [("entry-mention", NOT_RETRIEVED)]
+    hit = trace_row("MSG-90", golden, [other, entry], settings)
+    assert [(t.kind, t.outcome) for t in hit.targets] == [("entry-heading", RETRIEVED_PACKED)]
+    assert hit.category == CAT_OK
+
+
+def test_heading_naming_no_requested_message_id_keeps_the_heading_target():
+    settings = _settings()
+    hit = _hit("SA00-0001-01", [_entry_text("ZZQ100I", 10)], "c1")
+    golden = _golden(
+        "MSG-91", "ZZQ100I: which table lists fields?", ["SA00-0001-01"], expected_heading="h"
+    )
+    row = trace_row("MSG-91", golden, [hit], settings)
+    assert [t.kind for t in row.targets] == ["heading", "entry-heading"]
+    assert row.category == CAT_OK

@@ -42,6 +42,18 @@ def _hermetic_qdrant_client(monkeypatch, request):
 
 
 
+@pytest.fixture(autouse=True)
+def _private_colab_assignment_lock(request, tmp_path_factory, monkeypatch):
+    """Colab controller tests take scripts/colab.py's assignment lock. Give each
+    its own lock directory (also seen by the controller subprocesses through the
+    environment) so they neither serialize on, nor collide with, the host-wide
+    /tmp/mainframe-rag-colab-<uid> lock. Tests that prove lock contention hold
+    this same private lock, so the asserted behavior is unchanged."""
+    if not request.module.__name__.rsplit(".", 1)[-1].startswith("test_colab"):
+        return
+    monkeypatch.setenv("COLAB_ASSIGNMENT_LOCK_DIR", str(tmp_path_factory.mktemp("colab-lock") / "assignment"))
+
+
 @pytest.fixture(scope="session")
 def synthetic_pdf(tmp_path_factory) -> Path:
     from scripts.make_synthetic_pdf import build

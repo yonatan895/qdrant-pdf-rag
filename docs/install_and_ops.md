@@ -240,8 +240,8 @@ When running local tooling (`sh scripts/tools/run-task.sh local:ask`, `sh script
 | **`ALLOW_HASH_MODE`** | `"true"` (auto-set for local test utilities) | `false` (fails closed to prevent hash retrieval in prod) |
 | **`LLM_BASE_URL`** | Source the real gateway's `GATEWAY_ENV_FILE` (`http://localhost:4000/v1`) | Platform gateway endpoint from `airgap.env` |
 | **`LLM_MODEL_REASONING`** | Auto-resolved from `/v1/models` on local server | Dedicated reasoning model specified in `airgap.env` |
-| **`LLM_REASONING_EFFORT_SIMPLE`** | `"low"` (local 8 GB lane pin) | `"xhigh"` (default, #777) |
-| **`LLM_REASONING_EFFORT_COMPLEX`** | `"high"` (local 8 GB lane pin) | `"xhigh"` (default, #777) |
+| **`LLM_REASONING_EFFORT_SIMPLE`** | `"low"` (local 8 GB lane pin) | `"medium"` (default, #917) |
+| **`LLM_REASONING_EFFORT_COMPLEX`** | `"high"` (local 8 GB lane pin) | `"medium"` (default, #917) |
 | **`LLM_REASONING_EFFORTS`** | `"low,medium,high"` (local 8 GB lane pin) | `"low,medium,xhigh"` (default; the Qwen3.8 template's efforts, #748) |
 | **`LLM_TEMPERATURE`** | `0.2` | `0.2` (deterministic, grounded technical reasoning) |
 | **`PROMPT_MAX_CONTEXT_CHARS`** | `8000` (local 8 GB lane pin) | `32000` (default; no-tokenizer fallback, #777) |

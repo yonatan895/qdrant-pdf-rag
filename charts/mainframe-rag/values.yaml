@@ -11,6 +11,13 @@
 
 replicaCount: 2
 
+# Total request deadline in seconds for the agent (REQUEST_DEADLINE_S, #843 D6
+# 2026-10-23, 270 s so it stays strictly below the 300 s route, client and answer
+# timeouts; handoff owned by #374): expiry is 504 deadline_exceeded instead
+# of a silent route cut. 0 disables. Settings keeps 0 for local/CI (#843 D5).
+# Admission limits are not part of this value.
+requestDeadlineSeconds: 270
+
 # Packed image identity. The tag is the full git SHA (deploy.sh fail-closes
 # on empty/HEAD; the same rule is enforced by values.schema.json). The
 # repository is the full registry path set by the generator, e.g.
@@ -68,8 +75,10 @@ models:
     # reservedOutputTokens: 2560
     # thinkingReserveTokensSimple: 8192
     # thinkingReserveTokensComplex: 8192
-    # reasoningEffortSimple: xhigh
-    # reasoningEffortComplex: xhigh
+    # The efforts are set explicitly so a rendered pod carries them (#917,
+    # maintainer decision 2026-10-23: medium on both routes; xhigh before).
+    reasoningEffortSimple: medium
+    reasoningEffortComplex: medium
     # Efforts the served template accepts; the console offers exactly these and
     # both efforts above must be members. Stock Qwen3.8 needs low,medium,xhigh.
     # reasoningEfforts: low,medium,xhigh

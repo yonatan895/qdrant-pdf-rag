@@ -72,6 +72,10 @@ spec:
               value: {{ index $.Values.models.reasoning $field | toString | quote }}
             {{- end }}
             {{- end }}
+            {{- if hasKey .Values "requestDeadlineSeconds" }}
+            - name: REQUEST_DEADLINE_S
+              value: {{ .Values.requestDeadlineSeconds | toString | quote }}
+            {{- end }}
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: {{ include "mainframe-rag.otelEndpoint" . | quote }}
             - name: IMAGE_SHA

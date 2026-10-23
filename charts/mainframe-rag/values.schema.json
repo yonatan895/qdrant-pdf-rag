@@ -43,6 +43,7 @@
     }
   },
   "properties": {
+    "requestDeadlineSeconds": { "type": "integer", "minimum": 0, "maximum": 3600 },
     "replicaCount": {
       "type": "integer",
       "minimum": 1,
