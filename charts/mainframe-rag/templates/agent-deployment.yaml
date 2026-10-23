@@ -76,6 +76,13 @@ spec:
             - name: REQUEST_DEADLINE_S
               value: {{ .Values.requestDeadlineSeconds | toString | quote }}
             {{- end }}
+            {{- $requestEnv := dict "requestMaxConcurrent" "REQUEST_MAX_CONCURRENT" "requestQueueMax" "REQUEST_QUEUE_MAX" "requestQueueWaitSeconds" "REQUEST_QUEUE_WAIT_S" }}
+            {{- range $field, $name := $requestEnv }}
+            {{- if hasKey $.Values $field }}
+            - name: {{ $name }}
+              value: {{ index $.Values $field | toString | quote }}
+            {{- end }}
+            {{- end }}
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: {{ include "mainframe-rag.otelEndpoint" . | quote }}
             - name: IMAGE_SHA

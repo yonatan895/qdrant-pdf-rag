@@ -36,6 +36,7 @@ try:
         network_policy,
         parse_strict_bool,
         reasoning_overrides,
+        request_overrides,
         require_in_place_retired,
         validate_model_config,
     )
@@ -46,6 +47,7 @@ except ModuleNotFoundError:
         network_policy,
         parse_strict_bool,
         reasoning_overrides,
+        request_overrides,
         require_in_place_retired,
         validate_model_config,
     )
@@ -382,6 +384,7 @@ def build_values(deploy_only: bool = False) -> dict:
             },
         },
         "qdrantRelease": qdrant_release,
+        **request_overrides(model_config),
         "models": {
             "embedding": {
                 "baseUrl": embed_base,

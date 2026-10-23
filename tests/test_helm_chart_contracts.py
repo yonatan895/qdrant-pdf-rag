@@ -1117,7 +1117,7 @@ def test_chart_ships_request_deadline_270_and_reaches_settings(monkeypatch):
     assert Settings(_env_file=None).request_deadline_s == 270.0
     monkeypatch.delenv("REQUEST_DEADLINE_S")
     assert Settings(_env_file=None).request_deadline_s == 0.0
-    # Explicit zero is retained (deadline off); admission names are not rendered.
+    # Explicit zero is retained (deadline off); admission names are not rendered by default.
     off = env_map(run_new_template({"requestDeadlineSeconds": 0})["Deployment", "rag-agent"])
     assert off["REQUEST_DEADLINE_S"]["value"] == "0"
     assert not any(name.startswith("REQUEST_") and name != "REQUEST_DEADLINE_S" for name in pod)
@@ -1136,3 +1136,27 @@ def test_direct_chart_refuses_invalid_request_deadline(bad):
     result = _helm_template_with_values(values)
     assert result.returncode != 0
     assert "requestDeadlineSeconds" in result.stderr
+
+
+def test_chart_admission_values_are_optional_and_render_only_when_set():
+    """#374: absent keys render nothing (application default); explicit zero is retained."""
+    pod = env_map(run_new_template({})["Deployment", "rag-agent"])
+    assert not {"REQUEST_MAX_CONCURRENT", "REQUEST_QUEUE_MAX", "REQUEST_QUEUE_WAIT_S"} & pod.keys()
+    chosen = env_map(run_new_template(
+        {"requestMaxConcurrent": 0, "requestQueueMax": 3, "requestQueueWaitSeconds": 2.5},
+    )["Deployment", "rag-agent"])
+    assert chosen["REQUEST_MAX_CONCURRENT"]["value"] == "0"
+    assert chosen["REQUEST_QUEUE_MAX"]["value"] == "3"
+    assert chosen["REQUEST_QUEUE_WAIT_S"]["value"] == "2.5"
+
+
+@pytest.mark.parametrize("key,bad", [
+    ("requestMaxConcurrent", -1), ("requestMaxConcurrent", 1001), ("requestMaxConcurrent", "2"),
+    ("requestQueueMax", 1.5), ("requestQueueWaitSeconds", 301), ("requestQueueWaitSeconds", -1),
+])
+def test_direct_chart_refuses_invalid_admission_values(key, bad):
+    values = base_values()
+    values[key] = bad
+    result = _helm_template_with_values(values)
+    assert result.returncode != 0
+    assert key in result.stderr

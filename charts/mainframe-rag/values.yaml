@@ -18,6 +18,14 @@ replicaCount: 2
 # Admission limits are not part of this value.
 requestDeadlineSeconds: 270
 
+# Request admission (#374, agent REQUEST_MAX_CONCURRENT / REQUEST_QUEUE_MAX /
+# REQUEST_QUEUE_WAIT_S). Deliberately unset: absent renders no env, so the
+# application default (no limit) applies until a measured envelope is approved
+# (#843 D4). A value of 0 is an explicit selection. Limits are per agent replica.
+# requestMaxConcurrent: 0      # 0..1000
+# requestQueueMax: 0           # 0..1000
+# requestQueueWaitSeconds: 5   # 0..300
+
 # Packed image identity. The tag is the full git SHA (deploy.sh fail-closes
 # on empty/HEAD; the same rule is enforced by values.schema.json). The
 # repository is the full registry path set by the generator, e.g.
