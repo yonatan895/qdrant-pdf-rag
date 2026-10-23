@@ -1,5 +1,5 @@
 # Ingress NetworkPolicy for the agent pods (issue #373). Agent-only and
-# ingress-only: Qdrant, Jaeger and the ingest Job are not selected and egress
+# ingress-only: Qdrant, OpenObserve and the ingest Job are not selected and egress
 # is untouched. Rendered unless networkPolicy.enabled is false. The pod
 # selector, ports and peers track the Deployment (app: rag-agent), the Service
 # ports (http 8080, oauth 8443) and the ServiceMonitor. Kubelet probes and the
