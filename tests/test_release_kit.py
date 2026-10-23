@@ -127,7 +127,7 @@ def test_group_accessible_storage_is_a_problem(env):
 
 
 def test_pin_is_accepted_by_the_rc_reader(env, monkeypatch):
-    private, cmp_root, crit, sha = env
+    private, _cmp_root, _crit, sha = env
     path = private / "release_set.jsonl"
     path.write_text("\n".join(json.dumps(r) for r in _rows(sha)) + "\n")
     digest = kit.pin(path)
