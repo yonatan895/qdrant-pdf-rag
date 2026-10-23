@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 import tomllib
 from pathlib import Path
 from types import SimpleNamespace
@@ -180,7 +181,7 @@ def test_parallel_acquisition_overlaps_and_verifies_each_download_before_reuse(l
         return io.BytesIO(contents[Path(urlsplit(url).path).name])
     monkeypatch.setattr(locks.urllib.request, 'urlopen', fetch)
     result = locks.prepare(root, 'dev', wheels, workers=2)
-    assert len(calls) == 2 and all(timeout == 60 for _, timeout in calls)
+    assert len(calls) == 2 and all(timeout == locks.DOWNLOAD_SOCKET_TIMEOUT_S for _, timeout in calls)
     assert {path.name: path.read_bytes() for path in wheels.glob('*.whl')} == contents
     assert locks.verify_wheelhouse(root, 'dev', wheels) == result
     assert not list(root.glob('.wheels.prepare-*'))
@@ -202,6 +203,7 @@ def test_parallel_failure_drains_workers_preserves_cache_and_next_prepare_recove
     for path in wheels.glob('*.whl'):
         path.write_bytes(b'retained previous bytes')
     before = {path.name: path.read_bytes() for path in wheels.iterdir()}
+    monkeypatch.setattr(locks, 'DOWNLOAD_ATTEMPTS', 1)
     barrier = threading.Barrier(2)
     finished = threading.Event()
     class Stream(io.BytesIO):
@@ -229,6 +231,164 @@ def test_parallel_failure_drains_workers_preserves_cache_and_next_prepare_recove
     assert {path.name: path.read_bytes() for path in wheels.glob('*.whl')} == contents
     assert json.loads((wheels / '.task-complete').read_text())['profile'] == 'dev'
     assert locks.verify_wheelhouse(root, 'dev', wheels)['profile'] == 'dev'
+
+
+class _StallingWheelServer:
+    """Local HTTP server: the first `stalls` requests accept and never answer."""
+
+    def __init__(self, content, stalls, mode='silent'):
+        import http.server
+        import threading
+        self.requests = 0
+        self.release = threading.Event()
+        outer = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                outer.requests += 1
+                if outer.requests <= stalls:
+                    if mode == 'trickle':
+                        self.send_response(200)
+                        self.send_header('Content-Length', str(len(content) + 1000))
+                        self.end_headers()
+                        while not outer.release.wait(0.05):
+                            try:
+                                self.wfile.write(b'x')
+                                self.wfile.flush()
+                            except OSError:
+                                return
+                        return
+                    outer.release.wait(30)
+                    return
+                self.send_response(200)
+                self.send_header('Content-Length', str(len(content)))
+                self.end_headers()
+                self.wfile.write(content)
+
+        self.server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        self.server.daemon_threads = True
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+
+    def __enter__(self):
+        self.thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self.release.set()
+        self.server.shutdown()
+        self.server.server_close()
+
+    @property
+    def url(self):
+        return f'http://127.0.0.1:{self.server.server_port}/wheel'
+
+
+def _single_wheel_entry(content):
+    return {'wheel': 'x-1-py3-none-any.whl', 'sha256': hashlib.sha256(content).hexdigest(),
+            'url': 'https://files.pythonhosted.org/packages/x-1-py3-none-any.whl'}
+
+
+def _redirect_acquire(locked, monkeypatch, server_url, timeout=0.3, deadline=120):
+    """Route the approved origin to the local server through real urllib sockets."""
+    root, _, wheels = locked
+    real = locks.urllib.request.urlopen
+    seen = []
+
+    def redirected(url, *, timeout):
+        seen.append(timeout)
+        return real(server_url, timeout=timeout)
+    monkeypatch.setattr(locks.urllib.request, 'urlopen', redirected)
+    monkeypatch.setattr(locks, 'DOWNLOAD_SOCKET_TIMEOUT_S', timeout)
+    monkeypatch.setattr(locks, 'DOWNLOAD_DEADLINE_S', deadline)
+    monkeypatch.setattr(locks, 'DOWNLOAD_BACKOFF_S', 0)
+    sleeps = []
+    monkeypatch.setattr(locks.time, 'sleep', sleeps.append)
+    for path in wheels.glob('*.whl'):
+        path.unlink()
+    return root, wheels, seen, sleeps
+
+
+@pytest.mark.parametrize('workers', [1, 2])
+def test_stalled_download_times_out_retries_and_succeeds(locked, monkeypatch, workers):
+    root, _, wheels = locked
+    contents = {path.name: path.read_bytes() for path in wheels.glob('*.whl')}
+    content = contents['example-1.0-py3-none-any.whl']
+    with _StallingWheelServer(content, stalls=1) as server:
+        _, _, _seen, sleeps = _redirect_acquire(locked, monkeypatch, server.url)
+        real = locks.urllib.request.urlopen
+        def by_name(url, *, timeout):
+            name = url.rsplit('/', 1)[1]
+            body = contents[name]
+            if name.startswith('example-'):
+                return real(server.url, timeout=timeout)
+            import io
+            return io.BytesIO(body)
+        monkeypatch.setattr(locks.urllib.request, 'urlopen', by_name)
+        locks.acquire(root, 'dev', wheels, workers=workers)
+        assert server.requests == 2          # one stalled attempt, one retry
+    assert (wheels / 'example-1.0-py3-none-any.whl').read_bytes() == content
+    assert not list(wheels.glob('.wheel-*'))
+    assert sleeps == [0]                     # exactly one backoff before the retry
+
+
+def test_download_that_always_stalls_fails_closed_after_bounded_retries(locked, monkeypatch):
+    root, _, wheels = locked
+    content = (wheels / 'example-1.0-py3-none-any.whl').read_bytes()
+    with _StallingWheelServer(content, stalls=10**6) as server:
+        root, wheels, _seen, sleeps = _redirect_acquire(locked, monkeypatch, server.url)
+        with pytest.raises(locks.LockError) as raised:
+            locks.acquire(root, 'dev', wheels)
+        assert server.requests == locks.DOWNLOAD_ATTEMPTS
+    assert str(raised.value) == 'wheel download failed after bounded retries'
+    assert len(sleeps) == locks.DOWNLOAD_ATTEMPTS - 1
+    assert not list(wheels.glob('.wheel-*')) and not list(wheels.glob('example-*'))
+
+
+def test_trickling_download_is_cut_off_by_the_attempt_deadline(locked, monkeypatch):
+    root, _, wheels = locked
+    content = (wheels / 'example-1.0-py3-none-any.whl').read_bytes()
+    with _StallingWheelServer(content, stalls=10**6, mode='trickle') as server:
+        root, wheels, _seen, _sleeps = _redirect_acquire(locked, monkeypatch, server.url,
+                                                       timeout=5, deadline=0.3)
+        monkeypatch.setattr(locks, 'DOWNLOAD_ATTEMPTS', 2)
+        with pytest.raises(locks.LockError, match='after bounded retries'):
+            locks.acquire(root, 'dev', wheels)
+        assert server.requests == 2
+
+
+def test_retried_download_still_fails_on_wrong_bytes_without_retrying(locked, monkeypatch):
+    import io
+    root, _, wheels = locked
+    for path in wheels.glob('*.whl'):
+        path.unlink()
+    calls = []
+    monkeypatch.setattr(locks.time, 'sleep', lambda _: None)
+    monkeypatch.setattr(locks.urllib.request, 'urlopen',
+                        lambda *a, **kw: calls.append(1) or io.BytesIO(b'incorrect bytes'))
+    with pytest.raises(locks.LockError, match='checksum mismatch'):
+        locks.acquire(root, 'dev', wheels)
+    assert len(calls) == 1
+    assert not list(wheels.glob('.wheel-*'))
+
+
+def test_prepare_python_exits_nonzero_with_fixed_message_when_downloads_stall(locked, monkeypatch, capsys):
+    root, _, wheels = locked
+    for path in wheels.glob('*.whl'):
+        path.unlink()
+    def refuse(*a, **kw):
+        raise TimeoutError('upstream detail https://secret.example/token')
+    monkeypatch.setattr(locks.urllib.request, 'urlopen', refuse)
+    monkeypatch.setattr(locks.time, 'sleep', lambda _: None)
+    monkeypatch.setattr(prepare_python.subprocess, 'run', lambda *a, **kw: pytest.fail('process started'))
+    code = prepare_python.main(['--root', str(root), '--wheelhouse', str(wheels), '--python', sys.executable,
+                                '--connected', '--download-workers', '2'])
+    err = capsys.readouterr().err
+    assert code == 2
+    assert 'prepare-python: wheel download failed after bounded retries' in err
+    assert 'secret' not in err
 
 
 @pytest.mark.parametrize('workers', [0, 17, True, '4'])
