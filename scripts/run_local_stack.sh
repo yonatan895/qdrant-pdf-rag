@@ -1,24 +1,28 @@
 #!/bin/sh
 # Full local production simulation (local-dev only): the complete topology in
 # one supervisor — pinned Qdrant + the real LiteLLM gateway in front of the
-# three local vLLM backends + this repo's FastAPI agent + Jaeger. This mirrors
+# three local vLLM backends + this repo's FastAPI agent + OpenObserve. This mirrors
 # prod, where the platform team owns vLLM + LiteLLM and this repo owns Qdrant,
 # ingest, and the agent: locally we stand up both sides, but every consumer
 # leg still goes through the gateway (never straight to vLLM).
 #
-#   sh scripts/tools/run-task.sh local:stack                      # Qdrant + Jaeger + gateway + agent
+#   sh scripts/tools/run-task.sh local:stack                      # Qdrant + OpenObserve + gateway + agent
 #   CORPUS_DIR=/path sh scripts/tools/run-task.sh local:stack     # also ingest through the gateway
 #
 # Tracing is part of the stack, not a flag: agent and ingest export OTLP to
-# the local Jaeger (started here via scripts/run_local_jaeger.sh, or reused
-# when one already answers on the UI port), and the stack refuses to report
-# up until a v1.search span has landed.
+# the local OpenObserve (started here via scripts/run_local_openobserve.sh, or
+# reused when one already answers on its port; ADR-0006), and the stack refuses
+# to report up until a v1.search span has landed. Credentials come from the
+# 0600 env file that script owns (O2_ENV_FILE), never from a command line.
+# METRICS_ENABLED=true also starts the pinned otelcol scraper (/metrics ->
+# OpenObserve). Gateway-side spans are not exported (the gateway holds no
+# OpenObserve credential).
 #
 # Prereqs: docker; the three backends already serving (sh scripts/tools/run-task.sh local:llm,
 # local:embed, local:rerank); .venv. Qdrant is started via
 # scripts/sim_qdrant.sh (the pinned-image Qdrant owner, shared with
 # `task local:qdrant:up`) when unreachable.
-# Ctrl-C stops the agent, gateway, and an owned Jaeger; Qdrant is left for
+# Ctrl-C stops the agent, gateway, and an owned OpenObserve; Qdrant is left for
 # `task local:qdrant:down`.
 # Local ingest is host-RAM budgeted (issue #580): the worker count is sized from
 # MemAvailable (INGEST_WORKERS overrides; LOCAL_INGEST_WORKER_MB is the per-worker
@@ -60,12 +64,12 @@ esac
 GATEWAY_PORT="${GATEWAY_PORT:-4000}"
 GATEWAY_PROBE_MAX_TOKENS="${GATEWAY_PROBE_MAX_TOKENS:-16}"
 GATEWAY_ENV_FILE="${GATEWAY_ENV_FILE:-${TMPDIR:-/tmp}/local-stack-gateway-${GATEWAY_PORT}.env}"
-JAEGER_PORT="${JAEGER_PORT:-16686}"
-JAEGER_OTLP_PORT="${JAEGER_OTLP_PORT:-4318}"
-JAEGER_UI_URL="http://127.0.0.1:${JAEGER_PORT}"
-OTEL_ENDPOINT="http://127.0.0.1:${JAEGER_OTLP_PORT}"
+O2_PORT="${O2_PORT:-5080}"
+O2_ENV_FILE="${O2_ENV_FILE:-${HOME:-/nonexistent}/.config/mainframe-rag/local-openobserve.env}"
+O2_URL="http://127.0.0.1:${O2_PORT}"
+OTEL_ENDPOINT="$O2_URL/api/default"
 OTEL_TRACE_TIMEOUT="${OTEL_TRACE_TIMEOUT:-30}"
-# Service names are distinct per process so one Jaeger shows both: agent and
+# Service names are distinct per process so one OpenObserve shows both: agent and
 # ingest. OTEL_SERVICE_NAME overrides the agent name; ingest keeps its own
 # knob so a shared exporter never merges the two services.
 AGENT_SERVICE_NAME="${OTEL_SERVICE_NAME:-mainframe-rag-agent}"
@@ -174,7 +178,7 @@ esac
 [ "$GATEWAY_PROBE_MAX_TOKENS" -ge 1 ] && [ "$GATEWAY_PROBE_MAX_TOKENS" -le 4096 ] || \
     die "GATEWAY_PROBE_MAX_TOKENS must be an integer from 1 to 4096"
 for _pair in "GATEWAY_PORT:$GATEWAY_PORT" "LOCAL_AGENT_PORT:$LOCAL_AGENT_PORT" "DENSE_DIM:$DENSE_DIM" \
-    "JAEGER_PORT:$JAEGER_PORT" "JAEGER_OTLP_PORT:$JAEGER_OTLP_PORT" "OTEL_TRACE_TIMEOUT:$OTEL_TRACE_TIMEOUT" \
+    "O2_PORT:$O2_PORT" "OTEL_TRACE_TIMEOUT:$OTEL_TRACE_TIMEOUT" \
     "LOCAL_INGEST_WORKER_MB:$LOCAL_INGEST_WORKER_MB" "HOST_CPUS:$HOST_CPUS"; do
     _name="${_pair%%:*}"; _val="${_pair#*:}"
     case "$_val" in
@@ -265,7 +269,7 @@ fi
 if [ "$DRYRUN" = "1" ]; then
     echo "[plan] 1. backends: check $* (start with 'sh scripts/tools/run-task.sh local:llm' (or local:embed / local:rerank))"
     echo "[plan] 2. qdrant:  reuse $QDRANT_URL (start with 'sh scripts/tools/run-task.sh local:qdrant:up' if unreachable)"
-    echo "[plan] 3. jaeger:  reuse $JAEGER_UI_URL or start scripts/run_local_jaeger.sh (OTLP $OTEL_ENDPOINT)"
+    echo "[plan] 3. openobserve: reuse $O2_URL or start scripts/run_local_openobserve.sh (OTLP $OTEL_ENDPOINT, credentials from the 0600 O2_ENV_FILE, collector O2_COLLECTOR=${METRICS_ENABLED:-false})"
     echo "[plan] 4. gateway: GATEWAY_ENV_FILE=$GATEWAY_ENV_FILE sh scripts/run_local_gateway.sh"
     echo "[plan] 5. probe:   $PY scripts/probe_gateway.py --stream --max-tokens $GATEWAY_PROBE_MAX_TOKENS"
     if [ -n "$CORPUS_DIR" ]; then
@@ -279,7 +283,7 @@ if [ "$DRYRUN" = "1" ]; then
     else
         echo "[plan] 8. smoke:   POST http://127.0.0.1:$LOCAL_AGENT_PORT/v1/search (UI disabled)"
     fi
-    echo "[plan] 9. trace:   poll $JAEGER_UI_URL for service $AGENT_SERVICE_NAME + a v1.search span (timeout ${OTEL_TRACE_TIMEOUT}s)"
+    echo "[plan] 9. trace:   scripts/trace_arrival.py against $O2_URL for service $AGENT_SERVICE_NAME + a v1.search span (timeout ${OTEL_TRACE_TIMEOUT}s)"
     exit 0
 fi
 
@@ -330,28 +334,37 @@ else
     [ "$_OK" = "1" ] || die "Qdrant did not answer at $QDRANT_URL within 60s"
 fi
 
-# Jaeger is part of the stack, not an option: reuse whatever answers on the
-# UI port (an operator-managed Jaeger is not ours to stop), otherwise start
+# OpenObserve is part of the stack, not an option: reuse whatever answers on
+# its port (an operator-managed backend is not ours to stop), otherwise start
 # the pinned owner script and stop it again on exit.
-JAEGER_PID=""
-if curl -s -m 3 -o /dev/null "$JAEGER_UI_URL/api/services" 2>/dev/null; then
-    step "Jaeger reachable at $JAEGER_UI_URL (reusing)"
+O2_PID=""
+# Anything answering on the port is reused (the owner script's own probe is
+# strict); a foreign service then fails the credentials or trace check below.
+o2_up() { curl -s -m 3 -o /dev/null "$O2_URL/healthz" 2>/dev/null; }
+if o2_up; then
+    step "OpenObserve reachable at $O2_URL (reusing)"
 else
-    step "Starting local Jaeger (OTLP $OTEL_ENDPOINT, UI $JAEGER_UI_URL)"
-    JAEGER_PORT="$JAEGER_PORT" JAEGER_OTLP_PORT="$JAEGER_OTLP_PORT" \
-        sh "$REPO_ROOT/scripts/run_local_jaeger.sh" >"$LOG_DIR/local-stack-jaeger.log" 2>&1 &
-    JAEGER_PID=$!
+    step "Starting local OpenObserve (OTLP $OTEL_ENDPOINT, UI $O2_URL/web/)"
+    case "${METRICS_ENABLED:-false}" in true) _O2_COLLECTOR=1 ;; *) _O2_COLLECTOR=0 ;; esac
+    O2_PORT="$O2_PORT" O2_ENV_FILE="$O2_ENV_FILE" O2_COLLECTOR="$_O2_COLLECTOR" O2_AGENT_PORT="$LOCAL_AGENT_PORT" \
+        sh "$REPO_ROOT/scripts/run_local_openobserve.sh" >"$LOG_DIR/local-stack-openobserve.log" 2>&1 &
+    O2_PID=$!
     _i=0
-    while [ "$_i" -lt 60 ]; do
-        curl -s -m 3 -o /dev/null "$JAEGER_UI_URL/api/services" 2>/dev/null && break
-        kill -0 "$JAEGER_PID" 2>/dev/null || die "Jaeger exited early — see $LOG_DIR/local-stack-jaeger.log"
+    while [ "$_i" -lt 90 ]; do
+        o2_up && break
+        kill -0 "$O2_PID" 2>/dev/null || die "OpenObserve exited early — see $LOG_DIR/local-stack-openobserve.log"
         _i=$((_i + 1))
         sleep 1
     done
-    if ! curl -s -m 3 -o /dev/null "$JAEGER_UI_URL/api/services" 2>/dev/null; then
-        die "Jaeger did not answer at $JAEGER_UI_URL within 60s — see $LOG_DIR/local-stack-jaeger.log"
-    fi
+    o2_up || die "OpenObserve did not answer at $O2_URL within 90s — see $LOG_DIR/local-stack-openobserve.log"
 fi
+# Trace credentials for the agent/ingest export and the arrival check: read
+# from the 0600 file (never sourced, never on a command line).
+[ -f "$O2_ENV_FILE" ] || die "OpenObserve credentials file $O2_ENV_FILE not found (the owner script creates it on first start)"
+_O2_AUTH="$(sed -n 's/^O2_BASIC_AUTH=//p' "$O2_ENV_FILE")"
+_O2_USER="$(sed -n 's/^ZO_ROOT_USER_EMAIL=//p' "$O2_ENV_FILE")"
+_O2_PASS="$(sed -n 's/^ZO_ROOT_USER_PASSWORD=//p' "$O2_ENV_FILE")"
+[ -n "$_O2_AUTH" ] && [ -n "$_O2_USER" ] && [ -n "$_O2_PASS" ] || die "$O2_ENV_FILE lacks O2_BASIC_AUTH / ZO_ROOT_USER_EMAIL / ZO_ROOT_USER_PASSWORD"
 
 # Gateway lifecycle stays owned by run_local_gateway.sh; this supervisor
 # starts it, waits for the leg-env handoff, and stops it on exit.
@@ -361,7 +374,6 @@ GATEWAY_PORT="$GATEWAY_PORT" GATEWAY_ENV_FILE="$GATEWAY_ENV_FILE" \
     GATEWAY_REASONING_URL="$REASONING_GW_URL" \
     GATEWAY_EMBED_URL="$EMBED_GW_URL" \
     GATEWAY_RERANK_URL="$RERANK_GW_URL" \
-    GATEWAY_OTEL_ENDPOINT="http://host.docker.internal:${JAEGER_OTLP_PORT}" \
     sh "$REPO_ROOT/scripts/run_local_gateway.sh" >"$LOG_DIR/local-stack-gateway.log" 2>&1 &
 GW_PID=$!
 
@@ -371,9 +383,9 @@ cleanup() {
         kill "$AGENT_PID" 2>/dev/null || true
         wait "$AGENT_PID" 2>/dev/null || true
     fi
-    if [ -n "${JAEGER_PID:-}" ]; then
-        kill -TERM "$JAEGER_PID" 2>/dev/null || true
-        wait "$JAEGER_PID" 2>/dev/null || true
+    if [ -n "${O2_PID:-}" ]; then
+        kill -TERM "$O2_PID" 2>/dev/null || true
+        wait "$O2_PID" 2>/dev/null || true
     fi
     if [ -n "$GW_PID" ]; then
         kill -TERM "$GW_PID" 2>/dev/null || true
@@ -401,8 +413,11 @@ export DENSE_DIM QDRANT_URL QDRANT_COLLECTION
 # served window (#777; one owner shared with local:query/local:ask).
 # shellcheck source=scripts/local_lane_budget.sh
 . "$REPO_ROOT/scripts/local_lane_budget.sh"
-# Tracing is on for every process this stack starts (the local Jaeger above).
+# Tracing is on for every process this stack starts (the local OpenObserve
+# above). The OTLP header value carries the basic-auth credential; it is set
+# only here, after the gateway started, so the gateway never receives it.
 export OTEL_EXPORTER_OTLP_ENDPOINT="$OTEL_ENDPOINT"
+export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Basic%20$_O2_AUTH"
 export OTEL_DEPLOYMENT_ENVIRONMENT="${OTEL_DEPLOYMENT_ENVIRONMENT:-local}"
 
 step "Probing every model leg through the gateway"
@@ -451,24 +466,17 @@ if [ "$UI_ENABLED" = "true" ]; then
     [ "$_ui_code" = "200" ] || die "console /ui returned HTTP $_ui_code — see $LOG_DIR/local-stack-agent.log"
 fi
 
-# Tracing is only "active" when a span actually landed: poll the Jaeger
-# query API (batch export means spans arrive seconds after the request).
+# Tracing is only "active" when a span actually landed: query OpenObserve's
+# search API through the shared arrival check (batch export means spans arrive
+# seconds after the request). Credentials go over stdin, never argv.
 step "Trace check: waiting for a v1.search span (service $AGENT_SERVICE_NAME)"
-_trace_ok=0
-_i=0
-while [ "$_i" -lt "$OTEL_TRACE_TIMEOUT" ]; do
-    if curl -s -m 3 "$JAEGER_UI_URL/api/services" 2>/dev/null | grep -q "\"$AGENT_SERVICE_NAME\"" &&
-        curl -s -m 5 "$JAEGER_UI_URL/api/traces?service=$AGENT_SERVICE_NAME&operation=v1.search&limit=1" 2>/dev/null | grep -q '"traceID"'; then
-        _trace_ok=1
-        break
-    fi
-    _i=$((_i + 1))
-    sleep 1
-done
-[ "$_trace_ok" = "1" ] || die "no v1.search trace landed in Jaeger within ${OTEL_TRACE_TIMEOUT}s — check $JAEGER_UI_URL and $LOG_DIR/local-stack-agent.log"
+printf '%s:%s\n' "$_O2_USER" "$_O2_PASS" | "$PY" "$REPO_ROOT/scripts/trace_arrival.py" --backend openobserve \
+    --url "$O2_URL" --service "$AGENT_SERVICE_NAME" --operation v1.search --timeout "$OTEL_TRACE_TIMEOUT" --auth-stdin ||
+    die "no v1.search trace landed in OpenObserve within ${OTEL_TRACE_TIMEOUT}s — check $O2_URL and $LOG_DIR/local-stack-agent.log"
 if [ -n "$CORPUS_DIR" ]; then
-    curl -s -m 3 "$JAEGER_UI_URL/api/services" 2>/dev/null | grep -q "\"$INGEST_SERVICE_NAME\"" ||
-        die "no $INGEST_SERVICE_NAME service in Jaeger — ingest tracing did not export"
+    printf '%s:%s\n' "$_O2_USER" "$_O2_PASS" | "$PY" "$REPO_ROOT/scripts/trace_arrival.py" --backend openobserve \
+        --url "$O2_URL" --service "$INGEST_SERVICE_NAME" --operation ingest.run --timeout "$OTEL_TRACE_TIMEOUT" --auth-stdin ||
+        die "no $INGEST_SERVICE_NAME trace in OpenObserve — ingest tracing did not export"
     step "Trace check: ingest traces present (service $INGEST_SERVICE_NAME)"
 fi
 
@@ -487,12 +495,12 @@ cat <<EOF
 $CONSOLE_LINE
  Qdrant (ours)       : $QDRANT_URL  collection '$QDRANT_COLLECTION'
  Gateway (platform)  : http://localhost:$GATEWAY_PORT/v1  (log $LOG_DIR/local-stack-gateway.log)
- Jaeger (ours)       : $JAEGER_UI_URL  (OTLP $OTEL_ENDPOINT, service $AGENT_SERVICE_NAME)
+ OpenObserve (ours) : $O2_URL/web/  (OTLP $OTEL_ENDPOINT, service $AGENT_SERVICE_NAME, login in $O2_ENV_FILE)
  Model legs          : all through LiteLLM (keys in $GATEWAY_ENV_FILE)
  Ingest              : ${CORPUS_DIR:-skipped (set CORPUS_DIR=<dir> to ingest)}
- Tracing             : ON — v1.search span verified in Jaeger
+ Tracing             : ON — v1.search span verified in OpenObserve
 
- Ctrl-C stops the agent, the gateway, and an owned Jaeger. Qdrant stays for
+ Ctrl-C stops the agent, the gateway, and an owned OpenObserve. Qdrant stays for
  'sh scripts/tools/run-task.sh local:qdrant:down'.
  Try:  curl -s -X POST http://127.0.0.1:$LOCAL_AGENT_PORT/v1/search \\
         -H 'Content-Type: application/json' -d '{"query":"LFAREA","top_k":3}'

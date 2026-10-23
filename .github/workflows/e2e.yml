@@ -439,7 +439,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        lane: [pipeline, gateway-chat-upstream, gateway-chat-malformed, gateway-chat-truncated, gateway-embed-upstream, gateway-embed-malformed, gateway-embed-dimension, gateway-auth, lifecycle-chart, lifecycle, shared-gateway, rerank]
+        lane: [pipeline, gateway-chat-upstream, gateway-chat-malformed, gateway-chat-truncated, gateway-embed-upstream, gateway-embed-malformed, gateway-embed-dimension, gateway-auth, lifecycle-chart, lifecycle, shared-gateway, rerank, observability]
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -925,6 +925,14 @@ jobs:
           EOF
           /usr/local/bin/kubectl -n "$NS" wait --for=condition=complete job/corpus-gen --timeout=300s
 
+      - name: Enforce PSA restricted on the namespace (observability lane)
+        if: matrix.lane == 'observability'
+        run: |
+          export PATH="/usr/local/bin:$PATH"
+          # Existing stand-in pods are not evicted by an enforce label; every
+          # pod the pipeline admits from here (OpenObserve, otelcol) must pass it.
+          /usr/local/bin/kubectl label namespace "$NS" pod-security.kubernetes.io/enforce=restricted --overwrite
+
       - name: airgap-pipeline LIVE (deploy, ingest, smoke; registry pre-loaded)
         env:
           IMAGE_SHA: ${{ env.SHA }}
@@ -1034,6 +1042,14 @@ jobs:
           test "$(/usr/local/bin/kubectl get nodes -l '!node-role.kubernetes.io/control-plane' --no-headers | wc -l)" -eq 3
           sh scripts/ci/check_lifecycle.sh "$NS"
           sh scripts/airgap/pipeline.sh --skip-load
+
+      - name: OpenObserve admission, trace + metric arrival and canary scan (ADR-0006)
+        if: matrix.lane == 'observability'
+        shell: sh rehearsal-infra/scripts/ci/egress_gate.sh run bash -e {0}
+        run: |
+          export PATH="/usr/local/bin:$PATH"
+          cd gapbox/qdrant-pdf-rag
+          sh scripts/ci/observability_lane.sh "$NS"
 
       - name: Record the egress boundary state
         if: always()
@@ -1189,10 +1205,10 @@ jobs:
           grep -q "ghcr.io/dryrun-standin/qdrant-pdf-rag-agent:${SHA}" dist/agent-rendered.yaml
           ! grep -Eq "__[A-Z][A-Z0-9_]*__" dist/agent-rendered.yaml
           # Tracing defaults ON: an unset endpoint resolves to the in-cluster
-          # Jaeger (issue #83), so the default deploy renders it too.
-          test -f dist/jaeger-rendered.yaml
-          grep -Eq 'value: "?http://jaeger:4318"?$' dist/agent-rendered.yaml
-          ! grep -Eq "__[A-Z][A-Z0-9_]*__" dist/jaeger-rendered.yaml
+          # OpenObserve (issue #956, ADR-0006), so the default deploy renders it too.
+          test -f dist/openobserve-rendered.yaml
+          grep -Eq 'value: "?http://openobserve:5080/api/default"?$' dist/agent-rendered.yaml
+          ! grep -Eq "__[A-Z][A-Z0-9_]*__" dist/openobserve-rendered.yaml
 
       - name: First-party release inventory assertions
         env:
@@ -1262,7 +1278,7 @@ jobs:
           fi
           grep -q "QDRANT_EXTRA_VALUES file not found" err.log
 
-      - name: airgap-deploy dry-run with tracing enabled (Jaeger render, issue #83)
+      - name: airgap-deploy dry-run with tracing enabled (OpenObserve render, issue #956)
         env:
           IMAGE_SHA: ${{ env.SHA }}
           AIRGAP_DRYRUN: "1"
@@ -1273,16 +1289,16 @@ jobs:
           DENSE_DIM: "768"
           EMBED_MODEL_REVISION: dryrun-rev-1
           EMBED_BASE_URL: http://vllm:8000/v1
-          OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+          OTEL_EXPORTER_OTLP_ENDPOINT: http://openobserve:5080/api/default
           QDRANT_STORAGE_SIZE: 1Gi
         run: |
           export PATH="/usr/local/bin:$PATH"
           sh scripts/tools/run-task.sh airgap:deploy
-          test -f dist/jaeger-rendered.yaml
-          grep -q "ghcr.io/dryrun-standin/jaegertracing/jaeger:v2.20.0" dist/jaeger-rendered.yaml
-          grep -q "storageClassName: standard" dist/jaeger-rendered.yaml
-          grep -Eq 'value: "?http://jaeger:4318"?$' dist/agent-rendered.yaml
-          ! grep -Eq "__[A-Z][A-Z0-9_]*__" dist/jaeger-rendered.yaml
+          test -f dist/openobserve-rendered.yaml
+          grep -q "ghcr.io/dryrun-standin/openobserve/openobserve@sha256:4a154849432f75c4fb024de32fe34163c02406c905dab22bf8d213d2e3386392" dist/openobserve-rendered.yaml
+          grep -q "storageClassName: standard" dist/openobserve-rendered.yaml
+          grep -Eq 'value: "?http://openobserve:5080/api/default"?$' dist/agent-rendered.yaml
+          ! grep -Eq "__[A-Z][A-Z0-9_]*__" dist/openobserve-rendered.yaml
 
       - name: airgap-deploy dry-run with metrics enabled (ServiceMonitor render, issue #187)
         env:
@@ -1303,8 +1319,8 @@ jobs:
           # Hermetic w.r.t. sibling dry-run steps sharing this workspace, and
           # focused: tracing defaults ON (asserted by the prod-render step), so
           # this step uses the off sentinel — metrics-on does not depend on
-          # tracing and must not drag Jaeger along.
-          rm -f dist/jaeger-rendered.yaml
+          # tracing and must not drag OpenObserve along.
+          rm -f dist/openobserve-rendered.yaml
           sh scripts/tools/run-task.sh airgap:deploy
           test -f dist/servicemonitor-rendered.yaml
           grep -q "kind: ServiceMonitor" dist/servicemonitor-rendered.yaml
@@ -1312,7 +1328,7 @@ jobs:
           grep -q "namespace: airgap-dryrun" dist/servicemonitor-rendered.yaml
           grep -A1 'name: METRICS_ENABLED' dist/agent-rendered.yaml | grep -q 'value: "true"'
           ! grep -Eq "__[A-Z][A-Z0-9_]*__" dist/servicemonitor-rendered.yaml
-          test ! -f dist/jaeger-rendered.yaml
+          test ! -f dist/openobserve-rendered.yaml
 
       - name: airgap-ingest dry-run (prod ingest render + patch knob)
         env:

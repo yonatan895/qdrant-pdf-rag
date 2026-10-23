@@ -155,7 +155,7 @@ metadata:
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: jaeger-badger
+  name: openobserve-data
 '''
 
 MANIFEST_STS = MANIFEST_CLEAN + '''---

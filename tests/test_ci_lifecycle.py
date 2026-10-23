@@ -255,8 +255,8 @@ elif command == 'exec':
     if '/snapshots' in payload:
         print('403 Forbidden: serving credential cannot create snapshots',file=sys.stderr)
         sys.exit(1)
-    if "['traceID']" in payload:
-        print('trace-preserved')
+    if 'OTEL_EXPORTER_OTLP_HEADERS' in ' '.join(args):
+        print('0123456789abcdef0123456789abcdef')
 elif command == 'get' and 'pvc' in args:
     print('same-pvc-uid')
 if command == os.environ['FAIL_AT']:
@@ -304,7 +304,10 @@ if command == os.environ['FAIL_AT']:
     assert bool(rollouts) == (not failure)
     if not failure:
         assert any('smoke_search.py' in ' '.join(c['args']) for c in calls)
-        assert calls[-1]['args'][2] == 'exec' and 'Pre-restart trace persisted' in calls[-1]['input']
+        # The trace id read before the restart is the one queried after it, from inside the agent pod.
+        assert calls[-1]['args'][2] == 'exec' and calls[-1]['args'][-1] == '0123456789abcdef0123456789abcdef'
+        assert 'OTEL_EXPORTER_OTLP_HEADERS' in ' '.join(calls[-1]['args'])
+        assert any('deploy/openobserve' in ' '.join(c['args']) for c in rollouts)
     assert not any(c['args'][2] == 'get' and 'secret' in c['args'] for c in calls)
 
 
