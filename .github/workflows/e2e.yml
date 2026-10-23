@@ -21,6 +21,10 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+  # Heavy lanes (sneakernet bundle, bundle acceptance, 12 Kind lanes, rehearsal)
+  # run nightly on main HEAD instead of on every merge. Off the hour, UTC.
+  schedule:
+    - cron: '17 2 * * *'
 
 permissions:
   contents: read
@@ -146,7 +150,8 @@ jobs:
       - name: Push to GHCR
         if: >-
           github.event_name == 'workflow_dispatch' ||
-          (github.event_name == 'push' && github.ref == 'refs/heads/main')
+          (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+          github.event_name == 'schedule'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -216,7 +221,7 @@ jobs:
     needs: [build]
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'push' && github.ref == 'refs/heads/main')
+      (github.event_name == 'schedule' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -310,7 +315,7 @@ jobs:
     needs: [build, airgap-package]
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'push' && github.ref == 'refs/heads/main')
+      (github.event_name == 'schedule' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -428,7 +433,7 @@ jobs:
     needs: [build, airgap-package]
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'push' && github.ref == 'refs/heads/main')
+      (github.event_name == 'schedule' && github.ref == 'refs/heads/main')
     name: kind-${{ matrix.lane }}
     strategy:
       fail-fast: false
@@ -1332,7 +1337,7 @@ jobs:
     if: >-
       needs.e2e-secrets-check.outputs.ok == 'true' &&
       (github.event_name == 'workflow_dispatch' ||
-       (github.event_name == 'push' && github.ref == 'refs/heads/main'))
+       (github.event_name == 'schedule' && github.ref == 'refs/heads/main'))
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
