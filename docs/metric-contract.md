@@ -101,14 +101,16 @@ shape.
 trace lookups, run in the OpenObserve trace search (`type=traces`, stream
 `default`; [ADR-0006](adr/0006-openobserve-traces-metrics-backend.md)):
 
-- J1, trace by request: `SELECT trace_id FROM "default" WHERE service_name = 'mainframe-rag-agent' AND http_request_id = '<id>'`
-- J2, slow answers: `... WHERE operation_name = 'v1.answer' AND duration > 500000` (microseconds)
-- J3, server errors: `... WHERE service_name = 'mainframe-rag-agent' AND span_status = 'ERROR'`
+- J1, trace by request: `SELECT * FROM "default" WHERE http_request_id = '<id>'`, then `SELECT _timestamp, operation_name, span_status, duration FROM "default" WHERE trace_id = '<trace id>'` for the tree
+- J2, slow answers: `SELECT trace_id, duration FROM "default" WHERE operation_name = 'v1.answer' AND duration > 500000 ORDER BY duration DESC LIMIT 5` (`duration` in microseconds)
+- J3, server errors: `SELECT trace_id FROM "default" WHERE span_status = 'ERROR' LIMIT 5`
 
-The trial record ([2026-10-23](records/2026-10-23-openobserve-oss-qualification.md))
-names the three intents but not their SQL; `service_name`, `operation_name` and
-`trace_id` are the columns `scripts/trace_arrival.py` queries, while the
-attribute and status column spellings above are not yet verified against a
-live stack. `tests/test_metric_contract.py` pins this whole map in CI:
+These are the #782 trial queries, run against OpenObserve v1.0.4 (J1 100 of
+100, J2 70 slow answers; J3 returned ERROR spans, but its equality with ground
+truth is unverified: no 5xx occurred, see the
+[trial record](records/2026-10-23-openobserve-oss-qualification.md)). Add
+`service_name = 'mainframe-rag-agent'` to scope them; `scripts/trace_arrival.py`
+filters on it. Not yet re-run on v1.1.2.
+`tests/test_metric_contract.py` pins this whole map in CI:
 instrument names/units/label keys, bucket boundaries, and that every
 `rag_*` name and label key in the PromQL file exists on the wire shape.
