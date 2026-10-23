@@ -1436,7 +1436,9 @@ Ingress). Required settings, each failing the render when missing:
 The pod sets `ZO_TELEMETRY=false`, `ZO_MODEL_PRICING_ENABLED=false` and
 `ZO_MMDB_DISABLE_DOWNLOAD=true`, and uses the restricted-v2 form (non-root, no
 privilege escalation, drop ALL, seccomp RuntimeDefault, read-only root, no fixed
-IDs). Metrics forwarding, the disk-full alert and the smoke trace check are later
+IDs). Egress is denied by a NetworkPolicy (DNS included) as well as by the `ZO_*`
+settings; this needs a CNI that enforces NetworkPolicy. Ingress is not restricted.
+Metrics forwarding, the disk-full alert and the smoke trace check are later
 steps of #956; the console is reached by port-forward only.
 
 <a id="configuration-contract"></a>

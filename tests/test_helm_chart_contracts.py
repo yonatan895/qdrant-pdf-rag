@@ -1199,7 +1199,19 @@ def test_openobserve_backend_contract():
         "capabilities": {"drop": ["ALL"]},
     }
     assert "runAsUser" not in c["securityContext"] and "runAsUser" not in pod["securityContext"]
+    for probe in ("readinessProbe", "livenessProbe"):
+        assert c[probe]["httpGet"] == {"path": "/healthz", "port": "http"}
+    assert c["livenessProbe"]["failureThreshold"] >= 3
     env = {e["name"]: e for e in c["env"]}
+    assert {n: e["value"] for n, e in env.items() if "value" in e} == {
+        "ZO_LOCAL_MODE": "true",
+        "ZO_LOCAL_MODE_STORAGE": "disk",
+        "ZO_DATA_DIR": "/data",
+        "ZO_TELEMETRY": "false",
+        "ZO_MODEL_PRICING_ENABLED": "false",
+        "ZO_MMDB_DISABLE_DOWNLOAD": "true",
+    }
+    assert set(env) - {n for n, e in env.items() if "value" in e} == {"ZO_ROOT_USER_EMAIL", "ZO_ROOT_USER_PASSWORD"}
     assert env["ZO_TELEMETRY"]["value"] == "false"
     assert env["ZO_MODEL_PRICING_ENABLED"]["value"] == "false"
     assert env["ZO_MMDB_DISABLE_DOWNLOAD"]["value"] == "true"
@@ -1269,3 +1281,12 @@ def test_openobserve_off_when_tracing_disabled():
     docs = run_new_template({**OO_ON, "tracing": {"backend": "openobserve", "enabled": False}})
     assert not [k for k in docs if "openobserve" in k[1]]
     assert env_map(docs["Deployment", "rag-agent"])["OTEL_EXPORTER_OTLP_ENDPOINT"]["value"] == ""
+
+
+def test_openobserve_egress_policy_only_for_openobserve_and_denies_all():
+    assert not [k for k in run_new_template({}) if k[0] == "NetworkPolicy" and "openobserve" in k[1]]
+    pol = run_new_template(OO_ON)["NetworkPolicy", "openobserve-egress-deny"]
+    spec = pol["spec"]
+    assert spec["podSelector"] == {"matchLabels": {"app": "openobserve"}}
+    assert spec["policyTypes"] == ["Egress"]
+    assert "egress" not in spec and "ingress" not in spec
