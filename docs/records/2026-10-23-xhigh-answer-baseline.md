@@ -58,8 +58,10 @@ answered; NEG-03 `generation_incomplete`. Prior baselines: main 4/13, original #
 - `generation_incomplete` (27, plus the 5 truncated retrieval rows) is owned by #843 (thinking budget, arm in progress) and #831 (effort).
   The #831 low-effort arm passes 31 of the 32 rows xhigh truncates
   ([comment](https://github.com/yonatan895/qdrant-pdf-rag/issues/831#issuecomment-6355914926)). No separate Task.
-- `retrieval_miss`: CMP-01 is already in #825; CMP-06 extends it. DIA-18, DIA-23, SYS-09 have no owner.
-- Abstention answered (5 rows) and `refusal_gold_present` (2 rows) have no owner beyond the measurement in #798.
+- `retrieval_miss`: the low-effort arm passes all five (CMP-01, CMP-06, DIA-18, DIA-23, SYS-09) from the same retrieval,
+  so the gold-unit gap does not block a correct answer; no retrieval Task. CMP-01's labels stay with #825.
+- Abstention answered: NEG-04, VER-07, VER-08, VER-11 also fail at low effort (SYN-32 declines there). `refusal_gold_present`:
+  MSG-13 and SYN-07 refuse again at low effort. One Task each.
 - Draft Tasks (criterion 3) are filed separately by the maintainer.
 
 Limits: one run per row at temperature 0; the dev set is the tuning set, not an acceptance set.
