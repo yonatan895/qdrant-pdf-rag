@@ -38,6 +38,24 @@ from scripts.review_tooling import (
 )
 
 
+class TestOpencodeWorkflowContract(unittest.TestCase):
+    """The /oc comment agent runs only for trusted commenters (#588)."""
+
+    def test_comment_trigger_requires_a_trusted_author_association(self):
+        import yaml
+
+        path = pathlib.Path(__file__).resolve().parents[1] / ".github/workflows/opencode.yml"
+        condition = " ".join(yaml.safe_load(path.read_text())["jobs"]["gate"]["if"].split())
+        # The pull_request branch is the only one allowed to skip the check.
+        comment_branch = condition.split("github.event_name == 'pull_request' ||", 1)[1]
+        self.assertIn("github.event.comment.author_association", comment_branch)
+        self.assertIn("""fromJSON('["OWNER","MEMBER","COLLABORATOR"]')""", comment_branch)
+        for untrusted in ("CONTRIBUTOR", "NONE", "FIRST_TIMER", "FIRST_TIME_CONTRIBUTOR", "MANNEQUIN"):
+            self.assertNotIn(untrusted, condition)
+        # The check sits inside the same && chain as the /oc match, before it.
+        self.assertLess(comment_branch.index("author_association"), comment_branch.index("'/oc'"))
+
+
 class TestProfileClassification(unittest.TestCase):
     """Risk-based profile selection and service mapping (§5.1)."""
 
