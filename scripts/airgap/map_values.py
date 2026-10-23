@@ -353,11 +353,14 @@ def build_values(deploy_only: bool = False) -> dict:
             "tag": "v1.1.2",
             "pullPolicy": "IfNotPresent",
         }
-        tracing_images["otelcol"] = {
-            "repository": f"{internal_registry}/otel/opentelemetry-collector-contrib",
-            "tag": "0.160.0",
-            "pullPolicy": "IfNotPresent",
-        }
+        # The collector scrapes /metrics: the chart renders it only with
+        # metrics on (metrics.collector.enabled stays null and follows it).
+        if metrics_enabled:
+            tracing_images["otelcol"] = {
+                "repository": f"{internal_registry}/otel/opentelemetry-collector-contrib",
+                "tag": "0.160.0",
+                "pullPolicy": "IfNotPresent",
+            }
 
     # Plain Kubernetes (Kind) has no SCC to assign a UID, and the OpenObserve
     # image runs as root: an operator may pin one non-root id for the bundled
@@ -456,6 +459,9 @@ def print_bundle_decisions() -> None:
     print(f"OTEL_TRACING_ENABLED={int(tracing)}")
     print(f"OTEL_ENDPOINT_RESOLVED={shlex.quote(endpoint)}")
     print(f"OTEL_BUNDLED={int(tracing and not endpoint)}")
+    # Same condition as the chart's otelcolEnabled with metrics.collector.enabled
+    # null: bundled OpenObserve and metrics on.
+    print(f"OTEL_COLLECTOR={int(tracing and not endpoint and env('METRICS_ENABLED') == 'true')}")
     print(f"SERVICEMONITOR_DEPLOY={int(monitor)}")
 
 

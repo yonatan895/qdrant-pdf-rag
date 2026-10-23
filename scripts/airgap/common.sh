@@ -189,7 +189,7 @@ resolve_observability() {
         die "observability configuration refused (see the message above)"
     eval "$_decisions"
     unset _decisions
-    export OTEL_ENDPOINT_RESOLVED OTEL_TRACING_ENABLED OTEL_BUNDLED SERVICEMONITOR_DEPLOY
+    export OTEL_ENDPOINT_RESOLVED OTEL_TRACING_ENABLED OTEL_BUNDLED OTEL_COLLECTOR SERVICEMONITOR_DEPLOY
 }
 
 # Trace-arrival query settings for airgap:smoke (ADR-0006, #956). With tracing

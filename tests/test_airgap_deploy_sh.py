@@ -505,7 +505,14 @@ def test_tracing_on_deploys_openobserve_and_off_removes_it(tree):
     assert_no_placeholders(oo)
     assert_no_placeholders(agent)
     assert "deploy/openobserve" in _helm_log(tree)
+    # The collector scrapes /metrics: metrics off renders no otelcol, so no wait
+    # and no image check for it; metrics on waits for it.
+    assert "deploy/otelcol" not in _helm_log(tree)
+    on = _run(tree, ("METRICS_ENABLED", "true"))
+    assert on.returncode == 0, on.stderr
     assert "deploy/otelcol" in _helm_log(tree)
+    assert "name: otelcol" in (tree[0] / "dist" / "agent-rendered.yaml").read_text()
+    assert "name: otelcol" not in agent
     # The off sentinel renders no backend and waits for none.
     off = _run(tree, ("OTEL_EXPORTER_OTLP_ENDPOINT", "off"))
     assert off.returncode == 0, off.stderr
@@ -530,12 +537,13 @@ def test_openobserve_and_otelcol_are_identity_checked_when_tracing_is_on(tree, r
     before any mutation, and the next run with the image loaded deploys."""
     _release(tree)
     _put_registry(tree, role, None)
-    refused = _run(tree)
+    metrics = (("METRICS_ENABLED", "true"),)  # otelcol renders only with metrics on
+    refused = _run(tree, *metrics)
     assert refused.returncode != 0
     assert f"cannot read back registry image {ROLE_REFS[role]}" in refused.stderr
     assert _mutations(tree) == []
     _load_all(tree)
-    ok = _run(tree)
+    ok = _run(tree, *metrics)
     assert ok.returncode == 0, ok.stderr
 
 
@@ -1294,7 +1302,7 @@ def test_missing_registry_image_refuses_before_any_mutation(tree, role):
     """pipeline --skip-load / standalone deploy against an empty or partial registry."""
     _release(tree)
     _put_registry(tree, role, None)
-    result = _run(tree)
+    result = _run(tree, ("METRICS_ENABLED", "true"))  # otelcol renders only with metrics on
     assert result.returncode != 0
     assert f"cannot read back registry image {ROLE_REFS[role]}" in result.stderr
     assert _mutations(tree) == []
@@ -1663,7 +1671,7 @@ def test_release_path_verifies_the_feedback_pod_against_the_agent_digest(tree):
     _write_feedback_pod(tree, digests["agent"])
     r = _run(tree, *FEEDBACK_ENV)
     assert r.returncode == 0, r.stderr
-    assert "running images match the verified registry digests (5 roles)" in r.stdout
+    assert "running images match the verified registry digests (4 roles)" in r.stdout
     values = (tree[0] / "dist" / "mainframe-rag-release-values.yaml").read_text()
     assert f'digest: "{digests["agent"]}"' in values
     rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()

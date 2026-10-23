@@ -173,13 +173,16 @@ def test_otel_is_owned_by_the_mapper_not_stale_shell_state(monkeypatch, mapper_e
 
 @pytest.mark.parametrize(("environment", "expected"), [
     ({}, {"OTEL_TRACING_ENABLED": "1", "OTEL_ENDPOINT_RESOLVED": "",
-          "OTEL_BUNDLED": "1", "SERVICEMONITOR_DEPLOY": "0"}),
+          "OTEL_BUNDLED": "1", "OTEL_COLLECTOR": "0", "SERVICEMONITOR_DEPLOY": "0"}),
     ({"OTEL_EXPORTER_OTLP_ENDPOINT": "off"},
      {"OTEL_TRACING_ENABLED": "0", "OTEL_ENDPOINT_RESOLVED": "",
-      "OTEL_BUNDLED": "0", "SERVICEMONITOR_DEPLOY": "0"}),
+      "OTEL_BUNDLED": "0", "OTEL_COLLECTOR": "0", "SERVICEMONITOR_DEPLOY": "0"}),
     ({"OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector.platform:4318"},
      {"OTEL_TRACING_ENABLED": "1", "OTEL_ENDPOINT_RESOLVED": "http://collector.platform:4318",
-      "OTEL_BUNDLED": "0", "SERVICEMONITOR_DEPLOY": "0"}),
+      "OTEL_BUNDLED": "0", "OTEL_COLLECTOR": "0", "SERVICEMONITOR_DEPLOY": "0"}),
+    ({"METRICS_ENABLED": "true"},
+     {"OTEL_TRACING_ENABLED": "1", "OTEL_ENDPOINT_RESOLVED": "",
+      "OTEL_BUNDLED": "1", "OTEL_COLLECTOR": "1", "SERVICEMONITOR_DEPLOY": "1"}),
 ])
 def test_bundle_decisions_match_the_rendered_release(monkeypatch, mapper_env, environment, expected):
     """The shell stages `eval` --bundle-decisions; the release renders the
@@ -197,6 +200,8 @@ def test_bundle_decisions_match_the_rendered_release(monkeypatch, mapper_env, en
     assert r2.returncode == 0, r2.stderr
     v = load_values(out)
     assert ("openobserve" in v["images"]) is (expected["OTEL_BUNDLED"] == "1")
+    # The chart renders otelcol only with the bundled backend and metrics on.
+    assert ("otelcol" in v["images"]) is (expected["OTEL_COLLECTOR"] == "1")
     assert v["metrics"]["serviceMonitor"]["enabled"] is (expected["SERVICEMONITOR_DEPLOY"] == "1")
 
 
@@ -686,6 +691,7 @@ def test_openobserve_and_otelcol_images_follow_tracing(monkeypatch, mapper_env, 
     assert decisions.returncode == 0, decisions.stderr
     assert f"OTEL_BUNDLED={int(bundled)}" in decisions.stdout.split()
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint)
+    monkeypatch.setenv("METRICS_ENABLED", "true")  # otelcol renders only with metrics on
     monkeypatch.setenv("IMAGE_DIGEST_OPENOBSERVE", "sha256:" + "c" * 64)
     monkeypatch.setenv("IMAGE_DIGEST_OTELCOL", "sha256:" + "d" * 64)
     r, out = mapper_env()

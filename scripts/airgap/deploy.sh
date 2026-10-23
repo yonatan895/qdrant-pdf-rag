@@ -86,8 +86,11 @@ QDRANT_URL="http://${QDRANT_RELEASE}:6333"
 # as repository@digest; the Qdrant digest is checked against the pods below.
 DEPLOY_IMAGES="qdrant agent"
 # OpenObserve is the only trace backend (ADR-0006, #956): with tracing on, the
-# chart renders it and the otelcol collector, so both are identity-checked.
-[ "$OTEL_BUNDLED" != "1" ] || DEPLOY_IMAGES="$DEPLOY_IMAGES openobserve otelcol"
+# chart renders it (and, with metrics on, the otelcol collector), so those are
+# identity-checked.
+[ "$OTEL_BUNDLED" != "1" ] || DEPLOY_IMAGES="$DEPLOY_IMAGES openobserve"
+# otelcol (the /metrics scraper) renders only with metrics on (OTEL_COLLECTOR).
+[ "$OTEL_COLLECTOR" != "1" ] || DEPLOY_IMAGES="$DEPLOY_IMAGES otelcol"
 [ "$AGENT_ROUTE" != "true" ] || DEPLOY_IMAGES="$DEPLOY_IMAGES oauth_proxy"
 # shellcheck disable=SC2086
 verify_registry_images $DEPLOY_IMAGES
@@ -314,7 +317,7 @@ else
     wait_rollout "deploy/rag-agent" 300
     if [ "$OTEL_BUNDLED" = "1" ]; then
         wait_rollout "deploy/openobserve" 120
-        wait_rollout "deploy/otelcol" 120
+        [ "$OTEL_COLLECTOR" != "1" ] || wait_rollout "deploy/otelcol" 120
     fi
     if [ "$FEEDBACK_ENABLED" = "true" ]; then
         wait_rollout "statefulset/rag-feedback" 120
