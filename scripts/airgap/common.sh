@@ -177,18 +177,41 @@ check_secret_name() {
 # Observability decisions (issues #83, #529 OBS-2, #568): one owner for
 # deploy / validate / smoke / ingest and the chart values — the values mapper
 # (scripts/airgap/map_values.py observability()). Sets OTEL_ENDPOINT_RESOLVED
-# (empty = disabled), OTEL_TRACING_ENABLED, JAEGER_DEPLOY and
+# (empty = the bundled OpenObserve, or tracing off), OTEL_TRACING_ENABLED and
 # SERVICEMONITOR_DEPLOY (1/0); invalid or contradictory operator input fails
 # before any manifest is rendered. The same function renders the chart's
 # explicit booleans, so the shell gates and the release can never disagree.
 resolve_observability() {
     command -v python3 >/dev/null 2>&1 || die "python3 is required for observability decisions"
-    export OTEL_EXPORTER_OTLP_ENDPOINT JAEGER_ENABLED SERVICEMONITOR_ENABLED METRICS_ENABLED
+    export OTEL_EXPORTER_OTLP_ENDPOINT SERVICEMONITOR_ENABLED METRICS_ENABLED
     _decisions=$(python3 scripts/airgap/map_values.py --bundle-decisions) ||
         die "observability configuration refused (see the message above)"
     eval "$_decisions"
     unset _decisions
-    export OTEL_ENDPOINT_RESOLVED OTEL_TRACING_ENABLED JAEGER_DEPLOY SERVICEMONITOR_DEPLOY
+    export OTEL_ENDPOINT_RESOLVED OTEL_TRACING_ENABLED SERVICEMONITOR_DEPLOY
+}
+
+# Trace-arrival query settings for airgap:smoke (ADR-0006, #956). With tracing
+# on, the in-cluster OpenObserve query URL is the default and the credentials
+# are read from the operator-created openobserve-credentials Secret at call
+# time (never printed, never placed on a command line). Explicit
+# TRACE_QUERY_URL/TRACE_QUERY_USER/TRACE_QUERY_PASSWORD win. Needs $KC.
+_read_oo_secret_key() {
+    _oo_b64=$($KC -n "$NAMESPACE" get secret openobserve-credentials \
+        -o "jsonpath={.data['$1']}" 2>/dev/null) || return 1
+    [ -n "$_oo_b64" ] || return 1
+    printf '%s' "$_oo_b64" | base64 -d 2>/dev/null
+}
+resolve_trace_query() {
+    [ "${OTEL_TRACING_ENABLED:-0}" = "1" ] || return 0
+    [ "${AIRGAP_DRYRUN:-0}" != "1" ] || { TRACE_QUERY_URL=${TRACE_QUERY_URL:-http://openobserve:5080}; export TRACE_QUERY_URL; return 0; }
+    TRACE_QUERY_URL=${TRACE_QUERY_URL:-http://openobserve:5080}
+    if [ -z "${TRACE_QUERY_USER:-}" ] || [ -z "${TRACE_QUERY_PASSWORD:-}" ]; then
+        TRACE_QUERY_USER=$(_read_oo_secret_key root-user-email) &&
+            TRACE_QUERY_PASSWORD=$(_read_oo_secret_key root-user-password) ||
+            die "E_OPENOBSERVE_CREDENTIALS: cannot read root-user-email and root-user-password from Secret openobserve-credentials"
+    fi
+    export TRACE_QUERY_URL TRACE_QUERY_USER TRACE_QUERY_PASSWORD
 }
 
 resolve_aliases() {

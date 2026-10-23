@@ -371,10 +371,10 @@ CORPUS_DIR=output/demo-pdfs sh scripts/tools/run-task.sh local:stack
 ```
 
 Check an existing stack with `sh scripts/tools/run-task.sh local:check --
---agent URL --jaeger URL --query TEXT --followup TEXT --report PATH`; the
+--agent URL --trace-url URL --query TEXT --followup TEXT --report PATH`; the
 [retained-stack runbook](local-real-corpus.md#4-verify-and-retain-the-complete-live-stack)
 owns endpoint and private-report selection. It requires grounded first and
-follow-up answers, complete SSE and a fresh search trace. Representation
+follow-up answers, complete SSE and a fresh search trace; the OpenObserve credentials come from `TRACE_QUERY_USER` and `TRACE_QUERY_PASSWORD` in the environment. Representation
 changes use the [snapshot-gated ingestion migration](ingest.md#metadata-contract).
 For semantic answer quality on the configured live GPU stack, run
 `sh scripts/tools/run-task.sh eval:answers` under the [answer-tier contract](testing.md#answer-tier).
@@ -557,7 +557,7 @@ registry service-account credentials. Do not paste them into issue/PR text.
 This generates `dist/qdrant-pdf-rag-<sha>.tar` and its digest `dist/qdrant-pdf-rag-<sha>.tar.sha256`, containing:
 1. Complete Git repository bundle (`repo.bundle`).
 2. App container images (`qdrant-pdf-rag-agent`, `qdrant-pdf-rag-ingest`), with per-image digests bound in `MANIFEST.txt` and re-verified on load.
-3. Vendored third-party Qdrant unprivileged image and Jaeger v2 image (tag + digest pinned in `images.txt`).
+3. Vendored third-party Qdrant unprivileged image, OpenObserve OSS v1.1.2 image and otelcol-contrib 0.160.0 image (tag + digest pinned in `images.txt`; no Jaeger image).
 4. Vendored Helm chart (`charts/qdrant-1.19.0.tgz`).
 5. Self-contained extraction bootstrap script (`bootstrap.sh`).
 6. Manifest (`MANIFEST.txt`), Packing Record (`PACKING_RECORD.txt`), digest enumeration (`sbom.json`), third-party notices and license review status (`THIRD-PARTY-NOTICES.txt`, see [licensing](licensing.md); declared licenses only, not a legal approval), offline signature (`SHA256SUMS.sig` + `sneakernet-signing.pub`), and member `SHA256SUMS`.
@@ -835,18 +835,16 @@ Acceptance Criteria:
 ### 4.4.1 Tracing (active by default, issue #83)
 
 Tracing is **on by default**: leaving `OTEL_EXPORTER_OTLP_ENDPOINT` unset
-resolves to the in-cluster `http://jaeger:4318`, and `sh scripts/tools/run-task.sh airgap:deploy`
-renders and installs the Jaeger templates in `charts/mainframe-rag` (Jaeger v2 all-in-one, badger
-storage on a 10Gi RWO block PVC, 14-day span TTL, ClusterIP only) and wires
-the endpoint into the agent and the ingest Job. To disable tracing — and skip
-the Jaeger deployment entirely — set `OTEL_EXPORTER_OTLP_ENDPOINT=off` (also
-`none`, `false`, or `0`) in `airgap.env`. A custom `http(s)` OTLP/HTTP
-collector origin is accepted in place of the in-cluster Jaeger; anything else
-fails closed before a manifest is rendered. To keep exporting while skipping the
-bundled backend (`JAEGER_ENABLED=false`), also set `OTEL_EXPORTER_OTLP_ENDPOINT`
-to the external collector (the former `http://jaeger:4318` is fine when a
-platform-owned service really lives there) or to `off`; the unset default is
-refused in preflight, the values mapper and the chart (`tracing.endpoint`). `sh scripts/tools/run-task.sh airgap:validate` prints the
+selects the bundled OpenObserve OSS backend (ADR-0006, #956; the only trace
+backend, Jaeger is retired), and `sh scripts/tools/run-task.sh airgap:deploy`
+renders and installs it with its otelcol collector from `charts/mainframe-rag`,
+wires the export into the agent and the ingest Job, and checks both images
+against the packed digests (registry read-back before the release, running pods
+after rollout). To disable tracing and skip both workloads, set
+`OTEL_EXPORTER_OTLP_ENDPOINT=off` (also `none`, `false`, or `0`) in
+`airgap.env`. A custom `http(s)` origin is passed through unchanged; anything
+else fails closed before a manifest is rendered. `JAEGER_ENABLED` and
+`JAEGER_QUERY_URL` no longer exist. `sh scripts/tools/run-task.sh airgap:validate` prints the
 resolved mode.
 
 This traces **this repo's components only** (agent, retrieval, ingest); the
@@ -855,17 +853,22 @@ carry W3C `traceparent` so their gateway can correlate its spans with ours
 when it is tracing-enabled — nothing from this repo configures or deploys
 their monitoring.
 
-The sneakernet bundle always carries the Jaeger image (`images.txt` is a
+The sneakernet bundle always carries the OpenObserve and otelcol images (`images.txt` is a
 pack-wide contract — every pin with a recorded digest is mirrored on every
 pack; the oauth-proxy pin is skipped while `sha256:PENDING`), so the
 default-on path works in a disconnected install. The endpoint may be given
 with or without the `/v1/traces` path — the agent accepts both.
 `sh scripts/tools/run-task.sh airgap:smoke` proves a `v1.search` span landed before reporting
-acceptance (empty-collection runs and a disabled bundled Jaeger report tracing
-as skipped, trace arrival NOT VERIFIED); it polls the
-Jaeger query API at `JAEGER_QUERY_URL` (default `http://jaeger:16686`) —
-change that only when a custom collector exposes a Jaeger-compatible query
-API.
+acceptance (empty-collection runs report tracing as skipped, trace arrival NOT
+VERIFIED). With no manual env, smoke queries `http://openobserve:5080` and reads
+the credentials from the `openobserve-credentials` Secret at run time (never
+printed); `TRACE_QUERY_URL`, `TRACE_QUERY_USER` and `TRACE_QUERY_PASSWORD` override.
+
+**Bundle size (#956).** Jaeger v2.20.0 leaves the bundle and OpenObserve v1.1.2
+plus otelcol-contrib 0.160.0 enter it. By registry layer sizes read with
+`skopeo inspect --raw` for linux/amd64 (compressed): Jaeger -50.2 MB,
+OpenObserve +161.8 MB, otelcol +110.8 MB, net +222.4 MB. The docker-archive
+tars inside the bundle hold uncompressed layers, so the on-disk growth is larger.
 
 Every exported span carries deploy identity as resource attributes:
 `service.version` is the packed `IMAGE_SHA` for the agent Deployment, and
@@ -877,11 +880,11 @@ no `service.version` (issue #315). The agent also honors the standard
 `OTEL_RESOURCE_ATTRIBUTES` mapping underneath these explicit keys, and joins
 an upstream W3C `traceparent` when the caller sends one.
 
-View traces (port-forward only — Jaeger has no public Route, like Qdrant):
+View traces (port-forward only — OpenObserve has no public Route, like Qdrant):
 
 ```bash
-oc -n mainframe-rag port-forward svc/jaeger 16686:16686
-# open http://localhost:16686, service "mainframe-rag-agent" (rename via OTEL_SERVICE_NAME
+oc -n mainframe-rag port-forward svc/openobserve 5080:5080
+# open http://localhost:5080, service "mainframe-rag-agent" (rename via OTEL_SERVICE_NAME
 # in airgap.env — deploy.sh renders it, and strips the entry when unset so the
 # agent default stands)
 ```

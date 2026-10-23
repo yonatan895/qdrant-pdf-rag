@@ -111,7 +111,6 @@ def _stage_stub_images(artdir: Path, sha: str, oauth: bool = False) -> dict[str,
         (stub / sub).mkdir(parents=True, exist_ok=True)
     tars = {
         "qdrant": "qdrant-image.tar",
-        "jaeger": "jaeger-image.tar",
         "openobserve": "openobserve-image.tar",
         "otelcol": "otelcol-image.tar",
         "ingest": f"app-ingest-{sha}.tar",
@@ -137,7 +136,6 @@ def _make_artifacts(artdir: Path, sha: str = IMAGE_SHA, corrupt: bool = False, o
         **task_members(),
         "repo.bundle": b"bundle-content\n",
         "qdrant-image.tar": b"qdrant-tar\n",
-        "jaeger-image.tar": b"jaeger-tar\n",
         "openobserve-image.tar": b"openobserve-tar\n",
         "otelcol-image.tar": b"otelcol-tar\n",
         f"app-ingest-{sha}.tar": b"ingest-tar\n",
@@ -145,12 +143,11 @@ def _make_artifacts(artdir: Path, sha: str = IMAGE_SHA, corrupt: bool = False, o
         "MANIFEST.txt": (
             f"sha: {sha}\ndate: 2026-09-05T00:00:00Z\n"
             f"qdrant_digest: {digests['qdrant']}\n"
-            f"jaeger_digest: {digests['jaeger']}\n"
             f"openobserve_digest: {digests['openobserve']}\n"
             f"otelcol_digest: {digests['otelcol']}\n"
             f"ingest_digest: {digests['ingest']}\n"
             f"agent_digest: {digests['agent']}\n"
-            + "".join(f"{k}_config_digest: {_config_of(k)}\n" for k in ("qdrant", "jaeger", "openobserve", "otelcol", "ingest", "agent"))
+            + "".join(f"{k}_config_digest: {_config_of(k)}\n" for k in ("qdrant", "openobserve", "otelcol", "ingest", "agent"))
             + task_manifest()
         ).encode(),
         "sbom.json": b'{"images": []}\n',
@@ -254,7 +251,7 @@ def test_load_success_with_parent_dir(load_tree):
         check=False,
     )
     assert r.returncode == 0, r.stderr
-    assert "Loaded 6 images into reg.internal:5000" in r.stdout
+    assert "Loaded 5 images into reg.internal:5000" in r.stdout
     assert skopeo_log.exists()
 
 
@@ -264,7 +261,7 @@ def test_load_success_with_bundle_dir_override(load_tree):
     _make_artifacts(custom_dir, sha=IMAGE_SHA)
     r = _run_load(load_tree, ("AIRGAP_BUNDLE_DIR", str(custom_dir)))
     assert r.returncode == 0, r.stderr
-    assert "Loaded 6 images into reg.internal:5000" in r.stdout
+    assert "Loaded 5 images into reg.internal:5000" in r.stdout
 
 
 def test_load_tampered_sums_fails_signature(load_tree):
@@ -366,7 +363,7 @@ def test_load_ignores_retained_optional_image_outside_current_signed_inventory(l
     retained.write_bytes(b"retained from prior approved bundle")
     result = _run_load(load_tree)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "Loaded 6 images" in result.stdout
+    assert "Loaded 5 images" in result.stdout
     assert "oauth-proxy" not in log.read_text()
     assert retained.read_bytes() == b"retained from prior approved bundle"
 
@@ -379,15 +376,13 @@ def test_load_ignores_retained_optional_image_outside_current_signed_inventory(l
 REGISTRY = "reg.internal:5000"
 REF = {
     "qdrant": f"{REGISTRY}/qdrant/qdrant:v1.19.0-unprivileged",
-    "jaeger": f"{REGISTRY}/jaegertracing/jaeger:v2.20.0",
-    "openobserve": f"{REGISTRY}/openobserve/openobserve:v1.0.4",
+    "openobserve": f"{REGISTRY}/openobserve/openobserve:v1.1.2",
     "otelcol": f"{REGISTRY}/otel/opentelemetry-collector-contrib:0.160.0",
     "ingest": f"{REGISTRY}/qdrant-pdf-rag-ingest:{IMAGE_SHA}",
     "agent": f"{REGISTRY}/qdrant-pdf-rag-agent:{IMAGE_SHA}",
 }
 TAR = {
     "qdrant": "qdrant-image.tar",
-    "jaeger": "jaeger-image.tar",
     "openobserve": "openobserve-image.tar",
     "otelcol": "otelcol-image.tar",
     "ingest": f"app-ingest-{IMAGE_SHA}.tar",
@@ -412,7 +407,7 @@ def test_load_success_proves_registry_serves_packed_config(load_tree):
     _make_artifacts(root / "dist")
     r = _run_load(load_tree)
     assert r.returncode == 0, r.stderr
-    assert "Loaded 6 images into reg.internal:5000" in r.stdout
+    assert "Loaded 5 images into reg.internal:5000" in r.stdout
     for image, ref in REF.items():
         registry_raw = _registry_manifest(root, image)
         archive_raw = (root / "dist/.skopeo-stub/archive" / f"{TAR[image]}.raw").read_bytes()
@@ -421,7 +416,7 @@ def test_load_success_proves_registry_serves_packed_config(load_tree):
         assert json.loads(registry_raw)["config"] == json.loads(archive_raw)["config"]
         assert _digest(registry_raw) != _digest(archive_raw)
         assert f"{ref}@{_digest(registry_raw)}" in r.stdout
-    assert len(_registry_calls(log)) == 6
+    assert len(_registry_calls(log)) == 5
 
 
 def test_load_refuse_then_fix_next_run_passes(load_tree):
@@ -441,7 +436,7 @@ def test_load_refuse_then_fix_next_run_passes(load_tree):
     _set_pushed(artdir, "agent", good)
     second = _run_load(load_tree)
     assert second.returncode == 0, second.stderr
-    assert "Loaded 6 images into reg.internal:5000" in second.stdout
+    assert "Loaded 5 images into reg.internal:5000" in second.stdout
     assert json.loads(_registry_manifest(root, "agent"))["config"]["digest"] == _config_of("agent")
 
 
@@ -495,11 +490,11 @@ def test_load_registry_read_back_follows_skopeo_args_and_insecure_flag(load_tree
     )
     assert r.returncode == 0, r.stderr
     copies = [line for line in log.read_text().splitlines() if line.startswith("copy")]
-    assert len(copies) == 6
+    assert len(copies) == 5
     for copy in copies:
         assert "--authfile /a.json" in copy and "--dest-tls-verify=false" in copy
     calls = _registry_calls(log)
-    assert len(calls) == 6
+    assert len(calls) == 5
     for call in calls:
         assert "--cert-dir /certs" in call
         assert "--authfile /a.json" in call
@@ -512,7 +507,7 @@ def test_load_dryrun_is_hermetic_and_not_release_verified(load_tree):
     root, log = load_tree
     r = _run_load(load_tree, ("AIRGAP_DRYRUN", "1"))
     assert r.returncode == 0, r.stderr
-    assert "Loaded 6 images into reg.internal:5000 (dry-run)" in r.stdout
+    assert "Loaded 5 images into reg.internal:5000 (dry-run)" in r.stdout
     assert "registry image identity not release-verified" in r.stdout
     assert not log.exists()
     assert not (root / "skopeo-state").exists()
@@ -525,8 +520,8 @@ def test_load_verifies_optional_oauth_proxy_image_like_the_others(load_tree):
     ref = f"{REGISTRY}/openshift4/ose-oauth-proxy:v4.14"
     first = _run_load(load_tree)
     assert first.returncode == 0, first.stderr
-    assert "Loaded 7 images" in first.stdout
-    assert len(_registry_calls(log)) == 7
+    assert "Loaded 6 images" in first.stdout
+    assert len(_registry_calls(log)) == 6
     assert f"verified {ref}@sha256:" in first.stdout
     (artdir / ".skopeo-stub/pushed/oauth-proxy-image.tar.raw").write_bytes(
         _manifest(_config_of("swapped"), _digest(b"layer-swapped"))

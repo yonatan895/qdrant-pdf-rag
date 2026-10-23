@@ -16,8 +16,8 @@ import sys
 ROLE_TARGETS = {
     "qdrant": ("StatefulSet", None, "qdrant"),
     "agent": ("Deployment", "rag-agent", "agent"),
-    "jaeger": ("Deployment", "jaeger", "jaeger"),
     "openobserve": ("Deployment", "openobserve", "openobserve"),
+    "otelcol": ("Deployment", "otelcol", "otelcol"),
     "oauth_proxy": ("Deployment", "rag-agent", "oauth-proxy"),
     # The feedback service runs the agent image (#804): same repository and
     # digest as the "agent" role, its own workload.

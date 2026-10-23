@@ -40,11 +40,11 @@ MAPPER_KEYS = [
     "RERANK_ENABLED", "RERANK_BASE_URL", "RERANK_MODEL", "RERANK_ENDPOINT_ORDER",
     "GATEWAY_API_KEY_SECRET", "GATEWAY_API_KEY_SECRET_KEY", "GATEWAY_CA_CONFIGMAP", "PULL_SECRET",
     "OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_ENDPOINT_RESOLVED", "OTEL_TRACING_ENABLED",
-    "OTEL_DEPLOYMENT_ENVIRONMENT", "OTEL_SERVICE_NAME", "JAEGER_ENABLED",
+    "OTEL_DEPLOYMENT_ENVIRONMENT", "OTEL_SERVICE_NAME",
     "METRICS_ENABLED", "SERVICEMONITOR_ENABLED", "AGENT_ROUTE", "ROUTE_DESTINATION_CA_FILE",
     "UI_ENABLED", "AGENT_NETWORK_POLICY", "AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES",
     "FEEDBACK_ENABLED", "FEEDBACK_SECRET", "FEEDBACK_STORAGE_SIZE", "FEEDBACK_RETENTION_DAYS",
-    "IMAGE_DIGEST_AGENT", "IMAGE_DIGEST_INGEST", "IMAGE_DIGEST_JAEGER", "IMAGE_DIGEST_OPENOBSERVE", "IMAGE_DIGEST_OAUTH_PROXY",
+    "IMAGE_DIGEST_AGENT", "IMAGE_DIGEST_INGEST", "IMAGE_DIGEST_OPENOBSERVE", "IMAGE_DIGEST_OTELCOL", "IMAGE_DIGEST_OAUTH_PROXY",
     "STORAGE_CLASS", "CORPUS_PVC", "INGEST_WORKERS", "INGEST_WORK_SIZE",
     "INGEST_ALIAS_PUBLISH", "INGEST_REINGEST", "INGEST_RETIRE_DOCS",
     "CONTEXTUAL_EMBED_ENABLED", "CONTEXT_LLM_BASE_URL", "CONTEXT_LLM_MODEL",
@@ -101,7 +101,7 @@ def test_full_mapping_table(mapper_env):
         "tag": IMAGE_SHA, "pullPolicy": "IfNotPresent",
     }
     assert v["images"]["ingest"]["tag"] == IMAGE_SHA
-    assert v["images"]["jaeger"]["tag"] == "v2.20.0"
+    assert "jaeger" not in v["images"]
     assert v["images"]["oauthProxy"]["tag"] == "v4.14"
     assert v["qdrantRelease"] == "qdrant"
     assert v["models"]["embedding"] == {
@@ -112,9 +112,8 @@ def test_full_mapping_table(mapper_env):
     assert v["models"]["rerank"]["model"] == "BAAI/bge-reranker-v2-m3"
     assert v["models"]["rerank"]["endpointOrder"] == "score_first"
     assert v["tracing"] == {
-        "enabled": True, "endpoint": "http://jaeger:4318",
+        "enabled": True, "endpoint": "",
         "deploymentEnvironment": "", "serviceName": "",
-        "jaeger": {"enabled": True},
     }
     assert v["metrics"] == {"enabled": False, "serviceMonitor": {"enabled": False}}
     assert v["route"] == {"enabled": False, "timeoutSeconds": 300, "destinationCA": ""}
@@ -140,7 +139,7 @@ def test_removed_legacy_env_names_are_not_honored(monkeypatch, mapper_env):
 
 
 @pytest.mark.parametrize("token,enabled,endpoint", [
-    ("", True, "http://jaeger:4318"),
+    ("", True, ""),
     ("off", False, ""), ("OFF", False, ""),
     ("http://collector:4318", True, "http://collector:4318"),
 ])
@@ -168,14 +167,15 @@ def test_otel_is_owned_by_the_mapper_not_stale_shell_state(monkeypatch, mapper_e
     r, out = mapper_env()
     assert r.returncode == 0, r.stderr
     t = load_values(out)["tracing"]
-    assert (t["enabled"], t["endpoint"], t["jaeger"]) == (True, "http://collector:4318", {"enabled": True})
+    assert (t["enabled"], t["endpoint"]) == (True, "http://collector:4318")
+    assert "jaeger" not in t
 
 
 @pytest.mark.parametrize(("environment", "expected"), [
-    ({}, {"OTEL_TRACING_ENABLED": "1", "OTEL_ENDPOINT_RESOLVED": "http://jaeger:4318",
-          "JAEGER_DEPLOY": "1", "SERVICEMONITOR_DEPLOY": "0"}),
+    ({}, {"OTEL_TRACING_ENABLED": "1", "OTEL_ENDPOINT_RESOLVED": "",
+          "SERVICEMONITOR_DEPLOY": "0"}),
     ({"OTEL_EXPORTER_OTLP_ENDPOINT": "off"},
-     {"OTEL_TRACING_ENABLED": "0", "OTEL_ENDPOINT_RESOLVED": "", "JAEGER_DEPLOY": "0",
+     {"OTEL_TRACING_ENABLED": "0", "OTEL_ENDPOINT_RESOLVED": "",
       "SERVICEMONITOR_DEPLOY": "0"}),
 ])
 def test_bundle_decisions_match_the_rendered_release(monkeypatch, mapper_env, environment, expected):
@@ -193,7 +193,7 @@ def test_bundle_decisions_match_the_rendered_release(monkeypatch, mapper_env, en
     r2, out = mapper_env()
     assert r2.returncode == 0, r2.stderr
     v = load_values(out)
-    assert v["tracing"]["jaeger"]["enabled"] is (expected["JAEGER_DEPLOY"] == "1")
+    assert ("openobserve" in v["images"]) is (expected["OTEL_TRACING_ENABLED"] == "1")
     assert v["metrics"]["serviceMonitor"]["enabled"] is (expected["SERVICEMONITOR_DEPLOY"] == "1")
 
 
@@ -624,25 +624,14 @@ def test_empty_model_budget_inputs_preserve_application_defaults(monkeypatch, ma
 
 
 def test_decoupled_backend_flags_follow_the_parent_by_default(mapper_env):
-    """OBS-2: unset subflags follow the parent leg; the release carries the
-    effective boolean (the chart never re-derives the default)."""
+    """OBS-2: an unset ServiceMonitor flag follows the parent leg; the release
+    carries the effective boolean (the chart never re-derives the default).
+    Tracing has no backend switch: OpenObserve is the only backend (#956)."""
     r, out = mapper_env()
     assert r.returncode == 0, r.stderr
     v = load_values(out)
-    assert v["tracing"]["jaeger"] == {"enabled": v["tracing"]["enabled"]}
+    assert "jaeger" not in v["tracing"]
     assert v["metrics"]["serviceMonitor"] == {"enabled": v["metrics"]["enabled"]}
-
-
-@pytest.mark.parametrize("raw,expected", [
-    ("true", True), ("YES", True), ("false", False),
-])
-def test_jaeger_enabled_selection(monkeypatch, mapper_env, raw, expected):
-    monkeypatch.setenv("JAEGER_ENABLED", raw)
-    if not expected:  # #568: disabling the bundled backend names a collector
-        monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector.platform:4318")
-    r, out = mapper_env()
-    assert r.returncode == 0, r.stderr
-    assert load_values(out)["tracing"]["jaeger"] == {"enabled": expected}
 
 
 @pytest.mark.parametrize("raw,expected", [("true", True), ("false", False)])
@@ -654,20 +643,12 @@ def test_servicemonitor_enabled_selection(monkeypatch, mapper_env, raw, expected
     assert load_values(out)["metrics"] == {"enabled": True, "serviceMonitor": {"enabled": expected}}
 
 
-@pytest.mark.parametrize("key", ["JAEGER_ENABLED"])
+@pytest.mark.parametrize("key", ["SERVICEMONITOR_ENABLED"])
 def test_decoupled_flags_reject_garbage(monkeypatch, mapper_env, key):
     monkeypatch.setenv(key, "maybe")
     r, _ = mapper_env()
     assert r.returncode != 0
     assert key in r.stderr
-
-
-def test_jaeger_for_disabled_tracing_fails_closed(monkeypatch, mapper_env):
-    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "off")
-    monkeypatch.setenv("JAEGER_ENABLED", "true")
-    r, _ = mapper_env()
-    assert r.returncode != 0
-    assert "JAEGER_ENABLED=true requires tracing" in r.stderr
 
 
 def test_monitor_for_disabled_metrics_fails_closed(monkeypatch, mapper_env):
@@ -677,32 +658,40 @@ def test_monitor_for_disabled_metrics_fails_closed(monkeypatch, mapper_env):
     assert "SERVICEMONITOR_ENABLED=true requires METRICS_ENABLED=true" in r.stderr
 
 
-def test_jaeger_false_without_destination_fails_closed(monkeypatch, mapper_env):
-    """Issue #568: no bundled backend and no named collector must not map to
-    the defaulted bundled hostname."""
+def test_retired_jaeger_switch_is_ignored(monkeypatch, mapper_env):
+    """#956: JAEGER_ENABLED no longer selects or refuses anything; tracing
+    follows OTEL_EXPORTER_OTLP_ENDPOINT alone and no Jaeger key is emitted."""
     monkeypatch.setenv("JAEGER_ENABLED", "false")
-    r, out = mapper_env()
-    assert r.returncode != 0
-    assert "JAEGER_ENABLED=false needs an intentional trace destination" in r.stderr
-    assert not out.exists()
-
-
-@pytest.mark.parametrize("endpoint,enabled", [
-    ("http://collector.platform:4318", True), ("http://jaeger:4318", True), ("off", False),
-])
-def test_jaeger_false_with_intentional_destination(monkeypatch, mapper_env, endpoint, enabled):
-    monkeypatch.setenv("JAEGER_ENABLED", "false")
-    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint)
     r, out = mapper_env()
     assert r.returncode == 0, r.stderr
-    t = load_values(out)["tracing"]
-    assert t["enabled"] is enabled and t["jaeger"] == {"enabled": False}
-    assert t["endpoint"] == (endpoint if enabled else "")
+    v = load_values(out)
+    assert v["tracing"]["enabled"] is True and "jaeger" not in v["tracing"]
+    assert "jaeger" not in v["images"]
+
+
+@pytest.mark.parametrize("endpoint,enabled", [("", True), ("http://collector.platform:4318", True), ("off", False)])
+def test_openobserve_and_otelcol_images_follow_tracing(monkeypatch, mapper_env, endpoint, enabled):
+    """#956: tracing on always emits images.openobserve and images.otelcol
+    (repository, tag, pullPolicy; never a digest, which lives in images.txt); tracing off emits neither."""
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint)
+    monkeypatch.setenv("IMAGE_DIGEST_OPENOBSERVE", "sha256:" + "c" * 64)
+    monkeypatch.setenv("IMAGE_DIGEST_OTELCOL", "sha256:" + "d" * 64)
+    r, out = mapper_env()
+    assert r.returncode == 0, r.stderr
+    images = load_values(out)["images"]
+    if not enabled:
+        assert "openobserve" not in images and "otelcol" not in images
+        return
+    assert images["openobserve"] == {
+        "repository": "reg.internal/openobserve/openobserve", "tag": "v1.1.2",
+        "pullPolicy": "IfNotPresent"}
+    assert images["otelcol"] == {
+        "repository": "reg.internal/otel/opentelemetry-collector-contrib", "tag": "0.160.0",
+        "pullPolicy": "IfNotPresent"}
 
 
 def test_mapper_to_helm_round_trip_decoupled(mapper_env, tmp_path):
     """Producer-to-consumer: decoupled flags survive env -> values -> helm."""
-    os.environ["JAEGER_ENABLED"] = "false"
     os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"] = "http://collector.platform:4318"
     os.environ["METRICS_ENABLED"] = "true"
     os.environ["SERVICEMONITOR_ENABLED"] = "false"
@@ -714,7 +703,7 @@ def test_mapper_to_helm_round_trip_decoupled(mapper_env, tmp_path):
         )
         assert r.returncode == 0, r.stderr
         v = load_values(out)
-        assert v["tracing"]["jaeger"] == {"enabled": False}
+        assert "jaeger" not in v["tracing"]
         assert v["metrics"]["serviceMonitor"] == {"enabled": False}
         t = subprocess.run(
             ["helm", "template", "app", str(CHART), "-f", str(out),
@@ -723,7 +712,6 @@ def test_mapper_to_helm_round_trip_decoupled(mapper_env, tmp_path):
         )
         assert t.returncode == 0, t.stderr
         kinds = {(d["kind"], d["metadata"]["name"]) for d in yaml.safe_load_all(t.stdout) if d}
-        assert not {k for k in kinds if k[1] in ("jaeger", "jaeger-badger", "jaeger-config")}
         assert ("ServiceMonitor", "rag-agent") not in kinds
         agent = next(d for d in yaml.safe_load_all(t.stdout) if d
                      and (d["kind"], d["metadata"]["name"]) == ("Deployment", "rag-agent"))
@@ -732,7 +720,7 @@ def test_mapper_to_helm_round_trip_decoupled(mapper_env, tmp_path):
         assert env["OTEL_EXPORTER_OTLP_ENDPOINT"] == "http://collector.platform:4318"
         assert env["METRICS_ENABLED"] == "true"
     finally:
-        for k in ("JAEGER_ENABLED", "OTEL_EXPORTER_OTLP_ENDPOINT", "METRICS_ENABLED", "SERVICEMONITOR_ENABLED"):
+        for k in ("OTEL_EXPORTER_OTLP_ENDPOINT", "METRICS_ENABLED", "SERVICEMONITOR_ENABLED"):
             os.environ.pop(k, None)
 
 
@@ -756,18 +744,14 @@ def test_image_digest_env_renders_digest_per_image(monkeypatch, mapper_env):
     assert all("digest" not in image for image in load_values(out)["images"].values())
 
 
-def test_openobserve_image_is_digest_only_and_absent_until_verified(monkeypatch, mapper_env):
-    """ADR-0006 (#956): the chart reference is repository@digest with no tag, and
-    releases that verified no OpenObserve image render no images.openobserve key."""
-    r, out = mapper_env()
-    assert r.returncode == 0, r.stderr
-    assert "openobserve" not in load_values(out)["images"]
-    digest = "sha256:" + "c" * 64
-    monkeypatch.setenv("IMAGE_DIGEST_OPENOBSERVE", digest)
+def test_openobserve_digest_never_enters_chart_values(monkeypatch, mapper_env):
+    """#956: like every chart image, OpenObserve renders repository and tag; the
+    verified digest from the identity check is not copied into the values."""
+    monkeypatch.setenv("IMAGE_DIGEST_OPENOBSERVE", "sha256:" + "c" * 64)
     r, out = mapper_env()
     assert r.returncode == 0, r.stderr
     image = load_values(out)["images"]["openobserve"]
-    assert image["digest"] == digest and "tag" not in image
+    assert "digest" not in image and image["tag"] == "v1.1.2"
     assert image["repository"].endswith("/openobserve/openobserve")
 
 

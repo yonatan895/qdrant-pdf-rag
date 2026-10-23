@@ -90,7 +90,7 @@ def test_recorded_decisions_match_the_maintainer_dispositions():
         assert entry["status"] == "approved" and entry["approval_ref"]
         bound = entry["bind"]["files"][0]
         assert bound["notice"] and bound["source_url"].startswith("https://raw.githubusercontent.com/")
-    for cid in ("image:qdrant", "image:jaeger", "image:ubi9-python-314-minimal", "image:oauth-proxy",
+    for cid in ("image:qdrant", "image:ubi9-python-314-minimal", "image:oauth-proxy",
                 "asset:ibm-plex", "model:bm25-sparse-weights"):
         assert by_id[cid]["status"] == "approved" and by_id[cid]["decision"]["owner"] == "yonatan895"
     assert by_id["asset:ibm-plex"]["class"] == "permissive"
@@ -99,6 +99,8 @@ def test_recorded_decisions_match_the_maintainer_dispositions():
     assert by_id["image:openobserve"]["class"] == "network-copyleft"
     assert by_id["image:openobserve"]["status"] == "approved" and by_id["image:openobserve"]["obligation"]
     assert by_id["image:otelcol-contrib"]["license_spdx"] == "Apache-2.0"
+    assert "image:jaeger" not in by_id  # OpenObserve is the only trace backend (#956)
+    assert by_id["image:openobserve"]["bind"]["images_txt"].endswith("openobserve:v1.1.2")
     assert by_id["image:oauth-proxy"]["decision"]["escalation"] == "maintainer -> platform team"
     assert by_id["model:bm25-sparse-weights"]["license_spdx"] == "Apache-2.0"
     rpm_list = REPO / "licenses/ubi9-python-314-minimal.rpms.txt"

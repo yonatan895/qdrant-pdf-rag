@@ -62,7 +62,6 @@ def bundle_dir(tmp_path):
         "bootstrap.sh": (extract_dir / "bootstrap.sh").read_bytes(),
         "repo.bundle": (extract_dir / "repo.bundle").read_bytes(),
         "qdrant-image.tar": b"mock-qdrant",
-        "jaeger-image.tar": b"mock-jaeger",
         "openobserve-image.tar": b"mock-openobserve",
         "otelcol-image.tar": b"mock-otelcol",
         f"app-ingest-{head}.tar": b"mock-ingest",

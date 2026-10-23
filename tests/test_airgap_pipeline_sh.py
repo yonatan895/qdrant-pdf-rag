@@ -143,7 +143,7 @@ def test_pipeline_dryrun_including_load(pipe_tree):
     r = _run_pipeline(pipe_tree, extra_env={"CORPUS_PVC": "test-corpus"})
     assert r.returncode == 0, r.stderr
     assert "STAGE 2/5: IMAGE LOADING & INTEGRITY" in r.stdout
-    assert "Loaded 6 images into reg.internal:5000 (dry-run)" in r.stdout
+    assert "Loaded 5 images into reg.internal:5000 (dry-run)" in r.stdout
     assert "PIPELINE DRY-RUN COMPLETE: rendering passed; live acceptance NOT RUN" in r.stdout
 
 
