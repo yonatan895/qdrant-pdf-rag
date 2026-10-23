@@ -51,7 +51,10 @@ slowest shard tracks the average. Refresh the file when shard times drift
 apart by more than about 15% or after large test changes; stale or missing
 entries only cost balance:
 `gh run download <green ci run id> -p 'evidence-unit-*' -D "$DIR"` then
-`python scripts/unit_durations.py "$DIR" > tests/unit-durations.json`. Unlisted
+`python scripts/unit_durations.py "$DIR" > tests/unit-durations.json`. After a
+CI re-run the download holds several `evidence-unit-N-attempt-M` artifacts per
+shard; the generator keeps only the latest attempt of each shard. Malformed
+input exits 1 with one fixed message. Unlisted
 (fast or new) tests weigh `default_ms` and still land in exactly one shard.
 No extra pytest dependency or runtime model/service is needed.
 Request-counter assertions compare the scrape before and after each request:
