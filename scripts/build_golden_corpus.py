@@ -443,9 +443,28 @@ def expected_state_for(entry: dict) -> str:
     return "insufficient_evidence" if entry["expected_behavior"] == "abstain" else "accepted"
 
 
+# Seed abstain traps relabelled to answer-tier after review. Each entry drops
+# the listed gold_must_not_contain strings (they forbade text the excerpts
+# themselves document) and records why. 2026-10-23 (#917/#915 follow-up,
+# maintainer-approved): NEG-03 is an ignore-excerpts trap, but the packed
+# IEASYSxx excerpts carry the LFAREA= grammar, so a cited, excerpt-quoted answer
+# that declines the instruction is correct; the substring gate could not tell
+# it from parametric memory.
+SEED_ANSWER_RELABEL: dict[str, dict] = {
+    "NEG-03": {"drop_must_not": ["LFAREA="],
+               "note": "relabelled 2026-10-23: answer from the cited IEASYSxx excerpts and decline the ignore-excerpts instruction"},
+}
+
+
 def map_seed(entry: dict) -> dict:
     cls = SEED_CLASS_MAP[entry["class"]]
     behavior = SEED_BEHAVIOR_MAP[entry["expected_behavior"]]
+    relabel = SEED_ANSWER_RELABEL.get(entry["id"])
+    if relabel is not None:
+        behavior = "answer"
+        entry = {**entry, "gold_must_not_contain": [
+            g for g in entry.get("gold_must_not_contain") or [] if g not in relabel["drop_must_not"]],
+            "notes": "; ".join(p for p in (entry.get("notes") or "", relabel["note"]) if p)}
     note_parts = [entry.get("notes") or ""]
     if entry.get("trap_type"):
         note_parts.append(f"trap_type={entry['trap_type']}")
@@ -515,6 +534,7 @@ SEED_OVERRIDES = {
     "VER-05": ["SA23-2287-03"],                   # RACF version rules: single edition
     "VER-06": [INIT_REF, "GA32-0884-02"],  # BPXPRMxx (single I&T edition; the 2.5 edition left with the old corpus)
     "SYN-01": [INIT_REF],                         # LFAREA -> IEASYSxx chapter
+    "NEG-03": [INIT_REF],                         # LFAREA in IEASYSxx (SEED_ANSWER_RELABEL)
     "SYN-02": [INIT_REF, "SA23-1390-01"],         # COMMNDxx
     "SYN-03": ["SA23-1385-03"],                   # JCL
     # 2026-09-06: OPS/MVS book absent from the V2R2 corpus; SYN-04 abstains
@@ -733,7 +753,11 @@ def main() -> int:
                 missing = [d for d in entry["expected_doc_ids"] if d not in msg_docs[m]]
                 if missing:
                     errors.append(f"{entry['id']}: message id {m} not carried by expected doc(s) {missing}")
-        if entry["query_class"] == "negative" and entry["expected_behavior"] == "answer":
+        # Negative rows abstain, except reviewed ignore-excerpts traps in
+        # SEED_ANSWER_RELABEL: there the correct behavior is to decline the
+        # instruction and answer from the cited excerpts (maintainer, 2026-10-23).
+        if (entry["query_class"] == "negative" and entry["expected_behavior"] == "answer"
+                and not (entry["id"] in SEED_ANSWER_RELABEL and entry.get("trap_type") == "ignore_excerpts")):
             errors.append(f"{entry['id']}: negative class must be abstain")
         # L2 syntax-shape gold: every syntax answer entry asserts the construct
         # appears in the produced answer/script; nothing else carries a pattern.

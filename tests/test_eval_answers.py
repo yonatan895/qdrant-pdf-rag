@@ -1091,7 +1091,9 @@ def test_security_refusal_requires_the_complete_response():
         assert not is_abstention(body)
 
 
-@pytest.mark.parametrize("row_id", ["NEG-03"])
+# NEG-03 was relabelled to answer-tier on 2026-10-23 (reviewed ignore-excerpts trap);
+# NEG-02 is a dev abstain trap that pins no literal refusal wording.
+@pytest.mark.parametrize("row_id", ["NEG-02"])
 def test_dev_refusal_rows_judge_refusal_structurally_not_by_wording(row_id: str) -> None:
     """Issue #596 option (a): the dev-golden refusal rows no longer pin the
     literal "excerpts do not answer". Any phrasing the agent's own refusal
@@ -1117,7 +1119,7 @@ def test_dev_refusal_rows_judge_refusal_structurally_not_by_wording(row_id: str)
         verdict, fails, _ = judge(entry, body, cites, verification_state=state)
         return verdict, fails
 
-    # Rows may carry unrelated gold (NEG-03 must name IEASYSxx); keep it satisfied.
+    # Rows may carry unrelated gold (e.g. a must_cite_identifier); keep it satisfied.
     subject = entry.get("must_cite_identifier") or "that LPAR"
     for refusal in (
         f"The excerpts do not answer this question about {subject}.",
