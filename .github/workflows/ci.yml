@@ -210,7 +210,8 @@ jobs:
         run: |
           set -o pipefail
           python scripts/ci_evidence.py --lane simulation --job-name sim --output "$RUNNER_TEMP/evidence-sim" --junit "$RUNNER_TEMP/sim.xml" -- \
-            python -m pytest -m integration --ignore=tests/test_load_tier.py --ignore=tests/test_ha_cluster.py -v -rs --junitxml="$RUNNER_TEMP/sim.xml" 2>&1 | tee sim-output.txt
+            python scripts/sim_parallel.py --shards 3 --junit "$RUNNER_TEMP/sim.xml" -- \
+            python -m pytest -m integration --ignore=tests/test_load_tier.py --ignore=tests/test_ha_cluster.py -v -rs 2>&1 | tee sim-output.txt
           if grep -qE '[1-9][0-9]* skipped' sim-output.txt; then
             echo "simulation tests were skipped — coverage must not silently vanish" >&2
             exit 1
