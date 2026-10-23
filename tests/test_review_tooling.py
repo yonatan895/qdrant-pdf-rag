@@ -2728,7 +2728,8 @@ class TestVerifierUpdateDecision(unittest.TestCase):
                               'actor': {'login': 'stranger', 'type': 'User'}, 'conclusion': 'skipped'}]
         self.assertEqual(latest_decision(api, api.candidate)['id'], 900)
         api.runs[1]['actor'] = {'login': 'yonatan895', 'type': 'User'}
-        api.get = (lambda original: lambda e: api.runs[1] if e.endswith('/950') else original(e))(api.get)
+        original_get = api.get
+        api.get = lambda e: api.runs[1] if e.endswith('/950') else original_get(e)
         self.assertEqual(latest_decision(api, api.candidate)['id'], 950)
 
     def test_comment_grammar_is_strict(self):
