@@ -1,18 +1,20 @@
 name: ha
 on:
   pull_request:
-  push:
-    branches: [main]
+  schedule:
+    - cron: "41 1 * * *" # nightly on main, UTC, off the hour
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
   group: ha-${{ github.ref || github.run_id }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   select:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -44,7 +46,9 @@ jobs:
   # GitHub-only: air-gap GitLab runners cannot pull Docker Hub.
   ha:
     needs: select
-    if: contains(fromJSON(needs.select.outputs.lanes), 'ha')
+    if: >-
+      !cancelled() && (github.event_name != 'pull_request' ||
+      (needs.select.result == 'success' && contains(fromJSON(needs.select.outputs.lanes), 'ha')))
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -61,6 +65,11 @@ jobs:
         run: docker version
       # Explicit preparation (verification never installs): the lane runs on
       # the explicitly prepared .venv/bin/python.
+      - name: Restore verified wheelhouse (exact lock key; acquisition still re-verifies every digest)
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: .tools/python-wheels/dev
+          key: wheelhouse-dev-${{ runner.os }}-${{ hashFiles('requirements.dev.lock.txt', 'locks/cp314-linux-x86_64.json') }}
       - run: python scripts/prepare_python.py --venv .venv --wheelhouse .tools/python-wheels/dev --connected --download-workers 8
       - run: sh scripts/tools/install-helm.sh
       - run: echo "$GITHUB_WORKSPACE/.tools/bin" >> "$GITHUB_PATH"

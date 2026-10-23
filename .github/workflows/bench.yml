@@ -1,11 +1,5 @@
 name: bench
 on:
-  push:
-    branches: [main]
-    paths-ignore:
-      - "**/*.md"
-      - "**/*.markdown"
-      - ".agents/**"
   schedule:
     - cron: "37 3 * * *" # nightly, off the hour
   workflow_dispatch:
@@ -35,6 +29,11 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0; Python packages use the target hash lock below
         with:
           python-version: "3.14"
+      - name: Restore verified wheelhouse (exact lock key; acquisition still re-verifies every digest)
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: .tools/python-wheels/dev
+          key: wheelhouse-dev-${{ runner.os }}-${{ hashFiles('requirements.dev.lock.txt', 'locks/cp314-linux-x86_64.json') }}
       - run: python scripts/prepare_python.py --python "$(command -v python)" --wheelhouse .tools/python-wheels/dev --connected --download-workers 8
       - name: Prepare approved Qdrant image explicitly
         run: python scripts/qdrant_pin.py --prepare

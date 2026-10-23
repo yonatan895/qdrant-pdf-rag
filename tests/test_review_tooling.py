@@ -807,12 +807,16 @@ class TestTaskCiConsumers(unittest.TestCase):
 
         changes = ("Taskfile.yml", "taskfiles/quality.yml", "taskfiles/airgap.yml",
                    "scripts/tools/run-task.sh", "scripts/tools/task-pin.txt")
-        for workflow in ("agent-context.yml", "load.yml"):
+        # The pre-merge gate is unchanged for both. Post-merge, the light context
+        # lane stays on push; load runs nightly on main plus dispatch (maintainer
+        # decision 2026-10-23), so a main SHA is not individually load-tested.
+        expected = {"agent-context.yml": ("pull_request", "push"), "load.yml": ("pull_request", "schedule")}
+        for workflow, events in expected.items():
             document = yaml.safe_load((self.root / ".github/workflows" / workflow).read_text())
             triggers = document.get("on", document.get(True))
-            self.assertIn("pull_request", triggers)
-            self.assertIn("push", triggers)
-            for event in ("pull_request", "push"):
+            self.assertNotIn("push", triggers) if workflow == "load.yml" else None
+            for event in events:
+                self.assertIn(event, triggers)
                 self.assertFalse((triggers[event] or {}).get("paths"))
                 self.assertFalse((triggers[event] or {}).get("paths-ignore"))
         for path in changes:
