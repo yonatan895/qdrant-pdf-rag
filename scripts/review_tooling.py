@@ -9,6 +9,7 @@ Provides:
 from __future__ import annotations
 
 import argparse
+import ast
 import dataclasses
 import enum
 import fnmatch
@@ -38,7 +39,30 @@ PROSE_PATTERNS = [
     ".github/pull_request_template.md",
     ".github/ISSUE_TEMPLATE/**",
     "evals/README.md",
+    "site/**",  # static project site (#888): docs-like, no service or test obligation (#588)
 ]
+
+def _rule_module_paths() -> list[str]:
+    """Repo paths of the payload-producing rule modules, read from the owner
+    tuple `_RULE_MODULES` without importing the package (this script runs
+    before any install). A module added there selects eval_retrieval (#588)."""
+    root = pathlib.Path(__file__).resolve().parent.parent
+    tree = ast.parse((root / "src/mainframe_rag/ingest/rules_version.py").read_text(encoding="utf-8"))
+    for node in tree.body:
+        targets: list[ast.expr]
+        value: ast.expr | None
+        if isinstance(node, ast.AnnAssign):
+            targets, value = [node.target], node.value
+        elif isinstance(node, ast.Assign):
+            targets, value = node.targets, node.value
+        else:
+            continue
+        if value is not None and any(getattr(t, "id", "") == "_RULE_MODULES" for t in targets):
+            return ["src/mainframe_rag/" + rel for rel in ast.literal_eval(value)]
+    raise RuntimeError("_RULE_MODULES not found in rules_version.py")
+
+
+RULE_MODULE_PATHS = _rule_module_paths()
 
 TOOLING_PATTERNS = [
     ".agents/qdrant-skills-provenance.md",
@@ -955,10 +979,9 @@ def required_lanes(manifest: dict[str, Any]) -> set[str]:
     if (profile_name == ProfileName.FULL.value and (not paths or
             any(category in matched_cats for category in ("unclassified", "unclassified_empty")))) or any(
             _match_any(path, ["src/mainframe_rag/retrieve/**", "src/mainframe_rag/ingest/embed.py",
-                              "src/mainframe_rag/ingest/chunk.py", "src/mainframe_rag/ingest/identity.py",
-                              "src/mainframe_rag/ingest/ibm_pdf.py", "src/mainframe_rag/ingest/chrome.py",
-                              "src/mainframe_rag/ingest/classify.py", "src/mainframe_rag/ingest/context.py",
-                              "src/mainframe_rag/ingest/representation.py", "src/mainframe_rag/ingest/rules_version.py"])
+                              "src/mainframe_rag/ingest/context.py",
+                              "src/mainframe_rag/ingest/representation.py", "src/mainframe_rag/ingest/rules_version.py",
+                              *RULE_MODULE_PATHS])
             for path in paths):
         required_lanes.add("eval_retrieval")
     if any(_match_any(path, ["scripts/verify_placement.py", "tests/test_placement.py",
