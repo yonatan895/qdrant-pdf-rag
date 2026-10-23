@@ -1,6 +1,6 @@
 {{/*
 OpenObserve OSS Deployment (issue #956, ADR-0006). Rendered only when
-tracing.backend=openobserve. Local mode on one RWO block volume, replicas 1
+the bundled-backend condition (tracing on, empty endpoint). Local mode on one RWO block volume, replicas 1
 with Recreate (single writer), ClusterIP only, no Route. Project UID/volume
 group from restricted-v2 (no fixed IDs). Credentials come from a Secret.
 */}}

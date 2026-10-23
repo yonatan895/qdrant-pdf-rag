@@ -18,81 +18,58 @@ http://{{ required "qdrantRelease is required" .Values.qdrantRelease }}:6333
 {{- end -}}
 
 {{/*
-Export destination (issue #568). An empty endpoint selects the bundled
-Jaeger Service and is valid only while that backend renders; with the
-bundled backend disabled the operator must name a collector (any http(s)
-URL, the former hostname included) or turn tracing off.
+Export destination. An empty tracing.endpoint selects the bundled OpenObserve
+(ADR-0006); a set endpoint is the generic OTLP/HTTP escape hatch (external
+collector, no bundled backend and no collector). Tracing off exports nowhere.
 */}}
 {{- define "mainframe-rag.otelEndpoint" -}}
 {{- if .Values.tracing.enabled -}}
 {{- if .Values.tracing.endpoint -}}
 {{ .Values.tracing.endpoint }}
-{{- else if include "mainframe-rag.jaegerEnabled" . -}}
-http://jaeger:4318
-{{- else if include "mainframe-rag.openobserveEnabled" . -}}
-http://openobserve:5080/api/default
 {{- else -}}
-{{- fail "tracing.jaeger.enabled=false needs an intentional trace destination: set tracing.endpoint to the external collector's http(s) URL, or tracing.enabled=false" -}}
+http://openobserve:5080/api/default
 {{- end -}}
 {{- end -}}
 {{- end -}}
 
 {{/*
-Decoupled backend choices (issue #529 OBS-2): whether to deploy the bundled
-Jaeger and whether to render the ServiceMonitor are independent of export
-and exposition. A null sub-flag follows its parent leg (the historical
-coupling); an explicit boolean overrides. kindIs (not default) reads the
-override: Helm's default treats an explicit false as empty. Contradictions
-fail the render before any mutation. Renders "true" or nothing so callers
-use {{- if include ... }} directly (a "false" string would be truthy).
-*/}}
-{{- define "mainframe-rag.jaegerEnabled" -}}
-{{- $enabled := .Values.tracing.enabled -}}
-{{- if eq (include "mainframe-rag.tracingBackend" .) "openobserve" -}}
-{{- if eq (.Values.tracing.jaeger.enabled | toString) "true" -}}
-{{- fail "tracing.jaeger.enabled=true contradicts tracing.backend=openobserve: one bundled trace backend" -}}
-{{- end -}}
-{{- $enabled = false -}}
-{{- end -}}
-{{- if kindIs "bool" .Values.tracing.jaeger.enabled -}}
-{{- $enabled = .Values.tracing.jaeger.enabled -}}
-{{- end -}}
-{{- if and $enabled (not .Values.tracing.enabled) -}}
-{{- fail "tracing.jaeger.enabled=true requires tracing.enabled=true: refusing to deploy a bundled Jaeger nothing exports to" -}}
-{{- end -}}
-{{- if $enabled -}}true{{- end -}}
-{{- end -}}
-
-{{/*
-Trace backend selector (issue #956). Default jaeger; the schema enum is the
-only other value. A missing key reads as jaeger so existing values keep
-rendering byte-identically.
-*/}}
-{{- define "mainframe-rag.tracingBackend" -}}
-{{- .Values.tracing.backend | default "jaeger" -}}
-{{- end -}}
-
-{{/*
-Bundled OpenObserve (issue #956, ADR-0006): "true" or nothing. Needs tracing
-on (nothing else exports to it) and an empty tracing.endpoint (#568 rule:
-a bundled backend only when the endpoint is the bundled one).
+Bundled OpenObserve: "true" or nothing (a "false" string would be truthy).
+Needs tracing on and an empty tracing.endpoint.
 */}}
 {{- define "mainframe-rag.openobserveEnabled" -}}
-{{- if and (eq (include "mainframe-rag.tracingBackend" .) "openobserve") .Values.tracing.enabled -}}
-{{- if .Values.tracing.endpoint -}}
-{{- fail "tracing.backend=openobserve renders the bundled backend: leave tracing.endpoint empty" -}}
-{{- end -}}
-true
-{{- end -}}
+{{- if and .Values.tracing.enabled (not .Values.tracing.endpoint) -}}true{{- end -}}
 {{- end -}}
 
 {{- define "mainframe-rag.openobserveSecretName" -}}
-{{ required "openobserve.credentialsSecretName is required (Secret with root-user-email, root-user-password, otlp-headers)" .Values.openobserve.credentialsSecretName }}
+{{ required "openobserve.credentialsSecretName is required (Secret with root-user-email, root-user-password, otlp-headers, metrics-auth)" .Values.openobserve.credentialsSecretName }}
 {{- end -}}
 
 {{/* Digest-only image reference; a tag is never accepted (ADR-0006). */}}
 {{- define "mainframe-rag.openobserveImage" -}}
 {{ required "images.openobserve.repository is required" .Values.images.openobserve.repository }}@{{ required "images.openobserve.digest is required: set the pinned sha256 digest (pin PR, issue #956)" .Values.images.openobserve.digest }}
+{{- end -}}
+
+{{/*
+Metrics collector: "true" or nothing. Null metrics.collector.enabled follows
+(bundled OpenObserve and metrics.enabled); an explicit boolean overrides, and
+true without both prerequisites fails the render (a collector nothing scrapes
+or nothing receives).
+*/}}
+{{- define "mainframe-rag.otelcolEnabled" -}}
+{{- $prereq := and .Values.metrics.enabled (include "mainframe-rag.openobserveEnabled" .) -}}
+{{- $enabled := $prereq -}}
+{{- if kindIs "bool" .Values.metrics.collector.enabled -}}
+{{- $enabled = .Values.metrics.collector.enabled -}}
+{{- end -}}
+{{- if and $enabled (not $prereq) -}}
+{{- fail "metrics.collector.enabled=true requires metrics.enabled=true and the bundled OpenObserve (tracing.enabled=true, empty tracing.endpoint)" -}}
+{{- end -}}
+{{- if $enabled -}}true{{- end -}}
+{{- end -}}
+
+{{/* Digest-only collector image reference (ADR-0006). */}}
+{{- define "mainframe-rag.otelcolImage" -}}
+{{ required "images.otelcol.repository is required" .Values.images.otelcol.repository }}@{{ required "images.otelcol.digest is required: set the pinned sha256 digest (pin PR, issue #956)" .Values.images.otelcol.digest }}
 {{- end -}}
 
 {{- define "mainframe-rag.serviceMonitorEnabled" -}}

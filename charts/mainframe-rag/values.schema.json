@@ -10,6 +10,16 @@
       "minLength": 1,
       "not": { "pattern": "__[A-Z0-9_]+__" }
     },
+    "digestImage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository"],
+      "properties": {
+        "repository": { "$ref": "#/definitions/nonPlaceholderString" },
+        "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "pullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"] }
+      }
+    },
     "image": {
       "type": "object",
       "additionalProperties": false,
@@ -55,22 +65,13 @@
     "images": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["agent", "ingest", "jaeger", "oauthProxy"],
+      "required": ["agent", "ingest", "oauthProxy"],
       "properties": {
         "agent": { "$ref": "#/definitions/appImage" },
         "ingest": { "$ref": "#/definitions/appImage" },
-        "jaeger": { "$ref": "#/definitions/image" },
         "oauthProxy": { "$ref": "#/definitions/image" },
-        "openobserve": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["repository"],
-          "properties": {
-            "repository": { "$ref": "#/definitions/nonPlaceholderString" },
-            "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
-            "pullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"] }
-          }
-        }
+        "openobserve": { "$ref": "#/definitions/digestImage" },
+        "otelcol": { "$ref": "#/definitions/digestImage" }
       }
     },
     "qdrantRelease": {
@@ -205,14 +206,6 @@
       "properties": {
         "enabled": { "type": "boolean" },
         "endpoint": { "type": "string" },
-        "backend": { "type": "string", "enum": ["jaeger", "openobserve"] },
-        "jaeger": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "enabled": { "type": ["boolean", "null"] }
-          }
-        },
         "deploymentEnvironment": { "type": "string" },
         "serviceName": {
           "type": "string",
@@ -256,6 +249,13 @@
       "required": ["enabled"],
       "properties": {
         "enabled": { "type": "boolean" },
+        "collector": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": ["boolean", "null"] }
+          }
+        },
         "serviceMonitor": {
           "type": "object",
           "additionalProperties": false,

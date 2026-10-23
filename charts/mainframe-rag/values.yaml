@@ -43,17 +43,16 @@ images:
     repository: qdrant-pdf-rag-ingest
     tag: "0000000000000000000000000000000000000000"
     pullPolicy: IfNotPresent
-  # Jaeger all-in-one (upstream tag 2.20.0; digest pinned in images.txt and
-  # enforced at pack/load, not in the manifest).
-  jaeger:
-    repository: jaegertracing/jaeger
-    tag: v2.20.0
-    pullPolicy: IfNotPresent
-  # OpenObserve OSS (issue #956, ADR-0006). Used only with
-  # tracing.backend=openobserve. Digest-only: no tag; render fails while the
-  # digest is unset (the pin lands through its own pin PR).
+  # OpenObserve OSS (issue #956, ADR-0006), the bundled trace/metrics backend.
+  # Digest-only: no tag; render fails while the digest is unset (the pin
+  # lands through its own pin PR and the operator mapping).
   openobserve:
     repository: openobserve/openobserve
+    pullPolicy: IfNotPresent
+  # Stateless otelcol-contrib that scrapes the agent /metrics and forwards to
+  # OpenObserve. Digest-only, same fail-closed rule.
+  otelcol:
+    repository: otel/opentelemetry-collector-contrib
     pullPolicy: IfNotPresent
   # OAuth proxy sidecar for the optional console Route (ADR-0004). Ref is the
   # internal retag (load.sh pushes the packed image under
@@ -114,35 +113,21 @@ gateway:
   caConfigMapName: ""
 
 tracing:
-  # Unset-equivalent default: enabled with the in-cluster Jaeger endpoint.
-  # Disabled renders an empty OTEL_EXPORTER_OTLP_ENDPOINT and skips the
-  # Jaeger resources. Custom collectors set a full http(s) URL. An empty
-  # endpoint means "the bundled Jaeger" (http://jaeger:4318) and is only
-  # valid while the bundled Jaeger renders (issue #568).
+  # Enabled with an empty endpoint renders the bundled OpenObserve and points
+  # the agent at it. A set endpoint is the generic OTLP/HTTP escape hatch: an
+  # external collector, no bundled backend. Disabled renders an empty
+  # OTEL_EXPORTER_OTLP_ENDPOINT and no backend.
   enabled: true
   endpoint: ""
-  # jaeger (default) or openobserve (ADR-0006, issue #956). Flipping the
-  # default is a separate approved concern.
-  backend: jaeger
-  jaeger:
-    # Bundled Jaeger all-in-one backend (issue #529 OBS-2). Null (default)
-    # follows tracing.enabled, preserving the historical coupling. Set false
-    # to export to an external collector without the bundled backend; that
-    # requires an explicit tracing.endpoint (any http(s) URL, the former
-    # hostname included) or tracing.enabled=false, never the empty default;
-    # setting true while tracing.enabled is false is rejected (a backend
-    # nothing exports to). Explicit values must be booleans, not truthy
-    # strings (enforced by values.schema.json).
-    enabled: null
   # Optional deploy identity; empty renders an empty string (no attribute).
   deploymentEnvironment: ""
   # Optional service name; empty strips the entry entirely so the agent
   # default stands (a blank value would override it with "").
   serviceName: ""
 
-# Bundled OpenObserve (tracing.backend=openobserve). Credentials are only
-# ever a Secret reference: keys root-user-email, root-user-password and
-# otlp-headers (the full "Authorization=Basic <b64>" header value).
+# Bundled OpenObserve. Credentials are only ever a Secret reference: keys
+# root-user-email, root-user-password, otlp-headers and metrics-auth (each
+# header value is the full "Basic <b64>" form the consumer sends).
 openobserve:
   credentialsSecretName: ""
   storage:
@@ -152,6 +137,11 @@ metrics:
   # False renders METRICS_ENABLED="false" (/metrics 404s) and skips the
   # ServiceMonitor. True serves exposition and renders the monitor for UWM.
   enabled: false
+  collector:
+    # Metrics collector (otelcol-contrib -> OpenObserve). Null follows
+    # metrics.enabled with the bundled OpenObserve; false skips it (platform
+    # forwarding); true without both prerequisites is rejected.
+    enabled: null
   serviceMonitor:
     # UWM ServiceMonitor for the agent /metrics (issue #529 OBS-2). Null
     # (default) follows metrics.enabled. Set false to serve exposition
@@ -185,7 +175,7 @@ route:
 # namespace, the monitoring namespaces (when metrics.enabled) and the
 # namespaces listed in allowedNamespaces; the OAuth port (8443, route.enabled)
 # is additionally reachable from the OpenShift router. Ingress only; Qdrant,
-# Jaeger and the ingest Job are not selected. Policies are additive: whether a
+# Qdrant and the ingest Job are not selected. Policies are additive: whether a
 # site's own policies widen this is site acceptance evidence, not a chart
 # claim. enabled=false renders no policy (and allowedNamespaces must be empty).
 # allowedNamespaces: DNS-1123 namespace names (matched by the immutable
@@ -210,7 +200,7 @@ feedback:
   storageSize: 10Gi
   retentionDays: 180
 
-# RWO block storage class for Jaeger Badger, ingest-work scratch and the
+# RWO block storage class for OpenObserve, ingest-work scratch and the
 # feedback store.
 # NFS refusal stays owned by shell preflight; schema additionally rejects
 # nfs-looking names fail-closed.

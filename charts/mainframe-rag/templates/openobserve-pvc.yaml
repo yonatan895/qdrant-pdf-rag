@@ -1,6 +1,6 @@
 {{/*
 OpenObserve data PVC (issue #956, ADR-0006). Single-node RWO block volume;
-NFS refused by shell preflight and schema. Kept on uninstall like Jaeger's.
+NFS refused by shell preflight and schema. Kept on uninstall.
 */}}
 {{- if include "mainframe-rag.openobserveEnabled" . }}
 apiVersion: v1
