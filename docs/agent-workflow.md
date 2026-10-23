@@ -303,6 +303,24 @@ Actions → **Verifier update decision** → Run workflow, selects **main**, ent
 the PR number, leaves **kind: implementation**, and selects **approve**. No SHA
 or JSON is entered manually.
 Agents must never dispatch or rerun this workflow on the maintainer's behalf.
+
+**PR comment path.** The same decision can be made on the PR itself: the
+maintainer comments `/verifier approve <head-sha> [catalogue-anchors]` (at
+least 7 lowercase hex characters of the head they reviewed; kind defaults to
+implementation) or `/verifier revoke [catalogue-anchors]`. The same workflow
+file runs on `issue_comment` **created** from main, so PR code cannot change
+it and is never checked out. It acts only for a `yonatan895` comment with
+author_association OWNER on a PR, re-reads the live comment (unedited, same PR,
+same text), and refuses unless the named SHA is the PR's current head, so a
+push between viewing and commenting is not approved. The recorded evidence is
+the dispatch record plus a `comment` binding (id, creation time, head SHA);
+the consumer re-reads that comment and requires it to still match the current
+head. Because the comment itself updates the PR timestamp, the head-SHA
+binding replaces the dispatch path's "updated before dispatch" rule. The run
+reacts to the comment and replies with the recorded SHA; completing it
+re-evaluates candidate-acceptance exactly as a dispatched run does. Deleting
+or editing the comment withdraws the approval. Comment runs by anyone else are
+skipped and ignored. Dispatch remains the fallback.
 The workflow does not mark ready, submit a PR review, merge, or change settings.
 
 Approved-main code reads the current same-repository PR and records its exact

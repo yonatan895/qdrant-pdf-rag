@@ -28,6 +28,11 @@ MAINTAINER = 'yonatan895'
 # decisions have a separate namespace and retain every approved obligation.
 CATALOGUE = 'tests/hazards/critical.json'
 FIXED_POLICY = {CATALOGUE}
+EVENTS = ('workflow_dispatch', 'issue_comment')
+# Grammar of the PR comment decision. Approvals must name the head the maintainer
+# reviewed; revocations need no SHA. Anything else is refused, never guessed.
+COMMAND = re.compile(r'/verifier (?:(?P<approve>approve) (?P<sha>[0-9a-f]{7,40})|(?P<revoke>revoke))'
+                     r'(?: (?P<kind>catalogue-anchors|implementation))?')
 
 
 class VerifierApprovalRequired(ValueError):
@@ -85,10 +90,16 @@ def _namespace(kind: str) -> tuple[str, str]:
 
 def latest_decision(api: Any, candidate: dict, *, kind: str = 'implementation') -> dict | None:
     title, _ = _namespace(kind)
-    runs = paginate(api.get, api.prefix + 'actions/workflows/' + WORKFLOW + '/runs?event=workflow_dispatch',
-                    'workflow_runs')
+    runs: dict[int, dict] = {}
+    for event in EVENTS:
+        for item in paginate(api.get, api.prefix + 'actions/workflows/' + WORKFLOW + f'/runs?event={event}',
+                             'workflow_runs'):
+            runs[item['id']] = item
     titles = {f"{title} PR {candidate['number']}: {decision}" for decision in ('approve', 'revoke')}
-    matches = [r for r in runs if r.get('display_title') in titles]
+    # A comment run by anyone else is a skipped no-op and must not shadow the
+    # maintainer's decision; the decision itself is validated again below.
+    matches = [r for r in runs.values() if r.get('display_title') in titles
+               and (r.get('event') != 'issue_comment' or (r.get('actor') or {}).get('login') == MAINTAINER)]
     if not matches:
         return None
     # A newer pending, failed, cancelled or revoked decision never falls back.
@@ -116,6 +127,39 @@ def _bound_candidate(api: Any, candidate: dict, recorded: str) -> dict:
     return {**candidate, 'execution_sha': recorded}
 
 
+def parse_command(body: Any) -> tuple[str, str, str | None]:
+    """Strictly parse a decision comment into (decision, kind, head sha prefix)."""
+    require(isinstance(body, str))
+    match = COMMAND.fullmatch(body.strip())
+    require(match is not None)
+    assert match is not None
+    decision = 'approve' if match['approve'] else 'revoke'
+    return decision, match['kind'] or 'implementation', match['sha']
+
+
+def _require_maintainer_comment(api: Any, number: int, comment_id: int) -> dict:
+    """Re-read the comment: maintainer-authored, OWNER, on this PR, and unedited."""
+    comment = api.get(api.prefix + f'issues/comments/{comment_id}')
+    require(comment['id'] == comment_id and comment['user']['login'] == MAINTAINER
+            and comment['user']['type'] == 'User' and comment['author_association'] == 'OWNER'
+            and comment['issue_url'].endswith('/' + api.prefix + f'issues/{number}')
+            and comment['created_at'] == comment['updated_at'])
+    return comment
+
+
+def _comment_binding(api: Any, candidate: dict, binding: Any, run: dict, kind: str) -> dict:
+    """Validate the recorded comment against the live comment and current head."""
+    require(isinstance(binding, dict) and set(binding) == {'id', 'created_at', 'head_sha'}
+            and type(binding['id']) is int and binding['id'] > 0)
+    live = _require_maintainer_comment(api, candidate['number'], binding['id'])
+    decision, command_kind, prefix = parse_command(live['body'])
+    require(decision == 'approve' and command_kind == kind and prefix is not None
+            and binding['head_sha'].startswith(prefix) and binding['head_sha'] == candidate['head_sha']
+            and live['created_at'] == binding['created_at'])
+    require(datetime.fromisoformat(binding['created_at']) <= datetime.fromisoformat(run['created_at']))
+    return binding
+
+
 def validated_decision(api: Any, candidate: dict, inputs: dict[str, str], *,
                        kind: str = 'implementation', catalogue: dict | None = None) -> dict:
     title, artifact_name = _namespace(kind)
@@ -127,7 +171,7 @@ def validated_decision(api: Any, candidate: dict, inputs: dict[str, str], *,
     run = latest_decision(api, candidate, kind=kind)
     require(run is not None)
     assert run is not None
-    require(run['event'] == 'workflow_dispatch' and run['path'] == '.github/workflows/' + WORKFLOW)
+    require(run['event'] in EVENTS and run['path'] == '.github/workflows/' + WORKFLOW)
     require(run['head_sha'] == candidate['base_sha'] and run['head_branch'] == 'main')
     require(run['repository']['id'] == candidate['repository_id']
             and run['repository']['full_name'] == candidate['repository'])
@@ -159,11 +203,20 @@ def validated_decision(api: Any, candidate: dict, inputs: dict[str, str], *,
     # PR. Strict ordering rejects ambiguous same-second updates as well.
     updated = datetime.fromisoformat(record['pr_updated_at'])
     dispatched = datetime.fromisoformat(run['created_at'])
-    require(updated.tzinfo is not None and dispatched.tzinfo is not None and updated < dispatched)
+    require(updated.tzinfo is not None and dispatched.tzinfo is not None)
+    comment = None
+    if run['event'] == 'workflow_dispatch':
+        require(updated < dispatched)
+    else:
+        # The comment itself bumps the PR's updated_at, so the exact head named in
+        # the maintainer's comment (checked against the live comment) is the binding.
+        comment = _comment_binding(api, candidate, record.get('comment'), run, kind)
     bound = _bound_candidate(api, candidate, record['candidate']['execution_sha'])
     expected = {'schema_version': 1, 'candidate': bound, 'inputs': inputs,
                 'pr_updated_at': record['pr_updated_at'],
                 'decision': 'approve', 'run_id': run['id'], 'run_attempt': run['run_attempt']}
+    if comment is not None:
+        expected['comment'] = comment
     identity = {'run_id': run['id'], 'run_attempt': run['run_attempt'], 'inputs': inputs}
     if kind == 'catalogue-anchors':
         expected.update(schema_version=2, kind=kind, catalogue=catalogue)
@@ -208,7 +261,8 @@ def approved_inputs(api: Any, candidate: dict, expected: dict[str, str]) -> tupl
 
 
 def record_decision(api: Any, number: int, decision: str, root: Path, run_id: int, attempt: int, *,
-                    kind: str = 'implementation') -> dict:
+                    kind: str = 'implementation', comment: dict | None = None,
+                    head_prefix: str | None = None) -> dict:
     import subprocess
 
     from scripts.acceptance import candidate_identity, require_current_base, verification_inputs
@@ -224,6 +278,12 @@ def record_decision(api: Any, number: int, decision: str, root: Path, run_id: in
             == candidate['base_sha'])
     require(not subprocess.check_output(['git', 'status', '--porcelain', '--untracked-files=no'],
                                         cwd=root, text=True).strip())
+    if comment is not None:
+        # Comment path: the approved head is the one the maintainer named, never
+        # whatever the PR happens to be at job time.
+        require(decision == 'revoke' or (head_prefix is not None
+                                         and candidate['head_sha'].startswith(head_prefix)))
+        comment = {**comment, 'head_sha': candidate['head_sha']}
     commit = api.get(api.prefix + 'commits/' + candidate['execution_sha'])
     require(commit['sha'] == candidate['execution_sha']
             and [p['sha'] for p in commit['parents']] == [candidate['base_sha'], candidate['head_sha']])
@@ -241,7 +301,34 @@ def record_decision(api: Any, number: int, decision: str, root: Path, run_id: in
               'pr_updated_at': pr['updated_at'], 'run_id': run_id, 'run_attempt': attempt}
     if kind == 'catalogue-anchors':
         record.update(schema_version=2, kind=kind, catalogue=catalogue)
+    if comment is not None:
+        record['comment'] = comment
     return record
+
+
+def comment_request(api: Any, event: dict) -> tuple[int, str, str, str | None, dict]:
+    """Authorize a created PR comment event: (pr, decision, kind, sha prefix, comment)."""
+    comment, issue = event['comment'], event['issue']
+    require(event['action'] == 'created' and 'pull_request' in issue)
+    require(comment['user']['login'] == MAINTAINER and comment['user']['type'] == 'User'
+            and comment['author_association'] == 'OWNER' and event['sender']['login'] == MAINTAINER)
+    require(type(issue['number']) is int and issue['number'] > 0 and type(comment['id']) is int)
+    decision, kind, prefix = parse_command(comment['body'])
+    live = _require_maintainer_comment(api, issue['number'], comment['id'])
+    require(live['body'] == comment['body'])
+    return (issue['number'], decision, kind, prefix,
+            {'id': comment['id'], 'created_at': live['created_at']})
+
+
+def _emit(**outputs: str) -> None:
+    import os
+
+    path = os.environ.get('GITHUB_OUTPUT')
+    if path:
+        with open(path, 'a') as handle:
+            for key, value in outputs.items():
+                require(re.fullmatch('[a-z0-9-]*', value) is not None)
+                handle.write(f'{key}={value}\n')
 
 
 def main() -> None:
@@ -251,21 +338,37 @@ def main() -> None:
     from scripts.acceptance import GitHub
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--pr', required=True)
-    parser.add_argument('--decision', choices=('approve', 'revoke'), required=True)
+    parser.add_argument('--pr')
+    parser.add_argument('--decision', choices=('approve', 'revoke'))
     parser.add_argument('--kind', choices=('implementation', 'catalogue-anchors'), default='implementation')
+    parser.add_argument('--from-comment-event', action='store_true')
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
-    require(args.pr.isascii() and args.pr.isdecimal() and str(int(args.pr)) == args.pr and int(args.pr) > 0)
-    require(os.environ['GITHUB_EVENT_NAME'] == 'workflow_dispatch'
-            and os.environ['GITHUB_REF'] == 'refs/heads/main'
+    require(os.environ['GITHUB_REF'] == 'refs/heads/main'
             and os.environ['GITHUB_ACTOR'] == MAINTAINER
             and os.environ['GITHUB_TRIGGERING_ACTOR'] == MAINTAINER)
-    record = record_decision(GitHub(os.environ['GITHUB_REPOSITORY']), int(args.pr), args.decision,
-                             Path.cwd(), int(os.environ['GITHUB_RUN_ID']), int(os.environ['GITHUB_RUN_ATTEMPT']),
-                             kind=args.kind)
+    api = GitHub(os.environ['GITHUB_REPOSITORY'])
+    run_id, attempt = int(os.environ['GITHUB_RUN_ID']), int(os.environ['GITHUB_RUN_ATTEMPT'])
+    extra: dict[str, Any] = {}
+    if args.from_comment_event:
+        require(os.environ['GITHUB_EVENT_NAME'] == 'issue_comment' and args.pr is None and args.decision is None)
+        # The comment text is read from the event file by this script only; it is
+        # never expanded into a shell or an environment variable.
+        number, decision, kind, prefix, comment = comment_request(
+            api, json.loads(Path(os.environ['GITHUB_EVENT_PATH']).read_text()))
+        extra = {'comment': comment, 'head_prefix': prefix}
+    else:
+        require(os.environ['GITHUB_EVENT_NAME'] == 'workflow_dispatch')
+        require(args.pr is not None and args.decision is not None
+                and args.pr.isascii() and args.pr.isdecimal() and str(int(args.pr)) == args.pr and int(args.pr) > 0)
+        number, decision, kind = int(args.pr), args.decision, args.kind
+    record = record_decision(api, number, decision, Path.cwd(), run_id, attempt, kind=kind, **extra)
     require(not args.output.exists())
     args.output.write_text(json.dumps(record, sort_keys=True) + '\n')
+    if args.from_comment_event:
+        _emit(kind=kind, decision=decision, head_sha=record['candidate']['head_sha'])
+    else:
+        _emit(kind=kind)
 
 
 if __name__ == '__main__':
