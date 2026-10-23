@@ -1013,7 +1013,11 @@ reports reject any skipped or xfailed test (`scripts/check_junit_clean.py`);
 `tests/test_ci_gitlab_parity.py` pins the correspondence and failure propagation. Job meaning stays aligned across the two files; only e2e-scale jobs
 live in `.github/workflows/e2e.yml`.
 
-- GitHub product `ci.yml`/`e2e.yml` run on every PR/push with no markdown-only
+- GitHub product `ci.yml` runs on every PR/push; `e2e.yml` runs its light jobs
+  on every PR/push, while the heavy jobs (`airgap-package`, `airgap-acceptance`,
+  the `kind-live-rehearsal` matrix, `airgap-rehearsal`) run only nightly on `main`
+  HEAD (`schedule`) or by `workflow_dispatch` (use it on a branch for Kind-lane
+  PRs). Neither is gated by a markdown-only
   ignore (only `bench.yml` carries a `paths-ignore` for docs). The
   `agent-context.yml` lane likewise runs on every PR/push with no `paths:`
   filter: it always runs `qa:context` plus the dependency-free context
@@ -1047,6 +1051,17 @@ live in `.github/workflows/e2e.yml`.
   Hazard pairs run in four isolated processes; baseline, mutation and cleanup
   remain ordered within each pair. Connected Python acquisition explicitly
   uses eight bounded download workers across GitHub workflows.
+- Post-merge cadence (maintainer decision 2026-10-23): `load.yml`, `ha.yml`,
+  `agent-probes.yml` and `browser.yml` run on `pull_request` (the merge gate,
+  unchanged) and nightly on `main` by `schedule` (staggered UTC, off the hour)
+  plus `workflow_dispatch`; they no longer run on every push to `main`, so an
+  individual main SHA is covered by its PR run and the next nightly, not by its
+  own post-merge run. A red nightly is visible as a failed scheduled run in the
+  Actions list (GitHub notifies the account that last edited the cron); it is
+  not a PR check. Candidate acceptance reads only `pull_request`-event runs, so
+  it is unaffected. Pull-request runs of `ha`/`load` cancel superseded runs of
+  the same PR. Their `select` job runs only on pull requests; schedule and
+  dispatch run the lane unconditionally.
 - `load.yml`: path-allowlisted to agent/retrieve/ingest/mock/sim/loadtest
   surface and shared dependency/Task inputs — other paths run nothing. `ha.yml` is path-allowlisted to the
   collection-policy/placement surface and runs the three-peer fixture
@@ -1057,7 +1072,7 @@ live in `.github/workflows/e2e.yml`.
 - `coverage.yml`: nightly + dispatch + PRs touching only its own file; runs
   `qa:coverage` over the full unit selection and uploads the reports. Advisory:
   never a required check or an acceptance producer.
-- `bench.yml`: push-to-main + nightly + dispatch (baseline update with
+- `bench.yml`: nightly + dispatch (no longer on push to main; baseline update with
   repeats); never a PR gate.
   Measurement passes and search/answer load phases stay sequential on their
   dedicated runner: overlapping them would change contention and invalidate
@@ -1065,7 +1080,7 @@ live in `.github/workflows/e2e.yml`.
   both complete images; fault and lifecycle transitions remain ordered inside
   each isolated rehearsal case. No GPU work is added.
 - `e2e.yml build`: local images retagged to full-SHA GHCR refs; push only
-  on `main`/dispatch (PRs build, never push — fork-safe).
+  on `main` push/schedule/dispatch (PRs build, never push — fork-safe).
   Runtime wheels and BM25 weights prepare in two independent `build-inputs`
   runners; runtime acquisition needs no full dev install. Verified bytes move
   through full-SHA-named, workflow-run-scoped artifacts into two independent

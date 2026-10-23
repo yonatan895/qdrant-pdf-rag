@@ -1,11 +1,5 @@
 name: bench
 on:
-  push:
-    branches: [main]
-    paths-ignore:
-      - "**/*.md"
-      - "**/*.markdown"
-      - ".agents/**"
   schedule:
     - cron: "37 3 * * *" # nightly, off the hour
   workflow_dispatch:

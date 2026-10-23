@@ -1,18 +1,20 @@
 name: ha
 on:
   pull_request:
-  push:
-    branches: [main]
+  schedule:
+    - cron: "41 1 * * *" # nightly on main, UTC, off the hour
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
   group: ha-${{ github.ref || github.run_id }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   select:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -44,7 +46,9 @@ jobs:
   # GitHub-only: air-gap GitLab runners cannot pull Docker Hub.
   ha:
     needs: select
-    if: contains(fromJSON(needs.select.outputs.lanes), 'ha')
+    if: >-
+      !cancelled() && (github.event_name != 'pull_request' ||
+      (needs.select.result == 'success' && contains(fromJSON(needs.select.outputs.lanes), 'ha')))
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
