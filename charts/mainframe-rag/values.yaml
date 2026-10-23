@@ -134,6 +134,11 @@ tracing:
 # the name fails the render.
 openobserve:
   credentialsSecretName: openobserve-credentials
+  # Null keeps the OpenShift restricted-v2 contract (the platform assigns the
+  # UID and fsGroup). The image runs as root by default, so plain Kubernetes
+  # (Kind) sets one non-root id here: it is used as runAsUser, runAsGroup and
+  # fsGroup so the data volume is writable.
+  runAsId: null
   storage:
     size: 10Gi
 

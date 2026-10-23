@@ -359,7 +359,21 @@ def build_values(deploy_only: bool = False) -> dict:
             "pullPolicy": "IfNotPresent",
         }
 
+    # Plain Kubernetes (Kind) has no SCC to assign a UID, and the OpenObserve
+    # image runs as root: an operator may pin one non-root id for the bundled
+    # backend. Unset keeps the restricted-v2 platform-assigned identity.
+    oo_values = {}
+    run_as_id = env("OPENOBSERVE_RUN_AS_ID")
+    if run_as_id:
+        if not (tracing_enabled and not otel_endpoint):
+            die("OPENOBSERVE_RUN_AS_ID requires the bundled OpenObserve (tracing on, empty OTEL_EXPORTER_OTLP_ENDPOINT)")
+        uid = positive_int("OPENOBSERVE_RUN_AS_ID", run_as_id)
+        if uid > 65535:
+            die(f"OPENOBSERVE_RUN_AS_ID must be at most 65535 (got {run_as_id!r})")
+        oo_values = {"openobserve": {"runAsId": uid}}
+
     return {
+        **oo_values,
         "replicaCount": 2,
         "images": {
             **tracing_images,

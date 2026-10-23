@@ -4,7 +4,6 @@ The retired differential oracle is replaced by explicit expectations for
 agent, OAuth/Route, OpenObserve, collector, ServiceMonitor and explicit ingest profiles.
 Operator-to-render round trips also live in test_map_values and airgap suites.
 """
-import copy
 import json
 
 import pytest
@@ -1078,6 +1077,29 @@ def test_default_render_is_openobserve_only():
     }
 
 
+def test_openobserve_vanilla_kubernetes_identity_is_opt_in():
+    """The OpenObserve image runs as root (User 0): restricted-v2 assigns a UID on
+    OpenShift, plain Kubernetes (Kind) needs one pinned non-root id for the pod,
+    with fsGroup so /data is writable. otelcol's image already runs as 10001, so
+    it never pins an identity."""
+    default = run_new_template({})
+    pod = default["Deployment", "openobserve"]["spec"]["template"]["spec"]["securityContext"]
+    assert not {"runAsUser", "runAsGroup", "fsGroup"} & set(pod)
+    pinned = run_new_template({"openobserve": {"runAsId": 10001}})
+    pod = pinned["Deployment", "openobserve"]["spec"]["template"]["spec"]
+    assert pod["securityContext"] == {
+        "runAsNonRoot": True, "runAsUser": 10001, "runAsGroup": 10001, "fsGroup": 10001,
+        "seccompProfile": {"type": "RuntimeDefault"}}
+    c = pod["containers"][0]["securityContext"]
+    assert c == {"allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True,
+                 "capabilities": {"drop": ["ALL"]}}
+    col = run_new_template({**METRICS_ON, "openobserve": {"runAsId": 10001}})["Deployment", "otelcol"]["spec"]["template"]["spec"]
+    assert not {"runAsUser", "runAsGroup", "fsGroup"} & set(col["securityContext"])
+    assert col["securityContext"]["runAsNonRoot"] is True
+    for bad in (0, 70000, "x"):
+        assert _helm_template_with_values({**base_values(), "openobserve": {"runAsId": bad}}).returncode != 0
+
+
 def test_openobserve_backend_contract():
     docs = run_new_template({})
     dep = docs["Deployment", "openobserve"]
@@ -1086,7 +1108,7 @@ def test_openobserve_backend_contract():
     pod = dep["spec"]["template"]["spec"]
     assert pod["securityContext"] == {"runAsNonRoot": True, "seccompProfile": {"type": "RuntimeDefault"}}
     c = pod["containers"][0]
-    assert c["image"] == f"reg.internal/openobserve/openobserve:v1.1.2"
+    assert c["image"] == "reg.internal/openobserve/openobserve:v1.1.2"
     assert c["securityContext"] == {
         "allowPrivilegeEscalation": False,
         "readOnlyRootFilesystem": True,
@@ -1208,7 +1230,7 @@ def test_collector_contract():
     assert pod["securityContext"] == {"runAsNonRoot": True, "seccompProfile": {"type": "RuntimeDefault"}}
     assert _hardening_violations(pod) == []
     (c,) = pod["containers"]
-    assert c["image"] == f"reg.internal/otel/opentelemetry-collector-contrib:0.160.0"
+    assert c["image"] == "reg.internal/otel/opentelemetry-collector-contrib:0.160.0"
     assert c["securityContext"]["readOnlyRootFilesystem"] is True
     assert c["env"] == [
         {"name": "O2_AUTH", "valueFrom": {"secretKeyRef": {"name": "openobserve-credentials", "key": "metrics-auth"}}}

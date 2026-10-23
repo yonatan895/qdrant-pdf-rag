@@ -681,7 +681,7 @@ def test_openobserve_and_otelcol_images_follow_tracing(monkeypatch, mapper_env, 
     bundled = enabled
     decisions = subprocess.run(
         [sys.executable, "scripts/airgap/map_values.py", "--bundle-decisions"],
-        capture_output=True, text=True, cwd=REPO,
+        capture_output=True, text=True, cwd=REPO, check=False,
         env={**os.environ, "OTEL_EXPORTER_OTLP_ENDPOINT": endpoint})
     assert decisions.returncode == 0, decisions.stderr
     assert f"OTEL_BUNDLED={int(bundled)}" in decisions.stdout.split()
@@ -701,6 +701,23 @@ def test_openobserve_and_otelcol_images_follow_tracing(monkeypatch, mapper_env, 
     assert images["otelcol"] == {
         "repository": "reg.internal/otel/opentelemetry-collector-contrib", "tag": "0.160.0",
         "pullPolicy": "IfNotPresent"}
+
+
+def test_openobserve_run_as_id_maps_only_when_set_and_bundled(monkeypatch, mapper_env):
+    r, out = mapper_env()
+    assert r.returncode == 0, r.stderr
+    assert "runAsId" not in load_values(out).get("openobserve", {})
+    monkeypatch.setenv("OPENOBSERVE_RUN_AS_ID", "10001")
+    r, out = mapper_env()
+    assert r.returncode == 0, r.stderr
+    assert load_values(out)["openobserve"]["runAsId"] == 10001
+    for bad in ("0", "abc", "70000"):
+        monkeypatch.setenv("OPENOBSERVE_RUN_AS_ID", bad)
+        assert mapper_env()[0].returncode != 0, bad
+    monkeypatch.setenv("OPENOBSERVE_RUN_AS_ID", "10001")
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector.platform:4318")
+    r, _ = mapper_env()
+    assert r.returncode != 0 and "requires the bundled OpenObserve" in r.stderr
 
 
 def test_mapper_to_helm_round_trip_decoupled(mapper_env, tmp_path):

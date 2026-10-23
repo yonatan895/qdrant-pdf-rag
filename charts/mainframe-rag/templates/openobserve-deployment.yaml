@@ -27,6 +27,11 @@ spec:
     spec:
       securityContext:
         runAsNonRoot: true
+        {{- if .Values.openobserve.runAsId }}
+        runAsUser: {{ .Values.openobserve.runAsId }}
+        runAsGroup: {{ .Values.openobserve.runAsId }}
+        fsGroup: {{ .Values.openobserve.runAsId }}
+        {{- end }}
         seccompProfile:
           type: RuntimeDefault
       {{- if .Values.pullSecret.name }}
