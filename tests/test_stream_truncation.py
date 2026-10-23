@@ -1283,3 +1283,80 @@ def test_buffered_sync_call_incomplete_stream_is_truncation():
     with pytest.raises(TruncatedStreamError):
         llm.chat(_HI)
     assert fake.post_bodies == []
+
+
+# ---------------------------------------------------------------------------
+# Issue #868 review follow-up: an endpoint that ignores `stream: true` and
+# answers application/json keeps working for buffered callers.
+# ---------------------------------------------------------------------------
+
+_JSON_ANSWER = {
+    "choices": [{"message": {"content": "Complete answer"}, "finish_reason": "stop"}],
+    "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
+}
+
+
+def _json_only_backend(payload, posts):
+    def respond(request):
+        posts.append(json.loads(request.content))
+        return httpx2.Response(200, json=payload)
+
+    return httpx2.MockTransport(respond)
+
+
+@pytest.mark.anyio
+async def test_buffered_call_accepts_a_json_only_backend_with_one_request():
+    posts: list = []
+    async with httpx2.AsyncClient(transport=_json_only_backend(_JSON_ANSWER, posts)) as http:
+        llm = HttpxLLMClient(Settings(**_settings_kwargs()), client=http)
+        result = await llm.achat(_HI)
+    assert (result.content, result.finish_reason) == ("Complete answer", "stop")
+    assert (result.usage.prompt_tokens, result.usage.total_tokens) == (5, 8)
+    assert len(posts) == 1
+
+
+def test_buffered_sync_call_accepts_a_json_only_backend_with_one_request():
+    posts: list = []
+    with httpx2.Client(transport=_json_only_backend(_JSON_ANSWER, posts)) as http:
+        llm = HttpxLLMClient(Settings(**_settings_kwargs()), client=http)
+        result = llm.chat(_HI)
+    assert (result.content, result.finish_reason) == ("Complete answer", "stop")
+    assert len(posts) == 1
+
+
+@pytest.mark.anyio
+async def test_json_only_backend_payload_is_still_validated():
+    posts: list = []
+    bad = {"choices": [{"message": {"content": "x"}}]}  # no finish_reason
+    async with httpx2.AsyncClient(transport=_json_only_backend(bad, posts)) as http:
+        llm = HttpxLLMClient(Settings(**_settings_kwargs()), client=http)
+        with pytest.raises(TruncatedStreamError) as caught:
+            await llm.achat(_HI)
+    assert caught.value.reason == REASON_MISSING_FINISH
+    assert len(posts) == 1
+
+
+@pytest.mark.anyio
+async def test_buffered_usage_absent_matches_the_buffered_payload_default():
+    """Base reported zeros for a buffered payload without `usage`; so does the
+    assembled stream."""
+    posts: list = []
+    no_usage = {"choices": [{"message": {"content": "a"}, "finish_reason": "stop"}]}
+    async with httpx2.AsyncClient(transport=_json_only_backend(no_usage, posts)) as http:
+        base_usage = (await HttpxLLMClient(Settings(**_settings_kwargs()), client=http).achat(_HI)).usage
+    fake = HttpxStreamFake(lines=[_CONTENT_LINE, _FINISH_LINE, _DONE_LINE])
+    streamed = await HttpxLLMClient(Settings(**_settings_kwargs()), client=fake).achat(_HI)
+    assert streamed.usage == base_usage
+    assert (base_usage.prompt_tokens, base_usage.completion_tokens, base_usage.total_tokens) == (0, 0, 0)
+
+
+@pytest.mark.anyio
+async def test_json_only_backend_read_keeps_the_total_wait():
+    async def slow(request):
+        await asyncio.sleep(5)
+        return httpx2.Response(200, json=_JSON_ANSWER)
+
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(slow)) as http:
+        llm = HttpxLLMClient(Settings(**_settings_kwargs(answer_timeout_s=0.3)), client=http)
+        with pytest.raises(httpx2.ReadTimeout):
+            await llm.achat(_HI)

@@ -1576,6 +1576,15 @@ def _buffered_result_from_stream(state: _SseStreamState) -> ChatResult:
     )
 
 
+def _is_json_response(resp: Any) -> bool:
+    """True when a streamed request was answered with a JSON body instead of
+    SSE: an endpoint that ignores `stream: true`. The buffered caller takes it
+    through the buffered-payload parser, as the plain POST did (issue #868)."""
+    headers = getattr(resp, "headers", None)
+    content_type = str(headers.get("content-type", "")).lower() if headers is not None else ""
+    return "json" in content_type and "event-stream" not in content_type
+
+
 def is_model_timeout(exc: BaseException) -> bool:
     """True when the reasoning leg ran out of its `answer_timeout_s` wait
     (connect, write, read or pool). The one classification behind the stable
@@ -1766,6 +1775,7 @@ class HttpxLLMClient:
         as the same `ReadTimeout`. No recovery POST (the buffered path never
         had one); expiry and cancellation close the stream."""
         state = _SseStreamState()
+        json_body: bytes | None = None
         t0 = time.monotonic()
         budget = asyncio.timeout(self._settings.answer_timeout_s)
         try:
@@ -1779,14 +1789,19 @@ class HttpxLLMClient:
                 ) as stream_resp,
             ):
                 stream_resp.raise_for_status()
-                async for line in stream_resp.aiter_lines():
-                    _feed_sse_line(state, line, t0)
-                    if state.terminal_seen():
-                        break
+                if _is_json_response(stream_resp):
+                    json_body = await stream_resp.aread()
+                else:
+                    async for line in stream_resp.aiter_lines():
+                        _feed_sse_line(state, line, t0)
+                        if state.terminal_seen():
+                            break
         except TimeoutError:
             if budget.expired():
                 raise httpx2.ReadTimeout("buffered model call exceeded answer_timeout_s") from None
             raise
+        if json_body is not None:
+            return _chat_result_from_response(json.loads(json_body))
         return _buffered_result_from_stream(state)
 
     async def achat(
@@ -1979,6 +1994,7 @@ class HttpxLLMClient:
             # thread cannot be interrupted; the per-read timeout covers
             # silence); no recovery POST, as before.
             state = _SseStreamState()
+            json_body: bytes | None = None
             t0 = time.monotonic()
             with self._sync_http().stream(
                 "POST",
@@ -1987,12 +2003,19 @@ class HttpxLLMClient:
                 headers=headers,
             ) as stream_resp:
                 stream_resp.raise_for_status()
-                for line in stream_resp.iter_lines():
-                    _feed_sse_line(state, line, t0)
-                    if state.terminal_seen():
-                        break
+                if _is_json_response(stream_resp):
+                    json_body = stream_resp.read()
                     if time.monotonic() - t0 > self._settings.answer_timeout_s:
                         raise httpx2.ReadTimeout("buffered model call exceeded answer_timeout_s")
+                else:
+                    for line in stream_resp.iter_lines():
+                        _feed_sse_line(state, line, t0)
+                        if state.terminal_seen():
+                            break
+                        if time.monotonic() - t0 > self._settings.answer_timeout_s:
+                            raise httpx2.ReadTimeout("buffered model call exceeded answer_timeout_s")
+            if json_body is not None:
+                return _chat_result_from_response(json.loads(json_body))
             return _buffered_result_from_stream(state)
         if getattr(self._settings, "llm_stream", False) and hasattr(self._sync_http(), "stream"):
             body_stream = _chat_body(model, serialized, reasoning_effort, temperature, max_tokens=max_tokens, stream=True)
