@@ -2612,18 +2612,196 @@ class TestVerifierUpdateDecision(unittest.TestCase):
 
         root = pathlib.Path(__file__).resolve().parents[1]
         workflow = yaml.safe_load((root / '.github/workflows/verifier-update.yml').read_text())
-        self.assertEqual(set(workflow.get('on', workflow.get(True))), {'workflow_dispatch'})
+        triggers = workflow.get('on', workflow.get(True))
+        self.assertEqual(set(triggers), {'workflow_dispatch', 'issue_comment'})
+        self.assertEqual(triggers['issue_comment'], {'types': ['created']})
         self.assertEqual(workflow['permissions'], {'contents': 'read', 'pull-requests': 'read'})
         job = workflow['jobs']['record-decision']
+        self.assertNotIn('permissions', job)
         self.assertIn("github.ref == 'refs/heads/main'", job['if'])
         self.assertIn("github.actor == 'yonatan895'", job['if'])
         self.assertIn("github.triggering_actor == 'yonatan895'", job['if'])
+        for guard in ("github.event.comment.user.login == 'yonatan895'",
+                      "github.event.comment.author_association == 'OWNER'",
+                      "github.event.action == 'created'", 'github.event.issue.pull_request'):
+            self.assertIn(guard, job['if'])
         self.assertEqual(job['steps'][0]['with']['ref'], '${{ github.sha }}')
         self.assertFalse(job['steps'][0]['with']['persist-credentials'])
         commands = '\n'.join(step.get('run', '') for step in job['steps'])
         self.assertNotIn('${{', commands)
         self.assertNotIn('git checkout', commands)
         self.assertNotIn('secrets.', json.dumps(workflow))
+
+    def test_comment_workflow_never_expands_comment_text_and_acknowledges_with_least_privilege(self):
+        import re
+
+        import yaml
+
+        root = pathlib.Path(__file__).resolve().parents[1]
+        text = (root / '.github/workflows/verifier-update.yml').read_text()
+        workflow = yaml.safe_load(text)
+        # The comment body may appear only in expressions (if/run-name), never in env or a script.
+        for job in workflow['jobs'].values():
+            for step in job['steps']:
+                self.assertNotIn('comment.body', json.dumps(step))
+        self.assertNotIn('pull_request.head', text)
+        self.assertNotIn('issue.title', text)
+        ack = workflow['jobs']['acknowledge']
+        self.assertEqual(ack['permissions'], {'issues': 'write'})
+        self.assertEqual(ack['needs'], 'record-decision')
+        self.assertNotIn('actions/checkout', json.dumps(ack))
+        self.assertNotIn('comment.body', json.dumps(ack))
+        # Third-party actions stay on the pins already used in this repository.
+        self.assertTrue(all(re.search(r'@[0-9a-f]{40}$', step['uses'])
+                            for step in workflow['jobs']['record-decision']['steps'] if 'uses' in step))
+        self.assertEqual(workflow['name'], 'Verifier update decision')
+
+    def comment_fixture(self, body='/verifier approve ' + 'a' * 12):
+        import copy
+
+        api = self.fixture()
+        api.run.update(event='issue_comment', display_title='Verifier PR 3: approve',
+                       created_at='2026-09-25T12:00:05Z')
+        api.record['comment'] = {'id': 77, 'created_at': '2026-09-25T12:00:04Z', 'head_sha': 'a' * 40}
+        api.record['pr_updated_at'] = '2026-09-25T12:00:04Z'
+        api.pack()
+        api.live_comment = {'id': 77, 'body': body, 'created_at': '2026-09-25T12:00:04Z',
+                            'updated_at': '2026-09-25T12:00:04Z', 'author_association': 'OWNER',
+                            'user': {'login': 'yonatan895', 'type': 'User'},
+                            'issue_url': 'https://api.github.com/repos/synthetic/repository/issues/3'}
+        original = api.get
+        def get(endpoint):
+            if endpoint.endswith('issues/comments/77'):
+                return copy.deepcopy(api.live_comment)
+            if '/issues/comments/' in endpoint:
+                raise OSError('404 Not Found')
+            return original(endpoint)
+        api.get = get
+        return api
+
+    def test_comment_approval_binds_the_named_head_and_the_live_comment(self):
+        from scripts.verifier_approval import validated_decision
+
+        api = self.comment_fixture()
+        inputs = api.record['inputs']
+        self.assertEqual(validated_decision(api, api.candidate, inputs),
+                         {'run_id': 900, 'run_attempt': 1, 'inputs': inputs})
+        # Every mutation of the comment, run or record must fail closed.
+        cases = [('live_comment', 'body', '/verifier approve ' + 'd' * 12),
+                 ('live_comment', 'body', '/verifier approve ' + 'a' * 12 + ' catalogue-anchors'),
+                 ('live_comment', 'body', '/verifier revoke'),
+                 ('live_comment', 'body', '/verifier approve'),
+                 ('live_comment', 'updated_at', '2026-09-25T12:09:00Z'),
+                 ('live_comment', 'author_association', 'CONTRIBUTOR'),
+                 ('live_comment', 'user', {'login': 'other', 'type': 'User'}),
+                 ('live_comment', 'issue_url', 'https://api.github.com/repos/synthetic/repository/issues/4'),
+                 ('live_comment', 'created_at', '2026-09-25T12:00:03Z'),
+                 ('run', 'created_at', '2026-09-25T12:00:03Z'),
+                 ('run', 'actor', {'login': 'other', 'type': 'User'}),
+                 ('run', 'triggering_actor', {'login': 'other', 'type': 'User'}),
+                 ('candidate', 'head_sha', 'd' * 40)]
+        for target, key, value in cases:
+            with self.subTest(target=target, key=key, value=value):
+                api = self.comment_fixture()
+                getattr(api, target)[key] = value
+                with self.assertRaises((ValueError, KeyError)):
+                    validated_decision(api, api.candidate, api.record['inputs'])
+        for mutate in (lambda r: r.pop('comment'), lambda r: r['comment'].update(head_sha='d' * 40),
+                       lambda r: r['comment'].update(id=78), lambda r: r['comment'].update(extra=1)):
+            api = self.comment_fixture()
+            mutate(api.record)
+            api.pack()
+            with self.assertRaises((ValueError, KeyError, TypeError, OSError)):
+                validated_decision(api, api.candidate, api.record['inputs'])
+        # A dispatch-shaped record must not carry a comment binding.
+        api = self.fixture()
+        api.record['comment'] = {'id': 77, 'created_at': '2026-09-25T12:00:04Z', 'head_sha': 'a' * 40}
+        api.pack()
+        with self.assertRaises(ValueError):
+            validated_decision(api, api.candidate, api.record['inputs'])
+
+    def test_other_users_comment_runs_cannot_shadow_or_replace_the_maintainers_decision(self):
+        from scripts.verifier_approval import latest_decision
+
+        api = self.comment_fixture()
+        api.runs = [api.run, {**api.run, 'id': 950, 'display_title': 'Verifier PR 3: revoke',
+                              'actor': {'login': 'stranger', 'type': 'User'}, 'conclusion': 'skipped'}]
+        self.assertEqual(latest_decision(api, api.candidate)['id'], 900)
+        api.runs[1]['actor'] = {'login': 'yonatan895', 'type': 'User'}
+        api.get = (lambda original: lambda e: api.runs[1] if e.endswith('/950') else original(e))(api.get)
+        self.assertEqual(latest_decision(api, api.candidate)['id'], 950)
+
+    def test_comment_grammar_is_strict(self):
+        from scripts.verifier_approval import parse_command
+
+        sha = 'ab12cd3'
+        self.assertEqual(parse_command(f'/verifier approve {sha}\n'), ('approve', 'implementation', sha))
+        self.assertEqual(parse_command(f'/verifier approve {sha} catalogue-anchors'),
+                         ('approve', 'catalogue-anchors', sha))
+        self.assertEqual(parse_command('/verifier revoke'), ('revoke', 'implementation', None))
+        self.assertEqual(parse_command('/verifier revoke catalogue-anchors'), ('revoke', 'catalogue-anchors', None))
+        for body in ('/verifier approve', '/verifier approve ab12cd', '/verifier approve AB12CD3',
+                     f'/verifier approve {sha}; id', f'/verifier approve {sha}\nextra', f'x /verifier approve {sha}',
+                     f'/verifier  approve {sha}', f'/verifier approve {sha} other', '/verifier revoke ' + sha,
+                     '/verifier approve ' + 'a' * 41, '$(id)', '', None):
+            with self.subTest(body=body), self.assertRaises(ValueError):
+                parse_command(body)
+
+    def test_comment_event_authorization_and_recording(self):
+        import copy
+
+        from scripts.verifier_approval import comment_request
+
+        event = {'action': 'created', 'sender': {'login': 'yonatan895'}, 'issue': {'number': 3, 'pull_request': {}},
+                 'comment': {'id': 77, 'body': '/verifier approve ' + 'a' * 12, 'author_association': 'OWNER',
+                             'user': {'login': 'yonatan895', 'type': 'User'}}}
+        api = self.comment_fixture()
+        self.assertEqual(comment_request(api, event),
+                         (3, 'approve', 'implementation', 'a' * 12,
+                          {'id': 77, 'created_at': '2026-09-25T12:00:04Z'}))
+        mutations = [lambda e: e.update(action='edited'), lambda e: e['issue'].pop('pull_request'),
+                     lambda e: e['comment']['user'].update(login='other'),
+                     lambda e: e['comment'].update(author_association='MEMBER'),
+                     lambda e: e['comment']['user'].update(type='Bot'),
+                     lambda e: e['sender'].update(login='other'),
+                     lambda e: e['comment'].update(body='/verifier approve'),
+                     lambda e: e['comment'].update(body='/verifier approve ' + 'b' * 12),
+                     lambda e: e['issue'].update(number=4)]
+        for mutate in mutations:
+            changed = copy.deepcopy(event)
+            mutate(changed)
+            with self.assertRaises(ValueError):
+                comment_request(api, changed)
+
+    def test_comment_recording_refuses_a_head_pushed_after_the_comment(self):
+        import copy
+        import subprocess
+        import tempfile
+
+        from scripts.verifier_approval import record_decision
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            subprocess.run(['git', 'init', '-q', str(root)], check=True)
+            (root / 'f').write_text('x')
+            subprocess.run(['git', '-C', str(root), '-c', 'user.name=t', '-c', 'user.email=t@t', 'add', 'f'], check=True)
+            subprocess.run(['git', '-C', str(root), '-c', 'user.name=t', '-c', 'user.email=t@t',
+                            'commit', '-qm', 'x'], check=True)
+            head = subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True).strip()
+            api = self.comment_fixture()
+            api.candidate['base_sha'] = head
+            from unittest.mock import patch
+            with patch('scripts.acceptance.verification_inputs', return_value=['scripts/check_hazard_sensitivity.py']):
+                comment = {'id': 77, 'created_at': '2026-09-25T12:00:04Z'}
+                record = record_decision(api, 3, 'approve', root, 900, 1, comment=copy.deepcopy(comment),
+                                         head_prefix='a' * 12)
+                self.assertEqual(record['comment'], {**comment, 'head_sha': 'a' * 40})
+                with self.assertRaises(ValueError):
+                    record_decision(api, 3, 'approve', root, 900, 1, comment=copy.deepcopy(comment),
+                                    head_prefix='b' * 12)
+                with self.assertRaises(ValueError):
+                    record_decision(api, 3, 'approve', root, 900, 1, comment=copy.deepcopy(comment),
+                                    head_prefix=None)
 
 
     def test_publisher_explains_required_decision_without_recommending_a_policy_bypass(self):
