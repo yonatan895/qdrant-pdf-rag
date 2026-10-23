@@ -21,7 +21,7 @@ sh scripts/tools/run-task.sh qa:unit -- tests/test_agent_context.py -q
 The entry resolves the repository's verified `.tools/bin/task`, fixes the root
 Taskfile and working directory, and disables remote Taskfile access. From a
 subdirectory, invoke the entry by its relative or absolute script path; task
-inputs still resolve from the repository root.
+inputs still resolve from the repository root. Paths with spaces are supported.
 No task name prints the list. Discovery and summaries install nothing, read no
 private operator configuration and launch no service.
 

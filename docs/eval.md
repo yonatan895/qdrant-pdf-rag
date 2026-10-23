@@ -4,7 +4,8 @@ Retrieval scoring and measured execution are owned by
 `mainframe_rag.eval.retrieval`: `evaluate` constructs the configured clients,
 measures each selected query and reports query failures; `collect_rows` uses
 the caller's clients for L1 and propagates query failures. The retrieval CLI, simulator gate and
-promotion harness consume the canonical operations directly. CLI handling, label drafting, simulator lifecycle and
+promotion harness consume the canonical operations directly. Client imports occur when an
+operation is called. CLI handling, label drafting, simulator lifecycle and
 snapshot/restore orchestration remain in their operational scripts.
 
 Answer-tier measurement is owned by `mainframe_rag.eval.answers`: deterministic
@@ -20,7 +21,8 @@ judge-call parameters live in `mainframe_rag.eval.judging`. L2 orchestration and
 L4 repeated quality gates remain distinct; both consume the canonical labels.
 L2 row enrichment, request-attributed alert capture, aggregation, structural
 verdicts and measured execution live in `mainframe_rag.eval.answer_tier`.
-L4 imports this runner directly. L2's CLI retains dataset/venue resolution and
+L4 imports this runner directly. Importing the measurement package does not
+start the app or connect to model/storage services. L2's CLI retains dataset/venue resolution and
 output/manifest composition. The synthetic HTTP runner test covers per-run search
 caching, judge-leg order/eligibility, request attribution, cleanup and the next run.
 
@@ -41,7 +43,8 @@ snapshots and CLI execution stay in `scripts/harness.py`.
 Multi-turn condensation A/B measurement is owned by `mainframe_rag.eval.chat`,
 using the shared dataset and retrieval scorers. `python -m mainframe_rag.eval.chat`
 runs its `main` in a prepared installation.  Outside a workspace, supply explicit golden/output paths; the default
-`evals/golden.jsonl` stays relative to the working directory.
+`evals/golden.jsonl` stays relative to the working directory. Importing the module does not
+execute a session.
 
 Reusable concurrent HTTP load measurement, Server-Timing parsing, percentiles
 and optional GPU observations are owned by `mainframe_rag.eval.load`. The L3

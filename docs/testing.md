@@ -632,9 +632,8 @@ when selected; #411 owns maintainer enforcement.
 ## Native CI execution evidence
 
 PR CI runs on the merge ref, not the PR head. `ci_evidence.py` `identity()`
-requires that commit's parents to equal the event's `[base, head]`; once main
-moves, a rerun fails with `checkout does not bind the event head and base`, so
-push or rebase instead.
+requires that commit's parents to equal the event's `[base, head]`, else it
+fails with `checkout does not bind the event head and base`.
 
 The existing review-tooling suite owns candidate selection, CI invocation and
 native receipt regression cases. It exercises real temporary Git merge histories,
