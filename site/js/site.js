@@ -66,7 +66,10 @@
   if (demo) {
     var v = demo.querySelector("video");
     if (v) {
-      v.addEventListener("loadedmetadata", function () { demo.hidden = false; });
+      // The deferred script can run after metadata already loaded (cached or
+      // fast fetch); then loadedmetadata has fired and would never unhide it.
+      var show = function () { demo.hidden = false; };
+      if (v.readyState >= 1) { show(); } else { v.addEventListener("loadedmetadata", show); }
     }
   }
 }());
