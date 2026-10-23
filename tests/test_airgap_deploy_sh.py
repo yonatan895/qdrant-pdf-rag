@@ -98,7 +98,7 @@ case "$*" in
   *'get deployments,statefulsets,replicasets,pods -o json'*)
     [ -z "${{PODS_FILE:-}}" ] || cat "$PODS_FILE" ;;
   *'get secret openobserve-credentials '*'jsonpath='*)
-    case "$*" in *root-user-email*) printf 'dGVzdC11c2Vy' ;; *) printf 'dGVzdC1wYXNz' ;; esac ;;
+    case "$*" in *root-user-email*) printf 'dGVzdC11c2Vy' ;; *) printf '%s' "${{OO_PASSWORD_B64:-VGVzdC1wYXNzMQ==}}" ;; esac ;;
   *'get secret '*'go-template='*)
     if [ -n "${{MISSING_KEY:-}}" ]; then
       case "$*" in *"$MISSING_KEY"*) exit 0 ;; esac
@@ -537,6 +537,24 @@ def test_openobserve_and_otelcol_are_identity_checked_when_tracing_is_on(tree, r
     _load_all(tree)
     ok = _run(tree)
     assert ok.returncode == 0, ok.stderr
+
+
+@pytest.mark.parametrize("password", ["abcdef0123456789abcdef", "Short1!", "NOLOWER-123", "nodigit-Aaaa", "NoSpecial123x", "x" * 129 + "Aa1!"])
+def test_weak_openobserve_root_password_refuses_before_any_mutation(tree, password):
+    """OpenObserve v1.1.2 crash-loops on a weak root password: refuse it up front
+    with a stable code and never echo the value."""
+    import base64
+    r = _run(tree, ("OO_PASSWORD_B64", base64.b64encode(password.encode()).decode()))
+    assert r.returncode != 0
+    assert "E_OPENOBSERVE_WEAK_PASSWORD" in r.stderr
+    assert password not in r.stdout + r.stderr and base64.b64encode(password.encode()).decode() not in r.stdout + r.stderr
+    assert _mutations(tree) == []
+    assert _helm_log(tree) == "" or "upgrade" not in _helm_log(tree)
+    ok = _run(tree, ("OO_PASSWORD_B64", base64.b64encode(b"Strong-pass-1").decode()))
+    assert ok.returncode == 0, ok.stderr
+    # Tracing off or an external endpoint never reads the Secret.
+    off = _run(tree, ("OTEL_EXPORTER_OTLP_ENDPOINT", "off"), ("OO_PASSWORD_B64", base64.b64encode(password.encode()).decode()))
+    assert off.returncode == 0, off.stderr
 
 
 @pytest.mark.parametrize("missing_key", ["root-user-email", "root-user-password", "otlp-headers", "metrics-auth"])
@@ -1676,7 +1694,7 @@ def test_default_smoke_gets_trace_query_settings_without_manual_env(tree):
     env = {"PATH": f"{tree[0] / 'bin'}:/usr/bin:/bin", "HELM_LOG": str(tree[1])}
     r = subprocess.run(["sh", "-c", script], cwd=tree[0], env=env, capture_output=True, text=True, check=False)
     assert r.returncode == 0, r.stderr
-    assert r.stdout == "http://openobserve:5080|test-user|test-pass"
+    assert r.stdout == "http://openobserve:5080|test-user|Test-pass1"
     off = subprocess.run(["sh", "-c", script.replace("OTEL_TRACING_ENABLED=1", "OTEL_TRACING_ENABLED=0")],
                          cwd=tree[0], env=env, capture_output=True, text=True, check=False)
     assert off.stdout == "||"
@@ -1708,7 +1726,7 @@ def test_task_runner_empty_trace_query_vars_get_bundled_defaults(tree):
     empty = subprocess.run(["sh", "-c", script], cwd=tree[0], capture_output=True, text=True, check=False,
                            env={**env, "TRACE_QUERY_URL": "", "TRACE_QUERY_USER": "", "TRACE_QUERY_PASSWORD": ""})
     assert empty.returncode == 0, empty.stderr
-    assert empty.stdout == "http://openobserve:5080|test-user|test-pass"
+    assert empty.stdout == "http://openobserve:5080|test-user|Test-pass1"
     given = subprocess.run(["sh", "-c", script], cwd=tree[0], capture_output=True, text=True, check=False,
                            env={**env, "TRACE_QUERY_URL": "http://x:1", "TRACE_QUERY_USER": "u", "TRACE_QUERY_PASSWORD": "p"})
     assert given.stdout == "http://x:1|u|p"

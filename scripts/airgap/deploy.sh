@@ -137,6 +137,20 @@ if [ "$OTEL_BUNDLED" = "1" ] && [ "${AIRGAP_DRYRUN:-0}" != "1" ]; then
         [ "$_oo_present" = present ] ||
             die "E_OPENOBSERVE_CREDENTIALS: Secret openobserve-credentials must exist with non-empty keys root-user-email, root-user-password, otlp-headers and metrics-auth"
     done
+    # OpenObserve v1.1.2 panics at startup on a weak root password (8-128
+    # characters with a lowercase, an uppercase, a digit and a special
+    # character), which would crash-loop the rollout. The value stays in a shell
+    # variable and reaches the checks on stdin, never argv or output.
+    _oo_pw=$(_read_oo_secret_key root-user-password) || _oo_pw=""
+    if [ "${#_oo_pw}" -lt 8 ] || [ "${#_oo_pw}" -gt 128 ] ||
+        ! printf '%s' "$_oo_pw" | LC_ALL=C grep -q '[a-z]' ||
+        ! printf '%s' "$_oo_pw" | LC_ALL=C grep -q '[A-Z]' ||
+        ! printf '%s' "$_oo_pw" | LC_ALL=C grep -q '[0-9]' ||
+        ! printf '%s' "$_oo_pw" | LC_ALL=C grep -q '[^A-Za-z0-9]'; then
+        unset _oo_pw
+        die "E_OPENOBSERVE_WEAK_PASSWORD: Secret openobserve-credentials key root-user-password must be 8-128 characters with a lowercase letter, an uppercase letter, a digit and a special character"
+    fi
+    unset _oo_pw
 fi
 require_secret_keys "${PULL_SECRET:-}" .dockerconfigjson
 # Operator-created, never rendered: the bearer token both the service and the
