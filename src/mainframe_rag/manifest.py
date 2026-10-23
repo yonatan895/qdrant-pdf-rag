@@ -44,13 +44,25 @@ def compute_settings_hash(settings: Settings) -> str:
     return hashlib.sha256(dumped.encode("utf-8")).hexdigest()
 
 
-def get_qdrant_version(qdrant_url: str, timeout_s: float = 3.0) -> str:
+def _auth_kwargs(api_key: str | None) -> dict[str, Any]:
+    """Header kwargs for an authenticated Qdrant; empty when no key is set.
+
+    The key is only ever sent on the request: it is never returned, logged or
+    placed in the manifest (failures fall back to fixed values)."""
+    return {"headers": {"api-key": api_key}} if api_key else {}
+
+
+def get_qdrant_version(
+    qdrant_url: str, timeout_s: float = 3.0, api_key: str | None = None
+) -> str:
     """Queries Qdrant server version via REST API root endpoint.
 
     Returns "unknown" when Qdrant is unreachable — never the pinned server
     version, which would forge comparability between run manifests."""
     try:
-        resp = httpx2.get(qdrant_url.rstrip("/") + "/", timeout=timeout_s)
+        resp = httpx2.get(
+            qdrant_url.rstrip("/") + "/", timeout=timeout_s, **_auth_kwargs(api_key)
+        )
         if resp.status_code == 200:
             data = resp.json()
             return str(data.get("version") or "unknown")
@@ -60,12 +72,13 @@ def get_qdrant_version(qdrant_url: str, timeout_s: float = 3.0) -> str:
 
 
 def get_collection_snapshot_id(
-    qdrant_url: str, collection: str, timeout_s: float = 3.0
+    qdrant_url: str, collection: str, timeout_s: float = 3.0, api_key: str | None = None
 ) -> str | None:
     """Queries snapshots for collection, falling back to points count."""
     base = qdrant_url.rstrip("/")
+    auth = _auth_kwargs(api_key)
     try:
-        resp = httpx2.get(f"{base}/collections/{collection}/snapshots", timeout=timeout_s)
+        resp = httpx2.get(f"{base}/collections/{collection}/snapshots", timeout=timeout_s, **auth)
         if resp.status_code == 200:
             snaps = resp.json().get("result", [])
             if snaps and isinstance(snaps, list):
@@ -73,7 +86,7 @@ def get_collection_snapshot_id(
     except Exception:  # noqa: BLE001, S110
         pass
     try:
-        resp = httpx2.get(f"{base}/collections/{collection}", timeout=timeout_s)
+        resp = httpx2.get(f"{base}/collections/{collection}", timeout=timeout_s, **auth)
         if resp.status_code == 200:
             pts = resp.json().get("result", {}).get("points_count")
             if pts is not None:
@@ -103,8 +116,10 @@ def write_run_manifest(
         "llm_context": settings.context_llm_model,
         "context_prompt": CONTEXT_PROMPT_VERSION if settings.contextual_embed_enabled else None,
     }
-    qdrant_ver = get_qdrant_version(settings.qdrant_url)
-    snapshot_id = get_collection_snapshot_id(settings.qdrant_url, settings.qdrant_collection)
+    qdrant_ver = get_qdrant_version(settings.qdrant_url, api_key=settings.qdrant_api_key)
+    snapshot_id = get_collection_snapshot_id(
+        settings.qdrant_url, settings.qdrant_collection, api_key=settings.qdrant_api_key
+    )
 
     manifest: dict[str, Any] = {
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),

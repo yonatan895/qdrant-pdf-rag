@@ -129,11 +129,11 @@ changes; add a root rule only when it is genuinely repository-wide.
 
 ## Code Review Rules
 
-Reviews follow the canonical [review protocol](docs/agent-workflow.md#review-handoff).
+Every change gets a repo-code-review review posted on its PR or issue with
+evidence, per the canonical [review protocol](docs/agent-workflow.md#review-handoff).
 For each claimed guarantee ask: what state establishes it, who can change that
 state, for how long is it valid, and what forbids the counterexample? A
 documented exception that weakens a promised guarantee needs an explicit design
 decision, not a reassuring comment. A finding blocks only when it is in scope
 and changes a user-visible outcome, data integrity or a security boundary;
-record other findings in the parking-lot issue (#588). Agents do not merge
-their own PRs or change repository access controls.
+record other findings in the parking-lot issue (#588).
