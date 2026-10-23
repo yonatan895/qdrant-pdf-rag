@@ -477,3 +477,24 @@ fresh matching search trace are required; HTTP success, a refusal or historical
 traces do not pass. Preserve the failing original question on recheck. Record
 the exact source/chart/image/configuration identity separately, particularly
 when testing a host gateway fix with an older published agent image.
+
+## 9. Scripted demo recording (#890)
+
+Regenerates the project-site demo (`site/media/demo.mp4`, `demo.webm`,
+`poster.jpg`, at most 3 MB together) on the Synthetic Corp corpus. Local tooling
+only: never CI, never the air gap, never a real corpus. Run it only when no
+Colab/G4 session uses the host, under the heavy-job guard.
+
+1. Generate the corpus outside git:
+   `python3 scripts/make_synthetic_pdf.py --synthetic-corp --out "$SCRATCH_DIR/corp"`.
+2. Serve the 8 GB pair (`LOCAL_RT_8GB`: embedding first, then reasoning; the
+   embedding server may need the documented per-run `HOST_MEM_MB=4096`), then
+   `RERANK_ENABLED=false QDRANT_COLLECTION=<scratch> CORPUS_DIR="$SCRATCH_DIR/corp" sh scripts/tools/run-task.sh local:stack`
+   against a disposable Qdrant and a scratch collection. Real embeddings; hash
+   mode is not acceptable for a published demo.
+3. `CONSOLE_BROWSER_CHROME=<pinned Chrome for Testing> python3 scripts/record_demo.py run --base-url http://127.0.0.1:<agent port> --frames "$SCRATCH_DIR/demo-frames" --media-dir site/media`
+   (needs `ffmpeg` and `ffprobe` on PATH; standard library otherwise). It prints
+   sizes, length and the speed-up applied to waiting time.
+4. Read every frame before committing the media (no vendor text, real-corpus
+   answers, keys or private paths); the console has no search screen, so the
+   search scene shows the retrieved excerpts panel.
