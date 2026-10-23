@@ -101,7 +101,7 @@ shape.
 trace lookups, run in the OpenObserve trace search (`type=traces`, stream
 `default`; [ADR-0006](adr/0006-openobserve-traces-metrics-backend.md)):
 
-- J1, trace by request: `SELECT * FROM "default" WHERE http_request_id = '<id>'`, then `SELECT operation_name, span_status, duration FROM "default" WHERE trace_id = '<trace id>'` for the tree (the trial also selected `_timestamp`, which its record does not show running; `_timestamp` is unverified until the re-qualification runs it)
+- J1, trace by request: `SELECT * FROM "default" WHERE http_request_id = '<id>'`, then `SELECT _timestamp, operation_name, span_status, duration FROM "default" WHERE trace_id = '<trace id>'` for the tree (`_timestamp` selectable, verified on v1.1.2 in the #956 re-qualification)
 - J2, slow answers: `SELECT trace_id, duration FROM "default" WHERE operation_name = 'v1.answer' AND duration > 500000 ORDER BY duration DESC LIMIT 5` (`duration` in microseconds)
 - J3, server errors: `SELECT trace_id FROM "default" WHERE span_status = 'ERROR' LIMIT 5`
 
@@ -110,7 +110,7 @@ These are the #782 trial queries, run against OpenObserve v1.0.4 (J1 100 of
 truth is unverified: no 5xx occurred, see the
 [trial record](records/2026-10-23-openobserve-oss-qualification.md)). Add
 `service_name = 'mainframe-rag-agent'` to scope them; `scripts/trace_arrival.py`
-filters on it. Not yet re-run on v1.1.2.
+filters on it. The #956 re-qualification re-ran them on v1.1.2 with identical results (J2 70=70) and verified the span fields `reference_parent_span_id`, `span_id`, `rag_stream_aborted` and `_timestamp`.
 `tests/test_metric_contract.py` pins this whole map in CI:
 instrument names/units/label keys, bucket boundaries, and that every
 `rag_*` name and label key in the PromQL file exists on the wire shape.

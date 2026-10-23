@@ -31,6 +31,31 @@
   packing always on and removed `ZO_METRICS_INDEX_ENABLED` and
   `ZO_FEATURE_WAL_PACK_ENABLED`, which changes the write path the S7 and
   durability evidence covered. The trial figures below are v1.0.4.
+- **Amendment, 2026-10-23 (#956): v1.1.2 re-qualified, adopted.** The local
+  re-run ([#956 comment](https://github.com/yonatan895/qdrant-pdf-rag/issues/956#issuecomment-6373675369))
+  passed G2 (identical auth behaviour), G3 (0 egress attempts with the three
+  `ZO_*` settings; the new `ZO_USAGE_REPORTING_URL` and `ZO_TELEMETRY_URL` made
+  none), G4, G5 (13/13 operations, 100/100 lookups, J2 70=70), G6 (peak 163 MiB)
+  and a 1.0.4 to 1.1.2 upgrade of a copy of the trial volume (identical query
+  battery, schema migrated 77 to 97, old traces 100/100, new traces 30/30). S6
+  was inconclusive at that scale. The pin stays v1.1.2; no fall-back to v1.0.4.
+  - **Upgrade gap closed:** the volume upgrade is no longer untested; it is the
+    1.0.4 to 1.1.2 run above. A later release still needs its own pin-bump run.
+  - **kill -9 trade-off:** the 107 of 107 spans present before the kill survive,
+    but spans from roughly the last 6 s before the kill were not visible (4 of
+    119). Traces accept losing about the last 6 s on a hard kill.
+  - **S7 is unchanged:** 400 acknowledged, 159 stored on v1.1.2 (161 on v1.0.4),
+    still silent loss with HTTP 200. The alert mitigation is tracked in the
+    #956 follow-up; see the finding below.
+  - **Disk-full signal finding (2026-10-23):** OpenObserve OSS has alerting
+    (`/api/{org}/{stream}/alerts`, SQL or PromQL over ingested streams) and its
+    `/metrics` exposes `zo_node_disk_total` and `zo_node_disk_usage`. Run
+    against the v1.1.2 binary with the data directory on a 128 MiB tmpfs and 60
+    MiB written there, both series stayed at the host root filesystem figures
+    and did not move. They do not measure the data volume, so an alert on them
+    cannot see the PVC filling. A usable volume signal needs a source that
+    mounts or reads the PVC; none is in the chart yet. No PrometheusRule
+    (maintainer decision).
 - **Required configuration (the supported deployment must set all of these):**
   - `ZO_TELEMETRY=false`, `ZO_MODEL_PRICING_ENABLED=false` and
     `ZO_MMDB_DISABLE_DOWNLOAD=true`. With `ZO_TELEMETRY=false` alone, the default
@@ -68,9 +93,9 @@
     needs a mitigation: volume-usage alerting and headroom well below the
     retention-sized budget.
   - **Not run:** Phase B (`kind load` failed with "failed to detect containerd
-    snapshotter"), the upgrade of a volume by a later release, and logs (S3).
-    The volume-upgrade gap stays until the re-qualification's 1.0.4 to 1.1.2
-    upgrade run reports; that run closes it.
+    snapshotter"), the upgrade of a volume by a release later than v1.1.2, and
+    logs (S3). The 1.0.4 to 1.1.2 upgrade ran and closed that gap (amendment
+    above).
     Not tested: SSO, RBAC and audit gaps in OSS.
   - AGPL-3.0 is accepted for the unmodified upstream binary as a separate
     service ([licensing](../licensing.md)). No modification of Enterprise
