@@ -338,3 +338,17 @@ def test_the_pod_probes_still_run_after_the_policy():
     boundary = names.index('Close the network boundary (block public egress, prove it)')
     assert names.index('Prove node and pod egress is blocked (mock vLLM pod, real sockets)') > boundary
     assert names.index('Application pod egress is blocked (agent pod, real sockets)') > boundary
+
+
+def test_a_node_probe_exercises_the_host_rule_before_require_hits_nodes():
+    # The NetworkPolicy keeps pod connects off the host rule, so the nodes
+    # counter is only reachable through a probe in a node's own namespace.
+    steps = kind_steps()
+    names = [s.get('name', '') for s in steps]
+    probe = names.index('Prove node egress is blocked (Kind node network namespace, real sockets)')
+    assert names.index('Assert the boundary rejected real traffic (host and pods)') > probe
+    step = steps[probe]
+    assert step['shell'] == GATED_SHELL
+    assert 'docker exec "$node" curl' in step['run']
+    assert all(ip in step['run'] for ip in ('1.1.1.1', '8.8.8.8', '9.9.9.9'))
+    assert 'exit 1' in step['run']

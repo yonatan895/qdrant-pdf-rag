@@ -839,6 +839,25 @@ jobs:
           /usr/local/bin/kubectl -n "$NS" exec -i deploy/vllm-mock -- python3 - reachable kubernetes.default.svc:443 < "$PROBE"
           /usr/local/bin/kubectl -n "$NS" exec -i deploy/vllm-mock -- python3 - blocked 1.1.1.1:443 8.8.8.8:443 9.9.9.9:443 < "$PROBE"
 
+      # Pod egress is stopped in the node by the NetworkPolicy, so pod probes no
+      # longer reach the host DOCKER-USER rule. A node's own network namespace is
+      # outside NetworkPolicy: this connect (curl; the node image has no python)
+      # must be refused by the host rule, which is what require-hits nodes proves.
+      - name: Prove node egress is blocked (Kind node network namespace, real sockets)
+        shell: sh rehearsal-infra/scripts/ci/egress_gate.sh run bash -e {0}
+        run: |
+          export PATH="/usr/local/bin:$PATH"
+          for node in $(/usr/local/bin/kind get nodes --name gapbox); do
+            for target in 1.1.1.1 8.8.8.8 9.9.9.9; do
+              if docker exec "$node" curl -sS --max-time 5 -o /dev/null "https://$target/" 2>/dev/null; then
+                echo "VIOLATED: $node reached $target:443"
+                exit 1
+              fi
+              echo "unreachable $node -> $target:443"
+            done
+          done
+          echo "node egress probe blocked: ok"
+
       - name: Assert the boundary rejected real traffic (host and pods)
         run: |
           sh rehearsal-infra/scripts/ci/egress_gate.sh require-hits host

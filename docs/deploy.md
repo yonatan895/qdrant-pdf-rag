@@ -1198,6 +1198,9 @@ not by mocking. `scripts/ci/egress_gate.sh` owns the rules and
   allowing only cluster DNS, pods of that namespace and the API server (a
   CI-only manifest; the product chart has no egress option). The host rules alone
   were seen to miss a pod connect to a public address.
+  Because that policy stops pod connects before the host, a probe from each Kind
+  node's own network namespace (outside NetworkPolicy) exercises the host rule, so
+  `require-hits nodes` still passes for the right reason.
   The counters and rules are retained as `diagnostics/egress-gate-*.txt`.
 - **Maintenance**: a step added after the boundary must use the gated `shell:`
   or be listed as post-mortem in `tests/test_egress_gate.py`. A new public
