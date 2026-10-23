@@ -903,12 +903,15 @@ stepped-concurrency run (#843 D4).
 - **Propagation:** these are `Settings` fields read from the environment
   (`REQUEST_MAX_CONCURRENT`, `REQUEST_QUEUE_MAX`, `REQUEST_QUEUE_WAIT_S`,
   `REQUEST_DEADLINE_S`, `EMBED_MAX_INPUT_CHARS`, `INGEST_MAX_PDF_BYTES`,
-  `INGEST_MAX_DOC_PAGES`, `INGEST_MAX_DOC_CHUNKS`). Only `REQUEST_DEADLINE_S`
-  has a handoff: the chart value `requestDeadlineSeconds` (default 270, rendered
-  as the pod env; a direct Helm caller may set 0..3600, 0 disables). There is no
-  operator-file key for it yet (that needs the Task `TASK_OP_KEYS` list to move
-  with `OPERATOR_ENV_KEYS`). The other names stay a local/CI experiment, not a
-  deployment change (same rule as `LLM_THINKING_RESERVE_TOKENS_SIMPLE`).
+  `INGEST_MAX_DOC_PAGES`, `INGEST_MAX_DOC_CHUNKS`). Only the four
+  request-bound names have a typed handoff (#374): operator keys
+  `REQUEST_DEADLINE_S`, `REQUEST_MAX_CONCURRENT`, `REQUEST_QUEUE_MAX`,
+  `REQUEST_QUEUE_WAIT_S` -> chart values `requestDeadlineSeconds` (default 270),
+  `requestMaxConcurrent`, `requestQueueMax`, `requestQueueWaitSeconds` -> pod env.
+  Empty keeps the chart state: deadline 270, admission names not rendered (no limit)
+  until the D4 run approves values; `0` is an explicit selection. The other
+  names (`EMBED_MAX_INPUT_CHARS`, `INGEST_MAX_*`) stay a local/CI experiment, not a
+  deployment change.
 
 **Local evidence (labelled by scope):** full re-ingest on 2026-10-02 —
 452 documents / 209,501 pages / 190,440 chunks in 98 minutes at 4 workers,
@@ -925,7 +928,7 @@ peak RSS/CPU, restarts, thread count after forced expirations; (2) pick
 knee with headroom and write the stop/rollback criteria; (3) largest
 included PDF through the whole ingest process tree (peak RSS, IPC bytes) to
 choose `ingest_max_*` and `embed_max_input_chars` (the embedding model's own
-window owns the latter); (4) the Helm/operator handoff for the chosen values.
+window owns the latter); (4) set the chosen values through the operator keys above (the handoff exists; the values do not).
 
 ## 7. Settings catalog
 

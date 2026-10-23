@@ -23,11 +23,25 @@ REASONING_EFFORT_DEFAULTS = {"LLM_REASONING_EFFORT_SIMPLE": "medium", "LLM_REASO
                              "LLM_REASONING_EFFORTS": "low,medium,xhigh"}
 REASONING_ENV_KEYS = (*REASONING_INTEGER_FIELDS, *REASONING_EFFORT_FIELDS, "LLM_REASONING_EFFORTS", "LLM_STREAM")
 
+# Request admission and total deadline (#374 handoff, #843 D1). Empty keeps the
+# chart default (deadline 270; admission unset, i.e. off until the D4 stepped
+# run); zero is an explicit selection. Limits match config.Settings and the
+# chart schema. The route timeout is the mapper's fixed 300 s.
+ROUTE_TIMEOUT_SECONDS = 300
+REQUEST_INTEGER_FIELDS = {
+    "REQUEST_DEADLINE_S": ("requestDeadlineSeconds", 0, 3600),
+    "REQUEST_MAX_CONCURRENT": ("requestMaxConcurrent", 0, 1000),
+    "REQUEST_QUEUE_MAX": ("requestQueueMax", 0, 1000),
+}
+REQUEST_WAIT_KEY = "REQUEST_QUEUE_WAIT_S"  # chart requestQueueWaitSeconds, 0..300, decimal
+REQUEST_ENV_KEYS = (*REQUEST_INTEGER_FIELDS, REQUEST_WAIT_KEY)
+
 MODEL_CONFIG_KEYS = (
     "GATEWAY_BASE_URL", "EMBED_BASE_URL", "EMBED_MODEL",
     "LLM_BASE_URL", "LLM_MODEL_REASONING", "RERANK_BASE_URL",
     "CONTEXT_LLM_BASE_URL", "CONTEXT_LLM_MODEL", "CONTEXTUAL_EMBED_ENABLED",
     *REASONING_ENV_KEYS,
+    *REQUEST_ENV_KEYS,
 )
 
 # Operator booleans that fail closed on any non-boolean spelling. One parser
@@ -191,8 +205,35 @@ def reasoning_overrides(values: Mapping[str, str]) -> dict[str, int | str | bool
     return result
 
 
+def request_overrides(values: Mapping[str, str]) -> dict[str, int | float]:
+    """Explicit request-bound selections as chart values; empty is omitted.
+
+    A nonzero deadline must stay strictly below the route timeout so the
+    agent's 504 fires before the route cut (#843 D2). Diagnostics name the
+    field, never the value.
+    """
+    result: dict[str, int | float] = {}
+    for name, (field, minimum, maximum) in REQUEST_INTEGER_FIELDS.items():
+        raw = values.get(name, "")
+        if raw == "":
+            continue
+        if not re.fullmatch(r"[0-9]{1,5}", raw) or not minimum <= int(raw) <= maximum:
+            raise ValueError(f"{name} must be an integer from {minimum} to {maximum}")
+        result[field] = int(raw)
+    deadline = result.get("requestDeadlineSeconds", 0)
+    if deadline >= ROUTE_TIMEOUT_SECONDS:
+        raise ValueError(f"REQUEST_DEADLINE_S must be 0 or below the {ROUTE_TIMEOUT_SECONDS} s route timeout")
+    raw = values.get(REQUEST_WAIT_KEY, "")
+    if raw != "":
+        if not re.fullmatch(r"[0-9]{1,3}(?:\.[0-9]{1,3})?", raw) or float(raw) > 300:
+            raise ValueError(f"{REQUEST_WAIT_KEY} must be a number from 0 to 300")
+        result["requestQueueWaitSeconds"] = float(raw) if "." in raw else int(raw)
+    return result
+
+
 def validate_model_config(values: Mapping[str, str]) -> None:
     reasoning_overrides(values)
+    request_overrides(values)
     for name in MODEL_CONFIG_KEYS:
         if name.endswith("BASE_URL"):
             value = values.get(name, "")

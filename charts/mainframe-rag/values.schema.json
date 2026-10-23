@@ -44,6 +44,9 @@
   },
   "properties": {
     "requestDeadlineSeconds": { "type": "integer", "minimum": 0, "maximum": 3600 },
+    "requestMaxConcurrent": { "type": "integer", "minimum": 0, "maximum": 1000 },
+    "requestQueueMax": { "type": "integer", "minimum": 0, "maximum": 1000 },
+    "requestQueueWaitSeconds": { "type": "number", "minimum": 0, "maximum": 300 },
     "replicaCount": {
       "type": "integer",
       "minimum": 1,
