@@ -17,9 +17,9 @@ from scripts.unit_evidence import POLICY, input_hashes
 def pytest_addoption(parser):
     parser.addoption('--unit-evidence')
     parser.addoption('--unit-phase', choices=('collect', 'execute'))
-    parser.addoption('--unit-shards', type=int, choices=(2, 4), default=2)
+    parser.addoption('--unit-shards', type=int, choices=(2, 4, 8), default=2)
     parser.addoption(
-        "--unit-shard", type=int, choices=(1, 2, 3, 4), default=None,
+        "--unit-shard", type=int, choices=tuple(range(1, 9)), default=None,
         help="Run one shard of the selected tests (omit to run all tests).",
     )
 

@@ -15,15 +15,8 @@ on:
       - requirements*.txt
       - locks/**
       - .github/workflows/browser.yml
-  push:
-    branches: [main]
-    paths:
-      - src/mainframe_rag/webui/**
-      - tests/console_browser_contracts.py
-      - tests/helpers_console_browser.py
-      - requirements*.txt
-      - locks/**
-      - .github/workflows/browser.yml
+  schedule:
+    - cron: "51 2 * * *" # nightly on main, UTC, off the hour (replaces the path-filtered push run)
   workflow_dispatch:
 
 permissions:
