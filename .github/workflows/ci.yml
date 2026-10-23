@@ -51,6 +51,7 @@ jobs:
         with:
           python-version: "3.14"
       - run: python scripts/prepare_python.py --python "$(command -v python)" --wheelhouse .tools/python-wheels/dev --connected --download-workers 8
+        timeout-minutes: 4
       - name: Run lint and types with execution evidence
         run: |
           python scripts/ci_evidence.py --lane lint_and_types --job-name lint --output "$RUNNER_TEMP/evidence-lint" -- bash -e -c '
@@ -94,6 +95,7 @@ jobs:
             exit 1
           fi
       - run: python scripts/prepare_python.py --python "$(command -v python)" --wheelhouse .tools/python-wheels/dev --connected --download-workers 8
+        timeout-minutes: 4
       - name: Install pinned Task runner for required contract tests
         run: sh scripts/tools/install-task.sh
       - name: Install checksum-pinned Helm for deployment render tests
@@ -106,7 +108,7 @@ jobs:
         run: >-
           python scripts/ci_evidence.py --lane unit_tests --job-name 'unit (${{ matrix.shard }}/8)'
           --output "$RUNNER_TEMP/evidence-unit-${{ matrix.shard }}" --junit "$RUNNER_TEMP/unit-${{ matrix.shard }}.xml"
-          --unit-shard=${{ matrix.shard }} --unit-shards=8
+          --unit-shard=${{ matrix.shard }} --unit-shards=8 --unit-durations tests/unit-durations.json
       - name: Retain native execution evidence
         if: always()
         uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
@@ -148,6 +150,7 @@ jobs:
         with:
           python-version: "3.14"
       - run: python scripts/prepare_python.py --python "$(command -v python)" --wheelhouse .tools/python-wheels/dev --connected --download-workers 8
+        timeout-minutes: 4
       - run: sh scripts/tools/install-task.sh
       - run: sh scripts/tools/install-helm.sh
       - name: Execute critical historical mutations
@@ -196,6 +199,7 @@ jobs:
       - name: docker must be present (the tier skips without it — skip is failure here)
         run: docker version
       - run: python scripts/prepare_python.py --python "$(command -v python)" --wheelhouse .tools/python-wheels/dev --connected --download-workers 8
+        timeout-minutes: 4
       - name: Prepare approved Qdrant image explicitly
         run: python scripts/qdrant_pin.py --prepare
       - run: sh scripts/tools/install-task.sh
@@ -251,6 +255,7 @@ jobs:
       - name: docker must be present for qdrant_sim
         run: docker version
       - run: python scripts/prepare_python.py --python "$(command -v python)" --wheelhouse .tools/python-wheels/dev --connected --download-workers 8
+        timeout-minutes: 4
       - name: Prepare approved Qdrant image explicitly
         run: python scripts/qdrant_pin.py --prepare
       - name: run L1 retrieval gate
@@ -314,6 +319,7 @@ jobs:
       - name: docker must be present for qdrant_sim
         run: docker version
       - run: python scripts/prepare_python.py --python "$(command -v python)" --wheelhouse .tools/python-wheels/dev --connected --download-workers 8
+        timeout-minutes: 4
       - name: Prepare approved Qdrant image explicitly
         run: python scripts/qdrant_pin.py --prepare
       - name: run L1 retrieval eval with native evidence

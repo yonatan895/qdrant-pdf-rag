@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import hashlib
+import http.client
 import importlib.metadata
 import json
 import os
@@ -18,7 +19,9 @@ import shutil
 import sys
 import sysconfig
 import tempfile
+import time
 import tomllib
+import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -188,6 +191,14 @@ def verify_wheelhouse(root: Path, profile: str, directory: Path) -> dict:
             "wheels": dict(sorted(expected.items()))}
 
 
+# Connected acquisition bounds: normal downloads finish in seconds. The socket
+# timeout covers connect and each blocked read; the deadline covers one attempt.
+DOWNLOAD_SOCKET_TIMEOUT_S = 20
+DOWNLOAD_DEADLINE_S = 120
+DOWNLOAD_ATTEMPTS = 3
+DOWNLOAD_BACKOFF_S = 2
+
+
 def download_workers(value: int) -> int:
     if type(value) is not int or not 1 <= value <= 16:
         raise LockError("download workers must be between 1 and 16")
@@ -218,13 +229,35 @@ def acquire(root: Path, profile: str, directory: Path, *, workers: int = 1) -> d
             raise LockError("unapproved connected acquisition origin")
         pending.append(entry)
 
+    def attempt(entry: dict, temporary: Path) -> None:
+        deadline = time.monotonic() + DOWNLOAD_DEADLINE_S
+        with temporary.open("wb") as output, urllib.request.urlopen(
+                entry["url"], timeout=DOWNLOAD_SOCKET_TIMEOUT_S) as source:
+            # The socket timeout bounds one blocked read only; a peer trickling
+            # bytes would never trip it, so the whole attempt has its own deadline.
+            while chunk := source.read1(1 << 16):  # returns once any bytes arrive
+                if time.monotonic() > deadline:
+                    raise TimeoutError("wheel download attempt exceeded its deadline")
+                output.write(chunk)
+
     def fetch(entry: dict) -> None:
         destination = directory / entry["wheel"]
         fd, name = tempfile.mkstemp(prefix=".wheel-", dir=directory)
+        os.close(fd)
         temporary = Path(name)
         try:
-            with os.fdopen(fd, "wb") as output, urllib.request.urlopen(entry["url"], timeout=60) as source:
-                shutil.copyfileobj(source, output)
+            for number in range(1, DOWNLOAD_ATTEMPTS + 1):
+                try:
+                    attempt(entry, temporary)
+                    break
+                except urllib.error.HTTPError as exc:
+                    if exc.code < 500 and exc.code != 429:
+                        raise LockError("wheel download failed") from None
+                except (OSError, http.client.HTTPException):
+                    pass  # transient transport failure; retried below, never echoed
+                if number == DOWNLOAD_ATTEMPTS:
+                    raise LockError("wheel download failed after bounded retries")
+                time.sleep(DOWNLOAD_BACKOFF_S * 2 ** (number - 1))
             if digest(temporary) != entry["sha256"]:
                 raise LockError("downloaded wheel checksum mismatch")
             temporary.replace(destination)

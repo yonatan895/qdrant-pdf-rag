@@ -53,6 +53,7 @@ jobs:
         with:
           python-version: '3.14'
       - run: python scripts/prepare_python.py --python "$(command -v python)" --wheelhouse .tools/python-wheels/dev --connected --download-workers 8
+        timeout-minutes: 4
       - name: Explicitly prepare pinned service images
         run: |
           python scripts/qdrant_pin.py --prepare

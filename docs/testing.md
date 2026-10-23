@@ -44,6 +44,15 @@ Reproduce a GitHub shard with
 `sh scripts/tools/run-task.sh qa:unit -- -p tests.ci_shard --unit-shards=4 --unit-shard=1`
 (or `2`, `3`, `4`). Invalid shard numbers and empty selections fail through pytest.
 Without the option, local and air-gapped GitLab runs retain the full suite.
+
+GitHub CI balances shards by recorded duration (`--unit-durations
+tests/unit-durations.json`, rule in [unit-coverage](#unit-coverage)) so the
+slowest shard tracks the average. Refresh the file when shard times drift
+apart by more than about 15% or after large test changes; stale or missing
+entries only cost balance:
+`gh run download <green ci run id> -p 'evidence-unit-*' -D "$DIR"` then
+`python scripts/unit_durations.py "$DIR" > tests/unit-durations.json`. Unlisted
+(fast or new) tests weigh `default_ms` and still land in exactly one shard.
 No extra pytest dependency or runtime model/service is needed.
 Request-counter assertions compare the scrape before and after each request:
 the metrics provider persists across lifespans, so an absolute total of one
@@ -631,18 +640,20 @@ when selected; #411 owns maintainer enforcement.
 
 ## Native CI execution evidence
 
+PR CI runs on the merge ref, not the PR head. `ci_evidence.py` `identity()`
+requires that commit's parents to equal the event's `[base, head]`, else it
+fails with `checkout does not bind the event head and base`.
+
 The existing review-tooling suite owns candidate selection, CI invocation and
-native receipt regression cases. It exercises real temporary Git merge histories
-and child processes, plus independently specified native API records and ZIP
-bytes. It rejects wrong producer/run/attempt/candidate identities, empty, skipped or
+native receipt regression cases. It exercises real temporary Git merge histories,
+child processes, and independently specified native API records and ZIP bytes. It rejects wrong producer/run/attempt/candidate identities, empty, skipped or
 xfail test reports, changed raw results, unsafe ZIP entries, and incomplete
 pagination. These local cases establish parser and attribution behavior, not a deployed
 acceptance check, human review, or merge-rule enforcement; #411's real PR trials do.
 
 The consumer cases also execute file pagination with both rename paths. Legacy
 review-parser tests retain optional diagnostic compatibility; native technical
-verification ignores human comments and draft state. Only the maintainer controls
-ready/review/merge decisions. Publication tests
+verification ignores human comments and draft state. Publication tests
 require pending before collection and failure after a failed currentness recheck.
 A controlled curl stub executes the GitLab report shell and verifies literal-body
 POST behavior. The posted GitHub report belongs to the native PR trial: compare the posted
@@ -697,6 +708,17 @@ approved `ci.yml` bytes, never a receipt-supplied count. Only the literal,
 complete two- or four-job matrices are supported; missing, duplicated, mixed
 or partial shards cannot qualify. Local opt-in sharding defaults to two;
 ordinary unsharded local/GitLab execution is unchanged.
+
+Shard assignment has two rules, both accepted by the consumer. The original
+rule is `sorted(eligible)[shard - 1::shards]` (a proof without a `rule` key).
+The balanced rule (`--unit-durations FILE`, `lpt-durations-v1`) sorts nodes by
+recorded milliseconds descending, ties by node id, and gives each to the
+lightest shard, ties by lowest shard; unknown nodes weigh the file's
+`default_ms`. The proof embeds the durations text and its sha256, and
+`validate` recomputes the assignment from that text; `validate_union` requires
+one rule across shards and the exact partition of the eligible nodes. Durations
+only choose where a test runs, never whether it runs, so they are not a trusted
+input: a wrong file costs balance, not coverage.
 
 The critical-hazard runner keeps a baseline and its mutation sequential, but
 GitHub selects four independent processes for separate pairs (`qa:hazards

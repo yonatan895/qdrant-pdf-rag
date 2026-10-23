@@ -678,3 +678,114 @@ def test_empty_classes_get_no_confidence_interval():
     """An empty class must render n/a, never a fabricated CI."""
     assert ci95([]) is None
     assert ci95_paired([]) is None
+
+
+# ------------------------------------------------- Qdrant API key (#950)
+_AUTH_SECRET = "s3cret-harness-key-950"
+
+
+class _Reached(Exception):
+    """Sentinel: the harness got past the Qdrant pin check."""
+
+
+@pytest.fixture
+def auth_qdrant():
+    """Fake Qdrant over real HTTP: 403 unless the api-key header equals the secret."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    seen: list[str | None] = []
+    info = {"status": "green", "optimizer_status": "ok", "points_count": 7, "segments_count": 1,
+            "config": {"params": {"vectors": {"size": 4, "distance": "Cosine"}},
+                       "hnsw_config": {"m": 16, "ef_construct": 100, "full_scan_threshold": 10000},
+                       "optimizer_config": {"deleted_threshold": 0.2, "vacuum_min_vector_number": 1000,
+                                            "default_segment_number": 0, "flush_interval_sec": 5},
+                       "wal_config": {"wal_capacity_mb": 32, "wal_segments_ahead": 0}},
+            "payload_schema": {}}
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            key = self.headers.get("api-key")
+            seen.append(key)
+            if key != _AUTH_SECRET:
+                self.send_response(403)
+                self.end_headers()
+                self.wfile.write(b"forbidden")
+                return
+            result = ([{"name": "pin-a", "creation_time": "2026-01-01T00:00:00", "size": 1}]
+                      if self.path.endswith("/snapshots") else info)
+            body = json.dumps({"status": "ok", "time": 0.0, "result": result}).encode()
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{server.server_port}", seen
+    server.shutdown()
+
+
+def _run_harness_against(url, key, tmp_path, monkeypatch, capsys):
+    from scripts import harness
+
+    from mainframe_rag.eval import retrieval
+    from mainframe_rag.ingest import embed
+
+    golden = tmp_path / "g.jsonl"
+    golden.write_text(json.dumps({"id": "a", "query": "q", "query_class": "syntax",
+                                  "expected_doc_ids": ["d"]}) + "\n")
+    baseline = tmp_path / "b.json"
+    baseline.write_text(json.dumps({"_meta": {"golden_entries": 1,
+                                              "snapshot": {"points_count": 7, "snapshot_name": "pin-a"}},
+                                    "classes": {}, "per_query": {}}))
+    for name in ("QDRANT_API_KEY",):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("QDRANT_URL", url)
+    monkeypatch.setenv("QDRANT_COLLECTION", "c")
+    monkeypatch.setenv("EMBED_MODE", "hash")
+    monkeypatch.setenv("ALLOW_HASH_MODE", "true")
+    monkeypatch.setenv("VENUE", "dev")
+    if key:
+        monkeypatch.setenv("QDRANT_API_KEY", key)
+
+    def reached(*a, **k):
+        raise _Reached
+
+    monkeypatch.setattr(embed, "build_embedder", lambda *a: object())
+    monkeypatch.setattr(retrieval, "collect_rows", reached)
+    argv = ["--golden", str(golden), "--baseline", str(baseline), "--out", str(tmp_path / "o.json")]
+    try:
+        rc = harness.main(argv)
+    except _Reached:
+        rc = "reached"
+    err = capsys.readouterr().err
+    return rc, err
+
+
+def test_harness_authenticates_to_qdrant_with_the_configured_key(auth_qdrant, tmp_path, monkeypatch, capsys):
+    url, seen = auth_qdrant
+    rc, err = _run_harness_against(url, _AUTH_SECRET, tmp_path, monkeypatch, capsys)
+    assert rc == "reached", err
+    assert "unreachable" not in err
+    assert _AUTH_SECRET not in err
+    assert set(seen) == {_AUTH_SECRET}
+
+
+def test_harness_without_key_fails_closed_with_fixed_message_and_no_secret(auth_qdrant, tmp_path, monkeypatch, capsys):
+    url, seen = auth_qdrant
+    rc, err = _run_harness_against(url, None, tmp_path, monkeypatch, capsys)
+    assert rc == 1
+    assert "unreachable; refusing to evaluate" in err
+    assert _AUTH_SECRET not in err
+    assert set(seen) == {None}
+
+
+def test_harness_with_wrong_key_does_not_leak_it(auth_qdrant, tmp_path, monkeypatch, capsys):
+    url, _ = auth_qdrant
+    rc, err = _run_harness_against(url, "wrong-key-xyz", tmp_path, monkeypatch, capsys)
+    assert rc == 1
+    assert "wrong-key-xyz" not in err

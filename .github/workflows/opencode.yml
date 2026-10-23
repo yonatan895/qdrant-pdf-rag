@@ -152,6 +152,7 @@ jobs:
           python scripts/prepare_python.py --python "$(command -v python)" --wheelhouse .tools/python-wheels/dev --connected --download-workers 8
           sh scripts/tools/install-task.sh
           echo "TASK_CONTRACTS_REQUIRE_RUNNER=1" >> "$GITHUB_ENV"
+        timeout-minutes: 4
 
       - name: Select review profile & generate manifest
         id: profile
