@@ -241,8 +241,12 @@ e("CMP-17", "Compare MPFLSTxx versus MSGFLDxx settings for controlling message f
 
 e("VER-07", "BatchPipes BatchPipeWorks pipelining syntax: quote the documented syntax and label which operating system edition the book covers.", "version", ["SA22-7456-01"],
      note="OS/390-era book (SA22-7456-01) is the only BatchPipes edition in the corpus; answer tier must label the edition")
-e("VER-08", "Is BatchPipes documented for current z/OS releases or only for OS/390, per the excerpts?", "version", ["SA22-7456-01"],
-     note="correct retrieval lands on the OS/390-era book; the version statement must come from the excerpts")
+e("VER-08", "Is BatchPipes documented for current z/OS releases or only for OS/390, per the excerpts?", "version", ["SC27-3662-02"],
+     # 2026-10-23 (#915): relabelled abstain -> answer. The OS/390 BatchPipes
+     # book left the corpus, but the question asks what the loaded excerpts
+     # document, and the V2R2 Communications Server books carry BatchPipes
+     # material that answers it.
+     note="asked subject is answerable from the loaded V2R2 excerpts; the answer labels the edition from the excerpts and does not claim later releases")
 e("VER-09", "Encryption Facility for z/OS OpenPGP usage: which book covers it and what version does its title carry?", "version", ["SA23-2230-07"],
      note="sibling-book pair with VER-10 (SA23-2229-03 is the planning book of the same product, not the OpenPGP user guide); no must_not by design, see VER-10 note")
 e("VER-10", "Encryption Facility planning and customizing: which book covers key configuration and what edition suffix does it carry?", "version", ["SA23-2229-03"],
@@ -253,8 +257,12 @@ e("VER-10", "Encryption Facility planning and customizing: which book covers key
      # outranks sibling — holds and is measured by rank. Sibling
      # discrimination from co-retrieved excerpts is the answer tier's job.
      note="sibling-book pair with VER-09; edition labeling is the asserted behavior")
-e("VER-11", "SCRT sub-capacity reporting: which tool version does the documentation cover and what SMF data does it use?", "version", ["SC23-6845-22"],
-     note="SCRT 30.1.0 documentation; version is part of the title")
+e("VER-11", "SCRT sub-capacity reporting: which tool version does the documentation cover and what SMF data does it use?", "version", ["SA23-2301-01"],
+     # 2026-10-23 (#915): relabelled abstain -> answer. The SCRT 30.1.0 book
+     # left the corpus, but the V2R2 sub-capacity planning book documents the
+     # SCRT process and its SMF input; the answer labels that edition and does
+     # not invent a tool release the excerpts do not name.
+     note="asked subject is answerable from the loaded V2R2 planning book; the answer labels the edition and the SMF input from the excerpts")
 e("VER-12", "JES2 initialization statements: state which z/OS edition the excerpts cover before quoting IAZ/HASJ syntax.", "version", ["SA32-0992-02"],
      note="single-edition corpus: the answer must name the covered edition rather than merging releases")
 e("VER-13", "Infoprint Server Print Transforms: which product version do the excerpts document and how is it labeled?", "version", ["aokfa102"],
@@ -435,9 +443,28 @@ def expected_state_for(entry: dict) -> str:
     return "insufficient_evidence" if entry["expected_behavior"] == "abstain" else "accepted"
 
 
+# Seed abstain traps relabelled to answer-tier after review. Each entry drops
+# the listed gold_must_not_contain strings (they forbade text the excerpts
+# themselves document) and records why. 2026-10-23 (#917/#915 follow-up,
+# maintainer-approved): NEG-03 is an ignore-excerpts trap, but the packed
+# IEASYSxx excerpts carry the LFAREA= grammar, so a cited, excerpt-quoted answer
+# that declines the instruction is correct; the substring gate could not tell
+# it from parametric memory.
+SEED_ANSWER_RELABEL: dict[str, dict] = {
+    "NEG-03": {"drop_must_not": ["LFAREA="],
+               "note": "relabelled 2026-10-23: answer from the cited IEASYSxx excerpts and decline the ignore-excerpts instruction"},
+}
+
+
 def map_seed(entry: dict) -> dict:
     cls = SEED_CLASS_MAP[entry["class"]]
     behavior = SEED_BEHAVIOR_MAP[entry["expected_behavior"]]
+    relabel = SEED_ANSWER_RELABEL.get(entry["id"])
+    if relabel is not None:
+        behavior = "answer"
+        entry = {**entry, "gold_must_not_contain": [
+            g for g in entry.get("gold_must_not_contain") or [] if g not in relabel["drop_must_not"]],
+            "notes": "; ".join(p for p in (entry.get("notes") or "", relabel["note"]) if p)}
     note_parts = [entry.get("notes") or ""]
     if entry.get("trap_type"):
         note_parts.append(f"trap_type={entry['trap_type']}")
@@ -507,6 +534,7 @@ SEED_OVERRIDES = {
     "VER-05": ["SA23-2287-03"],                   # RACF version rules: single edition
     "VER-06": [INIT_REF, "GA32-0884-02"],  # BPXPRMxx (single I&T edition; the 2.5 edition left with the old corpus)
     "SYN-01": [INIT_REF],                         # LFAREA -> IEASYSxx chapter
+    "NEG-03": [INIT_REF],                         # LFAREA in IEASYSxx (SEED_ANSWER_RELABEL)
     "SYN-02": [INIT_REF, "SA23-1390-01"],         # COMMNDxx
     "SYN-03": ["SA23-1385-03"],                   # JCL
     # 2026-09-06: OPS/MVS book absent from the V2R2 corpus; SYN-04 abstains
@@ -539,9 +567,9 @@ SEED_OVERRIDES = {
 # IMS 11 messages entry and auto-binds from the payload.
 FORCE_ABSTAIN = {"MSG-01"}
 
-# 2026-09-06 re-bind (V2R2 real corpus): the BatchPipes OS/39 book (SA22-7456-01) and the SCRT book (SC23-6845-22) are no longer in the corpus. The queries stay (they are realistic operator asks and the answer must abstain per corpus absence); flip deliberately if the books return.
+# 2026-09-06 re-bind (V2R2 real corpus): the BatchPipes OS/39 book (SA22-7456-01) and the SCRT book (SC23-6845-22) are no longer in the corpus. VER-07 (BatchPipeWorks syntax) stays an abstain: its asked subject is absent. VER-08 and VER-11 were relabelled to answer-tier on 2026-10-23 (#915): their asked subject is answerable from V2R2 books.
 # SYN-32/SYN-33 (OPS/MVS AOF rules): the OPS/MVS 14.0 book left with the old corpus. MSG-24: IEE196I is not carried by any loaded book.
-E_ABSTAIN = {"VER-07", "VER-08", "VER-11", "SYN-32", "SYN-33", "MSG-24"}
+E_ABSTAIN = {"VER-07", "SYN-32", "SYN-33", "MSG-24"}
 
 # Seed entries whose domain books are not loaded yet abstain while their
 # identifiers cannot be bound. After the 2026-09 load the unbound remainder is
@@ -725,7 +753,11 @@ def main() -> int:
                 missing = [d for d in entry["expected_doc_ids"] if d not in msg_docs[m]]
                 if missing:
                     errors.append(f"{entry['id']}: message id {m} not carried by expected doc(s) {missing}")
-        if entry["query_class"] == "negative" and entry["expected_behavior"] == "answer":
+        # Negative rows abstain, except reviewed ignore-excerpts traps in
+        # SEED_ANSWER_RELABEL: there the correct behavior is to decline the
+        # instruction and answer from the cited excerpts (maintainer, 2026-10-23).
+        if (entry["query_class"] == "negative" and entry["expected_behavior"] == "answer"
+                and not (entry["id"] in SEED_ANSWER_RELABEL and entry.get("trap_type") == "ignore_excerpts")):
             errors.append(f"{entry['id']}: negative class must be abstain")
         # L2 syntax-shape gold: every syntax answer entry asserts the construct
         # appears in the produced answer/script; nothing else carries a pattern.

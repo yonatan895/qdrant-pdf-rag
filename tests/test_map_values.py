@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -35,6 +36,7 @@ MAPPER_KEYS = [
     "LLM_MAX_MODEL_LEN", "LLM_RESERVED_OUTPUT_TOKENS",
     "LLM_THINKING_RESERVE_TOKENS_SIMPLE", "LLM_THINKING_RESERVE_TOKENS_COMPLEX",
     "LLM_REASONING_EFFORT_SIMPLE", "LLM_REASONING_EFFORT_COMPLEX", "LLM_REASONING_EFFORTS", "LLM_STREAM",
+    "REQUEST_DEADLINE_S", "REQUEST_MAX_CONCURRENT", "REQUEST_QUEUE_MAX", "REQUEST_QUEUE_WAIT_S",
     "RERANK_ENABLED", "RERANK_BASE_URL", "RERANK_MODEL", "RERANK_ENDPOINT_ORDER",
     "GATEWAY_API_KEY_SECRET", "GATEWAY_API_KEY_SECRET_KEY", "GATEWAY_CA_CONFIGMAP", "PULL_SECRET",
     "OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_ENDPOINT_RESOLVED", "OTEL_TRACING_ENABLED",
@@ -888,3 +890,76 @@ def test_airgap_render_carries_the_request_deadline(mapper_env):
     actual = {entry["name"]: entry.get("value") for entry in agent["env"]}
     assert actual["REQUEST_DEADLINE_S"] == "270"
     assert yaml.safe_load(output.read_text())["route"]["timeoutSeconds"] > int(actual["REQUEST_DEADLINE_S"])
+
+
+def _agent_env(output):
+    rendered = subprocess.run(
+        [str(REPO / ".tools/bin/helm"), "template", "app", str(CHART), "-f", str(output),
+         "--namespace", "ns", "--show-only", "templates/agent-deployment.yaml"],
+        capture_output=True, text=True, check=False,
+    )
+    assert rendered.returncode == 0, rendered.stderr
+    agent = yaml.safe_load(rendered.stdout)["spec"]["template"]["spec"]["containers"][0]
+    return {entry["name"]: entry.get("value") for entry in agent["env"]}
+
+
+def test_request_bound_inputs_unset_keep_chart_deadline_and_no_admission(mapper_env):
+    """#374 handoff: no operator value means no override; admission stays unset (D4 pending)."""
+    result, output = mapper_env()
+    assert result.returncode == 0, result.stderr
+    values = load_values(output)
+    assert not {"requestDeadlineSeconds", "requestMaxConcurrent", "requestQueueMax",
+                "requestQueueWaitSeconds"} & values.keys()
+    actual = _agent_env(output)
+    assert actual["REQUEST_DEADLINE_S"] == "270"
+    assert not {"REQUEST_MAX_CONCURRENT", "REQUEST_QUEUE_MAX", "REQUEST_QUEUE_WAIT_S"} & actual.keys()
+
+
+def test_request_bound_operator_values_reach_the_pod_and_settings(monkeypatch, mapper_env):
+    from mainframe_rag.config import Settings
+
+    chosen = {"REQUEST_DEADLINE_S": "120", "REQUEST_MAX_CONCURRENT": "4",
+              "REQUEST_QUEUE_MAX": "8", "REQUEST_QUEUE_WAIT_S": "2.5"}
+    for name, value in chosen.items():
+        monkeypatch.setenv(name, value)
+    result, output = mapper_env()
+    assert result.returncode == 0, result.stderr
+    actual = _agent_env(output)
+    assert {name: actual[name] for name in chosen} == chosen
+    for name in chosen:
+        monkeypatch.setenv(name, actual[name])
+    settings = Settings(_env_file=None)
+    assert (settings.request_deadline_s, settings.request_max_concurrent,
+            settings.request_queue_max, settings.request_queue_wait_s) == (120.0, 4, 8, 2.5)
+
+
+def test_request_bound_explicit_zero_is_retained(monkeypatch, mapper_env):
+    for name in ("REQUEST_DEADLINE_S", "REQUEST_MAX_CONCURRENT", "REQUEST_QUEUE_MAX", "REQUEST_QUEUE_WAIT_S"):
+        monkeypatch.setenv(name, "0")
+    result, output = mapper_env()
+    assert result.returncode == 0, result.stderr
+    actual = _agent_env(output)
+    assert [actual[n] for n in ("REQUEST_DEADLINE_S", "REQUEST_MAX_CONCURRENT",
+                                "REQUEST_QUEUE_MAX", "REQUEST_QUEUE_WAIT_S")] == ["0"] * 4
+
+
+@pytest.mark.parametrize("name,raw", [
+    ("REQUEST_DEADLINE_S", "-1"), ("REQUEST_DEADLINE_S", "3601"), ("REQUEST_DEADLINE_S", "1.5"),
+    ("REQUEST_DEADLINE_S", "300"), ("REQUEST_DEADLINE_S", "900"), ("REQUEST_DEADLINE_S", "private-value"),
+    ("REQUEST_MAX_CONCURRENT", "1001"), ("REQUEST_MAX_CONCURRENT", "two"),
+    ("REQUEST_QUEUE_MAX", "-3"), ("REQUEST_QUEUE_WAIT_S", "301"), ("REQUEST_QUEUE_WAIT_S", "1e2"),
+])
+def test_request_bound_invalid_values_fail_without_echo(monkeypatch, mapper_env, name, raw):
+    monkeypatch.setenv(name, raw)
+    result, _ = mapper_env()
+    assert result.returncode != 0
+    assert name in result.stderr
+    assert "private-value" not in result.stderr
+
+
+def test_preflight_rejects_invalid_request_bound():
+    """validate.sh / model_config.py shares the mapper's validator."""
+    env = {**os.environ, "EMBED_MODEL": "m", "EMBED_BASE_URL": "http://e", "REQUEST_QUEUE_MAX": "x"}
+    result = subprocess.run([sys.executable, str(REPO / "scripts/airgap/model_config.py")],
+                            env=env, capture_output=True, text=True, check=False)
+    assert result.returncode == 1 and "REQUEST_QUEUE_MAX" in result.stderr
