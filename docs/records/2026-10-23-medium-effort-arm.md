@@ -71,11 +71,11 @@ the 570 s deadline. No row exceeded 300 s; no `generation_incomplete`.
 |---|---|---|---|
 | MSG-13 | message_id | `insufficient_evidence` (answer-tier refusal) | #916; retrieval fix in #922 / #931 |
 | SYN-07 | syntax | `insufficient_evidence` (answer-tier refusal) | #916 |
-| SYS-07 | message_id | `insufficient_evidence` (answer-tier refusal) | #916 family (answer-tier refusal); the only row xhigh passes and medium does not |
+| SYS-07 | message_id | `insufficient_evidence` (answer-tier refusal) | unrouted (not yet diagnosed); the only row xhigh passes and medium does not |
 | NEG-04 | negative | `accepted`, trap answered | #915 (prompt concern) |
 | VER-08 | version | `accepted` on an abstain-tier row | #915; maintainer approved relabeling to answer-tier, pending that PR |
 | VER-11 | version | `accepted` on an abstain-tier row | #915; same relabel |
-| NEG-03 | negative | `accepted`, trap answered (forbidden-substring and citation checks) | fails at every effort; no routing assigned |
+| NEG-03 | negative | `accepted`, trap answered (forbidden-substring and citation checks) | unrouted (not yet diagnosed); fails at every effort |
 
 Low fails the same seven plus NEG-02, SYN-01, TBL-02 and VER-07.
 
@@ -92,4 +92,4 @@ beat xhigh by about 30 rows at a third of the latency or less.
 - The dev set is the tuning set; no holdout confirmation (#859 exposure).
 - The xhigh column is the S2 to S4 baseline, run on separate sessions from low and medium; the arms differ in session, not
   only in effort.
-- The routing of SYS-07 to #916 is by failure shape (answer-tier refusal), not a separate diagnosis.
+- SYS-07 and NEG-03 are unrouted: neither has been diagnosed.
