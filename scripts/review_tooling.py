@@ -39,6 +39,7 @@ PROSE_PATTERNS = [
     ".github/pull_request_template.md",
     ".github/ISSUE_TEMPLATE/**",
     "evals/README.md",
+    "site/**",  # static project site (#888): docs-like, no service or test obligation (#588)
 ]
 
 def _rule_module_paths() -> list[str]:

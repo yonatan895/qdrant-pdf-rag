@@ -153,6 +153,17 @@ class TestProfileClassification(unittest.TestCase):
                 _, lanes = self._required([path])
                 self.assertIn("eval_retrieval", lanes)
 
+    def test_site_only_changes_are_docs_like_and_offline(self):
+        for paths in (["site/index.html"], ["site/js/app.js", "site/data/x.json", "site/css/a.css"]):
+            with self.subTest(paths=paths):
+                decision, lanes = self._required(paths)
+                self.assertEqual((decision.profile, decision.services), (ProfileName.OFFLINE, []))
+                self.assertEqual(decision.matched_categories, ["prose"])
+                self.assertNotIn("unclassified", decision.matched_categories)
+                self.assertFalse({"simulation", "load", "ha", "packaging", "eval_retrieval"} & lanes)
+        # A sibling that merely shares the prefix stays fail-closed.
+        self.assertEqual(self._required(["sitemap/x.py"])[0].profile, ProfileName.FULL)
+
     def test_evaluation_package_and_delegates_select_executable_tooling_lanes(self):
         from scripts.review_tooling import required_lanes
 
