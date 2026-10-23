@@ -17,7 +17,12 @@ from collections import Counter
 from pathlib import Path
 
 from mainframe_rag.eval import acceptance as acc
-from mainframe_rag.eval.datasets import DatasetError, parse_golden_text, read_golden_text
+from mainframe_rag.eval.datasets import (
+    QUERY_CLASSES,
+    DatasetError,
+    parse_golden_text,
+    read_golden_text,
+)
 
 PILOT_ANSWER, PILOT_ABSTAIN = 24, 6
 RELEASE_MIN_ANSWER, RELEASE_ABSTAIN = 100, 40  # D1 (about 130 rows) and D4
@@ -36,7 +41,7 @@ def template_rows() -> list[dict]:
         "independence": {"authored_outside_tuning_loop": True, "saw_system_outputs": False, "statement": TODO},
     }
     base = {
-        "record": "case", "id": "REL-000", "query": TODO, "query_class": "|".join(acc.QUERY_CLASSES),
+        "record": "case", "id": "REL-000", "query": TODO, "query_class": "|".join(QUERY_CLASSES),
         "provenance": {"author": TODO, "authored_at": "YYYY-MM-DD", "source": TODO, "release": TODO},
         "adjudication": {"adjudicator": TODO, "adjudicated_at": "YYYY-MM-DD (a later day)", "verdict": "accepted"},
     }
