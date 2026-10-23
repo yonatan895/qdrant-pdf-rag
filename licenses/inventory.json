@@ -104,12 +104,12 @@
     {
       "approval_ref": "gh:yonatan895/qdrant-pdf-rag#376 maintainer decisions comment 2026-10-23",
       "bind": {
-        "digest": "sha256:1e4b43488508216fee35b87e6b5425f4ef475eacf9c113f5b901e27af3844fba",
+        "digest": "sha256:638914ba78de063c53cb179342518a0b39abe910cc7d36d8a434b7c4d4fa81fd",
         "files": [
           {
             "notice": true,
             "path": "licenses/ubi9-python-314-minimal.rpms.txt",
-            "sha256": "8962143bc2ed97fdbc756750cc29b68cd48022979d84a3f2a97d9fc80616d16b"
+            "sha256": "716325d69633b144f57499cdba5a4409f8db9556e2c48fb4baf1610a3b9799d3"
           }
         ],
         "images_txt": "registry.access.redhat.com/ubi9/python-314-minimal:9.8"
