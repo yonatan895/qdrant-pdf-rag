@@ -447,6 +447,7 @@ def main(argv: list[str] | None = None) -> int:
     selection = parser.add_mutually_exclusive_group(required=True)
     selection.add_argument('--pr', type=int)
     selection.add_argument('--all-open', action='store_true')
+    selection.add_argument('--head-sha', help='evaluate only open PRs whose current head is this commit')
     parser.add_argument('--publish', action='store_true')
     parser.add_argument('--review-template', action='store_true',
                         help='print current identity and unset human review fields; never submit')
@@ -455,7 +456,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--publisher-run-id', type=int)
     parser.add_argument('--approved-root', type=Path, default=Path.cwd())
     args = parser.parse_args(argv)
-    if args.review_template and (args.publish or args.all_open):
+    if args.head_sha is not None and re.fullmatch('[a-f0-9]{40}', args.head_sha) is None:
+        parser.error('--head-sha requires a full lowercase commit SHA')
+    bulk = args.all_open or args.head_sha is not None
+    if args.review_template and (args.publish or bulk):
         parser.error('--review-template requires --pr and cannot be combined with --publish')
     if ((args.review_templates_dir is not None or args.publisher_run_id is not None)
             and (not args.publish or args.review_templates_dir is None
@@ -469,8 +473,13 @@ def main(argv: list[str] | None = None) -> int:
         if args.review_template:
             print(json.dumps(review_template(api, args.pr), indent=2))
             return 0
-        numbers = ([args.pr] if args.pr is not None else
-                   [pr['number'] for pr in paginate(api.get, api.prefix + 'pulls?state=open')])
+        if args.pr is not None:
+            numbers = [args.pr]
+        else:
+            # An event for a superseded head selects nothing: the current head
+            # has its own events and the periodic all-open reconciliation.
+            numbers = [pr['number'] for pr in paginate(api.get, api.prefix + 'pulls?state=open')
+                       if args.head_sha is None or pr['head']['sha'] == args.head_sha]
         for number in numbers:
             require(type(number) is int and number > 0)
             if args.publish:
@@ -491,11 +500,11 @@ def main(argv: list[str] | None = None) -> int:
                           'verification_status': 'incomplete',
                           'error': 'acceptance_evidence_unavailable_or_changed'}))
         return 1
-    print(json.dumps(results if args.all_open else results[0], sort_keys=True))
+    print(json.dumps(results if bulk else results[0], sort_keys=True))
     # Bulk publisher health is separate from each PR's technical result.
     # API/publication errors above still exit nonzero; red candidate checks
     # remain red without failing an unrelated PR's aggregate workflow job.
-    if args.all_open and args.publish:
+    if bulk and args.publish:
         return 0
     return 0 if all(result['all_prerequisites_met'] for result in results) else 1
 

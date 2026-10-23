@@ -14,7 +14,13 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: current-candidate-acceptance
+  # Evidence for one head SHA is evaluated in order; unrelated candidates,
+  # main pushes and the periodic sweep no longer queue behind each other.
+  group: >-
+    current-candidate-acceptance${{
+    (github.event_name == 'pull_request_target' && format('-{0}', github.event.pull_request.head.sha))
+    || (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request'
+    && format('-{0}', github.event.workflow_run.head_sha)) || '' }}
   cancel-in-progress: false
 jobs:
   advisory:
@@ -39,8 +45,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           ACCEPTANCE_REPOSITORY: ${{ github.repository }}
+          # Candidate events name only a commit; the script re-reads everything
+          # else from the API. Other triggers reconcile all open candidates.
+          ACCEPTANCE_HEAD_SHA: ${{ (github.event_name == 'pull_request_target' && github.event.pull_request.head.sha) || (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.head_sha) || '' }}
         run: |
-          python -m scripts.acceptance --repository "$ACCEPTANCE_REPOSITORY" --all-open --publish > "$RUNNER_TEMP/acceptance.json"
+          if [ -n "$ACCEPTANCE_HEAD_SHA" ]; then selection="--head-sha $ACCEPTANCE_HEAD_SHA"; else selection=--all-open; fi
+          python -m scripts.acceptance --repository "$ACCEPTANCE_REPOSITORY" $selection --publish > "$RUNNER_TEMP/acceptance.json"
       - name: Retain acceptance report
         if: always()
         uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
@@ -81,8 +91,12 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
           ACCEPTANCE_REPOSITORY: ${{ github.repository }}
+          # Candidate events name only a commit; the script re-reads everything
+          # else from the API. Other triggers reconcile all open candidates.
+          ACCEPTANCE_HEAD_SHA: ${{ (github.event_name == 'pull_request_target' && github.event.pull_request.head.sha) || (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.head_sha) || '' }}
         run: |
-          python -m scripts.acceptance --repository "$ACCEPTANCE_REPOSITORY" --all-open --publish > "$RUNNER_TEMP/acceptance.json"
+          if [ -n "$ACCEPTANCE_HEAD_SHA" ]; then selection="--head-sha $ACCEPTANCE_HEAD_SHA"; else selection=--all-open; fi
+          python -m scripts.acceptance --repository "$ACCEPTANCE_REPOSITORY" $selection --publish > "$RUNNER_TEMP/acceptance.json"
       - name: Retain acceptance report
         if: always()
         uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1

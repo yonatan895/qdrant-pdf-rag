@@ -448,7 +448,11 @@ is not an input to technical verification. Both publisher paths check out `main`
 explicitly with no persisted git
 credentials, install no project dependencies, and never execute candidate code
 or artifact commands. The obsolete review-signal workflow is removed.
-Publication is serialized. API snapshots and events are not an atomic merge
+Publication is serialized per candidate head SHA: PR events and workflow_run
+events of `pull_request` runs evaluate only the open PRs at that head, in one
+group per SHA. Base pushes, the periodic sweep, manual dispatch and non-PR
+workflow runs share one group and reconcile every open PR. An event for a
+superseded head selects nothing. API snapshots and events are not an atomic merge
 transaction; a state change can occur after the final read, and GitHub scheduling
 can be delayed. The chosen review policy, branch currency and conversation
 resolution must be enforced by the maintainer's repository configuration.
