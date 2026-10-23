@@ -148,9 +148,9 @@ Current acronym behavior and measured retry verdicts: [docs/retrieval.md](docs/r
 
 ### PR-09 (issue #83): OpenTelemetry tracing
 > **Status: DONE.** Owner moved to `src/mainframe_rag/tracing.py`; library default off,
-> air-gap deploy default ON — an unset endpoint resolves to the in-cluster Jaeger and the
+> air-gap deploy default ON — an unset endpoint resolves to the in-cluster trace backend (OpenObserve since ADR-0006; Jaeger when this shipped) and the
 > `off` sentinel disables tracing and the deployment together. Fail-open bounded export +
-> Jaeger v2 all-in-one Helm templates (`charts/mainframe-rag/templates/jaeger-*.yaml`; the Kustomize overlay was retired).
+> Jaeger v2 all-in-one Helm templates (`charts/mainframe-rag/templates/jaeger-*.yaml`, replaced under #956; the Kustomize overlay was retired).
 > Tests: `tests/test_tracing.py`, `tests/test_ingest_tracing.py`.
 
 Current tracing ownership and deployment contracts: [docs/architecture.md](docs/architecture.md)

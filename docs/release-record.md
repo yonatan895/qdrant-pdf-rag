@@ -52,7 +52,7 @@ successful agent check cannot conceal an ingest failure.
 | Gateway probe from application-configured pod before deployment | NOT RUN | |
 | Full pipeline, no skipped ingest/search/tracing | NOT RUN | |
 | Running image digest reconciliation | NOT RUN | |
-| PVC writes including ingest scratch, Qdrant, Jaeger | NOT RUN | |
+| PVC writes including ingest scratch, Qdrant, OpenObserve | NOT RUN | |
 | Qdrant / agent pod replacement and persistent trace recovery | NOT RUN | |
 | Repeat deployment and ingest without data/key regression | NOT RUN | |
 | Isolated synthetic snapshot restore and query equivalence | NOT RUN | |

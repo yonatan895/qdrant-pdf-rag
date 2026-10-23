@@ -466,7 +466,7 @@ def resolve_runtime_settings(
     except (httpx2.HTTPError, OSError, ValueError, KeyError, TypeError):
         pass
 
-    # 3. Resolve OpenTelemetry tracing endpoint (Jaeger / OTLP HTTP)
+    # 3. Resolve OpenTelemetry tracing endpoint (OpenObserve / OTLP HTTP)
     if otel_endpoint is not None:
         cleaned_otel = otel_endpoint.strip()
         if cleaned_otel.lower() in ("none", "off", "false", "0", ""):
@@ -478,11 +478,21 @@ def resolve_runtime_settings(
     elif settings.otel_exporter_otlp_endpoint:
         updates["otel_exporter_otlp_endpoint"] = settings.otel_exporter_otlp_endpoint
     else:
-        # Auto-detect local Jaeger / OTLP collector on :4318 if listening
+        # Auto-detect the local OpenObserve (scripts/run_local_openobserve.sh) on its
+        # loopback port. Its OTLP export needs basic auth, read from the 0600 env
+        # file that script owns; without a readable credential tracing stays off.
         try:
-            httpx2.get("http://127.0.0.1:4318", timeout=0.3)
-            updates["otel_exporter_otlp_endpoint"] = "http://127.0.0.1:4318"
-        except (httpx2.HTTPError, OSError):
+            httpx2.get("http://127.0.0.1:5080/healthz", timeout=0.3).raise_for_status()
+            if not os.environ.get("OTEL_EXPORTER_OTLP_HEADERS"):
+                env_file = Path(os.environ.get(
+                    "O2_ENV_FILE", Path.home() / ".config/mainframe-rag/local-openobserve.env"))
+                auth = next((line.split("=", 1)[1] for line in env_file.read_text().splitlines()
+                             if line.startswith("O2_BASIC_AUTH=")), "")
+                if not auth:
+                    raise ValueError("no local OpenObserve credential")
+                os.environ["OTEL_EXPORTER_OTLP_HEADERS"] = "Authorization=Basic%20" + auth
+            updates["otel_exporter_otlp_endpoint"] = "http://127.0.0.1:5080/api/default"
+        except (httpx2.HTTPError, OSError, ValueError):
             pass
 
     if updates:
@@ -766,7 +776,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--format", choices=["text", "json", "html"], default="text", help="Output format")
     parser.add_argument("--out", type=Path, default=None, help="Write output to file")
     parser.add_argument("--rerank", action="store_true", help="Enable cross-encoder reranking")
-    parser.add_argument("--otel-endpoint", default=None, help="OpenTelemetry OTLP/HTTP collector endpoint (e.g. http://localhost:4318, 'off' to disable)")
+    parser.add_argument("--otel-endpoint", default=None, help="OpenTelemetry OTLP/HTTP collector endpoint (e.g. http://127.0.0.1:5080/api/default, 'off' to disable)")
 
     args = parser.parse_args(argv)
 

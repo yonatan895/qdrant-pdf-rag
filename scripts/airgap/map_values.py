@@ -101,19 +101,12 @@ def lenient_bool(raw: str) -> bool:
 
 
 def resolve_otel() -> tuple[bool, str]:
-    """Effective tracing leg. The in-cluster default belongs to the bundled
-    Jaeger (issue #568): an explicit JAEGER_ENABLED=false with no endpoint
-    would keep exporting to a Service nothing deploys, so it must name a
-    collector (any http(s) URL) or off."""
+    """Effective tracing leg. Unset means the bundled OpenObserve (ADR-0006,
+    #956), the only trace backend: tracing on with an empty endpoint, which the
+    chart resolves to that service. off/none/false/0 disables tracing."""
     raw = env("OTEL_EXPORTER_OTLP_ENDPOINT")
-    if raw == "" and optional_bool("JAEGER_ENABLED", env("JAEGER_ENABLED")) is False:
-        die(
-            "JAEGER_ENABLED=false needs an intentional trace destination: set "
-            "OTEL_EXPORTER_OTLP_ENDPOINT to the external collector's http(s) URL, "
-            "or to off to disable tracing"
-        )
     if raw == "":
-        return True, "http://jaeger:4318"
+        return True, ""
     if raw.lower() in ("off", "none", "false", "0"):
         return False, ""
     if raw.startswith(("http://", "https://")):
@@ -121,21 +114,15 @@ def resolve_otel() -> tuple[bool, str]:
     die(f"OTEL_EXPORTER_OTLP_ENDPOINT must be http(s) or off/none/false/0, got {raw!r}")
 
 
-def observability() -> tuple[bool, str, bool, bool]:
+def observability() -> tuple[bool, str, bool]:
     """The one owner of the observability decisions (issue #529 OBS-2):
-    (tracing, endpoint, deploy bundled Jaeger, deploy ServiceMonitor).
-    Explicit JAEGER_ENABLED/SERVICEMONITOR_ENABLED override; unset follows
-    the parent leg. A backend for a disabled leg fails before any manifest
+    (tracing, endpoint, deploy ServiceMonitor). The trace backend is always the
+    bundled OpenObserve while tracing is on. Explicit SERVICEMONITOR_ENABLED
+    overrides; unset follows the parent leg. A backend for a disabled leg fails before any manifest
     is rendered. The shell stages consume this (--bundle-decisions) and the
     chart receives the effective booleans, never a default to re-derive."""
     tracing, endpoint = resolve_otel()
     metrics = env("METRICS_ENABLED") == "true"
-    jaeger = optional_bool("JAEGER_ENABLED", env("JAEGER_ENABLED"))
-    if jaeger and not tracing:
-        die(
-            "JAEGER_ENABLED=true requires tracing (OTEL_EXPORTER_OTLP_ENDPOINT is off): "
-            "refusing a bundled Jaeger nothing exports to"
-        )
     monitor = optional_bool("SERVICEMONITOR_ENABLED", env("SERVICEMONITOR_ENABLED"))
     if monitor and not metrics:
         die(
@@ -145,7 +132,6 @@ def observability() -> tuple[bool, str, bool, bool]:
     return (
         tracing,
         endpoint,
-        tracing if jaeger is None else jaeger,
         metrics if monitor is None else monitor,
     )
 
@@ -238,7 +224,7 @@ def build_values(deploy_only: bool = False) -> dict:
         die("EMBED_MODEL_REVISION must be a non-blank immutable revision")
     dimension = positive_int("DENSE_DIM", env("DENSE_DIM"))
 
-    tracing_enabled, otel_endpoint, jaeger_deploy, monitor_deploy = observability()
+    tracing_enabled, otel_endpoint, monitor_deploy = observability()
 
     rerank_enabled = lenient_bool(env("RERANK_ENABLED"))
     metrics_enabled = env("METRICS_ENABLED") == "true"
@@ -355,9 +341,45 @@ def build_values(deploy_only: bool = False) -> dict:
             "limits": {"cpu": "250m", "memory": "256Mi"},
         }
 
+    # OpenObserve and otelcol (ADR-0006, #956) are the only trace/metrics
+    # backend: present only for the bundled backend (tracing on, empty endpoint); a set
+    # endpoint is the external-collector escape hatch and renders neither. Like every other
+    # chart image they carry repository and tag only; the pinned digests live in
+    # images.txt and are enforced at pack/load and by the pod-image check.
+    tracing_images = {}
+    if tracing_enabled and not otel_endpoint:
+        tracing_images["openobserve"] = {
+            "repository": f"{internal_registry}/openobserve/openobserve",
+            "tag": "v1.1.2",
+            "pullPolicy": "IfNotPresent",
+        }
+        # The collector scrapes /metrics: the chart renders it only with
+        # metrics on (metrics.collector.enabled stays null and follows it).
+        if metrics_enabled:
+            tracing_images["otelcol"] = {
+                "repository": f"{internal_registry}/otel/opentelemetry-collector-contrib",
+                "tag": "0.160.0",
+                "pullPolicy": "IfNotPresent",
+            }
+
+    # Plain Kubernetes (Kind) has no SCC to assign a UID, and the OpenObserve
+    # image runs as root: an operator may pin one non-root id for the bundled
+    # backend. Unset keeps the restricted-v2 platform-assigned identity.
+    oo_values = {}
+    run_as_id = env("OPENOBSERVE_RUN_AS_ID")
+    if run_as_id:
+        if not (tracing_enabled and not otel_endpoint):
+            die("OPENOBSERVE_RUN_AS_ID requires the bundled OpenObserve (tracing on, empty OTEL_EXPORTER_OTLP_ENDPOINT)")
+        uid = positive_int("OPENOBSERVE_RUN_AS_ID", run_as_id)
+        if uid > 65535:
+            die(f"OPENOBSERVE_RUN_AS_ID must be at most 65535 (got {run_as_id!r})")
+        oo_values = {"openobserve": {"runAsId": uid}}
+
     return {
+        **oo_values,
         "replicaCount": 2,
         "images": {
+            **tracing_images,
             "agent": {
                 "repository": f"{internal_registry}/qdrant-pdf-rag-agent",
                 "tag": image_sha,
@@ -369,12 +391,6 @@ def build_values(deploy_only: bool = False) -> dict:
                 "tag": image_sha,
                 "pullPolicy": "IfNotPresent",
                 **image_digest("INGEST"),
-            },
-            "jaeger": {
-                "repository": f"{internal_registry}/jaegertracing/jaeger",
-                "tag": "v2.20.0",
-                "pullPolicy": "IfNotPresent",
-                **image_digest("JAEGER"),
             },
             "oauthProxy": {
                 "repository": f"{internal_registry}/openshift4/ose-oauth-proxy",
@@ -413,7 +429,6 @@ def build_values(deploy_only: bool = False) -> dict:
             "endpoint": otel_endpoint,
             "deploymentEnvironment": env("OTEL_DEPLOYMENT_ENVIRONMENT"),
             "serviceName": env("OTEL_SERVICE_NAME"),
-            "jaeger": {"enabled": jaeger_deploy},
         },
         "metrics": {
             "enabled": metrics_enabled,
@@ -440,10 +455,13 @@ def print_bundle_decisions() -> None:
     resolve_observability): the one owner's decisions, never re-derived."""
     import shlex
 
-    tracing, endpoint, jaeger, monitor = observability()
+    tracing, endpoint, monitor = observability()
     print(f"OTEL_TRACING_ENABLED={int(tracing)}")
     print(f"OTEL_ENDPOINT_RESOLVED={shlex.quote(endpoint)}")
-    print(f"JAEGER_DEPLOY={int(jaeger)}")
+    print(f"OTEL_BUNDLED={int(tracing and not endpoint)}")
+    # Same condition as the chart's otelcolEnabled with metrics.collector.enabled
+    # null: bundled OpenObserve and metrics on.
+    print(f"OTEL_COLLECTOR={int(tracing and not endpoint and env('METRICS_ENABLED') == 'true')}")
     print(f"SERVICEMONITOR_DEPLOY={int(monitor)}")
 
 

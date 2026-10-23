@@ -59,7 +59,7 @@ This fixed group is Kind-only; OpenShift keeps project-assigned identities.
 Use explicit local `QDRANT_SHARD_NUMBER=1`, `QDRANT_REPLICATION_FACTOR=1`,
 `QDRANT_WRITE_CONSISTENCY_FACTOR=1`, `AGENT_ROUTE=false`, two agent replicas,
 real-model dimension 1024 and the verified immutable `EMBED_MODEL_REVISION`.
-The recorded claims are 20Gi each for Qdrant data/snapshots and 10Gi for Jaeger.
+The recorded claims are 20Gi each for Qdrant data/snapshots and 10Gi for OpenObserve.
 Include old generation, staging, safety snapshots and optimizer scratch in disk
 planning. Local-path claim capacity does not reserve or enforce physical disk
 space. Production sizing and 6/3/2 policy are unchanged.
@@ -84,10 +84,10 @@ convergence. The node's registry DNS and the pod's gateway DNS are distinct
 paths. Verify TLS/auth from both before attributing failures to model serving.
 
 For an explicitly authorized workload rebuild, first record a successful search
-and its Jaeger trace ID. Drain/stop agent and Jaeger Deployments, then uninstall
-the selected Helm releases. Legacy unmanaged agent/Jaeger Deployment, Service
+and its OpenObserve trace ID. Drain/stop agent and OpenObserve Deployments, then uninstall
+the selected Helm releases. Legacy unmanaged agent/OpenObserve Deployment, Service
 and ConfigMap resources need explicit removal by name. Inspect Helm manifests
-before uninstalling: retain Jaeger Badger and Qdrant data/snapshot PVCs, and keep
+before uninstalling: retain OpenObserve and Qdrant data/snapshot PVCs, and keep
 corpus/scratch claims outside the application release. Do not delete the namespace
 or cluster to accomplish workload teardown. Preserve unrelated resources.
 
@@ -223,22 +223,23 @@ raw question can still produce insufficient evidence.
 
 Verify search, grounded answer and follow-up, streaming completion, long-input
 refusal, liveness/readiness and the enabled console. Keep manual answers/browser
-captures private; share counts and outcomes. Replace Qdrant/agent/Jaeger pods,
+captures private; share counts and outcomes. Replace Qdrant/agent/OpenObserve pods,
 then verify collection/control state, next ordinary search/answer and the exact
 **pre-replacement trace ID**. Stable PVC UIDs alone do not prove retained content.
 
 ```sh
 kubectl -n "$KIND_NAMESPACE" port-forward --address 127.0.0.1 svc/rag-agent 8087:8080
 # Separate terminal:
-kubectl -n "$KIND_NAMESPACE" port-forward --address 127.0.0.1 svc/jaeger 16686:16686
+kubectl -n "$KIND_NAMESPACE" port-forward --address 127.0.0.1 svc/openobserve 5080:5080
 ```
 
 With both port-forwards running, execute the strict check from the candidate
 source checkout (requires the prepared development environment):
 
 ```sh
-sh scripts/tools/run-task.sh local:check -- \
-  --agent http://127.0.0.1:8087 --jaeger http://127.0.0.1:16686 \
+TRACE_QUERY_USER=<root email> TRACE_QUERY_PASSWORD=<root password> \
+  sh scripts/tools/run-task.sh local:check -- \
+  --agent http://127.0.0.1:8087 --trace-url http://127.0.0.1:5080 \
   --query 'What should the LFAREA parameter be set to in IEASYSxx?' \
   --followup 'What is the purpose of that parameter? Please cite the manual.' \
   --report "$STATE/live-check-<run-id>.json"
@@ -254,7 +255,7 @@ model revisions and private configuration inventory beside the report. Mixed
 candidate components are explicit diagnostic evidence, not exact-release
 acceptance. The check does not replace gateway/TLS, browser or persistence tests.
 
-Open **http://localhost:8087/ui** and **http://localhost:16686**. On Windows/WSL,
+Open **http://localhost:8087/ui** and **http://localhost:5080**. On Windows/WSL,
 check listeners on both hosts and verify these URLs from the Windows side;
 a successful WSL curl does not prove the browser reaches the same listener.
 The September audit used 8087 because an unrelated Windows `AgentService`

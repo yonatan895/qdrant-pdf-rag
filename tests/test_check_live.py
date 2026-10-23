@@ -71,15 +71,184 @@ def test_complete_run_and_terminal_error(bad_followup, trap_response, refused):
             body = bad_followup or (': heartbeat\n\n' + frame('token', {'delta': 'provisional'})
                                     + frame('final', ANSWER) + ': heartbeat\n\n')
             return httpx2.Response(200, text=body, headers={'content-type': 'text/event-stream'})
-        if path.startswith('/api/traces/'):
-            assert path.endswith(trace_id)
-            return httpx2.Response(200, json={'data': [{'traceID': trace_id,
-                'spans': [{'operationName': 'v1.search'}]}]})
+        if path == '/api/default/_search':
+            assert f"trace_id = '{trace_id}'" in json.loads(request.content)['query']['sql']
+            return httpx2.Response(200, json={'hits': [{'trace_id': trace_id}]})
         return httpx2.Response(200)
 
     with httpx2.Client(base_url='http://synthetic', transport=httpx2.MockTransport(respond)) as client:
-        report = check(client, client, 'synthetic question', 'synthetic followup', trace_wait=0)
+        report = check(client, client, 'synthetic question', 'synthetic followup', trace_wait=0, trace_auth=('u', 'p'))
     assert report['passed'] == (not bad_followup and refused)
     assert report['checks']['trap']['status'] == ('PASS' if refused else 'FAIL')
     assert report['checks']['console_followup']['status'] == ('FAIL' if bad_followup else 'PASS')
     assert 'Synthetic answer' not in json.dumps(report)
+
+
+# --- backend-neutral trace arrival (issue #956) -----------------------------
+import base64
+
+from scripts import trace_arrival
+
+from tests.helpers_airgap import FakeHttpServer
+
+TRACE_ID = 'a1b2c3d4e5f60718293a4b5c6d7e8f90'
+USER, PASSWORD = 'ops@example.invalid', 'p:ss w0rd/+='
+BASIC = 'Basic ' + base64.b64encode(f'{USER}:{PASSWORD}'.encode()).decode()
+
+
+def openobserve_server(present=True, status=200):
+    def respond(request):
+        if request['headers'].get('authorization') != BASIC:
+            return 401, {'code': 401}
+        if status != 200:
+            return status, {}
+        return 200, {'hits': [{'trace_id': TRACE_ID}] if present else []}
+    return FakeHttpServer(respond)
+
+
+def run_arrival(server, *argv, env=None, stdin=''):
+    import io
+    import sys
+    from unittest import mock
+    with mock.patch.dict('os.environ', env or {}, clear=False), \
+            mock.patch.object(sys, 'stdin', io.StringIO(stdin)):
+        return trace_arrival.main(['--url', server.url, '--timeout', '0', *argv])
+
+
+@pytest.mark.parametrize('present', [True, False])
+def test_openobserve_query_shape_and_result(present, capsys):
+    server = openobserve_server(present)
+    try:
+        rc = run_arrival(server, '--trace-id', TRACE_ID, '--auth-stdin',
+                         stdin=f'{USER}:{PASSWORD}\n')
+    finally:
+        server.close()
+    assert rc == (0 if present else 1)
+    request = server.requests[0]
+    assert (request['method'], request['path'], request['query']) == (
+        'POST', '/api/default/_search', {'type': ['traces']})
+    assert request['headers']['authorization'] == BASIC
+    query = request['body']['query']
+    assert query['sql'] == ('SELECT trace_id FROM "default" WHERE operation_name = \'v1.search\''
+                            f' AND trace_id = \'{TRACE_ID}\'')
+    assert query['end_time'] > query['start_time'] > 0 and (query['from'], query['size']) == (0, 1)
+    out = capsys.readouterr()
+    assert PASSWORD not in out.out + out.err
+    if not present:
+        assert 'no v1.search trace landed in OpenObserve' in out.err
+
+
+def test_openobserve_service_since_query(capsys):
+    server = openobserve_server()
+    try:
+        rc = run_arrival(server, '--service', 'svc-x', '--since', '120',
+                         env={'TRACE_QUERY_USER': USER, 'TRACE_QUERY_PASSWORD': PASSWORD})
+    finally:
+        server.close()
+    query = server.requests[0]['body']['query']
+    assert rc == 0
+    assert query['sql'].endswith("WHERE operation_name = 'v1.search' AND service_name = 'svc-x'")
+    assert query['end_time'] - query['start_time'] == 180_000_000  # 120 s lookback + 60 s slack
+
+
+def test_openobserve_auth_failure_is_fixed_message(capsys):
+    server = openobserve_server()
+    try:
+        rc = run_arrival(server, '--auth-stdin', stdin=f'{USER}:wrong\n')
+    finally:
+        server.close()
+    out = capsys.readouterr()
+    assert rc == 1 and len(server.requests) == 1
+    assert out.err == 'trace backend refused the credentials\n' and out.out == ''
+    assert 'wrong' not in out.err and '401' not in out.err
+
+
+def test_openobserve_without_credentials_never_queries(capsys):
+    server = openobserve_server()
+    try:
+        rc = run_arrival(server, env={'TRACE_QUERY_USER': '', 'TRACE_QUERY_PASSWORD': ''})
+    finally:
+        server.close()
+    assert rc == 1 and server.requests == []
+    assert capsys.readouterr().err == 'trace backend credentials missing\n'
+
+
+@pytest.mark.parametrize('argv', [['--trace-id', "x' OR 1=1 --"], ['--service', "a'b"], ['--operation', 'a b']])
+def test_unsafe_identifiers_are_refused_before_any_query(argv, capsys):
+    server = openobserve_server()
+    try:
+        rc = run_arrival(server, '--auth-stdin', *argv, stdin=f'{USER}:{PASSWORD}\n')
+    finally:
+        server.close()
+    assert rc == 1 and server.requests == []
+    assert capsys.readouterr().err == 'invalid trace check arguments\n'
+
+
+@pytest.mark.parametrize('present, expected', [(True, 'PASS'), (False, 'FAIL')])
+def test_fresh_search_trace(present, expected):
+    """check() asks OpenObserve about the exact traceparent id it sent."""
+    sent = []
+    agent = FakeHttpServer(lambda r: (sent.append(r['headers'].get('traceparent')) or (200, {'hits': [{'id': 's'}]}))
+                           if r['path'] == '/v1/search' else (200, {}))
+    sink = openobserve_server(present)
+    from unittest import mock
+
+    from scripts import check_live
+    with mock.patch.object(check_live, 'uuid4', return_value=mock.Mock(hex=TRACE_ID)):
+        try:
+            with httpx2.Client(base_url=agent.url) as client, httpx2.Client(base_url=sink.url) as trace_client:
+                report = check(client, trace_client, 'q', 'f', trace_wait=0, trace_auth=(USER, PASSWORD))
+        finally:
+            agent.close()
+            sink.close()
+    assert sent[0].split('-')[1] == TRACE_ID
+    assert report['checks']['fresh_search_trace'] == {'status': expected, 'trace_id': TRACE_ID}
+    assert f"trace_id = '{TRACE_ID}'" in sink.requests[0]['body']['query']['sql']
+
+
+def test_fresh_search_trace_auth_failure_is_fixed():
+    sink = openobserve_server()
+    try:
+        with httpx2.Client(base_url=sink.url) as trace_client:
+            report = check(trace_client, trace_client, 'q', 'f', trace_wait=0, trace_auth=(USER, 'wrong'))
+    finally:
+        sink.close()
+    assert report['checks']['fresh_search_trace']['status'] == 'FAIL'
+    assert report['checks']['fresh_search_trace']['error_type'] == 'TraceAuthError'
+    assert 'wrong' not in json.dumps(report)
+
+
+@pytest.mark.parametrize('status', [500, 404])
+def test_poll_error_prints_one_fixed_line_and_retries(status, capsys):
+    server = openobserve_server(status=status)
+    ticks = iter(range(100))
+    try:
+        with httpx2.Client(base_url=server.url) as client:
+            found = trace_arrival.wait(client, timeout=3, interval=1, sleep=lambda _s: None,
+                                       clock=lambda: next(ticks), auth=(USER, PASSWORD))
+    finally:
+        server.close()
+    assert found is None and len(server.requests) > 1  # retried
+    assert capsys.readouterr().err == 'trace backend poll error\n'  # once, no upstream text
+
+
+def test_removed_backend_flags_are_rejected():
+    import sys
+    from unittest import mock
+
+    from scripts import check_live
+    server = openobserve_server()
+    try:
+        for argv in (['--backend', 'jaeger'], ['--backend', 'openobserve']):
+            with pytest.raises(SystemExit) as exc:
+                run_arrival(server, *argv)
+            assert exc.value.code == 2
+        for flag in ('--jaeger', '--trace-backend'):
+            argv = ['check_live', '--agent', 'http://a', flag, 'x', '--trace-url', 'http://t',
+                    '--query', 'q', '--followup', 'f', '--report', '/nonexistent/r']
+            with mock.patch.object(sys, 'argv', argv), pytest.raises(SystemExit) as exc:
+                check_live.main()
+            assert exc.value.code == 2
+    finally:
+        server.close()
+    assert server.requests == []

@@ -54,14 +54,14 @@ echo "    EMBED_BASE_URL:    $EMBED_BASE_URL"
 echo "    Collection policy: S=$QDRANT_SHARD_NUMBER RF=$QDRANT_REPLICATION_FACTOR W=$QDRANT_WRITE_CONSISTENCY_FACTOR"
 echo "    IMAGE_SHA:         $IMAGE_SHA"
 if [ "$OTEL_TRACING_ENABLED" = "1" ]; then
-    echo "    Tracing:           ON ($OTEL_ENDPOINT_RESOLVED)"
+    echo "    Tracing:           ON (${OTEL_ENDPOINT_RESOLVED:-bundled OpenObserve})"
 else
     echo "    Tracing:           OFF (OTEL_EXPORTER_OTLP_ENDPOINT=off)"
 fi
-if [ "$JAEGER_DEPLOY" = "1" ]; then
-    echo "    Jaeger backend:    bundled"
+if [ "$OTEL_BUNDLED" = "1" ]; then
+    echo "    Trace backend:     OpenObserve (bundled)"
 else
-    echo "    Jaeger backend:    not deployed"
+    echo "    Trace backend:     not deployed"
 fi
 if [ "$SERVICEMONITOR_DEPLOY" = "1" ]; then
     echo "    ServiceMonitor:    rendered"

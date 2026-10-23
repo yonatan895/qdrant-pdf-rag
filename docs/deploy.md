@@ -231,8 +231,9 @@ Compatibility and lifecycle decisions under #448:
 - Agent ingress NetworkPolicy (issue #373, **default on**, a maintainer-approved
   default change). The chart renders `NetworkPolicy/rag-agent-ingress` unless
   `AGENT_NETWORK_POLICY=false` (strict boolean; `networkPolicy.enabled`). It
-  selects only `app: rag-agent` pods and only `Ingress` (Qdrant, Jaeger, the
-  ingest Job and all egress are untouched). Rules: pods of the release
+  selects only `app: rag-agent` pods and only `Ingress` (Qdrant, OpenObserve, the
+  ingest Job and all egress are untouched; the OpenObserve egress-deny policy
+  is a separate object that this toggle does not disable). Rules: pods of the release
   namespace reach 8080 (and 8443 when `AGENT_ROUTE=true`); the OpenShift
   router (`network.openshift.io/policy-group: ingress`) reaches 8443 only;
   with `METRICS_ENABLED=true` the monitoring namespaces
@@ -257,7 +258,7 @@ Compatibility and lifecycle decisions under #448:
   (service and pod IP), and coexistence with site policies. NetworkPolicies
   are additive, so a site allow-all or broad allow policy that also selects the
   agent pods voids the restriction; a site default-deny is not satisfied by
-  this policy for Qdrant or Jaeger.
+  this policy for Qdrant or OpenObserve.
 
 <a id="feedback-service"></a>
 - Answer-feedback service (issue #804, ADR-0005, **default off**). With
@@ -344,7 +345,7 @@ Compatibility and lifecycle decisions under #448:
 - The first adoption also inventories disabled legacy optional objects using
   cluster API discovery. Discovery/read/ownership failures stop before either
   release changes. Once selected workloads are ready, deployment deletes only
-  the checked disabled Jaeger workloads/config, console Route/ServiceAccount
+  the checked legacy Jaeger leftovers (retired in #956), console Route/ServiceAccount
   and ServiceMonitor. This covers objects absent from the first Helm release's
   history. The cleanup inventory never permits a PVC.
 - The one exception (#680) is a disabled ServiceMonitor read that returns
@@ -355,7 +356,7 @@ Compatibility and lifecycle decisions under #448:
   failure, and every Route, Jaeger and ServiceAccount read failure, still stops
   before mutation.
 - Disabled optional workloads, Routes and monitors are removed on upgrades of
-  the Helm release. The Jaeger PVC has `helm.sh/resource-policy: keep`: disabling
+  the Helm release. The OpenObserve PVC has `helm.sh/resource-policy: keep`: disabling
   tracing or removing the app release retains its data. Re-enabling tracing
   reuses that claim; moving to an external collector sets the destination in
   the same release that removes the backend, and the backend objects are
@@ -390,7 +391,7 @@ Compatibility and lifecycle decisions under #448:
   (`QDRANT_STORAGE_SIZE`, `QDRANT_EXTRA_VALUES`, `QDRANT_TAG`, `INGEST_WORK_SIZE`,
   `INGEST_EXTRA_PATCH`) retain their existing precedence and never change the
   production defaults. The last remains a client-side CI-only Job patch.
-- Rollout waits remain Qdrant 600s, agent 300s and Jaeger 120s, with bounded
+- Rollout waits remain Qdrant 600s, agent 300s and, with the bundled backend, OpenObserve and otelcol 120s each, with bounded
   diagnostics on failure. Explicit ingest keeps its existing wait/diagnostics.
 
 - The Qdrant service URL is derived as plaintext
@@ -433,8 +434,8 @@ they do not authorize production promotion.
 
 ## 4. Signing and provenance
 
-The connected host packs one tarball: git bundle, Qdrant + Jaeger + ingest
-+ agent image archives (plus the oauth-proxy sidecar image once its
+The connected host packs one tarball: git bundle, Qdrant + OpenObserve
++ otelcol-contrib + ingest + agent image archives (plus the oauth-proxy sidecar image once its
 `images.txt` digest is recorded), vendored chart, bootstrap script,
 `MANIFEST.txt`, `PACKING_RECORD.txt`, digest enumeration, `THIRD-PARTY-NOTICES.txt`
 ([licensing](licensing.md); pack fails closed on an unrecorded dependency, image
@@ -460,10 +461,11 @@ checksums **after**.
   tarball. Without a pinned pubkey, verification is TOFU: it binds members
   together but proves nothing about *which* key signed.
 - Load re-verifies the signature, then checksums, then the `IMAGE_SHA`
-  against the manifest, then all four base image digests (plus the
+  against the manifest, then all six base image digests (plus the
   oauth-proxy digest when the bundle carries it) — and pushes under fixed
   names: `qdrant/qdrant:v1.19.0-unprivileged`,
-  `jaegertracing/jaeger:v2.20.0` (retag note: upstream tag `2.20.0`),
+  `openobserve/openobserve:v1.1.2`,
+  `otel/opentelemetry-collector-contrib:0.160.0`,
   `qdrant-pdf-rag-ingest:<SHA>`, `qdrant-pdf-rag-agent:<SHA>`, and
   `openshift4/ose-oauth-proxy:v4.14` when bundled. Full SHA only, never
   `latest` or short SHAs. `INSECURE_REGISTRY=true` disables TLS
@@ -552,7 +554,7 @@ Model servers (reasoning, dense embed, reranker) live in a
 platform-team-owned pool with its own resources — this repo neither
 deploys nor sizes them, so model VRAM/RAM/CPU is out of scope here.
 Everything below sizes this repo's workloads only (Qdrant, agent,
-ingest, Jaeger). Where this guide says prod has ≥10× local, that means
+ingest, OpenObserve, otelcol). Where this guide says prod has ≥10× local, that means
 CPU/RAM/disk for those workloads, not model GPU/VRAM.
 
 Prod values assume a real OpenShift cluster; the single-node Kind path
@@ -577,7 +579,7 @@ cannot schedule on one node — proven).
   (Jobs are immutable); completion waits up to `INGEST_TIMEOUT` (default
   1h) while a background tailer streams pod logs, dumping logs and events
   on timeout.
-- First-party pods (agent, the oauth-proxy sidecar, the ingest Job, Jaeger)
+- First-party pods (agent, the oauth-proxy sidecar, the ingest Job, OpenObserve, otelcol)
   declare their own hardening so it does not depend on `restricted-v2`
   alone (issue #585): pod `runAsNonRoot: true` and
   `seccompProfile: RuntimeDefault`; every container
@@ -598,14 +600,9 @@ cannot schedule on one node — proven).
   coverage. The pinned OAuth sidecar retains the four original controls;
   its read-only-root/write-path qualification and actual `restricted-v2`
   admission remain separate acceptance under #585/#373/#447.
-- Jaeger is on by default (unset `OTEL_EXPORTER_OTLP_ENDPOINT` resolves to
-  `http://jaeger:4318`; the off sentinel disables both tracing and this
-  deployment; `JAEGER_ENABLED=false` skips only the deployment and is
-  refused unless `OTEL_EXPORTER_OTLP_ENDPOINT` names a collector or `off`,
-  in preflight, mapper and chart alike): 1 replica,
-  project-assigned UID and volume group from `restricted-v2` for Badger, 10Gi volume with 14-day span TTL, OTLP/HTTP 4318 only (the configured exporter uses HTTP;
-  the Qdrant client independently brings a transitive `grpcio` wheel), UI on
-  port-forward only, no archive store (debug data, not records).
+- OpenObserve is the bundled trace backend (see [Trace and metrics backend](#trace-backend)):
+  1 replica, project-assigned UID and volume group from `restricted-v2`, 10Gi RWO volume, OTLP/HTTP
+  on 5080 only, UI on port-forward only. Tracing off disables it.
 - Validate is read-only pre-flight: required keys, non-blank
   `EMBED_MODEL_REVISION` (the vllm attestation ingest/serving refuse when
   blank), `DENSE_DIM` positive
@@ -627,10 +624,11 @@ cannot schedule on one node — proven).
   search results as SKIP (infrastructure ready, corpus not ingested) rather
   than failure, and never touches `/v1/answer` (needs a reasoning model).
   With tracing on (the default) it also fails closed unless a `v1.search`
-  span lands in `JAEGER_QUERY_URL` within `TRACE_TIMEOUT` (default 60s); the `off`
-  sentinel skips that assertion. With the bundled Jaeger disabled the query is
-  skipped and the report says trace arrival is NOT VERIFIED: configuring a
-  collector is not proof that spans reach it.
+  span lands in OpenObserve (`TRACE_QUERY_URL`, default the in-cluster service; credentials from the
+  `openobserve-credentials` Secret or `TRACE_QUERY_USER`/`TRACE_QUERY_PASSWORD`) within `TRACE_TIMEOUT` (default 60s); the `off`
+  sentinel skips that assertion. With an external `OTEL_EXPORTER_OTLP_ENDPOINT` there is no bundled
+  OpenObserve: `TRACE_QUERY_URL` (and user/password) must be given explicitly, otherwise smoke
+  refuses with a fixed message.
 
 <a id="collection-policy"></a>
 ### Capacity arithmetic (issue #272)
@@ -643,7 +641,7 @@ values; the three Qdrant peers each get their own claims):
 | Qdrant data (RWO block) | 500Gi | 3 peers | 1500Gi |
 | Qdrant snapshots (RWO block, node-local) | 500Gi | 3 peers | 1500Gi |
 | Ingest scratch `ingest-work` (`INGEST_WORK_SIZE`) | 100Gi | 1 | 100Gi |
-| Jaeger Badger (when enabled) | 10Gi | 1 | 10Gi |
+| OpenObserve data (when tracing is on) | 10Gi | 1 | 10Gi |
 | **Provisioned PVC capacity** | | | **3110Gi = 3.04TiB** |
 
 The optional feedback claim (`FEEDBACK_STORAGE_SIZE`, default 10Gi, unmeasured,
@@ -935,6 +933,15 @@ bytes. Combined tag+digest refs are invalid — digest-only form is the pin.
   part of the handoff. The explicit PENDING state still skips the member and
   makes `AGENT_ROUTE=true` fail closed. A tag bump for `ose-oauth-proxy`
   must change all three sites: `images.txt`, `deploy.sh`, `load.sh`.
+- OpenObserve OSS v1.0.4 (`docker.io/openobserve/openobserve`,
+  `sha256:d4a878fa...54ba`, amd64 manifest list) and otelcol-contrib 0.160.0
+  (`docker.io/otel/opentelemetry-collector-contrib`, `sha256:799dc6cf...2ad6`)
+  are pinned and bundled by [ADR-0006](adr/0006-openobserve-traces-metrics-backend.md)
+  (#956); the [qualification record](records/2026-10-23-openobserve-oss-qualification.md)
+  names both digests. Neither pin changes what deploys until the chart backend
+  selection (#957) lands. OpenObserve is AGPL-3.0, otelcol-contrib Apache-2.0
+  ([licensing](licensing.md)). A bump of either changes `images.txt`, the
+  `licenses/inventory.json` bind, `load.sh` and `image_identity.sh` together.
 - `METRICS_ENABLED=true` additionally renders/applies
   the first-party chart ServiceMonitor so the OpenShift UWM stack scrapes
   `/metrics` (prerequisite and sizing in `docs/install_and_ops.md`).
@@ -958,7 +965,8 @@ and CI tooling have different owners and pull credentials.
 | Agent | `qdrant-pdf-rag-agent:<IMAGE_SHA>` | packed config digest, then deployed by registry manifest digest | `load.sh` | cluster pods |
 | Ingest | `qdrant-pdf-rag-ingest:<IMAGE_SHA>` | as the agent | `load.sh` | ingest Job |
 | Qdrant | `qdrant/qdrant:v1.19.0-unprivileged` | tag (the vendored chart cannot render a digest); running `imageID` compared | `load.sh` | cluster pods |
-| Jaeger | `jaegertracing/jaeger:v2.20.0` | as the agent | `load.sh` | cluster pods |
+| OpenObserve OSS (ADR-0006) | `openobserve/openobserve:v1.1.2` | as the agent; the chart references it by digest only (`images.openobserve.digest`) | `load.sh` | cluster pods when tracing is on with an empty `tracing.endpoint` |
+| otelcol-contrib (ADR-0006) | `otel/opentelemetry-collector-contrib:0.160.0` | as the agent | `load.sh` | cluster pod (`Deployment/otelcol`, container `otelcol`) beside OpenObserve |
 | OAuth sidecar (optional) | `openshift4/ose-oauth-proxy:v4.14` | as the agent; absent while `images.txt` says `sha256:PENDING` | `load.sh` | cluster pods |
 | CI job image | `ci/python:3.14`, or a complete `CI_PYTHON_IMAGE` | mirrored UBI Python 3.14 (GIL) with git, pip, tar, sha256sum | platform or factory mirror, not this repository | GitLab runner |
 | CI Qdrant service | `qdrant/qdrant@sha256:<images.txt digest>` | the `images.txt` manifest digest, so a tag is never enough | registry-to-registry copy that preserves the digest | GitLab runner (`sim`, `gate-l1`) |
@@ -1156,7 +1164,7 @@ include actual runner CPU, RAM and disk capacity; cleanup runs even after failur
 | `kind-gateway-embed-{upstream,malformed,dimension}` | Three isolated clusters, one embedding fault each through real LiteLLM and healthy recovery |
 | `kind-gateway-auth` | Wrong/missing credentials, untrusted CA, hostname mismatch and reasoning deadline, followed by healthy gateway/application recovery |
 | `kind-lifecycle-chart` | Three-worker Kind; first-party chart fresh/repeat/update/failure/rollback/redeploy sequence with PVC guards, then the next ordinary pipeline, all behind the egress boundary |
-| `kind-lifecycle` | Independent three-worker Kind; synthetic snapshot recovery, PVC identity, Qdrant/agent/Jaeger replacement, old trace persistence and repeat pipeline |
+| `kind-lifecycle` | Independent three-worker Kind; synthetic snapshot recovery, PVC identity, Qdrant/agent/OpenObserve replacement, old trace persistence and repeat pipeline |
 | `kind-shared-gateway` | Same live pipeline/probe/contracts/smoke but through the shared `GATEWAY_BASE_URL` fallback and the single `api-key` Secret data-key (issue #551); explicit per-operation URLs stay unset so fallback is exercised |
 | `kind-rerank` | Same live pipeline behind the egress boundary with `RERANK_ENABLED=true` through the test gateway: the minted per-leg `rerank-api-key` reaches the pod through its Secret reference, the gateway refuses a wrong, absent or other-leg key on both rerank routes, one scoped search is one stand-in call, the score route being unavailable is served by the rerank route, a scoped search with rerank on differs from rerank off only by the stand-in's scores (gateway call count the causal check), and with every rerank route down non-identifier search fails closed with the fixed `retrieval failed` message while `/healthz` is 503 with the rerank leg unready, then recovers (issue #815) |
 | Manual release Kind lane | Both real models through the authenticated TLS gateway on the same signed bundle ([release gate](release-verification.md)); SCC, Service CA, OAuth, Routes, node pulls and egress are verified on the site |
@@ -1301,8 +1309,8 @@ LiteLLM can turn it into a successful finish. This is the approved gateway-only
 LiteLLM import exception. Served model IDs and application contracts remain the
 same; production's platform gateway must provide equivalent protection.
 
-The production SCC fixes remove fixed Qdrant/Jaeger identities and make the
-application's required work paths group-0 writable. Jaeger uses `Recreate`
+The production SCC fixes remove fixed Qdrant/OpenObserve identities and make the
+application's required work paths group-0 writable. OpenObserve uses `Recreate`
 for its single RWO volume, avoiding concurrent-writer locks during redeployment.
 The dedicated OAuth pin and registry service-account authentication make the
 sidecar part of the signed candidate, rather than an unresolved release input.
@@ -1333,7 +1341,7 @@ Implemented (issue #272), as one chain bound to the signed MANIFEST:
    `python3`. `image_manifest.py` owns config-digest and layer structure parsing
    for pack/load/deploy/ingest; load additionally binds the archive manifest
    checksum and compares layer counts across serialization.
-3. The first-party images (agent, ingest, Jaeger, oauth-proxy) are then rendered
+3. The first-party images (agent, ingest, OpenObserve, otelcol, oauth-proxy) are then rendered
    as `repository@sha256:<registry manifest digest>` (`IMAGE_DIGEST_<ROLE>` →
    `map_values.py` → `images.<name>.digest`; the chart keeps the SHA tag only as
    the informational release identity). The digest only ever comes from this
@@ -1384,7 +1392,7 @@ protection remains the platform's responsibility.
 Preserve separate CI/prod Qdrant values and sizing. CI synthetic hash jobs never become
 prod ingest; production has no EMBED_MODE key, RWO block data/work storage,
 read-only caller corpus and two agent replicas. Qdrant chart IDs are explicitly
-null; Jaeger uses project-assigned IDs and `Recreate` for its single Badger writer.
+null; OpenObserve uses project-assigned IDs and `Recreate` for its single local-mode writer.
 Agent and ingest image roots (source and baked BM25 snapshot included) are
 read-only; only `/tmp` and ingest's existing `/work` mount accept writes.
 Never repair admission with `anyuid`. Verify an old trace survives replacement.
@@ -1413,6 +1421,42 @@ require completed recovery, provenance/count/dimension and vector compatibility
 before an alias. Never mix synthetic cleanup with preserved real-corpus resources.
 Transfer the identical tested bundle; missing/failed release-gate checks block
 promotion. Sizing-only overrides do not establish SCC, residency or distributed HA.
+
+<a id="trace-backend"></a>
+## Trace and metrics backend: OpenObserve (ADR-0006, #956)
+
+OpenObserve OSS is the only bundled backend; Jaeger is gone from the chart (an approved
+default change, #956). With `tracing.enabled=true` and an empty `tracing.endpoint` the chart
+renders a single-node Deployment (local mode, replicas 1, `Recreate`, RWO PVC
+`openobserve-data`, `openobserve.storage.size` default 10Gi, kept on uninstall), a ClusterIP
+Service on 5080 (no Route or Ingress) and an egress-deny NetworkPolicy. The pod is restricted-v2
+(non-root, no fixed IDs, drop ALL, seccomp RuntimeDefault, read-only root) and sets
+`ZO_TELEMETRY=false`, `ZO_MODEL_PRICING_ENABLED=false`, `ZO_MMDB_DISABLE_DOWNLOAD=true`.
+Egress is denied (DNS included) by the policy as well as by those settings; the policy needs an
+enforcing CNI. The console is reached by port-forward only.
+
+Settings (tracing off needs none of them):
+
+- `images.openobserve` (`v1.1.2`) and `images.otelcol` (`0.160.0`): repository plus tag, like the
+  other images; the digest pin lives in `images.txt` and is enforced at pack/load (#960).
+- `openobserve.runAsId` (operator key `OPENOBSERVE_RUN_AS_ID`, default unset): on plain Kubernetes such as the Kind lanes the image runs as root, so set one non-root id used as runAsUser/runAsGroup/fsGroup; leave unset on OpenShift, where restricted-v2 assigns the identity.
+- `openobserve.credentialsSecretName` (default `openobserve-credentials`; an emptied name fails the
+  render): the Secret must exist at deploy time (#960/`deploy.sh` checks it) with keys
+  `root-user-email`, `root-user-password`, `otlp-headers` (`Authorization=Basic <b64>`, read by the
+  agent and ingest Job as `OTEL_EXPORTER_OTLP_HEADERS`) and `metrics-auth` (`Basic <b64>`, read by
+  the collector). No credential value is in values or the ConfigMap. `deploy.sh` refuses a weak password before any mutation (`E_OPENOBSERVE_WEAK_PASSWORD`, value never printed). OpenObserve v1.1.2 refuses to start with a weak root password: `root-user-password` must be 8-128 characters with a lowercase letter, an uppercase letter, a digit and a special character.
+
+`tracing.endpoint` set is the generic OTLP/HTTP escape hatch: the agent exports there, and no
+OpenObserve or collector renders. Export stays fail-open.
+
+**Metrics collector.** With `metrics.enabled=true` (and the bundled OpenObserve) the chart adds a
+stateless `otelcol-contrib` Deployment (no PVC, no Service, same hardening). It scrapes
+`rag-agent:8080/metrics` every 15s and forwards over OTLP/HTTP to
+`http://openobserve:5080/api/default` with `Authorization` from `metrics-auth`.
+`NetworkPolicy/otelcol-egress` allows only OpenObserve 5080, the agent 8080 and cluster DNS
+(`openshift-dns`, `kube-system`), never the internet. `metrics.collector.enabled=false` skips it
+(platform forwarding); `true` without metrics and the bundled backend fails the render.
+The disk-full alert and the smoke trace check are later steps of #956.
 
 <a id="configuration-contract"></a>
 ## Operator configuration propagation contract
@@ -1508,15 +1552,15 @@ rejects whitespace. Runtime bearer auth intentionally omits a header for an
 absent/empty/whitespace key. These are different owners/meanings: do not globally
 normalize blanks without tracing both consumers. `map_values.py observability()`
 is the one owner of the observability decisions across stages: the
-unset=local-Jaeger and off/none/false/0=disabled tracing policy, and whether the
-bundled Jaeger and the ServiceMonitor deploy (explicit flag, else the parent leg;
+unset=bundled-OpenObserve, http(s)=external collector and off/none/false/0=disabled tracing policy,
+whether the bundled OpenObserve and otelcol deploy (`OTEL_BUNDLED`: tracing on and an empty endpoint)
+and whether the ServiceMonitor deploys (explicit flag, else the parent leg;
 a backend for a disabled leg fails closed). The shell stages `eval` its
 `--bundle-decisions` (`common.sh resolve_observability`) and the release renders
 the same booleans, so deploy/smoke/validate gates and the chart cannot disagree.
-An unset endpoint with `JAEGER_ENABLED=false` fails closed (the chart's empty
-`tracing.endpoint` guard keeps it for direct chart users), since the default
-names the service just disabled. Any explicit `http(s)` URL, the former hostname
-included, is an intentional platform-owned collector.
+Any explicit `http(s)` URL is an intentional platform-owned collector: the chart renders
+neither OpenObserve nor otelcol then, and deploy skips their Secret, identity, render and
+rollout steps.
 
 **Preconditions/failures/lifetime:** platform-supplied model/dimension/revision and
 per-leg credentials must match the deployment. Gateway aliases are mutable and

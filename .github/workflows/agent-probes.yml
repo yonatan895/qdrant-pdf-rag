@@ -61,7 +61,7 @@ jobs:
           import subprocess
           from pathlib import Path
           line = next(line for line in Path('images.txt').read_text().splitlines()
-                      if line.startswith('cr.jaegertracing.io/jaegertracing/jaeger:'))
+                      if line.startswith('docker.io/openobserve/openobserve:'))
           tag, digest = line.split()[:2]
           subprocess.run(['docker', 'pull', tag.rsplit(':', 1)[0] + '@' + digest], check=True)
           PY

@@ -19,18 +19,27 @@ REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / "scripts" / "run_local_stack.sh"
 
 
+@pytest.fixture(autouse=True)
+def _o2_credentials(tmp_path_factory, monkeypatch):
+    """Every stack run reads the 0600 OpenObserve env file; tests never touch the real one."""
+    path = tmp_path_factory.mktemp("o2") / "o2.env"
+    path.write_text("ZO_ROOT_USER_EMAIL=r@x.invalid\nZO_ROOT_USER_PASSWORD=fixture-o2-password\nO2_BASIC_AUTH=Zm9v\n")
+    path.chmod(0o600)
+    monkeypatch.setenv("O2_ENV_FILE", str(path))
+
+
 def _run(extra_env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
     env = {**os.environ, "LOCAL_STACK_DRYRUN": "1", **(extra_env or {})}
     return subprocess.run(["sh", str(SCRIPT)], capture_output=True, text=True, env=env, check=False)
 
 
 def test_dryrun_plan_orders_stages():
-    """Dry-run plan keeps the prod topology order (backends, Qdrant, Jaeger,
+    """Dry-run plan keeps the prod topology order (backends, Qdrant, OpenObserve,
     gateway, probe, ingest, agent)."""
     r = _run()
     assert r.returncode == 0, r.stderr
     plan = "\n".join(ln for ln in r.stdout.splitlines() if ln.startswith("[plan]"))
-    marks = ["backends", "qdrant", "run_local_jaeger.sh", "run_local_gateway.sh", "probe_gateway.py", "ingest", "uvicorn"]
+    marks = ["backends", "qdrant", "run_local_openobserve.sh", "run_local_gateway.sh", "probe_gateway.py", "ingest", "uvicorn"]
     positions = [plan.index(m) for m in marks]
     assert positions == sorted(positions)
     assert "UI_ENABLED=true" in plan
@@ -47,7 +56,7 @@ def test_dryrun_plan_reflects_operator_overrides(tmp_path):
     assert "UI_ENABLED=false" in next(ln for ln in lines if "uvicorn" in ln)
     ingest = next(ln for ln in lines if "ingest" in ln)
     assert str(tmp_path) in ingest and "skipped" not in ingest
-    # A shared service name would merge agent and ingest in one Jaeger.
+    # A shared service name would merge agent and ingest in one OpenObserve.
     assert "OTEL_SERVICE_NAME=mainframe-rag-ingest" in ingest
     assert "timeout 7s" in r.stdout and "--port 9099" in r.stdout
     assert "8002" not in lines[0]
@@ -437,7 +446,10 @@ def _host(tmp_path: Path, avail_mb: int = 64000, psi: float = 0.0) -> dict[str, 
     line = f"some avg10={psi:.2f} avg60=0.00 avg300=0.00 total=0\n"
     for resource in ("memory", "io"):
         (psi_dir / resource).write_text(line + line.replace("some", "full"))
-    return {"HOST_MEMINFO": str(meminfo), "HOST_PSI_DIR": str(psi_dir), "HOST_CPUS": "8"}
+    o2_env = tmp_path / "o2.env"
+    o2_env.write_text("ZO_ROOT_USER_EMAIL=r@x.invalid\nZO_ROOT_USER_PASSWORD=fixture-o2-password\nO2_BASIC_AUTH=Zm9v\n")
+    o2_env.chmod(0o600)
+    return {"HOST_MEMINFO": str(meminfo), "HOST_PSI_DIR": str(psi_dir), "HOST_CPUS": "8", "O2_ENV_FILE": str(o2_env)}
 
 
 def _plan_workers(tmp_path: Path, host: dict[str, str]) -> tuple[subprocess.CompletedProcess, str]:

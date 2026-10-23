@@ -141,7 +141,7 @@ Follow [Kind network and node trust](release-verification.md#kind-cluster)
 through cluster creation, using this guide's `KIND_NAME` and `KIND_STATE`. Add read-only Kind node
 mounts for `$KIND_STATE/corpus` at `/mnt/rag-kind-corpus` and
 `$KIND_STATE/checkpoint` at `/mnt/rag-kind-checkpoint`. The corpus is a static
-read-only local PV; Qdrant data/scratch and Jaeger use writable local-path claims.
+read-only local PV; Qdrant data/scratch and OpenObserve use writable local-path claims.
 After both services join the `kind` network, the registry gets Docker DNS alias
 `rag-kind.test`; CoreDNS maps that same hostname to the TLS gateway address.
 The node registry and pod gateway use different ports and DNS paths.
@@ -171,7 +171,7 @@ local choice, not a product-default change. Keep the published `IMAGE_SHA`.
 Use the [real-corpus resource overrides](local-real-corpus.md#1-establish-the-candidate-data-and-resource-budget):
 1/1/1 Qdrant topology, one ingest worker, Kind-only fsGroup 3000, two agent
 replicas, Qdrant data/snapshots sized for current data plus a replacement, and
-Jaeger persistent Badger storage. Mount `/mnt/rag-kind-checkpoint` read-only at
+OpenObserve persistent storage. Mount `/mnt/rag-kind-checkpoint` read-only at
 `/qdrant/snapshots/checkpoint` for restore; never mount a host source over the
 writable Qdrant data directory. Provision the read-only corpus PV separately.
 
@@ -222,18 +222,18 @@ Run the candidate gateway probe from an application pod, including tokenizer,
 real embeddings, reasoning and streaming completion. Run `local:check` with the
 original manual question and follow-up using private report files. Require
 accepted cited answers, a genuine zero-citation trap refusal, terminal SSE
-completion, fixed overlong-input rejection, healthy console and a fresh Jaeger
+completion, fixed overlong-input rejection, healthy console and a fresh OpenObserve
 search trace. An uncited draft is not a passing refusal.
 
 Retain port forwards in named tmux sessions:
 
 ```sh
 kubectl -n rag-kind port-forward --address 127.0.0.1 svc/rag-agent 8087:8080
-kubectl -n rag-kind port-forward --address 127.0.0.1 svc/jaeger 16686:16686
+kubectl -n rag-kind port-forward --address 127.0.0.1 svc/openobserve 5080:5080
 ```
 
-Open `http://localhost:8087/ui` and `http://localhost:16686`; verify them from the
-browser host too. Replace Qdrant, agent and Jaeger pods, then repeat an ordinary
+Open `http://localhost:8087/ui` and `http://localhost:5080`; verify them from the
+browser host too. Replace Qdrant, agent and OpenObserve pods, then repeat an ordinary
 search/answer and fetch the exact pre-replacement trace ID. Record imageIDs,
 PVC identities, corpus hashes, collection/control verification, RAM/VRAM and
 actual end-to-end timing. Keep the startup commands, protected credentials,
