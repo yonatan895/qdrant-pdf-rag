@@ -372,7 +372,7 @@ def test_load_ignores_retained_optional_image_outside_current_signed_inventory(l
 
 REGISTRY = "reg.internal:5000"
 REF = {
-    "qdrant": f"{REGISTRY}/qdrant/qdrant:v1.19.0-unprivileged",
+    "qdrant": f"{REGISTRY}/qdrant/qdrant:v1.19.2-unprivileged",
     "jaeger": f"{REGISTRY}/jaegertracing/jaeger:v2.20.0",
     "ingest": f"{REGISTRY}/qdrant-pdf-rag-ingest:{IMAGE_SHA}",
     "agent": f"{REGISTRY}/qdrant-pdf-rag-agent:{IMAGE_SHA}",

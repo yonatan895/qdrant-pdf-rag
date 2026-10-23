@@ -158,7 +158,7 @@ restores the snapshot over whatever the file assigned; empty stays unset
 
 ## 3. Render pipeline
 
-Qdrant deploys separately from `charts/qdrant-1.19.0.tgz`; the first-party
+Qdrant deploys separately from `charts/qdrant-1.19.2.tgz`; the first-party
 application chart uses the verified checkout. Both render offline with
 checksum-pinned Helm 4.3.0. The packaging-selected PR job in
 [the workflow](../.github/workflows/e2e.yml) executes `artifacts:helm-lint` and
@@ -462,7 +462,7 @@ checksums **after**.
 - Load re-verifies the signature, then checksums, then the `IMAGE_SHA`
   against the manifest, then all four base image digests (plus the
   oauth-proxy digest when the bundle carries it) — and pushes under fixed
-  names: `qdrant/qdrant:v1.19.0-unprivileged`,
+  names: `qdrant/qdrant:v1.19.2-unprivileged`,
   `jaegertracing/jaeger:v2.20.0` (retag note: upstream tag `2.20.0`),
   `qdrant-pdf-rag-ingest:<SHA>`, `qdrant-pdf-rag-agent:<SHA>`, and
   `openshift4/ose-oauth-proxy:v4.14` when bundled. Full SHA only, never
@@ -957,7 +957,7 @@ and CI tooling have different owners and pull credentials.
 |---|---|---|---|---|
 | Agent | `qdrant-pdf-rag-agent:<IMAGE_SHA>` | packed config digest, then deployed by registry manifest digest | `load.sh` | cluster pods |
 | Ingest | `qdrant-pdf-rag-ingest:<IMAGE_SHA>` | as the agent | `load.sh` | ingest Job |
-| Qdrant | `qdrant/qdrant:v1.19.0-unprivileged` | tag (the vendored chart cannot render a digest); running `imageID` compared | `load.sh` | cluster pods |
+| Qdrant | `qdrant/qdrant:v1.19.2-unprivileged` | tag (the vendored chart cannot render a digest); running `imageID` compared | `load.sh` | cluster pods |
 | Jaeger | `jaegertracing/jaeger:v2.20.0` | as the agent | `load.sh` | cluster pods |
 | OAuth sidecar (optional) | `openshift4/ose-oauth-proxy:v4.14` | as the agent; absent while `images.txt` says `sha256:PENDING` | `load.sh` | cluster pods |
 | CI job image | `ci/python:3.14`, or a complete `CI_PYTHON_IMAGE` | mirrored UBI Python 3.14 (GIL) with git, pip, tar, sha256sum | platform or factory mirror, not this repository | GitLab runner |
@@ -1364,7 +1364,7 @@ registry-side tag immutability (a platform control).
 ## Deployment maintenance policy
 
 Hard boundaries from the root guide remain binding. CPython is 3.14 GIL;
-Qdrant server/client/chart track 1.19.0 and the unprivileged image. The connected
+Qdrant server and chart track 1.19.2 (client 1.19.0, same minor) and the unprivileged image. The connected
 main factory is the only product image builder. App references use one exact
 `ghcr.io/<owner-lowercase>/qdrant-pdf-rag-{ingest,agent}:<full-git-sha>` across tag,
 push, render, pack and load (retag local `mainframe-rag/*` images before push).

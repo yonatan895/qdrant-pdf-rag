@@ -55,7 +55,7 @@ LOADED_COUNT=4
 
 if [ "${AIRGAP_DRYRUN:-0}" = "1" ]; then
     echo "==> [dryrun] Member checksum verification skipped"
-    echo "[dryrun] skopeo copy docker-archive:$ARTDIR/qdrant-image.tar docker://$INTERNAL_REGISTRY/qdrant/qdrant:v1.19.0-unprivileged"
+    echo "[dryrun] skopeo copy docker-archive:$ARTDIR/qdrant-image.tar docker://$INTERNAL_REGISTRY/qdrant/qdrant:v1.19.2-unprivileged"
     echo "[dryrun] skopeo copy docker-archive:$ARTDIR/jaeger-image.tar docker://$INTERNAL_REGISTRY/jaegertracing/jaeger:v2.20.0"
     echo "[dryrun] skopeo copy docker-archive:$ARTDIR/app-ingest-$IMAGE_SHA.tar docker://$INTERNAL_REGISTRY/qdrant-pdf-rag-ingest:$IMAGE_SHA"
     echo "[dryrun] skopeo copy docker-archive:$ARTDIR/app-agent-$IMAGE_SHA.tar docker://$INTERNAL_REGISTRY/qdrant-pdf-rag-agent:$IMAGE_SHA"
@@ -171,7 +171,7 @@ load() {
     verify_registry_image "$src" "$dst" "$key"
 }
 
-load qdrant-image.tar "$INTERNAL_REGISTRY/qdrant/qdrant:v1.19.0-unprivileged" qdrant_digest
+load qdrant-image.tar "$INTERNAL_REGISTRY/qdrant/qdrant:v1.19.2-unprivileged" qdrant_digest
 # Upstream source tag is 2.20.0 in images.txt; retagged to v2.20.0 to match the first-party Jaeger template
 load jaeger-image.tar "$INTERNAL_REGISTRY/jaegertracing/jaeger:v2.20.0" jaeger_digest
 load "app-ingest-$IMAGE_SHA.tar" "$INTERNAL_REGISTRY/qdrant-pdf-rag-ingest:$IMAGE_SHA" ingest_digest

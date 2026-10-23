@@ -266,7 +266,7 @@ def test_agent_qdrant_write_key_fails_closed(tree):
 
 
 ROLE_REFS = {
-    "qdrant": "reg.internal/qdrant/qdrant:v1.19.0-unprivileged",
+    "qdrant": "reg.internal/qdrant/qdrant:v1.19.2-unprivileged",
     "agent": f"reg.internal/qdrant-pdf-rag-agent:{IMAGE_SHA}",
     "jaeger": "reg.internal/jaegertracing/jaeger:v2.20.0",
 }
@@ -1247,7 +1247,7 @@ def test_release_renders_first_party_images_by_verified_digest(tree):
     assert f"image: reg.internal/jaegertracing/jaeger@{digests['jaeger']}" in jaeger
     assert "running images match the verified registry digests" in result.stdout
     # The vendored Qdrant chart cannot render a digest: its tag stays, the pods are compared.
-    assert "image.tag=v1.19.0" in _helm_log(tree)
+    assert "image.tag=v1.19.2" in _helm_log(tree)
 
 
 @pytest.mark.parametrize("role", ["jaeger"])
