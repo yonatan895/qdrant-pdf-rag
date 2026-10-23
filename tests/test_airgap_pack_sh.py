@@ -10,8 +10,8 @@ clone-traversable (the airgap-package CI check, hermetically).
 
 import hashlib
 import json
-import re
 import os
+import re
 import shutil
 import subprocess
 import tarfile
