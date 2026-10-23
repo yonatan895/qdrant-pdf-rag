@@ -241,6 +241,14 @@ or design needs rethinking: stop and say so. Re-review runs only after blocking
 fixes, at most twice, and marks the prior blockers alone: it files no new
 blocker, and a fix that regresses stays unresolved. A blocker unresolved after two re-reviews goes to
 the maintainer as a decision (#785).
+
+Maintainer rule (2026-10-23): every change gets a review through the
+`repo-code-review` skill (both axes): each PR, each merge train, and each fix
+pushed after review. Post it as a comment on that PR; a train PR also gets a
+summary linking each member review, its fixes and re-reviews. Post issue-level
+outcomes (a criterion met, a decision) on the issue. Each comment carries its
+evidence: head and base SHAs, the commands run with results or exit codes,
+findings in the fields above, and the verdicts. Re-reviews follow the limits above.
 If time/tool limits leave material review incomplete, report incomplete rather
 than approval by default.
 
