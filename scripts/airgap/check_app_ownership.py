@@ -21,6 +21,15 @@ ALLOWED = {
     ('v1', 'Service', 'jaeger'),
     ('v1', 'ConfigMap', 'jaeger-config'),
     ('v1', 'PersistentVolumeClaim', 'jaeger-badger'),
+    # OpenObserve backend and otelcol collector (ADR-0006, #956): the deploy
+    # after the one that created them must find them in the live inventory.
+    ('apps/v1', 'Deployment', 'openobserve'),
+    ('v1', 'Service', 'openobserve'),
+    ('v1', 'PersistentVolumeClaim', 'openobserve-data'),
+    ('networking.k8s.io/v1', 'NetworkPolicy', 'openobserve-egress-deny'),
+    ('apps/v1', 'Deployment', 'otelcol'),
+    ('v1', 'ConfigMap', 'otelcol-config'),
+    ('networking.k8s.io/v1', 'NetworkPolicy', 'otelcol-egress'),
     # Answer-feedback service (#804): the next ordinary deploy must find its own
     # objects in the live inventory. None is a disabled-cleanup entry: the
     # release prunes the workload, Service, policy and monitor, and the claim

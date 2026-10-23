@@ -1595,6 +1595,37 @@ def test_invalid_feedback_selection_fails_before_any_mutation(tree, env, message
     assert "upgrade" not in log and "new-project" not in log
 
 
+OPENOBSERVE_OBJECTS = [
+    ("apps/v1", "Deployment", "openobserve"),
+    ("v1", "Service", "openobserve"),
+    ("v1", "PersistentVolumeClaim", "openobserve-data"),
+    ("networking.k8s.io/v1", "NetworkPolicy", "openobserve-egress-deny"),
+    ("apps/v1", "Deployment", "otelcol"),
+    ("v1", "ConfigMap", "otelcol-config"),
+    ("networking.k8s.io/v1", "NetworkPolicy", "otelcol-egress"),
+]
+
+
+def test_next_ordinary_deploy_adopts_every_owned_openobserve_object(tree):
+    """Lifecycle, not first install: the deploy after the one that created
+    OpenObserve and otelcol finds all seven objects live and must proceed
+    (kind-lifecycle: 'application ownership preflight refused')."""
+    inventory = _live_inventory(tree, OPENOBSERVE_OBJECTS, **HELM_OWNED)
+    r = _run(tree, ("METRICS_ENABLED", "true"), ("OWNERSHIP_FILE", inventory))
+    assert r.returncode == 0, r.stderr
+    assert "ownership preflight refused" not in r.stderr
+    assert "upgrade" in _helm_log(tree)
+
+
+@pytest.mark.parametrize("obj", OPENOBSERVE_OBJECTS, ids=[o[2] for o in OPENOBSERVE_OBJECTS])
+def test_foreign_openobserve_objects_are_refused_before_any_mutation(tree, obj):
+    inventory = _live_inventory(tree, [obj], annotations={"meta.helm.sh/release-name": "other"})
+    r = _run(tree, ("METRICS_ENABLED", "true"), ("OWNERSHIP_FILE", inventory))
+    assert r.returncode != 0
+    assert "ownership preflight refused" in r.stderr
+    assert "upgrade" not in _helm_log(tree)
+
+
 def test_next_ordinary_deploy_adopts_every_owned_feedback_object(tree):
     """The deploy after the one that created the feedback service finds all five
     objects in the live inventory. Without them in check_app_ownership.ALLOWED
