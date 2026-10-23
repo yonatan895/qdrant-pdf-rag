@@ -3,6 +3,13 @@
   "title": "mainframe-rag values",
   "type": "object",
   "additionalProperties": false,
+  "if": {
+    "properties": { "requestMaxConcurrent": { "exclusiveMinimum": 0 } },
+    "required": ["requestMaxConcurrent"]
+  },
+  "then": {
+    "properties": { "requestQueueWaitSeconds": { "exclusiveMinimum": 0 } }
+  },
   "required": ["replicaCount", "images", "qdrantRelease", "models", "gateway", "tracing", "metrics", "ui", "route", "storage", "ingest", "pullSecret", "resources"],
   "definitions": {
     "nonPlaceholderString": {
