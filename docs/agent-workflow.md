@@ -453,7 +453,7 @@ submitted JSON has no role in the native verification check. Its identity lookup
 still refuses stale candidates. Selected `agent_probes`/`eval_retrieval` remain
 technical obligations. The dedicated `agent-probes.yml` producer runs
 `tests/live_agent_probes.py` against real loopback HTTP, disposable pinned
-Qdrant/Jaeger and a deterministic model stand-in. Its receipt must contain each
+Qdrant/OpenObserve and a deterministic model stand-in. Its receipt must contain each
 of the four named transport/lifecycle tests exactly once: live contracts and a
 fresh trace, fixed overlong error, buffered/streamed final integrity, and upstream
 cancellation followed by a successful ordinary request. Scripted refusal checks

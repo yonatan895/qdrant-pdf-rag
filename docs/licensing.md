@@ -22,7 +22,7 @@ Decision owners: `licenses/inventory.json` (the record),
 | Category | What it is | Who is responsible |
 |---|---|---|
 | Public code | This repository, Apache-2.0 per `pyproject.toml` and `LICENSE`. Its license does not cover dependencies. | Maintainer |
-| Transferred artifacts | Both app images (wheels, base layers, htmx, BM25 weights), Qdrant/Jaeger/oauth-proxy images, vendored chart, Task binary, repo bundle. Only these are what a release gives to the enterprise. | Release owner; obligations below |
+| Transferred artifacts | Both app images (wheels, base layers, htmx, BM25 weights), Qdrant/OpenObserve/oauth-proxy images, vendored chart, Task binary, repo bundle. Only these are what a release gives to the enterprise. | Release owner; obligations below |
 | Local model simulation | Weights a developer downloads for local gateway/embed runs. Not in any image, chart or bundle. | Each developer or CI owner, per upstream model license |
 | Platform model service | Production reasoning/embed/rerank models behind the gateway. This repo consumes HTTP endpoints; it does not redistribute weights. | Platform team and its consumption agreement |
 | Protected corpus | Vendor manuals/runbooks. Never in git or a bundle. Rights to hold and process them are a separate corpus-governance decision. | Corpus owner; protected records |
@@ -45,7 +45,7 @@ non-Python component (17, including the three non-distributed boundaries above).
   pin and digest, chart archive and its inner `LICENSE`, htmx files, Task pin and
   license digest, BM25 manifest, skills license/notice. Image labels recorded in
   this repository: none. The only archives observed locally (an older pack) carry
-  no license label on Qdrant or Jaeger, so image licenses are the upstream
+  no license label on Qdrant or the former Jaeger image, so image licenses are the upstream
   project's, with layer contents not enumerated.
 
 License classes (conservative, from `license_inventory.py`): `permissive`,
@@ -85,7 +85,8 @@ owner: these are maintainer dispositions, not legal approvals.
 |---|---|
 | `pymupdf` 1.28.2 | `elected: AGPL-3.0-only`, scoped to ingest. **Legal confirmation pending**: status stays `pending-owner-decision` (the one remaining unresolved item) until the qualified legal owner confirms. |
 | `flatbuffers`, `loguru`, `onnxruntime`, `tokenizers` | `approved`. Upstream license texts (locked version's tag, source URLs in the inventory) are in `licenses/texts/` and rendered into `THIRD-PARTY-NOTICES.txt`. |
-| Qdrant, Jaeger images | `approved` on the upstream Apache-2.0 license. Layer inventory is follow-up #371. |
+| Qdrant image | `approved` on the upstream Apache-2.0 license. Layer inventory is follow-up #371. |
+| OpenObserve image | AGPL-3.0, accepted for the unmodified upstream binary as a separate service ([ADR-0006](adr/0006-openobserve-traces-metrics-backend.md), D7). |
 | UBI 9 base image | `approved` on the UBI EULA after RPM-list extraction: 116 packages (name, version, license tag) from the rpmdb of the pinned digest in `licenses/ubi9-python-314-minimal.rpms.txt` (hash-bound, rendered into the notices). License tags are declared RPM metadata; any source offer would be a separately approved packaging change. |
 | oauth-proxy image | `approved` to transfer as an **external dependency**: the Red Hat image is shipped unmodified, not built here (`distributed_by_repo` stays true because the bundle carries it). Escalation, if transfer becomes a problem: maintainer, then platform team. |
 | IBM Plex fonts | `approved`; `OFL-1.1` is a permissive class in the checker. |
@@ -106,7 +107,7 @@ obligation is triggered by a given delivery is an owner decision (next section).
 | Class (inventory count) | Conditions the text states | What the bundle carries today |
 |---|---|---|
 | Permissive: MIT, BSD-2/3, 0BSD, Zlib, CC0, MIT-CMU, PSF-2.0, OFL-1.1 (59 wheels; htmx, Task, skills, Plex, BM25 declared) | Keep the copyright notice and permission/license text with copies (MIT, MIT-CMU, PSF-2.0; BSD-2/3 for binary form in the documentation or other materials supplied). BSD-3 adds no use of the author's name to endorse. Zlib: mark altered versions. OFL-1.1: keep copyright and license with each copy; the font is not sold on its own; Reserved Font Names unusable for modified versions. 0BSD and CC0 state none. | Wheel license files stay in each image under `<dist>.dist-info`; the four wheels without one have bound texts. Vendored asset licenses are in the notices file. |
-| Apache-2.0 (21 wheels, counting expressions that include it; Qdrant and Jaeger images, chart, project) | Section 4: give recipients a copy of the License; keep copyright, patent, trademark and attribution notices; if the Work has a NOTICE file, carry its attribution text in a NOTICE file, in documentation or in a display; mark changed files. | License files in `dist-info`; chart `LICENSE`, project `LICENSE` in the notices. Three wheels (`fastembed`, `prometheus-client`, `requests`) carry a `licenses/NOTICE` file, which stays in their `dist-info`; NOTICE content of image layers is not enumerated (#371). |
+| Apache-2.0 (21 wheels, counting expressions that include it; Qdrant image, chart, project) | Section 4: give recipients a copy of the License; keep copyright, patent, trademark and attribution notices; if the Work has a NOTICE file, carry its attribution text in a NOTICE file, in documentation or in a display; mark changed files. | License files in `dist-info`; chart `LICENSE`, project `LICENSE` in the notices. Three wheels (`fastembed`, `prometheus-client`, `requests`) carry a `licenses/NOTICE` file, which stays in their `dist-info`; NOTICE content of image layers is not enumerated (#371). |
 | Weak copyleft: MPL-2.0 (`certifi`; MPL part of `tqdm`) | Section 3.1: Covered Software stays under MPL in Source Code Form. Section 3.2: for an Executable Form, the recipient must be told how to obtain the Source Code Form by reasonable means, in a timely manner, at no more than the cost of distribution. Section 3.3: a larger work may carry other terms if the MPL rights in the covered files are not restricted. File-level scope. | The wheels are unmodified upstream bytes; their license files are in `dist-info`. No source pointer or source copy is carried. |
 | LGPL (no wheel; 43 of 116 UBI RPMs carry an LGPL tag) | LGPL-2.1 sections 4 to 6 and LGPL-3.0 sections 4 to 6: notice, license text, source for the library (or an offer), and the recipient's ability to relink or replace the library. | RPM names, versions and declared tags in `licenses/ubi9-python-314-minimal.rpms.txt` (rendered into the notices); not the license texts or sources. |
 | Strong copyleft: GPL (no wheel; 23 UBI RPMs tagged GPL without LGPL, such as `bash`, `coreutils-single`, `grep`, `sed`) | GPL-2.0 section 3 and GPL-3.0 section 6: pass object code only with the Corresponding Source, or with a written offer for it (GPL-3.0: valid for at least three years), or the other means the section lists. | Same RPM list. No source and no offer. Whether these base-layer packages trigger the duty for this delivery is the open source-offer question below. |

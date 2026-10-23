@@ -27,7 +27,7 @@ The intended acceptance is **answers supported by supplied evidence and citation
 | Environment | Model tier (reasoning / embed / rerank) | Qdrant + ingest + retrieval + agent |
 |---|---|---|
 | **Production (air-gap OpenShift)** | **Platform team owns it**: vLLM servers behind the LiteLLM gateway. This repo consumes it over HTTP only (`*_BASE_URL` + per-leg virtual keys) — it never installs, deploys, or Helm-charts vLLM / LiteLLM / GPU operators on a product path. | **This repo owns it.** |
-| **Local dev/test** | **Simulated by this repo** (`sh scripts/tools/run-task.sh local:stack`): local vLLM backends behind the real, digest-pinned LiteLLM gateway (`scripts/run_local_gateway.sh`) — a stand-in for the platform team's tier. | **Same code as prod**, same wire contract, plus Jaeger tracing of our components verified end to end. |
+| **Local dev/test** | **Simulated by this repo** (`sh scripts/tools/run-task.sh local:stack`): local vLLM backends behind the real, digest-pinned LiteLLM gateway (`scripts/run_local_gateway.sh`) — a stand-in for the platform team's tier. | **Same code as prod**, same wire contract, plus OpenObserve tracing of our components verified end to end. |
 
 Local simulation exists so agent/ingest always exercise the production gateway wire shape (single origin, model-id routing, per-leg Bearer virtual keys, native `/rerank` + `/v1/score` pass-through) — never a straight-to-vLLM shortcut. The local model/gateway simulation scripts (`scripts/run_local_gateway.sh`, `scripts/run_local_stack.sh`, `scripts/run_local_vllm.sh`) are local-only: never in the air gap or Helm. CI's `airgap-rehearsal` is a deployment-config rehearsal and uses the documented `scripts/mock_vllm.py` stand-in instead.
 
@@ -93,7 +93,7 @@ complete its answer-context integration; see the workload status table below.
 | `rag-agent` | Deployment | 2 | FastAPI, unprivileged, no GPU |
 | `ingest` | One-Shot Job | 1 | High CPU, worker pool, RWO scratch |
 | `zowe-mcp` | Proposed sidecar (ADR-0003); absent from the current Helm chart | Not deployed | Bridge/client code exists; answer-context integration and deployment wiring remain incomplete. Default-off; enabling requires the ADR-0003 reactivation gate, separate site credentials and written site acceptance |
-| `jaeger` | Deployment (default on; `off` sentinel disables; disabling only the backend needs an explicit collector endpoint or `off`) | 1 | Jaeger v2 all-in-one, Badger RWO block PVC, tracing backend |
+| `jaeger` | Deployment (default on; `off` sentinel disables; disabling only the backend needs an explicit collector endpoint or `off`) | 1 | OpenObserve, local mode, RWO block PVC, tracing backend |
 | `feedback` | Single-replica StatefulSet `rag-feedback` (ADR-0005, #804), rendered only with `FEEDBACK_ENABLED` (default off; [deploy.md](deploy.md#feedback-service)) | Deployed when enabled | Single SQLite writer for answer-quality records on its own kept RWO block PVC `rag-feedback-data` (never NFS); bearer token from an operator-created Secret; ClusterIP only, ingress limited to agent pods by `rag-feedback-ingress`; purges its own retention window in-process and exports purge outcomes on a bearer-protected `/metrics`; agents send to it best-effort when `FEEDBACK_ENABLED` (default off). Not console session state, which stays in browser `localStorage` (ADR-0004) |
 | `bm25-weights` | Baked in images | — | FastEmbed `Qdrant/bm25`; no runtime download |
 

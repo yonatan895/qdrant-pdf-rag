@@ -230,7 +230,7 @@ stream cancellation before a produced terminal records `generation_incomplete`.
 Both use the existing one-outcome guard. `tests/test_tracing.py` exercises
 real-SDK lifecycle, correlation and overlapping requests; the native
 `tests/live_agent_probes.py` verifies socket disconnect, upstream closure,
-finished Jaeger roots, exact JSON log joins and the next ordinary request.
+finished OpenObserve roots, exact JSON log joins and the next ordinary request.
 
 ### Console browser contract: retention and accessibility (#372)
 

@@ -59,7 +59,7 @@ This fixed group is Kind-only; OpenShift keeps project-assigned identities.
 Use explicit local `QDRANT_SHARD_NUMBER=1`, `QDRANT_REPLICATION_FACTOR=1`,
 `QDRANT_WRITE_CONSISTENCY_FACTOR=1`, `AGENT_ROUTE=false`, two agent replicas,
 real-model dimension 1024 and the verified immutable `EMBED_MODEL_REVISION`.
-The recorded claims are 20Gi each for Qdrant data/snapshots and 10Gi for Jaeger.
+The recorded claims are 20Gi each for Qdrant data/snapshots and 10Gi for OpenObserve.
 Include old generation, staging, safety snapshots and optimizer scratch in disk
 planning. Local-path claim capacity does not reserve or enforce physical disk
 space. Production sizing and 6/3/2 policy are unchanged.
@@ -84,10 +84,10 @@ convergence. The node's registry DNS and the pod's gateway DNS are distinct
 paths. Verify TLS/auth from both before attributing failures to model serving.
 
 For an explicitly authorized workload rebuild, first record a successful search
-and its Jaeger trace ID. Drain/stop agent and Jaeger Deployments, then uninstall
-the selected Helm releases. Legacy unmanaged agent/Jaeger Deployment, Service
+and its OpenObserve trace ID. Drain/stop agent and OpenObserve Deployments, then uninstall
+the selected Helm releases. Legacy unmanaged agent/OpenObserve Deployment, Service
 and ConfigMap resources need explicit removal by name. Inspect Helm manifests
-before uninstalling: retain Jaeger Badger and Qdrant data/snapshot PVCs, and keep
+before uninstalling: retain OpenObserve and Qdrant data/snapshot PVCs, and keep
 corpus/scratch claims outside the application release. Do not delete the namespace
 or cluster to accomplish workload teardown. Preserve unrelated resources.
 
@@ -223,7 +223,7 @@ raw question can still produce insufficient evidence.
 
 Verify search, grounded answer and follow-up, streaming completion, long-input
 refusal, liveness/readiness and the enabled console. Keep manual answers/browser
-captures private; share counts and outcomes. Replace Qdrant/agent/Jaeger pods,
+captures private; share counts and outcomes. Replace Qdrant/agent/OpenObserve pods,
 then verify collection/control state, next ordinary search/answer and the exact
 **pre-replacement trace ID**. Stable PVC UIDs alone do not prove retained content.
 

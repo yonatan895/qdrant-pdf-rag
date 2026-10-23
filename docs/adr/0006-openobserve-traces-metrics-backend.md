@@ -2,7 +2,8 @@
 
 - **Status:** accepted (maintainer, 2026-10-23; #782). Supersedes the backend
   and retention rules of [ADR-0002](0002-otel-backend-posture.md) for traces and
-  metrics. No deployment change until the follow-up Task lands.
+  metrics. Amended 2026-10-23 (#956): OpenObserve is the only trace backend,
+  in dev, CI and the local stack too, pinned at v1.1.2.
 - **Context:** ADR-0002 keeps single-replica, debug-grade Jaeger and requires a
   new ADR to replace it. #782 qualified single-node OpenObserve OSS v1.0.4 (local
   mode) against Jaeger + user-workload monitoring (UWM) + Splunk. Basis: the
@@ -20,6 +21,16 @@
   Logs stay in the platform's Splunk (D2/D3). The OpenTelemetry
   trace exporter and the `/metrics` exposition are unchanged. ADR-0005 holds:
   no question, answer, excerpt or comment text in any telemetry backend.
+- **Amendment, 2026-10-23 (#956, maintainer):** OpenObserve replaces Jaeger
+  everywhere, including development, CI, the Kind lanes and the local stack; there
+  is no `tracing.backend` selector. The pin is v1.1.2
+  (`sha256:4a154849432f75c4fb024de32fe34163c02406c905dab22bf8d213d2e3386392`,
+  index), subject to local re-qualification before merge (G2, G3, G4, G5, G6, S6,
+  S7 and a 1.0.4 to 1.1.2 upgrade of a copy of the trial volume). Any regression
+  falls the pin back to v1.0.4. Reason: v1.1.1 made the metrics index and WAL
+  packing always on and removed `ZO_METRICS_INDEX_ENABLED` and
+  `ZO_FEATURE_WAL_PACK_ENABLED`, which changes the write path the S7 and
+  durability evidence covered. The trial figures below are v1.0.4.
 - **Required configuration (the supported deployment must set all of these):**
   - `ZO_TELEMETRY=false`, `ZO_MODEL_PRICING_ENABLED=false` and
     `ZO_MMDB_DISABLE_DOWNLOAD=true`. With `ZO_TELEMETRY=false` alone, the default
@@ -28,8 +39,10 @@
   - Image pinned by digest (trial: v1.0.4,
     `sha256:d4a878fac1f6c56003764f7f2a1625668917388f167e222c8c810de3f54c56ba`,
     amd64); no tag references, no runtime downloads.
-  - No external egress. The names of the two egress settings were found in the
-    binary, not vendor documentation; verify them when the pin is made.
+  - No external egress: the three `ZO_*` settings above, plus an egress-deny
+    NetworkPolicy so the pod cannot reach a public destination even if a setting
+    is missed. The names of the two egress settings were found in the binary, not
+    vendor documentation; verify them when the pin is made.
   - Credentials from a Secret; the console, query and ingest paths all require
     them. Four endpoints answer without credentials (`/healthz`, `/config`, the
     UI static files, `/metrics`; accepted G2 reading). `ZO_PROMETHEUS_ENABLED=false`
@@ -56,6 +69,8 @@
     retention-sized budget.
   - **Not run:** Phase B (`kind load` failed with "failed to detect containerd
     snapshotter"), the upgrade of a volume by a later release, and logs (S3).
+    The volume-upgrade gap stays until the re-qualification's 1.0.4 to 1.1.2
+    upgrade run reports; that run closes it.
     Not tested: SSO, RBAC and audit gaps in OSS.
   - AGPL-3.0 is accepted for the unmodified upstream binary as a separate
     service ([licensing](../licensing.md)). No modification of Enterprise
@@ -64,12 +79,9 @@
     Security admission; real namespace quota; platform forwarding of metrics and
     traces; a 14-day soak; Enterprise offline licence answers (issue, renewal,
     50 GB/day enforcement, expiry behaviour); disk-full behaviour on the site volume.
-  - Retiring Jaeger in production first needs backend-neutral replacements for
-    the trace-arrival query in `scripts/airgap/smoke.sh` and `check_live.py`'s
-    `fresh_search_trace`. Jaeger remains the development and CI backend until
-    the follow-up Task lands.
   - Dashboards and alerts are later work under #529, using the M1-M6 PromQL
     (ran unmodified except M2, not numerically verified) and the J1-J3 queries
-    in the record.
+    in [metric-contract](../metric-contract.md). The disk-full alert follows the
+    re-qualification, because S7 behaviour may differ on v1.1.2.
   - Revisit trigger: any open site check failing, or Enterprise licensing
     constraints that block the supported deployment.

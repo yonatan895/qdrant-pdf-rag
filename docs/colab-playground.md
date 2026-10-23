@@ -1,7 +1,7 @@
 # Bounded Colab playground (#706)
 
 This is connected development tooling. The application, persistent Qdrant,
-ingestion, real pinned LiteLLM gateway, gateway Postgres and Jaeger stay local;
+ingestion, real pinned LiteLLM gateway, gateway Postgres and OpenObserve stay local;
 one explicitly owned Colab session supplies model HTTP endpoints. Production
 serving remains platform-owned. CPU/fake lifecycle evidence does not establish
 GPU fit, full-corpus quality, deployment acceptance or production parity.
@@ -531,7 +531,7 @@ gateway host-log cap and Docker rotation at 8MiB×2 files per container. Later
 ambient settings cannot remove those selected limits. Saturated host capture
 drains excess output, records truncation, and preserves Docker failure/cleanup.
 These limits need measured fit; they do not cap images, volumes, historical logs
-or cumulative daemon writes. Retain Jaeger's existing memory/trace caps and admit
+or cumulative daemon writes. Retain OpenObserve's existing memory/trace caps and admit
 every full-stack memory/disk destination separately: the controller cgroup does
 not contain Docker descendants. Retain final CU/session evidence on export failure.
 
