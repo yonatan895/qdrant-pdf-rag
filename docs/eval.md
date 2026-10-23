@@ -888,6 +888,9 @@ committed row is the pointer, the manifest is the detail.
 | 2026-10-22 | 80607ec | synthetic hash L1 venue: `mainframe_manuals` alias over a fresh throwaway Qdrant (`v1.19.0-unprivileged`, digest-pinned), original PDFs generated from `evals/golden.jsonl` by `gate_l1.generate_synthetic_golden_corpus` (61 docs, 135 pts, hash embeddings, `ALLOW_HASH_MODE`) | `eval:harness:baseline` equivalent (`scripts/harness.py --update-baseline --restore drift`, `EMBED_MODE=hash`, dev golden 127 entries; Qdrant started and corpus ingested by a scratch driver because the Task entry assumes an already-prepared `mainframe_manuals`) - #837 second criterion; **the default `rrf_k` is now 60 (#867, was 2), so the re-record reflects that change as well as recall@1** | `benchmarks/harness.json` re-recorded: 114 scored + 13 abstain rows (127 checked), overall r@1 1.0, r@5 1.0, r@8 1.0, MRR 1.0, nDCG@8 0.9737, 0 trap failures; every class r@1 1.0 (`negative` has no scored rows: null); recorded `golden_entries` 127. Previous record (2026-09-06, 208 pts, 117 checked, 104 scored, r@5/MRR 0.9712, no recall@1, no `table` class, no `golden_entries`) was stale against the current golden and rules. The synthetic pages echo the query text, so the venue is saturated: it detects drops in class recall@1 (floor 0.05), not gains. New pin `mainframe_manuals__gen94e05d25f7c9c1344b5aa9137e9e-279217298361320-2026-10-22-07-24-35.snapshot` (135 pts), snapshot file kept at `~/qdrant-snapshots/harness-hash-837/`. `harness-vllm.json` not re-recorded: needs the RC venue on a G4 session |
 | 2026-10-22 | 308f70b (G4 sandbox) | `colab_manuals_qwen3_8b_4096_ced400a7` (rules `ced400a7`, 234,610 pts, Qwen3-Embedding-8B dim 4096, shipped defaults, rerank off) | #825 live dev and section evaluation of the per-document comparative merge (#852); two identical replicates; holdout not read (#859) | dev (114 scored) r@1 0.711, r@5 0.956, MRR 0.802; comparative (12) r@1 0.333, r@5 0.917, MRR 0.583; sections (17) r@1 0.235, r@5 0.471, MRR 0.333; 0 `must_not`. CMP-05, CMP-17 retrieved at rank 3, CMP-06 rank 2, CMP-01 not in top 8 (label question). No regression versus the 2026-10-21 live row; not a controlled comparison (corpus rules and search params differ). Detail: [record](records/2026-10-22-comparative-live-eval.md) |
 | 2026-10-23 | 308f70b (G4 sandbox) | `colab_manuals_qwen3_8b_4096_ced400a7` (rules `ced400a7`, 234,610 pts, Qwen3.8-27B, Qwen3-Embedding-8B dim 4096, rerank off, deadline 570 s / client 600 s) | `eval-answers` 127 dev rows, xhigh versus low `LLM_REASONING_EFFORT_{SIMPLE,COMPLEX}` (only difference), plus the #843 thinking-reserve 16384 arm on the capped rows; holdout excluded (#859) - #831 | xhigh 88/127, low 116/127; p50 221.0 s vs 70.4 s; over 300 s 55 vs 0. Paired: both 84, low only 32, xhigh only 4 (NEG-02, SYN-01, SYS-07, TBL-02), both fail 7; McNemar p < 0.001. Low passes 31 of the 32 xhigh-truncated rows; on the 95 completed rows 88 vs 85 (not significant). Reserve arm: 11/16 vs low 15/16, p50 658 s vs 110 s. **Recommendation only (no default changed):** `low` for both routes as its own concern. Per-class table: [record](records/2026-10-23-effort-arms.md) |
+| 2026-10-23 | 308f70b (G4 sandbox) | `colab_manuals_qwen3_8b_4096_ced400a7` (rules `ced400a7`, 234,610 pts, Qwen3.8-27B, Qwen3-Embedding-8B dim 4096, rerank off, deadline 570 s / client 600 s) | `eval-answers` 126 of 127 dev rows (SYS-09 not run, session time), `LLM_REASONING_EFFORT_{SIMPLE,COMPLEX}` medium (only difference), paired with low and xhigh on the same 126 rows; holdout excluded (#859) - #917 | medium 119/126, low 115, xhigh 88; abstain declined 9/13 vs 7/13 vs 7/13; p50 / p95 / max 87.5 / 163.3 / 232.3 s; 0 timeouts, 0 `generation_incomplete`, 0 over 300 s. Paired: medium vs low 115 both, medium only 4 (NEG-02, SYN-01, TBL-02, VER-07), low only 0, p = 0.125; medium vs xhigh 87 both, medium only 32, xhigh only 1 (SYS-07), p < 0.001. Failures: MSG-13, SYN-07, SYS-07 (#916, #922 / #931), NEG-04, VER-08, VER-11 (#915), NEG-03. **No default changed; recommendation pending maintainer decision (#917).** Per-class table: [record](records/2026-10-23-medium-effort-arm.md) |
+
+**2026-10-23 default decision (#917).** The maintainer adopted `medium` reasoning effort on both routes as the shipped default after the S9 medium arm (126 dev rows: 119 pass against 115 low and 88 xhigh; 0 `generation_incomplete`; latency p50 87.5 s, p95 162 s, max 232 s). The measured record is #932; this note carries no new run. The xhigh and low rows above stay as the history they measured. Live confirmation of the changed default on G4 has not been run.
 
 ### Protected holdout acquisition (#508 C3)
 
@@ -956,7 +959,8 @@ pin (one record naming the basename). Passages are referenced, never quoted:
   `required_facts`, `required_conditions`. Abstain cases add `abstain_reason`
   (`insufficient_evidence`/`wrong_premise`) and `must_not_assert`, and carry no
   docs/evidence.
-- The validator rejects unknown fields, author equal to adjudicator, authors or
+- The validator rejects unknown fields, an `adjudicated_at` that is not a later day
+  than `authored_at` (D2 amendment: adjudication is a separate pass), authors or
   adjudicators absent from the manifest, duplicate ids or case/whitespace-folded
   queries, malformed dates/hashes, and any unadjudicated case. The CLI also
   refuses a set whose queries overlap the required `golden.jsonl`,
@@ -1021,7 +1025,8 @@ per-criterion results but is `non-certifying`.
 Repeats do not add independent cases: the Wilson bound uses the case count as
 `n` and the mean pass fraction across repeats as the rate. Fractional successes
 are descriptive quantities, not established binomial confidence bounds for
-repeated-case mean performance. A requested statistical claim for these means
+repeated-case mean performance. Unless the stage registers `case_reduction: "majority"` (see the 2026-10-23
+statistical-method entry below), a requested statistical claim for these means
 keeps the result non-certifying (`statistical_claim=false`, original request
 reported separately). The maintainer must select and register a statistical
 unit/method in the dedicated criteria decision; the scorer does not invent a
@@ -1048,6 +1053,30 @@ the PR carrying it merges. Dated; amend by a new dated record, not in place.
 - **Roles (D2).** Adjudicator: yonatan895. Author: **not yet named**; must be
   a different person (the validator rejects author equal to adjudicator). The
   set cannot be built until the author is named; #367 stays blocked on that.
+- **D2 amended, 2026-10-23 (yonatan895).** Supersedes the Roles (D2) line above
+  (kept as the dated original). Author: **yonatan895**, also the adjudicator;
+  the "different person" condition is dropped and #367 is no longer blocked on
+  an author. Independence now means: the release set is separate from
+  development, and **agents never author, read, score against or tune on it**
+  (the rule of the frozen holdout, #859); only its denominators and ids are
+  published. The second-person check is replaced by the written authoring
+  checklist and by adjudication in a separate pass after authoring, not while
+  writing (enforced as `adjudicated_at` later than `authored_at`). The
+  "adjudicated by a second person" clause in the #859 paragraph below is
+  superseded accordingly.
+- **Statistical method, 2026-10-23 (yonatan895; option B).** For the registered
+  absolute bars R1, R2 and R6 (the Wilson-bounded rates), each case is reduced to
+  pass/fail by majority over its repeats (at least 2 of 3; the stage field
+  `case_reduction: "majority"` requires an odd repeat count, so there are no ties),
+  and the existing Wilson bound then runs with n = number of cases. This
+  supersedes the "unit unselected" and "descriptive" wording above for those
+  criteria; the other release criteria (R3-R5, R7, R8, per-class floors) keep
+  their stated statistic over all repeat slots. Option A (a deterministic
+  percentile cluster bootstrap over per-case means, seed 367, 10000 resamples)
+  is reported in the report's `sensitivity` list and **never gates**. Option C
+  (paired comparison) is reserved for model-change comparisons and is not
+  implemented. The criteria file carries `case_reduction` for the release stage
+  but stays `proposed` with abstain `min_n` 30 until registration.
 - **Abstain composition (D4).** 40 abstain rows in the release set (pilot
   keeps 6), so one miss is tolerable: R2 (Wilson lower >= 0.85) at n=30 needs
   30/30, at n=40 it tolerates one miss. Mix of `insufficient_evidence` and
@@ -1073,6 +1102,59 @@ the PR carrying it merges. Dated; amend by a new dated record, not in place.
   stays non-certifying until the maintainer sets `registered`,
   `registered_by`/`registered_at` and the 40-row abstain `min_n` with the set
   binding, before the first scored run.
+
+### Pilot authoring kit (#367, 2026-10-23)
+
+Tooling and rules for the maintainer; agents never write, read or run it on
+real rows. It reuses the registered `release_set.jsonl` schema and loaders in
+`mainframe_rag.eval.acceptance` (no second format); `scripts/release_kit.py`
+(`mainframe_rag.eval.release_kit`) adds authoring-time checks. Tests:
+`tests/test_release_kit.py`, `tests/test_acceptance.py`, synthetic only.
+
+- **Private storage.** `~/.config/mainframe-rag/release-set/` (mode 700, outside
+  the working tree, never committed, never under the agent scratch cache):
+  `release_set.jsonl` plus its adjacent `.sha256` pin. The kit refuses a path
+  inside the repository and flags a group/other-accessible directory. Back it up
+  with the other durable records in `~/.config/mainframe-rag/`.
+- **Row template.** `python scripts/release_kit.py template` prints a placeholder
+  manifest, one answer row and one abstain row generated from the schema fields.
+  Ids use a `REL-` prefix; never reuse a dev golden id.
+- **Check while authoring.** `python scripts/release_kit.py check` (default
+  `--set` is the private path) validates the schema, ids, the stage counts
+  (pilot 24 answer + 6 abstain, covering the criteria's per-class
+  `case_count` minimums; release at least 100 answer and exactly 40 abstain),
+  the manifest `criteria_sha256`, one `required_facts` entry per answer row,
+  `excerpt_sha256` on every evidence item, and no id or normalized-query overlap
+  with `golden.jsonl` and `paraphrase.jsonl`. It prints ids and counts only,
+  never query text. The pinned holdout overlap is checked by the final
+  `--validate-only` run, not here.
+- **Freeze.** `python scripts/release_kit.py pin` writes the `.sha256` pin; then
+  `VENUE=rc python scripts/eval_acceptance.py --set <path> --validate-only`
+  (adds holdout overlap). Run scoring only after the criteria are registered.
+- **Authoring checklist (replaces the second-person check).**
+  1. Write from the manual page, never from system output or the dev golden set;
+     do not paraphrase a dev row.
+  2. One fact per answer row (`required_facts` has one entry); side conditions
+     go in `required_conditions`.
+  3. Record the source passage: `doc_id`, `release`, physical page, locator and
+     `excerpt_sha256` of the passage (hash only, never the text).
+  4. The question must have one answer supportable by the cited passage alone,
+     and must not name the expected fact.
+  5. Abstain rows: choose `insufficient_evidence` (the corpus plausibly lacks
+     the answer; confirm absence by reading the manuals, not by querying the
+     system) or `wrong_premise` (a false assumption the manuals contradict);
+     `must_not_assert` lists the specific fabrication to catch. Abstain rows
+     carry no docs or evidence. Declare the mix in the manifest `independence.statement` before
+     scoring.
+  6. Cooling-off: finish authoring, wait at least one full day, then adjudicate
+     each row cold against the cited passage in a separate sitting. Record the
+     adjudication date; same-day adjudication is rejected.
+  7. Reject, do not repair, a row that needed changing after adjudication
+     reading; rewrite and re-adjudicate it on a later day.
+  8. No feedback-derived rows (D6); no row written after seeing a system answer
+     to it (set `saw_system_outputs` false only if true).
+  9. After the first scored run, a defect found through the set is fixed against
+     the dev golden and the row is re-adjudicated or retired, never tuned on.
 
 ### Decision procedure
 

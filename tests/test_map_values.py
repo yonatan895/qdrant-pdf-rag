@@ -576,12 +576,14 @@ def test_model_budget_invalid_selection_fails_without_artifact(monkeypatch, mapp
 
 
 @pytest.mark.parametrize("selected,field", [
-    # #748/#777: a served domain without xhigh while an effort keeps the
-    # Settings default "xhigh".
-    ({"LLM_REASONING_EFFORTS": "low,medium,high", "LLM_REASONING_EFFORT_SIMPLE": "low"},
-     "LLM_REASONING_EFFORT_COMPLEX"),
-    ({"LLM_REASONING_EFFORTS": "low,medium,high", "LLM_REASONING_EFFORT_COMPLEX": "high"},
-     "LLM_REASONING_EFFORT_SIMPLE"),
+    # #748/#777/#917: a served domain without a selected effort. medium is the
+    # default and served by every shipped domain, so xhigh is selected explicitly;
+    # an unserved default (domain without medium) is refused too.
+    ({"LLM_REASONING_EFFORTS": "low,medium,high", "LLM_REASONING_EFFORT_SIMPLE": "low",
+      "LLM_REASONING_EFFORT_COMPLEX": "xhigh"}, "LLM_REASONING_EFFORT_COMPLEX"),
+    ({"LLM_REASONING_EFFORTS": "low,medium,high", "LLM_REASONING_EFFORT_COMPLEX": "high",
+      "LLM_REASONING_EFFORT_SIMPLE": "xhigh"}, "LLM_REASONING_EFFORT_SIMPLE"),
+    ({"LLM_REASONING_EFFORTS": "low,high"}, "LLM_REASONING_EFFORT_SIMPLE"),
 ])
 def test_effort_outside_served_set_fails_before_artifact(monkeypatch, mapper_env, selected, field):
     for name, value in selected.items():
@@ -850,3 +852,39 @@ def test_feedback_mapper_to_helm_round_trip(monkeypatch, mapper_env, tmp_path):
     assert env["FEEDBACK_SERVICE_TOKEN"]["valueFrom"]["secretKeyRef"] == {
         "key": "service-token", "name": "fb-secret"}
     assert ("ServiceMonitor", "rag-feedback") in docs and ("NetworkPolicy", "rag-feedback-ingress") in docs
+
+
+def test_unset_efforts_render_medium_on_the_agent_pod(monkeypatch, mapper_env):
+    """#917: with no operator effort, mapper values omit it and the chart default puts medium on the pod."""
+    for name in ("LLM_REASONING_EFFORT_SIMPLE", "LLM_REASONING_EFFORT_COMPLEX", "LLM_REASONING_EFFORTS"):
+        monkeypatch.setenv(name, "")
+    result, output = mapper_env()
+    assert result.returncode == 0, result.stderr
+    reasoning = load_values(output)["models"]["reasoning"]
+    assert "reasoningEffortSimple" not in reasoning and "reasoningEffortComplex" not in reasoning
+    rendered = subprocess.run(
+        [str(REPO / ".tools/bin/helm"), "template", "app", str(CHART), "-f", str(output),
+         "--namespace", "ns", "--show-only", "templates/agent-deployment.yaml"],
+        capture_output=True, text=True, check=False,
+    )
+    assert rendered.returncode == 0, rendered.stderr
+    agent = yaml.safe_load(rendered.stdout)["spec"]["template"]["spec"]["containers"][0]
+    actual = {entry["name"]: entry.get("value") for entry in agent["env"]}
+    assert actual["LLM_REASONING_EFFORT_SIMPLE"] == actual["LLM_REASONING_EFFORT_COMPLEX"] == "medium"
+
+
+def test_airgap_render_carries_the_request_deadline(mapper_env):
+    """#843 D6: the mapped release values add no override, so the chart's 300 s reaches the pod."""
+    result, output = mapper_env()
+    assert result.returncode == 0, result.stderr
+    assert "requestDeadlineSeconds" not in load_values(output)
+    rendered = subprocess.run(
+        [str(REPO / ".tools/bin/helm"), "template", "app", str(CHART), "-f", str(output),
+         "--namespace", "ns", "--show-only", "templates/agent-deployment.yaml"],
+        capture_output=True, text=True, check=False,
+    )
+    assert rendered.returncode == 0, rendered.stderr
+    agent = yaml.safe_load(rendered.stdout)["spec"]["template"]["spec"]["containers"][0]
+    actual = {entry["name"]: entry.get("value") for entry in agent["env"]}
+    assert actual["REQUEST_DEADLINE_S"] == "270"
+    assert yaml.safe_load(output.read_text())["route"]["timeoutSeconds"] > int(actual["REQUEST_DEADLINE_S"])

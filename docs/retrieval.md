@@ -220,6 +220,20 @@ rank 0 is worth `1/3` and rank 1 `1/4`, so one leg's top hit dominated).
    everywhere. Reopen
    gate: fresh pools with per-query attribution showing type-confusion
    losses the boost repairs.
+- Entry-headed ranking (issue #922, ranking only: no setting, no payload
+  field, no ingest or rules change). A message id that ends a range in a
+  chapter title is repeated in the running header of every page of the
+  chapter, so those chunks carry it in `message_ids` and all match the exact-id
+  filter; one of them is the entry. `rrf_fuse` therefore takes the query's
+  `message_ids` and, before the limit cut, ranks candidates having a text line
+  that begins with a requested id (`entry_headed`, the packer's
+  start-of-line rule) above candidates that only mention it, keeping RRF
+  order inside each group. A range title such as "Chapter 6 (X - Y)" begins
+  with other text, so it never counts. No candidate headed by the id leaves
+  the order unchanged; queries without a message id are untouched. Split
+  legs use their own ranking text's ids. The entry must be in the prefetch
+  pool (40 per leg): this ranks within the pool, it does not widen it.
+  Replay records hold no chunk text, so `replay_sweep` does not apply it.
 - The non-rerank fuse keeps only `max(limit*3, 24)` candidates — with the
   default limit of 8, 24 of up to 80 prefetched points survive to
   diversification. This truncation is the real recall knob: it has no

@@ -9,8 +9,10 @@ here, preserve the "filters in prefetch" contract. architecture.md 4.5.
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from collections import defaultdict
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 from opentelemetry import trace
@@ -196,6 +198,19 @@ def _to_hit(point: models.ScoredPoint, score: float) -> SearchHit:
     )
 
 
+def entry_headed(text: str, ids: Sequence[str]) -> bool:
+    """True when some line of `text` BEGINS with one of the requested message
+    ids (issue #922): the chunk holds that id's entry heading. A running
+    header or chapter title that only names the id inside a range or a title
+    ("Chapter 6. IEE messages (IEE400I - IEE699I)") starts with other text, so
+    it never counts. Same start-of-line rule as the prompt packer's
+    `_requested_identifiers`; no payload field and no vendor format is read."""
+    if not ids or not text:
+        return False
+    alts = "|".join(re.escape(i) for i in sorted(ids, key=len, reverse=True))
+    return re.search(rf"^[^\w\n]*(?:{alts})(?!\w)", text, re.IGNORECASE | re.MULTILINE) is not None
+
+
 def rrf_fuse(
     dense: list[models.ScoredPoint],
     sparse: list[models.ScoredPoint],
@@ -203,7 +218,14 @@ def rrf_fuse(
     k: int = RRF_K,
     limit: int = 8,
     type_boosts: dict[str, float] | None = None,
+    entry_ids: Sequence[str] = (),
 ) -> list[SearchHit]:
+    """Weighted RRF over the two legs. `entry_ids` (the query's message ids,
+    issue #922): candidates whose text has an entry heading for one of them
+    rank above candidates that only mention it, RRF order kept inside each
+    group. A range endpoint repeated in every page's running header makes
+    dozens of chunks match the exact-id filter; only the entry is the answer.
+    Empty `entry_ids` leaves the fusion byte-identical."""
     by_id: dict[str, models.ScoredPoint] = {}
     scores: dict[str, float] = defaultdict(float)
     for weight, points, leg in zip(weights, (dense, sparse), ("dense", "bm25"), strict=True):
@@ -220,8 +242,14 @@ def rrf_fuse(
                 if isinstance(ctype, str):
                     contrib *= type_boosts.get(ctype, 1.0)
             scores[key] += contrib
-    ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)[:limit]
-    return [_to_hit(by_id[key], score) for key, score in ranked]
+    ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+    if entry_ids:
+        headed = {
+            key: entry_headed(str((by_id[key].payload or {}).get("text") or ""), entry_ids)
+            for key, _ in ranked
+        }
+        ranked = [kv for kv in ranked if headed[kv[0]]] + [kv for kv in ranked if not headed[kv[0]]]
+    return [_to_hit(by_id[key], score) for key, score in ranked[:limit]]
 
 
 def merge_split_hits(
@@ -636,13 +664,17 @@ def _fuse_with_span(
     k: int,
     limit: int,
     type_boosts: dict[str, float] | None = None,
+    entry_ids: Sequence[str] = (),
 ) -> list[SearchHit]:
     with start_as_current_span(
         tracer,
         "retrieve.rrf",
         attributes=_rrf_span_attrs(weights, k, len(dense_points) + len(sparse_points), type_boosts),
     ):
-        return rrf_fuse(dense_points, sparse_points, weights, k=k, limit=limit, type_boosts=type_boosts)
+        return rrf_fuse(
+            dense_points, sparse_points, weights, k=k, limit=limit, type_boosts=type_boosts,
+            entry_ids=entry_ids,
+        )
 
 
 def _diversify_with_span(
@@ -847,14 +879,26 @@ async def async_search(
                 _ranking_params(settings, parse_query(sub).has_identifiers)[0]
                 for sub in sub_queries
             ]
+        # Entry-headed ranking (issue #922) follows each leg's own ranking
+        # text, like the weights: a stripped cause leg ranks by score alone.
+        leg_entry_ids = (
+            [identifiers.message_ids]
+            if split_mode == "single"
+            else [parse_query(sub).message_ids for sub in sub_queries]
+        )
 
         if rerank_active and active_reranker is not None:
             from mainframe_rag.retrieve.rerank import rerank_candidates
 
             rrf_limit = settings.rerank_candidates if settings else 50
             fused_lists = [
-                _fuse_with_span(dp, sp, w, k, rrf_limit, type_boosts=boosts)
-                for (dp, sp), w in zip(zip(leg_dense_points, leg_sparse_points, strict=True), leg_weights, strict=True)
+                _fuse_with_span(dp, sp, w, k, rrf_limit, type_boosts=boosts, entry_ids=eids)
+                for (dp, sp), w, eids in zip(
+                    zip(leg_dense_points, leg_sparse_points, strict=True),
+                    leg_weights,
+                    leg_entry_ids,
+                    strict=True,
+                )
             ]
             if split_mode == "single":
                 fused = fused_lists[0]
@@ -886,8 +930,13 @@ async def async_search(
         else:
             fuse_limit = max(limit * 3, 24)
             fused_lists = [
-                _fuse_with_span(dp, sp, w, k, fuse_limit, type_boosts=boosts)
-                for (dp, sp), w in zip(zip(leg_dense_points, leg_sparse_points, strict=True), leg_weights, strict=True)
+                _fuse_with_span(dp, sp, w, k, fuse_limit, type_boosts=boosts, entry_ids=eids)
+                for (dp, sp), w, eids in zip(
+                    zip(leg_dense_points, leg_sparse_points, strict=True),
+                    leg_weights,
+                    leg_entry_ids,
+                    strict=True,
+                )
             ]
             if split_mode == "single":
                 fused = fused_lists[0]

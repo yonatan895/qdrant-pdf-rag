@@ -1377,7 +1377,7 @@ def test_assignment_holder_without_recorded_pid_is_still_named_busy(lab, monkeyp
     root, state, _ = lab
     second = _prepare_new(state, root / "unrecorded-holder-run")
     monkeypatch.setattr(controller.Run, "run", lambda self, approval, workload: 0)
-    lock_path = Path("/tmp") / f"mainframe-rag-colab-{os.geteuid()}" / "assignment.lock"
+    lock_path = Path(os.environ["COLAB_ASSIGNMENT_LOCK_DIR"]) / "assignment.lock"
     lock_path.parent.mkdir(mode=0o700, exist_ok=True)
     with os.fdopen(os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600), "r+b") as holder:
         holder.truncate(0)
@@ -3069,7 +3069,7 @@ def test_reasoning_profile_sandbox_handoff_keeps_its_exact_routing(lab):
         "GATEWAY_REASONING_MODEL": "Qwen/Qwen3.8-27B", "GATEWAY_EMBED_MODEL": "Qwen/Qwen3-Embedding-8B",
         "GATEWAY_EMBED_MODEL_REVISION": profile["servers"][1]["revision"],
         "DENSE_DIM": "4096", "RERANK_ENABLED": "false", "LLM_MAX_MODEL_LEN": "32768",
-        "LLM_REASONING_EFFORT_SIMPLE": "xhigh", "LLM_REASONING_EFFORT_COMPLEX": "xhigh",
+        "LLM_REASONING_EFFORT_SIMPLE": "medium", "LLM_REASONING_EFFORT_COMPLEX": "medium",
         "LLM_REASONING_EFFORTS": "low,medium,xhigh", "GATEWAY_PROBE_MAX_TOKENS": "512",
     }
 

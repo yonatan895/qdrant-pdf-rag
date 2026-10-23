@@ -273,10 +273,12 @@ class Settings(BaseSettings):
     # on complex operational, diagnostic, and comparative inquiries while conserving
     # latency on simple factoid/message lookups.
     # Values are forwarded verbatim; operators select the served template's domain.
-    # Production target is xhigh on both paths (#777); complexity still selects
-    # the complex system-prompt extension.
-    llm_reasoning_effort_simple: ReasoningEffort = Field(default="xhigh")
-    llm_reasoning_effort_complex: ReasoningEffort = Field(default="xhigh")
+    # Production target is medium on both paths (#917, maintainer decision
+    # 2026-10-23; was xhigh since #777); complexity still selects the complex
+    # system-prompt extension. The chart values, air-gap model_config mirror and
+    # colab profile carry the same value; a test pins them in step.
+    llm_reasoning_effort_simple: ReasoningEffort = Field(default="medium")
+    llm_reasoning_effort_complex: ReasoningEffort = Field(default="medium")
     # Comma list of efforts the served chat template accepts (#748): the console
     # offers exactly these, and both defaults above must be members. The stock
     # Qwen3.8 template needs "low,medium,xhigh" (the default since #777).

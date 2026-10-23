@@ -3421,17 +3421,19 @@ def test_unknown_topology_legacy_migration_never_deletes_the_squatter(tmp_path, 
 
 
 
-def test_publication_checks_are_read_only_by_type(tmp_path):
-    """Issue #369: publication's resolution and verification helpers take
-    the read-only `QdrantReader`, so the checker used by qa:typecheck proves
-    they cannot write (transitively: a reader can only reach other reader
-    helpers), while every helper that mutates storage requires the writer
-    protocol and rejects a reader. The publish decision step and the
-    re-certification checks are readers; re-certification's receipt
-    backfill is its one write and needs the writer."""
+@pytest.fixture(scope="module", autouse=True)
+def _publication_typecheck(request, tmp_path_factory):
+    """Start the strict mypy run for `test_publication_checks_are_read_only_by_type`
+    when the module starts, so its ~7 s cold start overlaps the other tests
+    instead of being waited on serially. Same command, same inputs; the test
+    below collects the result. Nothing starts unless that test is selected."""
+    if not any(item.name == "test_publication_checks_are_read_only_by_type" for item in request.session.items):
+        yield None
+        return
     import subprocess
     import sys
 
+    tmp_path = tmp_path_factory.mktemp("publication_typecheck")
     command = [sys.executable, "-m", "mypy", "--strict", "--follow-imports=silent", "--no-incremental"]
     imports = """
 import qdrant_client
@@ -3485,10 +3487,28 @@ def writes(r: QdrantReader, s: Settings) -> None:
             for peer in placement.values():
                 peer.delete_collection("staging")
 """)
-    # One strict run checks both files (a cold mypy start-up dominates the
-    # cost): the reader-only file must produce no diagnostic at all, and the
-    # writer-requiring file exactly the five below.
-    rejected = subprocess.run([*command, str(good), str(bad)], capture_output=True, text=True, check=False)
+    process = subprocess.Popen([*command, str(good), str(bad)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        yield process, good
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate()
+
+
+def test_publication_checks_are_read_only_by_type(_publication_typecheck):
+    """Issue #369: publication's resolution and verification helpers take
+    the read-only `QdrantReader`, so the checker used by qa:typecheck proves
+    they cannot write (transitively: a reader can only reach other reader
+    helpers), while every helper that mutates storage requires the writer
+    protocol and rejects a reader. The publish decision step and the
+    re-certification checks are readers; re-certification's receipt
+    backfill is its one write and needs the writer."""
+    import subprocess
+
+    process, good = _publication_typecheck
+    stdout, stderr = process.communicate()
+    rejected = subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
     assert rejected.returncode == 1, rejected.stdout + rejected.stderr
     assert str(good) not in rejected.stdout + rejected.stderr, rejected.stdout + rejected.stderr
     for name in ("ensure_staging", "delete_by_revision", "swap_alias_to"):

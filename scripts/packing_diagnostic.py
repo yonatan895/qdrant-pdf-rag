@@ -378,7 +378,12 @@ def _targets(
 ) -> list[TargetTrace]:
     """The gold evidence a good answer needs, at the level the row can name.
 
-    * heading row   -> one target: a gold-doc hit whose heading matches;
+    * heading row   -> one target: a gold-doc hit whose heading matches. A row
+                       that also requests a message id needs a unit headed by
+                       it (issue #922): a heading shared by a whole chapter
+                       matches every hit, so it stands in for the entry only
+                       when the heading names no requested id, and a mention
+                       alone does not satisfy the entry target;
     * comparison    -> one target per expected doc plus one per requested
                        identifier (the cross-hit coverage premise of #811);
     * other row with a requested identifier -> one target per identifier
@@ -390,15 +395,24 @@ def _targets(
     is_cmp = (entry.id or "").startswith("CMP") or entry.query_class == "comparative"
     heading = (entry.expected_heading or "").lower()
     out: list[TargetTrace] = []
+    need_head = False  # a mention does not satisfy the target (issue #922)
 
     def in_prompt(t: HitTrace) -> bool:
         return t.status != "dropped"
 
     if heading:
-        rel = [t for t in traces if t.gold_doc and t.heading_match]
-        out.append(_target("heading", "heading", rel, [t for t in rel if in_prompt(t)], budget_tokens))
-        return out
-    if is_cmp or not ids:
+        # Message rows (issue #922): a chapter-title heading that names the id
+        # matches every hit of the chapter, so only a unit headed by the id
+        # counts as the entry. The heading target stays when it names none.
+        msg_ids = parse_query(query).message_ids
+        if not any(i.lower() in heading for i in msg_ids):
+            rel = [t for t in traces if t.gold_doc and t.heading_match]
+            out.append(_target("heading", "heading", rel, [t for t in rel if in_prompt(t)], budget_tokens))
+        if not msg_ids:
+            return out
+        ids = list(msg_ids)
+        need_head = True
+    elif is_cmp or not ids:
         for doc in sorted(gold):
             rel = [t for t in traces if t.doc_id == doc]
             out.append(_target("doc", doc, rel, [t for t in rel if in_prompt(t)], budget_tokens))
@@ -412,6 +426,11 @@ def _targets(
                 continue
             seen = [t for t in pool if ident in t.mention_ids]
             covered = [t for t in seen if ident in t.mention_ids_in_prompt]
+            if need_head and seen:
+                # Named only inside other text, e.g. a running header: the
+                # entry itself was never retrieved.
+                out.append(TargetTrace("entry-mention", ident, NOT_RETRIEVED, [t.rank for t in seen]))
+                continue
             out.append(
                 _target("entry-mention" if seen else "entry-none", ident, seen, covered, budget_tokens)
             )

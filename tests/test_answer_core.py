@@ -431,13 +431,13 @@ async def test_core_reasoning_effort_explicit_override_sync():
     def retrieve(*_a, **_k):
         return [_hit()], "nl", {"embed_ms": 1, "qdrant_ms": 1}
 
-    # Query without override -> simple query uses the xhigh default (#777)
+    # Query without override -> simple query uses the medium default (#917)
     llm1 = CoreFakeLLM()
     await execute_answer_core(
         AnswerCoreInput(query="simple query"),
         _deps(_settings(), llm1, retrieve),
     )
-    assert llm1.calls[0]["reasoning_effort"] == "xhigh"
+    assert llm1.calls[0]["reasoning_effort"] == "medium"
 
     # Simple query with explicit override="high" -> gets "high"
     llm2 = CoreFakeLLM()

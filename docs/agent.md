@@ -593,12 +593,13 @@ otherwise multi-step configuration phrasing, comparisons (`versus`, `vs`,
 (`rule, interval, parameter, parmlib, jcl, policy, threshold, journal`)
 select `complex`. Default is `simple`.
 
-- Defaults (#777, sized for Qwen3.8-27B at a 32768-token window): `xhigh`
-  effort on both paths; complex adds the extended system prompt. Temperature
+- Defaults (#777 sizing for Qwen3.8-27B at a 32768-token window; effort
+  changed to `medium` by #917, maintainer decision 2026-10-23, basis in
+  [eval.md](eval.md) and #932): `medium` effort on both paths; complex adds the extended system prompt. Temperature
   0.2 both. Both paths take whole chunks (4000 chars per excerpt, 32000 chars
   of no-tokenizer context); the prompt budget prices a 2560-token answer
-  reserve plus an 8192-token thinking reserve (provisional until xhigh is
-  measured). In #759 the window never bound (largest request 9011 of 16384
+  reserve plus an 8192-token thinking reserve (priced for xhigh, unchanged by #917 and
+  not re-measured at medium). In #759 the window never bound (largest request 9011 of 16384
   tokens) while the 4096-era complex caps omitted evidence on 21 of 32
   complex requests. The local 8 GB lane keeps its 4096-window budget
   (8000/4500 chars, 3000/1100 per excerpt, 1536 answer, 0/1000 thinking,
@@ -835,12 +836,25 @@ async pool on `FEEDBACK_TIMEOUT_S` (issue #780; closed after a bounded drain).
 ## 6a. Request admission, total deadline and embed-input bound (issue #374)
 
 **Status:** implemented with hermetic tests (`tests/test_request_bounds.py`,
-`tests/test_hash_embed.py`, `tests/test_run_ingest.py`); **every limit defaults
-off** (0), so behaviour is unchanged until an operator selects values. No
-numeric limit is approved or measured for production: choosing them needs the
-site procedure at the end of this section. **Decision owners:** `agent/admission.py`
+`tests/test_hash_embed.py`, `tests/test_run_ingest.py`); **every `Settings` limit
+defaults off** (0), so local and CI behaviour is unchanged. Only the 270 s
+deadline is approved for the supported deployment (below, #843 D6); no admission
+limit is approved or measured, and choosing one needs the site procedure at the
+end of this section. **Decision owners:** `agent/admission.py`
 (`AdmissionController`), `app._admit` / `_within_deadline` / `_deadline_iter`,
 `ingest/bounds.py`.
+
+**Approved envelope (2026-10-23, #843 D6; handoff owned by #374).** The supported
+deployment ships `REQUEST_DEADLINE_S=270` through the chart value
+`requestDeadlineSeconds` (so the air-gap render carries it); the `Settings`
+default stays 0 for local and CI (#843 D5). It is chosen from the medium-effort
+record (#917: p95 162 s, max 232 s on 126 dev rows), so the supported route sees
+no 504 at that effort, while a longer generation ends as `504 deadline_exceeded`
+instead of a silent route cut. 270 s is strictly below the route `timeoutSeconds`
+and the default client and `answer_timeout_s` waits (300 each), so the agent's
+504 arrives before the route cut; a test requires deadline < route timeout. Admission
+numbers (`request_max_concurrent`, queue) are **not** approved; they wait for the
+stepped-concurrency run (#843 D4).
 
 - **Admission** (`request_max_concurrent` > 0): `/v1/search`, `/v1/evidence/*`,
   `/v1/sources`, `/v1/answer`, `/v1/chat*` and `/ui/chat*` share one pool and take one slot as
@@ -889,9 +903,11 @@ site procedure at the end of this section. **Decision owners:** `agent/admission
 - **Propagation:** these are `Settings` fields read from the environment
   (`REQUEST_MAX_CONCURRENT`, `REQUEST_QUEUE_MAX`, `REQUEST_QUEUE_WAIT_S`,
   `REQUEST_DEADLINE_S`, `EMBED_MAX_INPUT_CHARS`, `INGEST_MAX_PDF_BYTES`,
-  `INGEST_MAX_DOC_PAGES`, `INGEST_MAX_DOC_CHUNKS`). The operator-file ->
-  Task/shell -> Helm handoff is **not** added in this change; until a
-  reviewed handoff exists, setting them is a local/CI experiment, not a
+  `INGEST_MAX_DOC_PAGES`, `INGEST_MAX_DOC_CHUNKS`). Only `REQUEST_DEADLINE_S`
+  has a handoff: the chart value `requestDeadlineSeconds` (default 270, rendered
+  as the pod env; a direct Helm caller may set 0..3600, 0 disables). There is no
+  operator-file key for it yet (that needs the Task `TASK_OP_KEYS` list to move
+  with `OPERATOR_ENV_KEYS`). The other names stay a local/CI experiment, not a
   deployment change (same rule as `LLM_THINKING_RESERVE_TOKENS_SIMPLE`).
 
 **Local evidence (labelled by scope):** full re-ingest on 2026-10-02 —
@@ -935,12 +951,12 @@ readers:
 | `prompt_order` | `retrieval` (`stable_cache` alt) | block ordering |
 | `llm_base_url` / `llm_model_reasoning` / `llm_api_key` | unset (answer stays disabled; key unset = keyless) | per-request assertion, LLM client, tokenizer |
 | `answer_timeout_s` | 300.0 | reasoning client wait per model I/O (not a total on a stream; a buffered caller still gets a total), expiry is `504 model_timeout`; no transport retries, explicit fallback policy below; budgets in §6 |
-| `llm_reasoning_effort_simple` / `_complex` / `llm_temperature` | xhigh / xhigh / 0.2 | answer path (#777) |
+| `llm_reasoning_effort_simple` / `_complex` / `llm_temperature` | medium / medium / 0.2 | answer path (#917, was xhigh / xhigh from #777) |
 | `llm_reasoning_efforts` | `low,medium,xhigh` | served template's effort domain (Qwen3.8): console choices; both efforts above must be members (#748) |
 | `llm_max_model_len` / `llm_reserved_output_tokens` / `llm_thinking_reserve_tokens_complex` / `llm_token_safety_margin` / `llm_max_chunk_tokens_narrative` / `llm_tokenize_timeout_s` | 32768 / 2560 / 8192 / 128 / 1200 / 5.0 | tokenizer-path budgeting (#298, #777). `llm_max_model_len` must not exceed the served `--max-model-len`. With a server-verified prompt count the reserved output plus the path's thinking reserve is sent as `max_tokens` (prompt + cap stays inside the window minus the margin), so a runaway xhigh generation ends as `finish_reason: length` → `generation_incomplete`; an estimator-only prompt sends no cap |
 | `llm_thinking_reserve_tokens_simple` | 8192 | reasoning headroom in single-turn and chat prompt budgets (provisional for xhigh, #777); environment input `LLM_THINKING_RESERVE_TOKENS_SIMPLE` |
 | `llm_stream` | `false` | TTFT measurement and streaming recovery policy for server-side reasoning calls (the wire is a stream either way, #868) |
-| `request_max_concurrent` / `request_queue_max` / `request_queue_wait_s` / `request_deadline_s` | 0 (unlimited) / 0 / 5.0 (used only with a queue) / 0.0 (no deadline) | request admission and total deadline (§6a); issue #374, **no numeric envelope approved** — values come from site measurement |
+| `request_max_concurrent` / `request_queue_max` / `request_queue_wait_s` / `request_deadline_s` | 0 (unlimited) / 0 / 5.0 (used only with a queue) / 0.0 (no deadline; the chart ships 270, #843) | request admission and total deadline (§6a); issue #374; only the 270 s deadline is approved for the supported deployment, **no admission envelope approved** — values come from site measurement |
 | `embed_max_input_chars` | 0 (unbounded) | refuse an over-bound dense embed input before the call, query path and ingest (§6a, `docs/ingest.md` §7) |
 | `http_connect_retries` / `http_max_connections` / `http_max_keepalive_connections` | 2 (connect-only) / 200 / 100 | both pools, embed/context clients |
 | `health_qdrant_timeout_s` / `health_embed_timeout_s` | 5.0 / 10.0 | healthz only |
@@ -1377,7 +1393,11 @@ are above. **Authority:** ADR-0001/0004, #363 and existing transport contracts;
 `HttpxLLMClient`, `VllmTokenizer`, `HttpReranker`, `http_client` and lifespan.
 
 `LLM_REASONING_EFFORT_SIMPLE` and `LLM_REASONING_EFFORT_COMPLEX` accept `low`,
-`medium`, `high` and explicit `xhigh`; their defaults are `xhigh` and `xhigh` (#777).
+`medium`, `high` and explicit `xhigh`; their defaults are `medium` and `medium` (#917; `xhigh` until 2026-10-23, #777).
+The default lives in `config.Settings`, mirrored by the air-gap preflight
+(`model_config.REASONING_EFFORT_DEFAULTS`) and set explicitly in the chart
+`models.reasoning.reasoningEffortSimple/Complex` values, so a rendered pod carries
+`medium`; tests pin the three in step. An operator may still select `xhigh`.
 Shared-core overrides accept the same values. The selected effort reaches the
 reasoning HTTP request verbatim for buffered, streamed and permitted fallback
 calls; `high` is never translated to `xhigh`, and an omitted direct-client effort

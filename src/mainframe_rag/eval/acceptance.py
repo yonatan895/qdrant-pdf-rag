@@ -28,6 +28,7 @@ import argparse
 import hashlib
 import json
 import math
+import random
 import re
 import sys
 from collections import Counter
@@ -187,8 +188,10 @@ class ReleaseCase(_Strict):
     def _shape(self) -> ReleaseCase:
         if (self.critical_probe is None) != (self.critical_expected_outcome is None):
             raise ValueError("critical_probe and critical_expected_outcome must be declared together")
-        if self.provenance.author.casefold() == self.adjudication.adjudicator.casefold():
-            raise ValueError("author and adjudicator must be different people")
+        # D2 amended 2026-10-23: author and adjudicator may be the same person;
+        # the second-person check is replaced by a separate, later adjudication pass.
+        if date.fromisoformat(self.adjudication.adjudicated_at) <= date.fromisoformat(self.provenance.authored_at):
+            raise ValueError("adjudicated_at must be a later day than authored_at (separate adjudication pass)")
         if self.expected_behavior == "answer":
             if self.abstain_reason is not None or self.must_not_assert:
                 raise ValueError("answer cases take no abstain_reason/must_not_assert")
@@ -330,10 +333,15 @@ class Stage(_Strict):
     repeats: int = Field(ge=1)
     statistical_claim: bool
     confidence: float = Field(default=0.95, gt=0.5, lt=1)
+    # Registered reduction of repeated cases to one binary outcome before the Wilson bound
+    # (D-stat 2026-10-23, option B). None keeps the descriptive case-mean behavior.
+    case_reduction: Literal["majority"] | None = None
     criteria: list[Criterion] = Field(min_length=1)
 
     @model_validator(mode="after")
     def _unique(self) -> Stage:
+        if self.case_reduction == "majority" and self.repeats % 2 == 0:
+            raise ValueError("case_reduction 'majority' needs an odd repeat count (ties are not defined)")
         ids = [c.id for c in self.criteria]
         if len(set(ids)) != len(ids):
             raise ValueError("criterion ids must be unique within a stage")
@@ -567,12 +575,54 @@ def _check_outcomes(release: ReleaseSet, outcomes: list[Outcome], repeats: int) 
     return table
 
 
+SENSITIVITY_SEED = 367
+SENSITIVITY_RESAMPLES = 10000
+
+
+def _reduced(c: Criterion, stage: Stage) -> bool:
+    """Majority reduction applies to the Wilson-bounded rate criteria only."""
+    return stage.case_reduction == "majority" and c.statistic != "point" and c.metric in RATE_METRICS
+
+
+def _case_means(c: Criterion, scoped: list[ReleaseCase], stage: Stage,
+                table: dict[tuple[str, int], Outcome]) -> list[float]:
+    return [
+        sum(_cell(c.metric, case, table.get((case.id, r))) for r in range(1, stage.repeats + 1)) / stage.repeats
+        for case in scoped
+    ]
+
+
+def cluster_bootstrap(means: list[float], confidence: float) -> tuple[float, float]:
+    """Deterministic percentile bootstrap over cases; descriptive only, never gates."""
+    rng = random.Random(SENSITIVITY_SEED)
+    n = len(means)
+    draws = sorted(sum(rng.choices(means, k=n)) / n for _ in range(SENSITIVITY_RESAMPLES))
+    tail = (1 - confidence) / 2
+    return draws[int(tail * SENSITIVITY_RESAMPLES)], draws[min(SENSITIVITY_RESAMPLES - 1, int((1 - tail) * SENSITIVITY_RESAMPLES))]
+
+
+def _sensitivity(stage: Stage, release: ReleaseSet, table: dict[tuple[str, int], Outcome]) -> list[dict[str, Any]]:
+    out = []
+    for c in stage.criteria:
+        scoped = [case for case in release.cases if _in_scope(case, c.scope)]
+        if not _reduced(c, stage) or len(scoped) < c.min_n:
+            continue
+        means = _case_means(c, scoped, stage, table)
+        lo, hi = cluster_bootstrap(means, stage.confidence)
+        out.append({"id": c.id, "n_cases": len(scoped), "case_mean": round(sum(means) / len(means), 4),
+                    "bootstrap_lower": round(lo, 4), "bootstrap_upper": round(hi, 4),
+                    "seed": SENSITIVITY_SEED, "resamples": SENSITIVITY_RESAMPLES, "gates": False})
+    return out
+
+
 def _evaluate(c: Criterion, stage: Stage, release: ReleaseSet, table: dict[tuple[str, int], Outcome]) -> dict[str, Any]:
     scoped = [case for case in release.cases if _in_scope(case, c.scope)]
     base: dict[str, Any] = {
         "id": c.id, "metric": c.metric, "scope": c.scope, "op": c.op,
         "threshold": c.threshold, "statistic": c.statistic, "n": len(scoped), "min_n": c.min_n,
     }
+    if _reduced(c, stage):
+        base["case_reduction"] = "majority"
     if c.metric == "case_count":
         value: float | None = float(len(scoped))
     elif len(scoped) < c.min_n:
@@ -589,6 +639,9 @@ def _evaluate(c: Criterion, stage: Stage, release: ReleaseSet, table: dict[tuple
             for case in scoped
             for r in range(1, stage.repeats + 1)
         )
+    elif _reduced(c, stage):
+        # Majority of repeats per case (odd count, so no ties), then n = cases.
+        value = sum(2 * m > 1 for m in _case_means(c, scoped, stage, table)) / len(scoped)
     else:
         cells = [
             _cell(c.metric, case, table.get((case.id, r)))
@@ -664,7 +717,7 @@ def score(
     if not binding_ok:
         reasons.append("release set manifest names different criteria than the scored file")
     repeated_wilson_mean = stage.repeats > 1 and any(
-        c.statistic != "point" and c.metric != "flip_rate" for c in stage.criteria
+        c.statistic != "point" and c.metric != "flip_rate" and not _reduced(c, stage) for c in stage.criteria
     )
     if stage.statistical_claim and repeated_wilson_mean:
         reasons.append("repeated-case mean Wilson quantities are descriptive; no inferential statistical unit is registered")
@@ -681,6 +734,8 @@ def score(
         "statistical_claim": stage.statistical_claim and not repeated_wilson_mean,
         "requested_statistical_claim": stage.statistical_claim,
         "rate_unit": "case_mean_across_repeats" if stage.repeats > 1 else "binary_case_outcome",
+        "case_reduction": stage.case_reduction,
+        "sensitivity": _sensitivity(stage, release, table),
         "repeats": stage.repeats,
         "criteria": {"id": criteria.criteria_id, "status": criteria.status, "sha256": criteria_sha256},
         "set": {
