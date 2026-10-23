@@ -381,7 +381,7 @@ _ANSWER_BODY_LABEL_RE = re.compile(
 # the caller's own words, not an answer.
 _PROMPT_ECHO_LINE_RE = re.compile(
     r"^\s*#{0,6}\s*[*_`]*(?:"
-    + "|".join(re.escape(label.rstrip(":")) for label in (QUESTION_LABEL, SYSPLEX_LABEL))
+    + "|".join(re.escape(label.rstrip(":")) for label in (QUESTION_LABEL, SYSPLEX_LABEL, RESOLVED_CODE_LABEL))
     + r")[*_`]*\s*:",
     re.IGNORECASE,
 )
@@ -1194,12 +1194,19 @@ def resolved_code_note(query: str) -> str:
     Only normalized codes and the query's own tokens appear, never chunk text.
     """
     pairs: list[str] = []
+    seen: set[str] = set()
     for code in find_system_codes(query):
-        for pattern in (rf"\bS{re.escape(code)}\b", rf"\bX'{re.escape(code)}'"):
-            for m in re.finditer(pattern, query, re.IGNORECASE):
-                pair = f"{m.group(0)} = {code}"
-                if pair not in pairs:
-                    pairs.append(pair)
+        forms = re.compile(rf"\bS{re.escape(code)}\b|\bX'{re.escape(code)}'", re.IGNORECASE)
+        # Assert pairs only when these literal tokens are what retrieval
+        # resolved: with every such spelling blanked the code must be gone
+        # (S370 is a model number; a separate `abend 370` or `abend ABC`
+        # is another source).
+        if code in find_system_codes(forms.sub(" ", query)):
+            continue
+        for m in forms.finditer(query):
+            if m.group(0).casefold() not in seen:
+                seen.add(m.group(0).casefold())
+                pairs.append(f"{m.group(0)} = {code}")
     return f"{RESOLVED_CODE_LABEL} " + "; ".join(pairs) if pairs else ""
 
 

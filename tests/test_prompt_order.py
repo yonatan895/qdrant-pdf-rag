@@ -388,7 +388,9 @@ _RESOLVED_CASES = [
         "Question: S0C4 vs X'0C4'\nResolved system code: S0C4 = 0C4; X'0C4' = 0C4",
     ),
 ]
-_UNCHANGED = ["abend 0C4", "What does IEA500I mean?", "completion code 806", "U4038 abend"]
+_UNCHANGED = [
+    "abend 370 on S370",
+    "abend ABC and sabc","abend 0C4", "What does IEA500I mean?", "completion code 806", "U4038 abend"]
 
 
 @pytest.mark.parametrize("order", ["retrieval", "stable_cache"])
@@ -428,3 +430,19 @@ def test_resolved_code_note_is_the_line_after_the_question_and_has_no_chunk_text
     line = "Resolved system code: SAFB = AFB"
     assert f"Question: abend SAFB\n{line}\n" in user
     assert "CHUNK-SECRET-TEXT" not in line
+
+
+@pytest.mark.parametrize(
+    "query,note",
+    [
+        ("abend SAFB and S0C4 s0c4", "Resolved system code: S0C4 = 0C4; SAFB = AFB"),
+        ("S0C4 S0C4 s0c4", "Resolved system code: S0C4 = 0C4"),
+        ("s0c4 S0C4", "Resolved system code: s0c4 = 0C4"),
+        ("abend 370 on S370", ""),
+        ("abend ABC and sabc", ""),
+    ],
+)
+def test_resolved_code_note_exact_and_only_what_retrieval_resolved(query, note):
+    from mainframe_rag.agent.answer import resolved_code_note
+
+    assert resolved_code_note(query) == note

@@ -254,6 +254,22 @@ async def test_core_prompt_header_residue_is_not_an_answer_body(echo):
     assert output.verification_state == "generation_incomplete"
 
 
+@pytest.mark.parametrize(
+    "echo",
+    ["Question: abend SAFB", "Sysplex context: product: z/OS", "Resolved system code: SAFB = AFB"],
+)
+def test_echoed_frame_line_then_decline_is_still_a_decline(echo):
+    """#944: the resolved-code note is prompt scaffolding like Question:."""
+    from mainframe_rag.agent.answer import is_abstention, is_structured_decline
+
+    decline = "Nothing in the supplied excerpts answers this question about SAFB."
+    assert is_structured_decline(f"{echo}\n{decline}")
+    assert is_abstention(f"{echo}\n{decline}")
+    real = f"{echo}\nRestart the system with CLPA after editing IEASYSxx."
+    assert not is_structured_decline(real)
+    assert not is_abstention(real)
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize(
     "lead",
