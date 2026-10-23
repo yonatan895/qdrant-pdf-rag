@@ -65,7 +65,7 @@ unchanged. Header contents are never logged.
 | Traces | Bundled Jaeger all-in-one with Badger on an RWO PVC, 14-day TTL. Remains the development and CI backend (one small pod) whatever production chooses. |
 | Metrics, dashboards, alerts | Prometheus exposition; the chart renders a `ServiceMonitor` for OpenShift user-workload monitoring when `metrics.enabled`. |
 | Logs | Sanitized JSON on stdout, through the platform's log forwarding to Splunk. |
-| Single-pane backend | **Under evaluation (#782): OpenObserve local mode** (single binary, local volume; AGPL-3.0 OSS edition first; no modification of Enterprise behaviour or limits). Baseline if it does not qualify: Jaeger, user-workload monitoring and Splunk, with no new stateful service. |
+| Single-pane backend | **Qualified, conditional go ([2026-10-23 record](records/2026-10-23-openobserve-oss-qualification.md), #782); a superseding ADR for ADR-0002 is still required, no deployment change.** Evaluated: OpenObserve local mode (single binary, local volume; AGPL-3.0 OSS edition first; no modification of Enterprise behaviour or limits). Baseline if it does not qualify: Jaeger, user-workload monitoring and Splunk, with no new stateful service. |
 | SigNoz | Deprioritized: ClickHouse plus Keeper operations, version migrations, `restricted-v2` admission risk, SSO in paid editions, too heavy for CI. Reconsider only if the platform operates it. |
 
 Retiring the bundled Jaeger in production (whatever replaces it) first requires
