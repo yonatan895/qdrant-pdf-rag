@@ -1022,7 +1022,8 @@ per-criterion results but is `non-certifying`.
 Repeats do not add independent cases: the Wilson bound uses the case count as
 `n` and the mean pass fraction across repeats as the rate. Fractional successes
 are descriptive quantities, not established binomial confidence bounds for
-repeated-case mean performance. A requested statistical claim for these means
+repeated-case mean performance. Unless the stage registers `case_reduction: "majority"` (see the 2026-10-23
+statistical-method entry below), a requested statistical claim for these means
 keeps the result non-certifying (`statistical_claim=false`, original request
 reported separately). The maintainer must select and register a statistical
 unit/method in the dedicated criteria decision; the scorer does not invent a
@@ -1060,6 +1061,19 @@ the PR carrying it merges. Dated; amend by a new dated record, not in place.
   writing (enforced as `adjudicated_at` later than `authored_at`). The
   "adjudicated by a second person" clause in the #859 paragraph below is
   superseded accordingly.
+- **Statistical method, 2026-10-23 (yonatan895; option B).** For the registered
+  absolute bars R1, R2 and R6 (the Wilson-bounded rates), each case is reduced to
+  pass/fail by majority over its repeats (at least 2 of 3; the stage field
+  `case_reduction: "majority"` requires an odd repeat count, so there are no ties),
+  and the existing Wilson bound then runs with n = number of cases. This
+  supersedes the "unit unselected" and "descriptive" wording above for those
+  criteria; the other release criteria (R3-R5, R7, R8, per-class floors) keep
+  their stated statistic over all repeat slots. Option A (a deterministic
+  percentile cluster bootstrap over per-case means, seed 367, 10000 resamples)
+  is reported in the report's `sensitivity` list and **never gates**. Option C
+  (paired comparison) is reserved for model-change comparisons and is not
+  implemented. The criteria file carries `case_reduction` for the release stage
+  but stays `proposed` with abstain `min_n` 30 until registration.
 - **Abstain composition (D4).** 40 abstain rows in the release set (pilot
   keeps 6), so one miss is tolerable: R2 (Wilson lower >= 0.85) at n=30 needs
   30/30, at n=40 it tolerates one miss. Mix of `insufficient_evidence` and

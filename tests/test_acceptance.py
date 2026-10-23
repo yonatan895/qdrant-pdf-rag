@@ -90,7 +90,8 @@ def _write_set(tmp: Path, rows: list[dict], name: str = "release_set.jsonl") -> 
 
 
 def _outcomes(release: acc.ReleaseSet, set_sha: str, crit_sha: str, kind: str = "production",
-              fail_ids: tuple[str, ...] = (), repeats: int = 1, drop: tuple[str, ...] = ()) -> str:
+              fail_ids: tuple[str, ...] = (), repeats: int = 1, drop: tuple[str, ...] = (),
+              fail_slots: frozenset = frozenset()) -> str:
     profile = {"kind": kind, "label": "fixture"}
     if kind == "production":
         profile.update(reasoning_model="m-r", embed_model="m-e", rerank_model="none", corpus_collection="c",
@@ -103,7 +104,7 @@ def _outcomes(release: acc.ReleaseSet, set_sha: str, crit_sha: str, kind: str = 
                 continue
             o = {"record": "outcome", "case_id": case.id, "repeat": r, "status": "scored",
                  "adjudicator": "Bob", "completed": True, "evidence_supplied": True}
-            good = case.id not in fail_ids
+            good = case.id not in fail_ids and (case.id, r) not in fail_slots
             if case.expected_behavior == "answer":
                 o.update(refused=False, useful=good, supported=True, traceable=True)
                 if not good:
@@ -473,8 +474,11 @@ def test_structural_outcome_defects_refuse(pilot):
 # ---- release stage: statistics, repeats, flips ----------------------------
 
 
-def _release_fixture(tmp_path, n_answer=100, n_abstain=30):
+def _release_fixture(tmp_path, n_answer=100, n_abstain=30, reduction=None):
     doc = _criteria_doc()
+    doc["stages"]["release"].pop("case_reduction", None)  # legacy descriptive path unless requested
+    if reduction:
+        doc["stages"]["release"]["case_reduction"] = reduction
     doc["stages"]["release"]["criteria"] = [c for c in doc["stages"]["release"]["criteria"]
                                             if not c["id"].startswith("R-CLS")]
     path, csha = _write_criteria(tmp_path, doc)
@@ -625,3 +629,74 @@ def test_real_acceptance_script_refuses_unavailable_required_comparison(tmp_path
             (comparison / (name + ".sha256")).write_text(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {name}\n")
     bad = subprocess.run(args, cwd=tmp_path, capture_output=True, text=True, check=False)
     assert bad.returncode == 2 and f"required overlap dataset {name}" in bad.stderr
+
+
+# ---- registered majority reduction (#367 statistical method, option B) ----
+
+
+def _slots(ids, failing_repeats):
+    return frozenset((i, r) for i in ids for r in failing_repeats)
+
+
+def _by_id(report):
+    return {r["id"]: r for r in report["criteria_results"]}
+
+
+def test_majority_reduction_boundaries_and_wilson_on_case_counts(tmp_path, rc):
+    fx = _release_fixture(tmp_path, reduction="majority")
+    ids = [c.id for c in fx[0].cases if c.expected_behavior == "answer"]
+    # 10 cases fail 1 of 3 repeats (still pass), 12 fail 2 of 3 repeats (fail): 88/100 cases pass
+    slots = _slots(ids[:10], (1,)) | _slots(ids[10:22], (1, 2))
+    report = _score(fx, repeats=3, fail_slots=slots)
+    r1 = _by_id(report)["R1"]
+    assert r1["case_reduction"] == "majority" and r1["n"] == 100
+    assert r1["value"] == 0.88  # cases, not the 0.9 mean of repeats
+    assert r1["bound"] == pytest.approx(acc.wilson_bound(88, 100, 0.95, "lower"), abs=1e-4)
+    assert report["rate_unit"] and report["case_reduction"] == "majority"
+    assert _by_id(report)["R5"]["value"] == 1.0  # non-Wilson criteria keep their registered statistic
+
+
+def test_majority_two_of_three_pass_one_of_three_fails(tmp_path, rc):
+    fx = _release_fixture(tmp_path, reduction="majority")
+    ids = [c.id for c in fx[0].cases if c.expected_behavior == "answer"]
+    two_pass = _by_id(_score(fx, repeats=3, fail_slots=_slots(ids[:1], (3,))))["R1"]
+    one_pass = _by_id(_score(fx, repeats=3, fail_slots=_slots(ids[:1], (2, 3))))["R1"]
+    assert two_pass["value"] == 1.0 and one_pass["value"] == 0.99
+
+
+def test_majority_requires_an_odd_repeat_count():
+    doc = json.loads(CRITERIA_PATH.read_text())
+    doc["stages"]["release"]["repeats"] = 4
+    with pytest.raises(ValueError, match="odd repeat count"):
+        acc.Criteria.model_validate(doc)
+    doc["stages"]["release"]["case_reduction"] = "plurality"
+    with pytest.raises(ValueError):
+        acc.Criteria.model_validate(doc)
+
+
+def test_majority_removes_the_descriptive_only_downgrade(tmp_path, rc):
+    legacy = _score(_release_fixture(tmp_path), repeats=3)
+    assert not legacy["statistical_claim"] and legacy["requested_statistical_claim"]
+    reduced = _score(_release_fixture(tmp_path, reduction="majority"), repeats=3)
+    assert reduced["statistical_claim"]
+    assert not any("descriptive" in r for r in reduced["non_certifying_reasons"])
+
+
+def test_sensitivity_bootstrap_is_deterministic_and_never_gates(tmp_path, rc):
+    fx = _release_fixture(tmp_path, reduction="majority")
+    ids = [c.id for c in fx[0].cases if c.expected_behavior == "answer"]
+    slots = _slots(ids[:5], (1,))
+    a = _score(fx, repeats=3, fail_slots=slots)
+    b = _score(fx, repeats=3, fail_slots=slots)
+    assert a["sensitivity"] == b["sensitivity"] and a["sensitivity"]
+    row = next(x for x in a["sensitivity"] if x["id"] == "R1")
+    assert row["gates"] is False and row["case_mean"] == pytest.approx(1 - 5 / 300, abs=1e-4)
+    assert row["bootstrap_lower"] <= row["case_mean"] <= row["bootstrap_upper"]
+    assert all(r["id"] != "sensitivity" for r in a["criteria_results"])
+    assert _score(_release_fixture(tmp_path), repeats=3)["sensitivity"] == []
+
+
+def test_shipped_criteria_register_majority_for_release_only():
+    doc = json.loads(CRITERIA_PATH.read_text())
+    assert doc["stages"]["release"]["case_reduction"] == "majority"
+    assert "case_reduction" not in doc["stages"]["pilot"] and doc["status"] == "proposed"
