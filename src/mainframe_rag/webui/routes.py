@@ -33,9 +33,9 @@ from opentelemetry.trace import SpanKind
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from mainframe_rag.agent.answer import is_model_timeout
-from mainframe_rag.agent.answer_core import LLMChatError
 from mainframe_rag.agent.answer_core import (
     AnswerCoreInput,
+    LLMChatError,
     execute_answer_core,
     execute_answer_core_stream,
 )
