@@ -1,8 +1,9 @@
 name: agent-probes
 on:
   pull_request:
-  push:
-    branches: [main]
+  schedule:
+    - cron: "27 2 * * *" # nightly on main, UTC, off the hour
+  workflow_dispatch:
 permissions:
   contents: read
 concurrency:
@@ -10,6 +11,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   select:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -36,7 +38,9 @@ jobs:
           PY
   agent-probes:
     needs: select
-    if: needs.select.outputs.required == 'true'
+    if: >-
+      !cancelled() && (github.event_name != 'pull_request' ||
+      (needs.select.result == 'success' && needs.select.outputs.required == 'true'))
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
