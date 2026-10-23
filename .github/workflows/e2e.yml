@@ -934,6 +934,7 @@ jobs:
           /usr/local/bin/kubectl -n "$NS" wait --for=condition=complete job/corpus-gen --timeout=300s
 
       - name: OpenObserve credentials Secret (operator-created, ADR-0006)
+        shell: sh rehearsal-infra/scripts/ci/egress_gate.sh run bash -e {0}
         run: |
           export PATH="/usr/local/bin:$PATH"
           # Tracing is on by default, so every lane needs the Secret deploy.sh checks.
@@ -951,6 +952,7 @@ jobs:
 
       - name: Enforce PSA restricted on the namespace (observability lane)
         if: matrix.lane == 'observability'
+        shell: sh rehearsal-infra/scripts/ci/egress_gate.sh run bash -e {0}
         run: |
           export PATH="/usr/local/bin:$PATH"
           # Existing stand-in pods are not evicted by an enforce label; every
