@@ -1,6 +1,9 @@
 # ADR-0002: Observability backend posture (single-replica Jaeger, sample-all)
 
-- **Status:** accepted
+- **Status:** accepted; partly superseded by
+  [ADR-0006](0006-openobserve-traces-metrics-backend.md) (backend choice and
+  retention math for traces and metrics). Sample-all, no exemplars, fail-open
+  export and the UI-access rule remain in force.
 - **Context:** OTel Phases 1–3 shipped RED metrics, W3C ingress, deploy
   identity, and a smoke check that spans land. Remaining open questions:
   is the single-replica Jaeger backend production-grade, is head sampling
