@@ -40,9 +40,11 @@ would widen access to manual text beyond the protected feedback volume.
   (platform-owned, not shipped). No text, ids or request labels.
   The chart ServiceMonitor `rag-feedback` (with `metrics.enabled`, same decision
   as the agent's) scrapes with the service bearer token from the operator Secret.
-- **Periodic analysis report** (#780 phase 2), from a read-only export of the
-  feedback store: failure clusters, candidate golden cases, and `request_id`
-  links to traces.
+- **Periodic analysis report** (#780 phase 2, #805), from an export file of the
+  feedback store (`feedback:report`; [agent.md](agent.md#answer-feedback)): counts, bounded
+  labels, failure clusters and the `request_id`s of bad ratings as trace links. No
+  text and no LLM; it never produces golden or release cases (#806 D6). The report
+  is counts only, but the export it reads is protected content: delete it afterwards.
 - **Deferred:** an admin UI over the feedback store, until the report proves
   insufficient.
 

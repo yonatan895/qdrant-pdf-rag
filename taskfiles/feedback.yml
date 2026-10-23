@@ -1,4 +1,4 @@
-# Feedback export/import tasks — issue #805 (ADR-0005).
+# Feedback export/import/report tasks — issue #805 (ADR-0005).
 #
 # Dispatch only: mainframe_rag.feedback.exchange owns validation, the file
 # format, refusals and exit codes. These run the CLI against a LOCAL store file
@@ -44,3 +44,21 @@ tasks:
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
       - .venv/bin/python -m mainframe_rag.feedback.exchange import --in "$TASK_IN" --db "$TASK_DB" {{if .MERGE}}--merge{{end}} {{if .KEEP_EXISTING}}--keep-existing{{end}} {{if .RETENTION_DAYS}}--retention-days "$TASK_RETENTION_DAYS"{{end}}
+
+  report:
+    desc: Offline feedback report from an export file (counts and bounded labels, no text)
+    summary: |
+      `python -m mainframe_rag.feedback.report --in "$IN" [--out "$OUT"] [--format md|json]`.
+      Reads an export file only (never the live store), refuses whatever
+      `feedback:import` refuses, calls no model and prints counts and bounded labels
+      plus the request ids of `bad` ratings: no question, answer, comment, script or
+      citation text. OUT is a NEW file (mode 0600, refused inside a git work tree);
+      default is stdout. A monitoring view, not an evaluation: it never feeds the
+      release set (#806 D6). Inputs: IN (export file); optional OUT, FORMAT.
+    env:
+      TASK_IN: '{{.IN}}'
+      TASK_OUT: '{{.OUT}}'
+      TASK_FORMAT: '{{.FORMAT}}'
+    cmds:
+      - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
+      - .venv/bin/python -m mainframe_rag.feedback.report --in "$TASK_IN" {{if .OUT}}--out "$TASK_OUT"{{end}} {{if .FORMAT}}--format "$TASK_FORMAT"{{end}}

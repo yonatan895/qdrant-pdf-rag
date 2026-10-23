@@ -784,6 +784,24 @@ class TaskContractsTests(unittest.TestCase):
         self.assertNotIn("--merge", argv)
         self.assertNotIn("--keep-existing", argv)
 
+    def test_feedback_report_task_transports_paths_and_flags_exactly(self):
+        self.make_venv_fake()
+        env = self.tool_env()
+        proc = self.run_task("feedback:report", "IN=/o/x y.jsonl", extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        argv = self.pip_calls()[0]["argv"]
+        self.assertEqual(argv[:2], ["-m", "mainframe_rag.feedback.report"])
+        self.assertEqual(argv[argv.index("--in") + 1], "/o/x y.jsonl")
+        self.assertNotIn("--out", argv)
+        self.assertNotIn("--format", argv)
+        self.log.unlink()
+        proc = self.run_task("feedback:report", "IN=a", "OUT=/o/r r.json", "FORMAT=json",
+                             extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        argv = self.pip_calls()[0]["argv"]
+        self.assertEqual(argv[argv.index("--out") + 1], "/o/r r.json")
+        self.assertEqual(argv[argv.index("--format") + 1], "json")
+
     def test_harness_l3_transports_only_explicit_baseline(self):
         self.make_venv_fake()
         env = self.tool_env()
