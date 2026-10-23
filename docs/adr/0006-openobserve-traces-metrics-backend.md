@@ -27,7 +27,7 @@
     `raw.githubusercontent.com`) within 45 s. This is the accepted G3 reading.
   - Image pinned by digest (trial: v1.0.4,
     `sha256:d4a878fac1f6c56003764f7f2a1625668917388f167e222c8c810de3f54c56ba`,
-    amd64), at least 14 days old; no tag references, no runtime downloads.
+    amd64); no tag references, no runtime downloads.
   - No external egress. The names of the two egress settings were found in the
     binary, not vendor documentation; verify them when the pin is made.
   - Credentials from a Secret; the console, query and ingest paths all require
@@ -37,10 +37,12 @@
   - Single writer on an RWO block volume (replicas 1, Recreate), as for Jaeger.
     Local mode only; HA mode (object storage, PostgreSQL, NATS) is out of scope.
 - **Consequences / rules:**
-  - ADR-0002's Jaeger, no-HA, UI-access and retention-math rules are replaced
-    for traces and metrics. Still in force: head sampling at 1.0 until its
-    revisit trigger, no Prometheus exemplars (`request_id` is the pivot), the
-    14-day trace retention target, and fail-open export.
+  - ADR-0002's Jaeger, no-HA and retention-math rules are replaced for traces
+    and metrics. Still in force: head sampling at 1.0 until its revisit trigger,
+    no Prometheus exemplars (`request_id` is the pivot), the 14-day trace
+    retention target, fail-open export, and ADR-0002's UI-access rule, applied
+    to the OpenObserve console: ClusterIP only, reached by port-forward with
+    cluster RBAC; no Route and no extra auth layer.
   - Volume sizing: about 90 bytes per span puts 14 days at the ADR-0002 volume
     bound near 0.6 GB (6% of 10Gi; 30% with a 5x margin for less repetitive
     real spans). Re-measure on the site.
