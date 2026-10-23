@@ -37,9 +37,13 @@ would widen access to manual text beyond the protected feedback volume.
   its own retention purge and exports `rag_feedback_purge_total{outcome}`
   (`truncated`, `deferred`, `error`), `rag_feedback_purge_last_success_timestamp_seconds`
   and `rag_feedback_purged_rows_total{kind}` (bearer-protected, 404 unless
-  `METRICS_ENABLED`). Only `truncated` is success; alert on
-  `time() - rag_feedback_purge_last_success_timestamp_seconds > 2 * 86400`
-  (platform-owned, not shipped). No text, ids or request labels.
+  `METRICS_ENABLED`). Only `truncated` is success. The gauge is 0 until the first
+  success after a start, so guard the staleness alert and add a second rule
+  (platform-owned, not shipped):
+  `rag_feedback_purge_last_success_timestamp_seconds > 0 and time() - rag_feedback_purge_last_success_timestamp_seconds > 2 * 86400`
+  with `for: 1h`; and "no success since start":
+  `rag_feedback_purge_last_success_timestamp_seconds == 0 and time() - process_start_time_seconds > 2 * 86400`.
+  No text, ids or request labels.
   The chart ServiceMonitor `rag-feedback` (with `metrics.enabled`, same decision
   as the agent's) scrapes with the service bearer token from the operator Secret.
 - **Periodic analysis report** (#780 phase 2, #805), from an export file of the
