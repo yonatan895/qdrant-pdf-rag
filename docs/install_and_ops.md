@@ -374,7 +374,7 @@ Check an existing stack with `sh scripts/tools/run-task.sh local:check --
 --agent URL --jaeger URL --query TEXT --followup TEXT --report PATH`; the
 [retained-stack runbook](local-real-corpus.md#4-verify-and-retain-the-complete-live-stack)
 owns endpoint and private-report selection. It requires grounded first and
-follow-up answers, complete SSE and a fresh search trace. Representation
+follow-up answers, complete SSE and a fresh search trace (`--jaeger` is also `--trace-url`; `--trace-backend` per [observability](observability.md#backend-status)). Representation
 changes use the [snapshot-gated ingestion migration](ingest.md#metadata-contract).
 For semantic answer quality on the configured live GPU stack, run
 `sh scripts/tools/run-task.sh eval:answers` under the [answer-tier contract](testing.md#answer-tier).

@@ -12,12 +12,30 @@ KC=${KC:-$(kc)}
 QUERY=${QUERY:-IEA500I operator message}
 TRACE_TIMEOUT=${TRACE_TIMEOUT:-60}
 JAEGER_QUERY_URL=${JAEGER_QUERY_URL:-http://jaeger:16686}
+# Trace backend: must match the chart's tracing.backend (jaeger|openobserve).
+# OpenObserve needs TRACE_QUERY_URL plus TRACE_QUERY_USER/TRACE_QUERY_PASSWORD
+# (from the Secret; sent to the pod on stdin, never on a command line).
+TRACE_BACKEND=${TRACE_BACKEND:-jaeger}
+case "$TRACE_BACKEND" in
+    jaeger) TRACE_QUERY_URL=${TRACE_QUERY_URL:-$JAEGER_QUERY_URL}; TRACE_LABEL=Jaeger ;;
+    openobserve)
+        [ -n "${TRACE_QUERY_URL:-}" ] || die "TRACE_BACKEND=openobserve requires TRACE_QUERY_URL"
+        TRACE_LABEL=OpenObserve ;;
+    *) die "TRACE_BACKEND must be jaeger or openobserve" ;;
+esac
+# Jaeger runs only against the bundled instance; an explicit OpenObserve
+# selection always runs its check (the operator named the query endpoint).
+if [ "$TRACE_BACKEND" = "jaeger" ] && [ "$JAEGER_DEPLOY" != "1" ]; then
+    TRACE_CHECK=0
+else
+    TRACE_CHECK=1
+fi
 
 if [ "${AIRGAP_DRYRUN:-0}" = "1" ]; then
     echo "[dryrun] $KC -n $NAMESPACE exec -i deploy/rag-agent -- python3 -c '... check /healthz ...'"
     echo "[dryrun] $KC -n $NAMESPACE exec -i deploy/rag-agent -- python3 - \"$QUERY\""
-    if [ "$OTEL_TRACING_ENABLED" = "1" ] && [ "$JAEGER_DEPLOY" = "1" ]; then
-        echo "[dryrun] $KC -n $NAMESPACE exec -i deploy/rag-agent -- python3 - '... poll $JAEGER_QUERY_URL for a v1.search trace ...'"
+    if [ "$OTEL_TRACING_ENABLED" = "1" ] && [ "$TRACE_CHECK" = "1" ]; then
+        echo "[dryrun] $KC -n $NAMESPACE exec -i deploy/rag-agent -- python3 - '... poll $TRACE_QUERY_URL for a v1.search trace ...'"
     elif [ "$OTEL_TRACING_ENABLED" = "1" ]; then
         echo "[dryrun] tracing check skipped (bundled Jaeger off — trace arrival NOT VERIFIED)"
     else
@@ -93,42 +111,30 @@ fi
 # a disabled bundled backend skips the check. That skip proves nothing about
 # the configured collector (issue #568): trace arrival stays NOT VERIFIED
 # until its own backend check runs (qualification, not this smoke).
+# The query runs scripts/trace_arrival.py shipped in the agent image.
+run_trace_check() {
+    if [ "$TRACE_BACKEND" = "openobserve" ]; then
+        [ -n "${TRACE_QUERY_USER:-}" ] && [ -n "${TRACE_QUERY_PASSWORD:-}" ] ||
+            die "TRACE_BACKEND=openobserve requires TRACE_QUERY_USER and TRACE_QUERY_PASSWORD"
+        printf '%s:%s\n' "$TRACE_QUERY_USER" "$TRACE_QUERY_PASSWORD" |
+            $KC -n "$NAMESPACE" exec -i deploy/rag-agent -- python3 /app/scripts/trace_arrival.py \
+                --backend "$TRACE_BACKEND" --url "$TRACE_QUERY_URL" --timeout "$TRACE_TIMEOUT" \
+                --operation v1.search --auth-stdin
+    else
+        $KC -n "$NAMESPACE" exec -i deploy/rag-agent -- python3 /app/scripts/trace_arrival.py \
+            --backend "$TRACE_BACKEND" --url "$TRACE_QUERY_URL" --timeout "$TRACE_TIMEOUT" \
+            --operation v1.search </dev/null
+    fi
+}
+
 if [ "$OTEL_TRACING_ENABLED" != "1" ]; then
     TRACING_LINE="Tracing:       OFF (disabled)"
-elif [ "$JAEGER_DEPLOY" != "1" ]; then
+elif [ "$TRACE_CHECK" != "1" ]; then
     TRACING_LINE="Tracing:       SKIPPED (bundled Jaeger off — trace arrival NOT VERIFIED; qualify the external collector separately)"
-elif $KC -n "$NAMESPACE" exec -i deploy/rag-agent -- python3 - "$TRACE_TIMEOUT" "$JAEGER_QUERY_URL" <<'PYEOF'
-import httpx2
-import sys
-import time
-
-timeout_s = float(sys.argv[1])
-base = sys.argv[2].rstrip("/")
-deadline = time.time() + timeout_s
-while time.time() < deadline:
-    try:
-        services = httpx2.get(f"{base}/api/services", timeout=10).json().get("data", [])
-        names = [s for s in services if "rag-agent" in s or "mainframe-rag" in s]
-        if names:
-            svc = "mainframe-rag-agent" if "mainframe-rag-agent" in names else names[0]
-            traces = httpx2.get(
-                f"{base}/api/traces",
-                params={"service": svc, "operation": "v1.search"},
-                timeout=10,
-            ).json().get("data", [])
-            if traces:
-                print(f"traced service={svc} spans={len(traces[0].get('spans', []))}")
-                sys.exit(0)
-    except Exception as e:  # noqa: BLE001
-        print(f"jaeger poll: {e}", file=sys.stderr)
-    time.sleep(5)
-print("no v1.search trace landed in Jaeger", file=sys.stderr)
-sys.exit(1)
-PYEOF
-then
-    TRACING_LINE="Tracing:       OK (recent v1.search span in Jaeger)"
+elif run_trace_check; then
+    TRACING_LINE="Tracing:       OK (recent v1.search span in $TRACE_LABEL)"
 else
-    die "no v1.search span landed in Jaeger within ${TRACE_TIMEOUT}s — check OTEL_EXPORTER_OTLP_ENDPOINT and the Jaeger deployment"
+    die "no v1.search span landed in $TRACE_LABEL within ${TRACE_TIMEOUT}s — check OTEL_EXPORTER_OTLP_ENDPOINT and the $TRACE_LABEL deployment"
 fi
 
 echo "Smoke query returned hits. For an expected-substring check run:"

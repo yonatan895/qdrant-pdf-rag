@@ -70,10 +70,15 @@ unchanged. Header contents are never logged.
 | Single-pane backend | **Accepted ([ADR-0006](adr/0006-openobserve-traces-metrics-backend.md); [2026-10-23 record](records/2026-10-23-openobserve-oss-qualification.md), #782); no deployment change until the follow-up Task lands.** Evaluated: OpenObserve local mode (single binary, local volume; AGPL-3.0 OSS edition first; no modification of Enterprise behaviour or limits). Baseline if it does not qualify: Jaeger, user-workload monitoring and Splunk, with no new stateful service. |
 | SigNoz | Deprioritized: ClickHouse plus Keeper operations, version migrations, `restricted-v2` admission risk, SSO in paid editions, too heavy for CI. Reconsider only if the platform operates it. |
 
-Retiring the bundled Jaeger in production (whatever replaces it) first requires
-backend-neutral replacements for the two Jaeger-specific checks: the
-trace-arrival query in `scripts/airgap/smoke.sh` and `check_live.py`'s
-`fresh_search_trace`.
+Trace arrival is checked by `scripts/trace_arrival.py`, used by
+`scripts/airgap/smoke.sh` and `check_live.py`'s `fresh_search_trace`. The backend is
+explicit (`TRACE_BACKEND` / `--trace-backend`, `jaeger` default; it must match the
+chart's `tracing.backend`). Jaeger uses its query API unchanged. OpenObserve uses
+`POST /api/default/_search?type=traces` with basic auth from `TRACE_QUERY_USER` and
+`TRACE_QUERY_PASSWORD` (smoke sends them to the agent pod on stdin, never on a command
+line), by trace id or by service since a lookback. A refusal (401/403) fails at once
+with a fixed message; credentials are never printed. `smoke.sh` needs
+`TRACE_QUERY_URL` for OpenObserve (`JAEGER_QUERY_URL` stays the Jaeger default).
 
 ## Feedback store backend
 

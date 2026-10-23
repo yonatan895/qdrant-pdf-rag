@@ -192,3 +192,128 @@ def test_smoke_external_collector_never_claims_trace_arrival(smoke_tree):
     assert "external collector —" not in r.stdout
 
 
+
+
+# --- backend-neutral trace arrival (issue #956) ------------------------------
+# The stub kubectl runs the real scripts/trace_arrival.py (what the agent image
+# ships) against a loopback fake, so query, auth and exit mapping are real.
+import base64
+import sys
+
+from tests.helpers_airgap import REPO, FakeHttpServer
+
+OO_USER, OO_PASSWORD = "ops@example.invalid", "p:ss w0rd/+="
+OO_BASIC = "Basic " + base64.b64encode(f"{OO_USER}:{OO_PASSWORD}".encode()).decode()
+
+
+def _stub_running_trace_module(tmp_path):
+    script = f"""#!/bin/sh
+for arg in "$@"; do
+    case "$arg" in
+        /app/scripts/trace_arrival.py)
+            while [ "$1" != "$arg" ]; do shift; done
+            shift
+            exec {sys.executable} {REPO / 'scripts' / 'trace_arrival.py'} "$@"
+            ;;
+    esac
+done
+while read -r _line; do :; done
+exit 0
+"""
+    for name in ("kubectl", "oc"):
+        write_stub(tmp_path / "bin" / name, script)
+
+
+def _oo_server(present=True):
+    def respond(request):
+        if request["headers"].get("authorization") != OO_BASIC:
+            return 401, {}
+        return 200, {"hits": [{"trace_id": "t"}] if present else []}
+    return FakeHttpServer(respond)
+
+
+def _oo_env(server, **extra):
+    env = {"TRACE_BACKEND": "openobserve", "TRACE_QUERY_URL": server.url, "TRACE_QUERY_USER": OO_USER,
+           "TRACE_QUERY_PASSWORD": OO_PASSWORD, "TRACE_TIMEOUT": "1", **extra}
+    return list(env.items())
+
+
+def test_smoke_openobserve_arrival_found(smoke_tree):
+    _stub_running_trace_module(smoke_tree)
+    server = _oo_server()
+    try:
+        r = _run_smoke(smoke_tree, *_oo_env(server))
+    finally:
+        server.close()
+    assert r.returncode == 0, r.stderr
+    assert "Tracing:       OK (recent v1.search span in OpenObserve)" in r.stdout
+    request = server.requests[0]
+    assert (request["method"], request["path"], request["query"]) == (
+        "POST", "/api/default/_search", {"type": ["traces"]})
+    assert request["body"]["query"]["sql"] == (
+        "SELECT trace_id FROM \"default\" WHERE operation_name = 'v1.search'"
+        " AND service_name = 'mainframe-rag-agent'")
+    assert OO_PASSWORD not in r.stdout + r.stderr
+
+
+def test_smoke_openobserve_arrival_not_found_fails_closed(smoke_tree):
+    _stub_running_trace_module(smoke_tree)
+    server = _oo_server(present=False)
+    try:
+        r = _run_smoke(smoke_tree, *_oo_env(server))
+    finally:
+        server.close()
+    assert r.returncode == 1
+    assert "no v1.search span landed in OpenObserve within 1s" in r.stderr
+    assert "Tracing:       OK" not in r.stdout
+
+
+def test_smoke_openobserve_auth_failure_is_fixed_message(smoke_tree):
+    _stub_running_trace_module(smoke_tree)
+    server = _oo_server()
+    try:
+        r = _run_smoke(smoke_tree, *_oo_env(server, TRACE_QUERY_PASSWORD="wrong-secret"))
+    finally:
+        server.close()
+    assert r.returncode == 1
+    assert "trace backend refused the credentials" in r.stderr
+    assert "wrong-secret" not in r.stdout + r.stderr and OO_PASSWORD not in r.stdout + r.stderr
+    assert len(server.requests) == 1  # no retry loop on a refusal
+
+
+@pytest.mark.parametrize("env, message", [
+    ([("TRACE_BACKEND", "openobserve")], "TRACE_BACKEND=openobserve requires TRACE_QUERY_URL"),
+    ([("TRACE_BACKEND", "openobserve"), ("TRACE_QUERY_URL", "http://o2:5080")],
+     "TRACE_BACKEND=openobserve requires TRACE_QUERY_USER and TRACE_QUERY_PASSWORD"),
+    ([("TRACE_BACKEND", "tempo")], "TRACE_BACKEND must be jaeger or openobserve"),
+])
+def test_smoke_trace_backend_misconfiguration_fails_closed(smoke_tree, env, message):
+    _setup_stub(smoke_tree)
+    r = _run_smoke(smoke_tree, *env)
+    assert r.returncode == 1
+    assert f"FAIL: {message}" in r.stderr
+
+
+def test_smoke_default_backend_is_jaeger_with_todays_query(smoke_tree):
+    _stub_running_trace_module(smoke_tree)
+
+    def respond(request):
+        if request["path"] == "/api/services":
+            return 200, {"data": ["mainframe-rag-agent"]}
+        return 200, {"data": [{"spans": [{}, {}, {}]}]}
+    server = FakeHttpServer(respond)
+    try:
+        r = _run_smoke(smoke_tree, ("JAEGER_QUERY_URL", server.url))
+    finally:
+        server.close()
+    assert r.returncode == 0, r.stderr
+    assert "traced service=mainframe-rag-agent spans=3" in r.stdout
+    assert "Tracing:       OK (recent v1.search span in Jaeger)" in r.stdout
+    assert [(q["path"], q["query"]) for q in server.requests] == [
+        ("/api/services", {}),
+        ("/api/traces", {"service": ["mainframe-rag-agent"], "operation": ["v1.search"]})]
+
+
+def test_smoke_default_dryrun_text_unchanged(smoke_tree):
+    r = _run_smoke(smoke_tree, ("AIRGAP_DRYRUN", "1"))
+    assert "python3 - '... poll http://jaeger:16686 for a v1.search trace ...'" in r.stdout
