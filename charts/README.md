@@ -1,6 +1,6 @@
 # Vendored Qdrant Helm chart
 
-`qdrant-1.19.0.tgz` was pulled with `helm pull qdrant/qdrant` on a connected
+`qdrant-1.19.2.tgz` was pulled with `helm pull qdrant/qdrant` on a connected
 host (architecture.md §3.1). The air-gap never runs `helm repo add`.
 
 The chart is Apache-2.0 licensed by the Qdrant project; the upstream license

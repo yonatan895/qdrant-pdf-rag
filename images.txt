@@ -5,7 +5,7 @@
 # Digest pins are the air-gap contract: the cluster must run exactly these bytes.
 #
 # name                                                                  digest
-docker.io/qdrant/qdrant:v1.19.0-unprivileged                           sha256:a0e04fe623cb064502cd869cefc1dc7ce359d8edd481063b5bd351c0a0a2c91e
+docker.io/qdrant/qdrant:v1.19.2-unprivileged                           sha256:efb96a9425a90d2d5a1a0a474156280df1892dcdf1af3e8515bd2589b1bfd88b
 # ADR-0006 trace/metrics backend (#956): OpenObserve OSS v1.1.2 (AGPL-3.0,
 # unmodified upstream binary, released 2026-10-20) and the stateless otelcol-contrib
 # scraper/forwarder from the #782 qualification trial. Both digests are manifest

@@ -375,7 +375,7 @@ def test_load_ignores_retained_optional_image_outside_current_signed_inventory(l
 
 REGISTRY = "reg.internal:5000"
 REF = {
-    "qdrant": f"{REGISTRY}/qdrant/qdrant:v1.19.0-unprivileged",
+    "qdrant": f"{REGISTRY}/qdrant/qdrant:v1.19.2-unprivileged",
     "openobserve": f"{REGISTRY}/openobserve/openobserve:v1.1.2",
     "otelcol": f"{REGISTRY}/otel/opentelemetry-collector-contrib:0.160.0",
     "ingest": f"{REGISTRY}/qdrant-pdf-rag-ingest:{IMAGE_SHA}",

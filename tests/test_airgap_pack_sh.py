@@ -450,7 +450,7 @@ def test_pack_refuses_unreviewed_license_change_before_any_image_call(pack_tree,
     elif change == "image-digest":
         saved["images.txt"] = (root / "images.txt").read_bytes()
         (root / "images.txt").write_text(
-            (root / "images.txt").read_text().replace("sha256:a0e04fe6", "sha256:b0e04fe6"))
+            (root / "images.txt").read_text().replace("sha256:efb96a94", "sha256:b0e04fe6"))
     else:
         saved["licenses/inventory.json"] = (root / "licenses/inventory.json").read_bytes()
         _break_license_record(pack_tree, lambda inv: inv["python"].pop(0))

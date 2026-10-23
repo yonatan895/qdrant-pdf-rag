@@ -38,7 +38,7 @@ fi
         "spec": {
             "nodeName": "kind-worker",
             "containers": [{
-                "name": "qdrant", "image": "qdrant/qdrant:v1.19.0-unprivileged",
+                "name": "qdrant", "image": "qdrant/qdrant:v1.19.2-unprivileged",
                 "command": ["/bin/bash", "-c"], "args": ["./config/initialize.sh"],
                 "securityContext": {"readOnlyRootFilesystem": True},
                 "env": [{"name": "QDRANT_INIT_FILE_PATH", "value": "/qdrant/init/.qdrant-initialized"}],
