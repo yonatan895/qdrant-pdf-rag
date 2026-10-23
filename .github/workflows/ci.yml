@@ -1,17 +1,19 @@
 name: ci
 on:
   pull_request:
-  push:
-    branches: [main]
+  schedule:
+    - cron: "11 4 * * *" # nightly on main, UTC, off the hour (replaces the push run)
+  workflow_dispatch:
 
 permissions:
   contents: read
 
-# PR runs: one per ref, superseded runs cancelled. Pushes to main share one
-# group (`ci-main`) that never cancels a running job: one main run in flight,
-# the newest pending one wins, so post-merge runs queue behind PR feedback.
+# PR runs: one per ref, superseded runs cancelled. Schedule and dispatch runs on
+# main share one group (`ci-main`) that never cancels a running job: one main
+# run in flight, the newest pending one wins, so they queue behind PR feedback.
+# A dispatch on another branch gets its own per-ref group.
 concurrency:
-  group: ${{ github.event_name == 'pull_request' && format('ci-{0}', github.ref) || 'ci-main' }}
+  group: ${{ github.ref == 'refs/heads/main' && 'ci-main' || format('ci-{0}', github.ref) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:

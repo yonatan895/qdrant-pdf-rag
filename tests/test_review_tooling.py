@@ -801,6 +801,21 @@ class TestTaskCiConsumers(unittest.TestCase):
 
     root = pathlib.Path(__file__).resolve().parents[1]
 
+    def test_ci_runs_on_pull_request_and_nightly_main_not_on_push(self):
+        import yaml
+        document = yaml.safe_load((self.root / ".github/workflows/ci.yml").read_text())
+        triggers = document.get("on", document.get(True))
+        # Candidate acceptance reads only pull_request-event ci runs, so a push
+        # run on main is redundant; the nightly is the post-merge signal.
+        self.assertEqual(set(triggers), {"pull_request", "schedule", "workflow_dispatch"})
+        self.assertIsNone(triggers["pull_request"])
+        self.assertEqual(len(triggers["schedule"]), 1)
+        self.assertRegex(triggers["schedule"][0]["cron"], r"^(?!0 )\d+ \d+ \* \* \*$")
+        concurrency = document["concurrency"]
+        self.assertIn("'ci-main'", concurrency["group"])
+        self.assertIn("format('ci-{0}', github.ref)", concurrency["group"])
+        self.assertEqual(concurrency["cancel-in-progress"], "${{ github.event_name == 'pull_request' }}")
+
     def test_task_edits_trigger_context_and_load_on_push_and_pull_request(self):
         import yaml
         from scripts.review_tooling import classify_paths, required_lanes
