@@ -758,7 +758,10 @@ jobs:
           # Qdrant (Insufficient memory on one node — proven locally).
           replicaCount: 1
           # Kind has no SCC to supply a volume group for the init emptyDir.
-          podSecurityContext: {fsGroup: 3000}
+          # Kind has no SCC to add what PSA "restricted" requires (the observability
+          # lane enforces it): drop all capabilities, RuntimeDefault seccomp.
+          podSecurityContext: {fsGroup: 3000, seccompProfile: {type: RuntimeDefault}}
+          containerSecurityContext: {capabilities: {drop: [ALL]}}
           resources:
             requests: {cpu: "200m", memory: 512Mi}
             limits: {cpu: "2", memory: 2Gi}
