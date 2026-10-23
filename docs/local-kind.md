@@ -232,7 +232,7 @@ kubectl -n rag-kind port-forward --address 127.0.0.1 svc/rag-agent 8087:8080
 kubectl -n rag-kind port-forward --address 127.0.0.1 svc/openobserve 5080:5080
 ```
 
-Open `http://localhost:8087/ui` and `http://localhost:16686`; verify them from the
+Open `http://localhost:8087/ui` and `http://localhost:5080`; verify them from the
 browser host too. Replace Qdrant, agent and OpenObserve pods, then repeat an ordinary
 search/answer and fetch the exact pre-replacement trace ID. Record imageIDs,
 PVC identities, corpus hashes, collection/control verification, RAM/VRAM and

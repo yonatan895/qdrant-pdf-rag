@@ -275,8 +275,11 @@ def test_smoke_openobserve_auth_failure_is_fixed_message(smoke_tree):
     ([("TRACE_QUERY_PASSWORD", "")], "tracing is enabled: TRACE_QUERY_USER and TRACE_QUERY_PASSWORD are required"),
 ])
 def test_smoke_trace_misconfiguration_fails_closed(smoke_tree, env, message):
+    # Smoke's own refusal is reachable with an external collector: on the bundled
+    # path an empty value is treated as unset (the task runner exports empty
+    # operator keys) and defaulted from OpenObserve's Secret.
     _setup_stub(smoke_tree)
-    r = _run_smoke(smoke_tree, *env)
+    r = _run_smoke(smoke_tree, ("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector.platform:4318"), *env)
     assert r.returncode == 1
     assert f"FAIL: {message}" in r.stderr
 

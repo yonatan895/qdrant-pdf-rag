@@ -255,7 +255,7 @@ model revisions and private configuration inventory beside the report. Mixed
 candidate components are explicit diagnostic evidence, not exact-release
 acceptance. The check does not replace gateway/TLS, browser or persistence tests.
 
-Open **http://localhost:8087/ui** and **http://localhost:16686**. On Windows/WSL,
+Open **http://localhost:8087/ui** and **http://localhost:5080**. On Windows/WSL,
 check listeners on both hosts and verify these URLs from the Windows side;
 a successful WSL curl does not prove the browser reaches the same listener.
 The September audit used 8087 because an unrelated Windows `AgentService`

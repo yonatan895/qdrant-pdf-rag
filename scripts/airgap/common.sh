@@ -205,17 +205,19 @@ _read_oo_secret_key() {
 }
 resolve_trace_query() {
     [ "${OTEL_TRACING_ENABLED:-0}" = "1" ] || return 0
-    # Only an UNSET variable is defaulted; an explicitly empty one stays empty
-    # so smoke refuses it with its own fixed message.
-    if [ "${OTEL_BUNDLED:-1}" != "1" ] && [ -z "${TRACE_QUERY_URL+x}" ]; then
-        die "TRACE_QUERY_URL is required when OTEL_EXPORTER_OTLP_ENDPOINT is an external collector (no bundled OpenObserve to query)"
+    # External collector: there is no bundled OpenObserve to default to, so the
+    # operator's values pass through unchanged and smoke refuses empty ones with
+    # its own fixed messages.
+    if [ "${OTEL_BUNDLED:-1}" != "1" ]; then
+        export TRACE_QUERY_URL TRACE_QUERY_USER TRACE_QUERY_PASSWORD
+        return 0
     fi
-    TRACE_QUERY_URL=${TRACE_QUERY_URL-http://openobserve:5080}
+    # Bundled backend: empty counts as unset (the task runner exports every
+    # operator key, empty when not given); a non-empty operator value wins.
+    TRACE_QUERY_URL=${TRACE_QUERY_URL:-http://openobserve:5080}
     export TRACE_QUERY_URL
     [ "${AIRGAP_DRYRUN:-0}" != "1" ] || return 0
-    if [ -z "${TRACE_QUERY_USER+x}" ] || [ -z "${TRACE_QUERY_PASSWORD+x}" ]; then
-        [ "${OTEL_BUNDLED:-1}" = "1" ] ||
-            die "TRACE_QUERY_USER and TRACE_QUERY_PASSWORD are required with an external OTLP endpoint"
+    if [ -z "${TRACE_QUERY_USER:-}" ] || [ -z "${TRACE_QUERY_PASSWORD:-}" ]; then
         TRACE_QUERY_USER=$(_read_oo_secret_key root-user-email) &&
             TRACE_QUERY_PASSWORD=$(_read_oo_secret_key root-user-password) ||
             die "E_OPENOBSERVE_CREDENTIALS: cannot read root-user-email and root-user-password from Secret openobserve-credentials"

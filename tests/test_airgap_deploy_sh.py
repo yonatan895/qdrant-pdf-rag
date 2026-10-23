@@ -1683,16 +1683,32 @@ def test_default_smoke_gets_trace_query_settings_without_manual_env(tree):
 
 
 def test_external_otlp_endpoint_has_no_bundled_trace_query_default(tree):
-    """#956: with tracing.endpoint set there is no bundled OpenObserve, so smoke
-    must be given TRACE_QUERY_URL explicitly instead of defaulting to a service
-    that is not rendered."""
+    """#956: with tracing.endpoint set there is no bundled OpenObserve, so no
+    default URL or Secret read is applied; operator values pass through and
+    smoke refuses empty ones."""
     base = ('. scripts/airgap/common.sh; NAMESPACE=ns; KC=kubectl; OTEL_TRACING_ENABLED=1; OTEL_BUNDLED=0; '
             'resolve_trace_query; printf "%s|%s" "${TRACE_QUERY_URL-}" "${TRACE_QUERY_USER-}"')
     env = {"PATH": f"{tree[0] / 'bin'}:/usr/bin:/bin", "HELM_LOG": str(tree[1])}
-    refused = subprocess.run(["sh", "-c", base], cwd=tree[0], env=env, capture_output=True, text=True, check=False)
-    assert refused.returncode != 0 and "TRACE_QUERY_URL is required" in refused.stderr
+    unset = subprocess.run(["sh", "-c", base], cwd=tree[0], env=env, capture_output=True, text=True, check=False)
+    assert unset.returncode == 0 and unset.stdout == "|"
     given = subprocess.run(
         ["sh", "-c", base], cwd=tree[0], capture_output=True, text=True, check=False,
         env={**env, "TRACE_QUERY_URL": "http://oo.platform:5080", "TRACE_QUERY_USER": "u", "TRACE_QUERY_PASSWORD": "p"})
     assert given.returncode == 0, given.stderr
     assert given.stdout == "http://oo.platform:5080|u"
+
+
+def test_task_runner_empty_trace_query_vars_get_bundled_defaults(tree):
+    """The task runner exports every operator key, empty when unset: on the
+    bundled path empty means unset (defaults and Secret credentials), while a
+    non-empty operator value still wins."""
+    script = ('. scripts/airgap/common.sh; NAMESPACE=ns; KC=kubectl; OTEL_TRACING_ENABLED=1; OTEL_BUNDLED=1; '
+              'resolve_trace_query; printf "%s|%s|%s" "${TRACE_QUERY_URL-}" "${TRACE_QUERY_USER-}" "${TRACE_QUERY_PASSWORD-}"')
+    env = {"PATH": f"{tree[0] / 'bin'}:/usr/bin:/bin", "HELM_LOG": str(tree[1])}
+    empty = subprocess.run(["sh", "-c", script], cwd=tree[0], capture_output=True, text=True, check=False,
+                           env={**env, "TRACE_QUERY_URL": "", "TRACE_QUERY_USER": "", "TRACE_QUERY_PASSWORD": ""})
+    assert empty.returncode == 0, empty.stderr
+    assert empty.stdout == "http://openobserve:5080|test-user|test-pass"
+    given = subprocess.run(["sh", "-c", script], cwd=tree[0], capture_output=True, text=True, check=False,
+                           env={**env, "TRACE_QUERY_URL": "http://x:1", "TRACE_QUERY_USER": "u", "TRACE_QUERY_PASSWORD": "p"})
+    assert given.stdout == "http://x:1|u|p"
