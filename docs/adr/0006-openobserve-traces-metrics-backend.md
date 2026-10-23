@@ -8,7 +8,7 @@
   mode) against Jaeger + user-workload monitoring (UWM) + Splunk. Basis: the
   [2026-10-23 record](../records/2026-10-23-openobserve-oss-qualification.md),
   with criteria approved 2026-10-18 (D1-D10).
-  All 7 gates passed (data boundary with 0 canary hits, security, air-gap
+  All 7 gates passed (data boundary with 0 canary hits in the scanned `default` streams and container logs; `_meta` not scanned, security, air-gap
   packaging, kill -9 durability, 13/13 trace-operation parity, 1 GiB cap with no
   OOM, fail-open); scored S1, S4, S6 and S8 passed (peak 519 MiB sampled, about
   90 bytes per span, about 42 MiB for 480,975 spans, exporter overhead within

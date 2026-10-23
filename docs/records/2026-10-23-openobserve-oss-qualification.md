@@ -8,7 +8,7 @@ Counts, bytes, percentiles and times only: no raw telemetry, host paths or crede
 
 **GO, conditional** (recommend a superseding ADR for ADR-0002 and the pin PR; no deployment change from #782).
 
-- All seven gates passed, two of them on a reading the maintainer must accept (G2: four unauthenticated non-data
+- All seven gates passed, two of them on readings the maintainer accepted on 2026-10-23 (G2: four unauthenticated non-data
   endpoints; G3: the default config tries to reach two hosts and the trial disabled both by environment settings).
   If either reading is rejected, the verdict is keep-baseline.
 - Scored items required for a go (S1, S4, S6, S8) passed; S9 holds (net new stateful services +0, collector stateless).
@@ -24,7 +24,7 @@ Counts, bytes, percentiles and times only: no raw telemetry, host paths or crede
   registries `public.ecr.aws/zinclabs` and `docker.io/openobserve` returned the same digest); otelcol-contrib 0.160.0
   `sha256:799dc6cf12c96192af37b5bdba804da8c10b3bc563b43cb90c3f3c58d9572ad6` (built 2026-09-02). Jaeger comparison: the
   `images.txt` digest `46a88626...`.
-- Host: 16 GB WSL; at start MemAvailable 10.4 GB, PSI memory and io near 0, 603 GB disk free; minimum MemAvailable during
+- Host: 16 GB WSL; at start MemAvailable 10.4 GB, PSI memory and io near 0, 601 GB disk free; minimum MemAvailable during
   the run 9.4 GB; no watchdog abort. Heavy lock held for the whole run.
 - Workload: Qdrant sim (1 GiB cap), `mock_vllm` (TTFT 300 ms, 20 ms/token, jitter 50 ms, seed 782, 2% error rate; mock
   embeddings, no hash mode, D10), 4 synthetic PDFs (12 points), the real agent unchanged (traces direct to O2, `/metrics`
@@ -32,7 +32,7 @@ Counts, bytes, percentiles and times only: no raw telemetry, host paths or crede
 
 ## Deviations from the approved design
 
-1. **Logs excluded** (D2/D3): S3 NOT RUN; G1 covers traces, metrics, O2's own streams (`_meta` org included) and container logs.
+1. **Logs excluded** (D2/D3): S3 NOT RUN; G1 covers the `default` org's trace, metrics and log streams and the O2 and bridge container logs; the `_meta` org was listed but its streams were not scanned.
 2. **Host cannot reach an `--internal` Docker network** on this host (the daemon is not in the WSL network namespace), so
    the design assumption failed. A 128 MiB relay container (python on the `kindest/node` image, on the default bridge and the
    internal network) publishes O2 on host loopback; the bridge is also attached to both networks. O2 itself stays on the internal
@@ -59,12 +59,12 @@ Counts, bytes, percentiles and times only: no raw telemetry, host paths or crede
 
 | ID | Observed | Result |
 |---|---|---|
-| G1 data boundary | 20 canary requests (query, header, upstream-exception body, doc id; 16 x 200, 4 x 502). All streams of orgs `default` and `_meta` (32 streams, traces, metrics, usage) downloaded and scanned locally: 0 hits. Negative control stream: all 6 tokens found. O2 and collector container logs: 0 hits. Data volume files: 0 files contain a token. Server-side `match_all` cross-check on traces returned an HTTP error (not counted) | PASS |
+| G1 data boundary | 20 canary requests (query, header, upstream-exception body, doc id; 16 x 200, 4 x 502). The `default` org's streams (1 traces, 25 metrics, 1 logs; 3 `rag_*` metric names returned "stream not found") and the O2 and bridge container logs were downloaded and scanned locally: 0 hits. The `_meta` org was listed but not scanned (ADR-0005 coverage is for the scanned streams). Negative control stream: all 6 tokens found. O2 and collector container logs: 0 hits. Data volume files: 0 files contain a token. Server-side `match_all` cross-check on traces returned an HTTP error (not counted) | PASS |
 | G2 security | Ingest (traces, metrics, json), search, streams, Prometheus query, orgs, users, settings: 401 without credentials; wrong credentials 401. Unauthenticated 200: `/healthz`, `/config` (build info and a telemetry flag), `/web/` static UI, `/metrics` (26 process-level series, no stream or org names; empty body with `ZO_PROMETHEUS_ENABLED=false`). No published ports. Ran, ingested and restarted as UID 1000770000 GID 0, read-only rootfs, `--cap-drop ALL`, no-new-privileges, `/tmp` tmpfs, writable data volume only (fsGroup stand-in) | PASS, with the four named public endpoints |
 | G3 air-gap | Digest-pinned amd64, 29 days old. Static UI: no external `src` or `href` or CSS `url()` (JS bundles contain literal documentation and vendor URLs, never fetched). Default config with `ZO_TELEMETRY=false` still tried `geoip.zinclabs.dev` and `raw.githubusercontent.com` within 45 s; with the two settings in deviation 4, the O2 log shows 0 outbound attempts for the whole run. Kernel-level counters were not observable (the container namespace is not visible); evidence is the log plus the internal network, which blocks all egress | PASS, with the extra settings |
 | G4 durability | `kill -9` under load (search 40 rps plus a tracker): restart ready in 2.3 s, no manual repair, 224 of 224 pre-kill tracked requests present (unflushed window 0 s), next ordinary request visible 6.1 s after sending | PASS |
 | G5 trace parity | 13 of 13 operations present service-wide in both backends. 100 of 100 request ids returned exactly one trace in both; spans per trace identical (search 6 or 7, answer 8 or 9; same distribution in Jaeger and O2). Steady-state export errors in agent logs: 0 (errors only in the G7 stop window and the G4 kill window) | PASS |
-| G6 memory cap | cgroup peak after the last restart 206 MiB; highest sampled 519 MiB (the G7 or restart window); 1 GiB cap, OOMKilled false throughout | PASS |
+| G6 memory cap | cgroup peak after the last restart 206 MiB; highest sampled 519 MiB (during the `g5_s2` trace-query phase); 1 GiB cap, OOMKilled false throughout | PASS |
 | G7 fail-open | O2 stopped 100 s under load, then restarted (ready in 2.6 s). Answer p95 1790 / 1828 / 1795 ms (before / during / after), search p95 11.96 / 11.59 / 11.97 ms; 0 request errors; baseline noise (two off runs) 36 ms and 0.5 ms. Traces resumed 2.1 s after the restart, no agent restart | PASS |
 
 ## Scored items
