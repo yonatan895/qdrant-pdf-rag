@@ -305,3 +305,87 @@ def test_the_bundle_is_bootstrapped_only_behind_the_boundary():
     assert 'bootstrap.sh' in steps[handoff]['run']
     for step in steps[:boundary]:
         assert 'bootstrap.sh' not in step.get('run', ''), step.get('name')
+
+
+def boundary_policy():
+    step = next(s for s in kind_steps() if s.get('name') == 'Close the network boundary (block public egress, prove it)')
+    run = step['run']
+    assert run.index('$GATE install') < run.index('kind: NetworkPolicy')
+    body = run.split('apply -f - <<EOF\n', 1)[1].split('\nEOF', 1)[0]
+    return yaml.safe_load(body.replace('${KIND_V4}', '172.18.0.0/16'))
+
+
+def test_the_boundary_step_denies_pod_egress_inside_the_cluster():
+    # The host rules were seen not to see a leaked pod SYN (runs 39936150839,
+    # 39942787786, 39945681590); kindnet enforces this policy in the node.
+    policy = boundary_policy()
+    assert policy['kind'] == 'NetworkPolicy'
+    assert policy['spec']['podSelector'] == {}
+    assert policy['spec']['policyTypes'] == ['Egress']
+
+
+def test_the_egress_policy_allows_only_dns_namespace_pods_and_the_api_server():
+    rules = boundary_policy()['spec']['egress']
+    assert rules[0]['to'][0]['podSelector'] == {'matchLabels': {'k8s-app': 'kube-dns'}}
+    assert {(p['port'], p['protocol']) for p in rules[0]['ports']} == {(53, 'UDP'), (53, 'TCP')}
+    assert rules[1] == {'to': [{'podSelector': {}}]}
+    assert rules[2] == {'to': [{'ipBlock': {'cidr': '172.18.0.0/16'}}], 'ports': [{'port': 6443, 'protocol': 'TCP'}]}
+    assert len(rules) == 3
+
+
+def test_the_pod_probes_still_run_after_the_policy():
+    names = [s.get('name', '') for s in kind_steps()]
+    boundary = names.index('Close the network boundary (block public egress, prove it)')
+    assert names.index('Prove node and pod egress is blocked (mock vLLM pod, real sockets)') > boundary
+    assert names.index('Application pod egress is blocked (agent pod, real sockets)') > boundary
+
+
+def test_a_node_probe_exercises_the_host_rule_before_require_hits_nodes():
+    # The NetworkPolicy keeps pod connects off the host rule, so the nodes
+    # counter is only reachable through a probe in a node's own namespace.
+    steps = kind_steps()
+    names = [s.get('name', '') for s in steps]
+    probe = names.index('Prove node egress is blocked (Kind node network namespace, real sockets)')
+    assert names.index('Assert the boundary rejected real traffic (host and pods)') > probe
+    step = steps[probe]
+    assert step['shell'] == GATED_SHELL
+    assert 'docker exec "$node" curl' in step['run']
+    assert all(ip in step['run'] for ip in ('1.1.1.1', '8.8.8.8', '9.9.9.9'))
+    assert 'exit 1' in step['run']
+
+
+def node_probe(tmp_path, curl_exit, nodes='gapbox-control-plane'):
+    """Run the workflow's node-probe script against stub kind/docker."""
+    step = next(s for s in kind_steps()
+                if s.get('name') == 'Prove node egress is blocked (Kind node network namespace, real sockets)')
+    bindir = tmp_path / 'bin'
+    bindir.mkdir()
+    (tmp_path / 'kind').write_text('#!/bin/sh\nprintf "%s" "$NODES"\n')
+    (tmp_path / 'kind').chmod(0o755)
+    (bindir / 'docker').write_text('#!/bin/sh\nexit "$CURL_EXIT"\n')
+    (bindir / 'docker').chmod(0o755)
+    script = step['run'].replace('/usr/local/bin/kind', str(tmp_path / 'kind'))
+    return subprocess.run(['bash', '-ec', script], capture_output=True, text=True, check=False,
+                          env={**os.environ, 'PATH': f'{bindir}:/usr/bin:/bin', 'NODES': nodes,
+                               'CURL_EXIT': str(curl_exit)})
+
+
+@pytest.mark.parametrize('code', [6, 7, 28, 35, 56])
+def test_node_probe_accepts_network_failures_as_blocked(tmp_path, code):
+    result = node_probe(tmp_path, code)
+    assert result.returncode == 0, result.stdout
+    assert 'node egress probe blocked: ok' in result.stdout
+
+
+@pytest.mark.parametrize('code', [0, 1, 2, 22, 125, 126, 127])
+def test_node_probe_fails_when_connected_or_not_run(tmp_path, code):
+    result = node_probe(tmp_path, code)
+    assert result.returncode == 1
+    assert 'VIOLATED' in result.stdout
+    assert 'blocked: ok' not in result.stdout
+
+
+def test_node_probe_fails_without_any_node(tmp_path):
+    result = node_probe(tmp_path, 7, nodes='')
+    assert result.returncode == 1
+    assert 'no Kind node found' in result.stdout

@@ -620,6 +620,31 @@ jobs:
           test -n "$RULE_ARGS"
           # shellcheck disable=SC2086
           $GATE install $RULE_ARGS
+          # Pod egress is closed inside the cluster too: a pod SYN to a public
+          # address was seen to leave through no host FORWARD rule at all (runs
+          # 39936150839, 39942787786, 39945681590), so the host rules cannot be
+          # the only enforcement. kindnet enforces NetworkPolicy including egress.
+          # Allowed: cluster DNS, pods of this namespace (stand-in gateway, mock
+          # vLLM, Qdrant, agent, ingest) and the API server on the Kind network.
+          KIND_V4=""
+          for cidr in $KIND_CIDRS; do case "$cidr" in *:*) ;; *) KIND_V4="$cidr" ;; esac; done
+          test -n "$KIND_V4"
+          /usr/local/bin/kubectl -n "$NS" apply -f - <<EOF
+          apiVersion: networking.k8s.io/v1
+          kind: NetworkPolicy
+          metadata: {name: rehearsal-default-deny-egress}
+          spec:
+            podSelector: {}
+            policyTypes: [Egress]
+            egress:
+              - to:
+                  - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}
+                    podSelector: {matchLabels: {k8s-app: kube-dns}}
+                ports: [{port: 53, protocol: UDP}, {port: 53, protocol: TCP}]
+              - to: [{podSelector: {}}]
+              - to: [{ipBlock: {cidr: "${KIND_V4}"}}]
+                ports: [{port: 6443, protocol: TCP}]
+          EOF
           # Counterexamples behind the boundary: these must all fail.
           $GATE run python3 "$PROBE" blocked 1.1.1.1:443 8.8.8.8:443 9.9.9.9:443 github.com:443 get.helm.sh:443
           if $GATE run curl -sS --max-time 10 -o /dev/null https://get.helm.sh/; then
@@ -820,6 +845,33 @@ jobs:
           /usr/local/bin/kubectl -n "$NS" exec -i deploy/vllm-mock -- python3 - reachable kubernetes.default.svc:443 < "$PROBE"
           /usr/local/bin/kubectl -n "$NS" exec -i deploy/vllm-mock -- python3 - blocked 1.1.1.1:443 8.8.8.8:443 9.9.9.9:443 < "$PROBE"
 
+      # Pod egress is stopped in the node by the NetworkPolicy, so pod probes no
+      # longer reach the host DOCKER-USER rule. A node's own network namespace is
+      # outside NetworkPolicy: this connect (curl; the node image has no python)
+      # must be refused by the host rule, which is what require-hits nodes proves.
+      - name: Prove node egress is blocked (Kind node network namespace, real sockets)
+        shell: sh rehearsal-infra/scripts/ci/egress_gate.sh run bash -e {0}
+        run: |
+          export PATH="/usr/local/bin:$PATH"
+          NODES="$(/usr/local/bin/kind get nodes --name gapbox)"
+          test -n "$NODES" || { echo "VIOLATED: no Kind node found; the probe did not run"; exit 1; }
+          for node in $NODES; do
+            for target in 1.1.1.1 8.8.8.8 9.9.9.9; do
+              rc=0
+              docker exec "$node" curl -sS --max-time 5 -o /dev/null "https://$target/" 2>/dev/null || rc=$?
+              # Only a network failure counts as blocked: 6 resolve, 7 refused or
+              # unreachable (REJECT's ICMP port-unreachable), 28 timeout, 35/56 TLS
+              # or receive failure. 0 means it connected; docker exec failures
+              # (125-127, no such container) and anything else mean it never ran.
+              case "$rc" in
+                6|7|28|35|56) echo "unreachable $node -> $target:443 (curl exit $rc)" ;;
+                0) echo "VIOLATED: $node reached $target:443"; exit 1 ;;
+                *) echo "VIOLATED: probe did not run on $node for $target (exit $rc)"; exit 1 ;;
+              esac
+            done
+          done
+          echo "node egress probe blocked: ok"
+
       - name: Assert the boundary rejected real traffic (host and pods)
         run: |
           sh rehearsal-infra/scripts/ci/egress_gate.sh require-hits host
@@ -988,6 +1040,11 @@ jobs:
           mkdir -p diagnostics
           sh rehearsal-infra/scripts/ci/egress_gate.sh status > diagnostics/egress-gate-final.txt 2>&1 || true
           cat diagnostics/egress-gate-final.txt
+          # Node-side masquerade state, to explain a pod probe that leaked.
+          for node in $(docker ps --filter label=io.x-k8s.kind.cluster=gapbox --format '{{.Names}}'); do
+            { echo "== $node nat POSTROUTING"; docker exec "$node" iptables -t nat -S POSTROUTING; } >> diagnostics/egress-gate-nodes-nat.txt 2>&1 || true
+          done
+          cat diagnostics/egress-gate-nodes-nat.txt 2>/dev/null || true
 
       - name: Failure diagnostics (pods, events, logs)
         if: failure()
