@@ -693,6 +693,17 @@ complete two- or four-job matrices are supported; missing, duplicated, mixed
 or partial shards cannot qualify. Local opt-in sharding defaults to two;
 ordinary unsharded local/GitLab execution is unchanged.
 
+Shard assignment has two rules, both accepted by the consumer. The original
+rule is `sorted(eligible)[shard - 1::shards]` (a proof without a `rule` key).
+The balanced rule (`--unit-durations FILE`, `lpt-durations-v1`) sorts nodes by
+recorded milliseconds descending, ties by node id, and gives each to the
+lightest shard, ties by lowest shard; unknown nodes weigh the file's
+`default_ms`. The proof embeds the durations text and its sha256, and
+`validate` recomputes the assignment from that text; `validate_union` requires
+one rule across shards and the exact partition of the eligible nodes. Durations
+only choose where a test runs, never whether it runs, so they are not a trusted
+input: a wrong file costs balance, not coverage.
+
 The critical-hazard runner keeps a baseline and its mutation sequential, but
 GitHub selects four independent processes for separate pairs (`qa:hazards
 WORKERS=4`). Each process owns pristine source copies, private temporary/cache

@@ -754,6 +754,113 @@ class TestCiUnitPartition(unittest.TestCase):
                                   cwd=root, env=env, capture_output=True, check=False, timeout=20)
             self.assertEqual(proc.returncode, 5)
 
+    def test_balanced_assignment_is_a_deterministic_exact_partition(self):
+        from scripts.unit_evidence import assign_balanced, parse_durations, select_nodes
+
+        nodes = [f"tests/t.py::t[{index:02d}]" for index in range(40)]
+        ms = {nodes[0]: 9000, nodes[1]: 4000, nodes[2]: 4000, nodes[39]: 10}
+        text = json.dumps({"schema_version": 1, "default_ms": 5, "ms": ms})
+        default_ms, parsed = parse_durations(text)
+        bins = assign_balanced(sorted(nodes), 4, default_ms, parsed)
+        self.assertEqual(sorted(node for group in bins for node in group), sorted(nodes))
+        self.assertEqual(bins, assign_balanced(sorted(nodes), 4, default_ms, parsed))
+        self.assertEqual([select_nodes(nodes, shard, 4, text) for shard in range(1, 5)], bins)
+        # Heaviest first onto the lightest shard, ties by lowest shard index.
+        self.assertIn(nodes[0], bins[0])
+        self.assertIn(nodes[1], bins[1])
+        self.assertIn(nodes[2], bins[2])
+        # Unknown new tests still land in exactly one shard, sharing the default weight.
+        grown = sorted(nodes + ["tests/t.py::new_case"])
+        self.assertEqual(sorted(node for group in assign_balanced(grown, 4, default_ms, parsed) for node in group), grown)
+        # A skewed load beats round-robin's worst shard.
+        heavy = {node: 1000 if index % 4 == 0 else 1 for index, node in enumerate(sorted(nodes))}
+        def weights(group):
+            return sum(heavy[node] for node in group)
+
+        balanced = max(map(weights, assign_balanced(sorted(nodes), 4, 5, heavy)))
+        self.assertLess(balanced, max(weights(sorted(nodes)[index::4]) for index in range(4)))
+        for invalid in ("[]", "{}", json.dumps({"schema_version": 2, "default_ms": 5, "ms": {}}),
+                        json.dumps({"schema_version": 1, "default_ms": 0, "ms": {}}),
+                        json.dumps({"schema_version": 1, "default_ms": 5, "ms": {"a": -1}}),
+                        json.dumps({"schema_version": 1, "default_ms": 5, "ms": {"a": 1.5}}),
+                        json.dumps({"schema_version": 1, "default_ms": 5, "ms": {"a": True}}),
+                        json.dumps({"schema_version": 1, "default_ms": 5, "ms": {}, "x": 1}),
+                        '{"schema_version": 1, "default_ms": 5, "ms": {"a": 1, "a": 2}}'):
+            with self.assertRaises(ValueError):
+                parse_durations(invalid)
+
+    def test_balanced_native_shards_prove_exact_union_and_reject_a_forged_rule(self):
+        import copy
+        import hashlib
+
+        from scripts.unit_evidence import input_hashes, run_shard, validate, validate_union
+
+        source = ("import pytest\n"
+                  "@pytest.mark.parametrize('value', range(9), ids=[f'case {index}::λ' for index in range(9)])\n"
+                  "def test_case(value):\n    assert value >= 0\n"
+                  "def test_unlisted():\n    pass\n"
+                  "@pytest.mark.integration\ndef test_excluded():\n    assert False\n")
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            self.coverage_tree(root, source)
+            listed = {f"tests/test_sample.py::test_case[case {index}::\\u03bb]": 1000 if index < 3 else 10
+                      for index in range(9)}
+            (root / "tests/unit-durations.json").write_text(
+                json.dumps({"schema_version": 1, "default_ms": 10, "ms": listed}, sort_keys=True))
+            records, proofs = [], []
+            for shard in range(1, 5):
+                out = root / f"out-{shard}"
+                out.mkdir()
+                xml = out / "result.xml"
+                code, proof = run_shard(root, sys.executable, shard, xml, out, shards=4,
+                                        durations=pathlib.Path("tests/unit-durations.json"))
+                self.assertEqual(code, 0)
+                record = validate(proof, shard, xml.read_bytes(), input_hashes(root), shards=4)
+                self.assertEqual(proof["collect"]["rule"]["name"], "lpt-durations-v1")
+                records.append(record)
+                proofs.append((proof, xml.read_bytes()))
+            # The three heavy cases are on three different shards, not round-robin neighbours of each other.
+            heavy_homes = [next(r["shard"] for r in records if node in r["executed"]) for node in list(listed)[:3]]
+            self.assertEqual(sorted(heavy_homes), [1, 2, 3])
+            self.assertTrue(any(r["executed"] != r["eligible"][r["shard"] - 1::4] for r in records))
+            executed = sorted(node for r in records for node in r["executed"])
+            self.assertEqual(executed, records[0]["eligible"])
+            self.assertIn("tests/test_sample.py::test_unlisted", executed)
+            self.assertEqual(len({r["rule_sha256"] for r in records}), 1)
+            validate_union(list(reversed(records)), shards=4)
+            mixed = copy.deepcopy(records)
+            mixed[0]["rule_sha256"] = None
+            with self.assertRaises(ValueError):
+                validate_union(mixed, shards=4)
+            proof, xml = copy.deepcopy(proofs[0][0]), proofs[0][1]
+            round_robin = copy.deepcopy(proof)
+            for phase in ("collect", "execute"):
+                round_robin[phase].pop("rule")
+            with self.assertRaises(ValueError):  # balanced results are not a round-robin shard
+                validate(round_robin, 1, xml, input_hashes(root), shards=4)
+            for tamper in ("hash", "text", "name", "missing-phase", "extra"):
+                forged = copy.deepcopy(proof)
+                if tamper == "hash":
+                    forged["collect"]["rule"]["durations_sha256"] = "0" * 64
+                elif tamper == "text":  # a consistent hash for different durations still changes the assignment
+                    text = json.dumps({"schema_version": 1, "default_ms": 1, "ms": {}})
+                    for phase in ("collect", "execute"):
+                        forged[phase]["rule"].update(durations_text=text, durations_sha256=hashlib.sha256(text.encode()).hexdigest())
+                elif tamper == "name":
+                    forged["collect"]["rule"]["name"] = "other"
+                elif tamper == "missing-phase":
+                    forged["execute"].pop("rule")
+                else:
+                    forged["collect"]["rule"]["extra"] = 1
+                    forged["execute"]["rule"]["extra"] = 1
+                with self.subTest(tamper=tamper), self.assertRaises(ValueError):
+                    validate(forged, 1, xml, input_hashes(root), shards=4)
+            out = root / "out-absent"
+            out.mkdir()
+            with self.assertRaises(OSError):  # an unreadable durations file never degrades to round-robin
+                run_shard(root, sys.executable, 1, out / "result.xml", out, shards=4,
+                          durations=pathlib.Path("tests/absent.json"))
+
     def test_four_native_shards_preserve_exact_union_and_reject_partial_or_forged_coverage(self):
         import copy
 
@@ -1156,17 +1263,25 @@ class TestNativeExecutionEvidence(unittest.TestCase):
 
 class TestNativeEvidenceConsumer(unittest.TestCase):
     def test_four_native_job_receipts_require_the_complete_raw_junit_union(self):
+        for balanced in (False, True):
+            with self.subTest(balanced=balanced):
+                self.check_native_union(balanced)
+
+    def check_native_union(self, balanced):
         import base64
         import copy
         import hashlib
 
         from scripts.acceptance_evidence import normalize_native, unit_producers
         from scripts.ci_evidence import junit_bytes
-        from scripts.unit_evidence import validate_union
+        from scripts.unit_evidence import rule_record, select_nodes, validate_union
 
         source = b'    name: unit (${{ matrix.shard }}/4)\n        shard: [1, 2, 3, 4]\n'
         producers = unit_producers(source, hashlib.sha256(source).hexdigest())
         eligible = [f'tests/test_exact \t\n λ.py::test_case[{index}:: a b]' for index in range(9)]
+        text = json.dumps({'schema_version': 1, 'default_ms': 5,
+                           'ms': {eligible[3]: 900, eligible[4]: 800, eligible[0]: 700}})
+        durations = text if balanced else None
         records = []
         for shard, producer in enumerate(producers, 1):
             args, receipt, _ = self.fixture()
@@ -1174,7 +1289,7 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
                         workflow_digest=hashlib.sha256(source).hexdigest())
             args['job'].update(name=producer.job, id=456 + shard)
             args['artifact']['name'] = f'evidence-unit-{shard}-attempt-2'
-            selected = eligible[shard - 1::4]
+            selected = select_nodes(eligible, shard, 4, durations)
             xml = ('<testsuite>' + ''.join(
                 '<testcase><properties><property name="native_nodeid" value="' +
                 base64.b64encode(node.encode()).decode() + '"/></properties></testcase>'
@@ -1182,6 +1297,8 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
             coverage = receipt['unit_coverage']
             coverage['shard'] = shard
             for phase in ('collect', 'execute'):
+                if balanced:
+                    coverage[phase]['rule'] = rule_record(text)
                 coverage[phase].update(all=eligible, eligible=eligible,
                                        selected=eligible if phase == 'collect' else selected,
                                        executed=[] if phase == 'collect' else selected)
