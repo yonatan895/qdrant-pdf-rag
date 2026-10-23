@@ -14,7 +14,7 @@ ROADMAP/ADR entries, not every historical entry by default.
 Confirm repository, base commit, branch/worktree, and working-tree status.
 Do not discard another contributor's changes. Use an isolated branch or
 worktree from the approved current baseline. Connected and air-gapped
-baseline acquisition follow their existing procedures.
+baseline acquisition keep their procedures.
 
 One concern means one bounded end-to-end behavior or invariant, not one
 file or layer. Start with the decision owner, then inspect affected callers,
@@ -26,12 +26,14 @@ forbidden outcome, relevant owners/boundaries, assumptions, counterexample,
 and verification plan. An issue's file list is a starting map, not proof
 that other affected paths do not exist.
 
-Use the pinned entry: sh scripts/tools/run-task.sh --list, then
+Pinned entry: sh scripts/tools/run-task.sh --list, then
 sh scripts/tools/run-task.sh <name> --summary. Taskfile.yml and taskfiles/
 own dispatch; docs/task-runner.md owns setup/inputs; docs/live-stack.md
 owns required verification.
 
 ## Focus and process budget
+
+Parallelize large tasks across subagents: [parallel work](docs/agent-workflow.md#parallel-work).
 
 Start from value: name the quality-tracker metric (#582 completed 2026-10-01 — name the active tracker) or robustness
 item a task moves, with baseline and expected direction, or link an escaped
@@ -99,8 +101,8 @@ step pending a decision; continue independent safe work.
 
 Use docs/live-stack.md's table as the minimum verification for the actual
 impact of the diff. Cross-layer changes take the union of affected minimums
-and add tests for their interactions. Do not run expensive unrelated checks
-merely to increase the test count; record why a check is or is not relevant.
+and add tests for their interactions. Skip expensive unrelated checks; record
+why a check is or is not relevant.
 
 Record the baseline. A failure reproducing the assigned defect is expected
 and may be fixed. An unrelated product failure, missing prerequisite, and

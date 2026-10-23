@@ -153,6 +153,21 @@ budget figures; this section owns the mechanics:
 - Lane results, counts and SHAs come from the acceptance summary and CI receipts;
   PR prose states the claim, the counterexample considered and the limits.
 
+<a id="parallel-work"></a>
+## Parallel work
+
+Maintainer request (2026-10-23): parallelize as much work as possible; hand a
+large task to as many agents as it needs to finish quickly.
+
+- Split a large task into independent pieces, each with explicit file ownership
+  and its own worktree or branch. Pieces that touch one file or contract stay
+  with one agent.
+- Run the pieces in parallel subagents; integrate and verify centrally, and
+  batch the resulting PRs as merge trains.
+- Shared limits still bind: host RAM and the heavy lock, the serialized test
+  runner, one G4 session at a time, and the trusted/Verifier steps. Parallelism
+  never bypasses them or the [branch workflow](#git-workflow) authority rules.
+
 <a id="review-handoff"></a>
 ## Independent review and handoff
 
