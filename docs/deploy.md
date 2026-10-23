@@ -1179,8 +1179,8 @@ not by mocking. `scripts/ci/egress_gate.sh` owns the rules and
   (a fresh workspace from the bundle only), every later operator step, and all
   pods. Host processes run with a dedicated primary group whose `iptables`
   OUTPUT owner-match accepts only loopback and the Kind network and REJECTs
-  everything else, DNS included. A `DOCKER-USER` rule REJECTs traffic leaving
-  the Kind network, which covers node image pulls and pod egress. Only bundle
+  everything else, DNS included. `DOCKER-USER` rules REJECT traffic leaving
+  the Kind network (by source address and by its bridge interface), which covers node image pulls and pod egress. Only bundle
   images, loaded into the lane's authenticated TLS registry, can be pulled.
 - **Not blocked**: the GitHub runner agent, the Docker daemon and its embedded
   resolver (a pod can resolve a public name but cannot connect), the setup

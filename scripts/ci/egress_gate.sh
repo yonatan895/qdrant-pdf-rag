@@ -9,11 +9,15 @@
 #           REJECTs everything else, DNS included. Other runner processes (the
 #           GitHub runner agent, Docker daemon) keep their network: the runner
 #           must keep reporting to GitHub, so a host-wide block is not possible.
-#   nodes   a DOCKER-USER rule REJECTs forwarded traffic that leaves a Kind
-#           network (--block-source CIDR), i.e. all node and pod egress.
+#   nodes   DOCKER-USER rules REJECT forwarded traffic that leaves a Kind
+#           network, i.e. all node and pod egress: by source address
+#           (--block-source CIDR; also the pod CIDR as a backstop) and by the
+#           network's bridge interface (--block-network NAME), which does not
+#           depend on the packet still carrying a node source address (a pod
+#           SYN that escapes the node's masquerade would miss a source match).
 #
 # Subcommands (root is obtained with `sudo -n` when needed):
-#   install [--allow CIDR]... [--block-source CIDR]...
+#   install [--allow CIDR]... [--block-source CIDR]... [--block-network NAME]...
 #   run COMMAND [ARG...]     exec COMMAND under the gated group; refuses to run
 #                            when the rules are absent (fail closed)
 #   status                   print the rules and their packet counters
@@ -30,11 +34,20 @@ GROUP=${EGRESS_GATE_GROUP:-airgap-egress-gate}
 
 die() { echo "egress-gate: $*" >&2; exit 1; }
 usage() {
-    echo "usage: $0 install [--allow CIDR]... [--block-source CIDR]... | run CMD [ARG...] | status | require-hits host|nodes | remove" >&2
+    echo "usage: $0 install [--allow CIDR]... [--block-source CIDR]... [--block-network NAME]... | run CMD [ARG...] | status | require-hits host|nodes | remove" >&2
     exit 2
 }
 as_root() { if [ "$(id -u)" = 0 ]; then "$@"; else sudo -n "$@"; fi; }
 valid_cidr() { case "$1" in ''|*[!0-9./]*) return 1 ;; */*) return 0 ;; *) return 1 ;; esac; }
+valid_ifname() { case "$1" in ''|*[!A-Za-z0-9_.-]*) return 1 ;; *) [ "${#1}" -le 15 ] ;; esac; }
+# Linux bridge of a Docker network: its explicit bridge option, else br-<id[:12]>.
+network_bridge() {
+    _opt=$(docker network inspect "$1" -f '{{index .Options "com.docker.network.bridge.name"}}' 2>/dev/null) || return 1
+    case "$_opt" in ''|'<no value>') ;; *) echo "$_opt"; return 0 ;; esac
+    _id=$(docker network inspect "$1" -f '{{.Id}}' 2>/dev/null) || return 1
+    [ -n "$_id" ] || return 1
+    echo "br-$(printf %s "$_id" | cut -c1-12)"
+}
 group_gid() { getent group "$GROUP" | cut -d: -f3; }
 
 # One rule per line, whitespace-separated tokens without spaces inside.
@@ -56,6 +69,9 @@ host_rules6() {
 node_rules() {
     for _cidr in $SOURCES; do
         echo "-s $_cidr ! -d $_cidr -m comment --comment $TAG:nodes -j REJECT"
+    done
+    for _if in $BRIDGES; do
+        echo "-i $_if ! -o $_if -m comment --comment $TAG:nodes -j REJECT"
     done
 }
 
@@ -89,10 +105,17 @@ cmd_remove() {
 cmd_install() {
     ALLOW=""
     SOURCES=""
+    BRIDGES=""
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --allow) [ "$#" -ge 2 ] || usage; valid_cidr "$2" || die "invalid CIDR: $2"; ALLOW="$ALLOW $2"; shift 2 ;;
             --block-source) [ "$#" -ge 2 ] || usage; valid_cidr "$2" || die "invalid CIDR: $2"; SOURCES="$SOURCES $2"; shift 2 ;;
+            --block-network)
+                [ "$#" -ge 2 ] || usage
+                command -v docker >/dev/null 2>&1 || die "docker is required for --block-network"
+                _if=$(network_bridge "$2") || die "cannot inspect Docker network: $2"
+                valid_ifname "$_if" || die "invalid bridge interface for network $2: $_if"
+                BRIDGES="$BRIDGES $_if"; shift 2 ;;
             *) usage ;;
         esac
     done
@@ -102,7 +125,7 @@ cmd_install() {
     [ -n "$_gid" ] || die "cannot resolve group $GROUP"
     cmd_remove
     host_rules "$_gid" | insert_rules iptables OUTPUT
-    if [ -n "$SOURCES" ]; then
+    if [ -n "$SOURCES$BRIDGES" ]; then
         as_root iptables -w -S DOCKER-USER >/dev/null 2>&1 || die "DOCKER-USER chain not found; is Docker running?"
         node_rules | insert_rules iptables DOCKER-USER
     fi
@@ -111,7 +134,7 @@ cmd_install() {
     else
         echo "egress-gate: WARNING: ip6tables absent; IPv6 egress is not gated" >&2
     fi
-    echo "egress-gate: installed (group $GROUP gid $_gid; allowed:${ALLOW:- loopback only}; node networks:${SOURCES:- none})"
+    echo "egress-gate: installed (group $GROUP gid $_gid; allowed:${ALLOW:- loopback only}; node networks:${SOURCES:- none}; node bridges:${BRIDGES:- none})"
 }
 
 cmd_run() {

@@ -611,6 +611,10 @@ jobs:
             case "$cidr" in *:*) continue ;; esac
             RULE_ARGS="$RULE_ARGS --allow $cidr --block-source $cidr"
           done
+          # Interface rule: blocks whatever leaves the Kind bridge, whatever its
+          # source address. The pod CIDR (Kind default; the config sets no
+          # podSubnet) is a backstop for a pod SYN that escapes the node masquerade.
+          RULE_ARGS="$RULE_ARGS --block-network kind --block-source 10.244.0.0/16"
           test -n "$RULE_ARGS"
           # shellcheck disable=SC2086
           $GATE install $RULE_ARGS
@@ -982,6 +986,11 @@ jobs:
           mkdir -p diagnostics
           sh rehearsal-infra/scripts/ci/egress_gate.sh status > diagnostics/egress-gate-final.txt 2>&1 || true
           cat diagnostics/egress-gate-final.txt
+          # Node-side masquerade state, to explain a pod probe that leaked.
+          for node in $(docker ps --filter label=io.x-k8s.kind.cluster=gapbox --format '{{.Names}}'); do
+            { echo "== $node nat POSTROUTING"; docker exec "$node" iptables -t nat -S POSTROUTING; } >> diagnostics/egress-gate-nodes-nat.txt 2>&1 || true
+          done
+          cat diagnostics/egress-gate-nodes-nat.txt 2>/dev/null || true
 
       - name: Failure diagnostics (pods, events, logs)
         if: failure()
