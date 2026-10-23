@@ -9,7 +9,7 @@ from qdrant_client import models
 from mainframe_rag.config import Settings
 from mainframe_rag.ports import AsyncReaderAdapter, Embedder
 from mainframe_rag.retrieve.filters import build_filter, build_scope_filter, parse_query
-from mainframe_rag.retrieve.query import format_citation, rrf_fuse, search
+from mainframe_rag.retrieve.query import entry_headed, format_citation, rrf_fuse, search
 from tests.conftest import FakeEmbedder, FakeQdrant, _point, _typed_point
 from tests.fakes import batch_via_query_points
 
@@ -980,3 +980,76 @@ def test_async_scope_retention_against_real_local_qdrant(embedder):
     hits, kind, _ = asyncio.run(run())
     assert kind == "identifier"
     assert [h.chunk_id for h in hits] == ["1"]
+
+
+# --- Entry-headed ranking inside the message_ids path (issue #922) ----------
+
+_RUNNING_HEADER = "Chapter 6. ZZQ messages (ZZQ100I - ZZQ699I)"
+
+
+def _text_point(pid: str, text: str, page: int) -> models.ScoredPoint:
+    base = _point(pid)
+    payload = dict(base.payload or {})
+    payload.update(text=text, page_start=page, page_label=str(page), message_ids=["ZZQ100I"])
+    return base.model_copy(update={"payload": payload})
+
+
+def _range_endpoint_pool():
+    """One chunk headed by ZZQ100I plus chunks of the same chapter that only
+    carry the id in the repeated running header (all match message_ids)."""
+    entry = _text_point("entry", f"{_RUNNING_HEADER}\nZZQ100I\nExplanation: original text", 1)
+    mentions = [
+        _text_point(f"m{i}", f"ZZQ{200 + i}I\nExplanation: other\n{_RUNNING_HEADER}", i + 2)
+        for i in range(5)
+    ]
+    return entry, mentions
+
+
+def test_entry_headed_requires_the_id_to_start_a_line():
+    assert entry_headed(f"{_RUNNING_HEADER}\nZZQ100I\nbody", ["ZZQ100I"])
+    assert entry_headed("zzq100i  lower-case heading line", ["ZZQ100I"])
+    assert entry_headed("body\n  (ZZQ100I) wrapped heading", ["ZZQ100I"])
+    assert not entry_headed(f"ZZQ200I\nbody\n{_RUNNING_HEADER}", ["ZZQ100I"])
+    assert not entry_headed("ZZQ100I2 is a different id\nZZQ100IX", ["ZZQ100I"])
+    assert not entry_headed("anything", [])
+
+
+def test_rrf_fuse_ranks_entry_headed_chunk_above_mention_only_chunks():
+    entry, mentions = _range_endpoint_pool()
+    sparse = [*mentions, entry]  # the entry loses the raw ranking
+    plain = rrf_fuse([], sparse, weights=(1.0, 3.0), k=60, limit=3)
+    assert "entry" not in [h.chunk_id for h in plain]
+    ranked = rrf_fuse([], sparse, weights=(1.0, 3.0), k=60, limit=3, entry_ids=["ZZQ100I"])
+    assert [h.chunk_id for h in ranked] == ["entry", "m0", "m1"]
+    # Inside each group the RRF order is kept, scores are the fused scores.
+    assert ranked[1].score > ranked[2].score
+    assert ranked[0].score < ranked[1].score
+
+
+def test_rrf_fuse_without_entry_headed_candidates_is_unchanged():
+    _, mentions = _range_endpoint_pool()
+    base = [h.model_dump() for h in rrf_fuse(mentions[:2], mentions[1:], weights=(1.0, 3.0))]
+    got = [
+        h.model_dump()
+        for h in rrf_fuse(mentions[:2], mentions[1:], weights=(1.0, 3.0), entry_ids=["ZZQ100I"])
+    ]
+    assert got == base
+
+
+def test_search_message_id_query_puts_the_entry_chunk_first(embedder):
+    entry, mentions = _range_endpoint_pool()
+    fake = FakeQdrant(dense=list(reversed(mentions)), sparse=[*mentions, entry])
+    hits, kind, _ = search(fake, embedder, "mainframe_manuals", "ZZQ100I showed up at IPL", limit=3)
+    assert kind == "identifier"
+    assert hits[0].chunk_id == "entry"
+
+
+def test_search_other_ids_of_the_chapter_keep_their_order(embedder):
+    """Next ordinary lookups in the same chapter: an id no candidate is headed
+    by ranks exactly as before; an id with its own entry in the pool leads."""
+    entry, mentions = _range_endpoint_pool()
+    fake = FakeQdrant(dense=[], sparse=[*mentions, entry])
+    hits, _, _ = search(fake, embedder, "mainframe_manuals", "ZZQ300I explanation", limit=3)
+    assert [h.chunk_id for h in hits] == ["m0", "m1", "m2"]
+    hits, _, _ = search(fake, embedder, "mainframe_manuals", "what is ZZQ201I", limit=3)
+    assert hits[0].chunk_id == "m1"  # m1 is the chunk headed by ZZQ201I
