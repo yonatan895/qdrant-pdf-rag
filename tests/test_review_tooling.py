@@ -1827,6 +1827,32 @@ class TestAcceptanceSnapshot(unittest.TestCase):
             publish.side_effect = ValueError('API write failed')
             self.assertEqual(main(args), 1)
 
+    def test_head_sha_selects_only_candidates_at_that_exact_head(self):
+        import contextlib
+        import io
+        from unittest.mock import patch
+
+        from scripts.acceptance import main
+
+        def pull(number, sha):
+            return {'number': number, 'head': {'sha': sha * 40}}
+
+        open_prs = [pull(3, 'a'), pull(4, 'b'), pull(5, 'a')]
+        base = ['--repository', 'synthetic/repository', '--publish']
+        with patch('scripts.acceptance.GitHub'), patch('scripts.acceptance.paginate', return_value=open_prs), \
+             patch('scripts.acceptance.publish_acceptance') as publish, contextlib.redirect_stdout(io.StringIO()) as out:
+            publish.return_value = {'all_prerequisites_met': False, 'check_run_id': 17}
+            self.assertEqual(main([*base, '--head-sha', 'a' * 40]), 0)
+            self.assertEqual([call.args[1] for call in publish.call_args_list], [3, 5])
+            publish.reset_mock()
+            # A superseded head selects nothing and publishes nothing.
+            self.assertEqual(main([*base, '--head-sha', 'c' * 40]), 0)
+            publish.assert_not_called()
+            self.assertEqual(out.getvalue().splitlines()[-1], '[]')
+            for bad in ('A' * 40, 'a' * 39, 'a' * 40 + ' --all-open'):
+                with self.assertRaises(SystemExit):
+                    main([*base, '--head-sha', bad])
+
     def test_read_only_cli_never_emits_success_after_recheck_failure(self):
         import contextlib
         import io
@@ -1959,6 +1985,17 @@ class TestAcceptanceSnapshot(unittest.TestCase):
                 self.assertNotIn('issues', job['permissions'])
                 self.assertEqual(job['permissions']['pull-requests'], 'read')
                 self.assertEqual(job['permissions']['contents'], 'read')
+        # Candidate events serialize per head SHA; everything else keeps the
+        # single global group so base pushes and the sweep stay ordered.
+        group = workflow['concurrency']['group']
+        self.assertIn('github.event.pull_request.head.sha', group)
+        self.assertIn("github.event.workflow_run.event == 'pull_request'", group)
+        self.assertIs(workflow['concurrency']['cancel-in-progress'], False)
+        for job in workflow['jobs'].values():
+            step = next(step for step in job['steps'] if 'run' in step)
+            self.assertIn('--all-open', step['run'])
+            self.assertIn('--head-sha $ACCEPTANCE_HEAD_SHA', step['run'])
+            self.assertIn("github.event.workflow_run.event == 'pull_request'", step['env']['ACCEPTANCE_HEAD_SHA'])
         self.assertNotIn('issue_comment', events)
         self.assertNotIn('acceptance-review-signal', events['workflow_run']['workflows'])
         self.assertFalse((root / '.github/workflows/acceptance-review-signal.yml').exists())
