@@ -1,5 +1,12 @@
 name: Verifier update decision
-run-name: "${{ inputs.kind == 'catalogue-anchors' && 'Catalogue anchors' || 'Verifier' }} PR ${{ inputs.pr }}: ${{ inputs.decision }}"
+run-name: >-
+  ${{ github.event_name == 'issue_comment'
+  && ((github.event.issue.pull_request && github.event.action == 'created'
+  && github.event.comment.user.login == 'yonatan895' && startsWith(github.event.comment.body, '/verifier '))
+  && format('{0} PR {1}: {2}', contains(github.event.comment.body, ' catalogue-anchors') && 'Catalogue anchors' || 'Verifier',
+  github.event.issue.number, startsWith(github.event.comment.body, '/verifier revoke') && 'revoke' || 'approve')
+  || 'Verifier comment ignored')
+  || format('{0} PR {1}: {2}', inputs.kind == 'catalogue-anchors' && 'Catalogue anchors' || 'Verifier', inputs.pr, inputs.decision) }}
 on:
   workflow_dispatch:
     inputs:
@@ -18,14 +25,28 @@ on:
         default: implementation
         type: choice
         options: [implementation, catalogue-anchors]
+  # Fallback-equivalent PR comment path: "/verifier approve <head-sha> [kind]" or
+  # "/verifier revoke [kind]". issue_comment always runs this file from main.
+  issue_comment:
+    types: [created]
 permissions:
   contents: read
   pull-requests: read
 jobs:
   record-decision:
-    if: github.ref == 'refs/heads/main' && github.actor == 'yonatan895' && github.triggering_actor == 'yonatan895'
+    if: >-
+      github.ref == 'refs/heads/main' && github.actor == 'yonatan895' && github.triggering_actor == 'yonatan895'
+      && (github.event_name == 'workflow_dispatch'
+      || (github.event_name == 'issue_comment' && github.event.action == 'created'
+      && github.event.issue.pull_request && github.event.comment.user.login == 'yonatan895'
+      && github.event.comment.author_association == 'OWNER'
+      && startsWith(github.event.comment.body, '/verifier ')))
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    outputs:
+      kind: ${{ steps.dispatch.outputs.kind || steps.comment.outputs.kind }}
+      decision: ${{ steps.comment.outputs.decision }}
+      head_sha: ${{ steps.comment.outputs.head_sha }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -35,6 +56,8 @@ jobs:
         with:
           python-version: '3.14'
       - name: Record exact candidate and verifier hashes using approved code
+        if: github.event_name == 'workflow_dispatch'
+        id: dispatch
         env:
           GH_TOKEN: ${{ github.token }}
           VERIFIER_PR: ${{ inputs.pr }}
@@ -44,9 +67,45 @@ jobs:
           python -m scripts.verifier_approval --pr "$VERIFIER_PR" --decision "$VERIFIER_DECISION"
           --kind "$VERIFIER_KIND"
           --output "$RUNNER_TEMP/evidence.json"
+      - name: Record the maintainer PR comment decision using approved code
+        if: github.event_name == 'issue_comment'
+        id: comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python -m scripts.verifier_approval --from-comment-event --output "$RUNNER_TEMP/evidence.json"
       - name: Retain maintainer decision
         uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
         with:
-          name: ${{ inputs.kind == 'catalogue-anchors' && 'catalogue-anchor-decision' || 'verifier-decision' }}-${{ github.run_attempt }}
+          name: ${{ (steps.dispatch.outputs.kind || steps.comment.outputs.kind) == 'catalogue-anchors' && 'catalogue-anchor-decision' || 'verifier-decision' }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/evidence.json
           if-no-files-found: error
+  acknowledge:
+    # Feedback only: a reaction and a fixed-format reply. No checkout, no PR data in a shell.
+    needs: record-decision
+    if: always() && github.event_name == 'issue_comment' && needs.record-decision.result != 'skipped'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      issues: write
+    steps:
+      - name: React and reply
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RESULT: ${{ needs.record-decision.result }}
+          DECISION: ${{ needs.record-decision.outputs.decision }}
+          HEAD_SHA: ${{ needs.record-decision.outputs.head_sha }}
+        run: |
+          case "$HEAD_SHA" in *[!0-9a-f]*) HEAD_SHA="" ;; esac
+          if [ "$RESULT" = success ] && [ "${#HEAD_SHA}" = 40 ] && { [ "$DECISION" = approve ] || [ "$DECISION" = revoke ]; }; then
+            gh api -X POST "repos/$REPOSITORY/issues/comments/$COMMENT_ID/reactions" -f content='+1' >/dev/null
+            gh api -X POST "repos/$REPOSITORY/issues/$PR_NUMBER/comments" \
+              -f body="Verifier decision recorded: $DECISION for head \`$HEAD_SHA\`. The acceptance check re-evaluates after this run. Any push needs a new decision. $RUN_URL" >/dev/null
+          else
+            gh api -X POST "repos/$REPOSITORY/issues/comments/$COMMENT_ID/reactions" -f content='-1' >/dev/null
+            gh api -X POST "repos/$REPOSITORY/issues/$PR_NUMBER/comments" \
+              -f body="Verifier decision NOT recorded (stale or unknown head, bad command, or not the maintainer). Usage: \`/verifier approve <head-sha> [catalogue-anchors]\` or \`/verifier revoke [catalogue-anchors]\`. $RUN_URL" >/dev/null
+          fi
