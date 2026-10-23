@@ -179,7 +179,7 @@ route:
 # namespace, the monitoring namespaces (when metrics.enabled) and the
 # namespaces listed in allowedNamespaces; the OAuth port (8443, route.enabled)
 # is additionally reachable from the OpenShift router. Ingress only; Qdrant,
-# Qdrant and the ingest Job are not selected. Policies are additive: whether a
+# OpenObserve and the ingest Job are not selected. Policies are additive: whether a
 # site's own policies widen this is site acceptance evidence, not a chart
 # claim. enabled=false renders no policy (and allowedNamespaces must be empty).
 # allowedNamespaces: DNS-1123 namespace names (matched by the immutable
