@@ -138,9 +138,9 @@ the same tool without network access. Start with
 | | `sh scripts/tools/run-task.sh local:rerank` | Run local vLLM reranker server on GPU (port 8002, `BAAI/bge-reranker-v2-m3`) |
 | | `sh scripts/tools/run-task.sh local:stack` | Canonical full local simulation (Qdrant + OpenObserve + LiteLLM gateway + agent + console; `UI_ENABLED=true` by default) |
 | | `sh scripts/tools/run-task.sh local:gateway:up` / `sh scripts/tools/run-task.sh local:gateway:down` | Foreground LiteLLM gateway (port 4000) / stop it and its key store |
-| | `sh scripts/tools/run-task.sh local:jaeger:up` / `sh scripts/tools/run-task.sh local:jaeger:down` | OpenObserve trace backend / stop it |
+| | `sh scripts/tools/run-task.sh local:openobserve:up` / `sh scripts/tools/run-task.sh local:openobserve:down` | OpenObserve trace backend / stop it |
 | | `sh scripts/tools/run-task.sh local:agent` | Start the agent with `LLM_STREAM=true` (reasoning SSE streaming for TTFT) on port 8080; serves `/ui` when `UI_ENABLED=true` |
-| | `sh scripts/tools/run-task.sh local:check -- --agent URL --jaeger URL --query TEXT --followup TEXT --report PATH` | Verify grounded answers, console follow-up and a fresh search trace against an existing stack |
+| | `sh scripts/tools/run-task.sh local:check -- --agent URL --trace-url URL --query TEXT --followup TEXT --report PATH` | Verify grounded answers, console follow-up and a fresh search trace against an existing stack |
 | **Cluster recipe** | `sh scripts/tools/run-task.sh artifacts:chart-fetch` / `sh scripts/tools/run-task.sh artifacts:helm-render` / `sh scripts/tools/run-task.sh artifacts:helm-lint` | Fetch / render / lint the vendored Qdrant chart against OpenShift values |
 | | `sh scripts/tools/run-task.sh artifacts:wheelhouse` / `sh scripts/tools/run-task.sh artifacts:bm25` / `sh scripts/tools/run-task.sh artifacts:images` | Build offline wheelhouse, cache BM25 weights, build UBI images (connected host) |
 | | `sh scripts/tools/run-task.sh dev:demo-pdfs` | Generate synthetic demo PDFs into `output/demo-pdfs` |

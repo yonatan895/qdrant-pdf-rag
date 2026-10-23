@@ -501,7 +501,7 @@ def test_job_and_service_images_come_only_from_the_operator_set_registry():
 def test_documented_quay_roles_match_the_image_paths_load_sh_pushes():
     load = (ROOT / 'scripts/airgap/load.sh').read_text()
     paths = set(re.findall(r'\$INTERNAL_REGISTRY/([\w./-]+)(?::|\b)', load))
-    assert {'qdrant/qdrant', 'jaegertracing/jaeger', 'qdrant-pdf-rag-ingest',
+    assert {'qdrant/qdrant', 'openobserve/openobserve', 'qdrant-pdf-rag-ingest',
             'qdrant-pdf-rag-agent', 'openshift4/ose-oauth-proxy'} <= paths
     deploy = (ROOT / 'docs/deploy.md').read_text()
     example = (ROOT / 'airgap.env.example').read_text()

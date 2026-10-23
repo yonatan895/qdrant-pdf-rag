@@ -93,7 +93,7 @@ complete its answer-context integration; see the workload status table below.
 | `rag-agent` | Deployment | 2 | FastAPI, unprivileged, no GPU |
 | `ingest` | One-Shot Job | 1 | High CPU, worker pool, RWO scratch |
 | `zowe-mcp` | Proposed sidecar (ADR-0003); absent from the current Helm chart | Not deployed | Bridge/client code exists; answer-context integration and deployment wiring remain incomplete. Default-off; enabling requires the ADR-0003 reactivation gate, separate site credentials and written site acceptance |
-| `jaeger` | Deployment (default on; `off` sentinel disables; disabling only the backend needs an explicit collector endpoint or `off`) | 1 | OpenObserve, local mode, RWO block PVC, tracing backend |
+| `openobserve` | Deployment (default on; `off` sentinel disables; disabling only the backend needs an explicit collector endpoint or `off`) | 1 | OpenObserve, local mode, RWO block PVC, tracing backend |
 | `feedback` | Single-replica StatefulSet `rag-feedback` (ADR-0005, #804), rendered only with `FEEDBACK_ENABLED` (default off; [deploy.md](deploy.md#feedback-service)) | Deployed when enabled | Single SQLite writer for answer-quality records on its own kept RWO block PVC `rag-feedback-data` (never NFS); bearer token from an operator-created Secret; ClusterIP only, ingress limited to agent pods by `rag-feedback-ingress`; purges its own retention window in-process and exports purge outcomes on a bearer-protected `/metrics`; agents send to it best-effort when `FEEDBACK_ENABLED` (default off). Not console session state, which stays in browser `localStorage` (ADR-0004) |
 | `bm25-weights` | Baked in images | — | FastEmbed `Qdrant/bm25`; no runtime download |
 
