@@ -2084,14 +2084,12 @@ def test_forced_build_retry_keeps_verified_document_checkpoint(tmp_path, monkeyp
     storage double; threads keep captured worker calls visible to the test.
     """
     import json
-    from concurrent.futures import ThreadPoolExecutor
 
     from mainframe_rag.ingest import run_ingest
     from mainframe_rag.ingest.publish import publish_state_path
 
     _publish_env(monkeypatch)
     monkeypatch.setenv("INGEST_UPSERT_STREAMS", "1")
-    monkeypatch.setattr(run_ingest, "ProcessPoolExecutor", lambda max_workers, mp_context: ThreadPoolExecutor(max_workers=max_workers))
     fake = PublishFake()
     monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
     corpus = tmp_path / "corpus"
@@ -2177,14 +2175,12 @@ def test_interrupted_first_build_resumes_only_under_explicit_reingest(tmp_path, 
     once, and the next ordinary operation is read-only.
     """
     import json
-    from concurrent.futures import ThreadPoolExecutor
 
     from mainframe_rag.ingest import run_ingest
     from mainframe_rag.ingest.publish import publish_state_path
 
     _publish_env(monkeypatch)
     monkeypatch.setenv("INGEST_UPSERT_STREAMS", "1")
-    monkeypatch.setattr(run_ingest, "ProcessPoolExecutor", lambda max_workers, mp_context: ThreadPoolExecutor(max_workers=max_workers))
     fake = PublishFake()
     monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
     corpus = tmp_path / "corpus"
@@ -2243,12 +2239,10 @@ def test_interrupted_first_build_resumes_only_under_explicit_reingest(tmp_path, 
 @pytest.mark.parametrize("after_commit", [False, True])
 def test_forced_retry_after_all_checkpoints_does_no_embedding(tmp_path, monkeypatch, after_commit):
     """Crashing around manifest commit must not redo a fully checkpointed build."""
-    from concurrent.futures import ThreadPoolExecutor
 
     from mainframe_rag.ingest import run_ingest
 
     _publish_env(monkeypatch)
-    monkeypatch.setattr(run_ingest, "ProcessPoolExecutor", lambda max_workers, mp_context: ThreadPoolExecutor(max_workers=max_workers))
     fake = PublishFake()
     monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
     corpus = tmp_path / "corpus"
