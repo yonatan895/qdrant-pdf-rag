@@ -96,6 +96,13 @@ class DoctorTests(TestCase):
         self.assertEqual(pin_findings()['Qdrant pin'], 'missing prerequisite')
         self.assertEqual(pin_findings()['Qdrant chart'], 'missing prerequisite')
 
+    def test_server_patch_without_its_chart_fails_on_chart(self):
+        # Server 1.19.2 with only the 1.19.0 chart (same minor): pin ok, chart mismatch.
+        (self.root/'charts/qdrant-1.19.2.tgz').rename(self.root/'charts/qdrant-1.19.0.tgz')
+        found = {f.subject: f.status for f in doctor.diagnose(self.root, 'deploy')}
+        self.assertEqual(found['Qdrant pin'], 'ready')
+        self.assertEqual(found['Qdrant chart'], 'missing prerequisite')
+
     def test_deploy_profile_requires_its_inputs_and_a_cluster_cli(self):
         with patch.object(doctor.subprocess, 'run', side_effect=AssertionError('no service or Task calls')):
             findings = doctor.diagnose(self.root, 'deploy')

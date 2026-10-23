@@ -1364,7 +1364,7 @@ registry-side tag immutability (a platform control).
 ## Deployment maintenance policy
 
 Hard boundaries from the root guide remain binding. CPython is 3.14 GIL;
-Qdrant server and chart track 1.19.2 (client 1.19.0, same minor) and the unprivileged image. The connected
+Qdrant server and chart track 1.19.2 (client 1.19.0; server and client agree on major.minor, the chart matches the server; maintainer, 2026-10-23) and the unprivileged image. The connected
 main factory is the only product image builder. App references use one exact
 `ghcr.io/<owner-lowercase>/qdrant-pdf-rag-{ingest,agent}:<full-git-sha>` across tag,
 push, render, pack and load (retag local `mainframe-rag/*` images before push).
