@@ -62,6 +62,8 @@ def test_base_contract_with_independent_controls():
         "RERANK_BASE_URL": "",
         "RERANK_MODEL": "BAAI/bge-reranker-v2-m3",
         "RERANK_ENDPOINT_ORDER": "score_first",
+        "LLM_REASONING_EFFORT_SIMPLE": "medium",  # chart default, #917
+        "LLM_REASONING_EFFORT_COMPLEX": "medium",
     }
     assert {key: env["value"] for key, env in new_env.items() if "value" in env} == expected_scalars
     assert set(new_env) == set(expected_scalars) | {"QDRANT_API_KEY"}
@@ -1087,3 +1089,18 @@ def test_feedback_claim_is_the_only_object_retained_when_disabled():
     assert not [k for k in off if "feedback" in k[1]]
     assert on["PersistentVolumeClaim", "rag-feedback-data"]["metadata"]["annotations"] == {
         "helm.sh/resource-policy": "keep"}
+
+
+def test_default_chart_carries_medium_effort_matching_settings():
+    """#917: the chart sets the shipped effort explicitly; it must equal the Settings default."""
+    from mainframe_rag.config import Settings
+
+    pod = env_map(run_new_template({})["Deployment", "rag-agent"])
+    settings = Settings(_env_file=None)
+    assert pod["LLM_REASONING_EFFORT_SIMPLE"]["value"] == settings.llm_reasoning_effort_simple == "medium"
+    assert pod["LLM_REASONING_EFFORT_COMPLEX"]["value"] == settings.llm_reasoning_effort_complex == "medium"
+    # An operator override still wins over the chart default.
+    override = env_map(run_new_template(
+        {"models": {"reasoning": {"reasoningEffortComplex": "xhigh"}}})["Deployment", "rag-agent"])
+    assert override["LLM_REASONING_EFFORT_COMPLEX"]["value"] == "xhigh"
+    assert override["LLM_REASONING_EFFORT_SIMPLE"]["value"] == "medium"

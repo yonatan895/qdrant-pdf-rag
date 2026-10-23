@@ -1452,13 +1452,13 @@ def test_answer_dispatches_reasoning_effort_by_complexity(client, monkeypatch):
     complex_query = {
         "query": "How do I diagnose and recover when DFSMShsm journal fills up during migration?"
     }
-    # Defaults (#777): xhigh on both paths; complexity still selects the prompt.
+    # Defaults (#917, was xhigh since #777): medium on both paths; complexity still selects the prompt.
     assert client.post("/v1/answer", json=simple_query).status_code == 200
-    assert fake.last_reasoning_effort == "xhigh"
+    assert fake.last_reasoning_effort == "medium"
     assert fake.last_temperature == 0.2
     assert fake.last_messages[0].content == SYSTEM_PROMPT
     assert client.post("/v1/answer", json=complex_query).status_code == 200
-    assert fake.last_reasoning_effort == "xhigh"
+    assert fake.last_reasoning_effort == "medium"
     assert SYSTEM_PROMPT_COMPLEX_EXTENSION in fake.last_messages[0].content
 
     # Distinct configured efforts prove routing by complexity, not a constant.

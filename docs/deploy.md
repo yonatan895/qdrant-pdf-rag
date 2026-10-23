@@ -116,7 +116,11 @@ restores the snapshot over whatever the file assigned; empty stays unset
   the `low/medium/high/xhigh` effort domain, `LLM_REASONING_EFFORTS` membership
   of both efforts (explicit or default, #748) and strict streaming booleans; chart
   schema also enforces these types and ranges for direct Helm callers, whose pod
-  then refuses non-member efforts at Settings startup. `xhigh`
+  then refuses non-member efforts at Settings startup. The shipped effort is
+  `medium` on both routes (#917, maintainer decision 2026-10-23): it is the
+  `Settings` default, the `model_config` mirror and the explicit chart values
+  `reasoningEffortSimple/Complex`, so a rendered pod always carries it unless the
+  operator selects another. `xhigh`
   needs an application build with #707 support. Unset/empty operator values omit
   the new pod env entries, preserving application defaults; explicit zero
   thinking reserves and streaming false remain present. These are application

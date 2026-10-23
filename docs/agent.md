@@ -593,12 +593,13 @@ otherwise multi-step configuration phrasing, comparisons (`versus`, `vs`,
 (`rule, interval, parameter, parmlib, jcl, policy, threshold, journal`)
 select `complex`. Default is `simple`.
 
-- Defaults (#777, sized for Qwen3.8-27B at a 32768-token window): `xhigh`
-  effort on both paths; complex adds the extended system prompt. Temperature
+- Defaults (#777 sizing for Qwen3.8-27B at a 32768-token window; effort
+  changed to `medium` by #917, maintainer decision 2026-10-23, basis in
+  [eval.md](eval.md) and #932): `medium` effort on both paths; complex adds the extended system prompt. Temperature
   0.2 both. Both paths take whole chunks (4000 chars per excerpt, 32000 chars
   of no-tokenizer context); the prompt budget prices a 2560-token answer
-  reserve plus an 8192-token thinking reserve (provisional until xhigh is
-  measured). In #759 the window never bound (largest request 9011 of 16384
+  reserve plus an 8192-token thinking reserve (priced for xhigh, unchanged by #917 and
+  not re-measured at medium). In #759 the window never bound (largest request 9011 of 16384
   tokens) while the 4096-era complex caps omitted evidence on 21 of 32
   complex requests. The local 8 GB lane keeps its 4096-window budget
   (8000/4500 chars, 3000/1100 per excerpt, 1536 answer, 0/1000 thinking,
@@ -935,7 +936,7 @@ readers:
 | `prompt_order` | `retrieval` (`stable_cache` alt) | block ordering |
 | `llm_base_url` / `llm_model_reasoning` / `llm_api_key` | unset (answer stays disabled; key unset = keyless) | per-request assertion, LLM client, tokenizer |
 | `answer_timeout_s` | 300.0 | reasoning client wait per model I/O (not a total on a stream; a buffered caller still gets a total), expiry is `504 model_timeout`; no transport retries, explicit fallback policy below; budgets in §6 |
-| `llm_reasoning_effort_simple` / `_complex` / `llm_temperature` | xhigh / xhigh / 0.2 | answer path (#777) |
+| `llm_reasoning_effort_simple` / `_complex` / `llm_temperature` | medium / medium / 0.2 | answer path (#917, was xhigh / xhigh from #777) |
 | `llm_reasoning_efforts` | `low,medium,xhigh` | served template's effort domain (Qwen3.8): console choices; both efforts above must be members (#748) |
 | `llm_max_model_len` / `llm_reserved_output_tokens` / `llm_thinking_reserve_tokens_complex` / `llm_token_safety_margin` / `llm_max_chunk_tokens_narrative` / `llm_tokenize_timeout_s` | 32768 / 2560 / 8192 / 128 / 1200 / 5.0 | tokenizer-path budgeting (#298, #777). `llm_max_model_len` must not exceed the served `--max-model-len`. With a server-verified prompt count the reserved output plus the path's thinking reserve is sent as `max_tokens` (prompt + cap stays inside the window minus the margin), so a runaway xhigh generation ends as `finish_reason: length` → `generation_incomplete`; an estimator-only prompt sends no cap |
 | `llm_thinking_reserve_tokens_simple` | 8192 | reasoning headroom in single-turn and chat prompt budgets (provisional for xhigh, #777); environment input `LLM_THINKING_RESERVE_TOKENS_SIMPLE` |
@@ -1377,7 +1378,11 @@ are above. **Authority:** ADR-0001/0004, #363 and existing transport contracts;
 `HttpxLLMClient`, `VllmTokenizer`, `HttpReranker`, `http_client` and lifespan.
 
 `LLM_REASONING_EFFORT_SIMPLE` and `LLM_REASONING_EFFORT_COMPLEX` accept `low`,
-`medium`, `high` and explicit `xhigh`; their defaults are `xhigh` and `xhigh` (#777).
+`medium`, `high` and explicit `xhigh`; their defaults are `medium` and `medium` (#917; `xhigh` until 2026-10-23, #777).
+The default lives in `config.Settings`, mirrored by the air-gap preflight
+(`model_config.REASONING_EFFORT_DEFAULTS`) and set explicitly in the chart
+`models.reasoning.reasoningEffortSimple/Complex` values, so a rendered pod carries
+`medium`; tests pin the three in step. An operator may still select `xhigh`.
 Shared-core overrides accept the same values. The selected effort reaches the
 reasoning HTTP request verbatim for buffered, streamed and permitted fallback
 calls; `high` is never translated to `xhigh`, and an omitted direct-client effort

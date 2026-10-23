@@ -68,8 +68,10 @@ models:
     # reservedOutputTokens: 2560
     # thinkingReserveTokensSimple: 8192
     # thinkingReserveTokensComplex: 8192
-    # reasoningEffortSimple: xhigh
-    # reasoningEffortComplex: xhigh
+    # The efforts are set explicitly so a rendered pod carries them (#917,
+    # maintainer decision 2026-10-23: medium on both routes; xhigh before).
+    reasoningEffortSimple: medium
+    reasoningEffortComplex: medium
     # Efforts the served template accepts; the console offers exactly these and
     # both efforts above must be members. Stock Qwen3.8 needs low,medium,xhigh.
     # reasoningEfforts: low,medium,xhigh
