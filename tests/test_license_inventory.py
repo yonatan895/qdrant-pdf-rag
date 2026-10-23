@@ -271,7 +271,7 @@ def test_unrecorded_image_pin_is_flagged_then_passes_after_the_record_is_added(t
 
 def test_changed_image_digest_requires_re_review(tree, capsys):
     images = tree / "images.txt"
-    images.write_text(images.read_text().replace("sha256:a0e04fe6", "sha256:b0e04fe6"))
+    images.write_text(images.read_text().replace("sha256:efb96a94", "sha256:b0e04fe6"))
     code, out = run(tree, capsys)
     assert code == 1 and "image:qdrant" in out and "re-review the image" in out
 
@@ -391,7 +391,7 @@ def test_notices_carry_real_texts_and_open_decisions_and_refuse_a_missing_member
     assert "### skills:pstack: LICENSE.pstack-skills" in text
     assert "Copyright (c) 2026 Lauren Tan" in text
     assert "### tool:task: task-LICENSE" in text and "Synthetic MIT task license" in text
-    assert "### chart:qdrant-1.19.0: charts/qdrant-1.19.0.tgz:qdrant/LICENSE" in text
+    assert "### chart:qdrant-1.19.2: charts/qdrant-1.19.2.tgz:qdrant/LICENSE" in text
     assert "pymupdf==1.28.2" in text.split("COMPONENTS")[0]
     assert "Owner approval of this inventory: absent" in text
     (tmp_path / "task-LICENSE").write_bytes(b"tampered")

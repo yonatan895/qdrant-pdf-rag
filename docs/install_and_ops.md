@@ -47,7 +47,7 @@ Mainframe RAG is a citation-first retrieval-augmented generation engine designed
 ### Disconnected / Air-Gapped Bastion
 - **Host runner:** signed bundle bootstrap installs verified Task into `.tools/bin/task`; no Make, preinstalled Task, Go, application Python or internet is needed for bootstrap. Keep `git`, POSIX shell, `tar`, `sha256sum` and `openssl` available for its verification steps.
 - **OpenShift Client:** `oc` (v4.12+) or `kubectl`.
-- **Helm:** checksum-pinned **4.3.0**, as used by [the deployment workflow](../.github/workflows/e2e.yml); the launcher requires Helm 4. Transfer the verified client with the operator tools. Both `charts/mainframe-rag` and `charts/qdrant-1.19.0.tgz` are local; do **not** run `helm repo add` in the air gap.
+- **Helm:** checksum-pinned **4.3.0**, as used by [the deployment workflow](../.github/workflows/e2e.yml); the launcher requires Helm 4. Transfer the verified client with the operator tools. Both `charts/mainframe-rag` and `charts/qdrant-1.19.2.tgz` are local; do **not** run `helm repo add` in the air gap.
 - **Rendering:** host `python3` with its standard library for release-value serialization and ownership checks. Bootstrap itself does not require Python; deployment does. No application packages or runtime dependency downloads are needed on the bastion.
 - **Image Tooling:** `skopeo` (for loading archives into the internal registry).
 - **Cluster Permissions:** Access to create/manage workloads in the target namespace with `restricted-v2` SCC.
@@ -97,7 +97,7 @@ sh scripts/tools/run-task.sh qa:typecheck   # Mypy static typing
 
 ### 3.3 Integration Simulation Tier
 
-The simulation tier spins up an ephemeral Docker container running the pinned unprivileged Qdrant image (`docker.io/qdrant/qdrant:v1.19.0-unprivileged`), parses runtime-generated synthetic PDFs, ingests them, and exercises the agent API against a deterministic mock LLM server:
+The simulation tier spins up an ephemeral Docker container running the pinned unprivileged Qdrant image (`docker.io/qdrant/qdrant:v1.19.2-unprivileged`), parses runtime-generated synthetic PDFs, ingests them, and exercises the agent API against a deterministic mock LLM server:
 
 ```bash
 # Run simulation suite
@@ -558,7 +558,7 @@ This generates `dist/qdrant-pdf-rag-<sha>.tar` and its digest `dist/qdrant-pdf-r
 1. Complete Git repository bundle (`repo.bundle`).
 2. App container images (`qdrant-pdf-rag-agent`, `qdrant-pdf-rag-ingest`), with per-image digests bound in `MANIFEST.txt` and re-verified on load.
 3. Vendored third-party Qdrant unprivileged image, OpenObserve OSS v1.1.2 image and otelcol-contrib 0.160.0 image (tag + digest pinned in `images.txt`; no Jaeger image).
-4. Vendored Helm chart (`charts/qdrant-1.19.0.tgz`).
+4. Vendored Helm chart (`charts/qdrant-1.19.2.tgz`).
 5. Self-contained extraction bootstrap script (`bootstrap.sh`).
 6. Manifest (`MANIFEST.txt`), Packing Record (`PACKING_RECORD.txt`), digest enumeration (`sbom.json`), third-party notices and license review status (`THIRD-PARTY-NOTICES.txt`, see [licensing](licensing.md); declared licenses only, not a legal approval), offline signature (`SHA256SUMS.sig` + `sneakernet-signing.pub`), and member `SHA256SUMS`.
 7. The console oauth-proxy sidecar image (`oauth-proxy-image.tar`) — pinned in `images.txt`; connected packaging needs Red Hat registry authentication (see §4.4.2).

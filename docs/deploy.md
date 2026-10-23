@@ -158,7 +158,7 @@ restores the snapshot over whatever the file assigned; empty stays unset
 
 ## 3. Render pipeline
 
-Qdrant deploys separately from `charts/qdrant-1.19.0.tgz`; the first-party
+Qdrant deploys separately from `charts/qdrant-1.19.2.tgz`; the first-party
 application chart uses the verified checkout. Both render offline with
 checksum-pinned Helm 4.3.0. The packaging-selected PR job in
 [the workflow](../.github/workflows/e2e.yml) executes `artifacts:helm-lint` and
@@ -463,7 +463,7 @@ checksums **after**.
 - Load re-verifies the signature, then checksums, then the `IMAGE_SHA`
   against the manifest, then all six base image digests (plus the
   oauth-proxy digest when the bundle carries it) — and pushes under fixed
-  names: `qdrant/qdrant:v1.19.0-unprivileged`,
+  names: `qdrant/qdrant:v1.19.2-unprivileged`,
   `openobserve/openobserve:v1.1.2`,
   `otel/opentelemetry-collector-contrib:0.160.0`,
   `qdrant-pdf-rag-ingest:<SHA>`, `qdrant-pdf-rag-agent:<SHA>`, and
@@ -964,7 +964,7 @@ and CI tooling have different owners and pull credentials.
 |---|---|---|---|---|
 | Agent | `qdrant-pdf-rag-agent:<IMAGE_SHA>` | packed config digest, then deployed by registry manifest digest | `load.sh` | cluster pods |
 | Ingest | `qdrant-pdf-rag-ingest:<IMAGE_SHA>` | as the agent | `load.sh` | ingest Job |
-| Qdrant | `qdrant/qdrant:v1.19.0-unprivileged` | tag (the vendored chart cannot render a digest); running `imageID` compared | `load.sh` | cluster pods |
+| Qdrant | `qdrant/qdrant:v1.19.2-unprivileged` | tag (the vendored chart cannot render a digest); running `imageID` compared | `load.sh` | cluster pods |
 | OpenObserve OSS (ADR-0006) | `openobserve/openobserve:v1.1.2` | as the agent; the chart references it by digest only (`images.openobserve.digest`) | `load.sh` | cluster pods when tracing is on with an empty `tracing.endpoint` |
 | otelcol-contrib (ADR-0006) | `otel/opentelemetry-collector-contrib:0.160.0` | as the agent | `load.sh` | cluster pod (`Deployment/otelcol`, container `otelcol`) beside OpenObserve |
 | OAuth sidecar (optional) | `openshift4/ose-oauth-proxy:v4.14` | as the agent; absent while `images.txt` says `sha256:PENDING` | `load.sh` | cluster pods |
@@ -1372,7 +1372,7 @@ registry-side tag immutability (a platform control).
 ## Deployment maintenance policy
 
 Hard boundaries from the root guide remain binding. CPython is 3.14 GIL;
-Qdrant server/client/chart track 1.19.0 and the unprivileged image. The connected
+Qdrant server and chart track 1.19.2 (client 1.19.0; server and client agree on major.minor, the chart matches the server; maintainer, 2026-10-23) and the unprivileged image. The connected
 main factory is the only product image builder. App references use one exact
 `ghcr.io/<owner-lowercase>/qdrant-pdf-rag-{ingest,agent}:<full-git-sha>` across tag,
 push, render, pack and load (retag local `mainframe-rag/*` images before push).

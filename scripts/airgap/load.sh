@@ -55,7 +55,7 @@ LOADED_COUNT=5
 
 if [ "${AIRGAP_DRYRUN:-0}" = "1" ]; then
     echo "==> [dryrun] Member checksum verification skipped"
-    echo "[dryrun] skopeo copy docker-archive:$ARTDIR/qdrant-image.tar docker://$INTERNAL_REGISTRY/qdrant/qdrant:v1.19.0-unprivileged"
+    echo "[dryrun] skopeo copy docker-archive:$ARTDIR/qdrant-image.tar docker://$INTERNAL_REGISTRY/qdrant/qdrant:v1.19.2-unprivileged"
     echo "[dryrun] skopeo copy docker-archive:$ARTDIR/openobserve-image.tar docker://$INTERNAL_REGISTRY/openobserve/openobserve:v1.1.2"
     echo "[dryrun] skopeo copy docker-archive:$ARTDIR/otelcol-image.tar docker://$INTERNAL_REGISTRY/otel/opentelemetry-collector-contrib:0.160.0"
     echo "[dryrun] skopeo copy docker-archive:$ARTDIR/app-ingest-$IMAGE_SHA.tar docker://$INTERNAL_REGISTRY/qdrant-pdf-rag-ingest:$IMAGE_SHA"
@@ -173,7 +173,7 @@ load() {
     verify_registry_image "$src" "$dst" "$key"
 }
 
-load qdrant-image.tar "$INTERNAL_REGISTRY/qdrant/qdrant:v1.19.0-unprivileged" qdrant_digest
+load qdrant-image.tar "$INTERNAL_REGISTRY/qdrant/qdrant:v1.19.2-unprivileged" qdrant_digest
 # ADR-0006 (#956): the chart renders OpenObserve by digest only; the tag is a readable retag.
 load openobserve-image.tar "$INTERNAL_REGISTRY/openobserve/openobserve:v1.1.2" openobserve_digest
 load otelcol-image.tar "$INTERNAL_REGISTRY/otel/opentelemetry-collector-contrib:0.160.0" otelcol_digest

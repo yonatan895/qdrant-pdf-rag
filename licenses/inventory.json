@@ -29,8 +29,8 @@
     {
       "approval_ref": "gh:yonatan895/qdrant-pdf-rag#376 maintainer decisions comment 2026-10-23",
       "bind": {
-        "digest": "sha256:a0e04fe623cb064502cd869cefc1dc7ce359d8edd481063b5bd351c0a0a2c91e",
-        "images_txt": "docker.io/qdrant/qdrant:v1.19.0-unprivileged"
+        "digest": "sha256:efb96a9425a90d2d5a1a0a474156280df1892dcdf1af3e8515bd2589b1bfd88b",
+        "images_txt": "docker.io/qdrant/qdrant:v1.19.2-unprivileged"
       },
       "class": "permissive",
       "decision": {
@@ -182,25 +182,25 @@
       "bind": {
         "files": [
           {
-            "path": "charts/qdrant-1.19.0.tgz",
-            "sha256": "131236b52d7959ee600f86ba43e48e88ff715b12a26451871fe57c2ba5809f0b"
+            "path": "charts/qdrant-1.19.2.tgz",
+            "sha256": "2811cff3992052b131aed7af1d42cb8a760f111c40f56cfbba519425252143f8"
           }
         ],
         "tar_members": [
           {
-            "archive": "charts/qdrant-1.19.0.tgz",
+            "archive": "charts/qdrant-1.19.2.tgz",
             "member": "qdrant/LICENSE",
-            "sha256": "43070e2d4e532684de521b885f385d0841030efa2b1a20bafb76133a5e1379c1"
+            "sha256": "f693e4b9c621d3120ceb9392ca183cc46221c4c03236ee0a9bbf2df91460791a"
           }
         ]
       },
       "class": "permissive",
       "distributed_by_repo": true,
-      "id": "chart:qdrant-1.19.0",
+      "id": "chart:qdrant-1.19.2",
       "kind": "chart",
       "license_declared": "Apache-2.0 (LICENSE inside the chart archive)",
       "license_spdx": "Apache-2.0",
-      "name": "Vendored Qdrant Helm chart 1.19.0",
+      "name": "Vendored Qdrant Helm chart 1.19.2",
       "ships_in": [
         "repo.bundle"
       ],
@@ -1584,11 +1584,11 @@
       ],
       "license_spdx": "MIT",
       "name": "pydantic",
-      "sha256": "45a282cde31d808236fd7ea9d919b128653c8b38b393d1c4ab335c62924d9aba",
+      "sha256": "346a034f080da3755d8e9cb5e00e8b07de1d39e4f6e2c87d8ab7cafa0b269a73",
       "spdx_basis": "declared-expression",
       "status": "declared",
-      "version": "2.13.4",
-      "wheel": "pydantic-2.13.4-py3-none-any.whl"
+      "version": "2.13.5",
+      "wheel": "pydantic-2.13.5-py3-none-any.whl"
     },
     {
       "approval_ref": null,
@@ -1605,11 +1605,11 @@
       ],
       "license_spdx": "MIT",
       "name": "pydantic-core",
-      "sha256": "7a5f930472650a82629163023e630d160863fce524c616f4e5186e5de9d9a49b",
+      "sha256": "54d510bac3ee52247af28ed4bb18a1e799f040ac60fd2bf5ccd4c92f1fbe786f",
       "spdx_basis": "declared-expression",
       "status": "declared",
-      "version": "2.46.4",
-      "wheel": "pydantic_core-2.46.4-cp314-cp314-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
+      "version": "2.46.5",
+      "wheel": "pydantic_core-2.46.5-cp314-cp314-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
     },
     {
       "approval_ref": null,

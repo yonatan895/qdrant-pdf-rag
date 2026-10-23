@@ -20,8 +20,8 @@ class DoctorTests(TestCase):
         files = {
             'pyproject.toml': '[project]\nrequires-python=">=3.14"\n',
             'requirements.lock.txt': 'qdrant-client==1.19.0\n',
-            'images.txt': 'docker.io/qdrant/qdrant:v1.19.0-unprivileged sha256:example\n',
-            'bm25-weights.sha256': 'example', 'charts/qdrant-1.19.0.tgz': 'example',
+            'images.txt': 'docker.io/qdrant/qdrant:v1.19.2-unprivileged sha256:example\n',
+            'bm25-weights.sha256': 'example', 'charts/qdrant-1.19.2.tgz': 'example',
             '.venv/bin/python': 'fixture', 'airgap.env.example': '# public example',
             'scripts/airgap/common.sh': '# fixture',
             'scripts/tools/task-pin.txt': 'version: v3.53.1\nasset: task_linux_amd64.tar.gz\nsha256: ' + hashlib.sha256(b'archive').hexdigest() + '\nbinary-sha256: ' + hashlib.sha256(b'fixture').hexdigest() + '\n',
@@ -85,6 +85,23 @@ class DoctorTests(TestCase):
         self.assertEqual(doctor.inspect_task(self.root).status, 'missing prerequisite')
         archive.unlink()
         self.assertEqual(doctor.inspect_task(self.root).status, 'missing prerequisite')
+
+    def test_qdrant_pin_allows_patch_skew_but_not_minor_skew(self):
+        # Skill rule: server and client agree on major.minor; the chart tracks the server.
+        def pin_findings():
+            return {f.subject: f.status for f in doctor.diagnose(self.root, 'deploy')}
+        self.assertEqual(pin_findings()['Qdrant pin'], 'ready')
+        self.assertEqual(pin_findings()['Qdrant chart'], 'ready')
+        (self.root/'images.txt').write_text('docker.io/qdrant/qdrant:v1.20.0-unprivileged sha256:example\n')
+        self.assertEqual(pin_findings()['Qdrant pin'], 'missing prerequisite')
+        self.assertEqual(pin_findings()['Qdrant chart'], 'missing prerequisite')
+
+    def test_server_patch_without_its_chart_fails_on_chart(self):
+        # Server 1.19.2 with only the 1.19.0 chart (same minor): pin ok, chart mismatch.
+        (self.root/'charts/qdrant-1.19.2.tgz').rename(self.root/'charts/qdrant-1.19.0.tgz')
+        found = {f.subject: f.status for f in doctor.diagnose(self.root, 'deploy')}
+        self.assertEqual(found['Qdrant pin'], 'ready')
+        self.assertEqual(found['Qdrant chart'], 'missing prerequisite')
 
     def test_deploy_profile_requires_its_inputs_and_a_cluster_cli(self):
         with patch.object(doctor.subprocess, 'run', side_effect=AssertionError('no service or Task calls')):
