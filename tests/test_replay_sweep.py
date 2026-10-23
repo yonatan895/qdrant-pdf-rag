@@ -322,3 +322,16 @@ def test_rerank_grid_depth_bounds_which_candidates_the_cross_encoder_can_promote
     assert replay_record(record, by_label["k60d30a1"], _settings())[0].chunk_id == "c025"
     # alpha 0 keeps the first-stage order whatever the cross-encoder says.
     assert replay_record(record, by_label["k60d30a0"], _settings())[0].chunk_id == "c000"
+
+
+def test_rerank_grid_without_ce_scored_pools_warns_with_a_fixed_message(capsys):
+    """#588: a rerank grid over pools with no CE scores replays RRF-only; say so."""
+    from scripts.replay_sweep import NO_CE_SCORED_WARNING, warn_if_no_ce_scored
+
+    plain = _record(["a", "b"])
+    scored = _record(["a", "b"], ce={"a": 1.0, "b": 0.5}, meta={"ce_scored": True})
+    assert warn_if_no_ce_scored("rerank", [plain]) is True
+    assert capsys.readouterr().err.strip() == NO_CE_SCORED_WARNING
+    assert warn_if_no_ce_scored("rerank", [plain, scored]) is False
+    assert warn_if_no_ce_scored("default", [plain]) is False
+    assert capsys.readouterr().err == ""
