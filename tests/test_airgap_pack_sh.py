@@ -10,6 +10,7 @@ clone-traversable (the airgap-package CI check, hermetically).
 
 import hashlib
 import json
+import re
 import os
 import shutil
 import subprocess
@@ -284,7 +285,10 @@ def test_pack_success_builds_verified_tarball(pack_tree):
     # Digest-only refs: tag+digest combined is not a valid reference.
     assert "docker.io/qdrant/qdrant@sha256:" in log
     assert "@sha256:" in log
-    assert ":v1.19.0-unprivileged@sha256:" not in log
+    # No Qdrant reference carries a tag at all, so no stale pin can slip in.
+    qdrant_refs = re.findall(r"docker\.io/qdrant/qdrant\S*", log)
+    assert qdrant_refs
+    assert all(re.fullmatch(r"docker\.io/qdrant/qdrant@sha256:[0-9a-f]{64}", r) for r in qdrant_refs), qdrant_refs
 
     # sbom.json enumerates the pinned inputs as valid JSON.
     sbom = json.loads((dist / "sbom.json").read_text())
