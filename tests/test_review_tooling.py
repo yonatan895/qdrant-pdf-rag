@@ -982,8 +982,8 @@ class TestTaskCiConsumers(unittest.TestCase):
 
         def junit(text, seconds):
             value = base64.b64encode(text.encode()).decode()
-            return ('<testsuite><testcase time="%s"><properties><property name="native_nodeid" '
-                    'value="%s"/></properties></testcase></testsuite>' % (seconds, value))
+            return (f'<testsuite><testcase time="{seconds}"><properties><property name="native_nodeid" '
+                    f'value="{value}"/></properties></testcase></testsuite>')
 
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
