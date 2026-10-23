@@ -75,9 +75,9 @@ echo "==> Feedback service $(describe_feedback)"
 refuse_nfs_storage
 SNAPSHOT_STORAGE_CLASS=${SNAPSHOT_STORAGE_CLASS:-$STORAGE_CLASS}
 # Chart appends "-unprivileged" to the tag when useUnprivilegedImage=true;
-# values.yaml pins v1.19.0 — set it explicitly so it always matches load.sh.
+# values.yaml pins v1.19.2 — set it explicitly so it always matches load.sh.
 # Strip a "-unprivileged" suffix from the pin: the chart re-adds it itself.
-QDRANT_TAG=${QDRANT_TAG:-$(echo "${QDRANT_IMAGE:-docker.io/qdrant/qdrant:v1.19.0-unprivileged}" | sed "s/.*://; s/-unprivileged\$//")}
+QDRANT_TAG=${QDRANT_TAG:-$(echo "${QDRANT_IMAGE:-docker.io/qdrant/qdrant:v1.19.2-unprivileged}" | sed "s/.*://; s/-unprivileged\$//")}
 QDRANT_URL="http://${QDRANT_RELEASE}:6333"
 
 # Registry image identity (issue #272), before any cluster change and for every

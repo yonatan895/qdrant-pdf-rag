@@ -52,8 +52,8 @@ def test_qdrant_image_pin_ignores_commented_and_blank_lines(tmp_path):
     images = tmp_path / "images.txt"
     images.write_text("#docker.io/qdrant/qdrant:v0.0.1-unprivileged sha256:old\n\n   \n"
                       "docker.io/other/tool:1 sha256:x\n"
-                      "docker.io/qdrant/qdrant:v1.19.0-unprivileged sha256:" + "a" * 64 + "\n", encoding="utf-8")
-    assert qdrant_pin.qdrant_image_pin(images) == "docker.io/qdrant/qdrant:v1.19.0-unprivileged"
+                      "docker.io/qdrant/qdrant:v1.19.2-unprivileged sha256:" + "a" * 64 + "\n", encoding="utf-8")
+    assert qdrant_pin.qdrant_image_pin(images) == "docker.io/qdrant/qdrant:v1.19.2-unprivileged"
 
 
 def test_require_docker_returns_immutable_id_after_digest_attestation(monkeypatch):

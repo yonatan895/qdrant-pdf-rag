@@ -532,7 +532,7 @@ class TaskContractsTests(unittest.TestCase):
         self.assertIn("task artifacts:chart-fetch", proc.stdout)
         charts = self.root / "charts"
         charts.mkdir()
-        (charts / "qdrant-1.19.0.tgz").write_text("fixture", encoding="utf-8")
+        (charts / "qdrant-1.19.2.tgz").write_text("fixture", encoding="utf-8")
         proc = self.run_task("artifacts:chart-check")
         self.assertEqual(proc.returncode, 0, proc.stdout)
 
@@ -542,13 +542,13 @@ class TaskContractsTests(unittest.TestCase):
         env = self.tool_env()
         charts = self.root / "charts"
         charts.mkdir()
-        (charts / "qdrant-1.19.0.tgz").write_text("fixture", encoding="utf-8")
+        (charts / "qdrant-1.19.2.tgz").write_text("fixture", encoding="utf-8")
         proc = self.run_task("artifacts:helm-render", extra_env=env)
         self.assertEqual(proc.returncode, 0, proc.stdout)
         calls = self.tool_calls("helm")
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0]["argv"], [
-            "template", "qdrant", "charts/qdrant-1.19.0.tgz", "-f", "charts/qdrant-openshift.values.yaml",
+            "template", "qdrant", "charts/qdrant-1.19.2.tgz", "-f", "charts/qdrant-openshift.values.yaml",
             "--set", "image.repository=PLACEHOLDER_REGISTRY/qdrant/qdrant",
             "--set", "imagePullSecrets[0].name=PLACEHOLDER_PULL_SECRET",
             "--set", "persistence.storageClassName=PLACEHOLDER_STORAGE_CLASS",

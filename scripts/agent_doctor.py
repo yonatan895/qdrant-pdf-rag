@@ -185,9 +185,13 @@ def diagnose(root: Path, profile: str = "unit", probe_docker: bool = False,
             return results
         image = qdrant_image_pin(root/"images.txt")
         expected = pins["qdrant-client"]
-        matches = image.endswith(f":v{expected}-unprivileged")
+        # Server and client agree on major.minor (qdrant-version-upgrade skill); the
+        # chart tracks the server patch version.
+        tag = re.fullmatch(r".*:v(\d+\.\d+)\.(\d+)-unprivileged", image)
+        matches = bool(tag) and tag.group(1) == ".".join(expected.split(".")[:2])
         add("ready" if matches else "missing prerequisite", "Qdrant pin", "server/client version agreement")
-        chart = root/"charts"/f"qdrant-{expected}.tgz"
+        server = f"{tag.group(1)}.{tag.group(2)}" if tag else expected
+        chart = root/"charts"/f"qdrant-{server}.tgz"
         add("ready" if chart.is_file() else "missing prerequisite", "Qdrant chart", "chart matching locked client")
     except (OSError, UnicodeError, ValueError, KeyError, TypeError):
         add("unable to verify", "tracked configuration", "missing, unreadable or unsupported pin/config input")
