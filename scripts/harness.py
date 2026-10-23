@@ -28,6 +28,7 @@ a silently drifted index would make every CI lie.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 import time
@@ -40,6 +41,7 @@ if str(REPO / "src") not in sys.path:
     sys.path.insert(0, str(REPO / "src"))
 
 from mainframe_rag.eval.datasets import (
+    HOLDOUT_FILENAME,
     DatasetError,
     load_golden,
     require_rc_for_collection,
@@ -59,7 +61,43 @@ def load_baseline(path: Path) -> dict[str, Any] | None:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def save_baseline(path: Path, summary: dict[str, Any], *, embed_mode: str, snapshot: dict[str, Any]) -> None:
+GOLDEN_SHA_MISMATCH_CODE = "HARNESS_GOLDEN_SHA_MISMATCH"
+GOLDEN_SHA_MISMATCH_MESSAGE = (
+    f"FAIL [{GOLDEN_SHA_MISMATCH_CODE}]: the golden used for this run differs from the golden "
+    "the baseline was recorded on; refusing to compare or promote. Re-record the baseline "
+    "in a dedicated PR."
+)
+GOLDEN_SHA_LEGACY_WARNING = (
+    "warn [HARNESS_GOLDEN_SHA_UNRECORDED]: the baseline records no golden_sha256 (legacy); "
+    "the golden cannot be verified. Continuing."
+)
+
+
+def golden_sha256(paths: list[Path]) -> str | None:
+    """sha256 over the exact dev-golden bytes the run reads (same digest as
+    evals/golden.jsonl.sha256). The frozen holdout is never read here (#859);
+    None when the run uses no non-holdout file."""
+    used = [p for p in paths if p.name != HOLDOUT_FILENAME and p.resolve().name != HOLDOUT_FILENAME]
+    if not used:
+        return None
+    return hashlib.sha256(b"".join(p.read_bytes() for p in used)).hexdigest()
+
+
+def check_golden_sha(baseline: dict[str, Any], run_sha: str | None) -> str | None:
+    """Fixed message for a mismatch (fail closed), the legacy warning when the
+    baseline has no sha, else None. Callers print; a warning does not stop."""
+    recorded = (baseline.get("_meta") or {}).get("golden_sha256")
+    if not recorded:
+        return GOLDEN_SHA_LEGACY_WARNING
+    if recorded != run_sha:
+        return GOLDEN_SHA_MISMATCH_MESSAGE
+    return None
+
+
+def save_baseline(
+    path: Path, summary: dict[str, Any], *, embed_mode: str, snapshot: dict[str, Any],
+    golden_sha: str | None = None,
+) -> None:
     doc = {
         "_meta": {
             "note": "Harness promotion baseline; re-record via `sh scripts/tools/run-task.sh eval:harness:baseline` (dedicated PR, AGENTS.md).",
@@ -67,6 +105,7 @@ def save_baseline(path: Path, summary: dict[str, Any], *, embed_mode: str, snaps
             "snapshot": snapshot,
             "class_regression_floor": DEFAULT_CLASS_FLOOR,
             "golden_entries": (summary.get("traps") or {}).get("checked"),
+            "golden_sha256": golden_sha,
             "updated": time.strftime("%Y-%m-%d"),
         },
         **summary,
@@ -277,6 +316,14 @@ def main(argv: list[str] | None = None) -> int:
         print(f"FAIL: no baseline at {baseline_path}; a gate run never creates one. "
               "Record it first: sh scripts/tools/run-task.sh eval:harness:baseline", file=sys.stderr)
         return 1
+    run_golden_sha = golden_sha256(golden_paths)
+    if baseline is not None and not args.update_baseline:
+        note = check_golden_sha(baseline, run_golden_sha)
+        if note == GOLDEN_SHA_MISMATCH_MESSAGE:
+            print(note, file=sys.stderr)
+            return 1
+        if note:
+            print(note, file=sys.stderr)
     print(f"[*] harness L1: {len(entries)} entries, collection {collection!r}, "
           f"embed_mode={settings.embed_mode}, baseline={baseline_path.name}", file=sys.stderr)
 
@@ -341,7 +388,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"    {cls:12s} {json.dumps(block)}", file=sys.stderr)
 
     if args.update_baseline:
-        save_baseline(baseline_path, summary, embed_mode=settings.embed_mode, snapshot=pin)
+        save_baseline(baseline_path, summary, embed_mode=settings.embed_mode, snapshot=pin,
+                      golden_sha=run_golden_sha)
         print(f"[*] baseline recorded: {baseline_path}", file=sys.stderr)
         verdict, reasons = "baseline", ["baseline recorded"]
     else:
