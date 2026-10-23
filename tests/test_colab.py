@@ -1377,7 +1377,7 @@ def test_assignment_holder_without_recorded_pid_is_still_named_busy(lab, monkeyp
     root, state, _ = lab
     second = _prepare_new(state, root / "unrecorded-holder-run")
     monkeypatch.setattr(controller.Run, "run", lambda self, approval, workload: 0)
-    lock_path = Path("/tmp") / f"mainframe-rag-colab-{os.geteuid()}" / "assignment.lock"
+    lock_path = Path(os.environ["COLAB_ASSIGNMENT_LOCK_DIR"]) / "assignment.lock"
     lock_path.parent.mkdir(mode=0o700, exist_ok=True)
     with os.fdopen(os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600), "r+b") as holder:
         holder.truncate(0)

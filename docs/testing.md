@@ -168,6 +168,11 @@ tree is "uncommitted, not evidence", and the CI `unit_tests` lane remains the
 authority for the full suite. Dynamic dispatch the static rules cannot see is
 the known gap.
 
+The `test_colab*` modules do not use the host-wide assignment lock: `tests/conftest.py`
+points `COLAB_ASSIGNMENT_LOCK_DIR` (read by `scripts/colab.py`, unset in production)
+at a per-test directory, so they neither serialize across processes nor fail while a
+real Colab run holds `/tmp/mainframe-rag-colab-<uid>/assignment.lock`.
+
 <a id="advisory-coverage"></a>
 ### Advisory branch coverage (`sh scripts/tools/run-task.sh qa:coverage`, `.github/workflows/coverage.yml`, #587)
 
