@@ -618,7 +618,8 @@ def observe():
     profile, software, snapshot = (decode(inputs[name]) for name in ("profile", "software", "snapshot"))
     require(all(type(value) is dict for value in (profile, software, snapshot)), "native_inputs_not_objects")
     require((profile.get("name"), profile.get("accelerator")) in (
-        ("COLAB_G4_BF16", "G4"), ("COLAB_A100_80GB_BF16", "A100"))
+        ("COLAB_G4_BF16", "G4"), ("COLAB_A100_80GB_BF16", "A100"),
+        ("COLAB_G4_RERANK_8B", "G4"), ("COLAB_G4_RERANK_4B", "G4"))
         and profile.get("vllm_version") == "0.28.0" and profile.get("transformers_version") == "5.15.0"
         and profile.get("python_version") == "3.12" and profile.get("dense_dim") == 4096,
         "unsupported_native_profile")
