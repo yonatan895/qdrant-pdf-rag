@@ -1,7 +1,7 @@
 """OpenShift must select identities; chart defaults must not reintroduce IDs."""
 from pathlib import Path
-import pytest
 
+import pytest
 import yaml
 
 from tests.helpers_helm import run_new_template
