@@ -246,11 +246,182 @@ def build_rexx(out_path: Path, doc_id: str = "SA22-8005-00") -> Path:
     return out_path
 
 
+# "Synthetic Corp" demo manuals (issue #890): a small invented product family
+# with original prose, used by the scripted console recording
+# (scripts/record_demo.py). Every fact below is made up for this fixture; there
+# is no vendor text. Each page is (heading, body); `build_corp_manual` lays one
+# out per PDF page and raises when a page would overflow, so a wording edit can
+# never silently clip a sentence.
+CORP_FOOTER = "(c) Synthetic Corp 2026 - Invented demo manual, not a real product"
+
+CORP_MANUALS: dict[str, dict] = {
+    "SC-1001-00_Meridian_Scheduler_Operations_Guide": {
+        "title": "Meridian Scheduler Operations Guide",
+        "doc_id": "SC-1001-00",
+        "pages": [
+            ("Meridian Scheduler Operations Guide",
+             "Synthetic Corp Meridian Scheduler 4.2\nDocument number SC-1001-00\n\n"
+             "Meridian is an invented batch job scheduler used only to demonstrate "
+             "document search. This guide explains how operators start, tune and "
+             "monitor the scheduler. Message explanations are in the Meridian "
+             "Messages Reference, SC-1002-00."),
+            ("Chapter 1 Starting the scheduler",
+             "The scheduler runs as a dispatcher process and one or more worker "
+             "nodes. Start the dispatcher first with the command mrdctl dispatcher "
+             "start, then start each worker with mrdctl worker start.\n\n"
+             "The dispatcher refuses to start when the state directory is locked by "
+             "another dispatcher. Remove the lock only after confirming that the "
+             "other dispatcher is stopped.\n\n"
+             "A normal start takes about twelve seconds. The dispatcher writes the "
+             "message MRD1001I when it is ready to accept jobs."),
+            ("Chapter 2 Queue leases",
+             "Every worker holds a lease on the queue it serves. The lease proves "
+             "that the worker is alive. If a worker cannot renew its lease before "
+             "the lease timeout elapses, the dispatcher takes the queue back and "
+             "hands its pending jobs to another worker.\n\n"
+             "The lease timeout is set by the LEASE_TIMEOUT_SEC parameter. The "
+             "default is 90 seconds. Valid values are 30 through 600 seconds. A "
+             "value below 30 is rejected when the dispatcher starts.\n\n"
+             "Raise the value on slow networks. Lower it when failover must be "
+             "faster, but keep it at least three times the renewal interval."),
+            ("Chapter 2 Queue leases",
+             "Table 1. Lease parameters\n\n"
+             "Parameter            Default   Meaning\n"
+             "LEASE_TIMEOUT_SEC    90        Seconds before an unrenewed lease expires\n"
+             "LEASE_RENEW_SEC      30        Seconds between lease renewals\n"
+             "MAX_CLOCK_SKEW_SEC   5         Largest tolerated clock difference\n\n"
+             "Clock differences between the dispatcher and a worker shorten the "
+             "effective lease. When the difference exceeds MAX_CLOCK_SKEW_SEC the "
+             "worker is marked suspect."),
+            ("Chapter 3 Monitoring",
+             "Use mrdctl status to list workers, leases and queue depth. The "
+             "command mrdctl clock-check compares the clock of every worker with "
+             "the dispatcher and prints the difference in seconds.\n\n"
+             "Queue depth above 500 pending jobs for ten minutes should be "
+             "treated as a capacity problem, not a fault. Add a worker or raise "
+             "the per-worker slot count with the SLOTS parameter."),
+            ("Appendix A Notices",
+             "This is an invented manual written for a demonstration. Meridian "
+             "and Synthetic Corp do not exist as products or companies."),
+        ],
+    },
+    "SC-1002-00_Meridian_Messages_Reference": {
+        "title": "Meridian Messages Reference",
+        "doc_id": "SC-1002-00",
+        "pages": [
+            ("Meridian Messages Reference",
+             "Synthetic Corp Meridian Scheduler 4.2\nDocument number SC-1002-00\n\n"
+             "This reference lists the messages written by the invented Meridian "
+             "scheduler. Each entry gives an explanation, the system action and "
+             "the operator response."),
+            ("Chapter 1 Dispatcher messages",
+             "MRD1001I\n\nMRD1001I DISPATCHER READY, QUEUES=nn\n\n"
+             "Explanation: The dispatcher finished starting and is accepting "
+             "jobs. nn is the number of queues it opened.\n\n"
+             "System action: Processing continues.\n\n"
+             "Operator response: None."),
+            ("Chapter 1 Dispatcher messages",
+             "MRD2041E\n\nMRD2041E LEASE EXPIRED FOR QUEUE qname, WORKER=wname\n\n"
+             "Explanation: The worker wname did not renew its lease on queue "
+             "qname before LEASE_TIMEOUT_SEC elapsed. The usual causes are a "
+             "stalled worker, a congested network, or clock skew larger than "
+             "MAX_CLOCK_SKEW_SEC.\n\n"
+             "System action: The dispatcher takes the queue back and reassigns "
+             "its pending jobs to another worker.\n\n"
+             "Operator response: Run mrdctl clock-check. If the skew is more "
+             "than 5 seconds, resynchronize the worker clock. Then run mrdctl "
+             "worker restart wname to return the worker to service."),
+            ("Chapter 1 Dispatcher messages",
+             "MRD2042W\n\nMRD2042W WORKER wname MARKED SUSPECT, SKEW=ss\n\n"
+             "Explanation: The clock of worker wname differs from the "
+             "dispatcher clock by ss seconds, which is more than "
+             "MAX_CLOCK_SKEW_SEC.\n\n"
+             "System action: The worker keeps its queues but receives no new "
+             "jobs until its clock is within the limit.\n\n"
+             "Operator response: Resynchronize the worker clock."),
+            ("Chapter 2 Worker messages",
+             "MRD3007E\n\nMRD3007E JOB jobid ENDED WITH CODE cc\n\n"
+             "Explanation: Job jobid ended with the non-zero return code cc.\n\n"
+             "System action: The job is marked failed and its successors wait.\n\n"
+             "Operator response: Read the job log, correct the cause, and "
+             "resubmit the job with mrdctl job retry jobid."),
+        ],
+    },
+    "SC-2001-00_Harbor_Archive_Administration_Guide": {
+        "title": "Harbor Archive Administration Guide",
+        "doc_id": "SC-2001-00",
+        "pages": [
+            ("Harbor Archive Administration Guide",
+             "Synthetic Corp Harbor Archive 2.0\nDocument number SC-2001-00\n\n"
+             "Harbor is an invented long-term archive for job output. This guide "
+             "explains retention, restore and capacity planning."),
+            ("Chapter 1 Retention",
+             "Harbor keeps job output for the retention period of its class. The "
+             "class standard keeps output for 30 days. The class audit keeps "
+             "output for 400 days and cannot be shortened once a record is "
+             "written.\n\n"
+             "Expired records are removed by the nightly sweep, which starts at "
+             "02:00 local time."),
+            ("Chapter 2 Restoring output",
+             "Restore a record with harborctl restore recordid. A record younger "
+             "than seven days restores immediately. An older record is read from "
+             "cold storage and takes up to one hour.\n\n"
+             "A restore never overwrites existing output. It writes a copy with "
+             "the suffix .restored."),
+        ],
+    },
+}
+
+
+def build_corp_manual(out_path: Path, spec: dict) -> Path:
+    """One Synthetic Corp demo manual: heading plus body per page, an outline
+    from the page headings, and the fixed fixture footer."""
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    doc = pymupdf.open()
+    header = f"{spec['doc_id']} {spec['title']}"
+    toc: list[list] = []
+    for number, (heading, body) in enumerate(spec["pages"], start=1):
+        page = doc.new_page()
+        w, h = page.rect.width, page.rect.height
+        text = f"{heading}\n\n{body}"
+        leftover = page.insert_textbox(pymupdf.Rect(72, 72, w - 72, h - 90), text, fontsize=11)
+        if leftover < 0:
+            raise ValueError(f"{out_path.name} page {number}: text overflows the page")
+        page.insert_textbox(pymupdf.Rect(72, 30, w - 72, 55), header, fontsize=8)
+        page.insert_textbox(pymupdf.Rect(72, h - 60, w - 72, h - 40), CORP_FOOTER, fontsize=8)
+        if heading.startswith(("Chapter", "Appendix")) and (not toc or toc[-1][1] != heading):
+            toc.append([1, heading, number])
+    if toc:
+        doc.set_toc(toc)
+    doc.set_metadata({"title": spec["title"], "author": "Synthetic Corp"})
+    doc.save(out_path)
+    doc.close()
+    return out_path
+
+
+def build_corp_manuals(out_dir: Path) -> list[Path]:
+    """Write every Synthetic Corp demo manual into out_dir (filename-stem
+    identity, no vendor signals); returns the paths in name order."""
+    return [
+        build_corp_manual(out_dir / f"{stem}.pdf", spec)
+        for stem, spec in sorted(CORP_MANUALS.items())
+    ]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--plain", action="store_true")
+    parser.add_argument(
+        "--synthetic-corp",
+        action="store_true",
+        help="write the Synthetic Corp demo manuals (issue #890) into the directory --out",
+    )
     args = parser.parse_args()
+    if args.synthetic_corp:
+        for path in build_corp_manuals(args.out):
+            print(path)
+        return
     print(build_plain(args.out) if args.plain else build(args.out))
 
 
