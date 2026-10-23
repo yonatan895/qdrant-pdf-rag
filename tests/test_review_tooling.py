@@ -2646,11 +2646,21 @@ class TestVerifierUpdateDecision(unittest.TestCase):
                 self.assertNotIn('comment.body', json.dumps(step))
         self.assertNotIn('pull_request.head', text)
         self.assertNotIn('issue.title', text)
-        ack = workflow['jobs']['acknowledge']
-        self.assertEqual(ack['permissions'], {'issues': 'write'})
-        self.assertEqual(ack['needs'], 'record-decision')
-        self.assertNotIn('actions/checkout', json.dumps(ack))
-        self.assertNotIn('comment.body', json.dumps(ack))
+        # validated_decision accepts a run with exactly one successful record-decision
+        # job; any second job (even skipped) voids every decision, dispatch included.
+        self.assertEqual(list(workflow['jobs']), ['record-decision'])
+        feedback_text = (root / '.github/workflows/verifier-feedback.yml').read_text()
+        feedback = yaml.safe_load(feedback_text)
+        self.assertEqual(feedback[True if True in feedback else 'on'],
+                         {'workflow_run': {'workflows': ['Verifier update decision'], 'types': ['completed']}})
+        self.assertEqual(feedback['permissions'], {})
+        ack = feedback['jobs']['feedback']
+        self.assertEqual(ack['permissions'], {'actions': 'read', 'issues': 'write', 'pull-requests': 'write'})
+        self.assertIn("github.event.workflow_run.event == 'issue_comment'", ack['if'])
+        self.assertIn("github.event.workflow_run.head_branch == 'main'", ack['if'])
+        self.assertNotIn('actions/checkout', feedback_text)
+        self.assertNotIn('comment.body', feedback_text)
+        self.assertTrue(all('${{' not in step.get('run', '') for step in ack['steps']))
         # Third-party actions stay on the pins already used in this repository.
         self.assertTrue(all(re.search(r'@[0-9a-f]{40}$', step['uses'])
                             for step in workflow['jobs']['record-decision']['steps'] if 'uses' in step))
