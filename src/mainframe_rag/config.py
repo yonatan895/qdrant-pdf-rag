@@ -302,9 +302,10 @@ class Settings(BaseSettings):
     # Thinking reserve, complex path only (issue #298): high-effort thinking
     # draws from the same window as the answer, but the single 1536-token
     # output bucket priced none of it — 0.81 of complex L4 rows truncated at
-    # prompt+completion = 4096 with reasoning p50 1120. Pricing 1000 of it
-    # into the complex prompt budget trades excerpt chars for a prompt that
-    # can actually finish.
+    # prompt+completion = 4096 with reasoning p50 1120. The default is now
+    # 8192 (provisional, #777; it was 1000 under #298). Pricing it into the
+    # complex prompt budget trades excerpt chars for a prompt that can
+    # actually finish.
     llm_thinking_reserve_tokens_complex: int = Field(default=8192, ge=0, le=16384)
     llm_token_safety_margin: int = Field(default=128, ge=0, le=1024)
     # Complex-path narrative cap above the largest chunk (~1150 tokens, #777).
