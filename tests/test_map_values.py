@@ -938,8 +938,8 @@ def _agent_env(output):
     return {entry["name"]: entry.get("value") for entry in agent["env"]}
 
 
-def test_request_bound_inputs_unset_keep_chart_deadline_and_no_admission(mapper_env):
-    """#374 handoff: no operator value means no override; admission stays unset (D4 pending)."""
+def test_request_bound_inputs_unset_keep_chart_deadline_and_admission(mapper_env):
+    """#374 handoff: no operator value means no override; the chart's 270 and 4/4/30 reach the pod (#843)."""
     result, output = mapper_env()
     assert result.returncode == 0, result.stderr
     values = load_values(output)
@@ -947,7 +947,7 @@ def test_request_bound_inputs_unset_keep_chart_deadline_and_no_admission(mapper_
                 "requestQueueWaitSeconds"} & values.keys()
     actual = _agent_env(output)
     assert actual["REQUEST_DEADLINE_S"] == "270"
-    assert not {"REQUEST_MAX_CONCURRENT", "REQUEST_QUEUE_MAX", "REQUEST_QUEUE_WAIT_S"} & actual.keys()
+    assert [actual[n] for n in ("REQUEST_MAX_CONCURRENT", "REQUEST_QUEUE_MAX", "REQUEST_QUEUE_WAIT_S")] == ["4", "4", "30"]
 
 
 def test_request_bound_operator_values_reach_the_pod_and_settings(monkeypatch, mapper_env):

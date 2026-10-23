@@ -860,9 +860,19 @@ record (#917: p95 162 s, max 232 s on 126 dev rows), so the supported route sees
 no 504 at that effort, while a longer generation ends as `504 deadline_exceeded`
 instead of a silent route cut. 270 s is strictly below the route `timeoutSeconds`
 and the default client and `answer_timeout_s` waits (300 each), so the agent's
-504 arrives before the route cut; a test requires deadline < route timeout. Admission
-numbers (`request_max_concurrent`, queue) are **not** approved; they wait for the
-stepped-concurrency run (#843 D4).
+504 arrives before the route cut; a test requires deadline < route timeout.
+
+**Admission defaults (2026-10-23, #843, explicit approved default change).** The
+chart and air-gap defaults ship admission ON: `requestMaxConcurrent` 4,
+`requestQueueMax` 4, `requestQueueWaitSeconds` 30 (`REQUEST_MAX_CONCURRENT`,
+`REQUEST_QUEUE_MAX`, `REQUEST_QUEUE_WAIT_S`), per agent replica. The `Settings`
+defaults stay 0 (off) for local and CI. Chart schema: integers 0..1000, wait
+0..300 and above 0 while concurrency is above 0. **Sizing rule:**
+`max_concurrent` = 2 x the engine's concurrent sequence slots; the site overrides
+the three operator keys via the #374 handoff using its own engine numbers. Basis:
+G4 session S10 D4 (2-slot engine, medium effort): peak throughput at 4 in flight,
+overload without admission ended as 270 s 504s, and with 4/4/30 the excess was an
+immediate 503 (row in `docs/eval.md` section 10).
 
 - **Admission** (`request_max_concurrent` > 0): `/v1/search`, `/v1/evidence/*`,
   `/v1/sources`, `/v1/answer`, `/v1/chat*` and `/ui/chat*` share one pool and take one slot as
@@ -967,7 +977,7 @@ readers:
 | `llm_max_model_len` / `llm_reserved_output_tokens` / `llm_thinking_reserve_tokens_complex` / `llm_token_safety_margin` / `llm_max_chunk_tokens_narrative` / `llm_tokenize_timeout_s` | 32768 / 2560 / 8192 / 128 / 1200 / 5.0 | tokenizer-path budgeting (#298, #777). `llm_max_model_len` must not exceed the served `--max-model-len`. With a server-verified prompt count the reserved output plus the path's thinking reserve is sent as `max_tokens` (prompt + cap stays inside the window minus the margin), so a runaway xhigh generation ends as `finish_reason: length` → `generation_incomplete`; an estimator-only prompt sends no cap |
 | `llm_thinking_reserve_tokens_simple` | 8192 | reasoning headroom in single-turn and chat prompt budgets (provisional for xhigh, #777); environment input `LLM_THINKING_RESERVE_TOKENS_SIMPLE` |
 | `llm_stream` | `false` | TTFT measurement and streaming recovery policy for server-side reasoning calls (the wire is a stream either way, #868) |
-| `request_max_concurrent` / `request_queue_max` / `request_queue_wait_s` / `request_deadline_s` | 0 (unlimited) / 0 / 5.0 (used only with a queue) / 0.0 (no deadline; the chart ships 270, #843) | request admission and total deadline (§6a); issue #374; only the 270 s deadline is approved for the supported deployment, **no admission envelope approved** — values come from site measurement |
+| `request_max_concurrent` / `request_queue_max` / `request_queue_wait_s` / `request_deadline_s` | 0 (unlimited) / 0 / 5.0 (used only with a queue) / 0.0 (no deadline); the chart ships 4 / 4 / 30 / 270 (#843) | request admission and total deadline (§6a); issue #374; the library default is off, the supported deployment ships admission on and the site overrides by the sizing rule |
 | `embed_max_input_chars` | 0 (unbounded) | refuse an over-bound dense embed input before the call, query path and ingest (§6a, `docs/ingest.md` §7) |
 | `http_connect_retries` / `http_max_connections` / `http_max_keepalive_connections` | 2 (connect-only) / 200 / 100 | both pools, embed/context clients |
 | `health_qdrant_timeout_s` / `health_embed_timeout_s` | 5.0 / 10.0 | healthz only |
