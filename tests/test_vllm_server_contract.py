@@ -42,7 +42,16 @@ def _stream_lines(lines):
 
 
 def _post_payload(payload):
+    """A fake whose stream is empty: with `llm_stream=True` the client takes
+    its one non-streaming recovery POST, the remaining buffered wire (#868:
+    a buffered caller without `llm_stream` reads the stream instead)."""
     return HttpxStreamFake(payload=payload)
+
+
+def _sync_post_payload(payload):
+    fake = _post_payload(payload)
+    fake.stream = fake.stream_sync
+    return fake
 
 
 @pytest.mark.anyio
@@ -141,15 +150,15 @@ async def test_stream_without_usage_chunk_yields_zero_usage():
 
 
 def test_nonstream_post_shape_and_explicit_finish():
-    """llm_stream=False posts WITHOUT a stream key; an explicit finish_reason
+    """The recovery POST carries NO stream key; an explicit finish_reason
     is preserved and absent usage defaults, never KeyError."""
     seen = {}
-    fake = _post_payload(
+    fake = _sync_post_payload(
         {"choices": [{"message": {"content": "ans"}, "finish_reason": "stop"}]}
     )
     fake.capture = seen
 
-    llm = HttpxLLMClient(Settings(**_settings_kwargs()), client=fake)
+    llm = HttpxLLMClient(Settings(**_settings_kwargs(llm_stream=True)), client=fake)
     result = llm.chat(_msgs())
     assert seen["url"] == "http://llm.internal:8000/v1/chat/completions"
     assert "stream" not in seen["json"]
@@ -187,9 +196,9 @@ def test_nonstream_post_shape_and_explicit_finish():
 def test_nonstream_payload_without_explicit_finish_fails_closed(payload, reason):
     """A non-streaming payload without an explicit terminal finish, with a
     top-level error, or with non-string content fails closed (issues #365 / Q420-P1)."""
-    fake = _post_payload(payload)
+    fake = _sync_post_payload(payload)
 
-    llm = HttpxLLMClient(Settings(**_settings_kwargs()), client=fake)
+    llm = HttpxLLMClient(Settings(**_settings_kwargs(llm_stream=True)), client=fake)
     with pytest.raises(TruncatedStreamError) as excinfo:
         llm.chat(_msgs())
     assert excinfo.value.reason == reason
@@ -226,8 +235,8 @@ def test_nonstream_payload_without_explicit_finish_fails_closed(payload, reason)
 def test_nonstream_payload_healthy_variants(payload, expected_content, expected_finish):
     """Healthy non-streaming payloads, including null/empty content, error: None,
     and explicit terminal classifications, are preserved (issues #365 / Q420-P1)."""
-    fake = _post_payload(payload)
-    llm = HttpxLLMClient(Settings(**_settings_kwargs()), client=fake)
+    fake = _sync_post_payload(payload)
+    llm = HttpxLLMClient(Settings(**_settings_kwargs(llm_stream=True)), client=fake)
     result = llm.chat(_msgs())
     assert result.content == expected_content
     assert result.finish_reason == expected_finish
@@ -240,8 +249,8 @@ def test_nonstream_client_sync_rejects_error_payload():
         "error": {"message": "PRIVATE_SENTINEL"},
         "choices": [{"message": {"content": "ans"}, "finish_reason": "stop"}],
     }
-    fake = _post_payload(payload)
-    llm = HttpxLLMClient(Settings(**_settings_kwargs()), client=fake)
+    fake = _sync_post_payload(payload)
+    llm = HttpxLLMClient(Settings(**_settings_kwargs(llm_stream=True)), client=fake)
 
     with pytest.raises(TruncatedStreamError) as excinfo:
         llm.chat(_msgs())
@@ -258,7 +267,7 @@ async def test_nonstream_client_async_rejects_error_payload():
         "choices": [{"message": {"content": "ans"}, "finish_reason": "stop"}],
     }
     fake = _post_payload(payload)
-    llm = HttpxLLMClient(Settings(**_settings_kwargs()), client=fake)
+    llm = HttpxLLMClient(Settings(**_settings_kwargs(llm_stream=True)), client=fake)
 
     with pytest.raises(TruncatedStreamError) as excinfo:
         await llm.achat(_msgs())
@@ -276,7 +285,7 @@ async def test_nonstream_client_async_rejects_object_content():
         ],
     }
     fake = _post_payload(payload)
-    llm = HttpxLLMClient(Settings(**_settings_kwargs()), client=fake)
+    llm = HttpxLLMClient(Settings(**_settings_kwargs(llm_stream=True)), client=fake)
 
     with pytest.raises(TruncatedStreamError) as excinfo:
         await llm.achat(_msgs())
@@ -293,14 +302,14 @@ def test_nonstream_nested_reasoning_tokens_mapped():
         "completion_tokens_details": {"reasoning_tokens": 12},
     }
 
-    fake = _post_payload(
+    fake = _sync_post_payload(
         {
             "choices": [{"message": {"content": "ans"}, "finish_reason": "stop"}],
             "usage": usage,
         }
     )
 
-    llm = HttpxLLMClient(Settings(**_settings_kwargs()), client=fake)
+    llm = HttpxLLMClient(Settings(**_settings_kwargs(llm_stream=True)), client=fake)
     result = llm.chat(_msgs())
     assert result.usage.reasoning_tokens == 12
     assert result.usage.total_tokens == 15
@@ -351,10 +360,10 @@ def test_trailing_slash_base_url_builds_clean_completions_url():
     """A trailing slash in LLM_BASE_URL must not produce //chat/completions
     (some servers 404 the doubled slash while vLLM tolerates it)."""
 
-    fake = _post_payload({"choices": [{"message": {"content": "ans"}, "finish_reason": "stop"}]})
+    fake = _sync_post_payload({"choices": [{"message": {"content": "ans"}, "finish_reason": "stop"}]})
 
     llm = HttpxLLMClient(
-        Settings(**_settings_kwargs(llm_base_url="http://llm.internal:8000/v1/")), client=fake
+        Settings(**_settings_kwargs(llm_stream=True, llm_base_url="http://llm.internal:8000/v1/")), client=fake
     )
     llm.chat(_msgs())
     assert fake.capture["url"] == "http://llm.internal:8000/v1/chat/completions"
@@ -383,10 +392,10 @@ async def test_bearer_header_sent_on_stream_leg_when_key_set():
 def test_bearer_header_sent_on_nonstream_post_when_key_set():
     """The non-streaming POST (and the stream-fallback leg) carries the key."""
     seen = {}
-    fake = _post_payload({"choices": [{"message": {"content": "ans"}, "finish_reason": "stop"}]})
+    fake = _sync_post_payload({"choices": [{"message": {"content": "ans"}, "finish_reason": "stop"}]})
     fake.capture = seen
 
-    llm = HttpxLLMClient(Settings(**_settings_kwargs(llm_api_key="sk-test-llm")), client=fake)
+    llm = HttpxLLMClient(Settings(**_settings_kwargs(llm_stream=True, llm_api_key="sk-test-llm")), client=fake)
     llm.chat(_msgs())
     assert seen["headers"] == {"Authorization": "Bearer sk-test-llm"}
 
@@ -395,9 +404,9 @@ def test_no_auth_header_sent_on_nonstream_post_when_key_unset():
     """Keyless setups keep the pre-gateway wire shape: no Authorization
     header on the non-streaming POST."""
     post_seen: dict = {}
-    post_fake = _post_payload({"choices": [{"message": {"content": "ans"}, "finish_reason": "stop"}]})
+    post_fake = _sync_post_payload({"choices": [{"message": {"content": "ans"}, "finish_reason": "stop"}]})
     post_fake.capture = post_seen
-    post_llm = HttpxLLMClient(Settings(**_settings_kwargs()), client=post_fake)
+    post_llm = HttpxLLMClient(Settings(**_settings_kwargs(llm_stream=True)), client=post_fake)
     post_llm.chat(_msgs())
     assert post_seen["headers"] == {}
 

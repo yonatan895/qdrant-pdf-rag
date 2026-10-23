@@ -908,9 +908,11 @@ def test_shared_gateway_aliases_and_secret_reach_requests(tree, from_file):
         if request.url.path == "/v1/embeddings":
             return httpx2.Response(200, json={"data": [{"index": 0, "embedding": [0.25, 0.75]}]})
         assert request.url.path == "/v1/chat/completions"
-        return httpx2.Response(200, json={"choices": [
-            {"message": {"content": "Synthetic answer"}, "finish_reason": "stop"},
-        ]})
+        # Issue #868: a buffered answer is read from the streamed wire.
+        sse = ('data: {"choices": [{"delta": {"content": "Synthetic answer"}}]}\n\n'
+               'data: {"choices": [{"delta": {}, "finish_reason": "stop"}]}\n\n'
+               "data: [DONE]\n\n")
+        return httpx2.Response(200, text=sse, headers={"content-type": "text/event-stream"})
 
     # Simulate Kubernetes resolving the single referenced Secret, then use
     # real runtime clients/HTTP serialization with an in-process transport.

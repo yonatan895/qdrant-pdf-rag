@@ -93,10 +93,12 @@ def test_cli_answer_counts_the_same_effort_as_completion_near_window(effort, que
             return httpx2.Response(200, json={"count": 3963 if selected == effort else 3975})
         assert request.url.path == "/v1/chat/completions"
         completed.append(body)
-        return httpx2.Response(200, json={"choices": [{
-            "message": {"content": "Original guidance.\n\nCitations:\n" + hit.cite},
-            "finish_reason": "stop",
-        }]})
+        # Issue #868: a buffered answer is read from the streamed wire.
+        assert body["stream"] is True
+        content = "Original guidance.\n\nCitations:\n" + hit.cite
+        frames = [{"choices": [{"delta": {"content": content}}]}, {"choices": [{"delta": {}, "finish_reason": "stop"}]}]
+        sse = "".join(f"data: {json.dumps(frame)}\n\n" for frame in frames) + "data: [DONE]\n\n"
+        return httpx2.Response(200, text=sse, headers={"content-type": "text/event-stream"})
 
     with (
         httpx2.Client(transport=httpx2.MockTransport(respond)) as client,

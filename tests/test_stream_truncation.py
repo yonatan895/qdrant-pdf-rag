@@ -18,6 +18,7 @@ import asyncio
 import json
 import logging
 
+import httpx2
 import pytest
 from fastapi.testclient import TestClient
 
@@ -30,11 +31,12 @@ from mainframe_rag.agent.answer import (
     HttpxLLMClient,
     TruncatedStreamError,
     _chat_result_from_response,
+    is_model_timeout,
 )
 from mainframe_rag.agent.tokenizer import FallbackTokenizer
 from mainframe_rag.config import Settings
 from mainframe_rag.ports import ChatMessage
-from tests.fakes import HttpxStreamFake, SlowOpenAIUpstream, settings_kw
+from tests.fakes import HttpxStreamFake, NonPropagatingGateway, SlowOpenAIUpstream, settings_kw
 
 TRUNCATED_LINES = [
     'data: {"choices": [{"delta": {"role": "assistant", "content": "Partial "}}]}',
@@ -521,8 +523,9 @@ def test_answer_body_state_real_client_all_surfaces(
         assert data["citations_inferred"] is False
         assert data["script"] == script
         assert data["script_review_required"] is (script is not None)
-        assert len(transport.stream_bodies) == int(stream or llm_stream)
-        assert len(transport.post_bodies) == int(not (stream or llm_stream))
+        # Issue #868: every model call is read from the streamed wire.
+        assert len(transport.stream_bodies) == 1
+        assert len(transport.post_bodies) == 0
 
 
 # Issue #597: adversarial model outputs through the real HttpxLLMClient and
@@ -600,8 +603,10 @@ def test_reasoning_only_empty_content_never_reads_as_an_answer(
     transport, clients = _adversarial_llm(monkeypatch, synthetic_pdf, lines, payload, llm_stream)
     for client in clients:
         final, error = _drive_surface(client, path, stream)
-    assert len(transport.post_bodies) == 1
-    assert len(transport.stream_bodies) == int(llm_stream)
+    # The `llm_stream` opt-in keeps the empty-`stop` recovery POST; a buffered
+    # caller reads the stream and has no recovery (issue #868).
+    assert len(transport.post_bodies) == int(llm_stream)
+    assert len(transport.stream_bodies) == 1
     if stream:
         assert final is None
         assert error["verification_state"] == "generation_incomplete"
@@ -632,8 +637,8 @@ def test_length_finish_mid_citation_keeps_body_drops_fragment(
     for client in clients:
         final, error = _drive_surface(client, path, stream)
     assert error is None
-    assert len(transport.stream_bodies) == int(llm_stream)
-    assert len(transport.post_bodies) == int(not llm_stream)
+    assert len(transport.stream_bodies) == 1
+    assert len(transport.post_bodies) == 0
     assert final["state"] == "generation_incomplete"
     assert final["citations"] == []
     if final["answer"] is not None:
@@ -1079,7 +1084,7 @@ def test_length_with_reasoning_only_is_incomplete_not_a_gateway_failure(
 
 
 @pytest.mark.parametrize("path,stream", _BUDGET_SURFACES)
-@pytest.mark.parametrize("llm_stream", [False, True], ids=["pool-post", "pool-stream"])
+@pytest.mark.parametrize("llm_stream", [False, True], ids=["buffered-config", "llm-stream"])
 def test_model_wait_expiry_is_model_timeout_and_closes_the_connection(
     monkeypatch, synthetic_pdf, servable_representation_gate, path, stream, llm_stream,
 ):
@@ -1140,4 +1145,141 @@ def test_chat_sync_length_without_content_is_final_and_not_reasked():
     llm = HttpxLLMClient(Settings(**_settings_kwargs(llm_stream=True)), client=fake)
     result = llm.chat([ChatMessage(role="user", content="hi")])
     assert (result.content, result.finish_reason) == ("", "length")
+    assert fake.post_bodies == []
+
+
+# ---------------------------------------------------------------------------
+# Issue #868, buffered callers: abandonment must reach the engine through a
+# gateway that forwards a disconnect only for streamed requests.
+# ---------------------------------------------------------------------------
+
+_HI = [ChatMessage(role="user", content="hi")]
+
+
+@pytest.mark.anyio
+async def test_gateway_fake_does_not_propagate_a_buffered_disconnect():
+    """Control: the fake gateway reproduces the live defect for a plain
+    buffered POST, so the tests below prove the client's change, not the fake."""
+    with SlowOpenAIUpstream(stream="stall", post="stall") as upstream, NonPropagatingGateway(upstream) as gateway:
+        async with httpx2.AsyncClient(timeout=0.3) as http:
+            with pytest.raises(httpx2.ReadTimeout):
+                await http.post(f"{gateway.base_url}/chat/completions", json={"model": "m", "messages": []})
+        assert upstream.wait_for(lambda u: len(u.requests) == 1)
+        assert not upstream.wait_for(lambda u: u.disconnects >= 1, timeout=1.0)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("llm_stream", [False, True], ids=["buffered-config", "llm-stream"])
+async def test_buffered_call_expiry_reaches_the_engine_through_the_gateway(llm_stream):
+    with SlowOpenAIUpstream(stream="stall", post="stall") as upstream, NonPropagatingGateway(upstream) as gateway:
+        llm = _socket_llm(gateway, llm_stream=llm_stream, answer_timeout_s=0.3)
+        with pytest.raises(httpx2.TimeoutException):
+            await llm.achat(_HI)
+        await llm.aclose()
+        assert upstream.wait_for(lambda u: u.disconnects >= 1, timeout=3.0)
+    assert [r["stream"] for r in upstream.requests] == [True]
+
+
+@pytest.mark.anyio
+async def test_buffered_call_cancellation_reaches_the_engine_through_the_gateway():
+    """The request-deadline path: the awaiting task is cancelled."""
+    with SlowOpenAIUpstream(stream="stall", post="stall") as upstream, NonPropagatingGateway(upstream) as gateway:
+        llm = _socket_llm(gateway, answer_timeout_s=60.0)
+        task = asyncio.ensure_future(llm.achat(_HI))
+        assert await asyncio.to_thread(upstream.wait_for, lambda u: len(u.requests) == 1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await llm.aclose()
+        assert upstream.wait_for(lambda u: u.disconnects >= 1, timeout=3.0)
+
+
+@pytest.mark.anyio
+async def test_buffered_call_keeps_a_total_wait_while_frames_trickle():
+    """A buffered POST had no byte until done, so `answer_timeout_s` was the
+    whole generation. Over the stream, reasoning frames renew httpx's per-read
+    timeout; the total bound must survive, as the same timeout class."""
+    with SlowOpenAIUpstream(stream="trickle", step_s=0.05) as upstream:
+        llm = _socket_llm(upstream, answer_timeout_s=0.4)
+        started = asyncio.get_running_loop().time()
+        with pytest.raises(httpx2.ReadTimeout) as caught:
+            await llm.achat(_HI)
+        await llm.aclose()
+        assert asyncio.get_running_loop().time() - started < 3.0
+        assert is_model_timeout(caught.value)
+        assert upstream.wait_for(lambda u: u.disconnects >= 1)
+    assert len(upstream.requests) == 1
+
+
+@pytest.mark.anyio
+async def test_buffered_call_assembles_the_stream_into_the_buffered_result():
+    fake = HttpxStreamFake(
+        lines=[
+            'data: {"choices": [{"delta": {"reasoning_content": "hmm"}}]}',
+            'data: {"choices": [{"delta": {"content": "Complete "}}]}',
+            'data: {"choices": [{"delta": {"content": "answer"}, "finish_reason": "stop"}]}',
+            'data: {"choices": [], "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8}}',
+            _DONE_LINE,
+        ],
+        payload=_COMPLETE_PAYLOAD,
+    )
+    llm = HttpxLLMClient(Settings(**_settings_kwargs()), client=fake)
+    result = await llm.achat(_HI)
+    assert (result.content, result.finish_reason) == ("Complete answer", "stop")
+    assert (result.usage.prompt_tokens, result.usage.completion_tokens, result.usage.total_tokens) == (5, 3, 8)
+    assert result.ttft_ms is None
+    assert fake.post_bodies == []
+    assert fake.stream_bodies[0]["stream"] is True
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "lines,reason",
+    [
+        ([_CONTENT_LINE, _ERROR_FRAME, _DONE_LINE], REASON_UPSTREAM_ERROR),
+        (TRUNCATED_LINES, REASON_MISSING_DONE),
+        ([_CONTENT_LINE, _DONE_LINE], REASON_MISSING_FINISH),
+    ],
+    ids=["error-frame", "missing-done", "missing-finish"],
+)
+async def test_buffered_call_incomplete_stream_is_truncation_without_a_second_ask(lines, reason, caplog):
+    fake = HttpxStreamFake(lines=lines, payload=_COMPLETE_PAYLOAD)
+    llm = HttpxLLMClient(Settings(**_settings_kwargs()), client=fake)
+    with caplog.at_level(logging.DEBUG), pytest.raises(TruncatedStreamError) as caught:
+        await llm.achat(_HI)
+    assert reason in str(caught.value)
+    assert "SECRET-UPSTREAM-TEXT" not in str(caught.value) + caplog.text
+    assert fake.post_bodies == []
+
+
+@pytest.mark.anyio
+async def test_buffered_call_length_without_content_is_the_result_and_empty_stop_stays_empty():
+    for finish in ("length", "stop"):
+        fake = HttpxStreamFake(
+            lines=[f'data: {{"choices": [{{"delta": {{}}, "finish_reason": "{finish}"}}]}}', _DONE_LINE],
+        )
+        llm = HttpxLLMClient(Settings(**_settings_kwargs()), client=fake)
+        result = await llm.achat(_HI)
+        assert (result.content, result.finish_reason) == ("", finish)
+        assert fake.post_bodies == []
+
+
+def test_buffered_sync_call_assembles_the_stream_and_never_posts():
+    fake = HttpxStreamFake(
+        lines=[_CONTENT_LINE, _FINISH_LINE, _DONE_LINE], payload=_COMPLETE_PAYLOAD
+    )
+    fake.stream = fake.stream_sync
+    llm = HttpxLLMClient(Settings(**_settings_kwargs()), client=fake)
+    result = llm.chat(_HI)
+    assert (result.content, result.finish_reason) == ("Partial ", "stop")
+    assert fake.post_bodies == []
+    assert fake.stream_bodies[0]["stream"] is True
+
+
+def test_buffered_sync_call_incomplete_stream_is_truncation():
+    fake = HttpxStreamFake(lines=TRUNCATED_LINES, payload=_COMPLETE_PAYLOAD)
+    fake.stream = fake.stream_sync
+    llm = HttpxLLMClient(Settings(**_settings_kwargs()), client=fake)
+    with pytest.raises(TruncatedStreamError):
+        llm.chat(_HI)
     assert fake.post_bodies == []

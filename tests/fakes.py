@@ -322,6 +322,7 @@ class SlowOpenAIUpstream:
       "stall"                 - accept the request, never answer
       "token_then_stall"      - one content delta, then silence
       "answer"                - a complete `stop` answer
+      "trickle"               - a reasoning delta every `step_s`, never finishing
     It records every request body and notices when the client closes the
     connection while the script is still running, which is how a real model
     server learns that its caller gave up. Test-only; no shared state between
@@ -437,6 +438,11 @@ class SlowOpenAIUpstream:
             elif script == "token_then_stall":
                 await send(sse({"content": "Partial "}))
                 alive = await pause(3600)
+            elif script == "trickle":
+                alive = True
+                while alive:
+                    await send(sse({"reasoning_content": "thinking "}))
+                    alive = await pause(self.step_s)
             elif script == "length_reasoning_only":
                 alive = True
                 if is_stream:
@@ -465,6 +471,96 @@ class SlowOpenAIUpstream:
         payload = json.dumps({"choices": [{"message": message, "finish_reason": finish}]})
         await send("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
                    f"Content-Length: {len(payload)}\r\nConnection: close\r\n\r\n{payload}")
+
+
+class NonPropagatingGateway:
+    """Real-socket stand-in for the model gateway's disconnect behavior
+    (issue #868): when the caller leaves, a streamed request is cancelled
+    upstream, a buffered (`"stream": false`) request is not - the gateway
+    keeps waiting for the engine, as the pinned LiteLLM did in the live check.
+    Forwards one request to `upstream`; test-only."""
+
+    def __init__(self, upstream):
+        import threading
+
+        self.upstream = upstream
+        self._loop = None
+        self._server = None
+        self._thread = None
+        self._ready = threading.Event()
+        self.port = 0
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.port}/v1"
+
+    def __enter__(self):
+        import asyncio
+        import threading
+
+        async def main():
+            self._loop = asyncio.get_running_loop()
+            self._server = await asyncio.start_server(self._handle, "127.0.0.1", 0)
+            self.port = self._server.sockets[0].getsockname()[1]
+            self._ready.set()
+            async with self._server:
+                await self._server.serve_forever()
+
+        def run():
+            with contextlib.suppress(asyncio.CancelledError):
+                asyncio.run(main())
+
+        self._thread = threading.Thread(target=run, daemon=True)
+        self._thread.start()
+        assert self._ready.wait(5)
+        return self
+
+    def __exit__(self, *exc):
+        import asyncio
+
+        async def stop():
+            self._server.close()
+            for task in asyncio.all_tasks():
+                if task is not asyncio.current_task():
+                    task.cancel()
+
+        asyncio.run_coroutine_threadsafe(stop(), self._loop)
+        self._thread.join(5)
+
+    async def _handle(self, reader, writer) -> None:
+        import asyncio
+
+        upstream_writer = None
+        try:
+            head = await reader.readuntil(b"\r\n\r\n")
+            length = 0
+            for line in head.split(b"\r\n"):
+                if line.lower().startswith(b"content-length:"):
+                    length = int(line.split(b":")[1])
+            raw = await reader.readexactly(length)
+            is_stream = bool(json.loads(raw).get("stream"))
+            up_reader, upstream_writer = await asyncio.open_connection("127.0.0.1", self.upstream.port)
+            upstream_writer.write(head + raw)
+            await upstream_writer.drain()
+
+            async def pump():
+                while chunk := await up_reader.read(65536):
+                    writer.write(chunk)
+                    await writer.drain()
+
+            relay = asyncio.ensure_future(pump())
+            if is_stream:
+                gone = asyncio.ensure_future(reader.read())
+                await asyncio.wait({relay, gone}, return_when=asyncio.FIRST_COMPLETED)
+                gone.cancel()
+                relay.cancel()  # a streamed request leaves with its caller: the engine is told
+            await relay  # buffered: waits for the engine whether or not the caller is still there
+        except (asyncio.IncompleteReadError, ConnectionError, asyncio.CancelledError):
+            pass
+        finally:
+            if upstream_writer is not None:
+                upstream_writer.close()
+            writer.close()
 
 
 # ---------------------------------------------------------------------------
