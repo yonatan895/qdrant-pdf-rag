@@ -24,6 +24,7 @@ from tests.helpers_airgap import (
     rendered_env,
     run_sh,
     set_oauth_proxy_pin,
+    set_openwebui_pin,
     sha256_bytes,
     write_git_identity_stub,
     write_signed_manifest,
@@ -77,6 +78,17 @@ case "$*" in
   *'get route.route.openshift.io/rag-agent '*'-o json'*)
     [ "${{ROUTE_LIVE_FILE:-}}" != "" ] || exit 1
     cat "$ROUTE_LIVE_FILE" ;;
+  *'get route.route.openshift.io/rag-openwebui '*'-o json'*)
+    [ "${{OWUI_ROUTE_LIVE_FILE:-}}" != "" ] || exit 1
+    cat "$OWUI_ROUTE_LIVE_FILE" ;;
+  *'delete route.route.openshift.io/rag-openwebui'*)
+    [ "${{DELETE_FAIL:-}}" != 1 ] || exit 1 ;;
+  *'admin-api-key'*)
+    printf '%s' "${{OWUI_ADMIN_KEY_B64:-}}" ;;
+  *'exec -i deploy/rag-openwebui '*)
+    tee "${{OWUI_EXEC_STDIN:-/dev/null}}" >/dev/null
+    [ "${{OWUI_EXEC_FAIL:-}}" != 1 ] || {{ echo 'FAIL: docs Pipe provisioning refused: x' >&2; exit 1; }}
+    echo 'docs Pipe installed: Function mainframe_rag_docs active' ;;
   *'get configmap openshift-service-ca.crt'*)
     printf '%s\\n' "${{SERVICE_CA:-}}" ;;
   *'get '*'servicemonitor.monitoring.coreos.com/rag-agent '*)
@@ -1276,6 +1288,121 @@ def test_other_route_alternate_backend_to_qdrant_refuses(tree):
     assert r.returncode != 0
     assert "Route docs exposes" in r.stderr
     assert "upgrade" not in _helm_log(tree)
+
+
+# ------------------------------------------- Open WebUI front end (#1074)
+
+OWUI_HOST = "docs.apps.example.internal"
+OWUI_PIPE = "class Pipe:\n    pass\n"
+OWUI_ENV = (
+    ("OPENWEBUI_ENABLED", "true"), ("OPENWEBUI_SECRET", "owui-secrets"),
+    ("OPENWEBUI_HOST", OWUI_HOST),
+    ("OPENWEBUI_OIDC_PROVIDER_URL", "https://idp.example.internal/.well-known/openid-configuration"),
+    ("OPENWEBUI_OIDC_CLIENT_ID", "docs-frontend"), ("OPENWEBUI_OIDC_ALLOWED_ROLES", "staff"),
+    ("OPENWEBUI_OIDC_ADMIN_ROLES", "docs-admins"), ("OPENWEBUI_IDP_EGRESS_CIDRS", "10.20.0.0/24"),
+    ("SERVICE_CA", SERVICE_CA),
+)
+OWUI_ADMIN_KEY = "sk-synthetic-admin"
+
+
+def _owui_route(*, host=OWUI_HOST, **kw):
+    route = _route("rag-openwebui", **{"to": "rag-openwebui", "port": "https", **kw})
+    route["spec"]["host"] = host
+    return route
+
+
+def _owui_deploy(tree, *extra, live=None, admin_key=True):
+    import base64
+
+    root = tree[0]
+    set_openwebui_pin(root, GOOD_PIN)
+    pipe = root / "charts" / "mainframe-rag" / "files" / "openwebui" / "docs_pipe.py"
+    pipe.write_text(OWUI_PIPE)
+    env = [*OWUI_ENV, ("OWUI_ROUTE_LIVE_FILE", live or _write_json(tree, "owui-route.json", _owui_route())),
+           ("OWUI_EXEC_STDIN", str(root / "exec-stdin.txt"))]
+    if admin_key:
+        env.append(("OWUI_ADMIN_KEY_B64", base64.b64encode(OWUI_ADMIN_KEY.encode()).decode()))
+    return _run(tree, *env, *extra)
+
+
+def test_openwebui_enabled_deploy_renders_verifies_and_installs_the_pipe(tree):
+    import hashlib
+
+    r = _owui_deploy(tree)
+    assert r.returncode == 0, r.stderr
+    rendered = (tree[0] / "dist/agent-rendered.yaml").read_text()
+    for name in ("Deployment", "Route", "NetworkPolicy", "ConfigMap"):
+        assert re.search(rf"kind: {name}\n(?:.*\n){{0,3}}  name: rag-openwebui", rendered), name
+    # Stored content: the Route carries the namespace CA read from the cluster.
+    assert "U0VSVklDRS1DQQ==" in rendered and f'host: "{OWUI_HOST}"' in rendered
+    assert "Route rag-openwebui verified" in r.stdout
+    log = _helm_log(tree)
+    assert "deploy/rag-openwebui" in log
+    assert log.index("deploy/rag-openwebui") > log.index("upgrade")
+    # The installer runs with the repository Pipe hash; the key reaches it on
+    # stdin only, never argv or output.
+    sha = hashlib.sha256(OWUI_PIPE.encode()).hexdigest()
+    assert f"python3\n/opt/mainframe-rag/openwebui/provision_pipe.py\n{sha}" in log
+    assert (tree[0] / "exec-stdin.txt").read_text() == OWUI_ADMIN_KEY
+    assert OWUI_ADMIN_KEY not in log and OWUI_ADMIN_KEY not in r.stdout + r.stderr
+    assert "docs Pipe installed" in r.stdout
+
+
+def test_openwebui_without_an_admin_key_says_the_pipe_is_not_installed(tree):
+    r = _owui_deploy(tree, admin_key=False)
+    assert r.returncode == 0, r.stderr
+    assert "docs Pipe NOT installed" in r.stdout
+    assert "exec" not in _helm_log(tree).split()
+
+
+def test_openwebui_installer_refusal_fails_the_deploy(tree):
+    r = _owui_deploy(tree, ("OWUI_EXEC_FAIL", "1"))
+    assert r.returncode != 0
+    assert "docs Pipe was not installed" in r.stderr
+
+
+def test_openwebui_missing_secret_key_refuses_before_mutation(tree):
+    r = _owui_deploy(tree, ("MISSING_KEY", "oidc-client-secret"))
+    assert r.returncode != 0
+    assert "oidc-client-secret" in r.stderr
+    assert "upgrade" not in _helm_log(tree)
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_other_routes_to_openwebui_refuse_before_any_mutation(tree, enabled):
+    routes = _route_list(tree, _route("shortcut", to="rag-openwebui", port="https"))
+    r = (_owui_deploy(tree, ("ROUTES_FILE", routes)) if enabled
+         else _run(tree, ("ROUTES_FILE", routes)))
+    assert r.returncode != 0
+    assert "Route shortcut exposes a protected Service" in r.stderr
+    assert "upgrade" not in _helm_log(tree)
+
+
+@pytest.mark.parametrize("drift", [{"port": "http"}, {"termination": "edge"},
+                                   {"alternates": ("rag-agent",)}, {"host": "other.example"}])
+def test_openwebui_route_not_converged_after_release_is_deleted_and_fails(tree, drift):
+    live = _write_json(tree, "owui-route.json", _owui_route(**drift))
+    r = _owui_deploy(tree, live=live)
+    assert r.returncode != 0
+    assert "Route rag-openwebui did not converge" in r.stderr
+    log = _helm_log(tree)
+    assert log.index("delete\nroute.route.openshift.io/rag-openwebui") > log.index("upgrade")
+
+
+def test_openwebui_incompatible_owned_route_is_retired_before_the_release(tree):
+    routes = _route_list(tree, _owui_route(termination="edge"))
+    r = _owui_deploy(tree, ("ROUTES_FILE", routes))
+    assert r.returncode == 0, r.stderr
+    log = _helm_log(tree)
+    assert log.index("delete\nroute.route.openshift.io/rag-openwebui") < log.index("upgrade")
+
+
+def test_openwebui_off_renders_and_runs_nothing_of_it(tree):
+    r = _run(tree)
+    assert r.returncode == 0, r.stderr
+    assert "rag-openwebui" not in (tree[0] / "dist/agent-rendered.yaml").read_text()
+    assert "rag-openwebui" not in _helm_log(tree)
+    assert "Open WebUI front end off" in r.stdout
 
 
 def test_unrelated_routes_do_not_block_the_deploy(tree):

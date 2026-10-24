@@ -48,7 +48,7 @@ MODEL_CONFIG_KEYS = (
 OPERATOR_BOOL_KEYS = (
     "UI_ENABLED", "CONTEXTUAL_EMBED_ENABLED", "INGEST_ALIAS_PUBLISH",
     "INGEST_REINGEST", "INGEST_AUTHORIZE_FROM_CATALOG", "CHAT_CONDENSE_ENABLED", "LLM_STREAM", "AGENT_NETWORK_POLICY",
-    "FEEDBACK_ENABLED",
+    "FEEDBACK_ENABLED", "OPENWEBUI_ENABLED",
 )
 
 # Agent ingress NetworkPolicy (issue #373): default ON; the allow-list names
@@ -153,6 +153,97 @@ def feedback_config(values: Mapping[str, str]) -> dict[str, object] | None:
     return {"enabled": True, "secretName": secret, "storageSize": size, "retentionDays": days}
 
 
+# Optional Open WebUI docs front end (#1074, ADR-0007). Retention: maintainer
+# decision 2026-10-24 (30 days); the chart's purge sidecar enforces it.
+OPENWEBUI_DEFAULT_RETENTION_DAYS = 30
+OPENWEBUI_DEFAULT_STORAGE_SIZE = "10Gi"
+_HOSTNAME = re.compile(r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?(?:\.[a-z0-9](?:[-a-z0-9]*[a-z0-9])?)+")
+_PROVIDER_URL = re.compile(r"https://[^\s/]+(?:/\S*)?/\.well-known/openid-configuration")
+_CLAIM = re.compile(r"[A-Za-z0-9_:/.-]+")
+_NAME_LIST = re.compile(r"[^,\s]+(?:,[^,\s]+)*")
+_CIDR = re.compile(r"(?:[0-9]{1,3}\.){3}[0-9]{1,3}/(?:[0-9]|[12][0-9]|3[0-2])")
+
+
+def openwebui_config(values: Mapping[str, str]) -> dict[str, object] | None:
+    """The Open WebUI selection as chart values, or None while it is off.
+
+    Shapes are checked whenever a key is set; the Secret, host, OIDC client,
+    roles and IdP CIDRs are required only when enabled. The IdP egress is
+    NetworkPolicy ipBlocks (a policy cannot match a DNS name), so at least one
+    CIDR is required. Diagnostics name the key, never the value."""
+    enabled = parse_strict_bool("OPENWEBUI_ENABLED", values.get("OPENWEBUI_ENABLED", ""), False)
+    secret = values.get("OPENWEBUI_SECRET", "")
+    if secret and (len(secret) > 253 or _DNS_SUBDOMAIN.fullmatch(secret) is None):
+        raise ValueError("OPENWEBUI_SECRET must be a DNS-subdomain Secret name")
+    host = values.get("OPENWEBUI_HOST", "")
+    if host and (len(host) > 253 or _HOSTNAME.fullmatch(host) is None):
+        raise ValueError("OPENWEBUI_HOST must be a lowercase DNS host name (no scheme or path)")
+    raw_days = values.get("OPENWEBUI_RETENTION_DAYS", "")
+    days = OPENWEBUI_DEFAULT_RETENTION_DAYS
+    if raw_days != "":
+        if re.fullmatch(r"[0-9]+", raw_days) is None or not 1 <= int(raw_days) <= 3650:
+            raise ValueError("OPENWEBUI_RETENTION_DAYS must be an integer from 1 to 3650")
+        days = int(raw_days)
+    size = values.get("OPENWEBUI_STORAGE_SIZE", "") or OPENWEBUI_DEFAULT_STORAGE_SIZE
+    if _QUANTITY.fullmatch(size) is None:
+        raise ValueError("OPENWEBUI_STORAGE_SIZE must be a quantity such as 10Gi (Mi, Gi or Ti)")
+    provider = values.get("OPENWEBUI_OIDC_PROVIDER_URL", "")
+    if provider and _PROVIDER_URL.fullmatch(provider) is None:
+        raise ValueError("OPENWEBUI_OIDC_PROVIDER_URL must be the https://.../.well-known/"
+                         "openid-configuration URL of the identity team's client")
+    client_id = values.get("OPENWEBUI_OIDC_CLIENT_ID", "")
+    if client_id and (len(client_id) > 255 or re.search(r"[\s,]", client_id)):
+        raise ValueError("OPENWEBUI_OIDC_CLIENT_ID must not contain spaces or commas")
+    claims = {}
+    for key, default in (("OPENWEBUI_OIDC_GROUP_CLAIM", "groups"),
+                         ("OPENWEBUI_OIDC_ROLES_CLAIM", "roles")):
+        claims[key] = values.get(key, "") or default
+        if _CLAIM.fullmatch(claims[key]) is None:
+            raise ValueError(f"{key} must be a claim name (letters, digits, _ : / . -)")
+    roles = {}
+    for key in ("OPENWEBUI_OIDC_ALLOWED_ROLES", "OPENWEBUI_OIDC_ADMIN_ROLES"):
+        roles[key] = values.get(key, "")
+        if roles[key] and _NAME_LIST.fullmatch(roles[key]) is None:
+            raise ValueError(f"{key} must be a comma-separated list of role names")
+    cidrs = [part.strip() for part in values.get("OPENWEBUI_IDP_EGRESS_CIDRS", "").split(",")
+             if part.strip()]
+    for cidr in cidrs:
+        if _CIDR.fullmatch(cidr) is None or any(int(o) > 255 for o in cidr.split("/")[0].split(".")):
+            raise ValueError("OPENWEBUI_IDP_EGRESS_CIDRS must be comma-separated IPv4 CIDRs")
+    if len(set(cidrs)) != len(cidrs):
+        raise ValueError("OPENWEBUI_IDP_EGRESS_CIDRS must not repeat a CIDR")
+    raw_port = values.get("OPENWEBUI_IDP_EGRESS_PORT", "") or "443"
+    if re.fullmatch(r"[0-9]{1,5}", raw_port) is None or not 1 <= int(raw_port) <= 65535:
+        raise ValueError("OPENWEBUI_IDP_EGRESS_PORT must be a TCP port from 1 to 65535")
+    if not enabled:
+        return None
+    required = {"OPENWEBUI_SECRET": secret, "OPENWEBUI_HOST": host,
+                "OPENWEBUI_OIDC_PROVIDER_URL": provider, "OPENWEBUI_OIDC_CLIENT_ID": client_id,
+                **roles}
+    for key, value in required.items():
+        if not value:
+            raise ValueError(f"{key} is required when OPENWEBUI_ENABLED=true")
+    if not cidrs:
+        raise ValueError("OPENWEBUI_IDP_EGRESS_CIDRS is required when OPENWEBUI_ENABLED=true "
+                         "(the IdP back channel is the only egress besides the agent and DNS)")
+    return {
+        "enabled": True,
+        "secretName": secret,
+        "host": host,
+        "retentionDays": days,
+        "storageSize": size,
+        "oidc": {
+            "providerUrl": provider,
+            "clientId": client_id,
+            "groupClaim": claims["OPENWEBUI_OIDC_GROUP_CLAIM"],
+            "rolesClaim": claims["OPENWEBUI_OIDC_ROLES_CLAIM"],
+            "allowedRoles": roles["OPENWEBUI_OIDC_ALLOWED_ROLES"],
+            "adminRoles": roles["OPENWEBUI_OIDC_ADMIN_ROLES"],
+        },
+        "idpEgress": {"cidrs": cidrs, "port": int(raw_port)},
+    }
+
+
 def validate_operator_booleans(values: Mapping[str, str]) -> None:
     for name in OPERATOR_BOOL_KEYS:
         parse_strict_bool(name, values.get(name, ""), False)
@@ -254,6 +345,7 @@ def main() -> int:
         validate_operator_booleans(os.environ)
         network_policy(os.environ)
         feedback_config(os.environ)
+        openwebui_config(os.environ)
         validate_model_config(os.environ)
     except ValueError as exc:
         print(f"FAIL: {exc}", file=sys.stderr)

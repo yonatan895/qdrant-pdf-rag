@@ -34,6 +34,7 @@ resolve_observability
 resolve_agent_route
 resolve_network_policy
 resolve_feedback
+resolve_openwebui
 
 case "${RERANK_ENDPOINT_ORDER:-score_first}" in
     score_first|rerank_first) ;;

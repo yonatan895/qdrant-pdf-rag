@@ -1308,8 +1308,20 @@ def _openwebui_tree(tree, pin=OWUI_PIN):
     return tree
 
 
+OWUI_OPERATOR_ENV = {
+    "OPENWEBUI_ENABLED": "true",
+    "OPENWEBUI_SECRET": "owui-secrets",
+    "OPENWEBUI_HOST": "docs.apps.example.internal",
+    "OPENWEBUI_OIDC_PROVIDER_URL": "https://idp.example.internal/.well-known/openid-configuration",
+    "OPENWEBUI_OIDC_CLIENT_ID": "docs-frontend",
+    "OPENWEBUI_OIDC_ALLOWED_ROLES": "staff",
+    "OPENWEBUI_OIDC_ADMIN_ROLES": "docs-admins",
+    "OPENWEBUI_IDP_EGRESS_CIDRS": "10.20.0.0/24",
+}
+
+
 def _openwebui_run(tree, **env):
-    return _run(tree, {"OPENWEBUI_ENABLED": "true", **env})
+    return _run(tree, {**OWUI_OPERATOR_ENV, **env})
 
 
 def test_validate_openwebui_accepts_a_recorded_pin_matching_chart_and_bundle(tree):
@@ -1321,6 +1333,18 @@ def test_validate_openwebui_accepts_a_recorded_pin_matching_chart_and_bundle(tre
     r = _openwebui_run(tree)
     assert r.returncode == 0, r.stderr
     assert "Open WebUI pin recorded; matches the chart and the packed bundle" in r.stdout
+
+
+@pytest.mark.parametrize("key,needle", [
+    ("OPENWEBUI_OIDC_CLIENT_ID", "OPENWEBUI_OIDC_CLIENT_ID is required"),
+    ("OPENWEBUI_IDP_EGRESS_CIDRS", "OPENWEBUI_IDP_EGRESS_CIDRS is required"),
+    ("OPENWEBUI_SECRET", "OPENWEBUI_SECRET"),
+])
+def test_validate_openwebui_refuses_an_incomplete_selection(tree, key, needle):
+    _openwebui_tree(tree)
+    r = _openwebui_run(tree, **{key: ""})
+    assert r.returncode != 0
+    assert needle in r.stderr
 
 
 def test_validate_openwebui_pending_pin_refused_only_when_enabled(tree):
