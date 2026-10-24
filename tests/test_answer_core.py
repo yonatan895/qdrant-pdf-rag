@@ -1276,6 +1276,53 @@ async def test_core_one_usable_excerpt_invokes_generation_once(mode):
     )
 
 
+class _CharTokenizer:
+    """Whole-message count at a realistic ~4 chars/token, remotely confirmed."""
+
+    remote_confirmed = True
+
+    def count_tokens(self, text: str) -> int:
+        return len(text) // 4
+
+    def count_messages(self, messages, *, reasoning_effort=None) -> int:
+        return sum(len(m.content) for m in messages) // 4
+
+
+@pytest.mark.anyio
+async def test_core_huge_stored_title_does_not_starve_good_evidence():
+    """Issue #1008: one document with a 60 KB /Title (stored as-is in its
+    title and outline-less heading_path) made a 120 KB cite; its header and
+    the tail example ate the window, so the request failed 422 with zero
+    model calls and a good second hit was never supplied. Served cites are
+    bounded at construction, so both excerpts ship and both cites stay
+    copyable into the exact allowlist."""
+    from qdrant_client import models
+
+    from mainframe_rag.retrieve.query import _to_hit
+
+    huge = "Real Manual " + "A" * 60000
+
+    def point(pid, doc_id, title, heading, text):
+        return models.ScoredPoint(id=pid, version=1, score=1.0, payload={
+            "doc_id": doc_id, "title": title, "heading_path": heading, "page_label": "1-6",
+            "chunk_type": "message", "message_ids": ["IEA500I"], "text": text,
+            "page_start": 0, "page_end": 0,
+        })
+
+    bad = _to_hit(point("bad", "SA22-0000-00", huge, huge, "IEA500I bad doc text"), 0.9)
+    good = _to_hit(point("good", "SA22-7777-01", "Good Reference", "Chapter 2 > IEA500I",
+                         "IEA500I means reissue the command."), 0.8)
+    llm = CoreFakeLLM(content=f"Reissue the command.\n\nCitations:\n- {good.cite}\n- {bad.cite}\n")
+    deps = _deps(_settings(), llm, lambda *_a, **_k: ([bad, good], "nl", {}))
+    deps.tokenizer = _CharTokenizer()
+    out = await execute_answer_core(AnswerCoreInput(query="What does IEA500I mean?", hits=[bad, good]), deps)
+    assert len(llm.calls) == 1
+    user = llm.calls[0]["messages"][-1].content
+    assert f"[2] {good.cite}" in user and f"[1] {bad.cite}" in user
+    assert len(user) < 12000  # was > 240,000 chars before the bound
+    assert out.citations == [good.cite, bad.cite]
+
+
 @pytest.mark.anyio
 async def test_core_fixed_content_overflow_stays_plain_budget_error():
     """Irreducible fixed-content overflow keeps its own (non-evidence) cause."""
