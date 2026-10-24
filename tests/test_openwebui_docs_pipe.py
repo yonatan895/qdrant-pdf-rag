@@ -269,7 +269,7 @@ def _body_chars(body: dict[str, Any]) -> int:
 def test_max_body_chars_valve_defaults_to_the_agents_default():
     from mainframe_rag.config import Settings
 
-    assert docs_pipe.Pipe.Valves().MAX_BODY_CHARS == Settings.model_fields["chat_max_body_chars"].default
+    assert Settings.model_fields["chat_max_body_chars"].default == docs_pipe.Pipe.Valves().MAX_BODY_CHARS
 
 
 def test_long_history_is_trimmed_oldest_first_and_the_real_chat_request_accepts_it(chat_request):
