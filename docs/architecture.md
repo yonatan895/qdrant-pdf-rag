@@ -318,7 +318,7 @@ src/mainframe_rag/
   tracing.py          # OTel export: agent + ingest; library default off, deploy default on
 ```
 
-**Allowed Dependencies:** Python 3.14 GIL, `pymupdf`, `qdrant-client`, `fastembed` (sparse only), `httpx2`, `fastapi`, `jinja2` (operator console templates), `python-multipart` (console form parsing), `uvicorn`, `pydantic`, `pydantic-settings`, `opentelemetry-api`/`-sdk` plus the OTLP-HTTP and Prometheus exporters, `urllib3`.
+**Allowed Dependencies:** Python 3.14 GIL, `pymupdf`, `qdrant-client`, `fastembed` (sparse only), `httpx2`, `fastapi`, `jinja2` (operator console templates), `python-multipart` (console form parsing), `uvicorn`, `pydantic`, `pydantic-settings`, `opentelemetry-api`/`-sdk` plus the OTLP-HTTP and Prometheus exporters, `urllib3`, `pyjwt[crypto]` (team-tool caller verification, [team tools](team-tools.md#caller-verification)).
 
 ### Per-area reference docs
 

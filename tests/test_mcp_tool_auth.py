@@ -94,9 +94,9 @@ class _Idp:
 
     def handler(self, request: httpx2.Request) -> httpx2.Response:
         self.requests.append(str(request.url))
-        if self.status != 200:
-            return httpx2.Response(self.status, json={"error": "down"})
-        return httpx2.Response(200, json={"keys": self.keys})
+        # A non-200 still carries a well-formed key set: only the status may
+        # be what refuses it.
+        return httpx2.Response(self.status, json={"keys": self.keys})
 
     def cache(self, config: GatewayAuthConfig, clock: Callable[[], float] = time.monotonic) -> JwksCache:
         client = httpx2.AsyncClient(transport=httpx2.MockTransport(self.handler))
@@ -393,11 +393,17 @@ def test_config_needs_exactly_one_jwks_source(tmp_path: Path):
 
 
 class _App:
+    """Records every call it receives, with or without a Principal, so only
+    the middleware (not this app) can be what keeps a caller out."""
+
     def __init__(self) -> None:
-        self.calls: list[Principal] = []
+        self.calls: list[Principal | None] = []
 
     async def __call__(self, scope, receive, send) -> None:
-        self.calls.append(principal_from_scope(scope))
+        try:
+            self.calls.append(principal_from_scope(scope))
+        except AuthError:
+            self.calls.append(None)
         await send({"type": "http.response.start", "status": 200, "headers": []})
         await send({"type": "http.response.body", "body": b"ok"})
 
@@ -426,7 +432,13 @@ def _request(
 def test_middleware_passes_the_principal_to_the_app():
     response, app = _request({"Authorization": f"Bearer {_token()}"})
     assert response.status_code == 200
-    assert [p.sub for p in app.calls] == ["user-1"]
+    assert app.calls == [Principal(sub="user-1", groups=frozenset({GROUP, "everyone"}))]
+
+
+def test_principal_from_scope_refuses_an_unauthenticated_scope():
+    with pytest.raises(AuthError) as caught:
+        principal_from_scope({"type": "http", "headers": [(b"x-openwebui-user-id", b"user-1")]})
+    assert caught.value.code == "unauthenticated"
 
 
 def test_open_webui_headers_alone_never_authorize():
@@ -463,6 +475,24 @@ def test_duplicate_authorization_headers_are_refused():
     good = f"Bearer {_token()}"
     response, app = _request([("Authorization", good), ("Authorization", good)])
     assert response.status_code == 401
+    assert app.calls == []
+
+
+def test_unauthenticated_websocket_is_closed_before_the_app():
+    app = _App()
+    config = _config()
+    middleware = GatewayAuthMiddleware(app, config, _Idp().cache(config))
+    sent: list[dict[str, object]] = []
+
+    async def receive() -> dict[str, object]:
+        return {"type": "websocket.connect"}
+
+    async def send(message: dict[str, object]) -> None:
+        sent.append(message)
+
+    scope = {"type": "websocket", "path": "/mcp", "headers": [(b"x-openwebui-user-id", b"user-1")]}
+    asyncio.run(middleware(scope, receive, send))
+    assert sent == [{"type": "websocket.close", "code": 1008}]
     assert app.calls == []
 
 
