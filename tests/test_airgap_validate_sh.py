@@ -92,6 +92,40 @@ def test_validate_clean_exits_zero(tree):
     assert "EMBED_MODEL_REVISION: rev-1" in r.stdout
 
 
+RECORDING_TOOL = "#!/bin/sh\nprintf '%s\\n' \"$0 $*\" >> \"$TOOL_LOG\"\nexit 0\n"
+
+
+@pytest.mark.parametrize("value", ["true", "TRUE", "yes", "Yes"])
+def test_dryrun_spellings_are_a_dry_run_and_never_touch_the_cluster(tree, value):
+    for name in ("skopeo", "helm", "kubectl", "oc"):
+        write_stub(tree / "bin" / name, RECORDING_TOOL)
+    log = tree / "tool.log"
+    r = _run(tree, {"AIRGAP_DRYRUN": value, "TOOL_LOG": str(log)})
+    assert r.returncode == 0, r.stderr
+    assert "(dry-run mode)" in r.stdout
+    assert not log.exists(), log.read_text()
+
+
+@pytest.mark.parametrize("value", ["false", "0", "no"])
+def test_dryrun_off_spellings_run_live(tree, value):
+    for name in ("skopeo", "helm", "kubectl", "oc"):
+        write_stub(tree / "bin" / name, RECORDING_TOOL)
+    log = tree / "tool.log"
+    _run(tree, {"AIRGAP_DRYRUN": value, "TOOL_LOG": str(log)})
+    assert log.exists(), "an explicit live run must reach the cluster tools"
+
+
+@pytest.mark.parametrize("value", [" 1", "1 ", "1\n", "on", "y", "2", "maybe", "tru"])
+def test_unknown_dryrun_values_are_refused_before_any_stage(tree, value):
+    for name in ("skopeo", "helm", "kubectl", "oc"):
+        write_stub(tree / "bin" / name, RECORDING_TOOL)
+    log = tree / "tool.log"
+    r = _run(tree, {"AIRGAP_DRYRUN": value, "TOOL_LOG": str(log)})
+    assert r.returncode != 0
+    assert "AIRGAP_DRYRUN must be" in r.stderr
+    assert not log.exists(), "a refused flag must not run any stage"
+
+
 @pytest.mark.parametrize("extra_env,exit_code,messages", [
     pytest.param({'QDRANT_REPLICATION_FACTOR': None}, 1, ('collection distribution policy is incomplete', 'QDRANT_REPLICATION_FACTOR'),
                  id='validate_partial_policy_fails_closed'),
@@ -369,6 +403,25 @@ def test_validate_refuses_plaintext_gateway_key_in_env_file(tree):
         assert r.returncode != 0, var
         assert "plaintext gateway virtual key" in r.stderr, var
         assert "sk-plaintext-must-die" not in r.stdout + r.stderr
+
+
+@pytest.mark.parametrize("line", [
+    "export LLM_API_KEY=sk-plaintext-must-die",
+    "readonly LLM_API_KEY=sk-plaintext-must-die",
+    "declare -x LLM_API_KEY=sk-plaintext-must-die",
+    "typeset -x LLM_API_KEY=sk-plaintext-must-die",
+    "export -- LLM_API_KEY=sk-plaintext-must-die",
+    "X=1; export LLM_API_KEY=sk-plaintext-must-die",
+    "export OTHER=1 LLM_API_KEY=sk-plaintext-must-die",
+    "export LLM_API_KEY='sk-plaintext-must-die'",
+    "eval 'LLM_API_KEY=sk-plaintext-must-die'",
+], ids=["export", "readonly", "declare", "typeset", "dashdash", "chained", "multi", "quoted", "eval"])
+def test_validate_refuses_plaintext_gateway_key_under_any_shell_syntax(tree, line):
+    """The operator file is sourced, so export/readonly forms must not bypass the guard."""
+    r = _run(tree, {"AIRGAP_ENV": _write_env_file(tree, f"{line}\n")})
+    assert r.returncode != 0
+    assert "plaintext gateway virtual key" in r.stderr
+    assert "sk-plaintext-must-die" not in r.stdout + r.stderr
 
 
 def test_validate_allows_empty_and_commented_gateway_keys(tree):

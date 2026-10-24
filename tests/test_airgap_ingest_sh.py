@@ -229,6 +229,24 @@ def test_hostile_patch_is_refused_after_the_patch_is_applied(ingest_tree, patch)
     assert "INGEST_EXTRA_PATCH may only change container resources" in r.stderr
 
 
+@pytest.mark.parametrize("value", ["true", "yes", "TRUE"])
+def test_ingest_dryrun_spellings_never_apply_or_delete(ingest_tree, value):
+    """#1015: the natural spelling of a preview must not mutate the cluster."""
+    r = _run_ingest(ingest_tree, ("AIRGAP_DRYRUN", value))
+    assert r.returncode == 0, r.stderr
+    log = ingest_tree[1].read_text() if ingest_tree[1].exists() else ""
+    assert "apply" not in log and "delete" not in log
+    assert "[dryrun]" in r.stdout
+
+
+@pytest.mark.parametrize("value", [" 1", "1\n", "on", "2"])
+def test_ingest_refuses_unknown_dryrun_values_before_any_call(ingest_tree, value):
+    r = _run_ingest(ingest_tree, ("AIRGAP_DRYRUN", value))
+    assert r.returncode != 0
+    assert "AIRGAP_DRYRUN must be" in r.stderr
+    assert not ingest_tree[1].exists()
+
+
 @pytest.mark.parametrize("delete_fails", [False, True])
 def test_ingest_replacement_waits_for_prior_writer(ingest_tree, delete_fails):
     """A deleted Job can still have a terminating pod holding the writer lock."""
