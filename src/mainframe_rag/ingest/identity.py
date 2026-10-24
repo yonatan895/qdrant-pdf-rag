@@ -31,6 +31,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 
 def normalize_label(value: str | None) -> str:
@@ -57,6 +58,24 @@ def source_rev_key(vendor: str | None, product: str | None, version: str | None,
     normalized); equal keys are always safe to treat as one revision."""
     labels = (_escape_label(normalize_label(x)) for x in (vendor, product, version))
     return "|".join((*labels, sha256))
+
+
+class _LabelledSource(Protocol):
+    @property
+    def vendor(self) -> str | None: ...
+    @property
+    def product(self) -> str | None: ...
+    @property
+    def version(self) -> str | None: ...
+    @property
+    def sha256(self) -> str: ...
+
+
+def parsed_source_rev(parsed: _LabelledSource) -> str:
+    """The source revision of a parsed document (#990 item 2): the one
+    mapping from its resolved labels and digest to the key that chunk ids,
+    stored payloads and orchestration (`run_ingest.walked_source_rev`) use."""
+    return source_rev_key(parsed.vendor, parsed.product, parsed.version, parsed.sha256)
 
 
 def corpus_relpath(path_str: str, src: Path) -> str:

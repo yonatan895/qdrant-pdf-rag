@@ -98,9 +98,9 @@ from mainframe_rag.ingest.ibm_pdf import (
 from mainframe_rag.ingest.identity import (
     RevisionCollisionError,
     find_collisions,
+    parsed_source_rev,
     plan_duplicates,
     prescan_doc_ids,
-    source_rev_key,
 )
 from mainframe_rag.ingest.inventory import (
     InventoryRecord,
@@ -260,9 +260,10 @@ def walked_source_rev(parsed: ParsedDoc) -> str:
     """The source revision of a parsed walked document, after the hidden-
     character doc_id refusal (issue #1022): the one key the build path
     stores, locks and deletes by, and the retirement check compares (issue
-    #986). A `|` in a label is escaped by source_rev_key (#990 item 1)."""
+    #986). The mapping is identity.parsed_source_rev (#990 item 2), which
+    escapes a `|` in a label (#990 item 1)."""
     require_visible_doc_id(parsed)
-    return source_rev_key(parsed.vendor, parsed.product, parsed.version, parsed.sha256)
+    return parsed_source_rev(parsed)
 
 
 def parse_walked(
@@ -279,7 +280,7 @@ def parse_walked(
     path (`_parse_one`) and the retirement-conflict check (issue #986), so a
     file cannot be labelled one way when stored and another when retired (the
     #839 drift). Its key is `walked_source_rev(parsed)`. Both only compose
-    `parse_pdf` and `source_rev_key`, so no stored key changes."""
+    `parse_pdf` and `parsed_source_rev`, so no stored key changes."""
     return parse_pdf(
         path, vendor=vendor, product=product, version=version,
         corpus_root=corpus_root, sha256=sha,

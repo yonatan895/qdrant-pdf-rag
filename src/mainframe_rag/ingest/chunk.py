@@ -15,7 +15,7 @@ from itertools import pairwise
 from typing import TYPE_CHECKING
 
 from mainframe_rag.ingest.classify import classify, is_table_block
-from mainframe_rag.ingest.identity import source_rev_key
+from mainframe_rag.ingest.identity import parsed_source_rev
 from mainframe_rag.regexes import (
     FRONT_MATTER_RE,
     SKIP_ALWAYS_RE,
@@ -1029,7 +1029,7 @@ def make_chunks(
     doc_id = parsed.doc_id or parsed.path.stem
     # Chunk identity keys on the source revision (issue #361): the payload
     # doc_id stays the printed family key for citations and filters.
-    revision = source_rev_key(parsed.vendor, parsed.product, parsed.version, parsed.sha256)
+    revision = parsed_source_rev(parsed)
     labels = page_labels or [None] * parsed.page_count
     chunks: list[Chunk] = []
 

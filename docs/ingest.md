@@ -115,7 +115,10 @@ PyMuPDF is the only parser. `parse_pdf` returns a frozen, slots `ParsedDoc`.
   the two could compute different source revisions). Both paths reach it
   through `run_ingest.parse_walked` (the run's CLI labels, corpus root and walk
   digest) and take the key from `walked_source_rev`, which `_upsert_one`'s
-  locks and deletes use too (issue #986). Empty version becomes
+  locks and deletes use too (issue #986). `walked_source_rev`, the chunk-id
+  revision in `chunk.make_chunks` and the stored payload `source_rev` all
+  come from one mapping, `identity.parsed_source_rev` (#990 item 2; before,
+  `chunk.py` and `payload.py` each spelled it). Empty version becomes
   `None`, empty vendor becomes `"unknown"`; the TOC comes from `get_toc(simple=True)`;
   the document is closed in a `finally`.
 - Metadata sanitizing (issue #998): `/Title`, bookmark titles and
