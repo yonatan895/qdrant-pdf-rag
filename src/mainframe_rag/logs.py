@@ -8,7 +8,8 @@ prompts, evidence, responses, headers, or source paths: callers log ids
 (doc_id, chunk_id, request_id), counts, elapsed_ms, and error *types* only.
 Exception bodies are never exported — use error_type() for the stable
 class name; tracebacks render as frame locations (file:function:line)
-without messages or source text (issue #529 OBS-1A). When a traced
+without messages or source text (issue #529 OBS-1A). Uvicorn's own
+loggers are routed through the same handler (issue #989). When a traced
 request is active, the formatter also stamps the OTel trace_id/span_id
 (issue #185) so log lines join to Jaeger traces; with tracing off the
 fields are omitted and the log shape is unchanged.
@@ -18,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 import traceback
 
@@ -54,6 +56,31 @@ def _frame_locations(exc_info) -> list[str]:
     return locations
 
 
+_TRACEBACK_HEAD = "Traceback (most recent call last):"
+_RENDERED_FRAME = re.compile(r'^\s*File "([^"]+)", line (\d+), in (\S+)', re.MULTILINE)
+_RENDERED_TRACEBACK = "rendered traceback withheld"
+
+
+def _withhold_rendered_traceback(message: str) -> tuple[str, dict[str, str]]:
+    """A plain message carrying an already-rendered traceback (uvicorn logs
+    Starlette's `traceback.format_exc()` text when a lifespan fails, with no
+    exc_info; issue #989) keeps only what an exc_info record would: the text
+    before the traceback, the final exception's type name and frame
+    locations. The exception message and source lines never reach the line."""
+    head, found, rendered = message.partition(_TRACEBACK_HEAD)
+    if not found:
+        return message, {}
+    trace = "\n".join(
+        f"{path}:{function}:{line}" for path, line, function in _RENDERED_FRAME.findall(rendered)
+    )
+    final = next((ln for ln in reversed(rendered.splitlines()) if ln.strip()), "")
+    name = final.split(":", 1)[0].strip().rsplit(".", 1)[-1]
+    return head.strip() or _RENDERED_TRACEBACK, {
+        "error_type": name if name.isidentifier() else "Error",
+        "trace": trace,
+    }
+
+
 class JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         payload: dict = {
@@ -71,7 +98,8 @@ class JsonFormatter(logging.Formatter):
             # be shadowed by an event dict.
             payload = {**parsed, **payload}
         else:
-            payload["message"] = message
+            payload["message"], rendered = _withhold_rendered_traceback(message)
+            payload.update(rendered)
         # Trace correlation last, never overwriting: an explicit caller
         # value (e.g. propagated across a process boundary) wins over the
         # ambient span context.
@@ -87,6 +115,9 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(payload, separators=(",", ":"), default=str)
 
 
+_SERVER_LOGGERS = ("uvicorn", "uvicorn.error", "uvicorn.access")
+
+
 def configure_logging(level: str = "INFO") -> None:
     """Install the JSON handler on the root logger (idempotent)."""
     try:
@@ -100,3 +131,15 @@ def configure_logging(level: str = "INFO") -> None:
     root = logging.getLogger()
     root.handlers = [handler]
     root.setLevel(resolved)
+    # Uvicorn's default config gives its loggers their own plain-text handlers
+    # that never reach root, so the crash it logs after Starlette re-raises an
+    # unhandled fault printed the full traceback, message and source lines
+    # included (issue #989). Their records go through the JSON handler instead;
+    # their levels stay uvicorn's (`--log-level`). A logger uvicorn disabled
+    # (`--no-access-log`: no handlers, no propagation) stays disabled.
+    for name in _SERVER_LOGGERS:
+        server = logging.getLogger(name)
+        if not server.handlers and not server.propagate:
+            continue
+        server.handlers = []
+        server.propagate = True
