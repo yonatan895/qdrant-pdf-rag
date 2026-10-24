@@ -92,6 +92,18 @@ else
     echo "==> oauth-proxy pin is sha256:PENDING: not bundled (agent console Route stays unavailable until recorded)"
 fi
 
+# Optional docs front end (ADR-0007, #1074): the hardened Open WebUI image is
+# bundled only once its digest is recorded (#1073); while it is sha256:PENDING
+# the member is skipped and deploying with OPENWEBUI_ENABLED=true fails closed.
+OPENWEBUI_REF=""
+OPENWEBUI_TAR=""
+if pin_recorded qdrant-pdf-rag-openwebui; then
+    OPENWEBUI_REF=$(pin_from_images_txt qdrant-pdf-rag-openwebui)
+    OPENWEBUI_TAR="openwebui-image.tar"
+else
+    echo "==> Open WebUI pin is sha256:PENDING: not bundled (OPENWEBUI_ENABLED stays unavailable until recorded)"
+fi
+
 DIST="$REPO_ROOT/dist"
 OUT_TARBALL="$DIST/qdrant-pdf-rag-${IMAGE_SHA}.tar"
 mkdir -p "$DIST"
@@ -118,6 +130,7 @@ rm -f "$DIST"/repo.bundle "$DIST"/qdrant-image.tar \
       "$DIST"/MANIFEST.txt "$DIST"/THIRD-PARTY-NOTICES.txt "$DIST"/SHA256SUMS "$OUT_TARBALL" "$OUT_TARBALL.sha256"
 # shellcheck disable=SC2086
 rm -f $OAUTH_TAR
+rm -f "$DIST/openwebui-image.tar"
 
 echo "==> Git bundle of the checked-out commit"
 # HEAD must be an explicit ref: without it, `git clone repo.bundle` on the
@@ -152,6 +165,12 @@ if [ -n "$OAUTH_TAR" ]; then
     # shellcheck disable=SC2086
     skopeo copy $extra_args --remove-signatures --preserve-digests "docker://$OAUTH_PROXY_REF" "oci-archive:$DIST/$OAUTH_TAR"
 fi
+if [ -n "$OPENWEBUI_TAR" ]; then
+    # Same OCI-archive contract as the other members (#1066): keep the
+    # registry manifest and compressed layers byte-for-byte.
+    # shellcheck disable=SC2086
+    skopeo copy $extra_args --preserve-digests "docker://$OPENWEBUI_REF" "oci-archive:$DIST/$OPENWEBUI_TAR"
+fi
 
 echo "==> Image digests (bound into MANIFEST, verified on load)"
 # Archive digests come from one verified read of each OCI layout (index.json ->
@@ -172,11 +191,19 @@ OAUTH_DIGEST=""
 if [ -n "$OAUTH_TAR" ]; then
     OAUTH_DIGEST=$(archive_manifest "$DIST/$OAUTH_TAR" "$IMAGE_MANIFESTS/oauth_proxy")
 fi
+OPENWEBUI_DIGEST=""
+if [ -n "$OPENWEBUI_TAR" ]; then
+    OPENWEBUI_DIGEST=$(archive_manifest "$DIST/$OPENWEBUI_TAR" "$IMAGE_MANIFESTS/openwebui")
+fi
 INGEST_CONFIG_DIGEST=$(archive_config_digest "$IMAGE_MANIFESTS/ingest")
 AGENT_CONFIG_DIGEST=$(archive_config_digest "$IMAGE_MANIFESTS/agent")
 QDRANT_CONFIG_DIGEST=$(archive_config_digest "$IMAGE_MANIFESTS/qdrant")
 OPENOBSERVE_CONFIG_DIGEST=$(archive_config_digest "$IMAGE_MANIFESTS/openobserve")
 OTELCOL_CONFIG_DIGEST=$(archive_config_digest "$IMAGE_MANIFESTS/otelcol")
+OPENWEBUI_CONFIG_DIGEST=""
+if [ -n "$OPENWEBUI_TAR" ]; then
+    OPENWEBUI_CONFIG_DIGEST=$(archive_config_digest "$IMAGE_MANIFESTS/openwebui")
+fi
 OAUTH_CONFIG_DIGEST=""
 if [ -n "$OAUTH_TAR" ]; then
     OAUTH_CONFIG_DIGEST=$(archive_config_digest "$IMAGE_MANIFESTS/oauth_proxy")
@@ -214,6 +241,11 @@ CHART_SHA256=$(sha256sum charts/qdrant-*.tgz | awk '{print $1}')
         echo "oauth_proxy_digest: $OAUTH_DIGEST"
         echo "oauth_proxy_config_digest: $OAUTH_CONFIG_DIGEST"
     fi
+    if [ -n "$OPENWEBUI_TAR" ]; then
+        echo "openwebui: $OPENWEBUI_REF"
+        echo "openwebui_digest: $OPENWEBUI_DIGEST"
+        echo "openwebui_config_digest: $OPENWEBUI_CONFIG_DIGEST"
+    fi
     echo "chart: $CHART_VERSION"
     echo "chart_sha256: $CHART_SHA256"
     echo "ingest: $INGEST_IMAGE"
@@ -241,6 +273,7 @@ export SBOM_DATE IMAGE_SHA QDRANT_REF QDRANT_DIGEST
 export OPENOBSERVE_REF OPENOBSERVE_DIGEST OTELCOL_REF OTELCOL_DIGEST
 export INGEST_IMAGE INGEST_DIGEST AGENT_IMAGE AGENT_DIGEST UBI_REF UBI_DIGEST
 export OAUTH_PROXY_REF OAUTH_DIGEST CHART_VERSION CHART_SHA256 DIST REPO_ROOT
+export OPENWEBUI_REF OPENWEBUI_DIGEST
 export TASK_VERSION TASK_ASSET TASK_SHA256 TASK_BINARY_SHA256 TASK_LICENSE_SHA256 TASK_ORIGIN
 python3 - <<'PYEOF'
 import json
@@ -293,6 +326,14 @@ if os.environ.get("OAUTH_PROXY_REF"):
             "digest": os.environ["OAUTH_DIGEST"],
         }
     )
+if os.environ.get("OPENWEBUI_REF"):
+    sbom["images"].append(
+        {
+            "name": "openwebui",
+            "ref": os.environ["OPENWEBUI_REF"],
+            "digest": os.environ["OPENWEBUI_DIGEST"],
+        }
+    )
 with open(os.path.join(os.environ["DIST"], "sbom.json"), "w", encoding="utf-8") as fh:
     json.dump(sbom, fh, indent=2, sort_keys=True)
     fh.write("\n")
@@ -328,6 +369,9 @@ chmod +x "$DIST/bootstrap.sh"
     if [ -n "$OAUTH_TAR" ]; then
         echo "  - oauth-proxy Image:   $OAUTH_PROXY_REF"
     fi
+    if [ -n "$OPENWEBUI_TAR" ]; then
+        echo "  - Open WebUI Image:    $OPENWEBUI_REF"
+    fi
     echo "  - Ingest Image:        $INGEST_IMAGE"
     echo "  - Agent Image:         $AGENT_IMAGE"
     echo "  - Helm Chart:          $CHART_VERSION"
@@ -356,7 +400,7 @@ openssl pkey -in "$SNEAKERNET_SIGNING_KEY" -pubout -out "$DIST/sneakernet-signin
     cd "$DIST"
     # shellcheck disable=SC2086
     sha256sum bootstrap.sh repo.bundle "$TASK_ASSET" task-pin.txt task-LICENSE qdrant-image.tar \
-              openobserve-image.tar otelcol-image.tar app-ingest-"$IMAGE_SHA".tar app-agent-"$IMAGE_SHA".tar $OAUTH_TAR \
+              openobserve-image.tar otelcol-image.tar app-ingest-"$IMAGE_SHA".tar app-agent-"$IMAGE_SHA".tar $OAUTH_TAR $OPENWEBUI_TAR \
               MANIFEST.txt PACKING_RECORD.txt sbom.json THIRD-PARTY-NOTICES.txt sneakernet-signing.pub > SHA256SUMS
 )
 
@@ -369,7 +413,7 @@ openssl dgst -sha256 -sign "$SNEAKERNET_SIGNING_KEY" \
 echo "==> Tarball + tarball digest"
 # shellcheck disable=SC2086
 tar -C "$DIST" -cf "$OUT_TARBALL" bootstrap.sh repo.bundle "$TASK_ASSET" task-pin.txt task-LICENSE qdrant-image.tar \
-    openobserve-image.tar otelcol-image.tar app-ingest-"$IMAGE_SHA".tar app-agent-"$IMAGE_SHA".tar $OAUTH_TAR MANIFEST.txt PACKING_RECORD.txt sbom.json THIRD-PARTY-NOTICES.txt sneakernet-signing.pub SHA256SUMS SHA256SUMS.sig
+    openobserve-image.tar otelcol-image.tar app-ingest-"$IMAGE_SHA".tar app-agent-"$IMAGE_SHA".tar $OAUTH_TAR $OPENWEBUI_TAR MANIFEST.txt PACKING_RECORD.txt sbom.json THIRD-PARTY-NOTICES.txt sneakernet-signing.pub SHA256SUMS SHA256SUMS.sig
 # shellcheck disable=SC2016
 ( cd "$DIST" && sha256sum "$(basename "$OUT_TARBALL")" ) > "$OUT_TARBALL.sha256"
 

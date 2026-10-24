@@ -744,6 +744,28 @@ require_oauth_cookie_secret() {
     require_secret_keys rag-agent-oauth-cookie cookie-secret
 }
 
+# Optional docs front end (ADR-0007, #1074): the hardened Open WebUI pin must
+# be recorded (not sha256:PENDING, #1073), name the chart's images.openwebui
+# repository/tag, and (with a packed MANIFEST) be the pin the bundle carries.
+require_openwebui_pin() {
+    pin_recorded qdrant-pdf-rag-openwebui || die "OPENWEBUI_ENABLED=true needs the Open WebUI digest recorded in images.txt (currently sha256:PENDING, pending #1073 qualification); record it on the connected host and repack"
+    _owui_src=$(awk '$1 !~ /^#/ && $1 ~ /qdrant-pdf-rag-openwebui/ {print $1; exit}' images.txt)
+    _chart_values=charts/mainframe-rag/values.yaml
+    # images.openwebui (indented), not the top-level openwebui settings block.
+    _chart_repo=$(awk '/^[[:space:]]+openwebui:/{f=1;next} f&&/^[[:space:]]*repository:/{print $2;exit} f&&/^[^[:space:]]/{exit}' "$_chart_values" | tr -d "\"'")
+    _chart_tag=$(awk '/^[[:space:]]+openwebui:/{f=1;next} f&&/^[[:space:]]*tag:/{print $2;exit} f&&/^[^[:space:]]/{exit}' "$_chart_values" | tr -d "\"'")
+    case "$_owui_src" in
+        *"/$_chart_repo:$_chart_tag") ;;
+        *) die "OPENWEBUI_ENABLED=true needs the images.txt Open WebUI pin ($_owui_src) to match the chart's images.openwebui repository/tag ($_chart_repo:$_chart_tag); change both together" ;;
+    esac
+    if [ -n "${MANIFEST:-}" ]; then
+        _packed_ref=$(awk -F': ' '$1 == "openwebui" {print $2}' "$MANIFEST")
+        [ -n "$_packed_ref" ] || die "OPENWEBUI_ENABLED=true needs an openwebui entry in the packed MANIFEST: the bundle was packed without the Open WebUI image; record the pin and repack"
+        [ "$_packed_ref" = "$(pin_from_images_txt qdrant-pdf-rag-openwebui)" ] || die "OPENWEBUI_ENABLED=true needs the packed MANIFEST openwebui pin to equal images.txt: wrong bundle for this checkout"
+    fi
+    unset _owui_src _chart_values _chart_repo _chart_tag _packed_ref
+}
+
 # Namespace service CA (public) as the Route destinationCACertificate.
 # $1 = output file. Empty or non-PEM content fails closed.
 fetch_route_destination_ca() {

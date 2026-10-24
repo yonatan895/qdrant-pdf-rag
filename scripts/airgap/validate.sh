@@ -112,6 +112,12 @@ if [ "$AGENT_ROUTE" = "true" ]; then
     echo "    oauth-proxy pin recorded; matches the chart${MANIFEST:+ and the packed bundle}"
     echo "    Notice: the console Route authenticates any OpenShift user (oauth-proxy --email-domain=*, no SAR); the cohort restriction is a site decision (issue #373)"
 fi
+# Optional docs front end (ADR-0007, #1074): the Open WebUI image pin must be
+# recorded and consistent with the chart and the bundle. Static: runs in dry-run.
+if [ "${OPENWEBUI_ENABLED:-false}" = "true" ]; then
+    require_openwebui_pin
+    echo "    Open WebUI pin recorded; matches the chart${MANIFEST:+ and the packed bundle}"
+fi
 
 CHART=$(ls charts/qdrant-*.tgz 2>/dev/null | head -1 || true)
 [ -n "$CHART" ] || die "vendored chart missing (charts/qdrant-*.tgz)"
