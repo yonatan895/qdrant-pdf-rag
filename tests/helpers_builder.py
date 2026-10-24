@@ -24,9 +24,10 @@ def use_staging_builder(monkeypatch) -> None:
 
     def build_configured_collection(
         src, progress, workers, settings, tracer, root, *, vendor, product, version,
-        force_reingest, prewalked, retire_docs, rules_v,
+        force_reingest, prewalked, retire_docs, rules_v, authorize_from_catalog=False,
     ):
         assert not retire_docs, "retirements are a publication contract: use test_ingest_publish"
+        assert not authorize_from_catalog, "a retirement authority: use test_ingest_publish"
         return run_ingest._run_impl(
             src, progress, workers, None, False, settings, tracer, root,
             vendor=vendor, product=product, version=version, force_reingest=force_reingest,

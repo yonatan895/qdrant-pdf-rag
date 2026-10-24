@@ -727,15 +727,23 @@ thread pool.
   retry); a lineage-less run therefore ADDS revisions — keep the
   `--progress` file (prod `/work` persists it) so refreshes replace.
   **Recovery after a lost progress file** (issue #1005): a relabel then has no
-  lineage and refuses as residue, and `--retire-doc` cannot name the published
-  revision either, because the inventory is the only retirement authority
+  lineage and refuses as residue, and plain `--retire-doc` cannot name the
+  published revision, because the inventory is the default retirement authority
   (removing a document's records revokes its approval). Restore the progress
-  file if a copy exists. Otherwise: remove the refused build's
-  `publish-<alias>.json`, republish with the **original** labels and
-  `--reingest` (the serving generation cannot be re-certified without
-  inventory, so a forced repair generation rebuilds the records), then rerun
-  the relabel; lineage replaces the old revision and its markers. No control
-  collection is edited. Any
+  file if a copy exists. Otherwise remove the refused build's
+  `publish-<alias>.json` and rerun the relabel with
+  `--retire-doc DOCID@SOURCEREV --authorize-from-catalog`. The flag is valid only
+  with `--retire-doc`. Under the target lock it also approves a requested
+  revision that the inventory lacks, provided the live build's sealed source
+  catalog lists it (stored entries verified against the receipt) and it is
+  committed in the live generation (a completion marker whose points verify).
+  Refusals carry stable codes and ids only: `retire_catalog_requires_retire_doc`,
+  `retire_not_in_catalog` and `retire_not_committed`. The run logs
+  `action: retire_authorized_from_catalog` with the approved ids. Without the
+  flag, behaviour is unchanged. Alternative without the flag: republish with the
+  **original** labels and `--reingest` (a forced repair generation rebuilds
+  the inventory records), then rerun the relabel, and lineage replaces the old
+  revision. No control collection is edited on either path. Any
   point without a source revision under the document (pre-#361 data) raises
   `UnsupportedLegacyDataError` (doc id + content ids, never text) before any
   delete: that data is never migrated; build the corpus into a new collection.
@@ -802,7 +810,9 @@ thread pool.
    cutover until the operator either restores the file or names an explicit
    approved removal (`--retire-doc DOCID[@SOURCEREV]`, repeatable, planned
    under the target lock against the freshest approved inventory and applied
-   to staging with revision-scoped deletes before verification). Approved
+   to staging with revision-scoped deletes before verification; the explicit
+   `--authorize-from-catalog` flag additionally accepts revisions the live
+   build published and committed, see the lost-inventory recovery above). Approved
    history without a source revision is unsupported pre-#361 data and refuses
    the plan; every refusal names the operator path (re-plan, retire the whole
    document, or build into a new collection). Retiring revision A (`--retire-doc DOCID@SOURCEREV`)

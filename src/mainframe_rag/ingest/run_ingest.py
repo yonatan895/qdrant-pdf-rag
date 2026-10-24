@@ -101,7 +101,10 @@ from mainframe_rag.ingest.inventory import (
 )
 from mainframe_rag.ingest.publish import (
     PUBLISH_STATE_VERSION,
+    RETIRE_CATALOG_REQUIRES_RETIRE_DOC,
+    CatalogRetirementRefused,
     apply_approved_removals,
+    catalog_retirement_approvals,
     clear_publish_state,
     commit_retired_inventory,
     corpus_fingerprint,
@@ -689,6 +692,7 @@ def run(
     version: str | None = None,
     force_reingest: bool = False,
     retire_docs: tuple[str, ...] | None = None,
+    authorize_from_catalog: bool = False,
 ) -> int:
     """Public entry: OTel tracing around the ingest body (issue #83).
 
@@ -722,6 +726,7 @@ def run(
             version=version,
             force_reingest=force_reingest,
             retire_docs=retire_docs,
+            authorize_from_catalog=authorize_from_catalog,
         )
     except Exception as exc:
         root.set_attribute("ingest.error_type", type(exc).__name__)
@@ -747,6 +752,7 @@ def _dispatch(
     version: str | None = None,
     force_reingest: bool = False,
     retire_docs: tuple[str, ...] | None = None,
+    authorize_from_catalog: bool = False,
 ) -> int:
     """Mode choice (issue #583 S5), made once per run: every real run is an
     alias publication; only a dry run (which writes nothing) reaches the
@@ -754,6 +760,12 @@ def _dispatch(
     collection, was retired (#360). The publisher builds its staging
     generation through `_run_impl` with a `_StagingBuild`; `_run_impl`
     itself never chooses a mode."""
+    if authorize_from_catalog and not retire_docs:
+        # The catalog authority only extends an explicit removal (issue #1005).
+        raise CatalogRetirementRefused(
+            RETIRE_CATALOG_REQUIRES_RETIRE_DOC,
+            "--authorize-from-catalog is valid only together with --retire-doc",
+        )
     if settings.contextual_embed_enabled and not dry_run:
         # Fail the whole run before spawning the pool: a misconfigured flag
         # must never degrade into header-only vectors doc by doc. Dry runs
@@ -778,6 +790,7 @@ def _dispatch(
             version=version,
             force_reingest=force_reingest,
             retire_docs=retire_docs,
+            authorize_from_catalog=authorize_from_catalog,
         )
     if retire_docs:
         # Explicit removals are a publication operation; a dry run mutates
@@ -1592,6 +1605,7 @@ def _run_publish(
     version: str | None = None,
     force_reingest: bool = False,
     retire_docs: tuple[str, ...] | None = None,
+    authorize_from_catalog: bool = False,
 ) -> int:
     """Alias-publication orchestration (issue #359 req 4/5): converge a    versioned staging generation, then atomically swap the alias to it.
 
@@ -1636,6 +1650,7 @@ def _run_publish(
             prewalked=prewalked,
             retire_docs=retire_docs,
             rules_v=rules_v,
+            authorize_from_catalog=authorize_from_catalog,
         )
     finally:
         release_run_lock(target_lock)
@@ -1655,6 +1670,7 @@ def _run_publish_locked(
     prewalked: list[tuple[str, str]],
     retire_docs: tuple[str, ...] | None,
     rules_v: str,
+    authorize_from_catalog: bool = False,
 ) -> int:
     """Publication body under the target lock (see _run_publish), in three
     phases (issue #583 S6): a read-only resolution of the predecessor, build
@@ -1674,6 +1690,7 @@ def _run_publish_locked(
         prewalked=prewalked,
         retire_docs=retire_docs,
         rules_v=rules_v,
+        authorize_from_catalog=authorize_from_catalog,
     )
     if res.live == res.staging:
         return _recertify_live(res, client, progress, settings, prewalked=prewalked, rules_v=rules_v)
@@ -1730,6 +1747,7 @@ def _resolve_publication(
     prewalked: list[tuple[str, str]],
     retire_docs: tuple[str, ...] | None,
     rules_v: str,
+    authorize_from_catalog: bool = False,
 ) -> _Resolution:
     """Read-only resolution: publish-state format and predecessor binding,
     retirement plan selection (replaying a bound plan), walked-corpus
@@ -1809,7 +1827,24 @@ def _resolve_publication(
         if already_swapped or recorded_retire_docs is not None or retire_docs:
             retire_plan = state.get("retire_plan")
     if retire_plan is None:
-        retire_plan = plan_approved_removals(retire_docs, prior_inventory)[0] if retire_docs else {}
+        catalog_approved = None
+        if retire_docs and authorize_from_catalog:
+            # Explicit operator authority (issue #1005, option B): revisions
+            # the live build published and committed, read under this lock.
+            live_settings = settings.model_copy(update={"qdrant_collection": live or alias})
+            catalog_approved = catalog_retirement_approvals(
+                client, live_settings, retire_docs, prior_inventory
+            )
+            log.info(json.dumps({
+                "action": "retire_authorized_from_catalog",
+                "alias": alias,
+                "revisions": {doc: sorted(revs) for doc, revs in sorted(catalog_approved.items())},
+            }))
+        retire_plan = (
+            plan_approved_removals(retire_docs, prior_inventory, catalog_approved)[0]
+            if retire_docs
+            else {}
+        )
 
     conflicts: set[str] = set()
     if retire_plan:
@@ -2284,6 +2319,13 @@ def main(argv: list[str] | None = None) -> int:
         "from the published set. Validated against the last approved "
         "inventory; publish mode only.",
     )
+    parser.add_argument(
+        "--authorize-from-catalog",
+        action="store_true",
+        help="With --retire-doc only: also approve revisions the live build "
+        "published and committed (sealed source catalog plus verified marker "
+        "and points) when the local inventory lost them.",
+    )
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args(argv)
 
@@ -2299,6 +2341,7 @@ def main(argv: list[str] | None = None) -> int:
         version=args.version,
         force_reingest=args.reingest,
         retire_docs=tuple(args.retire_doc or ()),
+        authorize_from_catalog=args.authorize_from_catalog,
     )
 
 
