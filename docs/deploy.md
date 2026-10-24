@@ -36,7 +36,14 @@ Standalone `sh scripts/tools/run-task.sh airgap:deploy` only waits for workload 
 `/healthz` check covers Qdrant and embedding connectivity, the served
 generation's representation contract, **and** the rerank leg when
 `RERANK_ENABLED=true` (HTTP 503 for any non-servable state);
-`/livez` is the process-only liveness probe. It does not prove that reasoning
+`/livez` is the process-only liveness probe. Kubelet probes reach the pod port
+directly, not the OAuth sidecar; the sidecar's only unauthenticated path is
+`--skip-auth-regex=^/livez$` (no upstream work), so an anonymous Route caller
+cannot trigger the `/healthz` Qdrant, embedding or serving-gate evaluation
+(#1018). No agent, ingest, OpenObserve or otelcol pod automounts a
+ServiceAccount token (`automountServiceAccountToken: false`); with the Route
+on, a projected token is mounted only into the `oauth-proxy` container (#1029).
+It does not prove that reasoning
 works. Run the gateway probe before ingesting when using the
 modular commands. `sh scripts/tools/run-task.sh airgap:smoke` checks retrieval and tracing; use the
 console/answer checks in the operator runbook to verify the user experience.

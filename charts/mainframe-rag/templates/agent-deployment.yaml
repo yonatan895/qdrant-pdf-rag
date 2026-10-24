@@ -27,6 +27,9 @@ spec:
       {{- if .Values.route.enabled }}
       serviceAccountName: rag-agent
       {{- end }}
+      # No API use in the agent; the token is projected into oauth-proxy only
+      # (issue #1029).
+      automountServiceAccountToken: false
       {{- if .Values.pullSecret.name }}
       imagePullSecrets:
         - name: {{ .Values.pullSecret.name }}
@@ -188,11 +191,14 @@ spec:
             - --cookie-secret-file=/etc/oauth/cookie-secret
             - --email-domain=*
             - --openshift-service-account=rag-agent
-            - --skip-auth-regex=^/healthz.*$
+            - --skip-auth-regex=^/livez$
           ports:
             - name: oauth
               containerPort: 8443
           volumeMounts:
+            - name: oauth-sa-token
+              mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              readOnly: true
             - name: oauth-tls
               mountPath: /etc/tls/private
               readOnly: true
@@ -219,6 +225,28 @@ spec:
                 path: ca-bundle.crt
         {{- end }}
         {{- if .Values.route.enabled }}
+        - name: oauth-sa-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  expirationSeconds: 3607
+              - configMap:
+                  name: kube-root-ca.crt
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+              - configMap:
+                  name: openshift-service-ca.crt
+                  optional: true
+                  items:
+                    - key: service-ca.crt
+                      path: service-ca.crt
+              - downwardAPI:
+                  items:
+                    - path: namespace
+                      fieldRef:
+                        fieldPath: metadata.namespace
         - name: oauth-tls
           secret:
             secretName: rag-agent-tls

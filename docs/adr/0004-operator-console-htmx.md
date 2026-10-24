@@ -143,11 +143,10 @@
     `service.beta.openshift.io/serving-cert-secret-name: rag-agent-tls`.
   - **Cookie encryption:** Session cookies are encrypted via AES-256 GCM using a 32-byte
     random secret mounted from Secret `rag-agent-oauth-cookie`.
-  - **Probe bypass discipline:** Kubelet liveness/readiness probes bypass OAuth
-    authentication via strictly anchored argument:
-    `-skip-auth-regex=^/healthz.*$`
-    External monitoring reaching `/healthz` passes through to port 8080 without
-    redirection, while all requests to `/ui` or `/` require authentication.
+  - **Probe bypass discipline:** Kubelet probes hit port 8080 directly and need no OAuth
+    bypass. The sidecar skips authentication only for the work-free
+    `-skip-auth-regex=^/livez$` (#1018); `/healthz`, `/ui` and `/` require
+    authentication through the Route.
   - **Route timeout configuration:** To accommodate deep reasoning deliberation by the
     underlying model without connection drops, the OpenShift Route manifest must include:
     `haproxy.router.openshift.io/timeout: 300s`
