@@ -467,6 +467,8 @@ def _two_images(members):
         "index and manifest media types differ",
         "config media type differs",
         "layer media type differs",
+        "docker manifest with OCI layer type",
+        "OCI index entry for a docker manifest",
         "symlink member",
         "hardlink member",
     ],
@@ -503,6 +505,18 @@ def test_load_refuses_member_that_is_not_one_oci_image_before_any_push(load_tree
         def wrong_layer(manifest):
             manifest["layers"][0]["mediaType"] = "application/vnd.oci.image.layer.v1.tar+zstd"
         _rewrite_manifest(member, wrong_layer)
+    elif shape == "docker manifest with OCI layer type":
+        # A known layer type of the other family is still a family mismatch.
+        def oci_layer(manifest):
+            manifest["layers"][0]["mediaType"] = "application/vnd.oci.image.layer.v1.tar+gzip"
+        _rewrite_manifest(member, oci_layer)
+    elif shape == "OCI index entry for a docker manifest":
+        # The docker-v2s2 body is unchanged, so its digest still matches the entry.
+        def oci_entry(members):
+            index = json.loads(members["index.json"])
+            index["manifests"][0]["mediaType"] = "application/vnd.oci.image.manifest.v1+json"
+            return {**members, "index.json": json.dumps(index).encode()}
+        _rewrite_member(member, oci_entry)
     elif shape == "symlink member":
         with tarfile.open(member, "a") as archive:
             info = tarfile.TarInfo("unused-symlink")
