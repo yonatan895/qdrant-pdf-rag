@@ -390,7 +390,7 @@ _PROMPT_ECHO_LINE_RE = re.compile(
 def _prose_line_pairs(answer: str, citations: Sequence[str]) -> Iterator[tuple[str, str]]:
     """(raw line, normalized prose) pairs beyond citation scaffolding."""
     from mainframe_rag.agent.cites import (
-        CITATION_LINE_RE,
+        is_citation_shaped,
         normalize_citation_line,
     )
 
@@ -402,7 +402,7 @@ def _prose_line_pairs(answer: str, citations: Sequence[str]) -> Iterator[tuple[s
         candidate = normalize_citation_line(_ANSWER_BODY_LABEL_RE.sub("", candidate, count=1))
         if (
             candidate in citation_lines
-            or CITATION_LINE_RE.match(candidate)
+            or is_citation_shaped(candidate)
         ):
             continue
         if re.search(r"[^\W_]", _INLINE_INDEX_RE.sub("", candidate)):
@@ -2171,7 +2171,9 @@ def parse_answer(content: str, evidence: PromptEvidence) -> ParsedAnswer:
         # "z/OS (3.1)", "(2)", "APARs (1, 2)") are ignored to avoid false
         # inference; an index with no supplied entry resolves to nothing.
         for match in _INLINE_INDEX_RE.finditer(text_processed):
-            for num_str in re.findall(r"\b\d+\b", match.group(1)):
+            # Bounded digits (#1009): a longer run cannot be a prompt label and
+            # would hit Python's int-string limit; it resolves to nothing.
+            for num_str in re.findall(r"\b\d{1,9}\b", match.group(1)):
                 idx = int(num_str)
                 cite = evidence.cite_for_index(idx)
                 if cite is not None and cite not in citations:

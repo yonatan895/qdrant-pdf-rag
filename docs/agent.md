@@ -1312,7 +1312,9 @@ The G4 measurement of this wording records how often either occurs.
 Body presence is shared with the answer eval (#576): empty `Answer` headings,
 citation labels (including inline labels followed only by bracket indices or
 a citation), citation headers, standalone citation-shaped or validated lines (including generic
-filename identities), bracket indices, whitespace and punctuation alone are
+filename identities, whether or not the stem was supplied: a fabricated
+`stem Title, Heading, p. N` line is stripped and counted as a rejected
+citation, #997), bracket indices, whitespace and punctuation alone are
 not prose. Echoed prompt scaffolding is not prose either: the `Retrieved manual
 excerpts:` and Splunk context section headers, and whole `Question:` /
 `Sysplex context:` lines (the constants the prompt builder sends, so the two
@@ -1323,6 +1325,11 @@ script without prose is `unverified_draft` with `script_review_required: true`;
 an empty script fence still requires review but cannot establish a body.
 No second reasoning call is added to repair citation-only content, and
 transport completion remains independent of content eligibility.
+
+Parsing never raises on model text and cannot stall the event loop (#1009,
+#1010): the `Citations:` header search is confined to single lines (linear in
+reply length), and a bracketed number longer than nine digits is not a prompt
+label and resolves to no excerpt instead of reaching `int()`.
 
 The shared refusal predicate also recognizes complete, one-sentence first-person
 security refusals of private keys, secrets, credentials, passwords, credential

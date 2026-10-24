@@ -1648,8 +1648,8 @@ def test_parse_answer_filename_stem_citation_block():
 
 def test_parse_answer_filename_stem_body_citation_hygiene():
     """Body-level fabricated filename-stem cites and pasted heading-path
-    fragments are stripped and counted exactly like doc-number ones; prose,
-    and a stem that is not a supplied doc id, are untouched."""
+    fragments are stripped and counted exactly like doc-number ones, whether or
+    not the stem was supplied (#997); prose is untouched."""
     supplied = "widget-messages Widget Messages, Widget Messages > WID7143E, p. 234"
     evidence = _stem_evidence([("widget-messages", supplied)])
     content = (
@@ -1665,11 +1665,11 @@ def test_parse_answer_filename_stem_body_citation_hygiene():
     assert parsed.citations == [supplied]
     assert parsed.answer.splitlines() == [
         "First step.",
-        "unknown-manual Some Title, Some > Path, p. 3",
         "widget-messages lists every code.",
         "Second step.",
     ]
-    assert parsed.cites_rejected_unmapped == 1
+    # An unsupplied generic stem is a citation attempt too (#997).
+    assert parsed.cites_rejected_unmapped == 2
 
 
 def test_build_messages_preserves_syntax_and_message_fidelity():
@@ -3964,7 +3964,7 @@ def test_parse_answer_unsupplied_generic_stem_citation_is_not_a_body():
     assert parsed.cites_rejected_unmapped == 1
     assert not has_answer_body(parsed.answer, parsed.citations)
     # Prose that merely starts with a hyphenated word is untouched.
-    prose = "well-known fact, see below, p. is not a page"
+    prose = "well-known behavior applies, but only when SMS is active, see below."
     assert is_citation_shaped(prose) is False
     assert parse_answer(prose, evidence).answer == prose
 
