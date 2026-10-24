@@ -292,6 +292,33 @@ def test_update_one_revision_leaves_other_untouched(monkeypatch):
     assert fake.main_revs(coll, "reference") == {rev_a2, REV_B}
 
 
+def test_lineage_replaces_a_revision_printed_under_another_doc_id(monkeypatch):
+    """Issue #1006 (S2-6): lineage is the path's previous source revision,
+    independent of the printed doc_id. A reissue that prints a new form
+    number deletes exactly that revision, points and markers, and leaves a
+    coexisting revision of the old document untouched."""
+    settings = _settings()
+    fake = RevisionFake()
+    coll = settings.qdrant_collection
+    _upsert_one(monkeypatch, fake, _parsed(doc_id="GX28-1234", sha=SHA_A1),
+                _chunks(doc_id="GX28-1234", rev=REV_A, tag="old"), settings)
+    _upsert_one(monkeypatch, fake, _parsed(doc_id="GX28-1234", sha=SHA_B1, vendor="vendor-b",
+                product="product-y", version="2.0"),
+                _chunks(doc_id="GX28-1234", rev=REV_B, tag="sibling"), settings)
+    sha_new = "c3" * 32
+    rev_new = _rev("vendor-a", "product-x", "1.0", sha_new)
+    status, _ = _upsert_one(
+        monkeypatch, fake, _parsed(doc_id="SC33-5678", sha=sha_new),
+        _chunks(doc_id="SC33-5678", rev=rev_new, tag="reissue"), settings, lineage_rev=REV_A,
+    )
+    assert status == "upserted"
+    assert fake.main_revs(coll, "GX28-1234") == {REV_B}
+    assert fake.main_revs(coll, "SC33-5678") == {rev_new}
+    markers = fake._points.get(completion_collection_name(settings), [])
+    assert {p.payload["source_rev"] for p in markers} == {REV_B, rev_new}
+    assert _complete(settings, fake, "GX28-1234", SHA_B1, REV_B)
+
+
 def _gen_id(settings, sha, labels="||"):
     return doc_generation_id(settings, sha, extraction_rules_version(), labels)
 

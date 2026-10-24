@@ -2131,6 +2131,44 @@ def test_duplicate_relabel_never_drops_a_committed_sibling_revision(tmp_path, mo
     assert fake.aliases[ALIAS] == live_2
 
 
+def test_same_path_reissue_with_a_new_form_number_cuts_over_by_lineage(tmp_path, monkeypatch):
+    """Issue #1006 (S2-6): the path's inventory lineage names the revision it
+    replaces even when the reissue prints another form number. The ordinary
+    rerun deletes that revision (points and markers) and cuts over; no
+    --retire-doc is needed and nothing of the old revision stays live."""
+    from scripts.make_synthetic_pdf import build as make_pdf
+
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.inventory import load_inventory
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    progress = tmp_path / "inv.jsonl"
+    manual = corpus / "manual.pdf"
+    make_pdf(manual, doc_id="GX28-1234-00", title="Original Issue")
+    _build_doc_with_id(corpus, "doc_b", DOC_B)
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    live_1 = fake.aliases[ALIAS]
+    old = load_inventory(progress)[str(manual)]
+    assert old.doc_id == "GX28-1234-00" and old.source_rev
+
+    make_pdf(manual, doc_id="SC33-5678-00", title="Reissued Manual")
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    live_2 = fake.aliases[ALIAS]
+    assert live_2 != live_1
+    new = load_inventory(progress)[str(manual)]
+    assert new.doc_id == "SC33-5678-00" and new.source_rev != old.source_rev
+    assert _live_doc_ids(fake) == {"SC33-5678-00", DOC_B}
+    assert old.source_rev not in _revisions_in(fake, live_2)
+    assert old.source_rev not in _marker_revisions_in(fake, live_2), "no orphaned marker"
+    assert old.source_rev in _revisions_in(fake, live_1), "superseded generation retained"
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    assert fake.aliases[ALIAS] == live_2, "the next ordinary run is steady state"
+
+
 def test_stale_completion_markers_revision_scoped_exclusion():
     """R-REV: stale_completion_markers excuses only the retired revision,
     not retained sibling revisions of the same document."""
