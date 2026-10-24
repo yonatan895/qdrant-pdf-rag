@@ -532,7 +532,7 @@ def test_openwebui_base_and_derived_pin_needles_are_disjoint(pack_tree):
     text = images.read_text()
     base = "ghcr.io/open-webui/open-webui:v0.12.3-slim"
     derived = "ghcr.io/yonatan895/qdrant-pdf-rag-openwebui:v0.12.3-slim"
-    assert re.search(rf"^{re.escape(base)}\s+sha256:PENDING$", text, re.MULTILINE)
+    assert re.search(rf"^{re.escape(base)}\s+sha256:5adfb035[0-9a-f]{{56}}$", text, re.MULTILINE)
     assert re.search(rf"^{re.escape(derived)}\s+sha256:PENDING$", text, re.MULTILINE)
     text = re.sub(rf"^({re.escape(base)})\s+\S+$", r"\1 sha256:" + "1" * 64, text, flags=re.MULTILINE)
     images.write_text(text)

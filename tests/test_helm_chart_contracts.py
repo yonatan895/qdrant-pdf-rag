@@ -1205,6 +1205,9 @@ def test_openwebui_workload_is_single_replica_restricted_and_holds_no_model_key(
     for key, value in {
         "OFFLINE_MODE": "true", "ENABLE_PERSISTENT_CONFIG": "false", "UVICORN_WORKERS": "1",
         "ENABLE_OPENAI_API": "false", "ENABLE_OLLAMA_API": "false",
+        # #1073 trial R2: without an explicit loopback base URL v0.12.3 probes
+        # host.docker.internal:11434/12434 on first start.
+        "OLLAMA_BASE_URL": "http://127.0.0.1:9",
         "ENABLE_DIRECT_CONNECTIONS": "false", "ENABLE_COMMUNITY_SHARING": "false",
         "ENABLE_VERSION_UPDATE_CHECK": "false", "BYPASS_EMBEDDING_AND_RETRIEVAL": "true",
         "ENABLE_WEB_SEARCH": "false", "ENABLE_MEMORIES": "false",
@@ -1233,7 +1236,7 @@ def test_openwebui_workload_is_single_replica_restricted_and_holds_no_model_key(
     # No agent, gateway, Qdrant or model connection setting reaches the pod.
     for name in env:
         assert not name.startswith(("QDRANT", "LLM_", "EMBED_", "RERANK_", "GATEWAY", "OTEL_",
-                                    "OPENAI_API_", "OLLAMA_BASE", "FEEDBACK")), name
+                                    "OPENAI_API_", "FEEDBACK")), name
     text = json.dumps(dep)
     for forbidden in ("api-key", "apikey", "qdrant:6333", "openobserve-credentials"):
         assert forbidden not in text, forbidden

@@ -26,11 +26,15 @@ registry.redhat.io/openshift4/ose-oauth-proxy:v4.14                     sha256:b
 # ADR-0007 (#1071, proposed) optional docs front end (#1074, off by default):
 # the hardened Open WebUI image, derived from the upstream slim image in the
 # connected factory (#1073) by an ownership/permission-only layer so it runs as
-# an arbitrary UID under restricted-v2 (ADR-0007 R1). The digest is pending
-# #1073 qualification: while it is sha256:PENDING, pack.sh skips the member and
-# OPENWEBUI_ENABLED=true fails closed. Open WebUI License (BSD-3 plus branding).
+# an arbitrary UID under restricted-v2 (ADR-0007 R1). Recipe:
+# scripts/ci/openwebui-trial/Containerfile.openwebui (#1073, PR #1085). The
+# derived image was built locally and qualified in the Kind trial (image id
+# sha256:bf4e04373ceab05bfff212a51f195d8afd3c0e8ecdb55b1a7d9ce528df0c002f, a
+# config id, not a pullable manifest digest). Its registry manifest digest is
+# recorded here only after the factory pushes it; while it is sha256:PENDING,
+# pack.sh skips the member and OPENWEBUI_ENABLED=true fails closed. Open WebUI License (BSD-3 plus branding).
 # The upstream slim line is the factory build base of the derived image (#1073
 # records it); like the UBI line it is provenance, never a bundle member. The
 # two needles are disjoint: open-webui:v0.12.3-slim vs qdrant-pdf-rag-openwebui.
-ghcr.io/open-webui/open-webui:v0.12.3-slim                             sha256:PENDING
+ghcr.io/open-webui/open-webui:v0.12.3-slim                             sha256:5adfb0355bbe4a5860c0ba9482cc0b40f573de3749a21a64cf4789391a14fffc
 ghcr.io/yonatan895/qdrant-pdf-rag-openwebui:v0.12.3-slim               sha256:PENDING
