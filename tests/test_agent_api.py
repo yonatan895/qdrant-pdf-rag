@@ -1403,7 +1403,9 @@ def test_build_messages_context_budgeting():
     msgs1 = build_messages("test query", [hit1], max_chunk_chars=100, max_context_chars=1000).messages
     user_prompt1 = msgs1[1].content
     assert "... [truncated]" in user_prompt1
-    assert len(user_prompt1) < 600  # + one source-metadata line (issue #635)
+    # + one source-metadata line (issue #635), the excerpt frame and the
+    # tail's untrusted-text clause (issue #999)
+    assert len(user_prompt1) < 720
 
     # Total context max truncates subsequent hits
     msgs2 = build_messages("test query", [hit1, hit2], max_chunk_chars=400, max_context_chars=500).messages
@@ -1827,7 +1829,8 @@ def test_build_messages_tokenizer_budget_respected():
             # decline and +19 when it named the missing subject) grew the
             # fixed overhead, so the fixture window widened
             # to keep the knife-edge scenario (5 excerpts fit, the last
-            # truncated) reachable.
+            # truncated) reachable; +64 for the per-excerpt frames and the
+            # tail's untrusted-text clause (issue #999).
             doc_id=f"DOC{i}",
             title="Title",
             page_label=str(i),
@@ -1838,7 +1841,7 @@ def test_build_messages_tokenizer_budget_respected():
     ]
 
     settings = Settings(
-        llm_max_model_len=1629,
+        llm_max_model_len=1693,
         llm_reserved_output_tokens=250,
         llm_thinking_reserve_tokens_simple=0,  # knife edge independent of #777 defaults
         llm_token_safety_margin=100,
@@ -1860,7 +1863,7 @@ def test_build_messages_tokenizer_budget_respected():
         assert f"[{i}]" in user_content
     prefix, rest = user_content.split("Retrieved manual excerpts:\n", 1)
     block, _tail = rest.split("\n\nPlease answer based strictly", 1)
-    chunk_texts = re.split(r"\n\n(?=\[\d+\] )", block)
+    chunk_texts = re.split(r"\n\n(?=<retrieved-excerpt>\n\[\d+\] )", block)
     assert len(chunk_texts) == 5
     assert "[truncated]" in chunk_texts[-1]
 

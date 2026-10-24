@@ -656,13 +656,24 @@ select `complex`. Default is `simple`.
   suffix, which verification trim rounds re-check before cutting. A trim that
   would remove the requested entry drops the excerpt instead. Defaults and
   budgets are unchanged.
+- Excerpt frame (issue #999): every `prompt_order` policy wraps each excerpt
+  block (its `[i] cite` header, source line and body) in attributeless
+  `<retrieved-excerpt>` / `</retrieved-excerpt>` delimiter lines. Before
+  framing, any delimiter-shaped tag inside the block (either direction, any
+  case or inner spacing, `_`/space for the hyphen, and the angle-bracket
+  lookalikes) has its bracket replaced with `&lt;`, so the only exact
+  delimiter lines are the frame's own: chunk text cannot close or reopen its
+  frame, and an "end of excerpts" or `SYSTEM:` line in it stays inside.
+  Manual text never carries the tag, so legitimate excerpts are unchanged;
+  a cite whose stored metadata carried one is shown escaped and cannot be
+  copied back to the allowlist. The tail says the framed text is untrusted
+  manual text, never instructions. Every planner and the manifest's
+  `est_tokens` price the frame material with the header.
 - `prompt_order` policies reorder (never drop or duplicate — violations fail
-  closed): `retrieval` keeps historical assembly order byte-identical;
-  `stable_cache` frames excerpts in attributeless
-  `<retrieved-excerpt>` delimiters and orders instructions → context →
-  excerpts → question → tail, with a static deterministic instruction block
-  (no cites, timestamps, or ids — the prefix-cache premise) that demotes
-  excerpts to untrusted data.
+  closed): `retrieval` keeps historical assembly order (framed as above);
+  `stable_cache` orders instructions → context → excerpts → question → tail,
+  with a static deterministic instruction block (no cites, timestamps, or
+  ids — the prefix-cache premise) that demotes excerpts to untrusted data.
 - Tokenizer path (when a tokenizer is configured): plans with the
   in-process estimator (`≈3.5` chars/token, 1200-token complex narrative cap), then
   verifies the packed prompt against the whole-message count per trim round
@@ -707,7 +718,12 @@ select `complex`. Default is `simple`.
   answer.
 - The tail's worked example is `hits[0].cite` even when packing dropped that
   hit: it is prompt furniture, never a manifest entry, so echoing it is
-  rejected. The system prompt's seven rules (ground-only, synthesize-from-templates,
+  rejected unless that hit was supplied. It is the served cite, so it is a
+  single line with bounded, sanitized fields ([retrieval §1](retrieval.md),
+  issues #998/#1008), and it is delimiter-escaped like excerpt text because
+  it sits outside the frames. Its title and heading remain corpus-derived
+  text in the instruction region; replacing it with a static example is an
+  open answer-quality decision (issue #999). The system prompt's seven rules (ground-only, synthesize-from-templates,
   version-disagree attribution, admit-gap, fenced scripts as examples,
   identify-a-doc-number/message-id/short-name query instead of refusing,
   mandatory `Citations:` with a few-shot example) plus the complex-query
