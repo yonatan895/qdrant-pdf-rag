@@ -88,7 +88,8 @@ restores the snapshot over whatever the file assigned; empty stays unset
   `STORAGE_CLASS` and `SNAPSHOT_STORAGE_CLASS` are checked (the latter
   defaults to the former); the corpus PVC is not.
 - Operator booleans `UI_ENABLED`, `CONTEXTUAL_EMBED_ENABLED`,
-  `INGEST_ALIAS_PUBLISH`, `INGEST_REINGEST`, `CHAT_CONDENSE_ENABLED`, `LLM_STREAM`
+  `INGEST_ALIAS_PUBLISH`, `INGEST_REINGEST`, `INGEST_AUTHORIZE_FROM_CATALOG`,
+  `CHAT_CONDENSE_ENABLED`, `LLM_STREAM`
   `FEEDBACK_ENABLED` and `AGENT_NETWORK_POLICY` (default **true**, unlike the others)
   accept only `true/1/yes` or `false/0/no` (any case; unset keeps the
   default). `INGEST_ALIAS_PUBLISH` may only be unset or true: in-place ingest
@@ -670,7 +671,12 @@ cannot schedule on one node — proven).
   count, env, and pull secrets — FastAPI needs no GPU). The ingest Job is
   one-shot with a 24h deadline: caller corpus PVC read-only plus an
   auto-created `ingest-work` RWO scratch PVC (sized by `INGEST_WORK_SIZE`,
-  default 100Gi, never deleted); previous runs are deleted before re-apply
+  default 100Gi, never deleted). Parse workers also put their private
+  per-document PDF copies under `/work/parse-tmp` (`INGEST_PARSE_TMP_DIR`,
+  issue #1058): size `INGEST_WORK_SIZE` for the existing scratch plus about
+  `ingest.workers` x the largest PDF at peak (`ingest_max_pdf_bytes` defaults
+  to 0, unbounded). A full volume fails only the affected document with
+  `ParseScratchError`; previous runs are deleted before re-apply
   (Jobs are immutable); completion waits up to `INGEST_TIMEOUT` (default
   1h) while a background tailer streams pod logs, dumping logs and events
   on timeout.
@@ -1585,9 +1591,15 @@ explicit environment → `OPERATOR_ENV_KEYS` snapshot/restore around file loadin
 → both agent and ingest environments → Settings and operation-specific interpretation. Trace every step
 for a newly required input; an example alone or agent-only render is insufficient.
 Maintenance modes (issue #391 current packet) follow the same path:
-`INGEST_REINGEST` and `INGEST_RETIRE_DOCS` are `OPERATOR_ENV_KEYS` validated by
+`INGEST_REINGEST`, `INGEST_RETIRE_DOCS` and `INGEST_AUTHORIZE_FROM_CATALOG` are `OPERATOR_ENV_KEYS` validated by
 `scripts/airgap/ingest.sh` and rendered into the ingest Job args (`INGEST_RETIRE_DOCS` accepts comma- or newline-separated
-`DOCID[@SOURCEREV]` entries and preserves interior whitespace in product/version labels);
+`DOCID[@SOURCEREV]` entries and preserves interior whitespace in product/version labels;
+`INGEST_AUTHORIZE_FROM_CATALOG=true` maps to `ingest.authorizeFromCatalog` and renders
+`--authorize-from-catalog`, which lets a retirement name a revision the live build published and
+committed after the local inventory was lost. It is valid only with `INGEST_RETIRE_DOCS`: the values
+mapper refuses it alone with `INGEST_AUTHORIZE_FROM_CATALOG requires INGEST_RETIRE_DOCS`, and the
+chart schema and template refuse it too. See
+[ingest refresh lineage](ingest.md#9-orchestration-run_ingestpy-inventorypy));
 alias publication is the only ingest mode (the Job carries no mode switch, the
 chart schema refuses `ingest.aliasPublish`, and the values mapper refuses
 `INGEST_ALIAS_PUBLISH=false`), and the shared ingest-work progress path is fixed so one authorized

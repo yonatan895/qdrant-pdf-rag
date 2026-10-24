@@ -60,6 +60,12 @@ spec:
             - --retire-doc
             - {{ . | quote }}
             {{- end }}
+            {{- if .Values.ingest.authorizeFromCatalog }}
+            {{- if not .Values.ingest.retireDocs }}
+            {{- fail "ingest.authorizeFromCatalog requires ingest.retireDocs" }}
+            {{- end }}
+            - --authorize-from-catalog
+            {{- end }}
           env:
             - name: QDRANT_URL
               value: {{ include "mainframe-rag.qdrantUrl" . | quote }}
@@ -105,6 +111,10 @@ spec:
               value: {{ .Values.tracing.deploymentEnvironment | quote }}
             - name: INGEST_WORKERS
               value: {{ .Values.ingest.workers | quote }}
+            # Private parse copies go on the sized /work scratch volume, not on
+            # node ephemeral storage (issue #1058).
+            - name: INGEST_PARSE_TMP_DIR
+              value: /work/parse-tmp
             - name: CONTEXTUAL_EMBED_ENABLED
               value: {{ .Values.ingest.contextualEnabled | toString | quote }}
             - name: CONTEXT_LLM_BASE_URL

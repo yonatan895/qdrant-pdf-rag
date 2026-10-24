@@ -4,6 +4,7 @@ No Qdrant, no embeddings (air-gap Job does that; CI uses --dry-run).
 """
 
 import json
+import os
 from pathlib import Path
 from typing import ClassVar
 
@@ -747,6 +748,106 @@ def test_parse_one_error_isolation_and_picklability(tmp_path):
     assert unpacked_chunks == []
     assert unpacked_vectors == []
     assert unpacked_contexts == {}
+
+
+
+def test_private_copy_enospc_fails_only_that_document_and_leaves_no_scratch(tmp_path, monkeypatch):
+    """#1058: the private verified copy lives under INGEST_PARSE_TMP_DIR (the
+    chart points it at the /work volume). A full scratch volume while copying
+    one document gives that document a fixed error record (no errno text, no
+    path), removes its mfr-parse dir, and the next document in the same real
+    run still ingests."""
+    import errno
+    from concurrent.futures import ThreadPoolExecutor
+
+    from scripts.make_synthetic_pdf import build
+
+    from mainframe_rag.ingest import run_ingest
+
+    corpus = tmp_path / "corpus"
+    stems = ["SA22-7000-00", "SA22-7010-00"]
+    for n, stem in enumerate(stems):
+        build(corpus / f"{stem}.pdf", doc_id=stem, title=f"Synthetic Reference {n}",
+              message_id=f"IEA{n}00I")
+    scratch = tmp_path / "work" / "parse-tmp"  # absent: the worker creates it, 0700
+    monkeypatch.setenv("INGEST_PARSE_TMP_DIR", str(scratch))
+    monkeypatch.setattr(run_ingest, "_worker_settings", None)
+
+    class _InlinePool(ThreadPoolExecutor):
+        def __init__(self, max_workers=None, mp_context=None):
+            super().__init__(max_workers=max_workers)
+
+    monkeypatch.setattr(run_ingest, "ProcessPoolExecutor", _InlinePool)
+    import builtins
+
+    from mainframe_rag.ingest import corpus_scan
+
+    real_copy = run_ingest.private_verified_copy
+    seen: list[str] = []
+
+    def counting_copy(path, corpus_root, walk_sha, tmp_dir):
+        seen.append(tmp_dir)
+        return real_copy(path, corpus_root, walk_sha, tmp_dir)
+
+    def full_disk_open(file, mode="r", *args, **kwargs):
+        handle = builtins.open(file, mode, *args, **kwargs)  # noqa: SIM115
+        if mode == "wb" and stems[0] in str(file):  # the scratch side of the first document
+            handle.write(b"x" * 64)  # a half-written copy
+            handle.close()
+            raise OSError(errno.ENOSPC, "No space left on device", str(file))
+        return handle
+
+    monkeypatch.setattr(run_ingest, "private_verified_copy", counting_copy)
+    monkeypatch.setattr(corpus_scan, "open", full_disk_open, raising=False)
+    fake = _FakeQdrant()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    monkeypatch.setenv("EMBED_MODE", "hash")
+    monkeypatch.delenv("DENSE_DIM", raising=False)
+    progress = tmp_path / "inventory.jsonl"
+    assert main(_migration_args(corpus, progress)) == 1
+
+    records = {
+        Path(r["path"]).stem: r
+        for r in (json.loads(l) for l in progress.read_text().splitlines() if l.strip())
+    }
+    failed = records[stems[0]]
+    assert (failed["status"], failed["error_type"]) == ("error", "ParseScratchError")
+    assert failed["error"] == (
+        "parse_scratch_failed: the private copy of the document could not be written"
+    )
+    assert records[stems[1]]["status"] == "upserted"
+    assert len(seen) == 2
+    assert all(Path(d).parent == scratch for d in seen)
+    assert list(scratch.iterdir()) == []  # every mfr-parse-* dir is gone
+    assert scratch.stat().st_mode & 0o777 == 0o700
+    stored = {(p.payload or {}).get("doc_id") for pts in fake._points.values() for p in pts}
+    assert stems[1] in stored and stems[0] not in stored
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any file")
+def test_unreadable_source_keeps_its_own_error_type_not_a_scratch_error(
+    plain_pdf, tmp_path, monkeypatch
+):
+    """#1058: only the scratch side becomes ParseScratchError; a source the
+    worker cannot read keeps its own error type."""
+    import shutil
+
+    from mainframe_rag.config import Settings
+    from mainframe_rag.ingest import run_ingest
+
+    pdf = tmp_path / "locked.pdf"
+    shutil.copy(plain_pdf, pdf)
+    sha = sha256_file(pdf)
+    pdf.chmod(0)
+    try:
+        monkeypatch.setattr(
+            run_ingest, "_load_worker_settings", lambda: Settings(embed_mode="hash", _env_file=None)
+        )
+        record = run_ingest._parse_one((str(pdf), None, None, None, str(tmp_path), sha, False, None))[0]
+    finally:
+        pdf.chmod(0o600)
+    assert record.status == "error"
+    assert record.error_type == "PermissionError"
 
 
 # --------------------------------------- representation migration (391 F2) ---

@@ -382,6 +382,15 @@ def swap_alias_to(
     KEPT (plus a safety snapshot): rollback and GC are operator actions.
     Callers refuse a physical collection squatting on the alias name before
     any write, so `old_physical` is always a published alias target or None.
+
+    `old_physical` is also the predecessor the cutover was planned against
+    (issue #1019): after the safety snapshot, immediately before the atomic
+    call, the alias is re-read and must still resolve to it, or the swap
+    refuses and sends nothing. A publisher overtaken during its catalog/seal
+    phase (an unsupported second writer outside the target lock) can then
+    never switch the alias back to an older candidate. Qdrant alias updates
+    are not compare-and-swap, so the remaining window is this read-to-call
+    gap; the target lock stays the primary control.
     Returns the publication summary for the run log."""
     alias = settings.qdrant_collection
     from mainframe_rag.ingest.build import build_aliases
@@ -395,7 +404,21 @@ def swap_alias_to(
         safety_snapshot = snapshot_collection(client, old_physical)
     # Alias existence is checked here (not trusted from resolve time): a
     # dangling alias still occupies the name and needs the delete half.
-    alias_exists = any(desc.alias_name == alias for desc in client.get_aliases().aliases)
+    current = next(
+        (d.collection_name for d in client.get_aliases().aliases if d.alias_name == alias), None
+    )
+    alias_exists = current is not None
+    resolved, _ = live_collection_from(
+        alias, current, client.collection_exists(current if current is not None else alias)
+    )
+    if current is None and resolved is not None:
+        resolved = None  # a squatting physical is refused upstream; not a predecessor
+    if resolved != old_physical:
+        raise RuntimeError(
+            f"live target moved during publication ({old_physical!r} -> {resolved!r}): "
+            "another publisher cut over first — alias untouched, retry against the "
+            "current live generation."
+        )
     ops: list[models.CreateAliasOperation | models.DeleteAliasOperation] = []
     if alias_exists:
         ops.append(models.DeleteAliasOperation(delete_alias=models.DeleteAlias(alias_name=alias)))
