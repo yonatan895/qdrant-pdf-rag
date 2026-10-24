@@ -1260,7 +1260,7 @@ def test_filename_doc_id_with_hidden_characters_is_refused_with_a_fixed_error(
         run_ingest, "_load_worker_settings", lambda: Settings(embed_mode="hash", _env_file=None)
     )
     embed_calls = _spy_embed(monkeypatch)
-    task = (str(pdf), None, None, None, str(tmp_path), "d" * 64, True, None)
+    task = (str(pdf), None, None, None, str(tmp_path), sha256_file(pdf), True, None)
     record, _parsed, chunks, vectors, contexts = run_ingest._parse_one(task)
     assert record.status == "error"
     assert record.error_type == "DocIdRefused"
@@ -1284,7 +1284,7 @@ def test_clean_filename_doc_id_is_not_refused(plain_pdf, tmp_path, monkeypatch):
         run_ingest, "_load_worker_settings", lambda: Settings(embed_mode="hash", _env_file=None)
     )
     _spy_embed(monkeypatch)
-    task = (str(pdf), None, None, None, str(tmp_path), "d" * 64, True, None)
+    task = (str(pdf), None, None, None, str(tmp_path), sha256_file(pdf), True, None)
     record = run_ingest._parse_one(task)[0]
     assert record.status != "error", record.error
 
