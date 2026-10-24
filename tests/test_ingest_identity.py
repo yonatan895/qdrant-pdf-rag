@@ -145,6 +145,36 @@ def test_revision_key_escapes_only_the_delimiter_and_escape_characters():
     # Delimiter-free labels keep their key byte for byte.
     assert source_rev_key("IBM", "z/OS", "3.1", sha) == f"ibm|z/os|3.1|{sha}"
 
+
+def test_source_rev_is_derived_from_a_parsed_document_in_one_place():
+    """#990 item 2: payload.py and chunk.py each spelled
+    `source_rev_key(parsed.vendor, parsed.product, parsed.version,
+    parsed.sha256)`, so the stored `source_rev` and the chunk-id revision could
+    drift apart. One function owns the mapping; every package call of
+    source_rev_key goes through it."""
+    import ast
+
+    from mainframe_rag.ingest import identity
+
+    package = Path(identity.__file__).resolve().parents[1]
+    callers = set()
+    for path in sorted(package.rglob("*.py")):
+        for fn in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not isinstance(fn, ast.FunctionDef):
+                continue
+            for call in ast.walk(fn):
+                if isinstance(call, ast.Call) and (
+                    getattr(call.func, "id", None) == "source_rev_key"
+                    or getattr(call.func, "attr", None) == "source_rev_key"
+                ):
+                    callers.add(f"{path.relative_to(package)}:{fn.name}")
+    assert callers == {"ingest/identity.py:parsed_source_rev"}
+
+    from mainframe_rag.ingest.identity import parsed_source_rev
+
+    doc = SimpleNamespace(vendor="IBM", product="zOS|x", version="2.5", sha256="ab" * 32)
+    assert parsed_source_rev(doc) == f"ibm|zos\\|x|2.5|{'ab' * 32}"
+
 # ---------------------------------------------------------------------------
 # plan_duplicates: byte-identical copies elect the lexicographic winner
 # ---------------------------------------------------------------------------
