@@ -1395,6 +1395,17 @@ def test_openwebui_refuses_to_enable_without_the_repository_docs_pipe():
     assert r.returncode != 0 and "docs Pipe (#1072)" in r.stderr
 
 
+def test_openwebui_chart_pipe_is_byte_identical_to_the_repository_pipe():
+    """The #1072 Pipe source (integrations/openwebui/docs_pipe.py) and the copy
+    the chart ships (Helm reads only chart files) are both absent or equal; the
+    installer's hash check then binds the deployed Function to that source."""
+    source = CHART.parent.parent / "integrations" / "openwebui" / "docs_pipe.py"
+    copy = CHART / "files" / "openwebui" / "docs_pipe.py"
+    assert source.exists() == copy.exists()
+    if source.exists():
+        assert copy.read_bytes() == source.read_bytes()
+
+
 @pytest.mark.parametrize("patch,needle", [
     ({"enabled": "true"}, "openwebui"),
     ({"secretName": ""}, "openwebui"),
