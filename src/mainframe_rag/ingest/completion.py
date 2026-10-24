@@ -346,6 +346,33 @@ def delete_completion(
         )
 
 
+def delete_revision_completions(client: QdrantPoints, settings: Settings, source_rev: str) -> None:
+    """Invalidate every marker of one source revision, under whichever doc_id
+    it was recorded (issues #1005/#1006): the companion of `delete_by_revision`
+    for a revision this refresh deletes that is not the document being
+    written (swept residue, or a lineage revision printed under another form
+    number). Selected client-side by exact `source_rev`, deleted by point id;
+    a revision's points and markers leave together, so no zero-point marker
+    is left behind."""
+    name = completion_collection_name(settings)
+    if not client.collection_exists(name):
+        return
+    points = scroll_all_points(
+        client,
+        name,
+        scroll_filter=models.Filter(
+            must=[models.FieldCondition(key="source_rev", match=models.MatchValue(value=source_rev))]
+        ),
+        with_payload=["source_rev", "doc_id"],
+        page_size=settings.ingest_scan_page_size,
+    )
+    ids: list[int | str | uuid.UUID] = [
+        p.id for p in points if (p.payload or {}).get("doc_id") and (p.payload or {}).get("source_rev") == source_rev
+    ]
+    if ids:
+        client.delete(name, points_selector=models.PointIdsList(points=ids), wait=True)
+
+
 def _rev_filter(doc_id: str, source_rev: str) -> models.Filter:
     return models.Filter(
         must=[
@@ -481,14 +508,29 @@ def is_doc_complete(
 
 
 def is_revision_committed(
-    client: QdrantReader, settings: Settings, doc_id: str, source_rev: str
+    client: QdrantReader,
+    settings: Settings,
+    doc_id: str,
+    source_rev: str,
+    *,
+    ancestor: str | None = None,
 ) -> bool:
     """Self-consistent completeness of one revision under its OWN committed
-    generation (no current-run inputs needed): any scoped marker whose
-    points verify. Crash residue never passes — refresh wipes markers
-    before points, so partial data has no marker to validate."""
+    generation (no current-run inputs needed): a marker for the revision,
+    bound to this collection or to `ancestor`, whose points verify in this
+    collection. Crash residue never passes — refresh wipes markers before
+    points, so partial data has no marker to validate. A marker bound to any
+    other collection never certifies (#1039).
+
+    `ancestor` is the live generation a publication staging was cloned from
+    (issue #1004): the clone carries the marker a committed sibling's own
+    publication wrote for that physical, and its points are the committed
+    bytes (count, ids and content digests verify). Sweeping them as residue
+    would drop a published revision without a retirement. Skip eligibility
+    (`is_doc_complete`) still requires a marker for this target."""
+    targets = {settings.qdrant_collection} | ({ancestor} if ancestor else set())
     for m in _doc_markers(client, settings, doc_id):
-        if m.source_rev != source_rev or m.target_collection != settings.qdrant_collection:
+        if m.source_rev != source_rev or m.target_collection not in targets:
             continue
         if verify_doc_points(
             client,
@@ -531,6 +573,7 @@ def stale_completion_markers(
     sample: int = 3,
     exclude_doc_ids: frozenset[str] = frozenset(),
     retire_plan: dict[str, dict[str, set[str] | bool]] | None = None,
+    require_stored_points: bool = False,
 ) -> tuple[int, list[str]]:
     """Completion markers NOT certified under `wanted_digest` — the
     commit-time scope proof for a representation migration (issue #391 F2).
@@ -544,6 +587,11 @@ def stale_completion_markers(
     swap audit: their markers are about to be deleted explicitly, and the
     post-removal audit refuses any remnant the plan did not actually remove.
     Read-only, paginated; the manifest point has no `doc_id` and never counts.
+    `require_stored_points` (the migration commit, issue #1005) counts a
+    marker only while its (doc_id, source_rev) still holds a point in this
+    collection: a zero-point marker certifies no searchable vector, and the
+    coverage proof that follows independently attributes every point. A
+    marker without a source revision is unsupported data and always counts.
     Returns (count, sample labels)."""
     name = completion_collection_name(settings)
     if not client.collection_exists(name):
@@ -565,10 +613,40 @@ def stale_completion_markers(
             continue
         if payload.get("manifest_digest") == wanted_digest:
             continue
+        source_rev = payload.get("source_rev")
+        if require_stored_points and source_rev and not _revision_has_points(
+            client, settings, str(doc_id), str(source_rev)
+        ):
+            continue
         count += 1
         if len(labels) < sample:
             labels.append(f"{doc_id}@{payload.get('source_rev') or 'unknown'}")
     return count, labels
+
+
+def _revision_has_points(
+    client: QdrantReader, settings: Settings, doc_id: str, source_rev: str
+) -> bool:
+    points, _ = client.scroll(
+        settings.qdrant_collection,
+        scroll_filter=_rev_filter(doc_id, source_rev),
+        limit=1,
+        with_payload=False,
+    )
+    return bool(points)
+
+
+def _revision_stored(client: QdrantReader, settings: Settings, source_rev: str) -> bool:
+    """Whether any point of one source revision exists, whatever its doc_id."""
+    points, _ = client.scroll(
+        settings.qdrant_collection,
+        scroll_filter=models.Filter(
+            must=[models.FieldCondition(key="source_rev", match=models.MatchValue(value=source_rev))]
+        ),
+        limit=1,
+        with_payload=False,
+    )
+    return bool(points)
 
 
 class UnsupportedLegacyDataError(RuntimeError):
@@ -594,6 +672,8 @@ def plan_refresh_deletes(
     doc_id: str,
     source_rev: str,
     lineage_rev: str | None,
+    *,
+    ancestor: str | None = None,
 ) -> set[str]:
     """Delete plan for a refresh (issue #361). Returns the revisions to
     delete. Raises BEFORE any delete — callers delete only after this
@@ -602,9 +682,13 @@ def plan_refresh_deletes(
     - a stale current revision is always replaced (a valid one would have
       skipped already, except under --reingest);
     - inventory lineage replaces precisely (the lineage revision, if
-      present and different);
+      present and different) — under this doc_id or any other: lineage is
+      the path's previous source revision, and a reissue may print a new
+      form number (issue #1006);
     - committed coexisting revisions are left alone — replacing one needs
       its lineage (replacement without lineage would be the overwrite bug);
+      a sibling the staging inherited from `ancestor` (the live generation
+      it was cloned from) counts as committed (issue #1004);
     - completion-less residue is deleted (crash-safe retry);
     - sourceless points under the document raise UnsupportedLegacyDataError
       (pre-revision data is unsupported; nothing is deleted or migrated).
@@ -615,12 +699,14 @@ def plan_refresh_deletes(
     named = {r for r in present if r is not None}
     dels = {source_rev} if source_rev in named else set()
     if lineage_rev is not None:
-        if lineage_rev != source_rev and lineage_rev in named:
+        if lineage_rev != source_rev and (
+            lineage_rev in named or _revision_stored(client, settings, lineage_rev)
+        ):
             dels.add(lineage_rev)
         return dels
     # No lineage: committed others are coexistence (leave); residue goes.
     for other in sorted(named - {source_rev}):
-        if not is_revision_committed(client, settings, doc_id, other):
+        if not is_revision_committed(client, settings, doc_id, other, ancestor=ancestor):
             dels.add(other)
     return dels
 

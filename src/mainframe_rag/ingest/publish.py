@@ -53,6 +53,7 @@ from mainframe_rag.ingest.completion import (
     completion_collection_name,
     delete_completion,
     is_doc_complete,
+    is_revision_committed,
     plan_retire_deletes,
     representation_fingerprint,
 )
@@ -1213,15 +1214,9 @@ def audit_unmarked_residue(
     return []
 
 
-def plan_approved_removals(
-    flags: tuple[str, ...],
-    inventory: dict[str, InventoryRecord],
-) -> tuple[dict[str, dict[str, set[str] | bool]], frozenset[str]]:
-    """Parse --retire-doc flags (repeatable `DOCID` or `DOCID@SOURCEREV`)
-    and validate them against the last approved inventory (issue #405 R1).
-    Returns (delete plan, retired doc_ids). Malformed flags, unknown
-    documents, and unapproved revisions fail closed before any mutation —
-    a missing file is never itself a removal instruction."""
+def _parse_retire_flags(flags: tuple[str, ...]) -> dict[str, set[str | None]]:
+    """--retire-doc flags (repeatable `DOCID` or `DOCID@SOURCEREV`) by doc_id;
+    None in a set means the whole document. Malformed flags fail closed."""
     requested: dict[str, set[str | None]] = {}
     for flag in flags:
         doc_id, sep, rev = flag.partition("@")
@@ -1231,12 +1226,105 @@ def plan_approved_removals(
                 f"malformed --retire-doc {flag!r}: expected DOCID or DOCID@SOURCEREV."
             )
         requested.setdefault(doc_id, set()).add(rev.strip() if sep else None)
+    return requested
+
+
+def _inventory_approvals(inventory: dict[str, InventoryRecord]) -> dict[str, set[str | None]]:
     approved: dict[str, set[str | None]] = {}
     for rec in inventory.values():
         if rec.doc_id and rec.status in ("upserted", "skipped"):
             approved.setdefault(rec.doc_id, set()).add(rec.source_rev)
+    return approved
+
+
+def plan_approved_removals(
+    flags: tuple[str, ...],
+    inventory: dict[str, InventoryRecord],
+    catalog_approved: dict[str, set[str]] | None = None,
+) -> tuple[dict[str, dict[str, set[str] | bool]], frozenset[str]]:
+    """Parse --retire-doc flags (repeatable `DOCID` or `DOCID@SOURCEREV`)
+    and validate them against the last approved inventory (issue #405 R1).
+    Returns (delete plan, retired doc_ids). Malformed flags, unknown
+    documents, and unapproved revisions fail closed before any mutation —
+    a missing file is never itself a removal instruction.
+
+    `catalog_approved` is set only under the explicit operator flag
+    `--authorize-from-catalog` (issue #1005): the revisions
+    `catalog_retirement_approvals` proved published and committed in the live
+    build. Without it the inventory is the only authority."""
+    requested = _parse_retire_flags(flags)
+    approved = _inventory_approvals(inventory)
+    for doc_id, revs in (catalog_approved or {}).items():
+        approved.setdefault(doc_id, set()).update(revs)
     plan = plan_retire_deletes(approved, requested)
     return plan, frozenset(plan)
+
+
+class CatalogRetirementRefused(RuntimeError):
+    """A `--authorize-from-catalog` refusal (issue #1005): a stable `code`
+    and a fixed message carrying ids only (doc id, source revision)."""
+
+    def __init__(self, code: str, message: str) -> None:
+        self.code = code
+        super().__init__(f"{code}: {message}")
+
+
+RETIRE_CATALOG_REQUIRES_RETIRE_DOC = "retire_catalog_requires_retire_doc"
+RETIRE_NOT_IN_CATALOG = "retire_not_in_catalog"
+RETIRE_NOT_COMMITTED = "retire_not_committed"
+
+
+def catalog_retirement_approvals(
+    client: QdrantReader,
+    live_settings: Settings,
+    flags: tuple[str, ...],
+    inventory: dict[str, InventoryRecord],
+) -> dict[str, set[str]]:
+    """Revisions `--authorize-from-catalog` may approve for retirement (issue
+    #1005, operator option B): only those the local inventory does not
+    already approve. Each must be listed by the live build's sealed source
+    catalog (the stored entries are verified against the publication receipt
+    first) AND be committed in the live generation (a completion marker whose
+    points verify there). Read-only; called under the target lock, like the
+    inventory planning it extends. Refuses with a stable code otherwise."""
+    requested = _parse_retire_flags(flags)
+    have = _inventory_approvals(inventory)
+    controls = completion_collection_name(live_settings)
+    payload = (
+        read_publication_record(client, controls)
+        if client.collection_exists(controls)
+        else None
+    )
+    published: dict[str, set[str]] = {}
+    if payload is not None and "source_catalog" in payload:
+        for entry in verify_source_catalog(client, controls, payload["source_catalog"]):
+            published.setdefault(entry["doc_id"], set()).add(entry["source_revision"])
+    approvals: dict[str, set[str]] = {}
+    for doc_id in sorted(requested):
+        want = requested[doc_id]
+        listed = published.get(doc_id, set())
+        if None in want:
+            if not listed and doc_id not in have:
+                raise CatalogRetirementRefused(
+                    RETIRE_NOT_IN_CATALOG,
+                    f"the live source catalog lists no revision of document ({doc_id})",
+                )
+            needed = listed - {r for r in have.get(doc_id, set()) if r is not None}
+        else:
+            needed = {str(r) for r in want} - {r for r in have.get(doc_id, set()) if r is not None}
+        for rev in sorted(needed):
+            if rev not in listed:
+                raise CatalogRetirementRefused(
+                    RETIRE_NOT_IN_CATALOG,
+                    f"the live source catalog does not list revision ({doc_id}@{rev})",
+                )
+            if not is_revision_committed(client, live_settings, doc_id, rev):
+                raise CatalogRetirementRefused(
+                    RETIRE_NOT_COMMITTED,
+                    f"revision is not committed in the live generation ({doc_id}@{rev})",
+                )
+            approvals.setdefault(doc_id, set()).add(rev)
+    return approvals
 
 
 def apply_approved_removals(

@@ -682,6 +682,7 @@ def test_operator_job_publishes_exact_corpus_on_three_peers(cluster, ingest_tree
         assert [job_env[key] for key in ("QDRANT_SHARD_NUMBER", "QDRANT_REPLICATION_FACTOR",
                                          "QDRANT_WRITE_CONSISTENCY_FACTOR")] == ["6", "3", "2"]
         assert "EMBED_MODE" not in job_env and "ALLOW_HASH_MODE" not in job_env
+        assert job_env["INGEST_PARSE_TMP_DIR"] == "/work/parse-tmp"
         # Execute the checked-in image's entrypoint with the rendered arguments.
         entrypoint_line = next(line for line in (REPO / "images/Containerfile.ingest").read_text().splitlines()
                                if line.startswith("ENTRYPOINT "))
@@ -694,7 +695,8 @@ def test_operator_job_publishes_exact_corpus_on_three_peers(cluster, ingest_tree
         env = {key: value for key, value in os.environ.items()
                if key in {"PATH", "HOME", "LANG", "LC_ALL", "TMPDIR"}}
         env.update({key: value for key, value in job_env.items() if isinstance(value, str)})
-        env.update(QDRANT_URL=cluster.urls[0], EMBED_MODE="hash", ALLOW_HASH_MODE="true")
+        env.update(QDRANT_URL=cluster.urls[0], EMBED_MODE="hash", ALLOW_HASH_MODE="true",
+                   INGEST_PARSE_TMP_DIR=str(tmp_path / "work" / "parse-tmp"))
         # Run this checkout's code, not an editable install elsewhere.
         env["PYTHONPATH"] = str(REPO / "src")
         launched += 1

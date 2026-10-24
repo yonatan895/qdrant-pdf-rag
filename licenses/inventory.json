@@ -694,11 +694,11 @@
       ],
       "license_spdx": "MIT",
       "name": "filelock",
-      "sha256": "3f16ecd0117feae0dfc147e8c62eb5daeccd8bd800378c3ddf416de9b4feb6b1",
+      "sha256": "7be2662e9e826b9bba28afc0f843a123280d799a2ea44bb5d35ccec67905ae44",
       "spdx_basis": "declared-expression",
       "status": "declared",
-      "version": "3.32.6",
-      "wheel": "filelock-3.32.6-py3-none-any.whl"
+      "version": "4.2.1",
+      "wheel": "filelock-4.2.1-py3-none-any.whl"
     },
     {
       "approval_ref": "gh:yonatan895/qdrant-pdf-rag#376 maintainer decisions comment 2026-10-23",

@@ -73,6 +73,17 @@ class WalkedFileChangedError(CorpusScanError):
         super().__init__(f"{self.code}: walked file changed after the corpus scan")
 
 
+class ParseScratchError(RuntimeError):
+    """The private verified copy could not be written (scratch full, I/O
+    error on the scratch side). Fixed text only: no errno string, path or
+    manual text (issue #1058)."""
+
+    code = "parse_scratch_failed"
+
+    def __init__(self) -> None:
+        super().__init__(f"{self.code}: the private copy of the document could not be written")
+
+
 def require_inside_root(path: Path, corpus_root: str | None) -> None:
     """Worker-side confinement re-check right before parsing (TOCTOU, #996)."""
     if corpus_root and not path.resolve().is_relative_to(Path(corpus_root).resolve()):
@@ -99,12 +110,27 @@ def private_verified_copy(path: Path, corpus_root: str, walk_sha: str, tmp_dir: 
         lexical_rel = resolved_rel
     private_root = Path(tmp_dir) / "root"
     target = private_root / resolved_rel
-    target.parent.mkdir(parents=True, exist_ok=True)
     digest = hashlib.sha256()
-    with open(path, "rb") as src, open(target, "wb") as dst:
-        for block in iter(lambda: src.read(1 << 20), b""):
-            digest.update(block)
-            dst.write(block)
+    # Only the scratch side (mkdir/open/write) becomes ParseScratchError; a
+    # source read error keeps its own type (e.g. PermissionError).
+    with open(path, "rb") as src:
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            dst = open(target, "wb")  # noqa: SIM115 — closed in the finally below
+        except OSError:
+            raise ParseScratchError from None
+        try:
+            for block in iter(lambda: src.read(1 << 20), b""):
+                digest.update(block)
+                try:
+                    dst.write(block)
+                except OSError:
+                    raise ParseScratchError from None
+        finally:
+            try:
+                dst.close()
+            except OSError:
+                raise ParseScratchError from None
     if digest.hexdigest() != walk_sha:
         raise WalkedFileChangedError
     if lexical_rel == resolved_rel:

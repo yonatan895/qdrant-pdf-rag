@@ -283,6 +283,7 @@ def test_ingest_job_contract_normal():
         "OTEL_SERVICE_NAME": "mainframe-rag-ingest",
         "OTEL_DEPLOYMENT_ENVIRONMENT": "",
         "INGEST_WORKERS": "4",
+        "INGEST_PARSE_TMP_DIR": "/work/parse-tmp",
         "CONTEXTUAL_EMBED_ENABLED": "false",
         "CONTEXT_LLM_BASE_URL": "",
         "CONTEXT_LLM_MODEL": "",
@@ -306,6 +307,29 @@ def test_ingest_job_contract_normal():
         "persistentVolumeClaim": {"claimName": "corpus-pvc", "readOnly": True},
     }
     assert vols["work"] == {"name": "work", "persistentVolumeClaim": {"claimName": "ingest-work"}}
+
+
+def test_ingest_job_private_parse_copies_resolve_under_the_work_mount():
+    """#1058: the per-document private copy is made under INGEST_PARSE_TMP_DIR;
+    that must sit on the sized `ingest-work` PVC mount, never on the node
+    ephemeral `/tmp` emptyDir or the read-only corpus mount."""
+    from pathlib import PurePosixPath
+
+    job = run_new_job_only({"ingest": {"corpusPVC": "corpus-pvc"}})["Job", "ingest"]
+    pod = job["spec"]["template"]["spec"]
+    container = next(c for c in pod["containers"] if c["name"] == "ingest")
+    target = PurePosixPath(ingest_env_map(job)["INGEST_PARSE_TMP_DIR"]["value"])
+    mounts = {m["mountPath"]: m for m in container["volumeMounts"]}
+    owner = max(
+        (PurePosixPath(p) for p in mounts if target.is_relative_to(PurePosixPath(p))),
+        key=lambda p: len(p.parts),
+    )
+    mount = mounts[str(owner)]
+    assert target.is_absolute() and target != owner  # a subdirectory, not the mount root
+    assert mount["name"] == "work" and not mount.get("readOnly")
+    volume = next(v for v in pod["volumes"] if v["name"] == "work")
+    assert volume["persistentVolumeClaim"]["claimName"] == "ingest-work"
+
 
 def test_ingest_job_contract_maintenance_with_tricky_revision():
     tricky = "SA22-7777-01@vendor|product with spaces|v1|abc123 & more"
@@ -362,6 +386,41 @@ def test_rerank_enabled_without_base_url_falls_back():
         env = env_map(docs["Deployment", "rag-agent"])
         assert env["RERANK_ENABLED"]["value"] == "true"
         assert env["RERANK_BASE_URL"].get("value") in (None, "")
+
+@pytest.mark.parametrize("authorize", [False, True])
+def test_ingest_job_renders_authorize_from_catalog_only_when_set(authorize):
+    """Issue #1005 (option B): `ingest.authorizeFromCatalog` renders
+    `--authorize-from-catalog` after the retirements; the default renders
+    no flag."""
+    ingest = {"corpusPVC": "corpus-pvc", "retireDocs": ["SA22-0000-00@ibm|zos|2.5|abc"]}
+    if authorize:
+        ingest["authorizeFromCatalog"] = True
+    new = run_new_job_only(
+        {
+            "ingest": ingest,
+            "gateway": {"apiKeySecretName": "gw-keys", "caConfigMapName": "gw-ca"},
+            "pullSecret": {"name": "ghcr-pull"},
+        }
+    )
+    args = next(
+        c
+        for c in new["Job", "ingest"]["spec"]["template"]["spec"]["containers"]
+        if c["name"] == "ingest"
+    )["args"]
+    tail = ["--retire-doc", "SA22-0000-00@ibm|zos|2.5|abc"]
+    assert args[-3:] == [*tail, "--authorize-from-catalog"] if authorize else args[-2:] == tail
+    assert ("--authorize-from-catalog" in args) is authorize
+
+
+def test_authorize_from_catalog_without_retire_docs_is_refused_at_render():
+    """Issue #1005 (option B): the flag alone is refused by the chart (schema
+    and template), so a hand-written values file cannot render it either."""
+    values = base_values()
+    values["ingest"].update({"enabled": True, "corpusPVC": "c", "authorizeFromCatalog": True})
+    r = _helm_template_with_values(values)
+    assert r.returncode != 0
+    assert "authorizeFromCatalog" in r.stderr or "retireDocs" in r.stderr
+
 
 def test_schema_rejects_invalid_selected_configuration():
     cases = [

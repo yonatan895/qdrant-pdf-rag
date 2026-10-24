@@ -542,6 +542,24 @@ def test_swap_rejection_raises_without_applying(monkeypatch):
     assert fake.aliases[ALIAS] == "g1"
 
 
+def test_swap_refuses_when_the_alias_left_its_predecessor(monkeypatch):
+    """Issue #1019 (S2-19): the swap re-reads the alias right before the
+    atomic call and refuses when it no longer names the predecessor the
+    cutover was planned against; no alias operation is sent."""
+    from mainframe_rag.ingest.qdrant_io import swap_alias_to
+
+    fake = PublishFake()
+    for name in ("g1", "g2", "g3"):
+        fake.collections[name] = []
+    fake.aliases[ALIAS] = "g3"
+    with pytest.raises(RuntimeError, match="moved during publication"):
+        swap_alias_to(fake, _settings(), "g2", "g1")
+    with pytest.raises(RuntimeError, match="moved during publication"):
+        swap_alias_to(fake, _settings(), "g2", None)
+    assert fake.aliases[ALIAS] == "g3"
+    assert fake.alias_calls == []
+
+
 
 
 class _CreateRejectingFake(PublishFake):
@@ -1619,6 +1637,77 @@ def test_overtaken_publisher_refuses_stale_cutover(tmp_path, monkeypatch):
     assert fake.aliases[ALIAS] == "G2manual"
 
 
+def test_stale_publisher_cannot_revert_a_newer_publication(tmp_path, monkeypatch):
+    """Issue #1019 (S2-19): publisher A (its own progress directory, the
+    unsupported lock-bypass setup) passes its pre-swap live recheck, then
+    pauses in the catalog/seal phase while publisher B publishes a newer
+    three-document generation. A must refuse at the swap instead of switching
+    the alias back to its two-document candidate; B's publication keeps
+    serving."""
+    import shutil
+    import threading
+
+    from mainframe_rag.ingest import run_ingest
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus_a = tmp_path / "corpus_a"
+    corpus_a.mkdir()
+    _build_doc_with_id(corpus_a, "doc_a", DOC_A)
+    progress_a = tmp_path / "a" / "inv.jsonl"
+    progress_a.parent.mkdir()
+    assert _run_main(monkeypatch, corpus_a, progress_a) == 0
+    live_before = fake.aliases[ALIAS]
+    _build_doc_with_id(corpus_a, "doc_b", DOC_B)
+    corpus_b = tmp_path / "corpus_b"
+    corpus_b.mkdir()
+    for name in ("doc_a.pdf", "doc_b.pdf"):  # B walks the same bytes plus one more
+        shutil.copyfile(corpus_a / name, corpus_b / name)
+    _build_doc_with_id(corpus_b, "doc_c", "SA22-0000-02")
+    progress_b = tmp_path / "b" / "inv.jsonl"
+    progress_b.parent.mkdir()
+
+    paused = threading.Event()
+    release = threading.Event()
+    real_catalog = run_ingest.build_source_catalog
+    calls: list = []
+
+    def pausing_catalog(*args, **kwargs):
+        calls.append(threading.current_thread().name)
+        if len(calls) == 1:  # publisher A only: after its recheck, before the swap
+            paused.set()
+            assert release.wait(timeout=60)
+        return real_catalog(*args, **kwargs)
+
+    monkeypatch.setattr(run_ingest, "build_source_catalog", pausing_catalog)
+    errors: list = []
+
+    def run_publisher_a():
+        try:
+            errors.append(_run_main(monkeypatch, corpus_a, progress_a))
+        except Exception as exc:  # noqa: BLE001 — asserted below
+            errors.append(exc)
+
+    thread_a = threading.Thread(target=run_publisher_a, name="publisher-a")
+    thread_a.start()
+    try:
+        assert paused.wait(timeout=60)
+        assert fake.aliases[ALIAS] == live_before, "A has passed its recheck, not swapped"
+        assert _run_main(monkeypatch, corpus_b, progress_b) == 0
+        newer = fake.aliases[ALIAS]
+        assert newer != live_before
+        assert _live_doc_ids(fake) == {DOC_A, DOC_B, "SA22-0000-02"}
+    finally:
+        release.set()
+        thread_a.join(timeout=60)
+
+    assert len(errors) == 1 and isinstance(errors[0], RuntimeError), errors
+    assert "moved during publication" in str(errors[0])
+    assert fake.aliases[ALIAS] == newer, "the newer publication keeps serving"
+    assert _live_doc_ids(fake) == {DOC_A, DOC_B, "SA22-0000-02"}
+
+
 def test_revisit_retained_generation_never_mutated(tmp_path, monkeypatch):
     """R2 acceptance: republishing an older input set allocates a new
     staging generation; the retained published generation (points and
@@ -1891,6 +1980,45 @@ def test_publish_migration_retire_unapproved_stray_refuses(tmp_path, monkeypatch
         _run_main(monkeypatch, corpus, progress, "--retire-doc", DOC_A, "--reingest")
     assert fake.aliases[ALIAS] == live, "refusal moves no alias"
     assert any(getattr(p, "id", None) == "stray-a" for p in fake.collections[live])
+
+
+def test_zero_point_marker_does_not_block_migration(tmp_path, monkeypatch):
+    """Issue #1005 (S2-5): a completion marker whose revision has no stored
+    points (orphaned by the pre-#1004 sibling sweep) certifies no searchable
+    vector. A representation migration over the complete corpus must commit
+    and cut over without editing control collections, while the coverage
+    proof still attributes every searchable point."""
+    import uuid as uuid_mod
+
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.representation import STATE_COMMITTED, read_manifest_record
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _two_doc_corpus(corpus)
+    progress = tmp_path / "inv.jsonl"
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    live = fake.aliases[ALIAS]
+    controls = fake.collections[f"{live}__completions"]
+    marker = next(p for p in controls if (p.payload or {}).get("doc_id") == DOC_A)
+    orphan_rev = "ibm|zos|2.5|" + "e" * 64
+    controls.append(models.PointStruct(
+        id=str(uuid_mod.uuid4()), vector=marker.vector,
+        payload={**marker.payload, "source_rev": orphan_rev, "sha256": "e" * 64},
+    ))
+    assert orphan_rev not in _revisions_in(fake, live), "the marker certifies no point"
+
+    monkeypatch.setenv("EMBED_MODEL_REVISION", "rev-2")
+    assert _run_main(monkeypatch, corpus, progress, "--reingest") == 0
+    new = fake.aliases[ALIAS]
+    assert new != live
+    record = read_manifest_record(fake, f"{new}__completions")
+    assert record is not None and record.state == STATE_COMMITTED
+    assert record.manifest.embed_model_revision == "rev-2"
+    assert _live_doc_ids(fake) == {DOC_A, DOC_B}
 
 
 
@@ -2275,6 +2403,274 @@ def test_conflict_preflight_same_bytes_changed_label_replaces_old_revision(tmp_p
     rev_3_2 = inv_2[str(a_path)].source_rev
     assert rev_3_2 and "3.2" in rev_3_2
     assert not any((p.payload or {}).get("source_rev") == rev_3_1 for p in fake.collections[live_2])
+
+
+def _revisions_in(fake: PublishFake, physical: str) -> set:
+    return {(p.payload or {}).get("source_rev") for p in fake.collections.get(physical, [])}
+
+
+def _marker_revisions_in(fake: PublishFake, physical: str) -> set:
+    return {
+        (p.payload or {}).get("source_rev")
+        for p in fake.collections.get(f"{physical}__completions", [])
+        if (p.payload or {}).get("doc_id")
+    }
+
+
+def test_duplicate_relabel_never_drops_a_committed_sibling_revision(tmp_path, monkeypatch):
+    """Issue #1004 (S2-4): a byte-identical copy under another layout path wins
+    the duplicate election, so the published revision's own file is no longer
+    ingested. Its committed points must not be swept from staging as residue
+    (the inherited marker certifies them): publication refuses with the
+    documented residue message, live keeps serving the old revision, and only
+    an explicit --retire-doc removes it, leaving no orphaned marker."""
+    import shutil
+
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.inventory import load_inventory
+    from mainframe_rag.ingest.publish import publish_state_path
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    progress = tmp_path / "inv.jsonl"
+    old_path = corpus / "ibm" / "zos" / "2.5" / "SA22-0000-00_alpha.pdf"
+    _build_doc_with_id(old_path.parent, old_path.stem, DOC_A)
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    live_1 = fake.aliases[ALIAS]
+    rev_old = load_inventory(progress)[str(old_path)].source_rev
+    assert rev_old and "|2.5|" in rev_old
+    points_before = [(p.id, dict(p.payload or {})) for p in fake.collections[live_1]]
+
+    new_path = corpus / "0ibm" / "zos" / "3.0" / "SA22-0000-00_alpha.pdf"
+    new_path.parent.mkdir(parents=True)
+    shutil.copyfile(old_path, new_path)
+    with pytest.raises(RuntimeError, match="unmarked residue"):
+        _run_main(monkeypatch, corpus, progress)
+    assert fake.aliases[ALIAS] == live_1, "a refusal moves no alias"
+    assert [(p.id, dict(p.payload or {})) for p in fake.collections[live_1]] == points_before
+    rev_new = load_inventory(progress)[str(new_path)].source_rev
+    assert rev_new and rev_new != rev_old
+    staging = next(g for g in _gen_collections(fake) if g != live_1)
+    assert _revisions_in(fake, staging) == {rev_old, rev_new}, "sibling kept, never swept"
+
+    # Documented path through: abandon the refused build, retire explicitly.
+    publish_state_path(progress, ALIAS).unlink()
+    assert _run_main(monkeypatch, corpus, progress, "--retire-doc", f"{DOC_A}@{rev_old}") == 0
+    live_2 = fake.aliases[ALIAS]
+    assert live_2 not in (live_1, staging)
+    assert _revisions_in(fake, live_2) == {rev_new}
+    assert _marker_revisions_in(fake, live_2) == {rev_new}, "no orphaned marker"
+    assert _revisions_in(fake, live_1) == {rev_old}, "superseded generation retained"
+    # The next ordinary run is steady state.
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    assert fake.aliases[ALIAS] == live_2
+
+
+def test_relabel_after_inventory_loss_recovers_by_republishing_original_labels(tmp_path, monkeypatch):
+    """Issue #1005 (S2-5), documented recovery: a relabel run with a lost
+    progress file has no lineage, so the published revision stays and
+    cutover refuses as residue. The inventory is the only retirement
+    authority (SF1), so `--retire-doc` cannot name the published revision
+    either. Supported path, with no control-collection edit: abandon the
+    refused build, republish under the ORIGINAL labels (forced, since the
+    serving generation cannot be re-certified without inventory) to rebuild
+    the inventory record, then relabel; lineage replaces the old revision,
+    leaving no orphaned marker, and the next ordinary run is steady state."""
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.inventory import load_inventory
+    from mainframe_rag.ingest.publish import publish_state_path
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    path = _build_doc_with_id(corpus, "doc_a", DOC_A)
+    progress = tmp_path / "inv.jsonl"
+    original = ("--vendor", "ibm", "--product", "zos", "--version", "2.5")
+    relabel = ("--vendor", "ibm", "--product", "zos", "--version", "3.0")
+    assert _run_main(monkeypatch, corpus, progress, *original) == 0
+    live_1 = fake.aliases[ALIAS]
+    rev_old = load_inventory(progress)[str(path)].source_rev
+    progress.unlink()  # the inventory is lost
+
+    with pytest.raises(RuntimeError, match="unmarked residue"):
+        _run_main(monkeypatch, corpus, progress, *relabel)
+    publish_state_path(progress, ALIAS).unlink()  # abandon the refused build
+    with pytest.raises(RuntimeError, match="unapproved revision"):
+        _run_main(monkeypatch, corpus, progress, *relabel, "--retire-doc", f"{DOC_A}@{rev_old}")
+    assert fake.aliases[ALIAS] == live_1, "refusals move no alias"
+
+    assert _run_main(monkeypatch, corpus, progress, *original, "--reingest") == 0
+    assert load_inventory(progress)[str(path)].source_rev == rev_old, "inventory rebuilt"
+    live_2 = fake.aliases[ALIAS]
+    assert _revisions_in(fake, live_2) == {rev_old}
+
+    assert _run_main(monkeypatch, corpus, progress, *relabel) == 0
+    live_3 = fake.aliases[ALIAS]
+    rev_new = load_inventory(progress)[str(path)].source_rev
+    assert rev_new != rev_old
+    assert _revisions_in(fake, live_3) == {rev_new}
+    assert _marker_revisions_in(fake, live_3) == {rev_new}, "no orphaned marker"
+    assert _revisions_in(fake, live_1) == {rev_old}, "superseded generation retained"
+    assert _run_main(monkeypatch, corpus, progress, *relabel) == 0
+    assert fake.aliases[ALIAS] == live_3, "the next ordinary run is steady state"
+
+
+def _lost_inventory_relabel(tmp_path, monkeypatch, fake):
+    """Publish DOC_A under version 2.5, lose the progress file, then relabel to
+    3.0: the refused build is abandoned. Returns (corpus, progress, path,
+    relabel args, live, old revision)."""
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.inventory import load_inventory
+    from mainframe_rag.ingest.publish import publish_state_path
+
+    _publish_env(monkeypatch)
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    path = _build_doc_with_id(corpus, "doc_a", DOC_A)
+    progress = tmp_path / "inv.jsonl"
+    labels = ("--vendor", "ibm", "--product", "zos")
+    assert _run_main(monkeypatch, corpus, progress, *labels, "--version", "2.5") == 0
+    live = fake.aliases[ALIAS]
+    rev_old = load_inventory(progress)[str(path)].source_rev
+    progress.unlink()  # the inventory is lost
+    relabel = (*labels, "--version", "3.0")
+    with pytest.raises(RuntimeError, match="unmarked residue"):
+        _run_main(monkeypatch, corpus, progress, *relabel)
+    publish_state_path(progress, ALIAS).unlink()  # abandon the refused build
+    return corpus, progress, path, relabel, live, rev_old
+
+
+def test_authorize_from_catalog_retires_a_published_revision_after_inventory_loss(tmp_path, monkeypatch, capsys):
+    """Issue #1005 (S2-5, option B): with the inventory lost, the published
+    revision cannot be retired from the inventory. `--authorize-from-catalog`
+    lets --retire-doc name it because the live build's sealed source catalog
+    lists it and its marker and points verify in the live generation. Without
+    the flag the same state still refuses. The next ordinary run is steady
+    and never brings the retired revision back."""
+    from mainframe_rag.ingest.inventory import load_inventory
+
+    fake = PublishFake()
+    corpus, progress, path, relabel, live_1, rev_old = _lost_inventory_relabel(
+        tmp_path, monkeypatch, fake
+    )
+    retire = ("--retire-doc", f"{DOC_A}@{rev_old}")
+    with pytest.raises(RuntimeError, match="unapproved revision"):
+        _run_main(monkeypatch, corpus, progress, *relabel, *retire)
+    assert fake.aliases[ALIAS] == live_1, "without the flag the inventory is the only authority"
+
+    capsys.readouterr()
+    assert _run_main(monkeypatch, corpus, progress, *relabel, *retire, "--authorize-from-catalog") == 0
+    lines = [line for line in capsys.readouterr().err.splitlines() if "retire_authorized_from_catalog" in line]
+    assert len(lines) == 1 and rev_old in lines[0], "the catalog approval is logged, ids only"
+    live_2 = fake.aliases[ALIAS]
+    assert live_2 != live_1
+    rev_new = load_inventory(progress)[str(path)].source_rev
+    assert _revisions_in(fake, live_2) == {rev_new}
+    assert _marker_revisions_in(fake, live_2) == {rev_new}, "no orphaned marker"
+    assert _revisions_in(fake, live_1) == {rev_old}, "superseded generation retained"
+
+    assert _run_main(monkeypatch, corpus, progress, *relabel) == 0
+    assert fake.aliases[ALIAS] == live_2, "the next ordinary run is steady state"
+    assert rev_old not in _revisions_in(fake, live_2), "the retired revision stays retired"
+
+
+@pytest.mark.parametrize("case", ["without_retire_doc", "not_in_catalog", "uncommitted"])
+def test_authorize_from_catalog_refusals_mutate_nothing(tmp_path, monkeypatch, case):
+    """Issue #1005 (option B): the catalog authority is explicit and bounded.
+    The flag without --retire-doc, a revision the live catalog does not list,
+    and a listed revision whose live marker and points no longer verify each
+    refuse with a fixed message and a stable code, before any build."""
+    fake = PublishFake()
+    corpus, progress, _, relabel, live, rev_old = _lost_inventory_relabel(
+        tmp_path, monkeypatch, fake
+    )
+    if case == "without_retire_doc":
+        extra: tuple[str, ...] = ()
+        code = "retire_catalog_requires_retire_doc"
+    elif case == "not_in_catalog":
+        extra = ("--retire-doc", f"{DOC_A}@ibm|zos|2.5|{'f' * 64}")
+        code = "retire_not_in_catalog"
+    else:
+        extra = ("--retire-doc", f"{DOC_A}@{rev_old}")
+        code = "retire_not_committed"
+        damaged = next(p for p in fake.collections[live] if p.payload["source_rev"] == rev_old)
+        fake.collections[live].remove(damaged)
+    gens_before = _gen_collections(fake)
+    with pytest.raises(RuntimeError) as excinfo:
+        _run_main(monkeypatch, corpus, progress, *relabel, *extra, "--authorize-from-catalog")
+    assert getattr(excinfo.value, "code", None) == code
+    assert str(excinfo.value).startswith(f"{code}: ")
+    assert "/" not in str(excinfo.value).split("(")[0], "fixed text, ids only"
+    assert fake.aliases[ALIAS] == live
+    assert _gen_collections(fake) == gens_before, "a refusal builds nothing"
+
+
+def test_authorize_from_catalog_logs_nothing_when_the_inventory_approves(tmp_path, monkeypatch, capsys):
+    """Issue #1005 (N2): the flag logs `retire_authorized_from_catalog` only
+    when the catalog actually approved a revision. A retirement the
+    inventory already approves proceeds as without the flag, with no
+    catalog-authority line."""
+    from mainframe_rag.ingest import run_ingest
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _, b_path = _two_doc_corpus(corpus)
+    progress = tmp_path / "inv.jsonl"
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    b_path.unlink()
+    capsys.readouterr()
+    assert _run_main(monkeypatch, corpus, progress, "--retire-doc", DOC_B,
+                     "--authorize-from-catalog") == 0
+    err = capsys.readouterr().err
+    assert '"action":"publish"' in err, "the run's own log lines are captured"
+    assert _live_doc_ids(fake) == {DOC_A}
+    assert "retire_authorized_from_catalog" not in err
+
+
+def test_same_path_reissue_with_a_new_form_number_cuts_over_by_lineage(tmp_path, monkeypatch):
+    """Issue #1006 (S2-6): the path's inventory lineage names the revision it
+    replaces even when the reissue prints another form number. The ordinary
+    rerun deletes that revision (points and markers) and cuts over; no
+    --retire-doc is needed and nothing of the old revision stays live."""
+    from scripts.make_synthetic_pdf import build as make_pdf
+
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.inventory import load_inventory
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    progress = tmp_path / "inv.jsonl"
+    manual = corpus / "manual.pdf"
+    make_pdf(manual, doc_id="GX28-1234-00", title="Original Issue")
+    _build_doc_with_id(corpus, "doc_b", DOC_B)
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    live_1 = fake.aliases[ALIAS]
+    old = load_inventory(progress)[str(manual)]
+    assert old.doc_id == "GX28-1234-00" and old.source_rev
+
+    make_pdf(manual, doc_id="SC33-5678-00", title="Reissued Manual")
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    live_2 = fake.aliases[ALIAS]
+    assert live_2 != live_1
+    new = load_inventory(progress)[str(manual)]
+    assert new.doc_id == "SC33-5678-00" and new.source_rev != old.source_rev
+    assert _live_doc_ids(fake) == {"SC33-5678-00", DOC_B}
+    assert old.source_rev not in _revisions_in(fake, live_2)
+    assert old.source_rev not in _marker_revisions_in(fake, live_2), "no orphaned marker"
+    assert old.source_rev in _revisions_in(fake, live_1), "superseded generation retained"
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    assert fake.aliases[ALIAS] == live_2, "the next ordinary run is steady state"
 
 
 def test_stale_completion_markers_revision_scoped_exclusion():

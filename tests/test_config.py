@@ -316,6 +316,7 @@ PINNED_SETTING_DEFAULTS: dict[str, object] = {
     "ingest_max_pdf_bytes": 0,
     "ingest_max_doc_pages": 0,
     "ingest_max_doc_chunks": 0,
+    "ingest_parse_tmp_dir": "",
     "http_connect_retries": 2,
     "http_max_connections": 200,
     "http_max_keepalive_connections": 100,
