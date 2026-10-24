@@ -19,6 +19,11 @@ Commands:
   task USER                  call the title/tags/follow-up task endpoints directly
   refusals USER              upload, knowledge, memory and signup attempts (all must be refused)
   config-get / config-set K V  admin config read / live edit (check h)
+  task-config-set K V        admin: live edit of a task setting, e.g. ENABLE_TITLE_GENERATION true, TASK_MODEL docs
+  setup-toolprobe            admin: install the tool-probe control Pipe, public read (#1088)
+  tool-chat USER TOOL_ID...  one chat turn to the tool-probe Pipe with those tool ids; prints
+                             the tool names, call results and the OAuth token-set key names and
+                             12-hex fingerprints Open WebUI holds (to match the tool server's log)
   login-form                 the password sign-in path (must be refused)
 """
 from __future__ import annotations
@@ -60,12 +65,24 @@ def token(user: str) -> str:
         return fh.read().strip()
 
 
+def oauth_cookie(user: str) -> str | None:
+    """The oauth_session_id cookie a browser would send with every request."""
+    try:
+        with open(f"{STATE}/{user}.oauth_session", encoding="utf-8") as fh:
+            return fh.read().strip() or None
+    except OSError:
+        return None
+
+
 def api(user: str | None, method: str, path: str, body=None, timeout=60):
     data = None if body is None else json.dumps(body).encode()
     req = urllib.request.Request(BASE + path, data=data, method=method)
     req.add_header("Content-Type", "application/json")
     if user:
         req.add_header("Authorization", f"Bearer {token(user)}")
+        session = oauth_cookie(user)
+        if session:
+            req.add_header("Cookie", f"oauth_session_id={session}")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read()
@@ -105,6 +122,10 @@ def login(user: str) -> None:
     fd = os.open(_token_path(user), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as fh:
         fh.write(tok)
+    session = next((c.value for c in jar if c.name == "oauth_session_id"), "")
+    fd = os.open(f"{STATE}/{user}.oauth_session", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        fh.write(session)
     status, me = api(user, "GET", "/api/v1/auths/")
     groups = []
     if status == 200:
@@ -138,6 +159,85 @@ class Pipe:
         return "probe task=%s metadata_task=%s metadata_keys=%s emitter=%s" % (
             __task__, meta.get("task"), ",".join(sorted(meta)), __event_emitter__ is not None)
 '''
+
+
+TOOL_PROBE_PIPE = '''"""
+title: Tool probe
+version: 0.0.1
+description: Trial-only control model (issues #1073, #1088). Calls every tool Open WebUI resolved for the turn and reports key names and fingerprints, never token values.
+"""
+import hashlib
+import json
+
+
+def _fp(value):
+    return hashlib.sha256(value.encode()).hexdigest()[:12] if isinstance(value, str) and value else None
+
+
+class Pipe:
+    async def pipe(self, body: dict, __user__=None, __tools__=None, __oauth_token__=None, __metadata__=None) -> str:
+        tok = __oauth_token__ or {}
+        out = {"oauth_token_keys": sorted(tok), "access_token_fp": _fp(tok.get("access_token")),
+               "id_token_fp": _fp(tok.get("id_token")), "tools": sorted(__tools__ or {}), "calls": {}}
+        for name, tool in sorted((__tools__ or {}).items()):
+            try:
+                result = await tool["callable"](note="trial")
+                out["calls"][name] = str(result)[:300]
+            except Exception as exc:
+                out["calls"][name] = "error:" + type(exc).__name__
+        return json.dumps(out, sort_keys=True)
+'''
+
+
+def setup_toolprobe() -> None:
+    result = {}
+    status, _ = api("admin", "GET", "/api/v1/functions/id/tool_probe")
+    if status != 200:
+        result["create"] = api("admin", "POST", "/api/v1/functions/create", {
+            "id": "tool_probe", "name": "Tool probe", "content": TOOL_PROBE_PIPE,
+            "meta": {"description": "Tool probe"}})[0]
+    status, fn = api("admin", "GET", "/api/v1/functions/id/tool_probe")
+    if status == 200 and not fn.get("is_active"):
+        result["toggle"] = api("admin", "POST", "/api/v1/functions/id/tool_probe/toggle")[0]
+    result["access"] = api("admin", "POST", "/api/v1/models/model/access/update", {
+        "id": "tool_probe", "name": "Tool probe",
+        "access_grants": [{"principal_type": "user", "principal_id": "*", "permission": "read"}]})[0]
+    out(result)
+
+
+def tool_chat(user: str, *tool_ids: str) -> None:
+    uid, aid = str(uuid.uuid4()), str(uuid.uuid4())
+    now = int(time.time())
+    model = "tool_probe"
+    umsg = {"id": uid, "parentId": None, "childrenIds": [aid], "role": "user", "content": "tool probe",
+            "timestamp": now, "models": [model]}
+    amsg = {"id": aid, "parentId": uid, "childrenIds": [], "role": "assistant", "content": "",
+            "model": model, "modelName": model, "modelIdx": 0, "timestamp": now}
+    status, created = api(user, "POST", "/api/v1/chats/new", {"chat": {
+        "title": "New Chat", "models": [model], "params": {},
+        "history": {"messages": {uid: umsg, aid: amsg}, "currentId": aid},
+        "messages": [umsg, amsg], "tags": [], "timestamp": now * 1000}})
+    if status != 200:
+        out({"chat_create": status})
+        sys.exit(1)
+    chat_id = created["id"]
+    status, _resp = api(user, "POST", "/api/chat/completions", {
+        "model": model, "stream": True, "messages": [{"role": "user", "content": "tool probe"}],
+        "chat_id": chat_id, "id": aid, "parent_id": uid, "session_id": None,
+        "tool_ids": list(tool_ids), "features": {}, "params": {}}, timeout=180)
+    message = {}
+    for _ in range(60):
+        _gstatus, stored = api(user, "GET", f"/api/v1/chats/{chat_id}")
+        message = (((stored or {}).get("chat") or {}).get("history") or {}).get("messages", {}).get(aid, {})
+        if message.get("done") or message.get("content"):
+            break
+        time.sleep(2)
+    content = message.get("content") or ""
+    try:
+        report = json.loads(content)
+    except ValueError:
+        report = {"content_chars": len(content)}
+    out({"user": user, "completion_status": status, "tool_ids": list(tool_ids), "report": report})
 
 
 def setup() -> None:
@@ -284,6 +384,17 @@ def config_set(key: str, value: str) -> None:
     out({"set_status": status, key: (new or {}).get(key)})
 
 
+def task_config_set(key: str, value: str) -> None:
+    status, cfg = api("admin", "GET", "/api/v1/tasks/config")
+    if status != 200:
+        out({"get": status})
+        sys.exit(1)
+    before = cfg.get(key)
+    cfg[key] = value.lower() == "true" if value.lower() in ("true", "false") else value
+    status, new = api("admin", "POST", "/api/v1/tasks/config/update", cfg)
+    out({"set_status": status, "before": before, key: (new or {}).get(key)})
+
+
 def pipe_hash() -> None:
     import hashlib
     with open("/pipes/docs_pipe.py", "rb") as fh:
@@ -314,7 +425,8 @@ def main(argv: list[str]) -> int:
     table = {"login": login, "setup": setup, "models": models, "chat": chat, "chats": chats,
              "task": task, "refusals": refusals, "login-form": login_form,
              "config-get": config_get, "config-set": config_set,
-             "pipe-hash": pipe_hash, "task-direct": task_direct}
+             "pipe-hash": pipe_hash, "task-direct": task_direct,
+             "task-config-set": task_config_set, "setup-toolprobe": setup_toolprobe, "tool-chat": tool_chat}
     table[cmd](*args)
     return 0
 

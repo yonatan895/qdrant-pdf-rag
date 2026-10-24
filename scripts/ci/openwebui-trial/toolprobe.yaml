@@ -1,0 +1,146 @@
+# Open WebUI Kind trial, tool-server identity probe (issues #1073, #1088).
+# Trial-only overlay on stack.yaml: a dummy tool server that logs the decoded
+# JWT header and claims Open WebUI forwards (never the raw token), and a second
+# Dex instance ("broker") with an OIDC connector to the trial IdP, so the probe
+# can try RFC 8693 token exchange against both. run_trial.sh toolprobe renders
+# @PLACEHOLDERS@ and creates the Secrets (dex-broker-config, toolprobe-exchange)
+# at run time; no key, password or token is in this file.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: toolprobe-flows, namespace: owui-trial}
+spec:
+  podSelector: {matchLabels: {app: toolprobe}}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from: [{podSelector: {matchLabels: {app: openwebui}}}]
+      ports: [{protocol: TCP, port: 8000}]
+  egress:
+    - to: [{podSelector: {matchExpressions: [{key: app, operator: In, values: [dex, dex-broker]}]}}]
+      ports: [{protocol: TCP, port: 5556}]
+    - to:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}
+          podSelector: {matchLabels: {k8s-app: kube-dns}}
+      ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+---
+# Open WebUI may also reach the probe (policies are additive).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: openwebui-egress-toolprobe, namespace: owui-trial}
+spec:
+  podSelector: {matchLabels: {app: openwebui}}
+  policyTypes: [Egress]
+  egress:
+    - to: [{podSelector: {matchLabels: {app: toolprobe}}}]
+      ports: [{protocol: TCP, port: 8000}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: idp-from-toolprobe, namespace: owui-trial}
+spec:
+  podSelector: {matchExpressions: [{key: app, operator: In, values: [dex, dex-broker]}]}
+  policyTypes: [Ingress]
+  ingress:
+    - from: [{podSelector: {matchExpressions: [{key: app, operator: In, values: [toolprobe, dex-broker]}]}}]
+      ports: [{protocol: TCP, port: 5556}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: dex-broker-egress, namespace: owui-trial}
+spec:
+  podSelector: {matchLabels: {app: dex-broker}}
+  policyTypes: [Egress]
+  egress:
+    - to: [{podSelector: {matchLabels: {app: dex}}}]
+      ports: [{protocol: TCP, port: 5556}]
+    - to:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}
+          podSelector: {matchLabels: {k8s-app: kube-dns}}
+      ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: toolprobe, namespace: owui-trial}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: toolprobe}}
+  template:
+    metadata: {labels: {app: toolprobe}}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000771006
+        runAsGroup: 0
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: echo
+          image: @AGENT_IMAGE@
+          imagePullPolicy: Never
+          command: [python3, /probe/toolprobe_echo.py]
+          env:
+            - {name: PORT, value: "8000"}
+            - {name: EXCHANGE_CONFIG, value: /exchange/config.json}
+          ports: [{containerPort: 8000}]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          resources: {requests: {cpu: 10m, memory: 32Mi}, limits: {memory: 128Mi}}
+          readinessProbe:
+            exec: {command: [python3, -c, "import urllib.request as u; u.urlopen('http://127.0.0.1:8000/healthz', timeout=3)"]}
+            periodSeconds: 5
+          volumeMounts:
+            - {name: probe, mountPath: /probe, readOnly: true}
+            - {name: exchange, mountPath: /exchange, readOnly: true}
+      volumes:
+        - {name: probe, configMap: {name: toolprobe-script}}
+        - {name: exchange, secret: {secretName: toolprobe-exchange}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: toolprobe, namespace: owui-trial}
+spec:
+  selector: {app: toolprobe}
+  ports: [{name: http, port: 8000, targetPort: 8000}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: dex-broker, namespace: owui-trial}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: dex-broker}}
+  template:
+    metadata: {labels: {app: dex-broker}}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000771007
+        runAsGroup: 0
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: dex
+          image: @DEX_IMAGE@
+          imagePullPolicy: Never
+          args: [dex, serve, /etc/dex/config.yaml]
+          ports: [{containerPort: 5556}]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          resources: {requests: {cpu: 20m, memory: 32Mi}, limits: {memory: 128Mi}}
+          volumeMounts:
+            - {name: config, mountPath: /etc/dex, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - {name: config, secret: {secretName: dex-broker-config}}
+        - {name: tmp, emptyDir: {sizeLimit: 16Mi}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: dex-broker, namespace: owui-trial}
+spec:
+  selector: {app: dex-broker}
+  ports: [{name: http, port: 5556, targetPort: 5556}]
