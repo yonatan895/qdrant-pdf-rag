@@ -4,6 +4,7 @@ The retired differential oracle is replaced by explicit expectations for
 agent, OAuth/Route, OpenObserve, collector, ServiceMonitor and explicit ingest profiles.
 Operator-to-render round trips also live in test_map_values and airgap suites.
 """
+import hashlib
 import json
 
 import pytest
@@ -1100,6 +1101,42 @@ OWUI_KEYS = {
     ("Deployment", "rag-openwebui"), ("Service", "rag-openwebui"),
     ("PersistentVolumeClaim", "rag-openwebui-data"), ("NetworkPolicy", "rag-openwebui"),
     ("Route", "rag-openwebui"), ("ConfigMap", "rag-openwebui-pipe"),
+    ("ConfigMap", "rag-openwebui-proxy"),
+}
+# The complete environment of the Open WebUI container (N4: pin every toggle).
+OWUI_ENV_NAMES = {
+    "ANONYMIZED_TELEMETRY", "API_KEYS_ALLOWED_ENDPOINTS", "AUDIT_LOG_LEVEL",
+    "BYPASS_EMBEDDING_AND_RETRIEVAL", "BYPASS_MODEL_ACCESS_CONTROL", "CORS_ALLOW_ORIGIN",
+    "DATA_DIR", "DO_NOT_TRACK", "ENABLE_ADMIN_CHAT_ACCESS", "ENABLE_ADMIN_EXPORT",
+    "ENABLE_API_KEYS", "ENABLE_API_KEYS_ENDPOINT_RESTRICTIONS",
+    "ENABLE_AUTOCOMPLETE_GENERATION", "ENABLE_CHANNELS", "ENABLE_CODE_EXECUTION",
+    "ENABLE_CODE_INTERPRETER", "ENABLE_COMMUNITY_SHARING", "ENABLE_DIRECT_CONNECTIONS",
+    "ENABLE_DIRECT_INTEGRATIONS", "ENABLE_EVALUATION_ARENA_MODELS", "ENABLE_FOLDERS",
+    "ENABLE_FOLLOW_UP_GENERATION", "ENABLE_IMAGE_GENERATION", "ENABLE_INITIAL_ADMIN_SIGNUP",
+    "ENABLE_LOGIN_FORM", "ENABLE_MEMORIES", "ENABLE_MESSAGE_RATING", "ENABLE_NOTES",
+    "ENABLE_OAUTH_GROUP_CREATION", "ENABLE_OAUTH_GROUP_MANAGEMENT",
+    "ENABLE_OAUTH_PERSISTENT_CONFIG", "ENABLE_OAUTH_ROLE_MANAGEMENT", "ENABLE_OAUTH_SIGNUP",
+    "ENABLE_OAUTH_TOKEN_EXCHANGE", "ENABLE_OLLAMA_API", "ENABLE_OPENAI_API", "ENABLE_OTEL",
+    "ENABLE_PASSWORD_AUTH", "ENABLE_PERSISTENT_CONFIG",
+    "ENABLE_PIP_INSTALL_FRONTMATTER_REQUIREMENTS", "ENABLE_RETRIEVAL_QUERY_GENERATION",
+    "ENABLE_SEARCH_QUERY_GENERATION", "ENABLE_SIGNUP", "ENABLE_TAGS_GENERATION",
+    "ENABLE_TITLE_GENERATION", "ENABLE_TOOLS", "ENABLE_TOOL_SERVERS",
+    "ENABLE_VERSION_UPDATE_CHECK", "ENABLE_WEB_SEARCH", "GLOBAL_LOG_LEVEL", "HF_HUB_OFFLINE",
+    "HOME", "JWT_EXPIRES_IN", "OAUTH_ADMIN_ROLES", "OAUTH_ALLOWED_ROLES", "OAUTH_CLIENT_ID",
+    "OAUTH_CLIENT_SECRET", "OAUTH_GROUP_CLAIM", "OAUTH_MERGE_ACCOUNTS_BY_EMAIL",
+    "OAUTH_ROLES_CLAIM", "OAUTH_SCOPES", "OFFLINE_MODE", "OLLAMA_BASE_URL",
+    "OPENID_PROVIDER_URL", "OPENID_REDIRECT_URI", "RAG_EMBEDDING_MODEL_AUTO_UPDATE",
+    "RAG_EMBEDDING_MODEL_TRUST_REMOTE_CODE", "RAG_RERANKING_MODEL_AUTO_UPDATE",
+    "RAG_RERANKING_MODEL_TRUST_REMOTE_CODE", "SCARF_NO_ANALYTICS", "TASK_MODEL",
+    "USER_PERMISSIONS_CHAT_CALL", "USER_PERMISSIONS_CHAT_FILE_UPLOAD",
+    "USER_PERMISSIONS_CHAT_STT", "USER_PERMISSIONS_CHAT_TTS",
+    "USER_PERMISSIONS_FEATURES_API_KEYS", "USER_PERMISSIONS_FEATURES_CODE_INTERPRETER",
+    "USER_PERMISSIONS_FEATURES_DIRECT_TOOL_SERVERS",
+    "USER_PERMISSIONS_FEATURES_IMAGE_GENERATION", "USER_PERMISSIONS_FEATURES_MEMORIES",
+    "USER_PERMISSIONS_FEATURES_NOTES", "USER_PERMISSIONS_FEATURES_WEB_SEARCH",
+    "USER_PERMISSIONS_WORKSPACE_KNOWLEDGE_ACCESS", "USER_PERMISSIONS_WORKSPACE_MODELS_ACCESS",
+    "USER_PERMISSIONS_WORKSPACE_TOOLS_ACCESS", "UVICORN_WORKERS", "VECTOR_DB", "WEBUI_AUTH",
+    "WEBUI_SECRET_KEY", "WEBUI_URL", "WHISPER_MODEL_AUTO_UPDATE",
 }
 OWUI_PIPE = "class Pipe:\n    \"\"\"Synthetic stand-in for the #1072 docs Pipe.\"\"\"\n"
 OWUI_ON = {
@@ -1188,18 +1225,42 @@ def test_openwebui_workload_is_single_replica_restricted_and_holds_no_model_key(
         assert forbidden not in pod
     assert not [k for k in docs if k[0] in ("Role", "RoleBinding", "SecurityContextConstraints")]
     assert "anyuid" not in json.dumps(dep)
-    assert [c["name"] for c in pod["containers"]] == ["openwebui", "chat-purge"]
-    container, purge = pod["containers"]
+    assert [c["name"] for c in pod["containers"]] == ["openwebui", "proxy", "chat-purge"]
+    container, proxy, purge = pod["containers"]
     assert container["image"] == "qdrant-pdf-rag-openwebui:v0.12.3-slim"
     assert container["securityContext"].get("privileged") is not True
-    # One worker over TLS from the serving certificate; no plain HTTP port.
+    # One worker, plain HTTP on loopback ONLY: the allow-list proxy sidecar is
+    # the single listener the Service and Route reach (nothing bypasses it).
     assert container["args"][:2] == ["open_webui.main:app", "--host"]
     args = container["args"]
-    assert args[args.index("--workers") + 1] == "1" and args[args.index("--port") + 1] == "8443"
-    assert args[args.index("--ssl-certfile") + 1] == "/etc/tls/private/tls.crt"
-    assert container["ports"] == [{"containerPort": 8443, "name": "https"}]
+    assert args[args.index("--host") + 1] == "127.0.0.1"
+    assert args[args.index("--workers") + 1] == "1" and args[args.index("--port") + 1] == "8080"
+    assert "--ssl-certfile" not in args and "--ssl-keyfile" not in args
+    assert "ports" not in container
+    assert container["securityContext"]["readOnlyRootFilesystem"] is True  # B1
     for probe in ("readinessProbe", "livenessProbe", "startupProbe"):
-        assert container[probe]["httpGet"]["scheme"] == "HTTPS", probe
+        assert "httpGet" not in container[probe] and "exec" in container[probe], probe
+        assert "127.0.0.1:8080" in " ".join(container[probe]["exec"]["command"]), probe
+    # The proxy: pinned nginx-unprivileged class, TLS from the serving certificate
+    # on the only declared port, a read-only root, the allow-list from the ConfigMap.
+    assert proxy["image"] == "nginxinc/nginx-unprivileged:1.30.6-alpine"
+    assert proxy["ports"] == [{"containerPort": 8443, "name": "https"}]
+    assert proxy["args"] == ["nginx", "-c", "/etc/nginx/proxy/nginx.conf", "-g", "daemon off;"]
+    assert proxy["securityContext"]["readOnlyRootFilesystem"] is True
+    assert proxy["securityContext"]["allowPrivilegeEscalation"] is False
+    assert "env" not in proxy
+    assert proxy["readinessProbe"]["httpGet"] == {"path": "/health/db", "port": "https", "scheme": "HTTPS"}
+    assert proxy["livenessProbe"]["tcpSocket"] == {"port": "https"}
+    assert proxy["startupProbe"]["tcpSocket"] == {"port": "https"}
+    assert {m["mountPath"]: m.get("readOnly", False) for m in proxy["volumeMounts"]} == {
+        "/etc/nginx/proxy": True, "/etc/tls/private": True, "/tmp": False}
+    proxy_vols = {m["mountPath"]: m["name"] for m in proxy["volumeMounts"]}
+    pod_vols = {v["name"]: v for v in pod["volumes"]}
+    assert pod_vols[proxy_vols["/etc/nginx/proxy"]]["configMap"] == {"name": "rag-openwebui-proxy"}
+    assert pod_vols[proxy_vols["/tmp"]] == {"name": proxy_vols["/tmp"], "emptyDir": {}}
+    assert proxy_vols["/tmp"] != next(m["name"] for m in container["volumeMounts"] if m["mountPath"] == "/tmp")
+    assert dep["spec"]["template"]["metadata"]["annotations"]["checksum/proxy-config"] == hashlib.sha256(
+        (CHART / "files" / "openwebui" / "proxy.nginx.conf").read_bytes()).hexdigest()
     env = env_map(dep, "openwebui")
     plain = {k: v["value"] for k, v in env.items() if "value" in v}
     for key, value in {
@@ -1224,9 +1285,28 @@ def test_openwebui_workload_is_single_replica_restricted_and_holds_no_model_key(
         "WEBUI_URL": "https://docs.apps.example.internal", "OAUTH_CLIENT_ID": "docs-frontend",
         "OAUTH_GROUP_CLAIM": "groups", "OAUTH_ROLES_CLAIM": "roles",
         "OAUTH_ALLOWED_ROLES": "staff", "OAUTH_ADMIN_ROLES": "docs-admins,docs-owners",
+        # B1 (trial/review): tools, direct integrations, per-feature permissions,
+        # task model, audio, scopes, CORS and the narrow admin-only API key.
+        "ENABLE_TOOLS": "false", "ENABLE_DIRECT_INTEGRATIONS": "false",
+        "BYPASS_MODEL_ACCESS_CONTROL": "false", "TASK_MODEL": "",
+        "USER_PERMISSIONS_FEATURES_DIRECT_TOOL_SERVERS": "false",
+        "USER_PERMISSIONS_FEATURES_NOTES": "false",
+        "USER_PERMISSIONS_FEATURES_IMAGE_GENERATION": "false",
+        "USER_PERMISSIONS_CHAT_STT": "false", "USER_PERMISSIONS_CHAT_TTS": "false",
+        "USER_PERMISSIONS_CHAT_CALL": "false",
+        "OAUTH_SCOPES": "openid email profile groups",
+        "CORS_ALLOW_ORIGIN": "https://docs.apps.example.internal",
+        "ENABLE_API_KEYS": "true", "USER_PERMISSIONS_FEATURES_API_KEYS": "false",
+        "ENABLE_API_KEYS_ENDPOINT_RESTRICTIONS": "true",
+        "API_KEYS_ALLOWED_ENDPOINTS": "/api/v1/functions",
     }.items():
         assert plain.get(key) == value, key
     assert "PGVECTOR_DB_URL" not in env and "OPENAI_API_KEY" not in env
+    # N1: no Ollama setting but the pinned loopback base URL.
+    assert {k for k in env if k.startswith("OLLAMA_")} == {"OLLAMA_BASE_URL"}
+    # N4: every toggle the pod sets is pinned above or below; a new env name is a
+    # deliberate edit of this table, never an accident.
+    assert set(env) == OWUI_ENV_NAMES
     # Exactly the two operator Secret references; nothing else is a credential.
     refs = {k: v["valueFrom"]["secretKeyRef"] for k, v in env.items() if "valueFrom" in v}
     assert refs == {
@@ -1243,7 +1323,11 @@ def test_openwebui_workload_is_single_replica_restricted_and_holds_no_model_key(
     assert dep["metadata"]["annotations"]["mainframe-rag/chat-retention-days"] == "45"
     mounts = {m["mountPath"]: m for m in container["volumeMounts"]}
     assert set(mounts) == {"/app/backend/data", "/tmp", "/etc/tls/private",
-                           "/opt/mainframe-rag/openwebui"}
+                           "/opt/mainframe-rag/openwebui", "/app/backend/open_webui/static", "/root"}
+    # The root filesystem is read-only: every writable path is the claim or an emptyDir.
+    pod_volumes = {v["name"]: v for v in pod["volumes"]}
+    for writable in ("/tmp", "/app/backend/open_webui/static", "/root"):
+        assert pod_volumes[mounts[writable]["name"]]["emptyDir"] == {}, writable
     assert mounts["/etc/tls/private"]["readOnly"] and mounts["/opt/mainframe-rag/openwebui"]["readOnly"]
     volumes = {v["name"]: v for v in pod["volumes"]}
     assert volumes[mounts["/app/backend/data"]["name"]]["persistentVolumeClaim"] == {
@@ -1368,6 +1452,101 @@ def test_openwebui_pipe_configmap_carries_the_repository_files_and_their_hashes(
         "mainframe-rag/provision-pipe-sha256": hashlib.sha256(installer.encode()).hexdigest(),
         "mainframe-rag/purge-chats-sha256": hashlib.sha256(purge.encode()).hexdigest(),
     }
+
+
+ALLOWED_PATHS = [
+    "/", "/c/3f2a", "/auth", "/admin/users", "/_app/immutable/chunks/a.js", "/static/loader.js",
+    "/favicon.png", "/manifest.json", "/health", "/health/db", "/oauth/oidc/login",
+    "/oauth/oidc/callback", "/ws/socket.io/", "/api/config", "/api/version", "/api/models",
+    "/api/chat/completions", "/api/chat/completed", "/api/tasks/stop/x",
+    "/api/v1/auths/", "/api/v1/auths/api_key", "/api/v1/chats/list", "/api/v1/chats/abc",
+    "/api/v1/users/user/settings", "/api/v1/models/list", "/api/v1/groups/",
+    "/api/v1/functions/id/mainframe_rag_docs", "/api/v1/functions/create",
+    "/api/v1/configs/banners",
+]
+DENIED_PATHS = [
+    "/api/v1/files/", "/api/v1/files", "/api/v1/files/abc/content", "/api/v1/retrieval/process/text",
+    "/api/v1/retrieval/config", "/api/v1/knowledge/", "/api/v1/knowledge/create", "/api/v1/audio/transcriptions",
+    "/api/v1/images/generations", "/api/v1/memories/add", "/api/v1/notes/", "/api/v1/channels/",
+    "/api/v1/folders/", "/api/v1/utils/code/execute", "/api/v1/utils/db/download", "/api/v1/pipelines/",
+    "/api/v1/scim/v2/Users", "/api/v1/terminals/", "/api/v1/search", "/api/v1/skills/",
+    "/api/v1/evaluations/feedbacks", "/api/v1/automations/", "/openai/chat/completions",
+    "/ollama/api/chat", "/docs", "/openapi.json", "/api/version/updates", "/api/changelog",
+    "/api/chat", "/api/v1", "/api/v1/", "/api/", "/api", "/api/v1/chatsX", "/api/v1/auths_x",
+    "/API/v1/files/", "/api/v1/files/../files/", "/ws", "/oauthx", "/health/x",
+]
+
+
+def _proxy_conf():
+    return (CHART / "files" / "openwebui" / "proxy.nginx.conf").read_text(encoding="utf-8")
+
+
+def _allow_regexes():
+    import re
+    conf = _proxy_conf()
+    block = re.search(r"map \$uri \$owui_allowed \{(.*?)\n    \}", conf, re.S).group(1)
+    entries = re.findall(r"^\s*~(\S+)\s+1;\s*$", block, re.M)
+    assert re.search(r"^\s*default\s+0;\s*$", block, re.M), "deny must be the default"
+    assert entries, "no allow-list entries"
+    return [re.compile(e) for e in entries]
+
+
+def test_openwebui_proxy_allow_list_admits_exactly_the_pilot_paths():
+    rules = _allow_regexes()
+    for path in ALLOWED_PATHS:
+        assert any(r.search(path) for r in rules), path
+    for path in DENIED_PATHS:
+        assert not any(r.search(path) for r in rules), path
+
+
+def test_openwebui_proxy_config_matches_the_decoded_uri_and_forwards_the_original_uri():
+    """Maintainer decision 2026-10-24 (ADR-0007 E1): nginx decides on its
+    decoded, normalised $uri; the request line is forwarded to uvicorn as the
+    client sent it, so both see the same path; everything else is a fixed 403."""
+    import re
+    conf = _proxy_conf()
+    assert re.search(r"^\s*merge_slashes\s+on;", conf, re.M)
+    assert re.search(r"^\s*server_tokens\s+off;", conf, re.M)
+    assert re.search(r"^\s*listen\s+8443\s+ssl;", conf, re.M)
+    assert "server 127.0.0.1:8080;" in conf
+    # The URI the upstream sees is the original one: no URI part on proxy_pass,
+    # no rewrite of any kind, and nothing else may change $uri before the check.
+    proxy_passes = re.findall(r"^\s*proxy_pass\s+(\S+);", conf, re.M)
+    assert proxy_passes == ["http://owui_upstream"]
+    assert not re.search(r"^\s*(rewrite|set\s+\$uri|try_files|alias|root)\b", conf, re.M)
+    assert re.search(r'if \(\$owui_allowed = 0\) \{\s*return 403 "denied\\n";\s*\}', conf)
+    # The check precedes the proxy_pass inside the one location.
+    assert conf.index("$owui_allowed = 0") < conf.index("proxy_pass")
+    assert len(re.findall(r"^\s*location\b", conf, re.M)) == 1
+    # No request content in logs (S4): the access log is off.
+    assert re.search(r"^\s*access_log\s+off;", conf, re.M)
+    # Streaming and socket.io upgrade.
+    for needle in ("proxy_http_version 1.1;", "proxy_buffering off;", "$http_upgrade", "ssl_protocols TLSv1.2 TLSv1.3;"):
+        assert needle in conf, needle
+    assert "client_max_body_size 1m;" in conf
+
+
+def test_openwebui_proxy_configmap_carries_the_repository_config(owui_chart):
+    docs = _owui(owui_chart)
+    cm = docs["ConfigMap", "rag-openwebui-proxy"]
+    text = _proxy_conf()
+    assert cm["data"] == {"nginx.conf": text}
+    assert cm["metadata"]["annotations"] == {
+        "mainframe-rag/proxy-config-sha256": hashlib.sha256(text.encode()).hexdigest()}
+    # Not rendered (and the default render unchanged) when the front end is off.
+    default = run_new_template({}, chart=owui_chart)
+    assert ("ConfigMap", "rag-openwebui-proxy") not in default
+
+
+def test_openwebui_network_policy_admits_only_the_proxy_port_and_nothing_reaches_the_app_port(owui_chart):
+    docs = _owui(owui_chart)
+    ingress = docs["NetworkPolicy", "rag-openwebui"]["spec"]["ingress"]
+    assert [p["port"] for rule in ingress for p in rule["ports"]] == [8443]
+    svc = docs["Service", "rag-openwebui"]["spec"]
+    assert [p["port"] for p in svc["ports"]] == [8443] and svc["ports"][0]["targetPort"] == "https"
+    pod = docs["Deployment", "rag-openwebui"]["spec"]["template"]["spec"]
+    owui = next(c for c in pod["containers"] if c["name"] == "openwebui")
+    assert "ports" not in owui  # the app listens on 127.0.0.1:8080 only
 
 
 def test_openwebui_retention_defaults_to_30_days_and_cannot_be_unset(owui_chart):
