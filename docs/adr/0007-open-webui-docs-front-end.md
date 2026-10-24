@@ -110,12 +110,13 @@ Pipe is provisioned and the admin role is limited to the team.
   and pasted incident text. They are protected records that never leave the
   enterprise. They follow the same 30-day window: the purge job also removes
   backups older than 30 days. Admin chat access is off, but that toggle only
-  hides chats in the UI. Admins, in-process Functions and anyone with access to
-  the PVC or the DB can still read them. This is an accepted residual, kept small by limiting the
-  admin role to the named owners through an IdP group. Encryption at rest, if
-  required, comes from the storage class, because Open WebUI provides none.
-  **Open:** the security or corpus owner has not yet accepted chat content on a
-  PVC and in backups. Until they do, this is the no-go item below.
+  hides chats in the UI. Admins, in-process Functions and anyone with access
+  to the PVC or the DB can still read them. This is an accepted residual, kept
+  small by limiting the admin role to the named owners through an IdP group.
+  Encryption at rest, if required, comes from the storage class, because Open
+  WebUI provides none. **Open:** the security or corpus owner has not yet
+  accepted chat content on a PVC and in backups. Until they do, this is the
+  no-go item below.
 - **S4 No content in telemetry.** The log level is INFO or higher, and the
   audit level never records request or response bodies. A canary scan of the
   container logs finds 0 hits.
@@ -133,13 +134,13 @@ Pipe is provisioned and the admin role is limited to the team.
   About monthly, an agent prepares the import of the latest upstream release:
   the import PR plus the qualification run. The maintainer reviews it, merges
   it and loads the bundle. Security fixes land only on the latest release, so
-  staying on an old pin means accepting published vulnerabilities. Each import is a dedicated pin-bump PR. It re-runs every
-  condition above, captures Open WebUI's request body against the Pipe, and
-  upgrades a copy of the PVC. Open WebUI migrates its schema at startup, so
-  the pre-upgrade snapshot is kept for rollback. Switch-off trigger: the
-  rollback flag (K1) disables Open WebUI if no qualified import exists 14 days
-  after a published High or Critical advisory affecting the pinned version
-  (maintainer, 2026-10-24).
+  staying on an old pin means accepting published vulnerabilities. Each import
+  is a dedicated pin-bump PR. It re-runs every condition above, captures Open
+  WebUI's request body against the Pipe, and upgrades a copy of the PVC. Open
+  WebUI migrates its schema at startup, so the pre-upgrade snapshot is kept
+  for rollback. Switch-off trigger: the rollback flag (K1) disables Open WebUI
+  if no qualified import exists 14 days after a published High or Critical
+  advisory affecting the pinned version (maintainer, 2026-10-24).
 - **K1 Rollback by one flag.** Turning the chart flag off removes Open WebUI
   and keeps its PVC. With the flag off, the render is byte-identical to the
   render without Open WebUI. The agent and the console are untouched. The
