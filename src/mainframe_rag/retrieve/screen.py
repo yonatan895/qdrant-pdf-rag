@@ -21,20 +21,51 @@ whose format conversions (DER→PEM) are legitimate ops asks.
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import Literal
 
 QueryClass = Literal["answerable", "trap"]
 
 # Formatting noise that must not shield an override attempt: replaced with
 # a space (never deleted, so `ignore_the_excerpts` still separates into
-# words) before matching. Carries no trap signal of its own.
-_FORMAT_NOISE_RE = re.compile(r"[`'\"*~_>#()\[\]{}|\\]")
+# words) before matching. Carries no trap signal of its own. `,;:!?` after
+# the verb ("Ignore, the excerpts") is the same kind of noise.
+_FORMAT_NOISE_RE = re.compile(r"[`'\"*~_>#()\[\]{}|\\,;:!?]")
 _WS_RE = re.compile(r"\s+")
+
+# Invisible characters carry no visible text: they are DELETED (not spaced)
+# so `ig<ZWSP>nore` rejoins into `ignore`. Unicode category Cf covers
+# zero-width space/joiners, soft hyphen, word joiner, bidi overrides and
+# isolates, and the BOM; variation selectors (Mn) and the Mongolian free
+# variation selectors are added explicitly.
+_INVISIBLE_RE = re.compile("[\u180b-\u180d\u180f\ufe00-\ufe0f]")
+
+# Common Cyrillic/Greek look-alikes of Latin letters (lowercase, applied
+# after NFKC + casefold). Not a full confusables table: the letters that
+# appear in the trap vocabulary's words, plus their ordinary neighbours.
+_CONFUSABLES = str.maketrans(
+    {
+        "\u0430": "a", "\u0435": "e", "\u043e": "o", "\u0440": "p",
+        "\u0441": "c", "\u0445": "x", "\u0443": "y", "\u0456": "i",
+        "\u0458": "j", "\u0455": "s", "\u04bb": "h", "\u043a": "k",
+        "\u043c": "m", "\u043d": "h", "\u0442": "t", "\u0432": "b",
+        "\u0501": "d", "\u051b": "q", "\u051d": "w", "\u0475": "v",
+        "\u03bf": "o", "\u03b1": "a", "\u03b5": "e", "\u03b9": "i",
+        "\u03bd": "v", "\u03c1": "p", "\u03c4": "t", "\u03c5": "u",
+        "\u03ba": "k", "\u03b3": "y", "\u03c7": "x", "\u03b7": "n",
+        "\u0131": "i",
+    }
+)
 
 
 def _normalize(query: str) -> str:
-    lowered = _FORMAT_NOISE_RE.sub(" ", query.lower())
-    return _WS_RE.sub(" ", lowered).strip()
+    text = unicodedata.normalize("NFKC", query).casefold()
+    text = "".join(
+        c for c in text if unicodedata.category(c) != "Cf"
+    )
+    text = _INVISIBLE_RE.sub("", text).translate(_CONFUSABLES)
+    text = _FORMAT_NOISE_RE.sub(" ", text)
+    return _WS_RE.sub(" ", text).strip()
 
 
 # Secret-material noun groups, built once and shared by every key-pattern

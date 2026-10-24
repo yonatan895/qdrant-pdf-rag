@@ -166,7 +166,10 @@ MRR 0.655→0.643, overall r@5 0.873→0.857, overall MRR 0.700→0.697
   Slash pairs
   (`A/B`) deliberately never split (ambiguous joint-"both" vs "versus").
   Sub-queries are built by removal (original minus marker minus the other
-  entity), so shared context is verbatim; first marker only, cap 2 paths.
+  entity), so shared context is verbatim; when one side repeats the other's
+  noun phrase (`RACF dataset profiles` vs `ACF2 dataset profiles`) the spans
+  are widened so legs are disjoint and neither contains the other entity
+  (issue #1025); first marker only, cap 2 paths.
   Paths merge by distinct document per side (`interleave_split_hits`,
   issue #825). Merging chunks by best evidence alone placed a side's
   second-best manual near rank 2r, behind extra chunks of manuals already
@@ -265,10 +268,15 @@ rank 0 is worth `1/3` and rank 1 `1/4`, so one leg's top hit dominated).
 
 `screen_query` classifies each query as `answerable` or `trap` with
 deterministic regexes over a normalized query — no LLM, no network, no model
-to vendor. Normalization lowercases, replaces formatting noise
-(backticks, quotes, asterisks, tildes, underscores, `>#()[]{}|\`) with a
-space (never deletes, so `ignore_the_excerpts` still separates into words),
-and collapses whitespace.
+to vendor. Normalization applies Unicode NFKC and casefold, deletes invisible
+format characters (category Cf: zero-width space/joiners, soft hyphen, word
+joiner, bidi overrides/isolates, BOM; plus variation selectors) so `ig<ZWSP>nore`
+rejoins, folds common Cyrillic/Greek look-alikes to Latin, replaces formatting
+noise (backticks, quotes, asterisks, tildes, underscores, `>#()[]{}|\`) and the
+punctuation `,;:!?` with a space (never deletes, so `ignore_the_excerpts` and
+`Ignore, the excerpts` still separate into words), and collapses whitespace
+(issue #1024). Identifier and JCL queries (`IEA500I`, `DISP=(NEW,CATLG)`) carry
+none of these characters and are unaffected.
 
 The trap catalog targets thirteen override shapes with bounded gaps (enough for
 one adjective — "the supplied excerpts" — without letting the verb drift

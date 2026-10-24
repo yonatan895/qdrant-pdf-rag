@@ -291,6 +291,41 @@ def _split_top_placed(query: str, marker: tuple[int, int]) -> list[str] | None:
     return None
 
 
+def _mirrored_context_spans(
+    left_words: list[str],
+    right_words: list[str],
+    left_ent: tuple[int, int] | None,
+    right_ent: tuple[int, int] | None,
+) -> tuple[tuple[int, int], tuple[int, int]] | None:
+    """Disjoint spans for ``RACF dataset profiles vs ACF2 dataset profiles``.
+
+    The left side's adjacent-pair span covers the shared noun phrase
+    (``dataset profiles``) while the right side is a lone entity token
+    (``ACF2``), so plain removal leaves the other entity or a duplicated
+    noun phrase in one leg. When the words after the right entity repeat the
+    left span's tail and an entity-shaped token precedes that tail, the
+    spans become ``RACF + tail`` (left) and ``ACF2 + repeated tail`` (right),
+    so removal yields ``RACF dataset profiles`` / ``ACF2 dataset profiles``
+    (issue #1025). Returns None when the shape does not apply.
+    """
+    if left_ent is None or right_ent is None:
+        return None
+    if right_ent[1] - right_ent[0] != 1 or left_ent[1] - left_ent[0] < 2:
+        return None
+    if left_ent[1] != len(left_words):
+        return None
+    tail = [_strip_token(w).lower() for w in right_words[right_ent[1]:]]
+    left_norm = [_strip_token(w).lower() for w in left_words]
+    for k in range(len(left_words) - 1, 0, -1):
+        if k > len(tail) or left_norm[len(left_words) - k:] != tail[:k]:
+            continue
+        head = len(left_words) - k - 1
+        if head < 0 or not _is_entity_token(left_words[head]):
+            continue
+        return (head, len(left_words)), (right_ent[0], right_ent[1] + k)
+    return None
+
+
 def _split_on_marker(query: str, marker: tuple[int, int]) -> list[str] | None:
     # Raw word lists throughout: entity spans index these exact lists, and
     # _build_removal_subs strips comparison glue from the final strings.
@@ -299,12 +334,12 @@ def _split_on_marker(query: str, marker: tuple[int, int]) -> list[str] | None:
     right_words = query[marker[1]:].split()
     if not left_words or not right_words:
         return None
-    return _build_removal_subs(
-        query,
-        marker,
-        _entity_span(left_words, side="left"),
-        _entity_span(right_words, side="right"),
-    )
+    left_ent = _entity_span(left_words, side="left")
+    right_ent = _entity_span(right_words, side="right")
+    mirrored = _mirrored_context_spans(left_words, right_words, left_ent, right_ent)
+    if mirrored is not None:
+        left_ent, right_ent = mirrored
+    return _build_removal_subs(query, marker, left_ent, right_ent)
 
 
 def _comparative_paths(query: str) -> list[str] | None:
