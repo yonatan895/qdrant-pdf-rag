@@ -749,6 +749,70 @@ def test_parse_one_error_isolation_and_picklability(tmp_path):
     assert unpacked_contexts == {}
 
 
+
+def test_private_copy_enospc_fails_only_that_document_and_leaves_no_scratch(tmp_path, monkeypatch):
+    """#1058: the private verified copy lives under INGEST_PARSE_TMP_DIR (the
+    chart points it at the /work volume). A full scratch volume while copying
+    one document gives that document a fixed error record (no errno text, no
+    path), removes its mfr-parse dir, and the next document in the same real
+    run still ingests."""
+    import errno
+    from concurrent.futures import ThreadPoolExecutor
+
+    from scripts.make_synthetic_pdf import build
+
+    from mainframe_rag.ingest import run_ingest
+
+    corpus = tmp_path / "corpus"
+    stems = ["SA22-7000-00", "SA22-7010-00"]
+    for n, stem in enumerate(stems):
+        build(corpus / f"{stem}.pdf", doc_id=stem, title=f"Synthetic Reference {n}",
+              message_id=f"IEA{n}00I")
+    scratch = tmp_path / "work" / "parse-tmp"  # absent: the worker creates it, 0700
+    monkeypatch.setenv("INGEST_PARSE_TMP_DIR", str(scratch))
+    monkeypatch.setattr(run_ingest, "_worker_settings", None)
+
+    class _InlinePool(ThreadPoolExecutor):
+        def __init__(self, max_workers=None, mp_context=None):
+            super().__init__(max_workers=max_workers)
+
+    monkeypatch.setattr(run_ingest, "ProcessPoolExecutor", _InlinePool)
+    real_copy = run_ingest.private_verified_copy
+    seen: list[str] = []
+
+    def full_disk(path, corpus_root, walk_sha, tmp_dir):
+        seen.append(tmp_dir)
+        if path.stem == stems[0]:
+            (Path(tmp_dir) / "partial.bin").write_bytes(b"x" * 64)  # a half-written copy
+            raise OSError(errno.ENOSPC, "No space left on device", str(path))
+        return real_copy(path, corpus_root, walk_sha, tmp_dir)
+
+    monkeypatch.setattr(run_ingest, "private_verified_copy", full_disk)
+    fake = _FakeQdrant()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    monkeypatch.setenv("EMBED_MODE", "hash")
+    monkeypatch.delenv("DENSE_DIM", raising=False)
+    progress = tmp_path / "inventory.jsonl"
+    assert main(_migration_args(corpus, progress)) == 1
+
+    records = {
+        Path(r["path"]).stem: r
+        for r in (json.loads(l) for l in progress.read_text().splitlines() if l.strip())
+    }
+    failed = records[stems[0]]
+    assert (failed["status"], failed["error_type"]) == ("error", "ParseScratchError")
+    assert failed["error"] == (
+        "parse_scratch_failed: the private copy of the document could not be written"
+    )
+    assert records[stems[1]]["status"] == "upserted"
+    assert len(seen) == 2
+    assert all(Path(d).parent == scratch for d in seen)
+    assert list(scratch.iterdir()) == []  # every mfr-parse-* dir is gone
+    assert scratch.stat().st_mode & 0o777 == 0o700
+    stored = {(p.payload or {}).get("doc_id") for pts in fake._points.values() for p in pts}
+    assert stems[1] in stored and stems[0] not in stored
+
+
 # --------------------------------------- representation migration (391 F2) ---
 def _migration_args(corpus, progress, *extra):
     return ["--src", str(corpus), "--progress", str(progress), "--workers", "1", *extra]
