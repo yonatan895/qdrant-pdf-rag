@@ -244,6 +244,130 @@ def test_request_body_is_exactly_the_strict_chat_schema(chat_request):
     assert fake.requests[0].url == httpx.URL("http://rag-agent:8080/v1/chat")
 
 
+# --- History trimming to the agent's body cap (#1072) ------------------------
+
+CAP = 32768
+TRIM_NOTE = "Earlier messages in this chat were not sent"
+
+
+def _history(turns: int, size: int) -> list[dict[str, Any]]:
+    """`turns` alternating user/assistant turns of `size` chars each, oldest
+    first, starting with a user turn; each text is unique."""
+    return [{"role": "user" if i % 2 == 0 else "assistant",
+             "content": f"{i:04d}" + "x" * (size - 4)} for i in range(turns)]
+
+
+def _body_chars(body: dict[str, Any]) -> int:
+    """The agent's own count (chat_body_chars), not a re-implementation."""
+    from mainframe_rag.agent.app import ChatMessage
+    from mainframe_rag.agent.chat_turn import chat_body_chars
+
+    return chat_body_chars([ChatMessage(**m) for m in body["messages"]], None,
+                           body.get("product"), body.get("version"))
+
+
+def test_max_body_chars_valve_defaults_to_the_agents_default():
+    from mainframe_rag.config import Settings
+
+    assert docs_pipe.Pipe.Valves().MAX_BODY_CHARS == Settings.model_fields["chat_max_body_chars"].default
+
+
+def test_long_history_is_trimmed_oldest_first_and_the_real_chat_request_accepts_it(chat_request):
+    history = _history(8, 6000)  # 48000 chars: the agent would answer 422
+    messages = [*history, {"role": "user", "content": QUESTION}]
+    with pytest.raises(ValueError):
+        chat_request.model_validate({"messages": [{"role": m["role"], "content": m["content"]}
+                                                  for m in messages], "stream": True})
+    fake = FakeAgent()
+    _content, events = run_pipe(fake, messages=messages)
+    (body,) = fake.bodies()
+    assert _body_chars(body) <= CAP
+    chat_request.model_validate(body)
+    sent = [m["content"] for m in body["messages"]]
+    # A suffix of the original turns: only the oldest were dropped, none reordered.
+    assert sent == [m["content"] for m in messages][-len(sent):]
+    assert len(sent) < len(messages)
+    assert TRIM_NOTE in [s["description"] for s in _statuses(events)]
+
+
+def test_trim_keeps_as_many_recent_turns_as_fit():
+    fake = FakeAgent()
+    run_pipe(fake, messages=[*_history(8, 6000), {"role": "user", "content": QUESTION}],
+             user={"id": "u1", "valves": {"product": "z/OS", "version": "3.1"}})
+    (body,) = fake.bodies()
+    assert _body_chars(body) <= CAP
+    # Dropping nothing more than needed: the next older turn would not have fit.
+    older = 6000 + _body_chars(body)
+    assert older > CAP or body["messages"][0]["role"] == "user"
+    assert body["product"] == "z/OS" and body["version"] == "3.1"
+
+
+def test_last_turn_is_always_sent_and_history_never_starts_with_an_assistant_turn():
+    for size in range(5400, 6600, 137):  # every cut point lands somewhere different
+        fake = FakeAgent()
+        run_pipe(fake, messages=[*_history(9, size), {"role": "user", "content": QUESTION}])
+        (body,) = fake.bodies()
+        assert body["messages"][-1] == {"role": "user", "content": QUESTION}
+        assert body["messages"][0]["role"] == "user", size
+        assert _body_chars(body) <= CAP
+
+
+def test_last_turn_alone_over_the_cap_is_a_fixed_message_with_zero_calls():
+    fake = FakeAgent()
+    secret = "q" * (CAP + 1)
+    content, events = run_pipe(fake, messages=[
+        *_history(2, 100), {"role": "user", "content": secret}])
+    assert fake.requests == []
+    assert content == docs_pipe.ERROR_MESSAGES["invalid_request"]
+    assert "q" * 20 not in content
+    assert TRIM_NOTE not in [s["description"] for s in _statuses(events)]
+
+
+def test_product_and_version_count_against_the_cap():
+    fake = FakeAgent()
+    content, _ = run_pipe(fake, messages=[{"role": "user", "content": "q" * (CAP - 4)}],
+                          user={"id": "u1", "valves": {"product": "z/OS", "version": "3.1"}})
+    assert fake.requests == []
+    assert content == docs_pipe.ERROR_MESSAGES["invalid_request"]
+
+
+def test_exactly_at_the_cap_is_sent_whole_and_no_note_is_emitted():
+    fake = FakeAgent()
+    messages = [{"role": "user", "content": "a" * 100}, {"role": "assistant", "content": "b" * 100},
+                {"role": "user", "content": "q" * (CAP - 200)}]
+    _content, events = run_pipe(fake, messages=messages)
+    (body,) = fake.bodies()
+    assert len(body["messages"]) == 3 and _body_chars(body) == CAP
+    assert TRIM_NOTE not in [s["description"] for s in _statuses(events)]
+
+
+def test_short_chat_emits_no_trim_note():
+    _content, events = run_pipe(FakeAgent())
+    assert all(TRIM_NOTE not in s["description"] for s in _statuses(events))
+
+
+def test_trim_note_is_fixed_text_without_content_and_survives_the_final_banner():
+    _content, events = run_pipe(FakeAgent(), messages=[
+        *_history(8, 6000), {"role": "user", "content": QUESTION}])
+    notes = [s for s in _statuses(events) if TRIM_NOTE in s["description"]]
+    assert notes
+    for s in notes:
+        assert "xxxx" not in s["description"] and QUESTION not in s["description"]
+    assert TRIM_NOTE in _final_status(events)
+
+
+def test_admin_valve_sets_the_cap():
+    pipe = docs_pipe.Pipe()
+    pipe.valves.MAX_BODY_CHARS = 2000
+    fake = FakeAgent()
+    run_pipe(fake, pipe=pipe, messages=[*_history(8, 600), {"role": "user", "content": QUESTION}])
+    (body,) = fake.bodies()
+    assert 0 < _body_chars(body) <= 2000 and len(body["messages"]) < 9
+    with pytest.raises(ValueError):
+        docs_pipe.Pipe.Valves(MAX_BODY_CHARS=0)
+
+
+
 def test_no_string_turn_left_makes_no_agent_call():
     fake = FakeAgent()
     content, events = run_pipe(fake, messages=[
@@ -747,6 +871,19 @@ def test_round_trip_asks_the_last_multimodal_turn_not_an_earlier_one(real_agent)
                                      {"type": "image_url", "image_url": {"url": "data:x"}}]},
     ])
     assert [s["query"] for s in searches] == [QUESTION]
+
+
+def test_round_trip_a_long_chat_is_200_where_the_untrimmed_body_is_422(real_agent):
+    transport, searches = real_agent
+    messages = [*_history(8, 6000), {"role": "user", "content": QUESTION}]
+    untrimmed = httpx.Client(transport=transport, base_url="http://rag-agent:8080").post(
+        "/v1/chat", json={"messages": [{"role": m["role"], "content": m["content"]}
+                                       for m in messages], "stream": True})
+    assert untrimmed.status_code == 422 and searches == []
+    content, events = run_pipe(None, transport=transport, messages=messages)
+    assert [s["query"] for s in searches] == [QUESTION]
+    assert content.startswith("Reissue the command.")
+    assert _final_status(events).endswith(TRIM_NOTE)
 
 
 def test_round_trip_maps_the_real_strict_schema_refusal(real_agent):
