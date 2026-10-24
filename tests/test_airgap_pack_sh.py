@@ -112,6 +112,7 @@ def pack_tree(tmp_path):
         shutil.copy(REPO / "scripts" / script, tmp_path / "scripts" / script)
     (tmp_path / "charts").mkdir(exist_ok=True)
     copy_chart(tmp_path)
+    shutil.copytree(REPO / "images", tmp_path / "images")
 
     # Throwaway git repo so IMAGE_SHA resolves to a real HEAD.
     subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
@@ -162,6 +163,53 @@ def test_pack_sha_mismatch_fails_closed(pack_tree):
     assert r.returncode != 0
     assert "is not the checked-out commit" in r.stderr
     assert "airgap.env" in r.stderr
+
+
+@pytest.mark.parametrize("role", ["agent", "ingest"])
+def test_pack_refuses_a_containerfile_base_digest_off_the_pin(pack_tree, role):
+    """#1030: the shipped Containerfile FROM must equal images.txt and the lock."""
+    root, skopeo_log, _head, _key = pack_tree
+    containerfile = root / "images" / f"Containerfile.{role}"
+    good = containerfile.read_text()
+    containerfile.write_text(re.sub(r"@sha256:[0-9a-f]{64}", "@sha256:" + "0" * 64, good))
+    result, _ = _run_pack(pack_tree)
+    assert result.returncode != 0
+    assert "Containerfile base digest" in result.stderr
+    assert not skopeo_log.exists()
+    assert not (root / "dist" / "SHA256SUMS.sig").exists()
+    containerfile.write_text(good)
+    result, _ = _run_pack(pack_tree)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("dirt", ["modified", "assume-unchanged", "skip-worktree", "staged"])
+def test_pack_refuses_a_dirty_tree_before_signing(pack_tree, dirt):
+    """#1030: `git bundle` records clean HEAD, so a dirty tree must not be signed."""
+    root, skopeo_log, _head, _key = pack_tree
+    readme = root / "README.md"
+
+    def git(*args):
+        subprocess.run(["git", *args], cwd=root, check=True, capture_output=True)
+
+    if dirt == "assume-unchanged":
+        git("update-index", "--assume-unchanged", "README.md")
+    elif dirt == "skip-worktree":
+        git("update-index", "--skip-worktree", "README.md")
+    if dirt != "skip-worktree":
+        readme.write_text("tampered\n")
+    if dirt == "staged":
+        git("add", "README.md")
+    result, _ = _run_pack(pack_tree)
+    assert result.returncode != 0
+    assert "pack tree is not the clean checked-out commit" in result.stderr
+    assert not (root / "dist" / "SHA256SUMS.sig").exists()
+    if dirt == "assume-unchanged":
+        git("update-index", "--no-assume-unchanged", "README.md")
+    elif dirt == "skip-worktree":
+        git("update-index", "--no-skip-worktree", "README.md")
+    git("checkout", "HEAD", "--", "README.md")
+    result, _ = _run_pack(pack_tree)
+    assert result.returncode == 0, result.stderr
 
 
 def test_pack_refuses_several_chart_archives_then_passes_after_fix(pack_tree):
