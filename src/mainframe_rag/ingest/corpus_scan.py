@@ -80,18 +80,25 @@ def require_inside_root(path: Path, corpus_root: str | None) -> None:
 
 
 def private_verified_copy(path: Path, corpus_root: str, walk_sha: str, tmp_dir: str) -> tuple[Path, Path]:
-    """Copy the walked file ONCE into a private directory at the same path
-    relative to the corpus root, hashing the same bytes while copying, and
-    refuse unless they equal the walk digest. Returns (copy, private root):
-    the parser then reads exactly the verified bytes, whatever happens to the
-    original path afterwards, and path-derived labels are unchanged."""
+    """Copy the walked file ONCE into a private directory, hashing the same
+    bytes while copying, and refuse unless they equal the walk digest.
+    Returns (lexical private path, private root). The bytes sit at the
+    resolved target's path relative to the resolved root; when the walked
+    path is an in-root symlink, a symlink at the lexical relative path points
+    to that copy. The parser therefore sees the same layout, stem and
+    vendor-marker path as it did on the live path (labels and identity are
+    unchanged) but reads only the verified bytes."""
     root = Path(corpus_root)
     try:
-        rel = path.relative_to(root)
+        resolved_rel = path.resolve().relative_to(root.resolve())
     except ValueError:
-        rel = path.resolve().relative_to(root.resolve())
+        raise WalkedFileMovedError from None
+    try:
+        lexical_rel = path.relative_to(root)
+    except ValueError:
+        lexical_rel = resolved_rel
     private_root = Path(tmp_dir) / "root"
-    target = private_root / rel
+    target = private_root / resolved_rel
     target.parent.mkdir(parents=True, exist_ok=True)
     digest = hashlib.sha256()
     with open(path, "rb") as src, open(target, "wb") as dst:
@@ -100,7 +107,12 @@ def private_verified_copy(path: Path, corpus_root: str, walk_sha: str, tmp_dir: 
             dst.write(block)
     if digest.hexdigest() != walk_sha:
         raise WalkedFileChangedError
-    return target, private_root
+    if lexical_rel == resolved_rel:
+        return target, private_root
+    link = private_root / lexical_rel
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(target)
+    return link, private_root
 
 
 @dataclass(frozen=True)

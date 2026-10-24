@@ -4081,3 +4081,35 @@ def test_swap_and_restore_during_parse_never_feeds_foreign_bytes_to_the_parser(t
     assert seen and seen[0] != pdf
     assert parsed.doc_id == DOC_A
     assert chunks
+
+
+def test_in_root_symlink_keeps_target_labels_and_identity_through_the_private_copy(
+    tmp_path, monkeypatch
+):
+    """Identity guard: for an in-root file symlink the live-path parse derived
+    layout/vendor labels from the symlink TARGET and the stem from the link
+    name. The private copy must reproduce exactly that, so doc_id, labels and
+    source_rev equal the unchanged parse_pdf(<live lexical path>) result."""
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.ibm_pdf import parse_pdf, sha256_file
+
+    _publish_env(monkeypatch)
+    corpus = tmp_path / "corpus"
+    (corpus / "misc" / "Precisely" / "x").mkdir(parents=True)
+    (corpus / "IBM" / "zOS" / "2.5").mkdir(parents=True)
+    target = _build_doc_with_id(corpus / "misc" / "Precisely" / "x", "b", DOC_A)
+    link = corpus / "IBM" / "zOS" / "2.5" / "a.pdf"
+    link.symlink_to(target)
+    sha = sha256_file(link)
+    expected = parse_pdf(link, corpus_root=corpus, sha256=sha)
+    assert expected.product != "zOS"  # the guard is only meaningful if target labels differ
+    record, parsed, _chunks, _vectors, _ = run_ingest._parse_one(_parse_task(corpus, link, sha))
+    assert record.status != "error", record.error
+    assert record.path == str(link)
+    assert (parsed.doc_id, parsed.vendor, parsed.product, parsed.version) == (
+        expected.doc_id,
+        expected.vendor,
+        expected.product,
+        expected.version,
+    )
+    assert record.source_rev == run_ingest.walked_source_rev(expected)

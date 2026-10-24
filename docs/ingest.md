@@ -67,11 +67,13 @@ publication prewalk; `walk.py` is unchanged) enforces three rules:
   exits nonzero without staging or publishing anything.
 - **Parse-time re-check (TOCTOU).** The scan confines a path once. The worker
   re-checks that it still resolves inside the corpus root, then copies the file
-  once into a private 0700 directory at the same path relative to the root,
-  hashing the same bytes while copying. The parser and the page-text read use
-  only that copy, and only if its sha256 equals the walk digest; otherwise the
-  record is a fixed `error` (`WalkedFileMovedError`, `WalkedFileChangedError`).
-  The inventory keeps the original path.
+  once into a private 0700 directory, hashing the same bytes while copying
+  (an in-root symlink keeps its lexical path as a link to the copy, so layout,
+  stem and vendor-marker labels derive exactly as from the live path). The
+  parser and the page-text read use only that copy, and only if its sha256
+  equals the walk digest; otherwise the record is a fixed `error`
+  (`WalkedFileMovedError`, `WalkedFileChangedError`). The inventory keeps the
+  original path.
 - **Residual:** hardlinks to files outside the root have no path to detect
   and are out of scope; only symlinks are confined.
 
