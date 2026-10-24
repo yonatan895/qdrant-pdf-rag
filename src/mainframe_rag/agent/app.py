@@ -27,12 +27,13 @@ from dataclasses import replace
 
 import anyio
 import httpx2
-from fastapi import FastAPI, HTTPException, Query, Request, Response
+from fastapi import FastAPI, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from opentelemetry import trace
 from opentelemetry.trace import SpanKind, Status, StatusCode
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from mainframe_rag.agent.admission import (
     AdmissionController,
@@ -65,6 +66,7 @@ from mainframe_rag.agent.chat_turn import (
     PreparedChatTurn,
     is_unsearchable_query,
     prepare_chat_turn,
+    validate_request_text,
 )
 from mainframe_rag.agent.evidence import (
     PUBLIC_FAILURES,
@@ -981,6 +983,11 @@ class SearchRequest(BaseModel):
     version: str | None = None
     limit: int = Field(default=8, ge=1, le=40)
 
+    @model_validator(mode="after")
+    def _bounded_text(self) -> SearchRequest:
+        validate_request_text(settings, query=self.query, product=self.product, version=self.version)
+        return self
+
 
 class EvidenceSearchHit(SearchHit):
     """A search hit plus the opaque exact-evidence reference (issue #405).
@@ -1092,6 +1099,17 @@ class AnswerRequest(BaseModel):
     # retrieval instead of surfacing as upstream 502s.
     temperature: float | None = Field(default=None, ge=0.0, le=2.0, allow_inf_nan=False)
 
+    @model_validator(mode="after")
+    def _bounded_text(self) -> AnswerRequest:
+        validate_request_text(
+            settings,
+            query=self.query,
+            product=self.product,
+            version=self.version,
+            splunk_context=self.splunk_context,
+        )
+        return self
+
 
 class AnswerResponse(BaseModel):
     request_id: str
@@ -1142,6 +1160,17 @@ class ChatRequest(BaseModel):
     splunk_context: str | None = None
     product: str | None = None
     version: str | None = None
+
+    @model_validator(mode="after")
+    def _bounded_text(self) -> ChatRequest:
+        validate_request_text(
+            settings,
+            product=self.product,
+            version=self.version,
+            splunk_context=self.splunk_context,
+            messages=self.messages,
+        )
+        return self
 
 
 ChatCompletionsRequest = ChatRequest
@@ -1290,11 +1319,21 @@ async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
     )
 
 
-@app.exception_handler(HTTPException)
-async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
     # Fixed message on purpose: nothing in src/ raises HTTPException, this
     # only fires from framework internals, and exc.detail must never reach a
     # client body (the "no internals" rule is structural, not incidental).
+    if exc.status_code == 400:
+        # Starlette's body-parse failure (invalid UTF-8, issue #1031): the
+        # same fixed envelope as every other malformed body, never `detail`.
+        _record_handler_error(request, "invalid_request")
+        return JSONResponse(
+            status_code=422,
+            content=ErrorEnvelope(
+                code="invalid_request", message="request body failed validation"
+            ).model_dump(),
+        )
     _record_handler_error(request, "http_error")
     return JSONResponse(
         status_code=exc.status_code,
