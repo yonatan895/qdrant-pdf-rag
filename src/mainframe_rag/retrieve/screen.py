@@ -33,12 +33,16 @@ QueryClass = Literal["answerable", "trap"]
 _FORMAT_NOISE_RE = re.compile(r"[`'\"*~_>#()\[\]{}|\\,;:!?]")
 _WS_RE = re.compile(r"\s+")
 
-# Invisible characters carry no visible text: they are DELETED (not spaced)
-# so `ig<ZWSP>nore` rejoins into `ignore`. Unicode category Cf covers
-# zero-width space/joiners, soft hyphen, word joiner, bidi overrides and
-# isolates, and the BOM; variation selectors (Mn) and the Mongolian free
-# variation selectors are added explicitly.
-_INVISIBLE_RE = re.compile("[\u180b-\u180d\u180f\ufe00-\ufe0f]")
+# Invisible characters carry no visible text, so a bypass can use them either
+# inside a word (`ig<ZWSP>nore`) or as the ONLY separator between words
+# (`ignore<ZWSP>previous`). Both readings are screened (see `screen_query`):
+# one deletes them, one replaces them with a space. Covered: category Cf
+# (zero-width space/joiners, soft hyphen, word joiner, bidi overrides and
+# isolates, BOM), variation selectors, the combining grapheme joiner, the
+# Hangul fillers and the Braille blank.
+_INVISIBLE_RE = re.compile(
+    "[\u034f\u115f\u1160\u180b-\u180f\u2800\u3164\uffa0\ufe00-\ufe0f]"
+)
 
 # Common Cyrillic/Greek look-alikes of Latin letters (lowercase, applied
 # after NFKC + casefold). Not a full confusables table: the letters that
@@ -58,12 +62,22 @@ _CONFUSABLES = str.maketrans(
 )
 
 
-def _normalize(query: str) -> str:
+def _normalize(query: str, glue: str = "") -> str:
+    """Matching text only (the caller's query is never modified).
+
+    NFKC + casefold, invisible characters replaced by ``glue`` ("" joins the
+    neighbours, " " separates them), NFKD with combining marks dropped
+    (`i\u0307gnore`, `ignor\u00e9`), look-alikes folded, noise to spaces.
+    """
     text = unicodedata.normalize("NFKC", query).casefold()
     text = "".join(
-        c for c in text if unicodedata.category(c) != "Cf"
+        glue if unicodedata.category(c) == "Cf" else c for c in text
     )
-    text = _INVISIBLE_RE.sub("", text).translate(_CONFUSABLES)
+    text = _INVISIBLE_RE.sub(glue, text)
+    text = "".join(
+        c for c in unicodedata.normalize("NFKD", text) if unicodedata.category(c) != "Mn"
+    )
+    text = text.translate(_CONFUSABLES)
     text = _FORMAT_NOISE_RE.sub(" ", text)
     return _WS_RE.sub(" ", text).strip()
 
@@ -161,9 +175,14 @@ _TRAP_RES: tuple[re.Pattern[str], ...] = (
 
 
 def screen_query(query: str) -> QueryClass:
-    """Classify a user query as answerable or trap (injection-shaped)."""
-    normalized = _normalize(query)
-    for rx in _TRAP_RES:
-        if rx.search(normalized):
-            return "trap"
+    """Classify a user query as answerable or trap (injection-shaped).
+
+    Trap if EITHER reading of invisible characters matches: deleted (joins
+    `ig<ZWSP>nore`) or spaced (separates `ignore<ZWSP>previous`).
+    """
+    for glue in ("", " "):
+        normalized = _normalize(query, glue)
+        for rx in _TRAP_RES:
+            if rx.search(normalized):
+                return "trap"
     return "answerable"

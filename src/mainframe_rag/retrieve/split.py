@@ -297,32 +297,46 @@ def _mirrored_context_spans(
     left_ent: tuple[int, int] | None,
     right_ent: tuple[int, int] | None,
 ) -> tuple[tuple[int, int], tuple[int, int]] | None:
-    """Disjoint spans for ``RACF dataset profiles vs ACF2 dataset profiles``.
+    """Disjoint, qualifier-complete spans when the two sides mirror each other.
 
-    The left side's adjacent-pair span covers the shared noun phrase
-    (``dataset profiles``) while the right side is a lone entity token
-    (``ACF2``), so plain removal leaves the other entity or a duplicated
-    noun phrase in one leg. When the words after the right entity repeat the
-    left span's tail and an entity-shaped token precedes that tail, the
-    spans become ``RACF + tail`` (left) and ``ACF2 + repeated tail`` (right),
-    so removal yields ``RACF dataset profiles`` / ``ACF2 dataset profiles``
-    (issue #1025). Returns None when the shape does not apply.
+    ``RACF dataset profiles vs ACF2 dataset profiles``, ``z/OS RACF dataset
+    profiles vs z/OS ACF2 dataset profiles`` and ``SMF type 30 vs SMF type 70
+    records`` pair an entity with its own qualifiers on both sides. The
+    adjacent-pair heuristic cuts these unevenly and leaves the other entity in
+    a leg (issue #1025). Take the largest window of ``n`` words ending at the
+    marker and the ``n`` words after it that share a prefix and/or a suffix
+    yet differ somewhere: each window is one side's whole phrase, so removal
+    yields one phrase plus the verbatim shared context. When no window
+    mirrors but the sides are asymmetric (a 2-word left span against a lone
+    right entity, ``RACF group profiles`` vs ``ACF2 rule sets``), the left
+    phrase starts at the entity before its span and the right phrase takes the
+    same number of words. Returns None when the shape does not apply, leaving
+    the adjacent-pair spans (and the pinned WLM shared-prefix behavior) alone.
     """
     if left_ent is None or right_ent is None:
         return None
-    if right_ent[1] - right_ent[0] != 1 or left_ent[1] - left_ent[0] < 2:
-        return None
-    if left_ent[1] != len(left_words):
-        return None
-    tail = [_strip_token(w).lower() for w in right_words[right_ent[1]:]]
-    left_norm = [_strip_token(w).lower() for w in left_words]
-    for k in range(len(left_words) - 1, 0, -1):
-        if k > len(tail) or left_norm[len(left_words) - k:] != tail[:k]:
-            continue
-        head = len(left_words) - k - 1
-        if head < 0 or not _is_entity_token(left_words[head]):
-            continue
-        return (head, len(left_words)), (right_ent[0], right_ent[1] + k)
+    left = [_strip_token(w).lower() for w in left_words]
+    right = [_strip_token(w).lower() for w in right_words]
+    for n in range(min(len(left), len(right)), 1, -1):
+        a, b = left[-n:], right[:n]
+        p = 0
+        while p < n and a[p] == b[p]:
+            p += 1
+        s = 0
+        while s < n - p and a[n - 1 - s] == b[n - 1 - s]:
+            s += 1
+        if 0 < p + s < n:
+            return (len(left) - n, len(left)), (0, n)
+    if (
+        right_ent[1] - right_ent[0] == 1
+        and left_ent[1] - left_ent[0] >= 2
+        and left_ent[1] == len(left_words)
+        and left_ent[0] >= 1
+        and _is_entity_token(left_words[left_ent[0] - 1])
+    ):
+        n = len(left_words) - left_ent[0] + 1
+        if right_ent[0] + n <= len(right_words):
+            return (left_ent[0] - 1, len(left_words)), (right_ent[0], right_ent[0] + n)
     return None
 
 

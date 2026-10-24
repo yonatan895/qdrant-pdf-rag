@@ -73,7 +73,7 @@ def test_mirrored_noun_phrase_legs_are_disjoint(query, leg1, leg2):
             "IBM RACF dataset profiles",
             "CA ACF2 dataset profiles",
         ),
-        ("RACF group profiles and ACF2 rule sets", "RACF group profiles", "ACF2 rule sets"),
+        ("difference between RACF group profiles and ACF2 rule sets", "RACF group profiles", "ACF2 rule sets"),
         ("SMF type 30 vs SMF type 70 records", "SMF type 30 records", "SMF type 70 records"),
     ],
 )

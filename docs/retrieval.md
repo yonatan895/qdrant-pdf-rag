@@ -166,10 +166,11 @@ MRR 0.655→0.643, overall r@5 0.873→0.857, overall MRR 0.700→0.697
   Slash pairs
   (`A/B`) deliberately never split (ambiguous joint-"both" vs "versus").
   Sub-queries are built by removal (original minus marker minus the other
-  entity), so shared context is verbatim; when one side repeats the other's
-  noun phrase (`RACF dataset profiles` vs `ACF2 dataset profiles`) the spans
-  are widened so legs are disjoint and neither contains the other entity
-  (issue #1025); first marker only, cap 2 paths.
+  entity), so shared context is verbatim; when the sides mirror each other
+  (`z/OS RACF dataset profiles` vs `z/OS ACF2 dataset profiles`, `SMF type 30`
+  vs `SMF type 70 records`) each span is widened to that side's whole phrase, so
+  each leg holds exactly one compared entity with its qualifiers and the shared
+  context (issue #1025); first marker only, cap 2 paths.
   Paths merge by distinct document per side (`interleave_split_hits`,
   issue #825). Merging chunks by best evidence alone placed a side's
   second-best manual near rank 2r, behind extra chunks of manuals already
@@ -268,10 +269,12 @@ rank 0 is worth `1/3` and rank 1 `1/4`, so one leg's top hit dominated).
 
 `screen_query` classifies each query as `answerable` or `trap` with
 deterministic regexes over a normalized query — no LLM, no network, no model
-to vendor. Normalization applies Unicode NFKC and casefold, deletes invisible
-format characters (category Cf: zero-width space/joiners, soft hyphen, word
-joiner, bidi overrides/isolates, BOM; plus variation selectors) so `ig<ZWSP>nore`
-rejoins, folds common Cyrillic/Greek look-alikes to Latin, replaces formatting
+to vendor. Normalization applies Unicode NFKC and casefold, drops combining marks
+(NFKD, matching text only: `i̇gnore`, `ignoré`), and handles invisible
+characters (category Cf: zero-width space/joiners, soft hyphen, word joiner,
+bidi overrides/isolates, BOM; variation selectors, CGJ, Hangul fillers, Braille
+blank) in two readings, trapping when either matches: deleted (`ig<ZWSP>nore`
+rejoins) and replaced by a space (`ignore<ZWSP>previous` separates), folds common Cyrillic/Greek look-alikes to Latin, replaces formatting
 noise (backticks, quotes, asterisks, tildes, underscores, `>#()[]{}|\`) and the
 punctuation `,;:!?` with a space (never deletes, so `ignore_the_excerpts` and
 `Ignore, the excerpts` still separate into words), and collapses whitespace
