@@ -84,6 +84,7 @@ from mainframe_rag.ingest.context import (
 from mainframe_rag.ingest.corpus_scan import (
     UNREADABLE_FILE_MESSAGE,
     UNREADABLE_FILE_TYPE,
+    ParseScratchError,
     private_verified_copy,
     require_inside_root,
     scan_corpus,
@@ -312,16 +313,6 @@ def parse_walked(
     )
 
 
-class ParseScratchError(RuntimeError):
-    """The private verified copy could not be made (scratch full, I/O error).
-    Fixed text only: no errno string, path or manual text (issue #1058)."""
-
-    code = "parse_scratch_failed"
-
-    def __init__(self) -> None:
-        super().__init__(f"{self.code}: the private copy of the document could not be written")
-
-
 def _make_parse_tmp(base: str) -> str:
     """A new 0700 per-call directory under `base` (created 0700 if missing),
     or under the default temp dir when `base` is empty."""
@@ -364,9 +355,9 @@ def _parse_one(
         if corpus_root and sha:
             try:
                 tmp_dir = _make_parse_tmp(settings.ingest_parse_tmp_dir)
-                work_path, work_root = private_verified_copy(path, corpus_root, sha, tmp_dir)
-            except OSError:  # ENOSPC on the scratch volume, EIO, ...: fixed text, no path
+            except OSError:  # scratch dir cannot be made: fixed text, no path
                 raise ParseScratchError from None
+            work_path, work_root = private_verified_copy(path, corpus_root, sha, tmp_dir)
         parsed = parse_walked(
             work_path,
             sha,

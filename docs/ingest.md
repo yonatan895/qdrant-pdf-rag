@@ -79,11 +79,13 @@ publication prewalk; `walk.py` is unchanged) enforces three rules:
   created 0700 if missing; empty (the default) means the default temp dir, so
   local and CLI runs need no setting. The ingest Job sets `/work/parse-tmp`,
   on the sized `ingest-work` volume, not node ephemeral `/tmp`. The directory
-  is removed in the worker's `finally` on every path. Any `OSError` while
-  making the directory or the copy (scratch full, I/O error) is that
+  is removed in the worker's `finally` on every path. Any `OSError` on the
+  scratch side (making the directory, opening or writing the copy: scratch
+  full, I/O error) is that
   document's `error` record: `error_type` `ParseScratchError`, fixed message
   `parse_scratch_failed: ...` (no errno text or path); other documents
-  continue and the run exits non-zero. SIGKILL/OOM leftovers die with the pod
+  continue and the run exits non-zero. A failure reading the source keeps
+  its own type (e.g. `PermissionError`). SIGKILL/OOM leftovers die with the pod
   (a startup sweep is tracked under #588).
 - **Residual:** hardlinks to files outside the root have no path to detect
   and are out of scope; only symlinks are confined.

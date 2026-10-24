@@ -4,6 +4,7 @@ No Qdrant, no embeddings (air-gap Job does that; CI uses --dry-run).
 """
 
 import json
+import os
 from pathlib import Path
 from typing import ClassVar
 
@@ -777,17 +778,27 @@ def test_private_copy_enospc_fails_only_that_document_and_leaves_no_scratch(tmp_
             super().__init__(max_workers=max_workers)
 
     monkeypatch.setattr(run_ingest, "ProcessPoolExecutor", _InlinePool)
+    import builtins
+
+    from mainframe_rag.ingest import corpus_scan
+
     real_copy = run_ingest.private_verified_copy
     seen: list[str] = []
 
-    def full_disk(path, corpus_root, walk_sha, tmp_dir):
+    def counting_copy(path, corpus_root, walk_sha, tmp_dir):
         seen.append(tmp_dir)
-        if path.stem == stems[0]:
-            (Path(tmp_dir) / "partial.bin").write_bytes(b"x" * 64)  # a half-written copy
-            raise OSError(errno.ENOSPC, "No space left on device", str(path))
         return real_copy(path, corpus_root, walk_sha, tmp_dir)
 
-    monkeypatch.setattr(run_ingest, "private_verified_copy", full_disk)
+    def full_disk_open(file, mode="r", *args, **kwargs):
+        handle = builtins.open(file, mode, *args, **kwargs)  # noqa: SIM115
+        if mode == "wb" and stems[0] in str(file):  # the scratch side of the first document
+            handle.write(b"x" * 64)  # a half-written copy
+            handle.close()
+            raise OSError(errno.ENOSPC, "No space left on device", str(file))
+        return handle
+
+    monkeypatch.setattr(run_ingest, "private_verified_copy", counting_copy)
+    monkeypatch.setattr(corpus_scan, "open", full_disk_open, raising=False)
     fake = _FakeQdrant()
     monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
     monkeypatch.setenv("EMBED_MODE", "hash")
@@ -811,6 +822,32 @@ def test_private_copy_enospc_fails_only_that_document_and_leaves_no_scratch(tmp_
     assert scratch.stat().st_mode & 0o777 == 0o700
     stored = {(p.payload or {}).get("doc_id") for pts in fake._points.values() for p in pts}
     assert stems[1] in stored and stems[0] not in stored
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any file")
+def test_unreadable_source_keeps_its_own_error_type_not_a_scratch_error(
+    plain_pdf, tmp_path, monkeypatch
+):
+    """#1058: only the scratch side becomes ParseScratchError; a source the
+    worker cannot read keeps its own error type."""
+    import shutil
+
+    from mainframe_rag.config import Settings
+    from mainframe_rag.ingest import run_ingest
+
+    pdf = tmp_path / "locked.pdf"
+    shutil.copy(plain_pdf, pdf)
+    sha = sha256_file(pdf)
+    pdf.chmod(0)
+    try:
+        monkeypatch.setattr(
+            run_ingest, "_load_worker_settings", lambda: Settings(embed_mode="hash", _env_file=None)
+        )
+        record = run_ingest._parse_one((str(pdf), None, None, None, str(tmp_path), sha, False, None))[0]
+    finally:
+        pdf.chmod(0o600)
+    assert record.status == "error"
+    assert record.error_type == "PermissionError"
 
 
 # --------------------------------------- representation migration (391 F2) ---

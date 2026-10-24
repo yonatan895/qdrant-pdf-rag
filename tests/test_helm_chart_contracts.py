@@ -330,6 +330,7 @@ def test_ingest_job_private_parse_copies_resolve_under_the_work_mount():
     volume = next(v for v in pod["volumes"] if v["name"] == "work")
     assert volume["persistentVolumeClaim"]["claimName"] == "ingest-work"
 
+
 def test_ingest_job_contract_maintenance_with_tricky_revision():
     tricky = "SA22-7777-01@vendor|product with spaces|v1|abc123 & more"
     new = run_new_job_only(
