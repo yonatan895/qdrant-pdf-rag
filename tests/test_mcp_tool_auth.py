@@ -397,51 +397,90 @@ def test_jwks_fetch_failure_fails_closed():
     assert _code(_token(), idp=idp) == "unauthenticated"
 
 
-def _stale_run(max_stale_s: int) -> list[str]:
-    """Good fetch at t=0, IdP down from then on; verdicts at t=350 (past the
-    TTL), t=640, t=700, then the IdP recovers with a rotated key set at t=750."""
-    now = [0.0]
-    idp = _Idp(_rsa_jwk(_RSA_A, "a"))
-    config = _config(jwks_max_stale_s=max_stale_s)
-    cache = idp.cache(config, clock=lambda: now[0])
-    verdicts: list[str] = []
+class _Clocked:
+    """One gateway's cache on a controllable clock; `attempt` records verdicts."""
 
-    async def attempt(token: str) -> None:
+    def __init__(self, **overrides: object) -> None:
+        self.now = 0.0
+        self.idp = _Idp(_rsa_jwk(_RSA_A, "a"))
+        self.config = _config(**overrides)
+        self.cache = self.idp.cache(self.config, clock=lambda: self.now)
+
+    async def attempt(self, at: float, token: str | None = None) -> str:
+        self.now = at
         try:
-            await verify_token(token, config, cache)
-            verdicts.append("allow")
+            await verify_token(token or _token(), self.config, self.cache)
         except AuthError as exc:
-            verdicts.append(exc.code)
-
-    async def run() -> None:
-        await attempt(_token())
-        idp.status = 503
-        now[0] = 350.0
-        await attempt(_token(_RSA_B, kid="random"))  # unknown kid during the outage
-        await attempt(_token())
-        now[0] = 640.0  # inside the TTL of the failed refresh, past max-stale
-        await attempt(_token())
-        now[0] = 700.0
-        await attempt(_token())
-        idp.status, idp.keys = 200, [_rsa_jwk(_RSA_B, "b")]
-        now[0] = 750.0
-        await attempt(_token(_RSA_B, kid="b"))
-        await attempt(_token())
-
-    asyncio.run(run())
-    return verdicts
+            return exc.code
+        return "allow"
 
 
-def test_failed_refresh_fails_closed_by_default():
-    assert _stale_run(0) == [
-        "allow", "unauthenticated", "unauthenticated", "unauthenticated", "unauthenticated", "allow", "unauthenticated",
-    ]
+def _stale_lines(caplog: pytest.LogCaptureFixture) -> list[dict[str, object]]:
+    lines = [json.loads(r.getMessage()) for r in caplog.records if r.name == "tool_auth"]
+    return [line for line in lines if line.get("action") == "tool_auth_jwks_stale"]
 
 
-def test_max_stale_keeps_last_good_keys_through_a_failed_refresh_only():
-    assert _stale_run(600) == [
-        "allow", "unauthenticated", "allow", "unauthenticated", "unauthenticated", "allow", "unauthenticated",
-    ]
+def test_idp_blip_with_a_random_kid_does_not_evict_the_good_key(caplog: pytest.LogCaptureFixture):
+    gw = _Clocked()
+
+    async def run() -> list[str]:
+        verdicts = [await gw.attempt(0.0)]
+        gw.idp.status = 503
+        verdicts.append(await gw.attempt(350.0, _token(_RSA_B, kid="random")))
+        verdicts += [await gw.attempt(351.0) for _ in range(3)]
+        return verdicts
+
+    with caplog.at_level(logging.INFO, logger="tool_auth"):
+        assert asyncio.run(run()) == ["allow", "unauthenticated", "allow", "allow", "allow"]
+    assert len(gw.idp.requests) == 2
+    assert _stale_lines(caplog) == [{"action": "tool_auth_jwks_stale", "gateway": "splunk", "age_s": 350}]
+
+
+def test_stale_keys_stop_at_max_stale_while_the_idp_stays_down():
+    gw = _Clocked()
+    assert gw.config.jwks_max_stale_s == 3600
+
+    async def run() -> list[str]:
+        verdicts = [await gw.attempt(0.0)]
+        gw.idp.status = 503
+        verdicts.append(await gw.attempt(3500.0))  # refresh fails, set is 3500 s old
+        verdicts.append(await gw.attempt(3610.0))  # no refresh due, but past max-stale
+        verdicts.append(await gw.attempt(3900.0))  # refresh fails again
+        return verdicts
+
+    assert asyncio.run(run()) == ["allow", "allow", "unauthenticated", "unauthenticated"]
+
+
+def test_successful_fetch_that_drops_the_kid_refuses_at_once():
+    gw = _Clocked()
+
+    async def run() -> list[str]:
+        verdicts = [await gw.attempt(0.0)]
+        gw.idp.keys = [_rsa_jwk(_RSA_B, "b")]
+        verdicts.append(await gw.attempt(301.0))  # TTL refresh succeeds without "a"
+        verdicts.append(await gw.attempt(302.0, _token(_RSA_B, kid="b")))
+        return verdicts
+
+    assert asyncio.run(run()) == ["allow", "unauthenticated", "allow"]
+
+
+def test_zero_max_stale_fails_closed_on_the_first_failed_refresh():
+    gw = _Clocked(jwks_max_stale_s=0)
+
+    async def run() -> list[str]:
+        verdicts = [await gw.attempt(0.0)]
+        gw.idp.status = 503
+        verdicts.append(await gw.attempt(350.0))
+        return verdicts
+
+    assert asyncio.run(run()) == ["allow", "unauthenticated"]
+
+
+def test_max_stale_must_be_finite_and_not_negative():
+    assert _config(jwks_max_stale_s=0).jwks_max_stale_s == 0
+    for bad in (-1, float("nan"), float("inf")):
+        with pytest.raises(ValueError):
+            _config(jwks_max_stale_s=bad)
 
 
 def test_redirecting_jwks_is_refused_even_with_a_redirect_following_client():
