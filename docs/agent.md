@@ -720,14 +720,12 @@ select `complex`. Default is `simple`.
   `AnswerCoreOutput.hits` separately as retrieved candidates. For multi-turn
   chat, prior turns are conversation context, never evidence for the new
   answer.
-- The tail's worked example is `hits[0].cite` even when packing dropped that
-  hit: it is prompt furniture, never a manifest entry, so echoing it is
-  rejected unless that hit was supplied. It is the served cite, so it is a
-  single line with bounded, sanitized fields ([retrieval §1](retrieval.md),
-  issues #998/#1008), and it is delimiter-escaped like excerpt text because
-  it sits outside the frames. Its title and heading remain corpus-derived
-  text in the instruction region; replacing it with a static example is an
-  open answer-quality decision (issue #999). The system prompt's seven rules (ground-only, synthesize-from-templates,
+- The tail's worked example is the fixed synthetic `TAIL_EXAMPLE_CITE` (the
+  same cite the system prompt's rule 7 shows), never a retrieved cite: the
+  tail is outside every frame, so no corpus-derived title, heading or label
+  text reaches the instruction region (issue #999). It is prompt furniture,
+  never a manifest entry, so echoing it is rejected unless an identical cite
+  was supplied. The system prompt's seven rules (ground-only, synthesize-from-templates,
   version-disagree attribution, admit-gap, fenced scripts as examples,
   identify-a-doc-number/message-id/short-name query instead of refusing,
   mandatory `Citations:` with a few-shot example) plus the complex-query

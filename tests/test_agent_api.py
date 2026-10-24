@@ -1830,7 +1830,8 @@ def test_build_messages_tokenizer_budget_respected():
             # fixed overhead, so the fixture window widened
             # to keep the knife-edge scenario (5 excerpts fit, the last
             # truncated) reachable; +64 for the per-excerpt frames and the
-            # tail's untrusted-text clause (issue #999).
+            # tail's untrusted-text clause, +13 for the fixed tail example
+            # cite (issue #999).
             doc_id=f"DOC{i}",
             title="Title",
             page_label=str(i),
@@ -1841,7 +1842,7 @@ def test_build_messages_tokenizer_budget_respected():
     ]
 
     settings = Settings(
-        llm_max_model_len=1693,
+        llm_max_model_len=1706,
         llm_reserved_output_tokens=250,
         llm_thinking_reserve_tokens_simple=0,  # knife edge independent of #777 defaults
         llm_token_safety_margin=100,
