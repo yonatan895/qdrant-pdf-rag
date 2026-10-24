@@ -28,13 +28,15 @@ CITATION_LINE_RE = re.compile(
 # Horizontal whitespace only (`[^\S\r\n]`): with `\s*` around a MULTILINE `^`
 # the scan was polynomial in the number of newlines (a 2 KB reply of "\n" cost
 # 12 s, #1010). Every alternative is confined to one line, so the search is
-# linear. A header on a later line still matches at that line's own `^`.
+# linear; the optional `#` run is one group so two whitespace stars are never
+# adjacent (they backtracked quadratically on space floods). A header on a later
+# line still matches at that line's own `^`.
 CITATIONS_HEADER_RE = re.compile(
-    r"^[^\S\r\n]*#{0,6}[^\S\r\n]*[*_`]*Citations?[*_`]*:[*_`]*[^\S\r\n]*$",
+    r"^[^\S\r\n]*(?:#{1,6}[^\S\r\n]*)?[*_`]*Citations?[*_`]*:[*_`]*[^\S\r\n]*$",
     re.IGNORECASE | re.MULTILINE,
 )
 _CITATION_ALIAS_HEADER_RE = re.compile(
-    r"^\s*#{0,6}\s*[*_`]*(?:Sources?|References?)[*_`]*:[*_`]*\s*$",
+    r"^\s*(?:#{1,6}\s*)?[*_`]*(?:Sources?|References?)[*_`]*:[*_`]*\s*$",
     re.IGNORECASE,
 )
 

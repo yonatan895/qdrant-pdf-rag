@@ -370,7 +370,7 @@ RESOLVED_CODE_LABEL = "Resolved system code:"
 SPLUNK_HEADER = "Splunk context (live system observation; join key is the message ID):"
 
 _ANSWER_BODY_LABEL_RE = re.compile(
-    r"^\s*#{0,6}\s*[*_`]*(?:Answer|Citations?|Sources?|References?|"
+    r"^\s*(?:#{1,6}\s*)?[*_`]*(?:Answer|Citations?|Sources?|References?|"
     + re.escape(EXCERPTS_HEADER.rstrip(":"))
     + r"|"
     + re.escape(SPLUNK_HEADER.rstrip(":"))
@@ -380,7 +380,7 @@ _ANSWER_BODY_LABEL_RE = re.compile(
 # Echoed context/question lines: the label and the text echoed after it are
 # the caller's own words, not an answer.
 _PROMPT_ECHO_LINE_RE = re.compile(
-    r"^\s*#{0,6}\s*[*_`]*(?:"
+    r"^\s*(?:#{1,6}\s*)?[*_`]*(?:"
     + "|".join(re.escape(label.rstrip(":")) for label in (QUESTION_LABEL, SYSPLEX_LABEL, RESOLVED_CODE_LABEL))
     + r")[*_`]*\s*:",
     re.IGNORECASE,
