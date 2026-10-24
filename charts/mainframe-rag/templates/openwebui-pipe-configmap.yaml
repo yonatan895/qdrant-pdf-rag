@@ -1,0 +1,29 @@
+{{- /*
+Docs Pipe for Open WebUI (ADR-0007 V2, #1072, #1074). The repository files are
+the only Function source: the Pipe module and its installer ship in this
+ConfigMap with their sha256 recorded in annotations. deploy.sh runs the
+installer inside the Open WebUI pod, which refuses a mounted Pipe whose hash
+differs from the repository file and verifies the stored Function content by
+hash after the install. Community Functions are never installed. The same
+ConfigMap carries the chat retention purge run by the chat-purge sidecar.
+*/ -}}
+{{- if include "mainframe-rag.openwebuiEnabled" . }}
+{{- $pipe := .Files.Get "files/openwebui/docs_pipe.py" }}
+{{- $installer := .Files.Get "files/openwebui/provision_pipe.py" }}
+{{- $purge := .Files.Get "files/openwebui/purge_chats.py" }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rag-openwebui-pipe
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: rag-openwebui
+  annotations:
+    mainframe-rag/docs-pipe-sha256: {{ sha256sum $pipe | quote }}
+    mainframe-rag/provision-pipe-sha256: {{ sha256sum $installer | quote }}
+    mainframe-rag/purge-chats-sha256: {{ sha256sum $purge | quote }}
+data:
+  docs_pipe.py: {{ $pipe | quote }}
+  provision_pipe.py: {{ $installer | quote }}
+  purge_chats.py: {{ $purge | quote }}
+{{- end }}

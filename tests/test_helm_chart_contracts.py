@@ -1094,6 +1094,348 @@ def test_feedback_claim_is_the_only_object_retained_when_disabled():
         "helm.sh/resource-policy": "keep"}
 
 
+# ------------------------------------------- Open WebUI front end (#1074)
+
+OWUI_KEYS = {
+    ("Deployment", "rag-openwebui"), ("Service", "rag-openwebui"),
+    ("PersistentVolumeClaim", "rag-openwebui-data"), ("NetworkPolicy", "rag-openwebui"),
+    ("Route", "rag-openwebui"), ("ConfigMap", "rag-openwebui-pipe"),
+}
+OWUI_PIPE = "class Pipe:\n    \"\"\"Synthetic stand-in for the #1072 docs Pipe.\"\"\"\n"
+OWUI_ON = {
+    "route": {"destinationCA": FAKE_CA},
+    "openwebui": {
+        "enabled": True,
+        "secretName": "owui-secrets",
+        "host": "docs.apps.example.internal",
+        "retentionDays": 45,
+        "oidc": {
+            "providerUrl": "https://idp.example.internal/realms/x/.well-known/openid-configuration",
+            "clientId": "docs-frontend",
+            "allowedRoles": "staff",
+            "adminRoles": "docs-admins,docs-owners",
+        },
+        "idpEgress": {"cidrs": ["10.20.0.0/24", "10.21.0.8/32"], "port": 8443},
+    },
+}
+
+
+@pytest.fixture(scope="module")
+def owui_chart(tmp_path_factory):
+    """The chart plus a generated stand-in for the #1072 Pipe: the real chart
+    ships no Pipe until #1072 lands, and enabling it then fails closed."""
+    import shutil
+
+    root = tmp_path_factory.mktemp("owui") / "mainframe-rag"
+    shutil.copytree(CHART, root)
+    (root / "files" / "openwebui" / "docs_pipe.py").write_text(OWUI_PIPE, encoding="utf-8")
+    return root
+
+
+def _owui(chart, extra=None, **kw):
+    values = json.loads(json.dumps(OWUI_ON))
+    for key, val in (extra or {}).items():
+        if isinstance(val, dict) and isinstance(values.get(key), dict):
+            values[key] = {**values[key], **val}
+        else:
+            values[key] = val
+    return run_new_template(values, chart=chart, **kw)
+
+
+def test_openwebui_off_by_default_renders_nothing_and_changes_nothing(owui_chart):
+    """K1: off is the default, and an explicit off with every setting present
+    renders byte-identically to a release without the block."""
+    default = _helm_template_with_values(base_values(), chart=owui_chart)
+    assert default.returncode == 0
+    assert "openwebui" not in default.stdout and "OPENID" not in default.stdout
+    off = base_values()
+    off["openwebui"] = {**OWUI_ON["openwebui"], "enabled": False}
+    rendered = _helm_template_with_values(off, chart=owui_chart)
+    assert rendered.returncode == 0 and rendered.stdout == default.stdout
+    # The shipped chart (no Pipe file) renders the same default.
+    assert _helm_template_with_values(base_values()).stdout == default.stdout
+    with open(CHART / "values.yaml", encoding="utf-8") as f:
+        assert yaml.safe_load(f)["openwebui"]["enabled"] is False
+
+
+def test_openwebui_enabled_adds_its_objects_and_leaves_the_rest_unchanged(owui_chart):
+    """Enabling adds exactly the front-end set; agent, console, feedback and
+    backend objects are identical (no agent behaviour change)."""
+    on = _owui(owui_chart)
+    default = run_new_template({}, chart=owui_chart)
+    assert set(on) - set(default) == OWUI_KEYS
+    for key, doc in default.items():
+        assert on[key] == doc, key
+    # Not tied to the console Route: route.enabled stays false and no oauth-proxy appears.
+    assert ("Route", "rag-agent") not in on
+    assert list(container_map(on["Deployment", "rag-agent"])) == ["agent"]
+
+
+def test_openwebui_workload_is_single_replica_restricted_and_holds_no_model_key(owui_chart):
+    docs = _owui(owui_chart, {"_namespace": "rag-ns"})
+    dep = docs["Deployment", "rag-openwebui"]
+    assert dep["metadata"]["namespace"] == "rag-ns"
+    spec = dep["spec"]
+    assert spec["replicas"] == 1 and spec["strategy"] == {"type": "Recreate"}
+    assert spec["selector"]["matchLabels"] == {"app": "rag-openwebui"}
+    pod = spec["template"]["spec"]
+    assert spec["template"]["metadata"]["labels"] == {"app": "rag-openwebui"}
+    # restricted-v2 with a platform-assigned (random) UID: no fixed identity,
+    # no anyuid request, no service-account token, no privileged knobs.
+    assert _hardening_violations(pod) == []
+    assert pod["automountServiceAccountToken"] is False and "serviceAccountName" not in pod
+    for forbidden in ("hostNetwork", "hostPID", "hostIPC", "initContainers"):
+        assert forbidden not in pod
+    assert not [k for k in docs if k[0] in ("Role", "RoleBinding", "SecurityContextConstraints")]
+    assert "anyuid" not in json.dumps(dep)
+    assert [c["name"] for c in pod["containers"]] == ["openwebui", "chat-purge"]
+    container, purge = pod["containers"]
+    assert container["image"] == "qdrant-pdf-rag-openwebui:v0.12.3-slim"
+    assert container["securityContext"].get("privileged") is not True
+    # One worker over TLS from the serving certificate; no plain HTTP port.
+    assert container["args"][:2] == ["open_webui.main:app", "--host"]
+    args = container["args"]
+    assert args[args.index("--workers") + 1] == "1" and args[args.index("--port") + 1] == "8443"
+    assert args[args.index("--ssl-certfile") + 1] == "/etc/tls/private/tls.crt"
+    assert container["ports"] == [{"containerPort": 8443, "name": "https"}]
+    for probe in ("readinessProbe", "livenessProbe", "startupProbe"):
+        assert container[probe]["httpGet"]["scheme"] == "HTTPS", probe
+    env = env_map(dep, "openwebui")
+    plain = {k: v["value"] for k, v in env.items() if "value" in v}
+    for key, value in {
+        "OFFLINE_MODE": "true", "ENABLE_PERSISTENT_CONFIG": "false", "UVICORN_WORKERS": "1",
+        "ENABLE_OPENAI_API": "false", "ENABLE_OLLAMA_API": "false",
+        "ENABLE_DIRECT_CONNECTIONS": "false", "ENABLE_COMMUNITY_SHARING": "false",
+        "ENABLE_VERSION_UPDATE_CHECK": "false", "BYPASS_EMBEDDING_AND_RETRIEVAL": "true",
+        "ENABLE_WEB_SEARCH": "false", "ENABLE_MEMORIES": "false",
+        "USER_PERMISSIONS_CHAT_FILE_UPLOAD": "false", "ENABLE_CODE_EXECUTION": "false",
+        "ENABLE_CODE_INTERPRETER": "false", "ENABLE_PIP_INSTALL_FRONTMATTER_REQUIREMENTS": "false",
+        "ENABLE_TITLE_GENERATION": "false", "ENABLE_ADMIN_CHAT_ACCESS": "false",
+        "ENABLE_ADMIN_EXPORT": "false", "ENABLE_SIGNUP": "false", "ENABLE_LOGIN_FORM": "false",
+        "ENABLE_PASSWORD_AUTH": "false", "ENABLE_INITIAL_ADMIN_SIGNUP": "false",
+        "ENABLE_OAUTH_TOKEN_EXCHANGE": "false", "ENABLE_OAUTH_GROUP_MANAGEMENT": "true",
+        "ENABLE_OAUTH_ROLE_MANAGEMENT": "true", "JWT_EXPIRES_IN": "8h",
+        "DATA_DIR": "/app/backend/data", "AUDIT_LOG_LEVEL": "METADATA",
+        "OPENID_PROVIDER_URL": OWUI_ON["openwebui"]["oidc"]["providerUrl"],
+        "OPENID_REDIRECT_URI": "https://docs.apps.example.internal/oauth/oidc/callback",
+        "WEBUI_URL": "https://docs.apps.example.internal", "OAUTH_CLIENT_ID": "docs-frontend",
+        "OAUTH_GROUP_CLAIM": "groups", "OAUTH_ROLES_CLAIM": "roles",
+        "OAUTH_ALLOWED_ROLES": "staff", "OAUTH_ADMIN_ROLES": "docs-admins,docs-owners",
+    }.items():
+        assert plain.get(key) == value, key
+    assert "PGVECTOR_DB_URL" not in env and "OPENAI_API_KEY" not in env
+    # Exactly the two operator Secret references; nothing else is a credential.
+    refs = {k: v["valueFrom"]["secretKeyRef"] for k, v in env.items() if "valueFrom" in v}
+    assert refs == {
+        "WEBUI_SECRET_KEY": {"name": "owui-secrets", "key": "webui-secret-key"},
+        "OAUTH_CLIENT_SECRET": {"name": "owui-secrets", "key": "oidc-client-secret"},
+    }
+    # No agent, gateway, Qdrant or model connection setting reaches the pod.
+    for name in env:
+        assert not name.startswith(("QDRANT", "LLM_", "EMBED_", "RERANK_", "GATEWAY", "OTEL_",
+                                    "OPENAI_API_", "OLLAMA_BASE", "FEEDBACK")), name
+    text = json.dumps(dep)
+    for forbidden in ("api-key", "apikey", "qdrant:6333", "openobserve-credentials"):
+        assert forbidden not in text, forbidden
+    assert dep["metadata"]["annotations"]["mainframe-rag/chat-retention-days"] == "45"
+    mounts = {m["mountPath"]: m for m in container["volumeMounts"]}
+    assert set(mounts) == {"/app/backend/data", "/tmp", "/etc/tls/private",
+                           "/opt/mainframe-rag/openwebui"}
+    assert mounts["/etc/tls/private"]["readOnly"] and mounts["/opt/mainframe-rag/openwebui"]["readOnly"]
+    volumes = {v["name"]: v for v in pod["volumes"]}
+    assert volumes[mounts["/app/backend/data"]["name"]]["persistentVolumeClaim"] == {
+        "claimName": "rag-openwebui-data"}
+    assert volumes[mounts["/tmp"]["name"]] == {"name": mounts["/tmp"]["name"], "emptyDir": {}}
+    assert volumes[mounts["/etc/tls/private"]["name"]]["secret"] == {"secretName": "rag-openwebui-tls"}
+    assert volumes[mounts["/opt/mainframe-rag/openwebui"]["name"]]["configMap"] == {
+        "name": "rag-openwebui-pipe"}
+    # The retention purge (ADR-0007 S2): same image and claim, the configured
+    # window, a read-only root and no credential of any kind.
+    assert purge["image"] == container["image"]
+    assert purge["command"] == ["python3", "/opt/mainframe-rag/openwebui/purge_chats.py"]
+    assert purge["args"] == ["--days", "45", "--data-dir", "/app/backend/data"]
+    assert purge["securityContext"]["readOnlyRootFilesystem"] is True
+    assert "env" not in purge and "ports" not in purge
+    assert {m["mountPath"]: m.get("readOnly", False) for m in purge["volumeMounts"]} == {
+        "/app/backend/data": False, "/tmp": False, "/opt/mainframe-rag/openwebui": True}
+
+
+def test_openwebui_claim_is_kept_rwo_on_the_block_class(owui_chart):
+    docs = _owui(owui_chart, {"storage": {"className": "fast-block"},
+                              "openwebui": {**OWUI_ON["openwebui"], "storageSize": "25Gi"}})
+    pvc = docs["PersistentVolumeClaim", "rag-openwebui-data"]
+    assert pvc["metadata"]["annotations"] == {"helm.sh/resource-policy": "keep"}
+    assert pvc["spec"] == {"accessModes": ["ReadWriteOnce"], "storageClassName": "fast-block",
+                           "resources": {"requests": {"storage": "25Gi"}}}
+    values = base_values()
+    values.update(json.loads(json.dumps(OWUI_ON)))
+    values["storage"] = {"className": "nfs-client"}
+    r = _helm_template_with_values(values, chart=owui_chart)
+    assert r.returncode != 0 and "storage" in r.stderr
+
+
+def test_openwebui_service_and_route_are_tls_reencrypt_with_the_namespace_ca(owui_chart):
+    docs = _owui(owui_chart)
+    svc = docs["Service", "rag-openwebui"]
+    assert svc["metadata"]["annotations"] == {
+        "service.beta.openshift.io/serving-cert-secret-name": "rag-openwebui-tls"}
+    assert svc["spec"] == {"type": "ClusterIP", "selector": {"app": "rag-openwebui"},
+                           "ports": [{"name": "https", "port": 8443, "targetPort": "https"}]}
+    route = docs["Route", "rag-openwebui"]
+    assert route["spec"]["host"] == "docs.apps.example.internal"
+    assert route["spec"]["to"] == {"kind": "Service", "name": "rag-openwebui"}
+    assert "alternateBackends" not in route["spec"]
+    assert route["spec"]["port"] == {"targetPort": "https"}
+    tls = route["spec"]["tls"]
+    assert tls["termination"] == "reencrypt" and tls["insecureEdgeTerminationPolicy"] == "Redirect"
+    assert tls["destinationCACertificate"].strip() == FAKE_CA
+    assert set(tls) == {"termination", "insecureEdgeTerminationPolicy", "destinationCACertificate"}
+
+
+def _owui_egress_allows(policy, peer_ns, peer_pod_labels, ip, proto, port, release_ns="ns"):
+    """Independent egress semantics: a podSelector peer is a pod of the release
+    namespace, a namespaceSelector peer a pod of a matching namespace (by
+    name expression), an ipBlock peer an address inside the CIDR."""
+    import ipaddress
+
+    for rule in policy["spec"]["egress"]:
+        if (proto, port) not in {(p["protocol"], p["port"]) for p in rule["ports"]}:
+            continue
+        for peer in rule["to"]:
+            if set(peer) == {"podSelector"}:
+                want = peer["podSelector"]["matchLabels"]
+                if peer_ns == release_ns and all(peer_pod_labels.get(k) == v for k, v in want.items()):
+                    return True
+            elif set(peer) == {"namespaceSelector"}:
+                (expr,) = peer["namespaceSelector"]["matchExpressions"]
+                assert expr["key"] == "kubernetes.io/metadata.name" and expr["operator"] == "In"
+                if peer_ns in expr["values"]:
+                    return True
+            elif set(peer) == {"ipBlock"}:
+                assert set(peer["ipBlock"]) == {"cidr"}
+                if ip and ipaddress.ip_address(ip) in ipaddress.ip_network(peer["ipBlock"]["cidr"]):
+                    return True
+            else:
+                raise AssertionError(f"unexpected peer shape: {peer}")
+    return False
+
+
+def test_openwebui_policy_admits_the_router_only_and_egresses_to_agent_dns_and_idp(owui_chart):
+    docs = _owui(owui_chart, {"networkPolicy": {"enabled": False, "allowedNamespaces": []}})
+    # Rendered even with the agent policy off: it is the front end's egress control.
+    policy = docs["NetworkPolicy", "rag-openwebui"]
+    assert POLICY_KEY not in docs
+    spec = policy["spec"]
+    assert spec["podSelector"] == {"matchLabels": {"app": "rag-openwebui"}}
+    assert spec["policyTypes"] == ["Ingress", "Egress"]
+    assert spec["ingress"] == [{"from": [{"namespaceSelector": {"matchLabels": ROUTER_LABEL}}],
+                                "ports": [{"protocol": "TCP", "port": 8443}]}]
+    agent = {"app": "rag-agent"}
+    assert _owui_egress_allows(policy, "ns", agent, None, "TCP", 8080)
+    # Counterexamples: other pods or ports of the namespace, Qdrant, OpenObserve,
+    # the feedback store, the agent of another namespace, the model gateway.
+    for labels, port in (({"app": "rag-agent"}, 8443), ({"app": "qdrant"}, 6333),
+                         ({"app": "openobserve"}, 5080), ({"app": "rag-feedback"}, 8080), ({}, 8080)):
+        assert not _owui_egress_allows(policy, "ns", labels, None, "TCP", port), (labels, port)
+    assert not _owui_egress_allows(policy, "other", agent, None, "TCP", 8080)
+    for dns_ns in ("openshift-dns", "kube-system"):
+        assert _owui_egress_allows(policy, dns_ns, {}, None, "UDP", 53)
+    assert not _owui_egress_allows(policy, "openshift-ingress", {}, None, "UDP", 53)
+    # IdP back channel: only the listed CIDRs, only the listed port.
+    assert _owui_egress_allows(policy, None, {}, "10.20.0.77", "TCP", 8443)
+    assert _owui_egress_allows(policy, None, {}, "10.21.0.8", "TCP", 8443)
+    for ip, port in (("10.21.0.9", 8443), ("10.20.0.77", 443), ("8.8.8.8", 443), ("1.1.1.1", 53)):
+        assert not _owui_egress_allows(policy, None, {}, ip, "TCP", port), (ip, port)
+    # No empty (everything) peer and no 0.0.0.0/0.
+    rules = spec["egress"]
+    assert all(peer for r in rules for peer in r["to"])
+    assert "0.0.0.0/0" not in json.dumps(rules)
+
+
+def test_openwebui_pipe_configmap_carries_the_repository_files_and_their_hashes(owui_chart):
+    import hashlib
+
+    cm = _owui(owui_chart)["ConfigMap", "rag-openwebui-pipe"]
+    installer = (CHART / "files" / "openwebui" / "provision_pipe.py").read_text(encoding="utf-8")
+    purge = (CHART / "files" / "openwebui" / "purge_chats.py").read_text(encoding="utf-8")
+    assert cm["data"] == {"docs_pipe.py": OWUI_PIPE, "provision_pipe.py": installer,
+                          "purge_chats.py": purge}
+    assert cm["metadata"]["annotations"] == {
+        "mainframe-rag/docs-pipe-sha256": hashlib.sha256(OWUI_PIPE.encode()).hexdigest(),
+        "mainframe-rag/provision-pipe-sha256": hashlib.sha256(installer.encode()).hexdigest(),
+        "mainframe-rag/purge-chats-sha256": hashlib.sha256(purge.encode()).hexdigest(),
+    }
+
+
+def test_openwebui_retention_defaults_to_30_days_and_cannot_be_unset(owui_chart):
+    """Maintainer decision 2026-10-24: a 30-day window, enforced by the purge
+    sidecar. Omitting it keeps 30; an explicit null fails the render."""
+    with open(CHART / "values.yaml", encoding="utf-8") as f:
+        assert yaml.safe_load(f)["openwebui"]["retentionDays"] == 30
+    values = base_values()
+    values.update(json.loads(json.dumps(OWUI_ON)))
+    del values["openwebui"]["retentionDays"]
+    docs = run_new_template(values, chart=owui_chart)
+    purge = container_map(docs["Deployment", "rag-openwebui"])["chat-purge"]
+    assert purge["args"][:2] == ["--days", "30"]
+    values["openwebui"]["retentionDays"] = 7
+    purge = container_map(run_new_template(values, chart=owui_chart)["Deployment", "rag-openwebui"])["chat-purge"]
+    assert purge["args"][:2] == ["--days", "7"]
+    values["openwebui"]["retentionDays"] = None
+    r = _helm_template_with_values(values, chart=owui_chart)
+    assert r.returncode != 0 and "retentionDays" in r.stderr
+
+
+def test_openwebui_refuses_to_enable_without_the_repository_docs_pipe():
+    """The shipped chart has no Pipe until #1072 lands: enabling fails closed."""
+    assert not (CHART / "files" / "openwebui" / "docs_pipe.py").exists()
+    values = base_values()
+    values.update(json.loads(json.dumps(OWUI_ON)))
+    r = _helm_template_with_values(values)
+    assert r.returncode != 0 and "docs Pipe (#1072)" in r.stderr
+
+
+@pytest.mark.parametrize("patch,needle", [
+    ({"enabled": "true"}, "openwebui"),
+    ({"secretName": ""}, "openwebui"),
+    ({"secretName": "Bad_Name"}, "openwebui"),
+    ({"host": ""}, "openwebui"),
+    ({"host": "https://docs.example"}, "openwebui"),
+    ({"retentionDays": 0}, "openwebui"),
+    ({"retentionDays": 3651}, "openwebui"),
+    ({"retentionDays": "30"}, "openwebui"),
+    ({"storageSize": "lots"}, "openwebui"),
+    ({"oidc": {"providerUrl": "http://idp.example/.well-known/openid-configuration",
+               "clientId": "c", "allowedRoles": "r", "adminRoles": "a"}}, "openwebui"),
+    ({"oidc": {"providerUrl": "https://idp.example/realms/x", "clientId": "c",
+               "allowedRoles": "r", "adminRoles": "a"}}, "openwebui"),
+    ({"oidc": {"providerUrl": "https://idp.example/.well-known/openid-configuration",
+               "clientId": "", "allowedRoles": "r", "adminRoles": "a"}}, "openwebui"),
+    ({"oidc": {"providerUrl": "https://idp.example/.well-known/openid-configuration",
+               "clientId": "c", "allowedRoles": "r", "adminRoles": ""}}, "openwebui"),
+    ({"idpEgress": {"cidrs": [], "port": 443}}, "openwebui"),
+    ({"idpEgress": {"cidrs": ["0.0.0.0/33"], "port": 443}}, "openwebui"),
+    ({"idpEgress": {"cidrs": ["idp.example"], "port": 443}}, "openwebui"),
+    ({"idpEgress": {"cidrs": ["10.0.0.0/8"], "port": 0}}, "openwebui"),
+    ({"replicas": 2}, "openwebui"),
+    ({"extra": 1}, "openwebui"),
+])
+def test_openwebui_schema_refuses_invalid_selection(owui_chart, patch, needle):
+    values = base_values()
+    values.update(json.loads(json.dumps(OWUI_ON)))
+    values["openwebui"].update(patch)
+    r = _helm_template_with_values(values, chart=owui_chart)
+    assert r.returncode != 0 and needle in r.stderr
+
+
+def test_openwebui_requires_the_namespace_service_ca(owui_chart):
+    values = base_values()
+    values.update(json.loads(json.dumps(OWUI_ON)))
+    values["route"] = {"enabled": False, "timeoutSeconds": 300, "destinationCA": "  "}
+    r = _helm_template_with_values(values, chart=owui_chart)
+    assert r.returncode != 0 and "destinationCA" in r.stderr
+
+
 def test_default_chart_carries_medium_effort_matching_settings():
     """#917: the chart sets the shipped effort explicitly; it must equal the Settings default."""
     from mainframe_rag.config import Settings
