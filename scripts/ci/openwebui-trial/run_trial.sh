@@ -54,7 +54,7 @@ images() {
     docker pull -q "$QDRANT_PIN" >/dev/null
     docker tag "$DEX_PIN" "$DEX_IMAGE"
     docker tag "$QDRANT_PIN" "$QDRANT_IMAGE"
-    docker build -q -f "$REPO/images/Containerfile.openwebui" -t "$OWUI_IMAGE" "$REPO/images" >/dev/null
+    docker build -q -f "$REPO/scripts/ci/openwebui-trial/Containerfile.openwebui" -t "$OWUI_IMAGE" "$REPO/scripts/ci/openwebui-trial" >/dev/null
     BUNDLE_DIR=${BUNDLE_DIR:?set BUNDLE_DIR to the directory holding wheelhouse/ and bm25-weights/}
     docker build -q --build-context wheelhouse="$BUNDLE_DIR/wheelhouse" \
         --build-context bm25="$BUNDLE_DIR/bm25-weights" \
