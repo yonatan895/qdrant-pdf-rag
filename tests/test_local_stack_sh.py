@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -17,6 +18,7 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / "scripts" / "run_local_stack.sh"
+_INGEST_STEP = re.compile(r"^\[plan\] \d+\. ingest:")
 
 
 @pytest.fixture(autouse=True)
@@ -39,7 +41,7 @@ def test_dryrun_plan_orders_stages():
     r = _run()
     assert r.returncode == 0, r.stderr
     plan = "\n".join(ln for ln in r.stdout.splitlines() if ln.startswith("[plan]"))
-    marks = ["backends", "qdrant", "run_local_openobserve.sh", "run_local_gateway.sh", "probe_gateway.py", "ingest", "uvicorn"]
+    marks = ["backends", "qdrant", "run_local_openobserve.sh", "run_local_gateway.sh", "probe_gateway.py", ". ingest:", "uvicorn"]
     positions = [plan.index(m) for m in marks]
     assert positions == sorted(positions)
     assert "UI_ENABLED=true" in plan
@@ -54,7 +56,7 @@ def test_dryrun_plan_reflects_operator_overrides(tmp_path):
     lines = r.stdout.splitlines()
     assert "--max-tokens 512" in next(ln for ln in lines if "probe_gateway.py" in ln)
     assert "UI_ENABLED=false" in next(ln for ln in lines if "uvicorn" in ln)
-    ingest = next(ln for ln in lines if "ingest" in ln)
+    ingest = next(ln for ln in lines if _INGEST_STEP.match(ln))
     assert str(tmp_path) in ingest and "skipped" not in ingest
     # A shared service name would merge agent and ingest in one OpenObserve.
     assert "OTEL_SERVICE_NAME=mainframe-rag-ingest" in ingest
@@ -463,7 +465,7 @@ def _plan_workers(tmp_path: Path, host: dict[str, str]) -> tuple[subprocess.Comp
         check=False,
         env={**clean, "LOCAL_STACK_DRYRUN": "1", "CORPUS_DIR": str(corpus), **host},
     )
-    ingest = next((ln for ln in r.stdout.splitlines() if "ingest" in ln), "")
+    ingest = next((ln for ln in r.stdout.splitlines() if _INGEST_STEP.match(ln)), "")
     return r, ingest
 
 

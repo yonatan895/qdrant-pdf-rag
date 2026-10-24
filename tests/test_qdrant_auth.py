@@ -62,7 +62,7 @@ def _start(auth: dict[str, str], volume: str | None = None) -> tuple[str, str]:
             pass
         time.sleep(1)
     _docker("stop", cid, timeout=30)
-    pytest.skip("ephemeral Qdrant did not become ready")
+    pytest.fail("ephemeral Qdrant did not become ready")
 
 
 def _stop(cid: str) -> None:
