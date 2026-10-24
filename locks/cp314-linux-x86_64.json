@@ -67,10 +67,10 @@
       "wheel": "fastembed-0.8.0-py3-none-any.whl"
     },
     "filelock": {
-      "sha256": "3f16ecd0117feae0dfc147e8c62eb5daeccd8bd800378c3ddf416de9b4feb6b1",
-      "url": "https://files.pythonhosted.org/packages/cc/06/4f138f618dbea66803291274f228f01daf29f306fe8b96bc30dab765df75/filelock-3.32.6-py3-none-any.whl",
-      "version": "3.32.6",
-      "wheel": "filelock-3.32.6-py3-none-any.whl"
+      "sha256": "7be2662e9e826b9bba28afc0f843a123280d799a2ea44bb5d35ccec67905ae44",
+      "url": "https://files.pythonhosted.org/packages/28/00/db89d339bc4ecdc8087fa7b8607ba22ffc27bf96286f340c9620bea428b3/filelock-4.2.1-py3-none-any.whl",
+      "version": "4.2.1",
+      "wheel": "filelock-4.2.1-py3-none-any.whl"
     },
     "flatbuffers": {
       "sha256": "7634f50c427838bb021c2d66a3d1168e9d199b0607e6329399f04846d42e20b4",
@@ -415,10 +415,10 @@
       "wheel": "ruff-0.16.7-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
     },
     "setuptools": {
-      "sha256": "51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670",
-      "url": "https://files.pythonhosted.org/packages/95/9c/c510029fc6ef33a6275cd2c5d3cecd6613dfd6aa401d57c54f1c18852ccf/setuptools-84.0.0-py3-none-any.whl",
-      "version": "84.0.0",
-      "wheel": "setuptools-84.0.0-py3-none-any.whl"
+      "sha256": "5231689c6ac8156cd155cfb98c3fd6fb252c3e7e9bd3d78b64d3c55f132624c9",
+      "url": "https://files.pythonhosted.org/packages/18/02/b4bbb90f8f29e334898ff45c6d9b1fffaa6f378017052b3023a06262b5f7/setuptools-84.1.0-py3-none-any.whl",
+      "version": "84.1.0",
+      "wheel": "setuptools-84.1.0-py3-none-any.whl"
     },
     "sortedcontainers": {
       "sha256": "a163dcaede0f1c021485e957a39245190e74249897e2ae4b2aa38595db237ee0",
@@ -490,7 +490,7 @@
         "wheel"
       ],
       "requirements": "requirements.build.lock.txt",
-      "sha256": "18ba95dd373047ddf50eb8da8f7957f188e9461dece5c9030044efbfdeb3fc54"
+      "sha256": "f0167a21aec978580803bb0e499d60d46669f1dee850cc5f9cbce4180d06928f"
     },
     "dev": {
       "packages": [
@@ -575,7 +575,7 @@
         "wheel"
       ],
       "requirements": "requirements.dev.lock.txt",
-      "sha256": "17b26d40473693d2822daf8b7fbddc8e755ec109c75f84fb76123e40ca562416"
+      "sha256": "5fc53e3ab36c8b7ad55cba921cfc3aa099a4a31a0ec58f8df68fe301fa906e7e"
     },
     "runtime": {
       "packages": [
@@ -643,7 +643,7 @@
         "uvicorn"
       ],
       "requirements": "requirements.lock.txt",
-      "sha256": "b6dd61b7c00abdaf5ddbbbc50dffb848587697b41e718d9afbfe99c4eb186363"
+      "sha256": "74e0899b46c8d9651c1fce7f71060cad8a9c3a577136e317f06a74288afebd81"
     }
   },
   "resolver": {
