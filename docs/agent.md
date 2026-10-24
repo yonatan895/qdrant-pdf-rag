@@ -634,7 +634,11 @@ select `complex`. Default is `simple`.
   the stored payload only (whitespace collapsed, 120 chars). A missing value is
   `unknown`; the caller's `product`/`version` scope is never substituted. The
   header is part of every estimator, the remainder cut and the exact final
-  recount, so the budget includes it. The `[i]` label is the per-entry handle;
+  recount, so the budget includes it. The citation in the label line is the
+  served cite, whose title, heading and label are bounded and single-line at
+  construction ([retrieval](retrieval.md), issues #998/#1008), so one
+  document's oversized metadata cannot consume the window and push other
+  evidence out. The `[i]` label is the per-entry handle;
   the citation text is display only and may repeat across versions.
 - Range selection (#632): when the query names a message id, member or
   system code (shared `parse_query` normalization), a chunk over its cap ships
