@@ -28,6 +28,7 @@ spec:
         app: ingest
     spec:
       restartPolicy: Never
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         seccompProfile:
