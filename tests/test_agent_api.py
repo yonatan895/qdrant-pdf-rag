@@ -4014,4 +4014,3 @@ def test_a_whole_line_quoted_decline_is_recognized_in_every_quote_style(quote, s
     """#877 D2: wrapper peeling treats curly and straight quotes alike."""
     body = quote.format(f"{DECLINE_PREFIX} {subject}.") + tail
     assert is_structured_decline(body) is True, body
-
