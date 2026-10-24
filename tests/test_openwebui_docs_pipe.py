@@ -21,8 +21,8 @@ from typing import Any
 
 import httpx
 import pytest
-
 from integrations.openwebui import docs_pipe
+
 from mainframe_rag.agent.answer import SuppliedExcerpt
 from mainframe_rag.agent.sse import format_openai_chunk, format_openai_done, format_openai_error
 
@@ -122,6 +122,7 @@ def _messages(*turns: tuple[str, Any]) -> list[dict[str, Any]]:
 
 def run_pipe(fake: FakeAgent | None, *, messages: list[dict[str, Any]] | None = None,
              user: dict[str, Any] | None = None, task: str | None = None,
+             metadata: dict[str, Any] | None = None, body_extra: dict[str, Any] | None = None,
              pipe: docs_pipe.Pipe | None = None,
              transport: httpx.AsyncBaseTransport | None = None,
              ) -> tuple[str, list[dict[str, Any]]]:
@@ -137,11 +138,13 @@ def run_pipe(fake: FakeAgent | None, *, messages: list[dict[str, Any]] | None = 
         events.append(event)
 
     body = {"model": "docs", "stream": True,
-            "messages": messages if messages is not None else _messages(("user", QUESTION))}
+            "messages": messages if messages is not None else _messages(("user", QUESTION)),
+            **(body_extra or {})}
 
     async def main() -> str:
         result = await pipe.pipe(body, __user__=user or {"id": "u1"},
-                                 __event_emitter__=emit, __task__=task)
+                                 __event_emitter__=emit, __task__=task,
+                                 __metadata__=metadata or {})
         if isinstance(result, str):
             return result
         return "".join([chunk async for chunk in result])
@@ -166,11 +169,20 @@ def _sources(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
 # --- Request shape -----------------------------------------------------------
 
 
-def test_request_body_is_exactly_the_strict_chat_schema():
+@pytest.fixture
+def chat_request(monkeypatch) -> Any:
+    """The agent's real strict ChatRequest model, with the settings its
+    bounds validator reads (normally bound by the app lifespan)."""
+    from mainframe_rag.agent import app as app_mod
+    from mainframe_rag.config import load_settings
+
+    monkeypatch.setattr(app_mod, "settings", load_settings(), raising=False)
+    return app_mod.ChatRequest
+
+
+def test_request_body_is_exactly_the_strict_chat_schema(chat_request):
     """Only fields ChatRequest accepts: user/assistant string turns, stream,
     nothing Open WebUI adds (system prompts, file parts, model, params)."""
-    from mainframe_rag.agent.app import ChatRequest
-
     fake = FakeAgent()
     run_pipe(fake, messages=[
         {"role": "system", "content": "Open WebUI system prompt"},
@@ -191,7 +203,7 @@ def test_request_body_is_exactly_the_strict_chat_schema():
         "stream": True,
     }
     # The agent's real strict model accepts it unchanged (extra="forbid").
-    validated = ChatRequest.model_validate(body)
+    validated = chat_request.model_validate(body)
     assert validated.model_dump(exclude_unset=True) == body
     assert fake.requests[0].method == "POST"
     assert fake.requests[0].url == httpx.URL("http://rag-agent:8080/v1/chat")
@@ -205,21 +217,20 @@ def test_no_string_turn_left_makes_no_agent_call():
     ])
     assert fake.requests == []
     assert content == "Ask a question in plain text; attachments and images are not supported."
+    assert events == []
 
 
 @pytest.mark.parametrize("valves", [
     pytest.param(lambda: docs_pipe.Pipe.UserValves(product="z/OS", version="3.1"), id="instance"),
     pytest.param(lambda: {"product": "z/OS", "version": "3.1"}, id="dict"),
 ])
-def test_product_and_version_come_from_user_valves(valves: Callable[[], Any]):
+def test_product_and_version_come_from_user_valves(valves: Callable[[], Any], chat_request):
     fake = FakeAgent()
     run_pipe(fake, user={"id": "u1", "valves": valves()})
     (body,) = fake.bodies()
     assert body["product"] == "z/OS"
     assert body["version"] == "3.1"
-    from mainframe_rag.agent.app import ChatRequest
-
-    assert ChatRequest.model_validate(body).product == "z/OS"
+    assert chat_request.model_validate(body).product == "z/OS"
 
 
 @pytest.mark.parametrize("user", [
@@ -254,13 +265,29 @@ def test_agent_url_valve_is_the_only_destination():
     assert not {h for h in sent if h.startswith("x-openwebui") or h == "authorization"}
 
 
-def test_task_calls_never_reach_the_agent():
-    """Title/tag/follow-up generation must not turn into retrieval turns."""
+@pytest.mark.parametrize("marker", [
+    pytest.param({"task": "title_generation"}, id="__task__"),
+    pytest.param({"metadata": {"task": "tags_generation"}}, id="__metadata__"),
+    pytest.param({"body_extra": {"task": "follow_up_generation"}}, id="body-task"),
+    pytest.param({"body_extra": {"metadata": {"task": "query_generation"}}}, id="body-metadata"),
+])
+def test_task_calls_never_reach_the_agent(marker: dict[str, Any]):
+    """Open WebUI sends title/tag/follow-up/summary tasks to the chat's own
+    model, here the Pipe: they get a fixed short text and never turn into a
+    retrieval turn or forward the user's content."""
     fake = FakeAgent()
-    content, events = run_pipe(fake, task="title_generation")
+    content, events = run_pipe(fake, **marker)
     assert fake.requests == []
-    assert content == ""
+    assert content == "Docs question"
     assert events == []
+
+
+def test_ordinary_chat_with_empty_task_markers_still_calls_the_agent():
+    fake = FakeAgent()
+    content, _events = run_pipe(fake, task=None, metadata={"task": None, "chat_id": "c1"},
+                                body_extra={"metadata": {}})
+    assert len(fake.requests) == 1
+    assert content == "Answer."
 
 
 # --- Streaming ---------------------------------------------------------------
@@ -393,28 +420,28 @@ def test_script_review_warning_rides_the_banner():
 # --- Errors ------------------------------------------------------------------
 
 ERROR_CASES = [
-    ("invalid_request", 422, "The request was refused as invalid. Shorten or rephrase the question "
-     "and retry."),
-    ("prompt_budget_exceeded", 422, "The question and conversation are too long for the model. "
-     "Start a new chat or shorten the question."),
-    ("upstream_error", 502, "The documentation service could not complete this request. "
-     "Retry in a moment."),
+    ("invalid_request", 422, ("The request was refused as invalid. Shorten or rephrase the question "
+     "and retry.")),
+    ("prompt_budget_exceeded", 422, ("The question and conversation are too long for the model. "
+     "Start a new chat or shorten the question.")),
+    ("upstream_error", 502, ("The documentation service could not complete this request. "
+     "Retry in a moment.")),
     ("model_timeout", 504, "The reasoning model did not respond in time. Retry in a moment."),
-    ("deadline_exceeded", 504, "The request took longer than the service allows. "
-     "Retry, or ask a narrower question."),
+    ("deadline_exceeded", 504, ("The request took longer than the service allows. "
+     "Retry, or ask a narrower question.")),
     ("overloaded", 503, "The documentation service is at capacity. Retry in a moment."),
-    ("not_configured", 503, "The documentation service has no reasoning model configured. "
-     "Contact the operators."),
-    ("representation_unavailable", 503, "The documentation index is not available right now. "
-     "Retry later."),
-    ("internal", 500, "The documentation service hit an internal error. Retry; if it persists, "
-     "contact the operators."),
-    ("not_found", 404, "The documentation service rejected the request. Ask an administrator "
-     "to check the Docs Pipe configuration."),
-    ("method_not_allowed", 405, "The documentation service rejected the request. Ask an "
-     "administrator to check the Docs Pipe configuration."),
-    ("http_error", 400, "The documentation service rejected the request. Ask an administrator "
-     "to check the Docs Pipe configuration."),
+    ("not_configured", 503, ("The documentation service has no reasoning model configured. "
+     "Contact the operators.")),
+    ("representation_unavailable", 503, ("The documentation index is not available right now. "
+     "Retry later.")),
+    ("internal", 500, ("The documentation service hit an internal error. Retry; if it persists, "
+     "contact the operators.")),
+    ("not_found", 404, ("The documentation service rejected the request. Ask an administrator "
+     "to check the Docs Pipe configuration.")),
+    ("method_not_allowed", 405, ("The documentation service rejected the request. Ask an "
+     "administrator to check the Docs Pipe configuration.")),
+    ("http_error", 400, ("The documentation service rejected the request. Ask an administrator "
+     "to check the Docs Pipe configuration.")),
 ]
 UNREACHABLE = ("The documentation service could not be reached. Retry; if it persists, "
                "contact the operators.")
