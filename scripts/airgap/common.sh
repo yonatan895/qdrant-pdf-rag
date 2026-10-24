@@ -52,8 +52,8 @@ _plaintext_key_die() {
     die "plaintext gateway virtual key in $1 — keys live only in the cluster Secret named by GATEWAY_API_KEY_SECRET (see airgap.env.example); delete the plaintext assignment"
 }
 _scan_env_file_keys() {
-    # shellcheck disable=SC2086
-    _alt=$(echo $_GATEWAY_KEY_VARS | tr ' ' '|')
+    [ -s "$1" ] || return 0
+    _alt='LLM_API_KEY|EMBED_API_KEY|RERANK_API_KEY|CONTEXT_LLM_API_KEY'
     if grep -Eq "(^|[;&|({[:space:]])(${_alt})\+?=[^[:space:]]" "$1" 2>/dev/null; then
         # `KEY=` / `KEY=""` are empty assignments, not keys.
         if grep -E "(^|[;&|({[:space:]])(${_alt})\+?=" "$1" | grep -Ev "^[[:space:]]*#" |
