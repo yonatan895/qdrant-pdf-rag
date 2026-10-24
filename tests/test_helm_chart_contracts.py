@@ -283,6 +283,7 @@ def test_ingest_job_contract_normal():
         "OTEL_SERVICE_NAME": "mainframe-rag-ingest",
         "OTEL_DEPLOYMENT_ENVIRONMENT": "",
         "INGEST_WORKERS": "4",
+        "INGEST_PARSE_TMP_DIR": "/work/parse-tmp",
         "CONTEXTUAL_EMBED_ENABLED": "false",
         "CONTEXT_LLM_BASE_URL": "",
         "CONTEXT_LLM_MODEL": "",
@@ -306,6 +307,29 @@ def test_ingest_job_contract_normal():
         "persistentVolumeClaim": {"claimName": "corpus-pvc", "readOnly": True},
     }
     assert vols["work"] == {"name": "work", "persistentVolumeClaim": {"claimName": "ingest-work"}}
+
+
+def test_ingest_job_private_parse_copies_resolve_under_the_work_mount():
+    """#1058: the per-document private copy is made under INGEST_PARSE_TMP_DIR;
+    that must sit on the sized `ingest-work` PVC mount, never on the node
+    ephemeral `/tmp` emptyDir or the read-only corpus mount."""
+    from pathlib import PurePosixPath
+
+    job = run_new_job_only({"ingest": {"corpusPVC": "corpus-pvc"}})["Job", "ingest"]
+    pod = job["spec"]["template"]["spec"]
+    container = next(c for c in pod["containers"] if c["name"] == "ingest")
+    target = PurePosixPath(ingest_env_map(job)["INGEST_PARSE_TMP_DIR"]["value"])
+    mounts = {m["mountPath"]: m for m in container["volumeMounts"]}
+    owner = max(
+        (PurePosixPath(p) for p in mounts if target.is_relative_to(PurePosixPath(p))),
+        key=lambda p: len(p.parts),
+    )
+    mount = mounts[str(owner)]
+    assert target.is_absolute() and target != owner  # a subdirectory, not the mount root
+    assert mount["name"] == "work" and not mount.get("readOnly")
+    volume = next(v for v in pod["volumes"] if v["name"] == "work")
+    assert volume["persistentVolumeClaim"]["claimName"] == "ingest-work"
+
 
 def test_ingest_job_contract_maintenance_with_tricky_revision():
     tricky = "SA22-7777-01@vendor|product with spaces|v1|abc123 & more"

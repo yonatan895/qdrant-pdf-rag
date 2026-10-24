@@ -383,6 +383,12 @@ class Settings(BaseSettings):
     ingest_max_doc_pages: int = Field(default=0, ge=0)
     ingest_max_doc_chunks: int = Field(default=0, ge=0)
 
+    # Where each parse worker makes its per-call private copy of the PDF it
+    # parses (issue #1058). Empty = the default temp dir (local/CLI runs). The
+    # ingest Job sets a directory on the /work scratch volume so copies do not
+    # fill node ephemeral storage. Not an extraction rule; not in the manifest.
+    ingest_parse_tmp_dir: str = ""
+
     # Bounded httpx2 connection-establishment retries (0-5). These fire only
     # when the request was never sent (DNS/refused), so they are safe for any
     # method. There is deliberately no request-level retry anywhere.
