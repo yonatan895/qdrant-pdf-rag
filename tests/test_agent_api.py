@@ -2705,13 +2705,14 @@ def test_chat_body_cap_counts_product_and_version(client, monkeypatch):
     assert resp.json() == _FIXED_422
 
 
-@pytest.mark.parametrize("field", ["query", "product", "version", "splunk_context"])
-@pytest.mark.parametrize("path", ["/v1/search", "/v1/answer"])
+@pytest.mark.parametrize(
+    ("path", "field"),
+    [(p, f) for p in ("/v1/search", "/v1/answer") for f in ("query", "product", "version")]
+    + [("/v1/answer", "splunk_context")],
+)
 def test_lone_surrogate_in_fields_is_fixed_422_with_clean_logs(client, monkeypatch, caplog, path, field):
     """Issue #1013: an unpaired surrogate is a validation failure (never a
     500) and no log line carries the prompt or citation text."""
-    if field == "splunk_context" and path == "/v1/search":
-        pytest.skip("search has no splunk_context")
     search = MagicMockSearch()
     llm = FakeLLM()
     monkeypatch.setattr(app_mod, "retrieve_search", search.search)
