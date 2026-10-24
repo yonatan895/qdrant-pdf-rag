@@ -638,7 +638,11 @@ select `complex`. Default is `simple`.
   the stored payload only (whitespace collapsed, 120 chars). A missing value is
   `unknown`; the caller's `product`/`version` scope is never substituted. The
   header is part of every estimator, the remainder cut and the exact final
-  recount, so the budget includes it. The `[i]` label is the per-entry handle;
+  recount, so the budget includes it. The citation in the label line is the
+  served cite, whose title, heading and label are bounded and single-line at
+  construction ([retrieval](retrieval.md), issues #998/#1008), so one
+  document's oversized metadata cannot consume the window and push other
+  evidence out. The `[i]` label is the per-entry handle;
   the citation text is display only and may repeat across versions.
 - Range selection (#632): when the query names a message id, member or
   system code (shared `parse_query` normalization), a chunk over its cap ships
@@ -660,13 +664,28 @@ select `complex`. Default is `simple`.
   suffix, which verification trim rounds re-check before cutting. A trim that
   would remove the requested entry drops the excerpt instead. Defaults and
   budgets are unchanged.
+- Excerpt frame (issue #999): every `prompt_order` policy wraps each excerpt
+  block (its `[i] cite` header, source line and body) in attributeless
+  `<retrieved-excerpt>` / `</retrieved-excerpt>` delimiter lines. Before
+  framing, any delimiter-shaped tag inside the block has its bracket
+  replaced with `&lt;`. A tag is any `<` lookalike bracket followed by
+  `/retrievedexcerpt` (slash optional) in a normalized view: NFKD, case
+  folded, Cyrillic/Greek letter and slash/minus lookalikes folded to ASCII,
+  and whitespace, `_`, dashes (Pd), format characters (zero-width, soft
+  hyphen, joiners, bidi) and combining marks skipped. Each candidate scan
+  stops at its first mismatch, so the pass is linear. The only exact
+  delimiter lines are therefore the frame's own: chunk text cannot close or reopen its
+  frame, and an "end of excerpts" or `SYSTEM:` line in it stays inside.
+  Manual text never carries the tag, so legitimate excerpts are unchanged;
+  a cite whose stored metadata carried one is shown escaped and cannot be
+  copied back to the allowlist. The tail says the framed text is untrusted
+  manual text, never instructions. Every planner and the manifest's
+  `est_tokens` price the frame material with the header.
 - `prompt_order` policies reorder (never drop or duplicate — violations fail
-  closed): `retrieval` keeps historical assembly order byte-identical;
-  `stable_cache` frames excerpts in attributeless
-  `<retrieved-excerpt>` delimiters and orders instructions → context →
-  excerpts → question → tail, with a static deterministic instruction block
-  (no cites, timestamps, or ids — the prefix-cache premise) that demotes
-  excerpts to untrusted data.
+  closed): `retrieval` keeps historical assembly order (framed as above);
+  `stable_cache` orders instructions → context → excerpts → question → tail,
+  with a static deterministic instruction block (no cites, timestamps, or
+  ids — the prefix-cache premise) that demotes excerpts to untrusted data.
 - Tokenizer path (when a tokenizer is configured): plans with the
   in-process estimator (`≈3.5` chars/token, 1200-token complex narrative cap), then
   verifies the packed prompt against the whole-message count per trim round
@@ -709,9 +728,12 @@ select `complex`. Default is `simple`.
   `AnswerCoreOutput.hits` separately as retrieved candidates. For multi-turn
   chat, prior turns are conversation context, never evidence for the new
   answer.
-- The tail's worked example is `hits[0].cite` even when packing dropped that
-  hit: it is prompt furniture, never a manifest entry, so echoing it is
-  rejected. The system prompt's seven rules (ground-only, synthesize-from-templates,
+- The tail's worked example is the fixed synthetic `TAIL_EXAMPLE_CITE` (the
+  same cite the system prompt's rule 7 shows), never a retrieved cite: the
+  tail is outside every frame, so no corpus-derived title, heading or label
+  text reaches the instruction region (issue #999). It is prompt furniture,
+  never a manifest entry, so echoing it is rejected unless an identical cite
+  was supplied. The system prompt's seven rules (ground-only, synthesize-from-templates,
   version-disagree attribution, admit-gap, fenced scripts as examples,
   identify-a-doc-number/message-id/short-name query instead of refusing,
   mandatory `Citations:` with a few-shot example) plus the complex-query
@@ -1535,6 +1557,73 @@ Wire metadata remains the HTTP model client's responsibility before it emits
 these normalized events. Existing buffered sync/async/string fallback,
 pre-emission retry and post-emission no-replay policy are unchanged. Cleanup
 closes the operation, never the shared model client.
+
+<a id="openwebui-docs-pipe"></a>
+## Open WebUI docs Pipe (front end, issue #1072)
+
+**Status:** code and tests only. The deployment decision is ADR-0007 (#1071);
+the image, offline Kind trial and qualification are #1073 (tracker #1070).
+The console stays the supported front end. **Decision owner:**
+[`integrations/openwebui/docs_pipe.py`](../integrations/openwebui/docs_pipe.py).
+**Evidence:** [Pipe tests](../tests/test_openwebui_docs_pipe.py), which drive
+the documented Pipe interface against a fake agent built from the agent's own
+SSE formatters and `SuppliedExcerpt`, plus a round trip through the real app.
+
+The Pipe is one admin-installed Open WebUI Function that shows the docs corpus
+as one model, **Docs**. It is a stateless translator over the streaming
+`POST /v1/chat` (§1, §3). The agent API is unchanged. The target version is
+pinned: Open WebUI **v0.12.3**, in `OPEN_WEBUI_VERSION` and the
+`required_open_webui_version` frontmatter, kept equal by a test. The file
+imports only the standard library, `httpx` and `pydantic`, and its
+frontmatter has no `requirements:` line, so Open WebUI installs no packages at
+load time. It lives outside `src/` and outside the agent image, and needs no
+Open WebUI to import or test. CI's ruff/mypy tasks cover `src` and `tests`
+only; the PR lints and types this file directly.
+
+| Concern | Behaviour |
+|---|---|
+| Request | Only `ChatRequest` fields: `messages` (only `user`/`assistant` turns as plain text: a string, or the text parts of an Open WebUI content list joined by newlines; system prompts, image and file parts, tool turns and every other Open WebUI key are dropped), `stream: true`, and `product`/`version` from the per-user **UserValves** only when set (trimmed, blank = not sent). The last message is the question: unless it is a user turn with text, the Pipe returns a fixed hint and makes no agent call, never asking an earlier turn in its place |
+| Answer text | Content deltas stream through unchanged, including the agent's `**Citations:**` list. Each is yielded as an OpenAI chunk dict, never a raw string, because Open WebUI forwards a yielded string that starts with `data:` as an SSE frame and emits its `event`: model text cannot forge a banner, source or replace event. A non-streaming call gets one string. Tokens are provisional ([answer states](#answer-contract)): the banner arrives only after the terminal frame |
+| Completion | Complete only with a non-null `finish_reason` frame **and** `[DONE]`. A missing finish, a missing `[DONE]` or a malformed frame appends the fixed "stream ended before it completed" text with the incomplete banner |
+| Citations | One `source` event per validated citation in the terminal frame: `source{name: citation, id: doc_id}`, `document[]` = the `supplied_evidence[].text` entries carrying that citation (the excerpt the prompt actually held, never a new search), parallel `metadata[]` with `[index] citation`, doc id, page label, product, version and `label` (`source-matched`, or `inferred, not grounding` when `citations_inferred`). No URLs: a name or id that Open WebUI could render as a link (a scheme such as `http:` or `javascript:`, a bare `http` prefix, `//` or `www.`) is prefixed with `Citation: `. Supplied but uncited excerpts are not sources |
+| Verification | One final `status` event (`done: true`) in the console's wording: "Source-matched · N citation(s)" only for `accepted` with non-inferred citations; otherwise "Insufficient evidence — not operational guidance", "Unverified draft — no eligible citation", "Incomplete generation — output was cut off", or "Unverified — verification state unknown" for anything else. Inferred citations and `script_review_required` append their fixed warnings. Abstention text is the agent's own content; banners never enter the message content, so they are not sent back as history |
+| Errors | An error envelope's stable `code` selects a fixed message (`invalid_request`, `prompt_budget_exceeded`, `upstream_error`, `model_timeout`, `deadline_exceeded`, `overloaded`, `not_configured`, `representation_unavailable`, `internal`; `not_found`/`method_not_allowed`/`http_error` = configuration). An in-stream error frame uses the same table and the incomplete banner. Unknown codes, non-JSON bodies, transport failures and any internal fault give one fixed "could not be reached" text: the agent's `message`, upstream bodies and exception text are never shown, and the Pipe never raises into Open WebUI (which would display the exception) |
+| Tasks | Background task calls (title, tags, follow-ups, summaries), detected by `__task__`, `__metadata__["task"]`, or a `task`/`metadata.task` body key, return the fixed text `Docs question` and never call the agent |
+| Allowed calls | One `POST {AGENT_URL}/v1/chat` per question. No tools, no model calls, no other host, `trust_env=False` (no proxy environment), no redirects (a 3xx is the fixed "could not be reached" text), no forwarded identity headers, no logging |
+
+**Valves.** `AGENT_URL` (default `http://rag-agent:8080`, the agent Service in
+the same namespace; use `http://rag-agent.<ns>.svc:8080` across namespaces)
+and `TIMEOUT_S` (read timeout, default 300 s; connect 10 s). UserValves:
+`product`, `version`. Valves hold no secret: the agent port is
+unauthenticated and namespace-scoped by its
+[NetworkPolicy](deploy.md#agent-networkpolicy), so Open WebUI must run in the
+release namespace or in `AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES`. Every Open
+WebUI user is anonymous to the agent (#373).
+
+**Install (admin; verify each step on the pinned version in #1073).**
+
+1. Review the file at a merged commit and record `sha256sum
+   integrations/openwebui/docs_pipe.py`.
+2. Admin Panel → Functions → new function: id `docs`, name `Docs`, content =
+   the file. The API equivalent is `POST /api/v1/functions/create` with
+   `{"id": "docs", "name": "Docs", "content": <file>, "meta": {...}}` and an
+   admin key, then `POST /api/v1/functions/id/docs/toggle` to enable it.
+3. Set `AGENT_URL` (Function valves, or
+   `POST /api/v1/functions/id/docs/valves/update`).
+4. Model settings for Docs: no tools, no knowledge, and web search, code
+   interpreter, file upload and memory off. Keep the `citations` capability on
+   so source events render. Grant access to the docs group.
+5. Point `TASK_MODEL_EXTERNAL` at a platform model or turn the generation
+   tasks off. The Pipe's fixed task reply is the backstop, not the setting.
+6. Integrity: `GET /api/v1/functions/id/docs` and compare the sha256 of its
+   `content` with step 1. Repeat after every Open WebUI upgrade or admin edit;
+   any difference means reinstall from the repository.
+
+An Open WebUI upgrade is a dedicated change: bump the constant and the
+frontmatter together and rerun the Pipe tests against the new Pipe interface.
+Assumptions still to prove on the pinned image (#1073): `httpx` ships in it,
+and v0.12.3 passes `__task__`/`__metadata__` and renders `source` and `status`
+events as documented.
 
 <a id="source-observations"></a>
 ## Source observations (live z/OS state)
