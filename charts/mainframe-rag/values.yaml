@@ -66,6 +66,14 @@ images:
     repository: openshift4/ose-oauth-proxy
     tag: v4.14
     pullPolicy: IfNotPresent
+  # Optional Open WebUI docs front end (ADR-0007, #1074): the hardened derived
+  # image of the upstream slim release (#1073). Tag form like the other
+  # third-party images; the digest is pinned in images.txt (sha256:PENDING
+  # until the #1073 qualification records it) and enforced at pack/load.
+  openwebui:
+    repository: qdrant-pdf-rag-openwebui
+    tag: v0.12.3-slim
+    pullPolicy: IfNotPresent
 
 # Single Qdrant release owner (D2). The chart derives the in-cluster URL
 # (http://<release>:6333) and the chart-managed Secret name
@@ -212,6 +220,48 @@ feedback:
   storageSize: 10Gi
   retentionDays: 180
 
+# Optional Open WebUI docs front end (ADR-0007, #1074). Default OFF: nothing
+# below renders and every other object is byte-identical to a render without
+# this block (K1 rollback). True renders one Recreate replica of the hardened
+# image (one worker, SQLite on the kept RWO claim rag-openwebui-data, never
+# NFS), a ClusterIP Service on 8443 (TLS from the service-serving cert), a
+# reencrypt Route on `host` whose destination CA is route.destinationCA (the
+# namespace service CA, the single owner of that value), NetworkPolicy
+# rag-openwebui (ingress from the router only; egress to the agent 8080,
+# cluster DNS and idpEgress only) and the docs Pipe ConfigMap.
+# Users sign in through the identity team's OIDC client; the local login form,
+# signup and password auth are off. The answer path is the docs Pipe (#1072)
+# over the agent: no model connection, no gateway key, no RAG.
+# secretName names an operator-created Secret with data keys webui-secret-key
+# and oidc-client-secret (optional admin-api-key, read only by deploy.sh to
+# install the Pipe); never a chart value (D7).
+# retentionDays is the chat retention window (maintainer decision 2026-10-24,
+# ADR-0007 S2: 30 days; backups follow the same window). The purge sidecar in
+# the Open WebUI pod enforces it; an explicit null fails the render.
+openwebui:
+  enabled: false
+  secretName: ""
+  # Public Route host; the OIDC redirect URI is https://<host>/oauth/oidc/callback.
+  host: ""
+  retentionDays: 30
+  storageSize: 10Gi
+  oidc:
+    # https://<idp>/.well-known/openid-configuration of the identity team's client.
+    providerUrl: ""
+    clientId: ""
+    # ID-token claim carrying group names (not SIDs); synced on every login.
+    groupClaim: groups
+    # ID-token claim carrying roles; allowedRoles may sign in, adminRoles are
+    # Open WebUI admins (comma-separated names). Both are required when enabled.
+    rolesClaim: roles
+    allowedRoles: ""
+    adminRoles: ""
+  # IdP back channel (discovery, token, JWKS). NetworkPolicy cannot match DNS
+  # names: list the IdP's CIDRs. Required when enabled.
+  idpEgress:
+    cidrs: []
+    port: 443
+
 # RWO block storage class for OpenObserve, ingest-work scratch and the
 # feedback store.
 # NFS refusal stays owned by shell preflight; schema additionally rejects
@@ -279,3 +329,11 @@ resources:
     limits:
       cpu: 250m
       memory: 256Mi
+  # Open WebUI (#1074); sizing pending the #1073 trial measurement.
+  openwebui:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 2Gi
