@@ -116,7 +116,7 @@ def login(user: str) -> None:
 
 
 def _group_id(name: str) -> str | None:
-    status, groups = api("admin", "GET", "/api/v1/groups/")
+    _status, groups = api("admin", "GET", "/api/v1/groups/")
     for g in groups or []:
         if g.get("name") == name:
             return g["id"]
@@ -149,7 +149,7 @@ def setup() -> None:
     for fid, name, src in (("docs", "Docs", docs_src), ("hidden_control", "Hidden control", HIDDEN_PIPE)):
         status, _ = api("admin", "GET", f"/api/v1/functions/id/{fid}")
         if status != 200:
-            status, created = api("admin", "POST", "/api/v1/functions/create", {
+            status, _created = api("admin", "POST", "/api/v1/functions/create", {
                 "id": fid, "name": name, "content": src, "meta": {"description": name}})
             result[f"create_{fid}"] = status
         status, fn = api("admin", "GET", f"/api/v1/functions/id/{fid}")
