@@ -522,3 +522,43 @@ def test_signing_secret_and_trusted_flag_only_on_protected_release_path():
                     f"{where}: trusted flag not guarded by the main ref")
                 assert "GITHUB_EVENT_NAME" in before, f"{where}: trusted flag not guarded by event"
     assert seen, "signing step not found: update this contract if it moved"
+
+
+def _eval_gha(expr: str, event: str, ref: str, secret: str = "SECRET") -> str:
+    """Evaluate the `a && b && 'x' || 'y'` subset of a workflow expression."""
+    body = re.fullmatch(r"\s*\$\{\{(.*)\}\}\s*", str(expr), re.S)
+    assert body, f"not a plain expression: {expr!r}"
+    py = body.group(1).replace("&&", " and ").replace("||", " or ")
+    py = py.replace("github.event_name", repr(event)).replace("github.ref", repr(ref))
+    py = py.replace("secrets.SNEAKERNET_SIGNING_KEY", repr(secret))
+    assert not re.search(r"[A-Za-z_]\w*\.\w", re.sub(r"'[^']*'", "", py)), f"unknown context: {expr!r}"
+    return str(eval(py, {"__builtins__": {}}))  # noqa: S307 - fixed repo workflow text
+
+
+def test_only_manual_main_dispatch_signs_and_nightly_packs_ephemeral():
+    """#1051: schedule on main packs with the ephemeral key (no approval prompt);
+    only workflow_dispatch on main reaches release-signing, the secret and trust."""
+    import yaml
+
+    doc = yaml.safe_load((REPO / ".github" / "workflows" / "e2e.yml").read_text())
+    job = doc["jobs"]["airgap-package"]
+    step = next(s for s in job["steps"] if s.get("name") == "airgap-pack")
+    key_expr = step["env"]["SNEAKERNET_SIGNING_KEY"]
+    cond = re.search(r"if (\[[^\n]*\]); then\s*\n\s*export SNEAKERNET_KEY_TRUSTED=true", step["run"])
+    assert cond, "trusted-flag guard not found"
+    matrix = [
+        ("schedule", _MAIN_REF, "branch-unsigned", "", False),
+        ("workflow_dispatch", _MAIN_REF, _SIGNING_ENV, "SECRET", True),
+        ("workflow_dispatch", "refs/heads/feature", "branch-unsigned", "", False),
+        ("schedule", "refs/heads/feature", "branch-unsigned", "", False),
+        ("pull_request", "refs/pull/1/merge", "branch-unsigned", "", False),
+        ("push", _MAIN_REF, "branch-unsigned", "", False),
+    ]
+    for event, ref, env_name, secret, trusted in matrix:
+        where = f"{event}@{ref}"
+        assert _eval_gha(job["environment"], event, ref) == env_name, where
+        assert _eval_gha(key_expr, event, ref) == secret, where
+        out = subprocess.run(
+            ["sh", "-c", f"{cond.group(1)} && echo trusted"], capture_output=True, text=True,
+            env={"PATH": os.environ["PATH"], "GITHUB_REF": ref, "GITHUB_EVENT_NAME": event})
+        assert (out.stdout.strip() == "trusted") is trusted, f"{where}: trusted flag"
