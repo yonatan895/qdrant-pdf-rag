@@ -60,6 +60,12 @@ spec:
             - --retire-doc
             - {{ . | quote }}
             {{- end }}
+            {{- if .Values.ingest.authorizeFromCatalog }}
+            {{- if not .Values.ingest.retireDocs }}
+            {{- fail "ingest.authorizeFromCatalog requires ingest.retireDocs" }}
+            {{- end }}
+            - --authorize-from-catalog
+            {{- end }}
           env:
             - name: QDRANT_URL
               value: {{ include "mainframe-rag.qdrantUrl" . | quote }}

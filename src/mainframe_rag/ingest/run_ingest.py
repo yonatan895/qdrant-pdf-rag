@@ -621,6 +621,7 @@ def _upsert_one(
     *,
     src_labels: str,
     lineage_rev: str | None = None,
+    ancestor: str | None = None,
 ) -> tuple[str, float]:
     """Stage 2 (upsert stream): verified-completion skip, invalidate-on-change,
     batched upsert, verify-before-mark. Vectors arrive precomputed from the
@@ -637,6 +638,8 @@ def _upsert_one(
     file records one): the only key allowed to replace another revision's
     points. Without lineage, committed coexisting revisions are left alone
     (replacement would be the overwrite bug) and only residue is swept.
+    ancestor is the live generation this staging was cloned from: its
+    markers certify the committed siblings the clone carries (issue #1004).
     """
     started = time.perf_counter()
     client = _get_qdrant(settings)
@@ -664,7 +667,7 @@ def _upsert_one(
         # Revision delete plan (issue #361): computed BEFORE any delete —
         # raises on unsupported revision-less data instead of guessing.
         rev_deletes = plan_refresh_deletes(
-            client, settings, parsed.doc_id, revision, lineage_rev
+            client, settings, parsed.doc_id, revision, lineage_rev, ancestor=ancestor
         )
         # Invalidate this revision's markers (plus the lineage revision's
         # when it differs — a refresh retires the old generation's markers
@@ -1181,6 +1184,7 @@ def _execute(
     force_reingest: bool,
     lineage_by_path: dict[str, str | None],
     cache_path: Path | None,
+    ancestor: str | None = None,
 ) -> None:
     """Execution (issue #583 S4): the parse process pool and the upsert
     threads under one combined in-flight window. The parent alone appends
@@ -1405,6 +1409,7 @@ def _execute(
                             force_reingest,
                             src_labels=src_labels,
                             lineage_rev=lineage_by_path.get(path_str),
+                            ancestor=ancestor,
                         )
                     ] = (record, *binding)
                     refill_parse()
@@ -1592,6 +1597,7 @@ def _run_impl(
                 force_reingest=force_reingest,
                 lineage_by_path=lineage_by_path,
                 cache_path=cache_path,
+                ancestor=staging.live if staging is not None else None,
             )
         # Commit the pending migration contract inside the bulk window (it
         # is part of the load) and only when no document failed — the scope
@@ -1953,11 +1959,12 @@ def _resolve_publication(
             catalog_approved = catalog_retirement_approvals(
                 client, live_settings, retire_docs, prior_inventory
             )
-            log.info(json.dumps({
-                "action": "retire_authorized_from_catalog",
-                "alias": alias,
-                "revisions": {doc: sorted(revs) for doc, revs in sorted(catalog_approved.items())},
-            }))
+            if catalog_approved:
+                log.info(json.dumps({
+                    "action": "retire_authorized_from_catalog",
+                    "alias": alias,
+                    "revisions": {doc: sorted(revs) for doc, revs in sorted(catalog_approved.items())},
+                }))
         retire_plan = (
             plan_approved_removals(retire_docs, prior_inventory, catalog_approved)[0]
             if retire_docs

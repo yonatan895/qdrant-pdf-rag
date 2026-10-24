@@ -758,9 +758,11 @@ thread pool.
   lineage revision and its markers under the old `doc_id` before the upsert
   (issue #1006), so the ordinary rerun cuts over. Committed coexisting revisions
   are left alone — replacing one needs its lineage, otherwise the write
-  would be the overwrite bug. A revision is committed when any of its
-  markers verifies against the stored points, whichever physical the marker
-  names (issue #1004): the staging clone carries live's markers, so a
+  would be the overwrite bug. A revision is committed when one of its
+  markers bound to this collection, or to the live generation the staging
+  was cloned from, verifies against the stored points (issue #1004). A marker
+  bound to any other collection never certifies (#1039). The staging clone
+  carries live's markers, so a
   published sibling that this walk no longer ingests (for example, a
   byte-identical copy elsewhere won the duplicate election) stays in staging
   and the residue audit refuses cutover until an explicit `--retire-doc`
@@ -780,8 +782,14 @@ thread pool.
   committed in the live generation (a completion marker whose points verify).
   Refusals carry stable codes and ids only: `retire_catalog_requires_retire_doc`,
   `retire_not_in_catalog` and `retire_not_committed`. The run logs
-  `action: retire_authorized_from_catalog` with the approved ids. Without the
-  flag, behaviour is unchanged. Alternative without the flag: republish with the
+  `action: retire_authorized_from_catalog` with the approved ids, only when the
+  catalog approved at least one revision. A new plan made without the flag
+  uses the inventory alone. One exception: a flagged run that stops before
+  its swap records its plan in the publish sidecar. A retry with the same
+  `--retire-doc` list replays that bound plan, catalog approvals included,
+  even without the flag (the ordinary bound-plan replay). Remove the sidecar
+  to abandon that plan. In production, set `INGEST_AUTHORIZE_FROM_CATALOG=true`
+  together with `INGEST_RETIRE_DOCS` (see below). Alternative without the flag: republish with the
   **original** labels and `--reingest` (a forced repair generation rebuilds
   the inventory records), then rerun the relabel, and lineage replaces the old
   revision. No control collection is edited on either path. Any
@@ -873,7 +881,10 @@ thread pool.
    `scripts/airgap/ingest.sh` (issue #391 current packet):
    publication is the only mode (the values mapper refuses
    `INGEST_ALIAS_PUBLISH=false`), `INGEST_REINGEST=true`
-    renders `--reingest` (forced repair), and `INGEST_RETIRE_DOCS` takes a
+    renders `--reingest` (forced repair), `INGEST_AUTHORIZE_FROM_CATALOG=true`
+    renders `--authorize-from-catalog` (chart `ingest.authorizeFromCatalog`,
+    default false; the mapper, schema and template each refuse it without
+    retirements), and `INGEST_RETIRE_DOCS` takes a
     **comma- or newline-separated** `DOCID[@SOURCEREV]` list rendered as
     repeated `--retire-doc` (requires alias publication; labels may carry
     `|`, `/` and interior spaces — the launcher validates structure, not an

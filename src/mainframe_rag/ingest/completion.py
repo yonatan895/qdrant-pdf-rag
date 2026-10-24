@@ -508,23 +508,29 @@ def is_doc_complete(
 
 
 def is_revision_committed(
-    client: QdrantReader, settings: Settings, doc_id: str, source_rev: str
+    client: QdrantReader,
+    settings: Settings,
+    doc_id: str,
+    source_rev: str,
+    *,
+    ancestor: str | None = None,
 ) -> bool:
     """Self-consistent completeness of one revision under its OWN committed
-    generation (no current-run inputs needed): any marker for the revision
-    whose points verify in this collection. Crash residue never passes —
-    refresh wipes markers before points, so partial data has no marker to
-    validate.
+    generation (no current-run inputs needed): a marker for the revision,
+    bound to this collection or to `ancestor`, whose points verify in this
+    collection. Crash residue never passes — refresh wipes markers before
+    points, so partial data has no marker to validate. A marker bound to any
+    other collection never certifies (#1039).
 
-    The marker's `target_collection` deliberately does not gate here (issue
-    #1004): staging is cloned from live, so a committed sibling carries the
-    marker its own publication wrote for the live physical. Its points are
-    the committed bytes (count, ids and content digests verify); sweeping
-    them as residue would drop a published revision without a retirement.
-    Skip eligibility (`is_doc_complete`) still requires a marker for this
-    target."""
+    `ancestor` is the live generation a publication staging was cloned from
+    (issue #1004): the clone carries the marker a committed sibling's own
+    publication wrote for that physical, and its points are the committed
+    bytes (count, ids and content digests verify). Sweeping them as residue
+    would drop a published revision without a retirement. Skip eligibility
+    (`is_doc_complete`) still requires a marker for this target."""
+    targets = {settings.qdrant_collection} | ({ancestor} if ancestor else set())
     for m in _doc_markers(client, settings, doc_id):
-        if m.source_rev != source_rev:
+        if m.source_rev != source_rev or m.target_collection not in targets:
             continue
         if verify_doc_points(
             client,
@@ -666,6 +672,8 @@ def plan_refresh_deletes(
     doc_id: str,
     source_rev: str,
     lineage_rev: str | None,
+    *,
+    ancestor: str | None = None,
 ) -> set[str]:
     """Delete plan for a refresh (issue #361). Returns the revisions to
     delete. Raises BEFORE any delete — callers delete only after this
@@ -679,6 +687,8 @@ def plan_refresh_deletes(
       form number (issue #1006);
     - committed coexisting revisions are left alone — replacing one needs
       its lineage (replacement without lineage would be the overwrite bug);
+      a sibling the staging inherited from `ancestor` (the live generation
+      it was cloned from) counts as committed (issue #1004);
     - completion-less residue is deleted (crash-safe retry);
     - sourceless points under the document raise UnsupportedLegacyDataError
       (pre-revision data is unsupported; nothing is deleted or migrated).
@@ -696,7 +706,7 @@ def plan_refresh_deletes(
         return dels
     # No lineage: committed others are coexistence (leave); residue goes.
     for other in sorted(named - {source_rev}):
-        if not is_revision_committed(client, settings, doc_id, other):
+        if not is_revision_committed(client, settings, doc_id, other, ancestor=ancestor):
             dels.add(other)
     return dels
 

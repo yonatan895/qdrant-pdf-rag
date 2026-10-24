@@ -168,14 +168,15 @@ class RevisionFake:
 
 
 def _upsert_one(monkeypatch, fake, parsed, chunks, settings=None,
-                src_labels="||", lineage_rev=None):
+                src_labels="||", lineage_rev=None, ancestor=None):
     from mainframe_rag.ingest import run_ingest
     from mainframe_rag.ingest.run_ingest import _DocLocks, _upsert_one
 
     settings = settings or _settings()
     monkeypatch.setattr(run_ingest, "_get_qdrant", lambda s: fake)
     return _upsert_one(parsed, chunks, _vectors(len(chunks)), settings, _DocLocks(),
-                       None, False, src_labels=src_labels, lineage_rev=lineage_rev)
+                       None, False, src_labels=src_labels, lineage_rev=lineage_rev,
+                       ancestor=ancestor)
 
 
 SHA_A1 = "a1" * 32
@@ -361,11 +362,12 @@ def test_inherited_committed_sibling_is_left_alone(monkeypatch):
         fake._points[completion_collection_name(live)]
     )
     before = {str(p.id): dict(p.payload or {}) for p in fake._points["gen_staging"]}
-    assert is_revision_committed(fake, staging, "reference", REV_A)
+    assert is_revision_committed(fake, staging, "reference", REV_A, ancestor="gen_live")
+    assert not is_revision_committed(fake, staging, "reference", REV_A, ancestor="gen_other")
     status, _ = _upsert_one(
         monkeypatch, fake,
         _parsed(sha=SHA_B1, vendor="vendor-b", product="product-y", version="2.0"),
-        _chunks(rev=REV_B, tag="B-v1"), staging,
+        _chunks(rev=REV_B, tag="B-v1"), staging, ancestor="gen_live",
     )
     assert status == "upserted"
     assert fake.main_revs("gen_staging", "reference") == {REV_A, REV_B}
