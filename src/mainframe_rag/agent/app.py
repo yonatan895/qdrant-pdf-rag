@@ -100,7 +100,7 @@ from mainframe_rag.agent.sse import (
 )
 from mainframe_rag.agent.tokenizer import build_tokenizer
 from mainframe_rag.agent.zowe_mcp import build_zowe_mcp, probe_zowe_mcp
-from mainframe_rag.config import Settings, bearer_auth_headers, load_settings
+from mainframe_rag.config import ReasoningEffort, Settings, bearer_auth_headers, load_settings
 from mainframe_rag.feedback.client import FeedbackClient
 from mainframe_rag.feedback.store import AnswerRecord
 from mainframe_rag.feedback.store import Endpoint as FeedbackEndpoint
@@ -2235,19 +2235,33 @@ def _chat_final_frames(
     yield format_openai_done()
 
 
-async def _chat_response(req, response, owner):
-    request = owner.request
-    root_span = owner.span
-    request_id = request.state.request_id
-    started = owner.started
-    turn = prepare_chat_request(request_id, req.messages, req.splunk_context)
-    _require_reasoning_model(request_id, "chat")
+async def prepare_chat_core(
+    owner: _RequestSpan,
+    messages: list[ChatMessage],
+    *,
+    splunk_context: str | None,
+    product: str | None,
+    version: str | None,
+    temperature: float | None = None,
+    reasoning_effort: ReasoningEffort | None = None,
+) -> tuple[AnswerCoreInput, AnswerCoreDeps, str]:
+    """One chat turn up to the answer core, shared by /v1/chat* and both
+    console routes so the same fault maps to the same code, outcome and log
+    level on each (issue #985): turn validation, the reasoning-model gate,
+    the serving gate, condensation and retrieval. Returns the core input
+    carrying the retrieved hits, the bound deps and the reasoning model.
+
+    The turn's RED endpoint is `owner.endpoint`. A retrieval-leg failure
+    (condensation included) is recorded here and raised as the stable
+    AppError; earlier refusals are AppErrors the terminal owner records."""
+    request_id = owner.request.state.request_id
+    turn = prepare_chat_request(request_id, messages, splunk_context)
+    _require_reasoning_model(request_id, owner.endpoint)
     # The response `model` reports what actually ran: inference is always
     # the reasoning model (issue #313), so the caller-supplied OpenAI-compat
     # field stays accepted-and-ignored, exactly like `max_tokens`.
     llm_model = settings.require_reasoning_model()
 
-    is_stream = req.stream
     # Serving gate before the stream opens (issue #391 F3/F4): bind the
     # request to the validated physical generation or refuse with the
     # stable 503. The error handler records the single terminal
@@ -2259,27 +2273,43 @@ async def _chat_response(req, response, owner):
     core_input = AnswerCoreInput(
         query=turn.query,
         messages=turn.messages,
-        product=req.product,
-        version=req.version,
-        splunk_context=req.splunk_context,
-        temperature=req.temperature,
+        product=product,
+        version=version,
+        splunk_context=splunk_context,
+        temperature=temperature,
         is_chat=True,
+        reasoning_effort=reasoning_effort,
     )
 
     try:
-        with use_span(root_span, end_on_exit=False):
-            search_query = await resolve_search_query(core_input, deps, parent_span=root_span)
+        with use_span(owner.span, end_on_exit=False):
+            search_query = await resolve_search_query(core_input, deps, parent_span=owner.span)
             found = await rsc.retrieve(
-                search_query, product=req.product, version=req.version,
-                settings=deps.settings,
+                search_query, product=product, version=version, settings=deps.settings,
             )
-            hits, kind, timings = found.hits, found.kind, found.timings
     except Exception as exc:
-        raise _retrieval_failed(owner, "chat", "chat_retrieval", exc) from exc
+        raise _retrieval_failed(owner, owner.endpoint, f"{owner.endpoint}_retrieval", exc) from exc
 
-    core_input.hits = hits
-    core_input.query_kind = kind
-    core_input.timings = timings
+    core_input.hits = found.hits
+    core_input.query_kind = found.kind
+    core_input.timings = found.timings
+    return core_input, deps, llm_model
+
+
+async def _chat_response(req, response, owner):
+    root_span = owner.span
+    request_id = owner.request.state.request_id
+    started = owner.started
+    core_input, deps, llm_model = await prepare_chat_core(
+        owner,
+        req.messages,
+        splunk_context=req.splunk_context,
+        product=req.product,
+        version=req.version,
+        temperature=req.temperature,
+    )
+    hits, kind, timings = core_input.hits, core_input.query_kind, core_input.timings
+    is_stream = req.stream
 
     if not is_stream:
         output = await _execute_core_or_raise(

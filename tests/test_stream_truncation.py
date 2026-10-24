@@ -937,6 +937,62 @@ def test_truncation_alert_detail_is_fixed_vocabulary():
 
 
 @pytest.fixture
+def truncating_client(monkeypatch, synthetic_pdf, servable_representation_gate):
+    """Streams one token, then the upstream connection ends without [DONE]
+    (the typed TruncatedStreamError), on every streaming route."""
+
+    class TruncatingLLM:
+        async def chat_stream(self, messages, *args, **kwargs):
+            yield {"type": "token", "delta": "Partial ", "token": "Partial ", "ttft_ms": 12}
+            raise TruncatedStreamError(1, REASON_MISSING_DONE)
+
+    monkeypatch.setenv("UI_ENABLED", "true")
+    monkeypatch.setattr(app_mod, "retrieve_search", _search_stub().search)
+    yield from _client(monkeypatch, synthetic_pdf, TruncatingLLM())
+
+
+@pytest.mark.parametrize("path", ["/v1/answer", "/v1/chat", "/ui/chat/stream"])
+def test_truncated_stream_alerts_once_with_one_terminal_frame(
+    truncating_client, monkeypatch, caplog, path
+):
+    """#985: every streaming route, the console included, observes a
+    truncated upstream the same way: one fixed-vocabulary stream_truncated
+    answer_alert, one RED record carrying the retrieval's class and hit
+    count, and exactly one terminal frame (the error, never a final)."""
+    recorded = []
+    real = app_mod.record_request
+
+    def spy(endpoint, code, *a, **k):
+        recorded.append((endpoint, code, k.get("query_class"), k.get("hits")))
+        return real(endpoint, code, *a, **k)
+
+    monkeypatch.setattr(app_mod, "record_request", spy)
+    messages = [{"role": "user", "content": "IEA500I command"}]
+    body = {"query": "IEA500I command"} if path == "/v1/answer" else {"messages": messages}
+    if path != "/ui/chat/stream":
+        body["stream"] = True
+    with caplog.at_level(logging.INFO):
+        resp = truncating_client.post(path, json=body)
+
+    assert resp.status_code == 200
+    alerts = [
+        json.loads(r.getMessage()) for r in caplog.records
+        if '"answer_alert"' in r.getMessage() and '"stream_truncated"' in r.getMessage()
+    ]
+    assert len(alerts) == 1
+    assert "Partial" not in json.dumps(alerts[0])
+    endpoint = {"/v1/answer": "answer", "/v1/chat": "chat", "/ui/chat/stream": "console"}[path]
+    assert recorded == [(endpoint, "upstream_error", "identifier", 1)]
+    if path == "/v1/chat":
+        frames = [line for line in resp.text.splitlines() if line.startswith("data: ")]
+        assert sum('"error"' in f for f in frames) == 1
+        assert not any('"finish_reason": "stop"' in f for f in frames)
+    else:
+        kinds = [kind for kind, _ in _answer_sse_events(resp.text)]
+        assert kinds.count("error") == 1 and "final" not in kinds
+
+
+@pytest.fixture
 def blast_client(monkeypatch, synthetic_pdf, servable_representation_gate):
     """LLM stream yields tokens, then raises a non-truncation error after
     headers are committed: the wire shape is a fixed error event, never a

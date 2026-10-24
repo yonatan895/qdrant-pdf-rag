@@ -93,7 +93,9 @@
      and `/ui` thin routes invoke the shared `answer_core` engine in
      `src/mainframe_rag/agent/answer_core.py`. This unifies input validation (`query_max_chars = 2000`),
     complexity modulation, prompt budgeting, hybrid retrieval (dense + BM25 with RRF),
-    and reasoning model execution.
+    and reasoning model execution. The console also shares the `/v1/chat` transport path
+    (amended for issue #985): turn preparation and retrieval, failure classification and
+    the SSE loop, so the console renders only its banner and frames.
   - **Reasoning-model-only contract:** In strict adherence to ADR-0001, all conversational
     and console generation dispatches exclusively to `settings.llm_model_reasoning`.
     No secondary "fast" or conversational LLM tier is permitted. Query condensation
