@@ -20,6 +20,7 @@ import json
 import logging
 import multiprocessing as mp
 import os
+import re
 import sys
 import threading
 import time
@@ -210,6 +211,8 @@ class _StagingBuild:
     resume_verified: bool
 
 
+EMPTY_DOCUMENT_MESSAGE = "document produced zero chunks; nothing published"
+
 LABEL_DELIMITER_CODE = "label_delimiter"
 
 
@@ -236,11 +239,46 @@ def require_delimiter_free_labels(parsed: ParsedDoc) -> None:
         raise LabelDelimiterRefused
 
 
+DOC_ID_HIDDEN_CODE = "doc_id_hidden_characters"
+
+# C0 and C1 controls, DEL, bidirectional marks/overrides/isolates and
+# zero-width characters: the display-spoofing and token-smuggling set the
+# page-text sanitizer (docs/ingest.md section 2) already strips from titles.
+_HIDDEN_DOC_ID_CHARS = re.compile(
+    "[\x00-\x1f\x7f-\x9f\u00ad\u061c\u180e\u200b-\u200f\u202a-\u202e"
+    "\u2060-\u206f\ufeff]"
+)
+
+
+class DocIdRefused(ValueError):
+    """The resolved `doc_id` contains control, bidirectional-override or
+    zero-width characters (issue #1022). Fixed message and stable code: the
+    id, path and manual text never appear in it."""
+
+    code = DOC_ID_HIDDEN_CODE
+
+    def __init__(self) -> None:
+        super().__init__(
+            f"{DOC_ID_HIDDEN_CODE}: document id contains control, bidirectional-override "
+            "or zero-width characters; document refused"
+        )
+
+
+def require_visible_doc_id(parsed: ParsedDoc) -> None:
+    """Refuse (never rewrite) a document whose resolved `doc_id` carries
+    hidden characters. The filename-stem fallback bypasses the rule-module
+    sanitizer, and rewriting the id would change stored keys; refusing here,
+    outside the rules-version modules, changes none (no re-embed)."""
+    if _HIDDEN_DOC_ID_CHARS.search(parsed.doc_id or ""):
+        raise DocIdRefused
+
+
 def walked_source_rev(parsed: ParsedDoc) -> str:
     """The source revision of a parsed walked document, after the `|` refusal
     (issue #878): the one key the build path stores, locks and deletes by, and
     the retirement check compares (issue #986)."""
     require_delimiter_free_labels(parsed)
+    require_visible_doc_id(parsed)
     return source_rev_key(parsed.vendor, parsed.product, parsed.version, parsed.sha256)
 
 
@@ -1229,6 +1267,28 @@ def _execute(
                     stats.pages += record.pages
                     stats.parse_seconds += record.seconds
 
+                    if dry_run and record.chunks == 0:
+                        # Same policy as the real run (issue #1043): a
+                        # zero-chunk document is `empty` and fails the run;
+                        # the preflight never reports OK for a document the
+                        # publication will reject.
+                        record.status = "empty"
+                        record.error = EMPTY_DOCUMENT_MESSAGE
+                        record.error_type = "EmptyDocument"
+                        stats.files_failed += 1
+                        append_record(progress, record)
+                        log.error(
+                            json.dumps(
+                                {
+                                    "path": path_str,
+                                    "doc_id": record.doc_id,
+                                    "action": "empty",
+                                    "error_type": record.error_type,
+                                }
+                            )
+                        )
+                        refill_parse()
+                        continue
                     if dry_run:
                         record.status = "dry"
                         append_record(progress, record)
@@ -1328,7 +1388,7 @@ def _execute(
                             record.content_digest = content_digest
                         elif status == "empty":
                             stats.files_failed += 1
-                            record.error = "document produced zero chunks; nothing published"
+                            record.error = EMPTY_DOCUMENT_MESSAGE
                             record.error_type = "EmptyDocument"
                             log.error(
                                 json.dumps(
@@ -1792,17 +1852,25 @@ def _resolve_publication(
     if state is not None and state.get("gen_fp") == gen_fp and state.get("corpus_fp") == corp_fp:
         recorded_retire_docs = state.get("retire_docs")
         already_swapped = state.get("staging") == live
+        # Retirement scope is a set of documents/revisions: argument order and
+        # repeats are not part of the request (issue #1027). The comparison
+        # holds before AND after the alias swap (issue #1026): a retry may
+        # never replace, drop or add a destructive request the recorded plan
+        # was authorized for.
+        requested_retirements = sorted(set(retire_docs or ()))
         if (
-            not already_swapped
-            and recorded_retire_docs is not None
-            and list(retire_docs or ()) != recorded_retire_docs
-        ):
+            recorded_retire_docs is not None or requested_retirements
+        ) and requested_retirements != sorted(set(recorded_retire_docs or ())):
+            remedy = (
+                "rerun with the recorded retirements"
+                if already_swapped
+                else "remove the state file explicitly to abandon the recorded build, then rerun"
+            )
             raise RuntimeError(
                 f"publish state records staging {state.get('staging')!r} for different "
-                f"retirements (recorded {recorded_retire_docs!r}, requested "
-                f"{list(retire_docs or ())!r}): refusing a build the current "
-                "inputs cannot explain — remove the state file explicitly to "
-                "abandon the recorded build, then rerun."
+                f"retirements (recorded {sorted(set(recorded_retire_docs or ()))!r}, requested "
+                f"{requested_retirements!r}): refusing a build the current "
+                f"inputs cannot explain — {remedy}."
             )
         if already_swapped or recorded_retire_docs is not None or retire_docs:
             retire_plan = state.get("retire_plan")
@@ -1822,8 +1890,8 @@ def _resolve_publication(
             )
             try:
                 source_rev = walked_source_rev(parsed_walked)
-            except LabelDelimiterRefused:
-                continue  # refused at ingest (#878): no key exists to retire
+            except (LabelDelimiterRefused, DocIdRefused):
+                continue  # refused at ingest (#878, #1022): no key exists to retire
             doc_id = parsed_walked.doc_id
             if doc_id and doc_id in retire_plan:
                 entry = retire_plan[doc_id]
