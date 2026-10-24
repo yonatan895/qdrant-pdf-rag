@@ -484,11 +484,20 @@ def is_revision_committed(
     client: QdrantReader, settings: Settings, doc_id: str, source_rev: str
 ) -> bool:
     """Self-consistent completeness of one revision under its OWN committed
-    generation (no current-run inputs needed): any scoped marker whose
-    points verify. Crash residue never passes — refresh wipes markers
-    before points, so partial data has no marker to validate."""
+    generation (no current-run inputs needed): any marker for the revision
+    whose points verify in this collection. Crash residue never passes —
+    refresh wipes markers before points, so partial data has no marker to
+    validate.
+
+    The marker's `target_collection` deliberately does not gate here (issue
+    #1004): staging is cloned from live, so a committed sibling carries the
+    marker its own publication wrote for the live physical. Its points are
+    the committed bytes (count, ids and content digests verify); sweeping
+    them as residue would drop a published revision without a retirement.
+    Skip eligibility (`is_doc_complete`) still requires a marker for this
+    target."""
     for m in _doc_markers(client, settings, doc_id):
-        if m.source_rev != source_rev or m.target_collection != settings.qdrant_collection:
+        if m.source_rev != source_rev:
             continue
         if verify_doc_points(
             client,

@@ -708,7 +708,13 @@ thread pool.
   by inventory lineage (the path's previous `source_rev`, threaded from
   the parent plan into the upsert stage). Committed coexisting revisions
   are left alone — replacing one needs its lineage, otherwise the write
-  would be the overwrite bug. Completion-less residue is swept (crash-safe
+  would be the overwrite bug. A revision is committed when any of its
+  markers verifies against the stored points, whichever physical the marker
+  names (issue #1004): the staging clone carries live's markers, so a
+  published sibling that this walk no longer ingests (for example, a
+  byte-identical copy elsewhere won the duplicate election) stays in staging
+  and the residue audit refuses cutover until an explicit `--retire-doc`
+  names it. Completion-less residue is swept (crash-safe
   retry); a lineage-less run therefore ADDS revisions — keep the
   `--progress` file (prod `/work` persists it) so refreshes replace. Any
   point without a source revision under the document (pre-#361 data) raises
