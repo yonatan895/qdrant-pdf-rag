@@ -515,6 +515,51 @@ def _ready_pool():
     return ReadyPool()
 
 
+class _UpstreamSpy:
+    """Records every attribute touch on an upstream client the app holds and
+    fails it (a down/slow upstream must not matter to liveness)."""
+
+    def __init__(self, name, touched):
+        self._name, self._touched = name, touched
+
+    def __getattr__(self, attr):
+        self._touched.append(f"{self._name}.{attr}")
+        raise ConnectionError("upstream down")
+
+
+def test_livez_makes_no_upstream_call_but_healthz_does(client, monkeypatch):
+    """Issue #1018 criterion 1: the OAuth-bypassed /livez probe does no work.
+    Every upstream client the app holds is a recording, failing spy; repeated
+    /livez hits touch none of them and never run the readiness evaluation,
+    and the body is fixed. Positive control: /healthz DOES reach the spied
+    pool, so the spies observe the real path."""
+    touched: list[str] = []
+    evaluated: list[str] = []
+    real_evaluate = app_mod.evaluate_healthz
+
+    async def counting_evaluate():
+        evaluated.append("evaluate_healthz")
+        return await real_evaluate()
+
+    for name in ("http", "http_sync", "qdrant", "embedder", "llm", "reranker", "zowe_mcp", "feedback"):
+        monkeypatch.setattr(app_mod, name, _UpstreamSpy(name, touched))
+    monkeypatch.setattr(app_mod, "retrieve_search", lambda *a, **k: touched.append("retrieve_search"))
+    monkeypatch.setattr(app_mod, "evaluate_healthz", counting_evaluate)
+
+    for _ in range(5):
+        resp = client.get("/livez")
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "alive"}
+    assert touched == [] and evaluated == [], "livez must not call any upstream or readiness"
+
+    # Positive control: the same spies see the real readiness path.
+    assert client.get("/healthz").status_code == 503
+    assert evaluated == ["evaluate_healthz"]
+    assert "http.get" in touched
+    # ...and liveness is still unaffected afterwards.
+    assert client.get("/livez").json() == {"status": "alive"}
+
+
 def test_healthz_representation_drift_degrades(client, monkeypatch):
     """Issues #362 + #391 F3: a drifted stored generation degrades /healthz
     with the explicit outcome AND an HTTP failure (smoke fails closed,
@@ -1479,7 +1524,9 @@ def test_build_messages_context_budgeting():
     msgs1 = build_messages("test query", [hit1], max_chunk_chars=100, max_context_chars=1000).messages
     user_prompt1 = msgs1[1].content
     assert "... [truncated]" in user_prompt1
-    assert len(user_prompt1) < 600  # + one source-metadata line (issue #635)
+    # + one source-metadata line (issue #635), the excerpt frame and the
+    # tail's untrusted-text clause (issue #999)
+    assert len(user_prompt1) < 720
 
     # Total context max truncates subsequent hits
     msgs2 = build_messages("test query", [hit1, hit2], max_chunk_chars=400, max_context_chars=500).messages
@@ -1903,7 +1950,9 @@ def test_build_messages_tokenizer_budget_respected():
             # decline and +19 when it named the missing subject) grew the
             # fixed overhead, so the fixture window widened
             # to keep the knife-edge scenario (5 excerpts fit, the last
-            # truncated) reachable.
+            # truncated) reachable; +64 for the per-excerpt frames and the
+            # tail's untrusted-text clause, +13 for the fixed tail example
+            # cite (issue #999).
             doc_id=f"DOC{i}",
             title="Title",
             page_label=str(i),
@@ -1914,7 +1963,7 @@ def test_build_messages_tokenizer_budget_respected():
     ]
 
     settings = Settings(
-        llm_max_model_len=1629,
+        llm_max_model_len=1706,
         llm_reserved_output_tokens=250,
         llm_thinking_reserve_tokens_simple=0,  # knife edge independent of #777 defaults
         llm_token_safety_margin=100,
@@ -1936,7 +1985,7 @@ def test_build_messages_tokenizer_budget_respected():
         assert f"[{i}]" in user_content
     prefix, rest = user_content.split("Retrieved manual excerpts:\n", 1)
     block, _tail = rest.split("\n\nPlease answer based strictly", 1)
-    chunk_texts = re.split(r"\n\n(?=\[\d+\] )", block)
+    chunk_texts = re.split(r"\n\n(?=<retrieved-excerpt>\n\[\d+\] )", block)
     assert len(chunk_texts) == 5
     assert "[truncated]" in chunk_texts[-1]
 

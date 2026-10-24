@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import re
 import time
+import unicodedata
 from collections import defaultdict
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
@@ -81,6 +82,75 @@ RETRIEVE_PAYLOAD_FIELDS: tuple[str, ...] = (
 )
 
 
+# Stored title / heading_path / page_label are untrusted PDF metadata (/Title,
+# outline, /PageLabels; issue #998). Serving bounds and sanitizes them, so a
+# stored corpus is protected without re-ingest, and a 60 KB title can never
+# grow a header that starves the prompt (issue #1008). Real values sit far
+# below these bounds.
+CITE_TITLE_MAX_CHARS = 200
+CITE_HEADING_MAX_CHARS = 400
+CITE_LABEL_MAX_CHARS = 32
+_CITE_ELLIPSIS = "\u2026"
+# Control (incl. newline/tab) and line/paragraph separators read as a space;
+# format characters (bidi overrides, zero-width) and lone surrogates vanish.
+_CITE_SPACE_CATEGORIES = frozenset({"Cc", "Zl", "Zp"})
+_CITE_DROP_CATEGORIES = frozenset({"Cf", "Cs"})
+# The cite's own field markers: an IBM doc number (CITATION_LINE_RE's form)
+# and a `p.`/`pp.` page designation with its leading separator and page token.
+_CITE_DOCNO_RE = re.compile(r"(?<![A-Za-z0-9])[A-Z]{2,4}\d{2}-\d{4}(?:-\d{2})?(?![0-9])")
+_CITE_PAGE_MARK_RE = re.compile(r"[\s,\uff0c]*\b[Pp]{1,2}\.(?:\s*[^\s,\uff0c]+)?")
+
+
+def clean_cite_field(value: str, limit: int) -> str:
+    """One stored citation field as single-line display text: control and
+    separator characters become spaces, format/bidi/zero-width characters
+    are dropped, whitespace collapses, and the result is bounded to `limit`
+    characters (an ellipsis marks the cut). Idempotent."""
+    out: list[str] = []
+    # Bound the work as well as the output: a pathological field is cut
+    # before the per-character pass.
+    for ch in value[: limit * 8]:
+        category = unicodedata.category(ch)
+        if category in _CITE_DROP_CATEGORIES:
+            continue
+        out.append(" " if category in _CITE_SPACE_CATEGORIES else ch)
+    text = " ".join("".join(out).split())
+    if len(text) > limit:
+        text = text[: limit - 1].rstrip() + _CITE_ELLIPSIS
+    return text
+
+
+def plain_page_label(value: str) -> str:
+    """The stored printed label when it is one plain location, else "" (the
+    cite then names the physical PDF page). A label that is over the bound
+    or carries a comma, a page designation or a doc number could fabricate a
+    second location in the cite, so it is never cited (issue #998)."""
+    label = clean_cite_field(value, CITE_LABEL_MAX_CHARS + 1)
+    if (
+        len(label) > CITE_LABEL_MAX_CHARS
+        or "," in label
+        or "\uff0c" in label
+        or _CITE_PAGE_MARK_RE.search(label)
+        or _CITE_DOCNO_RE.search(label)
+    ):
+        return ""
+    return label
+
+
+def _cite_part(text: str, doc_id: str) -> str:
+    """A title or heading as cite text: page designations and doc numbers
+    other than this hit's own are removed, so stored metadata can never make
+    the cite name a second page or a document that was not ingested."""
+    own = {doc_id}
+    if base := re.match(r"[A-Z]{2,4}\d{2}-\d{4}", doc_id):
+        own.add(base.group(0))
+    text = _CITE_PAGE_MARK_RE.sub("", text)
+    text = _CITE_DOCNO_RE.sub(lambda m: m.group(0) if m.group(0) in own else "", text)
+    text = re.sub(r"\s+(?=[,\uff0c])", "", text)
+    text = re.sub(r"([,\uff0c])(?:\s*[,\uff0c])+", r"\1", text)
+    return " ".join(text.split()).strip(" ,\uff0c")
+
+
 def format_citation(
     doc_id: str,
     title: str,
@@ -96,7 +166,14 @@ def format_citation(
     page in the span labeled). Otherwise the physical PDF span is cited as
     `p. PDF n` / `p. PDF n–m` (1-based, issue #271): a location an engineer
     can open in the retained PDF, never a guessed printed folio. Legacy
-    points without a physical page keep the page-less form."""
+    points without a physical page keep the page-less form.
+
+    Title, heading and label are sanitized and bounded here (issue #998), so
+    every cite is one line with exactly one doc number and at most one page
+    designation, whatever the stored metadata says."""
+    title = _cite_part(clean_cite_field(title, CITE_TITLE_MAX_CHARS), doc_id)
+    heading_path = _cite_part(clean_cite_field(heading_path, CITE_HEADING_MAX_CHARS), doc_id)
+    page_label = plain_page_label(page_label)
     parts = [f"{doc_id} {title}".strip(), heading_path]
     cite = ", ".join(p for p in parts if p)
     if page_label:
@@ -171,9 +248,11 @@ def _parse_unit_spans(raw: object) -> tuple[tuple[int, int, str], ...] | None:
 def _to_hit(point: models.ScoredPoint, score: float) -> SearchHit:
     payload = point.payload or {}
     doc_id = str(payload.get("doc_id") or "")
-    title = str(payload.get("title") or "")
-    heading = str(payload.get("heading_path") or "")
-    page_label = str(payload.get("page_label") or "")
+    # Served fields are bounded, single-line display text (issue #998); the
+    # cite additionally drops foreign doc numbers and page designations.
+    title = clean_cite_field(str(payload.get("title") or ""), CITE_TITLE_MAX_CHARS)
+    heading = clean_cite_field(str(payload.get("heading_path") or ""), CITE_HEADING_MAX_CHARS)
+    page_label = plain_page_label(str(payload.get("page_label") or ""))
     page_start = _payload_page(payload.get("page_start"))
     page_end = _payload_page(payload.get("page_end"))
     if page_start is None or page_end is None or page_end < page_start:

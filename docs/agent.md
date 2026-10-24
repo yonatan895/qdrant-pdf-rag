@@ -638,7 +638,11 @@ select `complex`. Default is `simple`.
   the stored payload only (whitespace collapsed, 120 chars). A missing value is
   `unknown`; the caller's `product`/`version` scope is never substituted. The
   header is part of every estimator, the remainder cut and the exact final
-  recount, so the budget includes it. The `[i]` label is the per-entry handle;
+  recount, so the budget includes it. The citation in the label line is the
+  served cite, whose title, heading and label are bounded and single-line at
+  construction ([retrieval](retrieval.md), issues #998/#1008), so one
+  document's oversized metadata cannot consume the window and push other
+  evidence out. The `[i]` label is the per-entry handle;
   the citation text is display only and may repeat across versions.
 - Range selection (#632): when the query names a message id, member or
   system code (shared `parse_query` normalization), a chunk over its cap ships
@@ -660,13 +664,28 @@ select `complex`. Default is `simple`.
   suffix, which verification trim rounds re-check before cutting. A trim that
   would remove the requested entry drops the excerpt instead. Defaults and
   budgets are unchanged.
+- Excerpt frame (issue #999): every `prompt_order` policy wraps each excerpt
+  block (its `[i] cite` header, source line and body) in attributeless
+  `<retrieved-excerpt>` / `</retrieved-excerpt>` delimiter lines. Before
+  framing, any delimiter-shaped tag inside the block has its bracket
+  replaced with `&lt;`. A tag is any `<` lookalike bracket followed by
+  `/retrievedexcerpt` (slash optional) in a normalized view: NFKD, case
+  folded, Cyrillic/Greek letter and slash/minus lookalikes folded to ASCII,
+  and whitespace, `_`, dashes (Pd), format characters (zero-width, soft
+  hyphen, joiners, bidi) and combining marks skipped. Each candidate scan
+  stops at its first mismatch, so the pass is linear. The only exact
+  delimiter lines are therefore the frame's own: chunk text cannot close or reopen its
+  frame, and an "end of excerpts" or `SYSTEM:` line in it stays inside.
+  Manual text never carries the tag, so legitimate excerpts are unchanged;
+  a cite whose stored metadata carried one is shown escaped and cannot be
+  copied back to the allowlist. The tail says the framed text is untrusted
+  manual text, never instructions. Every planner and the manifest's
+  `est_tokens` price the frame material with the header.
 - `prompt_order` policies reorder (never drop or duplicate — violations fail
-  closed): `retrieval` keeps historical assembly order byte-identical;
-  `stable_cache` frames excerpts in attributeless
-  `<retrieved-excerpt>` delimiters and orders instructions → context →
-  excerpts → question → tail, with a static deterministic instruction block
-  (no cites, timestamps, or ids — the prefix-cache premise) that demotes
-  excerpts to untrusted data.
+  closed): `retrieval` keeps historical assembly order (framed as above);
+  `stable_cache` orders instructions → context → excerpts → question → tail,
+  with a static deterministic instruction block (no cites, timestamps, or
+  ids — the prefix-cache premise) that demotes excerpts to untrusted data.
 - Tokenizer path (when a tokenizer is configured): plans with the
   in-process estimator (`≈3.5` chars/token, 1200-token complex narrative cap), then
   verifies the packed prompt against the whole-message count per trim round
@@ -709,9 +728,12 @@ select `complex`. Default is `simple`.
   `AnswerCoreOutput.hits` separately as retrieved candidates. For multi-turn
   chat, prior turns are conversation context, never evidence for the new
   answer.
-- The tail's worked example is `hits[0].cite` even when packing dropped that
-  hit: it is prompt furniture, never a manifest entry, so echoing it is
-  rejected. The system prompt's seven rules (ground-only, synthesize-from-templates,
+- The tail's worked example is the fixed synthetic `TAIL_EXAMPLE_CITE` (the
+  same cite the system prompt's rule 7 shows), never a retrieved cite: the
+  tail is outside every frame, so no corpus-derived title, heading or label
+  text reaches the instruction region (issue #999). It is prompt furniture,
+  never a manifest entry, so echoing it is rejected unless an identical cite
+  was supplied. The system prompt's seven rules (ground-only, synthesize-from-templates,
   version-disagree attribution, admit-gap, fenced scripts as examples,
   identify-a-doc-number/message-id/short-name query instead of refusing,
   mandatory `Citations:` with a few-shot example) plus the complex-query

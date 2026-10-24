@@ -72,6 +72,24 @@ single-page. Both forms keep the `, p. <page>` tail that
 `cites.is_citation_shaped` validates (doc-number or supplied filename-stem
 doc id).
 
+Stored `title`, `heading_path` and `page_label` are untrusted PDF metadata
+(`/Title`, outline, `/PageLabels`), so serving sanitizes them in `_to_hit`
+and again inside `format_citation` (issues #998, #1008; stored corpora are
+covered without re-ingest). Each field is made single-line display text:
+control characters, newlines and line/paragraph separators become spaces,
+format characters (bidi overrides, zero-width) are dropped, whitespace
+collapses, and the field is bounded (`title` 200, `heading` 400, label 32
+characters; an ellipsis marks a cut). The `SearchHit` fields carry that
+text. A label that is over its bound or carries a comma, a `p.` page
+designation or a doc number is not a plain location: it is served as `""`
+and the cite names the physical `PDF n` page instead. Inside the cite only,
+the title and heading also lose any `p.`/`pp.` page designation and any
+IBM doc number other than the hit's own `doc_id` (or its base without the
+edition suffix). The cite is therefore one line with exactly one doc number
+and at most one page designation, and the format stays
+`"{doc_id} {title}, {heading}, p. {page}"`. `doc_id` itself is identity and
+is not rewritten.
+
 <a id="prefetch-filters"></a>
 ## 2. Prefetch and filters
 
