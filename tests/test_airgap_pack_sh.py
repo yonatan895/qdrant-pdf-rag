@@ -369,6 +369,10 @@ def test_pack_bundles_oauth_proxy_once_digest_recorded(pack_tree):
     bundle, MANIFEST, SBOM and member checksums."""
     tmp_path, skopeo_log, head, _key = pack_tree
     set_oauth_proxy_pin(tmp_path, "sha256:" + "b" * 64)
+    # The recorded pin is committed state: the pack tree must be clean (#1030).
+    subprocess.run(["git", "commit", "-qam", "record oauth-proxy pin"], cwd=tmp_path, check=True)
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True,
+                          capture_output=True, text=True).stdout.strip()
     # Model signed-source export: without attachment omission, Docker
     # archive export fails before the archive can be materialized.
     guard = '''signed_source=0

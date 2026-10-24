@@ -477,6 +477,18 @@ check_checkout_sha() {
     unset _flags
 }
 
+# Pack-host twin of the checkout guard (#1030): fixed messages, no file names.
+check_pack_tree_clean() {
+    _msg="pack tree is not the clean checked-out commit"
+    _rc=0
+    git diff --quiet HEAD -- >/dev/null 2>&1 || _rc=$?
+    [ "$_rc" -eq 0 ] || die "$_msg: tracked changes (git status lists them) — commit or restore them; the bundle records HEAD, not the working tree"
+    _flags=$(git ls-files -v -- ':/' 2>/dev/null) || die "$_msg: the index cannot be read"
+    printf '%s\n' "$_flags" | awk 'NF && substr($0, 1, 2) != "H " { bad=1 } END { exit bad }' ||
+        die "$_msg: tracked files are hidden from change detection (assume-unchanged, skip-worktree or sparse checkout)"
+    unset _msg _rc _flags
+}
+
 # oc/kubectl must exist unless previewing (deploy/ingest only; validate and
 # load enforce their own tool rules).
 require_kc() {

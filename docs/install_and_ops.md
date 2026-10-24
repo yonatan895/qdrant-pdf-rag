@@ -542,6 +542,13 @@ SNEAKERNET_SIGNING_KEY=/secure/release-signing.pem \
 SNEAKERNET_KEY_TRUSTED=true sh scripts/tools/run-task.sh airgap:pack
 ```
 
+`airgap:pack` refuses to sign unless the working tree is the clean checked-out
+commit (no tracked staged or unstaged change, no assume-unchanged/skip-worktree
+flag; untracked `airgap.env` and `dist/` are fine) and every
+`images/Containerfile.*` `FROM` digest equals the base pin in `images.txt` and
+the dependency lock (`python3 scripts/image_inventory.py --check-containerfiles`)
+(#1030).
+
 A maintainer creates the signing key once in a protected directory, for example
 with `openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out signing.pem`,
 and exports its public half with `openssl pkey -in signing.pem -pubout -out signing.pub`.

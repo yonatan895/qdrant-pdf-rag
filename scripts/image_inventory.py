@@ -7,6 +7,7 @@ import email.parser
 import gzip
 import hashlib
 import json
+import re
 import tarfile
 from pathlib import Path, PurePosixPath
 
@@ -149,6 +150,52 @@ def inventory(root: Path, image: Path) -> dict:
             'packages': dict(sorted(actual.items()))}
 
 
+FROM_LINE = re.compile(r'^\s*FROM\s+(?:--\S+\s+)*(\S+)(?:\s+AS\s+(\S+))?\s*$', re.IGNORECASE)
+
+
+def check_containerfile_bases(root: Path) -> None:
+    """Every images/Containerfile.* FROM must be the approved base pin (#1030).
+
+    The pin is locks.BASE_IMAGE; images.txt (what pack.sh labels the SBOM with)
+    and the lock's base_image reference must agree with it, and each Containerfile
+    FROM (a later stage may start FROM an earlier stage alias) must be exactly it.
+    Fixed diagnostics only.
+    """
+    digest = locks.BASE_IMAGE.rpartition('@')[2]
+    repository = locks.BASE_IMAGE.rpartition('@')[0]
+    pins = [line.split() for line in (root / 'images.txt').read_text().splitlines()
+            if line.strip() and not line.lstrip().startswith('#')]
+    recorded = [p[1] for p in pins if len(p) >= 2 and 'python-314-minimal' in p[0]]
+    if recorded != [digest]:
+        raise locks.LockError('images.txt base digest differs from the approved base pin')
+    manifest = locks.read_json(root / locks.MANIFEST)
+    if manifest.get('base_image', {}).get('reference') != locks.BASE_IMAGE:
+        raise locks.LockError('lock base image differs from the approved base pin')
+    files = sorted((root / 'images').glob('Containerfile.*'))
+    if not files:
+        raise locks.LockError('no images/Containerfile.* to verify')
+    for path in files:
+        stages: set[str] = set()
+        bases = 0
+        for line in path.read_text().splitlines():
+            match = FROM_LINE.match(line)
+            if not match:
+                if re.match(r'^\s*FROM\b', line, re.IGNORECASE):
+                    raise locks.LockError('unparseable Containerfile FROM line')
+                continue
+            reference, alias = match.groups()
+            if reference not in stages:
+                if reference != locks.BASE_IMAGE and reference.partition('@')[0] == repository:
+                    raise locks.LockError('Containerfile base digest differs from the approved base pin')
+                if reference != locks.BASE_IMAGE:
+                    raise locks.LockError('Containerfile base is not the approved digest-pinned base')
+                bases += 1
+            if alias:
+                stages.add(alias)
+        if bases == 0:
+            raise locks.LockError('Containerfile has no approved base')
+
+
 def verify_sbom(root: Path, directory: Path, commit: str) -> None:
     """Reconcile the serialized SBOM, independently of its producer's objects."""
     sbom = locks.read_json(directory / 'sbom.json')
@@ -164,9 +211,17 @@ def verify_sbom(root: Path, directory: Path, commit: str) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', type=Path, default=locks.ROOT)
-    parser.add_argument('--archive', type=Path, required=True)
+    parser.add_argument('--archive', type=Path)
+    parser.add_argument('--check-containerfiles', action='store_true',
+                        help='verify images/Containerfile.* FROM digests against images.txt and the lock')
     args = parser.parse_args()
     try:
+        if args.check_containerfiles:
+            check_containerfile_bases(args.root)
+            print('image-inventory: Containerfile bases match the approved pin')
+            return 0
+        if args.archive is None:
+            parser.error('--archive is required')
         print(json.dumps(inventory(args.root, args.archive), indent=2, sort_keys=True))
         return 0
     except locks.LockError as exc:
