@@ -214,8 +214,9 @@ def _bind_key(jwk: dict[str, Any], alg: str) -> Any:
 class JwksCache:
     """The IdP signing keys for one gateway.
 
-    URL mode fetches only `config.jwks_url`: redirects are never followed
-    (per request, whatever the client's default), and a response for any
+    URL mode fetches only `config.jwks_url`: redirects are never followed and
+    `jwks_timeout_s` always applies (per request, whatever the client's
+    defaults), and a response for any
     other URL is refused; token-supplied `jku`/`x5u` are never read. The set
     is kept for `jwks_ttl_s`, refetched early on an unknown kid at most once
     per `jwks_min_refetch_s`, and always replaced by a successful fetch. A
@@ -303,7 +304,8 @@ class JwksCache:
         assert url is not None
         try:
             async with self._client.stream(
-                "GET", url, headers={"Accept": "application/json"}, follow_redirects=False
+                "GET", url, headers={"Accept": "application/json"},
+                follow_redirects=False, timeout=self._config.jwks_timeout_s,
             ) as response:
                 if response.status_code != 200 or response.url != httpx2.URL(url):
                     return None
@@ -311,7 +313,8 @@ class JwksCache:
             if body is None:
                 return None
             return _parse_jwks(json.loads(body))
-        except (httpx2.HTTPError, ValueError, TypeError):
+        except (httpx2.HTTPError, ValueError, TypeError, RecursionError):
+            # RecursionError: deeply nested JSON inside the size cap.
             return None
 
 
@@ -375,7 +378,7 @@ class TokenExchanger:
         try:
             async with self._client.stream(
                 "POST", config.token_endpoint, data=form,
-                headers={"Accept": "application/json"}, follow_redirects=False,
+                headers={"Accept": "application/json"}, follow_redirects=False, timeout=config.timeout_s,
             ) as response:
                 if response.status_code != 200 or response.url != httpx2.URL(config.token_endpoint):
                     raise AuthError(UNAUTHENTICATED)
@@ -383,7 +386,7 @@ class TokenExchanger:
             if body is None:
                 raise AuthError(UNAUTHENTICATED)
             reply = json.loads(body)
-        except (httpx2.HTTPError, ValueError, TypeError):
+        except (httpx2.HTTPError, ValueError, TypeError, RecursionError):
             raise AuthError(UNAUTHENTICATED) from None
         if not isinstance(reply, dict):
             raise AuthError(UNAUTHENTICATED)
