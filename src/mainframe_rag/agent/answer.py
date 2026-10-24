@@ -528,8 +528,7 @@ STABLE_CACHE_INSTRUCTIONS = (
     "section that copies the exact citation line of each excerpt used."
 )
 
-# The tail's worked example (issue #999): constant text in the cite format,
-# the same example the system prompt's rule 7 shows.
+# Tail worked example: synthetic, deliberately not corpus-derived (#999).
 TAIL_EXAMPLE_CITE = (
     "SA22-7592-05 z/OS MVS Initialization and Tuning Reference, IEASYSxx > LFAREA, p. 1-17"
 )
