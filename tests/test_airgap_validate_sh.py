@@ -1292,6 +1292,9 @@ def test_validate_route_manifest_with_matching_pin_passes(tree):
 OWUI_PIN = "sha256:" + "e" * 64
 OWUI_SOURCE = "ghcr.io/yonatan895/qdrant-pdf-rag-openwebui"
 OWUI_REF = f"{OWUI_SOURCE}@{OWUI_PIN}"
+# ADR-0007 E1: the allow-list proxy sidecar pin recorded in images.txt.
+PROXY_REF = ("docker.io/nginxinc/nginx-unprivileged@sha256:"
+             "f5116ed4606f3eb015dd4a8e28cb9b351476dc0ad4bc6e9f93b19cec130cdf03")
 # Independent expectation of the chart's images.openwebui (repository, tag).
 OWUI_CHART_BLOCK = "  openwebui:\n    repository: qdrant-pdf-rag-openwebui\n    tag: v0.12.3-slim\n"
 
@@ -1329,7 +1332,7 @@ def test_validate_openwebui_accepts_a_recorded_pin_matching_chart_and_bundle(tre
     r = _openwebui_run(tree)
     assert r.returncode == 0, r.stderr
     assert "Open WebUI pin recorded; matches the chart" in r.stdout
-    _manifest(tree, f"openwebui: {OWUI_REF}")
+    _manifest(tree, f"openwebui: {OWUI_REF}", f"openwebui_proxy: {PROXY_REF}")
     r = _openwebui_run(tree)
     assert r.returncode == 0, r.stderr
     assert "Open WebUI pin recorded; matches the chart and the packed bundle" in r.stdout
@@ -1364,6 +1367,18 @@ def test_validate_openwebui_pending_pin_refused_only_when_enabled(tree):
     (lambda t: _manifest(t), "packed without the Open WebUI image"),
     (lambda t: _manifest(t, f"openwebui: {OWUI_SOURCE}@sha256:" + "c" * 64),
      "packed MANIFEST openwebui pin to equal images.txt"),
+    # ADR-0007 E1: the allow-list proxy gets the same three checks.
+    (lambda t: (t / "images.txt").write_text(re.sub(
+        r"^(docker\.io/nginxinc/nginx-unprivileged:\S+)[ \t]+\S+$", r"\1 sha256:PENDING",
+        (t / "images.txt").read_text(), flags=re.MULTILINE)),
+     "allow-list proxy digest (nginx-unprivileged) recorded in images.txt"),
+    (lambda t: (t / "images.txt").write_text((t / "images.txt").read_text().replace(
+        "nginx-unprivileged:1.30.6-alpine", "nginx-unprivileged:1.99.0-alpine")),
+     "to match the chart's images.openwebuiProxy repository/tag"),
+    (lambda t: _manifest(t, f"openwebui: {OWUI_REF}"), "openwebui_proxy entry in the packed MANIFEST"),
+    (lambda t: _manifest(t, f"openwebui: {OWUI_REF}",
+                         "openwebui_proxy: docker.io/nginxinc/nginx-unprivileged@sha256:" + "c" * 64),
+     "packed MANIFEST openwebui_proxy pin to equal images.txt"),
 ])
 def test_validate_openwebui_refuses_chart_or_bundle_mismatch(tree, edit, needle):
     _openwebui_tree(tree)

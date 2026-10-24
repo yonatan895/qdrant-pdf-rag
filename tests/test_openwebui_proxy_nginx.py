@@ -120,15 +120,15 @@ def _request(port: int, method: str, target: str, headers: dict | None = None) -
     extra = "".join(f"{k}: {v}\r\n" for k, v in (headers or {}).items())
     raw = (f"{method} {target} HTTP/1.1\r\nHost: docs.example\r\n{extra}Content-Length: 0\r\n"
            "Connection: close\r\n\r\n").encode()
-    with socket.create_connection(("127.0.0.1", port), timeout=10) as sock:
-        with context.wrap_socket(sock, server_hostname="localhost") as tls:
-            tls.sendall(raw)
-            data = b""
-            while True:
-                chunk = tls.recv(65536)
-                if not chunk:
-                    break
-                data += chunk
+    with (socket.create_connection(("127.0.0.1", port), timeout=10) as sock,
+          context.wrap_socket(sock, server_hostname="localhost") as tls):
+        tls.sendall(raw)
+        data = b""
+        while True:
+            chunk = tls.recv(65536)
+            if not chunk:
+                break
+            data += chunk
     head, _, body = data.partition(b"\r\n\r\n")
     status = int(head.split(b" ", 2)[1])
     return status, body.decode("latin-1")

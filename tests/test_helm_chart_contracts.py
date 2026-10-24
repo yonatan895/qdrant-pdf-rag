@@ -1484,9 +1484,9 @@ def _proxy_conf():
 def _allow_regexes():
     import re
     conf = _proxy_conf()
-    block = re.search(r"map \$uri \$owui_allowed \{(.*?)\n    \}", conf, re.S).group(1)
-    entries = re.findall(r"^\s*~(\S+)\s+1;\s*$", block, re.M)
-    assert re.search(r"^\s*default\s+0;\s*$", block, re.M), "deny must be the default"
+    block = re.search(r"map \$uri \$owui_allowed \{(.*?)\n    \}", conf, re.DOTALL).group(1)
+    entries = re.findall(r"^\s*~(\S+)\s+1;\s*$", block, re.MULTILINE)
+    assert re.search(r"^\s*default\s+0;\s*$", block, re.MULTILINE), "deny must be the default"
     assert entries, "no allow-list entries"
     return [re.compile(e) for e in entries]
 
@@ -1505,21 +1505,21 @@ def test_openwebui_proxy_config_matches_the_decoded_uri_and_forwards_the_origina
     client sent it, so both see the same path; everything else is a fixed 403."""
     import re
     conf = _proxy_conf()
-    assert re.search(r"^\s*merge_slashes\s+on;", conf, re.M)
-    assert re.search(r"^\s*server_tokens\s+off;", conf, re.M)
-    assert re.search(r"^\s*listen\s+8443\s+ssl;", conf, re.M)
+    assert re.search(r"^\s*merge_slashes\s+on;", conf, re.MULTILINE)
+    assert re.search(r"^\s*server_tokens\s+off;", conf, re.MULTILINE)
+    assert re.search(r"^\s*listen\s+8443\s+ssl;", conf, re.MULTILINE)
     assert "server 127.0.0.1:8080;" in conf
     # The URI the upstream sees is the original one: no URI part on proxy_pass,
     # no rewrite of any kind, and nothing else may change $uri before the check.
-    proxy_passes = re.findall(r"^\s*proxy_pass\s+(\S+);", conf, re.M)
+    proxy_passes = re.findall(r"^\s*proxy_pass\s+(\S+);", conf, re.MULTILINE)
     assert proxy_passes == ["http://owui_upstream"]
-    assert not re.search(r"^\s*(rewrite|set\s+\$uri|try_files|alias|root)\b", conf, re.M)
+    assert not re.search(r"^\s*(rewrite|set\s+\$uri|try_files|alias|root)\b", conf, re.MULTILINE)
     assert re.search(r'if \(\$owui_allowed = 0\) \{\s*return 403 "denied\\n";\s*\}', conf)
     # The check precedes the proxy_pass inside the one location.
-    assert conf.index("$owui_allowed = 0") < conf.index("proxy_pass")
-    assert len(re.findall(r"^\s*location\b", conf, re.M)) == 1
+    assert conf.index("$owui_allowed = 0") < conf.index("proxy_pass http://")
+    assert len(re.findall(r"^\s*location\b", conf, re.MULTILINE)) == 1
     # No request content in logs (S4): the access log is off.
-    assert re.search(r"^\s*access_log\s+off;", conf, re.M)
+    assert re.search(r"^\s*access_log\s+off;", conf, re.MULTILINE)
     # Streaming and socket.io upgrade.
     for needle in ("proxy_http_version 1.1;", "proxy_buffering off;", "$http_upgrade", "ssl_protocols TLSv1.2 TLSv1.3;"):
         assert needle in conf, needle

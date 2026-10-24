@@ -13,9 +13,13 @@ names follow Open WebUI v0.12.3; they are pending #1073 qualification and are
 re-qualified on every pin import (P1). ENABLE_PERSISTENT_CONFIG=false keeps
 this environment authoritative over admin-UI edits.
 
-TLS: uvicorn serves the service-serving certificate on 8443 (the Route is
-reencrypt); there is no plain HTTP port. The read-only root filesystem is a
-#1073 trial item (upstream does not document it), so it is not claimed here.
+Network path (ADR-0007 E1, maintainer decision 2026-10-24): Open WebUI listens
+on 127.0.0.1:8080 only. The nginx allow-list sidecar `proxy` is the one
+listener: it serves the service-serving certificate on 8443 (the Route is
+reencrypt), refuses every path the Docs pilot does not need with a fixed 403
+(decided on nginx's decoded, normalised URI), and forwards the rest unchanged.
+The root filesystems are read-only; the writable paths are the claim and
+emptyDirs (static, /root, /tmp), as qualified by the #1073 Kind trial.
 */ -}}
 {{- if include "mainframe-rag.openwebuiEnabled" . }}
 {{- $o := .Values.openwebui }}
@@ -40,6 +44,9 @@ spec:
     metadata:
       labels:
         app: rag-openwebui
+      annotations:
+        # A changed allow-list rolls the pod.
+        checksum/proxy-config: {{ .Files.Get "files/openwebui/proxy.nginx.conf" | sha256sum | quote }}
     spec:
       automountServiceAccountToken: false
       enableServiceLinks: false
@@ -59,6 +66,7 @@ spec:
           imagePullPolicy: {{ .Values.images.openwebui.pullPolicy | default "IfNotPresent" }}
           securityContext:
             allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
             capabilities:
               drop: [ALL]
           workingDir: /app/backend
@@ -66,18 +74,11 @@ spec:
           args:
             - open_webui.main:app
             - --host
-            - 0.0.0.0
+            - 127.0.0.1
             - --port
-            - "8443"
+            - "8080"
             - --workers
             - "1"
-            - --ssl-certfile
-            - /etc/tls/private/tls.crt
-            - --ssl-keyfile
-            - /etc/tls/private/tls.key
-          ports:
-            - containerPort: 8443
-              name: https
           env:
             # Storage (S1): SQLite on the RWO claim, one worker.
             - name: DATA_DIR
@@ -89,6 +90,8 @@ spec:
             - name: ENABLE_PERSISTENT_CONFIG
               value: "false"
             - name: WEBUI_URL
+              value: {{ printf "https://%s" $o.host | quote }}
+            - name: CORS_ALLOW_ORIGIN
               value: {{ printf "https://%s" $o.host | quote }}
             # Offline, no telemetry, no downloads (R2).
             - name: OFFLINE_MODE
@@ -155,6 +158,19 @@ spec:
               value: "false"
             - name: USER_PERMISSIONS_FEATURES_CODE_INTERPRETER
               value: "false"
+            - name: USER_PERMISSIONS_FEATURES_DIRECT_TOOL_SERVERS
+              value: "false"
+            - name: USER_PERMISSIONS_FEATURES_NOTES
+              value: "false"
+            - name: USER_PERMISSIONS_FEATURES_IMAGE_GENERATION
+              value: "false"
+            # Audio (STT/TTS/call) is off for users; the proxy refuses the audio API.
+            - name: USER_PERMISSIONS_CHAT_STT
+              value: "false"
+            - name: USER_PERMISSIONS_CHAT_TTS
+              value: "false"
+            - name: USER_PERMISSIONS_CHAT_CALL
+              value: "false"
             # Answers only through the agent (V2): no model connections, no
             # user tools, the Pipe Function is the only extension.
             - name: ENABLE_OPENAI_API
@@ -170,11 +186,19 @@ spec:
               value: "false"
             - name: ENABLE_TOOL_SERVERS
               value: "false"
+            - name: ENABLE_TOOLS
+              value: "false"
+            - name: ENABLE_DIRECT_INTEGRATIONS
+              value: "false"
+            - name: BYPASS_MODEL_ACCESS_CONTROL
+              value: "false"
             - name: ENABLE_EVALUATION_ARENA_MODELS
               value: "false"
             - name: ENABLE_MESSAGE_RATING
               value: "false"
             # Task calls off: the docs model is never a task model (V2).
+            - name: TASK_MODEL
+              value: ""
             - name: ENABLE_TITLE_GENERATION
               value: "false"
             - name: ENABLE_TAGS_GENERATION
@@ -225,7 +249,7 @@ spec:
             - name: OAUTH_CLIENT_ID
               value: {{ $o.oidc.clientId | quote }}
             - name: OAUTH_SCOPES
-              value: openid email profile
+              value: openid email profile groups
             - name: ENABLE_OAUTH_GROUP_MANAGEMENT
               value: "true"
             - name: ENABLE_OAUTH_GROUP_CREATION
@@ -240,6 +264,18 @@ spec:
               value: {{ $o.oidc.allowedRoles | quote }}
             - name: OAUTH_ADMIN_ROLES
               value: {{ $o.oidc.adminRoles | quote }}
+            # The Pipe installer needs one admin API key (docs/deploy.md). Narrowest
+            # setting: keys exist, users cannot create them (permission off, admins
+            # bypass it), and a key is honoured only on /api/v1/functions. Pending
+            # trial qualification (#1073 run 2).
+            - name: ENABLE_API_KEYS
+              value: "true"
+            - name: USER_PERMISSIONS_FEATURES_API_KEYS
+              value: "false"
+            - name: ENABLE_API_KEYS_ENDPOINT_RESTRICTIONS
+              value: "true"
+            - name: API_KEYS_ALLOWED_ENDPOINTS
+              value: /api/v1/functions
             - name: OAUTH_CLIENT_SECRET
               valueFrom:
                 secretKeyRef:
@@ -250,28 +286,27 @@ spec:
                 secretKeyRef:
                   name: {{ $o.secretName }}
                   key: webui-secret-key
+          # Loopback-only listener: kubelet cannot reach it, so the probes run
+          # inside the container; the proxy's own probes cover the Service path.
           readinessProbe:
-            httpGet:
-              path: /health/db
-              port: https
-              scheme: HTTPS
+            exec:
+              command: [python3, -c, "import urllib.request as u; u.urlopen('http://127.0.0.1:8080/health/db', timeout=4)"]
             initialDelaySeconds: 10
             periodSeconds: 10
+            timeoutSeconds: 5
           # Schema migrations run at startup: allow a slow first start before
           # a restart interrupts them.
           startupProbe:
-            httpGet:
-              path: /health
-              port: https
-              scheme: HTTPS
+            exec:
+              command: [python3, -c, "import urllib.request as u; u.urlopen('http://127.0.0.1:8080/health', timeout=4)"]
             periodSeconds: 10
+            timeoutSeconds: 5
             failureThreshold: 60
           livenessProbe:
-            httpGet:
-              path: /health
-              port: https
-              scheme: HTTPS
+            exec:
+              command: [python3, -c, "import urllib.request as u; u.urlopen('http://127.0.0.1:8080/health', timeout=4)"]
             periodSeconds: 20
+            timeoutSeconds: 5
             failureThreshold: 6
           resources:
             {{- toYaml .Values.resources.openwebui | nindent 12 }}
@@ -280,12 +315,60 @@ spec:
               mountPath: /app/backend/data
             - name: tmp
               mountPath: /tmp
+            - name: static
+              mountPath: /app/backend/open_webui/static
+            - name: home
+              mountPath: /root
             - name: tls
               mountPath: /etc/tls/private
               readOnly: true
             - name: pipe
               mountPath: /opt/mainframe-rag/openwebui
               readOnly: true
+        # Allow-list proxy (ADR-0007 E1): the only listener of the pod.
+        - name: proxy
+          image: {{ include "mainframe-rag.image" (dict "name" "openwebuiProxy" "image" .Values.images.openwebuiProxy) }}
+          imagePullPolicy: {{ .Values.images.openwebuiProxy.pullPolicy | default "IfNotPresent" }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          args: [nginx, -c, /etc/nginx/proxy/nginx.conf, -g, "daemon off;"]
+          ports:
+            - containerPort: 8443
+              name: https
+          readinessProbe:
+            httpGet:
+              path: /health/db
+              port: https
+              scheme: HTTPS
+            periodSeconds: 10
+          startupProbe:
+            tcpSocket:
+              port: https
+            periodSeconds: 5
+            failureThreshold: 24
+          livenessProbe:
+            tcpSocket:
+              port: https
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 500m
+              memory: 128Mi
+          volumeMounts:
+            - name: proxy-conf
+              mountPath: /etc/nginx/proxy
+              readOnly: true
+            - name: tls
+              mountPath: /etc/tls/private
+              readOnly: true
+            - name: proxy-tmp
+              mountPath: /tmp
         # Retention purge (ADR-0007 S2): same image and claim, so it shares the
         # node and the SQLite file with the single writer; a separate CronJob
         # could not mount the RWO claim reliably. Hourly; a failed run is
@@ -325,6 +408,15 @@ spec:
             claimName: rag-openwebui-data
         - name: tmp
           emptyDir: {}
+        - name: static
+          emptyDir: {}
+        - name: home
+          emptyDir: {}
+        - name: proxy-tmp
+          emptyDir: {}
+        - name: proxy-conf
+          configMap:
+            name: rag-openwebui-proxy
         - name: tls
           secret:
             secretName: rag-openwebui-tls

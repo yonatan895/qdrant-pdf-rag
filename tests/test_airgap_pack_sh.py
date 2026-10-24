@@ -56,7 +56,7 @@ STUB_SKOPEO = skopeo_stub("a", materialize=True).replace(
 assert "PACK_TEST_IMAGES" in STUB_SKOPEO
 
 THIRD_PARTY_MEMBERS = ("qdrant-image", "openobserve-image", "otelcol-image", "oauth-proxy-image",
-                       "openwebui-image")
+                       "openwebui-image", "openwebui-proxy-image")
 
 
 def write_pack_images(root, app_files=None) -> dict[str, tuple[str, str]]:
@@ -527,15 +527,28 @@ def test_pack_bundles_openwebui_once_digest_recorded(pack_tree):
     assert f"Open WebUI Image:    {ref}" in (dist / "PACKING_RECORD.txt").read_text()
     sbom = json.loads((dist / "sbom.json").read_text())
     assert {"name": "openwebui", "ref": ref, "digest": images["openwebui-image"][0]} in sbom["images"]
+    # ADR-0007 E1: the allow-list proxy joins the bundle exactly when the Open WebUI member does.
+    proxy_ref = ("docker.io/nginxinc/nginx-unprivileged@sha256:"
+                 "f5116ed4606f3eb015dd4a8e28cb9b351476dc0ad4bc6e9f93b19cec130cdf03")
+    assert f"docker://{proxy_ref}" in skopeo_log.read_text().splitlines()
+    assert (dist / "openwebui-proxy-image.tar").is_file()
+    assert f"openwebui_proxy: {proxy_ref}" in manifest.splitlines()
+    assert f"openwebui_proxy_digest: {images['openwebui-proxy-image'][0]}" in manifest.splitlines()
+    assert f"openwebui_proxy_config_digest: {images['openwebui-proxy-image'][1]}" in manifest.splitlines()
+    assert "openwebui-proxy-image.tar" in (dist / "SHA256SUMS").read_text()
+    assert {"name": "openwebui-proxy", "ref": proxy_ref,
+            "digest": images["openwebui-proxy-image"][0]} in sbom["images"]
     assert {img["name"] for img in sbom["images"]} == {
-        "qdrant", "openobserve", "otelcol", "app-ingest", "app-agent", "openwebui"}
+        "qdrant", "openobserve", "otelcol", "app-ingest", "app-agent", "openwebui", "openwebui-proxy"}
     extract = tmp_path / "owui extraction"
     extract.mkdir()
     with tarfile.open(dist / f"qdrant-pdf-rag-{head}.tar") as archive:
         assert "openwebui-image.tar" in archive.getnames()
+        assert "openwebui-proxy-image.tar" in archive.getnames()
         notices = archive.extractfile("THIRD-PARTY-NOTICES.txt").read().decode()
         archive.extractall(extract, filter="data")
-    assert "image:openwebui  [approved]" in notices
+    assert "image:openwebui  [pending-owner-decision]" in notices
+    assert "image:openwebui-proxy  [approved]" in notices
     assert "LicenseRef-Open-WebUI-License" in notices
     boot = subprocess.run(["sh", "bootstrap.sh"], cwd=extract, env={"PATH": "/usr/bin:/bin"},
                           capture_output=True, text=True, check=False)

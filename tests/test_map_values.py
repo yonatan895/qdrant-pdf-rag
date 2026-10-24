@@ -33,7 +33,7 @@ OPENWEBUI_KEYS = [
     "OPENWEBUI_STORAGE_SIZE", "OPENWEBUI_OIDC_PROVIDER_URL", "OPENWEBUI_OIDC_CLIENT_ID",
     "OPENWEBUI_OIDC_GROUP_CLAIM", "OPENWEBUI_OIDC_ROLES_CLAIM", "OPENWEBUI_OIDC_ALLOWED_ROLES",
     "OPENWEBUI_OIDC_ADMIN_ROLES", "OPENWEBUI_IDP_EGRESS_CIDRS", "OPENWEBUI_IDP_EGRESS_PORT",
-    "ROUTE_DESTINATION_CA_FILE", "IMAGE_DIGEST_OPENWEBUI",
+    "ROUTE_DESTINATION_CA_FILE", "IMAGE_DIGEST_OPENWEBUI", "IMAGE_DIGEST_OPENWEBUI_PROXY",
 ]
 MAPPER_KEYS = [
     *OPENWEBUI_KEYS,
@@ -986,6 +986,24 @@ def test_openwebui_selection_round_trips_with_the_decided_defaults(monkeypatch, 
     values = load_values(out)
     assert values["images"]["openwebui"]["digest"] == digest
     assert values["openwebui"]["retentionDays"] == 7
+
+
+def test_openwebui_allow_list_proxy_image_is_rendered_with_its_verified_digest(monkeypatch, mapper_env, tmp_path):
+    """ADR-0007 E1: the nginx sidecar's image follows the front end's selection and
+    carries the registry digest deploy verified; it is absent when the front end is off."""
+    _owui_env(monkeypatch, tmp_path)
+    r, out = mapper_env()
+    assert r.returncode == 0, r.stderr
+    assert load_values(out)["images"]["openwebuiProxy"] == {
+        "repository": "reg.internal/nginxinc/nginx-unprivileged", "tag": "1.30.6-alpine",
+        "pullPolicy": "IfNotPresent"}
+    digest = "sha256:" + "f" * 64
+    monkeypatch.setenv("IMAGE_DIGEST_OPENWEBUI_PROXY", digest)
+    r, out = mapper_env()
+    assert load_values(out)["images"]["openwebuiProxy"]["digest"] == digest
+    monkeypatch.setenv("IMAGE_DIGEST_OPENWEBUI_PROXY", "not-a-digest")
+    r, _ = mapper_env()
+    assert r.returncode != 0 and "IMAGE_DIGEST_OPENWEBUI_PROXY must be a sha256 manifest digest" in r.stderr
 
 
 @pytest.mark.parametrize("env,message", [

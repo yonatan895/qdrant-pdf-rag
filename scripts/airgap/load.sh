@@ -60,9 +60,19 @@ if [ -f "$ARTDIR/SHA256SUMS" ]; then
 elif [ "${AIRGAP_DRYRUN:-0}" = "1" ] && [ -f "$ARTDIR/openwebui-image.tar" ]; then
     OPENWEBUI_TAR="openwebui-image.tar"
 fi
+# The Open WebUI pod's allow-list proxy (ADR-0007 E1) rides with the image.
+OPENWEBUI_PROXY_TAR=""
+if [ -f "$ARTDIR/SHA256SUMS" ]; then
+    if awk '$2 == "openwebui-proxy-image.tar" { found=1 } END { exit !found }' "$ARTDIR/SHA256SUMS"; then
+        OPENWEBUI_PROXY_TAR="openwebui-proxy-image.tar"
+    fi
+elif [ "${AIRGAP_DRYRUN:-0}" = "1" ] && [ -f "$ARTDIR/openwebui-proxy-image.tar" ]; then
+    OPENWEBUI_PROXY_TAR="openwebui-proxy-image.tar"
+fi
 LOADED_COUNT=5
 [ -n "$OAUTH_TAR" ] && LOADED_COUNT=$((LOADED_COUNT + 1))
 [ -n "$OPENWEBUI_TAR" ] && LOADED_COUNT=$((LOADED_COUNT + 1))
+[ -n "$OPENWEBUI_PROXY_TAR" ] && LOADED_COUNT=$((LOADED_COUNT + 1))
 
 if [ "${AIRGAP_DRYRUN:-0}" = "1" ]; then
     echo "==> [dryrun] Member checksum verification skipped"
@@ -76,6 +86,9 @@ if [ "${AIRGAP_DRYRUN:-0}" = "1" ]; then
     fi
     if [ -n "$OPENWEBUI_TAR" ]; then
         echo "[dryrun] skopeo copy oci-archive:$ARTDIR/$OPENWEBUI_TAR docker://$INTERNAL_REGISTRY/qdrant-pdf-rag-openwebui:v0.12.3-slim"
+    fi
+    if [ -n "$OPENWEBUI_PROXY_TAR" ]; then
+        echo "[dryrun] skopeo copy oci-archive:$ARTDIR/$OPENWEBUI_PROXY_TAR docker://$INTERNAL_REGISTRY/nginxinc/nginx-unprivileged:1.30.6-alpine"
     fi
     echo "Notice: registry image identity not release-verified (dry-run pushes nothing and reads no registry)"
     echo ""
@@ -157,6 +170,9 @@ if [ -n "$OAUTH_TAR" ]; then
 fi
 if [ -n "$OPENWEBUI_TAR" ]; then
     check_image_digest "$OPENWEBUI_TAR" openwebui_digest
+fi
+if [ -n "$OPENWEBUI_PROXY_TAR" ]; then
+    check_image_digest "$OPENWEBUI_PROXY_TAR" openwebui_proxy_digest
 fi
 
 # skopeo ignores TMPDIR when it unpacks an oci-archive and uses /var/tmp unless
@@ -259,6 +275,10 @@ fi
 if [ -n "$OPENWEBUI_TAR" ]; then
     # ADR-0007 docs front end: the tag the chart's images.openwebui renders.
     load "$OPENWEBUI_TAR" "$INTERNAL_REGISTRY/qdrant-pdf-rag-openwebui:v0.12.3-slim" openwebui_digest
+fi
+if [ -n "$OPENWEBUI_PROXY_TAR" ]; then
+    # ADR-0007 E1: the tag the chart's images.openwebuiProxy renders.
+    load "$OPENWEBUI_PROXY_TAR" "$INTERNAL_REGISTRY/nginxinc/nginx-unprivileged:1.30.6-alpine" openwebui_proxy_digest
 fi
 
 echo ""

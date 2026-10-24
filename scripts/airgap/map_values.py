@@ -391,6 +391,13 @@ def build_values(deploy_only: bool = False) -> dict:
             "pullPolicy": "IfNotPresent",
             **image_digest("OPENWEBUI"),
         }
+        # ADR-0007 E1: the allow-list proxy sidecar of the same pod.
+        optional_images["openwebuiProxy"] = {
+            "repository": f"{internal_registry}/nginxinc/nginx-unprivileged",
+            "tag": "1.30.6-alpine",
+            "pullPolicy": "IfNotPresent",
+            **image_digest("OPENWEBUI_PROXY"),
+        }
 
     # Plain Kubernetes (Kind) has no SCC to assign a UID, and the OpenObserve
     # image runs as root: an operator may pin one non-root id for the bundled
