@@ -1,0 +1,45 @@
+# Open WebUI Kind trial (issue #1073): fill the trial Qdrant with the original
+# Synthetic Corp demo manuals (scripts/make_synthetic_pdf.py) through the real
+# ingest CLI, using the mock embedder. Trial-only.
+apiVersion: batch/v1
+kind: Job
+metadata: {name: ingest, namespace: owui-trial}
+spec:
+  backoffLimit: 0
+  template:
+    metadata: {labels: {app: ingest}}
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000771006
+        runAsGroup: 0
+        seccompProfile: {type: RuntimeDefault}
+      initContainers:
+        - name: corpus
+          image: @AGENT_IMAGE@
+          imagePullPolicy: Never
+          command: [python3, /app/scripts/make_synthetic_pdf.py, --out, /corpus, --synthetic-corp]
+          securityContext: &sc
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts: [{name: corpus, mountPath: /corpus}, {name: tmp, mountPath: /tmp}]
+      containers:
+        - name: ingest
+          image: @AGENT_IMAGE@
+          imagePullPolicy: Never
+          command: [python3, -m, mainframe_rag.ingest.run_ingest, --src, /corpus, --progress, /work/inventory.jsonl, --workers, "1"]
+          envFrom: [{configMapRef: {name: agent-env}}]
+          securityContext: *sc
+          resources: {requests: {cpu: 100m, memory: 256Mi}, limits: {memory: 1Gi}}
+          volumeMounts:
+            - {name: corpus, mountPath: /corpus, readOnly: true}
+            - {name: work, mountPath: /work}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - {name: corpus, emptyDir: {}}
+        - {name: work, emptyDir: {}}
+        - {name: tmp, emptyDir: {}}
