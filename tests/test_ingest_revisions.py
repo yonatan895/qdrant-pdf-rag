@@ -366,6 +366,31 @@ def test_crash_residue_without_completion_is_swept(monkeypatch):
     assert fake.main_revs(settings.qdrant_collection, "reference") == {REV_B}
 
 
+def test_swept_residue_revision_takes_its_markers(monkeypatch):
+    """Issue #1005 (S2-5): a sibling whose marker no longer verifies (a point
+    is missing) is residue and is swept. Its markers go with its points, so
+    the sweep never leaves a zero-point marker behind to block a later
+    representation migration."""
+    settings = _settings()
+    fake = RevisionFake()
+    coll = settings.qdrant_collection
+    _upsert_one(monkeypatch, fake, _parsed(sha=SHA_A1, vendor="vendor-a",
+                product="product-x", version="1.0"),
+                _chunks(rev=REV_A, tag="A-v1"), settings)
+    damaged = next(p for p in fake._points[coll] if p.payload["source_rev"] == REV_A)
+    fake._points[coll].remove(damaged)
+    assert not is_revision_committed(fake, settings, "reference", REV_A)
+    status, _ = _upsert_one(
+        monkeypatch, fake,
+        _parsed(sha=SHA_B1, vendor="vendor-b", product="product-y", version="2.0"),
+        _chunks(rev=REV_B, tag="B-v1"), settings,
+    )
+    assert status == "upserted"
+    assert fake.main_revs(coll, "reference") == {REV_B}
+    markers = fake._points.get(completion_collection_name(settings), [])
+    assert {p.payload["source_rev"] for p in markers} == {REV_B}, "orphaned marker left"
+
+
 def _legacy_points(doc_id, sha, rules_v, n=3, tag="legacy"):
     return [
         models.PointStruct(

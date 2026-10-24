@@ -1757,6 +1757,45 @@ def test_publish_migration_retire_unapproved_stray_refuses(tmp_path, monkeypatch
     assert any(getattr(p, "id", None) == "stray-a" for p in fake.collections[live])
 
 
+def test_zero_point_marker_does_not_block_migration(tmp_path, monkeypatch):
+    """Issue #1005 (S2-5): a completion marker whose revision has no stored
+    points (orphaned by the pre-#1004 sibling sweep) certifies no searchable
+    vector. A representation migration over the complete corpus must commit
+    and cut over without editing control collections, while the coverage
+    proof still attributes every searchable point."""
+    import uuid as uuid_mod
+
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.representation import STATE_COMMITTED, read_manifest_record
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _two_doc_corpus(corpus)
+    progress = tmp_path / "inv.jsonl"
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    live = fake.aliases[ALIAS]
+    controls = fake.collections[f"{live}__completions"]
+    marker = next(p for p in controls if (p.payload or {}).get("doc_id") == DOC_A)
+    orphan_rev = "ibm|zos|2.5|" + "e" * 64
+    controls.append(models.PointStruct(
+        id=str(uuid_mod.uuid4()), vector=marker.vector,
+        payload={**marker.payload, "source_rev": orphan_rev, "sha256": "e" * 64},
+    ))
+    assert orphan_rev not in _revisions_in(fake, live), "the marker certifies no point"
+
+    monkeypatch.setenv("EMBED_MODEL_REVISION", "rev-2")
+    assert _run_main(monkeypatch, corpus, progress, "--reingest") == 0
+    new = fake.aliases[ALIAS]
+    assert new != live
+    record = read_manifest_record(fake, f"{new}__completions")
+    assert record is not None and record.state == STATE_COMMITTED
+    assert record.manifest.embed_model_revision == "rev-2"
+    assert _live_doc_ids(fake) == {DOC_A, DOC_B}
+
+
 
 
 
