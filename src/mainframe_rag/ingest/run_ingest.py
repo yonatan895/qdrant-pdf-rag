@@ -78,12 +78,17 @@ from mainframe_rag.ingest.context import (
     load_context_cache,
     resolve_cache_path,
 )
+from mainframe_rag.ingest.corpus_scan import (
+    UNREADABLE_FILE_MESSAGE,
+    UNREADABLE_FILE_TYPE,
+    scan_corpus,
+    unreadable_paths,
+)
 from mainframe_rag.ingest.embed import build_embedder, chunk_embed_text, embed_batch
 from mainframe_rag.ingest.ibm_pdf import (
     ParsedDoc,
     _extract_page_texts,
     parse_pdf,
-    sha256_file,
 )
 from mainframe_rag.ingest.identity import (
     RevisionCollisionError,
@@ -142,7 +147,6 @@ from mainframe_rag.ingest.representation import (
     require_attested_revision,
 )
 from mainframe_rag.ingest.rules_version import extraction_rules_version
-from mainframe_rag.ingest.walk import walk_pdfs
 from mainframe_rag.logs import configure_logging
 from mainframe_rag.ports import QdrantPoints, QdrantReader, SparseVector
 from mainframe_rag.tracing import setup_tracing, shutdown_tracing, start_as_current_span, start_span
@@ -191,6 +195,7 @@ class _Plan:
     tasks: list[ParseTask]
     lineage_by_path: dict[str, str | None]
     skipped_ok: int
+    unreadable: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -819,6 +824,27 @@ def _gate_planned_entries(src: Path, walk_entries: list[tuple[str, str]]) -> lis
     return kept
 
 
+def _record_unreadable(paths: tuple[str, ...], progress: Path, stats: _RunStats) -> None:
+    """One fixed `error` inventory record per unreadable source file (issue
+    #1002); the run continues with the readable files and exits nonzero."""
+    for path_str in paths:
+        stats.files_failed += 1
+        append_record(
+            progress,
+            InventoryRecord(
+                path=path_str,
+                sha256="",
+                doc_id=Path(path_str).stem,
+                status="error",
+                error=UNREADABLE_FILE_MESSAGE,
+                error_type=UNREADABLE_FILE_TYPE,
+            ),
+        )
+        log.warning(
+            json.dumps({"path": path_str, "action": "error", "error_type": UNREADABLE_FILE_TYPE})
+        )
+
+
 def _log_record_drift(settings: Settings, record_drift: list[str]) -> None:
     """One rule for the record-only drift note (staging preflight and the
     publish read-only check share it): warn loudly, proceed — vectors are
@@ -861,14 +887,13 @@ def _plan(
     the target's completion records and points; it never writes. Runs before
     the representation manifest opens and before any worker spawns."""
     if prewalked is None:
-        pdfs = walk_pdfs(src)
-        if limit:
-            pdfs = pdfs[:limit]
-        walk_entries = [(str(p), sha256_file(p)) for p in pdfs]
+        scanned = scan_corpus(src, limit=limit)
+        walk_entries, unreadable = scanned.entries, scanned.unreadable
     else:
         if limit is not None:
             raise RuntimeError("pre-hashed walk and --limit are mutually exclusive.")
         walk_entries = prewalked
+        unreadable = unreadable_paths(src)
     # Identity gate (issue #361): dedup byte-identical copies and
     # abort on cross-revision doc_id collisions before any parse,
     # delete, or upsert. Deterministic for identical inputs.
@@ -967,7 +992,7 @@ def _plan(
                 str(cache_path) if cache_path is not None else None,
             )
         )
-    return _Plan(walk_entries, tasks, lineage_by_path, skipped_ok)
+    return _Plan(walk_entries, tasks, lineage_by_path, skipped_ok, tuple(unreadable))
 
 
 @dataclass(frozen=True)
@@ -1421,6 +1446,7 @@ def _run_impl(
             walk_entries, tasks = plan.walk_entries, plan.tasks
             lineage_by_path = plan.lineage_by_path
             stats.files_ok += plan.skipped_ok
+            _record_unreadable(plan.unreadable, progress, stats)
             plan_span.set_attribute("ingest.pdfs", len(walk_entries))
             plan_span.set_attribute("ingest.todo", len(tasks))
             root.set_attribute("ingest.workers", workers)
@@ -1603,13 +1629,13 @@ def _run_publish(
             "ingest refuses --limit on a real run: publication certifies the "
             "whole corpus; rerun without --limit (a --dry-run may plan a prefix)."
         )
-    pdfs = walk_pdfs(src)
-    if not pdfs:
+    scanned = scan_corpus(src)
+    if not scanned.entries:
         raise RuntimeError(
             "ingest refuses an empty corpus: publishing nothing "
             "would leave the alias serving an empty generation."
         )
-    prewalked = [(str(p), sha256_file(p)) for p in pdfs]
+    prewalked = scanned.entries
     # Identity gate (issue #361) before the corpus fingerprint and staging:
     # publication certifies the gated corpus — a colliding or duplicated
     # walk must fail here, never after a staging generation was cloned.

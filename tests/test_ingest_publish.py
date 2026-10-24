@@ -12,6 +12,7 @@ injection; real PDFs only where main() needs files (built at runtime).
 
 from __future__ import annotations
 
+import os
 import re
 from itertools import permutations
 from pathlib import Path
@@ -3829,3 +3830,99 @@ def test_interrupted_catalog_publication_resumes_with_identical_entries(tmp_path
     with pytest.raises(RuntimeError, match="old-format"):
         _run_main(monkeypatch, other, progress_b)
     assert (fake.collections, fake.aliases, sidecar.read_bytes()) == before
+
+
+# ------------------------------------------------ corpus confinement (#996, #1002, #1003)
+def _fresh_publish(tmp_path, monkeypatch):
+    from mainframe_rag.ingest import run_ingest
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    return fake, corpus, tmp_path / "inv.jsonl"
+
+
+def _nothing_written(fake: PublishFake, progress: Path) -> bool:
+    return not fake.collections and not fake.aliases and not progress.exists()
+
+
+def test_out_of_root_file_symlink_is_refused_and_outside_bytes_never_served(tmp_path, monkeypatch):
+    """#996: a file symlink resolving outside the corpus root is a typed
+    planning refusal before any storage or inventory write; the outside
+    document is never parsed, so it cannot be served."""
+    from mainframe_rag.ingest.corpus_scan import OutOfRootLinkError
+
+    fake, corpus, progress = _fresh_publish(tmp_path, monkeypatch)
+    _build_doc_with_id(corpus, "normal", DOC_A)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    secret = _build_doc_with_id(outside, "confidential", DOC_B)
+    (corpus / "linked.pdf").symlink_to(secret)
+    with pytest.raises(OutOfRootLinkError, match="linked.pdf"):
+        _run_main(monkeypatch, corpus, progress)
+    assert _nothing_written(fake, progress)
+
+
+def test_in_root_file_symlink_and_symlinked_directory_policy(tmp_path, monkeypatch):
+    """#996 policy: a file symlink resolving inside the root is walked; a
+    symlinked directory is never traversed (its PDFs are not the corpus),
+    in-root or not, and the skip is logged with a fixed action."""
+    from mainframe_rag.ingest.corpus_scan import confined_pdfs
+
+    corpus = tmp_path / "corpus"
+    (corpus / "real").mkdir(parents=True)
+    pdf = _build_doc_with_id(corpus / "real", "a", DOC_A)
+    (corpus / "alias.pdf").symlink_to(pdf)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    _build_doc_with_id(outside, "o", DOC_B)
+    (corpus / "linkdir").symlink_to(outside, target_is_directory=True)
+    (corpus / "samedir").symlink_to(corpus / "real", target_is_directory=True)
+    assert [p.name for p in confined_pdfs(corpus)] == ["alias.pdf", "a.pdf"]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
+def test_unreadable_subtree_fails_closed_before_any_write(tmp_path, monkeypatch):
+    """#1003: an unreadable directory makes the walk partial; publication
+    refuses with a typed error, never a green swap lacking its documents."""
+    from mainframe_rag.ingest.corpus_scan import UnreadableSubtreeError
+
+    fake, corpus, progress = _fresh_publish(tmp_path, monkeypatch)
+    _build_doc_with_id(corpus, "a", DOC_A)
+    hidden = corpus / "hidden"
+    hidden.mkdir()
+    _build_doc_with_id(hidden, "b", DOC_B)
+    hidden.chmod(0)
+    try:
+        with pytest.raises(UnreadableSubtreeError, match="hidden"):
+            _run_main(monkeypatch, corpus, progress)
+        assert _nothing_written(fake, progress)
+    finally:
+        hidden.chmod(0o755)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
+def test_unreadable_file_is_a_fixed_error_record_and_the_run_continues(tmp_path, monkeypatch):
+    """#1002: one unreadable PDF becomes a per-file `error` record with a
+    fixed type/message; readable siblings are still planned and recorded; the
+    run exits nonzero and publishes nothing."""
+    from mainframe_rag.ingest.corpus_scan import UNREADABLE_FILE_MESSAGE
+    from mainframe_rag.ingest.inventory import load_inventory
+
+    fake, corpus, progress = _fresh_publish(tmp_path, monkeypatch)
+    good = _build_doc_with_id(corpus, "good", DOC_A)
+    bad = _build_doc_with_id(corpus, "bad", DOC_B)
+    bad.chmod(0)
+    try:
+        assert _run_main(monkeypatch, corpus, progress) == 1
+    finally:
+        bad.chmod(0o644)
+    inv = load_inventory(progress)
+    assert inv[str(bad)].status == "error"
+    assert inv[str(bad)].error_type == "UnreadableFile"
+    assert inv[str(bad)].error == UNREADABLE_FILE_MESSAGE
+    assert str(corpus) not in (inv[str(bad)].error or "")
+    assert inv[str(good)].status == "upserted"
+    assert ALIAS not in fake.aliases  # no cutover over a failed corpus

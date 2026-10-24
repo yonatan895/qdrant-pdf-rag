@@ -46,6 +46,24 @@ a sample (a real run is a publication of the whole corpus and refuses `--limit`)
   an IBM kit's folder names as product and version (issue #849). Note
   the empty-string (not `None`) version.
 
+**Corpus confinement (issues #996, #1002, #1003).** `walk_pdfs` is the corpus
+definition but does not check where a path leads or whether a subtree could be
+listed, so the planner (`corpus_scan.py`, called from `_plan` and the
+publication prewalk; `walk.py` is unchanged) enforces three rules:
+
+- A file symlink whose target resolves outside the corpus root is refused with
+  `OutOfRootLinkError` (code `corpus_symlink_outside_root`) before any parse,
+  storage or inventory write. A symlink resolving inside the root is walked.
+- A **symlinked directory is never traversed**, in-root or out: its PDFs are
+  not part of the corpus. The skip is logged as `symlinked_dir_skipped`.
+- A directory that cannot be listed (or a PDF name that cannot be stat'ed
+  because its directory has no search permission) makes the walk partial and
+  fails closed with `UnreadableSubtreeError` (code `corpus_subtree_unreadable`);
+  no alias can be published over it.
+- A single unreadable file (open/read `OSError`) is not fatal: it gets a fixed
+  `error` inventory record (`error_type` `UnreadableFile`, fixed message, empty
+  sha), the other files are planned, and the run exits nonzero (see §9).
+
 Contract tests: `tests/test_generic_pdf.py` (`detect_vendor`,
 `infer_from_path`), `tests/test_parser_ibm_shape.py` (walker filtering),
 `tests/test_ingest_revisions.py` (one source revision on both ingest paths
@@ -993,7 +1011,7 @@ thread pool.
 - `_parse_one` traps everything and returns a plain `InventoryRecord(status="error")`
   (message capped at 500 chars, exception class name in `error_type`, doc id or filename
   stem, zero pages/chunks) plus a dummy parsed doc; the future-exception path uses an
-  empty sha. One bad PDF never kills the run. Records must stay picklable across spawn
+  empty sha. One bad PDF never kills the run, including a file the planner cannot read (§1, #1002). Records must stay picklable across spawn
   IPC (no exception objects — unpicklable exceptions like `httpx2.HTTPStatusError` from
   contextual LLM calls would crash `ProcessPoolExecutor` across process boundaries).
 - A worker that dies (e.g. OOM-killed, #841) breaks the pool and fails every
