@@ -290,7 +290,7 @@ fi
 # privileged, read-only root, the verified registry image) before any apply.
 helm template "$QDRANT_RELEASE" "$CHART" -n "$NAMESPACE" "$@" > dist/qdrant-rendered.yaml ||
     die "cannot render the Qdrant release for validation"
-python3 scripts/airgap/check_qdrant_render.py "$INTERNAL_REGISTRY/qdrant/qdrant:" < dist/qdrant-rendered.yaml ||
+python3 scripts/airgap/check_qdrant_render.py "$INTERNAL_REGISTRY/qdrant/qdrant:" "$QDRANT_RELEASE" < dist/qdrant-rendered.yaml ||
     die "rendered Qdrant release refused (see above)"
 run helm upgrade -i "$QDRANT_RELEASE" "$CHART" "$@"
 

@@ -153,6 +153,15 @@ def inventory(root: Path, image: Path) -> dict:
 FROM_LINE = re.compile(r'^\s*FROM\s+(?:--\S+\s+)*(\S+)(?:\s+AS\s+(\S+))?\s*$', re.IGNORECASE)
 
 
+# Named build contexts the release build supplies (docker build --build-context);
+# they are directories, not registry images.
+BUILD_CONTEXTS = frozenset({'wheelhouse', 'bm25'})
+
+# `COPY --from=X`, `ADD --from=X` and `RUN --mount=...,from=X`: X must be an earlier
+# stage alias; anything else is an unpinned external image (#1030).
+FROM_SOURCE = re.compile(r'(?:--from=|--mount=[^\s]*?\bfrom=|(?<=,)from=)([^\s,]+)')
+
+
 def check_containerfile_bases(root: Path) -> None:
     """Every images/Containerfile.* FROM must be the approved base pin (#1030).
 
@@ -177,7 +186,10 @@ def check_containerfile_bases(root: Path) -> None:
     for path in files:
         stages: set[str] = set()
         bases = 0
-        for line in path.read_text().splitlines():
+        for line in path.read_text().replace('\\\n', ' ').splitlines():
+            for source in FROM_SOURCE.findall(line):
+                if source not in stages and source not in BUILD_CONTEXTS:
+                    raise locks.LockError('Containerfile copies from or mounts a non-stage image')
             match = FROM_LINE.match(line)
             if not match:
                 if re.match(r'^\s*FROM\b', line, re.IGNORECASE):

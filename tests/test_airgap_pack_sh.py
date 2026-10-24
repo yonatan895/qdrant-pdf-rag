@@ -182,6 +182,28 @@ def test_pack_refuses_a_containerfile_base_digest_off_the_pin(pack_tree, role):
     assert result.returncode == 0, result.stderr
 
 
+@pytest.mark.parametrize("directive", [
+    "COPY --from=evil.example/img:latest / /x",
+    "COPY --from=docker.io/library/busybox@sha256:" + "a" * 64 + " / /x",
+    "RUN --mount=type=bind,from=evil.example/img:latest,target=/m true",
+    "RUN --mount=type=bind,source=/,from=unknown,target=/m true",
+    "COPY --from=missingstage \\\n    / /x",
+], ids=["copy-external", "copy-digest-not-in-images", "mount-external", "mount-unknown", "continued"])
+def test_pack_refuses_a_containerfile_that_reads_from_an_external_image(pack_tree, directive):
+    """#1030: a non-FROM image reference is as unpinned as an off-pin FROM."""
+    root, skopeo_log, _head, _key = pack_tree
+    containerfile = root / "images" / "Containerfile.agent"
+    good = containerfile.read_text()
+    containerfile.write_text(good + "\n" + directive + "\n")
+    result, _ = _run_pack(pack_tree)
+    assert result.returncode != 0
+    assert "Containerfile base digest check failed" in result.stderr
+    assert not skopeo_log.exists()
+    containerfile.write_text(good)
+    result, _ = _run_pack(pack_tree)
+    assert result.returncode == 0, result.stderr
+
+
 @pytest.mark.parametrize("dirt", ["modified", "assume-unchanged", "skip-worktree", "staged"])
 def test_pack_refuses_a_dirty_tree_before_signing(pack_tree, dirt):
     """#1030: `git bundle` records clean HEAD, so a dirty tree must not be signed."""

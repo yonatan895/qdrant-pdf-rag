@@ -467,6 +467,9 @@ def test_rehearsal_knobs_reach_helm(tree):
     ("QDRANT_TAG", "v1{a}"),
     ("QDRANT_STORAGE_SIZE", "1Gi,service.type=LoadBalancer"),
     ("QDRANT_STORAGE_SIZE", "lots"),
+    ("QDRANT_STORAGE_SIZE", "0"),
+    ("QDRANT_STORAGE_SIZE", "100"),
+    ("QDRANT_STORAGE_SIZE", "0Gi"),
     ("INTERNAL_REGISTRY", "reg.internal,image.tag=latest"),
     ("INTERNAL_REGISTRY", "reg internal"),
     ("QDRANT_RELEASE", "Qdrant,x=1"),
@@ -511,6 +514,14 @@ def test_extra_values_are_refused_without_ci_rehearsal(tree):
     assert "upgrade" not in _helm_log(tree)
 
 
+@pytest.mark.parametrize("line", ["CI_REHEARSAL=1", "_ci_rehearsal_cli=1", "_CI_REHEARSAL_PROCESS_ENV=1"])
+def test_ci_rehearsal_internal_capture_cannot_be_forged_by_the_operator_file(tree, line):
+    (tree[0] / "airgap.env").write_text(line + "\n")
+    r = _run(tree, ("QDRANT_EXTRA_VALUES", _values(tree, "resources: {}\n")))
+    assert r.returncode != 0
+    assert "upgrade" not in _helm_log(tree)
+
+
 def test_ci_rehearsal_cannot_come_from_the_operator_file(tree):
     (tree[0] / "airgap.env").write_text("CI_REHEARSAL=1\n")
     r = _run(tree, ("QDRANT_EXTRA_VALUES", _values(tree, "resources: {}\n")))
@@ -527,7 +538,13 @@ def test_ci_rehearsal_cannot_come_from_the_operator_file(tree):
     "containerSecurityContext:\n  privileged: true\n",
     "sidecarContainers:\n  - name: x\n    image: evil.example/x:1\n    securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true}\n",
     "additionalVolumes:\n  - name: h\n    hostPath: {path: /}\n",
-], ids=["loadbalancer", "nodeport", "ingress", "no-api-key", "writable-root", "privileged", "foreign-sidecar-image", "hostpath"])
+    "containerSecurityContext:\n  capabilities:\n    add: [SYS_ADMIN]\n",
+    "containerSecurityContext:\n  runAsUser: 0\n  runAsNonRoot: false\n",
+    "podSecurityContext:\n  runAsUser: 0\n",
+    "sidecarContainers:\n  - name: x\n    image: reg.internal/qdrant/qdrant:x\n    ports: [{containerPort: 80, hostPort: 80}]\n    securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, runAsNonRoot: true, capabilities: {drop: [ALL]}}\n",
+    "serviceAccount:\n  name: cluster-admin\n",
+], ids=["loadbalancer", "nodeport", "ingress", "no-api-key", "writable-root", "privileged", "foreign-sidecar-image", "hostpath",
+        "cap-add", "container-root", "pod-root", "hostport", "foreign-serviceaccount"])
 def test_hostile_extra_values_are_refused_by_the_qdrant_render(tree, text):
     r = _run(tree, ("QDRANT_EXTRA_VALUES", _values(tree, text)), ("CI_REHEARSAL", "1"))
     assert r.returncode != 0, r.stdout

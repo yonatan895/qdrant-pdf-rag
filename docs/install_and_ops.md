@@ -546,8 +546,9 @@ SNEAKERNET_KEY_TRUSTED=true sh scripts/tools/run-task.sh airgap:pack
 commit (no tracked staged or unstaged change, no assume-unchanged/skip-worktree
 flag; untracked `airgap.env` and `dist/` are fine) and every
 `images/Containerfile.*` `FROM` digest equals the base pin in `images.txt` and
-the dependency lock (`python3 scripts/image_inventory.py --check-containerfiles`)
-(#1030).
+the dependency lock (`python3 scripts/image_inventory.py --check-containerfiles`);
+every `COPY/ADD --from` and `RUN --mount ...from=` must name an earlier build stage or
+the `wheelhouse`/`bm25` build contexts (#1030).
 
 A maintainer creates the signing key once in a protected directory, for example
 with `openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out signing.pem`,
