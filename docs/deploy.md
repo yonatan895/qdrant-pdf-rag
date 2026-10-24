@@ -90,7 +90,7 @@ restores the snapshot over whatever the file assigned; empty stays unset
 - Operator booleans `UI_ENABLED`, `CONTEXTUAL_EMBED_ENABLED`,
   `INGEST_ALIAS_PUBLISH`, `INGEST_REINGEST`, `INGEST_AUTHORIZE_FROM_CATALOG`,
   `CHAT_CONDENSE_ENABLED`, `LLM_STREAM`
-  `FEEDBACK_ENABLED` and `AGENT_NETWORK_POLICY` (default **true**, unlike the others)
+  `FEEDBACK_ENABLED`, `OPENWEBUI_ENABLED` and `AGENT_NETWORK_POLICY` (default **true**, unlike the others)
   accept only `true/1/yes` or `false/0/no` (any case; unset keeps the
   default). `INGEST_ALIAS_PUBLISH` may only be unset or true: in-place ingest
   was retired (#360) and an explicit false fails closed.
@@ -278,6 +278,11 @@ Compatibility and lifecycle decisions under #448:
   are additive, so a site allow-all or broad allow policy that also selects the
   agent pods voids the restriction; a site default-deny is not satisfied by
   this policy for Qdrant or OpenObserve.
+
+- Open WebUI docs front end (issue #1074, ADR-0007, **default off**): `OPENWEBUI_*`
+  keys, validated by `model_config.openwebui_config` before any mutation, render the
+  objects, Route checks and Pipe install described in
+  [Docs front end](#docs-front-end); off renders nothing.
 
 <a id="feedback-service"></a>
 - Answer-feedback service (issue #804, ADR-0005, **default off**). With
@@ -1576,6 +1581,130 @@ PrometheusRule (it would depend on user-workload monitoring, which ADR-0006 repl
   between the 30% budget and a full volume), routed to the site's on-call destination. This is a
   required item on the site-check list below the ADR-0006 open checks (#807).
 The smoke trace check is a later step of #956.
+
+<a id="docs-front-end"></a>
+## Docs front end: Open WebUI (ADR-0007, #1074)
+
+Open WebUI is an optional, **off-by-default** second front end for the docs corpus. It is a
+client of the agent: its only model is the repository docs Pipe (#1072) over `/v1/chat`. It
+holds no gateway key and no model connection, and it does no retrieval of its own. The console
+stays the supported fallback and is untouched. Enabling it in production waits for ADR-0007 to be
+accepted and for the #1073 trial to qualify the image and the settings below. The environment
+variable names, the uvicorn TLS arguments, the Functions API used by the Pipe installer and the
+chat table layout used by the purge are those of Open WebUI v0.12.3, **pending #1073
+qualification**, and are re-qualified on every pin import.
+
+**What `OPENWEBUI_ENABLED=true` (`openwebui.enabled`) renders.** With it off, the render is
+byte-identical to a release without it (tested).
+- `Deployment/rag-openwebui`: one replica, `Recreate`, one uvicorn worker, SQLite on the kept RWO
+  claim `rag-openwebui-data` (`OPENWEBUI_STORAGE_SIZE`, default 10Gi, on `STORAGE_CLASS`; NFS is
+  refused). It runs under `restricted-v2` with a platform-assigned UID: non-root, `drop: [ALL]`,
+  seccomp `RuntimeDefault`, no privilege escalation, no fixed IDs and no `anyuid`. The read-only
+  root filesystem is not claimed; it is a #1073 trial item. The pod serves TLS on 8443 from the
+  service-serving certificate (`rag-openwebui-tls`); there is no plain HTTP port.
+- The chat-purge sidecar (same image, read-only root, no credentials) enforces the retention
+  window (below).
+- `Service/rag-openwebui` (ClusterIP, 8443) and `Route/rag-openwebui`: reencrypt, HTTP
+  redirected, on `OPENWEBUI_HOST`, with the namespace service CA as the destination CA. Users
+  authenticate in Open WebUI through OIDC, so there is no oauth-proxy (ADR-0007 R3). The Route
+  exposure preflight treats `rag-openwebui` as a protected Service. It refuses any other Route
+  in front of it, whether the front end is on or off. It retires an owned Route that differs from
+  the contract before the release, and it verifies the live Route after the release, deleting
+  the Route and failing on a mismatch.
+- `NetworkPolicy/rag-openwebui`. Ingress is allowed from the OpenShift router to 8443 only.
+  Egress is allowed to the agent pods on 8080, to cluster DNS (`openshift-dns`, `kube-system`),
+  and to `OPENWEBUI_IDP_EGRESS_CIDRS` on `OPENWEBUI_IDP_EGRESS_PORT`, and to nothing else. This
+  policy is the zero-egress control; the offline settings are not. The policy needs an enforcing
+  CNI, and the site provides that evidence.
+- `ConfigMap/rag-openwebui-pipe`: the repository Pipe, its installer and the purge script, each
+  annotated with its sha256.
+- Environment, by ADR-0007 condition:
+  - Offline (R2): `OFFLINE_MODE`, no version check, no community sharing, no telemetry, no pip or
+    model downloads.
+  - No vector store (V1): the slim image with no vector DB URL, retrieval bypassed; uploads,
+    knowledge, memories, notes, channels, web search, code execution and the interpreter off.
+  - Answers only through the agent (V2): no OpenAI or Ollama connections, no direct connections
+    or tool servers, task generation off, built-in ratings off.
+  - Chat history (S2, S3): no admin chat access or admin export.
+  - Logs (S4): metadata-only audit.
+  - Identity (R3): OIDC only; no login form, signup, password or initial-admin signup, no token
+    exchange; 8-hour sessions.
+  - `ENABLE_PERSISTENT_CONFIG=false`, so admin-UI edits cannot override this environment.
+
+**What the identity team registers.** One confidential OIDC client on the organisation's IdP
+(AD FS, or Keycloak in front of it):
+- Redirect URI: `https://<OPENWEBUI_HOST>/oauth/oidc/callback`. Scopes: `openid email profile`.
+  Client authentication by client secret.
+- The **ID token** must carry `email`, the group claim (`OPENWEBUI_OIDC_GROUP_CLAIM`, default
+  `groups`) and the roles claim (`OPENWEBUI_OIDC_ROLES_CLAIM`, default `roles`). Open WebUI
+  merges ID-token claims with userinfo, and AD FS userinfo returns only `sub`, so AD FS issues
+  these through ID-token issuance rules.
+- Group values must be **names, not SIDs** (AD FS "Token-Groups - Unqualified Names"; in Keycloak,
+  a group-membership mapper with full group path off). Groups are re-synced on every login.
+- Roles claim values: `OPENWEBUI_OIDC_ALLOWED_ROLES` lists the roles that may sign in (all
+  employees in the pilot), and `OPENWEBUI_OIDC_ADMIN_ROLES` lists the named owners who are Open
+  WebUI admins. Admins can still read chats through the database or a Function (ADR-0007 S3), so
+  keep that group small.
+- The team hands over: the discovery URL (`https://<idp>/.well-known/openid-configuration`), the
+  client id, the client secret (it goes into the Secret, never `airgap.env`), and the IdP's IPv4
+  CIDRs and port for the egress policy.
+
+**Site procedure.**
+1. On the connected side, #1073 records the derived image and its upstream base digest in
+   `images.txt`. Then pack and load: the bundle carries `openwebui-image.tar` only once the pin is
+   recorded, and validate/deploy refuse `OPENWEBUI_ENABLED=true` while the pin is
+   `sha256:PENDING` or does not match the chart and the bundle.
+2. Create the Secret (`OPENWEBUI_SECRET`) with `webui-secret-key` (`openssl rand -hex 32`) and
+   `oidc-client-secret`. Deploy checks that both keys are present before any mutation.
+3. Set the `OPENWEBUI_*` keys in `airgap.env` (see `airgap.env.example`) and run
+   `sh scripts/tools/run-task.sh airgap:deploy`. The bridge of these keys through
+   `taskfiles/airgap.yml` is a Verifier-owned change (#1074). Deploy verifies the registry image
+   and then the running pod's digest (`check_pod_images`, role `openwebui`), waits for the
+   rollout (schema migrations at first start), and verifies the Route.
+4. First admin: a member of an admin role signs in once, creates an API key in Open WebUI, and
+   adds it to the Secret as `admin-api-key`. Re-run `airgap:deploy`. The installer then runs
+   inside the pod with the key on stdin. It refuses a mounted Pipe whose sha256 differs from the
+   repository file, sends the key only to the pod's own serving certificate, creates or updates
+   the Function, reads it back by hash and activates it. Until the key exists, deploy prints
+   `docs Pipe NOT installed` and the front end offers no model.
+5. Give all signed-in users read access to the Docs model in the Open WebUI admin UI (the
+   default visibility is a #1073 trial item). Then sign in as an ordinary user and ask one
+   question: citations show as source chips, and the console still works.
+
+**Retention (ADR-0007 S2).** The window is `OPENWEBUI_RETENTION_DAYS` (`openwebui.retentionDays`),
+default **30 days** (maintainer decision 2026-10-24). An explicit null fails the render.
+- The chat-purge sidecar runs hourly. In one transaction it deletes the chats last updated before
+  the window, their shared snapshots and stale snapshots, every row that references a deleted
+  chat by `chat_id`, and file records with their uploads. Deletion runs with `secure_delete`;
+  the sidecar then truncates the WAL and runs `VACUUM`, so the text is gone from the claim's
+  files. Users may also delete their own chats.
+- An unexpected table layout or a timestamp that is not epoch seconds refuses to delete
+  anything. A busy database or a failed vacuum is a failed run. Each run logs one line of counts.
+  Failures are retried after 5 minutes and counted in `rag-openwebui-data/.mainframe-rag-purge.json`
+  (`consecutive_failures`, `total_failures`, `last_success`). Alert on `consecutive_failures`
+  above 0 for more than a day.
+- Backups of `rag-openwebui-data` hold chat text. They are protected records that never leave
+  the enterprise, and their retention follows the same window: at most 30 days plus one backup
+  cycle.
+
+**Patch policy and advisory switch-off (ADR-0007 P1).** The maintainer owns patching. Agents
+prepare a monthly import of the latest upstream release as a dedicated pin-bump PR, carrying the
+base and derived digests, the licence record, the re-run of every ADR-0007 condition, and an
+upgrade of a PVC copy. Upstream fixes land only on its latest release. If a published High or
+Critical advisory affects the running pin and stays unpatched for **14 days**, switch the front end
+off with the rollback flag below until a qualified import is deployed.
+
+**Rollback (K1).** Set `OPENWEBUI_ENABLED=false` and re-run `airgap:deploy`. Helm removes the
+Deployment, Service, Route, NetworkPolicy and ConfigMap. The claim `rag-openwebui-data` is kept
+(`helm.sh/resource-policy: keep`), and nothing purges it while the front end is off. The agent
+and the console are unchanged. Open WebUI chats cannot move into the console. A database that a
+newer pin has migrated rolls back only through its pre-upgrade snapshot. To retire the front end
+for good, delete the claim explicitly (`oc delete pvc rag-openwebui-data`); no deploy path does
+that.
+
+**Requirements.** The Route API (OpenShift; deploy refuses the front end without it) and an
+enforcing CNI. The Kind lanes do not enable the front end yet: an e2e run with it enabled needs
+the #1073 test IdP and the #1072 Pipe.
 
 <a id="configuration-contract"></a>
 ## Operator configuration propagation contract
