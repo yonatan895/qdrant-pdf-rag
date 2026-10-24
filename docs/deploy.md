@@ -1025,6 +1025,7 @@ and CI tooling have different owners and pull credentials.
 | OpenObserve OSS (ADR-0006) | `openobserve/openobserve:v1.1.2` | as the agent; the chart references it by digest only (`images.openobserve.digest`) | `load.sh` | cluster pods when tracing is on with an empty `tracing.endpoint` |
 | otelcol-contrib (ADR-0006) | `otel/opentelemetry-collector-contrib:0.160.0` | as the agent | `load.sh` | cluster pod (`Deployment/otelcol`, container `otelcol`) beside OpenObserve |
 | OAuth sidecar (optional) | `openshift4/ose-oauth-proxy:v4.14` | as the agent; absent while `images.txt` says `sha256:PENDING` | `load.sh` | cluster pods |
+| Open WebUI front end (optional, ADR-0007, #1074) | `qdrant-pdf-rag-openwebui:v0.12.3-slim` | as the agent; absent while `images.txt` says `sha256:PENDING` (#1073 records it); the upstream `open-webui/open-webui:v0.12.3-slim` line is factory build provenance, never pushed | `load.sh` | cluster pod (`Deployment/rag-openwebui`, container `openwebui`) when `openwebui.enabled` |
 | CI job image | `ci/python:3.14`, or a complete `CI_PYTHON_IMAGE` | mirrored UBI Python 3.14 (GIL) with git, pip, tar, sha256sum | platform or factory mirror, not this repository | GitLab runner |
 | CI Qdrant service | `qdrant/qdrant@sha256:<images.txt digest>` | the `images.txt` manifest digest, so a tag is never enough | registry-to-registry copy that preserves the digest | GitLab runner (`sim`, `gate-l1`) |
 

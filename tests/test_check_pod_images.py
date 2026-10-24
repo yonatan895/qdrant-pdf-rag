@@ -209,6 +209,26 @@ def test_openobserve_deployment_is_bound_to_its_own_workload_and_digest():
     assert check({"items": []}, role="openobserve") == ["missing or ambiguous Deployment openobserve"]
 
 
+def test_openwebui_role_is_bound_to_the_rag_openwebui_deployment_container():
+    """ADR-0007 (#1074): the Open WebUI image is verified through Deployment
+    rag-openwebui, container openwebui; a same-image container elsewhere
+    (another workload or container name) does not satisfy it."""
+    document = rollout("Deployment", name="rag-openwebui", container="openwebui")
+    assert check(document, role="openwebui") == []
+    assert check(document, role="openwebui", digest=OTHER) == [
+        f"pod rag-openwebui-0 container openwebui runs {DIGEST}, expected {OTHER}"]
+    assert check({"items": []}, role="openwebui") == ["missing or ambiguous Deployment rag-openwebui"]
+    renamed = rollout("Deployment", name="rag-openwebui", container="webui")
+    assert "Deployment rag-openwebui container openwebui has an unexpected repository" in check(
+        renamed, role="openwebui")
+    other_workload = rollout("Deployment", name="openwebui", container="openwebui")
+    assert check(other_workload, role="openwebui") == ["missing or ambiguous Deployment rag-openwebui"]
+    # The CLI accepts the role (an unknown role is a usage refusal).
+    result = subprocess.run([sys.executable, str(SCRIPT), "ns", "qdrant", f"openwebui={REPO_Q}@{DIGEST}"],
+                            input=json.dumps(document), capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+
+
 def test_feedback_statefulset_is_bound_to_its_own_workload_and_digest():
     """#804: the feedback pod runs the agent image but is a different workload;
     it is verified through its own StatefulSet, never through rag-agent."""

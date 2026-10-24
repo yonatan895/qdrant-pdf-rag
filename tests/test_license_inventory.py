@@ -107,6 +107,37 @@ def test_recorded_decisions_match_the_maintainer_dispositions():
     assert len([ln for ln in rpm_list.read_text().splitlines() if ln and not ln.startswith("#")]) == 116
 
 
+def test_open_webui_licence_records_the_maintainer_decision_and_its_conditions():
+    """ADR-0007 L1 (#1074): both Open WebUI images.txt lines (derived bundle
+    member and upstream build base) carry a record bound to their pins, classed
+    proprietary (BSD-3 plus a branding clause, non-OSI), approved by the
+    2026-10-24 maintainer decision with its conditions kept in the record."""
+    inventory = real_inventory()
+    by_id = {e["id"]: e for e in inventory["components"]}
+    binds = {
+        "image:openwebui": "ghcr.io/yonatan895/qdrant-pdf-rag-openwebui:v0.12.3-slim",
+        "image:openwebui-base": "ghcr.io/open-webui/open-webui:v0.12.3-slim",
+    }
+    for cid, ref in binds.items():
+        entry = by_id[cid]
+        assert entry["bind"] == {"images_txt": ref, "digest": "sha256:PENDING"}, cid
+        assert (entry["license_spdx"], entry["class"]) == ("LicenseRef-Open-WebUI-License", "proprietary")
+        assert entry["status"] == "approved" and "ADR-0007 L1" in entry["approval_ref"]
+        assert entry["decision"]["owner"] == "yonatan895" and entry["decision"]["date"] == "2026-10-24"
+        assert "branding" in entry["obligation"] and "100 users" in entry["obligation"]
+    assert "unmodified" in by_id["image:openwebui"]["decision"]["disposition"]
+    assert "100 users" in by_id["image:openwebui"]["decision"]["disposition"]
+    assert "not an OSI-approved" in by_id["image:openwebui"]["license_declared"]
+    problems, unresolved, _ = problems_for(inventory)
+    assert problems == [] and not [u for u in unresolved if "openwebui" in u]
+    # Without the decision the restricted class cannot rest on declared metadata.
+    del by_id["image:openwebui"]["decision"]
+    by_id["image:openwebui"].update(status="declared", approval_ref=None)
+    problems, _, _ = problems_for(inventory)
+    assert any("component:image:openwebui: class proprietary cannot rest on declared metadata" in p
+               for p in problems)
+
+
 def test_altered_python_notice_text_is_flagged_and_notices_carry_the_four_texts(tmp_path):
     inventory = notice_inventory(tmp_path)
     text = li.render_notices(REPO, inventory, tmp_path)
@@ -274,6 +305,17 @@ def test_changed_image_digest_requires_re_review(tree, capsys):
     images.write_text(images.read_text().replace("sha256:efb96a94", "sha256:b0e04fe6"))
     code, out = run(tree, capsys)
     assert code == 1 and "image:qdrant" in out and "re-review the image" in out
+
+
+def test_recording_the_open_webui_digest_requires_re_review(tree, capsys):
+    """#1074: recording the #1073 digest without updating the licence record
+    is a refusal, not a silent rebind of the pending entry."""
+    images = tree / "images.txt"
+    pending = "qdrant-pdf-rag-openwebui:v0.12.3-slim               sha256:PENDING"
+    assert pending in images.read_text()
+    images.write_text(images.read_text().replace(pending, pending.replace("PENDING", "d" * 64)))
+    code, out = run(tree, capsys)
+    assert code == 1 and "image:openwebui" in out and "re-review the image" in out
 
 
 def test_unrecorded_vendored_asset_and_second_chart_are_flagged(tree, capsys):

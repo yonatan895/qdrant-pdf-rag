@@ -161,6 +161,56 @@
       "status": "approved"
     },
     {
+      "approval_ref": "gh:yonatan895/qdrant-pdf-rag#1070 maintainer decision 2026-10-24, relayed by the #1070 coordinator; ADR-0007 L1",
+      "bind": {
+        "digest": "sha256:PENDING",
+        "images_txt": "ghcr.io/open-webui/open-webui:v0.12.3-slim"
+      },
+      "class": "proprietary",
+      "decision": {
+        "date": "2026-10-24",
+        "disposition": "approved with image:openwebui (ADR-0007 L1): the upstream slim image is the factory build base of the derived image and ships only as its base layers; same branding and at most 100 users conditions",
+        "owner": "yonatan895"
+      },
+      "distributed_by_repo": true,
+      "id": "image:openwebui-base",
+      "kind": "image",
+      "license_declared": "Open WebUI License (v0.6.6 and later): BSD-3-Clause terms plus a branding clause (clause 4) that forbids altering, removing or replacing the Open WebUI branding except for deployments of at most 50 end users in a rolling 30 days, written permission or an enterprise licence; the upstream project states it is not an OSI-approved licence",
+      "license_spdx": "LicenseRef-Open-WebUI-License",
+      "name": "Open WebUI v0.12.3 slim upstream image (build base of the derived image, factory provenance)",
+      "obligation": "Same as image:openwebui: keep the copyright notice, conditions and disclaimer; never alter, remove or replace the Open WebUI branding; at most 100 users. Not a bundle member on its own; its layers ship inside openwebui-image.tar. Image layer licenses are not enumerated (#371).",
+      "ships_in": [
+        "openwebui-image.tar (as the base layers of the derived image)"
+      ],
+      "spdx_basis": "upstream-project-license",
+      "status": "approved"
+    },
+    {
+      "approval_ref": "gh:yonatan895/qdrant-pdf-rag#1070 maintainer decision 2026-10-24, relayed by the #1070 coordinator; ADR-0007 L1",
+      "bind": {
+        "digest": "sha256:PENDING",
+        "images_txt": "ghcr.io/yonatan895/qdrant-pdf-rag-openwebui:v0.12.3-slim"
+      },
+      "class": "proprietary",
+      "decision": {
+        "date": "2026-10-24",
+        "disposition": "Open WebUI License accepted for the optional docs front end (ADR-0007 L1) on the conditions that the branding stays unmodified (no custom name, logo, theme or injected CSS) and the deployment serves at most 100 users; the repository adds only an ownership/permission layer to the upstream slim image (#1073). Patching: the maintainer owns monthly agent-prepared upstream imports (ADR-0007 P1). Any branding change, user count above 100 or source change needs a new decision.",
+        "owner": "yonatan895"
+      },
+      "distributed_by_repo": true,
+      "id": "image:openwebui",
+      "kind": "image",
+      "license_declared": "Open WebUI License (v0.6.6 and later): BSD-3-Clause terms plus a branding clause (clause 4) that forbids altering, removing or replacing the Open WebUI branding except for deployments of at most 50 end users in a rolling 30 days, written permission or an enterprise licence; the upstream project states it is not an OSI-approved licence",
+      "license_spdx": "LicenseRef-Open-WebUI-License",
+      "name": "Open WebUI v0.12.3 slim, hardened derived image (optional docs front end, ADR-0007)",
+      "obligation": "Keep the copyright notice, conditions and disclaimer with every copy (BSD-3 clauses 1-2); never alter, remove or replace the Open WebUI branding (no custom name, logo, theme or injected CSS); the pilot is capped at 100 users. The repository adds only an ownership/permission layer in the connected factory (#1073), no source change. Image layer licenses are not enumerated (#371).",
+      "ships_in": [
+        "openwebui-image.tar (when the pin is recorded and bundled)"
+      ],
+      "spdx_basis": "upstream-project-license",
+      "status": "approved"
+    },
+    {
       "approval_ref": null,
       "bind": {},
       "class": "permissive",
