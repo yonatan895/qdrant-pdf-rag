@@ -340,9 +340,14 @@ for citations and filters.
   contract is unchanged. `page_label` is the printed-label range over every
   touched page (`_page_label_range`): single, or `first–last` with an
   en-dash, and **empty** whenever the printed labels cannot locate the whole
-  span — any page in the span unlabeled, or a multi-page span starting and
-  ending on the same printed label (repeated folios). A printed label is
-  never invented. Citations then fall back to the physical span (`p. PDF n` /
+  span — any page in the span unlabeled, or any page whose label does not
+  advance on the page before it (issue #1020). Advancing means the same
+  shape of digit, letter and separator runs, with the first differing run a
+  larger decimal number, one-case roman numeral or single letter (`1-12` →
+  `2-1`, `ix` → `x`, `A-9` → `B-1`). A repeated folio (`A-`, `A-`), a
+  restarted `/PageLabels` rule (`1,2,3,1,2,3` stored `2–1`, or `1–2` for
+  five pages) and a style change (`xii` → `1-1`) all store empty. A printed
+  label is never invented. Citations then fall back to the physical span (`p. PDF n` /
   `p. PDF n–m`, see [retrieval §1](retrieval.md)). A `/PageLabels` tree whose
   first rule starts after page 0 makes PyMuPDF's `get_label()` raise
   `IndexError` on the earlier pages; extraction treats those labels as absent

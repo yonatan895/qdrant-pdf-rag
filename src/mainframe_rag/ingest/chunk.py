@@ -950,22 +950,63 @@ def fallback_sections(page_texts: list[str], title: str) -> list[Section]:
     return [s for s in sections if s.page_end > s.page_start]
 
 
+_LABEL_TOKEN_RE = re.compile(r"\d+|[A-Za-z]+|[^\dA-Za-z]+")
+_ROMAN_RE = re.compile(r"(?:m{0,3})(?:cm|cd|d?c{0,3})(?:xc|xl|l?x{0,3})(?:ix|iv|v?i{0,3})")
+_ROMAN_VALUES = {"i": 1, "v": 5, "x": 10, "l": 50, "c": 100, "d": 500, "m": 1000}
+
+
+def _roman_value(token: str) -> int | None:
+    """Value of a one-case roman numeral ('xii', 'XIV'), else None."""
+    if not (token.islower() or token.isupper()) or not _ROMAN_RE.fullmatch(token.lower()):
+        return None
+    values = [_ROMAN_VALUES[ch] for ch in token.lower()]
+    return sum(-v if v < nxt else v for v, nxt in zip(values, [*values[1:], 0], strict=True))
+
+
+def _label_advances(prev: str, cur: str) -> bool:
+    """True when printed label `cur` provably follows `prev` (issue #1020).
+
+    The labels must have the same shape (digit, letter and separator runs
+    in the same places), and at the first differing run both must be
+    numbers that grow: decimal, one-case roman numerals, or single letters
+    of one case ('A-9' -> 'B-1'). Anything else (a restarted rule, a repeated
+    folio, a style change such as 'xii' -> '1-1') proves nothing."""
+    a, b = _LABEL_TOKEN_RE.findall(prev), _LABEL_TOKEN_RE.findall(cur)
+    if len(a) != len(b):
+        return False
+    for x, y in zip(a, b, strict=True):
+        if x == y:
+            continue
+        if x.isdigit() and y.isdigit():
+            return int(y) > int(x)
+        rx, ry = _roman_value(x), _roman_value(y)
+        if rx is not None and ry is not None and x.islower() == y.islower():
+            return ry > rx
+        single = len(x) == len(y) == 1 and x.isalpha() and y.isalpha()
+        return single and x.islower() == y.islower() and y > x
+    return False
+
+
 def _page_label_range(labels: list[str | None]) -> str:
     """Printed-label range for a chunk's physical page span, or '' when the
     printed labels cannot honestly locate the whole span (issue #271).
 
     '' when any page in the span is unlabeled (a surviving label would
-    understate the span) or when a multi-page span starts and ends on the
-    same printed label (repeated folios, e.g. every page labeled 'A-'). The
-    citation then falls back to the physical PDF pages (page_start/page_end).
-    A printed label is never invented for an unlabeled page."""
+    understate the span) or when any page's label does not advance on the
+    previous one (issue #1020): a repeated folio (every page 'A-') locates
+    nothing, and a restarted /PageLabels rule (1,2,3,1,2,3) stored '2–1' or a
+    short '1–2' for five pages. The citation then falls back to the physical
+    PDF pages (page_start/page_end). A printed label is never invented for
+    an unlabeled page."""
     present = [lbl for lbl in labels if lbl]
     if not present or len(present) != len(labels):
         return ""
     first, last = present[0], present[-1]
     if len(present) == 1:
         return first
-    return "" if first == last else f"{first}\u2013{last}"
+    if not all(_label_advances(a, b) for a, b in pairwise(present)):
+        return ""
+    return f"{first}\u2013{last}"
 
 
 def make_chunks(
