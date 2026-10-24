@@ -1144,7 +1144,7 @@ def test_pipe_in_a_label_is_refused_with_a_fixed_error_on_the_worker_path(
         run_ingest, "_load_worker_settings", lambda: Settings(embed_mode="hash", _env_file=None)
     )
     embed_calls = _spy_embed(monkeypatch)
-    task = (str(pdf), cli.get("vendor"), cli.get("product"), cli.get("version"), str(tmp_path), "d" * 64, True, None)
+    task = (str(pdf), cli.get("vendor"), cli.get("product"), cli.get("version"), str(tmp_path), sha256_file(pdf), True, None)
     record, _parsed, chunks, vectors, contexts = run_ingest._parse_one(task)
     assert record.status == "error"
     assert record.error_type == "LabelDelimiterRefused"

@@ -4046,3 +4046,38 @@ def test_file_changed_after_the_scan_is_refused_at_parse_time(tmp_path, monkeypa
     assert record.status == "error" and record.error_type == "WalkedFileChangedError"
     assert record.error == "walked_file_changed: walked file changed after the corpus scan"
     assert chunks == [] and vectors == []
+
+
+def test_swap_and_restore_during_parse_never_feeds_foreign_bytes_to_the_parser(tmp_path, monkeypatch):
+    """#996 TOCTOU: the original path is swapped for other bytes while the
+    parser runs and restored before it returns, so a later digest re-read of
+    the path would pass. The worker parses a private copy of the verified
+    bytes, so the parsed content is the original document's."""
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.ibm_pdf import sha256_file
+
+    _publish_env(monkeypatch)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    pdf = _build_doc_with_id(corpus, "a", DOC_A)
+    sha = sha256_file(pdf)
+    original = pdf.read_bytes()
+    foreign = _build_doc_with_id(tmp_path, "foreign", DOC_B).read_bytes()
+    real_parse = run_ingest.parse_walked
+    seen = []
+
+    def swapping_parse(path, *args, **kwargs):
+        seen.append(Path(path))
+        pdf.write_bytes(foreign)
+        try:
+            return real_parse(path, *args, **kwargs)
+        finally:
+            pdf.write_bytes(original)
+
+    monkeypatch.setattr(run_ingest, "parse_walked", swapping_parse)
+    record, parsed, chunks, _vectors, _ = run_ingest._parse_one(_parse_task(corpus, pdf, sha))
+    assert record.status != "error", record.error
+    assert record.path == str(pdf)
+    assert seen and seen[0] != pdf
+    assert parsed.doc_id == DOC_A
+    assert chunks

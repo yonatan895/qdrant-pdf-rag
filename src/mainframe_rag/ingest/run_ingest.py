@@ -20,7 +20,9 @@ import json
 import logging
 import multiprocessing as mp
 import os
+import shutil
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -81,8 +83,8 @@ from mainframe_rag.ingest.context import (
 from mainframe_rag.ingest.corpus_scan import (
     UNREADABLE_FILE_MESSAGE,
     UNREADABLE_FILE_TYPE,
+    private_verified_copy,
     require_inside_root,
-    require_unchanged,
     scan_corpus,
     unreadable_paths,
 )
@@ -289,32 +291,36 @@ def _parse_one(
     path_str, vendor, product, version, corpus_root, sha, embed, cache_path = args
     started = time.monotonic()
     parsed: ParsedDoc | None = None
+    tmp_dir = tempfile.mkdtemp(prefix="mfr-parse-")  # 0700, private to this call
     try:
         path = Path(path_str)
         # TOCTOU (#996): the scan confined this path once; re-check right
-        # before any byte is parsed, and verify the digest after reading.
+        # before any byte is read. The parser then reads a private copy of
+        # exactly the bytes that match the walk digest, never the live path.
         require_inside_root(path, corpus_root)
         settings = _load_worker_settings()
         # Per-document bounds (issue #374): each refusal is an explicit
         # error record before the stage it bounds — no partial ingest, no
         # completion. 0 = unbounded (legacy).
         require_document_within("pdf_bytes", path.stat().st_size, settings.ingest_max_pdf_bytes)
+        work_path, work_root = path, Path(corpus_root) if corpus_root else None
+        if corpus_root and sha:
+            work_path, work_root = private_verified_copy(path, corpus_root, sha, tmp_dir)
         parsed = parse_walked(
-            path,
+            work_path,
             sha,
             vendor=vendor,
             product=product,
             version=version,
-            corpus_root=Path(corpus_root) if corpus_root else None,
+            corpus_root=work_root,
         )
         source_rev = walked_source_rev(parsed)
         require_document_within("pages", parsed.page_count, settings.ingest_max_doc_pages)
-        doc = pymupdf.open(path)
+        doc = pymupdf.open(work_path)
         try:
             page_texts, page_labels = _extract_page_texts(doc)
         finally:
             doc.close()
-        require_unchanged(path, sha, corpus_root)
         stripped = strip_chrome(page_texts)
         chunks = make_chunks(parsed, stripped, page_labels)
         require_document_within("chunks", len(chunks), settings.ingest_max_doc_chunks)
@@ -412,6 +418,8 @@ def _parse_one(
             )
         )
         return record, dummy_parsed, [], [], {}
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 def resolve_workers(requested: int | None, settings: Settings) -> int:

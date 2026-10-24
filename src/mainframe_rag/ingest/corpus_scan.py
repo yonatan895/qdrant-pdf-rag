@@ -9,6 +9,7 @@ absolute paths, exception text or manual content."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -78,14 +79,28 @@ def require_inside_root(path: Path, corpus_root: str | None) -> None:
         raise WalkedFileMovedError
 
 
-def require_unchanged(path: Path, walk_sha: str, corpus_root: str | None) -> None:
-    """After the worker read the file: still inside the root and still the
-    bytes the scan hashed, else the parsed content is refused."""
-    if not corpus_root or not walk_sha:
-        return
-    require_inside_root(path, corpus_root)
-    if sha256_file(path) != walk_sha:
+def private_verified_copy(path: Path, corpus_root: str, walk_sha: str, tmp_dir: str) -> tuple[Path, Path]:
+    """Copy the walked file ONCE into a private directory at the same path
+    relative to the corpus root, hashing the same bytes while copying, and
+    refuse unless they equal the walk digest. Returns (copy, private root):
+    the parser then reads exactly the verified bytes, whatever happens to the
+    original path afterwards, and path-derived labels are unchanged."""
+    root = Path(corpus_root)
+    try:
+        rel = path.relative_to(root)
+    except ValueError:
+        rel = path.resolve().relative_to(root.resolve())
+    private_root = Path(tmp_dir) / "root"
+    target = private_root / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256()
+    with open(path, "rb") as src, open(target, "wb") as dst:
+        for block in iter(lambda: src.read(1 << 20), b""):
+            digest.update(block)
+            dst.write(block)
+    if digest.hexdigest() != walk_sha:
         raise WalkedFileChangedError
+    return target, private_root
 
 
 @dataclass(frozen=True)

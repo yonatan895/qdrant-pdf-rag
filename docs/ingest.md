@@ -65,11 +65,13 @@ publication prewalk; `walk.py` is unchanged) enforces three rules:
   sha), the other files are planned, and the run exits nonzero (see §9).
   A corpus whose only PDFs are unreadable gets the same per-file records and
   exits nonzero without staging or publishing anything.
-- **Parse-time re-check (TOCTOU).** The scan confines a path once; the worker
-  re-checks that it still resolves inside the corpus root right before parsing
-  and that the file's sha256 still equals the walk-time digest after reading.
-  A mismatch is a fixed `error` record (`WalkedFileMovedError`,
-  `WalkedFileChangedError`), never parsed or served content.
+- **Parse-time re-check (TOCTOU).** The scan confines a path once. The worker
+  re-checks that it still resolves inside the corpus root, then copies the file
+  once into a private 0700 directory at the same path relative to the root,
+  hashing the same bytes while copying. The parser and the page-text read use
+  only that copy, and only if its sha256 equals the walk digest; otherwise the
+  record is a fixed `error` (`WalkedFileMovedError`, `WalkedFileChangedError`).
+  The inventory keeps the original path.
 - **Residual:** hardlinks to files outside the root have no path to detect
   and are out of scope; only symlinks are confined.
 
