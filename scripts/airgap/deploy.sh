@@ -101,7 +101,7 @@ DEPLOY_IMAGES="qdrant agent"
 # otelcol (the /metrics scraper) renders only with metrics on (OTEL_COLLECTOR).
 [ "$OTEL_COLLECTOR" != "1" ] || DEPLOY_IMAGES="$DEPLOY_IMAGES otelcol"
 [ "$AGENT_ROUTE" != "true" ] || DEPLOY_IMAGES="$DEPLOY_IMAGES oauth_proxy"
-[ "$OPENWEBUI_ENABLED" != "true" ] || DEPLOY_IMAGES="$DEPLOY_IMAGES openwebui"
+[ "$OPENWEBUI_ENABLED" != "true" ] || DEPLOY_IMAGES="$DEPLOY_IMAGES openwebui openwebui_proxy"
 # shellcheck disable=SC2086
 verify_registry_images $DEPLOY_IMAGES
 # The feedback pod runs the agent image: no extra registry read-back, but its

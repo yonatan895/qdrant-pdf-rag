@@ -8,14 +8,21 @@ as the SQLite database (the ADR-0005/#804 purge pattern):
 Each run deletes, in one transaction, every chat whose last update is older
 than N days, the shared snapshots of those chats (and stale snapshots), the
 rows of every other table that reference a deleted chat by `chat_id`, and
-file records older than the window with their uploaded files. Deletion runs
-with secure_delete on; the WAL is then truncated and the database vacuumed so
-the deleted text is gone from the files on the claim.
+file records older than the window with their uploaded files. The uploads are
+unlinked INSIDE the transaction, before the commit: if one cannot be removed
+the run fails and rolls back, so the rows that name it survive for the next
+run (a file is never orphaned with no row left to find it). Deletion runs with
+secure_delete on; the WAL is then truncated and the database vacuumed so the
+deleted text is gone from the files on the claim. A durable marker
+(.mainframe-rag-purge-pending, written before the commit) says the scrub is
+owed; it is removed only after a checkpoint that was not blocked by a reader,
+the vacuum and a second clean checkpoint. While it exists every run repeats
+the scrub, even with nothing new to delete, and fails until it completes.
 
 Fail closed and counted, never reported as success: an unexpected schema (a
 pin import changed it) or a timestamp that is not epoch seconds refuses to
-delete anything; a busy database or a failed vacuum is a failed run, retried
-after --retry-seconds. Each run writes counters to .mainframe-rag-purge.json
+delete anything; a busy database, an upload that cannot be removed or an
+incomplete scrub is a failed run, retried after --retry-seconds. Each run writes counters to .mainframe-rag-purge.json
 next to the database and logs one fixed line of counts. Chat content, titles
 and identifiers are never logged. The table layout is Open WebUI v0.12.3's,
 pending #1073 qualification and re-qualified on every pin import (P1).
@@ -33,6 +40,7 @@ from pathlib import Path
 
 DAY_S = 86400
 STATUS_NAME = ".mainframe-rag-purge.json"
+PENDING_NAME = ".mainframe-rag-purge-pending"
 SHARED_PREFIX = "shared-"
 # Epoch seconds stay below this for centuries; milliseconds or nanoseconds do not.
 MAX_EPOCH_S = 10**11
@@ -62,6 +70,26 @@ def _check_epoch(conn: sqlite3.Connection, table: str) -> None:
         raise PurgeError("timestamp-unit")
 
 
+def _fsync_dir(path: Path) -> None:
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _mark_pending(data_dir: Path) -> None:
+    """Durably record that deleted content may still be in the database files."""
+    marker = data_dir / PENDING_NAME
+    fd = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o660)
+    try:
+        os.write(fd, b"scrub owed\n")
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    _fsync_dir(data_dir)
+
+
 def purge(db: Path, data_dir: Path, days: int, now: float, busy_timeout_s: float = 30.0) -> dict:
     """One retention run. Returns counts; raises PurgeError on any failure."""
     if days < 1:
@@ -75,7 +103,6 @@ def purge(db: Path, data_dir: Path, days: int, now: float, busy_timeout_s: float
         conn = sqlite3.connect(str(db), timeout=busy_timeout_s, isolation_level=None)
     except sqlite3.Error:
         raise PurgeError("open") from None
-    removed: list[Path] = []
     try:
         tables = _tables(conn)
         if "chat" not in tables or not {"id", "user_id", "updated_at"} <= _columns(conn, "chat"):
@@ -110,11 +137,12 @@ def purge(db: Path, data_dir: Path, days: int, now: float, busy_timeout_s: float
             conn.execute("CREATE TEMP TABLE purge_file(id TEXT PRIMARY KEY, path TEXT)")
             conn.execute("INSERT INTO purge_file SELECT id, path FROM file WHERE updated_at < ?",
                          (cutoff,))
-            for (path,) in conn.execute("SELECT path FROM purge_file"):
+            for (path,) in conn.execute("SELECT path FROM purge_file").fetchall():
                 if isinstance(path, str) and path:
                     candidate = Path(path).resolve()
                     if candidate.is_relative_to(uploads):
-                        removed.append(candidate)
+                        # Inside the transaction: a failure rolls the rows back.
+                        candidate.unlink(missing_ok=True)
             for table in tables:
                 if table != "file" and "file_id" in _columns(conn, table):
                     cur = conn.execute(f"DELETE FROM {_quote(table)} WHERE file_id IN "
@@ -122,18 +150,25 @@ def purge(db: Path, data_dir: Path, days: int, now: float, busy_timeout_s: float
                     linked += max(cur.rowcount, 0)
             cur = conn.execute("DELETE FROM file WHERE id IN (SELECT id FROM purge_file)")
             files = max(cur.rowcount, 0)
-        conn.execute("COMMIT")
-        for path in removed:
-            path.unlink(missing_ok=True)
         if total or files or linked:
+            # Before the commit: a crash between commit and scrub still leaves
+            # the marker, so the next run finishes the job.
+            _mark_pending(data_dir)
+        conn.execute("COMMIT")
+        if (data_dir / PENDING_NAME).exists():
             # Freed pages are zeroed (secure_delete); the WAL still holds the old
             # pages until it is checkpointed and truncated, and VACUUM rebuilds
-            # the file. Either failing is a failed run: the text may remain.
+            # the file. A reader that blocks the checkpoint, or either step
+            # failing, is a failed run and the marker stays: the text may remain.
             busy = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            if busy and busy[0]:
+                raise PurgeError("checkpoint-busy")
             conn.execute("VACUUM")
             busy_after = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
-            if (busy and busy[0]) or (busy_after and busy_after[0]):
+            if busy_after and busy_after[0]:
                 raise PurgeError("checkpoint-busy")
+            (data_dir / PENDING_NAME).unlink()
+            _fsync_dir(data_dir)
         return {"chats": chats, "snapshots": total - chats, "linked_rows": linked, "files": files}
     except sqlite3.OperationalError as exc:
         code = "busy" if "locked" in str(exc) or "busy" in str(exc) else "sqlite"
@@ -152,10 +187,11 @@ def _write_status(path: Path, status: dict) -> None:
     os.replace(tmp, path)
 
 
-def run_once(db: Path, data_dir: Path, days: int, status: dict, now: float) -> bool:
+def run_once(db: Path, data_dir: Path, days: int, status: dict, now: float,
+             busy_timeout_s: float = 30.0) -> bool:
     status["last_attempt"] = int(now)
     try:
-        counts = purge(db, data_dir, days, now)
+        counts = purge(db, data_dir, days, now, busy_timeout_s)
     except PurgeError as exc:
         status["consecutive_failures"] = status.get("consecutive_failures", 0) + 1
         status["total_failures"] = status.get("total_failures", 0) + 1

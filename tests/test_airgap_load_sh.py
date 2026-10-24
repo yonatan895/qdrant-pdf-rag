@@ -121,6 +121,7 @@ def _stage_stub_images(artdir: Path, sha: str, oauth: bool = False,
         tars["oauth_proxy"] = "oauth-proxy-image.tar"
     if openwebui:
         tars["openwebui"] = "openwebui-image.tar"
+        tars["openwebui_proxy"] = "openwebui-proxy-image.tar"  # ADR-0007 E1: rides with it
     digests = {}
     for image, tar in tars.items():
         archive = _manifest(_config_of(image), _digest(f"layer-{image}".encode()))
@@ -167,7 +168,10 @@ def _make_artifacts(artdir: Path, sha: str = IMAGE_SHA, corrupt: bool = False, o
         files["MANIFEST.txt"] += (
             f"openwebui_digest: {digests['openwebui']}\n"
             f"openwebui_config_digest: {_config_of('openwebui')}\n"
+            f"openwebui_proxy_digest: {digests['openwebui_proxy']}\n"
+            f"openwebui_proxy_config_digest: {_config_of('openwebui_proxy')}\n"
         ).encode()
+        files["openwebui-proxy-image.tar"] = b"openwebui-proxy-tar\n"
     sums = []
     for name, content in files.items():
         p = artdir / name
@@ -542,6 +546,7 @@ def test_load_verifies_optional_oauth_proxy_image_like_the_others(load_tree):
 
 
 OPENWEBUI_REF = f"{REGISTRY}/qdrant-pdf-rag-openwebui:v0.12.3-slim"
+OPENWEBUI_PROXY_REF = f"{REGISTRY}/nginxinc/nginx-unprivileged:1.30.6-alpine"
 
 
 def test_load_verifies_and_pushes_optional_openwebui_image_when_signed(load_tree):
@@ -552,15 +557,29 @@ def test_load_verifies_and_pushes_optional_openwebui_image_when_signed(load_tree
     _make_artifacts(artdir, oauth=True, openwebui=True)
     first = _run_load(load_tree)
     assert first.returncode == 0, first.stderr
-    assert "Loaded 7 images" in first.stdout
-    assert len(_registry_calls(log)) == 7
+    assert "Loaded 8 images" in first.stdout
+    assert len(_registry_calls(log)) == 8
     assert f"copy docker-archive:{artdir}/openwebui-image.tar docker://{OPENWEBUI_REF}" in log.read_text()
     assert f"verified {OPENWEBUI_REF}@sha256:" in first.stdout
+    assert (f"copy docker-archive:{artdir}/openwebui-proxy-image.tar docker://{OPENWEBUI_PROXY_REF}"
+            in log.read_text())
+    assert f"verified {OPENWEBUI_PROXY_REF}@sha256:" in first.stdout
     (artdir / ".skopeo-stub/pushed/openwebui-image.tar.raw").write_bytes(
         _manifest(_config_of("swapped"), _digest(b"layer-swapped")))
     second = _run_load(load_tree)
     assert second.returncode == 1
     assert f"registry image {OPENWEBUI_REF} is not the packed image" in second.stderr
+
+
+def test_load_refuses_a_swapped_openwebui_proxy_registry_image(load_tree):
+    root, _log = load_tree
+    artdir = root / "dist"
+    _make_artifacts(artdir, openwebui=True)
+    (artdir / ".skopeo-stub/pushed/openwebui-proxy-image.tar.raw").write_bytes(
+        _manifest(_config_of("swapped"), _digest(b"layer-swapped")))
+    result = _run_load(load_tree)
+    assert result.returncode == 1
+    assert f"registry image {OPENWEBUI_PROXY_REF} is not the packed image" in result.stderr
 
 
 def test_load_refuses_openwebui_archive_that_is_not_the_manifest_digest(load_tree):

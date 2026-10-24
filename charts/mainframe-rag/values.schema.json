@@ -87,7 +87,8 @@
         "oauthProxy": { "$ref": "#/definitions/image" },
         "openobserve": { "$ref": "#/definitions/image" },
         "otelcol": { "$ref": "#/definitions/image" },
-        "openwebui": { "$ref": "#/definitions/image" }
+        "openwebui": { "$ref": "#/definitions/image" },
+        "openwebuiProxy": { "$ref": "#/definitions/image" }
       }
     },
     "qdrantRelease": {

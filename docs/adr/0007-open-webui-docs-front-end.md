@@ -85,17 +85,27 @@ Pipe is provisioned and the admin role is limited to the team.
   the IdP. The control is the policy, not the offline flag. Proof: 0 egress
   attempts behind the Kind egress boundary, and no external fetch from the
   browser.
-- **E1 Unenforced endpoints are blocked before the pod.** (Maintainer
-  decision 2026-10-24, #1070/#1071.) A feature that v0.12.3 disables only in
-  its UI, not in the route handler, stays reachable by API. The router must
-  refuse those API prefixes (`/api/v1/files`, `/api/v1/retrieval`,
-  `/api/v1/knowledge`, `/api/v1/audio`) for every spelling that Open WebUI's
-  server decodes to them, including percent-encoded ones. The control must
-  match the decoded, normalised path; an OpenShift path Route matches the raw
-  path and cannot (see the #1083 analysis), so it is not sufficient alone.
-  Re-checked on every import (P1): list each router's handlers and sort them
-  into server-enforced and UI-only. Proof: site curl checks in
-  `docs/deploy.md` return a refusal for each path and variant.
+- **E1 Unenforced endpoints are blocked before the pod: an allow-list.**
+  (Maintainer decision 2026-10-24, #1070/#1071.) Open WebUI v0.12.3 disables
+  some features in its UI only, not in the route handler: `POST /api/v1/files/`
+  stores uploads with uploads off, the `retrieval/process/*` routes check no
+  feature flag, and knowledge and audio rest on permissions that admins bypass.
+  A router path match cannot close this: it matches the raw path, and the server
+  decodes percent-encoding before routing (`/api/v1/%66iles/` and
+  `/api/v1%2Ffiles/` reach the handler). So the pod runs a pinned
+  `nginx-unprivileged` sidecar as its only listener, Open WebUI listens on
+  `127.0.0.1:8080`, and nginx serves an **allow-list** matched on its decoded,
+  normalised `$uri` (`merge_slashes on`); everything else gets a fixed 403. The
+  request line is forwarded unchanged so nginx and uvicorn decide on the same
+  path. The list is the Docs pilot's need: the SPA shell and assets, sign-in
+  and the OIDC callback, socket.io, health, chats, models, the Pipe's chat
+  completions, the account and admin APIs and the Pipe installer's
+  `/api/v1/functions`. **Re-audited on every import (P1)**: list each router's
+  handlers, sort them into server-enforced and UI-only, and re-run the browser
+  trace; a path is added deliberately, never by default. Proof: the nginx
+  config test runs the real pinned image against every encoded variant, and the
+  site curl checks in `docs/deploy.md` return a refusal for each. The remaining
+  browser-trace completeness of the list is a #1073 run-2 item.
 - **R3 Identity.** Login is OIDC against the identity team's IdP (AD FS, with
   Keycloak also in use). Every employee signs in with a personal account.
   Groups and the admin role come from IdP claims. The local login form,

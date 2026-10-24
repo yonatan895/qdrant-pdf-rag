@@ -1031,6 +1031,7 @@ and CI tooling have different owners and pull credentials.
 | otelcol-contrib (ADR-0006) | `otel/opentelemetry-collector-contrib:0.160.0` | as the agent | `load.sh` | cluster pod (`Deployment/otelcol`, container `otelcol`) beside OpenObserve |
 | OAuth sidecar (optional) | `openshift4/ose-oauth-proxy:v4.14` | as the agent; absent while `images.txt` says `sha256:PENDING` | `load.sh` | cluster pods |
 | Open WebUI front end (optional, ADR-0007, #1074) | `qdrant-pdf-rag-openwebui:v0.12.3-slim` | as the agent; absent while `images.txt` says `sha256:PENDING` (the factory records the pushed manifest digest of the #1073 trial image; recipe `scripts/ci/openwebui-trial/Containerfile.openwebui`, PR #1085); the upstream `open-webui/open-webui:v0.12.3-slim` line is factory build provenance, never pushed | `load.sh` | cluster pod (`Deployment/rag-openwebui`, container `openwebui`) when `openwebui.enabled` |
+| Open WebUI allow-list proxy (ADR-0007 E1, **Verifier-owned** where the workflow builds or mirrors images) | `nginxinc/nginx-unprivileged:1.30.6-alpine` | pinned by digest in `images.txt`; bundled as `openwebui-proxy-image.tar` exactly when the Open WebUI member is | `load.sh` | cluster pod (`Deployment/rag-openwebui`, container `proxy`) when `openwebui.enabled` |
 | CI job image | `ci/python:3.14`, or a complete `CI_PYTHON_IMAGE` | mirrored UBI Python 3.14 (GIL) with git, pip, tar, sha256sum | platform or factory mirror, not this repository | GitLab runner |
 | CI Qdrant service | `qdrant/qdrant@sha256:<images.txt digest>` | the `images.txt` manifest digest, so a tag is never enough | registry-to-registry copy that preserves the digest | GitLab runner (`sim`, `gate-l1`) |
 
@@ -1658,23 +1659,49 @@ newer pin has migrated rolls back only through its pre-upgrade snapshot. To reti
 for good, delete the claim explicitly (`oc delete pvc rag-openwebui-data`); no deploy path does
 that.
 
-**Blocked API prefixes (ADR-0007 E1; mechanism pending).** Open WebUI v0.12.3 enforces some
-disabled features only in its UI. `/api/v1/files` stores uploads with uploads off (Kind trial V1),
-and `/api/v1/retrieval/process/*` and the audio endpoints check no feature flag. The router must
-refuse `/api/v1/files`, `/api/v1/retrieval`, `/api/v1/knowledge` and `/api/v1/audio`. The server
-decodes percent-encoding before routing, so `%66iles` and `%2F` reach the handler. A raw-path
-OpenShift Route cannot block them, and the chart does not yet render a block. Until a
-decoded-path deny layer is approved and shipped, do not enable the front end for users. Site
-acceptance, as a signed-in user cookie `$C` and `$H` the Route host. Each request must return 403
-or 404 and must not store a file:
+**Allow-list proxy (ADR-0007 E1).** Open WebUI v0.12.3 disables some features in its UI
+only: `/api/v1/files` stores uploads with uploads off (Kind trial V1), the
+`/api/v1/retrieval/process/*` routes check no feature flag, and knowledge and audio rest on
+permissions that admins bypass. The server also decodes percent-encoding before routing, so a
+raw-path Route cannot block `/api/v1/%66iles/` or `/api/v1%2Ffiles/`. The pod therefore runs
+an `nginx-unprivileged` sidecar (`proxy`, pinned in `images.txt`, bundled with the Open WebUI
+image as `openwebui-proxy-image.tar`) as its only listener. Open WebUI listens on
+`127.0.0.1:8080`. The Service, Route and probes target the proxy on 8443; the config is
+`charts/mainframe-rag/files/openwebui/proxy.nginx.conf`, shipped verbatim in
+`ConfigMap/rag-openwebui-proxy`. It decides on nginx's decoded, normalised `$uri`
+(`merge_slashes on`), forwards the original request line, and answers `403 denied` for
+everything outside the allow-list. Access logs are off.
+
+Site acceptance, with `$C` a signed-in user's session cookie and `$H` the Route host. Every
+request must return `403` (or `400` for the null byte) and must store nothing:
 
 ```sh
 for p in /api/v1/files/ /api/v1/files /API/v1/files/ //api/v1/files/ /api/v1/./files/ \
-         /api/v1/%66iles/ /api/v1%2Ffiles/ /%61pi/v1/files/ /api/v1/retrieval/process/text \
-         /api/v1/knowledge/ /api/v1/audio/transcriptions; do
+         /api/v1/%66iles/ /api/v1%2Ffiles/ /api/v1/files%2F /%61pi/v1/files/ \
+         /api/v1/chats/%2e%2e/files/ /api/v1/%2566iles/ /api/v1/files%00 \
+         /api/v1/retrieval/process/text /api/v1/knowledge/ /api/v1/audio/transcriptions \
+         /openai/chat/completions /ollama/api/chat /api/v1/utils/code/execute; do
   printf '%s ' "$p"; curl -sk -o /dev/null -w '%{http_code}\n' -X POST -b "$C" "https://$H$p"
 done
 ```
+
+Then sign in and open a chat: a conversation must answer through the Docs model.
+
+**Re-audit the allow-list on every Open WebUI import (ADR-0007 P1).** Each import PR must (1) list
+the router prefixes and handlers of the new release (`main.py` `include_router`, each
+router's feature and permission checks) and sort them into server-enforced and UI-only; (2) record
+the table in the PR; (3) add nothing to the allow-list that is UI-only for a disabled feature;
+(4) re-run the nginx config test (`tests/test_openwebui_proxy_nginx.py`, pinned image) and the
+curl checks above; and (5) re-run a browser trace of the pilot flows (sign-in, chat, admin
+pages, Pipe install) to catch a path the UI newly needs. A UI error on a denied path is the
+signal to decide, not to widen the list by default.
+
+**Admin API key (installer).** The Pipe installer needs one admin key. The chart sets
+`ENABLE_API_KEYS=true`, `USER_PERMISSIONS_FEATURES_API_KEYS=false` (users cannot create keys;
+admins bypass the permission) and `ENABLE_API_KEYS_ENDPOINT_RESTRICTIONS=true` with
+`API_KEYS_ALLOWED_ENDPOINTS=/api/v1/functions`, so a key works only on the Functions API.
+Rotate or delete the key after an install if you prefer: `deploy.sh` prints the explicit
+not-done notice without it. The settings are pending #1073 run-2 qualification.
 
 **Requirements.** The Route API (OpenShift; deploy refuses the front end without it) and an
 enforcing CNI. The Kind lanes do not enable the front end yet: an e2e run with it enabled needs

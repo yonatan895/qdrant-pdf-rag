@@ -184,6 +184,23 @@ def test_service_container_cannot_be_replaced_by_same_named_init_container():
     assert "qdrant runs an unknown digest" in " ".join(check(document))
 
 
+def test_openwebui_proxy_role_is_bound_to_its_own_container_of_the_same_deployment():
+    """ADR-0007 E1: the nginx sidecar is verified as container `proxy` of
+    rag-openwebui, by its own digest, independently of the Open WebUI container."""
+    document = rollout("Deployment", name="rag-openwebui", container="openwebui")
+    proxy_repo = "reg.internal/nginxinc/nginx-unprivileged"
+    proxy = {"name": "proxy", "image": f"{proxy_repo}:1.30.6-alpine"}
+    document["items"][0]["spec"]["template"]["spec"]["containers"].append(proxy)
+    pod = document["items"][-1]
+    pod["spec"]["containers"].append(proxy)
+    expected = {"openwebui": (REPO_Q, DIGEST), "openwebui_proxy": (proxy_repo, OTHER)}
+    assert "container proxy runs an unknown digest" in " ".join(mod.check(document, expected, "ns", "qdrant"))
+    pod["status"]["containerStatuses"].append({"name": "proxy", "imageID": f"{proxy_repo}@{OTHER}"})
+    assert mod.check(document, expected, "ns", "qdrant") == []
+    pod["status"]["containerStatuses"][-1]["imageID"] = f"{proxy_repo}@{DIGEST}"
+    assert mod.check(document, expected, "ns", "qdrant") != []
+
+
 def test_oauth_proxy_requires_its_own_container_status():
     document = rollout("Deployment", name="rag-agent", container="agent")
     oauth_repo = "reg.internal/openshift4/ose-oauth-proxy"

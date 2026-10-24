@@ -103,6 +103,15 @@ if pin_recorded qdrant-pdf-rag-openwebui; then
 else
     echo "==> Open WebUI pin is sha256:PENDING: not bundled (OPENWEBUI_ENABLED stays unavailable until recorded)"
 fi
+# The allow-list proxy sidecar of the same pod (ADR-0007 E1) travels with the
+# Open WebUI image: bundled exactly when that member is.
+OPENWEBUI_PROXY_REF=""
+OPENWEBUI_PROXY_TAR=""
+if [ -n "$OPENWEBUI_TAR" ]; then
+    pin_recorded nginx-unprivileged || die "the Open WebUI image is recorded but the allow-list proxy (nginx-unprivileged) has no digest in images.txt: record it and repack"
+    OPENWEBUI_PROXY_REF=$(pin_from_images_txt nginx-unprivileged)
+    OPENWEBUI_PROXY_TAR="openwebui-proxy-image.tar"
+fi
 
 DIST="$REPO_ROOT/dist"
 OUT_TARBALL="$DIST/qdrant-pdf-rag-${IMAGE_SHA}.tar"
@@ -130,7 +139,7 @@ rm -f "$DIST"/repo.bundle "$DIST"/qdrant-image.tar \
       "$DIST"/MANIFEST.txt "$DIST"/THIRD-PARTY-NOTICES.txt "$DIST"/SHA256SUMS "$OUT_TARBALL" "$OUT_TARBALL.sha256"
 # shellcheck disable=SC2086
 rm -f $OAUTH_TAR
-rm -f "$DIST/openwebui-image.tar"
+rm -f "$DIST/openwebui-image.tar" "$DIST/openwebui-proxy-image.tar"
 
 echo "==> Git bundle of the checked-out commit"
 # HEAD must be an explicit ref: without it, `git clone repo.bundle` on the
@@ -164,6 +173,10 @@ if [ -n "$OPENWEBUI_TAR" ]; then
     # shellcheck disable=SC2086
     skopeo copy $extra_args "docker://$OPENWEBUI_REF" "docker-archive:$DIST/$OPENWEBUI_TAR"
 fi
+if [ -n "$OPENWEBUI_PROXY_TAR" ]; then
+    # shellcheck disable=SC2086
+    skopeo copy $extra_args "docker://$OPENWEBUI_PROXY_REF" "docker-archive:$DIST/$OPENWEBUI_PROXY_TAR"
+fi
 
 echo "==> Image digests (bound into MANIFEST, verified on load)"
 # Post-copy tar manifest digests: skopeo resolves the pinned manifest list
@@ -186,6 +199,12 @@ OPENWEBUI_CONFIG_DIGEST=""
 if [ -n "$OPENWEBUI_TAR" ]; then
     OPENWEBUI_DIGEST=$(skopeo inspect "docker-archive:$DIST/$OPENWEBUI_TAR" --format '{{.Digest}}')
     OPENWEBUI_CONFIG_DIGEST=$(archive_config_digest "$DIST/$OPENWEBUI_TAR")
+fi
+OPENWEBUI_PROXY_DIGEST=""
+OPENWEBUI_PROXY_CONFIG_DIGEST=""
+if [ -n "$OPENWEBUI_PROXY_TAR" ]; then
+    OPENWEBUI_PROXY_DIGEST=$(skopeo inspect "docker-archive:$DIST/$OPENWEBUI_PROXY_TAR" --format '{{.Digest}}')
+    OPENWEBUI_PROXY_CONFIG_DIGEST=$(archive_config_digest "$DIST/$OPENWEBUI_PROXY_TAR")
 fi
 # Image config digests (issue #272): pin the rootfs identity independently of
 # archive vs registry layer compression; deploy/ingest verify the registry
@@ -233,6 +252,11 @@ CHART_SHA256=$(sha256sum charts/qdrant-*.tgz | awk '{print $1}')
         echo "openwebui_digest: $OPENWEBUI_DIGEST"
         echo "openwebui_config_digest: $OPENWEBUI_CONFIG_DIGEST"
     fi
+    if [ -n "$OPENWEBUI_PROXY_TAR" ]; then
+        echo "openwebui_proxy: $OPENWEBUI_PROXY_REF"
+        echo "openwebui_proxy_digest: $OPENWEBUI_PROXY_DIGEST"
+        echo "openwebui_proxy_config_digest: $OPENWEBUI_PROXY_CONFIG_DIGEST"
+    fi
     echo "chart: $CHART_VERSION"
     echo "chart_sha256: $CHART_SHA256"
     echo "ingest: $INGEST_IMAGE"
@@ -260,7 +284,7 @@ export SBOM_DATE IMAGE_SHA QDRANT_REF QDRANT_DIGEST
 export OPENOBSERVE_REF OPENOBSERVE_DIGEST OTELCOL_REF OTELCOL_DIGEST
 export INGEST_IMAGE INGEST_DIGEST AGENT_IMAGE AGENT_DIGEST UBI_REF UBI_DIGEST
 export OAUTH_PROXY_REF OAUTH_DIGEST CHART_VERSION CHART_SHA256 DIST REPO_ROOT
-export OPENWEBUI_REF OPENWEBUI_DIGEST
+export OPENWEBUI_REF OPENWEBUI_DIGEST OPENWEBUI_PROXY_REF OPENWEBUI_PROXY_DIGEST
 export TASK_VERSION TASK_ASSET TASK_SHA256 TASK_BINARY_SHA256 TASK_LICENSE_SHA256 TASK_ORIGIN
 python3 - <<'PYEOF'
 import json
@@ -321,6 +345,14 @@ if os.environ.get("OPENWEBUI_REF"):
             "digest": os.environ["OPENWEBUI_DIGEST"],
         }
     )
+if os.environ.get("OPENWEBUI_PROXY_REF"):
+    sbom["images"].append(
+        {
+            "name": "openwebui-proxy",
+            "ref": os.environ["OPENWEBUI_PROXY_REF"],
+            "digest": os.environ["OPENWEBUI_PROXY_DIGEST"],
+        }
+    )
 with open(os.path.join(os.environ["DIST"], "sbom.json"), "w", encoding="utf-8") as fh:
     json.dump(sbom, fh, indent=2, sort_keys=True)
     fh.write("\n")
@@ -358,6 +390,7 @@ chmod +x "$DIST/bootstrap.sh"
     fi
     if [ -n "$OPENWEBUI_TAR" ]; then
         echo "  - Open WebUI Image:    $OPENWEBUI_REF"
+        echo "  - Open WebUI proxy:    $OPENWEBUI_PROXY_REF"
     fi
     echo "  - Ingest Image:        $INGEST_IMAGE"
     echo "  - Agent Image:         $AGENT_IMAGE"
@@ -386,7 +419,7 @@ openssl pkey -in "$SNEAKERNET_SIGNING_KEY" -pubout -out "$DIST/sneakernet-signin
     cd "$DIST"
     # shellcheck disable=SC2086
     sha256sum bootstrap.sh repo.bundle "$TASK_ASSET" task-pin.txt task-LICENSE qdrant-image.tar \
-              openobserve-image.tar otelcol-image.tar app-ingest-"$IMAGE_SHA".tar app-agent-"$IMAGE_SHA".tar $OAUTH_TAR $OPENWEBUI_TAR \
+              openobserve-image.tar otelcol-image.tar app-ingest-"$IMAGE_SHA".tar app-agent-"$IMAGE_SHA".tar $OAUTH_TAR $OPENWEBUI_TAR $OPENWEBUI_PROXY_TAR \
               MANIFEST.txt PACKING_RECORD.txt sbom.json THIRD-PARTY-NOTICES.txt sneakernet-signing.pub > SHA256SUMS
 )
 
@@ -399,7 +432,7 @@ openssl dgst -sha256 -sign "$SNEAKERNET_SIGNING_KEY" \
 echo "==> Tarball + tarball digest"
 # shellcheck disable=SC2086
 tar -C "$DIST" -cf "$OUT_TARBALL" bootstrap.sh repo.bundle "$TASK_ASSET" task-pin.txt task-LICENSE qdrant-image.tar \
-    openobserve-image.tar otelcol-image.tar app-ingest-"$IMAGE_SHA".tar app-agent-"$IMAGE_SHA".tar $OAUTH_TAR $OPENWEBUI_TAR MANIFEST.txt PACKING_RECORD.txt sbom.json THIRD-PARTY-NOTICES.txt sneakernet-signing.pub SHA256SUMS SHA256SUMS.sig
+    openobserve-image.tar otelcol-image.tar app-ingest-"$IMAGE_SHA".tar app-agent-"$IMAGE_SHA".tar $OAUTH_TAR $OPENWEBUI_TAR $OPENWEBUI_PROXY_TAR MANIFEST.txt PACKING_RECORD.txt sbom.json THIRD-PARTY-NOTICES.txt sneakernet-signing.pub SHA256SUMS SHA256SUMS.sig
 # shellcheck disable=SC2016
 ( cd "$DIST" && sha256sum "$(basename "$OUT_TARBALL")" ) > "$OUT_TARBALL.sha256"
 
