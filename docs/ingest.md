@@ -874,7 +874,10 @@ thread pool.
   or resume the run that recorded it). Same-alias publishers must share the
   progress directory (already required for refresh lineage) so the target
   lock serializes them; different directories or hosts are operator error,
-  guarded only by the pre-swap live recheck — there is no distributed lock.
+  guarded only by the pre-swap live recheck and the swap's predecessor check
+  (`swap_alias_to` re-reads the alias immediately before the atomic call and
+  refuses unless it still names the planned predecessor, issue #1019) — there
+  is no distributed lock, and Qdrant alias updates are not compare-and-swap.
   Lock filenames sanitize the alias charset: aliases differing only in
   sanitised-away characters share a lock (over-serialization, never
   concurrent publication).
@@ -1174,7 +1177,10 @@ through cutover; a second live publisher for the same target fails closed
 are never stolen). Same-alias runs must share the progress directory; a
 pre-swap live recheck refuses a candidate overtaken by a lock-bypass writer
 (different directory or host), without which the alias could swing back to
-an older generation. The inner build keeps its own progress lock; `_DocLocks`
+an older generation. The swap itself repeats that check after the
+catalog/seal phase, immediately before its atomic alias call (issue #1019),
+so a writer overtaken there refuses too; only the read-to-call gap remains.
+Different progress directories stay unsupported. The inner build keeps its own progress lock; `_DocLocks`
 only serializes revisions inside one process. Supported operation requires
 operator-serialized jobs, not a claim of distributed lock enforcement. No HA
 claim follows from a single-node run.
