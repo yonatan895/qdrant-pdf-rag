@@ -62,7 +62,7 @@
      *(Amendment, ADR-0005: the answer-feedback service is a separate
      deployment the agent calls; it is not a BFF, serves no UI and runs no
      process alongside the agent.)*
-     *(Amendment, ADR-0007, proposed: the optional Open WebUI deployment is a
+     *(Amendment, ADR-0007, accepted 2026-10-24: the optional Open WebUI deployment is a
      second front end and a client of the agent, in its own pod.)*
   3. **No server-side user/session DB:** No SQLite, PostgreSQL, MySQL, Redis, or
      stateful PVCs for UI data; zero server database tables.
@@ -71,13 +71,13 @@
      single-writer feedback service on its own PVC. They are never read back
      as session state; dialogue history stays in `localStorage`, and the agent
      pod keeps no persistent volume or database.)*
-     *(Amendment, ADR-0007, proposed: while Open WebUI is enabled, it stores
+     *(Amendment, ADR-0007, accepted 2026-10-24: while Open WebUI is enabled, it stores
      its users' chats on its own RWO PVC under ADR-0007's retention rules; the
      console and the agent pod are unchanged.)*
   4. **No application-level authentication:** FastAPI implements no custom login forms,
      credential hashing, or session cookie generation; authentication and RBAC are
      delegated entirely to the OpenShift `oauth-proxy` sidecar.
-     *(Amendment, ADR-0007, proposed: Open WebUI authenticates its users itself
+     *(Amendment, ADR-0007, accepted 2026-10-24: Open WebUI authenticates its users itself
      through OIDC; the console Route keeps the sidecar.)*
   5. **No remote asset retrieval:** Zero calls to external CDNs, Google Fonts, or
      third-party script/icon registries.
