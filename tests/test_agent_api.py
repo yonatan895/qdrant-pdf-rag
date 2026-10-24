@@ -515,6 +515,51 @@ def _ready_pool():
     return ReadyPool()
 
 
+class _UpstreamSpy:
+    """Records every attribute touch on an upstream client the app holds and
+    fails it (a down/slow upstream must not matter to liveness)."""
+
+    def __init__(self, name, touched):
+        self._name, self._touched = name, touched
+
+    def __getattr__(self, attr):
+        self._touched.append(f"{self._name}.{attr}")
+        raise ConnectionError("upstream down")
+
+
+def test_livez_makes_no_upstream_call_but_healthz_does(client, monkeypatch):
+    """Issue #1018 criterion 1: the OAuth-bypassed /livez probe does no work.
+    Every upstream client the app holds is a recording, failing spy; repeated
+    /livez hits touch none of them and never run the readiness evaluation,
+    and the body is fixed. Positive control: /healthz DOES reach the spied
+    pool, so the spies observe the real path."""
+    touched: list[str] = []
+    evaluated: list[str] = []
+    real_evaluate = app_mod.evaluate_healthz
+
+    async def counting_evaluate():
+        evaluated.append("evaluate_healthz")
+        return await real_evaluate()
+
+    for name in ("http", "http_sync", "qdrant", "embedder", "llm", "reranker", "zowe_mcp", "feedback"):
+        monkeypatch.setattr(app_mod, name, _UpstreamSpy(name, touched))
+    monkeypatch.setattr(app_mod, "retrieve_search", lambda *a, **k: touched.append("retrieve_search"))
+    monkeypatch.setattr(app_mod, "evaluate_healthz", counting_evaluate)
+
+    for _ in range(5):
+        resp = client.get("/livez")
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "alive"}
+    assert touched == [] and evaluated == [], "livez must not call any upstream or readiness"
+
+    # Positive control: the same spies see the real readiness path.
+    assert client.get("/healthz").status_code == 503
+    assert evaluated == ["evaluate_healthz"]
+    assert "http.get" in touched
+    # ...and liveness is still unaffected afterwards.
+    assert client.get("/livez").json() == {"status": "alive"}
+
+
 def test_healthz_representation_drift_degrades(client, monkeypatch):
     """Issues #362 + #391 F3: a drifted stored generation degrades /healthz
     with the explicit outcome AND an HTTP failure (smoke fails closed,
