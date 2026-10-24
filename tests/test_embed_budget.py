@@ -147,3 +147,13 @@ def test_worst_case_embed_text_fits_the_embed_window_budget(tmp_path: Path):
         context="x" * Settings(_env_file=None).context_max_chars,
     )
     assert len(with_prefix) <= CHAR_BUDGET
+    # Issue #998: title and heading_path are bounded at ingest, so even
+    # adversarial metadata at both bounds plus the max prefix still fits.
+    from mainframe_rag.ingest.chunk import HEADING_PATH_MAX_CHARS
+    from mainframe_rag.ingest.ibm_pdf import TITLE_MAX_CHARS
+
+    bounded = build_embed_text(
+        PRODUCT, VERSION, DOC_ID, "t" * TITLE_MAX_CHARS, "h" * HEADING_PATH_MAX_CHARS, body,
+        context="x" * Settings(_env_file=None).context_max_chars,
+    )
+    assert len(bounded) <= CHAR_BUDGET

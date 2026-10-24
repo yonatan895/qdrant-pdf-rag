@@ -33,6 +33,10 @@ SECTION_MAX_CHARS = 3500
 SPLIT_OVERLAP_CHARS = 400
 FRONT_MATTER_FRACTION = 0.15
 FRONT_MATTER_MIN_PAGES = 2
+# Issue #998: total heading_path bound. Elements are already bounded at
+# parse (ibm_pdf.TITLE_MAX_CHARS = 200), so at least two whole elements fit;
+# tests/test_embed_budget.py proves the worst-case embed text still fits.
+HEADING_PATH_MAX_CHARS = 512
 
 _BLANK_SPLIT_RE = re.compile(r"\n\s*\n")
 
@@ -417,6 +421,16 @@ def _shared_page_pieces(
     return pieces
 
 
+def _join_heading_path(titles: list[str]) -> str:
+    """`" > "`-joined heading path within HEADING_PATH_MAX_CHARS (issue
+    #998): the outermost ancestors are dropped whole until it fits, so the
+    leaf and its nearest ancestors stay and no element is cut mid-word."""
+    parts = list(titles)
+    while len(parts) > 1 and len(" > ".join(parts)) > HEADING_PATH_MAX_CHARS:
+        parts.pop(0)
+    return " > ".join(parts)
+
+
 def _named_skip(title: str, page_1based: int, front_matter_limit: int) -> bool:
     """A heading whose section is skipped by name: always-skipped back
     matter anywhere, front matter at or before the limit."""
@@ -499,7 +513,7 @@ def outline_sections(parsed: ParsedDoc, page_texts: list[str] | None = None) -> 
         while stack and stack[-1][0] >= level:
             stack.pop()
         stack.append((level, title))
-        heading_path = " > ".join(t for _, t in stack)
+        heading_path = _join_heading_path([t for _, t in stack])
         group.append((level, title, heading_path))
 
         start = max(0, page_1based - 1)

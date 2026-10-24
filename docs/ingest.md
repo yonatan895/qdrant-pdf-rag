@@ -124,8 +124,14 @@ PyMuPDF is the only parser. `parse_pdf` returns a frozen, slots `ParsedDoc`.
   `sanitize_page_text`, then every whitespace run (newlines, tabs) collapsed
   to one space, stripped, and cut at a word boundary to `TITLE_MAX_CHARS =
   200`. A metadata title that sanitizes to nothing falls through to the
-  first-page line. Bookmark titles are sanitized (chunking collapses their
-  whitespace for `heading_path`). A page label is decoded (#863),
+  first-page line. Bookmark titles (each `heading_path` element) are made
+  one line and cut at a word boundary to the same 200 chars, so a cut title
+  is still a title-line prefix for same-page splitting; the joined
+  `heading_path` is capped at `chunk.HEADING_PATH_MAX_CHARS = 512` by
+  dropping the outermost ancestors whole, keeping the leaf (a 5,000-char
+  bookmark used to store a 5,000-char `heading_path`). Both bounds plus the
+  maximal context prefix fit the embed window (`tests/test_embed_budget.py`).
+  A page label is decoded (#863),
   sanitized and collapsed the same way; one longer than
   `PAGE_LABEL_MAX_CHARS = 32` is absent rather than truncated, since a cut
   label would name another page. Printable content is otherwise kept as

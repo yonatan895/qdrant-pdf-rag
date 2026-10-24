@@ -148,9 +148,10 @@ def extract_product_version(doc: pymupdf.Document) -> tuple[str | None, str | No
 
 
 # Issue #998: /Title, bookmark titles and /PageLabels are free-form metadata
-# that citations repeat verbatim, so each is one sanitized line. A title is
-# cut at a word boundary; an overlong printed label is absent instead (a
-# truncated label would name another page).
+# that citations repeat verbatim, so each is one sanitized line. A title or
+# bookmark title (one heading_path element) is cut at a word boundary, which
+# keeps it a title-line prefix for same-page splitting; an overlong printed
+# label is absent instead (a truncated label would name another page).
 TITLE_MAX_CHARS = 200
 PAGE_LABEL_MAX_CHARS = 32
 _WHITESPACE_RE = re.compile(r"\s+")
@@ -213,7 +214,7 @@ def parse_pdf(
             version=version_f or None,
             vendor=vendor_f or "unknown",
             toc=tuple(
-                (level, sanitize_page_text(title), page)
+                (level, _bounded_title(_metadata_line(title)), page)
                 for level, title, page in doc.get_toc(simple=True)
             ),
             page_count=doc.page_count,
