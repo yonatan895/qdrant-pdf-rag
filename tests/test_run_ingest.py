@@ -9,6 +9,7 @@ from typing import ClassVar
 
 import pytest
 
+from mainframe_rag.ingest.ibm_pdf import sha256_file
 from mainframe_rag.ingest.run_ingest import main
 from tests.helpers_builder import staging_builder  # noqa: F401 — fixture
 
@@ -633,7 +634,7 @@ def test_worker_embed_batches_by_batch_size(synthetic_pdf, monkeypatch):
     monkeypatch.setattr(run_ingest, "_load_worker_settings", lambda: test_settings)
     monkeypatch.setattr(run_ingest, "embed_batch", mock_embed_batch)
 
-    task = (str(synthetic_pdf), None, None, None, str(synthetic_pdf.parent), "dummy_sha", True, None)
+    task = (str(synthetic_pdf), None, None, None, str(synthetic_pdf.parent), sha256_file(synthetic_pdf), True, None)
     _rec, _parsed, chunks, vectors, contexts = run_ingest._parse_one(task)
     assert len(chunks) > 2
     assert contexts == {}
@@ -1034,7 +1035,7 @@ def test_upsert_failure_log_carries_error_type_not_exception_text(
 
 
 def _bounded_task(pdf):
-    return (str(pdf), None, None, None, str(pdf.parent), "dummy_sha", True, None)
+    return (str(pdf), None, None, None, str(pdf.parent), sha256_file(pdf), True, None)
 
 
 def _spy_embed(monkeypatch):

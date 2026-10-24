@@ -81,6 +81,8 @@ from mainframe_rag.ingest.context import (
 from mainframe_rag.ingest.corpus_scan import (
     UNREADABLE_FILE_MESSAGE,
     UNREADABLE_FILE_TYPE,
+    require_inside_root,
+    require_unchanged,
     scan_corpus,
     unreadable_paths,
 )
@@ -289,6 +291,9 @@ def _parse_one(
     parsed: ParsedDoc | None = None
     try:
         path = Path(path_str)
+        # TOCTOU (#996): the scan confined this path once; re-check right
+        # before any byte is parsed, and verify the digest after reading.
+        require_inside_root(path, corpus_root)
         settings = _load_worker_settings()
         # Per-document bounds (issue #374): each refusal is an explicit
         # error record before the stage it bounds — no partial ingest, no
@@ -309,6 +314,7 @@ def _parse_one(
             page_texts, page_labels = _extract_page_texts(doc)
         finally:
             doc.close()
+        require_unchanged(path, sha, corpus_root)
         stripped = strip_chrome(page_texts)
         chunks = make_chunks(parsed, stripped, page_labels)
         require_document_within("chunks", len(chunks), settings.ingest_max_doc_chunks)
@@ -1630,6 +1636,16 @@ def _run_publish(
             "whole corpus; rerun without --limit (a --dry-run may plan a prefix)."
         )
     scanned = scan_corpus(src)
+    if not scanned.entries and scanned.unreadable:
+        # Every PDF is unreadable (#1002): per-file error records and a
+        # nonzero exit through the normal path; nothing is staged or published.
+        only_failed = _RunStats()
+        failed_lock = acquire_publish_lock(progress, settings.qdrant_collection)
+        try:
+            _record_unreadable(tuple(scanned.unreadable), progress, only_failed)
+        finally:
+            release_run_lock(failed_lock)
+        return 1
     if not scanned.entries:
         raise RuntimeError(
             "ingest refuses an empty corpus: publishing nothing "

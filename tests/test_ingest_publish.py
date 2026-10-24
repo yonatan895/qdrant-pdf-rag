@@ -3865,6 +3865,31 @@ def test_out_of_root_file_symlink_is_refused_and_outside_bytes_never_served(tmp_
     assert _nothing_written(fake, progress)
 
 
+@pytest.mark.parametrize("shape", ["chain", "relative", "relative-deep"])
+def test_out_of_root_link_variants_are_refused(tmp_path, monkeypatch, shape):
+    """#996: a link chain (l1 -> l2 -> outside) and relative `../` targets
+    resolve outside the root and are refused like a direct link."""
+    from mainframe_rag.ingest.corpus_scan import OutOfRootLinkError
+
+    fake, corpus, progress = _fresh_publish(tmp_path, monkeypatch)
+    _build_doc_with_id(corpus, "normal", DOC_A)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    secret = _build_doc_with_id(outside, "confidential", DOC_B)
+    if shape == "chain":
+        (corpus / "l2.pdf").symlink_to(secret)
+        (corpus / "l1.pdf").symlink_to("l2.pdf")
+    elif shape == "relative":
+        (corpus / "l1.pdf").symlink_to("../outside/confidential.pdf")
+    else:
+        (corpus / "a" / "b").mkdir(parents=True)
+        (corpus / "a" / "b" / "l1.pdf").symlink_to("../../../outside/confidential.pdf")
+    with pytest.raises(OutOfRootLinkError, match="l1.pdf"):
+        _run_main(monkeypatch, corpus, progress)
+    assert _nothing_written(fake, progress)
+
+
+
 def test_in_root_file_symlink_and_symlinked_directory_policy(tmp_path, monkeypatch):
     """#996 policy: a file symlink resolving inside the root is walked; a
     symlinked directory is never traversed (its PDFs are not the corpus),
@@ -3904,6 +3929,28 @@ def test_unreadable_subtree_fails_closed_before_any_write(tmp_path, monkeypatch)
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
+@pytest.mark.parametrize("mode", [0o444, 0o311])
+def test_partially_accessible_directory_fails_closed(tmp_path, monkeypatch, mode):
+    """#1003: a directory with read but no search permission (0o444), or search
+    but no read (0o311), still hides its PDFs from the walk: fail closed."""
+    from mainframe_rag.ingest.corpus_scan import UnreadableSubtreeError
+
+    fake, corpus, progress = _fresh_publish(tmp_path, monkeypatch)
+    _build_doc_with_id(corpus, "a", DOC_A)
+    hidden = corpus / "hidden"
+    hidden.mkdir()
+    _build_doc_with_id(hidden, "b", DOC_B)
+    hidden.chmod(mode)
+    try:
+        with pytest.raises(UnreadableSubtreeError, match="hidden"):
+            _run_main(monkeypatch, corpus, progress)
+        assert _nothing_written(fake, progress)
+    finally:
+        hidden.chmod(0o755)
+
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
 def test_unreadable_file_is_a_fixed_error_record_and_the_run_continues(tmp_path, monkeypatch):
     """#1002: one unreadable PDF becomes a per-file `error` record with a
     fixed type/message; readable siblings are still planned and recorded; the
@@ -3926,3 +3973,76 @@ def test_unreadable_file_is_a_fixed_error_record_and_the_run_continues(tmp_path,
     assert str(corpus) not in (inv[str(bad)].error or "")
     assert inv[str(good)].status == "upserted"
     assert ALIAS not in fake.aliases  # no cutover over a failed corpus
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
+def test_corpus_of_only_unreadable_files_records_each_and_exits_nonzero(tmp_path, monkeypatch):
+    """#1002: when every PDF is unreadable the run still writes a fixed error
+    record per file and exits 1 (no exception, nothing published)."""
+    from mainframe_rag.ingest.inventory import load_inventory
+
+    fake, corpus, progress = _fresh_publish(tmp_path, monkeypatch)
+    bad = [_build_doc_with_id(corpus, "x", DOC_A), _build_doc_with_id(corpus, "y", DOC_B)]
+    for b in bad:
+        b.chmod(0)
+    try:
+        assert _run_main(monkeypatch, corpus, progress) == 1
+    finally:
+        for b in bad:
+            b.chmod(0o644)
+    inv = load_inventory(progress)
+    assert {inv[str(b)].error_type for b in bad} == {"UnreadableFile"}
+    assert all(inv[str(b)].status == "error" for b in bad)
+    assert not fake.aliases and not fake.collections
+
+
+def _parse_task(corpus: Path, path: Path, sha: str):
+    from mainframe_rag.ingest import run_ingest
+
+    return run_ingest.ParseTask(str(path), None, None, None, str(corpus), sha, False, None)
+
+
+def test_link_swapped_in_after_the_scan_is_refused_at_parse_time(tmp_path, monkeypatch):
+    """#996 TOCTOU: the planner confined the path, then it became a symlink to
+    an outside file. The worker refuses with a fixed record and never parses
+    the outside bytes."""
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.ibm_pdf import sha256_file
+
+    _publish_env(monkeypatch)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    pdf = _build_doc_with_id(corpus, "a", DOC_A)
+    sha = sha256_file(pdf)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    secret = _build_doc_with_id(outside, "o", DOC_B)
+    pdf.unlink()
+    pdf.symlink_to(secret)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("outside bytes were parsed")
+
+    monkeypatch.setattr(run_ingest, "parse_walked", forbidden)
+    record, _, chunks, vectors, _ = run_ingest._parse_one(_parse_task(corpus, pdf, sha))
+    assert record.status == "error" and record.error_type == "WalkedFileMovedError"
+    assert record.error == "walked_file_outside_root: walked file no longer resolves inside the corpus root"
+    assert chunks == [] and vectors == []
+
+
+def test_file_changed_after_the_scan_is_refused_at_parse_time(tmp_path, monkeypatch):
+    """#996 TOCTOU: bytes that differ from the walk-time digest are refused
+    after the worker read them, so they are never chunked or served."""
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.ibm_pdf import sha256_file
+
+    _publish_env(monkeypatch)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    pdf = _build_doc_with_id(corpus, "a", DOC_A)
+    sha = sha256_file(pdf)
+    _build_doc_with_id(corpus, "a", DOC_B)  # same path, different bytes
+    record, _, chunks, vectors, _ = run_ingest._parse_one(_parse_task(corpus, pdf, sha))
+    assert record.status == "error" and record.error_type == "WalkedFileChangedError"
+    assert record.error == "walked_file_changed: walked file changed after the corpus scan"
+    assert chunks == [] and vectors == []

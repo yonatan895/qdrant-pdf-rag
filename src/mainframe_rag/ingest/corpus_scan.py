@@ -52,6 +52,42 @@ class UnreadableSubtreeError(CorpusScanError):
         )
 
 
+class WalkedFileMovedError(CorpusScanError):
+    """Parse-time re-check failed: the walked path now resolves outside the
+    corpus root (a link swapped in after the scan). Fixed text only."""
+
+    code = "walked_file_outside_root"
+
+    def __init__(self) -> None:
+        super().__init__(f"{self.code}: walked file no longer resolves inside the corpus root")
+
+
+class WalkedFileChangedError(CorpusScanError):
+    """Parse-time re-check failed: the file's bytes differ from the walk-time
+    digest. Fixed text only."""
+
+    code = "walked_file_changed"
+
+    def __init__(self) -> None:
+        super().__init__(f"{self.code}: walked file changed after the corpus scan")
+
+
+def require_inside_root(path: Path, corpus_root: str | None) -> None:
+    """Worker-side confinement re-check right before parsing (TOCTOU, #996)."""
+    if corpus_root and not path.resolve().is_relative_to(Path(corpus_root).resolve()):
+        raise WalkedFileMovedError
+
+
+def require_unchanged(path: Path, walk_sha: str, corpus_root: str | None) -> None:
+    """After the worker read the file: still inside the root and still the
+    bytes the scan hashed, else the parsed content is refused."""
+    if not corpus_root or not walk_sha:
+        return
+    require_inside_root(path, corpus_root)
+    if sha256_file(path) != walk_sha:
+        raise WalkedFileChangedError
+
+
 @dataclass(frozen=True)
 class CorpusScan:
     entries: list[tuple[str, str]]  # (path, sha256) of readable PDFs

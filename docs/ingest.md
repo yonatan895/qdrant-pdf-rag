@@ -63,6 +63,15 @@ publication prewalk; `walk.py` is unchanged) enforces three rules:
 - A single unreadable file (open/read `OSError`) is not fatal: it gets a fixed
   `error` inventory record (`error_type` `UnreadableFile`, fixed message, empty
   sha), the other files are planned, and the run exits nonzero (see §9).
+  A corpus whose only PDFs are unreadable gets the same per-file records and
+  exits nonzero without staging or publishing anything.
+- **Parse-time re-check (TOCTOU).** The scan confines a path once; the worker
+  re-checks that it still resolves inside the corpus root right before parsing
+  and that the file's sha256 still equals the walk-time digest after reading.
+  A mismatch is a fixed `error` record (`WalkedFileMovedError`,
+  `WalkedFileChangedError`), never parsed or served content.
+- **Residual:** hardlinks to files outside the root have no path to detect
+  and are out of scope; only symlinks are confined.
 
 Contract tests: `tests/test_generic_pdf.py` (`detect_vendor`,
 `infer_from_path`), `tests/test_parser_ibm_shape.py` (walker filtering),
