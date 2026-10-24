@@ -78,14 +78,18 @@ def _hit(text: str, chunk_type: str = "syntax", units=None, index: str = "c1", p
 
 # The per-excerpt source-metadata line these (product-less) fixture hits render (issue #635).
 _META_LEN = len("\nSource product: unknown; version: unknown")
+# The frame delimiters every prompt order adds around each excerpt and every
+# planner prices with it (issue #999).
+_FRAME_LEN = len("<retrieved-excerpt>\n") + len("\n</retrieved-excerpt>")
 
 
 def _excerpt_body(prepared, index: int = 1) -> str:
     user_text = prepared.messages[1].content
     marker = f"[{index}]"
     start = user_text.index(marker)
-    tail = user_text.index("\n\nPlease answer based strictly")
-    return user_text[start:tail]
+    # Each excerpt ends at its own frame close (issue #999).
+    end = user_text.index("\n</retrieved-excerpt>", start)
+    return user_text[start:end]
 
 
 # ---------------------------------------------------------------------------
@@ -175,11 +179,12 @@ def test_budget_remainder_packs_whole_units_then_stops():
     lead_len = (
         len("[1] SA22-0000-00 Synthetic Reference, H, p. 1-1")
         + _META_LEN
+        + _FRAME_LEN
         + 1
         + len("Intro sentence.")
     )
-    full = len("[2] SA22-0000-00 Synthetic Reference, H, p. 1-1") + _META_LEN + 1 + len(text)
-    room = lead_len + 300  # remainder > 200 guard, but short of the full hit
+    full = len("[2] SA22-0000-00 Synthetic Reference, H, p. 1-1") + _META_LEN + _FRAME_LEN + 1 + len(text)
+    room = lead_len + 300 + _FRAME_LEN  # remainder > 200 guard, but short of the full hit
     assert 200 < room - lead_len < full
     prepared = build_messages("q", [lead, hit], max_context_chars=room)
     assert prepared.evidence.omitted_indices == ()
@@ -384,11 +389,12 @@ def test_wholly_omitted_chunk_is_not_citation_eligible():
     lead_len = (
         len("[1] SA22-0000-00 Synthetic Reference, H, p. 1-1")
         + _META_LEN
+        + _FRAME_LEN
         + 1
         + len("Intro sentence.")
     )
     header1 = "[2] SA22-0000-00 Synthetic Reference, H, p. 1-2"
-    room = lead_len + len(header1) + _META_LEN + 1 + len(JCL_TEXT) + 1 + 10
+    room = lead_len + len(header1) + _META_LEN + _FRAME_LEN + 1 + len(JCL_TEXT) + 1 + 10
     prepared = build_messages("q", [lead, hit1, hit2], max_context_chars=room)
     assert prepared.evidence.omitted_indices == (3,)
     assert prepared.evidence.cite_for_index(3) is None
