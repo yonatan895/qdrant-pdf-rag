@@ -4015,6 +4015,27 @@ def test_citations_header_regex_is_linear_in_newlines():
     assert CITATIONS_HEADER_RE.search("a\n\n\n## **Citations**:\n- x")
 
 
+def test_citations_header_regex_is_linear_in_horizontal_whitespace():
+    """#1010: adjacent horizontal-whitespace runs around an optional `#` run
+    backtracked quadratically (16,000 spaces cost 1.3 s in the regex, 7 s in
+    parse_answer); whole-reply parsing of a 128k space/tab flood stays fast."""
+    from mainframe_rag.agent.cites import CITATIONS_HEADER_RE
+
+    for ws in (" ", "\t", " \t"):
+        text = "Fix it.\n" + ws * (16_000 // len(ws)) + "\n[1]"
+        t0 = time.perf_counter()
+        assert CITATIONS_HEADER_RE.search(text) is None
+        assert time.perf_counter() - t0 < 0.2, repr(ws)
+    for ws in (" ", "\t"):
+        text = "Fix it.\n" + ws * 128_000 + "\n[1]"
+        t0 = time.perf_counter()
+        parse_answer(text, make_evidence([]))
+        assert time.perf_counter() - t0 < 2.0, repr(ws)
+    # Indented and marked headers still match.
+    for header in ("Citations:", "  Citations:", "\t## Citations:", "###   **Citations**:  "):
+        assert CITATIONS_HEADER_RE.search("a\n" + header + "\n- x"), header
+
+
 def test_livez_responsive_while_hostile_reply_is_finalized(client, monkeypatch):
     """#1010: /livez answers promptly while a 2 KB newline reply is processed."""
     content = "Reissue the command.\n" + "\n" * 2000
