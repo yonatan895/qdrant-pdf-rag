@@ -6,12 +6,15 @@ and SKOPEO_ARGS / INSECURE_REGISTRY flag propagation without network or live reg
 """
 
 import hashlib
+import io
 import json
 import shutil
 import subprocess
+import tarfile
 from pathlib import Path
 
 import pytest
+from scripts.airgap import image_manifest
 
 from tests.helpers_airgap import (
     REPO,
@@ -23,47 +26,53 @@ from tests.helpers_airgap import (
     write_git_identity_stub,
     write_stub,
 )
+from tests.helpers_image_inventory import (
+    DOCKER_MANIFEST,
+    oci_archive,
+    tar_bytes,
+    write_docker_archive,
+)
 from tests.helpers_task_artifact import copy_task_tools, task_manifest, task_members
 
 IMAGE_SHA = "b" * 40
 
-# skopeo stub with real registry semantics for identity checks. Archive
-# manifests are canned files next to the archives (.skopeo-stub/archive/);
-# `copy` "pushes" the matching .skopeo-stub/pushed/ manifest into the stub
-# registry ($SKOPEO_STATE/registry/), and `inspect docker://` reads it back.
+# skopeo stub with real registry semantics for identity checks. Archives are
+# real oci-archive layouts that load.sh reads itself; `copy` "pushes" the
+# matching .skopeo-stub/pushed/ manifest into the stub registry
+# ($SKOPEO_STATE/registry/), and `inspect docker://` reads it back. A
+# .skopeo-stub/swap/<member> file replaces the archive at copy time (the
+# bytes skopeo actually reads) and pushes that image's manifest instead.
+# Load never needs `skopeo inspect` of an archive: any such call fails.
 # Every call is logged on one line.
 STUB_SKOPEO = r"""#!/bin/sh
 printf '%s\n' "$*" >> "$SKOPEO_LOG"
-src=""; dst=""; raw=0
+src=""; dst=""
 for a in "$@"; do
   case "$a" in
-    --raw) raw=1 ;;
-    docker-archive:*) src="${a#docker-archive:}" ;;
+    oci-archive:*) src="${a#oci-archive:}" ;;
+    docker-archive:*) echo "stub: docker-archive transport is not used by load" >&2; exit 1 ;;
     docker://*) dst="${a#docker://}" ;;
   esac
 done
 key=$(printf '%s' "$dst" | tr '/:@' '___')
 case "$1" in
   inspect)
-    if [ -n "$dst" ]; then
-      f="$SKOPEO_STATE/registry/$key.raw"
-      [ -f "$f" ] || { echo "manifest unknown" >&2; exit 1; }
-      cat "$f"
-    else
-      stubdir="$(dirname "$src")/.skopeo-stub"
-      name=$(basename "$src")
-      f="$stubdir/archive/$name.raw"
-      if [ "$raw" = 1 ]; then cat "$f"
-      elif [ -f "$stubdir/format-digest/$name" ]; then cat "$stubdir/format-digest/$name"
-      else printf 'sha256:%s\n' "$(sha256sum "$f" | cut -d' ' -f1)"
-      fi
-    fi
+    [ -n "$dst" ] || { echo "stub: load must not inspect an archive" >&2; exit 1; }
+    f="$SKOPEO_STATE/registry/$key.raw"
+    [ -f "$f" ] || { echo "manifest unknown" >&2; exit 1; }
+    cat "$f"
     ;;
   copy)
     if [ -n "$src" ] && [ -n "$dst" ]; then
       mkdir -p "$SKOPEO_STATE/registry"
-      pushed="$(dirname "$src")/.skopeo-stub/pushed/$(basename "$src").raw"
-      [ -f "$pushed" ] && cp "$pushed" "$SKOPEO_STATE/registry/$key.raw"
+      stubdir="$(dirname "$src")/.skopeo-stub"
+      name=$(basename "$src")
+      if [ -f "$stubdir/swap/$name" ]; then
+        cp "$stubdir/swap/$name" "$src"
+        cp "$stubdir/swap/$name.raw" "$SKOPEO_STATE/registry/$key.raw"
+      elif [ -f "$stubdir/pushed/$name.raw" ]; then
+        cp "$stubdir/pushed/$name.raw" "$SKOPEO_STATE/registry/$key.raw"
+      fi
     fi
     ;;
 esac
@@ -79,6 +88,7 @@ def _digest(raw: bytes) -> str:
 
 
 def _manifest(config: str, layer: str) -> bytes:
+    """A registry-side manifest (sizes are not identity; config and layers are)."""
     return json.dumps(
         {
             "schemaVersion": 2,
@@ -98,16 +108,21 @@ def _registry_key(ref: str) -> str:
     return ref.replace("/", "_").replace(":", "_").replace("@", "_")
 
 
-def _stage_stub_images(artdir: Path, sha: str, oauth: bool = False) -> dict[str, str]:
-    """Write per-archive stub manifests; return the MANIFEST digest per image.
+def _write_member(path: Path, image: str) -> bytes:
+    """A real oci-archive member: config blob `config-<image>`, one layer blob."""
+    return oci_archive(path, f"config-{image}".encode(), [f"layer-{image}".encode()],
+                       manifest_type=DOCKER_MANIFEST, compressed=True)
 
-    The archive manifest is what `skopeo inspect docker-archive:` reports.
-    The pushed manifest keeps the same image config but compresses the layer,
-    so its digest legitimately differs from the archive digest (the docker
-    archive holds uncompressed layers; a registry stores compressed ones).
+
+def _stage_stub_images(artdir: Path, sha: str, oauth: bool = False) -> dict[str, str]:
+    """Write each image member as an oci-archive; return the MANIFEST digest per image.
+
+    The archive keeps the registry's manifest bytes (pack copies with
+    --preserve-digests), so by default the stub registry stores exactly the
+    archive's manifest after a push.
     """
     stub = artdir / ".skopeo-stub"
-    for sub in ("archive", "pushed", "format-digest"):
+    for sub in ("pushed", "swap"):
         (stub / sub).mkdir(parents=True, exist_ok=True)
     tars = {
         "qdrant": "qdrant-image.tar",
@@ -120,13 +135,13 @@ def _stage_stub_images(artdir: Path, sha: str, oauth: bool = False) -> dict[str,
         tars["oauth_proxy"] = "oauth-proxy-image.tar"
     digests = {}
     for image, tar in tars.items():
-        archive = _manifest(_config_of(image), _digest(f"layer-{image}".encode()))
-        (stub / "archive" / f"{tar}.raw").write_bytes(archive)
-        (stub / "pushed" / f"{tar}.raw").write_bytes(
-            _manifest(_config_of(image), _digest(f"layer-{image}-gz".encode()))
-        )
-        digests[image] = _digest(archive)
+        raw = _write_member(artdir / tar, image)
+        (stub / "pushed" / f"{tar}.raw").write_bytes(raw)
+        digests[image] = _digest(raw)
     return digests
+
+
+IMAGE_MEMBERS = ("qdrant-image.tar", "openobserve-image.tar", "otelcol-image.tar", "oauth-proxy-image.tar")
 
 
 def _make_artifacts(artdir: Path, sha: str = IMAGE_SHA, corrupt: bool = False, oauth: bool = False):
@@ -135,13 +150,8 @@ def _make_artifacts(artdir: Path, sha: str = IMAGE_SHA, corrupt: bool = False, o
     files = {
         **task_members(),
         "repo.bundle": b"bundle-content\n",
-        "qdrant-image.tar": b"qdrant-tar\n",
-        "openobserve-image.tar": b"openobserve-tar\n",
-        "otelcol-image.tar": b"otelcol-tar\n",
-        f"app-ingest-{sha}.tar": b"ingest-tar\n",
-        f"app-agent-{sha}.tar": b"agent-tar\n",
         "MANIFEST.txt": (
-            f"sha: {sha}\ndate: 2026-09-05T00:00:00Z\n"
+            f"sha: {sha}\ndate: 2026-09-05T00:00:00Z\nimage_format: oci-archive\n"
             f"qdrant_digest: {digests['qdrant']}\n"
             f"openobserve_digest: {digests['openobserve']}\n"
             f"otelcol_digest: {digests['otelcol']}\n"
@@ -153,15 +163,17 @@ def _make_artifacts(artdir: Path, sha: str = IMAGE_SHA, corrupt: bool = False, o
         "sbom.json": b'{"images": []}\n',
     }
     if oauth:
-        files["oauth-proxy-image.tar"] = b"oauth-tar\n"
         files["MANIFEST.txt"] += (
             f"oauth_proxy_digest: {digests['oauth_proxy']}\n"
             f"oauth_proxy_config_digest: {_config_of('oauth_proxy')}\n"
         ).encode()
-    sums = []
     for name, content in files.items():
-        p = artdir / name
-        p.write_bytes(content)
+        (artdir / name).write_bytes(content)
+    members = [*files, *(name for name in sorted(p.name for p in artdir.glob("*.tar"))
+                         if name in IMAGE_MEMBERS or name.startswith("app-"))]
+    sums = []
+    for name in members:
+        content = (artdir / name).read_bytes()
         digest = _sha256(b"corrupt\n" if corrupt and name == "qdrant-image.tar" else content)
         sums.append(f"{digest}  {name}\n")
     (artdir / "SHA256SUMS").write_text("".join(sums))
@@ -176,8 +188,13 @@ def _sign_artifacts(artdir: Path) -> None:
     sign_sums(artdir)
 
 
+def _archive_manifest(artdir: Path, tar: str) -> bytes:
+    with tarfile.open(artdir / tar) as archive:
+        return image_manifest.read_archive(archive).manifest_raw
+
+
 def _digest_of_archive(artdir: Path, tar: str) -> str:
-    return _digest((artdir / ".skopeo-stub" / "archive" / f"{tar}.raw").read_bytes())
+    return _digest(_archive_manifest(artdir, tar))
 
 
 @pytest.fixture
@@ -293,6 +310,12 @@ def test_load_image_digest_mismatch_fails_closed(load_tree):
     assert "does not match MANIFEST" in r.stderr
 
 
+def _copies(log: Path) -> list[str]:
+    """skopeo copy calls so far; load verifies archives itself, so a refusal
+    before any push may leave no skopeo call at all."""
+    return [line for line in log.read_text().splitlines() if line.startswith("copy")] if log.exists() else []
+
+
 def _edit_manifest_and_resign(artdir: Path, edit) -> None:
     manifest = artdir / "MANIFEST.txt"
     manifest.write_text(edit(manifest.read_text()))
@@ -314,7 +337,7 @@ def test_load_refuses_manifest_without_config_digest_before_any_push(load_tree):
     r = _run_load(load_tree)
     assert r.returncode == 1
     assert "no agent_config_digest entry" in r.stderr
-    assert "copy" not in skopeo_log.read_text().split()
+    assert not _copies(skopeo_log)
 
 
 def test_load_refuses_manifest_config_digest_that_is_not_the_archives(load_tree):
@@ -327,7 +350,120 @@ def test_load_refuses_manifest_config_digest_that_is_not_the_archives(load_tree)
     r = _run_load(load_tree)
     assert r.returncode == 1
     assert "image config does not match MANIFEST qdrant_config_digest" in r.stderr
-    assert "copy" not in skopeo_log.read_text().split()
+    assert not _copies(skopeo_log)
+
+
+# --- OCI archive members (#1066) --------------------------------------------
+# A validly signed bundle (pack bug or key holder) must still not push bytes
+# that differ from the archive's own descriptors or from the MANIFEST, and a
+# bundle of another format is refused as a whole before any push.
+
+
+def _resign(artdir: Path) -> None:
+    _edit_manifest_and_resign(artdir, lambda text: text)
+
+
+def _rewrite_member(path: Path, edit) -> None:
+    with tarfile.open(path) as archive:
+        members = {item.name: (archive.extractfile(item).read() if item.isfile() else None) for item in archive}
+    path.write_bytes(tar_bytes(edit(members)))
+
+
+@pytest.mark.parametrize("blob", ["layer", "config", "manifest"])
+def test_load_refuses_tampered_oci_blob_before_any_push(load_tree, blob):
+    tmp_path, skopeo_log = load_tree
+    artdir = tmp_path / "dist"
+    _make_artifacts(artdir)
+    manifest = json.loads(_archive_manifest(artdir, TAR["otelcol"]))
+    target = {"layer": manifest["layers"][0]["digest"], "config": manifest["config"]["digest"],
+              "manifest": _digest_of_archive(artdir, TAR["otelcol"])}[blob]
+    name = f"blobs/sha256/{target[7:]}"
+
+    def flip(members):
+        data = bytearray(members[name])
+        data[0] ^= 1  # same size, different bytes
+        return {**members, name: bytes(data)}
+
+    _rewrite_member(artdir / TAR["otelcol"], flip)
+    _resign(artdir)
+    r = _run_load(load_tree)
+    assert r.returncode == 1
+    assert "otelcol-image.tar: an image blob is missing or does not match its digest" in r.stderr
+    assert not _copies(skopeo_log)
+
+
+def test_load_refuses_consistent_archive_of_another_image(load_tree):
+    tmp_path, skopeo_log = load_tree
+    artdir = tmp_path / "dist"
+    _make_artifacts(artdir)
+    # Internally consistent, correctly checksummed and signed, but not the image
+    # the MANIFEST binds: only the digest binding can catch it.
+    other = _digest(_write_member(artdir / TAR["qdrant"], "someone-else"))
+    _resign(artdir)
+    r = _run_load(load_tree)
+    assert r.returncode == 1
+    assert f"qdrant-image.tar digest {other} does not match MANIFEST qdrant_digest" in r.stderr
+    assert not _copies(skopeo_log)
+
+
+@pytest.mark.parametrize("declared", [None, "docker-archive"])
+def test_load_refuses_docker_archive_bundle_then_loads_the_next_oci_bundle(load_tree, declared):
+    """Rollback decision (#1066): a pre-#1066 docker-archive bundle is refused with
+    a fixed message before any registry call; its own release loads it."""
+    tmp_path, skopeo_log = load_tree
+    artdir = tmp_path / "dist"
+    _make_artifacts(artdir)
+    for tar in TAR.values():
+        write_docker_archive(artdir / tar, [{"etc/legacy": b"legacy"}])
+    _edit_manifest_and_resign(
+        artdir,
+        lambda t: t.replace("image_format: oci-archive\n", "" if declared is None else f"image_format: {declared}\n"),
+    )
+    r = _run_load(load_tree)
+    assert r.returncode == 1
+    assert ("FAIL: bundle image format is not oci-archive (a docker-archive bundle from an older release, "
+            "or an unknown format) — load an older approved release with that release's own bootstrap.sh "
+            "and load.sh in a separate workspace; nothing was pushed") in r.stderr
+    assert not skopeo_log.exists()
+    # The next ordinary operation: the current release's bundle loads.
+    shutil.rmtree(artdir)
+    _make_artifacts(artdir)
+    again = _run_load(load_tree)
+    assert again.returncode == 0, again.stderr
+    assert "Loaded 5 images into reg.internal:5000" in again.stdout
+
+
+def _two_images(members):
+    index = json.loads(members["index.json"])
+    index["manifests"].append(dict(index["manifests"][0]))
+    return {**members, "index.json": json.dumps(index).encode()}
+
+
+@pytest.mark.parametrize("shape", ["docker-archive member", "two-image index", "shadowed blob"])
+def test_load_refuses_member_that_is_not_one_oci_image_before_any_push(load_tree, shape):
+    tmp_path, skopeo_log = load_tree
+    artdir = tmp_path / "dist"
+    _make_artifacts(artdir)
+    member = artdir / TAR["otelcol"]
+    if shape == "docker-archive member":
+        # MANIFEST declares oci-archive: one member of another format is a mixed bundle.
+        write_docker_archive(member, [{"etc/legacy": b"legacy"}])
+    elif shape == "two-image index":
+        _rewrite_member(member, _two_images)
+    else:
+        # A second copy of a blob name would shadow the verified bytes for some readers.
+        with tarfile.open(member) as archive:
+            blob = next(item for item in archive if item.name.startswith("blobs/sha256/") and item.isfile())
+            data = archive.extractfile(blob).read()
+        with tarfile.open(member, "a") as archive:
+            info = tarfile.TarInfo(blob.name)
+            info.size = len(data)
+            archive.addfile(info, io.BytesIO(data))
+    _resign(artdir)
+    r = _run_load(load_tree)
+    assert r.returncode == 1
+    assert "otelcol-image.tar is not a single-image oci-archive" in r.stderr
+    assert not _copies(skopeo_log)
 
 
 def test_load_trusted_pub_mismatch_refuses(load_tree):
@@ -404,18 +540,24 @@ def _registry_calls(log: Path) -> list[str]:
 
 def test_load_success_proves_registry_serves_packed_config(load_tree):
     root, log = load_tree
-    _make_artifacts(root / "dist")
+    artdir = root / "dist"
+    _make_artifacts(artdir)
+    # A registry may re-serialize what it stores: the agent tag holds the same
+    # config under another manifest digest, which load still accepts and pins.
+    reserialized = _manifest(_config_of("agent"), _digest(b"layer-agent-recompressed"))
+    _set_pushed(artdir, "agent", reserialized)
     r = _run_load(load_tree)
     assert r.returncode == 0, r.stderr
     assert "Loaded 5 images into reg.internal:5000" in r.stdout
     for image, ref in REF.items():
         registry_raw = _registry_manifest(root, image)
-        archive_raw = (root / "dist/.skopeo-stub/archive" / f"{TAR[image]}.raw").read_bytes()
-        # The stored bytes are the packed image's config; the compressed
-        # registry manifest has its own digest, which load reports as the pin.
-        assert json.loads(registry_raw)["config"] == json.loads(archive_raw)["config"]
-        assert _digest(registry_raw) != _digest(archive_raw)
+        archive_raw = _archive_manifest(artdir, TAR[image])
+        assert json.loads(registry_raw)["config"]["digest"] == json.loads(archive_raw)["config"]["digest"]
+        # The printed pin is always the registry's digest. The archive keeps the
+        # registry's manifest bytes, so it equals the archive digest unless the
+        # registry re-serialized the manifest.
         assert f"{ref}@{_digest(registry_raw)}" in r.stdout
+        assert (_digest(registry_raw) == _digest(archive_raw)) is (image != "agent")
     assert len(_registry_calls(log)) == 5
 
 
@@ -464,20 +606,19 @@ def test_load_refuses_unreadable_registry_after_push(load_tree):
     assert "Loaded" not in r.stdout
 
 
-def test_load_refuses_archive_changed_after_digest_binding(load_tree):
+def test_load_refuses_archive_swapped_after_digest_binding(load_tree):
     root, _ = load_tree
     artdir = root / "dist"
     _make_artifacts(artdir)
-    # `inspect --format` still reports the MANIFEST digest (as it did at the
-    # binding step) but the archive's manifest bytes no longer hash to it.
-    manifest_digest = _digest_of_archive(artdir, TAR["agent"])
-    (artdir / ".skopeo-stub/format-digest" / TAR["agent"]).write_text(manifest_digest + "\n")
-    (artdir / ".skopeo-stub/archive" / f"{TAR['agent']}.raw").write_bytes(
-        _manifest(_config_of("agent"), _digest(b"layer-tampered"))
-    )
+    # The archive verifies before any push, then another image replaces it
+    # before skopeo reads it: the registry now serves that image, and the
+    # read-back compares it with the manifest that was verified, not the file.
+    other = artdir / ".skopeo-stub/swap" / TAR["agent"]
+    (artdir / ".skopeo-stub/swap" / f"{TAR['agent']}.raw").write_bytes(_write_member(other, "someone-else"))
     r = _run_load(load_tree)
     assert r.returncode == 1
-    assert f"archive for {REF['agent']} no longer matches its MANIFEST digest" in r.stderr
+    assert f"registry image {REF['agent']} is not the packed image" in r.stderr
+    assert "Loaded" not in r.stdout
 
 
 def test_load_registry_read_back_follows_skopeo_args_and_insecure_flag(load_tree):

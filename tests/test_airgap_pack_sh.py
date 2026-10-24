@@ -3,7 +3,7 @@
 Hermetic tests: pack.sh against a stubbed skopeo and a real throwaway git
 repo — no GHCR, no network. Covers the fail-closed gates (SHA==HEAD, git
 repo present, skopeo present, signing key present) and the happy path:
-bundle + 4 image tars + MANIFEST (with image digests) + sbom.json +
+bundle + oci-archive image members + MANIFEST (with image digests) + sbom.json +
 offline signature + member checksums + tarball digest, with the bundle
 clone-traversable (the airgap-package CI check, hermetically).
 """
@@ -30,7 +30,13 @@ from tests.helpers_airgap import (
     skopeo_stub,
     symlink_tools,
 )
-from tests.helpers_image_inventory import image_files, write_image
+from tests.helpers_image_inventory import (
+    image_files,
+    oci_archive,
+    tar_bytes,
+    write_docker_archive,
+    write_image,
+)
 from tests.helpers_task_artifact import (
     TASK_ASSET,
     TASK_BINARY_SHA256,
@@ -39,29 +45,34 @@ from tests.helpers_task_artifact import (
     task_archive,
 )
 
-# Stub skopeo: materialize every docker-archive:DEST as a marker file;
-# answer inspect with a canned digest (pack binds it into MANIFEST, so the
-# self-consistency is what the test proves).
+# Stub skopeo: materialize every oci-archive:DEST from the fixture member of
+# the same role (real OCI layouts written by the test); pack reads each
+# archive itself (#1066), so it never needs `skopeo inspect`.
 STUB_SKOPEO = skopeo_stub("a", materialize=True).replace(
-    "printf 'stub-image-tar\\n' > \"$dest\"", 'cp "$PACK_TEST_IMAGE" "$dest"')
+    "printf 'stub-image-tar\\n' > \"$dest\"",
+    'n=$(basename "$dest"); case "$n" in app-ingest-*) n=app-ingest.tar ;; app-agent-*) n=app-agent.tar ;; esac\n'
+    '      cp "$PACK_TEST_IMAGES/$n" "$dest"')
+assert "PACK_TEST_IMAGES" in STUB_SKOPEO
 
-STUB_DIGEST = "sha256:" + "a" * 64
-# `inspect --raw` answers a single-image manifest whose config digest is derived
-# from the archive path, so each image has a distinct, checkable config digest.
-_RAW_ARM = r"""if [ "$1" = "inspect" ]; then
-  case " $* " in *" --raw "*)
-    for a in "$@"; do case "$a" in docker-archive:*) n=$(basename "${a#docker-archive:}" .tar) ;; esac; done
-    printf '{"config":{"digest":"sha256:%s"},"layers":[]}\n' "$(printf '%s' "$n" | sha256sum | cut -d' ' -f1)"
-    printf '%s\n' "$@" >> "$SKOPEO_LOG"
-    exit 0 ;;
-  esac
-"""
-STUB_SKOPEO = STUB_SKOPEO.replace('if [ "$1" = "inspect" ]; then\n', _RAW_ARM, 1)
-assert "--raw" in STUB_SKOPEO
+THIRD_PARTY_MEMBERS = ("qdrant-image", "openobserve-image", "otelcol-image", "oauth-proxy-image")
 
 
-def config_digest_of(archive_stem: str) -> str:
-    return "sha256:" + hashlib.sha256(archive_stem.encode()).hexdigest()
+def write_pack_images(root, app_files=None) -> dict[str, tuple[str, str]]:
+    """Fixture registry images; returns {member stem: (manifest digest, config digest)}.
+
+    App images carry the shipped Python inventory plus a role layer, so every
+    image has its own config digest.
+    """
+    images = root / "pack-images"
+    images.mkdir(exist_ok=True)
+    raws = {stem: oci_archive(images / f"{stem}.tar", f"config-{stem}".encode(), [f"layer-{stem}".encode()],
+                              compressed=True) for stem in THIRD_PARTY_MEMBERS}
+    for role in ("ingest", "agent"):
+        raws[f"app-{role}"] = write_image(images / f"app-{role}.tar",
+                                          [app_files or image_files(root), {f"app/{role}": role.encode()}],
+                                          compressed=True)
+    return {stem: ("sha256:" + hashlib.sha256(raw).hexdigest(), json.loads(raw)["config"]["digest"])
+            for stem, raw in raws.items()}
 
 
 # Hermetic tool PATH: every external pack.sh needs, symlinked from the host.
@@ -133,7 +144,7 @@ def pack_tree(tmp_path):
     p.write_text(STUB_SKOPEO)
     p.chmod(0o755)
 
-    write_image(tmp_path / "synthetic-image.tar", [image_files(tmp_path)])
+    write_pack_images(tmp_path)
     # Throwaway signing key (mirrors the rehearsal flow: pack signs, the
     # bundle carries the derived pub, verification is self-consistent).
     key = gen_sign_keypair(tmp_path)
@@ -145,7 +156,7 @@ def _run_pack(tree, *extra_env):
     env = {
         "PATH": str(tmp_path / "bin"),
         "SKOPEO_LOG": str(tmp_path / "skopeo-args.log"),
-        "PACK_TEST_IMAGE": str(tmp_path / "synthetic-image.tar"),
+        "PACK_TEST_IMAGES": str(tmp_path / "pack-images"),
         "AIRGAP_APP_REGISTRY": "ghcr.io/pack-test",
         "SNEAKERNET_SIGNING_KEY": str(key),
         "AIRGAP_TASK_ARCHIVE": str(task_archive()),
@@ -329,12 +340,21 @@ def test_pack_success_builds_verified_tarball(pack_tree):
     assert f"sha: {head}" in manifest
     assert f"ghcr.io/pack-test/qdrant-pdf-rag-ingest:{head}" in manifest
     assert f"ghcr.io/pack-test/qdrant-pdf-rag-agent:{head}" in manifest
-    assert f"ingest_digest: {STUB_DIGEST}" in manifest
-    assert f"agent_digest: {STUB_DIGEST}" in manifest
-    assert "qdrant_digest: sha256:" in manifest
-    # Tar-manifest digests, not the images.txt list pins: the stub answers
-    # every inspect identically, while the fixture images.txt pins differ.
-    assert f"qdrant_digest: {STUB_DIGEST}" in manifest
+    images = write_pack_images(tmp_path)  # same deterministic fixture bytes the stub copied
+    # Archive (platform manifest) digests and config digests read from each OCI
+    # layout, not the images.txt list pins the images were pulled by.
+    for role, stem in (
+        ("qdrant", "qdrant-image"),
+        ("openobserve", "openobserve-image"),
+        ("otelcol", "otelcol-image"),
+        ("ingest", "app-ingest"),
+        ("agent", "app-agent"),
+    ):
+        assert f"{role}_digest: {images[stem][0]}\n" in manifest
+        assert f"{role}_config_digest: {images[stem][1]}\n" in manifest
+    assert len({digest for digest, _ in images.values()}) == len(images)
+    assert images["qdrant-image"][0] not in (tmp_path / "images.txt").read_text()
+    assert "image_format: oci-archive\n" in manifest
     assert "signed: ephemeral" in manifest
     assert "sha256:PENDING: not bundled" in r.stdout
     assert not (dist / "oauth-proxy-image.tar").exists()
@@ -343,15 +363,12 @@ def test_pack_success_builds_verified_tarball(pack_tree):
     assert f"task_binary_sha256: {TASK_BINARY_SHA256}" in manifest
     log = skopeo_log.read_text()
     assert log.splitlines().count("copy") == 5
-    assert log.count("inspect") == 10  # digest + raw config read per image
-    for role, stem in (
-        ("qdrant", "qdrant-image"),
-        ("openobserve", "openobserve-image"),
-        ("otelcol", "otelcol-image"),
-        ("ingest", f"app-ingest-{head}"),
-        ("agent", f"app-agent-{head}"),
-    ):
-        assert f"{role}_config_digest: {config_digest_of(stem)}" in manifest
+    # Every image is copied as an oci-archive with the registry's own bytes
+    # (no conversion or recompression); pack reads the layouts itself.
+    assert log.splitlines().count("--preserve-digests") == 5
+    assert len([a for a in log.splitlines() if a.startswith("oci-archive:")]) == 5
+    assert "docker-archive" not in log
+    assert "inspect" not in log
     # Digest-only refs: tag+digest combined is not a valid reference.
     assert "docker.io/qdrant/qdrant@sha256:" in log
     assert "@sha256:" in log
@@ -364,7 +381,7 @@ def test_pack_success_builds_verified_tarball(pack_tree):
     sbom = json.loads((dist / "sbom.json").read_text())
     assert sbom["image_sha"] == head
     assert {img["name"] for img in sbom["images"]} == {"qdrant", "openobserve", "otelcol", "app-ingest", "app-agent"}
-    assert sbom["images"][4]["digest"] == STUB_DIGEST
+    assert sbom["images"][4]["digest"] == images["app-agent"][0]
     assert sbom["host_tools"][0]["sha256"] == TASK_SHA256
     assert sbom["host_tools"][0]["license"] == "MIT"
     assert sbom["host_tools"][0]["license_file"] == "task-LICENSE"
@@ -395,8 +412,8 @@ def test_pack_bundles_oauth_proxy_once_digest_recorded(pack_tree):
     subprocess.run(["git", "commit", "-qam", "record oauth-proxy pin"], cwd=tmp_path, check=True)
     head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True,
                           capture_output=True, text=True).stdout.strip()
-    # Model signed-source export: without attachment omission, Docker
-    # archive export fails before the archive can be materialized.
+    # Model signed-source export: without attachment omission, OCI archive
+    # export fails before the archive can be materialized.
     guard = '''signed_source=0
 remove_signatures=0
 for arg in "$@"; do
@@ -406,7 +423,7 @@ for arg in "$@"; do
   esac
 done
 if [ "$signed_source" = 1 ] && [ "$remove_signatures" != 1 ]; then
-  echo "Docker archives cannot store signature attachments" >&2
+  echo "OCI archives cannot store signature attachments" >&2
   exit 1
 fi
 '''
@@ -418,8 +435,9 @@ fi
     assert skopeo_log.read_text().splitlines().count("--remove-signatures") == 1
     manifest = (dist / "MANIFEST.txt").read_text()
     assert "oauth_proxy: registry.redhat.io/openshift4/ose-oauth-proxy@sha256:" + "b" * 64 in manifest
-    assert f"oauth_proxy_digest: {STUB_DIGEST}" in manifest
-    assert f"oauth_proxy_config_digest: {config_digest_of('oauth-proxy-image')}" in manifest
+    images = write_pack_images(tmp_path)
+    assert f"oauth_proxy_digest: {images['oauth-proxy-image'][0]}\n" in manifest
+    assert f"oauth_proxy_config_digest: {images['oauth-proxy-image'][1]}\n" in manifest
     assert "oauth-proxy-image.tar" in (dist / "SHA256SUMS").read_text()
     with tarfile.open(dist / f"qdrant-pdf-rag-{head}.tar") as tf:
         assert "oauth-proxy-image.tar" in tf.getnames()
@@ -499,11 +517,32 @@ def test_pack_rejects_actual_inventory_drift_before_signing(pack_tree, corruptio
         receipt = json.loads(files[key])
         del receipt["packages"][next(iter(receipt["packages"]))]
         files[key] = json.dumps(receipt).encode()
-    write_image(root / "synthetic-image.tar", [files])
+    write_pack_images(root, files)
     result, _ = _run_pack(pack_tree)
     assert result.returncode != 0
     assert "SBOM reconciliation failed" in result.stderr
     assert not list((root / "dist").glob("SHA256SUMS.sig"))
+
+
+@pytest.mark.parametrize("damage", ["tampered blob", "docker-archive"])
+def test_pack_refuses_an_image_member_that_is_not_a_verified_oci_archive(pack_tree, damage):
+    """#1066: pack binds digests only from a verified OCI layout, before signing."""
+    root = pack_tree[0]
+    member = root / "pack-images" / "otelcol-image.tar"
+    if damage == "docker-archive":
+        write_docker_archive(member, [{"etc/otelcol": b"otelcol"}])
+    else:
+        with tarfile.open(member) as source:
+            members = {item.name: source.extractfile(item).read() if item.isfile() else None for item in source}
+        layer = next(name for name, data in members.items() if data == b"layer-otelcol-image")
+        members[layer] = b"layer-otelcol-imagf"  # same size, different bytes
+        member.write_bytes(tar_bytes(members))
+    result, _ = _run_pack(pack_tree)
+    assert result.returncode != 0
+    expected = ("otelcol-image.tar: an image blob is missing or does not match its digest" if damage == "tampered blob"
+                else "otelcol-image.tar is not a single-image oci-archive")
+    assert expected in result.stderr
+    assert not list((root / "dist").glob("SHA256SUMS*"))
 
 
 def _break_license_record(tree, mutate):
