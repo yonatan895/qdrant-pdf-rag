@@ -342,6 +342,26 @@ def test_sigterm_mid_run_stops_every_worker_and_the_next_run_completes(tmp_path)
     assert recorded() == dict.fromkeys(stems, "dry")
 
 
+def test_sigterm_inside_a_spawn_stops_workers_only_after_it_returns(monkeypatch):
+    """Workers spawn inside pool.submit, where the handler also runs: a child
+    that has started but is not yet registered would escape the stop. A
+    SIGTERM there is held until submit returns, and then never dropped."""
+    import signal
+
+    from mainframe_rag.ingest import run_ingest
+
+    guard = run_ingest._WorkersDieWithRun()
+    spawned, stops = [], []
+    monkeypatch.setattr(guard, "_stop", lambda: stops.append(len(spawned)))
+    with guard.spawning():
+        guard._handle(signal.SIGTERM, None)
+        assert stops == []
+        spawned.append("worker")
+    assert stops == [1]
+    guard._handle(signal.SIGTERM, None)  # outside a spawn: at once
+    assert stops == [1, 1]
+
+
 class _CrashSemanticsPool:
     """In-process ProcessPoolExecutor stand-in with its crash semantics
     (#841): one worker thread runs submissions in order; a listed stem
