@@ -9,8 +9,9 @@ maintainer and the organization's qualified legal/open-source owner.
 
 Status: partially implemented. The record, the check and the bundled notices
 exist. The maintainer recorded dispositions on 2026-10-23 (issue #376 comment);
-only `pymupdf` stays unresolved (legal confirmation pending) and `release_approval`
-is absent, so `check --release` still fails.
+`pymupdf` stays unresolved (legal confirmation pending), the Open WebUI trial
+candidate (#1073) awaits a decision, and `release_approval` is absent, so
+`check --release` still fails.
 Source of authority: #376 and its triage comments (19 and 24 September, 1 October
 2026): close on a documented owner disposition, never on CI alone.
 Decision owners: `licenses/inventory.json` (the record),
@@ -83,7 +84,8 @@ owner: these are maintainer dispositions, not legal approvals.
 
 | Component | Recorded state |
 |---|---|
-| `pymupdf` 1.28.2 | `elected: AGPL-3.0-only`, scoped to ingest. **Legal confirmation pending**: status stays `pending-owner-decision` (the one remaining unresolved item) until the qualified legal owner confirms. |
+| `pymupdf` 1.28.2 | `elected: AGPL-3.0-only`, scoped to ingest. **Legal confirmation pending**: status stays `pending-owner-decision` until the qualified legal owner confirms. |
+| Open WebUI v0.12.3 slim (`image:open-webui`, trial candidate #1073) | **Open, owner decision.** `LicenseRef-OpenWebUI` (`proprietary` class): BSD-3-Clause terms plus clause 4, which forbids altering Open WebUI branding above 50 end users per rolling 30 days without written permission or an enterprise license. The upstream LICENSE at tag v0.12.3 is recorded by hash; the image itself carries no LICENSE file, so any adoption must ship the text in the notices. `distributed_by_repo: false`, bound to no pin: not in `images.txt`, the chart or a bundle while ADR-0007 (#1080) is open. |
 | `flatbuffers`, `loguru`, `onnxruntime`, `tokenizers` | `approved`. Upstream license texts (locked version's tag, source URLs in the inventory) are in `licenses/texts/` and rendered into `THIRD-PARTY-NOTICES.txt`. |
 | Qdrant image | `approved` on the upstream Apache-2.0 license. Layer inventory is follow-up #371. |
 | OpenObserve OSS v1.1.2 image | `approved` (ADR-0006, #956): AGPL-3.0 (`network-copyleft`) accepted for the unmodified upstream binary run as a separate service; it is transferred unchanged with the source reference upstream v1.1.2, and any modification or Enterprise-feature change needs a new decision. Layer inventory is follow-up #371. |
