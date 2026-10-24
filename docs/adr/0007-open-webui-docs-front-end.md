@@ -31,10 +31,14 @@
 
 The trial and every pin import (P1) record evidence for each condition. A
 condition is met only when Open WebUI behaves as stated. Proof that a setting
-exists does not count. The deployment reads its configuration from the
-environment only (persistent DB configuration off), so admin-UI edits cannot
-override these conditions.
+exists does not count. The environment wins at every start
+(`ENABLE_PERSISTENT_CONFIG=False`). Two residuals remain. A live admin edit
+applies until the next restart. Admin-created Functions, models and valves are
+not environment configuration. The mitigation is that only the hash-checked
+Pipe is provisioned and the admin role is limited to the team.
 
+- **C1 Admin edits do not survive a restart.** The trial changes a setting in
+  the admin UI, restarts the pod and shows the environment value back in force.
 - **V1 No second vector-store content.** The image is the upstream slim
   variant, with no vector-store URL configured. Built-in RAG, Knowledge, chat
   uploads, memories, notes, web search, the built-in knowledge tools, the code
@@ -49,8 +53,10 @@ override these conditions.
   off, and the Pipelines server is not deployed. The only model is the docs
   Pipe. Its Functions are repository files installed by the deploy step, with
   their hash checked against the repository. Community Functions and
-  frontmatter pip installs are refused. The task model is not the docs model:
-  task features are off, and the Pipe returns fixed text for any task call.
+  frontmatter pip installs are refused. Task features (titles, tags,
+  follow-ups, autocomplete, query generation) are off. The Pipe also answers
+  any Open WebUI `__task__` call with fixed text and never forwards it to the
+  agent.
   Proof: over a multi-turn trial, agent requests equal user turns.
 - **V3 Contract fidelity.** The Pipe sends exactly the agent's `ChatRequest`
   shape. It renders validated citations with their supplied excerpts as source
@@ -68,8 +74,9 @@ override these conditions.
   explicit mounts: the data PVC plus `emptyDir` volumes. The secret key and
   OIDC client secret come from operator-created Secrets. The image is the
   upstream slim image pinned by digest. A derived layer may change only
-  ownership and permissions: it is built in the connected factory, with no
-  source change and no Node build.
+  ownership and permissions (pending maintainer confirmation). It is built in
+  the connected factory, with no source change and no Node build. The deployed
+  digest is then the derived image's, recorded with its base digest.
 - **R2 Offline, zero egress.** Offline mode is on. The version check,
   community sharing, model downloads, STT/TTS and the Pyodide CDN path are off.
   An egress-deny NetworkPolicy allows only the agent Service, cluster DNS and
@@ -83,8 +90,9 @@ override these conditions.
   hours, not the four-week default, because without Redis a sign-out does not
   revoke a session. Open WebUI is exposed only through its own Route, with
   re-encrypt TLS and a Service CA certificate. The Route-exposure preflight
-  refuses any other Route in front of its Service. The agent stays anonymous to Open WebUI
-  users (#373), which is safe because the docs corpus is read by everyone.
+  refuses any other Route in front of its Service. The agent stays anonymous
+  to Open WebUI users (#373), which is safe because the docs corpus is read by
+  everyone.
 - **S1 Storage.** The pod runs one replica with a `Recreate` rollout, a single
   worker and SQLite. Its data lives on a kept RWO block PVC, never NFS:
   validate refuses an NFS-named class, as for the other writable volumes,
@@ -113,7 +121,8 @@ override these conditions.
 - **L1 Licence.** The branding stays unmodified: no custom name, logo, theme
   or injected CSS. The licence permits that at any user count. Users are
   capped at 100. The image gets an inventory record bound to its digest, and
-  the licensing owner signs off per [licensing](../licensing.md#owner-decisions).
+  the licensing owner signs off per
+  [licensing](../licensing.md#owner-decisions).
   `check --release` stays red until then.
 - **P1 Patch policy.** A named owner, recorded with the pin, imports the
   latest upstream release about monthly. Security fixes land only on the
@@ -121,9 +130,10 @@ override these conditions.
   vulnerabilities. Each import is a dedicated pin-bump PR. It re-runs every
   condition above, captures Open WebUI's request body against the Pipe, and
   upgrades a copy of the PVC. Open WebUI migrates its schema at startup, so
-  the pre-upgrade snapshot is kept for rollback. If a published High or
-  Critical advisory affects the running pin and no qualified import exists
-  within a cycle, the instance is switched off by the rollback flag (K1).
+  the pre-upgrade snapshot is kept for rollback. Switch-off trigger: the
+  rollback flag (K1) disables Open WebUI within N days of a published High or
+  Critical advisory affecting the pinned version, unless a qualified import
+  exists by then. N is a maintainer parameter.
 - **K1 Rollback by one flag.** Turning the chart flag off removes Open WebUI
   and keeps its PVC. With the flag off, the render is byte-identical to the
   render without Open WebUI. The agent and the console are untouched. The
@@ -145,6 +155,8 @@ the pilot. The console remains the only supported front end.
 - The Pipe cannot preserve citations, abstention and the verification state.
 - Retention cannot be enforced, or the security or corpus owner refuses chat
   content on a PVC and in backups.
+- The Route cannot meet the documented pin and Secret checks.
+- The IdP cannot supply OIDC group claims.
 - The licensing owner refuses the licence.
 - No owner accepts the patch cadence.
 - The console fallback is not kept.
@@ -165,8 +177,9 @@ the pilot. The console remains the only supported front end.
 - **ADR-0004 §4 CSP: does not extend to Open WebUI.** Its HTML/artifact
   preview and code execution stay off. Whether security headers can be added
   is a trial item.
-- **Unchanged:** non-goal 1 (no Node in our images or packaging; the upstream
-  image is a third-party artifact and a fork stays excluded), non-goal 5 (no
+- **Unchanged:** non-goal 1 (no Node in our images or packaging). The upstream
+  image is a third-party artifact, as OpenObserve is under ADR-0006, and a fork
+  stays excluded. Also unchanged: non-goal 5 (no
   remote assets, R2), the reasoning-model-only rule (V2) and §2 for the
   console.
 - **ADR-0005 decision ("only in the feedback store"): amended.** Open WebUI
