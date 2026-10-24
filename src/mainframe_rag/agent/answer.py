@@ -543,7 +543,8 @@ EXCERPT_CLOSE = "</retrieved-excerpt>"
 # accents split off), case folded, Cyrillic/Greek letter lookalikes and
 # slash/minus lookalikes folded to ASCII, and whitespace, `_`, dashes (Pd),
 # format characters (zero-width, soft hyphen, joiners, bidi) and combining
-# marks skipped. Each candidate scan stops at the first mismatch, so the
+# marks skipped. Each candidate scan reads characters in place and stops at
+# its first mismatch (a candidate bracket is itself a mismatch), so the
 # whole pass is linear in the text.
 _TAG_BRACKET_RE = re.compile("[<\uff1c\ufe64\u2039\u3008\u2329\u27e8\u276c\u29fc\u02c2\u226e]")
 _TAG_NAME = "/retrievedexcerpt"
@@ -567,8 +568,8 @@ def _tag_follows(text: str, pos: int) -> bool:
     """True when the normalized characters from `pos` spell the tag name,
     with the leading `/` optional."""
     want = 0
-    for ch in text[pos:]:
-        for c in unicodedata.normalize("NFKD", ch).translate(_TAG_FOLD).casefold():
+    for k in range(pos, len(text)):  # index loop: no per-candidate tail copy
+        for c in unicodedata.normalize("NFKD", text[k]).translate(_TAG_FOLD).casefold():
             if c in "-_" or c.isspace() or unicodedata.category(c) in _TAG_SKIP_CATEGORIES:
                 continue
             if want == 0 and c != "/":
