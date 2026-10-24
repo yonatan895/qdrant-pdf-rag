@@ -39,6 +39,60 @@ def test_multiword_entities_split_into_exact_paths():
 
 
 @pytest.mark.parametrize(
+    ("query", "leg1", "leg2"),
+    [
+        (
+            "difference between RACF dataset profiles and ACF2 dataset profiles",
+            "RACF dataset profiles",
+            "ACF2 dataset profiles",
+        ),
+        (
+            "JES2 spool handling versus JES3 spool handling",
+            "JES2 spool handling",
+            "JES3 spool handling",
+        ),
+    ],
+)
+def test_mirrored_noun_phrase_legs_are_disjoint(query, leg1, leg2):
+    """Issue #1025: each leg isolates its own entity; no duplicated phrase."""
+    paths, mode = _split(query)
+    assert mode == "comparative"
+    assert paths == [leg1, leg2]
+
+
+@pytest.mark.parametrize(
+    ("query", "leg1", "leg2"),
+    [
+        (
+            "difference between z/OS RACF dataset profiles and z/OS ACF2 dataset profiles",
+            "z/OS RACF dataset profiles",
+            "z/OS ACF2 dataset profiles",
+        ),
+        (
+            "IBM RACF dataset profiles vs CA ACF2 dataset profiles",
+            "IBM RACF dataset profiles",
+            "CA ACF2 dataset profiles",
+        ),
+        ("difference between RACF group profiles and ACF2 rule sets", "RACF group profiles", "ACF2 rule sets"),
+        ("SMF type 30 vs SMF type 70 records", "SMF type 30 records", "SMF type 70 records"),
+    ],
+)
+def test_legs_with_qualifiers_isolate_one_entity_each(query, leg1, leg2):
+    """Issue #1025 review: each leg keeps exactly one compared entity with its
+    own qualifiers; no leg carries both."""
+    paths, mode = _split(query)
+    assert mode == "comparative"
+    assert paths == [leg1, leg2]
+
+
+def test_racf_acf2_legs_exclude_the_other_entity():
+    paths, _ = _split("difference between RACF dataset profiles and ACF2 dataset profiles")
+    assert "ACF2" not in paths[0]
+    assert "RACF" not in paths[1]
+    assert paths[0].lower().count("dataset profiles") == 1
+
+
+@pytest.mark.parametrize(
     ("query", "first", "second"),
     [
         ("Compare MXT vs EDSALIMIT for the region.", "MXT", "EDSALIMIT"),
