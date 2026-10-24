@@ -43,6 +43,39 @@ die() {
     exit 1
 }
 
+# Issue #1016: the operator file is sourced, so `export`/`readonly`/`declare`
+# lines run too. Scan its text before sourcing (any assignment prefix, even
+# chained after `;`/`&&`) and compare the key values after sourcing (any
+# syntax, including eval). Fixed message; the value is never printed.
+_GATEWAY_KEY_VARS="LLM_API_KEY EMBED_API_KEY RERANK_API_KEY CONTEXT_LLM_API_KEY"
+_plaintext_key_die() {
+    die "plaintext gateway virtual key in $1 — keys live only in the cluster Secret named by GATEWAY_API_KEY_SECRET (see airgap.env.example); delete the plaintext assignment"
+}
+_scan_env_file_keys() {
+    # shellcheck disable=SC2086
+    _alt=$(echo $_GATEWAY_KEY_VARS | tr ' ' '|')
+    if grep -Eq "(^|[;&|({[:space:]])(${_alt})\+?=[^[:space:]]" "$1" 2>/dev/null; then
+        # `KEY=` / `KEY=""` are empty assignments, not keys.
+        if grep -E "(^|[;&|({[:space:]])(${_alt})\+?=" "$1" | grep -Ev "^[[:space:]]*#" |
+            grep -Evq "(${_alt})\+?=(\"\"|'')?([[:space:]]*(#.*)?)?\$"; then
+            _plaintext_key_die "$1"
+        fi
+    fi
+    unset _alt
+}
+for _k in $_GATEWAY_KEY_VARS; do
+    eval "_pre_set_${_k}=\${$_k+set}; _pre_val_${_k}=\${$_k:-}"
+done
+_check_sourced_keys() {
+    for _k in $_GATEWAY_KEY_VARS; do
+        eval "_now=\${$_k:-}; _was=\${_pre_val_${_k}}"
+        if [ -n "$_now" ] && [ "$_now" != "$_was" ]; then
+            _plaintext_key_die "$1"
+        fi
+    done
+    unset _now _was
+}
+
 if [ -n "${AIRGAP_ENV:-}" ]; then
     # Issue #478: an explicitly selected file must load or fail closed
     # before any mutation. A missing/unreadable selection must never
@@ -51,14 +84,18 @@ if [ -n "${AIRGAP_ENV:-}" ]; then
     # diagnostic names the path only, never file contents. Unset stays
     # optional: default ./airgap.env when present, else environment-only.
     if [ -f "$AIRGAP_ENV" ] && [ -r "$AIRGAP_ENV" ]; then
+        _scan_env_file_keys "$AIRGAP_ENV"
         # shellcheck disable=SC1091
         . "$AIRGAP_ENV"
+        _check_sourced_keys "$AIRGAP_ENV"
     else
         die "AIRGAP_ENV selects '$AIRGAP_ENV' but it is not a readable regular file (fix the path or unset AIRGAP_ENV to use airgap.env/environment-only)"
     fi
 elif [ -f airgap.env ]; then
+    _scan_env_file_keys airgap.env
     # shellcheck disable=SC1091
     . ./airgap.env
+    _check_sourced_keys airgap.env
 fi
 
 for _k in $_cli_saved_keys; do
@@ -68,6 +105,18 @@ done
 unset _k _cli_saved_keys OPERATOR_ENV_KEYS
 CI_REHEARSAL=$_ci_rehearsal_cli
 unset _ci_rehearsal_cli
+
+# Issue #1015: AIRGAP_DRYRUN is a safety interlock, so it is normalized once,
+# here, and every stage compares the normalized "1"/"0". Documented spellings
+# only (true/yes/1 = preview, false/no/0/unset = live); anything else, such as
+# " 1", "1\n" or "on", is refused before any stage rather than run live.
+case "${AIRGAP_DRYRUN:-}" in
+    "") AIRGAP_DRYRUN=0 ;;
+    1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]) AIRGAP_DRYRUN=1 ;;
+    0|[Ff][Aa][Ll][Ss][Ee]|[Nn][Oo]) AIRGAP_DRYRUN=0 ;;
+    *) die "AIRGAP_DRYRUN must be one of 1/true/yes (preview) or 0/false/no (live); refusing to guess" ;;
+esac
+export AIRGAP_DRYRUN
 
 # Issue #1014: CI-rehearsal overrides change a manifest after (or outside) the
 # release checks, so the release path refuses them unless the caller's process
@@ -171,10 +220,9 @@ refuse_plaintext_gateway_keys() {
         _env_file="airgap.env"
     fi
     if [ -n "$_env_file" ]; then
-        _leaked=$(grep -E "^[[:space:]]*(LLM_API_KEY|EMBED_API_KEY|RERANK_API_KEY|CONTEXT_LLM_API_KEY)=[^[:space:]]" "$_env_file" || true)
-        [ -z "$_leaked" ] || die "plaintext gateway virtual key in $_env_file — keys live only in the cluster Secret named by GATEWAY_API_KEY_SECRET (see airgap.env.example); delete the plaintext assignment"
+        _scan_env_file_keys "$_env_file"
     fi
-    unset _env_file _leaked
+    unset _env_file
 }
 
 # Secret names land inside sed replacements and k8s manifests: restrict to

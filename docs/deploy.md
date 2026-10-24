@@ -13,7 +13,10 @@ reference: this file §7. Design overview: `docs/architecture.md` §3.
 no rollback:
 
 - `--skip-load` / `--skip-ingest` skip their stage; `--dry-run` exports
-  `AIRGAP_DRYRUN=1` (every script prints instead of executing);
+  `AIRGAP_DRYRUN=1` (every script prints instead of executing).
+  `common.sh` normalizes the flag once: `1`/`true`/`yes` (any case) preview,
+  `0`/`false`/`no`/unset run live, and any other value (`on`, ` 1`, `1<newline>`)
+  is refused before any stage (#1015);
   `--help` usage; unknown arguments fail before any pipeline stage runs.
 - Ingest runs only when `CORPUS_PVC` is non-empty and `--skip-ingest` is
   absent; otherwise the stage reports skipped.
@@ -148,6 +151,12 @@ restores the snapshot over whatever the file assigned; empty stays unset
 - **Maintenance warning:** a new `.example` key that is not added to
   `OPERATOR_ENV_KEYS` silently regresses to file-wins. The list and the
   example must change together.
+- The plaintext gateway-key guard (`LLM_API_KEY`, `EMBED_API_KEY`,
+  `RERANK_API_KEY`, `CONTEXT_LLM_API_KEY`) scans the operator file text before it
+  is sourced (any `export`/`readonly`/`declare`/chained form) and rejects any
+  such variable whose sourced value differs from the caller's environment, so
+  no shell syntax can smuggle a key in (#1016). Process-environment keys for
+  `local:ask` stay allowed.
 - Task discovery never loads private env files. Air-gap tasks bridge only
   caller-set operator values to `common.sh`; CLI assignments win over the
   caller environment before that script applies its precedence rule.
