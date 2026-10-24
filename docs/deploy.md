@@ -412,6 +412,12 @@ Compatibility and lifecycle decisions under #448:
   Ingress/Route, ClusterIP Services only, API-key Secret present, no host
   namespaces or hostPath, non-privileged read-only-root containers, the verified
   registry image) before any `helm upgrade` (#1014).
+- `deploy.sh` validates every operator string that becomes a Helm value before
+  rendering (`STORAGE_CLASS`/`SNAPSHOT_STORAGE_CLASS`: DNS-1123 name,
+  `QDRANT_RELEASE`: DNS-1123 label, `QDRANT_TAG`: image tag,
+  `QDRANT_STORAGE_SIZE`: Kubernetes quantity, `INTERNAL_REGISTRY`:
+  `host[:port][/path]`) and passes them with `--set-string`, so a comma or `=`
+  can never become a second chart value (#1017).
 - Rollout waits remain Qdrant 600s, agent 300s and, with the bundled backend, OpenObserve and otelcol 120s each, with bounded
   diagnostics on failure. Explicit ingest keeps its existing wait/diagnostics.
 

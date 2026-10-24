@@ -338,6 +338,33 @@ refuse_nfs_storage() {
     esac
 }
 
+# Issue #1017: operator strings that become Helm values must each be exactly
+# one value. Strict syntax checks run before any render, so a comma, brace,
+# space or '=' can never split into a second chart value. $1 = variable name,
+# $2 = ERE it must fully match, $3 = what it must be (for the message). Empty
+# is skipped here (required-ness is require_env's job).
+check_value_syntax() {
+    eval "_cv=\${$1:-}"
+    [ -z "$_cv" ] && { unset _cv; return 0; }
+    if [ "${#_cv}" -gt 253 ] || ! printf '%s\n' "$_cv" | grep -Eq "^($2)\$" ||
+        [ "$(printf '%s\n' "$_cv" | wc -l)" -ne 1 ]; then
+        unset _cv
+        die "$1 must be $3"
+    fi
+    unset _cv
+}
+
+validate_helm_inputs() {
+    _dns='[a-z0-9]([-a-z0-9.]*[a-z0-9])?'
+    check_value_syntax STORAGE_CLASS "$_dns" "a DNS-1123 name (lowercase alphanumerics, '-', '.')"
+    check_value_syntax SNAPSHOT_STORAGE_CLASS "$_dns" "a DNS-1123 name (lowercase alphanumerics, '-', '.')"
+    check_value_syntax QDRANT_RELEASE '[a-z0-9]([-a-z0-9]*[a-z0-9])?' "a DNS-1123 label (lowercase alphanumerics, '-')"
+    check_value_syntax QDRANT_TAG '[A-Za-z0-9_][A-Za-z0-9._-]{0,127}' "an image tag (letters, digits, '_', '.', '-')"
+    check_value_syntax QDRANT_STORAGE_SIZE '[0-9]+(\.[0-9]+)?(Ki|Mi|Gi|Ti|Pi|Ei|k|M|G|T|P|E)?' "a Kubernetes quantity such as 100Gi"
+    check_value_syntax INTERNAL_REGISTRY '[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?(/[a-z0-9]+([._-][a-z0-9]+)*)*' "host[:port][/path] with no spaces, commas or '='"
+    unset _dns
+}
+
 # kubectl preferred, oc fallback — same choice in deploy/ingest/validate/smoke.
 kc() {
     if command -v kubectl >/dev/null 2>&1; then echo kubectl; else echo oc; fi

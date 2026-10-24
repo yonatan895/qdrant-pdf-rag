@@ -78,6 +78,7 @@ SNAPSHOT_STORAGE_CLASS=${SNAPSHOT_STORAGE_CLASS:-$STORAGE_CLASS}
 # values.yaml pins v1.19.2 — set it explicitly so it always matches load.sh.
 # Strip a "-unprivileged" suffix from the pin: the chart re-adds it itself.
 QDRANT_TAG=${QDRANT_TAG:-$(echo "${QDRANT_IMAGE:-docker.io/qdrant/qdrant:v1.19.2-unprivileged}" | sed "s/.*://; s/-unprivileged\$//")}
+validate_helm_inputs
 QDRANT_URL="http://${QDRANT_RELEASE}:6333"
 
 # Registry image identity (issue #272), before any cluster change and for every
@@ -266,19 +267,19 @@ fi
 echo "==> Helm: Qdrant from the vendored chart with PROD values"
 set -- -n "$NAMESPACE" \
     -f charts/qdrant-openshift.values.yaml \
-    --set "image.repository=$INTERNAL_REGISTRY/qdrant/qdrant" \
-    --set "image.tag=$QDRANT_TAG" \
-    --set "persistence.storageClassName=$STORAGE_CLASS" \
-    --set "snapshotPersistence.storageClassName=$SNAPSHOT_STORAGE_CLASS"
+    --set-string "image.repository=$INTERNAL_REGISTRY/qdrant/qdrant" \
+    --set-string "image.tag=$QDRANT_TAG" \
+    --set-string "persistence.storageClassName=$STORAGE_CLASS" \
+    --set-string "snapshotPersistence.storageClassName=$SNAPSHOT_STORAGE_CLASS"
 if [ -n "$QDRANT_STORAGE_SIZE" ]; then
-    set -- "$@" --set "persistence.size=$QDRANT_STORAGE_SIZE" \
-        --set "snapshotPersistence.size=$QDRANT_STORAGE_SIZE"
+    set -- "$@" --set-string "persistence.size=$QDRANT_STORAGE_SIZE" \
+        --set-string "snapshotPersistence.size=$QDRANT_STORAGE_SIZE"
 fi
 if [ -n "$QDRANT_EXTRA_VALUES" ]; then
     set -- "$@" -f "$QDRANT_EXTRA_VALUES"
 fi
 if [ -n "${PULL_SECRET:-}" ]; then
-    set -- "$@" --set "imagePullSecrets[0].name=$PULL_SECRET"
+    set -- "$@" --set-string "imagePullSecrets[0].name=$PULL_SECRET"
 else
     # values.yaml ships a placeholder pull-secret name; without a real secret
     # that placeholder must never reach the cluster (fail closed, not open).
