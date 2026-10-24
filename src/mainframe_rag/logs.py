@@ -8,7 +8,8 @@ prompts, evidence, responses, headers, or source paths: callers log ids
 (doc_id, chunk_id, request_id), counts, elapsed_ms, and error *types* only.
 Exception bodies are never exported — use error_type() for the stable
 class name; tracebacks render as frame locations (file:function:line)
-without messages or source text (issue #529 OBS-1A). When a traced
+without messages or source text (issue #529 OBS-1A). Uvicorn's own
+loggers are routed through the same handler (issue #989). When a traced
 request is active, the formatter also stamps the OTel trace_id/span_id
 (issue #185) so log lines join to Jaeger traces; with tracing off the
 fields are omitted and the log shape is unchanged.
@@ -87,6 +88,9 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(payload, separators=(",", ":"), default=str)
 
 
+_SERVER_LOGGERS = ("uvicorn", "uvicorn.error", "uvicorn.access")
+
+
 def configure_logging(level: str = "INFO") -> None:
     """Install the JSON handler on the root logger (idempotent)."""
     try:
@@ -100,3 +104,12 @@ def configure_logging(level: str = "INFO") -> None:
     root = logging.getLogger()
     root.handlers = [handler]
     root.setLevel(resolved)
+    # Uvicorn's default config gives its loggers their own plain-text handlers
+    # that never reach root, so the crash it logs after Starlette re-raises an
+    # unhandled fault printed the full traceback, message and source lines
+    # included (issue #989). Their records go through the JSON handler instead;
+    # their levels stay uvicorn's (`--log-level`).
+    for name in _SERVER_LOGGERS:
+        server = logging.getLogger(name)
+        server.handlers = []
+        server.propagate = True

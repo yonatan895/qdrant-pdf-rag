@@ -1020,6 +1020,13 @@ WHY telemetry (`inline_bracket_present`, `citations_header_present`,
 omission). Errors log error types server-side only. **Never query text,
 prompts, evidence, responses, headers, exception bodies, or secrets, and no
 document identifiers on spans** — the JSON-log rule is unchanged by tracing.
+`configure_logging` also takes over uvicorn's `uvicorn`, `uvicorn.error` and
+`uvicorn.access` loggers (issue #989), so the agent and the feedback service
+print JSON for server lines too: the crash uvicorn logs after an unhandled
+fault (`"logger":"uvicorn.error"`) carries `error_type` and frame locations
+only, and an access line is `{"logger":"uvicorn.access","message":"<client> -
+\"<method> <path> HTTP/1.1\" <status>"}`. Only uvicorn's two startup lines
+before the application lifespan stay plain text.
 
 Spans mirror the log contract (one request = one trace: a
 `v1.search`/`v1.answer`/`v1.chat`/`ui.chat` root → (`chat.condense` before
