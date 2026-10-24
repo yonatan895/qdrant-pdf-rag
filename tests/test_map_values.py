@@ -47,6 +47,7 @@ MAPPER_KEYS = [
     "IMAGE_DIGEST_AGENT", "IMAGE_DIGEST_INGEST", "IMAGE_DIGEST_OPENOBSERVE", "IMAGE_DIGEST_OTELCOL", "IMAGE_DIGEST_OAUTH_PROXY",
     "STORAGE_CLASS", "CORPUS_PVC", "INGEST_WORKERS", "INGEST_WORK_SIZE",
     "INGEST_ALIAS_PUBLISH", "INGEST_REINGEST", "INGEST_RETIRE_DOCS",
+    "INGEST_AUTHORIZE_FROM_CATALOG",
     "CONTEXTUAL_EMBED_ENABLED", "CONTEXT_LLM_BASE_URL", "CONTEXT_LLM_MODEL",
     "QDRANT_PEER_URLS", "QDRANT_SHARD_NUMBER", "QDRANT_REPLICATION_FACTOR", "QDRANT_WRITE_CONSISTENCY_FACTOR",
 ]
@@ -373,6 +374,38 @@ def test_ingest_enabled_block_and_tricky_retire(monkeypatch, mapper_env):
     assert ing["collectionPolicy"] == {
         "shardNumber": 6, "replicationFactor": 3, "writeConsistencyFactor": 2,
     }
+    assert ing["authorizeFromCatalog"] is False, "the catalog authority is off by default"
+
+
+@pytest.mark.parametrize("retire", ["SA22-0000-00@ibm|zos|2.5|abc", ""])
+def test_authorize_from_catalog_maps_only_with_retire_docs(monkeypatch, mapper_env, retire):
+    """Issue #1005 (option B): INGEST_AUTHORIZE_FROM_CATALOG maps to
+    ingest.authorizeFromCatalog only together with INGEST_RETIRE_DOCS; alone
+    it is refused at map time with a fixed message, never silently dropped."""
+    monkeypatch.setenv("CORPUS_PVC", "corpus-pvc")
+    monkeypatch.setenv("GATEWAY_API_KEY_SECRET", "gw-keys")
+    monkeypatch.setenv("INGEST_AUTHORIZE_FROM_CATALOG", "true")
+    if retire:
+        monkeypatch.setenv("INGEST_RETIRE_DOCS", retire)
+    r, out = mapper_env()
+    if retire:
+        assert r.returncode == 0, r.stderr
+        ing = load_values(out)["ingest"]
+        assert ing["authorizeFromCatalog"] is True
+        assert ing["retireDocs"] == [retire]
+    else:
+        assert r.returncode != 0
+        assert "INGEST_AUTHORIZE_FROM_CATALOG requires INGEST_RETIRE_DOCS" in r.stderr
+
+
+def test_authorize_from_catalog_refuses_a_non_boolean(monkeypatch, mapper_env):
+    monkeypatch.setenv("CORPUS_PVC", "corpus-pvc")
+    monkeypatch.setenv("GATEWAY_API_KEY_SECRET", "gw-keys")
+    monkeypatch.setenv("INGEST_RETIRE_DOCS", "SA22-0000-00")
+    monkeypatch.setenv("INGEST_AUTHORIZE_FROM_CATALOG", "yes please")
+    r, _ = mapper_env()
+    assert r.returncode != 0
+    assert "INGEST_AUTHORIZE_FROM_CATALOG" in r.stderr
 
 
 def test_route_needs_ca_file(monkeypatch, mapper_env, tmp_path):

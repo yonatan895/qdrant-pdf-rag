@@ -2545,7 +2545,7 @@ def _lost_inventory_relabel(tmp_path, monkeypatch, fake):
     return corpus, progress, path, relabel, live, rev_old
 
 
-def test_authorize_from_catalog_retires_a_published_revision_after_inventory_loss(tmp_path, monkeypatch):
+def test_authorize_from_catalog_retires_a_published_revision_after_inventory_loss(tmp_path, monkeypatch, capsys):
     """Issue #1005 (S2-5, option B): with the inventory lost, the published
     revision cannot be retired from the inventory. `--authorize-from-catalog`
     lets --retire-doc name it because the live build's sealed source catalog
@@ -2563,7 +2563,10 @@ def test_authorize_from_catalog_retires_a_published_revision_after_inventory_los
         _run_main(monkeypatch, corpus, progress, *relabel, *retire)
     assert fake.aliases[ALIAS] == live_1, "without the flag the inventory is the only authority"
 
+    capsys.readouterr()
     assert _run_main(monkeypatch, corpus, progress, *relabel, *retire, "--authorize-from-catalog") == 0
+    lines = [line for line in capsys.readouterr().err.splitlines() if "retire_authorized_from_catalog" in line]
+    assert len(lines) == 1 and rev_old in lines[0], "the catalog approval is logged, ids only"
     live_2 = fake.aliases[ALIAS]
     assert live_2 != live_1
     rev_new = load_inventory(progress)[str(path)].source_rev
@@ -2605,6 +2608,31 @@ def test_authorize_from_catalog_refusals_mutate_nothing(tmp_path, monkeypatch, c
     assert "/" not in str(excinfo.value).split("(")[0], "fixed text, ids only"
     assert fake.aliases[ALIAS] == live
     assert _gen_collections(fake) == gens_before, "a refusal builds nothing"
+
+
+def test_authorize_from_catalog_logs_nothing_when_the_inventory_approves(tmp_path, monkeypatch, capsys):
+    """Issue #1005 (N2): the flag logs `retire_authorized_from_catalog` only
+    when the catalog actually approved a revision. A retirement the
+    inventory already approves proceeds as without the flag, with no
+    catalog-authority line."""
+    from mainframe_rag.ingest import run_ingest
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _, b_path = _two_doc_corpus(corpus)
+    progress = tmp_path / "inv.jsonl"
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    b_path.unlink()
+    capsys.readouterr()
+    assert _run_main(monkeypatch, corpus, progress, "--retire-doc", DOC_B,
+                     "--authorize-from-catalog") == 0
+    err = capsys.readouterr().err
+    assert '"action":"publish"' in err, "the run's own log lines are captured"
+    assert _live_doc_ids(fake) == {DOC_A}
+    assert "retire_authorized_from_catalog" not in err
 
 
 def test_same_path_reissue_with_a_new_form_number_cuts_over_by_lineage(tmp_path, monkeypatch):
