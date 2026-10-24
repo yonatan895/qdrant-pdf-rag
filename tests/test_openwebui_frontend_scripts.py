@@ -351,6 +351,60 @@ def test_purge_busy_database_is_a_failed_run_then_the_next_run_succeeds(tmp_path
     assert purge.purge(db, data, 30, NOW)["chats"] == 2
 
 
+def test_purge_with_an_open_reader_fails_until_the_deleted_text_is_gone(tmp_path):
+    """B2: a reader pins the WAL, so the checkpoint cannot truncate it. The run
+    fails, and so does every later run while the content remains, even when
+    there is nothing new to delete; success is reported only once the text is
+    gone from the files on the claim."""
+    data, db, conn = _db(tmp_path)
+    _seed(conn, data)
+    reader = sqlite3.connect(db, isolation_level=None)
+    reader.execute("BEGIN")
+    reader.execute("SELECT count(*) FROM chat").fetchone()
+    # New writes after the reader's snapshot keep the WAL from truncating.
+    for _ in range(2):
+        with pytest.raises(purge.PurgeError, match="^checkpoint-busy$"):
+            purge.purge(db, data, 30, NOW, busy_timeout_s=0.05)
+    status: dict = {}
+    assert purge.run_once(db, data, 30, status, NOW, busy_timeout_s=0.05) is False
+    assert status["last_error"] == "checkpoint-busy" and "last_success" not in status
+    reader.execute("ROLLBACK")
+    reader.close()
+    counts = purge.purge(db, data, 30, NOW)
+    assert counts["chats"] == 0  # the rows went in the first run; only the scrub remained
+    conn.close()
+    for path in data.iterdir():
+        if path.is_file():
+            assert CANARY_OLD.encode() not in path.read_bytes(), path.name
+    assert not (data / purge.PENDING_NAME).exists()
+    # Converged: the next run does no scrub work and succeeds.
+    assert purge.purge(db, data, 30, NOW)["chats"] == 0
+
+
+def test_purge_unlink_failure_is_a_failed_run_and_the_next_run_removes_the_upload(
+        tmp_path, monkeypatch):
+    """B2: the upload is removed inside the transaction; if it cannot be, the
+    rows stay, the run fails, and the next run retries (never an orphaned file
+    with no row left to find it)."""
+    data, db, conn = _db(tmp_path)
+    inside, _outside = _seed(conn, data)
+    real_unlink = Path.unlink
+
+    def failing(self, *args, **kwargs):
+        if self.name == "old.txt":
+            raise PermissionError("read-only")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", failing)
+    with pytest.raises(purge.PurgeError):
+        purge.purge(db, data, 30, NOW)
+    assert inside.exists()
+    assert {r[0] for r in conn.execute("SELECT id FROM file")} == {"f-old", "f-out", "f-new"}
+    monkeypatch.setattr(Path, "unlink", real_unlink)
+    assert purge.purge(db, data, 30, NOW)["files"] == 2
+    assert not inside.exists()
+
+
 def test_purge_before_open_webui_created_its_database_is_an_empty_success(tmp_path):
     data = tmp_path / "data"
     data.mkdir()
