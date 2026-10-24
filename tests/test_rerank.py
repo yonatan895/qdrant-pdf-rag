@@ -405,7 +405,8 @@ def _raw(field: str, key: str, items) -> bytes:
         parts.append(f'"{key}": {lit}')
         return "{" + ", ".join(parts) + "}"
 
-    return ('{"%s": [%s]}' % (field, ", ".join(one(i, v) for i, v in items))).encode()
+    body = ", ".join(one(i, v) for i, v in items)
+    return f'{{"{field}": [{body}]}}'.encode()
 
 
 def _two_leg_reranker(score_body, rerank_body, order="score_first"):
