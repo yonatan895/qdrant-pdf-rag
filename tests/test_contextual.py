@@ -13,6 +13,7 @@ import pytest
 from mainframe_rag.config import Settings
 from mainframe_rag.ingest import context as ctx_mod
 from mainframe_rag.ingest.chunk import Chunk
+from mainframe_rag.ingest.ibm_pdf import sha256_file
 from mainframe_rag.ports import ChatMessage
 
 
@@ -428,7 +429,7 @@ def test_parse_one_contextual_path_end_to_end(synthetic_pdf, tmp_path, monkeypat
 
     task = (
         str(synthetic_pdf), None, None, None, str(synthetic_pdf.parent),
-        "dummy_sha", True, str(cache_path),
+        sha256_file(synthetic_pdf), True, str(cache_path),
     )
     record, parsed, chunks, vectors, contexts = run_ingest._parse_one(task)
     assert record.status != "error"
@@ -440,7 +441,7 @@ def test_parse_one_contextual_path_end_to_end(synthetic_pdf, tmp_path, monkeypat
     # Second run with a primed cache makes zero LLM calls (acceptance #2).
     binding = ctx_mod.ContextBinding.from_settings(
         settings,
-        doc_sha256="dummy_sha",
+        doc_sha256=sha256_file(synthetic_pdf),
         product=parsed.product,
         version=parsed.version,
         title=parsed.title,
@@ -481,7 +482,7 @@ def test_dry_run_makes_no_context_calls(synthetic_pdf, tmp_path, monkeypatch):
     monkeypatch.setattr(run_ingest, "_get_context_client", boom)
     task = (
         str(synthetic_pdf), None, None, None, str(synthetic_pdf.parent),
-        "dummy_sha", False, str(tmp_path / "ctx.jsonl"),
+        sha256_file(synthetic_pdf), False, str(tmp_path / "ctx.jsonl"),
     )
     record, _, _chunks, vectors, contexts = run_ingest._parse_one(task)
     assert record.status != "error"
@@ -518,7 +519,7 @@ def _resume_env(
         run_ingest._worker_context_cache_path = None
         task = (
             str(synthetic_pdf), None, None, None, str(synthetic_pdf.parent),
-            "dummy_sha", True, str(cache_path),
+            sha256_file(synthetic_pdf), True, str(cache_path),
         )
         record, parsed, chunks, vectors, contexts = run_ingest._parse_one(task)
         if expect_error:
@@ -529,7 +530,7 @@ def _resume_env(
                 cache_path,
                 ctx_mod.ContextBinding.from_settings(
                     settings,
-                    doc_sha256="dummy_sha",
+                    doc_sha256=sha256_file(synthetic_pdf),
                     product=parsed.product,
                     version=parsed.version,
                     title=parsed.title,
@@ -580,7 +581,7 @@ def test_resume_with_legacy_sidecar_regenerates_without_deleting_it(
     chunks, _, _ = run(probe, append=False)
     legacy_lines = [
         json.dumps(
-            {"v": "v2", "doc_sha256": "dummy_sha", "chunk_id": c.chunk_id, "context": "L" * 130}
+            {"v": "v2", "doc_sha256": sha256_file(synthetic_pdf), "chunk_id": c.chunk_id, "context": "L" * 130}
         )
         for c in chunks
     ]
@@ -616,7 +617,7 @@ def test_contextual_off_worker_path_is_unchanged(synthetic_pdf, tmp_path, monkey
     cache_path = tmp_path / "never.jsonl"
     task = (
         str(synthetic_pdf), None, None, None, str(synthetic_pdf.parent),
-        "dummy_sha", True, str(cache_path),
+        sha256_file(synthetic_pdf), True, str(cache_path),
     )
     record, _, chunks, vectors, contexts = run_ingest._parse_one(task)
     assert record.status != "error"
@@ -681,7 +682,7 @@ def test_model_swap_embeds_new_prefix_and_leaves_sparse_unchanged(
     record, _, _, vec_off, ctx_off = run_ingest._parse_one(
         (
             str(synthetic_pdf), None, None, None, str(synthetic_pdf.parent),
-            "dummy_sha", True, str(tmp_path / "inv.contexts.jsonl"),
+            sha256_file(synthetic_pdf), True, str(tmp_path / "inv.contexts.jsonl"),
         )
     )
     assert record.status != "error" and ctx_off == {}
@@ -744,7 +745,7 @@ def test_live_worker_retry_reuses_only_completed_gists(synthetic_pdf, tmp_path, 
     )
     task = (
         str(synthetic_pdf), None, None, None, str(synthetic_pdf.parent),
-        "dummy_sha", True, str(cache_path),
+        sha256_file(synthetic_pdf), True, str(cache_path),
     )
     record2, _, chunks2, _, contexts = run_ingest._parse_one(task)
     assert record2.status != "error"

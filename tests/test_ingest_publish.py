@@ -12,6 +12,7 @@ injection; real PDFs only where main() needs files (built at runtime).
 
 from __future__ import annotations
 
+import os
 import re
 from itertools import permutations
 from pathlib import Path
@@ -3829,3 +3830,286 @@ def test_interrupted_catalog_publication_resumes_with_identical_entries(tmp_path
     with pytest.raises(RuntimeError, match="old-format"):
         _run_main(monkeypatch, other, progress_b)
     assert (fake.collections, fake.aliases, sidecar.read_bytes()) == before
+
+
+# ------------------------------------------------ corpus confinement (#996, #1002, #1003)
+def _fresh_publish(tmp_path, monkeypatch):
+    from mainframe_rag.ingest import run_ingest
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    return fake, corpus, tmp_path / "inv.jsonl"
+
+
+def _nothing_written(fake: PublishFake, progress: Path) -> bool:
+    return not fake.collections and not fake.aliases and not progress.exists()
+
+
+def test_out_of_root_file_symlink_is_refused_and_outside_bytes_never_served(tmp_path, monkeypatch):
+    """#996: a file symlink resolving outside the corpus root is a typed
+    planning refusal before any storage or inventory write; the outside
+    document is never parsed, so it cannot be served."""
+    from mainframe_rag.ingest.corpus_scan import OutOfRootLinkError
+
+    fake, corpus, progress = _fresh_publish(tmp_path, monkeypatch)
+    _build_doc_with_id(corpus, "normal", DOC_A)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    secret = _build_doc_with_id(outside, "confidential", DOC_B)
+    (corpus / "linked.pdf").symlink_to(secret)
+    with pytest.raises(OutOfRootLinkError, match="linked.pdf"):
+        _run_main(monkeypatch, corpus, progress)
+    assert _nothing_written(fake, progress)
+
+
+@pytest.mark.parametrize("shape", ["chain", "relative", "relative-deep"])
+def test_out_of_root_link_variants_are_refused(tmp_path, monkeypatch, shape):
+    """#996: a link chain (l1 -> l2 -> outside) and relative `../` targets
+    resolve outside the root and are refused like a direct link."""
+    from mainframe_rag.ingest.corpus_scan import OutOfRootLinkError
+
+    fake, corpus, progress = _fresh_publish(tmp_path, monkeypatch)
+    _build_doc_with_id(corpus, "normal", DOC_A)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    secret = _build_doc_with_id(outside, "confidential", DOC_B)
+    if shape == "chain":
+        (corpus / "l2.pdf").symlink_to(secret)
+        (corpus / "l1.pdf").symlink_to("l2.pdf")
+    elif shape == "relative":
+        (corpus / "l1.pdf").symlink_to("../outside/confidential.pdf")
+    else:
+        (corpus / "a" / "b").mkdir(parents=True)
+        (corpus / "a" / "b" / "l1.pdf").symlink_to("../../../outside/confidential.pdf")
+    with pytest.raises(OutOfRootLinkError, match="l1.pdf"):
+        _run_main(monkeypatch, corpus, progress)
+    assert _nothing_written(fake, progress)
+
+
+
+def test_in_root_file_symlink_and_symlinked_directory_policy(tmp_path, monkeypatch):
+    """#996 policy: a file symlink resolving inside the root is walked; a
+    symlinked directory is never traversed (its PDFs are not the corpus),
+    in-root or not, and the skip is logged with a fixed action."""
+    from mainframe_rag.ingest.corpus_scan import confined_pdfs
+
+    corpus = tmp_path / "corpus"
+    (corpus / "real").mkdir(parents=True)
+    pdf = _build_doc_with_id(corpus / "real", "a", DOC_A)
+    (corpus / "alias.pdf").symlink_to(pdf)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    _build_doc_with_id(outside, "o", DOC_B)
+    (corpus / "linkdir").symlink_to(outside, target_is_directory=True)
+    (corpus / "samedir").symlink_to(corpus / "real", target_is_directory=True)
+    assert [p.name for p in confined_pdfs(corpus)] == ["alias.pdf", "a.pdf"]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
+def test_unreadable_subtree_fails_closed_before_any_write(tmp_path, monkeypatch):
+    """#1003: an unreadable directory makes the walk partial; publication
+    refuses with a typed error, never a green swap lacking its documents."""
+    from mainframe_rag.ingest.corpus_scan import UnreadableSubtreeError
+
+    fake, corpus, progress = _fresh_publish(tmp_path, monkeypatch)
+    _build_doc_with_id(corpus, "a", DOC_A)
+    hidden = corpus / "hidden"
+    hidden.mkdir()
+    _build_doc_with_id(hidden, "b", DOC_B)
+    hidden.chmod(0)
+    try:
+        with pytest.raises(UnreadableSubtreeError, match="hidden"):
+            _run_main(monkeypatch, corpus, progress)
+        assert _nothing_written(fake, progress)
+    finally:
+        hidden.chmod(0o755)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
+@pytest.mark.parametrize("mode", [0o444, 0o311])
+def test_partially_accessible_directory_fails_closed(tmp_path, monkeypatch, mode):
+    """#1003: a directory with read but no search permission (0o444), or search
+    but no read (0o311), still hides its PDFs from the walk: fail closed."""
+    from mainframe_rag.ingest.corpus_scan import UnreadableSubtreeError
+
+    fake, corpus, progress = _fresh_publish(tmp_path, monkeypatch)
+    _build_doc_with_id(corpus, "a", DOC_A)
+    hidden = corpus / "hidden"
+    hidden.mkdir()
+    _build_doc_with_id(hidden, "b", DOC_B)
+    hidden.chmod(mode)
+    try:
+        with pytest.raises(UnreadableSubtreeError, match="hidden"):
+            _run_main(monkeypatch, corpus, progress)
+        assert _nothing_written(fake, progress)
+    finally:
+        hidden.chmod(0o755)
+
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
+def test_unreadable_file_is_a_fixed_error_record_and_the_run_continues(tmp_path, monkeypatch):
+    """#1002: one unreadable PDF becomes a per-file `error` record with a
+    fixed type/message; readable siblings are still planned and recorded; the
+    run exits nonzero and publishes nothing."""
+    from mainframe_rag.ingest.corpus_scan import UNREADABLE_FILE_MESSAGE
+    from mainframe_rag.ingest.inventory import load_inventory
+
+    fake, corpus, progress = _fresh_publish(tmp_path, monkeypatch)
+    good = _build_doc_with_id(corpus, "good", DOC_A)
+    bad = _build_doc_with_id(corpus, "bad", DOC_B)
+    bad.chmod(0)
+    try:
+        assert _run_main(monkeypatch, corpus, progress) == 1
+    finally:
+        bad.chmod(0o644)
+    inv = load_inventory(progress)
+    assert inv[str(bad)].status == "error"
+    assert inv[str(bad)].error_type == "UnreadableFile"
+    assert inv[str(bad)].error == UNREADABLE_FILE_MESSAGE
+    assert str(corpus) not in (inv[str(bad)].error or "")
+    assert inv[str(good)].status == "upserted"
+    assert ALIAS not in fake.aliases  # no cutover over a failed corpus
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
+def test_corpus_of_only_unreadable_files_records_each_and_exits_nonzero(tmp_path, monkeypatch):
+    """#1002: when every PDF is unreadable the run still writes a fixed error
+    record per file and exits 1 (no exception, nothing published)."""
+    from mainframe_rag.ingest.inventory import load_inventory
+
+    fake, corpus, progress = _fresh_publish(tmp_path, monkeypatch)
+    bad = [_build_doc_with_id(corpus, "x", DOC_A), _build_doc_with_id(corpus, "y", DOC_B)]
+    for b in bad:
+        b.chmod(0)
+    try:
+        assert _run_main(monkeypatch, corpus, progress) == 1
+    finally:
+        for b in bad:
+            b.chmod(0o644)
+    inv = load_inventory(progress)
+    assert {inv[str(b)].error_type for b in bad} == {"UnreadableFile"}
+    assert all(inv[str(b)].status == "error" for b in bad)
+    assert not fake.aliases and not fake.collections
+
+
+def _parse_task(corpus: Path, path: Path, sha: str):
+    from mainframe_rag.ingest import run_ingest
+
+    return run_ingest.ParseTask(str(path), None, None, None, str(corpus), sha, False, None)
+
+
+def test_link_swapped_in_after_the_scan_is_refused_at_parse_time(tmp_path, monkeypatch):
+    """#996 TOCTOU: the planner confined the path, then it became a symlink to
+    an outside file. The worker refuses with a fixed record and never parses
+    the outside bytes."""
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.ibm_pdf import sha256_file
+
+    _publish_env(monkeypatch)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    pdf = _build_doc_with_id(corpus, "a", DOC_A)
+    sha = sha256_file(pdf)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    secret = _build_doc_with_id(outside, "o", DOC_B)
+    pdf.unlink()
+    pdf.symlink_to(secret)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("outside bytes were parsed")
+
+    monkeypatch.setattr(run_ingest, "parse_walked", forbidden)
+    record, _, chunks, vectors, _ = run_ingest._parse_one(_parse_task(corpus, pdf, sha))
+    assert record.status == "error" and record.error_type == "WalkedFileMovedError"
+    assert record.error == "walked_file_outside_root: walked file no longer resolves inside the corpus root"
+    assert chunks == [] and vectors == []
+
+
+def test_file_changed_after_the_scan_is_refused_at_parse_time(tmp_path, monkeypatch):
+    """#996 TOCTOU: bytes that differ from the walk-time digest are refused
+    after the worker read them, so they are never chunked or served."""
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.ibm_pdf import sha256_file
+
+    _publish_env(monkeypatch)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    pdf = _build_doc_with_id(corpus, "a", DOC_A)
+    sha = sha256_file(pdf)
+    _build_doc_with_id(corpus, "a", DOC_B)  # same path, different bytes
+    record, _, chunks, vectors, _ = run_ingest._parse_one(_parse_task(corpus, pdf, sha))
+    assert record.status == "error" and record.error_type == "WalkedFileChangedError"
+    assert record.error == "walked_file_changed: walked file changed after the corpus scan"
+    assert chunks == [] and vectors == []
+
+
+def test_swap_and_restore_during_parse_never_feeds_foreign_bytes_to_the_parser(tmp_path, monkeypatch):
+    """#996 TOCTOU: the original path is swapped for other bytes while the
+    parser runs and restored before it returns, so a later digest re-read of
+    the path would pass. The worker parses a private copy of the verified
+    bytes, so the parsed content is the original document's."""
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.ibm_pdf import sha256_file
+
+    _publish_env(monkeypatch)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    pdf = _build_doc_with_id(corpus, "a", DOC_A)
+    sha = sha256_file(pdf)
+    original = pdf.read_bytes()
+    foreign = _build_doc_with_id(tmp_path, "foreign", DOC_B).read_bytes()
+    real_parse = run_ingest.parse_walked
+    seen = []
+
+    def swapping_parse(path, *args, **kwargs):
+        seen.append(Path(path))
+        pdf.write_bytes(foreign)
+        try:
+            return real_parse(path, *args, **kwargs)
+        finally:
+            pdf.write_bytes(original)
+
+    monkeypatch.setattr(run_ingest, "parse_walked", swapping_parse)
+    record, parsed, chunks, _vectors, _ = run_ingest._parse_one(_parse_task(corpus, pdf, sha))
+    assert record.status != "error", record.error
+    assert record.path == str(pdf)
+    assert seen and seen[0] != pdf
+    assert parsed.doc_id == DOC_A
+    assert chunks
+
+
+def test_in_root_symlink_keeps_target_labels_and_identity_through_the_private_copy(
+    tmp_path, monkeypatch
+):
+    """Identity guard: for an in-root file symlink the live-path parse derived
+    layout/vendor labels from the symlink TARGET and the stem from the link
+    name. The private copy must reproduce exactly that, so doc_id, labels and
+    source_rev equal the unchanged parse_pdf(<live lexical path>) result."""
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.ibm_pdf import parse_pdf, sha256_file
+
+    _publish_env(monkeypatch)
+    corpus = tmp_path / "corpus"
+    (corpus / "misc" / "Precisely" / "x").mkdir(parents=True)
+    (corpus / "IBM" / "zOS" / "2.5").mkdir(parents=True)
+    target = _build_doc_with_id(corpus / "misc" / "Precisely" / "x", "b", DOC_A)
+    link = corpus / "IBM" / "zOS" / "2.5" / "a.pdf"
+    link.symlink_to(target)
+    sha = sha256_file(link)
+    expected = parse_pdf(link, corpus_root=corpus, sha256=sha)
+    assert expected.product != "zOS"  # the guard is only meaningful if target labels differ
+    record, parsed, _chunks, _vectors, _ = run_ingest._parse_one(_parse_task(corpus, link, sha))
+    assert record.status != "error", record.error
+    assert record.path == str(link)
+    assert (parsed.doc_id, parsed.vendor, parsed.product, parsed.version) == (
+        expected.doc_id,
+        expected.vendor,
+        expected.product,
+        expected.version,
+    )
+    assert record.source_rev == run_ingest.walked_source_rev(expected)

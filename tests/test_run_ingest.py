@@ -9,6 +9,7 @@ from typing import ClassVar
 
 import pytest
 
+from mainframe_rag.ingest.ibm_pdf import sha256_file
 from mainframe_rag.ingest.run_ingest import main
 from tests.helpers_builder import staging_builder  # noqa: F401 — fixture
 
@@ -633,7 +634,7 @@ def test_worker_embed_batches_by_batch_size(synthetic_pdf, monkeypatch):
     monkeypatch.setattr(run_ingest, "_load_worker_settings", lambda: test_settings)
     monkeypatch.setattr(run_ingest, "embed_batch", mock_embed_batch)
 
-    task = (str(synthetic_pdf), None, None, None, str(synthetic_pdf.parent), "dummy_sha", True, None)
+    task = (str(synthetic_pdf), None, None, None, str(synthetic_pdf.parent), sha256_file(synthetic_pdf), True, None)
     _rec, _parsed, chunks, vectors, contexts = run_ingest._parse_one(task)
     assert len(chunks) > 2
     assert contexts == {}
@@ -1034,7 +1035,7 @@ def test_upsert_failure_log_carries_error_type_not_exception_text(
 
 
 def _bounded_task(pdf):
-    return (str(pdf), None, None, None, str(pdf.parent), "dummy_sha", True, None)
+    return (str(pdf), None, None, None, str(pdf.parent), sha256_file(pdf), True, None)
 
 
 def _spy_embed(monkeypatch):
@@ -1143,7 +1144,7 @@ def test_pipe_in_a_label_is_refused_with_a_fixed_error_on_the_worker_path(
         run_ingest, "_load_worker_settings", lambda: Settings(embed_mode="hash", _env_file=None)
     )
     embed_calls = _spy_embed(monkeypatch)
-    task = (str(pdf), cli.get("vendor"), cli.get("product"), cli.get("version"), str(tmp_path), "d" * 64, True, None)
+    task = (str(pdf), cli.get("vendor"), cli.get("product"), cli.get("version"), str(tmp_path), sha256_file(pdf), True, None)
     record, _parsed, chunks, vectors, contexts = run_ingest._parse_one(task)
     assert record.status == "error"
     assert record.error_type == "LabelDelimiterRefused"

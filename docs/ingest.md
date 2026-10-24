@@ -46,6 +46,37 @@ a sample (a real run is a publication of the whole corpus and refuses `--limit`)
   an IBM kit's folder names as product and version (issue #849). Note
   the empty-string (not `None`) version.
 
+**Corpus confinement (issues #996, #1002, #1003).** `walk_pdfs` is the corpus
+definition but does not check where a path leads or whether a subtree could be
+listed, so the planner (`corpus_scan.py`, called from `_plan` and the
+publication prewalk; `walk.py` is unchanged) enforces three rules:
+
+- A file symlink whose target resolves outside the corpus root is refused with
+  `OutOfRootLinkError` (code `corpus_symlink_outside_root`) before any parse,
+  storage or inventory write. A symlink resolving inside the root is walked.
+- A **symlinked directory is never traversed**, in-root or out: its PDFs are
+  not part of the corpus. The skip is logged as `symlinked_dir_skipped`.
+- A directory that cannot be listed (or a PDF name that cannot be stat'ed
+  because its directory has no search permission) makes the walk partial and
+  fails closed with `UnreadableSubtreeError` (code `corpus_subtree_unreadable`);
+  no alias can be published over it.
+- A single unreadable file (open/read `OSError`) is not fatal: it gets a fixed
+  `error` inventory record (`error_type` `UnreadableFile`, fixed message, empty
+  sha), the other files are planned, and the run exits nonzero (see §9).
+  A corpus whose only PDFs are unreadable gets the same per-file records and
+  exits nonzero without staging or publishing anything.
+- **Parse-time re-check (TOCTOU).** The scan confines a path once. The worker
+  re-checks that it still resolves inside the corpus root, then copies the file
+  once into a private 0700 directory, hashing the same bytes while copying
+  (an in-root symlink keeps its lexical path as a link to the copy, so layout,
+  stem and vendor-marker labels derive exactly as from the live path). The
+  parser and the page-text read use only that copy, and only if its sha256
+  equals the walk digest; otherwise the record is a fixed `error`
+  (`WalkedFileMovedError`, `WalkedFileChangedError`). The inventory keeps the
+  original path.
+- **Residual:** hardlinks to files outside the root have no path to detect
+  and are out of scope; only symlinks are confined.
+
 Contract tests: `tests/test_generic_pdf.py` (`detect_vendor`,
 `infer_from_path`), `tests/test_parser_ibm_shape.py` (walker filtering),
 `tests/test_ingest_revisions.py` (one source revision on both ingest paths
@@ -993,7 +1024,7 @@ thread pool.
 - `_parse_one` traps everything and returns a plain `InventoryRecord(status="error")`
   (message capped at 500 chars, exception class name in `error_type`, doc id or filename
   stem, zero pages/chunks) plus a dummy parsed doc; the future-exception path uses an
-  empty sha. One bad PDF never kills the run. Records must stay picklable across spawn
+  empty sha. One bad PDF never kills the run, including a file the planner cannot read (§1, #1002). Records must stay picklable across spawn
   IPC (no exception objects — unpicklable exceptions like `httpx2.HTTPStatusError` from
   contextual LLM calls would crash `ProcessPoolExecutor` across process boundaries).
 - A worker that dies (e.g. OOM-killed, #841) breaks the pool and fails every
