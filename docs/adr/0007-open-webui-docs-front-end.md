@@ -61,8 +61,10 @@ Pipe is provisioned and the admin role is limited to the team.
 - **V3 Contract fidelity.** The Pipe sends exactly the agent's `ChatRequest`
   shape. It renders validated citations with their supplied excerpts as source
   events, and it shows `verification_state` and the script-review warning.
-  Agent error codes map to the console's fixed texts. An error frame, or a
-  stream with no final frame, shows a fixed "incomplete" banner. The Pipe never
+  The Pipe maps every stable agent error code to a fixed user-visible text
+  defined in the Pipe, with no agent or upstream text, and that table is
+  tested. An error frame, or a stream with no final frame, shows a fixed
+  "incomplete" banner. The Pipe never
   yields exception or upstream text. The fixed-error rule binds this
   repository's surfaces. Open WebUI's own error texts are accepted as
   third-party behaviour, and the trial shows that no agent or upstream text
