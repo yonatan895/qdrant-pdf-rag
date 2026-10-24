@@ -1,0 +1,441 @@
+# Open WebUI offline Kind trial (issue #1073). Trial-only: never referenced by
+# the production chart or airgap manifests (ADR-0007, #1080, is not accepted).
+# run_trial.sh renders the @PLACEHOLDERS@ and creates every Secret at run time;
+# no key, password or token is in this file. Every image is loaded into the
+# node beforehand and uses imagePullPolicy: Never, so nothing is downloaded.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: owui-trial
+  labels:
+    # Kind stand-in for OpenShift restricted-v2: Pod Security "restricted".
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+---
+# ---------------------------------------------------------------- network
+# Default deny in both directions; every flow below is an explicit allow.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: default-deny-all, namespace: owui-trial}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+# Open WebUI egress: the agent port only, plus the two flows OIDC needs from
+# the server side (discovery, token and userinfo calls to the IdP) and
+# cluster DNS for those Service names. No other destination.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: openwebui-egress, namespace: owui-trial}
+spec:
+  podSelector: {matchLabels: {app: openwebui}}
+  policyTypes: [Egress]
+  egress:
+    - to: [{podSelector: {matchLabels: {app: agent}}}]
+      ports: [{protocol: TCP, port: 8080}]
+    - to: [{podSelector: {matchLabels: {app: dex}}}]
+      ports: [{protocol: TCP, port: 5556}]
+    - to:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}
+          podSelector: {matchLabels: {k8s-app: kube-dns}}
+      ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+---
+# Open WebUI is reachable only from the trial's browser stand-in.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: openwebui-ingress, namespace: owui-trial}
+spec:
+  podSelector: {matchLabels: {app: openwebui}}
+  policyTypes: [Ingress]
+  ingress:
+    - from: [{podSelector: {matchLabels: {app: browser}}}]
+      ports: [{protocol: TCP, port: 8080}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: stack-flows, namespace: owui-trial}
+spec:
+  podSelector: {matchExpressions: [{key: app, operator: In, values: [agent, qdrant, mock-vllm, dex, browser, ingest]}]}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from: [{podSelector: {matchLabels: {app: openwebui}}}, {podSelector: {matchLabels: {app: browser}}}]
+      ports: [{protocol: TCP, port: 8080}, {protocol: TCP, port: 5556}]
+    - from: [{podSelector: {matchLabels: {app: agent}}}, {podSelector: {matchLabels: {app: ingest}}}]
+      ports: [{protocol: TCP, port: 6333}, {protocol: TCP, port: 8000}]
+  egress:
+    - to: [{podSelector: {matchExpressions: [{key: app, operator: In, values: [qdrant, mock-vllm]}]}}]
+      ports: [{protocol: TCP, port: 6333}, {protocol: TCP, port: 8000}]
+    - to: [{podSelector: {matchExpressions: [{key: app, operator: In, values: [openwebui, agent, dex]}]}}]
+      ports: [{protocol: TCP, port: 8080}, {protocol: TCP, port: 5556}]
+    - to:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}
+          podSelector: {matchLabels: {k8s-app: kube-dns}}
+      ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+---
+# ---------------------------------------------------------------- Open WebUI
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: openwebui-data, namespace: owui-trial}
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: standard
+  resources: {requests: {storage: 1Gi}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: openwebui, namespace: owui-trial}
+spec:
+  replicas: 1
+  # SQLite on an RWO volume and the in-memory websocket manager: one pod, and
+  # the old pod stops before the new one mounts the volume.
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: openwebui}}
+  template:
+    metadata: {labels: {app: openwebui}}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: @TRIAL_UID@
+        runAsGroup: 0
+        fsGroup: @TRIAL_UID@
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: openwebui
+          image: @OWUI_IMAGE@
+          imagePullPolicy: Never
+          ports: [{containerPort: 8080, name: http}]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: @READ_ONLY_ROOT@
+            capabilities: {drop: [ALL]}
+          env:
+            - {name: WEBUI_SECRET_KEY, valueFrom: {secretKeyRef: {name: openwebui-secret, key: webui-secret-key}}}
+            - {name: OAUTH_CLIENT_SECRET, valueFrom: {secretKeyRef: {name: openwebui-secret, key: oauth-client-secret}}}
+            - {name: WEBUI_URL, value: "http://openwebui.owui-trial.svc.cluster.local:8080"}
+            # Air gap: no update check, no model download, no pip install.
+            - {name: OFFLINE_MODE, value: "true"}
+            - {name: HF_HUB_OFFLINE, value: "1"}
+            - {name: ENABLE_VERSION_UPDATE_CHECK, value: "false"}
+            - {name: ENABLE_PIP_INSTALL_FRONTMATTER_REQUIREMENTS, value: "false"}
+            - {name: RAG_EMBEDDING_MODEL_AUTO_UPDATE, value: "false"}
+            - {name: RAG_RERANKING_MODEL_AUTO_UPDATE, value: "false"}
+            - {name: WHISPER_MODEL_AUTO_UPDATE, value: "false"}
+            - {name: RAG_EMBEDDING_MODEL_TRUST_REMOTE_CODE, value: "false"}
+            - {name: RAG_RERANKING_MODEL_TRUST_REMOTE_CODE, value: "false"}
+            - {name: ENABLE_COMMUNITY_SHARING, value: "false"}
+            # Env is authoritative: admin-UI edits do not persist (check h).
+            - {name: ENABLE_PERSISTENT_CONFIG, value: "false"}
+            - {name: ENABLE_OAUTH_PERSISTENT_CONFIG, value: "false"}
+            # Built-in RAG and every surface that creates vectors: off. Slim
+            # with VECTOR_DB=pgvector and no PGVECTOR_DB_URL never builds a client.
+            - {name: VECTOR_DB, value: "pgvector"}
+            - {name: BYPASS_EMBEDDING_AND_RETRIEVAL, value: "true"}
+            - {name: ENABLE_WEB_SEARCH, value: "false"}
+            - {name: ENABLE_MEMORIES, value: "false"}
+            - {name: ENABLE_CODE_INTERPRETER, value: "false"}
+            - {name: ENABLE_CODE_EXECUTION, value: "false"}
+            - {name: ENABLE_IMAGE_GENERATION, value: "false"}
+            - {name: ENABLE_NOTES, value: "false"}
+            - {name: ENABLE_CHANNELS, value: "false"}
+            - {name: ENABLE_FOLDERS, value: "false"}
+            - {name: ENABLE_EVALUATION_ARENA_MODELS, value: "false"}
+            - {name: ENABLE_DIRECT_CONNECTIONS, value: "false"}
+            - {name: ENABLE_DIRECT_INTEGRATIONS, value: "false"}
+            - {name: ENABLE_TOOLS, value: "false"}
+            - {name: ENABLE_API_KEYS, value: "false"}
+            - {name: ENABLE_ADMIN_EXPORT, value: "false"}
+            - {name: ENABLE_ADMIN_CHAT_ACCESS, value: "false"}
+            # No model connection: the only models are admin-installed Pipes.
+            - {name: ENABLE_OPENAI_API, value: "false"}
+            - {name: ENABLE_OLLAMA_API, value: "false"}
+            # Without an explicit URL, config.py probes host.docker.internal on
+            # 11434 and 12434 at import time even with the Ollama API off (the
+            # trial's first start recorded both attempts). An explicit loopback
+            # URL skips the probe; nothing listens there and nothing leaves the pod.
+            - {name: OLLAMA_BASE_URL, value: "http://127.0.0.1:9"}
+            - {name: BYPASS_MODEL_ACCESS_CONTROL, value: "false"}
+            - {name: USER_PERMISSIONS_CHAT_FILE_UPLOAD, value: "false"}
+            - {name: USER_PERMISSIONS_WORKSPACE_KNOWLEDGE_ACCESS, value: "false"}
+            - {name: USER_PERMISSIONS_WORKSPACE_MODELS_ACCESS, value: "false"}
+            - {name: USER_PERMISSIONS_WORKSPACE_TOOLS_ACCESS, value: "false"}
+            - {name: USER_PERMISSIONS_FEATURES_MEMORIES, value: "false"}
+            - {name: USER_PERMISSIONS_FEATURES_WEB_SEARCH, value: "false"}
+            - {name: USER_PERMISSIONS_FEATURES_CODE_INTERPRETER, value: "false"}
+            - {name: USER_PERMISSIONS_FEATURES_IMAGE_GENERATION, value: "false"}
+            - {name: USER_PERMISSIONS_FEATURES_NOTES, value: "false"}
+            - {name: USER_PERMISSIONS_FEATURES_DIRECT_TOOL_SERVERS, value: "false"}
+            # Background tasks off; no task model (check i).
+            - {name: ENABLE_TITLE_GENERATION, value: "false"}
+            - {name: ENABLE_TAGS_GENERATION, value: "false"}
+            - {name: ENABLE_FOLLOW_UP_GENERATION, value: "false"}
+            - {name: ENABLE_AUTOCOMPLETE_GENERATION, value: "false"}
+            - {name: ENABLE_SEARCH_QUERY_GENERATION, value: "false"}
+            - {name: ENABLE_RETRIEVAL_QUERY_GENERATION, value: "false"}
+            - {name: TASK_MODEL, value: ""}
+            - {name: TASK_MODEL_EXTERNAL, value: ""}
+            # Sign-in through OIDC only; local signup and the login form are off.
+            - {name: ENABLE_SIGNUP, value: "false"}
+            - {name: ENABLE_LOGIN_FORM, value: "false"}
+            - {name: ENABLE_PASSWORD_AUTH, value: "false"}
+            - {name: ENABLE_OAUTH_SIGNUP, value: "true"}
+            - {name: DEFAULT_USER_ROLE, value: "user"}
+            - {name: OAUTH_PROVIDER_NAME, value: "Trial IdP"}
+            - {name: OPENID_PROVIDER_URL, value: "http://dex.owui-trial.svc.cluster.local:5556/dex/.well-known/openid-configuration"}
+            - {name: OPENID_REDIRECT_URI, value: "http://openwebui.owui-trial.svc.cluster.local:8080/oauth/oidc/callback"}
+            - {name: OAUTH_CLIENT_ID, value: "open-webui"}
+            - {name: OAUTH_SCOPES, value: "openid email profile groups"}
+            - {name: ENABLE_OAUTH_GROUP_MANAGEMENT, value: "true"}
+            - {name: ENABLE_OAUTH_GROUP_CREATION, value: "true"}
+            - {name: OAUTH_GROUP_CLAIM, value: "groups"}
+            - {name: OAUTH_GROUP_DEFAULT_SHARE, value: "members"}
+            # No Redis at one replica: sign-out cannot revoke a JWT, so keep it short.
+            - {name: JWT_EXPIRES_IN, value: "8h"}
+            - {name: UVICORN_WORKERS, value: "1"}
+          resources:
+            requests: {cpu: 100m, memory: 384Mi}
+            limits: {memory: 1536Mi}
+          readinessProbe:
+            exec: {command: [python3, -c, "import urllib.request as u; u.urlopen('http://127.0.0.1:8080/health', timeout=3)"]}
+            periodSeconds: 5
+            failureThreshold: 60
+          volumeMounts:
+            - {name: data, mountPath: /app/backend/data}
+            - {name: static, mountPath: /app/backend/open_webui/static}
+            - {name: home, mountPath: /root}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - {name: data, persistentVolumeClaim: {claimName: openwebui-data}}
+        - {name: static, emptyDir: {sizeLimit: 64Mi}}
+        - {name: home, emptyDir: {sizeLimit: 64Mi}}
+        - {name: tmp, emptyDir: {sizeLimit: 256Mi}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: openwebui, namespace: owui-trial}
+spec:
+  selector: {app: openwebui}
+  ports: [{name: http, port: 8080, targetPort: 8080}]
+---
+# ---------------------------------------------------------------- test IdP
+# Dex v2.46.0 (distroless), test-only stand-in for the identity team's IdP:
+# in-memory storage, one static client, static users with a groups claim.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: dex, namespace: owui-trial}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: dex}}
+  template:
+    metadata: {labels: {app: dex}}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000771001
+        runAsGroup: 0
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: dex
+          image: @DEX_IMAGE@
+          imagePullPolicy: Never
+          args: [dex, serve, /etc/dex/config.yaml]
+          ports: [{containerPort: 5556}]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          resources: {requests: {cpu: 20m, memory: 32Mi}, limits: {memory: 128Mi}}
+          volumeMounts:
+            - {name: config, mountPath: /etc/dex, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - {name: config, secret: {secretName: dex-config}}
+        - {name: tmp, emptyDir: {sizeLimit: 16Mi}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: dex, namespace: owui-trial}
+spec:
+  selector: {app: dex}
+  ports: [{name: http, port: 5556, targetPort: 5556}]
+---
+# ---------------------------------------------------------------- agent side
+# The repository's simulation stack: pinned Qdrant, the deterministic
+# scripts/mock_vllm.py model stand-in (embeddings + reasoning, no hash mode)
+# and the real agent with the console, all from the trial's agent image.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: qdrant, namespace: owui-trial}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: qdrant}}
+  template:
+    metadata: {labels: {app: qdrant}}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000771002
+        runAsGroup: 0
+        fsGroup: 1000771002
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: qdrant
+          image: @QDRANT_IMAGE@
+          imagePullPolicy: Never
+          ports: [{containerPort: 6333}]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          resources: {requests: {cpu: 50m, memory: 128Mi}, limits: {memory: 512Mi}}
+          volumeMounts:
+            - {name: storage, mountPath: /qdrant/storage}
+            - {name: snapshots, mountPath: /qdrant/snapshots}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - {name: storage, emptyDir: {}}
+        - {name: snapshots, emptyDir: {}}
+        - {name: tmp, emptyDir: {}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: qdrant, namespace: owui-trial}
+spec:
+  selector: {app: qdrant}
+  ports: [{name: http, port: 6333, targetPort: 6333}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: mock-vllm, namespace: owui-trial}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: mock-vllm}}
+  template:
+    metadata: {labels: {app: mock-vllm}}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000771003
+        runAsGroup: 0
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: mock
+          image: @AGENT_IMAGE@
+          imagePullPolicy: Never
+          # The mock never ships in an image (.dockerignore); a ConfigMap carries it.
+          command: [python3, /mock/mock_vllm.py]
+          env: [{name: PORT, value: "8000"}, {name: MOCK_DIM, value: "64"}]
+          ports: [{containerPort: 8000}]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          resources: {requests: {cpu: 20m, memory: 64Mi}, limits: {memory: 256Mi}}
+          volumeMounts: [{name: mock, mountPath: /mock, readOnly: true}]
+      volumes: [{name: mock, configMap: {name: mock-vllm-script}}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: mock-vllm, namespace: owui-trial}
+spec:
+  selector: {app: mock-vllm}
+  ports: [{name: http, port: 8000, targetPort: 8000}]
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: agent-env, namespace: owui-trial}
+data:
+  QDRANT_URL: http://qdrant:6333
+  QDRANT_COLLECTION: mainframe_manuals
+  EMBED_MODE: vllm
+  EMBED_BASE_URL: http://mock-vllm:8000/v1
+  EMBED_MODEL: mock-embed
+  DENSE_DIM: "64"
+  # The agent refuses an unattested embedding revision; the mock's is fixed.
+  EMBED_MODEL_REVISION: mock-embed-trial-1073
+  LLM_BASE_URL: http://mock-vllm:8000/v1
+  LLM_MODEL_REASONING: mock-reasoning
+  UI_ENABLED: "true"
+  METRICS_ENABLED: "true"
+  RERANK_ENABLED: "false"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: agent, namespace: owui-trial}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: agent}}
+  template:
+    metadata: {labels: {app: agent}}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000771004
+        runAsGroup: 0
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: agent
+          image: @AGENT_IMAGE@
+          imagePullPolicy: Never
+          envFrom: [{configMapRef: {name: agent-env}}]
+          ports: [{containerPort: 8080}]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          resources: {requests: {cpu: 50m, memory: 192Mi}, limits: {memory: 768Mi}}
+          readinessProbe:
+            exec: {command: [python3, -c, "import urllib.request as u; u.urlopen('http://127.0.0.1:8080/healthz', timeout=3)"]}
+            periodSeconds: 5
+            failureThreshold: 60
+          volumeMounts: [{name: tmp, mountPath: /tmp}]
+      volumes: [{name: tmp, emptyDir: {}}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: agent, namespace: owui-trial}
+spec:
+  selector: {app: agent}
+  ports: [{name: http, port: 8080, targetPort: 8080}]
+---
+# ---------------------------------------------------------------- browser stand-in
+# Runs scripts/ci/openwebui-trial/qualify.py (stdlib only) for the sign-in,
+# chat and admin steps. Test user passwords are mounted from a run-time Secret.
+apiVersion: v1
+kind: Pod
+metadata: {name: browser, namespace: owui-trial, labels: {app: browser}}
+spec:
+  automountServiceAccountToken: false
+  enableServiceLinks: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000771005
+    runAsGroup: 0
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: browser
+      image: @AGENT_IMAGE@
+      imagePullPolicy: Never
+      command: [python3, -c, "import time; time.sleep(10**8)"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities: {drop: [ALL]}
+      resources: {requests: {cpu: 10m, memory: 32Mi}, limits: {memory: 256Mi}}
+      volumeMounts:
+        - {name: users, mountPath: /secrets, readOnly: true}
+        - {name: pipes, mountPath: /pipes, readOnly: true}
+        - {name: tmp, mountPath: /tmp}
+  volumes:
+    - {name: users, secret: {secretName: trial-users}}
+    - {name: pipes, configMap: {name: trial-pipes}}
+    - {name: tmp, emptyDir: {}}
