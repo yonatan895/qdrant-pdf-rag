@@ -16,6 +16,9 @@ from scripts import license_inventory as li
 from tests.helpers_airgap import REPO, copy_chart, copy_license_inputs
 from tests.helpers_task_artifact import copy_task_tools
 
+# Open WebUI v0.12.3-slim upstream index qualified by the #1073 Kind trial.
+BASE_DIGEST = "5adfb0355bbe4a5860c0ba9482cc0b40f573de3749a21a64cf4789391a14fffc"
+
 
 def real_inventory():
     return li.load_inventory(REPO)
@@ -76,7 +79,12 @@ def test_pymupdf_election_is_recorded_but_legal_confirmation_keeps_it_unresolved
     assert entry["decision"]["legal_confirmation"] == "pending"
     assert entry["status"] == "pending-owner-decision"
     _, unresolved, _ = problems_for(inventory)
-    assert [u for u in unresolved if "pymupdf" in u] and len(unresolved) == 1
+    assert [u for u in unresolved if "pymupdf" in u]
+    # The Open WebUI records stay visible as unresolved until ADR-0007 is accepted (N5).
+    others = sorted(u for u in unresolved if "pymupdf" not in u)
+    assert [u.split(": ")[0] for u in others] == ["component:image:openwebui-base", "component:image:openwebui"]
+    assert all("LicenseRef-Open-WebUI-License (proprietary) awaits owner decision" in u for u in others)
+    assert len(unresolved) == 3
     entry["decision"] = {"owner": "yonatan895"}
     problems, _, _ = problems_for(inventory)
     assert any("decision record needs owner, date and disposition" in p for p in problems)
@@ -106,6 +114,55 @@ def test_recorded_decisions_match_the_maintainer_dispositions():
     assert by_id["model:bm25-sparse-weights"]["license_spdx"] == "Apache-2.0"
     rpm_list = REPO / "licenses/ubi9-python-314-minimal.rpms.txt"
     assert len([ln for ln in rpm_list.read_text().splitlines() if ln and not ln.startswith("#")]) == 116
+
+
+def test_open_webui_licence_records_the_maintainer_decision_and_its_conditions():
+    """ADR-0007 L1 (#1074): both Open WebUI images.txt lines (derived bundle
+    member and upstream build base) carry a record bound to their pins, classed
+    proprietary (BSD-3 plus a branding clause, non-OSI), approved by the
+    2026-10-24 maintainer decision with its conditions kept in the record."""
+    inventory = real_inventory()
+    by_id = {e["id"]: e for e in inventory["components"]}
+    binds = {
+        "image:openwebui": "ghcr.io/yonatan895/qdrant-pdf-rag-openwebui:v0.12.3-slim",
+        "image:openwebui-base": "ghcr.io/open-webui/open-webui:v0.12.3-slim",
+    }
+    for cid, ref in binds.items():
+        entry = by_id[cid]
+        digest = "sha256:" + BASE_DIGEST if cid == "image:openwebui-base" else "sha256:PENDING"
+        assert entry["bind"] == {"images_txt": ref, "digest": digest}, cid
+        assert (entry["license_spdx"], entry["class"]) == ("LicenseRef-Open-WebUI-License", "proprietary")
+        # N5: a maintainer disposition recorded while ADR-0007 is not accepted, not an approval.
+        assert entry["status"] == "pending-owner-decision" and "ADR-0007 L1" in entry["approval_ref"]
+        assert "pending acceptance" in entry["approval_ref"]
+        assert entry["decision"]["disposition"].startswith(
+            "maintainer disposition 2026-10-24 (ADR-0007 pending acceptance)")
+        assert entry["decision"]["owner"] == "yonatan895" and entry["decision"]["date"] == "2026-10-24"
+        assert "branding" in entry["obligation"] and "100 users" in entry["obligation"]
+    assert "unmodified" in by_id["image:openwebui"]["decision"]["disposition"]
+    assert "100 users" in by_id["image:openwebui"]["decision"]["disposition"]
+    assert "not an OSI-approved" in by_id["image:openwebui"]["license_declared"]
+    problems, unresolved, _ = problems_for(inventory)
+    assert problems == [] and len([u for u in unresolved if "openwebui" in u]) == 2
+    # Without the decision the restricted class cannot rest on declared metadata.
+    del by_id["image:openwebui"]["decision"]
+    by_id["image:openwebui"].update(status="declared", approval_ref=None)
+    problems, _, _ = problems_for(inventory)
+    assert any("component:image:openwebui: class proprietary cannot rest on declared metadata" in p
+               for p in problems)
+
+
+def test_open_webui_proxy_image_is_recorded_bound_and_permissive():
+    """ADR-0007 E1: the nginx allow-list sidecar is an images.txt member with its
+    own record, bound to the pinned digest."""
+    by_id = {e["id"]: e for e in real_inventory()["components"]}
+    entry = by_id["image:openwebui-proxy"]
+    line = next(ln.split() for ln in (REPO / "images.txt").read_text().splitlines()
+                if not ln.startswith("#") and "nginx-unprivileged" in ln)
+    assert entry["bind"] == {"images_txt": line[0], "digest": line[1]}
+    assert (entry["license_spdx"], entry["class"]) == ("BSD-2-Clause", "permissive")
+    assert entry["ships_in"] == ["openwebui-proxy-image.tar (when the Open WebUI member is bundled)"]
+    assert "pending acceptance" in entry["approval_ref"]
 
 
 def test_altered_python_notice_text_is_flagged_and_notices_carry_the_four_texts(tmp_path):
@@ -275,6 +332,17 @@ def test_changed_image_digest_requires_re_review(tree, capsys):
     images.write_text(images.read_text().replace("sha256:efb96a94", "sha256:b0e04fe6"))
     code, out = run(tree, capsys)
     assert code == 1 and "image:qdrant" in out and "re-review the image" in out
+
+
+def test_recording_the_open_webui_digest_requires_re_review(tree, capsys):
+    """#1074: recording the #1073 digest without updating the licence record
+    is a refusal, not a silent rebind of the pending entry."""
+    images = tree / "images.txt"
+    pending = "qdrant-pdf-rag-openwebui:v0.12.3-slim               sha256:PENDING"
+    assert pending in images.read_text()
+    images.write_text(images.read_text().replace(pending, pending.replace("PENDING", "d" * 64)))
+    code, out = run(tree, capsys)
+    assert code == 1 and "image:openwebui" in out and "re-review the image" in out
 
 
 def test_unrecorded_vendored_asset_and_second_chart_are_flagged(tree, capsys):

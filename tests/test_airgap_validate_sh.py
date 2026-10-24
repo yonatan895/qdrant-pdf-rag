@@ -9,6 +9,7 @@ Tests validate.sh in dry-run mode against hermetic stubs:
 """
 
 import os
+import re
 import shutil
 
 import pytest
@@ -1284,6 +1285,107 @@ def test_validate_route_manifest_with_matching_pin_passes(tree):
     r = _route_run(tree, live=False)
     assert r.returncode == 0, r.stderr
     assert "and the packed bundle" in r.stdout
+
+
+# ----------------------------------------- optional Open WebUI image (#1074)
+
+OWUI_PIN = "sha256:" + "e" * 64
+OWUI_SOURCE = "ghcr.io/yonatan895/qdrant-pdf-rag-openwebui"
+OWUI_REF = f"{OWUI_SOURCE}@{OWUI_PIN}"
+# ADR-0007 E1: the allow-list proxy sidecar pin recorded in images.txt.
+PROXY_REF = ("docker.io/nginxinc/nginx-unprivileged@sha256:"
+             "f5116ed4606f3eb015dd4a8e28cb9b351476dc0ad4bc6e9f93b19cec130cdf03")
+# Independent expectation of the chart's images.openwebui (repository, tag).
+OWUI_CHART_BLOCK = "  openwebui:\n    repository: qdrant-pdf-rag-openwebui\n    tag: v0.12.3-slim\n"
+
+
+def _openwebui_tree(tree, pin=OWUI_PIN):
+    images = tree / "images.txt"
+    images.write_text(re.sub(rf"^({re.escape(OWUI_SOURCE)}:\S+)[ \t]+\S+$",
+                             lambda m: f"{m[1]} {pin}", (REPO / "images.txt").read_text(),
+                             flags=re.MULTILINE))
+    values = tree / "charts/mainframe-rag/values.yaml"
+    text = values.read_text()
+    if not re.search(r"^[ \t]+openwebui:\n[ \t]+repository: qdrant-pdf-rag-openwebui\n", text, re.MULTILINE):
+        values.write_text(text.replace("\nimages:\n", "\nimages:\n" + OWUI_CHART_BLOCK, 1))
+    return tree
+
+
+OWUI_OPERATOR_ENV = {
+    "OPENWEBUI_ENABLED": "true",
+    "OPENWEBUI_SECRET": "owui-secrets",
+    "OPENWEBUI_HOST": "docs.apps.example.internal",
+    "OPENWEBUI_OIDC_PROVIDER_URL": "https://idp.example.internal/.well-known/openid-configuration",
+    "OPENWEBUI_OIDC_CLIENT_ID": "docs-frontend",
+    "OPENWEBUI_OIDC_ALLOWED_ROLES": "staff",
+    "OPENWEBUI_OIDC_ADMIN_ROLES": "docs-admins",
+    "OPENWEBUI_IDP_EGRESS_CIDRS": "10.20.0.0/24",
+}
+
+
+def _openwebui_run(tree, **env):
+    return _run(tree, {**OWUI_OPERATOR_ENV, **env})
+
+
+def test_validate_openwebui_accepts_a_recorded_pin_matching_chart_and_bundle(tree):
+    _openwebui_tree(tree)
+    r = _openwebui_run(tree)
+    assert r.returncode == 0, r.stderr
+    assert "Open WebUI pin recorded; matches the chart" in r.stdout
+    _manifest(tree, f"openwebui: {OWUI_REF}", f"openwebui_proxy: {PROXY_REF}")
+    r = _openwebui_run(tree)
+    assert r.returncode == 0, r.stderr
+    assert "Open WebUI pin recorded; matches the chart and the packed bundle" in r.stdout
+
+
+@pytest.mark.parametrize("key,needle", [
+    ("OPENWEBUI_OIDC_CLIENT_ID", "OPENWEBUI_OIDC_CLIENT_ID is required"),
+    ("OPENWEBUI_IDP_EGRESS_CIDRS", "OPENWEBUI_IDP_EGRESS_CIDRS is required"),
+    ("OPENWEBUI_SECRET", "OPENWEBUI_SECRET"),
+])
+def test_validate_openwebui_refuses_an_incomplete_selection(tree, key, needle):
+    _openwebui_tree(tree)
+    r = _openwebui_run(tree, **{key: ""})
+    assert r.returncode != 0
+    assert needle in r.stderr
+
+
+def test_validate_openwebui_pending_pin_refused_only_when_enabled(tree):
+    _openwebui_tree(tree, pin="sha256:PENDING")
+    r = _openwebui_run(tree)
+    assert r.returncode != 0
+    assert "OPENWEBUI_ENABLED=true needs the Open WebUI digest recorded in images.txt" in r.stderr
+    off = _run(tree, {"OPENWEBUI_ENABLED": "false"})
+    assert off.returncode == 0, off.stderr
+    assert "Open WebUI pin" not in off.stdout
+
+
+@pytest.mark.parametrize("edit,needle", [
+    (lambda t: (t / "images.txt").write_text((t / "images.txt").read_text().replace(
+        "qdrant-pdf-rag-openwebui:v0.12.3-slim", "qdrant-pdf-rag-openwebui:v0.99.0-slim")),
+     "to match the chart's images.openwebui repository/tag"),
+    (lambda t: _manifest(t), "packed without the Open WebUI image"),
+    (lambda t: _manifest(t, f"openwebui: {OWUI_SOURCE}@sha256:" + "c" * 64),
+     "packed MANIFEST openwebui pin to equal images.txt"),
+    # ADR-0007 E1: the allow-list proxy gets the same three checks.
+    (lambda t: (t / "images.txt").write_text(re.sub(
+        r"^(docker\.io/nginxinc/nginx-unprivileged:\S+)[ \t]+\S+$", r"\1 sha256:PENDING",
+        (t / "images.txt").read_text(), flags=re.MULTILINE)),
+     "allow-list proxy digest (nginx-unprivileged) recorded in images.txt"),
+    (lambda t: (t / "images.txt").write_text((t / "images.txt").read_text().replace(
+        "nginx-unprivileged:1.30.6-alpine", "nginx-unprivileged:1.99.0-alpine")),
+     "to match the chart's images.openwebuiProxy repository/tag"),
+    (lambda t: _manifest(t, f"openwebui: {OWUI_REF}"), "openwebui_proxy entry in the packed MANIFEST"),
+    (lambda t: _manifest(t, f"openwebui: {OWUI_REF}",
+                         "openwebui_proxy: docker.io/nginxinc/nginx-unprivileged@sha256:" + "c" * 64),
+     "packed MANIFEST openwebui_proxy pin to equal images.txt"),
+])
+def test_validate_openwebui_refuses_chart_or_bundle_mismatch(tree, edit, needle):
+    _openwebui_tree(tree)
+    edit(tree)
+    r = _openwebui_run(tree)
+    assert r.returncode != 0
+    assert needle in r.stderr
 
 
 def test_validate_route_live_success(tree):

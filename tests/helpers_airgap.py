@@ -37,6 +37,25 @@ def set_oauth_proxy_pin(tree: Path, digest: str) -> None:
         record.write_text(json.dumps(inventory, indent=2, sort_keys=True) + "\n")
 
 
+def set_openwebui_pin(tree: Path, digest: str) -> None:
+    """Select an explicit Open WebUI pin state (ADR-0007, #1074), independently
+    of the production pin, keeping its license record bound to the same state."""
+    path = tree / "images.txt"
+    updated, count = re.subn(
+        r"^(ghcr\.io/yonatan895/qdrant-pdf-rag-openwebui:\S+)[ \t]+\S+$",
+        lambda match: f"{match[1]} {digest}", path.read_text(), flags=re.MULTILINE,
+    )
+    assert count == 1
+    path.write_text(updated)
+    record = tree / "licenses" / "inventory.json"
+    if record.is_file():
+        inventory = json.loads(record.read_text())
+        for component in inventory["components"]:
+            if component["id"] == "image:openwebui":
+                component["bind"]["digest"] = digest
+        record.write_text(json.dumps(inventory, indent=2, sort_keys=True) + "\n")
+
+
 def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 

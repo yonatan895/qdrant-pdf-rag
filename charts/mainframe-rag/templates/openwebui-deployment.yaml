@@ -1,0 +1,429 @@
+{{- /*
+Open WebUI docs front end (ADR-0007, #1074). Rendered only when
+openwebui.enabled (openwebuiEnabled also refuses a missing retention window or
+docs Pipe). One replica, Recreate, one uvicorn worker: SQLite has one writer
+and a rollout must never run two. restricted-v2 assigns UID and volume group
+(no fixed IDs, no anyuid); the image is the hardened derived slim image
+(#1073). The pod holds no gateway key and no model connection: the docs Pipe
+over the agent (#1072) is the only model.
+
+The environment is the ADR-0007 condition set (V1 vector store, V2 answer
+path, R2 offline, R3 identity, S2-S4 storage, audit and sharing). Variable
+names follow Open WebUI v0.12.3; they are pending #1073 qualification and are
+re-qualified on every pin import (P1). ENABLE_PERSISTENT_CONFIG=false keeps
+this environment authoritative over admin-UI edits.
+
+Network path (ADR-0007 E1, maintainer decision 2026-10-24): Open WebUI listens
+on 127.0.0.1:8080 only. The nginx allow-list sidecar `proxy` is the one
+listener: it serves the service-serving certificate on 8443 (the Route is
+reencrypt), refuses every path the Docs pilot does not need with a fixed 403
+(decided on nginx's decoded, normalised URI), and forwards the rest unchanged.
+The root filesystems are read-only; the writable paths are the claim and
+emptyDirs (static, /root, /tmp), as qualified by the #1073 Kind trial.
+*/ -}}
+{{- if include "mainframe-rag.openwebuiEnabled" . }}
+{{- $o := .Values.openwebui }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rag-openwebui
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: rag-openwebui
+  annotations:
+    # The chat retention window (ADR-0007 S2) the chat-purge sidecar enforces.
+    mainframe-rag/chat-retention-days: {{ $o.retentionDays | int | toString | quote }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: rag-openwebui
+  template:
+    metadata:
+      labels:
+        app: rag-openwebui
+      annotations:
+        # A changed allow-list rolls the pod.
+        checksum/proxy-config: {{ .Files.Get "files/openwebui/proxy.nginx.conf" | sha256sum | quote }}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      {{- if .Values.pullSecret.name }}
+      imagePullSecrets:
+        - name: {{ .Values.pullSecret.name }}
+      {{- else }}
+      imagePullSecrets: []
+      {{- end }}
+      containers:
+        - name: openwebui
+          image: {{ include "mainframe-rag.image" (dict "name" "openwebui" "image" .Values.images.openwebui) }}
+          imagePullPolicy: {{ .Values.images.openwebui.pullPolicy | default "IfNotPresent" }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          workingDir: /app/backend
+          command: [python3, -m, uvicorn]
+          args:
+            - open_webui.main:app
+            - --host
+            - 127.0.0.1
+            - --port
+            - "8080"
+            - --workers
+            - "1"
+          env:
+            # Storage (S1): SQLite on the RWO claim, one worker.
+            - name: DATA_DIR
+              value: /app/backend/data
+            - name: HOME
+              value: /tmp
+            - name: UVICORN_WORKERS
+              value: "1"
+            - name: ENABLE_PERSISTENT_CONFIG
+              value: "false"
+            - name: WEBUI_URL
+              value: {{ printf "https://%s" $o.host | quote }}
+            - name: CORS_ALLOW_ORIGIN
+              value: {{ printf "https://%s" $o.host | quote }}
+            # Offline, no telemetry, no downloads (R2).
+            - name: OFFLINE_MODE
+              value: "true"
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: ENABLE_VERSION_UPDATE_CHECK
+              value: "false"
+            - name: ENABLE_COMMUNITY_SHARING
+              value: "false"
+            - name: SCARF_NO_ANALYTICS
+              value: "true"
+            - name: DO_NOT_TRACK
+              value: "true"
+            - name: ANONYMIZED_TELEMETRY
+              value: "false"
+            - name: ENABLE_OTEL
+              value: "false"
+            - name: ENABLE_PIP_INSTALL_FRONTMATTER_REQUIREMENTS
+              value: "false"
+            - name: RAG_EMBEDDING_MODEL_AUTO_UPDATE
+              value: "false"
+            - name: RAG_RERANKING_MODEL_AUTO_UPDATE
+              value: "false"
+            - name: WHISPER_MODEL_AUTO_UPDATE
+              value: "false"
+            - name: RAG_EMBEDDING_MODEL_TRUST_REMOTE_CODE
+              value: "false"
+            - name: RAG_RERANKING_MODEL_TRUST_REMOTE_CODE
+              value: "false"
+            # No second vector store (V1): slim lazy client with no URL, every
+            # surface that embeds is off.
+            - name: VECTOR_DB
+              value: pgvector
+            - name: BYPASS_EMBEDDING_AND_RETRIEVAL
+              value: "true"
+            - name: ENABLE_WEB_SEARCH
+              value: "false"
+            - name: ENABLE_MEMORIES
+              value: "false"
+            - name: ENABLE_NOTES
+              value: "false"
+            - name: ENABLE_CHANNELS
+              value: "false"
+            - name: ENABLE_FOLDERS
+              value: "false"
+            - name: ENABLE_CODE_INTERPRETER
+              value: "false"
+            - name: ENABLE_CODE_EXECUTION
+              value: "false"
+            - name: ENABLE_IMAGE_GENERATION
+              value: "false"
+            - name: USER_PERMISSIONS_CHAT_FILE_UPLOAD
+              value: "false"
+            - name: USER_PERMISSIONS_WORKSPACE_KNOWLEDGE_ACCESS
+              value: "false"
+            - name: USER_PERMISSIONS_WORKSPACE_MODELS_ACCESS
+              value: "false"
+            - name: USER_PERMISSIONS_WORKSPACE_TOOLS_ACCESS
+              value: "false"
+            - name: USER_PERMISSIONS_FEATURES_MEMORIES
+              value: "false"
+            - name: USER_PERMISSIONS_FEATURES_WEB_SEARCH
+              value: "false"
+            - name: USER_PERMISSIONS_FEATURES_CODE_INTERPRETER
+              value: "false"
+            - name: USER_PERMISSIONS_FEATURES_DIRECT_TOOL_SERVERS
+              value: "false"
+            - name: USER_PERMISSIONS_FEATURES_NOTES
+              value: "false"
+            - name: USER_PERMISSIONS_FEATURES_IMAGE_GENERATION
+              value: "false"
+            # Audio (STT/TTS/call) is off for users; the proxy refuses the audio API.
+            - name: USER_PERMISSIONS_CHAT_STT
+              value: "false"
+            - name: USER_PERMISSIONS_CHAT_TTS
+              value: "false"
+            - name: USER_PERMISSIONS_CHAT_CALL
+              value: "false"
+            # Answers only through the agent (V2): no model connections, no
+            # user tools, the Pipe Function is the only extension.
+            - name: ENABLE_OPENAI_API
+              value: "false"
+            - name: ENABLE_OLLAMA_API
+              value: "false"
+            # v0.12.3 probes host.docker.internal:11434/12434 on first start even
+            # with ENABLE_OLLAMA_API=false unless the base URL is explicit (#1073
+            # trial R2). Loopback, discard port: the probe fails locally.
+            - name: OLLAMA_BASE_URL
+              value: "http://127.0.0.1:9"
+            - name: ENABLE_DIRECT_CONNECTIONS
+              value: "false"
+            - name: ENABLE_TOOL_SERVERS
+              value: "false"
+            - name: ENABLE_TOOLS
+              value: "false"
+            - name: ENABLE_DIRECT_INTEGRATIONS
+              value: "false"
+            - name: BYPASS_MODEL_ACCESS_CONTROL
+              value: "false"
+            - name: ENABLE_EVALUATION_ARENA_MODELS
+              value: "false"
+            - name: ENABLE_MESSAGE_RATING
+              value: "false"
+            # Task calls off: the docs model is never a task model (V2).
+            - name: TASK_MODEL
+              value: ""
+            - name: ENABLE_TITLE_GENERATION
+              value: "false"
+            - name: ENABLE_TAGS_GENERATION
+              value: "false"
+            - name: ENABLE_FOLLOW_UP_GENERATION
+              value: "false"
+            - name: ENABLE_AUTOCOMPLETE_GENERATION
+              value: "false"
+            - name: ENABLE_SEARCH_QUERY_GENERATION
+              value: "false"
+            - name: ENABLE_RETRIEVAL_QUERY_GENERATION
+              value: "false"
+            # Chat history bounds (S2, S3): no admin chat access or export.
+            - name: ENABLE_ADMIN_CHAT_ACCESS
+              value: "false"
+            - name: ENABLE_ADMIN_EXPORT
+              value: "false"
+            # No content in logs (S4).
+            - name: GLOBAL_LOG_LEVEL
+              value: INFO
+            - name: AUDIT_LOG_LEVEL
+              value: METADATA
+            # Identity (R3): OIDC only, roles and groups from the IdP claims.
+            - name: WEBUI_AUTH
+              value: "true"
+            - name: ENABLE_SIGNUP
+              value: "false"
+            - name: ENABLE_LOGIN_FORM
+              value: "false"
+            - name: ENABLE_PASSWORD_AUTH
+              value: "false"
+            - name: ENABLE_INITIAL_ADMIN_SIGNUP
+              value: "false"
+            - name: ENABLE_OAUTH_SIGNUP
+              value: "true"
+            - name: OAUTH_MERGE_ACCOUNTS_BY_EMAIL
+              value: "false"
+            - name: ENABLE_OAUTH_TOKEN_EXCHANGE
+              value: "false"
+            - name: ENABLE_OAUTH_PERSISTENT_CONFIG
+              value: "false"
+            - name: JWT_EXPIRES_IN
+              value: 8h
+            - name: OPENID_PROVIDER_URL
+              value: {{ $o.oidc.providerUrl | quote }}
+            - name: OPENID_REDIRECT_URI
+              value: {{ printf "https://%s/oauth/oidc/callback" $o.host | quote }}
+            - name: OAUTH_CLIENT_ID
+              value: {{ $o.oidc.clientId | quote }}
+            - name: OAUTH_SCOPES
+              # offline_access: Open WebUI refreshes the session from a refresh token;
+              # without one it deletes the session near expiry and may fall back to an
+              # older session's token (Kind trial). The IdP must permit the scope.
+              value: openid email profile groups offline_access
+            - name: ENABLE_OAUTH_GROUP_MANAGEMENT
+              value: "true"
+            - name: ENABLE_OAUTH_GROUP_CREATION
+              value: "false"
+            - name: OAUTH_GROUP_CLAIM
+              value: {{ $o.oidc.groupClaim | quote }}
+            - name: ENABLE_OAUTH_ROLE_MANAGEMENT
+              value: "true"
+            - name: OAUTH_ROLES_CLAIM
+              value: {{ $o.oidc.rolesClaim | quote }}
+            - name: OAUTH_ALLOWED_ROLES
+              value: {{ $o.oidc.allowedRoles | quote }}
+            - name: OAUTH_ADMIN_ROLES
+              value: {{ $o.oidc.adminRoles | quote }}
+            # The Pipe installer needs one admin API key (docs/deploy.md). Narrowest
+            # setting: keys exist, users cannot create them (permission off, admins
+            # bypass it), and a key is honoured only on /api/v1/functions. Pending
+            # trial qualification (#1073 run 2).
+            - name: ENABLE_API_KEYS
+              value: "true"
+            - name: USER_PERMISSIONS_FEATURES_API_KEYS
+              value: "false"
+            - name: ENABLE_API_KEYS_ENDPOINT_RESTRICTIONS
+              value: "true"
+            - name: API_KEYS_ALLOWED_ENDPOINTS
+              value: /api/v1/functions
+            - name: OAUTH_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $o.secretName }}
+                  key: oidc-client-secret
+            - name: WEBUI_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $o.secretName }}
+                  key: webui-secret-key
+          # Loopback-only listener: kubelet cannot reach it, so the probes run
+          # inside the container; the proxy's own probes cover the Service path.
+          readinessProbe:
+            exec:
+              command: [python3, -c, "import urllib.request as u; u.urlopen('http://127.0.0.1:8080/health/db', timeout=4)"]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+          # Schema migrations run at startup: allow a slow first start before
+          # a restart interrupts them.
+          startupProbe:
+            exec:
+              command: [python3, -c, "import urllib.request as u; u.urlopen('http://127.0.0.1:8080/health', timeout=4)"]
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 60
+          livenessProbe:
+            exec:
+              command: [python3, -c, "import urllib.request as u; u.urlopen('http://127.0.0.1:8080/health', timeout=4)"]
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            {{- toYaml .Values.resources.openwebui | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /app/backend/data
+            - name: tmp
+              mountPath: /tmp
+            - name: static
+              mountPath: /app/backend/open_webui/static
+            - name: home
+              mountPath: /root
+            - name: tls
+              mountPath: /etc/tls/private
+              readOnly: true
+            - name: pipe
+              mountPath: /opt/mainframe-rag/openwebui
+              readOnly: true
+        # Allow-list proxy (ADR-0007 E1): the only listener of the pod.
+        - name: proxy
+          image: {{ include "mainframe-rag.image" (dict "name" "openwebuiProxy" "image" .Values.images.openwebuiProxy) }}
+          imagePullPolicy: {{ .Values.images.openwebuiProxy.pullPolicy | default "IfNotPresent" }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          args: [nginx, -c, /etc/nginx/proxy/nginx.conf, -g, "daemon off;"]
+          ports:
+            - containerPort: 8443
+              name: https
+          readinessProbe:
+            httpGet:
+              path: /health/db
+              port: https
+              scheme: HTTPS
+            periodSeconds: 10
+          startupProbe:
+            tcpSocket:
+              port: https
+            periodSeconds: 5
+            failureThreshold: 24
+          livenessProbe:
+            tcpSocket:
+              port: https
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 500m
+              memory: 128Mi
+          volumeMounts:
+            - name: proxy-conf
+              mountPath: /etc/nginx/proxy
+              readOnly: true
+            - name: tls
+              mountPath: /etc/tls/private
+              readOnly: true
+            - name: proxy-tmp
+              mountPath: /tmp
+        # Retention purge (ADR-0007 S2): same image and claim, so it shares the
+        # node and the SQLite file with the single writer; a separate CronJob
+        # could not mount the RWO claim reliably. Hourly; a failed run is
+        # counted in /app/backend/data/.mainframe-rag-purge.json and retried.
+        - name: chat-purge
+          image: {{ include "mainframe-rag.image" (dict "name" "openwebui" "image" .Values.images.openwebui) }}
+          imagePullPolicy: {{ .Values.images.openwebui.pullPolicy | default "IfNotPresent" }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          command: [python3, /opt/mainframe-rag/openwebui/purge_chats.py]
+          args:
+            - --days
+            - {{ $o.retentionDays | int | toString | quote }}
+            - --data-dir
+            - /app/backend/data
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          volumeMounts:
+            - name: data
+              mountPath: /app/backend/data
+            - name: tmp
+              mountPath: /tmp
+            - name: pipe
+              mountPath: /opt/mainframe-rag/openwebui
+              readOnly: true
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: rag-openwebui-data
+        - name: tmp
+          emptyDir: {}
+        - name: static
+          emptyDir: {}
+        - name: home
+          emptyDir: {}
+        - name: proxy-tmp
+          emptyDir: {}
+        - name: proxy-conf
+          configMap:
+            name: rag-openwebui-proxy
+        - name: tls
+          secret:
+            secretName: rag-openwebui-tls
+        - name: pipe
+          configMap:
+            name: rag-openwebui-pipe
+{{- end }}

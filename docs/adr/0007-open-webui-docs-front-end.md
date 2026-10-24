@@ -57,6 +57,13 @@ Pipe is provisioned and the admin role is limited to the team.
   follow-ups, autocomplete, query generation) are off. The Pipe also answers
   any Open WebUI `__task__` call with fixed text and never forwards it to the
   agent.
+  Functions can read tokens: any Open WebUI Function may declare
+  `__oauth_token__` and receive the user's access and ID tokens (Kind trial).
+  So **only the hash-checked docs Pipe may exist**: the installer installs
+  nothing else and refuses (fails the deploy with fixed text) when any other
+  Function is present, and the Pipe never declares `__oauth_token__`,
+  `__request__` or any `__user__`-style parameter it does not use; a test
+  inspects its `pipe()` signature. A new parameter is a recorded decision.
   Proof: over a multi-turn trial, agent requests equal user turns.
 - **V3 Contract fidelity.** The Pipe sends exactly the agent's `ChatRequest`
   shape. It renders validated citations with their supplied excerpts as source
@@ -85,6 +92,27 @@ Pipe is provisioned and the admin role is limited to the team.
   the IdP. The control is the policy, not the offline flag. Proof: 0 egress
   attempts behind the Kind egress boundary, and no external fetch from the
   browser.
+- **E1 Unenforced endpoints are blocked before the pod: an allow-list.**
+  (Maintainer decision 2026-10-24, #1070/#1071.) Open WebUI v0.12.3 disables
+  some features in its UI only, not in the route handler: `POST /api/v1/files/`
+  stores uploads with uploads off, the `retrieval/process/*` routes check no
+  feature flag, and knowledge and audio rest on permissions that admins bypass.
+  A router path match cannot close this: it matches the raw path, and the server
+  decodes percent-encoding before routing (`/api/v1/%66iles/` and
+  `/api/v1%2Ffiles/` reach the handler). So the pod runs a pinned
+  `nginx-unprivileged` sidecar as its only listener, Open WebUI listens on
+  `127.0.0.1:8080`, and nginx serves an **allow-list** matched on its decoded,
+  normalised `$uri` (`merge_slashes on`); everything else gets a fixed 403. The
+  request line is forwarded unchanged so nginx and uvicorn decide on the same
+  path. The list is the Docs pilot's need: the SPA shell and assets, sign-in
+  and the OIDC callback, socket.io, health, chats, models, the Pipe's chat
+  completions, the account and admin APIs and the Pipe installer's
+  `/api/v1/functions`. **Re-audited on every import (P1)**: list each router's
+  handlers, sort them into server-enforced and UI-only, and re-run the browser
+  trace; a path is added deliberately, never by default. Proof: the nginx
+  config test runs the real pinned image against every encoded variant, and the
+  site curl checks in `docs/deploy.md` return a refusal for each. The remaining
+  browser-trace completeness of the list is a #1073 run-2 item.
 - **R3 Identity.** Login is OIDC against the identity team's IdP (AD FS, with
   Keycloak also in use). Every employee signs in with a personal account.
   Groups and the admin role come from IdP claims. The local login form,
@@ -95,6 +123,10 @@ Pipe is provisioned and the admin role is limited to the team.
   refuses any other Route in front of its Service. The agent stays anonymous
   to Open WebUI users (#373), which is safe because the docs corpus is read by
   everyone.
+  Scopes include `groups` and `offline_access`: without a refresh token Open
+  WebUI deletes the session near expiry and may fall back to an older
+  session's token, so the IdP must permit the refresh scope (the real IdP
+  refresh path is a #1073 run-2 item).
 - **S1 Storage.** The pod runs one replica with a `Recreate` rollout, a single
   worker and SQLite. Its data lives on a kept RWO block PVC, never NFS:
   validate refuses an NFS-named class, as for the other writable volumes,

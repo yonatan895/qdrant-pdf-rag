@@ -26,6 +26,7 @@ from tests.helpers_airgap import (
     make_bin_tree,
     run_sh,
     set_oauth_proxy_pin,
+    set_openwebui_pin,
     sha256_bytes,
     skopeo_stub,
     symlink_tools,
@@ -108,6 +109,7 @@ def pack_tree(tmp_path):
     shutil.copytree(REPO / "locks", tmp_path / "locks")
     copy_license_inputs(tmp_path)
     set_oauth_proxy_pin(tmp_path, "sha256:PENDING")
+    set_openwebui_pin(tmp_path, "sha256:PENDING")
     for script in ("dependency_lock.py", "image_inventory.py"):
         shutil.copy(REPO / "scripts" / script, tmp_path / "scripts" / script)
     (tmp_path / "charts").mkdir(exist_ok=True)
@@ -339,6 +341,12 @@ def test_pack_success_builds_verified_tarball(pack_tree):
     assert "sha256:PENDING: not bundled" in r.stdout
     assert not (dist / "oauth-proxy-image.tar").exists()
     assert "oauth_proxy" not in manifest
+    # The optional Open WebUI image (#1074) is skipped while its pin is pending.
+    assert "Open WebUI pin is sha256:PENDING: not bundled" in r.stdout
+    assert not (dist / "openwebui-image.tar").exists()
+    assert "openwebui" not in manifest and "openwebui" not in (dist / "SHA256SUMS").read_text()
+    assert "Open WebUI Image" not in (dist / "PACKING_RECORD.txt").read_text()
+    assert "open-webui" not in skopeo_log.read_text()  # the build base is provenance only
     assert f"task_sha256: {TASK_SHA256}" in manifest
     assert f"task_binary_sha256: {TASK_BINARY_SHA256}" in manifest
     log = skopeo_log.read_text()
@@ -472,6 +480,88 @@ fi
         text=True,
     ).stdout.strip()
     assert logged == head
+
+
+def test_pack_bundles_openwebui_once_digest_recorded(pack_tree):
+    """ADR-0007 (#1074): a recorded Open WebUI pin joins the bundle, MANIFEST,
+    SBOM, packing record and member checksums, and the packed archive's own
+    bootstrap accepts the optional member."""
+    tmp_path, skopeo_log, head, _key = pack_tree
+    pin = "sha256:" + "e" * 64
+    set_openwebui_pin(tmp_path, pin)
+    subprocess.run(["git", "commit", "-qam", "record open webui pin"], cwd=tmp_path, check=True)
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True,
+                          capture_output=True, text=True).stdout.strip()
+    r, _ = _run_pack(pack_tree)
+    assert r.returncode == 0, r.stderr
+    assert "Open WebUI pin is sha256:PENDING" not in r.stdout
+    dist = tmp_path / "dist"
+    assert (dist / "openwebui-image.tar").is_file()
+    ref = f"ghcr.io/yonatan895/qdrant-pdf-rag-openwebui@{pin}"
+    assert f"docker://{ref}" in skopeo_log.read_text().splitlines()
+    manifest = (dist / "MANIFEST.txt").read_text()
+    assert f"openwebui: {ref}" in manifest.splitlines()
+    assert f"openwebui_digest: {STUB_DIGEST}" in manifest.splitlines()
+    assert f"openwebui_config_digest: {config_digest_of('openwebui-image')}" in manifest.splitlines()
+    assert "openwebui-image.tar" in (dist / "SHA256SUMS").read_text()
+    assert f"Open WebUI Image:    {ref}" in (dist / "PACKING_RECORD.txt").read_text()
+    sbom = json.loads((dist / "sbom.json").read_text())
+    assert {"name": "openwebui", "ref": ref, "digest": STUB_DIGEST} in sbom["images"]
+    # ADR-0007 E1: the allow-list proxy joins the bundle exactly when the Open WebUI member does.
+    proxy_ref = ("docker.io/nginxinc/nginx-unprivileged@sha256:"
+                 "f5116ed4606f3eb015dd4a8e28cb9b351476dc0ad4bc6e9f93b19cec130cdf03")
+    assert f"docker://{proxy_ref}" in skopeo_log.read_text().splitlines()
+    assert (dist / "openwebui-proxy-image.tar").is_file()
+    assert f"openwebui_proxy: {proxy_ref}" in manifest.splitlines()
+    assert f"openwebui_proxy_digest: {STUB_DIGEST}" in manifest.splitlines()
+    assert f"openwebui_proxy_config_digest: {config_digest_of('openwebui-proxy-image')}" in manifest.splitlines()
+    assert "openwebui-proxy-image.tar" in (dist / "SHA256SUMS").read_text()
+    assert {"name": "openwebui-proxy", "ref": proxy_ref, "digest": STUB_DIGEST} in sbom["images"]
+    assert {img["name"] for img in sbom["images"]} == {
+        "qdrant", "openobserve", "otelcol", "app-ingest", "app-agent", "openwebui", "openwebui-proxy"}
+    extract = tmp_path / "owui extraction"
+    extract.mkdir()
+    with tarfile.open(dist / f"qdrant-pdf-rag-{head}.tar") as archive:
+        assert "openwebui-image.tar" in archive.getnames()
+        assert "openwebui-proxy-image.tar" in archive.getnames()
+        notices = archive.extractfile("THIRD-PARTY-NOTICES.txt").read().decode()
+        archive.extractall(extract, filter="data")
+    assert "image:openwebui  [pending-owner-decision]" in notices
+    assert "image:openwebui-proxy  [approved]" in notices
+    assert "LicenseRef-Open-WebUI-License" in notices
+    boot = subprocess.run(["sh", "bootstrap.sh"], cwd=extract, env={"PATH": "/usr/bin:/bin"},
+                          capture_output=True, text=True, check=False)
+    assert boot.returncode == 0, boot.stdout + boot.stderr
+    # Only the derived image is a member: the upstream build base is never pulled.
+    assert "ghcr.io/open-webui/open-webui" not in skopeo_log.read_text()
+
+
+def test_openwebui_base_and_derived_pin_needles_are_disjoint(pack_tree):
+    """images.txt lookups are substring matches: each Open WebUI needle must
+    select its own line and nothing else, whichever line comes first."""
+    tmp_path, _log, _head, _key = pack_tree
+    images = tmp_path / "images.txt"
+    text = images.read_text()
+    base = "ghcr.io/open-webui/open-webui:v0.12.3-slim"
+    derived = "ghcr.io/yonatan895/qdrant-pdf-rag-openwebui:v0.12.3-slim"
+    assert re.search(rf"^{re.escape(base)}\s+sha256:5adfb035[0-9a-f]{{56}}$", text, re.MULTILINE)
+    assert re.search(rf"^{re.escape(derived)}\s+sha256:PENDING$", text, re.MULTILINE)
+    text = re.sub(rf"^({re.escape(base)})\s+\S+$", r"\1 sha256:" + "1" * 64, text, flags=re.MULTILINE)
+    images.write_text(text)
+    probe = tmp_path / "scripts" / "airgap" / "pin-probe.sh"
+    probe.write_text('. "$(dirname -- "$0")/common.sh"\n'
+                     "pin_from_images_txt open-webui:v0.12.3-slim\n"
+                     "pin_from_images_txt qdrant-pdf-rag-openwebui\n"
+                     "if pin_recorded qdrant-pdf-rag-openwebui; then echo derived-recorded; else echo derived-pending; fi\n"
+                     "pin_from_images_txt qdrant\n")
+    r = subprocess.run(["sh", str(probe)], cwd=tmp_path, capture_output=True, text=True,
+                       env={"PATH": "/usr/bin:/bin"}, check=False)
+    assert r.returncode == 0, r.stderr
+    base_out, derived_out, state, qdrant_out = r.stdout.split()
+    assert (base_out, derived_out, state) == (
+        "ghcr.io/open-webui/open-webui@sha256:" + "1" * 64, derived, "derived-pending")
+    # Neither line contains the qdrant needle's first match.
+    assert qdrant_out.startswith("docker.io/qdrant/qdrant@sha256:")
 
 
 @pytest.mark.parametrize("damage", ["corrupt"])

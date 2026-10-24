@@ -53,7 +53,7 @@ image_identity_enforced() {
     [ -n "${MANIFEST:-}" ] && [ "${AIRGAP_DRYRUN:-0}" != "1" ]
 }
 
-# $1 = role (qdrant|agent|ingest|openobserve|otelcol|oauth_proxy). Prints the registry ref.
+# $1 = role (qdrant|agent|ingest|openobserve|otelcol|oauth_proxy|openwebui|openwebui_proxy). Prints the registry ref.
 image_role_ref() {
     case "$1" in
         qdrant) echo "$INTERNAL_REGISTRY/qdrant/qdrant:${QDRANT_TAG}-unprivileged" ;;
@@ -62,6 +62,8 @@ image_role_ref() {
         openobserve) echo "$INTERNAL_REGISTRY/openobserve/openobserve:v1.1.2" ;;
         otelcol) echo "$INTERNAL_REGISTRY/otel/opentelemetry-collector-contrib:0.160.0" ;;
         oauth_proxy) echo "$INTERNAL_REGISTRY/openshift4/ose-oauth-proxy:v4.14" ;;
+        openwebui) echo "$INTERNAL_REGISTRY/qdrant-pdf-rag-openwebui:v0.12.3-slim" ;;
+        openwebui_proxy) echo "$INTERNAL_REGISTRY/nginxinc/nginx-unprivileged:1.30.6-alpine" ;;
         *) die "unknown image role: $1" ;;
     esac
 }
@@ -95,7 +97,7 @@ verify_registry_role() {
 # $@ = roles to verify before any cluster change.
 verify_registry_images() {
     # Digests only ever come from this verification, never from the caller's environment.
-    unset IMAGE_DIGEST_QDRANT IMAGE_DIGEST_AGENT IMAGE_DIGEST_INGEST IMAGE_DIGEST_OPENOBSERVE IMAGE_DIGEST_OTELCOL IMAGE_DIGEST_OAUTH_PROXY
+    unset IMAGE_DIGEST_QDRANT IMAGE_DIGEST_AGENT IMAGE_DIGEST_INGEST IMAGE_DIGEST_OPENOBSERVE IMAGE_DIGEST_OTELCOL IMAGE_DIGEST_OAUTH_PROXY IMAGE_DIGEST_OPENWEBUI IMAGE_DIGEST_OPENWEBUI_PROXY
     if ! image_identity_enforced; then
         echo "Notice: images are referenced by tag and not release-verified (dry-run or no packed MANIFEST)" >&2
         return 0

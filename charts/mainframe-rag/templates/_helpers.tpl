@@ -90,3 +90,22 @@ bearer token as the only control: refuse at render, before any mutation.
 true
 {{- end -}}
 {{- end -}}
+
+{{/*
+Open WebUI docs front end (ADR-0007, #1074). Default off; "true" or nothing.
+The schema requires the Secret, host, OIDC client, IdP egress and the
+retention window when enabled; the checks below repeat the two that must
+never be bypassed (no front end without its enforced retention window or
+without the repository-owned docs Pipe, #1072).
+*/}}
+{{- define "mainframe-rag.openwebuiEnabled" -}}
+{{- if .Values.openwebui.enabled -}}
+{{- if not .Values.openwebui.retentionDays -}}
+{{- fail "openwebui.retentionDays is required when openwebui.enabled=true: the purge sidecar enforces the chat retention window (ADR-0007 S2)" -}}
+{{- end -}}
+{{- if not (.Files.Get "files/openwebui/docs_pipe.py") -}}
+{{- fail "openwebui.enabled=true needs the repository-owned docs Pipe (#1072) at charts/mainframe-rag/files/openwebui/docs_pipe.py; refusing a front end without its only model" -}}
+{{- end -}}
+true
+{{- end -}}
+{{- end -}}
