@@ -8,6 +8,7 @@ just the changed revision.
 
 from __future__ import annotations
 
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -633,6 +634,12 @@ def _planned_and_published_revs(
     assert chunks, "the synthetic document must produce stored points"
     stored = {point_payload(parsed, chunk, rules_v)["source_rev"] for chunk in chunks}
     assert stored == {record.source_rev}, "inventory and stored payload disagree"
+    # Issue #990: chunk.py mints point ids from its own copy of the revision
+    # mapping until the next rules bump folds it; each id must still be the
+    # documented key (docs/ingest.md §4) over the inventory's revision.
+    for chunk in chunks:
+        key = f"{record.source_rev}|{chunk.heading_path}|{chunk.page_start}|{chunk.ordinal}"
+        assert chunk.chunk_id == str(uuid.uuid5(uuid.NAMESPACE_URL, key)), "point id drifted"
     built = record.source_rev
     append_record(progress, record.model_copy(update={"status": "upserted"}))
 
