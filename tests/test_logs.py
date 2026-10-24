@@ -51,6 +51,40 @@ def test_exception_goes_into_payload_one_line():
     assert "trace" in payload and "test_logs.py" in payload["trace"]
 
 
+def test_rendered_traceback_in_a_plain_message_keeps_type_and_frames_only():
+    """Issue #989: uvicorn logs a failed lifespan as Starlette's
+    `traceback.format_exc()` text with no exc_info; the line keeps the type
+    and frame locations, never the message or source lines."""
+    import traceback
+
+    try:
+        raise RuntimeError("SECRET-CANARY-989 rendered")
+    except RuntimeError:
+        rendered = traceback.format_exc()
+    line = JsonFormatter().format(_record(rendered))
+    payload = json.loads(line)
+    assert "SECRET-CANARY-989" not in line and 'raise RuntimeError("' not in line
+    assert payload["error_type"] == "RuntimeError"
+    assert "test_logs.py:test_rendered_traceback" in payload["trace"]
+    assert payload["message"] == "rendered traceback withheld"
+    assert json.loads(JsonFormatter().format(_record("plain text")))["message"] == "plain text"
+
+
+def test_server_logger_disabled_by_uvicorn_stays_disabled(monkeypatch):
+    """`--no-access-log` leaves uvicorn.access with no handlers and no
+    propagation; adopting the server loggers must not re-enable it."""
+    access = logging.getLogger("uvicorn.access")
+    error = logging.getLogger("uvicorn.error")
+    monkeypatch.setattr(logging.getLogger(), "handlers", [])
+    monkeypatch.setattr(access, "handlers", [])
+    monkeypatch.setattr(access, "propagate", False)
+    monkeypatch.setattr(error, "handlers", [logging.StreamHandler()])
+    monkeypatch.setattr(error, "propagate", False)
+    configure_logging("INFO")
+    assert (access.handlers, access.propagate) == ([], False)
+    assert (error.handlers, error.propagate) == ([], True)
+
+
 def test_configure_logging_is_idempotent(monkeypatch):
     root = logging.getLogger()
     # Swap the handler list so the original (pytest's capture) is restored
@@ -119,6 +153,27 @@ def app():
 """
 
 
+_LIFESPAN_PROBE = f"""
+from mainframe_rag.agent import app as app_mod
+
+_configure = app_mod.configure_logging
+
+
+def _configure_then_fail(level):
+    _configure(level)
+    raise RuntimeError({_CANARY!r})  # first startup step after logging
+
+
+app_mod.configure_logging = _configure_then_fail
+app = app_mod.app
+"""
+
+_AGENT_ENV = {
+    "QDRANT_URL": "http://127.0.0.1:1", "EMBED_MODE": "hash", "ALLOW_HASH_MODE": "true",
+    "LLM_BASE_URL": "http://127.0.0.1:1/v1", "LLM_MODEL_REASONING": "probe-model",
+}
+
+
 def _free_port() -> int:
     import socket
 
@@ -127,28 +182,56 @@ def _free_port() -> int:
         return sock.getsockname()[1]
 
 
-def _serve_and_fault(tmp_path, probe: str, extra: list[str], env: dict[str, str], ready: str, fault):
-    """Start the probe app as the image starts the service, wait until
-    `ready` answers, run `fault(client)` and return (response, all output)."""
+def _launch(tmp_path, probe: str, extra: list[str], env: dict[str, str]):
+    """`python -m uvicorn probe_app:app` with uvicorn's default log config, as
+    the images launch the services. Python `warnings` output (e.g.
+    qdrant-client's version-check UserWarning against the unreachable probe
+    Qdrant) is not the logging path and stays out of scope (#989), so the
+    child ignores warnings to keep the JSON-only assertion deterministic."""
     import os
     import subprocess
     import sys
-    import time
     from pathlib import Path
-
-    import httpx2
 
     import mainframe_rag
 
     (tmp_path / "probe_app.py").write_text(probe)
     port = _free_port()
     src = str(Path(mainframe_rag.__file__).resolve().parents[1])
-    child_env = {**os.environ, **env, "PYTHONPATH": src}
+    child_env = {**os.environ, **env, "PYTHONPATH": src, "PYTHONWARNINGS": "ignore"}
     proc = subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "probe_app:app", *extra, "--app-dir", str(tmp_path),
          "--host", "127.0.0.1", "--port", str(port)],
         env=child_env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
     )
+    return proc, port
+
+
+def _assert_json_only_without_canary(output: str) -> list[dict]:
+    """No canary anywhere; every line from the first JSON line on is JSON
+    (only uvicorn lines printed before the app configures logging precede it)."""
+    assert _CANARY not in output, "exception text reached the service output"
+    lines = [line for line in output.splitlines() if line.strip()]
+    parsed = []
+    for line in lines:
+        try:
+            parsed.append(json.loads(line))
+        except ValueError:
+            parsed.append(None)
+    first = next(i for i, payload in enumerate(parsed) if payload is not None)
+    plain_after = [lines[i] for i in range(first, len(lines)) if parsed[i] is None]
+    assert plain_after == [], plain_after
+    return [payload for payload in parsed if payload is not None]
+
+
+def _serve_and_fault(tmp_path, probe: str, extra: list[str], env: dict[str, str], ready: str, fault):
+    """Start the probe app as the image starts the service, wait until
+    `ready` answers, run `fault(client)` and return (response, all output)."""
+    import time
+
+    import httpx2
+
+    proc, port = _launch(tmp_path, probe, extra, env)
     try:
         base = f"http://127.0.0.1:{port}"
         deadline = time.monotonic() + 60
@@ -177,12 +260,7 @@ def test_unhandled_fault_under_uvicorn_defaults_logs_json_without_exception_text
     uvicorn logs carries the type and frame locations, never the message."""
     if service == "agent":
         response, output = _serve_and_fault(
-            tmp_path, _AGENT_PROBE, [],
-            {
-                "QDRANT_URL": "http://127.0.0.1:1", "EMBED_MODE": "hash", "ALLOW_HASH_MODE": "true",
-                "LLM_BASE_URL": "http://127.0.0.1:1/v1", "LLM_MODEL_REASONING": "probe-model",
-            },
-            "/livez",
+            tmp_path, _AGENT_PROBE, [], _AGENT_ENV, "/livez",
             lambda c: c.post("/v1/answer", json={"query": "IEA500I"}),
         )
         assert response.json() == {"code": "internal", "message": "internal error"}
@@ -199,18 +277,21 @@ def test_unhandled_fault_under_uvicorn_defaults_logs_json_without_exception_text
         )
         assert response.json()["code"] == "internal_error"
     assert response.status_code == 500
-    assert _CANARY not in output, "exception text reached the service output"
-    lines = [line for line in output.splitlines() if line.strip()]
-    parsed = []
-    for line in lines:
-        try:
-            parsed.append(json.loads(line))
-        except ValueError:
-            parsed.append(None)
-    # Only uvicorn's few pre-lifespan startup lines may precede the JSON handler.
-    first = next(i for i, payload in enumerate(parsed) if payload is not None)
-    plain_after = [lines[i] for i in range(first, len(lines)) if parsed[i] is None]
-    assert plain_after == [], plain_after
-    crashes = [p for p in parsed if p and p.get("logger") == "uvicorn.error" and "error_type" in p]
+    parsed = _assert_json_only_without_canary(output)
+    crashes = [p for p in parsed if p.get("logger") == "uvicorn.error" and "error_type" in p]
     assert [p["error_type"] for p in crashes] == ["RuntimeError"]
     assert crashes[0]["trace"], "frame locations stay for triage"
+
+
+def test_lifespan_failure_after_logging_is_configured_withholds_the_traceback(tmp_path):
+    """A startup failure after `configure_logging` reaches uvicorn as
+    Starlette's rendered traceback text (no exc_info): the process still
+    exits non-zero and says so, with the type and frames only."""
+    proc, _port = _launch(tmp_path, _LIFESPAN_PROBE, [], _AGENT_ENV)
+    output, _ = proc.communicate(timeout=60)
+    assert proc.returncode != 0, "a failed startup must not keep serving"
+    parsed = _assert_json_only_without_canary(output)
+    failed = [p for p in parsed if p.get("logger") == "uvicorn.error" and "error_type" in p]
+    assert [p["error_type"] for p in failed] == ["RuntimeError"]
+    assert "_configure_then_fail" in failed[0]["trace"]
+    assert any(p.get("message") == "Application startup failed. Exiting." for p in parsed)
