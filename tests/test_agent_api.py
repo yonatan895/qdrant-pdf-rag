@@ -3930,3 +3930,87 @@ def test_a_whole_line_quoted_decline_is_recognized_in_every_quote_style(quote, s
     """#877 D2: wrapper peeling treats curly and straight quotes alike."""
     body = quote.format(f"{DECLINE_PREFIX} {subject}.") + tail
     assert is_structured_decline(body) is True, body
+
+
+_FIXED_422 = {"code": "invalid_request", "message": "request body failed validation"}
+
+
+@pytest.mark.parametrize("field", ["product", "version"])
+@pytest.mark.parametrize(
+    ("path", "body"),
+    [
+        ("/v1/search", {"query": "IEA500I"}),
+        ("/v1/answer", {"query": "IEA500I"}),
+        ("/v1/chat", {"messages": [{"role": "user", "content": "IEA500I"}]}),
+    ],
+    ids=["search", "answer", "chat"],
+)
+def test_oversized_product_version_get_fixed_422_before_any_work(client, monkeypatch, path, body, field):
+    """Issue #1011: header fields are bounded (query_max_chars) at the request
+    model, so a 1 MB value never reaches a Qdrant filter, the prompt or a model."""
+    search = MagicMockSearch()
+    llm = FakeLLM()
+    monkeypatch.setattr(app_mod, "retrieve_search", search.search)
+    monkeypatch.setattr(app_mod, "llm", llm)
+    resp = client.post(path, json={**body, field: "p" * 1_000_000})
+    assert resp.status_code == 422
+    assert resp.json() == _FIXED_422
+    assert search.calls == [] and llm.calls == 0
+    limit = app_mod.settings.query_max_chars
+    ok = client.post(path, json={**body, field: "p" * limit})
+    assert ok.status_code != 422
+
+
+def test_chat_body_cap_counts_product_and_version(client, monkeypatch):
+    """The chat body cap covers every caller-supplied prompt field."""
+    monkeypatch.setattr(app_mod.settings, "chat_max_body_chars", 1000)
+    monkeypatch.setattr(app_mod.settings, "query_max_chars", 800)
+    body = {"messages": [{"role": "user", "content": "q" * 500}], "product": "p" * 400, "version": "v" * 400}
+    resp = client.post("/v1/chat", json=body)
+    assert resp.status_code == 422
+    assert resp.json() == _FIXED_422
+
+
+@pytest.mark.parametrize("field", ["query", "product", "version", "splunk_context"])
+@pytest.mark.parametrize("path", ["/v1/search", "/v1/answer"])
+def test_lone_surrogate_in_fields_is_fixed_422_with_clean_logs(client, monkeypatch, caplog, path, field):
+    """Issue #1013: an unpaired surrogate is a validation failure (never a
+    500) and no log line carries the prompt or citation text."""
+    if field == "splunk_context" and path == "/v1/search":
+        pytest.skip("search has no splunk_context")
+    search = MagicMockSearch()
+    llm = FakeLLM()
+    monkeypatch.setattr(app_mod, "retrieve_search", search.search)
+    monkeypatch.setattr(app_mod, "llm", llm)
+    body = {"query": "IEA500I", field: "\ud800"}
+    with caplog.at_level("DEBUG"):
+        resp = client.post(path, content=json.dumps(body), headers={"content-type": "application/json"})
+    assert resp.status_code == 422
+    assert resp.json() == _FIXED_422
+    assert search.calls == [] and llm.calls == 0
+    assert "Sysplex" not in caplog.text and "IEA500I, p." not in caplog.text
+
+
+@pytest.mark.parametrize("field", ["splunk_context", "product", "version", "message"])
+def test_lone_surrogate_in_chat_is_fixed_422(client, field):
+    msgs = [{"role": "user", "content": "\ud800" if field == "message" else "IEA500I"}]
+    body = {"messages": msgs} if field == "message" else {"messages": msgs, field: "\udfff"}
+    resp = client.post("/v1/chat", content=json.dumps(body), headers={"content-type": "application/json"})
+    assert resp.status_code == 422
+    assert resp.json() == _FIXED_422
+
+
+def test_invalid_utf8_and_malformed_bodies_use_the_fixed_envelope(client):
+    """Issue #1031: no framework `detail` shape for any unparseable body."""
+    hdr = {"content-type": "application/json"}
+    cases = [
+        (b'{"query":"\xff"}', hdr),
+        (b'{"query":"IEA50', hdr),
+        (b'{"query":"x"} junk', hdr),
+        (b'{"query":"IEA500I"}', {"content-type": "text/plain"}),
+    ]
+    for path in ("/v1/search", "/v1/answer", "/v1/chat"):
+        for raw, headers in cases:
+            resp = client.post(path, content=raw, headers=headers)
+            assert resp.status_code == 422, (path, raw)
+            assert resp.json() == _FIXED_422, (path, raw)
