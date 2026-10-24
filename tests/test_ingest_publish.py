@@ -2271,6 +2271,94 @@ def test_relabel_after_inventory_loss_recovers_by_republishing_original_labels(t
     assert fake.aliases[ALIAS] == live_3, "the next ordinary run is steady state"
 
 
+def _lost_inventory_relabel(tmp_path, monkeypatch, fake):
+    """Publish DOC_A under version 2.5, lose the progress file, then relabel to
+    3.0: the refused build is abandoned. Returns (corpus, progress, path,
+    relabel args, live, old revision)."""
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.inventory import load_inventory
+    from mainframe_rag.ingest.publish import publish_state_path
+
+    _publish_env(monkeypatch)
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    path = _build_doc_with_id(corpus, "doc_a", DOC_A)
+    progress = tmp_path / "inv.jsonl"
+    labels = ("--vendor", "ibm", "--product", "zos")
+    assert _run_main(monkeypatch, corpus, progress, *labels, "--version", "2.5") == 0
+    live = fake.aliases[ALIAS]
+    rev_old = load_inventory(progress)[str(path)].source_rev
+    progress.unlink()  # the inventory is lost
+    relabel = (*labels, "--version", "3.0")
+    with pytest.raises(RuntimeError, match="unmarked residue"):
+        _run_main(monkeypatch, corpus, progress, *relabel)
+    publish_state_path(progress, ALIAS).unlink()  # abandon the refused build
+    return corpus, progress, path, relabel, live, rev_old
+
+
+def test_authorize_from_catalog_retires_a_published_revision_after_inventory_loss(tmp_path, monkeypatch):
+    """Issue #1005 (S2-5, option B): with the inventory lost, the published
+    revision cannot be retired from the inventory. `--authorize-from-catalog`
+    lets --retire-doc name it because the live build's sealed source catalog
+    lists it and its marker and points verify in the live generation. Without
+    the flag the same state still refuses. The next ordinary run is steady
+    and never brings the retired revision back."""
+    from mainframe_rag.ingest.inventory import load_inventory
+
+    fake = PublishFake()
+    corpus, progress, path, relabel, live_1, rev_old = _lost_inventory_relabel(
+        tmp_path, monkeypatch, fake
+    )
+    retire = ("--retire-doc", f"{DOC_A}@{rev_old}")
+    with pytest.raises(RuntimeError, match="unapproved revision"):
+        _run_main(monkeypatch, corpus, progress, *relabel, *retire)
+    assert fake.aliases[ALIAS] == live_1, "without the flag the inventory is the only authority"
+
+    assert _run_main(monkeypatch, corpus, progress, *relabel, *retire, "--authorize-from-catalog") == 0
+    live_2 = fake.aliases[ALIAS]
+    assert live_2 != live_1
+    rev_new = load_inventory(progress)[str(path)].source_rev
+    assert _revisions_in(fake, live_2) == {rev_new}
+    assert _marker_revisions_in(fake, live_2) == {rev_new}, "no orphaned marker"
+    assert _revisions_in(fake, live_1) == {rev_old}, "superseded generation retained"
+
+    assert _run_main(monkeypatch, corpus, progress, *relabel) == 0
+    assert fake.aliases[ALIAS] == live_2, "the next ordinary run is steady state"
+    assert rev_old not in _revisions_in(fake, live_2), "the retired revision stays retired"
+
+
+@pytest.mark.parametrize("case", ["without_retire_doc", "not_in_catalog", "uncommitted"])
+def test_authorize_from_catalog_refusals_mutate_nothing(tmp_path, monkeypatch, case):
+    """Issue #1005 (option B): the catalog authority is explicit and bounded.
+    The flag without --retire-doc, a revision the live catalog does not list,
+    and a listed revision whose live marker and points no longer verify each
+    refuse with a fixed message and a stable code, before any build."""
+    fake = PublishFake()
+    corpus, progress, _, relabel, live, rev_old = _lost_inventory_relabel(
+        tmp_path, monkeypatch, fake
+    )
+    if case == "without_retire_doc":
+        extra: tuple[str, ...] = ()
+        code = "retire_catalog_requires_retire_doc"
+    elif case == "not_in_catalog":
+        extra = ("--retire-doc", f"{DOC_A}@ibm|zos|2.5|{'f' * 64}")
+        code = "retire_not_in_catalog"
+    else:
+        extra = ("--retire-doc", f"{DOC_A}@{rev_old}")
+        code = "retire_not_committed"
+        damaged = next(p for p in fake.collections[live] if p.payload["source_rev"] == rev_old)
+        fake.collections[live].remove(damaged)
+    gens_before = _gen_collections(fake)
+    with pytest.raises(RuntimeError) as excinfo:
+        _run_main(monkeypatch, corpus, progress, *relabel, *extra, "--authorize-from-catalog")
+    assert getattr(excinfo.value, "code", None) == code
+    assert str(excinfo.value).startswith(f"{code}: ")
+    assert "/" not in str(excinfo.value).split("(")[0], "fixed text, ids only"
+    assert fake.aliases[ALIAS] == live
+    assert _gen_collections(fake) == gens_before, "a refusal builds nothing"
+
+
 def test_same_path_reissue_with_a_new_form_number_cuts_over_by_lineage(tmp_path, monkeypatch):
     """Issue #1006 (S2-6): the path's inventory lineage names the revision it
     replaces even when the reissue prints another form number. The ordinary
