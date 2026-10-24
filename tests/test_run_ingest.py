@@ -1147,25 +1147,27 @@ def test_oversize_document_is_never_upserted_or_completed_and_next_run_succeeds(
 
 
 @pytest.mark.parametrize(
-    ("parts", "cli"),
+    ("parts", "cli", "labels"),
     [
-        (("IBM", "zOS|x", "2.5"), {}),
-        (("IBM", "zOS", "2|5"), {}),
-        (("IBM", "zOS", "2.5"), {"vendor": "a|b"}),
-        (("IBM", "zOS", "2.5"), {"product": "p|q"}),
-        (("IBM", "zOS", "2.5"), {"version": "1|2"}),
+        (("IBM", "zOS|x", "2.5"), {}, "ibm|zos\\|x|2.5"),
+        (("IBM", "zOS", "2|5"), {}, "ibm|zos|2\\|5"),
+        (("IBM", "zOS", "2.5"), {"vendor": "a|b"}, "a\\|b|zos|2.5"),
+        (("IBM", "zOS", "2.5"), {"product": "p|q"}, "ibm|p\\|q|2.5"),
+        (("IBM", "zOS", "2.5"), {"version": "1|2"}, "ibm|zos|1\\|2"),
     ],
 )
-def test_pipe_in_a_label_is_refused_with_a_fixed_error_on_the_worker_path(
-    plain_pdf, tmp_path, monkeypatch, parts, cli
+def test_pipe_in_a_label_is_escaped_into_the_key_on_the_worker_path(
+    plain_pdf, tmp_path, monkeypatch, parts, cli, labels
 ):
-    """Issue #878: `|` delimits source_rev_key, so a label containing it (path
-    layout or CLI flag) is refused before any chunk, embed or key exists. The
-    error record is fixed text: no label, path or manual text."""
+    """#990 item 1 (supersedes the #878 refusal): `|` inside a path-layout or
+    CLI label is escaped in source_rev_key, so the document ingests under an
+    unambiguous key. The record, every chunk id and the embed calls use that
+    one key (spelled independently here)."""
     import shutil
 
     from mainframe_rag.config import Settings
     from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.chunk import make_chunk_id
 
     pdf = tmp_path.joinpath(*parts, "guide.pdf")
     pdf.parent.mkdir(parents=True)
@@ -1174,25 +1176,23 @@ def test_pipe_in_a_label_is_refused_with_a_fixed_error_on_the_worker_path(
         run_ingest, "_load_worker_settings", lambda: Settings(embed_mode="hash", _env_file=None)
     )
     embed_calls = _spy_embed(monkeypatch)
-    task = (str(pdf), cli.get("vendor"), cli.get("product"), cli.get("version"), str(tmp_path), sha256_file(pdf), True, None)
-    record, _parsed, chunks, vectors, contexts = run_ingest._parse_one(task)
-    assert record.status == "error"
-    assert record.error_type == "LabelDelimiterRefused"
-    assert record.error == (
-        "label_delimiter: vendor, product or version label contains the reserved "
-        "character '|'; document refused"
-    )
-    assert (chunks, vectors, contexts) == ([], [], {})
-    assert embed_calls == []
+    sha = sha256_file(pdf)
+    task = (str(pdf), cli.get("vendor"), cli.get("product"), cli.get("version"), str(tmp_path), sha, True, None)
+    record, _parsed, chunks, vectors, _contexts = run_ingest._parse_one(task)
+    assert record.status != "error" and record.error_type is None
+    assert record.source_rev == f"{labels}|{sha}"
+    assert chunks and len(vectors) == len(chunks) and sum(embed_calls) == len(chunks)
+    assert [c.chunk_id for c in chunks] == [
+        make_chunk_id(record.source_rev, c.heading_path, c.page_start, c.ordinal) for c in chunks
+    ]
 
 
-def test_pipe_label_document_is_refused_run_continues_and_valid_labels_keep_their_key(
+def test_pipe_label_document_ingests_beside_a_valid_one_with_distinct_keys(
     tmp_path, synthetic_pdf, plain_pdf, monkeypatch
 ):
-    """Issue #878 end to end through main(): the refused document is an error
-    record, the valid document in the same run is ingested with the same
-    source_rev key as before (independently spelled), and once the label is
-    fixed the forced re-run ingests it."""
+    """#990 item 1 end to end through main(): the `|`-labelled document is
+    upserted under its escaped key, and the valid document in the same run
+    keeps the key it always had (independently spelled)."""
     import shutil
 
     from mainframe_rag.ingest import run_ingest
@@ -1210,19 +1210,12 @@ def test_pipe_label_document_is_refused_run_continues_and_valid_labels_keep_thei
     monkeypatch.delenv("DENSE_DIM", raising=False)
     progress = tmp_path / "inventory.jsonl"
     args = ["--src", str(root), "--progress", str(progress), "--workers", "1"]
-    assert main(args) == 1
+    assert main(args) == 0
     records = {Path(r["path"]).name: r for r in map(json.loads, progress.read_text().splitlines()) if r}
-    assert records["bad.pdf"]["status"] == "error"
-    assert records["bad.pdf"]["error_type"] == "LabelDelimiterRefused"
-    assert "zOS|x" not in records["bad.pdf"]["error"] and "bad.pdf" not in records["bad.pdf"]["error"]
+    assert records["bad.pdf"]["status"] == "upserted"
+    assert records["bad.pdf"]["source_rev"] == f"ibm|zos\\|x|2.5|{sha256_file(bad)}"
     assert records["good.pdf"]["status"] == "upserted"
     assert records["good.pdf"]["source_rev"] == f"ibm|zos|2.5|{sha256_file(good)}"
-
-    shutil.move(str(bad.parent.parent), str(root / "IBM" / "zOS2"))
-    assert main([*args, "--reingest"]) == 0
-    last = {Path(r["path"]).name: r for r in map(json.loads, progress.read_text().splitlines()) if r}
-    assert last["bad.pdf"]["status"] == "upserted"
-    assert last["bad.pdf"]["source_rev"].startswith("ibm|zos2|2.5|")
 
 
 @pytest.mark.parametrize(

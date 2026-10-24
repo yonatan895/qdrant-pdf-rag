@@ -120,6 +120,31 @@ def test_label_normalization_is_idempotent_with_a_constrained_alphabet(value):
     assert label == label.strip(" ") and "  " not in label
     assert (label == "") == (value is None or not value.strip())
 
+
+_LABEL = st.one_of(st.none(), st.text(alphabet="ab|\\ ", max_size=6))
+
+
+@_PROPERTY
+@given(_LABEL, _LABEL, _LABEL, _LABEL, _LABEL, _LABEL)
+@example("a|b", "c", "d", "a", "b|c", "d")
+@example("a", "b|c", "d", "a", "b", "c|d")
+@example("\\", "", "|", "|", "\\", "")  # collides if only `|` were escaped
+def test_revision_key_is_injective_over_normalized_labels(v1, p1, r1, v2, p2, r2):
+    """#990 item 1: `|` inside a label used to read as a field delimiter, so
+    ('a|b', 'c') and ('a', 'b|c') shared one key. Labels are escaped (`\\`
+    then `|`), so keys are equal exactly when the normalized labels are."""
+    sha = "ab" * 32
+    same = [normalize_label(x) for x in (v1, p1, r1)] == [normalize_label(x) for x in (v2, p2, r2)]
+    assert (source_rev_key(v1, p1, r1, sha) == source_rev_key(v2, p2, r2, sha)) == same
+
+
+def test_revision_key_escapes_only_the_delimiter_and_escape_characters():
+    sha = "ab" * 32
+    assert source_rev_key("IBM", "zOS|x", "2.5", sha) == f"ibm|zos\\|x|2.5|{sha}"
+    assert source_rev_key("a\\b", None, "1|2", sha) == f"a\\\\b||1\\|2|{sha}"
+    # Delimiter-free labels keep their key byte for byte.
+    assert source_rev_key("IBM", "z/OS", "3.1", sha) == f"ibm|z/os|3.1|{sha}"
+
 # ---------------------------------------------------------------------------
 # plan_duplicates: byte-identical copies elect the lexicographic winner
 # ---------------------------------------------------------------------------
