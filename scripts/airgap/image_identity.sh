@@ -3,10 +3,10 @@
 # common.sh; never executed directly.
 #
 # Contract: the signed MANIFEST carries each packed image's CONFIG digest
-# (<role>_config_digest). The config digest pins the rootfs diffIDs and is
-# stable across the archive (uncompressed layers) -> registry (compressed
-# layers) conversion, unlike the manifest digest (docs/deploy.md, "Image
-# identity across archive and registry formats"). Before any cluster change,
+# (<role>_config_digest). The config digest pins the rootfs diffIDs and stays
+# the identity even when a registry re-serializes the manifest, so the registry
+# manifest digest is never compared blindly (docs/deploy.md, "Image identity
+# across archive and registry formats"). Before any cluster change,
 # deploy/ingest read the registry tag back, require the packed config digest and
 # a single-image manifest, and render the first-party images as
 # repository@<registry manifest digest>. The vendored Qdrant chart cannot take
@@ -40,11 +40,24 @@ inspect_args() {
     printf '%s' "$_ia"
 }
 
-# $1 = docker-archive tar path. Prints the image config digest of the archive.
+# $1 = oci-archive member path, $2 = file that receives its verified manifest
+# bytes. Prints the archive (platform) manifest digest. Reads the layout itself
+# (index.json -> manifest -> config + every layer blob, sizes and sha256) so no
+# `skopeo inspect` has to unpack the archive into a temporary directory (#1066).
+archive_manifest() {
+    _am_rc=0
+    _am_digest=$(python3 scripts/airgap/image_manifest.py archive "$1" "$2") || _am_rc=$?
+    case "$_am_rc" in
+        0) printf '%s' "$_am_digest" ;;
+        6) die "$(basename "$1"): an image blob is missing or does not match its digest — wrong image bytes; do not trust this bundle" ;;
+        *) die "$(basename "$1") is not a single-image oci-archive — repack the bundle with this release's pack.sh" ;;
+    esac
+}
+
+# $1 = manifest file written by archive_manifest. Prints its image config digest.
 archive_config_digest() {
-    _acd_raw=$(skopeo inspect --raw "docker-archive:$1") || die "cannot read the archive manifest of $(basename "$1")"
-    printf '%s' "$_acd_raw" | python3 scripts/airgap/image_manifest.py config ||
-        die "archive manifest of $(basename "$1") has no usable image config digest"
+    python3 scripts/airgap/image_manifest.py config < "$1" ||
+        die "archive manifest $(basename "$1") has no usable image config digest"
 }
 
 # Release path = a packed MANIFEST is reachable and this is not a dry-run.

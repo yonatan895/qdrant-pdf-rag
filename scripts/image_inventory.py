@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read installed Python metadata from Docker archive layers without executing them."""
+"""Read installed Python metadata from OCI archive layers without executing them."""
 from __future__ import annotations
 
 import argparse
@@ -17,6 +17,15 @@ except ModuleNotFoundError:
     import dependency_lock as _local_locks
 
     locks = _local_locks
+try:
+    from scripts.airgap import image_manifest as oci
+except ModuleNotFoundError:
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent / 'airgap'))
+    import image_manifest as _local_oci
+
+    oci = _local_oci
 
 RECEIPT = 'opt/rag-locks/installed-inventory.json'
 LOCK = 'opt/rag-locks/locks/cp314-linux-x86_64.json'
@@ -28,16 +37,6 @@ def path_name(name: str) -> str:
     if path.is_absolute() or '..' in path.parts:
         raise locks.LockError('unsafe image member path')
     return str(path)
-
-
-def read_member(archive: tarfile.TarFile, name: str) -> bytes:
-    member = archive.getmember(name)
-    if not member.isfile() or member.size > 8_000_000:
-        raise locks.LockError('invalid or oversized image metadata')
-    stream = archive.extractfile(member)
-    if stream is None:
-        raise locks.LockError('missing image metadata bytes')
-    return stream.read()
 
 
 def package_metadata(path: str) -> bool:
@@ -53,30 +52,29 @@ def inventory(root: Path, image: Path) -> dict:
     expected.update(manifest['base_image']['inherited_python_packages'])
     retained: dict[str, bytes] = {}
     links: set[str] = set()
-    with tarfile.open(image, 'r:*') as outer:
-        index = json.loads(read_member(outer, 'manifest.json'))
-        if not isinstance(index, list) or len(index) != 1:
-            raise locks.LockError('image archive must contain exactly one image')
-        config_bytes = read_member(outer, index[0]['Config'])
+    with tarfile.open(image, 'r:') as outer:
+        # The bundle's OCI reader (#1066) verifies the single image's manifest,
+        # config and every layer blob against its descriptor first.
+        try:
+            image_layout = oci.read_archive(outer)
+        except oci.BlobMismatch:
+            raise locks.LockError('image archive blob does not match its digest') from None
+        except (oci.ArchiveError, KeyError, TypeError) as exc:
+            raise locks.LockError('image archive must contain exactly one OCI image') from exc
+        config_bytes = image_layout.config_raw
         config = json.loads(config_bytes)
         if config.get('os') != 'linux' or config.get('architecture') != 'amd64':
             raise locks.LockError('image target differs from the locked target')
-        layers = index[0]['Layers']
+        layers = image_layout.layers
         diff_ids = config['rootfs']['diff_ids']
         if not layers or len(layers) != len(diff_ids):
             raise locks.LockError('image layer identity is incomplete')
         for name, diff_id in zip(layers, diff_ids, strict=True):
-            member = outer.getmember(name)
-            if not member.isfile():
-                raise locks.LockError('image layer is not a regular member')
-            stream = outer.extractfile(member)
-            if stream is None:
-                raise locks.LockError('missing image layer')
+            stream = oci.open_blob(outer, image_layout, name)
             magic = stream.read(2)
             stream.seek(0)
-            # Docker's containerd exporter uses compressed OCI blobs even in
-            # Docker archives; skopeo may produce plain tar layers. diff_ids
-            # always bind the uncompressed tar bytes.
+            # Registry layers are gzip (the factory's push) or plain tar;
+            # diff_ids always bind the uncompressed tar bytes.
             decoded = gzip.GzipFile(fileobj=stream) if magic == b'\x1f\x8b' else stream
             layer_hash = hashlib.sha256()
             while block := decoded.read(1024 * 1024):

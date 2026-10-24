@@ -203,7 +203,7 @@ def gen_other_pub(tmp_path: Path, name: str = "other") -> Path:
 
 
 def skopeo_stub(digest_char: str, materialize: bool = False) -> str:
-    """Canned `inspect` digest + optional docker-archive materialization.
+    """Canned `inspect` digest + optional oci-archive materialization.
 
     pack.sh needs the materialize arm (it "pulls" into tar files);
     load.sh only needs inspect + arg logging.
@@ -213,8 +213,8 @@ def skopeo_stub(digest_char: str, materialize: bool = False) -> str:
     if materialize:
         materialize_arm = """for arg in "$@"; do
   case "$arg" in
-    docker-archive:*)
-      dest="${arg#docker-archive:}"
+    oci-archive:*)
+      dest="${arg#oci-archive:}"
       mkdir -p "$(dirname "$dest")"
       printf 'stub-image-tar\\n' > "$dest"
       ;;

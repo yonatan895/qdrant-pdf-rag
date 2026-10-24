@@ -496,18 +496,61 @@ def test_image_layer_tamper_is_detected_even_when_metadata_stays_valid(locked):
 
     from scripts.image_inventory import inventory
 
-    from tests.helpers_image_inventory import image_files, tar_bytes, write_image
+    from tests.helpers_image_inventory import (
+        DOCKER_MANIFEST,
+        image_files,
+        oci_archive,
+        tar_bytes,
+        write_image,
+    )
 
     root, _, _ = locked
     archive = root / 'image.tar'
+    raw = json.loads(write_image(archive, [image_files(root)]))
+    layer = raw['layers'][0]['digest']
+    with tarfile.open(archive) as source:
+        members = {item.name: source.extractfile(item).read() if item.isfile() else None for item in source}
+    # Append a harmless-looking tar padding block; unchanged package names
+    # cannot excuse a blob whose actual bytes no longer match its descriptor.
+    members[f'blobs/sha256/{layer[7:]}'] += b'\0' * 512
+    archive.write_bytes(tar_bytes(members))
+    with pytest.raises(locks.LockError, match='blob does not match its digest'):
+        inventory(root, archive)
+    # A self-consistent OCI archive (blob digests rewritten to match) is still
+    # refused when the layer is not the rootfs its config's diff_id binds.
+    padded = members[f'blobs/sha256/{layer[7:]}']
+    config = json.dumps({'os': 'linux', 'architecture': 'amd64', 'rootfs': {
+        'type': 'layers', 'diff_ids': ['sha256:' + hashlib.sha256(padded[:-512]).hexdigest()]}}).encode()
+    oci_archive(archive, config, [padded], manifest_type=DOCKER_MANIFEST)
+    with pytest.raises(locks.LockError, match='layer digest'):
+        inventory(root, archive)
+
+
+def test_image_inventory_reads_only_single_image_oci_archives(locked):
+    import tarfile
+
+    from scripts.image_inventory import inventory
+
+    from tests.helpers_image_inventory import (
+        image_files,
+        tar_bytes,
+        write_docker_archive,
+        write_image,
+    )
+
+    root, _, _ = locked
+    archive = root / 'image.tar'
+    # Pre-#1066 member format: the SBOM reader no longer accepts docker-archive.
+    write_docker_archive(archive, [image_files(root)])
+    with pytest.raises(locks.LockError, match='exactly one OCI image'):
+        inventory(root, archive)
     write_image(archive, [image_files(root)])
     with tarfile.open(archive) as source:
-        members = {item.name: source.extractfile(item).read() for item in source if item.isfile()}
-    # Append a harmless-looking tar padding block; unchanged package names
-    # cannot excuse a layer whose actual bytes no longer match its diff_id.
-    members['0/layer.tar'] += b'\0' * 512
-    archive.write_bytes(tar_bytes(members))
-    with pytest.raises(locks.LockError, match='layer digest'):
+        members = {item.name: source.extractfile(item).read() if item.isfile() else None for item in source}
+    index = json.loads(members['index.json'])
+    index['manifests'].append(dict(index['manifests'][0]))
+    archive.write_bytes(tar_bytes({**members, 'index.json': json.dumps(index).encode()}))
+    with pytest.raises(locks.LockError, match='exactly one OCI image'):
         inventory(root, archive)
 
 
