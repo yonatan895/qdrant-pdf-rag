@@ -85,8 +85,21 @@ PyMuPDF is the only parser. `parse_pdf` returns a frozen, slots `ParsedDoc`.
   through `run_ingest.parse_walked` (the run's CLI labels, corpus root and walk
   digest) and take the key from `walked_source_rev`, which `_upsert_one`'s
   locks and deletes use too (issue #986). Empty version becomes
-  `None`, empty vendor becomes `"unknown"`; title is sanitized; the TOC comes from `get_toc(simple=True)`;
+  `None`, empty vendor becomes `"unknown"`; the TOC comes from `get_toc(simple=True)`;
   the document is closed in a `finally`.
+- Metadata sanitizing (issue #998): `/Title`, bookmark titles and
+  `/PageLabels` are free-form strings that citations repeat, so none is
+  stored raw. The title (metadata or first-page line) is one line:
+  `sanitize_page_text`, then every whitespace run (newlines, tabs) collapsed
+  to one space, stripped, and cut at a word boundary to `TITLE_MAX_CHARS =
+  200`. A metadata title that sanitizes to nothing falls through to the
+  first-page line. Bookmark titles are sanitized (chunking collapses their
+  whitespace for `heading_path`). A page label is decoded (#863),
+  sanitized and collapsed the same way; one longer than
+  `PAGE_LABEL_MAX_CHARS = 32` is absent rather than truncated, since a cut
+  label would name another page. Printable content is otherwise kept as
+  written: ingest does not judge a `, p.` or doc number inside a title or
+  label; the citation builder owns that refusal ([retrieval](retrieval.md)).
 - `sanitize_page_text` drops CSI sequences, C0 controls, bidi marks, and
   zero-width chars **in that order**, preserving `\t` and `\n`, then spells
   the typographic ligatures U+FB00–FB06 out as letters (`ﬁ` → `fi`, #870) so
@@ -351,7 +364,8 @@ for citations and filters.
   `p. PDF n–m`, see [retrieval §1](retrieval.md)). A `/PageLabels` tree whose
   first rule starts after page 0 makes PyMuPDF's `get_label()` raise
   `IndexError` on the earlier pages; extraction treats those labels as absent
-  (`ibm_pdf._page_label`) instead of failing the document. A rule prefix
+  (`ibm_pdf._page_label`) instead of failing the document; labels are one
+  bounded, sanitized line (§2). A rule prefix
   written as a PDF hex string comes back verbatim (`<FEFF0033002D>1`) and is
   decoded to the printed label (`3-1`, issue #863): UTF-16BE after the `FEFF`
   byte-order mark, or an even-length string that decodes to printable ASCII.
