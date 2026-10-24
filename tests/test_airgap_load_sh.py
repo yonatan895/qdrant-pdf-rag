@@ -98,7 +98,8 @@ def _registry_key(ref: str) -> str:
     return ref.replace("/", "_").replace(":", "_").replace("@", "_")
 
 
-def _stage_stub_images(artdir: Path, sha: str, oauth: bool = False) -> dict[str, str]:
+def _stage_stub_images(artdir: Path, sha: str, oauth: bool = False,
+                       openwebui: bool = False) -> dict[str, str]:
     """Write per-archive stub manifests; return the MANIFEST digest per image.
 
     The archive manifest is what `skopeo inspect docker-archive:` reports.
@@ -118,6 +119,8 @@ def _stage_stub_images(artdir: Path, sha: str, oauth: bool = False) -> dict[str,
     }
     if oauth:
         tars["oauth_proxy"] = "oauth-proxy-image.tar"
+    if openwebui:
+        tars["openwebui"] = "openwebui-image.tar"
     digests = {}
     for image, tar in tars.items():
         archive = _manifest(_config_of(image), _digest(f"layer-{image}".encode()))
@@ -129,9 +132,10 @@ def _stage_stub_images(artdir: Path, sha: str, oauth: bool = False) -> dict[str,
     return digests
 
 
-def _make_artifacts(artdir: Path, sha: str = IMAGE_SHA, corrupt: bool = False, oauth: bool = False):
+def _make_artifacts(artdir: Path, sha: str = IMAGE_SHA, corrupt: bool = False, oauth: bool = False,
+                    openwebui: bool = False):
     artdir.mkdir(parents=True, exist_ok=True)
-    digests = _stage_stub_images(artdir, sha, oauth)
+    digests = _stage_stub_images(artdir, sha, oauth, openwebui)
     files = {
         **task_members(),
         "repo.bundle": b"bundle-content\n",
@@ -157,6 +161,12 @@ def _make_artifacts(artdir: Path, sha: str = IMAGE_SHA, corrupt: bool = False, o
         files["MANIFEST.txt"] += (
             f"oauth_proxy_digest: {digests['oauth_proxy']}\n"
             f"oauth_proxy_config_digest: {_config_of('oauth_proxy')}\n"
+        ).encode()
+    if openwebui:
+        files["openwebui-image.tar"] = b"openwebui-tar\n"
+        files["MANIFEST.txt"] += (
+            f"openwebui_digest: {digests['openwebui']}\n"
+            f"openwebui_config_digest: {_config_of('openwebui')}\n"
         ).encode()
     sums = []
     for name, content in files.items():
@@ -529,6 +539,55 @@ def test_load_verifies_optional_oauth_proxy_image_like_the_others(load_tree):
     second = _run_load(load_tree)
     assert second.returncode == 1
     assert f"registry image {ref} is not the packed image" in second.stderr
+
+
+OPENWEBUI_REF = f"{REGISTRY}/qdrant-pdf-rag-openwebui:v0.12.3-slim"
+
+
+def test_load_verifies_and_pushes_optional_openwebui_image_when_signed(load_tree):
+    """ADR-0007 (#1074): a signed openwebui member is digest-checked, pushed to
+    the tag the chart renders and read back like every other image."""
+    root, log = load_tree
+    artdir = root / "dist"
+    _make_artifacts(artdir, oauth=True, openwebui=True)
+    first = _run_load(load_tree)
+    assert first.returncode == 0, first.stderr
+    assert "Loaded 7 images" in first.stdout
+    assert len(_registry_calls(log)) == 7
+    assert f"copy docker-archive:{artdir}/openwebui-image.tar docker://{OPENWEBUI_REF}" in log.read_text()
+    assert f"verified {OPENWEBUI_REF}@sha256:" in first.stdout
+    (artdir / ".skopeo-stub/pushed/openwebui-image.tar.raw").write_bytes(
+        _manifest(_config_of("swapped"), _digest(b"layer-swapped")))
+    second = _run_load(load_tree)
+    assert second.returncode == 1
+    assert f"registry image {OPENWEBUI_REF} is not the packed image" in second.stderr
+
+
+def test_load_refuses_openwebui_archive_that_is_not_the_manifest_digest(load_tree):
+    root, log = load_tree
+    artdir = root / "dist"
+    _make_artifacts(artdir, openwebui=True)
+    (artdir / ".skopeo-stub/format-digest").mkdir(exist_ok=True)
+    (artdir / ".skopeo-stub/format-digest/openwebui-image.tar").write_text("sha256:" + "f" * 64 + "\n")
+    result = _run_load(load_tree)
+    assert result.returncode != 0
+    assert "openwebui-image.tar digest" in result.stderr and "openwebui_digest" in result.stderr
+    assert "copy" not in log.read_text()
+
+
+def test_load_ignores_unsigned_openwebui_archive_and_dryrun_names_a_present_one(load_tree):
+    root, log = load_tree
+    artdir = root / "dist"
+    _make_artifacts(artdir)
+    (artdir / "openwebui-image.tar").write_bytes(b"retained, not in SHA256SUMS")
+    result = _run_load(load_tree)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Loaded 5 images" in result.stdout and "openwebui" not in log.read_text()
+    (artdir / "SHA256SUMS").unlink()
+    dry = _run_load(load_tree, ("AIRGAP_DRYRUN", "1"))
+    assert dry.returncode == 0, dry.stderr
+    assert f"docker-archive:{artdir}/openwebui-image.tar docker://{OPENWEBUI_REF}" in dry.stdout
+    assert "Loaded 6 images" in dry.stdout
 
 
 def test_load_preserves_layer_count_requirement(load_tree):

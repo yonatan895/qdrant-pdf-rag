@@ -23,3 +23,14 @@ registry.access.redhat.com/ubi9/python-314-minimal:9.8                 sha256:63
 # omits upstream signature attachments (unsupported by docker-archive);
 # source digest pinning and the signed bundle checksum contract remain enforced.
 registry.redhat.io/openshift4/ose-oauth-proxy:v4.14                     sha256:b86cefe58f2f74904a71d0c1a064beb7a2a94caa979f4c472e6b936eec79850d
+# ADR-0007 (#1071, proposed) optional docs front end (#1074, off by default):
+# the hardened Open WebUI image, derived from the upstream slim image in the
+# connected factory (#1073) by an ownership/permission-only layer so it runs as
+# an arbitrary UID under restricted-v2 (ADR-0007 R1). The digest is pending
+# #1073 qualification: while it is sha256:PENDING, pack.sh skips the member and
+# OPENWEBUI_ENABLED=true fails closed. Open WebUI License (BSD-3 plus branding).
+# The upstream slim line is the factory build base of the derived image (#1073
+# records it); like the UBI line it is provenance, never a bundle member. The
+# two needles are disjoint: open-webui:v0.12.3-slim vs qdrant-pdf-rag-openwebui.
+ghcr.io/open-webui/open-webui:v0.12.3-slim                             sha256:PENDING
+ghcr.io/yonatan895/qdrant-pdf-rag-openwebui:v0.12.3-slim               sha256:PENDING
