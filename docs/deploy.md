@@ -393,6 +393,16 @@ Compatibility and lifecycle decisions under #448:
   (`QDRANT_STORAGE_SIZE`, `QDRANT_EXTRA_VALUES`, `QDRANT_TAG`, `INGEST_WORK_SIZE`,
   `INGEST_EXTRA_PATCH`) retain their existing precedence and never change the
   production defaults. The last remains a client-side CI-only Job patch.
+  `QDRANT_EXTRA_VALUES` and `INGEST_EXTRA_PATCH` are CI-rehearsal overrides:
+  the scripts refuse them unless `CI_REHEARSAL=1` is in the caller's process
+  environment (an `airgap.env` assignment never counts; never set it in the
+  air gap). Even then the patched ingest Job may differ from the render only in
+  container `resources` (no image, env/hash mode, security context, volume,
+  sidecar or identity change), and the Qdrant release is rendered with
+  `helm template` and refused unless it is private and hardened (no
+  Ingress/Route, ClusterIP Services only, API-key Secret present, no host
+  namespaces or hostPath, non-privileged read-only-root containers, the verified
+  registry image) before any `helm upgrade` (#1014).
 - Rollout waits remain Qdrant 600s, agent 300s and, with the bundled backend, OpenObserve and otelcol 120s each, with bounded
   diagnostics on failure. Explicit ingest keeps its existing wait/diagnostics.
 

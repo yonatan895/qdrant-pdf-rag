@@ -764,6 +764,7 @@ jobs:
             limits: {cpu: "2", memory: 2Gi}
           EOF
           echo "QDRANT_EXTRA_VALUES=$RUNNER_TEMP/qdrant-kind-scale.yaml" >> "$GITHUB_ENV"
+          echo "CI_REHEARSAL=1" >> "$GITHUB_ENV"
           # Kind has no SCC to assign a UID and the OpenObserve image runs as root.
           echo "OPENOBSERVE_RUN_AS_ID=10001" >> "$GITHUB_ENV"
 
@@ -1282,6 +1283,7 @@ jobs:
           export PATH="/usr/local/bin:$PATH"
           printf 'resources:\n  requests: {cpu: "100m", memory: 256Mi}\n' > "$RUNNER_TEMP/vals.yaml"
           export QDRANT_EXTRA_VALUES="$RUNNER_TEMP/vals.yaml"
+          export CI_REHEARSAL=1
           out="$(sh scripts/tools/run-task.sh airgap:deploy)"
           echo "$out" | grep -q "persistence.size=1Gi"
           echo "$out" | grep -q "imagePullSecrets\[0\].name=ci-pull"
@@ -1299,6 +1301,7 @@ jobs:
           EMBED_MODEL_REVISION: dryrun-rev-1
           EMBED_BASE_URL: http://vllm:8000/v1
           QDRANT_EXTRA_VALUES: /nonexistent/vals.yaml
+          CI_REHEARSAL: "1"
         run: |
           export PATH="/usr/local/bin:$PATH"
           if sh scripts/tools/run-task.sh airgap:deploy 2>err.log; then
@@ -1379,6 +1382,7 @@ jobs:
           {"spec":{"template":{"spec":{"containers":[{"name":"ingest","resources":{"requests":{"cpu":"250m","memory":"512Mi"},"limits":{"cpu":"1","memory":"1Gi"}}}]}}}}
           EOF
           export INGEST_EXTRA_PATCH="$RUNNER_TEMP/ingest-patch.json"
+          export CI_REHEARSAL=1
           sh scripts/tools/run-task.sh airgap:ingest
           test -f dist/ingest-rendered.yaml
           grep -q "ghcr.io/dryrun-standin/qdrant-pdf-rag-ingest:${SHA}" dist/ingest-rendered.yaml
@@ -1588,6 +1592,7 @@ jobs:
             limits: {cpu: "1", memory: 1Gi}
           EOF
           echo "QDRANT_EXTRA_VALUES=$RUNNER_TEMP/qdrant-ci-scale.yaml" >> "$GITHUB_ENV"
+          echo "CI_REHEARSAL=1" >> "$GITHUB_ENV"
 
       - name: Write CI-scale ingest patch (same quota; prod Job asks 4cpu/8Gi)
         run: |

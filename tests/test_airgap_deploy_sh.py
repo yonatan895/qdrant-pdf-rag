@@ -427,7 +427,7 @@ def test_missing_production_values_fails_before_mutation(tree):
 
 
 @pytest.mark.parametrize("extra_env,exit_code,messages", [
-    pytest.param({'QDRANT_EXTRA_VALUES': '/nonexistent/vals.yaml'}, 1, ('QDRANT_EXTRA_VALUES file not found',),
+    pytest.param({'QDRANT_EXTRA_VALUES': '/nonexistent/vals.yaml', 'CI_REHEARSAL': '1'}, 1, ('QDRANT_EXTRA_VALUES file not found',),
                  id='missing_extra_values_file_fails_closed'),
     pytest.param({'EMBED_MODEL_REVISION': '  '}, None, ('EMBED_MODEL_REVISION must be a non-blank',),
                  id='whitespace_embed_revision_fails_before_render'),
@@ -486,9 +486,9 @@ def test_ci_rehearsal_cannot_come_from_the_operator_file(tree):
     "apiKey: false\nreadOnlyApiKey: false\n",
     "containerSecurityContext:\n  readOnlyRootFilesystem: false\n",
     "containerSecurityContext:\n  privileged: true\n",
-    "image:\n  repository: evil.example/qdrant\n",
-    "hostNetwork: true\n",
-], ids=["loadbalancer", "nodeport", "ingress", "no-api-key", "writable-root", "privileged", "foreign-image", "hostnetwork"])
+    "sidecarContainers:\n  - name: x\n    image: evil.example/x:1\n    securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true}\n",
+    "additionalVolumes:\n  - name: h\n    hostPath: {path: /}\n",
+], ids=["loadbalancer", "nodeport", "ingress", "no-api-key", "writable-root", "privileged", "foreign-sidecar-image", "hostpath"])
 def test_hostile_extra_values_are_refused_by_the_qdrant_render(tree, text):
     r = _run(tree, ("QDRANT_EXTRA_VALUES", _values(tree, text)), ("CI_REHEARSAL", "1"))
     assert r.returncode != 0, r.stdout

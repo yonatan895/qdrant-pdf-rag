@@ -238,8 +238,9 @@ fi
 # the lab run WITHOUT touching the prod values in git. Empty = git values.
 QDRANT_STORAGE_SIZE=${QDRANT_STORAGE_SIZE:-}
 QDRANT_EXTRA_VALUES=${QDRANT_EXTRA_VALUES:-}
-if [ -n "$QDRANT_EXTRA_VALUES" ] && [ ! -f "$QDRANT_EXTRA_VALUES" ]; then
-    die "QDRANT_EXTRA_VALUES file not found: $QDRANT_EXTRA_VALUES"
+if [ -n "$QDRANT_EXTRA_VALUES" ]; then
+    require_ci_rehearsal QDRANT_EXTRA_VALUES
+    [ -f "$QDRANT_EXTRA_VALUES" ] || die "QDRANT_EXTRA_VALUES file not found: $QDRANT_EXTRA_VALUES"
 fi
 
 echo "==> Namespace: $NAMESPACE"
@@ -263,8 +264,7 @@ if [ "${OWNED_ROUTE_PRESENT:-0}" = "1" ] && { [ "$AGENT_ROUTE" != "true" ] || [ 
 fi
 
 echo "==> Helm: Qdrant from the vendored chart with PROD values"
-set -- helm upgrade -i "$QDRANT_RELEASE" "$CHART" \
-    -n "$NAMESPACE" \
+set -- -n "$NAMESPACE" \
     -f charts/qdrant-openshift.values.yaml \
     --set "image.repository=$INTERNAL_REGISTRY/qdrant/qdrant" \
     --set "image.tag=$QDRANT_TAG" \
@@ -284,7 +284,14 @@ else
     # that placeholder must never reach the cluster (fail closed, not open).
     set -- "$@" --set "imagePullSecrets=null"
 fi
-run "$@"
+# Issue #1014: whatever the values files and flags produced, the Qdrant render
+# must be private and hardened (no Ingress/Route, ClusterIP, API keys, non-
+# privileged, read-only root, the verified registry image) before any apply.
+helm template "$QDRANT_RELEASE" "$CHART" -n "$NAMESPACE" "$@" > dist/qdrant-rendered.yaml ||
+    die "cannot render the Qdrant release for validation"
+python3 scripts/airgap/check_qdrant_render.py "$INTERNAL_REGISTRY/qdrant/qdrant:" < dist/qdrant-rendered.yaml ||
+    die "rendered Qdrant release refused (see above)"
+run helm upgrade -i "$QDRANT_RELEASE" "$CHART" "$@"
 
 echo "==> Helm: mainframe-rag application release"
 run helm upgrade --install mainframe-rag charts/mainframe-rag \
