@@ -193,7 +193,7 @@ def test_route_oauth_contract():
             "--cookie-secret-file=/etc/oauth/cookie-secret",
             "--email-domain=*",
             "--openshift-service-account=rag-agent",
-            "--skip-auth-regex=^/healthz.*$",
+            "--skip-auth-regex=^/livez$",
         ]
         assert oauth["ports"] == [{"name": "oauth", "containerPort": 8443}]
         assert oauth["resources"] == {
@@ -1324,3 +1324,56 @@ def test_agent_ingress_policy_admits_the_collector_scrape():
     first = docs[POLICY_KEY]["spec"]["ingress"][0]
     assert first["from"] == [{"podSelector": {}}]
     assert {"protocol": "TCP", "port": 8080} in first["ports"]
+
+
+def test_oauth_skip_regex_exempts_only_the_work_free_liveness_path():
+    """#1018: the unauthenticated OAuth bypass must never reach /healthz, which
+    performs Qdrant, embedding and serving-gate work per request. Kubelet probes
+    hit the pod port directly, so they never needed the bypass."""
+    import re
+
+    docs = run_new_template({"route": {"enabled": True, "destinationCA": FAKE_CA}})
+    oauth = container_map(docs["Deployment", "rag-agent"])["oauth-proxy"]
+    patterns = [a.split("=", 1)[1] for a in oauth["args"] if a.startswith("--skip-auth-regex=")]
+    assert patterns, "livez bypass pinned"
+    for path in ("/healthz", "/healthz/", "/healthzx", "/ui", "/v1/search", "/metrics"):
+        assert not any(re.search(p, path) for p in patterns), path
+    assert any(re.search(p, "/livez") for p in patterns)
+    # The kubelet probes target the container port, not the oauth sidecar.
+    agent = container_map(docs["Deployment", "rag-agent"])["agent"]
+    assert agent["readinessProbe"]["httpGet"] == {"path": "/healthz", "port": "http"}
+
+
+@pytest.mark.parametrize("route", [False, True])
+def test_no_workload_automounts_a_service_account_token(route):
+    """#1029: pods with no Kubernetes API use mount no token; with the Route on,
+    only the oauth-proxy container gets a projected token."""
+    extra = {
+        "ingest": {"enabled": True, "corpusPVC": "corpus-pvc"},
+        "metrics": {"enabled": True},
+        **FEEDBACK_ON,
+    }
+    if route:
+        extra["route"] = {"enabled": True, "destinationCA": FAKE_CA}
+    docs = run_new_template(extra)
+    pods = {
+        key: doc["spec"]["template"]["spec"]
+        for key, doc in docs.items()
+        if key[0] in ("Deployment", "StatefulSet", "Job", "DaemonSet", "CronJob")
+    }
+    assert {k[1] for k in pods} >= {"rag-agent", "openobserve", "otelcol", "ingest", "rag-feedback"}
+    for key, pod in pods.items():
+        assert pod.get("automountServiceAccountToken") is False, key
+    agent = pods["Deployment", "rag-agent"]
+    sa_path = "/var/run/secrets/kubernetes.io/serviceaccount"
+    mounting = {
+        c["name"]
+        for pod in pods.values()
+        for c in pod["containers"] + pod.get("initContainers", [])
+        for m in c.get("volumeMounts", [])
+        if m["mountPath"] == sa_path
+    }
+    assert mounting == ({"oauth-proxy"} if route else set())
+    if route:
+        vol = next(v for v in agent["volumes"] if v["name"] == "oauth-sa-token")
+        assert any("serviceAccountToken" in s for s in vol["projected"]["sources"])
