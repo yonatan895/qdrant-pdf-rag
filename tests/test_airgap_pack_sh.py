@@ -185,7 +185,7 @@ def test_pack_refuses_a_containerfile_base_digest_off_the_pin(pack_tree, role):
 @pytest.mark.parametrize("dirt", ["modified", "assume-unchanged", "skip-worktree", "staged"])
 def test_pack_refuses_a_dirty_tree_before_signing(pack_tree, dirt):
     """#1030: `git bundle` records clean HEAD, so a dirty tree must not be signed."""
-    root, skopeo_log, _head, _key = pack_tree
+    root, _skopeo_log, _head, _key = pack_tree
     readme = root / "README.md"
 
     def git(*args):
