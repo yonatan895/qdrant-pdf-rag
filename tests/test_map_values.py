@@ -28,7 +28,15 @@ CHART = REPO / "charts" / "mainframe-rag"
 
 IMAGE_SHA = "a" * 40
 
+OPENWEBUI_KEYS = [
+    "OPENWEBUI_ENABLED", "OPENWEBUI_SECRET", "OPENWEBUI_HOST", "OPENWEBUI_RETENTION_DAYS",
+    "OPENWEBUI_STORAGE_SIZE", "OPENWEBUI_OIDC_PROVIDER_URL", "OPENWEBUI_OIDC_CLIENT_ID",
+    "OPENWEBUI_OIDC_GROUP_CLAIM", "OPENWEBUI_OIDC_ROLES_CLAIM", "OPENWEBUI_OIDC_ALLOWED_ROLES",
+    "OPENWEBUI_OIDC_ADMIN_ROLES", "OPENWEBUI_IDP_EGRESS_CIDRS", "OPENWEBUI_IDP_EGRESS_PORT",
+    "ROUTE_DESTINATION_CA_FILE", "IMAGE_DIGEST_OPENWEBUI",
+]
 MAPPER_KEYS = [
+    *OPENWEBUI_KEYS,
     "INTERNAL_REGISTRY", "REGISTRY_INTERNAL", "NAMESPACE", "OPENSHIFT_NAMESPACE",
     "QDRANT_RELEASE", "IMAGE_SHA", "EMBED_BASE_URL", "VLLM_BASE_URL",
     "EMBED_MODEL", "DENSE_DIM", "EMBED_MODEL_REVISION",
@@ -922,6 +930,124 @@ def test_feedback_mapper_to_helm_round_trip(monkeypatch, mapper_env, tmp_path):
     assert env["FEEDBACK_SERVICE_TOKEN"]["valueFrom"]["secretKeyRef"] == {
         "key": "service-token", "name": "fb-secret"}
     assert ("ServiceMonitor", "rag-feedback") in docs and ("NetworkPolicy", "rag-feedback-ingress") in docs
+
+
+# ------------------------------------------- Open WebUI front end (#1074)
+
+OWUI_ON = {
+    "OPENWEBUI_ENABLED": "true", "OPENWEBUI_SECRET": "owui-secrets",
+    "OPENWEBUI_HOST": "docs.apps.example.internal",
+    "OPENWEBUI_OIDC_PROVIDER_URL": "https://idp.example.internal/realms/x/.well-known/openid-configuration",
+    "OPENWEBUI_OIDC_CLIENT_ID": "docs-frontend", "OPENWEBUI_OIDC_ALLOWED_ROLES": "staff",
+    "OPENWEBUI_OIDC_ADMIN_ROLES": "docs-admins", "OPENWEBUI_IDP_EGRESS_CIDRS": "10.20.0.0/24, 10.21.0.8/32",
+}
+OWUI_CA = "-----BEGIN CERTIFICATE-----\nT1dVSS1DQQ==\n-----END CERTIFICATE-----\n"
+
+
+def _owui_env(monkeypatch, tmp_path, **extra):
+    ca = tmp_path / "service-ca.crt"
+    ca.write_text(OWUI_CA)
+    for key, value in {**OWUI_ON, "ROUTE_DESTINATION_CA_FILE": str(ca), **extra}.items():
+        monkeypatch.setenv(key, value)
+
+
+def test_openwebui_is_absent_from_the_release_values_by_default(mapper_env):
+    r, out = mapper_env()
+    assert r.returncode == 0, r.stderr
+    values = load_values(out)
+    assert "openwebui" not in values and "openwebui" not in values["images"]
+    assert "openwebui" not in out.read_text().lower()
+
+
+def test_openwebui_selection_round_trips_with_the_decided_defaults(monkeypatch, mapper_env, tmp_path):
+    _owui_env(monkeypatch, tmp_path)
+    r, out = mapper_env()
+    assert r.returncode == 0, r.stderr
+    values = load_values(out)
+    # 30 days is the maintainer's 2026-10-24 decision; groups/roles are the
+    # Open WebUI claim names; 443 the IdP port.
+    assert values["openwebui"] == {
+        "enabled": True, "secretName": "owui-secrets", "host": "docs.apps.example.internal",
+        "retentionDays": 30, "storageSize": "10Gi",
+        "oidc": {"providerUrl": OWUI_ON["OPENWEBUI_OIDC_PROVIDER_URL"], "clientId": "docs-frontend",
+                 "groupClaim": "groups", "rolesClaim": "roles", "allowedRoles": "staff",
+                 "adminRoles": "docs-admins"},
+        "idpEgress": {"cidrs": ["10.20.0.0/24", "10.21.0.8/32"], "port": 443},
+    }
+    assert values["images"]["openwebui"] == {
+        "repository": "reg.internal/qdrant-pdf-rag-openwebui", "tag": "v0.12.3-slim",
+        "pullPolicy": "IfNotPresent"}
+    # The namespace service CA is the destination CA while the console Route is off.
+    assert values["route"] == {"enabled": False, "timeoutSeconds": 300, "destinationCA": OWUI_CA}
+    digest = "sha256:" + "d" * 64
+    monkeypatch.setenv("IMAGE_DIGEST_OPENWEBUI", digest)
+    monkeypatch.setenv("OPENWEBUI_RETENTION_DAYS", "7")
+    r, out = mapper_env()
+    values = load_values(out)
+    assert values["images"]["openwebui"]["digest"] == digest
+    assert values["openwebui"]["retentionDays"] == 7
+
+
+@pytest.mark.parametrize("env,message", [
+    ({"OPENWEBUI_ENABLED": "maybe"}, "OPENWEBUI_ENABLED must be true/false"),
+    ({"OPENWEBUI_SECRET": ""}, "OPENWEBUI_SECRET is required"),
+    ({"OPENWEBUI_SECRET": "Bad_Name"}, "OPENWEBUI_SECRET must be"),
+    ({"OPENWEBUI_HOST": ""}, "OPENWEBUI_HOST is required"),
+    ({"OPENWEBUI_HOST": "https://docs.example.internal"}, "OPENWEBUI_HOST must be"),
+    ({"OPENWEBUI_OIDC_PROVIDER_URL": "http://idp.example/.well-known/openid-configuration"},
+     "OPENWEBUI_OIDC_PROVIDER_URL must be"),
+    ({"OPENWEBUI_OIDC_PROVIDER_URL": ""}, "OPENWEBUI_OIDC_PROVIDER_URL is required"),
+    ({"OPENWEBUI_OIDC_CLIENT_ID": ""}, "OPENWEBUI_OIDC_CLIENT_ID is required"),
+    ({"OPENWEBUI_OIDC_ADMIN_ROLES": ""}, "OPENWEBUI_OIDC_ADMIN_ROLES is required"),
+    ({"OPENWEBUI_OIDC_ALLOWED_ROLES": "a,,b"}, "OPENWEBUI_OIDC_ALLOWED_ROLES must be"),
+    ({"OPENWEBUI_OIDC_GROUP_CLAIM": "group claim"}, "OPENWEBUI_OIDC_GROUP_CLAIM must be"),
+    ({"OPENWEBUI_IDP_EGRESS_CIDRS": ""}, "OPENWEBUI_IDP_EGRESS_CIDRS is required"),
+    ({"OPENWEBUI_IDP_EGRESS_CIDRS": "idp.example.internal"}, "OPENWEBUI_IDP_EGRESS_CIDRS must be"),
+    ({"OPENWEBUI_IDP_EGRESS_CIDRS": "10.0.0.300/32"}, "OPENWEBUI_IDP_EGRESS_CIDRS must be"),
+    ({"OPENWEBUI_IDP_EGRESS_PORT": "0"}, "OPENWEBUI_IDP_EGRESS_PORT must be"),
+    ({"OPENWEBUI_RETENTION_DAYS": "0"}, "OPENWEBUI_RETENTION_DAYS must be"),
+    ({"OPENWEBUI_RETENTION_DAYS": "3651"}, "OPENWEBUI_RETENTION_DAYS must be"),
+    ({"OPENWEBUI_STORAGE_SIZE": "10"}, "OPENWEBUI_STORAGE_SIZE must be"),
+    ({"ROUTE_DESTINATION_CA_FILE": ""}, "needs ROUTE_DESTINATION_CA_FILE"),
+    # Shapes are checked even while the feature is off: a typo fails today.
+    ({"OPENWEBUI_ENABLED": "false", "OPENWEBUI_RETENTION_DAYS": "forever"}, "OPENWEBUI_RETENTION_DAYS must be"),
+])
+def test_openwebui_selection_is_strict_and_writes_nothing(monkeypatch, mapper_env, tmp_path, env, message):
+    _owui_env(monkeypatch, tmp_path, **env)
+    r, out = mapper_env()
+    assert r.returncode != 0
+    assert message in r.stderr
+    assert not out.exists()
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is required for the round-trip")
+def test_openwebui_mapper_to_helm_round_trip(monkeypatch, mapper_env, tmp_path):
+    """Producer-to-consumer: operator env -> values -> helm template (a chart
+    copy holding a stand-in Pipe) -> the pod, Route and policy asked for."""
+    _owui_env(monkeypatch, tmp_path, OPENWEBUI_RETENTION_DAYS="14", OPENWEBUI_IDP_EGRESS_PORT="8443")
+    r, out = mapper_env()
+    assert r.returncode == 0, r.stderr
+    chart = tmp_path / "mainframe-rag"
+    shutil.copytree(CHART, chart)
+    (chart / "files" / "openwebui" / "docs_pipe.py").write_text("class Pipe:\n    pass\n")
+    rendered = subprocess.run(["helm", "template", "app", str(chart), "-f", str(out), "--namespace", "ns"],
+                              capture_output=True, text=True, cwd=REPO, check=False)
+    assert rendered.returncode == 0, rendered.stderr
+    docs = {(d["kind"], d["metadata"]["name"]): d for d in yaml.safe_load_all(rendered.stdout) if d}
+    dep = docs["Deployment", "rag-openwebui"]
+    containers = {c["name"]: c for c in dep["spec"]["template"]["spec"]["containers"]}
+    assert containers["openwebui"]["image"] == "reg.internal/qdrant-pdf-rag-openwebui:v0.12.3-slim"
+    assert containers["chat-purge"]["args"][:2] == ["--days", "14"]
+    env = {e["name"]: e for e in containers["openwebui"]["env"]}
+    assert env["OAUTH_CLIENT_ID"]["value"] == "docs-frontend"
+    assert env["OPENID_REDIRECT_URI"]["value"] == "https://docs.apps.example.internal/oauth/oidc/callback"
+    route = docs["Route", "rag-openwebui"]["spec"]
+    assert route["host"] == "docs.apps.example.internal"
+    assert route["tls"]["destinationCACertificate"].strip() == OWUI_CA.strip()
+    egress = docs["NetworkPolicy", "rag-openwebui"]["spec"]["egress"][2]
+    assert egress == {"to": [{"ipBlock": {"cidr": "10.20.0.0/24"}}, {"ipBlock": {"cidr": "10.21.0.8/32"}}],
+                      "ports": [{"protocol": "TCP", "port": 8443}]}
+    assert ("Route", "rag-agent") not in docs
 
 
 def test_unset_efforts_render_medium_on_the_agent_pod(monkeypatch, mapper_env):

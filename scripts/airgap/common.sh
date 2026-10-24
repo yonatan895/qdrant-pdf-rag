@@ -320,7 +320,7 @@ resolve_aliases() {
 
 validate_model_config() {
     command -v python3 >/dev/null 2>&1 || die "python3 is required for model configuration validation"
-    export GATEWAY_BASE_URL EMBED_BASE_URL EMBED_MODEL LLM_BASE_URL LLM_MODEL_REASONING LLM_MAX_MODEL_LEN LLM_RESERVED_OUTPUT_TOKENS LLM_THINKING_RESERVE_TOKENS_SIMPLE LLM_THINKING_RESERVE_TOKENS_COMPLEX LLM_REASONING_EFFORT_SIMPLE LLM_REASONING_EFFORT_COMPLEX LLM_REASONING_EFFORTS LLM_STREAM REQUEST_DEADLINE_S REQUEST_MAX_CONCURRENT REQUEST_QUEUE_MAX REQUEST_QUEUE_WAIT_S RERANK_BASE_URL CONTEXT_LLM_BASE_URL CONTEXT_LLM_MODEL CONTEXTUAL_EMBED_ENABLED UI_ENABLED INGEST_ALIAS_PUBLISH INGEST_REINGEST CHAT_CONDENSE_ENABLED AGENT_NETWORK_POLICY AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES FEEDBACK_ENABLED FEEDBACK_SECRET FEEDBACK_STORAGE_SIZE FEEDBACK_RETENTION_DAYS
+    export GATEWAY_BASE_URL EMBED_BASE_URL EMBED_MODEL LLM_BASE_URL LLM_MODEL_REASONING LLM_MAX_MODEL_LEN LLM_RESERVED_OUTPUT_TOKENS LLM_THINKING_RESERVE_TOKENS_SIMPLE LLM_THINKING_RESERVE_TOKENS_COMPLEX LLM_REASONING_EFFORT_SIMPLE LLM_REASONING_EFFORT_COMPLEX LLM_REASONING_EFFORTS LLM_STREAM REQUEST_DEADLINE_S REQUEST_MAX_CONCURRENT REQUEST_QUEUE_MAX REQUEST_QUEUE_WAIT_S RERANK_BASE_URL CONTEXT_LLM_BASE_URL CONTEXT_LLM_MODEL CONTEXTUAL_EMBED_ENABLED UI_ENABLED INGEST_ALIAS_PUBLISH INGEST_REINGEST CHAT_CONDENSE_ENABLED AGENT_NETWORK_POLICY AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES FEEDBACK_ENABLED FEEDBACK_SECRET FEEDBACK_STORAGE_SIZE FEEDBACK_RETENTION_DAYS OPENWEBUI_ENABLED OPENWEBUI_SECRET OPENWEBUI_HOST OPENWEBUI_RETENTION_DAYS OPENWEBUI_STORAGE_SIZE OPENWEBUI_OIDC_PROVIDER_URL OPENWEBUI_OIDC_CLIENT_ID OPENWEBUI_OIDC_GROUP_CLAIM OPENWEBUI_OIDC_ROLES_CLAIM OPENWEBUI_OIDC_ALLOWED_ROLES OPENWEBUI_OIDC_ADMIN_ROLES OPENWEBUI_IDP_EGRESS_CIDRS OPENWEBUI_IDP_EGRESS_PORT
     python3 scripts/airgap/model_config.py
 }
 
@@ -635,7 +635,7 @@ map_app_values() {
         v4.*) ;;
         *) die "Helm 4 is required; use the checksum-pinned 4.3.0 client" ;;
     esac
-    export INTERNAL_REGISTRY NAMESPACE QDRANT_RELEASE IMAGE_SHA EMBED_BASE_URL EMBED_MODEL DENSE_DIM EMBED_MODEL_REVISION LLM_BASE_URL LLM_MODEL_REASONING LLM_MAX_MODEL_LEN LLM_RESERVED_OUTPUT_TOKENS LLM_THINKING_RESERVE_TOKENS_SIMPLE LLM_THINKING_RESERVE_TOKENS_COMPLEX LLM_REASONING_EFFORT_SIMPLE LLM_REASONING_EFFORT_COMPLEX LLM_REASONING_EFFORTS LLM_STREAM REQUEST_DEADLINE_S REQUEST_MAX_CONCURRENT REQUEST_QUEUE_MAX REQUEST_QUEUE_WAIT_S RERANK_ENABLED RERANK_BASE_URL RERANK_MODEL RERANK_ENDPOINT_ORDER GATEWAY_API_KEY_SECRET GATEWAY_API_KEY_SECRET_KEY GATEWAY_BASE_URL GATEWAY_CA_CONFIGMAP PULL_SECRET OTEL_EXPORTER_OTLP_ENDPOINT OTEL_ENDPOINT_RESOLVED OTEL_TRACING_ENABLED OTEL_DEPLOYMENT_ENVIRONMENT OTEL_SERVICE_NAME OPENOBSERVE_RUN_AS_ID METRICS_ENABLED SERVICEMONITOR_ENABLED UI_ENABLED CHAT_CONDENSE_ENABLED AGENT_NETWORK_POLICY AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES FEEDBACK_ENABLED FEEDBACK_SECRET FEEDBACK_STORAGE_SIZE FEEDBACK_RETENTION_DAYS AGENT_ROUTE ROUTE_DESTINATION_CA_FILE STORAGE_CLASS CORPUS_PVC INGEST_WORKERS INGEST_ALIAS_PUBLISH INGEST_REINGEST INGEST_RETIRE_DOCS CONTEXTUAL_EMBED_ENABLED CONTEXT_LLM_BASE_URL CONTEXT_LLM_MODEL QDRANT_PEER_URLS QDRANT_SHARD_NUMBER QDRANT_REPLICATION_FACTOR QDRANT_WRITE_CONSISTENCY_FACTOR INGEST_WORK_SIZE
+    export INTERNAL_REGISTRY NAMESPACE QDRANT_RELEASE IMAGE_SHA EMBED_BASE_URL EMBED_MODEL DENSE_DIM EMBED_MODEL_REVISION LLM_BASE_URL LLM_MODEL_REASONING LLM_MAX_MODEL_LEN LLM_RESERVED_OUTPUT_TOKENS LLM_THINKING_RESERVE_TOKENS_SIMPLE LLM_THINKING_RESERVE_TOKENS_COMPLEX LLM_REASONING_EFFORT_SIMPLE LLM_REASONING_EFFORT_COMPLEX LLM_REASONING_EFFORTS LLM_STREAM REQUEST_DEADLINE_S REQUEST_MAX_CONCURRENT REQUEST_QUEUE_MAX REQUEST_QUEUE_WAIT_S RERANK_ENABLED RERANK_BASE_URL RERANK_MODEL RERANK_ENDPOINT_ORDER GATEWAY_API_KEY_SECRET GATEWAY_API_KEY_SECRET_KEY GATEWAY_BASE_URL GATEWAY_CA_CONFIGMAP PULL_SECRET OTEL_EXPORTER_OTLP_ENDPOINT OTEL_ENDPOINT_RESOLVED OTEL_TRACING_ENABLED OTEL_DEPLOYMENT_ENVIRONMENT OTEL_SERVICE_NAME OPENOBSERVE_RUN_AS_ID METRICS_ENABLED SERVICEMONITOR_ENABLED UI_ENABLED CHAT_CONDENSE_ENABLED AGENT_NETWORK_POLICY AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES FEEDBACK_ENABLED FEEDBACK_SECRET FEEDBACK_STORAGE_SIZE FEEDBACK_RETENTION_DAYS OPENWEBUI_ENABLED OPENWEBUI_SECRET OPENWEBUI_HOST OPENWEBUI_RETENTION_DAYS OPENWEBUI_STORAGE_SIZE OPENWEBUI_OIDC_PROVIDER_URL OPENWEBUI_OIDC_CLIENT_ID OPENWEBUI_OIDC_GROUP_CLAIM OPENWEBUI_OIDC_ROLES_CLAIM OPENWEBUI_OIDC_ALLOWED_ROLES OPENWEBUI_OIDC_ADMIN_ROLES OPENWEBUI_IDP_EGRESS_CIDRS OPENWEBUI_IDP_EGRESS_PORT AGENT_ROUTE ROUTE_DESTINATION_CA_FILE STORAGE_CLASS CORPUS_PVC INGEST_WORKERS INGEST_ALIAS_PUBLISH INGEST_REINGEST INGEST_RETIRE_DOCS CONTEXTUAL_EMBED_ENABLED CONTEXT_LLM_BASE_URL CONTEXT_LLM_MODEL QDRANT_PEER_URLS QDRANT_SHARD_NUMBER QDRANT_REPLICATION_FACTOR QDRANT_WRITE_CONSISTENCY_FACTOR INGEST_WORK_SIZE
     if [ -n "${GATEWAY_API_KEY_SECRET:-}" ]; then
         echo "==> Gateway keys wired via Secret references"
     else
@@ -716,6 +716,23 @@ describe_feedback() {
     fi
 }
 
+# Issue #1074 (ADR-0007): the optional Open WebUI docs front end, default off.
+# Shapes and required keys are validated by map_values.py (openwebui_config)
+# before any mutation; this only selects the stages and the Secret name.
+resolve_openwebui() {
+    OPENWEBUI_ENABLED=$(bool_flag OPENWEBUI_ENABLED false)
+    export OPENWEBUI_ENABLED
+    [ "$OPENWEBUI_ENABLED" != "true" ] || check_secret_name "${OPENWEBUI_SECRET:-}" OPENWEBUI_SECRET
+}
+
+describe_openwebui() {
+    if [ "$OPENWEBUI_ENABLED" = "true" ]; then
+        printf '%s' "on: Deployment rag-openwebui (1 replica), Route rag-openwebui on ${OPENWEBUI_HOST:-?} (OIDC sign-in, reencrypt), kept RWO claim rag-openwebui-data, chat retention ${OPENWEBUI_RETENTION_DAYS:-30} days (chat-purge sidecar), Secret ${OPENWEBUI_SECRET}; egress only to the agent, DNS and OPENWEBUI_IDP_EGRESS_CIDRS"
+    else
+        printf '%s' "off (OPENWEBUI_ENABLED=false); a retained rag-openwebui-data claim keeps its chats and is not purged while off"
+    fi
+}
+
 # oauth-proxy supply-chain pin: a recorded digest, the same ref/tag the chart
 # renders, and (when a packed MANIFEST is reachable) a bundle that carries
 # exactly that pin. Static: needs no cluster. $MANIFEST is set by the caller.
@@ -780,26 +797,42 @@ fetch_route_destination_ca() {
 # OWNED_ROUTE_PRESENT=1 when the owned Route already exists; when $2 supplies
 # the service CA, also sets OWNED_ROUTE_INCOMPATIBLE for retirement. A deployer that
 # cannot list Routes cannot prove the absence of a public path: fail closed.
+# Issue #1074: rag-openwebui is always protected (only its own owned Route may
+# back it). With OPENWEBUI_ENABLED=true and $3 = the service CA file, an owned
+# rag-openwebui Route that differs from its contract sets
+# OPENWEBUI_ROUTE_INCOMPATIBLE=1 for retirement before the release.
 check_route_exposure() {
     OWNED_ROUTE_PRESENT=0
     OWNED_ROUTE_INCOMPATIBLE=0
+    OPENWEBUI_ROUTE_INCOMPATIBLE=0
     [ "${AIRGAP_DRYRUN:-0}" != "1" ] || return 0
     _route_apis=$($KC api-resources -o name) || die "cannot discover the Route API"
     if ! printf '%s\n' "$_route_apis" | grep -qx 'routes.route.openshift.io'; then
         [ "$1" != enabled ] || die "AGENT_ROUTE=true but this cluster does not serve routes.route.openshift.io (OpenShift required)"
+        [ "${OPENWEBUI_ENABLED:-false}" != "true" ] || die "OPENWEBUI_ENABLED=true but this cluster does not serve routes.route.openshift.io (OpenShift required)"
         return 0
     fi
     _route_json=$($KC -n "$NAMESPACE" get routes.route.openshift.io -o json) || die "cannot list Routes in namespace '$NAMESPACE'; without it the absence of an unauthenticated public path cannot be proven (grant namespace-scoped list on routes, not cluster-admin)"
-    if [ "$1" = enabled ] && [ -n "${2:-}" ]; then
-        _route_out=$(printf '%s' "$_route_json" | python3 scripts/airgap/check_route_exposure.py classify "$NAMESPACE" "$2" "$QDRANT_RELEASE" "${QDRANT_RELEASE}-headless" rag-feedback) || exit 1
+    if [ "${OPENWEBUI_ENABLED:-false}" = "true" ] && [ -n "${3:-}" ]; then
+        _route_owui="--openwebui=enabled:$3:${OPENWEBUI_HOST:-}"
+    elif [ "${OPENWEBUI_ENABLED:-false}" = "true" ]; then
+        _route_owui="--openwebui=enabled"
     else
-        _route_out=$(printf '%s' "$_route_json" | python3 scripts/airgap/check_route_exposure.py inventory "$NAMESPACE" "$1" "$QDRANT_RELEASE" "${QDRANT_RELEASE}-headless" rag-feedback) || exit 1
+        _route_owui="--openwebui=disabled"
+    fi
+    if [ "$1" = enabled ] && [ -n "${2:-}" ]; then
+        _route_out=$(printf '%s' "$_route_json" | python3 scripts/airgap/check_route_exposure.py "$_route_owui" classify "$NAMESPACE" "$2" "$QDRANT_RELEASE" "${QDRANT_RELEASE}-headless" rag-feedback) || exit 1
+    else
+        _route_out=$(printf '%s' "$_route_json" | python3 scripts/airgap/check_route_exposure.py "$_route_owui" inventory "$NAMESPACE" "$1" "$QDRANT_RELEASE" "${QDRANT_RELEASE}-headless" rag-feedback) || exit 1
     fi
     case "$_route_out" in
-        owned-route-present) OWNED_ROUTE_PRESENT=1 ;;
-        owned-route-incompatible) OWNED_ROUTE_PRESENT=1; OWNED_ROUTE_INCOMPATIBLE=1 ;;
+        *owned-route-incompatible*) OWNED_ROUTE_PRESENT=1; OWNED_ROUTE_INCOMPATIBLE=1 ;;
+        *owned-route-present*) OWNED_ROUTE_PRESENT=1 ;;
     esac
-    unset _route_apis _route_json _route_out
+    case "$_route_out" in
+        *openwebui-route-incompatible*) OPENWEBUI_ROUTE_INCOMPATIBLE=1 ;;
+    esac
+    unset _route_apis _route_json _route_out _route_owui
 }
 
 # After release, remove a readable owned OAuth-contract mismatch and fail.
@@ -817,4 +850,43 @@ verify_agent_route() {
     fi
     unset _route_json
     echo "==> Route rag-agent verified: Service rag-agent port oauth, reencrypt, HTTP redirected, destination CA matches"
+}
+
+# Issue #1074: after the release, the live rag-openwebui Route must be its
+# reencrypt contract on OPENWEBUI_HOST. A readable owned mismatch is deleted
+# and fails; unknown state fails without claiming verification.
+verify_openwebui_route() {
+    [ "${AIRGAP_DRYRUN:-0}" != "1" ] || return 0
+    _route_json=$($KC -n "$NAMESPACE" get route.route.openshift.io/rag-openwebui -o json) || die "Route rag-openwebui cannot be read after the release; front-end exposure is NOT verified"
+    printf '%s' "$_route_json" | python3 scripts/airgap/check_app_ownership.py "$NAMESPACE" ||
+        die "Route rag-openwebui ownership is not established; cannot safely remove it and front-end exposure is NOT verified"
+    if ! printf '%s' "$_route_json" | python3 scripts/airgap/check_route_exposure.py verify-openwebui "$NAMESPACE" "$1" "${OPENWEBUI_HOST:-}"; then
+        $KC -n "$NAMESPACE" delete route.route.openshift.io/rag-openwebui --ignore-not-found >/dev/null 2>&1 ||
+            die "Route rag-openwebui is not its contract AND could not be deleted: run '$KC -n $NAMESPACE delete route rag-openwebui' now"
+        die "Route rag-openwebui did not converge to its reencrypt contract; it was deleted. Fix the cause and re-run airgap:deploy"
+    fi
+    unset _route_json
+    echo "==> Route rag-openwebui verified: Service rag-openwebui port https, reencrypt, HTTP redirected, host and destination CA match"
+}
+
+# Issue #1074 (ADR-0007 V2): install the repository docs Pipe through the
+# hash-checked installer inside the Open WebUI pod. The admin API key comes
+# from the operator Secret (optional key admin-api-key) and reaches the pod on
+# stdin only. Without the key the first admin has not been set up yet: say so
+# and leave the front end without its model (no silent success).
+provision_openwebui_pipe() {
+    [ "${AIRGAP_DRYRUN:-0}" != "1" ] || { echo "[dryrun] docs Pipe would be installed into Open WebUI"; return 0; }
+    _pipe_sha=$(sha256sum charts/mainframe-rag/files/openwebui/docs_pipe.py | awk '{print $1}') ||
+        die "cannot hash the repository docs Pipe"
+    _key_b64=$($KC -n "$NAMESPACE" get secret "$OPENWEBUI_SECRET" -o "jsonpath={.data['admin-api-key']}" 2>/dev/null) || _key_b64=""
+    if [ -z "$_key_b64" ]; then
+        echo "==> Notice: docs Pipe NOT installed: Secret $OPENWEBUI_SECRET has no admin-api-key yet. Sign in once as an IdP admin (OPENWEBUI_OIDC_ADMIN_ROLES), create an API key, add it to the Secret as admin-api-key and re-run airgap:deploy (docs/deploy.md). Until then Open WebUI offers no model."
+        unset _pipe_sha _key_b64
+        return 0
+    fi
+    printf '%s' "$_key_b64" | base64 -d 2>/dev/null |
+        $KC -n "$NAMESPACE" exec -i deploy/rag-openwebui -c openwebui -- \
+            python3 /opt/mainframe-rag/openwebui/provision_pipe.py "$_pipe_sha" ||
+        die "docs Pipe was not installed into Open WebUI (see the installer refusal above); the front end has no verified model"
+    unset _pipe_sha _key_b64
 }
