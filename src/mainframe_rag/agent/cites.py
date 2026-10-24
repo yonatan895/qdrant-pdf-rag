@@ -25,12 +25,18 @@ CITATION_LINE_RE = re.compile(
     r"(?P<heading>.+?),\s+p\.\s+(?P<page>.+?)\s*$"
 )
 
+# Horizontal whitespace only (`[^\S\r\n]`): with `\s*` around a MULTILINE `^`
+# the scan was polynomial in the number of newlines (a 2 KB reply of "\n" cost
+# 12 s, #1010). Every alternative is confined to one line, so the search is
+# linear; the optional `#` run is one group so two whitespace stars are never
+# adjacent (they backtracked quadratically on space floods). A header on a later
+# line still matches at that line's own `^`.
 CITATIONS_HEADER_RE = re.compile(
-    r"^\s*#{0,6}\s*[*_`]*Citations?[*_`]*:[*_`]*\s*$",
+    r"^[^\S\r\n]*(?:#{1,6}[^\S\r\n]*)?[*_`]*Citations?[*_`]*:[*_`]*[^\S\r\n]*$",
     re.IGNORECASE | re.MULTILINE,
 )
 _CITATION_ALIAS_HEADER_RE = re.compile(
-    r"^\s*#{0,6}\s*[*_`]*(?:Sources?|References?)[*_`]*:[*_`]*\s*$",
+    r"^\s*(?:#{1,6}\s*)?[*_`]*(?:Sources?|References?)[*_`]*:[*_`]*\s*$",
     re.IGNORECASE,
 )
 
@@ -56,6 +62,12 @@ _WRAP_PAIRS = {"\u201c": "\u201d", "\u2018": "\u2019"}
 # or ends with sentence punctuation; real citations are in `allowed`.
 _DOCNO_LED_RE = re.compile(r"^[A-Z]{2,4}\d{2}-\d{4}(?:-\d{2})?\s+\S")
 
+# A generic filename-stem identity (`tss-messages`, `evil_messages.v2`) that was
+# NOT supplied: one token joined by -, _ or . followed by the citation tail.
+# Prose does not start with such a token followed by `title, heading, p. <page>`
+# (#997).
+_GENERIC_STEM_LED_RE = re.compile(r"^[A-Za-z0-9]+(?:[-_.][A-Za-z0-9]+)+\s+")
+
 # CITATION_LINE_RE after its doc id: title, heading path, page.
 _CITATION_TAIL_RE = re.compile(r"^\S.*?,\s+.+?,\s+p\.\s+.+?\s*$")
 
@@ -76,7 +88,11 @@ def is_citation_shaped(candidate: str, doc_ids: AbstractSet[str] = frozenset()) 
     if CITATION_LINE_RE.match(candidate):
         return True
     rest = _known_doc_led(candidate, doc_ids)
-    return rest is not None and bool(_CITATION_TAIL_RE.match(rest))
+    if rest is not None and _CITATION_TAIL_RE.match(rest):
+        return True
+    # Unsupplied generic filename identity: still a citation attempt, never prose.
+    led = _GENERIC_STEM_LED_RE.match(candidate)
+    return led is not None and bool(_CITATION_TAIL_RE.match(candidate[led.end() :]))
 
 
 def _is_docno_led_fragment(candidate: str, doc_ids: AbstractSet[str]) -> bool:

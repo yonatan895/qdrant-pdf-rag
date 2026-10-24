@@ -427,7 +427,7 @@ def test_missing_production_values_fails_before_mutation(tree):
 
 
 @pytest.mark.parametrize("extra_env,exit_code,messages", [
-    pytest.param({'QDRANT_EXTRA_VALUES': '/nonexistent/vals.yaml'}, 1, ('QDRANT_EXTRA_VALUES file not found',),
+    pytest.param({'QDRANT_EXTRA_VALUES': '/nonexistent/vals.yaml', 'CI_REHEARSAL': '1'}, 1, ('QDRANT_EXTRA_VALUES file not found',),
                  id='missing_extra_values_file_fails_closed'),
     pytest.param({'EMBED_MODEL_REVISION': '  '}, None, ('EMBED_MODEL_REVISION must be a non-blank',),
                  id='whitespace_embed_revision_fails_before_render'),
@@ -446,7 +446,8 @@ def test_invalid_configuration_fails_closed(tree, extra_env, exit_code, messages
 def test_rehearsal_knobs_reach_helm(tree):
     vals = tree[0] / "vals.yaml"
     vals.write_text("resources: {}\n")
-    r = _run(tree, ("QDRANT_EXTRA_VALUES", str(vals)), ("QDRANT_STORAGE_SIZE", "1Gi"))
+    r = _run(tree, ("QDRANT_EXTRA_VALUES", str(vals)), ("QDRANT_STORAGE_SIZE", "1Gi"),
+             ("CI_REHEARSAL", "1"))
     assert r.returncode == 0, r.stderr
     assert "persistence.size=1Gi" in _helm_log(tree)
     assert "snapshotPersistence.size=1Gi" in _helm_log(tree)
@@ -454,6 +455,101 @@ def test_rehearsal_knobs_reach_helm(tree):
     assert str(vals) in args
     assert args[args.index(str(vals)) - 1] == "-f"
     assert args.index("charts/qdrant-openshift.values.yaml") < args.index(str(vals))
+
+
+@pytest.mark.parametrize("name,value", [
+    ("STORAGE_CLASS", "gp3-csi,containerSecurityContext.readOnlyRootFilesystem=false"),
+    ("STORAGE_CLASS", "GP3"),
+    ("STORAGE_CLASS", "gp3 csi"),
+    ("STORAGE_CLASS", "-gp3"),
+    ("SNAPSHOT_STORAGE_CLASS", "snap,image.repository=evil.example/q"),
+    ("QDRANT_TAG", "v1.19.2,image.repository=evil.example/q"),
+    ("QDRANT_TAG", "v1{a}"),
+    ("QDRANT_STORAGE_SIZE", "1Gi,service.type=LoadBalancer"),
+    ("QDRANT_STORAGE_SIZE", "lots"),
+    ("QDRANT_STORAGE_SIZE", "0"),
+    ("QDRANT_STORAGE_SIZE", "100"),
+    ("QDRANT_STORAGE_SIZE", "0Gi"),
+    ("INTERNAL_REGISTRY", "reg.internal,image.tag=latest"),
+    ("INTERNAL_REGISTRY", "reg internal"),
+    ("QDRANT_RELEASE", "Qdrant,x=1"),
+], ids=lambda v: v[:24] if isinstance(v, str) else v)
+def test_operator_strings_cannot_inject_helm_values(tree, name, value):
+    """#1017: each operator value is exactly one validated Helm value."""
+    env = [(name, value)] + ([("CI_REHEARSAL", "1")] if name == "QDRANT_STORAGE_SIZE" else [])
+    r = _run(tree, *env)
+    assert r.returncode != 0, r.stdout
+    assert f"{name} must be" in r.stderr
+    assert "upgrade" not in _helm_log(tree)
+    assert "template" not in _helm_log(tree)
+
+
+def test_valid_operator_strings_reach_helm_as_literal_strings(tree):
+    r = _run(tree, ("STORAGE_CLASS", "gp3-csi"), ("SNAPSHOT_STORAGE_CLASS", "snap.class-1"),
+             ("QDRANT_TAG", "v1.19.2"), ("QDRANT_STORAGE_SIZE", "1.5Gi"), ("CI_REHEARSAL", "1"),
+             ("INTERNAL_REGISTRY", "reg.internal:5000/team"))
+    assert r.returncode == 0, r.stderr
+    args = _helm_log(tree).splitlines()
+    upgrade = args[args.index("upgrade"):]
+    for assignment in ("image.repository=reg.internal:5000/team/qdrant/qdrant", "image.tag=v1.19.2",
+                       "persistence.storageClassName=gp3-csi",
+                       "snapshotPersistence.storageClassName=snap.class-1",
+                       "persistence.size=1.5Gi", "snapshotPersistence.size=1.5Gi"):
+        assert upgrade[upgrade.index(assignment) - 1] == "--set-string", assignment
+    assert "--set" not in [a for a in upgrade if a.startswith(("image.", "persistence.", "snapshotPersistence."))]
+
+
+# --- #1014: CI-rehearsal values never reach the release path ----------------
+
+def _values(tree, text):
+    path = tree[0] / "extra-values.yaml"
+    path.write_text(text)
+    return str(path)
+
+
+def test_extra_values_are_refused_without_ci_rehearsal(tree):
+    r = _run(tree, ("QDRANT_EXTRA_VALUES", _values(tree, "resources: {}\n")))
+    assert r.returncode != 0
+    assert "QDRANT_EXTRA_VALUES is a CI-rehearsal override" in r.stderr
+    assert "upgrade" not in _helm_log(tree)
+
+
+@pytest.mark.parametrize("line", ["CI_REHEARSAL=1", "_ci_rehearsal_cli=1", "_CI_REHEARSAL_PROCESS_ENV=1"])
+def test_ci_rehearsal_internal_capture_cannot_be_forged_by_the_operator_file(tree, line):
+    (tree[0] / "airgap.env").write_text(line + "\n")
+    r = _run(tree, ("QDRANT_EXTRA_VALUES", _values(tree, "resources: {}\n")))
+    assert r.returncode != 0
+    assert "upgrade" not in _helm_log(tree)
+
+
+def test_ci_rehearsal_cannot_come_from_the_operator_file(tree):
+    (tree[0] / "airgap.env").write_text("CI_REHEARSAL=1\n")
+    r = _run(tree, ("QDRANT_EXTRA_VALUES", _values(tree, "resources: {}\n")))
+    assert r.returncode != 0
+    assert "CI-rehearsal override" in r.stderr
+
+
+@pytest.mark.parametrize("text", [
+    "service:\n  type: LoadBalancer\n",
+    "service:\n  type: NodePort\n",
+    "ingress:\n  enabled: true\n  hosts:\n    - host: qdrant.example.com\n      paths:\n        - path: /\n          pathType: Prefix\n          servicePort: 6333\n",
+    "apiKey: false\nreadOnlyApiKey: false\n",
+    "containerSecurityContext:\n  readOnlyRootFilesystem: false\n",
+    "containerSecurityContext:\n  privileged: true\n",
+    "sidecarContainers:\n  - name: x\n    image: evil.example/x:1\n    securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true}\n",
+    "additionalVolumes:\n  - name: h\n    hostPath: {path: /}\n",
+    "containerSecurityContext:\n  capabilities:\n    add: [SYS_ADMIN]\n",
+    "containerSecurityContext:\n  runAsUser: 0\n  runAsNonRoot: false\n",
+    "podSecurityContext:\n  runAsUser: 0\n",
+    "sidecarContainers:\n  - name: x\n    image: reg.internal/qdrant/qdrant:x\n    ports: [{containerPort: 80, hostPort: 80}]\n    securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, runAsNonRoot: true, capabilities: {drop: [ALL]}}\n",
+    "serviceAccount:\n  name: cluster-admin\n",
+], ids=["loadbalancer", "nodeport", "ingress", "no-api-key", "writable-root", "privileged", "foreign-sidecar-image", "hostpath",
+        "cap-add", "container-root", "pod-root", "hostport", "foreign-serviceaccount"])
+def test_hostile_extra_values_are_refused_by_the_qdrant_render(tree, text):
+    r = _run(tree, ("QDRANT_EXTRA_VALUES", _values(tree, text)), ("CI_REHEARSAL", "1"))
+    assert r.returncode != 0, r.stdout
+    assert "rendered Qdrant" in r.stderr
+    assert "upgrade" not in _helm_log(tree)
 
 
 def test_rendered_manifest_substituted_and_written(tree):

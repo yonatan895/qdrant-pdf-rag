@@ -496,7 +496,7 @@ status (`/ui` failures render HTML banners instead, §1):
 | `sources_unavailable` / `the requested sources are not available` | 404 / 503 | 404: the cursor's build is unknown or no longer retained (never a successor's entries); 503: the build has no catalog (published before #827), missing/redirected controls, or a malformed catalog entry the caller may see |
 | `sources_timeout` / `the sources listing timed out` | 504 | Listing exceeded `EVIDENCE_TIMEOUT_S` |
 | `upstream_error` / `sources listing failed` | 502 | Storage fault during a listing (type logged only); `authentication_required` / `access_unavailable` apply to listings as to reads |
-| `invalid_request` / `request body failed validation` | 422 | Pydantic failure, the shared query guard (overlong, empty after `str.strip()`, or containing NUL/C0 controls other than `\t\n\r`, issue #579; or, when `embed_max_input_chars` is set, a query whose dense text — prefix plus query — exceeds it, issue #374: refused before any model call, never truncated; an effective query that only grows past the bound after expansion/condensation is refused by the embedder with the same envelope), and a chat/console active `user` turn that is missing, blank, control-character or overlong (one message, every 422 path) |
+| `invalid_request` / `request body failed validation` | 422 | Pydantic failure, the shared query guard (overlong, empty after `str.strip()`, or containing NUL/C0 controls other than `\t\n\r`, issue #579; or, when `embed_max_input_chars` is set, a query whose dense text — prefix plus query — exceeds it, issue #374: refused before any model call, never truncated; an effective query that only grows past the bound after expansion/condensation is refused by the embedder with the same envelope), and a chat/console active `user` turn that is missing, blank, control-character or overlong (one message, every 422 path); `product`/`version` longer than `query_max_chars`, a chat body (messages plus `splunk_context`, `product`, `version`) over `chat_max_body_chars`, any text field holding an unpaired surrogate (issues #1011, #1013: refused at the request model, before retrieval or any model call), and any body Starlette cannot parse, e.g. invalid UTF-8 (issue #1031: never the framework `detail` shape). The console's client-owned `messages` history that fails to parse (invalid JSON, deep nesting, over-long integers) degrades to an empty history (issue #1032) |
 | `overloaded` / `the service is at capacity; retry later` | 503 + `Retry-After: 1` | Request admission refused (issue #374): all `request_max_concurrent` slots busy and the bounded wait queue full or its wait expired. Raised first, before validation, the serving gate and any retrieval/model work; only when a limit is selected. `/ui/chat` renders its fixed banner; `/ui/chat/stream` returns this envelope |
 | `deadline_exceeded` / `request deadline exceeded` | 504 | Total request deadline (`request_deadline_s`, issue #374) expired before the response began; on an already-open stream it is an `error` event (no `final`, `generation_incomplete`) instead. Only when a deadline is selected |
 | `unknown_answer` / `this answer is not recorded, or not yet; it cannot be rated now` | 404 | Console rating (`/ui/feedback`, issue #780) for a `request_id` the feedback store does not hold: still queued, or dropped, failed or purged |
@@ -1316,7 +1316,9 @@ The G4 measurement of this wording records how often either occurs.
 Body presence is shared with the answer eval (#576): empty `Answer` headings,
 citation labels (including inline labels followed only by bracket indices or
 a citation), citation headers, standalone citation-shaped or validated lines (including generic
-filename identities), bracket indices, whitespace and punctuation alone are
+filename identities, whether or not the stem was supplied: a fabricated
+`stem Title, Heading, p. N` line is stripped and counted as a rejected
+citation, #997), bracket indices, whitespace and punctuation alone are
 not prose. Echoed prompt scaffolding is not prose either: the `Retrieved manual
 excerpts:` and Splunk context section headers, and whole `Question:` /
 `Sysplex context:` lines (the constants the prompt builder sends, so the two
@@ -1327,6 +1329,12 @@ script without prose is `unverified_draft` with `script_review_required: true`;
 an empty script fence still requires review but cannot establish a body.
 No second reasoning call is added to repair citation-only content, and
 transport completion remains independent of content eligibility.
+
+Parsing never raises on model text and cannot stall the event loop (#1009,
+#1010): the `Citations:` header search is confined to single lines and its `#` run is one optional group,
+so no two whitespace stars are adjacent (128k-character space or tab floods stay
+linear; the same shape in the answer/echo/alias header patterns is fixed alike), and a bracketed number longer than nine digits is not a prompt
+label and resolves to no excerpt instead of reaching `int()`.
 
 The shared refusal predicate also recognizes complete, one-sentence first-person
 security refusals of private keys, secrets, credentials, passwords, credential

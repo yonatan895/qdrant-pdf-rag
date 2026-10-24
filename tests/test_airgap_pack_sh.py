@@ -112,6 +112,7 @@ def pack_tree(tmp_path):
         shutil.copy(REPO / "scripts" / script, tmp_path / "scripts" / script)
     (tmp_path / "charts").mkdir(exist_ok=True)
     copy_chart(tmp_path)
+    shutil.copytree(REPO / "images", tmp_path / "images")
 
     # Throwaway git repo so IMAGE_SHA resolves to a real HEAD.
     subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
@@ -162,6 +163,75 @@ def test_pack_sha_mismatch_fails_closed(pack_tree):
     assert r.returncode != 0
     assert "is not the checked-out commit" in r.stderr
     assert "airgap.env" in r.stderr
+
+
+@pytest.mark.parametrize("role", ["agent", "ingest"])
+def test_pack_refuses_a_containerfile_base_digest_off_the_pin(pack_tree, role):
+    """#1030: the shipped Containerfile FROM must equal images.txt and the lock."""
+    root, skopeo_log, _head, _key = pack_tree
+    containerfile = root / "images" / f"Containerfile.{role}"
+    good = containerfile.read_text()
+    containerfile.write_text(re.sub(r"@sha256:[0-9a-f]{64}", "@sha256:" + "0" * 64, good))
+    result, _ = _run_pack(pack_tree)
+    assert result.returncode != 0
+    assert "Containerfile base digest" in result.stderr
+    assert not skopeo_log.exists()
+    assert not (root / "dist" / "SHA256SUMS.sig").exists()
+    containerfile.write_text(good)
+    result, _ = _run_pack(pack_tree)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("directive", [
+    "COPY --from=evil.example/img:latest / /x",
+    "COPY --from=docker.io/library/busybox@sha256:" + "a" * 64 + " / /x",
+    "RUN --mount=type=bind,from=evil.example/img:latest,target=/m true",
+    "RUN --mount=type=bind,source=/,from=unknown,target=/m true",
+    "COPY --from=missingstage \\\n    / /x",
+], ids=["copy-external", "copy-digest-not-in-images", "mount-external", "mount-unknown", "continued"])
+def test_pack_refuses_a_containerfile_that_reads_from_an_external_image(pack_tree, directive):
+    """#1030: a non-FROM image reference is as unpinned as an off-pin FROM."""
+    root, skopeo_log, _head, _key = pack_tree
+    containerfile = root / "images" / "Containerfile.agent"
+    good = containerfile.read_text()
+    containerfile.write_text(good + "\n" + directive + "\n")
+    result, _ = _run_pack(pack_tree)
+    assert result.returncode != 0
+    assert "Containerfile base digest check failed" in result.stderr
+    assert not skopeo_log.exists()
+    containerfile.write_text(good)
+    result, _ = _run_pack(pack_tree)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("dirt", ["modified", "assume-unchanged", "skip-worktree", "staged"])
+def test_pack_refuses_a_dirty_tree_before_signing(pack_tree, dirt):
+    """#1030: `git bundle` records clean HEAD, so a dirty tree must not be signed."""
+    root, _skopeo_log, _head, _key = pack_tree
+    readme = root / "README.md"
+
+    def git(*args):
+        subprocess.run(["git", *args], cwd=root, check=True, capture_output=True)
+
+    if dirt == "assume-unchanged":
+        git("update-index", "--assume-unchanged", "README.md")
+    elif dirt == "skip-worktree":
+        git("update-index", "--skip-worktree", "README.md")
+    if dirt != "skip-worktree":
+        readme.write_text("tampered\n")
+    if dirt == "staged":
+        git("add", "README.md")
+    result, _ = _run_pack(pack_tree)
+    assert result.returncode != 0
+    assert "pack tree is not the clean checked-out commit" in result.stderr
+    assert not (root / "dist" / "SHA256SUMS.sig").exists()
+    if dirt == "assume-unchanged":
+        git("update-index", "--no-assume-unchanged", "README.md")
+    elif dirt == "skip-worktree":
+        git("update-index", "--no-skip-worktree", "README.md")
+    git("checkout", "HEAD", "--", "README.md")
+    result, _ = _run_pack(pack_tree)
+    assert result.returncode == 0, result.stderr
 
 
 def test_pack_refuses_several_chart_archives_then_passes_after_fix(pack_tree):
@@ -321,6 +391,10 @@ def test_pack_bundles_oauth_proxy_once_digest_recorded(pack_tree):
     bundle, MANIFEST, SBOM and member checksums."""
     tmp_path, skopeo_log, head, _key = pack_tree
     set_oauth_proxy_pin(tmp_path, "sha256:" + "b" * 64)
+    # The recorded pin is committed state: the pack tree must be clean (#1030).
+    subprocess.run(["git", "commit", "-qam", "record oauth-proxy pin"], cwd=tmp_path, check=True)
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True,
+                          capture_output=True, text=True).stdout.strip()
     # Model signed-source export: without attachment omission, Docker
     # archive export fails before the archive can be materialized.
     guard = '''signed_source=0
