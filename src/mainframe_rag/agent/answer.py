@@ -12,6 +12,7 @@ import json
 import logging
 import re
 import time
+import unicodedata
 from collections.abc import AsyncIterator, Awaitable, Iterator, Sequence
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
@@ -537,12 +538,48 @@ EXCERPT_OPEN = "<retrieved-excerpt>"
 EXCERPT_CLOSE = "</retrieved-excerpt>"
 
 
-# Any delimiter-shaped tag inside retrieved text (either direction, any case,
-# inner spacing, `_`/space for the hyphen, and the common angle-bracket
-# lookalikes). Only the frame's own delimiter lines are real (issue #999).
-_EXCERPT_TAG_RE = re.compile(
-    r"[<\uff1c\u2039\u3008\u27e8\ufe64](?=\s*/?\s*retrieved[\s_-]*excerpt)", re.IGNORECASE
-)
+# Delimiter-shaped tags inside retrieved text (issue #999). A bracket that
+# reads as "<" starts a candidate; the characters after it are compared with
+# the tag name in a normalized view: NFKD (fullwidth and compatibility forms,
+# accents split off), case folded, Cyrillic/Greek letter lookalikes and
+# slash/minus lookalikes folded to ASCII, and whitespace, `_`, dashes (Pd),
+# format characters (zero-width, soft hyphen, joiners, bidi) and combining
+# marks skipped. Each candidate scan stops at the first mismatch, so the
+# whole pass is linear in the text.
+_TAG_BRACKET_RE = re.compile("[<\uff1c\ufe64\u2039\u3008\u2329\u27e8\u276c\u29fc\u02c2\u226e]")
+_TAG_NAME = "/retrievedexcerpt"
+_TAG_FOLD = str.maketrans({
+    "\u0435": "e", "\u0415": "e", "\u03b5": "e", "\u0395": "e",
+    "\u0441": "c", "\u0421": "c", "\u03f2": "c", "\u03f9": "c",
+    "\u0440": "p", "\u0420": "p", "\u03c1": "p", "\u03a1": "p",
+    "\u0445": "x", "\u0425": "x", "\u03c7": "x", "\u03a7": "x",
+    "\u0442": "t", "\u0422": "t", "\u03c4": "t", "\u03a4": "t",
+    "\u0456": "i", "\u0406": "i", "\u03b9": "i", "\u0399": "i", "\u0131": "i",
+    "\u0433": "r", "\u0413": "r",
+    "\u03bd": "v", "\u0475": "v", "\u0474": "v",
+    "\u0501": "d", "\u0500": "d",
+    "\u2215": "/", "\u2044": "/", "\u29f8": "/",
+    "\u2212": "-",
+})
+_TAG_SKIP_CATEGORIES = frozenset({"Cf", "Mn", "Me", "Pd"})
+
+
+def _tag_follows(text: str, pos: int) -> bool:
+    """True when the normalized characters from `pos` spell the tag name,
+    with the leading `/` optional."""
+    want = 0
+    for ch in text[pos:]:
+        for c in unicodedata.normalize("NFKD", ch).translate(_TAG_FOLD).casefold():
+            if c in "-_" or c.isspace() or unicodedata.category(c) in _TAG_SKIP_CATEGORIES:
+                continue
+            if want == 0 and c != "/":
+                want = 1
+            if c != _TAG_NAME[want]:
+                return False
+            want += 1
+            if want == len(_TAG_NAME):
+                return True
+    return False
 
 
 def _escape_excerpt(text: str) -> str:
@@ -550,7 +587,17 @@ def _escape_excerpt(text: str) -> str:
     becomes `&lt;`, so chunk text can never close or reopen its frame.
     Manual text never carries the tag, so legitimate excerpts are
     byte-identical."""
-    return _EXCERPT_TAG_RE.sub("&lt;", text)
+    pieces: list[str] = []
+    last = 0
+    for m in _TAG_BRACKET_RE.finditer(text):
+        if _tag_follows(text, m.end()):
+            pieces.append(text[last : m.start()])
+            pieces.append("&lt;")
+            last = m.end()
+    if not pieces:
+        return text
+    pieces.append(text[last:])
+    return "".join(pieces)
 
 
 def _frame_excerpt(text: str) -> str:

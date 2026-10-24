@@ -663,10 +663,14 @@ select `complex`. Default is `simple`.
 - Excerpt frame (issue #999): every `prompt_order` policy wraps each excerpt
   block (its `[i] cite` header, source line and body) in attributeless
   `<retrieved-excerpt>` / `</retrieved-excerpt>` delimiter lines. Before
-  framing, any delimiter-shaped tag inside the block (either direction, any
-  case or inner spacing, `_`/space for the hyphen, and the angle-bracket
-  lookalikes) has its bracket replaced with `&lt;`, so the only exact
-  delimiter lines are the frame's own: chunk text cannot close or reopen its
+  framing, any delimiter-shaped tag inside the block has its bracket
+  replaced with `&lt;`. A tag is any `<` lookalike bracket followed by
+  `/retrievedexcerpt` (slash optional) in a normalized view: NFKD, case
+  folded, Cyrillic/Greek letter and slash/minus lookalikes folded to ASCII,
+  and whitespace, `_`, dashes (Pd), format characters (zero-width, soft
+  hyphen, joiners, bidi) and combining marks skipped. Each candidate scan
+  stops at its first mismatch, so the pass is linear. The only exact
+  delimiter lines are therefore the frame's own: chunk text cannot close or reopen its
   frame, and an "end of excerpts" or `SYSTEM:` line in it stays inside.
   Manual text never carries the tag, so legitimate excerpts are unchanged;
   a cite whose stored metadata carried one is shown escaped and cannot be
