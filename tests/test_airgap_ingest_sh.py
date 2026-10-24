@@ -478,6 +478,27 @@ def test_ingest_retire_docs_rendered_with_alias_publish(ingest_tree):
     assert_no_placeholders(rendered)
 
 
+@pytest.mark.parametrize("with_retire", [True, False])
+def test_ingest_authorize_from_catalog_renders_only_with_retire_docs(ingest_tree, with_retire):
+    """Issue #1005 (option B): the launcher maps INGEST_AUTHORIZE_FROM_CATALOG
+    end to end into the production Job; without INGEST_RETIRE_DOCS it refuses
+    before rendering."""
+    extra = [("INGEST_ALIAS_PUBLISH", "true"), ("INGEST_AUTHORIZE_FROM_CATALOG", "true")]
+    if with_retire:
+        extra.append(("INGEST_RETIRE_DOCS", "SA22-0000-00@ibm|zos|2.5|abc"))
+    r = _run_ingest(ingest_tree, *extra)
+    if not with_retire:
+        assert r.returncode != 0
+        assert "INGEST_AUTHORIZE_FROM_CATALOG requires INGEST_RETIRE_DOCS" in r.stderr
+        return
+    assert r.returncode == 0, r.stderr
+    rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
+    assert rendered_container(rendered, "ingest")["args"][-3:] == [
+        "--retire-doc", "SA22-0000-00@ibm|zos|2.5|abc", "--authorize-from-catalog",
+    ]
+    assert_no_placeholders(rendered)
+
+
 def test_ingest_retire_docs_preserves_interior_spaces_in_product_label(ingest_tree):
     """Issue #391 Q419-I1: operator inputs with interior spaces (e.g. from
     normalize_label on product names) must not be fragmented by word splitting.

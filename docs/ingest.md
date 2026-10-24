@@ -572,7 +572,10 @@ Collection + indexes-before-load + batched idempotent upsert, behind the
   Written only after every batch is acknowledged and the stored points
   verify (count + per-point sha/rules/revision + recomputed digests);
   refreshes invalidate the revision's markers before deleting points, so a
-  failed refresh leaves no valid completion and retries safely. Zero-chunk
+  failed refresh leaves no valid completion and retries safely. Every other
+  revision a refresh deletes (its lineage revision, swept residue) loses its
+  markers with its points, under whichever `doc_id` recorded them
+  (`delete_revision_completions`, issue #1005): no zero-point marker is left. Zero-chunk
   docs are an explicit `empty` outcome — never published, never skippable.
 - Downstream consumers: `doc_id/product/version/vendor/chunk_type/
   message_ids/members/sha256/rules_v/page_start` → filtered prefetch + keyword
@@ -686,7 +689,10 @@ thread pool.
   finds a fresh target — writes it `pending` before any
   delete/upsert and flips it `committed` only on the success path: zero
   document failures AND a read-only scope proof that (a) no completion
-  marker under another `manifest_digest` remains and (b) every searchable
+  marker under another `manifest_digest` remains whose revision still holds
+  a point (a zero-point marker certifies no searchable vector; one left by
+  the pre-#1004 sibling sweep therefore needs no control-collection edit —
+  the next complete `--reingest` commits over it, issue #1005) and (b) every searchable
   point is attributable to a verified walked document of this run (a new
   contract may only be declared over vectors this run re-embedded). Unmarked old data therefore blocks the commit and
   leaves the contract pending; points an explicit, lock-validated
@@ -760,11 +766,46 @@ thread pool.
   this is a distinct identity and remains a #361/#391 design question.
 - **Refresh lineage rule:** a refresh replaces precisely the revision named
   by inventory lineage (the path's previous `source_rev`, threaded from
-  the parent plan into the upsert stage). Committed coexisting revisions
+  the parent plan into the upsert stage), independent of the printed
+  `doc_id`: a same-path reissue that prints a new form number deletes the
+  lineage revision and its markers under the old `doc_id` before the upsert
+  (issue #1006), so the ordinary rerun cuts over. Committed coexisting revisions
   are left alone — replacing one needs its lineage, otherwise the write
-  would be the overwrite bug. Completion-less residue is swept (crash-safe
+  would be the overwrite bug. A revision is committed when one of its
+  markers bound to this collection, or to the live generation the staging
+  was cloned from, verifies against the stored points (issue #1004). A marker
+  bound to any other collection never certifies (#1039). The staging clone
+  carries live's markers, so a
+  published sibling that this walk no longer ingests (for example, a
+  byte-identical copy elsewhere won the duplicate election) stays in staging
+  and the residue audit refuses cutover until an explicit `--retire-doc`
+  names it. Completion-less residue is swept (crash-safe
   retry); a lineage-less run therefore ADDS revisions — keep the
-  `--progress` file (prod `/work` persists it) so refreshes replace. Any
+  `--progress` file (prod `/work` persists it) so refreshes replace.
+  **Recovery after a lost progress file** (issue #1005): a relabel then has no
+  lineage and refuses as residue, and plain `--retire-doc` cannot name the
+  published revision, because the inventory is the default retirement authority
+  (removing a document's records revokes its approval). Restore the progress
+  file if a copy exists. Otherwise remove the refused build's
+  `publish-<alias>.json` and rerun the relabel with
+  `--retire-doc DOCID@SOURCEREV --authorize-from-catalog`. The flag is valid only
+  with `--retire-doc`. Under the target lock it also approves a requested
+  revision that the inventory lacks, provided the live build's sealed source
+  catalog lists it (stored entries verified against the receipt) and it is
+  committed in the live generation (a completion marker whose points verify).
+  Refusals carry stable codes and ids only: `retire_catalog_requires_retire_doc`,
+  `retire_not_in_catalog` and `retire_not_committed`. The run logs
+  `action: retire_authorized_from_catalog` with the approved ids, only when the
+  catalog approved at least one revision. A new plan made without the flag
+  uses the inventory alone. One exception: a flagged run that stops before
+  its swap records its plan in the publish sidecar. A retry with the same
+  `--retire-doc` list replays that bound plan, catalog approvals included,
+  even without the flag (the ordinary bound-plan replay). Remove the sidecar
+  to abandon that plan. In production, set `INGEST_AUTHORIZE_FROM_CATALOG=true`
+  together with `INGEST_RETIRE_DOCS` (see below). Alternative without the flag: republish with the
+  **original** labels and `--reingest` (a forced repair generation rebuilds
+  the inventory records), then rerun the relabel, and lineage replaces the old
+  revision. No control collection is edited on either path. Any
   point without a source revision under the document (pre-#361 data) raises
   `UnsupportedLegacyDataError` (doc id + content ids, never text) before any
   delete: that data is never migrated; build the corpus into a new collection.
@@ -831,7 +872,9 @@ thread pool.
    cutover until the operator either restores the file or names an explicit
    approved removal (`--retire-doc DOCID[@SOURCEREV]`, repeatable, planned
    under the target lock against the freshest approved inventory and applied
-   to staging with revision-scoped deletes before verification). Approved
+   to staging with revision-scoped deletes before verification; the explicit
+   `--authorize-from-catalog` flag additionally accepts revisions the live
+   build published and committed, see the lost-inventory recovery above). Approved
    history without a source revision is unsupported pre-#361 data and refuses
    the plan; every refusal names the operator path (re-plan, retire the whole
    document, or build into a new collection). Retiring revision A (`--retire-doc DOCID@SOURCEREV`)
@@ -851,7 +894,10 @@ thread pool.
    `scripts/airgap/ingest.sh` (issue #391 current packet):
    publication is the only mode (the values mapper refuses
    `INGEST_ALIAS_PUBLISH=false`), `INGEST_REINGEST=true`
-    renders `--reingest` (forced repair), and `INGEST_RETIRE_DOCS` takes a
+    renders `--reingest` (forced repair), `INGEST_AUTHORIZE_FROM_CATALOG=true`
+    renders `--authorize-from-catalog` (chart `ingest.authorizeFromCatalog`,
+    default false; the mapper, schema and template each refuse it without
+    retirements), and `INGEST_RETIRE_DOCS` takes a
     **comma- or newline-separated** `DOCID[@SOURCEREV]` list rendered as
     repeated `--retire-doc` (requires alias publication; labels may carry
     `|`, `/` and interior spaces — the launcher validates structure, not an
@@ -917,7 +963,10 @@ thread pool.
   or resume the run that recorded it). Same-alias publishers must share the
   progress directory (already required for refresh lineage) so the target
   lock serializes them; different directories or hosts are operator error,
-  guarded only by the pre-swap live recheck — there is no distributed lock.
+  guarded only by the pre-swap live recheck and the swap's predecessor check
+  (`swap_alias_to` re-reads the alias immediately before the atomic call and
+  refuses unless it still names the planned predecessor, issue #1019) — there
+  is no distributed lock, and Qdrant alias updates are not compare-and-swap.
   Lock filenames sanitize the alias charset: aliases differing only in
   sanitised-away characters share a lock (over-serialization, never
   concurrent publication).
@@ -1222,7 +1271,10 @@ through cutover; a second live publisher for the same target fails closed
 are never stolen). Same-alias runs must share the progress directory; a
 pre-swap live recheck refuses a candidate overtaken by a lock-bypass writer
 (different directory or host), without which the alias could swing back to
-an older generation. The inner build keeps its own progress lock; `_DocLocks`
+an older generation. The swap itself repeats that check after the
+catalog/seal phase, immediately before its atomic alias call (issue #1019),
+so a writer overtaken there refuses too; only the read-to-call gap remains.
+Different progress directories stay unsupported. The inner build keeps its own progress lock; `_DocLocks`
 only serializes revisions inside one process. Supported operation requires
 operator-serialized jobs, not a claim of distributed lock enforcement. No HA
 claim follows from a single-node run.

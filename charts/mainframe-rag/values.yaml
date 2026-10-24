@@ -238,6 +238,10 @@ ingest:
   # the backend alphabet (labels may carry '/', '|' and spaces); shell
   # preflight remains the owner for malformed combinations (D6).
   retireDocs: []
+  # With retireDocs only (issue #1005): also approve revisions the live build
+  # published and committed when the inventory lost them. Renders
+  # --authorize-from-catalog; refused without retireDocs.
+  authorizeFromCatalog: false
   contextualEnabled: false
   contextLlmBaseUrl: ""
   contextLlmModel: ""

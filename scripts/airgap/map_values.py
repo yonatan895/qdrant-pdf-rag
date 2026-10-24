@@ -282,6 +282,7 @@ def build_values(deploy_only: bool = False) -> dict:
         "peerUrls": "",
         "reingest": False,
         "retireDocs": [],
+        "authorizeFromCatalog": False,
         "contextualEnabled": False,
         "contextLlmBaseUrl": "",
         "contextLlmModel": "",
@@ -305,13 +306,21 @@ def build_values(deploy_only: bool = False) -> dict:
                 "QDRANT_WRITE_CONSISTENCY_FACTOR", env("QDRANT_WRITE_CONSISTENCY_FACTOR")
             ),
         }
+        retire_docs = split_retire(env("INGEST_RETIRE_DOCS"))
+        authorize_from_catalog = strict_bool(
+            "INGEST_AUTHORIZE_FROM_CATALOG", env("INGEST_AUTHORIZE_FROM_CATALOG"), False
+        )
+        if authorize_from_catalog and not retire_docs:
+            # The catalog authority only extends an explicit removal (#1005).
+            die("INGEST_AUTHORIZE_FROM_CATALOG requires INGEST_RETIRE_DOCS")
         ingest_block = {
             "enabled": True,
             "workSize": env("INGEST_WORK_SIZE") or "100Gi",
             "corpusPVC": corpus_pvc,
             "workers": positive_int("INGEST_WORKERS", env("INGEST_WORKERS") or "4"),
             "reingest": strict_bool("INGEST_REINGEST", env("INGEST_REINGEST"), False),
-            "retireDocs": split_retire(env("INGEST_RETIRE_DOCS")),
+            "retireDocs": retire_docs,
+            "authorizeFromCatalog": authorize_from_catalog,
             "contextualEnabled": strict_bool(
                 "CONTEXTUAL_EMBED_ENABLED", env("CONTEXTUAL_EMBED_ENABLED"), False
             ),
