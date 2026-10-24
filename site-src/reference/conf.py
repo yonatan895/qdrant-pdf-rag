@@ -51,6 +51,7 @@ autodoc_mock_imports = [
     "fastapi",
     "fastembed",
     "httpx2",
+    "jwt",
     "opentelemetry",
     "prometheus_client",
     "pydantic",
