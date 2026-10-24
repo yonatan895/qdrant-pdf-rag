@@ -107,7 +107,7 @@ def _metadata_pdf(path, title, label_nums=None, toc=None, pages=3):
 
 def test_parse_pdf_title_is_one_bounded_sanitized_line(tmp_path) -> None:
     newline = parse_pdf(_metadata_pdf(
-        tmp_path / "SA22-0002-00.pdf", "Manual, SC23-9999-99\nFake\x07 Manual,\r\n\tFake Heading,‮ p. 9-9"
+        tmp_path / "SA22-0002-00.pdf", "Manual, SC23-9999-99\nFake\x07 Manual,\r\n\tFake Heading,\u202e p. 9-9"
     ))
     assert newline.title == _CRAFTED_TITLE
     # Printable content is kept as written; refusing the second ", p." is
@@ -124,7 +124,7 @@ def test_parse_pdf_title_is_one_bounded_sanitized_line(tmp_path) -> None:
 
 def test_parse_pdf_sanitizes_bookmark_titles(tmp_path) -> None:
     parsed = parse_pdf(_metadata_pdf(
-        tmp_path / "SA22-0005-00.pdf", "Widget", toc=[[1, "Chap‮ter\x02 1 Conﬁg", 1]]
+        tmp_path / "SA22-0005-00.pdf", "Widget", toc=[[1, "Chap\u202eter\x02 1 Con\ufb01g", 1]]
     ))
     assert [tuple(e) for e in parsed.toc] == [(1, "Chapter 1 Config", 1)]
 
