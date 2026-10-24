@@ -13,6 +13,9 @@
   explicit purge (scheduled in-process by the service, #804; nothing deletes implicitly). Telemetry (metrics, traces, logs) never holds content;
   `request_id` is the only join key. Ratings surface as bounded-label metrics
   plus a periodic report from a read-only export of the store.
+  *(Amendment, ADR-0007, accepted 2026-10-24: while Open WebUI is enabled, its chat
+  history may also hold question, answer and excerpt text as user session
+  state, not quality records, under ADR-0007's storage and retention rules.)*
 - **Consequences / rules:**
   - No backend choice under #529 or #782 may ingest question, answer, excerpt or
     comment text. Using content for analytics means exporting from the feedback

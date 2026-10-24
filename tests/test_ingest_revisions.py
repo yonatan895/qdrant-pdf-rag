@@ -168,14 +168,15 @@ class RevisionFake:
 
 
 def _upsert_one(monkeypatch, fake, parsed, chunks, settings=None,
-                src_labels="||", lineage_rev=None):
+                src_labels="||", lineage_rev=None, ancestor=None):
     from mainframe_rag.ingest import run_ingest
     from mainframe_rag.ingest.run_ingest import _DocLocks, _upsert_one
 
     settings = settings or _settings()
     monkeypatch.setattr(run_ingest, "_get_qdrant", lambda s: fake)
     return _upsert_one(parsed, chunks, _vectors(len(chunks)), settings, _DocLocks(),
-                       None, False, src_labels=src_labels, lineage_rev=lineage_rev)
+                       None, False, src_labels=src_labels, lineage_rev=lineage_rev,
+                       ancestor=ancestor)
 
 
 SHA_A1 = "a1" * 32
@@ -292,6 +293,33 @@ def test_update_one_revision_leaves_other_untouched(monkeypatch):
     assert fake.main_revs(coll, "reference") == {rev_a2, REV_B}
 
 
+def test_lineage_replaces_a_revision_printed_under_another_doc_id(monkeypatch):
+    """Issue #1006 (S2-6): lineage is the path's previous source revision,
+    independent of the printed doc_id. A reissue that prints a new form
+    number deletes exactly that revision, points and markers, and leaves a
+    coexisting revision of the old document untouched."""
+    settings = _settings()
+    fake = RevisionFake()
+    coll = settings.qdrant_collection
+    _upsert_one(monkeypatch, fake, _parsed(doc_id="GX28-1234", sha=SHA_A1),
+                _chunks(doc_id="GX28-1234", rev=REV_A, tag="old"), settings)
+    _upsert_one(monkeypatch, fake, _parsed(doc_id="GX28-1234", sha=SHA_B1, vendor="vendor-b",
+                product="product-y", version="2.0"),
+                _chunks(doc_id="GX28-1234", rev=REV_B, tag="sibling"), settings)
+    sha_new = "c3" * 32
+    rev_new = _rev("vendor-a", "product-x", "1.0", sha_new)
+    status, _ = _upsert_one(
+        monkeypatch, fake, _parsed(doc_id="SC33-5678", sha=sha_new),
+        _chunks(doc_id="SC33-5678", rev=rev_new, tag="reissue"), settings, lineage_rev=REV_A,
+    )
+    assert status == "upserted"
+    assert fake.main_revs(coll, "GX28-1234") == {REV_B}
+    assert fake.main_revs(coll, "SC33-5678") == {rev_new}
+    markers = fake._points.get(completion_collection_name(settings), [])
+    assert {p.payload["source_rev"] for p in markers} == {REV_B, rev_new}
+    assert _complete(settings, fake, "GX28-1234", SHA_B1, REV_B)
+
+
 def _gen_id(settings, sha, labels="||"):
     return doc_generation_id(settings, sha, extraction_rules_version(), labels)
 
@@ -318,6 +346,36 @@ def test_refresh_without_lineage_adds_and_leaves_committed(monkeypatch):
     assert _complete(settings, fake, "reference", sha_a2, rev_a2)
 
 
+def test_inherited_committed_sibling_is_left_alone(monkeypatch):
+    """Issue #1004 (S2-4): staging is cloned from live, so a committed sibling
+    revision's marker targets the live physical. Its points still verify in
+    staging; without lineage it is coexistence, never residue to sweep."""
+    live = _settings(qdrant_collection="gen_live")
+    staging = _settings(qdrant_collection="gen_staging")
+    fake = RevisionFake()
+    _upsert_one(monkeypatch, fake, _parsed(sha=SHA_A1, vendor="vendor-a",
+                product="product-x", version="1.0"),
+                _chunks(rev=REV_A, tag="A-v1"), live)
+    # The clone: every point and marker copied verbatim into staging.
+    fake._points["gen_staging"] = list(fake._points["gen_live"])
+    fake._points[completion_collection_name(staging)] = list(
+        fake._points[completion_collection_name(live)]
+    )
+    before = {str(p.id): dict(p.payload or {}) for p in fake._points["gen_staging"]}
+    assert is_revision_committed(fake, staging, "reference", REV_A, ancestor="gen_live")
+    assert not is_revision_committed(fake, staging, "reference", REV_A, ancestor="gen_other")
+    status, _ = _upsert_one(
+        monkeypatch, fake,
+        _parsed(sha=SHA_B1, vendor="vendor-b", product="product-y", version="2.0"),
+        _chunks(rev=REV_B, tag="B-v1"), staging, ancestor="gen_live",
+    )
+    assert status == "upserted"
+    assert fake.main_revs("gen_staging", "reference") == {REV_A, REV_B}
+    kept = {str(p.id): dict(p.payload or {}) for p in fake._points["gen_staging"]
+            if (p.payload or {}).get("source_rev") == REV_A}
+    assert kept == before, "the committed sibling must be byte-identical"
+
+
 def test_crash_residue_without_completion_is_swept(monkeypatch):
     """Points without a marker are residue, never a revision: a later
     refresh deletes them without lineage."""
@@ -335,6 +393,31 @@ def test_crash_residue_without_completion_is_swept(monkeypatch):
     )
     assert status == "upserted"
     assert fake.main_revs(settings.qdrant_collection, "reference") == {REV_B}
+
+
+def test_swept_residue_revision_takes_its_markers(monkeypatch):
+    """Issue #1005 (S2-5): a sibling whose marker no longer verifies (a point
+    is missing) is residue and is swept. Its markers go with its points, so
+    the sweep never leaves a zero-point marker behind to block a later
+    representation migration."""
+    settings = _settings()
+    fake = RevisionFake()
+    coll = settings.qdrant_collection
+    _upsert_one(monkeypatch, fake, _parsed(sha=SHA_A1, vendor="vendor-a",
+                product="product-x", version="1.0"),
+                _chunks(rev=REV_A, tag="A-v1"), settings)
+    damaged = next(p for p in fake._points[coll] if p.payload["source_rev"] == REV_A)
+    fake._points[coll].remove(damaged)
+    assert not is_revision_committed(fake, settings, "reference", REV_A)
+    status, _ = _upsert_one(
+        monkeypatch, fake,
+        _parsed(sha=SHA_B1, vendor="vendor-b", product="product-y", version="2.0"),
+        _chunks(rev=REV_B, tag="B-v1"), settings,
+    )
+    assert status == "upserted"
+    assert fake.main_revs(coll, "reference") == {REV_B}
+    markers = fake._points.get(completion_collection_name(settings), [])
+    assert {p.payload["source_rev"] for p in markers} == {REV_B}, "orphaned marker left"
 
 
 def _legacy_points(doc_id, sha, rules_v, n=3, tag="legacy"):

@@ -13,7 +13,10 @@ reference: this file §7. Design overview: `docs/architecture.md` §3.
 no rollback:
 
 - `--skip-load` / `--skip-ingest` skip their stage; `--dry-run` exports
-  `AIRGAP_DRYRUN=1` (every script prints instead of executing);
+  `AIRGAP_DRYRUN=1` (every script prints instead of executing).
+  `common.sh` normalizes the flag once: `1`/`true`/`yes` (any case) preview,
+  `0`/`false`/`no`/unset run live, and any other value (`on`, ` 1`, `1<newline>`)
+  is refused before any stage (#1015);
   `--help` usage; unknown arguments fail before any pipeline stage runs.
 - Ingest runs only when `CORPUS_PVC` is non-empty and `--skip-ingest` is
   absent; otherwise the stage reports skipped.
@@ -85,7 +88,8 @@ restores the snapshot over whatever the file assigned; empty stays unset
   `STORAGE_CLASS` and `SNAPSHOT_STORAGE_CLASS` are checked (the latter
   defaults to the former); the corpus PVC is not.
 - Operator booleans `UI_ENABLED`, `CONTEXTUAL_EMBED_ENABLED`,
-  `INGEST_ALIAS_PUBLISH`, `INGEST_REINGEST`, `CHAT_CONDENSE_ENABLED`, `LLM_STREAM`
+  `INGEST_ALIAS_PUBLISH`, `INGEST_REINGEST`, `INGEST_AUTHORIZE_FROM_CATALOG`,
+  `CHAT_CONDENSE_ENABLED`, `LLM_STREAM`
   `FEEDBACK_ENABLED` and `AGENT_NETWORK_POLICY` (default **true**, unlike the others)
   accept only `true/1/yes` or `false/0/no` (any case; unset keeps the
   default). `INGEST_ALIAS_PUBLISH` may only be unset or true: in-place ingest
@@ -155,6 +159,12 @@ restores the snapshot over whatever the file assigned; empty stays unset
 - **Maintenance warning:** a new `.example` key that is not added to
   `OPERATOR_ENV_KEYS` silently regresses to file-wins. The list and the
   example must change together.
+- The plaintext gateway-key guard (`LLM_API_KEY`, `EMBED_API_KEY`,
+  `RERANK_API_KEY`, `CONTEXT_LLM_API_KEY`) scans the operator file text before it
+  is sourced (any `export`/`readonly`/`declare`/chained form) and rejects any
+  such variable whose sourced value differs from the caller's environment, so
+  no shell syntax can smuggle a key in (#1016). Process-environment keys for
+  `local:ask` stay allowed.
 - Task discovery never loads private env files. Air-gap tasks bridge only
   caller-set operator values to `common.sh`; CLI assignments win over the
   caller environment before that script applies its precedence rule.
@@ -400,6 +410,26 @@ Compatibility and lifecycle decisions under #448:
   (`QDRANT_STORAGE_SIZE`, `QDRANT_EXTRA_VALUES`, `QDRANT_TAG`, `INGEST_WORK_SIZE`,
   `INGEST_EXTRA_PATCH`) retain their existing precedence and never change the
   production defaults. The last remains a client-side CI-only Job patch.
+  `QDRANT_EXTRA_VALUES` and `INGEST_EXTRA_PATCH` are CI-rehearsal overrides:
+  the scripts refuse them unless `CI_REHEARSAL=1` is in the caller's process
+  environment (an `airgap.env` assignment never counts; never set it in the
+  air gap). Even then the patched ingest Job may differ from the render only in
+  container `resources` (no image, env/hash mode, security context, volume,
+  sidecar or identity change), and the Qdrant release is rendered with
+  `helm template` and refused unless it is private and hardened (no
+  Ingress/Route, ClusterIP Services only, API-key Secret present, no host
+  namespaces or hostPath, non-privileged read-only-root containers, the verified
+  registry image) before any `helm upgrade` (#1014). The container check is an
+  allowlist: no added capabilities and `drop: [ALL]`, `runAsNonRoot` with no UID 0,
+  no `hostPort`, host namespaces or RBAC objects, and only the chart's own
+  ServiceAccount. `CI_REHEARSAL` is captured read-only before the operator file
+  is sourced, so the file cannot forge it.
+- `deploy.sh` validates every operator string that becomes a Helm value before
+  rendering (`STORAGE_CLASS`/`SNAPSHOT_STORAGE_CLASS`: DNS-1123 name,
+  `QDRANT_RELEASE`: DNS-1123 label, `QDRANT_TAG`: image tag,
+  `QDRANT_STORAGE_SIZE`: positive quantity with a Ki/Mi/Gi/Ti unit, `INTERNAL_REGISTRY`:
+  `host[:port][/path]`) and passes them with `--set-string`, so a comma or `=`
+  can never become a second chart value (#1017).
 - Rollout waits remain Qdrant 600s, agent 300s and, with the bundled backend, OpenObserve and otelcol 120s each, with bounded
   diagnostics on failure. Explicit ingest keeps its existing wait/diagnostics.
 
@@ -445,7 +475,7 @@ they do not authorize production promotion.
 
 The connected host packs one tarball: git bundle, Qdrant + OpenObserve
 + otelcol-contrib + ingest + agent image archives (plus the oauth-proxy sidecar image once its
-`images.txt` digest is recorded), vendored chart, bootstrap script,
+`images.txt` digest is recorded; [image format](#bundle-image-format)), vendored chart, bootstrap script,
 `MANIFEST.txt`, `PACKING_RECORD.txt`, digest enumeration, `THIRD-PARTY-NOTICES.txt`
 ([licensing](licensing.md); pack fails closed on an unrecorded dependency, image
 digest or notice change, and bootstrap requires the member), offline signature,
@@ -457,11 +487,53 @@ checksums **after**.
   green `main` SHA whose CI images exist. The owner is inferred lowercase
   from the git remote (GHCR 404s on uppercase). The git bundle pins HEAD
   explicitly so the air-gap clone lands on the packed SHA.
-- `MANIFEST *_digest` lines are post-copy archive digests (the manifest
-  *list* resolves to one arch manifest when written, by construction) —
-  the ref line carries the requested pin, the digest line carries the
-  bundled bytes that load re-verifies. Confusing the two is the classic
-  digest-mismatch false alarm.
+- `MANIFEST *_digest` lines are the archives' platform manifest digests (the
+  manifest *list* pin resolves to one arch manifest when written, by
+  construction) — the ref line carries the requested pin, the digest line
+  carries the bundled bytes that load re-verifies. Confusing the two is the
+  classic digest-mismatch false alarm.
+- <a id="bundle-image-format"></a>**Image format (#1066).** Image members are
+  `oci-archive` tars under the unchanged member names (`qdrant-image.tar`,
+  `app-<role>-<SHA>.tar`, ...), and the signed MANIFEST declares
+  `image_format: oci-archive`. Pack copies with `skopeo copy --preserve-digests`,
+  so each archive holds the registry's platform manifest, config and compressed
+  layer blobs byte-for-byte: no conversion, no recompression (third-party layers
+  keep their upstream gzip; app layers keep the gzip the factory pushed). Each
+  `*_digest` therefore equals the upstream platform manifest digest (for a
+  manifest-list pin, the amd64 entry of that list), and `*_config_digest` the
+  upstream config. Pack, load and the SBOM inventory read each archive through
+  `image_manifest.py` (`oci-layout` version, an `index.json` naming exactly one
+  single-image manifest, and every manifest, config and layer blob present once
+  with its descriptor's size and sha256); a missing, shadowed or altered blob,
+  a second image, or another format fails closed with a fixed message before
+  signing (pack) or before any push (load). Load refuses any `image_format`
+  other than `oci-archive` before its `IMAGE_SHA` check, so a bundle never
+  mixes formats.
+- Rollback across the format change: a bundle packed before #1066 (for
+  example release `d53595e`) has docker-archive members and no
+  `image_format` line. This release's `load.sh` refuses it with the fixed
+  message "bundle image format is not oci-archive ..."; load it as before with
+  that release's own `bootstrap.sh` and `load.sh` in a separate workspace
+  ([rollback](install_and_ops.md#42-transfer--automated-bootstrap)). Its
+  checkout-identity guard would refuse mixing it with this checkout anyway.
+- Bastion prerequisites for `oci-archive`: skopeo ignores `TMPDIR` when it
+  unpacks an `oci-archive` and uses `/var/tmp` unless the global `--tmpdir`
+  flag is given. Where only a work directory is writable, put
+  `--tmpdir /work/tmp` in `SKOPEO_ARGS` (for example
+  `SKOPEO_ARGS="--authfile /work/auth.json --tmpdir /work/tmp"`); `load.sh`
+  refuses before the first push unless that directory exists, is writable and
+  has room for the largest member (at least 0.3 GB). A site
+  `containers-policy.json` passed with `--policy` that admits only the
+  `docker-archive` transport must also admit `oci-archive` (same
+  `insecureAcceptAnything` scope: bundle trust is the signed checksum list,
+  not registry signatures). The internal registry must accept OCI image
+  manifests (Qdrant's platform manifest is OCI; Docker registry 2.x and
+  current Quay do). A registry that rejects OCI manifests makes skopeo convert
+  the push to Docker v2s2: the manifest digest changes but the config blob
+  does not (observed with skopeo 1.22.2 on the Qdrant member), so load's
+  config read-back passes and prints the registry digest, which deploy pins;
+  it differs from the MANIFEST digest. Load refuses the tag only if the
+  config itself changed.
 - Release-signing custody (#1000): CI holds the key only as an **environment**
   secret `SNEAKERNET_SIGNING_KEY` of the GitHub environment `release-signing`
   (maintainer setup: Settings > Environments > New; Deployment branches =
@@ -501,7 +573,9 @@ checksums **after**.
   not overwritten, unreadable) fails closed with a fixed message and no
   `Loaded N images` line. Each verified image prints
   `==> verified <ref>@<registry manifest digest>`; that digest is the immutable
-  pin, and it differs from the MANIFEST archive digest by design (see
+  pin. With the registry's manifest bytes kept in the archive it normally equals
+  the MANIFEST archive digest, but a registry may re-serialize, so identity is
+  the config digest, never digest equality (see
   [image identity](#image-identity-across-archive-and-registry-formats)).
   Dry-run reads no registry and says so ("not release-verified").
   Load also requires each `<image>_config_digest` in the MANIFEST to equal its
@@ -597,7 +671,12 @@ cannot schedule on one node — proven).
   count, env, and pull secrets — FastAPI needs no GPU). The ingest Job is
   one-shot with a 24h deadline: caller corpus PVC read-only plus an
   auto-created `ingest-work` RWO scratch PVC (sized by `INGEST_WORK_SIZE`,
-  default 100Gi, never deleted); previous runs are deleted before re-apply
+  default 100Gi, never deleted). Parse workers also put their private
+  per-document PDF copies under `/work/parse-tmp` (`INGEST_PARSE_TMP_DIR`,
+  issue #1058): size `INGEST_WORK_SIZE` for the existing scratch plus about
+  `ingest.workers` x the largest PDF at peak (`ingest_max_pdf_bytes` defaults
+  to 0, unbounded). A full volume fails only the affected document with
+  `ParseScratchError`; previous runs are deleted before re-apply
   (Jobs are immutable); completion waits up to `INGEST_TIMEOUT` (default
   1h) while a background tailer streams pod logs, dumping logs and events
   on timeout.
@@ -949,7 +1028,7 @@ bytes. Combined tag+digest refs are invalid — digest-only form is the pin.
   requires `REDHAT_REGISTRY_USER` and `REDHAT_REGISTRY_PASSWORD` secrets
   belonging to a registry service account and fails closed if either is absent
   or login fails. Personal pull secrets stay local. The OAuth copy uses
-  `--remove-signatures` because Docker archives cannot store Red Hat's upstream
+  `--remove-signatures` because OCI archives cannot store Red Hat's upstream
   signature attachments. Source digest verification, archive digests, and the
   offline bundle signature still apply; upstream signature attachments are not
   part of the handoff. The explicit PENDING state still skips the member and
@@ -994,9 +1073,9 @@ and CI tooling have different owners and pull credentials.
 | CI Qdrant service | `qdrant/qdrant@sha256:<images.txt digest>` | the `images.txt` manifest digest, so a tag is never enough | registry-to-registry copy that preserves the digest | GitLab runner (`sim`, `gate-l1`) |
 
 The CI Qdrant service is a different role from the runtime Qdrant image. `load.sh`
-pushes from a Docker archive, whose registry manifest digest can differ from the
-upstream pin (see above), so a digest reference only resolves for a copy made
-registry to registry. Prove it with `skopeo inspect` against the `images.txt`
+pushes the single platform image from an OCI archive: its registry manifest digest
+is the platform digest, never the `images.txt` manifest-list pin (see above), so a
+digest reference to the pin only resolves for a copy made registry to registry. Prove it with `skopeo inspect` against the `images.txt`
 digest before relying on it; a repository shared by both roles must satisfy both
 forms. Registry-side tag immutability, retention and scanning remain Quay policy,
 not repository behavior.
@@ -1340,8 +1419,9 @@ sidecar part of the signed candidate, rather than an unresolved release input.
 ### Image identity across archive and registry formats
 
 Record the requested upstream pin, platform/archive manifest digest, image config
-digest, loaded registry manifest digest and actual pod `imageID`. Docker archives
-can contain uncompressed layers while the registry stores compressed layers;
+digest, loaded registry manifest digest and actual pod `imageID`. The bundle's
+OCI archives keep the registry's manifest bytes, but a manifest-list pin is not
+the platform digest, and a registry may re-serialize a pushed manifest, so
 those manifest digests can differ. Verify the archive signature/checksums and
 its manifest against the bundle first, then verify identical image config/rootfs
 diffIDs across the load, and the running digest against the loaded registry.
@@ -1350,9 +1430,10 @@ alone. Capture all five images, including every OAuth sidecar.
 Implemented (issue #272), as one chain bound to the signed MANIFEST:
 
 1. `pack.sh` records `<image>_config_digest` for all five images next to the
-   archive `<image>_digest`. `load.sh` refuses an archive whose config differs
-   from it (before any push), then reads each pushed tag back and requires the
-   packed config digest and layer count; it prints `ref@registry-manifest-digest`.
+   archive `<image>_digest`, both read from the verified OCI layout. `load.sh`
+   re-reads every archive the same way and refuses one whose blobs, digest or
+   config differ (before any push), then reads each pushed tag back and requires
+   the packed config digest and layer count; it prints `ref@registry-manifest-digest`.
 2. `deploy.sh` (every entry path: after `load`, `pipeline.sh --skip-load`,
    standalone `airgap:deploy`) and `ingest.sh` read the registry tag back
    **before any cluster change** and require a single-image manifest with the
@@ -1510,9 +1591,15 @@ explicit environment → `OPERATOR_ENV_KEYS` snapshot/restore around file loadin
 → both agent and ingest environments → Settings and operation-specific interpretation. Trace every step
 for a newly required input; an example alone or agent-only render is insufficient.
 Maintenance modes (issue #391 current packet) follow the same path:
-`INGEST_REINGEST` and `INGEST_RETIRE_DOCS` are `OPERATOR_ENV_KEYS` validated by
+`INGEST_REINGEST`, `INGEST_RETIRE_DOCS` and `INGEST_AUTHORIZE_FROM_CATALOG` are `OPERATOR_ENV_KEYS` validated by
 `scripts/airgap/ingest.sh` and rendered into the ingest Job args (`INGEST_RETIRE_DOCS` accepts comma- or newline-separated
-`DOCID[@SOURCEREV]` entries and preserves interior whitespace in product/version labels);
+`DOCID[@SOURCEREV]` entries and preserves interior whitespace in product/version labels;
+`INGEST_AUTHORIZE_FROM_CATALOG=true` maps to `ingest.authorizeFromCatalog` and renders
+`--authorize-from-catalog`, which lets a retirement name a revision the live build published and
+committed after the local inventory was lost. It is valid only with `INGEST_RETIRE_DOCS`: the values
+mapper refuses it alone with `INGEST_AUTHORIZE_FROM_CATALOG requires INGEST_RETIRE_DOCS`, and the
+chart schema and template refuse it too. See
+[ingest refresh lineage](ingest.md#9-orchestration-run_ingestpy-inventorypy));
 alias publication is the only ingest mode (the Job carries no mode switch, the
 chart schema refuses `ingest.aliasPublish`, and the values mapper refuses
 `INGEST_ALIAS_PUBLISH=false`), and the shared ingest-work progress path is fixed so one authorized

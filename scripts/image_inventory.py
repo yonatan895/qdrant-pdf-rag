@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read installed Python metadata from Docker archive layers without executing them."""
+"""Read installed Python metadata from OCI archive layers without executing them."""
 from __future__ import annotations
 
 import argparse
@@ -7,6 +7,7 @@ import email.parser
 import gzip
 import hashlib
 import json
+import re
 import tarfile
 from pathlib import Path, PurePosixPath
 
@@ -16,6 +17,15 @@ except ModuleNotFoundError:
     import dependency_lock as _local_locks
 
     locks = _local_locks
+try:
+    from scripts.airgap import image_manifest as oci
+except ModuleNotFoundError:
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent / 'airgap'))
+    import image_manifest as _local_oci
+
+    oci = _local_oci
 
 RECEIPT = 'opt/rag-locks/installed-inventory.json'
 LOCK = 'opt/rag-locks/locks/cp314-linux-x86_64.json'
@@ -27,16 +37,6 @@ def path_name(name: str) -> str:
     if path.is_absolute() or '..' in path.parts:
         raise locks.LockError('unsafe image member path')
     return str(path)
-
-
-def read_member(archive: tarfile.TarFile, name: str) -> bytes:
-    member = archive.getmember(name)
-    if not member.isfile() or member.size > 8_000_000:
-        raise locks.LockError('invalid or oversized image metadata')
-    stream = archive.extractfile(member)
-    if stream is None:
-        raise locks.LockError('missing image metadata bytes')
-    return stream.read()
 
 
 def package_metadata(path: str) -> bool:
@@ -52,30 +52,29 @@ def inventory(root: Path, image: Path) -> dict:
     expected.update(manifest['base_image']['inherited_python_packages'])
     retained: dict[str, bytes] = {}
     links: set[str] = set()
-    with tarfile.open(image, 'r:*') as outer:
-        index = json.loads(read_member(outer, 'manifest.json'))
-        if not isinstance(index, list) or len(index) != 1:
-            raise locks.LockError('image archive must contain exactly one image')
-        config_bytes = read_member(outer, index[0]['Config'])
+    with tarfile.open(image, 'r:') as outer:
+        # The bundle's OCI reader (#1066) verifies the single image's manifest,
+        # config and every layer blob against its descriptor first.
+        try:
+            image_layout = oci.read_archive(outer)
+        except oci.BlobMismatch:
+            raise locks.LockError('image archive blob does not match its digest') from None
+        except (oci.ArchiveError, KeyError, TypeError) as exc:
+            raise locks.LockError('image archive must contain exactly one OCI image') from exc
+        config_bytes = image_layout.config_raw
         config = json.loads(config_bytes)
         if config.get('os') != 'linux' or config.get('architecture') != 'amd64':
             raise locks.LockError('image target differs from the locked target')
-        layers = index[0]['Layers']
+        layers = image_layout.layers
         diff_ids = config['rootfs']['diff_ids']
         if not layers or len(layers) != len(diff_ids):
             raise locks.LockError('image layer identity is incomplete')
         for name, diff_id in zip(layers, diff_ids, strict=True):
-            member = outer.getmember(name)
-            if not member.isfile():
-                raise locks.LockError('image layer is not a regular member')
-            stream = outer.extractfile(member)
-            if stream is None:
-                raise locks.LockError('missing image layer')
+            stream = oci.open_blob(outer, image_layout, name)
             magic = stream.read(2)
             stream.seek(0)
-            # Docker's containerd exporter uses compressed OCI blobs even in
-            # Docker archives; skopeo may produce plain tar layers. diff_ids
-            # always bind the uncompressed tar bytes.
+            # Registry layers are gzip (the factory's push) or plain tar;
+            # diff_ids always bind the uncompressed tar bytes.
             decoded = gzip.GzipFile(fileobj=stream) if magic == b'\x1f\x8b' else stream
             layer_hash = hashlib.sha256()
             while block := decoded.read(1024 * 1024):
@@ -149,6 +148,64 @@ def inventory(root: Path, image: Path) -> dict:
             'packages': dict(sorted(actual.items()))}
 
 
+FROM_LINE = re.compile(r'^\s*FROM\s+(?:--\S+\s+)*(\S+)(?:\s+AS\s+(\S+))?\s*$', re.IGNORECASE)
+
+
+# Named build contexts the release build supplies (docker build --build-context);
+# they are directories, not registry images.
+BUILD_CONTEXTS = frozenset({'wheelhouse', 'bm25'})
+
+# `COPY --from=X`, `ADD --from=X` and `RUN --mount=...,from=X`: X must be an earlier
+# stage alias; anything else is an unpinned external image (#1030).
+FROM_SOURCE = re.compile(r'(?:--from=|--mount=[^\s]*?\bfrom=|(?<=,)from=)([^\s,]+)')
+
+
+def check_containerfile_bases(root: Path) -> None:
+    """Every images/Containerfile.* FROM must be the approved base pin (#1030).
+
+    The pin is locks.BASE_IMAGE; images.txt (what pack.sh labels the SBOM with)
+    and the lock's base_image reference must agree with it, and each Containerfile
+    FROM (a later stage may start FROM an earlier stage alias) must be exactly it.
+    Fixed diagnostics only.
+    """
+    digest = locks.BASE_IMAGE.rpartition('@')[2]
+    repository = locks.BASE_IMAGE.rpartition('@')[0]
+    pins = [line.split() for line in (root / 'images.txt').read_text().splitlines()
+            if line.strip() and not line.lstrip().startswith('#')]
+    recorded = [p[1] for p in pins if len(p) >= 2 and 'python-314-minimal' in p[0]]
+    if recorded != [digest]:
+        raise locks.LockError('images.txt base digest differs from the approved base pin')
+    manifest = locks.read_json(root / locks.MANIFEST)
+    if manifest.get('base_image', {}).get('reference') != locks.BASE_IMAGE:
+        raise locks.LockError('lock base image differs from the approved base pin')
+    files = sorted((root / 'images').glob('Containerfile.*'))
+    if not files:
+        raise locks.LockError('no images/Containerfile.* to verify')
+    for path in files:
+        stages: set[str] = set()
+        bases = 0
+        for line in path.read_text().replace('\\\n', ' ').splitlines():
+            for source in FROM_SOURCE.findall(line):
+                if source not in stages and source not in BUILD_CONTEXTS:
+                    raise locks.LockError('Containerfile copies from or mounts a non-stage image')
+            match = FROM_LINE.match(line)
+            if not match:
+                if re.match(r'^\s*FROM\b', line, re.IGNORECASE):
+                    raise locks.LockError('unparseable Containerfile FROM line')
+                continue
+            reference, alias = match.groups()
+            if reference not in stages:
+                if reference != locks.BASE_IMAGE and reference.partition('@')[0] == repository:
+                    raise locks.LockError('Containerfile base digest differs from the approved base pin')
+                if reference != locks.BASE_IMAGE:
+                    raise locks.LockError('Containerfile base is not the approved digest-pinned base')
+                bases += 1
+            if alias:
+                stages.add(alias)
+        if bases == 0:
+            raise locks.LockError('Containerfile has no approved base')
+
+
 def verify_sbom(root: Path, directory: Path, commit: str) -> None:
     """Reconcile the serialized SBOM, independently of its producer's objects."""
     sbom = locks.read_json(directory / 'sbom.json')
@@ -164,9 +221,17 @@ def verify_sbom(root: Path, directory: Path, commit: str) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', type=Path, default=locks.ROOT)
-    parser.add_argument('--archive', type=Path, required=True)
+    parser.add_argument('--archive', type=Path)
+    parser.add_argument('--check-containerfiles', action='store_true',
+                        help='verify images/Containerfile.* FROM digests against images.txt and the lock')
     args = parser.parse_args()
     try:
+        if args.check_containerfiles:
+            check_containerfile_bases(args.root)
+            print('image-inventory: Containerfile bases match the approved pin')
+            return 0
+        if args.archive is None:
+            parser.error('--archive is required')
         print(json.dumps(inventory(args.root, args.archive), indent=2, sort_keys=True))
         return 0
     except locks.LockError as exc:

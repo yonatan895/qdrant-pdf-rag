@@ -375,6 +375,14 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["enabled", "workers", "reingest", "collectionPolicy"],
+      "if": {
+        "properties": { "authorizeFromCatalog": { "const": true } },
+        "required": ["authorizeFromCatalog"]
+      },
+      "then": {
+        "required": ["retireDocs"],
+        "properties": { "retireDocs": { "minItems": 1 } }
+      },
       "properties": {
         "enabled": {
           "type": "boolean",
@@ -403,6 +411,10 @@
             "not": { "pattern": "__[A-Z0-9_]+__" }
           },
           "description": "Malformed @-sides, control characters and backend inventory checks stay shell-owned (D6)."
+        },
+        "authorizeFromCatalog": {
+          "type": "boolean",
+          "description": "Renders --authorize-from-catalog; valid only with a non-empty retireDocs (issue #1005)."
         },
         "contextualEnabled": { "type": "boolean" },
         "contextLlmBaseUrl": { "type": "string" },

@@ -13,7 +13,12 @@ cd "$REPO_ROOT"
 # the snapshot over whatever the file assigned — so `VAR=x sh scripts/tools/run-task.sh airgap:load`
 # beats a stale key in airgap.env instead of being silently overridden by it.
 # Empty stays unset, matching the ${VAR:-default} idiom used everywhere below.
-OPERATOR_ENV_KEYS="AGENT_NETWORK_POLICY AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES AGENT_ROUTE AIRGAP_APP_REGISTRY AIRGAP_BUNDLE_DIR AIRGAP_DRYRUN AIRGAP_ENV AIRGAP_WORKSPACE CONTEXTUAL_EMBED_ENABLED CONTEXT_LLM_BASE_URL CONTEXT_LLM_MODEL CORPUS_PVC DENSE_DIM EMBED_BASE_URL EMBED_MODE EMBED_MODEL EMBED_MODEL_REVISION FEEDBACK_ENABLED FEEDBACK_RETENTION_DAYS FEEDBACK_SECRET FEEDBACK_STORAGE_SIZE GATEWAY_API_KEY_SECRET GATEWAY_API_KEY_SECRET_KEY GATEWAY_BASE_URL GATEWAY_CA_CONFIGMAP GATEWAY_PROBE_MAX_TOKENS GHCR_OWNER IMAGE_SHA INGEST_ALIAS_PUBLISH INGEST_EXTRA_PATCH INGEST_REINGEST INGEST_RETIRE_DOCS INGEST_TIMEOUT INGEST_WORKERS INGEST_WORK_SIZE INSECURE_REGISTRY INTERNAL_REGISTRY KC LLM_BASE_URL LLM_MODEL_REASONING LLM_MAX_MODEL_LEN LLM_RESERVED_OUTPUT_TOKENS LLM_THINKING_RESERVE_TOKENS_SIMPLE LLM_THINKING_RESERVE_TOKENS_COMPLEX LLM_REASONING_EFFORT_SIMPLE LLM_REASONING_EFFORT_COMPLEX LLM_REASONING_EFFORTS LLM_STREAM REQUEST_DEADLINE_S REQUEST_MAX_CONCURRENT REQUEST_QUEUE_MAX REQUEST_QUEUE_WAIT_S CHAT_CONDENSE_ENABLED METRICS_ENABLED NAMESPACE OTEL_DEPLOYMENT_ENVIRONMENT OTEL_EXPORTER_OTLP_ENDPOINT OPENOBSERVE_RUN_AS_ID OTEL_SERVICE_NAME PULL_SECRET QDRANT_EXTRA_VALUES QDRANT_IMAGE QDRANT_RELEASE QDRANT_PEER_URLS QDRANT_REPLICATION_FACTOR QDRANT_SHARD_NUMBER QDRANT_STORAGE_SIZE QDRANT_TAG QDRANT_WRITE_CONSISTENCY_FACTOR QUERY RERANK_BASE_URL RERANK_ENABLED RERANK_ENDPOINT_ORDER RERANK_MODEL SKOPEO_ARGS SNAPSHOT_STORAGE_CLASS SNEAKERNET_KEY_TRUSTED SNEAKERNET_SIGNING_KEY SNEAKERNET_TRUSTED_PUB AIRGAP_TASK_ARCHIVE SERVICEMONITOR_ENABLED STORAGE_CLASS TRACE_QUERY_PASSWORD TRACE_QUERY_URL TRACE_QUERY_USER TRACE_TIMEOUT UI_ENABLED"
+OPERATOR_ENV_KEYS="AGENT_NETWORK_POLICY AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES AGENT_ROUTE AIRGAP_APP_REGISTRY AIRGAP_BUNDLE_DIR AIRGAP_DRYRUN AIRGAP_ENV AIRGAP_WORKSPACE CONTEXTUAL_EMBED_ENABLED CONTEXT_LLM_BASE_URL CONTEXT_LLM_MODEL CORPUS_PVC DENSE_DIM EMBED_BASE_URL EMBED_MODE EMBED_MODEL EMBED_MODEL_REVISION FEEDBACK_ENABLED FEEDBACK_RETENTION_DAYS FEEDBACK_SECRET FEEDBACK_STORAGE_SIZE GATEWAY_API_KEY_SECRET GATEWAY_API_KEY_SECRET_KEY GATEWAY_BASE_URL GATEWAY_CA_CONFIGMAP GATEWAY_PROBE_MAX_TOKENS GHCR_OWNER IMAGE_SHA INGEST_ALIAS_PUBLISH INGEST_AUTHORIZE_FROM_CATALOG INGEST_EXTRA_PATCH INGEST_REINGEST INGEST_RETIRE_DOCS INGEST_TIMEOUT INGEST_WORKERS INGEST_WORK_SIZE INSECURE_REGISTRY INTERNAL_REGISTRY KC LLM_BASE_URL LLM_MODEL_REASONING LLM_MAX_MODEL_LEN LLM_RESERVED_OUTPUT_TOKENS LLM_THINKING_RESERVE_TOKENS_SIMPLE LLM_THINKING_RESERVE_TOKENS_COMPLEX LLM_REASONING_EFFORT_SIMPLE LLM_REASONING_EFFORT_COMPLEX LLM_REASONING_EFFORTS LLM_STREAM REQUEST_DEADLINE_S REQUEST_MAX_CONCURRENT REQUEST_QUEUE_MAX REQUEST_QUEUE_WAIT_S CHAT_CONDENSE_ENABLED METRICS_ENABLED NAMESPACE OTEL_DEPLOYMENT_ENVIRONMENT OTEL_EXPORTER_OTLP_ENDPOINT OPENOBSERVE_RUN_AS_ID OTEL_SERVICE_NAME PULL_SECRET QDRANT_EXTRA_VALUES QDRANT_IMAGE QDRANT_RELEASE QDRANT_PEER_URLS QDRANT_REPLICATION_FACTOR QDRANT_SHARD_NUMBER QDRANT_STORAGE_SIZE QDRANT_TAG QDRANT_WRITE_CONSISTENCY_FACTOR QUERY RERANK_BASE_URL RERANK_ENABLED RERANK_ENDPOINT_ORDER RERANK_MODEL SKOPEO_ARGS SNAPSHOT_STORAGE_CLASS SNEAKERNET_KEY_TRUSTED SNEAKERNET_SIGNING_KEY SNEAKERNET_TRUSTED_PUB AIRGAP_TASK_ARCHIVE SERVICEMONITOR_ENABLED STORAGE_CLASS TRACE_QUERY_PASSWORD TRACE_QUERY_URL TRACE_QUERY_USER TRACE_TIMEOUT UI_ENABLED"
+# CI_REHEARSAL (#1014) is honored from the process environment only: the
+# operator file travels to the air gap and must never opt itself in.
+# readonly BEFORE sourcing: an operator-file assignment to it aborts the shell
+# instead of forging the opt-in (the capture cannot be overwritten or unset).
+readonly _CI_REHEARSAL_PROCESS_ENV="${CI_REHEARSAL:-}"
 _cli_saved_keys=""
 for _k in $OPERATOR_ENV_KEYS; do
     eval "_is_set=\${$_k:+set}"
@@ -40,6 +45,39 @@ die() {
     exit 1
 }
 
+# Issue #1016: the operator file is sourced, so `export`/`readonly`/`declare`
+# lines run too. Scan its text before sourcing (any assignment prefix, even
+# chained after `;`/`&&`) and compare the key values after sourcing (any
+# syntax, including eval). Fixed message; the value is never printed.
+_GATEWAY_KEY_VARS="LLM_API_KEY EMBED_API_KEY RERANK_API_KEY CONTEXT_LLM_API_KEY"
+_plaintext_key_die() {
+    die "plaintext gateway virtual key in $1 — keys live only in the cluster Secret named by GATEWAY_API_KEY_SECRET (see airgap.env.example); delete the plaintext assignment"
+}
+_scan_env_file_keys() {
+    [ -s "$1" ] || return 0
+    _alt='LLM_API_KEY|EMBED_API_KEY|RERANK_API_KEY|CONTEXT_LLM_API_KEY'
+    if grep -Eq "(^|[;&|({[:space:]])(${_alt})\+?=[^[:space:]]" "$1" 2>/dev/null; then
+        # `KEY=` / `KEY=""` are empty assignments, not keys.
+        if grep -E "(^|[;&|({[:space:]])(${_alt})\+?=" "$1" | grep -Ev "^[[:space:]]*#" |
+            grep -Evq "(${_alt})\+?=(\"\"|'')?([[:space:]]*(#.*)?)?\$"; then
+            _plaintext_key_die "$1"
+        fi
+    fi
+    unset _alt
+}
+for _k in $_GATEWAY_KEY_VARS; do
+    eval "_pre_set_${_k}=\${$_k+set}; _pre_val_${_k}=\${$_k:-}"
+done
+_check_sourced_keys() {
+    for _k in $_GATEWAY_KEY_VARS; do
+        eval "_now=\${$_k:-}; _was=\${_pre_val_${_k}}"
+        if [ -n "$_now" ] && [ "$_now" != "$_was" ]; then
+            _plaintext_key_die "$1"
+        fi
+    done
+    unset _now _was
+}
+
 if [ -n "${AIRGAP_ENV:-}" ]; then
     # Issue #478: an explicitly selected file must load or fail closed
     # before any mutation. A missing/unreadable selection must never
@@ -48,14 +86,18 @@ if [ -n "${AIRGAP_ENV:-}" ]; then
     # diagnostic names the path only, never file contents. Unset stays
     # optional: default ./airgap.env when present, else environment-only.
     if [ -f "$AIRGAP_ENV" ] && [ -r "$AIRGAP_ENV" ]; then
+        _scan_env_file_keys "$AIRGAP_ENV"
         # shellcheck disable=SC1091
         . "$AIRGAP_ENV"
+        _check_sourced_keys "$AIRGAP_ENV"
     else
         die "AIRGAP_ENV selects '$AIRGAP_ENV' but it is not a readable regular file (fix the path or unset AIRGAP_ENV to use airgap.env/environment-only)"
     fi
 elif [ -f airgap.env ]; then
+    _scan_env_file_keys airgap.env
     # shellcheck disable=SC1091
     . ./airgap.env
+    _check_sourced_keys airgap.env
 fi
 
 for _k in $_cli_saved_keys; do
@@ -63,6 +105,28 @@ for _k in $_cli_saved_keys; do
     eval "unset _cli_saved_${_k}"
 done
 unset _k _cli_saved_keys OPERATOR_ENV_KEYS
+CI_REHEARSAL=$_CI_REHEARSAL_PROCESS_ENV
+
+# Issue #1015: AIRGAP_DRYRUN is a safety interlock, so it is normalized once,
+# here, and every stage compares the normalized "1"/"0". Documented spellings
+# only (true/yes/1 = preview, false/no/0/unset = live); anything else, such as
+# " 1", "1\n" or "on", is refused before any stage rather than run live.
+case "${AIRGAP_DRYRUN:-}" in
+    "") AIRGAP_DRYRUN=0 ;;
+    1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]) AIRGAP_DRYRUN=1 ;;
+    0|[Ff][Aa][Ll][Ss][Ee]|[Nn][Oo]) AIRGAP_DRYRUN=0 ;;
+    *) die "AIRGAP_DRYRUN must be one of 1/true/yes (preview) or 0/false/no (live); refusing to guess" ;;
+esac
+export AIRGAP_DRYRUN
+
+# Issue #1014: CI-rehearsal overrides change a manifest after (or outside) the
+# release checks, so the release path refuses them unless the caller's process
+# environment opts in with CI_REHEARSAL=1 (disposable lab only, never the air
+# gap). $1 = the override's variable name.
+require_ci_rehearsal() {
+    [ "${CI_REHEARSAL:-}" = "1" ] ||
+        die "$1 is a CI-rehearsal override and is refused on the release path (set CI_REHEARSAL=1 in the process environment only in a disposable lab, never in the air gap)"
+}
 
 require_env() {
     # Collect every missing key before failing, so one run tells the
@@ -157,10 +221,9 @@ refuse_plaintext_gateway_keys() {
         _env_file="airgap.env"
     fi
     if [ -n "$_env_file" ]; then
-        _leaked=$(grep -E "^[[:space:]]*(LLM_API_KEY|EMBED_API_KEY|RERANK_API_KEY|CONTEXT_LLM_API_KEY)=[^[:space:]]" "$_env_file" || true)
-        [ -z "$_leaked" ] || die "plaintext gateway virtual key in $_env_file — keys live only in the cluster Secret named by GATEWAY_API_KEY_SECRET (see airgap.env.example); delete the plaintext assignment"
+        _scan_env_file_keys "$_env_file"
     fi
-    unset _env_file _leaked
+    unset _env_file
 }
 
 # Secret names land inside sed replacements and k8s manifests: restrict to
@@ -276,6 +339,33 @@ refuse_nfs_storage() {
     esac
 }
 
+# Issue #1017: operator strings that become Helm values must each be exactly
+# one value. Strict syntax checks run before any render, so a comma, brace,
+# space or '=' can never split into a second chart value. $1 = variable name,
+# $2 = ERE it must fully match, $3 = what it must be (for the message). Empty
+# is skipped here (required-ness is require_env's job).
+check_value_syntax() {
+    eval "_cv=\${$1:-}"
+    [ -z "$_cv" ] && { unset _cv; return 0; }
+    if [ "${#_cv}" -gt 253 ] || ! printf '%s\n' "$_cv" | grep -Eq "^($2)\$" ||
+        [ "$(printf '%s\n' "$_cv" | wc -l)" -ne 1 ]; then
+        unset _cv
+        die "$1 must be $3"
+    fi
+    unset _cv
+}
+
+validate_helm_inputs() {
+    _dns='[a-z0-9]([-a-z0-9.]*[a-z0-9])?'
+    check_value_syntax STORAGE_CLASS "$_dns" "a DNS-1123 name (lowercase alphanumerics, '-', '.')"
+    check_value_syntax SNAPSHOT_STORAGE_CLASS "$_dns" "a DNS-1123 name (lowercase alphanumerics, '-', '.')"
+    check_value_syntax QDRANT_RELEASE '[a-z0-9]([-a-z0-9]*[a-z0-9])?' "a DNS-1123 label (lowercase alphanumerics, '-')"
+    check_value_syntax QDRANT_TAG '[A-Za-z0-9_][A-Za-z0-9._-]{0,127}' "an image tag (letters, digits, '_', '.', '-')"
+    check_value_syntax QDRANT_STORAGE_SIZE '[1-9][0-9]*(\.[0-9]+)?(Ki|Mi|Gi|Ti)' "a positive quantity with a unit (Ki, Mi, Gi or Ti), such as 100Gi"
+    check_value_syntax INTERNAL_REGISTRY '[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?(/[a-z0-9]+([._-][a-z0-9]+)*)*' "host[:port][/path] with no spaces, commas or '='"
+    unset _dns
+}
+
 # kubectl preferred, oc fallback — same choice in deploy/ingest/validate/smoke.
 kc() {
     if command -v kubectl >/dev/null 2>&1; then echo kubectl; else echo oc; fi
@@ -386,6 +476,18 @@ check_checkout_sha() {
     printf '%s\n' "$_flags" | awk 'NF && substr($0, 1, 2) != "H " { bad=1 } END { exit bad }' || \
         die "executing checkout hides tracked files from change detection (assume-unchanged, skip-worktree or sparse checkout) — clear the flags (git update-index --no-assume-unchanged / --no-skip-worktree; git ls-files -v marks them) before running a release"
     unset _flags
+}
+
+# Pack-host twin of the checkout guard (#1030): fixed messages, no file names.
+check_pack_tree_clean() {
+    _msg="pack tree is not the clean checked-out commit"
+    _rc=0
+    git diff --quiet HEAD -- >/dev/null 2>&1 || _rc=$?
+    [ "$_rc" -eq 0 ] || die "$_msg: tracked changes (git status lists them) — commit or restore them; the bundle records HEAD, not the working tree"
+    _flags=$(git ls-files -v -- ':/' 2>/dev/null) || die "$_msg: the index cannot be read"
+    printf '%s\n' "$_flags" | awk 'NF && substr($0, 1, 2) != "H " { bad=1 } END { exit bad }' ||
+        die "$_msg: tracked files are hidden from change detection (assume-unchanged, skip-worktree or sparse checkout)"
+    unset _msg _rc _flags
 }
 
 # oc/kubectl must exist unless previewing (deploy/ingest only; validate and

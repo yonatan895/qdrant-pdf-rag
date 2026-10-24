@@ -211,6 +211,23 @@ def test_ui_chat_bad_history_json_is_ignored(ui_client):
     assert "Reissue the command after initialization." in resp.text
 
 
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "[" * 100_000,
+        '[{"role":"user","content":' + "9" * 6000 + "}]",
+        '[{"role":"user","content":"ok","x":' + "[" * 50_000 + "}]",
+    ],
+    ids=["deep-nesting", "huge-int", "nested-extra"],
+)
+def test_ui_chat_hostile_history_degrades_to_empty_history(ui_client, raw):
+    """Issue #1032: client-owned history is untrusted; recursion and int-limit
+    failures behave like malformed JSON, never a 500."""
+    resp = ui_client.post("/ui/chat", data={"message": "What is IEA500I?", "messages": raw})
+    assert resp.status_code == 200
+    assert "Reissue the command after initialization." in resp.text
+
+
 def test_ui_chat_stream_sse_token_final_contract(ui_client):
     resp = ui_client.post(
         "/ui/chat/stream",

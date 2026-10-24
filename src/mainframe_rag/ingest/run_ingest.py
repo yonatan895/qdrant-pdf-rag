@@ -62,6 +62,7 @@ from mainframe_rag.ingest.completion import (
     acquire_run_lock,
     completion_collection_name,
     delete_completion,
+    delete_revision_completions,
     doc_generation_id,
     ensure_completion_collection,
     expected_digests,
@@ -84,6 +85,7 @@ from mainframe_rag.ingest.context import (
 from mainframe_rag.ingest.corpus_scan import (
     UNREADABLE_FILE_MESSAGE,
     UNREADABLE_FILE_TYPE,
+    ParseScratchError,
     private_verified_copy,
     require_inside_root,
     scan_corpus,
@@ -110,7 +112,10 @@ from mainframe_rag.ingest.inventory import (
 )
 from mainframe_rag.ingest.publish import (
     PUBLISH_STATE_VERSION,
+    RETIRE_CATALOG_REQUIRES_RETIRE_DOC,
+    CatalogRetirementRefused,
     apply_approved_removals,
+    catalog_retirement_approvals,
     clear_publish_state,
     commit_retired_inventory,
     corpus_fingerprint,
@@ -287,6 +292,15 @@ def parse_walked(
     )
 
 
+def _make_parse_tmp(base: str) -> str:
+    """A new 0700 per-call directory under `base` (created 0700 if missing),
+    or under the default temp dir when `base` is empty."""
+    if not base:
+        return tempfile.mkdtemp(prefix="mfr-parse-")
+    os.makedirs(base, mode=0o700, exist_ok=True)
+    return tempfile.mkdtemp(prefix="mfr-parse-", dir=base)
+
+
 def _parse_one(
     args: ParseTask,
 ) -> tuple[
@@ -304,7 +318,7 @@ def _parse_one(
     path_str, vendor, product, version, corpus_root, sha, embed, cache_path = args
     started = time.monotonic()
     parsed: ParsedDoc | None = None
-    tmp_dir = tempfile.mkdtemp(prefix="mfr-parse-")  # 0700, private to this call
+    tmp_dir: str | None = None  # per-call private dir (0700), removed in `finally`
     try:
         path = Path(path_str)
         # TOCTOU (#996): the scan confined this path once; re-check right
@@ -318,6 +332,10 @@ def _parse_one(
         require_document_within("pdf_bytes", path.stat().st_size, settings.ingest_max_pdf_bytes)
         work_path, work_root = path, Path(corpus_root) if corpus_root else None
         if corpus_root and sha:
+            try:
+                tmp_dir = _make_parse_tmp(settings.ingest_parse_tmp_dir)
+            except OSError:  # scratch dir cannot be made: fixed text, no path
+                raise ParseScratchError from None
             work_path, work_root = private_verified_copy(path, corpus_root, sha, tmp_dir)
         parsed = parse_walked(
             work_path,
@@ -432,7 +450,8 @@ def _parse_one(
         )
         return record, dummy_parsed, [], [], {}
     finally:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
+        if tmp_dir is not None:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 def resolve_workers(requested: int | None, settings: Settings) -> int:
@@ -592,6 +611,7 @@ def _upsert_one(
     *,
     src_labels: str,
     lineage_rev: str | None = None,
+    ancestor: str | None = None,
 ) -> tuple[str, float]:
     """Stage 2 (upsert stream): verified-completion skip, invalidate-on-change,
     batched upsert, verify-before-mark. Vectors arrive precomputed from the
@@ -608,6 +628,8 @@ def _upsert_one(
     file records one): the only key allowed to replace another revision's
     points. Without lineage, committed coexisting revisions are left alone
     (replacement would be the overwrite bug) and only residue is swept.
+    ancestor is the live generation this staging was cloned from: its
+    markers certify the committed siblings the clone carries (issue #1004).
     """
     started = time.perf_counter()
     client = _get_qdrant(settings)
@@ -635,7 +657,7 @@ def _upsert_one(
         # Revision delete plan (issue #361): computed BEFORE any delete —
         # raises on unsupported revision-less data instead of guessing.
         rev_deletes = plan_refresh_deletes(
-            client, settings, parsed.doc_id, revision, lineage_rev
+            client, settings, parsed.doc_id, revision, lineage_rev, ancestor=ancestor
         )
         # Invalidate this revision's markers (plus the lineage revision's
         # when it differs — a refresh retires the old generation's markers
@@ -645,17 +667,17 @@ def _upsert_one(
         # exists-check and the delete) is tolerated — real Qdrant failures
         # propagate so the doc errors instead of publishing alongside a
         # stale marker.
-        scopes = {revision}
+        # Every other revision the plan deletes (lineage, swept residue)
+        # loses its markers with its points, under whichever doc_id they
+        # were recorded (issues #1005/#1006): a swept revision must never
+        # leave a zero-point marker behind.
+        others = set(rev_deletes) - {revision}
         if lineage_rev is not None and lineage_rev != revision:
-            scopes.add(lineage_rev)
+            others.add(lineage_rev)
         try:
-            for scope in sorted(scopes):
-                delete_completion(
-                    client,
-                    settings,
-                    parsed.doc_id,
-                    source_rev=scope,
-                )
+            delete_completion(client, settings, parsed.doc_id, source_rev=revision)
+            for scope in sorted(others):
+                delete_revision_completions(client, settings, scope)
         except UnexpectedResponse as exc:
             if exc.status_code != 404:
                 raise
@@ -720,6 +742,7 @@ def run(
     version: str | None = None,
     force_reingest: bool = False,
     retire_docs: tuple[str, ...] | None = None,
+    authorize_from_catalog: bool = False,
 ) -> int:
     """Public entry: OTel tracing around the ingest body (issue #83).
 
@@ -753,6 +776,7 @@ def run(
             version=version,
             force_reingest=force_reingest,
             retire_docs=retire_docs,
+            authorize_from_catalog=authorize_from_catalog,
         )
     except Exception as exc:
         root.set_attribute("ingest.error_type", type(exc).__name__)
@@ -778,6 +802,7 @@ def _dispatch(
     version: str | None = None,
     force_reingest: bool = False,
     retire_docs: tuple[str, ...] | None = None,
+    authorize_from_catalog: bool = False,
 ) -> int:
     """Mode choice (issue #583 S5), made once per run: every real run is an
     alias publication; only a dry run (which writes nothing) reaches the
@@ -785,6 +810,12 @@ def _dispatch(
     collection, was retired (#360). The publisher builds its staging
     generation through `_run_impl` with a `_StagingBuild`; `_run_impl`
     itself never chooses a mode."""
+    if authorize_from_catalog and not retire_docs:
+        # The catalog authority only extends an explicit removal (issue #1005).
+        raise CatalogRetirementRefused(
+            RETIRE_CATALOG_REQUIRES_RETIRE_DOC,
+            "--authorize-from-catalog is valid only together with --retire-doc",
+        )
     if settings.contextual_embed_enabled and not dry_run:
         # Fail the whole run before spawning the pool: a misconfigured flag
         # must never degrade into header-only vectors doc by doc. Dry runs
@@ -809,6 +840,7 @@ def _dispatch(
             version=version,
             force_reingest=force_reingest,
             retire_docs=retire_docs,
+            authorize_from_catalog=authorize_from_catalog,
         )
     if retire_docs:
         # Explicit removals are a publication operation; a dry run mutates
@@ -1142,6 +1174,7 @@ def _execute(
     force_reingest: bool,
     lineage_by_path: dict[str, str | None],
     cache_path: Path | None,
+    ancestor: str | None = None,
 ) -> None:
     """Execution (issue #583 S4): the parse process pool and the upsert
     threads under one combined in-flight window. The parent alone appends
@@ -1366,6 +1399,7 @@ def _execute(
                             force_reingest,
                             src_labels=src_labels,
                             lineage_rev=lineage_by_path.get(path_str),
+                            ancestor=ancestor,
                         )
                     ] = (record, *binding)
                     refill_parse()
@@ -1553,6 +1587,7 @@ def _run_impl(
                 force_reingest=force_reingest,
                 lineage_by_path=lineage_by_path,
                 cache_path=cache_path,
+                ancestor=staging.live if staging is not None else None,
             )
         # Commit the pending migration contract inside the bulk window (it
         # is part of the load) and only when no document failed — the scope
@@ -1611,6 +1646,7 @@ def _commit_migration_representation(
         digest,
         exclude_doc_ids=pending_removals,
         retire_plan=retire_plan,
+        require_stored_points=True,
     )
     if count:
         raise RuntimeError(
@@ -1665,6 +1701,7 @@ def _run_publish(
     version: str | None = None,
     force_reingest: bool = False,
     retire_docs: tuple[str, ...] | None = None,
+    authorize_from_catalog: bool = False,
 ) -> int:
     """Alias-publication orchestration (issue #359 req 4/5): converge a    versioned staging generation, then atomically swap the alias to it.
 
@@ -1719,6 +1756,7 @@ def _run_publish(
             prewalked=prewalked,
             retire_docs=retire_docs,
             rules_v=rules_v,
+            authorize_from_catalog=authorize_from_catalog,
         )
     finally:
         release_run_lock(target_lock)
@@ -1738,6 +1776,7 @@ def _run_publish_locked(
     prewalked: list[tuple[str, str]],
     retire_docs: tuple[str, ...] | None,
     rules_v: str,
+    authorize_from_catalog: bool = False,
 ) -> int:
     """Publication body under the target lock (see _run_publish), in three
     phases (issue #583 S6): a read-only resolution of the predecessor, build
@@ -1757,6 +1796,7 @@ def _run_publish_locked(
         prewalked=prewalked,
         retire_docs=retire_docs,
         rules_v=rules_v,
+        authorize_from_catalog=authorize_from_catalog,
     )
     if res.live == res.staging:
         return _recertify_live(res, client, progress, settings, prewalked=prewalked, rules_v=rules_v)
@@ -1813,6 +1853,7 @@ def _resolve_publication(
     prewalked: list[tuple[str, str]],
     retire_docs: tuple[str, ...] | None,
     rules_v: str,
+    authorize_from_catalog: bool = False,
 ) -> _Resolution:
     """Read-only resolution: publish-state format and predecessor binding,
     retirement plan selection (replaying a bound plan), walked-corpus
@@ -1900,7 +1941,25 @@ def _resolve_publication(
         if already_swapped or recorded_retire_docs is not None or retire_docs:
             retire_plan = state.get("retire_plan")
     if retire_plan is None:
-        retire_plan = plan_approved_removals(retire_docs, prior_inventory)[0] if retire_docs else {}
+        catalog_approved = None
+        if retire_docs and authorize_from_catalog:
+            # Explicit operator authority (issue #1005, option B): revisions
+            # the live build published and committed, read under this lock.
+            live_settings = settings.model_copy(update={"qdrant_collection": live or alias})
+            catalog_approved = catalog_retirement_approvals(
+                client, live_settings, retire_docs, prior_inventory
+            )
+            if catalog_approved:
+                log.info(json.dumps({
+                    "action": "retire_authorized_from_catalog",
+                    "alias": alias,
+                    "revisions": {doc: sorted(revs) for doc, revs in sorted(catalog_approved.items())},
+                }))
+        retire_plan = (
+            plan_approved_removals(retire_docs, prior_inventory, catalog_approved)[0]
+            if retire_docs
+            else {}
+        )
 
     conflicts: set[str] = set()
     if retire_plan:
@@ -2375,6 +2434,13 @@ def main(argv: list[str] | None = None) -> int:
         "from the published set. Validated against the last approved "
         "inventory; publish mode only.",
     )
+    parser.add_argument(
+        "--authorize-from-catalog",
+        action="store_true",
+        help="With --retire-doc only: also approve revisions the live build "
+        "published and committed (sealed source catalog plus verified marker "
+        "and points) when the local inventory lost them.",
+    )
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args(argv)
 
@@ -2390,6 +2456,7 @@ def main(argv: list[str] | None = None) -> int:
         version=args.version,
         force_reingest=args.reingest,
         retire_docs=tuple(args.retire_doc or ()),
+        authorize_from_catalog=args.authorize_from_catalog,
     )
 
 

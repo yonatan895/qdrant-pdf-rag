@@ -78,6 +78,7 @@ SNAPSHOT_STORAGE_CLASS=${SNAPSHOT_STORAGE_CLASS:-$STORAGE_CLASS}
 # values.yaml pins v1.19.2 — set it explicitly so it always matches load.sh.
 # Strip a "-unprivileged" suffix from the pin: the chart re-adds it itself.
 QDRANT_TAG=${QDRANT_TAG:-$(echo "${QDRANT_IMAGE:-docker.io/qdrant/qdrant:v1.19.2-unprivileged}" | sed "s/.*://; s/-unprivileged\$//")}
+validate_helm_inputs
 QDRANT_URL="http://${QDRANT_RELEASE}:6333"
 
 # Registry image identity (issue #272), before any cluster change and for every
@@ -238,8 +239,9 @@ fi
 # the lab run WITHOUT touching the prod values in git. Empty = git values.
 QDRANT_STORAGE_SIZE=${QDRANT_STORAGE_SIZE:-}
 QDRANT_EXTRA_VALUES=${QDRANT_EXTRA_VALUES:-}
-if [ -n "$QDRANT_EXTRA_VALUES" ] && [ ! -f "$QDRANT_EXTRA_VALUES" ]; then
-    die "QDRANT_EXTRA_VALUES file not found: $QDRANT_EXTRA_VALUES"
+if [ -n "$QDRANT_EXTRA_VALUES" ]; then
+    require_ci_rehearsal QDRANT_EXTRA_VALUES
+    [ -f "$QDRANT_EXTRA_VALUES" ] || die "QDRANT_EXTRA_VALUES file not found: $QDRANT_EXTRA_VALUES"
 fi
 
 echo "==> Namespace: $NAMESPACE"
@@ -263,28 +265,34 @@ if [ "${OWNED_ROUTE_PRESENT:-0}" = "1" ] && { [ "$AGENT_ROUTE" != "true" ] || [ 
 fi
 
 echo "==> Helm: Qdrant from the vendored chart with PROD values"
-set -- helm upgrade -i "$QDRANT_RELEASE" "$CHART" \
-    -n "$NAMESPACE" \
+set -- -n "$NAMESPACE" \
     -f charts/qdrant-openshift.values.yaml \
-    --set "image.repository=$INTERNAL_REGISTRY/qdrant/qdrant" \
-    --set "image.tag=$QDRANT_TAG" \
-    --set "persistence.storageClassName=$STORAGE_CLASS" \
-    --set "snapshotPersistence.storageClassName=$SNAPSHOT_STORAGE_CLASS"
+    --set-string "image.repository=$INTERNAL_REGISTRY/qdrant/qdrant" \
+    --set-string "image.tag=$QDRANT_TAG" \
+    --set-string "persistence.storageClassName=$STORAGE_CLASS" \
+    --set-string "snapshotPersistence.storageClassName=$SNAPSHOT_STORAGE_CLASS"
 if [ -n "$QDRANT_STORAGE_SIZE" ]; then
-    set -- "$@" --set "persistence.size=$QDRANT_STORAGE_SIZE" \
-        --set "snapshotPersistence.size=$QDRANT_STORAGE_SIZE"
+    set -- "$@" --set-string "persistence.size=$QDRANT_STORAGE_SIZE" \
+        --set-string "snapshotPersistence.size=$QDRANT_STORAGE_SIZE"
 fi
 if [ -n "$QDRANT_EXTRA_VALUES" ]; then
     set -- "$@" -f "$QDRANT_EXTRA_VALUES"
 fi
 if [ -n "${PULL_SECRET:-}" ]; then
-    set -- "$@" --set "imagePullSecrets[0].name=$PULL_SECRET"
+    set -- "$@" --set-string "imagePullSecrets[0].name=$PULL_SECRET"
 else
     # values.yaml ships a placeholder pull-secret name; without a real secret
     # that placeholder must never reach the cluster (fail closed, not open).
     set -- "$@" --set "imagePullSecrets=null"
 fi
-run "$@"
+# Issue #1014: whatever the values files and flags produced, the Qdrant render
+# must be private and hardened (no Ingress/Route, ClusterIP, API keys, non-
+# privileged, read-only root, the verified registry image) before any apply.
+helm template "$QDRANT_RELEASE" "$CHART" -n "$NAMESPACE" "$@" > dist/qdrant-rendered.yaml ||
+    die "cannot render the Qdrant release for validation"
+python3 scripts/airgap/check_qdrant_render.py "$INTERNAL_REGISTRY/qdrant/qdrant:" "$QDRANT_RELEASE" < dist/qdrant-rendered.yaml ||
+    die "rendered Qdrant release refused (see above)"
+run helm upgrade -i "$QDRANT_RELEASE" "$CHART" "$@"
 
 echo "==> Helm: mainframe-rag application release"
 run helm upgrade --install mainframe-rag charts/mainframe-rag \
