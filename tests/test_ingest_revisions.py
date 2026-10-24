@@ -597,32 +597,44 @@ def test_revision_locks_serialize_same_revision_only():
     locks.get(REV_A).release()
 
 
-def _planned_and_published_revs(monkeypatch, root: Path, pdf: Path, progress: Path):
-    """Issue #839: the source revision the build path stores for `pdf`
-    (planned task -> worker parse, as `_parse_one` calls it) and whether
-    publication recognizes that revision when its retirement is requested
-    while the file is still walked."""
-    from mainframe_rag.ingest import run_ingest
-    from mainframe_rag.ingest.ibm_pdf import sha256_file
-    from mainframe_rag.ingest.inventory import InventoryRecord, append_record
+def _isolate_worker_state(monkeypatch, run_ingest) -> None:
+    """_parse_one caches per-worker state in module globals; isolate them so an
+    in-process call cannot leak a Settings/embedder into later tests."""
+    for name in ("_worker_settings", "_worker_embedder", "_worker_context_client",
+                 "_worker_context_cache", "_worker_context_cache_path", "_worker_qdrant"):
+        monkeypatch.setattr(run_ingest, name, None)
 
+
+def _planned_and_published_revs(
+    monkeypatch, root: Path, pdf: Path, progress: Path, *, labels=(None, None, None),
+):
+    """Issues #839/#986: the source revision the build path stores for `pdf`,
+    taken from its real producers (the planned task through `_parse_one`'s
+    inventory record and the stored point payload, never recomputed here), and
+    proof that publication derives the same key: retiring exactly that revision
+    while the file is still walked is a conflict. `labels` are the CLI
+    vendor/product/version overrides, passed to both paths."""
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.inventory import append_record
+    from mainframe_rag.ingest.payload import point_payload
+
+    vendor, product, version = labels
     settings = _settings()
     rules_v = extraction_rules_version()
     plan = run_ingest._plan(
         root, progress, settings, client=None, prewalked=None, limit=None, dry_run=True,
         rules_v=rules_v, src_labels="||", force_reingest=False, resume_checkpoints=False,
-        vendor=None, product=None, version=None, cache_path=None,
+        vendor=vendor, product=product, version=version, cache_path=None,
     )
     [task] = plan.tasks
-    parsed = run_ingest.parse_pdf(
-        Path(task.path), vendor=task.vendor, product=task.product, version=task.version,
-        corpus_root=Path(task.corpus_root), sha256=task.sha256,
-    )
-    built = source_rev_key(parsed.vendor, parsed.product, parsed.version, task.sha256)
-    append_record(progress, InventoryRecord(
-        path=task.path, sha256=task.sha256, doc_id=parsed.doc_id, status="upserted",
-        source_rev=built,
-    ))
+    _isolate_worker_state(monkeypatch, run_ingest)
+    record, parsed, chunks, _vectors, _contexts = run_ingest._parse_one(task)
+    assert record.status != "error", record.error_type
+    assert chunks, "the synthetic document must produce stored points"
+    stored = {point_payload(parsed, chunk, rules_v)["source_rev"] for chunk in chunks}
+    assert stored == {record.source_rev}, "inventory and stored payload disagree"
+    built = record.source_rev
+    append_record(progress, record.model_copy(update={"status": "upserted"}))
 
     def missed(*args, **kwargs):
         raise AssertionError("publication did not recognize the walked file's revision")
@@ -634,11 +646,47 @@ def _planned_and_published_revs(monkeypatch, root: Path, pdf: Path, progress: Pa
     )
     with pytest.raises(RuntimeError, match="still present in the walked corpus"):
         run_ingest._resolve_publication(
-            reader, root, progress, settings, vendor=None, product=None, version=None,
-            force_reingest=False, prewalked=[(str(pdf), sha256_file(pdf))],
-            retire_docs=(f"{parsed.doc_id}@{built}",), rules_v=rules_v,
+            reader, root, progress, settings, vendor=vendor, product=product, version=version,
+            force_reingest=False, prewalked=[(task.path, task.sha256)],
+            retire_docs=(f"{record.doc_id}@{built}",), rules_v=rules_v,
         )
-    return built
+    return record.doc_id, built
+
+
+@pytest.mark.parametrize("case", ["cli_override", "path_layout", "unknown_vendor"])
+def test_retirement_check_derives_the_revision_the_build_path_stores(
+    monkeypatch, tmp_path, plain_pdf, case
+):
+    """Issue #986: for the same walked file, the retirement-conflict check
+    derives the exact source revision the build path stored, under a CLI
+    label override, the four-level path layout (#849) and the unknown-vendor
+    fallback (no marker, outside the layout). Expected keys come from the
+    labelling rules, not from the code under test."""
+    import shutil
+
+    from mainframe_rag.ingest.ibm_pdf import sha256_file
+
+    rel, labels = {
+        "cli_override": ("manuals/guide.pdf", ("Acme", "Widget", "1.0")),
+        "path_layout": ("IBM/zOS/2.5/guide.pdf", (None, None, None)),
+        "unknown_vendor": ("notes/guide.pdf", (None, None, None)),
+    }[case]
+    root = tmp_path / "corpus"
+    pdf = root / rel
+    pdf.parent.mkdir(parents=True)
+    shutil.copy(plain_pdf, pdf)
+    sha = sha256_file(pdf)
+    doc_id, built = _planned_and_published_revs(
+        monkeypatch, root, pdf, tmp_path / "inventory.jsonl", labels=labels
+    )
+    assert doc_id == "guide", "filename-stem identity"
+    if case == "cli_override":
+        assert built == source_rev_key("Acme", "Widget", "1.0", sha)
+    elif case == "path_layout":
+        assert built == source_rev_key("IBM", "zOS", "2.5", sha)
+    else:
+        vendor, _product, _version, digest = built.split("|")
+        assert (vendor, digest) == ("unknown", sha)
 
 
 def test_vendor_is_resolved_below_the_corpus_root_on_both_ingest_paths(monkeypatch, tmp_path, plain_pdf):
@@ -656,7 +704,9 @@ def test_vendor_is_resolved_below_the_corpus_root_on_both_ingest_paths(monkeypat
         pdf = root / "IBM" / "zOS" / "2.5" / "guide.pdf"
         pdf.parent.mkdir(parents=True)
         shutil.copy(plain_pdf, pdf)
-        revs[mount] = _planned_and_published_revs(monkeypatch, root, pdf, tmp_path / f"{mount}.jsonl")
+        _doc_id, revs[mount] = _planned_and_published_revs(
+            monkeypatch, root, pdf, tmp_path / f"{mount}.jsonl"
+        )
     sha = revs["plain"].rsplit("|", 1)[1]
     assert revs["precisely"] == revs["plain"] == source_rev_key("IBM", "zOS", "2.5", sha)
 
@@ -711,3 +761,6 @@ def test_retirement_check_skips_a_walked_file_refused_for_a_pipe_label(monkeypat
 
     record, *_ = run_ingest._parse_one((str(pdf), None, None, None, str(root), sha, False, None))
     assert (record.status, record.error_type) == ("error", "LabelDelimiterRefused")
+    # The refusal follows the parse: the error record keeps the parsed
+    # identity and page count, not the filename-stem fallback.
+    assert (record.doc_id, record.pages > 0) == (doc_id, True)

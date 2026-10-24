@@ -81,7 +81,10 @@ PyMuPDF is the only parser. `parse_pdf` returns a frozen, slots `ParsedDoc`.
   one place that resolves it, for the build workers and for publication's
   retirement check alike (issue #839: the build path used to match markers
   against the absolute path while publication took the layout's vendor, so
-  the two could compute different source revisions). Empty version becomes
+  the two could compute different source revisions). Both paths reach it
+  through `run_ingest.parse_walked` (the run's CLI labels, corpus root and walk
+  digest) and take the key from `walked_source_rev`, which `_upsert_one`'s
+  locks and deletes use too (issue #986). Empty version becomes
   `None`, empty vendor becomes `"unknown"`; title is sanitized; the TOC comes from `get_toc(simple=True)`;
   the document is closed in a `finally`.
 - `sanitize_page_text` drops CSI sequences, C0 controls, bidi marks, and
@@ -550,11 +553,12 @@ parsing runs in a `spawn` process pool while check-delete-upsert runs in a
 thread pool.
 
 - **Reserved label delimiter** (issue #878): `|` separates the
-  `source_rev_key` fields, so `_parse_one` refuses a document whose resolved
+  `source_rev_key` fields, so `walked_source_rev` refuses a document whose resolved
   vendor, product or version (path layout or `--vendor/--product/--version`)
   contains `|`. The inventory record is an `error` with `error_type`
   `LabelDelimiterRefused` and the fixed message `label_delimiter: ...` (no label,
-  path or text); other documents continue and the run exits non-zero. The labels
+  path or text); other documents continue and the run exits non-zero. The
+  retirement check skips such a walked file: it has no key to retire. The labels
   are refused, never sanitized or escaped: the guard lives in `run_ingest.py`,
   outside the rules-version modules, so existing keys, chunk ids and the rules
   version are unchanged. Escaping waits for the next planned rules bump.
