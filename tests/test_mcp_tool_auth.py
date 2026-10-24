@@ -315,6 +315,23 @@ def test_unknown_kid_refetch_is_rate_limited():
     assert len(idp.requests) == 1
 
 
+def test_concurrent_cold_requests_share_one_fetch_and_all_verify():
+    idp = _Idp(_rsa_jwk(_RSA_A, "a"))
+
+    async def slow(request: httpx2.Request) -> httpx2.Response:
+        await asyncio.sleep(0.01)
+        return idp.handler(request)
+
+    config = _config()
+    cache = JwksCache(config, client=httpx2.AsyncClient(transport=httpx2.MockTransport(slow)))
+
+    async def run() -> list[Principal]:
+        return await asyncio.gather(*(verify_token(_token(), config, cache) for _ in range(5)))
+
+    assert [p.sub for p in asyncio.run(run())] == ["user-1"] * 5
+    assert idp.requests == [JWKS_URL]
+
+
 def test_cached_keys_expire_after_the_ttl():
     now = [0.0]
     idp = _Idp(_rsa_jwk(_RSA_A, "a"))
