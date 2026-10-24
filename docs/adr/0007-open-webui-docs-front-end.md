@@ -73,10 +73,10 @@ Pipe is provisioned and the admin role is limited to the team.
   privilege escalation. There is no `anyuid` and no root. Writable paths are
   explicit mounts: the data PVC plus `emptyDir` volumes. The secret key and
   OIDC client secret come from operator-created Secrets. The image is the
-  upstream slim image pinned by digest. A derived layer may change only
-  ownership and permissions (pending maintainer confirmation). It is built in
-  the connected factory, with no source change and no Node build. The deployed
-  digest is then the derived image's, recorded with its base digest.
+  upstream slim release plus one derived layer that changes only ownership
+  and permissions (maintainer, 2026-10-24). The layer is built in the
+  connected factory, with no source change and no Node build. Both digests are
+  pinned and recorded: the deployed derived digest and its upstream base.
 - **R2 Offline, zero egress.** Offline mode is on. The version check,
   community sharing, model downloads, STT/TTS and the Pyodide CDN path are off.
   An egress-deny NetworkPolicy allows only the agent Service, cluster DNS and
@@ -98,42 +98,48 @@ Pipe is provisioned and the admin role is limited to the team.
   validate refuses an NFS-named class, as for the other writable volumes,
   and site acceptance confirms block semantics.
   Multiple replicas (Postgres plus Redis) need a new ADR.
-- **S2 Bounded history.** Chat retention is a **required parameter with no
-  default** (the value is open, maintainer, 2026-10-25). The deploy refuses to
-  enable Open WebUI without it. A repository-owned scheduled purge deletes the
+- **S2 Bounded history.** Chat retention is **30 days** (maintainer,
+  2026-10-24). A repository-owned scheduled purge enforces it. It deletes the
   chats, messages, shared snapshots and files whose last update is older than
-  the window. It then reclaims the freed database pages, so the text is gone
+  30 days. It then reclaims the freed database pages, so the text is gone
   from the file. The pattern is ADR-0005/#804: failures are retried and
   counted and are never reported as success. Proof: the stored rows are gone,
   then the next ordinary chat succeeds. Users may delete their own chats. Chat
   sharing and admin export are off.
 - **S3 Protected copies and admin access.** PVC backups hold manual excerpts
   and pasted incident text. They are protected records that never leave the
-  enterprise. Their retention is at most the chat window plus one backup
-  cycle. Admin chat access is off, but that toggle only hides chats in the UI.
-  Admins, in-process Functions and anyone with access to the PVC or the DB can
-  still read them. This is an accepted residual, kept small by limiting the
+  enterprise. They follow the same 30-day window: the purge job also removes
+  backups older than 30 days. Admin chat access is off, but that toggle only
+  hides chats in the UI. Admins, in-process Functions and anyone with access to
+  the PVC or the DB can still read them. This is an accepted residual, kept small by limiting the
   admin role to the named owners through an IdP group. Encryption at rest, if
   required, comes from the storage class, because Open WebUI provides none.
+  **Open:** the security or corpus owner has not yet accepted chat content on a
+  PVC and in backups. Until they do, this is the no-go item below.
 - **S4 No content in telemetry.** The log level is INFO or higher, and the
   audit level never records request or response bodies. A canary scan of the
   container logs finds 0 hits.
 - **L1 Licence.** The branding stays unmodified: no custom name, logo, theme
   or injected CSS. The licence permits that at any user count. Users are
-  capped at 100. The image gets an inventory record bound to its digest, and
-  the licensing owner signs off per
-  [licensing](../licensing.md#owner-decisions).
-  `check --release` stays red until then.
-- **P1 Patch policy.** A named owner, recorded with the pin, imports the
-  latest upstream release about monthly. Security fixes land only on the
-  latest release, so staying on an old pin means accepting published
-  vulnerabilities. Each import is a dedicated pin-bump PR. It re-runs every
+  capped at 100. The maintainer signed off as repository owner on 2026-10-24.
+  The sign-off covers internal use with the Open WebUI branding unmodified, at
+  an expected 100 users or fewer. Like the other
+  [owner decisions](../licensing.md#owner-decisions), it is a maintainer
+  disposition, not a legal approval. It is recorded in the inventory, bound to
+  the pinned digest, when the image is pinned. Any rebrand needs a new decision
+  and either written permission from the copyright holder or an enterprise
+  licence.
+- **P1 Patch policy.** The owner is the maintainer (yonatan895, 2026-10-24).
+  About monthly, an agent prepares the import of the latest upstream release:
+  the import PR plus the qualification run. The maintainer reviews it, merges
+  it and loads the bundle. Security fixes land only on the latest release, so
+  staying on an old pin means accepting published vulnerabilities. Each import is a dedicated pin-bump PR. It re-runs every
   condition above, captures Open WebUI's request body against the Pipe, and
   upgrades a copy of the PVC. Open WebUI migrates its schema at startup, so
   the pre-upgrade snapshot is kept for rollback. Switch-off trigger: the
-  rollback flag (K1) disables Open WebUI within N days of a published High or
-  Critical advisory affecting the pinned version, unless a qualified import
-  exists by then. N is a maintainer parameter.
+  rollback flag (K1) disables Open WebUI if no qualified import exists 14 days
+  after a published High or Critical advisory affecting the pinned version
+  (maintainer, 2026-10-24).
 - **K1 Rollback by one flag.** Turning the chart flag off removes Open WebUI
   and keeps its PVC. With the flag off, the render is byte-identical to the
   render without Open WebUI. The agent and the console are untouched. The
@@ -157,8 +163,8 @@ the pilot. The console remains the only supported front end.
   content on a PVC and in backups.
 - The Route cannot meet the documented pin and Secret checks.
 - The IdP cannot supply OIDC group claims.
-- The licensing owner refuses the licence.
-- No owner accepts the patch cadence.
+- The licence disposition is withdrawn, or a rebrand becomes necessary
+  without written permission or an enterprise licence.
 - The console fallback is not kept.
 
 ## What changes in ADR-0004 and ADR-0005
