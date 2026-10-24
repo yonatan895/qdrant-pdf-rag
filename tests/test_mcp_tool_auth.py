@@ -13,7 +13,7 @@ import asyncio
 import json
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 import httpx2
@@ -525,6 +525,71 @@ def test_oversized_jwks_is_refused_without_reading_it_all():
     assert pulled[0] <= 8
 
 
+def _deep_json() -> bytes:
+    return b"[" * 100_000 + b"]" * 100_000
+
+
+def test_deeply_nested_jwks_is_a_failed_fetch_under_the_refetch_floor():
+    idp = _Idp()
+    config = _config()
+
+    def deep(request: httpx2.Request) -> httpx2.Response:
+        idp.requests.append(str(request.url))
+        return httpx2.Response(200, content=_deep_json())
+
+    cache = JwksCache(config, client=httpx2.AsyncClient(transport=httpx2.MockTransport(deep)), clock=lambda: 0.0)
+
+    async def run() -> list[str]:
+        codes = []
+        for _ in range(2):
+            try:
+                await verify_token(_token(), config, cache)
+                codes.append("allow")
+            except AuthError as exc:
+                codes.append(exc.code)
+        return codes
+
+    assert asyncio.run(run()) == ["unauthenticated", "unauthenticated"]
+    assert idp.requests == [JWKS_URL]
+
+
+def test_deeply_nested_jwks_after_a_good_fetch_serves_stale_keys():
+    gw = _Clocked()
+
+    async def run() -> list[str]:
+        verdicts = [await gw.attempt(0.0)]
+        gw.cache._client = httpx2.AsyncClient(
+            transport=httpx2.MockTransport(lambda request: httpx2.Response(200, content=_deep_json())))
+        verdicts.append(await gw.attempt(350.0))
+        return verdicts
+
+    assert asyncio.run(run()) == ["allow", "allow"]
+
+
+class _HangingTransport(httpx2.AsyncBaseTransport):
+    """Never answers, but honours the request's read timeout the way a real
+    transport does: a request without one hangs."""
+
+    async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
+        read = (request.extensions.get("timeout") or {}).get("read")
+        await asyncio.sleep(30 if read is None else read)
+        raise httpx2.ReadTimeout("timed out", request=request)
+
+
+def _within(seconds: float, coro: Awaitable[object]) -> object:
+    async def run() -> object:
+        return await asyncio.wait_for(coro, seconds)
+
+    return asyncio.run(run())
+
+
+def test_jwks_timeout_applies_to_a_caller_client_without_one():
+    config = _config(jwks_timeout_s=0.05)
+    cache = JwksCache(config, client=httpx2.AsyncClient(transport=_HangingTransport(), timeout=None))
+    with pytest.raises(AuthError):
+        _within(3.0, verify_token(_token(), config, cache))
+
+
 def test_token_supplied_key_locations_are_never_fetched():
     head = {"kid": "evil", "jku": "https://attacker.test/keys", "x5u": "https://attacker.test/c"}
     token = jwt.encode(_claims(), _RSA_B, algorithm="RS256", headers=head)
@@ -805,6 +870,49 @@ def test_exchange_redirect_is_refused_even_with_a_redirect_following_client():
     assert response.status_code == 401
     assert endpoint.seen == [TOKEN_URL]
     assert app.calls == []
+
+
+def test_deeply_nested_exchange_reply_is_a_fixed_401():
+    endpoint = _TokenEndpoint(lambda form: httpx2.Response(200, content=_deep_json()))
+    response, app = _request({"Authorization": f"Bearer {_owui_token()}"}, exchanger=endpoint.exchanger())
+    assert response.json() == {"code": "unauthenticated", "message": "authentication is required"}
+    assert app.calls == []
+
+
+def test_exchange_refuses_an_unexpected_issued_token_type():
+    def id_token(form: dict[str, str]) -> httpx2.Response:
+        return httpx2.Response(200, json={
+            "access_token": _token(), "token_type": "N_A",
+            "issued_token_type": "urn:ietf:params:oauth:token-type:id_token",
+        })
+
+    response, app = _request({"Authorization": f"Bearer {_owui_token()}"},
+                             exchanger=_TokenEndpoint(id_token).exchanger())
+    assert response.status_code == 401
+    assert app.calls == []
+
+
+def test_oversized_exchange_reply_is_refused_without_reading_it_all():
+    pulled = [0]
+
+    async def body():
+        yield json.dumps({"access_token": _token(), "token_type": "Bearer"}).encode()
+        for _ in range(200):
+            pulled[0] += 1
+            yield b" " * 65536  # trailing whitespace: valid JSON if read whole
+
+    endpoint = _TokenEndpoint(lambda form: httpx2.Response(200, content=body()))
+    response, app = _request({"Authorization": f"Bearer {_owui_token()}"}, exchanger=endpoint.exchanger())
+    assert response.status_code == 401
+    assert app.calls == []
+    assert pulled[0] <= 3
+
+
+def test_exchange_timeout_applies_to_a_caller_client_without_one():
+    client = httpx2.AsyncClient(transport=_HangingTransport(), timeout=None)
+    exchanger = TokenExchanger(_exchange_config(timeout_s=0.05), client=client, environ={SECRET_ENV: "s"})
+    with pytest.raises(AuthError):
+        _within(3.0, exchanger.exchange(_owui_token()))
 
 
 def test_exchange_config_needs_https_and_a_present_secret():
