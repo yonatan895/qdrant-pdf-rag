@@ -1,8 +1,9 @@
 # ADR-0007: Open WebUI as an optional, single-replica docs front end
 
-- **Status:** proposed (#1071, tracker #1070, 2026-10-24). Acceptance is the
-  maintainer's. No chart, manifest or production change lands before it is
-  accepted. Amends [ADR-0004](0004-operator-console-htmx.md) and
+- **Status:** accepted (maintainer, 2026-10-24; #1071, tracker #1070).
+  Accepting this record does not enable anything: the chart component stays
+  off by default, and a site enables it only after every condition below
+  passes. Amends [ADR-0004](0004-operator-console-htmx.md) and
   [ADR-0005](0005-answer-feedback-data-boundary.md) as stated below.
 - **Context:** the maintainer wants one team-owned front end with SSO and
   group-scoped capabilities (request, 2026-10-24). This record covers only the
@@ -116,9 +117,9 @@ Pipe is provisioned and the admin role is limited to the team.
   to the PVC or the DB can still read them. This is an accepted residual, kept
   small by limiting the admin role to the named owners through an IdP group.
   Encryption at rest, if required, comes from the storage class, because Open
-  WebUI provides none. **Open:** the security or corpus owner has not yet
-  accepted chat content on a PVC and in backups. Until they do, this is the
-  no-go item below.
+  WebUI provides none. The maintainer, as corpus owner, accepted chat
+  content on the PVC and in backups under these rules (2026-10-24). If that
+  acceptance is withdrawn, the no-go item below applies.
 - **S4 No content in telemetry.** The log level is INFO or higher, and the
   audit level never records request or response bodies. A canary scan of the
   container logs finds 0 hits.

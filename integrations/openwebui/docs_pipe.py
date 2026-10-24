@@ -64,6 +64,8 @@ UNREACHABLE = ("The documentation service could not be reached. Retry; if it per
 TRUNCATED = ("The answer stream ended before it completed. "
              "Treat any text above as incomplete and retry.")
 NO_TEXT_TURN = "Ask a question in plain text; attachments and images are not supported."
+TRIMMED = "Earlier messages in this chat were not sent"
+DEFAULT_MAX_BODY_CHARS = 32768  # the agent's Settings.chat_max_body_chars default
 NO_EXCERPT = "Excerpt text is not available in this response."
 TASK_REPLY = "Docs question"
 
@@ -152,6 +154,27 @@ def build_request(messages: object, user_valves: object) -> dict[str, Any] | Non
         if value := _valve(user_valves, name):
             body[name] = value
     return body
+
+
+def fit_request(request: dict[str, Any], max_chars: int) -> tuple[dict[str, Any] | None, bool]:
+    """Fit a built request to the agent's body cap, counted as the agent counts
+    it (chat_body_chars): message characters plus product plus version. Drops
+    the oldest turns first and then any leading assistant turn, so the history
+    never starts with an answer to a dropped question. The last turn is always
+    kept. Returns (request, trimmed); (None, False) when the last turn alone
+    does not fit, so there is no call to make."""
+    turns: list[dict[str, str]] = request["messages"]
+    budget = max_chars - sum(len(request.get(name, "")) for name in ("product", "version"))
+    if len(turns[-1]["content"]) > budget:
+        return None, False
+    total = sum(len(t["content"]) for t in turns)
+    start = 0
+    while start < len(turns) - 1 and (total > budget or turns[start]["role"] != "user"):
+        total -= len(turns[start]["content"])
+        start += 1
+    if start == 0:
+        return request, False
+    return {**request, "messages": turns[start:]}, True
 
 
 def _plain(value: object) -> object:
@@ -266,6 +289,11 @@ class Pipe:
             default=300.0, gt=0,
             description="Read timeout for one answer, seconds (connect is bounded at 10 s).",
         )
+        MAX_BODY_CHARS: int = Field(
+            default=DEFAULT_MAX_BODY_CHARS, ge=1000, le=100000,
+            description="Request body cap in characters. Must equal the deployed agent's "
+                        "chat_max_body_chars; older turns are dropped to fit it.",
+        )
 
     class UserValves(BaseModel):
         product: str = Field(default="", description="Restrict answers to this product.")
@@ -293,12 +321,16 @@ class Pipe:
         request = build_request(body.get("messages"), user_valves)
         if request is None:
             return NO_TEXT_TURN
-        answer = self._answer(request, __event_emitter__)
+        request, trimmed = fit_request(request, self.valves.MAX_BODY_CHARS)
+        if request is None:
+            return ERROR_MESSAGES["invalid_request"]  # the question alone exceeds the cap
+        answer = self._answer(request, __event_emitter__, trimmed)
         if body.get("stream") is True:
             return _chunks(answer)
         return "".join([text async for text in answer])
 
-    async def _answer(self, request: dict[str, Any], emit: Emitter | None) -> AsyncIterator[str]:
+    async def _answer(self, request: dict[str, Any], emit: Emitter | None,
+                      trimmed: bool = False) -> AsyncIterator[str]:
         async def event(payload: dict[str, Any]) -> None:
             if emit is None:
                 return
@@ -312,6 +344,8 @@ class Pipe:
 
         started = False
         try:
+            if trimmed:
+                await status(TRIMMED, False)
             await status(WORKING, False)
             final: dict[str, Any] = {}
             timeout = httpx.Timeout(self.valves.TIMEOUT_S, connect=10.0)
@@ -335,7 +369,7 @@ class Pipe:
                     yield delta
             for source in _source_events(final):
                 await event(source)
-            await status(_status_text(final), True)
+            await status(_status_text(final) + (f" · {TRIMMED}" if trimmed else ""), True)
         except _Failure as failure:
             yield ("\n\n" if started else "") + failure.text
             await status(STATE_LABELS["generation_incomplete"] if failure.incomplete else FAILED,

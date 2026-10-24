@@ -95,7 +95,7 @@ complete its answer-context integration; see the workload status table below.
 | `zowe-mcp` | Proposed sidecar (ADR-0003); absent from the current Helm chart | Not deployed | Bridge/client code exists; answer-context integration and deployment wiring remain incomplete. Default-off; enabling requires the ADR-0003 reactivation gate, separate site credentials and written site acceptance |
 | `openobserve` | Deployment (default on; `off` sentinel disables; disabling only the backend needs an explicit collector endpoint or `off`) | 1 | OpenObserve, local mode, RWO block PVC, tracing backend |
 | `feedback` | Single-replica StatefulSet `rag-feedback` (ADR-0005, #804), rendered only with `FEEDBACK_ENABLED` (default off; [deploy.md](deploy.md#feedback-service)) | Deployed when enabled | Single SQLite writer for answer-quality records on its own kept RWO block PVC `rag-feedback-data` (never NFS); bearer token from an operator-created Secret; ClusterIP only, ingress limited to agent pods by `rag-feedback-ingress`; purges its own retention window in-process and exports purge outcomes on a bearer-protected `/metrics`; agents send to it best-effort when `FEEDBACK_ENABLED` (default off). Not console session state, which stays in browser `localStorage` (ADR-0004) |
-| `open-webui` | Proposed (ADR-0007, #1070); absent from the current Helm chart | Not deployed | Optional docs front end behind a default-off flag: one replica, OIDC login, chats in SQLite on a kept RWO block PVC (never NFS) with a 30-day retention purge. It reaches the corpus only through a repository-owned Pipe over the agent's `/v1/chat`, with no model connection or gateway key. Its built-in RAG and vector store are off and proven empty, and egress is limited to the agent, DNS and the IdP. The console stays the fallback and HA path |
+| `open-webui` | Accepted (ADR-0007, #1070); absent from the current Helm chart | Not deployed | Optional docs front end behind a default-off flag: one replica, OIDC login, chats in SQLite on a kept RWO block PVC (never NFS) with a 30-day retention purge. It reaches the corpus only through a repository-owned Pipe over the agent's `/v1/chat`, with no model connection or gateway key. Its built-in RAG and vector store are off and proven empty, and egress is limited to the agent, DNS and the IdP. The console stays the fallback and HA path |
 | `bm25-weights` | Baked in images | — | FastEmbed `Qdrant/bm25`; no runtime download |
 
 - **Storage Constraint:** Qdrant persistent data volume **must** be RWO Block storage (NFS and object storage are refused). Ingest work volume is also RWO Block. The corpus volume may be mounted as read-only NFS or PVC.
@@ -224,7 +224,7 @@ ROADMAP #90/#91. Splunk remains caller-supplied context.
 fallbacks, Settings-bounded pools/timeouts, stable error bodies, endpoint-specific
 SSE completion and shutdown. [ADR-0004](adr/0004-operator-console-htmx.md) owns
 browser-only console state, strict CSP, local assets and external OAuth ingress;
-[ADR-0007](adr/0007-open-webui-docs-front-end.md) (proposed) amends it only for
+[ADR-0007](adr/0007-open-webui-docs-front-end.md) (accepted) amends it only for
 the optional Open WebUI front end.
 `tracing.py` owns bounded fail-open OTel export for agent and ingest, with no
 manual text/secrets; bounded query span text is the explicit exception to the
