@@ -1045,6 +1045,52 @@ def test_non_finite_upstream_score_fails_closed_not_500(client, rerank_leg, monk
     json.loads(ok.text, parse_constant=lambda c: pytest.fail(c))
 
 
+def _strict(text: str):
+    def reject(c):
+        raise AssertionError(f"non-strict JSON token {c}")
+
+    return json.loads(text, parse_constant=reject)
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf")], ids=["nan", "inf"])
+@pytest.mark.parametrize(
+    ("path", "body"),
+    [
+        ("/v1/search", {"query": "IEA500I"}),
+        ("/v1/answer", {"query": "IEA500I"}),
+        ("/v1/answer", {"query": "IEA500I", "stream": True}),
+        ("/v1/chat", {"messages": [{"role": "user", "content": "IEA500I"}]}),
+        ("/v1/chat", {"messages": [{"role": "user", "content": "IEA500I"}], "stream": True}),
+        ("/v1/chat/completions", {"messages": [{"role": "user", "content": "IEA500I"}]}),
+        (
+            "/v1/chat/completions",
+            {"messages": [{"role": "user", "content": "IEA500I"}], "stream": True},
+        ),
+    ],
+)
+def test_non_finite_hit_score_never_emits_invalid_json(client, monkeypatch, path, body, bad):
+    """#1012: a NaN/Infinity reaching a payload must never ship as a bare
+    NaN/Infinity token or a 500/traceback. Every JSON body and every SSE
+    data frame parses under a strict parser; the outcome is either a normal
+    response or the fixed error envelope / terminal error frame."""
+    hit = _hit().model_copy(update={"score": bad})
+    monkeypatch.setattr(app_mod, "retrieve_search", lambda *a, **k: ([hit], "identifier", {}))
+    resp = client.post(path, json=body)
+    assert resp.status_code != 500
+    assert "Traceback" not in resp.text
+    if "text/event-stream" in resp.headers["content-type"]:
+        frames = [ln[len("data:") :].strip() for ln in resp.text.splitlines() if ln.startswith("data:")]
+        parsed = [_strict(f) for f in frames if f != "[DONE]"]
+        assert parsed
+    else:
+        parsed = [_strict(resp.text)]
+        if resp.status_code >= 400:
+            assert set(parsed[0]) >= {"code", "message"}
+    for p in parsed:
+        if isinstance(p, dict) and "code" in p and p.get("type") == "error":
+            assert p["message"] == "stream failed"
+
+
 def test_error_shape_is_structured(client, monkeypatch):
     """Stable {"code", "message"} JSON — no stack traces to the client."""
 

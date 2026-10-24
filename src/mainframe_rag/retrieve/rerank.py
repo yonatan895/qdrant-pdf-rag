@@ -266,14 +266,15 @@ class HttpReranker:
             data = resp.json()
             if isinstance(data, dict) and "data" in data and isinstance(data["data"], list):
                 items = data["data"]
-                batch_scores = _scores_by_index(
-                    [(d.get("index"), d["score"]) for d in items], len(batch_texts)
-                )
+                if all(isinstance(d, dict) for d in items):
+                    batch_scores = _scores_by_index(
+                        [(d.get("index"), d["score"]) for d in items], len(batch_texts)
+                    )
         except httpx2.HTTPStatusError as exc:
             if rejected is not None:
                 rejected.append(exc)
             batch_scores = None
-        except (httpx2.RequestError, ValueError, KeyError):
+        except (httpx2.RequestError, ValueError, KeyError, TypeError, AttributeError):
             batch_scores = None
         return batch_scores
 
@@ -303,6 +304,8 @@ class HttpReranker:
                 f"Reranker endpoint {rerank_url} returned invalid or mismatched results: {r_data}"
             )
         try:
+            if not all(isinstance(r, dict) for r in results):
+                raise KeyError("results")
             batch_scores = _scores_by_index(
                 [
                     (r.get("index"), r["relevance_score"] if "relevance_score" in r else r["score"])
@@ -388,6 +391,12 @@ def _minmax(values: Sequence[float]) -> list[float]:
     if hi == lo:
         return [0.5] * len(values)
     span = hi - lo
+    if not math.isfinite(span):
+        # Finite extremes (e.g. +/-1.7e308) overflow `hi - lo` to inf and the
+        # blend to NaN; halving first keeps every normalized key finite.
+        lo, hi = lo / 2.0, hi / 2.0
+        span = hi - lo
+        return [(v / 2.0 - lo) / span for v in values]
     return [(v - lo) / span for v in values]
 
 

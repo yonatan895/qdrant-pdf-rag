@@ -232,6 +232,27 @@ def test_rerank_alpha_flat_leg_abstains():
         assert [h.chunk_id for h in reranked] == ["c1", "c2"], alpha
 
 
+def test_rerank_extreme_finite_scores_keep_finite_keys_and_sane_order():
+    """#1023: finite scores whose span overflows (hi - lo = inf) used to turn
+    the blend into NaN. Every normalized key stays finite and the order
+    follows the cross-encoder at alpha=1.0."""
+    import math
+
+    from mainframe_rag.retrieve import rerank as rr
+
+    assert all(math.isfinite(v) for v in rr._minmax([1.7e308, -1.7e308, 0.0]))
+    assert rr._minmax([1.7e308, -1.7e308, 0.0]) == pytest.approx([1.0, 0.0, 0.5])
+    hits = [
+        _make_hit("c1", "DOC1", 0.9, text="Doc 1"),
+        _make_hit("c2", "DOC2", 0.5, text="Doc 2"),
+        _make_hit("c3", "DOC3", 0.1, text="Doc 3"),
+    ]
+    ce = {format_rerank_text(h): v for h, v in zip(hits, (-1.7e308, 1.7e308, 0.0), strict=True)}
+    out = rerank_candidates("test", hits, MockReranker(ce), alpha=1.0)
+    assert [h.chunk_id for h in out] == ["c2", "c3", "c1"]
+    assert all(h.rerank_score is not None and math.isfinite(h.rerank_score) for h in out)
+
+
 def test_search_rerank_alpha_zero_keeps_rrf_order():
     """Claimed path: the Settings knob flows through search() into ranking —
     alpha=0.0 keeps RRF order where the default alpha=1.0 flips it."""
@@ -393,12 +414,16 @@ _BAD_ITEMS = {
     "negative": [(0, 0.1), (-1, 0.9)],
     "missing_index": [(0, 0.1), (None, 0.9)],
     "nan": [(0, 0.1), (1, float("nan"))],
+    "non_dict_entries": None,
     "inf": [(0, 0.1), (1, float("inf"))],
     "neg_inf": [(0, 0.1), (1, float("-inf"))],
 }
 
 
 def _raw(field: str, key: str, items) -> bytes:
+    if items is None:  # entries that are not objects at all
+        return f'{{"{field}": [1, [0, 1]]}}'.encode()
+
     def one(i, v):
         parts = [] if i is None else [f'"index": {i}']
         lit = {"nan": "NaN", "inf": "Infinity", "-inf": "-Infinity"}.get(str(v), str(v))
