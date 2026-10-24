@@ -120,6 +120,61 @@ def test_label_normalization_is_idempotent_with_a_constrained_alphabet(value):
     assert label == label.strip(" ") and "  " not in label
     assert (label == "") == (value is None or not value.strip())
 
+
+_LABEL = st.one_of(st.none(), st.text(alphabet="ab|\\ ", max_size=6))
+
+
+@_PROPERTY
+@given(_LABEL, _LABEL, _LABEL, _LABEL, _LABEL, _LABEL)
+@example("a|b", "c", "d", "a", "b|c", "d")
+@example("a", "b|c", "d", "a", "b", "c|d")
+@example("\\", "", "|", "|", "\\", "")  # collides if only `|` were escaped
+def test_revision_key_is_injective_over_normalized_labels(v1, p1, r1, v2, p2, r2):
+    """#990 item 1: `|` inside a label used to read as a field delimiter, so
+    ('a|b', 'c') and ('a', 'b|c') shared one key. Labels are escaped (`\\`
+    then `|`), so keys are equal exactly when the normalized labels are."""
+    sha = "ab" * 32
+    same = [normalize_label(x) for x in (v1, p1, r1)] == [normalize_label(x) for x in (v2, p2, r2)]
+    assert (source_rev_key(v1, p1, r1, sha) == source_rev_key(v2, p2, r2, sha)) == same
+
+
+def test_revision_key_escapes_only_the_delimiter_and_escape_characters():
+    sha = "ab" * 32
+    assert source_rev_key("IBM", "zOS|x", "2.5", sha) == f"ibm|zos\\|x|2.5|{sha}"
+    assert source_rev_key("a\\b", None, "1|2", sha) == f"a\\\\b||1\\|2|{sha}"
+    # Delimiter-free labels keep their key byte for byte.
+    assert source_rev_key("IBM", "z/OS", "3.1", sha) == f"ibm|z/os|3.1|{sha}"
+
+
+def test_source_rev_is_derived_from_a_parsed_document_in_one_place():
+    """#990 item 2: payload.py and chunk.py each spelled
+    `source_rev_key(parsed.vendor, parsed.product, parsed.version,
+    parsed.sha256)`, so the stored `source_rev` and the chunk-id revision could
+    drift apart. One function owns the mapping; every package call of
+    source_rev_key goes through it."""
+    import ast
+
+    from mainframe_rag.ingest import identity
+
+    package = Path(identity.__file__).resolve().parents[1]
+    callers = set()
+    for path in sorted(package.rglob("*.py")):
+        for fn in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not isinstance(fn, ast.FunctionDef):
+                continue
+            for call in ast.walk(fn):
+                if isinstance(call, ast.Call) and (
+                    getattr(call.func, "id", None) == "source_rev_key"
+                    or getattr(call.func, "attr", None) == "source_rev_key"
+                ):
+                    callers.add(f"{path.relative_to(package)}:{fn.name}")
+    assert callers == {"ingest/identity.py:parsed_source_rev"}
+
+    from mainframe_rag.ingest.identity import parsed_source_rev
+
+    doc = SimpleNamespace(vendor="IBM", product="zOS|x", version="2.5", sha256="ab" * 32)
+    assert parsed_source_rev(doc) == f"ibm|zos\\|x|2.5|{'ab' * 32}"
+
 # ---------------------------------------------------------------------------
 # plan_duplicates: byte-identical copies elect the lexicographic winner
 # ---------------------------------------------------------------------------
@@ -197,7 +252,53 @@ def test_collision_report_names_inputs_not_layout_or_text():
     assert "'reference'" in text
     assert "a/reference.pdf" in text and "b/reference.pdf" in text
     assert "/mnt/secret" not in text
-    assert "--vendor/--product/--version" in text
+    assert text.endswith(_COLLISION_REMEDIATION)
+
+
+# Issue #1007 (maintainer decision C): same-doc_id volumes stay refused in
+# one walk, and the message gives only a remediation that works. Run-wide CLI
+# labels cannot separate two files of one walk, and a run that walks one
+# volume refuses the other as residue under alias publication.
+_COLLISION_HEADER = (
+    "revision collision: distinct walked inputs resolve to one doc_id with "
+    "different content \u2014 ingesting would delete one revision's points "
+    "(refusing before any delete/upsert):"
+)
+_COLLISION_REMEDIATION = (
+    "Distinct revisions or volumes that share one doc_id cannot be ingested "
+    "into one corpus, and --vendor/--product/--version labels apply to the "
+    "whole run, so they cannot separate them. Rename the files so each "
+    "filename stem starts with a distinct form number (a filename form "
+    "number takes precedence over the text), or ingest each into its own "
+    "corpus and alias. If they are duplicate copies, keep one input."
+)
+
+
+@pytest.mark.parametrize(
+    "rels",
+    [
+        ("SA22-0000-00_volume1.pdf", "SA22-0000-00_volume2.pdf"),
+        ("ibm/zos/2.5/SA22-0000-00_volume1.pdf", "ibm/zos/3.1/SA22-0000-00_volume2.pdf"),
+    ],
+    ids=["one-directory", "four-level-distinct-versions"],
+)
+def test_same_doc_id_volumes_refuse_with_a_working_remediation(tmp_path, rels):
+    import hashlib
+
+    from mainframe_rag.ingest.run_ingest import main
+
+    shas = []
+    for n, rel in enumerate(rels, start=1):
+        path = _write_text_pdf(tmp_path / rel, [f"Volume {n} widget prose."])
+        shas.append(hashlib.sha256(path.read_bytes()).hexdigest()[:16])
+    with pytest.raises(RevisionCollisionError) as err:
+        main(["--src", str(tmp_path), "--progress", str(tmp_path / "inv.jsonl"),
+              "--workers", "1", "--dry-run"])
+    members = ", ".join(f"{rel}@{sha}" for rel, sha in zip(rels, shas, strict=True))
+    assert str(err.value) == (
+        f"{_COLLISION_HEADER}\n  doc_id 'SA22-0000-00': {members}.\n{_COLLISION_REMEDIATION}"
+    )
+    assert str(tmp_path) not in str(err.value)
 
 
 def test_prescan_doc_ids_never_raise(tmp_path):

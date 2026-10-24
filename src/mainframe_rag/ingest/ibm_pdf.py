@@ -147,14 +147,37 @@ def extract_product_version(doc: pymupdf.Document) -> tuple[str | None, str | No
     return None, None
 
 
+# Issue #998: /Title, bookmark titles and /PageLabels are free-form metadata
+# that citations repeat verbatim, so each is one sanitized line. A title or
+# bookmark title (one heading_path element) is cut at a word boundary, which
+# keeps it a title-line prefix for same-page splitting; an overlong printed
+# label is absent instead (a truncated label would name another page).
+TITLE_MAX_CHARS = 200
+PAGE_LABEL_MAX_CHARS = 32
+_WHITESPACE_RE = re.compile(r"\s+")
+
+
+def _metadata_line(text: str) -> str:
+    """Sanitized (sanitize_page_text), whitespace-collapsed, stripped."""
+    return _WHITESPACE_RE.sub(" ", sanitize_page_text(text)).strip()
+
+
+def _bounded_title(title: str) -> str:
+    if len(title) <= TITLE_MAX_CHARS:
+        return title
+    cut = title[: TITLE_MAX_CHARS + 1]
+    return (cut.rsplit(" ", 1)[0] if " " in cut else cut[:TITLE_MAX_CHARS]).rstrip()
+
+
 def extract_title(doc: pymupdf.Document, doc_id: str | None) -> str:
-    meta_title = (doc.metadata or {}).get("title") or ""
-    if meta_title.strip():
-        return meta_title.strip()
+    meta_title = _metadata_line((doc.metadata or {}).get("title") or "")
+    if meta_title:
+        return _bounded_title(meta_title)
     first = doc[0].get_text().strip().splitlines() if doc.page_count else []
-    for line in first[:10]:
-        if line.strip() and not DOCNO_RE.search(line):
-            return line.strip()
+    for raw in first[:10]:
+        line = _metadata_line(raw)
+        if line and not DOCNO_RE.search(line):
+            return _bounded_title(line)
     return doc_id or "Untitled"
 
 
@@ -186,11 +209,14 @@ def parse_pdf(
             path=path,
             sha256=sha256 or sha256_file(path),
             doc_id=doc_id,
-            title=sanitize_page_text(extract_title(doc, doc_id)),
+            title=extract_title(doc, doc_id),
             product=product_f,
             version=version_f or None,
             vendor=vendor_f or "unknown",
-            toc=tuple(doc.get_toc(simple=True)),
+            toc=tuple(
+                (level, _bounded_title(_metadata_line(title)), page)
+                for level, title, page in doc.get_toc(simple=True)
+            ),
             page_count=doc.page_count,
         )
     finally:
@@ -490,12 +516,19 @@ def _page_label(page: pymupdf.Page) -> str | None:
     them instead of returning ''. Treat that page's label as absent rather
     than failing the whole document: chunking cites a physical-page
     fallback for any span that is not fully labeled. A hex-string prefix is
-    decoded to the printed text (issue #863)."""
+    decoded to the printed text (issue #863), then made one sanitized line;
+    a label longer than PAGE_LABEL_MAX_CHARS is absent (issue #998)."""
     try:
         label = page.get_label()
     except IndexError:
         return None
-    return _decode_hex_label_prefix(label) if label else label
+    if not label:
+        return label
+    decoded = _decode_hex_label_prefix(label)
+    if decoded is None:
+        return None
+    line = _metadata_line(decoded)
+    return line if len(line) <= PAGE_LABEL_MAX_CHARS else None
 
 
 def _extract_page_texts(doc: pymupdf.Document) -> tuple[list[str], list[str | None]]:
@@ -506,8 +539,8 @@ def _extract_page_texts(doc: pymupdf.Document) -> tuple[list[str], list[str | No
     characters are dropped by sanitize_page_text (issue #87) before chrome
     detection sees the text, since those characters would also fracture
     chrome line-matching. Table rows are rebuilt by extract_page_text
-    (issue #85). Labels pass through untouched, except that an unreadable
-    label is absent (see _page_label).
+    (issue #85). Labels are decoded and made one bounded, sanitized line;
+    an unreadable or overlong label is absent (see _page_label).
     """
     page_texts: list[str] = []
     page_labels: list[str | None] = []

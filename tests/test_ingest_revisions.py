@@ -738,8 +738,8 @@ def _planned_and_published_revs(
     assert chunks, "the synthetic document must produce stored points"
     stored = {point_payload(parsed, chunk, rules_v)["source_rev"] for chunk in chunks}
     assert stored == {record.source_rev}, "inventory and stored payload disagree"
-    # Issue #990: chunk.py mints point ids from its own copy of the revision
-    # mapping until the next rules bump folds it; each id must still be the
+    # Issue #990: chunk ids and payloads share identity.parsed_source_rev
+    # since the rules bump folded the copies; each id must still be the
     # documented key (docs/ingest.md §4) over the inventory's revision.
     for chunk in chunks:
         key = f"{record.source_rev}|{chunk.heading_path}|{chunk.page_start}|{chunk.ordinal}"
@@ -822,12 +822,12 @@ def test_vendor_is_resolved_below_the_corpus_root_on_both_ingest_paths(monkeypat
     assert revs["precisely"] == revs["plain"] == source_rev_key("IBM", "zOS", "2.5", sha)
 
 
-def test_retirement_check_skips_a_walked_file_refused_for_a_pipe_label(monkeypatch, tmp_path, plain_pdf):
-    """Issue #878: a published document whose file moved under a directory
-    containing `|` is refused at ingest, so it has no source revision for the
-    retirement-conflict check to compare. Retiring the old document must neither
-    crash nor be blocked by the refused file, the old inventory record stays
-    untouched, and the worker records the refusal."""
+def test_retirement_check_keys_a_pipe_labelled_walked_file_by_its_escaped_revision(monkeypatch, tmp_path, plain_pdf):
+    """#990 item 1 (supersedes the #878 refusal): a published document whose
+    file moved under a directory containing `|` now ingests under an escaped
+    key. Retiring the old revision by name is not blocked by the moved file
+    (its key differs), the old inventory record stays untouched, and the
+    worker stores the moved file under the escaped key."""
     import shutil
 
     from mainframe_rag.ingest import run_ingest
@@ -864,14 +864,14 @@ def test_retirement_check_skips_a_walked_file_refused_for_a_pipe_label(monkeypat
     )
     res = run_ingest._resolve_publication(
         reader, root, progress, _settings(), vendor=None, product=None, version=None,
-        force_reingest=False, prewalked=[(str(pdf), sha)], retire_docs=(doc_id,),
+        force_reingest=False, prewalked=[(str(pdf), sha)],
+        retire_docs=(f"{doc_id}@{old.source_rev}",),
         rules_v=extraction_rules_version(),
     )
     assert reached == [1] and doc_id in res.retire_plan
     assert load_inventory(progress)[old.path].source_rev == old.source_rev
 
     record, *_ = run_ingest._parse_one((str(pdf), None, None, None, str(root), sha, False, None))
-    assert (record.status, record.error_type) == ("error", "LabelDelimiterRefused")
-    # The refusal follows the parse: the error record keeps the parsed
-    # identity and page count, not the filename-stem fallback.
+    assert record.status != "error" and record.error_type is None
+    assert record.source_rev == f"ibm|zos\\|x|2.5|{sha}" != old.source_rev
     assert (record.doc_id, record.pages > 0) == (doc_id, True)

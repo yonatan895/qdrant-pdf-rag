@@ -15,7 +15,7 @@ from itertools import pairwise
 from typing import TYPE_CHECKING
 
 from mainframe_rag.ingest.classify import classify, is_table_block
-from mainframe_rag.ingest.identity import source_rev_key
+from mainframe_rag.ingest.identity import parsed_source_rev
 from mainframe_rag.regexes import (
     FRONT_MATTER_RE,
     SKIP_ALWAYS_RE,
@@ -33,6 +33,10 @@ SECTION_MAX_CHARS = 3500
 SPLIT_OVERLAP_CHARS = 400
 FRONT_MATTER_FRACTION = 0.15
 FRONT_MATTER_MIN_PAGES = 2
+# Issue #998: total heading_path bound. Elements are already bounded at
+# parse (ibm_pdf.TITLE_MAX_CHARS = 200), so at least two whole elements fit;
+# tests/test_embed_budget.py proves the worst-case embed text still fits.
+HEADING_PATH_MAX_CHARS = 512
 
 _BLANK_SPLIT_RE = re.compile(r"\n\s*\n")
 
@@ -417,6 +421,57 @@ def _shared_page_pieces(
     return pieces
 
 
+def _join_heading_path(titles: list[str]) -> str:
+    """`" > "`-joined heading path within HEADING_PATH_MAX_CHARS (issue
+    #998): the outermost ancestors are dropped whole until it fits, so the
+    leaf and its nearest ancestors stay and no element is cut mid-word."""
+    parts = list(titles)
+    while len(parts) > 1 and len(" > ".join(parts)) > HEADING_PATH_MAX_CHARS:
+        parts.pop(0)
+    return " > ".join(parts)
+
+
+def _named_skip(title: str, page_1based: int, front_matter_limit: int) -> bool:
+    """A heading whose section is skipped by name: always-skipped back
+    matter anywhere, front matter at or before the limit."""
+    return bool(SKIP_ALWAYS_RE.search(title)) or (
+        bool(FRONT_MATTER_RE.search(title)) and page_1based <= front_matter_limit
+    )
+
+
+def _leading_sections(
+    parsed: ParsedDoc,
+    entries: list[tuple[int, str, int]],
+    first_kept: int,
+    front_matter_limit: int,
+) -> list[Section]:
+    """Sections under the document title for the pages before the first
+    kept entry (issue #1001). No kept section covers them, so they used to
+    be dropped whole: one late bookmark lost the body before it. A page is
+    skipped only when it is inside the front-matter limit and the entry it
+    falls under is skipped by name; un-bookmarked pages (covers, a partial
+    or shifted outline) and pages under an empty title are body."""
+    sections: list[Section] = []
+    run_start: int | None = None
+    owner: tuple[str, int] | None = None
+    nxt = 0
+    for page in range(first_kept + 1):
+        while nxt < len(entries) and entries[nxt][2] <= page + 1:
+            owner = (_clean_title(entries[nxt][1]), entries[nxt][2])
+            nxt += 1
+        skipped = (
+            page < front_matter_limit
+            and owner is not None
+            and _named_skip(owner[0], owner[1], front_matter_limit)
+        )
+        if page < first_kept and not skipped:
+            run_start = page if run_start is None else run_start
+        elif run_start is not None:
+            sections.append(Section(heading_path=parsed.title, page_start=run_start, page_end=page))
+            run_start = None
+    return sections
+
+
 def outline_sections(parsed: ParsedDoc, page_texts: list[str] | None = None) -> list[Section]:
     if not parsed.toc:
         return [Section(heading_path=parsed.title, page_start=0, page_end=parsed.page_count)]
@@ -436,9 +491,7 @@ def outline_sections(parsed: ParsedDoc, page_texts: list[str] | None = None) -> 
     kept: list[tuple[int, str, int]] = []
     for level, raw_title, page_1based in entries:
         title = _clean_title(raw_title)
-        if not title or SKIP_ALWAYS_RE.search(title):
-            continue
-        if FRONT_MATTER_RE.search(title) and page_1based <= front_matter_limit:
+        if not title or _named_skip(title, page_1based, front_matter_limit):
             continue
         kept.append((level, title, page_1based))
 
@@ -452,13 +505,15 @@ def outline_sections(parsed: ParsedDoc, page_texts: list[str] | None = None) -> 
     # last message's heading. With the page text available, the page is
     # split at each later bookmark's own title line instead.
     group: list[tuple[int, str, str]] = []
+    first_kept = min(parsed.page_count, max(0, kept[0][2] - 1)) if kept else parsed.page_count
+    sections.extend(_leading_sections(parsed, entries, first_kept, front_matter_limit))
 
     for idx, (level, title, page_1based) in enumerate(kept):
 
         while stack and stack[-1][0] >= level:
             stack.pop()
         stack.append((level, title))
-        heading_path = " > ".join(t for _, t in stack)
+        heading_path = _join_heading_path([t for _, t in stack])
         group.append((level, title, heading_path))
 
         start = max(0, page_1based - 1)
@@ -909,22 +964,63 @@ def fallback_sections(page_texts: list[str], title: str) -> list[Section]:
     return [s for s in sections if s.page_end > s.page_start]
 
 
+_LABEL_TOKEN_RE = re.compile(r"\d+|[A-Za-z]+|[^\dA-Za-z]+")
+_ROMAN_RE = re.compile(r"(?:m{0,3})(?:cm|cd|d?c{0,3})(?:xc|xl|l?x{0,3})(?:ix|iv|v?i{0,3})")
+_ROMAN_VALUES = {"i": 1, "v": 5, "x": 10, "l": 50, "c": 100, "d": 500, "m": 1000}
+
+
+def _roman_value(token: str) -> int | None:
+    """Value of a one-case roman numeral ('xii', 'XIV'), else None."""
+    if not (token.islower() or token.isupper()) or not _ROMAN_RE.fullmatch(token.lower()):
+        return None
+    values = [_ROMAN_VALUES[ch] for ch in token.lower()]
+    return sum(-v if v < nxt else v for v, nxt in zip(values, [*values[1:], 0], strict=True))
+
+
+def _label_advances(prev: str, cur: str) -> bool:
+    """True when printed label `cur` provably follows `prev` (issue #1020).
+
+    The labels must have the same shape (digit, letter and separator runs
+    in the same places), and at the first differing run both must be
+    numbers that grow: decimal, one-case roman numerals, or single letters
+    of one case ('A-9' -> 'B-1'). Anything else (a restarted rule, a repeated
+    folio, a style change such as 'xii' -> '1-1') proves nothing."""
+    a, b = _LABEL_TOKEN_RE.findall(prev), _LABEL_TOKEN_RE.findall(cur)
+    if len(a) != len(b):
+        return False
+    for x, y in zip(a, b, strict=True):
+        if x == y:
+            continue
+        if x.isdigit() and y.isdigit():
+            return int(y) > int(x)
+        rx, ry = _roman_value(x), _roman_value(y)
+        if rx is not None and ry is not None and x.islower() == y.islower():
+            return ry > rx
+        single = len(x) == len(y) == 1 and x.isalpha() and y.isalpha()
+        return single and x.islower() == y.islower() and y > x
+    return False
+
+
 def _page_label_range(labels: list[str | None]) -> str:
     """Printed-label range for a chunk's physical page span, or '' when the
     printed labels cannot honestly locate the whole span (issue #271).
 
     '' when any page in the span is unlabeled (a surviving label would
-    understate the span) or when a multi-page span starts and ends on the
-    same printed label (repeated folios, e.g. every page labeled 'A-'). The
-    citation then falls back to the physical PDF pages (page_start/page_end).
-    A printed label is never invented for an unlabeled page."""
+    understate the span) or when any page's label does not advance on the
+    previous one (issue #1020): a repeated folio (every page 'A-') locates
+    nothing, and a restarted /PageLabels rule (1,2,3,1,2,3) stored '2–1' or a
+    short '1–2' for five pages. The citation then falls back to the physical
+    PDF pages (page_start/page_end). A printed label is never invented for
+    an unlabeled page."""
     present = [lbl for lbl in labels if lbl]
     if not present or len(present) != len(labels):
         return ""
     first, last = present[0], present[-1]
     if len(present) == 1:
         return first
-    return "" if first == last else f"{first}\u2013{last}"
+    if not all(_label_advances(a, b) for a, b in pairwise(present)):
+        return ""
+    return f"{first}\u2013{last}"
 
 
 def make_chunks(
@@ -933,7 +1029,7 @@ def make_chunks(
     doc_id = parsed.doc_id or parsed.path.stem
     # Chunk identity keys on the source revision (issue #361): the payload
     # doc_id stays the printed family key for citations and filters.
-    revision = source_rev_key(parsed.vendor, parsed.product, parsed.version, parsed.sha256)
+    revision = parsed_source_rev(parsed)
     labels = page_labels or [None] * parsed.page_count
     chunks: list[Chunk] = []
 
