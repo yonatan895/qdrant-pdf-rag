@@ -526,13 +526,13 @@ def test_signing_secret_and_trusted_flag_only_on_protected_release_path():
 
 def _eval_gha(expr: str, event: str, ref: str, secret: str = "SECRET") -> str:
     """Evaluate the `a && b && 'x' || 'y'` subset of a workflow expression."""
-    body = re.fullmatch(r"\s*\$\{\{(.*)\}\}\s*", str(expr), re.S)
+    body = re.fullmatch(r"\s*\$\{\{(.*)\}\}\s*", str(expr), re.DOTALL)
     assert body, f"not a plain expression: {expr!r}"
     py = body.group(1).replace("&&", " and ").replace("||", " or ")
     py = py.replace("github.event_name", repr(event)).replace("github.ref", repr(ref))
     py = py.replace("secrets.SNEAKERNET_SIGNING_KEY", repr(secret))
     assert not re.search(r"[A-Za-z_]\w*\.\w", re.sub(r"'[^']*'", "", py)), f"unknown context: {expr!r}"
-    return str(eval(py, {"__builtins__": {}}))  # noqa: S307 - fixed repo workflow text
+    return str(eval(py, {"__builtins__": {}}))
 
 
 def test_only_manual_main_dispatch_signs_and_nightly_packs_ephemeral():
@@ -559,6 +559,6 @@ def test_only_manual_main_dispatch_signs_and_nightly_packs_ephemeral():
         assert _eval_gha(job["environment"], event, ref) == env_name, where
         assert _eval_gha(key_expr, event, ref) == secret, where
         out = subprocess.run(
-            ["sh", "-c", f"{cond.group(1)} && echo trusted"], capture_output=True, text=True,
+            ["sh", "-c", f"{cond.group(1)} && echo trusted"], capture_output=True, text=True, check=False,
             env={"PATH": os.environ["PATH"], "GITHUB_REF": ref, "GITHUB_EVENT_NAME": event})
         assert (out.stdout.strip() == "trusted") is trusted, f"{where}: trusted flag"
