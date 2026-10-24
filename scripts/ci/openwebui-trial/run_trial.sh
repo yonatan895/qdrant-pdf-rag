@@ -14,6 +14,9 @@
 # audit    install the node-level egress audit: an nftables set that records
 #          every new flow (destination, protocol, port) the Open WebUI pod opens
 # egress-report  print that set and the pod's CoreDNS queries
+# idp-config  regenerate the Dex config (DEX_TOKEN_EXPIRY) and restart Dex
+# toolprobe  add the tool-server identity probe (toolprobe.yaml, #1088): echo
+#          tool server, broker IdP, Open WebUI tool-server registration
 # teardown delete the cluster (only $KIND_NAME, which this script created)
 #
 # Inputs: KIND_BIN (pinned kind v0.33.0), EVIDENCE (outside git), PIPE_FILE
@@ -117,7 +120,8 @@ path = os.path.join(ev, "secrets.json")
 if not os.path.exists(path):
     data = {"webui": secrets.token_urlsafe(32), "client": secrets.token_urlsafe(32),
             "admin": secrets.token_urlsafe(18), "alice": secrets.token_urlsafe(18),
-            "bob": secrets.token_urlsafe(18)}
+            "bob": secrets.token_urlsafe(18), "gateway": secrets.token_urlsafe(32),
+            "broker_client": secrets.token_urlsafe(32)}
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w") as fh:
         json.dump(data, fh)
@@ -128,24 +132,38 @@ PY
 import bcrypt, sys
 for line in sys.stdin.read().split():
     print(bcrypt.hashpw(line.encode(), bcrypt.gensalt(10)).decode())' > "$EVIDENCE/hashes.txt"
-    python3 - "$EVIDENCE" > "$EVIDENCE/dex-config.yaml" <<'PY'
+    python3 - "$EVIDENCE" "${DEX_TOKEN_EXPIRY:-}" "${DEX_STORAGE:-memory}" > "$EVIDENCE/dex-config.yaml" <<'PY'
 import json, sys
 ev = sys.argv[1]
+expiry = sys.argv[2]
+storage = sys.argv[3]
 s = json.load(open(f"{ev}/secrets.json"))
 hashes = open(f"{ev}/hashes.txt").read().split()
 users = [("admin", "owui-admins", "4b0f4a8e-0000-4000-8000-000000000001"),
          ("alice", "docs-readers", "4b0f4a8e-0000-4000-8000-000000000002"),
          ("bob", "other-team", "4b0f4a8e-0000-4000-8000-000000000003")]
 print("issuer: http://dex.owui-trial.svc.cluster.local:5556/dex")
-print("storage: {type: memory}")
+# DEX_STORAGE=sqlite3 keeps state in the pod's /tmp emptyDir (refresh-token probe).
+print("storage: {type: sqlite3, config: {file: /tmp/dex.db}}" if storage == "sqlite3" else "storage: {type: memory}")
 print("web: {http: 0.0.0.0:5556}")
 print("oauth2: {skipApprovalScreen: true, responseTypes: [code]}")
 print("enablePasswordDB: true")
+if expiry:
+    # Token-lifetime probe (#1088): Dex uses this lifetime for ID and access tokens.
+    print(f"expiry: {{idTokens: {expiry}}}")
 print("staticClients:")
 print("  - id: open-webui")
 print("    name: Open WebUI")
 print(f"    secret: {json.dumps(s['client'])}")
 print("    redirectURIs: ['http://openwebui.owui-trial.svc.cluster.local:8080/oauth/oidc/callback']")
+# Tool-probe (#1088): a gateway client that trusts open-webui, so open-webui may
+# ask for it as an extra audience (scope audience:server:client_id:team-gateway).
+# The probe broker's OIDC connector also authenticates as this client.
+print("  - id: team-gateway")
+print("    name: Team gateway (trial)")
+print(f"    secret: {json.dumps(s['gateway'])}")
+print("    trustedPeers: [open-webui]")
+print("    redirectURIs: ['http://dex-broker.owui-trial.svc.cluster.local:5556/dex/callback']")
 print("staticPasswords:")
 for (name, group, uid), h in zip(users, hashes):
     print(f"  - email: {name}@trial.test")
@@ -222,6 +240,78 @@ egress_report() {
     k -n kube-system logs -l k8s-app=kube-dns --tail=-1 | python3 "$HERE/egress_report.py" dns "$EVIDENCE/owui-pod-ips.txt"
 }
 
+toolprobe() {
+    # Tool-server identity probe (#1088): the echo tool server, the broker IdP
+    # and Open WebUI registered with both as system_oauth tool servers (MCP and
+    # OpenAPI) and user-info headers on. TOOLPROBE_OAUTH_SCOPES, when set,
+    # replaces OAUTH_SCOPES (the extra-audience run). Secrets stay in $EVIDENCE.
+    TRIAL_UID=$(cat "$EVIDENCE/trial-uid.txt")
+    k -n "$NS" create configmap toolprobe-script --from-file=toolprobe_echo.py="$HERE/toolprobe_echo.py" \
+        --dry-run=client -o yaml | k apply -f - >/dev/null
+    python3 - "$EVIDENCE" <<'PY'
+import json, os, sys
+ev = sys.argv[1]
+s = json.load(open(f"{ev}/secrets.json"))
+idp = "http://dex.owui-trial.svc.cluster.local:5556/dex"
+broker = "http://dex-broker.owui-trial.svc.cluster.local:5556/dex"
+lines = [
+    f"issuer: {broker}", "storage: {type: memory}", "web: {http: 0.0.0.0:5556}",
+    "oauth2: {skipApprovalScreen: true}",
+    "connectors:", "  - type: oidc", "    id: trial-idp", "    name: Trial IdP", "    config:",
+    f"      issuer: {idp}", "      clientID: team-gateway", f"      clientSecret: {json.dumps(s['gateway'])}",
+    f"      redirectURI: {broker}/callback", "      getUserInfo: true", "      insecureEnableGroups: true",
+    "      scopes: [openid, profile, email, groups]",
+    "staticClients:",
+    "  - id: splunk-gateway", "    name: Splunk gateway (trial)", f"    secret: {json.dumps(s['broker_client'])}",
+    "  - id: gitlab-gateway", "    name: GitLab gateway (trial)", f"    secret: {json.dumps(s['broker_client'])}",
+    "    trustedPeers: [splunk-gateway]",
+]
+access = "urn:ietf:params:oauth:token-type:access_token"
+id_token = "urn:ietf:params:oauth:token-type:id_token"
+attempts = [
+    {"label": "idp-local-connector", "token_url": f"{idp}/token", "client_id": "team-gateway",
+     "client_secret": s["gateway"], "params": {"connector_id": "local", "subject_token_type": access,
+                                              "requested_token_type": access, "scope": "openid groups"}},
+    {"label": "broker-access-token", "token_url": f"{broker}/token", "client_id": "splunk-gateway",
+     "client_secret": s["broker_client"], "params": {"connector_id": "trial-idp", "subject_token_type": access,
+                                                    "requested_token_type": access, "scope": "openid email groups"}},
+    {"label": "broker-access-token-extra-audience", "token_url": f"{broker}/token", "client_id": "splunk-gateway",
+     "client_secret": s["broker_client"], "params": {
+         "connector_id": "trial-idp", "subject_token_type": access, "requested_token_type": access,
+         "scope": "openid email groups audience:server:client_id:gitlab-gateway"}},
+    {"label": "broker-as-id-token", "token_url": f"{broker}/token", "client_id": "splunk-gateway",
+     "client_secret": s["broker_client"], "params": {"connector_id": "trial-idp", "subject_token_type": id_token,
+                                                    "requested_token_type": access, "scope": "openid email groups"}},
+]
+for name, text in (("dex-broker-config.yaml", "\n".join(lines) + "\n"),
+                   ("toolprobe-exchange.json", json.dumps(attempts))):
+    path = os.path.join(ev, name)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        fh.write(text)
+PY
+    k -n "$NS" create secret generic dex-broker-config --from-file=config.yaml="$EVIDENCE/dex-broker-config.yaml" \
+        --dry-run=client -o yaml | k apply -f - >/dev/null
+    k -n "$NS" create secret generic toolprobe-exchange --from-file=config.json="$EVIDENCE/toolprobe-exchange.json" \
+        --dry-run=client -o yaml | k apply -f - >/dev/null
+    render "$HERE/toolprobe.yaml" | k apply -f -
+    k -n "$NS" rollout restart deploy/toolprobe deploy/dex-broker
+    for d in toolprobe dex-broker; do k -n "$NS" rollout status "deploy/$d" --timeout=300s; done
+    grants='[{"principal_type": "user", "principal_id": "*", "permission": "read"}]'
+    conns=$(printf '[{"type": "mcp", "url": "http://toolprobe.%s.svc.cluster.local:8000/mcp", "path": "", "auth_type": "system_oauth", "key": "", "config": {"enable": true, "access_grants": %s}, "info": {"id": "echo", "name": "Trial echo (MCP)", "description": "trial"}}, {"type": "openapi", "url": "http://toolprobe.%s.svc.cluster.local:8000", "path": "openapi.json", "auth_type": "system_oauth", "key": "", "config": {"enable": true, "access_grants": %s}, "info": {"id": "echo-openapi", "name": "Trial echo (OpenAPI)", "description": "trial"}}]' "$NS" "$grants" "$NS" "$grants")
+    k -n "$NS" set env deploy/openwebui ENABLE_FORWARD_USER_INFO_HEADERS=true TOOL_SERVER_CONNECTIONS="$conns" \
+        OAUTH_SCOPES="${TOOLPROBE_OAUTH_SCOPES:-openid email profile groups}"
+    k -n "$NS" rollout status deploy/openwebui --timeout=600s
+}
+
+idp_config() {
+    # Regenerate the trial IdP config (DEX_TOKEN_EXPIRY, when set, shortens token
+    # lifetimes; DEX_STORAGE=sqlite3 swaps the store) and restart Dex: users sign in again.
+    secrets
+    k -n "$NS" rollout restart deploy/dex
+    k -n "$NS" rollout status deploy/dex --timeout=300s
+}
+
 teardown() {
     "$KIND_BIN" delete cluster --name "$KIND_NAME" --kubeconfig "$KUBECONFIG"
     "$KIND_BIN" get clusters
@@ -235,6 +325,8 @@ case "${1:-}" in
     deploy) deploy ;;
     audit) audit ;;
     egress-report) egress_report ;;
+    toolprobe) toolprobe ;;
+    idp-config) idp_config ;;
     teardown) teardown ;;
-    *) echo "usage: $0 images|cluster|deploy|audit|egress-report|teardown" >&2; exit 2 ;;
+    *) echo "usage: $0 images|cluster|deploy|audit|egress-report|toolprobe|idp-config|teardown" >&2; exit 2 ;;
 esac
