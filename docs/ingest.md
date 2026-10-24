@@ -725,7 +725,17 @@ thread pool.
   and the residue audit refuses cutover until an explicit `--retire-doc`
   names it. Completion-less residue is swept (crash-safe
   retry); a lineage-less run therefore ADDS revisions — keep the
-  `--progress` file (prod `/work` persists it) so refreshes replace. Any
+  `--progress` file (prod `/work` persists it) so refreshes replace.
+  **Recovery after a lost progress file** (issue #1005): a relabel then has no
+  lineage and refuses as residue, and `--retire-doc` cannot name the published
+  revision either, because the inventory is the only retirement authority
+  (removing a document's records revokes its approval). Restore the progress
+  file if a copy exists. Otherwise: remove the refused build's
+  `publish-<alias>.json`, republish with the **original** labels and
+  `--reingest` (the serving generation cannot be re-certified without
+  inventory, so a forced repair generation rebuilds the records), then rerun
+  the relabel; lineage replaces the old revision and its markers. No control
+  collection is edited. Any
   point without a source revision under the document (pre-#361 data) raises
   `UnsupportedLegacyDataError` (doc id + content ids, never text) before any
   delete: that data is never migrated; build the corpus into a new collection.

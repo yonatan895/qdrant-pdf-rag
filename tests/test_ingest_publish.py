@@ -2220,6 +2220,57 @@ def test_duplicate_relabel_never_drops_a_committed_sibling_revision(tmp_path, mo
     assert fake.aliases[ALIAS] == live_2
 
 
+def test_relabel_after_inventory_loss_recovers_by_republishing_original_labels(tmp_path, monkeypatch):
+    """Issue #1005 (S2-5), documented recovery: a relabel run with a lost
+    progress file has no lineage, so the published revision stays and
+    cutover refuses as residue. The inventory is the only retirement
+    authority (SF1), so `--retire-doc` cannot name the published revision
+    either. Supported path, with no control-collection edit: abandon the
+    refused build, republish under the ORIGINAL labels (forced, since the
+    serving generation cannot be re-certified without inventory) to rebuild
+    the inventory record, then relabel; lineage replaces the old revision,
+    leaving no orphaned marker, and the next ordinary run is steady state."""
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.inventory import load_inventory
+    from mainframe_rag.ingest.publish import publish_state_path
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    path = _build_doc_with_id(corpus, "doc_a", DOC_A)
+    progress = tmp_path / "inv.jsonl"
+    original = ("--vendor", "ibm", "--product", "zos", "--version", "2.5")
+    relabel = ("--vendor", "ibm", "--product", "zos", "--version", "3.0")
+    assert _run_main(monkeypatch, corpus, progress, *original) == 0
+    live_1 = fake.aliases[ALIAS]
+    rev_old = load_inventory(progress)[str(path)].source_rev
+    progress.unlink()  # the inventory is lost
+
+    with pytest.raises(RuntimeError, match="unmarked residue"):
+        _run_main(monkeypatch, corpus, progress, *relabel)
+    publish_state_path(progress, ALIAS).unlink()  # abandon the refused build
+    with pytest.raises(RuntimeError, match="unapproved revision"):
+        _run_main(monkeypatch, corpus, progress, *relabel, "--retire-doc", f"{DOC_A}@{rev_old}")
+    assert fake.aliases[ALIAS] == live_1, "refusals move no alias"
+
+    assert _run_main(monkeypatch, corpus, progress, *original, "--reingest") == 0
+    assert load_inventory(progress)[str(path)].source_rev == rev_old, "inventory rebuilt"
+    live_2 = fake.aliases[ALIAS]
+    assert _revisions_in(fake, live_2) == {rev_old}
+
+    assert _run_main(monkeypatch, corpus, progress, *relabel) == 0
+    live_3 = fake.aliases[ALIAS]
+    rev_new = load_inventory(progress)[str(path)].source_rev
+    assert rev_new != rev_old
+    assert _revisions_in(fake, live_3) == {rev_new}
+    assert _marker_revisions_in(fake, live_3) == {rev_new}, "no orphaned marker"
+    assert _revisions_in(fake, live_1) == {rev_old}, "superseded generation retained"
+    assert _run_main(monkeypatch, corpus, progress, *relabel) == 0
+    assert fake.aliases[ALIAS] == live_3, "the next ordinary run is steady state"
+
+
 def test_same_path_reissue_with_a_new_form_number_cuts_over_by_lineage(tmp_path, monkeypatch):
     """Issue #1006 (S2-6): the path's inventory lineage names the revision it
     replaces even when the reissue prints another form number. The ordinary
