@@ -1658,6 +1658,24 @@ newer pin has migrated rolls back only through its pre-upgrade snapshot. To reti
 for good, delete the claim explicitly (`oc delete pvc rag-openwebui-data`); no deploy path does
 that.
 
+**Blocked API prefixes (ADR-0007 E1; mechanism pending).** Open WebUI v0.12.3 enforces some
+disabled features only in its UI. `/api/v1/files` stores uploads with uploads off (Kind trial V1),
+and `/api/v1/retrieval/process/*` and the audio endpoints check no feature flag. The router must
+refuse `/api/v1/files`, `/api/v1/retrieval`, `/api/v1/knowledge` and `/api/v1/audio`. The server
+decodes percent-encoding before routing, so `%66iles` and `%2F` reach the handler. A raw-path
+OpenShift Route cannot block them, and the chart does not yet render a block. Until a
+decoded-path deny layer is approved and shipped, do not enable the front end for users. Site
+acceptance, as a signed-in user cookie `$C` and `$H` the Route host. Each request must return 403
+or 404 and must not store a file:
+
+```sh
+for p in /api/v1/files/ /api/v1/files /API/v1/files/ //api/v1/files/ /api/v1/./files/ \
+         /api/v1/%66iles/ /api/v1%2Ffiles/ /%61pi/v1/files/ /api/v1/retrieval/process/text \
+         /api/v1/knowledge/ /api/v1/audio/transcriptions; do
+  printf '%s ' "$p"; curl -sk -o /dev/null -w '%{http_code}\n' -X POST -b "$C" "https://$H$p"
+done
+```
+
 **Requirements.** The Route API (OpenShift; deploy refuses the front end without it) and an
 enforcing CNI. The Kind lanes do not enable the front end yet: an e2e run with it enabled needs
 the #1073 test IdP and the #1072 Pipe.
