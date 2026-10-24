@@ -446,7 +446,8 @@ def test_invalid_configuration_fails_closed(tree, extra_env, exit_code, messages
 def test_rehearsal_knobs_reach_helm(tree):
     vals = tree[0] / "vals.yaml"
     vals.write_text("resources: {}\n")
-    r = _run(tree, ("QDRANT_EXTRA_VALUES", str(vals)), ("QDRANT_STORAGE_SIZE", "1Gi"))
+    r = _run(tree, ("QDRANT_EXTRA_VALUES", str(vals)), ("QDRANT_STORAGE_SIZE", "1Gi"),
+             ("CI_REHEARSAL", "1"))
     assert r.returncode == 0, r.stderr
     assert "persistence.size=1Gi" in _helm_log(tree)
     assert "snapshotPersistence.size=1Gi" in _helm_log(tree)
@@ -454,6 +455,45 @@ def test_rehearsal_knobs_reach_helm(tree):
     assert str(vals) in args
     assert args[args.index(str(vals)) - 1] == "-f"
     assert args.index("charts/qdrant-openshift.values.yaml") < args.index(str(vals))
+
+
+# --- #1014: CI-rehearsal values never reach the release path ----------------
+
+def _values(tree, text):
+    path = tree[0] / "extra-values.yaml"
+    path.write_text(text)
+    return str(path)
+
+
+def test_extra_values_are_refused_without_ci_rehearsal(tree):
+    r = _run(tree, ("QDRANT_EXTRA_VALUES", _values(tree, "resources: {}\n")))
+    assert r.returncode != 0
+    assert "QDRANT_EXTRA_VALUES is a CI-rehearsal override" in r.stderr
+    assert "upgrade" not in _helm_log(tree)
+
+
+def test_ci_rehearsal_cannot_come_from_the_operator_file(tree):
+    (tree[0] / "airgap.env").write_text("CI_REHEARSAL=1\n")
+    r = _run(tree, ("QDRANT_EXTRA_VALUES", _values(tree, "resources: {}\n")))
+    assert r.returncode != 0
+    assert "CI-rehearsal override" in r.stderr
+
+
+@pytest.mark.parametrize("text", [
+    "service:\n  type: LoadBalancer\n",
+    "service:\n  type: NodePort\n",
+    "ingress:\n  enabled: true\n  hosts:\n    - host: qdrant.example.com\n      paths:\n        - path: /\n          pathType: Prefix\n          servicePort: 6333\n",
+    "apiKey: false\nreadOnlyApiKey: false\n",
+    "containerSecurityContext:\n  readOnlyRootFilesystem: false\n",
+    "containerSecurityContext:\n  privileged: true\n",
+    "image:\n  repository: evil.example/qdrant\n",
+    "hostNetwork: true\n",
+], ids=["loadbalancer", "nodeport", "ingress", "no-api-key", "writable-root", "privileged", "foreign-image", "hostnetwork"])
+def test_hostile_extra_values_are_refused_by_the_qdrant_render(tree, text):
+    r = _run(tree, ("QDRANT_EXTRA_VALUES", _values(tree, text)), ("CI_REHEARSAL", "1"))
+    assert r.returncode != 0, r.stdout
+    assert "rendered Qdrant" in r.stderr
+    assert "upgrade" not in _helm_log(tree)
 
 
 def test_rendered_manifest_substituted_and_written(tree):

@@ -128,6 +128,107 @@ def test_ingest_dryrun_renders_clean_manifest(ingest_tree):
     assert "Gateway keys off" in r.stdout
 
 
+# --- #1014: CI-rehearsal overrides never reach the release path -------------
+
+PATCHING_KUBECTL = f"""#!{__import__("sys").executable}
+import json, sys, yaml
+args = sys.argv[1:]
+if args[:2] != ["patch", "--local"]:
+    sys.exit(0)
+
+def merge(base, patch):
+    if isinstance(base, dict) and isinstance(patch, dict):
+        out = dict(base)
+        for key, value in patch.items():
+            out[key] = merge(base[key], value) if key in base else value
+        return out
+    if (isinstance(base, list) and isinstance(patch, list)
+            and all(isinstance(x, dict) and "name" in x for x in base + patch)):
+        out = [dict(x) for x in base]
+        for item in patch:
+            for index, existing in enumerate(out):
+                if existing["name"] == item["name"]:
+                    out[index] = merge(existing, item)
+                    break
+            else:
+                out.append(item)
+        return out
+    return patch
+
+doc = yaml.safe_load(open(args[args.index("-f") + 1]))
+sys.stdout.write(yaml.safe_dump(merge(doc, json.loads(args[args.index("-p") + 1]))))
+"""
+
+RESOURCE_PATCH = {"spec": {"template": {"spec": {"containers": [{
+    "name": "ingest",
+    "resources": {"requests": {"cpu": "250m", "memory": "512Mi"},
+                  "limits": {"cpu": "1", "memory": "1Gi"}}}]}}}}
+
+
+def _write_patch(tree, patch, name="patch.json"):
+    import json
+
+    path = tree[0] / name
+    path.write_text(json.dumps(patch))
+    return str(path)
+
+
+def _container_patch(**fields):
+    return {"spec": {"template": {"spec": {"containers": [{"name": "ingest", **fields}]}}}}
+
+
+def _use_patching_kubectl(tree):
+    for name in ("kubectl", "oc"):
+        write_stub(tree[0] / "bin" / name, PATCHING_KUBECTL)
+
+
+def test_extra_patch_is_refused_without_ci_rehearsal(ingest_tree):
+    _use_patching_kubectl(ingest_tree)
+    patch = _write_patch(ingest_tree, RESOURCE_PATCH)
+    r = _run_ingest(ingest_tree, ("INGEST_EXTRA_PATCH", patch))
+    assert r.returncode != 0
+    assert "INGEST_EXTRA_PATCH is a CI-rehearsal override" in r.stderr
+    assert "cpu: 250m" not in (ingest_tree[0] / "dist/ingest-rendered.yaml").read_text() \
+        if (ingest_tree[0] / "dist/ingest-rendered.yaml").exists() else True
+
+
+def test_ci_rehearsal_cannot_come_from_the_operator_file(ingest_tree):
+    """The opt-in is process environment only: airgap.env travels to the air gap."""
+    _use_patching_kubectl(ingest_tree)
+    patch = _write_patch(ingest_tree, RESOURCE_PATCH)
+    (ingest_tree[0] / "airgap.env").write_text("CI_REHEARSAL=1\n")
+    r = _run_ingest(ingest_tree, ("INGEST_EXTRA_PATCH", patch))
+    assert r.returncode != 0
+    assert "CI-rehearsal override" in r.stderr
+
+
+def test_resource_only_patch_is_accepted_in_a_ci_rehearsal(ingest_tree):
+    _use_patching_kubectl(ingest_tree)
+    patch = _write_patch(ingest_tree, RESOURCE_PATCH)
+    r = _run_ingest(ingest_tree, ("INGEST_EXTRA_PATCH", patch), ("CI_REHEARSAL", "1"))
+    assert r.returncode == 0, r.stderr
+    rendered = (ingest_tree[0] / "dist/ingest-rendered.yaml").read_text()
+    assert "cpu: 250m" in rendered
+
+
+@pytest.mark.parametrize("patch", [
+    _container_patch(env=[{"name": "EMBED_MODE", "value": "hash"}]),
+    _container_patch(env=[{"name": "ALLOW_HASH_MODE", "value": "true"}]),
+    _container_patch(image="evil.example/ingest:latest"),
+    _container_patch(securityContext={"privileged": True}),
+    _container_patch(volumeMounts=[{"name": "extra", "mountPath": "/extra"}]),
+    {"spec": {"template": {"spec": {"containers": [{"name": "sidecar", "image": "evil/x"}]}}}},
+    {"spec": {"template": {"spec": {"volumes": [{"name": "h", "hostPath": {"path": "/"}}]}}}},
+    {"spec": {"template": {"spec": {"serviceAccountName": "cluster-admin"}}}},
+], ids=["hash-mode", "allow-hash", "image", "privileged", "mount", "sidecar", "hostpath", "serviceaccount"])
+def test_hostile_patch_is_refused_after_the_patch_is_applied(ingest_tree, patch):
+    _use_patching_kubectl(ingest_tree)
+    path = _write_patch(ingest_tree, patch)
+    r = _run_ingest(ingest_tree, ("INGEST_EXTRA_PATCH", path), ("CI_REHEARSAL", "1"))
+    assert r.returncode != 0
+    assert "INGEST_EXTRA_PATCH may only change container resources" in r.stderr
+
+
 @pytest.mark.parametrize("delete_fails", [False, True])
 def test_ingest_replacement_waits_for_prior_writer(ingest_tree, delete_fails):
     """A deleted Job can still have a terminating pod holding the writer lock."""
