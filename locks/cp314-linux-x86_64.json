@@ -36,6 +36,12 @@
       "version": "2026.10.19",
       "wheel": "certifi-2026.10.19-py3-none-any.whl"
     },
+    "cffi": {
+      "sha256": "b0431303acaea1089ad4b3e9ce4e6518193def1118d4073ca848635ee4ea2e96",
+      "url": "https://files.pythonhosted.org/packages/e9/02/4e7d553a7ac4b4238b38b3c1b80d486e9d4436f8d2acbf87a0997fe3f402/cffi-2.1.1-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+      "version": "2.1.1",
+      "wheel": "cffi-2.1.1-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.whl"
+    },
     "charset-normalizer": {
       "sha256": "15f024313246a4ed976c60f440bb8d257815513a681d212ff74fd46f7d715a90",
       "url": "https://files.pythonhosted.org/packages/e0/91/39c3af510b0aa32bbda03374259200f28430febfd1bf5e511fe765282ce5/charset_normalizer-3.5.1-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
@@ -53,6 +59,12 @@
       "url": "https://files.pythonhosted.org/packages/a8/d4/a306940c81c6ae759e82fff27d20b7fdc6896e422b821f51313cce212b6c/coverage-7.16.2-cp314-cp314-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl",
       "version": "7.16.2",
       "wheel": "coverage-7.16.2-cp314-cp314-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl"
+    },
+    "cryptography": {
+      "sha256": "9dab55f57c74c3cad24c323bacbbd04be4705ba6eb0d92e920b1fc4837ed5079",
+      "url": "https://files.pythonhosted.org/packages/d3/69/2c833a049475e0a3444e94c7d0aca0aa51d166374a449b09e92ac98138de/cryptography-50.0.2-cp311-abi3-manylinux_2_34_x86_64.whl",
+      "version": "50.0.2",
+      "wheel": "cryptography-50.0.2-cp311-abi3-manylinux_2_34_x86_64.whl"
     },
     "fastapi": {
       "sha256": "bfb91aa2d334c61cb35ba9a116fc123b3d3df31640b801cf57a7a78ec3f603b3",
@@ -336,6 +348,12 @@
       "version": "0.1.8",
       "wheel": "py_rust_stemmers-0.1.8-cp314-cp314-manylinux_2_28_x86_64.whl"
     },
+    "pycparser": {
+      "sha256": "a076f3f489b39b43ed13563a1dafe42447445bec2e294154ec5c57fcdda4c85e",
+      "url": "https://files.pythonhosted.org/packages/b6/ae/315bbeee126a769cbde43cf4908acb4b40408d8bf8bbf334dd7368d8dadf/pycparser-3.12-py3-none-any.whl",
+      "version": "3.12",
+      "wheel": "pycparser-3.12-py3-none-any.whl"
+    },
     "pydantic": {
       "sha256": "346a034f080da3755d8e9cb5e00e8b07de1d39e4f6e2c87d8ab7cafa0b269a73",
       "url": "https://files.pythonhosted.org/packages/eb/47/c95ffc2009878c7aac0c5e08528022dcb885933252a88b5f170058014464/pydantic-2.13.5-py3-none-any.whl",
@@ -359,6 +377,12 @@
       "url": "https://files.pythonhosted.org/packages/71/46/17f022dd3e953bf20a04a028a21ec746d942f8d2af30fa0f124fa0e6a684/pygments-2.21.0-py3-none-any.whl",
       "version": "2.21.0",
       "wheel": "pygments-2.21.0-py3-none-any.whl"
+    },
+    "pyjwt": {
+      "sha256": "42d59d631f7768a1028a64c7ff581a9bf7519804daf91fc5b6c56e30eec5e193",
+      "url": "https://files.pythonhosted.org/packages/50/ca/44de4e75f8aadc457f0634be3b542815078ded46dca30efb960edeecad6e/pyjwt-2.15.1-py3-none-any.whl",
+      "version": "2.15.1",
+      "wheel": "pyjwt-2.15.1-py3-none-any.whl"
     },
     "pymupdf": {
       "sha256": "397d6715c1f0df7548a92d0afd8ce370fc48fa47aeefac16be2bc04a16a8227f",
@@ -499,9 +523,11 @@
         "anyio",
         "ast-serialize",
         "certifi",
+        "cffi",
         "charset-normalizer",
         "click",
         "coverage",
+        "cryptography",
         "fastapi",
         "fastembed",
         "filelock",
@@ -549,10 +575,12 @@
         "prometheus-client",
         "protobuf",
         "py-rust-stemmers",
+        "pycparser",
         "pydantic",
         "pydantic-core",
         "pydantic-settings",
         "pygments",
+        "pyjwt",
         "pymupdf",
         "pytest",
         "pytest-cov",
@@ -575,7 +603,7 @@
         "wheel"
       ],
       "requirements": "requirements.dev.lock.txt",
-      "sha256": "5fc53e3ab36c8b7ad55cba921cfc3aa099a4a31a0ec58f8df68fe301fa906e7e"
+      "sha256": "fe7adcc7d43c8f9106fc9c5ccdc900d908d7e24106ac3f2f4288123b03758b60"
     },
     "runtime": {
       "packages": [
@@ -583,8 +611,10 @@
         "annotated-types",
         "anyio",
         "certifi",
+        "cffi",
         "charset-normalizer",
         "click",
+        "cryptography",
         "fastapi",
         "fastembed",
         "filelock",
@@ -624,9 +654,11 @@
         "prometheus-client",
         "protobuf",
         "py-rust-stemmers",
+        "pycparser",
         "pydantic",
         "pydantic-core",
         "pydantic-settings",
+        "pyjwt",
         "pymupdf",
         "python-dotenv",
         "python-multipart",
@@ -643,7 +675,7 @@
         "uvicorn"
       ],
       "requirements": "requirements.lock.txt",
-      "sha256": "74e0899b46c8d9651c1fce7f71060cad8a9c3a577136e317f06a74288afebd81"
+      "sha256": "fadd022b95d46e075df9391bb7a1c91ca096c59eae8f80ca0cb872c8e42533e0"
     }
   },
   "resolver": {

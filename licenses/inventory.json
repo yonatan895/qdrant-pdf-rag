@@ -595,6 +595,27 @@
       "approval_ref": null,
       "binary_wheel": true,
       "class": "permissive",
+      "declared_source": "License-Expression",
+      "evidence": "wheel-bytes",
+      "license_declared": "MIT-0",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE",
+          "sha256": "5ba24ddc57067f9249add644c3afc41a5d6dc37e23433ef759d95df370b0af63"
+        }
+      ],
+      "license_spdx": "MIT-0",
+      "name": "cffi",
+      "sha256": "b0431303acaea1089ad4b3e9ce4e6518193def1118d4073ca848635ee4ea2e96",
+      "spdx_basis": "declared-expression",
+      "status": "declared",
+      "version": "2.1.1",
+      "wheel": "cffi-2.1.1-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": true,
+      "class": "permissive",
       "declared_source": "License",
       "evidence": "wheel-bytes",
       "license_declared": "MIT",
@@ -632,6 +653,35 @@
       "status": "declared",
       "version": "8.5.0",
       "wheel": "click-8.5.0-py3-none-any.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": true,
+      "class": "permissive",
+      "declared_source": "License-Expression",
+      "evidence": "wheel-bytes",
+      "license_declared": "Apache-2.0 OR BSD-3-Clause",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE",
+          "sha256": "3e0c7c091a948b82533ba98fd7cbb40432d6f1a9acbf85f5922d2f99a93ae6bb"
+        },
+        {
+          "name": "licenses/LICENSE.APACHE",
+          "sha256": "aac73b3148f6d1d7111dbca32099f68d26c644c6813ae1e4f05f6579aa2663fe"
+        },
+        {
+          "name": "licenses/LICENSE.BSD",
+          "sha256": "602c4c7482de6479dd2e9793cda275e5e63d773dacd1eca689232ab7008fb4fb"
+        }
+      ],
+      "license_spdx": "Apache-2.0 OR BSD-3-Clause",
+      "name": "cryptography",
+      "sha256": "9dab55f57c74c3cad24c323bacbbd04be4705ba6eb0d92e920b1fc4837ed5079",
+      "spdx_basis": "declared-expression",
+      "status": "declared",
+      "version": "50.0.2",
+      "wheel": "cryptography-50.0.2-cp311-abi3-manylinux_2_34_x86_64.whl"
     },
     {
       "approval_ref": null,
@@ -1575,6 +1625,27 @@
       "class": "permissive",
       "declared_source": "License-Expression",
       "evidence": "wheel-bytes",
+      "license_declared": "BSD-3-Clause",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE",
+          "sha256": "0a9e78156ae8b96caf1b4f11ac2df424b83de29736f9e757630548a6272fdf90"
+        }
+      ],
+      "license_spdx": "BSD-3-Clause",
+      "name": "pycparser",
+      "sha256": "a076f3f489b39b43ed13563a1dafe42447445bec2e294154ec5c57fcdda4c85e",
+      "spdx_basis": "declared-expression",
+      "status": "declared",
+      "version": "3.12",
+      "wheel": "pycparser-3.12-py3-none-any.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": false,
+      "class": "permissive",
+      "declared_source": "License-Expression",
+      "evidence": "wheel-bytes",
       "license_declared": "MIT",
       "license_files": [
         {
@@ -1631,6 +1702,31 @@
       "status": "declared",
       "version": "2.15.0",
       "wheel": "pydantic_settings-2.15.0-py3-none-any.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": false,
+      "class": "permissive",
+      "declared_source": "License-Expression",
+      "evidence": "wheel-bytes",
+      "license_declared": "MIT",
+      "license_files": [
+        {
+          "name": "licenses/AUTHORS.rst",
+          "sha256": "925ce43461029eedbf558ec0b7cf7fc4b045def5120ebb97937c70814071cf07"
+        },
+        {
+          "name": "licenses/LICENSE",
+          "sha256": "797a7a20231d4c433e9f1911db1731d06b5828b98f499819a034f7c0f56f5ce5"
+        }
+      ],
+      "license_spdx": "MIT",
+      "name": "pyjwt",
+      "sha256": "42d59d631f7768a1028a64c7ff581a9bf7519804daf91fc5b6c56e30eec5e193",
+      "spdx_basis": "declared-expression",
+      "status": "declared",
+      "version": "2.15.1",
+      "wheel": "pyjwt-2.15.1-py3-none-any.whl"
     },
     {
       "approval_ref": null,
