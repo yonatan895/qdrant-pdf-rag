@@ -197,7 +197,53 @@ def test_collision_report_names_inputs_not_layout_or_text():
     assert "'reference'" in text
     assert "a/reference.pdf" in text and "b/reference.pdf" in text
     assert "/mnt/secret" not in text
-    assert "--vendor/--product/--version" in text
+    assert text.endswith(_COLLISION_REMEDIATION)
+
+
+# Issue #1007 (maintainer decision C): same-doc_id volumes stay refused in
+# one walk, and the message gives only a remediation that works. Run-wide CLI
+# labels cannot separate two files of one walk, and a run that walks one
+# volume refuses the other as residue under alias publication.
+_COLLISION_HEADER = (
+    "revision collision: distinct walked inputs resolve to one doc_id with "
+    "different content \u2014 ingesting would delete one revision's points "
+    "(refusing before any delete/upsert):"
+)
+_COLLISION_REMEDIATION = (
+    "Distinct revisions or volumes that share one doc_id cannot be ingested "
+    "into one corpus, and --vendor/--product/--version labels apply to the "
+    "whole run, so they cannot separate them. Rename the files so each "
+    "filename stem starts with a distinct form number (a filename form "
+    "number takes precedence over the text), or ingest each into its own "
+    "corpus and alias. If they are duplicate copies, keep one input."
+)
+
+
+@pytest.mark.parametrize(
+    "rels",
+    [
+        ("SA22-0000-00_volume1.pdf", "SA22-0000-00_volume2.pdf"),
+        ("ibm/zos/2.5/SA22-0000-00_volume1.pdf", "ibm/zos/3.1/SA22-0000-00_volume2.pdf"),
+    ],
+    ids=["one-directory", "four-level-distinct-versions"],
+)
+def test_same_doc_id_volumes_refuse_with_a_working_remediation(tmp_path, rels):
+    import hashlib
+
+    from mainframe_rag.ingest.run_ingest import main
+
+    shas = []
+    for n, rel in enumerate(rels, start=1):
+        path = _write_text_pdf(tmp_path / rel, [f"Volume {n} widget prose."])
+        shas.append(hashlib.sha256(path.read_bytes()).hexdigest()[:16])
+    with pytest.raises(RevisionCollisionError) as err:
+        main(["--src", str(tmp_path), "--progress", str(tmp_path / "inv.jsonl"),
+              "--workers", "1", "--dry-run"])
+    members = ", ".join(f"{rel}@{sha}" for rel, sha in zip(rels, shas, strict=True))
+    assert str(err.value) == (
+        f"{_COLLISION_HEADER}\n  doc_id 'SA22-0000-00': {members}.\n{_COLLISION_REMEDIATION}"
+    )
+    assert str(tmp_path) not in str(err.value)
 
 
 def test_prescan_doc_ids_never_raise(tmp_path):
