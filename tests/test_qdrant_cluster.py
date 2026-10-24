@@ -56,6 +56,17 @@ def test_qdrant_image_pin_ignores_commented_and_blank_lines(tmp_path):
     assert qdrant_pin.qdrant_image_pin(images) == "docker.io/qdrant/qdrant:v1.19.2-unprivileged"
 
 
+@pytest.mark.parametrize("derived_first", [True, False])
+def test_qdrant_pin_ignores_another_image_whose_name_contains_qdrant(tmp_path, derived_first):
+    """#1074 adds qdrant-pdf-rag-openwebui: it is not a second Qdrant pin."""
+    qdrant = "docker.io/qdrant/qdrant:v1.19.2-unprivileged sha256:" + "a" * 64 + "\n"
+    derived = "ghcr.io/yonatan895/qdrant-pdf-rag-openwebui:v0.12.3-slim sha256:PENDING\n"
+    images = tmp_path / "images.txt"
+    images.write_text(derived + qdrant if derived_first else qdrant + derived, encoding="utf-8")
+    assert qdrant_pin.qdrant_image_pin(images) == "docker.io/qdrant/qdrant:v1.19.2-unprivileged"
+    assert qdrant_pin.qdrant_digest_pin(images) == "docker.io/qdrant/qdrant@sha256:" + "a" * 64
+
+
 def test_require_docker_returns_immutable_id_after_digest_attestation(monkeypatch):
     reference = "docker.io/qdrant/qdrant@sha256:" + "a" * 64
     image_id = "sha256:" + "b" * 64
