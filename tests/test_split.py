@@ -60,6 +60,31 @@ def test_mirrored_noun_phrase_legs_are_disjoint(query, leg1, leg2):
     assert paths == [leg1, leg2]
 
 
+@pytest.mark.parametrize(
+    ("query", "leg1", "leg2"),
+    [
+        (
+            "difference between z/OS RACF dataset profiles and z/OS ACF2 dataset profiles",
+            "z/OS RACF dataset profiles",
+            "z/OS ACF2 dataset profiles",
+        ),
+        (
+            "IBM RACF dataset profiles vs CA ACF2 dataset profiles",
+            "IBM RACF dataset profiles",
+            "CA ACF2 dataset profiles",
+        ),
+        ("RACF group profiles and ACF2 rule sets", "RACF group profiles", "ACF2 rule sets"),
+        ("SMF type 30 vs SMF type 70 records", "SMF type 30 records", "SMF type 70 records"),
+    ],
+)
+def test_legs_with_qualifiers_isolate_one_entity_each(query, leg1, leg2):
+    """Issue #1025 review: each leg keeps exactly one compared entity with its
+    own qualifiers; no leg carries both."""
+    paths, mode = _split(query)
+    assert mode == "comparative"
+    assert paths == [leg1, leg2]
+
+
 def test_racf_acf2_legs_exclude_the_other_entity():
     paths, _ = _split("difference between RACF dataset profiles and ACF2 dataset profiles")
     assert "ACF2" not in paths[0]
