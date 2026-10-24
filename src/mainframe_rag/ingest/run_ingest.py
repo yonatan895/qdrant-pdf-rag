@@ -59,6 +59,7 @@ from mainframe_rag.ingest.completion import (
     acquire_run_lock,
     completion_collection_name,
     delete_completion,
+    delete_revision_completions,
     doc_generation_id,
     ensure_completion_collection,
     expected_digests,
@@ -613,17 +614,17 @@ def _upsert_one(
         # exists-check and the delete) is tolerated — real Qdrant failures
         # propagate so the doc errors instead of publishing alongside a
         # stale marker.
-        scopes = {revision}
+        # Every other revision the plan deletes (lineage, swept residue)
+        # loses its markers with its points, under whichever doc_id they
+        # were recorded (issues #1005/#1006): a swept revision must never
+        # leave a zero-point marker behind.
+        others = set(rev_deletes) - {revision}
         if lineage_rev is not None and lineage_rev != revision:
-            scopes.add(lineage_rev)
+            others.add(lineage_rev)
         try:
-            for scope in sorted(scopes):
-                delete_completion(
-                    client,
-                    settings,
-                    parsed.doc_id,
-                    source_rev=scope,
-                )
+            delete_completion(client, settings, parsed.doc_id, source_rev=revision)
+            for scope in sorted(others):
+                delete_revision_completions(client, settings, scope)
         except UnexpectedResponse as exc:
             if exc.status_code != 404:
                 raise
@@ -1536,6 +1537,7 @@ def _commit_migration_representation(
         digest,
         exclude_doc_ids=pending_removals,
         retire_plan=retire_plan,
+        require_stored_points=True,
     )
     if count:
         raise RuntimeError(

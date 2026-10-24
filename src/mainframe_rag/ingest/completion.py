@@ -346,6 +346,33 @@ def delete_completion(
         )
 
 
+def delete_revision_completions(client: QdrantPoints, settings: Settings, source_rev: str) -> None:
+    """Invalidate every marker of one source revision, under whichever doc_id
+    it was recorded (issues #1005/#1006): the companion of `delete_by_revision`
+    for a revision this refresh deletes that is not the document being
+    written (swept residue, or a lineage revision printed under another form
+    number). Selected client-side by exact `source_rev`, deleted by point id;
+    a revision's points and markers leave together, so no zero-point marker
+    is left behind."""
+    name = completion_collection_name(settings)
+    if not client.collection_exists(name):
+        return
+    points = scroll_all_points(
+        client,
+        name,
+        scroll_filter=models.Filter(
+            must=[models.FieldCondition(key="source_rev", match=models.MatchValue(value=source_rev))]
+        ),
+        with_payload=["source_rev", "doc_id"],
+        page_size=settings.ingest_scan_page_size,
+    )
+    ids: list[int | str | uuid.UUID] = [
+        p.id for p in points if (p.payload or {}).get("doc_id") and (p.payload or {}).get("source_rev") == source_rev
+    ]
+    if ids:
+        client.delete(name, points_selector=models.PointIdsList(points=ids), wait=True)
+
+
 def _rev_filter(doc_id: str, source_rev: str) -> models.Filter:
     return models.Filter(
         must=[
@@ -540,6 +567,7 @@ def stale_completion_markers(
     sample: int = 3,
     exclude_doc_ids: frozenset[str] = frozenset(),
     retire_plan: dict[str, dict[str, set[str] | bool]] | None = None,
+    require_stored_points: bool = False,
 ) -> tuple[int, list[str]]:
     """Completion markers NOT certified under `wanted_digest` — the
     commit-time scope proof for a representation migration (issue #391 F2).
@@ -553,6 +581,11 @@ def stale_completion_markers(
     swap audit: their markers are about to be deleted explicitly, and the
     post-removal audit refuses any remnant the plan did not actually remove.
     Read-only, paginated; the manifest point has no `doc_id` and never counts.
+    `require_stored_points` (the migration commit, issue #1005) counts a
+    marker only while its (doc_id, source_rev) still holds a point in this
+    collection: a zero-point marker certifies no searchable vector, and the
+    coverage proof that follows independently attributes every point. A
+    marker without a source revision is unsupported data and always counts.
     Returns (count, sample labels)."""
     name = completion_collection_name(settings)
     if not client.collection_exists(name):
@@ -574,10 +607,27 @@ def stale_completion_markers(
             continue
         if payload.get("manifest_digest") == wanted_digest:
             continue
+        source_rev = payload.get("source_rev")
+        if require_stored_points and source_rev and not _revision_has_points(
+            client, settings, str(doc_id), str(source_rev)
+        ):
+            continue
         count += 1
         if len(labels) < sample:
             labels.append(f"{doc_id}@{payload.get('source_rev') or 'unknown'}")
     return count, labels
+
+
+def _revision_has_points(
+    client: QdrantReader, settings: Settings, doc_id: str, source_rev: str
+) -> bool:
+    points, _ = client.scroll(
+        settings.qdrant_collection,
+        scroll_filter=_rev_filter(doc_id, source_rev),
+        limit=1,
+        with_payload=False,
+    )
+    return bool(points)
 
 
 class UnsupportedLegacyDataError(RuntimeError):

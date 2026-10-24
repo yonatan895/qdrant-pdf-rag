@@ -528,7 +528,10 @@ Collection + indexes-before-load + batched idempotent upsert, behind the
   Written only after every batch is acknowledged and the stored points
   verify (count + per-point sha/rules/revision + recomputed digests);
   refreshes invalidate the revision's markers before deleting points, so a
-  failed refresh leaves no valid completion and retries safely. Zero-chunk
+  failed refresh leaves no valid completion and retries safely. Every other
+  revision a refresh deletes (its lineage revision, swept residue) loses its
+  markers with its points, under whichever `doc_id` recorded them
+  (`delete_revision_completions`, issue #1005): no zero-point marker is left. Zero-chunk
   docs are an explicit `empty` outcome — never published, never skippable.
 - Downstream consumers: `doc_id/product/version/vendor/chunk_type/
   message_ids/members/sha256/rules_v/page_start` → filtered prefetch + keyword
@@ -632,7 +635,10 @@ thread pool.
   finds a fresh target — writes it `pending` before any
   delete/upsert and flips it `committed` only on the success path: zero
   document failures AND a read-only scope proof that (a) no completion
-  marker under another `manifest_digest` remains and (b) every searchable
+  marker under another `manifest_digest` remains whose revision still holds
+  a point (a zero-point marker certifies no searchable vector; one left by
+  the pre-#1004 sibling sweep therefore needs no control-collection edit —
+  the next complete `--reingest` commits over it, issue #1005) and (b) every searchable
   point is attributable to a verified walked document of this run (a new
   contract may only be declared over vectors this run re-embedded). Unmarked old data therefore blocks the commit and
   leaves the contract pending; points an explicit, lock-validated
