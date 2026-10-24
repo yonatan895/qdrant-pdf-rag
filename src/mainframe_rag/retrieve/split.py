@@ -291,6 +291,55 @@ def _split_top_placed(query: str, marker: tuple[int, int]) -> list[str] | None:
     return None
 
 
+def _mirrored_context_spans(
+    left_words: list[str],
+    right_words: list[str],
+    left_ent: tuple[int, int] | None,
+    right_ent: tuple[int, int] | None,
+) -> tuple[tuple[int, int], tuple[int, int]] | None:
+    """Disjoint, qualifier-complete spans when the two sides mirror each other.
+
+    ``RACF dataset profiles vs ACF2 dataset profiles``, ``z/OS RACF dataset
+    profiles vs z/OS ACF2 dataset profiles`` and ``SMF type 30 vs SMF type 70
+    records`` pair an entity with its own qualifiers on both sides. The
+    adjacent-pair heuristic cuts these unevenly and leaves the other entity in
+    a leg (issue #1025). Take the largest window of ``n`` words ending at the
+    marker and the ``n`` words after it that share a prefix and/or a suffix
+    yet differ somewhere: each window is one side's whole phrase, so removal
+    yields one phrase plus the verbatim shared context. When no window
+    mirrors but the sides are asymmetric (a 2-word left span against a lone
+    right entity, ``RACF group profiles`` vs ``ACF2 rule sets``), the left
+    phrase starts at the entity before its span and the right phrase takes the
+    same number of words. Returns None when the shape does not apply, leaving
+    the adjacent-pair spans (and the pinned WLM shared-prefix behavior) alone.
+    """
+    if left_ent is None or right_ent is None:
+        return None
+    left = [_strip_token(w).lower() for w in left_words]
+    right = [_strip_token(w).lower() for w in right_words]
+    for n in range(min(len(left), len(right)), 1, -1):
+        a, b = left[-n:], right[:n]
+        p = 0
+        while p < n and a[p] == b[p]:
+            p += 1
+        s = 0
+        while s < n - p and a[n - 1 - s] == b[n - 1 - s]:
+            s += 1
+        if 0 < p + s < n:
+            return (len(left) - n, len(left)), (0, n)
+    if (
+        right_ent[1] - right_ent[0] == 1
+        and left_ent[1] - left_ent[0] >= 2
+        and left_ent[1] == len(left_words)
+        and left_ent[0] >= 1
+        and _is_entity_token(left_words[left_ent[0] - 1])
+    ):
+        n = len(left_words) - left_ent[0] + 1
+        if right_ent[0] + n <= len(right_words):
+            return (left_ent[0] - 1, len(left_words)), (right_ent[0], right_ent[0] + n)
+    return None
+
+
 def _split_on_marker(query: str, marker: tuple[int, int]) -> list[str] | None:
     # Raw word lists throughout: entity spans index these exact lists, and
     # _build_removal_subs strips comparison glue from the final strings.
@@ -299,12 +348,12 @@ def _split_on_marker(query: str, marker: tuple[int, int]) -> list[str] | None:
     right_words = query[marker[1]:].split()
     if not left_words or not right_words:
         return None
-    return _build_removal_subs(
-        query,
-        marker,
-        _entity_span(left_words, side="left"),
-        _entity_span(right_words, side="right"),
-    )
+    left_ent = _entity_span(left_words, side="left")
+    right_ent = _entity_span(right_words, side="right")
+    mirrored = _mirrored_context_spans(left_words, right_words, left_ent, right_ent)
+    if mirrored is not None:
+        left_ent, right_ent = mirrored
+    return _build_removal_subs(query, marker, left_ent, right_ent)
 
 
 def _comparative_paths(query: str) -> list[str] | None:

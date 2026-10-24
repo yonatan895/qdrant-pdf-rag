@@ -856,6 +856,7 @@ class _RerankUpstream:
     def __init__(self):
         self.score_ok = True
         self.rerank_ok = True
+        self.nan = False  # answer 200 with a non-finite score on both legs
         self.hang = None  # threading.Event the handler blocks on (probe timeout)
         self.calls = 0
 
@@ -867,6 +868,11 @@ class _RerankUpstream:
             self.hang.wait(10)
         payload = json.loads(request.content)
         n = len(payload.get("text_2") or payload.get("documents") or [])
+        if self.nan:
+            key = "score" if request.url.path.endswith("/v1/score") else "relevance_score"
+            body = ",".join(f'{{"index": {i}, "{key}": NaN}}' for i in range(n))
+            field = "data" if key == "score" else "results"
+            return httpx2.Response(200, content=f'{{"{field}": [{body}]}}'.encode())
         if request.url.path.endswith("/v1/score"):
             if not self.score_ok:
                 return httpx2.Response(404, text="vllm secret-upstream-text")
@@ -1014,6 +1020,75 @@ def test_rerank_recovery_restores_readiness_and_next_search(client, rerank_leg, 
     resp = client.get("/healthz")
     assert resp.status_code == 200 and resp.json()["rerank"] is True
     assert client.post("/v1/search", json={"query": "how to allocate"}).status_code == 200
+
+
+def test_non_finite_upstream_score_fails_closed_not_500(client, rerank_leg, monkeypatch):
+    """#1012: a NaN reranker score used to flow into the response and 500 on
+    JSON encoding. Both legs spent on it now fail the call closed (502, fixed
+    body, strict JSON), and the next ordinary search works once it recovers."""
+    upstream, _ = rerank_leg
+
+    def search(qdrant, embedder, collection, query, *args, reranker=None, **kwargs):
+        reranker.score(query, ["passage"])
+        return [_hit()], "hybrid", {"embed_ms": 1, "qdrant_ms": 2}
+
+    monkeypatch.setattr(app_mod, "retrieve_search", search)
+    upstream.nan = True
+    resp = client.post("/v1/search", json={"query": "how to allocate"})
+    assert resp.status_code == 502
+    assert "NaN" not in resp.text and "Infinity" not in resp.text
+    json.loads(resp.text, parse_constant=lambda c: pytest.fail(c))
+
+    upstream.nan = False
+    ok = client.post("/v1/search", json={"query": "how to allocate"})
+    assert ok.status_code == 200
+    json.loads(ok.text, parse_constant=lambda c: pytest.fail(c))
+
+
+def _strict(text: str):
+    def reject(c):
+        raise AssertionError(f"non-strict JSON token {c}")
+
+    return json.loads(text, parse_constant=reject)
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf")], ids=["nan", "inf"])
+@pytest.mark.parametrize(
+    ("path", "body"),
+    [
+        ("/v1/search", {"query": "IEA500I"}),
+        ("/v1/answer", {"query": "IEA500I"}),
+        ("/v1/answer", {"query": "IEA500I", "stream": True}),
+        ("/v1/chat", {"messages": [{"role": "user", "content": "IEA500I"}]}),
+        ("/v1/chat", {"messages": [{"role": "user", "content": "IEA500I"}], "stream": True}),
+        ("/v1/chat/completions", {"messages": [{"role": "user", "content": "IEA500I"}]}),
+        (
+            "/v1/chat/completions",
+            {"messages": [{"role": "user", "content": "IEA500I"}], "stream": True},
+        ),
+    ],
+)
+def test_non_finite_hit_score_never_emits_invalid_json(client, monkeypatch, path, body, bad):
+    """#1012: a NaN/Infinity reaching a payload must never ship as a bare
+    NaN/Infinity token or a 500/traceback. Every JSON body and every SSE
+    data frame parses under a strict parser; the outcome is either a normal
+    response or the fixed error envelope / terminal error frame."""
+    hit = _hit().model_copy(update={"score": bad})
+    monkeypatch.setattr(app_mod, "retrieve_search", lambda *a, **k: ([hit], "identifier", {}))
+    resp = client.post(path, json=body)
+    assert resp.status_code != 500
+    assert "Traceback" not in resp.text
+    if "text/event-stream" in resp.headers["content-type"]:
+        frames = [ln[len("data:") :].strip() for ln in resp.text.splitlines() if ln.startswith("data:")]
+        parsed = [_strict(f) for f in frames if f != "[DONE]"]
+        assert parsed
+    else:
+        parsed = [_strict(resp.text)]
+        if resp.status_code >= 400:
+            assert set(parsed[0]) >= {"code", "message"}
+    for p in parsed:
+        if isinstance(p, dict) and "code" in p and p.get("type") == "error":
+            assert p["message"] == "stream failed"
 
 
 def test_error_shape_is_structured(client, monkeypatch):

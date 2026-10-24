@@ -21,6 +21,7 @@ spec:
       labels:
         app: otelcol
     spec:
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         seccompProfile:

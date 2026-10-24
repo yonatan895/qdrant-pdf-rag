@@ -225,6 +225,12 @@ jobs:
       (github.event_name == 'schedule' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # #1000: the signing key is an environment secret of `release-signing`
+    # (deployment branches: main only, required reviewers; docs/deploy.md).
+    # Any other ref, and the nightly schedule (#1051: no approval prompt, packs
+    # with an ephemeral key), lands in the secret-free `branch-unsigned`
+    # environment. Only a manual dispatch on main signs.
+    environment: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && 'release-signing' || 'branch-unsigned' }}
     env:
       SHARE: "false"
     steps:
@@ -267,7 +273,9 @@ jobs:
           # (PEM private key; pubkey ceremony in docs/install_and_ops.md).
           # Until a maintainer stores it, pack with an ephemeral throwaway
           # key so the sign/verify plumbing still executes end to end.
-          SNEAKERNET_SIGNING_KEY: ${{ secrets.SNEAKERNET_SIGNING_KEY }}
+          # Only a workflow_dispatch on main resolves the secret; elsewhere
+          # (including the nightly schedule) it is empty.
+          SNEAKERNET_SIGNING_KEY: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && secrets.SNEAKERNET_SIGNING_KEY || '' }}
         run: |
           export PATH="/usr/local/bin:$PATH"
           if [ -z "$SNEAKERNET_SIGNING_KEY" ]; then
@@ -281,7 +289,10 @@ jobs:
               exit 1
             }
             export SNEAKERNET_SIGNING_KEY="$RUNNER_TEMP/signing.key"
-            export SNEAKERNET_KEY_TRUSTED=true
+            # Trust is claimed only for a manual dispatch on main.
+            if [ "$GITHUB_REF" = "refs/heads/main" ] && [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+              export SNEAKERNET_KEY_TRUSTED=true
+            fi
           fi
           sh scripts/tools/run-task.sh airgap:pack
           ls -la dist/

@@ -469,3 +469,96 @@ def test_pack_refuses_unreviewed_license_change_before_any_image_call(pack_tree,
     result, _ = _run_pack(pack_tree)
     assert result.returncode == 0, result.stderr
     assert (root / "dist" / "THIRD-PARTY-NOTICES.txt").is_file()
+
+
+# --- #1000: the release signing key is reachable only from the protected path
+
+_SIGNING_ENV = "release-signing"
+_MAIN_REF = "refs/heads/main"
+
+
+def _workflow_jobs():
+    import yaml
+
+    for path in sorted((REPO / ".github" / "workflows").glob("*.yml")):
+        doc = yaml.safe_load(path.read_text())
+        for name, job in (doc.get("jobs") or {}).items():
+            yield path.name, name, job
+
+
+def test_signing_secret_and_trusted_flag_only_on_protected_release_path():
+    """No PR-triggerable or non-main path can read the key or claim trust.
+
+    Same-repo PR workflows get repository secrets, so the secret must live in
+    a protected GitHub environment (deployment branches limited to main), and
+    every read and the trusted flag must be gated on the main ref as well.
+    """
+    seen = 0
+    for wf, name, job in _workflow_jobs():
+        steps = job.get("steps") or []
+        text = json.dumps(job)
+        reads_key = "secrets.SNEAKERNET_SIGNING_KEY" in text
+        sets_trusted = re.search(r"SNEAKERNET_KEY_TRUSTED=true", text) is not None
+        if not (reads_key or sets_trusted):
+            continue
+        seen += 1
+        where = f"{wf}:{name}"
+        env = job.get("environment")
+        env_name = env.get("name") if isinstance(env, dict) else env
+        assert env_name and _SIGNING_ENV in str(env_name), f"{where}: no {_SIGNING_ENV} environment"
+        # Branch dispatches must fall back to an environment without the secret.
+        assert _MAIN_REF in str(env_name), f"{where}: environment not selected by main ref"
+        assert "pull_request" not in str(job.get("if", "")), f"{where}: PR-triggerable"
+        for step in steps:
+            step_text = json.dumps(step)
+            if "secrets.SNEAKERNET_SIGNING_KEY" in step_text:
+                for value in (step.get("env") or {}).values():
+                    if "secrets.SNEAKERNET_SIGNING_KEY" in str(value):
+                        assert _MAIN_REF in str(value), f"{where}: secret read not gated on main"
+            if "SNEAKERNET_KEY_TRUSTED=true" in step_text:
+                run = step.get("run", "")
+                before = run.split("SNEAKERNET_KEY_TRUSTED=true")[0]
+                assert "GITHUB_REF" in before and "refs/heads/main" in before, (
+                    f"{where}: trusted flag not guarded by the main ref")
+                assert "GITHUB_EVENT_NAME" in before, f"{where}: trusted flag not guarded by event"
+    assert seen, "signing step not found: update this contract if it moved"
+
+
+def _eval_gha(expr: str, event: str, ref: str, secret: str = "SECRET") -> str:
+    """Evaluate the `a && b && 'x' || 'y'` subset of a workflow expression."""
+    body = re.fullmatch(r"\s*\$\{\{(.*)\}\}\s*", str(expr), re.DOTALL)
+    assert body, f"not a plain expression: {expr!r}"
+    py = body.group(1).replace("&&", " and ").replace("||", " or ")
+    py = py.replace("github.event_name", repr(event)).replace("github.ref", repr(ref))
+    py = py.replace("secrets.SNEAKERNET_SIGNING_KEY", repr(secret))
+    assert not re.search(r"[A-Za-z_]\w*\.\w", re.sub(r"'[^']*'", "", py)), f"unknown context: {expr!r}"
+    return str(eval(py, {"__builtins__": {}}))
+
+
+def test_only_manual_main_dispatch_signs_and_nightly_packs_ephemeral():
+    """#1051: schedule on main packs with the ephemeral key (no approval prompt);
+    only workflow_dispatch on main reaches release-signing, the secret and trust."""
+    import yaml
+
+    doc = yaml.safe_load((REPO / ".github" / "workflows" / "e2e.yml").read_text())
+    job = doc["jobs"]["airgap-package"]
+    step = next(s for s in job["steps"] if s.get("name") == "airgap-pack")
+    key_expr = step["env"]["SNEAKERNET_SIGNING_KEY"]
+    cond = re.search(r"if (\[[^\n]*\]); then\s*\n\s*export SNEAKERNET_KEY_TRUSTED=true", step["run"])
+    assert cond, "trusted-flag guard not found"
+    matrix = [
+        ("schedule", _MAIN_REF, "branch-unsigned", "", False),
+        ("workflow_dispatch", _MAIN_REF, _SIGNING_ENV, "SECRET", True),
+        ("workflow_dispatch", "refs/heads/feature", "branch-unsigned", "", False),
+        ("schedule", "refs/heads/feature", "branch-unsigned", "", False),
+        ("pull_request", "refs/pull/1/merge", "branch-unsigned", "", False),
+        ("push", _MAIN_REF, "branch-unsigned", "", False),
+    ]
+    for event, ref, env_name, secret, trusted in matrix:
+        where = f"{event}@{ref}"
+        assert _eval_gha(job["environment"], event, ref) == env_name, where
+        assert _eval_gha(key_expr, event, ref) == secret, where
+        out = subprocess.run(
+            ["sh", "-c", f"{cond.group(1)} && echo trusted"], capture_output=True, text=True, check=False,
+            env={"PATH": os.environ["PATH"], "GITHUB_REF": ref, "GITHUB_EVENT_NAME": event})
+        assert (out.stdout.strip() == "trusted") is trusted, f"{where}: trusted flag"

@@ -48,6 +48,17 @@ def test_syntax_table_and_narrative():
     assert classify("The lookaside facility stores invented entries for tests.") == "narrative"
 
 
+def test_bare_angle_bracket_parameter_alone_classifies_as_syntax():
+    """#1042: `<parm>` placeholders are an independent syntax signal. The sample
+    has no `::=`, no box characters, no railroad tokens and no column layout, so
+    only the bare `<parm>` branch can classify it as syntax."""
+    sample = "Issue the command with the <volume> operand to select the target."
+    assert "::=" not in sample
+    assert classify(sample) == "syntax"
+    # Control: the same prose without the placeholder is narrative.
+    assert classify("Issue the command with the volume operand to select the target.") == "narrative"
+
+
 def test_chrome_strip():
     pages = [
         "IEA500I Manual\n" + f"body line {i}\n(c) Synthetic Corp 2026"
