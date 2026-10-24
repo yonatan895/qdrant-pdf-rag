@@ -1389,12 +1389,15 @@ def test_openwebui_retention_defaults_to_30_days_and_cannot_be_unset(owui_chart)
     assert r.returncode != 0 and "retentionDays" in r.stderr
 
 
-def test_openwebui_refuses_to_enable_without_the_repository_docs_pipe():
-    """The shipped chart has no Pipe until #1072 lands: enabling fails closed."""
-    assert not (CHART / "files" / "openwebui" / "docs_pipe.py").exists()
+def test_openwebui_refuses_to_enable_without_the_repository_docs_pipe(tmp_path):
+    """A chart without the Pipe file fails closed when enabled (#1072)."""
+    import shutil
+    chart = tmp_path / "chart"
+    shutil.copytree(CHART, chart)
+    (chart / "files" / "openwebui" / "docs_pipe.py").unlink(missing_ok=True)
     values = base_values()
     values.update(json.loads(json.dumps(OWUI_ON)))
-    r = _helm_template_with_values(values)
+    r = _helm_template_with_values(values, chart=chart)
     assert r.returncode != 0 and "docs Pipe (#1072)" in r.stderr
 
 

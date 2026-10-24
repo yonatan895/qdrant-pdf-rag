@@ -86,6 +86,17 @@ Pipe is provisioned and the admin role is limited to the team.
   the IdP. The control is the policy, not the offline flag. Proof: 0 egress
   attempts behind the Kind egress boundary, and no external fetch from the
   browser.
+- **E1 Unenforced endpoints are blocked before the pod.** (Maintainer
+  decision 2026-10-24, #1070/#1071.) A feature that v0.12.3 disables only in
+  its UI, not in the route handler, stays reachable by API. The router must
+  refuse those API prefixes (`/api/v1/files`, `/api/v1/retrieval`,
+  `/api/v1/knowledge`, `/api/v1/audio`) for every spelling that Open WebUI's
+  server decodes to them, including percent-encoded ones. The control must
+  match the decoded, normalised path; an OpenShift path Route matches the raw
+  path and cannot (see the #1083 analysis), so it is not sufficient alone.
+  Re-checked on every import (P1): list each router's handlers and sort them
+  into server-enforced and UI-only. Proof: site curl checks in
+  `docs/deploy.md` return a refusal for each path and variant.
 - **R3 Identity.** Login is OIDC against the identity team's IdP (AD FS, with
   Keycloak also in use). Every employee signs in with a personal account.
   Groups and the admin role come from IdP claims. The local login form,
