@@ -105,6 +105,10 @@ spec:
               value: {{ .Values.tracing.deploymentEnvironment | quote }}
             - name: INGEST_WORKERS
               value: {{ .Values.ingest.workers | quote }}
+            # Private parse copies go on the sized /work scratch volume, not on
+            # node ephemeral storage (issue #1058).
+            - name: INGEST_PARSE_TMP_DIR
+              value: /work/parse-tmp
             - name: CONTEXTUAL_EMBED_ENABLED
               value: {{ .Values.ingest.contextualEnabled | toString | quote }}
             - name: CONTEXT_LLM_BASE_URL

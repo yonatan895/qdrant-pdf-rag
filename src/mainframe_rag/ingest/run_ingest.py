@@ -312,6 +312,25 @@ def parse_walked(
     )
 
 
+class ParseScratchError(RuntimeError):
+    """The private verified copy could not be made (scratch full, I/O error).
+    Fixed text only: no errno string, path or manual text (issue #1058)."""
+
+    code = "parse_scratch_failed"
+
+    def __init__(self) -> None:
+        super().__init__(f"{self.code}: the private copy of the document could not be written")
+
+
+def _make_parse_tmp(base: str) -> str:
+    """A new 0700 per-call directory under `base` (created 0700 if missing),
+    or under the default temp dir when `base` is empty."""
+    if not base:
+        return tempfile.mkdtemp(prefix="mfr-parse-")
+    os.makedirs(base, mode=0o700, exist_ok=True)
+    return tempfile.mkdtemp(prefix="mfr-parse-", dir=base)
+
+
 def _parse_one(
     args: ParseTask,
 ) -> tuple[
@@ -329,7 +348,7 @@ def _parse_one(
     path_str, vendor, product, version, corpus_root, sha, embed, cache_path = args
     started = time.monotonic()
     parsed: ParsedDoc | None = None
-    tmp_dir = tempfile.mkdtemp(prefix="mfr-parse-")  # 0700, private to this call
+    tmp_dir: str | None = None  # per-call private dir (0700), removed in `finally`
     try:
         path = Path(path_str)
         # TOCTOU (#996): the scan confined this path once; re-check right
@@ -343,7 +362,11 @@ def _parse_one(
         require_document_within("pdf_bytes", path.stat().st_size, settings.ingest_max_pdf_bytes)
         work_path, work_root = path, Path(corpus_root) if corpus_root else None
         if corpus_root and sha:
-            work_path, work_root = private_verified_copy(path, corpus_root, sha, tmp_dir)
+            try:
+                tmp_dir = _make_parse_tmp(settings.ingest_parse_tmp_dir)
+                work_path, work_root = private_verified_copy(path, corpus_root, sha, tmp_dir)
+            except OSError:  # ENOSPC on the scratch volume, EIO, ...: fixed text, no path
+                raise ParseScratchError from None
         parsed = parse_walked(
             work_path,
             sha,
@@ -457,7 +480,8 @@ def _parse_one(
         )
         return record, dummy_parsed, [], [], {}
     finally:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
+        if tmp_dir is not None:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 def resolve_workers(requested: int | None, settings: Settings) -> int:

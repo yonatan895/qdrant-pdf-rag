@@ -597,7 +597,12 @@ cannot schedule on one node — proven).
   count, env, and pull secrets — FastAPI needs no GPU). The ingest Job is
   one-shot with a 24h deadline: caller corpus PVC read-only plus an
   auto-created `ingest-work` RWO scratch PVC (sized by `INGEST_WORK_SIZE`,
-  default 100Gi, never deleted); previous runs are deleted before re-apply
+  default 100Gi, never deleted). Parse workers also put their private
+  per-document PDF copies under `/work/parse-tmp` (`INGEST_PARSE_TMP_DIR`,
+  issue #1058): size `INGEST_WORK_SIZE` for the existing scratch plus about
+  `ingest.workers` x the largest PDF at peak (`ingest_max_pdf_bytes` defaults
+  to 0, unbounded). A full volume fails only the affected document with
+  `ParseScratchError`; previous runs are deleted before re-apply
   (Jobs are immutable); completion waits up to `INGEST_TIMEOUT` (default
   1h) while a background tailer streams pod logs, dumping logs and events
   on timeout.
