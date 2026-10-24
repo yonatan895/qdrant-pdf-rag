@@ -94,6 +94,29 @@ one question as `docs-user` and requires `done` and at least one source chip. Th
 from `smoke-question.txt` in the state dir and is never in git. Every path in the #1083 site
 acceptance list must answer the proxy's own `403 denied`, and `GET /api/models` must answer 200.
 
+## Memory budget
+
+Check this before promising a start time. `sh $S --dry-run up` prints the whole-plan table against
+the current MemAvailable and ends it with `would pass` or `would refuse`. It starts nothing. Do not
+say the environment can be expected up unless that line says `would pass`. On a refusal, `up`
+exits 75 before it starts anything.
+
+| Component | MiB | Set by |
+|---|---|---|
+| Reasoning vLLM (gemma-4-E4B) | 5500 | `REASONING_EST_MB`; 5.35 GiB host RSS measured on 2026-10-25 |
+| Embed vLLM (Qwen3-Embedding-0.6B) | 2000 | `EMBED_EST_MB` |
+| Gateway, OpenObserve, agent, Qdrant | 2048 | `STACK_EST_MB` |
+| Kind node: Open WebUI (2 GiB limit), Dex, router, relay pod | 4096 | `KIND_NODE_MEM_MB` (the node cap) |
+| Headroom | 1024 | `HEADROOM_MB` |
+| **Total** | **14668** | 13644 (about 13.3 GiB) with `KIND_NODE_MEM_MB=3072`, as in attempt 2 |
+
+- A model already served on its port counts 0.
+- The embed server's own guard also needs 4648 MiB free when it starts (2600 + 2048 headroom). The
+  whole-plan total leaves that after the reasoning server.
+- The host has MemTotal 15994 MiB (15.6 GiB), so the plan fits only when nothing else heavy runs.
+- **Known conflict: the retained rag-kind node** (about 4.6 GiB) must be paused by the maintainer
+  first, for example `docker stop rag-kind-control-plane`. This script never touches it.
+
 ## Resources
 
 - Kind node capped at `KIND_NODE_MEM_MB=4096` (`docker update`). Admission needs MemAvailable of
@@ -102,11 +125,9 @@ acceptance list must answer the proxy's own `403 denied`, and `GET /api/models` 
 - Local lane, by the budget caps (`LOCAL_RT_8GB`): reasoning 6400 MB and embed 2600 MB of host RAM,
   each checked by `run_local_vllm.sh` itself. Add the gateway, OpenObserve, the agent and Qdrant.
   The order is models, then ingest, then Kind, so ingest never overlaps the cluster start.
-- Whole plan: `up` checks the sum before it starts anything. The estimates are reasoning 5500 MB
-  (observed 5.35 GiB host RSS), embed 2000, stack 2048, the Kind cap and 1024 MB headroom, about
-  13.6 GB with `KIND_NODE_MEM_MB=3072`. They are set by `REASONING_EST_MB`, `EMBED_EST_MB` and
-  `STACK_EST_MB`. Each vLLM guard checks only its own server, so before this check the reasoning
-  server could start and leave too little for the rest. On any failure, `up` removes what that
+- Whole plan: `up` checks the sum in [Memory budget](#memory-budget) before it starts anything.
+  Each vLLM guard checks only its own server, so before this check the reasoning server could
+  start and leave too little for the rest. On any failure, `up` removes what that
   run started, recorded in `run-started.txt`, and writes `READY.md` with the step and exit code.
 - Sized for a host with nothing else heavy running, after G1. `up` refuses while ports 4000, 8000,
   8001 or 8080 are held by something it did not start (`AGENT_REUSE=1` accepts a running agent).

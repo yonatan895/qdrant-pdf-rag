@@ -131,7 +131,8 @@ admit() {  # admit NEED_MB WHAT
     avail=$(mem_avail_mb)
     if [ "$avail" -ge "$1" ]; then verdict=pass; else verdict=refuse; fi
     if [ "$DRYRUN" = 1 ]; then
-        plan "admission $2: need ${1} MB, MemAvailable ${avail} MB now: would $verdict"
+        if [ "$verdict" = pass ]; then plan "admission $2: need ${1} MB, MemAvailable ${avail} MB now: would pass"
+        else plan "admission $2: need ${1} MB, MemAvailable ${avail} MB now: would refuse (up exits 75, starts nothing)"; fi
         return 0
     fi
     if [ "$verdict" != pass ]; then
@@ -140,6 +141,23 @@ admit() {  # admit NEED_MB WHAT
         exit 75
     fi
     say "admission $2: MemAvailable ${avail} MB >= ${1} MB"
+}
+
+budget() {  # print the whole-plan table (MiB) against MemAvailable, then admit its sum
+    r=$REASONING_EST_MB; e=$EMBED_EST_MB; rn=""; en=""
+    printf '%s\n' "$(served_ids 8000)" | grep -qx "$REASONING_MODEL" && { r=0; rn=", already served on 8000"; }
+    printf '%s\n' "$(served_ids 8001)" | grep -qx "$EMBED_MODEL" && { e=0; en=", already served on 8001"; }
+    need=$((r + e + STACK_EST_MB + KIND_NODE_MEM_MB + HEADROOM_MB))
+    if [ "$DRYRUN" = 1 ]; then plan "memory budget (whole plan):"; else say "memory budget (whole plan):"; fi
+    printf '  %-62s %6s\n' component MiB \
+        "reasoning vLLM (REASONING_EST_MB; 5.35 GiB RSS measured$rn)" "$r" \
+        "embed vLLM (EMBED_EST_MB$en)" "$e" \
+        "gateway, OpenObserve, agent, Qdrant (STACK_EST_MB)" "$STACK_EST_MB" \
+        "Kind node cap: Open WebUI, Dex, router (KIND_NODE_MEM_MB)" "$KIND_NODE_MEM_MB" \
+        "headroom (HEADROOM_MB)" "$HEADROOM_MB" \
+        "total needed" "$need" \
+        "MemAvailable now" "$(mem_avail_mb)"
+    admit "$need" "whole plan"
 }
 
 state_dir() {
@@ -288,10 +306,7 @@ agent_up() {
         [ "$DRYRUN" = 1 ] || die "gateway port $GATEWAY_PORT is held by another process"
     fi
     agent_src
-    need=$((STACK_EST_MB + KIND_NODE_MEM_MB + HEADROOM_MB))
-    printf '%s\n' "$(served_ids 8000)" | grep -qx "$REASONING_MODEL" || need=$((need + REASONING_EST_MB))
-    printf '%s\n' "$(served_ids 8001)" | grep -qx "$EMBED_MODEL" || need=$((need + EMBED_EST_MB))
-    admit "$need" "whole plan (models to start + stack ${STACK_EST_MB} + Kind ${KIND_NODE_MEM_MB} + headroom ${HEADROOM_MB} MB)"
+    budget
     start_model reasoning 8000 local:llm "$REASONING_MODEL"
     start_model embed 8001 local:embed "$EMBED_MODEL"
     if [ "$DRYRUN" = 1 ]; then
