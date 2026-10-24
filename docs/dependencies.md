@@ -94,9 +94,11 @@ runtime profile plus inherited pip. They record that observed inventory under
 `/opt/rag-locks/installed-inventory.json`. Dev/build tools are not installed in
 runtime images. The final process still runs unprivileged.
 
-`pack.sh` reads each actual shipped Docker archive through
+`pack.sh` reads each actual shipped OCI archive (#1066) through
 `scripts/image_inventory.py`; it never executes an image to inspect it. The
-reader verifies uncompressed layer identities, applies overwrites/whiteouts,
+reader first verifies the archive's blobs against their descriptors
+(`scripts/airgap/image_manifest.py`), then the uncompressed layer identities
+(diff_ids), applies overwrites/whiteouts,
 reads installed distribution metadata, and checks the image's lock and receipt
 against the release source. Missing/extra packages and receipt omissions fail
 before signing. `sbom.json` retains wheel identities and adds the independently

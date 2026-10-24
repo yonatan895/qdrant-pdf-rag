@@ -1,6 +1,6 @@
 #!/bin/sh
 # CONNECTED SIDE (issue #15): pack a green public-main SHA into one sneakernet
-# tarball: git bundle + 3 image archives + MANIFEST + member checksums.
+# tarball: git bundle + oci-archive image members + MANIFEST + member checksums.
 #
 #   sh scripts/tools/run-task.sh airgap:pack              # or: sh scripts/airgap/pack.sh
 #
@@ -130,51 +130,56 @@ extra_args="${SKOPEO_ARGS:-}"
 if [ "${INSECURE_REGISTRY:-false}" = "true" ]; then
     extra_args="$extra_args --src-tls-verify=false"
 fi
+# Image members are oci-archive (#1066). --preserve-digests stores the
+# registry's platform manifest, config and compressed layer blobs byte-for-byte
+# (skopeo fails rather than convert or recompress), so third-party layers keep
+# their upstream compression and the app images keep the gzip layers the
+# factory pushed. A manifest-list pin still resolves to one platform image.
 # shellcheck disable=SC2086
-skopeo copy $extra_args "docker://$QDRANT_REF" "docker-archive:$DIST/qdrant-image.tar"
+skopeo copy $extra_args --preserve-digests "docker://$QDRANT_REF" "oci-archive:$DIST/qdrant-image.tar"
 # shellcheck disable=SC2086
-skopeo copy $extra_args "docker://$OPENOBSERVE_REF" "docker-archive:$DIST/openobserve-image.tar"
+skopeo copy $extra_args --preserve-digests "docker://$OPENOBSERVE_REF" "oci-archive:$DIST/openobserve-image.tar"
 # shellcheck disable=SC2086
-skopeo copy $extra_args "docker://$OTELCOL_REF" "docker-archive:$DIST/otelcol-image.tar"
+skopeo copy $extra_args --preserve-digests "docker://$OTELCOL_REF" "oci-archive:$DIST/otelcol-image.tar"
 # shellcheck disable=SC2086
-skopeo copy $extra_args "docker://$INGEST_IMAGE" "docker-archive:$DIST/app-ingest-$IMAGE_SHA.tar"
+skopeo copy $extra_args --preserve-digests "docker://$INGEST_IMAGE" "oci-archive:$DIST/app-ingest-$IMAGE_SHA.tar"
 # shellcheck disable=SC2086
-skopeo copy $extra_args "docker://$AGENT_IMAGE" "docker-archive:$DIST/app-agent-$IMAGE_SHA.tar"
+skopeo copy $extra_args --preserve-digests "docker://$AGENT_IMAGE" "oci-archive:$DIST/app-agent-$IMAGE_SHA.tar"
 if [ -n "$OAUTH_TAR" ]; then
-    # Red Hat images carry signature attachments that docker-archive cannot
+    # Red Hat images carry signature attachments that an OCI archive cannot
     # store. Omit those attachments, retaining the digest-pinned source and
     # our archive-digest + signed-SHA256SUMS handoff contract below.
     # shellcheck disable=SC2086
-    skopeo copy $extra_args --remove-signatures "docker://$OAUTH_PROXY_REF" "docker-archive:$DIST/$OAUTH_TAR"
+    skopeo copy $extra_args --remove-signatures --preserve-digests "docker://$OAUTH_PROXY_REF" "oci-archive:$DIST/$OAUTH_TAR"
 fi
 
 echo "==> Image digests (bound into MANIFEST, verified on load)"
-# Post-copy tar manifest digests: skopeo resolves the pinned manifest list
-# to one arch manifest when writing docker-archive, so the tar digest
-# differs from the images.txt list pin by construction (--preserve-digests
-# cannot bridge it: docker-archive rejects lists outright). MANIFEST keeps
-# both: the ref line carries the requested pin, the *_digest line carries
-# the bundled bytes that load re-verifies.
-INGEST_DIGEST=$(skopeo inspect "docker-archive:$DIST/app-ingest-$IMAGE_SHA.tar" --format '{{.Digest}}')
-AGENT_DIGEST=$(skopeo inspect "docker-archive:$DIST/app-agent-$IMAGE_SHA.tar" --format '{{.Digest}}')
-QDRANT_DIGEST=$(skopeo inspect "docker-archive:$DIST/qdrant-image.tar" --format '{{.Digest}}')
-OPENOBSERVE_DIGEST=$(skopeo inspect "docker-archive:$DIST/openobserve-image.tar" --format '{{.Digest}}')
-OTELCOL_DIGEST=$(skopeo inspect "docker-archive:$DIST/otelcol-image.tar" --format '{{.Digest}}')
+# Archive digests come from one verified read of each OCI layout (index.json ->
+# manifest -> config and every layer blob): the platform manifest digest the
+# registry serves. A manifest-list pin in images.txt therefore differs from its
+# *_digest by construction. MANIFEST keeps both: the ref line carries the
+# requested pin, the *_digest line the bundled bytes that load re-verifies.
+# Image config digests (issue #272) are what deploy/ingest verify the registry
+# against before any cluster change.
+IMAGE_MANIFESTS="$TASK_TMP/image-manifests"
+mkdir "$IMAGE_MANIFESTS"
+INGEST_DIGEST=$(archive_manifest "$DIST/app-ingest-$IMAGE_SHA.tar" "$IMAGE_MANIFESTS/ingest")
+AGENT_DIGEST=$(archive_manifest "$DIST/app-agent-$IMAGE_SHA.tar" "$IMAGE_MANIFESTS/agent")
+QDRANT_DIGEST=$(archive_manifest "$DIST/qdrant-image.tar" "$IMAGE_MANIFESTS/qdrant")
+OPENOBSERVE_DIGEST=$(archive_manifest "$DIST/openobserve-image.tar" "$IMAGE_MANIFESTS/openobserve")
+OTELCOL_DIGEST=$(archive_manifest "$DIST/otelcol-image.tar" "$IMAGE_MANIFESTS/otelcol")
 OAUTH_DIGEST=""
 if [ -n "$OAUTH_TAR" ]; then
-    OAUTH_DIGEST=$(skopeo inspect "docker-archive:$DIST/$OAUTH_TAR" --format '{{.Digest}}')
+    OAUTH_DIGEST=$(archive_manifest "$DIST/$OAUTH_TAR" "$IMAGE_MANIFESTS/oauth_proxy")
 fi
-# Image config digests (issue #272): pin the rootfs identity independently of
-# archive vs registry layer compression; deploy/ingest verify the registry
-# against these before any cluster change.
-INGEST_CONFIG_DIGEST=$(archive_config_digest "$DIST/app-ingest-$IMAGE_SHA.tar")
-AGENT_CONFIG_DIGEST=$(archive_config_digest "$DIST/app-agent-$IMAGE_SHA.tar")
-QDRANT_CONFIG_DIGEST=$(archive_config_digest "$DIST/qdrant-image.tar")
-OPENOBSERVE_CONFIG_DIGEST=$(archive_config_digest "$DIST/openobserve-image.tar")
-OTELCOL_CONFIG_DIGEST=$(archive_config_digest "$DIST/otelcol-image.tar")
+INGEST_CONFIG_DIGEST=$(archive_config_digest "$IMAGE_MANIFESTS/ingest")
+AGENT_CONFIG_DIGEST=$(archive_config_digest "$IMAGE_MANIFESTS/agent")
+QDRANT_CONFIG_DIGEST=$(archive_config_digest "$IMAGE_MANIFESTS/qdrant")
+OPENOBSERVE_CONFIG_DIGEST=$(archive_config_digest "$IMAGE_MANIFESTS/openobserve")
+OTELCOL_CONFIG_DIGEST=$(archive_config_digest "$IMAGE_MANIFESTS/otelcol")
 OAUTH_CONFIG_DIGEST=""
 if [ -n "$OAUTH_TAR" ]; then
-    OAUTH_CONFIG_DIGEST=$(archive_config_digest "$DIST/$OAUTH_TAR")
+    OAUTH_CONFIG_DIGEST=$(archive_config_digest "$IMAGE_MANIFESTS/oauth_proxy")
 fi
 UBI_REF=$(pin_from_images_txt python-314-minimal)
 UBI_DIGEST=${UBI_REF##*@}
@@ -191,6 +196,10 @@ CHART_SHA256=$(sha256sum charts/qdrant-*.tgz | awk '{print $1}')
     echo "task_binary_sha256: $TASK_BINARY_SHA256"
     echo "task_license_sha256: $TASK_LICENSE_SHA256"
     echo "date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    # Signed format declaration (#1066): load refuses any other value, so a
+    # bundle never mixes formats and a pre-#1066 docker-archive bundle is
+    # refused with a fixed message instead of being half-loaded.
+    echo "image_format: oci-archive"
     echo "qdrant: $QDRANT_REF"
     echo "qdrant_digest: $QDRANT_DIGEST"
     echo "qdrant_config_digest: $QDRANT_CONFIG_DIGEST"
@@ -327,7 +336,8 @@ chmod +x "$DIST/bootstrap.sh"
     echo "                           Declared licenses only; not a legal approval. Unresolved owner decisions are listed in that file."
     echo "  - Bundle signature:    SHA256SUMS.sig (openssl dgst; pubkey sneakernet-signing.pub)"
     echo "  - Signing key (pub):   $(openssl pkey -in "$SNEAKERNET_SIGNING_KEY" -pubout | openssl sha256)"
-    echo "  - Digest binding:      MANIFEST *_digest lines are post-copy tar manifest digests;"
+    echo "  - Image format:        oci-archive members, registry blobs kept compressed (MANIFEST image_format)"
+    echo "  - Digest binding:      MANIFEST *_digest lines are the archives' platform manifest digests;"
     echo "                           qdrant:/openobserve:/otelcol: refs carry the images.txt list pins they were pulled by."
     echo ""
     echo "INSPECTION & BOOTSTRAP INSTRUCTIONS:"
