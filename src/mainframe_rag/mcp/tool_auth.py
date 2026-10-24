@@ -3,8 +3,9 @@
 Every team-tool MCP server (Splunk, GitLab, mail) verifies its caller itself:
 an IdP-issued OIDC JWT, checked against the IdP's JWKS for signature, issuer,
 audience, expiry and not-before, then group membership from a configured
-claim. Headers set by Open WebUI never authorize on their own. Contract:
-docs/tool-auth.md.
+claim. Headers set by Open WebUI never authorize on their own. An optional
+RFC 8693 token exchange turns the token Open WebUI forwards into one
+addressed to this gateway (#1088). Contract: docs/team-tools.md.
 """
 
 from __future__ import annotations
@@ -12,8 +13,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
+import os
 import time
-from collections.abc import Awaitable, Callable, Iterable, MutableMapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping, MutableMapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final, Literal
@@ -42,8 +45,12 @@ _KEY_TYPES: Final[dict[str, tuple[str, str | None]]] = {
 }
 _MIN_RSA_BITS: Final = 2048
 _MAX_JWKS_BYTES: Final = 256 * 1024
+_MAX_EXCHANGE_BYTES: Final = 64 * 1024
 _MAX_TOKEN_CHARS: Final = 32 * 1024
 _SCOPE_KEY: Final = "tool_auth.principal"
+_OPENWEBUI_PREFIX: Final = b"x-openwebui-"
+ACCESS_TOKEN_TYPE: Final = "urn:ietf:params:oauth:token-type:access_token"
+_EXCHANGE_GRANT: Final = "urn:ietf:params:oauth:grant-type:token-exchange"
 
 ASGIApp = Callable[
     [MutableMapping[str, Any], Callable[[], Awaitable[Any]], Callable[[Any], Awaitable[None]]],
@@ -74,11 +81,36 @@ class Principal:
     groups: frozenset[str]
 
 
+def _str_set(name: str, value: object) -> frozenset[str]:
+    """A set of non-empty strings. A bare str is refused: frozenset("team")
+    would silently become {"t", "e", "a", "m"}."""
+    if isinstance(value, (str, bytes)) or not isinstance(value, Iterable):
+        raise ValueError(f"{name} must be a set of strings, not a single string")  # noqa: TRY004 - config errors are ValueError
+    items = frozenset(value)
+    if any(not isinstance(item, str) or not item for item in items):
+        raise ValueError(f"{name} must hold non-empty strings")
+    return items
+
+
+def _seconds(name: str, value: object, *, low: float, high: float = math.inf, low_open: bool = False) -> None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        raise ValueError(f"{name} must be a finite number")
+    if value < low or (low_open and value == low) or value > high:
+        raise ValueError(f"{name} is out of range")
+
+
+def _https(name: str, value: object) -> None:
+    if not isinstance(value, str) or not value.startswith("https://"):
+        raise ValueError(f"{name} must be an https URL")
+
+
 @dataclass(frozen=True)
 class GatewayAuthConfig:
     """Per-gateway verification policy. Exactly one JWKS source: an https
     `jwks_url` (the only URL ever fetched) or a pinned `jwks_file`. An empty
-    `allowed_groups` (the default) denies every caller."""
+    `allowed_groups` (the default) denies every caller. `accepted_audiences`
+    adds other names for this gateway to `audience`; an `aud` list naming any
+    of them is accepted unless `require_single_audience`."""
 
     gateway: str
     issuer: str
@@ -87,10 +119,13 @@ class GatewayAuthConfig:
     jwks_file: Path | None = None
     group_claim: str = "groups"
     allowed_groups: frozenset[str] = field(default_factory=frozenset)
+    accepted_audiences: frozenset[str] | None = None
+    require_single_audience: bool = False
     algorithms: tuple[str, ...] = ("RS256",)
     leeway_s: float = 30.0
     jwks_ttl_s: float = 300.0
     jwks_min_refetch_s: float = 30.0
+    jwks_max_stale_s: float = 3600
     jwks_timeout_s: float = 5.0
 
     def __post_init__(self) -> None:
@@ -100,21 +135,37 @@ class GatewayAuthConfig:
                 raise ValueError(f"{name} must be a non-empty string")
         if (self.jwks_url is None) == (self.jwks_file is None):
             raise ValueError("configure exactly one of jwks_url or jwks_file")
-        if self.jwks_url is not None and not self.jwks_url.startswith("https://"):
-            raise ValueError("jwks_url must be an https URL")
+        if self.jwks_url is not None:
+            _https("jwks_url", self.jwks_url)
         algorithms = tuple(self.algorithms)
         if not algorithms or any(alg not in _KEY_TYPES for alg in algorithms):
             raise ValueError(f"algorithms must be a non-empty subset of {sorted(_KEY_TYPES)}")
-        groups = frozenset(self.allowed_groups)
-        if any(not isinstance(g, str) or not g for g in groups):
-            raise ValueError("allowed_groups must hold non-empty strings")
-        if not 0 <= self.leeway_s <= 300:
-            raise ValueError("leeway_s must be within 0..300 seconds")
-        for name in ("jwks_ttl_s", "jwks_min_refetch_s", "jwks_timeout_s"):
-            if not getattr(self, name) > 0:
-                raise ValueError(f"{name} must be positive")
         object.__setattr__(self, "algorithms", algorithms)
-        object.__setattr__(self, "allowed_groups", groups)
+        object.__setattr__(self, "allowed_groups", _str_set("allowed_groups", self.allowed_groups))
+        if self.accepted_audiences is not None:
+            accepted = _str_set("accepted_audiences", self.accepted_audiences)
+            if not accepted:
+                raise ValueError("accepted_audiences must be non-empty when set")
+            object.__setattr__(self, "accepted_audiences", accepted)
+        _seconds("leeway_s", self.leeway_s, low=0, high=300)
+        _seconds("jwks_max_stale_s", self.jwks_max_stale_s, low=0)
+        for name in ("jwks_ttl_s", "jwks_min_refetch_s", "jwks_timeout_s"):
+            _seconds(name, getattr(self, name), low=0, low_open=True)
+
+    @property
+    def audiences(self) -> frozenset[str]:
+        """Every audience value that names this gateway."""
+        return frozenset({self.audience}) | (self.accepted_audiences or frozenset())
+
+
+async def _read_capped(response: httpx2.Response, cap: int) -> bytes | None:
+    """The streamed body, or None as soon as it exceeds `cap` bytes."""
+    body = bytearray()
+    async for chunk in response.aiter_bytes():
+        body += chunk
+        if len(body) > cap:
+            return None
+    return bytes(body)
 
 
 def _parse_jwks(document: object) -> dict[str, dict[str, Any]]:
@@ -163,11 +214,14 @@ def _bind_key(jwk: dict[str, Any], alg: str) -> Any:
 class JwksCache:
     """The IdP signing keys for one gateway.
 
-    URL mode fetches only `config.jwks_url` (no redirects, no token-supplied
-    `jku`/`x5u`), keeps the key set for `jwks_ttl_s`, and refetches early on
-    an unknown kid at most once per `jwks_min_refetch_s` (key rotation without
-    a refetch storm). A failed fetch fails closed. File mode loads the pinned
-    JWKS once at construction and never touches the network.
+    URL mode fetches only `config.jwks_url`: redirects are never followed
+    (per request, whatever the client's default), and a response for any
+    other URL is refused; token-supplied `jku`/`x5u` are never read. The set
+    is kept for `jwks_ttl_s`, refetched early on an unknown kid at most once
+    per `jwks_min_refetch_s`, and always replaced by a successful fetch. A
+    failed fetch keeps the last-good set until it is `jwks_max_stale_s` older
+    than its successful fetch, then fails closed (0: at once). File mode loads
+    the pinned JWKS once at construction and never touches the network.
     """
 
     def __init__(
@@ -183,6 +237,7 @@ class JwksCache:
         self._client = client
         self._keys: dict[str, dict[str, Any]] = {}
         self._fetched_at: float | None = None
+        self._good_at: float | None = None
         self._lock = asyncio.Lock()
         if config.jwks_file is not None:
             self._keys = _parse_jwks(json.loads(config.jwks_file.read_bytes()))
@@ -191,6 +246,8 @@ class JwksCache:
         """The public key for `kid`, bound to `alg`; AuthError otherwise."""
         if self._config.jwks_file is None:
             await self._refresh(kid)
+            if not self._usable():
+                raise AuthError(UNAUTHENTICATED)
         jwk = self._keys.get(kid)
         if jwk is None:
             raise AuthError(UNAUTHENTICATED)
@@ -199,6 +256,12 @@ class JwksCache:
     async def aclose(self) -> None:
         if self._owns_client and self._client is not None:
             await self._client.aclose()
+
+    def _usable(self) -> bool:
+        if self._good_at is None:
+            return False
+        limit = max(self._config.jwks_ttl_s, self._config.jwks_max_stale_s)
+        return self._clock() - self._good_at <= limit
 
     def _due(self, kid: str) -> bool:
         if self._fetched_at is None:
@@ -215,23 +278,124 @@ class JwksCache:
             if not self._due(kid):
                 return
             # Concurrent callers wait on the lock and re-check, so they see
-            # the new set. A failed fetch leaves no keys (fail closed) and is
-            # retried at the refetch floor, not on every request.
-            self._keys = await self._fetch()
-            self._fetched_at = self._clock()
+            # the outcome; a failure is retried at the refetch floor.
+            fetched = await self._fetch()
+            now = self._clock()
+            self._fetched_at = now
+            if fetched is not None:
+                self._keys, self._good_at = fetched, now
+                return
+            age = None if self._good_at is None else now - self._good_at
+            if age is not None and age <= self._config.jwks_max_stale_s:
+                # Revocation is learned only from a successful fetch, so
+                # dropping the set here would revoke nothing sooner.
+                log.warning(json.dumps({
+                    "action": "tool_auth_jwks_stale", "gateway": self._config.gateway, "age_s": int(age),
+                }))
+                return
+            self._keys = {}
 
-    async def _fetch(self) -> dict[str, dict[str, Any]]:
+    async def _fetch(self) -> dict[str, dict[str, Any]] | None:
+        """A parsed key set, or None for any failure."""
         if self._client is None:
             self._client = httpx2.AsyncClient(timeout=self._config.jwks_timeout_s, follow_redirects=False)
         url = self._config.jwks_url
         assert url is not None
         try:
-            response = await self._client.get(url, headers={"Accept": "application/json"})
-            if response.status_code != 200 or len(response.content) > _MAX_JWKS_BYTES:
-                return {}
-            return _parse_jwks(response.json())
+            async with self._client.stream(
+                "GET", url, headers={"Accept": "application/json"}, follow_redirects=False
+            ) as response:
+                if response.status_code != 200 or response.url != httpx2.URL(url):
+                    return None
+                body = await _read_capped(response, _MAX_JWKS_BYTES)
+            if body is None:
+                return None
+            return _parse_jwks(json.loads(body))
         except (httpx2.HTTPError, ValueError, TypeError):
-            return {}
+            return None
+
+
+@dataclass(frozen=True)
+class TokenExchangeConfig:
+    """RFC 8693 token exchange for one gateway (#1088 path a). The client
+    secret is read from the environment variable `client_secret_env`
+    (a Secret reference), never stored in configuration."""
+
+    token_endpoint: str
+    client_id: str
+    client_secret_env: str
+    audience: str
+    subject_token_type: str = ACCESS_TOKEN_TYPE
+    requested_token_type: str = ACCESS_TOKEN_TYPE
+    timeout_s: float = 5.0
+
+    def __post_init__(self) -> None:
+        _https("token_endpoint", self.token_endpoint)
+        for name in ("client_id", "client_secret_env", "audience", "subject_token_type", "requested_token_type"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{name} must be a non-empty string")
+        _seconds("timeout_s", self.timeout_s, low=0, low_open=True)
+
+
+class TokenExchanger:
+    """Exchanges the token Open WebUI forwards for one addressed to this
+    gateway. The result is still verified by `verify_token`; any failure
+    (IdP error, redirect, oversized or malformed reply) is `unauthenticated`."""
+
+    def __init__(
+        self,
+        config: TokenExchangeConfig,
+        *,
+        client: httpx2.AsyncClient | None = None,
+        environ: Mapping[str, str] | None = None,
+    ) -> None:
+        secret = (os.environ if environ is None else environ).get(config.client_secret_env, "")
+        if not secret:
+            raise ValueError(f"{config.client_secret_env} is not set")
+        self._config = config
+        self._secret = secret
+        self._owns_client = client is None
+        self._client = client or httpx2.AsyncClient(timeout=config.timeout_s, follow_redirects=False)
+
+    def __repr__(self) -> str:
+        return f"TokenExchanger(client_id={self._config.client_id!r})"
+
+    async def exchange(self, subject_token: str) -> str:
+        config = self._config
+        form = {
+            "grant_type": _EXCHANGE_GRANT,
+            "subject_token": subject_token,
+            "subject_token_type": config.subject_token_type,
+            "requested_token_type": config.requested_token_type,
+            "audience": config.audience,
+            "client_id": config.client_id,
+            "client_secret": self._secret,
+        }
+        try:
+            async with self._client.stream(
+                "POST", config.token_endpoint, data=form,
+                headers={"Accept": "application/json"}, follow_redirects=False,
+            ) as response:
+                if response.status_code != 200 or response.url != httpx2.URL(config.token_endpoint):
+                    raise AuthError(UNAUTHENTICATED)
+                body = await _read_capped(response, _MAX_EXCHANGE_BYTES)
+            if body is None:
+                raise AuthError(UNAUTHENTICATED)
+            reply = json.loads(body)
+        except (httpx2.HTTPError, ValueError, TypeError):
+            raise AuthError(UNAUTHENTICATED) from None
+        if not isinstance(reply, dict):
+            raise AuthError(UNAUTHENTICATED)
+        token = reply.get("access_token")
+        issued = reply.get("issued_token_type", config.requested_token_type)
+        if not isinstance(token, str) or not token or issued != config.requested_token_type:
+            raise AuthError(UNAUTHENTICATED)
+        return token
+
+    async def aclose(self) -> None:
+        if self._owns_client:
+            await self._client.aclose()
 
 
 def _groups(claims: dict[str, Any], claim: str) -> frozenset[str]:
@@ -248,7 +412,8 @@ async def verify_token(token: str, config: GatewayAuthConfig, jwks: JwksCache) -
 
     Raises AuthError: `unauthenticated` (malformed, unknown key, bad signature,
     disallowed alg, wrong issuer/audience, not yet valid, missing exp/sub),
-    `token_expired`, or `forbidden` (verified, but in no allowed group).
+    `token_expired` (signature valid, `exp` passed; checked before iss/aud), or
+    `forbidden` (verified, but in no allowed group).
     """
     if not isinstance(token, str) or not token or len(token) > _MAX_TOKEN_CHARS:
         raise AuthError(UNAUTHENTICATED)
@@ -267,7 +432,7 @@ async def verify_token(token: str, config: GatewayAuthConfig, jwks: JwksCache) -
             token,
             key=key,
             algorithms=[alg],
-            audience=config.audience,
+            audience=sorted(config.audiences),
             issuer=config.issuer,
             leeway=config.leeway_s,
             options={"require": ["exp", "iss", "aud", "sub"]},
@@ -276,6 +441,9 @@ async def verify_token(token: str, config: GatewayAuthConfig, jwks: JwksCache) -
         raise AuthError(TOKEN_EXPIRED) from None
     except jwt.PyJWTError:
         raise AuthError(UNAUTHENTICATED) from None
+    aud = claims.get("aud")
+    if config.require_single_audience and isinstance(aud, list) and len(aud) != 1:
+        raise AuthError(UNAUTHENTICATED)
     sub = claims.get("sub")
     if not isinstance(sub, str) or not sub:
         raise AuthError(UNAUTHENTICATED)
@@ -313,11 +481,12 @@ def _log_decision(gateway: str, sub: str | None, decision: str) -> None:
 
 class GatewayAuthMiddleware:
     """ASGI middleware: authenticate every http/websocket request from its
-    single `Authorization: Bearer` header, then hand the app a scope carrying
-    the Principal (read it with `principal_from_scope`). Nothing else in the
-    request (Open WebUI's X-OpenWebUI-* headers included) is consulted.
-    `exempt_paths` are exact paths (e.g. a kubelet health probe) that skip
-    verification and receive no Principal."""
+    single `Authorization: Bearer` header (exchanged first when an
+    `exchanger` is given), then hand the app a scope carrying the Principal
+    (read it with `principal_from_scope`). Nothing else in the request is
+    consulted, and `X-OpenWebUI-*` headers are removed before the app unless
+    `strip_openwebui_headers=False`. `exempt_paths` are exact paths (e.g. a
+    kubelet health probe) that skip verification and receive no Principal."""
 
     def __init__(
         self,
@@ -326,11 +495,21 @@ class GatewayAuthMiddleware:
         jwks: JwksCache,
         *,
         exempt_paths: frozenset[str] = frozenset(),
+        exchanger: TokenExchanger | None = None,
+        strip_openwebui_headers: bool = True,
     ) -> None:
         self.app = app
         self.config = config
         self.jwks = jwks
-        self.exempt_paths = frozenset(exempt_paths)
+        self.exempt_paths = _str_set("exempt_paths", exempt_paths)
+        self.exchanger = exchanger
+        self.strip_openwebui_headers = strip_openwebui_headers
+
+    def _forward(self, scope: MutableMapping[str, Any], **extra: Any) -> MutableMapping[str, Any]:
+        headers = scope.get("headers", [])
+        if self.strip_openwebui_headers:
+            headers = [(n, v) for n, v in headers if not n.lower().startswith(_OPENWEBUI_PREFIX)]
+        return {**scope, "headers": headers, **extra}
 
     async def __call__(
         self,
@@ -339,20 +518,25 @@ class GatewayAuthMiddleware:
         send: Callable[[Any], Awaitable[None]],
     ) -> None:
         kind = scope["type"]
-        if kind == "lifespan" or (kind == "http" and scope.get("path") in self.exempt_paths):
+        if kind == "lifespan":
             await self.app(scope, receive, send)
+            return
+        if kind == "http" and scope.get("path") in self.exempt_paths:
+            await self.app(self._forward(scope), receive, send)
             return
         token = _bearer(scope.get("headers", ()))
         try:
             if token is None:
                 raise AuthError(UNAUTHENTICATED)
+            if self.exchanger is not None:
+                token = await self.exchanger.exchange(token)
             principal = await verify_token(token, self.config, self.jwks)
         except AuthError as exc:
             _log_decision(self.config.gateway, exc.sub, exc.code)
             await _refuse(kind, exc, send, presented=token is not None)
             return
         _log_decision(self.config.gateway, principal.sub, "allow")
-        await self.app({**scope, _SCOPE_KEY: principal}, receive, send)
+        await self.app(self._forward(scope, **{_SCOPE_KEY: principal}), receive, send)
 
 
 async def _refuse(

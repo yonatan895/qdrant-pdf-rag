@@ -436,7 +436,7 @@ def test_idp_blip_with_a_random_kid_does_not_evict_the_good_key(caplog: pytest.L
     assert _stale_lines(caplog) == [{"action": "tool_auth_jwks_stale", "gateway": "splunk", "age_s": 350}]
 
 
-def test_stale_keys_stop_at_max_stale_while_the_idp_stays_down():
+def test_stale_keys_stop_at_max_stale_while_the_idp_stays_down(caplog: pytest.LogCaptureFixture):
     gw = _Clocked()
     assert gw.config.jwks_max_stale_s == 3600
 
@@ -448,7 +448,10 @@ def test_stale_keys_stop_at_max_stale_while_the_idp_stays_down():
         verdicts.append(await gw.attempt(3900.0))  # refresh fails again
         return verdicts
 
-    assert asyncio.run(run()) == ["allow", "allow", "unauthenticated", "unauthenticated"]
+    with caplog.at_level(logging.INFO, logger="tool_auth"):
+        assert asyncio.run(run()) == ["allow", "allow", "unauthenticated", "unauthenticated"]
+    # Only the failure inside max-stale serves stale keys; the later one does not.
+    assert _stale_lines(caplog) == [{"action": "tool_auth_jwks_stale", "gateway": "splunk", "age_s": 3500}]
 
 
 def test_successful_fetch_that_drops_the_kid_refuses_at_once():
@@ -778,7 +781,10 @@ def test_exchanged_token_is_still_verified():
 
 def test_exchange_idp_error_is_a_fixed_401(caplog: pytest.LogCaptureFixture):
     def refused(form: dict[str, str]) -> httpx2.Response:
-        return httpx2.Response(400, json={"error": "invalid_grant", "error_description": "upstream-detail-xyz"})
+        # The error body also carries a valid token: only the status may refuse it.
+        return httpx2.Response(400, json={
+            "error": "invalid_grant", "error_description": "upstream-detail-xyz", "access_token": _token(),
+        })
 
     with caplog.at_level(logging.INFO, logger="tool_auth"):
         response, app = _request({"Authorization": f"Bearer {_owui_token()}"},
