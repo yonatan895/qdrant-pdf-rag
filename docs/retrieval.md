@@ -333,8 +333,13 @@ tries two scoring legs in `RERANK_ENDPOINT_ORDER` (`score_first` default:
 — then the Cohere/TEI-style `/rerank` shape; `rerank_first` reverses them
 for gateways, which 404 the vLLM-only `/v1/score`). A spent leg falls
 through to the next on transport/shape errors; the last leg failing raises
-strictly (mismatched/out-of-bounds indexes included), so a wrong order
-choice costs one failed call per batch, never a wrong ranking. Batch size
+strictly, so a wrong order
+choice costs one failed call per batch, never a wrong ranking. Both legs
+accept a response only when its indexes are exactly `0..n-1`, each once
+(no duplicates, out-of-range, missing or non-integer index) and every score
+is a finite number; anything else (including NaN/Infinity, which would
+otherwise break strict JSON output) is a spent leg and follows the same
+fallback, never a partially zero-filled or re-ordered ranking. Batch size
 32 and a 5s timeout. Anything else raises fail-closed. Rerank input passages are `product/version/doc_id` plus a
 `[chunk_type]` tag and bare `message_ids` header, then title/heading, then
 a type-distinct body template (`Table:`/`Syntax:` label line for table/syntax

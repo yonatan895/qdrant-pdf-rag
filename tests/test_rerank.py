@@ -896,3 +896,82 @@ def test_probe_reranker_failure_reports_error_type_only():
     assert err is not None and "SECRET-XYZ" not in err
     assert "ConnectError" in err
 
+
+
+# ---- #1012 / #1023: index permutation and finite scores on both legs
+_BAD_ITEMS = {
+    "duplicate": [(0, 0.1), (0, 0.9)],
+    "out_of_range": [(0, 0.1), (2, 0.9)],
+    "negative": [(0, 0.1), (-1, 0.9)],
+    "missing_index": [(0, 0.1), (None, 0.9)],
+    "nan": [(0, 0.1), (1, float("nan"))],
+    "inf": [(0, 0.1), (1, float("inf"))],
+    "neg_inf": [(0, 0.1), (1, float("-inf"))],
+}
+
+
+def _raw(field: str, key: str, items) -> bytes:
+    def one(i, v):
+        parts = [] if i is None else [f'"index": {i}']
+        lit = {"nan": "NaN", "inf": "Infinity", "-inf": "-Infinity"}.get(str(v), str(v))
+        parts.append(f'"{key}": {lit}')
+        return "{" + ", ".join(parts) + "}"
+
+    return ('{"%s": [%s]}' % (field, ", ".join(one(i, v) for i, v in items))).encode()
+
+
+def _two_leg_reranker(score_body, rerank_body, order="score_first"):
+    settings = Settings(
+        rerank_base_url="http://rerank.test/v1",
+        rerank_model="m",
+        rerank_batch_size=2,
+        rerank_endpoint_order=order,
+        _env_file=None,
+    )
+    calls: list[str] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        calls.append(request.url.path)
+        body = score_body if request.url.path.endswith("/score") else rerank_body
+        return httpx2.Response(200, content=body)
+
+    client = httpx2.Client(transport=httpx2.MockTransport(handler))
+    return HttpReranker(settings, client=client), calls
+
+
+GOOD_SCORE = _raw("data", "score", [(1, 0.8), (0, 0.2)])
+GOOD_RERANK = _raw("results", "relevance_score", [(1, 0.7), (0, 0.3)])
+
+
+@pytest.mark.parametrize("case", sorted(_BAD_ITEMS))
+def test_score_leg_malformed_falls_back_to_rerank_leg(case):
+    bad = _raw("data", "score", _BAD_ITEMS[case])
+    reranker, calls = _two_leg_reranker(bad, GOOD_RERANK)
+    assert reranker.score("q", ["a", "b"]) == [0.3, 0.7]
+    assert calls == ["/v1/score", "/v1/rerank"]
+
+
+@pytest.mark.parametrize("case", sorted(_BAD_ITEMS))
+def test_rerank_leg_malformed_falls_back_to_score_leg(case):
+    bad = _raw("results", "relevance_score", _BAD_ITEMS[case])
+    reranker, calls = _two_leg_reranker(GOOD_SCORE, bad, order="rerank_first")
+    assert reranker.score("q", ["a", "b"]) == [0.2, 0.8]
+    assert calls == ["/v1/rerank", "/v1/score"]
+
+
+@pytest.mark.parametrize("case", sorted(_BAD_ITEMS))
+def test_both_legs_malformed_fail_closed(case):
+    reranker, _ = _two_leg_reranker(
+        _raw("data", "score", _BAD_ITEMS[case]),
+        _raw("results", "relevance_score", _BAD_ITEMS[case]),
+    )
+    with pytest.raises(RuntimeError):
+        reranker.score("q", ["a", "b"])
+
+
+def test_rerank_leg_missing_score_field_is_rejected_not_zero():
+    reranker, _ = _two_leg_reranker(
+        b'{"data": []}', b'{"results": [{"index": 0}, {"index": 1, "score": 0.5}]}'
+    )
+    with pytest.raises(RuntimeError):
+        reranker.score("q", ["a", "b"])

@@ -856,6 +856,7 @@ class _RerankUpstream:
     def __init__(self):
         self.score_ok = True
         self.rerank_ok = True
+        self.nan = False  # answer 200 with a non-finite score on both legs
         self.hang = None  # threading.Event the handler blocks on (probe timeout)
         self.calls = 0
 
@@ -867,6 +868,11 @@ class _RerankUpstream:
             self.hang.wait(10)
         payload = json.loads(request.content)
         n = len(payload.get("text_2") or payload.get("documents") or [])
+        if self.nan:
+            key = "score" if request.url.path.endswith("/v1/score") else "relevance_score"
+            body = ",".join(f'{{"index": {i}, "{key}": NaN}}' for i in range(n))
+            field = "data" if key == "score" else "results"
+            return httpx2.Response(200, content=f'{{"{field}": [{body}]}}'.encode())
         if request.url.path.endswith("/v1/score"):
             if not self.score_ok:
                 return httpx2.Response(404, text="vllm secret-upstream-text")
@@ -1014,6 +1020,29 @@ def test_rerank_recovery_restores_readiness_and_next_search(client, rerank_leg, 
     resp = client.get("/healthz")
     assert resp.status_code == 200 and resp.json()["rerank"] is True
     assert client.post("/v1/search", json={"query": "how to allocate"}).status_code == 200
+
+
+def test_non_finite_upstream_score_fails_closed_not_500(client, rerank_leg, monkeypatch):
+    """#1012: a NaN reranker score used to flow into the response and 500 on
+    JSON encoding. Both legs spent on it now fail the call closed (502, fixed
+    body, strict JSON), and the next ordinary search works once it recovers."""
+    upstream, _ = rerank_leg
+
+    def search(qdrant, embedder, collection, query, *args, reranker=None, **kwargs):
+        reranker.score(query, ["passage"])
+        return [_hit()], "hybrid", {"embed_ms": 1, "qdrant_ms": 2}
+
+    monkeypatch.setattr(app_mod, "retrieve_search", search)
+    upstream.nan = True
+    resp = client.post("/v1/search", json={"query": "how to allocate"})
+    assert resp.status_code == 502
+    assert "NaN" not in resp.text and "Infinity" not in resp.text
+    json.loads(resp.text, parse_constant=lambda c: pytest.fail(c))
+
+    upstream.nan = False
+    ok = client.post("/v1/search", json={"query": "how to allocate"})
+    assert ok.status_code == 200
+    json.loads(ok.text, parse_constant=lambda c: pytest.fail(c))
 
 
 def test_error_shape_is_structured(client, monkeypatch):
