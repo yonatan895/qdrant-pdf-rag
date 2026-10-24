@@ -250,6 +250,28 @@ def _gen_collections(fake: PublishFake) -> list[str]:
     return sorted(n for n in fake.collections if "__gen" in n and not n.endswith("__completions"))
 
 
+def test_aliases_that_sanitize_to_one_lock_name_do_not_share_publish_state(tmp_path):
+    """Issue #1028: `a b` and `a_b` sanitize to the same lock stem, yet are
+    distinct logical aliases: each gets its own lock and sidecar, and one
+    alias's recorded build is invisible to the other. A plain alias keeps its
+    existing file names."""
+    from mainframe_rag.ingest.completion import publish_lock_path
+    from mainframe_rag.ingest.publish import (
+        publish_state_path,
+        read_publish_state,
+        write_publish_state,
+    )
+
+    progress = tmp_path / "inv.jsonl"
+    assert publish_lock_path(progress, ALIAS) == tmp_path / f"publish-{ALIAS}.lock"
+    assert publish_state_path(progress, ALIAS) == tmp_path / f"publish-{ALIAS}.json"
+    assert publish_lock_path(progress, "a b") != publish_lock_path(progress, "a_b")
+    assert publish_state_path(progress, "a b") != publish_state_path(progress, "a_b")
+    write_publish_state(progress, "a b", "staging-1", "g" * 16, "c" * 12)
+    assert read_publish_state(progress, "a_b") is None
+    assert read_publish_state(progress, "a b")["staging"] == "staging-1"
+
+
 # ---------------------------------------------------------------- naming
 def test_publication_identity_addresses_distinct_generations():
     from mainframe_rag.ingest.rules_version import extraction_rules_version
@@ -1970,6 +1992,91 @@ def test_retire_retry_recovers_its_plan_and_refuses_a_changed_request(tmp_path, 
     live_2 = fake.aliases[ALIAS]
     assert live_2 != live_1
     assert not any((p.payload or {}).get("source_rev") == rev_a for p in fake.collections[live_2])
+
+
+DOC_C = "SA22-0000-02"
+
+
+def _crash_at_cutover(monkeypatch, run_ingest, *, after: bool):
+    """Interrupt the first cutover just before (`after=False`) or just after
+    the alias swap; later swaps run normally."""
+    original_swap = run_ingest.swap_alias_to
+    state = {"armed": True}
+
+    def interrupted(*args, **kwargs):
+        if state["armed"]:
+            state["armed"] = False
+            if after:
+                original_swap(*args, **kwargs)
+            raise RuntimeError("interrupted cutover")
+        return original_swap(*args, **kwargs)
+
+    monkeypatch.setattr(run_ingest, "swap_alias_to", interrupted)
+
+
+def test_post_cutover_retry_refuses_a_changed_retirement_request(tmp_path, monkeypatch):
+    """Issue #1026: after the alias swapped, a retry that adds, replaces or
+    drops a retirement is refused exactly like the pre-swap request, mutating
+    nothing; the identical request then completes."""
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.publish import publish_state_path
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    a, _b = _two_doc_corpus(corpus)
+    progress = tmp_path / "inv.jsonl"
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    a.unlink()
+    _crash_at_cutover(monkeypatch, run_ingest, after=True)
+    with pytest.raises(RuntimeError, match="interrupted cutover"):
+        _run_main(monkeypatch, corpus, progress, "--retire-doc", DOC_A)
+    current = fake.aliases[ALIAS]
+    sidecar = publish_state_path(progress, ALIAS)
+    saved = (sidecar.read_bytes(), progress.read_bytes())
+    for changed in (
+        ("--retire-doc", DOC_A, "--retire-doc", DOC_B),  # adds a walked doc
+        ("--retire-doc", DOC_B),  # replaces
+        (),  # drops
+    ):
+        with pytest.raises(RuntimeError, match="different retirements"):
+            _run_main(monkeypatch, corpus, progress, *changed)
+        assert (sidecar.read_bytes(), progress.read_bytes()) == saved
+        assert fake.aliases[ALIAS] == current
+    assert DOC_B in _live_doc_ids(fake)
+    assert _run_main(monkeypatch, corpus, progress, "--retire-doc", DOC_A) == 0
+    assert not sidecar.exists()
+    assert _live_doc_ids(fake) == {DOC_B}
+
+
+@pytest.mark.parametrize("after_swap", [False, True], ids=["pre-swap", "post-swap"])
+def test_retry_with_reordered_or_repeated_retire_flags_resumes(tmp_path, monkeypatch, after_swap):
+    """Issue #1027: retirement scope is a set. The same documents in another
+    argument order, or repeated, resume the recorded build instead of being
+    refused as different retirements."""
+    from mainframe_rag.ingest import run_ingest
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    a, b = _two_doc_corpus(corpus)
+    _build_doc_with_id(corpus, "doc_c", DOC_C)
+    progress = tmp_path / "inv.jsonl"
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    a.unlink()
+    b.unlink()
+    _crash_at_cutover(monkeypatch, run_ingest, after=after_swap)
+    with pytest.raises(RuntimeError, match="interrupted cutover"):
+        _run_main(monkeypatch, corpus, progress, "--retire-doc", DOC_A, "--retire-doc", DOC_B)
+    assert _run_main(
+        monkeypatch, corpus, progress,
+        "--retire-doc", DOC_B, "--retire-doc", DOC_A, "--retire-doc", DOC_B,
+    ) == 0
+    assert _live_doc_ids(fake) == {DOC_C}
 
 
 def test_conflict_preflight_same_bytes_changed_label_replaces_old_revision(tmp_path, monkeypatch):

@@ -680,12 +680,16 @@ def publish_lock_path(progress_path: Path, alias: str) -> Path:
     run. Same-alias runs must therefore share the progress directory (already
     required for refresh lineage); different directories are operator error
     and remain guarded only by the pre-swap live recheck. The sanitisation
-    maps the alias charset onto the lock filename: two aliases differing
-    only in sanitised-away characters would share a lock (harmless —
-    over-serialization, never concurrent publication)."""
+    maps the alias charset onto the lock filename. An alias the mapping
+    changes gets a short digest of the full alias appended (issue #1028), so
+    two distinct aliases that sanitize alike never share a lock or the build
+    sidecar derived from it; an alias already in the charset keeps its
+    historical file name."""
     safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", alias).strip("._")
     if not safe:
         raise RuntimeError(f"cannot derive a publish lock for empty alias {alias!r}.")
+    if safe != alias:
+        safe = f"{safe}-{hashlib.sha256(alias.encode()).hexdigest()[:12]}"
     return progress_path.parent / f"publish-{safe}.lock"
 
 
