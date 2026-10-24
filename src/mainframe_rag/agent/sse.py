@@ -32,7 +32,7 @@ MODEL_TIMEOUT_MESSAGE = "model response timed out"
 
 def format_sse_event(name: str, payload: dict[str, Any]) -> str:
     """One SSE frame: `event: <name>` + JSON data + blank-line terminator."""
-    return f"event: {name}\ndata: {json.dumps(payload)}\n\n"
+    return f"event: {name}\ndata: {json.dumps(payload, allow_nan=False)}\n\n"
 
 
 def error_payload(
@@ -152,7 +152,7 @@ def format_openai_chunk(
         "model": model,
         "choices": [choice],
     }
-    return f"data: {json.dumps(payload)}\n\n"
+    return f"data: {json.dumps(payload, allow_nan=False)}\n\n"
 
 
 def format_openai_done() -> str:
@@ -172,7 +172,7 @@ def format_openai_error(code: str = SSE_ERROR_CODE, message: str = SSE_ERROR_MES
         "error": {"code": code, "message": message},
         "verification_state": "generation_incomplete",
     }
-    return f"data: {json.dumps(payload)}\n\n"
+    return f"data: {json.dumps(payload, allow_nan=False)}\n\n"
 
 
 def output_final_payload(

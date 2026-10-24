@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
 import os
 import time
 import uuid
@@ -2312,6 +2313,9 @@ async def _chat_response(req, response, owner):
     is_stream = req.stream
 
     if not is_stream:
+        if any(not math.isfinite(h.score) for h in hits):
+            # Strict JSON: a NaN/Infinity score would 500 in the encoder.
+            raise AppError(502, "upstream_error", "retrieval failed")
         output = await _execute_core_or_raise(
             core_input, deps, owner, "chat", "chat_answer", kind, len(hits)
         )
