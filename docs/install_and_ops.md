@@ -525,7 +525,7 @@ The hardened 5-stage deployment pipeline (`airgap:validate` -> `airgap:load` -> 
 The sneakernet archive is packaged on the connected host. Connected `main` is the only image factory.
 
 > [!TIP]
-> **Automated CI Packaging:** A nightly `e2e.yml` run (02:17 UTC, current `main` HEAD) or a manual dispatch triggers the `airgap-package` job once container images have been built and pushed to GHCR; merges to `main` alone no longer package a bundle. Any authenticated GitHub user with read access to the repository can download the pre-packaged, verified `sneakernet-bundle-<sha>` artifact (containing `qdrant-pdf-rag-<sha>.tar`, digest, `PACKING_RECORD.txt`, and `MANIFEST.txt`, retained for 90 days) directly from GitHub Actions runs. The artifact is stored uncompressed (`compression-level: 0`; the download is byte-identical). Pull request runs intentionally skip this packaging job. To get a bundle for a specific commit, dispatch `e2e.yml` on it. A failed nightly run shows on the Actions page and in GitHub's scheduled-workflow failure email.
+> **Automated CI Packaging:** A nightly `e2e.yml` run (02:17 UTC, current `main` HEAD) or a manual dispatch triggers the `airgap-package` job once container images have been built and pushed to GHCR; merges to `main` alone no longer package a bundle. Any authenticated GitHub user with read access to the repository can download the pre-packaged `sneakernet-bundle-<sha>` artifact (containing `qdrant-pdf-rag-<sha>.tar`, digest, `PACKING_RECORD.txt`, and `MANIFEST.txt`, retained for 90 days) directly from GitHub Actions runs. The artifact is stored uncompressed (`compression-level: 0`; the download is byte-identical). Pull request runs intentionally skip this packaging job. Only a manual `workflow_dispatch` on `main` signs with the custodied key (`release-signing` environment, required reviewer; [custody](deploy.md)). Nightly and branch bundles are `signed: ephemeral` (plumbing only, no trust) and not promotable. To get a bundle for a specific commit, dispatch `e2e.yml` on it. A failed nightly run shows on the Actions page and in GitHub's scheduled-workflow failure email.
 
 To build the package manually on a connected Linux workstation:
 
@@ -541,6 +541,14 @@ sh scripts/tools/install-task.sh  # Explicit connected runner provisioning
 SNEAKERNET_SIGNING_KEY=/secure/release-signing.pem \
 SNEAKERNET_KEY_TRUSTED=true sh scripts/tools/run-task.sh airgap:pack
 ```
+
+`airgap:pack` refuses to sign unless the working tree is the clean checked-out
+commit (no tracked staged or unstaged change, no assume-unchanged/skip-worktree
+flag; untracked `airgap.env` and `dist/` are fine) and every
+`images/Containerfile.*` `FROM` digest equals the base pin in `images.txt` and
+the dependency lock (`python3 scripts/image_inventory.py --check-containerfiles`);
+every `COPY/ADD --from` and `RUN --mount ...from=` must name an earlier build stage or
+the `wheelhouse`/`bm25` build contexts (#1030).
 
 A maintainer creates the signing key once in a protected directory, for example
 with `openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out signing.pem`,

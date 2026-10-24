@@ -32,6 +32,19 @@ def test_hash_embedder_is_deterministic_normalized_and_offline():
     assert len(embedder.dense(["IEA500I"])[0]) == HASH_EMBED_DIM
 
 
+def test_vllm_mode_with_base_url_dispatches_to_vllm_embedder_not_hash():
+    """#1034: vllm settings (even with embed_base_url set) must build the real
+    VllmEmbedder, never HashEmbedder; construction needs no network."""
+    from mainframe_rag.ingest.embed import HashEmbedder, VllmEmbedder
+
+    s = Settings(embed_mode="vllm", embed_base_url="http://embed.invalid/v1",
+                 embed_model="m", dense_dim=1024, _env_file=None)
+    embedder = build_embedder(s)
+    assert isinstance(embedder, VllmEmbedder)
+    assert not isinstance(embedder, HashEmbedder)
+    assert isinstance(build_embedder(_hash_settings()), HashEmbedder)
+
+
 def test_hash_mode_needs_no_dense_dim_and_rejects_vllm_requirement():
     import pytest
 

@@ -168,6 +168,14 @@ POLICY_DOCUMENTS = {"docs/agent-workflow.md", "docs/live-stack.md", "docs/testin
                     "docs/task-runner.md", "docs/dependencies.md"}
 # These shared producers feed every selected suite. Narrow helpers retain their
 # actual deploy owner above instead of treating every tests/** file as global.
+# Helpers whose only (or additional) consumer is the simulation tier: the
+# subprocess crash worker CLI, the publication-lifecycle builders and the
+# builder seam are imported or spawned by tests/test_integration_sim.py (#1033).
+SIMULATION_TEST_INPUTS = [
+    "tests/helpers_ingest_crash_worker.py",
+    "tests/helpers_publication_lifecycle.py",
+    "tests/helpers_builder.py",
+]
 SHARED_TEST_INPUTS = {"tests/conftest.py", "tests/fakes.py", "tests/ci_shard.py", "tests/__init__.py"}
 
 
@@ -984,6 +992,8 @@ def required_lanes(manifest: dict[str, Any]) -> set[str]:
                               *RULE_MODULE_PATHS])
             for path in paths):
         required_lanes.add("eval_retrieval")
+    if any(_match_any(path, SIMULATION_TEST_INPUTS) for path in paths):
+        required_lanes.add("simulation")
     if any(_match_any(path, ["scripts/verify_placement.py", "tests/test_placement.py",
                             "tests/test_ha_cluster.py", "scripts/airgap/collection-policy.env",
                             "charts/qdrant-openshift.values.yaml", ".github/workflows/ha.yml"])

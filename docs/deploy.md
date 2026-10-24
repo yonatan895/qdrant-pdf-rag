@@ -13,7 +13,10 @@ reference: this file §7. Design overview: `docs/architecture.md` §3.
 no rollback:
 
 - `--skip-load` / `--skip-ingest` skip their stage; `--dry-run` exports
-  `AIRGAP_DRYRUN=1` (every script prints instead of executing);
+  `AIRGAP_DRYRUN=1` (every script prints instead of executing).
+  `common.sh` normalizes the flag once: `1`/`true`/`yes` (any case) preview,
+  `0`/`false`/`no`/unset run live, and any other value (`on`, ` 1`, `1<newline>`)
+  is refused before any stage (#1015);
   `--help` usage; unknown arguments fail before any pipeline stage runs.
 - Ingest runs only when `CORPUS_PVC` is non-empty and `--skip-ingest` is
   absent; otherwise the stage reports skipped.
@@ -36,7 +39,14 @@ Standalone `sh scripts/tools/run-task.sh airgap:deploy` only waits for workload 
 `/healthz` check covers Qdrant and embedding connectivity, the served
 generation's representation contract, **and** the rerank leg when
 `RERANK_ENABLED=true` (HTTP 503 for any non-servable state);
-`/livez` is the process-only liveness probe. It does not prove that reasoning
+`/livez` is the process-only liveness probe. Kubelet probes reach the pod port
+directly, not the OAuth sidecar; the sidecar's only unauthenticated path is
+`--skip-auth-regex=^/livez$` (no upstream work), so an anonymous Route caller
+cannot trigger the `/healthz` Qdrant, embedding or serving-gate evaluation
+(#1018). No agent, ingest, OpenObserve or otelcol pod automounts a
+ServiceAccount token (`automountServiceAccountToken: false`); with the Route
+on, a projected token is mounted only into the `oauth-proxy` container (#1029).
+It does not prove that reasoning
 works. Run the gateway probe before ingesting when using the
 modular commands. `sh scripts/tools/run-task.sh airgap:smoke` checks retrieval and tracing; use the
 console/answer checks in the operator runbook to verify the user experience.
@@ -148,6 +158,12 @@ restores the snapshot over whatever the file assigned; empty stays unset
 - **Maintenance warning:** a new `.example` key that is not added to
   `OPERATOR_ENV_KEYS` silently regresses to file-wins. The list and the
   example must change together.
+- The plaintext gateway-key guard (`LLM_API_KEY`, `EMBED_API_KEY`,
+  `RERANK_API_KEY`, `CONTEXT_LLM_API_KEY`) scans the operator file text before it
+  is sourced (any `export`/`readonly`/`declare`/chained form) and rejects any
+  such variable whose sourced value differs from the caller's environment, so
+  no shell syntax can smuggle a key in (#1016). Process-environment keys for
+  `local:ask` stay allowed.
 - Task discovery never loads private env files. Air-gap tasks bridge only
   caller-set operator values to `common.sh`; CLI assignments win over the
   caller environment before that script applies its precedence rule.
@@ -393,6 +409,26 @@ Compatibility and lifecycle decisions under #448:
   (`QDRANT_STORAGE_SIZE`, `QDRANT_EXTRA_VALUES`, `QDRANT_TAG`, `INGEST_WORK_SIZE`,
   `INGEST_EXTRA_PATCH`) retain their existing precedence and never change the
   production defaults. The last remains a client-side CI-only Job patch.
+  `QDRANT_EXTRA_VALUES` and `INGEST_EXTRA_PATCH` are CI-rehearsal overrides:
+  the scripts refuse them unless `CI_REHEARSAL=1` is in the caller's process
+  environment (an `airgap.env` assignment never counts; never set it in the
+  air gap). Even then the patched ingest Job may differ from the render only in
+  container `resources` (no image, env/hash mode, security context, volume,
+  sidecar or identity change), and the Qdrant release is rendered with
+  `helm template` and refused unless it is private and hardened (no
+  Ingress/Route, ClusterIP Services only, API-key Secret present, no host
+  namespaces or hostPath, non-privileged read-only-root containers, the verified
+  registry image) before any `helm upgrade` (#1014). The container check is an
+  allowlist: no added capabilities and `drop: [ALL]`, `runAsNonRoot` with no UID 0,
+  no `hostPort`, host namespaces or RBAC objects, and only the chart's own
+  ServiceAccount. `CI_REHEARSAL` is captured read-only before the operator file
+  is sourced, so the file cannot forge it.
+- `deploy.sh` validates every operator string that becomes a Helm value before
+  rendering (`STORAGE_CLASS`/`SNAPSHOT_STORAGE_CLASS`: DNS-1123 name,
+  `QDRANT_RELEASE`: DNS-1123 label, `QDRANT_TAG`: image tag,
+  `QDRANT_STORAGE_SIZE`: positive quantity with a Ki/Mi/Gi/Ti unit, `INTERNAL_REGISTRY`:
+  `host[:port][/path]`) and passes them with `--set-string`, so a comma or `=`
+  can never become a second chart value (#1017).
 - Rollout waits remain Qdrant 600s, agent 300s and, with the bundled backend, OpenObserve and otelcol 120s each, with bounded
   diagnostics on failure. Explicit ingest keeps its existing wait/diagnostics.
 
@@ -455,6 +491,19 @@ checksums **after**.
   the ref line carries the requested pin, the digest line carries the
   bundled bytes that load re-verifies. Confusing the two is the classic
   digest-mismatch false alarm.
+- Release-signing custody (#1000): CI holds the key only as an **environment**
+  secret `SNEAKERNET_SIGNING_KEY` of the GitHub environment `release-signing`
+  (maintainer setup: Settings > Environments > New; Deployment branches =
+  selected branches `main`; Required reviewers = the maintainer; move the secret
+  there and delete any repository-level copy, since a same-repo PR workflow can
+  read repository secrets). `airgap-package` selects that environment only for a
+  manual `workflow_dispatch` on `refs/heads/main` (the required reviewer
+  approves it); only that run produces a signed, promotable bundle. Every
+  other run, including the nightly `schedule` (#1051, so it needs no daily
+  approval), uses the secret-free `branch-unsigned` environment, packs with an
+  ephemeral key and records `signed: ephemeral`; such bundles are not
+  promotable. `SNEAKERNET_KEY_TRUSTED=true` is exported only for that
+  dispatch on `refs/heads/main`. `tests/test_airgap_pack_sh.py` pins this.
 - `signed: true` appears only with a custodied key (`SNEAKERNET_KEY_TRUSTED`);
   rehearsal keys record `ephemeral`. The label is honesty, never a trust
   root. Trust roots, strongest first: a `SNEAKERNET_TRUSTED_PUB` obtained

@@ -13,7 +13,7 @@ from __future__ import annotations
 import math
 import re
 from collections.abc import Callable, Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import httpx2
 
@@ -266,14 +266,15 @@ class HttpReranker:
             data = resp.json()
             if isinstance(data, dict) and "data" in data and isinstance(data["data"], list):
                 items = data["data"]
-                if len(items) == len(batch_texts):
-                    sorted_items = sorted(items, key=lambda d: d.get("index", 0))
-                    batch_scores = [float(d["score"]) for d in sorted_items]
+                if all(isinstance(d, dict) for d in items):
+                    batch_scores = _scores_by_index(
+                        [(d.get("index"), d["score"]) for d in items], len(batch_texts)
+                    )
         except httpx2.HTTPStatusError as exc:
             if rejected is not None:
                 rejected.append(exc)
             batch_scores = None
-        except (httpx2.RequestError, ValueError, KeyError):
+        except (httpx2.RequestError, ValueError, KeyError, TypeError, AttributeError):
             batch_scores = None
         return batch_scores
 
@@ -302,13 +303,43 @@ class HttpReranker:
             raise RuntimeError(
                 f"Reranker endpoint {rerank_url} returned invalid or mismatched results: {r_data}"
             )
-        batch_scores = [0.0] * len(batch_texts)
-        for res in results:
-            idx = res.get("index")
-            if idx is None or not (0 <= idx < len(batch_texts)):
-                raise RuntimeError(f"Reranker returned out-of-bounds index: {idx}")
-            batch_scores[idx] = float(res.get("relevance_score", res.get("score", 0.0)))
+        try:
+            if not all(isinstance(r, dict) for r in results):
+                raise KeyError("results")
+            batch_scores = _scores_by_index(
+                [
+                    (r.get("index"), r["relevance_score"] if "relevance_score" in r else r["score"])
+                    for r in results
+                ],
+                len(batch_texts),
+            )
+        except (AttributeError, KeyError):
+            batch_scores = None
+        if batch_scores is None:
+            raise RuntimeError(
+                f"Reranker endpoint {rerank_url} returned indexes that are not a "
+                f"permutation of the batch or non-finite scores"
+            )
         return batch_scores
+
+
+def _scores_by_index(pairs: list[tuple[Any, Any]], n: int) -> list[float] | None:
+    """Scores in batch order, or None unless `pairs` carries exactly the
+    indexes 0..n-1 once each with finite numeric scores (issues #1012, #1023).
+    A malformed response is one failed call, never a wrong ranking."""
+    if len(pairs) != n:
+        return None
+    out: list[float | None] = [None] * n
+    for idx, raw in pairs:
+        if type(idx) is not int or not 0 <= idx < n or out[idx] is not None:
+            return None
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            return None
+        score = float(raw)
+        if not math.isfinite(score):
+            return None
+        out[idx] = score
+    return [s for s in out if s is not None]
 
 
 # ------------------------------------------------------- Dispatch and candidate scoring
@@ -360,6 +391,12 @@ def _minmax(values: Sequence[float]) -> list[float]:
     if hi == lo:
         return [0.5] * len(values)
     span = hi - lo
+    if not math.isfinite(span):
+        # Finite extremes (e.g. +/-1.7e308) overflow `hi - lo` to inf and the
+        # blend to NaN; halving first keeps every normalized key finite.
+        lo, hi = lo / 2.0, hi / 2.0
+        span = hi - lo
+        return [(v / 2.0 - lo) / span for v in values]
     return [(v - lo) / span for v in values]
 
 

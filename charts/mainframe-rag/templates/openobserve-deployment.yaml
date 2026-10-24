@@ -25,6 +25,7 @@ spec:
       labels:
         app: openobserve
     spec:
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         {{- if .Values.openobserve.runAsId }}

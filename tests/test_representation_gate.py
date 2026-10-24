@@ -135,6 +135,43 @@ def test_compare_each_reembed_field_rejects(field, value):
     assert field in fields
 
 
+# One independent drift value per REEMBED_FIELDS member (#1035). Hard-coded, not
+# derived from the product tuple, so a field dropped from REEMBED_FIELDS flips
+# its row red and a newly added field fails the coverage assertion below.
+_REEMBED_DRIFT = {
+    "schema_version": 2,
+    "extraction_rules": "0" * 16,
+    "identity_schema": "other_schema",
+    "embed_mode": "vllm",
+    "embed_model": "other-model",
+    "embed_model_revision": "rev-2",
+    "dense_dim": 768,
+    "contextual_enabled": True,
+    "context_llm_model": "other-llm",
+    "context_prompt_version": "v-other",
+    "context_max_chars": 501,
+    "sparse_model": "Other/bm25",
+    "sparse_weights_revision": "0" * 40,
+}
+
+
+def test_every_reembed_field_has_a_drift_witness():
+    from mainframe_rag.ingest.representation import REEMBED_FIELDS
+
+    assert set(_REEMBED_DRIFT) == set(REEMBED_FIELDS)
+
+
+@pytest.mark.parametrize("field", sorted(_REEMBED_DRIFT))
+def test_drift_in_every_reembed_field_requires_reembed(field):
+    s = _settings()
+    wanted = build_manifest(s, RULES)
+    stored = wanted.model_copy(update={field: _REEMBED_DRIFT[field]})
+    assert getattr(stored, field) != getattr(wanted, field)
+    outcome, fields = compare_manifests(stored, wanted)
+    assert outcome == REEMBED_REQUIRED
+    assert fields == [field]
+
+
 def test_compare_manifests_compatible_and_record_only():
     s = _settings()
     wanted = build_manifest(s, RULES)

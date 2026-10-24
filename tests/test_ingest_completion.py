@@ -344,6 +344,38 @@ def test_stale_single_point_never_skips(monkeypatch):
     assert "residue-point" not in {str(p.id) for p in points}
 
 
+def test_surplus_point_under_the_same_revision_never_verifies(monkeypatch):
+    """#1037: one expected chunk set plus one extra point under the same doc and
+    revision is not complete: the scroll must be able to observe the surplus."""
+    from qdrant_client import models
+
+    settings = _settings(batch_size=16)
+    fake = FailingFakeQdrant()
+    status, _ = _upsert_one(monkeypatch, fake, _parsed(), _chunks(n=3), settings)
+    assert status == "upserted"
+    assert _complete(settings, fake) is True
+    template = fake.main_points(settings.qdrant_collection, "DOC1")[0]
+    fake.upsert(settings.qdrant_collection, points=[models.PointStruct(
+        id="surplus-point", vector=template.vector,
+        payload={**template.payload, "text": "surplus"})])
+    assert len(fake.main_points(settings.qdrant_collection, "DOC1")) == 4
+    assert _complete(settings, fake) is False
+
+
+@pytest.mark.parametrize("field", ["sha256", "rules_v"])
+def test_one_point_with_a_foreign_sha_or_rules_version_never_verifies(monkeypatch, field):
+    """#1038: exact point count and matching digests are not enough; each point
+    must carry the marker's sha256 and rules version."""
+    settings = _settings(batch_size=16)
+    fake = FailingFakeQdrant()
+    status, _ = _upsert_one(monkeypatch, fake, _parsed(), _chunks(n=3), settings)
+    assert status == "upserted"
+    assert _complete(settings, fake) is True
+    victim = fake.main_points(settings.qdrant_collection, "DOC1")[0]
+    victim.payload[field] = "f" * 64 if field == "sha256" else "0" * 16
+    assert _complete(settings, fake) is False
+
+
 def test_zero_chunk_is_explicit_empty_never_complete(monkeypatch):
     fake = FailingFakeQdrant()
     status, _ = _upsert_one(monkeypatch, fake, _parsed(), [], _settings())

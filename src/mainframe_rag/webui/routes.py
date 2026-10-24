@@ -30,7 +30,7 @@ from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.templating import Jinja2Templates
 from opentelemetry.trace import SpanKind
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from mainframe_rag.agent.sse import error_payload, format_sse_event, output_final_payload
 from mainframe_rag.config import ReasoningEffort
@@ -151,6 +151,22 @@ class UiChatRequest(BaseModel):
     version: str | None = None
     reasoning_effort: ReasoningEffort | None = None
 
+    @model_validator(mode="after")
+    def _bounded_text(self) -> UiChatRequest:
+        # Same bounds and surrogate refusal as the API chat request (#1011,
+        # #1013); the agent module is imported late, as the handlers do.
+        from mainframe_rag.agent import app as app_mod
+        from mainframe_rag.agent.chat_turn import validate_request_text
+
+        validate_request_text(
+            app_mod.settings,
+            product=self.product,
+            version=self.version,
+            splunk_context=self.splunk_context,
+            messages=self.messages,
+        )
+        return self
+
 
 def _secure(response: Response) -> Response:
     for key, value in _SECURITY_HEADERS.items():
@@ -165,7 +181,9 @@ def _parse_history(raw: str | None) -> list[ChatMessage]:
         return []
     try:
         parsed = json.loads(raw)
-    except json.JSONDecodeError:
+    except (ValueError, RecursionError):
+        # JSONDecodeError, Python's int-digit limit and deep nesting
+        # (issue #1032): the browser owns this field, so all degrade alike.
         return []
     if not isinstance(parsed, list):
         return []
@@ -173,7 +191,7 @@ def _parse_history(raw: str | None) -> list[ChatMessage]:
     for item in parsed:
         try:
             history.append(ChatMessage.model_validate(item))
-        except ValidationError:
+        except (ValidationError, ValueError, RecursionError, TypeError):
             continue
     return history
 

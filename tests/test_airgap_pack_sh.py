@@ -112,6 +112,7 @@ def pack_tree(tmp_path):
         shutil.copy(REPO / "scripts" / script, tmp_path / "scripts" / script)
     (tmp_path / "charts").mkdir(exist_ok=True)
     copy_chart(tmp_path)
+    shutil.copytree(REPO / "images", tmp_path / "images")
 
     # Throwaway git repo so IMAGE_SHA resolves to a real HEAD.
     subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
@@ -162,6 +163,75 @@ def test_pack_sha_mismatch_fails_closed(pack_tree):
     assert r.returncode != 0
     assert "is not the checked-out commit" in r.stderr
     assert "airgap.env" in r.stderr
+
+
+@pytest.mark.parametrize("role", ["agent", "ingest"])
+def test_pack_refuses_a_containerfile_base_digest_off_the_pin(pack_tree, role):
+    """#1030: the shipped Containerfile FROM must equal images.txt and the lock."""
+    root, skopeo_log, _head, _key = pack_tree
+    containerfile = root / "images" / f"Containerfile.{role}"
+    good = containerfile.read_text()
+    containerfile.write_text(re.sub(r"@sha256:[0-9a-f]{64}", "@sha256:" + "0" * 64, good))
+    result, _ = _run_pack(pack_tree)
+    assert result.returncode != 0
+    assert "Containerfile base digest" in result.stderr
+    assert not skopeo_log.exists()
+    assert not (root / "dist" / "SHA256SUMS.sig").exists()
+    containerfile.write_text(good)
+    result, _ = _run_pack(pack_tree)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("directive", [
+    "COPY --from=evil.example/img:latest / /x",
+    "COPY --from=docker.io/library/busybox@sha256:" + "a" * 64 + " / /x",
+    "RUN --mount=type=bind,from=evil.example/img:latest,target=/m true",
+    "RUN --mount=type=bind,source=/,from=unknown,target=/m true",
+    "COPY --from=missingstage \\\n    / /x",
+], ids=["copy-external", "copy-digest-not-in-images", "mount-external", "mount-unknown", "continued"])
+def test_pack_refuses_a_containerfile_that_reads_from_an_external_image(pack_tree, directive):
+    """#1030: a non-FROM image reference is as unpinned as an off-pin FROM."""
+    root, skopeo_log, _head, _key = pack_tree
+    containerfile = root / "images" / "Containerfile.agent"
+    good = containerfile.read_text()
+    containerfile.write_text(good + "\n" + directive + "\n")
+    result, _ = _run_pack(pack_tree)
+    assert result.returncode != 0
+    assert "Containerfile base digest check failed" in result.stderr
+    assert not skopeo_log.exists()
+    containerfile.write_text(good)
+    result, _ = _run_pack(pack_tree)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("dirt", ["modified", "assume-unchanged", "skip-worktree", "staged"])
+def test_pack_refuses_a_dirty_tree_before_signing(pack_tree, dirt):
+    """#1030: `git bundle` records clean HEAD, so a dirty tree must not be signed."""
+    root, _skopeo_log, _head, _key = pack_tree
+    readme = root / "README.md"
+
+    def git(*args):
+        subprocess.run(["git", *args], cwd=root, check=True, capture_output=True)
+
+    if dirt == "assume-unchanged":
+        git("update-index", "--assume-unchanged", "README.md")
+    elif dirt == "skip-worktree":
+        git("update-index", "--skip-worktree", "README.md")
+    if dirt != "skip-worktree":
+        readme.write_text("tampered\n")
+    if dirt == "staged":
+        git("add", "README.md")
+    result, _ = _run_pack(pack_tree)
+    assert result.returncode != 0
+    assert "pack tree is not the clean checked-out commit" in result.stderr
+    assert not (root / "dist" / "SHA256SUMS.sig").exists()
+    if dirt == "assume-unchanged":
+        git("update-index", "--no-assume-unchanged", "README.md")
+    elif dirt == "skip-worktree":
+        git("update-index", "--no-skip-worktree", "README.md")
+    git("checkout", "HEAD", "--", "README.md")
+    result, _ = _run_pack(pack_tree)
+    assert result.returncode == 0, result.stderr
 
 
 def test_pack_refuses_several_chart_archives_then_passes_after_fix(pack_tree):
@@ -321,6 +391,10 @@ def test_pack_bundles_oauth_proxy_once_digest_recorded(pack_tree):
     bundle, MANIFEST, SBOM and member checksums."""
     tmp_path, skopeo_log, head, _key = pack_tree
     set_oauth_proxy_pin(tmp_path, "sha256:" + "b" * 64)
+    # The recorded pin is committed state: the pack tree must be clean (#1030).
+    subprocess.run(["git", "commit", "-qam", "record oauth-proxy pin"], cwd=tmp_path, check=True)
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True,
+                          capture_output=True, text=True).stdout.strip()
     # Model signed-source export: without attachment omission, Docker
     # archive export fails before the archive can be materialized.
     guard = '''signed_source=0
@@ -469,3 +543,96 @@ def test_pack_refuses_unreviewed_license_change_before_any_image_call(pack_tree,
     result, _ = _run_pack(pack_tree)
     assert result.returncode == 0, result.stderr
     assert (root / "dist" / "THIRD-PARTY-NOTICES.txt").is_file()
+
+
+# --- #1000: the release signing key is reachable only from the protected path
+
+_SIGNING_ENV = "release-signing"
+_MAIN_REF = "refs/heads/main"
+
+
+def _workflow_jobs():
+    import yaml
+
+    for path in sorted((REPO / ".github" / "workflows").glob("*.yml")):
+        doc = yaml.safe_load(path.read_text())
+        for name, job in (doc.get("jobs") or {}).items():
+            yield path.name, name, job
+
+
+def test_signing_secret_and_trusted_flag_only_on_protected_release_path():
+    """No PR-triggerable or non-main path can read the key or claim trust.
+
+    Same-repo PR workflows get repository secrets, so the secret must live in
+    a protected GitHub environment (deployment branches limited to main), and
+    every read and the trusted flag must be gated on the main ref as well.
+    """
+    seen = 0
+    for wf, name, job in _workflow_jobs():
+        steps = job.get("steps") or []
+        text = json.dumps(job)
+        reads_key = "secrets.SNEAKERNET_SIGNING_KEY" in text
+        sets_trusted = re.search(r"SNEAKERNET_KEY_TRUSTED=true", text) is not None
+        if not (reads_key or sets_trusted):
+            continue
+        seen += 1
+        where = f"{wf}:{name}"
+        env = job.get("environment")
+        env_name = env.get("name") if isinstance(env, dict) else env
+        assert env_name and _SIGNING_ENV in str(env_name), f"{where}: no {_SIGNING_ENV} environment"
+        # Branch dispatches must fall back to an environment without the secret.
+        assert _MAIN_REF in str(env_name), f"{where}: environment not selected by main ref"
+        assert "pull_request" not in str(job.get("if", "")), f"{where}: PR-triggerable"
+        for step in steps:
+            step_text = json.dumps(step)
+            if "secrets.SNEAKERNET_SIGNING_KEY" in step_text:
+                for value in (step.get("env") or {}).values():
+                    if "secrets.SNEAKERNET_SIGNING_KEY" in str(value):
+                        assert _MAIN_REF in str(value), f"{where}: secret read not gated on main"
+            if "SNEAKERNET_KEY_TRUSTED=true" in step_text:
+                run = step.get("run", "")
+                before = run.split("SNEAKERNET_KEY_TRUSTED=true")[0]
+                assert "GITHUB_REF" in before and "refs/heads/main" in before, (
+                    f"{where}: trusted flag not guarded by the main ref")
+                assert "GITHUB_EVENT_NAME" in before, f"{where}: trusted flag not guarded by event"
+    assert seen, "signing step not found: update this contract if it moved"
+
+
+def _eval_gha(expr: str, event: str, ref: str, secret: str = "SECRET") -> str:
+    """Evaluate the `a && b && 'x' || 'y'` subset of a workflow expression."""
+    body = re.fullmatch(r"\s*\$\{\{(.*)\}\}\s*", str(expr), re.DOTALL)
+    assert body, f"not a plain expression: {expr!r}"
+    py = body.group(1).replace("&&", " and ").replace("||", " or ")
+    py = py.replace("github.event_name", repr(event)).replace("github.ref", repr(ref))
+    py = py.replace("secrets.SNEAKERNET_SIGNING_KEY", repr(secret))
+    assert not re.search(r"[A-Za-z_]\w*\.\w", re.sub(r"'[^']*'", "", py)), f"unknown context: {expr!r}"
+    return str(eval(py, {"__builtins__": {}}))
+
+
+def test_only_manual_main_dispatch_signs_and_nightly_packs_ephemeral():
+    """#1051: schedule on main packs with the ephemeral key (no approval prompt);
+    only workflow_dispatch on main reaches release-signing, the secret and trust."""
+    import yaml
+
+    doc = yaml.safe_load((REPO / ".github" / "workflows" / "e2e.yml").read_text())
+    job = doc["jobs"]["airgap-package"]
+    step = next(s for s in job["steps"] if s.get("name") == "airgap-pack")
+    key_expr = step["env"]["SNEAKERNET_SIGNING_KEY"]
+    cond = re.search(r"if (\[[^\n]*\]); then\s*\n\s*export SNEAKERNET_KEY_TRUSTED=true", step["run"])
+    assert cond, "trusted-flag guard not found"
+    matrix = [
+        ("schedule", _MAIN_REF, "branch-unsigned", "", False),
+        ("workflow_dispatch", _MAIN_REF, _SIGNING_ENV, "SECRET", True),
+        ("workflow_dispatch", "refs/heads/feature", "branch-unsigned", "", False),
+        ("schedule", "refs/heads/feature", "branch-unsigned", "", False),
+        ("pull_request", "refs/pull/1/merge", "branch-unsigned", "", False),
+        ("push", _MAIN_REF, "branch-unsigned", "", False),
+    ]
+    for event, ref, env_name, secret, trusted in matrix:
+        where = f"{event}@{ref}"
+        assert _eval_gha(job["environment"], event, ref) == env_name, where
+        assert _eval_gha(key_expr, event, ref) == secret, where
+        out = subprocess.run(
+            ["sh", "-c", f"{cond.group(1)} && echo trusted"], capture_output=True, text=True, check=False,
+            env={"PATH": os.environ["PATH"], "GITHUB_REF": ref, "GITHUB_EVENT_NAME": event})
+        assert (out.stdout.strip() == "trusted") is trusted, f"{where}: trusted flag"
