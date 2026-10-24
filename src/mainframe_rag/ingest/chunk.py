@@ -417,6 +417,47 @@ def _shared_page_pieces(
     return pieces
 
 
+def _named_skip(title: str, page_1based: int, front_matter_limit: int) -> bool:
+    """A heading whose section is skipped by name: always-skipped back
+    matter anywhere, front matter at or before the limit."""
+    return bool(SKIP_ALWAYS_RE.search(title)) or (
+        bool(FRONT_MATTER_RE.search(title)) and page_1based <= front_matter_limit
+    )
+
+
+def _leading_sections(
+    parsed: ParsedDoc,
+    entries: list[tuple[int, str, int]],
+    first_kept: int,
+    front_matter_limit: int,
+) -> list[Section]:
+    """Sections under the document title for the pages before the first
+    kept entry (issue #1001). No kept section covers them, so they used to
+    be dropped whole: one late bookmark lost the body before it. A page is
+    skipped only when it is inside the front-matter limit and the entry it
+    falls under is skipped by name; un-bookmarked pages (covers, a partial
+    or shifted outline) and pages under an empty title are body."""
+    sections: list[Section] = []
+    run_start: int | None = None
+    owner: tuple[str, int] | None = None
+    nxt = 0
+    for page in range(first_kept + 1):
+        while nxt < len(entries) and entries[nxt][2] <= page + 1:
+            owner = (_clean_title(entries[nxt][1]), entries[nxt][2])
+            nxt += 1
+        skipped = (
+            page < front_matter_limit
+            and owner is not None
+            and _named_skip(owner[0], owner[1], front_matter_limit)
+        )
+        if page < first_kept and not skipped:
+            run_start = page if run_start is None else run_start
+        elif run_start is not None:
+            sections.append(Section(heading_path=parsed.title, page_start=run_start, page_end=page))
+            run_start = None
+    return sections
+
+
 def outline_sections(parsed: ParsedDoc, page_texts: list[str] | None = None) -> list[Section]:
     if not parsed.toc:
         return [Section(heading_path=parsed.title, page_start=0, page_end=parsed.page_count)]
@@ -436,9 +477,7 @@ def outline_sections(parsed: ParsedDoc, page_texts: list[str] | None = None) -> 
     kept: list[tuple[int, str, int]] = []
     for level, raw_title, page_1based in entries:
         title = _clean_title(raw_title)
-        if not title or SKIP_ALWAYS_RE.search(title):
-            continue
-        if FRONT_MATTER_RE.search(title) and page_1based <= front_matter_limit:
+        if not title or _named_skip(title, page_1based, front_matter_limit):
             continue
         kept.append((level, title, page_1based))
 
@@ -452,6 +491,8 @@ def outline_sections(parsed: ParsedDoc, page_texts: list[str] | None = None) -> 
     # last message's heading. With the page text available, the page is
     # split at each later bookmark's own title line instead.
     group: list[tuple[int, str, str]] = []
+    first_kept = min(parsed.page_count, max(0, kept[0][2] - 1)) if kept else parsed.page_count
+    sections.extend(_leading_sections(parsed, entries, first_kept, front_matter_limit))
 
     for idx, (level, title, page_1based) in enumerate(kept):
 

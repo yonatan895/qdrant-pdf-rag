@@ -516,7 +516,9 @@ def test_nested_outline_chunks_deepest_once_no_duplicates():
         toc=[[1, "Chapter 3", 3], [2, "Section 1", 3], [3, "Functions", 3], [1, "Chapter 4", 6]],
         page_count=6,
     )
+    # Pages 1-2 precede the first bookmark: body under the title (#1001).
     assert [(s.heading_path, s.page_start, s.page_end) for s in outline_sections(same)] == [
+        ("SamePage", 0, 2),
         ("Chapter 3 > Section 1 > Functions", 2, 5),
         ("Chapter 4", 5, 6),
     ]
@@ -561,12 +563,14 @@ def test_skipped_child_heading_does_not_cut_parent():
     )
     s1 = outline_sections(p1)
     assert [(s.heading_path, s.page_start, s.page_end) for s in s1] == [
+        ("Skipped", 0, 79),  # pages before the first bookmark (#1001)
         ("Ch 6 Alternate indexes", 79, 87),
         ("Ch 6 Alternate indexes > Maintaining data", 87, 94),
         ("Ch 7", 94, 100),
     ]
-    # Union matches the pre-#577 base ([79,94) + [94,100)): no pages lost.
-    assert sorted({i for s in s1 for i in range(s.page_start, s.page_end)}) == list(range(79, 100))
+    # Union matches the pre-#577 base ([79,94) + [94,100)) plus the
+    # pre-outline pages #1001 recovers: no pages lost.
+    assert sorted({i for s in s1 for i in range(s.page_start, s.page_end)}) == list(range(100))
     pages1 = [f"Marker page {i} unique." for i in range(100)]
     joined1 = "\n".join(c.text for c in make_chunks(p1, pages1, [str(i) for i in range(100)]))
     for i in (81, 82, 83, 84, 85, 86):
@@ -579,11 +583,12 @@ def test_skipped_child_heading_does_not_cut_parent():
     )
     s2 = outline_sections(p2)
     assert [(s.heading_path, s.page_start, s.page_end) for s in s2] == [
+        ("Skipped", 0, 9),  # pages before the first bookmark (#1001)
         ("Chapter 1", 9, 14),
         ("Chapter 1 > Real child", 14, 19),
         ("Chapter 2", 19, 25),
     ]
-    assert sorted({i for s in s2 for i in range(s.page_start, s.page_end)}) == list(range(9, 25))
+    assert sorted({i for s in s2 for i in range(s.page_start, s.page_end)}) == list(range(25))
 
     # 3. Front-matter child (Contents@2 within limit) is skipped: Preface
     # runs to Chapter 1, not to the skipped Contents.

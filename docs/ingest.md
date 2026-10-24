@@ -228,7 +228,15 @@ for citations and filters.
   sections (notices, trademarks, reader comments, bibliography, copyright,
   index) skip at any position; contents/figures/tables/summary-of-changes
   skip only at or before the limit — a mid-book same-named section is kept
-  by design.
+  by design. A skipped heading drops pages only before the first kept
+  entry, where no kept section can absorb them, and only inside the limit.
+- Pages before the first kept entry (issue #1001): every page there that is
+  not under a named skip heading inside the front-matter limit is chunked
+  under the document title. That covers un-bookmarked covers, a partial or
+  late outline (one `Appendix A -> 5` bookmark used to store page 5 only),
+  pages under an empty-titled bookmark, and an outline whose entries are
+  all skipped (the document used to store nothing). Pages past the limit
+  are body even under a leading `Contents` or `Notices` bookmark.
 - Outline build (issue #577): entries stable-sorted by page only (bookmarks sharing a page keep outline
   order, #663), a stack popping
   deeper-or-equal levels, `heading_path` joined with `" > "`, each kept section
