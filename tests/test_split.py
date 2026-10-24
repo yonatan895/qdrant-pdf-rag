@@ -39,6 +39,35 @@ def test_multiword_entities_split_into_exact_paths():
 
 
 @pytest.mark.parametrize(
+    ("query", "leg1", "leg2"),
+    [
+        (
+            "difference between RACF dataset profiles and ACF2 dataset profiles",
+            "RACF dataset profiles",
+            "ACF2 dataset profiles",
+        ),
+        (
+            "JES2 spool handling versus JES3 spool handling",
+            "JES2 spool handling",
+            "JES3 spool handling",
+        ),
+    ],
+)
+def test_mirrored_noun_phrase_legs_are_disjoint(query, leg1, leg2):
+    """Issue #1025: each leg isolates its own entity; no duplicated phrase."""
+    paths, mode = _split(query)
+    assert mode == "comparative"
+    assert paths == [leg1, leg2]
+
+
+def test_racf_acf2_legs_exclude_the_other_entity():
+    paths, _ = _split("difference between RACF dataset profiles and ACF2 dataset profiles")
+    assert "ACF2" not in paths[0]
+    assert "RACF" not in paths[1]
+    assert paths[0].lower().count("dataset profiles") == 1
+
+
+@pytest.mark.parametrize(
     ("query", "first", "second"),
     [
         ("Compare MXT vs EDSALIMIT for the region.", "MXT", "EDSALIMIT"),
