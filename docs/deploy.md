@@ -528,9 +528,11 @@ checksums **after**.
   not registry signatures). The internal registry must accept OCI image
   manifests (Qdrant's platform manifest is OCI; Docker registry 2.x and
   current Quay do). A registry that rejects OCI manifests makes skopeo convert
-  on push, and that can rewrite the image config, so load refuses the tag; a
-  conversion that keeps the config passes, with a registry digest that differs
-  from the MANIFEST digest, and deploy pins that registry digest.
+  the push to Docker v2s2: the manifest digest changes but the config blob
+  does not (observed with skopeo 1.22.2 on the Qdrant member), so load's
+  config read-back passes and prints the registry digest, which deploy pins;
+  it differs from the MANIFEST digest. Load refuses the tag only if the
+  config itself changed.
 - Release-signing custody (#1000): CI holds the key only as an **environment**
   secret `SNEAKERNET_SIGNING_KEY` of the GitHub environment `release-signing`
   (maintainer setup: Settings > Environments > New; Deployment branches =
