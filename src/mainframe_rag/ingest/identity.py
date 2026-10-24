@@ -7,7 +7,8 @@ Three identities, three jobs — do not conflate them:
   search. It is NOT a destructive key: two files may resolve to one
   ``doc_id`` while carrying different bytes.
 - ``source_rev``: the unambiguous source-revision key
-  ``vendor|product|version|sha256`` (labels normalized). Destructive
+  ``vendor|product|version|sha256`` (labels normalized, then ``\\`` and
+  ``|`` escaped, #990). Destructive
   operations, completion records, and chunk identity key on this — the
   selector switch is the 361B migration; this PR detects ambiguity before
   any delete/upsert and stamps the key on payloads and inventory for that
@@ -42,11 +43,20 @@ def normalize_label(value: str | None) -> str:
     return " ".join(value.split()).casefold()
 
 
+def _escape_label(label: str) -> str:
+    """`\\` then `|` escaped with a backslash (#990 item 1), so a label
+    containing the field delimiter cannot shift the fields after it.
+    Labels without `\\` or `|` are byte-identical."""
+    return label.replace("\\", "\\\\").replace("|", "\\|")
+
+
 def source_rev_key(vendor: str | None, product: str | None, version: str | None, sha256: str) -> str:
-    """Unambiguous source-revision key. The sha256 segment is the raw hex
-    digest (never normalized); equal keys mean equal bytes under equal
-    labels, so equal keys are always safe to treat as one revision."""
-    return f"{normalize_label(vendor)}|{normalize_label(product)}|{normalize_label(version)}|{sha256}"
+    """Unambiguous source-revision key. Labels are normalized, then escaped
+    (`_escape_label`), so keys are equal exactly when the normalized labels
+    and bytes are. The sha256 segment is the raw hex digest (never
+    normalized); equal keys are always safe to treat as one revision."""
+    labels = (_escape_label(normalize_label(x)) for x in (vendor, product, version))
+    return "|".join((*labels, sha256))
 
 
 def corpus_relpath(path_str: str, src: Path) -> str:

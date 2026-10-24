@@ -253,7 +253,8 @@ Contract tests: `tests/test_classify_messages.py`, `tests/test_code_entries.py`;
 
 Section-outline chunking with per-statement code protection. Point id =
 `UUID5(NAMESPACE_URL, "source_rev|heading_path|page_start|ordinal")`
-where `source_rev` is `normalize(vendor)|normalize(product)|normalize(version)|sha256`
+where `source_rev` is `esc(normalize(vendor))|esc(normalize(product))|esc(normalize(version))|sha256`
+(`esc`: `\` → `\\`, then `|` → `\|`, #990)
 (issue #361): same-form-number revisions mint disjoint point ids, so a
 different revisions do not collide; same-revision writers still need coordination. The UUID5-of-key
 scheme never changes; the payload `doc_id` stays the printed family key
@@ -626,16 +627,15 @@ thread pool.
   run exits non-zero. Refused, never rewritten, in `run_ingest.py` outside the
   rules-version modules, so no key changes and no re-embed is needed. Rename the
   file to ingest it.
-- **Reserved label delimiter** (issue #878): `|` separates the
-  `source_rev_key` fields, so `walked_source_rev` refuses a document whose resolved
+- **Label delimiter escaping** (#990 item 1, superseding the #878 refusal):
+  `|` separates the `source_rev_key` fields, so each normalized label is
+  escaped first: `\` becomes `\\`, then `|` becomes `\|`. A document whose
   vendor, product or version (path layout or `--vendor/--product/--version`)
-  contains `|`. The inventory record is an `error` with `error_type`
-  `LabelDelimiterRefused` and the fixed message `label_delimiter: ...` (no label,
-  path or text); other documents continue and the run exits non-zero. The
-  retirement check skips such a walked file: it has no key to retire. The labels
-  are refused, never sanitized or escaped: the guard lives in `run_ingest.py`,
-  outside the rules-version modules, so existing keys, chunk ids and the rules
-  version are unchanged. Escaping waits for the next planned rules bump.
+  contains `|` therefore ingests under an unambiguous key
+  (`IBM/zOS|x/2.5` → `ibm|zos\|x|2.5|<sha>`). Before, `('a', 'b|c', 'd')`
+  and `('a', 'b', 'c|d')` shared one key, which is why such documents were
+  refused. Keys whose labels contain neither `\` nor `|` are byte-identical
+  to before. The retirement check compares the walked file's escaped key.
 - **Per-document bounds** (issue #374; `ingest_max_pdf_bytes`,
   `ingest_max_doc_pages`, `ingest_max_doc_chunks`, default 0 = unbounded):
   `_parse_one` refuses an over-bound document with a typed
@@ -758,7 +758,7 @@ thread pool.
 - **Source-revision identity** (issue #361, `ingest/identity.py` +
   revision-keyed pipeline): three identities — printed `doc_id`
   (family/citation key), `source_rev`
-  (`normalize(vendor)|normalize(product)|normalize(version)|sha256`, the
+  (`esc(normalize(vendor))|esc(normalize(product))|esc(normalize(version))|sha256`, the
   destructive key for locks, deletes, completions, and chunk ids),
   committed generation. Planning (dry runs and the publication prewalk
   alike) gates the walked corpus before any parse worker spawns:
