@@ -33,6 +33,7 @@ def problems_for(inventory, root=REPO, release=False, found=None):
     ("GPL-2.0-only WITH Classpath-exception-2.0", "strong-copyleft"),
     ("AGPL-3.0-only", "network-copyleft"),
     ("OFL-1.1", "permissive"),
+    ("MIT-0", "permissive"),
     ("(MIT OR Apache-2.0) AND MPL-2.0", "weak-copyleft"),
     ("AGPL-3.0-only OR LicenseRef-Artifex-Commercial", "election-required"),
     ("MIT AND LicenseRef-Vendor-EULA", "proprietary"),
