@@ -1327,8 +1327,9 @@ No second reasoning call is added to repair citation-only content, and
 transport completion remains independent of content eligibility.
 
 Parsing never raises on model text and cannot stall the event loop (#1009,
-#1010): the `Citations:` header search is confined to single lines (linear in
-reply length), and a bracketed number longer than nine digits is not a prompt
+#1010): the `Citations:` header search is confined to single lines and its `#` run is one optional group,
+so no two whitespace stars are adjacent (128k-character space or tab floods stay
+linear; the same shape in the answer/echo/alias header patterns is fixed alike), and a bracketed number longer than nine digits is not a prompt
 label and resolves to no excerpt instead of reaching `int()`.
 
 The shared refusal predicate also recognizes complete, one-sentence first-person
