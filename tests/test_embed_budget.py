@@ -7,9 +7,15 @@ case the ingest pipeline can produce, so the window cannot silently rot when
 constants change:
 
   - the real chunker (parse_pdf -> strip_chrome -> make_chunks) on a
-    runtime-generated worst-case PDF must emit a body bounded by
-    SECTION_MAX_CHARS + SPLIT_OVERLAP_CHARS (+ separator), and the test
-    asserts the constructed case actually reaches that bound;
+    runtime-generated worst-case split shape (one seeded, sliceable
+    paragraph) must emit a body bounded by SECTION_MAX_CHARS +
+    SPLIT_OVERLAP_CHARS (+ separator), and the test asserts the constructed
+    case actually reaches that bound. That is not a corpus-wide body cap:
+    an oversize atomic unit (a code statement or table row) is emitted
+    whole, and the #1060 G4 L0 stored-content census measured a longest
+    real body of 4,594 chars (31 chunks in 15 documents above 3,902, all
+    pre-existing on main), so the bounded-metadata check below uses that
+    measured body with a margin;
   - build_embed_text over that worst body with a maximal realistic header
     must stay inside a conservative char budget.
 
@@ -55,6 +61,10 @@ CHAR_BUDGET = int(TOKEN_BUDGET * MIN_CHARS_PER_TOKEN)  # 6809
 # SECTION_MAX_CHARS, joined by the paragraph separator.
 SEPARATOR_LEN = 2  # "\n\n"
 MAX_BODY_CHARS = SECTION_MAX_CHARS + SPLIT_OVERLAP_CHARS + SEPARATOR_LEN
+# Longest stored body on a real corpus (#1060 G4 L0 census, counts only),
+# with a 15% margin: atomic units make the split shape above a non-bound.
+OBSERVED_MAX_BODY_CHARS = 4594
+BODY_MARGIN = 1.15
 
 # Maximal REALISTIC header fields (real manual shapes, not adversarial):
 # product + version + doc_id line, a long title, a deep heading path.
@@ -148,12 +158,15 @@ def test_worst_case_embed_text_fits_the_embed_window_budget(tmp_path: Path):
     )
     assert len(with_prefix) <= CHAR_BUDGET
     # Issue #998: title and heading_path are bounded at ingest, so even
-    # adversarial metadata at both bounds plus the max prefix still fits.
+    # adversarial metadata at both bounds plus the max prefix still fits,
+    # over the measured real-corpus body (with margin), not only the split
+    # shape above.
     from mainframe_rag.ingest.chunk import HEADING_PATH_MAX_CHARS
     from mainframe_rag.ingest.ibm_pdf import TITLE_MAX_CHARS
 
+    real_body = "b" * max(len(body), int(OBSERVED_MAX_BODY_CHARS * BODY_MARGIN))
     bounded = build_embed_text(
-        PRODUCT, VERSION, DOC_ID, "t" * TITLE_MAX_CHARS, "h" * HEADING_PATH_MAX_CHARS, body,
+        PRODUCT, VERSION, DOC_ID, "t" * TITLE_MAX_CHARS, "h" * HEADING_PATH_MAX_CHARS, real_body,
         context="x" * Settings(_env_file=None).context_max_chars,
     )
-    assert len(bounded) <= CHAR_BUDGET
+    assert len(bounded) <= CHAR_BUDGET, f"bounded worst case is {len(bounded)} chars"

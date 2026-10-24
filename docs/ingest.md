@@ -133,7 +133,12 @@ PyMuPDF is the only parser. `parse_pdf` returns a frozen, slots `ParsedDoc`.
   `heading_path` is capped at `chunk.HEADING_PATH_MAX_CHARS = 512` by
   dropping the outermost ancestors whole, keeping the leaf (a 5,000-char
   bookmark used to store a 5,000-char `heading_path`). Both bounds plus the
-  maximal context prefix fit the embed window (`tests/test_embed_budget.py`).
+  maximal context prefix fit the embed window (`tests/test_embed_budget.py`):
+  a body is not capped at `SECTION_MAX_CHARS + SPLIT_OVERLAP_CHARS` (an
+  oversize code statement or table row is emitted whole), so the check uses
+  the longest measured real body, 4,594 chars (#1060 G4 L0 census; the worst
+  real embed input measured 4,678 chars), plus 15%: 200 + 512 + 500 + 5,283
+  plus header is about 6,520 chars, under the 6,809-char budget.
   A page label is decoded (#863),
   sanitized and collapsed the same way; one longer than
   `PAGE_LABEL_MAX_CHARS = 32` is absent rather than truncated, since a cut
