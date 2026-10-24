@@ -457,6 +457,45 @@ def test_rehearsal_knobs_reach_helm(tree):
     assert args.index("charts/qdrant-openshift.values.yaml") < args.index(str(vals))
 
 
+@pytest.mark.parametrize("name,value", [
+    ("STORAGE_CLASS", "gp3-csi,containerSecurityContext.readOnlyRootFilesystem=false"),
+    ("STORAGE_CLASS", "GP3"),
+    ("STORAGE_CLASS", "gp3 csi"),
+    ("STORAGE_CLASS", "-gp3"),
+    ("SNAPSHOT_STORAGE_CLASS", "snap,image.repository=evil.example/q"),
+    ("QDRANT_TAG", "v1.19.2,image.repository=evil.example/q"),
+    ("QDRANT_TAG", "v1{a}"),
+    ("QDRANT_STORAGE_SIZE", "1Gi,service.type=LoadBalancer"),
+    ("QDRANT_STORAGE_SIZE", "lots"),
+    ("INTERNAL_REGISTRY", "reg.internal,image.tag=latest"),
+    ("INTERNAL_REGISTRY", "reg internal"),
+    ("QDRANT_RELEASE", "Qdrant,x=1"),
+], ids=lambda v: v[:24] if isinstance(v, str) else v)
+def test_operator_strings_cannot_inject_helm_values(tree, name, value):
+    """#1017: each operator value is exactly one validated Helm value."""
+    env = [(name, value)] + ([("CI_REHEARSAL", "1")] if name == "QDRANT_STORAGE_SIZE" else [])
+    r = _run(tree, *env)
+    assert r.returncode != 0, r.stdout
+    assert f"{name} must be" in r.stderr
+    assert "upgrade" not in _helm_log(tree)
+    assert "template" not in _helm_log(tree)
+
+
+def test_valid_operator_strings_reach_helm_as_literal_strings(tree):
+    r = _run(tree, ("STORAGE_CLASS", "gp3-csi"), ("SNAPSHOT_STORAGE_CLASS", "snap.class-1"),
+             ("QDRANT_TAG", "v1.19.2"), ("QDRANT_STORAGE_SIZE", "1.5Gi"), ("CI_REHEARSAL", "1"),
+             ("INTERNAL_REGISTRY", "reg.internal:5000/team"))
+    assert r.returncode == 0, r.stderr
+    args = _helm_log(tree).splitlines()
+    upgrade = args[args.index("upgrade"):]
+    for assignment in ("image.repository=reg.internal:5000/team/qdrant/qdrant", "image.tag=v1.19.2",
+                       "persistence.storageClassName=gp3-csi",
+                       "snapshotPersistence.storageClassName=snap.class-1",
+                       "persistence.size=1.5Gi", "snapshotPersistence.size=1.5Gi"):
+        assert upgrade[upgrade.index(assignment) - 1] == "--set-string", assignment
+    assert "--set" not in [a for a in upgrade if a.startswith(("image.", "persistence.", "snapshotPersistence."))]
+
+
 # --- #1014: CI-rehearsal values never reach the release path ----------------
 
 def _values(tree, text):
