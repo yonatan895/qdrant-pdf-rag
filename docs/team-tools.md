@@ -69,7 +69,7 @@ token at the IdP (RFC 8693: `grant_type` token-exchange, access-token subject an
 requested types, `audience`, and `client_secret_post` credentials). The secret is
 read from the environment variable named by `client_secret_env`, which is fed from
 a Secret; a missing secret is a configuration error at start-up. The endpoint is
-https and the request never follows a redirect. Any IdP error, redirect, oversized
+https; the request never follows a redirect and always uses `timeout_s`. Any IdP error, redirect, oversized
 (> 64 KiB) or malformed reply, or unexpected `issued_token_type` is a fixed
 `unauthenticated`; upstream text and tokens are never returned or logged. The
 exchanged token then goes through every check above, so the IdP's answer is
@@ -77,8 +77,9 @@ verified, not trusted. Each request costs one exchange; caching exchanged tokens
 is left to the gateways if latency needs it.
 
 **JWKS.** URL mode fetches only `jwks_url` (https, at most 256 KiB, enforced while
-the body streams). Every request passes `follow_redirects=False`, whatever the
-client's default, and a response for any URL other than `jwks_url` is refused.
+the body streams). Every request passes `follow_redirects=False` and
+`timeout=jwks_timeout_s`, whatever the client's defaults, and a response for any
+URL other than `jwks_url` is refused. Deeply nested JSON counts as a failed fetch.
 Token-supplied `jku`/`x5u` are never read. Keys are cached for `jwks_ttl_s` (300 s).
 An unknown `kid` triggers an early refetch at most once per `jwks_min_refetch_s`
 (30 s), so a rotated key is found. Concurrent cold requests share one fetch. A
@@ -88,7 +89,8 @@ source is configured.
 
 **Stale keys (maintainer decision, 2026-10-24).** A *successful* fetch always
 replaces the whole set, so a kid the IdP removed stops verifying at once. A
-*failed* fetch (transport error, non-200, redirect, oversized or malformed body)
+*failed* fetch (transport error or timeout, non-200, redirect, or an oversized, malformed or
+too deeply nested body)
 keeps the last-good set until it is `jwks_max_stale_s` (default 3600 s) older than
 its successful fetch, then verification fails closed. `0` fails closed on the
 first failed refresh; negative, NaN and infinite values are refused. The reason:
