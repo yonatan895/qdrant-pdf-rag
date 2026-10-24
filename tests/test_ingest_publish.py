@@ -489,6 +489,87 @@ def test_swap_rejection_raises_without_applying(monkeypatch):
 
 
 
+class _CreateRejectingFake(PublishFake):
+    """Rejects any alias call that creates a link to `reject_target`, applying
+    nothing from that call (per-call atomicity, like the server). Calls that
+    only delete are applied: a swap split into delete-then-create strands the
+    alias when the create half is refused."""
+
+    reject_target = "g2"
+
+    def update_collection_aliases(self, ops):
+        for op in ops:
+            create = getattr(op, "create_alias", None)
+            if create is not None and create.collection_name == self.reject_target:
+                self.alias_calls.append(list(ops))
+                raise RuntimeError("injected create-half rejection")
+        return super().update_collection_aliases(ops)
+
+
+def test_alias_swap_is_one_atomic_call_old_alias_serves_when_create_is_rejected(monkeypatch):
+    """#1036: delete+create ride one alias call; refusing the create half
+    leaves the previous generation serving, never a missing alias."""
+    from mainframe_rag.ingest.qdrant_io import swap_alias_to
+
+    fake = _CreateRejectingFake()
+    fake.collections["g1"] = []
+    fake.collections["g2"] = []
+    fake.aliases[ALIAS] = "g1"
+    with pytest.raises(RuntimeError, match="create-half rejection"):
+        swap_alias_to(fake, _settings(), "g2", "g1")
+    assert fake.aliases.get(ALIAS) == "g1", "alias must still serve the old generation"
+    assert len(fake.alias_calls) == 1
+    kinds = sorted(
+        "delete" if getattr(op, "delete_alias", None) is not None else "create"
+        for op in fake.alias_calls[0]
+    )
+    assert kinds == ["create", "delete"], "delete and create travel in the same call"
+
+
+def test_failed_safety_snapshot_refuses_cutover_and_keeps_old_alias(monkeypatch):
+    """#1040: a failed pre-cutover safety snapshot is not swallowed; no alias
+    operation is sent and the previous generation keeps serving."""
+    from mainframe_rag.ingest.qdrant_io import swap_alias_to
+
+    fake = PublishFake()
+    fake.collections["g1"] = []
+    fake.collections["g2"] = []
+    fake.aliases[ALIAS] = "g1"
+    fake.fail_snapshot = True
+    with pytest.raises(RuntimeError, match="snapshot failure"):
+        swap_alias_to(fake, _settings(), "g2", "g1")
+    assert fake.aliases[ALIAS] == "g1"
+    assert fake.alias_calls == [], "no alias operation after a failed snapshot"
+
+    fake.fail_snapshot = False
+    summary = swap_alias_to(fake, _settings(), "g2", "g1")
+    assert fake.aliases[ALIAS] == "g2" and summary["safety_snapshot"]
+
+
+@pytest.mark.parametrize("which", [0, 1])
+def test_existing_immutable_build_alias_is_never_rebound(which):
+    """#1041: a build alias (data or completions) that already exists is
+    refused before any write; its binding and the live alias are untouched."""
+    import uuid
+
+    from mainframe_rag.ingest.build import build_aliases
+    from mainframe_rag.ingest.qdrant_io import swap_alias_to
+
+    build_id = str(uuid.uuid4())
+    fake = PublishFake()
+    for name in ("g1", "g2", "elsewhere"):
+        fake.collections[name] = []
+    fake.aliases[ALIAS] = "g1"
+    victim = build_aliases(ALIAS, build_id)[which]
+    fake.aliases[victim] = "elsewhere"
+    with pytest.raises(RuntimeError, match="immutable build alias already exists"):
+        swap_alias_to(fake, _settings(), "g2", "g1", build_id=build_id)
+    assert fake.aliases[victim] == "elsewhere"
+    assert fake.aliases[ALIAS] == "g1"
+    assert fake.alias_calls == []
+    assert fake.snapshots == {}, "refusal precedes the safety snapshot"
+
+
 @pytest.mark.parametrize("case", ["limit", "empty-corpus", "revision-collision"])
 def test_publish_refusals_precede_any_allocation(tmp_path, monkeypatch, case):
     from scripts.make_synthetic_pdf import build as make_pdf
