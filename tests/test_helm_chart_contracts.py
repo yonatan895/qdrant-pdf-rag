@@ -1294,7 +1294,7 @@ def test_openwebui_workload_is_single_replica_restricted_and_holds_no_model_key(
         "USER_PERMISSIONS_FEATURES_IMAGE_GENERATION": "false",
         "USER_PERMISSIONS_CHAT_STT": "false", "USER_PERMISSIONS_CHAT_TTS": "false",
         "USER_PERMISSIONS_CHAT_CALL": "false",
-        "OAUTH_SCOPES": "openid email profile groups",
+        "OAUTH_SCOPES": "openid email profile groups offline_access",
         "CORS_ALLOW_ORIGIN": "https://docs.apps.example.internal",
         "ENABLE_API_KEYS": "true", "USER_PERMISSIONS_FEATURES_API_KEYS": "false",
         "ENABLE_API_KEYS_ENDPOINT_RESTRICTIONS": "true",

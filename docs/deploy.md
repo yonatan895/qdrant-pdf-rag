@@ -1590,7 +1590,9 @@ byte-identical to a release without it (tested).
 
 **What the identity team registers.** One confidential OIDC client on the organisation's IdP
 (AD FS, or Keycloak in front of it):
-- Redirect URI: `https://<OPENWEBUI_HOST>/oauth/oidc/callback`. Scopes: `openid email profile`.
+- Redirect URI: `https://<OPENWEBUI_HOST>/oauth/oidc/callback`. Scopes: `openid email profile groups offline_access` (the IdP must permit `offline_access`, or its
+  equivalent refresh-token scope: without a refresh token Open WebUI deletes the session near
+  token expiry and can fall back to an older session's token, per the Kind trial).
   Client authentication by client secret.
 - The **ID token** must carry `email`, the group claim (`OPENWEBUI_OIDC_GROUP_CLAIM`, default
   `groups`) and the roles claim (`OPENWEBUI_OIDC_ROLES_CLAIM`, default `roles`). Open WebUI

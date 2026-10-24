@@ -81,6 +81,8 @@ def _server(state, key_file, cert_file):
             if auth != f"Bearer {KEY}":
                 return self._reply(401, {"detail": "UPSTREAM-SECRET-TEXT"})
             prefix = "/api/v1/functions/id/"
+            if method == "GET" and self.path == "/api/v1/functions/":
+                return self._reply(200, list(state.functions.values()))
             if method == "GET" and self.path.startswith(prefix):
                 fn = state.functions.get(self.path[len(prefix):])
                 return self._reply(200, fn) if fn else self._reply(404, {"detail": "not found"})
@@ -139,6 +141,15 @@ def test_installer_creates_activates_and_verifies_the_stored_pipe(owui):
     assert _writes(state) == [("POST", "/api/v1/functions/create"),
                               ("POST", "/api/v1/functions/id/mainframe_rag_docs/toggle")]
     assert {auth for _, _, auth in state.requests} == {f"Bearer {KEY}"}
+
+
+def test_installer_refuses_when_any_other_function_exists(owui):
+    """Every Function can read the user's tokens: the Docs Pipe is the only one."""
+    state, client, _ = owui
+    state.functions["community_x"] = {"id": "community_x", "name": "X", "content": "c", "is_active": True}
+    with pytest.raises(provision.ProvisionError, match="a Function other than the repository docs Pipe"):
+        provision.provision(client, PIPE, PIPE_SHA)
+    assert _writes(state) == []
 
 
 def test_installer_repeat_run_converges_without_writes(owui):
@@ -275,7 +286,7 @@ def test_purge_deletes_expired_chats_snapshots_links_and_files_and_reclaims_the_
     data, db, conn = _db(tmp_path)
     inside, outside = _seed(conn, data)
     counts = purge.purge(db, data, 30, NOW)
-    assert counts == {"chats": 2, "snapshots": 2, "linked_rows": 3, "files": 2}
+    assert counts == {"chats": 2, "snapshots": 2, "linked_rows": 3, "files": 2, "orphans": 0}
     ids = {row[0] for row in conn.execute("SELECT id FROM chat")}
     assert ids == {"new-1", "s-new"}
     assert [r[0] for r in conn.execute("SELECT id FROM chat_message")] == ["m3"]
@@ -294,7 +305,7 @@ def test_purge_deletes_expired_chats_snapshots_links_and_files_and_reclaims_the_
     assert conn.execute("SELECT count(*) FROM chat").fetchone() == (3,)
     # A repeat run converges: nothing left to delete.
     assert purge.purge(db, data, 30, NOW) == {"chats": 0, "snapshots": 0, "linked_rows": 0,
-                                              "files": 0}
+                                              "files": 0, "orphans": 0}
 
 
 def test_purge_reclaims_freed_pages_so_the_file_shrinks(tmp_path):
@@ -405,11 +416,90 @@ def test_purge_unlink_failure_is_a_failed_run_and_the_next_run_removes_the_uploa
     assert not inside.exists()
 
 
+def _upload(data, name, text, age_days):
+    import os
+    path = data / "uploads" / name
+    path.write_text(text)
+    stamp = NOW - age_days * DAY
+    os.utime(path, (stamp, stamp))
+    return path
+
+
+def test_purge_removes_the_uploaded_bytes_of_purged_chats_but_keeps_shared_ones(tmp_path):
+    """Trial V1 follow-on: rows alone are not enough, the bytes in uploads/ must
+    go. A file attached to a purged chat is removed even when its own row is
+    recent; a file a surviving chat still references stays."""
+    data, db, conn = _db(tmp_path)
+    old, new = NOW - 31 * DAY, NOW - 1 * DAY
+    conn.execute("INSERT INTO chat VALUES ('gone', 'u1', 't', '{}', ?, ?, NULL)", (old, old))
+    conn.execute("INSERT INTO chat VALUES ('kept', 'u1', 't', '{}', ?, ?, NULL)", (new, new))
+    mine = _upload(data, "attached.txt", CANARY_OLD, 0)
+    shared = _upload(data, "shared.txt", "SHARED", 0)
+    other = _upload(data, "unrelated.txt", "KEEP", 0)
+    conn.executemany("INSERT INTO file VALUES (?, 'u1', ?, ?)", [
+        ("f-mine", str(mine), new), ("f-shared", str(shared), new), ("f-other", str(other), new)])
+    conn.executemany("INSERT INTO chat_file VALUES (?, ?)", [
+        ("gone", "f-mine"), ("gone", "f-shared"), ("kept", "f-shared")])
+    counts = purge.purge(db, data, 30, NOW)
+    assert counts["chats"] == 1 and counts["files"] == 1
+    assert not mine.exists() and shared.exists() and other.exists()
+    assert {r[0] for r in conn.execute("SELECT id FROM file")} == {"f-shared", "f-other"}
+    conn.close()
+    for path in data.rglob("*"):
+        if path.is_file() and path.name not in ("shared.txt", "unrelated.txt"):
+            assert CANARY_OLD.encode() not in path.read_bytes(), path.name
+
+
+def test_purge_removes_orphaned_uploads_after_a_grace_and_never_a_referenced_file(tmp_path):
+    """An upload with no row (left by an older failure, or a bypassed upload)
+    is removed once it is past the grace period; a fresh one (its row may be
+    about to be written), a referenced one and anything outside uploads/ stay."""
+    data, db, conn = _db(tmp_path)
+    kept_row = _upload(data, "referenced.txt", "ROW", 40)
+    stale = _upload(data, "orphan-stale.txt", CANARY_OLD, 3)
+    fresh = _upload(data, "orphan-fresh.txt", "FRESH", 0)
+    nested = data / "uploads" / "sub"
+    nested.mkdir()
+    deep = nested / "orphan-deep.txt"
+    deep.write_text("DEEP")
+    import os
+    os.utime(deep, (NOW - 5 * DAY, NOW - 5 * DAY))
+    outside = data.parent / "outside.txt"
+    outside.write_text("not ours")
+    conn.execute("INSERT INTO file VALUES ('f-ref', 'u1', ?, ?)", (str(kept_row), NOW - DAY))
+    counts = purge.purge(db, data, 30, NOW)
+    assert counts["orphans"] == 2 and counts["files"] == 0
+    assert kept_row.exists() and fresh.exists() and outside.exists()
+    assert not stale.exists() and not deep.exists()
+    # Converged, and the next ordinary operation works.
+    assert purge.purge(db, data, 30, NOW)["orphans"] == 0
+    conn.execute("INSERT INTO chat VALUES ('next', 'u1', 't', '{}', ?, ?, NULL)", (NOW, NOW))
+
+
+def test_purge_orphan_unlink_failure_is_a_failed_run_retried_next_time(tmp_path, monkeypatch):
+    data, db, _conn = _db(tmp_path)
+    stale = _upload(data, "orphan-stale.txt", CANARY_OLD, 3)
+    real_unlink = Path.unlink
+
+    def failing(self, *args, **kwargs):
+        if self.name == "orphan-stale.txt":
+            raise PermissionError("read-only")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", failing)
+    status: dict = {}
+    assert purge.run_once(db, data, 30, status, NOW) is False
+    assert status["last_error"] == "unlink"
+    assert stale.exists()
+    monkeypatch.setattr(Path, "unlink", real_unlink)
+    assert purge.run_once(db, data, 30, status, NOW + 1) is True and not stale.exists()
+
+
 def test_purge_before_open_webui_created_its_database_is_an_empty_success(tmp_path):
     data = tmp_path / "data"
     data.mkdir()
     assert purge.purge(data / "webui.db", data, 30, NOW) == {
-        "chats": 0, "snapshots": 0, "linked_rows": 0, "files": 0}
+        "chats": 0, "snapshots": 0, "linked_rows": 0, "files": 0, "orphans": 0}
     assert not (data / "webui.db").exists()
 
 
@@ -432,7 +522,7 @@ def test_purge_runs_are_counted_and_failures_never_report_success(tmp_path, caps
     assert recorded["last_success"] == NOW + 2 and recorded["last_counts"]["chats"] == 1
     out = capsys.readouterr().out
     assert out == ("chat purge ok: window 30 days, chats 1, snapshots 0, linked rows 0, "
-                   "files 0\n")
+                   "files 0, orphan uploads 0\n")
 
 
 def test_purge_cli_once_exit_codes_and_window_bounds(tmp_path):
