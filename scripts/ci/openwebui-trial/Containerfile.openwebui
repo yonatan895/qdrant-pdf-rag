@@ -8,7 +8,8 @@
 # (chgrp 0, group permissions = owner permissions, setgid directories); the
 # upstream bytes and the "Open WebUI" branding are unchanged (LICENSE clause 4,
 # docs/licensing.md). Build on the connected host only; never in the air gap:
-#   docker build -f images/Containerfile.openwebui -t mainframe-rag/openwebui-trial:0.12.3-slim images
+#   docker build -f scripts/ci/openwebui-trial/Containerfile.openwebui \
+#     -t mainframe-rag/openwebui-trial:0.12.3-slim scripts/ci/openwebui-trial
 #
 # Base: ghcr.io/open-webui/open-webui:v0.12.3-slim, image index digest below
 # (amd64 manifest sha256:912c133d2dcecb8d74662f9be64b1f00f303a0d8c0836cbb30fd156f65652f5f;

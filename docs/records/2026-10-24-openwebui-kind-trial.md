@@ -17,7 +17,7 @@ browser render of the chips, and the licence inventory record. Next commands are
 | Item | Value |
 |---|---|
 | Open WebUI base | `ghcr.io/open-webui/open-webui:v0.12.3-slim`, index `sha256:5adfb0355bbe4a5860c0ba9482cc0b40f573de3749a21a64cf4789391a14fffc`, amd64 `sha256:912c133d…52f5f`, revision `91ea4e34` (tag v0.12.3), created 2026-10-16 |
-| Derived image | `images/Containerfile.openwebui`: one ownership/permission layer (126 MB), image id `sha256:bf4e04373ceab05bfff212a51f195d8afd3c0e8ecdb55b1a7d9ce528df0c002f` (local build, not pushed) |
+| Derived image | `scripts/ci/openwebui-trial/Containerfile.openwebui`: one ownership/permission layer (126 MB), image id `sha256:bf4e04373ceab05bfff212a51f195d8afd3c0e8ecdb55b1a7d9ce528df0c002f` (local build, not pushed). Kept out of `images/` so the production Containerfile base-pin check never sees a trial image |
 | Agent image | `images/Containerfile.agent` at `fcc843e`, fresh runtime wheelhouse; id `sha256:f8e3b0ff8a1d53600ef8b6d2fa271baf80ca2a37c2701cf228ede3c3b64f5ea9` |
 | Docs Pipe | `integrations/openwebui/docs_pipe.py` at `feat/1072-docs-pipe` `8afdd40` (draft #1081), sha256 `f9af2e9e…66e6` |
 | Test IdP | Dex v2.46.0-distroless (index `sha256:8ba378a1…3589`, amd64 `sha256:a9492ee2…3912`, Apache-2.0, 17 days old). Chosen over Keycloak: about 30 MB of memory against roughly 700 MB on a shared 16 GB host, a single static config, and static users with a `groups` claim since v2.45. Test-only; never shipped |
