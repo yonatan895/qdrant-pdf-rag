@@ -55,7 +55,7 @@ STATUSES = ("declared", "pending-owner-decision", "approved", "excluded")
 SPDX_BASES = ("declared-expression", "normalized-license-field", "normalized-classifier",
               "license-file-text", "upstream-project-license", "not-verified")
 
-PERMISSIVE = {"MIT", "MIT-CMU", "BSD-2-Clause", "BSD-3-Clause", "0BSD", "Apache-2.0", "ISC",
+PERMISSIVE = {"MIT", "MIT-0", "MIT-CMU", "BSD-2-Clause", "BSD-3-Clause", "0BSD", "Apache-2.0", "ISC",
               "PSF-2.0", "Zlib", "CC0-1.0", "Unlicense", "HPND", "BSL-1.0", "OFL-1.1"}
 WEAK = {"MPL-2.0", "LGPL-2.1-only", "LGPL-2.1-or-later", "LGPL-3.0-only", "LGPL-3.0-or-later"}
 STRONG = {"GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later"}
