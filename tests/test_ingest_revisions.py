@@ -318,6 +318,35 @@ def test_refresh_without_lineage_adds_and_leaves_committed(monkeypatch):
     assert _complete(settings, fake, "reference", sha_a2, rev_a2)
 
 
+def test_inherited_committed_sibling_is_left_alone(monkeypatch):
+    """Issue #1004 (S2-4): staging is cloned from live, so a committed sibling
+    revision's marker targets the live physical. Its points still verify in
+    staging; without lineage it is coexistence, never residue to sweep."""
+    live = _settings(qdrant_collection="gen_live")
+    staging = _settings(qdrant_collection="gen_staging")
+    fake = RevisionFake()
+    _upsert_one(monkeypatch, fake, _parsed(sha=SHA_A1, vendor="vendor-a",
+                product="product-x", version="1.0"),
+                _chunks(rev=REV_A, tag="A-v1"), live)
+    # The clone: every point and marker copied verbatim into staging.
+    fake._points["gen_staging"] = list(fake._points["gen_live"])
+    fake._points[completion_collection_name(staging)] = list(
+        fake._points[completion_collection_name(live)]
+    )
+    before = {str(p.id): dict(p.payload or {}) for p in fake._points["gen_staging"]}
+    assert is_revision_committed(fake, staging, "reference", REV_A)
+    status, _ = _upsert_one(
+        monkeypatch, fake,
+        _parsed(sha=SHA_B1, vendor="vendor-b", product="product-y", version="2.0"),
+        _chunks(rev=REV_B, tag="B-v1"), staging,
+    )
+    assert status == "upserted"
+    assert fake.main_revs("gen_staging", "reference") == {REV_A, REV_B}
+    kept = {str(p.id): dict(p.payload or {}) for p in fake._points["gen_staging"]
+            if (p.payload or {}).get("source_rev") == REV_A}
+    assert kept == before, "the committed sibling must be byte-identical"
+
+
 def test_crash_residue_without_completion_is_swept(monkeypatch):
     """Points without a marker are residue, never a revision: a later
     refresh deletes them without lineage."""

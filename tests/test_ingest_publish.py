@@ -2029,6 +2029,69 @@ def test_conflict_preflight_same_bytes_changed_label_replaces_old_revision(tmp_p
     assert not any((p.payload or {}).get("source_rev") == rev_3_1 for p in fake.collections[live_2])
 
 
+def _revisions_in(fake: PublishFake, physical: str) -> set:
+    return {(p.payload or {}).get("source_rev") for p in fake.collections.get(physical, [])}
+
+
+def _marker_revisions_in(fake: PublishFake, physical: str) -> set:
+    return {
+        (p.payload or {}).get("source_rev")
+        for p in fake.collections.get(f"{physical}__completions", [])
+        if (p.payload or {}).get("doc_id")
+    }
+
+
+def test_duplicate_relabel_never_drops_a_committed_sibling_revision(tmp_path, monkeypatch):
+    """Issue #1004 (S2-4): a byte-identical copy under another layout path wins
+    the duplicate election, so the published revision's own file is no longer
+    ingested. Its committed points must not be swept from staging as residue
+    (the inherited marker certifies them): publication refuses with the
+    documented residue message, live keeps serving the old revision, and only
+    an explicit --retire-doc removes it, leaving no orphaned marker."""
+    import shutil
+
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.inventory import load_inventory
+    from mainframe_rag.ingest.publish import publish_state_path
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    progress = tmp_path / "inv.jsonl"
+    old_path = corpus / "ibm" / "zos" / "2.5" / "SA22-0000-00_alpha.pdf"
+    _build_doc_with_id(old_path.parent, old_path.stem, DOC_A)
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    live_1 = fake.aliases[ALIAS]
+    rev_old = load_inventory(progress)[str(old_path)].source_rev
+    assert rev_old and "|2.5|" in rev_old
+    points_before = [(p.id, dict(p.payload or {})) for p in fake.collections[live_1]]
+
+    new_path = corpus / "0ibm" / "zos" / "3.0" / "SA22-0000-00_alpha.pdf"
+    new_path.parent.mkdir(parents=True)
+    shutil.copyfile(old_path, new_path)
+    with pytest.raises(RuntimeError, match="unmarked residue"):
+        _run_main(monkeypatch, corpus, progress)
+    assert fake.aliases[ALIAS] == live_1, "a refusal moves no alias"
+    assert [(p.id, dict(p.payload or {})) for p in fake.collections[live_1]] == points_before
+    rev_new = load_inventory(progress)[str(new_path)].source_rev
+    assert rev_new and rev_new != rev_old
+    staging = next(g for g in _gen_collections(fake) if g != live_1)
+    assert _revisions_in(fake, staging) == {rev_old, rev_new}, "sibling kept, never swept"
+
+    # Documented path through: abandon the refused build, retire explicitly.
+    publish_state_path(progress, ALIAS).unlink()
+    assert _run_main(monkeypatch, corpus, progress, "--retire-doc", f"{DOC_A}@{rev_old}") == 0
+    live_2 = fake.aliases[ALIAS]
+    assert live_2 not in (live_1, staging)
+    assert _revisions_in(fake, live_2) == {rev_new}
+    assert _marker_revisions_in(fake, live_2) == {rev_new}, "no orphaned marker"
+    assert _revisions_in(fake, live_1) == {rev_old}, "superseded generation retained"
+    # The next ordinary run is steady state.
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    assert fake.aliases[ALIAS] == live_2
+
+
 def test_stale_completion_markers_revision_scoped_exclusion():
     """R-REV: stale_completion_markers excuses only the retired revision,
     not retained sibling revisions of the same document."""
