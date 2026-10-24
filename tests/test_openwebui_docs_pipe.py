@@ -491,7 +491,7 @@ def test_url_looking_citations_never_become_links(citation: str):
     (source,) = _sources(events)
     names = [source["source"]["name"], source["source"]["id"],
              *(m[k] for m in source["metadata"] for k in ("source", "name", "doc_id"))]
-    assert all(n.startswith("Citation: ") or n.startswith("[1] Citation: ") for n in names), names
+    assert all(n.startswith(("Citation: ", "[1] Citation: ")) for n in names), names
     assert source["source"]["name"] == "Citation: " + citation
     assert source["document"] == [EXCERPT_A]
 

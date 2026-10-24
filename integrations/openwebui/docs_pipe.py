@@ -18,6 +18,7 @@ description: The documentation corpus through the agent's /v1/chat, with its val
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
@@ -29,6 +30,9 @@ CHAT_PATH = "/v1/chat"
 ERROR_BODY_MAX_BYTES = 65536
 
 Emitter = Callable[[dict[str, Any]], Awaitable[Any]]
+# Anything Open WebUI could render as a link: a scheme (http:, javascript:,
+# data:...), a bare `http` prefix, a protocol-relative `//` or `www.`.
+_URL_LIKE = re.compile(r"\s*(?:http|www\.|//|[a-z][a-z0-9+.\-]*:)", re.IGNORECASE)
 
 # Fixed user-visible texts. The agent's error `message` and any upstream body
 # are never shown: only the stable `code` selects one of these.
@@ -116,25 +120,45 @@ def _is_task(task: object, metadata: object, body: dict[str, Any]) -> bool:
     ))
 
 
+def _text(content: object) -> str:
+    """Plain text of a message: a string, or the text parts of an Open WebUI
+    content list joined by newlines (image and file parts dropped)."""
+    if isinstance(content, str):
+        return content if content.strip() else ""
+    if not isinstance(content, list):
+        return ""
+    parts = [p.get("text") for p in content if isinstance(p, dict) and p.get("type") == "text"]
+    joined = "\n".join(t for t in parts if isinstance(t, str) and t.strip())
+    return joined if joined.strip() else ""
+
+
 def build_request(messages: object, user_valves: object) -> dict[str, Any] | None:
-    """The agent ChatRequest body: user/assistant turns with non-blank string
-    content (system prompts, file and image parts, tool turns and every other
-    Open WebUI field are dropped), `stream: true`, and product/version only
-    when the user set them. None when no user turn is left to send."""
-    turns: list[dict[str, str]] = []
-    for message in messages if isinstance(messages, list) else []:
-        if not isinstance(message, dict):
-            continue
-        role, content = message.get("role"), message.get("content")
-        if role in ("user", "assistant") and isinstance(content, str) and content.strip():
-            turns.append({"role": role, "content": content})
-    if not any(t["role"] == "user" for t in turns):
+    """The agent ChatRequest body: user/assistant turns as plain text
+    (system prompts, image and file parts, tool turns and every other Open
+    WebUI field are dropped), `stream: true`, and product/version only when
+    the user set them. The last message is the question: None, so no agent
+    call, unless it is a user turn with text. An earlier turn is never asked
+    in its place."""
+    items = [m for m in messages if isinstance(m, dict)] if isinstance(messages, list) else []
+    if not items or items[-1].get("role") != "user" or not _text(items[-1].get("content")):
         return None
+    turns: list[dict[str, str]] = []
+    for message in items:
+        role, text = message.get("role"), _text(message.get("content"))
+        if role in ("user", "assistant") and text:
+            turns.append({"role": role, "content": text})
     body: dict[str, Any] = {"messages": turns, "stream": True}
     for name in ("product", "version"):
         if value := _valve(user_valves, name):
             body[name] = value
     return body
+
+
+def _plain(value: object) -> object:
+    """A display name Open WebUI cannot render as a link."""
+    if isinstance(value, str) and _URL_LIKE.match(value):
+        return "Citation: " + value
+    return value
 
 
 def _source_events(final: dict[str, Any]) -> list[dict[str, Any]]:
@@ -152,14 +176,15 @@ def _source_events(final: dict[str, Any]) -> list[dict[str, Any]]:
         matches = [e for e in supplied if e.get("citation") == citation]
         documents = [str(e.get("text", "")) for e in matches] or [NO_EXCERPT]
         metadata: list[dict[str, Any]] = [
-            {"source": citation, "name": f"[{e.get('index')}] {citation}",
-             "doc_id": e.get("doc_id"), "page_label": e.get("page_label"),
+            {"source": _plain(citation), "name": f"[{e.get('index')}] {_plain(citation)}",
+             "doc_id": _plain(e.get("doc_id")), "page_label": e.get("page_label"),
              "product": e.get("product"), "version": e.get("version"), "label": label}
             for e in matches
-        ] or [{"source": citation, "name": citation, "label": label}]
+        ] or [{"source": _plain(citation), "name": _plain(citation), "label": label}]
         doc_id = matches[0].get("doc_id") if matches else None
         events.append({"type": "source", "data": {
-            "source": {"name": citation, "id": doc_id if isinstance(doc_id, str) else citation},
+            "source": {"name": _plain(citation),
+                       "id": _plain(doc_id if isinstance(doc_id, str) else citation)},
             "document": documents,
             "metadata": metadata,
         }})
@@ -221,6 +246,16 @@ async def _deltas(lines: AsyncIterator[str], final: dict[str, Any]) -> AsyncIter
     raise _Failure(TRUNCATED, incomplete=True)
 
 
+async def _chunks(texts: AsyncIterator[str]) -> AsyncIterator[dict[str, Any]]:
+    """Each text as an OpenAI chunk dict. Open WebUI forwards a yielded string
+    that starts with `data:` as a raw SSE frame and emits its `event`, so a
+    model delta yielded as a string could forge a banner, source or replace
+    event; inside a dict it is only ever JSON string content."""
+    async for text in texts:
+        yield {"object": "chat.completion.chunk",
+               "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": None}]}
+
+
 class Pipe:
     class Valves(BaseModel):
         AGENT_URL: str = Field(
@@ -248,7 +283,7 @@ class Pipe:
         __event_emitter__: Emitter | None = None,
         __task__: str | None = None,
         __metadata__: dict[str, Any] | None = None,
-    ) -> str | AsyncIterator[str]:
+    ) -> str | AsyncIterator[dict[str, Any]]:
         if _is_task(__task__, __metadata__, body):
             # Title/tag/follow-up/summary generation is not a docs question:
             # a fixed short text, never an agent call (it would retrieve,
@@ -258,7 +293,10 @@ class Pipe:
         request = build_request(body.get("messages"), user_valves)
         if request is None:
             return NO_TEXT_TURN
-        return self._answer(request, __event_emitter__)
+        answer = self._answer(request, __event_emitter__)
+        if body.get("stream") is True:
+            return _chunks(answer)
+        return "".join([text async for text in answer])
 
     async def _answer(self, request: dict[str, Any], emit: Emitter | None) -> AsyncIterator[str]:
         async def event(payload: dict[str, Any]) -> None:
