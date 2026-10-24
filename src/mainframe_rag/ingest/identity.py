@@ -128,13 +128,18 @@ class RevisionCollisionError(RuntimeError):
         ]
         for collision in collisions:
             members = ", ".join(f"{rel}@{sha16}" for rel, sha16 in collision.members)
-            lines.append(
-                f"  doc_id {collision.doc_id!r}: {members}. If these are distinct "
-                "revisions, give them distinct --vendor/--product/--version labels "
-                "or ingest them as separate corpora (distinct revisions coexist "
-                "after the #361 identity migration); if they are duplicate copies, "
-                "keep one input."
-            )
+            lines.append(f"  doc_id {collision.doc_id!r}: {members}.")
+        # Issue #1007: fixed text naming only remediations that work. CLI
+        # labels are run-wide, and under alias publication a run that walks
+        # one volume refuses the other as residue.
+        lines.append(
+            "Distinct revisions or volumes that share one doc_id cannot be ingested "
+            "into one corpus, and --vendor/--product/--version labels apply to the "
+            "whole run, so they cannot separate them. Rename the files so each "
+            "filename stem starts with a distinct form number (a filename form "
+            "number takes precedence over the text), or ingest each into its own "
+            "corpus and alias. If they are duplicate copies, keep one input."
+        )
         super().__init__("\n".join(lines))
 
 

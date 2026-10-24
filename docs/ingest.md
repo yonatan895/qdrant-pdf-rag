@@ -721,6 +721,15 @@ thread pool.
   same winner with no stored state), and distinct revisions claiming one
   `doc_id` abort fail-closed (`RevisionCollisionError`: doc id +
   corpus-relative paths + sha16s, never manual text or absolute paths).
+  Same-`doc_id` volumes or revisions are unsupported in one corpus (issue
+  #1007, maintainer decision C), with or without distinct path-layout
+  versions. The refusal's fixed remediation is the one that works: rename
+  the files so each filename stem starts with a distinct form number (the
+  filename form number wins over the text), or ingest each into its own
+  corpus and alias. `--vendor/--product/--version` labels apply to the whole
+  run and cannot separate two files of one walk, and splitting one corpus
+  across runs fails under alias publication (the run that walks one volume
+  refuses the other as residue). Duplicate copies: keep one input.
   Unreadable files map to no key — prescan validates identity, never file
   health (the worker still error-records them per file), so a corrupt twin
   neither causes nor hides a collision. Prescan resolves through the same
