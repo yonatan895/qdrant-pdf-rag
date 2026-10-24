@@ -112,6 +112,9 @@ def _assert_root_join(events, root, request_id):
         ("admission", "console", True),
         ("retrieval", "search", False),
         ("retrieval", "chat", False),
+        # The console retrieves before the stream opens, as /v1/chat does (#985).
+        ("retrieval", "console", True),
+        ("retrieval", "console", False),
     ],
 )
 def test_request_cancellation_ends_root_before_headers(
@@ -157,42 +160,6 @@ def test_request_cancellation_ends_root_before_headers(
     assert points[0].attributes["outcome"] == "client_disconnect"
     assert "verification_state" not in points[0].attributes
     assert sum(point.count for point in _points(reader, "rag.request.duration")) == 1
-
-
-def test_console_stream_cancel_during_postheader_retrieval(terminal_telemetry, monkeypatch):
-    from fastapi import Request
-
-    _client, exporter, reader, events = terminal_telemetry
-
-    async def run():
-        entered = asyncio.Event()
-        cleaned = asyncio.Event()
-
-        async def retrieve(*args, **kwargs):
-            entered.set()
-            try:
-                await asyncio.Event().wait()
-            finally:
-                cleaned.set()
-
-        monkeypatch.setattr(app_mod, "retrieve_search", retrieve)
-        response = await _direct_turn("console", Request(_scope("/ui/chat/stream")), stream=True)
-        assert not exporter.get_finished_spans()
-        task = asyncio.create_task(response.body_iterator.__anext__())
-        await asyncio.wait_for(entered.wait(), 2)
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await asyncio.wait_for(task, 2)
-        assert cleaned.is_set()
-
-    asyncio.run(run())
-    roots = [span for span in exporter.get_finished_spans() if span.kind == trace.SpanKind.SERVER]
-    assert len(roots) == 1
-    _assert_root_join(events, roots[0], "disconnect-test")
-    points = _points(reader, "rag.requests.total")
-    assert sum(point.value for point in points) == 1
-    assert points[0].attributes["outcome"] == "client_disconnect"
-    assert points[0].attributes["verification_state"] == "generation_incomplete"
 
 
 @pytest.mark.parametrize(
@@ -346,7 +313,8 @@ def test_retrieval_failure_terminal_logs_join_recording_root(
             path, json={**payload, "stream": stream} if path != "/ui/chat/stream" else payload
         )
     )
-    assert response.status_code == (200 if path == "/ui/chat/stream" else 502)
+    # Every route, the console stream included (#985), fails before headers.
+    assert response.status_code == 502
     roots = [span for span in exporter.get_finished_spans() if span.kind == trace.SpanKind.SERVER]
     assert len(roots) == 1
     _assert_root_join(events, roots[0], roots[0].attributes["http.request_id"])
@@ -482,7 +450,7 @@ def test_condense_failure_terminal_log_joins_root(terminal_telemetry, monkeypatc
     monkeypatch.setattr(app_mod, "resolve_search_query", fail_condense)
     monkeypatch.setattr(answer_core_mod, "resolve_search_query", fail_condense)
     response = _post_terminal(client, path, stream)
-    assert response.status_code == (200 if path == "/ui/chat/stream" else 502)
+    assert response.status_code == 502
     roots = [span for span in exporter.get_finished_spans() if span.kind == trace.SpanKind.SERVER]
     assert len(roots) == 1
     _assert_root_join(events, roots[0], roots[0].attributes["http.request_id"])
@@ -506,7 +474,7 @@ def test_nonrecording_failures_never_invent_correlation(
         app_mod, "retrieve_search", MagicSearch(exc=RuntimeError("synthetic failure"))
     )
     response = _post_terminal(client, path, stream)
-    assert response.status_code == (200 if path == "/ui/chat/stream" else 502)
+    assert response.status_code == 502
     assert events and not exporter.get_finished_spans()
     for event in events:
         assert "trace_id" not in event and "span_id" not in event

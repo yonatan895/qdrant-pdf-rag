@@ -167,6 +167,9 @@ as `chatcmpl-<request_id>`). The ops endpoints carry none: `/healthz`,
 - `GET /ui` — operator console (ADR-0004), a thin adapter over the same core:
   Jinja2 shell + HTMX form/fragment + SSE stream (`/ui/chat`, `/ui/chat/stream`,
   `/ui/healthz`, `/ui/static/*`), browser-only `localStorage` state, strict CSP.
+  Every refusal and retrieval fault before generation is the `/v1/chat`
+  envelope on `/ui/chat/stream`; `/ui/chat` renders the fixed banner instead
+  (422 for `prompt_budget_exceeded` and `unsupported_reasoning_effort`, else 502).
   Every `/ui` path serves the stable `404 not_found` envelope while
   `UI_ENABLED` is false; the oauth-proxy sidecar authenticates external ingress
   when `AGENT_ROUTE=true` (ADR-0004 §3). The production chart sets
@@ -212,7 +215,10 @@ search), classifies complexity, short-circuits empty hits (§3), builds the
 prompt, and either chats once (JSON) or streams (SSE). `chat` runs the same
 assertion and retrieval (hardcoded `limit=8` for both endpoints), resolving
 the follow-up search query through `resolve_search_query` first so the
-condense gate cannot be honored on one path only. The SSE generators hold
+condense gate cannot be honored on one path only. Both console routes run
+this chat path through `prepare_chat_core` (issue #985): the form maps core
+faults like chat JSON, the stream shares the answer/chat SSE loop, and a fault
+records the same outcome and log level on every chat route. The SSE generators hold
 the request root for each iterator operation. A single lifetime owner starts
 before admission and ends buffered work in `finally`; a streaming response
 transfers that ownership to the response. Exhaustion followed by the closing
@@ -468,11 +474,11 @@ status (`/ui` failures render HTML banners instead, §1):
 
 | Code | Status | Trigger |
 |---|---|---|
-| `upstream_error` / `retrieval failed` | 502 | Any retrieval fault, identical on both endpoints |
+| `upstream_error` / `retrieval failed` | 502 | Any retrieval or condensation fault, identical on search, answer, chat and console (#985) |
 | `upstream_error` / `answer failed` | 502 | LLM call or response-parse fault |
-| `model_timeout` / `model response timed out` | 504 | The reasoning leg spent its `answer_timeout_s` wait (connect, write, read or pool) on `/v1/answer` or `/v1/chat`; on an already-open stream it is the terminal `error` event (no `final`, `generation_incomplete`) with this code and message instead of `upstream_error` / `stream failed` (issue #868). A model that *finished* with `length` is never this error: it is a `generation_incomplete` answer |
+| `model_timeout` / `model response timed out` | 504 | The reasoning leg spent its `answer_timeout_s` wait (connect, write, read or pool) on `/v1/answer`, `/v1/chat` or the console; on an already-open stream it is the terminal `error` event (no `final`, `generation_incomplete`) with this code and message instead of `upstream_error` / `stream failed` (issue #868). A model that *finished* with `length` is never this error: it is a `generation_incomplete` answer |
 | `internal` / `internal error` | 500 | Prompt-build failure and any unhandled exception |
-| `not_configured` / `reasoning model…` | 503 | `/v1/answer` or `/v1/chat` without `LLM_BASE_URL` + reasoning model (pre-retrieval) |
+| `not_configured` / `reasoning model…` | 503 | `/v1/answer`, `/v1/chat` or the console without `LLM_BASE_URL` + reasoning model (pre-retrieval) |
 | `qdrant_unready` / `qdrant…` | 503 | `/healthz` Qdrant exception |
 | `representation_unavailable` / `the retrieval generation is not available` | 503 | Serving gate: resolved generation is `empty` or not validated compatible (drift/legacy/pending/unknown); `/ui/chat` renders its banner while `/ui/chat/stream` returns this envelope |
 | `invalid_evidence_reference` / `the evidence reference is not valid` | 400 | `GET /v1/evidence/{reference}`: malformed, non-canonical or unsupported-version reference (no storage contact) |

@@ -294,17 +294,9 @@ def test_attachment_failures_hide_canaries(
             payload.update({"query": CANARY_QUERY} if endpoint == "answer" else {"messages": messages})
             response = connection.post(path, headers=headers, json=payload)
     assert calls == [failure]
-    if path == "/ui/chat/stream":
-        assert response.status_code == 200
-        assert response.headers["content-type"].startswith("text/event-stream")
-        frames = response.text.strip().split("\n")
-        assert frames[0] == "event: error"
-        assert json.loads(frames[1].removeprefix("data: ")) == {
-            "type": "error", "code": "upstream_error", "message": "stream failed",
-            "verification_state": "generation_incomplete",
-        }
-        assert "event: final" not in response.text
-    elif path == "/ui/chat":
+    # The console retrieves before its stream opens, as /v1/chat does (#985):
+    # the failure is the same JSON envelope, never a post-header error frame.
+    if path == "/ui/chat":
         assert response.status_code == 502
         assert "The reasoning agent could not complete this request." in response.text
     else:
@@ -326,7 +318,7 @@ def test_attachment_failures_hide_canaries(
     roots = [span for span in spans if span.name == root_name]
     assert len(roots) == 1
     root = roots[0]
-    expected_type = "RetrievalError" if endpoint == "console" and not condensation else "RuntimeError"
+    expected_type = "RuntimeError"
     assert root.status.status_code == trace.StatusCode.ERROR
     assert root.status.description == expected_type
     assert [dict(event.attributes) for event in root.events if event.name == "exception"] == [
@@ -336,8 +328,7 @@ def test_attachment_failures_hide_canaries(
     assert root.context.trace_id == 0x1234567890ABCDEF1234567890ABCDEF
     assert root.parent.span_id == 0xABCDEF1234567890
     assert len(root.attributes["http.request_id"]) == 12
-    if endpoint != "console":
-        assert root.attributes["http.request_id"] in logs_blob
+    assert root.attributes["http.request_id"] in logs_blob
     if condensation:
         children = [span for span in spans if span.name == "chat.condense"]
         assert len(children) == 1
@@ -346,7 +337,6 @@ def test_attachment_failures_hide_canaries(
     assert len(counts) == 1 and counts[0].value == 1
     assert dict(counts[0].attributes) == {
         "endpoint": endpoint, "outcome": "upstream_error", "query_class": "unknown",
-        **({"verification_state": "generation_incomplete"} if path == "/ui/chat/stream" else {}),
     }
     assert sum(point.count for point in _points(metric_reader, "rag.request.duration")) == 1
 
