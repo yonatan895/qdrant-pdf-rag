@@ -373,6 +373,22 @@ def test_frame_escape_is_linear_in_padding():
         assert escaped.count("&lt;") == 1 and escaped.endswith("/retrieved-excerpt>")
 
 
+@pytest.mark.parametrize("unit", ["<", "<\u200b"], ids=["brackets", "brackets-zero-width"])
+def test_frame_escape_is_linear_in_bracket_count(unit):
+    """Many candidate brackets (a hostile chunk of `<`) are each checked
+    without copying the rest of the text: 400 000 candidates stay well under
+    a second (a per-candidate tail copy took over 1 s, and 5 s with
+    zero-width padding)."""
+    import time
+
+    from mainframe_rag.agent.answer import _escape_excerpt
+
+    text = unit * 400_000
+    start = time.perf_counter()
+    assert _escape_excerpt(text) == text
+    assert time.perf_counter() - start < 1.0
+
+
 @pytest.mark.parametrize("chat", [False, True])
 @pytest.mark.parametrize("order", ["retrieval", "stable_cache"])
 def test_corpus_metadata_never_reaches_the_instruction_region(order, chat):
