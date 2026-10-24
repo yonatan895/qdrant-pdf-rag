@@ -487,6 +487,24 @@ def test_swap_rejection_raises_without_applying(monkeypatch):
     assert fake.aliases[ALIAS] == "g1"
 
 
+def test_swap_refuses_when_the_alias_left_its_predecessor(monkeypatch):
+    """Issue #1019 (S2-19): the swap re-reads the alias right before the
+    atomic call and refuses when it no longer names the predecessor the
+    cutover was planned against; no alias operation is sent."""
+    from mainframe_rag.ingest.qdrant_io import swap_alias_to
+
+    fake = PublishFake()
+    for name in ("g1", "g2", "g3"):
+        fake.collections[name] = []
+    fake.aliases[ALIAS] = "g3"
+    with pytest.raises(RuntimeError, match="moved during publication"):
+        swap_alias_to(fake, _settings(), "g2", "g1")
+    with pytest.raises(RuntimeError, match="moved during publication"):
+        swap_alias_to(fake, _settings(), "g2", None)
+    assert fake.aliases[ALIAS] == "g3"
+    assert fake.alias_calls == []
+
+
 
 
 @pytest.mark.parametrize("case", ["limit", "empty-corpus", "revision-collision"])
@@ -1481,6 +1499,77 @@ def test_overtaken_publisher_refuses_stale_cutover(tmp_path, monkeypatch):
     assert len(errors) == 1
     assert "moved during publication" in str(errors[0])
     assert fake.aliases[ALIAS] == "G2manual"
+
+
+def test_stale_publisher_cannot_revert_a_newer_publication(tmp_path, monkeypatch):
+    """Issue #1019 (S2-19): publisher A (its own progress directory, the
+    unsupported lock-bypass setup) passes its pre-swap live recheck, then
+    pauses in the catalog/seal phase while publisher B publishes a newer
+    three-document generation. A must refuse at the swap instead of switching
+    the alias back to its two-document candidate; B's publication keeps
+    serving."""
+    import shutil
+    import threading
+
+    from mainframe_rag.ingest import run_ingest
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus_a = tmp_path / "corpus_a"
+    corpus_a.mkdir()
+    _build_doc_with_id(corpus_a, "doc_a", DOC_A)
+    progress_a = tmp_path / "a" / "inv.jsonl"
+    progress_a.parent.mkdir()
+    assert _run_main(monkeypatch, corpus_a, progress_a) == 0
+    live_before = fake.aliases[ALIAS]
+    _build_doc_with_id(corpus_a, "doc_b", DOC_B)
+    corpus_b = tmp_path / "corpus_b"
+    corpus_b.mkdir()
+    for name in ("doc_a.pdf", "doc_b.pdf"):  # B walks the same bytes plus one more
+        shutil.copyfile(corpus_a / name, corpus_b / name)
+    _build_doc_with_id(corpus_b, "doc_c", "SA22-0000-02")
+    progress_b = tmp_path / "b" / "inv.jsonl"
+    progress_b.parent.mkdir()
+
+    paused = threading.Event()
+    release = threading.Event()
+    real_catalog = run_ingest.build_source_catalog
+    calls: list = []
+
+    def pausing_catalog(*args, **kwargs):
+        calls.append(threading.current_thread().name)
+        if len(calls) == 1:  # publisher A only: after its recheck, before the swap
+            paused.set()
+            assert release.wait(timeout=60)
+        return real_catalog(*args, **kwargs)
+
+    monkeypatch.setattr(run_ingest, "build_source_catalog", pausing_catalog)
+    errors: list = []
+
+    def run_publisher_a():
+        try:
+            errors.append(_run_main(monkeypatch, corpus_a, progress_a))
+        except Exception as exc:  # noqa: BLE001 — asserted below
+            errors.append(exc)
+
+    thread_a = threading.Thread(target=run_publisher_a, name="publisher-a")
+    thread_a.start()
+    try:
+        assert paused.wait(timeout=60)
+        assert fake.aliases[ALIAS] == live_before, "A has passed its recheck, not swapped"
+        assert _run_main(monkeypatch, corpus_b, progress_b) == 0
+        newer = fake.aliases[ALIAS]
+        assert newer != live_before
+        assert _live_doc_ids(fake) == {DOC_A, DOC_B, "SA22-0000-02"}
+    finally:
+        release.set()
+        thread_a.join(timeout=60)
+
+    assert len(errors) == 1 and isinstance(errors[0], RuntimeError), errors
+    assert "moved during publication" in str(errors[0])
+    assert fake.aliases[ALIAS] == newer, "the newer publication keeps serving"
+    assert _live_doc_ids(fake) == {DOC_A, DOC_B, "SA22-0000-02"}
 
 
 def test_revisit_retained_generation_never_mutated(tmp_path, monkeypatch):
