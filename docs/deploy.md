@@ -455,6 +455,16 @@ checksums **after**.
   the ref line carries the requested pin, the digest line carries the
   bundled bytes that load re-verifies. Confusing the two is the classic
   digest-mismatch false alarm.
+- Release-signing custody (#1000): CI holds the key only as an **environment**
+  secret `SNEAKERNET_SIGNING_KEY` of the GitHub environment `release-signing`
+  (maintainer setup: Settings > Environments > New; Deployment branches =
+  selected branches `main`; Required reviewers = the maintainer; move the secret
+  there and delete any repository-level copy, since a same-repo PR workflow can
+  read repository secrets). `airgap-package` selects that environment only on
+  `refs/heads/main`; every other ref (branch dispatch) uses the secret-free
+  `branch-unsigned` environment, packs with an ephemeral key and records
+  `signed: ephemeral`. `SNEAKERNET_KEY_TRUSTED=true` is exported only for a
+  non-PR run on `refs/heads/main`. `tests/test_airgap_pack_sh.py` pins this.
 - `signed: true` appears only with a custodied key (`SNEAKERNET_KEY_TRUSTED`);
   rehearsal keys record `ephemeral`. The label is honesty, never a trust
   root. Trust roots, strongest first: a `SNEAKERNET_TRUSTED_PUB` obtained
