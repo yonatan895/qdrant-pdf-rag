@@ -583,6 +583,16 @@ embed (hash embedding is GIL-bound — a thread pool would serialize it), so
 parsing runs in a `spawn` process pool while check-delete-upsert runs in a
 thread pool.
 
+- **Hidden characters in `doc_id`** (issue #1022): the filename-stem fallback
+  bypasses the rule-module page-text sanitizer, so `walked_source_rev` also
+  refuses a document whose resolved `doc_id` contains C0/C1 controls, DEL,
+  bidirectional marks/overrides/isolates, zero-width characters, soft hyphen,
+  U+2028/U+2029 or tag characters (NBSP and variation selectors stay allowed). The record is an
+  `error` with `error_type` `DocIdRefused` and the fixed message
+  `doc_id_hidden_characters: ...` (no id or path); other documents continue and the
+  run exits non-zero. Refused, never rewritten, in `run_ingest.py` outside the
+  rules-version modules, so no key changes and no re-embed is needed. Rename the
+  file to ingest it.
 - **Reserved label delimiter** (issue #878): `|` separates the
   `source_rev_key` fields, so `walked_source_rev` refuses a document whose resolved
   vendor, product or version (path layout or `--vendor/--product/--version`)
@@ -879,7 +889,11 @@ thread pool.
   `revs`/boolean `whole` plan entries (a plan entry still carrying the removed
   `legacy` field is refused). String-to-set and
   truthiness coercions are forbidden. A plan with recorded requests must match
-  their document/revision/whole-document scope; corrupt entries are never
+  their document/revision/whole-document scope; the requested `--retire-doc`
+  set must equal the recorded one before and after the alias swap (issue #1026;
+  a changed destructive request refuses, a post-swap retry cannot drop or add
+  one), compared as a set so order and repeats are not part of the request
+  (issue #1027); corrupt entries are never
   discarded. Older v1 records without either optional retirement field remain
   readable for diagnosis, but the new writer refuses unfinished v1 builds before
   mutation. Finish with the matching old release or explicitly abandon the
@@ -1039,7 +1053,8 @@ thread pool.
   because the workers cannot run at all.
 - Result accounting: `skipped` + `upserted` both count as files-ok; only
   `upserted` adds upserted chunks. `empty` (zero-chunk doc, issue #359) and
-  `error` count as failed and exit nonzero. Bulk mode applies to real runs only,
+  `error` count as failed and exit nonzero, in a `--dry-run` as in a real run
+  (issue #1043): a dry run records `empty` with the same fixed message. Bulk mode applies to real runs only,
   restored in a `finally`. The summary logs files-ok/failed/chunks/parse and
   upsert seconds/pages-per-second/bulk/elapsed-ms and warns on failures;
   exit `1` iff any failure.
@@ -1184,7 +1199,11 @@ readiness, retrieval, answer/chat/console, recovery tools and evaluation.
 **Coordination/lifetime assumptions:** serialize the **entire** resolve/prepare/
 ingest/verify/publish interval across every writer/admin actor to the same target.
 Publish mode holds one target-identified advisory file lock
-(`publish-<alias>.lock` beside the progress file) from staging resolution
+(`publish-<alias>.lock` beside the progress file; an alias outside
+`[A-Za-z0-9_.-]` gets a digest of the full alias appended, so distinct aliases
+never share a lock or the `.json` build sidecar, issue #1028; the acquire also
+takes the legacy sanitized-name lock after it, and refuses while a legacy
+`.json` state exists: resume with the previous release or remove it explicitly) from staging resolution
 through cutover; a second live publisher for the same target fails closed
 (fcntl releases on process death, so a held lock means a live holder — locks
 are never stolen). Same-alias runs must share the progress directory; a

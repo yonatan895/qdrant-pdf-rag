@@ -43,6 +43,36 @@ def test_dry_run_ingest(tmp_path, synthetic_pdf, capsys):
         assert summary["elapsed_ms"] >= 0
 
 
+def _blank_pdf(path: Path) -> Path:
+    import pymupdf
+
+    with pymupdf.open() as doc:
+        doc.new_page()
+        doc.save(path)
+    return path
+
+
+@pytest.mark.parametrize("dry", [True, False], ids=["dry", "real"])
+def test_zero_chunk_document_fails_identically_in_dry_and_real_runs(tmp_path, monkeypatch, dry):
+    """Issue #1043: a document that yields zero chunks is `empty` (failed, rc 1,
+    fixed message) in a dry run exactly as in a real run: the preflight never
+    reports OK for a document the publication will reject."""
+    from mainframe_rag.ingest import run_ingest
+
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _blank_pdf(corpus / "scan.pdf")
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: _FakeQdrant())
+    monkeypatch.setenv("EMBED_MODE", "hash")
+    monkeypatch.delenv("DENSE_DIM", raising=False)
+    progress = tmp_path / "inventory.jsonl"
+    args = ["--src", str(corpus), "--progress", str(progress), "--workers", "1"]
+    assert main([*args, "--dry-run"] if dry else args) == 1
+    rec = json.loads(progress.read_text().splitlines()[0])
+    assert (rec["status"], rec["error_type"]) == ("empty", "EmptyDocument")
+    assert rec["error"] == "document produced zero chunks; nothing published"
+
+
 def test_worker_qdrant_client_is_built_once_from_ingest_settings(monkeypatch):
     """Each spawned ingest worker opens one Qdrant client with the writer URL,
     key and ingest timeout, then reuses it for every document it processes."""
@@ -1193,6 +1223,70 @@ def test_pipe_label_document_is_refused_run_continues_and_valid_labels_keep_thei
     last = {Path(r["path"]).name: r for r in map(json.loads, progress.read_text().splitlines()) if r}
     assert last["bad.pdf"]["status"] == "upserted"
     assert last["bad.pdf"]["source_rev"].startswith("ibm|zos2|2.5|")
+
+
+@pytest.mark.parametrize(
+    "stem",
+    [
+        "ctrl\x01name",
+        "rtl\u202egnp",
+        "zw\u200bname",
+        "bom\ufeffname",
+        "iso\u2066name",
+        "soft\u00adhyphen",
+        "line\u2028sep",
+        "para\u2029sep",
+        "tag\U000e0041name",
+    ],
+    ids=[
+        "control", "rtl-override", "zero-width", "bom", "isolate",
+        "soft-hyphen", "line-separator", "paragraph-separator", "tag-char",
+    ],
+)
+def test_filename_doc_id_with_hidden_characters_is_refused_with_a_fixed_error(
+    plain_pdf, tmp_path, monkeypatch, stem
+):
+    """Issue #1022: a filename-stem doc_id is not sanitized by the rule module,
+    so the orchestrator refuses a C0, bidi or zero-width doc_id before any
+    chunk, embed or key exists. Fixed text: no name appears in the error."""
+    import shutil
+
+    from mainframe_rag.config import Settings
+    from mainframe_rag.ingest import run_ingest
+
+    pdf = tmp_path / f"{stem}.pdf"
+    shutil.copy(plain_pdf, pdf)
+    monkeypatch.setattr(
+        run_ingest, "_load_worker_settings", lambda: Settings(embed_mode="hash", _env_file=None)
+    )
+    embed_calls = _spy_embed(monkeypatch)
+    task = (str(pdf), None, None, None, str(tmp_path), "d" * 64, True, None)
+    record, _parsed, chunks, vectors, contexts = run_ingest._parse_one(task)
+    assert record.status == "error"
+    assert record.error_type == "DocIdRefused"
+    assert record.error == (
+        "doc_id_hidden_characters: document id contains control, bidirectional-override "
+        "or zero-width characters; document refused"
+    )
+    assert (chunks, vectors, contexts) == ([], [], {})
+    assert embed_calls == []
+
+
+def test_clean_filename_doc_id_is_not_refused(plain_pdf, tmp_path, monkeypatch):
+    import shutil
+
+    from mainframe_rag.config import Settings
+    from mainframe_rag.ingest import run_ingest
+
+    pdf = tmp_path / "café guide-1\u00a0x\ufe0f.pdf"  # NBSP and a variation selector stay allowed
+    shutil.copy(plain_pdf, pdf)
+    monkeypatch.setattr(
+        run_ingest, "_load_worker_settings", lambda: Settings(embed_mode="hash", _env_file=None)
+    )
+    _spy_embed(monkeypatch)
+    task = (str(pdf), None, None, None, str(tmp_path), "d" * 64, True, None)
+    record = run_ingest._parse_one(task)[0]
+    assert record.status != "error", record.error
 
 
 @pytest.mark.parametrize(

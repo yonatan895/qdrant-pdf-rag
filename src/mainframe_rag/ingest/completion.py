@@ -667,7 +667,11 @@ def acquire_run_lock(progress_path: Path) -> IO[Any]:
 
 
 def release_run_lock(handle: IO[Any]) -> None:
-    """Release the run lock (idempotent, never raises)."""
+    """Release the run lock (idempotent, never raises), including a legacy-named
+    publish lock riding on it (issue #1028)."""
+    legacy = getattr(handle, "legacy_lock", None)
+    if legacy is not None:
+        release_run_lock(legacy)
     with contextlib.suppress(Exception):
         fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
     with contextlib.suppress(Exception):
@@ -680,13 +684,29 @@ def publish_lock_path(progress_path: Path, alias: str) -> Path:
     run. Same-alias runs must therefore share the progress directory (already
     required for refresh lineage); different directories are operator error
     and remain guarded only by the pre-swap live recheck. The sanitisation
-    maps the alias charset onto the lock filename: two aliases differing
-    only in sanitised-away characters would share a lock (harmless —
-    over-serialization, never concurrent publication)."""
+    maps the alias charset onto the lock filename. An alias the mapping
+    changes gets a short digest of the full alias appended (issue #1028), so
+    two distinct aliases that sanitize alike never share a lock or the build
+    sidecar derived from it; an alias already in the charset keeps its
+    historical file name."""
+    safe = _legacy_lock_stem(alias)
+    if safe != alias:
+        safe = f"{safe}-{hashlib.sha256(alias.encode()).hexdigest()[:12]}"
+    return progress_path.parent / f"publish-{safe}.lock"
+
+
+def _legacy_lock_stem(alias: str) -> str:
     safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", alias).strip("._")
     if not safe:
         raise RuntimeError(f"cannot derive a publish lock for empty alias {alias!r}.")
-    return progress_path.parent / f"publish-{safe}.lock"
+    return safe
+
+
+def legacy_publish_lock_path(progress_path: Path, alias: str) -> Path | None:
+    """The pre-#1028 lock name (sanitized alias only), or None when the alias
+    is already in the charset and its lock name never changed."""
+    safe = _legacy_lock_stem(alias)
+    return None if safe == alias else progress_path.parent / f"publish-{safe}.lock"
 
 
 def acquire_publish_lock(progress_path: Path, alias: str) -> IO[Any]:
@@ -698,16 +718,39 @@ def acquire_publish_lock(progress_path: Path, alias: str) -> IO[Any]:
     is unsupported (operator discipline, as with the progress lock)."""
     lock_path = publish_lock_path(progress_path, alias)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    handle = open(lock_path, "w", encoding="utf-8")  # noqa: SIM115 — handle outlives the call
+    # Upgrade compatibility (issue #1028): an alias whose lock name changed
+    # also takes the legacy-named lock, always after the new one (fixed order,
+    # no deadlock), so an older release's publisher still excludes this one.
+    legacy = legacy_publish_lock_path(progress_path, alias)
+    handles: list[Any] = []
     try:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError as exc:
-        handle.close()
-        raise RuntimeError(
-            f"another publish for target {alias!r} holds {lock_path} — "
-            "concurrent publishers for the same target are rejected; run serially."
-        ) from exc
-    return handle
+        for path in (lock_path, legacy):
+            if path is None:
+                continue
+            handle = open(path, "w", encoding="utf-8")  # noqa: SIM115 — handle outlives the call
+            handles.append(handle)
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as exc:
+                raise RuntimeError(
+                    f"another publish for target {alias!r} holds {path} — "
+                    "concurrent publishers for the same target are rejected; run serially."
+                ) from exc
+        if legacy is not None and legacy.with_suffix(".json").exists():
+            raise RuntimeError(
+                f"a legacy publish state {legacy.with_suffix('.json')} exists for target "
+                f"{alias!r}: resume that build with the previous release, or remove the "
+                "legacy state file explicitly to abandon it, then rerun."
+            )
+    except BaseException:
+        for handle in handles:
+            handle.close()
+        raise
+    # The caller holds one handle; the legacy lock rides on it and is
+    # released with it by release_run_lock.
+    if len(handles) == 2:
+        handles[0].legacy_lock = handles[1]
+    return handles[0]
 
 
 def plan_retire_deletes(
