@@ -59,6 +59,12 @@ DEX_PORT=${DEX_PORT:-5556}
 POD_CIDR=10.244.0.0/16
 KIND_NODE_MEM_MB=${KIND_NODE_MEM_MB:-4096}
 HEADROOM_MB=${HEADROOM_MB:-1024}
+# Whole-plan host RAM, from the 2026-10-25 bring-up (reasoning vLLM 5.35 GiB host RSS,
+# embed about 2 GB, gateway + OpenObserve + agent + Qdrant about 2 GB). Each server's
+# own guard checks only itself, so `up` checks the sum before it starts anything.
+REASONING_EST_MB=${REASONING_EST_MB:-5500}
+EMBED_EST_MB=${EMBED_EST_MB:-2000}
+STACK_EST_MB=${STACK_EST_MB:-2048}
 LOCAL_AGENT_PORT=${LOCAL_AGENT_PORT:-8080}
 GATEWAY_PORT=${GATEWAY_PORT:-4000}
 HOST_RELAY_PORT=${HOST_RELAY_PORT:-18080}
@@ -98,7 +104,14 @@ done
 
 say() { echo "==> $*"; }
 plan() { echo "[dry-run] $*"; }
-die() { echo "ERROR: $*" >&2; exit 1; }
+die() {
+    echo "ERROR: $*" >&2
+    [ -d "$STATE/logs" ] && echo "$*" > "$STATE/logs/last-error.txt"
+    exit 1
+}
+started() {  # record what this `up` run started, for the failure cleanup
+    [ "$DRYRUN" = 1 ] || echo "$1" >> "$STATE/run-started.txt"
+}
 k() { "$KUBECTL" --context "kind-$KIND_NAME" "$@"; }
 mem_avail_mb() { awk '/^MemAvailable:/{print int($2/1024)}' /proc/meminfo; }
 port_busy() { [ -n "$(ss -ltnH "sport = :$1" 2>/dev/null)" ]; }
@@ -121,7 +134,11 @@ admit() {  # admit NEED_MB WHAT
         plan "admission $2: need ${1} MB, MemAvailable ${avail} MB now: would $verdict"
         return 0
     fi
-    [ "$verdict" = pass ] || { echo "ERROR: admission $2: MemAvailable ${avail} MB < ${1} MB" >&2; exit 75; }
+    if [ "$verdict" != pass ]; then
+        echo "ERROR: admission $2: MemAvailable ${avail} MB < ${1} MB" >&2
+        [ -d "$STATE/logs" ] && echo "admission $2: MemAvailable ${avail} MB < ${1} MB" > "$STATE/logs/last-error.txt"
+        exit 75
+    fi
     say "admission $2: MemAvailable ${avail} MB >= ${1} MB"
 }
 
@@ -192,6 +209,7 @@ start_model() {  # start_model ROLE PORT TASK MODEL
         -p StandardOutput="append:$STATE/logs/$1.log" -p StandardError="append:$STATE/logs/$1.log" \
         $(unit_env) sh scripts/tools/run-task.sh "$3" CONTAINER_NAME="$UNIT-$1" MODEL="$4" SERVED_NAME="$4" \
         PORT="$2" BUDGET_PROFILE=LOCAL_RT_8GB VLLM_IMAGE="$VLLM_IMAGE"
+    started "unit $UNIT-$1"
     i=0
     until curl -s -m 3 -o /dev/null "http://127.0.0.1:$2/health"; do
         unit_active "$UNIT-$1" || die "$1 server exited; see $STATE/logs/$1.log"
@@ -270,11 +288,16 @@ agent_up() {
         [ "$DRYRUN" = 1 ] || die "gateway port $GATEWAY_PORT is held by another process"
     fi
     agent_src
+    need=$((STACK_EST_MB + KIND_NODE_MEM_MB + HEADROOM_MB))
+    printf '%s\n' "$(served_ids 8000)" | grep -qx "$REASONING_MODEL" || need=$((need + REASONING_EST_MB))
+    printf '%s\n' "$(served_ids 8001)" | grep -qx "$EMBED_MODEL" || need=$((need + EMBED_EST_MB))
+    admit "$need" "whole plan (models to start + stack ${STACK_EST_MB} + Kind ${KIND_NODE_MEM_MB} + headroom ${HEADROOM_MB} MB)"
     start_model reasoning 8000 local:llm "$REASONING_MODEL"
     start_model embed 8001 local:embed "$EMBED_MODEL"
     if [ "$DRYRUN" = 1 ]; then
         plan "qdrant: SIM_CONTAINER=$QDRANT_CONTAINER SIM_PORT=$QDRANT_PORT SIM_QDRANT_VOLUME=$QDRANT_VOLUME sh scripts/sim_qdrant.sh up"
     else
+        docker inspect "$QDRANT_CONTAINER" >/dev/null 2>&1 || started "qdrant"
         SIM_CONTAINER=$QDRANT_CONTAINER SIM_PORT=$QDRANT_PORT SIM_QDRANT_VOLUME=$QDRANT_VOLUME PY=$AGENT_PY \
             sh "$AGENT_SRC/scripts/sim_qdrant.sh" up
         i=0
@@ -309,6 +332,7 @@ agent_up() {
         --setenv=LOCAL_STACK_LOG_DIR="$STATE/logs" --setenv=GATEWAY_ENV_FILE="$STATE/gateway.env" \
         --setenv=LOCAL_AGENT_PORT="$LOCAL_AGENT_PORT" --setenv=GATEWAY_PORT="$GATEWAY_PORT" \
         $corpus_env sh scripts/tools/run-task.sh local:stack
+    started "unit $UNIT-stack"
     i=0
     until curl -s -m 3 -o /dev/null "http://127.0.0.1:$LOCAL_AGENT_PORT/healthz"; do
         unit_active "$UNIT-stack" || die "local stack exited; see $STATE/logs/stack.log"
@@ -378,6 +402,7 @@ cluster() {
     "$KIND_BIN" create cluster --name "$KIND_NAME" --image "$NODE_IMAGE" --config "$STATE/kind-config.yaml" \
         --kubeconfig "$KUBECONFIG" --wait 120s
     chmod 600 "$KUBECONFIG"
+    started "cluster"
     printf 'name=%s\nnode_id=%s\ncreated=%s\n' "$KIND_NAME" "$(docker inspect -f '{{.Id}}' "$NODE")" \
         "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$STATE/cluster.created"
     docker update --memory "${KIND_NODE_MEM_MB}m" --memory-swap "${KIND_NODE_MEM_MB}m" "$NODE" >/dev/null
@@ -607,6 +632,7 @@ relay() {
         -p StandardOutput="append:$STATE/logs/relay.log" -p StandardError="append:$STATE/logs/relay.log" \
         python3 -I "$HERE/agent_relay.py" --listen "$1:$HOST_RELAY_PORT" \
         --target "127.0.0.1:$LOCAL_AGENT_PORT" --allow "$2"
+    started "unit $UNIT-relay"
     say "relay $1:$HOST_RELAY_PORT -> 127.0.0.1:$LOCAL_AGENT_PORT for node $2 (unit $UNIT-relay)"
 }
 
@@ -774,13 +800,67 @@ up_phases() {
     images; agent_up; cluster; deploy; relay; provision; urls
 }
 
+up_failed() {  # tear down only what this run started, then record the failure in READY.md
+    rc=$1
+    trap - EXIT
+    set +e
+    echo "up failed (rc=$rc): removing what this run started" >&2
+    if grep -qx cluster "$STATE/run-started.txt" 2>/dev/null; then down; fi
+    for u in relay stack embed reasoning; do
+        if grep -qx "unit $UNIT-$u" "$STATE/run-started.txt" 2>/dev/null; then
+            systemctl --user stop "$UNIT-$u.service" 2>/dev/null
+        fi
+    done
+    if grep -qx qdrant "$STATE/run-started.txt" 2>/dev/null; then
+        SIM_CONTAINER=$QDRANT_CONTAINER SIM_PORT=$QDRANT_PORT sh "$AGENT_SRC/scripts/sim_qdrant.sh" down
+    fi
+    write_failed "up" "$rc" "$(cat "$STATE/logs/last-error.txt" 2>/dev/null)" "$(cat "$STATE/run-started.txt" 2>/dev/null | tr '\n' ',')"
+    exit "$rc"
+}
+
+write_failed() {  # write_failed STEP RC MESSAGE STARTED
+    ( umask 077; {
+        echo "# Open WebUI hands-on: NOT ready"
+        echo
+        echo "Written $(date '+%Y-%m-%d %H:%M %Z') by \`hands_on.sh\` (harness $(git -C "$REPO" rev-parse --short HEAD))."
+        echo
+        echo "## What failed"
+        echo
+        echo "- Step \`$1\` exited with code **$2**: $3"
+        echo "- Started by this run and removed again: ${4:-nothing}"
+        echo "- Left running: nothing from this script (check with the status command)."
+        echo
+        echo "## Commands"
+        echo
+        echo "- Status: \`sh $HERE/hands_on.sh status\`"
+        echo "- Retry: \`sh $HERE/hands_on.sh up\`, then \`sh $HERE/hands_on.sh ready\`"
+        echo "- Stop: \`sh $HERE/hands_on.sh down\` and \`sh $HERE/hands_on.sh agent-down\`"
+        echo
+        echo "## Password files (contents not shown)"
+        echo
+        for u in team-user docs-user owui-admin; do echo "- \`$u@trial.test\`: \`$STATE/$u.password\`"; done
+        echo
+        echo "## RAM in use"
+        echo
+        echo '```'
+        ram_in_use
+        echo '```'
+    } > "$STATE/READY.md" )
+    chmod 600 "$STATE/READY.md"
+}
+
 case "$CMD" in
     up)
         preflight
         if [ "$DRYRUN" = 1 ]; then up_phases; plan "then: hands_on.sh ready (checks + READY.md)"; plan "up: all phases planned"; exit 0; fi
         state_dir
         locked ;;
-    _up_locked) up_phases ;;
+    _up_locked)
+        : > "$STATE/run-started.txt"
+        rm -f "$STATE/logs/last-error.txt"
+        trap 'up_failed $?' EXIT
+        up_phases
+        trap - EXIT ;;
     images|cluster|deploy|agent-up)
         preflight
         fn=$(printf '%s' "$CMD" | tr '-' '_')

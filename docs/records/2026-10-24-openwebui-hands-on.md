@@ -1,6 +1,6 @@
 # Open WebUI hands-on Kind setup (procedure and record)
 
-Status: **phase 1 (written, dry-run only)**. The maintainer asked on 2026-10-24 to use Open WebUI
+Status: **phase 2 blocked on host RAM (2026-10-25)**. Nothing from this setup is running; see Results. The maintainer asked on 2026-10-24 to use Open WebUI
 hands-on, in the full trial setup, from the Windows browser, and to leave it running. Trial-only
 (#1073, tracker #1070; ADR-0007 #1080 is not accepted). It changes no chart, `images.txt`,
 Taskfile or production manifest. State and evidence stay outside git in
@@ -102,6 +102,12 @@ acceptance list must answer the proxy's own `403 denied`, and `GET /api/models` 
 - Local lane, by the budget caps (`LOCAL_RT_8GB`): reasoning 6400 MB and embed 2600 MB of host RAM,
   each checked by `run_local_vllm.sh` itself. Add the gateway, OpenObserve, the agent and Qdrant.
   The order is models, then ingest, then Kind, so ingest never overlaps the cluster start.
+- Whole plan: `up` checks the sum before it starts anything. The estimates are reasoning 5500 MB
+  (observed 5.35 GiB host RSS), embed 2000, stack 2048, the Kind cap and 1024 MB headroom, about
+  13.6 GB with `KIND_NODE_MEM_MB=3072`. They are set by `REASONING_EST_MB`, `EMBED_EST_MB` and
+  `STACK_EST_MB`. Each vLLM guard checks only its own server, so before this check the reasoning
+  server could start and leave too little for the rest. On any failure, `up` removes what that
+  run started, recorded in `run-started.txt`, and writes `READY.md` with the step and exit code.
 - Sized for a host with nothing else heavy running, after G1. `up` refuses while ports 4000, 8000,
   8001 or 8080 are held by something it did not start (`AGENT_REUSE=1` accepts a running agent).
 
@@ -124,4 +130,18 @@ Phase 1, 2026-10-24: `sh $S --dry-run up` rc=0, along with `--dry-run down`, `ag
 (`6fdf65ca…`). The NetworkPolicy has 3 egress rules. Dex has 3 users with an HTTPS issuer. The
 support manifest has 14 objects.
 
-Phase 2 (bring-up, checks, left running): pending the coordinator's go after G1.
+Phase 2, 2026-10-25 00:59–01:06 IDT, after G1 ended:
+- **Attempt 1: `up` rc=1 in `agent-up`.** The images were built. The derived image was rebuilt
+  from the #1085 Containerfile as `de278f9e…`, user `1000:0`. gemma-4-E4B served on 8000 at
+  5.35 GiB host RSS. The embed server then refused under its own guard: 2600 + 2048 MiB needed,
+  1663 MiB available. `agent-down` removed the reasoning unit. No cluster, Qdrant, stack or relay
+  had started.
+- **Attempt 2, with the whole-plan check: `up` rc=75.** The check refused before anything
+  started: 6959 MB available, 13644 MB needed. `READY.md` records the failure.
+- **Held outside this setup:**
+  - the rag-kind node, at 4.63 GiB (its qdrant-0 was OOM-looping at the 4 GiB limit; not
+    touched);
+  - three `dist/deploy-bb53388` multiprocessing workers, about 0.85 GB each (not touched).
+- **No startup check ran:** the sign-ins, the docs question with chips and the blocked path.
+- **To fit,** about 7 GB must be freed (rag-kind and those workers). That is the maintainer's
+  call. A smaller corpus does not help: the model servers dominate.
