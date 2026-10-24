@@ -105,6 +105,10 @@ as `chatcmpl-<request_id>`). The ops endpoints carry none: `/healthz`,
   the agent before data exists (bootstrap must not deadlock); requests are
   still refused by the serving gate. Any Qdrant exception becomes
   `503 qdrant_unready`.
+- Through the Route, `/healthz` requires OAuth: the sidecar skips auth only
+  for `/livez`. `/healthz` stays uncached and unlimited on the pod port
+  (kubelet and in-cluster callers admitted by NetworkPolicy), so its upstream
+  work is reachable only by those callers (#1018).
 - `GET /livez` (liveness) — always `200 {"status": "alive"}` while the
   process serves. Data-serving readiness belongs to `/healthz`; the
   deployment livenessProbe points here so a non-servable generation never

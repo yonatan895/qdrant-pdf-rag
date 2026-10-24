@@ -36,7 +36,14 @@ Standalone `sh scripts/tools/run-task.sh airgap:deploy` only waits for workload 
 `/healthz` check covers Qdrant and embedding connectivity, the served
 generation's representation contract, **and** the rerank leg when
 `RERANK_ENABLED=true` (HTTP 503 for any non-servable state);
-`/livez` is the process-only liveness probe. It does not prove that reasoning
+`/livez` is the process-only liveness probe. Kubelet probes reach the pod port
+directly, not the OAuth sidecar; the sidecar's only unauthenticated path is
+`--skip-auth-regex=^/livez$` (no upstream work), so an anonymous Route caller
+cannot trigger the `/healthz` Qdrant, embedding or serving-gate evaluation
+(#1018). No agent, ingest, OpenObserve or otelcol pod automounts a
+ServiceAccount token (`automountServiceAccountToken: false`); with the Route
+on, a projected token is mounted only into the `oauth-proxy` container (#1029).
+It does not prove that reasoning
 works. Run the gateway probe before ingesting when using the
 modular commands. `sh scripts/tools/run-task.sh airgap:smoke` checks retrieval and tracing; use the
 console/answer checks in the operator runbook to verify the user experience.
@@ -460,11 +467,14 @@ checksums **after**.
   (maintainer setup: Settings > Environments > New; Deployment branches =
   selected branches `main`; Required reviewers = the maintainer; move the secret
   there and delete any repository-level copy, since a same-repo PR workflow can
-  read repository secrets). `airgap-package` selects that environment only on
-  `refs/heads/main`; every other ref (branch dispatch) uses the secret-free
-  `branch-unsigned` environment, packs with an ephemeral key and records
-  `signed: ephemeral`. `SNEAKERNET_KEY_TRUSTED=true` is exported only for a
-  non-PR run on `refs/heads/main`. `tests/test_airgap_pack_sh.py` pins this.
+  read repository secrets). `airgap-package` selects that environment only for a
+  manual `workflow_dispatch` on `refs/heads/main` (the required reviewer
+  approves it); only that run produces a signed, promotable bundle. Every
+  other run, including the nightly `schedule` (#1051, so it needs no daily
+  approval), uses the secret-free `branch-unsigned` environment, packs with an
+  ephemeral key and records `signed: ephemeral`; such bundles are not
+  promotable. `SNEAKERNET_KEY_TRUSTED=true` is exported only for that
+  dispatch on `refs/heads/main`. `tests/test_airgap_pack_sh.py` pins this.
 - `signed: true` appears only with a custodied key (`SNEAKERNET_KEY_TRUSTED`);
   rehearsal keys record `ephemeral`. The label is honesty, never a trust
   root. Trust roots, strongest first: a `SNEAKERNET_TRUSTED_PUB` obtained

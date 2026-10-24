@@ -430,6 +430,27 @@ def test_plan_refresh_deletes_matrix(monkeypatch):
     assert plan_refresh_deletes(fake, settings, "reference", rev_a2, REV_A) == {REV_A}
 
 
+def test_foreign_target_marker_never_certifies_a_revision(monkeypatch):
+    """#1039: a marker whose target_collection is another collection must not
+    certify this target's points; refresh still plans the delete."""
+    from mainframe_rag.ingest.completion import plan_refresh_deletes
+
+    settings = _settings()
+    fake = RevisionFake()
+    _upsert_one(monkeypatch, fake, _parsed(sha=SHA_A1, vendor="vendor-a",
+                product="product-x", version="1.0"),
+                _chunks(rev=REV_A, tag="A"), settings)
+    # Control: its own committed marker makes the revision coexistence-safe.
+    assert is_revision_committed(fake, settings, "reference", REV_A)
+    assert plan_refresh_deletes(fake, settings, "reference", REV_B, None) == set()
+    markers = fake._points[completion_collection_name(settings)]
+    doc_markers = [p for p in markers if (p.payload or {}).get("doc_id") == "reference"]
+    assert len(doc_markers) == 1
+    doc_markers[0].payload["target_collection"] = "some_other_collection"
+    assert not is_revision_committed(fake, settings, "reference", REV_A)
+    assert plan_refresh_deletes(fake, settings, "reference", REV_B, None) == {REV_A}
+
+
 def test_triple_variant_refresh_retires_old_marker(monkeypatch):
     """Same bytes+labels under another CLI triple: the same revision
     re-certifies (points overwritten idempotently — same chunk ids), and

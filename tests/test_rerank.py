@@ -232,6 +232,27 @@ def test_rerank_alpha_flat_leg_abstains():
         assert [h.chunk_id for h in reranked] == ["c1", "c2"], alpha
 
 
+def test_rerank_extreme_finite_scores_keep_finite_keys_and_sane_order():
+    """#1023: finite scores whose span overflows (hi - lo = inf) used to turn
+    the blend into NaN. Every normalized key stays finite and the order
+    follows the cross-encoder at alpha=1.0."""
+    import math
+
+    from mainframe_rag.retrieve import rerank as rr
+
+    assert all(math.isfinite(v) for v in rr._minmax([1.7e308, -1.7e308, 0.0]))
+    assert rr._minmax([1.7e308, -1.7e308, 0.0]) == pytest.approx([1.0, 0.0, 0.5])
+    hits = [
+        _make_hit("c1", "DOC1", 0.9, text="Doc 1"),
+        _make_hit("c2", "DOC2", 0.5, text="Doc 2"),
+        _make_hit("c3", "DOC3", 0.1, text="Doc 3"),
+    ]
+    ce = {format_rerank_text(h): v for h, v in zip(hits, (-1.7e308, 1.7e308, 0.0), strict=True)}
+    out = rerank_candidates("test", hits, MockReranker(ce), alpha=1.0)
+    assert [h.chunk_id for h in out] == ["c2", "c3", "c1"]
+    assert all(h.rerank_score is not None and math.isfinite(h.rerank_score) for h in out)
+
+
 def test_search_rerank_alpha_zero_keeps_rrf_order():
     """Claimed path: the Settings knob flows through search() into ranking —
     alpha=0.0 keeps RRF order where the default alpha=1.0 flips it."""
@@ -383,6 +404,91 @@ def test_http_reranker_length_mismatch_raises():
 
     with pytest.raises(RuntimeError, match="invalid or mismatched results"):
         reranker.score("query", ["text0", "text1"])
+
+
+
+# ---- #1012 / #1023: index permutation and finite scores on both legs
+_BAD_ITEMS = {
+    "duplicate": [(0, 0.1), (0, 0.9)],
+    "out_of_range": [(0, 0.1), (2, 0.9)],
+    "negative": [(0, 0.1), (-1, 0.9)],
+    "missing_index": [(0, 0.1), (None, 0.9)],
+    "nan": [(0, 0.1), (1, float("nan"))],
+    "non_dict_entries": None,
+    "inf": [(0, 0.1), (1, float("inf"))],
+    "neg_inf": [(0, 0.1), (1, float("-inf"))],
+}
+
+
+def _raw(field: str, key: str, items) -> bytes:
+    if items is None:  # entries that are not objects at all
+        return f'{{"{field}": [1, [0, 1]]}}'.encode()
+
+    def one(i, v):
+        parts = [] if i is None else [f'"index": {i}']
+        lit = {"nan": "NaN", "inf": "Infinity", "-inf": "-Infinity"}.get(str(v), str(v))
+        parts.append(f'"{key}": {lit}')
+        return "{" + ", ".join(parts) + "}"
+
+    body = ", ".join(one(i, v) for i, v in items)
+    return f'{{"{field}": [{body}]}}'.encode()
+
+
+def _two_leg_reranker(score_body, rerank_body, order="score_first"):
+    settings = Settings(
+        rerank_base_url="http://rerank.test/v1",
+        rerank_model="m",
+        rerank_batch_size=2,
+        rerank_endpoint_order=order,
+        _env_file=None,
+    )
+    calls: list[str] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        calls.append(request.url.path)
+        body = score_body if request.url.path.endswith("/score") else rerank_body
+        return httpx2.Response(200, content=body)
+
+    client = httpx2.Client(transport=httpx2.MockTransport(handler))
+    return HttpReranker(settings, client=client), calls
+
+
+GOOD_SCORE = _raw("data", "score", [(1, 0.8), (0, 0.2)])
+GOOD_RERANK = _raw("results", "relevance_score", [(1, 0.7), (0, 0.3)])
+
+
+@pytest.mark.parametrize("case", sorted(_BAD_ITEMS))
+def test_score_leg_malformed_falls_back_to_rerank_leg(case):
+    bad = _raw("data", "score", _BAD_ITEMS[case])
+    reranker, calls = _two_leg_reranker(bad, GOOD_RERANK)
+    assert reranker.score("q", ["a", "b"]) == [0.3, 0.7]
+    assert calls == ["/v1/score", "/v1/rerank"]
+
+
+@pytest.mark.parametrize("case", sorted(_BAD_ITEMS))
+def test_rerank_leg_malformed_falls_back_to_score_leg(case):
+    bad = _raw("results", "relevance_score", _BAD_ITEMS[case])
+    reranker, calls = _two_leg_reranker(GOOD_SCORE, bad, order="rerank_first")
+    assert reranker.score("q", ["a", "b"]) == [0.2, 0.8]
+    assert calls == ["/v1/rerank", "/v1/score"]
+
+
+@pytest.mark.parametrize("case", sorted(_BAD_ITEMS))
+def test_both_legs_malformed_fail_closed(case):
+    reranker, _ = _two_leg_reranker(
+        _raw("data", "score", _BAD_ITEMS[case]),
+        _raw("results", "relevance_score", _BAD_ITEMS[case]),
+    )
+    with pytest.raises(RuntimeError):
+        reranker.score("q", ["a", "b"])
+
+
+def test_rerank_leg_missing_score_field_is_rejected_not_zero():
+    reranker, _ = _two_leg_reranker(
+        b'{"data": []}', b'{"results": [{"index": 0}, {"index": 1, "score": 0.5}]}'
+    )
+    with pytest.raises(RuntimeError):
+        reranker.score("q", ["a", "b"])
 
 
 def _order_settings(**overrides):
@@ -895,4 +1001,3 @@ def test_probe_reranker_failure_reports_error_type_only():
     err = probe_reranker(reranker)
     assert err is not None and "SECRET-XYZ" not in err
     assert "ConnectError" in err
-

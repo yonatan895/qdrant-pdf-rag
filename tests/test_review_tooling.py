@@ -153,6 +153,17 @@ class TestProfileClassification(unittest.TestCase):
                 _, lanes = self._required([path])
                 self.assertIn("eval_retrieval", lanes)
 
+    def test_simulation_only_test_helpers_select_the_simulation_lane(self):
+        """#1033: helpers spawned/imported by the sim tier must select `simulation`."""
+        for path in ("tests/helpers_ingest_crash_worker.py",
+                     "tests/helpers_publication_lifecycle.py",
+                     "tests/helpers_builder.py"):
+            with self.subTest(path=path):
+                _, lanes = self._required([path])
+                self.assertIn("simulation", lanes)
+        # A helper with no simulation consumer stays offline.
+        self.assertNotIn("simulation", self._required(["tests/helpers_helm.py"])[1])
+
     def test_site_only_changes_are_docs_like_and_offline(self):
         for paths in (["site/index.html"], ["site/js/app.js", "site/data/x.json", "site/css/a.css"]):
             with self.subTest(paths=paths):

@@ -12,6 +12,7 @@ injection; real PDFs only where main() needs files (built at runtime).
 
 from __future__ import annotations
 
+import os
 import re
 from itertools import permutations
 from pathlib import Path
@@ -248,6 +249,60 @@ def _run_main(monkeypatch, corpus: Path, progress: Path, *extra: str) -> int:
 
 def _gen_collections(fake: PublishFake) -> list[str]:
     return sorted(n for n in fake.collections if "__gen" in n and not n.endswith("__completions"))
+
+
+def test_publish_lock_for_a_renamed_alias_also_takes_the_legacy_lock_and_refuses_legacy_state(tmp_path):
+    """Issue #1028 upgrade path: an older release locks `publish-<sanitized>.lock`
+    and records `publish-<sanitized>.json`. The new acquire also takes the legacy
+    lock (so the old writer excludes it) and refuses while legacy state exists.
+    A charset alias keeps exactly one lock file with its unchanged name."""
+    import fcntl
+
+    from mainframe_rag.ingest.completion import acquire_publish_lock, release_run_lock
+
+    progress = tmp_path / "inv.jsonl"
+    legacy_lock = tmp_path / "publish-a_b.lock"
+    with open(legacy_lock, "w") as old_holder:
+        fcntl.flock(old_holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with pytest.raises(RuntimeError, match="another publish"):
+            acquire_publish_lock(progress, "a b")
+    handle = acquire_publish_lock(progress, "a b")
+    with open(legacy_lock, "w") as other, pytest.raises(OSError):
+        fcntl.flock(other.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    release_run_lock(handle)
+    with open(legacy_lock, "w") as other:
+        fcntl.flock(other.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    (tmp_path / "publish-a_b.json").write_text("{}")
+    with pytest.raises(RuntimeError, match="legacy publish state"):
+        acquire_publish_lock(progress, "a b")
+
+    plain = tmp_path / "plain"
+    plain_progress = plain / "inv.jsonl"
+    release_run_lock(acquire_publish_lock(plain_progress, ALIAS))
+    assert sorted(p.name for p in plain.glob("publish-*")) == [f"publish-{ALIAS}.lock"]
+
+
+def test_aliases_that_sanitize_to_one_lock_name_do_not_share_publish_state(tmp_path):
+    """Issue #1028: `a b` and `a_b` sanitize to the same lock stem, yet are
+    distinct logical aliases: each gets its own lock and sidecar, and one
+    alias's recorded build is invisible to the other. A plain alias keeps its
+    existing file names."""
+    from mainframe_rag.ingest.completion import publish_lock_path
+    from mainframe_rag.ingest.publish import (
+        publish_state_path,
+        read_publish_state,
+        write_publish_state,
+    )
+
+    progress = tmp_path / "inv.jsonl"
+    assert publish_lock_path(progress, ALIAS) == tmp_path / f"publish-{ALIAS}.lock"
+    assert publish_state_path(progress, ALIAS) == tmp_path / f"publish-{ALIAS}.json"
+    assert publish_lock_path(progress, "a b") != publish_lock_path(progress, "a_b")
+    assert publish_state_path(progress, "a b") != publish_state_path(progress, "a_b")
+    write_publish_state(progress, "a b", "staging-1", "g" * 16, "c" * 12)
+    assert read_publish_state(progress, "a_b") is None
+    assert read_publish_state(progress, "a b")["staging"] == "staging-1"
 
 
 # ---------------------------------------------------------------- naming
@@ -487,6 +542,87 @@ def test_swap_rejection_raises_without_applying(monkeypatch):
     assert fake.aliases[ALIAS] == "g1"
 
 
+
+
+class _CreateRejectingFake(PublishFake):
+    """Rejects any alias call that creates a link to `reject_target`, applying
+    nothing from that call (per-call atomicity, like the server). Calls that
+    only delete are applied: a swap split into delete-then-create strands the
+    alias when the create half is refused."""
+
+    reject_target = "g2"
+
+    def update_collection_aliases(self, ops):
+        for op in ops:
+            create = getattr(op, "create_alias", None)
+            if create is not None and create.collection_name == self.reject_target:
+                self.alias_calls.append(list(ops))
+                raise RuntimeError("injected create-half rejection")
+        return super().update_collection_aliases(ops)
+
+
+def test_alias_swap_is_one_atomic_call_old_alias_serves_when_create_is_rejected(monkeypatch):
+    """#1036: delete+create ride one alias call; refusing the create half
+    leaves the previous generation serving, never a missing alias."""
+    from mainframe_rag.ingest.qdrant_io import swap_alias_to
+
+    fake = _CreateRejectingFake()
+    fake.collections["g1"] = []
+    fake.collections["g2"] = []
+    fake.aliases[ALIAS] = "g1"
+    with pytest.raises(RuntimeError, match="create-half rejection"):
+        swap_alias_to(fake, _settings(), "g2", "g1")
+    assert fake.aliases.get(ALIAS) == "g1", "alias must still serve the old generation"
+    assert len(fake.alias_calls) == 1
+    kinds = sorted(
+        "delete" if getattr(op, "delete_alias", None) is not None else "create"
+        for op in fake.alias_calls[0]
+    )
+    assert kinds == ["create", "delete"], "delete and create travel in the same call"
+
+
+def test_failed_safety_snapshot_refuses_cutover_and_keeps_old_alias(monkeypatch):
+    """#1040: a failed pre-cutover safety snapshot is not swallowed; no alias
+    operation is sent and the previous generation keeps serving."""
+    from mainframe_rag.ingest.qdrant_io import swap_alias_to
+
+    fake = PublishFake()
+    fake.collections["g1"] = []
+    fake.collections["g2"] = []
+    fake.aliases[ALIAS] = "g1"
+    fake.fail_snapshot = True
+    with pytest.raises(RuntimeError, match="snapshot failure"):
+        swap_alias_to(fake, _settings(), "g2", "g1")
+    assert fake.aliases[ALIAS] == "g1"
+    assert fake.alias_calls == [], "no alias operation after a failed snapshot"
+
+    fake.fail_snapshot = False
+    summary = swap_alias_to(fake, _settings(), "g2", "g1")
+    assert fake.aliases[ALIAS] == "g2" and summary["safety_snapshot"]
+
+
+@pytest.mark.parametrize("which", [0, 1])
+def test_existing_immutable_build_alias_is_never_rebound(which):
+    """#1041: a build alias (data or completions) that already exists is
+    refused before any write; its binding and the live alias are untouched."""
+    import uuid
+
+    from mainframe_rag.ingest.build import build_aliases
+    from mainframe_rag.ingest.qdrant_io import swap_alias_to
+
+    build_id = str(uuid.uuid4())
+    fake = PublishFake()
+    for name in ("g1", "g2", "elsewhere"):
+        fake.collections[name] = []
+    fake.aliases[ALIAS] = "g1"
+    victim = build_aliases(ALIAS, build_id)[which]
+    fake.aliases[victim] = "elsewhere"
+    with pytest.raises(RuntimeError, match="immutable build alias already exists"):
+        swap_alias_to(fake, _settings(), "g2", "g1", build_id=build_id)
+    assert fake.aliases[victim] == "elsewhere"
+    assert fake.aliases[ALIAS] == "g1"
+    assert fake.alias_calls == []
+    assert fake.snapshots == {}, "refusal precedes the safety snapshot"
 
 
 @pytest.mark.parametrize("case", ["limit", "empty-corpus", "revision-collision"])
@@ -1970,6 +2106,118 @@ def test_retire_retry_recovers_its_plan_and_refuses_a_changed_request(tmp_path, 
     live_2 = fake.aliases[ALIAS]
     assert live_2 != live_1
     assert not any((p.payload or {}).get("source_rev") == rev_a for p in fake.collections[live_2])
+
+
+DOC_C = "SA22-0000-02"
+
+
+def _crash_at_cutover(monkeypatch, run_ingest, *, after: bool):
+    """Interrupt the first cutover just before (`after=False`) or just after
+    the alias swap; later swaps run normally."""
+    original_swap = run_ingest.swap_alias_to
+    state = {"armed": True}
+
+    def interrupted(*args, **kwargs):
+        if state["armed"]:
+            state["armed"] = False
+            if after:
+                original_swap(*args, **kwargs)
+            raise RuntimeError("interrupted cutover")
+        return original_swap(*args, **kwargs)
+
+    monkeypatch.setattr(run_ingest, "swap_alias_to", interrupted)
+
+
+def test_post_cutover_retry_refuses_a_changed_retirement_request(tmp_path, monkeypatch):
+    """Issue #1026: after the alias swapped, a retry that adds, replaces or
+    drops a retirement is refused exactly like the pre-swap request, mutating
+    nothing; the identical request then completes."""
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.publish import publish_state_path
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    a, _b = _two_doc_corpus(corpus)
+    progress = tmp_path / "inv.jsonl"
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    a.unlink()
+    _crash_at_cutover(monkeypatch, run_ingest, after=True)
+    with pytest.raises(RuntimeError, match="interrupted cutover"):
+        _run_main(monkeypatch, corpus, progress, "--retire-doc", DOC_A)
+    current = fake.aliases[ALIAS]
+    sidecar = publish_state_path(progress, ALIAS)
+    saved = (sidecar.read_bytes(), progress.read_bytes())
+    for changed in (
+        ("--retire-doc", DOC_A, "--retire-doc", DOC_B),  # adds a walked doc
+        ("--retire-doc", DOC_B),  # replaces
+        (),  # drops
+    ):
+        with pytest.raises(RuntimeError, match="different retirements"):
+            _run_main(monkeypatch, corpus, progress, *changed)
+        assert (sidecar.read_bytes(), progress.read_bytes()) == saved
+        assert fake.aliases[ALIAS] == current
+    assert DOC_B in _live_doc_ids(fake)
+    assert _run_main(monkeypatch, corpus, progress, "--retire-doc", DOC_A) == 0
+    assert not sidecar.exists()
+    assert _live_doc_ids(fake) == {DOC_B}
+
+
+@pytest.mark.parametrize("after_swap", [False, True], ids=["pre-swap", "post-swap"])
+def test_retry_with_reordered_or_repeated_retire_flags_resumes(tmp_path, monkeypatch, after_swap):
+    """Issue #1027: retirement scope is a set. The same documents in another
+    argument order, or repeated, resume the recorded build instead of being
+    refused as different retirements."""
+    from mainframe_rag.ingest import run_ingest
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    a, b = _two_doc_corpus(corpus)
+    _build_doc_with_id(corpus, "doc_c", DOC_C)
+    progress = tmp_path / "inv.jsonl"
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    a.unlink()
+    b.unlink()
+    _crash_at_cutover(monkeypatch, run_ingest, after=after_swap)
+    with pytest.raises(RuntimeError, match="interrupted cutover"):
+        _run_main(monkeypatch, corpus, progress, "--retire-doc", DOC_A, "--retire-doc", DOC_B)
+    assert _run_main(
+        monkeypatch, corpus, progress,
+        "--retire-doc", DOC_B, "--retire-doc", DOC_A, "--retire-doc", DOC_B,
+    ) == 0
+    assert _live_doc_ids(fake) == {DOC_C}
+
+
+def test_refused_doc_id_file_does_not_abort_a_retirement_publication(tmp_path, monkeypatch):
+    """Issue #1022: the retire-conflict walk skips a walked file whose doc_id is
+    refused (no key exists to retire) instead of aborting the publication."""
+    import json
+
+    from scripts.make_synthetic_pdf import build_plain
+
+    from mainframe_rag.ingest import run_ingest
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _a, b = _two_doc_corpus(corpus)
+    progress = tmp_path / "inv.jsonl"
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    b.unlink()
+    build_plain(corpus / "hid\u202eden.pdf")
+    # The refused file is an error record, so the run exits 1 without
+    # publishing; the retirement walk itself must not raise.
+    assert _run_main(monkeypatch, corpus, progress, "--retire-doc", DOC_B) == 1
+    records = [json.loads(line) for line in progress.read_text().splitlines() if line.strip()]
+    assert [r["error_type"] for r in records if r["status"] == "error"] == ["DocIdRefused"]
+    assert _live_doc_ids(fake) == {DOC_A, DOC_B}
 
 
 def test_conflict_preflight_same_bytes_changed_label_replaces_old_revision(tmp_path, monkeypatch):
@@ -3829,3 +4077,286 @@ def test_interrupted_catalog_publication_resumes_with_identical_entries(tmp_path
     with pytest.raises(RuntimeError, match="old-format"):
         _run_main(monkeypatch, other, progress_b)
     assert (fake.collections, fake.aliases, sidecar.read_bytes()) == before
+
+
+# ------------------------------------------------ corpus confinement (#996, #1002, #1003)
+def _fresh_publish(tmp_path, monkeypatch):
+    from mainframe_rag.ingest import run_ingest
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    return fake, corpus, tmp_path / "inv.jsonl"
+
+
+def _nothing_written(fake: PublishFake, progress: Path) -> bool:
+    return not fake.collections and not fake.aliases and not progress.exists()
+
+
+def test_out_of_root_file_symlink_is_refused_and_outside_bytes_never_served(tmp_path, monkeypatch):
+    """#996: a file symlink resolving outside the corpus root is a typed
+    planning refusal before any storage or inventory write; the outside
+    document is never parsed, so it cannot be served."""
+    from mainframe_rag.ingest.corpus_scan import OutOfRootLinkError
+
+    fake, corpus, progress = _fresh_publish(tmp_path, monkeypatch)
+    _build_doc_with_id(corpus, "normal", DOC_A)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    secret = _build_doc_with_id(outside, "confidential", DOC_B)
+    (corpus / "linked.pdf").symlink_to(secret)
+    with pytest.raises(OutOfRootLinkError, match="linked.pdf"):
+        _run_main(monkeypatch, corpus, progress)
+    assert _nothing_written(fake, progress)
+
+
+@pytest.mark.parametrize("shape", ["chain", "relative", "relative-deep"])
+def test_out_of_root_link_variants_are_refused(tmp_path, monkeypatch, shape):
+    """#996: a link chain (l1 -> l2 -> outside) and relative `../` targets
+    resolve outside the root and are refused like a direct link."""
+    from mainframe_rag.ingest.corpus_scan import OutOfRootLinkError
+
+    fake, corpus, progress = _fresh_publish(tmp_path, monkeypatch)
+    _build_doc_with_id(corpus, "normal", DOC_A)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    secret = _build_doc_with_id(outside, "confidential", DOC_B)
+    if shape == "chain":
+        (corpus / "l2.pdf").symlink_to(secret)
+        (corpus / "l1.pdf").symlink_to("l2.pdf")
+    elif shape == "relative":
+        (corpus / "l1.pdf").symlink_to("../outside/confidential.pdf")
+    else:
+        (corpus / "a" / "b").mkdir(parents=True)
+        (corpus / "a" / "b" / "l1.pdf").symlink_to("../../../outside/confidential.pdf")
+    with pytest.raises(OutOfRootLinkError, match="l1.pdf"):
+        _run_main(monkeypatch, corpus, progress)
+    assert _nothing_written(fake, progress)
+
+
+
+def test_in_root_file_symlink_and_symlinked_directory_policy(tmp_path, monkeypatch):
+    """#996 policy: a file symlink resolving inside the root is walked; a
+    symlinked directory is never traversed (its PDFs are not the corpus),
+    in-root or not, and the skip is logged with a fixed action."""
+    from mainframe_rag.ingest.corpus_scan import confined_pdfs
+
+    corpus = tmp_path / "corpus"
+    (corpus / "real").mkdir(parents=True)
+    pdf = _build_doc_with_id(corpus / "real", "a", DOC_A)
+    (corpus / "alias.pdf").symlink_to(pdf)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    _build_doc_with_id(outside, "o", DOC_B)
+    (corpus / "linkdir").symlink_to(outside, target_is_directory=True)
+    (corpus / "samedir").symlink_to(corpus / "real", target_is_directory=True)
+    assert [p.name for p in confined_pdfs(corpus)] == ["alias.pdf", "a.pdf"]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
+def test_unreadable_subtree_fails_closed_before_any_write(tmp_path, monkeypatch):
+    """#1003: an unreadable directory makes the walk partial; publication
+    refuses with a typed error, never a green swap lacking its documents."""
+    from mainframe_rag.ingest.corpus_scan import UnreadableSubtreeError
+
+    fake, corpus, progress = _fresh_publish(tmp_path, monkeypatch)
+    _build_doc_with_id(corpus, "a", DOC_A)
+    hidden = corpus / "hidden"
+    hidden.mkdir()
+    _build_doc_with_id(hidden, "b", DOC_B)
+    hidden.chmod(0)
+    try:
+        with pytest.raises(UnreadableSubtreeError, match="hidden"):
+            _run_main(monkeypatch, corpus, progress)
+        assert _nothing_written(fake, progress)
+    finally:
+        hidden.chmod(0o755)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
+@pytest.mark.parametrize("mode", [0o444, 0o311])
+def test_partially_accessible_directory_fails_closed(tmp_path, monkeypatch, mode):
+    """#1003: a directory with read but no search permission (0o444), or search
+    but no read (0o311), still hides its PDFs from the walk: fail closed."""
+    from mainframe_rag.ingest.corpus_scan import UnreadableSubtreeError
+
+    fake, corpus, progress = _fresh_publish(tmp_path, monkeypatch)
+    _build_doc_with_id(corpus, "a", DOC_A)
+    hidden = corpus / "hidden"
+    hidden.mkdir()
+    _build_doc_with_id(hidden, "b", DOC_B)
+    hidden.chmod(mode)
+    try:
+        with pytest.raises(UnreadableSubtreeError, match="hidden"):
+            _run_main(monkeypatch, corpus, progress)
+        assert _nothing_written(fake, progress)
+    finally:
+        hidden.chmod(0o755)
+
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
+def test_unreadable_file_is_a_fixed_error_record_and_the_run_continues(tmp_path, monkeypatch):
+    """#1002: one unreadable PDF becomes a per-file `error` record with a
+    fixed type/message; readable siblings are still planned and recorded; the
+    run exits nonzero and publishes nothing."""
+    from mainframe_rag.ingest.corpus_scan import UNREADABLE_FILE_MESSAGE
+    from mainframe_rag.ingest.inventory import load_inventory
+
+    fake, corpus, progress = _fresh_publish(tmp_path, monkeypatch)
+    good = _build_doc_with_id(corpus, "good", DOC_A)
+    bad = _build_doc_with_id(corpus, "bad", DOC_B)
+    bad.chmod(0)
+    try:
+        assert _run_main(monkeypatch, corpus, progress) == 1
+    finally:
+        bad.chmod(0o644)
+    inv = load_inventory(progress)
+    assert inv[str(bad)].status == "error"
+    assert inv[str(bad)].error_type == "UnreadableFile"
+    assert inv[str(bad)].error == UNREADABLE_FILE_MESSAGE
+    assert str(corpus) not in (inv[str(bad)].error or "")
+    assert inv[str(good)].status == "upserted"
+    assert ALIAS not in fake.aliases  # no cutover over a failed corpus
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
+def test_corpus_of_only_unreadable_files_records_each_and_exits_nonzero(tmp_path, monkeypatch):
+    """#1002: when every PDF is unreadable the run still writes a fixed error
+    record per file and exits 1 (no exception, nothing published)."""
+    from mainframe_rag.ingest.inventory import load_inventory
+
+    fake, corpus, progress = _fresh_publish(tmp_path, monkeypatch)
+    bad = [_build_doc_with_id(corpus, "x", DOC_A), _build_doc_with_id(corpus, "y", DOC_B)]
+    for b in bad:
+        b.chmod(0)
+    try:
+        assert _run_main(monkeypatch, corpus, progress) == 1
+    finally:
+        for b in bad:
+            b.chmod(0o644)
+    inv = load_inventory(progress)
+    assert {inv[str(b)].error_type for b in bad} == {"UnreadableFile"}
+    assert all(inv[str(b)].status == "error" for b in bad)
+    assert not fake.aliases and not fake.collections
+
+
+def _parse_task(corpus: Path, path: Path, sha: str):
+    from mainframe_rag.ingest import run_ingest
+
+    return run_ingest.ParseTask(str(path), None, None, None, str(corpus), sha, False, None)
+
+
+def test_link_swapped_in_after_the_scan_is_refused_at_parse_time(tmp_path, monkeypatch):
+    """#996 TOCTOU: the planner confined the path, then it became a symlink to
+    an outside file. The worker refuses with a fixed record and never parses
+    the outside bytes."""
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.ibm_pdf import sha256_file
+
+    _publish_env(monkeypatch)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    pdf = _build_doc_with_id(corpus, "a", DOC_A)
+    sha = sha256_file(pdf)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    secret = _build_doc_with_id(outside, "o", DOC_B)
+    pdf.unlink()
+    pdf.symlink_to(secret)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("outside bytes were parsed")
+
+    monkeypatch.setattr(run_ingest, "parse_walked", forbidden)
+    record, _, chunks, vectors, _ = run_ingest._parse_one(_parse_task(corpus, pdf, sha))
+    assert record.status == "error" and record.error_type == "WalkedFileMovedError"
+    assert record.error == "walked_file_outside_root: walked file no longer resolves inside the corpus root"
+    assert chunks == [] and vectors == []
+
+
+def test_file_changed_after_the_scan_is_refused_at_parse_time(tmp_path, monkeypatch):
+    """#996 TOCTOU: bytes that differ from the walk-time digest are refused
+    after the worker read them, so they are never chunked or served."""
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.ibm_pdf import sha256_file
+
+    _publish_env(monkeypatch)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    pdf = _build_doc_with_id(corpus, "a", DOC_A)
+    sha = sha256_file(pdf)
+    _build_doc_with_id(corpus, "a", DOC_B)  # same path, different bytes
+    record, _, chunks, vectors, _ = run_ingest._parse_one(_parse_task(corpus, pdf, sha))
+    assert record.status == "error" and record.error_type == "WalkedFileChangedError"
+    assert record.error == "walked_file_changed: walked file changed after the corpus scan"
+    assert chunks == [] and vectors == []
+
+
+def test_swap_and_restore_during_parse_never_feeds_foreign_bytes_to_the_parser(tmp_path, monkeypatch):
+    """#996 TOCTOU: the original path is swapped for other bytes while the
+    parser runs and restored before it returns, so a later digest re-read of
+    the path would pass. The worker parses a private copy of the verified
+    bytes, so the parsed content is the original document's."""
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.ibm_pdf import sha256_file
+
+    _publish_env(monkeypatch)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    pdf = _build_doc_with_id(corpus, "a", DOC_A)
+    sha = sha256_file(pdf)
+    original = pdf.read_bytes()
+    foreign = _build_doc_with_id(tmp_path, "foreign", DOC_B).read_bytes()
+    real_parse = run_ingest.parse_walked
+    seen = []
+
+    def swapping_parse(path, *args, **kwargs):
+        seen.append(Path(path))
+        pdf.write_bytes(foreign)
+        try:
+            return real_parse(path, *args, **kwargs)
+        finally:
+            pdf.write_bytes(original)
+
+    monkeypatch.setattr(run_ingest, "parse_walked", swapping_parse)
+    record, parsed, chunks, _vectors, _ = run_ingest._parse_one(_parse_task(corpus, pdf, sha))
+    assert record.status != "error", record.error
+    assert record.path == str(pdf)
+    assert seen and seen[0] != pdf
+    assert parsed.doc_id == DOC_A
+    assert chunks
+
+
+def test_in_root_symlink_keeps_target_labels_and_identity_through_the_private_copy(
+    tmp_path, monkeypatch
+):
+    """Identity guard: for an in-root file symlink the live-path parse derived
+    layout/vendor labels from the symlink TARGET and the stem from the link
+    name. The private copy must reproduce exactly that, so doc_id, labels and
+    source_rev equal the unchanged parse_pdf(<live lexical path>) result."""
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.ibm_pdf import parse_pdf, sha256_file
+
+    _publish_env(monkeypatch)
+    corpus = tmp_path / "corpus"
+    (corpus / "misc" / "Precisely" / "x").mkdir(parents=True)
+    (corpus / "IBM" / "zOS" / "2.5").mkdir(parents=True)
+    target = _build_doc_with_id(corpus / "misc" / "Precisely" / "x", "b", DOC_A)
+    link = corpus / "IBM" / "zOS" / "2.5" / "a.pdf"
+    link.symlink_to(target)
+    sha = sha256_file(link)
+    expected = parse_pdf(link, corpus_root=corpus, sha256=sha)
+    assert expected.product != "zOS"  # the guard is only meaningful if target labels differ
+    record, parsed, _chunks, _vectors, _ = run_ingest._parse_one(_parse_task(corpus, link, sha))
+    assert record.status != "error", record.error
+    assert record.path == str(link)
+    assert (parsed.doc_id, parsed.vendor, parsed.product, parsed.version) == (
+        expected.doc_id,
+        expected.vendor,
+        expected.product,
+        expected.version,
+    )
+    assert record.source_rev == run_ingest.walked_source_rev(expected)

@@ -46,6 +46,37 @@ a sample (a real run is a publication of the whole corpus and refuses `--limit`)
   an IBM kit's folder names as product and version (issue #849). Note
   the empty-string (not `None`) version.
 
+**Corpus confinement (issues #996, #1002, #1003).** `walk_pdfs` is the corpus
+definition but does not check where a path leads or whether a subtree could be
+listed, so the planner (`corpus_scan.py`, called from `_plan` and the
+publication prewalk; `walk.py` is unchanged) enforces three rules:
+
+- A file symlink whose target resolves outside the corpus root is refused with
+  `OutOfRootLinkError` (code `corpus_symlink_outside_root`) before any parse,
+  storage or inventory write. A symlink resolving inside the root is walked.
+- A **symlinked directory is never traversed**, in-root or out: its PDFs are
+  not part of the corpus. The skip is logged as `symlinked_dir_skipped`.
+- A directory that cannot be listed (or a PDF name that cannot be stat'ed
+  because its directory has no search permission) makes the walk partial and
+  fails closed with `UnreadableSubtreeError` (code `corpus_subtree_unreadable`);
+  no alias can be published over it.
+- A single unreadable file (open/read `OSError`) is not fatal: it gets a fixed
+  `error` inventory record (`error_type` `UnreadableFile`, fixed message, empty
+  sha), the other files are planned, and the run exits nonzero (see §9).
+  A corpus whose only PDFs are unreadable gets the same per-file records and
+  exits nonzero without staging or publishing anything.
+- **Parse-time re-check (TOCTOU).** The scan confines a path once. The worker
+  re-checks that it still resolves inside the corpus root, then copies the file
+  once into a private 0700 directory, hashing the same bytes while copying
+  (an in-root symlink keeps its lexical path as a link to the copy, so layout,
+  stem and vendor-marker labels derive exactly as from the live path). The
+  parser and the page-text read use only that copy, and only if its sha256
+  equals the walk digest; otherwise the record is a fixed `error`
+  (`WalkedFileMovedError`, `WalkedFileChangedError`). The inventory keeps the
+  original path.
+- **Residual:** hardlinks to files outside the root have no path to detect
+  and are out of scope; only symlinks are confined.
+
 Contract tests: `tests/test_generic_pdf.py` (`detect_vendor`,
 `infer_from_path`), `tests/test_parser_ibm_shape.py` (walker filtering),
 `tests/test_ingest_revisions.py` (one source revision on both ingest paths
@@ -552,6 +583,16 @@ embed (hash embedding is GIL-bound — a thread pool would serialize it), so
 parsing runs in a `spawn` process pool while check-delete-upsert runs in a
 thread pool.
 
+- **Hidden characters in `doc_id`** (issue #1022): the filename-stem fallback
+  bypasses the rule-module page-text sanitizer, so `walked_source_rev` also
+  refuses a document whose resolved `doc_id` contains C0/C1 controls, DEL,
+  bidirectional marks/overrides/isolates, zero-width characters, soft hyphen,
+  U+2028/U+2029 or tag characters (NBSP and variation selectors stay allowed). The record is an
+  `error` with `error_type` `DocIdRefused` and the fixed message
+  `doc_id_hidden_characters: ...` (no id or path); other documents continue and the
+  run exits non-zero. Refused, never rewritten, in `run_ingest.py` outside the
+  rules-version modules, so no key changes and no re-embed is needed. Rename the
+  file to ingest it.
 - **Reserved label delimiter** (issue #878): `|` separates the
   `source_rev_key` fields, so `walked_source_rev` refuses a document whose resolved
   vendor, product or version (path layout or `--vendor/--product/--version`)
@@ -848,7 +889,11 @@ thread pool.
   `revs`/boolean `whole` plan entries (a plan entry still carrying the removed
   `legacy` field is refused). String-to-set and
   truthiness coercions are forbidden. A plan with recorded requests must match
-  their document/revision/whole-document scope; corrupt entries are never
+  their document/revision/whole-document scope; the requested `--retire-doc`
+  set must equal the recorded one before and after the alias swap (issue #1026;
+  a changed destructive request refuses, a post-swap retry cannot drop or add
+  one), compared as a set so order and repeats are not part of the request
+  (issue #1027); corrupt entries are never
   discarded. Older v1 records without either optional retirement field remain
   readable for diagnosis, but the new writer refuses unfinished v1 builds before
   mutation. Finish with the matching old release or explicitly abandon the
@@ -993,7 +1038,7 @@ thread pool.
 - `_parse_one` traps everything and returns a plain `InventoryRecord(status="error")`
   (message capped at 500 chars, exception class name in `error_type`, doc id or filename
   stem, zero pages/chunks) plus a dummy parsed doc; the future-exception path uses an
-  empty sha. One bad PDF never kills the run. Records must stay picklable across spawn
+  empty sha. One bad PDF never kills the run, including a file the planner cannot read (§1, #1002). Records must stay picklable across spawn
   IPC (no exception objects — unpicklable exceptions like `httpx2.HTTPStatusError` from
   contextual LLM calls would crash `ProcessPoolExecutor` across process boundaries).
 - A worker that dies (e.g. OOM-killed, #841) breaks the pool and fails every
@@ -1008,7 +1053,8 @@ thread pool.
   because the workers cannot run at all.
 - Result accounting: `skipped` + `upserted` both count as files-ok; only
   `upserted` adds upserted chunks. `empty` (zero-chunk doc, issue #359) and
-  `error` count as failed and exit nonzero. Bulk mode applies to real runs only,
+  `error` count as failed and exit nonzero, in a `--dry-run` as in a real run
+  (issue #1043): a dry run records `empty` with the same fixed message. Bulk mode applies to real runs only,
   restored in a `finally`. The summary logs files-ok/failed/chunks/parse and
   upsert seconds/pages-per-second/bulk/elapsed-ms and warns on failures;
   exit `1` iff any failure.
@@ -1153,7 +1199,11 @@ readiness, retrieval, answer/chat/console, recovery tools and evaluation.
 **Coordination/lifetime assumptions:** serialize the **entire** resolve/prepare/
 ingest/verify/publish interval across every writer/admin actor to the same target.
 Publish mode holds one target-identified advisory file lock
-(`publish-<alias>.lock` beside the progress file) from staging resolution
+(`publish-<alias>.lock` beside the progress file; an alias outside
+`[A-Za-z0-9_.-]` gets a digest of the full alias appended, so distinct aliases
+never share a lock or the `.json` build sidecar, issue #1028; the acquire also
+takes the legacy sanitized-name lock after it, and refuses while a legacy
+`.json` state exists: resume with the previous release or remove it explicitly) from staging resolution
 through cutover; a second live publisher for the same target fails closed
 (fcntl releases on process death, so a held lock means a live holder — locks
 are never stolen). Same-alias runs must share the progress directory; a
