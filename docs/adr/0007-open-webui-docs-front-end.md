@@ -58,6 +58,13 @@ Pipe is provisioned and the admin role is limited to the team.
   follow-ups, autocomplete, query generation) are off. The Pipe also answers
   any Open WebUI `__task__` call with fixed text and never forwards it to the
   agent.
+  Functions can read tokens: any Open WebUI Function may declare
+  `__oauth_token__` and receive the user's access and ID tokens (Kind trial).
+  So **only the hash-checked docs Pipe may exist**: the installer installs
+  nothing else and refuses (fails the deploy with fixed text) when any other
+  Function is present, and the Pipe never declares `__oauth_token__`,
+  `__request__` or any `__user__`-style parameter it does not use; a test
+  inspects its `pipe()` signature. A new parameter is a recorded decision.
   Proof: over a multi-turn trial, agent requests equal user turns.
 - **V3 Contract fidelity.** The Pipe sends exactly the agent's `ChatRequest`
   shape. It renders validated citations with their supplied excerpts as source
@@ -117,6 +124,10 @@ Pipe is provisioned and the admin role is limited to the team.
   refuses any other Route in front of its Service. The agent stays anonymous
   to Open WebUI users (#373), which is safe because the docs corpus is read by
   everyone.
+  Scopes include `groups` and `offline_access`: without a refresh token Open
+  WebUI deletes the session near expiry and may fall back to an older
+  session's token, so the IdP must permit the refresh scope (the real IdP
+  refresh path is a #1073 run-2 item).
 - **S1 Storage.** The pod runs one replica with a `Recreate` rollout, a single
   worker and SQLite. Its data lives on a kept RWO block PVC, never NFS:
   validate refuses an NFS-named class, as for the other writable volumes,

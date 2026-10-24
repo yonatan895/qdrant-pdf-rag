@@ -446,6 +446,22 @@ def test_only_product_set_sends_only_product():
     assert "version" not in body
 
 
+def test_pipe_never_declares_token_or_request_parameters():
+    """ADR-0007 V2: any Function may declare `__oauth_token__` and receive the
+    user's access and ID tokens (Kind trial). The Pipe takes only what it uses:
+    never the token set, the raw request or the session."""
+    import inspect
+
+    forbidden = {"__oauth_token__", "__request__", "__oauth_id_token__", "__token__", "__session__",
+                 "__files__", "__tools__"}
+    declared = set(inspect.signature(docs_pipe.Pipe.pipe).parameters)
+    assert not declared & forbidden, sorted(declared & forbidden)
+    assert declared <= {"self", "body", "__user__", "__event_emitter__", "__task__", "__metadata__"}, \
+        "a new Pipe parameter is a deliberate decision: record why it is needed (ADR-0007 V2)"
+    # The module as a whole never names a token holder.
+    assert "oauth_token" not in Path(docs_pipe.__file__).read_text(encoding="utf-8")
+
+
 def test_agent_url_valve_is_the_only_destination():
     fake = FakeAgent()
     pipe = docs_pipe.Pipe()

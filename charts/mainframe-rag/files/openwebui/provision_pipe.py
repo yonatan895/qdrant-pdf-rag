@@ -10,6 +10,7 @@ key arrives on stdin, never in argv, the environment or the pod spec.
      certificate (pinned by DER bytes) before the key is sent.
   3. The Function is created, or updated when its stored content differs, and
      then read back: its stored content must hash to EXPECTED_SHA256.
+  3b. No other Function may exist (every Function can read the user's tokens).
   4. The Function is switched active when it is not (a toggle is applied only
      after reading the current state, so a repeat run converges).
 
@@ -108,14 +109,27 @@ class Client:
             document = json.loads(raw)
         except ValueError:
             raise ProvisionError(f"{method} {path} returned a non-JSON body") from None
-        return status, document if isinstance(document, dict) else None
+        return status, document if isinstance(document, (dict, list)) else None
+
+
+def _refuse_other_functions(client: Client) -> None:
+    """Every Function can read the user's access and ID tokens (__oauth_token__),
+    so the hash-checked docs Pipe is the only Function that may exist (ADR-0007
+    V2). Another one is refused by name-free fixed text: remove it, then re-run."""
+    status, document = client.call("GET", "/api/v1/functions/")
+    if status != 200 or not isinstance(document, list):
+        raise ProvisionError(f"cannot list Functions (HTTP {status})")
+    if any(not isinstance(item, dict) or item.get("id") != PIPE_ID for item in document):
+        raise ProvisionError("a Function other than the repository docs Pipe is installed; only the "
+                             "hash-checked docs Pipe may exist (Functions can read user tokens): "
+                             "remove it and re-run; nothing was installed")
 
 
 def _function(client: Client) -> dict | None:
     status, document = client.call("GET", f"/api/v1/functions/id/{PIPE_ID}")
     if status == 404:
         return None
-    if status != 200 or document is None:
+    if status != 200 or not isinstance(document, dict):
         raise ProvisionError(f"cannot read Function {PIPE_ID} (HTTP {status})")
     return document
 
@@ -132,6 +146,7 @@ def provision(client: Client, source: str, expected: str) -> list[str]:
                              "(sha256 differs); nothing was installed")
     form = {"id": PIPE_ID, "name": PIPE_NAME, "content": source,
             "meta": {"description": PIPE_DESCRIPTION, "manifest": {}}}
+    _refuse_other_functions(client)
     current = _function(client)
     if current is None:
         status, _ = client.call("POST", "/api/v1/functions/create", form)
@@ -147,6 +162,7 @@ def provision(client: Client, source: str, expected: str) -> list[str]:
     if stored is None or _stored_sha(stored) != expected:
         raise ProvisionError(f"stored Function {PIPE_ID} does not match the repository "
                              "Pipe after the write")
+    _refuse_other_functions(client)
     if stored.get("is_active") is not True:
         status, _ = client.call("POST", f"/api/v1/functions/id/{PIPE_ID}/toggle")
         if status != 200:

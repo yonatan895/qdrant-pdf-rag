@@ -211,7 +211,7 @@
       "status": "pending-owner-decision"
     },
     {
-      "approval_ref": "gh:yonatan895/qdrant-pdf-rag#1070 maintainer decision 2026-10-24, relayed by the #1070 coordinator; ADR-0007 E1 (ADR-0007 pending acceptance)",
+      "approval_ref": "gh:yonatan895/qdrant-pdf-rag#1070 maintainer disposition 2026-10-24, relayed by the #1070 coordinator; ADR-0007 E1 (ADR-0007 pending acceptance)",
       "bind": {
         "digest": "sha256:f5116ed4606f3eb015dd4a8e28cb9b351476dc0ad4bc6e9f93b19cec130cdf03",
         "images_txt": "docker.io/nginxinc/nginx-unprivileged:1.30.6-alpine"
@@ -219,7 +219,7 @@
       "class": "permissive",
       "decision": {
         "date": "2026-10-24",
-        "disposition": "maintainer decision 2026-10-24 (ADR-0007 pending acceptance): nginx allow-list sidecar of the Open WebUI pod, shipped unmodified from the nginxinc/nginx-unprivileged image; only the repository's own nginx.conf is mounted",
+        "disposition": "maintainer disposition 2026-10-24 (ADR-0007 pending acceptance): nginx allow-list sidecar of the Open WebUI pod, shipped unmodified from the nginxinc/nginx-unprivileged image; only the repository's own nginx.conf is mounted",
         "owner": "yonatan895"
       },
       "distributed_by_repo": true,

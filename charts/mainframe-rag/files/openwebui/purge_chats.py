@@ -8,7 +8,10 @@ as the SQLite database (the ADR-0005/#804 purge pattern):
 Each run deletes, in one transaction, every chat whose last update is older
 than N days, the shared snapshots of those chats (and stale snapshots), the
 rows of every other table that reference a deleted chat by `chat_id`, and
-file records older than the window with their uploaded files. The uploads are
+file records older than the window, the files attached to a purged chat that no
+surviving chat still references (even when the file's own row is recent), and
+orphaned uploads: regular files under uploads/ that no `file` row names and
+that are older than a day. The bytes in uploads/ go with their rows. The uploads are
 unlinked INSIDE the transaction, before the commit: if one cannot be removed
 the run fails and rolls back, so the rows that name it survive for the next
 run (a file is never orphaned with no row left to find it). Deletion runs with
@@ -39,6 +42,9 @@ import time
 from pathlib import Path
 
 DAY_S = 86400
+# An upload with no row is removed only after this long, so one whose row is
+# about to be written is never taken.
+ORPHAN_GRACE_S = DAY_S
 STATUS_NAME = ".mainframe-rag-purge.json"
 PENDING_NAME = ".mainframe-rag-purge-pending"
 SHARED_PREFIX = "shared-"
@@ -78,6 +84,24 @@ def _fsync_dir(path: Path) -> None:
         os.close(fd)
 
 
+def _upload_path(path: object, data_dir: Path, uploads: Path) -> Path | None:
+    """The stored upload path when it lies under uploads/, else None."""
+    if not isinstance(path, str) or not path:
+        return None
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        candidate = data_dir / candidate
+    candidate = candidate.resolve()
+    return candidate if candidate.is_relative_to(uploads) else None
+
+
+def _unlink(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        raise PurgeError("unlink") from None
+
+
 def _mark_pending(data_dir: Path) -> None:
     """Durably record that deleted content may still be in the database files."""
     marker = data_dir / PENDING_NAME
@@ -96,7 +120,7 @@ def purge(db: Path, data_dir: Path, days: int, now: float, busy_timeout_s: float
         raise PurgeError("bad-window")
     if not db.exists():
         # Open WebUI has not created its database yet: nothing is stored.
-        return {"chats": 0, "snapshots": 0, "linked_rows": 0, "files": 0}
+        return {"chats": 0, "snapshots": 0, "linked_rows": 0, "files": 0, "orphans": 0}
     cutoff = int(now) - days * DAY_S
     uploads = (data_dir / "uploads").resolve()
     try:
@@ -125,6 +149,25 @@ def purge(db: Path, data_dir: Path, days: int, now: float, busy_timeout_s: float
                      "(SELECT id FROM purge_chat))",
                      (SHARED_PREFIX + "%", cutoff, len(SHARED_PREFIX) + 1))
         (total,) = conn.execute("SELECT count(*) FROM purge_chat").fetchone()
+        files = 0
+        orphans = 0
+        if has_files:
+            conn.execute("CREATE TEMP TABLE purge_file(id TEXT PRIMARY KEY, path TEXT)")
+            conn.execute("INSERT INTO purge_file SELECT id, path FROM file WHERE updated_at < ?",
+                         (cutoff,))
+            if "chat_file" in tables and {"chat_id", "file_id"} <= _columns(conn, "chat_file"):
+                # Attached to a purged chat and to no surviving chat: the bytes go
+                # with the chat even when the file's own row is recent.
+                conn.execute(
+                    "INSERT OR IGNORE INTO purge_file SELECT id, path FROM file WHERE id IN "
+                    "(SELECT file_id FROM chat_file WHERE chat_id IN (SELECT id FROM purge_chat)) "
+                    "AND id NOT IN (SELECT file_id FROM chat_file "
+                    "WHERE chat_id NOT IN (SELECT id FROM purge_chat))")
+            for (path,) in conn.execute("SELECT path FROM purge_file").fetchall():
+                candidate = _upload_path(path, data_dir, uploads)
+                if candidate is not None:
+                    # Inside the transaction: a failure rolls the rows back.
+                    _unlink(candidate)
         linked = 0
         for table in tables:
             if table != "chat" and "chat_id" in _columns(conn, table):
@@ -132,17 +175,7 @@ def purge(db: Path, data_dir: Path, days: int, now: float, busy_timeout_s: float
                                    "(SELECT id FROM purge_chat)")
                 linked += max(cur.rowcount, 0)
         conn.execute("DELETE FROM chat WHERE id IN (SELECT id FROM purge_chat)")
-        files = 0
         if has_files:
-            conn.execute("CREATE TEMP TABLE purge_file(id TEXT PRIMARY KEY, path TEXT)")
-            conn.execute("INSERT INTO purge_file SELECT id, path FROM file WHERE updated_at < ?",
-                         (cutoff,))
-            for (path,) in conn.execute("SELECT path FROM purge_file").fetchall():
-                if isinstance(path, str) and path:
-                    candidate = Path(path).resolve()
-                    if candidate.is_relative_to(uploads):
-                        # Inside the transaction: a failure rolls the rows back.
-                        candidate.unlink(missing_ok=True)
             for table in tables:
                 if table != "file" and "file_id" in _columns(conn, table):
                     cur = conn.execute(f"DELETE FROM {_quote(table)} WHERE file_id IN "
@@ -150,6 +183,19 @@ def purge(db: Path, data_dir: Path, days: int, now: float, busy_timeout_s: float
                     linked += max(cur.rowcount, 0)
             cur = conn.execute("DELETE FROM file WHERE id IN (SELECT id FROM purge_file)")
             files = max(cur.rowcount, 0)
+            # Orphans: bytes under uploads/ that no remaining row names.
+            referenced = set()
+            for (path,) in conn.execute("SELECT path FROM file").fetchall():
+                candidate = _upload_path(path, data_dir, uploads)
+                if candidate is not None:
+                    referenced.add(candidate)
+            if uploads.is_dir():
+                for entry in sorted(uploads.rglob("*")):
+                    if (entry.is_symlink() or not entry.is_file() or entry.resolve() in referenced
+                            or entry.stat().st_mtime >= now - ORPHAN_GRACE_S):
+                        continue
+                    _unlink(entry)
+                    orphans += 1
         if total or files or linked:
             # Before the commit: a crash between commit and scrub still leaves
             # the marker, so the next run finishes the job.
@@ -169,7 +215,8 @@ def purge(db: Path, data_dir: Path, days: int, now: float, busy_timeout_s: float
                 raise PurgeError("checkpoint-busy")
             (data_dir / PENDING_NAME).unlink()
             _fsync_dir(data_dir)
-        return {"chats": chats, "snapshots": total - chats, "linked_rows": linked, "files": files}
+        return {"chats": chats, "snapshots": total - chats, "linked_rows": linked, "files": files,
+                "orphans": orphans}
     except sqlite3.OperationalError as exc:
         code = "busy" if "locked" in str(exc) or "busy" in str(exc) else "sqlite"
         raise PurgeError(code) from None
@@ -203,7 +250,8 @@ def run_once(db: Path, data_dir: Path, days: int, status: dict, now: float,
         status.update(consecutive_failures=0, last_success=int(now), last_counts=counts,
                       last_error="")
         print("chat purge ok: window {} days, chats {chats}, snapshots {snapshots}, "
-              "linked rows {linked_rows}, files {files}".format(days, **counts), flush=True)
+              "linked rows {linked_rows}, files {files}, orphan uploads {orphans}".format(days, **counts),
+              flush=True)
         ok = True
     status["window_days"] = days
     try:
