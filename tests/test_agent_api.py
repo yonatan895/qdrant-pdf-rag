@@ -17,6 +17,7 @@ from hypothesis import strategies as st
 from mainframe_rag.agent import app as app_mod
 from mainframe_rag.agent.answer import (
     DECLINE_PREFIX,
+    has_answer_body,
     is_abstention,
     is_structured_decline,
     parse_answer,
@@ -1722,8 +1723,8 @@ def test_parse_answer_filename_stem_citation_block():
 
 def test_parse_answer_filename_stem_body_citation_hygiene():
     """Body-level fabricated filename-stem cites and pasted heading-path
-    fragments are stripped and counted exactly like doc-number ones; prose,
-    and a stem that is not a supplied doc id, are untouched."""
+    fragments are stripped and counted exactly like doc-number ones, whether or
+    not the stem was supplied (#997); prose is untouched."""
     supplied = "widget-messages Widget Messages, Widget Messages > WID7143E, p. 234"
     evidence = _stem_evidence([("widget-messages", supplied)])
     content = (
@@ -1739,11 +1740,11 @@ def test_parse_answer_filename_stem_body_citation_hygiene():
     assert parsed.citations == [supplied]
     assert parsed.answer.splitlines() == [
         "First step.",
-        "unknown-manual Some Title, Some > Path, p. 3",
         "widget-messages lists every code.",
         "Second step.",
     ]
-    assert parsed.cites_rejected_unmapped == 1
+    # An unsupplied generic stem is a citation attempt too (#997).
+    assert parsed.cites_rejected_unmapped == 2
 
 
 def test_build_messages_preserves_syntax_and_message_fidelity():
@@ -4005,3 +4006,124 @@ def test_a_whole_line_quoted_decline_is_recognized_in_every_quote_style(quote, s
     """#877 D2: wrapper peeling treats curly and straight quotes alike."""
     body = quote.format(f"{DECLINE_PREFIX} {subject}.") + tail
     assert is_structured_decline(body) is True, body
+
+
+def test_parse_answer_unsupplied_generic_stem_citation_is_not_a_body():
+    """#997: a fabricated filename-stem citation whose stem was never supplied
+    is a citation attempt, not prose. As the only body it leaves the answer
+    incomplete and is counted; IBM-number and supplied-stem controls agree."""
+    supplied = "widget-messages Widget Messages, Recovery > WID001I, p. 2"
+    evidence = _stem_evidence([("widget-messages", supplied)])
+    ibm = "SA22-9999-99 Not Retrieved, Made Up > Path, p. 9-9"
+    supplied_stem_fake = "widget-messages Widget Messages, Recovery > WID999I, p. 9"
+    generic = "evil-messages Evil Messages, Recovery > X, p. 9-9"
+    for fake in (generic, ibm, supplied_stem_fake):
+        parsed = parse_answer(f"{fake}\n\nCitations:\n- {supplied}\n", evidence)
+        assert parsed.answer == "", fake
+        assert parsed.citations == [supplied]
+        assert parsed.cites_rejected_unmapped == 1, fake
+        assert (
+            verification_state_for(
+                answer=parsed.answer,
+                citations=parsed.citations,
+                citations_inferred=False,
+                finish_reason="stop",
+                abstained=False,
+                empty_hits=False,
+            )
+            == "generation_incomplete"
+        )
+    # Without a trailing list the body scanner alone must still reject it.
+    parsed = parse_answer(f"{generic}\n[1]", evidence)
+    assert parsed.answer == "[1]"
+    assert parsed.cites_rejected_unmapped == 1
+    assert not has_answer_body(parsed.answer, parsed.citations)
+    # Prose that merely starts with a hyphenated word is untouched.
+    prose = "well-known behavior applies, but only when SMS is active, see below."
+    assert is_citation_shaped(prose) is False
+    assert parse_answer(prose, evidence).answer == prose
+
+
+@pytest.mark.parametrize("digits", [4300, 5000, 50_000])
+def test_parse_answer_huge_bracket_digits_do_not_raise(digits):
+    """#1009: a bracket of thousands of digits resolves to no excerpt."""
+    cite = "SA22-0000-00 Synthetic Reference, Chapter 1 > System parameters, p. 1-3"
+    content = "Reissue the command.\n[" + "9" * digits + "]"
+    parsed = parse_answer(content, make_evidence([cite]))
+    assert parsed.citations == []
+    assert parsed.citations_inferred is False
+    mixed = parse_answer("Reissue [" + "9" * digits + ", 1].", make_evidence([cite]))
+    assert mixed.citations == [cite]
+    assert mixed.inferred_indices == [1]
+
+
+def test_answer_huge_bracket_returns_fixed_state_not_500(client, monkeypatch):
+    content = "Reissue the command.\n[" + "9" * 5000 + "]"
+
+    class HugeBracketLLM:
+        def chat(self, messages, *a, **k):
+            return ChatResult(content=content, finish_reason="stop", usage=TokenUsage())
+
+    monkeypatch.setattr(app_mod, "llm", HugeBracketLLM())
+    resp = client.post("/v1/answer", json={"query": "IEA500I"})
+    assert resp.status_code == 200
+    assert resp.json()["verification_state"] == "unverified_draft"
+
+
+def test_citations_header_regex_is_linear_in_newlines():
+    """#1010: the header search over a newline-only reply is bounded (it took
+    12 s at 2,000 newlines) and parse_answer of the same reply stays fast."""
+    from mainframe_rag.agent.cites import CITATIONS_HEADER_RE
+
+    cite = "SA22-0000-00 Synthetic Reference, Chapter 1 > System parameters, p. 1-3"
+    for n in (2000, 20_000):
+        text = "\n" * n
+        t0 = time.perf_counter()
+        assert CITATIONS_HEADER_RE.search(text) is None
+        assert time.perf_counter() - t0 < 0.5, n
+    spaced = "x\n" + " \t\n" * 5000
+    t0 = time.perf_counter()
+    parsed = parse_answer(spaced + "Citations:\n" + cite, make_evidence([cite]))
+    assert time.perf_counter() - t0 < 2.0
+    assert parsed.citations == [cite] and parsed.citations_header_present is True
+    # A header after blank lines, with markup, still matches.
+    assert CITATIONS_HEADER_RE.search("a\n\n\n## **Citations**:\n- x")
+
+
+def test_citations_header_regex_is_linear_in_horizontal_whitespace():
+    """#1010: adjacent horizontal-whitespace runs around an optional `#` run
+    backtracked quadratically (16,000 spaces cost 1.3 s in the regex, 7 s in
+    parse_answer); whole-reply parsing of a 128k space/tab flood stays fast."""
+    from mainframe_rag.agent.cites import CITATIONS_HEADER_RE
+
+    for ws in (" ", "\t", " \t"):
+        text = "Fix it.\n" + ws * (16_000 // len(ws)) + "\n[1]"
+        t0 = time.perf_counter()
+        assert CITATIONS_HEADER_RE.search(text) is None
+        assert time.perf_counter() - t0 < 0.2, repr(ws)
+    for ws in (" ", "\t"):
+        text = "Fix it.\n" + ws * 128_000 + "\n[1]"
+        t0 = time.perf_counter()
+        parse_answer(text, make_evidence([]))
+        assert time.perf_counter() - t0 < 2.0, repr(ws)
+    # Indented and marked headers still match.
+    for header in ("Citations:", "  Citations:", "\t## Citations:", "###   **Citations**:  "):
+        assert CITATIONS_HEADER_RE.search("a\n" + header + "\n- x"), header
+
+
+def test_livez_responsive_while_hostile_reply_is_finalized(client, monkeypatch):
+    """#1010: /livez answers promptly while a 2 KB newline reply is processed."""
+    content = "Reissue the command.\n" + "\n" * 2000
+
+    class HostileLLM:
+        def chat(self, messages, *a, **k):
+            return ChatResult(content=content, finish_reason="stop", usage=TokenUsage())
+
+    monkeypatch.setattr(app_mod, "llm", HostileLLM())
+    t0 = time.perf_counter()
+    resp = client.post("/v1/answer", json={"query": "IEA500I"})
+    assert resp.status_code == 200
+    assert time.perf_counter() - t0 < 3.0
+    t1 = time.perf_counter()
+    assert client.get("/livez").status_code == 200
+    assert time.perf_counter() - t1 < 1.0
