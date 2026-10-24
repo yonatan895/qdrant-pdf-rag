@@ -630,6 +630,19 @@ def _revision_has_points(
     return bool(points)
 
 
+def _revision_stored(client: QdrantReader, settings: Settings, source_rev: str) -> bool:
+    """Whether any point of one source revision exists, whatever its doc_id."""
+    points, _ = client.scroll(
+        settings.qdrant_collection,
+        scroll_filter=models.Filter(
+            must=[models.FieldCondition(key="source_rev", match=models.MatchValue(value=source_rev))]
+        ),
+        limit=1,
+        with_payload=False,
+    )
+    return bool(points)
+
+
 class UnsupportedLegacyDataError(RuntimeError):
     """Fail-closed refresh abort: a document has stored points without a
     source revision. Pre-revision (pre-361B) data is no longer supported, so
@@ -661,7 +674,9 @@ def plan_refresh_deletes(
     - a stale current revision is always replaced (a valid one would have
       skipped already, except under --reingest);
     - inventory lineage replaces precisely (the lineage revision, if
-      present and different);
+      present and different) — under this doc_id or any other: lineage is
+      the path's previous source revision, and a reissue may print a new
+      form number (issue #1006);
     - committed coexisting revisions are left alone — replacing one needs
       its lineage (replacement without lineage would be the overwrite bug);
     - completion-less residue is deleted (crash-safe retry);
@@ -674,7 +689,9 @@ def plan_refresh_deletes(
     named = {r for r in present if r is not None}
     dels = {source_rev} if source_rev in named else set()
     if lineage_rev is not None:
-        if lineage_rev != source_rev and lineage_rev in named:
+        if lineage_rev != source_rev and (
+            lineage_rev in named or _revision_stored(client, settings, lineage_rev)
+        ):
             dels.add(lineage_rev)
         return dels
     # No lineage: committed others are coexistence (leave); residue goes.

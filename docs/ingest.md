@@ -712,7 +712,10 @@ thread pool.
   this is a distinct identity and remains a #361/#391 design question.
 - **Refresh lineage rule:** a refresh replaces precisely the revision named
   by inventory lineage (the path's previous `source_rev`, threaded from
-  the parent plan into the upsert stage). Committed coexisting revisions
+  the parent plan into the upsert stage), independent of the printed
+  `doc_id`: a same-path reissue that prints a new form number deletes the
+  lineage revision and its markers under the old `doc_id` before the upsert
+  (issue #1006), so the ordinary rerun cuts over. Committed coexisting revisions
   are left alone — replacing one needs its lineage, otherwise the write
   would be the overwrite bug. A revision is committed when any of its
   markers verifies against the stored points, whichever physical the marker
