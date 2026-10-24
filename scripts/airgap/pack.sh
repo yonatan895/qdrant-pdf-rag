@@ -43,6 +43,18 @@ LICENSE_SUMMARY=$(python3 "$REPO_ROOT/scripts/license_inventory.py" --root "$REP
 printf '%s\n' "$LICENSE_SUMMARY" | sed -n '$p'
 LICENSE_STATUS=$(printf '%s\n' "$LICENSE_SUMMARY" | sed -n '$p' | sed 's/^license-inventory: //')
 
+# Packaging provenance (#1030): the shipped Containerfile FROM digests must equal
+# the approved pin in images.txt and the lock (the SBOM labels the base from
+# images.txt, so an off-pin FROM would otherwise be attested as the pin).
+python3 "$REPO_ROOT/scripts/image_inventory.py" --root "$REPO_ROOT" --check-containerfiles >/dev/null ||
+    die "Containerfile base digest check failed: images/Containerfile.* FROM must equal the pin in images.txt and the lock (scripts/image_inventory.py --check-containerfiles)"
+
+# `git bundle` records clean HEAD, so the license/SBOM scripts above must have
+# read exactly that tree: refuse tracked changes (staged or not) and index flags
+# that hide edits (assume-unchanged, skip-worktree, sparse) before anything is
+# pulled or signed. Untracked operator files (airgap.env, dist/) stay allowed.
+check_pack_tree_clean
+
 GHCR_OWNER=${GHCR_OWNER:-}
 APP_REGISTRY=${AIRGAP_APP_REGISTRY:-}
 if [ -z "$APP_REGISTRY" ]; then

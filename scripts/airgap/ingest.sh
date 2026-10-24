@@ -97,9 +97,14 @@ fail_on_placeholders dist/ingest-rendered.yaml ingest
 # production template in git. Client-side only; the cluster is not contacted.
 INGEST_EXTRA_PATCH=${INGEST_EXTRA_PATCH:-}
 if [ -n "$INGEST_EXTRA_PATCH" ]; then
+    require_ci_rehearsal INGEST_EXTRA_PATCH
     [ -f "$INGEST_EXTRA_PATCH" ] || die "INGEST_EXTRA_PATCH file not found: $INGEST_EXTRA_PATCH"
     $KC patch --local -f dist/ingest-rendered.yaml \
         -p "$(cat "$INGEST_EXTRA_PATCH")" -o yaml > dist/ingest-rendered-patched.yaml
+    # Re-validate after the patch: only container resources may differ, and
+    # no hash-embedding env may appear (#1014).
+    python3 scripts/airgap/check_ingest_patch.py dist/ingest-rendered.yaml dist/ingest-rendered-patched.yaml ||
+        die "INGEST_EXTRA_PATCH may only change container resources (the patched Job differs elsewhere)"
     mv dist/ingest-rendered-patched.yaml dist/ingest-rendered.yaml
 fi
 check_ingest_qdrant_key dist/ingest-rendered.yaml ingest
