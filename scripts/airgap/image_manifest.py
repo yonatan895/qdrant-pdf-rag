@@ -30,6 +30,25 @@ IMAGE_MANIFEST_TYPES = frozenset({
     "application/vnd.oci.image.manifest.v1+json",
     "application/vnd.docker.distribution.manifest.v2+json",
 })
+# Config and layer media types are part of the same family as the manifest
+# (#1066 review N1). A registry that rejects OCI manifests makes skopeo convert
+# on push; a member whose own descriptors disagree must be refused before any
+# bytes are pushed. Compressed and plain tar layers are accepted; zstd is not,
+# because pack never produces it and the site's skopeo support is unverified.
+CONFIG_MEDIA_TYPES = {
+    "application/vnd.oci.image.manifest.v1+json": "application/vnd.oci.image.config.v1+json",
+    "application/vnd.docker.distribution.manifest.v2+json": "application/vnd.docker.container.image.v1+json",
+}
+LAYER_MEDIA_TYPES = {
+    "application/vnd.oci.image.manifest.v1+json": frozenset({
+        "application/vnd.oci.image.layer.v1.tar",
+        "application/vnd.oci.image.layer.v1.tar+gzip",
+    }),
+    "application/vnd.docker.distribution.manifest.v2+json": frozenset({
+        "application/vnd.docker.image.rootfs.diff.tar",
+        "application/vnd.docker.image.rootfs.diff.tar.gzip",
+    }),
+}
 METADATA_LIMIT = 8_000_000
 
 
@@ -127,6 +146,21 @@ def _small(archive: tarfile.TarFile, members: dict[str, tarfile.TarInfo], name: 
     return json.loads(stream.read())
 
 
+def _check_media_types(entry_type: str, manifest: dict) -> None:
+    """Bind the manifest body, config and layers to the index entry's type."""
+    if manifest.get("mediaType") != entry_type:
+        raise ArchiveError("OCI index and manifest media types differ")
+    config = manifest.get("config")
+    if not isinstance(config, dict) or config.get("mediaType") != CONFIG_MEDIA_TYPES[entry_type]:
+        raise ArchiveError("image config media type does not match the manifest")
+    layers = manifest.get("layers")
+    if not isinstance(layers, list):
+        raise ArchiveError("image has no layer list")
+    for layer in layers:
+        if not isinstance(layer, dict) or layer.get("mediaType") not in LAYER_MEDIA_TYPES[entry_type]:
+            raise ArchiveError("image layer media type is not the manifest's family")
+
+
 def read_archive(archive: tarfile.TarFile) -> OciImage:
     """Verify one oci-archive member and return its manifest, config and layers."""
     members = _members(archive)
@@ -138,11 +172,13 @@ def read_archive(archive: tarfile.TarFile) -> OciImage:
         raise ArchiveError("OCI index must name exactly one image")
     entry = index["manifests"][0]
     digest, size = _descriptor(entry)
-    if entry.get("mediaType") not in IMAGE_MANIFEST_TYPES:
+    entry_type = entry.get("mediaType")
+    if not isinstance(entry_type, str) or entry_type not in IMAGE_MANIFEST_TYPES:
         raise ArchiveError("OCI index entry is not a single-image manifest")
     manifest_raw = _blob(archive, members, digest, size, keep=True)
     image_config(manifest_raw)
     manifest = json.loads(manifest_raw)
+    _check_media_types(entry_type, manifest)
     config_digest, config_size = _descriptor(manifest["config"])
     config_raw = _blob(archive, members, config_digest, config_size, keep=True)
     layers = []

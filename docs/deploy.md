@@ -515,17 +515,22 @@ checksums **after**.
   that release's own `bootstrap.sh` and `load.sh` in a separate workspace
   ([rollback](install_and_ops.md#42-transfer--automated-bootstrap)). Its
   checkout-identity guard would refuse mixing it with this checkout anyway.
-- Bastion prerequisites for `oci-archive`: skopeo unpacks an `oci-archive`
-  source under `TMPDIR` (default `/var/tmp`) for each copy, so export
-  `TMPDIR` to a writable directory with free space for the largest member
-  (about 0.3 GB) where only a work directory is writable. A site
+- Bastion prerequisites for `oci-archive`: skopeo ignores `TMPDIR` when it
+  unpacks an `oci-archive` and uses `/var/tmp` unless the global `--tmpdir`
+  flag is given. Where only a work directory is writable, put
+  `--tmpdir /work/tmp` in `SKOPEO_ARGS` (for example
+  `SKOPEO_ARGS="--authfile /work/auth.json --tmpdir /work/tmp"`); `load.sh`
+  refuses before the first push unless that directory exists, is writable and
+  has room for the largest member (at least 0.3 GB). A site
   `containers-policy.json` passed with `--policy` that admits only the
   `docker-archive` transport must also admit `oci-archive` (same
   `insecureAcceptAnything` scope: bundle trust is the signed checksum list,
   not registry signatures). The internal registry must accept OCI image
   manifests (Qdrant's platform manifest is OCI; Docker registry 2.x and
-  current Quay do); a registry that rewrites it fails load's config read-back,
-  never silently.
+  current Quay do). A registry that rejects OCI manifests makes skopeo convert
+  on push, and that can rewrite the image config, so load refuses the tag; a
+  conversion that keeps the config passes, with a registry digest that differs
+  from the MANIFEST digest, and deploy pins that registry digest.
 - Release-signing custody (#1000): CI holds the key only as an **environment**
   secret `SNEAKERNET_SIGNING_KEY` of the GitHub environment `release-signing`
   (maintainer setup: Settings > Environments > New; Deployment branches =

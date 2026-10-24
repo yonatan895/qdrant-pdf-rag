@@ -49,7 +49,7 @@ Mainframe RAG is a citation-first retrieval-augmented generation engine designed
 - **OpenShift Client:** `oc` (v4.12+) or `kubectl`.
 - **Helm:** checksum-pinned **4.3.0**, as used by [the deployment workflow](../.github/workflows/e2e.yml); the launcher requires Helm 4. Transfer the verified client with the operator tools. Both `charts/mainframe-rag` and `charts/qdrant-1.19.2.tgz` are local; do **not** run `helm repo add` in the air gap.
 - **Rendering:** host `python3` with its standard library for release-value serialization and ownership checks. Bootstrap itself does not require Python; deployment does. No application packages or runtime dependency downloads are needed on the bastion.
-- **Image Tooling:** `skopeo` (for loading the bundle's `oci-archive` image members into the internal registry). Export `TMPDIR` to a writable directory with room for the largest member (about 0.3 GB) when `/var/tmp` is not writable, and let a restrictive `--policy` file admit the `oci-archive` transport ([image format](deploy.md#bundle-image-format)).
+- **Image Tooling:** `skopeo` (for loading the bundle's `oci-archive` image members into the internal registry). skopeo ignores `TMPDIR` for `oci-archive` and uses `/var/tmp` unless `--tmpdir` is given: add `--tmpdir /work/tmp` to `SKOPEO_ARGS` when `/var/tmp` is not writable. `load.sh` checks that directory (exists, writable, room for the largest member) before the first push. Let a restrictive `--policy` file admit the `oci-archive` transport ([image format](deploy.md#bundle-image-format)).
 - **Cluster Permissions:** Access to create/manage workloads in the target namespace with `restricted-v2` SCC.
 
 ---

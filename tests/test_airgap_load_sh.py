@@ -369,6 +369,25 @@ def _rewrite_member(path: Path, edit) -> None:
     path.write_bytes(tar_bytes(edit(members)))
 
 
+def _rewrite_manifest(path: Path, edit) -> None:
+    """Rewrite the image manifest and rebind its size/digest in index.json."""
+    with tarfile.open(path) as archive:
+        members = {item.name: (archive.extractfile(item).read() if item.isfile() else None) for item in archive}
+    index = json.loads(members["index.json"])
+    entry = index["manifests"][0]
+    old = f"blobs/sha256/{entry['digest'][7:]}"
+    manifest = json.loads(members[old])
+    edit(manifest)
+    raw = json.dumps(manifest, separators=(",", ":")).encode()
+    new = f"blobs/sha256/{_digest(raw)[7:]}"
+    entry["digest"] = _digest(raw)
+    entry["size"] = len(raw)
+    members.pop(old)
+    members[new] = raw
+    members["index.json"] = json.dumps(index, separators=(",", ":")).encode()
+    path.write_bytes(tar_bytes(members))
+
+
 @pytest.mark.parametrize("blob", ["layer", "config", "manifest"])
 def test_load_refuses_tampered_oci_blob_before_any_push(load_tree, blob):
     tmp_path, skopeo_log = load_tree
@@ -439,7 +458,19 @@ def _two_images(members):
     return {**members, "index.json": json.dumps(index).encode()}
 
 
-@pytest.mark.parametrize("shape", ["docker-archive member", "two-image index", "shadowed blob"])
+@pytest.mark.parametrize(
+    "shape",
+    [
+        "docker-archive member",
+        "two-image index",
+        "shadowed blob",
+        "index and manifest media types differ",
+        "config media type differs",
+        "layer media type differs",
+        "symlink member",
+        "hardlink member",
+    ],
+)
 def test_load_refuses_member_that_is_not_one_oci_image_before_any_push(load_tree, shape):
     tmp_path, skopeo_log = load_tree
     artdir = tmp_path / "dist"
@@ -450,7 +481,7 @@ def test_load_refuses_member_that_is_not_one_oci_image_before_any_push(load_tree
         write_docker_archive(member, [{"etc/legacy": b"legacy"}])
     elif shape == "two-image index":
         _rewrite_member(member, _two_images)
-    else:
+    elif shape == "shadowed blob":
         # A second copy of a blob name would shadow the verified bytes for some readers.
         with tarfile.open(member) as archive:
             blob = next(item for item in archive if item.name.startswith("blobs/sha256/") and item.isfile())
@@ -459,6 +490,31 @@ def test_load_refuses_member_that_is_not_one_oci_image_before_any_push(load_tree
             info = tarfile.TarInfo(blob.name)
             info.size = len(data)
             archive.addfile(info, io.BytesIO(data))
+    elif shape == "index and manifest media types differ":
+        # The reader binds the manifest body to the index entry's declared type.
+        def flip(manifest):
+            manifest["mediaType"] = "application/vnd.oci.image.manifest.v1+json"
+        _rewrite_manifest(member, flip)
+    elif shape == "config media type differs":
+        def wrong_config(manifest):
+            manifest["config"]["mediaType"] = "application/vnd.oci.image.config.v1+json"
+        _rewrite_manifest(member, wrong_config)
+    elif shape == "layer media type differs":
+        def wrong_layer(manifest):
+            manifest["layers"][0]["mediaType"] = "application/vnd.oci.image.layer.v1.tar+zstd"
+        _rewrite_manifest(member, wrong_layer)
+    elif shape == "symlink member":
+        with tarfile.open(member, "a") as archive:
+            info = tarfile.TarInfo("unused-symlink")
+            info.type = tarfile.SYMTYPE
+            info.linkname = "index.json"
+            archive.addfile(info)
+    else:
+        with tarfile.open(member, "a") as archive:
+            info = tarfile.TarInfo("unused-hardlink")
+            info.type = tarfile.LNKTYPE
+            info.linkname = "oci-layout"
+            archive.addfile(info)
     _resign(artdir)
     r = _run_load(load_tree)
     assert r.returncode == 1
@@ -642,6 +698,48 @@ def test_load_registry_read_back_follows_skopeo_args_and_insecure_flag(load_tree
         assert "--tls-verify=false" in call
         # Copy-only options never reach `skopeo inspect`.
         assert "--dest-" not in call and "--format v2s2" not in call and "--src-" not in call
+
+
+def test_load_passes_configured_tmpdir_to_copies_only(load_tree):
+    root, log = load_tree
+    _make_artifacts(root / "dist")
+    tmpdir = root / "work-tmp"
+    tmpdir.mkdir()
+    r = _run_load(load_tree, ("SKOPEO_ARGS", f"--tmpdir {tmpdir}"))
+    assert r.returncode == 0, r.stderr
+    copies = [line for line in log.read_text().splitlines() if line.startswith("copy")]
+    assert len(copies) == 5
+    for copy in copies:
+        assert f"--tmpdir {tmpdir}" in copy
+    for call in _registry_calls(log):
+        assert "--tmpdir" not in call
+
+
+def test_load_refuses_missing_skopeo_tmpdir_before_any_push(load_tree):
+    root, log = load_tree
+    _make_artifacts(root / "dist")
+    r = _run_load(load_tree, ("SKOPEO_ARGS", f"--tmpdir {root / 'no-such-tmp'}"))
+    assert r.returncode == 1
+    assert "skopeo temporary directory from SKOPEO_ARGS --tmpdir" in r.stderr
+    assert "nothing was pushed" in r.stderr
+    assert not log.exists()
+
+
+def test_load_refuses_skopeo_tmpdir_without_space_before_any_push(load_tree):
+    root, log = load_tree
+    _make_artifacts(root / "dist")
+    tmpdir = root / "work-tmp"
+    tmpdir.mkdir()
+    write_stub(
+        root / "bin" / "df",
+        "#!/bin/sh\n"
+        "printf '%s\\n' 'Filesystem 1024-blocks Used Available Capacity Mounted on'\n"
+        "printf '%s\\n' 'stub 1000 900 100 90% /'\n",
+    )
+    r = _run_load(load_tree, ("SKOPEO_ARGS", f"--tmpdir={tmpdir}"))
+    assert r.returncode == 1
+    assert "less than 0.3 GB (or the largest image member) free" in r.stderr
+    assert not log.exists()
 
 
 def test_load_dryrun_is_hermetic_and_not_release_verified(load_tree):

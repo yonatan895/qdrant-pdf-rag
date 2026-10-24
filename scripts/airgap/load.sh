@@ -142,6 +142,52 @@ if [ -n "$OAUTH_TAR" ]; then
     check_image_digest "$OAUTH_TAR" oauth_proxy_digest
 fi
 
+# skopeo ignores TMPDIR when it unpacks an oci-archive and uses /var/tmp unless
+# SKOPEO_ARGS carries --tmpdir. On the site bastion only a work directory may be
+# writable, so refuse before the first push unless the selected directory exists,
+# is writable and holds the largest member (and at least 0.3 GB). The flag is a
+# copy-only option: inspect_args drops it from read-backs.
+check_skopeo_tmpdir() {
+    _tmpdir=/var/tmp
+    _tmpdir_next=0
+    # shellcheck disable=SC2086
+    for _arg in ${SKOPEO_ARGS:-}; do
+        if [ "$_tmpdir_next" = 1 ]; then
+            _tmpdir=$_arg
+            _tmpdir_next=0
+            continue
+        fi
+        case "$_arg" in
+            --tmpdir) _tmpdir_next=1 ;;
+            --tmpdir=*) _tmpdir=${_arg#--tmpdir=} ;;
+        esac
+    done
+    [ "$_tmpdir_next" = 0 ] || \
+        die "SKOPEO_ARGS has --tmpdir without a directory — give it a writable directory with room for the largest image member; nothing was pushed"
+    _required_bytes=314572800
+    for _member in qdrant-image.tar openobserve-image.tar otelcol-image.tar \
+                   "app-ingest-$IMAGE_SHA.tar" "app-agent-$IMAGE_SHA.tar"; do
+        _member_bytes=$(wc -c < "$ARTDIR/$_member")
+        [ "$_member_bytes" -le "$_required_bytes" ] || _required_bytes=$_member_bytes
+    done
+    if [ -n "$OAUTH_TAR" ]; then
+        _member_bytes=$(wc -c < "$ARTDIR/$OAUTH_TAR")
+        [ "$_member_bytes" -le "$_required_bytes" ] || _required_bytes=$_member_bytes
+    fi
+    _required_kb=$(( (_required_bytes + 1023) / 1024 ))
+    _tmpdir_fail=1
+    if [ -d "$_tmpdir" ] && [ -w "$_tmpdir" ]; then
+        _free_kb=$(df -Pk "$_tmpdir" 2>/dev/null | awk 'NR == 2 {print $4}')
+        case "$_free_kb" in
+            ''|*[!0-9]*) ;;
+            *) [ "$_free_kb" -ge "$_required_kb" ] && _tmpdir_fail=0 ;;
+        esac
+    fi
+    [ "$_tmpdir_fail" = 0 ] || \
+        die "skopeo temporary directory from SKOPEO_ARGS --tmpdir (default /var/tmp) is missing, not writable, or has less than 0.3 GB (or the largest image member) free — point --tmpdir at a writable directory with room for the largest member; nothing was pushed"
+}
+check_skopeo_tmpdir
+
 # Post-load identity (issue #272): `skopeo copy` exiting 0 does not prove what
 # the tag now resolves to. Read the tag back and require that the registry
 # serves the packed image, by image config digest (which pins the rootfs
@@ -150,8 +196,6 @@ fi
 # re-serializes the manifest may still differ, which is why the config digest
 # is the identity. The verified registry manifest digest is printed as the
 # immutable pin for `repo@digest` references; a tag alone is never accepted.
-# skopeo unpacks an oci-archive source under TMPDIR (default /var/tmp) for the
-# copy: point TMPDIR at a writable directory with room for the largest member.
 verify_registry_image() {
     _vtar=$1
     _vdst=$2
