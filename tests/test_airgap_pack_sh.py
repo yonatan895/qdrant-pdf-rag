@@ -469,3 +469,56 @@ def test_pack_refuses_unreviewed_license_change_before_any_image_call(pack_tree,
     result, _ = _run_pack(pack_tree)
     assert result.returncode == 0, result.stderr
     assert (root / "dist" / "THIRD-PARTY-NOTICES.txt").is_file()
+
+
+# --- #1000: the release signing key is reachable only from the protected path
+
+_SIGNING_ENV = "release-signing"
+_MAIN_REF = "refs/heads/main"
+
+
+def _workflow_jobs():
+    import yaml
+
+    for path in sorted((REPO / ".github" / "workflows").glob("*.yml")):
+        doc = yaml.safe_load(path.read_text())
+        for name, job in (doc.get("jobs") or {}).items():
+            yield path.name, name, job
+
+
+def test_signing_secret_and_trusted_flag_only_on_protected_release_path():
+    """No PR-triggerable or non-main path can read the key or claim trust.
+
+    Same-repo PR workflows get repository secrets, so the secret must live in
+    a protected GitHub environment (deployment branches limited to main), and
+    every read and the trusted flag must be gated on the main ref as well.
+    """
+    seen = 0
+    for wf, name, job in _workflow_jobs():
+        steps = job.get("steps") or []
+        text = json.dumps(job)
+        reads_key = "secrets.SNEAKERNET_SIGNING_KEY" in text
+        sets_trusted = re.search(r"SNEAKERNET_KEY_TRUSTED=true", text) is not None
+        if not (reads_key or sets_trusted):
+            continue
+        seen += 1
+        where = f"{wf}:{name}"
+        env = job.get("environment")
+        env_name = env.get("name") if isinstance(env, dict) else env
+        assert env_name and _SIGNING_ENV in str(env_name), f"{where}: no {_SIGNING_ENV} environment"
+        # Branch dispatches must fall back to an environment without the secret.
+        assert _MAIN_REF in str(env_name), f"{where}: environment not selected by main ref"
+        assert "pull_request" not in str(job.get("if", "")), f"{where}: PR-triggerable"
+        for step in steps:
+            step_text = json.dumps(step)
+            if "secrets.SNEAKERNET_SIGNING_KEY" in step_text:
+                for value in (step.get("env") or {}).values():
+                    if "secrets.SNEAKERNET_SIGNING_KEY" in str(value):
+                        assert _MAIN_REF in str(value), f"{where}: secret read not gated on main"
+            if "SNEAKERNET_KEY_TRUSTED=true" in step_text:
+                run = step.get("run", "")
+                before = run.split("SNEAKERNET_KEY_TRUSTED=true")[0]
+                assert "GITHUB_REF" in before and "refs/heads/main" in before, (
+                    f"{where}: trusted flag not guarded by the main ref")
+                assert "GITHUB_EVENT_NAME" in before, f"{where}: trusted flag not guarded by event"
+    assert seen, "signing step not found: update this contract if it moved"
