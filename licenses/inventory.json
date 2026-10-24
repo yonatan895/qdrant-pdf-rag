@@ -163,7 +163,7 @@
     {
       "approval_ref": "gh:yonatan895/qdrant-pdf-rag#1070 maintainer decision 2026-10-24, relayed by the #1070 coordinator; ADR-0007 L1",
       "bind": {
-        "digest": "sha256:PENDING",
+        "digest": "sha256:5adfb0355bbe4a5860c0ba9482cc0b40f573de3749a21a64cf4789391a14fffc",
         "images_txt": "ghcr.io/open-webui/open-webui:v0.12.3-slim"
       },
       "class": "proprietary",

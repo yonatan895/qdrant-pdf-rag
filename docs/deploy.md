@@ -1074,7 +1074,7 @@ and CI tooling have different owners and pull credentials.
 | OpenObserve OSS (ADR-0006) | `openobserve/openobserve:v1.1.2` | as the agent; the chart references it by digest only (`images.openobserve.digest`) | `load.sh` | cluster pods when tracing is on with an empty `tracing.endpoint` |
 | otelcol-contrib (ADR-0006) | `otel/opentelemetry-collector-contrib:0.160.0` | as the agent | `load.sh` | cluster pod (`Deployment/otelcol`, container `otelcol`) beside OpenObserve |
 | OAuth sidecar (optional) | `openshift4/ose-oauth-proxy:v4.14` | as the agent; absent while `images.txt` says `sha256:PENDING` | `load.sh` | cluster pods |
-| Open WebUI front end (optional, ADR-0007, #1074) | `qdrant-pdf-rag-openwebui:v0.12.3-slim` | as the agent; absent while `images.txt` says `sha256:PENDING` (#1073 records it); the upstream `open-webui/open-webui:v0.12.3-slim` line is factory build provenance, never pushed | `load.sh` | cluster pod (`Deployment/rag-openwebui`, container `openwebui`) when `openwebui.enabled` |
+| Open WebUI front end (optional, ADR-0007, #1074) | `qdrant-pdf-rag-openwebui:v0.12.3-slim` | as the agent; absent while `images.txt` says `sha256:PENDING` (the factory records the pushed manifest digest of the #1073 trial image; recipe `scripts/ci/openwebui-trial/Containerfile.openwebui`, PR #1085); the upstream `open-webui/open-webui:v0.12.3-slim` line is factory build provenance, never pushed | `load.sh` | cluster pod (`Deployment/rag-openwebui`, container `openwebui`) when `openwebui.enabled` |
 | CI job image | `ci/python:3.14`, or a complete `CI_PYTHON_IMAGE` | mirrored UBI Python 3.14 (GIL) with git, pip, tar, sha256sum | platform or factory mirror, not this repository | GitLab runner |
 | CI Qdrant service | `qdrant/qdrant@sha256:<images.txt digest>` | the `images.txt` manifest digest, so a tag is never enough | registry-to-registry copy that preserves the digest | GitLab runner (`sim`, `gate-l1`) |
 
@@ -1614,8 +1614,10 @@ byte-identical to a release without it (tested).
 - `NetworkPolicy/rag-openwebui`. Ingress is allowed from the OpenShift router to 8443 only.
   Egress is allowed to the agent pods on 8080, to cluster DNS (`openshift-dns`, `kube-system`),
   and to `OPENWEBUI_IDP_EGRESS_CIDRS` on `OPENWEBUI_IDP_EGRESS_PORT`, and to nothing else. This
-  policy is the zero-egress control; the offline settings are not. The policy needs an enforcing
-  CNI, and the site provides that evidence.
+  policy is the zero-egress control; the offline settings are not (the IdP rule carries the server-side
+  OIDC token exchange). The chart also sets `OLLAMA_BASE_URL=http://127.0.0.1:9`: v0.12.3 otherwise
+  probes `host.docker.internal:11434/12434` on first start even with `ENABLE_OLLAMA_API=false` (#1073
+  trial). The policy needs an enforcing CNI, and the site provides that evidence.
 - `ConfigMap/rag-openwebui-pipe`: the repository Pipe, its installer and the purge script, each
   annotated with its sha256.
 - Environment, by ADR-0007 condition:

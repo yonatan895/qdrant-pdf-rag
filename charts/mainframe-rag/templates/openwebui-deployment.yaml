@@ -161,6 +161,11 @@ spec:
               value: "false"
             - name: ENABLE_OLLAMA_API
               value: "false"
+            # v0.12.3 probes host.docker.internal:11434/12434 on first start even
+            # with ENABLE_OLLAMA_API=false unless the base URL is explicit (#1073
+            # trial R2). Loopback, discard port: the probe fails locally.
+            - name: OLLAMA_BASE_URL
+              value: "http://127.0.0.1:9"
             - name: ENABLE_DIRECT_CONNECTIONS
               value: "false"
             - name: ENABLE_TOOL_SERVERS

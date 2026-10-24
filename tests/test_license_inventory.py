@@ -16,6 +16,9 @@ from scripts import license_inventory as li
 from tests.helpers_airgap import REPO, copy_chart, copy_license_inputs
 from tests.helpers_task_artifact import copy_task_tools
 
+# Open WebUI v0.12.3-slim upstream index qualified by the #1073 Kind trial.
+BASE_DIGEST = "5adfb0355bbe4a5860c0ba9482cc0b40f573de3749a21a64cf4789391a14fffc"
+
 
 def real_inventory():
     return li.load_inventory(REPO)
@@ -121,7 +124,8 @@ def test_open_webui_licence_records_the_maintainer_decision_and_its_conditions()
     }
     for cid, ref in binds.items():
         entry = by_id[cid]
-        assert entry["bind"] == {"images_txt": ref, "digest": "sha256:PENDING"}, cid
+        digest = "sha256:" + BASE_DIGEST if cid == "image:openwebui-base" else "sha256:PENDING"
+        assert entry["bind"] == {"images_txt": ref, "digest": digest}, cid
         assert (entry["license_spdx"], entry["class"]) == ("LicenseRef-Open-WebUI-License", "proprietary")
         assert entry["status"] == "approved" and "ADR-0007 L1" in entry["approval_ref"]
         assert entry["decision"]["owner"] == "yonatan895" and entry["decision"]["date"] == "2026-10-24"
