@@ -129,6 +129,50 @@ def test_parse_pdf_sanitizes_bookmark_titles(tmp_path) -> None:
     assert [tuple(e) for e in parsed.toc] == [(1, "Chapter 1 Config", 1)]
 
 
+def _heading_paths(path) -> list[str]:
+    from mainframe_rag.ingest.chunk import make_chunks
+
+    parsed = parse_pdf(path)
+    with pymupdf.open(path) as doc:
+        texts, labels = run_ingest._extract_page_texts(doc)
+    return [c.heading_path for c in make_chunks(parsed, texts, labels)]
+
+
+def test_bookmark_heading_path_elements_are_bounded_like_titles(tmp_path) -> None:
+    """#998 review counterexample: a 5,000-char bookmark stored a 5,000-char
+    heading_path. Each element is one line cut at a word boundary to the
+    title bound, so the cut is still a title-line prefix of the page."""
+    from mainframe_rag.ingest.ibm_pdf import TITLE_MAX_CHARS
+
+    bookmark = "Widget\nqueue " * 400  # 5,200 chars
+    paths = _heading_paths(_metadata_pdf(tmp_path / "SA22-0007-00.pdf", "Widget",
+                                         toc=[[1, bookmark, 1]], pages=1))
+    assert paths and len(set(paths)) == 1
+    (path,) = set(paths)
+    assert len(path) <= TITLE_MAX_CHARS
+    assert path.startswith("Widget queue Widget queue") and path.endswith("Widget queue")
+
+
+def test_deep_heading_path_is_capped_keeping_the_leaf(tmp_path) -> None:
+    """Every element at the title bound, six levels deep, still fits the
+    total heading_path cap: the outermost ancestors are dropped whole, the
+    leaf and its nearest ancestors stay, and no element is cut mid-word."""
+    titles = [f"Level{n} " + "widget " * 25 for n in range(1, 7)]  # 182 chars each
+    toc = [[n, t, 1] for n, t in enumerate(titles, start=1)]
+    paths = _heading_paths(_metadata_pdf(tmp_path / "SA22-0008-00.pdf", "Widget",
+                                         toc=toc, pages=1))
+    elements = [t.strip() for t in titles]
+    assert paths
+    for path in paths:
+        parts = path.split(" > ")
+        assert parts == elements[-len(parts):]
+        assert 2 <= len(parts) < len(elements)
+
+    from mainframe_rag.ingest.chunk import HEADING_PATH_MAX_CHARS
+
+    assert all(len(path) <= HEADING_PATH_MAX_CHARS for path in paths)
+
+
 def test_extract_page_texts_labels_are_one_bounded_sanitized_line(tmp_path) -> None:
     from mainframe_rag.ingest.ibm_pdf import _decode_hex_label_prefix
 
