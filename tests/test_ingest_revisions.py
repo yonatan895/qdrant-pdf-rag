@@ -761,3 +761,6 @@ def test_retirement_check_skips_a_walked_file_refused_for_a_pipe_label(monkeypat
 
     record, *_ = run_ingest._parse_one((str(pdf), None, None, None, str(root), sha, False, None))
     assert (record.status, record.error_type) == ("error", "LabelDelimiterRefused")
+    # The refusal follows the parse: the error record keeps the parsed
+    # identity and page count, not the filename-stem fallback.
+    assert (record.doc_id, record.pages > 0) == (doc_id, True)

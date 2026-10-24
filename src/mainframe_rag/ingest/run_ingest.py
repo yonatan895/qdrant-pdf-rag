@@ -236,6 +236,35 @@ def require_delimiter_free_labels(parsed: ParsedDoc) -> None:
         raise LabelDelimiterRefused
 
 
+def walked_source_rev(parsed: ParsedDoc) -> str:
+    """The source revision of a parsed walked document, after the `|` refusal
+    (issue #878): the one key the build path stores, locks and deletes by, and
+    the retirement check compares (issue #986)."""
+    require_delimiter_free_labels(parsed)
+    return source_rev_key(parsed.vendor, parsed.product, parsed.version, parsed.sha256)
+
+
+def parse_walked(
+    path: Path,
+    sha: str,
+    *,
+    vendor: str | None,
+    product: str | None,
+    version: str | None,
+    corpus_root: Path | None,
+) -> ParsedDoc:
+    """Parse one walked PDF with the run's CLI labels, its corpus root and
+    its walk digest: the one label/identity input mapping behind the build
+    path (`_parse_one`) and the retirement-conflict check (issue #986), so a
+    file cannot be labelled one way when stored and another when retired (the
+    #839 drift). Its key is `walked_source_rev(parsed)`. Both only compose
+    `parse_pdf` and `source_rev_key`, so no stored key changes."""
+    return parse_pdf(
+        path, vendor=vendor, product=product, version=version,
+        corpus_root=corpus_root, sha256=sha,
+    )
+
+
 def _parse_one(
     args: ParseTask,
 ) -> tuple[
@@ -260,15 +289,15 @@ def _parse_one(
         # error record before the stage it bounds — no partial ingest, no
         # completion. 0 = unbounded (legacy).
         require_document_within("pdf_bytes", path.stat().st_size, settings.ingest_max_pdf_bytes)
-        parsed = parse_pdf(
+        parsed = parse_walked(
             path,
+            sha,
             vendor=vendor,
             product=product,
             version=version,
             corpus_root=Path(corpus_root) if corpus_root else None,
-            sha256=sha,
         )
-        require_delimiter_free_labels(parsed)
+        source_rev = walked_source_rev(parsed)
         require_document_within("pages", parsed.page_count, settings.ingest_max_doc_pages)
         doc = pymupdf.open(path)
         try:
@@ -341,7 +370,7 @@ def _parse_one(
             # Source-revision provenance (issue #361): stamped now so the
             # 361B selector migration can map every committed doc without
             # re-reading the corpus. Additive — older readers ignore it.
-            source_rev=source_rev_key(parsed.vendor, parsed.product, parsed.version, sha),
+            source_rev=source_rev,
         )
         return record, parsed, chunks, vectors, contexts
     except Exception as exc:  # noqa: BLE001 — isolate worker crash from main pool
@@ -551,7 +580,7 @@ def _upsert_one(
     started = time.perf_counter()
     client = _get_qdrant(settings)
     rules_v = extraction_rules_version()
-    revision = source_rev_key(parsed.vendor, parsed.product, parsed.version, parsed.sha256)
+    revision = walked_source_rev(parsed)
     if len(chunks) == 0:
         # Explicit policy, not accidental success: no completion, no skip.
         return "empty", round(time.perf_counter() - started, 3)
@@ -1783,22 +1812,19 @@ def _resolve_publication(
     conflicts: set[str] = set()
     if retire_plan:
         for path_str, sha in prewalked:
-            parsed_walked = parse_pdf(
+            parsed_walked = parse_walked(
                 Path(path_str),
+                sha,
                 vendor=vendor,
                 product=product,
                 version=version,
                 corpus_root=src,
-                sha256=sha,
             )
-            if "|" in "".join(
-                label or "" for label in (parsed_walked.vendor, parsed_walked.product, parsed_walked.version)
-            ):
+            try:
+                source_rev = walked_source_rev(parsed_walked)
+            except LabelDelimiterRefused:
                 continue  # refused at ingest (#878): no key exists to retire
             doc_id = parsed_walked.doc_id
-            source_rev = source_rev_key(
-                parsed_walked.vendor, parsed_walked.product, parsed_walked.version, sha
-            )
             if doc_id and doc_id in retire_plan:
                 entry = retire_plan[doc_id]
                 revs = entry.get("revs")
