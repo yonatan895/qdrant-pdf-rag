@@ -7,6 +7,7 @@ import contextlib
 import hashlib
 import html
 import json
+import logging
 import re
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -352,6 +353,95 @@ def test_ui_chat_nonstream_timeout_is_model_timeout(monkeypatch, synthetic_pdf, 
     assert "The reasoning agent could not complete this request." in resp.text
     assert "internal detail" not in resp.text
     assert recorded == [("console", "model_timeout")]
+
+
+class _FaultLLM:
+    """A model leg that fails before any output: `timeout` like an expired
+    wait, `error` like any other upstream fault."""
+
+    def __init__(self, fault):
+        self.fault = fault
+
+    def _raise(self):
+        import httpx2 as httpx
+
+        if self.fault == "model_timeout":
+            raise httpx.ReadTimeout("read timed out: SECRET-detail")
+        raise RuntimeError("model exploded: SECRET-detail")
+
+    async def chat(self, messages, reasoning_effort=None, temperature=None):
+        self._raise()
+
+    async def chat_stream(self, messages, reasoning_effort=None, temperature=None):
+        self._raise()
+        yield {}
+
+
+# Independent expectations per fault (#985): the RED outcome, whether the
+# fault is a server-side failure logged at ERROR, and the status of each
+# route. The console form keeps its fixed banner statuses (422 only for the
+# operator-correctable budget refusal); its stream matches /v1/chat's.
+_FAULTS = {
+    "embed_refusal": ("invalid_request", False, {"chat": 422, "chat_stream": 422, "ui_form": 502, "ui_stream": 422}),
+    "retrieval": ("upstream_error", True, {"chat": 502, "chat_stream": 502, "ui_form": 502, "ui_stream": 502}),
+    "model_timeout": ("model_timeout", False, {"chat": 504, "chat_stream": 200, "ui_form": 502, "ui_stream": 200}),
+    "model_error": ("upstream_error", True, {"chat": 502, "chat_stream": 200, "ui_form": 502, "ui_stream": 200}),
+    "budget": ("prompt_budget_exceeded", False, {"chat": 422, "chat_stream": 200, "ui_form": 422, "ui_stream": 200}),
+}
+
+
+@pytest.mark.parametrize("route", ["chat", "chat_stream", "ui_form", "ui_stream"])
+@pytest.mark.parametrize("fault", list(_FAULTS))
+def test_console_classifies_each_fault_like_chat(ui_client, monkeypatch, caplog, fault, route):
+    """#985: the console runs the /v1/chat transport path, so one fault has
+    one RED outcome and one log level on every chat route; the client sees
+    only fixed text."""
+    from mainframe_rag.ingest.bounds import EmbedInputTooLarge
+    from tests.test_prompt_packing_units import _RouteOvershootTokenizer
+
+    outcome, server_fault, statuses = _FAULTS[fault]
+    if fault.startswith("model_"):
+        monkeypatch.setattr(app_mod, "llm", _FaultLLM(fault))
+
+    def refuse(*_a, **_k):
+        raise EmbedInputTooLarge(100, 150, 1)
+
+    def boom(*_a, **_k):
+        raise RuntimeError("qdrant exploded: SECRET-detail")
+
+    if fault == "embed_refusal":
+        monkeypatch.setattr(app_mod, "retrieve_search", refuse)
+    elif fault == "retrieval":
+        monkeypatch.setattr(app_mod, "retrieve_search", boom)
+    elif fault == "budget":
+        monkeypatch.setattr(app_mod, "tokenizer", _RouteOvershootTokenizer())
+    recorded = []
+    real = app_mod.record_request
+
+    def spy(endpoint, code, *a, **k):
+        recorded.append((endpoint, code))
+        return real(endpoint, code, *a, **k)
+
+    monkeypatch.setattr(app_mod, "record_request", spy)
+    messages = [{"role": "user", "content": "What is IEA500I?"}]
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        if route == "ui_form":
+            resp = ui_client.post("/ui/chat", data={"message": "What is IEA500I?", "messages": ""})
+        elif route == "ui_stream":
+            resp = ui_client.post("/ui/chat/stream", json={"messages": messages})
+        else:
+            resp = ui_client.post("/v1/chat", json={"messages": messages, "stream": route == "chat_stream"})
+
+    endpoint = "console" if route.startswith("ui_") else "chat"
+    assert resp.status_code == statuses[route]
+    assert recorded == [(endpoint, outcome)]
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert bool(errors) is server_fault, [r.getMessage() for r in errors]
+    assert "SECRET" not in resp.text
+    if route == "ui_stream" and resp.status_code == 200:
+        names = [name for name, _ in _parse_sse_events(resp.text)]
+        assert names.count("error") == 1 and "final" not in names
 
 
 def test_ui_chat_body_cap_counts_splunk_context(ui_client, monkeypatch):
