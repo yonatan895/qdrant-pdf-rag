@@ -49,7 +49,7 @@ Mainframe RAG is a citation-first retrieval-augmented generation engine designed
 - **OpenShift Client:** `oc` (v4.12+) or `kubectl`.
 - **Helm:** checksum-pinned **4.3.0**, as used by [the deployment workflow](../.github/workflows/e2e.yml); the launcher requires Helm 4. Transfer the verified client with the operator tools. Both `charts/mainframe-rag` and `charts/qdrant-1.19.2.tgz` are local; do **not** run `helm repo add` in the air gap.
 - **Rendering:** host `python3` with its standard library for release-value serialization and ownership checks. Bootstrap itself does not require Python; deployment does. No application packages or runtime dependency downloads are needed on the bastion.
-- **Image Tooling:** `skopeo` (for loading archives into the internal registry).
+- **Image Tooling:** `skopeo` (for loading the bundle's `oci-archive` image members into the internal registry). Export `TMPDIR` to a writable directory with room for the largest member (about 0.3 GB) when `/var/tmp` is not writable, and let a restrictive `--policy` file admit the `oci-archive` transport ([image format](deploy.md#bundle-image-format)).
 - **Cluster Permissions:** Access to create/manage workloads in the target namespace with `restricted-v2` SCC.
 
 ---
@@ -564,7 +564,7 @@ registry service-account credentials. Do not paste them into issue/PR text.
 
 This generates `dist/qdrant-pdf-rag-<sha>.tar` and its digest `dist/qdrant-pdf-rag-<sha>.tar.sha256`, containing:
 1. Complete Git repository bundle (`repo.bundle`).
-2. App container images (`qdrant-pdf-rag-agent`, `qdrant-pdf-rag-ingest`), with per-image digests bound in `MANIFEST.txt` and re-verified on load.
+2. App container images (`qdrant-pdf-rag-agent`, `qdrant-pdf-rag-ingest`), with per-image digests bound in `MANIFEST.txt` and re-verified on load. Every image member is a compressed `oci-archive` holding the registry's own blobs (`image_format: oci-archive`, [deploy](deploy.md#bundle-image-format)).
 3. Vendored third-party Qdrant unprivileged image, OpenObserve OSS v1.1.2 image and otelcol-contrib 0.160.0 image (tag + digest pinned in `images.txt`; no Jaeger image).
 4. Vendored Helm chart (`charts/qdrant-1.19.2.tgz`).
 5. Self-contained extraction bootstrap script (`bootstrap.sh`).
@@ -611,7 +611,9 @@ The `bootstrap.sh` script automatically:
 After bootstrap use `sh scripts/tools/run-task.sh --list` for discovery.
 For rollback, use the previous approved bundle and its own bootstrap/command
 contract in a separate workspace; an older bundle may still use Make. Never
-combine its assets with a newer checkout.
+combine its assets with a newer checkout. Bundles packed before #1066 (such as
+`d53595e`) carry `docker-archive` image members; a newer `load.sh` refuses them
+with a fixed message, and their own `load.sh` loads them.
 
 ### 4.3 Configure Environment & Pre-Flight Validation
 
@@ -875,8 +877,9 @@ printed); `TRACE_QUERY_URL`, `TRACE_QUERY_USER` and `TRACE_QUERY_PASSWORD` overr
 **Bundle size (#956).** Jaeger v2.20.0 leaves the bundle and OpenObserve v1.1.2
 plus otelcol-contrib 0.160.0 enter it. By registry layer sizes read with
 `skopeo inspect --raw` for linux/amd64 (compressed): Jaeger -50.2 MB,
-OpenObserve +161.8 MB, otelcol +110.8 MB, net +222.4 MB. The docker-archive
-tars inside the bundle hold uncompressed layers, so the on-disk growth is larger.
+OpenObserve +161.8 MB, otelcol +110.8 MB, net +222.4 MB. Since #1066 the
+bundle's `oci-archive` members keep those compressed registry blobs, so the
+bundle grows by about the same amount.
 
 Every exported span carries deploy identity as resource attributes:
 `service.version` is the packed `IMAGE_SHA` for the agent Deployment, and
@@ -922,7 +925,7 @@ OAuth-protected; enable it with `AGENT_ROUTE=true`:
    `REDHAT_REGISTRY_PASSWORD` for a registry service account authorized to pull
    this image. Provision those before merging a recorded-pin change; the job
    fails closed when credentials are absent or rejected. Keep personal
-   pull secrets on the workstation. The Docker archive omits unsupported
+   pull secrets on the workstation. The OCI archive omits unsupported
    upstream signature attachments; image digests and the offline bundle
    signature remain enforced.
 2. Create the cookie-encryption Secret (operator-owned; deploy fails closed

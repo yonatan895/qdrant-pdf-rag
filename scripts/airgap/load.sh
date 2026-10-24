@@ -55,13 +55,13 @@ LOADED_COUNT=5
 
 if [ "${AIRGAP_DRYRUN:-0}" = "1" ]; then
     echo "==> [dryrun] Member checksum verification skipped"
-    echo "[dryrun] skopeo copy docker-archive:$ARTDIR/qdrant-image.tar docker://$INTERNAL_REGISTRY/qdrant/qdrant:v1.19.2-unprivileged"
-    echo "[dryrun] skopeo copy docker-archive:$ARTDIR/openobserve-image.tar docker://$INTERNAL_REGISTRY/openobserve/openobserve:v1.1.2"
-    echo "[dryrun] skopeo copy docker-archive:$ARTDIR/otelcol-image.tar docker://$INTERNAL_REGISTRY/otel/opentelemetry-collector-contrib:0.160.0"
-    echo "[dryrun] skopeo copy docker-archive:$ARTDIR/app-ingest-$IMAGE_SHA.tar docker://$INTERNAL_REGISTRY/qdrant-pdf-rag-ingest:$IMAGE_SHA"
-    echo "[dryrun] skopeo copy docker-archive:$ARTDIR/app-agent-$IMAGE_SHA.tar docker://$INTERNAL_REGISTRY/qdrant-pdf-rag-agent:$IMAGE_SHA"
+    echo "[dryrun] skopeo copy oci-archive:$ARTDIR/qdrant-image.tar docker://$INTERNAL_REGISTRY/qdrant/qdrant:v1.19.2-unprivileged"
+    echo "[dryrun] skopeo copy oci-archive:$ARTDIR/openobserve-image.tar docker://$INTERNAL_REGISTRY/openobserve/openobserve:v1.1.2"
+    echo "[dryrun] skopeo copy oci-archive:$ARTDIR/otelcol-image.tar docker://$INTERNAL_REGISTRY/otel/opentelemetry-collector-contrib:0.160.0"
+    echo "[dryrun] skopeo copy oci-archive:$ARTDIR/app-ingest-$IMAGE_SHA.tar docker://$INTERNAL_REGISTRY/qdrant-pdf-rag-ingest:$IMAGE_SHA"
+    echo "[dryrun] skopeo copy oci-archive:$ARTDIR/app-agent-$IMAGE_SHA.tar docker://$INTERNAL_REGISTRY/qdrant-pdf-rag-agent:$IMAGE_SHA"
     if [ -n "$OAUTH_TAR" ]; then
-        echo "[dryrun] skopeo copy docker-archive:$ARTDIR/$OAUTH_TAR docker://$INTERNAL_REGISTRY/openshift4/ose-oauth-proxy:v4.14"
+        echo "[dryrun] skopeo copy oci-archive:$ARTDIR/$OAUTH_TAR docker://$INTERNAL_REGISTRY/openshift4/ose-oauth-proxy:v4.14"
     fi
     echo "Notice: registry image identity not release-verified (dry-run pushes nothing and reads no registry)"
     echo ""
@@ -79,6 +79,14 @@ check_trusted_pub "$ARTDIR"
 (cd "$ARTDIR" && openssl dgst -sha256 -verify sneakernet-signing.pub -signature SHA256SUMS.sig SHA256SUMS >/dev/null) \
     || die "SHA256SUMS signature verification failed — do not trust this bundle"
 (cd "$ARTDIR" && sha256sum -c SHA256SUMS)
+
+# Image format (#1066): image members are oci-archive, declared once in the
+# signed MANIFEST. A docker-archive bundle (packed before #1066, e.g. a rollback
+# release) is loaded by that release's own bootstrap.sh/load.sh in its own
+# workspace, never by this checkout; any other value is refused before a push.
+image_format=$(awk -F': ' '$1 == "image_format" {print $2}' "$ARTDIR/MANIFEST.txt")
+[ "$image_format" = oci-archive ] || \
+    die "bundle image format is not oci-archive (a docker-archive bundle from an older release, or an unknown format) — load an older approved release with that release's own bootstrap.sh and load.sh in a separate workspace; nothing was pushed"
 
 # Cross-check IMAGE_SHA against the packed MANIFEST.
 packed_sha=$(awk '/^sha: /{print $2}' "$ARTDIR/MANIFEST.txt")
@@ -100,13 +108,21 @@ task_verify_archive "$ARTDIR/$TASK_ASSET"
 task_check_manifest "$ARTDIR/MANIFEST.txt"
 printf '%s  %s\n' "$TASK_LICENSE_SHA256" "$ARTDIR/task-LICENSE" | sha256sum -c - >/dev/null || die "Task license checksum mismatch"
 
-# Digest binding: every image must equal the MANIFEST-recorded digest.
+VERIFY_TMP=$(mktemp -d)
+trap 'rm -rf "$VERIFY_TMP"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+# Digest binding: every image must equal the MANIFEST-recorded digest. One
+# verified read of the OCI layout (every blob's size and sha256 against its
+# descriptor) yields the manifest bytes that the post-push check reuses.
 check_image_digest() {
     _tar=$1
     _key=$2
-    _actual=$(skopeo inspect "docker-archive:$ARTDIR/$_tar" --format '{{.Digest}}')
+    _raw="$VERIFY_TMP/$_tar.manifest"
     _expected=$(awk -F': ' -v k="$_key" '$1 == k {print $2}' "$ARTDIR/MANIFEST.txt")
     [ -n "$_expected" ] || die "MANIFEST.txt has no $_key entry"
+    _actual=$(archive_manifest "$ARTDIR/$_tar" "$_raw")
     [ "$_actual" = "$_expected" ] || \
         die "$_tar digest $_actual does not match MANIFEST $_key ($_expected) — wrong image bytes"
     # The config digest is what deploy/ingest later verify the registry against
@@ -114,7 +130,7 @@ check_image_digest() {
     _cfgkey="${_key%_digest}_config_digest"
     _cfg=$(awk -F': ' -v k="$_cfgkey" '$1 == k {print $2}' "$ARTDIR/MANIFEST.txt")
     [ -n "$_cfg" ] || die "MANIFEST.txt has no $_cfgkey entry — repack the bundle with this release's pack.sh"
-    [ "$(archive_config_digest "$ARTDIR/$_tar")" = "$_cfg" ] || \
+    [ "$(archive_config_digest "$_raw")" = "$_cfg" ] || \
         die "$_tar image config does not match MANIFEST $_cfgkey — wrong image bytes"
 }
 check_image_digest qdrant-image.tar qdrant_digest
@@ -129,27 +145,23 @@ fi
 # Post-load identity (issue #272): `skopeo copy` exiting 0 does not prove what
 # the tag now resolves to. Read the tag back and require that the registry
 # serves the packed image, by image config digest (which pins the rootfs
-# diffIDs). Archive and registry MANIFEST digests legitimately differ: a docker
-# archive holds uncompressed layers, a registry stores compressed ones. The
-# verified registry manifest digest is printed as the immutable pin for
-# `repo@digest` references; a tag alone is never accepted as identity.
-VERIFY_TMP=$(mktemp -d)
-trap 'rm -rf "$VERIFY_TMP"' EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
-
+# diffIDs) and layer count. The archive keeps the registry's manifest bytes, so
+# the registry digest usually equals the MANIFEST *_digest; a registry that
+# re-serializes the manifest may still differ, which is why the config digest
+# is the identity. The verified registry manifest digest is printed as the
+# immutable pin for `repo@digest` references; a tag alone is never accepted.
+# skopeo unpacks an oci-archive source under TMPDIR (default /var/tmp) for the
+# copy: point TMPDIR at a writable directory with room for the largest member.
 verify_registry_image() {
     _vtar=$1
     _vdst=$2
     _vkey=$3
     _vexpected=$(awk -F': ' -v k="$_vkey" '$1 == k {print $2}' "$ARTDIR/MANIFEST.txt")
-    skopeo inspect --raw "docker-archive:$ARTDIR/$_vtar" > "$VERIFY_TMP/archive.raw" || \
-        die "cannot read the packed archive manifest for $_vdst"
     # shellcheck disable=SC2046
     skopeo inspect --raw $(inspect_args) "docker://$_vdst" > "$VERIFY_TMP/registry.raw" || \
         die "cannot read back registry image $_vdst after the push — it is not verified; fix registry access and rerun"
     _vrc=0
-    _vdigest=$(python3 scripts/airgap/image_manifest.py load "$VERIFY_TMP/archive.raw" "$VERIFY_TMP/registry.raw" "$_vexpected") || _vrc=$?
+    _vdigest=$(python3 scripts/airgap/image_manifest.py load "$VERIFY_TMP/$_vtar.manifest" "$VERIFY_TMP/registry.raw" "$_vexpected") || _vrc=$?
     case "$_vrc" in
         0) ;;
         3) die "archive for $_vdst no longer matches its MANIFEST digest — do not trust this bundle" ;;
@@ -169,7 +181,7 @@ load() {
     fi
     echo "==> $src -> $dst"
     # shellcheck disable=SC2086
-    run skopeo copy $extra_args "docker-archive:$ARTDIR/$src" "docker://$dst"
+    run skopeo copy $extra_args "oci-archive:$ARTDIR/$src" "docker://$dst"
     verify_registry_image "$src" "$dst" "$key"
 }
 

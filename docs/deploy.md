@@ -474,7 +474,7 @@ they do not authorize production promotion.
 
 The connected host packs one tarball: git bundle, Qdrant + OpenObserve
 + otelcol-contrib + ingest + agent image archives (plus the oauth-proxy sidecar image once its
-`images.txt` digest is recorded), vendored chart, bootstrap script,
+`images.txt` digest is recorded; [image format](#bundle-image-format)), vendored chart, bootstrap script,
 `MANIFEST.txt`, `PACKING_RECORD.txt`, digest enumeration, `THIRD-PARTY-NOTICES.txt`
 ([licensing](licensing.md); pack fails closed on an unrecorded dependency, image
 digest or notice change, and bootstrap requires the member), offline signature,
@@ -486,11 +486,46 @@ checksums **after**.
   green `main` SHA whose CI images exist. The owner is inferred lowercase
   from the git remote (GHCR 404s on uppercase). The git bundle pins HEAD
   explicitly so the air-gap clone lands on the packed SHA.
-- `MANIFEST *_digest` lines are post-copy archive digests (the manifest
-  *list* resolves to one arch manifest when written, by construction) —
-  the ref line carries the requested pin, the digest line carries the
-  bundled bytes that load re-verifies. Confusing the two is the classic
-  digest-mismatch false alarm.
+- `MANIFEST *_digest` lines are the archives' platform manifest digests (the
+  manifest *list* pin resolves to one arch manifest when written, by
+  construction) — the ref line carries the requested pin, the digest line
+  carries the bundled bytes that load re-verifies. Confusing the two is the
+  classic digest-mismatch false alarm.
+- <a id="bundle-image-format"></a>**Image format (#1066).** Image members are
+  `oci-archive` tars under the unchanged member names (`qdrant-image.tar`,
+  `app-<role>-<SHA>.tar`, ...), and the signed MANIFEST declares
+  `image_format: oci-archive`. Pack copies with `skopeo copy --preserve-digests`,
+  so each archive holds the registry's platform manifest, config and compressed
+  layer blobs byte-for-byte: no conversion, no recompression (third-party layers
+  keep their upstream gzip; app layers keep the gzip the factory pushed). Each
+  `*_digest` therefore equals the upstream platform manifest digest (for a
+  manifest-list pin, the amd64 entry of that list), and `*_config_digest` the
+  upstream config. Pack, load and the SBOM inventory read each archive through
+  `image_manifest.py` (`oci-layout` version, an `index.json` naming exactly one
+  single-image manifest, and every manifest, config and layer blob present once
+  with its descriptor's size and sha256); a missing, shadowed or altered blob,
+  a second image, or another format fails closed with a fixed message before
+  signing (pack) or before any push (load). Load refuses any `image_format`
+  other than `oci-archive` before its `IMAGE_SHA` check, so a bundle never
+  mixes formats.
+- Rollback across the format change: a bundle packed before #1066 (for
+  example release `d53595e`) has docker-archive members and no
+  `image_format` line. This release's `load.sh` refuses it with the fixed
+  message "bundle image format is not oci-archive ..."; load it as before with
+  that release's own `bootstrap.sh` and `load.sh` in a separate workspace
+  ([rollback](install_and_ops.md#42-transfer--automated-bootstrap)). Its
+  checkout-identity guard would refuse mixing it with this checkout anyway.
+- Bastion prerequisites for `oci-archive`: skopeo unpacks an `oci-archive`
+  source under `TMPDIR` (default `/var/tmp`) for each copy, so export
+  `TMPDIR` to a writable directory with free space for the largest member
+  (about 0.3 GB) where only a work directory is writable. A site
+  `containers-policy.json` passed with `--policy` that admits only the
+  `docker-archive` transport must also admit `oci-archive` (same
+  `insecureAcceptAnything` scope: bundle trust is the signed checksum list,
+  not registry signatures). The internal registry must accept OCI image
+  manifests (Qdrant's platform manifest is OCI; Docker registry 2.x and
+  current Quay do); a registry that rewrites it fails load's config read-back,
+  never silently.
 - Release-signing custody (#1000): CI holds the key only as an **environment**
   secret `SNEAKERNET_SIGNING_KEY` of the GitHub environment `release-signing`
   (maintainer setup: Settings > Environments > New; Deployment branches =
@@ -530,7 +565,9 @@ checksums **after**.
   not overwritten, unreadable) fails closed with a fixed message and no
   `Loaded N images` line. Each verified image prints
   `==> verified <ref>@<registry manifest digest>`; that digest is the immutable
-  pin, and it differs from the MANIFEST archive digest by design (see
+  pin. With the registry's manifest bytes kept in the archive it normally equals
+  the MANIFEST archive digest, but a registry may re-serialize, so identity is
+  the config digest, never digest equality (see
   [image identity](#image-identity-across-archive-and-registry-formats)).
   Dry-run reads no registry and says so ("not release-verified").
   Load also requires each `<image>_config_digest` in the MANIFEST to equal its
@@ -978,7 +1015,7 @@ bytes. Combined tag+digest refs are invalid — digest-only form is the pin.
   requires `REDHAT_REGISTRY_USER` and `REDHAT_REGISTRY_PASSWORD` secrets
   belonging to a registry service account and fails closed if either is absent
   or login fails. Personal pull secrets stay local. The OAuth copy uses
-  `--remove-signatures` because Docker archives cannot store Red Hat's upstream
+  `--remove-signatures` because OCI archives cannot store Red Hat's upstream
   signature attachments. Source digest verification, archive digests, and the
   offline bundle signature still apply; upstream signature attachments are not
   part of the handoff. The explicit PENDING state still skips the member and
@@ -1023,9 +1060,9 @@ and CI tooling have different owners and pull credentials.
 | CI Qdrant service | `qdrant/qdrant@sha256:<images.txt digest>` | the `images.txt` manifest digest, so a tag is never enough | registry-to-registry copy that preserves the digest | GitLab runner (`sim`, `gate-l1`) |
 
 The CI Qdrant service is a different role from the runtime Qdrant image. `load.sh`
-pushes from a Docker archive, whose registry manifest digest can differ from the
-upstream pin (see above), so a digest reference only resolves for a copy made
-registry to registry. Prove it with `skopeo inspect` against the `images.txt`
+pushes the single platform image from an OCI archive: its registry manifest digest
+is the platform digest, never the `images.txt` manifest-list pin (see above), so a
+digest reference to the pin only resolves for a copy made registry to registry. Prove it with `skopeo inspect` against the `images.txt`
 digest before relying on it; a repository shared by both roles must satisfy both
 forms. Registry-side tag immutability, retention and scanning remain Quay policy,
 not repository behavior.
@@ -1369,8 +1406,9 @@ sidecar part of the signed candidate, rather than an unresolved release input.
 ### Image identity across archive and registry formats
 
 Record the requested upstream pin, platform/archive manifest digest, image config
-digest, loaded registry manifest digest and actual pod `imageID`. Docker archives
-can contain uncompressed layers while the registry stores compressed layers;
+digest, loaded registry manifest digest and actual pod `imageID`. The bundle's
+OCI archives keep the registry's manifest bytes, but a manifest-list pin is not
+the platform digest, and a registry may re-serialize a pushed manifest, so
 those manifest digests can differ. Verify the archive signature/checksums and
 its manifest against the bundle first, then verify identical image config/rootfs
 diffIDs across the load, and the running digest against the loaded registry.
@@ -1379,9 +1417,10 @@ alone. Capture all five images, including every OAuth sidecar.
 Implemented (issue #272), as one chain bound to the signed MANIFEST:
 
 1. `pack.sh` records `<image>_config_digest` for all five images next to the
-   archive `<image>_digest`. `load.sh` refuses an archive whose config differs
-   from it (before any push), then reads each pushed tag back and requires the
-   packed config digest and layer count; it prints `ref@registry-manifest-digest`.
+   archive `<image>_digest`, both read from the verified OCI layout. `load.sh`
+   re-reads every archive the same way and refuses one whose blobs, digest or
+   config differ (before any push), then reads each pushed tag back and requires
+   the packed config digest and layer count; it prints `ref@registry-manifest-digest`.
 2. `deploy.sh` (every entry path: after `load`, `pipeline.sh --skip-load`,
    standalone `airgap:deploy`) and `ingest.sh` read the registry tag back
    **before any cluster change** and require a single-image manifest with the
