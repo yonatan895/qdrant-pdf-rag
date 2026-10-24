@@ -1226,8 +1226,21 @@ def test_pipe_label_document_is_refused_run_continues_and_valid_labels_keep_thei
 
 @pytest.mark.parametrize(
     "stem",
-    ["ctrl\x01name", "rtl\u202egnp", "zw\u200bname", "bom\ufeffname", "iso\u2066name"],
-    ids=["control", "rtl-override", "zero-width", "bom", "isolate"],
+    [
+        "ctrl\x01name",
+        "rtl\u202egnp",
+        "zw\u200bname",
+        "bom\ufeffname",
+        "iso\u2066name",
+        "soft\u00adhyphen",
+        "line\u2028sep",
+        "para\u2029sep",
+        "tag\U000e0041name",
+    ],
+    ids=[
+        "control", "rtl-override", "zero-width", "bom", "isolate",
+        "soft-hyphen", "line-separator", "paragraph-separator", "tag-char",
+    ],
 )
 def test_filename_doc_id_with_hidden_characters_is_refused_with_a_fixed_error(
     plain_pdf, tmp_path, monkeypatch, stem
@@ -1264,7 +1277,7 @@ def test_clean_filename_doc_id_is_not_refused(plain_pdf, tmp_path, monkeypatch):
     from mainframe_rag.config import Settings
     from mainframe_rag.ingest import run_ingest
 
-    pdf = tmp_path / "café guide-1.pdf"
+    pdf = tmp_path / "café guide-1\u00a0x\ufe0f.pdf"  # NBSP and a variation selector stay allowed
     shutil.copy(plain_pdf, pdf)
     monkeypatch.setattr(
         run_ingest, "_load_worker_settings", lambda: Settings(embed_mode="hash", _env_file=None)

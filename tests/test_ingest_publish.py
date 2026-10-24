@@ -250,6 +250,38 @@ def _gen_collections(fake: PublishFake) -> list[str]:
     return sorted(n for n in fake.collections if "__gen" in n and not n.endswith("__completions"))
 
 
+def test_publish_lock_for_a_renamed_alias_also_takes_the_legacy_lock_and_refuses_legacy_state(tmp_path):
+    """Issue #1028 upgrade path: an older release locks `publish-<sanitized>.lock`
+    and records `publish-<sanitized>.json`. The new acquire also takes the legacy
+    lock (so the old writer excludes it) and refuses while legacy state exists.
+    A charset alias keeps exactly one lock file with its unchanged name."""
+    import fcntl
+
+    from mainframe_rag.ingest.completion import acquire_publish_lock, release_run_lock
+
+    progress = tmp_path / "inv.jsonl"
+    legacy_lock = tmp_path / "publish-a_b.lock"
+    with open(legacy_lock, "w") as old_holder:
+        fcntl.flock(old_holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with pytest.raises(RuntimeError, match="another publish"):
+            acquire_publish_lock(progress, "a b")
+    handle = acquire_publish_lock(progress, "a b")
+    with open(legacy_lock, "w") as other, pytest.raises(OSError):
+        fcntl.flock(other.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    release_run_lock(handle)
+    with open(legacy_lock, "w") as other:
+        fcntl.flock(other.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    (tmp_path / "publish-a_b.json").write_text("{}")
+    with pytest.raises(RuntimeError, match="legacy publish state"):
+        acquire_publish_lock(progress, "a b")
+
+    plain = tmp_path / "plain"
+    plain_progress = plain / "inv.jsonl"
+    release_run_lock(acquire_publish_lock(plain_progress, ALIAS))
+    assert sorted(p.name for p in plain.glob("publish-*")) == [f"publish-{ALIAS}.lock"]
+
+
 def test_aliases_that_sanitize_to_one_lock_name_do_not_share_publish_state(tmp_path):
     """Issue #1028: `a b` and `a_b` sanitize to the same lock stem, yet are
     distinct logical aliases: each gets its own lock and sidecar, and one
@@ -2077,6 +2109,33 @@ def test_retry_with_reordered_or_repeated_retire_flags_resumes(tmp_path, monkeyp
         "--retire-doc", DOC_B, "--retire-doc", DOC_A, "--retire-doc", DOC_B,
     ) == 0
     assert _live_doc_ids(fake) == {DOC_C}
+
+
+def test_refused_doc_id_file_does_not_abort_a_retirement_publication(tmp_path, monkeypatch):
+    """Issue #1022: the retire-conflict walk skips a walked file whose doc_id is
+    refused (no key exists to retire) instead of aborting the publication."""
+    import json
+
+    from scripts.make_synthetic_pdf import build_plain
+
+    from mainframe_rag.ingest import run_ingest
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _a, b = _two_doc_corpus(corpus)
+    progress = tmp_path / "inv.jsonl"
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    b.unlink()
+    build_plain(corpus / "hid\u202eden.pdf")
+    # The refused file is an error record, so the run exits 1 without
+    # publishing; the retirement walk itself must not raise.
+    assert _run_main(monkeypatch, corpus, progress, "--retire-doc", DOC_B) == 1
+    records = [json.loads(line) for line in progress.read_text().splitlines() if line.strip()]
+    assert [r["error_type"] for r in records if r["status"] == "error"] == ["DocIdRefused"]
+    assert _live_doc_ids(fake) == {DOC_A, DOC_B}
 
 
 def test_conflict_preflight_same_bytes_changed_label_replaces_old_revision(tmp_path, monkeypatch):

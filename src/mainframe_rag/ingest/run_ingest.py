@@ -246,7 +246,7 @@ DOC_ID_HIDDEN_CODE = "doc_id_hidden_characters"
 # page-text sanitizer (docs/ingest.md section 2) already strips from titles.
 _HIDDEN_DOC_ID_CHARS = re.compile(
     "[\x00-\x1f\x7f-\x9f\u00ad\u061c\u180e\u200b-\u200f\u202a-\u202e"
-    "\u2060-\u206f\ufeff]"
+    "\u2028\u2029\u2060-\u206f\ufeff\U000e0000-\U000e007f]"
 )
 
 

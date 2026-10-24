@@ -555,7 +555,8 @@ thread pool.
 - **Hidden characters in `doc_id`** (issue #1022): the filename-stem fallback
   bypasses the rule-module page-text sanitizer, so `walked_source_rev` also
   refuses a document whose resolved `doc_id` contains C0/C1 controls, DEL,
-  bidirectional marks/overrides/isolates or zero-width characters. The record is an
+  bidirectional marks/overrides/isolates, zero-width characters, soft hyphen,
+  U+2028/U+2029 or tag characters (NBSP and variation selectors stay allowed). The record is an
   `error` with `error_type` `DocIdRefused` and the fixed message
   `doc_id_hidden_characters: ...` (no id or path); other documents continue and the
   run exits non-zero. Refused, never rewritten, in `run_ingest.py` outside the
@@ -1169,7 +1170,9 @@ ingest/verify/publish interval across every writer/admin actor to the same targe
 Publish mode holds one target-identified advisory file lock
 (`publish-<alias>.lock` beside the progress file; an alias outside
 `[A-Za-z0-9_.-]` gets a digest of the full alias appended, so distinct aliases
-never share a lock or the `.json` build sidecar, issue #1028) from staging resolution
+never share a lock or the `.json` build sidecar, issue #1028; the acquire also
+takes the legacy sanitized-name lock after it, and refuses while a legacy
+`.json` state exists: resume with the previous release or remove it explicitly) from staging resolution
 through cutover; a second live publisher for the same target fails closed
 (fcntl releases on process death, so a held lock means a live holder — locks
 are never stolen). Same-alias runs must share the progress directory; a
