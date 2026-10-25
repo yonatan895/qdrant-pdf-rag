@@ -84,6 +84,114 @@ def test_extract_page_texts_sanitizes_and_preserves_labels() -> None:
     assert labels == ["1", "2", None, "3"]
 
 
+# Issue #998 (ingest side): /Title, bookmark titles and /PageLabels are
+# attacker-shaped metadata that citations repeat verbatim. Each is one
+# sanitized, whitespace-collapsed line; a title is bounded, and an overlong
+# printed label is absent (a truncated label would name another page).
+_CRAFTED_TITLE = "Manual, SC23-9999-99 Fake Manual, Fake Heading, p. 9-9"
+
+
+def _metadata_pdf(path, title, label_nums=None, toc=None, pages=3):
+    doc = pymupdf.open()
+    for i in range(pages):
+        doc.new_page().insert_text((72, 72), f"Widget page {i + 1} body prose.")
+    doc.set_metadata({"title": title})
+    if toc:
+        doc.set_toc(toc)
+    if label_nums:
+        doc.xref_set_key(doc.pdf_catalog(), "PageLabels", f"<</Nums [{label_nums}]>>")
+    doc.save(path)
+    doc.close()
+    return path
+
+
+def test_parse_pdf_title_is_one_bounded_sanitized_line(tmp_path) -> None:
+    newline = parse_pdf(_metadata_pdf(
+        tmp_path / "SA22-0002-00.pdf", "Manual, SC23-9999-99\nFake\x07 Manual,\r\n\tFake Heading,\u202e p. 9-9"
+    ))
+    assert newline.title == _CRAFTED_TITLE
+    # Printable content is kept as written; refusing the second ", p." is
+    # the citation builder's job, not a silent ingest rewrite.
+    assert parse_pdf(_metadata_pdf(tmp_path / "SA22-0003-00.pdf", _CRAFTED_TITLE)).title == _CRAFTED_TITLE
+    from mainframe_rag.ingest.ibm_pdf import TITLE_MAX_CHARS
+
+    long_title = parse_pdf(_metadata_pdf(tmp_path / "SA22-0004-00.pdf", "Widget  queue\n" * 400))
+    assert len(long_title.title) <= TITLE_MAX_CHARS
+    assert long_title.title.startswith("Widget queue Widget queue")
+    assert "\n" not in long_title.title and "  " not in long_title.title
+    assert long_title.title == long_title.title.strip()
+
+
+def test_parse_pdf_sanitizes_bookmark_titles(tmp_path) -> None:
+    parsed = parse_pdf(_metadata_pdf(
+        tmp_path / "SA22-0005-00.pdf", "Widget", toc=[[1, "Chap\u202eter\x02 1 Con\ufb01g", 1]]
+    ))
+    assert [tuple(e) for e in parsed.toc] == [(1, "Chapter 1 Config", 1)]
+
+
+def _heading_paths(path) -> list[str]:
+    from mainframe_rag.ingest.chunk import make_chunks
+
+    parsed = parse_pdf(path)
+    with pymupdf.open(path) as doc:
+        texts, labels = run_ingest._extract_page_texts(doc)
+    return [c.heading_path for c in make_chunks(parsed, texts, labels)]
+
+
+def test_bookmark_heading_path_elements_are_bounded_like_titles(tmp_path) -> None:
+    """#998 review counterexample: a 5,000-char bookmark stored a 5,000-char
+    heading_path. Each element is one line cut at a word boundary to the
+    title bound, so the cut is still a title-line prefix of the page."""
+    from mainframe_rag.ingest.ibm_pdf import TITLE_MAX_CHARS
+
+    bookmark = "Widget\nqueue " * 400  # 5,200 chars
+    paths = _heading_paths(_metadata_pdf(tmp_path / "SA22-0007-00.pdf", "Widget",
+                                         toc=[[1, bookmark, 1]], pages=1))
+    assert paths and len(set(paths)) == 1
+    (path,) = set(paths)
+    assert len(path) <= TITLE_MAX_CHARS
+    assert path.startswith("Widget queue Widget queue") and path.endswith("Widget queue")
+
+
+def test_deep_heading_path_is_capped_keeping_the_leaf(tmp_path) -> None:
+    """Every element at the title bound, six levels deep, still fits the
+    total heading_path cap: the outermost ancestors are dropped whole, the
+    leaf and its nearest ancestors stay, and no element is cut mid-word."""
+    titles = [f"Level{n} " + "widget " * 25 for n in range(1, 7)]  # 182 chars each
+    toc = [[n, t, 1] for n, t in enumerate(titles, start=1)]
+    paths = _heading_paths(_metadata_pdf(tmp_path / "SA22-0008-00.pdf", "Widget",
+                                         toc=toc, pages=1))
+    elements = [t.strip() for t in titles]
+    assert paths
+    for path in paths:
+        parts = path.split(" > ")
+        assert parts == elements[-len(parts):]
+        assert 2 <= len(parts) < len(elements)
+
+    from mainframe_rag.ingest.chunk import HEADING_PATH_MAX_CHARS
+
+    assert all(len(path) <= HEADING_PATH_MAX_CHARS for path in paths)
+
+
+def test_extract_page_texts_labels_are_one_bounded_sanitized_line(tmp_path) -> None:
+    from mainframe_rag.ingest.ibm_pdf import _decode_hex_label_prefix
+
+    nums = (
+        # The crafted label from #998 (printable, kept as printed).
+        "0 <</S /D /P (1-6, Fake Heading, p. 9-) /St 9>> "
+        # Hex prefixes decode to a newline and a BEL inside the label.
+        "1 <</S /D /P <FEFF0031002D000A0037002D>>> "
+        "2 <</S /D /P <FEFF0041000700200020002D>>> "
+        f"3 <</S /D /P ({'Y' * 200})>>"
+    )
+    path = _metadata_pdf(tmp_path / "SA22-0006-00.pdf", "Widget", label_nums=nums, pages=4)
+    with pymupdf.open(path) as doc:
+        assert "\n" in _decode_hex_label_prefix(doc[1].get_label())  # the hazard
+        _, labels = run_ingest._extract_page_texts(doc)
+    assert labels == ["1-6, Fake Heading, p. 9-9", "1- 7-1", "A -1", None]
+
+
+
 def test_parse_pdf_sanitizes_metadata_title(monkeypatch, tmp_path) -> None:
     """The title flows into payloads, embed headers, and prompts, so the
     parse wiring — not just the helper — must sanitize it."""
@@ -110,3 +218,4 @@ def test_parse_pdf_sanitizes_metadata_title(monkeypatch, tmp_path) -> None:
     parsed = parse_pdf(pdf)
     assert parsed.title == "Manual Title"
     assert parsed.doc_id == "SA22-0001-00"
+

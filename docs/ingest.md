@@ -128,9 +128,36 @@ PyMuPDF is the only parser. `parse_pdf` returns a frozen, slots `ParsedDoc`.
   the two could compute different source revisions). Both paths reach it
   through `run_ingest.parse_walked` (the run's CLI labels, corpus root and walk
   digest) and take the key from `walked_source_rev`, which `_upsert_one`'s
-  locks and deletes use too (issue #986). Empty version becomes
-  `None`, empty vendor becomes `"unknown"`; title is sanitized; the TOC comes from `get_toc(simple=True)`;
+  locks and deletes use too (issue #986). `walked_source_rev`, the chunk-id
+  revision in `chunk.make_chunks` and the stored payload `source_rev` all
+  come from one mapping, `identity.parsed_source_rev` (#990 item 2; before,
+  `chunk.py` and `payload.py` each spelled it). Empty version becomes
+  `None`, empty vendor becomes `"unknown"`; the TOC comes from `get_toc(simple=True)`;
   the document is closed in a `finally`.
+- Metadata sanitizing (issue #998): `/Title`, bookmark titles and
+  `/PageLabels` are free-form strings that citations repeat, so none is
+  stored raw. The title (metadata or first-page line) is one line:
+  `sanitize_page_text`, then every whitespace run (newlines, tabs) collapsed
+  to one space, stripped, and cut at a word boundary to `TITLE_MAX_CHARS =
+  200`. A metadata title that sanitizes to nothing falls through to the
+  first-page line. Bookmark titles (each `heading_path` element) are made
+  one line and cut at a word boundary to the same 200 chars, so a cut title
+  is still a title-line prefix for same-page splitting; the joined
+  `heading_path` is capped at `chunk.HEADING_PATH_MAX_CHARS = 512` by
+  dropping the outermost ancestors whole, keeping the leaf (a 5,000-char
+  bookmark used to store a 5,000-char `heading_path`). Both bounds plus the
+  maximal context prefix fit the embed window (`tests/test_embed_budget.py`):
+  a body is not capped at `SECTION_MAX_CHARS + SPLIT_OVERLAP_CHARS` (an
+  oversize code statement or table row is emitted whole), so the check uses
+  the longest measured real body, 4,594 chars (#1060 G4 L0 census; the worst
+  real embed input measured 4,678 chars), plus 15%: 200 + 512 + 500 + 5,283
+  plus header is about 6,520 chars, under the 6,809-char budget.
+  A page label is decoded (#863),
+  sanitized and collapsed the same way; one longer than
+  `PAGE_LABEL_MAX_CHARS = 32` is absent rather than truncated, since a cut
+  label would name another page. Printable content is otherwise kept as
+  written: ingest does not judge a `, p.` or doc number inside a title or
+  label; the citation builder owns that refusal ([retrieval](retrieval.md)).
 - `sanitize_page_text` drops CSI sequences, C0 controls, bidi marks, and
   zero-width chars **in that order**, preserving `\t` and `\n`, then spells
   the typographic ligatures U+FB00–FB06 out as letters (`ﬁ` → `fi`, #870) so
@@ -247,7 +274,8 @@ Contract tests: `tests/test_classify_messages.py`, `tests/test_code_entries.py`;
 
 Section-outline chunking with per-statement code protection. Point id =
 `UUID5(NAMESPACE_URL, "source_rev|heading_path|page_start|ordinal")`
-where `source_rev` is `normalize(vendor)|normalize(product)|normalize(version)|sha256`
+where `source_rev` is `esc(normalize(vendor))|esc(normalize(product))|esc(normalize(version))|sha256`
+(`esc`: `\` → `\\`, then `|` → `\|`, #990)
 (issue #361): same-form-number revisions mint disjoint point ids, so a
 different revisions do not collide; same-revision writers still need coordination. The UUID5-of-key
 scheme never changes; the payload `doc_id` stays the printed family key
@@ -272,7 +300,15 @@ for citations and filters.
   sections (notices, trademarks, reader comments, bibliography, copyright,
   index) skip at any position; contents/figures/tables/summary-of-changes
   skip only at or before the limit — a mid-book same-named section is kept
-  by design.
+  by design. A skipped heading drops pages only before the first kept
+  entry, where no kept section can absorb them, and only inside the limit.
+- Pages before the first kept entry (issue #1001): every page there that is
+  not under a named skip heading inside the front-matter limit is chunked
+  under the document title. That covers un-bookmarked covers, a partial or
+  late outline (one `Appendix A -> 5` bookmark used to store page 5 only),
+  pages under an empty-titled bookmark, and an outline whose entries are
+  all skipped (the document used to store nothing). Pages past the limit
+  are body even under a leading `Contents` or `Notices` bookmark.
 - Outline build (issue #577): entries stable-sorted by page only (bookmarks sharing a page keep outline
   order, #663), a stack popping
   deeper-or-equal levels, `heading_path` joined with `" > "`, each kept section
@@ -376,13 +412,19 @@ for citations and filters.
   contract is unchanged. `page_label` is the printed-label range over every
   touched page (`_page_label_range`): single, or `first–last` with an
   en-dash, and **empty** whenever the printed labels cannot locate the whole
-  span — any page in the span unlabeled, or a multi-page span starting and
-  ending on the same printed label (repeated folios). A printed label is
-  never invented. Citations then fall back to the physical span (`p. PDF n` /
+  span — any page in the span unlabeled, or any page whose label does not
+  advance on the page before it (issue #1020). Advancing means the same
+  shape of digit, letter and separator runs, with the first differing run a
+  larger decimal number, one-case roman numeral or single letter (`1-12` →
+  `2-1`, `ix` → `x`, `A-9` → `B-1`). A repeated folio (`A-`, `A-`), a
+  restarted `/PageLabels` rule (`1,2,3,1,2,3` stored `2–1`, or `1–2` for
+  five pages) and a style change (`xii` → `1-1`) all store empty. A printed
+  label is never invented. Citations then fall back to the physical span (`p. PDF n` /
   `p. PDF n–m`, see [retrieval §1](retrieval.md)). A `/PageLabels` tree whose
   first rule starts after page 0 makes PyMuPDF's `get_label()` raise
   `IndexError` on the earlier pages; extraction treats those labels as absent
-  (`ibm_pdf._page_label`) instead of failing the document. A rule prefix
+  (`ibm_pdf._page_label`) instead of failing the document; labels are one
+  bounded, sanitized line (§2). A rule prefix
   written as a PDF hex string comes back verbatim (`<FEFF0033002D>1`) and is
   decoded to the printed label (`3-1`, issue #863): UTF-16BE after the `FEFF`
   byte-order mark, or an even-length string that decodes to printable ASCII.
@@ -609,16 +651,15 @@ thread pool.
   run exits non-zero. Refused, never rewritten, in `run_ingest.py` outside the
   rules-version modules, so no key changes and no re-embed is needed. Rename the
   file to ingest it.
-- **Reserved label delimiter** (issue #878): `|` separates the
-  `source_rev_key` fields, so `walked_source_rev` refuses a document whose resolved
+- **Label delimiter escaping** (#990 item 1, superseding the #878 refusal):
+  `|` separates the `source_rev_key` fields, so each normalized label is
+  escaped first: `\` becomes `\\`, then `|` becomes `\|`. A document whose
   vendor, product or version (path layout or `--vendor/--product/--version`)
-  contains `|`. The inventory record is an `error` with `error_type`
-  `LabelDelimiterRefused` and the fixed message `label_delimiter: ...` (no label,
-  path or text); other documents continue and the run exits non-zero. The
-  retirement check skips such a walked file: it has no key to retire. The labels
-  are refused, never sanitized or escaped: the guard lives in `run_ingest.py`,
-  outside the rules-version modules, so existing keys, chunk ids and the rules
-  version are unchanged. Escaping waits for the next planned rules bump.
+  contains `|` therefore ingests under an unambiguous key
+  (`IBM/zOS|x/2.5` → `ibm|zos\|x|2.5|<sha>`). Before, `('a', 'b|c', 'd')`
+  and `('a', 'b', 'c|d')` shared one key, which is why such documents were
+  refused. Keys whose labels contain neither `\` nor `|` are byte-identical
+  to before. The retirement check compares the walked file's escaped key.
 - **Per-document bounds** (issue #374; `ingest_max_pdf_bytes`,
   `ingest_max_doc_pages`, `ingest_max_doc_chunks`, default 0 = unbounded):
   `_parse_one` refuses an over-bound document with a typed
@@ -744,7 +785,7 @@ thread pool.
 - **Source-revision identity** (issue #361, `ingest/identity.py` +
   revision-keyed pipeline): three identities — printed `doc_id`
   (family/citation key), `source_rev`
-  (`normalize(vendor)|normalize(product)|normalize(version)|sha256`, the
+  (`esc(normalize(vendor))|esc(normalize(product))|esc(normalize(version))|sha256`, the
   destructive key for locks, deletes, completions, and chunk ids),
   committed generation. Planning (dry runs and the publication prewalk
   alike) gates the walked corpus before any parse worker spawns:
@@ -754,6 +795,15 @@ thread pool.
   same winner with no stored state), and distinct revisions claiming one
   `doc_id` abort fail-closed (`RevisionCollisionError`: doc id +
   corpus-relative paths + sha16s, never manual text or absolute paths).
+  Same-`doc_id` volumes or revisions are unsupported in one corpus (issue
+  #1007, maintainer decision C), with or without distinct path-layout
+  versions. The refusal's fixed remediation is the one that works: rename
+  the files so each filename stem starts with a distinct form number (the
+  filename form number wins over the text), or ingest each into its own
+  corpus and alias. `--vendor/--product/--version` labels apply to the whole
+  run and cannot separate two files of one walk, and splitting one corpus
+  across runs fails under alias publication (the run that walks one volume
+  refuses the other as residue). Duplicate copies: keep one input.
   Unreadable files map to no key — prescan validates identity, never file
   health (the worker still error-records them per file), so a corrupt twin
   neither causes nor hides a collision. Prescan resolves through the same

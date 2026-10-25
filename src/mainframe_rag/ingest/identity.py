@@ -7,7 +7,8 @@ Three identities, three jobs — do not conflate them:
   search. It is NOT a destructive key: two files may resolve to one
   ``doc_id`` while carrying different bytes.
 - ``source_rev``: the unambiguous source-revision key
-  ``vendor|product|version|sha256`` (labels normalized). Destructive
+  ``vendor|product|version|sha256`` (labels normalized, then ``\\`` and
+  ``|`` escaped, #990). Destructive
   operations, completion records, and chunk identity key on this — the
   selector switch is the 361B migration; this PR detects ambiguity before
   any delete/upsert and stamps the key on payloads and inventory for that
@@ -30,6 +31,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 
 def normalize_label(value: str | None) -> str:
@@ -42,11 +44,38 @@ def normalize_label(value: str | None) -> str:
     return " ".join(value.split()).casefold()
 
 
+def _escape_label(label: str) -> str:
+    """`\\` then `|` escaped with a backslash (#990 item 1), so a label
+    containing the field delimiter cannot shift the fields after it.
+    Labels without `\\` or `|` are byte-identical."""
+    return label.replace("\\", "\\\\").replace("|", "\\|")
+
+
 def source_rev_key(vendor: str | None, product: str | None, version: str | None, sha256: str) -> str:
-    """Unambiguous source-revision key. The sha256 segment is the raw hex
-    digest (never normalized); equal keys mean equal bytes under equal
-    labels, so equal keys are always safe to treat as one revision."""
-    return f"{normalize_label(vendor)}|{normalize_label(product)}|{normalize_label(version)}|{sha256}"
+    """Unambiguous source-revision key. Labels are normalized, then escaped
+    (`_escape_label`), so keys are equal exactly when the normalized labels
+    and bytes are. The sha256 segment is the raw hex digest (never
+    normalized); equal keys are always safe to treat as one revision."""
+    labels = (_escape_label(normalize_label(x)) for x in (vendor, product, version))
+    return "|".join((*labels, sha256))
+
+
+class _LabelledSource(Protocol):
+    @property
+    def vendor(self) -> str | None: ...
+    @property
+    def product(self) -> str | None: ...
+    @property
+    def version(self) -> str | None: ...
+    @property
+    def sha256(self) -> str: ...
+
+
+def parsed_source_rev(parsed: _LabelledSource) -> str:
+    """The source revision of a parsed document (#990 item 2): the one
+    mapping from its resolved labels and digest to the key that chunk ids,
+    stored payloads and orchestration (`run_ingest.walked_source_rev`) use."""
+    return source_rev_key(parsed.vendor, parsed.product, parsed.version, parsed.sha256)
 
 
 def corpus_relpath(path_str: str, src: Path) -> str:
@@ -128,13 +157,18 @@ class RevisionCollisionError(RuntimeError):
         ]
         for collision in collisions:
             members = ", ".join(f"{rel}@{sha16}" for rel, sha16 in collision.members)
-            lines.append(
-                f"  doc_id {collision.doc_id!r}: {members}. If these are distinct "
-                "revisions, give them distinct --vendor/--product/--version labels "
-                "or ingest them as separate corpora (distinct revisions coexist "
-                "after the #361 identity migration); if they are duplicate copies, "
-                "keep one input."
-            )
+            lines.append(f"  doc_id {collision.doc_id!r}: {members}.")
+        # Issue #1007: fixed text naming only remediations that work. CLI
+        # labels are run-wide, and under alias publication a run that walks
+        # one volume refuses the other as residue.
+        lines.append(
+            "Distinct revisions or volumes that share one doc_id cannot be ingested "
+            "into one corpus, and --vendor/--product/--version labels apply to the "
+            "whole run, so they cannot separate them. Rename the files so each "
+            "filename stem starts with a distinct form number (a filename form "
+            "number takes precedence over the text), or ingest each into its own "
+            "corpus and alias. If they are duplicate copies, keep one input."
+        )
         super().__init__("\n".join(lines))
 
 

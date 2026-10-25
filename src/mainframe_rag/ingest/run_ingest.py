@@ -101,9 +101,9 @@ from mainframe_rag.ingest.ibm_pdf import (
 from mainframe_rag.ingest.identity import (
     RevisionCollisionError,
     find_collisions,
+    parsed_source_rev,
     plan_duplicates,
     prescan_doc_ids,
-    source_rev_key,
 )
 from mainframe_rag.ingest.inventory import (
     InventoryRecord,
@@ -302,32 +302,6 @@ class _StagingBuild:
 
 EMPTY_DOCUMENT_MESSAGE = "document produced zero chunks; nothing published"
 
-LABEL_DELIMITER_CODE = "label_delimiter"
-
-
-class LabelDelimiterRefused(ValueError):
-    """A vendor, product or version label contains `|`, the `source_rev_key`
-    field delimiter (issue #878). Fixed message and stable code: no label,
-    path or manual text ever appears in it."""
-
-    code = LABEL_DELIMITER_CODE
-
-    def __init__(self) -> None:
-        super().__init__(
-            f"{LABEL_DELIMITER_CODE}: vendor, product or version label contains the "
-            "reserved character '|'; document refused"
-        )
-
-
-def require_delimiter_free_labels(parsed: ParsedDoc) -> None:
-    """Refuse (never sanitize) a document whose resolved labels contain `|`,
-    so `vendor|product|version|sha256` stays unambiguous. This guard sits
-    outside the rules-version modules on purpose: it adds no key escaping,
-    so every existing key and chunk id is unchanged (no re-embed)."""
-    if any("|" in (label or "") for label in (parsed.vendor, parsed.product, parsed.version)):
-        raise LabelDelimiterRefused
-
-
 DOC_ID_HIDDEN_CODE = "doc_id_hidden_characters"
 
 # C0 and C1 controls, DEL, bidirectional marks/overrides/isolates and
@@ -363,12 +337,13 @@ def require_visible_doc_id(parsed: ParsedDoc) -> None:
 
 
 def walked_source_rev(parsed: ParsedDoc) -> str:
-    """The source revision of a parsed walked document, after the `|` refusal
-    (issue #878): the one key the build path stores, locks and deletes by, and
-    the retirement check compares (issue #986)."""
-    require_delimiter_free_labels(parsed)
+    """The source revision of a parsed walked document, after the hidden-
+    character doc_id refusal (issue #1022): the one key the build path
+    stores, locks and deletes by, and the retirement check compares (issue
+    #986). The mapping is identity.parsed_source_rev (#990 item 2), which
+    escapes a `|` in a label (#990 item 1)."""
     require_visible_doc_id(parsed)
-    return source_rev_key(parsed.vendor, parsed.product, parsed.version, parsed.sha256)
+    return parsed_source_rev(parsed)
 
 
 def parse_walked(
@@ -385,7 +360,7 @@ def parse_walked(
     path (`_parse_one`) and the retirement-conflict check (issue #986), so a
     file cannot be labelled one way when stored and another when retired (the
     #839 drift). Its key is `walked_source_rev(parsed)`. Both only compose
-    `parse_pdf` and `source_rev_key`, so no stored key changes."""
+    `parse_pdf` and `parsed_source_rev`, so no stored key changes."""
     return parse_pdf(
         path, vendor=vendor, product=product, version=version,
         corpus_root=corpus_root, sha256=sha,
@@ -2079,8 +2054,8 @@ def _resolve_publication(
             )
             try:
                 source_rev = walked_source_rev(parsed_walked)
-            except (LabelDelimiterRefused, DocIdRefused):
-                continue  # refused at ingest (#878, #1022): no key exists to retire
+            except DocIdRefused:
+                continue  # refused at ingest (#1022): no key exists to retire
             doc_id = parsed_walked.doc_id
             if doc_id and doc_id in retire_plan:
                 entry = retire_plan[doc_id]

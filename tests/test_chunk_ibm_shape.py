@@ -516,7 +516,9 @@ def test_nested_outline_chunks_deepest_once_no_duplicates():
         toc=[[1, "Chapter 3", 3], [2, "Section 1", 3], [3, "Functions", 3], [1, "Chapter 4", 6]],
         page_count=6,
     )
+    # Pages 1-2 precede the first bookmark: body under the title (#1001).
     assert [(s.heading_path, s.page_start, s.page_end) for s in outline_sections(same)] == [
+        ("SamePage", 0, 2),
         ("Chapter 3 > Section 1 > Functions", 2, 5),
         ("Chapter 4", 5, 6),
     ]
@@ -561,12 +563,14 @@ def test_skipped_child_heading_does_not_cut_parent():
     )
     s1 = outline_sections(p1)
     assert [(s.heading_path, s.page_start, s.page_end) for s in s1] == [
+        ("Skipped", 0, 79),  # pages before the first bookmark (#1001)
         ("Ch 6 Alternate indexes", 79, 87),
         ("Ch 6 Alternate indexes > Maintaining data", 87, 94),
         ("Ch 7", 94, 100),
     ]
-    # Union matches the pre-#577 base ([79,94) + [94,100)): no pages lost.
-    assert sorted({i for s in s1 for i in range(s.page_start, s.page_end)}) == list(range(79, 100))
+    # Union matches the pre-#577 base ([79,94) + [94,100)) plus the
+    # pre-outline pages #1001 recovers: no pages lost.
+    assert sorted({i for s in s1 for i in range(s.page_start, s.page_end)}) == list(range(100))
     pages1 = [f"Marker page {i} unique." for i in range(100)]
     joined1 = "\n".join(c.text for c in make_chunks(p1, pages1, [str(i) for i in range(100)]))
     for i in (81, 82, 83, 84, 85, 86):
@@ -579,11 +583,12 @@ def test_skipped_child_heading_does_not_cut_parent():
     )
     s2 = outline_sections(p2)
     assert [(s.heading_path, s.page_start, s.page_end) for s in s2] == [
+        ("Skipped", 0, 9),  # pages before the first bookmark (#1001)
         ("Chapter 1", 9, 14),
         ("Chapter 1 > Real child", 14, 19),
         ("Chapter 2", 19, 25),
     ]
-    assert sorted({i for s in s2 for i in range(s.page_start, s.page_end)}) == list(range(9, 25))
+    assert sorted({i for s in s2 for i in range(s.page_start, s.page_end)}) == list(range(25))
 
     # 3. Front-matter child (Contents@2 within limit) is skipped: Preface
     # runs to Chapter 1, not to the skipped Contents.
@@ -605,6 +610,11 @@ def test_skipped_child_heading_does_not_cut_parent():
         (["A-", "A-"], ""),  # repeated folio across a 2-page span locates nothing
         (["1-6"], ""),  # label list shorter than the span: missing page is unlabeled
         (None, ""),  # no labels supplied at all
+        (["2", "1"], ""),  # restarted /PageLabels (#1020): never a backwards range
+        (["1-12", "2-1"], "1-12–2-1"),  # chapter-folio boundary advances
+        (["ix", "x"], "ix–x"),  # roman front matter advances
+        (["A-9", "B-1"], "A-9–B-1"),  # appendix letter advances
+        (["xii", "1-1"], ""),  # style change: no order to prove the span
     ],
 )
 def test_make_chunks_stores_physical_span_and_honest_label(labels, expected_label):
@@ -642,6 +652,46 @@ def test_make_chunks_single_labeled_page_keeps_label():
     assert _page_label_range(["A-"]) == "A-"
     assert _page_label_range([""]) == ""
     assert _page_label_range([]) == ""
+
+
+@pytest.mark.parametrize(
+    "labels",
+    [["1", "2", "3", "1", "2"], ["3", "1", "2"], ["1", "2", "2"], ["1-3", "1-1", "1-4"]],
+)
+def test_page_label_range_is_empty_unless_every_page_advances(labels):
+    """Issue #1020: endpoints alone cannot prove a span. 1,2,3,1,2 ends on a
+    larger label than it starts, yet '1–2' names two pages of a five-page
+    span; every consecutive pair must advance or the citation falls back to
+    the physical pages."""
+    from mainframe_rag.ingest.chunk import _page_label_range
+
+    assert _page_label_range(labels) == ""
+
+
+def test_restarted_page_labels_never_store_an_inverted_range(tmp_path):
+    """Issue #1020 through the real parse path: two /PageLabels rules
+    (startpage 0 and 3, both decimal from 1) label the pages 1,2,3,1,2,3.
+    The chunk spanning physical pages 1-3 read '2–1'; it must store '' and
+    cite the physical pages, while spans inside one rule keep their range."""
+    import pymupdf
+
+    path = tmp_path / "WX10-0012-00_restart.pdf"
+    doc = pymupdf.open()
+    for i in range(1, 7):
+        doc.new_page().insert_text((72, 72), f"Widget marker PG{i:02d} plain fixture prose.")
+    doc.set_toc([[1, "Intro", 1], [1, "Body", 2], [1, "Tail", 5]])
+    doc.set_page_labels([
+        {"startpage": 0, "prefix": "", "style": "D", "firstpagenum": 1},
+        {"startpage": 3, "prefix": "", "style": "D", "firstpagenum": 1},
+    ])
+    doc.save(path)
+    doc.close()
+
+    by_heading = {c.heading_path: c for c in _pipeline_chunks(path)}
+    assert (by_heading["Body"].page_start, by_heading["Body"].page_end) == (1, 3)
+    assert by_heading["Body"].page_label == ""
+    assert by_heading["Intro"].page_label == "1"
+    assert by_heading["Tail"].page_label == "2\u20133"
 
 
 # Issue #597: realistic-shape generated PDFs through the real parse path
@@ -726,6 +776,57 @@ def test_deep_outline_pdf_chunks_each_page_once_under_deepest_kept_section(tmp_p
         # Pages 0-3 precede the first label rule: no label, never a guess.
         assert all(c.page_label == "" for c in chunks if c.page_start < 4)
         assert by_start[10].page_label == "7" and by_start[11].page_label == "8"
+
+
+def _prose_pdf(path, toc, pages=5):
+    import pymupdf
+
+    doc = pymupdf.open()
+    for i in range(1, pages + 1):
+        doc.new_page().insert_text(
+            (72, 72), f"Widget marker PG{i:02d} describes the fixture queue in plain prose."
+        )
+    doc.set_toc(toc)
+    doc.set_metadata({"title": "Widget Queue Guide"})
+    doc.save(path)
+    doc.close()
+    return path
+
+
+@pytest.mark.parametrize(
+    ("toc", "dropped", "owners"),
+    [
+        # Issue #1001: one late bookmark. Pages 1-4 have no entry at all.
+        ([[1, "Appendix A", 5]], set(), {1: "Widget Queue Guide", 4: "Widget Queue Guide",
+                                         5: "Appendix A"}),
+        # Named front matter inside the limit (max(2, 0.15 * 5) = 2) is still
+        # skipped; the pages it would claim past the limit are body.
+        ([[1, "Contents", 1], [1, "Appendix A", 5]], {1, 2},
+         {3: "Widget Queue Guide", 4: "Widget Queue Guide", 5: "Appendix A"}),
+        # Every entry skipped: the document must not vanish.
+        ([[1, "Contents", 1]], {1, 2}, {3: "Widget Queue Guide", 5: "Widget Queue Guide"}),
+        # An always-skipped heading before the first kept entry.
+        ([[1, "Notices", 1], [1, "Chapter 1", 4]], {1, 2},
+         {3: "Widget Queue Guide", 4: "Chapter 1", 5: "Chapter 1"}),
+        # An un-bookmarked cover before the named front matter.
+        ([[1, "Contents", 2], [1, "Chapter 1", 3]], {2},
+         {1: "Widget Queue Guide", 3: "Chapter 1"}),
+    ],
+    ids=["late-entry", "front-matter-then-late-entry", "all-skipped", "notices-first",
+         "cover-then-contents"],
+)
+def test_partial_outline_chunks_every_body_page(tmp_path, toc, dropped, owners):
+    """Issue #1001: pages before the first kept bookmark were never chunked,
+    so a partial outline silently lost the body (one `Appendix A -> 5` entry
+    stored page 5 only). Only named front matter inside the front-matter
+    limit may be skipped; every other page is chunked exactly once, under
+    the document title when no kept entry covers it."""
+    chunks = _pipeline_chunks(_prose_pdf(tmp_path / "WX10-0011-00_partial.pdf", toc))
+    for page in range(1, 6):
+        holders = [c.heading_path for c in chunks if f"PG{page:02d}" in c.text]
+        assert len(holders) == (0 if page in dropped else 1), f"PG{page:02d}: {holders}"
+        if page in owners:
+            assert holders == [owners[page]]
 
 
 def _table_pdf(path):

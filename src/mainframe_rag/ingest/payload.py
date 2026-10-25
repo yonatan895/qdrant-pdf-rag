@@ -12,7 +12,7 @@ from typing import Any
 
 from mainframe_rag.ingest.chunk import Chunk
 from mainframe_rag.ingest.ibm_pdf import ParsedDoc
-from mainframe_rag.ingest.identity import source_rev_key
+from mainframe_rag.ingest.identity import parsed_source_rev
 
 
 def normalize_context(text: str, max_chars: int) -> str:
@@ -40,9 +40,7 @@ def point_payload(
         # the 361B migration — locks, deletes, completions, and chunk
         # ids all scope to it. Computed from the same labels the
         # planner gates on.
-        "source_rev": source_rev_key(
-            parsed.vendor, parsed.product, parsed.version, parsed.sha256
-        ),
+        "source_rev": parsed_source_rev(parsed),
         "title": parsed.title,
         "heading_path": chunk.heading_path,
         "page_label": chunk.page_label,
