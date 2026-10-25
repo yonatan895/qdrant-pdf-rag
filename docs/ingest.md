@@ -1113,6 +1113,15 @@ thread pool.
   `max(3, window)` documents in a row (floor `_MIN_PARSE_CRASH_LIMIT`) each kill a fresh
   pool, with no parse returning in between, the run raises unpublished,
   because the workers cannot run at all.
+- SIGTERM while the parse pool exists stops every parse worker before the
+  run dies (escaped defect 2026-10-25: the default action killed the parent
+  alone and its spawn workers and resource tracker kept running). The
+  handler terminates each multiprocessing child (killed after 5 s), restores
+  the default disposition and re-sends SIGTERM, so the exit status is still
+  death by SIGTERM (143 as a container's PID 1) and no record is appended
+  after the signal; the next run resumes from the ledger as after any crash.
+  A signal inside `pool.submit` waits for it to return, so a just-spawned
+  worker is never missed. A caller's own SIGTERM handler is left in place.
 - Result accounting: `skipped` + `upserted` both count as files-ok; only
   `upserted` adds upserted chunks. `empty` (zero-chunk doc, issue #359) and
   `error` count as failed and exit nonzero, in a `--dry-run` as in a real run
