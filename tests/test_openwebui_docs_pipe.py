@@ -829,6 +829,30 @@ def test_prose_lines_stream_without_waiting_for_their_newline():
     assert pieces[:3] == ["Reissue ", "the ", "command"]
 
 
+def test_held_text_outside_a_section_is_bounded():
+    """Outside a section only a possible header start is held (64 characters):
+    a long line with no newline streams instead of waiting for one."""
+    deltas = ["The command "] * 2000
+    pieces = _yields(FakeAgent(_frames(*deltas, meta=UNVERIFIED)))
+    assert "".join(pieces) == "".join(deltas)
+    assert max(len(p) for p in pieces) <= 64 + len("The command ")
+
+
+@pytest.mark.parametrize("frames", [
+    pytest.param(_frames("Prose one. ", "Prose two.", finish=None, done=False), id="truncated"),
+    pytest.param(_frames("Prose one. ", "Prose two.", finish=None, done=False)
+                 + ["data: {not json\n\n"], id="malformed-frame"),
+])
+def test_the_last_held_delta_is_kept_when_the_stream_fails(frames: list[str]):
+    content, events = run_pipe(FakeAgent(frames))
+    assert content == "Prose one. Prose two.\n\n" + TRUNCATED_TEXT
+    assert _final_status(events) == "Incomplete generation — output was cut off"
+
+
+def test_an_unfinished_last_line_that_starts_like_a_header_is_kept():
+    content, _events = run_pipe(FakeAgent(_frames("Intro.\nSources", meta=UNVERIFIED)))
+    assert content == "Intro.\nSources"
+
 def test_header_and_marker_patterns_equal_the_agents():
     """The Pipe cannot import the agent inside Open WebUI, so it carries copies
     of the cites.py patterns that recognize a citations section."""
