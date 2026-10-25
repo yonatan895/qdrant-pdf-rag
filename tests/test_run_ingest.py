@@ -242,6 +242,126 @@ def test_crashes_separated_by_returned_parses_never_reach_the_bound(tmp_path, mo
         (s, "error" if s in bad else "dry") for s in stems)
 
 
+def _session_processes(sid: int) -> dict[int, str]:
+    """Live (non-zombie) processes in session `sid` -> their state. Orphans
+    reparented after their parent dies keep the session, so this finds
+    every descendant of a `start_new_session` child, wherever it now hangs."""
+    found = {}
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            stat = (entry / "stat").read_text()
+        except OSError:
+            continue  # exited while scanning
+        state, _ppid, _pgrp, session = stat.rsplit(")", 1)[1].split()[:4]
+        if int(session) == sid and state != "Z":
+            found[int(entry.name)] = state
+    return found
+
+
+def _wait_until(predicate, seconds: float, what: str) -> None:
+    import time
+
+    deadline = time.monotonic() + seconds
+    while not predicate():
+        if time.monotonic() > deadline:
+            raise AssertionError(f"timed out after {seconds}s waiting for {what}")
+        time.sleep(0.05)
+
+
+@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="needs Linux /proc")
+def test_sigterm_mid_run_stops_every_worker_and_the_next_run_completes(tmp_path):
+    """Escaped defect (2026-10-25): SIGTERM to a running ingest killed the
+    parent alone; its spawn parse workers and the resource tracker were
+    reparented and kept running. Now the whole process tree exits, the exit
+    status is still death by SIGTERM, the ledger keeps exactly what the run
+    had recorded, and the next ordinary run records the rest."""
+    import contextlib
+    import signal
+    import subprocess
+    import sys
+
+    from scripts.make_synthetic_pdf import build
+
+    from tests.helpers_ingest_crash_worker import HANG_PARSE_DIR_ENV, HANG_PARSE_STEMS_ENV
+
+    repo = Path(__file__).resolve().parents[1]
+    corpus = tmp_path / "corpus"
+    stems = [f"SA22-71{n}0-00" for n in range(4)]
+    for n, stem in enumerate(stems):
+        build(corpus / f"{stem}.pdf", doc_id=stem, title=f"Synthetic Reference {n}",
+              message_id=f"IEA{n}10I")
+    slow = set(stems[:2])  # two workers busy in a parse, the third idle
+    markers = tmp_path / "parsing"
+    markers.mkdir()
+    progress = tmp_path / "inventory.jsonl"
+    args = ["--src", str(corpus), "--progress", str(progress), "--workers", "3", "--dry-run"]
+    env = {**os.environ, "PYTHONPATH": str(repo / "src"),
+           HANG_PARSE_STEMS_ENV: ",".join(sorted(slow)), HANG_PARSE_DIR_ENV: str(markers)}
+
+    def recorded() -> dict[str, str]:
+        if not progress.exists():
+            return {}
+        rows = [json.loads(l) for l in progress.read_text().splitlines() if l.strip()]
+        assert len(rows) == len({r["path"] for r in rows}), rows  # each file at most once
+        return {Path(r["path"]).stem: r["status"] for r in rows}
+
+    log = tmp_path / "ingest.log"
+    with log.open("w") as output:  # a file, not a PIPE: an orphan could hold it open
+        process = subprocess.Popen(
+            [sys.executable, "-m", "tests.helpers_ingest_crash_worker", "hang-parse", "--", *args],
+            cwd=repo, env=env, stdout=output, stderr=subprocess.STDOUT, start_new_session=True,
+        )
+    try:
+        _wait_until(lambda: len(list(markers.iterdir())) == len(slow)
+                    and len(recorded()) == len(stems) - len(slow), 120,
+                    "the fast documents recorded and the slow ones parsing")
+        assert process.poll() is None, log.read_text()
+        tree = set(_session_processes(process.pid)) - {process.pid}
+        busy = {int(m.name.split(".")[0]) for m in markers.iterdir()}
+        assert busy <= tree and len(tree) >= 4, (busy, tree)  # 3 workers + resource tracker
+        ledger = progress.read_bytes()
+
+        process.send_signal(signal.SIGTERM)
+        assert process.wait(timeout=30) == -signal.SIGTERM, log.read_text()
+        _wait_until(lambda: not _session_processes(process.pid), 15,
+                    f"no process left in the ingest session ({_session_processes(process.pid)})")
+        assert progress.read_bytes() == ledger
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+        process.wait(timeout=10)
+
+    rerun = subprocess.run(
+        [sys.executable, "-m", "mainframe_rag.ingest.run_ingest", *args],
+        cwd=repo, env={**os.environ, "PYTHONPATH": str(repo / "src")},
+        capture_output=True, text=True, timeout=300, check=False,
+    )
+    assert rerun.returncode == 0, rerun.stderr[-2000:]
+    assert recorded() == dict.fromkeys(stems, "dry")
+
+
+def test_sigterm_inside_a_spawn_stops_workers_only_after_it_returns(monkeypatch):
+    """Workers spawn inside pool.submit, where the handler also runs: a child
+    that has started but is not yet registered would escape the stop. A
+    SIGTERM there is held until submit returns, and then never dropped."""
+    import signal
+
+    from mainframe_rag.ingest import run_ingest
+
+    guard = run_ingest._WorkersDieWithRun()
+    spawned, stops = [], []
+    monkeypatch.setattr(guard, "_stop", lambda: stops.append(len(spawned)))
+    with guard.spawning():
+        guard._handle(signal.SIGTERM, None)
+        assert stops == []
+        spawned.append("worker")
+    assert stops == [1]
+    guard._handle(signal.SIGTERM, None)  # outside a spawn: at once
+    assert stops == [1, 1]
+
+
 class _CrashSemanticsPool:
     """In-process ProcessPoolExecutor stand-in with its crash semantics
     (#841): one worker thread runs submissions in order; a listed stem

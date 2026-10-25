@@ -684,6 +684,210 @@ def test_script_review_warning_rides_the_banner():
     )
 
 
+# --- Citations section display (issue #1098) ---------------------------------
+# The model ends its reply with its own unvalidated citations section (answer
+# prompt rule 7); the agent then appends its validated list as one more delta
+# (`_chat_final_frames`). Open WebUI cannot retract streamed text, so the Pipe
+# shows the prose once and then only the validated list.
+
+PROSE = "Reissue the command after the recovery completes.\n\nCheck the console log first."
+REJECTED = "SA99-9999-99 Rejected Reference, Chapter 1 > Nowhere, p. 4-4"
+# The agent's validated-list delta, spelled out as app._chat_final_frames sends it.
+AGENT_LIST_A = f"\n\n**Citations:**\n- {CITE_A}"
+SHOWN_LIST_A = f"\n\n**Citations:**\n- {CITE_A}"
+UNVERIFIED = _final_meta(citations=[], verification_state="unverified_draft")
+TRUNCATED_TEXT = ("The answer stream ended before it completed. "
+                  "Treat any text above as incomplete and retry.")
+
+
+def test_model_citations_section_is_replaced_by_the_validated_list():
+    content, events = run_pipe(FakeAgent(_frames(
+        PROSE + "\n\n", f"Citations:\n{CITE_A}\n- {REJECTED}\n", AGENT_LIST_A)))
+    assert content == PROSE + SHOWN_LIST_A
+    assert REJECTED not in content
+    assert [s["source"]["name"] for s in _sources(events)] == [CITE_A]
+    assert _final_status(events) == "Source-matched · 1 citation"
+
+
+def test_model_citations_section_without_a_validated_list_shows_no_list():
+    content, events = run_pipe(FakeAgent(_frames(
+        PROSE + "\n\nCitations:\n", f"- {REJECTED}\n", meta=UNVERIFIED)))
+    assert content == PROSE + "\n\n"
+    assert _sources(events) == []
+    assert _final_status(events) == "Unverified draft — no eligible citation"
+
+
+def test_header_split_across_chunks_is_still_a_header():
+    text = PROSE + f"\n\nCitations:\n{CITE_A}\n"
+    split = text.index("Cita") + 4
+    content, _events = run_pipe(FakeAgent(_frames(text[:split], text[split:], AGENT_LIST_A)))
+    assert content == PROSE + SHOWN_LIST_A
+    # The agent sends its list as one delta; the model's text arrives in any split.
+    one_char, _events = run_pipe(FakeAgent(_frames(*text, AGENT_LIST_A)))
+    assert one_char == PROSE + SHOWN_LIST_A
+
+
+@pytest.mark.parametrize("header", [
+    "Sources:", "References:", "Source:", "**Sources:**", "### References:", "Citation:",
+    "  ## **Citations:**  ", "CITATIONS:\r",
+])
+def test_every_header_the_agent_recognizes_starts_the_section(header: str):
+    content, _events = run_pipe(FakeAgent(_frames(
+        PROSE + "\n\n" + header + "\n", f"{CITE_A}\n{REJECTED}\n", AGENT_LIST_A)))
+    assert content == PROSE + SHOWN_LIST_A
+
+
+CITATION_WORDS_IN_PROSE = (
+    "The citations: below are checked by the agent.\n"
+    "Citations are shown as source chips.\n"
+    "**Sources:** the z/OS library, p. 4 onwards.\n"
+    "- Citations: one per excerpt\n"
+    "See References: Chapter 2.\n"
+    "```\nCitations:\n- copied into a script, p. 3 as text\n```\n"
+    "Sources:\nThe excerpts cover only IEA500I."
+)
+
+
+def test_citation_words_inside_the_prose_are_never_suppressed():
+    """A header alone on its line starts a section; the word anywhere else is
+    prose. Code is never touched, and an alias header followed by prose is kept
+    with that prose, as cites.extract_body_and_citations keeps it."""
+    content, _events = run_pipe(FakeAgent(_frames(
+        CITATION_WORDS_IN_PROSE, f"\n\nCitations:\n{CITE_A}\n", AGENT_LIST_A)))
+    assert content == CITATION_WORDS_IN_PROSE + SHOWN_LIST_A
+
+
+def test_prose_after_the_model_section_is_kept_in_order():
+    """The section ends where cites.py ends it: at a blank line after a cite,
+    or at the first line that is neither a cite nor (after Citations:) a bullet."""
+    content, _events = run_pipe(FakeAgent(_frames(
+        "First.\nCitations:\n", f"{CITE_A}\nSecond.\nSources:\n- {REJECTED}\n\nThird.",
+        AGENT_LIST_A)))
+    assert content == "First.\nSecond.\n\nThird." + SHOWN_LIST_A
+
+
+def test_abstention_with_an_empty_section_shows_only_the_decline():
+    decline = "Nothing in the supplied excerpts answers this question about IEA500I."
+    meta = _final_meta(citations=[], hits=[], supplied_evidence=[],
+                       verification_state="insufficient_evidence")
+    content, events = run_pipe(FakeAgent(_frames(decline + "\n\nCitations:\n", meta=meta)))
+    assert content == decline + "\n\n"
+    assert _sources(events) == []
+    assert _final_status(events) == "Insufficient evidence — not operational guidance"
+
+
+def test_truncated_inside_the_model_section_keeps_prose_and_hides_raw_cites():
+    content, events = run_pipe(FakeAgent(_frames(
+        PROSE + "\n\nCitations:\n", f"{REJECTED}\n", REJECTED[:-2], done=False)))
+    assert content == PROSE + "\n\n\n\n" + TRUNCATED_TEXT
+    assert "Rejected Reference" not in content
+    assert _final_status(events) == "Incomplete generation — output was cut off"
+
+
+def test_error_frame_inside_the_model_section_keeps_prose_and_hides_raw_cites():
+    frames = [format_openai_chunk("chatcmpl-x", "m", delta_content=d)
+              for d in (PROSE + "\n\nCitations:\n", f"- {REJECTED}")]
+    frames += [format_openai_error("model_timeout", UPSTREAM_TEXT), format_openai_done()]
+    content, events = run_pipe(FakeAgent(frames))
+    assert content == PROSE + "\n\n\n\n" + ERROR_CASES[3][2]
+    assert "Rejected Reference" not in content
+    assert _final_status(events) == "Incomplete generation — output was cut off"
+
+
+def test_non_streaming_call_gets_the_same_single_list():
+    content, _events = run_pipe(FakeAgent(_frames(
+        PROSE + f"\n\nCitations:\n{CITE_A}\n", AGENT_LIST_A)), stream=False)
+    assert content == PROSE + SHOWN_LIST_A
+
+
+def _yields(fake: FakeAgent) -> list[str]:
+    """Each content piece the streaming Pipe yields, in order."""
+    pipe = docs_pipe.Pipe()
+    pipe._transport = httpx.MockTransport(fake.handler)
+
+    async def main() -> list[str]:
+        result = await pipe.pipe({"model": "docs", "stream": True,
+                                  "messages": _messages(("user", QUESTION))})
+        return [item["choices"][0]["delta"]["content"] async for item in result]
+
+    return asyncio.run(main())
+
+
+def test_held_text_is_bounded_and_a_long_line_in_a_section_streams_as_prose():
+    """Only the undecided current line is held: at most 2048 characters, after
+    which it is prose. A line no longer than that is decided at its newline."""
+    words = ["word "] * 1000
+    pieces = _yields(FakeAgent(_frames("Intro.\nCitations:\n", *words, "\nEnd.",
+                                       meta=UNVERIFIED)))
+    assert "".join(pieces) == "Intro.\n" + "".join(words) + "\nEnd."
+    assert max(len(p) for p in pieces) <= 2048 + len("word ")
+    assert len(pieces) > 100  # streamed, not released at the newline
+
+
+def test_prose_lines_stream_without_waiting_for_their_newline():
+    pieces = _yields(FakeAgent(_frames("Reissue ", "the ", "command", meta=UNVERIFIED)))
+    assert pieces[:3] == ["Reissue ", "the ", "command"]
+
+
+def test_held_text_outside_a_section_is_bounded():
+    """Outside a section only a possible header start is held (64 characters):
+    a long line with no newline streams instead of waiting for one."""
+    deltas = ["The command "] * 2000
+    pieces = _yields(FakeAgent(_frames(*deltas, meta=UNVERIFIED)))
+    assert "".join(pieces) == "".join(deltas)
+    assert max(len(p) for p in pieces) <= 64 + len("The command ")
+
+
+@pytest.mark.parametrize("frames", [
+    pytest.param(_frames("Prose one. ", "Prose two.", finish=None, done=False), id="truncated"),
+    pytest.param(_frames("Prose one. ", "Prose two.", finish=None, done=False)
+                 + ["data: {not json\n\n"], id="malformed-frame"),
+])
+def test_the_last_held_delta_is_kept_when_the_stream_fails(frames: list[str]):
+    content, events = run_pipe(FakeAgent(frames))
+    assert content == "Prose one. Prose two.\n\n" + TRUNCATED_TEXT
+    assert _final_status(events) == "Incomplete generation — output was cut off"
+
+
+def test_an_unfinished_last_line_that_starts_like_a_header_is_kept():
+    content, _events = run_pipe(FakeAgent(_frames("Intro.\nSources", meta=UNVERIFIED)))
+    assert content == "Intro.\nSources"
+
+def test_header_and_marker_patterns_equal_the_agents():
+    """The Pipe cannot import the agent inside Open WebUI, so it carries copies
+    of the cites.py patterns that recognize a citations section."""
+    from mainframe_rag.agent import cites
+
+    for copied, owner in ((docs_pipe._CITATIONS_HEADER, cites.CITATIONS_HEADER_RE),
+                          (docs_pipe._ALIAS_HEADER, cites._CITATION_ALIAS_HEADER_RE),
+                          (docs_pipe._LIST_MARKER, cites._MARKER_RE)):
+        assert (copied.pattern, copied.flags) == (owner.pattern, owner.flags)
+
+
+SECTION_CASES = {
+    "cites": PROSE + f"\n\nCitations:\n{CITE_A}\n{REJECTED}\n",
+    "bullets": PROSE + f"\nCitations:\n- {CITE_A}\n- not a citation at all\n",
+    "alias-bullet": PROSE + f"\nSources:\n- a bullet the alias does not consume\n{CITE_A}\n",
+    "blank-ends": PROSE + f"\nReferences:\n{CITE_A}\n\nA closing note.\n",
+    "two-sections": PROSE + f"\nCitations:\n\n{CITE_A}\nSources:\n{REJECTED}\nTrailing.\n",
+    "header-then-prose": "Citations:\nProse straight after the header.\n",
+    "alias-then-prose": PROSE + "\nSources:\nThe excerpts cover only IEA500I.\n",
+    "page-words": PROSE + "\nCitations:\nSee p. 4 of this guide, p. 5 for more.\n",
+}
+
+
+@pytest.mark.parametrize("text", SECTION_CASES.values(), ids=SECTION_CASES.keys())
+def test_section_boundaries_match_the_agents_body(text: str):
+    """The prose the Pipe shows has the same non-blank lines as the body
+    cites.extract_body_and_citations keeps, for IBM-number citations."""
+    from mainframe_rag.agent.cites import extract_body_and_citations
+
+    body, _cites = extract_body_and_citations(text)
+    content, _events = run_pipe(FakeAgent(_frames(text, meta=UNVERIFIED)))
+    assert [ln for ln in content.splitlines() if ln.strip()] == [
+        ln for ln in body.splitlines() if ln.strip()]
+
+
 # --- Errors ------------------------------------------------------------------
 
 ERROR_CASES = [
@@ -853,7 +1057,8 @@ def test_round_trip_through_the_real_agent(real_agent):
     content, events = run_pipe(None, transport=transport,
                                user={"id": "u1", "valves": {"product": "z/OS", "version": "3.1"}})
     assert searches == [{"query": QUESTION, "product": "z/OS", "version": "3.1"}]
-    assert content.startswith("Reissue the command.")
+    # The model's own section is replaced by the agent's validated list (#1098).
+    assert content == f"Reissue the command.\n\n**Citations:**\n- {CITE_A}"
     (source,) = _sources(events)
     assert source["source"] == {"name": CITE_A, "id": "SA22-0000-00"}
     assert source["document"] == [EXCERPT_A]

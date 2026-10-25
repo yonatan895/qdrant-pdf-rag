@@ -1,11 +1,14 @@
 """Test-only crash injection for ingest: a publisher process that terminates
-after an acknowledged durable boundary, and a parse worker that dies mid-run."""
+after an acknowledged durable boundary, a parse worker that dies mid-run, and
+a parse that never returns (a run interrupted while workers are busy)."""
 from __future__ import annotations
 
 import argparse
 import os
 import signal
+import sys
 import threading
+import time
 from pathlib import Path
 
 
@@ -100,5 +103,38 @@ def crashing_parse_one(task):
     return run_ingest._parse_one(task)
 
 
+# Names file stems whose parse never returns, and the directory where each
+# such worker announces itself (`<pid>.parsing`) before it blocks.
+HANG_PARSE_STEMS_ENV = "TEST_HANG_PARSE_STEMS"
+HANG_PARSE_DIR_ENV = "TEST_HANG_PARSE_DIR"
+
+
+def hanging_parse_one(task):
+    """Stand-in for run_ingest._parse_one in a spawn worker: blocks forever
+    for a listed stem, as a long parse would, and parses everything else for
+    real. Only a signal ends a blocked worker."""
+    from mainframe_rag.ingest import run_ingest
+
+    if Path(task.path).stem in os.environ.get(HANG_PARSE_STEMS_ENV, "").split(","):
+        marker = Path(os.environ[HANG_PARSE_DIR_ENV]) / f"{os.getpid()}.parsing"
+        marker.write_text(task.path)
+        while True:
+            time.sleep(60)
+    return run_ingest._parse_one(task)
+
+
+def hang_parse_main(ingest_args):
+    """`python -m tests.helpers_ingest_crash_worker hang-parse -- <ingest args>`:
+    the real ingest CLI with hanging_parse_one in its parse pool."""
+    from mainframe_rag.ingest import run_ingest
+
+    if ingest_args[:1] == ["--"]:
+        ingest_args = ingest_args[1:]
+    run_ingest._parse_one = hanging_parse_one
+    return run_ingest.main(ingest_args)
+
+
 if __name__ == "__main__":
+    if sys.argv[1:2] == ["hang-parse"]:
+        raise SystemExit(hang_parse_main(sys.argv[2:]))
     raise SystemExit(main())

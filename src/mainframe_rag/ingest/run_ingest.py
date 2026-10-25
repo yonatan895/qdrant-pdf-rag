@@ -22,6 +22,7 @@ import multiprocessing as mp
 import os
 import re
 import shutil
+import signal
 import sys
 import tempfile
 import threading
@@ -31,10 +32,10 @@ from collections import deque
 from collections.abc import Iterator
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager, nullcontext, suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, Self
 
 from opentelemetry import context as otel_context
 from opentelemetry import trace
@@ -178,6 +179,80 @@ _worker_context_cache_path: str | None = None
 # document. One pool crash requeues at most a window of files and any good
 # one resets the streak, so a few bad neighbours never reach the limit.
 _MIN_PARSE_CRASH_LIMIT = 3
+# How long a SIGTERM waits for terminated parse workers before killing them.
+_WORKER_STOP_SECONDS = 5.0
+
+
+class _WorkersDieWithRun:
+    """SIGTERM ends the parse workers with the run (escaped defect
+    2026-10-25). Under the default disposition SIGTERM killed the parent
+    alone: its spawn workers, which hold their own queue pipe ends, and the
+    resource tracker were reparented and kept running. While the pool
+    exists, the handler terminates every multiprocessing child, then
+    restores the default disposition and re-sends SIGTERM to this process,
+    so the exit status is still death by SIGTERM (143 where the process is a
+    container's PID 1) and nothing reaches the ledger after the signal. The
+    tracker exits once its last holder is gone.
+
+    Workers spawn only inside `pool.submit` on the main thread (no
+    max_tasks_per_child), where the handler also runs. A signal that lands
+    inside `spawning()` waits for it to return, so a child that has started
+    but is not yet registered is never missed. A caller that installed its
+    own SIGTERM disposition keeps it; the guard is then inactive."""
+
+    def __init__(self) -> None:
+        self.active = False
+        self.in_spawn = False
+        self.pending = False
+
+    def __enter__(self) -> Self:
+        if (
+            threading.current_thread() is threading.main_thread()
+            and signal.getsignal(signal.SIGTERM) == signal.SIG_DFL
+        ):
+            signal.signal(signal.SIGTERM, self._handle)
+            self.active = True
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        if self.active:
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)
+            self.active = False
+
+    @contextmanager
+    def spawning(self) -> Iterator[None]:
+        self.in_spawn = True
+        try:
+            yield
+        finally:
+            self.in_spawn = False
+            if self.pending:
+                self._stop()
+
+    def _handle(self, signum: int, frame: object) -> None:
+        if self.in_spawn:
+            self.pending = True
+        else:
+            self._stop()
+
+    def _stop(self) -> None:
+        log.warning(json.dumps({"action": "sigterm", "note": "stopping parse workers"}))
+        deadline = time.monotonic() + _WORKER_STOP_SECONDS
+        while (children := mp.active_children()) and time.monotonic() < deadline:
+            for child in children:
+                with suppress(Exception):
+                    child.terminate()
+            for child in children:
+                with suppress(Exception):
+                    child.join(max(0.0, min(0.5, deadline - time.monotonic())))
+        for child in mp.active_children():
+            with suppress(Exception):
+                child.kill()
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        os.kill(os.getpid(), signal.SIGTERM)
+        # Still alive: PID 1 of a container ignores a default-disposition
+        # signal it sends itself. Exit with the shell's SIGTERM status.
+        os._exit(128 + signal.SIGTERM)
 
 
 class ParseTask(NamedTuple):
@@ -1211,6 +1286,7 @@ def _execute(
     ] = {}
 
     pool = ProcessPoolExecutor(max_workers=workers, mp_context=ctx)
+    workers_die = _WorkersDieWithRun()
 
     def refill_parse() -> None:
         nonlocal pool, pool_broken, isolated
@@ -1223,14 +1299,17 @@ def _execute(
         if suspects or isolated is not None:
             if suspects and not parse_pending:
                 task = suspects.popleft()
-                isolated = pool.submit(_parse_one, task)
+                with workers_die.spawning():
+                    isolated = pool.submit(_parse_one, task)
                 parse_pending[isolated] = task
             return
         while len(parse_pending) + len(upsert_pending) < window:
             next_task = next(task_iter, None)
             if next_task is None:
                 break
-            parse_pending[pool.submit(_parse_one, next_task)] = next_task
+            with workers_die.spawning():
+                future = pool.submit(_parse_one, next_task)
+            parse_pending[future] = next_task
 
     upsert_ctx = (
         ThreadPoolExecutor(max_workers=settings.ingest_upsert_streams)
@@ -1247,6 +1326,7 @@ def _execute(
             pool.shutdown(wait=True)
 
     with (
+        workers_die,
         parse_pool(),
         upsert_ctx as upsert_pool,
     ):
