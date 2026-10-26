@@ -257,7 +257,7 @@ fi
 QDRANT_STORAGE_SIZE=${QDRANT_STORAGE_SIZE:-}
 QDRANT_EXTRA_VALUES=${QDRANT_EXTRA_VALUES:-}
 if [ -n "$QDRANT_EXTRA_VALUES" ]; then
-    require_ci_rehearsal QDRANT_EXTRA_VALUES
+    require_ci_rehearsal QDRANT_EXTRA_VALUES "$QDRANT_SIZING_KEYS"
     [ -f "$QDRANT_EXTRA_VALUES" ] || die "QDRANT_EXTRA_VALUES file not found: $QDRANT_EXTRA_VALUES"
 fi
 
@@ -267,6 +267,31 @@ fi
 # maintenance-window steps instead of failing at the agent rollout after
 # Qdrant and the application were already upgraded.
 check_stored_layout
+
+# Issue #1070 R2 (read-only, before any change): a StatefulSet's volume claim
+# templates are immutable, so the sizes this run would render must equal the
+# existing StatefulSet's. Kept separate from the layout preflight above.
+check_qdrant_volume_sizes() {
+    [ "${AIRGAP_DRYRUN:-0}" != "1" ] || return 0
+    _live=$($KC -n "$NAMESPACE" get statefulset "${QDRANT_RELEASE}-qdrant" -o json --ignore-not-found) ||
+        die "cannot read the existing Qdrant StatefulSet"
+    printf '%s' "$_live" > dist/qdrant-live-statefulset.json
+    set -- -n "$NAMESPACE" -f charts/qdrant-openshift.values.yaml
+    if [ -n "$QDRANT_STORAGE_SIZE" ]; then
+        set -- "$@" --set-string "persistence.size=$QDRANT_STORAGE_SIZE" \
+            --set-string "snapshotPersistence.size=$QDRANT_STORAGE_SIZE"
+    fi
+    for _assignment in $(python3 scripts/airgap/model_config.py --qdrant-sizing); do
+        set -- "$@" --set-string "$_assignment"
+    done
+    [ -z "$QDRANT_EXTRA_VALUES" ] || set -- "$@" -f "$QDRANT_EXTRA_VALUES"
+    helm template "$QDRANT_RELEASE" "$CHART" "$@" > dist/qdrant-size-probe.yaml ||
+        die "cannot render the Qdrant release for the volume size check"
+    python3 scripts/airgap/check_qdrant_volumes.py dist/qdrant-live-statefulset.json < dist/qdrant-size-probe.yaml ||
+        die "requested Qdrant volume sizes differ from the existing StatefulSet"
+    unset _live _assignment
+}
+check_qdrant_volume_sizes
 
 echo "==> Namespace: $NAMESPACE"
 if [ "${AIRGAP_DRYRUN:-0}" != "1" ]; then
@@ -304,6 +329,13 @@ if [ -n "$QDRANT_STORAGE_SIZE" ]; then
     set -- "$@" --set-string "persistence.size=$QDRANT_STORAGE_SIZE" \
         --set-string "snapshotPersistence.size=$QDRANT_STORAGE_SIZE"
 fi
+# Site sizing keys (#1070 R2), validated by validate_helm_inputs; they win
+# over QDRANT_STORAGE_SIZE. Unset keys add nothing, so the default is unchanged.
+_sizing=$(python3 scripts/airgap/model_config.py --qdrant-sizing) || die "invalid Qdrant sizing"
+for _assignment in $_sizing; do
+    set -- "$@" --set-string "$_assignment"
+done
+unset _sizing _assignment
 if [ -n "$QDRANT_EXTRA_VALUES" ]; then
     set -- "$@" -f "$QDRANT_EXTRA_VALUES"
 fi

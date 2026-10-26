@@ -99,7 +99,7 @@ fail_on_placeholders dist/ingest-rendered.yaml ingest
 # production template in git. Client-side only; the cluster is not contacted.
 INGEST_EXTRA_PATCH=${INGEST_EXTRA_PATCH:-}
 if [ -n "$INGEST_EXTRA_PATCH" ]; then
-    require_ci_rehearsal INGEST_EXTRA_PATCH
+    require_ci_rehearsal INGEST_EXTRA_PATCH "$INGEST_SIZING_KEYS"
     [ -f "$INGEST_EXTRA_PATCH" ] || die "INGEST_EXTRA_PATCH file not found: $INGEST_EXTRA_PATCH"
     $KC patch --local -f dist/ingest-rendered.yaml \
         -p "$(cat "$INGEST_EXTRA_PATCH")" -o yaml > dist/ingest-rendered-patched.yaml

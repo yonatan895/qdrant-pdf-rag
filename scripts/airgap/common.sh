@@ -122,11 +122,16 @@ export AIRGAP_DRYRUN
 # Issue #1014: CI-rehearsal overrides change a manifest after (or outside) the
 # release checks, so the release path refuses them unless the caller's process
 # environment opts in with CI_REHEARSAL=1 (disposable lab only, never the air
-# gap). $1 = the override's variable name.
+# gap). $1 = the override's variable name; the optional $2 names the airgap.env
+# keys that replace it (#1070).
 require_ci_rehearsal() {
     [ "${CI_REHEARSAL:-}" = "1" ] ||
-        die "$1 is a CI-rehearsal override and is refused on the release path (set CI_REHEARSAL=1 in the process environment only in a disposable lab, never in the air gap)"
+        die "$1 is a CI-rehearsal override and is refused on the release path (set CI_REHEARSAL=1 in the process environment only in a disposable lab, never in the air gap)${2:+; a site sets $2 in airgap.env instead}"
 }
+
+# Site sizing keys (#1070 R2) that replace the CI-only overlays.
+QDRANT_SIZING_KEYS="QDRANT_DATA_SIZE QDRANT_SNAPSHOT_SIZE QDRANT_CPU_REQUEST QDRANT_MEMORY_REQUEST QDRANT_CPU_LIMIT QDRANT_MEMORY_LIMIT"
+INGEST_SIZING_KEYS="INGEST_CPU_REQUEST INGEST_MEMORY_REQUEST INGEST_CPU_LIMIT INGEST_MEMORY_LIMIT"
 
 require_env() {
     # Collect every missing key before failing, so one run tells the
@@ -200,8 +205,18 @@ bool_flag() {
     printf '%s' "$_val"
 }
 
+# Issue #1070: keys an earlier release honoured and this one ignores refuse
+# with a fixed migration message (table: model_config.RETIRED_KEYS). Values
+# are never printed; the check runs before any cluster, registry or file change.
+refuse_retired_keys() {
+    command -v python3 >/dev/null 2>&1 || die "python3 is required for the retired-key check"
+    export REGISTRY_INTERNAL OPENSHIFT_NAMESPACE VLLM_BASE_URL JAEGER_ENABLED JAEGER_QUERY_URL OTEL_EXPORTER_OTLP_ENDPOINT
+    python3 scripts/airgap/model_config.py --retired-keys || exit 1
+}
+
 # Product rules that every air-gap step enforces (AGENTS.md).
 enforce_product_rules() {
+    refuse_retired_keys
     [ "${EMBED_MODE:-}" != "hash" ] || die "EMBED_MODE=hash is CI/dev only; air-gap uses the in-cluster vLLM endpoint"
     refuse_plaintext_gateway_keys
 }
@@ -364,6 +379,12 @@ validate_helm_inputs() {
     check_value_syntax QDRANT_STORAGE_SIZE '[1-9][0-9]*(\.[0-9]+)?(Ki|Mi|Gi|Ti)' "a positive quantity with a unit (Ki, Mi, Gi or Ti), such as 100Gi"
     check_value_syntax INTERNAL_REGISTRY '[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?(/[a-z0-9]+([._-][a-z0-9]+)*)*' "host[:port][/path] with no spaces, commas or '='"
     unset _dns
+    # Site sizing (#1070 R2): refuse a malformed quantity or a limit below its
+    # request here, before any cluster change; the same check prints the
+    # assignments deploy.sh passes to the Qdrant release.
+    # shellcheck disable=SC2086
+    export $QDRANT_SIZING_KEYS
+    python3 scripts/airgap/model_config.py --qdrant-sizing >/dev/null || exit 1
 }
 
 # kubectl preferred, oc fallback — same choice in deploy/ingest/validate/smoke.
@@ -686,6 +707,7 @@ map_app_values() {
     else
         echo "==> Gateway keys off: keyless model endpoints"
     fi
+    export $INGEST_SIZING_KEYS
     python3 scripts/airgap/map_values.py "$@"
 }
 

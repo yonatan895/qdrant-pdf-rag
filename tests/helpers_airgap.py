@@ -83,7 +83,7 @@ def make_bin_tree(tmp_path: Path, scripts: list[str]) -> Path:
     if any(name in scripts for name in ("deploy.sh", "ingest.sh")):
         scripts = [*scripts, "check_pod_images.py"]
     if "deploy.sh" in scripts:
-        scripts = [*scripts, "check_qdrant_render.py"]
+        scripts = [*scripts, "check_qdrant_render.py", "check_qdrant_volumes.py"]
     if "ingest.sh" in scripts:
         scripts = [*scripts, "check_ingest_patch.py"]
     for f in scripts:
@@ -510,3 +510,34 @@ class FakeQdrant:
             ("GET", ("snapshots",)): "snapshot_list", ("POST", ("snapshots",)): "snapshot_create",
         }
         return table.get((method, tuple(rest)), "unknown"), name
+
+
+# Operator keys release d53595e honoured that later releases ignore (#1070).
+# Values are distinctive sentinels so a leak into any output is detectable.
+RETIRED_ENV_KEYS = (
+    "REGISTRY_INTERNAL",
+    "OPENSHIFT_NAMESPACE",
+    "VLLM_BASE_URL",
+    "JAEGER_ENABLED",
+    "JAEGER_QUERY_URL",
+)
+RETIRED_ENV_VALUES = {key: f"sentinel-{key.lower().replace('_', '-')}" for key in RETIRED_ENV_KEYS}
+
+# An airgap.env shaped like d53595e's example after an operator filled it in:
+# every legacy key uncommented next to keys that are still current.
+D53595E_SHAPED_ENV = """\
+INTERNAL_REGISTRY=registry.example.internal/mainframe-rag
+REGISTRY_INTERNAL=sentinel-registry-internal
+NAMESPACE=mainframe-rag              # legacy alias: OPENSHIFT_NAMESPACE
+OPENSHIFT_NAMESPACE=sentinel-openshift-namespace
+GATEWAY_BASE_URL=https://sample-api/v1
+VLLM_BASE_URL=sentinel-vllm-base-url
+JAEGER_ENABLED=false
+JAEGER_QUERY_URL=sentinel-jaeger-query-url
+INGEST_ALIAS_PUBLISH=true
+"""
+
+
+def retired_keys_listed(stderr: str) -> list[str]:
+    """Keys named in the refusal, read from its fixed one-key-per-line layout."""
+    return re.findall(r"(?m)^  ([A-Z][A-Z0-9_]+) \(retired in ", stderr)

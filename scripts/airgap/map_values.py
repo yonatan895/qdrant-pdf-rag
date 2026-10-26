@@ -32,7 +32,9 @@ from pathlib import Path
 try:
     from scripts.airgap.model_config import (
         MODEL_CONFIG_KEYS,
+        SIZING_ENV_KEYS,
         feedback_config,
+        ingest_resources,
         network_policy,
         openwebui_config,
         parse_strict_bool,
@@ -40,12 +42,15 @@ try:
         reasoning_overrides,
         request_overrides,
         require_in_place_retired,
+        require_no_retired_keys,
         validate_model_config,
     )
 except ModuleNotFoundError:
     from model_config import (  # type: ignore[no-redef]  # Direct bastion-script execution.
         MODEL_CONFIG_KEYS,
+        SIZING_ENV_KEYS,
         feedback_config,
+        ingest_resources,
         network_policy,
         openwebui_config,
         parse_strict_bool,
@@ -53,6 +58,7 @@ except ModuleNotFoundError:
         reasoning_overrides,
         request_overrides,
         require_in_place_retired,
+        require_no_retired_keys,
         validate_model_config,
     )
 
@@ -304,6 +310,10 @@ def build_values(deploy_only: bool = False) -> dict:
     # --without-ingest-job so steady-state values keep ingest.enabled=false
     # even when CORPUS_PVC is set for a later explicit ingest operation.
     ingest_enabled = bool(corpus_pvc) and not deploy_only
+    try:
+        sizing = ingest_resources({name: env(name) for name in SIZING_ENV_KEYS})
+    except ValueError as exc:
+        die(str(exc))
     ingest_block: dict = {
         "enabled": False,
         "corpusPVC": "",
@@ -317,10 +327,7 @@ def build_values(deploy_only: bool = False) -> dict:
         "contextLlmBaseUrl": "",
         "contextLlmModel": "",
         "collectionPolicy": {"shardNumber": 6, "replicationFactor": 3, "writeConsistencyFactor": 2},
-        "resources": {
-            "requests": {"cpu": "4", "memory": "8Gi"},
-            "limits": {"cpu": "16", "memory": "32Gi"},
-        },
+        "resources": sizing,
     }
     if ingest_enabled:
         try:
@@ -358,10 +365,7 @@ def build_values(deploy_only: bool = False) -> dict:
             "contextLlmModel": env("CONTEXT_LLM_MODEL"),
             "collectionPolicy": qdrant_policy,
             "peerUrls": env("QDRANT_PEER_URLS"),
-            "resources": {
-                "requests": {"cpu": "4", "memory": "8Gi"},
-                "limits": {"cpu": "16", "memory": "32Gi"},
-            },
+            "resources": sizing,
         }
 
     reasoning_model = env("LLM_MODEL_REASONING")
@@ -527,6 +531,10 @@ def main(argv: list[str]) -> int:
     out = DEFAULT_OUT
     deploy_only = False
     args = list(argv)
+    try:
+        require_no_retired_keys(os.environ)
+    except ValueError as exc:
+        die(str(exc))
     if args == ["--bundle-decisions"]:
         print_bundle_decisions()
         return 0

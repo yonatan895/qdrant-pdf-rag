@@ -240,3 +240,22 @@ exit 0
     calls = log.read_text()
     assert "skopeo copy" not in calls and " upgrade " not in calls
     assert " apply " not in calls and " delete " not in calls and " create " not in calls
+
+
+def test_pipeline_refuses_a_d53595e_shaped_env_before_stage_one(pipe_tree):
+    from tests.helpers_airgap import D53595E_SHAPED_ENV, RETIRED_ENV_KEYS, retired_keys_listed
+
+    log = pipe_tree / "stages.log"
+    for stage in ("validate", "load", "deploy", "ingest", "smoke"):
+        write_stub(
+            pipe_tree / "scripts" / "airgap" / f"{stage}.sh",
+            f'#!/bin/sh\necho {stage} >> "{log}"\n',
+        )
+    env_file = pipe_tree / "d53595e.env"
+    env_file.write_text(D53595E_SHAPED_ENV)
+    r = _run_pipeline(pipe_tree, "--skip-load", extra_env={"AIRGAP_ENV": str(env_file)})
+    assert r.returncode != 0, r.stdout
+    assert sorted(retired_keys_listed(r.stderr)) == sorted(RETIRED_ENV_KEYS), r.stderr
+    assert "sentinel-" not in r.stdout + r.stderr
+    assert "STAGE" not in r.stdout
+    assert not log.exists()

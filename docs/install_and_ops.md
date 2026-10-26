@@ -854,7 +854,7 @@ after rollout). To disable tracing and skip both workloads, set
 `OTEL_EXPORTER_OTLP_ENDPOINT=off` (also `none`, `false`, or `0`) in
 `airgap.env`. A custom `http(s)` origin is passed through unchanged; anything
 else fails closed before a manifest is rendered. `JAEGER_ENABLED` and
-`JAEGER_QUERY_URL` no longer exist. `sh scripts/tools/run-task.sh airgap:validate` prints the
+`JAEGER_QUERY_URL` no longer exist and are refused when set (#1070). `sh scripts/tools/run-task.sh airgap:validate` prints the
 resolved mode.
 
 This traces **this repo's components only** (agent, retrieval, ingest); the

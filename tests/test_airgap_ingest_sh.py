@@ -640,10 +640,11 @@ def test_production_preset_is_the_owner_decision():
         assert line in text.splitlines()
 
 
-def test_ingest_retired_jaeger_switch_is_ignored(ingest_tree):
-    # #956: JAEGER_ENABLED no longer exists; the Job follows the same tracing
-    # decision as the agent (bundled OpenObserve unless an endpoint is given).
-    r = _run_ingest(ingest_tree, ("JAEGER_ENABLED", "false"))
+def test_ingest_follows_the_agent_tracing_decision(ingest_tree):
+    # #956: the Job follows the same tracing decision as the agent (bundled
+    # OpenObserve unless an endpoint is given). The retired JAEGER_ENABLED
+    # switch is refused instead (#1070).
+    r = _run_ingest(ingest_tree)
     assert r.returncode == 0, r.stderr
     rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
     assert rendered_env(rendered, "ingest")["OTEL_EXPORTER_OTLP_ENDPOINT"] == "http://openobserve:5080/api/default"
@@ -847,3 +848,84 @@ def test_ingest_with_the_seven_openwebui_inputs_renders_only_the_job(ingest_tree
     assert "ROUTE_DESTINATION_CA_FILE" not in r.stderr
     rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
     assert "claimName: my-manuals-pvc" in rendered and "rag-openwebui" not in rendered
+
+
+# --- #1070 R2: first-class ingest sizing -------------------------------------
+
+INGEST_SIZING = {
+    "INGEST_CPU_REQUEST": "750m", "INGEST_MEMORY_REQUEST": "3Gi",
+    "INGEST_CPU_LIMIT": "3", "INGEST_MEMORY_LIMIT": "6Gi",
+}
+
+
+def _chart_ingest_resources():
+    import yaml
+
+    return yaml.safe_load((REPO / "charts/mainframe-rag/values.yaml").read_text())["ingest"]["resources"]
+
+
+def test_default_ingest_job_resources_are_unchanged(ingest_tree):
+    r = _run_ingest(ingest_tree)
+    assert r.returncode == 0, r.stderr
+    rendered = (ingest_tree[0] / "dist/ingest-rendered.yaml").read_text()
+    assert rendered_container(rendered, "ingest")["resources"] == _chart_ingest_resources()
+
+
+def test_ingest_sizing_keys_reach_the_rendered_job(ingest_tree):
+    r = _run_ingest(ingest_tree, *INGEST_SIZING.items())
+    assert r.returncode == 0, r.stderr
+    rendered = (ingest_tree[0] / "dist/ingest-rendered.yaml").read_text()
+    assert rendered_container(rendered, "ingest")["resources"] == {
+        "requests": {"cpu": "750m", "memory": "3Gi"}, "limits": {"cpu": "3", "memory": "6Gi"}}
+
+
+def test_ingest_sizing_equals_what_the_resource_patch_produced(ingest_tree):
+    """The keys replace INGEST_EXTRA_PATCH: same Job, byte for byte."""
+    _use_patching_kubectl(ingest_tree)
+    patch = _write_patch(ingest_tree, {"spec": {"template": {"spec": {"containers": [{
+        "name": "ingest", "resources": {"requests": {"cpu": "750m", "memory": "3Gi"},
+                                         "limits": {"cpu": "3", "memory": "6Gi"}}}]}}}})
+    old = _run_ingest(ingest_tree, ("INGEST_EXTRA_PATCH", patch), ("CI_REHEARSAL", "1"))
+    assert old.returncode == 0, old.stderr
+    patched = rendered_container((ingest_tree[0] / "dist/ingest-rendered.yaml").read_text(), "ingest")
+    new = _run_ingest(ingest_tree, *INGEST_SIZING.items())
+    assert new.returncode == 0, new.stderr
+    keyed = rendered_container((ingest_tree[0] / "dist/ingest-rendered.yaml").read_text(), "ingest")
+    assert keyed == patched
+
+
+@pytest.mark.parametrize("name,value", [
+    ("INGEST_CPU_REQUEST", "lots"), ("INGEST_MEMORY_LIMIT", "500m"),
+    ("INGEST_CPU_LIMIT", "2"), ("INGEST_MEMORY_REQUEST", "33Gi"),
+])
+def test_invalid_ingest_sizing_is_refused_before_any_cluster_call(ingest_tree, name, value):
+    r = _run_ingest(ingest_tree, (name, value))
+    assert r.returncode != 0
+    assert name in r.stderr and value not in r.stderr
+    assert not ingest_tree[1].exists(), "no kubectl call may precede the refusal"
+
+
+def test_extra_patch_outside_ci_names_the_sizing_keys_to_use(ingest_tree):
+    patch = _write_patch(ingest_tree, RESOURCE_PATCH)
+    r = _run_ingest(ingest_tree, ("INGEST_EXTRA_PATCH", patch))
+    assert r.returncode != 0
+    assert "INGEST_EXTRA_PATCH is a CI-rehearsal override" in r.stderr
+    for key in INGEST_SIZING:
+        assert key in r.stderr, key
+
+
+# --- Retired airgap.env keys (#1070) ---
+
+
+def test_ingest_refuses_a_d53595e_shaped_env_before_any_cluster_call(ingest_tree):
+    from tests.helpers_airgap import D53595E_SHAPED_ENV, RETIRED_ENV_KEYS, retired_keys_listed
+
+    env_file = ingest_tree[0] / "d53595e.env"
+    env_file.write_text(D53595E_SHAPED_ENV)
+    r = _run_ingest(ingest_tree, ("AIRGAP_ENV", str(env_file)))
+    assert r.returncode != 0, r.stdout
+    assert sorted(retired_keys_listed(r.stderr)) == sorted(RETIRED_ENV_KEYS), r.stderr
+    assert "sentinel-" not in r.stdout + r.stderr
+    log = ingest_tree[1]
+    assert not log.exists() or log.read_text() == ""
+    assert not ((ingest_tree[0]) / "dist").exists() or not list((ingest_tree[0] / "dist").glob("*rendered*"))

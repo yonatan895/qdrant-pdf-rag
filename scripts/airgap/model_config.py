@@ -7,6 +7,8 @@ import re
 import ssl
 import sys
 from collections.abc import Mapping
+from fractions import Fraction
+from urllib.parse import urlsplit
 
 REASONING_INTEGER_FIELDS = {
     "LLM_MAX_MODEL_LEN": ("maxModelLen", 512, 131072),
@@ -70,6 +72,72 @@ def parse_strict_bool(name: str, raw: str, default: bool) -> bool:
     if low in ("false", "0", "no"):
         return False
     raise ValueError(f"{name} must be true/false")
+
+
+# Operator keys that earlier releases honoured and the current code ignores
+# (#1070). Ignoring them silently would let an upgrade run with a different
+# registry, namespace, embedding origin or tracing than the operator wrote, so
+# any non-empty value refuses. (key, retiring commit, fixed migration text).
+RETIRED_KEYS: tuple[tuple[str, str, str], ...] = (
+    ("REGISTRY_INTERNAL", "547d04d", "set INTERNAL_REGISTRY and remove it"),
+    ("OPENSHIFT_NAMESPACE", "547d04d", "set NAMESPACE and remove it"),
+    (
+        "VLLM_BASE_URL",
+        "547d04d",
+        ("set EMBED_BASE_URL to the old value plus /v1 (clients append /embeddings to a base "
+         "that must end in /v1; do not repeat /v1), then remove it"),
+    ),
+    (
+        "JAEGER_ENABLED",
+        "d7765dc",
+        "remove it; OTEL_EXPORTER_OTLP_ENDPOINT selects the collector (off disables tracing)",
+    ),
+    (
+        "JAEGER_QUERY_URL",
+        "d7765dc",
+        "remove it; airgap:smoke reads TRACE_QUERY_URL, TRACE_QUERY_USER and TRACE_QUERY_PASSWORD",
+    ),
+)
+
+
+# d53595e's example pointed OTEL_EXPORTER_OTLP_ENDPOINT at the bundled Jaeger
+# Service. Any set endpoint now means an external collector (no OpenObserve),
+# so that value would drop every trace silently (#1070).
+OTEL_ENDPOINT_KEY = "OTEL_EXPORTER_OTLP_ENDPOINT"
+_RETIRED_JAEGER_HOST = re.compile(r"jaeger(\.[a-z0-9-]+\.svc(\.[a-z0-9.-]*)?)?")
+_JAEGER_ENDPOINT_MESSAGE = (
+    "points at the retired in-cluster Jaeger; unset it to use the bundled OpenObserve "
+    "collector, or set your external collector"
+)
+
+
+def _points_at_retired_jaeger(raw: str) -> bool:
+    candidate = raw.strip()
+    if "://" not in candidate:
+        return False  # not a URL: the endpoint validator refuses it with its own message
+    try:
+        host = urlsplit(candidate).hostname or ""
+    except ValueError:
+        return False
+    return _RETIRED_JAEGER_HOST.fullmatch(host.lower().rstrip(".")) is not None
+
+
+def require_no_retired_keys(values: Mapping[str, str]) -> None:
+    """Refuse every retired key that carries a non-empty value, and a tracing
+    endpoint naming the retired in-cluster Jaeger Service. One fixed message
+    lists them all; values are never echoed. Empty or absent is fine."""
+    lines = [
+        f"  {key} (retired in {ref}): {text}"
+        for key, ref, text in RETIRED_KEYS
+        if values.get(key, "") != ""
+    ]
+    if _points_at_retired_jaeger(values.get(OTEL_ENDPOINT_KEY, "")):
+        lines.append(f"  {OTEL_ENDPOINT_KEY} (retired in d7765dc): {_JAEGER_ENDPOINT_MESSAGE}")
+    if lines:
+        raise ValueError(
+            "retired airgap.env keys are set and no longer read; apply the migration "
+            "or empty/remove each key before any cluster change:\n" + "\n".join(lines)
+        )
 
 
 def require_in_place_retired(raw: str) -> None:
@@ -291,6 +359,7 @@ def openwebui_config(values: Mapping[str, str]) -> dict[str, object] | None:
 
 
 def validate_operator_booleans(values: Mapping[str, str]) -> None:
+    require_no_retired_keys(values)
     for name in OPERATOR_BOOL_KEYS:
         parse_strict_bool(name, values.get(name, ""), False)
     require_in_place_retired(values.get("INGEST_ALIAS_PUBLISH", ""))
@@ -367,6 +436,83 @@ def request_overrides(values: Mapping[str, str]) -> dict[str, int | float]:
     return result
 
 
+# Site sizing (#1070 R2): a quota-bound site fits the release into its
+# namespace quota with these keys, not with free-form overlays (those stay
+# CI-only). Unset keeps the chart default, so the default render is unchanged.
+# SIZING_DEFAULTS mirrors charts/qdrant-openshift.values.yaml and
+# charts/mainframe-rag/values.yaml (a test pins both) so a lone limit or
+# request is compared against the value that will actually render.
+SIZING_DEFAULTS = {
+    "QDRANT": {"requests": {"cpu": "4", "memory": "16Gi"}, "limits": {"cpu": "8", "memory": "32Gi"}},
+    "INGEST": {"requests": {"cpu": "4", "memory": "8Gi"}, "limits": {"cpu": "16", "memory": "32Gi"}},
+}
+SIZING_PREFIXES = ("QDRANT", "INGEST")
+QDRANT_VOLUME_KEYS = {"QDRANT_DATA_SIZE": "persistence.size", "QDRANT_SNAPSHOT_SIZE": "snapshotPersistence.size"}
+SIZING_ENV_KEYS = (
+    *QDRANT_VOLUME_KEYS,
+    *(f"{prefix}_{res}_{kind}" for prefix in SIZING_PREFIXES for kind in ("REQUEST", "LIMIT") for res in ("CPU", "MEMORY")),
+)
+_CPU_QUANTITY = re.compile(r"(?:[0-9]+(?:\.[0-9]{1,3})?|[0-9]+m)")
+_BYTE_QUANTITY = re.compile(r"[0-9]+(?:\.[0-9]+)?(?:Ki|Mi|Gi|Ti)")
+_BINARY_UNITS = {"Ki": 2**10, "Mi": 2**20, "Gi": 2**30, "Ti": 2**40}
+
+
+def _quantity(name: str, raw: str, cpu: bool) -> Fraction:
+    """A positive CPU or byte quantity as an exact number; the message never echoes the value."""
+    if cpu:
+        if _CPU_QUANTITY.fullmatch(raw):
+            number = Fraction(raw[:-1]) / 1000 if raw.endswith("m") else Fraction(raw)
+            if number > 0:
+                return number
+        raise ValueError(f"{name} must be a positive CPU quantity (whole or decimal cores, or millicores with an m suffix)")
+    if _BYTE_QUANTITY.fullmatch(raw):
+        number = Fraction(raw[:-2]) * _BINARY_UNITS[raw[-2:]]
+        if number > 0:
+            return number
+    raise ValueError(f"{name} must be a positive quantity with a unit (Ki, Mi, Gi or Ti)")
+
+
+def sizing_resources(values: Mapping[str, str], prefix: str) -> dict[str, dict[str, str]]:
+    """The explicitly selected requests/limits of one workload (`QDRANT` or
+    `INGEST`), validated against each other and the chart default of any side
+    left unset. Unset keys are omitted."""
+    chosen: dict[str, dict[str, str]] = {"requests": {}, "limits": {}}
+    quantities: dict[tuple[str, str], Fraction] = {}
+    for section, kind in (("requests", "REQUEST"), ("limits", "LIMIT")):
+        for field, res in (("cpu", "CPU"), ("memory", "MEMORY")):
+            name = f"{prefix}_{res}_{kind}"
+            raw = values.get(name, "")
+            if raw != "":
+                chosen[section][field] = raw
+            quantities[(section, field)] = _quantity(
+                name, raw or SIZING_DEFAULTS[prefix][section][field], field == "cpu")
+    for field, res in (("cpu", "CPU"), ("memory", "MEMORY")):
+        if quantities[("limits", field)] < quantities[("requests", field)]:
+            raise ValueError(f"{prefix}_{res}_LIMIT must not be below {prefix}_{res}_REQUEST")
+    return {section: fields for section, fields in chosen.items() if fields}
+
+
+def qdrant_sizing(values: Mapping[str, str]) -> list[str]:
+    """`helm key=value` assignments for the Qdrant release, in a fixed order."""
+    result = []
+    for name, helm_key in QDRANT_VOLUME_KEYS.items():
+        raw = values.get(name, "")
+        if raw != "":
+            _quantity(name, raw, False)
+            result.append(f"{helm_key}={raw}")
+    for section, fields in sizing_resources(values, "QDRANT").items():
+        result.extend(f"resources.{section}.{field}={raw}" for field, raw in fields.items())
+    return result
+
+
+def ingest_resources(values: Mapping[str, str]) -> dict[str, dict[str, str]]:
+    """The chart's `ingest.resources` with the selected sizes applied over the defaults."""
+    merged = {section: dict(fields) for section, fields in SIZING_DEFAULTS["INGEST"].items()}
+    for section, fields in sizing_resources(values, "INGEST").items():
+        merged[section].update(fields)
+    return merged
+
+
 def validate_model_config(values: Mapping[str, str]) -> None:
     reasoning_overrides(values)
     request_overrides(values)
@@ -386,13 +532,24 @@ def validate_model_config(values: Mapping[str, str]) -> None:
                 raise ValueError(f"{name} is required when CONTEXTUAL_EMBED_ENABLED is set")
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    args = sys.argv[1:] if argv is None else argv
     try:
+        if args == ["--retired-keys"]:
+            require_no_retired_keys(os.environ)
+            return 0
+        if args == ["--qdrant-sizing"]:
+            require_no_retired_keys(os.environ)
+            print("\n".join(qdrant_sizing(os.environ)))
+            return 0
+            return 0
         validate_operator_booleans(os.environ)
         network_policy(os.environ)
         feedback_config(os.environ)
         openwebui_config(os.environ)
         validate_model_config(os.environ)
+        qdrant_sizing(os.environ)
+        ingest_resources(os.environ)
     except ValueError as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 1

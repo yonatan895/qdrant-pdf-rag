@@ -13,6 +13,7 @@ only); the helm round-trip skips without helm.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -56,6 +57,9 @@ MAPPER_KEYS = [
     "FEEDBACK_ENABLED", "FEEDBACK_SECRET", "FEEDBACK_STORAGE_SIZE", "FEEDBACK_RETENTION_DAYS",
     "IMAGE_DIGEST_AGENT", "IMAGE_DIGEST_INGEST", "IMAGE_DIGEST_OPENOBSERVE", "IMAGE_DIGEST_OTELCOL", "IMAGE_DIGEST_OAUTH_PROXY",
     "STORAGE_CLASS", "CORPUS_PVC", "INGEST_WORKERS", "INGEST_WORK_SIZE",
+    "INGEST_CPU_REQUEST", "INGEST_MEMORY_REQUEST", "INGEST_CPU_LIMIT", "INGEST_MEMORY_LIMIT",
+    "QDRANT_DATA_SIZE", "QDRANT_SNAPSHOT_SIZE", "QDRANT_CPU_REQUEST", "QDRANT_MEMORY_REQUEST",
+    "QDRANT_CPU_LIMIT", "QDRANT_MEMORY_LIMIT",
     "INGEST_ALIAS_PUBLISH", "INGEST_REINGEST", "INGEST_RETIRE_DOCS",
     "INGEST_AUTHORIZE_FROM_CATALOG",
     "CONTEXTUAL_EMBED_ENABLED", "CONTEXT_LLM_BASE_URL", "CONTEXT_LLM_MODEL",
@@ -135,17 +139,22 @@ def test_full_mapping_table(mapper_env):
     assert v["replicaCount"] == 2
 
 
-def test_removed_legacy_env_names_are_not_honored(monkeypatch, mapper_env):
-    """The removed aliases no longer stand in for the current inputs: a
-    VLLM_BASE_URL origin never supplies the embedding URL, and
-    REGISTRY_INTERNAL never supplies the registry."""
+def test_removed_legacy_env_names_are_refused_not_ignored(monkeypatch, mapper_env):
+    """The removed aliases never stand in for the current inputs; since #1070
+    setting one refuses with its migration instead of failing later (or not at
+    all) on the missing replacement."""
     monkeypatch.delenv("EMBED_BASE_URL")
     monkeypatch.setenv("VLLM_BASE_URL", "http://vllm:8000/v1")
     r, _ = mapper_env()
-    assert r.returncode != 0 and "EMBED_BASE_URL is required" in r.stderr
+    assert r.returncode != 0 and "VLLM_BASE_URL (retired in 547d04d)" in r.stderr
+    monkeypatch.delenv("VLLM_BASE_URL")
     monkeypatch.setenv("EMBED_BASE_URL", "http://vllm:8000/v1")
     monkeypatch.delenv("INTERNAL_REGISTRY", raising=False)
     monkeypatch.setenv("REGISTRY_INTERNAL", "old.example:5000")
+    r, _ = mapper_env()
+    assert r.returncode != 0 and "REGISTRY_INTERNAL (retired in 547d04d)" in r.stderr
+    assert "old.example" not in r.stderr
+    monkeypatch.delenv("REGISTRY_INTERNAL")
     r, _ = mapper_env()
     assert r.returncode != 0 and "INTERNAL_REGISTRY is not set" in r.stderr
 
@@ -710,10 +719,9 @@ def test_monitor_for_disabled_metrics_fails_closed(monkeypatch, mapper_env):
     assert "SERVICEMONITOR_ENABLED=true requires METRICS_ENABLED=true" in r.stderr
 
 
-def test_retired_jaeger_switch_is_ignored(monkeypatch, mapper_env):
-    """#956: JAEGER_ENABLED no longer selects or refuses anything; tracing
-    follows OTEL_EXPORTER_OTLP_ENDPOINT alone and no Jaeger key is emitted."""
-    monkeypatch.setenv("JAEGER_ENABLED", "false")
+def test_tracing_follows_the_endpoint_alone_and_emits_no_jaeger_key(mapper_env):
+    """#956: tracing follows OTEL_EXPORTER_OTLP_ENDPOINT alone and no Jaeger
+    key is emitted (JAEGER_ENABLED itself is refused, #1070)."""
     r, out = mapper_env()
     assert r.returncode == 0, r.stderr
     v = load_values(out)
@@ -1284,3 +1292,138 @@ def test_preflight_rejects_invalid_request_bound():
     result = subprocess.run([sys.executable, str(REPO / "scripts/airgap/model_config.py")],
                             env=env, capture_output=True, text=True, check=False)
     assert result.returncode == 1 and "REQUEST_QUEUE_MAX" in result.stderr
+
+
+# --- #1070 R2: first-class site sizing (quota-bound sites) -------------------
+
+CHART_INGEST_RESOURCES = yaml.safe_load((CHART / "values.yaml").read_text())["ingest"]["resources"]
+INGEST_SIZING_ENV = {
+    "INGEST_CPU_REQUEST": "750m", "INGEST_MEMORY_REQUEST": "3Gi",
+    "INGEST_CPU_LIMIT": "3", "INGEST_MEMORY_LIMIT": "6Gi",
+}
+INGEST_SIZING_EXPECTED = {
+    "requests": {"cpu": "750m", "memory": "3Gi"}, "limits": {"cpu": "3", "memory": "6Gi"},
+}
+
+
+@pytest.mark.parametrize("corpus", ["", "corpus-pvc"])
+def test_default_ingest_resources_are_the_chart_defaults(monkeypatch, mapper_env, corpus):
+    """Unset sizing keys keep today's rendered values, enabled or not."""
+    if corpus:
+        monkeypatch.setenv("CORPUS_PVC", corpus)
+    r, out = mapper_env()
+    assert r.returncode == 0, r.stderr
+    assert load_values(out)["ingest"]["resources"] == CHART_INGEST_RESOURCES
+
+
+def test_ingest_sizing_keys_reach_the_release_values(monkeypatch, mapper_env):
+    monkeypatch.setenv("CORPUS_PVC", "corpus-pvc")
+    for key, val in INGEST_SIZING_ENV.items():
+        monkeypatch.setenv(key, val)
+    r, out = mapper_env()
+    assert r.returncode == 0, r.stderr
+    assert load_values(out)["ingest"]["resources"] == INGEST_SIZING_EXPECTED
+
+
+def test_a_partial_ingest_override_keeps_the_other_defaults(monkeypatch, mapper_env):
+    monkeypatch.setenv("CORPUS_PVC", "corpus-pvc")
+    monkeypatch.setenv("INGEST_MEMORY_LIMIT", "12Gi")
+    r, out = mapper_env()
+    assert r.returncode == 0, r.stderr
+    expected = {k: dict(v) for k, v in CHART_INGEST_RESOURCES.items()}
+    expected["limits"]["memory"] = "12Gi"
+    assert load_values(out)["ingest"]["resources"] == expected
+
+
+@pytest.mark.parametrize("key,val", [
+    ("INGEST_CPU_REQUEST", "lots"), ("INGEST_CPU_REQUEST", "0"), ("INGEST_CPU_REQUEST", "-1"),
+    ("INGEST_CPU_REQUEST", "1Gi"), ("INGEST_CPU_LIMIT", "20,x=1"), ("INGEST_CPU_LIMIT", "20 "),
+    ("INGEST_MEMORY_REQUEST", "8"), ("INGEST_MEMORY_REQUEST", "8GB"), ("INGEST_MEMORY_REQUEST", "0Gi"),
+    ("INGEST_MEMORY_LIMIT", "500m"), ("INGEST_MEMORY_LIMIT", "1e3Gi"),
+    # A limit below the request, against the chart default for the other side.
+    ("INGEST_CPU_LIMIT", "2"),          # default request is 4
+    ("INGEST_MEMORY_LIMIT", "4Gi"),     # default request is 8Gi
+    ("INGEST_CPU_REQUEST", "17"),       # default limit is 16
+    ("INGEST_MEMORY_REQUEST", "33Gi"),  # default limit is 32Gi
+])
+def test_invalid_ingest_sizing_is_refused_with_a_fixed_message(monkeypatch, mapper_env, key, val):
+    monkeypatch.setenv("CORPUS_PVC", "corpus-pvc")
+    monkeypatch.setenv(key, val)
+    r, out = mapper_env()
+    assert r.returncode != 0 and not out.exists()
+    assert key in r.stderr
+    assert val not in r.stderr, "the refusal never echoes the supplied value"
+
+
+def test_sizing_defaults_mirror_the_chart_values():
+    """The limit-vs-request check compares against what will actually render."""
+    from scripts.airgap.model_config import SIZING_DEFAULTS
+
+    qdrant = yaml.safe_load((REPO / "charts" / "qdrant-openshift.values.yaml").read_text())
+    assert SIZING_DEFAULTS["QDRANT"] == qdrant["resources"]
+    assert SIZING_DEFAULTS["INGEST"] == CHART_INGEST_RESOURCES
+
+
+# --- Retired airgap.env keys (#1070) ---
+
+_EXAMPLE_ASSIGNMENT = re.compile(r"(?m)^(#?)\s*([A-Z][A-Z0-9_]+)=(\S*)")
+
+
+def test_mapper_refuses_a_retired_key_before_rendering(monkeypatch, mapper_env):
+    monkeypatch.setenv("REGISTRY_INTERNAL", "sentinel-registry-internal")
+    monkeypatch.setenv("JAEGER_ENABLED", "false")
+    r, out = mapper_env()
+    assert r.returncode != 0
+    assert not out.exists()
+    assert "sentinel-" not in r.stdout + r.stderr
+    assert re.findall(r"(?m)^  ([A-Z_]+) \(retired in ", r.stderr) == ["REGISTRY_INTERNAL", "JAEGER_ENABLED"]
+
+
+def test_mapper_ignores_empty_retired_keys(monkeypatch, mapper_env):
+    monkeypatch.setenv("REGISTRY_INTERNAL", "")
+    r, _ = mapper_env()
+    assert r.returncode == 0, r.stderr
+
+
+def test_current_airgap_env_example_is_not_refused():
+    """Neither a live nor a commented assignment in the shipped example names a
+    retired key, so copying it never trips the refusal."""
+    from scripts.airgap.model_config import RETIRED_KEYS, require_no_retired_keys
+
+    text = (REPO / "airgap.env.example").read_text()
+    live = {}
+    for hash_, key, value in _EXAMPLE_ASSIGNMENT.findall(text):
+        assert key not in {entry[0] for entry in RETIRED_KEYS}, key
+        if not hash_ and value:
+            live[key] = value
+    require_no_retired_keys(live)
+
+
+def test_retired_key_table_entries_are_complete_and_fixed():
+    from scripts.airgap.model_config import RETIRED_KEYS, require_no_retired_keys
+
+    assert [entry[0] for entry in RETIRED_KEYS] == [
+        "REGISTRY_INTERNAL", "OPENSHIFT_NAMESPACE", "VLLM_BASE_URL",
+        "JAEGER_ENABLED", "JAEGER_QUERY_URL",
+    ]
+    for _key, ref, message in RETIRED_KEYS:
+        assert re.fullmatch(r"[0-9a-f]{7}", ref) and message
+    with pytest.raises(ValueError) as caught:
+        require_no_retired_keys({key: "sentinel-value" for key, _, _ in RETIRED_KEYS})
+    assert "sentinel-value" not in str(caught.value)
+    require_no_retired_keys({key: "" for key, _, _ in RETIRED_KEYS})
+
+
+def test_vllm_base_url_migration_names_the_v1_suffix():
+    """The old key was an origin and d53595e appended /v1; EMBED_BASE_URL is a
+    base that clients append /embeddings to, so the message must say plus /v1."""
+    from scripts.airgap.model_config import require_no_retired_keys
+
+    with pytest.raises(ValueError) as caught:
+        require_no_retired_keys({"VLLM_BASE_URL": "http://vllm:8000"})
+    assert (
+        "  VLLM_BASE_URL (retired in 547d04d): set EMBED_BASE_URL to the old value plus /v1 "
+        "(clients append /embeddings to a base that must end in /v1; do not repeat /v1), "
+        "then remove it"
+    ) in str(caught.value)
+    assert "http://vllm:8000" not in str(caught.value)

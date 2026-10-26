@@ -72,6 +72,9 @@ case "$*" in
     [ -n "${{FAKE_QDRANT_URL:-}}" ] && [ "${{EXEC_FAIL:-}}" != 1 ] || {{ echo 'error: container not found' >&2; exit 1; }}
     while [ "$1" != "--" ]; do shift; done; shift
     exec env QDRANT_URL="$FAKE_QDRANT_URL" QDRANT_API_KEY="$FAKE_READ_KEY" "$@" ;;
+  *'get statefulset '*'-o json'*)
+    [ "${{LIVE_STS_FAIL:-}}" != 1 ] || exit 1
+    [ -z "${{LIVE_STS_FILE:-}}" ] || cat "$LIVE_STS_FILE" ;;
   *'rollout status '*)
     [ "${{ROLLOUT_FAIL:-}}" != 1 ] || exit 1 ;;
   'api-resources -o name')
@@ -1157,9 +1160,9 @@ def test_invalid_shared_gateway_key_refuses_before_commands(tree, key, secret):
 # --------------------------------- Decoupled backends (issue #529 OBS-2)
 
 
-def test_retired_jaeger_switch_is_ignored_and_external_collector_passes_through(tree):
-    # #956: OpenObserve is the only bundled backend; JAEGER_ENABLED is gone.
-    r = _run(tree, ("JAEGER_ENABLED", "false"), ("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector.platform:4318"))
+def test_external_collector_passes_through(tree):
+    # #956: OpenObserve is the only bundled backend; JAEGER_ENABLED is refused (#1070).
+    r = _run(tree, ("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector.platform:4318"))
     assert r.returncode == 0, r.stderr
     values = (tree[0] / "dist" / "mainframe-rag-release-values.yaml").read_text()
     assert 'endpoint: "http://collector.platform:4318"' in values
@@ -2150,3 +2153,209 @@ def test_rolled_back_layout_refuses_with_the_reopen_step(tree, qdrant):
     assert "E_ROLLED_BACK" in result.stderr
     assert "retire_legacy.sh --confirm mainframe_manuals" in result.stderr
     assert _mutations(tree) == []
+
+
+# --- #1070 R2: first-class site sizing for the Qdrant release ----------------
+
+QDRANT_SIZING = {
+    "QDRANT_DATA_SIZE": "40Gi", "QDRANT_SNAPSHOT_SIZE": "60Gi",
+    "QDRANT_CPU_REQUEST": "1500m", "QDRANT_MEMORY_REQUEST": "5Gi",
+    "QDRANT_CPU_LIMIT": "3", "QDRANT_MEMORY_LIMIT": "7Gi",
+}
+QDRANT_SIZING_HELM_KEYS = {
+    "QDRANT_DATA_SIZE": "persistence.size", "QDRANT_SNAPSHOT_SIZE": "snapshotPersistence.size",
+    "QDRANT_CPU_REQUEST": "resources.requests.cpu", "QDRANT_MEMORY_REQUEST": "resources.requests.memory",
+    "QDRANT_CPU_LIMIT": "resources.limits.cpu", "QDRANT_MEMORY_LIMIT": "resources.limits.memory",
+}
+
+
+def _upgrade_args(tree):
+    args = _helm_log(tree).splitlines()
+    return args[args.index("upgrade"):]
+
+
+def test_default_deploy_passes_no_sizing_values_to_qdrant(tree):
+    """Unset sizing keys leave the prod values file in charge: byte-identical render."""
+    r = _run(tree)
+    assert r.returncode == 0, r.stderr
+    upgrade = _upgrade_args(tree)
+    for helm_key in QDRANT_SIZING_HELM_KEYS.values():
+        assert not any(a.startswith(helm_key + "=") for a in upgrade), helm_key
+
+
+def test_each_qdrant_sizing_key_reaches_helm_as_a_literal_string(tree):
+    r = _run(tree, *QDRANT_SIZING.items())
+    assert r.returncode == 0, r.stderr
+    upgrade = _upgrade_args(tree)
+    for key, helm_key in QDRANT_SIZING_HELM_KEYS.items():
+        assignment = f"{helm_key}={QDRANT_SIZING[key]}"
+        assert upgrade[upgrade.index(assignment) - 1] == "--set-string", key
+
+
+def test_specific_qdrant_size_keys_win_over_the_rehearsal_storage_size(tree):
+    r = _run(tree, ("QDRANT_STORAGE_SIZE", "1Gi"), ("QDRANT_DATA_SIZE", "40Gi"), ("CI_REHEARSAL", "1"))
+    assert r.returncode == 0, r.stderr
+    upgrade = _upgrade_args(tree)
+    assert upgrade.index("persistence.size=40Gi") > upgrade.index("persistence.size=1Gi")
+    assert "snapshotPersistence.size=1Gi" in upgrade
+
+
+@pytest.mark.parametrize("name,value", [
+    ("QDRANT_DATA_SIZE", "lots"), ("QDRANT_DATA_SIZE", "0Gi"), ("QDRANT_DATA_SIZE", "40Gi,service.type=LoadBalancer"),
+    ("QDRANT_SNAPSHOT_SIZE", "40"), ("QDRANT_SNAPSHOT_SIZE", "40GB"),
+    ("QDRANT_CPU_REQUEST", "4Gi"), ("QDRANT_CPU_REQUEST", "0"), ("QDRANT_CPU_LIMIT", "x=1"),
+    ("QDRANT_MEMORY_REQUEST", "500m"), ("QDRANT_MEMORY_REQUEST", "16"), ("QDRANT_MEMORY_LIMIT", "-1Gi"),
+    ("QDRANT_CPU_LIMIT", "3"),          # default request is 4: limit below request
+    ("QDRANT_MEMORY_LIMIT", "8Gi"),     # default request is 16Gi
+    ("QDRANT_CPU_REQUEST", "9"),        # default limit is 8
+    ("QDRANT_MEMORY_REQUEST", "33Gi"),  # default limit is 32Gi
+])
+def test_invalid_qdrant_sizing_is_refused_before_any_helm_call(tree, name, value):
+    r = _run(tree, (name, value))
+    assert r.returncode != 0, r.stdout
+    assert name in r.stderr
+    assert value not in r.stderr
+    assert "upgrade" not in _helm_log(tree) and "template" not in _helm_log(tree)
+
+
+def test_a_limit_below_an_explicit_request_is_refused(tree):
+    r = _run(tree, ("QDRANT_CPU_REQUEST", "2"), ("QDRANT_CPU_LIMIT", "1500m"))
+    assert r.returncode != 0
+    assert "QDRANT_CPU_LIMIT" in r.stderr and "QDRANT_CPU_REQUEST" in r.stderr
+    assert "upgrade" not in _helm_log(tree)
+
+
+def test_overlay_outside_ci_names_the_sizing_keys_to_use(tree):
+    """The free-form overlay stays CI-only; a site is told which keys replace it."""
+    vals = tree[0] / "vals.yaml"
+    vals.write_text("resources: {}\n")
+    r = _run(tree, ("QDRANT_EXTRA_VALUES", str(vals)))
+    assert r.returncode != 0
+    assert "QDRANT_EXTRA_VALUES is a CI-rehearsal override" in r.stderr
+    for key in QDRANT_SIZING:
+        assert key in r.stderr, key
+    assert "upgrade" not in _helm_log(tree)
+
+
+def _qdrant_statefulset(rendered: str) -> dict:
+    import yaml
+
+    for doc in yaml.safe_load_all(rendered):
+        if doc and doc.get("kind") == "StatefulSet":
+            return doc
+    raise AssertionError("no StatefulSet in the Qdrant render")
+
+
+def _sizing_projection(rendered: str) -> dict:
+    """Only the resources and storage-size fields: never anything else."""
+    sts = _qdrant_statefulset(rendered)
+    return {
+        "resources": {c["name"]: c.get("resources") for c in sts["spec"]["template"]["spec"]["containers"]},
+        "claims": {t["metadata"]["name"]: t["spec"]["resources"]["requests"]["storage"]
+                   for t in sts["spec"].get("volumeClaimTemplates", [])},
+    }
+
+
+def test_sizing_keys_render_what_the_free_form_overlay_rendered(tmp_path):
+    """The key proof: a site's overlay and the new keys give the same sizes."""
+    import os
+
+    helm = shutil.which("helm")
+    assert helm, "pinned Helm is required"
+    chart = next(REPO.glob("charts/qdrant-*.tgz"))
+    base = ["template", "q", str(chart), "-n", "ns", "-f", str(REPO / "charts/qdrant-openshift.values.yaml")]
+    overlay = tmp_path / "overlay.yaml"
+    overlay.write_text(
+        "persistence: {size: 40Gi}\nsnapshotPersistence: {size: 60Gi}\n"
+        "resources:\n  requests: {cpu: 1500m, memory: 5Gi}\n  limits: {cpu: '3', memory: 7Gi}\n")
+    old = subprocess.run([helm, *base, "-f", str(overlay)], capture_output=True, text=True, check=True).stdout
+    env = {**os.environ, **QDRANT_SIZING}
+    sets = subprocess.run(
+        ["python3", "scripts/airgap/model_config.py", "--qdrant-sizing"],
+        capture_output=True, text=True, check=True, cwd=REPO, env=env).stdout.split()
+    args = [a for s in sets for a in ("--set-string", s)]
+    new = subprocess.run([helm, *base, *args], capture_output=True, text=True, check=True).stdout
+    default = subprocess.run([helm, *base], capture_output=True, text=True, check=True).stdout
+    assert _sizing_projection(new) == _sizing_projection(old)
+    assert _sizing_projection(new) != _sizing_projection(default)
+    def non_secret(text):  # the chart generates random API keys on every render
+        import yaml
+
+        docs = [d for d in yaml.safe_load_all(text) if d and d.get("kind") != "Secret"]
+        for d in docs:  # checksum annotations hash the random Secret
+            if d["kind"] == "StatefulSet":
+                d["spec"]["template"]["metadata"].pop("annotations", None)
+        return docs
+
+    assert non_secret(new) == non_secret(old), "every resource is identical, not only the sizing fields"
+
+
+# --- #1070 R2: StatefulSet volume sizes are immutable ------------------------
+
+def _live_statefulset(tree, data="500Gi", snapshots="500Gi"):
+    import json
+
+    path = tree[0] / "live-sts.json"
+    path.write_text(json.dumps({"spec": {"volumeClaimTemplates": [
+        {"metadata": {"name": "qdrant-storage"}, "spec": {"resources": {"requests": {"storage": data}}}},
+        {"metadata": {"name": "qdrant-snapshots"}, "spec": {"resources": {"requests": {"storage": snapshots}}}},
+    ]}}))
+    return ("LIVE_STS_FILE", str(path))
+
+
+def _mutations_before_refusal(tree):
+    log = _helm_log(tree)
+    return [w for w in ("upgrade", "create", "new-project", "delete") if w in log.split()]
+
+
+def test_a_changed_qdrant_volume_size_is_refused_before_any_change(tree):
+    r = _run(tree, _live_statefulset(tree, data="40Gi", snapshots="60Gi"), ("QDRANT_DATA_SIZE", "50Gi"),
+             ("QDRANT_SNAPSHOT_SIZE", "60Gi"))
+    assert r.returncode != 0
+    assert "QDRANT_DATA_SIZE" in r.stderr and "immutable" in r.stderr
+    assert "QDRANT_SNAPSHOT_SIZE" not in r.stderr, "only the mismatching volume is named"
+    assert "50Gi" not in r.stderr and "40Gi" not in r.stderr
+    assert _mutations_before_refusal(tree) == []
+
+
+def test_default_sizes_against_a_site_sized_statefulset_are_refused(tree):
+    """Forgetting the keys on a later upgrade must not fall back to 500Gi silently."""
+    r = _run(tree, _live_statefulset(tree, data="40Gi", snapshots="60Gi"))
+    assert r.returncode != 0
+    assert "QDRANT_DATA_SIZE" in r.stderr and "QDRANT_SNAPSHOT_SIZE" in r.stderr
+    assert _mutations_before_refusal(tree) == []
+
+
+def test_equal_sizes_in_another_unit_pass(tree):
+    r = _run(tree, _live_statefulset(tree, data="40Gi", snapshots="61440Mi"), ("QDRANT_DATA_SIZE", "40960Mi"),
+             ("QDRANT_SNAPSHOT_SIZE", "60Gi"))
+    assert r.returncode == 0, r.stderr
+
+
+def test_no_existing_statefulset_or_default_match_passes(tree):
+    assert _run(tree).returncode == 0
+    assert _run(tree, _live_statefulset(tree)).returncode == 0
+
+
+def test_an_unreadable_statefulset_is_refused(tree):
+    r = _run(tree, ("LIVE_STS_FAIL", "1"))
+    assert r.returncode != 0
+    assert "cannot read the existing Qdrant StatefulSet" in r.stderr
+    assert _mutations_before_refusal(tree) == []
+
+
+# --- Retired airgap.env keys (#1070) ---
+
+
+def test_deploy_refuses_a_d53595e_shaped_env_before_any_cluster_call(tree):
+    from tests.helpers_airgap import D53595E_SHAPED_ENV, RETIRED_ENV_KEYS, retired_keys_listed
+
+    env_file = tree[0] / "d53595e.env"
+    env_file.write_text(D53595E_SHAPED_ENV)
+    r = _run(tree, ("AIRGAP_ENV", str(env_file)))
+    assert r.returncode != 0, r.stdout
+    assert sorted(retired_keys_listed(r.stderr)) == sorted(RETIRED_ENV_KEYS), r.stderr
+    assert "sentinel-" not in r.stdout + r.stderr
+    log = tree[1]
+    assert not log.exists() or log.read_text() == ""
+    assert not ((tree[0]) / "dist").exists() or not list((tree[0] / "dist").glob("*rendered*"))
