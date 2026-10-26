@@ -23,6 +23,7 @@ emptyDirs (static, /root, /tmp), as qualified by the #1073 Kind trial.
 */ -}}
 {{- if include "mainframe-rag.openwebuiEnabled" . }}
 {{- $o := .Values.openwebui }}
+{{- $idpCA := $o.oidc.caBundle }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -47,6 +48,10 @@ spec:
       annotations:
         # A changed allow-list rolls the pod.
         checksum/proxy-config: {{ .Files.Get "files/openwebui/proxy.nginx.conf" | sha256sum | quote }}
+        {{- if $idpCA }}
+        # A changed IdP CA rolls the pod (the init step reads it at start).
+        checksum/idp-ca: {{ $idpCA | sha256sum | quote }}
+        {{- end }}
     spec:
       automountServiceAccountToken: false
       enableServiceLinks: false
@@ -59,6 +64,49 @@ spec:
         - name: {{ .Values.pullSecret.name }}
       {{- else }}
       imagePullSecrets: []
+      {{- end }}
+      {{- if $idpCA }}
+      # Optional IdP CA (openwebui.oidc.caBundle). Open WebUI v0.12.3 signs in
+      # through authlib's httpx client (trust_env: SSL_CERT_FILE, else certifi)
+      # and refreshes through aiohttp (OpenSSL default file, also SSL_CERT_FILE);
+      # requests reads REQUESTS_CA_BUNDLE. Pointing them at the IdP CA alone would
+      # drop the public stores, so this step writes OpenSSL's system bundle, the
+      # certifi bundle and the IdP CA into one file on an emptyDir the app mounts
+      # read-only. A missing input fails the step and the pod does not start.
+      initContainers:
+        - name: ca-trust
+          image: {{ include "mainframe-rag.image" (dict "name" "openwebui" "image" .Values.images.openwebui) }}
+          imagePullPolicy: {{ .Values.images.openwebui.pullPolicy | default "IfNotPresent" }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          command:
+            - python3
+            - -I
+            - -c
+            - |
+              import ssl
+              from pathlib import Path
+              import certifi
+              sources = [ssl.get_default_verify_paths().openssl_cafile, certifi.where(),
+                         "/etc/mainframe-rag/idp-ca/ca.crt"]
+              parts = [Path(s).read_text(encoding="utf-8").strip() + "\n" for s in sources]
+              Path("/etc/mainframe-rag/ca-trust/ca-bundle.crt").write_text("".join(parts), encoding="utf-8")
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          volumeMounts:
+            - name: idp-ca
+              mountPath: /etc/mainframe-rag/idp-ca
+              readOnly: true
+            - name: ca-trust
+              mountPath: /etc/mainframe-rag/ca-trust
       {{- end }}
       containers:
         - name: openwebui
@@ -248,11 +296,16 @@ spec:
               value: {{ printf "https://%s/oauth/oidc/callback" $o.host | quote }}
             - name: OAUTH_CLIENT_ID
               value: {{ $o.oidc.clientId | quote }}
+            # Scopes and identity claims are site inputs (values.yaml; AD FS in
+            # docs/deploy.md). v0.12.3 reads email, name, groups and roles from the
+            # ID token and calls userinfo when the e-mail or username claim is
+            # missing there (userinfo wins on a conflict).
             - name: OAUTH_SCOPES
-              # offline_access: Open WebUI refreshes the session from a refresh token;
-              # without one it deletes the session near expiry and may fall back to an
-              # older session's token (Kind trial). The IdP must permit the scope.
-              value: openid email profile groups offline_access
+              value: {{ $o.oidc.scopes | quote }}
+            - name: OAUTH_EMAIL_CLAIM
+              value: {{ $o.oidc.emailClaim | quote }}
+            - name: OAUTH_USERNAME_CLAIM
+              value: {{ $o.oidc.usernameClaim | quote }}
             - name: ENABLE_OAUTH_GROUP_MANAGEMENT
               value: "true"
             - name: ENABLE_OAUTH_GROUP_CREATION
@@ -289,6 +342,13 @@ spec:
                 secretKeyRef:
                   name: {{ $o.secretName }}
                   key: webui-secret-key
+            {{- if $idpCA }}
+            # Public stores plus the IdP CA, written by the ca-trust init step.
+            - name: SSL_CERT_FILE
+              value: /etc/mainframe-rag/ca-trust/ca-bundle.crt
+            - name: REQUESTS_CA_BUNDLE
+              value: /etc/mainframe-rag/ca-trust/ca-bundle.crt
+            {{- end }}
           # Loopback-only listener: kubelet cannot reach it, so the probes run
           # inside the container; the proxy's own probes cover the Service path.
           readinessProbe:
@@ -328,6 +388,11 @@ spec:
             - name: pipe
               mountPath: /opt/mainframe-rag/openwebui
               readOnly: true
+            {{- if $idpCA }}
+            - name: ca-trust
+              mountPath: /etc/mainframe-rag/ca-trust
+              readOnly: true
+            {{- end }}
         # Allow-list proxy (ADR-0007 E1): the only listener of the pod.
         - name: proxy
           image: {{ include "mainframe-rag.image" (dict "name" "openwebuiProxy" "image" .Values.images.openwebuiProxy) }}
@@ -426,4 +491,11 @@ spec:
         - name: pipe
           configMap:
             name: rag-openwebui-pipe
+        {{- if $idpCA }}
+        - name: idp-ca
+          configMap:
+            name: rag-openwebui-idp-ca
+        - name: ca-trust
+          emptyDir: {}
+        {{- end }}
 {{- end }}

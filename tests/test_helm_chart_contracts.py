@@ -1125,8 +1125,8 @@ OWUI_ENV_NAMES = {
     "ENABLE_TITLE_GENERATION", "ENABLE_TOOLS", "ENABLE_TOOL_SERVERS",
     "ENABLE_VERSION_UPDATE_CHECK", "ENABLE_WEB_SEARCH", "GLOBAL_LOG_LEVEL", "HF_HUB_OFFLINE",
     "HOME", "JWT_EXPIRES_IN", "OAUTH_ADMIN_ROLES", "OAUTH_ALLOWED_ROLES", "OAUTH_CLIENT_ID",
-    "OAUTH_CLIENT_SECRET", "OAUTH_GROUP_CLAIM", "OAUTH_MERGE_ACCOUNTS_BY_EMAIL",
-    "OAUTH_ROLES_CLAIM", "OAUTH_SCOPES", "OFFLINE_MODE", "OLLAMA_BASE_URL",
+    "OAUTH_CLIENT_SECRET", "OAUTH_EMAIL_CLAIM", "OAUTH_GROUP_CLAIM", "OAUTH_MERGE_ACCOUNTS_BY_EMAIL",
+    "OAUTH_ROLES_CLAIM", "OAUTH_SCOPES", "OAUTH_USERNAME_CLAIM", "OFFLINE_MODE", "OLLAMA_BASE_URL",
     "OPENID_PROVIDER_URL", "OPENID_REDIRECT_URI", "RAG_EMBEDDING_MODEL_AUTO_UPDATE",
     "RAG_EMBEDDING_MODEL_TRUST_REMOTE_CODE", "RAG_RERANKING_MODEL_AUTO_UPDATE",
     "RAG_RERANKING_MODEL_TRUST_REMOTE_CODE", "SCARF_NO_ANALYTICS", "TASK_MODEL",
@@ -1352,6 +1352,8 @@ def test_openwebui_workload_is_single_replica_restricted_and_holds_no_model_key(
         "OPENID_REDIRECT_URI": "https://docs.apps.example.internal/oauth/oidc/callback",
         "WEBUI_URL": "https://docs.apps.example.internal", "OAUTH_CLIENT_ID": "docs-frontend",
         "OAUTH_GROUP_CLAIM": "groups", "OAUTH_ROLES_CLAIM": "roles",
+        # Open WebUI v0.12.3's own defaults, pinned explicitly (config.py).
+        "OAUTH_EMAIL_CLAIM": "email", "OAUTH_USERNAME_CLAIM": "name",
         "OAUTH_ALLOWED_ROLES": "staff", "OAUTH_ADMIN_ROLES": "docs-admins,docs-owners",
         # B1 (trial/review): tools, direct integrations, per-feature permissions,
         # task model, audio, scopes, CORS and the narrow admin-only API key.
@@ -1413,6 +1415,93 @@ def test_openwebui_workload_is_single_replica_restricted_and_holds_no_model_key(
     assert "env" not in purge and "ports" not in purge
     assert {m["mountPath"]: m.get("readOnly", False) for m in purge["volumeMounts"]} == {
         "/app/backend/data": False, "/tmp": False, "/opt/mainframe-rag/openwebui": True}
+
+
+IDP_CA_PEM = ("-----BEGIN CERTIFICATE-----\nSURQLUNBLTE=\n-----END CERTIFICATE-----\n"
+              "-----BEGIN CERTIFICATE-----\nSURQLUNBLTI=\n-----END CERTIFICATE-----\n")
+CA_TRUST_FILE = "/etc/mainframe-rag/ca-trust/ca-bundle.crt"
+# Open WebUI v0.12.3 (pinned image): the sign-in calls (discovery, token, JWKS,
+# userinfo) use authlib's httpx client with trust_env on, which reads
+# SSL_CERT_FILE and otherwise certifi (httpx/_config.py create_ssl_context);
+# aiohttp (token refresh, utils/oauth.py) uses ssl.create_default_context(),
+# whose OpenSSL default file is also SSL_CERT_FILE; requests reads
+# REQUESTS_CA_BUNDLE. SSL_CERT_DIR or AIOHTTP_CLIENT_SESSION_SSL=<file> would
+# only add a second, partial owner of the same trust.
+CA_TRUST_ENV = {"SSL_CERT_FILE", "REQUESTS_CA_BUNDLE"}
+
+
+def test_openwebui_idp_ca_bundle_is_optional_and_adds_only_its_trust(owui_chart):
+    """A public-CA IdP needs no bundle: the default render has no CA objects,
+    variables or init step. With a bundle, the IdP CA is a ConfigMap mounted
+    read-only into a hardened init step that writes the public stores the image
+    already trusts (OpenSSL's system bundle and certifi) plus the IdP CA into an
+    emptyDir, which the app mounts read-only and every HTTP client is pointed at."""
+    plain = _owui(owui_chart)
+    pod = plain["Deployment", "rag-openwebui"]["spec"]["template"]["spec"]
+    assert "initContainers" not in pod
+    assert not CA_TRUST_ENV & set(env_map(plain["Deployment", "rag-openwebui"], "openwebui"))
+    assert ("ConfigMap", "rag-openwebui-idp-ca") not in plain
+    assert "ca-trust" not in json.dumps(plain["Deployment", "rag-openwebui"])
+
+    with_ca = _owui(owui_chart, {"openwebui": {
+        **OWUI_ON["openwebui"], "oidc": {**OWUI_ON["openwebui"]["oidc"], "caBundle": IDP_CA_PEM}}})
+    # Only the CA ConfigMap is added; every other object but the pod is unchanged.
+    assert set(with_ca) - set(plain) == {("ConfigMap", "rag-openwebui-idp-ca")}
+    for key, doc in plain.items():
+        if key != ("Deployment", "rag-openwebui"):
+            assert with_ca[key] == doc, key
+    cm = with_ca["ConfigMap", "rag-openwebui-idp-ca"]
+    assert cm["data"] == {"ca.crt": IDP_CA_PEM}
+    dep = with_ca["Deployment", "rag-openwebui"]
+    pod = dep["spec"]["template"]["spec"]
+    assert _hardening_violations(pod) == []
+    assert dep["spec"]["template"]["metadata"]["annotations"]["checksum/idp-ca"] == hashlib.sha256(
+        IDP_CA_PEM.encode()).hexdigest()
+    (init,) = pod["initContainers"]
+    app = next(c for c in pod["containers"] if c["name"] == "openwebui")
+    assert init["image"] == app["image"]
+    assert init["securityContext"]["readOnlyRootFilesystem"] is True
+    assert "env" not in init and "ports" not in init
+    script = "\n".join(init["command"] + init.get("args", []))
+    # The public stores stay trusted: both defaults are read, then the IdP CA.
+    for needle in ("certifi.where()", "openssl_cafile", "/etc/mainframe-rag/idp-ca/ca.crt", CA_TRUST_FILE):
+        assert needle in script, needle
+    volumes = {v["name"]: v for v in pod["volumes"]}
+    init_mounts = {m["mountPath"]: m for m in init["volumeMounts"]}
+    assert set(init_mounts) == {"/etc/mainframe-rag/idp-ca", "/etc/mainframe-rag/ca-trust"}
+    assert init_mounts["/etc/mainframe-rag/idp-ca"]["readOnly"] is True
+    assert volumes[init_mounts["/etc/mainframe-rag/idp-ca"]["name"]]["configMap"] == {
+        "name": "rag-openwebui-idp-ca"}
+    trust = init_mounts["/etc/mainframe-rag/ca-trust"]
+    assert volumes[trust["name"]]["emptyDir"] == {}
+    app_mounts = {m["mountPath"]: m for m in app["volumeMounts"]}
+    assert app_mounts["/etc/mainframe-rag/ca-trust"] == {**trust, "readOnly": True}
+    assert "/etc/mainframe-rag/idp-ca" not in app_mounts
+    # The complete CA variable set, all on the combined file; nothing else changes.
+    env = env_map(dep, "openwebui")
+    assert {k: v["value"] for k, v in env.items() if k in CA_TRUST_ENV} == dict.fromkeys(
+        CA_TRUST_ENV, CA_TRUST_FILE)
+    assert set(env) == OWUI_ENV_NAMES | CA_TRUST_ENV
+    assert not {"SSL_CERT_DIR", "AIOHTTP_CLIENT_SSL_CERT_FILE", "AIOHTTP_CLIENT_SESSION_SSL",
+                "CURL_CA_BUNDLE"} & set(env)
+    for name in ("proxy", "chat-purge"):
+        container = next(c for c in pod["containers"] if c["name"] == name)
+        assert "ca-trust" not in json.dumps(container), name
+
+
+@pytest.mark.parametrize("bad", [
+    "  \n", "not a certificate",
+    "-----BEGIN CERTIFICATE-----\n%%%\n-----END CERTIFICATE-----\n",
+    IDP_CA_PEM + "trailing junk\n",
+    "-----BEGIN PRIVATE KEY-----\nSURQLUNBLTE=\n-----END PRIVATE KEY-----\n",
+])
+def test_openwebui_idp_ca_bundle_refuses_blank_or_garbage(owui_chart, bad):
+    values = base_values()
+    values.update(json.loads(json.dumps(OWUI_ON)))
+    values["openwebui"]["oidc"]["caBundle"] = bad
+    r = _helm_template_with_values(values, chart=owui_chart)
+    assert r.returncode != 0 and "caBundle" in r.stderr
+    assert "rag-openwebui" not in r.stdout
 
 
 def test_openwebui_claim_is_kept_rwo_on_the_block_class(owui_chart):
@@ -2042,3 +2131,45 @@ def test_agent_ingress_policy_admits_the_collector_scrape():
     first = docs[POLICY_KEY]["spec"]["ingress"][0]
     assert first["from"] == [{"podSelector": {}}]
     assert {"protocol": "TCP", "port": 8080} in first["ports"]
+
+
+@pytest.mark.parametrize("path,bad", [
+    (("idpEgress", "port"), None), (("idpEgress", "port"), ""), (("idpEgress", "port"), " "),
+    (("idpEgress", "port"), 0), (("idpEgress", "port"), "443"),
+    (("oidc", "groupClaim"), None), (("oidc", "groupClaim"), ""), (("oidc", "groupClaim"), " "),
+    (("oidc", "rolesClaim"), None), (("oidc", "rolesClaim"), ""), (("oidc", "rolesClaim"), " "),
+    (("oidc", "emailClaim"), None), (("oidc", "emailClaim"), ""), (("oidc", "emailClaim"), " "),
+    (("oidc", "usernameClaim"), None), (("oidc", "usernameClaim"), ""),
+    (("oidc", "scopes"), None), (("oidc", "scopes"), ""), (("oidc", "scopes"), " "),
+    (("oidc", "scopes"), "email profile"), (("oidc", "scopes"), "openid,email"),
+    (("oidc", "scopes"), "openid  email"), (("oidc", "scopes"), "openidx email"),
+])
+def test_openwebui_refuses_null_empty_or_blank_port_and_claims(owui_chart, path, bad):
+    """B2: a null IdP port would render an egress rule open to every TCP port, and
+    an empty claim a half-configured sign-in; both must refuse, not render."""
+    values = _bare_default_values()
+    values.update(json.loads(json.dumps(OWUI_ON)))
+    values["openwebui"][path[0]][path[1]] = bad
+    r = _helm_template_with_values(values, chart=owui_chart)
+    assert r.returncode != 0, r.stdout[:200]
+    assert "rag-openwebui" not in r.stdout
+
+
+def test_openwebui_adfs_scopes_and_identity_claims_reach_the_pod(owui_chart):
+    """AD FS (docs/deploy.md): custom claims reach the ID token only with
+    allatclaims, and the e-mail is usually upn. Scopes and the e-mail and
+    username claims are site inputs that reach Open WebUI verbatim."""
+    oidc = {**OWUI_ON["openwebui"]["oidc"], "scopes": "openid profile email allatclaims",
+            "emailClaim": "upn", "usernameClaim": "unique_name"}
+    docs = _owui(owui_chart, {"openwebui": {**OWUI_ON["openwebui"], "oidc": oidc}})
+    env = env_map(docs["Deployment", "rag-openwebui"], "openwebui")
+    assert {k: env[k]["value"] for k in ("OAUTH_SCOPES", "OAUTH_EMAIL_CLAIM", "OAUTH_USERNAME_CLAIM")} == {
+        "OAUTH_SCOPES": "openid profile email allatclaims", "OAUTH_EMAIL_CLAIM": "upn",
+        "OAUTH_USERNAME_CLAIM": "unique_name"}
+    assert set(env) == OWUI_ENV_NAMES
+
+
+def test_openwebui_networkpolicy_egress_rules_always_carry_a_port(owui_chart):
+    policy = _owui(owui_chart)["NetworkPolicy", "rag-openwebui"]
+    for rule in policy["spec"]["egress"]:
+        assert rule.get("ports") and all("port" in p for p in rule["ports"])

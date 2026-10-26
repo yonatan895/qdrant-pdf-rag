@@ -1321,7 +1321,6 @@ OWUI_OPERATOR_ENV = {
     "OPENWEBUI_OIDC_ALLOWED_ROLES": "staff",
     "OPENWEBUI_OIDC_ADMIN_ROLES": "docs-admins",
     "OPENWEBUI_IDP_EGRESS_CIDRS": "10.20.0.0/24",
-    "ROUTE_DESTINATION_CA_FILE": "/etc/pki/test/service-ca.crt",
 }
 
 
@@ -1343,7 +1342,6 @@ def test_validate_openwebui_accepts_a_recorded_pin_matching_chart_and_bundle(tre
 @pytest.mark.parametrize("key,needle", [
     ("OPENWEBUI_OIDC_CLIENT_ID", "required inputs are missing: OPENWEBUI_OIDC_CLIENT_ID. Set them, or opt out with OPENWEBUI_ENABLED=false"),
     ("OPENWEBUI_IDP_EGRESS_CIDRS", "required inputs are missing: OPENWEBUI_IDP_EGRESS_CIDRS. Set them, or opt out with OPENWEBUI_ENABLED=false"),
-    ("ROUTE_DESTINATION_CA_FILE", "required inputs are missing: ROUTE_DESTINATION_CA_FILE. Set them, or opt out with OPENWEBUI_ENABLED=false"),
     ("OPENWEBUI_SECRET", "OPENWEBUI_SECRET"),
 ])
 def test_validate_openwebui_refuses_an_incomplete_selection(tree, key, needle):
@@ -1455,3 +1453,22 @@ def test_validate_live_unrelated_route_and_owned_route_pass(tree):
     _route_tree(tree)
     r = _route_run(tree, ROUTES_FILE=_routes_file(tree, ("docs", "docs-site"), ("rag-agent", "rag-agent")))
     assert r.returncode == 0, r.stderr
+
+
+def test_validate_openwebui_passes_with_the_seven_inputs_and_no_service_ca_env(tree):
+    """B1: the service CA is fetched by deploy on the live path, so it is not an
+    operator input validate may demand."""
+    _openwebui_tree(tree)
+    env = {**OWUI_OPERATOR_ENV}
+    assert "ROUTE_DESTINATION_CA_FILE" not in env
+    r = _run(tree, env)
+    assert r.returncode == 0, r.stderr
+    assert "ROUTE_DESTINATION_CA_FILE" not in r.stderr
+    assert "Open WebUI pin recorded; matches the chart" in r.stdout
+
+
+def test_validate_openwebui_pending_pin_refusal_names_the_opt_out(tree):
+    _openwebui_tree(tree, pin="sha256:PENDING")
+    r = _openwebui_run(tree)
+    assert r.returncode != 0
+    assert "or opt out with OPENWEBUI_ENABLED=false" in r.stderr

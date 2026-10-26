@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import os
 import re
 import sys
@@ -160,8 +161,30 @@ OPENWEBUI_DEFAULT_STORAGE_SIZE = "10Gi"
 _HOSTNAME = re.compile(r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?(?:\.[a-z0-9](?:[-a-z0-9]*[a-z0-9])?)+")
 _PROVIDER_URL = re.compile(r"https://[^\s/]+(?:/\S*)?/\.well-known/openid-configuration")
 _CLAIM = re.compile(r"[A-Za-z0-9_:/.-]+")
+_SCOPES = re.compile(r"[A-Za-z0-9_:/.-]+(?: [A-Za-z0-9_:/.-]+)*")
+# The chart's scope set (values.yaml openwebui.oidc.scopes); AD FS sites set their own.
+OPENWEBUI_DEFAULT_SCOPES = "openid email profile groups offline_access"
 _NAME_LIST = re.compile(r"[^,\s]+(?:,[^,\s]+)*")
 _CIDR = re.compile(r"(?:[0-9]{1,3}\.){3}[0-9]{1,3}/(?:[0-9]|[12][0-9]|3[0-2])")
+
+
+_PEM_CERTS = re.compile(r"\s*(?:-----BEGIN CERTIFICATE-----\r?\n[A-Za-z0-9+/=\r\n]+"
+                        r"-----END CERTIFICATE-----\s*)+")
+_PEM_BODY = re.compile(r"-----BEGIN CERTIFICATE-----([A-Za-z0-9+/=\r\n]+)-----END CERTIFICATE-----")
+
+
+def pem_certificates(text: str) -> bool:
+    """True when text is one or more PEM certificates and nothing else (no key,
+    no stray text), each body valid base64. Used for the optional IdP CA bundle."""
+    if _PEM_CERTS.fullmatch(text) is None:
+        return False
+    try:
+        for body in _PEM_BODY.findall(text):
+            if not base64.b64decode("".join(body.split()), validate=True):
+                return False
+    except ValueError:
+        return False
+    return True
 
 
 def openwebui_config(values: Mapping[str, str]) -> dict[str, object] | None:
@@ -196,10 +219,16 @@ def openwebui_config(values: Mapping[str, str]) -> dict[str, object] | None:
         raise ValueError("OPENWEBUI_OIDC_CLIENT_ID must not contain spaces or commas")
     claims = {}
     for key, default in (("OPENWEBUI_OIDC_GROUP_CLAIM", "groups"),
-                         ("OPENWEBUI_OIDC_ROLES_CLAIM", "roles")):
+                         ("OPENWEBUI_OIDC_ROLES_CLAIM", "roles"),
+                         ("OPENWEBUI_OIDC_EMAIL_CLAIM", "email"),
+                         ("OPENWEBUI_OIDC_USERNAME_CLAIM", "name")):
         claims[key] = values.get(key, "") or default
         if _CLAIM.fullmatch(claims[key]) is None:
             raise ValueError(f"{key} must be a claim name (letters, digits, _ : / . -)")
+    scopes = values.get("OPENWEBUI_OIDC_SCOPES", "") or OPENWEBUI_DEFAULT_SCOPES
+    if _SCOPES.fullmatch(scopes) is None or "openid" not in scopes.split(" "):
+        raise ValueError("OPENWEBUI_OIDC_SCOPES must be space-separated scope names "
+                         "including openid")
     roles = {}
     for key in ("OPENWEBUI_OIDC_ALLOWED_ROLES", "OPENWEBUI_OIDC_ADMIN_ROLES"):
         roles[key] = values.get(key, "")
@@ -219,10 +248,11 @@ def openwebui_config(values: Mapping[str, str]) -> dict[str, object] | None:
         return None
     required = {"OPENWEBUI_SECRET": secret, "OPENWEBUI_HOST": host,
                 "OPENWEBUI_OIDC_PROVIDER_URL": provider, "OPENWEBUI_OIDC_CLIENT_ID": client_id,
-                **roles, "OPENWEBUI_IDP_EGRESS_CIDRS": cidrs,
-                "ROUTE_DESTINATION_CA_FILE": values.get("ROUTE_DESTINATION_CA_FILE", "")}
+                **roles, "OPENWEBUI_IDP_EGRESS_CIDRS": cidrs}
     missing = [key for key, value in required.items() if not value]
     if missing:
+        # The service CA is not an operator input on the live path (deploy.sh
+        # fetches it); map_values enforces it only for dry-run rendering.
         # One fixed message: key names only, never values.
         raise ValueError("Open WebUI is enabled by default (ADR-0008) but required inputs are "
                          f"missing: {', '.join(missing)}. Set them, or opt out with "
@@ -240,6 +270,9 @@ def openwebui_config(values: Mapping[str, str]) -> dict[str, object] | None:
             "rolesClaim": claims["OPENWEBUI_OIDC_ROLES_CLAIM"],
             "allowedRoles": roles["OPENWEBUI_OIDC_ALLOWED_ROLES"],
             "adminRoles": roles["OPENWEBUI_OIDC_ADMIN_ROLES"],
+            "scopes": scopes,
+            "emailClaim": claims["OPENWEBUI_OIDC_EMAIL_CLAIM"],
+            "usernameClaim": claims["OPENWEBUI_OIDC_USERNAME_CLAIM"],
         },
         "idpEgress": {"cidrs": cidrs, "port": int(raw_port)},
     }

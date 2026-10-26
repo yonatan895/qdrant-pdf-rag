@@ -48,14 +48,27 @@ def _cert(tmp_path, name):
     return key, crt
 
 
+USER_KEY = "sk-synthetic-user-key"
+
+
 class FakeOpenWebUI:
-    """Functions API of the pinned release, as the installer uses it."""
+    """Functions API of the pinned release (v0.12.3), as the installer uses it.
+
+    Status codes follow the release source (backend/open_webui): an unknown key
+    is 401 (utils/auth.py get_current_user_by_api_key), a valid non-admin key is
+    401 on every admin route (utils/auth.py get_admin_user) but 200 on the
+    verified-user listing GET /api/v1/functions/, and an absent Function is 401
+    NOT_FOUND on GET /id/{id} and POST /id/{id}/toggle (routers/functions.py),
+    not 404. Listings carry no content.
+    """
 
     def __init__(self):
         self.functions: dict[str, dict] = {}
         self.requests: list[tuple[str, str, str | None]] = []
         self.mangle_content = False
         self.status_override: int | None = None
+        self.absent_status = 401
+        self.functions_disabled = False  # ENABLE_FUNCTIONS=false: both listings are []
 
 
 def _server(state, key_file, cert_file):
@@ -78,22 +91,33 @@ def _server(state, key_file, cert_file):
             body = json.loads(self.rfile.read(length)) if length else None
             if state.status_override:
                 return self._reply(state.status_override, {"detail": "UPSTREAM-SECRET-TEXT"})
+            if auth not in (f"Bearer {KEY}", f"Bearer {USER_KEY}"):
+                return self._reply(401, {"detail": "UPSTREAM-SECRET-TEXT"})
+            listing = [] if state.functions_disabled else [
+                {k: v for k, v in fn.items() if k != "content"} for fn in state.functions.values()]
+            if method == "GET" and self.path == "/api/v1/functions/":
+                return self._reply(200, listing)
             if auth != f"Bearer {KEY}":
                 return self._reply(401, {"detail": "UPSTREAM-SECRET-TEXT"})
             prefix = "/api/v1/functions/id/"
-            if method == "GET" and self.path == "/api/v1/functions/":
-                return self._reply(200, list(state.functions.values()))
+            if method == "GET" and self.path == "/api/v1/functions/list":
+                return self._reply(200, listing)
             if method == "GET" and self.path.startswith(prefix):
                 fn = state.functions.get(self.path[len(prefix):])
-                return self._reply(200, fn) if fn else self._reply(404, {"detail": "not found"})
+                return self._reply(200, fn) if fn else self._reply(state.absent_status,
+                                                                    {"detail": "not found"})
             if method == "POST" and self.path == "/api/v1/functions/create":
+                if body["id"] in state.functions:
+                    return self._reply(400, {"detail": "id taken"})
                 content = body["content"] + ("#x" if state.mangle_content else "")
                 state.functions[body["id"]] = {"id": body["id"], "name": body["name"],
                                                "content": content, "is_active": False}
                 return self._reply(200, state.functions[body["id"]])
             if method == "POST" and self.path.startswith(prefix):
                 fid, _, action = self.path[len(prefix):].partition("/")
-                fn = state.functions[fid]
+                fn = state.functions.get(fid)
+                if fn is None:
+                    return self._reply(401 if action == "toggle" else 400, {"detail": "not found"})
                 if action == "update":
                     fn["content"] = body["content"]
                 elif action == "toggle":
@@ -141,6 +165,51 @@ def test_installer_creates_activates_and_verifies_the_stored_pipe(owui):
     assert _writes(state) == [("POST", "/api/v1/functions/create"),
                               ("POST", "/api/v1/functions/id/mainframe_rag_docs/toggle")]
     assert {auth for _, _, auth in state.requests} == {f"Bearer {KEY}"}
+
+
+@pytest.mark.parametrize("absent_status", [401, 404], ids=["v0.12.3-401", "404"])
+def test_installer_first_install_creates_when_the_function_is_absent(owui, absent_status):
+    """v0.12.3 answers an absent Function with 401 (routers/functions.py
+    get_function_by_id); a fresh install must create it, never read that 401 as
+    a refused key (#1107 lane finding)."""
+    state, client, _ = owui
+    state.absent_status = absent_status
+    lines = provision.provision(client, PIPE, PIPE_SHA)
+    assert lines == [f"docs Pipe installed: Function mainframe_rag_docs active, sha256 {PIPE_SHA}"]
+    assert _writes(state) == [("POST", "/api/v1/functions/create"),
+                              ("POST", "/api/v1/functions/id/mainframe_rag_docs/toggle")]
+    stored = state.functions["mainframe_rag_docs"]
+    assert hashlib.sha256(stored["content"].encode()).hexdigest() == PIPE_SHA
+    assert stored["is_active"] is True
+    # The stored content is read back after the create and before activation.
+    order = [(m, p) for m, p, _ in state.requests]
+    create = order.index(("POST", "/api/v1/functions/create"))
+    toggle = order.index(("POST", "/api/v1/functions/id/mainframe_rag_docs/toggle"))
+    assert ("GET", "/api/v1/functions/id/mainframe_rag_docs") in order[create + 1:toggle]
+
+
+@pytest.mark.parametrize("key", ["sk-synthetic-unknown-key", USER_KEY], ids=["unknown", "non-admin"])
+def test_installer_refuses_a_bad_key_without_creating(owui, key):
+    """An unknown key and a non-admin key are both 401 on admin routes; either is
+    the fixed refusal, never an absent Function, and nothing is written."""
+    state, client, _ = owui
+    bad = provision.Client(key, client._pinned, host="127.0.0.1", port=client._port)
+    with pytest.raises(provision.ProvisionError, match=r"refused the admin API key \(HTTP 401\)"):
+        provision.provision(bad, PIPE, PIPE_SHA)
+    assert _writes(state) == []
+    assert state.functions == {}
+
+
+def test_installer_fails_closed_when_the_listing_cannot_show_the_function(owui):
+    """With Functions disabled the listing is always empty, so the only-one-Function
+    guard would be blind: the run fails after the write instead of reporting success,
+    and a re-run does not overwrite blindly (create of an existing id is HTTP 400)."""
+    state, client, _ = owui
+    state.functions_disabled = True
+    with pytest.raises(provision.ProvisionError, match="missing from the listing after the write"):
+        provision.provision(client, PIPE, PIPE_SHA)
+    with pytest.raises(provision.ProvisionError, match=r"cannot write Function .* \(HTTP 400\)"):
+        provision.provision(client, PIPE, PIPE_SHA)
 
 
 def test_installer_refuses_when_any_other_function_exists(owui):

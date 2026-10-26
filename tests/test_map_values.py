@@ -34,6 +34,8 @@ OPENWEBUI_KEYS = [
     "OPENWEBUI_OIDC_GROUP_CLAIM", "OPENWEBUI_OIDC_ROLES_CLAIM", "OPENWEBUI_OIDC_ALLOWED_ROLES",
     "OPENWEBUI_OIDC_ADMIN_ROLES", "OPENWEBUI_IDP_EGRESS_CIDRS", "OPENWEBUI_IDP_EGRESS_PORT",
     "ROUTE_DESTINATION_CA_FILE", "IMAGE_DIGEST_OPENWEBUI", "IMAGE_DIGEST_OPENWEBUI_PROXY",
+    "OPENWEBUI_IDP_CA_FILE", "OPENWEBUI_OIDC_SCOPES", "OPENWEBUI_OIDC_EMAIL_CLAIM",
+    "OPENWEBUI_OIDC_USERNAME_CLAIM",
 ]
 MAPPER_KEYS = [
     *OPENWEBUI_KEYS,
@@ -969,7 +971,7 @@ def test_openwebui_unset_is_enabled_and_fails_closed_naming_the_opt_out(monkeypa
     assert r.returncode != 0 and not out.exists()
     assert ("inputs are missing: OPENWEBUI_SECRET, OPENWEBUI_HOST, OPENWEBUI_OIDC_PROVIDER_URL, "
             "OPENWEBUI_OIDC_CLIENT_ID, OPENWEBUI_OIDC_ALLOWED_ROLES, OPENWEBUI_OIDC_ADMIN_ROLES, "
-            "OPENWEBUI_IDP_EGRESS_CIDRS, ROUTE_DESTINATION_CA_FILE. Set them, or opt out with "
+            "OPENWEBUI_IDP_EGRESS_CIDRS. Set them, or opt out with "
             "OPENWEBUI_ENABLED=false") in r.stderr
 
 
@@ -985,7 +987,8 @@ def test_openwebui_selection_round_trips_with_the_decided_defaults(monkeypatch, 
         "retentionDays": 30, "storageSize": "10Gi",
         "oidc": {"providerUrl": OWUI_ON["OPENWEBUI_OIDC_PROVIDER_URL"], "clientId": "docs-frontend",
                  "groupClaim": "groups", "rolesClaim": "roles", "allowedRoles": "staff",
-                 "adminRoles": "docs-admins"},
+                 "adminRoles": "docs-admins", "scopes": "openid email profile groups offline_access",
+                 "emailClaim": "email", "usernameClaim": "name"},
         "idpEgress": {"cidrs": ["10.20.0.0/24", "10.21.0.8/32"], "port": 443},
     }
     assert values["images"]["openwebui"] == {
@@ -1033,6 +1036,11 @@ def test_openwebui_allow_list_proxy_image_is_rendered_with_its_verified_digest(m
     ({"OPENWEBUI_OIDC_ADMIN_ROLES": ""}, "inputs are missing: OPENWEBUI_OIDC_ADMIN_ROLES"),
     ({"OPENWEBUI_OIDC_ALLOWED_ROLES": "a,,b"}, "OPENWEBUI_OIDC_ALLOWED_ROLES must be"),
     ({"OPENWEBUI_OIDC_GROUP_CLAIM": "group claim"}, "OPENWEBUI_OIDC_GROUP_CLAIM must be"),
+    ({"OPENWEBUI_OIDC_EMAIL_CLAIM": "e mail"}, "OPENWEBUI_OIDC_EMAIL_CLAIM must be"),
+    ({"OPENWEBUI_OIDC_USERNAME_CLAIM": "a,b"}, "OPENWEBUI_OIDC_USERNAME_CLAIM must be"),
+    ({"OPENWEBUI_OIDC_SCOPES": "email profile"}, "OPENWEBUI_OIDC_SCOPES must be"),
+    ({"OPENWEBUI_OIDC_SCOPES": "openid,email"}, "OPENWEBUI_OIDC_SCOPES must be"),
+    ({"OPENWEBUI_OIDC_SCOPES": "openid  email"}, "OPENWEBUI_OIDC_SCOPES must be"),
     ({"OPENWEBUI_IDP_EGRESS_CIDRS": ""}, "inputs are missing: OPENWEBUI_IDP_EGRESS_CIDRS"),
     ({"OPENWEBUI_IDP_EGRESS_CIDRS": "idp.example.internal"}, "OPENWEBUI_IDP_EGRESS_CIDRS must be"),
     ({"OPENWEBUI_IDP_EGRESS_CIDRS": "10.0.0.300/32"}, "OPENWEBUI_IDP_EGRESS_CIDRS must be"),
@@ -1040,7 +1048,7 @@ def test_openwebui_allow_list_proxy_image_is_rendered_with_its_verified_digest(m
     ({"OPENWEBUI_RETENTION_DAYS": "0"}, "OPENWEBUI_RETENTION_DAYS must be"),
     ({"OPENWEBUI_RETENTION_DAYS": "3651"}, "OPENWEBUI_RETENTION_DAYS must be"),
     ({"OPENWEBUI_STORAGE_SIZE": "10"}, "OPENWEBUI_STORAGE_SIZE must be"),
-    ({"ROUTE_DESTINATION_CA_FILE": ""}, "inputs are missing: ROUTE_DESTINATION_CA_FILE"),
+    ({"ROUTE_DESTINATION_CA_FILE": ""}, "needs ROUTE_DESTINATION_CA_FILE"),
     # Shapes are checked even while the feature is off: a typo fails today.
     ({"OPENWEBUI_ENABLED": "false", "OPENWEBUI_RETENTION_DAYS": "forever"}, "OPENWEBUI_RETENTION_DAYS must be"),
 ])
@@ -1052,11 +1060,56 @@ def test_openwebui_selection_is_strict_and_writes_nothing(monkeypatch, mapper_en
     assert not out.exists()
 
 
+IDP_CA = ("-----BEGIN CERTIFICATE-----\nSURQLUNBLTE=\n-----END CERTIFICATE-----\n"
+          "-----BEGIN CERTIFICATE-----\nSURQLUNBLTI=\n-----END CERTIFICATE-----\n")
+
+
+def test_openwebui_idp_ca_bundle_is_optional_and_round_trips_byte_exact(monkeypatch, mapper_env, tmp_path):
+    """A public-CA IdP needs no bundle (no key emitted); a site bundle reaches the
+    chart byte-for-byte (both certificates, order kept)."""
+    _owui_env(monkeypatch, tmp_path)
+    r, out = mapper_env()
+    assert r.returncode == 0, r.stderr
+    assert "caBundle" not in load_values(out)["openwebui"]["oidc"]
+    bundle = tmp_path / "idp-ca.pem"
+    bundle.write_text(IDP_CA)
+    monkeypatch.setenv("OPENWEBUI_IDP_CA_FILE", str(bundle))
+    r, out = mapper_env()
+    assert r.returncode == 0, r.stderr
+    assert load_values(out)["openwebui"]["oidc"]["caBundle"] == IDP_CA
+
+
+@pytest.mark.parametrize("content,message", [
+    (None, "OPENWEBUI_IDP_CA_FILE is unreadable"),
+    ("  \n", "OPENWEBUI_IDP_CA_FILE is blank"),
+    ("not a certificate\n", "OPENWEBUI_IDP_CA_FILE must hold only PEM certificates"),
+    (IDP_CA + "trailing junk\n", "OPENWEBUI_IDP_CA_FILE must hold only PEM certificates"),
+    ("-----BEGIN CERTIFICATE-----\n%%%\n-----END CERTIFICATE-----\n",
+     "OPENWEBUI_IDP_CA_FILE must hold only PEM certificates"),
+    ("-----BEGIN PRIVATE KEY-----\nSURQLUNBLTE=\n-----END PRIVATE KEY-----\n",
+     "OPENWEBUI_IDP_CA_FILE must hold only PEM certificates"),
+])
+def test_openwebui_idp_ca_bundle_refuses_unreadable_blank_or_garbage(monkeypatch, mapper_env, tmp_path,
+                                                                     content, message):
+    _owui_env(monkeypatch, tmp_path)
+    bundle = tmp_path / "idp-ca.pem"
+    if content is not None:
+        bundle.write_text(content)
+    monkeypatch.setenv("OPENWEBUI_IDP_CA_FILE", str(bundle))
+    r, out = mapper_env()
+    assert r.returncode != 0 and not out.exists()
+    assert message in r.stderr
+    # Fixed text: neither the path nor the content reaches the diagnostic.
+    assert str(bundle) not in r.stderr and "SURQLUNB" not in r.stderr and "junk" not in r.stderr
+
+
 @pytest.mark.skipif(shutil.which("helm") is None, reason="helm is required for the round-trip")
 def test_openwebui_mapper_to_helm_round_trip(monkeypatch, mapper_env, tmp_path):
     """Producer-to-consumer: operator env -> values -> helm template (a chart
     copy holding a stand-in Pipe) -> the pod, Route and policy asked for."""
-    _owui_env(monkeypatch, tmp_path, OPENWEBUI_RETENTION_DAYS="14", OPENWEBUI_IDP_EGRESS_PORT="8443")
+    _owui_env(monkeypatch, tmp_path, OPENWEBUI_RETENTION_DAYS="14", OPENWEBUI_IDP_EGRESS_PORT="8443",
+              OPENWEBUI_OIDC_SCOPES="openid profile email allatclaims", OPENWEBUI_OIDC_EMAIL_CLAIM="upn",
+              OPENWEBUI_OIDC_USERNAME_CLAIM="unique_name")
     r, out = mapper_env()
     assert r.returncode == 0, r.stderr
     chart = tmp_path / "mainframe-rag"
@@ -1073,6 +1126,9 @@ def test_openwebui_mapper_to_helm_round_trip(monkeypatch, mapper_env, tmp_path):
     env = {e["name"]: e for e in containers["openwebui"]["env"]}
     assert env["OAUTH_CLIENT_ID"]["value"] == "docs-frontend"
     assert env["OPENID_REDIRECT_URI"]["value"] == "https://docs.apps.example.internal/oauth/oidc/callback"
+    assert env["OAUTH_SCOPES"]["value"] == "openid profile email allatclaims"
+    assert env["OAUTH_EMAIL_CLAIM"]["value"] == "upn"
+    assert env["OAUTH_USERNAME_CLAIM"]["value"] == "unique_name"
     route = docs["Route", "rag-openwebui"]["spec"]
     assert route["host"] == "docs.apps.example.internal"
     assert route["tls"]["destinationCACertificate"].strip() == OWUI_CA.strip()

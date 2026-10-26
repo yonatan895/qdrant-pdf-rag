@@ -392,7 +392,22 @@
             "groupClaim": { "type": "string", "pattern": "^[A-Za-z0-9_:/.-]+$" },
             "rolesClaim": { "type": "string", "pattern": "^[A-Za-z0-9_:/.-]+$" },
             "allowedRoles": { "type": "string", "pattern": "^$|^[^,\\s]+(,[^,\\s]+)*$" },
-            "adminRoles": { "type": "string", "pattern": "^$|^[^,\\s]+(,[^,\\s]+)*$" }
+            "adminRoles": { "type": "string", "pattern": "^$|^[^,\\s]+(,[^,\\s]+)*$" },
+            "scopes": {
+              "type": "string",
+              "allOf": [
+                { "pattern": "^[A-Za-z0-9_:/.-]+( [A-Za-z0-9_:/.-]+)*$" },
+                { "pattern": "(^| )openid( |$)" }
+              ],
+              "description": "Space-separated OIDC scopes (OAUTH_SCOPES); must include openid."
+            },
+            "emailClaim": { "type": "string", "pattern": "^[A-Za-z0-9_:/.-]+$" },
+            "usernameClaim": { "type": "string", "pattern": "^[A-Za-z0-9_:/.-]+$" },
+            "caBundle": {
+              "type": "string",
+              "pattern": "^$|^\\s*(-----BEGIN CERTIFICATE-----[A-Za-z0-9+/=\\s]+-----END CERTIFICATE-----\\s*)+$",
+              "description": "Optional PEM certificates of the CA that issued the IdP's TLS certificate; added to the public trust stores, never replacing them."
+            }
           }
         },
         "idpEgress": {
@@ -410,7 +425,22 @@
             "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
           }
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "enabled": { "const": true } },
+            "required": ["enabled"]
+          },
+          "then": {
+            "required": ["oidc", "idpEgress"],
+            "properties": {
+              "oidc": { "required": ["groupClaim", "rolesClaim"] },
+              "idpEgress": { "required": ["port"] }
+            }
+          }
+        }
+      ]
     },
     "storage": {
       "type": "object",

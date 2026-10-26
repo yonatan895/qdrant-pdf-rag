@@ -176,3 +176,33 @@ def test_incomplete_reasoning_stops_before_load_then_corrected_config_runs(pipe_
     result = _run_pipeline(pipe_tree, extra_env=config)
     assert result.returncode == 0, result.stderr
     assert calls.read_text().splitlines() == ["load", "deploy", "ingest", "smoke"]
+
+
+def test_pipeline_dryrun_with_the_seven_openwebui_inputs_needs_the_ca_only_to_render(pipe_tree):
+    """B1: stage 1 (validate) passes with the seven inputs and no service CA; the
+    dry-run render then refuses with the existing Route-rendering message (live
+    deploy fetches the CA instead), never at validation."""
+    from tests.helpers_airgap import set_openwebui_pin
+
+    shutil.copy(REPO / "images.txt", pipe_tree / "images.txt")
+    set_openwebui_pin(pipe_tree, "sha256:" + "b" * 64)
+    pipe = pipe_tree / "charts" / "mainframe-rag" / "files" / "openwebui" / "docs_pipe.py"
+    pipe.write_text("class Pipe:\n    pass\n")
+    inputs = {
+        "OPENWEBUI_ENABLED": "true", "OPENWEBUI_SECRET": "owui-secrets",
+        "OPENWEBUI_HOST": "docs.apps.example.internal",
+        "OPENWEBUI_OIDC_PROVIDER_URL": "https://idp.example.internal/.well-known/openid-configuration",
+        "OPENWEBUI_OIDC_CLIENT_ID": "docs-frontend", "OPENWEBUI_OIDC_ALLOWED_ROLES": "staff",
+        "OPENWEBUI_OIDC_ADMIN_ROLES": "docs-admins", "OPENWEBUI_IDP_EGRESS_CIDRS": "10.20.0.0/24",
+        "CORPUS_PVC": "test-corpus",
+    }
+    r = _run_pipeline(pipe_tree, "--skip-load", extra_env=inputs)
+    assert "inputs are missing" not in r.stdout + r.stderr
+    assert "STAGE 1/5" in r.stdout
+    assert r.returncode != 0 and "needs ROUTE_DESTINATION_CA_FILE" in r.stderr
+    assert "STAGE 3/5" in r.stdout
+    ca = pipe_tree / "service-ca.crt"
+    ca.write_text("-----BEGIN CERTIFICATE-----\nU0VSVklDRS1DQQ==\n-----END CERTIFICATE-----\n")
+    r = _run_pipeline(pipe_tree, "--skip-load", extra_env={**inputs, "ROUTE_DESTINATION_CA_FILE": str(ca)})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "STAGE 4/5: CORPUS INGESTION" in r.stdout
