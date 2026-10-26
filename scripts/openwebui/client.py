@@ -349,23 +349,6 @@ def cmd_access(state: str) -> None:
         sys.exit(1)
 
 
-def cmd_seed_function(state: str, pipe_path: str) -> None:
-    """Workaround, acceptance lane only (OWUI_SEED_FUNCTION=1): create the Docs Function through the admin
-    session so the chart's installer finds it. Open WebUI v0.12.3 answers HTTP 401, not 404, for a Function
-    that does not exist, and provision_pipe.py reads 401 as a refused key, so its first install fails. The
-    installer still verifies the hash and activates; remove this once it handles the absent Function."""
-    s = Session(state)
-    if not s.login(ADMIN).get("signed_in"):
-        raise SystemExit("admin sign-in failed")
-    with open(pipe_path, encoding="utf-8") as fh:
-        source = fh.read()
-    status = s.api(ADMIN, "POST", "/api/v1/functions/create",
-                   {"id": DOCS_MODEL, "name": "Docs", "content": source, "meta": {"description": "seed"}})[0]
-    out({"seed_function_status": status})
-    if status != 200:
-        sys.exit(1)
-
-
 def cmd_smoke(state: str) -> None:
     s = Session(state)
     report: dict[str, Any] = {"users": [], "ok": True}
@@ -427,7 +410,7 @@ def main(argv: list[str]) -> int:
         return 2
     command, state, rest = argv[0], argv[1], argv[2:]
     handlers: dict[str, Any] = {"secrets": cmd_secrets, "users": cmd_users, "dex-config": cmd_dex_config, "login": cmd_login,
-                "api-key": cmd_api_key, "seed-function": cmd_seed_function, "access": cmd_access, "smoke": cmd_smoke, "health": cmd_health}
+                "api-key": cmd_api_key,  "access": cmd_access, "smoke": cmd_smoke, "health": cmd_health}
     if command not in handlers:
         print(__doc__, file=sys.stderr)
         return 2

@@ -44,10 +44,8 @@ def test_trial_directory_is_gone_and_pins_are_complete():
     assert not (ROOT / "scripts" / "ci" / "openwebui-trial").exists()
     pins = dict(line.split("=", 1) for line in (DIR / "pins.txt").read_text().splitlines()
                 if line and not line.startswith("#"))
-    assert set(pins) == {"NODE_IMAGE", "OWUI_BASE", "DEX_PIN", "SKOPEO_IMAGE"}
+    assert set(pins) == {"NODE_IMAGE", "DEX_PIN", "SKOPEO_IMAGE", "OWUI_PUSHED"}
     assert all("@sha256:" in v for v in pins.values())
-    # The Containerfile base and the pin file name the same upstream digest.
-    assert pins["OWUI_BASE"].split("@")[1] in (ROOT / "images" / "openwebui" / "Containerfile").read_text()
 
 
 def test_dev_environment_reads_the_working_tree_not_git_refs():
@@ -117,15 +115,19 @@ def test_answer_needs_source_events_with_documents():
     assert checks.check_answer(GOOD_ANSWER, name="x").name == "x"
 
 
-def test_blocked_paths_need_the_proxy_403_body():
-    assert checks.classify_blocked(403, b"denied\n") == "proxy-403"
-    assert checks.classify_blocked(403, b'{"detail":"Forbidden"}') == "HTTP 403"  # Open WebUI's own 403 is not the proxy
-    assert checks.classify_blocked(404, b"denied\n") == "HTTP 404"
-    assert checks.classify_blocked(400, b"<center>nginx</center>") == "proxy-400"
-    assert checks.classify_blocked(400, b'{"detail":"bad"}') == "HTTP 400"  # Open WebUI's own 400 is not the proxy
-    ok = {"/api/v1/files/": "proxy-403", "/api/v1/files%00": "proxy-400"}
+def test_blocked_paths_need_the_allow_list_403_or_the_sidecars_own_nul_refusal():
+    assert checks.classify_blocked(403, b"denied\n", "/api/v1/files/") == "proxy-403"
+    assert checks.classify_blocked(403, b'{"detail":"Forbidden"}', "/x") == "HTTP 403"  # Open WebUI's own 403
+    assert checks.classify_blocked(404, b"denied\n", "/x") == "HTTP 404"
+    nginx_400 = b"<html><center>nginx</center></html>"
+    # A 400 from nginx is no refusal by the allow-list; only the NUL path may use it.
+    assert checks.classify_blocked(400, nginx_400, "/api/v1/files/") == "HTTP 400"
+    assert checks.classify_blocked(400, nginx_400, "/api/v1/files%00") == "sidecar-nul-400"
+    assert checks.classify_blocked(400, b'{"detail":"bad"}', "/api/v1/files%00") == "HTTP 400"
+    ok = {"/api/v1/files/": "proxy-403", "/api/v1/files%00": "sidecar-nul-400"}
     assert checks.check_blocked(ok, 200).ok
     assert not checks.check_blocked({**ok, "/x": "HTTP 200"}, 200).ok
+    assert not checks.check_blocked({**ok, "/y": "HTTP 400"}, 200).ok
     assert not checks.check_blocked(ok, 502).ok  # the allowed control path must still work
     assert not checks.check_blocked({}, 200).ok
 
@@ -141,18 +143,28 @@ DNS = ('[INFO] 10.244.0.9:41234 - 1 "A IN dex.localhost.owui.svc.cluster.local. 
        '[INFO] 10.244.0.7:41236 - 3 "A IN pypi.org. udp 50 false 512" NOERROR\n')
 
 
-def test_dns_names_are_judged_for_the_pod_ips_only():
+SEARCH = ["rag-kind-1.svc.cluster.local", "svc.cluster.local", "cluster.local"]
+
+
+def test_dns_names_are_judged_for_the_pod_ips_only_and_matched_exactly():
     lines = DNS.splitlines()
     names = checks.dns_names(lines, {"10.244.0.9"})
     assert names == {"dex.localhost.owui.svc.cluster.local", "rag-agent.owui.svc.cluster.local"}
-    assert checks.check_dns(names, checks.count_queries(lines, {"10.244.0.9"})).ok
+    search = ["owui.svc.cluster.local", "svc.cluster.local", "cluster.local"]
+    assert checks.check_dns(names, checks.count_queries(lines, {"10.244.0.9"}), search).ok
     other = checks.dns_names(lines, {"10.244.0.7"})
-    assert checks.check_dns(other, 1).detail["stray_names"] == ["pypi.org"]
-    assert not checks.check_dns(other, 1).ok
-    # Zero queries means the log or the IPs were wrong: not a pass.
-    assert not checks.check_dns(set(), 0).ok
-    # The Ollama port probe of the 2026-10-24 trial must be caught.
-    assert not checks.check_dns({"host.docker.internal"}, 1).ok
+    assert checks.check_dns(other, 1, search).detail["stray_names"] == ["pypi.org"]
+    assert not checks.check_dns(other, 1, search).ok
+    # Zero queries or no resolver search line means the log or the pod was wrong: not a pass.
+    assert not checks.check_dns(set(), 0, search).ok
+    assert not checks.check_dns({"dex.localhost"}, 1, []).ok
+    # Substring matches are not allowed names (F4 of the #1107 review).
+    for stray in ("dex.localhost.attacker.example", "rag-agent.attacker.example", "xdex.localhost",
+                  "host.docker.internal"):
+        assert not checks.check_dns({stray}, 1, SEARCH).ok, stray
+    assert checks.check_dns({"dex.localhost", "rag-agent", "rag-agent.rag-kind-1.svc.cluster.local"}, 1, SEARCH).ok
+    assert checks.parse_search_domains("nameserver 10.96.0.10\nsearch A.svc.cluster.local. cluster.local\n") == [
+        "a.svc.cluster.local", "cluster.local"]
 
 
 def test_egress_probe_exit_codes():
@@ -299,3 +311,14 @@ def test_only_the_chart_policy_may_select_the_front_end_for_egress():
     bad = checks.check_policies_selecting(labels, [chart, wide])
     assert not bad.ok and bad.detail["egress_policies"] == ["rag-openwebui", "rehearsal-default-deny-egress"]
     assert not checks.check_policies_selecting(labels, [lane]).ok  # the chart policy must exist
+
+
+def test_gated_deploy_never_pulls_and_uses_the_digest_pinned_image():
+    lib = (DIR / "lib.sh").read_text()
+    hashing = lib[lib.index("bcrypt_hashes() {"):]
+    assert "--pull=never" in hashing and "pin OWUI_PUSHED" in hashing  # F2: no daemon pull behind the boundary
+    assert "@sha256:" in dict(line.split("=", 1) for line in (DIR / "pins.txt").read_text().splitlines()
+                              if line and not line.startswith("#"))["OWUI_PUSHED"]
+    for text in ((DIR / "client.py").read_text(), lib, (DIR / "acceptance.sh").read_text()):
+        assert "seed" not in text.lower()  # the installer's real first install is what the lane proves
+    assert "OWUI_SEED_FUNCTION" not in (ROOT / ".github" / "workflows" / "e2e.yml").read_text()

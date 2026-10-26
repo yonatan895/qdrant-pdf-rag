@@ -88,7 +88,7 @@ CORPUS_COUNT=${CORPUS_COUNT:-12}
 INGEST=${INGEST:-auto}
 BM25_DIR=${BM25_CACHE_DIR:-$MAIN_REPO/bundles/bm25-weights}
 UNIT=owui-hands-on
-OWUI_IMAGE=${OWUI_IMAGE:-mainframe-rag/openwebui-dev:0.12.3-slim}
+OWUI_IMAGE=${OWUI_IMAGE:-ghcr.io/yonatan895/qdrant-pdf-rag-openwebui:v0.12.3-slim}
 DEX_IMAGE=trial.local/dex:v2.46.0-distroless
 NGINX_IMAGE=trial.local/nginx-unprivileged:1.30.6-alpine
 OWUI_URL="https://$OWUI_HOST"
@@ -410,6 +410,7 @@ deploy() {
     state_dir
     if [ "$DRYRUN" = 1 ]; then
         d="$STATE/dryrun"; mkdir -p "$d"
+        pki
         render_chart "$d"
         printf '%s\n' '$2y$10$dryrundryrundryrundryruOdryrundryrundryrundryrundryru' \
             '$2y$10$dryrundryrundryrundryruOdryrundryrundryrundryrundryru' \
@@ -607,7 +608,7 @@ down() {
 preflight() {
     for t in "$KIND_BIN" "$KUBECTL" "$HELM" "$AGENT_PY"; do [ -x "$t" ] || die "missing tool $t"; done
     for t in openssl python3 systemd-run flock curl ss git; do command -v "$t" >/dev/null || die "missing $t"; done
-    [ -n "$NODE_IMAGE" ] && [ -n "$(pin OWUI_BASE)" ] && [ -n "$(pin DEX_PIN)" ] && [ -n "$(pin SKOPEO_IMAGE)" ] \
+    [ -n "$NODE_IMAGE" ] && [ -n "$(pin OWUI_PUSHED)" ] && [ -n "$(pin DEX_PIN)" ] && [ -n "$(pin SKOPEO_IMAGE)" ] \
         || die "pins not found in $HERE/pins.txt"
     [ -f "$REPO/charts/mainframe-rag/files/openwebui/proxy.nginx.conf" ] \
         || die "$REPO lacks the chart's Open WebUI files"
@@ -615,7 +616,7 @@ preflight() {
     [ -n "$(nginx_pin)" ] || die "no nginx-unprivileged pin in $REPO/images.txt"
     say "tools: $("$KIND_BIN" version | cut -d' ' -f1-2), helm $("$HELM" version --short), kubectl $("$KUBECTL" version --client -o json | python3 -I -c 'import json,sys;print(json.load(sys.stdin)["clientVersion"]["gitVersion"])')"
     say "sources: chart $REPO/charts/mainframe-rag and Pipe $REPO/integrations/openwebui/docs_pipe.py (working tree, $(git -C "$REPO" rev-parse --short HEAD))"
-    say "pins: node ${NODE_IMAGE#*@}, Open WebUI base $(pin OWUI_BASE | sed 's/.*@//'), Dex $(pin DEX_PIN | sed 's/.*@//'), nginx $(nginx_pin)"
+    say "pins: node ${NODE_IMAGE#*@}, Open WebUI image $(pin OWUI_PUSHED | sed "s/.*@//"), Dex $(pin DEX_PIN | sed 's/.*@//'), nginx $(nginx_pin)"
     if [ "$DRYRUN" = 1 ]; then
         if flock -n -o "$LOCK" true 2>/dev/null; then plan "heavy lock $LOCK: free now"
         else plan "heavy lock $LOCK: held by another job now; up would exit 75 and start nothing"; fi

@@ -170,9 +170,26 @@ class Acceptance:
     def blocked_paths(self) -> None:
         results = {}
         for path in client.BLOCKED:
-            status, body = self.s.raw("docs-user", "POST", path)
-            results[path] = checks.classify_blocked(status, body)
+            if path.endswith("%00"):
+                # Asked on the pod's own listener (the sidecar), so no other nginx hop can be the answer.
+                status, body = self.sidecar_post(path)
+            else:
+                status, body = self.s.raw("docs-user", "POST", path)
+            results[path] = checks.classify_blocked(status, body, path)
         self.add(checks.check_blocked(results, self.s.api("docs-user", "GET", "/api/models")[0]))
+
+    def sidecar_post(self, path: str) -> tuple[int, bytes]:
+        code = ("import http.client, ssl, sys\n"
+                "c = ssl.create_default_context(); c.check_hostname = False; c.verify_mode = ssl.CERT_NONE\n"
+                "h = http.client.HTTPSConnection('127.0.0.1', 8443, timeout=15, context=c)\n"
+                "h.request('POST', sys.argv[1], body=b'{}')\n"
+                "r = h.getresponse()\n"
+                "sys.stdout.write(str(r.status) + '\\n')\n"
+                "sys.stdout.flush()\n"
+                "sys.stdout.buffer.write(r.read())\n")
+        proc = py_exec("openwebui", code, path)
+        head, _, body = proc.stdout.partition(b"\n")
+        return (int(head) if head.strip().isdigit() else 0), body
 
     def data_dir_after_use(self) -> None:
         self.add(checks.check_data_dir(self.inspect()))
@@ -319,7 +336,8 @@ class Acceptance:
         self.c1_and_restart()
         self.retention_purge()
         self.collect_dns(pod_info()["ip"])  # the replacement pod, after all use
-        self.add(checks.check_dns(self.dns_names, self.dns_queries))
+        resolv = owui_exec("openwebui", ["cat", "/etc/resolv.conf"]).stdout.decode("utf-8", "replace")
+        self.add(checks.check_dns(self.dns_names, self.dns_queries, checks.parse_search_domains(resolv)))
         self.log_scan()
         self.console("after-restart")
         self.network_policies()

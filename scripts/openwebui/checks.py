@@ -19,7 +19,7 @@ DOCS_MODEL = "mainframe_rag_docs"
 UID_RANGE_START = 1000700000
 # The names an Open WebUI pod may resolve: the IdP and the agent Service (search-domain
 # expansions of those two included). Anything else is an egress attempt.
-ALLOWED_DNS_FRAGMENTS = ("dex.localhost", "rag-agent")
+ALLOWED_DNS_BASES = ("dex.localhost", "rag-agent")
 VECTOR_DIR_NAMES = ("vector_db", "chroma", "qdrant", "milvus")
 
 
@@ -100,12 +100,27 @@ def count_queries(log_lines: list[str], pod_ips: set[str]) -> int:
     return sum(1 for line in log_lines if (m := _DNS_LINE.search(line)) and m.group(1) in pod_ips)
 
 
-def check_dns(names: set[str], queries_seen: int) -> Verdict:
-    """Every name resolved by the Open WebUI pod belongs to the IdP or the agent."""
-    stray = sorted(n for n in names if not any(f in n for f in ALLOWED_DNS_FRAGMENTS))
-    # No query at all means the log or the pod IPs were wrong, not that egress is zero.
-    return _v("dns-egress", queries_seen > 0 and not stray, distinct_names=len(names),
-              queries=queries_seen, stray_names=stray)
+def allowed_dns_names(search_domains: list[str]) -> set[str]:
+    """The IdP and agent names as the pod's resolver asks for them: bare, then with each search domain."""
+    return {base if not d else f"{base}.{d}" for base in ALLOWED_DNS_BASES for d in ["", *search_domains]}
+
+
+def parse_search_domains(resolv_conf: str) -> list[str]:
+    for line in resolv_conf.splitlines():
+        parts = line.split()
+        if parts and parts[0] == "search":
+            return [p.strip(".").lower() for p in parts[1:]]
+    return []
+
+
+def check_dns(names: set[str], queries_seen: int, search_domains: list[str]) -> Verdict:
+    """Every name resolved by the Open WebUI pod is the IdP or the agent Service, exactly, bare or with one of
+    the pod's own search domains appended (not a substring: dex.localhost.attacker.example is stray)."""
+    allowed = allowed_dns_names(search_domains)
+    stray = sorted(n for n in names if n not in allowed)
+    # No query at all (or no resolver search line read) means the log or the pod was wrong, not zero egress.
+    return _v("dns-egress", queries_seen > 0 and bool(search_domains) and not stray, distinct_names=len(names),
+              queries=queries_seen, search_domains=len(search_domains), stray_names=stray)
 
 
 def _selects(selector: dict, labels: dict) -> bool:
@@ -169,20 +184,25 @@ def check_answer(chat: dict, name: str = "answer-citations") -> Verdict:
               source_documents=chat.get("source_documents", 0))
 
 
+BLOCKED_OK = ("proxy-403", "sidecar-nul-400")
+
+
 def check_blocked(results: dict[str, str], allowed_control: int) -> Verdict:
-    """Every allow-list path answers the proxy's 403 'denied'; the control path still works."""
-    not_blocked = {p: r for p, r in sorted(results.items()) if r not in ("proxy-403", "proxy-400")}
+    """Every listed path is refused by the pod's allow-list sidecar; the control path still works."""
+    not_blocked = {p: r for p, r in sorted(results.items()) if r not in BLOCKED_OK}
     return _v("blocked-paths", bool(results) and not not_blocked and allowed_control == 200,
-              paths=len(results), not_blocked=not_blocked, allowed_control=allowed_control)
+              paths=len(results), classes=sorted(set(results.values())), not_blocked=not_blocked,
+              allowed_control=allowed_control)
 
 
-def classify_blocked(status: int, body: bytes) -> str:
-    """403 'denied' is the allow-list's answer. A NUL byte in the decoded path is refused earlier by the
-    sidecar's nginx itself (400 with its own page); both stop the request before Open WebUI."""
+def classify_blocked(status: int, body: bytes, path: str = "") -> str:
+    """The allow-list's own answer is 403 'denied'. The one other accepted refusal is the sidecar itself
+    rejecting a NUL byte in the decoded path (nginx's 400 page, asked on the pod's own listener, so the
+    router stand-in cannot be the hop that answered); tests/test_openwebui_proxy_nginx.py owns that case."""
     if status == 403 and body == b"denied\n":
         return "proxy-403"
-    if status == 400 and b"<center>nginx</center>" in body:
-        return "proxy-400"
+    if status == 400 and path.endswith("%00") and b"<center>nginx</center>" in body:
+        return "sidecar-nul-400"
     return f"HTTP {status}"
 
 

@@ -42,7 +42,7 @@ memory and the lock without docker or a cluster. Run it with an isolated
 
 The agent lane runs from this working tree (`AGENT_SRC`); after any rule-module
 change run `INGEST=always dev.sh up` (a rule-module change forces a re-embed).
-Pins for the dev-only images live in `scripts/openwebui/pins.txt`; the proxy
+The IdP CA reaches the pod only through the chart input `openwebui.oidc.caBundle` (`--set-file` of the run's CA), so the dev environment and the lane also exercise that input against a private-CA IdP. Pins for the dev-only images live in `scripts/openwebui/pins.txt`; the proxy
 image digest comes from `images.txt`.
 
 <a id="acceptance-lane"></a>
@@ -53,8 +53,7 @@ nightly on main, like every Kind lane; never on `pull_request`). It runs the
 lane's normal pipeline first, so the agent is the one the other Kind lanes
 deploy from the bundle: test gateway with mock reasoning and embedding models,
 the synthetic corpus, no GPU, no hash mode. Before the egress boundary closes it
-pulls the pinned Open WebUI base, Dex and nginx images, builds the derived
-image from `images/openwebui/Containerfile` and loads all three into the node (`acceptance.sh images`). Behind the
+pulls the derived Open WebUI image **by the digest the `image-openwebui` job pushed** (`pins.txt`, `OWUI_PUSHED`), plus the pinned Dex and nginx images, and loads all three into the node (`acceptance.sh images`; `OWUI_BUILD=1` builds from `images/openwebui/Containerfile` instead, dev only). Behind the
 boundary it deploys the chart objects and stand-ins into the lane's namespace
 (`acceptance.sh deploy`) and runs `acceptance.py` through port-forwards
 (`acceptance.sh run`). The JSON result is kept as lane evidence
@@ -92,9 +91,25 @@ summary; the `images.txt` pin is a separate PR. Every other e2e job that runs
 the operator flow sets `OPENWEBUI_ENABLED=false` (the front end is default-on
 and fails closed without site inputs); only the `openwebui` lane deploys it.
 
-Known defect handled in the lane: Open WebUI v0.12.3 answers HTTP 401 (not 404) for a
-Function that does not exist, and the chart's `provision_pipe.py` reads 401 as a refused
-key, so a first install fails. The lane sets `OWUI_SEED_FUNCTION=1` (the admin session
-creates the Function, the installer then verifies its hash and activates it). Drop the
-variable once the installer treats the absent Function correctly; until then the
-installer's first-install path is not covered by this lane.
+<a id="gate-map"></a>
+### ADR-0007 gate to evidence map
+
+A green lane is not "all gates passed". Each condition and where it is proven:
+
+| Gate | Proven by |
+|---|---|
+| C1 admin edits revert on restart | lane `admin-edit-reverts` (`scripts/openwebui/checks.py`) |
+| V1 no second vector store | lane `data-dir`, `docs-model-only` (no upload/knowledge path: `blocked-paths`); chart env pins in `tests/test_helm_chart_contracts.py`; memory/notes refusal: site acceptance only |
+| V2 answers only through the agent | `tests/test_openwebui_docs_pipe.py` (`test_pipe_never_declares_token_or_request_parameters`, `test_task_calls_never_reach_the_agent`); lane `docs-model-only` and installer refusal of other Functions (`tests/test_openwebui_frontend_scripts.py`); "agent requests equal user turns": site acceptance only |
+| V3 contract fidelity | `tests/test_openwebui_docs_pipe.py` (error-code table, stream, citations); lane `answer-citations` |
+| R1 non-root, restricted | lane `uid`, `pod-security`; pinned digests: `tests/test_helm_chart_contracts.py`, `images.txt` |
+| R2 offline, zero egress | lane `dns-egress`, `egress-probes`, `egress-policy-owner`; policy render: `tests/test_helm_chart_contracts.py`; browser external fetch: site acceptance only |
+| R3 identity | lane `group-claim`, `sso-only`, private-CA IdP sign-in (`openwebui.oidc.caBundle`); session expiry and Route-only ingress: `tests/test_helm_chart_contracts.py`, site acceptance |
+| E1 allow-list proxy | lane `blocked-paths` (403 from the sidecar; NUL path asked on the sidecar itself); `tests/test_openwebui_proxy_nginx.py` runs the real image against every variant |
+| S1 RWO block PVC, one replica | lane `restart-persistence`; `tests/test_helm_chart_contracts.py` (claim), `tests/test_airgap_validate_sh.py` (NFS refused); block semantics: site acceptance only |
+| S2 30-day purge | lane `retention-purge` (chart's `purge_chats.py`, next chat); `tests/test_openwebui_frontend_scripts.py` |
+| S3 backups and admin access | site acceptance only (backup window, storage-class encryption) |
+| S4 no content in logs | lane `log-canary` |
+| L1 licence | `tests/test_license_inventory.py`, `docs/licensing.md`; branding unmodified: derived layer changes ownership only (`images/openwebui/Containerfile`) |
+| P1 patch policy | process (pin-bump PR re-runs this lane on the new digest) |
+| K1 rollback by one flag | `tests/test_helm_chart_contracts.py` (`test_openwebui_opt_out_is_byte_identical_to_a_chart_without_the_component`) |

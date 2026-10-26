@@ -21,44 +21,52 @@ nginx_ref() {  # repository without tag, as images.txt names it
 }
 
 # ------------------------------------------------------------------ images
-build_images() {  # pull the pinned images, tag the local names, build the derived Open WebUI image
-    OWUI_BASE=$(pin OWUI_BASE); DEX_PIN=$(pin DEX_PIN)
+build_images() {  # pull the pinned images by digest (OWUI_BUILD=1: build the Open WebUI image locally), tag the local names
+    OWUI_PUSHED=$(pin OWUI_PUSHED); DEX_PIN=$(pin DEX_PIN)
     NGINX_PIN=$(nginx_pin)
     [ -n "$NGINX_PIN" ] || die "no nginx-unprivileged pin in $REPO/images.txt"
     nginx_src="$(nginx_ref)@$NGINX_PIN"
     if [ "$DRYRUN" = 1 ]; then
-        plan "images: inspect or pull $OWUI_BASE, $DEX_PIN, $nginx_src; tag $DEX_IMAGE, $NGINX_IMAGE"
-        plan "images: docker build -f $REPO/images/openwebui/Containerfile -t $OWUI_IMAGE (cached layers)"
+        if [ "${OWUI_BUILD:-0}" = 1 ]; then plan "images: docker build -f $REPO/images/openwebui/Containerfile -t $OWUI_IMAGE (OWUI_BUILD=1)"
+        else plan "images: pull $OWUI_PUSHED (the pushed derived image, by digest), tag $OWUI_IMAGE"; fi
+        plan "images: inspect or pull $DEX_PIN, $nginx_src; tag $DEX_IMAGE, $NGINX_IMAGE"
         return 0
     fi
-    for ref in "$OWUI_BASE" "$DEX_PIN" "$nginx_src"; do
+    for ref in "$DEX_PIN" "$nginx_src"; do
         docker image inspect "$ref" >/dev/null 2>&1 || docker pull -q "$ref" >/dev/null
     done
     docker tag "$DEX_PIN" "$DEX_IMAGE"
     docker tag "$nginx_src" "$NGINX_IMAGE"
-    docker build -q -f "$REPO/images/openwebui/Containerfile" -t "$OWUI_IMAGE" "$REPO/images/openwebui" >/dev/null
+    if [ "${OWUI_BUILD:-0}" = 1 ]; then
+        docker build -q -f "$REPO/images/openwebui/Containerfile" -t "$OWUI_IMAGE" "$REPO/images/openwebui" >/dev/null
+    else
+        docker image inspect "$OWUI_PUSHED" >/dev/null 2>&1 || docker pull -q "$OWUI_PUSHED" >/dev/null
+        docker tag "$OWUI_PUSHED" "$OWUI_IMAGE"
+    fi
     for ref in "$OWUI_IMAGE" "$DEX_IMAGE" "$NGINX_IMAGE"; do
         docker image inspect "$ref" --format "$ref {{.Id}} {{.Config.User}}"
     done | tee "$STATE/images.txt"
 }
 
+copy_into_node() {  # copy_into_node SRC NAME FILE: registry image by digest -> docker archive -> node (skopeo native or pinned image)
+    if [ "${SKOPEO_NATIVE:-auto}" != 0 ] && command -v skopeo >/dev/null 2>&1; then
+        skopeo copy "docker://$1" "docker-archive:$STATE/$3.tar:$2" >/dev/null  # CI runners install skopeo
+    else
+        docker run --rm --pull=never --user "$(id -u):$(id -g)" -v "$STATE:$STATE" "$(pin SKOPEO_IMAGE)" \
+            copy -q "docker://$1" "docker-archive:$STATE/$3.tar:$2"
+    fi
+    docker exec -i "$NODE" ctr -n k8s.io images import --snapshotter overlayfs - < "$STATE/$3.tar"
+    rm -f "$STATE/$3.tar"
+}
+
 load_images() {  # into the Kind cluster $KIND_NAME, node container $NODE
-    DEX_PIN=$(pin DEX_PIN); SKOPEO_IMAGE=$(pin SKOPEO_IMAGE)
+    DEX_PIN=$(pin DEX_PIN)
     nginx_src="$(nginx_ref)@$(nginx_pin)"
-    "$KIND_BIN" load docker-image --name "$KIND_NAME" "$OWUI_IMAGE"
-    # Pulled images go in by their pinned digest with the pinned skopeo image
-    # (docker save of a pulled index omits blobs on some hosts).
-    for pair in "$DEX_PIN=$DEX_IMAGE=dex" "$nginx_src=$NGINX_IMAGE=nginx"; do
-        src=${pair%%=*}; rest=${pair#*=}; name=${rest%%=*}; file=${rest#*=}
-        if [ "${SKOPEO_NATIVE:-auto}" != 0 ] && command -v skopeo >/dev/null 2>&1; then
-            skopeo copy "docker://$src" "docker-archive:$STATE/$file.tar:$name" >/dev/null  # CI runners install skopeo
-        else
-            docker run --rm --user "$(id -u):$(id -g)" -v "$STATE:$STATE" "$SKOPEO_IMAGE" \
-                copy -q "docker://$src" "docker-archive:$STATE/$file.tar:$name"
-        fi
-        docker exec -i "$NODE" ctr -n k8s.io images import --snapshotter overlayfs - < "$STATE/$file.tar"
-        rm -f "$STATE/$file.tar"
-    done
+    # Pulled images go in by their pinned digest (docker save of a pulled index omits blobs on some hosts).
+    if [ "${OWUI_BUILD:-0}" = 1 ]; then "$KIND_BIN" load docker-image --name "$KIND_NAME" "$OWUI_IMAGE"
+    else copy_into_node "$(pin OWUI_PUSHED)" "$OWUI_IMAGE" owui; fi
+    copy_into_node "$DEX_PIN" "$DEX_IMAGE" dex
+    copy_into_node "$nginx_src" "$NGINX_IMAGE" nginx
     docker exec "$NODE" crictl images > "$STATE/node-images.txt"
 }
 
@@ -135,21 +143,22 @@ render_chart() {  # render_chart OUTDIR VALUES_TEMPLATE
     # The Pipe is the working tree's source file, whatever the chart's copy holds.
     cp "$REPO/integrations/openwebui/docs_pipe.py" "$chart/files/openwebui/docs_pipe.py"
     sha256sum "$chart/files/openwebui/docs_pipe.py" | cut -d' ' -f1 > "$out/pipe.sha256"
-    sed -e "s#@OWUI_REPO@#docker.io/${OWUI_IMAGE%:*}#" -e "s#@OWUI_TAG@#${OWUI_IMAGE##*:}#" \
+    sed -e "s#@OWUI_REPO@#${OWUI_IMAGE%:*}#" -e "s#@OWUI_TAG@#${OWUI_IMAGE##*:}#" \
         -e "s#@NGINX_REPO@#${NGINX_IMAGE%:*}#" -e "s#@NGINX_TAG@#${NGINX_IMAGE##*:}#" \
         -e "s#@OWUI_HOST@#$OWUI_HOST#" -e "s#@POD_CIDR@#$POD_CIDR#" \
         -e "s#@OIDC_PROVIDER_URL@#$DEX_ISSUER/.well-known/openid-configuration#" \
         "$HERE/values.yaml" > "$out/values.yaml"
     set --
-    for t in deployment networkpolicy pipe-configmap proxy-configmap service pvc; do
+    for t in deployment networkpolicy pipe-configmap proxy-configmap service pvc idp-ca-configmap; do
         set -- "$@" --show-only "templates/openwebui-$t.yaml"
     done
-    "$HELM" template rag "$chart" --namespace "$APP_NS" -f "$out/values.yaml" "$@" > "$out/kustomize/chart.yaml"
+    "$HELM" template rag "$chart" --namespace "$APP_NS" -f "$out/values.yaml" \
+        --set-file openwebui.oidc.caBundle="$STATE/pki/ca.crt" "$@" > "$out/kustomize/chart.yaml"
     uid=$(uid_for openwebui)
     {
         cat <<EOF
-# Kind stand-ins on the chart render (docs/openwebui-dev.md): restricted-v2's
-# assigned UID and group 0, and trust for the test IdP's CA.
+# Kind stand-in on the chart render (docs/openwebui-dev.md): restricted-v2's assigned UID
+# and group 0. Trust for the test IdP's CA is the chart's own input (openwebui.oidc.caBundle).
 apiVersion: apps/v1
 kind: Deployment
 metadata: {name: rag-openwebui, namespace: $APP_NS}
@@ -159,23 +168,15 @@ spec:
       securityContext: {runAsUser: $uid, runAsGroup: 0, fsGroup: $uid}
       containers:
         - name: openwebui
-          env:
-            - {name: SSL_CERT_FILE, value: /etc/mainframe-rag/trial-ca/ca.crt}
-            - {name: REQUESTS_CA_BUNDLE, value: /etc/mainframe-rag/trial-ca/ca.crt}
 EOF
         if [ "$OWUI_PORT" != 443 ]; then
             cat <<EOF
+          env:
             - {name: WEBUI_URL, value: "$OWUI_URL"}
             - {name: CORS_ALLOW_ORIGIN, value: "$OWUI_URL"}
             - {name: OPENID_REDIRECT_URI, value: "$OWUI_URL/oauth/oidc/callback"}
 EOF
         fi
-        cat <<EOF
-          volumeMounts:
-            - {name: trial-ca, mountPath: /etc/mainframe-rag/trial-ca, readOnly: true}
-      volumes:
-        - {name: trial-ca, configMap: {name: trial-ca}}
-EOF
     } > "$out/kustomize/patch-openwebui.yaml"
     printf 'resources: [chart.yaml]\npatches:\n  - path: patch-openwebui.yaml\n' > "$out/kustomize/kustomization.yaml"
     "$KUBECTL" kustomize "$out/kustomize" > "$out/openwebui.yaml"
@@ -201,14 +202,15 @@ d = sys.argv[1]
 chart = [x for x in yaml.safe_load_all(open(f"{d}/openwebui.yaml")) if x]
 support = [x for x in yaml.safe_load_all(open(f"{d}/support.yaml")) if x]
 kinds = sorted(f"{x['kind']}/{x['metadata']['name']}" for x in chart)
-want = ["ConfigMap/rag-openwebui-pipe", "ConfigMap/rag-openwebui-proxy", "Deployment/rag-openwebui",
-        "NetworkPolicy/rag-openwebui", "PersistentVolumeClaim/rag-openwebui-data", "Service/rag-openwebui"]
+want = ["ConfigMap/rag-openwebui-idp-ca", "ConfigMap/rag-openwebui-pipe", "ConfigMap/rag-openwebui-proxy", "Deployment/rag-openwebui",
+         "NetworkPolicy/rag-openwebui", "PersistentVolumeClaim/rag-openwebui-data", "Service/rag-openwebui"]
 assert kinds == want, kinds
 dep = next(x for x in chart if x["kind"] == "Deployment")
 pod = dep["spec"]["template"]["spec"]
 assert [c["name"] for c in pod["containers"]] == ["openwebui", "proxy", "chat-purge"]
 assert pod["securityContext"]["runAsNonRoot"] is True and pod["securityContext"]["runAsUser"] >= 1000700000
 env = {e["name"]: e.get("value") for e in pod["containers"][0]["env"]}
+assert [c["name"] for c in pod["initContainers"]] == ["ca-trust"]  # the chart's IdP CA input is in effect
 assert env["SSL_CERT_FILE"] and env["OPENID_PROVIDER_URL"].startswith("https://dex.localhost:")
 pipe = next(x for x in chart if x["metadata"]["name"] == "rag-openwebui-pipe")
 sha = open(f"{d}/pipe.sha256").read().strip()
@@ -230,18 +232,18 @@ apply_stack() {  # the Secrets and objects both entry points create in the clust
     k -n "$APP_NS" create secret tls rag-openwebui-tls --cert="$pk/owui-svc.crt" --key="$pk/owui-svc.key" --dry-run=client -o yaml | k apply -f - >/dev/null
     k -n "$APP_NS" create secret generic rag-openwebui --from-file="$STATE/owui-secret/webui-secret-key" \
         --from-file="$STATE/owui-secret/oidc-client-secret" --dry-run=client -o yaml | k apply -f - >/dev/null
-    for ns in owui-router "$APP_NS"; do
-        k -n "$ns" create configmap trial-ca --from-file=ca.crt="$pk/ca.crt" --dry-run=client -o yaml | k apply -f - >/dev/null
-    done
+    k -n owui-router create configmap trial-ca --from-file=ca.crt="$pk/ca.crt" --dry-run=client -o yaml | k apply -f - >/dev/null
     k apply -f "$STATE/render/openwebui.yaml" > "$STATE/logs/apply-openwebui.log"
     k -n owui-idp rollout restart deploy/dex >/dev/null
     k -n owui-router rollout restart deploy/router >/dev/null
     if [ "$PKI_REGENERATED" = 1 ]; then k -n "$APP_NS" rollout restart deploy/rag-openwebui >/dev/null; fi
 }
 
+# The digest-pinned image runs the hashing (never pulled behind a closed boundary: --pull=never).
 bcrypt_hashes() {  # passwords of the client.py users -> bcrypt hashes in STATE/hashes.txt, from the image's own module
+    BCRYPT_IMAGE=$(pin OWUI_PUSHED); [ "${OWUI_BUILD:-0}" != 1 ] || BCRYPT_IMAGE=$OWUI_IMAGE
     $PYH users "$STATE" | while read -r u; do cat "$STATE/$u.password"; done \
-        | docker run --rm -i --network none --entrypoint python3 "$OWUI_IMAGE" -c '
+        | docker run --rm -i --pull=never --network none --entrypoint python3 "$BCRYPT_IMAGE" -c '
 import bcrypt, sys
 for line in sys.stdin.read().split():
     print(bcrypt.hashpw(line.encode(), bcrypt.gensalt(10)).decode())' > "$STATE/hashes.txt"
@@ -251,8 +253,6 @@ for line in sys.stdin.read().split():
 
 provision_live() {  # admin API key, the chart's Pipe installer, groups, Docs model grants, both users sign in
     $PYH api-key "$STATE"
-    # Workaround for the installer's first install (see client.py seed-function); off by default.
-    [ "${OWUI_SEED_FUNCTION:-0}" != 1 ] || $PYH seed-function "$STATE" "$STATE/render/src/mainframe-rag/files/openwebui/docs_pipe.py"
     k -n "$APP_NS" exec -i deploy/rag-openwebui -c openwebui -- \
         python3 /opt/mainframe-rag/openwebui/provision_pipe.py "$(cat "$STATE/render/pipe.sha256")" < "$STATE/admin-api-key"
     $PYH access "$STATE"
