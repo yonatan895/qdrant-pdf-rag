@@ -450,7 +450,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        lane: [pipeline, gateway-chat-upstream, gateway-chat-malformed, gateway-chat-truncated, gateway-embed-upstream, gateway-embed-malformed, gateway-embed-dimension, gateway-auth, lifecycle-chart, lifecycle, shared-gateway, rerank, observability]
+        lane: [pipeline, gateway-chat-upstream, gateway-chat-malformed, gateway-chat-truncated, gateway-embed-upstream, gateway-embed-malformed, gateway-embed-dimension, gateway-auth, lifecycle-chart, lifecycle, shared-gateway, rerank, observability, openwebui]
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -609,6 +609,23 @@ jobs:
           # Real LiteLLM + PostgreSQL (platform-owned in production); images are
           # pulled by the nodes now. Model computation arrives later from the bundle.
           sh rehearsal-infra/scripts/ci/deploy_test_gateway.sh "$NS"
+
+      # Open WebUI acceptance lane (#1070): the derived image, the pinned test IdP
+      # and the allow-list proxy image come from the public network now and are
+      # loaded into the node by digest; the boundary closes right after, so the
+      # checks themselves run with zero public egress. Nothing here ships.
+      - name: Open WebUI images (public images, before the boundary)
+        if: matrix.lane == 'openwebui'
+        env:
+          KIND_NAME: gapbox
+          APP_NS: ${{ env.NS }}
+          OWUI_STATE: ${{ runner.temp }}/owui-acceptance
+          KIND_BIN: /usr/local/bin/kind
+          KUBECTL: /usr/local/bin/kubectl
+          HELM: /usr/local/bin/helm
+        run: |
+          export PATH="/usr/local/bin:$PATH"
+          sh rehearsal-infra/scripts/openwebui/acceptance.sh images
 
       # Close the boundary: from here the shipped operator flow runs under a
       # kernel-enforced block. Outside it: the GitHub runner agent, the Docker
@@ -1039,6 +1056,25 @@ jobs:
             python3 /app/scripts/smoke_search.py \
               --url http://localhost:8080 --query "torque the widget screws" --expect "torque"
 
+      # The front end next to the agent this lane just deployed (mock reasoning and
+      # embedding models behind the test gateway; no hash mode, no GPU). The chart's
+      # Open WebUI objects come from this checkout, with Kind stand-ins for the
+      # route and the IdP (docs/openwebui-dev.md). Zero-egress checks run behind the gate.
+      - name: Open WebUI acceptance (ADR-0007 conditions, by execution)
+        if: matrix.lane == 'openwebui'
+        env:
+          KIND_NAME: gapbox
+          APP_NS: ${{ env.NS }}
+          OWUI_STATE: ${{ runner.temp }}/owui-acceptance
+          KIND_BIN: /usr/local/bin/kind
+          KUBECTL: /usr/local/bin/kubectl
+          HELM: /usr/local/bin/helm
+        shell: sh rehearsal-infra/scripts/ci/egress_gate.sh run bash -e {0}
+        run: |
+          export PATH="/usr/local/bin:$PATH"
+          sh rehearsal-infra/scripts/openwebui/acceptance.sh deploy
+          sh rehearsal-infra/scripts/openwebui/acceptance.sh run
+
       - name: Gateway fault contracts
         if: startsWith(matrix.lane, 'gateway-')
         env:
@@ -1114,6 +1150,20 @@ jobs:
           /usr/local/bin/kubectl -n "$NS" logs statefulset/qdrant --all-containers --tail=50 || true
           /usr/local/bin/kubectl -n "$NS" logs deploy/rag-agent --all-containers --tail=100 || true
           /usr/local/bin/kubectl -n "$NS" logs job/ingest --tail=100 || true
+
+      - name: Open WebUI acceptance evidence (no passwords, keys or certificates)
+        if: always() && matrix.lane == 'openwebui'
+        env:
+          OWUI_STATE: ${{ runner.temp }}/owui-acceptance
+        shell: sh rehearsal-infra/scripts/ci/egress_gate.sh run bash -e {0}
+        run: |
+          export PATH="/usr/local/bin:$PATH"
+          mkdir -p diagnostics/openwebui
+          for f in logs/acceptance.json logs/apply-openwebui.log logs/apply-support.log images.txt node-images.txt render/openwebui.yaml render/pipe.sha256; do
+            test ! -f "$OWUI_STATE/$f" || cp "$OWUI_STATE/$f" "diagnostics/openwebui/$(basename "$f")"
+          done
+          /usr/local/bin/kubectl -n "$NS" get pods,pvc,svc,networkpolicy -o wide > diagnostics/openwebui/workloads.txt 2>&1 || true
+          /usr/local/bin/kubectl -n "$NS" describe deploy/rag-openwebui > diagnostics/openwebui/describe-rag-openwebui.txt 2>&1 || true
 
       - name: Retain sanitized cluster diagnostics
         if: always()

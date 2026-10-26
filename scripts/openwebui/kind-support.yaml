@@ -1,0 +1,191 @@
+# Kind stand-ins around the chart's Open WebUI objects (#1070; the dev
+# environment and the acceptance lane share them). Never referenced by the
+# production chart or the air-gap manifests. The scripts render the
+# @PLACEHOLDERS@; every Secret is created at run time and no key, password or
+# certificate is in this file. Images are loaded into the node beforehand and
+# use imagePullPolicy: Never, so nothing is downloaded.
+#
+#   owui-idp     test IdP (Dex, HTTPS), the stand-in for the identity team's IdP
+#   owui-router  router stand-in (reencrypt, like the chart's Route), labelled
+#                as the OpenShift ingress policy group the chart's policy admits
+#   @APP_NS@     the application namespace (created elsewhere): only the Kind
+#                kubelet-probe policy lives here
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: owui-idp
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: owui-router
+  labels:
+    # The label the chart's NetworkPolicy selects for the OpenShift router.
+    network.openshift.io/policy-group: ingress
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+---
+# Kind only: kubelet probes come from the node address. OpenShift's SDN admits
+# kubelet probes without a policy (the chart relies on that); Kind's policy
+# engine is given the node address explicitly. Nothing else uses that source.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: kind-kubelet-probes, namespace: @APP_NS@}
+spec:
+  podSelector: {matchLabels: {app: rag-openwebui}}
+  policyTypes: [Ingress]
+  ingress:
+    - from: [{ipBlock: {cidr: "@NODE_IP@/32"}}]
+      ports: [{protocol: TCP, port: 8443}]
+---
+# ------------------------------------------------------------------ test IdP
+# Dex (pinned, distroless), HTTPS with the run's local CA. Static users with a
+# groups claim; the chart reads roles from the same claim (rolesClaim: groups).
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: dex, namespace: owui-idp}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: dex}}
+  template:
+    metadata:
+      labels: {app: dex}
+      annotations: {mainframe-rag/config-sha256: "@DEX_CONFIG_SHA@"}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: @DEX_UID@
+        runAsGroup: 0
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: dex
+          image: @DEX_IMAGE@
+          imagePullPolicy: Never
+          args: [dex, serve, /etc/dex/config.yaml]
+          ports: [{containerPort: 5556, name: https}]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          resources: {requests: {cpu: 20m, memory: 32Mi}, limits: {memory: 128Mi}}
+          volumeMounts:
+            - {name: config, mountPath: /etc/dex, readOnly: true}
+            - {name: tls, mountPath: /etc/dex-tls, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - {name: config, secret: {secretName: dex-config}}
+        - {name: tls, secret: {secretName: dex-tls}}
+        - {name: tmp, emptyDir: {sizeLimit: 16Mi}}
+---
+# One Service for both paths: pods reach it as dex.localhost (a CoreDNS rewrite
+# to this name), the browser through the node port mapped to 127.0.0.1.
+apiVersion: v1
+kind: Service
+metadata: {name: dex, namespace: owui-idp}
+spec:
+  type: NodePort
+  selector: {app: dex}
+  ports: [{name: https, port: @DEX_PORT@, targetPort: 5556, nodePort: 30556}]
+---
+# ------------------------------------------------------------------ router stand-in
+# Reencrypt like the chart's Route: terminates the browser's TLS with the
+# router certificate for the Route host, verifies the pod's serving certificate
+# against the run's CA (the Route's destinationCA), keeps Host, passes
+# websockets, and uses the Route timeout (route.timeoutSeconds).
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: router, namespace: owui-router}
+data:
+  nginx.conf: |
+    pid /tmp/nginx.pid;
+    worker_processes 1;
+    error_log /dev/stderr warn;
+    events { worker_connections 1024; }
+    http {
+        access_log off;
+        server_tokens off;
+        client_body_temp_path /tmp/client_body;
+        proxy_temp_path /tmp/proxy;
+        fastcgi_temp_path /tmp/fastcgi;
+        uwsgi_temp_path /tmp/uwsgi;
+        scgi_temp_path /tmp/scgi;
+        map $http_upgrade $route_connection {
+            default upgrade;
+            "" "";
+        }
+        server {
+            listen 8443 ssl;
+            server_name @OWUI_HOST@;
+            ssl_certificate /etc/router/tls/tls.crt;
+            ssl_certificate_key /etc/router/tls/tls.key;
+            ssl_protocols TLSv1.2 TLSv1.3;
+            client_max_body_size 10m;
+            location / {
+                proxy_pass https://rag-openwebui.@APP_NS@.svc.cluster.local:8443;
+                proxy_ssl_verify on;
+                proxy_ssl_trusted_certificate /etc/router/ca/ca.crt;
+                proxy_ssl_name rag-openwebui.@APP_NS@.svc;
+                proxy_ssl_server_name on;
+                proxy_http_version 1.1;
+                proxy_set_header Host $http_host;
+                proxy_set_header Upgrade $http_upgrade;
+                proxy_set_header Connection $route_connection;
+                proxy_set_header X-Forwarded-For $remote_addr;
+                proxy_set_header X-Forwarded-Proto https;
+                proxy_buffering off;
+                proxy_read_timeout @ROUTE_TIMEOUT@s;
+                proxy_send_timeout @ROUTE_TIMEOUT@s;
+            }
+        }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: router, namespace: owui-router}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: router}}
+  template:
+    metadata: {labels: {app: router}}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: @ROUTER_UID@
+        runAsGroup: 0
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: router
+          image: @NGINX_IMAGE@
+          imagePullPolicy: Never
+          args: [nginx, -c, /etc/router/conf/nginx.conf, -g, "daemon off;"]
+          ports: [{containerPort: 8443, name: https}]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          resources: {requests: {cpu: 10m, memory: 16Mi}, limits: {memory: 64Mi}}
+          volumeMounts:
+            - {name: conf, mountPath: /etc/router/conf, readOnly: true}
+            - {name: tls, mountPath: /etc/router/tls, readOnly: true}
+            - {name: ca, mountPath: /etc/router/ca, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - {name: conf, configMap: {name: router}}
+        - {name: tls, secret: {secretName: router-tls}}
+        - {name: ca, configMap: {name: trial-ca}}
+        - {name: tmp, emptyDir: {sizeLimit: 16Mi}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: router, namespace: owui-router}
+spec:
+  type: NodePort
+  selector: {app: router}
+  ports: [{name: https, port: 8443, targetPort: 8443, nodePort: 30443}]

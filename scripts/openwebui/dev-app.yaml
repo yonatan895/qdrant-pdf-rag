@@ -1,0 +1,122 @@
+# Open WebUI dev environment, application namespace and agent relay (#1073,
+# #1070). Dev only: the acceptance lane deploys into the e2e lane's namespace,
+# where the real agent runs. dev.sh renders the @PLACEHOLDERS@.
+#
+#   @APP_NS@   the chart's Open WebUI objects (rendered separately) plus the
+#              agent relay that stands in for the agent pods
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: @APP_NS@
+  labels:
+    # Kind stand-in for OpenShift restricted-v2: Pod Security "restricted".
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+---
+# ------------------------------------------------------------------ owui policy
+# Default deny in both directions for the application namespace. The chart's
+# rag-openwebui policy is the Open WebUI allow-list; the relay has its own.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: default-deny-all, namespace: @APP_NS@}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+# ------------------------------------------------------------------ agent relay
+# Stands in for the agent pods (label app: rag-agent, so the chart's egress rule
+# applies unchanged). It forwards HTTP to the host relay on the Kind network
+# gateway, which forwards to the maintainer's local agent on 127.0.0.1. No idle
+# timeout on the streaming answer path.
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: agent-relay, namespace: @APP_NS@}
+data:
+  nginx.conf: |
+    pid /tmp/nginx.pid;
+    worker_processes 1;
+    error_log /dev/stderr warn;
+    events { worker_connections 256; }
+    http {
+        access_log off;
+        server_tokens off;
+        client_body_temp_path /tmp/client_body;
+        proxy_temp_path /tmp/proxy;
+        fastcgi_temp_path /tmp/fastcgi;
+        uwsgi_temp_path /tmp/uwsgi;
+        scgi_temp_path /tmp/scgi;
+        server {
+            listen 8080;
+            client_max_body_size 2m;
+            location / {
+                proxy_pass http://@HOST_GW@:@HOST_RELAY_PORT@;
+                proxy_http_version 1.1;
+                proxy_set_header Host $http_host;
+                proxy_set_header Connection "";
+                proxy_buffering off;
+                proxy_request_buffering off;
+                proxy_connect_timeout 10s;
+                proxy_read_timeout 3600s;
+                proxy_send_timeout 3600s;
+            }
+        }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: agent-relay, namespace: @APP_NS@}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: rag-agent}}
+  template:
+    metadata:
+      labels: {app: rag-agent}
+      annotations: {mainframe-rag/relay-target: "@HOST_GW@:@HOST_RELAY_PORT@"}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: @RELAY_UID@
+        runAsGroup: 0
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: relay
+          image: @NGINX_IMAGE@
+          imagePullPolicy: Never
+          args: [nginx, -c, /etc/nginx/relay/nginx.conf, -g, "daemon off;"]
+          ports: [{containerPort: 8080, name: http}]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          resources: {requests: {cpu: 10m, memory: 16Mi}, limits: {memory: 64Mi}}
+          volumeMounts:
+            - {name: conf, mountPath: /etc/nginx/relay, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - {name: conf, configMap: {name: agent-relay}}
+        - {name: tmp, emptyDir: {sizeLimit: 16Mi}}
+---
+# The Docs Pipe's default AGENT_URL is http://rag-agent:8080 (the chart's agent
+# Service name); this Service keeps that default unchanged.
+apiVersion: v1
+kind: Service
+metadata: {name: rag-agent, namespace: @APP_NS@}
+spec:
+  selector: {app: rag-agent}
+  ports: [{name: http, port: 8080, targetPort: 8080}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: agent-relay, namespace: @APP_NS@}
+spec:
+  podSelector: {matchLabels: {app: rag-agent}}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from: [{podSelector: {matchLabels: {app: rag-openwebui}}}]
+      ports: [{protocol: TCP, port: 8080}]
+  egress:
+    - to: [{ipBlock: {cidr: "@HOST_GW@/32"}}]
+      ports: [{protocol: TCP, port: @HOST_RELAY_PORT@}]

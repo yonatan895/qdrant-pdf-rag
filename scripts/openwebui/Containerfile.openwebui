@@ -1,0 +1,42 @@
+# Open WebUI image for the dev environment and acceptance lane (#1070, from #1073): the
+# unmodified upstream Open WebUI v0.12.3 SLIM release, derived only to run as
+# an arbitrary non-root UID in group 0 (OpenShift restricted-v2, no anyuid).
+#
+# Derived, not rebuilt: no source checkout, no Node/SvelteKit build, no pip
+# install. The only layer added below changes file ownership and mode bits,
+# the same operation as upstream's USE_PERMISSION_HARDENING build argument
+# (chgrp 0, group permissions = owner permissions, setgid directories); the
+# upstream bytes and the "Open WebUI" branding are unchanged (LICENSE clause 4,
+# docs/licensing.md). Build on the connected host only; never in the air gap:
+#   docker build -f scripts/openwebui/Containerfile.openwebui \
+#     -t mainframe-rag/openwebui-dev:0.12.3-slim scripts/openwebui
+#
+# Base: ghcr.io/open-webui/open-webui:v0.12.3-slim, image index digest below
+# (amd64 manifest sha256:912c133d2dcecb8d74662f9be64b1f00f303a0d8c0836cbb30fd156f65652f5f;
+# org.opencontainers.image.revision 91ea4e3421d1d8069f13d4a463fcb5986d94ea60 =
+# upstream tag v0.12.3; created 2026-10-16). Tag plus digest is not a valid
+# reference here, so the digest is the contract (as in Containerfile.agent).
+# The slim variant matters: it builds no vector client at import time and
+# ships no embedding, reranker or Whisper models (no second vector store).
+FROM ghcr.io/open-webui/open-webui@sha256:5adfb0355bbe4a5860c0ba9482cc0b40f573de3749a21a64cf4789391a14fffc
+
+USER 0:0
+# Writable paths at run time, each covered here and by a mount in the chart:
+#   /app/backend/data             DATA_DIR (SQLite, uploads, cache): the PVC
+#   /app/backend/open_webui/static STATIC_DIR, refilled from /app/build/static at startup
+#   /root                         HOME caches
+#   /tmp                          scratch
+# With a read-only root filesystem the chart mounts an emptyDir over static,
+# /root and /tmp; the group-0 bits below make the same paths work without one.
+RUN set -eux; \
+    mkdir -p /app/backend/data /app/backend/open_webui/static /root/.cache; \
+    chgrp -R 0 /app /root; \
+    chmod -R g=u /app /root; \
+    find /app /root -type d -exec chmod g+s {} +; \
+    chmod 1777 /tmp
+
+# Any UID works; restricted-v2 assigns one from the namespace range in group 0.
+USER 1000:0
+WORKDIR /app/backend
+EXPOSE 8080
+CMD ["bash", "start.sh"]
