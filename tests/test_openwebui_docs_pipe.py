@@ -924,11 +924,11 @@ ERROR_CASES = [
     ("internal", 500, ("The documentation service hit an internal error. Retry; if it persists, "
      "contact the operators.")),
     ("not_found", 404, ("The documentation service rejected the request. Ask an administrator "
-     "to check the Docs Pipe configuration.")),
+     "to check the Rosetta Pipe configuration.")),
     ("method_not_allowed", 405, ("The documentation service rejected the request. Ask an "
-     "administrator to check the Docs Pipe configuration.")),
+     "administrator to check the Rosetta Pipe configuration.")),
     ("http_error", 400, ("The documentation service rejected the request. Ask an administrator "
-     "to check the Docs Pipe configuration.")),
+     "to check the Rosetta Pipe configuration.")),
 ]
 UNREACHABLE = ("The documentation service could not be reached. Retry; if it persists, "
                "contact the operators.")
@@ -1010,7 +1010,7 @@ def test_open_webui_pin_and_install_header():
     fields = dict(re.findall(r"^(\w+):\s*(.+)$", header, flags=re.MULTILINE))
     assert docs_pipe.OPEN_WEBUI_VERSION == "0.12.3"
     assert fields["required_open_webui_version"] == docs_pipe.OPEN_WEBUI_VERSION
-    assert fields["title"] == "Docs"
+    assert fields["title"] == "Rosetta"
     assert "requirements" not in fields
     imports = set(re.findall(r"^(?:from|import) (\w+)", source, flags=re.MULTILINE))
     assert imports <= {"__future__", "collections", "json", "re", "typing", "httpx", "pydantic"}

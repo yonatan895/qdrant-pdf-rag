@@ -162,7 +162,7 @@ def test_installer_creates_activates_and_verifies_the_stored_pipe(owui):
     assert lines == [f"docs Pipe installed: Function mainframe_rag_docs active, sha256 {PIPE_SHA}"]
     stored = state.functions["mainframe_rag_docs"]
     assert hashlib.sha256(stored["content"].encode()).hexdigest() == PIPE_SHA
-    assert stored["is_active"] is True and stored["name"] == "Docs"
+    assert stored["is_active"] is True and stored["name"] == "Rosetta"
     assert _writes(state) == [("POST", "/api/v1/functions/create"),
                               ("POST", "/api/v1/functions/id/mainframe_rag_docs/toggle")]
     assert {auth for _, _, auth in state.requests} == {f"Bearer {KEY}"}

@@ -36,7 +36,7 @@ import sys
 from pathlib import Path
 
 PIPE_ID = "mainframe_rag_docs"
-PIPE_NAME = "Docs"
+PIPE_NAME = "Rosetta"
 PIPE_DESCRIPTION = "Documentation corpus through the mainframe-rag agent"
 MOUNT = Path("/opt/mainframe-rag/openwebui")
 CERT = Path("/etc/tls/private/tls.crt")
