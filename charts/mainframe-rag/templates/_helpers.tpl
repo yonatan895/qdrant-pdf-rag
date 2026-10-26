@@ -125,6 +125,24 @@ window, no repository-owned docs Pipe (#1072).
 {{- if $shape -}}
 {{- fail (printf "Open WebUI settings must not be empty or null: %s (a null port would open the IdP egress rule to every TCP port)." (join ", " $shape)) -}}
 {{- end -}}
+{{- /* Revocation through the IdP needs a roles claim on every sign-in, so the IdP
+issues the baseline value signed-in to every user (docs/deploy.md, AD FS). It,
+or *, in a role list would admit every signed-in user. */ -}}
+{{- range $list := list ($oidc.allowedRoles | toString) ($oidc.adminRoles | toString) -}}
+{{- range $role := splitList "," $list -}}
+{{- if or (eq $role "*") (eq $role "signed-in") -}}
+{{- fail "openwebui.oidc.allowedRoles and adminRoles must not contain * or the baseline role signed-in (every signed-in user carries it, so removing a user from the role groups would revoke nothing)" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- /* IdP CA: certificates only. A fixed message, never the value: a schema
+pattern would make Helm print the rejected value (a pasted key included).
+The ca-trust init step then loads every certificate (files/openwebui/ca_trust.py). */ -}}
+{{- with $oidc.caBundle -}}
+{{- if not (regexMatch "^\\s*(-----BEGIN CERTIFICATE-----\\r?\\n[A-Za-z0-9+/=\\r\\n]+-----END CERTIFICATE-----\\s*)+$" (toString .)) -}}
+{{- fail "openwebui.oidc.caBundle must hold only PEM certificates (-----BEGIN CERTIFICATE----- blocks, no key or other text); the value is not shown" -}}
+{{- end -}}
+{{- end -}}
 {{- if not $o.retentionDays -}}
 {{- fail "openwebui.retentionDays is required when openwebui.enabled=true: the purge sidecar enforces the chat retention window (ADR-0007 S2)" -}}
 {{- end -}}

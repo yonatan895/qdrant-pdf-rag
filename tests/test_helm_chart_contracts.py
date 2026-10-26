@@ -1451,20 +1451,25 @@ def test_openwebui_idp_ca_bundle_is_optional_and_adds_only_its_trust(owui_chart)
         if key != ("Deployment", "rag-openwebui"):
             assert with_ca[key] == doc, key
     cm = with_ca["ConfigMap", "rag-openwebui-idp-ca"]
-    assert cm["data"] == {"ca.crt": IDP_CA_PEM}
+    script = (CHART / "files" / "openwebui" / "ca_trust.py").read_text(encoding="utf-8")
+    assert cm["data"] == {"ca.crt": IDP_CA_PEM, "ca_trust.py": script}
     dep = with_ca["Deployment", "rag-openwebui"]
     pod = dep["spec"]["template"]["spec"]
     assert _hardening_violations(pod) == []
+    # A changed bundle or script rolls the pod.
     assert dep["spec"]["template"]["metadata"]["annotations"]["checksum/idp-ca"] == hashlib.sha256(
-        IDP_CA_PEM.encode()).hexdigest()
+        (IDP_CA_PEM + script).encode()).hexdigest()
     (init,) = pod["initContainers"]
     app = next(c for c in pod["containers"] if c["name"] == "openwebui")
     assert init["image"] == app["image"]
     assert init["securityContext"]["readOnlyRootFilesystem"] is True
-    assert "env" not in init and "ports" not in init
-    script = "\n".join(init["command"] + init.get("args", []))
+    assert "env" not in init and "ports" not in init and "args" not in init
+    # The shipped, tested script (test_openwebui_frontend_scripts.py): it loads
+    # every IdP certificate and fails the init step on anything else.
+    assert init["command"] == ["python3", "-I", "/etc/mainframe-rag/idp-ca/ca_trust.py"]
     # The public stores stay trusted: both defaults are read, then the IdP CA.
-    for needle in ("certifi.where()", "openssl_cafile", "/etc/mainframe-rag/idp-ca/ca.crt", CA_TRUST_FILE):
+    for needle in ("certifi.where()", "openssl_cafile", '"/etc/mainframe-rag/idp-ca/ca.crt"',
+                   f'"{CA_TRUST_FILE}"'):
         assert needle in script, needle
     volumes = {v["name"]: v for v in pod["volumes"]}
     init_mounts = {m["mountPath"]: m for m in init["volumeMounts"]}
@@ -1489,19 +1494,39 @@ def test_openwebui_idp_ca_bundle_is_optional_and_adds_only_its_trust(owui_chart)
         assert "ca-trust" not in json.dumps(container), name
 
 
+IDP_CA_REFUSAL = ("openwebui.oidc.caBundle must hold only PEM certificates (-----BEGIN CERTIFICATE----- "
+                  "blocks, no key or other text); the value is not shown")
+SECRET_KEY_BODY = "TUlJRXZRSUJBREFOQmdrcWhraUc5dzBCQVFFRkFBU0NCS2N3Z2dTakFnRUFBb0lCQVFDN0tFWV9TRUNSRVQ="
+
+
 @pytest.mark.parametrize("bad", [
     "  \n", "not a certificate",
     "-----BEGIN CERTIFICATE-----\n%%%\n-----END CERTIFICATE-----\n",
     IDP_CA_PEM + "trailing junk\n",
-    "-----BEGIN PRIVATE KEY-----\nSURQLUNBLTE=\n-----END PRIVATE KEY-----\n",
+    f"-----BEGIN PRIVATE KEY-----\n{SECRET_KEY_BODY}\n-----END PRIVATE KEY-----\n",
+    IDP_CA_PEM + f"-----BEGIN RSA PRIVATE KEY-----\n{SECRET_KEY_BODY}\n-----END RSA PRIVATE KEY-----\n",
 ])
-def test_openwebui_idp_ca_bundle_refuses_blank_or_garbage(owui_chart, bad):
+def test_openwebui_idp_ca_bundle_refuses_blank_or_garbage_without_echoing_it(owui_chart, bad):
+    """Review #1083 B1: a schema pattern made Helm print the rejected value, so a
+    pasted private key reached stderr. The chart refuses with fixed text only.
+    (A corrupted certificate body that keeps the PEM shape passes the chart, which
+    cannot parse X.509; the ca-trust init step refuses it and the pod is not Ready.)"""
     values = base_values()
     values.update(json.loads(json.dumps(OWUI_ON)))
     values["openwebui"]["oidc"]["caBundle"] = bad
     r = _helm_template_with_values(values, chart=owui_chart)
-    assert r.returncode != 0 and "caBundle" in r.stderr
+    assert r.returncode != 0 and IDP_CA_REFUSAL in r.stderr
     assert "rag-openwebui" not in r.stdout
+    for leaked in (SECRET_KEY_BODY, "PRIVATE KEY", "junk", "not a certificate", "SURQLUNB", "%%%"):
+        assert leaked not in r.stderr, leaked
+
+
+def test_openwebui_idp_ca_bundle_schema_checks_the_type_only():
+    """The schema keeps a type check (a string cannot be echoed by it) and no
+    pattern, so the content check is the template's fixed-text refusal."""
+    schema = json.loads((CHART / "values.schema.json").read_text(encoding="utf-8"))
+    ca = schema["properties"]["openwebui"]["properties"]["oidc"]["properties"]["caBundle"]
+    assert ca["type"] == "string" and "pattern" not in ca
 
 
 def test_openwebui_claim_is_kept_rwo_on_the_block_class(owui_chart):
@@ -2167,6 +2192,27 @@ def test_openwebui_adfs_scopes_and_identity_claims_reach_the_pod(owui_chart):
         "OAUTH_SCOPES": "openid profile email allatclaims", "OAUTH_EMAIL_CLAIM": "upn",
         "OAUTH_USERNAME_CLAIM": "unique_name"}
     assert set(env) == OWUI_ENV_NAMES
+
+
+ROLE_BASELINE_REFUSAL = (
+    "openwebui.oidc.allowedRoles and adminRoles must not contain * or the baseline role signed-in")
+
+
+@pytest.mark.parametrize("key,bad", [
+    ("allowedRoles", "*"), ("allowedRoles", "staff,*"), ("allowedRoles", "signed-in"),
+    ("allowedRoles", "staff,signed-in"), ("adminRoles", "signed-in"), ("adminRoles", "docs-admins,*"),
+])
+def test_openwebui_refuses_role_lists_that_would_admit_every_signed_in_user(owui_chart, key, bad):
+    """Review #1083 B2: revocation through the IdP needs a roles claim on every
+    sign-in, so AD FS issues the baseline value signed-in to every user
+    (docs/deploy.md). A role list containing it, or *, would admit everyone the
+    IdP authenticates and make removal from the role groups revoke nothing."""
+    values = base_values()
+    values.update(json.loads(json.dumps(OWUI_ON)))
+    values["openwebui"]["oidc"][key] = bad
+    r = _helm_template_with_values(values, chart=owui_chart)
+    assert r.returncode != 0 and ROLE_BASELINE_REFUSAL in r.stderr
+    assert "rag-openwebui" not in r.stdout
 
 
 def test_openwebui_networkpolicy_egress_rules_always_carry_a_port(owui_chart):
