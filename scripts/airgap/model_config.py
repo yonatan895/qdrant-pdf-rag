@@ -7,6 +7,7 @@ import re
 import ssl
 import sys
 from collections.abc import Mapping
+from urllib.parse import urlsplit
 
 REASONING_INTEGER_FIELDS = {
     "LLM_MAX_MODEL_LEN": ("maxModelLen", 512, 131072),
@@ -82,7 +83,8 @@ RETIRED_KEYS: tuple[tuple[str, str, str], ...] = (
     (
         "VLLM_BASE_URL",
         "547d04d",
-        "set EMBED_BASE_URL (or GATEWAY_BASE_URL, which already includes /v1) and remove it",
+        ("set EMBED_BASE_URL to the old value plus /v1 (clients append /embeddings to a base "
+         "that must end in /v1; do not repeat /v1), then remove it"),
     ),
     (
         "JAEGER_ENABLED",
@@ -97,15 +99,43 @@ RETIRED_KEYS: tuple[tuple[str, str, str], ...] = (
 )
 
 
+# d53595e's example pointed OTEL_EXPORTER_OTLP_ENDPOINT at the bundled Jaeger
+# Service. Any set endpoint now means an external collector (no OpenObserve),
+# so that value would drop every trace silently (#1070).
+OTEL_ENDPOINT_KEY = "OTEL_EXPORTER_OTLP_ENDPOINT"
+_RETIRED_JAEGER_HOST = re.compile(r"jaeger(\.[a-z0-9-]+\.svc(\.[a-z0-9.-]*)?)?")
+_JAEGER_ENDPOINT_MESSAGE = (
+    "points at the retired in-cluster Jaeger; unset it to use the bundled OpenObserve "
+    "collector, or set your external collector"
+)
+
+
+def _points_at_retired_jaeger(raw: str) -> bool:
+    candidate = raw.strip()
+    if "://" not in candidate:
+        return False  # not a URL: the endpoint validator refuses it with its own message
+    try:
+        host = urlsplit(candidate).hostname or ""
+    except ValueError:
+        return False
+    return _RETIRED_JAEGER_HOST.fullmatch(host.lower().rstrip(".")) is not None
+
+
 def require_no_retired_keys(values: Mapping[str, str]) -> None:
-    """Refuse every retired key that carries a non-empty value. One fixed
-    message lists them all; values are never echoed. Empty or absent is fine."""
-    present = [entry for entry in RETIRED_KEYS if values.get(entry[0], "") != ""]
-    if present:
-        lines = "\n".join(f"  {key} (retired in {ref}): {text}" for key, ref, text in present)
+    """Refuse every retired key that carries a non-empty value, and a tracing
+    endpoint naming the retired in-cluster Jaeger Service. One fixed message
+    lists them all; values are never echoed. Empty or absent is fine."""
+    lines = [
+        f"  {key} (retired in {ref}): {text}"
+        for key, ref, text in RETIRED_KEYS
+        if values.get(key, "") != ""
+    ]
+    if _points_at_retired_jaeger(values.get(OTEL_ENDPOINT_KEY, "")):
+        lines.append(f"  {OTEL_ENDPOINT_KEY} (retired in d7765dc): {_JAEGER_ENDPOINT_MESSAGE}")
+    if lines:
         raise ValueError(
             "retired airgap.env keys are set and no longer read; apply the migration "
-            "or empty/remove each key before any cluster change:\n" + lines
+            "or empty/remove each key before any cluster change:\n" + "\n".join(lines)
         )
 
 

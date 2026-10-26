@@ -205,7 +205,7 @@ bool_flag() {
 # are never printed; the check runs before any cluster, registry or file change.
 refuse_retired_keys() {
     command -v python3 >/dev/null 2>&1 || die "python3 is required for the retired-key check"
-    export REGISTRY_INTERNAL OPENSHIFT_NAMESPACE VLLM_BASE_URL JAEGER_ENABLED JAEGER_QUERY_URL
+    export REGISTRY_INTERNAL OPENSHIFT_NAMESPACE VLLM_BASE_URL JAEGER_ENABLED JAEGER_QUERY_URL OTEL_EXPORTER_OTLP_ENDPOINT
     python3 scripts/airgap/model_config.py --retired-keys || exit 1
 }
 

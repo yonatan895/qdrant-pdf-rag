@@ -1520,3 +1520,38 @@ def test_validate_accepts_empty_and_commented_retired_keys_then_refuses_the_fill
     bad = _run(tree, {"AIRGAP_ENV": _write_env_file(tree, empty + "REGISTRY_INTERNAL=x\n")})
     assert bad.returncode != 0
     assert retired_keys_listed(bad.stderr) == ["REGISTRY_INTERNAL"]
+
+
+_JAEGER_LINE = "OTEL_EXPORTER_OTLP_ENDPOINT (retired in d7765dc): points at the retired in-cluster Jaeger"
+
+
+@pytest.mark.parametrize("endpoint", [
+    "http://jaeger:4318",
+    "https://jaeger:4318/v1/traces",
+    "http://Jaeger.mainframe-rag.svc:4318",
+    "http://jaeger.mainframe-rag.svc.cluster.local:4318",
+])
+def test_validate_refuses_the_retired_in_cluster_jaeger_endpoint(tree, endpoint):
+    """d53595e's example pointed the exporter at http://jaeger:4318; today any set
+    endpoint means an external collector, so it would silently drop traces."""
+    r, calls = _run_with_recording_stubs(tree, {"OTEL_EXPORTER_OTLP_ENDPOINT": endpoint})
+    assert r.returncode != 0
+    assert _JAEGER_LINE in r.stderr
+    assert "unset it to use the bundled OpenObserve collector, or set your external collector" in r.stderr
+    assert retired_keys_listed(r.stderr) == ["OTEL_EXPORTER_OTLP_ENDPOINT"]
+    assert endpoint not in r.stdout + r.stderr
+    assert calls == []
+
+
+@pytest.mark.parametrize("endpoint", [
+    None,
+    "",
+    "off",
+    "http://collector.platform:4318",
+    "http://jaeger-collector.platform:4318",
+    "http://jaeger.example.com:4318",
+])
+def test_validate_accepts_unset_empty_off_and_external_collectors(tree, endpoint):
+    extra = {} if endpoint is None else {"OTEL_EXPORTER_OTLP_ENDPOINT": endpoint}
+    r = _run(tree, extra)
+    assert r.returncode == 0, r.stderr

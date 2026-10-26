@@ -1339,3 +1339,18 @@ def test_retired_key_table_entries_are_complete_and_fixed():
         require_no_retired_keys({key: "sentinel-value" for key, _, _ in RETIRED_KEYS})
     assert "sentinel-value" not in str(caught.value)
     require_no_retired_keys({key: "" for key, _, _ in RETIRED_KEYS})
+
+
+def test_vllm_base_url_migration_names_the_v1_suffix():
+    """The old key was an origin and d53595e appended /v1; EMBED_BASE_URL is a
+    base that clients append /embeddings to, so the message must say plus /v1."""
+    from scripts.airgap.model_config import require_no_retired_keys
+
+    with pytest.raises(ValueError) as caught:
+        require_no_retired_keys({"VLLM_BASE_URL": "http://vllm:8000"})
+    assert (
+        "  VLLM_BASE_URL (retired in 547d04d): set EMBED_BASE_URL to the old value plus /v1 "
+        "(clients append /embeddings to a base that must end in /v1; do not repeat /v1), "
+        "then remove it"
+    ) in str(caught.value)
+    assert "http://vllm:8000" not in str(caught.value)
