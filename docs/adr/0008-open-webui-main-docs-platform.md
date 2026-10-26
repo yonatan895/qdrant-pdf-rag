@@ -1,7 +1,7 @@
 # ADR-0008: Open WebUI as the main docs platform
 
-- **Status:** accepted (maintainer, 2026-10-26: items 1, 2, 5 to 8); the
-  fail-closed rule (items 3 and 4) is pending maintainer confirmation.
+- **Status:** accepted (maintainer, 2026-10-26). The maintainer confirmed the
+  fail-closed rule (items 3 and 4) in [a #1070 comment](https://github.com/yonatan895/qdrant-pdf-rag/issues/1070#issuecomment-6420723791).
   Tracker #1070. Supersedes
   [ADR-0007](0007-open-webui-docs-front-end.md) in part: its "optional",
   "default-off" and "pilot" framing. Every ADR-0007 condition and no-go item
