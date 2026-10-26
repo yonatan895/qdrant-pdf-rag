@@ -608,7 +608,7 @@ preflight() {
     for t in "$KIND_BIN" "$KUBECTL" "$HELM" "$AGENT_PY"; do [ -x "$t" ] || die "missing tool $t"; done
     for t in openssl python3 systemd-run flock curl ss git; do command -v "$t" >/dev/null || die "missing $t"; done
     [ -n "$NODE_IMAGE" ] && [ -n "$(pin OWUI_BASE)" ] && [ -n "$(pin DEX_PIN)" ] && [ -n "$(pin SKOPEO_IMAGE)" ] \
-        || die "pins not found in $HERE/pins.env"
+        || die "pins not found in $HERE/pins.txt"
     [ -f "$REPO/charts/mainframe-rag/files/openwebui/proxy.nginx.conf" ] \
         || die "$REPO lacks the chart's Open WebUI files"
     [ -f "$REPO/integrations/openwebui/docs_pipe.py" ] || die "$REPO lacks integrations/openwebui/docs_pipe.py"

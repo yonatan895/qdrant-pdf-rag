@@ -42,7 +42,7 @@ memory and the lock without docker or a cluster. Run it with an isolated
 
 The agent lane runs from this working tree (`AGENT_SRC`); after any rule-module
 change run `INGEST=always dev.sh up` (a rule-module change forces a re-embed).
-Pins for the dev-only images live in `scripts/openwebui/pins.env`; the proxy
+Pins for the dev-only images live in `scripts/openwebui/pins.txt`; the proxy
 image digest comes from `images.txt`.
 
 <a id="acceptance-lane"></a>
@@ -91,3 +91,10 @@ that Containerfile and pushes `ghcr.io/<owner>/qdrant-pdf-rag-openwebui` with
 summary; the `images.txt` pin is a separate PR. Every other e2e job that runs
 the operator flow sets `OPENWEBUI_ENABLED=false` (the front end is default-on
 and fails closed without site inputs); only the `openwebui` lane deploys it.
+
+Known defect handled in the lane: Open WebUI v0.12.3 answers HTTP 401 (not 404) for a
+Function that does not exist, and the chart's `provision_pipe.py` reads 401 as a refused
+key, so a first install fails. The lane sets `OWUI_SEED_FUNCTION=1` (the admin session
+creates the Function, the installer then verifies its hash and activates it). Drop the
+variable once the installer treats the absent Function correctly; until then the
+installer's first-install path is not covered by this lane.

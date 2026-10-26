@@ -1117,6 +1117,9 @@ jobs:
           KIND_BIN: /usr/local/bin/kind
           KUBECTL: /usr/local/bin/kubectl
           HELM: /usr/local/bin/helm
+          # Open WebUI v0.12.3 answers 401 (not 404) for an absent Function and the chart's installer
+          # reads that as a refused key: seed the Function so the rest of the suite can run (#1107).
+          OWUI_SEED_FUNCTION: "1"
         shell: sh rehearsal-infra/scripts/ci/egress_gate.sh run bash -e {0}
         run: |
           export PATH="/usr/local/bin:$PATH"

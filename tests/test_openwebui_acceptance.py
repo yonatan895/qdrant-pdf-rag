@@ -42,7 +42,7 @@ UID = 1000712345
 
 def test_trial_directory_is_gone_and_pins_are_complete():
     assert not (ROOT / "scripts" / "ci" / "openwebui-trial").exists()
-    pins = dict(line.split("=", 1) for line in (DIR / "pins.env").read_text().splitlines()
+    pins = dict(line.split("=", 1) for line in (DIR / "pins.txt").read_text().splitlines()
                 if line and not line.startswith("#"))
     assert set(pins) == {"NODE_IMAGE", "OWUI_BASE", "DEX_PIN", "SKOPEO_IMAGE"}
     assert all("@sha256:" in v for v in pins.values())

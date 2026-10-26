@@ -8,8 +8,8 @@
 # Two sources are read from the working tree, never from a git ref: the chart
 # (charts/mainframe-rag) and the Docs Pipe (integrations/openwebui/docs_pipe.py).
 
-pin() {  # pin KEY -> value from pins.env
-    sed -n "s/^$1=//p" "$HERE/pins.env" | head -1
+pin() {  # pin KEY -> value from pins.txt
+    sed -n "s/^$1=//p" "$HERE/pins.txt" | head -1
 }
 
 nginx_pin() {  # the allow-list proxy image digest, from the working tree's images.txt
@@ -247,6 +247,8 @@ for line in sys.stdin.read().split():
 
 provision_live() {  # admin API key, the chart's Pipe installer, groups, Docs model grants, both users sign in
     $PYH api-key "$STATE"
+    # Workaround for the installer's first install (see client.py seed-function); off by default.
+    [ "${OWUI_SEED_FUNCTION:-0}" != 1 ] || $PYH seed-function "$STATE" "$STATE/render/src/mainframe-rag/files/openwebui/docs_pipe.py"
     k -n "$APP_NS" exec -i deploy/rag-openwebui -c openwebui -- \
         python3 /opt/mainframe-rag/openwebui/provision_pipe.py "$(cat "$STATE/render/pipe.sha256")" < "$STATE/admin-api-key"
     $PYH access "$STATE"
