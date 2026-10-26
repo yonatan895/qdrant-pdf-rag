@@ -207,6 +207,15 @@ check_skopeo_tmpdir() {
         _member_bytes=$(wc -c < "$ARTDIR/$OAUTH_TAR")
         [ "$_member_bytes" -le "$_required_bytes" ] || _required_bytes=$_member_bytes
     fi
+    # Optional image members (#1074) can be the largest: preflight must see them.
+    if [ -n "$OPENWEBUI_TAR" ]; then
+        _member_bytes=$(wc -c < "$ARTDIR/$OPENWEBUI_TAR")
+        [ "$_member_bytes" -le "$_required_bytes" ] || _required_bytes=$_member_bytes
+    fi
+    if [ -n "$OPENWEBUI_PROXY_TAR" ]; then
+        _member_bytes=$(wc -c < "$ARTDIR/$OPENWEBUI_PROXY_TAR")
+        [ "$_member_bytes" -le "$_required_bytes" ] || _required_bytes=$_member_bytes
+    fi
     _required_kb=$(( (_required_bytes + 1023) / 1024 ))
     _tmpdir_fail=1
     if [ -d "$_tmpdir" ] && [ -w "$_tmpdir" ]; then

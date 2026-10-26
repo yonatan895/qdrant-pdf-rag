@@ -769,6 +769,36 @@ def test_load_refuses_skopeo_tmpdir_without_space_before_any_push(load_tree):
     assert not log.exists()
 
 
+def test_load_counts_optional_openwebui_member_in_skopeo_tmpdir_space(load_tree):
+    """#1074 + #1068: the Open WebUI member can be the largest, so the preflight
+    must size it too and refuse before any push when the tmpdir cannot hold it."""
+    root, log = load_tree
+    _make_artifacts(root / "dist", openwebui=True)
+    tmpdir = root / "work-tmp"
+    tmpdir.mkdir()
+    write_stub(
+        root / "bin" / "df",
+        "#!/bin/sh\n"
+        "printf '%s\\n' 'Filesystem 1024-blocks Used Available Capacity Mounted on'\n"
+        "printf '%s\\n' 'stub 1000000 600000 400000 60% /'\n",
+    )
+    # The archive stays a real oci-archive; only its reported size is large, so
+    # this isolates the sizing loop from a multi-GB fixture.
+    write_stub(
+        root / "bin" / "wc",
+        '#!/bin/sh\n'
+        'if [ "$1" = "-c" ]; then\n'
+        '  target=$(readlink /proc/self/fd/0)\n'
+        '  case "$target" in *openwebui-image.tar) echo 999999999; exit 0 ;; esac\n'
+        'fi\n'
+        'exec /usr/bin/wc "$@"\n',
+    )
+    r = _run_load(load_tree, ("SKOPEO_ARGS", f"--tmpdir={tmpdir}"))
+    assert r.returncode == 1
+    assert "less than 0.3 GB (or the largest image member) free" in r.stderr
+    assert not log.exists()
+
+
 def test_load_dryrun_is_hermetic_and_not_release_verified(load_tree):
     root, log = load_tree
     r = _run_load(load_tree, ("AIRGAP_DRYRUN", "1"))
