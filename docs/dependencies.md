@@ -8,8 +8,8 @@ not a claim of byte-identical images or legal/security approval.
 
 The owning inputs are `locks/cp314-linux-x86_64.json` and its three complete,
 hash-pinned requirements files. The manifest records each selected wheel,
-version, SHA-256 and public origin. Existing direct versions remain unchanged;
-transitive versions were taken from the qualified development environment.
+version, SHA-256 and public origin. Versions change only through a dedicated
+reviewed refresh; every other pin stays fixed.
 The `urllib3` security pin is also explicit in `pyproject.toml`; its runtime/dev
 lock entries and wheel identity must agree with that project dependency.
 `hypothesis` (property tests, #817) and its `sortedcontainers` dependency are dev-profile
@@ -122,6 +122,21 @@ otherwise. certifi 2026.10.19 and pip 26.2.2 drop only "emSign ECC Root CA - G3"
 the G1, C1 and C3 roots remain. The pinned UBI digest and the current `9.8` tag
 ship the same `ca-certificates` 2025.2.80_v9.0.305-91.el9 bundle with all four
 emSign roots; no workaround is applied. Re-inspect on each base-image refresh.
+
+## FastEmbed and Pillow (#1064, #895)
+
+`fastembed` and `pillow` move together: FastEmbed's Python 3.14 requirement
+declared `pillow<13.0` through 0.9.0, so Pillow 13 could not be locked without
+overriding that constraint. `fastembed` 0.9.1 (released 2026-10-24) declares
+`pillow<14.0,>=12.0.0` on Python 3.14; the refresh pins `fastembed==0.9.1` and
+`pillow==13.0.0` in the runtime and dev profiles. No other pin changed: the 3.14
+floors (`numpy>=2.3.0`, `onnxruntime>=1.24.2`) were already satisfied by numpy
+2.5.3 and onnxruntime 1.30.0, and no transitive package was added. Pillow 13.0.0
+is the first patched release for GHSA-5x8w-8jj5-q52h (critical) and
+GHSA-654x-cwwv-5j9c (medium); advisory status is evidence, not an approval.
+For a fixed synthetic query and document set, `SparseTextEmbedding` produced
+byte-identical BM25 document and query vectors under fastembed 0.8.0/Pillow
+12.3.0 and 0.9.1/Pillow 13.0.0 (#895).
 
 ## Reproduce, refresh and roll back
 

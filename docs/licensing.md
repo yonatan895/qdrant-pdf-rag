@@ -32,14 +32,18 @@ Decision owners: `licenses/inventory.json` (the record),
 `licenses/inventory.json` holds one record per locked runtime wheel (66) and per
 non-Python component (17, including the three non-distributed boundaries above).
 
-- **Python wheels** are derived offline from the exact locked wheel bytes (65,
+- **Python wheels** are derived offline from the exact locked wheel bytes (66,
   METADATA `License-Expression`, `License` field or classifier, plus license-file
-  names and SHA-256) or, where the locked wheel was not on the host, from a
-  version-matching installed dist-info (1: `urllib3` 2.8.0). `evidence` says which.
-  `license_spdx` is the normalized value and `spdx_basis` says how: 45 declared
-  expressions, 17 normalized from the `License` field, 3 from classifiers, 1 from
+  names and SHA-256). `evidence` says which; the #1064 refresh supplied the
+  complete runtime wheelhouse, so all 66 now come from wheel bytes (previously
+  `urllib3` 2.8.0 came from installed dist-info).
+  `license_spdx` is the normalized value and `spdx_basis` says how: 46 declared
+  expressions, 16 normalized from the `License` field, 3 from classifiers, 1 from
   license-file text (`py-rust-stemmers` declares nothing). A reviewer must treat
-  normalized values as claims to confirm, not as findings.
+  normalized values as claims to confirm, not as findings. `fastembed` 0.9.1
+  declares `License-Expression: Apache-2.0` (0.8.0 declared `License: Apache
+  License`) and `pillow` 13.0.0 declares `MIT-CMU`. Both stay permissive and
+  `declared`, and no new transitive package entered the runtime closure.
 - **Other components** record the license the upstream project declares or the
   vendored license text (`spdx_basis`), bound to the exact bytes: `images.txt`
   pin and digest, chart archive and its inner `LICENSE`, htmx files, Task pin and
