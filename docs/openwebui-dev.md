@@ -68,7 +68,7 @@ Every rule in `checks.py` has a counterexample in
 | Check | Executed as |
 |---|---|
 | arbitrary non-root UID | `id` in the container equals the namespace UID, group 0, not the image `USER`; every container has the restricted shape |
-| zero egress | the pod's CoreDNS queries name only the IdP and the agent; real sockets from the pod reach the agent and the IdP and fail to reach 1.1.1.1, 8.8.8.8, the API server, Qdrant and the gateway |
+| zero egress | the pod's CoreDNS queries name only the IdP and the agent; real sockets from the pod reach the agent and the IdP and fail to reach 1.1.1.1, 8.8.8.8 and a listening pod in another namespace (the lane's own boundary policy admits same-namespace pods and the API server for every pod, so those are not asserted; the chart policy's exact rules are asserted by its render tests and by the dev environment's default-deny namespace) |
 | no vector store or uploads after use | `inspect_data.py` in the pod after answers: no vector paths or tables, no `uploads/`, no retrieval rows |
 | Docs model only | both users list exactly `mainframe_rag_docs`; IdP group claim mapped; signup and password login refused |
 | citations | one saved turn has finished, text, and source events with documents (the Pipe's source chips) |

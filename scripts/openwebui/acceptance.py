@@ -206,8 +206,11 @@ class Acceptance:
 
         reach = run("reachable", "rag-agent:8080", client.DEX_ISSUER.split("/")[2])
         # One probe per target, so a failure names the target that connected.
-        connected = [t for t in ("1.1.1.1:443", "8.8.8.8:443", "kubernetes.default.svc:443", "qdrant:6333",
-                                 "test-gateway:4000") if run("blocked", t) != 0]
+        # The e2e boundary policy admits every pod of the lane's namespace and the API server for all
+        # pods there (unioned with the chart's policy), so only targets outside that are asserted:
+        # public addresses and a listening pod in another namespace (the router stand-in, port 8443).
+        connected = [t for t in ("1.1.1.1:443", "8.8.8.8:443", "router.owui-router.svc.cluster.local:8443")
+                     if run("blocked", t) != 0]
         verdict = checks.check_egress_probes(reach, 1 if connected else 0)
         verdict.detail["connected_outside_allow_list"] = connected
         self.add(verdict)
