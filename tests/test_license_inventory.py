@@ -18,7 +18,7 @@ from tests.helpers_task_artifact import copy_task_tools
 
 # Open WebUI v0.12.3-slim upstream index qualified by the #1073 Kind trial.
 BASE_DIGEST = "5adfb0355bbe4a5860c0ba9482cc0b40f573de3749a21a64cf4789391a14fffc"
-OPENWEBUI_DIGEST = "5329730006ef29f54784c760467363dfc3d268e5089f92ceaa8942dcb3b5d65b"
+OPENWEBUI_DIGEST = "8417d47dd04505cac429c8b50c0d9452f635ae23a6c17351299b703b8eb04e04"
 
 
 def real_inventory():

@@ -188,7 +188,7 @@
     {
       "approval_ref": "gh:yonatan895/qdrant-pdf-rag#1070 issuecomment-6420326886 (ADR-0008 direction, 2026-10-26) and issuecomment-6420723791 (fail-closed); ADR-0007 L1 (accepted 2026-10-24, relay gh:yonatan895/qdrant-pdf-rag#1085 issuecomment-6388915196); ADR-0008 (accepted 2026-10-26)",
       "bind": {
-        "digest": "sha256:5329730006ef29f54784c760467363dfc3d268e5089f92ceaa8942dcb3b5d65b",
+        "digest": "sha256:8417d47dd04505cac429c8b50c0d9452f635ae23a6c17351299b703b8eb04e04",
         "images_txt": "ghcr.io/yonatan895/qdrant-pdf-rag-openwebui:v0.12.3-slim"
       },
       "class": "proprietary",
