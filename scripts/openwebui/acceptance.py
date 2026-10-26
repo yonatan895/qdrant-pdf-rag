@@ -20,6 +20,7 @@ import secrets
 import subprocess
 import sys
 import time
+import traceback
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -180,13 +181,17 @@ class Acceptance:
         code = ("import urllib.request as u\n"
                 "r = u.urlopen('http://localhost:8080/ui', timeout=15)\n"
                 "h = u.urlopen('http://localhost:8080/healthz', timeout=15)\n"
-                "print(r.status, r.headers.get('content-type', ''), h.status)\n")
+                "import json\n"
+                "print(json.dumps([r.status, r.headers.get('content-type', ''), h.status]))\n")
         proc = agent_exec(code)
-        parts = proc.stdout.decode().split()
-        if proc.returncode != 0 or len(parts) < 3:
+        try:
+            parts = json.loads(proc.stdout.decode())
+        except ValueError:
+            parts = []
+        if proc.returncode != 0 or len(parts) != 3:
             self.add(checks.Verdict(f"console-alongside:{label}", False, {"reason": "console request failed"}))
             return
-        verdict = checks.check_console(int(parts[0]), parts[1], int(parts[2]))
+        verdict = checks.check_console(int(parts[0]), str(parts[1]), int(parts[2]))
         verdict.name = f"console-alongside:{label}"
         self.add(verdict)
 
@@ -317,7 +322,9 @@ def main(argv: list[str]) -> int:
     try:
         ok = run.run()
     except Exception as exc:  # noqa: BLE001 - report the class, never the text (it may carry upstream bytes)
-        run.verdicts.append(checks.Verdict("executor", False, {"error": type(exc).__name__}))
+        frame = traceback.extract_tb(exc.__traceback__)[-1]
+        run.verdicts.append(checks.Verdict("executor", False, {
+            "error": type(exc).__name__, "where": f"{os.path.basename(frame.filename)}:{frame.lineno}"}))
         ok = False
     print(json.dumps({"ok": ok, "checks": [v.as_json() for v in run.verdicts]}, sort_keys=True, indent=1))
     return 0 if ok else 1

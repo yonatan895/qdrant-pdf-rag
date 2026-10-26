@@ -145,13 +145,19 @@ def check_answer(chat: dict, name: str = "answer-citations") -> Verdict:
 
 def check_blocked(results: dict[str, str], allowed_control: int) -> Verdict:
     """Every allow-list path answers the proxy's 403 'denied'; the control path still works."""
-    not_blocked = sorted(p for p, r in results.items() if r != "proxy-403")
+    not_blocked = {p: r for p, r in sorted(results.items()) if r not in ("proxy-403", "proxy-400")}
     return _v("blocked-paths", bool(results) and not not_blocked and allowed_control == 200,
               paths=len(results), not_blocked=not_blocked, allowed_control=allowed_control)
 
 
 def classify_blocked(status: int, body: bytes) -> str:
-    return "proxy-403" if status == 403 and body == b"denied\n" else f"HTTP {status}"
+    """403 'denied' is the allow-list's answer. A NUL byte in the decoded path is refused earlier by the
+    sidecar's nginx itself (400 with its own page); both stop the request before Open WebUI."""
+    if status == 403 and body == b"denied\n":
+        return "proxy-403"
+    if status == 400 and b"<center>nginx</center>" in body:
+        return "proxy-400"
+    return f"HTTP {status}"
 
 
 def check_refusals(signup_status: int, login_form_enabled: object, password_signin_status: int) -> Verdict:

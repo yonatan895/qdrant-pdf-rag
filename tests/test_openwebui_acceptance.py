@@ -121,7 +121,9 @@ def test_blocked_paths_need_the_proxy_403_body():
     assert checks.classify_blocked(403, b"denied\n") == "proxy-403"
     assert checks.classify_blocked(403, b'{"detail":"Forbidden"}') == "HTTP 403"  # Open WebUI's own 403 is not the proxy
     assert checks.classify_blocked(404, b"denied\n") == "HTTP 404"
-    ok = {"/api/v1/files/": "proxy-403"}
+    assert checks.classify_blocked(400, b"<center>nginx</center>") == "proxy-400"
+    assert checks.classify_blocked(400, b'{"detail":"bad"}') == "HTTP 400"  # Open WebUI's own 400 is not the proxy
+    ok = {"/api/v1/files/": "proxy-403", "/api/v1/files%00": "proxy-400"}
     assert checks.check_blocked(ok, 200).ok
     assert not checks.check_blocked({**ok, "/x": "HTTP 200"}, 200).ok
     assert not checks.check_blocked(ok, 502).ok  # the allowed control path must still work
