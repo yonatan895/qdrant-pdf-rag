@@ -50,8 +50,12 @@ load_images() {  # into the Kind cluster $KIND_NAME, node container $NODE
     # (docker save of a pulled index omits blobs on some hosts).
     for pair in "$DEX_PIN=$DEX_IMAGE=dex" "$nginx_src=$NGINX_IMAGE=nginx"; do
         src=${pair%%=*}; rest=${pair#*=}; name=${rest%%=*}; file=${rest#*=}
-        docker run --rm --user "$(id -u):$(id -g)" -v "$STATE:$STATE" "$SKOPEO_IMAGE" \
-            copy -q "docker://$src" "docker-archive:$STATE/$file.tar:$name"
+        if [ "${SKOPEO_NATIVE:-auto}" != 0 ] && command -v skopeo >/dev/null 2>&1; then
+            skopeo copy "docker://$src" "docker-archive:$STATE/$file.tar:$name" >/dev/null  # CI runners install skopeo
+        else
+            docker run --rm --user "$(id -u):$(id -g)" -v "$STATE:$STATE" "$SKOPEO_IMAGE" \
+                copy -q "docker://$src" "docker-archive:$STATE/$file.tar:$name"
+        fi
         docker exec -i "$NODE" ctr -n k8s.io images import --snapshotter overlayfs - < "$STATE/$file.tar"
         rm -f "$STATE/$file.tar"
     done
