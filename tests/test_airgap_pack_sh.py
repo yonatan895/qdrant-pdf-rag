@@ -547,7 +547,7 @@ def test_pack_bundles_openwebui_once_digest_recorded(pack_tree):
         assert "openwebui-proxy-image.tar" in archive.getnames()
         notices = archive.extractfile("THIRD-PARTY-NOTICES.txt").read().decode()
         archive.extractall(extract, filter="data")
-    assert "image:openwebui  [pending-owner-decision]" in notices
+    assert "image:openwebui  [approved]" in notices
     assert "image:openwebui-proxy  [approved]" in notices
     assert "LicenseRef-Open-WebUI-License" in notices
     boot = subprocess.run(["sh", "bootstrap.sh"], cwd=extract, env={"PATH": "/usr/bin:/bin"},

@@ -18,6 +18,7 @@ from tests.helpers_task_artifact import copy_task_tools
 
 # Open WebUI v0.12.3-slim upstream index qualified by the #1073 Kind trial.
 BASE_DIGEST = "5adfb0355bbe4a5860c0ba9482cc0b40f573de3749a21a64cf4789391a14fffc"
+OPENWEBUI_DIGEST = "5329730006ef29f54784c760467363dfc3d268e5089f92ceaa8942dcb3b5d65b"
 
 
 def real_inventory():
@@ -80,11 +81,8 @@ def test_pymupdf_election_is_recorded_but_legal_confirmation_keeps_it_unresolved
     assert entry["status"] == "pending-owner-decision"
     _, unresolved, _ = problems_for(inventory)
     assert [u for u in unresolved if "pymupdf" in u]
-    # The Open WebUI records stay visible as unresolved until ADR-0007 is accepted (N5).
-    others = sorted(u for u in unresolved if "pymupdf" not in u)
-    assert [u.split(": ")[0] for u in others] == ["component:image:openwebui-base", "component:image:openwebui"]
-    assert all("LicenseRef-Open-WebUI-License (proprietary) awaits owner decision" in u for u in others)
-    assert len(unresolved) == 3
+    # The Open WebUI records are approved (ADR-0007 L1, ADR-0008); pymupdf is the one open item.
+    assert len(unresolved) == 1
     entry["decision"] = {"owner": "yonatan895"}
     problems, _, _ = problems_for(inventory)
     assert any("decision record needs owner, date and disposition" in p for p in problems)
@@ -129,21 +127,23 @@ def test_open_webui_licence_records_the_maintainer_decision_and_its_conditions()
     }
     for cid, ref in binds.items():
         entry = by_id[cid]
-        digest = "sha256:" + BASE_DIGEST if cid == "image:openwebui-base" else "sha256:PENDING"
+        digest = "sha256:" + (BASE_DIGEST if cid == "image:openwebui-base" else OPENWEBUI_DIGEST)
         assert entry["bind"] == {"images_txt": ref, "digest": digest}, cid
         assert (entry["license_spdx"], entry["class"]) == ("LicenseRef-Open-WebUI-License", "proprietary")
-        # N5: a maintainer disposition recorded while ADR-0007 is not accepted, not an approval.
-        assert entry["status"] == "pending-owner-decision" and "ADR-0007 L1" in entry["approval_ref"]
-        assert "pending acceptance" in entry["approval_ref"]
+        # ADR-0007 (accepted 2026-10-24) L1, ADR-0008 (accepted 2026-10-26): approved, bound to the digest.
+        assert entry["status"] == "approved"
+        assert "ADR-0007 L1 (accepted 2026-10-24)" in entry["approval_ref"]
+        assert "ADR-0008 (accepted 2026-10-26)" in entry["approval_ref"]
+        assert "pending acceptance" not in entry["approval_ref"]
         assert entry["decision"]["disposition"].startswith(
-            "maintainer disposition 2026-10-24 (ADR-0007 pending acceptance)")
+            "maintainer disposition 2026-10-24 (ADR-0007 accepted 2026-10-24)")
         assert entry["decision"]["owner"] == "yonatan895" and entry["decision"]["date"] == "2026-10-24"
         assert "branding" in entry["obligation"] and "100 users" in entry["obligation"]
     assert "unmodified" in by_id["image:openwebui"]["decision"]["disposition"]
     assert "100 users" in by_id["image:openwebui"]["decision"]["disposition"]
     assert "not an OSI-approved" in by_id["image:openwebui"]["license_declared"]
     problems, unresolved, _ = problems_for(inventory)
-    assert problems == [] and len([u for u in unresolved if "openwebui" in u]) == 2
+    assert problems == [] and [u for u in unresolved if "openwebui" in u] == []
     # Without the decision the restricted class cannot rest on declared metadata.
     del by_id["image:openwebui"]["decision"]
     by_id["image:openwebui"].update(status="declared", approval_ref=None)
@@ -162,7 +162,8 @@ def test_open_webui_proxy_image_is_recorded_bound_and_permissive():
     assert entry["bind"] == {"images_txt": line[0], "digest": line[1]}
     assert (entry["license_spdx"], entry["class"]) == ("BSD-2-Clause", "permissive")
     assert entry["ships_in"] == ["openwebui-proxy-image.tar (when the Open WebUI member is bundled)"]
-    assert "pending acceptance" in entry["approval_ref"]
+    assert entry["status"] == "approved" and "pending acceptance" not in entry["approval_ref"]
+    assert "ADR-0007 E1 (accepted 2026-10-24)" in entry["approval_ref"]
 
 
 def test_altered_python_notice_text_is_flagged_and_notices_carry_the_four_texts(tmp_path):
@@ -335,12 +336,12 @@ def test_changed_image_digest_requires_re_review(tree, capsys):
 
 
 def test_recording_the_open_webui_digest_requires_re_review(tree, capsys):
-    """#1074: recording the #1073 digest without updating the licence record
-    is a refusal, not a silent rebind of the pending entry."""
+    """#1074: changing the recorded digest without updating the licence record
+    is a refusal, not a silent rebind of the approved entry."""
     images = tree / "images.txt"
-    pending = "qdrant-pdf-rag-openwebui:v0.12.3-slim               sha256:PENDING"
-    assert pending in images.read_text()
-    images.write_text(images.read_text().replace(pending, pending.replace("PENDING", "d" * 64)))
+    pinned = "qdrant-pdf-rag-openwebui:v0.12.3-slim               sha256:" + OPENWEBUI_DIGEST
+    assert pinned in images.read_text()
+    images.write_text(images.read_text().replace(pinned, pinned.replace(OPENWEBUI_DIGEST, "d" * 64)))
     code, out = run(tree, capsys)
     assert code == 1 and "image:openwebui" in out and "re-review the image" in out
 
