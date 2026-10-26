@@ -72,6 +72,43 @@ def parse_strict_bool(name: str, raw: str, default: bool) -> bool:
     raise ValueError(f"{name} must be true/false")
 
 
+# Operator keys that earlier releases honoured and the current code ignores
+# (#1070). Ignoring them silently would let an upgrade run with a different
+# registry, namespace, embedding origin or tracing than the operator wrote, so
+# any non-empty value refuses. (key, retiring commit, fixed migration text).
+RETIRED_KEYS: tuple[tuple[str, str, str], ...] = (
+    ("REGISTRY_INTERNAL", "547d04d", "set INTERNAL_REGISTRY and remove it"),
+    ("OPENSHIFT_NAMESPACE", "547d04d", "set NAMESPACE and remove it"),
+    (
+        "VLLM_BASE_URL",
+        "547d04d",
+        "set EMBED_BASE_URL (or GATEWAY_BASE_URL, which already includes /v1) and remove it",
+    ),
+    (
+        "JAEGER_ENABLED",
+        "d7765dc",
+        "remove it; OTEL_EXPORTER_OTLP_ENDPOINT selects the collector (off disables tracing)",
+    ),
+    (
+        "JAEGER_QUERY_URL",
+        "d7765dc",
+        "remove it; airgap:smoke reads TRACE_QUERY_URL, TRACE_QUERY_USER and TRACE_QUERY_PASSWORD",
+    ),
+)
+
+
+def require_no_retired_keys(values: Mapping[str, str]) -> None:
+    """Refuse every retired key that carries a non-empty value. One fixed
+    message lists them all; values are never echoed. Empty or absent is fine."""
+    present = [entry for entry in RETIRED_KEYS if values.get(entry[0], "") != ""]
+    if present:
+        lines = "\n".join(f"  {key} (retired in {ref}): {text}" for key, ref, text in present)
+        raise ValueError(
+            "retired airgap.env keys are set and no longer read; apply the migration "
+            "or empty/remove each key before any cluster change:\n" + lines
+        )
+
+
 def require_in_place_retired(raw: str) -> None:
     """In-place ingest was retired (#360): INGEST_ALIAS_PUBLISH may be unset
     or true, and an explicit false fails closed instead of being ignored."""
@@ -291,6 +328,7 @@ def openwebui_config(values: Mapping[str, str]) -> dict[str, object] | None:
 
 
 def validate_operator_booleans(values: Mapping[str, str]) -> None:
+    require_no_retired_keys(values)
     for name in OPERATOR_BOOL_KEYS:
         parse_strict_bool(name, values.get(name, ""), False)
     require_in_place_retired(values.get("INGEST_ALIAS_PUBLISH", ""))
@@ -386,8 +424,12 @@ def validate_model_config(values: Mapping[str, str]) -> None:
                 raise ValueError(f"{name} is required when CONTEXTUAL_EMBED_ENABLED is set")
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    args = sys.argv[1:] if argv is None else argv
     try:
+        if args == ["--retired-keys"]:
+            require_no_retired_keys(os.environ)
+            return 0
         validate_operator_booleans(os.environ)
         network_policy(os.environ)
         feedback_config(os.environ)

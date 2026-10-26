@@ -263,7 +263,7 @@ def test_load_success_with_parent_dir(load_tree):
     subdir.mkdir()
     copy_task_tools(subdir)
     (subdir / "scripts" / "airgap").mkdir(parents=True)
-    for f in ("common.sh", "load.sh", "image_identity.sh", "image_manifest.py"):
+    for f in ("common.sh", "load.sh", "image_identity.sh", "image_manifest.py", "model_config.py"):
         shutil.copy(REPO / "scripts" / "airgap" / f, subdir / "scripts" / "airgap" / f)
     env = {
         "PATH": f"{tmp_path / 'bin'}:/usr/bin:/bin",
