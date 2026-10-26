@@ -1,10 +1,10 @@
 """scripts/airgap/retire_legacy.sh + legacy_layout.py (issue #1070, R1).
 
 The site runs release d53595e with a plain `mainframe_manuals` collection and
-its `__completions` pair, no alias. The retire step keeps a verified
-points-API copy (the rollback data), snapshots both collections on every peer,
-and only then deletes them; it converges when re-run after a crash at any
-point. kubectl is a stub that records every call; its `exec -i deploy/rag-agent`
+its `__completions` pair, no alias. `--stage copy` keeps a verified points-API
+copy (the rollback data) and deletes nothing; `--stage retire` takes this
+run's snapshots on every peer, binds and records them, and only then deletes.
+Both converge when re-run after a crash at any point. kubectl is a stub that records every call; its `exec -i deploy/rag-agent`
 arm runs the real in-pod program locally against a fake Qdrant HTTP server.
 """
 
@@ -20,6 +20,7 @@ from tests.helpers_airgap import FakeQdrant, make_bin_tree, write_stub
 
 L, LC = "mainframe_manuals", "mainframe_manuals__completions"
 K, KC = "mainframe_manuals_d53595e_keep", "mainframe_manuals_d53595e_keep__completions"
+R = "mainframe_manuals_d53595e_retire_record"
 
 KUBECTL = r"""#!/bin/sh
 printf '%s\n' "$*" >> "$KC_LOG"
@@ -117,214 +118,323 @@ def _assert_retired(qdrant, n=600):
     assert len(qdrant.collections[K]["points"]) == n
 
 
-# --- confirmation and inputs -------------------------------------------------
+# --- arguments ----------------------------------------------------------------
 
 
-@pytest.mark.parametrize("args", [(), ("--confirm",), ("--confirm", "other"), ("--confirm", "mainframe_manuals_x")])
-def test_retire_without_the_exact_confirmation_refuses_before_any_call(tree, qdrant, args):
+@pytest.mark.parametrize("args", [
+    (), ("--confirm", L), ("--stage", "copy"), ("--stage", "copy", "--confirm"),
+    ("--stage", "copy", "--confirm", "other"), ("--stage", "all", "--confirm", L),
+    ("--stage", "copy", "--rollback", "--confirm", L),
+    ("--stage", "retire", "--confirm", L, "--qdrant-url", "http://127.0.0.1:1"),
+    ("--rollback", "--confirm", L, "--qdrant-url", "http://qdrant:6333"),
+])
+def test_without_an_explicit_stage_and_confirmation_nothing_is_called(tree, qdrant, args):
     _legacy_site(qdrant)
     result = _run(tree, qdrant, *args)
     assert result.returncode != 0
-    assert "--confirm mainframe_manuals" in result.stderr
+    assert "E_RETIRE_" in result.stderr
     assert _log(tree) == ""
     assert qdrant.ops == []
 
 
 def test_unknown_argument_refuses(tree, qdrant):
-    result = _run(tree, qdrant, "--confirm", L, "--force")
+    result = _run(tree, qdrant, "--stage", "copy", "--confirm", L, "--force")
     assert result.returncode != 0
     assert "unknown argument" in result.stderr
     assert qdrant.ops == []
 
 
-# --- the converging state machine ---------------------------------------------
+def test_a_retired_operator_key_refuses_before_any_call(tree, qdrant):
+    """#1111: a d53595e-era key (NAMESPACE's old alias) is refused, not ignored."""
+    _legacy_site(qdrant)
+    result = _run(tree, qdrant, "--stage", "copy", "--confirm", L, OPENSHIFT_NAMESPACE="site-ns")
+    assert result.returncode != 0
+    assert "OPENSHIFT_NAMESPACE" in result.stderr
+    assert "site-ns" not in result.stdout + result.stderr
+    assert _log(tree) == "" and qdrant.ops == []
 
 
-def test_retire_keeps_a_verified_copy_snapshots_then_deletes(tree, qdrant):
+# --- stage copy: safe while d53595e serves -------------------------------------
+
+
+def _copy(tree, qdrant, *extra, **env):
+    return _run(tree, qdrant, "--stage", "copy", "--confirm", L, *extra, **env)
+
+
+def _retire(tree, qdrant, *extra, **env):
+    return _run(tree, qdrant, "--stage", "retire", "--confirm", L, *extra, **env)
+
+
+def _layout(qdrant):
+    from tests.helpers_airgap import REPO
+
+    done = subprocess.run(
+        ["python3", str(REPO / "scripts/airgap/legacy_layout.py"), "check", "--collection", L],
+        input="\n", capture_output=True, text=True, check=False,
+        env={"PATH": "/usr/bin:/bin", "QDRANT_URL": qdrant.url, "QDRANT_API_KEY": FakeQdrant.READ_KEY})
+    return done.stdout.strip()
+
+
+def test_copy_stage_keeps_a_verified_copy_and_deletes_nothing(tree, qdrant):
     from mainframe_rag.ingest.representation import manifest_point_id
 
     _legacy_site(qdrant)
     source = {i: dict(p) for i, p in qdrant.collections[L]["points"].items()}
-    result = _run(tree, qdrant, "--confirm", L)
+    result = _copy(tree, qdrant)
     assert result.returncode == 0, result.stderr
-    _assert_retired(qdrant)
-    # The kept copy is the stored content, not just the same count.
+    # Search keeps working: the legacy pair is untouched and still the layout.
+    assert L in qdrant.collections and LC in qdrant.collections
+    assert _layout(qdrant) == "LAYOUT flat_legacy"
+    assert not any(op.split(":")[0] in ("delete", "snapshot_create") for op in qdrant.ops)
     assert qdrant.collections[K]["points"] == source
     assert qdrant.collections[K]["payload_schema"] == {"doc_id": {"data_type": "keyword"}}
-    assert qdrant.collections[K]["config"]["params"]["vectors"] == {"dense": {"size": 4, "distance": "Cosine"}}
-    # The d53595e manifest is re-keyed for the kept control, payload verbatim.
     kept = qdrant.collections[KC]["points"]
     assert kept[manifest_point_id(KC)]["payload"] == kept[manifest_point_id(LC)]["payload"]
-    # Order: both snapshots are verified before the first delete.
-    ops = qdrant.ops
-    first_delete = ops.index(f"delete:{L}")
-    assert ops.index(f"snapshot_create:{L}") < first_delete
-    assert ops.index(f"snapshot_create:{LC}") < first_delete
-    assert "STATE retired" in result.stdout
-    assert "SNAPSHOT peer 0 mainframe_manuals: mainframe_manuals-peer-" in result.stdout
-    assert "--rollback --confirm mainframe_manuals" in result.stdout
-    assert "snapshots/recover" in result.stdout
+    assert "STATE copied" in result.stdout and "--stage retire" in result.stdout
     _assert_no_secret(tree, result)
 
 
-def test_rerun_after_success_is_a_no_op(tree, qdrant):
-    _legacy_site(qdrant)
-    assert _run(tree, qdrant, "--confirm", L).returncode == 0
-    before = len(qdrant.ops)
-    again = _run(tree, qdrant, "--confirm", L)
-    assert again.returncode == 0, again.stderr
-    assert "STATE retired" in again.stdout
-    assert [op for op in qdrant.ops[before:] if op.split(":")[0] in FakeQdrant.WRITE_OPS] == []
-    _assert_retired(qdrant)
-
-
-@pytest.mark.parametrize("crash", [
-    f"create:{K}", f"upsert:{K}", f"create:{KC}", f"upsert:{KC}",
-    f"snapshot_create:{L}", f"snapshot_create:{LC}", f"delete:{L}", f"delete:{LC}",
-])
-def test_a_crash_at_any_point_converges_on_the_next_run(tree, qdrant, crash):
+@pytest.mark.parametrize("crash", [f"create:{K}", f"upsert:{K}", f"create:{KC}", f"upsert:{KC}", f"index:{K}"])
+def test_copy_stage_crash_converges_on_rerun_and_never_deletes(tree, qdrant, crash):
     _legacy_site(qdrant)
     qdrant.faults[crash] = 1
-    first = _run(tree, qdrant, "--confirm", L)
-    assert first.returncode != 0
-    assert "STATE retired" not in first.stdout
-    if not crash.startswith("delete"):
-        # Nothing is deleted before the copy, the re-key and the snapshots are verified.
-        assert L in qdrant.collections and LC in qdrant.collections
-    second = _run(tree, qdrant, "--confirm", L)
+    assert _copy(tree, qdrant).returncode != 0
+    second = _copy(tree, qdrant)
     assert second.returncode == 0, second.stderr
-    _assert_retired(qdrant)
-    assert len(qdrant.collections[L + "_d53595e_keep"]["points"]) == 600
-    _assert_no_secret(tree, second)
+    assert len(qdrant.collections[K]["points"]) == 600
+    assert L in qdrant.collections and LC in qdrant.collections
+    assert not any(op.startswith("delete") for op in qdrant.ops)
 
 
 def test_a_partial_copy_is_resumed_not_restarted(tree, qdrant):
     _legacy_site(qdrant)
     qdrant.add_collection(K, _points(600)[:300])  # an earlier run stopped half-way
-    result = _run(tree, qdrant, "--confirm", L)
+    result = _copy(tree, qdrant)
     assert result.returncode == 0, result.stderr
-    _assert_retired(qdrant)
+    assert len(qdrant.collections[K]["points"]) == 600
     assert f"create:{K}" not in qdrant.ops
 
 
-def test_a_foreign_keep_collection_is_refused_and_nothing_deleted(tree, qdrant):
+def test_a_foreign_keep_collection_is_refused(tree, qdrant):
     _legacy_site(qdrant)
     qdrant.add_collection(K, _points(5, prefix="other-") + [{"id": 5000, "vector": {"dense": [0.0] * 4}}])
-    result = _run(tree, qdrant, "--confirm", L)
+    result = _copy(tree, qdrant)
     assert result.returncode != 0
     assert "E_RETIRE_KEEP_MISMATCH" in result.stderr
-    assert L in qdrant.collections and LC in qdrant.collections
     assert not any(op.startswith("delete") for op in qdrant.ops)
 
 
-@pytest.mark.parametrize("bad", [L, LC])
-def test_an_unverifiable_snapshot_deletes_nothing(tree, qdrant, bad):
-    _legacy_site(qdrant)
-    qdrant.bad_snapshots.add(bad)
-    result = _run(tree, qdrant, "--confirm", L)
-    assert result.returncode != 0
-    assert "E_RETIRE_SNAPSHOT_UNVERIFIED" in result.stderr
-    assert L in qdrant.collections and LC in qdrant.collections
-    assert not any(op.startswith("delete") for op in qdrant.ops)
-
-
-def test_snapshot_failure_deletes_nothing(tree, qdrant):
-    _legacy_site(qdrant)
-    qdrant.faults[f"snapshot_create:{L}"] = 5
-    result = _run(tree, qdrant, "--confirm", L)
-    assert result.returncode != 0
-    assert L in qdrant.collections and LC in qdrant.collections
-    assert not any(op.startswith("delete") for op in qdrant.ops)
-    _assert_no_secret(tree, result)
-
-
-def test_an_existing_snapshot_is_reused_on_rerun(tree, qdrant):
-    _legacy_site(qdrant)
-    qdrant.faults[f"delete:{L}"] = 1
-    assert _run(tree, qdrant, "--confirm", L).returncode != 0
-    creates = qdrant.ops.count(f"snapshot_create:{L}")
-    assert _run(tree, qdrant, "--confirm", L).returncode == 0
-    assert qdrant.ops.count(f"snapshot_create:{L}") == creates == 1
-
-
-def test_missing_manifest_refuses_before_any_delete(tree, qdrant):
+def test_missing_manifest_refuses(tree, qdrant):
     from mainframe_rag.ingest.representation import manifest_point_id
 
     _legacy_site(qdrant)
     del qdrant.collections[LC]["points"][manifest_point_id(LC)]
-    result = _run(tree, qdrant, "--confirm", L)
+    result = _copy(tree, qdrant)
     assert result.returncode != 0
     assert "E_RETIRE_NO_MANIFEST" in result.stderr
-    assert L in qdrant.collections
+
+
+# --- stage retire: the window ---------------------------------------------------
+
+
+def test_retire_without_the_copy_stage_refuses_and_deletes_nothing(tree, qdrant):
+    _legacy_site(qdrant)
+    result = _retire(tree, qdrant)
+    assert result.returncode != 0
+    assert "E_RETIRE_NOT_COPIED" in result.stderr and "--stage copy" in result.stderr
+    assert L in qdrant.collections and not any(op.startswith("delete") for op in qdrant.ops)
+
+
+def test_retire_snapshots_binds_records_then_deletes(tree, qdrant):
+    _legacy_site(qdrant)
+    assert _copy(tree, qdrant).returncode == 0
+    result = _retire(tree, qdrant)
+    assert result.returncode == 0, result.stderr
+    _assert_retired(qdrant)
+    ops = qdrant.ops
+    first_delete = ops.index(f"delete:{L}")
+    assert ops.index(f"snapshot_create:{L}") < first_delete
+    assert ops.index(f"snapshot_create:{LC}") < first_delete
+    assert ops.index(f"upsert:{R}") < first_delete
+    # The run record names exactly the snapshots this run created, bound to
+    # the collections' contents, and outlives them.
+    record = next(iter(qdrant.collections[R]["points"].values()))["payload"]
+    names = {e["collection"]: e for e in record["snapshots"]}
+    assert names[L]["points"] == 600 and names[LC]["points"] == 4
+    assert names[L]["name"].startswith("mainframe_manuals-peer-2026-10-27-")
+    assert f"RECORDED snapshot {L} on {qdrant.url}: {names[L]['name']}" in result.stdout
+    assert "created by this run" in result.stdout
+    assert "--rollback --confirm mainframe_manuals" in result.stdout
+    _assert_no_secret(tree, result)
+
+
+def test_rerun_after_success_is_a_no_op(tree, qdrant):
+    _legacy_site(qdrant)
+    assert _copy(tree, qdrant).returncode == 0
+    assert _retire(tree, qdrant).returncode == 0
+    before = len(qdrant.ops)
+    again = _retire(tree, qdrant)
+    assert again.returncode == 0, again.stderr
+    assert "STATE retired" in again.stdout and "RECORDED snapshot" in again.stdout
+    assert [op for op in qdrant.ops[before:] if op.split(":")[0] in FakeQdrant.WRITE_OPS] == []
+    assert _copy(tree, qdrant).returncode == 0  # copy after retire: nothing to copy
+    _assert_retired(qdrant)
+
+
+@pytest.mark.parametrize("crash", [
+    f"snapshot_create:{L}", f"snapshot_create:{LC}", f"create:{R}", f"upsert:{R}",
+    f"delete:{L}", f"delete:{LC}",
+])
+def test_retire_crash_at_any_point_converges_on_rerun(tree, qdrant, crash):
+    _legacy_site(qdrant)
+    assert _copy(tree, qdrant).returncode == 0
+    qdrant.faults[crash] = 1
+    first = _retire(tree, qdrant)
+    assert first.returncode != 0
+    if not crash.startswith("delete"):
+        assert L in qdrant.collections and LC in qdrant.collections
+    second = _retire(tree, qdrant)
+    assert second.returncode == 0, second.stderr
+    _assert_retired(qdrant)
+    _assert_no_secret(tree, second)
+
+
+def test_a_stale_smaller_snapshot_is_never_proof(tree, qdrant):
+    """B3: an older 300-point snapshot of L (and one of LC) is listed. Retire
+    must take and report its own; the stale ones are never recorded or used."""
+    _legacy_site(qdrant)
+    stale = qdrant.add_snapshot(L, points=300)
+    stale_c = qdrant.add_snapshot(LC, points=2)
+    assert _copy(tree, qdrant).returncode == 0
+    result = _retire(tree, qdrant)
+    assert result.returncode == 0, result.stderr
+    assert qdrant.ops.count(f"snapshot_create:{L}") == 1
+    assert stale["name"] not in result.stdout and stale_c["name"] not in result.stdout
+    record = next(iter(qdrant.collections[R]["points"].values()))["payload"]
+    assert {e["name"] for e in record["snapshots"]}.isdisjoint({stale["name"], stale_c["name"]})
+
+
+@pytest.mark.parametrize("failure", ["create", "unlisted"])
+def test_a_stale_snapshot_does_not_allow_deletion_when_this_runs_fails(tree, qdrant, failure):
+    _legacy_site(qdrant)
+    qdrant.add_snapshot(L, points=300)
+    assert _copy(tree, qdrant).returncode == 0
+    if failure == "create":
+        qdrant.faults[f"snapshot_create:{L}"] = 5
+    else:
+        qdrant.bad_snapshots.add(L)
+    result = _retire(tree, qdrant)
+    assert result.returncode != 0
+    assert L in qdrant.collections and LC in qdrant.collections
+    assert not any(op.startswith("delete") for op in qdrant.ops)
+
+
+def test_a_recorded_snapshot_is_reused_only_while_its_binding_holds(tree, qdrant):
+    _legacy_site(qdrant)
+    assert _copy(tree, qdrant).returncode == 0
+    qdrant.faults[f"delete:{L}"] = 1
+    assert _retire(tree, qdrant).returncode != 0
+    assert qdrant.ops.count(f"snapshot_create:{L}") == 1
+    # Unchanged: the recorded snapshot is reused, not retaken.
+    qdrant.faults[f"delete:{L}"] = 1
+    assert _retire(tree, qdrant).returncode != 0
+    assert qdrant.ops.count(f"snapshot_create:{L}") == 1
+    # L (and its verified copy) gained a point: the binding no longer holds.
+    extra = {"id": 9999, "vector": {"dense": [0.5] * 4}, "payload": {"doc_id": "late"}}
+    qdrant.collections[L]["points"]["9999"] = dict(extra)
+    qdrant.collections[K]["points"]["9999"] = dict(extra)
+    result = _retire(tree, qdrant)
+    assert result.returncode == 0, result.stderr
+    assert qdrant.ops.count(f"snapshot_create:{L}") == 2
+    record = next(iter(qdrant.collections[R]["points"].values()))["payload"]
+    assert {e["collection"]: e["points"] for e in record["snapshots"]}[L] == 601
+
+
+def test_a_write_during_the_snapshot_unbinds_it_and_nothing_is_deleted(tree, qdrant):
+    _legacy_site(qdrant)
+    assert _copy(tree, qdrant).returncode == 0
+    qdrant.on_snapshot[L] = lambda fake: fake.collections[L]["points"].update(
+        {"7777": {"id": 7777, "vector": {"dense": [0.0] * 4}, "payload": {}}})
+    result = _retire(tree, qdrant)
+    assert result.returncode != 0
+    assert "E_RETIRE_SNAPSHOT_UNBOUND" in result.stderr
+    assert L in qdrant.collections and not any(op.startswith("delete") for op in qdrant.ops)
 
 
 def test_collection_gone_and_nothing_kept_refuses_unless_accepted(tree, qdrant):
-    refused = _run(tree, qdrant, "--confirm", L)
+    refused = _retire(tree, qdrant)
     assert refused.returncode != 0
-    assert "E_RETIRE_NOTHING_KEPT" in refused.stderr
-    assert "--no-keep-ok" in refused.stderr
-    accepted = _run(tree, qdrant, "--confirm", L, "--no-keep-ok")
+    assert "E_RETIRE_NOTHING_KEPT" in refused.stderr and "--no-keep-ok" in refused.stderr
+    accepted = _retire(tree, qdrant, "--no-keep-ok")
     assert accepted.returncode == 0, accepted.stderr
     assert "nothing to retire" in accepted.stdout
-    assert _writes(qdrant) == []
+    assert [op for op in qdrant.ops if op.split(":")[0] in FakeQdrant.WRITE_OPS] == []
 
 
-def test_an_alias_name_is_never_deleted(tree, qdrant):
+@pytest.mark.parametrize("stage", ["copy", "retire"])
+def test_an_alias_name_is_never_deleted_or_copied(tree, qdrant, stage):
     qdrant.add_collection("mainframe_manuals__gen1", _points(3))
     qdrant.aliases[L] = "mainframe_manuals__gen1"
-    result = _run(tree, qdrant, "--confirm", L)
+    result = _run(tree, qdrant, "--stage", stage, "--confirm", L)
     assert result.returncode == 0, result.stderr
-    assert "nothing to retire" in result.stdout
-    assert _writes(qdrant) == []
-    assert "mainframe_manuals__gen1" in qdrant.collections
+    assert "STATE published" in result.stdout
+    assert [op for op in qdrant.ops if op.split(":")[0] in FakeQdrant.WRITE_OPS] == []
 
 
 def test_a_legacy_name_targeted_by_another_alias_is_refused(tree, qdrant):
     _legacy_site(qdrant)
     qdrant.aliases["mainframe_manuals__build_x"] = L
-    result = _run(tree, qdrant, "--confirm", L)
+    result = _copy(tree, qdrant)
     assert result.returncode != 0
     assert "E_RETIRE_ALIAS_CONFLICT" in result.stderr
-    assert _writes(qdrant) == []
+    assert [op for op in qdrant.ops if op.split(":")[0] in FakeQdrant.WRITE_OPS] == []
 
 
-# --- free space ---------------------------------------------------------------
+# --- free space -----------------------------------------------------------------
 
 
-def test_insufficient_free_space_refuses_before_any_write(tree, qdrant):
+@pytest.mark.parametrize(("stage", "used", "free", "snap", "ok"), [
+    ("copy", 50000, 50000, 0, True), ("copy", 50000, 49999, 90000, False),
+    ("retire", 50000, 50000, 25000, True), ("retire", 50000, 50000, 24999, False),
+    ("retire", 50000, 49999, 90000, False),
+])
+def test_free_space_gate_per_stage(tree, qdrant, stage, used, free, snap, ok):
     _legacy_site(qdrant)
-    result = _run(tree, qdrant, "--confirm", L, DF_USED="50000", DF_FREE="60000")
-    assert result.returncode != 0
-    assert "E_RETIRE_SPACE" in result.stderr
-    assert _writes(qdrant) == []
+    if stage == "retire":
+        assert _copy(tree, qdrant, "--space-verified").returncode == 0
+    before = len(qdrant.ops)
+    result = _run(tree, qdrant, "--stage", stage, "--confirm", L,
+                  DF_USED=str(used), DF_FREE=str(free), DF_SNAP_FREE=str(snap))
+    assert (result.returncode == 0) is ok, result.stderr
+    if not ok:
+        assert "E_RETIRE_SPACE" in result.stderr and "--space-verified" in result.stderr
+        assert [op for op in qdrant.ops[before:] if op.split(":")[0] in FakeQdrant.WRITE_OPS] == []
 
 
 def test_unreadable_free_space_refuses_with_guidance_then_accepts_the_operator_check(tree, qdrant):
     _legacy_site(qdrant)
-    refused = _run(tree, qdrant, "--confirm", L, DF_FAIL="1")
+    refused = _copy(tree, qdrant, DF_FAIL="1")
     assert refused.returncode != 0
-    assert "E_RETIRE_SPACE_UNKNOWN" in refused.stderr
-    assert "--space-verified" in refused.stderr
-    assert _writes(qdrant) == []
-    accepted = _run(tree, qdrant, "--confirm", L, "--space-verified", DF_FAIL="1")
-    assert accepted.returncode == 0, accepted.stderr
+    assert "E_RETIRE_SPACE_UNKNOWN" in refused.stderr and "--space-verified" in refused.stderr
+    assert [op for op in qdrant.ops if op.split(":")[0] in FakeQdrant.WRITE_OPS] == []
+    assert _copy(tree, qdrant, "--space-verified", DF_FAIL="1").returncode == 0
+    assert _retire(tree, qdrant, "--space-verified", DF_FAIL="1").returncode == 0
     _assert_retired(qdrant)
 
 
 def test_space_is_checked_on_every_peer(tree, qdrant):
     _legacy_site(qdrant)
-    result = _run(tree, qdrant, "--confirm", L, STS_REPLICAS="3")
+    result = _copy(tree, qdrant, STS_REPLICAS="3")
     assert result.returncode == 0, result.stderr
-    log = _log(tree)
     for peer in ("qdrant-0", "qdrant-1", "qdrant-2"):
-        assert f"exec {peer} -- df -Pk /qdrant/storage /qdrant/snapshots" in log
+        assert f"exec {peer} -- df -Pk /qdrant/storage /qdrant/snapshots" in _log(tree)
 
 
-# --- prerequisites and transport failures -------------------------------------
+# --- prerequisites and transport failures ---------------------------------------
 
 
 def test_no_qdrant_release_refuses(tree, qdrant):
-    result = _run(tree, qdrant, "--confirm", L, STS_ABSENT="1")
+    result = _copy(tree, qdrant, STS_ABSENT="1")
     assert result.returncode != 0
     assert "E_RETIRE_NO_QDRANT" in result.stderr
     assert qdrant.ops == []
@@ -332,15 +442,15 @@ def test_no_qdrant_release_refuses(tree, qdrant):
 
 def test_missing_writer_key_refuses_without_a_write(tree, qdrant):
     _legacy_site(qdrant)
-    result = _run(tree, qdrant, "--confirm", L, WRITER_KEY_B64="")
+    result = _copy(tree, qdrant, WRITER_KEY_B64="")
     assert result.returncode != 0
     assert "E_RETIRE_NO_WRITER_KEY" in result.stderr
-    assert _writes(qdrant) == []
+    assert [op for op in qdrant.ops if op.split(":")[0] in FakeQdrant.WRITE_OPS] == []
 
 
-def test_no_agent_pod_refuses(tree, qdrant):
+def test_no_agent_pod_refuses_the_stages(tree, qdrant):
     _legacy_site(qdrant)
-    result = _run(tree, qdrant, "--confirm", L, EXEC_FAIL="1")
+    result = _copy(tree, qdrant, EXEC_FAIL="1")
     assert result.returncode != 0
     assert "container not found" not in result.stderr  # client text is never echoed
     assert L in qdrant.collections
@@ -348,20 +458,25 @@ def test_no_agent_pod_refuses(tree, qdrant):
 
 def test_dry_run_reads_and_writes_nothing(tree, qdrant):
     _legacy_site(qdrant)
-    result = _run(tree, qdrant, "--confirm", L, AIRGAP_DRYRUN="1")
+    result = _retire(tree, qdrant, AIRGAP_DRYRUN="1")
     assert result.returncode == 0, result.stderr
     assert "[dryrun]" in result.stdout
     assert _log(tree) == "" and qdrant.ops == []
 
 
-# --- rollback ---------------------------------------------------------------
+# --- rollback ---------------------------------------------------------------------
+
+
+def _went_live(tree, qdrant):
+    _legacy_site(qdrant)
+    assert _copy(tree, qdrant).returncode == 0
+    assert _retire(tree, qdrant).returncode == 0
+    qdrant.add_collection("mainframe_manuals__gen2", _points(7))
+    qdrant.aliases[L] = "mainframe_manuals__gen2"
 
 
 def test_rollback_points_the_alias_at_the_kept_copy_atomically(tree, qdrant):
-    _legacy_site(qdrant)
-    assert _run(tree, qdrant, "--confirm", L).returncode == 0
-    qdrant.add_collection("mainframe_manuals__gen2", _points(7))
-    qdrant.aliases[L] = "mainframe_manuals__gen2"  # the new release went live
+    _went_live(tree, qdrant)
     result = _run(tree, qdrant, "--rollback", "--confirm", L)
     assert result.returncode == 0, result.stderr
     assert qdrant.aliases[L] == K
@@ -373,11 +488,64 @@ def test_rollback_points_the_alias_at_the_kept_copy_atomically(tree, qdrant):
     _assert_no_secret(tree, result)
 
 
+def test_rollback_without_an_agent_pod_runs_through_a_port_forward(tree, qdrant):
+    """B1: after go-live with no running agent (new one crashlooping, d53595e
+    not yet redeployed), the rollback still runs: on the bastion, against the
+    port-forwarded Service, writer key on stdin only, never via exec."""
+    _went_live(tree, qdrant)
+    refused = _run(tree, qdrant, "--rollback", "--confirm", L, EXEC_FAIL="1")
+    assert refused.returncode != 0
+    assert "port-forward svc/qdrant 16333:6333" in refused.stderr
+    assert "--qdrant-url http://127.0.0.1:16333" in refused.stderr
+    assert qdrant.aliases[L] == "mainframe_manuals__gen2"
+    (tree / "kc.log").unlink()
+    result = _run(tree, qdrant, "--rollback", "--confirm", L, "--qdrant-url", qdrant.url, EXEC_FAIL="1")
+    assert result.returncode == 0, result.stderr
+    assert qdrant.aliases[L] == K
+    assert "exec" not in _log(tree)
+    _assert_no_secret(tree, result)
+
+
 def test_rollback_without_a_kept_copy_refuses(tree, qdrant):
     result = _run(tree, qdrant, "--rollback", "--confirm", L)
     assert result.returncode != 0
     assert "E_ROLLBACK_NO_KEEP" in result.stderr
     assert "aliases_update" not in qdrant.ops
+
+
+def test_after_a_rollback_the_preflight_refuses_and_retire_reopens_the_upgrade(tree, qdrant):
+    """Rolled back (alias -> kept copy): the layout reads `rolled_back`; the
+    retire stage unpoints the alias, keeps the copy, and the next ordinary
+    layout check is `empty` (deploy proceeds)."""
+    _went_live(tree, qdrant)
+    assert _run(tree, qdrant, "--rollback", "--confirm", L).returncode == 0
+    assert _layout(qdrant) == "LAYOUT rolled_back"
+    result = _retire(tree, qdrant)
+    assert result.returncode == 0, result.stderr
+    assert "UNPOINTED alias mainframe_manuals" in result.stdout
+    assert L not in qdrant.aliases and len(qdrant.collections[K]["points"]) == 600
+    assert _layout(qdrant) == "LAYOUT empty"
+
+
+@pytest.mark.parametrize(("release", "name"), [
+    ("qdrant", "qdrant"), ("rag-qdrant", "rag-qdrant"), ("vectors", "vectors-qdrant"),
+])
+def test_qdrant_resource_names_follow_the_chart_fullname(tree, qdrant, release, name):
+    """The vendored chart names its StatefulSet, pods, headless Service and
+    Secret after the release alone when it contains "qdrant", else
+    `<release>-qdrant`; the retire tool reads exactly those."""
+    _legacy_site(qdrant)
+    assert _copy(tree, qdrant, QDRANT_RELEASE=release, STS_REPLICAS="3").returncode == 0
+    log = _log(tree)
+    assert f"get statefulset/{name} " in log and f"get secret {name}-apikey " in log
+    assert f"exec {name}-2 -- df -Pk" in log
+    # Retire derives peer URLs from the chart's headless names (unreachable
+    # here: the snapshot step stops on a transport failure, nothing deleted).
+    result = _retire(tree, qdrant, QDRANT_RELEASE=release, STS_REPLICAS="3", QDRANT_PEER_URLS="")
+    assert result.returncode != 0
+    assert L in qdrant.collections
+    rollback = _run(tree, qdrant, "--rollback", "--confirm", L, QDRANT_RELEASE=release, EXEC_FAIL="1")
+    assert f"port-forward svc/{name} " in rollback.stderr
 
 
 # --- the in-pod program's own contracts --------------------------------------
@@ -399,47 +567,3 @@ def test_in_pod_ids_match_the_package_derivations():
         assert module.manifest_point_id(name) == manifest_point_id(name)
         assert module.publication_point_id(name) == publication_metadata_point_id(name)
     assert json.dumps(module.BUILD_FIELDS)  # the binding fields stay a fixed tuple
-
-
-def test_after_a_rollback_the_preflight_refuses_and_retire_reopens_the_upgrade(tree, qdrant):
-    """Rolled back (alias -> kept copy): the next upgrade attempt is refused
-    with the step that reopens it; retire unpoints the alias, keeps the copy,
-    and the next ordinary layout check is `empty` (deploy proceeds)."""
-    _legacy_site(qdrant)
-    assert _run(tree, qdrant, "--confirm", L).returncode == 0
-    assert _run(tree, qdrant, "--rollback", "--confirm", L).returncode == 0
-    check = subprocess.run(
-        ["python3", str(tree / "scripts/airgap/legacy_layout.py"), "check", "--collection", L],
-        input="\n", capture_output=True, text=True, check=False,
-        env={"PATH": "/usr/bin:/bin", "QDRANT_URL": qdrant.url, "QDRANT_API_KEY": FakeQdrant.READ_KEY})
-    assert check.stdout.strip() == "LAYOUT rolled_back"
-    result = _run(tree, qdrant, "--confirm", L)
-    assert result.returncode == 0, result.stderr
-    assert "UNPOINTED alias mainframe_manuals" in result.stdout
-    assert qdrant.aliases == {} and len(qdrant.collections[K]["points"]) == 600
-    check = subprocess.run(
-        ["python3", str(tree / "scripts/airgap/legacy_layout.py"), "check", "--collection", L],
-        input="\n", capture_output=True, text=True, check=False,
-        env={"PATH": "/usr/bin:/bin", "QDRANT_URL": qdrant.url, "QDRANT_API_KEY": FakeQdrant.READ_KEY})
-    assert check.stdout.strip() == "LAYOUT empty"
-
-
-@pytest.mark.parametrize(("release", "name"), [
-    ("qdrant", "qdrant"), ("rag-qdrant", "rag-qdrant"), ("vectors", "vectors-qdrant"),
-])
-def test_qdrant_resource_names_follow_the_chart_fullname(tree, qdrant, release, name):
-    """The vendored chart names its StatefulSet, pods, headless Service and
-    Secret after the release alone when it contains "qdrant", else
-    `<release>-qdrant`; the retire step reads exactly those."""
-    _legacy_site(qdrant)
-    result = _run(tree, qdrant, "--confirm", L, "--space-verified", QDRANT_RELEASE=release,
-                  STS_REPLICAS="3", QDRANT_PEER_URLS="")
-    log = _log(tree)
-    assert f"get statefulset/{name} " in log
-    assert f"get secret {name}-apikey " in log
-    # Peer URLs derive from the chart's headless names (unreachable here, so
-    # the snapshot step stops with a transport failure and deletes nothing).
-    assert result.returncode != 0
-    assert L in qdrant.collections
-    space = _run(tree, qdrant, "--confirm", L, QDRANT_RELEASE=release, STS_REPLICAS="3", DF_FAIL="1")
-    assert f"cannot read the volume usage of {name}-0" in space.stderr

@@ -370,6 +370,9 @@ class FakeQdrant:
         self.aliases: dict[str, str] = {}
         self.faults: dict[str, int] = {}
         self.bad_snapshots: set[str] = set()
+        # collection -> callable(fake) run inside its next snapshot create
+        # (a concurrent write while the snapshot is taken).
+        self.on_snapshot: dict[str, object] = {}
         self.ops: list[str] = []
         self._snap = 0
         self.server = FakeHttpServer(self.respond)
@@ -379,6 +382,14 @@ class FakeQdrant:
         self.server.close()
 
     # -- fixtures --------------------------------------------------------
+    def add_snapshot(self, name, *, points, label="stale"):
+        """A snapshot file already listed for `name` (an older backup, or one
+        left by an earlier incarnation): valid size and checksum."""
+        entry = {"name": f"{name}-{label}-2026-10-01.snapshot", "creation_time": "2026-10-01T00:00:00",
+                 "size": 4096 + points, "checksum": hashlib.sha256(f"{name}{label}".encode()).hexdigest()}
+        self.collections[name]["snapshots"].append(entry)
+        return entry
+
     def add_collection(self, name, points, *, size=4, schema=None):
         self.collections[name] = {
             "config": {"params": {"vectors": {"dense": {"size": size, "distance": "Cosine"}},
@@ -478,6 +489,9 @@ class FakeQdrant:
                     entry["checksum"] = None
             return ok(listed)
         if op == "snapshot_create":
+            hook = self.on_snapshot.pop(name, None)
+            if hook is not None:
+                hook(self)
             self._snap += 1
             entry = {"name": f"{name}-peer-2026-10-27-{self._snap:02d}.snapshot",
                      "creation_time": f"2026-10-27T00:00:{self._snap:02d}",

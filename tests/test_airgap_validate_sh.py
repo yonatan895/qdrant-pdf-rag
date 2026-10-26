@@ -1512,7 +1512,7 @@ def test_validate_live_reports_the_stored_layout(tree, layout):
     if layout == "legacy":
         assert r.returncode != 0
         assert "E_LEGACY_COLLECTION" in r.stderr
-        assert "retire_legacy.sh --confirm mainframe_manuals" in r.stderr
+        assert "retire_legacy.sh --stage copy --confirm mainframe_manuals" in r.stderr
         assert "SUCCESS" not in r.stdout
     else:
         assert r.returncode == 0, r.stderr

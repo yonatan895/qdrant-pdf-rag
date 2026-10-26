@@ -22,13 +22,19 @@ appears in argv, the environment of another process, or any output.
           unbound_alias  alias L -> T whose control has no build binding
                          (pre-build publication): unsupported
           unreadable     the store could not be read (exit 3): never a pass
-  retire  writer key. Converges L/LC to: L and LC deleted, their verified
-          points-API copies K/KC kept (the rollback data, re-keyed so the
-          d53595e agent serves K), and a verified snapshot of L and LC on
-          every peer. Each step re-observes the store first, so a re-run
-          after a crash at any point continues or reports converged. From
-          the rolled-back state it removes the alias L (K stays).
+  copy    writer key; safe while d53595e serves. Copies L/LC to K/KC
+          through the points API (resuming a partial copy), verifies exact
+          id sets and re-keys the d53595e manifest so the d53595e agent
+          serves K. Never deletes, never snapshots.
+  retire  writer key; the maintenance window. Requires the verified copy,
+          then takes THIS run's snapshot of L and LC on every peer, binds
+          each to the collection's id set read before and after it, records
+          them in the run record collection R, and only then deletes L and
+          LC. A pre-existing snapshot is never proof: a re-run reuses only a
+          snapshot R names whose bindings still match. From the rolled-back
+          state it removes the alias L (K stays).
   rollback writer key. One atomic alias call points L at the kept copy K.
+          Runs anywhere Qdrant is reachable (agent pod or a port-forward).
 
 Output is fixed text plus collection/snapshot names and counts: never stored
 payloads, keys or upstream error text.
@@ -49,18 +55,20 @@ import uuid
 
 COMPLETIONS_SUFFIX = "__completions"
 KEEP_SUFFIX = "_d53595e_keep"
+RECORD_SUFFIX = "_d53595e_retire_record"
+RECORD_TYPE = "legacy-retire-record"
 MANIFEST_PREFIX = "representation-manifest"
 PUBLICATION_PREFIX = "publication-metadata"
 BUILD_FIELDS = ("build_schema", "build_id", "logical_alias", "data_collection")
 PAGE = 256
 CHECKSUM_RE = re.compile(r"[0-9a-f]{64}")
 RUNBOOK = "docs/install_and_ops.md#upgrade-from-a-legacy-flat-collection-issue-1070"
-EXIT_REFUSED = 1
+EXIT_REFUSED = 4  # distinct from a failed kubectl exec (1)
 EXIT_UNREADABLE = 3
 
 
 class Refusal(Exception):
-    """A fixed, operator-facing refusal (exit 1). Nothing further is changed."""
+    """A fixed, operator-facing refusal (exit 4). Nothing further is changed."""
 
 
 class Unreadable(Exception):
@@ -261,21 +269,74 @@ def _valid_snapshot(entry: dict) -> bool:
             and isinstance(entry.get("checksum"), str) and bool(CHECKSUM_RE.fullmatch(entry["checksum"])))
 
 
-def snapshot_on(peer: Qdrant, name: str) -> dict:
-    """A verified snapshot of `name` on this peer: reuse the newest listed one
-    with a size and a sha256 checksum, else create one and require that the
-    listing shows it with both. Snapshots are node-local and secondary to the
-    kept copy."""
-    listed = [s for s in peer.snapshots(name) if _valid_snapshot(s)]
-    if listed:
-        return max(listed, key=lambda s: (s.get("creation_time") or "", s.get("name") or ""))
+def _listed(peer: Qdrant, name: str, snapshot: str) -> dict | None:
+    match = [s for s in peer.snapshots(name) if s.get("name") == snapshot]
+    return match[0] if match and _valid_snapshot(match[0]) else None
+
+
+# The run record: one point in a small collection R (never in KC, which stays
+# a faithful copy). It names the snapshots THIS retire created, each bound to
+# the snapshotted collection's point count and id digest.
+
+
+def _record_id(logical: str) -> str:
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"{RECORD_TYPE}|{logical}"))
+
+
+def read_record(store: Qdrant, logical: str) -> dict[str, dict]:
+    record = logical + RECORD_SUFFIX
+    if not store.exists(record):
+        return {}
+    point = store.retrieve(record, _record_id(logical))
+    payload = (point or {}).get("payload") or {}
+    if payload.get("record_type") != RECORD_TYPE or payload.get("logical") != logical:
+        return {}
+    return {f"{e['peer']}|{e['collection']}": e for e in payload.get("snapshots", [])
+            if isinstance(e, dict) and {"peer", "collection", "name"} <= set(e)}
+
+
+def write_record(store: Qdrant, logical: str, entries: dict[str, dict], replication: int) -> None:
+    record = logical + RECORD_SUFFIX
+    if not store.exists(record):
+        store.call("PUT", f"/collections/{_q(record)}", {
+            "vectors": {"size": 1, "distance": "Dot"}, "shard_number": 1,
+            "replication_factor": replication, "write_consistency_factor": 1,
+        })
+    store.upsert(record, [{"id": _record_id(logical), "vector": [1.0], "payload": {
+        "record_type": RECORD_TYPE, "logical": logical,
+        "snapshots": [entries[k] for k in sorted(entries)],
+    }}])
+    if read_record(store, logical) != entries:
+        raise Refusal("E_RETIRE_RECORD: the run record did not read back; nothing deleted")
+
+
+def bound_snapshot(store: Qdrant, peer: Qdrant, peer_url: str, name: str,
+                   binding: tuple[int, str], entries: dict[str, dict]) -> tuple[dict, bool]:
+    """This run's verified snapshot of `name` on `peer`. Reuse only the one the
+    run record names, still listed with the recorded checksum and size, whose
+    recorded binding equals the collection now. Otherwise create one, require
+    the listing to show exactly that name with a size and sha256, and require
+    the collection's id set to be unchanged across it (the binding). Qdrant
+    lists older snapshot files under the same name; those are never used."""
+    points, digest = binding
+    recorded = entries.get(f"{peer_url}|{name}")
+    if recorded and recorded.get("points") == points and recorded.get("ids_digest") == digest:
+        listed = _listed(peer, name, recorded["name"])
+        if listed and listed["checksum"] == recorded.get("checksum") and listed["size"] == recorded.get("size"):
+            return recorded, False
     created = peer.create_snapshot(name)
-    match = [s for s in peer.snapshots(name) if s.get("name") == created.get("name")]
-    if not created.get("name") or not match or not _valid_snapshot(match[0]):
-        raise Refusal(f"E_RETIRE_SNAPSHOT_UNVERIFIED: snapshot of {name} is not listed with a size and checksum; nothing deleted")
-    if created.get("checksum") and created["checksum"] != match[0]["checksum"]:
-        raise Refusal(f"E_RETIRE_SNAPSHOT_UNVERIFIED: snapshot of {name} changed between create and list; nothing deleted")
-    return match[0]
+    listed = _listed(peer, name, created.get("name") or "")
+    if listed is None or (created.get("checksum") and created["checksum"] != listed["checksum"]):
+        raise Refusal(f"E_RETIRE_SNAPSHOT_UNVERIFIED: this run's snapshot of {name} is not listed "
+                      "with a size and checksum; nothing deleted")
+    after = store.ids(name)
+    if (len(after), ids_digest(after)) != binding:
+        raise Refusal(f"E_RETIRE_SNAPSHOT_UNBOUND: {name} changed while it was snapshotted; "
+                      "freeze ingest and re-run; nothing deleted")
+    entry = {"peer": peer_url, "collection": name, "name": listed["name"], "size": listed["size"],
+             "checksum": listed["checksum"], "creation_time": listed.get("creation_time") or "",
+             "points": points, "ids_digest": digest}
+    return entry, True
 
 
 def _refuse_alias_conflicts(aliases: dict[str, str], names: tuple[str, ...]) -> None:
@@ -293,13 +354,44 @@ def _kept(store: Qdrant, keep: str, keep_control: str) -> bool:
             and store.retrieve(keep_control, manifest_point_id(keep_control)) is not None)
 
 
-def retire(store: Qdrant, peers: list[Qdrant], logical: str, *, no_keep_ok: bool, out=print) -> None:
-    control, keep = logical + COMPLETIONS_SUFFIX, logical + KEEP_SUFFIX
-    keep_control = keep + COMPLETIONS_SUFFIX
+def _names(logical: str) -> tuple[str, str, str, str, str]:
+    keep = logical + KEEP_SUFFIX
+    return (logical, logical + COMPLETIONS_SUFFIX, keep, keep + COMPLETIONS_SUFFIX,
+            logical + RECORD_SUFFIX)
+
+
+def copy_stage(store: Qdrant, logical: str, out=print) -> None:
+    """Stage 1, safe while d53595e serves: K/KC verified and re-keyed. No delete."""
+    _, control, keep, keep_control, record = _names(logical)
+    aliases = store.aliases()
+    if logical in aliases:
+        out(f"STATE published: alias {logical} -> {aliases[logical]}; nothing to copy")
+        return
+    _refuse_alias_conflicts(aliases, (logical, control, keep, keep_control, record))
+    if not store.exists(logical):
+        if _kept(store, keep, keep_control):
+            out(f"STATE retired: {logical} is already gone and {keep} is kept; nothing to copy")
+            return
+        raise Refusal(f"E_RETIRE_NOTHING_TO_COPY: {logical} does not exist; nothing to copy")
+    if not store.exists(control):
+        raise Refusal(f"E_RETIRE_PAIR_INCOMPLETE: {logical} exists without {control}; not a d53595e layout, inspect it")
+    count = preserve(store, logical, keep)
+    out(f"KEPT {keep}: {count} points, ids {ids_digest(store.ids(keep))} (verified equal to {logical})")
+    preserve(store, control, keep_control, frozenset({manifest_point_id(keep_control)}))
+    rekey_manifest(store, control, keep_control)
+    out(f"KEPT {keep_control}: verified equal to {control}; manifest re-keyed")
+    out(f"STATE copied: {logical} untouched and still serving; in the window run --stage retire")
+
+
+def retire_stage(store: Qdrant, peers: list[tuple[str, Qdrant]], logical: str, *,
+                 no_keep_ok: bool, out=print) -> None:
+    """Stage 2, the maintenance window: this run's bound snapshots, then delete."""
+    _, control, keep, keep_control, record = _names(logical)
+    extra = frozenset({manifest_point_id(keep_control)})
     aliases = store.aliases()
     if aliases.get(logical) == keep:
         # The rolled-back state: unpoint L (the kept copy stays) so this
-        # release can publish L again; then report the retired state.
+        # release can publish L again.
         if store.call("POST", "/collections/aliases",
                       {"actions": [{"delete_alias": {"alias_name": logical}}]}) is not True:
             raise Unreadable("Qdrant alias update was not acknowledged")
@@ -308,7 +400,7 @@ def retire(store: Qdrant, peers: list[Qdrant], logical: str, *, no_keep_ok: bool
     if logical in aliases:
         out(f"STATE published: alias {logical} -> {aliases[logical]}; nothing to retire (an alias is never deleted)")
         return
-    _refuse_alias_conflicts(aliases, (logical, control, keep, keep_control))
+    _refuse_alias_conflicts(aliases, (logical, control, keep, keep_control, record))
     if not store.exists(logical):
         if not store.exists(keep):
             if no_keep_ok:
@@ -319,44 +411,69 @@ def retire(store: Qdrant, peers: list[Qdrant], logical: str, *, no_keep_ok: bool
         if not _kept(store, keep, keep_control):
             raise Refusal(f"E_RETIRE_KEEP_INCOMPLETE: {logical} is gone but {keep}/{keep_control} is incomplete; inspect it")
         if store.exists(control):
-            # Crash between the two deletes: finish the pair against the
-            # still-present source, re-verified before the delete.
-            verify_copy(store, control, keep_control, frozenset({manifest_point_id(keep_control)}))
+            # Crash between the two deletes: the control's snapshot must be
+            # this run's, still bound to it, before it goes too.
+            verify_copy(store, control, keep_control, extra)
+            entries = read_record(store, logical)
+            ids = store.ids(control)
+            for url, _peer in peers:
+                entry = entries.get(f"{url}|{control}")
+                if not entry or (entry.get("points"), entry.get("ids_digest")) != (len(ids), ids_digest(ids)):
+                    raise Refusal(f"E_RETIRE_SNAPSHOT_UNBOUND: no recorded snapshot of {control} on {url} "
+                                  "matches it; nothing deleted, inspect it")
             store.delete(control)
-        _report(store, logical, keep, keep_control, out)
+        _report(store, logical, out)
         return
     if not store.exists(control):
         raise Refusal(f"E_RETIRE_PAIR_INCOMPLETE: {logical} exists without {control}; not a d53595e layout, inspect it")
-    extra = frozenset({manifest_point_id(keep_control)})
-    count = preserve(store, logical, keep)
-    out(f"KEPT {keep}: {count} points, ids {ids_digest(store.ids(keep))} (verified equal to {logical})")
-    preserve(store, control, keep_control, extra)
-    rekey_manifest(store, control, keep_control)
-    out(f"KEPT {keep_control}: verified equal to {control}; manifest re-keyed")
-    for index, peer in enumerate(peers):
+    if not _kept(store, keep, keep_control):
+        raise Refusal(f"E_RETIRE_NOT_COPIED: no verified kept copy {keep}; run --stage copy first; nothing deleted")
+    verify_copy(store, logical, keep)
+    verify_copy(store, control, keep_control, extra)
+    bindings = {}
+    for name in (logical, control):
+        ids = store.ids(name)
+        bindings[name] = (len(ids), ids_digest(ids))
+    replication = int(((store.info(logical).get("config") or {}).get("params") or {}).get("replication_factor") or 1)
+    entries = read_record(store, logical)
+    for index, (url, peer) in enumerate(peers):
         for name in (logical, control):
-            snap = snapshot_on(peer, name)
-            out(f"SNAPSHOT peer {index} {name}: {snap['name']} size {snap['size']} sha256 {snap['checksum']}")
+            entry, created = bound_snapshot(store, peer, url, name, bindings[name], entries)
+            if created:
+                entries[f"{url}|{name}"] = entry
+                write_record(store, logical, entries, replication)
+            out(f"SNAPSHOT peer {index} {name}: {entry['name']} size {entry['size']} sha256 {entry['checksum']} "
+                f"({entry['points']} points, ids {entry['ids_digest']}{', created by this run' if created else ', recorded'})")
     # Immediately before the deletes, re-observe: no alias took the name,
-    # and the kept copies still equal the sources.
-    _refuse_alias_conflicts(store.aliases(), (logical, control, keep, keep_control))
+    # the kept copies still equal the sources, and the sources still equal
+    # what every recorded snapshot is bound to.
+    _refuse_alias_conflicts(store.aliases(), (logical, control, keep, keep_control, record))
     verify_copy(store, logical, keep)
     verify_copy(store, control, keep_control, extra)
     if not _kept(store, keep, keep_control):
         raise Refusal(f"E_RETIRE_KEEP_INCOMPLETE: {keep_control} lost its re-keyed manifest; nothing deleted")
+    for name in (logical, control):
+        ids = store.ids(name)
+        if (len(ids), ids_digest(ids)) != bindings[name]:
+            raise Refusal(f"E_RETIRE_SNAPSHOT_UNBOUND: {name} changed after its snapshot; re-run; nothing deleted")
     store.delete(logical)
     store.delete(control)
-    _report(store, logical, keep, keep_control, out)
+    _report(store, logical, out)
 
 
-def _report(store: Qdrant, logical: str, keep: str, keep_control: str, out) -> None:
-    if logical in store.aliases() or store.exists(logical) or store.exists(logical + COMPLETIONS_SUFFIX):
+def _report(store: Qdrant, logical: str, out) -> None:
+    _, control, keep, keep_control, record = _names(logical)
+    if logical in store.aliases() or store.exists(logical) or store.exists(control):
         raise Refusal(f"E_RETIRE_NOT_CONVERGED: {logical} or its control still exists; re-run")
     ids = store.ids(keep)
-    out(f"STATE retired: {logical} and {logical + COMPLETIONS_SUFFIX} deleted; "
+    out(f"STATE retired: {logical} and {control} deleted; "
         f"kept {keep} ({len(ids)} points, ids {ids_digest(ids)}) and {keep_control}")
-    out(f"ROLLBACK fast: after redeploying d53595e, retire_legacy.sh --rollback --confirm {logical} "
-        f"(one alias call: {logical} -> {keep})")
+    for _key, entry in sorted(read_record(store, logical).items()):
+        out(f"RECORDED snapshot {entry['collection']} on {entry['peer']}: {entry['name']} "
+            f"sha256 {entry.get('checksum')} ({entry.get('points')} points)")
+    out(f"RECORD {record} keeps these snapshot names after the collections are gone")
+    out(f"ROLLBACK fast: retire_legacy.sh --rollback --confirm {logical} "
+        f"(one alias call: {logical} -> {keep}; works through a port-forward, see the runbook)")
     out(f"ROLLBACK snapshot: PUT /collections/{logical}/snapshots/recover "
         f'{{"location": "file:///qdrant/snapshots/{logical}/<SNAPSHOT>", "priority": "snapshot"}} '
         "on the peer that holds it, after deleting the alias (node-local, unqualified for 6/3/2)")
@@ -364,8 +481,7 @@ def _report(store: Qdrant, logical: str, keep: str, keep_control: str, out) -> N
 
 
 def rollback(store: Qdrant, logical: str) -> None:
-    keep = logical + KEEP_SUFFIX
-    keep_control = keep + COMPLETIONS_SUFFIX
+    _, _, keep, keep_control, _ = _names(logical)
     aliases = store.aliases()
     if aliases.get(logical) == keep:
         print(f"STATE rolled back: alias {logical} -> {keep} already")
@@ -391,7 +507,7 @@ def rollback(store: Qdrant, logical: str) -> None:
 
 def main(argv: list[str], stdin_key: str) -> int:
     parser = argparse.ArgumentParser(prog="legacy_layout.py")
-    parser.add_argument("command", choices=("check", "retire", "rollback"))
+    parser.add_argument("command", choices=("check", "copy", "retire", "rollback"))
     parser.add_argument("--collection", required=True)
     parser.add_argument("--peer-url", action="append", default=[])
     parser.add_argument("--no-keep-ok", action="store_true")
@@ -414,9 +530,11 @@ def main(argv: list[str], stdin_key: str) -> int:
     try:
         if args.command == "check":
             print(f"LAYOUT {classify(store, args.collection)}")
+        elif args.command == "copy":
+            copy_stage(store, args.collection)
         elif args.command == "retire":
-            peers = [Qdrant(u, key) for u in args.peer_url] or [store]
-            retire(store, peers, args.collection, no_keep_ok=args.no_keep_ok)
+            peers = [(u, Qdrant(u, key)) for u in args.peer_url] or [(url, store)]
+            retire_stage(store, peers, args.collection, no_keep_ok=args.no_keep_ok)
         else:
             rollback(store, args.collection)
     except Refusal as exc:

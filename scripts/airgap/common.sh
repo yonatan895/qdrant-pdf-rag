@@ -552,8 +552,14 @@ check_stored_layout() {
     _sts=$($KC -n "$NAMESPACE" get "statefulset/$(qdrant_fullname)" --ignore-not-found -o name 2>/dev/null) ||
         die "E_LAYOUT_UNVERIFIED: cannot verify the stored Qdrant layout: statefulset/$(qdrant_fullname) in namespace $NAMESPACE is unreadable. Nothing was changed."
     if [ -z "$_sts" ]; then
+        # Fresh only when no Helm release exists either (the same rule as the
+        # volume-size check, #1113): a release without its StatefulSet refuses.
+        _rel=$($KC -n "$NAMESPACE" get secret -l "owner=helm,name=$QDRANT_RELEASE" -o name 2>/dev/null) ||
+            die "E_LAYOUT_UNVERIFIED: cannot verify the stored Qdrant layout: the Helm release records in namespace $NAMESPACE are unreadable. Nothing was changed."
+        [ -z "$_rel" ] ||
+            die "E_LAYOUT_UNVERIFIED: the Qdrant release exists but its StatefulSet was not found; cannot verify the stored layout. Nothing was changed."
         echo "==> Stored layout: no Qdrant release $QDRANT_RELEASE yet (fresh install)"
-        unset _sts
+        unset _sts _rel
         return 0
     fi
     _layout=$(printf '\n' | layout_exec check --collection "$LEGACY_COLLECTION" 2>/dev/null |
@@ -562,9 +568,9 @@ check_stored_layout() {
         empty) echo "==> Stored layout: no corpus collection yet" ;;
         ok) echo "==> Stored layout: $LEGACY_COLLECTION is an alias with a build-bound publication" ;;
         flat_legacy)
-            die "E_LEGACY_COLLECTION: $LEGACY_COLLECTION is a plain collection without an alias (the layout of release d53595e), which this release cannot serve or ingest. Nothing was changed. Upgrade in a maintenance window: sh scripts/airgap/retire_legacy.sh --confirm $LEGACY_COLLECTION, then deploy and a full ingest ($LAYOUT_RUNBOOK)." ;;
+            die "E_LEGACY_COLLECTION: $LEGACY_COLLECTION is a plain collection without an alias (the layout of release d53595e), which this release cannot serve or ingest. Nothing was changed. Upgrade in a maintenance window: sh scripts/airgap/retire_legacy.sh --stage copy --confirm $LEGACY_COLLECTION (before the window), then --stage retire, deploy and a full ingest ($LAYOUT_RUNBOOK)." ;;
         rolled_back)
-            die "E_ROLLED_BACK: alias $LEGACY_COLLECTION points at the kept d53595e copy (a rollback is in place). Nothing was changed. To upgrade again: sh scripts/airgap/retire_legacy.sh --confirm $LEGACY_COLLECTION, then deploy and a full ingest ($LAYOUT_RUNBOOK)." ;;
+            die "E_ROLLED_BACK: alias $LEGACY_COLLECTION points at the kept d53595e copy (a rollback is in place). Nothing was changed. To upgrade again: sh scripts/airgap/retire_legacy.sh --stage retire --confirm $LEGACY_COLLECTION (removes the alias), then deploy and a full ingest ($LAYOUT_RUNBOOK)." ;;
         unbound_alias)
             die "E_UNBOUND_PUBLICATION: alias $LEGACY_COLLECTION points at a publication without a build binding, which this release refuses. Nothing was changed. See $LAYOUT_RUNBOOK." ;;
         *)

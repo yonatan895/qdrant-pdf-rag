@@ -2097,7 +2097,7 @@ def test_legacy_plain_collection_refuses_before_any_mutation(tree, qdrant):
     result = _run(tree, *_layout_env(qdrant))
     assert result.returncode != 0
     assert "E_LEGACY_COLLECTION" in result.stderr
-    assert "retire_legacy.sh --confirm mainframe_manuals" in result.stderr
+    assert "retire_legacy.sh --stage copy --confirm mainframe_manuals" in result.stderr
     assert "install_and_ops.md#upgrade-from-a-legacy-flat-collection-issue-1070" in result.stderr
     _first_mutation_free(tree)
     assert _mutations(tree) == []
@@ -2154,7 +2154,7 @@ def test_rolled_back_layout_refuses_with_the_reopen_step(tree, qdrant):
     result = _run(tree, *_layout_env(qdrant))
     assert result.returncode != 0
     assert "E_ROLLED_BACK" in result.stderr
-    assert "retire_legacy.sh --confirm mainframe_manuals" in result.stderr
+    assert "retire_legacy.sh --stage retire --confirm mainframe_manuals" in result.stderr
     assert _mutations(tree) == []
 
 
@@ -2396,3 +2396,12 @@ def test_an_existing_release_without_its_statefulset_is_refused(tree):
 
 def test_a_fresh_install_without_release_or_statefulset_passes(tree):
     assert _run(tree).returncode == 0
+
+
+def test_layout_preflight_refuses_a_release_without_its_statefulset(tree):
+    """Same fresh-install rule as the #1113 volume check: a Helm release record
+    without its StatefulSet is not a fresh install."""
+    result = _run(tree, ("HELM_RELEASE_SECRET", "qdrant"))
+    assert result.returncode != 0
+    assert "E_LAYOUT_UNVERIFIED" in result.stderr and "StatefulSet was not found" in result.stderr
+    assert _mutations(tree) == []
