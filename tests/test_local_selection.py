@@ -30,6 +30,7 @@ TREE = {
     'tests/test_static.py': 'ASSET = "app.js"\n',
     'tests/test_other.py': '',
     'tests/test_colab.py': '',
+    'tests/test_local_verify.py': '',
     'docs/agent-workflow.md': (
         '<!-- context-map:start -->\n'
         '| Contract | Canonical owner | Boundaries to inspect | Evidence home |\n'
@@ -76,7 +77,7 @@ def test_broad_change_escalates_to_t2_without_slow_modules(tree, broad):
     selection = ls.select([broad, 'scripts/tool.sh'], root=tree)
     assert selection.tier == 'T2' and selection.broad == (broad,)
     unit = {p for p in ls.all_unit_modules(tree)}
-    assert set(selection.tests) == unit - {'tests/test_colab.py'}
+    assert set(selection.tests) == unit - {'tests/test_colab.py', 'tests/test_local_verify.py'}
 
 
 def test_slow_module_runs_in_t2_when_the_change_selects_it(tree):
@@ -108,3 +109,22 @@ def test_real_session_diffs_select_their_owning_suites(repo_graph, changed, requ
     selection = ls.select(changed, graph=repo_graph)
     assert selection.tier == 'T1' and not selection.unmapped
     assert required <= set(selection.tests)
+
+
+@pytest.mark.parametrize('changed', ['scripts/local_verify.py', 'tests/test_local_verify.py', 'docs/testing.md'])
+def test_runner_self_test_is_never_auto_selected(repo_graph, changed):
+    selection = ls.select([changed], graph=repo_graph)
+    assert 'tests/test_local_verify.py' not in selection.tests
+    assert 'tests/test_local_verify.py' not in selection.reasons
+
+
+def test_runner_self_test_is_never_added_by_t2(repo_graph):
+    selection = ls.select(['pyproject.toml'], graph=repo_graph)
+    assert selection.tier == 'T2'
+    assert 'tests/test_local_verify.py' not in selection.tests
+
+
+def test_harness_only_change_is_recorded_instead_of_selected(tree):
+    selection = ls.select(['tests/test_local_verify.py'], root=tree)
+    assert (selection.tests, selection.harness) == ((), ('tests/test_local_verify.py',))
+    assert selection.as_record()['harness'] == ['tests/test_local_verify.py']

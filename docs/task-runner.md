@@ -85,8 +85,26 @@ PATH explicitly; the doctor hashes the actual PATH-selected Helm without running
 it. Rendering uses the local chart and needs no cluster or chart repository.
 
 New worktree: symlink `.tools` from main and set `SIM_BM25_CACHE_DIR` (the
-default `bundles/` is untracked). A venv shared from main is an editable install
-of main's `src`; subprocesses need `PYTHONPATH=<worktree>/src`.
+default `bundles/` is untracked). `qa:local` supports two interpreter recipes;
+both must pass the focused `tests/test_render_report.py` selection and the
+runner self-test with plain `pytest`:
+
+- the shared main `.venv` with `PYTHONPATH=<worktree>/src` (the venv is an
+  editable install of main's `src`, so child processes need the worktree
+  source first). Pass it through to the isolated `qa:local` environment:
+  `PYTHONPATH=<worktree>/src sh scripts/tools/run-task.sh qa:local --
+  --python <main>/.venv/bin/python --pass-env PYTHONPATH -- tests/...`; or
+- a per-worktree `.venv` from `sh scripts/tools/run-task.sh dev:setup` (default
+  `PY=python3`; the host CPython and qualified wheelhouse must be available).
+
+`scripts/tools/check-worktree-qa.sh` runs the focused report selection under
+both available recipes. Keep every run's evidence outside the worktree:
+`qa:local` refuses an `--out-dir` inside it and defaults to
+`$XDG_STATE_HOME/mainframe-rag/local-verify`. The ignored default `bundles/`
+does not dirty the checkout; generated non-ignored variants such as
+`bundles-foo/` are dirty paths, so the receipt becomes "uncommitted, not
+evidence". `qa:local` never auto-selects `tests/test_local_verify.py` and
+refuses it explicitly; run that file with plain `pytest` or CI.
 
 `qa:prerequisites` runs the read-only doctor before `qa:unit` and before any
 `qa:check` tools. Missing/foreign Helm fails before pytest collection. Python

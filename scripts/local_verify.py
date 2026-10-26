@@ -51,6 +51,8 @@ ENV_ALLOWLIST = ('PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'LANGUAGE',
 ENV_NAME = re.compile(r'[A-Z_][A-Z0-9_]*')
 RAM_FILESYSTEMS = {'tmpfs', 'ramfs'}
 DEFAULT_MEMORY_MAX_MIB = 3072
+HARNESS_SELECTION_REFUSAL = ('tests/test_local_verify.py exercises this runner; '
+                             'run it with pytest or CI, not qa:local')
 NOT_VERIFIED = (
     'full unit suite (CI unit_tests lane is the authority)',
     'tests outside the selection',
@@ -195,6 +197,8 @@ def validate_selectors(root: Path, selectors: list[str]) -> None:
         target = (root / selector.split('::', 1)[0]).resolve()
         if not target.exists() or not (target == tests or tests in target.parents):
             raise Refusal(f'{selector!r} is not a test path under tests/')
+        if f'tests/{target.relative_to(tests).as_posix()}' in local_selection.HARNESS_TESTS:
+            raise Refusal(HARNESS_SELECTION_REFUSAL)
 
 
 def git(root: Path, *args: str) -> str:
@@ -202,9 +206,33 @@ def git(root: Path, *args: str) -> str:
     return result.stdout.strip() if result.returncode == 0 else ''
 
 
+def git_status(root: Path) -> str:
+    """Raw porcelain v1 status: never strip the XY columns or quote paths."""
+    result = subprocess.run(['git', 'status', '--porcelain', '-z', '--untracked-files=normal'],
+                            cwd=root, capture_output=True, text=True, check=False)
+    return result.stdout if result.returncode == 0 else ''
+
+
+def dirty_paths(status: str) -> list[str]:
+    """Both sides of a rename plus every modified, deleted or untracked path."""
+    found: set[str] = set()
+    fields = status.split('\0')
+    index = 0
+    while index < len(fields):
+        entry = fields[index]
+        index += 1
+        if len(entry) < 4:
+            continue
+        found.add(entry[3:])
+        if entry[0] in 'RC' or entry[1] in 'RC':
+            if index < len(fields) and fields[index]:
+                found.add(fields[index])
+            index += 1
+    return sorted(found)
+
+
 def tree_state(root: Path) -> dict:
-    status = git(root, 'status', '--porcelain', '--untracked-files=normal')
-    dirty = sorted({part for line in status.splitlines() if line for part in line[3:].split(' -> ')})
+    dirty = dirty_paths(git_status(root))
     return {'head': git(root, 'rev-parse', 'HEAD') or None,
             'base': {'ref': 'origin/main', 'sha': git(root, 'merge-base', 'HEAD', 'origin/main') or None},
             'dirty': dirty}
@@ -330,6 +358,9 @@ def main(argv: list[str] | None = None, *, lock: Path | None = None) -> int:
             if not changed:
                 raise Refusal('no change against origin/main; name tests explicitly')
             chosen = local_selection.select(changed, force_t2=args.t2)
+            if chosen.harness and not chosen.tests and not args.select:
+                raise Refusal('harness self-test change(s) are owned by CI or isolated pytest: '
+                              + ', '.join(chosen.harness) + '; ' + HARNESS_SELECTION_REFUSAL)
             if chosen.unmapped and not args.select:
                 raise Refusal('unmapped change(s) with no test: ' + ', '.join(chosen.unmapped)
                               + '; cover them with --select tests/<file> (recorded in the receipt)')
