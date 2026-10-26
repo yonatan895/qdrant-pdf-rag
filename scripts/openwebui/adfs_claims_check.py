@@ -317,6 +317,46 @@ def wait_for_callback(port: int, timeout: float) -> dict[str, str]:
     return Handler.result
 
 
+def parse_pasted_redirect(text: str, redirect_uri: str, state: str) -> str:
+    """Return the authorization code from a pasted redirect URL, or raise CheckError.
+
+    Scheme, host and path must equal ``redirect_uri`` exactly (the host is compared
+    case-insensitively); extra query parameters such as session_state are ignored.
+    Nothing from ``text`` appears in any error.
+    """
+    try:
+        got = urllib.parse.urlsplit(text.strip())
+        want = urllib.parse.urlsplit(redirect_uri)
+        query = urllib.parse.parse_qs(got.query, keep_blank_values=True)
+    except ValueError:
+        raise CheckError(EXIT_CALLBACK, "pasted text is not a URL") from None
+    if (got.scheme.lower(), got.netloc.lower(), got.path) != (
+        want.scheme.lower(),
+        want.netloc.lower(),
+        want.path,
+    ):
+        raise CheckError(EXIT_CALLBACK, "pasted URL does not match the redirect URI")
+    if "error" in query:
+        raise CheckError(EXIT_CALLBACK, "AD FS returned an authorization error")
+    if len(query.get("state", [])) != 1 or not secrets.compare_digest(
+        query["state"][0].encode(), state.encode()
+    ):
+        raise CheckError(EXIT_CALLBACK, "callback state does not match the request")
+    codes = query.get("code", [])
+    if len(codes) != 1 or not codes[0]:
+        raise CheckError(EXIT_CALLBACK, "pasted URL carries no single authorization code")
+    return codes[0]
+
+
+def read_pasted_url() -> str:
+    """Read one line without echoing it (getpass on a terminal, stdin otherwise)."""
+    prompt = "Paste the full redirected URL now (input hidden; the code expires in minutes): "
+    if sys.stdin.isatty():
+        return getpass.getpass(prompt)
+    print(prompt, flush=True)
+    return sys.stdin.readline()
+
+
 def read_secret(path: str | None) -> str:
     if path:
         try:
@@ -352,7 +392,11 @@ def run_flow(args: argparse.Namespace) -> dict[str, Any]:
     disc = fetch_discovery(args.issuer, ctx, args.http_timeout)
     print("discovery: ok")
 
-    redirect_uri = f"http://{args.redirect_host}:{args.port}/callback"
+    paste = bool(args.paste)
+    if paste:
+        redirect_uri = args.redirect_uri
+    else:
+        redirect_uri = f"http://{args.redirect_host}:{args.port}/callback"
     verifier, challenge = pkce_pair()
     state, nonce = secrets.token_urlsafe(24), secrets.token_urlsafe(24)
     url = build_authorize_url(
@@ -364,19 +408,27 @@ def run_flow(args: argparse.Namespace) -> dict[str, Any]:
         nonce,
         challenge,
     )
-    print(f"Open this URL in a browser and sign in with the test account:\n{url}")
-    print(
-        f"Waiting up to {int(args.timeout)} s on http://127.0.0.1:{args.port}/callback ...",
-        flush=True,
-    )
-    params = wait_for_callback(args.port, args.timeout)
-
-    if "error" in params:
-        raise CheckError(EXIT_CALLBACK, "AD FS returned an authorization error")
-    if not secrets.compare_digest(params.get("state", ""), state):
-        raise CheckError(EXIT_CALLBACK, "callback state does not match the request")
-    if not params.get("code"):
-        raise CheckError(EXIT_CALLBACK, "callback carries no authorization code")
+    if paste:
+        print(
+            "Open this URL in a browser and sign in with the test account. The browser "
+            "then lands on an error page for the registered host; that is expected. "
+            "Copy the full address from the address bar.\n" + url
+        )
+        code = parse_pasted_redirect(read_pasted_url(), redirect_uri, state)
+    else:
+        print(f"Open this URL in a browser and sign in with the test account:\n{url}")
+        print(
+            f"Waiting up to {int(args.timeout)} s on http://127.0.0.1:{args.port}/callback ...",
+            flush=True,
+        )
+        params = wait_for_callback(args.port, args.timeout)
+        if "error" in params:
+            raise CheckError(EXIT_CALLBACK, "AD FS returned an authorization error")
+        if not secrets.compare_digest(params.get("state", ""), state):
+            raise CheckError(EXIT_CALLBACK, "callback state does not match the request")
+        if not params.get("code"):
+            raise CheckError(EXIT_CALLBACK, "callback carries no authorization code")
+        code = params["code"]
     print("callback: state ok")
 
     tok = _http_json(
@@ -387,7 +439,7 @@ def run_flow(args: argparse.Namespace) -> dict[str, Any]:
         fail_code=EXIT_TOKEN,
         data={
             "grant_type": "authorization_code",
-            "code": params["code"],
+            "code": code,
             "redirect_uri": redirect_uri,
             "client_id": args.client_id,
             "client_secret": secret,
@@ -506,6 +558,18 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         default="localhost",
         help="host in the registered redirect URI (default localhost)",
     )
+    p.add_argument(
+        "--paste",
+        action="store_true",
+        help="no listener: print the authorize URL, then read the redirected URL pasted "
+        "from the browser address bar (needs --redirect-uri)",
+    )
+    p.add_argument(
+        "--redirect-uri",
+        default=env("ADFS_REDIRECT_URI"),
+        help="with --paste: the exact registered redirect URI, e.g. "
+        "https://<openwebui-host>/oauth/oidc/callback (ADFS_REDIRECT_URI)",
+    )
     p.add_argument("--timeout", type=float, default=180.0, help="seconds to wait for the callback")
     p.add_argument("--http-timeout", type=float, default=15.0, help="per-request socket timeout")
     p.add_argument(
@@ -530,6 +594,10 @@ def main(argv: list[str] | None = None) -> int:
             missing = [n for n in ("issuer", "client_id", "ca_bundle") if not getattr(args, n)]
             if missing or not args.issuer.startswith("https://"):
                 raise CheckError(EXIT_USAGE, "issuer (https), client ID and CA bundle are required")
+            if args.paste and not (args.redirect_uri or "").startswith(("https://", "http://")):
+                raise CheckError(EXIT_USAGE, "--paste needs --redirect-uri with the registered URI")
+            if args.redirect_uri and not args.paste:
+                raise CheckError(EXIT_USAGE, "--redirect-uri is only used with --paste")
             if not args.baseline_role:
                 raise CheckError(EXIT_USAGE, "baseline role must not be empty")
             if not 1 <= args.port <= 65535:

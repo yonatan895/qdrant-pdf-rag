@@ -644,3 +644,146 @@ def test_idle_connection_does_not_outlive_the_callback_timeout(adfs):
         proc.kill()
     assert proc.returncode == 5 and "no callback arrived before the timeout" in rest
     assert time.monotonic() - started < 12 and "Traceback" not in rest
+
+
+# ----------------------------------------------------------------- paste mode
+
+REG_URI = "https://openwebui.example.test/oauth/oidc/callback"
+
+
+def run_paste(adfs: FakeAdfs, mutate=lambda loc: loc, *extra: str):
+    """Run in --paste mode; the test plays the browser and pastes `mutate(redirect)`."""
+    secret = adfs.dir / "secret.txt"
+    secret.write_text(SECRET)
+    cmd = [
+        sys.executable,
+        "-I",
+        str(SCRIPT),
+        "--issuer",
+        adfs.issuer,
+        "--client-id",
+        CLIENT_ID,
+        "--client-secret-file",
+        str(secret),
+        "--ca-bundle",
+        str(adfs.dir / "good-ca.pem"),
+        "--paste",
+        "--redirect-uri",
+        REG_URI,
+        "--total-timeout",
+        "30",
+        *extra,
+    ]
+    proc = subprocess.Popen(
+        cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+    )
+    assert proc.stdin and proc.stdout
+    seen: list[str] = []
+    pasted = ""
+    ctx = ssl.create_default_context(cafile=str(adfs.dir / "good-ca.pem"))
+    for line in proc.stdout:
+        seen.append(line)
+        if line.startswith("https://"):
+
+            class NoRedir(urllib.request.HTTPRedirectHandler):
+                def redirect_request(self, *a: Any, **k: Any) -> None:  # type: ignore[override]
+                    return None
+
+            opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx), NoRedir)
+            try:
+                opener.open(line.strip(), timeout=10)
+            except urllib.error.HTTPError as e:
+                pasted = mutate(e.headers["Location"])
+            break
+    proc.stdin.write(pasted + "\n")
+    proc.stdin.close()
+    rest, _ = proc.communicate(timeout=30)
+    return proc.returncode, "".join(seen) + rest, pasted
+
+
+def assert_paste_no_leak(out: str, pasted: str) -> None:
+    assert pasted and pasted not in out
+    query = urllib.parse.parse_qs(urllib.parse.urlsplit(pasted).query)
+    for v in query.get("code", []) + query.get("state", []):
+        assert v not in out.split("https://", 1)[-1].split("\n", 1)[-1], "code or state echoed"
+    assert_no_leak(out)
+
+
+@needs_openssl
+def test_paste_happy_path_with_extra_params_and_no_listener(adfs):
+    rc, out, pasted = run_paste(adfs, lambda loc: loc + "&session_state=X&client-request-id=Y")
+    assert rc == 0, out
+    assert pasted.startswith(REG_URI + "?code=")
+    assert "callback: state ok" in out and "Waiting up to" not in out
+    assert "roles claim 'roles': present, type=list, count=2" in out
+    assert adfs.token_requests[0]["redirect_uri"] == REG_URI  # exchanged with the same URI
+    assert_paste_no_leak(out, pasted)
+
+
+@pytest.mark.parametrize(
+    ("mutate", "rc", "reason"),
+    [
+        (
+            lambda loc: loc.replace("openwebui.example.test", "evil.example.test"),
+            5,
+            "pasted URL does not match the redirect URI",
+        ),
+        (
+            lambda loc: loc.replace("/oauth/oidc/callback", "/oauth/other"),
+            5,
+            "pasted URL does not match the redirect URI",
+        ),
+        (
+            lambda loc: loc.replace("https://", "http://"),
+            5,
+            "pasted URL does not match the redirect URI",
+        ),
+        (
+            lambda loc: loc.replace("state=", "state=WRONG"),
+            5,
+            "callback state does not match the request",
+        ),
+        (
+            lambda loc: REG_URI + "?error=access_denied&error_description=CANARY-ADFS-TEXT",
+            5,
+            "AD FS returned an authorization error",
+        ),
+        (
+            lambda loc: (
+                REG_URI
+                + "?state="
+                + urllib.parse.parse_qs(urllib.parse.urlsplit(loc).query)["state"][0]
+            ),
+            5,
+            "pasted URL carries no single authorization code",
+        ),
+        (lambda loc: "not a url CANARY-PASTE", 5, "pasted URL does not match the redirect URI"),
+    ],
+)
+@needs_openssl
+def test_paste_rejections_are_fixed_and_skip_the_token_exchange(adfs, mutate, rc, reason):
+    got, out, pasted = run_paste(adfs, mutate)
+    assert got == rc and out.strip().splitlines()[-1] == f"FAIL: {reason}"
+    assert adfs.token_requests == []
+    assert "CANARY-ADFS-TEXT" not in out and "CANARY-PASTE" not in out
+    assert_paste_no_leak(out, pasted)
+
+
+def test_parse_pasted_redirect_unit():
+    ok = REG_URI + "?code=c1&state=s1&session_state=z"
+    assert chk.parse_pasted_redirect("  " + ok + "\n", REG_URI, "s1") == "c1"
+    assert chk.parse_pasted_redirect(ok.replace("openwebui", "OpenWebUI"), REG_URI, "s1") == "c1"
+    for bad in (
+        REG_URI + "?code=c1&code=c2&state=s1",
+        REG_URI + "?code=c1&state=s1&state=s1",
+        REG_URI + "x?code=c1&state=s1",
+        REG_URI + "?code=&state=s1",
+    ):
+        with pytest.raises(chk.CheckError):
+            chk.parse_pasted_redirect(bad, REG_URI, "s1")
+
+
+def test_paste_flag_combinations(capsys):
+    base = ["--issuer", "https://x/adfs", "--client-id", "c", "--ca-bundle", "ca"]
+    assert chk.main([*base, "--paste"]) == 2
+    assert chk.main([*base, "--redirect-uri", REG_URI]) == 2

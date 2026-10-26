@@ -1796,7 +1796,24 @@ in a role group (expect exit 0), then with `--expect-baseline-only` and an accou
 group (the baseline must be the only value). `--decode-only <file>` analyses a saved ID token
 offline with the same output rules.
 
-The redirect URI the script sends is `http://localhost:8400/callback`. Register that second
-redirect URI on the **test** client only, next to `https://<host>/oauth/oidc/callback`, and
-remove it when the check is done; the production client keeps only the HTTPS callback.
+**Paste mode (the default recommendation when the localhost redirect is not registered).**
+It needs only the real redirect URI and works before Open WebUI exists:
+
+```sh
+python3 -I scripts/openwebui/adfs_claims_check.py --paste \
+  --redirect-uri https://<openwebui-host>/oauth/oidc/callback  # plus the flags above
+```
+
+It prints the authorize URL and starts no listener. Sign in; AD FS then redirects to the
+not-yet-deployed host and the router shows an error page. That is expected: copy the full
+address from the address bar (it holds `?code=...&state=...`) and paste it at the hidden
+prompt. Paste immediately: the code expires in minutes, and the whole run is bounded by
+`--total-timeout` (300 s). The script requires the scheme, host and path to equal
+`--redirect-uri`, checks the state, exchanges with the same URI, and never echoes the pasted
+URL or code.
+
+**Listener mode.** Without `--paste` the script sends `http://localhost:8400/callback`.
+Register that second redirect URI on the **test** client only, next to
+`https://<host>/oauth/oidc/callback`, and remove it when the check is done; the production
+client keeps only the HTTPS callback.
 Tests: `tests/test_adfs_claims_check.py` (a fake TLS AD FS, canary leak assertions).
