@@ -24,10 +24,10 @@ K, KC = "mainframe_manuals_d53595e_keep", "mainframe_manuals_d53595e_keep__compl
 KUBECTL = r"""#!/bin/sh
 printf '%s\n' "$*" >> "$KC_LOG"
 case "$*" in
-  *'get statefulset/qdrant '*)
+  *'get statefulset/'*)
     [ "${STS_FAIL:-}" != 1 ] || { echo 'dial tcp: i/o timeout' >&2; exit 1; }
     case "$*" in *jsonpath*) printf '%s' "${STS_REPLICAS:-1}" ;; *) [ "${STS_ABSENT:-}" = 1 ] || echo statefulset.apps/qdrant ;; esac ;;
-  *'get secret qdrant-apikey '*)
+  *'get secret '*'-apikey '*)
     printf '%s' "${WRITER_KEY_B64:-}" ;;
   *' -- df -Pk '*)
     [ "${DF_FAIL:-}" != 1 ] || exit 1
@@ -422,3 +422,24 @@ def test_after_a_rollback_the_preflight_refuses_and_retire_reopens_the_upgrade(t
         input="\n", capture_output=True, text=True, check=False,
         env={"PATH": "/usr/bin:/bin", "QDRANT_URL": qdrant.url, "QDRANT_API_KEY": FakeQdrant.READ_KEY})
     assert check.stdout.strip() == "LAYOUT empty"
+
+
+@pytest.mark.parametrize(("release", "name"), [
+    ("qdrant", "qdrant"), ("rag-qdrant", "rag-qdrant"), ("vectors", "vectors-qdrant"),
+])
+def test_qdrant_resource_names_follow_the_chart_fullname(tree, qdrant, release, name):
+    """The vendored chart names its StatefulSet, pods, headless Service and
+    Secret after the release alone when it contains "qdrant", else
+    `<release>-qdrant`; the retire step reads exactly those."""
+    _legacy_site(qdrant)
+    result = _run(tree, qdrant, "--confirm", L, "--space-verified", QDRANT_RELEASE=release,
+                  STS_REPLICAS="3", QDRANT_PEER_URLS="")
+    log = _log(tree)
+    assert f"get statefulset/{name} " in log
+    assert f"get secret {name}-apikey " in log
+    # Peer URLs derive from the chart's headless names (unreachable here, so
+    # the snapshot step stops with a transport failure and deletes nothing).
+    assert result.returncode != 0
+    assert L in qdrant.collections
+    space = _run(tree, qdrant, "--confirm", L, QDRANT_RELEASE=release, STS_REPLICAS="3", DF_FAIL="1")
+    assert f"cannot read the volume usage of {name}-0" in space.stderr

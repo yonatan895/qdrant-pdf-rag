@@ -2359,3 +2359,10 @@ def test_deploy_refuses_a_d53595e_shaped_env_before_any_cluster_call(tree):
     log = tree[1]
     assert not log.exists() or log.read_text() == ""
     assert not ((tree[0]) / "dist").exists() or not list((tree[0] / "dist").glob("*rendered*"))
+
+
+@pytest.mark.parametrize(("release", "name"), [("rag-qdrant", "rag-qdrant"), ("vectors", "vectors-qdrant")])
+def test_layout_preflight_reads_the_chart_named_statefulset(tree, release, name):
+    result = _run(tree, ("QDRANT_RELEASE", release))
+    assert f"statefulset/{name}" in _helm_log(tree).split("\n")
+    assert result.returncode == 0, result.stderr

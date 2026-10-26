@@ -526,6 +526,16 @@ require_kc() {
 LEGACY_COLLECTION=mainframe_manuals
 LAYOUT_RUNBOOK="docs/install_and_ops.md#upgrade-from-a-legacy-flat-collection-issue-1070"
 LAYOUT_BOOT='import sys;k=sys.stdin.readline().rstrip("\n");s=sys.stdin.read();sys.argv[0]="legacy_layout.py";exec(compile(s,"legacy_layout.py","exec"),{"__name__":"__main__","QDRANT_KEY_FROM_STDIN":k})'
+# Resource names of the vendored Qdrant chart (`qdrant.fullname`): the release
+# name alone when it contains "qdrant" (the default `qdrant` and the site's
+# release), else `<release>-qdrant`. Its StatefulSet, Service, pods and Secret
+# all derive from it.
+qdrant_fullname() {
+    case "$QDRANT_RELEASE" in
+        *qdrant*) printf '%s' "$QDRANT_RELEASE" ;;
+        *) printf '%s-qdrant' "$QDRANT_RELEASE" ;;
+    esac
+}
 layout_exec() {
     cat - scripts/airgap/legacy_layout.py |
         $KC -n "$NAMESPACE" exec -i deploy/rag-agent -- python3 -c "$LAYOUT_BOOT" "$@"
@@ -538,8 +548,8 @@ check_stored_layout() {
         echo "==> [dryrun] stored Qdrant layout check skipped (reads the cluster)"
         return 0
     fi
-    _sts=$($KC -n "$NAMESPACE" get "statefulset/$QDRANT_RELEASE" --ignore-not-found -o name 2>/dev/null) ||
-        die "E_LAYOUT_UNVERIFIED: cannot verify the stored Qdrant layout: statefulset/$QDRANT_RELEASE in namespace $NAMESPACE is unreadable. Nothing was changed."
+    _sts=$($KC -n "$NAMESPACE" get "statefulset/$(qdrant_fullname)" --ignore-not-found -o name 2>/dev/null) ||
+        die "E_LAYOUT_UNVERIFIED: cannot verify the stored Qdrant layout: statefulset/$(qdrant_fullname) in namespace $NAMESPACE is unreadable. Nothing was changed."
     if [ -z "$_sts" ]; then
         echo "==> Stored layout: no Qdrant release $QDRANT_RELEASE yet (fresh install)"
         unset _sts
