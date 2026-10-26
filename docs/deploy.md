@@ -75,10 +75,13 @@ restores the snapshot over whatever the file assigned; empty stays unset
 - Defaults: `NAMESPACE` defaults to `mainframe-rag`, `QDRANT_RELEASE` to
   `qdrant`, and an empty `IMAGE_SHA` resolves from `git rev-parse HEAD`.
   Explicit model-operation URLs win over `GATEWAY_BASE_URL`, a shared API
-  base including `/v1`. The removed aliases `REGISTRY_INTERNAL`,
-  `OPENSHIFT_NAMESPACE` and the `VLLM_BASE_URL` embedding-origin fallback are
-  not read: set `INTERNAL_REGISTRY`, `NAMESPACE` and `EMBED_BASE_URL` (or
-  `GATEWAY_BASE_URL`).
+  base including `/v1`. The removed `REGISTRY_INTERNAL`, `OPENSHIFT_NAMESPACE`,
+  `VLLM_BASE_URL`, `JAEGER_ENABLED` and `JAEGER_QUERY_URL` are refused when
+  non-empty, before any cluster change, with a fixed migration message
+  (`model_config.RETIRED_KEYS`; values are never printed): set
+  `INTERNAL_REGISTRY`, `NAMESPACE` and `EMBED_BASE_URL` (or `GATEWAY_BASE_URL`),
+  and remove the Jaeger keys (`OTEL_EXPORTER_OTLP_ENDPOINT`/`TRACE_QUERY_URL`
+  replace them).
 - `require_env` collects **all** missing keys before failing, so one run
   tells the operator everything to fill in. `EMBED_MODEL_REVISION` is a
   required key on every air-gap launch path (vllm mode refuses a blank

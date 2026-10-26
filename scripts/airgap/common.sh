@@ -200,8 +200,18 @@ bool_flag() {
     printf '%s' "$_val"
 }
 
+# Issue #1070: keys an earlier release honoured and this one ignores refuse
+# with a fixed migration message (table: model_config.RETIRED_KEYS). Values
+# are never printed; the check runs before any cluster, registry or file change.
+refuse_retired_keys() {
+    command -v python3 >/dev/null 2>&1 || die "python3 is required for the retired-key check"
+    export REGISTRY_INTERNAL OPENSHIFT_NAMESPACE VLLM_BASE_URL JAEGER_ENABLED JAEGER_QUERY_URL OTEL_EXPORTER_OTLP_ENDPOINT
+    python3 scripts/airgap/model_config.py --retired-keys || exit 1
+}
+
 # Product rules that every air-gap step enforces (AGENTS.md).
 enforce_product_rules() {
+    refuse_retired_keys
     [ "${EMBED_MODE:-}" != "hash" ] || die "EMBED_MODE=hash is CI/dev only; air-gap uses the in-cluster vLLM endpoint"
     refuse_plaintext_gateway_keys
 }

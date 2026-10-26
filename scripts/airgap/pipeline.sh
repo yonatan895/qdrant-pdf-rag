@@ -14,6 +14,8 @@
 
 . "$(dirname -- "$0")/common.sh"
 
+refuse_retired_keys
+
 SKIP_LOAD=0
 SKIP_INGEST=0
 

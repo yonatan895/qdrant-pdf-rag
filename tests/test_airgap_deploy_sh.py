@@ -1149,9 +1149,9 @@ def test_invalid_shared_gateway_key_refuses_before_commands(tree, key, secret):
 # --------------------------------- Decoupled backends (issue #529 OBS-2)
 
 
-def test_retired_jaeger_switch_is_ignored_and_external_collector_passes_through(tree):
-    # #956: OpenObserve is the only bundled backend; JAEGER_ENABLED is gone.
-    r = _run(tree, ("JAEGER_ENABLED", "false"), ("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector.platform:4318"))
+def test_external_collector_passes_through(tree):
+    # #956: OpenObserve is the only bundled backend; JAEGER_ENABLED is refused (#1070).
+    r = _run(tree, ("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector.platform:4318"))
     assert r.returncode == 0, r.stderr
     values = (tree[0] / "dist" / "mainframe-rag-release-values.yaml").read_text()
     assert 'endpoint: "http://collector.platform:4318"' in values
@@ -2041,3 +2041,20 @@ def test_openobserve_password_length_counts_characters_not_bytes(tree, password,
         assert "E_OPENOBSERVE_WEAK_PASSWORD" in r.stderr
         assert password not in r.stdout + r.stderr
         assert _mutations(tree) == []
+
+
+# --- Retired airgap.env keys (#1070) ---
+
+
+def test_deploy_refuses_a_d53595e_shaped_env_before_any_cluster_call(tree):
+    from tests.helpers_airgap import D53595E_SHAPED_ENV, RETIRED_ENV_KEYS, retired_keys_listed
+
+    env_file = tree[0] / "d53595e.env"
+    env_file.write_text(D53595E_SHAPED_ENV)
+    r = _run(tree, ("AIRGAP_ENV", str(env_file)))
+    assert r.returncode != 0, r.stdout
+    assert sorted(retired_keys_listed(r.stderr)) == sorted(RETIRED_ENV_KEYS), r.stderr
+    assert "sentinel-" not in r.stdout + r.stderr
+    log = tree[1]
+    assert not log.exists() or log.read_text() == ""
+    assert not ((tree[0]) / "dist").exists() or not list((tree[0] / "dist").glob("*rendered*"))

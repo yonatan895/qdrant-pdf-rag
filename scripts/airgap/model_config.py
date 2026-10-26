@@ -7,6 +7,7 @@ import re
 import ssl
 import sys
 from collections.abc import Mapping
+from urllib.parse import urlsplit
 
 REASONING_INTEGER_FIELDS = {
     "LLM_MAX_MODEL_LEN": ("maxModelLen", 512, 131072),
@@ -70,6 +71,72 @@ def parse_strict_bool(name: str, raw: str, default: bool) -> bool:
     if low in ("false", "0", "no"):
         return False
     raise ValueError(f"{name} must be true/false")
+
+
+# Operator keys that earlier releases honoured and the current code ignores
+# (#1070). Ignoring them silently would let an upgrade run with a different
+# registry, namespace, embedding origin or tracing than the operator wrote, so
+# any non-empty value refuses. (key, retiring commit, fixed migration text).
+RETIRED_KEYS: tuple[tuple[str, str, str], ...] = (
+    ("REGISTRY_INTERNAL", "547d04d", "set INTERNAL_REGISTRY and remove it"),
+    ("OPENSHIFT_NAMESPACE", "547d04d", "set NAMESPACE and remove it"),
+    (
+        "VLLM_BASE_URL",
+        "547d04d",
+        ("set EMBED_BASE_URL to the old value plus /v1 (clients append /embeddings to a base "
+         "that must end in /v1; do not repeat /v1), then remove it"),
+    ),
+    (
+        "JAEGER_ENABLED",
+        "d7765dc",
+        "remove it; OTEL_EXPORTER_OTLP_ENDPOINT selects the collector (off disables tracing)",
+    ),
+    (
+        "JAEGER_QUERY_URL",
+        "d7765dc",
+        "remove it; airgap:smoke reads TRACE_QUERY_URL, TRACE_QUERY_USER and TRACE_QUERY_PASSWORD",
+    ),
+)
+
+
+# d53595e's example pointed OTEL_EXPORTER_OTLP_ENDPOINT at the bundled Jaeger
+# Service. Any set endpoint now means an external collector (no OpenObserve),
+# so that value would drop every trace silently (#1070).
+OTEL_ENDPOINT_KEY = "OTEL_EXPORTER_OTLP_ENDPOINT"
+_RETIRED_JAEGER_HOST = re.compile(r"jaeger(\.[a-z0-9-]+\.svc(\.[a-z0-9.-]*)?)?")
+_JAEGER_ENDPOINT_MESSAGE = (
+    "points at the retired in-cluster Jaeger; unset it to use the bundled OpenObserve "
+    "collector, or set your external collector"
+)
+
+
+def _points_at_retired_jaeger(raw: str) -> bool:
+    candidate = raw.strip()
+    if "://" not in candidate:
+        return False  # not a URL: the endpoint validator refuses it with its own message
+    try:
+        host = urlsplit(candidate).hostname or ""
+    except ValueError:
+        return False
+    return _RETIRED_JAEGER_HOST.fullmatch(host.lower().rstrip(".")) is not None
+
+
+def require_no_retired_keys(values: Mapping[str, str]) -> None:
+    """Refuse every retired key that carries a non-empty value, and a tracing
+    endpoint naming the retired in-cluster Jaeger Service. One fixed message
+    lists them all; values are never echoed. Empty or absent is fine."""
+    lines = [
+        f"  {key} (retired in {ref}): {text}"
+        for key, ref, text in RETIRED_KEYS
+        if values.get(key, "") != ""
+    ]
+    if _points_at_retired_jaeger(values.get(OTEL_ENDPOINT_KEY, "")):
+        lines.append(f"  {OTEL_ENDPOINT_KEY} (retired in d7765dc): {_JAEGER_ENDPOINT_MESSAGE}")
+    if lines:
+        raise ValueError(
+            "retired airgap.env keys are set and no longer read; apply the migration "
+            "or empty/remove each key before any cluster change:\n" + "\n".join(lines)
+        )
 
 
 def require_in_place_retired(raw: str) -> None:
@@ -291,6 +358,7 @@ def openwebui_config(values: Mapping[str, str]) -> dict[str, object] | None:
 
 
 def validate_operator_booleans(values: Mapping[str, str]) -> None:
+    require_no_retired_keys(values)
     for name in OPERATOR_BOOL_KEYS:
         parse_strict_bool(name, values.get(name, ""), False)
     require_in_place_retired(values.get("INGEST_ALIAS_PUBLISH", ""))
@@ -386,8 +454,12 @@ def validate_model_config(values: Mapping[str, str]) -> None:
                 raise ValueError(f"{name} is required when CONTEXTUAL_EMBED_ENABLED is set")
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    args = sys.argv[1:] if argv is None else argv
     try:
+        if args == ["--retired-keys"]:
+            require_no_retired_keys(os.environ)
+            return 0
         validate_operator_booleans(os.environ)
         network_policy(os.environ)
         feedback_config(os.environ)

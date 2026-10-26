@@ -5,6 +5,7 @@
 
 . "$(dirname -- "$0")/common.sh"
 
+refuse_retired_keys
 resolve_aliases
 resolve_observability
 require_env NAMESPACE
