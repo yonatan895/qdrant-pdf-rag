@@ -1143,6 +1143,55 @@ Pod-level fields may be empty when a container has its own context; inspect both
 and run `id` where the image provides it. Save only sanitized resource metadata;
 never archive Secret YAML, token-bearing login commands or browser cookies.
 
+##### Open WebUI go-live checks
+
+Open WebUI is the default-on main docs platform ([ADR-0008](adr/0008-open-webui-main-docs-platform.md)),
+and every [ADR-0007](adr/0007-open-webui-docs-front-end.md) condition is a release
+gate, so each check below blocks go-live on failure. A failure also blocks a site
+that keeps it on. The same rules apply as above: no `anyuid`, no site-only fix, and
+evidence holds ids, states and counts, never chat text, tokens or Secret content.
+The Kind acceptance lane stands in for the IdP, Route and SCC, so none of these
+checks is proven before the site run. Inputs and the AD FS client are described in
+[the Open WebUI section of deploy.md](deploy.md#docs-front-end): the paragraphs
+"Enabling it at a site (default)" and "Register Open WebUI with AD FS".
+
+| Check (gate) | Required evidence |
+|---|---|
+| Admission with an arbitrary UID (R1) | The `rag-openwebui` pod and its sidecars carry `openshift.io/scc` exactly `restricted-v2`. `id` in the container shows a UID from the namespace range with group 0, not an image-fixed UID. No `anyuid` grant. |
+| Own Route only (R3) | `oc -n "$NAMESPACE" get route` lists `rag-openwebui` as `reencrypt`, with the `OPENWEBUI_HOST` host. No other Route points at the `rag-openwebui` Service. Browser and CLI verify the certificate without bypass. |
+| AD FS sign-in, user and admin (R3) | A test account in the allowed-role group signs in and appears in the admin user list with role `user` (not `pending`). A test account in the admin group signs in and has role `admin`. A test account in no role group is refused with 403 and gets no session. |
+| Role revocation (R3) | Two tests. **User:** remove a test user from the role group and sign in again: expect a 403 when no role group is left, or demotion to `user` for an admin who stays in the user group. **Admin holding a Functions-API key:** (1) the test admin holds a key allowed on `/api/v1/functions`; show it works (for example a listing of Functions answers 200). (2) Remove that admin from the admins group and every role group. (3) Sign in again: expect 403, while the stored role stays admin. (4) Show the key still works. This is the documented residual: the IdP change applies only at the next successful sign-in, and the chart restricts keys to admins and to `/api/v1/functions`, so a removed admin keeps Functions-API admin until demoted. (5) Demote or delete the account in the Open WebUI admin UI. (6) Show the key is now refused. (7) If that admin owned the installer's `admin-api-key`, rotate it (deploy.md, "Admin API key (installer)"). Record ids and status codes only. |
+| Docs model only (V2) | A signed-in user and an admin see only the Docs model. No other model, connection, tool or tool server is listed. Signup and password login are refused. |
+| Answer with citations (V3) | An ordinary user asks one corpus question. The answer streams to the end and shows source chips with documents. The console `/ui` still works afterwards. |
+| Egress probe from the pod (R2) | From inside the pod, bounded direct-IP TCP attempts, with the tool the image provides as under the Egress row above. Reachable: the agent Service, cluster DNS and the IdP addresses. Blocked: a public address, the API server, Qdrant, the gateway and a pod in another namespace. Record that no policy grants this pod egress beyond the chart's allow-list (agent, DNS, IdP): list the policies that select the pod (`oc -n "$NAMESPACE" get networkpolicy -o yaml`, names and egress rules only); a namespace default-deny that also selects it is expected and adds nothing. Namespace-admin can run the pod-side attempts and read the namespace policies. The API-server and other-namespace targets, and node-level flows, need platform evidence from the network team. |
+| Blocked endpoints at the router (E1) | With `$C` a signed-in user's session cookie and `$H` the Route host, run the POST loop from the "Allow-list proxy" paragraph of [deploy.md](deploy.md#docs-front-end) through the real router and Route (the paragraph's "Site acceptance" block, not a port-forward). Every path must return `403` (`400` for the null byte), and nothing may be stored. An ordinary chat must still answer through the Docs model. |
+| Storage class (S1) | `oc -n "$NAMESPACE" get pvc rag-openwebui-data -o jsonpath='{.status.phase} {.spec.accessModes} {.spec.storageClassName}{"\n"}'` shows `Bound`, `ReadWriteOnce` and the intended class. The class is block storage, never NFS: `oc get storageclass` and its provisioner need cluster-read, otherwise platform evidence from the storage team. |
+| Backup retention (S3, site only) | Platform evidence from the backup owner: backups of `rag-openwebui-data` are kept at most 30 days (plus one backup cycle), match `OPENWEBUI_RETENTION_DAYS`, and stay inside the enterprise. Namespace-admin cannot see the backup system. |
+| Session lifetime (R3) | After sign-in, the session token expires in about 8 hours (`JWT_EXPIRES_IN`): decode the session token's `exp` against `iat` (claims only, never the token itself), or confirm the setting in the pod's rendered environment (`oc -n "$NAMESPACE" get deploy rag-openwebui -o yaml`, name and value of `JWT_EXPIRES_IN` only). |
+| No vector store or uploads (V1) | After the answer above, the data directory on the claim has no vector store directory, no vector tables and no `uploads/` content. List names and counts only. |
+| Retention purge scheduled (S2) | The chat-purge sidecar is running and its state file on the claim reports `consecutive_failures` 0 and a recent `last_success`. `OPENWEBUI_RETENTION_DAYS` matches the site decision (default 30). |
+| Console fallback (ADR-0008 item 5) | The OAuth console Route and `/ui` still work with Open WebUI up. |
+| Rollback leaves the PVC (K1) | Set `OPENWEBUI_ENABLED=false` and re-run `airgap:deploy`. The Deployment, Service, Route, NetworkPolicy and ConfigMap are gone, `rag-openwebui-data` is still Bound, and the agent and console are unaffected. Then set it back to `true` and re-deploy; the next ordinary chat succeeds. |
+
+Record the platform team's evidence and owner for any step that needs cluster-scoped
+access.
+
+##### Upgrading an existing site
+
+A site that moves from a release without Open WebUI **must** choose before the next
+`airgap:validate` or `airgap:deploy`: set the `OPENWEBUI_*` inputs and create their
+Secret, or set `OPENWEBUI_ENABLED=false`. With neither, validation refuses before any
+cluster change and the running release is untouched (fail closed, ADR-0008 items 3
+and 4). Follow the "Upgrade consequence for existing sites" paragraph of
+[deploy.md](deploy.md#docs-front-end), and review the new keys in `airgap.env.example`.
+
+If the new release changes the extraction rules version, the stored corpus is stale:
+a non-empty collection written by a different rules version refuses an ordinary ingest.
+Re-ingest it with `--reingest` (see "Extraction-rules changes" in
+[section 3.10](#310-managing-collections--real-world-ingest) and
+[ingest.md section 9](ingest.md#9-orchestration-run_ingestpy-inventorypy)) before go-live,
+and confirm `/healthz` reports the representation ready.
+
 ### 4.7 Local Cluster Testing Standard (Kind + Local Registry)
 
 For a clean local deployment with real models and an optional full corpus
