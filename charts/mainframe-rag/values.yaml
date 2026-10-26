@@ -66,7 +66,7 @@ images:
     repository: openshift4/ose-oauth-proxy
     tag: v4.14
     pullPolicy: IfNotPresent
-  # Optional Open WebUI docs front end (ADR-0007, #1074): the hardened derived
+  # Open WebUI docs front end (ADR-0007, #1074): the hardened derived
   # image of the upstream slim release (#1073). Tag form like the other
   # third-party images; the digest is pinned in images.txt (sha256:PENDING
   # until the #1073 qualification records it) and enforced at pack/load.
@@ -227,9 +227,13 @@ feedback:
   storageSize: 10Gi
   retentionDays: 180
 
-# Optional Open WebUI docs front end (ADR-0007, #1074). Default OFF: nothing
-# below renders and every other object is byte-identical to a render without
-# this block (K1 rollback). True renders one Recreate replica of the hardened
+# Open WebUI docs front end (ADR-0007, #1074): the main docs platform, ON by
+# default (maintainer decision 2026-10-26). While the required site inputs
+# below (secretName, host, oidc.providerUrl/clientId/allowedRoles/adminRoles,
+# idpEgress.cidrs, route.destinationCA) are missing the render fails closed
+# with a fixed message; opt out with `--set openwebui.enabled=false`, which
+# renders nothing from this block and leaves every other object byte-identical
+# to a render without it (K1 rollback). Enabled renders one Recreate replica of the hardened
 # image (one worker, SQLite on the kept RWO claim rag-openwebui-data, never
 # NFS), a ClusterIP Service on 8443 (TLS from the service-serving cert), a
 # reencrypt Route on `host` whose destination CA is route.destinationCA (the
@@ -246,7 +250,7 @@ feedback:
 # ADR-0007 S2: 30 days; backups follow the same window). The purge sidecar in
 # the Open WebUI pod enforces it; an explicit null fails the render.
 openwebui:
-  enabled: false
+  enabled: true
   secretName: ""
   # Public Route host; the OIDC redirect URI is https://<host>/oauth/oidc/callback.
   host: ""

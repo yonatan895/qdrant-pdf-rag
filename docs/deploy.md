@@ -279,10 +279,12 @@ Compatibility and lifecycle decisions under #448:
   agent pods voids the restriction; a site default-deny is not satisfied by
   this policy for Qdrant or OpenObserve.
 
-- Open WebUI docs front end (issue #1074, ADR-0007, **default off**): `OPENWEBUI_*`
+- Open WebUI docs front end (issue #1074, ADR-0007, ADR-0008, **default on**): `OPENWEBUI_*`
   keys, validated by `model_config.openwebui_config` before any mutation, render the
   objects, Route checks and Pipe install described in
-  [Docs front end](#docs-front-end); off renders nothing.
+  [Docs front end](#docs-front-end). Unset means on and, while a required site input is
+  missing, the deploy and the chart render refuse; `OPENWEBUI_ENABLED=false` opts out and
+  renders nothing.
 
 <a id="feedback-service"></a>
 - Answer-feedback service (issue #804, ADR-0005, **default off**). With
@@ -1074,7 +1076,7 @@ and CI tooling have different owners and pull credentials.
 | OpenObserve OSS (ADR-0006) | `openobserve/openobserve:v1.1.2` | as the agent; the chart references it by digest only (`images.openobserve.digest`) | `load.sh` | cluster pods when tracing is on with an empty `tracing.endpoint` |
 | otelcol-contrib (ADR-0006) | `otel/opentelemetry-collector-contrib:0.160.0` | as the agent | `load.sh` | cluster pod (`Deployment/otelcol`, container `otelcol`) beside OpenObserve |
 | OAuth sidecar (optional) | `openshift4/ose-oauth-proxy:v4.14` | as the agent; absent while `images.txt` says `sha256:PENDING` | `load.sh` | cluster pods |
-| Open WebUI front end (optional, ADR-0007, #1074) | `qdrant-pdf-rag-openwebui:v0.12.3-slim` | as the agent; absent while `images.txt` says `sha256:PENDING` (the factory records the pushed manifest digest of the #1073 trial image; recipe `scripts/ci/openwebui-trial/Containerfile.openwebui`, PR #1085); the upstream `open-webui/open-webui:v0.12.3-slim` line is factory build provenance, never pushed | `load.sh` | cluster pod (`Deployment/rag-openwebui`, container `openwebui`) when `openwebui.enabled` |
+| Open WebUI front end (default on, ADR-0007/ADR-0008, #1074) | `qdrant-pdf-rag-openwebui:v0.12.3-slim` | as the agent; absent while `images.txt` says `sha256:PENDING` (the factory records the pushed manifest digest of the #1073 trial image; recipe `images/openwebui/Containerfile`); the upstream `open-webui/open-webui:v0.12.3-slim` line is factory build provenance, never pushed | `load.sh` | cluster pod (`Deployment/rag-openwebui`, container `openwebui`) when `openwebui.enabled` |
 | Open WebUI allow-list proxy (ADR-0007 E1, **Verifier-owned** where the workflow builds or mirrors images) | `nginxinc/nginx-unprivileged:1.30.6-alpine` | pinned by digest in `images.txt`; bundled as `openwebui-proxy-image.tar` exactly when the Open WebUI member is | `load.sh` | cluster pod (`Deployment/rag-openwebui`, container `proxy`) when `openwebui.enabled` |
 | CI job image | `ci/python:3.14`, or a complete `CI_PYTHON_IMAGE` | mirrored UBI Python 3.14 (GIL) with git, pip, tar, sha256sum | platform or factory mirror, not this repository | GitLab runner |
 | CI Qdrant service | `qdrant/qdrant@sha256:<images.txt digest>` | the `images.txt` manifest digest, so a tag is never enough | registry-to-registry copy that preserves the digest | GitLab runner (`sim`, `gate-l1`) |
@@ -1586,14 +1588,42 @@ The smoke trace check is a later step of #956.
 <a id="docs-front-end"></a>
 ## Docs front end: Open WebUI (ADR-0007, #1074)
 
-Open WebUI is an optional, **off-by-default** second front end for the docs corpus. It is a
+Open WebUI is the main docs platform and is **on by default** (maintainer decision 2026-10-26,
+ADR-0008); the console stays the frozen fallback. It is a front end for the docs corpus. It is a
 client of the agent: its only model is the repository docs Pipe (#1072) over `/v1/chat`. It
 holds no gateway key and no model connection, and it does no retrieval of its own. The console
-stays the supported fallback and is untouched. Enabling it in production waits for ADR-0007 to be
-accepted and for the #1073 trial to qualify the image and the settings below. The environment
+stays the supported fallback and is untouched. Production use waits for the #1073 trial to
+qualify the image and the settings below, and for the image pin (below). The environment
 variable names, the uvicorn TLS arguments, the Functions API used by the Pipe installer and the
 chat table layout used by the purge are those of Open WebUI v0.12.3, **pending #1073
 qualification**, and are re-qualified on every pin import.
+
+**Enabling it at a site (default).** A site that does nothing gets Open WebUI, so the deploy
+refuses until the site supplies every required input. Both layers refuse before any cluster change:
+
+- `airgap.env` layer (`validate.sh`, `map_values.py`): refuses with one fixed message that names the
+  missing keys (never values), from `OPENWEBUI_SECRET`, `OPENWEBUI_HOST`,
+  `OPENWEBUI_OIDC_PROVIDER_URL`, `OPENWEBUI_OIDC_CLIENT_ID`, `OPENWEBUI_OIDC_ALLOWED_ROLES`,
+  `OPENWEBUI_OIDC_ADMIN_ROLES`, `OPENWEBUI_IDP_EGRESS_CIDRS`, `ROUTE_DESTINATION_CA_FILE`, and
+  names the opt-out `OPENWEBUI_ENABLED=false`.
+- Chart layer (direct `helm template/upgrade`): the same eight inputs as chart values
+  (`openwebui.secretName`, `host`, `oidc.providerUrl`, `oidc.clientId`, `oidc.allowedRoles`,
+  `oidc.adminRoles`, `idpEgress.cidrs`, `route.destinationCA`); the render fails with a fixed message
+  naming the missing values and `--set openwebui.enabled=false`. A half-configured Open WebUI is
+  never rendered, and there is no placeholder host or local-login fallback.
+- Opt out: `OPENWEBUI_ENABLED=false` in `airgap.env` (the mapper writes `openwebui.enabled: false`)
+  or `--set openwebui.enabled=false`. The opt-out render is byte-identical to a chart without Open
+  WebUI (tested).
+- Test inputs: `charts/mainframe-rag/ci/openwebui-site-values.yaml` holds obviously fake values
+  (`example.invalid`, TEST-NET CIDR) for lint and render tests only. Never use it at a site.
+
+**Upgrade consequence for existing sites.** A site upgrading from a release that predates this
+default and whose `airgap.env` has no `OPENWEBUI_*` keys fails validation at the next
+`airgap:validate`/`airgap:deploy`, before any cluster change, and keeps running the previous
+release. Either supply the inputs and the Secret (procedure below) or set `OPENWEBUI_ENABLED=false`
+to keep today's render unchanged. Scripts and CI that call `map_values.py` or `helm template`
+directly need the same choice. The image pin must also be recorded and bundled (step 1 below) before
+an enabled deploy can pass.
 
 **What `OPENWEBUI_ENABLED=true` (`openwebui.enabled`) renders.** With it off, the render is
 byte-identical to a release without it (tested).
@@ -1655,8 +1685,8 @@ byte-identical to a release without it (tested).
   CIDRs and port for the egress policy.
 
 **Site procedure.**
-1. On the connected side, #1073 records the derived image and its upstream base digest in
-   `images.txt`. Then pack and load: the bundle carries `openwebui-image.tar` only once the pin is
+1. On the connected side, build the derived image from `images/openwebui/Containerfile` (upstream
+   slim digest plus one ownership layer), push it, and record its manifest digest in `images.txt`. Then pack and load: the bundle carries `openwebui-image.tar` only once the pin is
    recorded, and validate/deploy refuse `OPENWEBUI_ENABLED=true` while the pin is
    `sha256:PENDING` or does not match the chart and the bundle.
 2. Create the Secret (`OPENWEBUI_SECRET`) with `webui-secret-key` (`openssl rand -hex 32`) and

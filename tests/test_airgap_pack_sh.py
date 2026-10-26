@@ -768,3 +768,28 @@ def test_only_manual_main_dispatch_signs_and_nightly_packs_ephemeral():
             ["sh", "-c", f"{cond.group(1)} && echo trusted"], capture_output=True, text=True, check=False,
             env={"PATH": os.environ["PATH"], "GITHUB_REF": ref, "GITHUB_EVENT_NAME": event})
         assert (out.stdout.strip() == "trusted") is trusted, f"{where}: trusted flag"
+
+
+def test_openwebui_product_image_is_the_pinned_upstream_plus_one_ownership_layer():
+    """ADR-0007 R1: images/openwebui/Containerfile derives from exactly the upstream
+    slim digest recorded in images.txt, adds no content (no COPY/ADD, no installs,
+    no downloads) and ends as a non-root UID in group 0 (restricted-v2)."""
+    import re
+
+    text = (REPO / "images" / "openwebui" / "Containerfile").read_text()
+    instructions = [line.split(None, 1) for line in text.replace("\\\n", " ").splitlines()
+                    if line.strip() and not line.lstrip().startswith("#")]
+    froms = [parts[1].strip() for parts in instructions if parts[0] == "FROM"]
+    pins = {p[0]: p[1] for p in (line.split() for line in (REPO / "images.txt").read_text().splitlines()
+                                 if line.strip() and not line.lstrip().startswith("#")) if len(p) >= 2}
+    upstream = next(k for k in pins if k.startswith("ghcr.io/open-webui/open-webui:"))
+    assert froms == [f"{upstream.partition(':')[0]}@{pins[upstream]}"]
+    assert re.fullmatch(r"sha256:[0-9a-f]{64}", pins[upstream])
+    forbidden = {"COPY", "ADD"}
+    assert not forbidden & {parts[0] for parts in instructions}
+    runs = " ".join(parts[1] for parts in instructions if parts[0] == "RUN")
+    assert not re.search(r"\b(pip|npm|apt|apt-get|apk|curl|wget|dnf|microdnf)\b", runs)
+    assert [parts[1].strip() for parts in instructions if parts[0] == "USER"][-1] == "1000:0"
+    # The derived pin is named for the product repository and the same upstream tag.
+    derived = next(k for k in pins if k.startswith("ghcr.io/yonatan895/qdrant-pdf-rag-openwebui:"))
+    assert derived.partition(":")[2] == upstream.partition(":")[2]

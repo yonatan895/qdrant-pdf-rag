@@ -67,6 +67,7 @@ def _run(tree, extra_env=None):
         "DENSE_DIM": "768",
         "EMBED_MODEL_REVISION": "rev-1",
         "EMBED_BASE_URL": "http://vllm:8000/v1",
+        "OPENWEBUI_ENABLED": "false",  # default-on (ADR-0008): fixtures opt out explicitly
         # Issue #360: fixtures select the explicit single-node 1/1/1 profile;
         # the production preset is exercised by its own test below.
         "QDRANT_SHARD_NUMBER": "1",
@@ -1320,6 +1321,7 @@ OWUI_OPERATOR_ENV = {
     "OPENWEBUI_OIDC_ALLOWED_ROLES": "staff",
     "OPENWEBUI_OIDC_ADMIN_ROLES": "docs-admins",
     "OPENWEBUI_IDP_EGRESS_CIDRS": "10.20.0.0/24",
+    "ROUTE_DESTINATION_CA_FILE": "/etc/pki/test/service-ca.crt",
 }
 
 
@@ -1339,8 +1341,9 @@ def test_validate_openwebui_accepts_a_recorded_pin_matching_chart_and_bundle(tre
 
 
 @pytest.mark.parametrize("key,needle", [
-    ("OPENWEBUI_OIDC_CLIENT_ID", "OPENWEBUI_OIDC_CLIENT_ID is required"),
-    ("OPENWEBUI_IDP_EGRESS_CIDRS", "OPENWEBUI_IDP_EGRESS_CIDRS is required"),
+    ("OPENWEBUI_OIDC_CLIENT_ID", "required inputs are missing: OPENWEBUI_OIDC_CLIENT_ID. Set them, or opt out with OPENWEBUI_ENABLED=false"),
+    ("OPENWEBUI_IDP_EGRESS_CIDRS", "required inputs are missing: OPENWEBUI_IDP_EGRESS_CIDRS. Set them, or opt out with OPENWEBUI_ENABLED=false"),
+    ("ROUTE_DESTINATION_CA_FILE", "required inputs are missing: ROUTE_DESTINATION_CA_FILE. Set them, or opt out with OPENWEBUI_ENABLED=false"),
     ("OPENWEBUI_SECRET", "OPENWEBUI_SECRET"),
 ])
 def test_validate_openwebui_refuses_an_incomplete_selection(tree, key, needle):

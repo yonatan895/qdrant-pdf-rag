@@ -716,11 +716,11 @@ describe_feedback() {
     fi
 }
 
-# Issue #1074 (ADR-0007): the optional Open WebUI docs front end, default off.
+# Issue #1074 (ADR-0007): the Open WebUI docs front end, default ON (ADR-0008); OPENWEBUI_ENABLED=false opts out.
 # Shapes and required keys are validated by map_values.py (openwebui_config)
 # before any mutation; this only selects the stages and the Secret name.
 resolve_openwebui() {
-    OPENWEBUI_ENABLED=$(bool_flag OPENWEBUI_ENABLED false)
+    OPENWEBUI_ENABLED=$(bool_flag OPENWEBUI_ENABLED true)
     export OPENWEBUI_ENABLED
     [ "$OPENWEBUI_ENABLED" != "true" ] || check_secret_name "${OPENWEBUI_SECRET:-}" OPENWEBUI_SECRET
 }

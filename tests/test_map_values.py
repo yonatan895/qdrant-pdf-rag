@@ -70,6 +70,7 @@ BASE_ENV = {
     "DENSE_DIM": "768",
     "EMBED_MODEL_REVISION": "rev-1",
     "STORAGE_CLASS": "standard",
+    "OPENWEBUI_ENABLED": "false",  # default-on (ADR-0008): base mapping opts out explicitly
     "QDRANT_SHARD_NUMBER": "6",
     "QDRANT_REPLICATION_FACTOR": "3",
     "QDRANT_WRITE_CONSISTENCY_FACTOR": "2",
@@ -951,12 +952,25 @@ def _owui_env(monkeypatch, tmp_path, **extra):
         monkeypatch.setenv(key, value)
 
 
-def test_openwebui_is_absent_from_the_release_values_by_default(mapper_env):
+def test_openwebui_opt_out_renders_only_the_explicit_off_switch(mapper_env):
+    """OPENWEBUI_ENABLED=false (the base env) reaches the chart as enabled=false:
+    the chart default is on, so the opt-out must be written, and nothing else
+    of the front end (image, route CA, inputs) is emitted (K1)."""
     r, out = mapper_env()
     assert r.returncode == 0, r.stderr
     values = load_values(out)
-    assert "openwebui" not in values and "openwebui" not in values["images"]
-    assert "openwebui" not in out.read_text().lower()
+    assert values["openwebui"] == {"enabled": False}
+    assert "openwebui" not in values["images"] and "openwebuiProxy" not in values["images"]
+
+
+def test_openwebui_unset_is_enabled_and_fails_closed_naming_the_opt_out(monkeypatch, mapper_env):
+    monkeypatch.delenv("OPENWEBUI_ENABLED", raising=False)
+    r, out = mapper_env()
+    assert r.returncode != 0 and not out.exists()
+    assert ("inputs are missing: OPENWEBUI_SECRET, OPENWEBUI_HOST, OPENWEBUI_OIDC_PROVIDER_URL, "
+            "OPENWEBUI_OIDC_CLIENT_ID, OPENWEBUI_OIDC_ALLOWED_ROLES, OPENWEBUI_OIDC_ADMIN_ROLES, "
+            "OPENWEBUI_IDP_EGRESS_CIDRS, ROUTE_DESTINATION_CA_FILE. Set them, or opt out with "
+            "OPENWEBUI_ENABLED=false") in r.stderr
 
 
 def test_openwebui_selection_round_trips_with_the_decided_defaults(monkeypatch, mapper_env, tmp_path):
@@ -1008,25 +1022,25 @@ def test_openwebui_allow_list_proxy_image_is_rendered_with_its_verified_digest(m
 
 @pytest.mark.parametrize("env,message", [
     ({"OPENWEBUI_ENABLED": "maybe"}, "OPENWEBUI_ENABLED must be true/false"),
-    ({"OPENWEBUI_SECRET": ""}, "OPENWEBUI_SECRET is required"),
+    ({"OPENWEBUI_SECRET": ""}, "inputs are missing: OPENWEBUI_SECRET"),
     ({"OPENWEBUI_SECRET": "Bad_Name"}, "OPENWEBUI_SECRET must be"),
-    ({"OPENWEBUI_HOST": ""}, "OPENWEBUI_HOST is required"),
+    ({"OPENWEBUI_HOST": ""}, "inputs are missing: OPENWEBUI_HOST"),
     ({"OPENWEBUI_HOST": "https://docs.example.internal"}, "OPENWEBUI_HOST must be"),
     ({"OPENWEBUI_OIDC_PROVIDER_URL": "http://idp.example/.well-known/openid-configuration"},
      "OPENWEBUI_OIDC_PROVIDER_URL must be"),
-    ({"OPENWEBUI_OIDC_PROVIDER_URL": ""}, "OPENWEBUI_OIDC_PROVIDER_URL is required"),
-    ({"OPENWEBUI_OIDC_CLIENT_ID": ""}, "OPENWEBUI_OIDC_CLIENT_ID is required"),
-    ({"OPENWEBUI_OIDC_ADMIN_ROLES": ""}, "OPENWEBUI_OIDC_ADMIN_ROLES is required"),
+    ({"OPENWEBUI_OIDC_PROVIDER_URL": ""}, "inputs are missing: OPENWEBUI_OIDC_PROVIDER_URL"),
+    ({"OPENWEBUI_OIDC_CLIENT_ID": ""}, "inputs are missing: OPENWEBUI_OIDC_CLIENT_ID"),
+    ({"OPENWEBUI_OIDC_ADMIN_ROLES": ""}, "inputs are missing: OPENWEBUI_OIDC_ADMIN_ROLES"),
     ({"OPENWEBUI_OIDC_ALLOWED_ROLES": "a,,b"}, "OPENWEBUI_OIDC_ALLOWED_ROLES must be"),
     ({"OPENWEBUI_OIDC_GROUP_CLAIM": "group claim"}, "OPENWEBUI_OIDC_GROUP_CLAIM must be"),
-    ({"OPENWEBUI_IDP_EGRESS_CIDRS": ""}, "OPENWEBUI_IDP_EGRESS_CIDRS is required"),
+    ({"OPENWEBUI_IDP_EGRESS_CIDRS": ""}, "inputs are missing: OPENWEBUI_IDP_EGRESS_CIDRS"),
     ({"OPENWEBUI_IDP_EGRESS_CIDRS": "idp.example.internal"}, "OPENWEBUI_IDP_EGRESS_CIDRS must be"),
     ({"OPENWEBUI_IDP_EGRESS_CIDRS": "10.0.0.300/32"}, "OPENWEBUI_IDP_EGRESS_CIDRS must be"),
     ({"OPENWEBUI_IDP_EGRESS_PORT": "0"}, "OPENWEBUI_IDP_EGRESS_PORT must be"),
     ({"OPENWEBUI_RETENTION_DAYS": "0"}, "OPENWEBUI_RETENTION_DAYS must be"),
     ({"OPENWEBUI_RETENTION_DAYS": "3651"}, "OPENWEBUI_RETENTION_DAYS must be"),
     ({"OPENWEBUI_STORAGE_SIZE": "10"}, "OPENWEBUI_STORAGE_SIZE must be"),
-    ({"ROUTE_DESTINATION_CA_FILE": ""}, "needs ROUTE_DESTINATION_CA_FILE"),
+    ({"ROUTE_DESTINATION_CA_FILE": ""}, "inputs are missing: ROUTE_DESTINATION_CA_FILE"),
     # Shapes are checked even while the feature is off: a typo fails today.
     ({"OPENWEBUI_ENABLED": "false", "OPENWEBUI_RETENTION_DAYS": "forever"}, "OPENWEBUI_RETENTION_DAYS must be"),
 ])
@@ -1171,7 +1185,8 @@ def test_request_bound_invalid_values_fail_without_echo(monkeypatch, mapper_env,
 
 def test_preflight_rejects_invalid_request_bound():
     """validate.sh / model_config.py shares the mapper's validator."""
-    env = {**os.environ, "EMBED_MODEL": "m", "EMBED_BASE_URL": "http://e", "REQUEST_QUEUE_MAX": "x"}
+    env = {**os.environ, "EMBED_MODEL": "m", "EMBED_BASE_URL": "http://e", "REQUEST_QUEUE_MAX": "x",
+           "OPENWEBUI_ENABLED": "false"}
     result = subprocess.run([sys.executable, str(REPO / "scripts/airgap/model_config.py")],
                             env=env, capture_output=True, text=True, check=False)
     assert result.returncode == 1 and "REQUEST_QUEUE_MAX" in result.stderr

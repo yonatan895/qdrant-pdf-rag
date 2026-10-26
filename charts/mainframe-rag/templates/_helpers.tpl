@@ -92,15 +92,30 @@ true
 {{- end -}}
 
 {{/*
-Open WebUI docs front end (ADR-0007, #1074). Default off; "true" or nothing.
-The schema requires the Secret, host, OIDC client, IdP egress and the
-retention window when enabled; the checks below repeat the two that must
-never be bypassed (no front end without its enforced retention window or
-without the repository-owned docs Pipe, #1072).
+Open WebUI docs front end (ADR-0007, #1074). Default on (maintainer decision 2026-10-26); "true" or nothing.
+The schema checks shapes only. Missing site inputs fail the render here with
+one fixed message that names the missing values and the opt-out, so a
+half-configured front end never renders. Also refused: no enforced retention
+window, no repository-owned docs Pipe (#1072).
 */}}
 {{- define "mainframe-rag.openwebuiEnabled" -}}
 {{- if .Values.openwebui.enabled -}}
-{{- if not .Values.openwebui.retentionDays -}}
+{{- $o := .Values.openwebui -}}
+{{- $oidc := $o.oidc | default dict -}}
+{{- $egress := $o.idpEgress | default dict -}}
+{{- $missing := list -}}
+{{- if not $o.secretName }}{{ $missing = append $missing "openwebui.secretName" }}{{ end -}}
+{{- if not $o.host }}{{ $missing = append $missing "openwebui.host" }}{{ end -}}
+{{- if not $oidc.providerUrl }}{{ $missing = append $missing "openwebui.oidc.providerUrl" }}{{ end -}}
+{{- if not $oidc.clientId }}{{ $missing = append $missing "openwebui.oidc.clientId" }}{{ end -}}
+{{- if not $oidc.allowedRoles }}{{ $missing = append $missing "openwebui.oidc.allowedRoles" }}{{ end -}}
+{{- if not $oidc.adminRoles }}{{ $missing = append $missing "openwebui.oidc.adminRoles" }}{{ end -}}
+{{- if not $egress.cidrs }}{{ $missing = append $missing "openwebui.idpEgress.cidrs" }}{{ end -}}
+{{- if not (.Values.route.destinationCA | default "" | trim) }}{{ $missing = append $missing "route.destinationCA" }}{{ end -}}
+{{- if $missing -}}
+{{- fail (printf "Open WebUI is enabled by default (ADR-0008) but required site inputs are missing: %s. Set them, or opt out with --set openwebui.enabled=false (OPENWEBUI_ENABLED=false in airgap.env)." (join ", " $missing)) -}}
+{{- end -}}
+{{- if not $o.retentionDays -}}
 {{- fail "openwebui.retentionDays is required when openwebui.enabled=true: the purge sidecar enforces the chat retention window (ADR-0007 S2)" -}}
 {{- end -}}
 {{- if not (.Files.Get "files/openwebui/docs_pipe.py") -}}

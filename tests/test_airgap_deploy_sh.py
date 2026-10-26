@@ -164,6 +164,7 @@ def _run(tree, *extra_env):
         "DENSE_DIM": "64",
         "EMBED_MODEL_REVISION": "rev-1",
         "EMBED_BASE_URL": "http://vllm:8000/v1",
+        "OPENWEBUI_ENABLED": "false",  # default-on (ADR-0008): fixtures opt out explicitly
         "SKOPEO_REGISTRY": str(tmp_path / "registry"),
         "PODS_FILE": str(tmp_path / "pods.json"),
     }
@@ -219,6 +220,7 @@ def test_model_budget_operator_precedence_reaches_rendered_pod(tree, source):
         "STORAGE_CLASS": "standard", "IMAGE_SHA": IMAGE_SHA,
         "EMBED_MODEL": "embed", "DENSE_DIM": "64", "EMBED_MODEL_REVISION": "rev-1",
         "EMBED_BASE_URL": "http://vllm:8000/v1",
+        "OPENWEBUI_ENABLED": "false",  # default-on (ADR-0008): fixtures opt out explicitly
         **(selected if source == "file" else alternate),
     }
     env_file = root / "airgap.env"

@@ -176,7 +176,8 @@ def test_signed_handoff_executes_workflow_with_shipped_model_modes(bundle_dir):
     result = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", command], cwd=bundle_dir.parent,
                             env={"PATH": f"{tools / 'bin'}:" + os.environ["PATH"],
                                  "HANDOFF_TOOLS": str(tools / "bin"),
-                                 "SHA": candidate_sha, "IMAGE_SHA": candidate_sha},
+                                 "SHA": candidate_sha, "IMAGE_SHA": candidate_sha,
+                                 "OPENWEBUI_ENABLED": "false"},  # default-on (ADR-0008)
                             capture_output=True, text=True, check=False)
     (bundle_dir.parent / "handoff-workflow.log").write_text(result.stdout + result.stderr)
     assert result.returncode == 0, result.stdout + result.stderr
