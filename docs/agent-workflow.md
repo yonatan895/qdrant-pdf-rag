@@ -138,9 +138,9 @@ No mandatory checklist of every failure mode for a trivial change. Settle design
 ## Process budget
 
 Agents optimize what the loop measures, so the loop measures value and caps its
-own overhead. The active quality tracker (#582 completed 2026-10-01; name the
-successor when one is designated) owns the scoreboard and
-budget figures; this section owns the mechanics:
+own overhead. No active quality tracker is designated: #582 completed
+2026-10-01 and no successor is named. A designated successor owns the scoreboard
+and budget figures; this section owns the mechanics:
 
 - Process work (agent instructions, CI/verifier/acceptance layers, workflow docs)
   links an escaped defect, a measured cost or a maintainer request. Target: at
