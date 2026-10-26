@@ -98,13 +98,18 @@ def proxy(tmp_path_factory):
                 "-v", f"{conf}:/etc/nginx/proxy/nginx.conf:ro", "-v", f"{tls}:/etc/tls/private:ro", image,
                 "nginx", "-c", "/etc/nginx/proxy/nginx.conf", "-g", "daemon off;")
         port = int(_docker("port", upstream, "8443/tcp").stdout.split(":")[-1])
+        # A bare TCP connect is not readiness: Docker's port proxy accepts on the host
+        # port before nginx listens in the container, so the first real request then
+        # sees an EOF. Wait for a full TLS round trip through the proxy to the stub.
         deadline = time.time() + 30
         while time.time() < deadline:
             try:
-                socket.create_connection(("127.0.0.1", port), timeout=1).close()
+                status, body = _request(port, "GET", ALLOWED[0])
+            except (OSError, ssl.SSLError, IndexError, ValueError):  # refused, EOF, empty reply
+                status, body = 0, ""
+            if status == 200 and body.startswith("stub:"):
                 break
-            except OSError:
-                time.sleep(0.3)
+            time.sleep(0.3)
         else:
             pytest.fail("the proxy container never listened: " + _docker("logs", front, check=False).stderr)
         yield port
