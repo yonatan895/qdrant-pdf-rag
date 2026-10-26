@@ -1765,3 +1765,38 @@ The pipeline's final banner reports only the stages it executed. Dry runs say
 live acceptance **NOT RUN**; a skipped ingest stays **NOT RUN**. Successful
 smoke stages do not certify grounded answers, console follow-ups or an exact
 production release. Complete the applicable live-stack acceptance separately.
+
+<a id="adfs-claims-check"></a>
+## AD FS claims check (bastion, before any Open WebUI deploy)
+
+`scripts/openwebui/adfs_claims_check.py` proves, from the air-gapped bastion, that the AD FS
+client for Open WebUI issues the claims the chart reads. It is stdlib-only (`python3 -I`),
+talks only to the AD FS host, and checks `iss`, `aud`, `nonce`, `exp` and the claim
+expectations. It prints claim **names**, the roles claim's JSON type and value **count**, and
+yes/no answers. It never prints tokens, the secret, claim values, group names or identity, and
+every failure is one fixed line with a distinct exit code (3 TLS, 5 callback, 6 token, 7 ID
+token, 8 claims). The ID token signature is **not** verified; this is a diagnostic only.
+
+```sh
+python3 -I scripts/openwebui/adfs_claims_check.py \
+  --issuer https://<adfs-host>/adfs --client-id <client-id> \
+  --client-secret-file <file> --ca-bundle <ca.pem> \
+  --roles-claim roles --email-claim upn --username-claim name \
+  --baseline-role signed-in
+```
+
+Flags also read `ADFS_ISSUER`, `ADFS_CLIENT_ID`, `ADFS_CLIENT_SECRET_FILE`, `ADFS_CA_BUNDLE`,
+`ADFS_ROLES_CLAIM`, `ADFS_EMAIL_CLAIM`, `ADFS_USERNAME_CLAIM`, `ADFS_BASELINE_ROLE`,
+`ADFS_SCOPES` (default `openid profile email allatclaims`) and `ADFS_CALLBACK_PORT` (8400).
+The secret is never an argument: without `--client-secret-file` it is prompted for. The
+script prints an authorize URL; open it in a browser that can reach AD FS and the bastion's
+loopback (for example through an SSH port forward of the callback port), sign in, and the
+script listens once on `http://127.0.0.1:<port>/callback` (180 s). Run it with a test account
+in a role group (expect exit 0), then with `--expect-baseline-only` and an account in no role
+group (the baseline must be the only value). `--decode-only <file>` analyses a saved ID token
+offline with the same output rules.
+
+The redirect URI the script sends is `http://localhost:8400/callback`. Register that second
+redirect URI on the **test** client only, next to `https://<host>/oauth/oidc/callback`, and
+remove it when the check is done; the production client keeps only the HTTPS callback.
+Tests: `tests/test_adfs_claims_check.py` (a fake TLS AD FS, canary leak assertions).
