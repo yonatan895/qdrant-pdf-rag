@@ -161,7 +161,7 @@
       "status": "approved"
     },
     {
-      "approval_ref": "gh:yonatan895/qdrant-pdf-rag#1070 issuecomment-6420326886 (ADR-0008 direction, 2026-10-26) and issuecomment-6420723791 (fail-closed); ADR-0007 L1 (accepted 2026-10-24, original relay via the #1070 coordinator: no issue comment id recorded); ADR-0008 (accepted 2026-10-26)",
+      "approval_ref": "gh:yonatan895/qdrant-pdf-rag#1070 issuecomment-6420326886 (ADR-0008 direction, 2026-10-26) and issuecomment-6420723791 (fail-closed); ADR-0007 L1 (accepted 2026-10-24, relay gh:yonatan895/qdrant-pdf-rag#1085 issuecomment-6388915196); ADR-0008 (accepted 2026-10-26)",
       "bind": {
         "digest": "sha256:5adfb0355bbe4a5860c0ba9482cc0b40f573de3749a21a64cf4789391a14fffc",
         "images_txt": "ghcr.io/open-webui/open-webui:v0.12.3-slim"
@@ -186,7 +186,7 @@
       "status": "approved"
     },
     {
-      "approval_ref": "gh:yonatan895/qdrant-pdf-rag#1070 issuecomment-6420326886 (ADR-0008 direction, 2026-10-26) and issuecomment-6420723791 (fail-closed); ADR-0007 L1 (accepted 2026-10-24, original relay via the #1070 coordinator: no issue comment id recorded); ADR-0008 (accepted 2026-10-26)",
+      "approval_ref": "gh:yonatan895/qdrant-pdf-rag#1070 issuecomment-6420326886 (ADR-0008 direction, 2026-10-26) and issuecomment-6420723791 (fail-closed); ADR-0007 L1 (accepted 2026-10-24, relay gh:yonatan895/qdrant-pdf-rag#1085 issuecomment-6388915196); ADR-0008 (accepted 2026-10-26)",
       "bind": {
         "digest": "sha256:5329730006ef29f54784c760467363dfc3d268e5089f92ceaa8942dcb3b5d65b",
         "images_txt": "ghcr.io/yonatan895/qdrant-pdf-rag-openwebui:v0.12.3-slim"
