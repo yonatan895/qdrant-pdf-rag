@@ -444,6 +444,18 @@ base must agree. No new SHAs are substituted into old evidence. `--all-open`
 paginates candidates; file pagination must match the changed-file count and
 retain both rename names verbatim.
 
+A required lane with no evidence leaves the check in progress and non-passing
+only while at least one native run bound to the current candidate is queued or
+in progress. The run must match the current head and PR, have been created after
+the current test merge, and its completed jobs' receipts must validate; forged
+or corrupt evidence fails immediately. A missing lane from a completed run, a
+failed, skipped or cancelled lane, an unverified receipt, or a run that cannot be
+attributed to the current head/test merge completes as failure. A completed
+neutral check would satisfy the required check on this repository, so pending is
+never published as success or completed neutral: it stays in progress and
+non-passing while the next native workflow event or the periodic reconciliation
+re-evaluates it.
+
 In bulk publication, each candidate gets its own success/failure check. A
 successfully completed reconciliation exits zero even when some candidates have
 unmet technical obligations. Errors preventing candidate listing or check publication still fail the workflow;

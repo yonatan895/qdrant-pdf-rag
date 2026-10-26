@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 import subprocess
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -102,6 +103,67 @@ def require_current_base(api: GitHub, pr: dict[str, Any], candidate: dict[str, A
     require(ref['object']['sha'] == candidate['base_sha'])
 
 
+# GitHub's nonterminal run states. A queued workflow has not produced its jobs
+# or artifacts yet, so its required lanes cannot be called missing failures.
+ACTIVE_RUN_STATUSES = frozenset({'queued', 'in_progress', 'requested', 'waiting', 'pending'})
+RUN_STATUSES = ACTIVE_RUN_STATUSES | {'completed'}
+
+
+def timestamp(value: Any) -> datetime:
+    """Parse a GitHub ISO timestamp and require a timezone."""
+    require(isinstance(value, str) and bool(value))
+    parsed = datetime.fromisoformat(value)
+    require(parsed.tzinfo is not None)
+    return parsed
+
+
+def current_native_run(candidate: dict[str, Any], workflow: str, run: dict[str, Any],
+                       execution_time: datetime) -> bool:
+    """Bind a run to the current candidate head, PR and test merge.
+
+    The run API exposes the pull-request head, not the test-merge SHA. Requiring
+    the run to have been created after the current execution commit was
+    generated keeps an older merge's missing lanes from reading as pending. A content-twin
+    merge can still supply successful receipts; only its *missing* lanes are not
+    current.
+
+    When GitHub supplies a non-empty ``pull_requests`` list, the run must name
+    this PR. Empty or missing metadata falls back to the head/repository/time
+    binding above; that limitation is explicit rather than inferred.
+    """
+    try:
+        pull_requests = run.get('pull_requests')
+        return (run['event'] == 'pull_request'
+                and run['path'] == '.github/workflows/' + workflow
+                and run['head_sha'] == candidate['head_sha']
+                and run['repository']['id'] == candidate['repository_id']
+                and run['repository']['full_name'] == candidate['repository']
+                and run['head_repository']['id'] == candidate['head_repository_id']
+                and run['status'] in RUN_STATUSES
+                and (not pull_requests or any(
+                    isinstance(item, dict) and item.get('number') == candidate['number']
+                    for item in pull_requests))
+                # The run's ref is fixed when the run is created; a rerun keeps
+                # that ref, so the original creation time binds its test merge.
+                and timestamp(run.get('created_at') or run.get('run_started_at')) >= execution_time)
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def acceptance_pending(summary: Any, pending_lanes: set[str]) -> bool:
+    """Pending publication is allowed only when every blocker is a pending miss.
+
+    Completed missing, skipped, cancelled, failed, unverified and stale lanes
+    stay failures even while another native workflow is still running.
+    """
+    from scripts.review_tooling import LaneState
+
+    blockers = [lane for lane in summary.lanes if lane.blocks_readiness]
+    return bool(blockers) and all(
+        lane.state is LaneState.SELECTED_MISSING and lane.name in pending_lanes
+        for lane in blockers)
+
+
 def review_template(api: GitHub, number: int) -> dict[str, Any]:
     """Generate identity fields, never a verdict or a submitted review."""
     from scripts.review_tooling import SCHEMA_VERSION
@@ -161,6 +223,8 @@ def collect_native(api: GitHub, pr: dict[str, Any], approved_root: Path) -> dict
     approved_root must be the trusted base checkout. Reading candidate content
     through the API does not execute it. The publisher must repeat the candidate
     and run checks before publication; this snapshot alone grants no acceptance.
+    A lane without evidence is pending only while a run bound to the current
+    head and test merge is still active; completed misses stay missing.
     """
     candidate = candidate_identity(pr, api.repository)
     root_sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=approved_root, text=True).strip()
@@ -185,6 +249,11 @@ def collect_native(api: GitHub, pr: dict[str, Any], approved_root: Path) -> dict
     producer_digest = policy_inputs['scripts/ci_evidence.py']
     hazard_policy = {'catalogue': catalogue_bytes, 'approved_catalogue': approved_catalogue_bytes,
                      'runner_sha256': policy_inputs['scripts/check_hazard_sensitivity.py']}
+    execution_commit = api.get(api.prefix + 'commits/' + candidate['execution_sha'])
+    require(execution_commit['sha'] == candidate['execution_sha'])
+    require([parent['sha'] for parent in execution_commit['parents']]
+            == [candidate['base_sha'], candidate['head_sha']])
+    execution_time = timestamp(execution_commit['commit']['committer']['date'])
     runs = paginate(api.get, api.prefix + f"actions/runs?event=pull_request&head_sha={candidate['head_sha']}", 'workflow_runs')
     workflows = {p.workflow for p in PRODUCERS}
     latest = {}
@@ -194,33 +263,53 @@ def collect_native(api: GitHub, pr: dict[str, Any], approved_root: Path) -> dict
             latest[workflow] = max(matches, key=lambda r: r['id'])
     native = []
     snapshots = {}
+    stale_runs = []
+    active = False
     producers: tuple[NativeProducer, ...] = PRODUCERS
     for workflow, run in latest.items():
         run = api.get(api.prefix + f"actions/runs/{run['id']}")
         jobs = paginate(api.get, api.prefix + f"actions/runs/{run['id']}/attempts/{run['run_attempt']}/jobs", 'jobs')
         artifacts = paginate(api.get, api.prefix + f"actions/runs/{run['id']}/artifacts", 'artifacts')
         snapshots[workflow] = {'run_id': run['id'], 'run_attempt': run['run_attempt'], 'status': run['status']}
+        current = current_native_run(candidate, workflow, run, execution_time)
+        pending = current and run['status'] in ACTIVE_RUN_STATUSES
+        active = active or pending
+        if not current:
+            stale_runs.append({'workflow': workflow, 'run_id': run['id'], 'run_attempt': run['run_attempt']})
         source = api.blob(candidate['execution_sha'], '.github/workflows/' + workflow)
         workflow_digest = policy_inputs['.github/workflows/' + workflow]
         if workflow == 'ci.yml':
             producers = tuple(producer for producer in producers if producer.lane != 'unit_tests') + unit_producers(source, workflow_digest)
-        commit = api.get(api.prefix + 'commits/' + candidate['execution_sha'])
         for producer in (definition for definition in producers if definition.workflow == workflow):
             record: dict[str, Any] = {'lane': producer.lane, 'job': producer.job, 'status': 'missing'}
             try:
                 selected_jobs = [j for j in jobs if j['name'] == producer.job]
                 if not selected_jobs:
+                    record['status'] = 'pending' if pending else ('missing' if current else 'stale')
                     native.append(record)
                     continue
                 require(len(selected_jobs) == 1)
                 job = selected_jobs[0]
-                if job['status'] == 'completed' and job['conclusion'] in {'failure', 'cancelled', 'skipped', 'timed_out'}:
+                if job['status'] != 'completed':
+                    record['status'] = 'pending' if pending else ('missing' if current else 'stale')
+                    native.append(record)
+                    continue
+                if job['conclusion'] in {'failure', 'cancelled', 'skipped', 'timed_out'}:
                     record['status'] = job['conclusion']
+                    native.append(record)
+                    continue
+                if job['conclusion'] != 'success':
+                    # neutral/action_required and any future non-success
+                    # completion are final evidence failures, never pending.
+                    record['status'] = 'unverified' if current else 'stale'
                     native.append(record)
                     continue
                 selected_artifacts = [a for a in artifacts if a['name'] ==
                                       f"evidence-{producer.artifact}-attempt-{run['run_attempt']}"]
                 if not selected_artifacts:
+                    # The job is complete: a missing artifact is final, even if
+                    # sibling jobs keep the parent run active.
+                    record['status'] = 'missing' if current else 'stale'
                     native.append(record)
                     continue
                 require(len(selected_artifacts) == 1)
@@ -230,21 +319,43 @@ def collect_native(api: GitHub, pr: dict[str, Any], approved_root: Path) -> dict
                 report = object_json(artifact_members(archive, artifact['digest'])['evidence.json'])
                 tested_sha = report['execution_sha']
                 require(isinstance(tested_sha, str) and re.fullmatch('[a-f0-9]{40}', tested_sha) is not None)
-                tested_commit = (commit if tested_sha == candidate['execution_sha'] else
+                if not current and tested_sha == candidate['execution_sha']:
+                    # A run created before the current test merge cannot claim
+                    # the current execution SHA. Only a receipt naming another
+                    # merge with identical parents/tree may use the content-twin
+                    # exception below.
+                    record['status'] = 'stale'
+                    native.append(record)
+                    continue
+                tested_commit = (execution_commit if tested_sha == candidate['execution_sha'] else
                                  api.get(api.prefix + 'commits/' + tested_sha))
-                result = normalize_native(candidate=candidate, producer=producer, run=run, job=job,
+                # normalize_native refuses an active run. Validate the completed
+                # job against a completed-status copy so a corrupt/forged
+                # artifact fails now instead of hiding as pending.
+                active_run = run['status'] in ACTIVE_RUN_STATUSES
+                normalization_run = {**run, 'status': 'completed'} if active_run else run
+                result = normalize_native(candidate=candidate, producer=producer, run=normalization_run, job=job,
                                           artifact=artifact, execution_commit=tested_commit,
-                                          candidate_commit=commit, archive=archive,
+                                          candidate_commit=execution_commit, archive=archive,
                                           policy_digest=execution_policy_digest, producer_digest=producer_digest,
                                           workflow_digest=workflow_digest, workflow_source=source,
                                           hazard_policy=hazard_policy,
                                           unit_policy={path: policy_inputs[path] for path in UNIT_INPUTS})
-                record.update(result)
+                if pending:
+                    record['status'] = 'pending'
+                elif active_run:
+                    record['status'] = 'stale'
+                else:
+                    record.update(result)
             except (KeyError, TypeError, ValueError, OSError):
-                record['status'] = 'unverified'
+                # A valid active run is pending only through the explicit path
+                # above; any normalization refusal is unverified or stale.
+                record['status'] = 'unverified' if current else 'stale'
             native.append(record)
     statuses = {}
-    for lane in {producer.lane for producer in producers}:
+    pending_lanes: set[str] = set()
+    lane_names = {producer.lane for producer in producers}
+    for lane in lane_names:
         required_jobs = [producer for producer in producers if producer.lane == lane]
         results = [r for r in native if r['lane'] == lane]
         values = {r['status'] for r in results}
@@ -259,9 +370,20 @@ def collect_native(api: GitHub, pr: dict[str, Any], approved_root: Path) -> dict
                     validate_union([record['unit_coverage'] for record in results], shards=len(required_jobs))
                 except (ValueError, KeyError, TypeError):
                     statuses[lane] = 'unverified'
+        elif (len(results) == len(required_jobs) and 'pending' in values
+              and values <= {'success', 'pending'}):
+            pending_lanes.add(lane)
         # An absent workflow, shard, or artifact stays missing in the existing
         # taxonomy: do not turn it into a reported execution failure.
+    # A workflow that has not been created yet has no run to inspect. While a
+    # current candidate run is active, its lanes are pending rather than a
+    # completed missing result. Once every current run completes, this falls
+    # back to the ordinary missing/failure taxonomy.
+    if active:
+        evaluated = {record['lane'] for record in native}
+        pending_lanes.update(lane_names - evaluated)
     return {'candidate': candidate, 'native': native, 'lane_statuses': statuses, 'runs': snapshots,
+            'pending_lanes': pending_lanes, 'stale_runs': stale_runs,
             'policy_sha256': policy_digest, 'producer_sha256': producer_digest, 'policy_inputs': policy_inputs,
             'verifier_approval': verifier_approval, 'catalogue_approval': catalogue_approval}
 
@@ -297,6 +419,8 @@ def collect_acceptance(api: GitHub, number: int, approved_root: Path) -> dict[st
     require(native['candidate'] == candidate)
     require(type(pr['draft']) is bool)
     summary = build_acceptance_summary(manifest, native['lane_statuses'])
+    pending_lanes = set(native.get('pending_lanes', ()))
+    pending = acceptance_pending(summary, pending_lanes)
     result = summary.to_dict()
     result['native'] = [{key: value for key, value in record.items() if key != 'results'}
                         for record in native['native']]
@@ -305,7 +429,30 @@ def collect_acceptance(api: GitHub, number: int, approved_root: Path) -> dict[st
     result['policy_inputs'] = native['policy_inputs']
     result['verifier_approval'] = native.get('verifier_approval')
     result['catalogue_approval'] = native.get('catalogue_approval')
+    result['pending'] = pending
+    result['pending_lanes'] = sorted(pending_lanes)
+    result['stale_runs'] = native.get('stale_runs', [])
     result['markdown_report'] = summary.markdown_report
+    if pending:
+        required_pending = [lane.name for lane in summary.lanes
+                            if lane.required and lane.name in pending_lanes]
+        lanes = ', '.join(f'`{lane}`' for lane in required_pending)
+        result['markdown_report'] = (
+            '## Candidate Technical Verification\n\n'
+            f"- **Head SHA**: `{candidate['head_sha']}`\n"
+            f"- **Base SHA**: `{candidate['base_sha']}`\n"
+            f"- **Execution SHA**: `{candidate['execution_sha']}`\n"
+            '- **Prerequisite Obligations**: `PENDING_NATIVE_RUNS`\n'
+            '- **Technical Verification**: `pending`\n\n'
+            'Current native runs for this execution are still queued or in progress. '
+            f'Missing required lanes are pending, not failed: {lanes}. '
+            'The next native workflow event or the periodic reconciliation re-evaluates '
+            'this candidate. A completed run with a missing lane still fails.')
+    elif result['stale_runs']:
+        runs = ', '.join(f"`{run['workflow']}` run `{run['run_id']}`" for run in result['stale_runs'])
+        result['markdown_report'] += (
+            f'\n\nNative run(s) {runs} could not be attributed to the current head and '
+            'test merge, so their missing lanes are not pending.')
     tested_shas = sorted({record['execution_sha'] for record in native['native']
                           if record.get('status') == 'success' and record.get('execution_sha')})
     if any(sha != candidate['execution_sha'] for sha in tested_shas):
@@ -362,7 +509,9 @@ def publish_acceptance(api: GitHub, number: int, approved_root: Path, *,
                        post_templates: bool = False) -> dict[str, Any]:
     """Publish a fresh pending check before collecting; only a rechecked pass goes green.
 
-    Authentication determines the check's App source. Ordinary Actions tokens
+    Missing lanes backed by an active current run leave the check in progress
+    and non-passing; completed misses, failures and stale runs complete as
+    failure. Authentication determines the check's App source. Ordinary Actions tokens
     provide an advisory result; required enforcement needs the maintainer's
     dedicated App and repository rules, as documented in agent-workflow.md.
     """
@@ -427,13 +576,24 @@ def publish_acceptance(api: GitHub, number: int, approved_root: Path, *,
         result = {'all_prerequisites_met': False, 'verification_status': 'incomplete',
                   'error': 'acceptance_evidence_unavailable_or_changed'}
     ready = result['all_prerequisites_met']
+    pending = bool(result.get('pending')) and not ready
     # The report contains generated lane/status text; no artifact commands run.
     summary = result.get('markdown_report', 'Current evidence is unavailable or changed; acceptance is not ready.')
     summary = summary[:55000] + template_note
-    api.write(api.prefix + f"check-runs/{check['id']}", {
-        'status': 'completed', 'conclusion': 'success' if ready else 'failure',
-        'output': {'title': 'Technical verification passed' if ready else 'Technical verification incomplete',
-                   'summary': summary[:60000]}}, method='PATCH')
+    if pending:
+        # A completed neutral check satisfies required checks on this
+        # repository. Leave pending in progress and non-passing; a later native
+        # event or reconciliation publishes success or failure.
+        payload = {'status': 'in_progress',
+                   'output': {'title': 'Candidate CI is still running',
+                              'summary': summary[:60000]}}
+    else:
+        payload = {'status': 'completed',
+                   'conclusion': 'success' if ready else 'failure',
+                   'output': {'title': ('Technical verification passed' if ready else
+                                        'Technical verification incomplete'),
+                              'summary': summary[:60000]}}
+    api.write(api.prefix + f"check-runs/{check['id']}", payload, method='PATCH')
     return {**result, 'check_run_id': check['id']}
 
 
