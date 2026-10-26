@@ -33,6 +33,7 @@ def gateway_rendered(tmp_path):
         "LLM_MODEL_REASONING": "mock-reasoning", "GATEWAY_API_KEY_SECRET": "test-gateway-keys",
         "GATEWAY_API_KEY_SECRET_KEY": "api-key", "QDRANT_SHARD_NUMBER": "1",
         "QDRANT_REPLICATION_FACTOR": "1", "QDRANT_WRITE_CONSISTENCY_FACTOR": "1",
+        "OPENWEBUI_ENABLED": "false",  # default-on (ADR-0008): fixture opts out explicitly
     }
     path = tmp_path / "airgap.env"
     example = "\n".join(line for line in (ROOT / "airgap.env.example").read_text().splitlines()

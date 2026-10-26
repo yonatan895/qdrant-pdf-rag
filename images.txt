@@ -23,3 +23,26 @@ registry.access.redhat.com/ubi9/python-314-minimal:9.8                 sha256:63
 # omits upstream signature attachments (unsupported by docker-archive);
 # source digest pinning and the signed bundle checksum contract remain enforced.
 registry.redhat.io/openshift4/ose-oauth-proxy:v4.14                     sha256:b86cefe58f2f74904a71d0c1a064beb7a2a94caa979f4c472e6b936eec79850d
+# ADR-0007/ADR-0008 docs front end (#1074, on by default; OPENWEBUI_ENABLED=false opts out):
+# the hardened Open WebUI image, derived from the upstream slim image in the
+# connected factory (#1073) by an ownership/permission-only layer so it runs as
+# an arbitrary UID under restricted-v2 (ADR-0007 R1). Recipe:
+# images/openwebui/Containerfile (product image; the dev environment and acceptance lane in
+# scripts/openwebui/ build from the same file, replacing the #1073 trial scripts). The
+# derived image was built locally and qualified in the Kind trial (image id
+# sha256:bf4e04373ceab05bfff212a51f195d8afd3c0e8ecdb55b1a7d9ce528df0c002f, a
+# config id, not a pullable manifest digest). Its registry manifest digest is
+# recorded here only after the factory pushes it; while it is sha256:PENDING,
+# pack.sh skips the member and the default-on deploy fails closed (the maintainer
+# must push the image and record its digest, or opt out). Open WebUI License (BSD-3 plus branding).
+# The upstream slim line is the factory build base of the derived image (#1073
+# records it); like the UBI line it is provenance, never a bundle member. The
+# two needles are disjoint: open-webui:v0.12.3-slim vs qdrant-pdf-rag-openwebui.
+ghcr.io/open-webui/open-webui:v0.12.3-slim                             sha256:5adfb0355bbe4a5860c0ba9482cc0b40f573de3749a21a64cf4789391a14fffc
+ghcr.io/yonatan895/qdrant-pdf-rag-openwebui:v0.12.3-slim               sha256:PENDING
+# ADR-0007 E1 (maintainer decision 2026-10-24): the allow-list proxy sidecar of
+# the Open WebUI pod (nginx, BSD-2-Clause; the unprivileged image is Apache-2.0
+# packaging). Config: charts/mainframe-rag/files/openwebui/proxy.nginx.conf.
+# Bundled only together with the Open WebUI image; Verifier-owned wherever the
+# workflow builds or mirrors it. Index digest of 1.30.6-alpine (2026-10-19).
+docker.io/nginxinc/nginx-unprivileged:1.30.6-alpine                    sha256:f5116ed4606f3eb015dd4a8e28cb9b351476dc0ad4bc6e9f93b19cec130cdf03

@@ -1,0 +1,25 @@
+{{- /*
+Open WebUI data claim (ADR-0007 S1, #1074): SQLite database and Open WebUI's
+own state. Standalone and kept like rag-feedback-data: disabling the front end
+or removing the release keeps the claim and its chat content; nothing purges
+it while it is unmounted. Single-node RWO block volume; NFS refused by shell
+preflight and the schema (SQLite on network storage corrupts).
+*/ -}}
+{{- if include "mainframe-rag.openwebuiEnabled" . }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: rag-openwebui-data
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    helm.sh/resource-policy: keep
+  labels:
+    app: rag-openwebui
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: {{ .Values.storage.className }}
+  resources:
+    requests:
+      storage: {{ .Values.openwebui.storageSize | quote }}
+{{- end }}

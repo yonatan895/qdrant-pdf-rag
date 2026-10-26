@@ -67,6 +67,7 @@ def _run_ingest(tree, *extra_env, policy: tuple[str, str, str] | None = ("1", "1
         "DENSE_DIM": "768",
         "EMBED_MODEL_REVISION": "rev-1",
         "EMBED_BASE_URL": "http://vllm:8000/v1",
+        "OPENWEBUI_ENABLED": "false",  # default-on (ADR-0008): fixtures opt out explicitly
         "AIRGAP_DRYRUN": "1",
     }
     if policy is not None:
@@ -826,3 +827,23 @@ def test_ingest_missing_registry_image_refuses_before_any_cluster_call(ingest_tr
     assert r.returncode != 0
     assert f"cannot read back registry image {INGEST_REF}" in r.stderr
     assert not ingest_tree[1].exists() or "apply" not in ingest_tree[1].read_text().split()
+
+
+OWUI_SEVEN_INPUTS = (
+    ("OPENWEBUI_ENABLED", "true"), ("OPENWEBUI_SECRET", "owui-secrets"),
+    ("OPENWEBUI_HOST", "docs.apps.example.internal"),
+    ("OPENWEBUI_OIDC_PROVIDER_URL", "https://idp.example.internal/.well-known/openid-configuration"),
+    ("OPENWEBUI_OIDC_CLIENT_ID", "docs-frontend"), ("OPENWEBUI_OIDC_ALLOWED_ROLES", "staff"),
+    ("OPENWEBUI_OIDC_ADMIN_ROLES", "docs-admins"), ("OPENWEBUI_IDP_EGRESS_CIDRS", "10.20.0.0/24"),
+)
+
+
+def test_ingest_with_the_seven_openwebui_inputs_renders_only_the_job(ingest_tree):
+    """B1: a fully configured default-on site (no ROUTE_DESTINATION_CA_FILE, which
+    only deploy fetches) must still pass the explicit ingest operation, and the
+    one-shot Job render must not carry the front end."""
+    r = _run_ingest(ingest_tree, *OWUI_SEVEN_INPUTS)
+    assert r.returncode == 0, r.stderr
+    assert "ROUTE_DESTINATION_CA_FILE" not in r.stderr
+    rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
+    assert "claimName: my-manuals-pvc" in rendered and "rag-openwebui" not in rendered

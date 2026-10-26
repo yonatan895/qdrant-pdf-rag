@@ -184,6 +184,23 @@ def test_service_container_cannot_be_replaced_by_same_named_init_container():
     assert "qdrant runs an unknown digest" in " ".join(check(document))
 
 
+def test_openwebui_proxy_role_is_bound_to_its_own_container_of_the_same_deployment():
+    """ADR-0007 E1: the nginx sidecar is verified as container `proxy` of
+    rag-openwebui, by its own digest, independently of the Open WebUI container."""
+    document = rollout("Deployment", name="rag-openwebui", container="openwebui")
+    proxy_repo = "reg.internal/nginxinc/nginx-unprivileged"
+    proxy = {"name": "proxy", "image": f"{proxy_repo}:1.30.6-alpine"}
+    document["items"][0]["spec"]["template"]["spec"]["containers"].append(proxy)
+    pod = document["items"][-1]
+    pod["spec"]["containers"].append(proxy)
+    expected = {"openwebui": (REPO_Q, DIGEST), "openwebui_proxy": (proxy_repo, OTHER)}
+    assert "container proxy runs an unknown digest" in " ".join(mod.check(document, expected, "ns", "qdrant"))
+    pod["status"]["containerStatuses"].append({"name": "proxy", "imageID": f"{proxy_repo}@{OTHER}"})
+    assert mod.check(document, expected, "ns", "qdrant") == []
+    pod["status"]["containerStatuses"][-1]["imageID"] = f"{proxy_repo}@{DIGEST}"
+    assert mod.check(document, expected, "ns", "qdrant") != []
+
+
 def test_oauth_proxy_requires_its_own_container_status():
     document = rollout("Deployment", name="rag-agent", container="agent")
     oauth_repo = "reg.internal/openshift4/ose-oauth-proxy"
@@ -207,6 +224,26 @@ def test_openobserve_deployment_is_bound_to_its_own_workload_and_digest():
     assert check(document, role="openobserve", digest=OTHER) == [
         f"pod openobserve-0 container openobserve runs {DIGEST}, expected {OTHER}"]
     assert check({"items": []}, role="openobserve") == ["missing or ambiguous Deployment openobserve"]
+
+
+def test_openwebui_role_is_bound_to_the_rag_openwebui_deployment_container():
+    """ADR-0007 (#1074): the Open WebUI image is verified through Deployment
+    rag-openwebui, container openwebui; a same-image container elsewhere
+    (another workload or container name) does not satisfy it."""
+    document = rollout("Deployment", name="rag-openwebui", container="openwebui")
+    assert check(document, role="openwebui") == []
+    assert check(document, role="openwebui", digest=OTHER) == [
+        f"pod rag-openwebui-0 container openwebui runs {DIGEST}, expected {OTHER}"]
+    assert check({"items": []}, role="openwebui") == ["missing or ambiguous Deployment rag-openwebui"]
+    renamed = rollout("Deployment", name="rag-openwebui", container="webui")
+    assert "Deployment rag-openwebui container openwebui has an unexpected repository" in check(
+        renamed, role="openwebui")
+    other_workload = rollout("Deployment", name="openwebui", container="openwebui")
+    assert check(other_workload, role="openwebui") == ["missing or ambiguous Deployment rag-openwebui"]
+    # The CLI accepts the role (an unknown role is a usage refusal).
+    result = subprocess.run([sys.executable, str(SCRIPT), "ns", "qdrant", f"openwebui={REPO_Q}@{DIGEST}"],
+                            input=json.dumps(document), capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
 
 
 def test_feedback_statefulset_is_bound_to_its_own_workload_and_digest():

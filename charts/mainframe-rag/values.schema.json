@@ -69,7 +69,9 @@
         "ingest": { "$ref": "#/definitions/appImage" },
         "oauthProxy": { "$ref": "#/definitions/image" },
         "openobserve": { "$ref": "#/definitions/image" },
-        "otelcol": { "$ref": "#/definitions/image" }
+        "otelcol": { "$ref": "#/definitions/image" },
+        "openwebui": { "$ref": "#/definitions/image" },
+        "openwebuiProxy": { "$ref": "#/definitions/image" }
       }
     },
     "qdrantRelease": {
@@ -353,6 +355,92 @@
         }
       ]
     },
+    "openwebui": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Open WebUI docs front end (ADR-0007, #1074). Default on; the chart template fails closed with a fixed message while required site inputs are missing.",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "secretName": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^$|^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$",
+          "description": "Operator-created Secret with webui-secret-key and oidc-client-secret (optional admin-api-key); never key material (D7)."
+        },
+        "host": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)+$",
+          "description": "Route host; the OIDC redirect URI is https://<host>/oauth/oidc/callback."
+        },
+        "retentionDays": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3650,
+          "description": "Chat retention window in days (maintainer decision 2026-10-24: 30), enforced by the purge sidecar. Required when enabled."
+        },
+        "storageSize": { "type": "string", "pattern": "^[1-9][0-9]*(Mi|Gi|Ti)$" },
+        "oidc": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "providerUrl": {
+              "type": "string",
+              "pattern": "^$|^https://[^\\s/]+(/\\S*)?/\\.well-known/openid-configuration$"
+            },
+            "clientId": { "type": "string", "maxLength": 255, "pattern": "^[^\\s,]*$" },
+            "groupClaim": { "type": "string", "pattern": "^[A-Za-z0-9_:/.-]+$" },
+            "rolesClaim": { "type": "string", "pattern": "^[A-Za-z0-9_:/.-]+$" },
+            "allowedRoles": { "type": "string", "pattern": "^$|^[^,\\s]+(,[^,\\s]+)*$" },
+            "adminRoles": { "type": "string", "pattern": "^$|^[^,\\s]+(,[^,\\s]+)*$" },
+            "scopes": {
+              "type": "string",
+              "allOf": [
+                { "pattern": "^[A-Za-z0-9_:/.-]+( [A-Za-z0-9_:/.-]+)*$" },
+                { "pattern": "(^| )openid( |$)" }
+              ],
+              "description": "Space-separated OIDC scopes (OAUTH_SCOPES); must include openid."
+            },
+            "emailClaim": { "type": "string", "pattern": "^[A-Za-z0-9_:/.-]+$" },
+            "usernameClaim": { "type": "string", "pattern": "^[A-Za-z0-9_:/.-]+$" },
+            "caBundle": {
+              "type": "string",
+              "description": "Optional PEM certificates of the CA that issued the IdP's TLS certificate; added to the public trust stores, never replacing them. Content is checked by the template (fixed message, value never shown) and loaded by the ca-trust init step; no schema pattern, because Helm prints a value that fails one."
+            }
+          }
+        },
+        "idpEgress": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "cidrs": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "pattern": "^([0-9]{1,3}\\.){3}[0-9]{1,3}/([0-9]|[12][0-9]|3[0-2])$"
+              }
+            },
+            "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "enabled": { "const": true } },
+            "required": ["enabled"]
+          },
+          "then": {
+            "required": ["oidc", "idpEgress"],
+            "properties": {
+              "oidc": { "required": ["groupClaim", "rolesClaim"] },
+              "idpEgress": { "required": ["port"] }
+            }
+          }
+        }
+      ]
+    },
     "storage": {
       "type": "object",
       "additionalProperties": false,
@@ -473,6 +561,10 @@
         "feedback": {
           "type": "object",
           "description": "Kubernetes resource requests/limits for the feedback service container."
+        },
+        "openwebui": {
+          "type": "object",
+          "description": "Kubernetes resource requests/limits for the Open WebUI container."
         }
       }
     }

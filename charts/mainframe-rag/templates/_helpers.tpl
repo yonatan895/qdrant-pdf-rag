@@ -90,3 +90,65 @@ bearer token as the only control: refuse at render, before any mutation.
 true
 {{- end -}}
 {{- end -}}
+
+{{/*
+Open WebUI docs front end (ADR-0007, #1074). Default on (maintainer decision 2026-10-26); "true" or nothing.
+The schema checks shapes only. Missing site inputs fail the render here with
+one fixed message that names the missing values and the opt-out, so a
+half-configured front end never renders. Also refused: no enforced retention
+window, no repository-owned docs Pipe (#1072).
+*/}}
+{{- define "mainframe-rag.openwebuiEnabled" -}}
+{{- if .Values.openwebui.enabled -}}
+{{- $o := .Values.openwebui -}}
+{{- $oidc := $o.oidc | default dict -}}
+{{- $egress := $o.idpEgress | default dict -}}
+{{- $missing := list -}}
+{{- if not $o.secretName }}{{ $missing = append $missing "openwebui.secretName" }}{{ end -}}
+{{- if not $o.host }}{{ $missing = append $missing "openwebui.host" }}{{ end -}}
+{{- if not $oidc.providerUrl }}{{ $missing = append $missing "openwebui.oidc.providerUrl" }}{{ end -}}
+{{- if not $oidc.clientId }}{{ $missing = append $missing "openwebui.oidc.clientId" }}{{ end -}}
+{{- if not $oidc.allowedRoles }}{{ $missing = append $missing "openwebui.oidc.allowedRoles" }}{{ end -}}
+{{- if not $oidc.adminRoles }}{{ $missing = append $missing "openwebui.oidc.adminRoles" }}{{ end -}}
+{{- if not $egress.cidrs }}{{ $missing = append $missing "openwebui.idpEgress.cidrs" }}{{ end -}}
+{{- if not (.Values.route.destinationCA | default "" | trim) }}{{ $missing = append $missing "route.destinationCA" }}{{ end -}}
+{{- if $missing -}}
+{{- fail (printf "Open WebUI is enabled by default (ADR-0008) but required site inputs are missing: %s. Set them, or opt out with --set openwebui.enabled=false (OPENWEBUI_ENABLED=false in airgap.env)." (join ", " $missing)) -}}
+{{- end -}}
+{{- $shape := list -}}
+{{- if not $oidc.groupClaim }}{{ $shape = append $shape "openwebui.oidc.groupClaim" }}{{ end -}}
+{{- if not $oidc.rolesClaim }}{{ $shape = append $shape "openwebui.oidc.rolesClaim" }}{{ end -}}
+{{- if not ($oidc.emailClaim | default "" | trim) }}{{ $shape = append $shape "openwebui.oidc.emailClaim" }}{{ end -}}
+{{- if not ($oidc.usernameClaim | default "" | trim) }}{{ $shape = append $shape "openwebui.oidc.usernameClaim" }}{{ end -}}
+{{- if not ($oidc.scopes | default "" | trim) }}{{ $shape = append $shape "openwebui.oidc.scopes" }}{{ end -}}
+{{- if not $egress.port }}{{ $shape = append $shape "openwebui.idpEgress.port" }}{{ end -}}
+{{- if $shape -}}
+{{- fail (printf "Open WebUI settings must not be empty or null: %s (a null port would open the IdP egress rule to every TCP port)." (join ", " $shape)) -}}
+{{- end -}}
+{{- /* Revocation through the IdP needs a roles claim on every sign-in, so the IdP
+issues the baseline value signed-in to every user (docs/deploy.md, AD FS). It,
+or *, in a role list would admit every signed-in user. */ -}}
+{{- range $list := list ($oidc.allowedRoles | toString) ($oidc.adminRoles | toString) -}}
+{{- range $role := splitList "," $list -}}
+{{- if or (eq $role "*") (eq $role "signed-in") -}}
+{{- fail "openwebui.oidc.allowedRoles and adminRoles must not contain * or the baseline role signed-in (every signed-in user carries it, so removing a user from the role groups would revoke nothing)" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- /* IdP CA: certificates only. A fixed message, never the value: a schema
+pattern would make Helm print the rejected value (a pasted key included).
+The ca-trust init step then loads every certificate (files/openwebui/ca_trust.py). */ -}}
+{{- with $oidc.caBundle -}}
+{{- if not (regexMatch "^\\s*(-----BEGIN CERTIFICATE-----\\r?\\n[A-Za-z0-9+/=\\r\\n]+-----END CERTIFICATE-----\\s*)+$" (toString .)) -}}
+{{- fail "openwebui.oidc.caBundle must hold only PEM certificates (-----BEGIN CERTIFICATE----- blocks, no key or other text); the value is not shown" -}}
+{{- end -}}
+{{- end -}}
+{{- if not $o.retentionDays -}}
+{{- fail "openwebui.retentionDays is required when openwebui.enabled=true: the purge sidecar enforces the chat retention window (ADR-0007 S2)" -}}
+{{- end -}}
+{{- if not (.Files.Get "files/openwebui/docs_pipe.py") -}}
+{{- fail "openwebui.enabled=true needs the repository-owned docs Pipe (#1072) at charts/mainframe-rag/files/openwebui/docs_pipe.py; refusing a front end without its only model" -}}
+{{- end -}}
+true
+{{- end -}}
+{{- end -}}
