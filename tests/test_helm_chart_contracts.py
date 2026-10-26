@@ -14,11 +14,13 @@ from tests.helpers_helm import (
     CHART,
     FAKE_CA,
     IMAGE_SHA,
+    REPO,
     _helm_template_with_values,
     base_values,
     container_map,
     env_map,
     ingest_env_map,
+    run,
     run_new_job_only,
     run_new_template,
 )
@@ -1179,20 +1181,86 @@ def _owui(chart, extra=None, **kw):
     return run_new_template(values, chart=chart, **kw)
 
 
-def test_openwebui_off_by_default_renders_nothing_and_changes_nothing(owui_chart):
-    """K1: off is the default, and an explicit off with every setting present
-    renders byte-identically to a release without the block."""
-    default = _helm_template_with_values(base_values(), chart=owui_chart)
-    assert default.returncode == 0
-    assert "openwebui" not in default.stdout and "OPENID" not in default.stdout
+def _bare_default_values() -> dict:
+    """The base values with the Open WebUI block removed: the chart default applies."""
+    values = base_values()
+    del values["openwebui"]
+    return values
+
+
+OWUI_FAIL_CLOSED_KEYS = [
+    "openwebui.secretName", "openwebui.host", "openwebui.oidc.providerUrl",
+    "openwebui.oidc.clientId", "openwebui.oidc.allowedRoles", "openwebui.oidc.adminRoles",
+    "openwebui.idpEgress.cidrs", "route.destinationCA",
+]
+
+
+def test_openwebui_is_on_by_default_and_the_bare_render_fails_closed_with_a_fixed_message():
+    """ADR-0008: the shipped default is enabled; with no site inputs the render
+    is refused (never half-configured) and the message names every missing
+    value and the opt-out, and nothing else."""
+    with open(CHART / "values.yaml", encoding="utf-8") as f:
+        assert yaml.safe_load(f)["openwebui"]["enabled"] is True
+    r = _helm_template_with_values(_bare_default_values())
+    assert r.returncode != 0
+    expected = (
+        "Open WebUI is enabled by default (ADR-0008) but required site inputs are missing: "
+        + ", ".join(OWUI_FAIL_CLOSED_KEYS)
+        + ". Set them, or opt out with --set openwebui.enabled=false "
+        "(OPENWEBUI_ENABLED=false in airgap.env)."
+    )
+    assert expected in r.stderr
+    assert "rag-openwebui" not in r.stdout
+
+
+@pytest.mark.parametrize("key", OWUI_FAIL_CLOSED_KEYS)
+def test_openwebui_fail_closed_names_exactly_the_one_missing_input(owui_chart, key):
+    values = _bare_default_values()
+    values.update(json.loads(json.dumps(OWUI_ON)))
+    section, _, rest = key.partition(".")
+    node = values[section]
+    path = rest.split(".")
+    for part in path[:-1]:
+        node = node[part]
+    node[path[-1]] = [] if path[-1] == "cidrs" else ""
+    r = _helm_template_with_values(values, chart=owui_chart)
+    assert r.returncode != 0
+    assert f"inputs are missing: {key}. Set them, or opt out with --set openwebui.enabled=false" in r.stderr
+    # Values (host, client id, CA) never reach the diagnostic.
+    for leaked in ("docs.apps.example.internal", "docs-frontend", "FAKE-CA-BUNDLE"):
+        assert leaked not in r.stderr
+
+
+def test_openwebui_opt_out_is_byte_identical_to_a_chart_without_the_component(tmp_path):
+    """K1: enabled=false renders byte-for-byte what a chart that does not contain
+    the front end renders, even with every site input present."""
+    import shutil
+    stripped = tmp_path / "chart"
+    shutil.copytree(CHART, stripped)
+    for tpl in (stripped / "templates").glob("openwebui-*.yaml"):
+        tpl.unlink()
     off = base_values()
     off["openwebui"] = {**OWUI_ON["openwebui"], "enabled": False}
-    rendered = _helm_template_with_values(off, chart=owui_chart)
-    assert rendered.returncode == 0 and rendered.stdout == default.stdout
-    # The shipped chart (no Pipe file) renders the same default.
-    assert _helm_template_with_values(base_values()).stdout == default.stdout
-    with open(CHART / "values.yaml", encoding="utf-8") as f:
-        assert yaml.safe_load(f)["openwebui"]["enabled"] is False
+    with_component = _helm_template_with_values(off)
+    without = _helm_template_with_values(base_values(), chart=stripped)
+    assert with_component.returncode == 0 and without.returncode == 0
+    assert "openwebui" not in with_component.stdout and "OPENID" not in with_component.stdout
+    assert with_component.stdout == without.stdout
+    # Opting out needs no other front-end input at all.
+    assert _helm_template_with_values(base_values()).stdout == with_component.stdout
+
+
+def test_openwebui_ci_site_inputs_render_the_front_end_and_stay_fake():
+    """The checked-in test inputs (for helm lint/template in CI) satisfy the
+    fail-closed check, and are non-routable so they cannot become site values."""
+    path = CHART / "ci" / "openwebui-site-values.yaml"
+    inputs = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert inputs["openwebui"]["host"].endswith(".invalid")
+    assert inputs["openwebui"]["oidc"]["providerUrl"].startswith("https://idp.example.invalid/")
+    assert inputs["openwebui"]["idpEgress"]["cidrs"] == ["192.0.2.0/24"]
+    r = run(["helm", "template", "test", str(CHART), "--namespace", "ns", "-f", str(path)], cwd=REPO)
+    assert r.returncode == 0, r.stderr
+    assert "name: rag-openwebui" in r.stdout
 
 
 def test_openwebui_enabled_adds_its_objects_and_leaves_the_rest_unchanged(owui_chart):

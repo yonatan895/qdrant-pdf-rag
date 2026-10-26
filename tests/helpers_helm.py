@@ -85,6 +85,10 @@ def base_values() -> dict:
         "openobserve": {"credentialsSecretName": "openobserve-credentials"},
         "metrics": {"enabled": False},
         "ui": {"enabled": True},
+        # Open WebUI is default-on (ADR-0008) and fails closed without site
+        # inputs; the shared base is an explicit opt-out, tests that exercise
+        # the front end override it with their own inputs.
+        "openwebui": {"enabled": False},
         "networkPolicy": {"enabled": True, "allowedNamespaces": []},
         "route": {"enabled": False, "timeoutSeconds": 300, "destinationCA": ""},
         "storage": {"className": BASE_ENV["STORAGE_CLASS"]},

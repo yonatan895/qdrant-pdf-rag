@@ -250,9 +250,9 @@ def build_values(deploy_only: bool = False) -> dict:
     except ValueError as exc:
         die(str(exc))
 
-    # Issue #1074: the Open WebUI docs front end, default off. Validated by its
-    # one owner; the block (and its image) is emitted only when enabled, so a
-    # deployment that never sets OPENWEBUI_ENABLED renders what it did (K1).
+    # Issue #1074: the Open WebUI docs front end, default on (ADR-0008). Validated by its
+    # one owner; the image is emitted only when enabled; OPENWEBUI_ENABLED=false
+    # renders `openwebui.enabled=false` (K1: nothing from the block renders).
     try:
         openwebui = openwebui_config(os.environ)
     except ValueError as exc:
@@ -265,7 +265,7 @@ def build_values(deploy_only: bool = False) -> dict:
         ca_file = env("ROUTE_DESTINATION_CA_FILE")
         if not ca_file:
             die(
-                "AGENT_ROUTE=true or OPENWEBUI_ENABLED=true needs ROUTE_DESTINATION_CA_FILE "
+                "AGENT_ROUTE=true or Open WebUI (on by default; opt out with OPENWEBUI_ENABLED=false) needs ROUTE_DESTINATION_CA_FILE "
                 "pointing at the namespace service-CA bundle (Route rendering; "
                 "route-off dry-run needs no CA)"
             )
@@ -474,7 +474,8 @@ def build_values(deploy_only: bool = False) -> dict:
         "ui": {"enabled": ui_enabled},
         "networkPolicy": {"enabled": policy_enabled, "allowedNamespaces": policy_namespaces},
         **({"feedback": feedback} if feedback else {}),
-        **({"openwebui": openwebui} if openwebui else {}),
+        # Default on in the chart: an explicit opt-out must reach the render.
+        "openwebui": openwebui if openwebui else {"enabled": False},
         "route": {
             "enabled": agent_route,
             "timeoutSeconds": 300,

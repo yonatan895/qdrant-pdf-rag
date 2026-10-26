@@ -171,7 +171,7 @@ def openwebui_config(values: Mapping[str, str]) -> dict[str, object] | None:
     roles and IdP CIDRs are required only when enabled. The IdP egress is
     NetworkPolicy ipBlocks (a policy cannot match a DNS name), so at least one
     CIDR is required. Diagnostics name the key, never the value."""
-    enabled = parse_strict_bool("OPENWEBUI_ENABLED", values.get("OPENWEBUI_ENABLED", ""), False)
+    enabled = parse_strict_bool("OPENWEBUI_ENABLED", values.get("OPENWEBUI_ENABLED", ""), True)
     secret = values.get("OPENWEBUI_SECRET", "")
     if secret and (len(secret) > 253 or _DNS_SUBDOMAIN.fullmatch(secret) is None):
         raise ValueError("OPENWEBUI_SECRET must be a DNS-subdomain Secret name")
@@ -219,13 +219,14 @@ def openwebui_config(values: Mapping[str, str]) -> dict[str, object] | None:
         return None
     required = {"OPENWEBUI_SECRET": secret, "OPENWEBUI_HOST": host,
                 "OPENWEBUI_OIDC_PROVIDER_URL": provider, "OPENWEBUI_OIDC_CLIENT_ID": client_id,
-                **roles}
-    for key, value in required.items():
-        if not value:
-            raise ValueError(f"{key} is required when OPENWEBUI_ENABLED=true")
-    if not cidrs:
-        raise ValueError("OPENWEBUI_IDP_EGRESS_CIDRS is required when OPENWEBUI_ENABLED=true "
-                         "(the IdP back channel is the only egress besides the agent and DNS)")
+                **roles, "OPENWEBUI_IDP_EGRESS_CIDRS": cidrs,
+                "ROUTE_DESTINATION_CA_FILE": values.get("ROUTE_DESTINATION_CA_FILE", "")}
+    missing = [key for key, value in required.items() if not value]
+    if missing:
+        # One fixed message: key names only, never values.
+        raise ValueError("Open WebUI is enabled by default (ADR-0008) but required inputs are "
+                         f"missing: {', '.join(missing)}. Set them, or opt out with "
+                         "OPENWEBUI_ENABLED=false")
     return {
         "enabled": True,
         "secretName": secret,

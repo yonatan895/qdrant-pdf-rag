@@ -11,23 +11,6 @@
     "required": ["requestQueueWaitSeconds"],
     "properties": { "requestQueueWaitSeconds": { "exclusiveMinimum": 0 } }
   },
-  "allOf": [
-    {
-      "if": {
-        "properties": { "openwebui": { "properties": { "enabled": { "const": true } }, "required": ["enabled"] } },
-        "required": ["openwebui"]
-      },
-      "then": {
-        "required": ["route"],
-        "properties": {
-          "route": {
-            "required": ["destinationCA"],
-            "properties": { "destinationCA": { "minLength": 1, "pattern": ".*\\S.*" } }
-          }
-        }
-      }
-    }
-  ],
   "required": ["replicaCount", "images", "qdrantRelease", "models", "gateway", "tracing", "metrics", "ui", "route", "storage", "ingest", "pullSecret", "resources"],
   "definitions": {
     "nonPlaceholderString": {
@@ -375,7 +358,7 @@
     "openwebui": {
       "type": "object",
       "additionalProperties": false,
-      "description": "Optional Open WebUI docs front end (ADR-0007, #1074). Default off.",
+      "description": "Open WebUI docs front end (ADR-0007, #1074). Default on; the chart template fails closed with a fixed message while required site inputs are missing.",
       "properties": {
         "enabled": { "type": "boolean" },
         "secretName": {
@@ -427,35 +410,7 @@
             "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
           }
         }
-      },
-      "allOf": [
-        {
-          "if": {
-            "properties": { "enabled": { "const": true } },
-            "required": ["enabled"]
-          },
-          "then": {
-            "required": ["secretName", "host", "retentionDays", "oidc", "idpEgress"],
-            "properties": {
-              "secretName": { "minLength": 1 },
-              "host": { "minLength": 1 },
-              "oidc": {
-                "required": ["providerUrl", "clientId", "groupClaim", "rolesClaim", "allowedRoles", "adminRoles"],
-                "properties": {
-                  "providerUrl": { "minLength": 1 },
-                  "clientId": { "minLength": 1 },
-                  "allowedRoles": { "minLength": 1 },
-                  "adminRoles": { "minLength": 1 }
-                }
-              },
-              "idpEgress": {
-                "required": ["cidrs", "port"],
-                "properties": { "cidrs": { "minItems": 1 } }
-              }
-            }
-          }
-        }
-      ]
+      }
     },
     "storage": {
       "type": "object",

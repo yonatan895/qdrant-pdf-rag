@@ -52,6 +52,7 @@ def _run_pipeline(pipe_tree, *args, extra_env=None):
         "DENSE_DIM": "768",
         "EMBED_MODEL_REVISION": "rev-1",
         "EMBED_BASE_URL": "http://vllm:8000/v1",
+        "OPENWEBUI_ENABLED": "false",  # default-on (ADR-0008): fixtures opt out explicitly
         # Issue #360: the hermetic single-node pipeline fixtures select the
         # 1/1/1 non-HA profile explicitly (the production preset is tested
         # by test_airgap_ingest_sh/test_airgap_validate_sh).

@@ -67,6 +67,7 @@ def _run_ingest(tree, *extra_env, policy: tuple[str, str, str] | None = ("1", "1
         "DENSE_DIM": "768",
         "EMBED_MODEL_REVISION": "rev-1",
         "EMBED_BASE_URL": "http://vllm:8000/v1",
+        "OPENWEBUI_ENABLED": "false",  # default-on (ADR-0008): fixtures opt out explicitly
         "AIRGAP_DRYRUN": "1",
     }
     if policy is not None:
