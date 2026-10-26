@@ -59,7 +59,7 @@ def test_repository_record_reconciles_with_the_real_pins():
     problems, unresolved, state = problems_for(real_inventory())
     assert problems == []
     assert state == "absent"
-    assert unresolved, "open owner decisions must stay visible, not be dropped"
+    assert unresolved == [], "every owner decision is recorded; pymupdf is the owner-decision exception"
 
 
 def test_every_locked_runtime_wheel_has_a_record_with_its_exact_identity():
@@ -73,16 +73,23 @@ def test_every_locked_runtime_wheel_has_a_record_with_its_exact_identity():
             entry["version"], entry["wheel"], entry["sha256"])
 
 
-def test_pymupdf_election_is_recorded_but_legal_confirmation_keeps_it_unresolved():
+def test_pymupdf_election_is_recorded_as_an_owner_decision_exception_to_legal_confirmation():
     inventory = real_inventory()
     entry = next(e for e in inventory["python"] if e["name"] == "pymupdf")
-    assert entry["decision"]["owner"] == "yonatan895" and entry["decision"]["date"] == "2026-10-23"
-    assert entry["decision"]["legal_confirmation"] == "pending"
-    assert entry["status"] == "pending-owner-decision"
+    assert entry["decision"]["owner"] == "yonatan895" and entry["decision"]["date"] == "2026-10-26"
+    assert entry["decision"]["scope"] == "ingest" and entry["elected"] == "AGPL-3.0-only"
+    assert entry["decision"]["legal_confirmation"] == "waived-by-owner-decision"
+    assert entry["status"] == "approved"
+    assert "issuecomment-6427197208" in entry["approval_ref"]
+    assert "explicit exception to legal confirmation" in entry["approval_ref"]
+    assert "withdrawn if legal confirmation is refused or the use changes" in entry["approval_ref"]
+    problems, unresolved, _ = problems_for(inventory)
+    assert problems == [] and unresolved == []
+    # Withdrawal: back to pending, the item is unresolved again and release refuses it.
+    entry["status"] = "pending-owner-decision"
+    entry["decision"]["legal_confirmation"] = "pending"
     _, unresolved, _ = problems_for(inventory)
-    assert [u for u in unresolved if "pymupdf" in u]
-    # The Open WebUI records are approved (ADR-0007 L1, ADR-0008); pymupdf is the one open item.
-    assert len(unresolved) == 1
+    assert [u for u in unresolved if "pymupdf" in u] and len(unresolved) == 1
     entry["decision"] = {"owner": "yonatan895"}
     problems, _, _ = problems_for(inventory)
     assert any("decision record needs owner, date and disposition" in p for p in problems)
@@ -226,7 +233,7 @@ def test_class_claim_must_follow_the_recorded_expression():
 def test_approved_status_needs_a_protected_reference():
     inventory = real_inventory()
     entry = next(e for e in inventory["python"] if e["name"] == "pymupdf")
-    entry["status"] = "approved"
+    entry["approval_ref"] = None
     problems, _, _ = problems_for(inventory)
     assert any("pymupdf" in p and "approval_ref" in p for p in problems)
 
@@ -250,9 +257,8 @@ def test_wheel_without_license_text_cannot_be_declared():
 def test_release_mode_blocks_on_unresolved_decisions_and_missing_approval():
     problems, unresolved, state = problems_for(real_inventory(), release=True)
     assert state == "absent"
-    assert any("awaits owner decision" in p and "pymupdf" in p for p in problems)
-    assert any("release approval: no owner approval" in p for p in problems)
-    assert len(unresolved) >= 1
+    assert unresolved == []
+    assert problems == ["release approval: no owner approval is recorded for this inventory"]
 
 
 def resolve_everything(inventory):
@@ -454,6 +460,8 @@ def notice_inventory(tmp_path, text=b"Synthetic MIT task license\n"):
 
 def test_notices_carry_real_texts_and_open_decisions_and_refuse_a_missing_member(tmp_path):
     inventory = notice_inventory(tmp_path)
+    # An open decision (here a withdrawn pymupdf disposition) must stay visible in the notices.
+    next(e for e in inventory["python"] if e["name"] == "pymupdf")["status"] = "pending-owner-decision"
     text = li.render_notices(REPO, inventory, tmp_path)
     assert "Apache License" in text and "Zero-Clause BSD" in text
     assert "### skills:mattpocock: LICENSE.mattpocock-skills" in text

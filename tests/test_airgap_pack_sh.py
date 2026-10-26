@@ -406,8 +406,8 @@ def test_pack_success_builds_verified_tarball(pack_tree):
     # Signed, readable offline, complete: actual notice texts and the open decisions.
     assert "THIRD-PARTY-NOTICES.txt" in (dist / "SHA256SUMS").read_text()
     assert "Apache License" in notices and "Zero-Clause BSD" in notices and "MIT License" in notices
-    assert "Components awaiting owner decision:" in notices
-    assert "pymupdf==" in notices.split("COMPONENTS")[0]
+    assert "Components awaiting owner decision: 0" in notices
+    assert "pymupdf==" not in notices.split("COMPONENTS")[0]
     assert "Owner approval of this inventory: absent" in notices
     assert "Third-party notices: THIRD-PARTY-NOTICES.txt" in (dist / "PACKING_RECORD.txt").read_text()
 

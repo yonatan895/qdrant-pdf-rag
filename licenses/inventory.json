@@ -1804,13 +1804,13 @@
       "wheel": "pyjwt-2.15.1-py3-none-any.whl"
     },
     {
-      "approval_ref": null,
+      "approval_ref": "gh:yonatan895/qdrant-pdf-rag#376 issuecomment-6427197208 maintainer owner decision 2026-10-26; owner decision, explicit exception to legal confirmation; withdrawn if legal confirmation is refused or the use changes",
       "binary_wheel": true,
       "class": "network-copyleft",
       "decision": {
-        "date": "2026-10-23",
-        "disposition": "election A: rely on AGPL-3.0, scoped to the ingest path",
-        "legal_confirmation": "pending",
+        "date": "2026-10-26",
+        "disposition": "owner decision 2026-10-26 (#376): election A, rely on AGPL-3.0, scoped to the ingest Job (unmodified, internal, not offered to users over a network); explicit exception to waiting for qualified legal confirmation. Withdrawn, and the item returns to pending, if legal confirmation is refused or the use changes (modification, distribution outside the organisation, network exposure of pymupdf itself); the release then needs a new decision or the Artifex commercial licence.",
+        "legal_confirmation": "waived-by-owner-decision",
         "owner": "yonatan895",
         "scope": "ingest"
       },
@@ -1826,11 +1826,11 @@
       ],
       "license_spdx": "AGPL-3.0-only OR LicenseRef-Artifex-Commercial",
       "name": "pymupdf",
-      "note": "METADATA does not state AGPL only versus or-later; recorded as only (the conservative reading). Imported by the ingest path only; the serving agent is designed not to import it (see ingest/chunk.py comment) although the wheel is installed in both images. Maintainer election 2026-10-23: AGPL-3.0, scoped to ingest. LEGAL CONFIRMATION PENDING: status stays pending-owner-decision until the qualified legal owner confirms; this is not a legal approval.",
+      "note": "METADATA does not state AGPL only versus or-later; recorded as only (the conservative reading). Imported by the ingest path only; the serving agent is designed not to import it (see ingest/chunk.py comment) although the wheel is installed in both images. Maintainer election 2026-10-23: AGPL-3.0, scoped to ingest. Maintainer owner decision 2026-10-26 (#376): approved as an explicit exception to the legal-confirmation rule, not a legal approval; withdrawn if legal confirmation is refused or the use changes.",
       "obligation": "Dual license (AGPL-3.0 or Artifex commercial). Which license governs this distribution, and any AGPL source/network-use duties or commercial-grant coverage, is an owner decision (docs/licensing.md, PyMuPDF decision record). The wheel carries only a one-line declaration, not license text.",
       "sha256": "397d6715c1f0df7548a92d0afd8ce370fc48fa47aeefac16be2bc04a16a8227f",
       "spdx_basis": "normalized-license-field",
-      "status": "pending-owner-decision",
+      "status": "approved",
       "version": "1.28.2",
       "wheel": "pymupdf-1.28.2-cp310-abi3-manylinux_2_28_x86_64.whl"
     },

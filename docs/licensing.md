@@ -9,8 +9,10 @@ maintainer and the organization's qualified legal/open-source owner.
 
 Status: partially implemented. The record, the check and the bundled notices
 exist. The maintainer recorded dispositions on 2026-10-23 (issue #376 comment);
-only `pymupdf` stays unresolved (legal confirmation pending) and `release_approval`
-is absent, so `check --release` still fails.
+on 2026-10-26 the maintainer recorded `pymupdf` as an owner decision, an explicit
+exception to waiting for qualified legal confirmation (withdrawn if confirmation is
+refused or the use changes). No entry is unresolved; `release_approval` is absent, so
+`check --release` still fails until the maintainer records the per-release approval.
 Source of authority: #376 and its triage comments (19 and 24 September, 1 October
 2026): close on a documented owner disposition, never on CI alone.
 Decision owners: `licenses/inventory.json` (the record),
@@ -54,7 +56,7 @@ License classes (conservative, from `license_inventory.py`): `permissive`,
 (`LicenseRef-*`), `unknown`. AND takes the most restrictive operand; an OR whose
 alternatives differ needs a recorded `elected` value. Runtime wheel result: 63
 permissive, 2 weak-copyleft (`certifi`: MPL-2.0; `tqdm`: MPL-2.0 AND MIT), 1 network-copyleft
-(`pymupdf`, AGPL elected; legal confirmation pending). 16 wheels are binary; their declared license may not describe native
+(`pymupdf`, AGPL elected; owner decision 2026-10-26, legal confirmation waived as an explicit exception). 16 wheels are binary; their declared license may not describe native
 libraries vendored inside them (numpy lists 17 license files; most others one; the `cryptography` wheel statically links OpenSSL, under its own Apache-2.0 terms, which its three license files do not enumerate).
 The dev/build profiles are not shipped and are not inventoried;
 `check` fails if a locked runtime wheel has no record or a record has no locked wheel,
@@ -83,14 +85,14 @@ owner: these are maintainer dispositions, not legal approvals.
 
 | Component | Recorded state |
 |---|---|
-| `pymupdf` 1.28.2 | `elected: AGPL-3.0-only`, scoped to ingest. **Legal confirmation pending**: status stays `pending-owner-decision` (the one remaining unresolved item) until the qualified legal owner confirms. |
+| `pymupdf` 1.28.2 | `elected: AGPL-3.0-only`, scoped to ingest. `approved` by the maintainer's owner decision of 2026-10-26 (#376), an **explicit exception** to waiting for qualified legal confirmation: unmodified, internal, not offered to users over a network. **Withdrawn** (back to `pending-owner-decision`) if legal confirmation is refused, or the use changes (modification, distribution outside the organisation, network exposure of pymupdf itself); the release then needs a new decision or the Artifex commercial licence. Not a legal approval; the AGPL obligations below stand. |
 | `flatbuffers`, `loguru`, `onnxruntime`, `tokenizers` | `approved`. Upstream license texts (locked version's tag, source URLs in the inventory) are in `licenses/texts/` and rendered into `THIRD-PARTY-NOTICES.txt`. |
 | Qdrant image | `approved` on the upstream Apache-2.0 license. Layer inventory is follow-up #371. |
 | OpenObserve OSS v1.1.2 image | `approved` (ADR-0006, #956): AGPL-3.0 (`network-copyleft`) accepted for the unmodified upstream binary run as a separate service; it is transferred unchanged with the source reference upstream v1.1.2, and any modification or Enterprise-feature change needs a new decision. Layer inventory is follow-up #371. |
 | otelcol-contrib 0.160.0 image | `approved` on the upstream Apache-2.0 license; NOTICE content of image layers is not enumerated (#371). |
 | UBI 9 base image | `approved` on the UBI EULA after RPM-list extraction: 116 packages (name, version, license tag) from the rpmdb of the pinned digest in `licenses/ubi9-python-314-minimal.rpms.txt` (hash-bound, rendered into the notices). License tags are declared RPM metadata; any source offer would be a separately approved packaging change. |
 | oauth-proxy image | `approved` to transfer as an **external dependency**: the Red Hat image is shipped unmodified, not built here (`distributed_by_repo` stays true because the bundle carries it). Escalation, if transfer becomes a problem: maintainer, then platform team. |
-| Open WebUI images (optional docs front end, ADR-0007, #1074) | Recorded as a maintainer disposition on 2026-10-24 (relayed by the #1070 coordinator; ADR-0007 L1), status `pending-owner-decision` while ADR-0007 is not accepted (release mode keeps both records unresolved). `LicenseRef-Open-WebUI-License`: BSD-3-Clause terms plus a branding clause, not OSI-approved (v0.6.6 and later), so the checker classes it `proprietary`. Conditions kept in the record: branding unmodified (no custom name, logo, theme or injected CSS) and at most 100 users; any change needs a new decision. Two records: the derived image (`qdrant-pdf-rag-openwebui`, the bundle member; the factory adds only an ownership/permission layer, #1073) and its upstream slim build base (`open-webui/open-webui`, provenance like the UBI line, shipped only as the derived image's base layers). The upstream base is pinned to the qualified v0.12.3-slim index `sha256:5adfb035…` (#1073 Kind trial); the derived image's pin stays `sha256:PENDING` until the factory pushes it and its registry manifest digest is recorded (the trial's local image id `sha256:bf4e0437…` is not pullable); pack skips the member until then. The maintainer owns patching: monthly agent-prepared upstream imports, each a dedicated pin-bump PR (ADR-0007 P1). |
+| Open WebUI images (optional docs front end, ADR-0007, #1074) | Recorded as a maintainer disposition on 2026-10-24 (relayed by the #1070 coordinator; ADR-0007 L1), status `approved` (ADR-0007 accepted 2026-10-24; ADR-0008 accepted 2026-10-26). `LicenseRef-Open-WebUI-License`: BSD-3-Clause terms plus a branding clause, not OSI-approved (v0.6.6 and later), so the checker classes it `proprietary`. Conditions kept in the record: branding unmodified (no custom name, logo, theme or injected CSS) and at most 100 users; any change needs a new decision. Two records: the derived image (`qdrant-pdf-rag-openwebui`, the bundle member; the factory adds only an ownership/permission layer, #1073) and its upstream slim build base (`open-webui/open-webui`, provenance like the UBI line, shipped only as the derived image's base layers). The upstream base is pinned to the qualified v0.12.3-slim index `sha256:5adfb035…` (#1073 Kind trial); the derived image is pinned to its registry manifest digest `sha256:5329730006ef…` (e2e run 40387935773), to which the record is bound; pack skips the member while the pin reads `sha256:PENDING`. The maintainer owns patching: monthly agent-prepared upstream imports, each a dedicated pin-bump PR (ADR-0007 P1). |
 | IBM Plex fonts | `approved`; `OFL-1.1` is a permissive class in the checker. |
 | BM25 weights (`Qdrant/bm25`, rev `22b8d2af71a7`) | `approved`: the Hugging Face model card at that revision declares `license: apache-2.0` (`https://huggingface.co/api/models/Qdrant/bm25/revision/22b8d2af71a76161e18dd432d2cee0eefa66e412`, checked 2026-10-23). Re-check if the revision changes. |
 | Corpus rights | Out of scope here by design; recorded as an excluded boundary. |
@@ -129,7 +131,7 @@ These are legal or maintainer calls. Nothing here is decided by the repository.
 
 | # | Decision | Who | Options | What each implies for the bundle |
 |---|---|---|---|---|
-| 1 | PyMuPDF: AGPL-3.0 or Artifex commercial (see the record below) | Qualified legal owner; maintainer has recorded A, scoped to ingest, legal confirmation pending | A: AGPL. B: commercial. C: replace the parser. D: exclude the ingest path. | A: add the AGPL-3.0 text to the notices, and a source mechanism that works offline (a hash-pinned source archive of the exact PyMuPDF and MuPDF version in the bundle, or a written offer the enterprise accepts); the owner decides which means and whether the project's own code is covered. B: no AGPL text or source; record an approval reference, change `elected`, no contract or key in git. C and D: separate approved issues. |
+| 1 | PyMuPDF: AGPL-3.0 or Artifex commercial (see the record below) | Qualified legal owner; maintainer recorded A, scoped to ingest, as an owner decision on 2026-10-26 (legal confirmation waived as an explicit exception; withdrawal conditions in the record below) | A: AGPL. B: commercial. C: replace the parser. D: exclude the ingest path. | A: add the AGPL-3.0 text to the notices, and a source mechanism that works offline (a hash-pinned source archive of the exact PyMuPDF and MuPDF version in the bundle, or a written offer the enterprise accepts); the owner decides which means and whether the project's own code is covered. B: no AGPL text or source; record an approval reference, change `elected`, no contract or key in git. C and D: separate approved issues. |
 | 2 | Does transferring the images or bundle to the enterprise count as distribution or conveying, and does the enterprise's own operation count as network use? | Qualified legal owner | Internal use only, conveyed to a separate legal entity, or something else | If conveying: source duties of the table apply to PyMuPDF, MPL wheels and the GPL/LGPL base-layer RPMs. If not: notices only. |
 | 3 | Source offer for base-layer GPL/LGPL RPMs and MPL-2.0 wheels | Qualified legal owner; packaging is a separate approved change | Carry sources or an offer; rely on the base image provider's offer; conclude no duty | Carrying sources makes the bundle larger and adds hashed members to `SHA256SUMS`; relying on a provider needs that provider's terms recorded. |
 | 4 | Combination with Apache-2.0 project code | Qualified legal owner | Accept the combination under the elected license; keep ingest as a separate program boundary | No code change; the answer only sets what the notices and any offer say. |
@@ -141,7 +143,7 @@ These are legal or maintainer calls. Nothing here is decided by the repository.
 <a id="pymupdf"></a>
 ## PyMuPDF decision record
 
-Status: **election recorded, legal confirmation pending.** The repository does not choose, purchase,
+Status: **election recorded and approved as an owner decision (2026-10-26), an explicit exception to legal confirmation.** The repository does not choose, purchase,
 replace or relicense anything. This section lays out facts and options.
 
 Observed facts (source inspection and package metadata, 2 October 2026):
@@ -172,11 +174,14 @@ agreement already cover this use.
 | D. Exclude or scope | Do not ship the ingest image/path to this enterprise, or ship only where the owner decides no distribution occurs. | Release scoping change; `status: excluded` with the reason. |
 
 **Maintainer's decision (2026-10-23): A, scoped to ingest.** The election is
-recorded (`elected: AGPL-3.0-only`). **Legal confirmation is pending** and recorded
-as such: `pymupdf` stays `pending-owner-decision`, and `check --release` also refuses
-any entry whose `decision.legal_confirmation` is `pending`, even after its status is
-flipped, until the qualified legal owner confirms that handing the images to the enterprise plus a
-source offer is acceptable (otherwise option B). Not a legal approval.
+recorded (`elected: AGPL-3.0-only`). **Owner decision (2026-10-26, #376):** the
+maintainer approved it as an **explicit exception** to waiting for the qualified legal
+owner's confirmation (`decision.legal_confirmation: waived-by-owner-decision`).
+`check --release` still refuses any entry whose `decision.legal_confirmation` is
+`pending`. The disposition is **withdrawn** and the item returns to pending if legal
+confirmation is refused, or the use changes (modification, distribution outside the
+organisation, network exposure of pymupdf itself); the release then needs a new
+decision or option B. Not a legal approval.
 
 ## What a release must satisfy
 
