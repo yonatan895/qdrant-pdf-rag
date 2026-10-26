@@ -18,7 +18,20 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / "scripts" / "run_local_stack.sh"
-_INGEST_STEP = re.compile(r"^\[plan\] \d+\. ingest:")
+_PLAN_STEP = re.compile(r"^\[plan\] (?P<number>\d+)\. (?P<stage>[a-z]+):")
+
+
+def _plan_step(stdout: str, stage: str) -> str:
+    """The documented `[plan] N. <stage>:` line, matched exactly.
+
+    A checkout path or argument that merely contains the stage word (e.g.
+    `.../989-uvicorn-json-logs/...`) is never selected as that step."""
+    matches = [
+        line for line in stdout.splitlines()
+        if (m := _PLAN_STEP.match(line)) and m.group("stage") == stage
+    ]
+    assert len(matches) == 1, f"expected one plan step {stage!r}, found {matches!r}"
+    return matches[0]
 
 
 @pytest.fixture(autouse=True)
@@ -40,11 +53,36 @@ def test_dryrun_plan_orders_stages():
     gateway, probe, ingest, agent)."""
     r = _run()
     assert r.returncode == 0, r.stderr
-    plan = "\n".join(ln for ln in r.stdout.splitlines() if ln.startswith("[plan]"))
-    marks = ["backends", "qdrant", "run_local_openobserve.sh", "run_local_gateway.sh", "probe_gateway.py", ". ingest:", "uvicorn"]
-    positions = [plan.index(m) for m in marks]
-    assert positions == sorted(positions)
-    assert "UI_ENABLED=true" in plan
+    stages = ["backends", "qdrant", "openobserve", "gateway", "probe", "ingest", "agent"]
+    steps = [_plan_step(r.stdout, stage) for stage in stages]
+    assert [int(_PLAN_STEP.match(line)["number"]) for line in steps] == list(range(1, 8))
+    assert "run_local_openobserve.sh" in steps[2]
+    assert "run_local_gateway.sh" in steps[3]
+    assert "probe_gateway.py" in steps[4]
+    assert "uvicorn" in steps[6]
+    assert "UI_ENABLED=true" in steps[6]
+
+
+def test_plan_step_matcher_ignores_stage_words_in_paths_and_arguments():
+    """#588: selecting a step by substring mistakes a checkout path or argument
+    for the label. Only the `[plan] N. <stage>:` prefix may select a line."""
+    stdout = (
+        "[plan] 1. backends: check http://127.0.0.1:8000/v1/models "
+        "(uvicorn probe; checkout /checkout/989-uvicorn-json-logs)\n"
+        "[plan] 5. probe:   PY=/checkout/989-agent-uvicorn-json-logs/python "
+        "scripts/probe_gateway.py --stream\n"
+        "[plan] 6. ingest:  PY=/checkout/989-agent-uvicorn-json-logs/python -m "
+        "mainframe_rag.ingest.run_ingest --src /checkout/989-agent-uvicorn-json-logs/corpus\n"
+        "[plan] 7. agent:   PY=/checkout/989-ingest-probe-json-logs/python -m uvicorn "
+        "mainframe_rag.agent.app:app"
+    )
+    lines = stdout.splitlines()
+    assert _plan_step(stdout, "backends") == lines[0]
+    assert _plan_step(stdout, "probe") == lines[1]
+    assert _plan_step(stdout, "ingest") == lines[2]
+    # Earlier lines carry "uvicorn"/"agent"/"probe"/"ingest" in paths; none of
+    # them is the agent step.
+    assert _plan_step(stdout, "agent") == lines[3]
 
 
 def test_dryrun_plan_reflects_operator_overrides(tmp_path):
@@ -54,9 +92,11 @@ def test_dryrun_plan_reflects_operator_overrides(tmp_path):
     })
     assert r.returncode == 0, r.stderr
     lines = r.stdout.splitlines()
-    assert "--max-tokens 512" in next(ln for ln in lines if "probe_gateway.py" in ln)
-    assert "UI_ENABLED=false" in next(ln for ln in lines if "uvicorn" in ln)
-    ingest = next(ln for ln in lines if _INGEST_STEP.match(ln))
+    probe = _plan_step(r.stdout, "probe")
+    agent = _plan_step(r.stdout, "agent")
+    assert "--max-tokens 512" in probe
+    assert "UI_ENABLED=false" in agent
+    ingest = _plan_step(r.stdout, "ingest")
     assert str(tmp_path) in ingest and "skipped" not in ingest
     # A shared service name would merge agent and ingest in one OpenObserve.
     assert "OTEL_SERVICE_NAME=mainframe-rag-ingest" in ingest
@@ -465,7 +505,7 @@ def _plan_workers(tmp_path: Path, host: dict[str, str]) -> tuple[subprocess.Comp
         check=False,
         env={**clean, "LOCAL_STACK_DRYRUN": "1", "CORPUS_DIR": str(corpus), **host},
     )
-    ingest = next((ln for ln in r.stdout.splitlines() if _INGEST_STEP.match(ln)), "")
+    ingest = _plan_step(r.stdout, "ingest") if "[plan]" in r.stdout else ""
     return r, ingest
 
 
