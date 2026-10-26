@@ -28,7 +28,7 @@ build_images() {  # pull the pinned images, tag the local names, build the deriv
     nginx_src="$(nginx_ref)@$NGINX_PIN"
     if [ "$DRYRUN" = 1 ]; then
         plan "images: inspect or pull $OWUI_BASE, $DEX_PIN, $nginx_src; tag $DEX_IMAGE, $NGINX_IMAGE"
-        plan "images: docker build -f $HERE/Containerfile.openwebui -t $OWUI_IMAGE (cached layers)"
+        plan "images: docker build -f $REPO/images/openwebui/Containerfile -t $OWUI_IMAGE (cached layers)"
         return 0
     fi
     for ref in "$OWUI_BASE" "$DEX_PIN" "$nginx_src"; do
@@ -36,7 +36,7 @@ build_images() {  # pull the pinned images, tag the local names, build the deriv
     done
     docker tag "$DEX_PIN" "$DEX_IMAGE"
     docker tag "$nginx_src" "$NGINX_IMAGE"
-    docker build -q -f "$HERE/Containerfile.openwebui" -t "$OWUI_IMAGE" "$HERE" >/dev/null
+    docker build -q -f "$REPO/images/openwebui/Containerfile" -t "$OWUI_IMAGE" "$REPO/images/openwebui" >/dev/null
     for ref in "$OWUI_IMAGE" "$DEX_IMAGE" "$NGINX_IMAGE"; do
         docker image inspect "$ref" --format "$ref {{.Id}} {{.Config.User}}"
     done | tee "$STATE/images.txt"

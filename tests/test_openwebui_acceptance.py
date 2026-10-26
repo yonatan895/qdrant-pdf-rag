@@ -47,7 +47,7 @@ def test_trial_directory_is_gone_and_pins_are_complete():
     assert set(pins) == {"NODE_IMAGE", "OWUI_BASE", "DEX_PIN", "SKOPEO_IMAGE"}
     assert all("@sha256:" in v for v in pins.values())
     # The Containerfile base and the pin file name the same upstream digest.
-    assert pins["OWUI_BASE"].split("@")[1] in (DIR / "Containerfile.openwebui").read_text()
+    assert pins["OWUI_BASE"].split("@")[1] in (ROOT / "images" / "openwebui" / "Containerfile").read_text()
 
 
 def test_dev_environment_reads_the_working_tree_not_git_refs():

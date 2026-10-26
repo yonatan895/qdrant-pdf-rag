@@ -54,7 +54,7 @@ lane's normal pipeline first, so the agent is the one the other Kind lanes
 deploy from the bundle: test gateway with mock reasoning and embedding models,
 the synthetic corpus, no GPU, no hash mode. Before the egress boundary closes it
 pulls the pinned Open WebUI base, Dex and nginx images, builds the derived
-image and loads all three into the node (`acceptance.sh images`). Behind the
+image from `images/openwebui/Containerfile` and loads all three into the node (`acceptance.sh images`). Behind the
 boundary it deploys the chart objects and stand-ins into the lane's namespace
 (`acceptance.sh deploy`) and runs `acceptance.py` through port-forwards
 (`acceptance.sh run`). The JSON result is kept as lane evidence
@@ -84,3 +84,10 @@ record), model quality (mock models), the node-level pre-NAT flow audit of the
 2026-10-24 trial (the DNS and socket checks replace it in CI), and anything
 about the site's CNI beyond Kind's NetworkPolicy engine. A failed lane is a
 product defect or a lane defect; do not weaken a rule in `checks.py` to pass.
+
+The same workflow's `image-openwebui` job (dispatch and nightly only) builds
+that Containerfile and pushes `ghcr.io/<owner>/qdrant-pdf-rag-openwebui` with
+`v0.12.3-slim` and the commit SHA, and writes the manifest digest to the job
+summary; the `images.txt` pin is a separate PR. Every other e2e job that runs
+the operator flow sets `OPENWEBUI_ENABLED=false` (the front end is default-on
+and fails closed without site inputs); only the `openwebui` lane deploys it.
