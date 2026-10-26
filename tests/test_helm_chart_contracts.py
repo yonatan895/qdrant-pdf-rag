@@ -2042,3 +2042,26 @@ def test_agent_ingress_policy_admits_the_collector_scrape():
     first = docs[POLICY_KEY]["spec"]["ingress"][0]
     assert first["from"] == [{"podSelector": {}}]
     assert {"protocol": "TCP", "port": 8080} in first["ports"]
+
+
+@pytest.mark.parametrize("path,bad", [
+    (("idpEgress", "port"), None), (("idpEgress", "port"), ""), (("idpEgress", "port"), " "),
+    (("idpEgress", "port"), 0), (("idpEgress", "port"), "443"),
+    (("oidc", "groupClaim"), None), (("oidc", "groupClaim"), ""), (("oidc", "groupClaim"), " "),
+    (("oidc", "rolesClaim"), None), (("oidc", "rolesClaim"), ""), (("oidc", "rolesClaim"), " "),
+])
+def test_openwebui_refuses_null_empty_or_blank_port_and_claims(owui_chart, path, bad):
+    """B2: a null IdP port would render an egress rule open to every TCP port, and
+    an empty claim a half-configured sign-in; both must refuse, not render."""
+    values = _bare_default_values()
+    values.update(json.loads(json.dumps(OWUI_ON)))
+    values["openwebui"][path[0]][path[1]] = bad
+    r = _helm_template_with_values(values, chart=owui_chart)
+    assert r.returncode != 0, r.stdout[:200]
+    assert "rag-openwebui" not in r.stdout
+
+
+def test_openwebui_networkpolicy_egress_rules_always_carry_a_port(owui_chart):
+    policy = _owui(owui_chart)["NetworkPolicy", "rag-openwebui"]
+    for rule in policy["spec"]["egress"]:
+        assert rule.get("ports") and all("port" in p for p in rule["ports"])

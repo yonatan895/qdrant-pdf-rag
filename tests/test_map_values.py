@@ -969,7 +969,7 @@ def test_openwebui_unset_is_enabled_and_fails_closed_naming_the_opt_out(monkeypa
     assert r.returncode != 0 and not out.exists()
     assert ("inputs are missing: OPENWEBUI_SECRET, OPENWEBUI_HOST, OPENWEBUI_OIDC_PROVIDER_URL, "
             "OPENWEBUI_OIDC_CLIENT_ID, OPENWEBUI_OIDC_ALLOWED_ROLES, OPENWEBUI_OIDC_ADMIN_ROLES, "
-            "OPENWEBUI_IDP_EGRESS_CIDRS, ROUTE_DESTINATION_CA_FILE. Set them, or opt out with "
+            "OPENWEBUI_IDP_EGRESS_CIDRS. Set them, or opt out with "
             "OPENWEBUI_ENABLED=false") in r.stderr
 
 
@@ -1040,7 +1040,7 @@ def test_openwebui_allow_list_proxy_image_is_rendered_with_its_verified_digest(m
     ({"OPENWEBUI_RETENTION_DAYS": "0"}, "OPENWEBUI_RETENTION_DAYS must be"),
     ({"OPENWEBUI_RETENTION_DAYS": "3651"}, "OPENWEBUI_RETENTION_DAYS must be"),
     ({"OPENWEBUI_STORAGE_SIZE": "10"}, "OPENWEBUI_STORAGE_SIZE must be"),
-    ({"ROUTE_DESTINATION_CA_FILE": ""}, "inputs are missing: ROUTE_DESTINATION_CA_FILE"),
+    ({"ROUTE_DESTINATION_CA_FILE": ""}, "needs ROUTE_DESTINATION_CA_FILE"),
     # Shapes are checked even while the feature is off: a typo fails today.
     ({"OPENWEBUI_ENABLED": "false", "OPENWEBUI_RETENTION_DAYS": "forever"}, "OPENWEBUI_RETENTION_DAYS must be"),
 ])

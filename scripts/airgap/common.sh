@@ -765,7 +765,7 @@ require_oauth_cookie_secret() {
 # be recorded (not sha256:PENDING, #1073), name the chart's images.openwebui
 # repository/tag, and (with a packed MANIFEST) be the pin the bundle carries.
 require_openwebui_pin() {
-    pin_recorded qdrant-pdf-rag-openwebui || die "OPENWEBUI_ENABLED=true needs the Open WebUI digest recorded in images.txt (currently sha256:PENDING, pending #1073 qualification); record it on the connected host and repack"
+    pin_recorded qdrant-pdf-rag-openwebui || die "OPENWEBUI_ENABLED=true needs the Open WebUI digest recorded in images.txt (currently sha256:PENDING, pending #1073 qualification); record it on the connected host and repack, or opt out with OPENWEBUI_ENABLED=false"
     _owui_src=$(awk '$1 !~ /^#/ && $1 ~ /qdrant-pdf-rag-openwebui/ {print $1; exit}' images.txt)
     _chart_values=charts/mainframe-rag/values.yaml
     # images.openwebui (indented), not the top-level openwebui settings block.

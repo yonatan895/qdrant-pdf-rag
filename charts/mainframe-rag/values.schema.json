@@ -410,7 +410,22 @@
             "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
           }
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "enabled": { "const": true } },
+            "required": ["enabled"]
+          },
+          "then": {
+            "required": ["oidc", "idpEgress"],
+            "properties": {
+              "oidc": { "required": ["groupClaim", "rolesClaim"] },
+              "idpEgress": { "required": ["port"] }
+            }
+          }
+        }
+      ]
     },
     "storage": {
       "type": "object",

@@ -1604,12 +1604,14 @@ refuses until the site supplies every required input. Both layers refuse before 
 - `airgap.env` layer (`validate.sh`, `map_values.py`): refuses with one fixed message that names the
   missing keys (never values), from `OPENWEBUI_SECRET`, `OPENWEBUI_HOST`,
   `OPENWEBUI_OIDC_PROVIDER_URL`, `OPENWEBUI_OIDC_CLIENT_ID`, `OPENWEBUI_OIDC_ALLOWED_ROLES`,
-  `OPENWEBUI_OIDC_ADMIN_ROLES`, `OPENWEBUI_IDP_EGRESS_CIDRS`, `ROUTE_DESTINATION_CA_FILE`, and
-  names the opt-out `OPENWEBUI_ENABLED=false`.
+  `OPENWEBUI_OIDC_ADMIN_ROLES`, `OPENWEBUI_IDP_EGRESS_CIDRS`, and
+  names the opt-out `OPENWEBUI_ENABLED=false`. `ROUTE_DESTINATION_CA_FILE` is not an operator input on
+  the live path (deploy fetches the service CA); only a dry-run render of the Route needs it.
 - Chart layer (direct `helm template/upgrade`): the same eight inputs as chart values
   (`openwebui.secretName`, `host`, `oidc.providerUrl`, `oidc.clientId`, `oidc.allowedRoles`,
   `oidc.adminRoles`, `idpEgress.cidrs`, `route.destinationCA`); the render fails with a fixed message
-  naming the missing values and `--set openwebui.enabled=false`. A half-configured Open WebUI is
+  naming the missing values and `--set openwebui.enabled=false`. The schema also refuses an absent or null `oidc.groupClaim`, `oidc.rolesClaim` and `idpEgress.port`
+  (a null port would otherwise render an egress rule open to all TCP ports). A half-configured Open WebUI is
   never rendered, and there is no placeholder host or local-login fallback.
 - Opt out: `OPENWEBUI_ENABLED=false` in `airgap.env` (the mapper writes `openwebui.enabled: false`)
   or `--set openwebui.enabled=false`. The opt-out render is byte-identical to a chart without Open

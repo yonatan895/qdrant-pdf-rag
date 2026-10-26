@@ -219,10 +219,11 @@ def openwebui_config(values: Mapping[str, str]) -> dict[str, object] | None:
         return None
     required = {"OPENWEBUI_SECRET": secret, "OPENWEBUI_HOST": host,
                 "OPENWEBUI_OIDC_PROVIDER_URL": provider, "OPENWEBUI_OIDC_CLIENT_ID": client_id,
-                **roles, "OPENWEBUI_IDP_EGRESS_CIDRS": cidrs,
-                "ROUTE_DESTINATION_CA_FILE": values.get("ROUTE_DESTINATION_CA_FILE", "")}
+                **roles, "OPENWEBUI_IDP_EGRESS_CIDRS": cidrs}
     missing = [key for key, value in required.items() if not value]
     if missing:
+        # The service CA is not an operator input on the live path (deploy.sh
+        # fetches it); map_values enforces it only for dry-run rendering.
         # One fixed message: key names only, never values.
         raise ValueError("Open WebUI is enabled by default (ADR-0008) but required inputs are "
                          f"missing: {', '.join(missing)}. Set them, or opt out with "
