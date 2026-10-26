@@ -164,6 +164,7 @@ keeps its separate fixed rehearsal inputs.
 | `COLAB_APPROVE_CU`, `COLAB_WORKLOAD` | `local:colab:run` | Requires explicit approval matching this prepared run's cap. Synthetic runs allow one private executable; production requires the native frozen workload. Trailing shell arguments are rejected. `local:colab:stop` recovers only the recorded session. |
 | Secrets (`GATEWAY_MASTER_KEY`, per-leg keys) | caller environment only | Never CLI assignments or Task variables. Script-owned private handoff paths and per-start key handling are unchanged. |
 | `BUDGET_PYTHON` | fixed by local launch tasks | Always the repository's `.venv/bin/python`; not caller-overridable or globally exported. |
+| `WHEELHOUSE`, `PROFILE`, `PY` | `qa:deps WHEELHOUSE=/approved/dev-wheels` | On-demand refreshed-lock check. `PROFILE` must be `dev` (the only profile with the focused test runner). `WHEELHOUSE` defaults to the prepared `.tools/python-wheels/dev`; `PY` defaults to `.venv/bin/python` and is only the base interpreter for a disposable temporary venv. See [dependencies](dependencies.md). |
 | Operator keys (`INTERNAL_REGISTRY`, `NAMESPACE`, …) | `airgap:deploy INTERNAL_REGISTRY=x` | No Task-side defaults. `common.sh` owns the full `OPERATOR_ENV_KEYS` list and env/file/default precedence: explicit nonempty values win, explicit empty stays unset. See [configuration](deploy.md#configuration-contract). |
 
 Values use environment bridges and quoted expansion, never templates reparsed
@@ -184,10 +185,13 @@ concurrent setup/build processes must not share one environment/output directory
 ## Safety boundaries
 
 Verification diagnoses missing dependencies; it never creates `.venv` or
-installs packages. `dev:setup` is explicit connected-host preparation, while
-CI selects its prepared interpreter. Services, model calls, baseline recording,
-cleanup and deployment remain explicit commands with their existing permissions.
-`dev:clean` retains `*.tar*`, `.tools/` and external paths.
+installs packages. The on-demand `qa:deps` refreshed-lock check is the bounded
+exception: it installs the verified dev profile only into a temporary
+environment that it removes on exit, and never into `.venv` (see
+[dependencies](dependencies.md)). `dev:setup` is explicit connected-host
+preparation, while CI selects its prepared interpreter. Services, model calls,
+baseline recording, cleanup and deployment remain explicit commands with their
+existing permissions. `dev:clean` retains `*.tar*`, `.tools/` and external paths.
 
 `airgap:dryrun` executes the existing pipeline's validation/rendering path with
 fixed stand-ins for its declared inputs. It is an executed verification;

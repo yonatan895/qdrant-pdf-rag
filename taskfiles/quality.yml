@@ -187,6 +187,34 @@ tasks:
     cmds:
       - '"$TASK_PY" scripts/check_agent_context.py'
 
+  deps:
+    desc: Verify a refreshed lock offline in a clean temporary venv (on-demand)
+    summary: |
+      `sh scripts/tools/run-task.sh qa:deps WHEELHOUSE=/approved/dev-wheels`
+      verifies the selected profile's wheelhouse against the lock manifest,
+      creates a temporary CPython 3.14 venv from PY (default .venv/bin/python),
+      installs the complete dev profile with `--no-index --find-links`, runs
+      `pip check`, then the dependency-lock, licence-inventory, BM25-weights,
+      embed-budget and hash-embed suites in that clean environment. PROFILE
+      defaults to dev and must be dev: it is the only profile with the test
+      runner and is a strict superset of runtime/build at identical pins.
+      WHEELHOUSE defaults to .tools/python-wheels/dev (the prepared dev
+      wheelhouse); point it at the candidate wheelhouse for a refresh. Never
+      uses the network, never installs into .venv, never edits a lock, and
+      removes the temporary environment. Missing, incomplete or unsafe inputs
+      fail closed. On-demand maintenance; not an every-lane CI job.
+    vars:
+      PROFILE: '{{if hasKey . "PROFILE"}}{{.PROFILE}}{{else}}dev{{end}}'
+      WHEELHOUSE: '{{if hasKey . "WHEELHOUSE"}}{{.WHEELHOUSE}}{{else}}.tools/python-wheels/dev{{end}}'
+      PY: '{{if hasKey . "PY"}}{{.PY}}{{else}}.venv/bin/python{{end}}'
+    env:
+      TASK_DEPS_PROFILE: '{{.PROFILE}}'
+      TASK_DEPS_WHEELHOUSE: '{{.WHEELHOUSE}}'
+      TASK_DEPS_PY: '{{.PY}}'
+    cmds:
+      - 'test -f "$TASK_DEPS_PY" || { echo "missing development environment: $TASK_DEPS_PY absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
+      - '"$TASK_DEPS_PY" scripts/verify_dependency_refresh.py --profile "$TASK_DEPS_PROFILE" --wheelhouse "$TASK_DEPS_WHEELHOUSE" --python "$TASK_DEPS_PY"'
+
   sim:
     desc: Run the sim integration tier against disposable Qdrant (load and HA tiers excluded, 0 skips)
     summary: |
