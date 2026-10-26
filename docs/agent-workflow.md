@@ -169,6 +169,10 @@ large task to as many agents as it needs to finish quickly.
   runner, one G4 session at a time, and the trusted/Verifier steps. Parallelism
   never bypasses them or the [branch workflow](#git-workflow) authority rules.
 
+`scripts/parallel_guard.py` wraps a command with a host-memory floor and a
+`systemd-run` memory cap; `--help` and the script docstring list its defaults
+and flags.
+
 <a id="review-handoff"></a>
 ## Independent review and handoff
 
