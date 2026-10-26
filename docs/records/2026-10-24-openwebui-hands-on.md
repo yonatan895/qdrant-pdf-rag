@@ -14,8 +14,8 @@ stand-ins) and `hands_on_values.yaml` (chart values).
 
 | Piece | Source | Kind detail |
 |---|---|---|
-| Open WebUI pod: `openwebui`, the nginx allow-list `proxy` sidecar, `chat-purge` | #1083 chart at `CHART_REF` (head `4b36e0b`), rendered with `helm template --show-only` for the Deployment, NetworkPolicy, both ConfigMaps, Service and PVC | derived image `mainframe-rag/openwebui-trial:0.12.3-slim` (#1085 Containerfile), proxy `nginx-unprivileged` by the `images.txt` digest |
-| Docs Pipe | `integrations/openwebui/docs_pipe.py` at `PIPE_REF` (main `13befa2`, with the #1091 trimming), swapped into the rendered chart copy | installed by the chart's own `provision_pipe.py` inside the pod, admin key on stdin |
+| Open WebUI pod: `openwebui`, the nginx allow-list `proxy` sidecar, `chat-purge` | #1083 chart at `CHART_REF` (head `765d44c`), rendered with `helm template --show-only` for the Deployment, NetworkPolicy, both ConfigMaps, Service and PVC | derived image `mainframe-rag/openwebui-trial:0.12.3-slim` (#1085 Containerfile), proxy `nginx-unprivileged` by the `images.txt` digest |
+| Docs Pipe | `integrations/openwebui/docs_pipe.py` at `PIPE_REF` (main `97e4fd8`, with the #1091 trimming and the #1098 citation fix), swapped into the rendered chart copy | installed by the chart's own `provision_pipe.py` inside the pod, admin key on stdin |
 | Identity | Dex v2.46.0 (pinned), HTTPS from a local CA, static users with a `groups` claim | namespace `owui-idp`; issuer `https://dex.localhost:5556/dex` |
 | Route | none (Kind has no Route API) | router stand-in in `owui-router` (labelled `network.openshift.io/policy-group: ingress`), reencrypt, the Route timeout (300 s) |
 | Agent | the maintainer's local lane (below) | relay pod labelled `app: rag-agent` plus Service `rag-agent`, so the chart's egress rule and the Pipe's default `AGENT_URL` apply unchanged |
@@ -42,7 +42,9 @@ The real local lane, as the maintainer runs it (`docs/local-kind.md` section 3,
   skip ingest while the `mainframe_manuals` alias exists (`INGEST=auto|always|never`,
   `CORPUS_COUNT`).
 - `local:stack` runs from a detached worktree at `PIPE_REF`, so the agent and the Pipe come from
-  the same main commit. It uses the main venv with `PYTHONPATH=<worktree>/src`,
+  the same main commit. After a `PIPE_REF` bump `up` refuses an existing worktree at the old
+  commit; remove it with `git worktree remove` first. The new commit may carry a new rules
+  version, so run that first `up` with `INGEST=always`. It uses the main venv with `PYTHONPATH=<worktree>/src`,
   `RERANK_ENABLED=false`, gateway 4000 and the agent on `127.0.0.1:8080`.
 
 Path: Open WebUI pod → `rag-agent:8080` (relay pod, nginx, 3600 s read timeout) → host

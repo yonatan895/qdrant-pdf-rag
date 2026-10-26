@@ -48,9 +48,9 @@ NODE="$KIND_NAME-control-plane"
 KUBECONFIG="$STATE/kubeconfig"
 export KUBECONFIG
 LOCK=${HEAVY_LOCK:-$HOME/.cache/agent-tmp/mainframe-rag-heavy.lock}
-# PR #1083 head (the chart under re-review) and main with the #1091 Pipe trimming.
-CHART_REF=${CHART_REF:-4b36e0bd0a8bbfbadf1d01ea4ababd254de1f568}
-PIPE_REF=${PIPE_REF:-13befa25902a40587e63f078b0b375ab0eab534d}
+# PR #1083 head (the chart under review) and main with the #1098 Pipe citation fix.
+CHART_REF=${CHART_REF:-765d44c4a777e241d4d3c610e29184bf439da863}
+PIPE_REF=${PIPE_REF:-97e4fd8332b3018248c31eb8e15e2cf3b89f8574}
 APP_NS=owui
 OWUI_HOST=owui.localhost
 DEX_HOST=dex.localhost
@@ -488,7 +488,7 @@ render_chart() {  # render_chart OUTDIR
     mkdir -p "$src" "$out/kustomize"
     git -C "$REPO" archive "$CHART_REF" charts/mainframe-rag | tar -x -C "$src"
     chart="$src/charts/mainframe-rag"
-    # The Docs Pipe is main's (with #1091), not the chart branch's copy.
+    # The Docs Pipe is main's (with #1098), not the chart branch's copy.
     git -C "$REPO" show "$PIPE_REF:integrations/openwebui/docs_pipe.py" > "$chart/files/openwebui/docs_pipe.py"
     sha256sum "$chart/files/openwebui/docs_pipe.py" | cut -d' ' -f1 > "$out/pipe.sha256"
     NGINX_PIN=$(nginx_pin)
