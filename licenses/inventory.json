@@ -161,7 +161,7 @@
       "status": "approved"
     },
     {
-      "approval_ref": "gh:yonatan895/qdrant-pdf-rag#1070 maintainer disposition 2026-10-24 (decision comments); ADR-0007 L1 (accepted 2026-10-24); ADR-0008 (accepted 2026-10-26)",
+      "approval_ref": "gh:yonatan895/qdrant-pdf-rag#1070 issuecomment-6420326886 (ADR-0008 direction, 2026-10-26) and issuecomment-6420723791 (fail-closed); ADR-0007 L1 (accepted 2026-10-24, original relay via the #1070 coordinator: no issue comment id recorded); ADR-0008 (accepted 2026-10-26)",
       "bind": {
         "digest": "sha256:5adfb0355bbe4a5860c0ba9482cc0b40f573de3749a21a64cf4789391a14fffc",
         "images_txt": "ghcr.io/open-webui/open-webui:v0.12.3-slim"
@@ -186,7 +186,7 @@
       "status": "approved"
     },
     {
-      "approval_ref": "gh:yonatan895/qdrant-pdf-rag#1070 maintainer disposition 2026-10-24 (decision comments); ADR-0007 L1 (accepted 2026-10-24); ADR-0008 (accepted 2026-10-26)",
+      "approval_ref": "gh:yonatan895/qdrant-pdf-rag#1070 issuecomment-6420326886 (ADR-0008 direction, 2026-10-26) and issuecomment-6420723791 (fail-closed); ADR-0007 L1 (accepted 2026-10-24, original relay via the #1070 coordinator: no issue comment id recorded); ADR-0008 (accepted 2026-10-26)",
       "bind": {
         "digest": "sha256:5329730006ef29f54784c760467363dfc3d268e5089f92ceaa8942dcb3b5d65b",
         "images_txt": "ghcr.io/yonatan895/qdrant-pdf-rag-openwebui:v0.12.3-slim"
@@ -211,7 +211,7 @@
       "status": "approved"
     },
     {
-      "approval_ref": "gh:yonatan895/qdrant-pdf-rag#1070 maintainer disposition 2026-10-24 (decision comments); ADR-0007 E1 (accepted 2026-10-24); ADR-0008 (accepted 2026-10-26)",
+      "approval_ref": "gh:yonatan895/qdrant-pdf-rag#1070 issuecomment-6388607256 (E1 Route allow-list, 2026-10-24) and issuecomment-6420326886 (ADR-0008 direction, 2026-10-26); ADR-0007 E1 (accepted 2026-10-24); ADR-0008 (accepted 2026-10-26)",
       "bind": {
         "digest": "sha256:f5116ed4606f3eb015dd4a8e28cb9b351476dc0ad4bc6e9f93b19cec130cdf03",
         "images_txt": "docker.io/nginxinc/nginx-unprivileged:1.30.6-alpine"
@@ -1804,7 +1804,7 @@
       "wheel": "pyjwt-2.15.1-py3-none-any.whl"
     },
     {
-      "approval_ref": "gh:yonatan895/qdrant-pdf-rag#376 issuecomment-6427197208 maintainer owner decision 2026-10-26; owner decision, explicit exception to legal confirmation; withdrawn if legal confirmation is refused or the use changes",
+      "approval_ref": "gh:yonatan895/qdrant-pdf-rag#376 issuecomment-6427197208; owner decision, explicit exception to legal confirmation; withdrawn if legal confirmation is refused or the use changes",
       "binary_wheel": true,
       "class": "network-copyleft",
       "decision": {

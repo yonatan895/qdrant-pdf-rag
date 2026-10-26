@@ -139,7 +139,7 @@ def test_open_webui_licence_records_the_maintainer_decision_and_its_conditions()
         assert (entry["license_spdx"], entry["class"]) == ("LicenseRef-Open-WebUI-License", "proprietary")
         # ADR-0007 (accepted 2026-10-24) L1, ADR-0008 (accepted 2026-10-26): approved, bound to the digest.
         assert entry["status"] == "approved"
-        assert "ADR-0007 L1 (accepted 2026-10-24)" in entry["approval_ref"]
+        assert "ADR-0007 L1 (accepted 2026-10-24" in entry["approval_ref"]
         assert "ADR-0008 (accepted 2026-10-26)" in entry["approval_ref"]
         assert "pending acceptance" not in entry["approval_ref"]
         assert entry["decision"]["disposition"].startswith(
@@ -259,6 +259,45 @@ def test_release_mode_blocks_on_unresolved_decisions_and_missing_approval():
     assert state == "absent"
     assert unresolved == []
     assert problems == ["release approval: no owner approval is recorded for this inventory"]
+    # Withdrawal: an unresolved item must block the release, not only the missing approval.
+    inventory = real_inventory()
+    pymupdf = next(e for e in inventory["python"] if e["name"] == "pymupdf")
+    pymupdf["status"] = "pending-owner-decision"
+    pymupdf["decision"]["legal_confirmation"] = "pending"
+    problems, unresolved, _ = problems_for(inventory, release=True)
+    assert len(unresolved) == 1
+    assert any("python:pymupdf" in p and "awaits owner decision" in p for p in problems)
+    assert any("pymupdf: legal confirmation of the recorded decision is pending" in p for p in problems)
+    assert any("release approval: no owner approval" in p for p in problems)
+
+
+@pytest.mark.parametrize("value", ["refused", "Pending", "pending ", "pendng", "", None, 3])
+def test_unknown_legal_confirmation_value_fails_check(value):
+    inventory = real_inventory()
+    pymupdf = next(e for e in inventory["python"] if e["name"] == "pymupdf")
+    pymupdf["decision"]["legal_confirmation"] = value
+    problems, _, _ = problems_for(inventory)
+    assert any("pymupdf" in p and "decision.legal_confirmation must be one of pending, confirmed, "
+               "waived-by-owner-decision" in p for p in problems)
+
+
+def test_missing_legal_confirmation_on_an_elected_entry_fails_check():
+    inventory = real_inventory()
+    pymupdf = next(e for e in inventory["python"] if e["name"] == "pymupdf")
+    del pymupdf["decision"]["legal_confirmation"]
+    problems, _, _ = problems_for(inventory)
+    assert any("decision.legal_confirmation must be one of" in p for p in problems)
+    del pymupdf["decision"]
+    problems, _, _ = problems_for(inventory)
+    assert any("decision.legal_confirmation must be one of" in p for p in problems)
+
+
+@pytest.mark.parametrize("value", ["confirmed", "waived-by-owner-decision"])
+def test_recognized_legal_confirmation_values_pass(value):
+    inventory = real_inventory()
+    next(e for e in inventory["python"] if e["name"] == "pymupdf")["decision"]["legal_confirmation"] = value
+    assert problems_for(inventory, release=True)[0] == [
+        "release approval: no owner approval is recorded for this inventory"]
 
 
 def resolve_everything(inventory):

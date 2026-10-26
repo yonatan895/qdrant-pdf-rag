@@ -52,6 +52,8 @@ ORDER = ("permissive", "weak-copyleft", "strong-copyleft", "network-copyleft",
 # decision (status pending-owner-decision, excluded or approved with a reference).
 RESTRICTED = frozenset(ORDER[2:])
 STATUSES = ("declared", "pending-owner-decision", "approved", "excluded")
+# decision.legal_confirmation: only "pending" blocks a release; any other value is rejected.
+LEGAL_CONFIRMATIONS = ("pending", "confirmed", "waived-by-owner-decision")
 SPDX_BASES = ("declared-expression", "normalized-license-field", "normalized-classifier",
               "license-file-text", "upstream-project-license", "not-verified")
 
@@ -346,6 +348,10 @@ def check_policy(entry: dict, label: str, problems: list[str], unresolved: list[
     if decision is not None and not (isinstance(decision, dict) and decision.get("owner") and decision.get("date")
                                      and decision.get("disposition")):
         problems.append(f"{label}: decision record needs owner, date and disposition")
+    legal = decision.get("legal_confirmation", "") if isinstance(decision, dict) else ""
+    if (isinstance(decision, dict) and "legal_confirmation" in decision and legal not in LEGAL_CONFIRMATIONS) or (
+            entry.get("elected") and not (isinstance(decision, dict) and "legal_confirmation" in decision)):
+        problems.append(f"{label}: decision.legal_confirmation must be one of {', '.join(LEGAL_CONFIRMATIONS)}")
     if expected in RESTRICTED and status == "declared":
         problems.append(f"{label}: class {expected} cannot rest on declared metadata; record an owner decision state")
     if expected == "weak-copyleft" and not entry.get("obligation"):

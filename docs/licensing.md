@@ -177,7 +177,9 @@ agreement already cover this use.
 recorded (`elected: AGPL-3.0-only`). **Owner decision (2026-10-26, #376):** the
 maintainer approved it as an **explicit exception** to waiting for the qualified legal
 owner's confirmation (`decision.legal_confirmation: waived-by-owner-decision`).
-`check --release` still refuses any entry whose `decision.legal_confirmation` is
+`decision.legal_confirmation` is required on every entry with an `elected` choice and must
+be one of `pending`, `confirmed` or `waived-by-owner-decision`; any other value, or a
+missing key, fails `check`. `check --release` refuses any entry whose value is
 `pending`. The disposition is **withdrawn** and the item returns to pending if legal
 confirmation is refused, or the use changes (modification, distribution outside the
 organisation, network exposure of pymupdf itself); the release then needs a new
