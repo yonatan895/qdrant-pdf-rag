@@ -16,6 +16,7 @@ import pytest
 
 from tests.helpers_airgap import (
     REPO,
+    FakeQdrant,
     assert_no_placeholders,
     assert_pull_secret_wired,
     copy_chart,
@@ -64,6 +65,13 @@ def test_packaging_pr_gate_checks_vendored_qdrant_chart():
 STUB_BIN = """#!/bin/sh
 printf '%s\\n' "$@" >> "$HELM_LOG"
 case "$*" in
+  *'get statefulset/qdrant '*)
+    [ "${{STS_FAIL:-}}" != 1 ] || {{ echo 'dial tcp 10.0.0.1:6443: i/o timeout' >&2; exit 1; }}
+    [ -z "${{FAKE_QDRANT_URL:-}}" ] || echo statefulset.apps/qdrant ;;
+  *'exec -i deploy/rag-agent -- python3 -c '*)
+    [ -n "${{FAKE_QDRANT_URL:-}}" ] && [ "${{EXEC_FAIL:-}}" != 1 ] || {{ echo 'error: container not found' >&2; exit 1; }}
+    while [ "$1" != "--" ]; do shift; done; shift
+    exec env QDRANT_URL="$FAKE_QDRANT_URL" QDRANT_API_KEY="$FAKE_READ_KEY" "$@" ;;
   *'get statefulset '*'-o json'*)
     [ "${{LIVE_STS_FAIL:-}}" != 1 ] || exit 1
     # Answers only the StatefulSet's real name, like a cluster would.
@@ -2049,6 +2057,107 @@ def test_openobserve_password_length_counts_characters_not_bytes(tree, password,
         assert _mutations(tree) == []
 
 
+# --- Issue #1070 (R1): stored-layout preflight before any cluster change -----
+
+
+@pytest.fixture
+def qdrant():
+    fake = FakeQdrant()
+    yield fake
+    fake.close()
+
+
+def _layout_env(qdrant, *extra):
+    return (("FAKE_QDRANT_URL", qdrant.url), ("FAKE_READ_KEY", FakeQdrant.READ_KEY), *extra)
+
+
+def _bound_alias(qdrant, *, bound=True):
+    from mainframe_rag.ingest.publish import publication_metadata_point_id
+
+    gen = "mainframe_manuals__gen1"
+    qdrant.add_collection(gen, [{"id": 1, "vector": {"dense": [0.0] * 4}}])
+    payload = {"record_type": "publication-metadata", "target_collection": gen + "__completions"}
+    if bound:
+        payload.update(build_schema=3, build_id="b1", logical_alias="mainframe_manuals", data_collection=gen)
+    qdrant.add_collection(gen + "__completions", [
+        {"id": publication_metadata_point_id(gen + "__completions"), "vector": {"dense": [0.0] * 4},
+         "payload": payload}])
+    qdrant.aliases["mainframe_manuals"] = gen
+
+
+def _first_mutation_free(tree):
+    log = _helm_log(tree)
+    assert "upgrade" not in log.split() and "new-project" not in log
+    assert not re.search(r"^(create|delete|apply)$", log, re.MULTILINE), log
+
+
+def test_legacy_plain_collection_refuses_before_any_mutation(tree, qdrant):
+    qdrant.add_collection("mainframe_manuals", [{"id": 1, "vector": {"dense": [0.0] * 4}}])
+    qdrant.add_collection("mainframe_manuals__completions", [])
+    result = _run(tree, *_layout_env(qdrant))
+    assert result.returncode != 0
+    assert "E_LEGACY_COLLECTION" in result.stderr
+    assert "retire_legacy.sh --stage copy --confirm mainframe_manuals" in result.stderr
+    assert "install_and_ops.md#upgrade-from-a-legacy-flat-collection-issue-1070" in result.stderr
+    _first_mutation_free(tree)
+    assert _mutations(tree) == []
+    # Read-only probe with the pod's serving key; no key in any output.
+    assert all(op.split(":")[0] in ("aliases_get", "exists") for op in qdrant.ops), qdrant.ops
+    for text in (result.stdout, result.stderr, _helm_log(tree)):
+        assert FakeQdrant.READ_KEY not in text
+
+
+def test_alias_published_layout_passes_and_deploys(tree, qdrant):
+    _bound_alias(qdrant)
+    result = _run(tree, *_layout_env(qdrant))
+    assert result.returncode == 0, result.stderr
+    assert "Stored layout: mainframe_manuals is an alias" in result.stdout
+    assert "upgrade" in _helm_log(tree)
+
+
+def test_unbound_alias_refuses_before_any_mutation(tree, qdrant):
+    _bound_alias(qdrant, bound=False)
+    result = _run(tree, *_layout_env(qdrant))
+    assert result.returncode != 0
+    assert "E_UNBOUND_PUBLICATION" in result.stderr
+    assert _mutations(tree) == []
+
+
+def test_fresh_install_without_qdrant_passes(tree):
+    result = _run(tree)
+    assert result.returncode == 0, result.stderr
+    assert "no Qdrant release qdrant yet (fresh install)" in result.stdout
+
+
+def test_empty_store_passes(tree, qdrant):
+    result = _run(tree, *_layout_env(qdrant))
+    assert result.returncode == 0, result.stderr
+    assert "no corpus collection yet" in result.stdout
+
+
+@pytest.mark.parametrize("failure", ["aliases", "exec", "statefulset"])
+def test_unreadable_layout_refuses_rather_than_passes(tree, qdrant, failure):
+    qdrant.add_collection("mainframe_manuals", [{"id": 1, "vector": {"dense": [0.0] * 4}}])
+    extra = {"aliases": (), "exec": (("EXEC_FAIL", "1"),), "statefulset": (("STS_FAIL", "1"),)}[failure]
+    if failure == "aliases":
+        qdrant.faults["aliases_get"] = 5
+    result = _run(tree, *_layout_env(qdrant, *extra))
+    assert result.returncode != 0
+    assert "E_LAYOUT_UNVERIFIED" in result.stderr
+    assert "i/o timeout" not in result.stderr and "container not found" not in result.stderr
+    assert _mutations(tree) == []
+
+
+def test_rolled_back_layout_refuses_with_the_reopen_step(tree, qdrant):
+    qdrant.add_collection("mainframe_manuals_d53595e_keep", [{"id": 1, "vector": {"dense": [0.0] * 4}}])
+    qdrant.aliases["mainframe_manuals"] = "mainframe_manuals_d53595e_keep"
+    result = _run(tree, *_layout_env(qdrant))
+    assert result.returncode != 0
+    assert "E_ROLLED_BACK" in result.stderr
+    assert "retire_legacy.sh --stage retire --confirm mainframe_manuals" in result.stderr
+    assert _mutations(tree) == []
+
+
 # --- #1070 R2: first-class site sizing for the Qdrant release ----------------
 
 QDRANT_SIZING = {
@@ -2255,6 +2364,13 @@ def test_deploy_refuses_a_d53595e_shaped_env_before_any_cluster_call(tree):
     assert not ((tree[0]) / "dist").exists() or not list((tree[0] / "dist").glob("*rendered*"))
 
 
+@pytest.mark.parametrize(("release", "name"), [("rag-qdrant", "rag-qdrant"), ("vectors", "vectors-qdrant")])
+def test_layout_preflight_reads_the_chart_named_statefulset(tree, release, name):
+    result = _run(tree, ("QDRANT_RELEASE", release))
+    assert f"statefulset/{name}" in _helm_log(tree).split("\n")
+    assert result.returncode == 0, result.stderr
+
+
 def test_a_release_named_qdrant_is_checked_under_the_chart_fullname(tree):
     """d53595e shape: the release name contains "qdrant", so the chart names the
     StatefulSet after the release alone (not `<release>-qdrant`). Sizes differ:
@@ -2280,3 +2396,12 @@ def test_an_existing_release_without_its_statefulset_is_refused(tree):
 
 def test_a_fresh_install_without_release_or_statefulset_passes(tree):
     assert _run(tree).returncode == 0
+
+
+def test_layout_preflight_refuses_a_release_without_its_statefulset(tree):
+    """Same fresh-install rule as the #1113 volume check: a Helm release record
+    without its StatefulSet is not a fresh install."""
+    result = _run(tree, ("HELM_RELEASE_SECRET", "qdrant"))
+    assert result.returncode != 0
+    assert "E_LAYOUT_UNVERIFIED" in result.stderr and "StatefulSet was not found" in result.stderr
+    assert _mutations(tree) == []

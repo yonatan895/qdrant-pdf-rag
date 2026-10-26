@@ -1546,7 +1546,9 @@ the off-cluster copy and its checksums, restore on a different cluster or Qdrant
 peer, distributed multi-peer restore and peer replacement (#360), the filesystem
 behavior of the real snapshot storage class, and the application serving the
 restored pair (the lane exercises the live pair, not the scratch copy).
-A source collection is never deleted or reset to "reingest": completion markers,
+A source collection is never deleted or reset to "reingest" (the one exception
+is the operator-confirmed retire step for the d53595e flat layout below, after
+a verified copy): completion markers,
 representation and inventory move with publication (`ingest.md`), so recovery is
 by alias re-pointing or by the publication contract, not by deleting live data.
 
@@ -1622,6 +1624,147 @@ snapshot, off-cluster copy, restore, rollback, Qdrant minor upgrade or PVC
 expansion has been recorded for it. Each needs a live rehearsal in the
 approved venue (site) before the corresponding operation is enabled;
 this is tracked on #272.
+
+#### Upgrade from a legacy flat collection (issue #1070)
+
+Release d53595e stored the corpus as a plain collection `mainframe_manuals`
+(plus `mainframe_manuals__completions`) with no alias. This release serves and
+ingests only an alias-published, build-bound corpus, so that layout cannot be
+upgraded in place (maintainer decision R1: a maintenance window with a full
+re-embed). Rule (`scripts/airgap/legacy_layout.py check`, aliases read first;
+Qdrant 1.19 reports an alias name as an existing collection):
+
+| Stored state | Preflight |
+|---|---|
+| No Qdrant StatefulSet and no Qdrant Helm release record (fresh install) | pass |
+| A Qdrant Helm release record without its StatefulSet | refuse `E_LAYOUT_UNVERIFIED` |
+| No alias and no collection `mainframe_manuals` | pass (`empty`) |
+| Alias `mainframe_manuals` -> T, and `T__completions` holds a build-bound publication record | pass (`ok`) |
+| No alias, but a collection `mainframe_manuals` | refuse `E_LEGACY_COLLECTION` |
+| Alias -> T without a build-bound publication record | refuse `E_UNBOUND_PUBLICATION` |
+| Alias -> `mainframe_manuals_d53595e_keep` (after a rollback) | refuse `E_ROLLED_BACK` |
+| StatefulSet present but no running `rag-agent` pod can read the store, or any read fails | refuse `E_LAYOUT_UNVERIFIED` |
+
+`airgap:validate` (with cluster access) and `airgap:deploy` apply it before
+any change (the namespace, Route deletes and both Helm upgrades come after
+it), so `airgap:pipeline` stops at stage 1. The check runs inside the running
+agent pod (the Qdrant image has no shell client or Python) with that pod's
+read-only key, and prints only the state code.
+
+**Two stages, never one command.** `retire_legacy.sh` refuses without
+`--stage copy` or `--stage retire`, so nothing is deleted by accident.
+
+| Stage | When | What it changes | Search |
+|---|---|---|---|
+| `--stage copy` | before the window | creates `mainframe_manuals_d53595e_keep(__completions)`: points-API copies, exact id sets verified, the d53595e manifest re-keyed so the d53595e agent serves the copy | keeps working (d53595e still serves `mainframe_manuals`) |
+| `--stage retire` | starts the window | takes **this run's** snapshot of both collections on every peer, binds each to the collection's point count and id digest (read before and after the snapshot), records the names in `mainframe_manuals_d53595e_retire_record`, then deletes both collections | down from the delete until go-live |
+
+A snapshot already listed for the collection (an older backup, or a file left
+by an earlier collection of the same name, which Qdrant lists again) is never
+used. A re-run reuses only a snapshot the record names whose binding and
+listed checksum and size still match. Limit: the binding proves which id set
+was in the collection while its snapshot was taken, not the snapshot's bytes;
+restoring into a scratch Qdrant (recovery step 2 above) is the content proof.
+The kept copy, which is verified point by point, is the rollback data. The
+snapshots are secondary.
+
+**Outage.** Search is down from the delete in `--stage retire` until
+go-live. With `N` documents, `G` the site gateway embedding speed relative to
+our local GPU endpoint (measure a 20-document slice first) and 2 ingest workers:
+
+```text
+outage ≈ retire stage (snapshots: minutes) + 0.5 h (deploy, smoke, checks)
+         + 19 s × N × 1.5 × G (full ingest)
+         e.g. N = 452: ≈ 0.5 h + 3.6 h × G;  N = 1,000: ≈ 0.5 h + 8 h × G
+copy stage (before the window, not part of the outage): P = 520 × N points;
+         locally ~1.2k points/s at 1024 dims on one node; measure on site
+```
+
+Plan a one-day window (`INGEST_TIMEOUT=86400`); the estimates and the
+per-pod disk/RAM arithmetic (two generations at most) are in the site
+re-ingest plan.
+
+**Procedure** (single operator; ingest frozen from step 3 on; run from the
+new bundle's workspace; d53595e stays deployed until step 6):
+
+1. **Announce** the window and the expected outage above.
+2. **Preflight:** `sh scripts/tools/run-task.sh airgap:validate`. It must stop
+   with `E_LEGACY_COLLECTION`; any other refusal is fixed first.
+3. **Copy (before the window, search keeps working):**
+   `sh scripts/airgap/retire_legacy.sh --stage copy --confirm mainframe_manuals`.
+   It checks each Qdrant peer's volumes first (`df` in the pod: data volume
+   free ≥ its used size). If the usage cannot be read it refuses with
+   `E_RETIRE_SPACE_UNKNOWN`: check the claims yourself and add
+   `--space-verified`. Record the `KEPT` lines. Re-run after any failure; it
+   resumes. The preflight still reports `E_LEGACY_COLLECTION`.
+4. **Retire (the window starts):**
+   `sh scripts/airgap/retire_legacy.sh --stage retire --confirm mainframe_manuals`.
+   Space gate: data free ≥ used and snapshot free ≥ half the used size, since
+   the copy is now counted in used. It refuses without the verified copy
+   (`E_RETIRE_NOT_COPIED`) and never deletes an alias name. Snapshots go to
+   `QDRANT_PEER_URLS`, else the StatefulSet's headless names. Re-run the same
+   command after any failure or crash. When everything is in place it prints
+   `STATE retired` and the `RECORDED snapshot` lines, and changes nothing.
+   With nothing to retire and no kept copy it refuses with
+   `E_RETIRE_NOTHING_KEPT`; `--no-keep-ok` accepts that no rollback data
+   exists. The writer key travels on stdin only and is never printed.
+5. **Deploy:** `sh scripts/tools/run-task.sh airgap:deploy` (the preflight now
+   reports `empty`).
+6. **Full ingest** under the current rules: `sh scripts/tools/run-task.sh
+   airgap:ingest` with the site values (section 4.5). It builds a new
+   generation and publishes it by the alias `mainframe_manuals`. If the wait
+   times out, the Job keeps running: watch it, do not start another.
+7. **Verify:** the Job log shows `files_failed 0` and the publish line; then
+   the placement verifier (section 5.4), `airgap:smoke`, the site's
+   cited-answer questions, and `/healthz` `representation` ready. The
+   preflight now reports `ok`.
+8. **Go-live:** announce the end of the window. Keep the kept copy, the run
+   record and the snapshots until the go-live checks pass and at least one
+   working week of use. Then remove them with the writer key.
+
+**Rollback to d53595e** (before the kept copy is removed). It does not
+depend on any agent: the new one may be crashlooping, and the d53595e agent
+crashloops on the new generation (`reembed_required`) until the alias moves.
+`<qdrant>` is the chart's resource name: the release name when it contains
+`qdrant` (the default `qdrant`), else `<release>-qdrant`.
+
+1. Scale the new agent down, or keep it down:
+   `$KC -n "$NS" scale deploy/rag-agent --replicas=0`.
+2. Port-forward the Qdrant Service in a second terminal:
+   `$KC -n "$NS" port-forward svc/<qdrant> 16333:6333`.
+3. Repoint the alias:
+   `sh scripts/airgap/retire_legacy.sh --rollback --confirm mainframe_manuals --qdrant-url http://127.0.0.1:16333`.
+   This is one atomic alias call, `mainframe_manuals ->
+   mainframe_manuals_d53595e_keep`. The new generation stays. Only a loopback
+   URL is accepted, and the writer key goes on stdin. Re-running it is a
+   no-op. Without `--qdrant-url` it runs through a running agent pod.
+4. Redeploy d53595e from its own workspace and bundle (`airgap:deploy`);
+   never mix it with this checkout. **Unqualified: d53595e's chart pins
+   Qdrant 1.19.0, and this release ran 1.19.2 on the same volumes. That is a
+   server downgrade on data a newer version wrote, and the release rehearsal
+   must test it before the site relies on it.** Freeze ingest: d53595e
+   ingest on an alias-published layout is unverified.
+5. Verify: d53595e `airgap:smoke` and check-live, and the point count of
+   `mainframe_manuals_d53595e_keep` equal to the recorded `KEPT` line.
+6. Secondary path (node-local, not qualified for 6/3/2): delete the alias
+   `mainframe_manuals`. Then, on the peer the run record names,
+   `PUT /collections/mainframe_manuals/snapshots/recover` with
+   `{"location": "file:///qdrant/snapshots/mainframe_manuals/<RECORDED SNAPSHOT>", "priority": "snapshot"}`
+   and the writer key. Do the same for `__completions`, then verify the counts.
+7. To upgrade again later, start at step 2 of the procedure. The preflight
+   refuses with `E_ROLLED_BACK`, and `--stage retire` removes the alias
+   (the kept copy stays) before the deploy.
+
+Hermetic proof is in `tests/test_airgap_retire_legacy_sh.py`:
+- both stages and a crash at each point;
+- stale, unlisted, unbound and recorded snapshots;
+- rollback through a port-forward with no agent pod;
+- no key in any output.
+
+The preflight cases are in `tests/test_airgap_deploy_sh.py`,
+`tests/test_airgap_validate_sh.py` and `tests/test_airgap_pipeline_sh.py`.
+Both stages, the rollback and the snapshot recovery ran against a throwaway
+single-node Qdrant. No OpenShift or multi-peer run exists.
 
 #### Ownership and linkage
 

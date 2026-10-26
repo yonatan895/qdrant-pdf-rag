@@ -266,6 +266,10 @@ else
 fi
 echo "    No Route other than the OAuth-protected rag-agent Route reaches the agent or Qdrant Services"
 
+echo "==> 4c. Stored Qdrant layout (issue #1070)"
+# Read-only: the same rule deploy.sh applies before its first change.
+check_stored_layout
+
 echo "==> 5. Checking OpenShift Security Context Constraints (SCC)"
 # A failed `get scc` is evidence of a non-OpenShift cluster only when the API
 # server lacks the resource type; a denied or failed read proves nothing.

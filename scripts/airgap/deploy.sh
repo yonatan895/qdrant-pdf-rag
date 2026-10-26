@@ -261,9 +261,16 @@ if [ -n "$QDRANT_EXTRA_VALUES" ]; then
     [ -f "$QDRANT_EXTRA_VALUES" ] || die "QDRANT_EXTRA_VALUES file not found: $QDRANT_EXTRA_VALUES"
 fi
 
+# Issue #1070 (R1): the stored Qdrant layout must be one this release can
+# serve, read before the first cluster change below (namespace, Route deletes,
+# both helm upgrades). A d53595e plain collection refuses here with the
+# maintenance-window steps instead of failing at the agent rollout after
+# Qdrant and the application were already upgraded.
+check_stored_layout
+
 # Issue #1070 R2 (read-only, before any change): a StatefulSet's volume claim
 # templates are immutable, so the sizes this run would render must equal the
-# existing StatefulSet's. Kept separate from the preflight above.
+# existing StatefulSet's. Kept separate from the layout preflight above.
 check_qdrant_volume_sizes() {
     [ "${AIRGAP_DRYRUN:-0}" != "1" ] || return 0
     set -- -n "$NAMESPACE" -f charts/qdrant-openshift.values.yaml
