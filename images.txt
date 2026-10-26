@@ -23,16 +23,17 @@ registry.access.redhat.com/ubi9/python-314-minimal:9.8                 sha256:63
 # omits upstream signature attachments (unsupported by docker-archive);
 # source digest pinning and the signed bundle checksum contract remain enforced.
 registry.redhat.io/openshift4/ose-oauth-proxy:v4.14                     sha256:b86cefe58f2f74904a71d0c1a064beb7a2a94caa979f4c472e6b936eec79850d
-# ADR-0007 (#1071, proposed) optional docs front end (#1074, off by default):
+# ADR-0007/ADR-0008 docs front end (#1074, on by default; OPENWEBUI_ENABLED=false opts out):
 # the hardened Open WebUI image, derived from the upstream slim image in the
 # connected factory (#1073) by an ownership/permission-only layer so it runs as
 # an arbitrary UID under restricted-v2 (ADR-0007 R1). Recipe:
-# scripts/ci/openwebui-trial/Containerfile.openwebui (#1073, PR #1085). The
+# images/openwebui/Containerfile (product image; the #1073 trial image uses the same recipe). The
 # derived image was built locally and qualified in the Kind trial (image id
 # sha256:bf4e04373ceab05bfff212a51f195d8afd3c0e8ecdb55b1a7d9ce528df0c002f, a
 # config id, not a pullable manifest digest). Its registry manifest digest is
 # recorded here only after the factory pushes it; while it is sha256:PENDING,
-# pack.sh skips the member and OPENWEBUI_ENABLED=true fails closed. Open WebUI License (BSD-3 plus branding).
+# pack.sh skips the member and the default-on deploy fails closed (the maintainer
+# must push the image and record its digest, or opt out). Open WebUI License (BSD-3 plus branding).
 # The upstream slim line is the factory build base of the derived image (#1073
 # records it); like the UBI line it is provenance, never a bundle member. The
 # two needles are disjoint: open-webui:v0.12.3-slim vs qdrant-pdf-rag-openwebui.
