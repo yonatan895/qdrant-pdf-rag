@@ -711,7 +711,11 @@ jobs:
           kind: NetworkPolicy
           metadata: {name: rehearsal-default-deny-egress}
           spec:
-            podSelector: {}
+            # Every pod except the Open WebUI front end (openwebui lane): its egress is governed by
+            # the chart's own NetworkPolicy alone, the policy production ships; a namespace-wide
+            # allow here would be unioned into it. acceptance.py fails if any other policy selects it.
+            podSelector:
+              matchExpressions: [{key: app, operator: NotIn, values: [rag-openwebui]}]
             policyTypes: [Egress]
             egress:
               - to:

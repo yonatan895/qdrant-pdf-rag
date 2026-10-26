@@ -108,6 +108,32 @@ def check_dns(names: set[str], queries_seen: int) -> Verdict:
               queries=queries_seen, stray_names=stray)
 
 
+def _selects(selector: dict, labels: dict) -> bool:
+    for k, v in (selector.get("matchLabels") or {}).items():
+        if labels.get(k) != v:
+            return False
+    for e in selector.get("matchExpressions") or []:
+        key, op, values = e.get("key"), e.get("operator"), e.get("values") or []
+        have = key in labels
+        if op == "In" and not (have and labels[key] in values):
+            return False
+        if op == "NotIn" and have and labels[key] in values:
+            return False
+        if op == "Exists" and not have:
+            return False
+        if op == "DoesNotExist" and have:
+            return False
+    return True
+
+
+def check_policies_selecting(pod_labels: dict, policies: list[dict], chart_policy: str = "rag-openwebui") -> Verdict:
+    """Names of the NetworkPolicies that govern the pod's egress: exactly the chart's, nothing else."""
+    egress = sorted(p["metadata"]["name"] for p in policies
+                    if "Egress" in (p.get("spec", {}).get("policyTypes") or [])
+                    and _selects(p["spec"].get("podSelector") or {}, pod_labels))
+    return _v("egress-policy-owner", egress == [chart_policy], egress_policies=egress)
+
+
 # ------------------------------------------------------------------ DATA_DIR
 def check_data_dir(report: dict) -> Verdict:
     """inspect_data.py's report after use: no vector store, no upload, no retrieval rows."""

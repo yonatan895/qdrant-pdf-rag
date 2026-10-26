@@ -282,3 +282,20 @@ def test_dex_config_uses_the_issuer_and_one_hash_per_user(tmp_path, capsys):
     hashes.write_text("one")
     with pytest.raises(SystemExit):
         client.cmd_dex_config(str(tmp_path), str(hashes))
+
+
+def _np(name, selector, types=("Egress",)):
+    return {"metadata": {"name": name}, "spec": {"podSelector": selector, "policyTypes": list(types)}}
+
+
+def test_only_the_chart_policy_may_select_the_front_end_for_egress():
+    labels = {"app": "rag-openwebui"}
+    chart = _np("rag-openwebui", {"matchLabels": {"app": "rag-openwebui"}}, ("Ingress", "Egress"))
+    lane = _np("rehearsal-default-deny-egress",
+               {"matchExpressions": [{"key": "app", "operator": "NotIn", "values": ["rag-openwebui"]}]})
+    probes = _np("kind-kubelet-probes", {"matchLabels": {"app": "rag-openwebui"}}, ("Ingress",))
+    assert checks.check_policies_selecting(labels, [chart, lane, probes]).ok
+    wide = _np("rehearsal-default-deny-egress", {})  # the pre-exclusion shape re-opens the pod
+    bad = checks.check_policies_selecting(labels, [chart, wide])
+    assert not bad.ok and bad.detail["egress_policies"] == ["rag-openwebui", "rehearsal-default-deny-egress"]
+    assert not checks.check_policies_selecting(labels, [lane]).ok  # the chart policy must exist

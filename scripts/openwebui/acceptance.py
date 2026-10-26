@@ -195,6 +195,12 @@ class Acceptance:
         verdict.name = f"console-alongside:{label}"
         self.add(verdict)
 
+    def network_policies(self) -> None:
+        """Only the chart's policy may select the Open WebUI pod for egress (a lane policy would be unioned in)."""
+        pod = pod_info()["spec"]["metadata"].get("labels", {})
+        docs = json.loads(kc_out("get", "networkpolicy", "-o", "json"))["items"]
+        self.add(checks.check_policies_selecting(pod, docs))
+
     def egress_probes(self) -> None:
         """Real sockets from inside the pod. Last, because the blocked targets add DNS names of their own."""
         probe = read_bytes(PROBE)
@@ -206,10 +212,10 @@ class Acceptance:
 
         reach = run("reachable", "rag-agent:8080", client.DEX_ISSUER.split("/")[2])
         # One probe per target, so a failure names the target that connected.
-        # The e2e boundary policy admits every pod of the lane's namespace and the API server for all
-        # pods there (unioned with the chart's policy), so only targets outside that are asserted:
-        # public addresses and a listening pod in another namespace (the router stand-in, port 8443).
-        connected = [t for t in ("1.1.1.1:443", "8.8.8.8:443", "router.owui-router.svc.cluster.local:8443")
+        # The lane's boundary policy excludes this pod, so only the chart's policy governs it: every
+        # target besides the agent and the IdP must fail, in-cluster ones included.
+        connected = [t for t in ("1.1.1.1:443", "8.8.8.8:443", "kubernetes.default.svc:443", "qdrant:6333",
+                                 "test-gateway:4000", "router.owui-router.svc.cluster.local:8443")
                      if run("blocked", t) != 0]
         verdict = checks.check_egress_probes(reach, 1 if connected else 0)
         verdict.detail["connected_outside_allow_list"] = connected
@@ -316,6 +322,7 @@ class Acceptance:
         self.add(checks.check_dns(self.dns_names, self.dns_queries))
         self.log_scan()
         self.console("after-restart")
+        self.network_policies()
         self.egress_probes()
         return checks.overall(self.verdicts)
 
