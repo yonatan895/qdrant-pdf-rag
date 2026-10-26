@@ -928,7 +928,9 @@ collection created with the selected policy, and refuses unless the copy
 holds exactly the source's point ids; the cutover gates then verify the
 staging pair's distribution and placement. A physical collection squatting
 on the alias name (the pre-publication layout) is unsupported and refused,
-never migrated. Supported recovery from lost distributed storage is
+never migrated; deploy and validate refuse it before any change, and the
+upgrade from it is the maintenance-window procedure in
+[install and operations](install_and_ops.md#upgrade-from-a-legacy-flat-collection-issue-1070). Supported recovery from lost distributed storage is
 still a fresh complete generation rebuilt from the protected originals
 (accepted downtime). Node-addressed restore, replacement-peer
 join and replica repair stay unqualified until site evidence exists. The

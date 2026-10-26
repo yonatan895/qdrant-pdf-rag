@@ -206,3 +206,37 @@ def test_pipeline_dryrun_with_the_seven_openwebui_inputs_needs_the_ca_only_to_re
     r = _run_pipeline(pipe_tree, "--skip-load", extra_env={**inputs, "ROUTE_DESTINATION_CA_FILE": str(ca)})
     assert r.returncode == 0, r.stdout + r.stderr
     assert "STAGE 4/5: CORPUS INGESTION" in r.stdout
+
+
+def test_pipeline_refuses_a_legacy_collection_at_validation_before_any_change(pipe_tree):
+    """Issue #1070 (R1): the d53595e plain collection stops the live pipeline
+    at stage 1, before the registry load and every cluster change."""
+    from tests.helpers_airgap import FakeQdrant
+
+    recording = r"""#!/bin/sh
+printf '%s\n' "$0 $*" >> "$TOOL_LOG"
+case "$*" in
+  *'get statefulset/qdrant '*) echo statefulset.apps/qdrant ;;
+  *'exec -i deploy/rag-agent -- python3 -c '*)
+    while [ "$1" != "--" ]; do shift; done; shift
+    exec env QDRANT_URL="$FAKE_QDRANT_URL" QDRANT_API_KEY="$FAKE_READ_KEY" "$@" ;;
+esac
+exit 0
+"""
+    for name in ("skopeo", "helm", "kubectl", "oc"):
+        write_stub(pipe_tree / "bin" / name, recording)
+    qdrant = FakeQdrant()
+    try:
+        qdrant.add_collection("mainframe_manuals", [{"id": 1, "vector": {"dense": [0.0] * 4}}])
+        log = pipe_tree / "tool.log"
+        r = _run_pipeline(pipe_tree, extra_env={
+            "AIRGAP_DRYRUN": "0", "TOOL_LOG": str(log),
+            "FAKE_QDRANT_URL": qdrant.url, "FAKE_READ_KEY": FakeQdrant.READ_KEY})
+    finally:
+        qdrant.close()
+    assert r.returncode != 0
+    assert "E_LEGACY_COLLECTION" in r.stderr
+    assert "STAGE 2/5" not in r.stdout
+    calls = log.read_text()
+    assert "skopeo copy" not in calls and " upgrade " not in calls
+    assert " apply " not in calls and " delete " not in calls and " create " not in calls

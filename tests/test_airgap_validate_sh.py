@@ -1472,3 +1472,45 @@ def test_validate_openwebui_pending_pin_refusal_names_the_opt_out(tree):
     r = _openwebui_run(tree)
     assert r.returncode != 0
     assert "or opt out with OPENWEBUI_ENABLED=false" in r.stderr
+
+
+# --- Issue #1070 (R1): the stored-layout preflight, with cluster access -------
+
+LAYOUT_KUBECTL = r"""#!/bin/sh
+printf '%s\n' "$*" >> "$TOOL_LOG"
+case "$*" in
+  *'get statefulset/qdrant '*) [ -z "${FAKE_QDRANT_URL:-}" ] || echo statefulset.apps/qdrant ;;
+  *'exec -i deploy/rag-agent -- python3 -c '*)
+    while [ "$1" != "--" ]; do shift; done; shift
+    exec env QDRANT_URL="$FAKE_QDRANT_URL" QDRANT_API_KEY="$FAKE_READ_KEY" "$@" ;;
+esac
+exit 0
+"""
+
+
+@pytest.mark.parametrize("layout", ["legacy", "empty", "fresh"])
+def test_validate_live_reports_the_stored_layout(tree, layout):
+    from tests.helpers_airgap import FakeQdrant
+
+    qdrant = FakeQdrant()
+    try:
+        if layout == "legacy":
+            qdrant.add_collection("mainframe_manuals", [{"id": 1, "vector": {"dense": [0.0] * 4}}])
+        for name in ("kubectl", "oc"):
+            write_stub(tree / "bin" / name, LAYOUT_KUBECTL)
+        extra = {"AIRGAP_DRYRUN": "0", "TOOL_LOG": str(tree / "tool.log"),
+                 "FAKE_READ_KEY": FakeQdrant.READ_KEY}
+        if layout != "fresh":
+            extra["FAKE_QDRANT_URL"] = qdrant.url
+        r = _run(tree, extra)
+    finally:
+        qdrant.close()
+    if layout == "legacy":
+        assert r.returncode != 0
+        assert "E_LEGACY_COLLECTION" in r.stderr
+        assert "retire_legacy.sh --confirm mainframe_manuals" in r.stderr
+        assert "SUCCESS" not in r.stdout
+    else:
+        assert r.returncode == 0, r.stderr
+        assert ("fresh install" if layout == "fresh" else "no corpus collection yet") in r.stdout
+    assert FakeQdrant.READ_KEY not in r.stdout + r.stderr + (tree / "tool.log").read_text()

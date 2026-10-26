@@ -496,6 +496,51 @@ require_kc() {
     [ "${AIRGAP_DRYRUN:-0}" = "1" ] || command -v oc >/dev/null 2>&1 || command -v kubectl >/dev/null 2>&1 || die "oc or kubectl is required on the air-gap bastion (or set AIRGAP_DRYRUN=1 to preview)"
 }
 
+# Issue #1070 (R1): the stored Qdrant layout, read before any cluster change.
+# The logical collection name is fixed by the chart (ingest-job.yaml) and the
+# agent default. scripts/airgap/legacy_layout.py owns the rule; it runs inside
+# the running agent pod (the Qdrant image has no Python or HTTP client) over
+# `exec -i`: stdin carries one key line (empty = the pod's own read-only
+# serving key), then the program. No key reaches argv, the environment or output.
+LEGACY_COLLECTION=mainframe_manuals
+LAYOUT_RUNBOOK="docs/install_and_ops.md#upgrade-from-a-legacy-flat-collection-issue-1070"
+LAYOUT_BOOT='import sys;k=sys.stdin.readline().rstrip("\n");s=sys.stdin.read();sys.argv[0]="legacy_layout.py";exec(compile(s,"legacy_layout.py","exec"),{"__name__":"__main__","QDRANT_KEY_FROM_STDIN":k})'
+layout_exec() {
+    cat - scripts/airgap/legacy_layout.py |
+        $KC -n "$NAMESPACE" exec -i deploy/rag-agent -- python3 -c "$LAYOUT_BOOT" "$@"
+}
+# Fail closed before any change: a fresh install (no Qdrant StatefulSet) and an
+# alias-published, build-bound corpus pass; the d53595e plain collection, an
+# unbound publication, and anything unreadable refuse. Client text is not echoed.
+check_stored_layout() {
+    if [ "${AIRGAP_DRYRUN:-0}" = "1" ]; then
+        echo "==> [dryrun] stored Qdrant layout check skipped (reads the cluster)"
+        return 0
+    fi
+    _sts=$($KC -n "$NAMESPACE" get "statefulset/$QDRANT_RELEASE" --ignore-not-found -o name 2>/dev/null) ||
+        die "E_LAYOUT_UNVERIFIED: cannot verify the stored Qdrant layout: statefulset/$QDRANT_RELEASE in namespace $NAMESPACE is unreadable. Nothing was changed."
+    if [ -z "$_sts" ]; then
+        echo "==> Stored layout: no Qdrant release $QDRANT_RELEASE yet (fresh install)"
+        unset _sts
+        return 0
+    fi
+    _layout=$(printf '\n' | layout_exec check --collection "$LEGACY_COLLECTION" 2>/dev/null |
+        sed -n 's/^LAYOUT //p' | tail -n 1) || _layout=""
+    case "$_layout" in
+        empty) echo "==> Stored layout: no corpus collection yet" ;;
+        ok) echo "==> Stored layout: $LEGACY_COLLECTION is an alias with a build-bound publication" ;;
+        flat_legacy)
+            die "E_LEGACY_COLLECTION: $LEGACY_COLLECTION is a plain collection without an alias (the layout of release d53595e), which this release cannot serve or ingest. Nothing was changed. Upgrade in a maintenance window: sh scripts/airgap/retire_legacy.sh --confirm $LEGACY_COLLECTION, then deploy and a full ingest ($LAYOUT_RUNBOOK)." ;;
+        rolled_back)
+            die "E_ROLLED_BACK: alias $LEGACY_COLLECTION points at the kept d53595e copy (a rollback is in place). Nothing was changed. To upgrade again: sh scripts/airgap/retire_legacy.sh --confirm $LEGACY_COLLECTION, then deploy and a full ingest ($LAYOUT_RUNBOOK)." ;;
+        unbound_alias)
+            die "E_UNBOUND_PUBLICATION: alias $LEGACY_COLLECTION points at a publication without a build binding, which this release refuses. Nothing was changed. See $LAYOUT_RUNBOOK." ;;
+        *)
+            die "E_LAYOUT_UNVERIFIED: cannot verify the stored Qdrant layout: Qdrant $QDRANT_RELEASE exists but no running rag-agent pod could read it. Nothing was changed. See $LAYOUT_RUNBOOK." ;;
+    esac
+    unset _sts _layout
+}
+
 # Fail closed on leftover __PLACEHOLDER__s. $1 = file, $2 = label for the message.
 fail_on_placeholders() {
     if grep -Eq "__[A-Z][A-Z0-9_]*__" "$1"; then

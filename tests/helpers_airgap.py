@@ -73,7 +73,8 @@ def make_bin_tree(tmp_path: Path, scripts: list[str]) -> Path:
     if any(name in scripts for name in ("deploy.sh", "ingest.sh", "validate.sh")):
         shutil.copytree(REPO / "charts/mainframe-rag", tmp_path / "charts/mainframe-rag", dirs_exist_ok=True)
     if "deploy.sh" in scripts or "validate.sh" in scripts:
-        scripts = [*scripts, "check_app_ownership.py", "check_route_exposure.py"]
+        # legacy_layout.py: the stored-layout preflight (#1070) runs from both.
+        scripts = [*scripts, "check_app_ownership.py", "check_route_exposure.py", "legacy_layout.py"]
     if "common.sh" in scripts:
         # resolve_observability evaluates the values mapper's decisions.
         scripts = [*scripts, "model_config.py", "map_values.py"]
@@ -296,7 +297,7 @@ def rendered_env(rendered: str, name: str) -> dict:
 
 
 class FakeHttpServer:
-    """Loopback HTTP server for trace-backend tests; records every request.
+    """Loopback HTTP server for trace-backend and Qdrant tests; records every request.
 
     `respond(request) -> (status, json_body)`, where request is a dict with
     method, path, query (parse_qs), headers and body (decoded JSON or None).
@@ -329,7 +330,7 @@ class FakeHttpServer:
                 self.end_headers()
                 self.wfile.write(data)
 
-            do_GET = do_POST = _handle
+            do_GET = do_POST = do_PUT = do_DELETE = _handle
 
             def log_message(self, *args):
                 pass
@@ -343,3 +344,169 @@ class FakeHttpServer:
         self._server.shutdown()
         self._server.server_close()
         self._thread.join(timeout=5)
+
+
+class FakeQdrant:
+    """In-memory Qdrant REST fake for the layout check and the retire step
+    (#1070), faithful to the observed 1.19 behaviour the scripts rely on:
+    `GET /aliases`; `exists` is true for an alias name as well as a
+    collection; `DELETE` of an absent or alias name answers `result: false`
+    and changes nothing; reads of an absent collection are 404; collection
+    snapshot listings exist only while the collection does.
+
+    Keys: the read key may only read; every write needs the writer key.
+    `faults` maps an operation label (`"<op>:<collection>"` or `"<op>"`) to
+    the number of upcoming matching requests that fail with HTTP 500, which
+    simulates a crash at that point. `bad_snapshots` lists snapshot
+    collections whose listing omits the checksum.
+    """
+
+    READ_KEY = "reader-key-0123456789abcdef"
+    WRITE_KEY = "writer-key-fedcba9876543210"
+    WRITE_OPS = frozenset({"create", "index", "upsert", "delete", "snapshot_create", "aliases_update"})
+
+    def __init__(self):
+        self.collections: dict[str, dict] = {}
+        self.aliases: dict[str, str] = {}
+        self.faults: dict[str, int] = {}
+        self.bad_snapshots: set[str] = set()
+        self.ops: list[str] = []
+        self._snap = 0
+        self.server = FakeHttpServer(self.respond)
+        self.url = self.server.url
+
+    def close(self):
+        self.server.close()
+
+    # -- fixtures --------------------------------------------------------
+    def add_collection(self, name, points, *, size=4, schema=None):
+        self.collections[name] = {
+            "config": {"params": {"vectors": {"dense": {"size": size, "distance": "Cosine"}},
+                                  "sparse_vectors": {"bm25": {"modifier": "idf"}},
+                                  "shard_number": 1, "replication_factor": 1,
+                                  "write_consistency_factor": 1, "on_disk_payload": True},
+                       "hnsw_config": {"m": 16, "ef_construct": 100}, "quantization_config": None},
+            "payload_schema": dict(schema or {}),
+            "points": {str(p["id"]): json.loads(json.dumps(p)) for p in points},
+            "snapshots": [],
+        }
+
+    def ids(self, name):
+        return sorted(self.collections[name]["points"])
+
+    # -- server ----------------------------------------------------------
+    def _fault(self, label):
+        for key in (label, label.split(":", 1)[0]):
+            if self.faults.get(key, 0) > 0:
+                self.faults[key] -= 1
+                return True
+        return False
+
+    def respond(self, request):
+        method, path = request["method"], request["path"]
+        parts = [p for p in path.split("/") if p]
+        body = request["body"] or {}
+        op, name = self._route(method, parts)
+        self.ops.append(f"{op}:{name}" if name else op)
+        key = request["headers"].get("api-key")
+        if key not in (self.READ_KEY, self.WRITE_KEY):
+            return 401, {"status": {"error": "Must provide an API key"}}
+        if op in self.WRITE_OPS and key != self.WRITE_KEY:
+            return 403, {"status": {"error": "read-only key"}}
+        if self._fault(f"{op}:{name}" if name else op):
+            return 500, {"status": {"error": "injected"}}
+        coll = self.collections.get(name) if name else None
+        ok = lambda result: (200, {"result": result, "status": "ok"})
+        missing = (404, {"status": {"error": f"Collection `{name}` doesn't exist!"}})
+        if op == "aliases_get":
+            return ok({"aliases": [{"alias_name": a, "collection_name": c} for a, c in self.aliases.items()]})
+        if op == "aliases_update":
+            for action in body.get("actions", []):
+                if "delete_alias" in action:
+                    self.aliases.pop(action["delete_alias"]["alias_name"], None)
+                if "create_alias" in action:
+                    spec = action["create_alias"]
+                    if spec["collection_name"] not in self.collections:
+                        return 404, {"status": {"error": "target missing"}}
+                    self.aliases[spec["alias_name"]] = spec["collection_name"]
+            return ok(True)
+        if op == "exists":
+            return ok({"exists": name in self.collections or name in self.aliases})
+        if op == "delete":
+            if name in self.collections:
+                del self.collections[name]
+                return ok(True)
+            return ok(False)
+        if op == "create":
+            if name in self.collections or name in self.aliases:
+                return 409, {"status": {"error": "exists"}}
+            self.collections[name] = {"config": {"params": {k: body.get(k) for k in (
+                "vectors", "sparse_vectors", "shard_number", "replication_factor",
+                "write_consistency_factor", "on_disk_payload")},
+                "hnsw_config": body.get("hnsw_config"), "quantization_config": body.get("quantization_config")},
+                "payload_schema": {}, "points": {}, "snapshots": []}
+            return ok(True)
+        if coll is None:
+            return missing
+        if op == "info":
+            return ok({"status": "green", "points_count": len(coll["points"]),
+                       "config": coll["config"], "payload_schema": coll["payload_schema"]})
+        if op == "index":
+            schema = body["field_schema"]
+            coll["payload_schema"][body["field_name"]] = (
+                {"data_type": schema} if isinstance(schema, str) else {"data_type": schema["type"], "params": schema})
+            return ok({"status": "completed"})
+        if op == "upsert":
+            for point in body["points"]:
+                coll["points"][str(point["id"])] = json.loads(json.dumps(point))
+            return ok({"status": "completed"})
+        if op == "retrieve":
+            found = [self._out(coll["points"][str(i)], True) for i in body["ids"] if str(i) in coll["points"]]
+            return ok(found)
+        if op == "scroll":
+            ordered = sorted(coll["points"])
+            start = ordered.index(str(body["offset"])) if "offset" in body else 0
+            page = ordered[start:start + body.get("limit", 10)]
+            following = ordered[start + len(page)] if start + len(page) < len(ordered) else None
+            with_data = body.get("with_vector") or body.get("with_payload")
+            return ok({"points": [self._out(coll["points"][i], with_data) for i in page],
+                       "next_page_offset": following})
+        if op == "snapshot_list":
+            listed = [dict(s) for s in coll["snapshots"]]
+            if name in self.bad_snapshots:
+                for entry in listed:
+                    entry["checksum"] = None
+            return ok(listed)
+        if op == "snapshot_create":
+            self._snap += 1
+            entry = {"name": f"{name}-peer-2026-10-27-{self._snap:02d}.snapshot",
+                     "creation_time": f"2026-10-27T00:00:{self._snap:02d}",
+                     "size": 4096 + len(coll["points"]),
+                     "checksum": hashlib.sha256(f"{name}{self._snap}".encode()).hexdigest()}
+            coll["snapshots"].append(entry)
+            return ok(dict(entry))
+        return 400, {"status": {"error": f"unsupported {method} {path}"}}
+
+    @staticmethod
+    def _out(point, with_data):
+        if with_data:
+            return json.loads(json.dumps(point))
+        return {"id": point["id"]}
+
+    @staticmethod
+    def _route(method, parts):
+        if parts == ["aliases"] and method == "GET":
+            return "aliases_get", ""
+        if parts == ["collections", "aliases"] and method == "POST":
+            return "aliases_update", ""
+        if len(parts) < 2 or parts[0] != "collections":
+            return "unknown", ""
+        name, rest = parts[1], parts[2:]
+        table = {
+            ("GET", ()): "info", ("PUT", ()): "create", ("DELETE", ()): "delete",
+            ("GET", ("exists",)): "exists", ("PUT", ("index",)): "index",
+            ("PUT", ("points",)): "upsert", ("POST", ("points",)): "retrieve",
+            ("POST", ("points", "scroll")): "scroll",
+            ("GET", ("snapshots",)): "snapshot_list", ("POST", ("snapshots",)): "snapshot_create",
+        }
+        return table.get((method, tuple(rest)), "unknown"), name

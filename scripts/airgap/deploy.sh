@@ -261,6 +261,13 @@ if [ -n "$QDRANT_EXTRA_VALUES" ]; then
     [ -f "$QDRANT_EXTRA_VALUES" ] || die "QDRANT_EXTRA_VALUES file not found: $QDRANT_EXTRA_VALUES"
 fi
 
+# Issue #1070 (R1): the stored Qdrant layout must be one this release can
+# serve, read before the first cluster change below (namespace, Route deletes,
+# both helm upgrades). A d53595e plain collection refuses here with the
+# maintenance-window steps instead of failing at the agent rollout after
+# Qdrant and the application were already upgraded.
+check_stored_layout
+
 echo "==> Namespace: $NAMESPACE"
 if [ "${AIRGAP_DRYRUN:-0}" != "1" ]; then
     if ! $KC get namespace "$NAMESPACE" >/dev/null 2>&1; then
