@@ -205,9 +205,12 @@ class Acceptance:
                       stdin=probe).returncode
 
         reach = run("reachable", "rag-agent:8080", client.DEX_ISSUER.split("/")[2])
-        blocked = run("blocked", "1.1.1.1:443", "8.8.8.8:443", "kubernetes.default.svc:443", "qdrant:6333",
-                      "test-gateway:4000")
-        self.add(checks.check_egress_probes(reach, blocked))
+        # One probe per target, so a failure names the target that connected.
+        connected = [t for t in ("1.1.1.1:443", "8.8.8.8:443", "kubernetes.default.svc:443", "qdrant:6333",
+                                 "test-gateway:4000") if run("blocked", t) != 0]
+        verdict = checks.check_egress_probes(reach, 1 if connected else 0)
+        verdict.detail["connected_outside_allow_list"] = connected
+        self.add(verdict)
 
     def c1_and_restart(self) -> None:
         before = {
