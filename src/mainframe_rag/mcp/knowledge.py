@@ -44,6 +44,8 @@ import httpx2
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 
+from mainframe_rag.mcp.http import serve_http
+
 PROTOCOL_VERSION = "2025-03-26"
 SUPPORTED_PROTOCOLS = ("2024-11-05", "2025-03-26", "2025-06-18")
 SERVER_INFO = {"name": "mainframe-knowledge", "version": "0.1.0"}
@@ -467,9 +469,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.transport == "stdio":
         asyncio.run(serve_stdio(backend))
         return 0
-    import uvicorn
-
-    uvicorn.run(create_app(backend), host=args.host, port=args.port, log_level="warning")
+    serve_http(create_app(backend), args.host, args.port)
     return 0
 
 

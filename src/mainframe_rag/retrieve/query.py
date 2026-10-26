@@ -290,6 +290,68 @@ def entry_headed(text: str, ids: Sequence[str]) -> bool:
     return re.search(rf"^[^\w\n]*(?:{alts})(?!\w)", text, re.IGNORECASE | re.MULTILINE) is not None
 
 
+def leading_title_section(payload: dict) -> bool:
+    """True when the chunk is the leading section under the document title.
+
+    The outline rules put every page before a document's first kept bookmark
+    under the document title (#1001), and that section starts at the
+    document's first page unless the pages before it are skipped by name. A
+    document with no outline gives the same heading path to its body windows
+    (`fallback_sections`), so the heading alone also matches body text: 2452
+    of the 2891 stored title-headed chunks start past page 0. Requiring
+    `page_start == 0` keeps those out (a leading section that begins after
+    skipped front matter is conservatively not demoted). A missing or
+    malformed page never counts, so legacy points keep their order."""
+    page = payload.get("page_start")
+    if type(page) is not int or page != 0:
+        return False
+    title = str(payload.get("title") or "").strip()
+    return bool(title) and str(payload.get("heading_path") or "").strip() == title
+
+
+def _prefer_section_on_ties(
+    ranked: list[tuple[str, float]], by_id: dict[str, models.ScoredPoint]
+) -> list[tuple[str, float]]:
+    """Resolve an exact fusion tie between a document's leading title section
+    and a section chunk of another document in favour of the section chunk
+    (issue #1100).
+
+    The legs can each rank a different chunk first; their RRF sums then tie
+    exactly (one `weight/(k+1)` each) and insertion order — dense leg first —
+    decided the order. That let the leading title section take rank 1 from the
+    body chunk that answers the question. Only *leading* title sections move
+    (`leading_title_section`: page 0 and heading path == title), so a
+    no-outline document's body windows keep their rank. Only *cross-document*
+    ties move: a tie inside one document keeps RRF order, and a strictly
+    higher-scoring title chunk is never demoted. Every other score and the
+    order inside each group are untouched."""
+    out = list(ranked)
+    start = 0
+    while start < len(out):
+        end = start + 1
+        while end < len(out) and out[end][1] == out[start][1]:
+            end += 1
+        if end - start > 1:
+            group = out[start:end]
+            leading = {key: leading_title_section(by_id[key].payload or {}) for key, _ in group}
+            doc = {key: str((by_id[key].payload or {}).get("doc_id") or "") for key, _ in group}
+            demoted = {
+                key
+                for key, _ in group
+                if leading[key]
+                and any(
+                    not leading[other] and doc[other] != doc[key]
+                    for other, _ in group
+                )
+            }
+            if demoted:
+                out[start:end] = [kv for kv in group if kv[0] not in demoted] + [
+                    kv for kv in group if kv[0] in demoted
+                ]
+        start = end
+    return out
+
+
 def rrf_fuse(
     dense: list[models.ScoredPoint],
     sparse: list[models.ScoredPoint],
@@ -304,7 +366,9 @@ def rrf_fuse(
     rank above candidates that only mention it, RRF order kept inside each
     group. A range endpoint repeated in every page's running header makes
     dozens of chunks match the exact-id filter; only the entry is the answer.
-    Empty `entry_ids` leaves the fusion byte-identical."""
+    Empty `entry_ids` leaves the entry-headed pass byte-identical. Exact
+    cross-document ties keep a section chunk above a document's leading title
+    section (`_prefer_section_on_ties`, issue #1100)."""
     by_id: dict[str, models.ScoredPoint] = {}
     scores: dict[str, float] = defaultdict(float)
     for weight, points, leg in zip(weights, (dense, sparse), ("dense", "bm25"), strict=True):
@@ -322,6 +386,7 @@ def rrf_fuse(
                     contrib *= type_boosts.get(ctype, 1.0)
             scores[key] += contrib
     ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+    ranked = _prefer_section_on_ties(ranked, by_id)
     if entry_ids:
         headed = {
             key: entry_headed(str((by_id[key].payload or {}).get("text") or ""), entry_ids)

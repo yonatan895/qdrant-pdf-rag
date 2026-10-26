@@ -14,6 +14,7 @@ import sys
 
 from mainframe_rag import tracing as tracing_mod
 from mainframe_rag.mcp.bridge import FTPConfig, connect
+from mainframe_rag.mcp.http import serve_http
 from mainframe_rag.mcp.server import create_app, sample_ratio_from_env, serve_stdio
 
 
@@ -77,9 +78,7 @@ def main(argv: list[str] | None = None) -> int:
         finally:
             tracing_mod.shutdown_tracing()
         return 0
-    import uvicorn
-
-    uvicorn.run(create_app(config, connect_fn), host=args.host, port=args.port, log_level="warning")
+    serve_http(create_app(config, connect_fn), args.host, args.port)
     return 0
 
 

@@ -238,14 +238,14 @@ def test_gain_and_ndcg_at_k_calculation():
     h2 = SearchHit(chunk_id="2", score=0.9, cite="c", heading="Detail", text="t",
                    doc_id="DOC-2", title="T", page_label="10", chunk_type="narrative", message_ids=())
 
-    # Ideal order: DOC-1 (gain 3) at rank 1, DOC-2 (gain 1) at rank 2 -> nDCG = 1.0
+    # Both expected docs have the same achievable max gain (3), so this
+    # ranking -- DOC-1 fully matched, DOC-2 doc-only -- is below the ideal.
     score = ndcg_at_k([h1, h2], entry, k=8)
-    assert score is not None
-    assert abs(score - 1.0) < 1e-4
+    assert score is not None and 0.0 <= score < 1.0
 
-    # Reversed order: DOC-2 at rank 1, DOC-1 at rank 2 -> nDCG < 1.0
+    # Rank order still counts: the higher-gain DOC-1 first beats DOC-2 first.
     score_rev = ndcg_at_k([h2, h1], entry, k=8)
-    assert score_rev is not None and score_rev < 1.0
+    assert score_rev is not None and 0.0 <= score_rev < score
 
 
 def test_generate_synthetic_golden_corpus(tmp_path: Path):
@@ -805,3 +805,30 @@ def test_ndcg_at_k_ignores_relevant_hits_ranked_past_k():
     entry = GoldenEntry(query="q", expected_doc_ids=["DOC-1"])
     assert ndcg_at_k([hit("X"), hit("Y"), hit("DOC-1")], entry, k=2) == 0.0
     assert ndcg_at_k([hit("X"), hit("Y"), hit("DOC-1")], entry, k=3) > 0.0
+
+
+def test_ndcg_at_k_ideal_gives_every_expected_doc_its_max_gain():
+    """#588: IDCG must credit every expected doc at the entry's achievable max
+    gain. Two fully matched expected docs are the ideal (nDCG 1.0), never >1,
+    and any miss or distractor ranks below it."""
+    from mainframe_rag.eval.datasets import GoldenEntry
+    from mainframe_rag.eval.retrieval import ndcg_at_k
+    from mainframe_rag.retrieve.query import SearchHit
+
+    def hit(doc_id: str, heading: str = "Overview", page: str = "5") -> SearchHit:
+        return SearchHit(chunk_id=f"{doc_id}-{heading}-{page}", score=1.0, cite="c",
+                         heading=heading, text="t", doc_id=doc_id, title="T", page_label=page,
+                         chunk_type="narrative", message_ids=())
+
+    entry = GoldenEntry(query="q", expected_doc_ids=["DOC-1", "DOC-2"],
+                        expected_heading="Overview", expected_page="5")
+    # max_gain = 3 (doc + heading + page) for each expected doc.
+    perfect = ndcg_at_k([hit("DOC-1"), hit("DOC-2")], entry, k=8)
+    assert perfect == pytest.approx(1.0)
+
+    # A distractor ahead of the ideal pair, and one expected doc matched only
+    # at doc level, both rank below the all-max-gain ideal.
+    late = ndcg_at_k([hit("OTHER", "Other", "9"), hit("DOC-1"), hit("DOC-2")], entry, k=8)
+    assert late is not None and 0.0 <= late < 1.0
+    partial = ndcg_at_k([hit("DOC-1"), hit("DOC-2", "Other", "9")], entry, k=8)
+    assert partial == pytest.approx(0.7420981285)

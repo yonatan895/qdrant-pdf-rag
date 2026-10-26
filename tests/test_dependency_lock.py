@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sys
 import tomllib
 from pathlib import Path
@@ -79,6 +80,81 @@ def test_urllib3_security_pin_covers_project_and_runtime_profiles():
         assert Version(version) >= Version("2.8.0")
         assert str(urllib3.specifier) == f"=={version}"
         assert packages["urllib3"]["wheel"] == f"urllib3-{version}-py3-none-any.whl"
+
+
+OLEFILE_GUARD = (
+    "olefile makes Pillow's FPX decoder importable (GHSA-5x8w-8jj5-q52h)"
+)
+
+
+def _raw_requirement_names(path: Path) -> set[str]:
+    """Names in a raw requirements file, independent of manifest coverage."""
+    names = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        requirement = re.split(r"\s+--hash=", line, maxsplit=1)[0].strip()
+        if not requirement or requirement.startswith("#"):
+            continue
+        name = re.split(r"[<>=!~\[;\s]", requirement, maxsplit=1)[0]
+        names.add(re.sub(r"[-_.]+", "-", name).lower())
+    return names
+
+
+def _assert_no_olefile(root: Path) -> None:
+    """Fail closed if any profile selects olefile, even through a hand edit."""
+    for profile, filename in locks.PROFILE_FILES.items():
+        raw = _raw_requirement_names(root / filename)
+        try:
+            _, packages = locks.load(root, profile)
+        except locks.LockError:
+            # An inconsistent hand edit is already a lock failure; prefer the
+            # fixed olefile diagnostic when olefile is the injected line.
+            if "olefile" not in raw:
+                raise
+            packages = {}
+        if "olefile" in raw | set(packages):
+            raise AssertionError(f"{profile} lock profile contains olefile; {OLEFILE_GUARD}")
+
+
+def test_olefile_is_absent_from_every_lock_profile():
+    """GHSA-5x8w stays unreachable while no profile can import Pillow's FPX plugin."""
+    _assert_no_olefile(Path(__file__).resolve().parents[1])
+
+
+@pytest.mark.parametrize("profile", list(locks.PROFILE_FILES))
+@pytest.mark.parametrize("injection", ["resolved", "hand-added"])
+def test_olefile_guard_rejects_injected_lock_copy(tmp_path, profile, injection):
+    root = Path(__file__).resolve().parents[1]
+    for name in (locks.MANIFEST, *locks.PROFILE_FILES.values()):
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / name).write_bytes((root / name).read_bytes())
+    _assert_no_olefile(tmp_path)  # the untouched copy passes
+    requirement = tmp_path / locks.PROFILE_FILES[profile]
+    pin = f"olefile==0.47 --hash=sha256:{'0' * 64}"
+    if injection == "resolved":
+        manifest = json.loads((tmp_path / locks.MANIFEST).read_text())
+        manifest["packages"]["olefile"] = {
+            "version": "0.47", "wheel": "olefile-0.47-py2.py3-none-any.whl",
+            "sha256": "0" * 64,
+            "url": "https://files.pythonhosted.org/packages/olefile-0.47-py2.py3-none-any.whl",
+        }
+        manifest["profiles"][profile]["packages"] = sorted(
+            [*manifest["profiles"][profile]["packages"], "olefile"])
+        lines = requirement.read_text(encoding="utf-8").splitlines()
+        header = [text for text in lines if text.startswith("#")]
+        entries = [text for text in lines if text and not text.startswith("#")]
+        ordered = sorted([*entries, pin], key=lambda text: text.split("==", 1)[0])
+        requirement.write_text("\n".join([*header, *ordered]) + "\n", encoding="utf-8")
+        manifest["profiles"][profile]["sha256"] = locks.digest(requirement)
+        (tmp_path / locks.MANIFEST).write_text(
+            json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        _, packages = locks.load(tmp_path, profile)
+        assert "olefile" in packages  # the injected copy is internally consistent
+    else:
+        requirement.write_text(requirement.read_text(encoding="utf-8") + pin + "\n",
+                               encoding="utf-8")
+    with pytest.raises(AssertionError) as raised:
+        _assert_no_olefile(tmp_path)
+    assert str(raised.value) == f"{profile} lock profile contains olefile; {OLEFILE_GUARD}"
 
 
 def test_hypothesis_is_a_dev_only_dependency():
