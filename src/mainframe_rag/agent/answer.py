@@ -2197,19 +2197,25 @@ def parse_answer(content: str, evidence: PromptEvidence) -> ParsedAnswer:
     doc_ids = frozenset(e.doc_id for e in evidence.entries if e.doc_id)
 
     # 1. Process code fences: extract scripts, drop thinking blocks, unwrap prose fences
+    # One left-to-right assembly (issue #1056): replacing each fence's full
+    # text inside the loop rescanned the document per fence, so a body of n
+    # repeated fences cost O(n^2) (2.8 s at 512 KB). Appending the gaps and
+    # each replacement is a single O(n) pass with the same output.
     scripts: list[tuple[str, str]] = []
-    text_processed = content
+    processed_parts: list[str] = []
+    cursor = 0
     for match in FENCE_RE.finditer(content):
+        processed_parts.append(content[cursor:match.start()])
+        cursor = match.end()
         lang = match.group(1).strip().lower()
         code = match.group(2).strip()
         if lang in SCRIPT_LANGS:
             scripts.append((lang, code))
-            text_processed = text_processed.replace(match.group(0), "")
-        elif lang in ("thought", "thinking"):
-            text_processed = text_processed.replace(match.group(0), "")
-        else:
+        elif lang not in ("thought", "thinking"):
             # Unlabeled or prose markdown code fence - unwrap into answer body
-            text_processed = text_processed.replace(match.group(0), code)
+            processed_parts.append(code)
+    processed_parts.append(content[cursor:])
+    text_processed = "".join(processed_parts)
 
     script = "\n\n".join(code for _, code in scripts).strip() if scripts else None
     script_lang = scripts[0][0] if scripts else None
