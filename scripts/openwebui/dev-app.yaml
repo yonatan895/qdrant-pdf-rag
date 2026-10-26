@@ -99,7 +99,7 @@ spec:
         - {name: conf, configMap: {name: agent-relay}}
         - {name: tmp, emptyDir: {sizeLimit: 16Mi}}
 ---
-# The Docs Pipe's default AGENT_URL is http://rag-agent:8080 (the chart's agent
+# The Rosetta Pipe's default AGENT_URL is http://rag-agent:8080 (the chart's agent
 # Service name); this Service keeps that default unchanged.
 apiVersion: v1
 kind: Service

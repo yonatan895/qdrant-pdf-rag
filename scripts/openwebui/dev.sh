@@ -1,7 +1,7 @@
 #!/bin/sh
 # Open WebUI dev environment (#1070; grew out of the #1073 hands-on setup).
 # Supported way to run the main docs platform locally: a long-lived Kind
-# cluster that renders the chart (charts/mainframe-rag) and the Docs Pipe
+# cluster that renders the chart (charts/mainframe-rag) and the Rosetta Pipe
 # (integrations/openwebui/docs_pipe.py) from this working tree, with a test IdP,
 # a router stand-in and the local agent lane. Connected dev host only.
 #
@@ -19,8 +19,8 @@
 # deploy      local CA and certificates, Dex users, render the working tree's chart
 #             (Open WebUI objects) and Pipe plus the Kind stand-ins, apply
 # relay       host relay (Kind gateway -> 127.0.0.1:$LOCAL_AGENT_PORT), no idle timeout
-# provision   admin API key, the chart's Pipe installer, groups, Docs model grants
-# smoke       both users sign in, Docs-only models, one question with source chips,
+# provision   admin API key, the chart's Pipe installer, groups, Rosetta model grants
+# smoke       both users sign in, Rosetta-only models, one question with source chips,
 #             the allow-list's blocked paths answer 403 from the proxy sidecar
 # ready       run the startup checks (health, smoke) and write STATE/READY.md (mode 600):
 #             URLs, which file holds which password, check results and exit codes,
@@ -466,7 +466,7 @@ provision() {
     if [ "$DRYRUN" = 1 ]; then
         plan "provision: owui-admin signs in, creates an API key (STATE/admin-api-key, mode 600)"
         plan "provision: kubectl exec -i deploy/rag-openwebui -c openwebui -- python3 /opt/mainframe-rag/openwebui/provision_pipe.py <pipe sha256> < admin-api-key"
-        plan "provision: groups internal-team and docs-readers; Docs model (mainframe_rag_docs) read grant to both; team-user and docs-user sign in"
+        plan "provision: groups internal-team and docs-readers; Rosetta model (mainframe_rag_docs) read grant to both; team-user and docs-user sign in"
         return 0
     fi
     provision_live
@@ -483,7 +483,7 @@ Open WebUI (Windows Chrome or Edge; Firefox also works): $OWUI_URL/
        team-user@trial.test   password in $STATE/team-user.password   (group internal-team)
        docs-user@trial.test   password in $STATE/docs-user.password   (group docs-readers)
      Admin (Pipe install, grants): owui-admin@trial.test, $STATE/owui-admin.password
-  3. Pick the "Docs" model (the only one) and ask. Answers come from the local agent.
+  3. Pick the "Rosetta" model (the only one) and ask. Answers come from the local agent.
 Test IdP: $DEX_ISSUER  (discovery $DEX_ISSUER/.well-known/openid-configuration)
 Status: sh $HERE/dev.sh status    Stop: sh $HERE/dev.sh down (cluster) and sh $HERE/dev.sh agent-down (local lane)
 EOF
@@ -553,7 +553,7 @@ ready() {
         echo "| Check | Exit code |"
         echo "|---|---|"
         echo "| health (Open WebUI /health through the router, Dex discovery) | $rc_health |"
-        echo "| smoke (both sign-ins, Docs-only models, one question with source chips, blocked paths 403) | $rc_smoke |"
+        echo "| smoke (both sign-ins, Rosetta-only models, one question with source chips, blocked paths 403) | $rc_smoke |"
         echo
         echo "health: \`$(tr -d '\n' < "$STATE/logs/check-health.json")\`"
         echo

@@ -1,6 +1,6 @@
 #!/bin/sh
 # Open WebUI acceptance lane (#1070, #1073; ADR-0007 conditions). Deploys the
-# working tree's chart (Open WebUI objects) and Docs Pipe next to the agent an
+# working tree's chart (Open WebUI objects) and Rosetta Pipe next to the agent an
 # e2e Kind lane already runs, then executes scripts/openwebui/acceptance.py.
 #
 #   sh scripts/openwebui/acceptance.sh images     before the egress boundary closes

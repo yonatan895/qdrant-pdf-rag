@@ -164,7 +164,7 @@ def check_data_dir(report: dict) -> Verdict:
 
 # ------------------------------------------------------------------ sign-in and models
 def check_models(users: dict[str, list[str]]) -> Verdict:
-    """Each signed-in user sees exactly the Docs model."""
+    """Each signed-in user sees exactly the Rosetta model."""
     bad = {u: m for u, m in users.items() if m != [DOCS_MODEL]}
     return _v("docs-model-only", bool(users) and not bad, users=sorted(users), unexpected=bad)
 
@@ -227,7 +227,7 @@ def check_admin_edit_reverts(before: object, edited: object, after: object, conf
 
 
 def check_persistence(before: dict, after: dict) -> Verdict:
-    """Restart on the RWO claim: chats, the Docs Function bytes and the model grant survived."""
+    """Restart on the RWO claim: chats, the Rosetta Function bytes and the model grant survived."""
     lost = sorted(set(before["chat_ids"]) - set(after["chat_ids"]))
     ok = (not lost and before["function_sha256"] == after["function_sha256"] and bool(after["function_sha256"])
           and after["models"] == [DOCS_MODEL] and after["pod_uid"] != before["pod_uid"])
@@ -237,7 +237,7 @@ def check_persistence(before: dict, after: dict) -> Verdict:
 
 
 def check_function_hash(stored_sha256: str | None, repo_sha256: str) -> Verdict:
-    """The installed Docs Function is byte-identical to the repository Pipe."""
+    """The installed Rosetta Function is byte-identical to the repository Pipe."""
     return _v("pipe-hash", stored_sha256 == repo_sha256, match=stored_sha256 == repo_sha256)
 
 

@@ -3,7 +3,7 @@
 Owner of the supported way to run the main docs platform (Open WebUI over the
 agent, ADR-0007 and the 2026-10-26 decision in #1070) on Kind, and of the
 suite that proves its conditions by execution. The chart (`charts/mainframe-rag`,
-Open WebUI templates) owns what is deployed, the [Docs Pipe](../integrations/openwebui/docs_pipe.py)
+Open WebUI templates) owns what is deployed, the [Rosetta Pipe](../integrations/openwebui/docs_pipe.py)
 owns the answer path, [deploy.md](deploy.md) owns the site procedure. This file
 owns only the Kind tooling around them. Scripts: `scripts/openwebui/`.
 Design records (dated, unchanged): [kind trial](records/2026-10-24-openwebui-kind-trial.md),
@@ -69,10 +69,10 @@ Every rule in `checks.py` has a counterexample in
 | arbitrary non-root UID | `id` in the container equals the namespace UID, group 0, not the image `USER`; every container has the restricted shape |
 | zero egress | the pod's CoreDNS queries name only the IdP and the agent; real sockets from the pod reach the agent and the IdP and fail to reach 1.1.1.1, 8.8.8.8, the API server, Qdrant, the gateway and a pod in another namespace; the lane's shared boundary policy excludes the Open WebUI pod, and the suite fails if any policy but the chart's selects it for egress |
 | no vector store or uploads after use | `inspect_data.py` in the pod after answers: no vector paths or tables, no `uploads/`, no retrieval rows |
-| Docs model only | both users list exactly `mainframe_rag_docs`; IdP group claim mapped; signup and password login refused |
+| Rosetta model only | both users list exactly `mainframe_rag_docs`; IdP group claim mapped; signup and password login refused |
 | citations | one saved turn has finished, text, and source events with documents (the Pipe's source chips) |
 | C1 admin edits | a live admin config edit takes effect, never reaches the `config` table and is gone after a restart |
-| restart persistence (RWO) | chats, the Docs Function bytes (sha256 equal to the repository Pipe) and the grant survive a Recreate rollout; the next chat answers |
+| restart persistence (RWO) | chats, the Rosetta Function bytes (sha256 equal to the repository Pipe) and the grant survive a Recreate rollout; the next chat answers |
 | retention purge (S2) | an aged chat and an orphan upload are removed by the chart's own `purge_chats.py`, the canary is gone from every file on the claim, a fresh chat survives, and the next ordinary chat answers |
 | log canary (S4) | no question canary, password or key occurs in the Open WebUI, agent, router or Dex logs |
 | blocked paths | the allow-list paths answer the proxy's 403 `denied`; an allowed path still answers 200 |

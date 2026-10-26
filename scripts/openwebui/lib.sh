@@ -6,7 +6,7 @@
 # DEX_IMAGE NGINX_IMAGE DRYRUN PY and the helpers say/plan/die/k.
 #
 # Two sources are read from the working tree, never from a git ref: the chart
-# (charts/mainframe-rag) and the Docs Pipe (integrations/openwebui/docs_pipe.py).
+# (charts/mainframe-rag) and the Rosetta Pipe (integrations/openwebui/docs_pipe.py).
 
 pin() {  # pin KEY -> value from pins.txt
     sed -n "s/^$1=//p" "$HERE/pins.txt" | head -1
@@ -266,7 +266,7 @@ for line in sys.stdin.read().split():
     ( umask 077; $PYH dex-config "$STATE" "$STATE/hashes.txt" > "$STATE/dex-config.yaml" )
 }
 
-provision_live() {  # admin API key, the chart's Pipe installer, groups, Docs model grants, both users sign in
+provision_live() {  # admin API key, the chart's Pipe installer, groups, Rosetta model grants, both users sign in
     $PYH api-key "$STATE"
     k -n "$APP_NS" exec -i deploy/rag-openwebui -c openwebui -- \
         python3 /opt/mainframe-rag/openwebui/provision_pipe.py "$(cat "$STATE/render/pipe.sha256")" < "$STATE/admin-api-key"

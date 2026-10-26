@@ -12,7 +12,7 @@ Commands:
   dex-config STATE HASHES        print the Dex config (HASHES: one bcrypt hash per USERS line)
   login STATE USER               sign in; print role, groups and visible models
   api-key STATE                  admin: create an API key into STATE/admin-api-key (mode 600)
-  access STATE                   admin: create the groups, grant the Docs model to them
+  access STATE                   admin: create the groups, grant the Rosetta model to them
   smoke STATE                    both users: sign in, models, one docs question, blocked paths
   health STATE                   Open WebUI /health through the router and Dex discovery
 
@@ -348,7 +348,7 @@ def cmd_access(state: str) -> None:
         sys.exit(1)
     grants = [{"principal_type": "group", "principal_id": ids[g], "permission": "read"} for g in DOCS_GROUPS]
     status = s.api(ADMIN, "POST", "/api/v1/models/model/access/update",
-                   {"id": DOCS_MODEL, "name": "Docs", "access_grants": grants})[0]
+                   {"id": DOCS_MODEL, "name": "Rosetta", "access_grants": grants})[0]
     out({"groups_created": created, "groups": sorted(DOCS_GROUPS), "docs_model_access_update": status})
     if status != 200:
         sys.exit(1)

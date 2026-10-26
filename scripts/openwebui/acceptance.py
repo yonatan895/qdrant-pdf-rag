@@ -9,7 +9,7 @@ Output is one JSON document of check names, states, counts and ids: never a
 password, token, key, question or answer. Exit 0 only when every check passed.
 
 Environment (set by acceptance.sh): KUBECTL, KIND_NAME, APP_NS, OWUI_URL, DEX_ISSUER.
-The agent behind the Docs Pipe is the one the e2e Kind lane already runs
+The agent behind the Rosetta Pipe is the one the e2e Kind lane already runs
 (Service rag-agent, test gateway with mock models); nothing here starts a model.
 """
 from __future__ import annotations
