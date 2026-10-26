@@ -9,10 +9,9 @@ maintainer and the organization's qualified legal/open-source owner.
 
 Status: partially implemented. The record, the check and the bundled notices
 exist. The maintainer recorded dispositions on 2026-10-23 (issue #376 comment);
-`pymupdf` stays unresolved (legal confirmation pending), the Open WebUI trial
-candidate (#1073) has the ADR-0007 L1 sign-off but its inventory entry stays
-open until the image is pinned, and `release_approval` is absent, so
-`check --release` still fails.
+`pymupdf` stays unresolved (legal confirmation pending), the Open WebUI
+production inventory entries are owned by #1083 (not by the #1073 trial), and
+`release_approval` is absent, so `check --release` still fails.
 Source of authority: #376 and its triage comments (19 and 24 September, 1 October
 2026): close on a documented owner disposition, never on CI alone.
 Decision owners: `licenses/inventory.json` (the record),
@@ -86,7 +85,6 @@ owner: these are maintainer dispositions, not legal approvals.
 | Component | Recorded state |
 |---|---|
 | `pymupdf` 1.28.2 | `elected: AGPL-3.0-only`, scoped to ingest. **Legal confirmation pending**: status stays `pending-owner-decision` until the qualified legal owner confirms. |
-| Open WebUI v0.12.3 slim (`image:open-webui`, trial candidate #1073) | **Owner sign-off recorded; inventory entry pending a pin.** ADR-0007 L1 (maintainer, 2026-10-24) covers internal use at 100 users or fewer with the branding unmodified, as a maintainer disposition, not a legal approval. `LicenseRef-OpenWebUI` (`proprietary` class): BSD-3-Clause terms plus clause 4, which forbids altering Open WebUI branding above 50 end users per rolling 30 days without written permission or an enterprise license. The upstream LICENSE at tag v0.12.3 is recorded by hash; the image itself carries no LICENSE file, so any adoption must ship the text in the notices. `distributed_by_repo: false`, bound to no pin: not in `images.txt`, the chart or a bundle while the image is not pinned; ADR-0007 (#1080) is accepted, but the chart flag stays off. |
 | `flatbuffers`, `loguru`, `onnxruntime`, `tokenizers` | `approved`. Upstream license texts (locked version's tag, source URLs in the inventory) are in `licenses/texts/` and rendered into `THIRD-PARTY-NOTICES.txt`. |
 | Qdrant image | `approved` on the upstream Apache-2.0 license. Layer inventory is follow-up #371. |
 | OpenObserve OSS v1.1.2 image | `approved` (ADR-0006, #956): AGPL-3.0 (`network-copyleft`) accepted for the unmodified upstream binary run as a separate service; it is transferred unchanged with the source reference upstream v1.1.2, and any modification or Enterprise-feature change needs a new decision. Layer inventory is follow-up #371. |
@@ -96,6 +94,14 @@ owner: these are maintainer dispositions, not legal approvals.
 | IBM Plex fonts | `approved`; `OFL-1.1` is a permissive class in the checker. |
 | BM25 weights (`Qdrant/bm25`, rev `22b8d2af71a7`) | `approved`: the Hugging Face model card at that revision declares `license: apache-2.0` (`https://huggingface.co/api/models/Qdrant/bm25/revision/22b8d2af71a76161e18dd432d2cee0eefa66e412`, checked 2026-10-23). Re-check if the revision changes. |
 | Corpus rights | Out of scope here by design; recorded as an excluded boundary. |
+
+The Open WebUI front-end licence analysis (BSD-3-Clause plus the branding clause,
+unmodified branding, and the upstream LICENSE hash) is in the
+[#1073 trial record](records/2026-10-24-openwebui-kind-trial.md). The production
+inventory entries (`image:openwebui`, `image:openwebui-base`) are owned by #1083,
+not by the trial; this table carries no trial-only duplicate. ADR-0007 L1
+(maintainer, 2026-10-24) signs off internal use at 100 users or fewer with the
+branding unmodified, as a maintainer disposition, not a legal approval.
 
 `python3 scripts/license_inventory.py check` prints open items as `UNRESOLVED` on every
 run so they stay visible; `check --release` fails while any remain.

@@ -76,28 +76,21 @@ def test_pymupdf_election_is_recorded_but_legal_confirmation_keeps_it_unresolved
     assert entry["decision"]["legal_confirmation"] == "pending"
     assert entry["status"] == "pending-owner-decision"
     _, unresolved, _ = problems_for(inventory)
-    # pymupdf and the Open WebUI trial candidate (#1073) are the two open decisions.
-    assert sorted(u.split(": ")[0] for u in unresolved) == ["component:image:open-webui", "python:pymupdf==1.28.2"]
+    # pymupdf is the only open decision in this trial branch; the Open WebUI
+    # production entries are owned by #1083, not duplicated here.
+    assert [u.split(": ")[0] for u in unresolved] == ["python:pymupdf==1.28.2"]
     entry["decision"] = {"owner": "yonatan895"}
     problems, _, _ = problems_for(inventory)
     assert any("decision record needs owner, date and disposition" in p for p in problems)
 
 
-def test_open_webui_candidate_stays_an_open_owner_decision_and_ships_nowhere():
-    """#1073: the Open WebUI licence (BSD-3-Clause plus a branding clause) is a
-    LicenseRef, so it cannot rest on declared metadata; while ADR-0007 (#1080) is
-    open the record is pending, not distributed and bound to no pin."""
+def test_trial_branch_does_not_own_the_open_webui_production_entry():
+    """#1073 records the Open WebUI licence analysis, but the production
+    inventory entries (`image:openwebui`, `image:openwebui-base`) are owned by
+    #1083. The trial-only `image:open-webui` duplicate must not return."""
     inventory = real_inventory()
-    entry = next(e for e in inventory["components"] if e["id"] == "image:open-webui")
-    assert entry["license_spdx"] == "LicenseRef-OpenWebUI" and entry["class"] == "proprietary"
-    assert entry["status"] == "pending-owner-decision" and entry["approval_ref"] is None
-    assert entry["distributed_by_repo"] is False and entry["ships_in"] == ["none"] and entry["bind"] == {}
-    assert "branding" in entry["obligation"] and "LICENSE" in entry["obligation"]
-    _, unresolved, _ = problems_for(inventory)
-    assert any(u.startswith("component:image:open-webui:") for u in unresolved)
-    entry["status"] = "declared"
-    problems, _, _ = problems_for(inventory)
-    assert any("component:image:open-webui" in p and "cannot rest on declared metadata" in p for p in problems)
+    ids = {e["id"] for e in inventory["components"]}
+    assert "image:open-webui" not in ids
 
 
 def test_recorded_decisions_match_the_maintainer_dispositions():
