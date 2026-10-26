@@ -1588,6 +1588,12 @@ The smoke trace check is a later step of #956.
 <a id="docs-front-end"></a>
 ## Docs front end: Open WebUI (ADR-0007, #1074)
 
+**Naming (maintainer decision 2026-10-26, #1070).** *Rosetta* is the site-facing name of the docs
+assistant: the Open WebUI model users pick, the Route host (suggested example
+`rosetta.apps.<cluster-domain>`, a placeholder), the AD FS client name and the user docs. Code
+identifiers stay `mainframe_rag`, `mainframe-rag` and the Pipe/model ID `mainframe_rag_docs`; Open
+WebUI's own branding stays unmodified (ADR-0007 L1) and the console keeps its title.
+
 Open WebUI is the main docs platform and is **on by default** (maintainer decision 2026-10-26,
 ADR-0008); the console stays the frozen fallback. It is a front end for the docs corpus. It is a
 client of the agent: its only model is the repository docs Pipe (#1072) over `/v1/chat`. It
@@ -1717,7 +1723,7 @@ statements come from the v0.12.3 source in the pinned image.
 1. **Client.** Create an application group with a server application, which is a confidential
    client authenticated by a generated shared secret. Add a Web API whose identifier is the
    client id, so it can carry the scopes and rules below *(confirm on the test client)*. A
-   suggested name is `mainframe-rag-docs`; it is only a suggestion. The redirect URI is exactly
+   suggested names are `rosetta` (production) and `rosetta-test` (test client); they are only suggestions. The redirect URI is exactly
    `https://<host>/oauth/oidc/callback`. The client id goes into `OPENWEBUI_OIDC_CLIENT_ID`, and
    the secret goes into the Secret as `oidc-client-secret`.
 2. **Scopes.** Permit `openid`, `profile`, `email` and `allatclaims`, and set
@@ -1800,7 +1806,7 @@ statements come from the v0.12.3 source in the pinned image.
    answers an absent Function with 401, so a 401 on the Function itself never decides) or
    updates it, reads it back by hash and activates it. Until the key exists, deploy prints
    `docs Pipe NOT installed` and the front end offers no model.
-5. Give all signed-in users read access to the Docs model in the Open WebUI admin UI (the
+5. Give all signed-in users read access to the Rosetta model in the Open WebUI admin UI (the
    default visibility is a #1073 trial item). Then sign in as an ordinary user and ask one
    question: citations show as source chips, and the console still works.
 
@@ -1861,7 +1867,7 @@ for p in /api/v1/files/ /api/v1/files /API/v1/files/ //api/v1/files/ /api/v1/./f
 done
 ```
 
-Then sign in and open a chat: a conversation must answer through the Docs model.
+Then sign in and open a chat: a conversation must answer through the Rosetta model.
 
 **Re-audit the allow-list on every Open WebUI import (ADR-0007 P1).** Each import PR must (1) list
 the router prefixes and handlers of the new release (`main.py` `include_router`, each
