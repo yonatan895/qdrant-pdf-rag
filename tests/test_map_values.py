@@ -57,6 +57,9 @@ MAPPER_KEYS = [
     "FEEDBACK_ENABLED", "FEEDBACK_SECRET", "FEEDBACK_STORAGE_SIZE", "FEEDBACK_RETENTION_DAYS",
     "IMAGE_DIGEST_AGENT", "IMAGE_DIGEST_INGEST", "IMAGE_DIGEST_OPENOBSERVE", "IMAGE_DIGEST_OTELCOL", "IMAGE_DIGEST_OAUTH_PROXY",
     "STORAGE_CLASS", "CORPUS_PVC", "INGEST_WORKERS", "INGEST_WORK_SIZE",
+    "INGEST_CPU_REQUEST", "INGEST_MEMORY_REQUEST", "INGEST_CPU_LIMIT", "INGEST_MEMORY_LIMIT",
+    "QDRANT_DATA_SIZE", "QDRANT_SNAPSHOT_SIZE", "QDRANT_CPU_REQUEST", "QDRANT_MEMORY_REQUEST",
+    "QDRANT_CPU_LIMIT", "QDRANT_MEMORY_LIMIT",
     "INGEST_ALIAS_PUBLISH", "INGEST_REINGEST", "INGEST_RETIRE_DOCS",
     "INGEST_AUTHORIZE_FROM_CATALOG",
     "CONTEXTUAL_EMBED_ENABLED", "CONTEXT_LLM_BASE_URL", "CONTEXT_LLM_MODEL",
@@ -1289,6 +1292,76 @@ def test_preflight_rejects_invalid_request_bound():
     result = subprocess.run([sys.executable, str(REPO / "scripts/airgap/model_config.py")],
                             env=env, capture_output=True, text=True, check=False)
     assert result.returncode == 1 and "REQUEST_QUEUE_MAX" in result.stderr
+
+
+# --- #1070 R2: first-class site sizing (quota-bound sites) -------------------
+
+CHART_INGEST_RESOURCES = yaml.safe_load((CHART / "values.yaml").read_text())["ingest"]["resources"]
+INGEST_SIZING_ENV = {
+    "INGEST_CPU_REQUEST": "750m", "INGEST_MEMORY_REQUEST": "3Gi",
+    "INGEST_CPU_LIMIT": "3", "INGEST_MEMORY_LIMIT": "6Gi",
+}
+INGEST_SIZING_EXPECTED = {
+    "requests": {"cpu": "750m", "memory": "3Gi"}, "limits": {"cpu": "3", "memory": "6Gi"},
+}
+
+
+@pytest.mark.parametrize("corpus", ["", "corpus-pvc"])
+def test_default_ingest_resources_are_the_chart_defaults(monkeypatch, mapper_env, corpus):
+    """Unset sizing keys keep today's rendered values, enabled or not."""
+    if corpus:
+        monkeypatch.setenv("CORPUS_PVC", corpus)
+    r, out = mapper_env()
+    assert r.returncode == 0, r.stderr
+    assert load_values(out)["ingest"]["resources"] == CHART_INGEST_RESOURCES
+
+
+def test_ingest_sizing_keys_reach_the_release_values(monkeypatch, mapper_env):
+    monkeypatch.setenv("CORPUS_PVC", "corpus-pvc")
+    for key, val in INGEST_SIZING_ENV.items():
+        monkeypatch.setenv(key, val)
+    r, out = mapper_env()
+    assert r.returncode == 0, r.stderr
+    assert load_values(out)["ingest"]["resources"] == INGEST_SIZING_EXPECTED
+
+
+def test_a_partial_ingest_override_keeps_the_other_defaults(monkeypatch, mapper_env):
+    monkeypatch.setenv("CORPUS_PVC", "corpus-pvc")
+    monkeypatch.setenv("INGEST_MEMORY_LIMIT", "12Gi")
+    r, out = mapper_env()
+    assert r.returncode == 0, r.stderr
+    expected = {k: dict(v) for k, v in CHART_INGEST_RESOURCES.items()}
+    expected["limits"]["memory"] = "12Gi"
+    assert load_values(out)["ingest"]["resources"] == expected
+
+
+@pytest.mark.parametrize("key,val", [
+    ("INGEST_CPU_REQUEST", "lots"), ("INGEST_CPU_REQUEST", "0"), ("INGEST_CPU_REQUEST", "-1"),
+    ("INGEST_CPU_REQUEST", "1Gi"), ("INGEST_CPU_LIMIT", "20,x=1"), ("INGEST_CPU_LIMIT", "20 "),
+    ("INGEST_MEMORY_REQUEST", "8"), ("INGEST_MEMORY_REQUEST", "8GB"), ("INGEST_MEMORY_REQUEST", "0Gi"),
+    ("INGEST_MEMORY_LIMIT", "500m"), ("INGEST_MEMORY_LIMIT", "1e3Gi"),
+    # A limit below the request, against the chart default for the other side.
+    ("INGEST_CPU_LIMIT", "2"),          # default request is 4
+    ("INGEST_MEMORY_LIMIT", "4Gi"),     # default request is 8Gi
+    ("INGEST_CPU_REQUEST", "17"),       # default limit is 16
+    ("INGEST_MEMORY_REQUEST", "33Gi"),  # default limit is 32Gi
+])
+def test_invalid_ingest_sizing_is_refused_with_a_fixed_message(monkeypatch, mapper_env, key, val):
+    monkeypatch.setenv("CORPUS_PVC", "corpus-pvc")
+    monkeypatch.setenv(key, val)
+    r, out = mapper_env()
+    assert r.returncode != 0 and not out.exists()
+    assert key in r.stderr
+    assert val not in r.stderr, "the refusal never echoes the supplied value"
+
+
+def test_sizing_defaults_mirror_the_chart_values():
+    """The limit-vs-request check compares against what will actually render."""
+    from scripts.airgap.model_config import SIZING_DEFAULTS
+
+    qdrant = yaml.safe_load((REPO / "charts" / "qdrant-openshift.values.yaml").read_text())
+    assert SIZING_DEFAULTS["QDRANT"] == qdrant["resources"]
+    assert SIZING_DEFAULTS["INGEST"] == CHART_INGEST_RESOURCES
 
 
 # --- Retired airgap.env keys (#1070) ---

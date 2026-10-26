@@ -850,6 +850,70 @@ def test_ingest_with_the_seven_openwebui_inputs_renders_only_the_job(ingest_tree
     assert "claimName: my-manuals-pvc" in rendered and "rag-openwebui" not in rendered
 
 
+# --- #1070 R2: first-class ingest sizing -------------------------------------
+
+INGEST_SIZING = {
+    "INGEST_CPU_REQUEST": "750m", "INGEST_MEMORY_REQUEST": "3Gi",
+    "INGEST_CPU_LIMIT": "3", "INGEST_MEMORY_LIMIT": "6Gi",
+}
+
+
+def _chart_ingest_resources():
+    import yaml
+
+    return yaml.safe_load((REPO / "charts/mainframe-rag/values.yaml").read_text())["ingest"]["resources"]
+
+
+def test_default_ingest_job_resources_are_unchanged(ingest_tree):
+    r = _run_ingest(ingest_tree)
+    assert r.returncode == 0, r.stderr
+    rendered = (ingest_tree[0] / "dist/ingest-rendered.yaml").read_text()
+    assert rendered_container(rendered, "ingest")["resources"] == _chart_ingest_resources()
+
+
+def test_ingest_sizing_keys_reach_the_rendered_job(ingest_tree):
+    r = _run_ingest(ingest_tree, *INGEST_SIZING.items())
+    assert r.returncode == 0, r.stderr
+    rendered = (ingest_tree[0] / "dist/ingest-rendered.yaml").read_text()
+    assert rendered_container(rendered, "ingest")["resources"] == {
+        "requests": {"cpu": "750m", "memory": "3Gi"}, "limits": {"cpu": "3", "memory": "6Gi"}}
+
+
+def test_ingest_sizing_equals_what_the_resource_patch_produced(ingest_tree):
+    """The keys replace INGEST_EXTRA_PATCH: same Job, byte for byte."""
+    _use_patching_kubectl(ingest_tree)
+    patch = _write_patch(ingest_tree, {"spec": {"template": {"spec": {"containers": [{
+        "name": "ingest", "resources": {"requests": {"cpu": "750m", "memory": "3Gi"},
+                                         "limits": {"cpu": "3", "memory": "6Gi"}}}]}}}})
+    old = _run_ingest(ingest_tree, ("INGEST_EXTRA_PATCH", patch), ("CI_REHEARSAL", "1"))
+    assert old.returncode == 0, old.stderr
+    patched = rendered_container((ingest_tree[0] / "dist/ingest-rendered.yaml").read_text(), "ingest")
+    new = _run_ingest(ingest_tree, *INGEST_SIZING.items())
+    assert new.returncode == 0, new.stderr
+    keyed = rendered_container((ingest_tree[0] / "dist/ingest-rendered.yaml").read_text(), "ingest")
+    assert keyed == patched
+
+
+@pytest.mark.parametrize("name,value", [
+    ("INGEST_CPU_REQUEST", "lots"), ("INGEST_MEMORY_LIMIT", "500m"),
+    ("INGEST_CPU_LIMIT", "2"), ("INGEST_MEMORY_REQUEST", "33Gi"),
+])
+def test_invalid_ingest_sizing_is_refused_before_any_cluster_call(ingest_tree, name, value):
+    r = _run_ingest(ingest_tree, (name, value))
+    assert r.returncode != 0
+    assert name in r.stderr and value not in r.stderr
+    assert not ingest_tree[1].exists(), "no kubectl call may precede the refusal"
+
+
+def test_extra_patch_outside_ci_names_the_sizing_keys_to_use(ingest_tree):
+    patch = _write_patch(ingest_tree, RESOURCE_PATCH)
+    r = _run_ingest(ingest_tree, ("INGEST_EXTRA_PATCH", patch))
+    assert r.returncode != 0
+    assert "INGEST_EXTRA_PATCH is a CI-rehearsal override" in r.stderr
+    for key in INGEST_SIZING:
+        assert key in r.stderr, key
+
+
 # --- Retired airgap.env keys (#1070) ---
 
 
