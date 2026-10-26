@@ -162,6 +162,71 @@ jobs:
           echo "$GITHUB_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
           docker push "$IMAGE"
 
+  # Derived Open WebUI image (ADR-0008, #1070/#1074): the unmodified upstream slim
+  # release plus one ownership layer (images/openwebui/Containerfile), no build
+  # contexts. Dispatch and nightly only, never pull_request. Pushed with the commit
+  # SHA tag; the fixed version tag is created once and never moved. The manifest
+  # digest goes to the job summary so a dedicated pin PR can record it in
+  # images.txt (this job never edits it).
+  image-openwebui:
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    concurrency:
+      group: image-openwebui-${{ github.ref || github.run_id }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Build and push the derived image (commit-SHA tag; the version tag is set once, never moved)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          OWNER_LC="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr 'A-Z' 'a-z')"
+          IMAGE="ghcr.io/${OWNER_LC}/qdrant-pdf-rag-openwebui"
+          VERSION_TAG=v0.12.3-slim
+          echo "$GITHUB_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          # Rebuilds of the same Containerfile aim at the same digest: the timestamp is the commit time
+          # of the Containerfile and BuildKit rewrites layer timestamps to it.
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct -- images/openwebui/Containerfile)"
+          export SOURCE_DATE_EPOCH
+          docker buildx create --name owui --driver docker-container --use >/dev/null
+          build() {
+            docker buildx build --builder owui -f images/openwebui/Containerfile --provenance=false --sbom=false \
+              --build-arg SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" --output "$1,rewrite-timestamp=true" images/openwebui
+          }
+          build "type=image,name=$IMAGE:$GITHUB_SHA,push=true"
+          DIGEST="$(docker buildx imagetools inspect "$IMAGE:$GITHUB_SHA" --format '{{json .Manifest.Digest}}' | tr -d '"')"
+          case "$DIGEST" in sha256:????????????????????????????????????????????????????????????????) ;; *) echo "no manifest digest" >&2; exit 1 ;; esac
+          # The fixed version tag is set only when it does not exist yet. An existing tag is left alone
+          # whatever it points at (a moving fixed tag is a supply-chain trap); the maintainer decides.
+          if docker buildx imagetools inspect "$IMAGE:$VERSION_TAG" >/dev/null 2>&1; then
+            EXISTING="$(docker buildx imagetools inspect "$IMAGE:$VERSION_TAG" --format '{{json .Manifest.Digest}}' | tr -d '"')"
+            TAGSTATE="left alone: $VERSION_TAG exists at $EXISTING"
+            [ "$EXISTING" = "$DIGEST" ] && TAGSTATE="left alone: $VERSION_TAG already points at this digest"
+          else
+            docker buildx imagetools create -t "$IMAGE:$VERSION_TAG" "$IMAGE@$DIGEST"
+            TAGSTATE="set: $VERSION_TAG did not exist"
+          fi
+          # Reproducibility probe: a second build of the same inputs must give the same manifest digest.
+          REPRO="no (digest differs on rebuild)"
+          build "type=oci,dest=$RUNNER_TEMP/owui-rebuild.tar"
+          REBUILT="$(tar -xOf "$RUNNER_TEMP/owui-rebuild.tar" index.json | python3 -c 'import json,sys; print(json.load(sys.stdin)["manifests"][0]["digest"])')"
+          [ "$REBUILT" = "$DIGEST" ] && REPRO="yes"
+          {
+            echo "### Open WebUI derived image"
+            echo ""
+            echo "- pushed tag: \`$IMAGE:$GITHUB_SHA\`"
+            echo "- manifest digest (for the images.txt pin PR): \`$DIGEST\`"
+            echo "- fixed version tag: $TAGSTATE"
+            echo "- SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH, rebuild reproduces the digest: $REPRO (rebuild digest \`$REBUILT\`)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   build:
     needs: [select, build-inputs, images]
     if: always() && contains(fromJSON(needs.select.outputs.lanes || '[]'), 'packaging')
@@ -331,6 +396,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
+      # Open WebUI is default-on (ADR-0008) and fails closed without site inputs; this job
+      # does not deploy it (the kind `openwebui` lane does, via scripts/openwebui/acceptance.sh).
+      OPENWEBUI_ENABLED: "false"
       SHARE: "false"
       SHA: ${{ needs.build.outputs.sha }}
     steps:
@@ -450,7 +518,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        lane: [pipeline, gateway-chat-upstream, gateway-chat-malformed, gateway-chat-truncated, gateway-embed-upstream, gateway-embed-malformed, gateway-embed-dimension, gateway-auth, lifecycle-chart, lifecycle, shared-gateway, rerank, observability]
+        lane: [pipeline, gateway-chat-upstream, gateway-chat-malformed, gateway-chat-truncated, gateway-embed-upstream, gateway-embed-malformed, gateway-embed-dimension, gateway-auth, lifecycle-chart, lifecycle, shared-gateway, rerank, observability, openwebui]
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -460,6 +528,9 @@ jobs:
       group: kind-${{ matrix.lane }}-${{ github.ref || github.run_id }}
       cancel-in-progress: false
     env:
+      # Open WebUI is default-on (ADR-0008) and fails closed without site inputs; this job
+      # does not deploy it (the kind `openwebui` lane does, via scripts/openwebui/acceptance.sh).
+      OPENWEBUI_ENABLED: "false"
       SHARE: "false"
       SHA: ${{ needs.build.outputs.sha }}
     steps:
@@ -610,6 +681,23 @@ jobs:
           # pulled by the nodes now. Model computation arrives later from the bundle.
           sh rehearsal-infra/scripts/ci/deploy_test_gateway.sh "$NS"
 
+      # Open WebUI acceptance lane (#1070): the pushed derived image (pins.txt, by digest), the
+      # pinned test IdP and the allow-list proxy image come from the public network now and are
+      # loaded into the node by digest; the boundary closes right after, so the
+      # checks themselves run with zero public egress. Nothing here ships.
+      - name: Open WebUI images (public images, before the boundary)
+        if: matrix.lane == 'openwebui'
+        env:
+          KIND_NAME: gapbox
+          APP_NS: ${{ env.NS }}
+          OWUI_STATE: ${{ runner.temp }}/owui-acceptance
+          KIND_BIN: /usr/local/bin/kind
+          KUBECTL: /usr/local/bin/kubectl
+          HELM: /usr/local/bin/helm
+        run: |
+          export PATH="/usr/local/bin:$PATH"
+          sh rehearsal-infra/scripts/openwebui/acceptance.sh images
+
       # Close the boundary: from here the shipped operator flow runs under a
       # kernel-enforced block. Outside it: the GitHub runner agent, the Docker
       # daemon and its embedded DNS, the infrastructure steps above, and the
@@ -646,7 +734,11 @@ jobs:
           kind: NetworkPolicy
           metadata: {name: rehearsal-default-deny-egress}
           spec:
-            podSelector: {}
+            # Every pod except the Open WebUI front end (openwebui lane): its egress is governed by
+            # the chart's own NetworkPolicy alone, the policy production ships; a namespace-wide
+            # allow here would be unioned into it. acceptance.py fails if any other policy selects it.
+            podSelector:
+              matchExpressions: [{key: app, operator: NotIn, values: [rag-openwebui]}]
             policyTypes: [Egress]
             egress:
               - to:
@@ -1039,6 +1131,25 @@ jobs:
             python3 /app/scripts/smoke_search.py \
               --url http://localhost:8080 --query "torque the widget screws" --expect "torque"
 
+      # The front end next to the agent this lane just deployed (mock reasoning and
+      # embedding models behind the test gateway; no hash mode, no GPU). The chart's
+      # Open WebUI objects come from this checkout, with Kind stand-ins for the
+      # route and the IdP (docs/openwebui-dev.md). Zero-egress checks run behind the gate.
+      - name: Open WebUI acceptance (ADR-0007 conditions, by execution)
+        if: matrix.lane == 'openwebui'
+        env:
+          KIND_NAME: gapbox
+          APP_NS: ${{ env.NS }}
+          OWUI_STATE: ${{ runner.temp }}/owui-acceptance
+          KIND_BIN: /usr/local/bin/kind
+          KUBECTL: /usr/local/bin/kubectl
+          HELM: /usr/local/bin/helm
+        shell: sh rehearsal-infra/scripts/ci/egress_gate.sh run bash -e {0}
+        run: |
+          export PATH="/usr/local/bin:$PATH"
+          sh rehearsal-infra/scripts/openwebui/acceptance.sh deploy
+          sh rehearsal-infra/scripts/openwebui/acceptance.sh run
+
       - name: Gateway fault contracts
         if: startsWith(matrix.lane, 'gateway-')
         env:
@@ -1115,6 +1226,20 @@ jobs:
           /usr/local/bin/kubectl -n "$NS" logs deploy/rag-agent --all-containers --tail=100 || true
           /usr/local/bin/kubectl -n "$NS" logs job/ingest --tail=100 || true
 
+      - name: Open WebUI acceptance evidence (no passwords, keys or certificates)
+        if: always() && matrix.lane == 'openwebui'
+        env:
+          OWUI_STATE: ${{ runner.temp }}/owui-acceptance
+        shell: sh rehearsal-infra/scripts/ci/egress_gate.sh run bash -e {0}
+        run: |
+          export PATH="/usr/local/bin:$PATH"
+          mkdir -p diagnostics/openwebui
+          for f in logs/acceptance.json logs/apply-openwebui.log logs/apply-support.log images.txt node-images.txt render/openwebui.yaml render/pipe.sha256; do
+            test ! -f "$OWUI_STATE/$f" || cp "$OWUI_STATE/$f" "diagnostics/openwebui/$(basename "$f")"
+          done
+          /usr/local/bin/kubectl -n "$NS" get pods,pvc,svc,networkpolicy -o wide > diagnostics/openwebui/workloads.txt 2>&1 || true
+          /usr/local/bin/kubectl -n "$NS" describe deploy/rag-openwebui > diagnostics/openwebui/describe-rag-openwebui.txt 2>&1 || true
+
       - name: Retain sanitized cluster diagnostics
         if: always()
         run: |
@@ -1178,6 +1303,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
+      # Open WebUI is default-on (ADR-0008) and fails closed without site inputs; this job
+      # does not deploy it (the kind `openwebui` lane does, via scripts/openwebui/acceptance.sh).
+      OPENWEBUI_ENABLED: "false"
       SHARE: "false"
       SHA: ${{ github.sha }}
     steps:
@@ -1460,6 +1588,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
+      # Open WebUI is default-on (ADR-0008) and fails closed without site inputs; this job
+      # does not deploy it (the kind `openwebui` lane does, via scripts/openwebui/acceptance.sh).
+      OPENWEBUI_ENABLED: "false"
       SHARE: "false"
       OPENSHIFT_SERVER: ${{ secrets.OPENSHIFT_SERVER }}
       OPENSHIFT_TOKEN: ${{ secrets.OPENSHIFT_TOKEN }}
