@@ -1597,3 +1597,22 @@ def test_validate_accepts_unset_empty_off_and_external_collectors(tree, endpoint
     extra = {} if endpoint is None else {"OTEL_EXPORTER_OTLP_ENDPOINT": endpoint}
     r = _run(tree, extra)
     assert r.returncode == 0, r.stderr
+
+
+# --- Site sizing keys (#1070 R2): airgap.env values validate like env values ---
+
+@pytest.mark.parametrize("name,value", [
+    ("QDRANT_DATA_SIZE", "lots"), ("QDRANT_CPU_LIMIT", "1"), ("INGEST_MEMORY_REQUEST", "64Gi"),
+    ("INGEST_CPU_REQUEST", "0"), ("QDRANT_MEMORY_LIMIT", "500m"),
+])
+@pytest.mark.parametrize("source", ["env", "file"])
+def test_validate_refuses_invalid_sizing_from_env_and_airgap_env(tree, name, value, source):
+    if source == "env":
+        r = _run(tree, {name: value})
+    else:
+        env_file = tree / "sizing.env"
+        env_file.write_text(f"{name}={value}\n")  # unexported, as a real airgap.env assignment
+        r = _run(tree, {"AIRGAP_ENV": str(env_file)})
+    assert r.returncode != 0, r.stdout
+    assert name in r.stderr
+    assert value not in r.stderr
