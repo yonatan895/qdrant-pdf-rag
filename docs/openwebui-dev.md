@@ -53,7 +53,7 @@ nightly on main, like every Kind lane; never on `pull_request`). It runs the
 lane's normal pipeline first, so the agent is the one the other Kind lanes
 deploy from the bundle: test gateway with mock reasoning and embedding models,
 the synthetic corpus, no GPU, no hash mode. Before the egress boundary closes it
-pulls the derived Open WebUI image **by the digest the `image-openwebui` job pushed** (`pins.txt`, `OWUI_PUSHED`), plus the pinned Dex and nginx images, and loads all three into the node (`acceptance.sh images`; `OWUI_BUILD=1` builds from `images/openwebui/Containerfile` instead, dev only). Behind the
+pulls the derived Open WebUI image **by the digest `images.txt` pins** (the `qdrant-pdf-rag-openwebui` row; the lane fails closed while it says `sha256:PENDING`, and `pins.txt` holds no copy), plus the pinned Dex and nginx images, and loads all three into the node (`acceptance.sh images`; `OWUI_BUILD=1` builds from `images/openwebui/Containerfile` instead, dev only). Behind the
 boundary it deploys the chart objects and stand-ins into the lane's namespace
 (`acceptance.sh deploy`) and runs `acceptance.py` through port-forwards
 (`acceptance.sh run`). The JSON result is kept as lane evidence

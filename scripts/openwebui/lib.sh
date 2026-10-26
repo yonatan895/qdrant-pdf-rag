@@ -16,13 +16,28 @@ nginx_pin() {  # the allow-list proxy image digest, from the working tree's imag
     awk '$1 ~ /^docker\.io\/nginxinc\/nginx-unprivileged:/ {print $2}' "$REPO/images.txt"
 }
 
+owui_pinned() {  # the pushed derived image by digest, from images.txt (the only owner); fails closed while PENDING
+    row=$(awk '$1 ~ /\/qdrant-pdf-rag-openwebui:/ {print $1 " " $2; exit}' "$REPO/images.txt")
+    repo=${row%%:*}; rest=${row#* }
+    case "$rest" in
+        sha256:????????????????????????????????????????????????????????????????) echo "$repo@$rest" ;;
+        *) echo "images.txt does not pin the qdrant-pdf-rag-openwebui digest yet (${rest:-no row}); pin it, or set OWUI_BUILD=1 to build locally (dev only)" >&2
+           return 1 ;;
+    esac
+}
+
 nginx_ref() {  # repository without tag, as images.txt names it
     awk '$1 ~ /^docker\.io\/nginxinc\/nginx-unprivileged:/ {sub(/:.*/, "", $1); print $1}' "$REPO/images.txt"
 }
 
 # ------------------------------------------------------------------ images
 build_images() {  # pull the pinned images by digest (OWUI_BUILD=1: build the Open WebUI image locally), tag the local names
-    OWUI_PUSHED=$(pin OWUI_PUSHED); DEX_PIN=$(pin DEX_PIN)
+    DEX_PIN=$(pin DEX_PIN)
+    if [ "${OWUI_BUILD:-0}" = 1 ]; then OWUI_PUSHED=""; else
+        OWUI_PUSHED=$(owui_pinned) || {
+            [ "$DRYRUN" = 1 ] || die "images.txt does not pin the Open WebUI image"
+            OWUI_PUSHED="<images.txt pin missing: a real run fails closed>"; }
+    fi
     NGINX_PIN=$(nginx_pin)
     [ -n "$NGINX_PIN" ] || die "no nginx-unprivileged pin in $REPO/images.txt"
     nginx_src="$(nginx_ref)@$NGINX_PIN"
@@ -64,7 +79,7 @@ load_images() {  # into the Kind cluster $KIND_NAME, node container $NODE
     nginx_src="$(nginx_ref)@$(nginx_pin)"
     # Pulled images go in by their pinned digest (docker save of a pulled index omits blobs on some hosts).
     if [ "${OWUI_BUILD:-0}" = 1 ]; then "$KIND_BIN" load docker-image --name "$KIND_NAME" "$OWUI_IMAGE"
-    else copy_into_node "$(pin OWUI_PUSHED)" "$OWUI_IMAGE" owui; fi
+    else copy_into_node "$(owui_pinned)" "$OWUI_IMAGE" owui; fi
     copy_into_node "$DEX_PIN" "$DEX_IMAGE" dex
     copy_into_node "$nginx_src" "$NGINX_IMAGE" nginx
     docker exec "$NODE" crictl images > "$STATE/node-images.txt"
@@ -241,7 +256,7 @@ apply_stack() {  # the Secrets and objects both entry points create in the clust
 
 # The digest-pinned image runs the hashing (never pulled behind a closed boundary: --pull=never).
 bcrypt_hashes() {  # passwords of the client.py users -> bcrypt hashes in STATE/hashes.txt, from the image's own module
-    BCRYPT_IMAGE=$(pin OWUI_PUSHED); [ "${OWUI_BUILD:-0}" != 1 ] || BCRYPT_IMAGE=$OWUI_IMAGE
+    if [ "${OWUI_BUILD:-0}" = 1 ]; then BCRYPT_IMAGE=$OWUI_IMAGE; else BCRYPT_IMAGE=$(owui_pinned) || die "images.txt does not pin the Open WebUI image"; fi
     $PYH users "$STATE" | while read -r u; do cat "$STATE/$u.password"; done \
         | docker run --rm -i --pull=never --network none --entrypoint python3 "$BCRYPT_IMAGE" -c '
 import bcrypt, sys

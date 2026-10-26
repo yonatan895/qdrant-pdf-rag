@@ -44,7 +44,7 @@ def test_trial_directory_is_gone_and_pins_are_complete():
     assert not (ROOT / "scripts" / "ci" / "openwebui-trial").exists()
     pins = dict(line.split("=", 1) for line in (DIR / "pins.txt").read_text().splitlines()
                 if line and not line.startswith("#"))
-    assert set(pins) == {"NODE_IMAGE", "DEX_PIN", "SKOPEO_IMAGE", "OWUI_PUSHED"}
+    assert set(pins) == {"NODE_IMAGE", "DEX_PIN", "SKOPEO_IMAGE"}  # the Open WebUI digest lives in images.txt only
     assert all("@sha256:" in v for v in pins.values())
 
 
@@ -316,9 +316,7 @@ def test_only_the_chart_policy_may_select_the_front_end_for_egress():
 def test_gated_deploy_never_pulls_and_uses_the_digest_pinned_image():
     lib = (DIR / "lib.sh").read_text()
     hashing = lib[lib.index("bcrypt_hashes() {"):]
-    assert "--pull=never" in hashing and "pin OWUI_PUSHED" in hashing  # F2: no daemon pull behind the boundary
-    assert "@sha256:" in dict(line.split("=", 1) for line in (DIR / "pins.txt").read_text().splitlines()
-                              if line and not line.startswith("#"))["OWUI_PUSHED"]
+    assert "--pull=never" in hashing and "owui_pinned" in hashing  # F2: no daemon pull behind the boundary
     for text in ((DIR / "client.py").read_text(), lib, (DIR / "acceptance.sh").read_text()):
         assert "seed" not in text.lower()  # the installer's real first install is what the lane proves
     assert "OWUI_SEED_FUNCTION" not in (ROOT / ".github" / "workflows" / "e2e.yml").read_text()
@@ -334,3 +332,33 @@ def test_a_user_in_neither_role_list_must_get_no_session():
     for line in values.splitlines():
         if "allowedRoles" in line or "adminRoles" in line:
             assert "*" not in line and "signed-in" not in line
+
+
+def _owui_pinned(tmp_path, images_txt: str | None):
+    """Run lib.sh's owui_pinned against a REPO whose images.txt is the given text (None: the real one)."""
+    repo = ROOT
+    if images_txt is not None:
+        (tmp_path / "images.txt").write_text(images_txt)
+        repo = tmp_path
+    script = f"HERE={DIR}; REPO={repo}; . $HERE/lib.sh; owui_pinned"
+    return subprocess.run(["sh", "-c", script], capture_output=True, text=True, check=False)
+
+
+def test_the_lane_image_is_the_images_txt_row_and_fails_closed_while_pending(tmp_path):
+    digest = "sha256:" + "ab" * 32
+    row = f"ghcr.io/example/qdrant-pdf-rag-openwebui:v0.12.3-slim    {digest}\n"
+    ok = _owui_pinned(tmp_path, "# c\nghcr.io/open-webui/open-webui:v0.12.3-slim  sha256:" + "cd" * 32 + "\n" + row)
+    assert ok.returncode == 0 and ok.stdout.strip() == f"ghcr.io/example/qdrant-pdf-rag-openwebui@{digest}"
+    pending = _owui_pinned(tmp_path, row.replace(digest, "sha256:PENDING"))
+    assert pending.returncode != 0 and pending.stdout == "" and "OWUI_BUILD=1" in pending.stderr
+    assert _owui_pinned(tmp_path, "# no row\n").returncode != 0
+
+
+def test_the_lane_reference_equals_the_real_images_txt_row():
+    row = next(line.split() for line in (ROOT / "images.txt").read_text().splitlines()
+               if "/qdrant-pdf-rag-openwebui:" in line and not line.startswith("#"))
+    proc = _owui_pinned(None, None)
+    if row[1] == "sha256:PENDING":
+        assert proc.returncode != 0  # fail closed, never a second digest source
+    else:
+        assert proc.stdout.strip() == f"{row[0].split(':')[0]}@{row[1]}"

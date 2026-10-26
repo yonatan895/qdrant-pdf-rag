@@ -7,6 +7,3 @@ NODE_IMAGE=kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e
 DEX_PIN=ghcr.io/dexidp/dex@sha256:a9492ee26351ea7aaac1cb5ce3feed0e5796faea73fb39fb1a8eb649433a3912
 # Copies pulled images into the Kind node by digest (docker save of a pulled index omits blobs).
 SKOPEO_IMAGE=quay.io/skopeo/stable@sha256:0f75798d450d0cc0ea3700c79d929ae7609fb7d0e627673c14be8a484587c9b1
-# The derived Open WebUI image the e2e image-openwebui job pushed (images/openwebui/Containerfile,
-# unchanged since). The lane and the dev environment pull it by this digest; OWUI_BUILD=1 builds locally instead.
-OWUI_PUSHED=ghcr.io/yonatan895/qdrant-pdf-rag-openwebui@sha256:5329730006ef29f54784c760467363dfc3d268e5089f92ceaa8942dcb3b5d65b
