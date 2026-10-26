@@ -164,9 +164,10 @@ jobs:
 
   # Derived Open WebUI image (ADR-0008, #1070/#1074): the unmodified upstream slim
   # release plus one ownership layer (images/openwebui/Containerfile), no build
-  # contexts. Dispatch and nightly only, never pull_request. Pushed with a fixed
-  # tag and the commit SHA; the manifest digest goes to the job summary so a
-  # dedicated pin PR can record it in images.txt (this job never edits it).
+  # contexts. Dispatch and nightly only, never pull_request. Pushed with the commit
+  # SHA tag; the fixed version tag is created once and never moved. The manifest
+  # digest goes to the job summary so a dedicated pin PR can record it in
+  # images.txt (this job never edits it).
   image-openwebui:
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
     concurrency:
@@ -180,28 +181,50 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          fetch-depth: 1
+          fetch-depth: 0
           persist-credentials: false
-      - name: Build the derived image
-        run: |
-          OWNER_LC="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr 'A-Z' 'a-z')"
-          IMAGE="ghcr.io/${OWNER_LC}/qdrant-pdf-rag-openwebui"
-          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
-          docker build -f images/openwebui/Containerfile -t "$IMAGE:v0.12.3-slim" -t "$IMAGE:$GITHUB_SHA" images/openwebui
-      - name: Push to GHCR and record the manifest digest
+      - name: Build and push the derived image (commit-SHA tag; the version tag is set once, never moved)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          OWNER_LC="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr 'A-Z' 'a-z')"
+          IMAGE="ghcr.io/${OWNER_LC}/qdrant-pdf-rag-openwebui"
+          VERSION_TAG=v0.12.3-slim
           echo "$GITHUB_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-          docker push "$IMAGE:v0.12.3-slim"
-          docker push "$IMAGE:$GITHUB_SHA"
+          # Rebuilds of the same Containerfile aim at the same digest: the timestamp is the commit time
+          # of the Containerfile and BuildKit rewrites layer timestamps to it.
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct -- images/openwebui/Containerfile)"
+          export SOURCE_DATE_EPOCH
+          docker buildx create --name owui --driver docker-container --use >/dev/null
+          build() {
+            docker buildx build --builder owui -f images/openwebui/Containerfile --provenance=false --sbom=false \
+              --build-arg SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" --output "$1,rewrite-timestamp=true" images/openwebui
+          }
+          build "type=image,name=$IMAGE:$GITHUB_SHA,push=true"
           DIGEST="$(docker buildx imagetools inspect "$IMAGE:$GITHUB_SHA" --format '{{json .Manifest.Digest}}' | tr -d '"')"
           case "$DIGEST" in sha256:????????????????????????????????????????????????????????????????) ;; *) echo "no manifest digest" >&2; exit 1 ;; esac
+          # The fixed version tag is set only when it does not exist yet. An existing tag is left alone
+          # whatever it points at (a moving fixed tag is a supply-chain trap); the maintainer decides.
+          if docker buildx imagetools inspect "$IMAGE:$VERSION_TAG" >/dev/null 2>&1; then
+            EXISTING="$(docker buildx imagetools inspect "$IMAGE:$VERSION_TAG" --format '{{json .Manifest.Digest}}' | tr -d '"')"
+            TAGSTATE="left alone: $VERSION_TAG exists at $EXISTING"
+            [ "$EXISTING" = "$DIGEST" ] && TAGSTATE="left alone: $VERSION_TAG already points at this digest"
+          else
+            docker buildx imagetools create -t "$IMAGE:$VERSION_TAG" "$IMAGE@$DIGEST"
+            TAGSTATE="set: $VERSION_TAG did not exist"
+          fi
+          # Reproducibility probe: a second build of the same inputs must give the same manifest digest.
+          REPRO="no (digest differs on rebuild)"
+          build "type=oci,dest=$RUNNER_TEMP/owui-rebuild.tar"
+          REBUILT="$(tar -xOf "$RUNNER_TEMP/owui-rebuild.tar" index.json | python3 -c 'import json,sys; print(json.load(sys.stdin)["manifests"][0]["digest"])')"
+          [ "$REBUILT" = "$DIGEST" ] && REPRO="yes"
           {
             echo "### Open WebUI derived image"
             echo ""
-            echo "- tags: \`$IMAGE:v0.12.3-slim\`, \`$IMAGE:$GITHUB_SHA\`"
+            echo "- pushed tag: \`$IMAGE:$GITHUB_SHA\`"
             echo "- manifest digest (for the images.txt pin PR): \`$DIGEST\`"
+            echo "- fixed version tag: $TAGSTATE"
+            echo "- SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH, rebuild reproduces the digest: $REPRO (rebuild digest \`$REBUILT\`)"
           } >> "$GITHUB_STEP_SUMMARY"
 
   build:

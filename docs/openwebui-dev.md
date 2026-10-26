@@ -85,9 +85,9 @@ about the site's CNI beyond Kind's NetworkPolicy engine. A failed lane is a
 product defect or a lane defect; do not weaken a rule in `checks.py` to pass.
 
 The same workflow's `image-openwebui` job (dispatch and nightly only) builds
-that Containerfile and pushes `ghcr.io/<owner>/qdrant-pdf-rag-openwebui` with
-`v0.12.3-slim` and the commit SHA, and writes the manifest digest to the job
-summary; the `images.txt` pin is a separate PR. Every other e2e job that runs
+that Containerfile and pushes `ghcr.io/<owner>/qdrant-pdf-rag-openwebui` with the commit-SHA tag,
+sets the `v0.12.3-slim` tag only if it does not exist yet (never moves it), and
+writes the manifest digest, the tag outcome and a rebuild-reproducibility probe to the job summary; the `images.txt` pin is a separate PR. Every other e2e job that runs
 the operator flow sets `OPENWEBUI_ENABLED=false` (the front end is default-on
 and fails closed without site inputs); only the `openwebui` lane deploys it.
 
