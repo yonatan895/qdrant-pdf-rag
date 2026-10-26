@@ -163,12 +163,17 @@ mypy on changed files within CI's lint scope), then the tests:
 - **T1:** test modules whose imports reach a changed module, tests whose string
   literals name a changed file (path, module name, or script/asset basename),
   and the context map's evidence suites for a changed boundary.
-- **T2:** all unit modules except `test_colab` and `test_ingest_publish` (they run
-  only when selected), required when a shared test input, dependency lock or
-  Task file changes, or forced with `--t2`.
+- **T2:** all unit modules except `test_colab`, `test_ingest_publish` and the
+  harness self-test (see below; the former two run only when selected),
+  required when a shared test input, dependency lock or Task file changes, or
+  forced with `--t2`.
 - **Unmapped:** a changed `src/` or `scripts/` file with no selected test refuses
   until `--select tests/<file>` covers it; the receipt records the override.
 - **Explicit:** `qa:local -- tests/<file>[::node]` runs exactly those tests.
+- **Harness self-test:** `tests/test_local_verify.py` is never auto-selected
+  (T1 or T2) and an explicit request is refused because it spawns nested
+  `qa:local`/pytest runs with shared state; run that file with plain `pytest`
+  or CI, where those invocations are isolated.
 
 It refuses (exit 2) when the interpreter imports another tree's `src`, the run
 directory is inside the repository or RAM-backed, the Colab assignment lock is
