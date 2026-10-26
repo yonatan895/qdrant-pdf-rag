@@ -180,6 +180,172 @@ def test_rrf_fuse_tie_order_is_deterministic():
     assert [h.chunk_id for h in hits] == ["chunk-1", "chunk-2"]
 
 
+def _leading_title_point(pid: str, doc_id: str) -> models.ScoredPoint:
+    """A document's leading title section (#1001): page 0, heading == title."""
+    point = _point(pid)
+    payload = dict(point.payload or {})
+    payload.update(
+        {
+            "doc_id": doc_id,
+            "title": "z/OS BatchPipes",
+            "heading_path": "z/OS BatchPipes",
+            "page_label": "1-2",
+            "page_start": 0,
+        }
+    )
+    return point.model_copy(update={"payload": payload})
+
+
+def _no_outline_body_point(pid: str, doc_id: str, page_start: int = 40) -> models.ScoredPoint:
+    """A body window of a document with no outline: `fallback_sections` gives
+    it heading path == title too, but it starts past page 0."""
+    point = _point(pid)
+    payload = dict(point.payload or {})
+    payload.update(
+        {
+            "doc_id": doc_id,
+            "title": "z/OS BatchPipes",
+            "heading_path": "z/OS BatchPipes",
+            "page_label": str(page_start + 1),
+            "page_start": page_start,
+        }
+    )
+    return point.model_copy(update={"payload": payload})
+
+
+def _section_point(pid: str, doc_id: str) -> models.ScoredPoint:
+    point = _point(pid)
+    payload = dict(point.payload or {})
+    payload.update(
+        {
+            "doc_id": doc_id,
+            "title": "z/OS BatchPipes",
+            "heading_path": "z/OS BatchPipes > Planning for BatchPipes",
+            "page_label": "182-183",
+            "page_start": 181,
+        }
+    )
+    return point.model_copy(update={"payload": payload})
+
+
+def _tie(dense_first: models.ScoredPoint, sparse_first: models.ScoredPoint) -> list:
+    """Both rank-0 on their own leg and nothing else: equal RRF sums."""
+    return rrf_fuse([dense_first], [sparse_first], weights=(1.0, 1.0), k=60, limit=4)
+
+
+def test_rrf_fuse_exact_cross_document_tie_prefers_section_chunk():
+    """Issue #1100: each leg can rank a different chunk first, which ties the
+    two RRF sums exactly. The dense-first insertion order then let one
+    document's leading title section take rank 1 from another document's body
+    chunk. On that exact tie the section chunk wins the head; the title chunk
+    stays retrieved at rank 2 (title/cover queries keep it reachable)."""
+    title = _leading_title_point("title-section", "SA23-1376-00")
+    body = _section_point("body", "SC27-3662-02")
+    hits = rrf_fuse(
+        [title, _section_point("dense-2", "SA23-1379-02")],
+        [body, _section_point("sparse-2", "SA23-1391-01")],
+        weights=(1.0, 1.0),
+        k=60,
+        limit=4,
+    )
+    assert hits[0].score == hits[1].score
+    assert [h.chunk_id for h in hits[:2]] == ["body", "title-section"]
+
+
+def test_rrf_fuse_title_chunk_keeps_rank_one_when_its_evidence_wins():
+    """A title/cover query still answers from the title chunk: with a strictly
+    higher RRF score (both legs name it) the same competition leaves it at
+    rank 1 — the tie-break never demotes a better-scoring chunk."""
+    title = _leading_title_point("title-section", "SA23-1376-00")
+    body = _section_point("body", "SC27-3662-02")
+    hits = rrf_fuse([title], [body, title], weights=(1.0, 1.0), k=60, limit=4)
+    assert hits[0].score > hits[1].score
+    assert hits[0].chunk_id == "title-section"
+    assert hits[1].chunk_id == "body"
+
+
+def test_rrf_fuse_same_document_tie_keeps_leading_title_first():
+    """Scope guard: a tie inside one document keeps RRF order, so a
+    document-level question about that document still returns its leading
+    title section first."""
+    title = _leading_title_point("title-section", "SA23-1376-00")
+    body = _section_point("body", "SA23-1376-00")
+    hits = _tie(title, body)
+    assert hits[0].score == hits[1].score
+    assert [h.chunk_id for h in hits[:2]] == ["title-section", "body"]
+
+
+def test_rrf_fuse_no_outline_body_is_not_demoted_on_a_tie():
+    """Review R1100-B1 (synthetic J): `fallback_sections` gives a no-outline
+    document's body windows heading path == title. Such a chunk past page 0 is
+    body, not a leading section, so an exact cross-document tie leaves it at
+    rank 1 — only the page-0 leading section is demoted."""
+    no_outline = _no_outline_body_point("no-outline-body", "ZZ11-1111-01")
+    other_section = _section_point("other-section", "ZZ22-2222-02")
+    hits = _tie(no_outline, other_section)
+    assert hits[0].score == hits[1].score
+    assert [h.chunk_id for h in hits[:2]] == ["no-outline-body", "other-section"]
+
+
+def test_rrf_fuse_non_title_page_zero_chunk_is_not_demoted():
+    """Review R1100-B1 (synthetic E): a page-0 chunk whose heading is a real
+    section is not a leading title section, so a cross-document tie leaves it
+    first. The gate is the predicate, not the page number alone."""
+    page0_section = _section_point("page0-section", "ZZ22-2222-02")
+    payload = dict(page0_section.payload or {})
+    payload.update({"heading_path": "z/OS BatchPipes > Scope", "page_start": 0})
+    page0_section = page0_section.model_copy(update={"payload": payload})
+    other_section = _section_point("other-section", "ZZ33-3333-03")
+    hits = _tie(page0_section, other_section)
+    assert hits[0].score == hits[1].score
+    assert [h.chunk_id for h in hits[:2]] == ["page0-section", "other-section"]
+
+
+def test_rrf_fuse_missing_page_start_is_not_leading():
+    """Legacy points carry no physical page: the leading predicate fails
+    closed, so an exact tie keeps the stable dense-first order."""
+    title = _leading_title_point("title-section", "SA23-1376-00")
+    payload = dict(title.payload or {})
+    payload.pop("page_start")
+    legacy = title.model_copy(update={"payload": payload})
+    hits = _tie(legacy, _section_point("body", "SC27-3662-02"))
+    assert hits[0].score == hits[1].score
+    assert [h.chunk_id for h in hits[:2]] == ["title-section", "body"]
+
+
+def test_rrf_fuse_empty_title_is_never_leading_title_section():
+    """A point without a stored title cannot match the leading predicate:
+    legacy points keep their stable tie order instead of being demoted."""
+    def blank(pid: str) -> models.ScoredPoint:
+        point = _point(pid)
+        payload = dict(point.payload or {})
+        payload.update({"title": "", "heading_path": "", "page_start": 0})
+        return point.model_copy(update={"payload": payload})
+
+    hits = rrf_fuse(
+        [blank("chunk-1"), blank("chunk-2")],
+        [blank("chunk-2"), blank("chunk-1")],
+        weights=(1.0, 1.0),
+        k=2,
+        limit=2,
+    )
+    assert hits[0].score == hits[1].score
+    assert [h.chunk_id for h in hits] == ["chunk-1", "chunk-2"]
+
+
+def test_rrf_fuse_cross_document_tie_keeps_leading_title_section_retrievable():
+    """Review R1100-B1 (synthetic H): a title query whose leading title section
+    ties another document's section keeps the title chunk in the result set at
+    rank 2. Without query-intent detection the tie goes to the section chunk;
+    retrievability is preserved."""
+    title = _leading_title_point("title-section", "SA23-1376-00")
+    body = _section_point("body", "SC27-3662-02")
+    hits = _tie(title, body)
+    assert hits[0].score == hits[1].score
+    assert [h.chunk_id for h in hits[:2]] == ["body", "title-section"]
+    assert hits[1].doc_id == "SA23-1376-00"
+
+
 def test_rrf_fuse_type_boosts_promote_syntax_on_sparse_leg():
     """Issue #216 claimed path: a syntax boost multiplies the BM25 leg only.
     Without boosts the narrative dense hit wins; with syntax x3 the sparse

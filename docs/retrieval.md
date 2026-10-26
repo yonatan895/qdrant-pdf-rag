@@ -261,6 +261,46 @@ rank 0 is worth `1/3` and rank 1 `1/4`, so one leg's top hit dominated).
   legs use their own ranking text's ids. The entry must be in the prefetch
   pool (40 per leg): this ranks within the pool, it does not widen it.
   Replay records hold no chunk text, so `replay_sweep` does not apply it.
+- A document's *leading* title section does not win an exact cross-document
+  tie (issue #1100, ranking only: no setting, no payload field, no ingest or
+  rules change). The outline rules put every page before a document's first
+  kept bookmark under the document title (#1001), and that section starts at
+  the document's first page unless the pages before it are skipped by name.
+  The predicate is therefore `page_start == 0` **and** stored `heading_path`
+  equal to the stored `title`; a missing or non-integer page never counts
+  (legacy points keep their order), and a leading section that begins after
+  skipped front matter is conservatively not demoted. The page gate is
+  load-bearing: `fallback_sections` gives a
+  no-outline document's *body* windows the same `heading_path == title`
+  path, and those windows start past page 0 (2452 of the 2891 stored
+  title-headed chunks; 21 of 452 documents are entirely title-headed), so
+  the heading alone is not evidence of front matter. When the two legs each
+  rank a different chunk first, their RRF sums tie exactly (one
+  `weight/(k+1)` each) and insertion order — dense leg first — decided the
+  order, so that leading section could take rank 1 from the body chunk that
+  answers a content question. On such an exact tie the leading title section
+  is placed after the section chunks of *other* documents. A tie inside one
+  document keeps RRF order, and a strictly higher-scoring leading section is
+  never demoted, so a title/cover query that wins on either leg or ties its
+  own document keeps rank 1. A cross-document tie for a title query still
+  resolves to the section chunk: without query-intent detection that case
+  returns the title section at rank 2, not rank 1 — it stays in the result
+  set, it does not keep its champion. The entry-headed pass (#922) still
+  precedes the tie-break, and no non-tied score or order changes. Measured
+  on the captured 2026-10-24 dev pools (`colab_manuals` Qwen3-8B 4096, head
+  rules, doc-level, n=117 answer rows of the 127-row dev golden): head
+  production r@1 0.709, MRR 0.807 → r@1 0.718, MRR 0.811 against base-rules
+  0.718 / 0.812; version class r@1 0.429 → 0.571 and MRR 0.667 → 0.738
+  (base 0.571 / 0.738); r@5 holds at 0.966; `VER-08` returns the body chunk
+  `c9cae9fa-…` at rank 1 (leading chunk `f9f5306a-…` rank 2, MRR 0.5→1.0)
+  and it is the only row whose top-8 order moves. That golden has no row for
+  any of the 21 all-title documents, so the rule's behaviour on a no-outline
+  document's page-0 window is not measured; only its past-page-0 body
+  windows are excluded by construction. Replay rows carry neither headings
+  nor titles, so `replay_sweep` cannot apply the predicate; the head-arm
+  outcome was replayed through the production `rrf_fuse` by grafting the
+  stored-content census' title/heading hashes (equal hashes = equal strings)
+  into the replayed payloads.
 - The non-rerank fuse keeps only `max(limit*3, 24)` candidates — with the
   default limit of 8, 24 of up to 80 prefetched points survive to
   diversification. This truncation is the real recall knob: it has no
