@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import base64
 import os
 import re
+import ssl
 import sys
 from collections.abc import Mapping
 
@@ -162,28 +162,34 @@ _HOSTNAME = re.compile(r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?(?:\.[a-z0-9](?:[-a-z0-9
 _PROVIDER_URL = re.compile(r"https://[^\s/]+(?:/\S*)?/\.well-known/openid-configuration")
 _CLAIM = re.compile(r"[A-Za-z0-9_:/.-]+")
 _SCOPES = re.compile(r"[A-Za-z0-9_:/.-]+(?: [A-Za-z0-9_:/.-]+)*")
+# The roles-claim value the IdP issues to every signed-in user (docs/deploy.md).
+OPENWEBUI_BASELINE_ROLE = "signed-in"
 # The chart's scope set (values.yaml openwebui.oidc.scopes); AD FS sites set their own.
 OPENWEBUI_DEFAULT_SCOPES = "openid email profile groups offline_access"
 _NAME_LIST = re.compile(r"[^,\s]+(?:,[^,\s]+)*")
 _CIDR = re.compile(r"(?:[0-9]{1,3}\.){3}[0-9]{1,3}/(?:[0-9]|[12][0-9]|3[0-2])")
 
 
-_PEM_CERTS = re.compile(r"\s*(?:-----BEGIN CERTIFICATE-----\r?\n[A-Za-z0-9+/=\r\n]+"
-                        r"-----END CERTIFICATE-----\s*)+")
-_PEM_BODY = re.compile(r"-----BEGIN CERTIFICATE-----([A-Za-z0-9+/=\r\n]+)-----END CERTIFICATE-----")
+_PEM_BLOCK = re.compile(r"-----BEGIN ([A-Z0-9 ]+)-----\r?\n(.*?)-----END \1-----", re.DOTALL)
 
 
 def pem_certificates(text: str) -> bool:
-    """True when text is one or more PEM certificates and nothing else (no key,
-    no stray text), each body valid base64. Used for the optional IdP CA bundle."""
-    if _PEM_CERTS.fullmatch(text) is None:
+    """True when text is one or more PEM CERTIFICATE blocks with only whitespace
+    between them and OpenSSL loads every one (a key, stray text or a corrupted
+    body that is still valid base64 fails). Used for the optional IdP CA bundle;
+    the chart's ca-trust init step (files/openwebui/ca_trust.py) applies the same
+    rule in the pod."""
+    blocks = list(_PEM_BLOCK.finditer(text))
+    if not blocks or _PEM_BLOCK.sub("", text).strip():
         return False
-    try:
-        for body in _PEM_BODY.findall(text):
-            if not base64.b64decode("".join(body.split()), validate=True):
-                return False
-    except ValueError:
-        return False
+    for block in blocks:
+        if block.group(1) != "CERTIFICATE":
+            return False
+        try:
+            der = ssl.PEM_cert_to_DER_cert(block.group(0) + "\n")
+            ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT).load_verify_locations(cadata=der)
+        except (ValueError, ssl.SSLError):
+            return False
     return True
 
 
@@ -234,6 +240,12 @@ def openwebui_config(values: Mapping[str, str]) -> dict[str, object] | None:
         roles[key] = values.get(key, "")
         if roles[key] and _NAME_LIST.fullmatch(roles[key]) is None:
             raise ValueError(f"{key} must be a comma-separated list of role names")
+        # Revocation through the IdP needs a roles claim on every sign-in, so the
+        # IdP issues the baseline value signed-in to every user (docs/deploy.md,
+        # AD FS). It, or *, in a role list would admit every signed-in user.
+        if set(roles[key].split(",")) & {"*", OPENWEBUI_BASELINE_ROLE}:
+            raise ValueError(f"{key} must not contain * or {OPENWEBUI_BASELINE_ROLE} (the baseline "
+                             "role every signed-in user carries)")
     cidrs = [part.strip() for part in values.get("OPENWEBUI_IDP_EGRESS_CIDRS", "").split(",")
              if part.strip()]
     for cidr in cidrs:

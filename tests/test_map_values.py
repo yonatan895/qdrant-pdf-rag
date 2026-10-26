@@ -1035,6 +1035,13 @@ def test_openwebui_allow_list_proxy_image_is_rendered_with_its_verified_digest(m
     ({"OPENWEBUI_OIDC_CLIENT_ID": ""}, "inputs are missing: OPENWEBUI_OIDC_CLIENT_ID"),
     ({"OPENWEBUI_OIDC_ADMIN_ROLES": ""}, "inputs are missing: OPENWEBUI_OIDC_ADMIN_ROLES"),
     ({"OPENWEBUI_OIDC_ALLOWED_ROLES": "a,,b"}, "OPENWEBUI_OIDC_ALLOWED_ROLES must be"),
+    # Review #1083 B2: * or the AD FS baseline role would admit every signed-in user.
+    ({"OPENWEBUI_OIDC_ALLOWED_ROLES": "*"}, "OPENWEBUI_OIDC_ALLOWED_ROLES must not contain * or signed-in"),
+    ({"OPENWEBUI_OIDC_ALLOWED_ROLES": "staff,signed-in"},
+     "OPENWEBUI_OIDC_ALLOWED_ROLES must not contain * or signed-in"),
+    ({"OPENWEBUI_OIDC_ADMIN_ROLES": "signed-in"}, "OPENWEBUI_OIDC_ADMIN_ROLES must not contain * or signed-in"),
+    ({"OPENWEBUI_OIDC_ADMIN_ROLES": "docs-admins,*"},
+     "OPENWEBUI_OIDC_ADMIN_ROLES must not contain * or signed-in"),
     ({"OPENWEBUI_OIDC_GROUP_CLAIM": "group claim"}, "OPENWEBUI_OIDC_GROUP_CLAIM must be"),
     ({"OPENWEBUI_OIDC_EMAIL_CLAIM": "e mail"}, "OPENWEBUI_OIDC_EMAIL_CLAIM must be"),
     ({"OPENWEBUI_OIDC_USERNAME_CLAIM": "a,b"}, "OPENWEBUI_OIDC_USERNAME_CLAIM must be"),
@@ -1060,47 +1067,78 @@ def test_openwebui_selection_is_strict_and_writes_nothing(monkeypatch, mapper_en
     assert not out.exists()
 
 
-IDP_CA = ("-----BEGIN CERTIFICATE-----\nSURQLUNBLTE=\n-----END CERTIFICATE-----\n"
-          "-----BEGIN CERTIFICATE-----\nSURQLUNBLTI=\n-----END CERTIFICATE-----\n")
+def _real_ca(tmp_path, name):
+    """A real self-signed CA (PEM certificate text, PEM key text) from openssl."""
+    key, crt = tmp_path / f"{name}.key", tmp_path / f"{name}.crt"
+    subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+                    "-subj", f"/CN={name}", "-keyout", str(key), "-out", str(crt)],
+                   check=True, capture_output=True)
+    return crt.read_text(), key.read_text()
+
+
+def _drop_line(pem):
+    """One full 64-character body line missing: still valid base64 (review #1083 B1)."""
+    lines = pem.splitlines(keepends=True)
+    body = [i for i, line in enumerate(lines) if len(line.strip()) == 64]
+    del lines[body[len(body) // 2]]
+    return "".join(lines)
 
 
 def test_openwebui_idp_ca_bundle_is_optional_and_round_trips_byte_exact(monkeypatch, mapper_env, tmp_path):
-    """A public-CA IdP needs no bundle (no key emitted); a site bundle reaches the
-    chart byte-for-byte (both certificates, order kept)."""
+    """A public-CA IdP needs no bundle (no key emitted); a site bundle of real
+    certificates reaches the chart byte-for-byte (both certificates, order kept)."""
     _owui_env(monkeypatch, tmp_path)
     r, out = mapper_env()
     assert r.returncode == 0, r.stderr
     assert "caBundle" not in load_values(out)["openwebui"]["oidc"]
+    bundle_text = _real_ca(tmp_path, "idp-root")[0] + _real_ca(tmp_path, "idp-issuing")[0]
     bundle = tmp_path / "idp-ca.pem"
-    bundle.write_text(IDP_CA)
+    bundle.write_text(bundle_text)
     monkeypatch.setenv("OPENWEBUI_IDP_CA_FILE", str(bundle))
     r, out = mapper_env()
     assert r.returncode == 0, r.stderr
-    assert load_values(out)["openwebui"]["oidc"]["caBundle"] == IDP_CA
+    assert load_values(out)["openwebui"]["oidc"]["caBundle"] == bundle_text
 
 
-@pytest.mark.parametrize("content,message", [
-    (None, "OPENWEBUI_IDP_CA_FILE is unreadable"),
-    ("  \n", "OPENWEBUI_IDP_CA_FILE is blank"),
-    ("not a certificate\n", "OPENWEBUI_IDP_CA_FILE must hold only PEM certificates"),
-    (IDP_CA + "trailing junk\n", "OPENWEBUI_IDP_CA_FILE must hold only PEM certificates"),
-    ("-----BEGIN CERTIFICATE-----\n%%%\n-----END CERTIFICATE-----\n",
-     "OPENWEBUI_IDP_CA_FILE must hold only PEM certificates"),
-    ("-----BEGIN PRIVATE KEY-----\nSURQLUNBLTE=\n-----END PRIVATE KEY-----\n",
-     "OPENWEBUI_IDP_CA_FILE must hold only PEM certificates"),
+@pytest.mark.parametrize("case,message", [
+    ("missing", "OPENWEBUI_IDP_CA_FILE is unreadable"),
+    ("empty", "OPENWEBUI_IDP_CA_FILE is blank"),
+    ("blank", "OPENWEBUI_IDP_CA_FILE is blank"),
+    ("binary", "OPENWEBUI_IDP_CA_FILE is unreadable"),
+    ("garbage", "OPENWEBUI_IDP_CA_FILE must hold only PEM certificates"),
+    ("trailing-text", "OPENWEBUI_IDP_CA_FILE must hold only PEM certificates"),
+    ("not-base64", "OPENWEBUI_IDP_CA_FILE must hold only PEM certificates"),
+    ("private-key", "OPENWEBUI_IDP_CA_FILE must hold only PEM certificates"),
+    ("cert-plus-key", "OPENWEBUI_IDP_CA_FILE must hold only PEM certificates"),
+    ("dropped-line", "OPENWEBUI_IDP_CA_FILE must hold only PEM certificates"),
+    ("base64-not-a-cert", "OPENWEBUI_IDP_CA_FILE must hold only PEM certificates"),
 ])
 def test_openwebui_idp_ca_bundle_refuses_unreadable_blank_or_garbage(monkeypatch, mapper_env, tmp_path,
-                                                                     content, message):
+                                                                     case, message):
+    """Only certificates that load are accepted: a dropped body line keeps valid
+    base64 but no longer loads, and a key is never a CA. Refusals are fixed text."""
     _owui_env(monkeypatch, tmp_path)
+    good, key = _real_ca(tmp_path, "idp-root")
     bundle = tmp_path / "idp-ca.pem"
-    if content is not None:
-        bundle.write_text(content)
+    contents = {
+        "empty": "", "blank": "  \n", "garbage": "not a certificate\n",
+        "trailing-text": good + "trailing junk\n",
+        "not-base64": "-----BEGIN CERTIFICATE-----\n%%%\n-----END CERTIFICATE-----\n",
+        "private-key": key, "cert-plus-key": good + key, "dropped-line": _drop_line(good),
+        "base64-not-a-cert": "-----BEGIN CERTIFICATE-----\nQUJDREVGR0g=\n-----END CERTIFICATE-----\n",
+    }
+    if case == "binary":
+        bundle.write_bytes(b"\x30\x82\xff\xfe" * 16)
+    elif case != "missing":
+        bundle.write_text(contents[case])
     monkeypatch.setenv("OPENWEBUI_IDP_CA_FILE", str(bundle))
     r, out = mapper_env()
     assert r.returncode != 0 and not out.exists()
     assert message in r.stderr
-    # Fixed text: neither the path nor the content reaches the diagnostic.
-    assert str(bundle) not in r.stderr and "SURQLUNB" not in r.stderr and "junk" not in r.stderr
+    # Fixed text: neither the path nor any content reaches the diagnostic.
+    assert str(bundle) not in r.stderr and "junk" not in r.stderr and "PRIVATE" not in r.stderr
+    for line in (good.splitlines()[1], key.splitlines()[1]):
+        assert line not in r.stderr
 
 
 @pytest.mark.skipif(shutil.which("helm") is None, reason="helm is required for the round-trip")

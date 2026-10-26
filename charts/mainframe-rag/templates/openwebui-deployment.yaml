@@ -50,7 +50,7 @@ spec:
         checksum/proxy-config: {{ .Files.Get "files/openwebui/proxy.nginx.conf" | sha256sum | quote }}
         {{- if $idpCA }}
         # A changed IdP CA rolls the pod (the init step reads it at start).
-        checksum/idp-ca: {{ $idpCA | sha256sum | quote }}
+        checksum/idp-ca: {{ printf "%s%s" $idpCA (.Files.Get "files/openwebui/ca_trust.py") | sha256sum | quote }}
         {{- end }}
     spec:
       automountServiceAccountToken: false
@@ -70,9 +70,11 @@ spec:
       # through authlib's httpx client (trust_env: SSL_CERT_FILE, else certifi)
       # and refreshes through aiohttp (OpenSSL default file, also SSL_CERT_FILE);
       # requests reads REQUESTS_CA_BUNDLE. Pointing them at the IdP CA alone would
-      # drop the public stores, so this step writes OpenSSL's system bundle, the
-      # certifi bundle and the IdP CA into one file on an emptyDir the app mounts
-      # read-only. A missing input fails the step and the pod does not start.
+      # drop the public stores, so this step (files/openwebui/ca_trust.py) loads
+      # every IdP certificate and writes OpenSSL's system bundle, the certifi
+      # bundle and the IdP CA into one file on an emptyDir the app mounts
+      # read-only. A bundle that does not load fails the step with fixed text, so
+      # the pod is not Ready rather than Ready with every sign-in failing.
       initContainers:
         - name: ca-trust
           image: {{ include "mainframe-rag.image" (dict "name" "openwebui" "image" .Values.images.openwebui) }}
@@ -82,18 +84,7 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: [ALL]
-          command:
-            - python3
-            - -I
-            - -c
-            - |
-              import ssl
-              from pathlib import Path
-              import certifi
-              sources = [ssl.get_default_verify_paths().openssl_cafile, certifi.where(),
-                         "/etc/mainframe-rag/idp-ca/ca.crt"]
-              parts = [Path(s).read_text(encoding="utf-8").strip() + "\n" for s in sources]
-              Path("/etc/mainframe-rag/ca-trust/ca-bundle.crt").write_text("".join(parts), encoding="utf-8")
+          command: [python3, -I, /etc/mainframe-rag/idp-ca/ca_trust.py]
           resources:
             requests:
               cpu: 10m

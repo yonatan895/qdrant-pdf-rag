@@ -272,7 +272,7 @@ def build_values(deploy_only: bool = False) -> dict:
         if not idp_ca.strip():
             die("OPENWEBUI_IDP_CA_FILE is blank")
         if not pem_certificates(idp_ca):
-            die("OPENWEBUI_IDP_CA_FILE must hold only PEM certificates "
+            die("OPENWEBUI_IDP_CA_FILE must hold only PEM certificates that load "
                 "(-----BEGIN CERTIFICATE----- blocks, no key or other text)")
     if openwebui and idp_ca:
         typing.cast(dict, openwebui["oidc"])["caBundle"] = idp_ca

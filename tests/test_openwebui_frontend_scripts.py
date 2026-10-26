@@ -36,6 +36,7 @@ def _load(name):
 
 provision = _load("provision_pipe")
 purge = _load("purge_chats")
+ca_trust = _load("ca_trust")
 
 
 # ------------------------------------------------------------ Pipe installer
@@ -302,6 +303,243 @@ def test_installer_main_reads_the_key_from_stdin_only(owui, capsys, monkeypatch)
     out = capsys.readouterr().out
     assert out == f"docs Pipe installed: Function mainframe_rag_docs active, sha256 {PIPE_SHA}\n"
     assert KEY not in out and PIPE not in out
+
+
+# ------------------------------------------------------------ IdP CA trust step
+
+def _ca(tmp_path, name):
+    """A real self-signed CA certificate (PEM text) from openssl."""
+    _key, crt = _cert(tmp_path, name)
+    return crt.read_text()
+
+
+def _drop_line(pem):
+    """Copy-paste corruption: one full 64-character body line missing; the rest
+    is still valid base64, so only loading the certificate can tell."""
+    lines = pem.splitlines(keepends=True)
+    body = [i for i, line in enumerate(lines) if len(line.strip()) == 64]
+    assert len(body) > 3
+    del lines[body[len(body) // 2]]
+    return "".join(lines)
+
+
+@pytest.fixture
+def trust_env(tmp_path):
+    """Two synthetic public stores, the IdP CA path and the output path."""
+    public = [tmp_path / "system.pem", tmp_path / "certifi.pem"]
+    public[0].write_text(_ca(tmp_path, "public-one"))
+    public[1].write_text(_ca(tmp_path, "public-two"))
+    return public, tmp_path / "idp-ca.crt", tmp_path / "ca-bundle.crt"
+
+
+def test_ca_trust_adds_every_idp_certificate_to_the_public_stores(trust_env, tmp_path, capsys):
+    public, idp, out = trust_env
+    bundle = _ca(tmp_path, "idp-root") + _ca(tmp_path, "idp-issuing")
+    idp.write_text(bundle)
+    assert ca_trust.build(idp, public, out) == 2
+    combined = out.read_text()
+    # Public stores first and unchanged, then the IdP CA; every certificate loads.
+    assert combined.startswith(public[0].read_text().strip()) and public[1].read_text().strip() in combined
+    context = ssl.create_default_context(cafile=str(out))
+    subjects = {dict(x[0] for x in c["subject"])["commonName"] for c in context.get_ca_certs()}
+    assert subjects == {"public-one", "public-two", "idp-root", "idp-issuing"}
+
+
+@pytest.mark.parametrize("case", ["dropped-line", "private-key", "cert-plus-key", "garbage", "empty",
+                                  "blank", "trailing-text", "not-base64", "base64-not-a-cert", "binary"])
+def test_ca_trust_refuses_anything_but_loadable_certificates(trust_env, tmp_path, capsys, monkeypatch,
+                                                              case):
+    """The review counterexamples (#1083): a bundle that is not wholly loadable
+    certificates stops the init step with fixed text (pod not Ready) instead of
+    a Ready pod whose every sign-in fails; nothing is written, nothing echoed."""
+    public, idp, out = trust_env
+    good = _ca(tmp_path, "idp-root")
+    key = (tmp_path / "idp-root.key").read_text()
+    content = {
+        "dropped-line": _drop_line(good), "private-key": key, "cert-plus-key": good + key,
+        "garbage": "not a certificate\n", "empty": "", "blank": " \n\n",
+        "trailing-text": good + "trailing junk\n",
+        "not-base64": "-----BEGIN CERTIFICATE-----\n%%%\n-----END CERTIFICATE-----\n",
+        "base64-not-a-cert": "-----BEGIN CERTIFICATE-----\nQUJDREVGR0g=\n-----END CERTIFICATE-----\n",
+    }
+    if case == "binary":
+        idp.write_bytes(b"\x30\x82\xff\xfe" * 16)
+    else:
+        idp.write_text(content[case])
+    monkeypatch.setattr(ca_trust, "IDP", idp)
+    monkeypatch.setattr(ca_trust, "OUT", out)
+    monkeypatch.setattr(ca_trust, "public_stores", lambda: public)
+    assert ca_trust.main() == 1
+    captured = capsys.readouterr()
+    assert captured.err == ca_trust.REFUSAL + "\n" and captured.out == ""
+    assert not out.exists()
+    for secret in ("PRIVATE KEY", "junk", key.splitlines()[1], good.splitlines()[1]):
+        assert secret not in captured.err
+
+
+def test_ca_trust_main_reports_counts_only(trust_env, tmp_path, capsys, monkeypatch):
+    public, idp, out = trust_env
+    idp.write_text(_ca(tmp_path, "idp-root"))
+    monkeypatch.setattr(ca_trust, "IDP", idp)
+    monkeypatch.setattr(ca_trust, "OUT", out)
+    monkeypatch.setattr(ca_trust, "public_stores", lambda: public)
+    assert ca_trust.main() == 0
+    assert capsys.readouterr().out == "ca-trust: 1 IdP certificate(s) added to the public trust stores\n"
+    # An unreadable public store is a fixed failure too (the image changed).
+    monkeypatch.setattr(ca_trust, "public_stores", lambda: [tmp_path / "missing.pem"])
+    out.unlink()
+    assert ca_trust.main() == 1 and not out.exists()
+
+
+# ------------------------------------------------- in the pinned Open WebUI image
+# Skipped when Docker or the pinned image (images.txt upstream line) is absent;
+# never pulled here (about 1 GB). Run locally under the heavy lock:
+#   flock ~/.cache/agent-tmp/mainframe-rag-heavy.lock mfr-pytest <wt> tests/test_openwebui_frontend_scripts.py
+
+def _owui_image():
+    import re
+    import shutil
+    lines = (FILES.parents[3] / "images.txt").read_text(encoding="utf-8").splitlines()
+    ref, digest = next(line.split()[:2] for line in lines
+                       if line.startswith("ghcr.io/open-webui/open-webui:"))
+    assert re.fullmatch(r"sha256:[0-9a-f]{64}", digest)
+    image = f"{ref.rsplit(':', 1)[0]}@{digest}"
+    if shutil.which("docker") is None:
+        pytest.skip("docker is required")
+    probe = subprocess.run(["docker", "image", "inspect", image], capture_output=True, check=False)
+    if probe.returncode != 0:
+        pytest.skip("the pinned Open WebUI image is not present locally")
+    return image
+
+
+def _in_image(image, *args, mounts=(), env=(), timeout=240):
+    cmd = ["docker", "run", "--rm", "--network", "none", "--read-only", "--tmpfs", "/tmp",
+           "--user", "1000700000:0", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+           "-w", "/tmp"]
+    for src, dst, mode in mounts:
+        cmd += ["-v", f"{src}:{dst}:{mode}"]
+    for item in env:
+        cmd += ["-e", item]
+    return subprocess.run([*cmd, "--entrypoint", "python3", image, *args],
+                          capture_output=True, text=True, timeout=timeout, check=False)
+
+
+TLS_PROBE = """
+import asyncio, ssl, threading, http.server
+import httpx, aiohttp
+srv = http.server.HTTPServer(("127.0.0.1", 0), http.server.BaseHTTPRequestHandler)
+srv.RequestHandlerClass.do_GET = lambda h: (h.send_response(200), h.end_headers())
+srv.RequestHandlerClass.log_message = lambda *a: None
+c = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER); c.load_cert_chain("/probe/leaf.crt", "/probe/leaf.key")
+srv.socket = c.wrap_socket(srv.socket, server_side=True)
+threading.Thread(target=srv.serve_forever, daemon=True).start()
+url = f"https://localhost:{srv.server_address[1]}/"
+async def main():
+    async with httpx.AsyncClient() as h:
+        print("httpx", (await h.get(url)).status_code)
+    async with aiohttp.ClientSession() as s:
+        async with s.get(url, ssl=True) as r:
+            print("aiohttp", r.status)
+asyncio.run(main())
+"""
+
+
+def test_ca_trust_in_the_pinned_image_refuses_a_corrupt_bundle_and_makes_tls_work(tmp_path):
+    """The shipped script, as the init step runs it (read-only root, arbitrary
+    UID, no network): a dropped-line bundle exits 1 with the fixed text; a good
+    one exits 0, and httpx (sign-in) and aiohttp (refresh) then complete TLS to
+    a server whose certificate the IdP CA signed."""
+    image = _owui_image()
+    ca_dir, trust, probe = tmp_path / "idp-ca", tmp_path / "trust", tmp_path / "probe"
+    for d in (ca_dir, trust, probe):
+        d.mkdir()
+        d.chmod(0o777)
+    ca_key, ca_crt = _cert(tmp_path, "idp-root")
+    (ca_dir / "ca_trust.py").write_bytes((FILES / "ca_trust.py").read_bytes())
+    mounts = [(ca_dir, "/etc/mainframe-rag/idp-ca", "ro"), (trust, "/etc/mainframe-rag/ca-trust", "rw")]
+    script = "/etc/mainframe-rag/idp-ca/ca_trust.py"
+
+    (ca_dir / "ca.crt").write_text(_drop_line(ca_crt.read_text()))
+    bad = _in_image(image, "-I", script, mounts=mounts)
+    assert bad.returncode == 1 and ca_trust.REFUSAL in bad.stderr
+    assert not (trust / "ca-bundle.crt").exists()
+
+    (ca_dir / "ca.crt").write_text(ca_crt.read_text())
+    good = _in_image(image, "-I", script, mounts=mounts)
+    assert good.returncode == 0, good.stderr
+    assert good.stdout == "ca-trust: 1 IdP certificate(s) added to the public trust stores\n"
+
+    subprocess.run(["openssl", "req", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=localhost",
+                    "-keyout", str(probe / "leaf.key"), "-out", str(probe / "leaf.csr")],
+                   check=True, capture_output=True)
+    (probe / "ext.cnf").write_text("subjectAltName=DNS:localhost\n")
+    subprocess.run(["openssl", "x509", "-req", "-in", str(probe / "leaf.csr"), "-CA", str(ca_crt),
+                    "-CAkey", str(ca_key), "-CAcreateserial", "-days", "1",
+                    "-extfile", str(probe / "ext.cnf"), "-out", str(probe / "leaf.crt")],
+                   check=True, capture_output=True)
+    (probe / "probe.py").write_text(TLS_PROBE)
+    for f in probe.iterdir():
+        f.chmod(0o644)
+    trusted = _in_image(image, "-I", "/probe/probe.py",
+                        mounts=[(probe, "/probe", "ro"), (trust, "/etc/mainframe-rag/ca-trust", "ro")],
+                        env=["SSL_CERT_FILE=/etc/mainframe-rag/ca-trust/ca-bundle.crt"])
+    assert trusted.stdout.split() == ["httpx", "200", "aiohttp", "200"], trusted.stderr[-400:]
+    untrusted = _in_image(image, "-I", "/probe/probe.py", mounts=[(probe, "/probe", "ro")])
+    assert untrusted.returncode != 0 and "httpx 200" not in untrusted.stdout
+
+
+ROLE_PROBE = """
+import asyncio, json, sys, types
+from fastapi import HTTPException
+import open_webui.utils.oauth as o
+cfg = types.SimpleNamespace(ENABLE_OAUTH_ROLE_MANAGEMENT=True, OAUTH_ROLES_CLAIM="roles",
+                            OAUTH_ALLOWED_ROLES=["docs-user"], OAUTH_ADMIN_ROLES=["docs-admin"],
+                            DEFAULT_USER_ROLE="pending")
+async def runtime_config():
+    return cfg
+async def user_count(*a, **k):
+    return 5
+o.get_oauth_runtime_config = runtime_config
+o.Users.get_num_users = user_count
+manager = o.OAuthManager.__new__(o.OAuthManager)
+async def role(stored, claims):
+    user = types.SimpleNamespace(role=stored) if stored else None
+    try:
+        return await manager.get_user_role(user, claims)
+    except HTTPException as e:
+        return f"HTTP {e.status_code}"
+async def main():
+    cases = json.loads(sys.argv[1])
+    print(json.dumps([await role(stored, claims) for stored, claims in cases]))
+asyncio.run(main())
+"""
+
+
+def test_pinned_role_mapping_needs_a_roles_claim_on_every_sign_in(tmp_path):
+    """docs/deploy.md (AD FS) relies on this v0.12.3 behaviour of
+    utils/oauth.py get_user_role, which the sign-in callback runs for an
+    existing user on every sign-in (review #1083 B2):
+    - no roles claim: an existing user KEEPS the stored role (an admin stays
+      admin); a new user is pending;
+    - a roles claim with no allowed or admin value (the always-issued baseline
+      `signed-in` only): HTTP 403, so the sign-in is refused;
+    - the claim is recomputed: an admin left with only docs-user becomes user."""
+    image = _owui_image()
+    probe = tmp_path / "probe"
+    probe.mkdir()
+    probe.chmod(0o755)
+    (probe / "role_probe.py").write_text(ROLE_PROBE)
+    (probe / "role_probe.py").chmod(0o644)
+    cases = [["admin", {}], [None, {}], ["admin", {"roles": ["signed-in"]}],
+             ["user", {"roles": "signed-in"}], ["admin", {"roles": ["signed-in", "docs-user"]}],
+             [None, {"roles": ["signed-in", "docs-admin"]}], ["user", {"roles": ["docs-admin"]}]]
+    r = _in_image(image, "/probe/role_probe.py", json.dumps(cases),
+                  mounts=[(probe, "/probe", "ro")],
+                  env=["PYTHONPATH=/app/backend", "DATA_DIR=/tmp", "HOME=/tmp", "WEBUI_SECRET_KEY=x",
+                       "OFFLINE_MODE=true", "HF_HUB_OFFLINE=1", "VECTOR_DB=pgvector", "ENABLE_OTEL=false"])
+    assert r.returncode == 0, r.stderr[-600:]
+    assert json.loads(r.stdout.strip().splitlines()[-1]) == [
+        "admin", "pending", "HTTP 403", "HTTP 403", "user", "admin", "admin"]
 
 
 # ------------------------------------------------------------ retention purge

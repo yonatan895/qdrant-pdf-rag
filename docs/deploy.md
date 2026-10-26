@@ -1659,8 +1659,15 @@ byte-identical to a release without it (tested).
   certifi bundle and the IdP CA into one file on an emptyDir. The app mounts it read-only through
   `SSL_CERT_FILE` (httpx for sign-in, aiohttp for token refresh) and `REQUESTS_CA_BUNDLE`. The
   public stores stay trusted, and a changed CA rolls the pod. Without it, sign-in fails at the
-  server-side discovery call. A public-CA IdP needs nothing. Mapping refuses an unreadable or
-  blank file, or one that holds anything but PEM certificates.
+  server-side discovery call. A public-CA IdP needs nothing.
+  - Mapping loads every certificate with OpenSSL. It refuses an unreadable or blank file, any
+    key or other text, and a corrupted body, such as one with a line dropped, that is still
+    valid base64.
+  - The chart refuses a value that is not only certificate blocks, with fixed text. It never
+    prints the value.
+  - The init step (`files/openwebui/ca_trust.py`) loads every certificate again. If one does not
+    load, the step exits non-zero with fixed text and the pod stays not Ready, so a bad bundle
+    can never give a Ready pod whose sign-ins fail.
 - Environment, by ADR-0007 condition:
   - Offline (R2): `OFFLINE_MODE`, no version check, no community sharing, no telemetry, no pip or
     model downloads.
@@ -1689,10 +1696,15 @@ byte-identical to a release without it (tested).
   `sub`, so AD FS issues these claims through issuance rules (below).
 - Group values must be **names, not SIDs** (AD FS "Token-Groups - Unqualified Names"; in Keycloak,
   a group-membership mapper with full group path off). Groups are re-synced on every login.
-- Roles claim values: `OPENWEBUI_OIDC_ALLOWED_ROLES` lists the roles that may sign in (all
-  employees in the pilot), and `OPENWEBUI_OIDC_ADMIN_ROLES` lists the named owners who are Open
-  WebUI admins. Admins can still read chats through the database or a Function (ADR-0007 S3), so
-  keep that group small.
+- Roles claim values: `OPENWEBUI_OIDC_ALLOWED_ROLES` lists the roles whose holders become Open
+  WebUI users (all employees in the pilot). `OPENWEBUI_OIDC_ADMIN_ROLES` lists the roles of the
+  named owners who are Open WebUI admins. Admins can still read chats through the database or a
+  Function (ADR-0007 S3), so keep that group small.
+- The roles claim must be in **every** ID token. The IdP issues the baseline value `signed-in`
+  to every user it authenticates, plus the group roles. Open WebUI v0.12.3 recomputes the role
+  at every sign-in only when the claim is present: if the claim is missing, an existing user
+  keeps the stored role, so a removed admin stays admin. Neither role list may contain
+  `signed-in` or `*`; validate and the chart refuse both.
 - The team hands over: the discovery URL (`https://<idp>/.well-known/openid-configuration`), the
   client id, the client secret (it goes into the Secret, never `airgap.env`), and the IdP's IPv4
   CIDRs and port for the egress policy. If an enterprise CA issued the IdP's TLS certificate, they
@@ -1725,11 +1737,29 @@ statements come from the v0.12.3 source in the pinned image.
    - Groups: map Token-Groups - Unqualified Names to the claim named in
      `OPENWEBUI_OIDC_GROUP_CLAIM` (`groups`). These are names, not SIDs. Several values arrive as
      a list. A single string value is split on `;`.
-   - Roles: add one "Send Group Membership as a Claim" rule per AD group. The outgoing type is
-     the `OPENWEBUI_OIDC_ROLES_CLAIM` name (`roles`), and the value is a name listed in
-     `OPENWEBUI_OIDC_ALLOWED_ROLES` or `OPENWEBUI_OIDC_ADMIN_ROLES`. A single string value is split
-     on `,`. If any role is present but none matches, sign-in is refused with HTTP 403. If the
-     claim is missing, sign-in is not refused, and a new user is created `pending` with no access.
+   - Roles, baseline first. Add a custom rule that issues the baseline to every authenticated
+     user: `=> issue(Type = "roles", Value = "signed-in");`. Its `Type` is the
+     `OPENWEBUI_OIDC_ROLES_CLAIM` name. Then add one "Send Group Membership as a Claim" rule per
+     AD group, with the same outgoing type and a value listed in `OPENWEBUI_OIDC_ALLOWED_ROLES`
+     (for example `docs-user`) or in `OPENWEBUI_OIDC_ADMIN_ROLES` (for example `docs-admin`).
+     Several values arrive as a list. A single string is split on `,`. *(Confirm on the test
+     client that the custom rule's type is emitted as `roles` in the ID token.)*
+   - **What happens at each sign-in.** Open WebUI v0.12.3 recomputes the role from the claim at
+     every sign-in (`utils/oauth.py` `get_user_role`, called from the callback for an existing
+     user). The cases are pinned by a test in the pinned image:
+     - An admin role is present: the user becomes `admin`.
+     - Otherwise an allowed role is present: the user becomes `user`, so a removed admin is
+       demoted.
+     - Only `signed-in` is present: sign-in is refused with HTTP 403 and no session is issued.
+     - No claim at all: an existing user keeps the stored role, and a new user is `pending`.
+       The baseline rule exists to prevent this case.
+   - **Revocation window.** The IdP change takes effect at the next sign-in. A session that is
+     already open stays valid until it expires (`JWT_EXPIRES_IN`, 8 hours). A refused sign-in
+     does not change the stored role. That user's API keys therefore keep their old role until
+     the next successful sign-in, or with no time limit for someone who never signs in again.
+     To remove an admin at once, also demote or delete the account in the Open WebUI admin UI.
+     That takes effect on the next request, because the role is read from the database on each
+     request. If the account owns the installer's admin API key, rotate the key.
 4. **CA.** If the enterprise CA issued the AD FS TLS certificate, export that CA (root and any
    intermediate) as PEM and set `OPENWEBUI_IDP_CA_FILE`. Without it, Open WebUI cannot reach the
    discovery URL.
@@ -1743,7 +1773,11 @@ statements come from the v0.12.3 source in the pinned image.
    test account that is in an allowed-role group and in one docs group. The account must appear
    in the Open WebUI admin user list with its UPN and the `user` role, not `pending`. It must also
    be a member of that group; the chart does not create groups from the claim, so create the
-   group first. This shows that the ID token carried the e-mail, role and group claims.
+   group first. This shows that the ID token carried the e-mail, role and group claims. Then
+   prove revocation: sign in with a test account that is in no role group. It must be refused
+   (HTTP 403, an error on the sign-in page). That shows the baseline claim arrives. Next, remove
+   a test admin from the admin group, keeping it in the user group. At its next sign-in it must
+   show the `user` role.
 
 **Site procedure.**
 1. On the connected side, build the derived image from `images/openwebui/Containerfile` (upstream
