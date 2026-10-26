@@ -427,6 +427,8 @@ class TaskContractsTests(unittest.TestCase):
                     self.assertNotEqual(proc.returncode, 0)
                     self.assertIn("missing development environment", proc.stdout)
                     self.assertIn("task dev:setup", proc.stdout)
+                    if task_name == "qa:deps":
+                        self.assertIn("disposable temporary venv", proc.stdout)
                     self.assertFalse((self.root / ".venv").exists(),
                                      "verification must never create .venv")
                     self.assertEqual(self.calls(), [])

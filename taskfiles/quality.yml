@@ -1,8 +1,10 @@
 # Quality tasks — issue #402 increment A.
 #
 # Dispatch only: ruff/mypy/pytest and the offline context checker keep their
-# own validation, selection and exit semantics. No install policy lives here;
-# verification diagnoses a missing `.venv`, `task dev:setup` prepares it.
+# own validation, selection and exit semantics. No general install policy lives
+# here; verification diagnoses a missing `.venv` and `task dev:setup` prepares
+# it. The sole bounded exception is `qa:deps`: it builds and removes a
+# temporary venv from the prepared interpreter and never installs into `.venv`.
 # Included with `dir: .` from the root Taskfile so commands always run at the
 # repository root, including invocation from documented subdirectories.
 version: '3'
@@ -212,7 +214,7 @@ tasks:
       TASK_DEPS_WHEELHOUSE: '{{.WHEELHOUSE}}'
       TASK_DEPS_PY: '{{.PY}}'
     cmds:
-      - 'test -f "$TASK_DEPS_PY" || { echo "missing development environment: $TASK_DEPS_PY absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
+      - 'test -f "$TASK_DEPS_PY" || { echo "missing development environment: $TASK_DEPS_PY absent; run: task dev:setup or pass PY=<prepared python> (qa:deps builds only a disposable temporary venv)" >&2; exit 1; }'
       - '"$TASK_DEPS_PY" scripts/verify_dependency_refresh.py --profile "$TASK_DEPS_PROFILE" --wheelhouse "$TASK_DEPS_WHEELHOUSE" --python "$TASK_DEPS_PY"'
 
   sim:
