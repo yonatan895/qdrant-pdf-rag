@@ -96,6 +96,71 @@ def test_configure_logging_is_idempotent(monkeypatch):
     assert isinstance(root.handlers[0].formatter, JsonFormatter)
 
 
+_MCP_CANARY = "SECRET-CANARY-588 manual excerpt text"
+
+
+@pytest.mark.parametrize("service", ["ftp", "knowledge"])
+def test_mcp_http_launch_routes_uvicorn_crashes_through_the_json_handler(
+    service, monkeypatch, tmp_path, capsys
+):
+    """#588 (from the #989 review): both MCP HTTP entry points configure the
+    JSON handler before uvicorn starts. Seeding uvicorn's default plain-text
+    handler makes the counterexample real: a log config installed after ours,
+    or no adoption at all, prints the rendered traceback instead."""
+    import traceback
+
+    import uvicorn
+
+    from mainframe_rag.mcp import __main__ as ftp_main
+    from mainframe_rag.mcp import knowledge as knowledge_main
+
+    plain = logging.StreamHandler()
+    plain.setFormatter(logging.Formatter("%(levelname)s:%(message)s"))
+    root = logging.getLogger()
+    monkeypatch.setattr(root, "handlers", [])
+    monkeypatch.setattr(root, "level", logging.WARNING)
+    for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+        logger = logging.getLogger(name)
+        monkeypatch.setattr(logger, "handlers", [plain])
+        monkeypatch.setattr(logger, "propagate", False)
+        monkeypatch.setattr(logger, "level", logging.INFO)
+
+    def fake_run(self, sockets=None):
+        try:
+            raise RuntimeError(_MCP_CANARY)
+        except RuntimeError:
+            # Starlette's failed-lifespan path: rendered text, no exc_info.
+            logging.getLogger("uvicorn.error").error(traceback.format_exc())
+        logging.getLogger("uvicorn.access").info('127.0.0.1 - "GET /mcp HTTP/1.1" 200')
+        self.started = True
+
+    monkeypatch.setattr(uvicorn.Server, "run", fake_run)
+    if service == "ftp":
+        status = ftp_main.main(["--transport", "http", "--mock", str(tmp_path)])
+    else:
+        monkeypatch.setenv("KNOWLEDGE_API_BASE_URL", "http://127.0.0.1:1")
+        status = knowledge_main.main(["--transport", "http"])
+    assert status == 0
+    captured = capsys.readouterr().err
+    assert _MCP_CANARY not in captured and 'raise RuntimeError("' not in captured
+    lines = [line for line in captured.splitlines() if line.strip()]
+    if service == "ftp":
+        assert lines[0].startswith("mcp bridge: MOCK MODE")
+        lines = lines[1:]
+    payloads = [json.loads(line) for line in lines]
+    crashes = [p for p in payloads if p.get("logger") == "uvicorn.error"]
+    assert [p["error_type"] for p in crashes] == ["RuntimeError"]
+    assert crashes[0]["message"] == "rendered traceback withheld" and crashes[0]["trace"]
+    # The requested warning level suppresses INFO access lines, and uvicorn's
+    # loggers now reach root with no handlers of their own.
+    assert not [p for p in payloads if p.get("logger") == "uvicorn.access"]
+    error = logging.getLogger("uvicorn.error")
+    assert (error.handlers, error.propagate) == ([], True)
+    assert (error.level, logging.getLogger("uvicorn.access").level) == (
+        logging.WARNING, logging.WARNING
+    )
+
+
 def test_trace_ids_follow_the_active_span_and_caller_values_win():
     """Issue #185: a line inside a span carries its ids (joining logs to
     traces); no span means no new keys; an explicit caller value is never

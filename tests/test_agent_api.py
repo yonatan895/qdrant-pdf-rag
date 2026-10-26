@@ -1514,6 +1514,45 @@ def test_parse_answer_script_lang():
     assert res_abstain.script_lang == "jcl"
 
 
+def test_parse_answer_fence_assembly_preserves_mixed_fence_behavior():
+    """#588 (from #1056): one left-to-right pass replaces the per-match
+    `str.replace`; mixed and repeated fences keep the same extract/drop/unwrap
+    outcomes, including both copies of an identical fence."""
+    script = "```jcl\n//JOB1 JOB\n```"
+    content = (
+        "Intro text.\n\n"
+        f"{script}\n\n"
+        "Between prose.\n\n"
+        "```thought\nhidden reasoning [9]\n```\n\n"
+        "```text\nprose fence body\n```\n\n"
+        f"{script}\n\n"
+        "Tail [1]."
+    )
+    parsed = parse_answer(content, make_evidence(set()))
+    assert parsed.answer == (
+        "Intro text.\n\n\n\nBetween prose.\n\n\n\nprose fence body\n\n\n\nTail [1]."
+    )
+    # Both copies are extracted, though the old replace() removed both from
+    # the working text on its first visit.
+    assert parsed.script == "//JOB1 JOB\n\n//JOB1 JOB"
+    assert parsed.script_lang == "jcl"
+    assert "hidden reasoning" not in parsed.answer
+    assert "```" not in parsed.answer
+
+
+def test_parse_answer_repeated_fences_finish_well_under_five_seconds():
+    """#588 (from #1056): 200k repeated fences (3.8 MB) stay linear. The old
+    per-match str.replace rescan was O(n^2) (2.8 s at 512 KB); O(n) measures
+    about 0.65 s here, so the 5 s cap leaves more than 7x headroom."""
+    content = "```\nprose line\n```\n" * 200_000
+    evidence = make_evidence(set())
+    started = time.monotonic()
+    parsed = parse_answer(content, evidence)
+    elapsed = time.monotonic() - started
+    assert parsed.script is None and parsed.answer.startswith("prose line")
+    assert elapsed < 5.0, f"repeated-fence parse took {elapsed:.2f}s (expected O(n))"
+
+
 def test_build_messages_context_budgeting():
     from mainframe_rag.agent.answer import build_messages
 

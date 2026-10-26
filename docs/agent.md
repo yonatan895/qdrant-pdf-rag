@@ -1047,8 +1047,11 @@ omission). Errors log error types server-side only. **Never query text,
 prompts, evidence, responses, headers, exception bodies, or secrets, and no
 document identifiers on spans** — the JSON-log rule is unchanged by tracing.
 `configure_logging` also takes over uvicorn's `uvicorn`, `uvicorn.error` and
-`uvicorn.access` loggers (issue #989), so the agent and the feedback service
-print JSON for server lines too: the crash uvicorn logs after an unhandled
+`uvicorn.access` loggers (issue #989), so the agent, the feedback service and
+both MCP HTTP transports (`python -m mainframe_rag.mcp` and
+`python -m mainframe_rag.mcp.knowledge`) print JSON for server lines too; the
+MCP stdio transports never configure logging and keep stdout for JSON-RPC
+frames. The crash uvicorn logs after an unhandled
 fault (`"logger":"uvicorn.error"`) carries `error_type` and frame locations
 only, and so does a failed lifespan, whose traceback reaches uvicorn as
 rendered text (the formatter withholds it). An access line is
