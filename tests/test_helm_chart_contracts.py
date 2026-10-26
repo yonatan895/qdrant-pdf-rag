@@ -678,7 +678,27 @@ def test_no_workload_automounts_a_service_account_token(route):
     assert mounting == ({"oauth-proxy"} if route else set())
     if route:
         vol = next(v for v in agent["volumes"] if v["name"] == "oauth-sa-token")
-        assert any("serviceAccountToken" in s for s in vol["projected"]["sources"])
+        # The oauth-proxy's full projection: bearer token, kube root CA,
+        # optional service CA, and the pod namespace. Dropping any item
+        # (notably ca.crt or namespace) breaks its in-cluster auth.
+        assert vol["projected"]["sources"] == [
+            {"serviceAccountToken": {"path": "token", "expirationSeconds": 3607}},
+            {"configMap": {
+                "name": "kube-root-ca.crt",
+                "items": [{"key": "ca.crt", "path": "ca.crt"}],
+            }},
+            {"configMap": {
+                "name": "openshift-service-ca.crt",
+                "optional": True,
+                "items": [{"key": "service-ca.crt", "path": "service-ca.crt"}],
+            }},
+            {"downwardAPI": {
+                "items": [{
+                    "path": "namespace",
+                    "fieldRef": {"fieldPath": "metadata.namespace"},
+                }],
+            }},
+        ]
 
 
 def _assert_app_read_only_paths(pod, container_name, writable_paths):

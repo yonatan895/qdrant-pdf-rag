@@ -174,12 +174,22 @@ _AGENT_ENV = {
 }
 
 
-def _free_port() -> int:
+def _free_port(attempts: int = 20) -> int:
+    """A loopback port for the child to bind.
+
+    Only a transient bind error is retried here; the close->child-bind race
+    itself is handled by `_launch_ready`, which restarts the launch on a fresh
+    port when the child reports a bind failure (#991)."""
     import socket
 
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
+    for _ in range(attempts):
+        with socket.socket() as sock:
+            try:
+                sock.bind(("127.0.0.1", 0))
+            except OSError:
+                continue
+            return sock.getsockname()[1]
+    raise AssertionError("could not reserve a loopback port")
 
 
 def _launch(tmp_path, probe: str, extra: list[str], env: dict[str, str]):
@@ -224,31 +234,79 @@ def _assert_json_only_without_canary(output: str) -> list[dict]:
     return [payload for payload in parsed if payload is not None]
 
 
-def _serve_and_fault(tmp_path, probe: str, extra: list[str], env: dict[str, str], ready: str, fault):
-    """Start the probe app as the image starts the service, wait until
-    `ready` answers, run `fault(client)` and return (response, all output)."""
+def _stop_and_collect(proc, timeout: float = 20) -> str:
+    """Terminate the child and reap it, escalating to kill on timeout so a
+    TERM-ignoring server fails the logging assertion instead of raising
+    TimeoutExpired from cleanup."""
+    import subprocess
+
+    proc.terminate()
+    try:
+        return proc.communicate(timeout=timeout)[0]
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        return proc.communicate()[0]
+
+
+_BIND_FAILURES = ("address already in use", "error while attempting to bind")
+
+
+def _is_bind_failure(output: str) -> bool:
+    text = output.casefold()
+    return any(marker in text for marker in _BIND_FAILURES)
+
+
+def _wait_until_ready(proc, base: str, ready: str) -> None:
     import time
 
     import httpx2
 
-    proc, port = _launch(tmp_path, probe, extra, env)
+    deadline = time.monotonic() + 60
+    with httpx2.Client(base_url=base, timeout=10) as client:
+        while True:
+            try:
+                if client.get(ready).status_code == 200:
+                    return
+            except httpx2.TransportError:
+                pass
+            assert proc.poll() is None, "service exited before it was ready"
+            assert time.monotonic() < deadline, "service never became ready"
+            time.sleep(0.2)
+
+
+def _launch_ready(
+    tmp_path, probe: str, extra: list[str], env: dict[str, str], ready: str, attempts: int = 3,
+):
+    """Start the probe app and wait for readiness, retrying only a child bind
+    failure on a fresh port. `_free_port` releases the selected port before
+    the child binds it, so another process can take it in that window."""
+    for attempt in range(1, attempts + 1):
+        proc, port = _launch(tmp_path, probe, extra, env)
+        try:
+            _wait_until_ready(proc, f"http://127.0.0.1:{port}", ready)
+        except AssertionError:
+            output = _stop_and_collect(proc)
+            if attempt < attempts and _is_bind_failure(output):
+                continue
+            raise AssertionError(
+                f"service not ready (attempt {attempt}/{attempts}); "
+                f"child output:\n{output}"
+            ) from None
+        return proc, port
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
+def _serve_and_fault(tmp_path, probe: str, extra: list[str], env: dict[str, str], ready: str, fault):
+    """Start the probe app as the image starts the service, wait until
+    `ready` answers, run `fault(client)` and return (response, all output)."""
+    import httpx2
+
+    proc, port = _launch_ready(tmp_path, probe, extra, env, ready)
     try:
-        base = f"http://127.0.0.1:{port}"
-        deadline = time.monotonic() + 60
-        with httpx2.Client(base_url=base, timeout=10) as client:
-            while True:
-                try:
-                    if client.get(ready).status_code == 200:
-                        break
-                except httpx2.TransportError:
-                    pass
-                assert proc.poll() is None, "service exited before it was ready"
-                assert time.monotonic() < deadline, "service never became ready"
-                time.sleep(0.2)
+        with httpx2.Client(base_url=f"http://127.0.0.1:{port}", timeout=10) as client:
             response = fault(client)
     finally:
-        proc.terminate()
-        output, _ = proc.communicate(timeout=20)
+        output = _stop_and_collect(proc)
     return response, output
 
 
@@ -295,3 +353,85 @@ def test_lifespan_failure_after_logging_is_configured_withholds_the_traceback(tm
     assert [p["error_type"] for p in failed] == ["RuntimeError"]
     assert "_configure_then_fail" in failed[0]["trace"]
     assert any(p.get("message") == "Application startup failed. Exiting." for p in parsed)
+
+
+def test_probe_cleanup_kills_and_reaps_a_child_that_ignores_terminate():
+    """#588: cleanup escalates to kill, so a wedged server surfaces as the
+    failing logging assertion rather than a TimeoutExpired from the fixture."""
+    import signal
+    import subprocess
+    import sys
+
+    child = (
+        "import signal, time\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "print('ready', flush=True)\n"
+        "time.sleep(60)"
+    )
+    proc = subprocess.Popen(
+        [sys.executable, "-c", child],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+    )
+    try:
+        assert proc.stdout is not None
+        assert proc.stdout.readline().strip() == "ready"
+        output = _stop_and_collect(proc, timeout=1)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+    assert proc.returncode == -signal.SIGKILL
+    assert output == ""
+
+
+def test_bind_failure_retries_launch_with_a_fresh_port(tmp_path, monkeypatch):
+    """#588/#991 F-minor: the port can be taken between `_free_port` returning
+    it and the child binding it. That window is closed by retrying the whole
+    launch on a fresh port, not by retrying `sock.bind(("127.0.0.1", 0))`."""
+    import socket
+    import sys
+
+    held = socket.socket()
+    held.bind(("127.0.0.1", 0))
+    held.listen()
+    held_port = held.getsockname()[1]
+    ports: list[int] = []
+    real_free_port = _free_port
+
+    def first_port_held() -> int:
+        port = held_port if not ports else real_free_port()
+        ports.append(port)
+        return port
+
+    monkeypatch.setattr(sys.modules[__name__], "_free_port", first_port_held)
+    try:
+        response, _output = _serve_and_fault(
+            tmp_path, _AGENT_PROBE, [], _AGENT_ENV, "/livez", lambda client: client.get("/livez"),
+        )
+    finally:
+        held.close()
+    assert response.status_code == 200
+    assert len(ports) == 2
+    assert ports[0] == held_port and ports[1] != held_port
+
+
+def test_non_bind_startup_failure_fails_once_with_child_output(tmp_path, monkeypatch):
+    """#588: only a child bind failure is retried. Any other early exit keeps
+    today's immediate failure and surfaces the child output."""
+    import sys
+
+    calls = []
+    real_launch = _launch
+
+    def counted_launch(*args, **kwargs):
+        calls.append(1)
+        return real_launch(*args, **kwargs)
+
+    monkeypatch.setattr(sys.modules[__name__], "_launch", counted_launch)
+    with pytest.raises(AssertionError) as excinfo:
+        _serve_and_fault(
+            tmp_path, _LIFESPAN_PROBE, [], _AGENT_ENV, "/livez", lambda client: client.get("/livez"),
+        )
+    assert len(calls) == 1
+    assert "service not ready (attempt 1/3)" in str(excinfo.value)
+    assert "Application startup failed" in str(excinfo.value)
