@@ -1483,13 +1483,15 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
                      "head_repository_id": 84}
         run = {"id": 123, "run_attempt": 2, "event": "pull_request", "path": ".github/workflows/ci.yml",
                "head_sha": "a" * 40, "status": "completed", "repository": {"id": 42, "full_name": "synthetic/repository"},
-               "head_repository": {"id": 84}, "actor": {"id": 7}, "triggering_actor": {"login": "synthetic"}}
+               "head_repository": {"id": 84}, "actor": {"id": 7}, "triggering_actor": {"login": "synthetic"},
+               "created_at": "2026-10-26T12:00:05Z", "run_started_at": "2026-10-26T12:00:05Z"}
         job = {"id": 456, "run_id": 123, "run_attempt": 2, "head_sha": "a" * 40,
                "name": "unit (1/2)", "status": "completed", "conclusion": "success"}
         artifact = {"id": 789, "expired": False, "name": "evidence-unit-1-attempt-2",
                     "workflow_run": {"id": 123, "repository_id": 42, "head_repository_id": 84, "head_sha": "a" * 40}}
         commit = {"sha": "c" * 40, "parents": [{"sha": "b" * 40}, {"sha": "a" * 40}],
-                  "commit": {"tree": {"sha": "1" * 40}}}
+                  "commit": {"tree": {"sha": "1" * 40},
+                             "committer": {"date": "2026-10-26T12:00:00Z"}}}
         import base64
         identity = base64.b64encode(b'tests/test_example.py::actual').decode()
         xml = ('<testsuite tests="999"><testcase name="actual"><properties>'
@@ -2290,6 +2292,308 @@ class TestAcceptanceSnapshot(unittest.TestCase):
             self.assertIn('Job: https://example.invalid/jobs/9', body)
 
 
+class TestAcceptancePendingPublication(unittest.TestCase):
+    """In-progress current runs leave the check in progress; stale runs fail."""
+
+    def approved_base(self, root):
+        from scripts.acceptance import VERIFICATION_INPUTS
+        from scripts.acceptance_evidence import PRODUCERS
+
+        (root / "scripts").mkdir()
+        (root / ".github/workflows").mkdir(parents=True)
+        (root / "scripts/review_tooling.py").write_bytes(b"approved policy")
+        (root / "scripts/ci_evidence.py").write_bytes(b"approved producer")
+        for workflow in {p.workflow for p in PRODUCERS}:
+            source = (b"    name: unit (${{ matrix.shard }}/2)\n        shard: [1, 2]\n"
+                      if workflow == "ci.yml" else b"approved workflow")
+            (root / ".github/workflows" / workflow).write_bytes(source)
+        for relative in (*VERIFICATION_INPUTS, "taskfiles/quality.yml"):
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if not path.exists():
+                path.write_bytes(b"approved verifier input")
+
+        def git(*args):
+            return subprocess.check_output(["git", *args], cwd=root, text=True,
+                                           stderr=subprocess.DEVNULL).strip()
+        git("init", "-b", "main")
+        git("config", "user.name", "Synthetic Test")
+        git("config", "user.email", "synthetic@example.invalid")
+        git("add", ".")
+        git("commit", "-m", "approved base")
+        return git("rev-parse", "HEAD")
+
+    def context_archive(self, base, execution_sha="c" * 40):
+        """A valid context_check receipt; this producer emits no JUnit file."""
+        import hashlib
+        import io
+        import zipfile
+
+        _args, receipt, _xml = TestNativeEvidenceConsumer().fixture()
+        receipt.update(
+            base_sha=base, execution_sha=execution_sha, workflow_sha=execution_sha,
+            execution_parents=[base, "a" * 40],
+            job_key="check-context", job_name="check-context", lane="context_check",
+            workflow_ref=("synthetic/repository/.github/workflows/agent-context.yml"
+                          "@refs/pull/3/merge"),
+            policy_sha256=hashlib.sha256(b"approved policy").hexdigest(),
+            producer_sha256=hashlib.sha256(b"approved producer").hexdigest())
+        receipt.pop("unit_coverage")
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr("evidence.json", json.dumps(receipt))
+        raw = buffer.getvalue()
+        return raw, "sha256:" + hashlib.sha256(raw).hexdigest(), len(raw)
+
+    def scenario(self, *, run_status, started="2026-10-26T12:00:05Z", head_sha="a" * 40,
+                 job_conclusion=None, success=False, corrupt=False, twin=False,
+                 extra_active_run=False, pull_request_number=None):
+        from scripts.acceptance import publish_acceptance
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            base = self.approved_base(root)
+            repository = "synthetic/repository"
+            run = {"id": 123, "run_attempt": 2, "event": "pull_request",
+                   "path": ".github/workflows/agent-context.yml", "head_sha": head_sha,
+                   "status": run_status, "created_at": started, "run_started_at": started,
+                   "repository": {"id": 42, "full_name": repository},
+                   "head_repository": {"id": 84},
+                   "actor": {"id": 7}, "triggering_actor": {"login": "synthetic"}}
+            if pull_request_number is not None:
+                run["pull_requests"] = [{"number": pull_request_number}]
+            runs = [run]
+            if extra_active_run:
+                runs.append({
+                    "id": 124, "run_attempt": 2, "event": "pull_request",
+                    "path": ".github/workflows/ci.yml", "head_sha": "a" * 40,
+                    "status": "in_progress", "created_at": "2026-10-26T12:00:05Z",
+                    "run_started_at": "2026-10-26T12:00:05Z",
+                    "repository": {"id": 42, "full_name": repository},
+                    "head_repository": {"id": 84},
+                    "actor": {"id": 7}, "triggering_actor": {"login": "synthetic"}})
+            jobs = [] if job_conclusion is None else [
+                {"id": 456, "run_id": 123, "run_attempt": 2, "head_sha": "a" * 40,
+                 "name": "check-context", "status": "completed", "conclusion": job_conclusion}]
+            artifacts = []
+            archive = None
+            if success:
+                tested_sha = "d" * 40 if twin else "c" * 40
+                archive, digest, size = self.context_archive(base, tested_sha)
+                if corrupt:
+                    archive += b"tampered"
+                jobs = [{"id": 456, "run_id": 123, "run_attempt": 2, "head_sha": "a" * 40,
+                         "name": "check-context", "status": "completed", "conclusion": "success"}]
+                artifacts = [{"id": 789, "expired": False, "size_in_bytes": size, "digest": digest,
+                              "name": "evidence-context-attempt-2",
+                              "workflow_run": {"id": 123, "repository_id": 42,
+                                               "head_repository_id": 84, "head_sha": "a" * 40}}]
+            pr = {"number": 3, "state": "open", "mergeable": True, "draft": False,
+                  "changed_files": 1, "merge_commit_sha": "c" * 40,
+                  "head": {"sha": "a" * 40, "repo": {"id": 84}},
+                  "base": {"sha": base, "ref": "main", "repo": {
+                      "id": 42, "full_name": repository, "default_branch": "main"}}}
+            execution = {"sha": "c" * 40, "parents": [{"sha": base}, {"sha": "a" * 40}],
+                         "commit": {"tree": {"sha": "1" * 40},
+                                    "committer": {"date": "2026-10-26T12:00:00Z"}}}
+            twin_commit = {"sha": "d" * 40, "parents": [{"sha": base}, {"sha": "a" * 40}],
+                           "commit": {"tree": {"sha": "1" * 40},
+                                      "committer": {"date": "2026-10-26T11:00:00Z"}}}
+
+            class API:
+                def __init__(self):
+                    self.writes = []
+
+                def get(self, endpoint):
+                    if endpoint.endswith("git/ref/heads/main"):
+                        return {"ref": "refs/heads/main",
+                                "object": {"type": "commit", "sha": base}}
+                    if "actions/workflows/verifier-update.yml/runs?" in endpoint:
+                        return {"total_count": 0, "workflow_runs": []}
+                    if "actions/runs?event=pull_request" in endpoint:
+                        return {"total_count": len(runs), "workflow_runs": runs}
+                    if endpoint.endswith("/pulls/3"):
+                        return pr
+                    if endpoint.endswith("/pulls/3/files?per_page=100&page=1"):
+                        return [{"filename": "docs/pending.md", "status": "modified"}]
+                    if "/commits/" in endpoint:
+                        if endpoint.endswith("c" * 40):
+                            return execution
+                        if endpoint.endswith("d" * 40):
+                            return twin_commit
+                        raise AssertionError(endpoint)
+                    if endpoint.endswith("/123"):
+                        return run
+                    if endpoint.endswith("/124"):
+                        return runs[1]
+                    if endpoint.endswith("/123/attempts/2/jobs?per_page=100&page=1"):
+                        return {"total_count": len(jobs), "jobs": jobs}
+                    if endpoint.endswith("/123/artifacts?per_page=100&page=1"):
+                        return {"total_count": len(artifacts), "artifacts": artifacts}
+                    if endpoint.endswith("/124/attempts/2/jobs?per_page=100&page=1"):
+                        return {"total_count": 0, "jobs": []}
+                    if endpoint.endswith("/124/artifacts?per_page=100&page=1"):
+                        return {"total_count": 0, "artifacts": []}
+                    raise AssertionError(endpoint)
+
+                def raw(self, endpoint):
+                    assert endpoint.endswith("/artifacts/789/zip") and archive is not None
+                    return archive
+
+                def blob(self, sha, path):
+                    assert sha == "c" * 40
+                    if path == "scripts/review_tooling.py":
+                        return b"approved policy"
+                    if path == "scripts/ci_evidence.py":
+                        return b"approved producer"
+                    return (root / path).read_bytes()
+
+                def write(self, endpoint, payload, *, method):
+                    self.writes.append({"endpoint": endpoint, "method": method, **payload})
+                    return {"id": 17}
+
+            API.repository = repository
+            API.prefix = "repos/" + repository + "/"
+            api = API()
+            result = publish_acceptance(api, 3, root)
+            return result, api.writes
+
+    def patch_payloads(self, writes):
+        return [write for write in writes if write["method"] == "PATCH"]
+
+    def assert_pending_patch(self, writes):
+        patch = self.patch_payloads(writes)[0]
+        self.assertEqual(patch["status"], "in_progress")
+        self.assertNotIn("conclusion", patch)
+        return patch
+
+    def assert_failure_patch(self, writes):
+        patches = self.patch_payloads(writes)
+        self.assertEqual([patch["status"] for patch in patches], ["completed"])
+        self.assertEqual([patch["conclusion"] for patch in patches], ["failure"])
+
+    def test_in_progress_current_run_leaves_check_in_progress(self):
+        result, writes = self.scenario(run_status="in_progress")
+        self.assertFalse(result["all_prerequisites_met"])
+        self.assertTrue(result["pending"])
+        self.assertIn("context_check", result["pending_lanes"])
+        self.assertEqual(writes[0]["status"], "in_progress")
+        patch = self.assert_pending_patch(writes)
+        self.assertIn("still queued or in progress", patch["output"]["summary"])
+
+    def test_valid_active_evidence_stays_pending(self):
+        result, writes = self.scenario(run_status="in_progress", success=True)
+        self.assertTrue(result["pending"])
+        lane = next(item for item in result["native"] if item["lane"] == "context_check")
+        self.assertEqual(lane["status"], "pending")
+        self.assert_pending_patch(writes)
+
+    def test_corrupt_active_artifact_fails_unverified(self):
+        result, writes = self.scenario(run_status="in_progress", success=True, corrupt=True)
+        self.assertFalse(result["pending"])
+        lane = next(item for item in result["native"] if item["lane"] == "context_check")
+        self.assertEqual(lane["status"], "unverified")
+        self.assert_failure_patch(writes)
+
+    def test_completed_run_with_missing_lane_publishes_failure(self):
+        result, writes = self.scenario(run_status="completed")
+        self.assertFalse(result["pending"])
+        self.assertEqual(result["pending_lanes"], [])
+        self.assert_failure_patch(writes)
+
+    def test_completed_job_without_artifact_fails_while_run_is_active(self):
+        result, writes = self.scenario(run_status="in_progress", job_conclusion="success")
+        self.assertFalse(result["pending"])
+        lane = next(item for item in result["native"] if item["lane"] == "context_check")
+        self.assertEqual(lane["status"], "missing")
+        self.assert_failure_patch(writes)
+
+    def test_completed_job_without_artifact_fails_after_run_completion(self):
+        result, writes = self.scenario(run_status="completed", job_conclusion="success")
+        self.assertFalse(result["pending"])
+        self.assert_failure_patch(writes)
+
+    def test_completed_success_publishes_success(self):
+        result, writes = self.scenario(run_status="completed", success=True)
+        self.assertTrue(result["all_prerequisites_met"])
+        self.assertFalse(result["pending"])
+        lane = next(item for item in result["native"] if item["lane"] == "context_check")
+        self.assertEqual(lane["status"], "success")
+        self.assertEqual(lane["execution_sha"], "c" * 40)
+        patches = self.patch_payloads(writes)
+        self.assertEqual([patch["status"] for patch in patches], ["completed"])
+        self.assertEqual([patch["conclusion"] for patch in patches], ["success"])
+
+    def test_completed_stale_run_claiming_current_execution_fails(self):
+        result, writes = self.scenario(run_status="completed", success=True,
+                                       started="2026-10-26T11:59:00Z")
+        self.assertFalse(result["all_prerequisites_met"])
+        self.assertFalse(result["pending"])
+        lane = next(item for item in result["native"] if item["lane"] == "context_check")
+        self.assertEqual(lane["status"], "stale")
+        self.assert_failure_patch(writes)
+
+    def test_completed_stale_run_content_twin_succeeds(self):
+        result, writes = self.scenario(run_status="completed", success=True, twin=True,
+                                       started="2026-10-26T11:59:00Z")
+        self.assertTrue(result["all_prerequisites_met"])
+        lane = next(item for item in result["native"] if item["lane"] == "context_check")
+        self.assertEqual(lane["status"], "success")
+        self.assertEqual(lane["execution_sha"], "d" * 40)
+        patches = self.patch_payloads(writes)
+        self.assertEqual([patch["status"] for patch in patches], ["completed"])
+        self.assertEqual([patch["conclusion"] for patch in patches], ["success"])
+
+    def test_completed_missing_lane_blocks_while_another_run_is_active(self):
+        result, writes = self.scenario(run_status="completed", extra_active_run=True)
+        self.assertFalse(result["pending"])
+        self.assertNotIn("context_check", result["pending_lanes"])
+        self.assertIn("lint_and_types", result["pending_lanes"])
+        self.assert_failure_patch(writes)
+
+    def test_failed_lane_publishes_failure(self):
+        result, writes = self.scenario(run_status="completed", job_conclusion="failure")
+        self.assertFalse(result["pending"])
+        lane = next(item for item in result["native"] if item["lane"] == "context_check")
+        self.assertEqual(lane["status"], "failure")
+        self.assert_failure_patch(writes)
+
+    def test_completed_non_success_conclusions_fail(self):
+        for conclusion in ("neutral", "action_required"):
+            with self.subTest(conclusion=conclusion):
+                result, writes = self.scenario(run_status="completed", job_conclusion=conclusion)
+                self.assertFalse(result["pending"])
+                lane = next(item for item in result["native"] if item["lane"] == "context_check")
+                self.assertEqual(lane["status"], "unverified")
+                self.assert_failure_patch(writes)
+
+    def test_run_started_before_current_test_merge_is_not_pending(self):
+        result, writes = self.scenario(run_status="in_progress",
+                                       started="2026-10-26T11:59:00Z")
+        self.assertFalse(result["pending"])
+        self.assertEqual(result["pending_lanes"], [])
+        self.assertEqual([run["run_id"] for run in result["stale_runs"]], [123])
+        self.assert_failure_patch(writes)
+
+    def test_run_for_another_head_is_not_current(self):
+        result, writes = self.scenario(run_status="in_progress", head_sha="d" * 40)
+        self.assertFalse(result["pending"])
+        self.assertEqual(result["pending_lanes"], [])
+        self.assert_failure_patch(writes)
+
+    def test_run_for_another_pull_request_is_not_current(self):
+        result, writes = self.scenario(run_status="in_progress", pull_request_number=4)
+        self.assertFalse(result["pending"])
+        self.assertEqual(result["pending_lanes"], [])
+        self.assertEqual([run["run_id"] for run in result["stale_runs"]], [123])
+        self.assert_failure_patch(writes)
+
+    def test_run_with_matching_pull_request_is_current(self):
+        result, writes = self.scenario(run_status="in_progress", pull_request_number=3)
+        self.assertTrue(result["pending"])
+        self.assert_pending_patch(writes)
+
+
 class ReviewTemplateTests(unittest.TestCase):
     def test_template_binds_current_merge_without_approving_or_writing(self):
         import copy
@@ -2571,8 +2875,11 @@ class TestVerifierUpdateDecision(unittest.TestCase):
                     sha = endpoint.rsplit("/", 1)[1]
                     if sha in self.commits:
                         return copy.deepcopy(self.commits[sha])
-                    return {"sha": self.candidate["execution_sha"], "commit": {"tree": {"sha": "1" * 40}}, "parents": [
-                        {"sha": self.candidate["base_sha"]}, {"sha": self.candidate["head_sha"]}]}
+                    return {"sha": self.candidate["execution_sha"],
+                            "commit": {"tree": {"sha": "1" * 40},
+                                       "committer": {"date": "2026-09-25T12:00:00Z"}},
+                            "parents": [{"sha": self.candidate["base_sha"]},
+                                        {"sha": self.candidate["head_sha"]}]}
                 if "actions/runs?" in endpoint:
                     return {"total_count": 0, "workflow_runs": []}
                 raise AssertionError(endpoint)
@@ -3781,9 +4088,11 @@ class TestEvalRetrievalProducer(unittest.TestCase):
                      "head_repository_id": 84}
         run = {"id": 123, "run_attempt": 2, "event": "pull_request", "path": ".github/workflows/ci.yml",
                "head_sha": "a" * 40, "status": "completed", "repository": {"id": 42, "full_name": "synthetic/repository"},
-               "head_repository": {"id": 84}, "actor": {"id": 7}, "triggering_actor": {"login": "synthetic"}}
+               "head_repository": {"id": 84}, "actor": {"id": 7}, "triggering_actor": {"login": "synthetic"},
+               "created_at": "2026-10-26T12:00:05Z", "run_started_at": "2026-10-26T12:00:05Z"}
         commit = {"sha": "c" * 40, "parents": [{"sha": None}, {"sha": "a" * 40}],
-                  "commit": {"tree": {"sha": "1" * 40}}}
+                  "commit": {"tree": {"sha": "1" * 40},
+                             "committer": {"date": "2026-10-26T12:00:00Z"}}}
         jobs = [{"id": 456 + i, "run_id": 123, "run_attempt": 2, "head_sha": "a" * 40,
                  "name": name, "status": "completed", "conclusion": "success"}
                 for i, name in enumerate(("gate-l1", "eval-retrieval"))]
