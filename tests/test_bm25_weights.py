@@ -10,19 +10,69 @@ from pathlib import Path
 import pytest
 from scripts import fetch_bm25_weights as bm25
 
+# FastEmbed 0.9.1 validates config.json plus the 17 language files before it
+# accepts a cached Qdrant/bm25 snapshot. Keep one source of truth for every
+# synthetic cache in this module. tamil.txt is intentionally absent: 0.9.1
+# omits it from additional_files.
+_BM25_LANGUAGES = (
+    "arabic", "danish", "dutch", "english", "finnish", "french", "german",
+    "greek", "hungarian", "italian", "norwegian", "portuguese", "romanian",
+    "russian", "spanish", "swedish", "turkish",
+)
+_BM25_FILES = ("config.json", *(f"{language}.txt" for language in _BM25_LANGUAGES))
+_REVISION = "1" * 40
+
+
+def _snapshot(cache: Path) -> Path:
+    return cache / bm25.MODEL_DIR / "snapshots" / _REVISION
+
+
+def _bm25_snapshot_files(stopwords: bytes = b"the\nand\n") -> dict[str, bytes]:
+    """Synthetic snapshot contents accepted by FastEmbed's BM25 loader."""
+    files = {name: b"" for name in _BM25_FILES}
+    files["config.json"] = b"{}"
+    files["english.txt"] = stopwords
+    return files
+
+
+def _write_bm25_manifest(path: Path, files: dict[str, bytes]) -> Path:
+    entries = sorted(
+        (hashlib.sha256(content).hexdigest(), name) for name, content in files.items()
+    )
+    path.write_text("".join(f"{digest}  {name}\n" for digest, name in entries), encoding="utf-8")
+    return path
+
+
+def _write_bm25_cache(cache: Path, revision: str, files: dict[str, bytes]) -> None:
+    """Write the pinned downloader's cache layout, including trees/<revision>.json."""
+    from huggingface_hub._local_folder import _create_cachedir_tag
+    from huggingface_hub._tree_cache import TreeCacheEntry, write_tree_cache
+
+    model = cache / bm25.MODEL_DIR
+    snapshot = model / "snapshots" / revision
+    snapshot.mkdir(parents=True)
+    _create_cachedir_tag(cache)
+    (model / "blobs").mkdir()
+    (model / "refs").mkdir()
+    (model / "refs/main").write_text(revision, encoding="utf-8")
+    metadata = {}
+    tree = {}
+    for name, content in files.items():
+        blob = hashlib.sha256(content).hexdigest()
+        (model / "blobs" / blob).write_bytes(content)
+        (snapshot / name).symlink_to(f"../../blobs/{blob}")
+        metadata[f"snapshots/{revision}/{name}"] = {"size": len(content), "blob_id": blob}
+        tree[name] = TreeCacheEntry(size=len(content), blob_id=blob)
+    (model / "files_metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+    write_tree_cache(str(model), revision, tree)
+
 
 @pytest.fixture
 def preparation(tmp_path, monkeypatch):
     source = tmp_path / "source"
-    snapshot = source / bm25.MODEL_DIR / "snapshots/original"
-    snapshot.mkdir(parents=True)
-    (snapshot / "english.txt").write_bytes(b"the\nand\n")
-    refs = source / bm25.MODEL_DIR / "refs"
-    refs.mkdir()
-    (refs / "main").write_text("original")
-    manifest = tmp_path / "weights.sha256"
-    digest = hashlib.sha256(b"the\nand\n").hexdigest()
-    manifest.write_text(f"{digest}  english.txt\n")
+    files = _bm25_snapshot_files()
+    _write_bm25_cache(source, _REVISION, files)
+    manifest = _write_bm25_manifest(tmp_path / "weights.sha256", files)
     calls = []
 
     def acquire(model, stage):
@@ -62,7 +112,7 @@ def test_preparation_verifies_bytes_and_refreshes_identity_without_download(prep
 def test_invalid_cache_requires_explicit_repair(preparation, damage):
     cache, manifest, calls = preparation
     bm25.prepare(cache, manifest)
-    weight = cache / bm25.MODEL_DIR / "snapshots/original/english.txt"
+    weight = _snapshot(cache) / "english.txt"
     if damage == "corrupt":
         weight.write_bytes(b"corrupted")
     elif damage == "reference":
@@ -80,7 +130,8 @@ def test_invalid_cache_requires_explicit_repair(preparation, damage):
     assert len(calls) == 2
 
 
-@pytest.mark.parametrize("metadata", ["{corrupt", "[]", '{"snapshots/original/english.txt": 1}',
+@pytest.mark.parametrize("metadata", ["{corrupt", "[]",
+                                     json.dumps({f"snapshots/{_REVISION}/english.txt": 1}),
                                      '{"../foreign": {"size": 7, "blob_id": "a"}}'])
 def test_unloadable_metadata_fails_verification_and_explicit_preparation_repairs(preparation, metadata):
     cache, manifest, calls = preparation
@@ -100,7 +151,7 @@ def test_unloadable_metadata_fails_verification_and_explicit_preparation_repairs
 def test_staged_failure_preserves_prior_cache_then_recovers(preparation, monkeypatch, failure):
     cache, manifest, _calls = preparation
     bm25.prepare(cache, manifest)
-    (cache / bm25.MODEL_DIR / "snapshots/original/english.txt").unlink()
+    (_snapshot(cache) / "english.txt").unlink()
     before = _bytes(cache)
     acquire = bm25._acquire
 
@@ -108,7 +159,7 @@ def test_staged_failure_preserves_prior_cache_then_recovers(preparation, monkeyp
         if failure == "download":
             raise OSError("synthetic acquisition failure")
         acquire(model, stage)
-        (stage / bm25.MODEL_DIR / "snapshots/original/english.txt").write_bytes(b"wrong bytes")
+        (_snapshot(stage) / "english.txt").write_bytes(b"wrong bytes")
 
     with monkeypatch.context() as m:
         m.setattr(bm25, "_acquire", fail)
@@ -128,7 +179,8 @@ def test_failed_pin_replacement_preserves_usable_previous_cache(preparation, mon
     previous_pin.write_bytes(manifest.read_bytes())
     before = _bytes(cache)
     next_bytes = b"original replacement stopwords\n"
-    manifest.write_text(f"{hashlib.sha256(next_bytes).hexdigest()}  english.txt\n")
+    next_files = _bm25_snapshot_files(next_bytes)
+    _write_bm25_manifest(manifest, next_files)
 
     def unavailable(model, stage):
         raise OSError("acquisition unavailable")
@@ -140,10 +192,11 @@ def test_failed_pin_replacement_preserves_usable_previous_cache(preparation, mon
     assert _bytes(cache) == before
     bm25.verify_manifest(cache, previous_pin)
     # The same original acquisition fixture now represents the approved new pin.
-    source_weight = tmp_path / "source" / bm25.MODEL_DIR / "snapshots/original/english.txt"
-    source_weight.write_bytes(next_bytes)
+    source = tmp_path / "source"
+    shutil.rmtree(source)
+    _write_bm25_cache(source, _REVISION, next_files)
     bm25.prepare(cache, manifest)
-    assert (cache / bm25.MODEL_DIR / "snapshots/original/english.txt").read_bytes() == next_bytes
+    assert (_snapshot(cache) / "english.txt").read_bytes() == next_bytes
     bm25.verify_manifest(cache, manifest)
 
 
@@ -165,7 +218,7 @@ def test_verify_only_cli_never_imports_or_acquires(preparation, monkeypatch):
     before = _bytes(cache)
     bm25.main()
     assert _bytes(cache) == before and len(calls) == 1
-    (cache / bm25.MODEL_DIR / "snapshots/original/english.txt").unlink()
+    (_snapshot(cache) / "english.txt").unlink()
     with pytest.raises(SystemExit):
         bm25.main()
     assert len(calls) == 1
@@ -204,7 +257,7 @@ def test_unsupported_model_refuses_before_effects(preparation):
 
 
 @pytest.mark.parametrize("foreign", ["notes.txt", "models--Other--model/file",
-                                    "models--Qdrant--bm25/snapshots/original/foreign.txt",
+                                    f"models--Qdrant--bm25/snapshots/{_REVISION}/foreign.txt",
                                     ".locks/models--Qdrant--bm25/notes.txt"])
 def test_preparation_refuses_unowned_members_without_mutation(preparation, foreign):
     cache, manifest, calls = preparation
@@ -232,7 +285,7 @@ def test_preparation_refuses_symlink_escapes(preparation, tmp_path, location):
     else:
         selected = cache
         target = {"model": cache / bm25.MODEL_DIR,
-                  "file": cache / bm25.MODEL_DIR / "snapshots/original/english.txt"}[location]
+                  "file": _snapshot(cache) / "english.txt"}[location]
         if target.is_dir():
             shutil.rmtree(target)
             target.symlink_to(outside, target_is_directory=True)
@@ -325,35 +378,16 @@ def test_verified_snapshot_remains_loadable_after_cache_relocation(tmp_path, mon
 
     monkeypatch.setattr(socket.socket, "connect", refuse_network)
     from fastembed import SparseTextEmbedding
-    from huggingface_hub._local_folder import _create_cachedir_tag
-    from huggingface_hub._tree_cache import TreeCacheEntry, write_tree_cache
 
     cache = tmp_path / "staged cache"
-    model = cache / "models--Qdrant--bm25"
-    revision = "1" * 40
-    snapshot = model / "snapshots" / revision
-    snapshot.mkdir(parents=True)
-    _create_cachedir_tag(cache)
-    (model / "blobs").mkdir()
-    (model / "refs").mkdir()
-    (model / "refs/main").write_text(revision)
     stopwords = b"the\nand\n"
-    blob = hashlib.sha256(stopwords).hexdigest()
-    (model / "blobs" / blob).write_bytes(stopwords)
-    (snapshot / "english.txt").symlink_to(f"../../blobs/{blob}")
-    (model / "files_metadata.json").write_text(json.dumps({
-        f"snapshots/{revision}/english.txt": {"size": len(stopwords), "blob_id": blob},
-    }))
-    # Use the pinned downloader's producer: hand-building only refs/blobs
-    # previously missed its trees/<commit>.json sidecar and broke real CI.
-    write_tree_cache(str(model), revision, {
-        "english.txt": TreeCacheEntry(size=len(stopwords), blob_id=blob),
-    })
-    tree_metadata = model / "trees" / f"{revision}.json"
+    files = _bm25_snapshot_files(stopwords)
+    _write_bm25_cache(cache, _REVISION, files)
+    model = cache / bm25.MODEL_DIR
+    tree_metadata = model / "trees" / f"{_REVISION}.json"
     assert tree_metadata.is_file()
     tree_bytes = tree_metadata.read_bytes()
-    manifest = tmp_path / "original.sha256"
-    manifest.write_text(f"{hashlib.sha256(stopwords).hexdigest()}  english.txt\n")
+    manifest = _write_bm25_manifest(tmp_path / "original.sha256", files)
     bm25.verify_manifest(cache, manifest)
 
     destination = tmp_path / "published cache"
@@ -366,11 +400,14 @@ def test_verified_snapshot_remains_loadable_after_cache_relocation(tmp_path, mon
     bm25.prepare(destination, manifest)
     shutil.rmtree(cache)
     bm25.verify_manifest(destination, manifest)
-    selected = destination / "models--Qdrant--bm25/snapshots" / revision
+    selected = _snapshot(destination)
+    assert {path.name for path in selected.iterdir()} == set(files)
+    assert all((selected / name).is_symlink() for name in files)
+    assert (selected / "config.json").read_bytes() == b"{}"
     assert (selected / "english.txt").is_symlink()
     assert (selected / "english.txt").read_bytes() == stopwords
     assert (destination / "CACHEDIR.TAG").read_bytes().startswith(b"Signature: 8a477f597d28d172789f06886806bc55\n")
-    assert (destination / bm25.MODEL_DIR / "trees" / f"{revision}.json").read_bytes() == tree_bytes
+    assert (destination / bm25.MODEL_DIR / "trees" / f"{_REVISION}.json").read_bytes() == tree_bytes
     embedder = SparseTextEmbedding(
         model_name="Qdrant/bm25", cache_dir=str(destination), local_files_only=True,
     )
