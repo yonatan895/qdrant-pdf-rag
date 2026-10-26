@@ -393,6 +393,16 @@
             "rolesClaim": { "type": "string", "pattern": "^[A-Za-z0-9_:/.-]+$" },
             "allowedRoles": { "type": "string", "pattern": "^$|^[^,\\s]+(,[^,\\s]+)*$" },
             "adminRoles": { "type": "string", "pattern": "^$|^[^,\\s]+(,[^,\\s]+)*$" },
+            "scopes": {
+              "type": "string",
+              "allOf": [
+                { "pattern": "^[A-Za-z0-9_:/.-]+( [A-Za-z0-9_:/.-]+)*$" },
+                { "pattern": "(^| )openid( |$)" }
+              ],
+              "description": "Space-separated OIDC scopes (OAUTH_SCOPES); must include openid."
+            },
+            "emailClaim": { "type": "string", "pattern": "^[A-Za-z0-9_:/.-]+$" },
+            "usernameClaim": { "type": "string", "pattern": "^[A-Za-z0-9_:/.-]+$" },
             "caBundle": {
               "type": "string",
               "pattern": "^$|^\\s*(-----BEGIN CERTIFICATE-----[A-Za-z0-9+/=\\s]+-----END CERTIFICATE-----\\s*)+$",

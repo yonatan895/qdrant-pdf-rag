@@ -118,6 +118,9 @@ window, no repository-owned docs Pipe (#1072).
 {{- $shape := list -}}
 {{- if not $oidc.groupClaim }}{{ $shape = append $shape "openwebui.oidc.groupClaim" }}{{ end -}}
 {{- if not $oidc.rolesClaim }}{{ $shape = append $shape "openwebui.oidc.rolesClaim" }}{{ end -}}
+{{- if not ($oidc.emailClaim | default "" | trim) }}{{ $shape = append $shape "openwebui.oidc.emailClaim" }}{{ end -}}
+{{- if not ($oidc.usernameClaim | default "" | trim) }}{{ $shape = append $shape "openwebui.oidc.usernameClaim" }}{{ end -}}
+{{- if not ($oidc.scopes | default "" | trim) }}{{ $shape = append $shape "openwebui.oidc.scopes" }}{{ end -}}
 {{- if not $egress.port }}{{ $shape = append $shape "openwebui.idpEgress.port" }}{{ end -}}
 {{- if $shape -}}
 {{- fail (printf "Open WebUI settings must not be empty or null: %s (a null port would open the IdP egress rule to every TCP port)." (join ", " $shape)) -}}

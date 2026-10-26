@@ -161,6 +161,9 @@ OPENWEBUI_DEFAULT_STORAGE_SIZE = "10Gi"
 _HOSTNAME = re.compile(r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?(?:\.[a-z0-9](?:[-a-z0-9]*[a-z0-9])?)+")
 _PROVIDER_URL = re.compile(r"https://[^\s/]+(?:/\S*)?/\.well-known/openid-configuration")
 _CLAIM = re.compile(r"[A-Za-z0-9_:/.-]+")
+_SCOPES = re.compile(r"[A-Za-z0-9_:/.-]+(?: [A-Za-z0-9_:/.-]+)*")
+# The chart's scope set (values.yaml openwebui.oidc.scopes); AD FS sites set their own.
+OPENWEBUI_DEFAULT_SCOPES = "openid email profile groups offline_access"
 _NAME_LIST = re.compile(r"[^,\s]+(?:,[^,\s]+)*")
 _CIDR = re.compile(r"(?:[0-9]{1,3}\.){3}[0-9]{1,3}/(?:[0-9]|[12][0-9]|3[0-2])")
 
@@ -216,10 +219,16 @@ def openwebui_config(values: Mapping[str, str]) -> dict[str, object] | None:
         raise ValueError("OPENWEBUI_OIDC_CLIENT_ID must not contain spaces or commas")
     claims = {}
     for key, default in (("OPENWEBUI_OIDC_GROUP_CLAIM", "groups"),
-                         ("OPENWEBUI_OIDC_ROLES_CLAIM", "roles")):
+                         ("OPENWEBUI_OIDC_ROLES_CLAIM", "roles"),
+                         ("OPENWEBUI_OIDC_EMAIL_CLAIM", "email"),
+                         ("OPENWEBUI_OIDC_USERNAME_CLAIM", "name")):
         claims[key] = values.get(key, "") or default
         if _CLAIM.fullmatch(claims[key]) is None:
             raise ValueError(f"{key} must be a claim name (letters, digits, _ : / . -)")
+    scopes = values.get("OPENWEBUI_OIDC_SCOPES", "") or OPENWEBUI_DEFAULT_SCOPES
+    if _SCOPES.fullmatch(scopes) is None or "openid" not in scopes.split(" "):
+        raise ValueError("OPENWEBUI_OIDC_SCOPES must be space-separated scope names "
+                         "including openid")
     roles = {}
     for key in ("OPENWEBUI_OIDC_ALLOWED_ROLES", "OPENWEBUI_OIDC_ADMIN_ROLES"):
         roles[key] = values.get(key, "")
@@ -261,6 +270,9 @@ def openwebui_config(values: Mapping[str, str]) -> dict[str, object] | None:
             "rolesClaim": claims["OPENWEBUI_OIDC_ROLES_CLAIM"],
             "allowedRoles": roles["OPENWEBUI_OIDC_ALLOWED_ROLES"],
             "adminRoles": roles["OPENWEBUI_OIDC_ADMIN_ROLES"],
+            "scopes": scopes,
+            "emailClaim": claims["OPENWEBUI_OIDC_EMAIL_CLAIM"],
+            "usernameClaim": claims["OPENWEBUI_OIDC_USERNAME_CLAIM"],
         },
         "idpEgress": {"cidrs": cidrs, "port": int(raw_port)},
     }

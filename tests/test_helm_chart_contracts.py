@@ -1125,8 +1125,8 @@ OWUI_ENV_NAMES = {
     "ENABLE_TITLE_GENERATION", "ENABLE_TOOLS", "ENABLE_TOOL_SERVERS",
     "ENABLE_VERSION_UPDATE_CHECK", "ENABLE_WEB_SEARCH", "GLOBAL_LOG_LEVEL", "HF_HUB_OFFLINE",
     "HOME", "JWT_EXPIRES_IN", "OAUTH_ADMIN_ROLES", "OAUTH_ALLOWED_ROLES", "OAUTH_CLIENT_ID",
-    "OAUTH_CLIENT_SECRET", "OAUTH_GROUP_CLAIM", "OAUTH_MERGE_ACCOUNTS_BY_EMAIL",
-    "OAUTH_ROLES_CLAIM", "OAUTH_SCOPES", "OFFLINE_MODE", "OLLAMA_BASE_URL",
+    "OAUTH_CLIENT_SECRET", "OAUTH_EMAIL_CLAIM", "OAUTH_GROUP_CLAIM", "OAUTH_MERGE_ACCOUNTS_BY_EMAIL",
+    "OAUTH_ROLES_CLAIM", "OAUTH_SCOPES", "OAUTH_USERNAME_CLAIM", "OFFLINE_MODE", "OLLAMA_BASE_URL",
     "OPENID_PROVIDER_URL", "OPENID_REDIRECT_URI", "RAG_EMBEDDING_MODEL_AUTO_UPDATE",
     "RAG_EMBEDDING_MODEL_TRUST_REMOTE_CODE", "RAG_RERANKING_MODEL_AUTO_UPDATE",
     "RAG_RERANKING_MODEL_TRUST_REMOTE_CODE", "SCARF_NO_ANALYTICS", "TASK_MODEL",
@@ -1352,6 +1352,8 @@ def test_openwebui_workload_is_single_replica_restricted_and_holds_no_model_key(
         "OPENID_REDIRECT_URI": "https://docs.apps.example.internal/oauth/oidc/callback",
         "WEBUI_URL": "https://docs.apps.example.internal", "OAUTH_CLIENT_ID": "docs-frontend",
         "OAUTH_GROUP_CLAIM": "groups", "OAUTH_ROLES_CLAIM": "roles",
+        # Open WebUI v0.12.3's own defaults, pinned explicitly (config.py).
+        "OAUTH_EMAIL_CLAIM": "email", "OAUTH_USERNAME_CLAIM": "name",
         "OAUTH_ALLOWED_ROLES": "staff", "OAUTH_ADMIN_ROLES": "docs-admins,docs-owners",
         # B1 (trial/review): tools, direct integrations, per-feature permissions,
         # task model, audio, scopes, CORS and the narrow admin-only API key.
@@ -2136,6 +2138,11 @@ def test_agent_ingress_policy_admits_the_collector_scrape():
     (("idpEgress", "port"), 0), (("idpEgress", "port"), "443"),
     (("oidc", "groupClaim"), None), (("oidc", "groupClaim"), ""), (("oidc", "groupClaim"), " "),
     (("oidc", "rolesClaim"), None), (("oidc", "rolesClaim"), ""), (("oidc", "rolesClaim"), " "),
+    (("oidc", "emailClaim"), None), (("oidc", "emailClaim"), ""), (("oidc", "emailClaim"), " "),
+    (("oidc", "usernameClaim"), None), (("oidc", "usernameClaim"), ""),
+    (("oidc", "scopes"), None), (("oidc", "scopes"), ""), (("oidc", "scopes"), " "),
+    (("oidc", "scopes"), "email profile"), (("oidc", "scopes"), "openid,email"),
+    (("oidc", "scopes"), "openid  email"), (("oidc", "scopes"), "openidx email"),
 ])
 def test_openwebui_refuses_null_empty_or_blank_port_and_claims(owui_chart, path, bad):
     """B2: a null IdP port would render an egress rule open to every TCP port, and
@@ -2146,6 +2153,20 @@ def test_openwebui_refuses_null_empty_or_blank_port_and_claims(owui_chart, path,
     r = _helm_template_with_values(values, chart=owui_chart)
     assert r.returncode != 0, r.stdout[:200]
     assert "rag-openwebui" not in r.stdout
+
+
+def test_openwebui_adfs_scopes_and_identity_claims_reach_the_pod(owui_chart):
+    """AD FS (docs/deploy.md): custom claims reach the ID token only with
+    allatclaims, and the e-mail is usually upn. Scopes and the e-mail and
+    username claims are site inputs that reach Open WebUI verbatim."""
+    oidc = {**OWUI_ON["openwebui"]["oidc"], "scopes": "openid profile email allatclaims",
+            "emailClaim": "upn", "usernameClaim": "unique_name"}
+    docs = _owui(owui_chart, {"openwebui": {**OWUI_ON["openwebui"], "oidc": oidc}})
+    env = env_map(docs["Deployment", "rag-openwebui"], "openwebui")
+    assert {k: env[k]["value"] for k in ("OAUTH_SCOPES", "OAUTH_EMAIL_CLAIM", "OAUTH_USERNAME_CLAIM")} == {
+        "OAUTH_SCOPES": "openid profile email allatclaims", "OAUTH_EMAIL_CLAIM": "upn",
+        "OAUTH_USERNAME_CLAIM": "unique_name"}
+    assert set(env) == OWUI_ENV_NAMES
 
 
 def test_openwebui_networkpolicy_egress_rules_always_carry_a_port(owui_chart):

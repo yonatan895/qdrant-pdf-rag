@@ -296,11 +296,16 @@ spec:
               value: {{ printf "https://%s/oauth/oidc/callback" $o.host | quote }}
             - name: OAUTH_CLIENT_ID
               value: {{ $o.oidc.clientId | quote }}
+            # Scopes and identity claims are site inputs (values.yaml; AD FS in
+            # docs/deploy.md). v0.12.3 reads email, name, groups and roles from the
+            # ID token and calls userinfo when the e-mail or username claim is
+            # missing there (userinfo wins on a conflict).
             - name: OAUTH_SCOPES
-              # offline_access: Open WebUI refreshes the session from a refresh token;
-              # without one it deletes the session near expiry and may fall back to an
-              # older session's token (Kind trial). The IdP must permit the scope.
-              value: openid email profile groups offline_access
+              value: {{ $o.oidc.scopes | quote }}
+            - name: OAUTH_EMAIL_CLAIM
+              value: {{ $o.oidc.emailClaim | quote }}
+            - name: OAUTH_USERNAME_CLAIM
+              value: {{ $o.oidc.usernameClaim | quote }}
             - name: ENABLE_OAUTH_GROUP_MANAGEMENT
               value: "true"
             - name: ENABLE_OAUTH_GROUP_CREATION
