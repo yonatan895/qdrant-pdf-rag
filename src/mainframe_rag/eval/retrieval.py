@@ -102,11 +102,11 @@ def gain(hit_doc_id: str, hit_heading: str, hit_page: str, entry: GoldenEntry) -
 
 def ndcg_at_k(hits: Sequence[Any], entry: GoldenEntry, k: int = SEARCH_LIMIT) -> float | None:
     """Doc-level nDCG@k against the entry's own ideal (every expected doc at
-    max gain). The hit list is DEDUPLICATED per doc_id (best-ranked chunk
-    wins) — otherwise N chunks of one expected doc each contribute gain and
-    DCG can exceed IDCG (nDCG > 1), which is meaningless. Doc-level ranking
-    matches the doc-level gold. None when the entry has no expected docs
-    (abstain rows)."""
+    its achievable max gain, bounded by k). The hit list is DEDUPLICATED per
+    doc_id (best-ranked chunk wins) — otherwise N chunks of one expected doc
+    each contribute gain and DCG can exceed IDCG (nDCG > 1), which is
+    meaningless. Doc-level ranking matches the doc-level gold. None when the
+    entry has no expected docs (abstain rows)."""
     expected_n = len(entry.expected_doc_ids)
     if expected_n == 0:
         return None
@@ -130,8 +130,8 @@ def ndcg_at_k(hits: Sequence[Any], entry: GoldenEntry, k: int = SEARCH_LIMIT) ->
             break
         g = gain(doc_id, heading, page_label, entry)
         dcg += g / math.log2(rank + 1)
-    ideal_gains = [max_gain] + [1] * (expected_n - 1)
-    idcg = sum(g / math.log2(i + 1) for i, g in enumerate(ideal_gains[:k], start=1))
+    ideal_gains = [max_gain] * min(expected_n, k)
+    idcg = sum(g / math.log2(i + 1) for i, g in enumerate(ideal_gains, start=1))
     if idcg == 0.0:
         return None
     return dcg / idcg
