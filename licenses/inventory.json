@@ -161,7 +161,7 @@
       "status": "approved"
     },
     {
-      "approval_ref": "gh:yonatan895/qdrant-pdf-rag#1070 maintainer disposition 2026-10-24, relayed by the #1070 coordinator; ADR-0007 L1 (ADR-0007 pending acceptance)",
+      "approval_ref": "gh:yonatan895/qdrant-pdf-rag#1070 issuecomment-6420326886 (ADR-0008 direction, 2026-10-26) and issuecomment-6420723791 (fail-closed); ADR-0007 L1 (accepted 2026-10-24, relay gh:yonatan895/qdrant-pdf-rag#1085 issuecomment-6388915196); ADR-0008 (accepted 2026-10-26)",
       "bind": {
         "digest": "sha256:5adfb0355bbe4a5860c0ba9482cc0b40f573de3749a21a64cf4789391a14fffc",
         "images_txt": "ghcr.io/open-webui/open-webui:v0.12.3-slim"
@@ -169,7 +169,7 @@
       "class": "proprietary",
       "decision": {
         "date": "2026-10-24",
-        "disposition": "maintainer disposition 2026-10-24 (ADR-0007 pending acceptance): approved with image:openwebui (ADR-0007 L1): the upstream slim image is the factory build base of the derived image and ships only as its base layers; same branding and at most 100 users conditions",
+        "disposition": "maintainer disposition 2026-10-24 (ADR-0007 accepted 2026-10-24): approved with image:openwebui (ADR-0007 L1): the upstream slim image is the factory build base of the derived image and ships only as its base layers; same branding and at most 100 users conditions",
         "owner": "yonatan895"
       },
       "distributed_by_repo": true,
@@ -183,18 +183,18 @@
         "openwebui-image.tar (as the base layers of the derived image)"
       ],
       "spdx_basis": "upstream-project-license",
-      "status": "pending-owner-decision"
+      "status": "approved"
     },
     {
-      "approval_ref": "gh:yonatan895/qdrant-pdf-rag#1070 maintainer disposition 2026-10-24, relayed by the #1070 coordinator; ADR-0007 L1 (ADR-0007 pending acceptance)",
+      "approval_ref": "gh:yonatan895/qdrant-pdf-rag#1070 issuecomment-6420326886 (ADR-0008 direction, 2026-10-26) and issuecomment-6420723791 (fail-closed); ADR-0007 L1 (accepted 2026-10-24, relay gh:yonatan895/qdrant-pdf-rag#1085 issuecomment-6388915196); ADR-0008 (accepted 2026-10-26)",
       "bind": {
-        "digest": "sha256:PENDING",
+        "digest": "sha256:8417d47dd04505cac429c8b50c0d9452f635ae23a6c17351299b703b8eb04e04",
         "images_txt": "ghcr.io/yonatan895/qdrant-pdf-rag-openwebui:v0.12.3-slim"
       },
       "class": "proprietary",
       "decision": {
         "date": "2026-10-24",
-        "disposition": "maintainer disposition 2026-10-24 (ADR-0007 pending acceptance): Open WebUI License accepted for the optional docs front end (ADR-0007 L1) on the conditions that the branding stays unmodified (no custom name, logo, theme or injected CSS) and the deployment serves at most 100 users; the repository adds only an ownership/permission layer to the upstream slim image (#1073). Patching: the maintainer owns monthly agent-prepared upstream imports (ADR-0007 P1). Any branding change, user count above 100 or source change needs a new decision.",
+        "disposition": "maintainer disposition 2026-10-24 (ADR-0007 accepted 2026-10-24): Open WebUI License accepted for the optional docs front end (ADR-0007 L1) on the conditions that the branding stays unmodified (no custom name, logo, theme or injected CSS) and the deployment serves at most 100 users; the repository adds only an ownership/permission layer to the upstream slim image (#1073). Patching: the maintainer owns monthly agent-prepared upstream imports (ADR-0007 P1). Any branding change, user count above 100 or source change needs a new decision.",
         "owner": "yonatan895"
       },
       "distributed_by_repo": true,
@@ -208,10 +208,10 @@
         "openwebui-image.tar (when the pin is recorded and bundled)"
       ],
       "spdx_basis": "upstream-project-license",
-      "status": "pending-owner-decision"
+      "status": "approved"
     },
     {
-      "approval_ref": "gh:yonatan895/qdrant-pdf-rag#1070 maintainer disposition 2026-10-24, relayed by the #1070 coordinator; ADR-0007 E1 (ADR-0007 pending acceptance)",
+      "approval_ref": "gh:yonatan895/qdrant-pdf-rag#1070 issuecomment-6388607256 (E1 Route allow-list, 2026-10-24) and issuecomment-6420326886 (ADR-0008 direction, 2026-10-26); ADR-0007 E1 (accepted 2026-10-24); ADR-0008 (accepted 2026-10-26)",
       "bind": {
         "digest": "sha256:f5116ed4606f3eb015dd4a8e28cb9b351476dc0ad4bc6e9f93b19cec130cdf03",
         "images_txt": "docker.io/nginxinc/nginx-unprivileged:1.30.6-alpine"
@@ -219,7 +219,7 @@
       "class": "permissive",
       "decision": {
         "date": "2026-10-24",
-        "disposition": "maintainer disposition 2026-10-24 (ADR-0007 pending acceptance): nginx allow-list sidecar of the Open WebUI pod, shipped unmodified from the nginxinc/nginx-unprivileged image; only the repository's own nginx.conf is mounted",
+        "disposition": "maintainer disposition 2026-10-24 (ADR-0007 accepted 2026-10-24): nginx allow-list sidecar of the Open WebUI pod, shipped unmodified from the nginxinc/nginx-unprivileged image; only the repository's own nginx.conf is mounted",
         "owner": "yonatan895"
       },
       "distributed_by_repo": true,
@@ -1804,13 +1804,13 @@
       "wheel": "pyjwt-2.15.1-py3-none-any.whl"
     },
     {
-      "approval_ref": null,
+      "approval_ref": "gh:yonatan895/qdrant-pdf-rag#376 issuecomment-6427197208; owner decision, explicit exception to legal confirmation; withdrawn if legal confirmation is refused or the use changes",
       "binary_wheel": true,
       "class": "network-copyleft",
       "decision": {
-        "date": "2026-10-23",
-        "disposition": "election A: rely on AGPL-3.0, scoped to the ingest path",
-        "legal_confirmation": "pending",
+        "date": "2026-10-26",
+        "disposition": "owner decision 2026-10-26 (#376): election A, rely on AGPL-3.0, scoped to the ingest Job (unmodified, internal, not offered to users over a network); explicit exception to waiting for qualified legal confirmation. Withdrawn, and the item returns to pending, if legal confirmation is refused or the use changes (modification, distribution outside the organisation, network exposure of pymupdf itself); the release then needs a new decision or the Artifex commercial licence.",
+        "legal_confirmation": "waived-by-owner-decision",
         "owner": "yonatan895",
         "scope": "ingest"
       },
@@ -1826,11 +1826,11 @@
       ],
       "license_spdx": "AGPL-3.0-only OR LicenseRef-Artifex-Commercial",
       "name": "pymupdf",
-      "note": "METADATA does not state AGPL only versus or-later; recorded as only (the conservative reading). Imported by the ingest path only; the serving agent is designed not to import it (see ingest/chunk.py comment) although the wheel is installed in both images. Maintainer election 2026-10-23: AGPL-3.0, scoped to ingest. LEGAL CONFIRMATION PENDING: status stays pending-owner-decision until the qualified legal owner confirms; this is not a legal approval.",
+      "note": "METADATA does not state AGPL only versus or-later; recorded as only (the conservative reading). Imported by the ingest path only; the serving agent is designed not to import it (see ingest/chunk.py comment) although the wheel is installed in both images. Maintainer election 2026-10-23: AGPL-3.0, scoped to ingest. Maintainer owner decision 2026-10-26 (#376): approved as an explicit exception to the legal-confirmation rule, not a legal approval; withdrawn if legal confirmation is refused or the use changes.",
       "obligation": "Dual license (AGPL-3.0 or Artifex commercial). Which license governs this distribution, and any AGPL source/network-use duties or commercial-grant coverage, is an owner decision (docs/licensing.md, PyMuPDF decision record). The wheel carries only a one-line declaration, not license text.",
       "sha256": "397d6715c1f0df7548a92d0afd8ce370fc48fa47aeefac16be2bc04a16a8227f",
       "spdx_basis": "normalized-license-field",
-      "status": "pending-owner-decision",
+      "status": "approved",
       "version": "1.28.2",
       "wheel": "pymupdf-1.28.2-cp310-abi3-manylinux_2_28_x86_64.whl"
     },

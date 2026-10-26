@@ -18,6 +18,7 @@ from tests.helpers_task_artifact import copy_task_tools
 
 # Open WebUI v0.12.3-slim upstream index qualified by the #1073 Kind trial.
 BASE_DIGEST = "5adfb0355bbe4a5860c0ba9482cc0b40f573de3749a21a64cf4789391a14fffc"
+OPENWEBUI_DIGEST = "8417d47dd04505cac429c8b50c0d9452f635ae23a6c17351299b703b8eb04e04"
 
 
 def real_inventory():
@@ -58,7 +59,7 @@ def test_repository_record_reconciles_with_the_real_pins():
     problems, unresolved, state = problems_for(real_inventory())
     assert problems == []
     assert state == "absent"
-    assert unresolved, "open owner decisions must stay visible, not be dropped"
+    assert unresolved == [], "every owner decision is recorded; pymupdf is the owner-decision exception"
 
 
 def test_every_locked_runtime_wheel_has_a_record_with_its_exact_identity():
@@ -72,19 +73,23 @@ def test_every_locked_runtime_wheel_has_a_record_with_its_exact_identity():
             entry["version"], entry["wheel"], entry["sha256"])
 
 
-def test_pymupdf_election_is_recorded_but_legal_confirmation_keeps_it_unresolved():
+def test_pymupdf_election_is_recorded_as_an_owner_decision_exception_to_legal_confirmation():
     inventory = real_inventory()
     entry = next(e for e in inventory["python"] if e["name"] == "pymupdf")
-    assert entry["decision"]["owner"] == "yonatan895" and entry["decision"]["date"] == "2026-10-23"
-    assert entry["decision"]["legal_confirmation"] == "pending"
-    assert entry["status"] == "pending-owner-decision"
+    assert entry["decision"]["owner"] == "yonatan895" and entry["decision"]["date"] == "2026-10-26"
+    assert entry["decision"]["scope"] == "ingest" and entry["elected"] == "AGPL-3.0-only"
+    assert entry["decision"]["legal_confirmation"] == "waived-by-owner-decision"
+    assert entry["status"] == "approved"
+    assert "issuecomment-6427197208" in entry["approval_ref"]
+    assert "explicit exception to legal confirmation" in entry["approval_ref"]
+    assert "withdrawn if legal confirmation is refused or the use changes" in entry["approval_ref"]
+    problems, unresolved, _ = problems_for(inventory)
+    assert problems == [] and unresolved == []
+    # Withdrawal: back to pending, the item is unresolved again and release refuses it.
+    entry["status"] = "pending-owner-decision"
+    entry["decision"]["legal_confirmation"] = "pending"
     _, unresolved, _ = problems_for(inventory)
-    assert [u for u in unresolved if "pymupdf" in u]
-    # The Open WebUI records stay visible as unresolved until ADR-0007 is accepted (N5).
-    others = sorted(u for u in unresolved if "pymupdf" not in u)
-    assert [u.split(": ")[0] for u in others] == ["component:image:openwebui-base", "component:image:openwebui"]
-    assert all("LicenseRef-Open-WebUI-License (proprietary) awaits owner decision" in u for u in others)
-    assert len(unresolved) == 3
+    assert [u for u in unresolved if "pymupdf" in u] and len(unresolved) == 1
     entry["decision"] = {"owner": "yonatan895"}
     problems, _, _ = problems_for(inventory)
     assert any("decision record needs owner, date and disposition" in p for p in problems)
@@ -129,21 +134,23 @@ def test_open_webui_licence_records_the_maintainer_decision_and_its_conditions()
     }
     for cid, ref in binds.items():
         entry = by_id[cid]
-        digest = "sha256:" + BASE_DIGEST if cid == "image:openwebui-base" else "sha256:PENDING"
+        digest = "sha256:" + (BASE_DIGEST if cid == "image:openwebui-base" else OPENWEBUI_DIGEST)
         assert entry["bind"] == {"images_txt": ref, "digest": digest}, cid
         assert (entry["license_spdx"], entry["class"]) == ("LicenseRef-Open-WebUI-License", "proprietary")
-        # N5: a maintainer disposition recorded while ADR-0007 is not accepted, not an approval.
-        assert entry["status"] == "pending-owner-decision" and "ADR-0007 L1" in entry["approval_ref"]
-        assert "pending acceptance" in entry["approval_ref"]
+        # ADR-0007 (accepted 2026-10-24) L1, ADR-0008 (accepted 2026-10-26): approved, bound to the digest.
+        assert entry["status"] == "approved"
+        assert "ADR-0007 L1 (accepted 2026-10-24" in entry["approval_ref"]
+        assert "ADR-0008 (accepted 2026-10-26)" in entry["approval_ref"]
+        assert "pending acceptance" not in entry["approval_ref"]
         assert entry["decision"]["disposition"].startswith(
-            "maintainer disposition 2026-10-24 (ADR-0007 pending acceptance)")
+            "maintainer disposition 2026-10-24 (ADR-0007 accepted 2026-10-24)")
         assert entry["decision"]["owner"] == "yonatan895" and entry["decision"]["date"] == "2026-10-24"
         assert "branding" in entry["obligation"] and "100 users" in entry["obligation"]
     assert "unmodified" in by_id["image:openwebui"]["decision"]["disposition"]
     assert "100 users" in by_id["image:openwebui"]["decision"]["disposition"]
     assert "not an OSI-approved" in by_id["image:openwebui"]["license_declared"]
     problems, unresolved, _ = problems_for(inventory)
-    assert problems == [] and len([u for u in unresolved if "openwebui" in u]) == 2
+    assert problems == [] and [u for u in unresolved if "openwebui" in u] == []
     # Without the decision the restricted class cannot rest on declared metadata.
     del by_id["image:openwebui"]["decision"]
     by_id["image:openwebui"].update(status="declared", approval_ref=None)
@@ -162,7 +169,8 @@ def test_open_webui_proxy_image_is_recorded_bound_and_permissive():
     assert entry["bind"] == {"images_txt": line[0], "digest": line[1]}
     assert (entry["license_spdx"], entry["class"]) == ("BSD-2-Clause", "permissive")
     assert entry["ships_in"] == ["openwebui-proxy-image.tar (when the Open WebUI member is bundled)"]
-    assert "pending acceptance" in entry["approval_ref"]
+    assert entry["status"] == "approved" and "pending acceptance" not in entry["approval_ref"]
+    assert "ADR-0007 E1 (accepted 2026-10-24)" in entry["approval_ref"]
 
 
 def test_altered_python_notice_text_is_flagged_and_notices_carry_the_four_texts(tmp_path):
@@ -225,7 +233,7 @@ def test_class_claim_must_follow_the_recorded_expression():
 def test_approved_status_needs_a_protected_reference():
     inventory = real_inventory()
     entry = next(e for e in inventory["python"] if e["name"] == "pymupdf")
-    entry["status"] = "approved"
+    entry["approval_ref"] = None
     problems, _, _ = problems_for(inventory)
     assert any("pymupdf" in p and "approval_ref" in p for p in problems)
 
@@ -249,9 +257,47 @@ def test_wheel_without_license_text_cannot_be_declared():
 def test_release_mode_blocks_on_unresolved_decisions_and_missing_approval():
     problems, unresolved, state = problems_for(real_inventory(), release=True)
     assert state == "absent"
-    assert any("awaits owner decision" in p and "pymupdf" in p for p in problems)
+    assert unresolved == []
+    assert problems == ["release approval: no owner approval is recorded for this inventory"]
+    # Withdrawal: an unresolved item must block the release, not only the missing approval.
+    inventory = real_inventory()
+    pymupdf = next(e for e in inventory["python"] if e["name"] == "pymupdf")
+    pymupdf["status"] = "pending-owner-decision"
+    pymupdf["decision"]["legal_confirmation"] = "pending"
+    problems, unresolved, _ = problems_for(inventory, release=True)
+    assert len(unresolved) == 1
+    assert any("python:pymupdf" in p and "awaits owner decision" in p for p in problems)
+    assert any("pymupdf: legal confirmation of the recorded decision is pending" in p for p in problems)
     assert any("release approval: no owner approval" in p for p in problems)
-    assert len(unresolved) >= 1
+
+
+@pytest.mark.parametrize("value", ["refused", "Pending", "pending ", "pendng", "", None, 3])
+def test_unknown_legal_confirmation_value_fails_check(value):
+    inventory = real_inventory()
+    pymupdf = next(e for e in inventory["python"] if e["name"] == "pymupdf")
+    pymupdf["decision"]["legal_confirmation"] = value
+    problems, _, _ = problems_for(inventory)
+    assert any("pymupdf" in p and "decision.legal_confirmation must be one of pending, confirmed, "
+               "waived-by-owner-decision" in p for p in problems)
+
+
+def test_missing_legal_confirmation_on_an_elected_entry_fails_check():
+    inventory = real_inventory()
+    pymupdf = next(e for e in inventory["python"] if e["name"] == "pymupdf")
+    del pymupdf["decision"]["legal_confirmation"]
+    problems, _, _ = problems_for(inventory)
+    assert any("decision.legal_confirmation must be one of" in p for p in problems)
+    del pymupdf["decision"]
+    problems, _, _ = problems_for(inventory)
+    assert any("decision.legal_confirmation must be one of" in p for p in problems)
+
+
+@pytest.mark.parametrize("value", ["confirmed", "waived-by-owner-decision"])
+def test_recognized_legal_confirmation_values_pass(value):
+    inventory = real_inventory()
+    next(e for e in inventory["python"] if e["name"] == "pymupdf")["decision"]["legal_confirmation"] = value
+    assert problems_for(inventory, release=True)[0] == [
+        "release approval: no owner approval is recorded for this inventory"]
 
 
 def resolve_everything(inventory):
@@ -335,12 +381,12 @@ def test_changed_image_digest_requires_re_review(tree, capsys):
 
 
 def test_recording_the_open_webui_digest_requires_re_review(tree, capsys):
-    """#1074: recording the #1073 digest without updating the licence record
-    is a refusal, not a silent rebind of the pending entry."""
+    """#1074: changing the recorded digest without updating the licence record
+    is a refusal, not a silent rebind of the approved entry."""
     images = tree / "images.txt"
-    pending = "qdrant-pdf-rag-openwebui:v0.12.3-slim               sha256:PENDING"
-    assert pending in images.read_text()
-    images.write_text(images.read_text().replace(pending, pending.replace("PENDING", "d" * 64)))
+    pinned = "qdrant-pdf-rag-openwebui:v0.12.3-slim               sha256:" + OPENWEBUI_DIGEST
+    assert pinned in images.read_text()
+    images.write_text(images.read_text().replace(pinned, pinned.replace(OPENWEBUI_DIGEST, "d" * 64)))
     code, out = run(tree, capsys)
     assert code == 1 and "image:openwebui" in out and "re-review the image" in out
 
@@ -453,6 +499,8 @@ def notice_inventory(tmp_path, text=b"Synthetic MIT task license\n"):
 
 def test_notices_carry_real_texts_and_open_decisions_and_refuse_a_missing_member(tmp_path):
     inventory = notice_inventory(tmp_path)
+    # An open decision (here a withdrawn pymupdf disposition) must stay visible in the notices.
+    next(e for e in inventory["python"] if e["name"] == "pymupdf")["status"] = "pending-owner-decision"
     text = li.render_notices(REPO, inventory, tmp_path)
     assert "Apache License" in text and "Zero-Clause BSD" in text
     assert "### skills:mattpocock: LICENSE.mattpocock-skills" in text
