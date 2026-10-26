@@ -35,9 +35,9 @@ owns required verification.
 
 Parallelize large tasks across subagents: [parallel work](docs/agent-workflow.md#parallel-work).
 
-Start from value: name the quality-tracker metric (#582 completed 2026-10-01 — name the active tracker) or robustness
-item a task moves, with baseline and expected direction, or link an escaped
-defect or maintainer request. Process changes (agent instructions,
+Start from value: link the quality tracker, when one is designated, or a
+robustness item a task moves, with baseline and expected direction, or link an
+escaped defect or maintainer request. Process changes (agent instructions,
 CI/verifier/acceptance, workflow docs) need the same link and stay word-neutral
 unless an incident requires more: [process budget](docs/agent-workflow.md#process-budget).
 

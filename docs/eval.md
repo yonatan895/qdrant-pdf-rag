@@ -650,6 +650,14 @@ anywhere (`tests/test_replay.py`, `scripts/capture_pool.py`). A single live A/B
 pair is noise (dense retrieval is nondeterministic, #836): capture once, then
 compare configs on those pools with `replay_sweep`.
 
+Retained runs live under the run root documented in the
+[sandbox lane](colab-playground.md#sandbox-lane-daily-iteration); the current
+layout uses `data/pools-*.jsonl` for replay pools, `data/census-stored-*.jsonl`
+for stored-content censuses and `reports/l1-*.json` for gate/probe reports.
+These are private run artifacts: never commit them; shared reports carry ids,
+ranks, scores, hashes/counts and metrics only, never chunk or manual text, and
+private paths stay private.
+
 ```bash
 # 1. Capture (RC/gap, live Qdrant + platform embed/rerank endpoints):
 VENUE=rc sh scripts/tools/run-task.sh eval:capture-pool          # records into bundles/pools-YYYYMMDD.jsonl
