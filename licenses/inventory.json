@@ -170,7 +170,7 @@
       "kind": "image",
       "license_declared": "Open WebUI License: BSD-3-Clause terms plus clause 4 (branding must stay unaltered above 50 end users per rolling 30 days, absent written permission or an enterprise license); materials under prior licenses keep them (LICENSE_HISTORY)",
       "license_spdx": "LicenseRef-OpenWebUI",
-      "name": "Open WebUI v0.12.3 slim (frontend candidate, trial only: #1073; ADR-0007 #1080 not accepted)",
+      "name": "Open WebUI v0.12.3 slim (frontend candidate, trial only: #1073; ADR-0007 #1080 accepted, image not pinned)",
       "obligation": "Before any adoption (owner decision): keep all Open WebUI branding (name, logo, identifiers) unaltered unless one of clause 4's exceptions is recorded; ship the LICENSE text and copyright notice with the image in the bundle notices, since the image does not carry them; check LICENSE_HISTORY for earlier-licensed parts. Not in images.txt, the chart or any bundle while this decision is open.",
       "ships_in": [
         "none"
