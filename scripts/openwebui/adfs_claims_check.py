@@ -20,10 +20,12 @@ import argparse
 import base64
 import getpass
 import hashlib
+import http.client
 import http.server
 import json
 import os
 import secrets
+import signal
 import ssl
 import sys
 import time
@@ -36,15 +38,17 @@ DEFAULT_SCOPES = "openid profile email allatclaims"
 MAX_BODY = 1_000_000
 
 # Exit codes with one fixed reason each.
-EXIT_USAGE, EXIT_TLS, EXIT_NET, EXIT_CALLBACK, EXIT_TOKEN, EXIT_VALIDATE, EXIT_CLAIMS = (
-    2,
-    3,
-    4,
-    5,
-    6,
-    7,
-    8,
-)
+(
+    EXIT_USAGE,
+    EXIT_TLS,
+    EXIT_NET,
+    EXIT_CALLBACK,
+    EXIT_TOKEN,
+    EXIT_VALIDATE,
+    EXIT_CLAIMS,
+    EXIT_INTERNAL,
+) = (2, 3, 4, 5, 6, 7, 8, 9)
+SOCKET_TIMEOUT = 3.0  # per accepted callback connection
 
 
 class CheckError(Exception):
@@ -102,7 +106,7 @@ def decode_jwt_payload(token: str) -> dict[str, Any]:
     try:
         seg = parts[1] + "=" * (-len(parts[1]) % 4)
         payload = json.loads(base64.urlsafe_b64decode(seg.encode("ascii")))
-    except ValueError, UnicodeError:
+    except (ValueError, UnicodeError):
         raise CheckError(EXIT_VALIDATE, "ID token payload is not base64url JSON") from None
     if not isinstance(payload, dict):
         raise CheckError(EXIT_VALIDATE, "ID token payload is not a JSON object")
@@ -141,14 +145,15 @@ def validate_claims(
 def role_values(value: Any) -> tuple[str, int, list[str]]:
     """Return (JSON type name, value count, values) for a roles claim.
 
-    A string is split on ',' and ';' (Open WebUI splits one on ','; the group
-    claim on ';'), so the count is what a consumer could see.
+    Open WebUI v0.12.3 reads the roles claim as a JSON list, or as a single string
+    that it splits on ',' only (docs/deploy.md, "Register Open WebUI with AD FS").
+    Anything else yields no roles; ';' is NOT a separator for roles.
     """
     if isinstance(value, list):
         items = [v for v in value if isinstance(v, str)]
         return "list", len(value), items
     if isinstance(value, str):
-        items = [v.strip() for v in value.replace(";", ",").split(",") if v.strip()]
+        items = [v for v in value.split(",") if v]
         return "string", len(items), items
     kind = {bool: "boolean", int: "number", float: "number", dict: "object"}.get(
         type(value), "null" if value is None else "other"
@@ -162,7 +167,7 @@ def analyse(
     roles_claim: str,
     email_claim: str,
     username_claim: str,
-    baseline: str | None,
+    baseline: str,
     expect_baseline_only: bool,
 ) -> tuple[list[str], list[str]]:
     """Return (report lines, failure reasons). Lines carry no claim values."""
@@ -174,21 +179,21 @@ def analyse(
         lines.append(f"roles claim '{roles_claim}': present, type={kind}, count={count}")
         if kind not in ("list", "string") or count == 0:
             failures.append("roles claim is empty or not a list or string")
-        if baseline is not None:
-            has = baseline in items
-            lines.append(f"baseline role present: {'yes' if has else 'no'}")
-            if not has:
-                failures.append("baseline role is missing from the roles claim")
-            elif expect_baseline_only:
-                if count != 1:
-                    failures.append("roles claim has more than the baseline value")
-            elif count == 1:
-                failures.append("roles claim carries only the baseline value")
+        if isinstance(claims[roles_claim], list) and len(items) != count:
+            failures.append("roles list holds a value that is not a string")
+        has = baseline in items
+        lines.append(f"baseline role present: {'yes' if has else 'no'}")
+        if not has:
+            failures.append("baseline role is missing from the roles claim")
+        elif expect_baseline_only:
+            if count != 1:
+                failures.append("roles claim has more than the baseline value")
+        elif count == 1:
+            failures.append("roles claim carries only the baseline value")
     else:
         lines.append(f"roles claim '{roles_claim}': absent")
         failures.append("roles claim is absent from the ID token")
-        if baseline is not None:
-            lines.append("baseline role present: no")
+        lines.append("baseline role present: no")
 
     for label, name in (("email claim", email_claim), ("username claim", username_claim)):
         present = isinstance(claims.get(name), str) and bool(claims.get(name))
@@ -210,7 +215,7 @@ def make_ssl_context(ca_path: str) -> ssl.SSLContext:
         ctx.verify_mode = ssl.CERT_REQUIRED
         ctx.check_hostname = True
         ctx.load_verify_locations(cafile=ca_path)
-    except OSError, ssl.SSLError:
+    except (OSError, ssl.SSLError):
         raise CheckError(EXIT_USAGE, "CA bundle is unreadable or not PEM") from None
     return ctx
 
@@ -237,7 +242,7 @@ def _http_json(
             raw = resp.read(MAX_BODY + 1)
     except urllib.error.HTTPError:
         raise CheckError(fail_code, f"{what} returned an HTTP error status") from None
-    except (urllib.error.URLError, ssl.SSLError, OSError) as exc:
+    except (urllib.error.URLError, ssl.SSLError, OSError, http.client.HTTPException) as exc:
         reason = getattr(exc, "reason", exc)
         if isinstance(reason, ssl.SSLCertVerificationError) or isinstance(
             exc, ssl.SSLCertVerificationError
@@ -291,10 +296,15 @@ def wait_for_callback(port: int, timeout: float) -> dict[str, str]:
 
     class Handler(_Callback):
         result: dict[str, str] | None = None
+        timeout = SOCKET_TIMEOUT  # an idle connection must not stall the listener
+
+    class Server(http.server.HTTPServer):
+        def handle_error(self, request: Any, client_address: Any) -> None:
+            return  # the default prints a traceback
 
     deadline = time.monotonic() + timeout
     try:
-        srv = http.server.HTTPServer(("127.0.0.1", port), Handler)
+        srv = Server(("127.0.0.1", port), Handler)
     except OSError:
         raise CheckError(EXIT_CALLBACK, "cannot listen on the local callback port") from None
     with srv:
@@ -324,9 +334,21 @@ def read_secret(path: str | None) -> str:
 # --------------------------------------------------------------------- flow
 
 
+def arm_total_timeout(seconds: float) -> None:
+    """Bound the whole run, including slow-drip responses that defeat socket timeouts."""
+
+    def expired(signum: int, frame: Any) -> None:
+        raise CheckError(EXIT_NET, "the run exceeded the overall time limit")
+
+    if hasattr(signal, "setitimer"):
+        signal.signal(signal.SIGALRM, expired)
+        signal.setitimer(signal.ITIMER_REAL, seconds)
+
+
 def run_flow(args: argparse.Namespace) -> dict[str, Any]:
     ctx = make_ssl_context(args.ca_bundle)
     secret = read_secret(args.client_secret_file)
+    arm_total_timeout(args.total_timeout)
     disc = fetch_discovery(args.issuer, ctx, args.http_timeout)
     print("discovery: ok")
 
@@ -468,8 +490,8 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     p.add_argument(
         "--baseline-role",
-        default=env("ADFS_BASELINE_ROLE"),
-        help="baseline role value; only yes/no is printed (ADFS_BASELINE_ROLE)",
+        default=env("ADFS_BASELINE_ROLE", "signed-in"),
+        help="baseline role value, default signed-in; only yes/no is printed (ADFS_BASELINE_ROLE)",
     )
     p.add_argument(
         "--expect-baseline-only",
@@ -485,7 +507,13 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="host in the registered redirect URI (default localhost)",
     )
     p.add_argument("--timeout", type=float, default=180.0, help="seconds to wait for the callback")
-    p.add_argument("--http-timeout", type=float, default=15.0)
+    p.add_argument("--http-timeout", type=float, default=15.0, help="per-request socket timeout")
+    p.add_argument(
+        "--total-timeout",
+        type=float,
+        default=float(env("ADFS_TOTAL_TIMEOUT", "300") or 300),
+        help="seconds allowed for the whole flow after the secret is read (default 300)",
+    )
     p.add_argument(
         "--decode-only", metavar="FILE", help="analyse a saved ID token file offline; no network"
     )
@@ -502,18 +530,23 @@ def main(argv: list[str] | None = None) -> int:
             missing = [n for n in ("issuer", "client_id", "ca_bundle") if not getattr(args, n)]
             if missing or not args.issuer.startswith("https://"):
                 raise CheckError(EXIT_USAGE, "issuer (https), client ID and CA bundle are required")
+            if not args.baseline_role:
+                raise CheckError(EXIT_USAGE, "baseline role must not be empty")
             if not 1 <= args.port <= 65535:
                 raise CheckError(EXIT_USAGE, "callback port is out of range")
             run_flow(args)
     except CheckError as err:
         print(f"FAIL: {err.reason}")
         return err.code
-    except KeyboardInterrupt, EOFError:
+    except (KeyboardInterrupt, EOFError):
         print("FAIL: interrupted")
         return EXIT_USAGE
-    except TimeoutError, OSError:
+    except (TimeoutError, OSError, http.client.HTTPException):
         print("FAIL: unexpected local or network error")
         return EXIT_NET
+    except Exception:  # noqa: BLE001  # never show exception or server text
+        print("FAIL: internal error in the check")
+        return EXIT_INTERNAL
     print("RESULT: ok - the ID token meets every expectation")
     return 0
 

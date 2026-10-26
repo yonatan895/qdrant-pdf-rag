@@ -7,6 +7,7 @@ on the bastion; the test plays the browser.
 
 from __future__ import annotations
 
+import ast
 import base64
 import hashlib
 import importlib.util
@@ -90,7 +91,8 @@ def test_decode_jwt_payload_handles_padding_and_rejects_garbage():
     ("value", "expected"),
     [
         (["a", "b"], ("list", 2)),
-        ("a,b;c", ("string", 3)),
+        ("a,b", ("string", 2)),
+        ("a;b", ("string", 1)),
         ("", ("string", 0)),
         (5, ("number", 0)),
         (None, ("null", 0)),
@@ -235,6 +237,8 @@ def make_server_cert(d: Path) -> None:
 
 class FakeAdfs:
     def __init__(self, d: Path) -> None:
+        self.discovery_sleep = 0.0
+        self.garbage_discovery = False
         self.claims_fn = lambda nonce: {
             "roles": [BASELINE, GROUP],
             "upn": UPN,
@@ -267,7 +271,10 @@ class FakeAdfs:
 
             def do_GET(self) -> None:
                 u = urllib.parse.urlsplit(self.path)
-                if u.path == "/adfs/.well-known/openid-configuration":
+                if u.path == "/adfs/.well-known/openid-configuration" and fake.garbage_discovery:
+                    self.wfile.write(b"CANARY-GARBAGE not http\r\n\r\n")
+                elif u.path == "/adfs/.well-known/openid-configuration":
+                    time.sleep(fake.discovery_sleep)
                     self._send(
                         200,
                         json.dumps(
@@ -512,3 +519,128 @@ def test_secret_never_on_argv_and_callback_listens_on_loopback_only(adfs):
     src = SCRIPT.read_text()
     assert '("127.0.0.1", port)' in src
     assert "--client-secret " not in src and '"--client-secret"' not in src
+
+
+# ------------------------------------------------- review fixes (B1, B2, extras)
+
+
+def test_script_parses_as_python_39_with_parenthesised_excepts():
+    src = SCRIPT.read_text()
+    tree = ast.parse(src, feature_version=(3, 9))  # no match, except*, 3.10+ syntax
+    assert "from __future__ import annotations" in src
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ExceptHandler) and isinstance(node.type, ast.Tuple):
+            # `except A, B:` (PEP 758) parses on 3.14 only
+            seg = ast.get_source_segment(src, node.type) or ""
+            assert (
+                src.splitlines()[node.lineno - 1].split("except", 1)[1].lstrip().startswith("(")
+            ), f"unparenthesised except at line {node.lineno}: {seg}"
+
+
+def test_pyproject_keeps_the_script_on_a_python_39_ruff_target():
+    pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text()
+    assert '"scripts/openwebui/adfs_claims_check.py" = "py39"' in pyproject
+
+
+def test_expect_baseline_only_requires_the_baseline_by_default(tmp_path, capsys):
+    f = tmp_path / "id.jwt"
+    f.write_text(make_jwt({"roles": ["docs-user"], "upn": "u", "name": "n"}))
+    assert chk.main(["--decode-only", str(f), "--expect-baseline-only"]) == 8
+    out = capsys.readouterr().out
+    assert "baseline role present: no" in out
+    assert "FAIL: baseline role is missing from the roles claim" in out
+    assert "RESULT: ok" not in out
+    f.write_text(make_jwt({"roles": [BASELINE, "docs-user"], "upn": "u", "name": "n"}))
+    assert chk.main(["--decode-only", str(f), "--expect-baseline-only"]) == 8
+    assert "more than the baseline" in capsys.readouterr().out
+    f.write_text(make_jwt({"roles": [BASELINE], "upn": "u", "name": "n"}))
+    assert chk.main(["--decode-only", str(f), "--expect-baseline-only"]) == 0
+
+
+def test_empty_baseline_role_is_a_usage_error(capsys):
+    argv = ["--issuer", "https://x/adfs", "--client-id", "c", "--ca-bundle", "ca"]
+    assert chk.main([*argv, "--baseline-role", ""]) == 2
+
+
+def test_roles_string_is_split_on_comma_only():
+    # Open WebUI splits a single roles string on ','; ';' does not separate roles.
+    assert chk.role_values(f"{BASELINE};docs-user")[1:] == (1, [f"{BASELINE};docs-user"])
+    assert chk.role_values(f"{BASELINE},docs-user")[1:] == (2, [BASELINE, "docs-user"])
+    _, failures = _analyse({"roles": f"{BASELINE};docs-user", "upn": "u", "name": "n"})
+    assert any("baseline role is missing" in f for f in failures)
+    assert _analyse({"roles": f"{BASELINE},docs-user", "upn": "u", "name": "n"})[1] == []
+    assert any(
+        "not a string" in f for f in _analyse({"roles": [BASELINE, 5], "upn": "u", "name": "n"})[1]
+    )
+
+
+def test_internal_error_prints_a_fixed_line_without_exception_text(monkeypatch, capsys):
+    def boom(args):
+        raise RuntimeError("CANARY-EXCEPTION-TEXT")
+
+    monkeypatch.setattr(chk, "run_flow", boom)
+    rc = chk.main(["--issuer", "https://x/adfs", "--client-id", "c", "--ca-bundle", "ca"])
+    out = capsys.readouterr().out
+    assert rc == 9 and "CANARY" not in out and "Traceback" not in out
+
+
+@needs_openssl
+def test_bad_status_line_is_a_fixed_error_without_server_text(adfs):
+    adfs.garbage_discovery = True
+    rc, out = run_check(adfs, browse=False)
+    assert rc == 4 and "Traceback" not in out and "CANARY" not in out
+    assert out.strip().splitlines()[-1] == "FAIL: discovery request failed (network or TLS)"
+
+
+@needs_openssl
+def test_slow_discovery_hits_the_overall_time_limit(adfs):
+    adfs.discovery_sleep = 8
+    started = time.monotonic()
+    rc, out = run_check(adfs, "--http-timeout", "60", "--total-timeout", "2", browse=False)
+    assert rc == 4 and "FAIL: the run exceeded the overall time limit" in out
+    assert time.monotonic() - started < 7
+
+
+@needs_openssl
+def test_idle_connection_does_not_outlive_the_callback_timeout(adfs):
+    secret = adfs.dir / "secret.txt"
+    secret.write_text(SECRET)
+    port = free_port()
+    cmd = [
+        sys.executable,
+        "-I",
+        str(SCRIPT),
+        "--issuer",
+        adfs.issuer,
+        "--client-id",
+        CLIENT_ID,
+        "--client-secret-file",
+        str(secret),
+        "--ca-bundle",
+        str(adfs.dir / "good-ca.pem"),
+        "--port",
+        str(port),
+        "--timeout",
+        "4",
+    ]
+    started = time.monotonic()
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    assert proc.stdout
+    for line in proc.stdout:
+        if line.startswith("Waiting"):
+            break
+    idle = None
+    for _ in range(50):
+        try:
+            idle = socket.create_connection(("127.0.0.1", port), timeout=5)
+            break
+        except OSError:
+            time.sleep(0.1)
+    assert idle is not None
+    try:
+        rest, _ = proc.communicate(timeout=20)
+    finally:
+        idle.close()
+        proc.kill()
+    assert proc.returncode == 5 and "no callback arrived before the timeout" in rest
+    assert time.monotonic() - started < 12 and "Traceback" not in rest
