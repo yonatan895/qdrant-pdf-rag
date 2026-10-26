@@ -82,7 +82,7 @@ def make_bin_tree(tmp_path: Path, scripts: list[str]) -> Path:
     if any(name in scripts for name in ("deploy.sh", "ingest.sh")):
         scripts = [*scripts, "check_pod_images.py"]
     if "deploy.sh" in scripts:
-        scripts = [*scripts, "check_qdrant_render.py"]
+        scripts = [*scripts, "check_qdrant_render.py", "check_qdrant_volumes.py"]
     if "ingest.sh" in scripts:
         scripts = [*scripts, "check_ingest_patch.py"]
     for f in scripts:

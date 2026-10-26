@@ -431,6 +431,26 @@ Compatibility and lifecycle decisions under #448:
   no `hostPort`, host namespaces or RBAC objects, and only the chart's own
   ServiceAccount. `CI_REHEARSAL` is captured read-only before the operator file
   is sourced, so the file cannot forge it.
+- **Site sizing keys (#1070).** A quota-bound site fits the release with these
+  `airgap.env` keys, not with the CI-only overlays. Unset keeps the shipped
+  default, so the default render is unchanged. Qdrant:
+  `QDRANT_DATA_SIZE` (`persistence.size`), `QDRANT_SNAPSHOT_SIZE`
+  (`snapshotPersistence.size`), `QDRANT_CPU_REQUEST`, `QDRANT_MEMORY_REQUEST`,
+  `QDRANT_CPU_LIMIT`, `QDRANT_MEMORY_LIMIT` (`resources.{requests,limits}`).
+  Ingest Job (`ingest.resources`): `INGEST_CPU_REQUEST`, `INGEST_MEMORY_REQUEST`,
+  `INGEST_CPU_LIMIT`, `INGEST_MEMORY_LIMIT`. Worker count and scratch size are
+  `INGEST_WORKERS` and `INGEST_WORK_SIZE`. CPU is whole/decimal cores or
+  millicores (`500m`); memory and sizes need a Ki/Mi/Gi/Ti unit. Each value is
+  validated before any change; a limit below its request (or below the default
+  request when only the limit is set) is refused, and diagnostics never echo the
+  value. The specific size keys win over `QDRANT_STORAGE_SIZE`. A StatefulSet's
+  volume claim templates are immutable: before any change `deploy.sh` reads the
+  existing Qdrant StatefulSet (read-only) and refuses when the rendered
+  data/snapshot sizes differ from it, so keep the creation-time sizes in the
+  file and grow a volume with `oc patch pvc` (`check_qdrant_volumes.py`).
+  `QDRANT_EXTRA_VALUES` and `INGEST_EXTRA_PATCH` set outside `CI_REHEARSAL=1`
+  refuse with a message naming these keys. The `OPERATOR_ENV_KEYS` list and the
+  Task bridge for these keys are Verifier-owned (see the PR).
 - `deploy.sh` validates every operator string that becomes a Helm value before
   rendering (`STORAGE_CLASS`/`SNAPSHOT_STORAGE_CLASS`: DNS-1123 name,
   `QDRANT_RELEASE`: DNS-1123 label, `QDRANT_TAG`: image tag,
