@@ -774,10 +774,18 @@ ready() {
 }
 
 down() {
-    if "$KIND_BIN" get clusters 2>/dev/null | grep -qx "$KIND_NAME"; then
+    # A kind or docker failure is not "no cluster": cluster.created is the only
+    # ownership proof, so it goes only after a successful delete or after docker
+    # itself confirms the node container is gone.
+    kept="kept $STATE/cluster.created; retry down"
+    clusters=$("$KIND_BIN" get clusters 2>/dev/null) || die "kind get clusters failed; $kept"
+    if printf '%s\n' "$clusters" | grep -qx "$KIND_NAME"; then
         ours || die "cluster $KIND_NAME was not created by this script (node id mismatch); not deleting"
-        "$KIND_BIN" delete cluster --name "$KIND_NAME" --kubeconfig "$KUBECONFIG"
+        "$KIND_BIN" delete cluster --name "$KIND_NAME" --kubeconfig "$KUBECONFIG" \
+            || die "kind delete cluster $KIND_NAME failed; $kept"
     else
+        node=$(docker ps -aq --filter "name=^/$NODE\$") || die "docker is not reachable; $kept"
+        [ -z "$node" ] || die "kind lists no $KIND_NAME but container $NODE exists; $kept"
         say "no cluster $KIND_NAME"
     fi
     rm -f "$STATE/cluster.created" "$KUBECONFIG"
@@ -820,7 +828,10 @@ up_failed() {  # tear down only what this run started, then record the failure i
     trap - EXIT
     set +e
     echo "up failed (rc=$rc): removing what this run started" >&2
-    if grep -qx cluster "$STATE/run-started.txt" 2>/dev/null; then down; fi
+    # A subshell, so a refusing down (its die) cannot skip the rest of the cleanup.
+    if grep -qx cluster "$STATE/run-started.txt" 2>/dev/null; then
+        ( down ) || echo "down refused during cleanup; the cluster and its record are kept" >&2
+    fi
     for u in relay stack embed reasoning; do
         if grep -qx "unit $UNIT-$u" "$STATE/run-started.txt" 2>/dev/null; then
             systemctl --user stop "$UNIT-$u.service" 2>/dev/null
