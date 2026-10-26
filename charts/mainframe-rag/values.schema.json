@@ -392,7 +392,12 @@
             "groupClaim": { "type": "string", "pattern": "^[A-Za-z0-9_:/.-]+$" },
             "rolesClaim": { "type": "string", "pattern": "^[A-Za-z0-9_:/.-]+$" },
             "allowedRoles": { "type": "string", "pattern": "^$|^[^,\\s]+(,[^,\\s]+)*$" },
-            "adminRoles": { "type": "string", "pattern": "^$|^[^,\\s]+(,[^,\\s]+)*$" }
+            "adminRoles": { "type": "string", "pattern": "^$|^[^,\\s]+(,[^,\\s]+)*$" },
+            "caBundle": {
+              "type": "string",
+              "pattern": "^$|^\\s*(-----BEGIN CERTIFICATE-----[A-Za-z0-9+/=\\s]+-----END CERTIFICATE-----\\s*)+$",
+              "description": "Optional PEM certificates of the CA that issued the IdP's TLS certificate; added to the public trust stores, never replacing them."
+            }
           }
         },
         "idpEgress": {

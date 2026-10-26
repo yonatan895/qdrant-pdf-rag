@@ -1415,6 +1415,93 @@ def test_openwebui_workload_is_single_replica_restricted_and_holds_no_model_key(
         "/app/backend/data": False, "/tmp": False, "/opt/mainframe-rag/openwebui": True}
 
 
+IDP_CA_PEM = ("-----BEGIN CERTIFICATE-----\nSURQLUNBLTE=\n-----END CERTIFICATE-----\n"
+              "-----BEGIN CERTIFICATE-----\nSURQLUNBLTI=\n-----END CERTIFICATE-----\n")
+CA_TRUST_FILE = "/etc/mainframe-rag/ca-trust/ca-bundle.crt"
+# Open WebUI v0.12.3 (pinned image): the sign-in calls (discovery, token, JWKS,
+# userinfo) use authlib's httpx client with trust_env on, which reads
+# SSL_CERT_FILE and otherwise certifi (httpx/_config.py create_ssl_context);
+# aiohttp (token refresh, utils/oauth.py) uses ssl.create_default_context(),
+# whose OpenSSL default file is also SSL_CERT_FILE; requests reads
+# REQUESTS_CA_BUNDLE. SSL_CERT_DIR or AIOHTTP_CLIENT_SESSION_SSL=<file> would
+# only add a second, partial owner of the same trust.
+CA_TRUST_ENV = {"SSL_CERT_FILE", "REQUESTS_CA_BUNDLE"}
+
+
+def test_openwebui_idp_ca_bundle_is_optional_and_adds_only_its_trust(owui_chart):
+    """A public-CA IdP needs no bundle: the default render has no CA objects,
+    variables or init step. With a bundle, the IdP CA is a ConfigMap mounted
+    read-only into a hardened init step that writes the public stores the image
+    already trusts (OpenSSL's system bundle and certifi) plus the IdP CA into an
+    emptyDir, which the app mounts read-only and every HTTP client is pointed at."""
+    plain = _owui(owui_chart)
+    pod = plain["Deployment", "rag-openwebui"]["spec"]["template"]["spec"]
+    assert "initContainers" not in pod
+    assert not CA_TRUST_ENV & set(env_map(plain["Deployment", "rag-openwebui"], "openwebui"))
+    assert ("ConfigMap", "rag-openwebui-idp-ca") not in plain
+    assert "ca-trust" not in json.dumps(plain["Deployment", "rag-openwebui"])
+
+    with_ca = _owui(owui_chart, {"openwebui": {
+        **OWUI_ON["openwebui"], "oidc": {**OWUI_ON["openwebui"]["oidc"], "caBundle": IDP_CA_PEM}}})
+    # Only the CA ConfigMap is added; every other object but the pod is unchanged.
+    assert set(with_ca) - set(plain) == {("ConfigMap", "rag-openwebui-idp-ca")}
+    for key, doc in plain.items():
+        if key != ("Deployment", "rag-openwebui"):
+            assert with_ca[key] == doc, key
+    cm = with_ca["ConfigMap", "rag-openwebui-idp-ca"]
+    assert cm["data"] == {"ca.crt": IDP_CA_PEM}
+    dep = with_ca["Deployment", "rag-openwebui"]
+    pod = dep["spec"]["template"]["spec"]
+    assert _hardening_violations(pod) == []
+    assert dep["spec"]["template"]["metadata"]["annotations"]["checksum/idp-ca"] == hashlib.sha256(
+        IDP_CA_PEM.encode()).hexdigest()
+    (init,) = pod["initContainers"]
+    app = next(c for c in pod["containers"] if c["name"] == "openwebui")
+    assert init["image"] == app["image"]
+    assert init["securityContext"]["readOnlyRootFilesystem"] is True
+    assert "env" not in init and "ports" not in init
+    script = "\n".join(init["command"] + init.get("args", []))
+    # The public stores stay trusted: both defaults are read, then the IdP CA.
+    for needle in ("certifi.where()", "openssl_cafile", "/etc/mainframe-rag/idp-ca/ca.crt", CA_TRUST_FILE):
+        assert needle in script, needle
+    volumes = {v["name"]: v for v in pod["volumes"]}
+    init_mounts = {m["mountPath"]: m for m in init["volumeMounts"]}
+    assert set(init_mounts) == {"/etc/mainframe-rag/idp-ca", "/etc/mainframe-rag/ca-trust"}
+    assert init_mounts["/etc/mainframe-rag/idp-ca"]["readOnly"] is True
+    assert volumes[init_mounts["/etc/mainframe-rag/idp-ca"]["name"]]["configMap"] == {
+        "name": "rag-openwebui-idp-ca"}
+    trust = init_mounts["/etc/mainframe-rag/ca-trust"]
+    assert volumes[trust["name"]]["emptyDir"] == {}
+    app_mounts = {m["mountPath"]: m for m in app["volumeMounts"]}
+    assert app_mounts["/etc/mainframe-rag/ca-trust"] == {**trust, "readOnly": True}
+    assert "/etc/mainframe-rag/idp-ca" not in app_mounts
+    # The complete CA variable set, all on the combined file; nothing else changes.
+    env = env_map(dep, "openwebui")
+    assert {k: v["value"] for k, v in env.items() if k in CA_TRUST_ENV} == dict.fromkeys(
+        CA_TRUST_ENV, CA_TRUST_FILE)
+    assert set(env) == OWUI_ENV_NAMES | CA_TRUST_ENV
+    assert not {"SSL_CERT_DIR", "AIOHTTP_CLIENT_SSL_CERT_FILE", "AIOHTTP_CLIENT_SESSION_SSL",
+                "CURL_CA_BUNDLE"} & set(env)
+    for name in ("proxy", "chat-purge"):
+        container = next(c for c in pod["containers"] if c["name"] == name)
+        assert "ca-trust" not in json.dumps(container), name
+
+
+@pytest.mark.parametrize("bad", [
+    "  \n", "not a certificate",
+    "-----BEGIN CERTIFICATE-----\n%%%\n-----END CERTIFICATE-----\n",
+    IDP_CA_PEM + "trailing junk\n",
+    "-----BEGIN PRIVATE KEY-----\nSURQLUNBLTE=\n-----END PRIVATE KEY-----\n",
+])
+def test_openwebui_idp_ca_bundle_refuses_blank_or_garbage(owui_chart, bad):
+    values = base_values()
+    values.update(json.loads(json.dumps(OWUI_ON)))
+    values["openwebui"]["oidc"]["caBundle"] = bad
+    r = _helm_template_with_values(values, chart=owui_chart)
+    assert r.returncode != 0 and "caBundle" in r.stderr
+    assert "rag-openwebui" not in r.stdout
+
+
 def test_openwebui_claim_is_kept_rwo_on_the_block_class(owui_chart):
     docs = _owui(owui_chart, {"storage": {"className": "fast-block"},
                               "openwebui": {**OWUI_ON["openwebui"], "storageSize": "25Gi"}})

@@ -34,6 +34,7 @@ OPENWEBUI_KEYS = [
     "OPENWEBUI_OIDC_GROUP_CLAIM", "OPENWEBUI_OIDC_ROLES_CLAIM", "OPENWEBUI_OIDC_ALLOWED_ROLES",
     "OPENWEBUI_OIDC_ADMIN_ROLES", "OPENWEBUI_IDP_EGRESS_CIDRS", "OPENWEBUI_IDP_EGRESS_PORT",
     "ROUTE_DESTINATION_CA_FILE", "IMAGE_DIGEST_OPENWEBUI", "IMAGE_DIGEST_OPENWEBUI_PROXY",
+    "OPENWEBUI_IDP_CA_FILE",
 ]
 MAPPER_KEYS = [
     *OPENWEBUI_KEYS,
@@ -1050,6 +1051,49 @@ def test_openwebui_selection_is_strict_and_writes_nothing(monkeypatch, mapper_en
     assert r.returncode != 0
     assert message in r.stderr
     assert not out.exists()
+
+
+IDP_CA = ("-----BEGIN CERTIFICATE-----\nSURQLUNBLTE=\n-----END CERTIFICATE-----\n"
+          "-----BEGIN CERTIFICATE-----\nSURQLUNBLTI=\n-----END CERTIFICATE-----\n")
+
+
+def test_openwebui_idp_ca_bundle_is_optional_and_round_trips_byte_exact(monkeypatch, mapper_env, tmp_path):
+    """A public-CA IdP needs no bundle (no key emitted); a site bundle reaches the
+    chart byte-for-byte (both certificates, order kept)."""
+    _owui_env(monkeypatch, tmp_path)
+    r, out = mapper_env()
+    assert r.returncode == 0, r.stderr
+    assert "caBundle" not in load_values(out)["openwebui"]["oidc"]
+    bundle = tmp_path / "idp-ca.pem"
+    bundle.write_text(IDP_CA)
+    monkeypatch.setenv("OPENWEBUI_IDP_CA_FILE", str(bundle))
+    r, out = mapper_env()
+    assert r.returncode == 0, r.stderr
+    assert load_values(out)["openwebui"]["oidc"]["caBundle"] == IDP_CA
+
+
+@pytest.mark.parametrize("content,message", [
+    (None, "OPENWEBUI_IDP_CA_FILE is unreadable"),
+    ("  \n", "OPENWEBUI_IDP_CA_FILE is blank"),
+    ("not a certificate\n", "OPENWEBUI_IDP_CA_FILE must hold only PEM certificates"),
+    (IDP_CA + "trailing junk\n", "OPENWEBUI_IDP_CA_FILE must hold only PEM certificates"),
+    ("-----BEGIN CERTIFICATE-----\n%%%\n-----END CERTIFICATE-----\n",
+     "OPENWEBUI_IDP_CA_FILE must hold only PEM certificates"),
+    ("-----BEGIN PRIVATE KEY-----\nSURQLUNBLTE=\n-----END PRIVATE KEY-----\n",
+     "OPENWEBUI_IDP_CA_FILE must hold only PEM certificates"),
+])
+def test_openwebui_idp_ca_bundle_refuses_unreadable_blank_or_garbage(monkeypatch, mapper_env, tmp_path,
+                                                                     content, message):
+    _owui_env(monkeypatch, tmp_path)
+    bundle = tmp_path / "idp-ca.pem"
+    if content is not None:
+        bundle.write_text(content)
+    monkeypatch.setenv("OPENWEBUI_IDP_CA_FILE", str(bundle))
+    r, out = mapper_env()
+    assert r.returncode != 0 and not out.exists()
+    assert message in r.stderr
+    # Fixed text: neither the path nor the content reaches the diagnostic.
+    assert str(bundle) not in r.stderr and "SURQLUNB" not in r.stderr and "junk" not in r.stderr
 
 
 @pytest.mark.skipif(shutil.which("helm") is None, reason="helm is required for the round-trip")

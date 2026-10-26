@@ -267,6 +267,11 @@ openwebui:
     rolesClaim: roles
     allowedRoles: ""
     adminRoles: ""
+    # Optional PEM bundle of the CA that issued the IdP's TLS certificate (an
+    # enterprise CA, e.g. AD FS). Empty: the image's public trust stores only. Set:
+    # rendered as ConfigMap rag-openwebui-idp-ca, and Open WebUI trusts the public
+    # stores plus this CA (SSL_CERT_FILE, REQUESTS_CA_BUNDLE). Certificates only.
+    caBundle: ""
   # IdP back channel (discovery, token, JWKS). NetworkPolicy cannot match DNS
   # names: list the IdP's CIDRs. Required when enabled.
   idpEgress:

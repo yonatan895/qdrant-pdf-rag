@@ -1653,6 +1653,14 @@ byte-identical to a release without it (tested).
   trial). The policy needs an enforcing CNI, and the site provides that evidence.
 - `ConfigMap/rag-openwebui-pipe`: the repository Pipe, its installer and the purge script, each
   annotated with its sha256.
+- IdP CA (optional, `OPENWEBUI_IDP_CA_FILE` / `openwebui.oidc.caBundle`): when the IdP's TLS
+  certificate comes from an enterprise CA (usual for AD FS), the PEM file becomes
+  `ConfigMap/rag-openwebui-idp-ca`. A `ca-trust` init step writes OpenSSL's system bundle, the
+  certifi bundle and the IdP CA into one file on an emptyDir. The app mounts it read-only through
+  `SSL_CERT_FILE` (httpx for sign-in, aiohttp for token refresh) and `REQUESTS_CA_BUNDLE`. The
+  public stores stay trusted, and a changed CA rolls the pod. Without it, sign-in fails at the
+  server-side discovery call. A public-CA IdP needs nothing. Mapping refuses an unreadable or
+  blank file, or one that holds anything but PEM certificates.
 - Environment, by ADR-0007 condition:
   - Offline (R2): `OFFLINE_MODE`, no version check, no community sharing, no telemetry, no pip or
     model downloads.
@@ -1684,7 +1692,8 @@ byte-identical to a release without it (tested).
   keep that group small.
 - The team hands over: the discovery URL (`https://<idp>/.well-known/openid-configuration`), the
   client id, the client secret (it goes into the Secret, never `airgap.env`), and the IdP's IPv4
-  CIDRs and port for the egress policy.
+  CIDRs and port for the egress policy. If an enterprise CA issued the IdP's TLS certificate, they
+  also hand over that CA's PEM certificate(s) for `OPENWEBUI_IDP_CA_FILE`.
 
 **Site procedure.**
 1. On the connected side, build the derived image from `images/openwebui/Containerfile` (upstream

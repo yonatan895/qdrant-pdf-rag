@@ -36,6 +36,7 @@ try:
         network_policy,
         openwebui_config,
         parse_strict_bool,
+        pem_certificates,
         reasoning_overrides,
         request_overrides,
         require_in_place_retired,
@@ -48,6 +49,7 @@ except ModuleNotFoundError:
         network_policy,
         openwebui_config,
         parse_strict_bool,
+        pem_certificates,
         reasoning_overrides,
         request_overrides,
         require_in_place_retired,
@@ -257,6 +259,23 @@ def build_values(deploy_only: bool = False) -> dict:
         openwebui = openwebui_config(os.environ)
     except ValueError as exc:
         die(str(exc))
+
+    # Optional IdP CA (enterprise CA behind AD FS): added to the public trust
+    # stores in the pod. Checked whenever set; fixed texts, never path or content.
+    idp_ca_file = env("OPENWEBUI_IDP_CA_FILE")
+    idp_ca = ""
+    if idp_ca_file:
+        try:
+            idp_ca = Path(idp_ca_file).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            die("OPENWEBUI_IDP_CA_FILE is unreadable")
+        if not idp_ca.strip():
+            die("OPENWEBUI_IDP_CA_FILE is blank")
+        if not pem_certificates(idp_ca):
+            die("OPENWEBUI_IDP_CA_FILE must hold only PEM certificates "
+                "(-----BEGIN CERTIFICATE----- blocks, no key or other text)")
+    if openwebui and idp_ca:
+        typing.cast(dict, openwebui["oidc"])["caBundle"] = idp_ca
 
     agent_route = env("AGENT_ROUTE") == "true"
     route_ca = ""

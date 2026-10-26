@@ -1,0 +1,20 @@
+{{- /*
+Optional IdP CA for the Open WebUI pod (#1074): openwebui.oidc.caBundle, the
+PEM certificates of the CA that issued the IdP's TLS certificate (an enterprise
+CA such as the one behind AD FS). Public material, so a ConfigMap. Rendered
+only when the bundle is set; the pod's ca-trust init step adds it to the
+image's public trust stores (openwebui-deployment.yaml).
+*/ -}}
+{{- if include "mainframe-rag.openwebuiEnabled" . }}
+{{- if .Values.openwebui.oidc.caBundle }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rag-openwebui-idp-ca
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: rag-openwebui
+data:
+  ca.crt: {{ .Values.openwebui.oidc.caBundle | quote }}
+{{- end }}
+{{- end }}

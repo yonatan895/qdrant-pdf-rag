@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import os
 import re
 import sys
@@ -162,6 +163,25 @@ _PROVIDER_URL = re.compile(r"https://[^\s/]+(?:/\S*)?/\.well-known/openid-config
 _CLAIM = re.compile(r"[A-Za-z0-9_:/.-]+")
 _NAME_LIST = re.compile(r"[^,\s]+(?:,[^,\s]+)*")
 _CIDR = re.compile(r"(?:[0-9]{1,3}\.){3}[0-9]{1,3}/(?:[0-9]|[12][0-9]|3[0-2])")
+
+
+_PEM_CERTS = re.compile(r"\s*(?:-----BEGIN CERTIFICATE-----\r?\n[A-Za-z0-9+/=\r\n]+"
+                        r"-----END CERTIFICATE-----\s*)+")
+_PEM_BODY = re.compile(r"-----BEGIN CERTIFICATE-----([A-Za-z0-9+/=\r\n]+)-----END CERTIFICATE-----")
+
+
+def pem_certificates(text: str) -> bool:
+    """True when text is one or more PEM certificates and nothing else (no key,
+    no stray text), each body valid base64. Used for the optional IdP CA bundle."""
+    if _PEM_CERTS.fullmatch(text) is None:
+        return False
+    try:
+        for body in _PEM_BODY.findall(text):
+            if not base64.b64decode("".join(body.split()), validate=True):
+                return False
+    except ValueError:
+        return False
+    return True
 
 
 def openwebui_config(values: Mapping[str, str]) -> dict[str, object] | None:
