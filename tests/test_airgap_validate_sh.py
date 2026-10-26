@@ -15,10 +15,14 @@ import shutil
 import pytest
 
 from tests.helpers_airgap import (
+    D53595E_SHAPED_ENV,
     REPO,
+    RETIRED_ENV_KEYS,
+    RETIRED_ENV_VALUES,
     STUB_TOOL,
     copy_chart,
     make_bin_tree,
+    retired_keys_listed,
     run_sh,
     symlink_tools,
     write_signed_manifest,
@@ -137,8 +141,8 @@ def test_unknown_dryrun_values_are_refused_before_any_stage(tree, value):
                  id='validate_tracing_bad_endpoint_fails_closed'),
     pytest.param({'INTERNAL_REGISTRY': None, 'STORAGE_CLASS': None, 'EMBED_MODEL_REVISION': None}, None, ('INTERNAL_REGISTRY', 'STORAGE_CLASS', 'EMBED_MODEL_REVISION', 'required variables unset'),
                  id='validate_lists_all_missing_vars_at_once'),
-    pytest.param({'INTERNAL_REGISTRY': None, 'REGISTRY_INTERNAL': 'old.example:5000'}, None, ('INTERNAL_REGISTRY', 'required variables unset'),
-                 id='validate_removed_registry_alias_is_not_honored'),
+    pytest.param({'INTERNAL_REGISTRY': None, 'REGISTRY_INTERNAL': 'old.example:5000'}, None, ('REGISTRY_INTERNAL (retired in 547d04d)', 'set INTERNAL_REGISTRY'),
+                 id='validate_removed_registry_alias_is_refused'),
     pytest.param({'STORAGE_CLASS': 'nfs-client'}, None, ('looks like NFS',),
                  id='validate_nfs_storage_refused'),
     pytest.param({'DENSE_DIM': 'not-a-number'}, None, ('DENSE_DIM must be a positive integer',),
@@ -244,12 +248,12 @@ def test_validate_ingest_copresent_readonly_key_fails_closed(tree):
 
 def test_validate_tracing_off_deploys_no_trace_backend_and_explicit_collector_passes_through(tree):
     # OpenObserve is the only bundled backend (#956): off removes it, an
-    # explicit http(s) collector is reported as given, the retired
-    # JAEGER_ENABLED switch has no effect.
+    # explicit http(s) collector is reported as given; the retired
+    # JAEGER_ENABLED switch is refused (#1070), never silently ignored.
     off = _run(tree, {"OTEL_EXPORTER_OTLP_ENDPOINT": "off"})
     assert off.returncode == 0, off.stderr
     assert "Trace backend:     not deployed" in off.stdout
-    ok = _run(tree, {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector.platform:4318", "JAEGER_ENABLED": "false"})
+    ok = _run(tree, {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector.platform:4318"})
     assert ok.returncode == 0, ok.stderr
     assert "Tracing:           ON (http://collector.platform:4318)" in ok.stdout
 
@@ -1472,3 +1476,82 @@ def test_validate_openwebui_pending_pin_refusal_names_the_opt_out(tree):
     r = _openwebui_run(tree)
     assert r.returncode != 0
     assert "or opt out with OPENWEBUI_ENABLED=false" in r.stderr
+
+
+# --- Retired airgap.env keys (#1070): silent ignoring becomes a loud refusal ---
+
+
+def _assert_retired_refusal(r, calls, expected):
+    assert r.returncode != 0, r.stdout
+    assert sorted(retired_keys_listed(r.stderr)) == sorted(expected), r.stderr
+    assert "1. Validating" not in r.stdout
+    assert calls == []
+    for value in RETIRED_ENV_VALUES.values():
+        assert value not in r.stdout + r.stderr
+    assert "sentinel-" not in r.stdout + r.stderr
+
+
+def test_validate_refuses_a_d53595e_shaped_env_listing_exactly_the_retired_keys(tree):
+    env = {"AIRGAP_ENV": _write_env_file(tree, D53595E_SHAPED_ENV)}
+    r, calls = _run_with_recording_stubs(tree, env)
+    _assert_retired_refusal(r, calls, RETIRED_ENV_KEYS)
+
+
+@pytest.mark.parametrize("key", RETIRED_ENV_KEYS)
+def test_validate_refuses_each_retired_key_alone(tree, key):
+    r, calls = _run_with_recording_stubs(
+        tree, {"AIRGAP_ENV": _write_env_file(tree, f"{key}={RETIRED_ENV_VALUES[key]}\n")}
+    )
+    _assert_retired_refusal(r, calls, [key])
+
+
+def test_validate_refuses_a_retired_key_from_the_process_environment(tree):
+    r, calls = _run_with_recording_stubs(tree, {"VLLM_BASE_URL": RETIRED_ENV_VALUES["VLLM_BASE_URL"]})
+    _assert_retired_refusal(r, calls, ["VLLM_BASE_URL"])
+
+
+def test_validate_accepts_empty_and_commented_retired_keys_then_refuses_the_filled_one(tree):
+    empty = "".join(f"{key}=\n" for key in RETIRED_ENV_KEYS) + "".join(
+        f"#{key}=x\n" for key in RETIRED_ENV_KEYS
+    )
+    good = _run(tree, {"AIRGAP_ENV": _write_env_file(tree, empty)})
+    assert good.returncode == 0, good.stderr
+    # Next ordinary run: the operator fills one key back in and is refused again.
+    bad = _run(tree, {"AIRGAP_ENV": _write_env_file(tree, empty + "REGISTRY_INTERNAL=x\n")})
+    assert bad.returncode != 0
+    assert retired_keys_listed(bad.stderr) == ["REGISTRY_INTERNAL"]
+
+
+_JAEGER_LINE = "OTEL_EXPORTER_OTLP_ENDPOINT (retired in d7765dc): points at the retired in-cluster Jaeger"
+
+
+@pytest.mark.parametrize("endpoint", [
+    "http://jaeger:4318",
+    "https://jaeger:4318/v1/traces",
+    "http://Jaeger.mainframe-rag.svc:4318",
+    "http://jaeger.mainframe-rag.svc.cluster.local:4318",
+])
+def test_validate_refuses_the_retired_in_cluster_jaeger_endpoint(tree, endpoint):
+    """d53595e's example pointed the exporter at http://jaeger:4318; today any set
+    endpoint means an external collector, so it would silently drop traces."""
+    r, calls = _run_with_recording_stubs(tree, {"OTEL_EXPORTER_OTLP_ENDPOINT": endpoint})
+    assert r.returncode != 0
+    assert _JAEGER_LINE in r.stderr
+    assert "unset it to use the bundled OpenObserve collector, or set your external collector" in r.stderr
+    assert retired_keys_listed(r.stderr) == ["OTEL_EXPORTER_OTLP_ENDPOINT"]
+    assert endpoint not in r.stdout + r.stderr
+    assert calls == []
+
+
+@pytest.mark.parametrize("endpoint", [
+    None,
+    "",
+    "off",
+    "http://collector.platform:4318",
+    "http://jaeger-collector.platform:4318",
+    "http://jaeger.example.com:4318",
+])
+def test_validate_accepts_unset_empty_off_and_external_collectors(tree, endpoint):
+    extra = {} if endpoint is None else {"OTEL_EXPORTER_OTLP_ENDPOINT": endpoint}
+    r = _run(tree, extra)
+    assert r.returncode == 0, r.stderr

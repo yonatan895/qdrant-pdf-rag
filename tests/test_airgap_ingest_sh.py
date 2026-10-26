@@ -640,10 +640,11 @@ def test_production_preset_is_the_owner_decision():
         assert line in text.splitlines()
 
 
-def test_ingest_retired_jaeger_switch_is_ignored(ingest_tree):
-    # #956: JAEGER_ENABLED no longer exists; the Job follows the same tracing
-    # decision as the agent (bundled OpenObserve unless an endpoint is given).
-    r = _run_ingest(ingest_tree, ("JAEGER_ENABLED", "false"))
+def test_ingest_follows_the_agent_tracing_decision(ingest_tree):
+    # #956: the Job follows the same tracing decision as the agent (bundled
+    # OpenObserve unless an endpoint is given). The retired JAEGER_ENABLED
+    # switch is refused instead (#1070).
+    r = _run_ingest(ingest_tree)
     assert r.returncode == 0, r.stderr
     rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
     assert rendered_env(rendered, "ingest")["OTEL_EXPORTER_OTLP_ENDPOINT"] == "http://openobserve:5080/api/default"
@@ -911,3 +912,20 @@ def test_extra_patch_outside_ci_names_the_sizing_keys_to_use(ingest_tree):
     assert "INGEST_EXTRA_PATCH is a CI-rehearsal override" in r.stderr
     for key in INGEST_SIZING:
         assert key in r.stderr, key
+
+
+# --- Retired airgap.env keys (#1070) ---
+
+
+def test_ingest_refuses_a_d53595e_shaped_env_before_any_cluster_call(ingest_tree):
+    from tests.helpers_airgap import D53595E_SHAPED_ENV, RETIRED_ENV_KEYS, retired_keys_listed
+
+    env_file = ingest_tree[0] / "d53595e.env"
+    env_file.write_text(D53595E_SHAPED_ENV)
+    r = _run_ingest(ingest_tree, ("AIRGAP_ENV", str(env_file)))
+    assert r.returncode != 0, r.stdout
+    assert sorted(retired_keys_listed(r.stderr)) == sorted(RETIRED_ENV_KEYS), r.stderr
+    assert "sentinel-" not in r.stdout + r.stderr
+    log = ingest_tree[1]
+    assert not log.exists() or log.read_text() == ""
+    assert not ((ingest_tree[0]) / "dist").exists() or not list((ingest_tree[0] / "dist").glob("*rendered*"))

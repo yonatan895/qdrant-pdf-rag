@@ -42,6 +42,7 @@ try:
         reasoning_overrides,
         request_overrides,
         require_in_place_retired,
+        require_no_retired_keys,
         validate_model_config,
     )
 except ModuleNotFoundError:
@@ -57,6 +58,7 @@ except ModuleNotFoundError:
         reasoning_overrides,
         request_overrides,
         require_in_place_retired,
+        require_no_retired_keys,
         validate_model_config,
     )
 
@@ -529,6 +531,10 @@ def main(argv: list[str]) -> int:
     out = DEFAULT_OUT
     deploy_only = False
     args = list(argv)
+    try:
+        require_no_retired_keys(os.environ)
+    except ValueError as exc:
+        die(str(exc))
     if args == ["--bundle-decisions"]:
         print_bundle_decisions()
         return 0
