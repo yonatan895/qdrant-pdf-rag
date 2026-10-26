@@ -224,8 +224,9 @@ ROADMAP #90/#91. Splunk remains caller-supplied context.
 fallbacks, Settings-bounded pools/timeouts, stable error bodies, endpoint-specific
 SSE completion and shutdown. [ADR-0004](adr/0004-operator-console-htmx.md) owns
 browser-only console state, strict CSP, local assets and external OAuth ingress;
-[ADR-0007](adr/0007-open-webui-docs-front-end.md) (accepted) amends it only for
-the optional Open WebUI front end.
+[ADR-0007](adr/0007-open-webui-docs-front-end.md) and
+[ADR-0008](adr/0008-open-webui-main-docs-platform.md) amend it only for the
+Open WebUI docs platform (default on; the console stays the fallback).
 `tracing.py` owns bounded fail-open OTel export for agent and ingest, with no
 manual text/secrets; bounded query span text is the explicit exception to the
 JSON-log prohibition. A collector outage is not required-metadata permission.
