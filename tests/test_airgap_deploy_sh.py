@@ -66,7 +66,10 @@ printf '%s\\n' "$@" >> "$HELM_LOG"
 case "$*" in
   *'get statefulset '*'-o json'*)
     [ "${{LIVE_STS_FAIL:-}}" != 1 ] || exit 1
-    [ -z "${{LIVE_STS_FILE:-}}" ] || cat "$LIVE_STS_FILE" ;;
+    # Answers only the StatefulSet's real name, like a cluster would.
+    case "$*" in *"get statefulset ${{LIVE_STS_NAME:-none}} "*) [ -z "${{LIVE_STS_FILE:-}}" ] || cat "$LIVE_STS_FILE" ;; esac ;;
+  *'get secret -l owner=helm,name='*)
+    [ -z "${{HELM_RELEASE_SECRET:-}}" ] || echo "secret/sh.helm.release.v1.$HELM_RELEASE_SECRET.v1" ;;
   *'rollout status '*)
     [ "${{ROLLOUT_FAIL:-}}" != 1 ] || exit 1 ;;
   'api-resources -o name')
@@ -2183,7 +2186,7 @@ def test_sizing_keys_render_what_the_free_form_overlay_rendered(tmp_path):
 
 # --- #1070 R2: StatefulSet volume sizes are immutable ------------------------
 
-def _live_statefulset(tree, data="500Gi", snapshots="500Gi"):
+def _live_statefulset(tree, data="500Gi", snapshots="500Gi", name="qdrant"):
     import json
 
     path = tree[0] / "live-sts.json"
@@ -2191,7 +2194,7 @@ def _live_statefulset(tree, data="500Gi", snapshots="500Gi"):
         {"metadata": {"name": "qdrant-storage"}, "spec": {"resources": {"requests": {"storage": data}}}},
         {"metadata": {"name": "qdrant-snapshots"}, "spec": {"resources": {"requests": {"storage": snapshots}}}},
     ]}}))
-    return ("LIVE_STS_FILE", str(path))
+    return ("LIVE_STS_FILE", str(path)), ("LIVE_STS_NAME", name)
 
 
 def _mutations_before_refusal(tree):
@@ -2200,7 +2203,7 @@ def _mutations_before_refusal(tree):
 
 
 def test_a_changed_qdrant_volume_size_is_refused_before_any_change(tree):
-    r = _run(tree, _live_statefulset(tree, data="40Gi", snapshots="60Gi"), ("QDRANT_DATA_SIZE", "50Gi"),
+    r = _run(tree, *_live_statefulset(tree, data="40Gi", snapshots="60Gi"), ("QDRANT_DATA_SIZE", "50Gi"),
              ("QDRANT_SNAPSHOT_SIZE", "60Gi"))
     assert r.returncode != 0
     assert "QDRANT_DATA_SIZE" in r.stderr and "immutable" in r.stderr
@@ -2211,21 +2214,21 @@ def test_a_changed_qdrant_volume_size_is_refused_before_any_change(tree):
 
 def test_default_sizes_against_a_site_sized_statefulset_are_refused(tree):
     """Forgetting the keys on a later upgrade must not fall back to 500Gi silently."""
-    r = _run(tree, _live_statefulset(tree, data="40Gi", snapshots="60Gi"))
+    r = _run(tree, *_live_statefulset(tree, data="40Gi", snapshots="60Gi"))
     assert r.returncode != 0
     assert "QDRANT_DATA_SIZE" in r.stderr and "QDRANT_SNAPSHOT_SIZE" in r.stderr
     assert _mutations_before_refusal(tree) == []
 
 
 def test_equal_sizes_in_another_unit_pass(tree):
-    r = _run(tree, _live_statefulset(tree, data="40Gi", snapshots="61440Mi"), ("QDRANT_DATA_SIZE", "40960Mi"),
+    r = _run(tree, *_live_statefulset(tree, data="40Gi", snapshots="61440Mi"), ("QDRANT_DATA_SIZE", "40960Mi"),
              ("QDRANT_SNAPSHOT_SIZE", "60Gi"))
     assert r.returncode == 0, r.stderr
 
 
 def test_no_existing_statefulset_or_default_match_passes(tree):
     assert _run(tree).returncode == 0
-    assert _run(tree, _live_statefulset(tree)).returncode == 0
+    assert _run(tree, *_live_statefulset(tree)).returncode == 0
 
 
 def test_an_unreadable_statefulset_is_refused(tree):
@@ -2250,3 +2253,30 @@ def test_deploy_refuses_a_d53595e_shaped_env_before_any_cluster_call(tree):
     log = tree[1]
     assert not log.exists() or log.read_text() == ""
     assert not ((tree[0]) / "dist").exists() or not list((tree[0] / "dist").glob("*rendered*"))
+
+
+def test_a_release_named_qdrant_is_checked_under_the_chart_fullname(tree):
+    """d53595e shape: the release name contains "qdrant", so the chart names the
+    StatefulSet after the release alone (not `<release>-qdrant`). Sizes differ:
+    refuse with zero helm upgrade and no cluster mutation."""
+    r = _run(tree, ("QDRANT_RELEASE", "qdrant"), *_live_statefulset(tree, data="40Gi", snapshots="60Gi", name="qdrant"))
+    assert r.returncode != 0
+    assert "QDRANT_DATA_SIZE" in r.stderr and "immutable" in r.stderr
+    assert _mutations_before_refusal(tree) == []
+    assert "get namespace" not in _helm_log(tree) or "create" not in _helm_log(tree)
+
+
+def test_another_release_name_resolves_its_own_statefulset_name(tree):
+    r = _run(tree, ("QDRANT_RELEASE", "vec"), *_live_statefulset(tree, data="40Gi", snapshots="60Gi", name="vec-qdrant"))
+    assert r.returncode != 0 and "immutable" in r.stderr
+
+
+def test_an_existing_release_without_its_statefulset_is_refused(tree):
+    r = _run(tree, ("HELM_RELEASE_SECRET", "qdrant"))
+    assert r.returncode != 0
+    assert "StatefulSet was not found" in r.stderr
+    assert _mutations_before_refusal(tree) == []
+
+
+def test_a_fresh_install_without_release_or_statefulset_passes(tree):
+    assert _run(tree).returncode == 0

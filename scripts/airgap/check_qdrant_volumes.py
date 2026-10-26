@@ -6,7 +6,8 @@ different size fails after earlier steps already changed the namespace. This
 read-only check compares the sizes the release would render with the existing
 StatefulSet and refuses a mismatch before any change (#1070).
 
-Usage: check_qdrant_volumes.py LIVE_STATEFULSET_JSON < helm-template-output
+Usage: check_qdrant_volumes.py --name < helm-template-output   (print the StatefulSet's name)
+       check_qdrant_volumes.py LIVE_STATEFULSET_JSON < helm-template-output
 Exit 0: accepted (no existing StatefulSet, or equal sizes). Fixed diagnostics
 only; sizes and manifest content are never echoed.
 """
@@ -47,6 +48,15 @@ def _sizes(templates: list[dict]) -> dict[str, Fraction | None]:
 
 
 def main() -> int:
+    if sys.argv[1:] == ["--name"]:
+        # The chart's own fullname logic decides the name (the release alone when
+        # it already contains "qdrant"), so read it from the render, never guess.
+        names = [d["metadata"]["name"] for d in yaml.safe_load_all(sys.stdin.read())
+                 if d and d.get("kind") == "StatefulSet"]
+        if len(names) != 1:
+            return 1
+        print(names[0])
+        return 0
     live_text = Path(sys.argv[1]).read_text(encoding="utf-8").strip()
     if not live_text:
         return 0  # nothing exists yet: any size is a first install
