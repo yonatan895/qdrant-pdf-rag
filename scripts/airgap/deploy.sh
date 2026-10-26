@@ -266,9 +266,6 @@ fi
 # existing StatefulSet's. Kept separate from the preflight above.
 check_qdrant_volume_sizes() {
     [ "${AIRGAP_DRYRUN:-0}" != "1" ] || return 0
-    _live=$($KC -n "$NAMESPACE" get statefulset "${QDRANT_RELEASE}-qdrant" -o json --ignore-not-found) ||
-        die "cannot read the existing Qdrant StatefulSet"
-    printf '%s' "$_live" > dist/qdrant-live-statefulset.json
     set -- -n "$NAMESPACE" -f charts/qdrant-openshift.values.yaml
     if [ -n "$QDRANT_STORAGE_SIZE" ]; then
         set -- "$@" --set-string "persistence.size=$QDRANT_STORAGE_SIZE" \
@@ -280,9 +277,22 @@ check_qdrant_volume_sizes() {
     [ -z "$QDRANT_EXTRA_VALUES" ] || set -- "$@" -f "$QDRANT_EXTRA_VALUES"
     helm template "$QDRANT_RELEASE" "$CHART" "$@" > dist/qdrant-size-probe.yaml ||
         die "cannot render the Qdrant release for the volume size check"
+    # The StatefulSet's name comes from the render (the chart's fullname logic).
+    _sts=$(python3 scripts/airgap/check_qdrant_volumes.py --name < dist/qdrant-size-probe.yaml) ||
+        die "cannot determine the Qdrant StatefulSet name from the render"
+    _live=$($KC -n "$NAMESPACE" get statefulset "$_sts" -o json --ignore-not-found) ||
+        die "cannot read the existing Qdrant StatefulSet"
+    if [ -z "$_live" ]; then
+        # No StatefulSet is fine only on a fresh install: an existing Helm release
+        # without it must never pass silently.
+        _rel=$($KC -n "$NAMESPACE" get secret -l "owner=helm,name=$QDRANT_RELEASE" -o name) ||
+            die "cannot check for an existing Qdrant release"
+        [ -z "$_rel" ] || die "the Qdrant release exists but its StatefulSet was not found; refusing to guess its volume sizes"
+    fi
+    printf '%s' "$_live" > dist/qdrant-live-statefulset.json
     python3 scripts/airgap/check_qdrant_volumes.py dist/qdrant-live-statefulset.json < dist/qdrant-size-probe.yaml ||
         die "requested Qdrant volume sizes differ from the existing StatefulSet"
-    unset _live _assignment
+    unset _live _assignment _sts _rel
 }
 check_qdrant_volume_sizes
 
