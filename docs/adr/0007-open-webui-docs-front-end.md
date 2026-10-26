@@ -4,7 +4,7 @@
   superseded in part by [ADR-0008](0008-open-webui-main-docs-platform.md)
   (default-on, release gates; the conditions below stay).
   Accepting this record does not enable anything: the chart component stays
-  off by default, and a site enables it only after every condition below
+  off by default (superseded by ADR-0008: default on), and a site enables it only after every condition below
   passes. Amends [ADR-0004](0004-operator-console-htmx.md) and
   [ADR-0005](0005-answer-feedback-data-boundary.md) as stated below.
 - **Context:** the maintainer wants one team-owned front end with SSO and
