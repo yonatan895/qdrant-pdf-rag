@@ -8,9 +8,16 @@ key arrives on stdin, never in argv, the environment or the pod spec.
      sha256 deploy.sh computed from the repository file.
   2. The server certificate on 127.0.0.1:8443 must be this pod's own serving
      certificate (pinned by DER bytes) before the key is sent.
-  3. The Function is created, or updated when its stored content differs, and
-     then read back: its stored content must hash to EXPECTED_SHA256.
-  3b. No other Function may exist (every Function can read the user's tokens).
+  3. The key is proven to be an admin key, and the installed Functions are
+     listed, by the admin-only listing GET /api/v1/functions/list: its 401/403
+     can only mean the key was refused. No other Function may exist (every
+     Function can read the user's tokens).
+  3b. The Function is created when that listing does not contain it, or updated
+     when its stored content differs, and then read back: its stored content must
+     hash to EXPECTED_SHA256. Open WebUI v0.12.3 answers HTTP 401, not 404, for
+     an absent Function (routers/functions.py get_function_by_id) and also 401 for
+     an unknown or non-admin key (utils/auth.py), so presence is decided by the
+     listing, never by a 401 on the Function itself.
   4. The Function is switched active when it is not (a toggle is applied only
      after reading the current state, so a repeat run converges).
 
@@ -85,7 +92,8 @@ class Client:
                                  "serving certificate; the admin key was not sent")
         return conn
 
-    def call(self, method: str, path: str, body: dict | None = None) -> tuple[int, dict | None]:
+    def call(self, method: str, path: str,
+             body: dict | None = None) -> tuple[int, dict | list | None]:
         conn = self._connect()
         try:
             headers = {"Authorization": f"Bearer {self._key}", "Accept": "application/json"}
@@ -101,8 +109,6 @@ class Client:
             raise ProvisionError(f"{method} {path} failed: Open WebUI is unreachable") from None
         finally:
             conn.close()
-        if status in (401, 403):
-            raise ProvisionError(f"{method} {path} refused the admin API key (HTTP {status})")
         if status != 200:
             return status, None
         try:
@@ -112,23 +118,33 @@ class Client:
         return status, document if isinstance(document, (dict, list)) else None
 
 
-def _refuse_other_functions(client: Client) -> None:
-    """Every Function can read the user's access and ID tokens (__oauth_token__),
+LIST_PATH = "/api/v1/functions/list"
+
+
+def _installed(client: Client) -> bool:
+    """List the Functions through the admin-only listing and say whether the docs
+    Pipe is among them. The listing has no not-found answer, so its 401/403 is the
+    key's refusal (unknown key, non-admin key, or API keys not allowed there).
+
+    Every Function can read the user's access and ID tokens (__oauth_token__),
     so the hash-checked docs Pipe is the only Function that may exist (ADR-0007
     V2). Another one is refused by name-free fixed text: remove it, then re-run."""
-    status, document = client.call("GET", "/api/v1/functions/")
+    status, document = client.call("GET", LIST_PATH)
+    if status in (401, 403):
+        raise ProvisionError(f"GET {LIST_PATH} refused the admin API key (HTTP {status})")
     if status != 200 or not isinstance(document, list):
         raise ProvisionError(f"cannot list Functions (HTTP {status})")
     if any(not isinstance(item, dict) or item.get("id") != PIPE_ID for item in document):
         raise ProvisionError("a Function other than the repository docs Pipe is installed; only the "
                              "hash-checked docs Pipe may exist (Functions can read user tokens): "
                              "remove it and re-run; nothing was installed")
+    return bool(document)
 
 
-def _function(client: Client) -> dict | None:
+def _function(client: Client) -> dict:
+    """Read the docs Pipe the listing showed or the write just stored: any
+    non-200 here (v0.12.3 answers an absent Function with 401) is a failure."""
     status, document = client.call("GET", f"/api/v1/functions/id/{PIPE_ID}")
-    if status == 404:
-        return None
     if status != 200 or not isinstance(document, dict):
         raise ProvisionError(f"cannot read Function {PIPE_ID} (HTTP {status})")
     return document
@@ -146,8 +162,7 @@ def provision(client: Client, source: str, expected: str) -> list[str]:
                              "(sha256 differs); nothing was installed")
     form = {"id": PIPE_ID, "name": PIPE_NAME, "content": source,
             "meta": {"description": PIPE_DESCRIPTION, "manifest": {}}}
-    _refuse_other_functions(client)
-    current = _function(client)
+    current = _function(client) if _installed(client) else None
     if current is None:
         status, _ = client.call("POST", "/api/v1/functions/create", form)
         action = "installed"
@@ -159,16 +174,17 @@ def provision(client: Client, source: str, expected: str) -> list[str]:
     if status != 200:
         raise ProvisionError(f"cannot write Function {PIPE_ID} (HTTP {status})")
     stored = _function(client)
-    if stored is None or _stored_sha(stored) != expected:
+    if _stored_sha(stored) != expected:
         raise ProvisionError(f"stored Function {PIPE_ID} does not match the repository "
                              "Pipe after the write")
-    _refuse_other_functions(client)
+    if not _installed(client):
+        raise ProvisionError(f"Function {PIPE_ID} is missing from the listing after the write")
     if stored.get("is_active") is not True:
         status, _ = client.call("POST", f"/api/v1/functions/id/{PIPE_ID}/toggle")
         if status != 200:
             raise ProvisionError(f"cannot activate Function {PIPE_ID} (HTTP {status})")
         stored = _function(client)
-        if stored is None or stored.get("is_active") is not True:
+        if stored.get("is_active") is not True:
             raise ProvisionError(f"Function {PIPE_ID} is not active after activation")
     return [f"docs Pipe {action}: Function {PIPE_ID} active, sha256 {expected}"]
 

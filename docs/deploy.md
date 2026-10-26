@@ -1076,7 +1076,7 @@ and CI tooling have different owners and pull credentials.
 | OpenObserve OSS (ADR-0006) | `openobserve/openobserve:v1.1.2` | as the agent; the chart references it by digest only (`images.openobserve.digest`) | `load.sh` | cluster pods when tracing is on with an empty `tracing.endpoint` |
 | otelcol-contrib (ADR-0006) | `otel/opentelemetry-collector-contrib:0.160.0` | as the agent | `load.sh` | cluster pod (`Deployment/otelcol`, container `otelcol`) beside OpenObserve |
 | OAuth sidecar (optional) | `openshift4/ose-oauth-proxy:v4.14` | as the agent; absent while `images.txt` says `sha256:PENDING` | `load.sh` | cluster pods |
-| Open WebUI front end (default on, ADR-0007/ADR-0008, #1074) | `qdrant-pdf-rag-openwebui:v0.12.3-slim` | as the agent; absent while `images.txt` says `sha256:PENDING` (the factory records the pushed manifest digest of the #1073 trial image; recipe `images/openwebui/Containerfile`); the upstream `open-webui/open-webui:v0.12.3-slim` line is factory build provenance, never pushed | `load.sh` | cluster pod (`Deployment/rag-openwebui`, container `openwebui`) when `openwebui.enabled` |
+| Open WebUI front end (default on, ADR-0007/ADR-0008, #1074) | `qdrant-pdf-rag-openwebui:v0.12.3-slim` | as the agent; absent while `images.txt` says `sha256:PENDING` (the factory records the pushed manifest digest of the image built from `images/openwebui/Containerfile`, the recipe the `scripts/openwebui/` dev environment and acceptance lane also build); the upstream `open-webui/open-webui:v0.12.3-slim` line is factory build provenance, never pushed | `load.sh` | cluster pod (`Deployment/rag-openwebui`, container `openwebui`) when `openwebui.enabled` |
 | Open WebUI allow-list proxy (ADR-0007 E1, **Verifier-owned** where the workflow builds or mirrors images) | `nginxinc/nginx-unprivileged:1.30.6-alpine` | pinned by digest in `images.txt`; bundled as `openwebui-proxy-image.tar` exactly when the Open WebUI member is | `load.sh` | cluster pod (`Deployment/rag-openwebui`, container `proxy`) when `openwebui.enabled` |
 | CI job image | `ci/python:3.14`, or a complete `CI_PYTHON_IMAGE` | mirrored UBI Python 3.14 (GIL) with git, pip, tar, sha256sum | platform or factory mirror, not this repository | GitLab runner |
 | CI Qdrant service | `qdrant/qdrant@sha256:<images.txt digest>` | the `images.txt` manifest digest, so a tag is never enough | registry-to-registry copy that preserves the digest | GitLab runner (`sim`, `gate-l1`) |
@@ -1701,8 +1701,11 @@ byte-identical to a release without it (tested).
 4. First admin: a member of an admin role signs in once, creates an API key in Open WebUI, and
    adds it to the Secret as `admin-api-key`. Re-run `airgap:deploy`. The installer then runs
    inside the pod with the key on stdin. It refuses a mounted Pipe whose sha256 differs from the
-   repository file, sends the key only to the pod's own serving certificate, creates or updates
-   the Function, reads it back by hash and activates it. Until the key exists, deploy prints
+   repository file, sends the key only to the pod's own serving certificate, proves it is an
+   admin key on the admin-only Function listing (a refused key, including a non-admin one,
+   fails there and nothing is written), creates the Function when the listing lacks it (v0.12.3
+   answers an absent Function with 401, so a 401 on the Function itself never decides) or
+   updates it, reads it back by hash and activates it. Until the key exists, deploy prints
    `docs Pipe NOT installed` and the front end offers no model.
 5. Give all signed-in users read access to the Docs model in the Open WebUI admin UI (the
    default visibility is a #1073 trial item). Then sign in as an ordinary user and ask one
