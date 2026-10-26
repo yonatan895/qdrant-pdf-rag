@@ -169,6 +169,11 @@ def check_models(users: dict[str, list[str]]) -> Verdict:
     return _v("docs-model-only", bool(users) and not bad, users=sorted(users), unexpected=bad)
 
 
+def check_revoked_user(signed_in: bool, token_issued: bool) -> Verdict:
+    """A user the IdP authenticates but whose only role value is in neither list gets no session."""
+    return _v("role-revocation", not signed_in and not token_issued, signed_in=signed_in, token_issued=token_issued)
+
+
 def check_groups(user_groups: dict[str, list[str]], expected: dict[str, str]) -> Verdict:
     """The IdP group claim is mapped to the Open WebUI group (per user)."""
     missing = {u: g for u, g in expected.items() if g not in user_groups.get(u, [])}

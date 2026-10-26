@@ -148,6 +148,11 @@ class Acceptance:
         self.dns_queries += checks.count_queries(lines, {ip})
 
     # -------------------------------------------------------------- the checks
+    def revocation(self) -> None:
+        login = self.s.login("other-user")
+        issued = os.path.exists(self.s._token_path("other-user"))
+        self.add(checks.check_revoked_user(bool(login.get("signed_in")), issued))
+
     def identity(self, users: dict[str, dict]) -> None:
         self.add(checks.check_models({u: users[u].get("models", []) for u in ("team-user", "docs-user")}))
         self.add(checks.check_groups({u: users[u].get("groups", []) for u in ("team-user", "docs-user")},
@@ -328,6 +333,7 @@ class Acceptance:
     def run(self) -> bool:
         users = self.sign_in_all()
         self.identity(users)
+        self.revocation()
         self.pod_identity()
         self.add(self._first_answer())
         self.blocked_paths()

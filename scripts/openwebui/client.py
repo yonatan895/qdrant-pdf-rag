@@ -42,6 +42,8 @@ USERS = {
     "owui-admin": ("owui-admins", "7c1f3e52-0000-4000-8000-000000000001"),
     "team-user": ("internal-team", "7c1f3e52-0000-4000-8000-000000000002"),
     "docs-user": ("docs-readers", "7c1f3e52-0000-4000-8000-000000000003"),
+    # Matches neither role list: the IdP authenticates this user but Open WebUI must refuse the sign-in.
+    "other-user": ("other-team", "7c1f3e52-0000-4000-8000-000000000004"),
 }
 EMAIL_DOMAIN = "trial.test"
 DOCS_MODEL = "mainframe_rag_docs"  # provision_pipe.py PIPE_ID
@@ -105,9 +107,12 @@ class Session:
         action = re.search(r'<form[^>]*action="([^"]+)"', html)
         post_url = urllib.parse.urljoin(form_url, action.group(1).replace("&amp;", "&")) if action else form_url
         data = urllib.parse.urlencode({"login": f"{user}@{EMAIL_DOMAIN}", "password": password}).encode()
-        with op.open(urllib.request.Request(post_url, data=data, method="POST"), timeout=30) as resp:
-            final = resp.geturl()
-            resp.read()
+        try:
+            with op.open(urllib.request.Request(post_url, data=data, method="POST"), timeout=30) as resp:
+                final = resp.geturl()
+                resp.read()
+        except urllib.error.HTTPError as exc:  # a refused sign-in may end in an error page
+            final = exc.geturl()
         hops = {"login_form_host": urllib.parse.urlsplit(form_url).netloc,
                 "final_host": urllib.parse.urlsplit(final).netloc,
                 "final_path": urllib.parse.urlsplit(final).path}

@@ -104,7 +104,7 @@ A green lane is not "all gates passed". Each condition and where it is proven:
 | V3 contract fidelity | `tests/test_openwebui_docs_pipe.py` (error-code table, stream, citations); lane `answer-citations` |
 | R1 non-root, restricted | lane `uid`, `pod-security`; pinned digests: `tests/test_helm_chart_contracts.py`, `images.txt` |
 | R2 offline, zero egress | lane `dns-egress`, `egress-probes`, `egress-policy-owner`; policy render: `tests/test_helm_chart_contracts.py`; browser external fetch: site acceptance only |
-| R3 identity | lane `group-claim`, `sso-only`, private-CA IdP sign-in (`openwebui.oidc.caBundle`); session expiry and Route-only ingress: `tests/test_helm_chart_contracts.py`, site acceptance |
+| R3 identity | lane `group-claim`, `role-revocation` (a Dex user in neither role list gets no session), `sso-only`, private-CA IdP sign-in (`openwebui.oidc.caBundle`; a corrupt bundle is refused at render and by the ca_trust init step: `tests/test_helm_chart_contracts.py`); session expiry and Route-only ingress: `tests/test_helm_chart_contracts.py`, site acceptance |
 | E1 allow-list proxy | lane `blocked-paths` (403 from the sidecar; NUL path asked on the sidecar itself); `tests/test_openwebui_proxy_nginx.py` runs the real image against every variant |
 | S1 RWO block PVC, one replica | lane `restart-persistence`; `tests/test_helm_chart_contracts.py` (claim), `tests/test_airgap_validate_sh.py` (NFS refused); block semantics: site acceptance only |
 | S2 30-day purge | lane `retention-purge` (chart's `purge_chats.py`, next chat); `tests/test_openwebui_frontend_scripts.py` |

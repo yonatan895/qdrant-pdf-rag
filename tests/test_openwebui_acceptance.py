@@ -322,3 +322,15 @@ def test_gated_deploy_never_pulls_and_uses_the_digest_pinned_image():
     for text in ((DIR / "client.py").read_text(), lib, (DIR / "acceptance.sh").read_text()):
         assert "seed" not in text.lower()  # the installer's real first install is what the lane proves
     assert "OWUI_SEED_FUNCTION" not in (ROOT / ".github" / "workflows" / "e2e.yml").read_text()
+
+
+def test_a_user_in_neither_role_list_must_get_no_session():
+    assert checks.check_revoked_user(False, False).ok
+    assert not checks.check_revoked_user(True, True).ok
+    assert not checks.check_revoked_user(False, True).ok  # a token cookie was issued
+    other = client.USERS["other-user"][0]
+    values = (DIR / "values.yaml").read_text()
+    assert other not in values  # neither allowedRoles nor adminRoles contains it
+    for line in values.splitlines():
+        if "allowedRoles" in line or "adminRoles" in line:
+            assert "*" not in line and "signed-in" not in line
