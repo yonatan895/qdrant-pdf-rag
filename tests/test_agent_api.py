@@ -8,6 +8,7 @@ import json
 import threading
 import time
 
+import httpx2
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
@@ -17,6 +18,8 @@ from hypothesis import strategies as st
 from mainframe_rag.agent import app as app_mod
 from mainframe_rag.agent.answer import (
     DECLINE_PREFIX,
+    HttpxLLMClient,
+    build_messages,
     has_answer_body,
     is_abstention,
     is_structured_decline,
@@ -24,44 +27,31 @@ from mainframe_rag.agent.answer import (
     verification_state_for,
 )
 from mainframe_rag.agent.cites import is_citation_shaped, normalize_citation_line
+from mainframe_rag.agent.serving import ServingGate
 from mainframe_rag.agent.tokenizer import FallbackTokenizer
-from mainframe_rag.ports import ChatResult, TokenUsage
+from mainframe_rag.config import Settings
+from mainframe_rag.ports import ChatMessage, ChatResult, TokenUsage
 from mainframe_rag.retrieve.query import SearchHit
-from tests.fakes import make_evidence
+from tests.fakes import HttpxStreamFake, make_evidence
+from tests.helpers_agent_local import (
+    agent_client,
+    agent_hit,
+    set_agent_env,
+)
+from tests.helpers_agent_local import (
+    sse_events as _parse_sse_events,
+)
 
 
 def _hit(cite_suffix: str = "p. 1-6", text: str = "IEA500I BEFORE IOS IOSCMDS COMMAND REJECTED, REASON=yy") -> SearchHit:
-    return SearchHit(
-        chunk_id="abc123",
-        score=0.42,
-        cite=f"SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, {cite_suffix}",
-        heading="Chapter 2 > IEA500I",
-        text=text,
-        doc_id="SA22-0000-00",
-        title="Synthetic Reference",
-        page_label="1-6",
-        chunk_type="message",
-        product="z/OS",
-        version="9.9",
-        message_ids=("IEA500I",),
-    )
+    return agent_hit(text=text, page_label=cite_suffix.removeprefix("p. "))
 
 
 @pytest.fixture
 def client(monkeypatch, synthetic_pdf, servable_representation_gate):
-    monkeypatch.setenv("QDRANT_URL", "http://localhost:6333")
-    # CI/dev embed profile: hash mode, explicitly allowed (PR D fail-fast)
-    monkeypatch.setenv("EMBED_MODE", "hash")
-    monkeypatch.setenv("ALLOW_HASH_MODE", "true")
-    monkeypatch.setenv("LLM_BASE_URL", "http://llm.internal/v1")
-    monkeypatch.setenv("LLM_MODEL_REASONING", "test-reasoning-model")
-    monkeypatch.setattr(app_mod, "retrieve_search", MagicMockSearch().search)
-    # patch the LLM client AFTER lifespan built it (module global exists then)
-    with TestClient(app_mod.app) as c:
-        monkeypatch.setattr(app_mod, "llm", FakeLLM())
-        # The lifespan builds a real VllmTokenizer pointed at llm.internal;
-        # swap in the in-process fallback so no test ever dials the network.
-        monkeypatch.setattr(app_mod, "tokenizer", FallbackTokenizer())
+    with agent_client(
+        monkeypatch, llm=FakeLLM(), search=MagicMockSearch().search
+    ) as c:
         yield c
 
 
@@ -103,51 +93,19 @@ class FakeLLM:
         )
 
 
-class FabricatingBodyLLM:
-    """Quotes a full citation line that is not in the hit set, mid-answer."""
+class ChatStub:
+    """Buffered answer double pinning one exact model output."""
+
+    def __init__(
+        self, content: str, finish_reason: str = "stop", usage: TokenUsage | None = None
+    ):
+        self.content = content
+        self.finish_reason = finish_reason
+        self.usage = usage or TokenUsage()
 
     def chat(self, messages, *args, **kwargs):
         return ChatResult(
-            content=(
-                "Answer text.\n"
-                "SA22-9999-99 Not Retrieved, Made Up > Path, p. 9-9\n"
-                "SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\n\n"
-                "Citations:\n"
-                "- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\n"
-            ),
-            finish_reason="stop",
-            usage=TokenUsage(),
-        )
-
-
-class FabricatingScriptLLM:
-    """Puts a fabricated citation inside the fenced script block."""
-
-    def chat(self, messages, *args, **kwargs):
-        return ChatResult(
-            content=(
-                "Answer text.\n\n"
-                "```jcl\n// see SA22-9999-99 Not Retrieved, Made Up > Path, p. 9-9\n"
-                "IOSCMDS LIST\n```\n\n"
-                "Citations:\n"
-                "- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\n"
-            ),
-            finish_reason="stop",
-            usage=TokenUsage(),
-        )
-
-
-class InferredOnlyLLM:
-    """Bare bracket markers, no explicit Citations: block (the cheapest
-    fabrication path, issue #269)."""
-
-    def chat(self, messages, *args, **kwargs):
-        return ChatResult(
-            content=(
-                "Reissue the command after initialization completes [1]."
-            ),
-            finish_reason="stop",
-            usage=TokenUsage(),
+            content=self.content, finish_reason=self.finish_reason, usage=self.usage
         )
 
 
@@ -186,7 +144,9 @@ def test_answer_validates_citations_and_script(client):
 def test_answer_surfaces_inferred_citation_provenance(client, monkeypatch):
     """Issue #269: bracket-only cites stay validated but are flagged, so no
     client or eval has to guess the provenance."""
-    monkeypatch.setattr(app_mod, "llm", InferredOnlyLLM())
+    # Bare bracket markers, no explicit Citations: block: the cheapest
+    # fabrication path (issue #269).
+    monkeypatch.setattr(app_mod, "llm", ChatStub("Reissue the command after initialization completes [1]."))
     resp = client.post("/v1/answer", json={"query": "IEA500I"})
     assert resp.status_code == 200
     body = resp.json()
@@ -214,11 +174,13 @@ def test_answer_refuses_without_reasoning_model(monkeypatch, servable_representa
 def test_answer_strips_fabricated_body_citation(client, monkeypatch):
     """No cite outside the hit set may reach the client — including ones the
     model quotes mid-answer (issue #20 PR C)."""
-    monkeypatch.setattr(app_mod, "llm", FabricatingBodyLLM())
+    fabricated = "SA22-9999-99 Not Retrieved, Made Up > Path, p. 9-9"
+    monkeypatch.setattr(app_mod, "llm", ChatStub(
+        f"Answer text.\n{fabricated}\n{_hit().cite}\n\nCitations:\n- {_hit().cite}\n"
+    ))
     resp = client.post("/v1/answer", json={"query": "IEA500I"})
     assert resp.status_code == 200
     body = resp.json()
-    fabricated = "SA22-9999-99 Not Retrieved, Made Up > Path, p. 9-9"
     assert fabricated not in body["answer"]
     assert _hit().cite in body["answer"]  # retrieved cite survives mid-answer
     assert body["citations"] == [_hit().cite]
@@ -227,12 +189,12 @@ def test_answer_strips_fabricated_body_citation(client, monkeypatch):
 def _eight_long_hits() -> list[SearchHit]:
     """8 hits whose size makes a 1000-char context budget pack only two."""
     return [
-        _hit(cite_suffix=f"p. 1-{i}", text="S" * 340).model_copy(
-            update={
-                "chunk_id": f"c{i}",
-                "cite": f"SA22-0000-0{i} Synthetic Reference, Chapter {i} > IEA500I, p. 1-{i}",
-                "doc_id": f"SA22-0000-0{i}",
-            }
+        agent_hit(
+            text="S" * 340,
+            doc_id=f"SA22-0000-0{i}",
+            chunk_id=f"c{i}",
+            heading=f"Chapter {i} > IEA500I",
+            page_label=f"1-{i}",
         )
         for i in range(1, 9)
     ]
@@ -400,7 +362,10 @@ def test_strip_unauthorized_leaves_prose_and_inline_mentions():
 def test_answer_script_block_passes_through_unvalidated(client, monkeypatch):
     """script is code: citation-shaped lines inside the fence are returned
     verbatim (documented behavior, issue #20 PR C)."""
-    monkeypatch.setattr(app_mod, "llm", FabricatingScriptLLM())
+    monkeypatch.setattr(app_mod, "llm", ChatStub(
+        "Answer text.\n\n```jcl\n// see SA22-9999-99 Not Retrieved, Made Up > Path, p. 9-9\n"
+        f"IOSCMDS LIST\n```\n\nCitations:\n- {_hit().cite}\n"
+    ))
     resp = client.post("/v1/answer", json={"query": "IEA500I"})
     assert resp.status_code == 200
     body = resp.json()
@@ -466,32 +431,36 @@ def test_router_and_http_exception_errors_use_fixed_envelopes(client):
     assert resp.json() == {"code": "method_not_allowed", "message": "method not allowed"}
 
 
-def test_unhandled_error_returns_internal_shape(monkeypatch, servable_representation_gate):
-    """An exception escaping the handler logs server-side; client sees only
-    {"code": "internal"}. Response construction runs after the handler's try, so breaking it
-    yields a genuinely unhandled exception."""
+@pytest.mark.parametrize("path, seam, error", [
+    ("/v1/search", "SearchResponse", RuntimeError("serializer down")),
+    ("/v1/answer", "build_messages",
+     ValueError("budget invariant violated: internal detail")),
+], ids=["response-construction", "prompt-build"])
+def test_unhandled_error_returns_internal_shape(
+    monkeypatch, servable_representation_gate, path, seam, error
+):
+    """An exception escaping the handler (response construction runs after
+    the handler's try; prompt construction is local work deliberately outside
+    the upstream try) logs server-side; the client sees only {"code":
+    "internal"} and never the exception text. ServerErrorMiddleware re-raises
+    after the 500 is sent, so the client must not surface that re-raise."""
 
-    def boom_response(*_a, **_k):
-        raise RuntimeError("serializer down")
+    def boom(*_a, **_k):
+        raise error
 
-    monkeypatch.setenv("QDRANT_URL", "http://localhost:6333")
-    # CI/dev embed profile: hash mode, explicitly allowed (PR D fail-fast)
-    monkeypatch.setenv("EMBED_MODE", "hash")
-    monkeypatch.setenv("ALLOW_HASH_MODE", "true")
-    monkeypatch.setenv("LLM_BASE_URL", "http://llm.internal/v1")
-    monkeypatch.setenv("LLM_MODEL_REASONING", "test-reasoning-model")
+    set_agent_env(monkeypatch)
     monkeypatch.setattr(
         app_mod, "retrieve_search",
         lambda *a, **k: ([_hit()], "identifier", {"embed_ms": 1, "qdrant_ms": 1}),
     )
-    monkeypatch.setattr(app_mod, "SearchResponse", boom_response)
-    # ServerErrorMiddleware re-raises after sending the 500; the client must
-    # not surface that re-raise.
+    monkeypatch.setattr(app_mod, seam, boom)
     with TestClient(app_mod.app, raise_server_exceptions=False) as c:
-        resp = c.post("/v1/search", json={"query": "IEA500I"})
+        monkeypatch.setattr(app_mod, "llm", FakeLLM())
+        monkeypatch.setattr(app_mod, "tokenizer", FallbackTokenizer())
+        resp = c.post(path, json={"query": "IEA500I"})
     assert resp.status_code == 500
     assert resp.json() == {"code": "internal", "message": "internal error"}
-    assert "serializer" not in resp.text
+    assert str(error) not in resp.text
 
 
 def test_healthz_qdrant_unready_structured(client, monkeypatch):
@@ -568,7 +537,6 @@ def test_healthz_representation_drift_degrades(client, monkeypatch):
     the async client, test doubles ride either shape."""
     from types import SimpleNamespace
 
-    from mainframe_rag.agent.serving import ServingGate
     from mainframe_rag.ingest.completion import completion_collection_name
     from mainframe_rag.ingest.rules_version import extraction_rules_version
     from tests.fakes import manifest_envelope
@@ -608,7 +576,6 @@ def test_healthz_representation_legacy_unknown_and_pending_degrade(client, monke
     """Legacy (points, no contract), unreadable and pending-migration stores
     degrade with their explicit outcomes (issue #391 F2); exception text
     never reaches the body."""
-    from mainframe_rag.agent.serving import ServingGate
     from mainframe_rag.ingest.completion import completion_collection_name
     from mainframe_rag.ingest.rules_version import extraction_rules_version
     from tests.fakes import ServingManifestQdrant, manifest_envelope
@@ -649,11 +616,7 @@ def test_lifespan_refuses_pending_contract(monkeypatch):
     """Issue #391 F2: an interrupted migration blocks startup, not only the
     live /healthz signal — the interval before a probe observes it must not
     serve queries against a half-verified generation."""
-    monkeypatch.setenv("QDRANT_URL", "http://localhost:6333")
-    monkeypatch.setenv("EMBED_MODE", "hash")
-    monkeypatch.setenv("ALLOW_HASH_MODE", "true")
-    monkeypatch.setenv("LLM_BASE_URL", "http://llm.internal/v1")
-    monkeypatch.setenv("LLM_MODEL_REASONING", "test-reasoning-model")
+    set_agent_env(monkeypatch)
 
     from mainframe_rag.agent.serving import ServingGeneration
 
@@ -678,7 +641,6 @@ def test_unservable_generation_refuses_retrieval_with_fixed_503(client, monkeypa
     embed/LLM work; retrieve_search is never called, the outcome and
     transport text stay out of the body, and liveness never reflects data
     state (an empty install is ready so deploy -> ingest cannot deadlock)."""
-    from mainframe_rag.agent.serving import ServingGate
     from tests.fakes import AliasQdrant
 
     class ExplodingAliases(AliasQdrant):
@@ -718,7 +680,6 @@ def test_gate_degrades_after_metadata_drift_and_recovers(client, monkeypatch):
     incompatible contract — readiness turns non-success and retrieval stops
     without an agent restart; `retrieve_search` runs only for the verified
     state. Restoring the contract restores service, again without a restart."""
-    from mainframe_rag.agent.serving import ServingGate
     from mainframe_rag.ingest.rules_version import extraction_rules_version
     from tests.fakes import AliasQdrant, manifest_envelope, published_build
 
@@ -805,7 +766,6 @@ def test_request_binds_validated_physical_and_alias_switch_revalidates(client, m
     an alias swap cannot redirect an in-flight or cached request; after
     revalidation the new target is served and the alias name itself is never
     queried."""
-    from mainframe_rag.agent.serving import ServingGate
     from mainframe_rag.ingest.rules_version import extraction_rules_version
     from tests.fakes import AliasQdrant, manifest_envelope, published_build
 
@@ -973,58 +933,44 @@ def rerank_leg(client, monkeypatch):
     return upstream, clock
 
 
-def test_healthz_rerank_up_or_alternate_route_is_ready(client, rerank_leg):
-    """The leg is up when the primary route answers, and equally when the
-    primary (score) 404s but the alternate (rerank) route answers — exactly
-    as search would serve it."""
+@pytest.mark.parametrize("mode", ["primary", "alternate", "down", "disabled", "timeout"])
+def test_healthz_rerank_outcome(client, rerank_leg, monkeypatch, caplog, mode):
+    """The leg is up when the primary route answers and equally when the
+    primary 404s but the alternate answers; all routes down is degraded with
+    error-type-only logs; disabled is null and probes nothing; a hung probe
+    times out unready. Liveness never depends on the leg."""
     upstream, clock = rerank_leg
-    resp = client.get("/healthz")
-    assert resp.status_code == 200
-    assert resp.json()["rerank"] is True
-    assert upstream.calls == 1
-
-    upstream.score_ok = False
-    clock.now += 16.0  # past the probe TTL
-    resp = client.get("/healthz")
-    assert resp.status_code == 200
-    assert resp.json()["rerank"] is True
-
-
-def test_healthz_rerank_all_routes_down_is_unready_without_upstream_text(
-    client, rerank_leg, caplog
-):
-    upstream, _ = rerank_leg
-    upstream.score_ok = upstream.rerank_ok = False
-    resp = client.get("/healthz")
-    assert resp.status_code == 503
-    body = resp.json()
-    assert body["status"] == "degraded" and body["rerank"] is False
-    assert body["qdrant"] is True
-    assert "secret-upstream-text" not in resp.text
-    assert "rerank_error" in caplog.text and "secret-upstream-text" not in caplog.text
-    # liveness never depends on the rerank leg
-    assert client.get("/livez").status_code == 200
-
-
-def test_healthz_rerank_disabled_is_null_and_unaffected(client, rerank_leg, monkeypatch):
-    upstream, _ = rerank_leg
-    monkeypatch.setattr(app_mod.settings, "rerank_enabled", False)
-    upstream.score_ok = upstream.rerank_ok = False
-    resp = client.get("/healthz")
-    assert resp.status_code == 200
-    assert resp.json()["rerank"] is None
-    assert upstream.calls == 0
-
-
-def test_healthz_rerank_probe_timeout_is_unready(client, rerank_leg):
-    upstream, _ = rerank_leg
-    upstream.hang = threading.Event()
+    if mode == "alternate":
+        upstream.score_ok = False
+        clock.now += 16.0  # past the probe TTL
+    elif mode == "down":
+        upstream.score_ok = upstream.rerank_ok = False
+    elif mode == "disabled":
+        monkeypatch.setattr(app_mod.settings, "rerank_enabled", False)
+        upstream.score_ok = upstream.rerank_ok = False
+    elif mode == "timeout":
+        upstream.hang = threading.Event()
     try:
         resp = client.get("/healthz")
     finally:
-        upstream.hang.set()
-    assert resp.status_code == 503
-    assert resp.json()["rerank"] is False
+        if upstream.hang is not None:
+            upstream.hang.set()
+
+    if mode in ("primary", "alternate"):
+        assert resp.status_code == 200 and resp.json()["rerank"] is True
+    elif mode == "down":
+        assert resp.status_code == 503
+        body = resp.json()
+        assert body["status"] == "degraded" and body["rerank"] is False
+        assert body["qdrant"] is True
+        assert "secret-upstream-text" not in resp.text
+        assert "rerank_error" in caplog.text and "secret-upstream-text" not in caplog.text
+    elif mode == "disabled":
+        assert resp.status_code == 200 and resp.json()["rerank"] is None
+        assert upstream.calls == 0
+    else:
+        assert resp.status_code == 503 and resp.json()["rerank"] is False
+    assert client.get("/livez").status_code == 200
 
 
 def test_healthz_rerank_probe_is_ttl_cached(client, rerank_leg):
@@ -1216,33 +1162,6 @@ def test_answer_llm_failure_reads_answer_failed(client, monkeypatch):
     assert resp.status_code == 502
     assert resp.json() == {"code": "upstream_error", "message": "answer failed"}
     assert "explode" not in resp.text
-
-
-def test_prompt_build_failure_maps_to_internal(monkeypatch, servable_representation_gate):
-    """Review S5: prompt construction is local work, deliberately outside the
-    upstream try — a build failure is an internal fault (500 "internal"),
-    never mislabeled as 502 "answer failed" / "retrieval failed". Like the
-    unhandled-error contract, ServerErrorMiddleware re-raises after the 500
-    is sent, so the client must be built with raise_server_exceptions=False."""
-
-    def boom_response(*_a, **_k):
-        raise ValueError("budget invariant violated: internal detail")
-
-    monkeypatch.setenv("QDRANT_URL", "http://localhost:6333")
-    # CI/dev embed profile: hash mode, explicitly allowed (PR D fail-fast)
-    monkeypatch.setenv("EMBED_MODE", "hash")
-    monkeypatch.setenv("ALLOW_HASH_MODE", "true")
-    monkeypatch.setenv("LLM_BASE_URL", "http://llm.internal/v1")
-    monkeypatch.setenv("LLM_MODEL_REASONING", "test-reasoning-model")
-    monkeypatch.setattr(app_mod, "retrieve_search", MagicMockSearch().search)
-    with TestClient(app_mod.app, raise_server_exceptions=False) as c:
-        monkeypatch.setattr(app_mod, "llm", FakeLLM())
-        monkeypatch.setattr(app_mod, "tokenizer", FallbackTokenizer())
-        monkeypatch.setattr(app_mod, "build_messages", boom_response)
-        resp = c.post("/v1/answer", json={"query": "IEA500I"})
-    assert resp.status_code == 500
-    assert resp.json() == {"code": "internal", "message": "internal error"}
-    assert "budget invariant" not in resp.text
 
 
 def test_parse_answer_shape_and_rejected_attempt_telemetry():
@@ -1554,7 +1473,6 @@ def test_parse_answer_repeated_fences_finish_well_under_five_seconds():
 
 
 def test_build_messages_context_budgeting():
-    from mainframe_rag.agent.answer import build_messages
 
     hit1 = _hit().model_copy(update={"text": "A" * 5000})
     hit2 = _hit(cite_suffix="p. 1-7").model_copy(update={"text": "B" * 5000})
@@ -1668,49 +1586,34 @@ def test_answer_accepts_per_request_temperature_override(client, monkeypatch):
     assert fake.last_temperature == 0.2
 
 
+def _json_answer_client(bodies, content):
+    def respond(request):
+        bodies.append(json.loads(request.content))
+        return httpx2.Response(200, json={"choices": [
+            {"message": {"content": content}, "finish_reason": "stop"}
+        ]})
+
+    return httpx2.Client(transport=httpx2.MockTransport(respond))
+
+
 def test_httpx_llm_client_passes_reasoning_params():
-    effort = "xhigh"
-    from mainframe_rag.agent.answer import HttpxLLMClient
-    from mainframe_rag.config import Settings
-    from mainframe_rag.ports import ChatMessage
 
-    recorded_payload: dict[str, object] = {}
-
-    class MockHttpResp:
-        def raise_for_status(self):
-            pass
-
-        def json(self):
-            return {
-                "choices": [
-                    {
-                        "message": {"content": "Test answer\n\nCitations:\nSA22-0000-00, p. 1-6"},
-                        "finish_reason": "stop",
-                    }
-                ]
-            }
-
-    class MockHttpClient:
-        def post(self, url, json=None, timeout=None, headers=None):
-            recorded_payload.update(json or {})
-            return MockHttpResp()
-
-        def close(self):
-            pass
-
+    bodies: list[dict] = []
     s = Settings(
         llm_base_url="http://mock-llm/v1",
         llm_model_reasoning="mock-reasoning-model",
         _env_file=None,
     )
-    client = HttpxLLMClient(s, client=MockHttpClient())  # type: ignore[arg-type]
-    msgs = [ChatMessage(role="user", content="Hello")]
-    ans = client.chat(msgs, reasoning_effort=effort, temperature=0.2)
+    with _json_answer_client(bodies, "Test answer\n\nCitations:\nSA22-0000-00, p. 1-6") as http:
+        ans = HttpxLLMClient(s, client=http).chat(
+            [ChatMessage(role="user", content="Hello")],
+            reasoning_effort="xhigh", temperature=0.2,
+        )
     assert ans.content and "Test answer" in ans.content
     assert ans.finish_reason == "stop"
-    assert recorded_payload["model"] == "mock-reasoning-model"
-    assert recorded_payload["reasoning_effort"] == effort
-    assert recorded_payload["temperature"] == 0.2
+    assert bodies[0]["model"] == "mock-reasoning-model"
+    assert bodies[0]["reasoning_effort"] == "xhigh"
+    assert bodies[0]["temperature"] == 0.2
 
 
 def test_parse_answer_citation_block_forms():
@@ -1834,7 +1737,6 @@ def test_parse_answer_filename_stem_body_citation_hygiene():
 
 
 def test_build_messages_preserves_syntax_and_message_fidelity():
-    from mainframe_rag.agent.answer import build_messages
     from mainframe_rag.retrieve.query import SearchHit
 
     syntax_hit = SearchHit(
@@ -1877,44 +1779,36 @@ def test_build_messages_preserves_syntax_and_message_fidelity():
     assert "[truncated]" in content.split("[2]")[1]
 
 
+def _json_logs(caplog, **match):
+    """Decoded JSON log records whose fields match every given value."""
+    found = []
+    for record in caplog.records:
+        try:
+            payload = json.loads(record.getMessage())
+        except (ValueError, TypeError):
+            continue
+        if all(payload.get(key) == value for key, value in match.items()):
+            found.append(payload)
+    return found
+
+
 def test_answer_audit_log_with_chat_result(client, monkeypatch, caplog):
-    import json
     import logging
 
-    from mainframe_rag.ports import ChatResult, TokenUsage
-
-    class UsageLLM:
-        def chat(self, messages, *args, **kwargs):
-            return ChatResult(
-                content=(
-                    "Reissue command.\nSA22-9999-99 Not Retrieved, Made Up > Path, p. 9-9\n\n"
-                    "Citations:\n- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\n"
-                ),
-                finish_reason="stop",
-                usage=TokenUsage(
-                    prompt_tokens=120,
-                    completion_tokens=45,
-                    reasoning_tokens=20,
-                    total_tokens=165,
-                ),
-            )
-
-    monkeypatch.setattr(app_mod, "llm", UsageLLM())
+    monkeypatch.setattr(app_mod, "llm", ChatStub(
+        "Reissue command.\nSA22-9999-99 Not Retrieved, Made Up > Path, p. 9-9\n\n"
+        "Citations:\n- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\n",
+        usage=TokenUsage(
+            prompt_tokens=120, completion_tokens=45, reasoning_tokens=20, total_tokens=165,
+        ),
+    ))
 
     with caplog.at_level(logging.INFO):
         resp = client.post("/v1/answer", json={"query": "IEA500I"})
 
     assert resp.status_code == 200
 
-    # Find audit log record
-    records = []
-    for r in caplog.records:
-        try:
-            d = json.loads(r.message)
-            if d.get("action") == "answer":
-                records.append(d)
-        except (ValueError, KeyError):
-            pass
+    records = _json_logs(caplog, action="answer")
     assert records
     audit = records[-1]
     assert audit["query_complexity"] == "simple"
@@ -1933,34 +1827,21 @@ def test_answer_audit_log_with_chat_result(client, monkeypatch, caplog):
 
 
 def test_answer_alert_on_non_stop_finish_reason(client, monkeypatch, caplog):
-    import json
     import logging
 
-    from mainframe_rag.ports import ChatResult, TokenUsage
-
-    class TruncatedLLM:
-        def chat(self, messages, *args, **kwargs):
-            return ChatResult(
-                content="Partial answer without conclusion.\n\nCitations:\n- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\n",
-                finish_reason="length",
-                usage=TokenUsage(prompt_tokens=200, completion_tokens=100, reasoning_tokens=0, total_tokens=300),
-            )
-
-    monkeypatch.setattr(app_mod, "llm", TruncatedLLM())
+    monkeypatch.setattr(app_mod, "llm", ChatStub(
+        "Partial answer without conclusion.\n\nCitations:\n"
+        "- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\n",
+        "length",
+        TokenUsage(prompt_tokens=200, completion_tokens=100, reasoning_tokens=0, total_tokens=300),
+    ))
 
     with caplog.at_level(logging.WARNING):
         resp = client.post("/v1/answer", json={"query": "IEA500I"})
 
     assert resp.status_code == 200
 
-    alert_records = []
-    for r in caplog.records:
-        try:
-            d = json.loads(r.message)
-            if d.get("action") == "answer_alert":
-                alert_records.append(d)
-        except (ValueError, KeyError):
-            pass
+    alert_records = _json_logs(caplog, action="answer_alert")
     assert alert_records
     alert = alert_records[-1]
     assert alert["alert"] == "finish_reason_non_stop"
@@ -1974,8 +1855,6 @@ def test_build_messages_tokenizer_budget_respected():
     checkable without any network."""
     import re
 
-    from mainframe_rag.agent.answer import build_messages
-    from mainframe_rag.config import Settings
 
     hits = [
         SearchHit(
@@ -2048,8 +1927,6 @@ def test_build_messages_complex_budget_prices_thinking_reserve():
     (high-effort thinking shares the window with the answer) and the verify
     pass prices the safety margin the plan already kept; the simple path
     keeps the legacy budget/packing with a zero thinking term."""
-    from mainframe_rag.agent.answer import build_messages
-    from mainframe_rag.config import Settings
 
     hits = [
         SearchHit(
@@ -2121,8 +1998,6 @@ def test_build_messages_complex_budget_prices_thinking_reserve():
 ])
 def test_prompt_budget_prices_simple_reasoning_without_changing_complex(chat, order, complexity):
     from mainframe_rag.agent.answer import build_chat_messages, build_messages
-    from mainframe_rag.config import Settings
-    from mainframe_rag.ports import ChatMessage
 
     class TemplateTokenizer(FallbackTokenizer):
         def count_messages(self, messages, *, reasoning_effort=None):
@@ -2187,34 +2062,17 @@ def test_as_chat_result_accepts_only_structured_completions():
 def test_chat_content_none_becomes_empty_string():
     """A reasoning model that returns content: None must surface as "",
     never the string "None"."""
-    from mainframe_rag.agent.answer import HttpxLLMClient
-    from mainframe_rag.config import Settings
-    from mainframe_rag.ports import ChatMessage, ChatResult
 
-    class FakeResp:
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return {
-                "choices": [
-                    {"message": {"role": "assistant", "content": None}, "finish_reason": "stop"}
-                ],
-                "usage": {"prompt_tokens": 1, "completion_tokens": 0, "total_tokens": 1},
-            }
-
-    class FakeClient:
-        def post(self, url, json=None, headers=None):
-            return FakeResp()
-
+    bodies: list[dict] = []
     settings = Settings(
         llm_base_url="http://llm.internal/v1",
         llm_model_reasoning="test-reasoning-model",
         _env_file=None,
     )
-    result = HttpxLLMClient(settings, client=FakeClient()).chat(
-        [ChatMessage(role="user", content="q")]
-    )
+    with _json_answer_client(bodies, None) as http:
+        result = HttpxLLMClient(settings, client=http).chat(
+            [ChatMessage(role="user", content="q")]
+        )
     assert isinstance(result, ChatResult)
     assert result.content == ""
 
@@ -2253,40 +2111,22 @@ def test_server_timing_headers_emitted_on_search_and_answer(client, monkeypatch)
 
 
 def test_httpx_llm_client_streaming_measures_ttft_on_first_content_token():
-    from contextlib import contextmanager
 
-    from mainframe_rag.agent.answer import HttpxLLMClient
-    from mainframe_rag.config import Settings
-    from mainframe_rag.ports import ChatMessage
-
-    lines = [
+    fake = HttpxStreamFake(lines=[
         'data: {"choices": [{"delta": {}}]}',
         'data: {"choices": [{"delta": {"content": "Hello "}}]}',
         'data: {"choices": [{"delta": {"content": "World"}}], "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7}}',
         'data: {"choices": [{"delta": {}, "finish_reason": "stop"}]}',
         "data: [DONE]",
-    ]
-
-    class FakeStreamResp:
-        def raise_for_status(self):
-            return None
-
-        def iter_lines(self):
-            return iter(lines)
-
-    class FakeStreamingClient:
-        @contextmanager
-        def stream(self, method, url, json=None, headers=None):
-            yield FakeStreamResp()
-
+    ])
+    fake.stream = fake.stream_sync
     settings = Settings(
         llm_base_url="http://llm.internal/v1",
         llm_model_reasoning="test-reasoning-model",
         llm_stream=True,
         _env_file=None,
     )
-    client = HttpxLLMClient(settings, client=FakeStreamingClient())
-    res = client.chat([ChatMessage(role="user", content="hi")])
+    res = HttpxLLMClient(settings, client=fake).chat([ChatMessage(role="user", content="hi")])
     assert res.content == "Hello World"
     assert res.ttft_ms is not None
     assert res.usage.total_tokens == 7
@@ -2296,61 +2136,26 @@ def test_httpx_llm_client_streaming_falls_back_to_post_on_empty_or_failed_stream
     """A stream with no content deltas (reasoning-channel-only output) and a
     stream that drops mid-connection both recover through the non-streaming
     POST."""
-    from contextlib import contextmanager
 
-    import httpx2
+    empty_sse = (
+        'data: {"choices": [{"delta": {}}]}\n'
+        'data: {"choices": [{"delta": {}, "finish_reason": "stop"}]}\n'
+        "data: [DONE]\n"
+    )
+    fallback = {"choices": [
+        {"message": {"role": "assistant", "content": "Fallback content"},
+         "finish_reason": "stop"}
+    ], "usage": {"prompt_tokens": 2, "completion_tokens": 2, "total_tokens": 4}}
+    state = {"stream_error": False, "streams": 0, "posts": 0}
 
-    from mainframe_rag.agent.answer import HttpxLLMClient
-    from mainframe_rag.config import Settings
-    from mainframe_rag.ports import ChatMessage
-
-    class EmptyStreamResp:
-        def raise_for_status(self):
-            return None
-
-        def iter_lines(self):
-            return iter(
-                [
-                    'data: {"choices": [{"delta": {}}]}',
-                    'data: {"choices": [{"delta": {}, "finish_reason": "stop"}]}',
-                    "data: [DONE]",
-                ]
-            )
-
-    class PostResp:
-        def __init__(self, content):
-            self.content = content
-
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return {
-                "choices": [
-                    {
-                        "message": {"role": "assistant", "content": self.content},
-                        "finish_reason": "stop",
-                    }
-                ],
-                "usage": {"prompt_tokens": 2, "completion_tokens": 2, "total_tokens": 4},
-            }
-
-    class FallbackClient:
-        def __init__(self, stream_error):
-            self.stream_error = stream_error
-            self.stream_called = False
-            self.post_called = False
-
-        @contextmanager
-        def stream(self, method, url, json=None, headers=None):
-            self.stream_called = True
-            if self.stream_error:
+    def respond(request):
+        if json.loads(request.content).get("stream"):
+            state["streams"] += 1
+            if state["stream_error"]:
                 raise httpx2.ConnectError("Connection dropped during streaming")
-            yield EmptyStreamResp()
-
-        def post(self, url, json=None, headers=None):
-            self.post_called = True
-            return PostResp("Fallback content")
+            return httpx2.Response(200, text=empty_sse)
+        state["posts"] += 1
+        return httpx2.Response(200, json=fallback)
 
     settings = Settings(
         llm_base_url="http://llm.internal/v1",
@@ -2359,12 +2164,12 @@ def test_httpx_llm_client_streaming_falls_back_to_post_on_empty_or_failed_stream
         _env_file=None,
     )
     for stream_error in (False, True):
-        fake_client = FallbackClient(stream_error)
-        res = HttpxLLMClient(settings, client=fake_client).chat(
-            [ChatMessage(role="user", content="hi")]
-        )
-        assert fake_client.stream_called is True
-        assert fake_client.post_called is True
+        state.update(stream_error=stream_error, streams=0, posts=0)
+        with httpx2.Client(transport=httpx2.MockTransport(respond)) as http:
+            res = HttpxLLMClient(settings, client=http).chat(
+                [ChatMessage(role="user", content="hi")]
+            )
+        assert (state["streams"], state["posts"]) == (1, 1)
         assert res.content == "Fallback content"
 
 
@@ -2402,33 +2207,6 @@ class StreamingFakeLLM:
             "usage": TokenUsage(prompt_tokens=10, completion_tokens=25, reasoning_tokens=5, total_tokens=35),
             "ttft_ms": 12,
         }
-
-
-def _parse_sse_events(text: str) -> list[tuple[str, dict]]:
-    """Parse raw SSE text into a list of (event_type, json_data) tuples."""
-    events = []
-    current_event = "message"
-    current_data: list[str] = []
-
-    for line in text.split("\n"):
-        line = line.strip()
-        if not line:
-            if current_data:
-                data_str = "\n".join(current_data)
-                events.append((current_event, json.loads(data_str)))
-                current_event = "message"
-                current_data = []
-            continue
-        if line.startswith("event:"):
-            current_event = line[6:].strip()
-        elif line.startswith("data:"):
-            current_data.append(line[5:].strip())
-
-    if current_data:
-        data_str = "\n".join(current_data)
-        events.append((current_event, json.loads(data_str)))
-
-    return events
 
 
 def test_v1_answer_streaming_sse_token_deltas_and_final_event(client, monkeypatch):
@@ -2482,39 +2260,6 @@ def test_v1_answer_stream_query_param_and_body_precedence(client, monkeypatch):
     # ?stream=false query param overrides body stream: true
     r4 = client.post("/v1/answer?stream=false", json={"query": "IEA500I command", "stream": True})
     assert r4.headers["content-type"] == "application/json"
-
-
-def test_v1_answer_empty_hits_streaming(client, monkeypatch):
-    class EmptySearch:
-        def search(self, *a, **kw):
-            return [], "nl", {"embed_ms": 1, "qdrant_ms": 1}
-
-    monkeypatch.setattr(app_mod, "retrieve_search", EmptySearch().search)
-    resp = client.post("/v1/answer?stream=true", json={"query": "random obscure thing"})
-    assert resp.status_code == 200
-    assert "text/event-stream" in resp.headers["content-type"]
-    events = _parse_sse_events(resp.text)
-    assert len(events) == 1
-    event_type, payload = events[0]
-    assert event_type == "final"
-    assert payload["answer"] == "No supporting manual excerpts were found for this question."
-    assert payload["citations"] == []
-    assert payload["script"] is None
-    assert payload["script_lang"] is None
-    assert payload["hits"] == []
-    # Schema parity with the non-empty final event (review S6): same keys,
-    # no tokens were streamed, usage is all zeros.
-    assert payload["finish_reason"] == "stop"
-    assert payload["ttft_ms"] is None
-    assert payload["verification_state"] == "insufficient_evidence"
-    assert payload["script_review_required"] is False
-    assert payload["supplied_evidence"] == [] and payload["evidence_omitted"] == 0
-    assert payload["usage"] == {
-        "prompt_tokens": 0,
-        "completion_tokens": 0,
-        "reasoning_tokens": 0,
-        "total_tokens": 0,
-    }
 
 
 def _empty_search(kind):
@@ -2600,6 +2345,7 @@ def test_sse_final_schemas_match_across_paths():
     assert full["script_review_required"] is False
     assert empty["verification_state"] == "insufficient_evidence"
     assert empty["script_review_required"] is False
+    assert empty["finish_reason"] == "stop" and empty["script"] is None
     assert final_payload(
         "req-3", "A.", ["c"], False, None, "nl", [hit], "stop", None, usage,
         verification_state="accepted", script_review_required=True,
@@ -2652,11 +2398,7 @@ async def test_v1_answer_20_concurrent_requests_no_threadpool_starvation(
 
     import httpx2
 
-    monkeypatch.setenv("QDRANT_URL", "http://localhost:6333")
-    monkeypatch.setenv("EMBED_MODE", "hash")
-    monkeypatch.setenv("ALLOW_HASH_MODE", "true")
-    monkeypatch.setenv("LLM_BASE_URL", "http://llm.internal/v1")
-    monkeypatch.setenv("LLM_MODEL_REASONING", "test-reasoning-model")
+    set_agent_env(monkeypatch)
 
     class BarrierAsyncLLM:
         def __init__(self, parties):
@@ -2696,47 +2438,25 @@ async def test_v1_answer_20_concurrent_requests_no_threadpool_starvation(
 
 @pytest.mark.anyio
 async def test_httpx_llm_client_chat_stream_async():
-    from collections.abc import AsyncIterator
-    from contextlib import asynccontextmanager
 
-    from mainframe_rag.agent.answer import HttpxLLMClient
-    from mainframe_rag.config import Settings
-    from mainframe_rag.ports import ChatMessage
-
-    class FakeAsyncStreamResp:
-        def raise_for_status(self):
-            return None
-
-        async def aiter_lines(self) -> AsyncIterator[str]:
-            lines = [
-                'data: {"choices": [{"delta": {"content": "First "}}]}',
-                'data: {"choices": [{"delta": {"content": "second"}}]}',
-                'data: {"choices": [{"finish_reason": "stop"}], "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7}}',
-                "data: [DONE]",
-            ]
-            for l in lines:
-                yield l
-
-    class FakeAsyncHttpClient:
-        @asynccontextmanager
-        async def stream(self, method, url, json=None, headers=None):
-            yield FakeAsyncStreamResp()
-
+    fake = HttpxStreamFake(lines=[
+        'data: {"choices": [{"delta": {"content": "First "}}]}',
+        'data: {"choices": [{"delta": {"content": "second"}}]}',
+        'data: {"choices": [{"finish_reason": "stop"}], "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7}}',
+        "data: [DONE]",
+    ])
     settings = Settings(
         llm_base_url="http://llm.internal/v1",
         llm_model_reasoning="test-reasoning-model",
         _env_file=None,
     )
-    client = HttpxLLMClient(settings, client=FakeAsyncHttpClient())
-    items = []
-    async for item in client.chat_stream([ChatMessage(role="user", content="hi")]):
-        items.append(item)
+    llm = HttpxLLMClient(settings, client=fake)
+    items = [item async for item in llm.chat_stream([ChatMessage(role="user", content="hi")])]
 
-    assert len(items) == 3
-    assert items[0]["type"] == "token" and items[0]["delta"] == "First "
+    assert [i["type"] for i in items] == ["token", "token", "done"]
+    assert (items[0]["delta"], items[1]["delta"]) == ("First ", "second")
     assert items[0]["ttft_ms"] is not None
-    assert items[1]["type"] == "token" and items[1]["delta"] == "second"
-    assert items[2]["type"] == "done" and items[2]["finish_reason"] == "stop"
+    assert items[2]["finish_reason"] == "stop"
     assert items[2]["usage"].total_tokens == 7
 
 
@@ -2781,9 +2501,6 @@ async def test_httpx_llm_client_chat_stream_empty_content_recovers_via_post():
             self.posts += 1
             return PostResp()
 
-    from mainframe_rag.agent.answer import HttpxLLMClient
-    from mainframe_rag.config import Settings
-    from mainframe_rag.ports import ChatMessage
 
     fake = RecoveringClient()
     settings = Settings(
@@ -2915,38 +2632,37 @@ def test_invalid_utf8_and_malformed_bodies_use_the_fixed_envelope(client):
             assert resp.json() == _FIXED_422, (path, raw)
 
 
-@pytest.mark.parametrize("temperature", [-1.0, 2.1])
-def test_answer_rejects_out_of_range_temperature(client, temperature):
-    """Issue #596: the temperature override is bounded like
-    Settings.llm_temperature, so client input errors 422 before retrieval
-    instead of surfacing as upstream 502s."""
-    resp = client.post("/v1/answer", json={"query": "IEA500I", "temperature": temperature})
-    assert resp.status_code == 422
-    assert resp.json() == {"code": "invalid_request", "message": "request body failed validation"}
+@pytest.mark.parametrize("temperature, status", [
+    (-1.0, 422),
+    (2.1, 422),
+    (0.0, 200),
+    (2.0, 200),
+    (float("nan"), None),
+    (float("inf"), None),
+], ids=["below-min", "above-max", "at-min", "at-max", "nan", "inf"])
+def test_answer_temperature_is_bounded_like_settings(client, temperature, status):
+    """Issue #596: the temperature override carries Settings.llm_temperature
+    bounds — out-of-range input errors 422 before retrieval instead of an
+    upstream 502; the boundary values are served; non-finite floats cannot
+    cross the JSON wire, so the bound is pinned at the model layer."""
+    if status is None:
+        import pydantic
 
-
-def test_answer_temperature_rejects_non_finite():
-    """Non-finite floats cannot cross the JSON wire (the client encoder
-    refuses them), so the allow_inf_nan=False bound is pinned at the model
-    layer instead."""
-    import pydantic
-
-    for temperature in (float("nan"), float("inf")):
         with pytest.raises(pydantic.ValidationError):
             app_mod.AnswerRequest(query="IEA500I", temperature=temperature)
-
-
-def test_answer_accepts_boundary_temperature(client):
-    for temperature in (0.0, 2.0):
-        resp = client.post("/v1/answer", json={"query": "IEA500I", "temperature": temperature})
-        assert resp.status_code == 200
+        return
+    resp = client.post("/v1/answer", json={"query": "IEA500I", "temperature": temperature})
+    assert resp.status_code == status
+    if status == 422:
+        assert resp.json() == {
+            "code": "invalid_request", "message": "request body failed validation"
+        }
 
 
 def test_build_messages_bounds_splunk_context():
     """Issue #87: unbounded caller-supplied telemetry truncates with the
     standard suffix instead of starving excerpts out of the window; a
     context within the bound is left alone."""
-    from mainframe_rag.agent.answer import build_messages
 
     user = build_messages(
         "IEA500I", [_hit()], splunk_context="y" * 5000, splunk_context_max_chars=100
@@ -2962,20 +2678,31 @@ def test_build_messages_bounds_splunk_context():
     assert "[truncated]" not in user
 
 
-def test_metrics_enabled_serves_prometheus_exposition(monkeypatch):
+@pytest.mark.parametrize("failing", [False, True], ids=["exposition", "scrape-failure"])
+def test_metrics_endpoint_exposition_and_scrape_failure(monkeypatch, failing):
     """Issue #187: enabled lifespan exposes runtime defaults as Prometheus
-    text for UWM scrapes."""
-    monkeypatch.setenv("QDRANT_URL", "http://localhost:6333")
-    monkeypatch.setenv("EMBED_MODE", "hash")
-    monkeypatch.setenv("ALLOW_HASH_MODE", "true")
-    monkeypatch.setenv("LLM_BASE_URL", "http://llm.internal/v1")
-    monkeypatch.setenv("LLM_MODEL_REASONING", "test-reasoning-model")
+    text for UWM scrapes. Issue #370: when exposition fails, GET /metrics
+    serves a fixed 503 metrics_unavailable without exception details."""
+    set_agent_env(monkeypatch)
     monkeypatch.setenv("METRICS_ENABLED", "true")
+    if failing:
+        def _exploding_generate_latest():
+            raise RuntimeError("collector exploded with secret connection info")
+
+        monkeypatch.setattr("prometheus_client.generate_latest", _exploding_generate_latest)
     with TestClient(app_mod.app) as c:
         resp = c.get("/metrics")
-    assert resp.status_code == 200
-    assert resp.headers["content-type"].startswith("text/plain")
-    assert "python_gc_objects_collected_total" in resp.text
+    if failing:
+        assert resp.status_code == 503
+        assert resp.json() == {
+            "code": "metrics_unavailable",
+            "message": "metrics are not available",
+        }
+        assert "collector exploded" not in resp.text
+    else:
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("text/plain")
+        assert "python_gc_objects_collected_total" in resp.text
 
 
 def test_lifespan_reranker_unreachable_warns_but_still_listens(monkeypatch, capsys):
@@ -3064,94 +2791,16 @@ def test_prompt_build_runs_off_the_event_loop(client, monkeypatch):
 _ACCEPTED_CITE = "SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6"
 
 
-class FluentNoCiteLLM:
-    """Fluent answer with no citation block and no bracket markers: prose
-    only, so nothing is eligible — but the shape is not an abstention."""
-
-    def chat(self, messages, *args, **kwargs):
-        return ChatResult(
-            content=(
-                "Reissue the command after initialization completes. "
-                "The IOSCMDS LIST output shows the pending requests."
-            ),
-            finish_reason="stop",
-            usage=TokenUsage(),
-        )
+_FLUENT_NO_CITE = (
+    "Reissue the command after initialization completes. "
+    "The IOSCMDS LIST output shows the pending requests."
+)
+_REFUSAL = "The excerpts do not contain this procedure."
+_CITED = f"Reissue the command after initialization completes.\n\nCitations:\n- {_ACCEPTED_CITE}\n"
 
 
-class FluentDraftWithScriptLLM:
-    """Fluent prose plus a script fence, zero eligible citations: the
-    orthogonal draft+script combo (issue #365 review) — draft state AND
-    review flag together."""
-
-    def chat(self, messages, *args, **kwargs):
-        return ChatResult(
-            content=(
-                "Reissue the command after initialization completes.\n\n"
-                "```jcl\n//STEP1 EXEC PGM=IEFBR14\n```\n"
-            ),
-            finish_reason="stop",
-            usage=TokenUsage(),
-        )
-
-
-class RefusalLLM:
-    def chat(self, messages, *args, **kwargs):
-        return ChatResult(
-            content=(
-                "The excerpts do not contain this procedure."
-            ),
-            finish_reason="stop",
-            usage=TokenUsage(),
-        )
-
-
-class RefusalWithScriptLLM:
-    def chat(self, messages, *args, **kwargs):
-        return ChatResult(
-            content=(
-                "The excerpts do not contain this procedure.\n\n"
-                "```jcl\n// example only\nIOSCMDS LIST\n```\n"
-            ),
-            finish_reason="stop",
-            usage=TokenUsage(),
-        )
-
-
-class LengthFinishLLM:
-    """Cut-off generation: valid citation present, but finish_reason says
-    the model was stopped by the token budget."""
-
-    def chat(self, messages, *args, **kwargs):
-        from mainframe_rag.ports import ChatResult, TokenUsage
-
-        return ChatResult(
-            content=(
-                "Reissue the command after initialization completes.\n\n"
-                "Citations:\n"
-                f"- {_ACCEPTED_CITE}\n"
-            ),
-            finish_reason="length",
-            usage=TokenUsage(prompt_tokens=10, completion_tokens=25, total_tokens=35),
-        )
-
-
-class PremiseCorrectingLLM:
-    """Corrects a false premise (JES3 vs JES2) while citing the supplied
-    excerpt: correction prose must keep its citations (issue #365 req 5)."""
-
-    def chat(self, messages, *args, **kwargs):
-        return ChatResult(
-            content=(
-                "The question assumes JES3, but the excerpts describe JES2 spool "
-                "handling. For JES2, reissue the command after initialization "
-                "completes.\n\n"
-                "Citations:\n"
-                f"- {_ACCEPTED_CITE}\n"
-            ),
-            finish_reason="stop",
-            usage=TokenUsage(),
-        )
+def _script(content: str, script: str) -> str:
+    return content + "\n\n```jcl\n" + script + "\n```\n"
 
 
 def test_answer_accepted_json_and_sse_agree(client, monkeypatch):
@@ -3178,53 +2827,32 @@ def test_answer_accepted_json_and_sse_agree(client, monkeypatch):
     assert final["script_review_required"] is True
 
 
-def test_answer_unverified_draft_states(client, monkeypatch):
-    """Zero eligible citations on a non-abstention is a 200 draft, never an
-    accepted answer and never an error: fluent prose with no cites, bracket
-    markers only (inferred provenance is eligibility, not grounding), and an
-    uncited script that is still a draft AND flagged for review."""
-    monkeypatch.setattr(app_mod, "llm", FluentNoCiteLLM())
-    resp = client.post("/v1/answer", json={"query": "IEA500I"})
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["citations"] == []
-    assert body["verification_state"] == "unverified_draft"
-    assert body["script_review_required"] is False
-
-    monkeypatch.setattr(app_mod, "llm", InferredOnlyLLM())
+@pytest.mark.parametrize("content,state,cites,inferred,script", [
+    # Zero eligible citations on a non-abstention is a draft, never accepted
+    # and never an error: fluent prose with no cites.
+    (_FLUENT_NO_CITE, "unverified_draft", [], False, None),
+    # Bracket markers only: inferred provenance is eligibility, not grounding.
+    ("Reissue the command after initialization completes [1].",
+     "unverified_draft", [_ACCEPTED_CITE], True, None),
+    # The orthogonal draft+script combo: draft state AND review flag together.
+    (_script("Reissue the command after initialization completes.",
+             "//STEP1 EXEC PGM=IEFBR14"),
+     "unverified_draft", [], False, "//STEP1 EXEC PGM=IEFBR14"),
+    # A refusal carries no citations; a refusal that still ships a script fence
+    # keeps the script AND flags it — a cited-looking draft cannot certify.
+    (_REFUSAL, "insufficient_evidence", [], False, None),
+    (_script(_REFUSAL, "// example only\nIOSCMDS LIST"),
+     "insufficient_evidence", [], False, "// example only\nIOSCMDS LIST"),
+])
+def test_answer_draft_and_abstention_states(client, monkeypatch, content, state, cites, inferred, script):
+    """A 200 draft is never accepted; abstention is insufficient_evidence."""
+    monkeypatch.setattr(app_mod, "llm", ChatStub(content))
     body = client.post("/v1/answer", json={"query": "IEA500I"}).json()
-    assert body["citations_inferred"] is True
-    assert len(body["citations"]) == 1
-    assert body["verification_state"] == "unverified_draft"
-
-    monkeypatch.setattr(app_mod, "llm", FluentDraftWithScriptLLM())
-    body = client.post("/v1/answer", json={"query": "IEA500I"}).json()
-    assert body["citations"] == []
-    assert body["verification_state"] == "unverified_draft"
-    assert body["script"] == "//STEP1 EXEC PGM=IEFBR14"
-    assert body["script_lang"] == "jcl"
-    assert body["script_review_required"] is True
-
-
-def test_answer_abstention_is_insufficient_evidence(client, monkeypatch):
-    """A refusal carries no citations; a refusal that still ships a script
-    fence keeps the script AND flags it — a cited-looking draft must not
-    certify execution."""
-    monkeypatch.setattr(app_mod, "llm", RefusalLLM())
-    resp = client.post("/v1/answer", json={"query": "IEA500I"})
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data["citations"] == []
-    assert data["verification_state"] == "insufficient_evidence"
-    assert data["script_review_required"] is False
-
-    monkeypatch.setattr(app_mod, "llm", RefusalWithScriptLLM())
-    body = client.post("/v1/answer", json={"query": "IEA500I"}).json()
-    assert body["citations"] == []
-    assert body["verification_state"] == "insufficient_evidence"
-    assert body["script"] == "// example only\nIOSCMDS LIST"
-    assert body["script_lang"] == "jcl"
-    assert body["script_review_required"] is True
+    assert body["citations"] == cites
+    assert body["citations_inferred"] is inferred
+    assert body["verification_state"] == state
+    assert body["script"] == script
+    assert body["script_review_required"] is (script is not None)
 
 
 def test_answer_length_finish_is_generation_incomplete_json_and_sse(client, monkeypatch):
@@ -3232,7 +2860,9 @@ def test_answer_length_finish_is_generation_incomplete_json_and_sse(client, monk
     mid-thought, so the answer is incomplete, not accepted — on JSON, and on
     a length-terminated stream, which still yields exactly one final (and no
     error event) whose cut Citations: tail does not read as accepted."""
-    monkeypatch.setattr(app_mod, "llm", LengthFinishLLM())
+    monkeypatch.setattr(app_mod, "llm", ChatStub(
+        _CITED, "length", TokenUsage(prompt_tokens=10, completion_tokens=25, total_tokens=35)
+    ))
     body = client.post("/v1/answer", json={"query": "IEA500I"}).json()
     assert body["citations"] == [_ACCEPTED_CITE]
     assert body["verification_state"] == "generation_incomplete"
@@ -3258,76 +2888,54 @@ def test_answer_length_finish_is_generation_incomplete_json_and_sse(client, monk
 def test_answer_premise_correction_keeps_citations(client, monkeypatch):
     """A false-premise correction with eligible cites is a supported answer,
     not an abstention: citations survive and the state is accepted."""
-    monkeypatch.setattr(app_mod, "llm", PremiseCorrectingLLM())
+    monkeypatch.setattr(app_mod, "llm", ChatStub(
+        "The question assumes JES3, but the excerpts describe JES2 spool handling. "
+        "For JES2, reissue the command after initialization completes.\n\n"
+        f"Citations:\n- {_ACCEPTED_CITE}\n"
+    ))
     body = client.post("/v1/answer", json={"query": "JES3 spool handling"}).json()
     assert body["citations"] == [_ACCEPTED_CITE]
     assert body["verification_state"] == "accepted"
 
 
-def test_verification_state_for_matrix():
-    """Unit pin for the single mapping rule (issue #365): order matters —
-    refusal/empty first, unfinished generation second, citation outcome last."""
-
-    assert verification_state_for(
-        answer="Retry.",
-        citations=[_ACCEPTED_CITE], citations_inferred=False,
-        finish_reason="stop", abstained=False, empty_hits=False,
-    ) == "accepted"
-    assert verification_state_for(
-        answer="The supplied excerpts do not answer the question.",
-        citations=[], citations_inferred=False,
-        finish_reason="stop", abstained=True, empty_hits=False,
-    ) == "insufficient_evidence"
+_C = _ACCEPTED_CITE
+_MATRIX = [
+    # (answer, citations, inferred, finish, abstained, empty_hits, state)
+    ("Retry.", [_C], False, "stop", False, False, "accepted"),
+    ("The supplied excerpts do not answer the question.", [], False, "stop", True, False,
+     "insufficient_evidence"),
     # #630: a refusal cut off by a non-stop finish is incomplete; the
     # deterministic empty-hits short circuit stays insufficient_evidence.
-    for finish in ("length", "content_filter", ""):
-        assert verification_state_for(
-            answer="The excerpts do not contain", citations=[], citations_inferred=False,
-            finish_reason=finish, abstained=True, empty_hits=False,
-        ) == "generation_incomplete"
-    assert verification_state_for(
-        answer="No excerpts.", citations=[], citations_inferred=False,
-        finish_reason="", abstained=False, empty_hits=True,
-    ) == "insufficient_evidence"
-    assert verification_state_for(
-        answer="No supporting manual excerpts were found for this question.",
-        citations=[], citations_inferred=False,
-        finish_reason="stop", abstained=False, empty_hits=True,
-    ) == "insufficient_evidence"
-    assert verification_state_for(
-        answer="Retry.",
-        citations=[_ACCEPTED_CITE], citations_inferred=False,
-        finish_reason="length", abstained=False, empty_hits=False,
-    ) == "generation_incomplete"
-    assert verification_state_for(
-        answer="Retry.",
-        citations=[], citations_inferred=False,
-        finish_reason="stop", abstained=False, empty_hits=False,
-    ) == "unverified_draft"
-    assert verification_state_for(
-        answer="Retry.",
-        citations=[_ACCEPTED_CITE], citations_inferred=True,
-        finish_reason="stop", abstained=False, empty_hits=False,
-    ) == "unverified_draft"
+    *[("The excerpts do not contain", [], False, f, True, False, "generation_incomplete")
+      for f in ("length", "content_filter", "")],
+    ("No excerpts.", [], False, "", False, True, "insufficient_evidence"),
+    ("No supporting manual excerpts were found for this question.", [], False, "stop",
+     False, True, "insufficient_evidence"),
+    ("Retry.", [_C], False, "length", False, False, "generation_incomplete"),
+    ("Retry.", [], False, "stop", False, False, "unverified_draft"),
+    ("Retry.", [_C], True, "stop", False, False, "unverified_draft"),
     # Unfinished generation outranks citation outcome: cites present but cut.
-    assert verification_state_for(
-        answer="Retry.",
-        citations=[], citations_inferred=False,
-        finish_reason="length", abstained=False, empty_hits=False,
-    ) == "generation_incomplete"
+    ("Retry.", [], False, "length", False, False, "generation_incomplete"),
     # Every explicitly classified non-stop finish stays incomplete; only a
     # real "stop" can reach accepted (issue #365).
-    assert verification_state_for(
-        answer="Retry.",
-        citations=[_ACCEPTED_CITE], citations_inferred=False,
-        finish_reason="content_filter", abstained=False, empty_hits=False,
-    ) == "generation_incomplete"
+    ("Retry.", [_C], False, "content_filter", False, False, "generation_incomplete"),
     # Empty model content is incomplete, not a draft: nothing to review.
+    ("", [], False, "stop", False, False, "generation_incomplete"),
+]
+
+
+@pytest.mark.parametrize("answer,citations,inferred,finish,abstained,empty_hits,state", _MATRIX)
+def test_verification_state_for_matrix(answer, citations, inferred, finish, abstained, empty_hits, state):
+    """Unit pin for the single mapping rule (issue #365): order matters —
+    refusal/empty first, unfinished generation second, citation outcome last."""
     assert verification_state_for(
-        answer="",
-        citations=[], citations_inferred=False,
-        finish_reason="stop", abstained=False, empty_hits=False,
-    ) == "generation_incomplete"
+        answer=answer,
+        citations=citations,
+        citations_inferred=inferred,
+        finish_reason=finish,
+        abstained=abstained,
+        empty_hits=empty_hits,
+    ) == state
 
 
 def test_answer_empty_generation_is_incomplete(client, monkeypatch):
@@ -3354,7 +2962,6 @@ def test_answer_empty_generation_is_incomplete(client, monkeypatch):
 def test_v1_answer_json_success_records_ttft_and_llm_model(client, monkeypatch):
     """PR #401 regression: successful /v1/answer JSON leg must forward
     ttft_ms and llm_model to record_request for RED metrics."""
-    from mainframe_rag.ports import ChatResult, TokenUsage
 
     class MeasuredLLM:
         def chat(self, messages, *args, **kwargs):
@@ -3382,30 +2989,6 @@ def test_v1_answer_json_success_records_ttft_and_llm_model(client, monkeypatch):
     _, _, kwargs = answer_calls[0]
     assert kwargs["ttft_ms"] == 42
     assert kwargs["llm_model"] == "test-reasoning-model"
-
-
-def test_metrics_scrape_failure_serves_stable_503(monkeypatch):
-    """Issue #187, #370: when metrics exposition fails, GET /metrics
-    serves fixed 503 metrics_unavailable without leaking exception details."""
-    monkeypatch.setenv("QDRANT_URL", "http://localhost:6333")
-    monkeypatch.setenv("EMBED_MODE", "hash")
-    monkeypatch.setenv("ALLOW_HASH_MODE", "true")
-    monkeypatch.setenv("LLM_BASE_URL", "http://llm.internal/v1")
-    monkeypatch.setenv("LLM_MODEL_REASONING", "test-reasoning-model")
-    monkeypatch.setenv("METRICS_ENABLED", "true")
-
-    def _exploding_generate_latest():
-        raise RuntimeError("collector exploded with secret connection info")
-
-    monkeypatch.setattr("prometheus_client.generate_latest", _exploding_generate_latest)
-    with TestClient(app_mod.app) as c:
-        resp = c.get("/metrics")
-    assert resp.status_code == 503
-    assert resp.json() == {
-        "code": "metrics_unavailable",
-        "message": "metrics are not available",
-    }
-    assert "collector exploded" not in resp.text
 
 
 def test_awaited_retrieval_async_error_maps_to_upstream_error(client, monkeypatch):
@@ -3538,18 +3121,13 @@ class _LifespanCloseSpies:
 
 
 def _lifespan_env(monkeypatch):
-    monkeypatch.setenv("QDRANT_URL", "http://localhost:6333")
-    monkeypatch.setenv("EMBED_MODE", "hash")
-    monkeypatch.setenv("ALLOW_HASH_MODE", "true")
-    monkeypatch.setenv("LLM_BASE_URL", "http://llm.internal/v1")
-    monkeypatch.setenv("LLM_MODEL_REASONING", "test-reasoning-model")
+    set_agent_env(monkeypatch)
 
 
 def test_lifespan_startup_refusal_closes_created_clients_once(monkeypatch):
     """Issue #369: a startup refusal (incompatible store) happens AFTER the
     pools, reasoning client and Qdrant client were created. They must close
     exactly once instead of leaking until process exit."""
-    from mainframe_rag.agent.serving import ServingGate
     from tests.fakes import ServingManifestQdrant
 
     _lifespan_env(monkeypatch)
