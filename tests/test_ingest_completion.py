@@ -12,12 +12,10 @@ in-memory except where main() needs a real file).
 
 from __future__ import annotations
 
-from pathlib import Path
+from functools import partial
 
 import pytest
 
-from mainframe_rag.config import Settings
-from mainframe_rag.ingest.chunk import Chunk
 from mainframe_rag.ingest.completion import (
     acquire_run_lock,
     completion_collection_name,
@@ -27,13 +25,12 @@ from mainframe_rag.ingest.completion import (
     read_completion,
     release_run_lock,
 )
-from mainframe_rag.ingest.ibm_pdf import ParsedDoc
 from mainframe_rag.ingest.identity import source_rev_key
 from mainframe_rag.ingest.inventory import InventoryRecord, append_record, should_skip
 from mainframe_rag.ingest.qdrant_io import CollectionPolicyMismatchError, upsert_chunks
 from mainframe_rag.ingest.rules_version import extraction_rules_version
 from tests.helpers_builder import staging_builder  # noqa: F401 — fixture
-from tests.test_run_ingest import _filter_doc_id
+from tests.helpers_ingest_local import PointStore, chunks, parsed_doc, settings, vectors
 
 # Real runs publish (in-place ingest retired, #360); these tests cover the
 # builder against a fixed collection through tests/helpers_builder.py.
@@ -41,32 +38,10 @@ pytestmark = pytest.mark.usefixtures("staging_builder")
 
 
 
-def _settings(**overrides):
-    kw = {"embed_mode": "hash", "_env_file": None}
-    kw.update(overrides)
-    return Settings(**kw)
-
-
-def _parsed(doc_id="DOC1", sha="a" * 64) -> ParsedDoc:
-    return ParsedDoc(
-        path=Path("d.pdf"), sha256=sha, doc_id=doc_id, title="t",
-        product="p", version="1", vendor="v", page_count=1,
-    )
-
-
-def _chunks(doc_id="DOC1", n=5, tag="body") -> list[Chunk]:
-    return [
-        Chunk(
-            chunk_id=f"{doc_id}-c{i:04d}", doc_id=doc_id, heading_path="H",
-            page_start=i, page_label=str(i + 1), chunk_type="narrative",
-            text=f"{tag} chunk {i}", message_ids=[], members=[], ordinal=i,
-        )
-        for i in range(n)
-    ]
-
-
-def _vectors(n):
-    return [([0.1] * 4, ([1], [1.0])) for _ in range(n)]
+_settings = settings
+_parsed = parsed_doc
+_chunks = partial(chunks, n=5)
+_vectors = vectors
 
 
 def _rev(sha="a" * 64) -> str:
@@ -94,75 +69,19 @@ def _complete(settings, fake, doc_id="DOC1", sha="a" * 64, labels="||"):
     )
 
 
-class FailingFakeQdrant:
-    """Per-collection point store with batch-failure injection."""
+class FailingFakeQdrant(PointStore):
+    """Shared point store with per-batch main-path failure injection."""
 
     def __init__(self, dim: int = 256):
-        self.dim = dim
-        self._points: dict[str, list] = {}
+        super().__init__(dim)
         self.main_upsert_calls = 0
         self.main_upserted_points = 0
         self.completion_upserts = 0
-        self.deletes = 0
         self.fail_main_calls: set[int] = set()
         self.fail_completion = False
         self.fail_delete: BaseException | None = None
 
-    # -- collection surface -------------------------------------------
-    def get_aliases(self):
-        from types import SimpleNamespace
-
-        return SimpleNamespace(aliases=[])
-
-    def collection_exists(self, collection_name):
-        return True
-
-    def get_collection(self, collection_name):
-        from types import SimpleNamespace
-
-        return SimpleNamespace(
-            config=SimpleNamespace(
-                params=SimpleNamespace(vectors={"dense": SimpleNamespace(size=self.dim)})
-            )
-        )
-
-    def create_collection(self, collection_name, **kwargs):
-        return True
-
-    def create_payload_index(self, *a, **k):
-        from types import SimpleNamespace
-
-        return SimpleNamespace()
-
-    def update_collection(self, collection_name, *, optimizer_config=None):
-        return True
-
-    # -- points surface -----------------------------------------------
-    def scroll(self, collection_name, *, scroll_filter=None, limit=10, with_payload=None, offset=None):
-        from tests.test_run_ingest import _filter_match_value
-
-        doc_id = _filter_doc_id(scroll_filter)
-        rev = _filter_match_value(scroll_filter, "source_rev")
-        stored = self._points.get(collection_name, [])
-        if doc_id is not None:
-            stored = [p for p in stored if (p.payload or {}).get("doc_id") == doc_id]
-        if rev is not None:
-            stored = [p for p in stored if (p.payload or {}).get("source_rev") == rev]
-        return stored[:limit], None
-
-    def retrieve(self, collection_name, ids, *, with_payload=True, with_vectors=False):
-        from types import SimpleNamespace
-
-        wanted = {str(i) for i in ids}
-        return [
-            SimpleNamespace(id=p.id, payload=p.payload)
-            for p in self._points.get(collection_name, [])
-            if str(p.id) in wanted
-        ]
-
     def upsert(self, collection_name, *, points, wait=True):
-        from types import SimpleNamespace
-
         if collection_name.endswith("__completions"):
             if self.fail_completion:
                 raise RuntimeError("injected completion-write failure")
@@ -172,43 +91,15 @@ class FailingFakeQdrant:
             if self.main_upsert_calls in self.fail_main_calls:
                 raise RuntimeError(f"injected main-batch failure #{self.main_upsert_calls}")
             self.main_upserted_points += len(points)
-        self._points.setdefault(collection_name, []).extend(points)
-        return SimpleNamespace()
+        return super().upsert(collection_name, points=points, wait=wait)
 
     def delete(self, collection_name, *, points_selector, wait=True):
-        from types import SimpleNamespace
-
-        from tests.test_run_ingest import _filter_match_value
-
         if self.fail_delete is not None:
             raise self.fail_delete
-        self.deletes += 1
-        ids = getattr(points_selector, "points", None)
-        if ids is not None:
-            # PointIdsList (precise completion invalidation, issue #361).
-            wanted = {str(i) for i in ids}
-            self._points[collection_name] = [
-                p for p in self._points.get(collection_name, [])
-                if str(getattr(p, "id", None)) not in wanted
-            ]
-            return SimpleNamespace()
-        doc_id = _filter_doc_id(points_selector)
-        rev = _filter_match_value(points_selector, "source_rev")
-        if doc_id is None and rev is None:
-            self._points[collection_name] = []
-        else:
-            self._points[collection_name] = [
-                p for p in self._points.get(collection_name, [])
-                if not (
-                    (doc_id is None or (p.payload or {}).get("doc_id") == doc_id)
-                    and (rev is None or (p.payload or {}).get("source_rev") == rev)
-                )
-            ]
-        return SimpleNamespace()
+        return super().delete(collection_name, points_selector=points_selector, wait=wait)
 
     def main_points(self, collection, doc_id):
-        return [p for p in self._points.get(collection, [])
-                if (p.payload or {}).get("doc_id") == doc_id]
+        return self.points_for(collection, doc_id=doc_id)
 
 
 def _upsert_one(monkeypatch, fake, parsed, chunks, settings=None, force_reingest=False,

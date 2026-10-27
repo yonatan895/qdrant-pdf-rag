@@ -37,6 +37,7 @@ from mainframe_rag.ingest.representation import (
 )
 from mainframe_rag.ingest.rules_version import extraction_rules_version
 from tests.fakes import ServingManifestQdrant, manifest_envelope
+from tests.helpers_ingest_local import PointStore
 
 RULES = extraction_rules_version()
 
@@ -57,45 +58,6 @@ def _settings(**overrides):
     }
     base.update(overrides)
     return Settings(**base)
-
-
-class SyncStore:
-    """Minimal sync QdrantPoints double: dict-backed points + collections."""
-
-    def __init__(self):
-        self._points: dict[str, list] = {}
-        self.upserts = 0
-
-    def collection_exists(self, name):
-        return True
-
-    def scroll(self, name, *, scroll_filter=None, limit=10, with_payload=None, with_vectors=False, offset=None):
-        return self._points.get(name, [])[:limit], None
-
-    def retrieve(self, name, ids, *, with_payload=True, with_vectors=False):
-        wanted = {str(i) for i in ids}
-        return [
-            SimpleNamespace(
-                id=p.id,
-                payload=p.payload,
-                # Real client default: no vector unless explicitly requested
-                # (issue #391 F5 — a fake that always returns one hides the
-                # projection bug).
-                vector=p.vector if with_vectors else None,
-            )
-            for p in self._points.get(name, [])
-            if str(p.id) in wanted
-        ]
-
-    def upsert(self, name, *, points, wait=True):
-        # Production upsert overwrites same-id points (manifest recommit);
-        # reads must never see a stale first.
-        self.upserts += 1
-        stored = self._points.setdefault(name, [])
-        ids = {str(p.id) for p in points}
-        stored[:] = [p for p in stored if str(p.id) not in ids]
-        stored.extend(points)
-        return SimpleNamespace()
 
 
 class ExplodingStore:
@@ -119,22 +81,6 @@ def _completions(settings):
 
 
 # ---------------------------------------------------------------- compare ----
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [
-        ("extraction_rules", "0" * 16),
-        ("embed_model_revision", "rev-2"),
-        ("dense_dim", 768),
-    ],
-)
-def test_compare_each_reembed_field_rejects(field, value):
-    s = _settings()
-    stored = build_manifest(s, RULES).model_copy(update={field: value})
-    outcome, fields = compare_manifests(stored, build_manifest(s, RULES))
-    assert outcome == REEMBED_REQUIRED
-    assert field in fields
-
-
 # One independent drift value per REEMBED_FIELDS member (#1035). Hard-coded, not
 # derived from the product tuple, so a field dropped from REEMBED_FIELDS flips
 # its row red and a newly added field fails the coverage assertion below.
@@ -214,9 +160,9 @@ def test_attestation_accepts_a_declared_revision_and_exempts_hash_mode():
 # --------------------------------------------------------------- preflight ---
 def test_preflight_proceeds_for_empty_compatible_and_record_only_targets():
     s = _settings()
-    digest, drift = check_ingest_compatible(SyncStore(), s, _completions(s), RULES)
+    digest, drift = check_ingest_compatible(PointStore(), s, _completions(s), RULES)
     assert (digest, drift) == (manifest_digest(s, RULES), [])
-    store = SyncStore()
+    store = PointStore()
     write_manifest(store, _completions(s), s, RULES)
     store._points.setdefault(s.qdrant_collection, []).append(
         SimpleNamespace(id="p1", payload={"doc_id": "D"}, vector=None)
@@ -230,7 +176,7 @@ def test_preflight_proceeds_for_empty_compatible_and_record_only_targets():
 
 def test_preflight_same_dim_new_revision_rejects_with_migration_path():
     s = _settings()
-    store = SyncStore()
+    store = PointStore()
     write_manifest(store, _completions(s), s, RULES)  # stored: unattested hash contract
     store._points.setdefault(s.qdrant_collection, []).append(
         SimpleNamespace(id="p1", payload={"doc_id": "D"}, vector=None)
@@ -245,7 +191,7 @@ def test_preflight_same_dim_new_revision_rejects_with_migration_path():
 
 def test_preflight_legacy_or_corrupt_manifest_rejects_with_attest_path():
     s = _settings()
-    store = SyncStore()
+    store = PointStore()
     store._points.setdefault(s.qdrant_collection, []).append(
         SimpleNamespace(id="p1", payload={"doc_id": "D"}, vector=None)
     )
@@ -268,7 +214,7 @@ def test_rekey_carries_contract_to_staging_id():
     from qdrant_client import models
 
     s = _settings()
-    store = SyncStore()
+    store = PointStore()
     live_comp, staging_comp = "live__completions", "staging__completions"
     manifest = build_manifest(s, RULES)
     vector = {"dense": [0.0] * 256, "bm25": models.SparseVector(indices=[0], values=[1.0])}
@@ -301,7 +247,7 @@ def test_rekey_inherits_live_state_verbatim():
     cloning would launder a migration into a pass), a pending live is not
     laundered into a committed staging, and an absent source writes nothing."""
     s = _settings()
-    store = SyncStore()
+    store = PointStore()
     assert rekey_manifest(store, "live__completions", "staging__completions") is False
     assert store.upserts == 0
 
@@ -357,7 +303,7 @@ def test_begin_commit_lifecycle():
     the explicit commit flips it; a pending re-declaration stays pending
     (resume), and a committed same-contract begin is zero-write."""
     s = _settings()
-    store = SyncStore()
+    store = PointStore()
     comp = _completions(s)
     digest, mode = begin_manifest(store, comp, s, RULES)
     assert (digest, mode) == (manifest_digest(s, RULES), "pending")
@@ -377,7 +323,7 @@ def test_begin_record_only_drift_commits_inline():
     """Query-prefix drift touches no stored vector, so there is nothing to
     verify: it commits immediately, never via a pending window."""
     s = _settings()
-    store = SyncStore()
+    store = PointStore()
     comp = _completions(s)
     write_manifest(store, comp, s, RULES)
     s2 = _settings(dense_query_prefix="OTHER:")
@@ -391,7 +337,7 @@ def test_preflight_pending_contract_rejects_with_resume_path():
     """An interrupted A->B migration must never look compatible: the stored
     pending state refuses skips until `--reingest` resumes."""
     s = _settings()
-    store = SyncStore()
+    store = PointStore()
     comp = _completions(s)
     write_manifest(store, comp, s, RULES, state=STATE_PENDING)
     store._points.setdefault(s.qdrant_collection, []).append(_point())

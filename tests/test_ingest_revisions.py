@@ -9,14 +9,13 @@ just the changed revision.
 from __future__ import annotations
 
 import uuid
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from qdrant_client import models
 
-from mainframe_rag.config import Settings
-from mainframe_rag.ingest.chunk import Chunk, make_chunk_id
 from mainframe_rag.ingest.completion import (
     UnsupportedLegacyDataError,
     completion_collection_name,
@@ -26,144 +25,34 @@ from mainframe_rag.ingest.completion import (
     is_revision_committed,
     read_completion,
 )
-from mainframe_rag.ingest.ibm_pdf import ParsedDoc
 from mainframe_rag.ingest.identity import source_rev_key
 from mainframe_rag.ingest.qdrant_io import delete_by_revision, stored_doc_revisions
 from mainframe_rag.ingest.rules_version import extraction_rules_version
-from tests.test_run_ingest import _filter_doc_id, _filter_match_value
+from tests.helpers_ingest_local import PointStore, chunks, parsed_doc, settings, vectors
 
-
-def _settings(**overrides):
-    kw = {"embed_mode": "hash", "_env_file": None, "batch_size": 16}
-    kw.update(overrides)
-    return Settings(**kw)
+_settings = partial(settings, batch_size=16)
+_parsed = partial(parsed_doc, doc_id="reference", vendor="vendor-a",
+                  product="product-x", version="1.0")
+_chunks = partial(chunks, doc_id="reference", rev="rev")
+_vectors = vectors
 
 
 def _rev(vendor, product, version, sha) -> str:
     return source_rev_key(vendor, product, version, sha)
 
 
-def _parsed(doc_id="reference", sha="a" * 64, vendor="vendor-a",
-            product="product-x", version="1.0") -> ParsedDoc:
-    return ParsedDoc(
-        path=Path("d.pdf"), sha256=sha, doc_id=doc_id, title="t",
-        product=product, version=version, vendor=vendor, page_count=1,
-    )
-
-
-def _chunks(doc_id="reference", rev="rev", n=3, tag="body") -> list[Chunk]:
-    return [
-        Chunk(
-            chunk_id=make_chunk_id(rev, "H", i, 0), doc_id=doc_id, heading_path="H",
-            page_start=i, page_label=str(i + 1), chunk_type="narrative",
-            text=f"{tag} chunk {i}", message_ids=[], members=[], ordinal=i,
-        )
-        for i in range(n)
-    ]
-
-
-def _vectors(n):
-    return [([0.1] * 4, ([1], [1.0])) for _ in range(n)]
-
-
-class RevisionFake:
-    """Collection-keyed point store honoring doc_id + source_rev filters
-    and both delete shapes (FilterSelector, PointIdsList)."""
-
-    def __init__(self, dim: int = 256):
-        self.dim = dim
-        self._points: dict[str, list] = {}
-        self.upserts = 0
-        self.deletes = 0
-
-    def get_aliases(self):
-        from types import SimpleNamespace
-
-        return SimpleNamespace(aliases=[])
-
-    def collection_exists(self, name):
-        return True
-
-    def get_collection(self, name):
-        return SimpleNamespace(
-            config=SimpleNamespace(
-                params=SimpleNamespace(vectors={"dense": SimpleNamespace(size=self.dim)})
-            )
-        )
-
-    def create_collection(self, name, **kwargs):
-        return True
-
-    def create_payload_index(self, *a, **k):
-        return SimpleNamespace()
-
-    def update_collection(self, name, *, optimizer_config=None):
-        return True
-
-    def scroll(self, name, *, scroll_filter=None, limit=10, with_payload=None, offset=None):
-        doc_id = _filter_doc_id(scroll_filter)
-        rev = _filter_match_value(scroll_filter, "source_rev")
-        stored = self._points.get(name, [])
-        if doc_id is not None:
-            stored = [p for p in stored if (p.payload or {}).get("doc_id") == doc_id]
-        if rev is not None:
-            stored = [p for p in stored if (p.payload or {}).get("source_rev") == rev]
-        start = offset if isinstance(offset, int) else 0
-        page = stored[start:start + limit]
-        nxt = start + limit if start + limit < len(stored) else None
-        return page, nxt
-
-    def retrieve(self, name, ids, *, with_payload=True, with_vectors=False):
-        wanted = {str(i) for i in ids}
-        return [
-            SimpleNamespace(id=p.id, payload=p.payload)
-            for p in self._points.get(name, [])
-            if str(getattr(p, "id", None)) in wanted
-        ]
-
-    def upsert(self, name, *, points, wait=True):
-        self.upserts += 1
-        # Production upsert overwrites same-id points (manifest recommit);
-        # a duplicated manifest id would read back as a stale first.
-        stored = self._points.setdefault(name, [])
-        ids = {str(p.id) for p in points}
-        stored[:] = [p for p in stored if str(p.id) not in ids]
-        stored.extend(points)
-        return SimpleNamespace()
-
-    def delete(self, name, *, points_selector, wait=True):
-        self.deletes += 1
-        ids = getattr(points_selector, "points", None)
-        if ids is not None:
-            wanted = {str(i) for i in ids}
-            self._points[name] = [
-                p for p in self._points.get(name, [])
-                if str(getattr(p, "id", None)) not in wanted
-            ]
-            return SimpleNamespace()
-        doc_id = _filter_doc_id(points_selector)
-        rev = _filter_match_value(points_selector, "source_rev")
-        self._points[name] = [
-            p for p in self._points.get(name, [])
-            if not (
-                (doc_id is None or (p.payload or {}).get("doc_id") == doc_id)
-                and (rev is None or (p.payload or {}).get("source_rev") == rev)
-            )
-        ]
-        return SimpleNamespace()
+class RevisionFake(PointStore):
+    """Collection-keyed point store; main_ids/main_revs are the per-document
+    views the revision assertions read (alias/snapshot behavior is not used
+    here, so this stays a plain store)."""
 
     def main_ids(self, collection, doc_id):
-        return {
-            str(p.id)
-            for p in self._points.get(collection, [])
-            if (p.payload or {}).get("doc_id") == doc_id
-        }
+        return {str(p.id) for p in self.points_for(collection, doc_id=doc_id)}
 
     def main_revs(self, collection, doc_id):
         return {
             (p.payload or {}).get("source_rev")
-            for p in self._points.get(collection, [])
-            if (p.payload or {}).get("doc_id") == doc_id
+            for p in self.points_for(collection, doc_id=doc_id)
         }
 
 
