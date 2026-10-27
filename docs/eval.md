@@ -861,8 +861,9 @@ L4's reference (`evals/harness-l4-thresholds.json`) is recorded with
 PR. L2/L4 standing red on known product debt is an RC debt signal, not a
 broken target.
 
-Historical command spellings below are preserved as executed; use the
-[older command names](task-runner.md#inventory) for new runs.
+Historical command spellings below are preserved as executed; new runs use the
+current `--list` / `<task> --summary` catalogue
+([task policy](task-runner.md#scope)).
 
 **Dated record.** Each battery run appends a row here in the same PR or
 RC checklist that runs it (`$BUNDLE_DIR` reports are local). Run

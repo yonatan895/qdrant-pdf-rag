@@ -1068,7 +1068,7 @@ bytes. Combined tag+digest refs are invalid — digest-only form is the pin.
   must change all three sites: `images.txt`, `deploy.sh`, `load.sh`.
 - OpenObserve OSS and otelcol-contrib are pinned and bundled by
   [ADR-0006](adr/0006-openobserve-traces-metrics-backend.md) (#956). Their
-  digests live in [`images.txt`](../images.txt), the single constant owner;
+  digests live in [`images.txt`](../images.txt), the deployment constant owner;
   never copy them into prose. A bump of either changes `images.txt`, the
   `licenses/inventory.json` bind, `load.sh` and `image_identity.sh` together.
   OpenObserve is AGPL-3.0, otelcol-contrib Apache-2.0
@@ -1620,8 +1620,10 @@ Open WebUI is the main docs platform and is **on by default** (maintainer decisi
 ADR-0008); the console stays the frozen fallback. It is a front end for the docs corpus and a
 client of the agent: its only model is the repository docs Pipe (#1072) over `/v1/chat`. It
 holds no gateway key and no model connection, and it does no retrieval of its own. The image pin
-is recorded in `images.txt`; the 2026-10-24 Kind trials are the dated qualification record, and
-every pin import re-runs the ADR-0007 conditions (ADR-0008 item 2). The environment variable
+is recorded in `images.txt`; the 2026-10-24 Kind trials are interim and partial
+(runs 1-2 of the #1073 qualification, not a clean pass; open residuals are listed
+in the trial records), and every pin import re-runs the ADR-0007 conditions
+(ADR-0008 item 2). The environment variable
 names, uvicorn TLS arguments, Functions API used by the Pipe installer and chat table layout
 used by the purge are those of the pinned v0.12.3 build.
 
@@ -1693,10 +1695,11 @@ owns the condition each one must satisfy. Operationally:
   file on an emptyDir, mounted read-only through `SSL_CERT_FILE` (httpx for
   sign-in, aiohttp for token refresh) and `REQUESTS_CA_BUNDLE`; a changed CA
   rolls the pod. Without it, sign-in fails at the server-side discovery call.
-  A public-CA IdP needs nothing. Mapping and the init step both refuse an
-  unreadable, blank, non-certificate or corrupted bundle with fixed text and
-  never print the value, so a bad bundle can never give a Ready pod whose
-  sign-ins fail.
+  A public-CA IdP needs nothing. Mapping, the chart render and the init step
+  each refuse an unreadable, blank, non-certificate or corrupted bundle with
+  fixed text and never print the value, so a bad bundle can never give a Ready
+  pod whose sign-ins fail. Token exchange stays disabled
+  (`ENABLE_OAUTH_TOKEN_EXCHANGE=false`).
 
 **What the identity team registers.** One confidential OIDC client on the organisation's IdP
 (AD FS, or Keycloak in front of it):

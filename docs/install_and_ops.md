@@ -96,9 +96,10 @@ container, parses runtime-generated synthetic PDFs, ingests them and exercises
 the agent API against the deterministic mock LLM. `sh scripts/tools/run-task.sh qa:load`
 runs the same composition under concurrency and asserts absolute contracts (no
 errors, SSE integrity, citation parity, fixed envelopes, determinism, abort
-survival, TTFT floor); its obligations and knobs are owned by
-[eval.md §8](eval.md#benchmarks) and its verification weight by
-[live-stack.md §0](live-stack.md#verification-minimums). A persistent local
+survival, TTFT floor); its obligations and verification weight are owned by
+[eval.md §8](eval.md#benchmarks) and
+[live-stack.md §0](live-stack.md#verification-minimums), and its `LOAD_*` knobs
+are defined in `tests/test_load_tier.py`. A persistent local
 Qdrant on 6333 is `local:qdrant:up` / `local:qdrant:down`.
 
 ### 3.4 Retrieval Evaluation Gates & Quality Tiers

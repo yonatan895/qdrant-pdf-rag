@@ -289,11 +289,11 @@ run during discovery, and there are no remote or optional includes.
 
 Task is the canonical documented interface. #402 increments C/D supplied the
 offline handoff and removed the Make adapter: no runtime Make dependency or
-Task → Make delegation remains in supported workflows. Old Make targets map to
-same-or-named Task commands (`lint`/`test`/`check` → `qa:lint`/`qa:unit`/
-`qa:check`, `sim`/`loadtest-mock` → `qa:sim`/`qa:load`, dated `airgap-*` and
-`eval-*` → `airgap:*` and `eval:*`); `--list` and `<task> --summary` are the
-catalogue, not a hand-copied table. Dated evidence and old signed bundles
+Task → Make delegation remains in supported workflows. The old Make → Task map
+is retired and was not one-for-one: `local-jaeger`, `query-demo`, `run-agent`,
+`chart` and `loadtest` changed shape or name (for example `local:openobserve:*`,
+`local:query`/`local:agent`, `artifacts:chart-*`, `eval:load`). Use `--list` and
+`<task> --summary`, not a copied table. Dated evidence and old signed bundles
 retain their original command spelling and their own bundled interface.
 
 ### Retained local Helm acceptance and maintenance
