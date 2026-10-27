@@ -26,7 +26,7 @@ Tests generate original PDFs at runtime
 CI must fail if `git ls-files` matches `.pdf` / `.pdx` / `.idx`.
 Cover IBM-shaped synthetics (form number, message id, outline) **and**
 generic PDFs (no outline, no form number, unknown vendor).
-`test_chrome_strip` must keep a **long** page list (≥8 pages). Chrome is
+`test_strip_chrome_keeps_entry_lines_and_strips_only_chrome` must keep a **long** page list (≥8 pages; it uses 12). Chrome is
 disabled on short docs on purpose.
 
 ## Unit tests are hermetic

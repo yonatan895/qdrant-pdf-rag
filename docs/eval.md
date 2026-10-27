@@ -638,7 +638,7 @@ competitors (sibling docs sharing vocabulary, intra-doc section pairs).
 Paraphrase measures semantic movement on synthetic pools; record-replay
 measures ranking movement on real pools without needing prod models
 locally. Capture runs where the models live (RC/gap), replay runs
-anywhere (`tests/test_replay.py`, `scripts/capture_pool.py`). A single live A/B
+anywhere (`tests/test_replay_sweep.py`, `scripts/capture_pool.py`). A single live A/B
 pair is noise (dense retrieval is nondeterministic, #836): capture once, then
 compare configs on those pools with `replay_sweep`.
 
@@ -854,7 +854,7 @@ scored. `mainframe_rag.eval.datasets` owns the rule.
 | 4. judge gate | `VENUE=rc sh scripts/tools/run-task.sh eval:harness:l4` | report + summary + review queue; `pass`/`hold`/`fail` |
 | 5. perf tier | `VENUE=rc sh scripts/tools/run-task.sh eval:harness:l3` | report + manifest vs the L3 baseline |
 | 6. pool capture | `VENUE=rc sh scripts/tools/run-task.sh eval:capture-pool` | dated `pools-YYYYMMDD.jsonl` (never committed) |
-| 7. hermetic replay | `pytest tests/test_replay.py` + a replay sweep | A/B deltas in the PR body |
+| 7. hermetic replay | `pytest tests/test_replay_sweep.py` + a replay sweep | A/B deltas in the PR body |
 
 L4's reference (`evals/harness-l4-thresholds.json`) is recorded with
 `VENUE=rc sh scripts/tools/run-task.sh eval:harness:l4-record` on the RC tier and ships in a dedicated

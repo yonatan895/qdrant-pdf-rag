@@ -38,6 +38,7 @@ venv/
 .mypy_cache/
 .ruff_cache/
 .coverage
+.coverage.*
 coverage.xml
 
 # --- Secrets / local config ---
