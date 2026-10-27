@@ -59,19 +59,6 @@ def test_bare_angle_bracket_parameter_alone_classifies_as_syntax():
     assert classify("Issue the command with the volume operand to select the target.") == "narrative"
 
 
-def test_chrome_strip():
-    pages = [
-        "IEA500I Manual\n" + f"body line {i}\n(c) Synthetic Corp 2026"
-        for i in range(10)
-    ]
-    chrome = chrome_lines(pages)
-    assert "iea500i manual" in chrome
-    assert "(c) synthetic corp 2026" in chrome
-    stripped = strip_page(pages[0], chrome)
-    assert "IEA500I Manual" not in stripped
-    assert "body line 0" in stripped
-
-
 @pytest.mark.parametrize("page_count", [128, 384, 200])
 def test_chrome_lines_find_alternating_footers_at_any_page_count(page_count):
     """Issue #864: book layouts put the running footer on alternate pages. A

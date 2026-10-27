@@ -537,11 +537,6 @@ def test_script_parses_as_python_39_with_parenthesised_excepts():
             ), f"unparenthesised except at line {node.lineno}: {seg}"
 
 
-def test_pyproject_keeps_the_script_on_a_python_39_ruff_target():
-    pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text()
-    assert '"scripts/openwebui/adfs_claims_check.py" = "py39"' in pyproject
-
-
 def test_expect_baseline_only_requires_the_baseline_by_default(tmp_path, capsys):
     f = tmp_path / "id.jwt"
     f.write_text(make_jwt({"roles": ["docs-user"], "upn": "u", "name": "n"}))

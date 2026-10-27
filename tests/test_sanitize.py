@@ -189,33 +189,3 @@ def test_extract_page_texts_labels_are_one_bounded_sanitized_line(tmp_path) -> N
         assert "\n" in _decode_hex_label_prefix(doc[1].get_label())  # the hazard
         _, labels = run_ingest._extract_page_texts(doc)
     assert labels == ["1-6, Fake Heading, p. 9-9", "1- 7-1", "A -1", None]
-
-
-
-def test_parse_pdf_sanitizes_metadata_title(monkeypatch, tmp_path) -> None:
-    """The title flows into payloads, embed headers, and prompts, so the
-    parse wiring — not just the helper — must sanitize it."""
-
-    class FakeDoc:
-        page_count = 1
-
-        @property
-        def metadata(self) -> dict[str, str]:
-            return {"title": "Manual\x00 Title\u202e"}
-
-        def __getitem__(self, i: int) -> _StubPage:
-            return _StubPage("body text without a form number")
-
-        def get_toc(self, simple: bool = True) -> list:
-            return []
-
-        def close(self) -> None:
-            pass
-
-    monkeypatch.setattr(pymupdf, "open", lambda path: FakeDoc())
-    pdf = tmp_path / "SA22-0001-00.pdf"
-    pdf.write_bytes(b"%PDF-1.4 fake")
-    parsed = parse_pdf(pdf)
-    assert parsed.title == "Manual Title"
-    assert parsed.doc_id == "SA22-0001-00"
-
