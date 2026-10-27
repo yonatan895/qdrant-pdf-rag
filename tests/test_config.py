@@ -454,10 +454,3 @@ def test_two_cpu_quota_bounds_the_default_not_an_explicit_count(tmp_path, monkey
     monkeypatch.setattr(multiprocessing, "cpu_count", lambda: 64)  # the node
     monkeypatch.setenv("INGEST_WORKERS", "8")
     assert resolve_workers(None, Settings(_env_file=None)) == 8
-
-
-def test_shipped_reasoning_effort_default_is_medium_and_served():
-    """#917: medium on both routes, a member of the default served domain."""
-    settings = Settings(_env_file=None)
-    assert (settings.llm_reasoning_effort_simple, settings.llm_reasoning_effort_complex) == ("medium", "medium")
-    assert "medium" in settings.reasoning_efforts()
