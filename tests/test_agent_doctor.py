@@ -6,6 +6,7 @@ import json
 import subprocess
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import ClassVar
 from unittest import TestCase
 from unittest.mock import patch
 
@@ -265,6 +266,137 @@ class HelmPreparationTests(TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(self.marker.exists())
         self.assertEqual((self.destination/'helm').read_text(), 'previous approved tool')
+
+
+
+CONNECTED_FETCH = 'curl -fsSL --retry 3 --retry-all-errors -o "$ARCHIVE"'
+
+
+class ConnectedPreparationRetryTests(TestCase):
+    """Connected installs retry transport failures only; a checksum mismatch is fatal (#1118).
+
+    Real curl against a loopback server: the first responses fail, then the
+    pinned bytes or tampered bytes are served.
+    """
+
+    TOOLS: ClassVar[dict[str, tuple[str, str, str]]] = {'helm': ('linux-amd64/helm', 'printf "v4.3.0+fixture\\n"', 'v4.3.0'),
+             'oras': ('oras', 'printf "Version: 1.3.4\\n"', 'v1.3.4')}
+
+    def setUp(self):
+        import shutil
+        import tarfile
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        self.temp = TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.requests = []
+        self.failures = 0
+        self.body = b''
+        test = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                test.requests.append(self.path)
+                if len(test.requests) <= test.failures:
+                    self.send_response(503)
+                    self.send_header('Content-Length', '0')
+                    self.end_headers()
+                    return
+                self.send_response(200)
+                self.send_header('Content-Length', str(len(test.body)))
+                self.end_headers()
+                self.wfile.write(test.body)
+
+            def log_message(self, *args):
+                pass
+
+        self.server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+        self.archives = {}
+        scripts = self.root / 'scripts/tools'
+        scripts.mkdir(parents=True)
+        for name, (member, version_output, version) in self.TOOLS.items():
+            shutil.copy(Path(__file__).parents[1] / f'scripts/tools/install-{name}.sh', scripts)
+            tool = self.root / 'build' / name / member
+            tool.parent.mkdir(parents=True)
+            tool.write_text(f'#!/bin/sh\n{version_output}\n')
+            tool.chmod(0o755)
+            archive = self.root / 'build' / f'{name}.tgz'
+            with tarfile.open(archive, 'w:gz') as packed:
+                packed.add(tool, arcname=member)
+            self.archives[name] = archive.read_bytes()
+            (scripts / f'{name}-pin.txt').write_text(
+                f'version: {version}\nsha256: {hashlib.sha256(self.archives[name]).hexdigest()}\n'
+                f'binary-sha256: {hashlib.sha256(tool.read_bytes()).hexdigest()}\n'
+                f'origin: http://127.0.0.1:{self.server.server_port}/{name}.tgz\n')
+
+    def install(self, name):
+        destination = self.root / 'tools' / name
+        result = subprocess.run(['sh', str(self.root / f'scripts/tools/install-{name}.sh'),
+                                 '--bin-dir', str(destination)],
+                                capture_output=True, text=True, timeout=60, check=False)
+        return result, destination / name
+
+    def test_transient_failures_are_retried_then_the_pinned_bytes_install(self):
+        for name in self.TOOLS:
+            with self.subTest(tool=name):
+                self.requests.clear()
+                self.failures, self.body = 2, self.archives[name]
+                result, installed = self.install(name)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(len(self.requests), 3)
+                self.assertTrue(installed.is_file())
+
+    def test_retries_are_bounded(self):
+        self.failures, self.body = 10, self.archives['helm']
+        result, installed = self.install('helm')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(len(self.requests), 4)  # one attempt plus three retries
+        self.assertFalse(installed.exists())
+
+    def test_checksum_mismatch_is_fatal_and_never_retried(self):
+        for name in self.TOOLS:
+            with self.subTest(tool=name):
+                self.requests.clear()
+                self.failures, self.body = 1, b'tampered bytes'
+                result, installed = self.install(name)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn('archive checksum mismatch', result.stderr)
+                self.assertEqual(len(self.requests), 2)  # the transient failure, then one transfer
+                self.assertFalse(installed.exists())
+
+    def test_task_installer_uses_the_same_fetch_and_refuses_tampered_bytes_once(self):
+        import shutil
+
+        repo = Path(__file__).parents[1]
+        for name in ('install-task.sh', 'install-helm.sh', 'install-oras.sh'):
+            self.assertEqual((repo / 'scripts/tools' / name).read_text().count('curl -fsSL'), 1, name)
+            self.assertIn(CONNECTED_FETCH, (repo / 'scripts/tools' / name).read_text(), name)
+        workspace = self.root / 'task-workspace'
+        (workspace / 'scripts/tools').mkdir(parents=True)
+        for name in ('install-task.sh', 'task-artifact.sh', 'task-pin.txt'):
+            shutil.copy(repo / 'scripts/tools' / name, workspace / 'scripts/tools')
+        stub = self.root / 'stub-bin'
+        stub.mkdir()
+        log = self.root / 'curl.log'
+        # Records every invocation and delivers tampered bytes to the -o path.
+        (stub / 'curl').write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$CURL_LOG"\n'
+                                   'while [ "$1" != -o ]; do shift; done\nprintf tampered > "$2"\n')
+        (stub / 'curl').chmod(0o755)
+        result = subprocess.run(['sh', str(workspace / 'scripts/tools/install-task.sh'),
+                                 '--bin-dir', str(self.root / 'task-bin')],
+                                env={'PATH': f'{stub}:/usr/bin:/bin', 'CURL_LOG': str(log)},
+                                capture_output=True, text=True, timeout=30, check=False)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('Task archive checksum mismatch', result.stderr)
+        calls = log.read_text().splitlines()
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(calls[0].startswith('-fsSL --retry 3 --retry-all-errors -o '), calls[0])
+        self.assertFalse((self.root / 'task-bin/task').exists())
 
 
 def test_bm25_cache_checks_the_selected_revision_and_exact_bytes(tmp_path, monkeypatch):

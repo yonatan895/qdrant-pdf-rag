@@ -283,7 +283,10 @@ visible for the maintainer to assess; CI does not parse comment history as votes
 `scripts/ci_evidence.py` records the actual native job invocation and its PR
 head, tested base and execution identity ([merge ref](testing.md#native-ci-execution-evidence)). Test lanes count actual test
 records, reject zero tests, skips and xfails, and refuse pre-existing reports. Receipts
-use attempt-specific artifacts. Packaging receipts identify the checkout only;
+use attempt-specific artifacts. After "re-run failed jobs", the latest
+attempt's record decides each job; a job carried unchanged from an earlier
+attempt binds that attempt's run, job and artifact, never the copy's.
+Packaging receipts identify the checkout only;
 the native packaging job must finish successfully before they can contribute
 acceptance. A receipt is never a code review or permission to merge.
 
@@ -441,7 +444,8 @@ execution still fails; passing checks on a draft do not mark it ready.
 only after rereading candidate and latest run/attempt identities and the live
 default-branch ref. PR merge metadata can lag a base push; matching old snapshots
 alone do not establish currentness. The approved checkout, live ref and candidate
-base must agree. No new SHAs are substituted into old evidence. `--all-open`
+base must agree; a base behind the live tip reports `candidate_base_not_current`
+with both SHAs and the fix (update the branch). No new SHAs are substituted into old evidence. `--all-open`
 paginates candidates; file pagination must match the changed-file count and
 retain both rename names verbatim.
 
