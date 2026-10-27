@@ -47,7 +47,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 REPO = Path(__file__).resolve().parents[1]
 SEED = REPO / "evals" / "expert_golden_seed.jsonl"
-FACTS = Path("/tmp/opencode/corpus_facts.json")
 
 SEED_CLASS_MAP = {
     "message_id_lookup": "message_id",

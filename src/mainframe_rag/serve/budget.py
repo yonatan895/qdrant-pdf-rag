@@ -207,16 +207,12 @@ class DeploymentPlan(BaseModel):
         return "\n".join(lines)
 
 
-def _compiled_margin_mib(weight_mib: float) -> float:
-    return max(COMPILED_MARGIN_FLOOR_MIB, COMPILED_MARGIN_WEIGHT_FRACTION * weight_mib)
-
-
 def _compiled_margin(spec: ModelSpec) -> float:
     """Per-model override when declared (measured basis only), else the
     floor+fraction formula. One helper so the two use sites cannot diverge."""
     if spec.compiled_margin_mib is not None:
         return spec.compiled_margin_mib
-    return _compiled_margin_mib(spec.weight_mib)
+    return max(COMPILED_MARGIN_FLOOR_MIB, COMPILED_MARGIN_WEIGHT_FRACTION * spec.weight_mib)
 
 
 def _ceil_util(footprint_mib: float, total_mib: float) -> float:

@@ -28,7 +28,7 @@ import os
 import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
@@ -74,6 +74,17 @@ class GoldenEntry(BaseModel):
 
 def load_golden(path: Path) -> list[GoldenEntry]:
     return parse_golden_text(read_golden_text(path))
+
+
+def load_golden_records(paths: Sequence[Path | str]) -> list[dict[str, Any]]:
+    """Raw JSON records from acquired golden files, in argument order (the
+    answer tiers score the raw record; release records are valid here)."""
+    return [
+        json.loads(text)
+        for path in paths
+        for text in map(str.strip, read_golden_text(path).splitlines())
+        if text and not text.startswith("#")
+    ]
 
 
 def parse_golden_text(text: str) -> list[GoldenEntry]:

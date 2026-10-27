@@ -5,36 +5,26 @@ prove the measured rows, repeats and verdict after parsing that transport.
 """
 import json
 import os
-import shutil
 import subprocess
 import sys
-from pathlib import Path
 
 import pytest
 
 
 @pytest.fixture
 def sampling_workspace(tmp_path):
-    from tests.test_taskfile_contracts import REQUIRE_RUNNER, find_task
+    from tests.helpers_eval_local import REPO_ROOT as repo
+    from tests.helpers_eval_local import task_workspace
 
-    task = find_task()
-    if task is None:
-        if REQUIRE_RUNNER:
-            pytest.fail("pinned Task unavailable in required lane")
-        pytest.skip("pinned Task unavailable")
-    repo = Path(__file__).resolve().parents[1]
-    shutil.copy2(repo / "Taskfile.yml", tmp_path / "Taskfile.yml")
-    shutil.copytree(repo / "taskfiles", tmp_path / "taskfiles")
+    task = task_workspace(tmp_path, "harness_l2.py", "harness_l4.py")
     (tmp_path / "src").symlink_to(repo / "src", target_is_directory=True)
-    (tmp_path / "scripts").mkdir()
-    for name in ("harness_l2.py", "harness_l4.py"):
-        shutil.copy2(repo / "scripts" / name, tmp_path / "scripts" / name)
-    (tmp_path / ".venv/bin").mkdir(parents=True)
     launcher = tmp_path / ".venv/bin/python"
     launcher.write_text(f"#!{sys.executable}\n" + '''
 import importlib.util, json, os, sys
 from pathlib import Path
 from types import SimpleNamespace
+# Exercise the candidate tree even when the interpreter's editable install points elsewhere.
+sys.path.insert(0, str(Path('src').resolve()))
 from mainframe_rag import config, manifest
 from mainframe_rag.eval import answers, answer_tier, chat
 from mainframe_rag.agent import answer

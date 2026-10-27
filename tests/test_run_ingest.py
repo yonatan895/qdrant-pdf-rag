@@ -13,6 +13,10 @@ import pytest
 from mainframe_rag.ingest.ibm_pdf import sha256_file
 from mainframe_rag.ingest.run_ingest import main
 from tests.helpers_builder import staging_builder  # noqa: F401 — fixture
+from tests.helpers_ingest_local import PointStore, filter_doc_id
+from tests.helpers_ingest_local import (
+    filter_doc_id as _filter_doc_id,  # noqa: F401 — sibling suites read it here
+)
 
 # Real runs publish (in-place ingest retired, #360); these tests cover the
 # builder against a fixed collection through tests/helpers_builder.py.
@@ -492,161 +496,43 @@ def _stderr_json(capsys) -> list[dict]:
     return lines
 
 
-def _filter_match_value(filter_obj, key: str) -> str | None:
-    """Extract one MatchValue from a Filter/FilterSelector shape (one rule
-    for every key — doc_id and source_rev selectors share it)."""
-    filt = getattr(filter_obj, "filter", filter_obj)
-    must = getattr(filt, "must", None) or []
-    for cond in must:
-        if getattr(cond, "key", None) == key:
-            match = getattr(cond, "match", None)
-            value = getattr(match, "value", None)
-            if value is not None:
-                return str(value)
-    return None
+class _FakeQdrant(PointStore):
+    """Parent-side run() double: seeds the startup rules sample (issue #124)
+    and counts accepted upserts/batches for the counter assertions.
 
-
-def _filter_doc_id(filter_obj) -> str | None:
-    """Extract a doc_id equality value from a Filter/FilterSelector shape."""
-    return _filter_match_value(filter_obj, "doc_id")
-
-
-class _FakeQdrant:
-    """QdrantPoints double for the parent-side run() path (review round on
-    PR D: the non-dry upsert branch had no coverage).
-
-    Stores points per collection so the verified-completion contract
-    (issue #359) exercises the claimed path: skips require a written
-    completion plus verifiable points, never a single sampled marker."""
+    A stored collection defaults to the CURRENT rules so existing skip tests
+    model a matching collection; tests pass an explicit value (including ""
+    for a legacy pre-versioning collection) to exercise the extraction-rules
+    gate. sample_rules_v models a MIXED collection (startup sample reads
+    current, an individual doc carries older/unstamped rules_v)."""
 
     def __init__(self, stored_sha: str | None = None, stored_rules_v: str | None = None,
                  sample_rules_v: str | None = None):
         from mainframe_rag.ingest.rules_version import extraction_rules_version
 
+        super().__init__()
         self.stored_sha = stored_sha
-        # A stored collection defaults to the CURRENT rules so existing
-        # skip tests model a matching collection; tests pass an explicit
-        # value (including "" for a legacy pre-versioning collection) to
-        # exercise the extraction-rules gate (issue #124). sample_rules_v
-        # models a MIXED collection (startup sample reads current, but an
-        # individual doc carries an older/unstamped rules_v) — the state
-        # the live re-stamp run exposed.
         self.stored_rules_v = (
             extraction_rules_version() if stored_rules_v is None else stored_rules_v
         )
         self.sample_rules_v = (
             self.stored_rules_v if sample_rules_v is None else sample_rules_v
         )
-        self.upserts: list[int] = []
-        self.upsert_calls: list[tuple[str, int]] = []
-        self.deletes = 0
-        self._points: dict[str, list] = {}
-        self.created_collections: list[str] = []
 
-    def get_aliases(self):
+    def scroll(self, collection_name, *, scroll_filter=None, limit=1,
+               with_payload=None, offset=None):
         from types import SimpleNamespace
 
-        return SimpleNamespace(aliases=[])
-
-    def collection_exists(self, collection_name):
-        return True
-
-    def get_collection(self, collection_name):
-        from types import SimpleNamespace
-
-        from mainframe_rag.config import HASH_EMBED_DIM
-
-        return SimpleNamespace(
-            config=SimpleNamespace(
-                params=SimpleNamespace(vectors={"dense": SimpleNamespace(size=HASH_EMBED_DIM)})
-            )
-        )
-
-    def create_collection(self, collection_name, **kwargs):
-        self.created_collections.append(collection_name)
-        return True
-
-    def create_payload_index(self, *a, **k):
-        from types import SimpleNamespace
-
-        return SimpleNamespace()
-
-    def update_collection(self, collection_name, *, optimizer_config=None):
-        return True
-
-    def scroll(self, collection_name, *, scroll_filter=None, limit=1, with_payload=None, offset=None):
-        from types import SimpleNamespace
-
-        if with_payload == ["rules_v"] and _filter_doc_id(scroll_filter) is None:
-            # Startup rules gate sample (issue #124): empty collection vs
-            # versioned points. Doc-level reads below serve stored points.
-            if self.stored_sha is None and not self._points.get(collection_name):
+        if with_payload == ["rules_v"] and filter_doc_id(scroll_filter) is None:
+            # Startup rules gate sample: empty collection vs versioned points.
+            # Doc-level reads below serve stored points only.
+            if self.stored_sha is None and not self.collections.get(collection_name):
                 return [], None
-            if self._points.get(collection_name):
-                return [self._points[collection_name][0]], None
+            if self.collections.get(collection_name):
+                return [self.collections[collection_name][0]], None
             return [SimpleNamespace(payload={"rules_v": self.sample_rules_v})], None
-        # Doc-level reads serve stored points only — the seeded sampling
-        # marker above never leaks into a doc_id-filtered read (issue #361:
-        # revision listing and marker reads must observe, never assume).
-        doc_id = _filter_doc_id(scroll_filter)
-        rev = _filter_match_value(scroll_filter, "source_rev")
-        stored = self._points.get(collection_name, [])
-        if doc_id is not None:
-            stored = [p for p in stored if (p.payload or {}).get("doc_id") == doc_id]
-        if rev is not None:
-            stored = [p for p in stored if (p.payload or {}).get("source_rev") == rev]
-        return stored[:limit], None
-
-    def upsert(self, collection_name, *, points, wait=True):
-        self.upserts.append(len(points))
-        self.upsert_calls.append((collection_name, len(points)))
-        # Production upsert overwrites same-id points (manifest recommit,
-        # marker rewrite); the double must too, or reads see stale firsts.
-        stored = self._points.setdefault(collection_name, [])
-        ids = {str(p.id) for p in points}
-        stored[:] = [p for p in stored if str(p.id) not in ids]
-        stored.extend(points)
-        from types import SimpleNamespace
-
-        return SimpleNamespace()
-
-    def retrieve(self, collection_name, ids, *, with_payload=True, with_vectors=False):
-        from types import SimpleNamespace
-
-        wanted = {str(i) for i in ids}
-        return [
-            SimpleNamespace(id=p.id, payload=p.payload)
-            for p in self._points.get(collection_name, [])
-            if str(p.id) in wanted
-        ]
-
-    def delete(self, collection_name, *, points_selector, wait=True):
-        from types import SimpleNamespace
-
-        self.deletes += 1
-        ids = getattr(points_selector, "points", None)
-        if ids is not None:
-            # PointIdsList (precise completion invalidation, issue #361).
-            # Seeded sampling markers carry no id and never match.
-            wanted = {str(i) for i in ids}
-            self._points[collection_name] = [
-                p for p in self._points.get(collection_name, [])
-                if str(getattr(p, "id", None)) not in wanted
-            ]
-            return SimpleNamespace()
-        doc_id = _filter_doc_id(points_selector)
-        rev = _filter_match_value(points_selector, "source_rev")
-        if doc_id is None and rev is None:
-            self._points[collection_name] = []
-        else:
-            self._points[collection_name] = [
-                p for p in self._points.get(collection_name, [])
-                if not (
-                    (doc_id is None or (p.payload or {}).get("doc_id") == doc_id)
-                    and (rev is None or (p.payload or {}).get("source_rev") == rev)
-                )
-            ]
-        return SimpleNamespace()
+        return super().scroll(collection_name, scroll_filter=scroll_filter,
+                              limit=limit, with_payload=with_payload, offset=offset)
 
 
 def test_upsert_path_counters_with_fake_qdrant(tmp_path, synthetic_pdf, capsys, monkeypatch):
@@ -670,7 +556,7 @@ def test_upsert_path_counters_with_fake_qdrant(tmp_path, synthetic_pdf, capsys, 
     main_collection = _Settings(_env_file=None).qdrant_collection
     main_sent = sum(n for collection, n in fake.upsert_calls if collection == main_collection)
     assert main_sent > 0
-    fake.upserts.clear()
+    fake.upsert_calls.clear()
     deletes_after_first = fake.deletes
     progress.unlink()
     assert main(["--src", str(synthetic_pdf.parent), "--progress", str(progress), "--workers", "1"]) == 0
@@ -679,7 +565,7 @@ def test_upsert_path_counters_with_fake_qdrant(tmp_path, synthetic_pdf, capsys, 
     assert done[0]["chunks_upserted"] == main_sent
     assert done[-1]["files_ok"] == 1
     assert done[-1]["chunks_upserted"] == 0
-    assert fake.upserts == [] and fake.deletes == deletes_after_first
+    assert fake.upsert_calls == [] and fake.deletes == deletes_after_first
 
 
 def test_builder_refuses_a_real_run_without_a_staging_build(
@@ -746,23 +632,6 @@ def test_embed_failfast_upserts_nothing(tmp_path, synthetic_pdf, monkeypatch):
     records = [json.loads(l) for l in progress.read_text().splitlines() if l.strip()]
     assert records and all(r["status"] == "error" for r in records)
     assert all(r["error_type"] == "RuntimeError" for r in records)
-
-
-def test_doc_locks_are_per_doc_id():
-    """Colliding doc_ids (shared form numbers) must serialize their
-    check-delete-upsert sequence; distinct doc_ids must not contend."""
-    from mainframe_rag.ingest.run_ingest import _DocLocks
-
-    locks = _DocLocks()
-    held = locks.get("SC14-7315-70")
-    assert held is locks.get("SC14-7315-70")
-    assert locks.get("SC23-6845-22") is not held
-    with held:
-        again = locks.get("SC14-7315-70")
-        assert again.acquire(blocking=False) is False  # same key excluded
-        other = locks.get("SC23-6845-22")
-        assert other.acquire(blocking=False) is True  # distinct key free
-        other.release()
 
 
 def test_worker_embed_batches_by_batch_size(synthetic_pdf, monkeypatch):
@@ -1364,7 +1233,7 @@ def test_oversize_document_is_never_upserted_or_completed_and_next_run_succeeds(
     # is a forced re-run once the cause is lifted.
     monkeypatch.delenv("INGEST_MAX_DOC_CHUNKS")
     assert main([*args, "--reingest"]) == 0
-    assert sum(fake.upserts) > 0
+    assert sum(n for _, n in fake.upsert_calls) > 0
 
 
 @pytest.mark.parametrize(

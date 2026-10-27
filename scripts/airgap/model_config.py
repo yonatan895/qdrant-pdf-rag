@@ -179,8 +179,6 @@ def network_policy(values: Mapping[str, str]) -> tuple[bool, list[str]]:
 # is a strict boolean; the secret is the operator-created Secret holding the
 # bearer token; size and retention are the operator's data decisions. One
 # validation owner for validate.sh and map_values.py, like network_policy.
-FEEDBACK_KEYS = ("FEEDBACK_ENABLED", "FEEDBACK_SECRET", "FEEDBACK_STORAGE_SIZE",
-                 "FEEDBACK_RETENTION_DAYS")
 FEEDBACK_DEFAULT_STORAGE_SIZE = "10Gi"
 FEEDBACK_DEFAULT_RETENTION_DAYS = 180  # ADR-0005; Settings bounds 1..3650
 _DNS_SUBDOMAIN = re.compile(r"[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?")

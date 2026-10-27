@@ -166,10 +166,7 @@ def _run_pack(tree, *extra_env):
     }
     for k, v in extra_env:
         env[k] = v
-    return (
-        run_sh(tmp_path / "scripts" / "airgap" / "pack.sh", env, tmp_path),
-        head,
-    )
+    return (run_sh(tmp_path / 'scripts' / 'airgap' / 'pack.sh', env, tmp_path), head)
 
 
 def test_pack_sha_mismatch_fails_closed(pack_tree):
@@ -585,12 +582,10 @@ def test_openwebui_base_and_derived_pin_needles_are_disjoint(pack_tree):
     assert qdrant_out.startswith("docker.io/qdrant/qdrant@sha256:")
 
 
-@pytest.mark.parametrize("damage", ["corrupt"])
-def test_pack_rejects_bad_task_before_image_calls(pack_tree, damage):
+def test_pack_rejects_bad_task_before_image_calls(pack_tree):
     tree, log, _, _ = pack_tree
     archive = tree / "unapproved.tar.gz"
-    if damage == "corrupt":
-        archive.write_bytes(b"not Task")
+    archive.write_bytes(b"not Task")
     result, _ = _run_pack(pack_tree, ("AIRGAP_TASK_ARCHIVE", str(archive)))
     assert result.returncode != 0
     assert "Task archive" in result.stderr

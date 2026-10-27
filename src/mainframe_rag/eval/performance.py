@@ -7,6 +7,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from mainframe_rag.eval.dotted import dotted_get as _get_nested
+
 _ENV_GATE_KEYS = ("cpu_count", "embed_mode", "qdrant_image", "concurrency")
 
 
@@ -14,17 +16,6 @@ def default_baseline_path(workspace_root: Path, embed_mode: str) -> Path:
     """Resolve the existing mode-keyed filename from explicit invocation inputs."""
     name = "harness-l3-vllm.json" if embed_mode.lower() == "vllm" else "harness-l3.json"
     return workspace_root / "benchmarks" / name
-
-
-def _get_nested(data: dict[str, Any] | None, dotted: str) -> Any:
-    if data is None:
-        return None
-    node: Any = data
-    for part in dotted.split("."):
-        if not isinstance(node, dict) or part not in node:
-            return None
-        node = node[part]
-    return node
 
 
 def gate_verdict_l3(

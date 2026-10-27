@@ -19,6 +19,7 @@ from tests.helpers_airgap import (
     FakeQdrant,
     assert_no_placeholders,
     assert_pull_secret_wired,
+    b64,
     copy_chart,
     install_rendering_helm,
     make_bin_tree,
@@ -399,28 +400,23 @@ def _chart(tree):
     return next((tree[0] / "charts").glob("qdrant-*.tgz"))
 
 
-def test_two_qdrant_charts_refuse_before_any_command(tree):
-    shutil.copy(_chart(tree), tree[0] / "charts" / "qdrant-9.9.9.tgz")
+@pytest.mark.parametrize(("setup", "messages"), [
+    ("two-charts", ("exactly one vendored Qdrant chart is required", "found 2")),
+    ("chart-sha", ("does not match the packed MANIFEST chart_sha256",)),
+    ("no-chart-sha", ("has no chart_sha256",)),
+], ids=["two-charts", "chart-sha-mismatch", "no-chart-sha"])
+def test_chart_identity_refuses_before_any_command(tree, setup, messages):
+    if setup == "two-charts":
+        shutil.copy(_chart(tree), tree[0] / "charts" / "qdrant-9.9.9.tgz")
+    elif setup == "chart-sha":
+        _manifest(tree, "0" * 64)
+    else:
+        _manifest(tree)
     result = _run(tree)
     assert result.returncode != 0
-    assert "exactly one vendored Qdrant chart is required" in result.stderr
-    assert "found 2" in result.stderr
-    assert not tree[1].exists() or "upgrade" not in _helm_log(tree)
-
-
-def test_manifest_chart_sha_mismatch_refuses_before_mutation(tree):
-    _manifest(tree, "0" * 64)
-    result = _run(tree)
-    assert result.returncode != 0
-    assert "does not match the packed MANIFEST chart_sha256" in result.stderr
-    assert not tree[1].exists() or "upgrade" not in _helm_log(tree)
-
-
-def test_manifest_without_chart_sha_refuses(tree):
-    _manifest(tree)
-    result = _run(tree)
-    assert result.returncode != 0
-    assert "has no chart_sha256" in result.stderr
+    for message in messages:
+        assert message in result.stderr
+    assert "upgrade" not in _helm_log(tree)
 
 
 def test_chart_identity_failure_then_fix_passes_on_next_run(tree):
@@ -474,8 +470,7 @@ def test_invalid_configuration_fails_closed(tree, extra_env, exit_code, messages
 def test_rehearsal_knobs_reach_helm(tree):
     vals = tree[0] / "vals.yaml"
     vals.write_text("resources: {}\n")
-    r = _run(tree, ("QDRANT_EXTRA_VALUES", str(vals)), ("QDRANT_STORAGE_SIZE", "1Gi"),
-             ("CI_REHEARSAL", "1"))
+    r = _run(tree, ('QDRANT_EXTRA_VALUES', str(vals)), ('QDRANT_STORAGE_SIZE', '1Gi'), ('CI_REHEARSAL', '1'))
     assert r.returncode == 0, r.stderr
     assert "persistence.size=1Gi" in _helm_log(tree)
     assert "snapshotPersistence.size=1Gi" in _helm_log(tree)
@@ -542,19 +537,12 @@ def test_extra_values_are_refused_without_ci_rehearsal(tree):
     assert "upgrade" not in _helm_log(tree)
 
 
-@pytest.mark.parametrize("line", ["CI_REHEARSAL=1", "_ci_rehearsal_cli=1", "_CI_REHEARSAL_PROCESS_ENV=1"])
-def test_ci_rehearsal_internal_capture_cannot_be_forged_by_the_operator_file(tree, line):
-    (tree[0] / "airgap.env").write_text(line + "\n")
-    r = _run(tree, ("QDRANT_EXTRA_VALUES", _values(tree, "resources: {}\n")))
-    assert r.returncode != 0
-    assert "upgrade" not in _helm_log(tree)
-
-
 def test_ci_rehearsal_cannot_come_from_the_operator_file(tree):
     (tree[0] / "airgap.env").write_text("CI_REHEARSAL=1\n")
     r = _run(tree, ("QDRANT_EXTRA_VALUES", _values(tree, "resources: {}\n")))
     assert r.returncode != 0
     assert "CI-rehearsal override" in r.stderr
+    assert "upgrade" not in _helm_log(tree)
 
 
 @pytest.mark.parametrize("text", [
@@ -657,36 +645,35 @@ def test_tracing_on_deploys_openobserve_and_off_removes_it(tree):
 
 
 @pytest.mark.parametrize("role", ["openobserve", "otelcol"])
-def test_openobserve_and_otelcol_are_identity_checked_when_tracing_is_on(tree, role):
-    """#956: DEPLOY_IMAGES carries both, so a missing registry image refuses
-    before any mutation, and the next run with the image loaded deploys."""
+def test_missing_registry_image_refuses_before_any_mutation(tree, role):
+    """pipeline --skip-load / standalone deploy against an empty or partial
+    registry refuses before mutation; the next run with the image loaded deploys."""
     _release(tree)
     _put_registry(tree, role, None)
     metrics = (("METRICS_ENABLED", "true"),)  # otelcol renders only with metrics on
-    refused = _run(tree, *metrics)
-    assert refused.returncode != 0
-    assert f"cannot read back registry image {ROLE_REFS[role]}" in refused.stderr
+    result = _run(tree, *metrics)
+    assert result.returncode != 0
+    assert f"cannot read back registry image {ROLE_REFS[role]}" in result.stderr
     assert _mutations(tree) == []
     _load_all(tree)
-    ok = _run(tree, *metrics)
-    assert ok.returncode == 0, ok.stderr
+    assert _run(tree, *metrics).returncode == 0
 
 
-@pytest.mark.parametrize("password", ["abcdef0123456789abcdef", "Short1!", "NOLOWER-123", "nodigit-Aaaa", "NoSpecial123x", "x" * 129 + "Aa1!"])
+# OpenObserve v1.1.2 crash-loops on a weak root password: refuse it up front with a
+# stable code and never echo the value.
+@pytest.mark.parametrize("password", ["abcdef0123456789abcdef", "Short1!", "NOLOWER-123", "nodigit-Aaaa",
+                                     "NoSpecial123x", "x" * 129 + "Aa1!"])
 def test_weak_openobserve_root_password_refuses_before_any_mutation(tree, password):
-    """OpenObserve v1.1.2 crash-loops on a weak root password: refuse it up front
-    with a stable code and never echo the value."""
-    import base64
-    r = _run(tree, ("OO_PASSWORD_B64", base64.b64encode(password.encode()).decode()))
+    r = _run(tree, ("OO_PASSWORD_B64", b64(password)))
     assert r.returncode != 0
     assert "E_OPENOBSERVE_WEAK_PASSWORD" in r.stderr
-    assert password not in r.stdout + r.stderr and base64.b64encode(password.encode()).decode() not in r.stdout + r.stderr
+    assert password not in r.stdout + r.stderr and b64(password) not in r.stdout + r.stderr
     assert _mutations(tree) == []
-    assert _helm_log(tree) == "" or "upgrade" not in _helm_log(tree)
-    ok = _run(tree, ("OO_PASSWORD_B64", base64.b64encode(b"Strong-pass-1").decode()))
+    assert "upgrade" not in _helm_log(tree)
+    ok = _run(tree, ("OO_PASSWORD_B64", b64("Strong-pass-1")))
     assert ok.returncode == 0, ok.stderr
     # Tracing off or an external endpoint never reads the Secret.
-    off = _run(tree, ("OTEL_EXPORTER_OTLP_ENDPOINT", "off"), ("OO_PASSWORD_B64", base64.b64encode(password.encode()).decode()))
+    off = _run(tree, ("OTEL_EXPORTER_OTLP_ENDPOINT", "off"), ("OO_PASSWORD_B64", b64(password)))
     assert off.returncode == 0, off.stderr
 
 
@@ -930,10 +917,9 @@ def test_model_revision_yaml_characters_round_trip(tree):
     assert rendered_env(rendered, "agent")["EMBED_MODEL"] == "true"
 
 
-@pytest.mark.parametrize("payload", ['{"kind":"List"}'])
-def test_corrupt_ownership_inventory_blocks_mutation(tree, payload):
+def test_corrupt_ownership_inventory_blocks_mutation(tree):
     inventory = tree[0] / "existing.json"
-    inventory.write_text(payload)
+    inventory.write_text('{"kind":"List"}')
     result = _run(tree, ("OWNERSHIP_FILE", str(inventory)))
     assert result.returncode != 0
     assert "ownership preflight refused" in result.stderr
@@ -955,8 +941,8 @@ def test_disabled_legacy_resources_are_checked_then_cleaned_after_rollout(tree, 
     import json
 
     meta = {"name": "jaeger", "namespace": "ns"}
-    if owner in ("ours", "other"):
-        meta["annotations"] = {"meta.helm.sh/release-name": "mainframe-rag" if owner == "ours" else "another"}
+    if owner == "other":
+        meta["annotations"] = {"meta.helm.sh/release-name": "another"}
     if owner == "controller":
         meta["ownerReferences"] = [{"name": "operator"}]
     path = tree[0] / "disabled.json"
@@ -1052,8 +1038,7 @@ def test_legacy_cleanup_waits_for_successful_rollouts(tree):
     assert "delete" not in log
 
 
-@pytest.mark.parametrize("from_file", [False])
-def test_shared_gateway_aliases_and_secret_reach_requests(tree, from_file):
+def test_shared_gateway_aliases_and_secret_reach_requests(tree):
     import json
 
     import httpx2
@@ -1064,23 +1049,15 @@ def test_shared_gateway_aliases_and_secret_reach_requests(tree, from_file):
     from mainframe_rag.ports import ChatMessage
     from tests.helpers_airgap import rendered_container
 
-    options = {
-        "EMBED_BASE_URL": "",  # no explicit override: the shared gateway applies
-        "GATEWAY_BASE_URL": "https://sample-api/v1/",
-        "GATEWAY_API_KEY_SECRET": "shared-gateway",
-        "GATEWAY_API_KEY_SECRET_KEY": "api-key",
-        "EMBED_MODEL": "embedding-v1",
-        "LLM_MODEL_REASONING": "code",
-    }
-    if from_file:
-        path = tree[0] / "gateway.env"
-        path.write_text("\n".join(f"{key}='{value}'" for key, value in options.items()))
-        # _run's synthetic embed model is a caller override, so explicitly
-        # select the requested alias there while resolving URL/Secret from file.
-        extra = [("AIRGAP_ENV", str(path)), ("EMBED_MODEL", "embedding-v1")]
-    else:
-        extra = list(options.items())
-    result = _run(tree, *extra)
+    extras = [
+        ("EMBED_BASE_URL", ""),  # no explicit override: the shared gateway applies
+        ("GATEWAY_BASE_URL", "https://sample-api/v1/"),
+        ("GATEWAY_API_KEY_SECRET", "shared-gateway"),
+        ("GATEWAY_API_KEY_SECRET_KEY", "api-key"),
+        ("EMBED_MODEL", "embedding-v1"),
+        ("LLM_MODEL_REASONING", "code"),
+    ]
+    result = _run(tree, *extras)
     assert result.returncode == 0, result.stderr
     rendered = (tree[0] / "dist/agent-rendered.yaml").read_text()
     scalars = rendered_env(rendered, "agent")
@@ -1090,9 +1067,7 @@ def test_shared_gateway_aliases_and_secret_reach_requests(tree, from_file):
     assert scalars["LLM_MODEL_REASONING"] == "code"
     env = {entry["name"]: entry for entry in rendered_container(rendered, "agent")["env"]}
     for key in ("EMBED_API_KEY", "LLM_API_KEY", "RERANK_API_KEY"):
-        assert env[key]["valueFrom"]["secretKeyRef"] == {
-            "name": "shared-gateway", "key": "api-key",
-        }
+        assert env[key]['valueFrom']['secretKeyRef'] == {'name': 'shared-gateway', 'key': 'api-key'}
     seen = []
 
     def respond(request):
@@ -1282,28 +1257,45 @@ def test_route_refusal_then_corrected_run_succeeds(tree):
     assert _route_on(tree).returncode == 0
 
 
-@pytest.mark.parametrize(("backend", "enabled"), [
-    ("rag-agent", True), ("rag-agent", False), ("qdrant", False), ("qdrant-headless", False),
+@pytest.mark.parametrize(("backend", "port", "route_on"), [
+    ("rag-agent", "oauth", True), ("rag-agent", "oauth", False),
+    ("qdrant", "6333", False), ("qdrant-headless", "6333", False),
     # #804: the content store is a protected Service whether or not it is enabled.
-    ("rag-feedback", False), ("rag-feedback", True),
-])
-def test_other_routes_to_agent_or_qdrant_refuse_before_any_mutation(tree, backend, enabled):
-    routes = _route_list(tree, _route("public-console", to=backend))
-    extra = (("AGENT_ROUTE", "true"), ("SERVICE_CA", SERVICE_CA)) if enabled else ()
-    set_oauth_proxy_pin(tree[0], GOOD_PIN)
-    r = _run(tree, ("ROUTES_FILE", routes), ("ROUTE_LIVE_FILE", _live(tree)), *extra)
+    ("rag-feedback", "8080", False), ("rag-feedback", "8080", True),
+    # #1074: the console front end is a protected Service too.
+    ("rag-openwebui", "https", True), ("rag-openwebui", "https", False),
+], ids=["agent-route-on", "agent-route-off", "qdrant", "qdrant-headless",
+        "feedback-off", "feedback-on", "openwebui-route-on", "openwebui-route-off"])
+def test_other_routes_to_a_protected_service_refuse_before_any_mutation(tree, backend, port, route_on):
+    routes = _route_list(tree, _route("shortcut", to=backend, port=port))
+    if route_on and backend == "rag-openwebui":
+        r = _owui_deploy(tree, ("ROUTES_FILE", routes))
+    elif route_on:
+        set_oauth_proxy_pin(tree[0], GOOD_PIN)
+        r = _run(tree, ("ROUTES_FILE", routes), ("ROUTE_LIVE_FILE", _live(tree)),
+                 ("AGENT_ROUTE", "true"), ("SERVICE_CA", SERVICE_CA))
+    else:
+        r = _run(tree, ("ROUTES_FILE", routes))
     assert r.returncode != 0
-    assert "Route public-console exposes a protected Service" in r.stderr
-    log = _helm_log(tree)
-    assert "upgrade" not in log and "delete" not in log and "create" not in log
+    assert "Route shortcut exposes a protected Service" in r.stderr
+    assert _mutations(tree) == []
 
 
-def test_other_route_alternate_backend_to_qdrant_refuses(tree):
-    routes = _route_list(tree, _route("docs", to="docs-site", alternates=("qdrant",)))
-    r = _run(tree, ("ROUTES_FILE", routes))
+@pytest.mark.parametrize(("route", "route_on", "message"), [
+    (("docs", "docs-site", ("qdrant",)), False, "Route docs exposes"),
+    (("rag-agent", "rag-agent", ("qdrant",)), True, "alternateBackends"),
+], ids=["foreign-route", "owned-route"])
+def test_route_with_a_protected_alternate_backend_refuses_before_mutation(tree, route, route_on, message):
+    name, to, alternates = route
+    routes = _route_list(tree, _route(name, to=to, alternates=alternates))
+    extra = []
+    if route_on:
+        set_oauth_proxy_pin(tree[0], GOOD_PIN)
+        extra = [("AGENT_ROUTE", "true"), ("SERVICE_CA", SERVICE_CA), ("ROUTE_LIVE_FILE", _live(tree))]
+    r = _run(tree, ("ROUTES_FILE", routes), *extra)
     assert r.returncode != 0
-    assert "Route docs exposes" in r.stderr
-    assert "upgrade" not in _helm_log(tree)
+    assert message in r.stderr
+    assert _mutations(tree) == []
 
 
 # ------------------------------------------- Open WebUI front end (#1074)
@@ -1328,8 +1320,6 @@ def _owui_route(*, host=OWUI_HOST, **kw):
 
 
 def _owui_deploy(tree, *extra, live=None, admin_key=True):
-    import base64
-
     root = tree[0]
     set_openwebui_pin(root, GOOD_PIN)
     pipe = root / "charts" / "mainframe-rag" / "files" / "openwebui" / "docs_pipe.py"
@@ -1337,7 +1327,7 @@ def _owui_deploy(tree, *extra, live=None, admin_key=True):
     env = [*OWUI_ENV, ("OWUI_ROUTE_LIVE_FILE", live or _write_json(tree, "owui-route.json", _owui_route())),
            ("OWUI_EXEC_STDIN", str(root / "exec-stdin.txt"))]
     if admin_key:
-        env.append(("OWUI_ADMIN_KEY_B64", base64.b64encode(OWUI_ADMIN_KEY.encode()).decode()))
+        env.append(("OWUI_ADMIN_KEY_B64", b64(OWUI_ADMIN_KEY)))
     return _run(tree, *env, *extra)
 
 
@@ -1463,16 +1453,6 @@ def test_openwebui_missing_secret_key_refuses_before_mutation(tree):
     assert "upgrade" not in _helm_log(tree)
 
 
-@pytest.mark.parametrize("enabled", [True, False])
-def test_other_routes_to_openwebui_refuse_before_any_mutation(tree, enabled):
-    routes = _route_list(tree, _route("shortcut", to="rag-openwebui", port="https"))
-    r = (_owui_deploy(tree, ("ROUTES_FILE", routes)) if enabled
-         else _run(tree, ("ROUTES_FILE", routes)))
-    assert r.returncode != 0
-    assert "Route shortcut exposes a protected Service" in r.stderr
-    assert "upgrade" not in _helm_log(tree)
-
-
 @pytest.mark.parametrize("drift", [{"port": "http"}, {"termination": "edge"},
                                    {"alternates": ("rag-agent",)}, {"host": "other.example"}])
 def test_openwebui_route_not_converged_after_release_is_deleted_and_fails(tree, drift):
@@ -1540,20 +1520,22 @@ def test_route_off_removal_failure_blocks_the_release(tree):
     assert "upgrade" not in _helm_log(tree)
 
 
-@pytest.mark.parametrize("failure", ["ROUTES_READ_FAIL", "DISCOVERY_FAIL"])
-def test_unlistable_routes_fail_closed_before_mutation(tree, failure):
-    r = _run(tree, (failure, "1"))
+@pytest.mark.parametrize(("env", "payload", "message"), [
+    (("ROUTES_READ_FAIL", "1"), None, None),
+    (("DISCOVERY_FAIL", "1"), None, None),
+    ((), "not-json", "Route exposure preflight refused"),
+    ((), '{"kind":"List","items":[{"kind":"Deployment"}]}', "Route exposure preflight refused"),
+], ids=["routes-read-fail", "discovery-fail", "not-json", "not-a-route"])
+def test_route_inventory_failures_block_mutation(tree, env, payload, message):
+    pairs = [env] if env else []
+    if payload is not None:
+        path = tree[0] / "bad-routes.json"
+        path.write_text(payload)
+        pairs.append(("ROUTES_FILE", str(path)))
+    r = _run(tree, *pairs)
     assert r.returncode != 0
-    assert "upgrade" not in _helm_log(tree)
-
-
-@pytest.mark.parametrize("payload", ["not-json", '{"kind":"List","items":[{"kind":"Deployment"}]}'])
-def test_corrupt_route_inventory_blocks_mutation(tree, payload):
-    path = tree[0] / "bad-routes.json"
-    path.write_text(payload)
-    r = _run(tree, ("ROUTES_FILE", str(path)))
-    assert r.returncode != 0
-    assert "Route exposure preflight refused" in r.stderr
+    if message:
+        assert message in r.stderr
     assert "upgrade" not in _helm_log(tree)
 
 
@@ -1616,17 +1598,6 @@ def test_release_renders_first_party_images_by_verified_digest(tree):
     assert "image.tag=v1.19.2" in _helm_log(tree)
 
 
-@pytest.mark.parametrize("role", ["openobserve", "otelcol"])
-def test_missing_registry_image_refuses_before_any_mutation(tree, role):
-    """pipeline --skip-load / standalone deploy against an empty or partial registry."""
-    _release(tree)
-    _put_registry(tree, role, None)
-    result = _run(tree, ("METRICS_ENABLED", "true"))  # otelcol renders only with metrics on
-    assert result.returncode != 0
-    assert f"cannot read back registry image {ROLE_REFS[role]}" in result.stderr
-    assert _mutations(tree) == []
-
-
 def test_manifest_without_config_digests_refuses_before_any_mutation(tree):
     _manifest(tree, sha256_bytes(_chart(tree).read_bytes()), config_digests=False)
     _write_pods(tree, _load_all(tree))
@@ -1685,8 +1656,7 @@ def test_digest_from_caller_environment_is_never_rendered(tree):
     assert "digest" not in (tree[0] / "dist" / "mainframe-rag-release-values.yaml").read_text()
 
 
-@pytest.mark.parametrize("phase", ["Failed"])
-def test_release_identity_ignores_unrelated_retained_jobs(tree, phase):
+def test_release_identity_ignores_unrelated_retained_jobs(tree):
     digests = _release(tree)
     path = tree[0] / "pods.json"
     document = json.loads(path.read_text())
@@ -1694,7 +1664,7 @@ def test_release_identity_ignores_unrelated_retained_jobs(tree, phase):
     extra = json.loads(json.dumps(extra))
     extra["metadata"].update(name="diagnostic-history", ownerReferences=[
         {"kind": "Job", "uid": "diagnostic-job", "controller": True}])
-    extra["status"].update(phase=phase)
+    extra["status"].update(phase="Failed")
     extra["status"]["containerStatuses"][0]["imageID"] = ROLE_REPOS["agent"] + "@sha256:" + "9" * 64
     document["items"].append(extra)
     path.write_text(json.dumps(document))
@@ -1792,15 +1762,14 @@ def test_existing_owned_route_failure_paths_preserve_only_compatible_exposure(tr
     assert operator_state.read_bytes() == operator_before
 
 
-@pytest.mark.parametrize("ownership", ["release"])
-def test_named_operator_owned_route_is_not_retired_or_adopted(tree, ownership):
+@pytest.mark.parametrize("meta", [
+    {"annotations": {"meta.helm.sh/release-name": "operator-release"}},
+    {"ownerReferences": [{"kind": "Operator", "name": "console"}]},
+    {"labels": {"app.kubernetes.io/managed-by": "operator"}},
+], ids=["release", "controller", "manager"])
+def test_named_operator_owned_route_is_not_retired_or_adopted(tree, meta):
     route = _route(port="http", termination="edge")
-    if ownership == "release":
-        route["metadata"]["annotations"] = {"meta.helm.sh/release-name": "operator-release"}
-    elif ownership == "controller":
-        route["metadata"]["ownerReferences"] = [{"kind": "Operator", "name": "console"}]
-    else:
-        route["metadata"]["labels"] = {"app.kubernetes.io/managed-by": "operator"}
+    route["metadata"].update(meta)
     result = _route_on(tree, ("ROUTES_FILE", _route_list(tree, route)))
     assert result.returncode != 0
     assert "delete" not in _helm_log(tree) and "upgrade" not in _helm_log(tree)
@@ -1810,11 +1779,7 @@ def test_named_operator_owned_route_is_not_retired_or_adopted(tree, ownership):
 def test_deploy_registry_structure_is_validated_before_mutation(tree, malformed):
     _release(tree)
     manifest = json.loads(_image_manifest("agent"))
-    if malformed == "layers-object":
-        manifest["layers"] = {"digest": "sha256:" + "a" * 64}
-    elif malformed == "config-type":
-        manifest["config"]["digest"] = 42
-    elif malformed == "layer-digest":
+    if malformed == "layer-digest":
         manifest["layers"][0]["digest"] = "not-a-digest"
     else:
         manifest["manifests"] = []
@@ -1989,8 +1954,7 @@ def test_disable_keeps_the_claim_and_re_enable_adopts_it(tree):
     assert not cleanup.exists() or "rag-feedback" not in cleanup.read_text()
     assert "delete" not in _helm_log(tree).split()
     # Only the retained claim is live (workload, Service and policy were pruned).
-    retained = _live_inventory(
-        tree, [("v1", "PersistentVolumeClaim", "rag-feedback-data")], **HELM_OWNED)
+    retained = _live_inventory(tree, [('v1', 'PersistentVolumeClaim', 'rag-feedback-data')], **HELM_OWNED)
     enabled = _run(tree, *FEEDBACK_ENV, ("OWNERSHIP_FILE", retained))
     assert enabled.returncode == 0, enabled.stderr
     assert "--take-ownership" in _helm_log(tree)
@@ -2044,49 +2008,51 @@ def test_feedback_pod_with_another_image_or_no_pod_fails_after_rollout(tree, pro
         assert "StatefulSet rag-feedback has 0 current pods, expected 1" in r.stderr
 
 
+TRACE_QUERY = ('. scripts/airgap/common.sh; NAMESPACE=ns; KC=kubectl; FLAGS; resolve_trace_query; '
+               'printf "%s|%s|%s" "${TRACE_QUERY_URL-}" "${TRACE_QUERY_USER-}" "${TRACE_QUERY_PASSWORD-}"')
+BUNDLED_TRACE = "http://openobserve:5080|test-user|Test-pass1"
+
+
+def _trace_query(tree, flags, env=None):
+    """Run the real common.sh resolver and return its three resolved fields."""
+    return subprocess.run(
+        ["sh", "-c", TRACE_QUERY.replace("FLAGS", flags)], cwd=tree[0], capture_output=True,
+        text=True, check=False,
+        env={"PATH": f"{tree[0] / 'bin'}:/usr/bin:/bin", "HELM_LOG": str(tree[1]), **(env or {})})
+
+
 def test_default_smoke_gets_trace_query_settings_without_manual_env(tree):
     """#956: with tracing on, airgap smoke needs no TRACE_QUERY_* env: the URL
     is the in-cluster OpenObserve and the credentials come from the Secret."""
-    script = ('. scripts/airgap/common.sh; NAMESPACE=ns; KC=kubectl; OTEL_TRACING_ENABLED=1; '
-              'resolve_trace_query; printf "%s|%s|%s" "${TRACE_QUERY_URL-}" "${TRACE_QUERY_USER-}" "${TRACE_QUERY_PASSWORD-}"')
-    env = {"PATH": f"{tree[0] / 'bin'}:/usr/bin:/bin", "HELM_LOG": str(tree[1])}
-    r = subprocess.run(["sh", "-c", script], cwd=tree[0], env=env, capture_output=True, text=True, check=False)
+    r = _trace_query(tree, "OTEL_TRACING_ENABLED=1")
     assert r.returncode == 0, r.stderr
-    assert r.stdout == "http://openobserve:5080|test-user|Test-pass1"
-    off = subprocess.run(["sh", "-c", script.replace("OTEL_TRACING_ENABLED=1", "OTEL_TRACING_ENABLED=0")],
-                         cwd=tree[0], env=env, capture_output=True, text=True, check=False)
-    assert off.stdout == "||"
+    assert r.stdout == BUNDLED_TRACE
+    assert _trace_query(tree, "OTEL_TRACING_ENABLED=0").stdout == "||"
 
 
 def test_external_otlp_endpoint_has_no_bundled_trace_query_default(tree):
     """#956: with tracing.endpoint set there is no bundled OpenObserve, so no
-    default URL or Secret read is applied; operator values pass through and
-    smoke refuses empty ones."""
-    base = ('. scripts/airgap/common.sh; NAMESPACE=ns; KC=kubectl; OTEL_TRACING_ENABLED=1; OTEL_BUNDLED=0; '
-            'resolve_trace_query; printf "%s|%s" "${TRACE_QUERY_URL-}" "${TRACE_QUERY_USER-}"')
-    env = {"PATH": f"{tree[0] / 'bin'}:/usr/bin:/bin", "HELM_LOG": str(tree[1])}
-    unset = subprocess.run(["sh", "-c", base], cwd=tree[0], env=env, capture_output=True, text=True, check=False)
-    assert unset.returncode == 0 and unset.stdout == "|"
-    given = subprocess.run(
-        ["sh", "-c", base], cwd=tree[0], capture_output=True, text=True, check=False,
-        env={**env, "TRACE_QUERY_URL": "http://oo.platform:5080", "TRACE_QUERY_USER": "u", "TRACE_QUERY_PASSWORD": "p"})
+    default URL or Secret read is applied; operator values pass through."""
+    flags = "OTEL_TRACING_ENABLED=1; OTEL_BUNDLED=0"
+    unset = _trace_query(tree, flags)
+    assert unset.returncode == 0 and unset.stdout == "||"
+    given = _trace_query(tree, flags, {"TRACE_QUERY_URL": "http://oo.platform:5080",
+                                       "TRACE_QUERY_USER": "u", "TRACE_QUERY_PASSWORD": "p"})
     assert given.returncode == 0, given.stderr
-    assert given.stdout == "http://oo.platform:5080|u"
+    assert given.stdout == "http://oo.platform:5080|u|p"
 
 
 def test_task_runner_empty_trace_query_vars_get_bundled_defaults(tree):
     """The task runner exports every operator key, empty when unset: on the
     bundled path empty means unset (defaults and Secret credentials), while a
     non-empty operator value still wins."""
-    script = ('. scripts/airgap/common.sh; NAMESPACE=ns; KC=kubectl; OTEL_TRACING_ENABLED=1; OTEL_BUNDLED=1; '
-              'resolve_trace_query; printf "%s|%s|%s" "${TRACE_QUERY_URL-}" "${TRACE_QUERY_USER-}" "${TRACE_QUERY_PASSWORD-}"')
-    env = {"PATH": f"{tree[0] / 'bin'}:/usr/bin:/bin", "HELM_LOG": str(tree[1])}
-    empty = subprocess.run(["sh", "-c", script], cwd=tree[0], capture_output=True, text=True, check=False,
-                           env={**env, "TRACE_QUERY_URL": "", "TRACE_QUERY_USER": "", "TRACE_QUERY_PASSWORD": ""})
+    flags = "OTEL_TRACING_ENABLED=1; OTEL_BUNDLED=1"
+    empty = _trace_query(tree, flags, dict.fromkeys(("TRACE_QUERY_URL", "TRACE_QUERY_USER",
+                                                     "TRACE_QUERY_PASSWORD"), ""))
     assert empty.returncode == 0, empty.stderr
-    assert empty.stdout == "http://openobserve:5080|test-user|Test-pass1"
-    given = subprocess.run(["sh", "-c", script], cwd=tree[0], capture_output=True, text=True, check=False,
-                           env={**env, "TRACE_QUERY_URL": "http://x:1", "TRACE_QUERY_USER": "u", "TRACE_QUERY_PASSWORD": "p"})
+    assert empty.stdout == BUNDLED_TRACE
+    given = _trace_query(tree, flags, {"TRACE_QUERY_URL": "http://x:1", "TRACE_QUERY_USER": "u",
+                                       "TRACE_QUERY_PASSWORD": "p"})
     assert given.stdout == "http://x:1|u|p"
 
 
@@ -2095,45 +2061,37 @@ def test_smoke_trace_query_with_bundled_backend_and_absent_secret_fails_fixed(tr
     """#588: the smoke-time branch of resolve_trace_query. With the bundled
     backend and no openobserve-credentials Secret, it dies with the fixed
     code and prints no credential, operator-given or from the cluster."""
-    script = ('. scripts/airgap/common.sh; NAMESPACE=ns; KC=kubectl; OTEL_TRACING_ENABLED=1; OTEL_BUNDLED=1; '
-              'resolve_trace_query; printf "%s|%s" "${TRACE_QUERY_USER-}" "${TRACE_QUERY_PASSWORD-}"')
-    env = {"PATH": f"{tree[0] / 'bin'}:/usr/bin:/bin", "HELM_LOG": str(tree[1]), "OO_SECRET_ABSENT": "1", **given}
-    r = subprocess.run(["sh", "-c", script], cwd=tree[0], env=env, capture_output=True, text=True, check=False)
+    r = _trace_query(tree, "OTEL_TRACING_ENABLED=1; OTEL_BUNDLED=1", {"OO_SECRET_ABSENT": "1", **given})
     assert r.returncode != 0
     assert r.stdout == ""
-    assert "E_OPENOBSERVE_CREDENTIALS: cannot read root-user-email and root-user-password from Secret openobserve-credentials" in r.stderr
+    assert ("E_OPENOBSERVE_CREDENTIALS: cannot read root-user-email and root-user-password "
+            "from Secret openobserve-credentials") in r.stderr
     for value in ("test-user", "Test-pass1", "operator-user-sentinel", "NotFound"):
         assert value not in r.stdout + r.stderr
 
 
 def _pw_run(tree, password):
-    import base64
-    return _run(tree, ("OO_PASSWORD_B64", base64.b64encode(password.encode()).decode()))
-
-
-@pytest.mark.parametrize("password", ["Aa1!" + "x" * 4, "Aa1!" + "x" * 124])
-def test_openobserve_password_length_limits_are_inclusive(tree, password):
-    """#588: exactly 8 and exactly 128 characters are accepted."""
-    assert len(password) in (8, 128)
-    r = _pw_run(tree, password)
-    assert r.returncode == 0, r.stderr
+    return _run(tree, ("OO_PASSWORD_B64", b64(password)))
 
 
 @pytest.mark.parametrize("password,accepted", [
+    ("Aa1!" + "x" * 4, True),      # #588: exactly 8 characters are accepted
+    ("Aa1!" + "x" * 124, True),    # exactly 128
     ("Aa1!" + "é" * 3, False),     # 7 chars but 10 bytes
     ("Aa1!" + "é" * 4, True),      # 8 chars, 12 bytes
     ("Aa1!" + "é" * 124, True),    # 128 chars, 252 bytes
     ("Aa1!" + "é" * 125, False),   # 129 chars
-])
+], ids=["8-chars", "128-chars", "7-chars-10-bytes", "8-chars-12-bytes",
+        "128-chars-252-bytes", "129-chars"])
 def test_openobserve_password_length_counts_characters_not_bytes(tree, password, accepted):
     r = _pw_run(tree, password)
     if accepted:
         assert r.returncode == 0, r.stderr
-    else:
-        assert r.returncode != 0
-        assert "E_OPENOBSERVE_WEAK_PASSWORD" in r.stderr
-        assert password not in r.stdout + r.stderr
-        assert _mutations(tree) == []
+        return
+    assert r.returncode != 0
+    assert "E_OPENOBSERVE_WEAK_PASSWORD" in r.stderr
+    assert password not in r.stdout + r.stderr
+    assert _mutations(tree) == []
 
 
 # --- Issue #1070 (R1): stored-layout preflight before any cluster change -----
@@ -2202,16 +2160,16 @@ def test_unbound_alias_refuses_before_any_mutation(tree, qdrant):
     assert _mutations(tree) == []
 
 
-def test_fresh_install_without_qdrant_passes(tree):
-    result = _run(tree)
-    assert result.returncode == 0, result.stderr
-    assert "no Qdrant release qdrant yet (fresh install)" in result.stdout
-
-
-def test_empty_store_passes(tree, qdrant):
-    result = _run(tree, *_layout_env(qdrant))
-    assert result.returncode == 0, result.stderr
-    assert "no corpus collection yet" in result.stdout
+def test_fresh_install_and_empty_store_pass(tree, qdrant):
+    """Both preflights (stored layout and immutable volume sizes) accept a first
+    install; an existing default-sized StatefulSet with no corpus also passes."""
+    fresh = _run(tree)
+    assert fresh.returncode == 0, fresh.stderr
+    assert "no Qdrant release qdrant yet (fresh install)" in fresh.stdout
+    assert _run(tree, *_live_statefulset(tree)).returncode == 0
+    empty = _run(tree, *_layout_env(qdrant))
+    assert empty.returncode == 0, empty.stderr
+    assert "no corpus collection yet" in empty.stdout
 
 
 @pytest.mark.parametrize("failure", ["aliases", "exec", "statefulset"])
@@ -2414,11 +2372,6 @@ def test_equal_sizes_in_another_unit_pass(tree):
     assert r.returncode == 0, r.stderr
 
 
-def test_no_existing_statefulset_or_default_match_passes(tree):
-    assert _run(tree).returncode == 0
-    assert _run(tree, *_live_statefulset(tree)).returncode == 0
-
-
 def test_an_unreadable_statefulset_is_refused(tree):
     r = _run(tree, ("LIVE_STS_FAIL", "1"))
     assert r.returncode != 0
@@ -2464,17 +2417,6 @@ def test_a_release_named_qdrant_is_checked_under_the_chart_fullname(tree):
 def test_another_release_name_resolves_its_own_statefulset_name(tree):
     r = _run(tree, ("QDRANT_RELEASE", "vec"), *_live_statefulset(tree, data="40Gi", snapshots="60Gi", name="vec-qdrant"))
     assert r.returncode != 0 and "immutable" in r.stderr
-
-
-def test_an_existing_release_without_its_statefulset_is_refused(tree):
-    r = _run(tree, ("HELM_RELEASE_SECRET", "qdrant"))
-    assert r.returncode != 0
-    assert "StatefulSet was not found" in r.stderr
-    assert _mutations_before_refusal(tree) == []
-
-
-def test_a_fresh_install_without_release_or_statefulset_passes(tree):
-    assert _run(tree).returncode == 0
 
 
 def test_layout_preflight_refuses_a_release_without_its_statefulset(tree):

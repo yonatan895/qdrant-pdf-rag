@@ -58,12 +58,9 @@ Current gate and CI contracts: [docs/eval.md](docs/eval.md) and
 [docs/deploy.md](docs/deploy.md).
 
 ### PR-02 (issue #76): Cross-encoder reranking
-> **Status: DONE — merged as PR #97.** `retrieve/rerank.py`, default-off
-> (`rerank_enabled=False`).
-> Shipped since: `rerank_fusion_alpha` blend, `Table:`/`Syntax:` passage
-> templates, `RERANK_ENDPOINT_ORDER` (`score_first` legacy wire order,
-> `rerank_first` for gateways), trap/identifier bypass. `probe_gateway.py`
-> recommends the order per deployment.
+> **Status: DONE — merged as PR #97.** Rerank ships default-off
+> (`rerank_enabled=False`); leg order and gateway selection are owned by
+> [docs/retrieval.md](docs/retrieval.md).
 
 Current rerank behavior and gateway leg selection: [docs/retrieval.md](docs/retrieval.md).
 The platform owns model serving; this repo consumes its configured HTTP endpoint.
@@ -75,10 +72,8 @@ The platform owns model serving; this repo consumes its configured HTTP endpoint
 Current async, streaming, and client-lifecycle contracts: [docs/agent.md](docs/agent.md).
 
 ### PR-04 (issue #78): Contextual retrieval (chunk context prefixes)
-> **Status: DONE.** Shipped as `ingest/context.py` (versioned `CONTEXT_PROMPT_VERSION=v2`
-> cache keyed by `v2:sha:chunk_id`, dense-only contexts) behind `CONTEXTUAL_EMBED_ENABLED`
-> (default off); enabling changes every dense vector so the collection must be recreated.
-> Tests: `tests/test_contextual.py`.
+> **Status: DONE.** `CONTEXTUAL_EMBED_ENABLED` (default off); enabling changes
+> every dense vector so the collection must be recreated.
 
 Measured verdict (issue #300, 2026-09-12): paraphrase vLLM A/B
 (header-only vs contextual, 22 entries) is 22/22 identical with both
@@ -91,18 +86,13 @@ Current embedding and evaluation contracts: [docs/ingest.md](docs/ingest.md)
 and [docs/eval.md](docs/eval.md).
 
 ### PR-05 (issue #79): Code-atomic chunking for JCL/REXX (rescoped)
-> **Status: DONE.** `detect_code_region` + statement-boundary splitters in `ingest/chunk.py`;
-> `heading_path` filterable in the Qdrant payload (`qdrant_io.py`); UUID5 contract kept.
-> Tests: `tests/test_chunk_ibm_shape.py` (JCL/REXX fixtures, no-statement-split).
+> **Status: DONE.** Code-atomic JCL/REXX regions; UUID5 point identity kept.
 
 Current code-atomic chunking and point-identity contracts: [docs/ingest.md](docs/ingest.md).
 
 ### PR-06 (issue #80): vLLM prefix caching + prompt ordering + injection hardening
-> **Status: DONE.** `order_prompt_blocks` (`retrieval`/`stable_cache` policies) in
-> `agent/answer.py` with prefix-cache-safe static instructions; `--enable-prefix-caching`
-> documented for the LOCAL reasoning server (`install_and_ops.md` §3.6, Budget `prefix_cache`);
-> injection screening via `retrieve/screen.py` (trap before identifiers).
-> Tests: `tests/test_prompt_order.py`, `tests/test_screen.py`.
+> **Status: DONE.** Prefix-cache-safe prompt ordering and injection screening
+> (trap before identifiers); serving details in `install_and_ops.md` §3.6.
 
 Current prompt-ordering and local serving contracts: [docs/agent.md](docs/agent.md)
 and [docs/live-stack.md](docs/live-stack.md).
@@ -116,28 +106,14 @@ and [docs/live-stack.md](docs/live-stack.md).
 > Db2 manuals did not meet the acceptance bar: it flipped the flagship `DSN9022I`
 > identifier query to the wrong chapter, at 4.4x points and 2.2x ingest wall time.
 > Nothing was merged; the spike branch `feat/81-parent-child` is kept. The
-> implementation below is historical, not a task to start. Verdict and measurements:
-> the closing comment on #81.
-
-- **Scope:** `ingest/chunk.py`, `ingest/qdrant_io.py`, `retrieve/query.py`
-- **Implementation:** Embed child chunks (~128–256 tokens); retrieve children, return
-  parent (~512–1024 tokens) to the LLM; group via payload `parent_id`; dedupe multiple
-  children → same parent. Keep the existing UUID5 point-id contract.
-- **Tests:** dedupe test; payload round-trip in `test_qdrant_io.py`.
-- **Gate:** L1 + L2 improvement vs PR-04 baseline.
-- **Depends on:** #78, #79.
+> spike is historical, not a task to start. Verdict and measurements: the
+> closing comment on #81.
 
 ### PR-08 (issue #82): Query understanding — acronym expansion + HyDE (gated)
 > **Status: CLOSED (acronym shipped; HyDE/step-back measured harmful, will not pursue).**
-> Deterministic acronym expansion shipped (`retrieve/rewrite.py` +
-> `acronyms_v1.json`, `acronym_expansion_enabled=False`, identifier bypass;
-> tests `tests/test_rewrite.py`). The LLM-rewriting remainder was built and
-> measured in PR #175 (branch `feat/82-hyde-stepback`, closed unmerged):
-> paired A/B on the real corpus showed HyDE recall@1 −0.015 for +1 LLM
-> call per query, step-back −0.177 (strips the product/feature tokens that
-> select the right manual), combined −0.192 — full per-query attribution in
-> that PR body; implementation + `--ab` instrument remain salvageable from
-> the branch. The acronym implementation remains available.
+> Deterministic acronym expansion ships default-off; the LLM-rewriting
+> remainder (PR #175) is closed unmerged — measured recall@1 −0.015 HyDE,
+> −0.177 step-back, −0.192 combined, attribution in that PR body.
 >
 > **Reopening gate (all required):** per-query attribution shows failures
 > from vocabulary mismatch (query terms absent from relevant docs) on the
@@ -147,21 +123,16 @@ and [docs/live-stack.md](docs/live-stack.md).
 Current acronym behavior and measured retry verdicts: [docs/retrieval.md](docs/retrieval.md).
 
 ### PR-09 (issue #83): OpenTelemetry tracing
-> **Status: DONE.** Owner moved to `src/mainframe_rag/tracing.py`; library default off,
-> air-gap deploy default ON — an unset endpoint resolves to the in-cluster trace backend (OpenObserve since ADR-0006; Jaeger when this shipped) and the
-> `off` sentinel disables tracing and the deployment together. Fail-open bounded export +
-> Jaeger v2 all-in-one Helm templates (`charts/mainframe-rag/templates/jaeger-*.yaml`, replaced under #956; the Kustomize overlay was retired).
-> Tests: `tests/test_tracing.py`, `tests/test_ingest_tracing.py`.
+> **Status: DONE.** Library default off, air-gap deploy default ON; the `off`
+> sentinel disables tracing and the deployment together. Owner and backend
+> contracts: [docs/deploy.md](docs/deploy.md).
 
 Current tracing ownership and deployment contracts: [docs/architecture.md](docs/architecture.md)
 and [docs/deploy.md](docs/deploy.md).
 
 ### PR-10 (issue #84): LLM-as-a-judge eval stage
-> **Status: DONE (via #268 L4).** Engine `scripts/harness_l4.py` reuses the
-> L2 runner (`harness_l2.py` adds the relevance leg), reference
-> `evals/harness-l4-thresholds.json` with a tolerance band and a
-> human-review queue; the deterministic gate-l1/L1 checks stay the gate.
-> RC-only by design (`VENUE=rc`), never a PR gate.
+> **Status: DONE (via #268 L4).** RC-only by design (`VENUE=rc`), never a PR
+> gate; the deterministic L1 checks stay the gate.
 
 Current L4 instrument and RC-only evaluation contract: [docs/eval.md](docs/eval.md).
 
@@ -197,18 +168,9 @@ Current L4 instrument and RC-only evaluation contract: [docs/eval.md](docs/eval.
 Decision evidence and reopening conditions: [docs/retrieval.md](docs/retrieval.md).
 
 ### PR-13 (issue #87): Prompt-injection & retrieved-content hygiene
-> **Status: DONE (closed via PR #115).** Baseline regex injection screen shipped (`retrieve/screen.py`,
-> trap before identifiers), extract-time PDF sanitization shipped (`ibm_pdf.sanitize_page_text`),
-> and context bounding shipped (`max_context_chars`). Tests are distributed across
-> `tests/test_sanitize.py`, `tests/test_hygiene.py`, and `tests/test_screen.py`.
-> Advanced LLM-based hygiene / dual-LLM guards were not built; no open issue tracks them.
-- **Scope:** `agent/answer.py`, `ingest/ibm_pdf.py` sanitization, `tests/test_sanitize.py`, `tests/test_screen.py`
-- **Implementation:** Anything not covered by #80: strip/neutralize control sequences in
-  extracted PDF text at ingest; size-cap assembled context (respect
-  `max_context_chars`); injection fixture battery (instruction overrides, fake system
-  messages, delimiter escapes — including via `splunk_context`).
-- **Acceptance:** security fixture suite green in both CIs.
-- **Depends on:** #80.
+> **Status: DONE (closed via PR #115).** Regex injection screen,
+> extract-time PDF sanitization and context bounding shipped. LLM-based
+> hygiene was not built; no open issue tracks it.
 
 ---
 
@@ -216,24 +178,10 @@ Decision evidence and reopening conditions: [docs/retrieval.md](docs/retrieval.m
 
 ### PR-14 (issue #88): SPLADE sparse leg (measured)
 > **Status: CLOSED (not planned).** No SPLADE leg was built or measured.
-- **Scope:** `ingest/embed.py`, `retrieve/query.py`, vendored SPLADE model
-- **Implementation:** Add SPLADE sparse vectors as a THIRD prefetch leg alongside
-  FastEmbed BM25; compare BM25 vs SPLADE vs both under the existing weighted RRF.
-  Keep the winner — existing identifier-weighted BM25 is strong for exact codes.
-- **Gate:** three-way L1 comparison; decision recorded in `docs/adr/`.
-- **Depends on:** #75, #76.
 
 ### PR-15 (issue #89): Embedding improvement track
-> **Status: CLOSED (not planned).** Representation/versioning shipped separately; hard-negative training closed as unbounded without a candidate.
-- **Scope:** `evals/expert_golden_seed.jsonl` → training pairs; `ingest/embed.py`,
-  `manifest.py`
-- **Implementation:** Hard-negative mining from failed harness runs; fine-tune or evaluate
-  alternates. Embedding model version recorded in `manifest.py` with re-embed detection.
-  NOTE: dense embeddings are served by the other team's vLLM — a model change is a
-  cross-team deliverable; this repo's part is versioning, detection, and eval.
-  If an MRL-capable model is adopted, Matryoshka truncation becomes available;
-  otherwise skip Matryoshka, use #92.
-- **Depends on:** #75, #84.
+> **Status: CLOSED (not planned).** Representation/versioning shipped
+> separately; hard-negative training closed as unbounded without a candidate.
 
 ### PR-16 (issue #90): ADR 0003 — agent-initiated live-state retrieval (rescoped)
 > **Status: PARTIAL — ADR proposed (`docs/adr/0003-zowe-mcp-read.md`) and a

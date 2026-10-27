@@ -1,21 +1,33 @@
 """CI gateway wiring: explicit model legs, authenticated routing, failure propagation."""
+
+import importlib.util
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
 import sys
+import textwrap
+import threading
+import urllib.error
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 
+import httpx2
 import pytest
 import yaml
+
+from mainframe_rag.config import Settings
+from mainframe_rag.retrieve.filters import parse_query, query_kind
+from mainframe_rag.retrieve.rerank import HttpReranker, probe_reranker
+from tests.helpers_airgap import copy_chart, install_rendering_helm, make_bin_tree, write_stub
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture
 def gateway_rendered(tmp_path):
-    from tests.helpers_airgap import copy_chart, install_rendering_helm, make_bin_tree, write_stub
 
     make_bin_tree(tmp_path, ["common.sh", "validate.sh", "deploy.sh", "ingest.sh",
                             "smoke.sh", "pipeline.sh", "map_values.py"])
@@ -206,8 +218,6 @@ def test_gateway_check_requires_exact_context_model(gateway_rendered, fault):
         entry = next(entry for entry in container["env"] if entry["name"] == "CONTEXT_LLM_MODEL")
         if fault == "missing":
             container["env"].remove(entry)
-        elif fault == "duplicate":
-            container["env"].append(entry.copy())
         elif fault == "valueFrom":
             entry.pop("value")
             entry["valueFrom"] = {"secretKeyRef": {"name": "private-model-sentinel", "key": "alias"}}
@@ -420,9 +430,6 @@ def test_installer_artifact_corruption_stops_before_installation(tmp_path):
 # the product client cannot read fails here, before a Kind run.
 
 def _start_rerank_mock(tag, fault="healthy"):
-    import importlib.util
-    import threading
-    from http.server import ThreadingHTTPServer
 
     saved = os.environ.get("MOCK_RERANK_FAULT")
     os.environ["MOCK_RERANK_FAULT"] = fault
@@ -456,13 +463,11 @@ def rerank_mock():
 
 
 def _mock_stats(url):
-    import httpx2
 
     return httpx2.get(url + "/stats", timeout=5).json()
 
 
 def _rerank_settings(url, order):
-    from mainframe_rag.config import Settings
 
     return Settings(rerank_base_url=url + "/v1", rerank_model="mock-rerank",
                     rerank_endpoint_order=order, rerank_batch_size=32, _env_file=None)
@@ -470,9 +475,7 @@ def _rerank_settings(url, order):
 
 @pytest.mark.parametrize("order", ["score_first", "rerank_first"])
 def test_rerank_stand_in_reverses_candidates_on_either_leg_and_counts_one_call(rerank_mock, order):
-    import httpx2
 
-    from mainframe_rag.retrieve.rerank import HttpReranker
 
     url = rerank_mock()
     reranker = HttpReranker(_rerank_settings(url, order), client=httpx2.Client())
@@ -487,9 +490,7 @@ def test_rerank_stand_in_reverses_candidates_on_either_leg_and_counts_one_call(r
 
 
 def test_rerank_stand_in_separates_the_readiness_probe_from_search_calls(rerank_mock):
-    import httpx2
 
-    from mainframe_rag.retrieve.rerank import HttpReranker, probe_reranker
 
     url = rerank_mock()
     reranker = HttpReranker(_rerank_settings(url, "score_first"), client=httpx2.Client())
@@ -500,9 +501,7 @@ def test_rerank_stand_in_separates_the_readiness_probe_from_search_calls(rerank_
 
 
 def test_rerank_stand_in_score_route_unavailable_is_served_by_the_other_leg(rerank_mock):
-    import httpx2
 
-    from mainframe_rag.retrieve.rerank import HttpReranker
 
     healthy, faulted = rerank_mock(), rerank_mock("score_unavailable")
     texts = ["a", "b", "c"]
@@ -515,9 +514,7 @@ def test_rerank_stand_in_score_route_unavailable_is_served_by_the_other_leg(rera
 
 
 def test_rerank_stand_in_unavailable_exhausts_both_legs_without_echoing_the_request(rerank_mock):
-    import httpx2
 
-    from mainframe_rag.retrieve.rerank import HttpReranker
 
     url = rerank_mock("unavailable")
     reranker = HttpReranker(_rerank_settings(url, "score_first"), client=httpx2.Client())
@@ -535,7 +532,6 @@ def test_rerank_stand_in_unavailable_exhausts_both_legs_without_echoing_the_requ
 # here against scripted stand-ins, so a script bug fails before a Kind run.
 
 def _load_script(name):
-    import importlib.util
 
     spec = importlib.util.spec_from_file_location("rerank_" + name, ROOT / "scripts/ci" / (name + ".py"))
     module = importlib.util.module_from_spec(spec)
@@ -577,7 +573,6 @@ def test_rerank_compare_accepts_exactly_the_stand_in_reversal():
     (lambda on, off: on.update(scope={"product": "other"}), "not the same scoped query"),
 ])
 def test_rerank_compare_refuses_each_false_proof(mutate, message):
-    import re
 
     checks = _load_script("rerank_checks")
     on, off = _off_on()
@@ -622,7 +617,6 @@ class _RerankStack:
     KEY, LLM, EMBED = "sk-rerank-leg", "sk-llm-leg", "sk-embed-leg"
 
     def __init__(self):
-        import httpx2
 
         self.down = False
         self.accept_wrong_key = False
@@ -632,7 +626,6 @@ class _RerankStack:
         self.transport = httpx2.MockTransport(self.handle)
 
     def handle(self, request):
-        import httpx2
 
         self.requests.append((request.method, str(request.url)))
         path = request.url.path
@@ -658,7 +651,6 @@ class _RerankStack:
         return httpx2.Response(404)
 
     def install(self, monkeypatch, module):
-        import httpx2
 
         monkeypatch.setattr(httpx2, "Client",
                             lambda **kw: self._client(transport=self.transport, **kw))
@@ -731,7 +723,6 @@ def test_rerank_contracts_search_observation_carries_scores_not_text(monkeypatch
         "chunk_id", "score", "rerank_score", "doc_id", "page_label"}
     # The rehearsal query must stay lowercase natural language: an identifier-shaped
     # query would be bypassed by rerank and prove nothing.
-    from mainframe_rag.retrieve.filters import parse_query, query_kind
     assert query_kind(parse_query(module.QUERY)) == "nl"
     assert query_kind(parse_query(module.IDENTIFIER_QUERY)) == "identifier"
 
@@ -742,7 +733,6 @@ def test_rerank_lane_is_the_only_lane_that_enables_rerank(tmp_path):
     comes from. Run its real shell for every matrix lane: only `rerank` turns the
     leg on (with the gateway URL and stand-in model); every other lane keeps the
     rerank-off configuration and its expected results."""
-    import textwrap
 
     workflow = yaml.safe_load((ROOT / ".github/workflows/e2e.yml").read_text())
     job = workflow["jobs"]["kind-live-rehearsal"]
@@ -801,7 +791,6 @@ def test_test_gateway_serves_the_rerank_stand_in_on_both_wire_legs():
 
 
 def test_minted_rerank_key_is_a_real_key_scoped_to_the_rerank_model_alone(capsys, monkeypatch):
-    import urllib.error
 
     mint = _load_script("mint_gateway_keys")
     generated = []

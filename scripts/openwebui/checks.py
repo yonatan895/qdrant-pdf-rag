@@ -20,7 +20,6 @@ UID_RANGE_START = 1000700000
 # The names an Open WebUI pod may resolve: the IdP and the agent Service (search-domain
 # expansions of those two included). Anything else is an egress attempt.
 ALLOWED_DNS_BASES = ("dex.localhost", "rag-agent")
-VECTOR_DIR_NAMES = ("vector_db", "chroma", "qdrant", "milvus")
 
 
 @dataclass

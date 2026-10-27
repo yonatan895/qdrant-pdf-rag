@@ -312,36 +312,31 @@ def test_last_turn_is_always_sent_and_history_never_starts_with_an_assistant_tur
         assert _body_chars(body) <= CAP
 
 
-def test_last_turn_alone_over_the_cap_is_a_fixed_message_with_zero_calls():
+@pytest.mark.parametrize("messages,user", [
+    pytest.param([*_history(2, 100), {"role": "user", "content": "q" * (CAP + 1)}], None,
+                 id="last-turn-alone"),
+    pytest.param([{"role": "user", "content": "q" * (CAP - 4)}],
+                 {"id": "u1", "valves": {"product": "z/OS", "version": "3.1"}},
+                 id="product-and-version-count"),
+])
+def test_a_body_over_the_cap_is_a_fixed_message_with_zero_calls(messages, user):
     fake = FakeAgent()
-    secret = "q" * (CAP + 1)
-    content, events = run_pipe(fake, messages=[
-        *_history(2, 100), {"role": "user", "content": secret}])
+    content, events = run_pipe(fake, messages=messages, user=user)
     assert fake.requests == []
     assert content == docs_pipe.ERROR_MESSAGES["invalid_request"]
     assert "q" * 20 not in content
     assert TRIM_NOTE not in [s["description"] for s in _statuses(events)]
 
 
-def test_product_and_version_count_against_the_cap():
-    fake = FakeAgent()
-    content, _ = run_pipe(fake, messages=[{"role": "user", "content": "q" * (CAP - 4)}],
-                          user={"id": "u1", "valves": {"product": "z/OS", "version": "3.1"}})
-    assert fake.requests == []
-    assert content == docs_pipe.ERROR_MESSAGES["invalid_request"]
-
-
-def test_exactly_at_the_cap_is_sent_whole_and_no_note_is_emitted():
+def test_a_chat_within_the_cap_is_sent_whole_and_emits_no_trim_note():
     fake = FakeAgent()
     messages = [{"role": "user", "content": "a" * 100}, {"role": "assistant", "content": "b" * 100},
                 {"role": "user", "content": "q" * (CAP - 200)}]
     _content, events = run_pipe(fake, messages=messages)
     (body,) = fake.bodies()
     assert len(body["messages"]) == 3 and _body_chars(body) == CAP
-    assert TRIM_NOTE not in [s["description"] for s in _statuses(events)]
-
-
-def test_short_chat_emits_no_trim_note():
+    assert all(TRIM_NOTE not in s["description"] for s in _statuses(events))
+    # An ordinarily short chat does not trim or note either.
     _content, events = run_pipe(FakeAgent())
     assert all(TRIM_NOTE not in s["description"] for s in _statuses(events))
 
@@ -368,34 +363,28 @@ def test_admin_valve_sets_the_cap():
 
 
 
-def test_no_string_turn_left_makes_no_agent_call():
-    fake = FakeAgent()
-    content, events = run_pipe(fake, messages=[
-        {"role": "system", "content": "only a system prompt"},
-        {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "x"}}]},
-    ])
-    assert fake.requests == []
-    assert content == "Ask a question in plain text; attachments and images are not supported."
-    assert events == []
+_UNUSABLE = "Ask a question in plain text; attachments and images are not supported."
+_IMAGE = {"type": "image_url", "image_url": {"url": "x"}}
+_EARLIER = [{"role": "user", "content": "an earlier question"},
+            {"role": "assistant", "content": "an earlier answer"}]
 
 
-@pytest.mark.parametrize("last", [
-    pytest.param({"role": "user", "content": [{"type": "image_url", "image_url": {"url": "x"}}]},
-                 id="image-only"),
-    pytest.param({"role": "user", "content": [{"type": "text", "text": "  "}]}, id="blank-text"),
-    pytest.param({"role": "assistant", "content": "an assistant turn last"}, id="assistant-last"),
+@pytest.mark.parametrize("messages", [
+    pytest.param([{"role": "system", "content": "only a system prompt"},
+                  {"role": "user", "content": [_IMAGE]}], id="no-string-turn"),
+    pytest.param([*_EARLIER, {"role": "user", "content": [_IMAGE]}], id="image-only-last"),
+    pytest.param([*_EARLIER, {"role": "user", "content": [{"type": "text", "text": "  "}]}],
+                 id="blank-text-last"),
+    pytest.param([*_EARLIER, {"role": "assistant", "content": "an assistant turn last"}],
+                 id="assistant-last"),
 ])
-def test_unusable_last_turn_never_falls_back_to_an_earlier_question(last: dict[str, Any]):
+def test_an_unusable_last_turn_never_reaches_the_agent(messages: list[dict[str, Any]]):
     """The question is the last message. Without usable text there, the Pipe
     must not send the history and let the agent answer an older question."""
     fake = FakeAgent()
-    content, events = run_pipe(fake, messages=[
-        {"role": "user", "content": "an earlier question"},
-        {"role": "assistant", "content": "an earlier answer"},
-        last,
-    ])
+    content, events = run_pipe(fake, messages=messages)
     assert fake.requests == []
-    assert content == "Ask a question in plain text; attachments and images are not supported."
+    assert content == _UNUSABLE
     assert events == []
 
 
@@ -560,13 +549,6 @@ def test_model_text_that_looks_like_a_frame_stays_text(delta: str):
     assert [e["type"] for e in events] == ["status", "source", "status"]
 
 
-def test_non_streaming_call_gets_one_string_with_the_same_banners():
-    content, events = run_pipe(FakeAgent(_frames("Follow the ", HOSTILE)), stream=False)
-    assert content == "Follow the " + HOSTILE
-    assert [s["source"]["name"] for s in _sources(events)] == [CITE_A]
-    assert _final_status(events) == "Source-matched · 1 citation"
-
-
 @pytest.mark.parametrize("frames", [
     pytest.param(_frames("Partial", done=False), id="missing-done"),
     pytest.param(_frames("Partial", finish=None), id="missing-finish"),
@@ -605,13 +587,6 @@ def test_validated_citations_become_source_events_with_supplied_excerpts():
         },
     ]
     assert _final_status(events) == "Source-matched · 2 citations"
-
-
-def test_supplied_but_uncited_excerpts_are_not_sources():
-    """Only the agent's validated citations are sources, never every excerpt
-    the prompt carried."""
-    _content, events = run_pipe(FakeAgent(_frames("Answer.")))
-    assert [s["source"]["name"] for s in _sources(events)] == [CITE_A]
 
 
 @pytest.mark.parametrize("citation", [
@@ -716,6 +691,20 @@ TRUNCATED_TEXT = ("The answer stream ended before it completed. "
                   "Treat any text above as incomplete and retry.")
 
 
+@pytest.mark.parametrize("frames,content", [
+    pytest.param(_frames("Follow the ", HOSTILE), "Follow the " + HOSTILE, id="frame-looking-text"),
+    pytest.param(_frames(PROSE + f"\n\nCitations:\n{CITE_A}\n", AGENT_LIST_A), PROSE + SHOWN_LIST_A,
+                 id="one-validated-list"),
+])
+def test_non_streaming_call_gets_one_string_with_the_same_banners(frames, content):
+    text, events = run_pipe(FakeAgent(frames), stream=False)
+    assert text == content
+    # Only the agent's validated citations are sources, never every excerpt the
+    # prompt carried or the model's own list.
+    assert [s["source"]["name"] for s in _sources(events)] == [CITE_A]
+    assert _final_status(events) == "Source-matched · 1 citation"
+
+
 def test_model_citations_section_is_replaced_by_the_validated_list():
     content, events = run_pipe(FakeAgent(_frames(
         PROSE + "\n\n", f"Citations:\n{CITE_A}\n- {REJECTED}\n", AGENT_LIST_A)))
@@ -725,12 +714,20 @@ def test_model_citations_section_is_replaced_by_the_validated_list():
     assert _final_status(events) == "Source-matched · 1 citation"
 
 
-def test_model_citations_section_without_a_validated_list_shows_no_list():
-    content, events = run_pipe(FakeAgent(_frames(
-        PROSE + "\n\nCitations:\n", f"- {REJECTED}\n", meta=UNVERIFIED)))
-    assert content == PROSE + "\n\n"
+@pytest.mark.parametrize("text,frames,meta,banner", [
+    pytest.param(PROSE, ("\n\nCitations:\n", f"- {REJECTED}\n"), UNVERIFIED,
+                 "Unverified draft — no eligible citation", id="rejected-model-list"),
+    pytest.param("Nothing in the supplied excerpts answers this question about IEA500I.",
+                 ("\n\nCitations:\n",),
+                 _final_meta(citations=[], hits=[], supplied_evidence=[],
+                             verification_state="insufficient_evidence"),
+                 "Insufficient evidence — not operational guidance", id="abstention-empty-section"),
+])
+def test_an_empty_model_citations_section_shows_only_the_prose(text, frames, meta, banner):
+    content, events = run_pipe(FakeAgent(_frames(text, *frames, meta=meta)))
+    assert content == text + "\n\n"
     assert _sources(events) == []
-    assert _final_status(events) == "Unverified draft — no eligible citation"
+    assert _final_status(events) == banner
 
 
 def test_header_split_across_chunks_is_still_a_header():
@@ -782,38 +779,21 @@ def test_prose_after_the_model_section_is_kept_in_order():
     assert content == "First.\nSecond.\n\nThird." + SHOWN_LIST_A
 
 
-def test_abstention_with_an_empty_section_shows_only_the_decline():
-    decline = "Nothing in the supplied excerpts answers this question about IEA500I."
-    meta = _final_meta(citations=[], hits=[], supplied_evidence=[],
-                       verification_state="insufficient_evidence")
-    content, events = run_pipe(FakeAgent(_frames(decline + "\n\nCitations:\n", meta=meta)))
-    assert content == decline + "\n\n"
-    assert _sources(events) == []
-    assert _final_status(events) == "Insufficient evidence — not operational guidance"
 
-
-def test_truncated_inside_the_model_section_keeps_prose_and_hides_raw_cites():
-    content, events = run_pipe(FakeAgent(_frames(
-        PROSE + "\n\nCitations:\n", f"{REJECTED}\n", REJECTED[:-2], done=False)))
-    assert content == PROSE + "\n\n\n\n" + TRUNCATED_TEXT
-    assert "Rejected Reference" not in content
-    assert _final_status(events) == "Incomplete generation — output was cut off"
-
-
-def test_error_frame_inside_the_model_section_keeps_prose_and_hides_raw_cites():
-    frames = [format_openai_chunk("chatcmpl-x", "m", delta_content=d)
-              for d in (PROSE + "\n\nCitations:\n", f"- {REJECTED}")]
-    frames += [format_openai_error("model_timeout", UPSTREAM_TEXT), format_openai_done()]
+@pytest.mark.parametrize("frames,tail", [
+    pytest.param(_frames(PROSE + "\n\nCitations:\n", f"{REJECTED}\n", REJECTED[:-2], done=False),
+                 TRUNCATED_TEXT, id="truncated"),
+    pytest.param([format_openai_chunk("chatcmpl-x", "m", delta_content=d)
+                  for d in (PROSE + "\n\nCitations:\n", f"- {REJECTED}")]
+                 + [format_openai_error("model_timeout", UPSTREAM_TEXT), format_openai_done()],
+                 "The reasoning model did not respond in time. Retry in a moment.",
+                 id="error-frame"),
+])
+def test_a_failed_stream_inside_the_model_section_keeps_prose_and_hides_raw_cites(frames, tail):
     content, events = run_pipe(FakeAgent(frames))
-    assert content == PROSE + "\n\n\n\n" + ERROR_CASES[3][2]
+    assert content == PROSE + "\n\n\n\n" + tail
     assert "Rejected Reference" not in content
     assert _final_status(events) == "Incomplete generation — output was cut off"
-
-
-def test_non_streaming_call_gets_the_same_single_list():
-    content, _events = run_pipe(FakeAgent(_frames(
-        PROSE + f"\n\nCitations:\n{CITE_A}\n", AGENT_LIST_A)), stream=False)
-    assert content == PROSE + SHOWN_LIST_A
 
 
 def _yields(fake: FakeAgent) -> list[str]:
@@ -829,29 +809,28 @@ def _yields(fake: FakeAgent) -> list[str]:
     return asyncio.run(main())
 
 
-def test_held_text_is_bounded_and_a_long_line_in_a_section_streams_as_prose():
-    """Only the undecided current line is held: at most 2048 characters, after
-    which it is prose. A line no longer than that is decided at its newline."""
-    words = ["word "] * 1000
-    pieces = _yields(FakeAgent(_frames("Intro.\nCitations:\n", *words, "\nEnd.",
-                                       meta=UNVERIFIED)))
-    assert "".join(pieces) == "Intro.\n" + "".join(words) + "\nEnd."
-    assert max(len(p) for p in pieces) <= 2048 + len("word ")
-    assert len(pieces) > 100  # streamed, not released at the newline
+@pytest.mark.parametrize("deltas,expected,bound,min_pieces", [
+    # In a section only the undecided current line is held (2048 characters),
+    # after which it is prose; a line no longer than that is decided at its newline.
+    pytest.param(("Intro.\nCitations:\n", *["word "] * 1000, "\nEnd."),
+                 "Intro.\n" + "word " * 1000 + "\nEnd.", 2048 + len("word "), 100,
+                 id="in-section-line-held"),
+    # Outside a section only a possible header start is held (64 characters):
+    # a long line with no newline streams instead of waiting for one.
+    pytest.param(("The command ",) * 2000, "The command " * 2000, 64 + len("The command "), 0,
+                 id="outside-only-header-start-held"),
+])
+def test_only_the_undecided_text_is_held(deltas, expected, bound, min_pieces):
+    pieces = _yields(FakeAgent(_frames(*deltas, meta=UNVERIFIED)))
+    assert "".join(pieces) == expected
+    assert max(len(p) for p in pieces) <= bound
+    if min_pieces:
+        assert len(pieces) > min_pieces, "the line must stream, not wait for its newline"
 
 
 def test_prose_lines_stream_without_waiting_for_their_newline():
     pieces = _yields(FakeAgent(_frames("Reissue ", "the ", "command", meta=UNVERIFIED)))
     assert pieces[:3] == ["Reissue ", "the ", "command"]
-
-
-def test_held_text_outside_a_section_is_bounded():
-    """Outside a section only a possible header start is held (64 characters):
-    a long line with no newline streams instead of waiting for one."""
-    deltas = ["The command "] * 2000
-    pieces = _yields(FakeAgent(_frames(*deltas, meta=UNVERIFIED)))
-    assert "".join(pieces) == "".join(deltas)
-    assert max(len(p) for p in pieces) <= 64 + len("The command ")
 
 
 @pytest.mark.parametrize("frames", [

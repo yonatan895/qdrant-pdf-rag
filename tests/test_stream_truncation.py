@@ -20,7 +20,7 @@ import logging
 
 import httpx2
 import pytest
-from fastapi.testclient import TestClient
+from fastapi import Request, Response
 
 from mainframe_rag.agent import app as app_mod
 from mainframe_rag.agent.answer import (
@@ -33,10 +33,20 @@ from mainframe_rag.agent.answer import (
     _chat_result_from_response,
     is_model_timeout,
 )
-from mainframe_rag.agent.tokenizer import FallbackTokenizer
+from mainframe_rag.agent.app import AnswerRequest, ChatRequest
 from mainframe_rag.config import Settings
 from mainframe_rag.ports import ChatMessage
 from tests.fakes import HttpxStreamFake, NonPropagatingGateway, SlowOpenAIUpstream, settings_kw
+from tests.helpers_agent_local import (
+    StreamStubLLM,
+    agent_client,
+    agent_hit,
+    chat_frames,
+    truncation_after_token,
+)
+from tests.helpers_agent_local import (
+    sse_events as _answer_sse_events,
+)
 
 TRUNCATED_LINES = [
     'data: {"choices": [{"delta": {"role": "assistant", "content": "Partial "}}]}',
@@ -61,44 +71,28 @@ def _settings_kwargs(**overrides):
     return settings_kw(llm_base_url="http://llm.internal/v1", **overrides)
 
 
+@pytest.mark.parametrize("sync", [False, True], ids=["achat", "chat"])
 @pytest.mark.parametrize(
     "lines",
     [TRUNCATED_LINES, [_CONTENT_LINE, _ERROR_FRAME, _DONE_LINE]],
     ids=["missing-done", "upstream-error"],
 )
 @pytest.mark.anyio
-@pytest.mark.parametrize("effort", ["high"])
-async def test_achat_failed_stream_discards_partial_and_recovers_via_post(lines, effort):
-    """Buffered content is discarded; one POST supplies the complete answer."""
+async def test_buffered_stream_discards_partial_and_recovers_via_one_post(lines, sync):
+    """Buffered content is discarded; one POST supplies the complete answer,
+    over the async and the sync transport alike."""
     fake = HttpxStreamFake(lines=lines, payload=_COMPLETE_PAYLOAD)
-    settings = Settings(**_settings_kwargs(llm_stream=True))
-    llm = HttpxLLMClient(settings, client=fake)
-    result = await llm.achat([ChatMessage(role="user", content="hi")], reasoning_effort=effort)
-    assert len(fake.post_bodies) == 1
-    for body in fake.stream_bodies + fake.post_bodies:
-        if effort is None:
-            assert "reasoning_effort" not in body
-        else:
-            assert body["reasoning_effort"] == effort
-    assert result.content == "Complete answer"
-    assert result.finish_reason == "stop"
-
-
-@pytest.mark.parametrize("effort", ["high"])
-def test_chat_sync_truncated_stream_falls_back_to_complete_post(effort):
-    """Sync mirror of the achat case: truncation recovers through POST."""
-    fake = HttpxStreamFake(lines=TRUNCATED_LINES, payload=_COMPLETE_PAYLOAD)
-    fake.stream = fake.stream_sync  # Explicitly select the sync transport.
-    settings = Settings(**_settings_kwargs(llm_stream=True))
-    llm = HttpxLLMClient(settings, client=fake)
-    result = llm.chat([ChatMessage(role="user", content="hi")], reasoning_effort=effort)
+    llm = HttpxLLMClient(Settings(**_settings_kwargs(llm_stream=True)), client=fake)
+    messages = [ChatMessage(role="user", content="hi")]
+    if sync:
+        fake.stream = fake.stream_sync  # Explicitly select the sync transport.
+        result = await asyncio.to_thread(llm.chat, messages, reasoning_effort="high")
+    else:
+        result = await llm.achat(messages, reasoning_effort="high")
     assert len(fake.stream_bodies) == 1
     assert len(fake.post_bodies) == 1
     for body in fake.stream_bodies + fake.post_bodies:
-        if effort is None:
-            assert "reasoning_effort" not in body
-        else:
-            assert body["reasoning_effort"] == effort
+        assert body["reasoning_effort"] == "high"
     assert result.content == "Complete answer"
     assert result.finish_reason == "stop"
 
@@ -196,37 +190,41 @@ async def test_every_malformed_frame_shape_fails_closed_after_content():
         assert fake.post_bodies == []
 
 
+_NO_FINISH_PAYLOAD = {"choices": [{"message": {"content": "fallback body"}}]}
+_MALFORMED_FIRST = (
+    'data: {"choices": [{"delta": {"content": "not emitted"}, "finish_reason": 42}]}'
+)
+
+
 @pytest.mark.anyio
-async def test_chat_stream_pre_output_error_frame_failed_fallback_raises():
-    """A fallback payload without an explicit finish is itself an incomplete
-    completion: no synthesized "stop" may be shipped as done (issue #365)."""
-    fake = HttpxStreamFake(
-        lines=[_ERROR_FRAME, _DONE_LINE],
-        payload={"choices": [{"message": {"content": "fallback body"}}]},
-    )
-    llm = HttpxLLMClient(Settings(**_settings_kwargs()), client=fake)
+@pytest.mark.parametrize("api, lines, payload, reason", [
+    pytest.param("chat-stream", [_ERROR_FRAME, _DONE_LINE], _NO_FINISH_PAYLOAD,
+                 REASON_MISSING_FINISH, id="error-frame-failed-fallback"),
+    pytest.param("achat", [_CONTENT_LINE, _DONE_LINE], _NO_FINISH_PAYLOAD,
+                 REASON_MISSING_FINISH, id="missing-finish-both-legs"),
+    pytest.param("chat-stream", [_MALFORMED_FIRST, _DONE_LINE],
+                 {"error": {"message": "SECRET-UPSTREAM-TEXT"},
+                  "choices": [{"message": {"content": "fallback"}, "finish_reason": "stop"}]},
+                 REASON_UPSTREAM_ERROR, id="malformed-first-failed-fallback"),
+])
+async def test_pre_output_failure_with_failed_fallback_fails_closed(api, lines, payload, reason):
+    """A pre-output failure recovers through exactly one POST; when that
+    fallback is itself incomplete, the request fails closed with the fixed
+    reason — no synthesized "stop", no done item, no retry loop and no
+    upstream text in the exception (issues #365 / Q420-P2)."""
+    fake = HttpxStreamFake(lines=lines, payload=payload)
+    llm = HttpxLLMClient(Settings(**_settings_kwargs(llm_stream=True)), client=fake)
     items = []
     with pytest.raises(TruncatedStreamError) as excinfo:
-        async for item in llm.chat_stream([ChatMessage(role="user", content="hi")]):
-            items.append(item)
+        if api == "achat":
+            await llm.achat([ChatMessage(role="user", content="hi")])
+        else:
+            async for item in llm.chat_stream([ChatMessage(role="user", content="hi")]):
+                items.append(item)
     assert len(fake.post_bodies) == 1
-    assert excinfo.value.reason == REASON_MISSING_FINISH
-    assert all(i["type"] != "done" for i in items)
-
-
-@pytest.mark.anyio
-async def test_achat_missing_finish_on_both_legs_raises_not_synthesized_stop():
-    """A missing-finish stream falls back once; a missing-finish fallback
-    then fails the request instead of inventing finish_reason "stop"."""
-    fake = HttpxStreamFake(
-        lines=[_CONTENT_LINE, _DONE_LINE],
-        payload={"choices": [{"message": {"content": "fallback body"}}]},
-    )
-    llm = HttpxLLMClient(Settings(**_settings_kwargs(llm_stream=True)), client=fake)
-    with pytest.raises(TruncatedStreamError) as excinfo:
-        await llm.achat([ChatMessage(role="user", content="hi")])
-    assert len(fake.post_bodies) == 1
-    assert excinfo.value.reason == REASON_MISSING_FINISH
+    assert excinfo.value.reason == reason
+    assert all(i.get("type") != "done" for i in items)
+    assert "SECRET-UPSTREAM-TEXT" not in str(excinfo.value)
 
 
 @pytest.mark.parametrize(
@@ -342,37 +340,16 @@ def test_buffered_payload_preserves_explicit_finish():
         assert result.finish_reason == finish
 
 
-def _client(monkeypatch, synthetic_pdf, llm):
-    monkeypatch.setenv("QDRANT_URL", "http://localhost:6333")
-    monkeypatch.setenv("EMBED_MODE", "hash")
-    monkeypatch.setenv("ALLOW_HASH_MODE", "true")
-    monkeypatch.setenv("LLM_BASE_URL", "http://llm.internal/v1")
-    monkeypatch.setenv("LLM_MODEL_REASONING", "test-reasoning-model")
-    with TestClient(app_mod.app) as c:
-        monkeypatch.setattr(app_mod, "llm", llm)
-        monkeypatch.setattr(app_mod, "tokenizer", FallbackTokenizer())
-        yield c
+def _client(monkeypatch, _synthetic_pdf, llm):
+    """Hermetic app client; `synthetic_pdf` keeps the session PDF alive."""
+    with agent_client(monkeypatch, llm=llm) as client:
+        yield client
 
 
 def _search_stub():
     """One synthetic hit through the patched retrieval leg: tests drive the
     stream machinery, not retrieval."""
-    from mainframe_rag.retrieve.query import SearchHit
-
-    hit = SearchHit(
-        chunk_id="abc123",
-        score=0.42,
-        cite="SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6",
-        heading="Chapter 2 > IEA500I",
-        text="IEA500I BEFORE IOS IOSCMDS COMMAND REJECTED, REASON=yy",
-        doc_id="SA22-0000-00",
-        title="Synthetic Reference",
-        page_label="1-6",
-        chunk_type="message",
-        product="z/OS",
-        version="9.9",
-        message_ids=("IEA500I",),
-    )
+    hit = agent_hit(text="IEA500I BEFORE IOS IOSCMDS COMMAND REJECTED, REASON=yy")
 
     class StubSearch:
         def search(self, *a, **kw):
@@ -381,57 +358,29 @@ def _search_stub():
     return StubSearch()
 
 
-class HangingLLM:
+class HangingLLM(StreamStubLLM):
     """Streams one token then never finishes, so a test can close the
     response generator the way a client disconnect does."""
 
-    async def chat_stream(self, messages, *args, **kwargs):
-        yield {"type": "token", "delta": "Partial ", "token": "Partial ", "ttft_ms": 5}
-        await asyncio.Event().wait()
+    def __init__(self):
+        super().__init__(({"type": "token", "delta": "Partial ", "token": "Partial ",
+                           "ttft_ms": 5},))
 
-    def chat(self, *a, **kw):
-        raise AssertionError("non-stream chat must not run on the stream path")
+    async def chat_stream(self, messages, *args, **kwargs):
+        yield self.items[0]
+        await asyncio.Event().wait()
 
 
 @pytest.fixture
 def trunc_client(monkeypatch, synthetic_pdf, servable_representation_gate):
-    class TruncLLM:
-        async def chat_stream(self, messages, *args, **kwargs):
-            yield {"type": "token", "delta": "Partial ", "token": "Partial ", "ttft_ms": 12}
-            raise TruncatedStreamError(1)
-
-        def chat(self, *a, **kw):
-            raise AssertionError("non-stream chat must not run on the stream path")
-
     monkeypatch.setattr(app_mod, "retrieve_search", _search_stub().search)
-    yield from _client(monkeypatch, synthetic_pdf, TruncLLM())
+    yield from _client(monkeypatch, synthetic_pdf, truncation_after_token(1))
 
 
 @pytest.fixture
 def hang_client(monkeypatch, synthetic_pdf, servable_representation_gate):
     monkeypatch.setattr(app_mod, "retrieve_search", _search_stub().search)
     yield from _client(monkeypatch, synthetic_pdf, HangingLLM())
-
-
-def _answer_sse_events(text: str) -> list[tuple[str, dict]]:
-    """(event-name, payload) pairs from a raw `event:`/`data:` answer stream."""
-    events = []
-    current_event = "message"
-    current_data: list[str] = []
-    for line in text.split("\n"):
-        line = line.strip()
-        if not line:
-            if current_data:
-                events.append((current_event, json.loads("\n".join(current_data))))
-                current_event, current_data = "message", []
-            continue
-        if line.startswith("event:"):
-            current_event = line[6:].strip()
-        elif line.startswith("data:"):
-            current_data.append(line[5:].strip())
-    if current_data:
-        events.append((current_event, json.loads("\n".join(current_data))))
-    return events
 
 
 _BODY_SURFACES = [
@@ -647,34 +596,33 @@ def test_length_finish_mid_citation_keeps_body_drops_fragment(
         assert final["finish"] == "length"
 
 
-@pytest.fixture
-def error_frame_client(monkeypatch, synthetic_pdf, servable_representation_gate):
-    """Real HttpxLLMClient over a fake transport whose stream carries a
-    content token, an upstream error frame, then [DONE] — the exact
-    counterexample from issue #365, driven through the app routes."""
+def _real_llm_client(monkeypatch, synthetic_pdf, lines, payload):
     monkeypatch.setattr(app_mod, "retrieve_search", _search_stub().search)
     llm = HttpxLLMClient(
         Settings(**_settings_kwargs(llm_stream=True)),
-        client=HttpxStreamFake(
-            lines=[_CONTENT_LINE, _ERROR_FRAME, _DONE_LINE], payload=_COMPLETE_PAYLOAD
-        ),
+        client=HttpxStreamFake(lines=lines, payload=payload),
     )
     yield from _client(monkeypatch, synthetic_pdf, llm)
+
+
+@pytest.fixture
+def error_frame_client(monkeypatch, synthetic_pdf, servable_representation_gate):
+    """Real client whose stream carries a content token, the upstream error
+    frame, then [DONE] — the exact counterexample from issue #365."""
+    yield from _real_llm_client(
+        monkeypatch, synthetic_pdf, [_CONTENT_LINE, _ERROR_FRAME, _DONE_LINE],
+        _COMPLETE_PAYLOAD,
+    )
 
 
 @pytest.fixture
 def missing_finish_client(monkeypatch, synthetic_pdf, servable_representation_gate):
     """Real client whose stream ends with [DONE] but no finish frame, and
     whose non-streaming fallback payload also lacks a finish reason."""
-    monkeypatch.setattr(app_mod, "retrieve_search", _search_stub().search)
-    llm = HttpxLLMClient(
-        Settings(**_settings_kwargs(llm_stream=True)),
-        client=HttpxStreamFake(
-            lines=[_CONTENT_LINE, _DONE_LINE],
-            payload={"choices": [{"message": {"content": "fallback body"}}]},
-        ),
+    yield from _real_llm_client(
+        monkeypatch, synthetic_pdf, [_CONTENT_LINE, _DONE_LINE],
+        {"choices": [{"message": {"content": "fallback body"}}]},
     )
-    yield from _client(monkeypatch, synthetic_pdf, llm)
 
 
 def test_v1_answer_real_client_error_frame_emits_fixed_error_without_leak(error_frame_client):
@@ -695,69 +643,49 @@ def test_v1_answer_real_client_error_frame_emits_fixed_error_without_leak(error_
     assert "SECRET-UPSTREAM-TEXT" not in resp.text
 
 
-def test_v1_chat_real_client_error_frame_is_incomplete_no_success_chunk(error_frame_client):
-    """Chat mirror: strict OpenAI error object + [DONE], no chunk claims the
-    failed generation completed."""
-    resp = error_frame_client.post(
+@pytest.mark.parametrize("failure", ["error-frame", "missing-finish"])
+def test_v1_chat_stream_real_client_failure_is_incomplete_no_success_chunk(request, failure):
+    """Chat SSE: a parser-level failure ends with the fixed OpenAI error
+    object + [DONE]; no chunk claims the failed generation completed and no
+    upstream error text reaches the response."""
+    client = request.getfixturevalue(
+        "error_frame_client" if failure == "error-frame" else "missing_finish_client"
+    )
+    resp = client.post(
         "/v1/chat",
         json={"messages": [{"role": "user", "content": "IEA500I command"}], "stream": True},
     )
     assert resp.status_code == 200
-    assert "data: [DONE]" in resp.text
-    frames = [
-        json.loads(line[len("data: ") :])
-        for line in resp.text.splitlines()
-        if line.startswith("data: ") and line != "data: [DONE]"
-    ]
+    assert resp.text.rstrip().endswith("data: [DONE]")
+    frames = chat_frames(resp.text)
     error = next(f for f in frames if "error" in f)
     assert error["error"] == {"code": "upstream_error", "message": "stream failed"}
     assert error["verification_state"] == "generation_incomplete"
     finished = [
         f
         for f in frames
-        if "error" not in f and f.get("choices") and f["choices"][0].get("finish_reason")
+        if f.get("choices") and f["choices"][0].get("finish_reason")
     ]
     assert finished == []
     assert "SECRET-UPSTREAM-TEXT" not in resp.text
 
 
 def test_v1_answer_real_client_missing_finish_both_legs_is_502(missing_finish_client):
-    """The buffered JSON path cannot synthesize success from a stream and
-    fallback that both lack an explicit finish: fixed 502 envelope only."""
-    resp = missing_finish_client.post("/v1/answer", json={"query": "IEA500I command"})
-    assert resp.status_code == 502
-    assert resp.json() == {"code": "upstream_error", "message": "answer failed"}
+    """Both buffered JSON legs cannot synthesize success from a stream and a
+    fallback that both lack an explicit finish: the fixed 502 envelope, never
+    an answer body carrying a manufactured finish_reason.
 
-
-def test_v1_chat_json_real_client_missing_finish_is_502(missing_finish_client):
-    """Chat JSON shares the answer core: same fixed envelope, never a
-    finish_reason "stop" answer body."""
-    resp = missing_finish_client.post(
-        "/v1/chat", json={"messages": [{"role": "user", "content": "IEA500I command"}]}
-    )
-    assert resp.status_code == 502
-    assert resp.json() == {"code": "upstream_error", "message": "answer failed"}
-
-
-def test_v1_chat_stream_real_client_missing_finish_emits_error_and_done(missing_finish_client):
-    """Chat SSE: the fallback payload itself lacks a finish, so the stream
-    ends with the fixed error frame + [DONE] and no success finish chunk."""
-    resp = missing_finish_client.post(
-        "/v1/chat",
-        json={"messages": [{"role": "user", "content": "IEA500I command"}], "stream": True},
-    )
-    assert resp.status_code == 200
-    frames = [
-        json.loads(line[len("data: ") :])
-        for line in resp.text.splitlines()
-        if line.startswith("data: ") and line != "data: [DONE]"
-    ]
-    error = next(f for f in frames if "error" in f)
-    assert error["error"] == {"code": "upstream_error", "message": "stream failed"}
-    assert error["verification_state"] == "generation_incomplete"
-    assert all(
-        not (f.get("choices") and f["choices"][0].get("finish_reason")) for f in frames
-    )
+    tests/hazards/critical.json (missing-terminal-finish) pins this exact
+    node, so it stays one unparameterized case covering both legs.
+    """
+    messages = [{"role": "user", "content": "IEA500I command"}]
+    for path, body in (
+        ("/v1/answer", {"query": "IEA500I command"}),
+        ("/v1/chat", {"messages": messages}),
+    ):
+        resp = missing_finish_client.post(path, json=body)
+        assert resp.status_code == 502, path
+        assert resp.json() == _ANSWER_FAILED, path
 
 
 @pytest.fixture
@@ -787,7 +715,7 @@ def test_v1_chat_json_real_client_buffered_error_is_502(buffered_error_client):
         json={"messages": [{"role": "user", "content": "IEA500I command"}]},
     )
     assert resp.status_code == 502
-    assert resp.json() == {"code": "upstream_error", "message": "answer failed"}
+    assert resp.json() == _ANSWER_FAILED
     assert "PRIVATE-SENTINEL-KEY" not in resp.text
 
 
@@ -813,15 +741,14 @@ def _scope(path: str) -> dict:
 
 
 @pytest.mark.anyio
-async def test_answer_stream_disconnect_records_generation_incomplete(
-    hang_client, monkeypatch, caplog
+@pytest.mark.parametrize("route", ["answer", "chat"])
+async def test_stream_disconnect_records_generation_incomplete(
+    hang_client, monkeypatch, caplog, route
 ):
     """A client disconnect before any terminal frame cannot receive a frame
-    (GeneratorExit at the yield), but is observable server-side (issue #365):
-    alert log with the incomplete state plus a client_disconnect outcome."""
-    from fastapi import Request, Response
-
-    from mainframe_rag.agent.app import AnswerRequest
+    (GeneratorExit at the yield), but is observable server-side (issue #365)
+    on both streaming routes: alert log with the incomplete state plus a
+    client_disconnect outcome."""
 
     recorded: list[tuple] = []
     monkeypatch.setattr(
@@ -830,21 +757,31 @@ async def test_answer_stream_disconnect_records_generation_incomplete(
         lambda endpoint, outcome, **kw: recorded.append((endpoint, outcome)),
     )
     with caplog.at_level(logging.WARNING, logger="agent"):
-        response = await app_mod.v1_answer(
-            Request(_scope("/v1/answer")),
-            AnswerRequest(query="IEA500I command"),
-            Response(),
-            stream=True,
-        )
+        if route == "answer":
+            response = await app_mod.v1_answer(
+                Request(_scope("/v1/answer")),
+                app_mod.AnswerRequest(query="IEA500I command"),
+                Response(),
+                stream=True,
+            )
+            first_marker = "event: token"
+        else:
+            response = await app_mod.chat_completions(
+                app_mod.ChatRequest(
+                    messages=[{"role": "user", "content": "IEA500I command"}], stream=True
+                ),
+                Request(_scope("/v1/chat")),
+                Response(),
+            )
+            first_marker = '"delta"'
         body = response.body_iterator
-        first = await body.__anext__()
-        assert "event: token" in first
+        assert first_marker in await body.__anext__()
         await body.aclose()
 
     aborts = [r for r in caplog.records if '"client_disconnect"' in r.getMessage()]
     assert len(aborts) == 1
     assert '"verification_state": "generation_incomplete"' in aborts[0].getMessage()
-    assert recorded[-1] == ("answer", "client_disconnect")
+    assert recorded[-1] == (route, "client_disconnect")
 
 
 @pytest.mark.anyio
@@ -854,9 +791,7 @@ async def test_answer_disconnect_after_error_frame_is_not_a_second_abort(
     """Terminal frames count even when the client disappears during delivery
     (PR #403 review): closing after the error frame must not record a second
     client_disconnect — the upstream_error outcome already stands."""
-    from fastapi import Request, Response
 
-    from mainframe_rag.agent.app import AnswerRequest
 
     recorded: list[tuple] = []
     monkeypatch.setattr(
@@ -886,9 +821,7 @@ async def test_chat_stream_disconnect_records_generation_incomplete(
     hang_client, monkeypatch, caplog
 ):
     """Chat mirror of the answer disconnect (issue #365)."""
-    from fastapi import Request, Response
 
-    from mainframe_rag.agent.app import ChatRequest
 
     recorded: list[tuple] = []
     monkeypatch.setattr(
@@ -940,15 +873,9 @@ def test_truncation_alert_detail_is_fixed_vocabulary():
 def truncating_client(monkeypatch, synthetic_pdf, servable_representation_gate):
     """Streams one token, then the upstream connection ends without [DONE]
     (the typed TruncatedStreamError), on every streaming route."""
-
-    class TruncatingLLM:
-        async def chat_stream(self, messages, *args, **kwargs):
-            yield {"type": "token", "delta": "Partial ", "token": "Partial ", "ttft_ms": 12}
-            raise TruncatedStreamError(1, REASON_MISSING_DONE)
-
     monkeypatch.setenv("UI_ENABLED", "true")
     monkeypatch.setattr(app_mod, "retrieve_search", _search_stub().search)
-    yield from _client(monkeypatch, synthetic_pdf, TruncatingLLM())
+    yield from _client(monkeypatch, synthetic_pdf, truncation_after_token(REASON_MISSING_DONE))
 
 
 @pytest.mark.parametrize("path", ["/v1/answer", "/v1/chat", "/ui/chat/stream"])
@@ -994,26 +921,23 @@ def test_truncated_stream_alerts_once_with_one_terminal_frame(
 
 @pytest.fixture
 def blast_client(monkeypatch, synthetic_pdf, servable_representation_gate):
-    """LLM stream yields tokens, then raises a non-truncation error after
-    headers are committed: the wire shape is a fixed error event, never a
-    final, and the request leaves exactly one terminal observation."""
-
-    class BlastLLM:
-        async def chat_stream(self, messages, *args, **kwargs):
-            yield {"type": "token", "delta": "Partial ", "token": "Partial ", "ttft_ms": 12}
-            raise RuntimeError("boom after headers")
-
-        def chat(self, *a, **kw):
-            raise AssertionError("non-stream chat must not run on the stream path")
-
+    """LLM stream yields tokens, then raises a generic (non-truncation)
+    error after headers are committed: the wire shape is a fixed error event,
+    never a final, and the request leaves exactly one terminal observation
+    without a `stream_truncated` alert (that alert is truncation-only)."""
     monkeypatch.setattr(app_mod, "retrieve_search", _search_stub().search)
-    yield from _client(monkeypatch, synthetic_pdf, BlastLLM())
+    llm = StreamStubLLM(
+        ({"type": "token", "delta": "Partial ", "token": "Partial ", "ttft_ms": 12},),
+        RuntimeError("boom after headers"),
+    )
+    yield from _client(monkeypatch, synthetic_pdf, llm)
 
 
-def test_v1_answer_stream_post_header_exception_single_observation(blast_client, monkeypatch):
-    """OBS-1B: an exception after headers yields error-without-final with a
-    fixed error frame. The single terminal observation rides the same
-    terminal/red_recorded path the truncation legs prove under load; the
+def test_v1_answer_stream_post_header_exception_single_observation(blast_client, monkeypatch, caplog):
+    """OBS-1B: a generic exception after headers yields error-without-final
+    with a fixed error frame and no `stream_truncated` alert (that alert is
+    reserved for typed truncation). The single terminal observation rides the
+    same terminal/red_recorded path the truncation legs prove under load; the
     SERVER span ends ERROR carrying only the error type."""
     import json as json_mod
 
@@ -1025,8 +949,10 @@ def test_v1_answer_stream_post_header_exception_single_observation(blast_client,
     provider = TracerProvider()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
     monkeypatch.setattr(app_mod, "tracer", provider.get_tracer("blast-test"))
-    resp = blast_client.post("/v1/answer?stream=true", json={"query": "IEA500I command"})
+    with caplog.at_level(logging.WARNING):
+        resp = blast_client.post("/v1/answer?stream=true", json={"query": "IEA500I command"})
     assert resp.status_code == 200
+    assert not any('"stream_truncated"' in r.getMessage() for r in caplog.records)
     events = _answer_sse_events(resp.text)
     kinds = [kind for kind, _ in events]
     assert "token" in kinds
@@ -1062,6 +988,8 @@ _BUDGET_SURFACES = [
     pytest.param("/v1/chat", True, id="chat-stream"),
 ]
 _MODEL_TIMEOUT = {"code": "model_timeout", "message": "model response timed out"}
+_ANSWER_FAILED = {"code": "upstream_error", "message": "answer failed"}
+_HI = [ChatMessage(role="user", content="hi")]
 
 
 def _socket_llm(upstream, **overrides):
@@ -1095,14 +1023,18 @@ def _stream_error(path, text):
 
 
 @pytest.mark.anyio
-async def test_achat_length_without_content_is_final_and_not_reasked():
+@pytest.mark.parametrize("sync", [False, True], ids=["achat", "chat"])
+async def test_length_without_content_is_final_and_not_reasked(sync):
     """A stream that ended with an explicit `length` finish and only
-    reasoning text is a complete (incomplete-generation) result. Asking
-    again would run the same generation to the same cut, so there is no
-    recovery POST."""
+    reasoning text is a complete (incomplete-generation) result, over the
+    async and the sync entry point alike. Asking again would run the same
+    generation to the same cut, so there is no recovery POST."""
     with SlowOpenAIUpstream(stream="length_reasoning_only", post="stall") as upstream:
         llm = _socket_llm(upstream, llm_stream=True, answer_timeout_s=2.0)
-        result = await llm.achat([ChatMessage(role="user", content="hi")])
+        if sync:
+            result = await asyncio.to_thread(llm.chat, _HI)
+        else:
+            result = await llm.achat(_HI)
         await llm.aclose()
     assert (result.content, result.finish_reason) == ("", "length")
     assert [r["stream"] for r in upstream.requests] == [True]
@@ -1169,7 +1101,8 @@ def test_request_deadline_expiry_closes_the_model_connection(
     monkeypatch, synthetic_pdf, servable_representation_gate, path, stream,
 ):
     """The documented total budget (`request_deadline_s`) abandons the model
-    request by closing its connection, on JSON and stream, answer and chat."""
+    request by closing its connection, on JSON and stream, answer and chat,
+    with a stable `deadline_exceeded` — never asked a second time."""
     monkeypatch.setattr(app_mod, "retrieve_search", _search_stub().search)
     monkeypatch.setenv("REQUEST_DEADLINE_S", "0.4")
     script = "token_then_stall" if stream else "stall"
@@ -1187,29 +1120,10 @@ def test_request_deadline_expiry_closes_the_model_connection(
     assert len(upstream.requests) == 1
 
 
-def test_chat_sync_length_without_content_is_final_and_not_reasked():
-    """Sync mirror of the achat case (issue #868)."""
-    fake = HttpxStreamFake(
-        lines=[
-            'data: {"choices": [{"delta": {"reasoning_content": "thinking"}}]}',
-            'data: {"choices": [{"delta": {}, "finish_reason": "length"}]}',
-            _DONE_LINE,
-        ],
-        payload=_COMPLETE_PAYLOAD,
-    )
-    fake.stream = fake.stream_sync
-    llm = HttpxLLMClient(Settings(**_settings_kwargs(llm_stream=True)), client=fake)
-    result = llm.chat([ChatMessage(role="user", content="hi")])
-    assert (result.content, result.finish_reason) == ("", "length")
-    assert fake.post_bodies == []
-
-
 # ---------------------------------------------------------------------------
 # Issue #868, buffered callers: abandonment must reach the engine through a
 # gateway that forwards a disconnect only for streamed requests.
 # ---------------------------------------------------------------------------
-
-_HI = [ChatMessage(role="user", content="hi")]
 
 
 @pytest.mark.anyio
@@ -1268,7 +1182,8 @@ async def test_buffered_call_keeps_a_total_wait_while_frames_trickle():
 
 
 @pytest.mark.anyio
-async def test_buffered_call_assembles_the_stream_into_the_buffered_result():
+@pytest.mark.parametrize("sync", [False, True], ids=["achat", "chat"])
+async def test_buffered_call_assembles_the_stream_into_the_buffered_result(sync):
     fake = HttpxStreamFake(
         lines=[
             'data: {"choices": [{"delta": {"reasoning_content": "hmm"}}]}',
@@ -1280,7 +1195,11 @@ async def test_buffered_call_assembles_the_stream_into_the_buffered_result():
         payload=_COMPLETE_PAYLOAD,
     )
     llm = HttpxLLMClient(Settings(**_settings_kwargs()), client=fake)
-    result = await llm.achat(_HI)
+    if sync:
+        fake.stream = fake.stream_sync
+        result = await asyncio.to_thread(llm.chat, _HI)
+    else:
+        result = await llm.achat(_HI)
     assert (result.content, result.finish_reason) == ("Complete answer", "stop")
     assert (result.usage.prompt_tokens, result.usage.completion_tokens, result.usage.total_tokens) == (5, 3, 8)
     assert result.ttft_ms is None
@@ -1289,6 +1208,7 @@ async def test_buffered_call_assembles_the_stream_into_the_buffered_result():
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("sync", [False, True], ids=["achat", "chat"])
 @pytest.mark.parametrize(
     "lines,reason",
     [
@@ -1298,11 +1218,18 @@ async def test_buffered_call_assembles_the_stream_into_the_buffered_result():
     ],
     ids=["error-frame", "missing-done", "missing-finish"],
 )
-async def test_buffered_call_incomplete_stream_is_truncation_without_a_second_ask(lines, reason, caplog):
+async def test_buffered_call_incomplete_stream_is_truncation_without_a_second_ask(
+    lines, reason, sync, caplog,
+):
     fake = HttpxStreamFake(lines=lines, payload=_COMPLETE_PAYLOAD)
     llm = HttpxLLMClient(Settings(**_settings_kwargs()), client=fake)
+    if sync:
+        fake.stream = fake.stream_sync
     with caplog.at_level(logging.DEBUG), pytest.raises(TruncatedStreamError) as caught:
-        await llm.achat(_HI)
+        if sync:
+            await asyncio.to_thread(llm.chat, _HI)
+        else:
+            await llm.achat(_HI)
     assert reason in str(caught.value)
     assert "SECRET-UPSTREAM-TEXT" not in str(caught.value) + caplog.text
     assert fake.post_bodies == []
@@ -1318,27 +1245,6 @@ async def test_buffered_call_length_without_content_is_the_result_and_empty_stop
         result = await llm.achat(_HI)
         assert (result.content, result.finish_reason) == ("", finish)
         assert fake.post_bodies == []
-
-
-def test_buffered_sync_call_assembles_the_stream_and_never_posts():
-    fake = HttpxStreamFake(
-        lines=[_CONTENT_LINE, _FINISH_LINE, _DONE_LINE], payload=_COMPLETE_PAYLOAD
-    )
-    fake.stream = fake.stream_sync
-    llm = HttpxLLMClient(Settings(**_settings_kwargs()), client=fake)
-    result = llm.chat(_HI)
-    assert (result.content, result.finish_reason) == ("Partial ", "stop")
-    assert fake.post_bodies == []
-    assert fake.stream_bodies[0]["stream"] is True
-
-
-def test_buffered_sync_call_incomplete_stream_is_truncation():
-    fake = HttpxStreamFake(lines=TRUNCATED_LINES, payload=_COMPLETE_PAYLOAD)
-    fake.stream = fake.stream_sync
-    llm = HttpxLLMClient(Settings(**_settings_kwargs()), client=fake)
-    with pytest.raises(TruncatedStreamError):
-        llm.chat(_HI)
-    assert fake.post_bodies == []
 
 
 # ---------------------------------------------------------------------------
@@ -1361,22 +1267,20 @@ def _json_only_backend(payload, posts):
 
 
 @pytest.mark.anyio
-async def test_buffered_call_accepts_a_json_only_backend_with_one_request():
+@pytest.mark.parametrize("sync", [False, True], ids=["achat", "chat"])
+async def test_buffered_call_accepts_a_json_only_backend_with_one_request(sync):
     posts: list = []
-    async with httpx2.AsyncClient(transport=_json_only_backend(_JSON_ANSWER, posts)) as http:
-        llm = HttpxLLMClient(Settings(**_settings_kwargs()), client=http)
-        result = await llm.achat(_HI)
+    settings = Settings(**_settings_kwargs())
+    if sync:
+        with httpx2.Client(transport=_json_only_backend(_JSON_ANSWER, posts)) as http:
+            result = await asyncio.to_thread(
+                HttpxLLMClient(settings, client=http).chat, _HI
+            )
+    else:
+        async with httpx2.AsyncClient(transport=_json_only_backend(_JSON_ANSWER, posts)) as http:
+            result = await HttpxLLMClient(settings, client=http).achat(_HI)
     assert (result.content, result.finish_reason) == ("Complete answer", "stop")
     assert (result.usage.prompt_tokens, result.usage.total_tokens) == (5, 8)
-    assert len(posts) == 1
-
-
-def test_buffered_sync_call_accepts_a_json_only_backend_with_one_request():
-    posts: list = []
-    with httpx2.Client(transport=_json_only_backend(_JSON_ANSWER, posts)) as http:
-        llm = HttpxLLMClient(Settings(**_settings_kwargs()), client=http)
-        result = llm.chat(_HI)
-    assert (result.content, result.finish_reason) == ("Complete answer", "stop")
     assert len(posts) == 1
 
 

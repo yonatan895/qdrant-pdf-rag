@@ -121,12 +121,12 @@ def _env_file(tmp_path: Path, mode: int = 0o600) -> Path:
     return path
 
 
-def _run_real(tmp_path, extra_env, docker=FAKE_DOCKER):
+def _run_real(tmp_path, extra_env, docker=FAKE_DOCKER, env_file=None):
     env = {
         **os.environ,
         "PATH": f"{_stub_tree(tmp_path, docker)}:/usr/bin:/bin",
         "O2_DRYRUN": "0",
-        "O2_ENV_FILE": str(_env_file(tmp_path)),
+        "O2_ENV_FILE": str(env_file or _env_file(tmp_path)),
         "O2_LOG": str(tmp_path / "o2.log"),
         **extra_env,
     }
@@ -158,27 +158,14 @@ def test_non_openobserve_port_squatter_fails_closed(tmp_path):
 
 
 def test_env_file_must_be_private(tmp_path):
-    env = {
-        **os.environ,
-        "PATH": f"{_stub_tree(tmp_path)}:/usr/bin:/bin",
-        "O2_DRYRUN": "0",
-        "O2_ENV_FILE": str(_env_file(tmp_path, 0o644)),
-    }
-    r = subprocess.run(["sh", str(SCRIPT)], capture_output=True, text=True, env=env, check=False)
+    r = _run_real(tmp_path, {}, env_file=_env_file(tmp_path, 0o644))
     assert r.returncode != 0 and "mode 0600" in r.stderr
     assert PASSWORD not in r.stdout + r.stderr
 
 
 def test_first_start_creates_private_credentials_file(tmp_path):
     target = tmp_path / "cfg" / "o2.env"
-    env = {
-        **os.environ,
-        "PATH": f"{_stub_tree(tmp_path)}:/usr/bin:/bin",
-        "O2_DRYRUN": "0",
-        "O2_ENV_FILE": str(target),
-        "O2_LOG": str(tmp_path / "o2.log"),
-    }
-    r = subprocess.run(["sh", str(SCRIPT)], capture_output=True, text=True, env=env, check=False)
+    r = _run_real(tmp_path, {}, env_file=target)
     assert stat.S_IMODE(target.stat().st_mode) == 0o600
     keys = dict(line.split("=", 1) for line in target.read_text().splitlines())
     assert set(keys) == {"ZO_ROOT_USER_EMAIL", "ZO_ROOT_USER_PASSWORD", "O2_BASIC_AUTH"}

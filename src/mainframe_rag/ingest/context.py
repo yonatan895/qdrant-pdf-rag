@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx2
 
-from mainframe_rag.config import Settings, bearer_auth_headers
+from mainframe_rag.config import Settings, bearer_auth_headers, new_http_client
 from mainframe_rag.ingest.payload import normalize_context
 from mainframe_rag.ports import ChatMessage
 
@@ -311,9 +311,8 @@ class ContextLLMClient:
 
     def _http(self) -> httpx2.Client:
         if self._client is None:
-            self._client = httpx2.Client(
-                timeout=self._settings.context_llm_timeout_s,
-                transport=httpx2.HTTPTransport(retries=self._settings.http_connect_retries),
+            self._client = new_http_client(
+                self._settings.context_llm_timeout_s, self._settings.http_connect_retries
             )
         return self._client
 

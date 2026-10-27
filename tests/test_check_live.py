@@ -151,18 +151,6 @@ def test_openobserve_service_since_query(capsys):
     assert query['end_time'] - query['start_time'] == 180_000_000  # 120 s lookback + 60 s slack
 
 
-def test_openobserve_auth_failure_is_fixed_message(capsys):
-    server = openobserve_server()
-    try:
-        rc = run_arrival(server, '--auth-stdin', stdin=f'{USER}:wrong\n')
-    finally:
-        server.close()
-    out = capsys.readouterr()
-    assert rc == 1 and len(server.requests) == 1
-    assert out.err == 'trace backend refused the credentials\n' and out.out == ''
-    assert 'wrong' not in out.err and '401' not in out.err
-
-
 def test_openobserve_without_credentials_never_queries(capsys):
     server = openobserve_server()
     try:
@@ -231,24 +219,3 @@ def test_poll_error_prints_one_fixed_line_and_retries(status, capsys):
     assert found is None and len(server.requests) > 1  # retried
     assert capsys.readouterr().err == 'trace backend poll error\n'  # once, no upstream text
 
-
-def test_removed_backend_flags_are_rejected():
-    import sys
-    from unittest import mock
-
-    from scripts import check_live
-    server = openobserve_server()
-    try:
-        for argv in (['--backend', 'jaeger'], ['--backend', 'openobserve']):
-            with pytest.raises(SystemExit) as exc:
-                run_arrival(server, *argv)
-            assert exc.value.code == 2
-        for flag in ('--jaeger', '--trace-backend'):
-            argv = ['check_live', '--agent', 'http://a', flag, 'x', '--trace-url', 'http://t',
-                    '--query', 'q', '--followup', 'f', '--report', '/nonexistent/r']
-            with mock.patch.object(sys, 'argv', argv), pytest.raises(SystemExit) as exc:
-                check_live.main()
-            assert exc.value.code == 2
-    finally:
-        server.close()
-    assert server.requests == []

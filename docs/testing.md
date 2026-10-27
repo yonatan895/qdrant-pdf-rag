@@ -26,7 +26,7 @@ Tests generate original PDFs at runtime
 CI must fail if `git ls-files` matches `.pdf` / `.pdx` / `.idx`.
 Cover IBM-shaped synthetics (form number, message id, outline) **and**
 generic PDFs (no outline, no form number, unknown vendor).
-`test_chrome_strip` must keep a **long** page list (≥8 pages). Chrome is
+`test_strip_chrome_keeps_entry_lines_and_strips_only_chrome` must keep a **long** page list (≥8 pages; it uses 12). Chrome is
 disabled on short docs on purpose.
 
 ## Unit tests are hermetic
@@ -516,7 +516,10 @@ For streaming recovery, assert yielded events and fallback-call counts through t
 A test earns its place:
 
 1. **Owner first.** Extend the test that owns the guarantee (owner contract;
-   [2026-10-16 ledger](records/2026-10-16-test-justification-ledger.md)).
+   the live contract-to-owner index is the [context map](agent-workflow.md#context-map)
+   plus the owner docs). The
+   [2026-10-16 ledger](records/2026-10-16-test-justification-ledger.md) is a
+   historical snapshot recoverable from git, not an index of the current suite.
    Add a test or file only when none exists, and say so. Exploratory and
    review-round cases keep only distinct behavior, in the owning suite, never
    in files named after an agent or round.

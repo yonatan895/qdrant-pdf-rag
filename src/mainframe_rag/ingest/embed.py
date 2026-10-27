@@ -20,7 +20,7 @@ import re
 
 import httpx2
 
-from mainframe_rag.config import HASH_EMBED_DIM, Settings, bearer_auth_headers
+from mainframe_rag.config import HASH_EMBED_DIM, Settings, bearer_auth_headers, new_http_client
 from mainframe_rag.ingest.bounds import require_embed_inputs_within
 from mainframe_rag.ingest.chunk import Chunk
 from mainframe_rag.ports import Embedder, SparseVector
@@ -145,12 +145,10 @@ class VllmEmbedder:
         return self._base_url, self._model
 
     def _http(self) -> httpx2.Client:
+        # Bounded connect retries; no request-level retries on POST /embeddings.
         if self._client is None:
-            # Bounded connect retries (fire only if the request was never
-            # sent); no request-level retries on POST /embeddings.
-            self._client = httpx2.Client(
-                timeout=self._settings.embed_timeout_s,
-                transport=httpx2.HTTPTransport(retries=self._settings.http_connect_retries),
+            self._client = new_http_client(
+                self._settings.embed_timeout_s, self._settings.http_connect_retries
             )
         return self._client
 

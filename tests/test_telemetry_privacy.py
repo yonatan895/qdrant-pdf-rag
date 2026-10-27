@@ -15,7 +15,6 @@ import json
 import logging
 
 import pytest
-from fastapi.testclient import TestClient
 from opentelemetry import trace
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
@@ -29,9 +28,9 @@ from mainframe_rag import tracing as tracing_mod
 from mainframe_rag.agent import answer_core as answer_core_mod
 from mainframe_rag.agent import app as app_mod
 from mainframe_rag.agent import metrics as metrics_mod
-from mainframe_rag.agent.tokenizer import FallbackTokenizer
 from mainframe_rag.logs import JsonFormatter, error_type
 from mainframe_rag.ports import ChatResult, TokenUsage
+from tests.helpers_agent_local import agent_client, agent_hit
 from tests.test_metrics import _points
 
 CANARY_QUERY = "canary-query-ZK7xq Kostenstelle"
@@ -57,22 +56,7 @@ def _provider():
 
 
 def _hit(doc_id="SA22-0000-00"):
-    from mainframe_rag.retrieve.query import SearchHit
-
-    return SearchHit(
-        chunk_id="abc123",
-        score=0.42,
-        cite=f"{doc_id} Synthetic Reference, Chapter 2 > IEA500I, p. 1-6",
-        heading="Chapter 2 > IEA500I",
-        text="IEA500I synthetic text",
-        doc_id=doc_id,
-        title="Synthetic Reference",
-        page_label="1-6",
-        chunk_type="message",
-        product="z/OS",
-        version="9.9",
-        message_ids=("IEA500I",),
-    )
+    return agent_hit(doc_id=doc_id, cite=f"{doc_id} Synthetic Reference, Chapter 2 > IEA500I, p. 1-6")
 
 
 class MagicSearch:
@@ -107,17 +91,11 @@ def _reset_provider(monkeypatch):
 
 @pytest.fixture
 def client(monkeypatch, servable_representation_gate):
-    monkeypatch.setenv("QDRANT_URL", "http://localhost:6333")
-    monkeypatch.setenv("EMBED_MODE", "hash")
-    monkeypatch.setenv("ALLOW_HASH_MODE", "true")
-    monkeypatch.setenv("LLM_BASE_URL", "http://llm.internal/v1")
-    monkeypatch.setenv("LLM_MODEL_REASONING", "test-reasoning-model")
-    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
     provider, exporter = _provider()
-    monkeypatch.setattr(app_mod, "retrieve_search", MagicSearch())
-    with TestClient(app_mod.app) as c:
-        monkeypatch.setattr(app_mod, "llm", FakeLLM())
-        monkeypatch.setattr(app_mod, "tokenizer", FallbackTokenizer())
+    with agent_client(
+        monkeypatch, llm=FakeLLM(), search=MagicSearch(),
+        env={"OTEL_EXPORTER_OTLP_ENDPOINT": ""},
+    ) as c:
         monkeypatch.setattr(app_mod, "tracer", provider.get_tracer("test"))
         monkeypatch.setattr(answer_core_mod, "tracer", provider.get_tracer("test"))
         yield c, exporter
@@ -140,26 +118,27 @@ def _span_text(spans):
     return "\n".join(span.to_json() for span in spans)
 
 
+def _metric_points(reader):
+    return [
+        point
+        for rm in reader.get_metrics_data().resource_metrics
+        for sm in rm.scope_metrics
+        for metric in sm.metrics
+        for point in metric.data.data_points
+    ]
+
+
 def _metric_text(reader):
-    texts = []
-    for rm in reader.get_metrics_data().resource_metrics:
-        for sm in rm.scope_metrics:
-            for metric in sm.metrics:
-                for point in metric.data.data_points:
-                    for key, value in dict(point.attributes or {}).items():
-                        texts.append(key)
-                        texts.append(str(value))
-    return "\n".join(texts)
+    return "\n".join(
+        item
+        for point in _metric_points(reader)
+        for pair in dict(point.attributes or {}).items()
+        for item in (pair[0], str(pair[1]))
+    )
 
 
 def _metric_label_keys(reader):
-    keys = set()
-    for rm in reader.get_metrics_data().resource_metrics:
-        for sm in rm.scope_metrics:
-            for metric in sm.metrics:
-                for point in metric.data.data_points:
-                    keys.update(dict(point.attributes or {}).keys())
-    return keys
+    return {key for point in _metric_points(reader) for key in dict(point.attributes or {})}
 
 
 def _formatted_logs(caplog):
@@ -181,16 +160,13 @@ def test_success_hides_canaries_from_logs_and_spans(client, caplog, monkeypatch)
         app_mod, "retrieve_search", MagicSearch(hits=[_hit(doc_id=CANARY_DOC)])
     )
     with caplog.at_level(logging.INFO):
-        resp = c.post(
-            "/v1/search",
-            json={"query": CANARY_QUERY},
-            headers={"X-Canary-Probe": CANARY_HEADER},
-        )
-        resp = c.post(
-            "/v1/search",
-            json={"query": CANARY_QUERY},
-            headers={"X-Canary-Probe": CANARY_HEADER},
-        )
+        # Repeated requests must stay canary-free too (no per-request cache).
+        for _ in range(2):
+            resp = c.post(
+                "/v1/search",
+                json={"query": CANARY_QUERY},
+                headers={"X-Canary-Probe": CANARY_HEADER},
+            )
     assert resp.status_code == 200
     logs_blob = "\n".join(_formatted_logs(caplog))
     assert CANARY_QUERY not in logs_blob

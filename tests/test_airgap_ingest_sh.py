@@ -102,9 +102,7 @@ def test_ingest_dryrun_renders_clean_manifest(ingest_tree):
     assert re.search(r"(?m)^\s*- name: EMBED_MODEL_REVISION$", rendered)
     assert rendered_env(rendered, "ingest")["EMBED_MODEL_REVISION"] == "rev-1"
     assert rendered_env(rendered, "ingest")["IMAGE_SHA"] == IMAGE_SHA
-    block = _ingest_qdrant_block(
-        (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
-    )
+    block = _ingest_qdrant_block((ingest_tree[0] / 'dist' / 'ingest-rendered.yaml').read_text())
     assert re.search(r"(?m)^\s*key: api-key$", block)
     assert rendered_container(rendered, "ingest")["args"] == [
         "--src", "/corpus", "--progress", "/work/inventory.jsonl",
@@ -183,24 +181,18 @@ def _use_patching_kubectl(tree):
         write_stub(tree[0] / "bin" / name, PATCHING_KUBECTL)
 
 
-def test_extra_patch_is_refused_without_ci_rehearsal(ingest_tree):
-    _use_patching_kubectl(ingest_tree)
-    patch = _write_patch(ingest_tree, RESOURCE_PATCH)
-    r = _run_ingest(ingest_tree, ("INGEST_EXTRA_PATCH", patch))
-    assert r.returncode != 0
-    assert "INGEST_EXTRA_PATCH is a CI-rehearsal override" in r.stderr
-    assert "cpu: 250m" not in (ingest_tree[0] / "dist/ingest-rendered.yaml").read_text() \
-        if (ingest_tree[0] / "dist/ingest-rendered.yaml").exists() else True
-
-
-def test_ci_rehearsal_cannot_come_from_the_operator_file(ingest_tree):
+@pytest.mark.parametrize("operator_file", [False, True], ids=["release-path", "operator-file"])
+def test_extra_patch_is_refused_without_ci_rehearsal(ingest_tree, operator_file):
     """The opt-in is process environment only: airgap.env travels to the air gap."""
     _use_patching_kubectl(ingest_tree)
     patch = _write_patch(ingest_tree, RESOURCE_PATCH)
-    (ingest_tree[0] / "airgap.env").write_text("CI_REHEARSAL=1\n")
+    if operator_file:
+        (ingest_tree[0] / "airgap.env").write_text("CI_REHEARSAL=1\n")
     r = _run_ingest(ingest_tree, ("INGEST_EXTRA_PATCH", patch))
     assert r.returncode != 0
-    assert "CI-rehearsal override" in r.stderr
+    assert "INGEST_EXTRA_PATCH is a CI-rehearsal override" in r.stderr
+    rendered = ingest_tree[0] / "dist/ingest-rendered.yaml"
+    assert not rendered.exists() or "cpu: 250m" not in rendered.read_text()
 
 
 def test_resource_only_patch_is_accepted_in_a_ci_rehearsal(ingest_tree):
@@ -270,11 +262,7 @@ case "$*" in
   *"wait --for=condition=complete"*) test -e replacement-applied ;;
 esac
 """)
-    result = _run_ingest(
-        ingest_tree,
-        ("AIRGAP_DRYRUN", "0"),
-        ("DELETE_FAILS", str(delete_fails).lower()),
-    )
+    result = _run_ingest(ingest_tree, ('AIRGAP_DRYRUN', '0'), ('DELETE_FAILS', str(delete_fails).lower()))
     if delete_fails:
         assert result.returncode == 23, result.stderr
         assert (tree / "old-writer").exists()
@@ -323,9 +311,7 @@ elif 'wait' in a:
   time.sleep(.02)
  sys.exit(0 if os.environ['JOB_SUCCEEDS']=='true' else 1)
 """)
-    result = _run_ingest(
-        ingest_tree, ("AIRGAP_DRYRUN", "0"), ("JOB_SUCCEEDS", str(job_succeeds).lower())
-    )
+    result = _run_ingest(ingest_tree, ('AIRGAP_DRYRUN', '0'), ('JOB_SUCCEEDS', str(job_succeeds).lower()))
     assert "first pod failure" in result.stdout
     assert "second pod progress" in result.stdout, result.stdout + result.stderr
     assert result.returncode == (0 if job_succeeds else 1)
@@ -369,8 +355,7 @@ elif 'pods' in a:
     for _ in range(2):
         for name in ("wait-pid", "observer-pid"):
             (tree / name).unlink(missing_ok=True)
-        proc = _run_ingest(ingest_tree, ("AIRGAP_DRYRUN", "0"),
-                           ("CANCEL_STAGE", cancel_stage), runner=start)
+        proc = _run_ingest(ingest_tree, ('AIRGAP_DRYRUN', '0'), ('CANCEL_STAGE', cancel_stage), runner=start)
         try:
             deadline = time.monotonic() + 10
             while not all((tree / name).exists() for name in ("wait-pid", "observer-pid")):
@@ -427,40 +412,31 @@ def _ingest_qdrant_block(rendered):
     return "\n".join(lines[start : start + 5])
 
 
-def test_ingest_qdrant_readonly_key_fails_closed(ingest_tree):
-    """A render downgrading ingest to the read-only key must stop the run."""
+@pytest.mark.parametrize("copresent", [False, True], ids=["readonly-only", "copresent-readonly"])
+def test_ingest_qdrant_readonly_key_fails_closed(ingest_tree, copresent):
+    """Ingest owns corpus mutation: a render wiring the read-only key must stop
+    the run, and a co-present read-only key must not hide behind api-key."""
     tmp_path, _ = ingest_tree
-    stub = (tmp_path / "charts/mainframe-rag/templates/ingest-job.yaml").read_text()
-    lines = [
-        l.replace("key: api-key", "key: read-only-api-key") if l.strip() == "key: api-key" else l
-        for l in stub.splitlines()
-    ]
-    (tmp_path / "charts/mainframe-rag/templates/ingest-job.yaml").write_text("\n".join(lines) + "\n")
+    stub = (tmp_path / "charts/mainframe-rag/templates/ingest-job.yaml")
+    text = stub.read_text()
+    if not copresent:
+        stub.write_text("\n".join(
+            l.replace("key: api-key", "key: read-only-api-key") if l.strip() == "key: api-key" else l
+            for l in text.splitlines()) + "\n")
+        needle = "key api-key"
+    else:
+        anchor = "                  key: api-key\n"
+        assert anchor in text
+        stub.write_text(text.replace(anchor, anchor + (
+            "            - name: QDRANT_READ_API_KEY\n"
+            "              valueFrom:\n"
+            "                secretKeyRef:\n"
+            "                  key: read-only-api-key\n"
+            "                  name: qdrant-apikey\n")))
+        needle = "read-only"
     r = _run_ingest(ingest_tree)
     assert r.returncode != 0
-    assert "key api-key" in r.stderr
-
-
-def test_ingest_qdrant_copresent_readonly_key_fails_closed(ingest_tree):
-    """Anti-revert parity with the agent check: a read-only key smuggled
-    into the ingest render must stop the run even with api-key present."""
-    tmp_path, _ = ingest_tree
-    stub = (tmp_path / "charts/mainframe-rag/templates/ingest-job.yaml").read_text()
-    anchor = "                  key: api-key\n"
-    assert anchor in stub
-    stub = stub.replace(
-        anchor,
-        anchor
-        + "            - name: QDRANT_READ_API_KEY\n"
-        + "              valueFrom:\n"
-        + "                secretKeyRef:\n"
-        + "                  key: read-only-api-key\n"
-        + "                  name: qdrant-apikey\n",
-    )
-    (tmp_path / "charts/mainframe-rag/templates/ingest-job.yaml").write_text(stub)
-    r = _run_ingest(ingest_tree)
-    assert r.returncode != 0
-    assert "read-only" in r.stderr
+    assert needle in r.stderr
 
 
 def test_ingest_retire_docs_rendered_with_alias_publish(ingest_tree):
@@ -517,11 +493,7 @@ def test_ingest_retire_docs_preserves_interior_spaces_in_product_label(ingest_tr
 
     # Test padded entries separated by comma
     retire_input = f"  SA23-1380-09@{rev}  ,  SA22-0000-00  "
-    r = _run_ingest(
-        ingest_tree,
-        ("INGEST_ALIAS_PUBLISH", "true"),
-        ("INGEST_RETIRE_DOCS", retire_input),
-    )
+    r = _run_ingest(ingest_tree, ('INGEST_ALIAS_PUBLISH', 'true'), ('INGEST_RETIRE_DOCS', retire_input))
     assert r.returncode == 0, r.stderr
     rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
     assert_no_placeholders(rendered)
@@ -531,11 +503,7 @@ def test_ingest_retire_docs_preserves_interior_spaces_in_product_label(ingest_tr
     args = container["args"]
 
     # Extract all --retire-doc values from container args
-    retire_args = [
-        args[i + 1]
-        for i, arg in enumerate(args)
-        if arg == "--retire-doc" and i + 1 < len(args)
-    ]
+    retire_args = [args[i + 1] for i, arg in enumerate(args) if arg == '--retire-doc' and i + 1 < len(args)]
     assert retire_args == [f"SA23-1380-09@{rev}", "SA22-0000-00"]
 
     # Verify backend retirement planner accepts the exact parsed args against inventory
@@ -584,9 +552,7 @@ def test_ingest_collection_policy_preset_supplies_production_tuple(ingest_tree):
     rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
     assert re.search(r'(?m)^\s*- name: QDRANT_SHARD_NUMBER\n\s*value: "6"$', rendered)
     assert re.search(r'(?m)^\s*- name: QDRANT_REPLICATION_FACTOR\n\s*value: "3"$', rendered)
-    assert re.search(
-        r'(?m)^\s*- name: QDRANT_WRITE_CONSISTENCY_FACTOR\n\s*value: "2"$', rendered
-    )
+    assert re.search('(?m)^\\s*- name: QDRANT_WRITE_CONSISTENCY_FACTOR\\n\\s*value: "2"$', rendered)
     assert_no_placeholders(rendered)
 
 
@@ -598,25 +564,19 @@ def test_ingest_collection_policy_precedence_caller_over_file_over_preset(ingest
         "QDRANT_REPLICATION_FACTOR=2\n"
         "QDRANT_WRITE_CONSISTENCY_FACTOR=1\n"
     )
-    r = _run_ingest(
-        ingest_tree, ("AIRGAP_ENV", str(env_file)), policy=None
-    )
+    r = _run_ingest(ingest_tree, ('AIRGAP_ENV', str(env_file)), policy=None)
     assert r.returncode == 0, r.stderr
     rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
     assert re.search(r'(?m)^\s*- name: QDRANT_SHARD_NUMBER\n\s*value: "2"$', rendered)
     assert re.search(r'(?m)^\s*- name: QDRANT_REPLICATION_FACTOR\n\s*value: "2"$', rendered)
-    assert re.search(
-        r'(?m)^\s*- name: QDRANT_WRITE_CONSISTENCY_FACTOR\n\s*value: "1"$', rendered
-    )
+    assert re.search('(?m)^\\s*- name: QDRANT_WRITE_CONSISTENCY_FACTOR\\n\\s*value: "1"$', rendered)
     # An explicit caller selection beats both the file and the preset.
     r = _run_ingest(ingest_tree, ("AIRGAP_ENV", str(env_file)), policy=("6", "3", "2"))
     assert r.returncode == 0, r.stderr
     rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
     assert re.search(r'(?m)^\s*- name: QDRANT_SHARD_NUMBER\n\s*value: "6"$', rendered)
     assert re.search(r'(?m)^\s*- name: QDRANT_REPLICATION_FACTOR\n\s*value: "3"$', rendered)
-    assert re.search(
-        r'(?m)^\s*- name: QDRANT_WRITE_CONSISTENCY_FACTOR\n\s*value: "2"$', rendered
-    )
+    assert re.search('(?m)^\\s*- name: QDRANT_WRITE_CONSISTENCY_FACTOR\\n\\s*value: "2"$', rendered)
 
 
 def test_ingest_collection_policy_invalid_fails_closed(ingest_tree):
@@ -721,9 +681,7 @@ def test_ingest_direct_peers_roundtrip_and_precedence(ingest_tree, override, via
     result = _run_ingest(ingest_tree, *extra, policy=("6", "3", "2"), runner=runner)
     assert result.returncode == 0, result.stderr
     rendered = (ingest_tree[0] / "dist/ingest-rendered.yaml").read_text()
-    assert rendered_env(rendered, "ingest")["QDRANT_PEER_URLS"] == (
-        caller_peers if override else file_peers
-    )
+    assert rendered_env(rendered, 'ingest')['QDRANT_PEER_URLS'] == (caller_peers if override else file_peers)
 
 
 def test_ingest_does_not_infer_direct_peers(ingest_tree):
@@ -796,9 +754,7 @@ def _release_ingest(tree, config=INGEST_CONFIG):
 
 
 def _run_release_ingest(tree):
-    return _run_ingest(
-        tree, ("AIRGAP_DRYRUN", "0"), ("SKOPEO_REGISTRY", str(tree[0] / "registry"))
-    )
+    return _run_ingest(tree, ('AIRGAP_DRYRUN', '0'), ('SKOPEO_REGISTRY', str(tree[0] / 'registry')))
 
 
 def test_ingest_release_renders_job_image_by_verified_digest(ingest_tree):
@@ -810,24 +766,24 @@ def test_ingest_release_renders_job_image_by_verified_digest(ingest_tree):
     assert f"qdrant-pdf-rag-ingest:{IMAGE_SHA}" not in rendered.replace("value:", "")
 
 
-def test_ingest_swapped_registry_tag_refuses_before_any_cluster_call_then_next_run_passes(ingest_tree):
-    _release_ingest(ingest_tree, config="sha256:" + "f" * 64)
+@pytest.mark.parametrize(("damage", "needle"), [
+    ("swapped", "is not the packed image"),
+    ("missing", f"cannot read back registry image {INGEST_REF}"),
+], ids=["swapped-tag", "missing-image"])
+def test_ingest_registry_identity_refuses_before_any_cluster_call(ingest_tree, damage, needle):
+    """A tag that is not the packed image, or an image the registry does not
+    serve, refuses before any cluster call; a reload makes the next run pass."""
+    if damage == "swapped":
+        _release_ingest(ingest_tree, config="sha256:" + "f" * 64)
+    else:
+        _release_ingest(ingest_tree)
+        (ingest_tree[0] / "registry" / (INGEST_REF.replace("/", "_").replace(":", "_") + ".raw")).unlink()
     r = _run_release_ingest(ingest_tree)
     assert r.returncode != 0
-    assert "is not the packed image" in r.stderr
-    kc_log = ingest_tree[1]
-    assert not kc_log.exists() or "apply" not in kc_log.read_text().split()
-    _release_ingest(ingest_tree)  # the tag is reloaded with the packed image
-    assert _run_release_ingest(ingest_tree).returncode == 0
-
-
-def test_ingest_missing_registry_image_refuses_before_any_cluster_call(ingest_tree):
-    _release_ingest(ingest_tree)
-    (ingest_tree[0] / "registry" / (INGEST_REF.replace("/", "_").replace(":", "_") + ".raw")).unlink()
-    r = _run_release_ingest(ingest_tree)
-    assert r.returncode != 0
-    assert f"cannot read back registry image {INGEST_REF}" in r.stderr
+    assert needle in r.stderr
     assert not ingest_tree[1].exists() or "apply" not in ingest_tree[1].read_text().split()
+    _release_ingest(ingest_tree)  # the registry now serves the packed image
+    assert _run_release_ingest(ingest_tree).returncode == 0
 
 
 OWUI_SEVEN_INPUTS = (
@@ -864,14 +820,11 @@ def _chart_ingest_resources():
     return yaml.safe_load((REPO / "charts/mainframe-rag/values.yaml").read_text())["ingest"]["resources"]
 
 
-def test_default_ingest_job_resources_are_unchanged(ingest_tree):
+def test_ingest_sizing_defaults_and_keys_reach_the_rendered_job(ingest_tree):
     r = _run_ingest(ingest_tree)
     assert r.returncode == 0, r.stderr
     rendered = (ingest_tree[0] / "dist/ingest-rendered.yaml").read_text()
     assert rendered_container(rendered, "ingest")["resources"] == _chart_ingest_resources()
-
-
-def test_ingest_sizing_keys_reach_the_rendered_job(ingest_tree):
     r = _run_ingest(ingest_tree, *INGEST_SIZING.items())
     assert r.returncode == 0, r.stderr
     rendered = (ingest_tree[0] / "dist/ingest-rendered.yaml").read_text()

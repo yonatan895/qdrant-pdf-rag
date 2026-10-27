@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 from typing import Literal, get_args
 
+import httpx2
 from opentelemetry import propagate
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -112,6 +113,15 @@ def bearer_auth_headers(api_key: str | None) -> dict[str, str]:
     with contextlib.suppress(Exception):
         propagate.inject(headers)
     return headers
+
+
+def new_http_client(timeout: float, connect_retries: int) -> httpx2.Client:
+    """Outbound model client: request timeout, connect-only retries (a POST is
+    never re-sent), cached by the caller unless a client was injected."""
+    return httpx2.Client(
+        timeout=timeout,
+        transport=httpx2.HTTPTransport(retries=connect_retries),
+    )
 
 
 class Settings(BaseSettings):

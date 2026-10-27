@@ -53,6 +53,8 @@ import httpx2
 from qdrant_sim import QdrantSim, start_simulator
 
 from mainframe_rag.config import load_settings
+from mainframe_rag.eval.dotted import dotted_get as _get
+from mainframe_rag.eval.dotted import dotted_set as _set
 from mainframe_rag.eval.load import DEFAULT_QUERIES, run_load
 from mainframe_rag.manifest import write_run_manifest
 
@@ -64,31 +66,6 @@ GATED_METRICS = {
     "agent.search.latency_ms.p95": 3.0,
     "agent.answer.latency_ms.p95": 3.0,
 }
-
-
-def _get(result: dict, dotted: str):
-    node: object = result
-    for part in dotted.split("."):
-        if not isinstance(node, dict) or part not in node:
-            return None
-        node = node[part]
-    return node
-
-
-def _set(target: dict, dotted: str, value) -> None:
-    """Mirror of _get: writes the nested shape the gate reads. Baselines and
-    results MUST share one shape — update_baseline emits nested records so
-    check_baseline's _get walk finds them (a flat dotted-key baseline would
-    gate nothing, forever)."""
-    parts = dotted.split(".")
-    node = target
-    for part in parts[:-1]:
-        child = node.get(part)
-        if not isinstance(child, dict):
-            child = {}
-            node[part] = child
-        node = child
-    node[parts[-1]] = value
 
 
 def _meminfo_total_mb() -> float | None:

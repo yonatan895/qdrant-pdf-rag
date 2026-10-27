@@ -30,8 +30,9 @@ from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.templating import Jinja2Templates
 from opentelemetry.trace import SpanKind
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from mainframe_rag.agent.request_text import BoundedRequestText
 from mainframe_rag.agent.sse import error_payload, format_sse_event, output_final_payload
 from mainframe_rag.config import ReasoningEffort
 from mainframe_rag.feedback.store import (
@@ -140,8 +141,9 @@ _FEEDBACK_OUTCOMES: dict[str, tuple[int, str | None, str]] = {
 }
 
 
-class UiChatRequest(BaseModel):
-    """Browser payload: client-owned history plus the active turn."""
+class UiChatRequest(BoundedRequestText):
+    """Browser payload: client-owned history plus the active turn (same bounds
+    and surrogate refusal as the API chat request, #1011/#1013)."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -150,22 +152,6 @@ class UiChatRequest(BaseModel):
     product: str | None = None
     version: str | None = None
     reasoning_effort: ReasoningEffort | None = None
-
-    @model_validator(mode="after")
-    def _bounded_text(self) -> UiChatRequest:
-        # Same bounds and surrogate refusal as the API chat request (#1011,
-        # #1013); the agent module is imported late, as the handlers do.
-        from mainframe_rag.agent import app as app_mod
-        from mainframe_rag.agent.chat_turn import validate_request_text
-
-        validate_request_text(
-            app_mod.settings,
-            product=self.product,
-            version=self.version,
-            splunk_context=self.splunk_context,
-            messages=self.messages,
-        )
-        return self
 
 
 def _secure(response: Response) -> Response:
@@ -231,172 +217,27 @@ _MD_ITALIC_RE = re.compile(r"(?<!\*)\*([^*\n]+?)\*(?!\*)")
 
 # Minimal JCL and REXX tokenizers (issue #337): spans for comments, strings,
 # keywords, and numbers. Other languages keep the language class with no spans.
-_JCL_KEYWORDS = (
-    # Statements / operations
-    "COMMAND",
-    "CNTL",
-    "DD",
-    "ELSE",
-    "ENDCNTL",
-    "ENDIF",
-    "EXEC",
-    "IF",
-    "INCLUDE",
-    "JCLLIB",
-    "JOB",
-    "OUTPUT",
-    "PEND",
-    "PROC",
-    "SET",
-    "THEN",
-    "XMIT",
-    # Parameters and dispositions
-    "AVGREC",
-    "BLKSIZE",
-    "CATLG",
-    "CLASS",
-    "COND",
-    "CONTIG",
-    "COPIES",
-    "CYL",
-    "DATACLAS",
-    "DCB",
-    "DELETE",
-    "DEST",
-    "DISP",
-    "DSN",
-    "DSNAME",
-    "DUMMY",
-    "EXPDT",
-    "FREE",
-    "HOLD",
-    "KEEP",
-    "LABEL",
-    "LIKE",
-    "LRECL",
-    "MGMTCLAS",
-    "MOD",
-    "MSGCLASS",
-    "MSGLEVEL",
-    "NEW",
-    "NOTIFY",
-    "OLD",
-    "PARM",
-    "PASS",
-    "PASSWORD",
-    "PGM",
-    "RECFM",
-    "REFDD",
-    "REGION",
-    "RESTART",
-    "RETPD",
-    "RLSE",
-    "SHR",
-    "SPACE",
-    "STORCLAS",
-    "SUBSYS",
-    "SYSOUT",
-    "TERM",
-    "TIME",
-    "TRK",
-    "TYPRUN",
-    "UNCATLG",
-    "UNIT",
-    "USER",
-    "VOL",
-    "VOLUME",
-)
+# Flat keyword lists; consumers only sort by length to build the alternation.
+_JCL_KEYWORD_TEXT = """
+    COMMAND CNTL DD ELSE ENDCNTL ENDIF EXEC IF INCLUDE JCLLIB JOB OUTPUT PEND PROC SET THEN
+    XMIT AVGREC BLKSIZE CATLG CLASS COND CONTIG COPIES CYL DATACLAS DCB DELETE DEST DISP DSN
+    DSNAME DUMMY EXPDT FREE HOLD KEEP LABEL LIKE LRECL MGMTCLAS MOD MSGCLASS MSGLEVEL NEW
+    NOTIFY OLD PARM PASS PASSWORD PGM RECFM REFDD REGION RESTART RETPD RLSE SHR SPACE
+    STORCLAS SUBSYS SYSOUT TERM TIME TRK TYPRUN UNCATLG UNIT USER VOL VOLUME
+"""
 
-_REXX_KEYWORDS = (
-    # Instructions and control flow
-    "ADDRESS",
-    "ARG",
-    "BY",
-    "CALL",
-    "DIGITS",
-    "DO",
-    "DROP",
-    "ELSE",
-    "END",
-    "EXIT",
-    "EXPOSE",
-    "FOR",
-    "FOREVER",
-    "FORM",
-    "FUZZ",
-    "IF",
-    "INTERPRET",
-    "ITERATE",
-    "LEAVE",
-    "NOP",
-    "NUMERIC",
-    "OPTIONS",
-    "OTHERWISE",
-    "PARSE",
-    "PROCEDURE",
-    "PULL",
-    "PUSH",
-    "QUEUE",
-    "RETURN",
-    "SAY",
-    "SELECT",
-    "SIGNAL",
-    "THEN",
-    "TO",
-    "TRACE",
-    "UNTIL",
-    "UPPER",
-    "VALUE",
-    "VAR",
-    "WHEN",
-    "WHILE",
-    "WITH",
-    # Built-in functions
-    "ABBREV",
-    "CENTER",
-    "CENTRE",
-    "COPIES",
-    "C2D",
-    "C2X",
-    "DATATYPE",
-    "DATE",
-    "DELSTR",
-    "DELWORD",
-    "D2C",
-    "D2X",
-    "ERRORTEXT",
-    "FORMAT",
-    "INSERT",
-    "LASTPOS",
-    "LEFT",
-    "LENGTH",
-    "LINEIN",
-    "LINEOUT",
-    "LINES",
-    "OVERLAY",
-    "POS",
-    "QUEUED",
-    "RANDOM",
-    "REVERSE",
-    "RIGHT",
-    "SOURCELINE",
-    "SPACE",
-    "STRIP",
-    "SUBSTR",
-    "SUBWORD",
-    "SYMBOL",
-    "TIME",
-    "TRANSLATE",
-    "TRUNC",
-    "VERIFY",
-    "WORD",
-    "WORDINDEX",
-    "WORDLENGTH",
-    "WORDPOS",
-    "WORDS",
-    "X2C",
-    "X2D",
-)
+_REXX_KEYWORD_TEXT = """
+    ADDRESS ARG BY CALL DIGITS DO DROP ELSE END EXIT EXPOSE FOR FOREVER FORM FUZZ IF
+    INTERPRET ITERATE LEAVE NOP NUMERIC OPTIONS OTHERWISE PARSE PROCEDURE PULL PUSH QUEUE
+    RETURN SAY SELECT SIGNAL THEN TO TRACE UNTIL UPPER VALUE VAR WHEN WHILE WITH ABBREV
+    CENTER CENTRE COPIES C2D C2X DATATYPE DATE DELSTR DELWORD D2C D2X ERRORTEXT FORMAT
+    INSERT LASTPOS LEFT LENGTH LINEIN LINEOUT LINES OVERLAY POS QUEUED RANDOM REVERSE RIGHT
+    SOURCELINE SPACE STRIP SUBSTR SUBWORD SYMBOL TIME TRANSLATE TRUNC VERIFY WORD WORDINDEX
+    WORDLENGTH WORDPOS WORDS X2C X2D
+"""
+
+_JCL_KEYWORDS = _JCL_KEYWORD_TEXT.split()
+_REXX_KEYWORDS = _REXX_KEYWORD_TEXT.split()
 
 _JCL_KW_PATTERN = "|".join(sorted(_JCL_KEYWORDS, key=len, reverse=True))
 _REXX_KW_PATTERN = "|".join(sorted(_REXX_KEYWORDS, key=len, reverse=True))
@@ -771,10 +612,6 @@ async def _run_turn(req: UiChatRequest, owner):
     return output
 
 
-def history_to_turns(history: list[ChatMessage]) -> list[dict[str, Any]]:
-    return [_turn(message.role, message.content) for message in history]
-
-
 @router.get("", response_class=HTMLResponse)
 async def ui_index(request: Request) -> Response:
     return _render_page(request, [])
@@ -821,7 +658,7 @@ async def ui_chat(
     history = _parse_history(messages)
     context = splunk_context.strip() if splunk_context and splunk_context.strip() else None
     user_turn = _turn("user", message.strip(), splunk_context=context)
-    turns = history_to_turns(history) + [user_turn]
+    turns = [_turn(message.role, message.content) for message in history] + [user_turn]
     form = {
         "splunk_context": splunk_context or "",
         "product": product or "",

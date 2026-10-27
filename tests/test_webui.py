@@ -18,36 +18,10 @@ from fastapi.testclient import TestClient
 from mainframe_rag.agent import app as app_mod
 from mainframe_rag.agent.tokenizer import FallbackTokenizer
 from mainframe_rag.ports import ChatResult, TokenUsage
-from mainframe_rag.retrieve.query import SearchHit
-from tests.fakes import parse_sse_events
+from tests.fakes import parse_sse_events as _parse_sse_events
+from tests.helpers_console_browser import MockSearch, _hit
 
 _VENDOR_DIR = Path(app_mod.__file__).parents[1] / "webui" / "static" / "vendor"
-
-
-def _hit() -> SearchHit:
-    return SearchHit(
-        chunk_id="abc123",
-        score=0.42,
-        cite="SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6",
-        heading="Chapter 2 > IEA500I",
-        text="IEA500I BEFORE IOS IOSCMDS COMMAND REJECTED, REASON=yy",
-        doc_id="SA22-0000-00",
-        title="Synthetic Reference",
-        page_label="1-6",
-        chunk_type="message",
-        product="z/OS",
-        version="9.9",
-        message_ids=("IEA500I",),
-    )
-
-
-class MockSearch:
-    def __init__(self, return_hits: bool = True):
-        self.calls: list[dict] = []
-
-    def search(self, qdrant, embedder, collection, query, product=None, version=None, limit=8, *args, **kwargs):
-        self.calls.append({"query": query})
-        return [_hit()], "identifier", {"embed_ms": 1, "qdrant_ms": 2}
 
 
 class UiFakeLLM:
@@ -125,9 +99,6 @@ def ui_disabled_client(monkeypatch, synthetic_pdf, servable_representation_gate)
     yield from _client(monkeypatch, ui_enabled=False, synthetic_pdf=synthetic_pdf)
 
 
-_parse_sse_events = parse_sse_events  # one shared parser (tests/fakes.py)
-
-
 def test_ui_disabled_blocks_stream_and_history_with_zero_model_calls(
     monkeypatch, synthetic_pdf, servable_representation_gate
 ):
@@ -180,93 +151,75 @@ def test_ui_shell_has_strict_csp_and_no_remote_assets(ui_client):
     assert "fonts.googleapis" not in body
 
 
-def test_ui_chat_form_flow_renders_full_page_with_answer(ui_client):
-    resp = ui_client.post("/ui/chat", data={"message": "What is IEA500I?", "messages": ""})
+@pytest.mark.parametrize("htmx", [False, True], ids=["full-page", "htmx-fragment"])
+def test_ui_chat_form_and_htmx_render_the_answer(ui_client, htmx):
+    """The no-JS form post renders the answer, citations and history field; an
+    HTMX post returns just the fragment with the out-of-band history update."""
+    resp = ui_client.post(
+        "/ui/chat",
+        data={"message": "What is IEA500I?", "messages": ""},
+        headers={"HX-Request": "true"} if htmx else {},
+    )
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("text/html")
     body = resp.text
     assert "What is IEA500I?" in body
     assert "Reissue the command after initialization." in body
     assert "SA22-0000-00 Synthetic Reference" in body
-    assert 'name="messages"' in body
-
-
-def test_ui_chat_htmx_returns_fragment_with_oob_history(ui_client):
-    resp = ui_client.post(
-        "/ui/chat",
-        data={"message": "What is IEA500I?", "messages": ""},
-        headers={"HX-Request": "true"},
-    )
-    assert resp.status_code == 200
-    body = resp.text
-    assert "<html" not in body
-    assert 'hx-swap-oob="true"' in body
-    assert 'id="history-json"' in body
-    assert "Reissue the command after initialization." in body
-
-
-def test_ui_chat_bad_history_json_is_ignored(ui_client):
-    resp = ui_client.post("/ui/chat", data={"message": "What is IEA500I?", "messages": "{not json"})
-    assert resp.status_code == 200
-    assert "Reissue the command after initialization." in resp.text
+    if htmx:
+        assert "<html" not in body
+        assert 'hx-swap-oob="true"' in body and 'id="history-json"' in body
+    else:
+        assert 'name="messages"' in body
 
 
 @pytest.mark.parametrize(
     "raw",
     [
+        "{not json",
         "[" * 100_000,
         '[{"role":"user","content":' + "9" * 6000 + "}]",
         '[{"role":"user","content":"ok","x":' + "[" * 50_000 + "}]",
     ],
-    ids=["deep-nesting", "huge-int", "nested-extra"],
+    ids=["malformed", "deep-nesting", "huge-int", "nested-extra"],
 )
 def test_ui_chat_hostile_history_degrades_to_empty_history(ui_client, raw):
-    """Issue #1032: client-owned history is untrusted; recursion and int-limit
-    failures behave like malformed JSON, never a 500."""
+    """Issue #1032: client-owned history is untrusted; malformed JSON, recursion
+    and int-limit failures behave like no history, never a 500."""
     resp = ui_client.post("/ui/chat", data={"message": "What is IEA500I?", "messages": raw})
     assert resp.status_code == 200
     assert "Reissue the command after initialization." in resp.text
 
 
-def test_ui_chat_stream_sse_token_final_contract(ui_client):
-    resp = ui_client.post(
-        "/ui/chat/stream",
-        json={"messages": [{"role": "user", "content": "What is IEA500I?"}]},
-    )
-    assert resp.status_code == 200
-    assert "text/event-stream" in resp.headers["content-type"]
-    assert resp.headers["x-accel-buffering"] == "no"
-    events = _parse_sse_events(resp.text)
-    names = [name for name, _ in events]
-    assert names.count("final") == 1
-    assert "token" in names
-    final = next(payload for name, payload in events if name == "final")
-    assert "Reissue the command" in final["answer"]
-    assert final["citations"] == [_hit().cite]
-    assert final["hits"][0]["doc_id"] == "SA22-0000-00"
-    assert final["verification_state"] == "accepted"
-    assert final["script_review_required"] is False
-
-
 def test_ui_chat_stream_final_matches_answer_stream_final(ui_client):
     """The console stream and the /v1/answer stream share one final-frame
-    mapping: for the same retrieved hits and model output their `final`
-    payloads are identical apart from the request id."""
+    mapping: for the same retrieved hits and model output they stream with the
+    same headers and their `final` payloads are identical apart from the request id."""
     question = "What is IEA500I?"
     console = ui_client.post(
         "/ui/chat/stream", json={"messages": [{"role": "user", "content": question}]}
     )
     answer = ui_client.post("/v1/answer", json={"query": question, "stream": True})
     assert console.status_code == answer.status_code == 200
+    assert "text/event-stream" in console.headers["content-type"]
+    assert console.headers["x-accel-buffering"] == "no"
     finals = []
     for resp in (console, answer):
         events = _parse_sse_events(resp.text)
-        assert [name for name, _ in events].count("final") == 1
+        names = [name for name, _ in events]
+        assert names.count("final") == 1 and "token" in names
+        assert names.index("token") < names.index("final"), "tokens must precede the single final"
         final = next(payload for name, payload in events if name == "final")
         finals.append({k: v for k, v in final.items() if k != "request_id"})
     console_final, answer_final = finals
+    deltas = "".join(payload["delta"] for name, payload in _parse_sse_events(console.text) if name == "token")
+    assert deltas.startswith(console_final["answer"])  # success-path tokens carry the answer body
     assert console_final == answer_final
+    assert "Reissue the command" in console_final["answer"]
     assert console_final["hits"] and console_final["citations"] == [_hit().cite]
+    assert console_final["hits"][0]["doc_id"] == "SA22-0000-00"
+    assert console_final["verification_state"] == "accepted"
+    assert console_final["script_review_required"] is False
     assert console_final["supplied_evidence"]
 
 
@@ -569,139 +522,102 @@ def test_vendored_fonts_are_local_pinned_and_served(ui_client):
 
 # ---------------------------------------------------------------- markdown (P1)
 
-
-_MD_CASES = [
-    # (source, must-contain, must-not-contain)
-    ("### Program Function", ["<h3>Program Function</h3>"], ["###"]),
-    ("## Tail", ["<h2>Tail</h2>"], ["## "]),
-    ("Use **IKJEFT01** now", ["<strong>IKJEFT01</strong>"], ["**"]),
-    ("a *b* c", ["<em>b</em>"], []),
-    ("Run `IKJEFT01` here", ["<code>IKJEFT01</code>"], ["`IKJEFT01`"]),
-    ("* one\n* two", ["<ul>", "<li>one</li>", "<li>two</li>", "</ul>"], []),
-    ("- **x:** y", ["<li><strong>x:</strong> y</li>"], []),
-    ("1. first\n2. second", ["<ol>", "<li>first</li>", "</ol>"], []),
-    # Lazy continuation: a plain line under an item stays in that item, never
-    # a paragraph emitted ahead of the list (escaped console defect).
-    (
-        "1. **A:**\nbody a\n2. **B:**\n  body b",
-        ["<li><strong>A:</strong> body a</li>", "<li><strong>B:</strong> body b</li>"],
-        ["<p>"],
-    ),
-    ("- one\n\nafter", ["<li>one</li>\n</ul>\n<p>after</p>"], []),
-    (
-        "```jcl\n//STEP1 EXEC PGM=IEFBR14\n```",
-        [
-            (
-                '<pre><button class="copy-btn" type="button">Copy</button>'
-                '<code class="language-jcl">//STEP1 <span class="tok-keyword">EXEC</span> <span class="tok-keyword">PGM</span>=IEFBR14</code></pre>'
-            )
-        ],
-        ["```"],
-    ),
-    # Unclosed fence still renders (streaming midpoint), never leaks raw.
-    (
-        "```\ncode here",
-        ['<pre><button class="copy-btn" type="button">Copy</button><code>code here</code></pre>'],
-        ["```"],
-    ),
-    # Code spans protect markup-like content.
-    ("`**not bold**`", ["<code>**not bold**</code>"], ["<strong>"]),
+# One row per equivalence class of the served markdown vocabulary:
+# (id, source, must-contain, must-not-contain, exact). `exact` is the whole
+# render where the document shape is the contract; the other rows assert every
+# fragment the renderer must emit and every one it must never emit.
+# Streamed/reloaded parity with this renderer is owned cross-layer by
+# tests/console_browser_contracts.py::test_pipe_tables_render_identically_to_the_server_subset.
+_COPY = '<pre><button class="copy-btn" type="button">Copy</button>'
+_MD_ROWS: list[tuple[str, str, tuple[str, ...], tuple[str, ...], str | None]] = [
+    ("h3", "### Program Function", ("<h3>Program Function</h3>",), ("###",), None),
+    ("h2", "## Tail", ("<h2>Tail</h2>",), ("## ",), None),
+    ("strong", "Use **IKJEFT01** now", ("<strong>IKJEFT01</strong>",), ("**",), None),
+    ("em", "a *b* c", ("<em>b</em>",), (), None),
+    ("code-span", "Run `IKJEFT01` here", ("<code>IKJEFT01</code>",), ("`IKJEFT01`",), None),
+    ("ul", "* one\n* two", ("<ul>", "<li>one</li>", "<li>two</li>", "</ul>"), (), None),
+    ("li-strong", "- **x:** y", ("<li><strong>x:</strong> y</li>",), (), None),
+    ("ol", "1. first\n2. second", ("<ol>", "<li>first</li>", "</ol>"), (), None),
+    # Lazy continuation: a plain line under an item stays in that item, never a paragraph ahead of the list (escaped console defect).
+    ("lazy-continuation", "1. **A:**\nbody a\n2. **B:**\n  body b",
+     ("<li><strong>A:</strong> body a</li>", "<li><strong>B:</strong> body b</li>"), ("<p>",), None),
+    ("list-then-paragraph", "- one\n\nafter", ("<li>one</li>\n</ul>\n<p>after</p>",), (), None),
+    # Unclosed fence still renders (streaming midpoint), never leaks raw; a code span protects markup-like content.
+    ("jcl-fence", "```jcl\n//STEP1 EXEC PGM=IEFBR14\n```",
+     (_COPY + '<code class="language-jcl">//STEP1 <span class="tok-keyword">EXEC</span>'
+      ' <span class="tok-keyword">PGM</span>=IEFBR14</code></pre>',), ("```",), None),
+    ("unclosed-fence", "```\ncode here", (_COPY + "<code>code here</code></pre>",), ("```",), None),
+    ("code-span-protects-markup", "`**not bold**`", ("<code>**not bold**</code>",), ("<strong>",), None),
     # Mainframe noise stays literal.
-    ("C# and a#b and 2*3", ["C# and a#b and 2*3"], ["<em>", "<strong>"]),
+    ("mainframe-noise", "C# and a#b and 2*3", ("C# and a#b and 2*3",), ("<em>", "<strong>"), None),
+    # Issue #749: pipe tables render as a real table, alignment and inline cells intact, never swallowing the prose after.
+    ("gfm-table",
+     ("The HSM category is subdivided into:\n\n| Sub-category | Description |\n|---|:---:|\n"
+      "| **HSM SFF** | Named `hlq.HMIGTAPE.DATASET`. |\n| **HSM GEN** | Generated data sets, such as *VTOCDUMPs*. |\n"
+      "\nAfter the table."), (), (),
+     ('<p>The HSM category is subdivided into:</p>\n<div class="md-table"><table><thead><tr><th>Sub-category</th>'
+      '<th class="align-center">Description</th></tr></thead><tbody><tr><td><strong>HSM SFF</strong></td>'
+      '<td class="align-center">Named <code>hlq.HMIGTAPE.DATASET</code>.</td></tr><tr><td><strong>HSM GEN</strong></td>'
+      '<td class="align-center">Generated data sets, such as <em>VTOCDUMPs</em>.</td></tr></tbody></table></div>\n'
+      "<p>After the table.</p>")),
+    # Ragged rows, an escaped pipe and no leading pipes; cells beyond the delimiter count are dropped, not row-wrapped.
+    ("table-ragged-and-aligned",
+     ("Code | Meaning | Action\n---|---:|:---\n04 | short \\| row\n"
+      "| 08 | error | retry | extra |\nNot a row"), (), ("extra",),
+     ('<div class="md-table"><table><thead><tr><th>Code</th><th class="align-right">Meaning</th>'
+      '<th class="align-left">Action</th></tr></thead><tbody><tr><td>04</td>'
+      '<td class="align-right">short | row</td><td class="align-left"></td></tr><tr><td>08</td>'
+      '<td class="align-right">error</td><td class="align-left">retry</td></tr></tbody></table></div>\n'
+      "<p>Not a row</p>")),
+    # No delimiter row, a second row that is not a delimiter, a delimiter width mismatch, fewer than three dashes: all inert.
+    ("table-no-delimiter", "| a | b |", (), ("<table",), "<p>| a | b |</p>"),
+    ("table-second-row", "| a | b |\n| c | d |", (), ("<table",), "<p>| a | b | | c | d |</p>"),
+    ("table-width-mismatch", "| a | b |\n|---|", (), ("<table",), "<p>| a | b | |---|</p>"),
+    ("table-short-dashes", "| a | b |\n|--|--|", (), ("<table",), "<p>| a | b | |--|--|</p>"),
+    # Spool dumps and retrieved chunks are untrusted: escaped text, our tags only, no links anywhere, also in table cells.
+    ("hostile-inline", "<script>alert(1)</script>\n<img src=x onerror=alert(2)>\n[click](javascript:alert(3))\nAT&T stays & fine",
+     ("&lt;script&gt;alert(1)&lt;/script&gt;", "AT&amp;T stays &amp; fine"), ("<script>", "<img", "<a ", "<a>"), None),
+    ("hostile-table", "| <script>alert(1)</script> | [x](javascript:alert(2)) |\n|---|---|\n| <img src=x onerror=alert(3)> | AT&T |",
+     ("<table>", "&lt;script&gt;alert(1)&lt;/script&gt;", "AT&amp;T"), ("<script>", "<img", "<a "), None),
+    # Issue #337: JCL comment, string, keyword and number spans.
+    ("jcl-highlight",
+     ("```jcl\n//* Clean up old datasets\n//STEP1   EXEC PGM=IEFBR14\n"
+      "//DD1     DD   DSN='SYS1.PARMLIB',DISP=SHR,SPACE=(CYL,(10,5))\n```"),
+     ('<code class="language-jcl">', '<span class="tok-comment">//* Clean up old datasets</span>',
+      '<span class="tok-keyword">EXEC</span>', '<span class="tok-keyword">PGM</span>', '<span class="tok-keyword">DD</span>',
+      '<span class="tok-keyword">DSN</span>', '<span class="tok-string">\'SYS1.PARMLIB\'</span>',
+      '<span class="tok-keyword">DISP</span>', '<span class="tok-keyword">SHR</span>', '<span class="tok-keyword">SPACE</span>',
+      '<span class="tok-keyword">CYL</span>', '<span class="tok-number">10</span>', '<span class="tok-number">5</span>'), (), None),
+    # Issue #337: an unlabeled fence is sniffed (detect_code_region); plain prose stays unclassified.
+    ("sniff-jcl", "```\n//STEP1 EXEC PGM=IEFBR14\n//DD1 DD DSN='A.B',DISP=SHR\n```",
+     ('<code class="language-jcl">', '<span class="tok-keyword">EXEC</span>'), (), None),
+    ("sniff-rexx", "```\n/* REXX */\nsay 'hi'\n```",
+     ('<code class="language-rexx">', '<span class="tok-comment">/* REXX */</span>'), (), None),
+    ("sniff-console", "```\n   IKJ56228I DATA SET NOT FOUND\n   READY\n```", ('<code class="language-console">',), ("tok-",), None),
+    ("sniff-prose", "```\nThis is just some plain text without any code markers.\n```", ("<code",), ("language-", "tok-"), None),
+    # Issue #337: hostile markup, unclosed or empty fences and an unknown language stay inert and classed as given.
+    ("fence-hostile-markup", "```jcl\n//STEP1 EXEC PGM=TEST,PARM='<script>alert(1)</script>'\n//DD1 DD <img src=x onerror=alert(2)>\n```",
+     ("&lt;script&gt;alert(1)&lt;/script&gt;", "&lt;img src=x onerror=alert("), ("<script>", "<img"), None),
+    ("fence-unclosed-at-eof", "```jcl\n//STEP1 EXEC PGM=IEFBR14",
+     ('<code class="language-jcl">', '<span class="tok-keyword">EXEC</span>'), ("```",), None),
+    ("fence-empty-labeled", "```jcl\n```", ('<code class="language-jcl"></code>',), (), None),
+    ("fence-empty-unlabeled", "```\n```", ("<code></code>",), (), None),
+    ("fence-unknown-language", "```unknownlang\nsome arbitrary text\n```",
+     ('<code class="language-unknownlang">some arbitrary text</code>',), ("tok-",), None),
 ]
 
 
-def test_markdown_subset_renders_blocks_and_inline():
+@pytest.mark.parametrize("case, source, present, absent, exact", _MD_ROWS, ids=[row[0] for row in _MD_ROWS])
+def test_markdown_subset_renders_the_served_vocabulary(case, source, present, absent, exact):
     from mainframe_rag.webui.routes import render_markdown_subset
 
-    for source, present, absent in _MD_CASES:
-        rendered = render_markdown_subset(source)
-        for needle in present:
-            assert needle in rendered, (source, needle)
-        for needle in absent:
-            assert needle not in rendered, (source, needle)
-
-
-def test_markdown_subset_renders_gfm_pipe_tables():
-    """Issue #749: the reasoning model answers with pipe tables; they render as
-    a real table instead of one run-on paragraph."""
-    from mainframe_rag.webui.routes import render_markdown_subset
-
-    rendered = render_markdown_subset(
-        "The HSM category is subdivided into:\n\n"
-        "| Sub-category | Description |\n"
-        "|---|:---:|\n"
-        "| **HSM SFF** | Named `hlq.HMIGTAPE.DATASET`. |\n"
-        "| **HSM GEN** | Generated data sets, such as *VTOCDUMPs*. |\n"
-        "\nAfter the table."
-    )
-    assert rendered == (
-        "<p>The HSM category is subdivided into:</p>\n"
-        '<div class="md-table"><table><thead><tr><th>Sub-category</th>'
-        '<th class="align-center">Description</th></tr></thead><tbody>'
-        '<tr><td><strong>HSM SFF</strong></td>'
-        '<td class="align-center">Named <code>hlq.HMIGTAPE.DATASET</code>.</td></tr>'
-        '<tr><td><strong>HSM GEN</strong></td>'
-        '<td class="align-center">Generated data sets, such as <em>VTOCDUMPs</em>.</td></tr>'
-        "</tbody></table></div>\n"
-        "<p>After the table.</p>"
-    )
-
-
-def test_markdown_subset_table_edge_cases():
-    from mainframe_rag.webui.routes import render_markdown_subset
-
-    rendered = render_markdown_subset(
-        "Code | Meaning | Action\n"
-        "---|---:|:---\n"
-        "04 | short \\| row\n"
-        "| 08 | error | retry | extra |\n"
-        "Not a row"
-    )
-    assert '<th class="align-right">Meaning</th><th class="align-left">Action</th>' in rendered
-    assert ('<tr><td>04</td><td class="align-right">short | row</td>'
-            '<td class="align-left"></td></tr>') in rendered
-    assert ('<tr><td>08</td><td class="align-right">error</td>'
-            '<td class="align-left">retry</td></tr>') in rendered
-    assert "extra" not in rendered
-    assert rendered.endswith("</tbody></table></div>\n<p>Not a row</p>")
-
-    for source in (
-        "| a | b |",  # header without a delimiter row
-        "| a | b |\n| c | d |",  # second row is not a delimiter
-        "| a | b |\n|---|",  # delimiter width differs from the header
-        "| a | b |\n|--|--|",  # fewer than three dashes is not a delimiter
-    ):
-        inert = render_markdown_subset(source)
-        assert "<table" not in inert and inert.startswith("<p>"), source
-
-
-def test_markdown_subset_neutralizes_hostile_markup():
-    """Spool dumps and retrieved chunks are untrusted: markup must render
-    inert — escaped text, our tags only, no links anywhere."""
-    from mainframe_rag.webui.routes import render_markdown_subset
-
-    rendered = render_markdown_subset(
-        '<script>alert(1)</script>\n'
-        '<img src=x onerror=alert(2)>\n'
-        '[click](javascript:alert(3))\n'
-        'AT&T stays & fine'
-    )
-    assert "<script>" not in rendered
-    assert "<img" not in rendered
-    assert "<a " not in rendered and "<a>" not in rendered
-    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in rendered
-    assert "AT&amp;T stays &amp; fine" in rendered
-
-    table = render_markdown_subset(
-        "| <script>alert(1)</script> | [x](javascript:alert(2)) |\n"
-        "|---|---|\n"
-        '| <img src=x onerror=alert(3)> | AT&T |'
-    )
-    assert "<table>" in table
-    for forbidden in ("<script>", "<img", "<a "):
-        assert forbidden not in table
-    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in table and "AT&amp;T" in table
+    rendered = render_markdown_subset(source)
+    if exact is not None:
+        assert rendered == exact, case
+    for needle in present:
+        assert needle in rendered, (case, needle)
+    for needle in absent:
+        assert needle not in rendered, (case, needle)
 
 
 class MarkdownFakeLLM:
@@ -768,127 +684,6 @@ def test_ui_chat_fragment_renders_markdown_not_markers(ui_client, monkeypatch):
     assert "Source-matched manual citations" in body
 
 
-def test_markdown_subset_highlights_jcl():
-    """Issue #337: JCL code block renders highlighted comment, string, keyword, and number spans."""
-    from mainframe_rag.webui.routes import render_markdown_subset
-
-    source = (
-        "```jcl\n"
-        "//* Clean up old datasets\n"
-        "//STEP1   EXEC PGM=IEFBR14\n"
-        "//DD1     DD   DSN='SYS1.PARMLIB',DISP=SHR,SPACE=(CYL,(10,5))\n"
-        "```"
-    )
-    rendered = render_markdown_subset(source)
-    assert '<code class="language-jcl">' in rendered
-    assert '<span class="tok-comment">//* Clean up old datasets</span>' in rendered
-    assert '<span class="tok-keyword">EXEC</span>' in rendered
-    assert '<span class="tok-keyword">PGM</span>' in rendered
-    assert '<span class="tok-keyword">DD</span>' in rendered
-    assert '<span class="tok-keyword">DSN</span>' in rendered
-    assert '<span class="tok-string">\'SYS1.PARMLIB\'</span>' in rendered
-    assert '<span class="tok-keyword">DISP</span>' in rendered
-    assert '<span class="tok-keyword">SHR</span>' in rendered
-    assert '<span class="tok-keyword">SPACE</span>' in rendered
-    assert '<span class="tok-keyword">CYL</span>' in rendered
-    assert '<span class="tok-number">10</span>' in rendered
-    assert '<span class="tok-number">5</span>' in rendered
-
-
-def test_markdown_subset_unlabeled_fence_content_sniffing():
-    """Issue #337: unlabeled fences sniff content via detect_code_region."""
-    from mainframe_rag.webui.routes import render_markdown_subset
-
-    # Unlabeled fence with JCL cards -> sniffed as jcl with highlighting
-    jcl_unlabeled = "```\n//STEP1 EXEC PGM=IEFBR14\n//DD1 DD DSN='A.B',DISP=SHR\n```"
-    rendered_jcl = render_markdown_subset(jcl_unlabeled)
-    assert '<code class="language-jcl">' in rendered_jcl
-    assert '<span class="tok-keyword">EXEC</span>' in rendered_jcl
-
-    # Unlabeled fence with REXX header -> sniffed as rexx with highlighting
-    rexx_unlabeled = "```\n/* REXX */\nsay 'hi'\n```"
-    rendered_rexx = render_markdown_subset(rexx_unlabeled)
-    assert '<code class="language-rexx">' in rendered_rexx
-    assert '<span class="tok-comment">/* REXX */</span>' in rendered_rexx
-
-    # Unlabeled fence with console indent -> sniffed as console, NO spans
-    console_unlabeled = "```\n   IKJ56228I DATA SET NOT FOUND\n   READY\n```"
-    rendered_console = render_markdown_subset(console_unlabeled)
-    assert '<code class="language-console">' in rendered_console
-    assert "tok-" not in rendered_console
-
-    # Unlabeled fence with plain prose -> remains plain, NO language class, NO spans
-    prose_unlabeled = "```\nThis is just some plain text without any code markers.\n```"
-    rendered_prose = render_markdown_subset(prose_unlabeled)
-    assert "<code" in rendered_prose
-    assert "language-" not in rendered_prose
-    assert "tok-" not in rendered_prose
-
-
-def test_markdown_subset_code_adversarial():
-    """Issue #337: adversarial code cases — hostile markup, unclosed fence, empty body, unknown lang."""
-    from mainframe_rag.webui.routes import render_markdown_subset
-
-    # Hostile markup inside JCL code block stays strictly escaped
-    hostile = (
-        "```jcl\n"
-        "//STEP1 EXEC PGM=TEST,PARM='<script>alert(1)</script>'\n"
-        "//DD1 DD <img src=x onerror=alert(2)>\n"
-        "```"
-    )
-    rendered = render_markdown_subset(hostile)
-    assert "<script>" not in rendered
-    assert "<img" not in rendered
-    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in rendered
-    assert "&lt;img src=x onerror=alert(" in rendered
-
-    # Unclosed fence at EOF
-    unclosed = "```jcl\n//STEP1 EXEC PGM=IEFBR14"
-    rendered_unclosed = render_markdown_subset(unclosed)
-    assert '<code class="language-jcl">' in rendered_unclosed
-    assert '<span class="tok-keyword">EXEC</span>' in rendered_unclosed
-    assert "```" not in rendered_unclosed
-
-    # Empty body in labeled fence
-    empty_jcl = "```jcl\n```"
-    rendered_empty = render_markdown_subset(empty_jcl)
-    assert '<code class="language-jcl"></code>' in rendered_empty
-
-    # Empty body in unlabeled fence
-    empty_unlabeled = "```\n```"
-    rendered_empty_unlabeled = render_markdown_subset(empty_unlabeled)
-    assert "<code></code>" in rendered_empty_unlabeled
-
-    # Unknown language tag
-    unknown = "```unknownlang\nsome arbitrary text\n```"
-    rendered_unknown = render_markdown_subset(unknown)
-    assert '<code class="language-unknownlang">some arbitrary text</code>' in rendered_unknown
-    assert "tok-" not in rendered_unknown
-
-
-def test_ui_chat_passes_reasoning_effort(ui_client, monkeypatch):
-    """Reasoning effort selected in UI form is forwarded to LLM chat call."""
-    fake_llm = UiFakeLLM()
-    monkeypatch.setattr(app_mod, "llm", fake_llm)
-
-    # xhigh: a member of the default served domain (#777)
-    resp_xhigh = ui_client.post(
-        "/ui/chat",
-        data={"message": "What is IEA500I?", "messages": "", "reasoning_effort": "xhigh"},
-        headers={"HX-Request": "true"},
-    )
-    assert resp_xhigh.status_code == 200
-    assert fake_llm.calls[-1]["reasoning_effort"] == "xhigh"
-
-    resp_low = ui_client.post(
-        "/ui/chat",
-        data={"message": "What is IEA500I?", "messages": "", "reasoning_effort": "low"},
-        headers={"HX-Request": "true"},
-    )
-    assert resp_low.status_code == 200
-    assert fake_llm.calls[-1]["reasoning_effort"] == "low"
-
-
 def test_ui_invalid_reasoning_effort_rejected(ui_client):
     """An unknown reasoning effort is a 422 on both the stream and form paths."""
     resp = ui_client.post(
@@ -947,6 +742,11 @@ def test_console_offers_only_served_efforts_and_refuses_others_before_the_model(
     default = ui_client.post("/ui/chat/stream", json={"messages": [{"role": "user", "content": "What is IEA500I?"}]})
     assert default.status_code == 200
     assert fake_llm.stream_calls[-1]["reasoning_effort"] == "low"
+    # The no-JS form forwards what it offers verbatim (#777).
+    for effort in ("xhigh", "low"):
+        form = ui_client.post("/ui/chat", data={"message": "What is IEA500I?", "messages": "",
+                                                "reasoning_effort": effort})
+        assert form.status_code == 200 and fake_llm.calls[-1]["reasoning_effort"] == effort
 
 
 # ---------------------------------------------------------------------------
@@ -1013,17 +813,6 @@ def test_ui_fragment_verification_state_presentation(ui_client, monkeypatch):
     assert "Verified" not in body
 
 
-def test_ui_stream_missing_user_is_fixed_validation_error(ui_client):
-    result = ui_client.post("/ui/chat/stream", json={"messages": [
-        {"role": "assistant", "content": "No user question was supplied"},
-    ]})
-    assert result.status_code == 422
-    assert result.json() == {"code": "invalid_request", "message": "request body failed validation"}
-    assert ui_client.mock_search.calls == []
-    assert app_mod.llm.calls == []
-    assert app_mod.llm.stream_calls == []
-
-
 @pytest.mark.parametrize("condense", [False, True])
 @pytest.mark.parametrize("tail_role", ["assistant", "system"])
 def test_ui_stream_retrieval_and_prompt_use_same_active_user(ui_client, monkeypatch, condense, tail_role):
@@ -1045,22 +834,18 @@ def test_ui_stream_retrieval_and_prompt_use_same_active_user(ui_client, monkeypa
     assert all("LATER_NON_USER" not in m.content for m in prompt)
 
 
-@pytest.mark.parametrize("message", [" \t\n ", "x" * 2001])
-def test_ui_stream_invalid_active_user_refuses_before_work(ui_client, message):
-    result = ui_client.post("/ui/chat/stream", json={"messages": [
-        {"role": "user", "content": message},
-        {"role": "assistant", "content": "Short tail"},
-    ]})
-    assert result.status_code == 422
-    assert result.json() == {"code": "invalid_request", "message": "request body failed validation"}
-    assert ui_client.mock_search.calls == []
-    assert app_mod.llm.calls == app_mod.llm.stream_calls == []
-
-
-@pytest.mark.parametrize("message", ["\x00x", "a\x1bb"])
-def test_ui_stream_unsearchable_active_user_refuses_before_work(ui_client, message):
-    """Issue #579: control characters and blank turns, fixed 422, no work."""
-    result = ui_client.post("/ui/chat/stream", json={"messages": [{"role": "user", "content": message}]})
+@pytest.mark.parametrize("messages", [
+    pytest.param([{"role": "assistant", "content": "No user question was supplied"}], id="missing-user"),
+    pytest.param([{"role": "user", "content": " \t\n "}, {"role": "assistant", "content": "Short tail"}], id="blank"),
+    pytest.param([{"role": "user", "content": "x" * 2001}, {"role": "assistant", "content": "Short tail"}],
+                 id="over-length"),
+    pytest.param([{"role": "user", "content": "\x00x"}], id="nul"),
+    pytest.param([{"role": "user", "content": "a\x1bb"}], id="escape"),
+])
+def test_ui_stream_unsearchable_question_refuses_before_work(ui_client, messages):
+    """Issue #579: no user turn, blank, over-length or control-character text is
+    a fixed 422 before retrieval or a model call."""
+    result = ui_client.post("/ui/chat/stream", json={"messages": messages})
     assert result.status_code == 422
     assert result.json() == {"code": "invalid_request", "message": "request body failed validation"}
     assert ui_client.mock_search.calls == []
@@ -1192,9 +977,10 @@ def test_ui_history_payload_never_carries_excerpt_text(ui_client):
 
 
 def test_console_js_keeps_excerpts_out_of_persistence():
-    """Static contract for the in-memory-only view: the live-evidence holder
-    is never written to the store, the export, or history, and excerpt text
-    only enters the DOM through textContent."""
+    """Static contract for the in-memory-only view (the browser lane is
+    marker-gated and not collected by a bare `pytest tests`, so the default
+    suite pins it): the live-evidence holder is never written to the store,
+    the export or history, and excerpt text only enters the DOM as text."""
     js = (
         Path(app_mod.__file__).resolve().parents[1] / "webui" / "static" / "js" / "console.js"
     ).read_text()

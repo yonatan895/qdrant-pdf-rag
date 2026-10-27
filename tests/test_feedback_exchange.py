@@ -25,6 +25,8 @@ from mainframe_rag.feedback.store import (
     read_snapshot,
     store_in_use,
 )
+from tests.helpers_eval_local import lines_of as _lines
+from tests.helpers_eval_local import rehash as _rehash
 
 TOKEN = "feedback-test-token"
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
@@ -216,17 +218,6 @@ def test_expired_rows_are_counted_for_the_next_purge(tmp_path, capsys):
     out = tmp_path / "e.jsonl"
     assert _export(db, out) == 0 and _import(out, tmp_path / "d.sqlite3") == 0
     assert json.loads(capsys.readouterr().out)["expired"] == 1
-
-
-def _lines(path):
-    return path.read_bytes().split(b"\n")[:-1]
-
-
-def _rehash(lines):
-    body = b"".join(line + b"\n" for line in lines[:-1])
-    t = json.loads(lines[-1])
-    t["sha256"] = hashlib.sha256(body).hexdigest()
-    return body + json.dumps(t, sort_keys=True, separators=(",", ":")).encode() + b"\n"
 
 
 def _tampered(source, tmp_path):

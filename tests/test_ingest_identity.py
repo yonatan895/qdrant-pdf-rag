@@ -18,7 +18,6 @@ import pytest
 from hypothesis import example, given, settings
 from hypothesis import strategies as st
 
-from mainframe_rag.config import HASH_EMBED_DIM
 from mainframe_rag.ingest.identity import (
     RevisionCollisionError,
     corpus_relpath,
@@ -399,51 +398,16 @@ def test_nondry_collision_writes_nothing(tmp_path, monkeypatch):
     upserts and zero deletes — the second writer never reaches its
     refresh delete."""
 
-    class _RecordingFake:
-        def __init__(self):
-            self.upserts: list[int] = []
-            self.deletes = 0
-
-        def get_aliases(self):
-            return SimpleNamespace(aliases=[])
-
-        def collection_exists(self, name):
-            return True
-
-        def get_collection(self, name):
-            return SimpleNamespace(
-                config=SimpleNamespace(
-                    params=SimpleNamespace(vectors={"dense": SimpleNamespace(size=HASH_EMBED_DIM)})
-                )
-            )
-
-        def create_collection(self, name, **kwargs):
-            return True
-
-        def create_payload_index(self, *a, **k):
-            return SimpleNamespace()
-
-        def scroll(self, *a, **k):
-            return [], None
-
-        def retrieve(self, name, ids, *, with_payload=True, with_vectors=False):
-            return []
-
-        def upsert(self, name, *, points, wait=True):
-            self.upserts.append(len(points))
-
-        def delete(self, name, *, points_selector, wait=True):
-            self.deletes += 1
-
     from mainframe_rag.ingest import run_ingest
+    from tests.helpers_ingest_local import PointStore
 
     monkeypatch.setenv("EMBED_MODE", "hash")
     monkeypatch.delenv("DENSE_DIM", raising=False)
-    fake = _RecordingFake()
+    fake = PointStore()
     monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
     _write_text_pdf(tmp_path / "a" / "reference.pdf", ["Edition one prose."])
     _write_text_pdf(tmp_path / "b" / "reference.pdf", ["Edition two prose."])
     with pytest.raises(RevisionCollisionError, match="reference"):
         run_ingest.main(["--src", str(tmp_path), "--progress", str(tmp_path / "inv.jsonl"),
                          "--workers", "1"])
-    assert fake.upserts == [] and fake.deletes == 0
+    assert fake.upsert_calls == [] and fake.deletes == 0

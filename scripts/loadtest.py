@@ -33,19 +33,8 @@ REPO = Path(__file__).resolve().parents[1]
 if str(REPO / "src") not in sys.path:
     sys.path.insert(0, str(REPO / "src"))
 
+from mainframe_rag.eval.dotted import dotted_set as _set_nested
 from mainframe_rag.eval.load import DEFAULT_QUERIES, query_gpu_name, run_load
-
-
-def _set_nested(target: dict[str, Any], dotted: str, value: Any) -> None:
-    parts = dotted.split(".")
-    node = target
-    for part in parts[:-1]:
-        child = node.get(part)
-        if not isinstance(child, dict):
-            child = {}
-            node[part] = child
-        node = child
-    node[parts[-1]] = value
 
 
 def export_to_baseline(

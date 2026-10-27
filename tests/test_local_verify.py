@@ -12,7 +12,9 @@ import uuid
 from pathlib import Path
 
 import pytest
+import yaml
 from scripts import colab as controller
+from scripts import local_selection
 from scripts import local_verify as lv
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -230,7 +232,6 @@ def test_t0_targets_follow_the_ci_lint_scope():
 
 
 def test_t0_script_scope_matches_the_ci_lint_step():
-    import yaml
     workflow = yaml.safe_load((ROOT / '.github/workflows/ci.yml').read_text())
     step = next(s['run'] for s in workflow['jobs']['lint']['steps'] if 'ruff check src tests' in s.get('run', ''))
     ruff_line = next(line for line in step.splitlines() if 'ruff check src tests' in line)
@@ -282,7 +283,6 @@ def test_tree_state_keeps_unstaged_status_paths_and_dirty_rename_sides(tmp_path)
 
 def test_unmapped_change_refuses_then_a_select_override_runs_and_is_recorded(monkeypatch, tmp_path, capsys,
                                                                            disk_backed_tmp):
-    from scripts import local_selection
     orphan = 'src/mainframe_rag/not_a_real_module.py'
     monkeypatch.setattr(lv, 'changed_paths', lambda root, state: [orphan])
     monkeypatch.setattr(local_selection, 'select', lambda changed, force_t2=False: local_selection.Selection(
@@ -302,7 +302,6 @@ def test_unmapped_change_refuses_then_a_select_override_runs_and_is_recorded(mon
 
 
 def test_auto_selection_of_only_the_runner_self_test_refuses_with_a_fixed_message(monkeypatch, tmp_path, capsys):
-    from scripts import local_selection
     changed = 'scripts/local_verify.py'
     monkeypatch.setattr(lv, 'changed_paths', lambda root, state: [changed])
     monkeypatch.setattr(local_selection, 'select', lambda changed, force_t2=False: local_selection.Selection(

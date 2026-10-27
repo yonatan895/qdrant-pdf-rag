@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import inspect
 import json
+from pathlib import Path
 
 import httpx2
 import pytest
@@ -28,13 +29,14 @@ from mainframe_rag.agent.answer_core import (
     execute_answer_core_stream,
     resolve_search_query,
 )
-from mainframe_rag.agent.core_ports import RetrievalResult
+from mainframe_rag.agent.core_ports import ModelDone, ModelToken, RetrievalResult
 from mainframe_rag.agent.model_adapter import ModelAdapter
 from mainframe_rag.agent.tokenizer import VllmTokenizer
 from mainframe_rag.config import Settings
 from mainframe_rag.ports import ChatMessage, ChatResult, TokenUsage
 from mainframe_rag.retrieve.query import SearchHit
 from tests.fakes import HttpxStreamFake
+from tests.helpers_agent_local import agent_hit
 
 
 def _settings(**overrides) -> Settings:
@@ -49,20 +51,7 @@ def _settings(**overrides) -> Settings:
 
 
 def _hit() -> SearchHit:
-    return SearchHit(
-        chunk_id="abc123",
-        score=0.42,
-        cite="SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6",
-        heading="Chapter 2 > IEA500I",
-        text="IEA500I synthetic text",
-        doc_id="SA22-0000-00",
-        title="Synthetic Reference",
-        page_label="1-6",
-        chunk_type="message",
-        product="z/OS",
-        version="9.9",
-        message_ids=("IEA500I",),
-    )
+    return agent_hit()
 
 
 class CoreFakeLLM:
@@ -358,34 +347,32 @@ async def test_core_retrieval_branch_feeds_prompt_and_output():
 
 
 @pytest.mark.anyio
-async def test_core_retrieval_failure_raises_typed_error():
-    def retrieve(*_a, **_k):
-        raise RuntimeError("qdrant exploded")
+@pytest.mark.parametrize("failure, error_type", [
+    ("retrieval", RetrievalError),
+    ("llm", LLMChatError),
+])
+async def test_core_failures_raise_their_typed_error(failure, error_type):
+    if failure == "retrieval":
+        def retrieve(*_a, **_k):
+            raise RuntimeError("qdrant exploded")
 
-    with pytest.raises(RetrievalError) as excinfo:
-        await execute_answer_core(
-            AnswerCoreInput(query="IEA500I"),
-            _deps(_settings(), CoreFakeLLM(), retrieve),
-        )
-    assert isinstance(excinfo.value.original, RuntimeError)
-    with pytest.raises(RetrievalError):
-        async for _item in execute_answer_core_stream(
-            AnswerCoreInput(query="IEA500I"),
-            _deps(_settings(), CoreFakeLLM(), retrieve),
-        ):
-            pass
+        llm = CoreFakeLLM()
+    else:
+        def retrieve(*_a, **_k):
+            return [_hit()], "identifier", {}
 
+        llm = CoreFakeLLM(raise_exc=RuntimeError("boom"))
 
-@pytest.mark.anyio
-async def test_core_llm_failure_raises_typed_error():
-    def retrieve(*_a, **_k):
-        return [_hit()], "identifier", {}
-
-    with pytest.raises(LLMChatError):
-        await execute_answer_core(
-            AnswerCoreInput(query="IEA500I"),
-            _deps(_settings(), CoreFakeLLM(raise_exc=RuntimeError("boom")), retrieve),
-        )
+    with pytest.raises(error_type) as excinfo:
+        await execute_answer_core(AnswerCoreInput(query="IEA500I"), _deps(_settings(), llm, retrieve))
+    if failure == "retrieval":
+        assert isinstance(excinfo.value.original, RuntimeError)
+        # The stream path surfaces the same typed error.
+        with pytest.raises(error_type):
+            async for _item in execute_answer_core_stream(
+                AnswerCoreInput(query="IEA500I"), _deps(_settings(), CoreFakeLLM(), retrieve)
+            ):
+                pass
 
 
 @pytest.mark.anyio
@@ -696,12 +683,15 @@ def _stream_deps(llm) -> AnswerCoreDeps:
         ({"type": "done", "finish_reason": None, "usage": TokenUsage()}, REASON_MISSING_FINISH),
         ({"type": "done", "usage": TokenUsage()}, REASON_MISSING_FINISH),
         ({"type": "done", "finish_reason": "", "usage": TokenUsage()}, REASON_MALFORMED_FRAME),
+        # No terminal item at all: a token-only stream is incomplete too.
+        (None, REASON_MISSING_FINISH),
     ],
 )
 async def test_core_stream_rejects_falsy_done_finish(done_item, reason):
     """The shared core validates the terminal done finish with buffered-parser
-    parity (issue #365): missing/null finish and misshapen values raise fixed
-    truncation errors instead of finalizing the prefix as accepted "stop"."""
+    parity (issue #365): missing/null finish, misshapen values and a stream
+    that never emits a done raise fixed truncation errors instead of
+    finalizing the prefix as accepted "stop"."""
     items = []
     with pytest.raises(TruncatedStreamError) as excinfo:
         async for item in execute_answer_core_stream(
@@ -711,20 +701,6 @@ async def test_core_stream_rejects_falsy_done_finish(done_item, reason):
     assert excinfo.value.reason == reason
     # The provisional token was already yielded and cannot be retracted; only
     # the terminal outcome is refused (the app takes its event: error path).
-    assert [i["type"] for i in items] == ["token"]
-
-
-@pytest.mark.anyio
-async def test_core_stream_without_done_raises_missing_finish():
-    """A token-only stream with no terminal done item is incomplete: the core
-    must not fall back to an initial "stop" (issue #365)."""
-    items = []
-    with pytest.raises(TruncatedStreamError) as excinfo:
-        async for item in execute_answer_core_stream(
-            AnswerCoreInput(query="IEA500I rejected"), _stream_deps(_DoneSeamLLM(None))
-        ):
-            items.append(item)
-    assert excinfo.value.reason == REASON_MISSING_FINISH
     assert [i["type"] for i in items] == ["token"]
 
 
@@ -843,7 +819,6 @@ async def test_closing_core_stream_releases_operation_without_closing_shared_mod
 def _assert_core_import_boundary():
     """Follow deferred imports too: a cold import alone misses function-local dependencies."""
     import ast
-    from pathlib import Path
 
     root = Path(__file__).resolve().parents[1] / "src"
     pending = ["mainframe_rag.agent.answer_core", "mainframe_rag.agent.model_adapter",
@@ -887,7 +862,6 @@ def test_core_import_graph_excludes_transports_and_application_singleton():
 def test_core_import_checker_rejects_forbidden_dependency(monkeypatch, module, injected, forbidden):
     """Challenge the actual graph checker without importing or modifying application code."""
     import re
-    from pathlib import Path
 
     target = Path(__file__).resolve().parents[1] / "src/mainframe_rag/agent" / (module + ".py")
     original_read = Path.read_text
@@ -908,7 +882,6 @@ def test_agent_resources_import_without_the_application_singleton():
     application module (and therefore no lifespan or module globals) loaded."""
     import subprocess
     import sys
-    from pathlib import Path
 
     src = Path(__file__).resolve().parents[1] / "src"
     probe = (
@@ -1080,7 +1053,6 @@ _STREAM_BAD_SEQUENCES = [
     ('core-legacy', _STREAM_BAD_SEQUENCES[0]),
 ])
 async def test_stream_grammar_rejects_invalid_sequences_and_next_operation_recovers(seam, frames):
-    from mainframe_rag.agent.core_ports import ModelDone, ModelToken
 
     class Model(CoreFakeLLM):
         def __init__(self):
@@ -1144,7 +1116,6 @@ async def test_stream_grammar_rejects_invalid_sequences_and_next_operation_recov
 @pytest.mark.anyio
 @pytest.mark.parametrize('typed', [False, True])
 async def test_single_incomplete_terminal_remains_incomplete(typed):
-    from mainframe_rag.agent.core_ports import ModelDone, ModelToken
 
     class Model(CoreFakeLLM):
         async def chat_stream(self, *args, **kwargs):

@@ -95,29 +95,6 @@ def test_summarize_means_rates_and_sums_faults():
 
 
 # ---------------------------------------------------------------- gate
-def test_gate_passes_at_reference():
-    summary = summarize_l4([_run(), _run()])
-    verdict, reasons, borderline = gate_l4(summary, _thresholds())
-    assert verdict == "pass", reasons
-    assert borderline == []
-
-
-def test_gate_holds_inside_the_band():
-    # grounded only misses inside tolerance: review queue, not fail.
-    summary = summarize_l4([_run(grounded_rate=0.77), _run(grounded_rate=0.77)])
-    verdict, reasons, borderline = gate_l4(summary, _thresholds())
-    assert verdict == "hold"
-    assert "grounded_rate" in borderline
-    assert any("borderline" in r for r in reasons)
-
-
-def test_gate_fails_outside_the_band():
-    summary = summarize_l4([_run(grounded_rate=0.60), _run(grounded_rate=0.60)])
-    verdict, reasons, _ = gate_l4(summary, _thresholds())
-    assert verdict == "fail"
-    assert any("grounded_rate" in r and "outside" in r for r in reasons)
-
-
 def test_gate_structural_fault_dominates_healthy_rates():
     summary = summarize_l4([_run(structural_fails=2), _run()])
     verdict, reasons, _ = gate_l4(summary, _thresholds())
@@ -138,20 +115,32 @@ def test_gate_uncomputed_metric_fails_closed(runs, metric):
     assert any(metric in r and "not computed" in r for r in reasons)
 
 
-def test_gate_max_metric_regression_fails():
-    summary = summarize_l4([_run(truncation_rate=0.30), _run(truncation_rate=0.30)])
-    verdict, reasons, _ = gate_l4(summary, _thresholds())
-    assert verdict == "fail"
-    assert any("truncation_rate" in r for r in reasons)
+@pytest.mark.parametrize(("runs", "verdict", "queue", "reason"), [
+    (None, "pass", [], None),
+    # A metric inside the tolerance band is a human-review item, not a fail:
+    # exactly that metric (and no other) enters the review queue.
+    ([{"grounded_rate": 0.77}] * 2, "hold", ["grounded_rate"], ("borderline",)),
+    # Clearly outside the band fails, naming the metric and the direction.
+    ([{"grounded_rate": 0.60}] * 2, "fail", [], ("grounded_rate", "outside")),
+    # A lower-is-better metric clearly over its reference fails.
+    ([{"truncation_rate": 0.30}] * 2, "fail", [], ("truncation_rate",)),
+])
+def test_gate_verdict_bands(runs, verdict, queue, reason):
+    summary = summarize_l4([_run(**kw) for kw in (runs or [{}, {}])])
+    got, reasons, borderline = gate_l4(summary, _thresholds())
+    assert got == verdict, reasons
+    assert borderline == queue
+    if reason is None:
+        assert reasons == []
+    else:
+        # Base semantics: the metric name and the verdict word share one reason.
+        assert any(all(text in r for text in reason) for r in reasons), reasons
 
 
 # ---------------------------------------------------------------- reference file
-def test_load_thresholds_missing_fails_closed(tmp_path: Path):
+def test_load_thresholds_missing_or_malformed_fails_closed(tmp_path: Path):
     with pytest.raises(ThresholdError):
         load_thresholds(tmp_path / "nope.json")
-
-
-def test_load_thresholds_malformed_reference_fails_closed(tmp_path: Path):
     missing_metric = _thresholds()
     del missing_metric["metrics"]["truncation_rate"]
     missing_tier = _thresholds()
@@ -183,23 +172,18 @@ def test_save_thresholds_records_mode_and_rounds(tmp_path: Path):
 def test_record_blockers_allow_structural_debt():
     # Product structural fails are a finding, not broken measurement —
     # they gate every run on their own and must not block recording.
-    summary = summarize_l4([_run(structural_fails=3), _run()])
-    assert record_blockers(summary) == []
+    assert record_blockers(summarize_l4([_run(structural_fails=3), _run()])) == []
 
 
-def test_record_blockers_reject_broken_measurement():
-    assert any("request error" in b for b in record_blockers(summarize_l4([_run(errors=1), _run()])))
-    assert any(
-        "judge infra" in b
-        for b in record_blockers(summarize_l4([
-            _run(faithfulness={"judge_errors": 1, "entailed": 0.5, "neutral": 0.5, "contradiction": 0.0}),
-            _run(),
-        ]))
-    )
-    assert any(
-        "uncomputed" in b
-        for b in record_blockers(summarize_l4([_run(syntax_compliance=None), _run(syntax_compliance=None)]))
-    )
+@pytest.mark.parametrize(("broken", "needle"), [
+    ({"errors": 1}, "request error"),
+    ({"faithfulness": {"judge_errors": 1, "entailed": 0.5, "neutral": 0.5, "contradiction": 0.0}},
+     "judge infra"),
+    ({"syntax_compliance": None}, "uncomputed"),
+])
+def test_record_blockers_reject_broken_measurement(broken, needle):
+    blockers = record_blockers(summarize_l4([_run(**broken), _run()]))
+    assert any(needle in b for b in blockers), blockers
 
 
 # ---------------------------------------------------------------- review queue
