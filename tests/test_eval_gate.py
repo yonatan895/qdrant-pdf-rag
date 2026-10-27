@@ -3,7 +3,6 @@
 import hashlib
 import json
 import os
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -12,75 +11,8 @@ import pytest
 from scripts.eval_retrieval import main
 
 from mainframe_rag.config import Settings
-from mainframe_rag.eval.retrieval import (
-    _set,
-    check_baseline,
-    update_baseline,
-)
-
-
-def _report() -> dict:
-    return {
-        "n": 12,
-        "scored": 12,
-        "must_not": {"checked": 12, "violations": 0},
-        "failures": 0,
-        "elapsed_s": 0.25,
-        "embed_mode": "hash",
-        "collection": "test-corpus",
-        "representation": {"servable": True, "outcome": "compatible", "details": [],
-                           "physical": "test-corpus__gen1"},
-        "recall@1": 0.5,
-        "recall@3": 0.75,
-        "recall@5": 0.75,
-        "recall@8": 0.80,
-        "mrr": 0.625,
-        "ndcg@8": 0.70,
-        "identifier": {
-            "recall@1": 1.0,
-            "recall@5": 1.0,
-            "recall@8": 1.0,
-            "mrr": 1.0,
-            "ndcg@8": 1.0,
-        },
-        "nl": {
-            "recall@1": 0.333,
-            "recall@5": 0.667,
-            "recall@8": 0.70,
-            "mrr": 0.5,
-            "ndcg@8": 0.60,
-        },
-        "rows": [],
-    }
-
-
-def test_check_baseline_detects_recall_regression():
-    baseline = {
-        "recall@1": 0.5,
-        "recall@5": 0.80,
-        "mrr": 0.60,
-        "identifier": {"recall@1": 1.0},
-    }
-    # Current recall@5 is 0.70 < 0.80 * 0.95 (0.76)
-    rep = _report()
-    rep["recall@5"] = 0.70
-    regressions = check_baseline(rep, baseline)
-    assert len(regressions) == 1
-    assert "recall@5" in regressions[0]
-
-
-def test_check_baseline_detects_query_failures():
-    baseline = {
-        "recall@1": 0.5,
-        "recall@5": 0.75,
-        "mrr": 0.60,
-        "identifier": {"recall@1": 1.0},
-    }
-    rep = _report()
-    rep["failures"] = 2
-    regressions = check_baseline(rep, baseline)
-    assert any("failures: 2 > 0" in r for r in regressions)
-
+from mainframe_rag.eval.retrieval import _set, update_baseline
+from tests.helpers_eval_local import retrieval_report as _report
 
 # --- main() exit-code contract (issue #159): a skipped gate is not a pass ---
 
@@ -354,60 +286,6 @@ def test_repo_golden_rows_opt_into_acceptance_states():
             assert row["expected_verification_state"] == expected, f"{path}:{row['id']}"
 
 
-# --- absolute identifier gates (AGENTS.md: "identifier recall@1 strict 1.0") ---
-
-def test_identifier_and_message_id_gates_are_absolute_not_ratio():
-    baseline = {"identifier": {"recall@1": 0.5}, "classes": {"message_id": {"recall@1": 0.5}}}
-    rep = _report()
-    rep["identifier"]["recall@1"] = 0.99
-    rep["classes"] = {"message_id": {"recall@1": 0.99}}
-
-    regressions = check_baseline(rep, baseline)
-
-    assert any("identifier.recall@1" in r and "absolute gate" in r for r in regressions)
-    assert any("classes.message_id.recall@1" in r and "absolute gate" in r for r in regressions)
-
-
-def test_real_corpus_baseline_uses_no_drop_floor():
-    """Issue #286: the real-corpus baseline sits below 1.0; the gate must go
-    green at its own baseline and still flag any identifier/message-id drop."""
-    baseline = {
-        "_meta": {"collection": "real_manuals", "embed_mode": "vllm"},
-        "identifier": {"recall@1": 0.692},
-        "classes": {"message_id": {"recall@1": 0.8}},
-    }
-    rep = _report()
-    rep["identifier"]["recall@1"] = 0.692
-    rep["classes"] = {"message_id": {"recall@1": 0.8}}
-    assert check_baseline(rep, baseline) == []
-
-    dropped = _report()
-    dropped["identifier"]["recall@1"] = 0.65
-    dropped["classes"] = {"message_id": {"recall@1": 0.75}}
-    regressions = check_baseline(dropped, baseline)
-    assert any("identifier.recall@1" in r and "real-corpus gate" in r for r in regressions)
-    assert any(
-        "classes.message_id.recall@1" in r and "real-corpus gate" in r for r in regressions
-    )
-
-
-# --- table query class (issue #270 step 4) ---------------------------------
-
-# Issue 367: requested gates need actual eligible observations, not just numbers.
-def test_requested_gate_rejects_empty_and_abstain_only_reports():
-    from mainframe_rag.eval.datasets import GoldenEntry
-    from mainframe_rag.eval.retrieval import score_entry, summarize
-
-    for rows in ([], [score_entry([], GoldenEntry(query="unknown", expected_behavior="abstain"))]):
-        rep = summarize(rows, failures=0, elapsed_s=0, embed_mode="hash", collection="c")
-        assert check_baseline(rep, {"recall@1": 0.0})
-
-
-def test_requested_gate_rejects_missing_required_class():
-    baseline = {"classes": {"table": {"n": 1, "scored": 1, "recall@5": 1.0}}}
-    assert any("table" in r for r in check_baseline(_report(), baseline))
-
-
 def test_main_exit_2_when_embed_mode_mismatch(tmp_path, monkeypatch):
     golden = _hermetic_main(monkeypatch, tmp_path)
     baseline = tmp_path / "baseline.json"
@@ -522,25 +400,13 @@ def test_explicit_gate_cannot_be_bypassed_by_diagnostic_cli_modes(monkeypatch):
 def test_task_holdout_uses_real_cli_pin_validation_and_recovers(tmp_path):
     """Actual pinned Task + actual evaluator parser, with only runtime effects replaced."""
     import os
-    import shutil
     import subprocess
     import sys
 
-    import pytest
+    from tests.helpers_eval_local import REPO_ROOT as repo
+    from tests.helpers_eval_local import task_workspace
 
-    from tests.test_taskfile_contracts import REQUIRE_RUNNER, find_task
-
-    task = find_task()
-    if task is None:
-        if REQUIRE_RUNNER:
-            pytest.fail("pinned Task unavailable in required lane")
-        pytest.skip("pinned Task unavailable")
-    repo = Path(__file__).resolve().parents[1]
-    shutil.copy2(repo / "Taskfile.yml", tmp_path / "Taskfile.yml")
-    shutil.copytree(repo / "taskfiles", tmp_path / "taskfiles")
-    (tmp_path / "scripts").mkdir()
-    shutil.copy2(repo / "scripts/eval_retrieval.py", tmp_path / "scripts/eval_retrieval.py")
-    (tmp_path / ".venv/bin").mkdir(parents=True)
+    task = task_workspace(tmp_path, "eval_retrieval.py")
     launcher = tmp_path / ".venv/bin/python"
     # This process adapter executes the actual requested script/main/parser.
     # Model/storage and manifest boundaries alone are instrumented.
@@ -605,19 +471,10 @@ def test_task_holdout_uses_real_cli_pin_validation_and_recovers(tmp_path):
 # scorer, gate and writer real. Only model/storage/manifest effects are replaced.
 @pytest.fixture
 def retrieval_task_workspace(tmp_path):
-    from tests.test_taskfile_contracts import REQUIRE_RUNNER, find_task
+    from tests.helpers_eval_local import REPO_ROOT as repo
+    from tests.helpers_eval_local import task_workspace
 
-    task = find_task()
-    if task is None:
-        if REQUIRE_RUNNER:
-            pytest.fail("pinned Task unavailable in required lane")
-        pytest.skip("pinned Task unavailable")
-    repo = Path(__file__).resolve().parents[1]
-    shutil.copy2(repo / "Taskfile.yml", tmp_path / "Taskfile.yml")
-    shutil.copytree(repo / "taskfiles", tmp_path / "taskfiles")
-    (tmp_path / "scripts").mkdir()
-    shutil.copy2(repo / "scripts/eval_retrieval.py", tmp_path / "scripts/eval_retrieval.py")
-    (tmp_path / ".venv/bin").mkdir(parents=True)
+    task = task_workspace(tmp_path, "eval_retrieval.py")
     launcher = tmp_path / ".venv/bin/python"
     launcher.write_text(f"#!{sys.executable}\n" + f"sys_path = {str(repo / 'src')!r}\n" + '''
 import importlib.util, json, os, sys

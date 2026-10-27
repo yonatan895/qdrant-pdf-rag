@@ -156,18 +156,6 @@ def _writes(state):
     return [(m, p) for m, p, _ in state.requests if m == "POST"]
 
 
-def test_installer_creates_activates_and_verifies_the_stored_pipe(owui):
-    state, client, _ = owui
-    lines = provision.provision(client, PIPE, PIPE_SHA)
-    assert lines == [f"docs Pipe installed: Function mainframe_rag_docs active, sha256 {PIPE_SHA}"]
-    stored = state.functions["mainframe_rag_docs"]
-    assert hashlib.sha256(stored["content"].encode()).hexdigest() == PIPE_SHA
-    assert stored["is_active"] is True and stored["name"] == "Rosetta"
-    assert _writes(state) == [("POST", "/api/v1/functions/create"),
-                              ("POST", "/api/v1/functions/id/mainframe_rag_docs/toggle")]
-    assert {auth for _, _, auth in state.requests} == {f"Bearer {KEY}"}
-
-
 @pytest.mark.parametrize("absent_status", [401, 404], ids=["v0.12.3-401", "404"])
 def test_installer_first_install_creates_when_the_function_is_absent(owui, absent_status):
     """v0.12.3 answers an absent Function with 401 (routers/functions.py
@@ -181,7 +169,8 @@ def test_installer_first_install_creates_when_the_function_is_absent(owui, absen
                               ("POST", "/api/v1/functions/id/mainframe_rag_docs/toggle")]
     stored = state.functions["mainframe_rag_docs"]
     assert hashlib.sha256(stored["content"].encode()).hexdigest() == PIPE_SHA
-    assert stored["is_active"] is True
+    assert stored["is_active"] is True and stored["name"] == "Rosetta"
+    assert {auth for _, _, auth in state.requests} == {f"Bearer {KEY}"}
     # The stored content is read back after the create and before activation.
     order = [(m, p) for m, p, _ in state.requests]
     create = order.index(("POST", "/api/v1/functions/create"))

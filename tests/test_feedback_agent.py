@@ -20,6 +20,20 @@ from tests.test_webui import _client
 
 QUERY = "IEA500I"
 
+# Every path an answer is finalized on: API (JSON and stream) and console.
+_CALLS = [
+    ("answer", lambda c: c.post("/v1/answer", json={"query": QUERY})),
+    ("answer_stream", lambda c: c.post("/v1/answer?stream=true", json={"query": QUERY})),
+    ("chat", lambda c: c.post("/v1/chat", json={"messages": [{"role": "user", "content": QUERY}]})),
+    ("chat_stream", lambda c: c.post("/v1/chat", json={"messages": [{"role": "user", "content": QUERY}],
+                                                         "stream": True})),
+    ("console", lambda c: c.post("/ui/chat/stream", json={"messages": [{"role": "user", "content": QUERY}]})),
+    ("console", lambda c: c.post("/ui/chat", data={"message": QUERY, "messages": ""},
+                                 headers={"HX-Request": "true"})),
+]
+
+
+
 
 class RecordingFeedback:
     """FeedbackClient double: records what the agent hands over."""
@@ -61,16 +75,7 @@ def _records():
     return instance.records
 
 
-@pytest.mark.parametrize("endpoint,call", [
-    ("answer", lambda c: c.post("/v1/answer", json={"query": QUERY})),
-    ("answer_stream", lambda c: c.post("/v1/answer?stream=true", json={"query": QUERY})),
-    ("chat", lambda c: c.post("/v1/chat", json={"messages": [{"role": "user", "content": QUERY}]})),
-    ("chat_stream", lambda c: c.post("/v1/chat", json={"messages": [{"role": "user", "content": QUERY}],
-                                                         "stream": True})),
-    ("console", lambda c: c.post("/ui/chat/stream", json={"messages": [{"role": "user", "content": QUERY}]})),
-    ("console", lambda c: c.post("/ui/chat", data={"message": QUERY, "messages": ""},
-                                 headers={"HX-Request": "true"})),
-])
+@pytest.mark.parametrize("endpoint,call", _CALLS)
 def test_every_finalized_answer_is_recorded_exactly_once(feedback_client, endpoint, call):
     response = call(feedback_client)
     assert response.status_code == 200
@@ -357,18 +362,6 @@ def test_console_page_offers_rating_only_when_enabled(feedback_client, monkeypat
     assert 'data-feedback="off"' in feedback_client.get("/ui").text
     response = feedback_client.post("/ui/feedback", json={"request_id": RID, "rating": "good"})
     assert response.status_code == 404 and response.json()["code"] == "feedback_disabled"
-
-
-_CALLS = [
-    ("answer", lambda c: c.post("/v1/answer", json={"query": QUERY})),
-    ("answer_stream", lambda c: c.post("/v1/answer?stream=true", json={"query": QUERY})),
-    ("chat", lambda c: c.post("/v1/chat", json={"messages": [{"role": "user", "content": QUERY}]})),
-    ("chat_stream", lambda c: c.post("/v1/chat", json={"messages": [{"role": "user", "content": QUERY}],
-                                                         "stream": True})),
-    ("console", lambda c: c.post("/ui/chat/stream", json={"messages": [{"role": "user", "content": QUERY}]})),
-    ("console", lambda c: c.post("/ui/chat", data={"message": QUERY, "messages": ""},
-                                 headers={"HX-Request": "true"})),
-]
 
 
 @pytest.mark.parametrize("endpoint,call", _CALLS)

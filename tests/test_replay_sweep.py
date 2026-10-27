@@ -2,9 +2,10 @@
 
 from dataclasses import replace
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
-from scripts.capture_pool import legs_to_record
+from scripts.capture_pool import legs_to_record, replay_pool
 from scripts.replay_sweep import (
     HeadingJoinError,
     SweepConfig,
@@ -17,9 +18,9 @@ from scripts.replay_sweep import (
     unsupported_reason,
 )
 
-from mainframe_rag.config import Settings
 from mainframe_rag.eval.datasets import GoldenEntry
 from tests.conftest import _point
+from tests.helpers_eval_local import eval_settings as _settings
 
 
 def _cp(pid, doc, page="1", ctype="narrative", page_start=5):
@@ -30,20 +31,6 @@ def _cp(pid, doc, page="1", ctype="narrative", page_start=5):
     if page_start is None:
         del payload["page_start"]
     return base.model_copy(update={"payload": payload})
-
-
-def _settings(**overrides):
-    kw = {
-        "qdrant_url": "http://localhost:6333",
-        "qdrant_collection": "mainframe_manuals",
-        "dense_dim": 768,
-        "embed_base_url": "http://localhost:8000/v1",
-        "embed_model": "test-embed",
-        "bm25_model": "Qdrant/bm25",
-        "_env_file": None,
-    }
-    kw.update(overrides)
-    return Settings(**kw)
 
 
 def _record(dense_ids, ce=None, meta=None, second_leg=None, docs=None):
@@ -335,3 +322,45 @@ def test_rerank_grid_without_ce_scored_pools_warns_with_a_fixed_message(capsys):
     assert warn_if_no_ce_scored("rerank", [plain, scored]) is False
     assert warn_if_no_ce_scored("default", [plain]) is False
     assert capsys.readouterr().err == ""
+
+
+# ---------------------------------------------------------------- replay schema
+# (tests/test_replay.py retired into this file: one module owns the captured
+# pool's schema, its replay, and the sweep over it.)
+
+
+def _capture_row(pid: str, dense_rank: int | None = None, sparse_rank: int | None = None,
+                 ce: Any = 0.5) -> dict[str, Any]:
+    return {"id": pid, "doc_id": pid, "page": "1", "dense_rank": dense_rank,
+            "sparse_rank": sparse_rank, "ce": ce}
+
+
+def test_replay_pool_orders_legs_by_rank_and_defaults_optional_fields():
+    rows = [
+        {"id": "b", "doc_id": "B", "page": "2", "dense_rank": 1, "sparse_rank": 0},  # no ce, no chunk_type
+        {"id": "a", "doc_id": "A", "page": "1", "dense_rank": 0, "ce": 0.5},
+        {"id": "c", "doc_id": "C", "page": "3", "sparse_rank": 1, "ce": 0.1},  # sparse-only
+    ]
+    dense, sparse, ce_by_id = replay_pool(rows)
+    assert [p.id for p in dense] == ["a", "b"]
+    assert [p.id for p in sparse] == ["b", "c"]
+    assert ce_by_id == {"b": None, "a": 0.5, "c": 0.1}  # CE-less rows are kept, marked unscored
+    assert all(p.payload["chunk_type"] == "narrative" for p in dense)
+
+
+@pytest.mark.parametrize("rows", [
+    "not-a-list",
+    ["just-a-string"],
+    [{"no": "id"}],
+    [_capture_row("a", dense_rank=0), _capture_row("a", sparse_rank=0)],  # duplicate id
+    [_capture_row("a", dense_rank=0), _capture_row("b", dense_rank=0)],  # duplicate rank in a leg
+    [_capture_row("lonely")],  # no rank on either leg
+    [_capture_row("flag", dense_rank=True)],
+    [_capture_row("nance", dense_rank=0, ce=float("nan"))],
+    [{**_capture_row("badtype", dense_rank=0), "chunk_type": 7}],
+    [{**_capture_row("baddoc", dense_rank=0), "doc_id": ""}],
+    [{**_capture_row("badpage", dense_rank=0), "page": ""}],
+])
+def test_replay_schema_rejects_corrupt_capture(rows):
+    with pytest.raises((ValueError, TypeError)):
+        replay_pool(rows)  # type: ignore[arg-type]

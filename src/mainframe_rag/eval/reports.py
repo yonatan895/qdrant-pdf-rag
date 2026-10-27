@@ -12,6 +12,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from mainframe_rag.eval.dotted import dotted_get as _get
+
 
 # ---------------------------------------------------------------- helpers
 def _load_json(path: Path | str) -> dict[str, Any]:
@@ -21,15 +23,17 @@ def _load_json(path: Path | str) -> dict[str, Any]:
     return json.loads(p.read_text(encoding="utf-8"))
 
 
-def _get(data: dict[str, Any] | None, dotted: str) -> Any:
-    if data is None:
-        return None
-    node: Any = data
-    for part in dotted.split("."):
-        if not isinstance(node, dict) or part not in node:
-            return None
-        node = node[part]
-    return node
+def _delta_span(
+    cur: Any, base: Any, fmt: str = ".2f", higher_better: bool = True, missing: str = "-"
+) -> str:
+    """The one delta cell: paired value -> classed span, unpaired -> ``missing``."""
+    if cur is None or base is None:
+        return missing
+    d = cur - base
+    good = (d >= 0) if higher_better else (d <= 0)
+    cls = "delta-good" if good else "delta-bad"
+    sign = "+" if d > 0 else ""
+    return f'<span class="{cls}">{sign}{d:{fmt}}</span>'
 
 
 def _diff_badge(val: float | None, base: float | None, higher_is_better: bool = True) -> str:
@@ -162,12 +166,7 @@ def render_eval(report: dict[str, Any], baseline: dict[str, Any] | None, fmt: st
             base = _get(baseline, m) if baseline else None
             ident = _get(report, f"identifier.{m}")
             nl = _get(report, f"nl.{m}")
-            diff_str = ""
-            if cur is not None and base is not None:
-                d = cur - base
-                cls = "delta-good" if d >= 0 else "delta-bad"
-                sign = "+" if d > 0 else ""
-                diff_str = f'<span class="{cls}">{sign}{d:.3f}</span>'
+            diff_str = _delta_span(cur, base, fmt=".3f", missing="")
             summary_rows += f"""
             <tr>
               <td><strong>{_html_esc(m)}</strong></td>
@@ -363,13 +362,7 @@ def render_bench(report: dict[str, Any], baseline: dict[str, Any] | None, fmt: s
         for dotted, label, higher_better in bench_metrics:
             cur = _get(report, dotted)
             base = _get(baseline, dotted) if baseline else None
-            diff_str = "-"
-            if cur is not None and base is not None:
-                d = cur - base
-                good = (d >= 0) if higher_better else (d <= 0)
-                cls = "delta-good" if good else "delta-bad"
-                sign = "+" if d > 0 else ""
-                diff_str = f'<span class="{cls}">{sign}{d:.2f}</span>'
+            diff_str = _delta_span(cur, base, higher_better=higher_better)
             table_rows += f"""
             <tr>
               <td><strong>{_html_esc(label)}</strong></td>
@@ -756,13 +749,7 @@ def compare_bench(base: dict[str, Any], current: dict[str, Any], fmt: str) -> tu
         for dotted, label, higher_better, _tol in bench_metrics:
             b_val = _get(base, dotted)
             c_val = _get(current, dotted)
-            diff_str = "-"
-            if b_val is not None and c_val is not None:
-                d = c_val - b_val
-                good = (d >= 0) if higher_better else (d <= 0)
-                cls = "delta-good" if good else "delta-bad"
-                sign = "+" if d > 0 else ""
-                diff_str = f'<span class="{cls}">{sign}{d:.2f}</span>'
+            diff_str = _delta_span(c_val, b_val, higher_better=higher_better)
             rows += f"""
             <tr>
               <td><strong>{_html_esc(label)}</strong></td>

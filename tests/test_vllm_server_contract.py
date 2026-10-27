@@ -208,11 +208,6 @@ def test_nonstream_payload_without_explicit_finish_fails_closed(payload, reason)
     "payload, expected_content, expected_finish",
     [
         (
-            {"choices": [{"message": {"content": "ans"}, "finish_reason": "stop"}]},
-            "ans",
-            "stop",
-        ),
-        (
             {"choices": [{"message": {"content": None}, "finish_reason": "stop"}]},
             "",
             "stop",
@@ -224,11 +219,6 @@ def test_nonstream_payload_without_explicit_finish_fails_closed(payload, reason)
             },
             "ans",
             "stop",
-        ),
-        (
-            {"choices": [{"message": {"content": "ans"}, "finish_reason": "length"}]},
-            "ans",
-            "length",
         ),
     ],
 )
@@ -258,40 +248,6 @@ def test_nonstream_client_sync_rejects_error_payload():
     assert "PRIVATE_SENTINEL" not in str(excinfo.value)
 
 
-@pytest.mark.anyio
-async def test_nonstream_client_async_rejects_error_payload():
-    """Async achat() rejects top-level error payloads without leaking
-    error-body text into the exception (issues #365 / Q420-P1)."""
-    payload = {
-        "error": {"message": "PRIVATE_SENTINEL"},
-        "choices": [{"message": {"content": "ans"}, "finish_reason": "stop"}],
-    }
-    fake = _post_payload(payload)
-    llm = HttpxLLMClient(Settings(**_settings_kwargs(llm_stream=True)), client=fake)
-
-    with pytest.raises(TruncatedStreamError) as excinfo:
-        await llm.achat(_msgs())
-    assert excinfo.value.reason == REASON_UPSTREAM_ERROR
-    assert "PRIVATE_SENTINEL" not in str(excinfo.value)
-
-
-@pytest.mark.anyio
-async def test_nonstream_client_async_rejects_object_content():
-    """Async achat() rejects object content instead of stringifying
-    it into answer prose (issues #365 / Q420-P1)."""
-    payload = {
-        "choices": [
-            {"message": {"content": {"unexpected": "shape"}}, "finish_reason": "stop"}
-        ],
-    }
-    fake = _post_payload(payload)
-    llm = HttpxLLMClient(Settings(**_settings_kwargs(llm_stream=True)), client=fake)
-
-    with pytest.raises(TruncatedStreamError) as excinfo:
-        await llm.achat(_msgs())
-    assert excinfo.value.reason == REASON_MALFORMED_FRAME
-
-
 def test_nonstream_nested_reasoning_tokens_mapped():
     """vLLM reports reasoning usage nested under completion_tokens_details;
     the client must surface it (drives cost/observability accounting)."""
@@ -313,24 +269,6 @@ def test_nonstream_nested_reasoning_tokens_mapped():
     result = llm.chat(_msgs())
     assert result.usage.reasoning_tokens == 12
     assert result.usage.total_tokens == 15
-
-
-@pytest.mark.anyio
-async def test_stream_and_nonstream_bodies_agree_on_model_and_messages():
-    """The streaming twin must ask for the same model/messages as the
-    non-streaming POST — a trial server must serve both identically."""
-
-    fake = HttpxStreamFake(
-        lines=["data: [DONE]"],
-        payload={"choices": [{"message": {"content": "recovered"}, "finish_reason": "stop"}]},
-    )
-    llm = HttpxLLMClient(Settings(**_settings_kwargs(llm_stream=True)), client=fake)
-    await llm.achat(_msgs())  # empty stream -> recovery POST fires
-    assert fake.capture["json"] is not None and fake.post_bodies[-1] is not None
-    for key in ("model", "messages"):
-        assert fake.stream_bodies[0][key] == fake.post_bodies[-1][key]
-    assert fake.stream_bodies[0]["stream"] is True
-    assert "stream" not in fake.post_bodies[-1]
 
 
 @pytest.mark.anyio

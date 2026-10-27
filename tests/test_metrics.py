@@ -5,11 +5,10 @@ exercise cumulative Prometheus counters through the application lifespan.
 """
 
 import pytest
-from fastapi.testclient import TestClient
 
 from mainframe_rag.agent import app as app_mod
 from mainframe_rag.agent import metrics as metrics_mod
-from mainframe_rag.retrieve.query import SearchHit
+from tests.helpers_agent_local import agent_client, agent_hit
 
 
 def test_setup_metrics_disabled_and_idempotent():
@@ -109,13 +108,7 @@ def test_record_request_noop_when_disabled_and_clamps_bad_values(monkeypatch):
 
 
 def _hit():
-    return SearchHit(
-        chunk_id="abc123", score=0.42,
-        cite="SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6",
-        heading="Chapter 2 > IEA500I", text="IEA500I synthetic text",
-        doc_id="SA22-0000-00", title="Synthetic Reference", page_label="1-6",
-        chunk_type="message", product="z/OS", version="9.9", message_ids=("IEA500I",),
-    )
+    return agent_hit()
 
 
 class _Search:
@@ -130,14 +123,11 @@ class _Search:
 
 @pytest.fixture
 def client(monkeypatch, servable_representation_gate):
-    monkeypatch.setenv("QDRANT_URL", "http://localhost:6333")
-    monkeypatch.setenv("EMBED_MODE", "hash")
-    monkeypatch.setenv("ALLOW_HASH_MODE", "true")
-    monkeypatch.setenv("LLM_BASE_URL", "http://llm.internal/v1")
-    monkeypatch.setenv("LLM_MODEL_REASONING", "test-reasoning-model")
-    monkeypatch.setenv("METRICS_ENABLED", "true")
-    monkeypatch.setattr(app_mod, "retrieve_search", _Search())
-    with TestClient(app_mod.app) as c:
+    # No tokenizer swap: search-only paths count without one.
+    with agent_client(
+        monkeypatch, search=_Search(), tokenizer=None,
+        env={"METRICS_ENABLED": "true"},
+    ) as c:
         yield c
 
 
@@ -156,40 +146,39 @@ def _series(body, name, *, default=None, **labels):
     raise AssertionError(f"series {name} with {labels} missing")
 
 
-def test_search_success_records_ok_series(client):
-    labels = {"endpoint": "search", "outcome": "ok", "query_class": "identifier"}
-    # The provider is intentionally process-global. Earlier tests or the next
-    # ordinary request can populate this series; each request must add one.
+def _assert_series_increments(client, labels, post, status):
+    """Each request adds exactly one to its series; the provider is global."""
     for _ in range(2):
         before = _series(client.get("/metrics").text, "rag_requests_total", default=0.0, **labels)
-        resp = client.post("/v1/search", json={"query": "IEA500I SECRETXYZ"})
-        assert resp.status_code == 200
+        assert post().status_code == status
         body = client.get("/metrics").text
         assert _series(body, "rag_requests_total", **labels) == before + 1.0
-        # Cardinality law: the query text that triggered the request must never
-        # become a label value in the exposition.
-        assert "SECRETXYZ" not in body
+    return body
+
+
+def test_search_success_records_ok_series(client):
+    labels = {"endpoint": "search", "outcome": "ok", "query_class": "identifier"}
+    body = _assert_series_increments(
+        client, labels, lambda: client.post("/v1/search", json={"query": "IEA500I SECRETXYZ"}), 200
+    )
+    # Cardinality law: the query text that triggered the request must never
+    # become a label value in the exposition.
+    assert "SECRETXYZ" not in body
 
 
 def test_search_failure_records_outcome_series(client, monkeypatch):
     monkeypatch.setattr(app_mod, "retrieve_search", _Search(exc=RuntimeError("qdrant down")))
     labels = {"endpoint": "search", "outcome": "upstream_error", "query_class": "unknown"}
-    for _ in range(2):
-        before = _series(client.get("/metrics").text, "rag_requests_total", default=0.0, **labels)
-        resp = client.post("/v1/search", json={"query": "IEA500I"})
-        assert resp.status_code == 502
-        body = client.get("/metrics").text
-        assert _series(body, "rag_requests_total", **labels) == before + 1.0
+    _assert_series_increments(
+        client, labels, lambda: client.post("/v1/search", json={"query": "IEA500I"}), 502
+    )
 
 
 def test_overlong_query_records_invalid_request(client):
     labels = {"endpoint": "search", "outcome": "invalid_request", "query_class": "unknown"}
-    for _ in range(2):
-        before = _series(client.get("/metrics").text, "rag_requests_total", default=0.0, **labels)
-        resp = client.post("/v1/search", json={"query": "Q" * 2001})
-        assert resp.status_code == 422
-        body = client.get("/metrics").text
-        assert _series(body, "rag_requests_total", **labels) == before + 1.0
+    _assert_series_increments(
+        client, labels, lambda: client.post("/v1/search", json={"query": "Q" * 2001}), 422
+    )
 
 
 @pytest.mark.parametrize("state", ["accepted", "SECRET-unknown-state"])
@@ -357,12 +346,9 @@ def test_answer_not_configured_records_once(client, monkeypatch):
 
     monkeypatch.setattr(app_mod, "assert_reasoning_model", _boom)
     labels = {"endpoint": "answer", "outcome": "not_configured", "query_class": "unknown"}
-    for _ in range(2):
-        before = _series(client.get("/metrics").text, "rag_requests_total", default=0.0, **labels)
-        resp = client.post("/v1/answer", json={"query": "IEA500I"})
-        assert resp.status_code == 503
-        body = client.get("/metrics").text
-        assert _series(body, "rag_requests_total", **labels) == before + 1.0
+    _assert_series_increments(
+        client, labels, lambda: client.post("/v1/answer", json={"query": "IEA500I"}), 503
+    )
 
 
 def test_record_request_failure_log_leaks_no_exception_text(monkeypatch, caplog):

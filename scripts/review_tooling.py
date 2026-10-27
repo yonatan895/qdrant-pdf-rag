@@ -572,29 +572,6 @@ def is_ancestor(ancestor_sha: str, descendant_sha: str, cwd: pathlib.Path | str 
     return res.returncode == 0
 
 
-def evaluate_probe_response(status_code: int | None, body: str | None = None, *, require_agent_ok: bool = False) -> bool:
-    """Shared readiness predicate for review-service probes.
-
-    HTTP success alone (2xx) is not readiness for the agent: the agent
-    readiness contract is `status == "ok"` with HTTP 200. A degraded 503
-    body that still contains `"qdrant":true` (e.g. reembed_required) must
-    not count as ready.
-    """
-    if status_code is None or not (200 <= status_code < 300):
-        return False
-    if not require_agent_ok:
-        return True
-    if not body:
-        return False
-    try:
-        parsed = json.loads(body)
-    except (json.JSONDecodeError, ValueError):
-        return False
-    if not isinstance(parsed, dict):
-        return False
-    return parsed.get("status") == "ok"
-
-
 def validate_review_payload(
     raw_payload: dict[str, Any] | None,
     expected_head: str | None = None,

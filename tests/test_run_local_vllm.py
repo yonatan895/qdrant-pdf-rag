@@ -41,13 +41,36 @@ _HOST_VARS = (
 )
 
 
-def _run_script(tmp_path: Path, extra_env: dict[str, str]) -> tuple[int, str, list[str]]:
+# Canned Budget resolver assignments: exercise the script's flag conditionals
+# independently of the real Budget table (see test_prefix_cache_flag...).
+STUB_RESOLVER = (
+    "#!/bin/sh\n"
+    "printf '%s\\n' "
+    "\"BUDGET_GPU_MEM='0.50'\" "
+    "\"BUDGET_MAX_LEN='4096'\" "
+    "\"BUDGET_RUNNER='generate'\" "
+    "\"BUDGET_CONVERT='none'\" "
+    "\"BUDGET_BATCHED_TOKENS=''\" "
+    "\"BUDGET_EAGER='0'\" "
+    "\"BUDGET_PREFIX_CACHE='${STUB_PREFIX_CACHE:-0}'\" "
+    "\"BUDGET_SEQS='1'\" "
+    "\"BUDGET_HOST_MEM_MB='${STUB_HOST_MEM_MB-4000}'\"\n"
+)
+
+
+def _run_script(tmp_path: Path, extra_env: dict[str, str],
+                *, resolver: str | None = None) -> tuple[int, str, list[str]]:
     bindir = tmp_path / "bin"
     bindir.mkdir(exist_ok=True)
     out_file = tmp_path / "docker-argv"
     stub = bindir / "docker"
     stub.write_text(f"#!/bin/sh\nprintf '%s\\0' \"$@\" > \"{out_file}\"\n")
     stub.chmod(stub.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    if resolver is not None:
+        stub_python = bindir / "stub-python"
+        stub_python.write_text(resolver)
+        stub_python.chmod(stub_python.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        resolver = str(stub_python)
     base_env = dict(os.environ)
     for var in (
         "MODEL",
@@ -71,7 +94,7 @@ def _run_script(tmp_path: Path, extra_env: dict[str, str]) -> tuple[int, str, li
         **({} if "HOST_MEMINFO" in extra_env else _host(tmp_path)),
         "PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}",
         "HOME": str(tmp_path / "home"),
-        "BUDGET_PYTHON": sys.executable,
+        "BUDGET_PYTHON": resolver or sys.executable,
         **extra_env,
     }
     proc = subprocess.run(
@@ -168,72 +191,8 @@ def test_local_model_path_is_one_mount_argument_and_token_stays_off_argv(tmp_pat
     assert 'private-test-token' not in ' '.join(argv) + stderr
 
 
-def _run_script_with_stub_resolver(tmp_path: Path, extra_env: dict[str, str]) -> tuple[int, str, list[str]]:
-    """BUDGET_PYTHON stub emitting canned assignments: exercises the script's
-    flag conditionals independently of the Budget table."""
-    bindir = tmp_path / "bin"
-    bindir.mkdir(exist_ok=True)
-    out_file = tmp_path / "docker-argv"
-    stub_docker = bindir / "docker"
-    stub_docker.write_text(f"#!/bin/sh\nprintf '%s\\0' \"$@\" > \"{out_file}\"\n")
-    stub_docker.chmod(stub_docker.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-    stub_python = bindir / "stub-python"
-    stub_python.write_text(
-        "#!/bin/sh\n"
-        "printf '%s\\n' "
-        "\"BUDGET_GPU_MEM='0.50'\" "
-        "\"BUDGET_MAX_LEN='4096'\" "
-        "\"BUDGET_RUNNER='generate'\" "
-        "\"BUDGET_CONVERT='none'\" "
-        "\"BUDGET_BATCHED_TOKENS=''\" "
-        "\"BUDGET_EAGER='0'\" "
-        "\"BUDGET_PREFIX_CACHE='${STUB_PREFIX_CACHE:-0}'\" "
-        "\"BUDGET_SEQS='1'\" "
-        "\"BUDGET_HOST_MEM_MB='${STUB_HOST_MEM_MB-4000}'\"\n"
-    )
-    stub_python.chmod(stub_python.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-    base_env = dict(os.environ)
-    for var in (
-        "MODEL",
-        "PORT",
-        "ROLE",
-        "GPU_MEM",
-        "MAX_LEN",
-        "SEQS",
-        "BUDGET_PROFILE",
-        "SERVED_NAME",
-        "CONTAINER_NAME",
-        "VLLM_IMAGE",
-        "TASK",
-        "CHAT_TEMPLATE",
-        *_HOST_VARS,
-    ):
-        if var not in extra_env:
-            base_env.pop(var, None)
-    env = {
-        **base_env,
-        **({} if "HOST_MEMINFO" in extra_env else _host(tmp_path)),
-        "PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}",
-        "HOME": str(tmp_path / "home"),
-        "BUDGET_PYTHON": str(stub_python),
-        **extra_env,
-    }
-    proc = subprocess.run(
-        ["sh", str(SCRIPT)],
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=120,
-        check=False,
-    )
-    argv: list[str] = []
-    if out_file.exists():
-        argv = out_file.read_bytes().decode().split('\0')[:-1]
-    return proc.returncode, proc.stderr, argv
-
-
 def test_prefix_cache_flag_follows_budget_resolution(tmp_path: Path):
-    rc, stderr, argv = _run_script_with_stub_resolver(tmp_path, {"STUB_PREFIX_CACHE": "1"})
+    rc, stderr, argv = _run_script(tmp_path, {"STUB_PREFIX_CACHE": "1"}, resolver=STUB_RESOLVER)
     assert rc == 0, stderr
     pairs = _pairs(argv)
     assert pairs["--gpu-memory-utilization"] == "0.50"
@@ -328,13 +287,12 @@ def test_force_start_skips_admission_but_keeps_the_cap(tmp_path: Path):
 
 
 def test_stub_resolver_without_cap_requires_host_mem_mb(tmp_path: Path):
-    rc, stderr, argv = _run_script_with_stub_resolver(tmp_path, {"STUB_HOST_MEM_MB": ""})
+    rc, stderr, argv = _run_script(tmp_path, {"STUB_HOST_MEM_MB": ""}, resolver=STUB_RESOLVER)
     assert rc != 0 and argv == []
     assert "HOST_MEM_MB" in stderr
     case = tmp_path / "explicit"
     case.mkdir()
-    rc, stderr, argv = _run_script_with_stub_resolver(
-        case, {"STUB_HOST_MEM_MB": "", "HOST_MEM_MB": "1500"}
-    )
+    rc, stderr, argv = _run_script(case, {"STUB_HOST_MEM_MB": "", "HOST_MEM_MB": "1500"},
+                    resolver=STUB_RESOLVER)
     assert rc == 0, stderr
     assert _cap(argv) == ("1500m", "1500m")

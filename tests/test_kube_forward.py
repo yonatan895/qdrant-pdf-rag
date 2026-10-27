@@ -212,13 +212,24 @@ def test_relay_replaces_an_idle_stream_so_reuse_never_hits_a_dead_one(forward):
 
 
 def test_relay_never_closes_a_connection_awaiting_its_response(forward):
-    start, _ = forward
+    start, root = forward
     proc, port = start("stale_keepalive", None, "--idle-close", "0.3")
     _wait(lambda: _ready(port))
-    response = _reuse_after_idle(port, 0.1, "/slow")  # each response takes 1.0 s, beyond --idle-close
+    # Each response takes 1.0 s, beyond --idle-close: the in-flight response wins.
+    response = _reuse_after_idle(port, 0.1, "/slow")
     assert response.status_code == 200 and response.text == "ok"
+    # A raw client on one connection may idle across the same timeout repeatedly;
+    # the relay never closes the client, so no client-side close races the server.
+    request = b"GET /readyz HTTP/1.1\r\nHost: x\r\n\r\n"
+    with socket.create_connection(("127.0.0.1", port), timeout=5) as client:
+        for idle in (0.0, 0.8, 1.6):
+            time.sleep(idle)
+            client.sendall(request)
+            assert client.recv(4096).endswith(b"\r\n\r\nok")
     proc.send_signal(signal.SIGTERM)
-    proc.communicate(timeout=10)
+    output, _ = proc.communicate(timeout=10)
+    assert proc.returncode == 0 and "restart" not in output, output
+    assert len(_launches(root)) == 1  # one kubectl; only its streams were replaced
 
 
 def test_restart_on_the_same_port_right_after_relay_closed_connections(forward):
@@ -234,20 +245,3 @@ def test_restart_on_the_same_port_right_after_relay_closed_connections(forward):
     proc.send_signal(signal.SIGTERM)
     output, _ = proc.communicate(timeout=10)
     assert proc.returncode == 0 and "already in use" not in output, output
-
-
-def test_client_connection_survives_the_server_idle_close_on_a_fresh_stream(forward):
-    # The relay never closes the client for idleness, so there is no client-side close to race.
-    start, root = forward
-    proc, port = start("stale_keepalive", None, "--idle-close", "0.3")
-    _wait(lambda: _ready(port))
-    request = b"GET /readyz HTTP/1.1\r\nHost: x\r\n\r\n"
-    with socket.create_connection(("127.0.0.1", port), timeout=5) as client:
-        for idle in (0.0, 0.8, 1.6):
-            time.sleep(idle)
-            client.sendall(request)
-            assert client.recv(4096).endswith(b"\r\n\r\nok")
-    proc.send_signal(signal.SIGTERM)
-    output, _ = proc.communicate(timeout=10)
-    assert proc.returncode == 0 and "restart" not in output, output
-    assert len(_launches(root)) == 1  # one kubectl; only its streams were replaced

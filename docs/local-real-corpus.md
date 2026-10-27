@@ -4,7 +4,8 @@ Use the exact published release with real reasoning and embedding models behind
 the authenticated TLS gateway. Preserve the original PDFs, verified snapshots,
 private configuration, credentials and persistent volumes. A successful historical
 restore is not acceptance of a newer application or representation contract.
-See the [dated Helm audit](deployment-audit-2026-09-20.md) for current observations.
+See the [dated Helm audit](deployment-audit-2026-09-20.md) for its findings and
+the environments it never ran.
 
 This is a single-node local operating profile, not production 6/3/2 acceptance.
 Keep unrelated rehearsal clusters stopped while both real models run.
@@ -126,8 +127,8 @@ must see every expected file and retain filename-stem identity. Keep shared
 explicitly in the protected operator inputs and select a local resource override
 from measured peak usage with both models and Qdrant running. A container limit
 does not reserve host RAM. The [dated audit](deployment-audit-2026-09-20.md)
-records the four-worker recovery and failed six-worker memory trial; neither
-historical one-worker sizing nor a brief healthy sample establishes full-run fit.
+records the failed six-worker memory trial; neither a historical one-worker
+figure nor a brief healthy sample establishes full-run fit.
 
 From the exact release checkout with protected `AIRGAP_ENV`, explicit kubeconfig
 and Helm 4 on PATH:

@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 from mainframe_rag.eval.datasets import GoldenEntry, load_golden
 from mainframe_rag.eval.retrieval import (
+    _set,
     check_baseline,
     is_relevant_hit,
     is_sibling_exception,
@@ -20,6 +21,7 @@ from mainframe_rag.eval.retrieval import (
     update_baseline,
 )
 from mainframe_rag.retrieve.query import SearchHit
+from tests.helpers_eval_local import retrieval_report as _report
 
 
 def _hit(
@@ -199,12 +201,86 @@ def test_summarize_mixed_corpus():
     assert report["must_not"] == {"checked": 4, "violations": 1, "rate": 0.25}
 
 
-def test_check_baseline_zero_gate_ignores_baseline_values():
-    report = {"n": 10, "scored": 10, "failures": 0, "must_not": {"violations": 2, "checked": 10, "rate": 0.2}}
-    regressions = check_baseline(report, {"must_not": {"violations": 2}})
-    assert any("must_not.violations" in r for r in regressions)
-    report_ok = {"n": 10, "scored": 10, "failures": 0, "must_not": {"violations": 0, "checked": 10, "rate": 0.0}}
-    assert check_baseline(report_ok, {"must_not": {"violations": 0}}) == []
+# The gate's refusal reasons are one decision table: every kind of regression
+# is a row, with the fixed substring callers see.
+def _gate_report(**overrides) -> dict:
+    report = _report()
+    for key, value in overrides.items():
+        _set(report, key, value)
+    return report
+
+
+def _empty_scope_reports() -> list[dict]:
+    from mainframe_rag.eval.retrieval import score_entry
+
+    rows = ([], [score_entry([], GoldenEntry(query="unknown", expected_behavior="abstain"))])
+    return [summarize(r, failures=0, elapsed_s=0, embed_mode="hash", collection="c") for r in rows]
+
+
+_REGRESSION_CASES = {
+    "recall-regression": (
+        _gate_report(**{"recall@5": 0.70}),
+        {"recall@1": 0.5, "recall@5": 0.80, "mrr": 0.60, "identifier": {"recall@1": 1.0}},
+        [("recall@5",)], 1),
+    "query-failures": (
+        _gate_report(failures=2),
+        {"recall@1": 0.5, "recall@5": 0.75, "mrr": 0.60, "identifier": {"recall@1": 1.0}},
+        [("failures: 2 > 0",)], 1),
+    # Absolute identifier gates: a drop of any size fails, never a ratio. Each
+    # reason names its own metric and the gate that fired, together.
+    "identifier-and-message-id-absolute": (
+        _gate_report(**{"identifier.recall@1": 0.99, "classes.message_id.recall@1": 0.99}),
+        {"identifier": {"recall@1": 0.5}, "classes": {"message_id": {"recall@1": 0.5}}},
+        [("identifier.recall@1", "absolute gate"),
+         ("classes.message_id.recall@1", "absolute gate")], None),
+    # Issue #286: the real-corpus baseline sits below 1.0 and goes green at its
+    # own value, while any identifier/message-id drop is still flagged.
+    "real-corpus-at-its-own-baseline": (
+        _gate_report(**{"identifier.recall@1": 0.692, "classes.message_id.recall@1": 0.8}),
+        {"_meta": {"collection": "real_manuals", "embed_mode": "vllm"},
+         "identifier": {"recall@1": 0.692}, "classes": {"message_id": {"recall@1": 0.8}}},
+        [], 0),
+    "real-corpus-drop": (
+        _gate_report(**{"identifier.recall@1": 0.65, "classes.message_id.recall@1": 0.75}),
+        {"_meta": {"collection": "real_manuals", "embed_mode": "vllm"},
+         "identifier": {"recall@1": 0.692}, "classes": {"message_id": {"recall@1": 0.8}}},
+        [("identifier.recall@1", "real-corpus gate"),
+         ("classes.message_id.recall@1", "real-corpus gate")], None),
+    # A must_not baseline is a zero gate: its recorded values are not a ratio.
+    "must-not-violations": (
+        _gate_report(must_not={"violations": 2, "checked": 10, "rate": 0.2}),
+        {"must_not": {"violations": 2}},
+        [("must_not.violations",)], None),
+    "must-not-clean": (
+        _gate_report(must_not={"violations": 0, "checked": 10, "rate": 0.0}),
+        {"must_not": {"violations": 0}},
+        [], 0),
+    # Issue #270/#367: a requested class must still be present and scoreable.
+    "missing-required-class": (
+        _report(),
+        {"classes": {"table": {"n": 1, "scored": 1, "recall@5": 1.0}}},
+        [("table",)], None),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_REGRESSION_CASES))
+def test_check_baseline_flags_each_regression_kind(case):
+    report, baseline, needles, count = _REGRESSION_CASES[case]
+    regressions = check_baseline(report, baseline)
+    if count is not None:
+        assert len(regressions) == count, regressions
+    if not needles:
+        assert regressions == []
+    for group in needles:
+        # Every text of a group must share ONE reason string: the metric name
+        # and the gate that fired are the same verdict, never two loose hits.
+        assert any(all(text in r for text in group) for r in regressions), (group, regressions)
+
+
+def test_requested_gate_rejects_empty_and_abstain_only_reports():
+    """Issue #367: requested gates need actual eligible observations."""
+    for report in _empty_scope_reports():
+        assert check_baseline(report, {"recall@1": 0.0})
 
 
 def test_update_baseline_roundtrip_with_new_keys(tmp_path: Path):

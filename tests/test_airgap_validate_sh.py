@@ -193,57 +193,33 @@ def test_invalid_configuration_fails_closed(tree, extra_env, exit_code, messages
         assert message in result.stderr
 
 
-def test_validate_agent_write_key_fails_closed(tree):
-    """Issue #366: a prod agent overlay wiring the full-access Qdrant key
-    must fail preflight before anything reaches the cluster."""
-    overlay = (
-        tree / "charts/mainframe-rag/templates/agent-deployment.yaml"
-    )
-    overlay.write_text(overlay.read_text().replace("key: read-only-api-key", "key: api-key"))
-    r = _run(tree)
-    assert r.returncode != 0
-    assert "read-only-api-key" in r.stderr
-
-
-def test_validate_ingest_readonly_key_fails_closed(tree):
-    """Issue #366 mirror: downgrading the ingest overlay to read-only must
-    also fail preflight — ingest owns corpus mutation."""
-    overlay = (
-        tree / "charts/mainframe-rag/templates/ingest-job.yaml"
-    )
-    lines = [
-        "key: read-only-api-key" if line.strip() == "key: api-key" else line
-        for line in overlay.read_text().splitlines()
-    ]
-    overlay.write_text("\n".join(lines) + "\n")
-    r = _run(tree)
-    assert r.returncode != 0
-    assert "to api-key" in r.stderr
-
-
-def test_validate_ingest_copresent_readonly_key_fails_closed(tree):
-    """Anti-revert parity with the agent gate: a co-present read-only key
-    in the ingest overlay fails preflight even with api-key present."""
-    overlay = (
-        tree / "charts/mainframe-rag/templates/ingest-job.yaml"
-    )
+@pytest.mark.parametrize(("template", "downgrade", "needle"), [
+    ("agent-deployment.yaml", False, "read-only-api-key"),
+    # Issue #366 mirror: ingest owns corpus mutation, so read-only must fail too.
+    ("ingest-job.yaml", True, "to api-key"),
+    ("ingest-job.yaml", False, "read-only"),
+], ids=["agent-write-key", "ingest-readonly", "ingest-copresent-readonly"])
+def test_validate_qdrant_key_role_fails_closed(tree, template, downgrade, needle):
+    overlay = tree / "charts/mainframe-rag/templates" / template
     text = overlay.read_text()
-    anchor = "key: api-key\n"
-    assert anchor in text
-    overlay.write_text(
-        text.replace(
-            anchor,
-            anchor
-            + "            - name: QDRANT_READ_API_KEY\n"
-            + "              valueFrom:\n"
-            + "                secretKeyRef:\n"
-            + "                  key: read-only-api-key\n"
-            + "                  name: __QDRANT_RELEASE__-apikey\n",
-        )
-    )
+    if downgrade:
+        lines = ["key: read-only-api-key" if line.strip() == "key: api-key" else line
+                 for line in text.splitlines()]
+        overlay.write_text("\n".join(lines) + "\n")
+    elif template == "agent-deployment.yaml":
+        overlay.write_text(text.replace("key: read-only-api-key", "key: api-key"))
+    else:
+        anchor = "key: api-key\n"
+        assert anchor in text
+        overlay.write_text(text.replace(anchor, anchor + (
+            "            - name: QDRANT_READ_API_KEY\n"
+            "              valueFrom:\n"
+            "                secretKeyRef:\n"
+            "                  key: read-only-api-key\n"
+            "                  name: __QDRANT_RELEASE__-apikey\n")))
     r = _run(tree)
     assert r.returncode != 0
-    assert "read-only" in r.stderr
+    assert needle in r.stderr
 
 
 def test_validate_tracing_off_deploys_no_trace_backend_and_explicit_collector_passes_through(tree):
@@ -258,11 +234,10 @@ def test_validate_tracing_off_deploys_no_trace_backend_and_explicit_collector_pa
     assert "Tracing:           ON (http://collector.platform:4318)" in ok.stdout
 
 
-@pytest.mark.parametrize("var", ["LLM_BASE_URL"])
-def test_validate_optional_model_url_bad_scheme_refused(tree, var):
-    r = _run(tree, {var: "gateway.internal:4000/v1"})
+def test_validate_optional_model_url_bad_scheme_refused(tree):
+    r = _run(tree, {"LLM_BASE_URL": "gateway.internal:4000/v1"})
     assert r.returncode != 0
-    assert f"{var} must begin with http:// or https://" in r.stderr
+    assert "LLM_BASE_URL must begin with http:// or https://" in r.stderr
 
 
 def test_validate_missing_skopeo_fails(tree):
@@ -446,31 +421,17 @@ def test_validate_pull_secret_bad_name_fails_closed(tree):
     assert "PULL_SECRET must be a DNS-subdomain name" in r.stderr
 
 
-def test_validate_live_verifies_gateway_secret(tree):
-    # Non-dry-run against all-zero stubs: namespace + Secret resolve.
-    r = _run(tree, {"AIRGAP_DRYRUN": "0", "GATEWAY_API_KEY_SECRET": "gateway-api-keys"})
-    assert r.returncode == 0, r.stderr
-    assert "Gateway key Secret 'gateway-api-keys' verified" in r.stdout
-
-
-def test_validate_live_missing_gateway_secret_fails(tree):
-    write_stub(
-        tree / "bin" / "kubectl",
-        _kubectl_stub("secret", NOT_FOUND),
-    )
-    r = _run(tree, {"AIRGAP_DRYRUN": "0", "GATEWAY_API_KEY_SECRET": "gateway-api-keys"})
-    assert r.returncode != 0
-    assert "Secret 'gateway-api-keys' not found" in r.stderr
-
-
-def test_validate_live_missing_namespace_notices_secret(tree):
-    write_stub(
-        tree / "bin" / "kubectl",
-        _kubectl_stub("namespace", NOT_FOUND),
-    )
-    r = _run(tree, {"AIRGAP_DRYRUN": "0", "GATEWAY_API_KEY_SECRET": "gateway-api-keys"})
-    assert r.returncode == 0, r.stderr
-    assert "does not exist yet" in r.stdout
+@pytest.mark.parametrize(("stub", "rc", "needle"), [
+    (None, 0, "Gateway key Secret 'gateway-api-keys' verified"),
+    ("secret", 1, "Secret 'gateway-api-keys' not found"),
+    ("namespace", 0, "does not exist yet"),
+], ids=["secret-present", "secret-missing", "namespace-missing"])
+def test_validate_live_verifies_the_gateway_secret(tree, stub, rc, needle):
+    if stub:
+        write_stub(tree / "bin" / "kubectl", _kubectl_stub(stub, NOT_FOUND))
+    r = _live(tree, GATEWAY_API_KEY_SECRET="gateway-api-keys")
+    assert r.returncode == rc, r.stderr
+    assert needle in (r.stdout if rc == 0 else r.stderr)
 
 
 def _git_checkout(tree, manifest_sha):
@@ -544,21 +505,26 @@ def _guard_run(tree, manifest_rel, extra_env=None):
     )
 
 
-def test_checkout_guard_dryrun_skips_mismatch(tree):
-    """Preview renders nothing, so the dry-run lane keeps its notice-only
-    behavior even with a mismatched checkout (issue #414)."""
-    import subprocess
-
+def _guard_tree(tree, *, commit=False):
+    """A tree that runs the real common.sh guard against dist/MANIFEST.txt."""
     (tree / "scripts" / "airgap").mkdir(parents=True, exist_ok=True)
     shutil.copy(REPO / "scripts" / "airgap" / "common.sh", tree / "scripts" / "airgap" / "common.sh")
-    subprocess.run(["git", "init", "-b", "main"], cwd=tree, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "Test"], cwd=tree, check=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tree, check=True)
-    (tree / "marker.txt").write_text("stale\n")
-    subprocess.run(["git", "add", "."], cwd=tree, check=True)
-    subprocess.run(["git", "commit", "-m", "stale"], cwd=tree, check=True, capture_output=True)
     (tree / "dist").mkdir(exist_ok=True)
     write_signed_manifest(tree / "dist", f"sha: {IMAGE_SHA}\n")
+    if commit:
+        (tree / "marker.txt").write_text("stale\n")
+        _git(tree, "init", "-b", "main")
+        _git(tree, "config", "user.name", "Test")
+        _git(tree, "config", "user.email", "test@example.com")
+        _git(tree, "add", ".")
+        _git(tree, "commit", "-m", "stale")
+    return tree
+
+
+def test_checkout_guard_dryrun_keeps_the_notice_with_a_mismatched_checkout(tree):
+    """Preview renders nothing, so the dry-run lane keeps its notice-only
+    behavior even with a mismatched checkout (issue #414)."""
+    _guard_tree(tree, commit=True)
     r = _guard_run(tree, "dist/MANIFEST.txt", {"AIRGAP_DRYRUN": "1"})
     assert r.returncode == 0, r.stderr
     assert "not release-verified" in r.stderr
@@ -574,10 +540,7 @@ def test_checkout_guard_refuses_unresolved_checkout_when_manifest_is_packed(tree
     cannot be resolved (a copied tree without .git, or no usable git) must not
     run live under that claim just because IMAGE_SHA was set to the packed
     SHA (issue #414). Dry-run keeps its notice-only behavior."""
-    (tree / "scripts" / "airgap").mkdir(parents=True, exist_ok=True)
-    shutil.copy(REPO / "scripts" / "airgap" / "common.sh", tree / "scripts" / "airgap" / "common.sh")
-    (tree / "dist").mkdir(exist_ok=True)
-    write_signed_manifest(tree / "dist", f"sha: {IMAGE_SHA}\n")
+    _guard_tree(tree)
     r = _guard_run(tree, "dist/MANIFEST.txt")
     assert r.returncode != 0
     assert "cannot be resolved" in r.stderr
@@ -651,16 +614,14 @@ def test_checkout_guard_allows_untracked_operator_files(approved):
     assert r.stderr == ""
 
 
-@pytest.mark.parametrize("stage", [True], ids=["staged"])
-@pytest.mark.parametrize("path", ["scripts/airgap/common.sh"])
-def test_checkout_guard_refuses_tracked_edit_at_matching_head(approved, path, stage):
+def test_checkout_guard_refuses_tracked_edit_at_matching_head(approved):
     """Equal HEAD is not enough: an edited tracked script/chart/Taskfile
     must not run under the release claim. The refusal names no file and
     echoes no content."""
+    path = "scripts/airgap/common.sh"
     with (approved / path).open("a") as fh:
         fh.write("\n# SECRET-EDIT-MARKER\n")
-    if stage:
-        _git(approved, "add", path)
+    _git(approved, "add", path)
     r = _approved_run(approved)
     assert r.returncode != 0
     assert "tracked changes against the packed MANIFEST sha" in r.stderr
@@ -718,42 +679,32 @@ def test_checkout_guard_refuses_manifest_without_signed_bundle(approved):
     assert _approved_run(approved).returncode == 0
 
 
-def test_checkout_guard_refuses_manifest_edited_after_signing(approved):
-    """A MANIFEST whose sha still equals HEAD but whose bytes changed after
-    signing (here: an added digest line) no longer matches its signed entry."""
-    manifest = approved / "dist" / "MANIFEST.txt"
-    manifest.write_text(manifest.read_text() + "chart_sha256: " + "0" * 64 + "\n")
-    r = _approved_run(approved)
-    assert r.returncode != 0
-    assert "does not match its signed checksum entry" in r.stderr
-    assert "chart_sha256" not in r.stdout + r.stderr
-
-
-def test_checkout_guard_refuses_forged_manifest_and_sums(approved):
-    """Rewriting MANIFEST and SHA256SUMS consistently but without the signing
-    key leaves a signature that no longer verifies."""
-    from tests.helpers_airgap import sha256_bytes
-
-    manifest = approved / "dist" / "MANIFEST.txt"
-    manifest.write_text(manifest.read_text() + "note: forged\n")
-    (approved / "dist" / "SHA256SUMS").write_text(f"{sha256_bytes(manifest.read_bytes())}  MANIFEST.txt\n")
-    r = _approved_run(approved)
-    assert r.returncode != 0
-    assert "signature verification failed" in r.stderr
-
-
-@pytest.mark.parametrize("listing", ["duplicate"])
-def test_checkout_guard_requires_manifest_listed_exactly_once(approved, listing):
+@pytest.mark.parametrize(("tamper", "needle"), [
+    ("edited", "does not match its signed checksum entry"),
+    ("forged", "signature verification failed"),
+    ("twice-listed", "does not match its signed checksum entry"),
+], ids=["edited-after-signing", "forged-and-resummed", "listed-twice"])
+def test_checkout_guard_refuses_a_broken_signed_manifest(approved, tamper, needle):
+    """HEAD still matches, but the signed chain no longer binds the MANIFEST:
+    an edit after signing, a consistently rewritten pair without the key, or a
+    duplicate sums entry are each refused (the diagnostic echoes no content)."""
     from tests.helpers_airgap import sha256_bytes, sign_sums
 
     dist = approved / "dist"
-    digest = sha256_bytes((dist / "MANIFEST.txt").read_bytes())
-    lines = {"unlisted": f"{'0' * 64}  other.tar\n", "duplicate": f"{digest}  MANIFEST.txt\n" * 2}[listing]
-    (dist / "SHA256SUMS").write_text(lines)
-    sign_sums(dist, _signing_key())  # validly signed, wrong inventory
+    target = dist / "MANIFEST.txt"
+    if tamper == "edited":
+        target.write_text(target.read_text() + "chart_sha256: " + "0" * 64 + "\n")
+    elif tamper == "forged":
+        target.write_text(target.read_text() + "note: forged\n")
+        (dist / "SHA256SUMS").write_text(f"{sha256_bytes(target.read_bytes())}  MANIFEST.txt\n")
+    else:
+        digest = sha256_bytes(target.read_bytes())
+        (dist / "SHA256SUMS").write_text(f"{digest}  MANIFEST.txt\n" * 2)
+        sign_sums(dist, _signing_key())  # validly signed, wrong inventory
     r = _approved_run(approved)
     assert r.returncode != 0
-    assert "does not match its signed checksum entry" in r.stderr
+    assert needle in r.stderr
+    assert "chart_sha256" not in r.stdout + r.stderr and "forged" not in r.stderr
 
 
 def _signing_key():
@@ -773,11 +724,11 @@ def test_checkout_guard_trusted_pub_pins_the_key(approved):
     assert "does not match SNEAKERNET_TRUSTED_PUB" in r.stderr
 
 
-@pytest.mark.parametrize("flag", ["--assume-unchanged"])
-def test_checkout_guard_refuses_index_flags_that_hide_edits(approved, flag):
+def test_checkout_guard_refuses_index_flags_that_hide_edits(approved):
     """`git diff` trusts the index: an edit under assume-unchanged or
     skip-worktree is invisible to it. The flag itself is refused, with the
     edit present or not, and the next run passes once it is cleared."""
+    flag = "--assume-unchanged"
     path = "scripts/airgap/common.sh"
     target = approved / path
     original = target.read_text()
@@ -809,7 +760,10 @@ def test_checkout_guard_refuses_sparse_checkout(approved):
 
 def test_checkout_guard_parent_bundle_layout_is_verified(tmp_path):
     """The documented unpack-next-to-the-clone layout: ../MANIFEST.txt is
-    trusted only through ../SHA256SUMS(.sig) like dist/ is."""
+    trusted only through ../SHA256SUMS(.sig) like dist/ is; a ../SHA256SUMS that
+    names MANIFEST.txt (every packed bundle's list does) is bundle evidence even
+    with MANIFEST.txt removed, while an unrelated one in the parent (a downloads
+    folder) is not, so connected development there keeps the notice."""
     (tmp_path / "ws").mkdir()
     ws = _make_approved(tmp_path / "ws")
     bundle = tmp_path
@@ -822,21 +776,12 @@ def test_checkout_guard_parent_bundle_layout_is_verified(tmp_path):
     bad = _guard_run(ws, "../MANIFEST.txt")
     assert bad.returncode != 0
     assert "does not match its signed checksum entry" in bad.stderr
-
-
-def test_checkout_guard_parent_sums_count_only_when_bundle_shaped(tmp_path):
-    """A ../SHA256SUMS that names MANIFEST.txt (every packed bundle's list
-    does) is bundle evidence even with MANIFEST.txt removed; an unrelated
-    SHA256SUMS in the parent (e.g. a downloads folder) is not, so connected
-    development there keeps the notice (issue #414 limit 3)."""
-    (tmp_path / "ws").mkdir()
-    ws = _make_approved(tmp_path / "ws")
-    shutil.rmtree(ws / "dist")
-    (tmp_path / "SHA256SUMS").write_text(f"{'0' * 64}  some-iso.img\n")
+    # The parent list is only evidence when it is bundle-shaped.
+    (bundle / "SHA256SUMS").write_text(f"{'0' * 64}  some-iso.img\n")
     stray = _guard_run(ws, "dist/MANIFEST.txt")
     assert stray.returncode == 0, stray.stderr
     assert "not release-verified" in stray.stderr
-    (tmp_path / "SHA256SUMS").write_text(f"{'0' * 64}  MANIFEST.txt\n")
+    (bundle / "SHA256SUMS").write_text(f"{'0' * 64}  MANIFEST.txt\n")
     r = _guard_run(ws, "dist/MANIFEST.txt")
     assert r.returncode != 0
     assert "bundle evidence" in r.stderr
@@ -863,14 +808,12 @@ def test_model_validation_preserves_caller_over_file_precedence(tree):
     assert "private-invalid-url" not in result.stdout + result.stderr
 
 
-@pytest.mark.parametrize("missing", ["CONTEXT_LLM_MODEL"])
-def test_contextual_model_pair_required_in_preflight(tree, missing):
+def test_contextual_model_pair_required_in_preflight(tree):
     config = {"CONTEXTUAL_EMBED_ENABLED": "true", "CONTEXT_LLM_BASE_URL": "https://context/v1",
-              "CONTEXT_LLM_MODEL": "context-model"}
-    config[missing] = ""
+              "CONTEXT_LLM_MODEL": ""}
     result = _run(tree, config)
     assert result.returncode != 0
-    assert f"{missing} is required when CONTEXTUAL_EMBED_ENABLED is set" in result.stderr
+    assert "CONTEXT_LLM_MODEL is required when CONTEXTUAL_EMBED_ENABLED is set" in result.stderr
 
 
 @pytest.mark.parametrize("shared", [False, True])
@@ -887,11 +830,10 @@ def test_shipped_example_model_mode_is_explicit(tree, shared):
 
 # ---------------------------------------------- strict operator booleans (#272)
 
-@pytest.mark.parametrize("key", ["INGEST_REINGEST"])
-def test_validate_invalid_operator_boolean_refused(tree, key):
-    r = _run(tree, {key: "maybe-secretish"})
+def test_validate_invalid_operator_boolean_refused(tree):
+    r = _run(tree, {"INGEST_REINGEST": "maybe-secretish"})
     assert r.returncode != 0
-    assert f"{key} must be true/false" in r.stderr
+    assert "INGEST_REINGEST must be true/false" in r.stderr
     assert "maybe-secretish" not in r.stderr + r.stdout
 
 
@@ -911,10 +853,7 @@ def test_validate_file_model_budgets_fail_before_later_stages(tree, key, bad):
 # appears once with a different accepted spelling. INGEST_ALIAS_PUBLISH accepts
 # only unset/true since in-place ingest was retired (#360); its false spellings
 # are pinned by the refusal test below.
-_ACCEPTED_BOOLEANS = [
-    ("CONTEXTUAL_EMBED_ENABLED", "YES"),
-    ("LLM_STREAM", "no"),
-]
+_ACCEPTED_BOOLEANS = [('CONTEXTUAL_EMBED_ENABLED', 'YES'), ('LLM_STREAM', 'no')]
 
 
 @pytest.mark.parametrize(("key", "value"), _ACCEPTED_BOOLEANS)
@@ -962,15 +901,9 @@ def _live(tree, **extra):
     return _run(tree, {"AIRGAP_DRYRUN": "0", **extra})
 
 
-def test_validate_live_storageclass_notfound_fails(tree):
-    write_stub(tree / "bin" / "kubectl", _kubectl_stub("storageclass", NOT_FOUND))
-    r = _live(tree)
-    assert r.returncode != 0
-    assert "must exist before deployment" in r.stderr
 
 
-@pytest.mark.parametrize("snapshot_class", ["standard"])
-def test_validate_live_shared_snapshot_storageclass_is_read_once(tree, snapshot_class):
+def test_validate_live_shared_snapshot_storageclass_is_read_once(tree):
     write_stub(
         tree / "bin" / "kubectl",
         "#!/bin/sh\n"
@@ -978,7 +911,7 @@ def test_validate_live_shared_snapshot_storageclass_is_read_once(tree, snapshot_
         '  printf \'%s\\n\' "$3" >> storageclass-reads\n'
         "fi\nexit 0\n",
     )
-    r = _live(tree, SNAPSHOT_STORAGE_CLASS=snapshot_class)
+    r = _live(tree, SNAPSHOT_STORAGE_CLASS="standard")
     assert r.returncode == 0, r.stderr
     assert (tree / "storageclass-reads").read_text().splitlines() == ["standard"]
 
@@ -988,10 +921,7 @@ def test_validate_live_shared_snapshot_storageclass_is_read_once(tree, snapshot_
     ("dial tcp: connection refused", 1, "cannot read StorageClass 'snapshot-tier' (unexpected client error)"),
 ])
 def test_validate_live_distinct_snapshot_storageclass_probe(tree, client_error, exit_code, message):
-    failure = (
-        f"  cat >&2 <<'EOT'\n{client_error}\nEOT\n  exit 1\n"
-        if client_error else "  exit 0\n"
-    )
+    failure = f"  cat >&2 <<'EOT'\n{client_error}\nEOT\n  exit 1\n" if client_error else '  exit 0\n'
     write_stub(
         tree / "bin" / "kubectl",
         "#!/bin/sh\n"
@@ -1008,29 +938,36 @@ def test_validate_live_distinct_snapshot_storageclass_probe(tree, client_error, 
         assert client_error not in r.stdout + r.stderr
 
 
-def test_validate_live_storageclass_forbidden_is_not_reported_absent(tree):
-    write_stub(tree / "bin" / "kubectl", _kubectl_stub("storageclass", FORBIDDEN))
-    r = _live(tree)
-    assert r.returncode == 0, r.stderr
-    assert "not found" not in r.stdout
-    assert "Forbidden" in r.stdout and "NOT verified" in r.stdout
 
 
-def test_validate_live_notfound_name_containing_forbidden_still_fails(tree):
-    """The reason token decides, not free text: a missing StorageClass whose
-    name contains 'forbidden' must not be classified as a Forbidden read."""
-    text = 'Error from server (NotFound): storageclasses.storage.k8s.io "ceph-forbidden-tier" not found'
+@pytest.mark.parametrize("text", [
+    NOT_FOUND,
+    # The reason token decides, not free text: a missing StorageClass whose name
+    # contains 'forbidden' must not be classified as a Forbidden read.
+    'Error from server (NotFound): storageclasses.storage.k8s.io "ceph-forbidden-tier" not found',
+], ids=["notfound", "notfound-name-contains-forbidden"])
+def test_validate_live_storageclass_notfound_fails(tree, text):
     write_stub(tree / "bin" / "kubectl", _kubectl_stub("storageclass", text))
     r = _live(tree)
     assert r.returncode != 0
     assert "must exist before deployment" in r.stderr
 
 
-def test_validate_live_storageclass_other_error_fails(tree):
-    write_stub(tree / "bin" / "kubectl", _kubectl_stub("storageclass", "dial tcp: connection refused"))
+@pytest.mark.parametrize(("text", "refused"), [
+    (FORBIDDEN, False),
+    ("dial tcp: connection refused", True),
+], ids=["forbidden-is-a-notice", "other-error-fails"])
+def test_validate_live_storageclass_client_error_classified(tree, text, refused):
+    write_stub(tree / "bin" / "kubectl", _kubectl_stub("storageclass", text))
     r = _live(tree)
-    assert r.returncode != 0
-    assert "unexpected client error" in r.stderr
+    assert text not in r.stdout + r.stderr
+    if refused:
+        assert r.returncode != 0
+        assert "unexpected client error" in r.stderr
+        return
+    assert r.returncode == 0, r.stderr
+    assert "not found" not in r.stdout
+    assert "Forbidden" in r.stdout and "NOT verified" in r.stdout
 
 
 def _namespace_admin_kubectl(api_error=None):
@@ -1058,11 +995,9 @@ def test_validate_live_namespace_admin_passes_cluster_probe(tree):
     assert "cluster type is NOT determined" in r.stdout
 
 
-@pytest.mark.parametrize("api_error", [
-    FORBIDDEN,  # anonymous: /version would pass, discovery does not
-])
-def test_validate_live_unauthenticated_or_unreachable_api_fails(tree, api_error):
-    write_stub(tree / "bin" / "kubectl", _namespace_admin_kubectl(api_error))
+def test_validate_live_unauthenticated_or_unreachable_api_fails(tree):
+    # anonymous: /version would pass, discovery does not
+    write_stub(tree / "bin" / "kubectl", _namespace_admin_kubectl(FORBIDDEN))
     r = _live(tree)
     assert r.returncode != 0
     assert "cannot connect to Kubernetes/OpenShift API server" in r.stderr
@@ -1086,29 +1021,21 @@ def test_validate_live_forbidden_secret_fails_not_absent(tree):
     assert "not found" not in r.stderr
 
 
-def test_validate_live_scc_readable_reports_openshift(tree):
+@pytest.mark.parametrize(("text", "needle"), [
+    (None, "OpenShift cluster detected"),
+    ('error: the server doesn\'t have a resource type "scc"', "Standard Kubernetes cluster detected"),
+    ("dial tcp: i/o timeout", "cluster type is NOT determined"),
+], ids=["scc-readable", "scc-missing-type", "scc-unreadable"])
+def test_validate_live_detects_the_cluster_type(tree, text, needle):
+    if text:
+        write_stub(tree / "bin" / "kubectl", _kubectl_stub("scc", text))
     r = _live(tree)
     assert r.returncode == 0, r.stderr
-    assert "OpenShift cluster detected" in r.stdout
+    assert needle in r.stdout
+    if text == "dial tcp: i/o timeout":
+        assert "Standard Kubernetes" not in r.stdout
 
 
-def test_validate_live_scc_missing_type_reports_standard_kubernetes(tree):
-    write_stub(
-        tree / "bin" / "kubectl",
-        _kubectl_stub("scc", "error: the server doesn't have a resource type \"scc\""),
-    )
-    r = _live(tree)
-    assert r.returncode == 0, r.stderr
-    assert "Standard Kubernetes cluster detected" in r.stdout
-
-
-@pytest.mark.parametrize("text", ["dial tcp: i/o timeout"])
-def test_validate_live_scc_failure_is_not_standard_kubernetes(tree, text):
-    write_stub(tree / "bin" / "kubectl", _kubectl_stub("scc", text))
-    r = _live(tree)
-    assert r.returncode == 0, r.stderr
-    assert "Standard Kubernetes" not in r.stdout
-    assert "cluster type is NOT determined" in r.stdout
 
 
 # ------------------------------------------------ feedback service (#804)
@@ -1238,25 +1165,23 @@ def test_validate_reports_the_feedback_selection(tree):
     assert "retention 90 days, token from Secret fb (key service-token)" in on.stdout
 
 
-def test_validate_route_dryrun_accepts_recorded_consistent_pin(tree):
-    _route_tree(tree)
-    r = _route_run(tree, live=False)
-    assert r.returncode == 0, r.stderr
-    assert "oauth-proxy pin recorded; matches the chart" in r.stdout
-    assert "--email-domain=*" in r.stdout
-
-
-def test_validate_route_dryrun_pending_pin_refused(tree):
-    _route_tree(tree, pin="sha256:PENDING")
-    r = _route_run(tree, live=False)
-    assert r.returncode != 0
-    assert "oauth-proxy digest recorded" in r.stderr
-
-
-def test_validate_route_off_ignores_the_oauth_pin(tree):
-    _route_tree(tree, pin="sha256:PENDING")
-    r = _run(tree, {"AGENT_ROUTE": "false"})
-    assert r.returncode == 0, r.stderr
+@pytest.mark.parametrize(("pin", "route_on"), [
+    (GOOD_PIN, True),
+    ("sha256:PENDING", True),
+    ("sha256:PENDING", False),
+], ids=["recorded", "pending-refused", "route-off-ignores-pin"])
+def test_validate_route_pin_state(tree, pin, route_on):
+    _route_tree(tree, pin=pin)
+    r = _route_run(tree, live=False) if route_on else _run(tree, {"AGENT_ROUTE": "false"})
+    if pin == GOOD_PIN:
+        assert r.returncode == 0, r.stderr
+        assert "oauth-proxy pin recorded; matches the chart" in r.stdout
+        assert "--email-domain=*" in r.stdout
+    elif route_on:
+        assert r.returncode != 0
+        assert "oauth-proxy digest recorded" in r.stderr
+    else:
+        assert r.returncode == 0, r.stderr
 
 
 def test_validate_route_pin_tag_must_match_chart(tree):
@@ -1268,28 +1193,18 @@ def test_validate_route_pin_tag_must_match_chart(tree):
     assert "does not match the chart" in r.stderr
 
 
-def test_validate_route_manifest_without_oauth_member_refused(tree):
+@pytest.mark.parametrize(("lines", "rc", "needle"), [
+    ((), 1, "packed without the oauth-proxy image"),
+    (("oauth_proxy: registry.redhat.io/openshift4/ose-oauth-proxy@sha256:" + "c" * 64,),
+     1, "differs from images.txt"),
+    ((f"oauth_proxy: {OAUTH_REF}",), 0, "and the packed bundle"),
+], ids=["absent", "other-pin", "matching-pin"])
+def test_validate_route_manifest_pin_state(tree, lines, rc, needle):
     _route_tree(tree)
-    _manifest(tree)
+    _manifest(tree, *lines)
     r = _route_run(tree, live=False)
-    assert r.returncode != 0
-    assert "packed without the oauth-proxy image" in r.stderr
-
-
-def test_validate_route_manifest_with_other_pin_refused(tree):
-    _route_tree(tree)
-    _manifest(tree, "oauth_proxy: registry.redhat.io/openshift4/ose-oauth-proxy@sha256:" + "c" * 64)
-    r = _route_run(tree, live=False)
-    assert r.returncode != 0
-    assert "differs from images.txt" in r.stderr
-
-
-def test_validate_route_manifest_with_matching_pin_passes(tree):
-    _route_tree(tree)
-    _manifest(tree, f"oauth_proxy: {OAUTH_REF}")
-    r = _route_run(tree, live=False)
-    assert r.returncode == 0, r.stderr
-    assert "and the packed bundle" in r.stdout
+    assert r.returncode == rc, r.stderr
+    assert needle in (r.stdout if rc == 0 else r.stderr)
 
 
 # ----------------------------------------- optional Open WebUI image (#1074)
@@ -1422,27 +1337,18 @@ def test_validate_route_live_success(tree):
     assert "Namespace service CA readable" in r.stdout
 
 
-@pytest.mark.parametrize("state,message", [
-    ("forbidden", "may not read Secret 'rag-agent-oauth-cookie'"),
-])
-def test_validate_route_live_cookie_secret_failures(tree, state, message):
+def test_validate_route_live_cookie_secret_failures(tree):
     _route_tree(tree)
-    r = _route_run(tree, COOKIE_SECRET=state)
-    assert r.returncode != 0
-    assert message in r.stderr
+    for env, message in (({"COOKIE_SECRET": "forbidden"}, "may not read Secret 'rag-agent-oauth-cookie'"),
+                         ({"MISSING_COOKIE_KEY": "1"}, "missing or empty: cookie-secret")):
+        r = _route_run(tree, **env)
+        assert r.returncode != 0
+        assert message in r.stderr
 
 
-def test_validate_route_live_cookie_key_missing(tree):
+def test_validate_route_live_service_ca_must_be_pem(tree):
     _route_tree(tree)
-    r = _route_run(tree, MISSING_COOKIE_KEY="1")
-    assert r.returncode != 0
-    assert "missing or empty: cookie-secret" in r.stderr
-
-
-@pytest.mark.parametrize("ca", ["garbage"])
-def test_validate_route_live_service_ca_must_be_pem(tree, ca):
-    _route_tree(tree)
-    r = _route_run(tree, SERVICE_CA=ca)
+    r = _route_run(tree, SERVICE_CA="garbage")
     assert r.returncode != 0
     assert "not a PEM certificate bundle" in r.stderr
 
@@ -1560,17 +1466,13 @@ def test_validate_refuses_a_d53595e_shaped_env_listing_exactly_the_retired_keys(
     _assert_retired_refusal(r, calls, RETIRED_ENV_KEYS)
 
 
+@pytest.mark.parametrize("source", ["file", "environment"])
 @pytest.mark.parametrize("key", RETIRED_ENV_KEYS)
-def test_validate_refuses_each_retired_key_alone(tree, key):
-    r, calls = _run_with_recording_stubs(
-        tree, {"AIRGAP_ENV": _write_env_file(tree, f"{key}={RETIRED_ENV_VALUES[key]}\n")}
-    )
+def test_validate_refuses_each_retired_key_alone(tree, key, source):
+    value = RETIRED_ENV_VALUES[key]
+    env = {"AIRGAP_ENV": _write_env_file(tree, f"{key}={value}\n")} if source == "file" else {key: value}
+    r, calls = _run_with_recording_stubs(tree, env)
     _assert_retired_refusal(r, calls, [key])
-
-
-def test_validate_refuses_a_retired_key_from_the_process_environment(tree):
-    r, calls = _run_with_recording_stubs(tree, {"VLLM_BASE_URL": RETIRED_ENV_VALUES["VLLM_BASE_URL"]})
-    _assert_retired_refusal(r, calls, ["VLLM_BASE_URL"])
 
 
 def test_validate_accepts_empty_and_commented_retired_keys_then_refuses_the_filled_one(tree):
@@ -1588,36 +1490,28 @@ def test_validate_accepts_empty_and_commented_retired_keys_then_refuses_the_fill
 _JAEGER_LINE = "OTEL_EXPORTER_OTLP_ENDPOINT (retired in d7765dc): points at the retired in-cluster Jaeger"
 
 
-@pytest.mark.parametrize("endpoint", [
-    "http://jaeger:4318",
-    "https://jaeger:4318/v1/traces",
-    "http://Jaeger.mainframe-rag.svc:4318",
-    "http://jaeger.mainframe-rag.svc.cluster.local:4318",
-])
-def test_validate_refuses_the_retired_in_cluster_jaeger_endpoint(tree, endpoint):
-    """d53595e's example pointed the exporter at http://jaeger:4318; today any set
-    endpoint means an external collector, so it would silently drop traces."""
-    r, calls = _run_with_recording_stubs(tree, {"OTEL_EXPORTER_OTLP_ENDPOINT": endpoint})
+@pytest.mark.parametrize(("endpoint", "refused"), [
+    # d53595e's example pointed the exporter at http://jaeger:4318; today any set
+    # endpoint means an external collector, so it would silently drop traces.
+    ("http://jaeger:4318", True), ("https://jaeger:4318/v1/traces", True),
+    ("http://Jaeger.mainframe-rag.svc:4318", True),
+    ("http://jaeger.mainframe-rag.svc.cluster.local:4318", True),
+    (None, False), ("", False), ("off", False), ("http://collector.platform:4318", False),
+    ("http://jaeger-collector.platform:4318", False), ("http://jaeger.example.com:4318", False),
+], ids=lambda v: "unset" if v is None else (v or "empty"))
+def test_validate_trace_endpoint_classification(tree, endpoint, refused):
+    extra = {} if endpoint is None else {"OTEL_EXPORTER_OTLP_ENDPOINT": endpoint}
+    if not refused:
+        r = _run(tree, extra)
+        assert r.returncode == 0, r.stderr
+        return
+    r, calls = _run_with_recording_stubs(tree, extra)
     assert r.returncode != 0
     assert _JAEGER_LINE in r.stderr
     assert "unset it to use the bundled OpenObserve collector, or set your external collector" in r.stderr
     assert retired_keys_listed(r.stderr) == ["OTEL_EXPORTER_OTLP_ENDPOINT"]
     assert endpoint not in r.stdout + r.stderr
     assert calls == []
-
-
-@pytest.mark.parametrize("endpoint", [
-    None,
-    "",
-    "off",
-    "http://collector.platform:4318",
-    "http://jaeger-collector.platform:4318",
-    "http://jaeger.example.com:4318",
-])
-def test_validate_accepts_unset_empty_off_and_external_collectors(tree, endpoint):
-    extra = {} if endpoint is None else {"OTEL_EXPORTER_OTLP_ENDPOINT": endpoint}
-    r = _run(tree, extra)
-    assert r.returncode == 0, r.stderr
 
 
 # --- Site sizing keys (#1070 R2): airgap.env values validate like env values ---

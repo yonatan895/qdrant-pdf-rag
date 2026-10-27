@@ -28,6 +28,24 @@ BASE_ENV = {
 def run(cmd, cwd, env=None):
     return subprocess.run(cmd, capture_output=True, text=True, cwd=cwd, env=env, check=False)
 
+def merge_values(dst: dict, src: dict) -> dict:
+    """Recursive merge of synthetic values (`src` wins on scalars)."""
+    for key, value in src.items():
+        if isinstance(value, dict) and isinstance(dst.get(key), dict):
+            merge_values(dst[key], value)
+        else:
+            dst[key] = value
+    return dst
+
+def set_path(values: dict, path: str, value) -> dict:
+    """Assign a dotted path in a values mapping, creating parents as needed."""
+    *parents, leaf = path.split(".")
+    node = values
+    for part in parents:
+        node = node.setdefault(part, {})
+    node[leaf] = value
+    return values
+
 def base_values() -> dict:
     """Independent synthetic operator mapping (not computed from the chart)."""
     return {
@@ -131,14 +149,7 @@ def run_new_template(extra_values: dict, namespace: str = "ns", *, job_only: boo
     if "_namespace" in extras:
         ns = extras.pop("_namespace")
 
-    def merge(dst, src):
-        for k, v in src.items():
-            if isinstance(v, dict) and isinstance(dst.get(k), dict):
-                merge(dst[k], v)
-            else:
-                dst[k] = v
-
-    merge(values, extras)
+    merge_values(values, extras)
     r = _helm_template_with_values(values, ns, job_only=job_only, chart=chart)
     assert r.returncode == 0, f"helm template failed: {r.stderr}"
     if not job_only:

@@ -23,6 +23,7 @@ Build a **citation-first expert mainframe agent** that answers operational quest
 The intended acceptance is **answers supported by supplied evidence and citations** (doc number, title, heading path, printed page label) and, when asked, JCL/REXX/operator steps verified against those citations. Claim support is not established by citation eligibility alone (see the answer contract below). Agent-fetched live-state prompt wiring under ADR-0003 remains incomplete; the desired behavior is distinct live citations and honest manuals-only degradation.
 
 ### 1.1 Ownership contract (prod vs local simulation)
+<a id="ownership-contract"></a>
 
 | Environment | Model tier (reasoning / embed / rerank) | Qdrant + ingest + retrieval + agent |
 |---|---|---|
@@ -326,9 +327,8 @@ src/mainframe_rag/
 
 ### Per-area reference docs
 
-Deep contracts, rationale, and constants live in the per-area references (one fact, one owner — this file states the design, those files state the details):
-- `docs/ingest.md` — parse/chunk/classify/embed/Qdrant pipeline, payload contract, id-stability rules
-- `docs/retrieval.md` — query flow, RRF, filters, screen, rerank, rewrite, diversification (incl. Appendix A identifier patterns)
-- `docs/agent.md` — endpoint/error/SSE contracts, prompt assembly and budgets, Settings catalog
-- `docs/eval.md` — tiers, gates, thresholds, baselines, mock fidelity limits
-- `docs/deploy.md` — air-gap script contracts, render pipeline, signing model, CI inventory
+This file states the design; the deep contracts, rationale and constants live
+with their owners. The machine-checked
+[context map](agent-workflow.md#context-map) is the current contract-to-owner
+index (one fact, one owner) and is verified by `qa:context`; it replaces the
+hand-maintained list that used to sit here.

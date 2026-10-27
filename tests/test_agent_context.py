@@ -1,4 +1,5 @@
 """Dependency-free context checker tests: temporary trees, no product imports."""
+import hashlib
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase
@@ -10,15 +11,19 @@ REAL_ROOT = Path(__file__).resolve().parents[1]
 SHA = "a"*40
 
 
+def _required_tree(root: Path) -> None:
+    for name in REQUIRED:
+        path = root/name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("content\n", encoding="utf-8")
+
+
 class ContextCheckTests(TestCase):
     def setUp(self):
         self.temp = TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        for name in REQUIRED:
-            path = self.root/name
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text("content\n", encoding="utf-8")
+        _required_tree(self.root)
         self.workflow = self.root/"docs/agent-workflow.md"
         self.workflow.write_text('''<!-- context-map:start -->
 | Contract | Canonical owner | Boundaries | Evidence |
@@ -183,10 +188,7 @@ class VendoredSkillsTests(TestCase):
         self.temp = TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        for name in REQUIRED:
-            path = self.root/name
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text("content\n", encoding="utf-8")
+        _required_tree(self.root)
         (self.root/"docs/agent-workflow.md").write_text(
             "<!-- context-map:start -->\n| C | O | B | E |\n|---|---|---|---|\n"
             "| x | [O](o.md) | [B](o.md) | [E](o.md) |\n<!-- context-map:end -->\n"
@@ -331,8 +333,6 @@ class VendoredSkillsTests(TestCase):
                 upstream.write_text("original upstream skill\n")
 
     def test_repository_engineering_vendor_bytes_match_the_pinned_manifest(self):
-        import hashlib
-
         for provider in ("mattpocock-skills", "pstack-skills"):
             with self.subTest(provider=provider):
                 manifest = REAL_ROOT/f".agents/{provider}.sha256"

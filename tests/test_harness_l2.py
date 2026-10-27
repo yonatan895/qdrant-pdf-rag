@@ -54,13 +54,12 @@ def test_cited_doc_ids_maps_and_records_unmatched():
 
 # ---------------------------------------------------------------- precision / recall
 
-def test_precision_recall_no_citations_zero_recall_not_none():
+def test_precision_recall_semantics():
+    p, r = precision_recall({"A", "X", "Y"}, {"A", "B"})
+    assert p == pytest.approx(1 / 3) and r == 0.5
     # Zero validated citations on an answer row is a recall miss, not a
     # denominator gap — the row must pull the average down.
     assert precision_recall(set(), {"A"}) == (None, 0.0)
-
-
-def test_precision_recall_no_gold_is_none():
     # Abstain rows carry no gold and stay out of the denominators.
     assert precision_recall({"A"}, set()) == (None, None)
 
@@ -168,11 +167,6 @@ def test_judge_chat_pins_temperature_and_reasoning_effort():
 
 # ---------------------------------------------------------------- syntax gold
 
-def test_syntax_check_invalid_pattern_fails_closed():
-    with pytest.raises(JudgeError):
-        syntax_check(r"([unclosed", "answer", None)
-
-
 # ---------------------------------------------------------------- truncation capture
 
 def _emit(handler: _AlertCapture, payload: str) -> None:
@@ -199,11 +193,13 @@ def _entry(eid: str = "X", behavior: str = "answer", gold: list | None = None, p
     return e
 
 
-def _llm_row(**kw) -> dict:
+def _llm_row(rid: str = "X", **kw) -> dict:
+    """One L2 row: the fields apply_l2_measurements writes plus the summary's."""
     row = {
-        "id": "X", "query": "q", "query_class": "syntax", "expected_behavior": "answer",
+        "id": rid, "query": "q", "query_class": "syntax", "expected_behavior": "answer",
         "verdict": "pass", "failures": [], "path": "llm", "citations": [],
         "request_id": "abc", "answer": "body", "script": None,
+        "cited_doc_ids": ["D1"], "truncated": False, "syntax_ok": True,
     }
     row.update(kw)
     return row
@@ -240,22 +236,14 @@ def test_apply_syntax_miss_fails_row():
 
 # ---------------------------------------------------------------- summarize + gate
 
-def _row(rid: str, **kw) -> dict:
-    base = {
-        "id": rid, "query": "q", "query_class": "syntax", "expected_behavior": "answer",
-        "verdict": "pass", "failures": [], "path": "llm", "citations": ["[1] c"],
-        "cited_doc_ids": ["D1"], "truncated": False, "syntax_ok": True,
-    }
-    base.update(kw)
-    return base
-
-
 def test_summarize_rates_and_structural_counts():
     rows = [
-        _row("A", citation_precision=1.0, citation_recall=1.0, judge_label="entailed"),
-        _row("B", verdict="fail", failures=["x"], judge_label="contradiction"),
-        _row("C", path="zero_hits", citations=[]),
-        _row("D", verdict="error", failures=["HTTP 502"]),
+        _llm_row("A", citations=["[1] c"], citation_precision=1.0, citation_recall=1.0,
+                 judge_label="entailed"),
+        _llm_row("B", verdict="fail", failures=["x"], citations=["[1] c"],
+                 judge_label="contradiction"),
+        _llm_row("C", path="zero_hits", citations=[]),
+        _llm_row("D", verdict="error", failures=["HTTP 502"]),
     ]
     m = summarize_l2(rows)
     assert m["structural_fails"] == 1
@@ -268,17 +256,17 @@ def test_summarize_rates_and_structural_counts():
 
 
 def test_gate_passes_on_rates_and_holds_on_fails():
-    good = summarize_l2([_row("A", judge_label="entailed")])
+    good = summarize_l2([_llm_row("A", judge_label="entailed")])
     assert gate_l2(good) == ("pass", [])
-    bad = summarize_l2([_row("B", verdict="fail", failures=["syntax pattern missed: x"])])
+    bad = summarize_l2([_llm_row("B", verdict="fail", failures=["syntax pattern missed: x"])])
     verdict, reasons = gate_l2(bad)
     assert verdict == "hold" and reasons
-    judge_bad = summarize_l2([_row("C", judge_error="JudgeError: junk")])
+    judge_bad = summarize_l2([_llm_row("C", judge_error="JudgeError: junk")])
     assert gate_l2(judge_bad)[0] == "hold"
 
 
 def test_gate_holds_on_judge_error_alone():
-    m = summarize_l2([_row("A", judge_error="JudgeError: unparseable")])
+    m = summarize_l2([_llm_row("A", judge_error="JudgeError: unparseable")])
     # the judge failing closed must hold the gate even with no other failure
     assert m["faithfulness"]["judge_errors"] == 1
     verdict, reasons = gate_l2(m)
@@ -393,15 +381,6 @@ def test_run_l2_http_sequence_attribution_and_next_run(monkeypatch, relevance_en
     assert len(clients) == 2 and all(client.closed for client in clients)
 
 
-def test_precision_recall_semantics():
-    p, r = precision_recall({"A", "X", "Y"}, {"A", "B"})
-    assert p == pytest.approx(1 / 3) and r == 0.5
-    # Zero validated citations on an answer row is a recall miss, not a
-    # denominator gap; abstain rows (no gold) stay out of the denominators.
-    assert precision_recall(set(), {"A"}) == (None, 0.0)
-    assert precision_recall({"A"}, set()) == (None, None)
-
-
 def test_judge_labels_parse_and_fail_closed_on_junk():
     assert parse_judge_label('The judgment:\n```json\n{"label": "contradiction"}\n```\nDone.') == "contradiction"
     assert parse_relevance_label('```json\n{"label": "irrelevant"}\n```') == "irrelevant"
@@ -440,7 +419,7 @@ def test_apply_truncation_join_and_content_floor_exemptions():
 
 
 def test_gate_holds_on_relevance_judge_error_alone():
-    m = summarize_l2([_row("A", judge_label="entailed", relevance_error="JudgeError: junk")])
+    m = summarize_l2([_llm_row("A", judge_label="entailed", relevance_error="JudgeError: junk")])
     assert m["relevance"]["judge_errors"] == 1
     verdict, reasons = gate_l2(m)
     assert verdict == "hold"

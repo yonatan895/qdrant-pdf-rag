@@ -2,18 +2,34 @@
 from __future__ import annotations
 
 import hashlib
+import http.server
+import io
 import json
 import re
 import sys
+import tarfile
+import threading
 import tomllib
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import urlsplit
 
 import pytest
 from packaging.requirements import Requirement
 from packaging.version import Version
 from scripts import dependency_lock as locks
 from scripts import prepare_python
+from scripts.image_inventory import inventory, verify_sbom
+
+from tests.helpers_image_inventory import (
+    DOCKER_MANIFEST,
+    image_files,
+    oci_archive,
+    tar_bytes,
+    write_docker_archive,
+    write_image,
+)
 
 
 def _report(items):
@@ -240,10 +256,6 @@ def test_installed_only_or_wrong_version_dependency_fails(locked, monkeypatch):
 
 
 def test_parallel_acquisition_overlaps_and_verifies_each_download_before_reuse(locked, monkeypatch, capsys):
-    import io
-    import threading
-    from pathlib import Path
-    from urllib.parse import urlsplit
 
     root, _, wheels = locked
     contents = {path.name: path.read_bytes() for path in wheels.glob('*.whl')}
@@ -269,10 +281,6 @@ def test_parallel_acquisition_overlaps_and_verifies_each_download_before_reuse(l
 
 @pytest.mark.parametrize('failure', ['checksum', 'transport'])
 def test_parallel_failure_drains_workers_preserves_cache_and_next_prepare_recovers(locked, monkeypatch, failure):
-    import io
-    import threading
-    from pathlib import Path
-    from urllib.parse import urlsplit
 
     root, _, wheels = locked
     contents = {path.name: path.read_bytes() for path in wheels.glob('*.whl')}
@@ -313,8 +321,6 @@ class _StallingWheelServer:
     """Local HTTP server: the first `stalls` requests accept and never answer."""
 
     def __init__(self, content, stalls, mode='silent'):
-        import http.server
-        import threading
         self.requests = 0
         self.release = threading.Event()
         outer = self
@@ -400,7 +406,6 @@ def test_stalled_download_times_out_retries_and_succeeds(locked, monkeypatch, wo
             body = contents[name]
             if name.startswith('example-'):
                 return real(server.url, timeout=timeout)
-            import io
             return io.BytesIO(body)
         monkeypatch.setattr(locks.urllib.request, 'urlopen', by_name)
         locks.acquire(root, 'dev', wheels, workers=workers)
@@ -436,7 +441,6 @@ def test_trickling_download_is_cut_off_by_the_attempt_deadline(locked, monkeypat
 
 
 def test_retried_download_still_fails_on_wrong_bytes_without_retrying(locked, monkeypatch):
-    import io
     root, _, wheels = locked
     for path in wheels.glob('*.whl'):
         path.unlink()
@@ -531,9 +535,7 @@ def test_preparation_uses_verified_pip_and_no_isolated_build_resolution(locked, 
 
 @pytest.mark.parametrize("compressed", [False, True])
 def test_actual_image_layers_and_receipt_reconcile(locked, compressed):
-    from scripts.image_inventory import inventory
 
-    from tests.helpers_image_inventory import image_files, write_image
 
     root, _, _ = locked
     archive = root / 'image.tar'
@@ -568,17 +570,8 @@ def test_actual_image_layers_and_receipt_reconcile(locked, compressed):
 
 
 def test_image_layer_tamper_is_detected_even_when_metadata_stays_valid(locked):
-    import tarfile
 
-    from scripts.image_inventory import inventory
 
-    from tests.helpers_image_inventory import (
-        DOCKER_MANIFEST,
-        image_files,
-        oci_archive,
-        tar_bytes,
-        write_image,
-    )
 
     root, _, _ = locked
     archive = root / 'image.tar'
@@ -603,16 +596,8 @@ def test_image_layer_tamper_is_detected_even_when_metadata_stays_valid(locked):
 
 
 def test_image_inventory_reads_only_single_image_oci_archives(locked):
-    import tarfile
 
-    from scripts.image_inventory import inventory
 
-    from tests.helpers_image_inventory import (
-        image_files,
-        tar_bytes,
-        write_docker_archive,
-        write_image,
-    )
 
     root, _, _ = locked
     archive = root / 'image.tar'
@@ -631,9 +616,7 @@ def test_image_inventory_reads_only_single_image_oci_archives(locked):
 
 
 def test_serialized_sbom_omission_is_rejected_against_actual_archives(locked):
-    from scripts.image_inventory import inventory, verify_sbom
 
-    from tests.helpers_image_inventory import image_files, write_image
 
     root, _, _ = locked
     commit = 'a' * 40
@@ -673,7 +656,6 @@ def test_preparation_revalidates_identity_without_reacquiring_approved_bytes(loc
 
 
 def test_staged_acquisition_failure_preserves_previous_cache_then_recovers(locked, monkeypatch):
-    import io
     root, reports, wheels = locked
     locks.prepare(root, 'dev', wheels)
     before = {p.name: p.read_bytes() for p in wheels.iterdir()}
@@ -722,7 +704,6 @@ def test_preparation_refuses_unowned_and_symlink_destinations(locked, monkeypatc
 
 
 def test_interrupted_member_publication_has_no_marker_and_next_prepare_recovers(locked, monkeypatch):
-    from pathlib import Path
     root, _, wheels = locked
     locks.prepare(root, 'dev', wheels)
     marker = wheels / '.task-complete'
@@ -744,8 +725,6 @@ def test_interrupted_member_publication_has_no_marker_and_next_prepare_recovers(
 
 
 def test_preparers_serialize_and_second_reuses_complete_result(locked, monkeypatch):
-    import threading
-    from concurrent.futures import ThreadPoolExecutor
     root, _, wheels = locked
     entered = threading.Event()
     release = threading.Event()
@@ -781,7 +760,6 @@ def test_preparers_serialize_and_second_reuses_complete_result(locked, monkeypat
 
 @pytest.mark.parametrize('mutation', ['corrupt', 'mtime', 'requirements'])
 def test_preparation_freshness_uses_content_and_repair_is_explicit(locked, monkeypatch, mutation):
-    import io
     root, _, wheels = locked
     locks.prepare(root, 'dev', wheels)
     wheel = wheels / 'example-1.0-py3-none-any.whl'
@@ -815,7 +793,6 @@ def test_preparation_freshness_uses_content_and_repair_is_explicit(locked, monke
 
 
 def test_task_wheelhouse_reaches_real_preparation_owner_with_literal_path():
-    import sys
 
     from tests.test_taskfile_contracts import TaskContractsTests
     case = TaskContractsTests()

@@ -141,20 +141,17 @@ def _dense_params(dim: int) -> models.VectorParams:
     )
 
 
-def _sparse_params() -> models.SparseVectorParams:
-    return models.SparseVectorParams(
-        modifier=models.Modifier.IDF,
-        index=models.SparseIndexParams(on_disk=True),
-    )
-
-
 def collection_vector_configs(
     dim: int,
 ) -> tuple[dict[str, models.VectorParams], dict[str, models.SparseVectorParams]]:
     """Named dense + BM25 sparse configs shared by the corpus collection and
     the ingest completion collection (issue #359): one helper so the two
     collections cannot drift apart."""
-    return {"dense": _dense_params(dim)}, {"bm25": _sparse_params()}
+    return {"dense": _dense_params(dim)}, {
+        "bm25": models.SparseVectorParams(
+            modifier=models.Modifier.IDF, index=models.SparseIndexParams(on_disk=True)
+        )
+    }
 
 
 def ensure_payload_indexes(client: QdrantPoints, collection: str) -> None:

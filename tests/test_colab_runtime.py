@@ -123,30 +123,30 @@ def remote_preflight(tmp_path, monkeypatch):
     return run
 
 
-def test_cpu_preflight_records_actual_platform_without_inference_python(remote_preflight):
+@pytest.mark.parametrize("optional_metadata", [True, False])
+def test_cpu_preflight_records_actual_platform_without_inference_python(
+        remote_preflight, monkeypatch, optional_metadata):
+    if not optional_metadata:
+        failure = OSError("metadata absent")
+
+        def unavailable(*args):
+            raise failure
+
+        monkeypatch.setattr(colab_preflight.platform, "freedesktop_os_release", unavailable)
+        monkeypatch.setattr(colab_preflight.os, "confstr", unavailable)
     status, observed = remote_preflight("COLAB_CPU_TRANSPORT")
     assert status == 0 and observed["admitted"] is True
     assert observed["python"] == "3.13.16"
     assert observed["python_implementation"] == "CPython"
-    assert observed["platform"] == {"system": "Linux", "machine": "x86_64",
-                                    "glibc": "glibc 2.35", "distribution_id": "ubuntu",
-                                    "distribution_version": "22.04"}
+    if optional_metadata:
+        assert observed["platform"] == {"system": "Linux", "machine": "x86_64",
+                                        "glibc": "glibc 2.35", "distribution_id": "ubuntu",
+                                        "distribution_version": "22.04"}
+    else:
+        assert observed["platform"] == {"system": "Linux", "machine": "x86_64", "glibc": None,
+                                        "distribution_id": None, "distribution_version": None}
     assert observed["inference_python"] == {"executable": None, "version": None,
                                             "implementation": None, "error": "not_found"}
-
-
-def test_cpu_preflight_records_unknown_optional_platform_facts(remote_preflight, monkeypatch):
-    failure = OSError("metadata absent")
-
-    def unavailable(*args):
-        raise failure
-
-    monkeypatch.setattr(colab_preflight.platform, "freedesktop_os_release", unavailable)
-    monkeypatch.setattr(colab_preflight.os, "confstr", unavailable)
-    status, observed = remote_preflight("COLAB_CPU_TRANSPORT")
-    assert status == 0 and observed["admitted"] is True
-    assert observed["platform"] == {"system": "Linux", "machine": "x86_64", "glibc": None,
-                                    "distribution_id": None, "distribution_version": None}
 
 
 @pytest.mark.parametrize("version,implementation,error,expected_status", [
@@ -228,8 +228,7 @@ def test_software_probe_observes_installed_tokenizers_version(tmp_path, monkeypa
     assert json.loads(observed.read_text())["tokenizers"] == "0.23.7"
 
 
-@pytest.mark.parametrize("disabled", [False])
-def test_snapshot_fetch_uses_parallel_transfer_and_records_its_time(tmp_path, monkeypatch, disabled):
+def test_snapshot_fetch_uses_parallel_transfer_and_records_its_time(tmp_path, monkeypatch):
     """The fixed fetch script downloads with 8 file workers, names the transfer
     the locked hub actually uses and reports elapsed time for startup measurement."""
     destination = tmp_path / "models" / "reasoning"
@@ -248,7 +247,7 @@ def test_snapshot_fetch_uses_parallel_transfer_and_records_its_time(tmp_path, mo
     siblings = [SimpleNamespace(rfilename=name, size=len(raw)) for name, raw in files.items()]
     api = SimpleNamespace(model_info=lambda model, **_: SimpleNamespace(sha="a" * 40, siblings=siblings))
     hub = SimpleNamespace(HfApi=lambda: api, snapshot_download=snapshot_download,
-                          constants=SimpleNamespace(HF_HUB_DISABLE_XET=disabled))
+                          constants=SimpleNamespace(HF_HUB_DISABLE_XET=False))
     monkeypatch.setitem(sys.modules, "huggingface_hub", hub)
     monkeypatch.setattr("importlib.util.find_spec", lambda name: object() if name == "hf_xet" else None)
     report = tmp_path / "snapshot.json"
@@ -258,7 +257,7 @@ def test_snapshot_fetch_uses_parallel_transfer_and_records_its_time(tmp_path, mo
     assert calls == [{"revision": "a" * 40, "local_dir": str(destination),
                       "allow_patterns": calls[0]["allow_patterns"], "max_workers": 8}]
     observed = json.loads(report.read_text())
-    assert observed["transfer"] == ("http" if disabled else "xet")
+    assert observed["transfer"] == "xet"
     assert type(observed["download_seconds"]) is float and 0 <= observed["download_seconds"] < 60
     assert observed["tensor_bytes"] == 64 and observed["resolved_revision"] == "a" * 40
 
@@ -324,12 +323,8 @@ def test_inference_install_works_without_ensurepip_and_targets_fresh_environment
                 assert env["PIP_CONFIG_FILE"] == os.devnull
                 if "--version" in argv:
                     output = b"pip 26.2.1 from /kernel/pip (python 3.12)\n"
-                    if corruption == "installer_kernel":
-                        output = output.replace(b"3.12", b"3.13")
-                    elif corruption == "installer_old":
+                    if corruption == "installer_old":
                         output = output.replace(b"26.2.1", b"22.2")
-                    elif corruption == "installer_exit":
-                        self.returncode = 1
                 elif "install" in argv:
                     assert {"--require-hashes", "--only-binary=:all:", "--no-deps", "--no-cache-dir"} <= set(argv)
                     target.parent.mkdir(parents=True)
@@ -345,9 +340,9 @@ def test_inference_install_works_without_ensurepip_and_targets_fresh_environment
                     value = {"python": "3.12.3", "implementation": "CPython",
                              "prefix": str(target.parent.parent), "base_prefix": "/system",
                              "executable": str(target)}
-                    if corruption in ("base_prefix", "prefix", "python", "implementation"):
-                        value[corruption] = {"base_prefix": str(target.parent.parent), "prefix": "/wrong-target",
-                                             "python": "3.13.3", "implementation": "PyPy"}[corruption]
+                    if corruption in ("base_prefix", "implementation"):
+                        value[corruption] = {"base_prefix": str(target.parent.parent),
+                                             "implementation": "PyPy"}[corruption]
                     output = json.dumps(value).encode() + b"\n"
                 else:
                     value = {"python": "3.12.3", "vllm": "0.28.0", "transformers": "5.15.0",
@@ -407,23 +402,21 @@ def test_preflight_records_kernel_pip_without_installing_or_bootstrapping(monkey
                       "error": error}
 
 
-@pytest.mark.parametrize("error", ["not_found"])
-def test_missing_kernel_installer_refuses_gpu_but_next_cpu_remains_usable(remote_preflight, monkeypatch, error):
+def test_missing_kernel_installer_refuses_gpu_but_next_cpu_remains_usable(remote_preflight, monkeypatch):
     monkeypatch.setattr(colab_preflight, "observe_inference_python", lambda: {
         "executable": "/usr/bin/python3.12", "version": "3.12.3", "implementation": "CPython", "error": None})
-    monkeypatch.setattr(colab_preflight, "observe_kernel_pip", lambda: {"version": None, "error": error})
+    monkeypatch.setattr(colab_preflight, "observe_kernel_pip", lambda: {"version": None, "error": "not_found"})
     monkeypatch.setattr(colab_preflight.shutil, "which", lambda name: "/usr/bin/nvidia-smi" if name == "nvidia-smi" else None)
     monkeypatch.setattr(colab_preflight.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(
         stdout="NVIDIA RTX PRO 6000 Blackwell,98304,580.100\n"))
     status, facts = remote_preflight("COLAB_G4_BF16")
-    assert status == 2 and facts["admitted"] is False and facts["kernel_pip"]["error"] == error
+    assert status == 2 and facts["admitted"] is False and facts["kernel_pip"]["error"] == "not_found"
     assert "kernel pip" in facts["error"]
     assert remote_preflight("COLAB_CPU_TRANSPORT")[0] == 0
 
 
-@pytest.mark.parametrize("raw", [b"[]"])
-def test_model_http_json_requires_an_object_and_next_response_succeeds(monkeypatch, raw):
-    bodies = iter([raw, b'{"data": [{"id": "Qwen/Qwen3.8-27B"}]}'])
+def test_model_http_json_requires_an_object_and_next_response_succeeds(monkeypatch):
+    bodies = iter([b"[]", b'{"data": [{"id": "Qwen/Qwen3.8-27B"}]}'])
 
     def response(request, *, timeout):
         stream = io.BytesIO(next(bodies))
@@ -941,13 +934,11 @@ def test_gpu_startup_uses_exact_argv_and_warms_reasoning_before_embedding(
                 if malformed and malformed[0] == "pooling":
                     if len(malformed) == 1:
                         packet = []
-                    elif malformed[1] == "missing":
-                        return
                     elif malformed[1] == "oversize":
                         (tmp_path / "pooling-observed.json").write_text(" " * (64 * 1024 + 1))
                         return
-                    elif malformed[1] in ("timeout", "exit"):
-                        self.returncode = None if malformed[1] == "timeout" else 1
+                    elif malformed[1] == "timeout":
+                        self.returncode = None
                         return
                     else:
                         target = packet

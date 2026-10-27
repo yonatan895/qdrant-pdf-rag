@@ -42,8 +42,6 @@ from mainframe_rag.regexes import DOCNO_RE, MEMBER_RE, MSG_RE
 from mainframe_rag.retrieve.filters import MEMBER_QUERY_RE, parse_query
 from mainframe_rag.retrieve.screen import screen_query
 
-SPLIT_MODES: tuple[str, str, str] = ("single", "comparative", "diagnostic")
-
 # Comparison words stripped from sub-queries (edges only — content words
 # like "documented" stay: they are retrieval signal, not comparison glue).
 _COMPARE_WORDS = frozenset({"compare", "compares", "compared", "comparing", "comparison", "versus", "vs", "difference", "differences", "between"})

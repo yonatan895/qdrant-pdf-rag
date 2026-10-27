@@ -256,7 +256,9 @@ def test_load_manifest_sha_mismatch_fails_closed(load_tree):
     assert "does not match the packed MANIFEST sha" in r.stderr
 
 
-def test_load_success_with_parent_dir(load_tree):
+def test_load_succeeds_from_the_parent_dir_and_an_explicit_bundle_dir(load_tree):
+    """The bundle may sit next to the clone (../dist) or where AIRGAP_BUNDLE_DIR
+    says; both load the same signed contents."""
     tmp_path, skopeo_log = load_tree
     _make_artifacts(tmp_path, sha=IMAGE_SHA)
     subdir = tmp_path / "clone-dir"
@@ -265,33 +267,19 @@ def test_load_success_with_parent_dir(load_tree):
     (subdir / "scripts" / "airgap").mkdir(parents=True)
     for f in ("common.sh", "load.sh", "image_identity.sh", "image_manifest.py", "model_config.py"):
         shutil.copy(REPO / "scripts" / "airgap" / f, subdir / "scripts" / "airgap" / f)
-    env = {
-        "PATH": f"{tmp_path / 'bin'}:/usr/bin:/bin",
-        "SKOPEO_LOG": str(skopeo_log),
-        "SKOPEO_STATE": str(tmp_path / "skopeo-state"),
-        "IMAGE_SHA": IMAGE_SHA,
-        "INTERNAL_REGISTRY": "reg.internal:5000",
-    }
-    r = subprocess.run(
-        ["sh", str(subdir / "scripts" / "airgap" / "load.sh")],
-        capture_output=True,
-        text=True,
-        env=env,
-        cwd=subdir,
-        check=False,
-    )
+    env = {"PATH": f"{tmp_path / 'bin'}:/usr/bin:/bin", "SKOPEO_LOG": str(skopeo_log),
+           "SKOPEO_STATE": str(tmp_path / "skopeo-state"), "IMAGE_SHA": IMAGE_SHA,
+           "INTERNAL_REGISTRY": "reg.internal:5000"}
+    r = subprocess.run(["sh", str(subdir / "scripts" / "airgap" / "load.sh")], capture_output=True,
+                       text=True, env=env, cwd=subdir, check=False)
     assert r.returncode == 0, r.stderr
     assert "Loaded 5 images into reg.internal:5000" in r.stdout
     assert skopeo_log.exists()
-
-
-def test_load_success_with_bundle_dir_override(load_tree):
-    tmp_path, _skopeo_log = load_tree
     custom_dir = tmp_path / "custom-bundle-location"
     _make_artifacts(custom_dir, sha=IMAGE_SHA)
-    r = _run_load(load_tree, ("AIRGAP_BUNDLE_DIR", str(custom_dir)))
-    assert r.returncode == 0, r.stderr
-    assert "Loaded 5 images into reg.internal:5000" in r.stdout
+    custom = _run_load(load_tree, ("AIRGAP_BUNDLE_DIR", str(custom_dir)))
+    assert custom.returncode == 0, custom.stderr
+    assert "Loaded 5 images into reg.internal:5000" in custom.stdout
 
 
 def test_load_tampered_sums_fails_signature(load_tree):
@@ -304,23 +292,23 @@ def test_load_tampered_sums_fails_signature(load_tree):
     assert "signature verification failed" in r.stderr
 
 
-def test_load_image_digest_mismatch_fails_closed(load_tree):
-    tmp_path, _ = load_tree
+@pytest.mark.parametrize(("selection", "member", "key"), [
+    ({}, "qdrant-image.tar", "qdrant_digest"),
+    ({"openwebui": True}, "openwebui-image.tar", "openwebui_digest"),
+], ids=["first-party", "openwebui"])
+def test_load_image_digest_mismatch_fails_closed(load_tree, selection, member, key):
+    """A validly-signed bundle with a lying digest: only the binding can catch it."""
+    tmp_path, log = load_tree
     artdir = tmp_path / "dist"
-    _make_artifacts(artdir, sha=IMAGE_SHA)
-    # A validly-signed bundle with a lying manifest: re-checksum and
-    # re-sign after the edit, so only the digest binding can catch it.
+    _make_artifacts(artdir, sha=IMAGE_SHA, **selection)
     manifest = artdir / "MANIFEST.txt"
-    manifest.write_text(manifest.read_text().replace(_digest_of_archive(artdir, "qdrant-image.tar"), "sha256:" + "c" * 64, 1))
-    sums = []
-    for line in (artdir / "SHA256SUMS").read_text().splitlines():
-        name = line.split("  ", 1)[1]
-        sums.append(f"{_sha256((artdir / name).read_bytes())}  {name}\n")
-    (artdir / "SHA256SUMS").write_text("".join(sums))
-    sign_sums(artdir)
+    manifest.write_text(manifest.read_text().replace(
+        _digest_of_archive(artdir, member), "sha256:" + "c" * 64, 1))
+    _resign(artdir)
     r = _run_load(load_tree)
     assert r.returncode == 1
-    assert "does not match MANIFEST" in r.stderr
+    assert "does not match MANIFEST" in r.stderr and key in r.stderr
+    assert not _copies(log)
 
 
 def _copies(log: Path) -> list[str]:
@@ -574,19 +562,6 @@ def test_load_signed_missing_task_member_refuses_before_push(load_tree):
     assert not log.exists()
 
 
-def test_load_ignores_retained_optional_image_outside_current_signed_inventory(load_tree):
-    root, log = load_tree
-    artdir = root / "dist"
-    _make_artifacts(artdir)
-    retained = artdir / "oauth-proxy-image.tar"
-    retained.write_bytes(b"retained from prior approved bundle")
-    result = _run_load(load_tree)
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "Loaded 5 images" in result.stdout
-    assert "oauth-proxy" not in log.read_text()
-    assert retained.read_bytes() == b"retained from prior approved bundle"
-
-
 # --- Post-load image identity (issue #272, item 3) -------------------------
 # After each push, load must read the registry tag back and prove that the
 # image the cluster will pull has the packed archive's config (image ID), not
@@ -742,30 +717,26 @@ def test_load_passes_configured_tmpdir_to_copies_only(load_tree):
         assert "--tmpdir" not in call
 
 
-def test_load_refuses_missing_skopeo_tmpdir_before_any_push(load_tree):
-    root, log = load_tree
-    _make_artifacts(root / "dist")
-    r = _run_load(load_tree, ("SKOPEO_ARGS", f"--tmpdir {root / 'no-such-tmp'}"))
-    assert r.returncode == 1
-    assert "skopeo temporary directory from SKOPEO_ARGS --tmpdir" in r.stderr
-    assert "nothing was pushed" in r.stderr
-    assert not log.exists()
-
-
-def test_load_refuses_skopeo_tmpdir_without_space_before_any_push(load_tree):
+@pytest.mark.parametrize(("missing_dir", "needle"), [
+    (True, "skopeo temporary directory from SKOPEO_ARGS --tmpdir"),
+    (False, "less than 0.3 GB (or the largest image member) free"),
+], ids=["missing-dir", "no-space"])
+def test_load_refuses_a_skopeo_tmpdir_before_any_push(load_tree, missing_dir, needle):
     root, log = load_tree
     _make_artifacts(root / "dist")
     tmpdir = root / "work-tmp"
-    tmpdir.mkdir()
-    write_stub(
-        root / "bin" / "df",
-        "#!/bin/sh\n"
-        "printf '%s\\n' 'Filesystem 1024-blocks Used Available Capacity Mounted on'\n"
-        "printf '%s\\n' 'stub 1000 900 100 90% /'\n",
-    )
-    r = _run_load(load_tree, ("SKOPEO_ARGS", f"--tmpdir={tmpdir}"))
+    if missing_dir:
+        tmpdir = root / "no-such-tmp"
+    else:
+        tmpdir.mkdir()
+        write_stub(root / "bin" / "df", "#!/bin/sh\n"
+                   "printf '%s\\n' 'Filesystem 1024-blocks Used Available Capacity Mounted on'\n"
+                   "printf '%s\\n' 'stub 1000 900 100 90% /'\n")
+    r = _run_load(load_tree, ("SKOPEO_ARGS", f"--tmpdir {tmpdir}"))
     assert r.returncode == 1
-    assert "less than 0.3 GB (or the largest image member) free" in r.stderr
+    assert needle in r.stderr
+    if missing_dir:
+        assert "nothing was pushed" in r.stderr
     assert not log.exists()
 
 
@@ -809,87 +780,56 @@ def test_load_dryrun_is_hermetic_and_not_release_verified(load_tree):
     assert not (root / "skopeo-state").exists()
 
 
-def test_load_verifies_optional_oauth_proxy_image_like_the_others(load_tree):
+OPENWEBUI_REF = f"{REGISTRY}/qdrant-pdf-rag-openwebui:v0.12.3-slim"
+OPENWEBUI_PROXY_REF = f"{REGISTRY}/nginxinc/nginx-unprivileged:1.30.6-alpine"
+OAUTH_REF = f"{REGISTRY}/openshift4/ose-oauth-proxy:v4.14"
+
+
+@pytest.mark.parametrize(("selection", "member", "ref", "count"), [
+    ({"oauth": True}, "oauth-proxy-image.tar", OAUTH_REF, 6),
+    ({"openwebui": True}, "openwebui-image.tar", OPENWEBUI_REF, 7),
+    ({"openwebui": True}, "openwebui-proxy-image.tar", OPENWEBUI_PROXY_REF, 7),
+], ids=["oauth-proxy", "openwebui", "openwebui-proxy"])
+def test_load_verifies_optional_signed_member_like_the_others(load_tree, selection, member, ref, count):
+    """ADR-0007 (#1074): every optional signed member is digest-checked, pushed to
+    the tag the chart renders and read back; a swapped registry image refuses."""
     root, log = load_tree
     artdir = root / "dist"
-    _make_artifacts(artdir, oauth=True)
-    ref = f"{REGISTRY}/openshift4/ose-oauth-proxy:v4.14"
+    _make_artifacts(artdir, **selection)
     first = _run_load(load_tree)
     assert first.returncode == 0, first.stderr
-    assert "Loaded 6 images" in first.stdout
-    assert len(_registry_calls(log)) == 6
+    assert f"Loaded {count} images" in first.stdout
+    assert len(_registry_calls(log)) == count
+    assert f"copy oci-archive:{artdir}/{member} docker://{ref}" in log.read_text()
     assert f"verified {ref}@sha256:" in first.stdout
-    (artdir / ".skopeo-stub/pushed/oauth-proxy-image.tar.raw").write_bytes(
-        _manifest(_config_of("swapped"), _digest(b"layer-swapped"))
-    )
+    (artdir / ".skopeo-stub/pushed" / f"{member}.raw").write_bytes(
+        _manifest(_config_of("swapped"), _digest(b"layer-swapped")))
     second = _run_load(load_tree)
     assert second.returncode == 1
     assert f"registry image {ref} is not the packed image" in second.stderr
 
 
-OPENWEBUI_REF = f"{REGISTRY}/qdrant-pdf-rag-openwebui:v0.12.3-slim"
-OPENWEBUI_PROXY_REF = f"{REGISTRY}/nginxinc/nginx-unprivileged:1.30.6-alpine"
-
-
-def test_load_verifies_and_pushes_optional_openwebui_image_when_signed(load_tree):
-    """ADR-0007 (#1074): a signed openwebui member is digest-checked, pushed to
-    the tag the chart renders and read back like every other image."""
+@pytest.mark.parametrize(("selection", "member", "ref"), [
+    ({}, "oauth-proxy-image.tar", OAUTH_REF),
+    ({}, "openwebui-image.tar", OPENWEBUI_REF),
+], ids=["retained-oauth-proxy", "retained-openwebui"])
+def test_load_ignores_an_unsigned_member_but_dryrun_names_it(load_tree, selection, member, ref):
+    """A retained archive that the current SHA256SUMS does not list is not part of
+    the signed inventory: it is neither pushed nor touched, and the dry-run names
+    the file's tag so the operator can see what a real run would push."""
     root, log = load_tree
     artdir = root / "dist"
-    _make_artifacts(artdir, oauth=True, openwebui=True)
-    first = _run_load(load_tree)
-    assert first.returncode == 0, first.stderr
-    assert "Loaded 8 images" in first.stdout
-    assert len(_registry_calls(log)) == 8
-    assert f"copy oci-archive:{artdir}/openwebui-image.tar docker://{OPENWEBUI_REF}" in log.read_text()
-    assert f"verified {OPENWEBUI_REF}@sha256:" in first.stdout
-    assert (f"copy oci-archive:{artdir}/openwebui-proxy-image.tar docker://{OPENWEBUI_PROXY_REF}"
-            in log.read_text())
-    assert f"verified {OPENWEBUI_PROXY_REF}@sha256:" in first.stdout
-    (artdir / ".skopeo-stub/pushed/openwebui-image.tar.raw").write_bytes(
-        _manifest(_config_of("swapped"), _digest(b"layer-swapped")))
-    second = _run_load(load_tree)
-    assert second.returncode == 1
-    assert f"registry image {OPENWEBUI_REF} is not the packed image" in second.stderr
-
-
-def test_load_refuses_a_swapped_openwebui_proxy_registry_image(load_tree):
-    root, _log = load_tree
-    artdir = root / "dist"
-    _make_artifacts(artdir, openwebui=True)
-    (artdir / ".skopeo-stub/pushed/openwebui-proxy-image.tar.raw").write_bytes(
-        _manifest(_config_of("swapped"), _digest(b"layer-swapped")))
-    result = _run_load(load_tree)
-    assert result.returncode == 1
-    assert f"registry image {OPENWEBUI_PROXY_REF} is not the packed image" in result.stderr
-
-
-def test_load_refuses_openwebui_archive_that_is_not_the_manifest_digest(load_tree):
-    root, log = load_tree
-    artdir = root / "dist"
-    _make_artifacts(artdir, openwebui=True)
-    _edit_manifest_and_resign(
-        artdir,
-        lambda t: t.replace(_digest_of_archive(artdir, "openwebui-image.tar"), "sha256:" + "f" * 64, 1),
-    )
-    result = _run_load(load_tree)
-    assert result.returncode != 0
-    assert "openwebui-image.tar digest" in result.stderr and "openwebui_digest" in result.stderr
-    assert not _copies(log)
-
-
-def test_load_ignores_unsigned_openwebui_archive_and_dryrun_names_a_present_one(load_tree):
-    root, log = load_tree
-    artdir = root / "dist"
-    _make_artifacts(artdir)
-    (artdir / "openwebui-image.tar").write_bytes(b"retained, not in SHA256SUMS")
+    _make_artifacts(artdir, **selection)
+    retained = artdir / member
+    retained.write_bytes(b"retained from prior approved bundle")
     result = _run_load(load_tree)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "Loaded 5 images" in result.stdout and "openwebui" not in log.read_text()
+    assert "Loaded 5 images" in result.stdout and ref not in log.read_text()
+    assert retained.read_bytes() == b"retained from prior approved bundle"
     (artdir / "SHA256SUMS").unlink()
     dry = _run_load(load_tree, ("AIRGAP_DRYRUN", "1"))
     assert dry.returncode == 0, dry.stderr
-    assert f"oci-archive:{artdir}/openwebui-image.tar docker://{OPENWEBUI_REF}" in dry.stdout
+    assert f"oci-archive:{artdir}/{member} docker://{ref}" in dry.stdout
     assert "Loaded 6 images" in dry.stdout
 
 

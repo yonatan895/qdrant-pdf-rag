@@ -340,75 +340,36 @@ def test_unsafe_qdrant_role_inputs_refuse_before_service_children(tmp_path, cred
     assert all(value not in result.stdout + result.stderr for value in credentials.values())
 
 
-@pytest.mark.parametrize(
-    ("var", "bad"),
-    [("GATEWAY_PORT", "not-a-number"), ("DENSE_DIM", "0"), ("OTEL_TRACE_TIMEOUT", "0")],
-)
-def test_bad_numeric_fails_closed(var, bad):
-    r = _run({var: bad})
+# One row per fail-closed input: numeric range, bare hostname, repo-owned env
+# file, missing corpus and an invalid rerank flag all die before stack work.
+@pytest.mark.parametrize(("extra", "message"), [
+    ({"GATEWAY_PORT": "not-a-number"}, "GATEWAY_PORT must be"),
+    ({"DENSE_DIM": "0"}, "DENSE_DIM must be"),
+    ({"OTEL_TRACE_TIMEOUT": "0"}, "OTEL_TRACE_TIMEOUT must be"),
+    ({"QDRANT_URL": "gpu-box:8000"}, "QDRANT_URL must begin with http:// or https://"),
+    ({"GATEWAY_RERANK_URL": "gpu-box:8000"}, "GATEWAY_RERANK_URL must begin with http:// or https://"),
+    ({"GATEWAY_ENV_FILE": str(REPO / "dist" / "keys.env")}, "must not live inside the repo"),
+    ({"CORPUS_DIR": "/nonexistent/corpus"}, "CORPUS_DIR is not a directory"),
+    ({"RERANK_ENABLED": "flase"}, "RERANK_ENABLED"),
+])
+def test_invalid_configuration_fails_closed_before_stack_work(extra, message):
+    r = _run(extra)
     assert r.returncode != 0
-    assert f"{var} must be" in r.stderr
-
-
-@pytest.mark.parametrize("var", ["QDRANT_URL", "GATEWAY_RERANK_URL"])
-def test_bare_hostname_fails_closed(var):
-    r = _run({var: "gpu-box:8000"})
-    assert r.returncode != 0
-    assert f"{var} must begin with http:// or https://" in r.stderr
-
-
-def test_env_file_inside_repo_fails_closed():
-    r = _run({"GATEWAY_ENV_FILE": str(REPO / "dist" / "keys.env")})
-    assert r.returncode != 0
-    assert "must not live inside the repo" in r.stderr
-
-
-def test_missing_corpus_dir_fails_closed():
-    r = _run({"CORPUS_DIR": "/nonexistent/corpus"})
-    assert r.returncode != 0
-    assert "CORPUS_DIR is not a directory" in r.stderr
-
-
-def test_invalid_rerank_flag_fails_before_launch():
-    r = _run({'RERANK_ENABLED': 'flase'})
-    assert r.returncode != 0
-    assert 'RERANK_ENABLED' in r.stderr
+    assert message in r.stderr
 
 
 def test_two_backend_live_path_preserves_flag_after_gateway_handoff(tmp_path):
     # Stop deliberately at the probe after recording its actual environment.
     # This traverses real backend validation and the gateway handoff, without I/O.
-    scripts = tmp_path / 'checkout' / 'scripts'
-    scripts.mkdir(parents=True)
-    (scripts / SCRIPT.name).write_text(SCRIPT.read_text())
-    (scripts / "local_lane_budget.sh").write_text((SCRIPT.parent / "local_lane_budget.sh").read_text())
-    (scripts / 'run_local_gateway.sh').write_text('''#!/bin/sh
-printf 'export RERANK_ENABLED=true\\n' > "$GATEWAY_ENV_FILE"
-''')
-    bindir = tmp_path / 'bin'
-    bindir.mkdir()
-    log = tmp_path / 'calls'
-    (bindir / 'curl').write_text('''#!/bin/sh
-printf '%s\\n' "$*" >> "$CALLS"
-printf '200'
-''')
-    (bindir / 'docker').write_text('#!/bin/sh\nexit 99\n')
-    py = bindir / 'python'
-    py.write_text('''#!/bin/sh
-printf 'probe-rerank=%s\\n' "$RERANK_ENABLED" >> "$CALLS"
-exit 23
-''')
-    for file in bindir.iterdir():
-        file.chmod(0o755)
-    result = subprocess.run(['sh', str(scripts / SCRIPT.name)], capture_output=True, text=True, check=False,
-        env={**os.environ, 'PATH': str(bindir) + ':' + os.environ['PATH'], 'CALLS': str(log),
-             'LOCAL_STACK_DRYRUN': '0', 'RERANK_ENABLED': 'false', 'PY': str(py),
-             'GATEWAY_ENV_FILE': str(tmp_path / 'gateway.env'), 'LOCAL_STACK_LOG_DIR': str(tmp_path)})
+    result, calls = _live(
+        tmp_path, _host(tmp_path), {"RERANK_ENABLED": "false"},
+        curl="#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$CALLS\"\nprintf '200'\n",
+        python="#!/bin/sh\nprintf 'probe-rerank=%s\\n' \"$RERANK_ENABLED\" >> \"$CALLS\"\nexit 23\n")
     assert result.returncode == 23, result.stderr
-    calls = log.read_text()
-    assert '8000/v1/models' in calls and '8001/v1/models' in calls
-    assert '8002' not in calls
-    assert 'probe-rerank=false' in calls
+    recorded = "\n".join(calls)
+    assert '8000/v1/models' in recorded and '8001/v1/models' in recorded
+    assert '8002' not in recorded
+    assert 'probe-rerank=false' in recorded
 
 
 _BUDGET_KEYS = ("LLM_MAX_MODEL_LEN", "LLM_RESERVED_OUTPUT_TOKENS", "LLM_THINKING_RESERVE_TOKENS_SIMPLE",
@@ -438,31 +399,13 @@ def test_local_lane_budget_is_pinned_unless_the_window_is_declared(tmp_path, cal
     """#777: application defaults are sized for a 32k Qwen3.8-27B window; the
     agent the local stack starts must never price that against the 4k local
     vLLM lane, while a caller that declares the served window keeps them."""
-    scripts = tmp_path / 'checkout' / 'scripts'
-    scripts.mkdir(parents=True)
-    (scripts / SCRIPT.name).write_text(SCRIPT.read_text())
-    (scripts / "local_lane_budget.sh").write_text((SCRIPT.parent / "local_lane_budget.sh").read_text())
-    (scripts / 'run_local_gateway.sh').write_text(
-        "#!/bin/sh\nprintf 'export RERANK_ENABLED=false\\n' > \"$GATEWAY_ENV_FILE\"\n")
-    bindir = tmp_path / 'bin'
-    bindir.mkdir()
-    log = tmp_path / 'calls'
-    (bindir / 'curl').write_text("#!/bin/sh\nprintf '200'\n")
-    (bindir / 'docker').write_text('#!/bin/sh\nexit 99\n')
-    py = bindir / 'python'
-    py.write_text('#!/bin/sh\n' + ''.join(
-        f'printf "{key}=%s\\n" "${{{key}:-}}" >> "$CALLS"\n' for key in _BUDGET_KEYS) + 'exit 23\n')
-    for file in bindir.iterdir():
-        file.chmod(0o755)
-    clean = {k: v for k, v in os.environ.items() if k not in _BUDGET_KEYS}
-    result = subprocess.run(['sh', str(scripts / SCRIPT.name)], capture_output=True, text=True, check=False,
-        env={**clean, 'PATH': str(bindir) + ':' + os.environ['PATH'], 'CALLS': str(log),
-             'LOCAL_STACK_DRYRUN': '0', 'RERANK_ENABLED': 'false', 'PY': str(py),
-             'GATEWAY_ENV_FILE': str(tmp_path / 'gateway.env'), 'LOCAL_STACK_LOG_DIR': str(tmp_path),
-             **caller})
+    result, calls = _live(
+        tmp_path, _host(tmp_path), {"RERANK_ENABLED": "false", **caller}, drop=_BUDGET_KEYS,
+        gateway="#!/bin/sh\nprintf 'export RERANK_ENABLED=false\\n' > \"$GATEWAY_ENV_FILE\"\n",
+        python='#!/bin/sh\n' + ''.join(
+            f'printf "{key}=%s\\n" "${{{key}:-}}" >> "$CALLS"\n' for key in _BUDGET_KEYS) + 'exit 23\n')
     assert result.returncode == 23, result.stderr
-    seen = dict(line.split('=', 1) for line in log.read_text().splitlines())
-    assert seen == expected
+    assert dict(line.split('=', 1) for line in calls) == expected
 
 
 # --- Local ingest host-RAM budget (issue #580) -------------------------------
@@ -510,24 +453,20 @@ def _plan_workers(tmp_path: Path, host: dict[str, str]) -> tuple[subprocess.Comp
 
 
 @pytest.mark.parametrize(
-    ("avail_mb", "workers"),
+    ("avail_mb", "workers", "extra"),
     [
-        (64000, 7),  # plenty of RAM: the CPU-1 cap (8 CPUs) applies
-        (4608, 2),  # a few GB free sizes down
-        (3072, 1),  # exactly one worker + headroom
+        (64000, 7, {}),   # plenty of RAM: the CPU-1 cap (8 CPUs) applies
+        (4608, 2, {}),    # a few GB free sizes down
+        (3072, 1, {}),    # exactly one worker + headroom
+        (64000, 2, {"INGEST_WORKERS": "2"}),  # an explicit choice overrides sizing
     ],
+    ids=["plenty", "few-gb-free", "exactly-one", "explicit-override"],
 )
-def test_ingest_workers_follow_available_ram(tmp_path, avail_mb, workers):
-    r, ingest = _plan_workers(tmp_path, _host(tmp_path, avail_mb=avail_mb))
+def test_ingest_workers_follow_available_ram(tmp_path, avail_mb, workers, extra):
+    r, ingest = _plan_workers(tmp_path, {**_host(tmp_path, avail_mb=avail_mb), **extra})
     assert r.returncode == 0, r.stderr
     assert f"--workers {workers} " in ingest
     assert "REFUSED" not in ingest and "REFUSED" not in r.stderr
-
-
-def test_ingest_workers_env_overrides_sizing(tmp_path):
-    r, ingest = _plan_workers(tmp_path, {**_host(tmp_path, avail_mb=64000), "INGEST_WORKERS": "2"})
-    assert r.returncode == 0, r.stderr
-    assert "--workers 2 " in ingest
 
 
 @pytest.mark.parametrize("bad", ["0", "lots"])
@@ -537,29 +476,32 @@ def test_invalid_ingest_workers_fails_closed(tmp_path, bad):
     assert "INGEST_WORKERS must be a positive integer" in r.stderr
 
 
-def _live(tmp_path: Path, host: dict[str, str], extra: dict[str, str] | None = None):
-    """Run the live path with stub gateway/curl/docker/python up to the ingest."""
+def _live(tmp_path: Path, host: dict[str, str], extra: dict[str, str] | None = None, *,
+          gateway: str | None = None, python: str | None = None, curl: str | None = None,
+          drop: tuple[str, ...] = ()):
+    """Run the live path from an isolated checkout with stub gateway/curl/docker/
+    python up to the first stub failure; returns its result and recorded calls.
+
+    Defaults record every python call; the agent health check then sees a 200 and
+    the script stops, so the run ends right after the ingest."""
     scripts = tmp_path / "checkout" / "scripts"
     scripts.mkdir(parents=True)
-    (scripts / SCRIPT.name).write_text(SCRIPT.read_text())
-    (scripts / "local_lane_budget.sh").write_text((SCRIPT.parent / "local_lane_budget.sh").read_text())
+    for name in (SCRIPT.name, "local_lane_budget.sh"):
+        (scripts / name).write_text((SCRIPT.parent / name).read_text())
     (scripts / "run_local_gateway.sh").write_text(
-        "#!/bin/sh\nprintf 'export RERANK_ENABLED=true\\n' > \"$GATEWAY_ENV_FILE\"\n"
-    )
+        gateway or "#!/bin/sh\nprintf 'export RERANK_ENABLED=true\\n' > \"$GATEWAY_ENV_FILE\"\n")
     bindir = tmp_path / "bin"
     bindir.mkdir()
     calls = tmp_path / "calls"
-    (bindir / "curl").write_text("#!/bin/sh\nprintf '200'\n")
+    (bindir / "curl").write_text(curl or "#!/bin/sh\nprintf '200'\n")
     (bindir / "docker").write_text("#!/bin/sh\nexit 99\n")
     py = bindir / "python"
-    # Every python call is recorded; the agent health check then sees a 200
-    # and the script stops, so the run ends right after the ingest.
-    py.write_text("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$CALLS\"\n")
+    py.write_text(python or "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$CALLS\"\n")
     for file in bindir.iterdir():
         file.chmod(0o755)
     corpus = tmp_path / "corpus"
     corpus.mkdir()
-    clean = {k: v for k, v in os.environ.items() if k not in _INGEST_VARS}
+    clean = {k: v for k, v in os.environ.items() if k not in _INGEST_VARS and k not in drop}
     result = subprocess.run(
         ["sh", str(scripts / SCRIPT.name)],
         capture_output=True,

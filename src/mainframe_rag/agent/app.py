@@ -33,7 +33,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from opentelemetry import trace
 from opentelemetry.trace import SpanKind, Status, StatusCode
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from mainframe_rag.agent.admission import (
@@ -67,7 +67,6 @@ from mainframe_rag.agent.chat_turn import (
     PreparedChatTurn,
     is_unsearchable_query,
     prepare_chat_turn,
-    validate_request_text,
 )
 from mainframe_rag.agent.evidence import (
     PUBLIC_FAILURES,
@@ -86,6 +85,7 @@ from mainframe_rag.agent.metrics import (
     record_request,
     setup_metrics,
 )
+from mainframe_rag.agent.request_text import BoundedRequestText
 from mainframe_rag.agent.resources import AgentResources
 from mainframe_rag.agent.serving import ServingGate, ServingGeneration
 from mainframe_rag.agent.sse import (
@@ -624,13 +624,6 @@ def _timing_parts(
     return parts
 
 
-def _search_span_attrs(kind: str, hits: list[SearchHit]) -> dict:
-    return {
-        "rag.query_kind": kind,
-        "rag.hits": len(hits),
-    }
-
-
 def _answer_span_attrs(
     kind: str,
     hits: list[SearchHit],
@@ -978,16 +971,11 @@ app = FastAPI(title="mainframe-rag agent", version="0.1.0", lifespan=lifespan)
 app.include_router(webui_router)
 
 
-class SearchRequest(BaseModel):
+class SearchRequest(BoundedRequestText):
     query: str = Field(min_length=1)
     product: str | None = None
     version: str | None = None
     limit: int = Field(default=8, ge=1, le=40)
-
-    @model_validator(mode="after")
-    def _bounded_text(self) -> SearchRequest:
-        validate_request_text(settings, query=self.query, product=self.product, version=self.version)
-        return self
 
 
 class EvidenceSearchHit(SearchHit):
@@ -1087,7 +1075,7 @@ class SourcesResponse(BaseModel):
     next_cursor: str | None
 
 
-class AnswerRequest(BaseModel):
+class AnswerRequest(BoundedRequestText):
     query: str = Field(min_length=1)
     product: str | None = None
     version: str | None = None
@@ -1099,17 +1087,6 @@ class AnswerRequest(BaseModel):
     # Bounded like Settings.llm_temperature so client input errors 422 before
     # retrieval instead of surfacing as upstream 502s.
     temperature: float | None = Field(default=None, ge=0.0, le=2.0, allow_inf_nan=False)
-
-    @model_validator(mode="after")
-    def _bounded_text(self) -> AnswerRequest:
-        validate_request_text(
-            settings,
-            query=self.query,
-            product=self.product,
-            version=self.version,
-            splunk_context=self.splunk_context,
-        )
-        return self
 
 
 class AnswerResponse(BaseModel):
@@ -1147,7 +1124,7 @@ class AnswerResponse(BaseModel):
     evidence_omitted: int = 0
 
 
-class ChatRequest(BaseModel):
+class ChatRequest(BoundedRequestText):
     model_config = ConfigDict(extra="forbid")
 
     messages: list[ChatMessage] = Field(min_length=1)
@@ -1161,20 +1138,6 @@ class ChatRequest(BaseModel):
     splunk_context: str | None = None
     product: str | None = None
     version: str | None = None
-
-    @model_validator(mode="after")
-    def _bounded_text(self) -> ChatRequest:
-        validate_request_text(
-            settings,
-            product=self.product,
-            version=self.version,
-            splunk_context=self.splunk_context,
-            messages=self.messages,
-        )
-        return self
-
-
-ChatCompletionsRequest = ChatRequest
 
 
 class ChatMessageResponse(BaseModel):
@@ -1212,9 +1175,6 @@ class ChatCompletionsResponse(BaseModel):
     # retrieval list. See docs/agent.md.
     supplied_evidence: list[SuppliedExcerpt] = Field(default_factory=list)
     evidence_omitted: int = 0
-
-
-ChatResponse = ChatCompletionsResponse
 
 
 class HealthzResponse(BaseModel):
@@ -1573,7 +1533,7 @@ async def _search_response(req, response, owner):
             _record_endpoint(request, "search", "upstream_error", started)
             log.error(json_log(request_id, "search", error=error_type(exc)))
             raise AppError(502, "upstream_error", "retrieval failed") from exc
-        root_span.set_attributes(_search_span_attrs(kind, hits))
+        root_span.set_attributes({"rag.query_kind": kind, "rag.hits": len(hits)})
         log.info(
             json_log(
                 request_id,

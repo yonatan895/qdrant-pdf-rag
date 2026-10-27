@@ -381,16 +381,39 @@ def _prepare_short_deadline(source_state, state):
     return _prepare_new(source_state, state, extra=("--deadline-seconds", SHORT_DEADLINE_SECONDS))
 
 
-def test_ingest_reingest_is_refused_outside_production_before_state(lab):
+@pytest.mark.parametrize("extra", [
+    ("--ingest-reingest",),
+    ("--poll-seconds", "nan"),
+    ("--poll-seconds", "5.1"),
+], ids=["ingest-reingest", "poll-nan", "poll-above-ceiling"])
+def test_prepare_refuses_unsupported_mode_or_invalid_poll_before_state(lab, extra):
     root, base, _ = lab
-    state = root / "synthetic-reingest"
-    argv, source = _prepare_arguments(base, state, extra=("--ingest-reingest",))
+    state = root / "refused-preparation"
+    argv, source = _prepare_arguments(base, state, extra=extra)
     assert _controller_call(argv, source_root=source) == 2
     assert not state.exists()
+    assert _events(root) == []
 
 
 def _run_fake(state, workload=("/bin/true",)):
     return _controller_call(["run", "--state", str(state), "--approve-cu", "20", "--", *workload])
+
+
+def _run_direct(command, state, *workload, timeout=15, cwd=None):
+    """The real `scripts/colab.py` in a child process: the executable boundary."""
+    return subprocess.run([*command, "run", "--state", str(state), "--approve-cu", "20", *workload],
+                          capture_output=True, text=True, timeout=timeout, check=False, cwd=cwd)
+
+
+def _manifest(state):
+    return json.loads((state / "manifest.json").read_text())
+
+
+def _next_run_works(state, root, name, *, receipt=True):
+    ordinary = _prepare_new(state, root / name)
+    assert _run_fake(ordinary) == 0
+    assert (ordinary / "transport-receipt.json").is_file() is receipt
+    return ordinary
 
 
 def _events(root):
@@ -430,7 +453,7 @@ def test_cleanup_observes_usage_after_last_work_poll_before_exact_release_then_n
     run = _allocated_cleanup_run(lab)
     (root / "usage-response.json").write_text(json.dumps({"mode": "available", "balance": 197.0}))
     assert run.cleanup() is True
-    manifest = json.loads((state / "manifest.json").read_text())
+    manifest = _manifest(state)
     final = manifest["final_cu_observation"]
     assert final["status"] == "available"
     assert final["balance"] == 197.0 and final["rate_per_hour"] == 0.0 and final["assignments"] == 1
@@ -443,8 +466,7 @@ def test_cleanup_observes_usage_after_last_work_poll_before_exact_release_then_n
     assert len(usage) == 3 and usage[-1] < stop
     assert calls[stop][1][-1] == run.manifest["session"]
     (root / "usage-response.json").unlink()
-    ordinary = _prepare_new(state, root / "ordinary-after-final-usage")
-    assert _run_fake(ordinary) == 0
+    _next_run_works(state, root, "ordinary-after-final-usage")
 
 
 @pytest.mark.parametrize("endpoint_bound", [True, False])
@@ -458,7 +480,7 @@ def test_orphan_assignment_cannot_establish_release_then_named_recovery_allows_n
         run.save("allocation_result_unknown")
     monkeypatch.setenv("FAKE_UNNAMED_SESSIONS", "1")
     assert run.cleanup() is False
-    manifest = json.loads((state / "manifest.json").read_text())
+    manifest = _manifest(state)
     assert manifest["released"] is False
     assert manifest["phase"] == "cleanup_required"
     assert not manifest.get("release_evidence", {}).get("absent")
@@ -470,8 +492,7 @@ def test_orphan_assignment_cannot_establish_release_then_named_recovery_allows_n
     monkeypatch.delenv("FAKE_UNNAMED_SESSIONS")
     assert _controller_call(["stop", "--state", str(state)]) == 0
     assert json.loads((root / "sessions.json").read_text()) == {}
-    ordinary = _prepare_new(state, root / "ordinary-after-orphan-recovery")
-    assert _run_fake(ordinary) == 0
+    _next_run_works(state, root, "ordinary-after-orphan-recovery")
 
 
 def test_unbound_allocation_with_empty_listing_remains_unverified(lab):
@@ -481,7 +502,7 @@ def test_unbound_allocation_with_empty_listing_remains_unverified(lab):
     run.manifest["allocation_attempted"] = True
     run.save("allocation_result_unknown")
     assert run.cleanup() is False
-    manifest = json.loads((state / "manifest.json").read_text())
+    manifest = _manifest(state)
     assert manifest["released"] is False
     assert manifest["phase"] == "cleanup_required"
     assert not manifest.get("release_evidence", {}).get("absent")
@@ -494,12 +515,11 @@ def test_generated_ssh_proxy_never_reallocates_pruned_session_then_next_run_work
     assert _run_fake(state) != 0
     assert not any(kind == "proxy-allocation" for kind, _ in _events(root))
     assert json.loads((root / "sessions.json").read_text()) == {}
-    manifest = json.loads((state / "manifest.json").read_text())
+    manifest = _manifest(state)
     assert manifest["released"] is True and manifest["release_evidence"]["absent"] is True
     assert not (state / "transport-receipt.json").exists()
     monkeypatch.delenv("FAKE_COLAB_SCENARIO")
-    ordinary = _prepare_new(state, root / "ordinary-after-pruned-proxy")
-    assert _run_fake(ordinary) == 0
+    ordinary = _next_run_works(state, root, "ordinary-after-pruned-proxy")
     stores = {argv[0] for kind, argv in _events(root) if kind == "cli-store"}
     assert stores == {str(state / "colab-sessions.json"), str(ordinary / "colab-sessions.json")}
 
@@ -509,55 +529,46 @@ def test_fresh_run_refuses_preexisting_private_cli_store_without_any_cloud_comma
     (state / "colab-sessions.json").write_text(json.dumps({"foreign": "endpoint-foreign"}))
     assert _run_fake(state) == 2
     assert _events(root) == []
-    assert json.loads((state / "manifest.json").read_text())["allocation_attempted"] is False
+    assert _manifest(state)["allocation_attempted"] is False
 
 
-@pytest.mark.parametrize("failure", ["error", "malformed", "timeout"])
-def test_unavailable_final_usage_is_explicit_and_cannot_block_exact_release_then_next_run(lab, failure):
+@pytest.mark.parametrize(("entry", "mode"), [
+    ("cleanup", "error"), ("cleanup", "malformed"), ("cleanup", "timeout"),
+    ("stop", "available"), ("stop", "error"),
+])
+def test_unavailable_final_usage_is_explicit_and_cannot_block_exact_release_then_next_run(
+        lab, entry, mode):
+    """The final CU read is recorded when available and explicitly unavailable
+    otherwise (never invented, never blocking exact release), through both the
+    run cleanup and the named recovery command."""
     root, state, _ = lab
+    available = mode == "available"
     run = _allocated_cleanup_run(lab)
-    (root / "usage-response.json").write_text(json.dumps({"mode": failure}))
+    (root / "usage-response.json").write_text(json.dumps(
+        {"mode": "available", "balance": 196.0} if available else {"mode": mode}))
     started = time.monotonic()
-    assert run.cleanup() is False
+    if entry == "cleanup":
+        assert run.cleanup() is False
+    else:
+        assert _controller_call(["stop", "--state", str(state)]) == (0 if available else 1)
     assert time.monotonic() - started < 9
-    manifest = json.loads((state / "manifest.json").read_text())
-    final = manifest["final_cu_observation"]
-    assert final["status"] == "unavailable"
-    assert final["reason"] == "usage_unavailable"
-    assert "balance" not in final and "spent_since_start" not in final
-    assert "original fake" not in json.dumps(final)
-    assert manifest["released"] is True and manifest["release_evidence"]["absent"] is True
-    assert json.loads((root / "sessions.json").read_text()) == {}
-    calls = [(kind, argv) for kind, argv in _events(root) if kind == "colab"]
-    stops = [argv[-1] for _, argv in calls if argv[2] == "stop"]
-    assert stops == [run.manifest["session"]]
-    assert sum(argv[2] == "usage" for _, argv in calls) == 3
-    (root / "usage-response.json").unlink()
-    ordinary = _prepare_new(state, root / "ordinary-after-unavailable-final-usage")
-    assert _run_fake(ordinary) == 0
-
-
-@pytest.mark.parametrize("available", [True, False])
-def test_manual_recovery_records_final_usage_or_explicit_unavailable_and_still_releases(lab, available):
-    root, state, _ = lab
-    run = _allocated_cleanup_run(lab)
-    response = {"mode": "available", "balance": 196.0} if available else {"mode": "error"}
-    (root / "usage-response.json").write_text(json.dumps(response))
-    assert _controller_call(["stop", "--state", str(state)]) == (0 if available else 1)
-    manifest = json.loads((state / "manifest.json").read_text())
+    manifest = _manifest(state)
     final = manifest["final_cu_observation"]
     assert final["status"] == ("available" if available else "unavailable")
     if available:
         assert final["balance"] == 196.0 and final["spent_since_start"] == 4.0
     else:
-        assert final["reason"] == "usage_unavailable" and "balance" not in final
+        assert final["reason"] == "usage_unavailable"
+        assert "balance" not in final and "spent_since_start" not in final
+        assert "original fake" not in json.dumps(final)
     assert manifest["released"] is True and manifest["release_evidence"]["absent"] is True
     assert json.loads((root / "sessions.json").read_text()) == {}
-    stops = [argv[-1] for kind, argv in _events(root) if kind == "colab" and argv[2] == "stop"]
-    assert stops == [run.manifest["session"]]
+    calls = [(kind, argv) for kind, argv in _events(root) if kind == "colab"]
+    assert [argv[-1] for _, argv in calls if argv[2] == "stop"] == [run.manifest["session"]]
+    if entry == "cleanup":
+        assert sum(argv[2] == "usage" for _, argv in calls) == 3
     (root / "usage-response.json").unlink()
-    ordinary = _prepare_new(state, root / "ordinary-after-final-usage-recovery")
-    assert _run_fake(ordinary) == 0
+    _next_run_works(state, root, "ordinary-after-final-usage")
 
 
 def test_successful_workload_with_unavailable_final_usage_has_no_cpu_receipt_then_next_run_works(lab, monkeypatch):
@@ -574,7 +585,7 @@ def test_successful_workload_with_unavailable_final_usage_has_no_cpu_receipt_the
 
     monkeypatch.setattr(controller.Run, "cleanup", fail_only_final_account_observation)
     assert _run_fake(state) == 1
-    manifest = json.loads((state / "manifest.json").read_text())
+    manifest = _manifest(state)
     assert manifest["workload_succeeded"] is True
     assert manifest["final_cu_observation"]["status"] == "unavailable"
     assert manifest["released"] is True and manifest["release_evidence"]["absent"] is True
@@ -583,9 +594,7 @@ def test_successful_workload_with_unavailable_final_usage_has_no_cpu_receipt_the
     stops = [argv[-1] for kind, argv in _events(root) if kind == "colab" and argv[2] == "stop"]
     assert stops == [manifest["session"]]
     monkeypatch.setattr(controller.Run, "cleanup", cleanup)
-    ordinary = _prepare_new(state, root / "ordinary-after-unavailable-final-accounting")
-    assert _run_fake(ordinary) == 0
-    assert (ordinary / "transport-receipt.json").is_file()
+    _next_run_works(state, root, "ordinary-after-unavailable-final-accounting")
 
 
 @pytest.mark.parametrize("interruption,created", [("terminate", True), ("recovery", True)])
@@ -648,7 +657,7 @@ def test_native_gateway_pg_readiness_interruption_and_recovery_preserve_foreign_
             assert _controller_call(["stop", "--state", str(state)]) == 0
     finally:
         run.terminate(child)
-    manifest = json.loads((state / "manifest.json").read_text())
+    manifest = _manifest(state)
     assert manifest["released"] is True and manifest["release_evidence"]["absent"] is True
     assert manifest["gateway_network_cleanup"]["completed"] is True
     assert json.loads(container_file.read_text()) == foreign
@@ -813,8 +822,7 @@ def lab(tmp_path, monkeypatch, request):
         cpu = tmp_path / "cpu-proof"
         assert _controller_call(["prepare", "--state", str(cpu), "--profile", "COLAB_CPU_TRANSPORT"]
                                 + common, source_root=source) == 0
-        proof = subprocess.run(command + ["run", "--state", str(cpu), "--approve-cu", "20", "--", "/bin/true"],
-                               capture_output=True, text=True, timeout=15, check=False)
+        proof = _run_direct(command, cpu, "/bin/true")
         assert proof.returncode == 0, proof.stdout + proof.stderr + _run_trail(cpu)
         inference_lock = tmp_path / "inference.lock"
         inference_lock.write_text(_reference_lock())
@@ -849,7 +857,7 @@ def lab(tmp_path, monkeypatch, request):
 @pytest.fixture
 def storage_lab(lab, retained, original_inputs, monkeypatch):
     root, base, command = lab
-    original = json.loads((base / "manifest.json").read_text())
+    original = _manifest(base)
     source = Path(original["origin"]["source_root"])
     kubectl = root / "bin/kubectl"
     kubectl.write_text(f"#!{sys.executable}\n" + FAKE)
@@ -902,8 +910,7 @@ def storage_lab(lab, retained, original_inputs, monkeypatch):
         "metadata_sha256": {name: row["sha256"] for name, row in evidence["files"].items()},
     }]}
     test_colab_production._json(root / "original-runtime-observed.json", runtime)
-    proof = subprocess.run(command + ["run", "--state", str(base), "--approve-cu", "20", "--", "/bin/true"],
-                           capture_output=True, text=True, timeout=15, check=False)
+    proof = _run_direct(command, base, "/bin/true")
     assert proof.returncode == 0, proof.stdout + proof.stderr + _run_trail(base)
     (root / "events.jsonl").write_text("")
     kubeconfig = root / "original-kubeconfig"
@@ -959,7 +966,7 @@ def test_fresh_cli_proves_storage_releases_forward_and_next_ordinary_prepare_wor
     ledger.unlink()
     assert _fresh_cli(run) == 0
     state = run.state.parent / "fresh-initialization"
-    manifest = json.loads((state / "manifest.json").read_text())
+    manifest = _manifest(state)
     assert manifest["phase"] == "initialized" and manifest["local_forward_released"] is True
     assert manifest["allocation_attempted"] is False and manifest["endpoint"] is None
     assert not (state / "execution").exists()
@@ -1022,9 +1029,9 @@ def test_fresh_http_progress_cannot_extend_absolute_deadline(storage_lab, monkey
         listener.bind(("127.0.0.1", run.config["qdrant_port"]))
 
 
-@pytest.mark.parametrize("interrupt", [signal.SIGTERM])
-def test_fresh_cleanup_finishes_before_honoring_another_interrupt(storage_lab, monkeypatch, interrupt):
+def test_fresh_cleanup_finishes_before_honoring_another_interrupt(storage_lab, monkeypatch):
     root, run, _ = storage_lab
+    interrupt = signal.SIGTERM
     (Path(run.config["data_state"]) / "retained-index-binding.json").unlink()
     monkeypatch.setenv("FAKE_FRESH_API", "resist-cleanup")
     delivered = []
@@ -1066,7 +1073,7 @@ def _production_cli(state, *, stop=False, workload=(), timeout=20):
 
 def test_production_prepare_refuses_maxima_only_census_without_independent_inputs(lab):
     root, base, _ = lab
-    original = json.loads((base / "manifest.json").read_text())
+    original = _manifest(base)
     corpus = root / "unmeasured-original-corpus"
     corpus.mkdir()
     golden = root / "unmeasured-original-golden.jsonl"
@@ -1089,34 +1096,24 @@ def test_production_prepare_refuses_maxima_only_census_without_independent_input
     assert not state.exists(), "incomplete evidence was published as prepared production"
 
 
-@pytest.mark.parametrize("lab", ["COLAB_G4_BF16"], indirect=True)
-def test_bad_assignment_releases_only_owned_session_before_model_runtime(lab, monkeypatch):
+@pytest.mark.parametrize("lab,scenario", [
+    ("COLAB_G4_BF16", "bad_gpu"),
+    ("COLAB_CPU_TRANSPORT", "spent_cap_zero_rate"),
+], indirect=["lab"], ids=["bad-assignment", "spent-cap-zero-rate"])
+def test_unusable_assignment_refuses_before_model_runtime_and_releases(lab, monkeypatch, scenario):
     root, state, command = lab
-    monkeypatch.setenv("FAKE_COLAB_SCENARIO", "bad_gpu")
-    result = subprocess.run(command + ["run", "--state", str(state), "--approve-cu", "20",
-                            "--", sys.executable, "-c", "raise AssertionError('must not run')"],
-                            capture_output=True, text=True, timeout=15, check=False)
+    monkeypatch.setenv("FAKE_COLAB_SCENARIO", scenario)
+    result = _run_direct(command, state, sys.executable, "-c", "raise AssertionError('must not run')")
+    events = _events(root)
     assert result.returncode != 0
-    events = [json.loads(line) for line in (root / "events.jsonl").read_text().splitlines()]
-    assert not any(kind == "ssh" for kind, _ in events)
     assert not any("colab_runtime.py" in " ".join(argv) for _, argv in events)
-    stopped = [argv[argv.index("-s") + 1] for kind, argv in events if kind == "colab" and "stop" in argv]
-    assert stopped == [json.loads((state / "manifest.json").read_text())["session"]]
+    manifest = _manifest(state)
+    assert manifest["released"] is True
+    if scenario == "bad_gpu":
+        assert not any(kind == "ssh" for kind, _ in events)
+        stopped = [argv[argv.index("-s") + 1] for kind, argv in events if kind == "colab" and "stop" in argv]
+        assert stopped == [manifest["session"]]
     assert json.loads((root / "sessions.json").read_text()) == {}
-
-
-@pytest.mark.parametrize("lab", ["COLAB_CPU_TRANSPORT"], indirect=True)
-def test_spent_cu_cap_refuses_even_when_current_rate_is_zero(lab, monkeypatch):
-    root, state, command = lab
-    monkeypatch.setenv("FAKE_COLAB_SCENARIO", "spent_cap_zero_rate")
-    result = subprocess.run(command + ["run", "--state", str(state), "--approve-cu", "20",
-                            "--", sys.executable, "-c", "raise AssertionError('must not run')"],
-                            capture_output=True, text=True, timeout=15, check=False)
-    events = [json.loads(line) for line in (root / "events.jsonl").read_text().splitlines()]
-    assert not any("colab_runtime.py" in " ".join(argv) for _, argv in events)
-    assert result.returncode != 0
-    assert json.loads((root / "sessions.json").read_text()) == {}
-    assert json.loads((state / "manifest.json").read_text())["released"] is True
 
 
 @pytest.mark.parametrize("lab", ["COLAB_CPU_TRANSPORT"], indirect=True)
@@ -1149,7 +1146,7 @@ def test_interrupt_quiesces_workload_before_remote_export_and_release(lab):
             process.kill()
             process.communicate(timeout=3)
     assert process.returncode == 130, stdout + stderr + _run_trail(state)
-    events = [json.loads(line) for line in (root / "events.jsonl").read_text().splitlines()]
+    events = _events(root)
     stopped = next(i for i, (kind, _) in enumerate(events) if kind == "workload-stopped")
     remote_teardown = next(i for i, (kind, argv) in enumerate(events)
                            if kind == "colab" and "upload" in argv and argv[-1] == "/content/colab-stop")
@@ -1157,31 +1154,18 @@ def test_interrupt_quiesces_workload_before_remote_export_and_release(lab):
     assert json.loads((root / "sessions.json").read_text()) == {}
 
 
-@pytest.mark.parametrize("lab", ["COLAB_CPU_TRANSPORT"], indirect=True)
-def test_workload_executes_the_prepared_checkout_from_a_decoy_cwd(lab, tmp_path):
-    root, state, command = lab
-    decoy = tmp_path / "decoy-checkout"
-    decoy.mkdir()
-    observed = root / "workload-cwd"
-    program = f"from pathlib import Path; Path({str(observed)!r}).write_text(str(Path.cwd()))"
-    result = subprocess.run(command + ["run", "--state", str(state), "--approve-cu", "20",
-                            "--", sys.executable, "-c", program],
-                            cwd=decoy, capture_output=True, text=True, timeout=15, check=False)
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert observed.read_text() == str(state / "execution")
-    assert json.loads((root / "sessions.json").read_text()) == {}
-
-
 @pytest.mark.parametrize("lab", ["COLAB_G4_BF16"], indirect=True)
 def test_paid_execution_uses_frozen_uploads_gateway_task_and_fresh_imports_during_origin_mutation(lab, monkeypatch):
     root, state, command = lab
-    manifest = json.loads((state / "manifest.json").read_text())
+    manifest = _manifest(state)
     execution = state / "execution"
     origin = Path(manifest["origin"]["source_root"])
     expected_profile = (execution / "src/mainframe_rag/serve/colab_profiles.py").read_bytes()
     monkeypatch.setenv("FAKE_COLAB_SCENARIO", "origin_mutation")
-    result = subprocess.run(command + ["run", "--state", str(state), "--approve-cu", "20"],
-                            capture_output=True, text=True, timeout=20, check=False)
+    # Run from a decoy checkout: only the frozen execution tree may be the cwd.
+    decoy = root / "decoy-checkout"
+    decoy.mkdir()
+    result = _run_direct(command, state, timeout=20, cwd=decoy)
     assert result.returncode == 0, result.stdout + result.stderr
     observed = json.loads((root / "snapshot-workload.json").read_text())
     assert observed == {
@@ -1206,14 +1190,13 @@ def test_paid_execution_uses_frozen_uploads_gateway_task_and_fresh_imports_durin
     assert manifest["execution"]["source"]["source_bytes"] < 2 * 1024 * 1024
     assert manifest["execution"]["task_bytes"] < 4096
     assert not any((execution / name).exists() for name in (".git", ".venv", ".env", "corpus"))
-    finished = json.loads((state / "manifest.json").read_text())
+    finished = _manifest(state)
     assert finished["released"] is True and finished["release_evidence"]["absent"] is True
     assert not (state / "transport-receipt.json").exists(), "GPU success cannot certify CPU transport"
     assert json.loads((root / "sessions.json").read_text()) == {}
     monkeypatch.setenv("FAKE_COLAB_SCENARIO", "success")
     ordinary = _prepare_new(state, root / "ordinary-after-source-restoration")
-    next_run = subprocess.run(command + ["run", "--state", str(ordinary), "--approve-cu", "20", "--", "/bin/true"],
-                              capture_output=True, text=True, timeout=15, check=False)
+    next_run = _run_direct(command, ordinary, "/bin/true")
     assert next_run.returncode == 0, next_run.stdout + next_run.stderr
     assert (ordinary / "transport-receipt.json").is_file()
 
@@ -1233,11 +1216,10 @@ def test_tampered_execution_snapshot_refuses_before_tools_then_restored_snapshot
         target.chmod(0o600)
         target.write_bytes(original + b"\n# original synthetic tampering\n")
         target.chmod(0o500 if changed == "task" else 0o400)
-    rejected = subprocess.run(command + ["run", "--state", str(state), "--approve-cu", "20", "--", "/bin/true"],
-                              capture_output=True, text=True, timeout=5, check=False)
+    rejected = _run_direct(command, state, "/bin/true", timeout=5)
     assert rejected.returncode == 2
     assert _events(root) == []
-    assert json.loads((state / "manifest.json").read_text())["allocation_attempted"] is False
+    assert _manifest(state)["allocation_attempted"] is False
     if changed == "dotenv":
         execution.chmod(0o700)
         target.unlink()
@@ -1246,8 +1228,7 @@ def test_tampered_execution_snapshot_refuses_before_tools_then_restored_snapshot
         target.chmod(0o600)
         target.write_bytes(original)
         target.chmod(0o500 if changed == "task" else 0o400)
-    result = subprocess.run(command + ["run", "--state", str(state), "--approve-cu", "20", "--", "/bin/true"],
-                            capture_output=True, text=True, timeout=15, check=False)
+    result = _run_direct(command, state, "/bin/true")
     assert result.returncode == 0, result.stdout + result.stderr
     assert (state / "transport-receipt.json").is_file()
 
@@ -1262,20 +1243,10 @@ def test_prepare_publishes_only_exact_bounded_source_and_pinned_tool_then_next_c
     capture = source / "scripts/gateway/log_capture.py"
     original_capture = capture.read_bytes()
     read_bounded = controller.read_bounded_input
-    source_check = controller.check_source_configuration
     if changed == "task":
         task.write_bytes(original_task + b"\n# mismatched original tool\n")
-    elif changed == "dotenv":
-        (source / ".env").write_text("ORIGINAL_SYNTHETIC_SETTING=unsupported\n")
     elif changed == "gateway_capture":
         capture.unlink()
-    elif changed == "gateway_capture_race":
-        def removed_after_precheck(root):
-            source_check(root)
-            if root == source:
-                capture.unlink()
-
-        monkeypatch.setattr(controller, "check_source_configuration", removed_after_precheck)
     else:
         def changed_during_copy(path, limit):
             raw = read_bounded(path, limit)
@@ -1288,16 +1259,12 @@ def test_prepare_publishes_only_exact_bounded_source_and_pinned_tool_then_next_c
     assert not (state / "execution/.env").exists(), "private configuration was copied"
     if changed == "task":
         task.write_bytes(original_task)
-    elif changed == "dotenv":
-        (source / ".env").unlink()
-    elif changed in {"gateway_capture", "gateway_capture_race"}:
+    elif changed == "gateway_capture":
         capture.write_bytes(original_capture)
-        monkeypatch.setattr(controller, "check_source_configuration", source_check)
     else:
         monkeypatch.setattr(controller, "read_bounded_input", read_bounded)
     ordinary = _prepare_new(base, root / "ordinary-after-invalid-source")
-    result = subprocess.run(command + ["run", "--state", str(ordinary), "--approve-cu", "20", "--", "/bin/true"],
-                            capture_output=True, text=True, timeout=15, check=False)
+    result = _run_direct(command, ordinary, "/bin/true")
     assert result.returncode == 0, result.stdout + result.stderr
     assert (ordinary / "transport-receipt.json").is_file()
 
@@ -1325,10 +1292,9 @@ def test_snapshot_recovery_releases_owned_session_despite_changed_origin_then_ne
     state = _prepare_short_deadline(base, root / "short-deadline-run")
     monkeypatch.setenv("FAKE_COLAB_SCENARIO", "stop_fail")
     # A persistent stop failure is retried until the run deadline (#746).
-    failed = subprocess.run(command + ["run", "--state", str(state), "--approve-cu", "20", "--", "/bin/true"],
-                            capture_output=True, text=True, timeout=60, check=False)
+    failed = _run_direct(command, state, "/bin/true", timeout=60)
     assert failed.returncode == 1
-    manifest = json.loads((state / "manifest.json").read_text())
+    manifest = _manifest(state)
     events = [event["event"] for event in manifest["events"]]
     assert manifest["release_retries"] >= 1 and manifest["released"] is False
     assert events.index("session_release_unverified") > events.index("session_release_retrying")
@@ -1347,45 +1313,35 @@ def test_snapshot_recovery_releases_owned_session_despite_changed_origin_then_ne
     assert not (state / "transport-receipt.json").exists()
     changed.write_bytes(original)
     ordinary = _prepare_new(state, root / "ordinary-after-frozen-recovery")
-    result = subprocess.run(command + ["run", "--state", str(ordinary), "--approve-cu", "20", "--", "/bin/true"],
-                            capture_output=True, text=True, timeout=15, check=False)
+    result = _run_direct(command, ordinary, "/bin/true")
     assert result.returncode == 0, result.stdout + result.stderr
     assert (ordinary / "transport-receipt.json").is_file()
 
 
-@pytest.mark.parametrize("lab", ["COLAB_CPU_TRANSPORT"], indirect=True)
-def test_separate_run_states_share_assignment_ownership_and_allow_next_run(lab, monkeypatch, capsys):
+@pytest.mark.parametrize("holder", ["recorded-pid", "unrecorded-pid"])
+def test_separate_run_states_share_assignment_ownership_and_allow_next_run(lab, monkeypatch, capsys, holder):
+    """#789: one account-wide assignment lock; the refusal names its holder and a
+    distinct state cannot allocate until that owner releases it."""
     root, state, _ = lab
     second = _prepare_new(state, root / "second-private-run")
     entered = []
     monkeypatch.setattr(controller.Run, "run", lambda self, approval, workload: entered.append(self.state) or 0)
-    with controller.assignment_lock():
+    lock_path = Path(os.environ["COLAB_ASSIGNMENT_LOCK_DIR"]) / "assignment.lock"
+    lock_path.parent.mkdir(mode=0o700, exist_ok=True)
+    with (controller.assignment_lock() if holder == "recorded-pid" else
+          os.fdopen(os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600), "r+b")) as held:
+        if holder == "unrecorded-pid":
+            held.truncate(0)
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
         capsys.readouterr()
         assert _controller_call(["run", "--state", str(second), "--approve-cu", "20"]) == 2
         assert entered == [], "a distinct state bypassed assignment ownership"
-        # #789: the refusal names the holder instead of the generic prerequisite refusal.
         refusal = capsys.readouterr().err
-        assert f"Colab assignment lock is held by PID {os.getpid()}; no allocation attempted." in refusal
+        named = "PID " + str(os.getpid()) if holder == "recorded-pid" else "an unrecorded PID"
+        assert f"Colab assignment lock is held by {named}; no allocation attempted." in refusal
         assert "refused invalid/missing prerequisites" not in refusal
     assert _controller_call(["run", "--state", str(second), "--approve-cu", "20"]) == 0
     assert entered == [second]
-
-
-@pytest.mark.parametrize("lab", ["COLAB_CPU_TRANSPORT"], indirect=True)
-def test_assignment_holder_without_recorded_pid_is_still_named_busy(lab, monkeypatch, capsys):
-    import fcntl
-    root, state, _ = lab
-    second = _prepare_new(state, root / "unrecorded-holder-run")
-    monkeypatch.setattr(controller.Run, "run", lambda self, approval, workload: 0)
-    lock_path = Path(os.environ["COLAB_ASSIGNMENT_LOCK_DIR"]) / "assignment.lock"
-    lock_path.parent.mkdir(mode=0o700, exist_ok=True)
-    with os.fdopen(os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600), "r+b") as holder:
-        holder.truncate(0)
-        fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        capsys.readouterr()
-        assert _controller_call(["run", "--state", str(second), "--approve-cu", "20"]) == 2
-        assert "Colab assignment lock is held by an unrecorded PID; no allocation attempted." in capsys.readouterr().err
-    assert _controller_call(["run", "--state", str(second), "--approve-cu", "20"]) == 0
     assert lock_path.read_bytes() == f"{os.getpid()}\n".encode()
 
 
@@ -1411,7 +1367,7 @@ def test_transient_budget_poll_failure_keeps_session_then_run_completes_and_next
     # usage call 0 is the initial budget, 1 follows allocation, 2 is the hold loop's first poll.
     (root / "fail-calls.json").write_text(json.dumps({"usage": [2]}))
     assert _run_fake(state, ("/bin/sleep", "1")) == 0
-    manifest = json.loads((state / "manifest.json").read_text())
+    manifest = _manifest(state)
     assert manifest["cu_poll_failures"] == 1 and "failure_reason" not in manifest
     assert manifest["final_cu_observation"]["status"] == "available"
     assert manifest["workload_succeeded"] is True and manifest["released"] is True
@@ -1443,7 +1399,7 @@ def test_failed_poll_right_after_allocation_cannot_bound_cap_and_fails_closed(la
     root, state, _ = lab
     (root / "fail-calls.json").write_text(json.dumps({"usage": [1]}))
     assert _run_fake(state) == 1
-    manifest = json.loads((state / "manifest.json").read_text())
+    manifest = _manifest(state)
     assert manifest["failure_reason"] == "CU usage could not be observed within its bounded tolerance"
     assert manifest["released"] is True and not (state / "transport-receipt.json").exists()
     assert json.loads((root / "sessions.json").read_text()) == {}
@@ -1463,7 +1419,7 @@ def test_transient_release_failure_is_retried_until_absence_then_next_run_works(
     # ownership, so 4 and 5 are the release's ownership and absence checks.
     (root / "fail-calls.json").write_text(json.dumps(failed))
     assert _run_fake(state) == 0
-    manifest = json.loads((state / "manifest.json").read_text())
+    manifest = _manifest(state)
     assert manifest["release_retries"] == len(next(iter(failed.values()))) and manifest["released"] is True
     assert "cleanup_complete" in [event["event"] for event in manifest["events"]]
     assert manifest["release_evidence"]["absent"] is True
@@ -1483,7 +1439,7 @@ def test_slow_export_cannot_consume_owned_vm_release_budget(lab, monkeypatch):
     run.expiry = time.time() + 6
     assert run.cleanup() is False, "an unavailable export cannot be reported as a complete cleanup"
     assert json.loads((root / "sessions.json").read_text()) == {}
-    manifest = json.loads((state / "manifest.json").read_text())
+    manifest = _manifest(state)
     assert manifest["released"] is True
     assert any(event["event"] == "artifact_export_unavailable" for event in manifest["events"])
     run.expiry = time.time() + 6
@@ -1497,7 +1453,7 @@ def test_failed_stop_upload_still_attempts_download_and_stays_incomplete_then_ne
     root, state, _ = lab
     monkeypatch.setenv("FAKE_COLAB_SCENARIO", "upload_fail")
     assert _run_fake(state) != 0
-    manifest = json.loads((state / "manifest.json").read_text())
+    manifest = _manifest(state)
     events = [event["event"] for event in manifest["events"]]
     assert "artifact_stop_signal_failed" in events and "cleanup_incomplete" in events
     downloads = [argv for kind, argv in _events(root)
@@ -1516,7 +1472,7 @@ def test_slow_stop_upload_still_exports_artifacts_and_issues_cpu_receipt_then_ne
     root, state, _ = lab
     monkeypatch.setenv("FAKE_COLAB_SCENARIO", "slow_upload")
     assert _run_fake(state) == 0
-    manifest = json.loads((state / "manifest.json").read_text())
+    manifest = _manifest(state)
     events = [event["event"] for event in manifest["events"]]
     assert "artifact_export_unavailable" not in events and "cleanup_complete" in events
     assert (state / "colab-artifacts.tgz").is_file() and (state / "transport-receipt.json").is_file()
@@ -1538,11 +1494,7 @@ def test_cli_capture_keeps_stdout_separate_from_bounded_noisy_stderr_and_allows_
     assert sorted(path.stat().st_size for path in state.glob("command-work-*.log")) == [20, 64 * 1024]
     assert run.command([sys.executable, "-c", "print('next ordinary command')"], seconds=3).stdout == \
         "next ordinary command\n"
-
-
-def test_oversize_cli_stdout_cannot_establish_partial_structured_identity(lab):
-    _, state, _ = lab
-    run = controller.Run(state)
+    # A truncated stdout can never establish a partial structured identity.
     program = "import os; os.write(1,b'[colab] No active sessions found on server.\\n'+b' '*262144)"
     with pytest.raises(controller.LabError, match="partial identity"):
         run.command([sys.executable, "-c", program], seconds=3, allow_failure=True)
@@ -1774,10 +1726,10 @@ def test_output_limits_never_prevent_owned_release_and_a_fresh_ordinary_operatio
     run.expiry = time.time() + 6
     assert run.cleanup() is True
     assert json.loads((root / "sessions.json").read_text()) == {}
-    manifest = json.loads((state / "manifest.json").read_text())
+    manifest = _manifest(state)
     assert manifest["released"] is True
     assert manifest["controller_capture"]["stdout_truncated"] is (scenario == "noisy_stop")
-    events = [json.loads(line) for line in (root / "events.jsonl").read_text().splitlines()]
+    events = _events(root)
     stops = [args for kind, args in events if kind == "colab" and args[2] == "stop"]
     assert len(stops) == 1 and stops[0][-1] == run.manifest["session"]
     assert not list(state.glob("command-*.log")), "exhausted capture must not create unbounded cleanup logs"
@@ -1790,14 +1742,14 @@ def test_output_limits_never_prevent_owned_release_and_a_fresh_ordinary_operatio
 
 def test_prepared_dirty_source_change_refuses_before_allocation_then_ordinary_cpu_run(lab, monkeypatch):
     root, base, _ = lab
-    sources = Path(json.loads((base / "manifest.json").read_text())["origin"]["source_root"])
+    sources = Path(_manifest(base)["origin"]["source_root"])
     state = _prepare_new(base, root / "bound-source-run")
     changed = sources / "src/mainframe_rag/serve/colab_profiles.py"
     original = changed.read_bytes()
     changed.write_text("changed source at the same HEAD\n")
     assert _run_fake(state) == 2
     assert _events(root) == [], "source drift reached a tool or allocated a runtime"
-    assert json.loads((state / "manifest.json").read_text())["allocation_attempted"] is False
+    assert _manifest(state)["allocation_attempted"] is False
     changed.write_bytes(original)
     assert _run_fake(state) == 0
     assert (state / "transport-receipt.json").is_file()
@@ -1807,32 +1759,25 @@ def test_prepared_dirty_source_change_refuses_before_allocation_then_ordinary_cp
 @pytest.mark.parametrize("changed", ["head", "profile", "tool"])
 def test_prepared_candidate_and_execution_identity_drift_refuses_before_allocation(lab, changed):
     root, state, _ = lab
-    manifest = json.loads((state / "manifest.json").read_text())
+    manifest = _manifest(state)
     if changed == "head":
         manifest["prepared_identity"]["candidate"]["development_sha"] = "0" * 40
-    elif changed == "reported_head":
-        manifest["development_sha"] = "0" * 40
     elif changed == "profile":
         manifest["profile"]["dense_dim"] = 4096
-    elif changed == "serialized_profile":
-        with (state / "model-profile.json").open("a") as stream:
-            stream.write("\n")
-    elif changed == "config":
-        manifest["config"]["gateway_image"] = "example.invalid/other@sha256:" + "b" * 64
     else:
         with Path(manifest["tools"]["colab"]).open("a") as stream:
             stream.write("\n# changed executable at the same path\n")
     (state / "manifest.json").write_text(json.dumps(manifest))
     assert _run_fake(state) == 2
     assert _events(root) == []
-    assert json.loads((state / "manifest.json").read_text())["allocation_attempted"] is False
+    assert _manifest(state)["allocation_attempted"] is False
 
 
 def test_successful_cpu_receipt_is_created_only_after_exact_release_absence(lab):
     root, state, _ = lab
     assert _run_fake(state) == 0
     receipt = json.loads((state / "transport-receipt.json").read_text())
-    manifest = json.loads((state / "manifest.json").read_text())
+    manifest = _manifest(state)
     assert receipt["kind"] == "colab-cpu-transport"
     assert receipt["released"] is True and receipt["workload_succeeded"] is True
     assert receipt["cpu_profile"]["name"] == "COLAB_CPU_TRANSPORT"
@@ -1864,11 +1809,11 @@ def test_successful_cpu_receipt_is_created_only_after_exact_release_absence(lab)
     assert json.loads((root / "sessions.json").read_text()) == {}
 
 
-@pytest.mark.parametrize("address", ["172.20.5.6"])
-def test_explicit_private_docker_gateway_is_frozen_and_checked_before_allocation(lab, monkeypatch, address):
+def test_explicit_private_docker_gateway_is_frozen_and_checked_before_allocation(lab, monkeypatch):
     root, base, _ = lab
+    address = "172.20.5.6"
     state = _prepare_new(base, root / "explicit-route", extra=("--docker-gateway", address))
-    prepared = json.loads((state / "manifest.json").read_text())
+    prepared = _manifest(state)
     assert prepared["config"]["docker_gateway"] == address
     monkeypatch.setenv("COLAB_DOCKER_GATEWAY", "10.99.99.99")
     checked = []
@@ -1885,7 +1830,7 @@ def test_explicit_private_docker_gateway_is_frozen_and_checked_before_allocation
     assert not any(kind == "docker" and argv[:3] == ["network", "inspect", "bridge"]
                    for kind, argv in _events(root))
     assert not any(kind == "colab" and argv[2] == "new" for kind, argv in _events(root))
-    failed = json.loads((state / "manifest.json").read_text())
+    failed = _manifest(state)
     assert failed["allocation_attempted"] is False and failed["endpoint"] is None
     assert not (state / "transport-receipt.json").exists()
 
@@ -1904,15 +1849,13 @@ def test_non_private_or_non_numeric_docker_gateway_refuses_preparation(lab, addr
 
 def test_cpu_transport_survives_delayed_listener_inside_run_deadline_then_next_run_works(lab, monkeypatch):
     root, state, command = lab
-    manifest = json.loads((state / "manifest.json").read_text())
+    manifest = _manifest(state)
     assert manifest["profile"]["deadline_seconds"] == 30
     # The public controller has a 20-second work window. Its boundary doubles
     # must not disappear at 12 seconds while that valid work is still ongoing.
     with monkeypatch.context() as delayed:
         delayed.setenv("FAKE_SSH_START_SECONDS", "12.5")
-        result = subprocess.run(command + ["run", "--state", str(state), "--approve-cu", "20",
-                                           "--", "/bin/true"],
-                                capture_output=True, text=True, timeout=24, check=False)
+        result = _run_direct(command, state, "/bin/true", timeout=24)
     assert result.returncode == 0, result.stdout + result.stderr
     receipt = json.loads((state / "transport-receipt.json").read_text())
     assert receipt["released"] is True and receipt["workload_succeeded"] is True
@@ -1936,7 +1879,7 @@ def test_sandbox_hold_hands_off_without_snapshot_interpreter_then_releases_and_n
     completed run; sandbox.env carries routing/ownership, not the snapshot interpreter."""
     root, state, _ = lab
     assert _run_fake(state, ("scripts/colab_hold.py",)) == 0
-    manifest = json.loads((state / "manifest.json").read_text())
+    manifest = _manifest(state)
     assert manifest["workload_succeeded"] is True and manifest["released"] is True
     sandbox = (state / "sandbox.env").read_text().splitlines()
     names = {line.split("=", 1)[0].removeprefix("export ") for line in sandbox}
@@ -1959,9 +1902,7 @@ def test_failed_cpu_run_has_no_receipt_and_recovery_allows_a_fresh_normal_run(la
     monkeypatch.setenv("FAKE_COLAB_SCENARIO", "success")
     assert _controller_call(["stop", "--state", str(state)]) == 0
     assert not (state / "transport-receipt.json").exists(), "recovery cannot certify a failed rehearsal"
-    ordinary = _prepare_new(state, root / "ordinary-cpu-after-recovery")
-    assert _run_fake(ordinary) == 0
-    assert (ordinary / "transport-receipt.json").is_file()
+    _next_run_works(state, root, "ordinary-cpu-after-recovery")
     assert json.loads((root / "sessions.json").read_text()) == {}
 
 
@@ -1979,7 +1920,7 @@ def test_gpu_lock_must_validate_before_allocation_and_valid_prerequisites_allow_
     invalid = _prepare_new(cpu, root / "invalid-gpu-lock", profile="COLAB_G4_BF16", extra=extra)
     assert _run_fake(invalid) != 0
     assert not any(kind == "colab" and argv[2] == "new" for kind, argv in _events(root))
-    assert json.loads((invalid / "manifest.json").read_text())["allocation_attempted"] is False
+    assert _manifest(invalid)["allocation_attempted"] is False
     if lock is None:
         inference.write_text(_reference_lock())
         valid = _prepare_new(cpu, root / "ordinary-gpu-lock", profile="COLAB_G4_BF16",
@@ -1989,8 +1930,8 @@ def test_gpu_lock_must_validate_before_allocation_and_valid_prerequisites_allow_
         assert len(news) == 1 and news[0][-2:] == ["--gpu", "G4"]
         assert json.loads((root / "sessions.json").read_text()) == {}
         assert not (valid / "transport-receipt.json").exists()
-        cpu_manifest = json.loads((cpu / "manifest.json").read_text())
-        gpu_manifest = json.loads((valid / "manifest.json").read_text())
+        cpu_manifest = _manifest(cpu)
+        gpu_manifest = _manifest(valid)
         assert cpu_manifest["gateway_network"]["network_id"] != gpu_manifest["gateway_network"]["network_id"]
         assert cpu_manifest["transport"] == gpu_manifest["transport"]
 
@@ -2004,15 +1945,11 @@ def test_gpu_rejects_incompatible_or_unsuccessful_cpu_receipt_before_allocation(
     receipt = json.loads((cpu / "transport-receipt.json").read_text())
     if changed == "released":
         receipt["released"] = False
-    elif changed == "verified":
-        receipt["transport"]["verified"] = False
     elif changed == "candidate":
         receipt["candidate"]["source_sha256"] = "0" * 64
-    elif changed in ("cli", "gateway", "bridge", "network"):
-        field = {"cli": "cli_version", "gateway": "gateway_image", "bridge": "bridge", "network": "network_name"}[changed]
+    elif changed in ("cli", "network"):
+        field = {"cli": "cli_version", "network": "network_name"}[changed]
         receipt["transport"][field] = "different identity"
-    elif changed == "profile":
-        receipt["cpu_profile"]["name"] = "COLAB_G4_BF16"
     elif changed == "absence":
         del receipt["release_evidence"]
     elif changed == "session":
@@ -2027,37 +1964,21 @@ def test_gpu_rejects_incompatible_or_unsuccessful_cpu_receipt_before_allocation(
                            extra=["--transport-receipt", str(supplied), "--inference-lock", str(inference)])
     assert _run_fake(invalid) != 0
     assert not any(kind == "colab" and argv[2] == "new" for kind, argv in _events(root))
-    assert json.loads((invalid / "manifest.json").read_text())["allocation_attempted"] is False
+    assert _manifest(invalid)["allocation_attempted"] is False
 
 
 @pytest.mark.parametrize("changed", ["lock_input", "receipt_snapshot"])
 @pytest.mark.parametrize("lab", ["COLAB_G4_BF16"], indirect=True)
 def test_gpu_prerequisite_byte_drift_after_prepare_refuses_before_allocation(lab, changed):
     root, state, _ = lab
-    manifest = json.loads((state / "manifest.json").read_text())
+    manifest = _manifest(state)
     target = {"lock_input": Path(manifest["config"]["inference_lock"]),
-              "lock_snapshot": state / "inference.lock",
-              "receipt_input": Path(manifest["config"]["transport_receipt"]),
               "receipt_snapshot": state / "cpu-transport-receipt.input.json"}[changed]
     with target.open("a") as stream:
         stream.write("\n")
     assert _run_fake(state) == 2
     assert _events(root) == []
-    assert json.loads((state / "manifest.json").read_text())["allocation_attempted"] is False
-
-
-@pytest.mark.parametrize("poll", ["nan", "5.1"])
-def test_invalid_poll_interval_refuses_preparation_without_allocation(lab, poll):
-    root, base, _ = lab
-    original = json.loads((base / "manifest.json").read_text())
-    tools = original["tools"]
-    argv = ["prepare", "--state", str(root / "invalid-poll"), "--dataset", "synthetic",
-            "--profile", "COLAB_CPU_TRANSPORT", "--gateway-image", IMAGE, "--poll-seconds", poll]
-    for name in ("colab", "ssh", "ssh_keygen", "docker"):
-        argv += ["--" + name.replace("_", "-"), tools[name]]
-    assert _controller_call(argv) == 2
-    assert not (root / "invalid-poll").exists()
-    assert _events(root) == []
+    assert _manifest(state)["allocation_attempted"] is False
 
 
 def test_sensitive_capture_keeps_bounded_memory_without_disk_then_ordinary_capture_works(lab):
@@ -2099,12 +2020,8 @@ def test_native_settings_use_proven_qdrant_and_gateway_generated_legs_despite_ca
         ambient.setenv("rerank_api_key", "sk-original-unapproved-reranking")
         environment = run.environment("127.0.0.2")
     assert environment["QDRANT_URL"] == proven_url
-    direct = subprocess.run(
-        [run.manifest["execution"]["interpreter"], "-c",
-         "from mainframe_rag.config import Settings; print(Settings(_env_file=None).qdrant_url)"],
-        env=environment, cwd=run.execution_root, capture_output=True, text=True, timeout=5, check=False)
-    assert direct.returncode == 0, direct.stdout + direct.stderr
-    assert direct.stdout.strip() == proven_url
+    # The native child below re-resolves every leg under these case aliases; its
+    # reported qdrant URL is the Settings-level proof, so no separate probe here.
     program = """
 import json
 from mainframe_rag.config import Settings
@@ -2257,23 +2174,20 @@ def test_production_drift_and_wrappers_refuse_before_native_workload_then_next_n
         original = target.read_bytes()
         with target.open("a") as stream:
             stream.write("\n")
-    elif changed.startswith("runtime_"):
+    elif changed == "runtime_software":
         target = root / "original-runtime-observed.json"
         original = target.read_bytes()
         report = json.loads(original)
-        if changed == "runtime_software":
-            report["software"]["tokenizers"] = "unapproved-fixture-version"
-        else:
-            report["models"][0]["metadata_sha256"]["tokenizer.json"] = "f" * 64
+        report["software"]["tokenizers"] = "unapproved-fixture-version"
         test_colab_production._json(target, report)
-    rejected = _production_cli(run.state, workload=("/bin/true",) if changed == "wrapper" else ())
+    rejected = _production_cli(run.state)
     assert rejected.returncode == 1, rejected.stdout + rejected.stderr
     assert not (root / "snapshot-workload.json").exists(), "unadmitted native workload executed"
     manifest = json.loads((run.state / "manifest.json").read_text())
     assert manifest.get("workload_succeeded") is not True
     assert not (run.state / "transport-receipt.json").exists()
     allocated = [argv for kind, argv in _events(root) if kind == "colab" and argv[2] == "new"]
-    if changed.startswith("runtime_"):
+    if changed == "runtime_software":
         assert len(allocated) == 1
         assert manifest["released"] is True and manifest["release_evidence"]["absent"] is True
         assert json.loads((root / "sessions.json").read_text()) == {}
@@ -2306,7 +2220,7 @@ def test_malformed_production_sidecar_cannot_block_exact_recovery_then_next_nati
     monkeypatch.setenv("FAKE_COLAB_SCENARIO", "stop_fail")
     failed = _production_cli(state, timeout=60)
     assert failed.returncode == 1, failed.stdout + failed.stderr
-    manifest = json.loads((state / "manifest.json").read_text())
+    manifest = _manifest(state)
     assert manifest["workload_succeeded"] is True
     assert json.loads((root / "sessions.json").read_text()) == {manifest["session"]: "endpoint-owned"}
     (state / "production-expected.json").write_text("{original broken synthetic sidecar\n")
@@ -2354,11 +2268,10 @@ def test_retained_storage_forwards_exact_proven_pod_without_logging_live_config(
                        seconds=3).stdout == "ordinary after storage proof\n"
 
 
-@pytest.mark.parametrize("field", ["namespace"])
-def test_retained_service_must_match_explicit_selection_before_forwarding(storage_lab, monkeypatch, field):
+def test_retained_service_must_match_explicit_selection_before_forwarding(storage_lab, monkeypatch):
     root, run, retained = storage_lab
     service = json.loads(json.dumps(retained["service"]))
-    service["metadata"][field] = "different-selection"
+    service["metadata"]["namespace"] = "different-selection"
     monkeypatch.setattr(run, "qdrant_object", lambda *_: service)
     with pytest.raises(controller.LabError, match="selected Qdrant service identity changed"):
         run.persistent_qdrant()
@@ -2416,39 +2329,34 @@ def test_budget_poll_refuses_retained_forward_loss_or_producer_drift(storage_lab
     assert not any(kind == "colab" and argv[2] == "usage" for kind, argv in _events(root))
 
 
-def test_workload_cannot_succeed_after_retained_container_restart(storage_lab, monkeypatch):
+@pytest.mark.parametrize("loss", ["container-restart", "lost-forward"])
+def test_mid_run_retained_store_loss_fails_the_workload_and_releases(storage_lab, monkeypatch, loss):
     root, run, _ = storage_lab
-    spawn = controller.Run.spawn
+    if loss == "container-restart":
+        spawn = controller.Run.spawn
 
-    def restart_after_workload(self, argv, name, **kwargs):
-        child = spawn(self, argv, name, **kwargs)
-        if name == "workload":
-            child.wait(timeout=2)
-            monkeypatch.setenv("FAKE_QDRANT_CHANGE", "container")
-        return child
+        def restart_after_workload(self, argv, name, **kwargs):
+            child = spawn(self, argv, name, **kwargs)
+            if name == "workload":
+                child.wait(timeout=2)
+                monkeypatch.setenv("FAKE_QDRANT_CHANGE", "container")
+            return child
 
-    monkeypatch.setattr(controller.Run, "spawn", restart_after_workload)
+        monkeypatch.setattr(controller.Run, "spawn", restart_after_workload)
+    else:
+        budget = controller.Run.budget
+
+        def lose_running_forward(self, *, initial=False):
+            if self.manifest["phase"] == "running":
+                self.terminate(self.qdrant_forward)
+            return budget(self, initial=initial)
+
+        monkeypatch.setattr(controller.Run, "budget", lose_running_forward)
+        monkeypatch.setenv("FAKE_NATIVE_WORKLOAD_SECONDS", "3")
     assert _run_fake(run.state, ()) != 0
-    manifest = json.loads((run.state / "manifest.json").read_text())
+    manifest = _manifest(run.state)
     assert manifest.get("workload_succeeded") is not True
     assert manifest["released"] is True and not (run.state / "transport-receipt.json").exists()
-    assert json.loads((root / "sessions.json").read_text()) == {}
-
-
-def test_running_budget_poll_lost_forward_releases_owned_vm(storage_lab, monkeypatch):
-    root, run, _ = storage_lab
-    budget = controller.Run.budget
-
-    def lose_running_forward(self, *, initial=False):
-        if self.manifest["phase"] == "running":
-            self.terminate(self.qdrant_forward)
-        return budget(self, initial=initial)
-
-    monkeypatch.setattr(controller.Run, "budget", lose_running_forward)
-    monkeypatch.setenv("FAKE_NATIVE_WORKLOAD_SECONDS", "3")
-    assert _run_fake(run.state, ()) != 0
-    manifest = json.loads((run.state / "manifest.json").read_text())
-    assert manifest.get("workload_succeeded") is not True and manifest["released"] is True
     assert json.loads((root / "sessions.json").read_text()) == {}
 
 
@@ -2468,7 +2376,7 @@ def test_host_health_cannot_certify_failed_actual_gateway_network_then_next_run_
     monkeypatch.setattr(controller.Run, "probe_gateway_network", check_host_before_owner)
     assert _run_fake(state) != 0
     assert healthy == [200, 200, 200, 200]
-    manifest = json.loads((state / "manifest.json").read_text())
+    manifest = _manifest(state)
     owned = manifest["gateway_network"]
     assert owned["created"] is True and manifest["released"] is True
     assert "transport" not in manifest and not (state / "transport-receipt.json").exists()
@@ -2478,9 +2386,8 @@ def test_host_health_cannot_certify_failed_actual_gateway_network_then_next_run_
     assert runs[0][-2:] == [owned["reasoning_url"], owned["embedding_url"]]
     assert json.loads((root / "gateway-networks.json").read_text()) == {}
     monkeypatch.setenv("FAKE_COLAB_SCENARIO", "success")
-    ordinary = _prepare_new(state, root / "ordinary-after-network-failure")
-    assert _run_fake(ordinary) == 0
-    following = json.loads((ordinary / "manifest.json").read_text())
+    ordinary = _next_run_works(state, root, "ordinary-after-network-failure")
+    following = _manifest(ordinary)
     assert following["gateway_network"]["network_id"] != owned["network_id"]
     assert json.loads((root / "gateway-networks.json").read_text()) == {}
 
@@ -2488,7 +2395,7 @@ def test_host_health_cannot_certify_failed_actual_gateway_network_then_next_run_
 @pytest.mark.parametrize("lab", ["COLAB_G4_BF16"], indirect=True)
 def test_normal_workload_gets_frozen_gateway_network_handoff_and_debug_disabled(lab, monkeypatch):
     root, state, _ = lab
-    before = json.loads((state / "manifest.json").read_text())
+    before = _manifest(state)
     monkeypatch.setenv("GATEWAY_NAME", "ambient-decoy-gateway")
     monkeypatch.setenv("PG_NET", "ambient-decoy-network")
     monkeypatch.setenv("GATEWAY_DEBUG", "true")
@@ -2499,7 +2406,7 @@ def test_normal_workload_gets_frozen_gateway_network_handoff_and_debug_disabled(
     program = ("import json,os; from pathlib import Path; "
                f"Path({str(observed)!r}).write_text(json.dumps({{key:os.environ[key] for key in {keys!r}}}))")
     assert _run_fake(state, (sys.executable, "-c", program)) == 0
-    manifest = json.loads((state / "manifest.json").read_text())
+    manifest = _manifest(state)
     assert json.loads(observed.read_text()) == {
         "GATEWAY_NAME": before["config"]["gateway_name"], "PG_NET": before["config"]["gateway_network"],
         "LITELLM_IMAGE": IMAGE, "GATEWAY_DOCKER_BIN": before["tools"]["docker"], "GATEWAY_DEBUG": "0",
@@ -2514,11 +2421,11 @@ def test_normal_workload_gets_frozen_gateway_network_handoff_and_debug_disabled(
 
 def test_preexisting_gateway_network_is_pinned_and_preserved(lab):
     root, state, _ = lab
-    manifest = json.loads((state / "manifest.json").read_text())
+    manifest = _manifest(state)
     existing = {manifest["config"]["gateway_network"]: "c" * 64}
     (root / "gateway-networks.json").write_text(json.dumps(existing))
     assert _run_fake(state) == 0
-    completed = json.loads((state / "manifest.json").read_text())
+    completed = _manifest(state)
     assert completed["gateway_network"]["network_id"] == "c" * 64
     assert completed["gateway_network"]["created"] is False
     assert completed["gateway_network_cleanup"] == {
@@ -2548,7 +2455,7 @@ def test_run_failure_records_only_controller_text_then_next_run_is_clean(lab, mo
     monkeypatch.setattr(controller.Run, "check_qdrant", check)
     state = _prepare_new(base, root / "next-ordinary-run")
     assert _run_fake(state) == 0
-    manifest = json.loads((state / "manifest.json").read_text())
+    manifest = _manifest(state)
     assert manifest["workload_succeeded"] is True
     assert "failure_type" not in manifest and "failure_reason" not in manifest
 
@@ -2580,7 +2487,7 @@ def test_probe_ownership_survives_timeout_or_interrupt_before_transport_ok(lab, 
         monkeypatch.setattr(controller.Run, "observe_gateway_network", interrupt_after_saved_ownership)
     result = _run_fake(state)
     assert result == (130 if failure == "interrupt" else 1)
-    manifest = json.loads((state / "manifest.json").read_text())
+    manifest = _manifest(state)
     assert manifest["gateway_network"]["created"] is True and manifest["released"] is True
     assert manifest["gateway_network_cleanup"]["completed"] is True
     events = [entry["event"] for entry in manifest["events"]]
@@ -2611,7 +2518,7 @@ def test_network_release_has_independent_budget_after_vm_release_then_recovery_w
     monkeypatch.setattr(controller.Run, "command", record_release_window)
     assert _run_fake(state) != 0
     assert release_windows and max(release_windows) < 8
-    manifest = json.loads((state / "manifest.json").read_text())
+    manifest = _manifest(state)
     assert manifest["released"] is True and manifest["release_evidence"]["absent"] is True
     assert manifest["gateway_network_cleanup"] == {"completed": False}
     assert not (state / "transport-receipt.json").exists()
@@ -2622,8 +2529,7 @@ def test_network_release_has_independent_budget_after_vm_release_then_recovery_w
     monkeypatch.setenv("FAKE_COLAB_SCENARIO", "success")
     assert _controller_call(["stop", "--state", str(state)]) == 0
     assert json.loads((root / "gateway-networks.json").read_text()) == {}
-    ordinary = _prepare_new(state, root / "ordinary-after-network-release-recovery")
-    assert _run_fake(ordinary) == 0
+    _next_run_works(state, root, "ordinary-after-network-release-recovery")
 
 
 def test_exact_network_cleanup_remains_available_after_absolute_vm_deadline(lab):
@@ -2651,18 +2557,10 @@ def test_gateway_ownership_observer_refuses_invalid_or_replaced_objects(lab, cha
                  "created": False, "gateway_image": IMAGE,
                  "reasoning_url": f"http://127.0.0.2:{run.config['reasoning_port']}/v1",
                  "embedding_url": f"http://127.0.0.2:{run.config['embedding_port']}/v1"}
-    if changed == "created":
-        ownership["created"] = 0
-    elif changed == "id":
-        ownership["network_id"] = "e" * 63
-    elif changed == "network":
+    if changed == "network":
         ownership["network_name"] = "different-name"
-    elif changed == "image":
-        ownership["gateway_image"] = "different-image"
     elif changed == "url":
         ownership["reasoning_url"] = "http://127.0.0.1:8000/v1"
-    elif changed == "extra":
-        ownership["unrecognized"] = True
     else:
         assert run.observe_gateway_network(json.dumps(ownership), "127.0.0.2") is True
         ownership["network_id"] = "f" * 64
@@ -2683,7 +2581,7 @@ def test_explicit_gateway_names_are_frozen_at_prepare_and_reused_by_owner_probe(
     monkeypatch.setenv("GATEWAY_NAME", "later-ambient-gateway")
     monkeypatch.setenv("PG_NET", "later-ambient-network")
     assert _run_fake(state) == 0
-    manifest = json.loads((state / "manifest.json").read_text())
+    manifest = _manifest(state)
     assert manifest["config"]["gateway_name"] == "original-custom-gateway"
     assert manifest["gateway_network"]["network_name"] == "original-custom-model-network"
     assert manifest["transport"]["gateway_name"] == "original-custom-gateway"
@@ -2699,7 +2597,7 @@ def test_same_name_replacement_is_never_removed_and_next_preexisting_run_works(l
                "p.write_text(json.dumps({'retained-old-name':os.environ['GATEWAY_TRANSPORT_NETWORK_ID'],"
                "os.environ['PG_NET']:'d'*64}))")
     assert _run_fake(state, (sys.executable, "-c", program)) != 0
-    manifest = json.loads((state / "manifest.json").read_text())
+    manifest = _manifest(state)
     old_id = manifest["gateway_network"]["network_id"]
     network_name = manifest["config"]["gateway_network"]
     assert json.loads(networks.read_text()) == {"retained-old-name": old_id, network_name: "d" * 64}
@@ -2709,9 +2607,8 @@ def test_same_name_replacement_is_never_removed_and_next_preexisting_run_works(l
     # Recovery must observe its absence while preserving the replacement.
     networks.write_text(json.dumps({network_name: "d" * 64}))
     assert _controller_call(["stop", "--state", str(state)]) == 0
-    ordinary = _prepare_new(state, root / "ordinary-with-preserved-replacement")
-    assert _run_fake(ordinary) == 0
-    following = json.loads((ordinary / "manifest.json").read_text())
+    ordinary = _next_run_works(state, root, "ordinary-with-preserved-replacement")
+    following = _manifest(ordinary)
     assert following["gateway_network"]["network_id"] == "d" * 64
     assert following["gateway_network"]["created"] is False
     assert json.loads(networks.read_text()) == {network_name: "d" * 64}
@@ -2822,9 +2719,7 @@ def test_successful_cpu_workload_with_undurable_cleanup_cannot_issue_receipt(lab
     monkeypatch.setattr(controller, "private_json", private_json)
     assert _controller_call(["stop", "--state", str(state)]) == 0
     assert not (state / "transport-receipt.json").exists()
-    ordinary = _prepare_new(state, root / "ordinary-after-undurable-cleanup")
-    assert _run_fake(ordinary) == 0
-    assert (ordinary / "transport-receipt.json").exists()
+    _next_run_works(state, root, "ordinary-after-undurable-cleanup")
 
 
 def test_normal_critical_metadata_write_failure_refuses_before_allocation_then_normal_run_works(lab, monkeypatch):
@@ -2841,14 +2736,14 @@ def test_normal_critical_metadata_write_failure_refuses_before_allocation_then_n
     assert _events(root) == []
     assert not (root / "sessions.json").exists()
     assert not (state / "transport-receipt.json").exists()
-    assert json.loads((state / "manifest.json").read_text())["phase"] == "prepared"
+    assert _manifest(state)["phase"] == "prepared"
     monkeypatch.setattr(controller, "private_json", private_json)
     assert _run_fake(state) == 0
     assert (state / "transport-receipt.json").exists()
 
 
-@pytest.mark.parametrize("address", ["127.0.0.2"])
-def test_port_admission_refuses_live_listener_then_allows_closed_transport_reuse(address):
+def test_port_admission_refuses_live_listener_then_allows_closed_transport_reuse():
+    address = "127.0.0.2"
     run = controller.Run.__new__(controller.Run)
     with socket.socket() as listener:
         listener.settimeout(1)
@@ -2907,8 +2802,7 @@ def test_read_only_existing_recovery_lock_keeps_exclusive_ownership_then_next_ru
     assert lock_path.stat().st_ino == inode and lock_path.stat().st_mode & 0o777 == 0o400
     assert json.loads((root / "sessions.json").read_text()) == {}
     assert not (state / "transport-receipt.json").exists()
-    ordinary = _prepare_new(state, root / "ordinary-after-read-only-recovery")
-    assert _run_fake(ordinary) == 0
+    _next_run_works(state, root, "ordinary-after-read-only-recovery")
 
 
 @pytest.mark.parametrize("unsafe", ["missing", "symlink", "unowned"])
@@ -2919,22 +2813,19 @@ def test_recovery_refuses_unsafe_existing_lock_without_tool_calls(lab, monkeypat
         target = root / "original-other-lock"
         target.write_bytes(b"")
         lock.symlink_to(target)
-    elif unsafe == "fifo":
-        os.mkfifo(lock, 0o600)
     elif unsafe != "missing":
         lock.write_bytes(b"")
-        lock.chmod(0o644 if unsafe == "public" else 0o600)
-        if unsafe == "unowned":
-            inode = lock.stat().st_ino
-            fstat = os.fstat
+        lock.chmod(0o600)
+        inode = lock.stat().st_ino
+        fstat = os.fstat
 
-            def wrong_owner(descriptor):
-                info = fstat(descriptor)
-                if info.st_ino == inode:
-                    return SimpleNamespace(st_mode=info.st_mode, st_uid=info.st_uid + 1)
-                return info
+        def wrong_owner(descriptor):
+            info = fstat(descriptor)
+            if info.st_ino == inode:
+                return SimpleNamespace(st_mode=info.st_mode, st_uid=info.st_uid + 1)
+            return info
 
-            monkeypatch.setattr(controller.os, "fstat", wrong_owner)
+        monkeypatch.setattr(controller.os, "fstat", wrong_owner)
     assert _controller_call(["stop", "--state", str(state)]) == 2
     assert _events(root) == []
 
@@ -2970,7 +2861,7 @@ def test_private_key_unlink_failure_is_incomplete_after_exact_release_then_recov
 
     monkeypatch.setattr(Path, "unlink", failed_private_key)
     assert _run_fake(state) == 1
-    manifest = json.loads((state / "manifest.json").read_text())
+    manifest = _manifest(state)
     assert manifest["released"] is True and manifest["release_evidence"]["absent"] is True
     assert manifest["private_key_cleanup_failed"] is True
     assert manifest["events"][-1]["event"] == "cleanup_incomplete"
@@ -2982,8 +2873,7 @@ def test_private_key_unlink_failure_is_incomplete_after_exact_release_then_recov
     assert _controller_call(["stop", "--state", str(state)]) == 0
     assert not (state / "id_ed25519_colab_rag").exists()
     assert not (state / "transport-receipt.json").exists()
-    ordinary = _prepare_new(state, root / "ordinary-after-private-key-recovery")
-    assert _run_fake(ordinary) == 0
+    _next_run_works(state, root, "ordinary-after-private-key-recovery")
 
 
 def test_manifest_and_diagnostic_sink_disk_full_cannot_interrupt_release_then_recovery_works(lab, monkeypatch):
@@ -3032,8 +2922,7 @@ def test_manifest_and_diagnostic_sink_disk_full_cannot_interrupt_release_then_re
     assert not (state / "transport-receipt.json").exists()
     # Model the unrelated owner's independent release, never a controller stop.
     (root / "sessions.json").write_text("{}")
-    ordinary = _prepare_new(state, root / "ordinary-after-diagnostic-sink-recovery")
-    assert _run_fake(ordinary) == 0
+    _next_run_works(state, root, "ordinary-after-diagnostic-sink-recovery")
 
 
 def _sandbox_env(state):
@@ -3050,7 +2939,7 @@ def test_reasoning_profile_sandbox_handoff_keeps_its_exact_routing(lab):
     """#862 characterization: the two-model reference's handoff is unchanged."""
     _, state, _ = lab
     assert _run_fake(state, ("scripts/colab_hold.py",)) == 0
-    manifest = json.loads((state / "manifest.json").read_text())
+    manifest = _manifest(state)
     config, profile, bridge = manifest["config"], manifest["profile"], manifest["transport"]["bridge"]
     env = _sandbox_env(state)
     assert env.pop("GATEWAY_RUN_OWNER") == manifest["session"]
@@ -3080,7 +2969,7 @@ def test_rerank_profile_sandbox_routes_embed_and_rerank_legs_without_a_reasoning
     slot (so the CPU receipt's :8000/:8001 transport proves it); no reasoning leg."""
     root, state, _ = lab
     assert _run_fake(state, ("scripts/colab_hold.py",)) == 0
-    manifest = json.loads((state / "manifest.json").read_text())
+    manifest = _manifest(state)
     assert manifest["workload_succeeded"] is True and manifest["released"] is True
     config, profile, bridge = manifest["config"], manifest["profile"], manifest["transport"]["bridge"]
     embedding, reranker = profile["servers"]

@@ -164,7 +164,7 @@ from mainframe_rag.config import load_settings
 from mainframe_rag.eval.datasets import (
     DatasetError,
     VenueError,  # noqa: F401 — compatibility export
-    read_golden_text,
+    load_golden_records,
     require_rc_for_collection,
     resolve_golden_paths,
 )
@@ -912,12 +912,7 @@ def main(argv: list[str] | None = None) -> int:
         golden_paths = resolve_golden_paths(args.golden)
         if args.agent_url is None:
             require_rc_for_collection(load_settings().qdrant_collection)
-        entries: list[dict[str, Any]] = []
-        for p in golden_paths:
-            for line in read_golden_text(p).splitlines():
-                line = line.strip()
-                if line and not line.startswith("#"):
-                    entries.append(json.loads(line))
+        entries = load_golden_records(golden_paths)
     except DatasetError as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 2

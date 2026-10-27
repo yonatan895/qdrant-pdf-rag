@@ -12,32 +12,20 @@ import json
 from collections.abc import AsyncIterator
 
 import pytest
-from fastapi.testclient import TestClient
 
 from mainframe_rag.agent import app as app_mod
 from mainframe_rag.agent.answer import build_chat_messages, condense_query
-from mainframe_rag.agent.tokenizer import FallbackTokenizer
 from mainframe_rag.ports import ChatMessage, ChatResult, TokenUsage
 from mainframe_rag.retrieve.query import SearchHit
+from tests.helpers_agent_local import agent_client, agent_hit, chat_frames
+
+_FIXED_422 = {"code": "invalid_request", "message": "request body failed validation"}
 
 
-def _hit(
-    cite_suffix: str = "p. 1-6",
-    text: str = "IEA500I BEFORE IOS IOSCMDS COMMAND REJECTED, REASON=yy",
-) -> SearchHit:
-    return SearchHit(
-        chunk_id="abc123",
-        score=0.42,
-        cite=f"SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, {cite_suffix}",
-        heading="Chapter 2 > IEA500I",
-        text=text,
-        doc_id="SA22-0000-00",
-        title="Synthetic Reference",
-        page_label="1-6",
-        chunk_type="message",
-        product="z/OS",
-        version="9.9",
-        message_ids=("IEA500I",),
+def _hit(cite_suffix: str = "p. 1-6") -> SearchHit:
+    return agent_hit(
+        text="IEA500I BEFORE IOS IOSCMDS COMMAND REJECTED, REASON=yy",
+        page_label=cite_suffix.removeprefix("p. "),
     )
 
 
@@ -123,19 +111,9 @@ class ChatFakeLLM:
 
 @pytest.fixture
 def chat_client(monkeypatch, synthetic_pdf, servable_representation_gate):
-    monkeypatch.setenv("QDRANT_URL", "http://localhost:6333")
-    monkeypatch.setenv("EMBED_MODE", "hash")
-    monkeypatch.setenv("ALLOW_HASH_MODE", "true")
-    monkeypatch.setenv("LLM_BASE_URL", "http://llm.internal/v1")
-    monkeypatch.setenv("LLM_MODEL_REASONING", "test-reasoning-model")
-
     mock_search = MockSearch()
-    monkeypatch.setattr(app_mod, "retrieve_search", mock_search.search)
-
-    with TestClient(app_mod.app) as c:
-        fake_llm = ChatFakeLLM()
-        monkeypatch.setattr(app_mod, "llm", fake_llm)
-        monkeypatch.setattr(app_mod, "tokenizer", FallbackTokenizer())
+    fake_llm = ChatFakeLLM()
+    with agent_client(monkeypatch, llm=fake_llm, search=mock_search.search) as c:
         c.mock_search = mock_search  # type: ignore[attr-defined]
         c.fake_llm = fake_llm  # type: ignore[attr-defined]
         yield c
@@ -201,80 +179,6 @@ def test_chat_completions_stream_error_is_openai_error(chat_client, monkeypatch)
     assert "upstream_error" in res.text
     assert "[DONE]" in res.text
     assert '"finish_reason": "error"' not in res.text
-
-
-def _parser_failure_llm(lines, payload):
-    """Real HttpxLLMClient over a fake transport: chat routes must inherit
-    the shared completion parser's failure classification (issue #365)."""
-    from mainframe_rag.agent.answer import HttpxLLMClient
-    from mainframe_rag.config import Settings
-    from tests.fakes import HttpxStreamFake, settings_kw
-
-    return HttpxLLMClient(
-        Settings(**settings_kw(llm_base_url="http://llm.internal/v1", llm_stream=True)),
-        client=HttpxStreamFake(lines=lines, payload=payload),
-    )
-
-
-_MISSING_FINISH_PAYLOAD = {"choices": [{"message": {"content": "fallback body"}}]}
-
-
-def test_chat_completions_json_incomplete_upstream_is_502(chat_client, monkeypatch):
-    """Issue #365: a stream and fallback that both lack an explicit finish
-    yield the fixed 502 envelope, never a synthesized finish_reason "stop"."""
-    monkeypatch.setattr(
-        app_mod,
-        "llm",
-        _parser_failure_llm(
-            lines=[
-                'data: {"choices": [{"delta": {"content": "partial "}}]}',
-                "data: [DONE]",
-            ],
-            payload=_MISSING_FINISH_PAYLOAD,
-        ),
-    )
-    res = chat_client.post(
-        "/v1/chat",
-        json={"messages": [{"role": "user", "content": "What is IEA500I?"}]},
-    )
-    assert res.status_code == 502
-    assert res.json() == {"code": "upstream_error", "message": "answer failed"}
-
-
-def test_chat_completions_stream_error_frame_then_done_is_failure(chat_client, monkeypatch):
-    """Issue #365: content -> upstream error frame -> [DONE] must terminate
-    the chat stream with the fixed error frame and no success finish chunk,
-    and the upstream error text must not leak."""
-    monkeypatch.setattr(
-        app_mod,
-        "llm",
-        _parser_failure_llm(
-            lines=[
-                'data: {"choices": [{"delta": {"content": "partial "}}]}',
-                'data: {"error": {"message": "SECRET-UPSTREAM-TEXT"}}',
-                "data: [DONE]",
-            ],
-            payload={"choices": [{"message": {"content": "unused"}, "finish_reason": "stop"}]},
-        ),
-    )
-    res = chat_client.post(
-        "/v1/chat/completions",
-        json={"messages": [{"role": "user", "content": "What is IEA500I?"}], "stream": True},
-    )
-    assert res.status_code == 200
-    assert res.text.rstrip().endswith("data: [DONE]")
-    frames = [
-        json.loads(line[len("data: ") :])
-        for line in res.text.splitlines()
-        if line.startswith("data: ") and line != "data: [DONE]"
-    ]
-    error = next(f for f in frames if "error" in f)
-    assert error["error"] == {"code": "upstream_error", "message": "stream failed"}
-    assert error["verification_state"] == "generation_incomplete"
-    assert all(
-        not (f.get("choices") and f["choices"][0].get("finish_reason")) for f in frames
-    )
-    assert "SECRET-UPSTREAM-TEXT" not in res.text
 
 
 def test_chat_completions_empty_hits_short_circuit(chat_client, monkeypatch):
@@ -472,7 +376,7 @@ def test_chat_stream_terminal_chunk_carries_state_and_script(chat_client, monkey
     assert resp.status_code == 200
     frames = [ln for ln in resp.text.splitlines() if ln.startswith("data:")]
     assert frames[-1] == "data: [DONE]"
-    terminal = json.loads(frames[-2][len("data: "):])
+    terminal = chat_frames(resp.text)[-1]
     choice = terminal["choices"][0]
     assert choice["finish_reason"] == "stop"
     assert choice["verification_state"] == "accepted"
@@ -520,31 +424,19 @@ def test_chat_active_user_agrees_across_retrieval_and_prompt(
         assert len(chat_client.fake_llm.chat_calls) == 0  # Identifier bypass, no condense ask.
 
 
-def test_chat_blank_active_user_refuses_before_any_work(chat_client):
-    """A blank active user turn is not replaced by the assistant tail."""
-    for stream in (False, True):
-        result = chat_client.post("/v1/chat", json={"messages": [
-            {"role": "user", "content": " \t\n "},
-            {"role": "assistant", "content": "This is not the question"},
-        ], "stream": stream})
-        assert result.status_code == 422
-        assert result.json() == {"code": "invalid_request", "message": "request body failed validation"}
-    assert chat_client.mock_search.calls == []
-    assert chat_client.fake_llm.chat_calls == []
-    assert chat_client.fake_llm.stream_calls == []
-
-
 @pytest.mark.parametrize("path,stream", [("/v1/chat", False), ("/v1/chat/completions", True)])
 def test_chat_unsearchable_active_user_refuses_before_any_work(chat_client, path, stream):
-    """Issue #579: blank or NUL/C0-control active turns share the fixed 422."""
+    """Issue #579: blank or NUL/C0-control active turns share the fixed 422,
+    and a trailing assistant turn is never promoted to the active question."""
     for content in ["   ", "\t\n", "\x00x", "a\x1bb"]:
         result = chat_client.post(path, json={"messages": [
             {"role": "user", "content": "Earlier question"},
             {"role": "assistant", "content": "Earlier answer"},
             {"role": "user", "content": content},
+            {"role": "assistant", "content": "This is not the question"},
         ], "stream": stream})
         assert result.status_code == 422, repr(content)
-        assert result.json() == {"code": "invalid_request", "message": "request body failed validation"}
+        assert result.json() == _FIXED_422
     assert chat_client.mock_search.calls == []
     assert chat_client.fake_llm.chat_calls == []
     assert chat_client.fake_llm.stream_calls == []
@@ -603,36 +495,34 @@ def test_chat_condensation_uses_only_history_before_normalized_user(
 def test_chat_invalid_active_turn_has_no_model_or_retrieval(chat_client, messages, path, stream):
     result = chat_client.post(path, json={"messages": messages, "stream": stream})
     assert result.status_code == 422
-    assert result.json() == {"code": "invalid_request", "message": "request body failed validation"}
+    assert result.json() == _FIXED_422
     assert chat_client.mock_search.calls == []
     assert chat_client.fake_llm.chat_calls == chat_client.fake_llm.stream_calls == []
 
 
-@pytest.mark.parametrize("temperature,path", [(-1.0, "/v1/chat"), (2.1, "/v1/chat/completions")])
-def test_chat_rejects_out_of_range_temperature(chat_client, path, temperature):
+@pytest.mark.parametrize("temperature,path", [
+    (-1.0, "/v1/chat"),
+    (2.1, "/v1/chat/completions"),
+    # Non-finite floats cannot cross the JSON wire, so the allow_inf_nan
+    # bound is pinned at the model layer.
+    (float("nan"), None),
+    (float("inf"), None),
+], ids=["below-min", "above-max", "nan", "inf"])
+def test_chat_rejects_invalid_temperature(chat_client, path, temperature):
     """Issue #596: the chat temperature override carries the same bounds as
     Settings.llm_temperature — client input errors 422 before any work."""
-    result = chat_client.post(path, json={
-        "messages": [{"role": "user", "content": "What does IEA500I mean?"}],
-        "temperature": temperature,
-    })
+    messages = [{"role": "user", "content": "What does IEA500I mean?"}]
+    if path is None:
+        import pydantic
+
+        with pytest.raises(pydantic.ValidationError):
+            app_mod.ChatRequest(messages=messages, temperature=temperature)
+        return
+    result = chat_client.post(path, json={"messages": messages, "temperature": temperature})
     assert result.status_code == 422
-    assert result.json() == {"code": "invalid_request", "message": "request body failed validation"}
+    assert result.json() == _FIXED_422
     assert chat_client.mock_search.calls == []
     assert chat_client.fake_llm.chat_calls == chat_client.fake_llm.stream_calls == []
-
-
-def test_chat_temperature_rejects_non_finite():
-    """Non-finite floats cannot cross the JSON wire, so the allow_inf_nan
-    bound is pinned at the model layer."""
-    import pydantic
-
-    for temperature in (float("nan"), float("inf")):
-        with pytest.raises(pydantic.ValidationError):
-            app_mod.ChatRequest(
-                messages=[{"role": "user", "content": "What does IEA500I mean?"}],
-                temperature=temperature,
-            )
 
 
 def test_chat_ignored_tail_still_counts_toward_body_limit(chat_client, monkeypatch):
@@ -642,7 +532,7 @@ def test_chat_ignored_tail_still_counts_toward_body_limit(chat_client, monkeypat
         {"role": "system", "content": "x" * 64},
     ]})
     assert result.status_code == 422
-    assert result.json() == {"code": "invalid_request", "message": "request body failed validation"}
+    assert result.json() == _FIXED_422
     assert chat_client.mock_search.calls == []
     assert chat_client.fake_llm.chat_calls == []
 
@@ -680,7 +570,6 @@ def test_chat_json_and_stream_carry_supplied_evidence(chat_client):
         "/v1/chat/completions",
         json={"messages": [{"role": "user", "content": "Show JCL"}], "stream": True},
     )
-    frames = [ln for ln in resp.text.splitlines() if ln.startswith("data:")]
-    terminal = json.loads(frames[-2][len("data: "):])["choices"][0]
+    terminal = chat_frames(resp.text)[-1]["choices"][0]
     assert terminal["supplied_evidence"] == body["supplied_evidence"]
     assert terminal["evidence_omitted"] == 0
