@@ -5,8 +5,16 @@ Stdlib only; run as ``python3 -I scripts/openwebui/adfs_claims_check.py``.
 It runs the authorization-code flow against the AD FS client registered for
 Open WebUI and reports which claims the ID token carries.
 
-Output rules: claim NAMES, a roles-claim JSON type and value COUNT, and yes/no
-answers only. Tokens, the client secret, claim values, group names and user
+Two modes. Baseline mode (default) expects the IdP to issue a constant baseline
+value plus role values. Role-list mode (``--allowed-roles``/``--admin-roles``) is
+for an IdP that can only issue LDAP attributes: the roles claim is the group
+claim itself, and the check predicts the Open WebUI v0.12.3 outcome (admin, user
+or refused) from the configured role lists. A refusal is a 403 inside Open WebUI; the
+browser gets a redirect to /auth?error=... and no session cookie.
+
+Output rules: claim NAMES, a roles-claim JSON type and value COUNT, the ID token
+size, yes/no answers and, in role-list mode, the CONFIGURED role values that
+matched. Tokens, the client secret, other claim values, group names and user
 identity are never printed. Error text from the network, TLS or the server is
 never printed either; every failure is one fixed line.
 
@@ -18,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import difflib
 import getpass
 import hashlib
 import http.client
@@ -25,6 +34,7 @@ import http.server
 import json
 import os
 import secrets
+import shlex
 import signal
 import ssl
 import sys
@@ -36,6 +46,24 @@ from typing import Any
 
 DEFAULT_SCOPES = "openid profile email allatclaims"
 MAX_BODY = 1_000_000
+
+# ID token size (#1070). The chart sets ENABLE_OAUTH_ID_TOKEN_COOKIE=false, so the
+# sign-in callback no longer carries the token as a cookie; before that, the pod's
+# allow-list proxy (nginx default proxy_buffer_size, one 4 KiB page) answered 502
+# once the callback headers passed 4096 bytes. Open WebUI v0.12.3 keeps the token
+# in its database (models/oauth_sessions.py), with no size limit found. The step
+# that still carries the whole token is sign-out: routers/auths.py signout sends
+# the browser to the IdP's end_session_endpoint with it as id_token_hint in the
+# URL. AD FS runs on Windows http.sys, whose request line and headers are limited
+# to 16384 bytes by default (MaxRequestBytes and MaxFieldLength in Microsoft's
+# http.sys registry documentation; not verified here), shared with the IdP's own
+# cookies. Above ID_TOKEN_WARN_BYTES, confirm sign-out on the test client.
+ID_TOKEN_WARN_BYTES = 8000
+
+# Mirrors scripts/airgap/model_config.py and the chart (values.schema.json,
+# templates/_helpers.tpl): comma-separated names without spaces; never * or the
+# baseline value.
+REFUSED_ROLE_VALUES = ("*", "signed-in")
 
 # Exit codes with one fixed reason each.
 (
@@ -159,6 +187,179 @@ def role_values(value: Any) -> tuple[str, int, list[str]]:
         type(value), "null" if value is None else "other"
     )
     return kind, 0, []
+
+
+def openwebui_roles(value: Any) -> list[Any]:
+    """The roles Open WebUI v0.12.3 reads from the claim (utils/oauth.py get_user_role).
+
+    A list is taken as-is, a string is split on ',' when it holds one, an int
+    becomes its decimal string, anything else gives no roles. Values are not
+    stripped and the comparison with the configured roles is exact.
+    """
+    if isinstance(value, list):
+        return list(value)
+    if isinstance(value, str):
+        return value.split(",") if "," in value else [value]
+    if isinstance(value, int):
+        return [str(value)]
+    return []
+
+
+def parse_role_list(raw: str | None) -> list[str]:
+    """Split a configured role list exactly as the chart and validate accept it."""
+    if raw is None or raw == "":
+        return []
+    items = raw.split(",")
+    for item in items:
+        if not item or any(c in item for c in (" ", "\t", "\n", "\r", "\v", "\f")):
+            raise CheckError(
+                EXIT_USAGE, "role lists are comma-separated names without spaces or empty items"
+            )
+        if item in REFUSED_ROLE_VALUES:
+            raise CheckError(EXIT_USAGE, "role lists must not contain * or signed-in")
+    return items
+
+
+def predict_outcome(roles: list[Any], allowed: list[str], admin: list[str]) -> str:
+    """Open WebUI v0.12.3 role decision at sign-in: admin, user, refused or unchanged."""
+    if not roles:
+        return "unchanged"
+    if any(r in roles for r in admin):
+        return "admin"
+    if any(r in roles for r in allowed):
+        return "user"
+    return "refused"
+
+
+OUTCOME_TEXT = {
+    "admin": "admin",
+    "user": "user",
+    "refused": "refused (redirect to /auth?error=..., no session cookie)",
+    "unchanged": "no role decision (claim absent or empty): an existing user keeps the "
+    "stored role and a new user is pending",
+}
+
+
+def value_form(values: list[str]) -> str:
+    """'domain-qualified' (every value has DOMAIN\\), 'bare' (none has) or 'mixed'."""
+    qualified = sum(1 for v in values if "\\" in v)
+    if qualified == len(values):
+        return "domain-qualified"
+    return "bare" if qualified == 0 else "mixed"
+
+
+def near_miss(role: str, values: list[str]) -> str | None:
+    """A fixed hint when a configured role differs from a claim value only by a
+    domain prefix or letter case. Only the configured role is ever printed."""
+    for v in values:
+        if v.casefold() == role.casefold():
+            return "a claim value equals it ignoring letter case (the match is exact)"
+    for v in values:
+        if "\\" in v and v.replace("\\", "") == role:
+            return (
+                "a claim value is it with a backslash: an unquoted backslash was removed "
+                "by the shell; single-quote the value"
+            )
+        if v.rpartition("\\")[2] == role and "\\" in v:
+            return "a claim value is it with a domain prefix (DOMAIN\\name)"
+        if role.rpartition("\\")[2] == v and "\\" in role:
+            return "a claim value is it without the domain prefix"
+    return None
+
+
+def analyse_role_lists(
+    claims: dict[str, Any],
+    *,
+    roles_claim: str,
+    allowed: list[str],
+    admin: list[str],
+    expect_refused: bool,
+) -> tuple[list[str], list[str]]:
+    """Role-list mode: the roles claim is the group claim; predict the outcome."""
+    lines: list[str] = []
+    failures: list[str] = []
+    if roles_claim in claims:
+        value = claims[roles_claim]
+        kind, _, _ = role_values(value)
+        roles = openwebui_roles(value)
+        if isinstance(value, str):
+            form = "string split on ','" if "," in value else "single string"
+        else:
+            form = kind
+        lines.append(
+            f"roles claim '{roles_claim}': present, type={kind}, form={form}, count={len(roles)}"
+        )
+    else:
+        roles = []
+        lines.append(f"roles claim '{roles_claim}': absent")
+    strings = [r for r in roles if isinstance(r, str)]
+    near = False
+    configured = allowed + [r for r in admin if r not in allowed]
+    config_form = value_form(configured)
+    lines.append(f"configured role form: {config_form}")
+    form_mismatch = False
+    if strings:
+        claim_form = value_form(strings)
+        lines.append(f"claim value form: {claim_form}")
+        if {config_form, claim_form} == {"bare", "domain-qualified"}:
+            form_mismatch = True
+            lines.append(
+                f"MISMATCH: the configured roles are {config_form} names but the claim's "
+                f"values are {claim_form}; no configured role can match"
+            )
+    if config_form != "domain-qualified":
+        lines.append(
+            "WARN: a bare configured role also matches a same-named group from any other "
+            "domain whose users sign in through this IdP; use DOMAIN\\group unless the "
+            "forest has one domain and no trusts (confirm that with the identity team)"
+        )
+    for role in configured:
+        if "\\" in role:
+            continue
+        domains = {
+            v.rpartition("\\")[0] for v in strings if v.rpartition("\\")[2] == role and "\\" in v
+        }
+        if len(domains) > 1:
+            lines.append(
+                f"WARN: configured role '{role}' is a bare name and the claim holds a group "
+                f"of that name from {len(domains)} domains"
+            )
+    for label, configured in (("allowed", allowed), ("admin", admin)):
+        matched = [r for r in configured if r in roles]
+        lines.append(
+            f"configured {label} roles matched: " + (", ".join(matched) if matched else "(none)")
+        )
+    for role in allowed + [r for r in admin if r not in allowed]:
+        if role not in roles:
+            hint = near_miss(role, strings)
+            if hint:
+                lines.append(f"hint: configured role '{role}' is not in the claim; {hint}")
+                near = True
+    outcome = predict_outcome(roles, allowed, admin)
+    lines.append("predicted Open WebUI v0.12.3 outcome: " + OUTCOME_TEXT[outcome])
+    if form_mismatch:
+        failures.append("the configured role form does not match the claim's value form")
+    if outcome == "unchanged":
+        failures.append("roles claim is absent or empty: Open WebUI would not recompute the role")
+    if near:
+        # The account is in a group the configuration means but does not name exactly.
+        failures.append("a configured role differs from a claim value only by form (see hint)")
+    elif expect_refused and outcome != "refused":
+        failures.append("the account matches a configured role; expected a refusal")
+    elif not expect_refused and outcome == "refused":
+        failures.append("the account matches no configured role; Open WebUI would refuse it")
+    return lines, failures
+
+
+def id_token_size_lines(size: int) -> list[str]:
+    lines = [f"ID token size: {size} bytes"]
+    if size > ID_TOKEN_WARN_BYTES:
+        lines.append(
+            f"WARN: the ID token is above {ID_TOKEN_WARN_BYTES} bytes: sign-out sends it to "
+            "the IdP in the URL (id_token_hint) and may pass the IdP web server's request "
+            "limit (16384 bytes by default on http.sys); confirm sign-out on the test client"
+        )
+    return lines
 
 
 def analyse(
@@ -453,12 +654,99 @@ def run_flow(args: argparse.Namespace) -> dict[str, Any]:
     bad = validate_claims(
         claims, issuer=disc["issuer"], client_id=args.client_id, nonce=nonce, now=time.time()
     )
-    report_and_fail(claims, args, bad, offline=False)
+    report_and_fail(claims, args, bad, offline=False, token_size=len(id_token.encode("utf-8")))
     return claims
 
 
+def suggest_claim(wanted: str, names: list[str]) -> str | None:
+    """The claim name in the token closest to ``wanted``, or None.
+
+    Tries, in order: the same name in another letter case, a URI whose last path
+    segment is the name, a name ending in it after '-', '_', '/' or ':' (an IdP
+    form may emit its rule name, such as role-<name>), then difflib similarity.
+    """
+    low = wanted.lower()
+    for n in names:
+        if n.lower() == low:
+            return n
+    for n in names:
+        if n.lower().rstrip("/").rpartition("/")[2] == low:
+            return n
+    for n in names:
+        if any(n.lower().endswith(sep + low) for sep in ("-", "_", "/", ":")):
+            return n
+    close = difflib.get_close_matches(wanted, names, n=1, cutoff=0.6)
+    return close[0] if close else None
+
+
+CLAIM_KEYS = (
+    ("email", "email_claim", "OPENWEBUI_OIDC_EMAIL_CLAIM"),
+    ("username", "username_claim", "OPENWEBUI_OIDC_USERNAME_CLAIM"),
+    ("group", "group_claim", "OPENWEBUI_OIDC_GROUP_CLAIM"),
+    ("roles", "roles_claim", "OPENWEBUI_OIDC_ROLES_CLAIM"),
+)
+
+
+# Other names an IdP commonly uses for the same claim (AD FS: upn, unique_name).
+CLAIM_ALTERNATIVES = {
+    "email": ("upn", "mail", "email", "preferred_username"),
+    "username": ("name", "display_name", "displayname", "unique_name"),
+    "group": ("groups", "group", "tokengroups", "memberof"),
+}
+
+
+def claim_name_lines(claims: dict[str, Any], args: argparse.Namespace) -> tuple[list[str], dict]:
+    """Report each configured claim name; for a missing one, the closest name.
+
+    Returns (lines, found) where ``found`` maps each airgap.env key to the claim
+    name to use, or None when nothing in the token fits. Names only, never values.
+    """
+    names = sorted(claims)
+    lines: list[str] = []
+    found: dict[str, str | None] = {}
+    for label, attr, key in CLAIM_KEYS:
+        wanted = getattr(args, attr)
+        if wanted in claims:
+            lines.append(f"{label} claim name '{wanted}': present")
+            found[key] = wanted
+            continue
+        guess = suggest_claim(wanted, names)
+        for alt in CLAIM_ALTERNATIVES.get(label, ()):
+            guess = guess or suggest_claim(alt, names)
+        if label == "roles" and args.role_lists and found.get("OPENWEBUI_OIDC_GROUP_CLAIM"):
+            guess = found["OPENWEBUI_OIDC_GROUP_CLAIM"]  # role-list mode: roles = groups
+        lines.append(
+            f"{label} claim name '{wanted}': absent; closest claim name in the token: "
+            + (f"'{guess}'" if guess else "(none)")
+        )
+        found[key] = guess
+    return lines, found
+
+
+def env_lines(found: dict, args: argparse.Namespace) -> list[str]:
+    """airgap.env lines matching what was found, ready to paste after review.
+
+    shlex.quote single-quotes any value with a backslash or other shell syntax,
+    so sourcing the file keeps it verbatim.
+    """
+    out = ["airgap.env lines for what this token carries (review, then paste):"]
+    for _label, _attr, key in CLAIM_KEYS:
+        name = found.get(key)
+        out.append(f"{key}={shlex.quote(name)}" if name else f"# {key}=  (no matching claim found)")
+    if args.role_lists:
+        allowed, admin = args.role_lists
+        out.append(f"OPENWEBUI_OIDC_ALLOWED_ROLES={shlex.quote(','.join(allowed))}")
+        out.append(f"OPENWEBUI_OIDC_ADMIN_ROLES={shlex.quote(','.join(admin))}")
+    return out
+
+
 def report_and_fail(
-    claims: dict[str, Any], args: argparse.Namespace, std_failures: list[str], *, offline: bool
+    claims: dict[str, Any],
+    args: argparse.Namespace,
+    std_failures: list[str],
+    *,
+    offline: bool,
+    token_size: int,
 ) -> None:
     lines, failures = analyse(
         claims,
@@ -468,6 +756,22 @@ def report_and_fail(
         baseline=args.baseline_role,
         expect_baseline_only=args.expect_baseline_only,
     )
+    if args.role_lists:
+        # Role-list mode replaces the baseline checks; keep the identity lines.
+        allowed, admin = args.role_lists
+        role_lines, failures_rl = analyse_role_lists(
+            claims,
+            roles_claim=args.roles_claim,
+            allowed=allowed,
+            admin=admin,
+            expect_refused=args.expect_refused,
+        )
+        keep = [ln for ln in lines if not ln.startswith(("roles claim ", "baseline role "))]
+        lines = keep[:1] + role_lines + keep[1:]
+        failures = failures_rl + [f for f in failures if f.startswith(("email ", "username "))]
+    lines += id_token_size_lines(token_size)
+    name_lines, found = claim_name_lines(claims, args)
+    lines += name_lines + env_lines(found, args)
     print("note: the ID token signature is NOT verified (diagnostic only)")
     if offline:
         print("standard checks: iss/aud only when given; nonce and exp not checked offline")
@@ -493,7 +797,7 @@ def run_decode_only(args: argparse.Namespace) -> None:
     bad = validate_claims(
         claims, issuer=args.expect_iss, client_id=args.client_id, nonce=None, now=None
     )
-    report_and_fail(claims, args, bad, offline=True)
+    report_and_fail(claims, args, bad, offline=True, token_size=len(token.strip().encode("utf-8")))
 
 
 # --------------------------------------------------------------------- main
@@ -506,7 +810,8 @@ def env(name: str, default: str | None = None) -> str | None:
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Check the claims AD FS puts in the Open WebUI client's ID token. "
-        "Prints claim names, a roles type/count and yes/no answers only. "
+        "Prints claim names, a roles type/count, the ID token size, yes/no answers and "
+        "(role-list mode) the configured roles that matched. "
         "Every flag also reads the ADFS_* environment variable shown.",
     )
     p.add_argument(
@@ -528,17 +833,23 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     p.add_argument(
         "--roles-claim",
         default=env("ADFS_ROLES_CLAIM", "roles"),
-        help="OPENWEBUI_OIDC_ROLES_CLAIM (ADFS_ROLES_CLAIM, default roles)",
+        help="OPENWEBUI_OIDC_ROLES_CLAIM (ADFS_ROLES_CLAIM, default roles, as the chart)",
+    )
+    p.add_argument(
+        "--group-claim",
+        default=env("ADFS_GROUP_CLAIM", "groups"),
+        help="OPENWEBUI_OIDC_GROUP_CLAIM (ADFS_GROUP_CLAIM, default groups, as the chart)",
     )
     p.add_argument(
         "--email-claim",
-        default=env("ADFS_EMAIL_CLAIM", "upn"),
-        help="OPENWEBUI_OIDC_EMAIL_CLAIM (ADFS_EMAIL_CLAIM, default upn)",
+        default=env("ADFS_EMAIL_CLAIM", "email"),
+        help="OPENWEBUI_OIDC_EMAIL_CLAIM (ADFS_EMAIL_CLAIM, default email, as the chart; "
+        "AD FS usually upn)",
     )
     p.add_argument(
         "--username-claim",
         default=env("ADFS_USERNAME_CLAIM", "name"),
-        help="OPENWEBUI_OIDC_USERNAME_CLAIM (ADFS_USERNAME_CLAIM, default name)",
+        help="OPENWEBUI_OIDC_USERNAME_CLAIM (ADFS_USERNAME_CLAIM, default name, as the chart)",
     )
     p.add_argument(
         "--baseline-role",
@@ -548,8 +859,25 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     p.add_argument(
         "--expect-baseline-only",
         action="store_true",
-        help="the test account is in no role group: pass only if the baseline "
-        "is the single role value",
+        help="baseline mode: the test account is in no role group: pass only if the "
+        "baseline is the single role value",
+    )
+    p.add_argument(
+        "--allowed-roles",
+        default=env("ADFS_ALLOWED_ROLES"),
+        help="role-list mode: OPENWEBUI_OIDC_ALLOWED_ROLES, comma-separated "
+        "(ADFS_ALLOWED_ROLES); with --admin-roles",
+    )
+    p.add_argument(
+        "--admin-roles",
+        default=env("ADFS_ADMIN_ROLES"),
+        help="role-list mode: OPENWEBUI_OIDC_ADMIN_ROLES, comma-separated (ADFS_ADMIN_ROLES)",
+    )
+    p.add_argument(
+        "--expect-refused",
+        action="store_true",
+        help="role-list mode: the test account is in no docs group: pass only if the "
+        "roles claim is present and Open WebUI would refuse the sign-in",
     )
     p.add_argument("--scopes", default=env("ADFS_SCOPES", DEFAULT_SCOPES))
     p.add_argument("--port", type=int, default=int(env("ADFS_CALLBACK_PORT", "8400") or 8400))
@@ -585,9 +913,26 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
+def resolve_mode(args: argparse.Namespace) -> None:
+    """Set ``args.role_lists`` to (allowed, admin) in role-list mode, else None."""
+    args.role_lists = None
+    if args.allowed_roles is None and args.admin_roles is None:
+        if args.expect_refused:
+            raise CheckError(EXIT_USAGE, "--expect-refused needs --allowed-roles and --admin-roles")
+        return
+    if not args.allowed_roles or not args.admin_roles:
+        raise CheckError(EXIT_USAGE, "role-list mode needs both --allowed-roles and --admin-roles")
+    if args.expect_baseline_only:
+        raise CheckError(
+            EXIT_USAGE, "--expect-baseline-only is for baseline mode; use --expect-refused"
+        )
+    args.role_lists = (parse_role_list(args.allowed_roles), parse_role_list(args.admin_roles))
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
+        resolve_mode(args)
         if args.decode_only:
             run_decode_only(args)
         else:

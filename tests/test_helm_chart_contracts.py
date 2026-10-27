@@ -1137,7 +1137,8 @@ OWUI_ENV_NAMES = {
     "ENABLE_FOLLOW_UP_GENERATION", "ENABLE_IMAGE_GENERATION", "ENABLE_INITIAL_ADMIN_SIGNUP",
     "ENABLE_LOGIN_FORM", "ENABLE_MEMORIES", "ENABLE_MESSAGE_RATING", "ENABLE_NOTES",
     "ENABLE_OAUTH_GROUP_CREATION", "ENABLE_OAUTH_GROUP_MANAGEMENT",
-    "ENABLE_OAUTH_PERSISTENT_CONFIG", "ENABLE_OAUTH_ROLE_MANAGEMENT", "ENABLE_OAUTH_SIGNUP",
+    "ENABLE_OAUTH_ID_TOKEN_COOKIE", "ENABLE_OAUTH_PERSISTENT_CONFIG",
+    "ENABLE_OAUTH_ROLE_MANAGEMENT", "ENABLE_OAUTH_SIGNUP",
     "ENABLE_OAUTH_TOKEN_EXCHANGE", "ENABLE_OLLAMA_API", "ENABLE_OPENAI_API", "ENABLE_OTEL",
     "ENABLE_PASSWORD_AUTH", "ENABLE_PERSISTENT_CONFIG",
     "ENABLE_PIP_INSTALL_FRONTMATTER_REQUIREMENTS", "ENABLE_RETRIEVAL_QUERY_GENERATION",
@@ -2233,6 +2234,45 @@ def test_openwebui_refuses_role_lists_that_would_admit_every_signed_in_user(owui
     r = _helm_template_with_values(values, chart=owui_chart)
     assert r.returncode != 0 and ROLE_BASELINE_REFUSAL in r.stderr
     assert "rag-openwebui" not in r.stdout
+
+
+def test_openwebui_keeps_the_raw_id_token_out_of_browser_cookies(owui_chart):
+    """#1070 (maintainer decision): v0.12.3 sets the raw ID token as the
+    oauth_id_token cookie unless ENABLE_OAUTH_ID_TOKEN_COOKIE is false, and never
+    reads it back (sign-out uses the server-side OAuth session). On the sign-in
+    callback it counts against the allow-list proxy's 4 KiB response-header
+    buffer, so a group claim for a user in many groups made sign-in fail with 502."""
+    env = env_map(_owui(owui_chart)["Deployment", "rag-openwebui"], "openwebui")
+    assert env["ENABLE_OAUTH_ID_TOKEN_COOKIE"] == {"name": "ENABLE_OAUTH_ID_TOKEN_COOKIE",
+                                                   "value": "false"}
+
+
+def test_openwebui_group_roles_render_domain_qualified_names_verbatim(owui_chart):
+    r"""#1070: with an IdP rule form that offers only LDAP-attribute rules, the roles
+    claim is the tokenGroups claim and the role lists are DOMAIN\group names. The
+    schema pattern accepts the backslash, and Helm's quote keeps it: the pod gets
+    the exact value Open WebUI compares, case-sensitively, with the claim values."""
+    oidc = {**OWUI_ON["openwebui"]["oidc"], "groupClaim": "groups", "rolesClaim": "groups",
+            "allowedRoles": "CORP\\docs-users,CORP\\docs-readers",
+            "adminRoles": "CORP\\docs-admins"}
+    docs = _owui(owui_chart, {"openwebui": {**OWUI_ON["openwebui"], "oidc": oidc}})
+    env = env_map(docs["Deployment", "rag-openwebui"], "openwebui")
+    assert {k: env[k]["value"] for k in ("OAUTH_ALLOWED_ROLES", "OAUTH_ADMIN_ROLES",
+                                         "OAUTH_ROLES_CLAIM", "OAUTH_GROUP_CLAIM")} == {
+        "OAUTH_ALLOWED_ROLES": "CORP\\docs-users,CORP\\docs-readers",
+        "OAUTH_ADMIN_ROLES": "CORP\\docs-admins",
+        "OAUTH_ROLES_CLAIM": "groups", "OAUTH_GROUP_CLAIM": "groups"}
+
+
+@pytest.mark.parametrize("key,bad", [("allowedRoles", "CORP\\docs-users,*"), ("adminRoles", "*")])
+def test_openwebui_group_roles_still_refuse_the_wildcard(owui_chart, key, bad):
+    """Open WebUI treats an allowed role of exactly * as every user; a group
+    literally named * cannot be configured either, in group-roles mode too."""
+    values = base_values()
+    values.update(json.loads(json.dumps(OWUI_ON)))
+    values["openwebui"]["oidc"].update({"groupClaim": "groups", "rolesClaim": "groups", key: bad})
+    r = _helm_template_with_values(values, chart=owui_chart)
+    assert r.returncode != 0 and ROLE_BASELINE_REFUSAL in r.stderr
 
 
 def test_openwebui_networkpolicy_egress_rules_always_carry_a_port(owui_chart):
