@@ -642,8 +642,11 @@ class ScopedFilterAwareFakeQdrant(FakeQdrant):
         self.batch_calls = 0
 
     def _matching(self, flt: models.Filter | None) -> list[models.ScoredPoint]:
+        """The client's own filter evaluator; no filter is unfiltered, not a miss."""
         from qdrant_client.local.payload_filters import check_filter
 
+        if flt is None:
+            return list(self._dense)
         return [p for p in self._dense if check_filter(flt, p.payload, p.id, {})]
 
     def query_batch_points(self, collection, requests, **_):
