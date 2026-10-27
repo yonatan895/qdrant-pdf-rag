@@ -269,8 +269,13 @@ def test_module_tasks_execute_checkout_with_foreign_editable(report_workspace, o
     (environment / "bin/python").unlink()
     venv.EnvBuilder(with_pip=False).create(environment)
     site = Path(sysconfig.get_path("purelib", vars={"base": str(environment), "platbase": str(environment)}))
-    (site / "foreign-editable.pth").write_text(f"{foreign}\n{sysconfig.get_path('purelib')}\n")
-    (foreign / "sitecustomize.py").write_text('''
+    # Supported interpreters are the pinned uv CPython and a dev:setup venv
+    # built from the host's /usr/bin/python3. Debian-family CPythons ship
+    # /usr/lib/pythonX/sitecustomize.py, which shadows a foreign editable's
+    # sitecustomize reached through sys.path; the uv interpreter has none.
+    # Register the trace from the editable .pth that site always executes,
+    # and keep sitecustomize as the second route where nothing shadows it.
+    trace_hook = '''
 import atexit, json, os, sys
 from pathlib import Path
 def trace():
@@ -279,7 +284,11 @@ def trace():
         'module': module.__spec__.name, 'file': module.__file__}))
 if 'IMPORT_TRACE' in os.environ:
     atexit.register(trace)
-''')
+'''
+    (foreign / "trace_hook.py").write_text(trace_hook)
+    (foreign / "sitecustomize.py").write_text("import trace_hook\n")
+    (site / "foreign-editable.pth").write_text(
+        f"{foreign}\n{sysconfig.get_path('purelib')}\nimport trace_hook\n")
     probe = subprocess.run([str(environment / "bin/python"), "-c",
                             "import mainframe_rag; print(mainframe_rag.__file__)"],
                            env={"PATH": os.defpath}, capture_output=True, text=True, check=True)

@@ -4,6 +4,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -17,6 +18,20 @@ from scripts import local_verify as lv
 ROOT = Path(__file__).resolve().parents[1]
 
 
+@pytest.fixture
+def disk_backed_tmp(monkeypatch, tmp_path):
+    """Declare tmp_path disk-backed: the host's /tmp may be tmpfs (Ubuntu 26.04
+    runners). The real check still runs; its refusal is pinned by
+    test_ram_backed_out_dir_refuses_by_longest_mount_prefix."""
+    checked, real = [], lv.check_disk_backed
+    def check(path, mounts):
+        checked.append(path)
+        point = str(tmp_path.resolve()).replace(' ', '\\040')
+        real(path, f'{mounts}\ntest-disk {point} ext4 rw 0 0\n')
+    monkeypatch.setattr(lv, 'check_disk_backed', check)
+    return checked
+
+
 def test_child_env_is_allowlisted_and_records_explicit_passes(tmp_path):
     inherited = {'PATH': '/usr/bin', 'HOME': '/home/u', 'LC_ALL': 'C.UTF-8', 'PYTHONPATH': '/other/src',
                  'EMBED_MODE': 'dense', 'LLM_BASE_URL': 'http://x', 'ALLOW_HASH_MODE': '1',
@@ -28,6 +43,28 @@ def test_child_env_is_allowlisted_and_records_explicit_passes(tmp_path):
     assert env['TMPDIR'] == str(tmp_path / 'tmp')
     with pytest.raises(lv.Refusal, match='--pass-env MISSING is not set'):
         lv.child_env(inherited, tmp_path, tmp_path / 'tmp', ['MISSING'])
+
+
+def nested_python(tmp_path: Path) -> str:
+    """The current interpreter prepared for this worktree without weakening G1.
+
+    A shared main venv is an editable install of main's src; the documented
+    worktree recipe puts this checkout's src first with PYTHONPATH. Wrap that
+    recipe so local_verify's clean-environment probe and child see the same
+    interpreter contract they would under a per-worktree venv.
+    """
+    # Match local_verify's allowlisted probe: ambient PYTHONPATH is not evidence.
+    probe = subprocess.run([sys.executable, '-c', 'import mainframe_rag; print(mainframe_rag.__file__)'],
+                           env={'PATH': os.defpath}, capture_output=True, text=True, check=False)
+    expected = (ROOT / 'src/mainframe_rag/__init__.py').resolve()
+    if probe.returncode == 0 and probe.stdout.strip() and Path(probe.stdout.strip()).resolve() == expected:
+        return sys.executable
+    launcher = tmp_path / 'python-with-worktree-src'
+    launcher.write_text(
+        f'#!/bin/sh\nPYTHONPATH={shlex.quote(str(ROOT / "src"))}${{PYTHONPATH:+:$PYTHONPATH}} '
+        f'exec {shlex.quote(sys.executable)} "$@"\n')
+    launcher.chmod(0o755)
+    return str(launcher)
 
 
 def _fake_tree(root: Path, reported: Path) -> Path:
@@ -113,9 +150,15 @@ def test_selection_must_name_test_paths(selector, reason):
 
 
 def test_selection_accepts_files_and_node_ids_and_refuses_empty():
-    lv.validate_selectors(ROOT, ['tests/test_local_verify.py', 'tests/test_local_verify.py::test_x'])
+    lv.validate_selectors(ROOT, ['tests/test_local_selection.py', 'tests/test_local_selection.py::test_x'])
     with pytest.raises(lv.Refusal, match='no selection'):
         lv.validate_selectors(ROOT, [])
+
+
+def test_runner_self_test_is_refused_explicitly_with_a_fixed_message():
+    for selector in ('tests/test_local_verify.py', 'tests/test_local_verify.py::test_x'):
+        with pytest.raises(lv.Refusal, match='exercises this runner; run it with pytest or CI'):
+            lv.validate_selectors(ROOT, [selector])
 
 
 def _receipt(state: dict, code: int, counts: dict | None) -> dict:
@@ -155,13 +198,13 @@ def test_out_dir_inside_the_repository_refuses_and_default_is_outside(tmp_path):
     assert lv.default_out_dir({'HOME': '/h'}) == Path('/h/.local/state/mainframe-rag/local-verify')
 
 
-def test_run_writes_a_receipt_for_exactly_the_selection_and_drops_ambient_env(monkeypatch, tmp_path):
+def test_run_writes_a_receipt_for_exactly_the_selection_and_drops_ambient_env(monkeypatch, tmp_path, disk_backed_tmp):
     out = tmp_path / f'out-{uuid.uuid4().hex}'
-    node = 'tests/test_local_verify.py::test_selection_accepts_files_and_node_ids_and_refuses_empty'
+    node = 'tests/test_local_selection.py::test_selection_is_deterministic_and_sorted'
     monkeypatch.setenv('EMBED_MODE', 'dense')
     monkeypatch.setenv('PYTHONPATH', '/other/src')
     try:
-        code = lv.main(['--no-memory-cap', '--python', sys.executable, '--out-dir', str(out), node],
+        code = lv.main(['--no-memory-cap', '--python', nested_python(tmp_path), '--out-dir', str(out), node],
                        lock=out / 'no-lock')
         (run,) = [p for p in out.iterdir() if p.is_dir()]
         receipt = json.loads((run / 'receipt.json').read_text())
@@ -174,6 +217,7 @@ def test_run_writes_a_receipt_for_exactly_the_selection_and_drops_ambient_env(mo
     assert {'EMBED_MODE', 'PYTHONPATH'} <= set(receipt['environment']['dropped'])
     assert receipt['memory_max_mib'] is None
     assert receipt['evidence'] == (not receipt['tree']['dirty'])
+    assert [path.parent for path in disk_backed_tmp] == [out]
 
 
 def test_t0_targets_follow_the_ci_lint_scope():
@@ -217,16 +261,36 @@ def test_changed_paths_are_committed_plus_dirty_including_both_sides_of_a_rename
         lv.changed_paths(tmp_path, {**state, 'base': {'ref': 'origin/main', 'sha': None}})
 
 
-def test_unmapped_change_refuses_then_a_select_override_runs_and_is_recorded(monkeypatch, tmp_path, capsys):
+def test_tree_state_keeps_unstaged_status_paths_and_dirty_rename_sides(tmp_path):
+    _git(tmp_path, 'init', '-q', '-b', 'main')
+    for name in ('unstaged.txt', 'unstaged space.txt', 'deleted.txt', 'rename-old.txt'):
+        (tmp_path / name).write_text('x\n')
+    _git(tmp_path, 'add', '.')
+    _git(tmp_path, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'base')
+    base = _git(tmp_path, 'rev-parse', 'HEAD')
+    (tmp_path / 'unstaged.txt').write_text('changed\n')
+    (tmp_path / 'unstaged space.txt').write_text('changed\n')
+    (tmp_path / 'deleted.txt').unlink()
+    _git(tmp_path, 'mv', 'rename-old.txt', 'rename-new.txt')
+    (tmp_path / 'untracked.txt').write_text('new\n')
+    expected = ['deleted.txt', 'rename-new.txt', 'rename-old.txt', 'unstaged space.txt',
+                'unstaged.txt', 'untracked.txt']
+    state = lv.tree_state(tmp_path)
+    assert state['dirty'] == expected
+    assert lv.changed_paths(tmp_path, {**state, 'base': {'ref': 'origin/main', 'sha': base}}) == expected
+
+
+def test_unmapped_change_refuses_then_a_select_override_runs_and_is_recorded(monkeypatch, tmp_path, capsys,
+                                                                           disk_backed_tmp):
     from scripts import local_selection
     orphan = 'src/mainframe_rag/not_a_real_module.py'
     monkeypatch.setattr(lv, 'changed_paths', lambda root, state: [orphan])
     monkeypatch.setattr(local_selection, 'select', lambda changed, force_t2=False: local_selection.Selection(
         'T1', (), {}, (), (orphan,)))
-    common = ['--no-memory-cap', '--python', sys.executable, '--out-dir', str(tmp_path / 'out')]
+    common = ['--no-memory-cap', '--python', nested_python(tmp_path), '--out-dir', str(tmp_path / 'out')]
     assert lv.main(common, lock=tmp_path / 'no-lock') == 2
     assert f'unmapped change(s) with no test: {orphan}' in capsys.readouterr().err
-    node = 'tests/test_local_verify.py::test_selection_accepts_files_and_node_ids_and_refuses_empty'
+    node = 'tests/test_local_selection.py::test_selection_is_deterministic_and_sorted'
     assert lv.main([*common, '--select', node], lock=tmp_path / 'no-lock') == 0
     (run,) = [p for p in (tmp_path / 'out').iterdir() if p.is_dir() and (p / 'receipt.json').exists()]
     receipt = json.loads((run / 'receipt.json').read_text())
@@ -234,6 +298,19 @@ def test_unmapped_change_refuses_then_a_select_override_runs_and_is_recorded(mon
     assert receipt['selection']['override'] == {'select': [node], 'unmapped': [orphan]}
     assert receipt['t0'] == {'files': [], 'ruff': None, 'mypy_src': None, 'mypy_scripts': None}
     assert receipt['counts']['executed'] == 1 and receipt['result'] == 'passed'
+    assert disk_backed_tmp == [run]
+
+
+def test_auto_selection_of_only_the_runner_self_test_refuses_with_a_fixed_message(monkeypatch, tmp_path, capsys):
+    from scripts import local_selection
+    changed = 'scripts/local_verify.py'
+    monkeypatch.setattr(lv, 'changed_paths', lambda root, state: [changed])
+    monkeypatch.setattr(local_selection, 'select', lambda changed, force_t2=False: local_selection.Selection(
+        'T1', (), {}, (), (), tuple(changed)))
+    assert lv.main(['--no-memory-cap', '--out-dir', str(tmp_path / 'out')], lock=tmp_path / 'no-lock') == 2
+    err = capsys.readouterr().err
+    assert f'harness self-test change(s) are owned by CI or isolated pytest: {changed}' in err
+    assert 'exercises this runner; run it with pytest or CI' in err
 
 
 def test_explicit_mode_rejects_auto_mode_options(tmp_path, capsys):
@@ -248,9 +325,9 @@ def test_colab_lock_matters_only_for_selections_that_exercise_the_controller():
     assert 'tests/test_local_verify.py' in lv.colab_lock_sensitive(['tests/test_local_verify.py'])
 
 
-def test_held_lock_refuses_a_controller_selection_but_not_an_unrelated_one(tmp_path, capsys):
+def test_held_lock_refuses_a_controller_selection_but_not_an_unrelated_one(tmp_path, capsys, disk_backed_tmp):
     lock = tmp_path / 'assignment.lock'
-    common = ['--no-memory-cap', '--python', sys.executable, '--out-dir', str(tmp_path / 'out')]
+    common = ['--no-memory-cap', '--python', nested_python(tmp_path), '--out-dir', str(tmp_path / 'out')]
     unrelated = 'tests/test_local_selection.py::test_selection_is_deterministic_and_sorted'
     with open(lock, 'w+b') as holder:
         holder.write(b'4242\n')

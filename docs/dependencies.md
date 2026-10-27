@@ -167,6 +167,37 @@ resolver, keep unchanged pins fixed, generate all profiles together, and record
 the input constraints and reports in the PR evidence. Do not update requirements
 alone or repair a failed check by regenerating its expected inventory.
 
+### Offline candidate-lock check (required before approval)
+
+Every dependency-refresh PR records the bounded on-demand check
+(`scripts/verify_dependency_refresh.py`, reached through `qa:deps`) against
+the complete candidate wheelhouse: the command, exit code and receipt.
+
+```sh
+sh scripts/tools/run-task.sh qa:deps \
+  WHEELHOUSE=/approved/dev-wheels PY=.venv/bin/python
+```
+
+`qa:deps` verifies the selected profile's wheelhouse bytes against the lock
+manifest, creates a temporary CPython 3.14 venv from the prepared interpreter,
+installs the complete dev profile with `--no-index --find-links` (no index or
+network), runs `pip check`, then the dependency-lock, licence-inventory,
+BM25-weights, embed-budget and hash-embed suites in that clean environment. It
+never installs into `.venv`, never edits a lock, and removes the temporary
+environment on exit. The temporary environment lives under `TMPDIR`; for a full
+dev install set `TMPDIR` to disk-backed scratch such as
+`$HOME/.cache/agent-tmp/` (the [live-stack](live-stack.md) `$SCRATCH_DIR`
+convention), not a small tmpfs. Missing, incomplete, extra, symlinked or
+tampered wheels and a missing interpreter fail closed before effects.
+`WHEELHOUSE` defaults to the prepared `.tools/python-wheels/dev`; point it at
+the candidate wheelhouse for a refresh. In a fresh worktree without `.venv`,
+pass `PY=<main>/.venv/bin/python`; it is only the base interpreter, and the
+disposable venv is created from it. `PROFILE` defaults to `dev`; the focused
+suites require it because only the dev profile contains their test runner, and
+it is a strict superset of runtime/build at identical pins. This check is
+on-demand maintenance, not an every-lane CI job; the two clean same-target
+environments below remain the approval evidence.
+
 Before approval, install into two clean same-target environments and compare
 observed dependency inventories; exercise missing, modified and incompatible
 transitive artifacts; build both images without networking; reconcile actual

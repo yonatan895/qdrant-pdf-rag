@@ -38,6 +38,10 @@ BROAD_PATTERNS = sorted(SHARED_TEST_INPUTS) + [
     'pyproject.toml', 'requirements*.txt', 'locks/**', 'Taskfile.yml', 'taskfiles/**', 'scripts/tools/**']
 # The two modules that take ~60% of unit time in CI (#796); they run when affected.
 SLOW_MODULES = ('tests/test_colab.py', 'tests/test_ingest_publish.py')
+# The runner's own tests spawn nested qa:local/pytest runs and shared state;
+# concurrent or per-worktree invocations can collide, and CI/isolated pytest
+# owns that contract. Never auto-select them, not even in T2.
+HARNESS_TESTS = frozenset({'tests/test_local_verify.py'})
 GUARDED_PATTERNS = ['src/**', 'scripts/**']
 CONTEXT_MAP = 'docs/agent-workflow.md'
 _LINK = re.compile(r'\]\(([^)#\s]+)')
@@ -181,10 +185,12 @@ class Selection:
     reasons: dict[str, tuple[str, ...]]  # test path -> changed paths that selected it
     broad: tuple[str, ...]            # changed paths that escalated to T2
     unmapped: tuple[str, ...]         # guarded changed paths no rule maps
+    harness: tuple[str, ...] = ()     # changed paths mapped only to HARNESS_TESTS
 
     def as_record(self) -> dict:
         return {'tier': self.tier, 'tests': list(self.tests), 'broad': list(self.broad),
-                'unmapped': list(self.unmapped), 'reasons': {k: list(v) for k, v in self.reasons.items()}}
+                'unmapped': list(self.unmapped), 'harness': list(self.harness),
+                'reasons': {k: list(v) for k, v in self.reasons.items()}}
 
 
 def all_unit_modules(root: Path = ROOT) -> list[str]:
@@ -196,7 +202,7 @@ def select(changed: list[str], *, root: Path = ROOT, graph: Graph | None = None,
            force_t2: bool = False) -> Selection:
     graph = graph or build_graph(root)
     reasons: dict[str, set[str]] = defaultdict(set)
-    broad, unmapped = [], []
+    broad, unmapped, harness = [], [], []
     for path in sorted(set(changed)):
         if _match_any(path, BROAD_PATTERNS):
             broad.append(path)
@@ -204,11 +210,14 @@ def select(changed: list[str], *, root: Path = ROOT, graph: Graph | None = None,
         hits = tests_for(graph, path)
         for test in hits:
             reasons[test].add(path)
+        if hits and hits <= HARNESS_TESTS:
+            harness.append(path)
         if not hits and (root / path).exists() and _match_any(path, GUARDED_PATTERNS):
             unmapped.append(path)
     tier = 'T2' if broad or force_t2 else 'T1'
-    tests = set(reasons)
+    tests = set(reasons) - HARNESS_TESTS
     if tier == 'T2':
-        tests |= {t for t in all_unit_modules(root) if t not in SLOW_MODULES}
-    return Selection(tier, tuple(sorted(tests)), {k: tuple(sorted(v)) for k, v in sorted(reasons.items())},
-                     tuple(broad), tuple(unmapped))
+        tests |= {t for t in all_unit_modules(root) if t not in SLOW_MODULES and t not in HARNESS_TESTS}
+    return Selection(tier, tuple(sorted(tests)),
+                     {k: tuple(sorted(v)) for k, v in sorted(reasons.items()) if k not in HARNESS_TESTS},
+                     tuple(broad), tuple(unmapped), tuple(harness))

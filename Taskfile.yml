@@ -9,9 +9,11 @@
 #   includes: `task --list` and summaries work with no venv, Docker, network,
 #   model, credentials or private config and modify nothing.
 # - YAML owns dispatch/order only; scripts keep validation/lifecycle logic.
-# - Verification tasks never install: a missing `.venv` fails closed with a
-#   pointer to `task dev:setup` (explicit setup separate from verification;
-#   recorded in docs/task-runner.md).
+# - Verification tasks never install into `.venv`: a missing `.venv` fails
+#   closed with a pointer to `task dev:setup` (explicit setup separate from
+#   verification). The sole bounded exception is `qa:deps`, which builds and
+#   removes a temporary venv from the prepared interpreter (see
+#   docs/task-runner.md).
 # - Caller values reach scripts through `env:` bridges and quoted `"$VAR"`
 #   expansion, never re-parsed template interpolation (see taskfiles/).
 # - Artifact rebuilds additionally require a completion stamp written only

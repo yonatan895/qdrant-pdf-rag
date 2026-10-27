@@ -416,7 +416,7 @@ class TaskContractsTests(unittest.TestCase):
         # and logs no invocation — in a plain and a workspace-bin environment.
         self.recorder_env = {"RECORDER_LOG": str(self.log), "RECORDER_TAG": "x",
                              "RECORDER_EXIT": "0"}
-        for task_name in ("qa:lint", "qa:typecheck", "qa:unit"):
+        for task_name in ("qa:lint", "qa:typecheck", "qa:unit", "qa:deps"):
             for env_mode in ("plain", "tooled"):
                 with self.subTest(task=task_name, env=env_mode):
                     if self.log.exists():
@@ -427,6 +427,8 @@ class TaskContractsTests(unittest.TestCase):
                     self.assertNotEqual(proc.returncode, 0)
                     self.assertIn("missing development environment", proc.stdout)
                     self.assertIn("task dev:setup", proc.stdout)
+                    if task_name == "qa:deps":
+                        self.assertIn("disposable temporary venv", proc.stdout)
                     self.assertFalse((self.root / ".venv").exists(),
                                      "verification must never create .venv")
                     self.assertEqual(self.calls(), [])
@@ -440,6 +442,20 @@ class TaskContractsTests(unittest.TestCase):
         self.assertEqual(calls[0]["argv"], ["scripts/agent_doctor.py", "--python", ".venv/bin/python"])
         self.assertEqual(calls[1]["argv"], ["-m", "pytest", "tests", "-v"])
         self.assertEqual(calls[0]["cwd"], str(self.root))
+
+    def test_dependency_refresh_task_transports_explicit_inputs(self):
+        self.make_venv_fake()
+        literal = "wheels space אב;$(touch SENTINEL)"
+        proc = self.run_task("qa:deps", f"WHEELHOUSE={literal}", "PROFILE=runtime",
+                             extra_env=self.recorder_env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        calls = self.pip_calls()
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["argv"], [
+            "scripts/verify_dependency_refresh.py", "--profile", "runtime",
+            "--wheelhouse", literal, "--python", ".venv/bin/python",
+        ])
+        self.assertFalse((self.root / "SENTINEL").exists())
 
     def test_hazard_paths_reach_runner_without_shell_interpretation(self):
         self.make_recorder(self.root / "python with spaces")
