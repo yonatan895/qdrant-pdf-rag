@@ -66,6 +66,21 @@ images:
     repository: openshift4/ose-oauth-proxy
     tag: v4.14
     pullPolicy: IfNotPresent
+  # Open WebUI docs front end (ADR-0007, #1074): the hardened derived
+  # image of the upstream slim release (#1073). Tag form like the other
+  # third-party images; the digest is pinned in images.txt (sha256:PENDING
+  # until the #1073 qualification records it) and enforced at pack/load.
+  openwebui:
+    repository: qdrant-pdf-rag-openwebui
+    tag: v0.12.3-slim
+    pullPolicy: IfNotPresent
+  # Allow-list proxy sidecar of the Open WebUI pod (ADR-0007 E1, maintainer
+  # decision 2026-10-24): nginx-unprivileged, pinned by digest in images.txt and
+  # bundled together with the Open WebUI image.
+  openwebuiProxy:
+    repository: nginxinc/nginx-unprivileged
+    tag: 1.30.6-alpine
+    pullPolicy: IfNotPresent
 
 # Single Qdrant release owner (D2). The chart derives the in-cluster URL
 # (http://<release>:6333) and the chart-managed Secret name
@@ -212,6 +227,69 @@ feedback:
   storageSize: 10Gi
   retentionDays: 180
 
+# Open WebUI docs front end (ADR-0007, #1074): the main docs platform, ON by
+# default (maintainer decision 2026-10-26). While the required site inputs
+# below (secretName, host, oidc.providerUrl/clientId/allowedRoles/adminRoles,
+# idpEgress.cidrs, route.destinationCA) are missing the render fails closed
+# with a fixed message; opt out with `--set openwebui.enabled=false`, which
+# renders nothing from this block and leaves every other object byte-identical
+# to a render without it (K1 rollback). Enabled renders one Recreate replica of the hardened
+# image (one worker, SQLite on the kept RWO claim rag-openwebui-data, never
+# NFS), a ClusterIP Service on 8443 (TLS from the service-serving cert), a
+# reencrypt Route on `host` whose destination CA is route.destinationCA (the
+# namespace service CA, the single owner of that value), NetworkPolicy
+# rag-openwebui (ingress from the router only; egress to the agent 8080,
+# cluster DNS and idpEgress only) and the docs Pipe ConfigMap.
+# Users sign in through the identity team's OIDC client; the local login form,
+# signup and password auth are off. The answer path is the docs Pipe (#1072)
+# over the agent: no model connection, no gateway key, no RAG.
+# secretName names an operator-created Secret with data keys webui-secret-key
+# and oidc-client-secret (optional admin-api-key, read only by deploy.sh to
+# install the Pipe); never a chart value (D7).
+# retentionDays is the chat retention window (maintainer decision 2026-10-24,
+# ADR-0007 S2: 30 days; backups follow the same window). The purge sidecar in
+# the Open WebUI pod enforces it; an explicit null fails the render.
+openwebui:
+  enabled: true
+  secretName: ""
+  # Public Route host; the OIDC redirect URI is https://<host>/oauth/oidc/callback.
+  host: ""
+  retentionDays: 30
+  storageSize: 10Gi
+  oidc:
+    # https://<idp>/.well-known/openid-configuration of the identity team's client.
+    providerUrl: ""
+    clientId: ""
+    # ID-token claim carrying group names (not SIDs); synced on every login.
+    groupClaim: groups
+    # ID-token claim carrying roles; allowedRoles may sign in, adminRoles are
+    # Open WebUI admins (comma-separated names). Both are required when enabled.
+    rolesClaim: roles
+    allowedRoles: ""
+    adminRoles: ""
+    # Space-separated scopes Open WebUI requests (OAUTH_SCOPES); must include
+    # openid. offline_access: Open WebUI refreshes the session from a refresh
+    # token; without one it deletes the session near expiry and may fall back to
+    # an older session's token (Kind trial). The IdP must permit every scope.
+    # AD FS: openid profile email allatclaims (docs/deploy.md).
+    scopes: openid email profile groups offline_access
+    # Claim with the user's e-mail (OAUTH_EMAIL_CLAIM): Open WebUI v0.12.3 refuses a
+    # sign-in without it. AD FS usually: upn. Top-level claim names only.
+    emailClaim: email
+    # Claim with the display name (OAUTH_USERNAME_CLAIM); missing, the e-mail is used.
+    # When the ID token lacks this or the e-mail claim, Open WebUI also calls userinfo.
+    usernameClaim: name
+    # Optional PEM bundle of the CA that issued the IdP's TLS certificate (an
+    # enterprise CA, e.g. AD FS). Empty: the image's public trust stores only. Set:
+    # rendered as ConfigMap rag-openwebui-idp-ca, and Open WebUI trusts the public
+    # stores plus this CA (SSL_CERT_FILE, REQUESTS_CA_BUNDLE). Certificates only.
+    caBundle: ""
+  # IdP back channel (discovery, token, JWKS). NetworkPolicy cannot match DNS
+  # names: list the IdP's CIDRs. Required when enabled.
+  idpEgress:
+    cidrs: []
+    port: 443
+
 # RWO block storage class for OpenObserve, ingest-work scratch and the
 # feedback store.
 # NFS refusal stays owned by shell preflight; schema additionally rejects
@@ -279,3 +357,11 @@ resources:
     limits:
       cpu: 250m
       memory: 256Mi
+  # Open WebUI (#1074); sizing pending the #1073 trial measurement.
+  openwebui:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 2Gi

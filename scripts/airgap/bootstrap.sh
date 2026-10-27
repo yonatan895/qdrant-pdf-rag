@@ -44,6 +44,8 @@ PACKED_SHA=$(sed -n 's/^sha: *//p' MANIFEST.txt)
 case "$PACKED_SHA" in *[!0-9a-f]*) echo "FAIL: invalid MANIFEST SHA." >&2; exit 1;; esac
 MEMBERS="bootstrap.sh repo.bundle task_linux_amd64.tar.gz task-pin.txt task-LICENSE qdrant-image.tar openobserve-image.tar otelcol-image.tar app-ingest-$PACKED_SHA.tar app-agent-$PACKED_SHA.tar MANIFEST.txt PACKING_RECORD.txt sbom.json THIRD-PARTY-NOTICES.txt sneakernet-signing.pub"
 [ ! -f oauth-proxy-image.tar ] || MEMBERS="$MEMBERS oauth-proxy-image.tar"
+[ ! -f openwebui-image.tar ] || MEMBERS="$MEMBERS openwebui-image.tar"
+[ ! -f openwebui-proxy-image.tar ] || MEMBERS="$MEMBERS openwebui-proxy-image.tar"
 awk -v members="$MEMBERS" '
     BEGIN { n=split(members, names, " "); for (i=1; i<=n; i++) wanted[names[i]]=1 }
     NF != 2 || length($1) != 64 || $1 !~ /^[0-9a-f]+$/ || !($2 in wanted) || seen[$2]++ { bad=1 }

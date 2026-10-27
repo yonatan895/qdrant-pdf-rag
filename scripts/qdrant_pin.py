@@ -12,22 +12,35 @@ import sys
 from pathlib import Path
 
 
-def qdrant_image_pin(images_txt: Path) -> str:
-    """First qdrant line's name column — a pin bump is picked up automatically."""
+def _qdrant_rows(images_txt: Path) -> list[list[str]]:
+    """Rows whose repository is qdrant/qdrant, not any name containing "qdrant".
+
+    The Open WebUI derived image is `qdrant-pdf-rag-openwebui` (#1074); a
+    substring match made it a second Qdrant pin and broke every lane that
+    prepares the Qdrant image.
+    """
+    rows = []
     for line in images_txt.read_text(encoding="utf-8").splitlines():
         if line.lstrip().startswith("#") or not line.strip():
             continue
         fields = line.split()
-        if fields and "qdrant" in fields[0]:
-            return fields[0]
-    raise ValueError(f"no qdrant image pin found in {images_txt}")
+        name = fields[0].split("@", 1)[0].rsplit(":", 1)[0]
+        if name.split("/")[-2:] == ["qdrant", "qdrant"]:
+            rows.append(fields)
+    return rows
+
+
+def qdrant_image_pin(images_txt: Path) -> str:
+    """First qdrant line's name column — a pin bump is picked up automatically."""
+    rows = _qdrant_rows(images_txt)
+    if not rows:
+        raise ValueError(f"no qdrant image pin found in {images_txt}")
+    return rows[0][0]
 
 
 def qdrant_digest_pin(images_txt: Path) -> str:
     """Resolve the approved content pin without changing its human version tag."""
-    rows = [line.split() for line in images_txt.read_text().splitlines()
-            if line.strip() and not line.lstrip().startswith('#')]
-    rows = [row for row in rows if 'qdrant' in row[0]]
+    rows = _qdrant_rows(images_txt)
     if len(rows) != 1 or len(rows[0]) != 2 or not re.fullmatch(r'sha256:[a-f0-9]{64}', rows[0][1]):
         raise ValueError('one complete Qdrant image digest pin is required')
     return rows[0][0].rsplit(':', 1)[0] + '@' + rows[0][1]

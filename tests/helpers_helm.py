@@ -1,6 +1,7 @@
 """Real Helm rendering with independent synthetic operator values."""
 from __future__ import annotations
 
+import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -84,6 +85,10 @@ def base_values() -> dict:
         "openobserve": {"credentialsSecretName": "openobserve-credentials"},
         "metrics": {"enabled": False},
         "ui": {"enabled": True},
+        # Open WebUI is default-on (ADR-0008) and fails closed without site
+        # inputs; the shared base is an explicit opt-out, tests that exercise
+        # the front end override it with their own inputs.
+        "openwebui": {"enabled": False},
         "networkPolicy": {"enabled": True, "allowedNamespaces": []},
         "route": {"enabled": False, "timeoutSeconds": 300, "destinationCA": ""},
         "storage": {"className": BASE_ENV["STORAGE_CLASS"]},
@@ -115,8 +120,9 @@ def base_values() -> dict:
         },
     }
 
-def run_new_template(extra_values: dict, namespace: str = "ns", *, job_only: bool = False) -> dict:
-    """Render the new chart with synthetic values; return parsed docs."""
+def run_new_template(extra_values: dict, namespace: str = "ns", *, job_only: bool = False,
+                     chart: Path = CHART) -> dict:
+    """Render the new chart (or a test copy of it) with synthetic values; return parsed docs."""
     values = base_values()
     if job_only:
         values["ingest"]["enabled"] = True
@@ -133,10 +139,12 @@ def run_new_template(extra_values: dict, namespace: str = "ns", *, job_only: boo
                 dst[k] = v
 
     merge(values, extras)
-    r = _helm_template_with_values(values, ns, job_only=job_only)
+    r = _helm_template_with_values(values, ns, job_only=job_only, chart=chart)
     assert r.returncode == 0, f"helm template failed: {r.stderr}"
     if not job_only:
-        assert "__" not in r.stdout, "placeholder leaked through chart render"
+        # The deploy gate's placeholder form (fail_on_placeholders); Python
+        # dunders in the Open WebUI ConfigMap (#1074) are not placeholders.
+        assert not re.search(r"__[A-Z][A-Z0-9_]*__", r.stdout), "placeholder leaked through chart render"
     docs = [d for d in yaml.safe_load_all(r.stdout) if d]
     if job_only:
         assert len(docs) == 1 and docs[0]["kind"] == "Job", f"expected one Job, got: {r.stdout[:500]}"
@@ -159,12 +167,13 @@ def ingest_env_map(job: dict) -> dict:
     c = next(x for x in job["spec"]["template"]["spec"]["containers"] if x["name"] == "ingest")
     return {e["name"]: e for e in c.get("env", [])}
 
-def _helm_template_with_values(values: dict, namespace: str = "ns", *, job_only: bool = False):
+def _helm_template_with_values(values: dict, namespace: str = "ns", *, job_only: bool = False,
+                               chart: Path = CHART):
     with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
         yaml.safe_dump(values, f)
         path = f.name
     try:
-        cmd = ["helm", "template", "test", str(CHART), "--namespace", namespace, "-f", path]
+        cmd = ["helm", "template", "test", str(chart), "--namespace", namespace, "-f", path]
         if job_only:
             cmd.extend(["--show-only", "templates/ingest-job.yaml"])
         return run(cmd, cwd=REPO)

@@ -1,0 +1,21 @@
+# Test-only site inputs for the default-on Open WebUI (ADR-0008, #1074).
+# Obviously fake and non-routable (example.invalid, TEST-NET-1 CIDR, a Secret
+# name only). Never a production value and never merged into values.yaml: the
+# bare default render must keep failing closed. Used by helm lint/template in
+# tests and CI; a real site supplies its own values (docs/deploy.md).
+openwebui:
+  secretName: owui-test-secrets
+  host: docs.example.invalid
+  oidc:
+    providerUrl: https://idp.example.invalid/.well-known/openid-configuration
+    clientId: test-client
+    allowedRoles: test-users
+    adminRoles: test-admins
+  idpEgress:
+    cidrs:
+      - 192.0.2.0/24
+route:
+  destinationCA: |
+    -----BEGIN CERTIFICATE-----
+    FAKE-TEST-CA-NOT-A-CERTIFICATE
+    -----END CERTIFICATE-----

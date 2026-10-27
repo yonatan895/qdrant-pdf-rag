@@ -24,6 +24,7 @@ resolve_observability
 resolve_agent_route
 resolve_network_policy
 resolve_feedback
+resolve_openwebui
 case "$IMAGE_SHA" in
     ""|HEAD) die "IMAGE_SHA must be the packed git SHA (see dist/MANIFEST.txt)" ;;
 esac
@@ -71,6 +72,13 @@ echo "==> NetworkPolicy $(describe_network_policy)"
 # (in map_values.py, before any mutation) a missing Secret name or a disabled
 # agent NetworkPolicy. Content stays on the kept claim even when disabled later.
 echo "==> Feedback service $(describe_feedback)"
+# Issue #1074 (ADR-0007): the Open WebUI docs front end is default off. Enabling
+# needs the recorded image pin (images.txt, chart and packed bundle agree);
+# map_values.py refuses missing OIDC/host/IdP-egress settings before mutation.
+if [ "$OPENWEBUI_ENABLED" = "true" ]; then
+    require_openwebui_pin
+fi
+echo "==> Open WebUI front end $(describe_openwebui)"
 
 refuse_nfs_storage
 SNAPSHOT_STORAGE_CLASS=${SNAPSHOT_STORAGE_CLASS:-$STORAGE_CLASS}
@@ -93,6 +101,7 @@ DEPLOY_IMAGES="qdrant agent"
 # otelcol (the /metrics scraper) renders only with metrics on (OTEL_COLLECTOR).
 [ "$OTEL_COLLECTOR" != "1" ] || DEPLOY_IMAGES="$DEPLOY_IMAGES otelcol"
 [ "$AGENT_ROUTE" != "true" ] || DEPLOY_IMAGES="$DEPLOY_IMAGES oauth_proxy"
+[ "$OPENWEBUI_ENABLED" != "true" ] || DEPLOY_IMAGES="$DEPLOY_IMAGES openwebui openwebui_proxy"
 # shellcheck disable=SC2086
 verify_registry_images $DEPLOY_IMAGES
 # The feedback pod runs the agent image: no extra registry read-back, but its
@@ -105,8 +114,11 @@ check_gateway_ca
 mkdir -p dist
 
 # Public namespace service CA becomes a generated value, never a YAML patch.
+# It is the destination CA of both reencrypt Routes (console and Open WebUI).
 if [ "$AGENT_ROUTE" = "true" ] && [ "${AIRGAP_DRYRUN:-0}" != "1" ]; then
     require_oauth_cookie_secret
+fi
+if { [ "$AGENT_ROUTE" = "true" ] || [ "$OPENWEBUI_ENABLED" = "true" ]; } && [ "${AIRGAP_DRYRUN:-0}" != "1" ]; then
     ROUTE_DESTINATION_CA_FILE=dist/namespace-service-ca.crt
     fetch_route_destination_ca "$ROUTE_DESTINATION_CA_FILE"
 fi
@@ -165,6 +177,9 @@ require_secret_keys "${PULL_SECRET:-}" .dockerconfigjson
 # agent read. Checked before any mutation (a missing key would otherwise show
 # as CreateContainerConfigError after the release).
 [ "$FEEDBACK_ENABLED" != "true" ] || require_secret_keys "$FEEDBACK_SECRET" service-token
+# Open WebUI (#1074): the session-signing key and the OIDC client secret are
+# operator-created; presence only, values never read here.
+[ "$OPENWEBUI_ENABLED" != "true" ] || require_secret_keys "$OPENWEBUI_SECRET" webui-secret-key oidc-client-secret
 # Only first-party objects listed by this render may be adopted. Never take
 # resources belonging to a different release/controller. All deployments
 # in the owned namespace must be serialized by the operator.
@@ -228,10 +243,12 @@ PY
     # Issue #373: no Route other than the OAuth-protected rag-agent Route may
     # reach the unauthenticated agent HTTP port or Qdrant, whatever the
     # AGENT_ROUTE selection. Refused here, before any mutation.
+    # #1074: rag-openwebui is protected the same way; only its own Route may
+    # back it, and with the front end on an incompatible owned Route is retired.
     if [ "$AGENT_ROUTE" = "true" ]; then
-        check_route_exposure enabled "$ROUTE_DESTINATION_CA_FILE"
+        check_route_exposure enabled "$ROUTE_DESTINATION_CA_FILE" "${ROUTE_DESTINATION_CA_FILE:-}"
     else
-        check_route_exposure disabled
+        check_route_exposure disabled "" "${ROUTE_DESTINATION_CA_FILE:-}"
     fi
 fi
 
@@ -240,9 +257,51 @@ fi
 QDRANT_STORAGE_SIZE=${QDRANT_STORAGE_SIZE:-}
 QDRANT_EXTRA_VALUES=${QDRANT_EXTRA_VALUES:-}
 if [ -n "$QDRANT_EXTRA_VALUES" ]; then
-    require_ci_rehearsal QDRANT_EXTRA_VALUES
+    require_ci_rehearsal QDRANT_EXTRA_VALUES "$QDRANT_SIZING_KEYS"
     [ -f "$QDRANT_EXTRA_VALUES" ] || die "QDRANT_EXTRA_VALUES file not found: $QDRANT_EXTRA_VALUES"
 fi
+
+# Issue #1070 (R1): the stored Qdrant layout must be one this release can
+# serve, read before the first cluster change below (namespace, Route deletes,
+# both helm upgrades). A d53595e plain collection refuses here with the
+# maintenance-window steps instead of failing at the agent rollout after
+# Qdrant and the application were already upgraded.
+check_stored_layout
+
+# Issue #1070 R2 (read-only, before any change): a StatefulSet's volume claim
+# templates are immutable, so the sizes this run would render must equal the
+# existing StatefulSet's. Kept separate from the layout preflight above.
+check_qdrant_volume_sizes() {
+    [ "${AIRGAP_DRYRUN:-0}" != "1" ] || return 0
+    set -- -n "$NAMESPACE" -f charts/qdrant-openshift.values.yaml
+    if [ -n "$QDRANT_STORAGE_SIZE" ]; then
+        set -- "$@" --set-string "persistence.size=$QDRANT_STORAGE_SIZE" \
+            --set-string "snapshotPersistence.size=$QDRANT_STORAGE_SIZE"
+    fi
+    for _assignment in $(python3 scripts/airgap/model_config.py --qdrant-sizing); do
+        set -- "$@" --set-string "$_assignment"
+    done
+    [ -z "$QDRANT_EXTRA_VALUES" ] || set -- "$@" -f "$QDRANT_EXTRA_VALUES"
+    helm template "$QDRANT_RELEASE" "$CHART" "$@" > dist/qdrant-size-probe.yaml ||
+        die "cannot render the Qdrant release for the volume size check"
+    # The StatefulSet's name comes from the render (the chart's fullname logic).
+    _sts=$(python3 scripts/airgap/check_qdrant_volumes.py --name < dist/qdrant-size-probe.yaml) ||
+        die "cannot determine the Qdrant StatefulSet name from the render"
+    _live=$($KC -n "$NAMESPACE" get statefulset "$_sts" -o json --ignore-not-found) ||
+        die "cannot read the existing Qdrant StatefulSet"
+    if [ -z "$_live" ]; then
+        # No StatefulSet is fine only on a fresh install: an existing Helm release
+        # without it must never pass silently.
+        _rel=$($KC -n "$NAMESPACE" get secret -l "owner=helm,name=$QDRANT_RELEASE" -o name) ||
+            die "cannot check for an existing Qdrant release"
+        [ -z "$_rel" ] || die "the Qdrant release exists but its StatefulSet was not found; refusing to guess its volume sizes"
+    fi
+    printf '%s' "$_live" > dist/qdrant-live-statefulset.json
+    python3 scripts/airgap/check_qdrant_volumes.py dist/qdrant-live-statefulset.json < dist/qdrant-size-probe.yaml ||
+        die "requested Qdrant volume sizes differ from the existing StatefulSet"
+    unset _live _assignment _sts _rel
+}
+check_qdrant_volume_sizes
 
 echo "==> Namespace: $NAMESPACE"
 if [ "${AIRGAP_DRYRUN:-0}" != "1" ]; then
@@ -263,6 +322,11 @@ if [ "${OWNED_ROUTE_PRESENT:-0}" = "1" ] && { [ "$AGENT_ROUTE" != "true" ] || [ 
     $KC -n "$NAMESPACE" delete route.route.openshift.io/rag-agent --ignore-not-found ||
         die "cannot remove disabled or incompatible owned Route rag-agent before the release"
 fi
+if [ "${OPENWEBUI_ROUTE_INCOMPATIBLE:-0}" = "1" ]; then
+    echo "==> Removing incompatible owned Route rag-openwebui before the release"
+    $KC -n "$NAMESPACE" delete route.route.openshift.io/rag-openwebui --ignore-not-found ||
+        die "cannot remove incompatible owned Route rag-openwebui before the release"
+fi
 
 echo "==> Helm: Qdrant from the vendored chart with PROD values"
 set -- -n "$NAMESPACE" \
@@ -275,6 +339,13 @@ if [ -n "$QDRANT_STORAGE_SIZE" ]; then
     set -- "$@" --set-string "persistence.size=$QDRANT_STORAGE_SIZE" \
         --set-string "snapshotPersistence.size=$QDRANT_STORAGE_SIZE"
 fi
+# Site sizing keys (#1070 R2), validated by validate_helm_inputs; they win
+# over QDRANT_STORAGE_SIZE. Unset keys add nothing, so the default is unchanged.
+_sizing=$(python3 scripts/airgap/model_config.py --qdrant-sizing) || die "invalid Qdrant sizing"
+for _assignment in $_sizing; do
+    set -- "$@" --set-string "$_assignment"
+done
+unset _sizing _assignment
 if [ -n "$QDRANT_EXTRA_VALUES" ]; then
     set -- "$@" -f "$QDRANT_EXTRA_VALUES"
 fi
@@ -302,6 +373,7 @@ if [ "$AGENT_ROUTE" = "true" ]; then
     # and refuse unknown/unreadable exposure without claiming verification.
     verify_agent_route "${ROUTE_DESTINATION_CA_FILE:-}"
 fi
+[ "$OPENWEBUI_ENABLED" != "true" ] || verify_openwebui_route "${ROUTE_DESTINATION_CA_FILE:-}"
 [ "${METRICS_ENABLED:-false}" = "true" ] || echo "==> Metrics off: ServiceMonitor not deployed"
 [ "$OTEL_BUNDLED" = "1" ] || echo "==> OpenObserve not deployed (tracing off or external OTLP endpoint)"
 
@@ -334,6 +406,10 @@ else
     if [ "$FEEDBACK_ENABLED" = "true" ]; then
         wait_rollout "statefulset/rag-feedback" 120
     fi
+    # Open WebUI migrates its schema at startup (startupProbe allows 10 min).
+    if [ "$OPENWEBUI_ENABLED" = "true" ]; then
+        wait_rollout "deploy/rag-openwebui" 660
+    fi
     # Tags can move after the registry read-back: the running pods must report
     # the verified digests (fail closed; legacy cleanup below is skipped).
     # shellcheck disable=SC2086
@@ -344,6 +420,8 @@ else
         $KC -n "$NAMESPACE" delete -f dist/app-disabled-cleanup.json --ignore-not-found
     fi
 fi
+# #1074: the docs Pipe is the front end's only model; install it hash-checked.
+[ "$OPENWEBUI_ENABLED" != "true" ] || provision_openwebui_pipe
 if [ "$AGENT_ROUTE" = "true" ]; then
     echo "Route rag-agent -> svc port oauth, reencrypt, timeout 300s"
 fi

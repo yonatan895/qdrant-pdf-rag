@@ -85,8 +85,10 @@ if [ -n "${INGEST_RETIRE_DOCS:-}" ]; then
 fi
 
 echo "==> Helm: explicit ingest Job (corpus PVC: $CORPUS_PVC)"
-# Route configuration belongs to deployment, not this one-shot operation.
-AGENT_ROUTE=false map_app_values --out dist/mainframe-rag-ingest-values.yaml
+# Route configuration belongs to deployment, not this one-shot operation; so
+# does the Open WebUI front end (its Route needs the service CA that only
+# deploy fetches), so the Job render opts out of it explicitly.
+AGENT_ROUTE=false OPENWEBUI_ENABLED=false map_app_values --out dist/mainframe-rag-ingest-values.yaml
 helm template mainframe-rag charts/mainframe-rag -f dist/mainframe-rag-ingest-values.yaml \
     --namespace "$NAMESPACE" --show-only templates/ingest-job.yaml > dist/ingest-rendered.yaml
 helm template mainframe-rag charts/mainframe-rag -f dist/mainframe-rag-ingest-values.yaml \
@@ -97,7 +99,7 @@ fail_on_placeholders dist/ingest-rendered.yaml ingest
 # production template in git. Client-side only; the cluster is not contacted.
 INGEST_EXTRA_PATCH=${INGEST_EXTRA_PATCH:-}
 if [ -n "$INGEST_EXTRA_PATCH" ]; then
-    require_ci_rehearsal INGEST_EXTRA_PATCH
+    require_ci_rehearsal INGEST_EXTRA_PATCH "$INGEST_SIZING_KEYS"
     [ -f "$INGEST_EXTRA_PATCH" ] || die "INGEST_EXTRA_PATCH file not found: $INGEST_EXTRA_PATCH"
     $KC patch --local -f dist/ingest-rendered.yaml \
         -p "$(cat "$INGEST_EXTRA_PATCH")" -o yaml > dist/ingest-rendered-patched.yaml

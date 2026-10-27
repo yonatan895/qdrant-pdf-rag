@@ -52,6 +52,7 @@ def _run_pipeline(pipe_tree, *args, extra_env=None):
         "DENSE_DIM": "768",
         "EMBED_MODEL_REVISION": "rev-1",
         "EMBED_BASE_URL": "http://vllm:8000/v1",
+        "OPENWEBUI_ENABLED": "false",  # default-on (ADR-0008): fixtures opt out explicitly
         # Issue #360: the hermetic single-node pipeline fixtures select the
         # 1/1/1 non-HA profile explicitly (the production preset is tested
         # by test_airgap_ingest_sh/test_airgap_validate_sh).
@@ -175,3 +176,86 @@ def test_incomplete_reasoning_stops_before_load_then_corrected_config_runs(pipe_
     result = _run_pipeline(pipe_tree, extra_env=config)
     assert result.returncode == 0, result.stderr
     assert calls.read_text().splitlines() == ["load", "deploy", "ingest", "smoke"]
+
+
+def test_pipeline_dryrun_with_the_seven_openwebui_inputs_needs_the_ca_only_to_render(pipe_tree):
+    """B1: stage 1 (validate) passes with the seven inputs and no service CA; the
+    dry-run render then refuses with the existing Route-rendering message (live
+    deploy fetches the CA instead), never at validation."""
+    from tests.helpers_airgap import set_openwebui_pin
+
+    shutil.copy(REPO / "images.txt", pipe_tree / "images.txt")
+    set_openwebui_pin(pipe_tree, "sha256:" + "b" * 64)
+    pipe = pipe_tree / "charts" / "mainframe-rag" / "files" / "openwebui" / "docs_pipe.py"
+    pipe.write_text("class Pipe:\n    pass\n")
+    inputs = {
+        "OPENWEBUI_ENABLED": "true", "OPENWEBUI_SECRET": "owui-secrets",
+        "OPENWEBUI_HOST": "docs.apps.example.internal",
+        "OPENWEBUI_OIDC_PROVIDER_URL": "https://idp.example.internal/.well-known/openid-configuration",
+        "OPENWEBUI_OIDC_CLIENT_ID": "docs-frontend", "OPENWEBUI_OIDC_ALLOWED_ROLES": "staff",
+        "OPENWEBUI_OIDC_ADMIN_ROLES": "docs-admins", "OPENWEBUI_IDP_EGRESS_CIDRS": "10.20.0.0/24",
+        "CORPUS_PVC": "test-corpus",
+    }
+    r = _run_pipeline(pipe_tree, "--skip-load", extra_env=inputs)
+    assert "inputs are missing" not in r.stdout + r.stderr
+    assert "STAGE 1/5" in r.stdout
+    assert r.returncode != 0 and "needs ROUTE_DESTINATION_CA_FILE" in r.stderr
+    assert "STAGE 3/5" in r.stdout
+    ca = pipe_tree / "service-ca.crt"
+    ca.write_text("-----BEGIN CERTIFICATE-----\nU0VSVklDRS1DQQ==\n-----END CERTIFICATE-----\n")
+    r = _run_pipeline(pipe_tree, "--skip-load", extra_env={**inputs, "ROUTE_DESTINATION_CA_FILE": str(ca)})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "STAGE 4/5: CORPUS INGESTION" in r.stdout
+
+
+def test_pipeline_refuses_a_legacy_collection_at_validation_before_any_change(pipe_tree):
+    """Issue #1070 (R1): the d53595e plain collection stops the live pipeline
+    at stage 1, before the registry load and every cluster change."""
+    from tests.helpers_airgap import FakeQdrant
+
+    recording = r"""#!/bin/sh
+printf '%s\n' "$0 $*" >> "$TOOL_LOG"
+case "$*" in
+  *'get statefulset/qdrant '*) echo statefulset.apps/qdrant ;;
+  *'exec -i deploy/rag-agent -- python3 -c '*)
+    while [ "$1" != "--" ]; do shift; done; shift
+    exec env QDRANT_URL="$FAKE_QDRANT_URL" QDRANT_API_KEY="$FAKE_READ_KEY" "$@" ;;
+esac
+exit 0
+"""
+    for name in ("skopeo", "helm", "kubectl", "oc"):
+        write_stub(pipe_tree / "bin" / name, recording)
+    qdrant = FakeQdrant()
+    try:
+        qdrant.add_collection("mainframe_manuals", [{"id": 1, "vector": {"dense": [0.0] * 4}}])
+        log = pipe_tree / "tool.log"
+        r = _run_pipeline(pipe_tree, extra_env={
+            "AIRGAP_DRYRUN": "0", "TOOL_LOG": str(log),
+            "FAKE_QDRANT_URL": qdrant.url, "FAKE_READ_KEY": FakeQdrant.READ_KEY})
+    finally:
+        qdrant.close()
+    assert r.returncode != 0
+    assert "E_LEGACY_COLLECTION" in r.stderr
+    assert "STAGE 2/5" not in r.stdout
+    calls = log.read_text()
+    assert "skopeo copy" not in calls and " upgrade " not in calls
+    assert " apply " not in calls and " delete " not in calls and " create " not in calls
+
+
+def test_pipeline_refuses_a_d53595e_shaped_env_before_stage_one(pipe_tree):
+    from tests.helpers_airgap import D53595E_SHAPED_ENV, RETIRED_ENV_KEYS, retired_keys_listed
+
+    log = pipe_tree / "stages.log"
+    for stage in ("validate", "load", "deploy", "ingest", "smoke"):
+        write_stub(
+            pipe_tree / "scripts" / "airgap" / f"{stage}.sh",
+            f'#!/bin/sh\necho {stage} >> "{log}"\n',
+        )
+    env_file = pipe_tree / "d53595e.env"
+    env_file.write_text(D53595E_SHAPED_ENV)
+    r = _run_pipeline(pipe_tree, "--skip-load", extra_env={"AIRGAP_ENV": str(env_file)})
+    assert r.returncode != 0, r.stdout
+    assert sorted(retired_keys_listed(r.stderr)) == sorted(RETIRED_ENV_KEYS), r.stderr
+    assert "sentinel-" not in r.stdout + r.stderr
+    assert "STAGE" not in r.stdout
+    assert not log.exists()

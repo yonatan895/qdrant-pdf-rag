@@ -1159,6 +1159,22 @@ class TaskContractsTests(unittest.TestCase):
         self.assertEqual(resolved["QUERY"], "")
         self.assertEqual(resolved["EMBED_MODE"], "")
 
+    def test_task_cli_does_not_yet_forward_the_retired_keys(self):
+        """Pins a known gap (#1070 review B1): `run-task airgap:validate
+        JAEGER_QUERY_URL=x` is dropped before common.sh can refuse it, because
+        taskfiles/airgap.yml bridges only the current keys. The Verifier-owned
+        diff in PR #1111 ("Needs Verifier decision") adds the five retired keys
+        to every stage's TASK_* bridge and TASK_OP_KEYS; when it lands, replace
+        this test with an assertion that all five are forwarded."""
+        import re
+
+        from scripts.airgap.model_config import RETIRED_KEYS
+
+        text = (REPO / "taskfiles/airgap.yml").read_text(encoding="utf-8")
+        forwarded = set(re.search(r'TASK_OP_KEYS: "([^"]+)"', text).group(1).split())
+        self.assertIn("OTEL_EXPORTER_OTLP_ENDPOINT", forwarded)
+        self.assertEqual(forwarded & {key for key, _, _ in RETIRED_KEYS}, set())
+
     def test_bridge_set_matches_operator_keys(self):
         import re
         common = (REPO / "scripts/airgap/common.sh").read_text(encoding="utf-8")

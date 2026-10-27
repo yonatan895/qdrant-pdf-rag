@@ -34,6 +34,7 @@ resolve_observability
 resolve_agent_route
 resolve_network_policy
 resolve_feedback
+resolve_openwebui
 
 case "${RERANK_ENDPOINT_ORDER:-score_first}" in
     score_first|rerank_first) ;;
@@ -111,6 +112,12 @@ if [ "$AGENT_ROUTE" = "true" ]; then
     require_oauth_pin
     echo "    oauth-proxy pin recorded; matches the chart${MANIFEST:+ and the packed bundle}"
     echo "    Notice: the console Route authenticates any OpenShift user (oauth-proxy --email-domain=*, no SAR); the cohort restriction is a site decision (issue #373)"
+fi
+# Docs front end (default on) (ADR-0007, #1074): the Open WebUI image pin must be
+# recorded and consistent with the chart and the bundle. Static: runs in dry-run.
+if [ "${OPENWEBUI_ENABLED:-true}" = "true" ]; then
+    require_openwebui_pin
+    echo "    Open WebUI pin recorded; matches the chart${MANIFEST:+ and the packed bundle}"
 fi
 
 CHART=$(ls charts/qdrant-*.tgz 2>/dev/null | head -1 || true)
@@ -258,6 +265,10 @@ else
     check_route_exposure disabled
 fi
 echo "    No Route other than the OAuth-protected rag-agent Route reaches the agent or Qdrant Services"
+
+echo "==> 4c. Stored Qdrant layout (issue #1070)"
+# Read-only: the same rule deploy.sh applies before its first change.
+check_stored_layout
 
 echo "==> 5. Checking OpenShift Security Context Constraints (SCC)"
 # A failed `get scc` is evidence of a non-OpenShift cluster only when the API

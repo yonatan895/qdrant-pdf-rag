@@ -9,15 +9,20 @@ Tests validate.sh in dry-run mode against hermetic stubs:
 """
 
 import os
+import re
 import shutil
 
 import pytest
 
 from tests.helpers_airgap import (
+    D53595E_SHAPED_ENV,
     REPO,
+    RETIRED_ENV_KEYS,
+    RETIRED_ENV_VALUES,
     STUB_TOOL,
     copy_chart,
     make_bin_tree,
+    retired_keys_listed,
     run_sh,
     symlink_tools,
     write_signed_manifest,
@@ -66,6 +71,7 @@ def _run(tree, extra_env=None):
         "DENSE_DIM": "768",
         "EMBED_MODEL_REVISION": "rev-1",
         "EMBED_BASE_URL": "http://vllm:8000/v1",
+        "OPENWEBUI_ENABLED": "false",  # default-on (ADR-0008): fixtures opt out explicitly
         # Issue #360: fixtures select the explicit single-node 1/1/1 profile;
         # the production preset is exercised by its own test below.
         "QDRANT_SHARD_NUMBER": "1",
@@ -135,8 +141,8 @@ def test_unknown_dryrun_values_are_refused_before_any_stage(tree, value):
                  id='validate_tracing_bad_endpoint_fails_closed'),
     pytest.param({'INTERNAL_REGISTRY': None, 'STORAGE_CLASS': None, 'EMBED_MODEL_REVISION': None}, None, ('INTERNAL_REGISTRY', 'STORAGE_CLASS', 'EMBED_MODEL_REVISION', 'required variables unset'),
                  id='validate_lists_all_missing_vars_at_once'),
-    pytest.param({'INTERNAL_REGISTRY': None, 'REGISTRY_INTERNAL': 'old.example:5000'}, None, ('INTERNAL_REGISTRY', 'required variables unset'),
-                 id='validate_removed_registry_alias_is_not_honored'),
+    pytest.param({'INTERNAL_REGISTRY': None, 'REGISTRY_INTERNAL': 'old.example:5000'}, None, ('REGISTRY_INTERNAL (retired in 547d04d)', 'set INTERNAL_REGISTRY'),
+                 id='validate_removed_registry_alias_is_refused'),
     pytest.param({'STORAGE_CLASS': 'nfs-client'}, None, ('looks like NFS',),
                  id='validate_nfs_storage_refused'),
     pytest.param({'DENSE_DIM': 'not-a-number'}, None, ('DENSE_DIM must be a positive integer',),
@@ -242,12 +248,12 @@ def test_validate_ingest_copresent_readonly_key_fails_closed(tree):
 
 def test_validate_tracing_off_deploys_no_trace_backend_and_explicit_collector_passes_through(tree):
     # OpenObserve is the only bundled backend (#956): off removes it, an
-    # explicit http(s) collector is reported as given, the retired
-    # JAEGER_ENABLED switch has no effect.
+    # explicit http(s) collector is reported as given; the retired
+    # JAEGER_ENABLED switch is refused (#1070), never silently ignored.
     off = _run(tree, {"OTEL_EXPORTER_OTLP_ENDPOINT": "off"})
     assert off.returncode == 0, off.stderr
     assert "Trace backend:     not deployed" in off.stdout
-    ok = _run(tree, {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector.platform:4318", "JAEGER_ENABLED": "false"})
+    ok = _run(tree, {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector.platform:4318"})
     assert ok.returncode == 0, ok.stderr
     assert "Tracing:           ON (http://collector.platform:4318)" in ok.stdout
 
@@ -1286,6 +1292,107 @@ def test_validate_route_manifest_with_matching_pin_passes(tree):
     assert "and the packed bundle" in r.stdout
 
 
+# ----------------------------------------- optional Open WebUI image (#1074)
+
+OWUI_PIN = "sha256:" + "e" * 64
+OWUI_SOURCE = "ghcr.io/yonatan895/qdrant-pdf-rag-openwebui"
+OWUI_REF = f"{OWUI_SOURCE}@{OWUI_PIN}"
+# ADR-0007 E1: the allow-list proxy sidecar pin recorded in images.txt.
+PROXY_REF = ("docker.io/nginxinc/nginx-unprivileged@sha256:"
+             "f5116ed4606f3eb015dd4a8e28cb9b351476dc0ad4bc6e9f93b19cec130cdf03")
+# Independent expectation of the chart's images.openwebui (repository, tag).
+OWUI_CHART_BLOCK = "  openwebui:\n    repository: qdrant-pdf-rag-openwebui\n    tag: v0.12.3-slim\n"
+
+
+def _openwebui_tree(tree, pin=OWUI_PIN):
+    images = tree / "images.txt"
+    images.write_text(re.sub(rf"^({re.escape(OWUI_SOURCE)}:\S+)[ \t]+\S+$",
+                             lambda m: f"{m[1]} {pin}", (REPO / "images.txt").read_text(),
+                             flags=re.MULTILINE))
+    values = tree / "charts/mainframe-rag/values.yaml"
+    text = values.read_text()
+    if not re.search(r"^[ \t]+openwebui:\n[ \t]+repository: qdrant-pdf-rag-openwebui\n", text, re.MULTILINE):
+        values.write_text(text.replace("\nimages:\n", "\nimages:\n" + OWUI_CHART_BLOCK, 1))
+    return tree
+
+
+OWUI_OPERATOR_ENV = {
+    "OPENWEBUI_ENABLED": "true",
+    "OPENWEBUI_SECRET": "owui-secrets",
+    "OPENWEBUI_HOST": "docs.apps.example.internal",
+    "OPENWEBUI_OIDC_PROVIDER_URL": "https://idp.example.internal/.well-known/openid-configuration",
+    "OPENWEBUI_OIDC_CLIENT_ID": "docs-frontend",
+    "OPENWEBUI_OIDC_ALLOWED_ROLES": "staff",
+    "OPENWEBUI_OIDC_ADMIN_ROLES": "docs-admins",
+    "OPENWEBUI_IDP_EGRESS_CIDRS": "10.20.0.0/24",
+}
+
+
+def _openwebui_run(tree, **env):
+    return _run(tree, {**OWUI_OPERATOR_ENV, **env})
+
+
+def test_validate_openwebui_accepts_a_recorded_pin_matching_chart_and_bundle(tree):
+    _openwebui_tree(tree)
+    r = _openwebui_run(tree)
+    assert r.returncode == 0, r.stderr
+    assert "Open WebUI pin recorded; matches the chart" in r.stdout
+    _manifest(tree, f"openwebui: {OWUI_REF}", f"openwebui_proxy: {PROXY_REF}")
+    r = _openwebui_run(tree)
+    assert r.returncode == 0, r.stderr
+    assert "Open WebUI pin recorded; matches the chart and the packed bundle" in r.stdout
+
+
+@pytest.mark.parametrize("key,needle", [
+    ("OPENWEBUI_OIDC_CLIENT_ID", "required inputs are missing: OPENWEBUI_OIDC_CLIENT_ID. Set them, or opt out with OPENWEBUI_ENABLED=false"),
+    ("OPENWEBUI_IDP_EGRESS_CIDRS", "required inputs are missing: OPENWEBUI_IDP_EGRESS_CIDRS. Set them, or opt out with OPENWEBUI_ENABLED=false"),
+    ("OPENWEBUI_SECRET", "OPENWEBUI_SECRET"),
+])
+def test_validate_openwebui_refuses_an_incomplete_selection(tree, key, needle):
+    _openwebui_tree(tree)
+    r = _openwebui_run(tree, **{key: ""})
+    assert r.returncode != 0
+    assert needle in r.stderr
+
+
+def test_validate_openwebui_pending_pin_refused_only_when_enabled(tree):
+    _openwebui_tree(tree, pin="sha256:PENDING")
+    r = _openwebui_run(tree)
+    assert r.returncode != 0
+    assert "OPENWEBUI_ENABLED=true needs the Open WebUI digest recorded in images.txt" in r.stderr
+    off = _run(tree, {"OPENWEBUI_ENABLED": "false"})
+    assert off.returncode == 0, off.stderr
+    assert "Open WebUI pin" not in off.stdout
+
+
+@pytest.mark.parametrize("edit,needle", [
+    (lambda t: (t / "images.txt").write_text((t / "images.txt").read_text().replace(
+        "qdrant-pdf-rag-openwebui:v0.12.3-slim", "qdrant-pdf-rag-openwebui:v0.99.0-slim")),
+     "to match the chart's images.openwebui repository/tag"),
+    (lambda t: _manifest(t), "packed without the Open WebUI image"),
+    (lambda t: _manifest(t, f"openwebui: {OWUI_SOURCE}@sha256:" + "c" * 64),
+     "packed MANIFEST openwebui pin to equal images.txt"),
+    # ADR-0007 E1: the allow-list proxy gets the same three checks.
+    (lambda t: (t / "images.txt").write_text(re.sub(
+        r"^(docker\.io/nginxinc/nginx-unprivileged:\S+)[ \t]+\S+$", r"\1 sha256:PENDING",
+        (t / "images.txt").read_text(), flags=re.MULTILINE)),
+     "allow-list proxy digest (nginx-unprivileged) recorded in images.txt"),
+    (lambda t: (t / "images.txt").write_text((t / "images.txt").read_text().replace(
+        "nginx-unprivileged:1.30.6-alpine", "nginx-unprivileged:1.99.0-alpine")),
+     "to match the chart's images.openwebuiProxy repository/tag"),
+    (lambda t: _manifest(t, f"openwebui: {OWUI_REF}"), "openwebui_proxy entry in the packed MANIFEST"),
+    (lambda t: _manifest(t, f"openwebui: {OWUI_REF}",
+                         "openwebui_proxy: docker.io/nginxinc/nginx-unprivileged@sha256:" + "c" * 64),
+     "packed MANIFEST openwebui_proxy pin to equal images.txt"),
+])
+def test_validate_openwebui_refuses_chart_or_bundle_mismatch(tree, edit, needle):
+    _openwebui_tree(tree)
+    edit(tree)
+    r = _openwebui_run(tree)
+    assert r.returncode != 0
+    assert needle in r.stderr
+
+
 def test_validate_route_live_success(tree):
     _route_tree(tree)
     r = _route_run(tree)
@@ -1350,3 +1457,162 @@ def test_validate_live_unrelated_route_and_owned_route_pass(tree):
     _route_tree(tree)
     r = _route_run(tree, ROUTES_FILE=_routes_file(tree, ("docs", "docs-site"), ("rag-agent", "rag-agent")))
     assert r.returncode == 0, r.stderr
+
+
+def test_validate_openwebui_passes_with_the_seven_inputs_and_no_service_ca_env(tree):
+    """B1: the service CA is fetched by deploy on the live path, so it is not an
+    operator input validate may demand."""
+    _openwebui_tree(tree)
+    env = {**OWUI_OPERATOR_ENV}
+    assert "ROUTE_DESTINATION_CA_FILE" not in env
+    r = _run(tree, env)
+    assert r.returncode == 0, r.stderr
+    assert "ROUTE_DESTINATION_CA_FILE" not in r.stderr
+    assert "Open WebUI pin recorded; matches the chart" in r.stdout
+
+
+def test_validate_openwebui_pending_pin_refusal_names_the_opt_out(tree):
+    _openwebui_tree(tree, pin="sha256:PENDING")
+    r = _openwebui_run(tree)
+    assert r.returncode != 0
+    assert "or opt out with OPENWEBUI_ENABLED=false" in r.stderr
+
+
+# --- Issue #1070 (R1): the stored-layout preflight, with cluster access -------
+
+LAYOUT_KUBECTL = r"""#!/bin/sh
+printf '%s\n' "$*" >> "$TOOL_LOG"
+case "$*" in
+  *'get statefulset/qdrant '*) [ -z "${FAKE_QDRANT_URL:-}" ] || echo statefulset.apps/qdrant ;;
+  *'exec -i deploy/rag-agent -- python3 -c '*)
+    while [ "$1" != "--" ]; do shift; done; shift
+    exec env QDRANT_URL="$FAKE_QDRANT_URL" QDRANT_API_KEY="$FAKE_READ_KEY" "$@" ;;
+esac
+exit 0
+"""
+
+
+@pytest.mark.parametrize("layout", ["legacy", "empty", "fresh"])
+def test_validate_live_reports_the_stored_layout(tree, layout):
+    from tests.helpers_airgap import FakeQdrant
+
+    qdrant = FakeQdrant()
+    try:
+        if layout == "legacy":
+            qdrant.add_collection("mainframe_manuals", [{"id": 1, "vector": {"dense": [0.0] * 4}}])
+        for name in ("kubectl", "oc"):
+            write_stub(tree / "bin" / name, LAYOUT_KUBECTL)
+        extra = {"AIRGAP_DRYRUN": "0", "TOOL_LOG": str(tree / "tool.log"),
+                 "FAKE_READ_KEY": FakeQdrant.READ_KEY}
+        if layout != "fresh":
+            extra["FAKE_QDRANT_URL"] = qdrant.url
+        r = _run(tree, extra)
+    finally:
+        qdrant.close()
+    if layout == "legacy":
+        assert r.returncode != 0
+        assert "E_LEGACY_COLLECTION" in r.stderr
+        assert "retire_legacy.sh --stage copy --confirm mainframe_manuals" in r.stderr
+        assert "SUCCESS" not in r.stdout
+    else:
+        assert r.returncode == 0, r.stderr
+        assert ("fresh install" if layout == "fresh" else "no corpus collection yet") in r.stdout
+    assert FakeQdrant.READ_KEY not in r.stdout + r.stderr + (tree / "tool.log").read_text()
+
+
+# --- Retired airgap.env keys (#1070): silent ignoring becomes a loud refusal ---
+
+
+def _assert_retired_refusal(r, calls, expected):
+    assert r.returncode != 0, r.stdout
+    assert sorted(retired_keys_listed(r.stderr)) == sorted(expected), r.stderr
+    assert "1. Validating" not in r.stdout
+    assert calls == []
+    for value in RETIRED_ENV_VALUES.values():
+        assert value not in r.stdout + r.stderr
+    assert "sentinel-" not in r.stdout + r.stderr
+
+
+def test_validate_refuses_a_d53595e_shaped_env_listing_exactly_the_retired_keys(tree):
+    env = {"AIRGAP_ENV": _write_env_file(tree, D53595E_SHAPED_ENV)}
+    r, calls = _run_with_recording_stubs(tree, env)
+    _assert_retired_refusal(r, calls, RETIRED_ENV_KEYS)
+
+
+@pytest.mark.parametrize("key", RETIRED_ENV_KEYS)
+def test_validate_refuses_each_retired_key_alone(tree, key):
+    r, calls = _run_with_recording_stubs(
+        tree, {"AIRGAP_ENV": _write_env_file(tree, f"{key}={RETIRED_ENV_VALUES[key]}\n")}
+    )
+    _assert_retired_refusal(r, calls, [key])
+
+
+def test_validate_refuses_a_retired_key_from_the_process_environment(tree):
+    r, calls = _run_with_recording_stubs(tree, {"VLLM_BASE_URL": RETIRED_ENV_VALUES["VLLM_BASE_URL"]})
+    _assert_retired_refusal(r, calls, ["VLLM_BASE_URL"])
+
+
+def test_validate_accepts_empty_and_commented_retired_keys_then_refuses_the_filled_one(tree):
+    empty = "".join(f"{key}=\n" for key in RETIRED_ENV_KEYS) + "".join(
+        f"#{key}=x\n" for key in RETIRED_ENV_KEYS
+    )
+    good = _run(tree, {"AIRGAP_ENV": _write_env_file(tree, empty)})
+    assert good.returncode == 0, good.stderr
+    # Next ordinary run: the operator fills one key back in and is refused again.
+    bad = _run(tree, {"AIRGAP_ENV": _write_env_file(tree, empty + "REGISTRY_INTERNAL=x\n")})
+    assert bad.returncode != 0
+    assert retired_keys_listed(bad.stderr) == ["REGISTRY_INTERNAL"]
+
+
+_JAEGER_LINE = "OTEL_EXPORTER_OTLP_ENDPOINT (retired in d7765dc): points at the retired in-cluster Jaeger"
+
+
+@pytest.mark.parametrize("endpoint", [
+    "http://jaeger:4318",
+    "https://jaeger:4318/v1/traces",
+    "http://Jaeger.mainframe-rag.svc:4318",
+    "http://jaeger.mainframe-rag.svc.cluster.local:4318",
+])
+def test_validate_refuses_the_retired_in_cluster_jaeger_endpoint(tree, endpoint):
+    """d53595e's example pointed the exporter at http://jaeger:4318; today any set
+    endpoint means an external collector, so it would silently drop traces."""
+    r, calls = _run_with_recording_stubs(tree, {"OTEL_EXPORTER_OTLP_ENDPOINT": endpoint})
+    assert r.returncode != 0
+    assert _JAEGER_LINE in r.stderr
+    assert "unset it to use the bundled OpenObserve collector, or set your external collector" in r.stderr
+    assert retired_keys_listed(r.stderr) == ["OTEL_EXPORTER_OTLP_ENDPOINT"]
+    assert endpoint not in r.stdout + r.stderr
+    assert calls == []
+
+
+@pytest.mark.parametrize("endpoint", [
+    None,
+    "",
+    "off",
+    "http://collector.platform:4318",
+    "http://jaeger-collector.platform:4318",
+    "http://jaeger.example.com:4318",
+])
+def test_validate_accepts_unset_empty_off_and_external_collectors(tree, endpoint):
+    extra = {} if endpoint is None else {"OTEL_EXPORTER_OTLP_ENDPOINT": endpoint}
+    r = _run(tree, extra)
+    assert r.returncode == 0, r.stderr
+
+
+# --- Site sizing keys (#1070 R2): airgap.env values validate like env values ---
+
+@pytest.mark.parametrize("name,value", [
+    ("QDRANT_DATA_SIZE", "lots"), ("QDRANT_CPU_LIMIT", "1"), ("INGEST_MEMORY_REQUEST", "64Gi"),
+    ("INGEST_CPU_REQUEST", "0"), ("QDRANT_MEMORY_LIMIT", "500m"),
+])
+@pytest.mark.parametrize("source", ["env", "file"])
+def test_validate_refuses_invalid_sizing_from_env_and_airgap_env(tree, name, value, source):
+    if source == "env":
+        r = _run(tree, {name: value})
+    else:
+        env_file = tree / "sizing.env"
+        env_file.write_text(f"{name}={value}\n")  # unexported, as a real airgap.env assignment
+        r = _run(tree, {"AIRGAP_ENV": str(env_file)})
+    assert r.returncode != 0, r.stdout
+    assert name in r.stderr
+    assert value not in r.stderr

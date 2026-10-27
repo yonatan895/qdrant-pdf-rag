@@ -16,6 +16,7 @@ import pytest
 
 from tests.helpers_airgap import (
     REPO,
+    FakeQdrant,
     assert_no_placeholders,
     assert_pull_secret_wired,
     copy_chart,
@@ -24,6 +25,7 @@ from tests.helpers_airgap import (
     rendered_env,
     run_sh,
     set_oauth_proxy_pin,
+    set_openwebui_pin,
     sha256_bytes,
     write_git_identity_stub,
     write_signed_manifest,
@@ -63,6 +65,19 @@ def test_packaging_pr_gate_checks_vendored_qdrant_chart():
 STUB_BIN = """#!/bin/sh
 printf '%s\\n' "$@" >> "$HELM_LOG"
 case "$*" in
+  *'get statefulset/qdrant '*)
+    [ "${{STS_FAIL:-}}" != 1 ] || {{ echo 'dial tcp 10.0.0.1:6443: i/o timeout' >&2; exit 1; }}
+    [ -z "${{FAKE_QDRANT_URL:-}}" ] || echo statefulset.apps/qdrant ;;
+  *'exec -i deploy/rag-agent -- python3 -c '*)
+    [ -n "${{FAKE_QDRANT_URL:-}}" ] && [ "${{EXEC_FAIL:-}}" != 1 ] || {{ echo 'error: container not found' >&2; exit 1; }}
+    while [ "$1" != "--" ]; do shift; done; shift
+    exec env QDRANT_URL="$FAKE_QDRANT_URL" QDRANT_API_KEY="$FAKE_READ_KEY" "$@" ;;
+  *'get statefulset '*'-o json'*)
+    [ "${{LIVE_STS_FAIL:-}}" != 1 ] || exit 1
+    # Answers only the StatefulSet's real name, like a cluster would.
+    case "$*" in *"get statefulset ${{LIVE_STS_NAME:-none}} "*) [ -z "${{LIVE_STS_FILE:-}}" ] || cat "$LIVE_STS_FILE" ;; esac ;;
+  *'get secret -l owner=helm,name='*)
+    [ -z "${{HELM_RELEASE_SECRET:-}}" ] || echo "secret/sh.helm.release.v1.$HELM_RELEASE_SECRET.v1" ;;
   *'rollout status '*)
     [ "${{ROLLOUT_FAIL:-}}" != 1 ] || exit 1 ;;
   'api-resources -o name')
@@ -77,6 +92,17 @@ case "$*" in
   *'get route.route.openshift.io/rag-agent '*'-o json'*)
     [ "${{ROUTE_LIVE_FILE:-}}" != "" ] || exit 1
     cat "$ROUTE_LIVE_FILE" ;;
+  *'get route.route.openshift.io/rag-openwebui '*'-o json'*)
+    [ "${{OWUI_ROUTE_LIVE_FILE:-}}" != "" ] || exit 1
+    cat "$OWUI_ROUTE_LIVE_FILE" ;;
+  *'delete route.route.openshift.io/rag-openwebui'*)
+    [ "${{DELETE_FAIL:-}}" != 1 ] || exit 1 ;;
+  *'admin-api-key'*)
+    printf '%s' "${{OWUI_ADMIN_KEY_B64:-}}" ;;
+  *'exec -i deploy/rag-openwebui '*)
+    tee "${{OWUI_EXEC_STDIN:-/dev/null}}" >/dev/null
+    [ "${{OWUI_EXEC_FAIL:-}}" != 1 ] || {{ echo 'FAIL: docs Pipe provisioning refused: x' >&2; exit 1; }}
+    echo 'docs Pipe installed: Function mainframe_rag_docs active' ;;
   *'get configmap openshift-service-ca.crt'*)
     printf '%s\\n' "${{SERVICE_CA:-}}" ;;
   *'get '*'servicemonitor.monitoring.coreos.com/rag-agent '*)
@@ -152,6 +178,7 @@ def _run(tree, *extra_env):
         "DENSE_DIM": "64",
         "EMBED_MODEL_REVISION": "rev-1",
         "EMBED_BASE_URL": "http://vllm:8000/v1",
+        "OPENWEBUI_ENABLED": "false",  # default-on (ADR-0008): fixtures opt out explicitly
         "SKOPEO_REGISTRY": str(tmp_path / "registry"),
         "PODS_FILE": str(tmp_path / "pods.json"),
     }
@@ -207,6 +234,7 @@ def test_model_budget_operator_precedence_reaches_rendered_pod(tree, source):
         "STORAGE_CLASS": "standard", "IMAGE_SHA": IMAGE_SHA,
         "EMBED_MODEL": "embed", "DENSE_DIM": "64", "EMBED_MODEL_REVISION": "rev-1",
         "EMBED_BASE_URL": "http://vllm:8000/v1",
+        "OPENWEBUI_ENABLED": "false",  # default-on (ADR-0008): fixtures opt out explicitly
         **(selected if source == "file" else alternate),
     }
     env_file = root / "airgap.env"
@@ -1135,9 +1163,9 @@ def test_invalid_shared_gateway_key_refuses_before_commands(tree, key, secret):
 # --------------------------------- Decoupled backends (issue #529 OBS-2)
 
 
-def test_retired_jaeger_switch_is_ignored_and_external_collector_passes_through(tree):
-    # #956: OpenObserve is the only bundled backend; JAEGER_ENABLED is gone.
-    r = _run(tree, ("JAEGER_ENABLED", "false"), ("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector.platform:4318"))
+def test_external_collector_passes_through(tree):
+    # #956: OpenObserve is the only bundled backend; JAEGER_ENABLED is refused (#1070).
+    r = _run(tree, ("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector.platform:4318"))
     assert r.returncode == 0, r.stderr
     values = (tree[0] / "dist" / "mainframe-rag-release-values.yaml").read_text()
     assert 'endpoint: "http://collector.platform:4318"' in values
@@ -1276,6 +1304,121 @@ def test_other_route_alternate_backend_to_qdrant_refuses(tree):
     assert r.returncode != 0
     assert "Route docs exposes" in r.stderr
     assert "upgrade" not in _helm_log(tree)
+
+
+# ------------------------------------------- Open WebUI front end (#1074)
+
+OWUI_HOST = "docs.apps.example.internal"
+OWUI_PIPE = "class Pipe:\n    pass\n"
+OWUI_ENV = (
+    ("OPENWEBUI_ENABLED", "true"), ("OPENWEBUI_SECRET", "owui-secrets"),
+    ("OPENWEBUI_HOST", OWUI_HOST),
+    ("OPENWEBUI_OIDC_PROVIDER_URL", "https://idp.example.internal/.well-known/openid-configuration"),
+    ("OPENWEBUI_OIDC_CLIENT_ID", "docs-frontend"), ("OPENWEBUI_OIDC_ALLOWED_ROLES", "staff"),
+    ("OPENWEBUI_OIDC_ADMIN_ROLES", "docs-admins"), ("OPENWEBUI_IDP_EGRESS_CIDRS", "10.20.0.0/24"),
+    ("SERVICE_CA", SERVICE_CA),
+)
+OWUI_ADMIN_KEY = "sk-synthetic-admin"
+
+
+def _owui_route(*, host=OWUI_HOST, **kw):
+    route = _route("rag-openwebui", **{"to": "rag-openwebui", "port": "https", **kw})
+    route["spec"]["host"] = host
+    return route
+
+
+def _owui_deploy(tree, *extra, live=None, admin_key=True):
+    import base64
+
+    root = tree[0]
+    set_openwebui_pin(root, GOOD_PIN)
+    pipe = root / "charts" / "mainframe-rag" / "files" / "openwebui" / "docs_pipe.py"
+    pipe.write_text(OWUI_PIPE)
+    env = [*OWUI_ENV, ("OWUI_ROUTE_LIVE_FILE", live or _write_json(tree, "owui-route.json", _owui_route())),
+           ("OWUI_EXEC_STDIN", str(root / "exec-stdin.txt"))]
+    if admin_key:
+        env.append(("OWUI_ADMIN_KEY_B64", base64.b64encode(OWUI_ADMIN_KEY.encode()).decode()))
+    return _run(tree, *env, *extra)
+
+
+def test_openwebui_enabled_deploy_renders_verifies_and_installs_the_pipe(tree):
+    import hashlib
+
+    r = _owui_deploy(tree)
+    assert r.returncode == 0, r.stderr
+    rendered = (tree[0] / "dist/agent-rendered.yaml").read_text()
+    for name in ("Deployment", "Route", "NetworkPolicy", "ConfigMap"):
+        assert re.search(rf"kind: {name}\n(?:.*\n){{0,3}}  name: rag-openwebui", rendered), name
+    # Stored content: the Route carries the namespace CA read from the cluster.
+    assert "U0VSVklDRS1DQQ==" in rendered and f'host: "{OWUI_HOST}"' in rendered
+    assert "Route rag-openwebui verified" in r.stdout
+    log = _helm_log(tree)
+    assert "deploy/rag-openwebui" in log
+    assert log.index("deploy/rag-openwebui") > log.index("upgrade")
+    # The installer runs with the repository Pipe hash; the key reaches it on
+    # stdin only, never argv or output.
+    sha = hashlib.sha256(OWUI_PIPE.encode()).hexdigest()
+    assert f"python3\n/opt/mainframe-rag/openwebui/provision_pipe.py\n{sha}" in log
+    assert (tree[0] / "exec-stdin.txt").read_text() == OWUI_ADMIN_KEY
+    assert OWUI_ADMIN_KEY not in log and OWUI_ADMIN_KEY not in r.stdout + r.stderr
+    assert "docs Pipe installed" in r.stdout
+
+
+def test_openwebui_without_an_admin_key_says_the_pipe_is_not_installed(tree):
+    r = _owui_deploy(tree, admin_key=False)
+    assert r.returncode == 0, r.stderr
+    assert "docs Pipe NOT installed" in r.stdout
+    assert "exec" not in _helm_log(tree).split()
+
+
+def test_openwebui_installer_refusal_fails_the_deploy(tree):
+    r = _owui_deploy(tree, ("OWUI_EXEC_FAIL", "1"))
+    assert r.returncode != 0
+    assert "docs Pipe was not installed" in r.stderr
+
+
+def test_openwebui_missing_secret_key_refuses_before_mutation(tree):
+    r = _owui_deploy(tree, ("MISSING_KEY", "oidc-client-secret"))
+    assert r.returncode != 0
+    assert "oidc-client-secret" in r.stderr
+    assert "upgrade" not in _helm_log(tree)
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_other_routes_to_openwebui_refuse_before_any_mutation(tree, enabled):
+    routes = _route_list(tree, _route("shortcut", to="rag-openwebui", port="https"))
+    r = (_owui_deploy(tree, ("ROUTES_FILE", routes)) if enabled
+         else _run(tree, ("ROUTES_FILE", routes)))
+    assert r.returncode != 0
+    assert "Route shortcut exposes a protected Service" in r.stderr
+    assert "upgrade" not in _helm_log(tree)
+
+
+@pytest.mark.parametrize("drift", [{"port": "http"}, {"termination": "edge"},
+                                   {"alternates": ("rag-agent",)}, {"host": "other.example"}])
+def test_openwebui_route_not_converged_after_release_is_deleted_and_fails(tree, drift):
+    live = _write_json(tree, "owui-route.json", _owui_route(**drift))
+    r = _owui_deploy(tree, live=live)
+    assert r.returncode != 0
+    assert "Route rag-openwebui did not converge" in r.stderr
+    log = _helm_log(tree)
+    assert log.index("delete\nroute.route.openshift.io/rag-openwebui") > log.index("upgrade")
+
+
+def test_openwebui_incompatible_owned_route_is_retired_before_the_release(tree):
+    routes = _route_list(tree, _owui_route(termination="edge"))
+    r = _owui_deploy(tree, ("ROUTES_FILE", routes))
+    assert r.returncode == 0, r.stderr
+    log = _helm_log(tree)
+    assert log.index("delete\nroute.route.openshift.io/rag-openwebui") < log.index("upgrade")
+
+
+def test_openwebui_off_renders_and_runs_nothing_of_it(tree):
+    r = _run(tree)
+    assert r.returncode == 0, r.stderr
+    assert "rag-openwebui" not in (tree[0] / "dist/agent-rendered.yaml").read_text()
+    assert "rag-openwebui" not in _helm_log(tree)
+    assert "Open WebUI front end off" in r.stdout
 
 
 def test_unrelated_routes_do_not_block_the_deploy(tree):
@@ -1912,3 +2055,353 @@ def test_openobserve_password_length_counts_characters_not_bytes(tree, password,
         assert "E_OPENOBSERVE_WEAK_PASSWORD" in r.stderr
         assert password not in r.stdout + r.stderr
         assert _mutations(tree) == []
+
+
+# --- Issue #1070 (R1): stored-layout preflight before any cluster change -----
+
+
+@pytest.fixture
+def qdrant():
+    fake = FakeQdrant()
+    yield fake
+    fake.close()
+
+
+def _layout_env(qdrant, *extra):
+    return (("FAKE_QDRANT_URL", qdrant.url), ("FAKE_READ_KEY", FakeQdrant.READ_KEY), *extra)
+
+
+def _bound_alias(qdrant, *, bound=True):
+    from mainframe_rag.ingest.publish import publication_metadata_point_id
+
+    gen = "mainframe_manuals__gen1"
+    qdrant.add_collection(gen, [{"id": 1, "vector": {"dense": [0.0] * 4}}])
+    payload = {"record_type": "publication-metadata", "target_collection": gen + "__completions"}
+    if bound:
+        payload.update(build_schema=3, build_id="b1", logical_alias="mainframe_manuals", data_collection=gen)
+    qdrant.add_collection(gen + "__completions", [
+        {"id": publication_metadata_point_id(gen + "__completions"), "vector": {"dense": [0.0] * 4},
+         "payload": payload}])
+    qdrant.aliases["mainframe_manuals"] = gen
+
+
+def _first_mutation_free(tree):
+    log = _helm_log(tree)
+    assert "upgrade" not in log.split() and "new-project" not in log
+    assert not re.search(r"^(create|delete|apply)$", log, re.MULTILINE), log
+
+
+def test_legacy_plain_collection_refuses_before_any_mutation(tree, qdrant):
+    qdrant.add_collection("mainframe_manuals", [{"id": 1, "vector": {"dense": [0.0] * 4}}])
+    qdrant.add_collection("mainframe_manuals__completions", [])
+    result = _run(tree, *_layout_env(qdrant))
+    assert result.returncode != 0
+    assert "E_LEGACY_COLLECTION" in result.stderr
+    assert "retire_legacy.sh --stage copy --confirm mainframe_manuals" in result.stderr
+    assert "install_and_ops.md#upgrade-from-a-legacy-flat-collection-issue-1070" in result.stderr
+    _first_mutation_free(tree)
+    assert _mutations(tree) == []
+    # Read-only probe with the pod's serving key; no key in any output.
+    assert all(op.split(":")[0] in ("aliases_get", "exists") for op in qdrant.ops), qdrant.ops
+    for text in (result.stdout, result.stderr, _helm_log(tree)):
+        assert FakeQdrant.READ_KEY not in text
+
+
+def test_alias_published_layout_passes_and_deploys(tree, qdrant):
+    _bound_alias(qdrant)
+    result = _run(tree, *_layout_env(qdrant))
+    assert result.returncode == 0, result.stderr
+    assert "Stored layout: mainframe_manuals is an alias" in result.stdout
+    assert "upgrade" in _helm_log(tree)
+
+
+def test_unbound_alias_refuses_before_any_mutation(tree, qdrant):
+    _bound_alias(qdrant, bound=False)
+    result = _run(tree, *_layout_env(qdrant))
+    assert result.returncode != 0
+    assert "E_UNBOUND_PUBLICATION" in result.stderr
+    assert _mutations(tree) == []
+
+
+def test_fresh_install_without_qdrant_passes(tree):
+    result = _run(tree)
+    assert result.returncode == 0, result.stderr
+    assert "no Qdrant release qdrant yet (fresh install)" in result.stdout
+
+
+def test_empty_store_passes(tree, qdrant):
+    result = _run(tree, *_layout_env(qdrant))
+    assert result.returncode == 0, result.stderr
+    assert "no corpus collection yet" in result.stdout
+
+
+@pytest.mark.parametrize("failure", ["aliases", "exec", "statefulset"])
+def test_unreadable_layout_refuses_rather_than_passes(tree, qdrant, failure):
+    qdrant.add_collection("mainframe_manuals", [{"id": 1, "vector": {"dense": [0.0] * 4}}])
+    extra = {"aliases": (), "exec": (("EXEC_FAIL", "1"),), "statefulset": (("STS_FAIL", "1"),)}[failure]
+    if failure == "aliases":
+        qdrant.faults["aliases_get"] = 5
+    result = _run(tree, *_layout_env(qdrant, *extra))
+    assert result.returncode != 0
+    assert "E_LAYOUT_UNVERIFIED" in result.stderr
+    assert "i/o timeout" not in result.stderr and "container not found" not in result.stderr
+    assert _mutations(tree) == []
+
+
+def test_rolled_back_layout_refuses_with_the_reopen_step(tree, qdrant):
+    qdrant.add_collection("mainframe_manuals_d53595e_keep", [{"id": 1, "vector": {"dense": [0.0] * 4}}])
+    qdrant.aliases["mainframe_manuals"] = "mainframe_manuals_d53595e_keep"
+    result = _run(tree, *_layout_env(qdrant))
+    assert result.returncode != 0
+    assert "E_ROLLED_BACK" in result.stderr
+    assert "retire_legacy.sh --stage retire --confirm mainframe_manuals" in result.stderr
+    assert _mutations(tree) == []
+
+
+# --- #1070 R2: first-class site sizing for the Qdrant release ----------------
+
+QDRANT_SIZING = {
+    "QDRANT_DATA_SIZE": "40Gi", "QDRANT_SNAPSHOT_SIZE": "60Gi",
+    "QDRANT_CPU_REQUEST": "1500m", "QDRANT_MEMORY_REQUEST": "5Gi",
+    "QDRANT_CPU_LIMIT": "3", "QDRANT_MEMORY_LIMIT": "7Gi",
+}
+QDRANT_SIZING_HELM_KEYS = {
+    "QDRANT_DATA_SIZE": "persistence.size", "QDRANT_SNAPSHOT_SIZE": "snapshotPersistence.size",
+    "QDRANT_CPU_REQUEST": "resources.requests.cpu", "QDRANT_MEMORY_REQUEST": "resources.requests.memory",
+    "QDRANT_CPU_LIMIT": "resources.limits.cpu", "QDRANT_MEMORY_LIMIT": "resources.limits.memory",
+}
+
+
+def _upgrade_args(tree):
+    args = _helm_log(tree).splitlines()
+    return args[args.index("upgrade"):]
+
+
+def test_default_deploy_passes_no_sizing_values_to_qdrant(tree):
+    """Unset sizing keys leave the prod values file in charge: byte-identical render."""
+    r = _run(tree)
+    assert r.returncode == 0, r.stderr
+    upgrade = _upgrade_args(tree)
+    for helm_key in QDRANT_SIZING_HELM_KEYS.values():
+        assert not any(a.startswith(helm_key + "=") for a in upgrade), helm_key
+
+
+def test_each_qdrant_sizing_key_reaches_helm_as_a_literal_string(tree):
+    r = _run(tree, *QDRANT_SIZING.items())
+    assert r.returncode == 0, r.stderr
+    upgrade = _upgrade_args(tree)
+    for key, helm_key in QDRANT_SIZING_HELM_KEYS.items():
+        assignment = f"{helm_key}={QDRANT_SIZING[key]}"
+        assert upgrade[upgrade.index(assignment) - 1] == "--set-string", key
+
+
+def test_specific_qdrant_size_keys_win_over_the_rehearsal_storage_size(tree):
+    r = _run(tree, ("QDRANT_STORAGE_SIZE", "1Gi"), ("QDRANT_DATA_SIZE", "40Gi"), ("CI_REHEARSAL", "1"))
+    assert r.returncode == 0, r.stderr
+    upgrade = _upgrade_args(tree)
+    assert upgrade.index("persistence.size=40Gi") > upgrade.index("persistence.size=1Gi")
+    assert "snapshotPersistence.size=1Gi" in upgrade
+
+
+@pytest.mark.parametrize("name,value", [
+    ("QDRANT_DATA_SIZE", "lots"), ("QDRANT_DATA_SIZE", "0Gi"), ("QDRANT_DATA_SIZE", "40Gi,service.type=LoadBalancer"),
+    ("QDRANT_SNAPSHOT_SIZE", "40"), ("QDRANT_SNAPSHOT_SIZE", "40GB"),
+    ("QDRANT_CPU_REQUEST", "4Gi"), ("QDRANT_CPU_REQUEST", "0"), ("QDRANT_CPU_LIMIT", "x=1"),
+    ("QDRANT_MEMORY_REQUEST", "500m"), ("QDRANT_MEMORY_REQUEST", "16"), ("QDRANT_MEMORY_LIMIT", "-1Gi"),
+    ("QDRANT_CPU_LIMIT", "3"),          # default request is 4: limit below request
+    ("QDRANT_MEMORY_LIMIT", "8Gi"),     # default request is 16Gi
+    ("QDRANT_CPU_REQUEST", "9"),        # default limit is 8
+    ("QDRANT_MEMORY_REQUEST", "33Gi"),  # default limit is 32Gi
+])
+def test_invalid_qdrant_sizing_is_refused_before_any_helm_call(tree, name, value):
+    r = _run(tree, (name, value))
+    assert r.returncode != 0, r.stdout
+    assert name in r.stderr
+    assert value not in r.stderr
+    assert "upgrade" not in _helm_log(tree) and "template" not in _helm_log(tree)
+
+
+def test_a_limit_below_an_explicit_request_is_refused(tree):
+    r = _run(tree, ("QDRANT_CPU_REQUEST", "2"), ("QDRANT_CPU_LIMIT", "1500m"))
+    assert r.returncode != 0
+    assert "QDRANT_CPU_LIMIT" in r.stderr and "QDRANT_CPU_REQUEST" in r.stderr
+    assert "upgrade" not in _helm_log(tree)
+
+
+def test_overlay_outside_ci_names_the_sizing_keys_to_use(tree):
+    """The free-form overlay stays CI-only; a site is told which keys replace it."""
+    vals = tree[0] / "vals.yaml"
+    vals.write_text("resources: {}\n")
+    r = _run(tree, ("QDRANT_EXTRA_VALUES", str(vals)))
+    assert r.returncode != 0
+    assert "QDRANT_EXTRA_VALUES is a CI-rehearsal override" in r.stderr
+    for key in QDRANT_SIZING:
+        assert key in r.stderr, key
+    assert "upgrade" not in _helm_log(tree)
+
+
+def _qdrant_statefulset(rendered: str) -> dict:
+    import yaml
+
+    for doc in yaml.safe_load_all(rendered):
+        if doc and doc.get("kind") == "StatefulSet":
+            return doc
+    raise AssertionError("no StatefulSet in the Qdrant render")
+
+
+def _sizing_projection(rendered: str) -> dict:
+    """Only the resources and storage-size fields: never anything else."""
+    sts = _qdrant_statefulset(rendered)
+    return {
+        "resources": {c["name"]: c.get("resources") for c in sts["spec"]["template"]["spec"]["containers"]},
+        "claims": {t["metadata"]["name"]: t["spec"]["resources"]["requests"]["storage"]
+                   for t in sts["spec"].get("volumeClaimTemplates", [])},
+    }
+
+
+def test_sizing_keys_render_what_the_free_form_overlay_rendered(tmp_path):
+    """The key proof: a site's overlay and the new keys give the same sizes."""
+    import os
+
+    helm = shutil.which("helm")
+    assert helm, "pinned Helm is required"
+    chart = next(REPO.glob("charts/qdrant-*.tgz"))
+    base = ["template", "q", str(chart), "-n", "ns", "-f", str(REPO / "charts/qdrant-openshift.values.yaml")]
+    overlay = tmp_path / "overlay.yaml"
+    overlay.write_text(
+        "persistence: {size: 40Gi}\nsnapshotPersistence: {size: 60Gi}\n"
+        "resources:\n  requests: {cpu: 1500m, memory: 5Gi}\n  limits: {cpu: '3', memory: 7Gi}\n")
+    old = subprocess.run([helm, *base, "-f", str(overlay)], capture_output=True, text=True, check=True).stdout
+    env = {**os.environ, **QDRANT_SIZING}
+    sets = subprocess.run(
+        ["python3", "scripts/airgap/model_config.py", "--qdrant-sizing"],
+        capture_output=True, text=True, check=True, cwd=REPO, env=env).stdout.split()
+    args = [a for s in sets for a in ("--set-string", s)]
+    new = subprocess.run([helm, *base, *args], capture_output=True, text=True, check=True).stdout
+    default = subprocess.run([helm, *base], capture_output=True, text=True, check=True).stdout
+    assert _sizing_projection(new) == _sizing_projection(old)
+    assert _sizing_projection(new) != _sizing_projection(default)
+    def non_secret(text):  # the chart generates random API keys on every render
+        import yaml
+
+        docs = [d for d in yaml.safe_load_all(text) if d and d.get("kind") != "Secret"]
+        for d in docs:  # checksum annotations hash the random Secret
+            if d["kind"] == "StatefulSet":
+                d["spec"]["template"]["metadata"].pop("annotations", None)
+        return docs
+
+    assert non_secret(new) == non_secret(old), "every resource is identical, not only the sizing fields"
+
+
+# --- #1070 R2: StatefulSet volume sizes are immutable ------------------------
+
+def _live_statefulset(tree, data="500Gi", snapshots="500Gi", name="qdrant"):
+    import json
+
+    path = tree[0] / "live-sts.json"
+    path.write_text(json.dumps({"spec": {"volumeClaimTemplates": [
+        {"metadata": {"name": "qdrant-storage"}, "spec": {"resources": {"requests": {"storage": data}}}},
+        {"metadata": {"name": "qdrant-snapshots"}, "spec": {"resources": {"requests": {"storage": snapshots}}}},
+    ]}}))
+    return ("LIVE_STS_FILE", str(path)), ("LIVE_STS_NAME", name)
+
+
+def _mutations_before_refusal(tree):
+    log = _helm_log(tree)
+    return [w for w in ("upgrade", "create", "new-project", "delete") if w in log.split()]
+
+
+def test_a_changed_qdrant_volume_size_is_refused_before_any_change(tree):
+    r = _run(tree, *_live_statefulset(tree, data="40Gi", snapshots="60Gi"), ("QDRANT_DATA_SIZE", "50Gi"),
+             ("QDRANT_SNAPSHOT_SIZE", "60Gi"))
+    assert r.returncode != 0
+    assert "QDRANT_DATA_SIZE" in r.stderr and "immutable" in r.stderr
+    assert "QDRANT_SNAPSHOT_SIZE" not in r.stderr, "only the mismatching volume is named"
+    assert "50Gi" not in r.stderr and "40Gi" not in r.stderr
+    assert _mutations_before_refusal(tree) == []
+
+
+def test_default_sizes_against_a_site_sized_statefulset_are_refused(tree):
+    """Forgetting the keys on a later upgrade must not fall back to 500Gi silently."""
+    r = _run(tree, *_live_statefulset(tree, data="40Gi", snapshots="60Gi"))
+    assert r.returncode != 0
+    assert "QDRANT_DATA_SIZE" in r.stderr and "QDRANT_SNAPSHOT_SIZE" in r.stderr
+    assert _mutations_before_refusal(tree) == []
+
+
+def test_equal_sizes_in_another_unit_pass(tree):
+    r = _run(tree, *_live_statefulset(tree, data="40Gi", snapshots="61440Mi"), ("QDRANT_DATA_SIZE", "40960Mi"),
+             ("QDRANT_SNAPSHOT_SIZE", "60Gi"))
+    assert r.returncode == 0, r.stderr
+
+
+def test_no_existing_statefulset_or_default_match_passes(tree):
+    assert _run(tree).returncode == 0
+    assert _run(tree, *_live_statefulset(tree)).returncode == 0
+
+
+def test_an_unreadable_statefulset_is_refused(tree):
+    r = _run(tree, ("LIVE_STS_FAIL", "1"))
+    assert r.returncode != 0
+    assert "cannot read the existing Qdrant StatefulSet" in r.stderr
+    assert _mutations_before_refusal(tree) == []
+
+
+# --- Retired airgap.env keys (#1070) ---
+
+
+def test_deploy_refuses_a_d53595e_shaped_env_before_any_cluster_call(tree):
+    from tests.helpers_airgap import D53595E_SHAPED_ENV, RETIRED_ENV_KEYS, retired_keys_listed
+
+    env_file = tree[0] / "d53595e.env"
+    env_file.write_text(D53595E_SHAPED_ENV)
+    r = _run(tree, ("AIRGAP_ENV", str(env_file)))
+    assert r.returncode != 0, r.stdout
+    assert sorted(retired_keys_listed(r.stderr)) == sorted(RETIRED_ENV_KEYS), r.stderr
+    assert "sentinel-" not in r.stdout + r.stderr
+    log = tree[1]
+    assert not log.exists() or log.read_text() == ""
+    assert not ((tree[0]) / "dist").exists() or not list((tree[0] / "dist").glob("*rendered*"))
+
+
+@pytest.mark.parametrize(("release", "name"), [("rag-qdrant", "rag-qdrant"), ("vectors", "vectors-qdrant")])
+def test_layout_preflight_reads_the_chart_named_statefulset(tree, release, name):
+    result = _run(tree, ("QDRANT_RELEASE", release))
+    assert f"statefulset/{name}" in _helm_log(tree).split("\n")
+    assert result.returncode == 0, result.stderr
+
+
+def test_a_release_named_qdrant_is_checked_under_the_chart_fullname(tree):
+    """d53595e shape: the release name contains "qdrant", so the chart names the
+    StatefulSet after the release alone (not `<release>-qdrant`). Sizes differ:
+    refuse with zero helm upgrade and no cluster mutation."""
+    r = _run(tree, ("QDRANT_RELEASE", "qdrant"), *_live_statefulset(tree, data="40Gi", snapshots="60Gi", name="qdrant"))
+    assert r.returncode != 0
+    assert "QDRANT_DATA_SIZE" in r.stderr and "immutable" in r.stderr
+    assert _mutations_before_refusal(tree) == []
+    assert "get namespace" not in _helm_log(tree) or "create" not in _helm_log(tree)
+
+
+def test_another_release_name_resolves_its_own_statefulset_name(tree):
+    r = _run(tree, ("QDRANT_RELEASE", "vec"), *_live_statefulset(tree, data="40Gi", snapshots="60Gi", name="vec-qdrant"))
+    assert r.returncode != 0 and "immutable" in r.stderr
+
+
+def test_an_existing_release_without_its_statefulset_is_refused(tree):
+    r = _run(tree, ("HELM_RELEASE_SECRET", "qdrant"))
+    assert r.returncode != 0
+    assert "StatefulSet was not found" in r.stderr
+    assert _mutations_before_refusal(tree) == []
+
+
+def test_a_fresh_install_without_release_or_statefulset_passes(tree):
+    assert _run(tree).returncode == 0
+
+
+def test_layout_preflight_refuses_a_release_without_its_statefulset(tree):
+    """Same fresh-install rule as the #1113 volume check: a Helm release record
+    without its StatefulSet is not a fresh install."""
+    result = _run(tree, ("HELM_RELEASE_SECRET", "qdrant"))
+    assert result.returncode != 0
+    assert "E_LAYOUT_UNVERIFIED" in result.stderr and "StatefulSet was not found" in result.stderr
+    assert _mutations(tree) == []

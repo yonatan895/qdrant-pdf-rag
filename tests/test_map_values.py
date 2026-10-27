@@ -13,6 +13,7 @@ only); the helm round-trip skips without helm.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -28,7 +29,17 @@ CHART = REPO / "charts" / "mainframe-rag"
 
 IMAGE_SHA = "a" * 40
 
+OPENWEBUI_KEYS = [
+    "OPENWEBUI_ENABLED", "OPENWEBUI_SECRET", "OPENWEBUI_HOST", "OPENWEBUI_RETENTION_DAYS",
+    "OPENWEBUI_STORAGE_SIZE", "OPENWEBUI_OIDC_PROVIDER_URL", "OPENWEBUI_OIDC_CLIENT_ID",
+    "OPENWEBUI_OIDC_GROUP_CLAIM", "OPENWEBUI_OIDC_ROLES_CLAIM", "OPENWEBUI_OIDC_ALLOWED_ROLES",
+    "OPENWEBUI_OIDC_ADMIN_ROLES", "OPENWEBUI_IDP_EGRESS_CIDRS", "OPENWEBUI_IDP_EGRESS_PORT",
+    "ROUTE_DESTINATION_CA_FILE", "IMAGE_DIGEST_OPENWEBUI", "IMAGE_DIGEST_OPENWEBUI_PROXY",
+    "OPENWEBUI_IDP_CA_FILE", "OPENWEBUI_OIDC_SCOPES", "OPENWEBUI_OIDC_EMAIL_CLAIM",
+    "OPENWEBUI_OIDC_USERNAME_CLAIM",
+]
 MAPPER_KEYS = [
+    *OPENWEBUI_KEYS,
     "INTERNAL_REGISTRY", "REGISTRY_INTERNAL", "NAMESPACE", "OPENSHIFT_NAMESPACE",
     "QDRANT_RELEASE", "IMAGE_SHA", "EMBED_BASE_URL", "VLLM_BASE_URL",
     "EMBED_MODEL", "DENSE_DIM", "EMBED_MODEL_REVISION",
@@ -46,6 +57,9 @@ MAPPER_KEYS = [
     "FEEDBACK_ENABLED", "FEEDBACK_SECRET", "FEEDBACK_STORAGE_SIZE", "FEEDBACK_RETENTION_DAYS",
     "IMAGE_DIGEST_AGENT", "IMAGE_DIGEST_INGEST", "IMAGE_DIGEST_OPENOBSERVE", "IMAGE_DIGEST_OTELCOL", "IMAGE_DIGEST_OAUTH_PROXY",
     "STORAGE_CLASS", "CORPUS_PVC", "INGEST_WORKERS", "INGEST_WORK_SIZE",
+    "INGEST_CPU_REQUEST", "INGEST_MEMORY_REQUEST", "INGEST_CPU_LIMIT", "INGEST_MEMORY_LIMIT",
+    "QDRANT_DATA_SIZE", "QDRANT_SNAPSHOT_SIZE", "QDRANT_CPU_REQUEST", "QDRANT_MEMORY_REQUEST",
+    "QDRANT_CPU_LIMIT", "QDRANT_MEMORY_LIMIT",
     "INGEST_ALIAS_PUBLISH", "INGEST_REINGEST", "INGEST_RETIRE_DOCS",
     "INGEST_AUTHORIZE_FROM_CATALOG",
     "CONTEXTUAL_EMBED_ENABLED", "CONTEXT_LLM_BASE_URL", "CONTEXT_LLM_MODEL",
@@ -62,6 +76,7 @@ BASE_ENV = {
     "DENSE_DIM": "768",
     "EMBED_MODEL_REVISION": "rev-1",
     "STORAGE_CLASS": "standard",
+    "OPENWEBUI_ENABLED": "false",  # default-on (ADR-0008): base mapping opts out explicitly
     "QDRANT_SHARD_NUMBER": "6",
     "QDRANT_REPLICATION_FACTOR": "3",
     "QDRANT_WRITE_CONSISTENCY_FACTOR": "2",
@@ -124,17 +139,22 @@ def test_full_mapping_table(mapper_env):
     assert v["replicaCount"] == 2
 
 
-def test_removed_legacy_env_names_are_not_honored(monkeypatch, mapper_env):
-    """The removed aliases no longer stand in for the current inputs: a
-    VLLM_BASE_URL origin never supplies the embedding URL, and
-    REGISTRY_INTERNAL never supplies the registry."""
+def test_removed_legacy_env_names_are_refused_not_ignored(monkeypatch, mapper_env):
+    """The removed aliases never stand in for the current inputs; since #1070
+    setting one refuses with its migration instead of failing later (or not at
+    all) on the missing replacement."""
     monkeypatch.delenv("EMBED_BASE_URL")
     monkeypatch.setenv("VLLM_BASE_URL", "http://vllm:8000/v1")
     r, _ = mapper_env()
-    assert r.returncode != 0 and "EMBED_BASE_URL is required" in r.stderr
+    assert r.returncode != 0 and "VLLM_BASE_URL (retired in 547d04d)" in r.stderr
+    monkeypatch.delenv("VLLM_BASE_URL")
     monkeypatch.setenv("EMBED_BASE_URL", "http://vllm:8000/v1")
     monkeypatch.delenv("INTERNAL_REGISTRY", raising=False)
     monkeypatch.setenv("REGISTRY_INTERNAL", "old.example:5000")
+    r, _ = mapper_env()
+    assert r.returncode != 0 and "REGISTRY_INTERNAL (retired in 547d04d)" in r.stderr
+    assert "old.example" not in r.stderr
+    monkeypatch.delenv("REGISTRY_INTERNAL")
     r, _ = mapper_env()
     assert r.returncode != 0 and "INTERNAL_REGISTRY is not set" in r.stderr
 
@@ -699,10 +719,9 @@ def test_monitor_for_disabled_metrics_fails_closed(monkeypatch, mapper_env):
     assert "SERVICEMONITOR_ENABLED=true requires METRICS_ENABLED=true" in r.stderr
 
 
-def test_retired_jaeger_switch_is_ignored(monkeypatch, mapper_env):
-    """#956: JAEGER_ENABLED no longer selects or refuses anything; tracing
-    follows OTEL_EXPORTER_OTLP_ENDPOINT alone and no Jaeger key is emitted."""
-    monkeypatch.setenv("JAEGER_ENABLED", "false")
+def test_tracing_follows_the_endpoint_alone_and_emits_no_jaeger_key(mapper_env):
+    """#956: tracing follows OTEL_EXPORTER_OTLP_ENDPOINT alone and no Jaeger
+    key is emitted (JAEGER_ENABLED itself is refused, #1070)."""
     r, out = mapper_env()
     assert r.returncode == 0, r.stderr
     v = load_values(out)
@@ -924,6 +943,247 @@ def test_feedback_mapper_to_helm_round_trip(monkeypatch, mapper_env, tmp_path):
     assert ("ServiceMonitor", "rag-feedback") in docs and ("NetworkPolicy", "rag-feedback-ingress") in docs
 
 
+# ------------------------------------------- Open WebUI front end (#1074)
+
+OWUI_ON = {
+    "OPENWEBUI_ENABLED": "true", "OPENWEBUI_SECRET": "owui-secrets",
+    "OPENWEBUI_HOST": "docs.apps.example.internal",
+    "OPENWEBUI_OIDC_PROVIDER_URL": "https://idp.example.internal/realms/x/.well-known/openid-configuration",
+    "OPENWEBUI_OIDC_CLIENT_ID": "docs-frontend", "OPENWEBUI_OIDC_ALLOWED_ROLES": "staff",
+    "OPENWEBUI_OIDC_ADMIN_ROLES": "docs-admins", "OPENWEBUI_IDP_EGRESS_CIDRS": "10.20.0.0/24, 10.21.0.8/32",
+}
+OWUI_CA = "-----BEGIN CERTIFICATE-----\nT1dVSS1DQQ==\n-----END CERTIFICATE-----\n"
+
+
+def _owui_env(monkeypatch, tmp_path, **extra):
+    ca = tmp_path / "service-ca.crt"
+    ca.write_text(OWUI_CA)
+    for key, value in {**OWUI_ON, "ROUTE_DESTINATION_CA_FILE": str(ca), **extra}.items():
+        monkeypatch.setenv(key, value)
+
+
+def test_openwebui_opt_out_renders_only_the_explicit_off_switch(mapper_env):
+    """OPENWEBUI_ENABLED=false (the base env) reaches the chart as enabled=false:
+    the chart default is on, so the opt-out must be written, and nothing else
+    of the front end (image, route CA, inputs) is emitted (K1)."""
+    r, out = mapper_env()
+    assert r.returncode == 0, r.stderr
+    values = load_values(out)
+    assert values["openwebui"] == {"enabled": False}
+    assert "openwebui" not in values["images"] and "openwebuiProxy" not in values["images"]
+
+
+def test_openwebui_unset_is_enabled_and_fails_closed_naming_the_opt_out(monkeypatch, mapper_env):
+    monkeypatch.delenv("OPENWEBUI_ENABLED", raising=False)
+    r, out = mapper_env()
+    assert r.returncode != 0 and not out.exists()
+    assert ("inputs are missing: OPENWEBUI_SECRET, OPENWEBUI_HOST, OPENWEBUI_OIDC_PROVIDER_URL, "
+            "OPENWEBUI_OIDC_CLIENT_ID, OPENWEBUI_OIDC_ALLOWED_ROLES, OPENWEBUI_OIDC_ADMIN_ROLES, "
+            "OPENWEBUI_IDP_EGRESS_CIDRS. Set them, or opt out with "
+            "OPENWEBUI_ENABLED=false") in r.stderr
+
+
+def test_openwebui_selection_round_trips_with_the_decided_defaults(monkeypatch, mapper_env, tmp_path):
+    _owui_env(monkeypatch, tmp_path)
+    r, out = mapper_env()
+    assert r.returncode == 0, r.stderr
+    values = load_values(out)
+    # 30 days is the maintainer's 2026-10-24 decision; groups/roles are the
+    # Open WebUI claim names; 443 the IdP port.
+    assert values["openwebui"] == {
+        "enabled": True, "secretName": "owui-secrets", "host": "docs.apps.example.internal",
+        "retentionDays": 30, "storageSize": "10Gi",
+        "oidc": {"providerUrl": OWUI_ON["OPENWEBUI_OIDC_PROVIDER_URL"], "clientId": "docs-frontend",
+                 "groupClaim": "groups", "rolesClaim": "roles", "allowedRoles": "staff",
+                 "adminRoles": "docs-admins", "scopes": "openid email profile groups offline_access",
+                 "emailClaim": "email", "usernameClaim": "name"},
+        "idpEgress": {"cidrs": ["10.20.0.0/24", "10.21.0.8/32"], "port": 443},
+    }
+    assert values["images"]["openwebui"] == {
+        "repository": "reg.internal/qdrant-pdf-rag-openwebui", "tag": "v0.12.3-slim",
+        "pullPolicy": "IfNotPresent"}
+    # The namespace service CA is the destination CA while the console Route is off.
+    assert values["route"] == {"enabled": False, "timeoutSeconds": 300, "destinationCA": OWUI_CA}
+    digest = "sha256:" + "d" * 64
+    monkeypatch.setenv("IMAGE_DIGEST_OPENWEBUI", digest)
+    monkeypatch.setenv("OPENWEBUI_RETENTION_DAYS", "7")
+    r, out = mapper_env()
+    values = load_values(out)
+    assert values["images"]["openwebui"]["digest"] == digest
+    assert values["openwebui"]["retentionDays"] == 7
+
+
+def test_openwebui_allow_list_proxy_image_is_rendered_with_its_verified_digest(monkeypatch, mapper_env, tmp_path):
+    """ADR-0007 E1: the nginx sidecar's image follows the front end's selection and
+    carries the registry digest deploy verified; it is absent when the front end is off."""
+    _owui_env(monkeypatch, tmp_path)
+    r, out = mapper_env()
+    assert r.returncode == 0, r.stderr
+    assert load_values(out)["images"]["openwebuiProxy"] == {
+        "repository": "reg.internal/nginxinc/nginx-unprivileged", "tag": "1.30.6-alpine",
+        "pullPolicy": "IfNotPresent"}
+    digest = "sha256:" + "f" * 64
+    monkeypatch.setenv("IMAGE_DIGEST_OPENWEBUI_PROXY", digest)
+    r, out = mapper_env()
+    assert load_values(out)["images"]["openwebuiProxy"]["digest"] == digest
+    monkeypatch.setenv("IMAGE_DIGEST_OPENWEBUI_PROXY", "not-a-digest")
+    r, _ = mapper_env()
+    assert r.returncode != 0 and "IMAGE_DIGEST_OPENWEBUI_PROXY must be a sha256 manifest digest" in r.stderr
+
+
+@pytest.mark.parametrize("env,message", [
+    ({"OPENWEBUI_ENABLED": "maybe"}, "OPENWEBUI_ENABLED must be true/false"),
+    ({"OPENWEBUI_SECRET": ""}, "inputs are missing: OPENWEBUI_SECRET"),
+    ({"OPENWEBUI_SECRET": "Bad_Name"}, "OPENWEBUI_SECRET must be"),
+    ({"OPENWEBUI_HOST": ""}, "inputs are missing: OPENWEBUI_HOST"),
+    ({"OPENWEBUI_HOST": "https://docs.example.internal"}, "OPENWEBUI_HOST must be"),
+    ({"OPENWEBUI_OIDC_PROVIDER_URL": "http://idp.example/.well-known/openid-configuration"},
+     "OPENWEBUI_OIDC_PROVIDER_URL must be"),
+    ({"OPENWEBUI_OIDC_PROVIDER_URL": ""}, "inputs are missing: OPENWEBUI_OIDC_PROVIDER_URL"),
+    ({"OPENWEBUI_OIDC_CLIENT_ID": ""}, "inputs are missing: OPENWEBUI_OIDC_CLIENT_ID"),
+    ({"OPENWEBUI_OIDC_ADMIN_ROLES": ""}, "inputs are missing: OPENWEBUI_OIDC_ADMIN_ROLES"),
+    ({"OPENWEBUI_OIDC_ALLOWED_ROLES": "a,,b"}, "OPENWEBUI_OIDC_ALLOWED_ROLES must be"),
+    # Review #1083 B2: * or the AD FS baseline role would admit every signed-in user.
+    ({"OPENWEBUI_OIDC_ALLOWED_ROLES": "*"}, "OPENWEBUI_OIDC_ALLOWED_ROLES must not contain * or signed-in"),
+    ({"OPENWEBUI_OIDC_ALLOWED_ROLES": "staff,signed-in"},
+     "OPENWEBUI_OIDC_ALLOWED_ROLES must not contain * or signed-in"),
+    ({"OPENWEBUI_OIDC_ADMIN_ROLES": "signed-in"}, "OPENWEBUI_OIDC_ADMIN_ROLES must not contain * or signed-in"),
+    ({"OPENWEBUI_OIDC_ADMIN_ROLES": "docs-admins,*"},
+     "OPENWEBUI_OIDC_ADMIN_ROLES must not contain * or signed-in"),
+    ({"OPENWEBUI_OIDC_GROUP_CLAIM": "group claim"}, "OPENWEBUI_OIDC_GROUP_CLAIM must be"),
+    ({"OPENWEBUI_OIDC_EMAIL_CLAIM": "e mail"}, "OPENWEBUI_OIDC_EMAIL_CLAIM must be"),
+    ({"OPENWEBUI_OIDC_USERNAME_CLAIM": "a,b"}, "OPENWEBUI_OIDC_USERNAME_CLAIM must be"),
+    ({"OPENWEBUI_OIDC_SCOPES": "email profile"}, "OPENWEBUI_OIDC_SCOPES must be"),
+    ({"OPENWEBUI_OIDC_SCOPES": "openid,email"}, "OPENWEBUI_OIDC_SCOPES must be"),
+    ({"OPENWEBUI_OIDC_SCOPES": "openid  email"}, "OPENWEBUI_OIDC_SCOPES must be"),
+    ({"OPENWEBUI_IDP_EGRESS_CIDRS": ""}, "inputs are missing: OPENWEBUI_IDP_EGRESS_CIDRS"),
+    ({"OPENWEBUI_IDP_EGRESS_CIDRS": "idp.example.internal"}, "OPENWEBUI_IDP_EGRESS_CIDRS must be"),
+    ({"OPENWEBUI_IDP_EGRESS_CIDRS": "10.0.0.300/32"}, "OPENWEBUI_IDP_EGRESS_CIDRS must be"),
+    ({"OPENWEBUI_IDP_EGRESS_PORT": "0"}, "OPENWEBUI_IDP_EGRESS_PORT must be"),
+    ({"OPENWEBUI_RETENTION_DAYS": "0"}, "OPENWEBUI_RETENTION_DAYS must be"),
+    ({"OPENWEBUI_RETENTION_DAYS": "3651"}, "OPENWEBUI_RETENTION_DAYS must be"),
+    ({"OPENWEBUI_STORAGE_SIZE": "10"}, "OPENWEBUI_STORAGE_SIZE must be"),
+    ({"ROUTE_DESTINATION_CA_FILE": ""}, "needs ROUTE_DESTINATION_CA_FILE"),
+    # Shapes are checked even while the feature is off: a typo fails today.
+    ({"OPENWEBUI_ENABLED": "false", "OPENWEBUI_RETENTION_DAYS": "forever"}, "OPENWEBUI_RETENTION_DAYS must be"),
+])
+def test_openwebui_selection_is_strict_and_writes_nothing(monkeypatch, mapper_env, tmp_path, env, message):
+    _owui_env(monkeypatch, tmp_path, **env)
+    r, out = mapper_env()
+    assert r.returncode != 0
+    assert message in r.stderr
+    assert not out.exists()
+
+
+def _real_ca(tmp_path, name):
+    """A real self-signed CA (PEM certificate text, PEM key text) from openssl."""
+    key, crt = tmp_path / f"{name}.key", tmp_path / f"{name}.crt"
+    subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+                    "-subj", f"/CN={name}", "-keyout", str(key), "-out", str(crt)],
+                   check=True, capture_output=True)
+    return crt.read_text(), key.read_text()
+
+
+def _drop_line(pem):
+    """One full 64-character body line missing: still valid base64 (review #1083 B1)."""
+    lines = pem.splitlines(keepends=True)
+    body = [i for i, line in enumerate(lines) if len(line.strip()) == 64]
+    del lines[body[len(body) // 2]]
+    return "".join(lines)
+
+
+def test_openwebui_idp_ca_bundle_is_optional_and_round_trips_byte_exact(monkeypatch, mapper_env, tmp_path):
+    """A public-CA IdP needs no bundle (no key emitted); a site bundle of real
+    certificates reaches the chart byte-for-byte (both certificates, order kept)."""
+    _owui_env(monkeypatch, tmp_path)
+    r, out = mapper_env()
+    assert r.returncode == 0, r.stderr
+    assert "caBundle" not in load_values(out)["openwebui"]["oidc"]
+    bundle_text = _real_ca(tmp_path, "idp-root")[0] + _real_ca(tmp_path, "idp-issuing")[0]
+    bundle = tmp_path / "idp-ca.pem"
+    bundle.write_text(bundle_text)
+    monkeypatch.setenv("OPENWEBUI_IDP_CA_FILE", str(bundle))
+    r, out = mapper_env()
+    assert r.returncode == 0, r.stderr
+    assert load_values(out)["openwebui"]["oidc"]["caBundle"] == bundle_text
+
+
+@pytest.mark.parametrize("case,message", [
+    ("missing", "OPENWEBUI_IDP_CA_FILE is unreadable"),
+    ("empty", "OPENWEBUI_IDP_CA_FILE is blank"),
+    ("blank", "OPENWEBUI_IDP_CA_FILE is blank"),
+    ("binary", "OPENWEBUI_IDP_CA_FILE is unreadable"),
+    ("garbage", "OPENWEBUI_IDP_CA_FILE must hold only PEM certificates"),
+    ("trailing-text", "OPENWEBUI_IDP_CA_FILE must hold only PEM certificates"),
+    ("not-base64", "OPENWEBUI_IDP_CA_FILE must hold only PEM certificates"),
+    ("private-key", "OPENWEBUI_IDP_CA_FILE must hold only PEM certificates"),
+    ("cert-plus-key", "OPENWEBUI_IDP_CA_FILE must hold only PEM certificates"),
+    ("dropped-line", "OPENWEBUI_IDP_CA_FILE must hold only PEM certificates"),
+    ("base64-not-a-cert", "OPENWEBUI_IDP_CA_FILE must hold only PEM certificates"),
+])
+def test_openwebui_idp_ca_bundle_refuses_unreadable_blank_or_garbage(monkeypatch, mapper_env, tmp_path,
+                                                                     case, message):
+    """Only certificates that load are accepted: a dropped body line keeps valid
+    base64 but no longer loads, and a key is never a CA. Refusals are fixed text."""
+    _owui_env(monkeypatch, tmp_path)
+    good, key = _real_ca(tmp_path, "idp-root")
+    bundle = tmp_path / "idp-ca.pem"
+    contents = {
+        "empty": "", "blank": "  \n", "garbage": "not a certificate\n",
+        "trailing-text": good + "trailing junk\n",
+        "not-base64": "-----BEGIN CERTIFICATE-----\n%%%\n-----END CERTIFICATE-----\n",
+        "private-key": key, "cert-plus-key": good + key, "dropped-line": _drop_line(good),
+        "base64-not-a-cert": "-----BEGIN CERTIFICATE-----\nQUJDREVGR0g=\n-----END CERTIFICATE-----\n",
+    }
+    if case == "binary":
+        bundle.write_bytes(b"\x30\x82\xff\xfe" * 16)
+    elif case != "missing":
+        bundle.write_text(contents[case])
+    monkeypatch.setenv("OPENWEBUI_IDP_CA_FILE", str(bundle))
+    r, out = mapper_env()
+    assert r.returncode != 0 and not out.exists()
+    assert message in r.stderr
+    # Fixed text: neither the path nor any content reaches the diagnostic.
+    assert str(bundle) not in r.stderr and "junk" not in r.stderr and "PRIVATE" not in r.stderr
+    for line in (good.splitlines()[1], key.splitlines()[1]):
+        assert line not in r.stderr
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is required for the round-trip")
+def test_openwebui_mapper_to_helm_round_trip(monkeypatch, mapper_env, tmp_path):
+    """Producer-to-consumer: operator env -> values -> helm template (a chart
+    copy holding a stand-in Pipe) -> the pod, Route and policy asked for."""
+    _owui_env(monkeypatch, tmp_path, OPENWEBUI_RETENTION_DAYS="14", OPENWEBUI_IDP_EGRESS_PORT="8443",
+              OPENWEBUI_OIDC_SCOPES="openid profile email allatclaims", OPENWEBUI_OIDC_EMAIL_CLAIM="upn",
+              OPENWEBUI_OIDC_USERNAME_CLAIM="unique_name")
+    r, out = mapper_env()
+    assert r.returncode == 0, r.stderr
+    chart = tmp_path / "mainframe-rag"
+    shutil.copytree(CHART, chart)
+    (chart / "files" / "openwebui" / "docs_pipe.py").write_text("class Pipe:\n    pass\n")
+    rendered = subprocess.run(["helm", "template", "app", str(chart), "-f", str(out), "--namespace", "ns"],
+                              capture_output=True, text=True, cwd=REPO, check=False)
+    assert rendered.returncode == 0, rendered.stderr
+    docs = {(d["kind"], d["metadata"]["name"]): d for d in yaml.safe_load_all(rendered.stdout) if d}
+    dep = docs["Deployment", "rag-openwebui"]
+    containers = {c["name"]: c for c in dep["spec"]["template"]["spec"]["containers"]}
+    assert containers["openwebui"]["image"] == "reg.internal/qdrant-pdf-rag-openwebui:v0.12.3-slim"
+    assert containers["chat-purge"]["args"][:2] == ["--days", "14"]
+    env = {e["name"]: e for e in containers["openwebui"]["env"]}
+    assert env["OAUTH_CLIENT_ID"]["value"] == "docs-frontend"
+    assert env["OPENID_REDIRECT_URI"]["value"] == "https://docs.apps.example.internal/oauth/oidc/callback"
+    assert env["OAUTH_SCOPES"]["value"] == "openid profile email allatclaims"
+    assert env["OAUTH_EMAIL_CLAIM"]["value"] == "upn"
+    assert env["OAUTH_USERNAME_CLAIM"]["value"] == "unique_name"
+    route = docs["Route", "rag-openwebui"]["spec"]
+    assert route["host"] == "docs.apps.example.internal"
+    assert route["tls"]["destinationCACertificate"].strip() == OWUI_CA.strip()
+    egress = docs["NetworkPolicy", "rag-openwebui"]["spec"]["egress"][2]
+    assert egress == {"to": [{"ipBlock": {"cidr": "10.20.0.0/24"}}, {"ipBlock": {"cidr": "10.21.0.8/32"}}],
+                      "ports": [{"protocol": "TCP", "port": 8443}]}
+    assert ("Route", "rag-agent") not in docs
+
+
 def test_unset_efforts_render_medium_on_the_agent_pod(monkeypatch, mapper_env):
     """#917: with no operator effort, mapper values omit it and the chart default puts medium on the pod."""
     for name in ("LLM_REASONING_EFFORT_SIMPLE", "LLM_REASONING_EFFORT_COMPLEX", "LLM_REASONING_EFFORTS"):
@@ -1027,7 +1287,143 @@ def test_request_bound_invalid_values_fail_without_echo(monkeypatch, mapper_env,
 
 def test_preflight_rejects_invalid_request_bound():
     """validate.sh / model_config.py shares the mapper's validator."""
-    env = {**os.environ, "EMBED_MODEL": "m", "EMBED_BASE_URL": "http://e", "REQUEST_QUEUE_MAX": "x"}
+    env = {**os.environ, "EMBED_MODEL": "m", "EMBED_BASE_URL": "http://e", "REQUEST_QUEUE_MAX": "x",
+           "OPENWEBUI_ENABLED": "false"}
     result = subprocess.run([sys.executable, str(REPO / "scripts/airgap/model_config.py")],
                             env=env, capture_output=True, text=True, check=False)
     assert result.returncode == 1 and "REQUEST_QUEUE_MAX" in result.stderr
+
+
+# --- #1070 R2: first-class site sizing (quota-bound sites) -------------------
+
+CHART_INGEST_RESOURCES = yaml.safe_load((CHART / "values.yaml").read_text())["ingest"]["resources"]
+INGEST_SIZING_ENV = {
+    "INGEST_CPU_REQUEST": "750m", "INGEST_MEMORY_REQUEST": "3Gi",
+    "INGEST_CPU_LIMIT": "3", "INGEST_MEMORY_LIMIT": "6Gi",
+}
+INGEST_SIZING_EXPECTED = {
+    "requests": {"cpu": "750m", "memory": "3Gi"}, "limits": {"cpu": "3", "memory": "6Gi"},
+}
+
+
+@pytest.mark.parametrize("corpus", ["", "corpus-pvc"])
+def test_default_ingest_resources_are_the_chart_defaults(monkeypatch, mapper_env, corpus):
+    """Unset sizing keys keep today's rendered values, enabled or not."""
+    if corpus:
+        monkeypatch.setenv("CORPUS_PVC", corpus)
+    r, out = mapper_env()
+    assert r.returncode == 0, r.stderr
+    assert load_values(out)["ingest"]["resources"] == CHART_INGEST_RESOURCES
+
+
+def test_ingest_sizing_keys_reach_the_release_values(monkeypatch, mapper_env):
+    monkeypatch.setenv("CORPUS_PVC", "corpus-pvc")
+    for key, val in INGEST_SIZING_ENV.items():
+        monkeypatch.setenv(key, val)
+    r, out = mapper_env()
+    assert r.returncode == 0, r.stderr
+    assert load_values(out)["ingest"]["resources"] == INGEST_SIZING_EXPECTED
+
+
+def test_a_partial_ingest_override_keeps_the_other_defaults(monkeypatch, mapper_env):
+    monkeypatch.setenv("CORPUS_PVC", "corpus-pvc")
+    monkeypatch.setenv("INGEST_MEMORY_LIMIT", "12Gi")
+    r, out = mapper_env()
+    assert r.returncode == 0, r.stderr
+    expected = {k: dict(v) for k, v in CHART_INGEST_RESOURCES.items()}
+    expected["limits"]["memory"] = "12Gi"
+    assert load_values(out)["ingest"]["resources"] == expected
+
+
+@pytest.mark.parametrize("key,val", [
+    ("INGEST_CPU_REQUEST", "lots"), ("INGEST_CPU_REQUEST", "0"), ("INGEST_CPU_REQUEST", "-1"),
+    ("INGEST_CPU_REQUEST", "1Gi"), ("INGEST_CPU_LIMIT", "20,x=1"), ("INGEST_CPU_LIMIT", "20 "),
+    ("INGEST_MEMORY_REQUEST", "8"), ("INGEST_MEMORY_REQUEST", "8GB"), ("INGEST_MEMORY_REQUEST", "0Gi"),
+    ("INGEST_MEMORY_LIMIT", "500m"), ("INGEST_MEMORY_LIMIT", "1e3Gi"),
+    # A limit below the request, against the chart default for the other side.
+    ("INGEST_CPU_LIMIT", "2"),          # default request is 4
+    ("INGEST_MEMORY_LIMIT", "4Gi"),     # default request is 8Gi
+    ("INGEST_CPU_REQUEST", "17"),       # default limit is 16
+    ("INGEST_MEMORY_REQUEST", "33Gi"),  # default limit is 32Gi
+])
+def test_invalid_ingest_sizing_is_refused_with_a_fixed_message(monkeypatch, mapper_env, key, val):
+    monkeypatch.setenv("CORPUS_PVC", "corpus-pvc")
+    monkeypatch.setenv(key, val)
+    r, out = mapper_env()
+    assert r.returncode != 0 and not out.exists()
+    assert key in r.stderr
+    assert val not in r.stderr, "the refusal never echoes the supplied value"
+
+
+def test_sizing_defaults_mirror_the_chart_values():
+    """The limit-vs-request check compares against what will actually render."""
+    from scripts.airgap.model_config import SIZING_DEFAULTS
+
+    qdrant = yaml.safe_load((REPO / "charts" / "qdrant-openshift.values.yaml").read_text())
+    assert SIZING_DEFAULTS["QDRANT"] == qdrant["resources"]
+    assert SIZING_DEFAULTS["INGEST"] == CHART_INGEST_RESOURCES
+
+
+# --- Retired airgap.env keys (#1070) ---
+
+_EXAMPLE_ASSIGNMENT = re.compile(r"(?m)^(#?)\s*([A-Z][A-Z0-9_]+)=(\S*)")
+
+
+def test_mapper_refuses_a_retired_key_before_rendering(monkeypatch, mapper_env):
+    monkeypatch.setenv("REGISTRY_INTERNAL", "sentinel-registry-internal")
+    monkeypatch.setenv("JAEGER_ENABLED", "false")
+    r, out = mapper_env()
+    assert r.returncode != 0
+    assert not out.exists()
+    assert "sentinel-" not in r.stdout + r.stderr
+    assert re.findall(r"(?m)^  ([A-Z_]+) \(retired in ", r.stderr) == ["REGISTRY_INTERNAL", "JAEGER_ENABLED"]
+
+
+def test_mapper_ignores_empty_retired_keys(monkeypatch, mapper_env):
+    monkeypatch.setenv("REGISTRY_INTERNAL", "")
+    r, _ = mapper_env()
+    assert r.returncode == 0, r.stderr
+
+
+def test_current_airgap_env_example_is_not_refused():
+    """Neither a live nor a commented assignment in the shipped example names a
+    retired key, so copying it never trips the refusal."""
+    from scripts.airgap.model_config import RETIRED_KEYS, require_no_retired_keys
+
+    text = (REPO / "airgap.env.example").read_text()
+    live = {}
+    for hash_, key, value in _EXAMPLE_ASSIGNMENT.findall(text):
+        assert key not in {entry[0] for entry in RETIRED_KEYS}, key
+        if not hash_ and value:
+            live[key] = value
+    require_no_retired_keys(live)
+
+
+def test_retired_key_table_entries_are_complete_and_fixed():
+    from scripts.airgap.model_config import RETIRED_KEYS, require_no_retired_keys
+
+    assert [entry[0] for entry in RETIRED_KEYS] == [
+        "REGISTRY_INTERNAL", "OPENSHIFT_NAMESPACE", "VLLM_BASE_URL",
+        "JAEGER_ENABLED", "JAEGER_QUERY_URL",
+    ]
+    for _key, ref, message in RETIRED_KEYS:
+        assert re.fullmatch(r"[0-9a-f]{7}", ref) and message
+    with pytest.raises(ValueError) as caught:
+        require_no_retired_keys({key: "sentinel-value" for key, _, _ in RETIRED_KEYS})
+    assert "sentinel-value" not in str(caught.value)
+    require_no_retired_keys({key: "" for key, _, _ in RETIRED_KEYS})
+
+
+def test_vllm_base_url_migration_names_the_v1_suffix():
+    """The old key was an origin and d53595e appended /v1; EMBED_BASE_URL is a
+    base that clients append /embeddings to, so the message must say plus /v1."""
+    from scripts.airgap.model_config import require_no_retired_keys
+
+    with pytest.raises(ValueError) as caught:
+        require_no_retired_keys({"VLLM_BASE_URL": "http://vllm:8000"})
+    assert (
+        "  VLLM_BASE_URL (retired in 547d04d): set EMBED_BASE_URL to the old value plus /v1 "
+        "(clients append /embeddings to a base that must end in /v1; do not repeat /v1), "
+        "then remove it"
+    ) in str(caught.value)
+    assert "http://vllm:8000" not in str(caught.value)

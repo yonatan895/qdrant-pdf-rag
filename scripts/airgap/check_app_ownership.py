@@ -39,6 +39,14 @@ ALLOWED = {
     ('v1', 'PersistentVolumeClaim', 'rag-feedback-data'),
     ('networking.k8s.io/v1', 'NetworkPolicy', 'rag-feedback-ingress'),
     ('monitoring.coreos.com/v1', 'ServiceMonitor', 'rag-feedback'),
+    # Open WebUI docs front end (#1074, ADR-0007): its own objects only; the
+    # claim (helm.sh/resource-policy: keep) is never in a cleanup inventory.
+    ('apps/v1', 'Deployment', 'rag-openwebui'),
+    ('v1', 'Service', 'rag-openwebui'),
+    ('v1', 'ConfigMap', 'rag-openwebui-pipe'),
+    ('v1', 'PersistentVolumeClaim', 'rag-openwebui-data'),
+    ('networking.k8s.io/v1', 'NetworkPolicy', 'rag-openwebui'),
+    ('route.openshift.io/v1', 'Route', 'rag-openwebui'),
 }
 
 
