@@ -117,6 +117,9 @@
   let releaseMark = null;
   let staleNoticeShown = false;
   const STALE_TEXT = "Another tab changed your saved incidents; nothing was changed here. Try again.";
+  const UNSAVED_TEXT =
+    "This answer was not saved because another tab changed your saved incidents. " +
+    "Copy it now if you need it; it disappears on your next change or when you leave this incident.";
   class StaleStoreError extends Error {}
 
   function revisionOf(store) {
@@ -170,6 +173,7 @@
         store.revision = Math.max(revisionOf(store), want) + 1;
         saveStore(store);
         if (sharedLocks && storageOk) await markRevision(store.revision);
+        unsaved = null;
         if (staleNoticeShown) {
           staleNoticeShown = false;
           composerNotice("");
@@ -1142,6 +1146,8 @@
    * (switching away and back, a cross-tab refresh) keeps the stream visible
    * instead of orphaning it. */
   let inflight = null;
+  // A finished answer whose save was refused (stale copy): shown, never stored.
+  let unsaved = null;
   let renaming = false;
 
   function orphanNote() {
@@ -1174,9 +1180,11 @@
     }
     session.turns.forEach((turn) => messagesEl.appendChild(renderTurn(turn)));
     const streamingHere = inflight && inflight.sid === current.id;
+    const unsavedHere = unsaved && unsaved.sid === current.id;
     const last = session.turns[session.turns.length - 1];
-    if (last && last.role === "user" && !streamingHere) messagesEl.appendChild(orphanNote());
+    if (last && last.role === "user" && !streamingHere && !unsavedHere) messagesEl.appendChild(orphanNote());
     if (streamingHere) messagesEl.appendChild(inflight.article);
+    if (unsavedHere) messagesEl.appendChild(unsaved.article);
     stick = true;
     messagesEl.scrollIntoView({ block: "end" });
     pruneDrafts(loadStore());
@@ -1248,6 +1256,7 @@
   }
 
   async function openSession(id) {
+    if (id !== currentId) unsaved = null;
     currentId = id;
     await mutate((store) => {
       if (store.sessions[id]) store.active = id;
@@ -1560,13 +1569,23 @@
     // may have created, renamed, deleted or switched incidents (here or in
     // another tab) while this turn streamed. A deleted incident stays
     // deleted: the finished turn is dropped, never resurrected.
-    const kept = await mutate((store) => {
-      const live = store.sessions[sid];
-      if (!live) return false;
-      live.turns.push(assistantTurn);
-      live.updated_at = Date.now();
-      return true;
-    });
+    let kept;
+    try {
+      kept = await mutate((store) => {
+        const live = store.sessions[sid];
+        if (!live) return false;
+        live.turns.push(assistantTurn);
+        live.updated_at = Date.now();
+        return true;
+      });
+    } catch (err) {
+      ignoreStale(err);
+      unsaved = { sid: sid, article: article };
+      article.setAttribute("data-state", "unsaved");
+      renderMessages();
+      composerNotice(UNSAVED_TEXT);
+      return;
+    }
     if (!kept) {
       article.remove();
       announce("The incident was deleted while the answer was generating; the answer was discarded.");

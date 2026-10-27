@@ -1212,6 +1212,75 @@ def test_an_unverifiable_copy_fails_closed_with_a_notice_and_the_next_action_wor
     assert store(page)["revision"] > data["revision"]
 
 
+UNSAVED_TEXT = (
+    "This answer was not saved because another tab changed your saved incidents. "
+    "Copy it now if you need it; it disappears on your next change or when you leave this incident."
+)
+
+
+@pytest.mark.parametrize("next_action", ["send", "switch"])
+def test_a_refused_completion_stays_visible_unsaved_until_the_next_change(console, page, next_action):
+    """The completion save is refused (stale copy): the finished answer stays
+    on screen as `unsaved` with its own notice and a working Copy, is never
+    stored, survives a re-render, and goes on the next send or incident switch."""
+    tab_a = page.handle()
+    console.llm.queue(("token", "Unsaved answer text. "), ("gate", "unsaved"), ("done",))
+    send(page, "Question whose answer is refused")
+    page.wait("return !!document.querySelector('[data-state=streaming] .md p')")
+    tab_b = page.new_tab()
+    page.switch(tab_b)
+    page.get(console.url)
+    page.wait("return document.querySelectorAll('.turn-user').length==1", what="tab B restores")
+
+    page.switch(tab_a)
+    page.eval(_STALE_VIEW)
+    page.eval(_EXPIRE_WAITS)
+    page.eval(
+        "window.__unhandled = []; window.addEventListener('unhandledrejection', e => window.__unhandled.push(String(e.reason)));"
+        "window.__copied = null; Object.defineProperty(navigator, 'clipboard',"
+        " {value: {writeText: t => { window.__copied = t; return Promise.resolve(); }}});"
+    )
+    page.switch(tab_b)
+    page.click("#new-session-btn")
+    page.wait("return document.querySelectorAll('.row').length==2", what="tab B writes")
+
+    page.switch(tab_a)
+    console.llm.release("unsaved")
+    page.wait("return !!document.querySelector('.turn-assistant[data-state=unsaved]')", what="the unsaved answer")
+    page.wait("return document.getElementById('composer-notice').textContent===arguments[0]", UNSAVED_TEXT)
+    assert "Unsaved answer text" not in json.dumps(page.eval("return window.__realStore()"))
+    page.eval("Date.now = window.__now; window.__stale = false")
+    assert "Unsaved answer text" not in json.dumps(store(page)), "a refused completion reached storage"
+    page.eval("document.querySelector('.turn-assistant[data-state=unsaved] .copy-turn').click()")
+    page.wait("return document.querySelector('.turn-assistant[data-state=unsaved] .copy-turn').textContent=='Copied'")
+    assert "Unsaved answer text" in page.eval("return window.__copied")
+
+    page.switch(tab_b)  # a storage-event re-render in A keeps the unsaved answer
+    page.eval("document.querySelector('.row .ren').click()")
+    page.wait("return !!document.querySelector('input.rename')")
+    page.eval("document.querySelector('input.rename').value='Renamed by B'")
+    page.keys("ENTER")
+    page.switch(tab_a)
+    page.wait("return document.body.innerText.includes('Renamed by B')", what="A re-renders after B's rename")
+    assert page.eval("return document.querySelectorAll('.turn-assistant[data-state=unsaved]').length") == 1
+    assert page.eval("return document.querySelectorAll('.orphan-note').length") == 0, "shown as unanswered"
+
+    if next_action == "send":
+        send(page, "Next ordinary question")
+        wait_state(page, "complete")
+        users = [t["content"] for s in store(page)["sessions"].values() for t in s["turns"] if t["role"] == "user"]
+        assert users[-2:] == ["Question whose answer is refused", "Next ordinary question"]
+    else:
+        page.eval("document.querySelector('.row:not(.active) .open').click()")
+        page.wait("return document.querySelectorAll('.turn').length==0", what="the other incident opens")
+        page.eval("document.querySelector('.row:not(.active) .open').click()")
+        page.wait("return document.querySelectorAll('.turn-user').length==1", what="back to the first incident")
+    assert page.eval("return document.querySelectorAll('[data-state=unsaved]').length") == 0
+    assert _composer_notice(page) == ""
+    assert "Unsaved answer text" not in json.dumps(store(page))
+    assert page.eval("return window.__unhandled") == []
+
+
 def test_an_absent_store_after_the_wait_is_written_not_refused(console, page):
     """Site data cleared in another tab leaves the key absent while that tab
     still holds the newest mark: the next write proceeds after the wait."""

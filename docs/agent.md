@@ -266,9 +266,8 @@ Retention policy as shipped:
   [Answer feedback](#answer-feedback)).
 - **How long:** until the operator clears it, capped at 30 incidents (oldest
   idle incident evicted first; the incidents open in this tab are protected).
-  There is no time-based expiry, no logout/user-switch clearing and no account
-  isolation: the key is global per browser origin profile. A cache-control
-  header does not change that.
+  No expiry or account isolation: the key is per browser origin profile,
+  regardless of cache-control.
 - **How cleared:** per incident (delete) or all incidents (`Clear all saved
   incidents`, two-step confirm; other tabs follow through the `storage` event;
   in-flight answers are discarded).
@@ -290,13 +289,14 @@ An incident lock is held from saving the user turn through its assistant
 result; a second tab sending there is visibly refused, keeps its question, and
 can send afterwards. Other incidents remain usable. Completion
 re-reads under the write lock, preserving renames and discarding deleted
-incidents. Chrome updates other tabs' copies late, so each write bumps
-a store revision (absent: 0) and holds a lock naming it until its next write or
-close; the next holder waits up to 3 s for it. A copy still behind
-is not written; the tab re-renders with a fixed retry notice. An absent
-store (site data cleared) is written. Accepted gap: a tab closed
-milliseconds after writing drops its lock before other copies catch up. Browser
-tests prove contenders read one version and serialize locked writes; a frozen copy
+incidents. Chrome updates other tabs' copies late, so each write bumps a store
+revision (absent: 0) and holds a lock naming it; the next holder waits up to
+3 s for it. A copy still behind is not written; the tab re-renders with a fixed
+retry notice. A refused answer save stays visible, unsaved, with its own notice
+until the next change or switch. An absent store (site data cleared) is
+written. Accepted gap: a tab closed milliseconds after writing drops its lock
+before other copies catch up. Browser tests prove contenders read one version
+and serialize locked writes; a frozen copy
 waits, refuses, or writes an absent store. A streaming turn is
 labelled provisional until the final frame; failed, stopped or
 EOF-without-final output is stored and restored as `generation_incomplete`, is
