@@ -1,0 +1,6 @@
+# Private release archive (#1118, decision D5): the newest site releases as
+# private GHCR OCI artifacts, pinned by digest. Written only by
+# scripts/release_archive.py; contract in docs/deploy.md#release-archive.
+# Repository: ghcr.io/yonatan895/qdrant-pdf-rag-release-archive
+# Columns: release-sha  manifest-digest  signing-key-sha256  packed-date (MANIFEST date, UTC)
+d53595eb03ac220028263ab415c953db47371554  sha256:a72ce4e0e4e26da6aaf0db3683b26cc574ca314bc2e1a58172167b813d211048  156af8024c404d196eb1a5fd214a8b4277095f2f5e2515355301d95644730efd  2026-10-06T20:47:05Z
