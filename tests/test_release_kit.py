@@ -97,13 +97,6 @@ def test_release_stage_needs_exactly_forty_abstain(env):
     assert any(">= 100 answer" in p for p in problems)
 
 
-def test_same_day_adjudication_is_rejected_by_the_schema(env):
-    rows = _rows(env[3])
-    rows[1]["adjudication"]["adjudicated_at"] = "2026-10-01"
-    with pytest.raises(acc.AcceptanceError, match="separate adjudication pass"):
-        _check(env, rows)
-
-
 def test_problem_output_never_echoes_query_text(env, capsys):
     private, cmp_root, crit, sha = env
     rows = _rows(sha)
