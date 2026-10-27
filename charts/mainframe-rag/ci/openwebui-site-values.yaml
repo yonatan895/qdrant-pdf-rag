@@ -2,7 +2,10 @@
 # Obviously fake and non-routable (example.invalid, TEST-NET-1 CIDR, a Secret
 # name only). Never a production value and never merged into values.yaml: the
 # bare default render must keep failing closed. Used by helm lint/template in
-# tests and CI; a real site supplies its own values (docs/deploy.md).
+# tests, CI and artifacts:app-helm-*; `airgap:dryrun` passes the same values as
+# its OPENWEBUI_* stand-ins, with openwebui-route-ca.pem (route.destinationCA
+# below) as ROUTE_DESTINATION_CA_FILE. A real site supplies its own values
+# (docs/deploy.md).
 openwebui:
   secretName: owui-test-secrets
   host: docs.example.invalid

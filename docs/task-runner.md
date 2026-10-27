@@ -183,7 +183,7 @@ keeps its separate fixed rehearsal inputs.
 | Secrets (`GATEWAY_MASTER_KEY`, per-leg keys) | caller environment only | Never CLI assignments or Task variables. Script-owned private handoff paths and per-start key handling are unchanged. |
 | `BUDGET_PYTHON` | fixed by local launch tasks | Always the repository's `.venv/bin/python`; not caller-overridable or globally exported. |
 | `WHEELHOUSE`, `PROFILE`, `PY` | `qa:deps WHEELHOUSE=/approved/dev-wheels` | On-demand refreshed-lock check. `PROFILE` must be `dev` (the only profile with the focused test runner). `WHEELHOUSE` defaults to the prepared `.tools/python-wheels/dev`; `PY` defaults to `.venv/bin/python` and is only the base interpreter for a disposable temporary venv. See [dependencies](dependencies.md). |
-| Operator keys (`INTERNAL_REGISTRY`, `NAMESPACE`, …) | `airgap:deploy INTERNAL_REGISTRY=x` | No Task-side defaults. `common.sh` owns the full `OPERATOR_ENV_KEYS` list and env/file/default precedence: explicit nonempty values win, explicit empty stays unset. See [configuration](deploy.md#configuration-contract). |
+| Operator keys (`INTERNAL_REGISTRY`, `NAMESPACE`, …) | `airgap:deploy INTERNAL_REGISTRY=x` | No Task-side defaults. `common.sh` owns the full `OPERATOR_ENV_KEYS` list and env/file/default precedence: explicit nonempty values win, explicit empty stays unset. Every `airgap.env.example` key and the retired keys (refused) are bridged; a test derives them from the example. See [configuration](deploy.md#configuration-contract). |
 
 Values use environment bridges and quoted expansion, never templates reparsed
 as shell commands. Included modules run at the checkout root; module evaluation
@@ -212,7 +212,9 @@ baseline recording, cleanup and deployment remain explicit commands with their
 existing permissions. `dev:clean` retains `*.tar*`, `.tools/` and external paths.
 
 `airgap:dryrun` executes the existing pipeline's validation/rendering path with
-fixed stand-ins for its declared inputs. It is an executed verification;
+fixed stand-ins for its declared inputs, including the fake Open WebUI site
+inputs in `charts/mainframe-rag/ci/`, so the default-on front end renders. The
+operator path keeps refusing without real site inputs. It is an executed verification;
 Task `--dry` merely previews commands and cannot establish a passing gate.
 Other operator inputs remain owned by `common.sh`, `deploy.sh` and `ingest.sh`.
 
@@ -310,6 +312,7 @@ executed. Prefix current tasks with `sh scripts/tools/run-task.sh`. Task
 | `local-gateway`, `local-gateway-stop`, `local-jaeger`, `local-jaeger-stop` | `local:gateway:up`, `local:gateway:down`, `local:openobserve:up`, `local:openobserve:down` | existing component owners |
 | `airgap-pack`, `airgap-validate`, `airgap-load`, `airgap-deploy`, `airgap-ingest`, `airgap-smoke`, `airgap-pipeline`, `airgap-dryrun` | `airgap:pack`, `airgap:validate`, `airgap:load`, `airgap:deploy`, `airgap:ingest`, `airgap:smoke`, `airgap:pipeline`, `airgap:dryrun` | `scripts/airgap/` stages/pipeline |
 | `e2e-demo-pdfs`, `clean` | `dev:demo-pdfs`, `dev:clean` | existing synthetic-document and cleanup owners |
+| (new, #1070/#1074) | `airgap:retire-legacy`, `artifacts:openwebui-image`, `local:openwebui:dev-up`, `local:openwebui:dev-dry-run`, `local:openwebui:dev-down`, `local:openwebui:acceptance` | `retire_legacy.sh`, `images/openwebui/Containerfile`, `scripts/openwebui/dev.sh` and `acceptance.sh`; flags after `--` |
 
 The local-stack supervisor invokes `sim_qdrant.sh` directly. CI, operator
 messages, active runbooks and context owners select Task or their existing

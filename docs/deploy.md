@@ -77,7 +77,7 @@ restores the snapshot over whatever the file assigned; empty stays unset
   Explicit model-operation URLs win over `GATEWAY_BASE_URL`, a shared API
   base including `/v1`. The removed `REGISTRY_INTERNAL`, `OPENSHIFT_NAMESPACE`,
   `VLLM_BASE_URL`, `JAEGER_ENABLED` and `JAEGER_QUERY_URL` are refused when
-  non-empty, before any cluster change, with a fixed migration message
+  non-empty (from the file, environment or Task CLI), before any cluster change, with a fixed migration message
   (`model_config.RETIRED_KEYS`; values are never printed): set
   `INTERNAL_REGISTRY`, `NAMESPACE` and `EMBED_BASE_URL` (or `GATEWAY_BASE_URL`),
   and remove the Jaeger keys (`OTEL_EXPORTER_OTLP_ENDPOINT`/`TRACE_QUERY_URL`
@@ -159,9 +159,9 @@ restores the snapshot over whatever the file assigned; empty stays unset
   selections keep their previous defaults and interpretation. Render/precedence
   evidence lives in `test_map_values.py`, `test_helm_chart_contracts.py` and
   `test_airgap_deploy_sh.py`; live model/deployment acceptance stays separate.
-- **Maintenance warning:** a new `.example` key that is not added to
-  `OPERATOR_ENV_KEYS` silently regresses to file-wins. The list and the
-  example must change together.
+- **Maintenance rule:** a new `.example` key must join `OPERATOR_ENV_KEYS`
+  and the Task bridge; `test_every_example_key_crosses_the_task_cli_and_beats_the_file`
+  derives the keys from the example and fails until both are updated.
 - The plaintext gateway-key guard (`LLM_API_KEY`, `EMBED_API_KEY`,
   `RERANK_API_KEY`, `CONTEXT_LLM_API_KEY`) scans the operator file text before it
   is sourced (any `export`/`readonly`/`declare`/chained form) and rejects any
@@ -172,7 +172,8 @@ restores the snapshot over whatever the file assigned; empty stays unset
   caller-set operator values to `common.sh`; CLI assignments win over the
   caller environment before that script applies its precedence rule.
   `sh scripts/tools/run-task.sh airgap:dryrun` executes the pipeline with
-  fixed stand-ins for its declared dry-run inputs. Other operator keys still
+  fixed stand-ins for its declared dry-run inputs, including the fake Open WebUI
+  site inputs (`charts/mainframe-rag/ci/`), so Open WebUI renders on. Other operator keys still
   follow `common.sh`; inspect that owner before supplying private config.
   Task `--dry` only previews commands and is not rendering evidence. Render
   custom values through `airgap:pipeline AIRGAP_DRYRUN=1` or the scripts with
@@ -452,8 +453,8 @@ Compatibility and lifecycle decisions under #448:
   data/snapshot sizes differ from it, so keep the creation-time sizes in the
   file and grow a volume with `oc patch pvc` (`check_qdrant_volumes.py`).
   `QDRANT_EXTRA_VALUES` and `INGEST_EXTRA_PATCH` set outside `CI_REHEARSAL=1`
-  refuse with a message naming these keys. The `OPERATOR_ENV_KEYS` list and the
-  Task bridge for these keys are Verifier-owned (see the PR).
+  refuse with a message naming these keys. These keys follow the
+  [precedence rule](#2-environment-precedence) and the Task bridge like every operator key.
 - `deploy.sh` validates every operator string that becomes a Helm value before
   rendering (`STORAGE_CLASS`/`SNAPSHOT_STORAGE_CLASS`: DNS-1123 name,
   `QDRANT_RELEASE`: DNS-1123 label, `QDRANT_TAG`: image tag,
@@ -1648,7 +1649,8 @@ refuses until the site supplies every required input. Both layers refuse before 
   or `--set openwebui.enabled=false`. The opt-out render is byte-identical to a chart without Open
   WebUI (tested).
 - Test inputs: `charts/mainframe-rag/ci/openwebui-site-values.yaml` holds obviously fake values
-  (`example.invalid`, TEST-NET CIDR) for lint and render tests only. Never use it at a site.
+  (`example.invalid`, TEST-NET CIDR) for lint and render tests, `artifacts:app-helm-*` and the
+  `airgap:dryrun` stand-ins (with `openwebui-route-ca.pem` as the route CA). Never use them at a site.
 
 **Upgrade consequence for existing sites.** A site upgrading from a release that predates this
 default and whose `airgap.env` has no `OPENWEBUI_*` keys fails validation at the next
@@ -1818,8 +1820,7 @@ statements come from the v0.12.3 source in the pinned image.
 2. Create the Secret (`OPENWEBUI_SECRET`) with `webui-secret-key` (`openssl rand -hex 32`) and
    `oidc-client-secret`. Deploy checks that both keys are present before any mutation.
 3. Set the `OPENWEBUI_*` keys in `airgap.env` (see `airgap.env.example`) and run
-   `sh scripts/tools/run-task.sh airgap:deploy`. The bridge of these keys through
-   `taskfiles/airgap.yml` is a Verifier-owned change (#1074). Deploy verifies the registry image
+   `sh scripts/tools/run-task.sh airgap:deploy`. Deploy verifies the registry image
    and then the running pod's digest (`check_pod_images`, role `openwebui`), waits for the
    rollout (schema migrations at first start), and verifies the Route.
 4. First admin: a member of an admin role signs in once, creates an API key in Open WebUI, and

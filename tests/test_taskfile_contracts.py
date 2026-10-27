@@ -30,6 +30,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from typing import ClassVar
 
 from tests.helpers_simulator import prepare_simulator
 
@@ -50,7 +51,8 @@ LOGGED_ENV_KEYS = ("EMBED_MODE", "VENUE", "PYTHONPATH", "LLM_STREAM", "UI_ENABLE
                    "GATEWAY_PORT", "GATEWAY_PROBE_MAX_TOKENS", "CORPUS_DIR", "LOCAL_INGEST_PROGRESS", "LOCAL_INGEST_REINGEST", "LOCAL_AGENT_PORT", "O2_PORT",
                    "SIM_CONTAINER", "SIM_PORT",
                    "GPU_MEM", "MAX_LEN", "SEQS", "LOCAL_STACK_DRYRUN",
-                   "LLM_MAX_MODEL_LEN", "LLM_REASONING_EFFORT_COMPLEX")
+                   "LLM_MAX_MODEL_LEN", "LLM_REASONING_EFFORT_COMPLEX",
+                   "OWUI_STATE", "KIND_NAME", "APP_NS")
 
 # Python tuple literal rendered into the shell recorders below.
 _LOGGED_KEYS_LITERAL = "(" + ", ".join(f'"{key}"' for key in LOGGED_ENV_KEYS) + ",)"
@@ -227,7 +229,11 @@ class TaskContractsTests(unittest.TestCase):
             'python3 - "$@" <<\'PYEOF\'\n'
             'import json, os, sys\n'
             'keys = ("INTERNAL_REGISTRY", "NAMESPACE", "EMBED_MODE", "CORPUS_PVC",\n'
-            '        "AIRGAP_DRYRUN", "IMAGE_SHA", "STORAGE_CLASS", "QUERY", "AIRGAP_ENV")\n'
+            '        "AIRGAP_DRYRUN", "IMAGE_SHA", "STORAGE_CLASS", "QUERY", "AIRGAP_ENV",\n'
+            '        "OPENWEBUI_ENABLED", "OPENWEBUI_SECRET", "OPENWEBUI_HOST",\n'
+            '        "OPENWEBUI_OIDC_PROVIDER_URL", "OPENWEBUI_OIDC_CLIENT_ID",\n'
+            '        "OPENWEBUI_OIDC_ALLOWED_ROLES", "OPENWEBUI_OIDC_ADMIN_ROLES",\n'
+            '        "OPENWEBUI_IDP_EGRESS_CIDRS", "ROUTE_DESTINATION_CA_FILE")\n'
             'with open(os.environ["RECORDER_LOG"], "a") as fh:\n'
             '    fh.write(json.dumps({"tag": "airgap-stage", "argv": sys.argv[1:],\n'
             '                         "cwd": os.getcwd(),\n'
@@ -578,6 +584,65 @@ class TaskContractsTests(unittest.TestCase):
         proc = self.run_task("artifacts:helm-render", extra_env=self.tool_env())
         self.assertNotEqual(proc.returncode, 0)
         self.assertEqual(self.tool_calls("helm"), [], "helm must not run before chart verification")
+
+    def test_app_chart_lint_and_render_use_the_fake_open_webui_site_inputs(self):
+        # #1118 B2: the bare defaults fail closed (Open WebUI is default-on), so
+        # both tasks pass the documented fake site inputs; nothing else changes.
+        self.make_tool_recorder("helm")
+        self.make_venv_fake()
+        site = ["-f", "charts/mainframe-rag/ci/openwebui-site-values.yaml"]
+        for task, argv in (("artifacts:app-helm-lint", ["lint", "charts/mainframe-rag", *site]),
+                           ("artifacts:app-helm-render",
+                            ["template", "app", "charts/mainframe-rag", "--namespace", "mainframe-rag", *site])):
+            with self.subTest(task=task):
+                self.log.unlink(missing_ok=True)
+                proc = self.run_task(task, extra_env=self.tool_env())
+                self.assertEqual(proc.returncode, 0, proc.stdout)
+                self.assertEqual([c["argv"] for c in self.tool_calls("helm")], [argv])
+
+    def test_openwebui_image_builds_only_its_own_context_with_the_selected_tag(self):
+        self.make_tool_recorder("docker")
+        self.make_venv_fake()
+        for args, tag in (((), "mainframe-rag/openwebui:v0.12.3-slim"),
+                          (("OPENWEBUI_IMAGE=ghcr.io/o/qdrant-pdf-rag-openwebui:x y",),
+                           "ghcr.io/o/qdrant-pdf-rag-openwebui:x y")):
+            with self.subTest(args=args):
+                self.log.unlink(missing_ok=True)
+                proc = self.run_task("artifacts:openwebui-image", *args, extra_env=self.tool_env())
+                self.assertEqual(proc.returncode, 0, proc.stdout)
+                self.assertEqual([c["argv"] for c in self.tool_calls("docker")], [[
+                    "build", "-f", "images/openwebui/Containerfile", "-t", tag, "images/openwebui"]])
+
+    def test_openwebui_dev_tasks_dispatch_to_their_owner_scripts(self):
+        # #1107 tasks; KIND_NAME/APP_NS/OWUI_STATE from the Task CLI reach the scripts.
+        self.recorder_env = {"RECORDER_LOG": str(self.log), "RECORDER_TAG": "x", "RECORDER_EXIT": "0"}
+        self.make_script_recorder("openwebui/dev.sh")
+        self.make_script_recorder("openwebui/acceptance.sh")
+        state = "/private state;$(touch SENTINEL)"
+        cases = (
+            ("local:openwebui:dev-up", "dev.sh", [["up"]]),
+            ("local:openwebui:dev-dry-run", "dev.sh", [["--dry-run", "up"]]),
+            ("local:openwebui:dev-down", "dev.sh", [["down"]]),
+            ("local:openwebui:acceptance", "acceptance.sh", [["deploy"], ["run"]]),
+        )
+        for task, script, argvs in cases:
+            with self.subTest(task=task):
+                self.log.unlink(missing_ok=True)
+                proc = self.run_task(task, f"OWUI_STATE={state}", "KIND_NAME=kind-x", "APP_NS=ns-x",
+                                     extra_env=self.tool_env())
+                self.assertEqual(proc.returncode, 0, proc.stdout)
+                calls = self.script_calls(f"openwebui/{script}")
+                self.assertEqual([c["argv"] for c in calls], argvs)
+                for call in calls:
+                    self.assertEqual(call["env"]["OWUI_STATE"], state)
+                    if script == "acceptance.sh":
+                        self.assertEqual((call["env"]["KIND_NAME"], call["env"]["APP_NS"]), ("kind-x", "ns-x"))
+                self.assertFalse((self.root / "SENTINEL").exists())
+        # A failed deploy never runs the checks.
+        self.log.unlink(missing_ok=True)
+        proc = self.run_task("local:openwebui:acceptance", extra_env={**self.tool_env(), "RECORDER_EXIT": "3"})
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertEqual([c["argv"] for c in self.script_calls("openwebui/acceptance.sh")], [["deploy"]])
 
     def test_images_builds_preparations_then_images_in_order(self):
         self.make_venv_fake()
@@ -1159,21 +1224,118 @@ class TaskContractsTests(unittest.TestCase):
         self.assertEqual(resolved["QUERY"], "")
         self.assertEqual(resolved["EMBED_MODE"], "")
 
-    def test_task_cli_does_not_yet_forward_the_retired_keys(self):
-        """Pins a known gap (#1070 review B1): `run-task airgap:validate
-        JAEGER_QUERY_URL=x` is dropped before common.sh can refuse it, because
-        taskfiles/airgap.yml bridges only the current keys. The Verifier-owned
-        diff in PR #1111 ("Needs Verifier decision") adds the five retired keys
-        to every stage's TASK_* bridge and TASK_OP_KEYS; when it lands, replace
-        this test with an assertion that all five are forwarded."""
+    # Operator stages and the script each Task wrapper runs (retire-legacy's
+    # script name differs from the task name).
+    AIRGAP_STAGES: ClassVar[dict[str, str]] = {"pack": "pack.sh", "load": "load.sh", "deploy": "deploy.sh",
+                     "ingest": "ingest.sh", "smoke": "smoke.sh", "validate": "validate.sh",
+                     "pipeline": "pipeline.sh", "retire-legacy": "retire_legacy.sh"}
+    # airgap.env.example names these two as GitLab CI/CD variables read by
+    # .gitlab-ci.yml, "not from this file"; no air-gap script reads them.
+    CI_ONLY_EXAMPLE_NAMES: ClassVar[frozenset[str]] = frozenset({"CI_APPROVED_REGISTRY", "CI_PYTHON_IMAGE"})
+
+    @staticmethod
+    def example_operator_keys() -> set[str]:
+        """Every key airgap.env.example assigns or shows commented out,
+        derived from the file itself (never a copied list)."""
+        import re
+        text = (REPO / "airgap.env.example").read_text(encoding="utf-8")
+        return set(re.findall(r"(?m)^#?[ \t]*([A-Z][A-Z0-9_]*)=", text)) - TaskContractsTests.CI_ONLY_EXAMPLE_NAMES
+
+    def test_ci_only_example_names_are_not_operator_keys(self):
+        import re
+        text = (REPO / "airgap.env.example").read_text(encoding="utf-8")
+        gitlab = (REPO / ".gitlab-ci.yml").read_text(encoding="utf-8")
+        airgap = "".join(p.read_text(encoding="utf-8") for p in (REPO / "scripts/airgap").iterdir() if p.is_file())
+        for name in self.CI_ONLY_EXAMPLE_NAMES:
+            self.assertRegex(text, rf"(?m)^#[ \t]*{name}=", name)
+            self.assertIn(name, gitlab, name)
+            self.assertIsNone(re.search(rf"\b{name}\b", airgap), name)
+
+    def test_every_example_key_crosses_the_task_cli_and_beats_the_file(self):
+        """#1118 B1: each airgap.env.example key (plus the retired keys, which
+        must reach their refusal) arrives through every operator stage from the
+        Task CLI, and an ambient value beats the file through the real common.sh
+        snapshot. A new example key that misses OPERATOR_ENV_KEYS or the Task
+        bridge fails here instead of being silently dropped or file-won."""
         import re
 
         from scripts.airgap.model_config import RETIRED_KEYS
 
-        text = (REPO / "taskfiles/airgap.yml").read_text(encoding="utf-8")
-        forwarded = set(re.search(r'TASK_OP_KEYS: "([^"]+)"', text).group(1).split())
-        self.assertIn("OTEL_EXPORTER_OTLP_ENDPOINT", forwarded)
-        self.assertEqual(forwarded & {key for key, _, _ in RETIRED_KEYS}, set())
+        keys = sorted(self.example_operator_keys())
+        retired = sorted(key for key, _, _ in RETIRED_KEYS)
+        self.assertGreater(len(keys), 90)
+        common = (REPO / "scripts/airgap/common.sh").read_text(encoding="utf-8")
+        snapshot = set(re.search(r'OPERATOR_ENV_KEYS="([^"]+)"', common).group(1).split())
+        self.assertEqual(sorted(set(keys) - snapshot), [], "missing from OPERATOR_ENV_KEYS (file would win)")
+        self.assertEqual(sorted(set(retired) & snapshot), [], "retired keys are refused, not snapshotted")
+        self.make_airgap_fixtures({key: f"file-{key}" for key in keys})
+        self.recorder_env = {"RECORDER_LOG": str(self.log)}
+        recorded = keys + retired
+        for script in self.AIRGAP_STAGES.values():
+            (self.root / "scripts/airgap" / script).write_text(
+                '#!/bin/sh\n. "$(dirname "$0")/common.sh"\npython3 - <<\'PY\'\nimport json, os\n'
+                + f'keys = {recorded!r}\n'
+                + 'with open(os.environ["RECORDER_LOG"], "a") as fh:\n'
+                + '    fh.write(json.dumps({k: os.environ.get(k) for k in keys}) + "\\n")\nPY\n',
+                encoding="utf-8")
+        cli = {key: f"cli {key} Ω ;$(touch SENTINEL) ' \"\t\nend" for key in recorded}
+        ambient = {key: f"ambient-{key}" for key in keys}
+        for stage in self.AIRGAP_STAGES:
+            for mode in ("cli", "ambient"):
+                with self.subTest(stage=stage, mode=mode):
+                    self.log.unlink(missing_ok=True)
+                    args = tuple(f"{k}={v}" for k, v in cli.items()) if mode == "cli" else ()
+                    proc = self.run_task(f"airgap:{stage}", *args, extra_env={**self.tool_env(), **ambient})
+                    self.assertEqual(proc.returncode, 0, proc.stdout)
+                    got = json.loads(self.log.read_text(encoding="utf-8"))
+                    if mode == "cli":
+                        self.assertEqual(got, cli)
+                    else:
+                        self.assertEqual({k: got[k] for k in keys}, ambient)
+                        self.assertEqual({k: got[k] for k in retired}, dict.fromkeys(retired, ""))
+                    self.assertFalse((self.root / "SENTINEL").exists())
+
+    def test_task_cli_forwards_the_retired_keys_to_their_refusal(self):
+        """#1070 review B1, #1118 B1: `run-task airgap:validate OPENSHIFT_NAMESPACE=x`
+        reaches common.sh's retired-key refusal instead of being dropped: the
+        stage refuses with the fixed migration text, never the value."""
+        from scripts.airgap.model_config import RETIRED_KEYS
+
+        self.make_airgap_fixtures({})
+        shutil.copy(REPO / "scripts/airgap/model_config.py", self.root / "scripts/airgap/model_config.py")
+        self.recorder_env = {"RECORDER_LOG": str(self.log)}
+        for script in self.AIRGAP_STAGES.values():
+            (self.root / "scripts/airgap" / script).write_text(
+                '#!/bin/sh\n. "$(dirname "$0")/common.sh"\nrefuse_retired_keys\n'
+                'echo reached >> "$RECORDER_LOG"\n', encoding="utf-8")
+        cases = [("validate", key, ref) for key, ref, _ in RETIRED_KEYS]
+        cases += [(stage, "OPENSHIFT_NAMESPACE", "547d04d") for stage in self.AIRGAP_STAGES]
+        for stage, key, ref in cases:
+            with self.subTest(stage=stage, key=key):
+                self.log.unlink(missing_ok=True)
+                proc = self.run_task(f"airgap:{stage}", f"{key}=retired-sentinel-value",
+                                     extra_env=self.tool_env())
+                self.assertNotEqual(proc.returncode, 0, proc.stdout)
+                self.assertIn(f"{key} (retired in {ref})", proc.stdout)
+                self.assertNotIn("retired-sentinel-value", proc.stdout)
+                self.assertFalse(self.log.exists(), "the stage must not run past the refusal")
+        # The next ordinary invocation, without the retired key, runs.
+        proc = self.run_task("airgap:validate", extra_env=self.tool_env())
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertEqual(self.log.read_text(encoding="utf-8"), "reached\n")
+
+    def test_retire_legacy_wrapper_passes_flags_after_the_separator(self):
+        self.make_airgap_fixtures({})
+        self.make_script_recorder("airgap/retire_legacy.sh")
+        self.recorder_env = {"RECORDER_LOG": str(self.log), "RECORDER_TAG": "x", "RECORDER_EXIT": "0"}
+        proc = self.run_task("airgap:retire-legacy", "--", "--stage", "copy",
+                             "--confirm", "mainframe_manuals", "--space-verified",
+                             extra_env=self.tool_env())
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        calls = self.script_calls("airgap/retire_legacy.sh")
+        self.assertEqual([c["argv"] for c in calls],
+                         [["--stage", "copy", "--confirm", "mainframe_manuals", "--space-verified"]])
+        self.assertEqual(calls[0]["cwd"], str(self.root))
 
     def test_bridge_set_matches_operator_keys(self):
         import re
@@ -1270,8 +1432,10 @@ class TaskContractsTests(unittest.TestCase):
         self.recorder_env = {"RECORDER_LOG": str(self.log), "RECORDER_TAG": "x", "RECORDER_EXIT": "0"}
         self.make_airgap_fixtures({"INTERNAL_REGISTRY": "file-reg"})
         self.make_airgap_stage_double("pipeline.sh")
-        proc = self.run_task("airgap:dryrun", "INTERNAL_REGISTRY=evil-reg",
-                             extra_env=self.tool_env())
+        # An ambient opt-out (CI job environments set one) does not turn the
+        # default-on front end off in the fixed dry-run (#1118 B2).
+        proc = self.run_task("airgap:dryrun", "INTERNAL_REGISTRY=evil-reg", "OPENWEBUI_HOST=evil.example",
+                             extra_env=dict(self.tool_env(), OPENWEBUI_ENABLED="false"))
         self.assertEqual(proc.returncode, 0, proc.stdout)
         calls = self.airgap_calls()
         self.assertEqual(len(calls), 1)
@@ -1282,6 +1446,18 @@ class TaskContractsTests(unittest.TestCase):
         self.assertEqual(resolved["NAMESPACE"], "mainframe-rag")
         self.assertEqual(resolved["STORAGE_CLASS"], "gp3-csi")
         self.assertIsNone(resolved["QUERY"], "unrelated keys stay absent, never defaulted")
+        # The fake site inputs of charts/mainframe-rag/ci/openwebui-site-values.yaml.
+        self.assertEqual({k: resolved[k] for k in resolved if k.startswith("OPENWEBUI_")}, {
+            "OPENWEBUI_ENABLED": "true",
+            "OPENWEBUI_SECRET": "owui-test-secrets",
+            "OPENWEBUI_HOST": "docs.example.invalid",
+            "OPENWEBUI_OIDC_PROVIDER_URL": "https://idp.example.invalid/.well-known/openid-configuration",
+            "OPENWEBUI_OIDC_CLIENT_ID": "test-client",
+            "OPENWEBUI_OIDC_ALLOWED_ROLES": "test-users",
+            "OPENWEBUI_OIDC_ADMIN_ROLES": "test-admins",
+            "OPENWEBUI_IDP_EGRESS_CIDRS": "192.0.2.0/24",
+        })
+        self.assertEqual(resolved["ROUTE_DESTINATION_CA_FILE"], "charts/mainframe-rag/ci/openwebui-route-ca.pem")
 
     def test_dev_setup_completion_stamp(self):
         # dev:setup requires both .venv/bin/python AND .venv/.setup-complete.

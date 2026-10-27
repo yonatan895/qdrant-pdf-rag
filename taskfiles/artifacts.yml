@@ -98,20 +98,24 @@ tasks:
     desc: Lint the first-party application chart (issue #448)
     summary: |
       Runs `helm lint` against charts/mainframe-rag, validating templates
-      and values.schema.json against the checked-in defaults. Always
+      and values.schema.json against the checked-in defaults plus the fake
+      Open WebUI site inputs (charts/mainframe-rag/ci/openwebui-site-values.yaml),
+      so the default-on front-end templates are linted too. Always
       re-verifies; no cluster, registry, or private config required.
     cmds:
-      - helm lint charts/mainframe-rag
+      - helm lint charts/mainframe-rag -f charts/mainframe-rag/ci/openwebui-site-values.yaml
 
   app-helm-render:
     desc: Render the first-party application chart with defaults (issue #448)
     summary: |
       Runs `helm template` against charts/mainframe-rag with the checked-in
-      defaults (steady-state: no Route, no Job). Rendering proof only;
-      operator releases render from mapped release values via
-      scripts/airgap/map_values.py (see airgap:dryrun). No cluster required.
+      defaults plus the fake Open WebUI site inputs
+      (charts/mainframe-rag/ci/openwebui-site-values.yaml); the bare defaults
+      fail closed by design. Rendering proof only; operator releases render
+      from mapped release values via scripts/airgap/map_values.py (see
+      airgap:dryrun). No cluster required.
     cmds:
-      - helm template app charts/mainframe-rag --namespace mainframe-rag
+      - helm template app charts/mainframe-rag --namespace mainframe-rag -f charts/mainframe-rag/ci/openwebui-site-values.yaml
 
   image:
     desc: Build one application image from already verified build inputs
@@ -163,3 +167,17 @@ tasks:
       - task: bm25
       - docker build --build-context wheelhouse="$TASK_BUNDLE_DIR/wheelhouse" --build-context bm25="$TASK_BUNDLE_DIR/bm25-weights" -f images/Containerfile.ingest -t "$TASK_INGEST_IMAGE_NAME:$TASK_IMAGE_TAG" .
       - docker build --build-context wheelhouse="$TASK_BUNDLE_DIR/wheelhouse" --build-context bm25="$TASK_BUNDLE_DIR/bm25-weights" -f images/Containerfile.agent -t "$TASK_AGENT_IMAGE_NAME:$TASK_IMAGE_TAG" .
+
+  openwebui-image:
+    desc: Build the derived Open WebUI image (connected; no build contexts)
+    summary: |
+      Builds images/openwebui/Containerfile (the pinned upstream slim release
+      plus one ownership layer) as OPENWEBUI_IMAGE (default
+      mainframe-rag/openwebui:v0.12.3-slim). Connected host only; the air gap
+      never builds. The pushed manifest digest is then recorded in images.txt.
+    vars:
+      OPENWEBUI_IMAGE: '{{if hasKey . "OPENWEBUI_IMAGE"}}{{.OPENWEBUI_IMAGE}}{{else}}mainframe-rag/openwebui:v0.12.3-slim{{end}}'
+    env:
+      TASK_OPENWEBUI_IMAGE: '{{.OPENWEBUI_IMAGE}}'
+    cmds:
+      - docker build -f images/openwebui/Containerfile -t "$TASK_OPENWEBUI_IMAGE" images/openwebui
