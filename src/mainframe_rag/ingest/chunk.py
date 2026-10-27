@@ -154,6 +154,12 @@ def detect_code_region(text: str) -> str | None:
     return None
 
 
+def _is_dd_data_para(text: str) -> bool:
+    """True when the paragraph opens a SYSIN in-stream block (a DD */DATA
+    card), making following data paragraphs adjacency candidates."""
+    return any(_JCL_DD_DATA_RE.match(line.lstrip()) for line in text.splitlines())
+
+
 def detect_table_region(text: str) -> bool:
     """Column-block test for atomic row splitting (issue #216): a table
     block only when it is NOT code (JCL continuations carry wide indents
@@ -287,6 +293,7 @@ class Section:
 # extraction work (#271), not a prompt-packing concern.
 UNIT_ATOMIC = "atomic"
 UNIT_PROSE = "prose"
+_UNIT_KINDS = frozenset({UNIT_ATOMIC, UNIT_PROSE})
 
 # Payload-size bound on persisted spans: a pathological multi-thousand-line
 # block stays servable by falling back to pack-time redetection (the same
@@ -834,11 +841,7 @@ def _build_blocks(
         statements = _code_statements(para)
         if statements:
             items.extend((page_idx, statement, True) for statement in statements)
-            # A DD */DATA card opens a SYSIN block: following data
-            # paragraphs are adjacency candidates.
-            dd_data_open = any(
-                _JCL_DD_DATA_RE.match(line.lstrip()) for line in para.splitlines()
-            )
+            dd_data_open = _is_dd_data_para(para)
         elif code_section and (code_items := _code_entries(para)) is not None:
             items.extend((page_idx, text, atomic) for text, atomic in code_items)
             dd_data_open = False
