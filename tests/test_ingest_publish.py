@@ -276,6 +276,15 @@ def test_first_publish_creates_alias_and_clean_rerun_is_noop(tmp_path, monkeypat
     assert fake.aliases[ALIAS] == gens[0], "steady state must not flip the alias"
     assert len(fake.collections) == n_collections, "no new staging on a clean rerun"
 
+    # A named staging generation is cloned from live, not rebuilt: live's
+    # contract is re-keyed into the clone (issue #391 F5).
+    from mainframe_rag.ingest.publish import ensure_staging
+    from mainframe_rag.ingest.representation import read_manifest
+
+    candidate = "mainframe_manuals__gen00112233445566778899"
+    assert ensure_staging(fake, _settings(), _staging_settings(candidate), gens[0]) == "cloned"
+    assert read_manifest(fake, f"{candidate}__completions") is not None
+
 
 def test_refresh_publishes_new_generation_keeps_old_and_rolls_back(tmp_path, monkeypatch):
     from mainframe_rag.ingest.qdrant_io import swap_alias_to
