@@ -540,6 +540,49 @@ def test_judge_verdict_table(case):
         assert any(failure in f for f in fails), fails
 
 
+# The structured-decline predicate is shared by the agent and the eval
+# (issues #764/#877): the prefix, the coverage note and the quoting forms are
+# the contract, so these stay explicit beside the verdict table.
+def test_structured_decline_with_coverage_note_is_judged_as_a_decline() -> None:
+    from mainframe_rag.agent.answer import DECLINE_PREFIX
+
+    body = f"{DECLINE_PREFIX} the LFAREA retry limit. The excerpts describe LFAREA syntax for IEASYSxx only."
+    verdict, fails, warns = judge(_entry(expected_behavior="abstain"), body, [])
+    assert verdict == "pass" and fails == [] and warns == []
+    verdict, fails, _ = judge(_entry(), body, ["SA23-1380-70 ref, p. 1"])
+    assert verdict == "fail"
+    assert any("explicit refusal" in f for f in fails)
+
+
+def test_decline_edge_cases_are_scored_by_the_shared_predicate() -> None:
+    from mainframe_rag.agent.answer import DECLINE_PREFIX
+
+    cited = f"{DECLINE_PREFIX} IEA500I.\n[1] Set RETRY=5 in IEASYSxx."
+    assert is_abstention(cited) is False
+    verdict, fails, _ = judge(_entry(), cited, ["SA23-1380-70 ref, p. 1"])
+    assert not any("explicit refusal" in f for f in fails), (verdict, fails)
+    for quoted in (f"\u201c{DECLINE_PREFIX} IEA500I.\u201d", f'"{DECLINE_PREFIX} IEA500I."'):
+        assert is_abstention(quoted) is True
+        assert judge(_entry(expected_behavior="abstain"), quoted, [])[:2] == ("pass", [])
+        verdict, fails, _ = judge(_entry(), quoted, ["SA23-1380-70 ref, p. 1"])
+        assert verdict == "fail" and any("explicit refusal" in f for f in fails)
+
+
+@pytest.mark.parametrize("row_id", ["DIA-08", "MSG-01"])
+def test_structured_decline_naming_the_identifier_meets_identifier_abstention_rows(row_id: str) -> None:
+    from pathlib import Path
+
+    from mainframe_rag.agent.answer import DECLINE_PREFIX, verification_state_for
+
+    golden = Path(__file__).resolve().parents[1] / "evals" / "golden.jsonl"
+    entry = next(json.loads(line) for line in golden.read_text().splitlines()
+                 if line.strip() and json.loads(line)["id"] == row_id)
+    body = f"{DECLINE_PREFIX} {entry['must_cite_identifier']}."
+    state = verification_state_for(answer=body, citations=[], citations_inferred=False,
+                                   finish_reason="stop", abstained=is_abstention(body), empty_hits=False)
+    assert judge(entry, body, [], verification_state=state)[:2] == ("pass", [])
+
+
 def test_abstain_long_grounded_decline_still_warns() -> None:
     """The trap branch keeps the marker test (#305 scope): a long grounded
     answer that declines still declines, so it warns rather than failing as

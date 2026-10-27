@@ -95,6 +95,26 @@ def test_summarize_means_rates_and_sums_faults():
 
 
 # ---------------------------------------------------------------- gate
+def test_gate_structural_fault_dominates_healthy_rates():
+    summary = summarize_l4([_run(structural_fails=2), _run()])
+    verdict, reasons, _ = gate_l4(summary, _thresholds())
+    assert verdict == "fail"
+    assert any("structural failure" in r for r in reasons)
+    assert not any("grounded_rate" in r for r in reasons)
+
+
+@pytest.mark.parametrize("runs,metric", [
+    # syntax_compliance is None when a sample has no syntax rows.
+    ([_run(syntax_compliance=None), _run(syntax_compliance=None)], "syntax_compliance"),
+    # A leg missing from one repeat cannot be averaged over the others.
+    ([_run(), _run(relevance={"judge_errors": 0})], "relevance.relevant"),
+], ids=["none-everywhere", "missing-in-one-repeat"])
+def test_gate_uncomputed_metric_fails_closed(runs, metric):
+    verdict, reasons, _ = gate_l4(summarize_l4(runs), _thresholds())
+    assert verdict == "fail"
+    assert any(metric in r and "not computed" in r for r in reasons)
+
+
 @pytest.mark.parametrize(("runs", "verdict", "needle", "borderline"), [
     (None, "pass", None, False),
     # A metric inside the tolerance band: human review, not fail.
