@@ -924,7 +924,7 @@ def test_role_list_mode_no_docs_group_is_refused_and_expect_refused_passes(tmp_p
     claims = {"groups": [PRIMARY, OTHER], "upn": UPN, "name": DISPLAY}
     rc, _ = _decode(tmp_path, claims)
     out = capsys.readouterr().out
-    assert rc == 8 and "outcome: refused (HTTP 403, no session)" in out
+    assert rc == 8 and "outcome: refused (redirect to /auth?error=..., no session cookie)" in out
     assert "FAIL: the account matches no configured role; Open WebUI would refuse it" in out
     rc, _ = _decode(tmp_path, claims, "--expect-refused")
     out = capsys.readouterr().out
@@ -948,7 +948,7 @@ def test_role_list_mode_absent_claim_fails_even_when_a_refusal_is_expected(
     tmp_path, capsys, claims
 ):
     # Revocation needs the claim on every sign-in: with no claim Open WebUI keeps
-    # the stored role, which is not the 403 the no-role account must get.
+    # the stored role, which is not the refusal the no-role account must get.
     for extra in ((), ("--expect-refused",)):
         rc, _ = _decode(tmp_path, claims, *extra)
         out = capsys.readouterr().out
@@ -1072,7 +1072,9 @@ def test_listener_role_list_mode_expect_refused_against_the_fake_adfs(adfs):
     adfs.claims_fn = lambda n: {"groups": PRIMARY, "upn": UPN, "name": DISPLAY}
     rc, out = run_check(adfs, *ROLE_ARGS, "--expect-refused")
     assert rc == 0, out
-    assert "form=single string, count=1" in out and "outcome: refused (HTTP 403" in out
+    assert (
+        "form=single string, count=1" in out and "outcome: refused (redirect to /auth?error=" in out
+    )
     assert PRIMARY not in out
     assert_no_leak(out)
 

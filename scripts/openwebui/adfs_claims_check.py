@@ -9,7 +9,8 @@ Two modes. Baseline mode (default) expects the IdP to issue a constant baseline
 value plus role values. Role-list mode (``--allowed-roles``/``--admin-roles``) is
 for an IdP that can only issue LDAP attributes: the roles claim is the group
 claim itself, and the check predicts the Open WebUI v0.12.3 outcome (admin, user
-or refused with 403) from the configured role lists.
+or refused) from the configured role lists. A refusal is a 403 inside Open WebUI; the
+browser gets a redirect to /auth?error=... and no session cookie.
 
 Output rules: claim NAMES, a roles-claim JSON type and value COUNT, the ID token
 size, yes/no answers and, in role-list mode, the CONFIGURED role values that
@@ -233,7 +234,7 @@ def predict_outcome(roles: list[Any], allowed: list[str], admin: list[str]) -> s
 OUTCOME_TEXT = {
     "admin": "admin",
     "user": "user",
-    "refused": "refused (HTTP 403, no session)",
+    "refused": "refused (redirect to /auth?error=..., no session cookie)",
     "unchanged": "no role decision (claim absent or empty): an existing user keeps the "
     "stored role and a new user is pending",
 }
@@ -876,7 +877,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--expect-refused",
         action="store_true",
         help="role-list mode: the test account is in no docs group: pass only if the "
-        "roles claim is present and Open WebUI would refuse the sign-in (403)",
+        "roles claim is present and Open WebUI would refuse the sign-in",
     )
     p.add_argument("--scopes", default=env("ADFS_SCOPES", DEFAULT_SCOPES))
     p.add_argument("--port", type=int, default=int(env("ADFS_CALLBACK_PORT", "8400") or 8400))

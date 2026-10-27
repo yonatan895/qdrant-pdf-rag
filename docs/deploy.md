@@ -1783,7 +1783,9 @@ statements come from the v0.12.3 source in the pinned image.
      - An admin role is present: the user becomes `admin`.
      - Otherwise an allowed role is present: the user becomes `user`, so a removed admin is
        demoted.
-     - Only `signed-in` is present: sign-in is refused with HTTP 403 and no session is issued.
+     - Only `signed-in` is present: sign-in is refused. Open WebUI raises 403 internally and the
+       callback answers with a redirect to `/auth?error=...` and no session cookie
+       (`utils/oauth.py` `handle_callback`), so the browser shows an error on the sign-in page.
      - No claim at all: an existing user keeps the stored role, and a new user is `pending`.
        The baseline rule exists to prevent this case.
    - **Revocation window.** The IdP change takes effect at the next sign-in. A session that is
@@ -1818,7 +1820,8 @@ step 3 then cannot be issued. Steps 1, 2 and 4 to 6 are unchanged; step 3 become
   no trusts, which the identity team must confirm in writing.
 - **Revocation.** Token-Groups always includes the user's primary group (Domain Users), so the
   claim is present in every token. A user in neither docs group carries only values that match
-  no configured role and is refused (403), so the guarantee above still holds without a
+  no configured role and is refused (redirected to `/auth?error=...` without a session), so the
+  guarantee above still holds without a
   baseline. The chart's refusal of `*` and `signed-in` stays. A group literally named `*` cannot
   be configured, and a claim value `*` matches nothing (only a configured `*` is a wildcard).
 - **Token size.** Every group of the user is in the ID token. By default Open WebUI v0.12.3
@@ -1832,7 +1835,11 @@ step 3 then cannot be issued. Steps 1, 2 and 4 to 6 are unchanged; step 3 become
   puts it in the IdP logout URL. AD FS runs on Windows http.sys, which by default limits the
   request line and headers to 16384 bytes (Microsoft's http.sys registry documentation; not
   verified here). The claims check warns above 8000 bytes; above that, confirm sign-out on the
-  test client.
+  test client. No size remedy is needed for sign-in. If sign-out to the IdP fails for a very
+  large token, the Rosetta session is already gone: the sign-out response deletes its cookies
+  before the redirect. Do not shrink the group claim: in this form the shorter queries either
+  give bare names (fail open, above) or drop the primary group, and so lose the claim that
+  revocation relies on.
 - **Sign-out.** Open WebUI v0.12.3 (`routers/auths.py` `signout`) deletes its session cookies and,
   for an OIDC session, sends the browser to the IdP's `end_session_endpoint` from discovery with
   `id_token_hint` taken from the server-side OAuth session (not from a cookie). Whether AD FS then
@@ -1844,7 +1851,7 @@ step 3 then cannot be issued. Steps 1, 2 and 4 to 6 are unchanged; step 3 become
   values, that is, all their group names (v0.12.3 `get_user_role`). This is identity metadata in
   the pod log, not chat content.
 - **Check.** Run the [claims check](#adfs-claims-check) in role-list mode before deploying. In
-  step 6, the 403 for the account in no docs group shows that the group claim arrives.
+  step 6, the refusal of the account in no docs group shows that the group claim arrives.
 
 4. **CA.** If the enterprise CA issued the AD FS TLS certificate, export that CA (root and any
    intermediate) as PEM and set `OPENWEBUI_IDP_CA_FILE`. Without it, Open WebUI cannot reach the
@@ -1861,7 +1868,8 @@ step 3 then cannot be issued. Steps 1, 2 and 4 to 6 are unchanged; step 3 become
    be a member of that group; the chart does not create groups from the claim, so create the
    group first. This shows that the ID token carried the e-mail, role and group claims. Then
    prove revocation: sign in with a test account that is in no role group. It must be refused
-   (HTTP 403, an error on the sign-in page). That shows the baseline claim arrives. Next, remove
+   (a redirect to `/auth?error=...` with no session cookie, shown as an error on the sign-in
+   page). That shows the baseline claim arrives. Next, remove
    a test admin from the admin group, keeping it in the user group. At its next sign-in it must
    show the `user` role.
 
@@ -2210,7 +2218,8 @@ python3 -I scripts/openwebui/adfs_claims_check.py --paste \
 ```
 
 It reports whether the claim is a list or a string (split on `,`), which configured roles
-matched, and the predicted Open WebUI v0.12.3 outcome: `admin`, `user` or refused (403). Run it
+matched, and the predicted Open WebUI v0.12.3 outcome: `admin`, `user` or refused (a redirect
+to `/auth?error=...` with no session cookie). Run it
 with a docs-group account (expect exit 0), then with `--expect-refused` and an account in
 neither docs group: it passes only if the claim is present and the prediction is a refusal.
 It fails when a configured role differs from a claim value only by letter case, a domain
