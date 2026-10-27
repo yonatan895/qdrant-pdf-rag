@@ -33,6 +33,13 @@ from scripts.colab_runtime import (
 )
 
 
+@pytest.fixture(autouse=True)
+def roomy_disk(monkeypatch):
+    """The host's free space is not an input: tmp_path may sit on a small tmpfs
+    (Ubuntu 26.04 runners), below the GPU path's 8 GiB floor and the fetch budget."""
+    monkeypatch.setattr("shutil.disk_usage", lambda _path: SimpleNamespace(free=200000 * 1024**2))
+
+
 def synthetic_pooling_record(profile, software, candidate, source):
     """Original control-flow packet, never qualified native-library evidence."""
     server = profile["servers"][1]
