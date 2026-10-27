@@ -18,6 +18,20 @@ from scripts import local_verify as lv
 ROOT = Path(__file__).resolve().parents[1]
 
 
+@pytest.fixture
+def disk_backed_tmp(monkeypatch, tmp_path):
+    """Declare tmp_path disk-backed: the host's /tmp may be tmpfs (Ubuntu 26.04
+    runners). The real check still runs; its refusal is pinned by
+    test_ram_backed_out_dir_refuses_by_longest_mount_prefix."""
+    checked, real = [], lv.check_disk_backed
+    def check(path, mounts):
+        checked.append(path)
+        point = str(tmp_path.resolve()).replace(' ', '\\040')
+        real(path, f'{mounts}\ntest-disk {point} ext4 rw 0 0\n')
+    monkeypatch.setattr(lv, 'check_disk_backed', check)
+    return checked
+
+
 def test_child_env_is_allowlisted_and_records_explicit_passes(tmp_path):
     inherited = {'PATH': '/usr/bin', 'HOME': '/home/u', 'LC_ALL': 'C.UTF-8', 'PYTHONPATH': '/other/src',
                  'EMBED_MODE': 'dense', 'LLM_BASE_URL': 'http://x', 'ALLOW_HASH_MODE': '1',
@@ -184,7 +198,7 @@ def test_out_dir_inside_the_repository_refuses_and_default_is_outside(tmp_path):
     assert lv.default_out_dir({'HOME': '/h'}) == Path('/h/.local/state/mainframe-rag/local-verify')
 
 
-def test_run_writes_a_receipt_for_exactly_the_selection_and_drops_ambient_env(monkeypatch, tmp_path):
+def test_run_writes_a_receipt_for_exactly_the_selection_and_drops_ambient_env(monkeypatch, tmp_path, disk_backed_tmp):
     out = tmp_path / f'out-{uuid.uuid4().hex}'
     node = 'tests/test_local_selection.py::test_selection_is_deterministic_and_sorted'
     monkeypatch.setenv('EMBED_MODE', 'dense')
@@ -203,6 +217,7 @@ def test_run_writes_a_receipt_for_exactly_the_selection_and_drops_ambient_env(mo
     assert {'EMBED_MODE', 'PYTHONPATH'} <= set(receipt['environment']['dropped'])
     assert receipt['memory_max_mib'] is None
     assert receipt['evidence'] == (not receipt['tree']['dirty'])
+    assert [path.parent for path in disk_backed_tmp] == [out]
 
 
 def test_t0_targets_follow_the_ci_lint_scope():
@@ -265,7 +280,8 @@ def test_tree_state_keeps_unstaged_status_paths_and_dirty_rename_sides(tmp_path)
     assert lv.changed_paths(tmp_path, {**state, 'base': {'ref': 'origin/main', 'sha': base}}) == expected
 
 
-def test_unmapped_change_refuses_then_a_select_override_runs_and_is_recorded(monkeypatch, tmp_path, capsys):
+def test_unmapped_change_refuses_then_a_select_override_runs_and_is_recorded(monkeypatch, tmp_path, capsys,
+                                                                           disk_backed_tmp):
     from scripts import local_selection
     orphan = 'src/mainframe_rag/not_a_real_module.py'
     monkeypatch.setattr(lv, 'changed_paths', lambda root, state: [orphan])
@@ -282,6 +298,7 @@ def test_unmapped_change_refuses_then_a_select_override_runs_and_is_recorded(mon
     assert receipt['selection']['override'] == {'select': [node], 'unmapped': [orphan]}
     assert receipt['t0'] == {'files': [], 'ruff': None, 'mypy_src': None, 'mypy_scripts': None}
     assert receipt['counts']['executed'] == 1 and receipt['result'] == 'passed'
+    assert disk_backed_tmp == [run]
 
 
 def test_auto_selection_of_only_the_runner_self_test_refuses_with_a_fixed_message(monkeypatch, tmp_path, capsys):
@@ -308,7 +325,7 @@ def test_colab_lock_matters_only_for_selections_that_exercise_the_controller():
     assert 'tests/test_local_verify.py' in lv.colab_lock_sensitive(['tests/test_local_verify.py'])
 
 
-def test_held_lock_refuses_a_controller_selection_but_not_an_unrelated_one(tmp_path, capsys):
+def test_held_lock_refuses_a_controller_selection_but_not_an_unrelated_one(tmp_path, capsys, disk_backed_tmp):
     lock = tmp_path / 'assignment.lock'
     common = ['--no-memory-cap', '--python', nested_python(tmp_path), '--out-dir', str(tmp_path / 'out')]
     unrelated = 'tests/test_local_selection.py::test_selection_is_deterministic_and_sorted'
