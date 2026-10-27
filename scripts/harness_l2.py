@@ -7,7 +7,6 @@ import json
 import sys
 import time
 from pathlib import Path
-from typing import Any
 
 # Preserve the supported uninstalled-checkout script entry.
 _SOURCE = Path(__file__).resolve().parents[1] / "src"
@@ -17,7 +16,7 @@ if str(_SOURCE) not in sys.path:
 from mainframe_rag.eval.answer_tier import gate_l2, run_l2, write_summary
 from mainframe_rag.eval.datasets import (
     DatasetError,
-    read_golden_text,
+    load_golden_records,
     require_rc_for_collection,
     resolve_golden_paths,
 )
@@ -41,12 +40,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         golden_paths = resolve_golden_paths(args.golden)
         require_rc_for_collection(load_settings().qdrant_collection)
-        entries: list[dict[str, Any]] = []
-        for p in golden_paths:
-            for line in read_golden_text(p).splitlines():
-                line = line.strip()
-                if line and not line.startswith("#"):
-                    entries.append(json.loads(line))
+        entries = load_golden_records(golden_paths)
     except DatasetError as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 2

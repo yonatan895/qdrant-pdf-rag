@@ -121,15 +121,6 @@ def _timestamp(value: Any, limit: float) -> float | None:
     return out if math.isfinite(out) and out <= limit else None
 
 
-def _finite_scalars(values: dict[str, Any]) -> bool:
-    """Telemetry numbers must be finite floats or ints within signed 64 bits
-    (what the store could hold; a 10**400 int is not representable as float)."""
-    return all(
-        (math.isfinite(v) if isinstance(v, float)
-         else -(2**63) <= v < 2**63 if isinstance(v, int) and not isinstance(v, bool) else True)
-        for v in values.values())
-
-
 def parse_export(data: bytes, *, now: float) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Validate a whole export; return (answers, ratings) as store rows."""
     if not data.endswith(b"\n"):
@@ -179,7 +170,12 @@ def parse_export(data: bytes, *, now: float) -> tuple[list[dict[str, Any]], list
             rec = _validate(AnswerRecord, {**fields, "finalized_at": created},
                             "invalid_answer", n)
             out = {**rec.model_dump(exclude={"finalized_at"}), "created_at": created}
-            if not _finite_scalars(out["telemetry"]):
+            # Telemetry numbers must be finite floats or ints within signed
+            # 64 bits (a 10**400 int is not representable as float).
+            if not all(
+                (math.isfinite(v) if isinstance(v, float)
+                 else -(2**63) <= v < 2**63 if isinstance(v, int) and not isinstance(v, bool) else True)
+                for v in out["telemetry"].values()):
                 raise Refused(f"invalid_answer_line_{n}")
         else:
             rat = _validate(Rating, fields, "invalid_rating", n)

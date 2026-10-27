@@ -51,15 +51,6 @@ def error_payload(
     }
 
 
-def _usage_payload(usage: TokenUsage) -> dict[str, int]:
-    return {
-        "prompt_tokens": usage.prompt_tokens,
-        "completion_tokens": usage.completion_tokens,
-        "reasoning_tokens": usage.reasoning_tokens,
-        "total_tokens": usage.total_tokens,
-    }
-
-
 def empty_final_payload(
     request_id: str,
     answer: str,
@@ -124,7 +115,12 @@ def final_payload(
         "hits": [h.model_dump() for h in hits],
         "finish_reason": finish_reason,
         "ttft_ms": ttft_ms,
-        "usage": _usage_payload(usage),
+        "usage": {
+            "prompt_tokens": usage.prompt_tokens,
+            "completion_tokens": usage.completion_tokens,
+            "reasoning_tokens": usage.reasoning_tokens,
+            "total_tokens": usage.total_tokens,
+        },
     }
 
 

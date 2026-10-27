@@ -533,6 +533,11 @@ TAIL_EXAMPLE_CITE = (
     "SA22-7592-05 z/OS MVS Initialization and Tuning Reference, IEASYSxx > LFAREA, p. 1-17"
 )
 
+# Iterated excerpt frames (issue #80 injection isolation): instruction-like
+# prose inside chunk text cannot blend into the prompt. Delimiters carry no
+# attributes — the [i] cite header line already identifies the block, and
+# attribute parsing would be a second format to keep honest — and the body is
+# escaped first (issue #999), so the only exact delimiter lines are ours.
 EXCERPT_OPEN = "<retrieved-excerpt>"
 EXCERPT_CLOSE = "</retrieved-excerpt>"
 
@@ -598,16 +603,6 @@ def _escape_excerpt(text: str) -> str:
         return text
     pieces.append(text[last:])
     return "".join(pieces)
-
-
-def _frame_excerpt(text: str) -> str:
-    """Delimit one excerpt block so instruction-like prose inside chunk text
-    cannot blend into the surrounding prompt (issue #80 injection
-    isolation). Delimiters carry no attributes: the [i] cite header line
-    already identifies the block, and attribute parsing would be a second
-    format to keep honest. The block is escaped first (issue #999), so the
-    only exact delimiter lines in the prompt are the ones added here."""
-    return f"{EXCERPT_OPEN}\n{_escape_excerpt(text)}\n{EXCERPT_CLOSE}"
 
 
 @dataclass(frozen=True)
@@ -1167,7 +1162,10 @@ def order_prompt_blocks(
     only, so a policy can never silently drop the tail (citation
     instruction) or duplicate excerpts. Unknown policies fail closed."""
     framed = [
-        (name, _frame_excerpt(text) if name == "excerpt" else text) for name, text in blocks
+        (name, f"{EXCERPT_OPEN}\n{_escape_excerpt(text)}\n{EXCERPT_CLOSE}")
+        if name == "excerpt"
+        else (name, text)
+        for name, text in blocks
     ]
     if policy == "retrieval":
         ordered = framed
