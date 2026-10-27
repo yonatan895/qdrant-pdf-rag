@@ -642,8 +642,11 @@ class ScopedFilterAwareFakeQdrant(FakeQdrant):
         self.batch_calls = 0
 
     def _matching(self, flt: models.Filter | None) -> list[models.ScoredPoint]:
+        """The client's own filter evaluator; no filter is unfiltered, not a miss."""
         from qdrant_client.local.payload_filters import check_filter
 
+        if flt is None:
+            return list(self._dense)
         return [p for p in self._dense if check_filter(flt, p.payload, p.id, {})]
 
     def query_batch_points(self, collection, requests, **_):
@@ -668,6 +671,43 @@ _SCOPE_POOL = [
     _spoint("linux-31", "LN-001", product="Linux", version="3.1"),
     _spoint("linux-10", "LN-002", product="Linux", version="1.0"),
 ]
+
+
+def test_search_filter_fallback_retains_explicit_scope_and_excludes_out_of_scope(embedder):
+    """Invariant D1, also the `scope-losing-fallback` hazard target
+    (tests/hazards/critical.json): when an identifier matches 0 points, the
+    fallback drops identifier clauses but retains explicit caller scope
+    (product, version). Out-of-scope records must never be returned."""
+    in_scope = _spoint("hit-zos", "SA22-7592-05", product="z/OS", version="3.1",
+                       heading_path="Init", text="z/OS initialization text")
+    out_scope_prod = _spoint("hit-linux", "LN-001", title="Linux Manual", product="Linux",
+                             version="3.1", heading_path="Boot", text="Linux boot text")
+    out_scope_ver = _spoint("hit-zos-24", "SA22-7592-04", title="z/OS Old Manual",
+                            product="z/OS", version="2.4", heading_path="Init",
+                            text="z/OS 2.4 text")
+    fake = ScopedFilterAwareFakeQdrant([in_scope, out_scope_prod, out_scope_ver])
+    hits, kind, _timings = search(
+        fake, embedder, "mainframe_manuals", "Identify SC23-6862",  # matches no stored doc id
+        product="z/OS", version="3.1", limit=5,
+    )
+    assert kind == "identifier"
+    assert fake.batch_calls == 2
+    # First batch carried doc_id + product + version -> matched 0 points.
+    first_keys = {c.key for c in fake.batch_requests[0].filter.must}
+    assert first_keys == {"doc_id", "product", "version"}
+    # Second batch (fallback retry) retained product + version, dropped doc_id.
+    fallback_filter = fake.batch_requests[2].filter
+    assert fallback_filter is not None
+    fallback_keys = {c.key for c in fallback_filter.must}
+    assert fallback_keys == {"product", "version"}
+    # Recovered hits MUST contain the in-scope hit only; never the out-of-scope ones.
+    assert len(hits) == 1
+    assert hits[0].chunk_id == "hit-zos"
+    assert hits[0].product == "z/OS"
+    assert hits[0].version == "3.1"
+    hit_ids = {h.chunk_id for h in hits}
+    assert "hit-linux" not in hit_ids
+    assert "hit-zos-24" not in hit_ids
 
 
 @pytest.mark.parametrize(("pool", "scope", "kept", "projected"), [
