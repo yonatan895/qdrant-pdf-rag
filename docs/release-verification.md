@@ -5,7 +5,7 @@ signing contracts remain in [deploy.md](deploy.md) and
 [install_and_ops.md](install_and_ops.md#4-standard-deployment-architecture-air-gap-production--local-cluster-testing).
 Run shell blocks in order, stop on any nonzero exit, use a separate terminal for
 each foreground service and set `umask 077` in operator shells. Keep private
-state outside both Git and the extracted candidate; save only sanitized evidence.
+state outside Git and the extracted candidate; save only sanitized evidence.
 Local addresses, certificates, model choices and resource overrides below belong
 to the rehearsal. Production receives its model endpoints and identities from the
 platform team.
@@ -36,10 +36,9 @@ Mock citations prove interfaces, not answer quality; the Kind lane uses real
 models. Site-specific production storage, identity, network policy and capacity
 acceptance remain separate. No laptop runner or new deployment framework is
 needed. A changed image or configuration requires a new candidate and new
-acceptance; never edit a signed bundle or repack separately per lane. Removing
-or renaming an
-[extension-surface](adr/0009-gap-fork.md#9-extension-surface-open-question-2-decided)
-item needs a [release note](release-notes.md).
+acceptance; never edit a signed bundle or repack separately per lane.
+[Extension-surface](adr/0009-gap-fork.md#9-extension-surface-open-question-2-decided)
+removals and renames need a [release note](release-notes.md).
 
 ## 1. Host and pinned models
 
@@ -758,14 +757,14 @@ PY_LONG
 
 This input is synthetic. Representative RAG prompts and explicit citations are
 checked separately by `application_contracts.py` and the browser exercise. The
-production gateway uses its owning team's model/tokenizer and dimension; do not
-copy these local model constants into production settings.
+production gateway uses its owner's model/tokenizer and dimension; do not
+copy these local constants into production settings.
 
 <a id="promotion"></a>
 ## 7. Cleanup and promotion
 
-Stop the private port-forward after recording results and export only the
-synthetic recovery evidence needed for the record. Remove only the disposable
+After recording results, stop the private port-forward and export only the
+synthetic recovery evidence the record needs. Remove only the disposable
 cluster and its two added network connections:
 
 ```sh
@@ -774,8 +773,9 @@ docker network disconnect kind rag-kind-registry
 docker network disconnect kind rag-kind-gateway-tls
 ```
 
-The TLS services, registry, model files, TLS material and gateway key store
-remain for the next rehearsal. Never delete another cluster or prune its volumes.
+The TLS services keep their original connections and loopback ports, and the
+registry, model files, TLS material and gateway key store remain for the next
+rehearsal. Never delete another cluster or prune its volumes.
 
 Promotion requires every required row in [the release record](release-record.md)
 to be `PASS`, evidence attributable to this bundle, and named operator sign-off.
@@ -783,12 +783,12 @@ to be `PASS`, evidence attributable to this bundle, and named operator sign-off.
 transfer. This is an operator-enforced gate; the pack/load scripts do not read the
 record. Transfer **the identical tested tarball and checksum**, plus its record,
 through the approved channel. Do not rebuild, repack, edit or substitute an image.
-Recheck the checksum on arrival, then use the existing bootstrap, validation,
+Recheck the checksum on arrival, then use the bootstrap, validation,
 deployment pipeline, [site OpenShift acceptance](install_and_ops.md#site-openshift-acceptance)
 and production acceptance commands. A bundle or security/configuration fix
 requires a new candidate and a fresh gate.
 
-Before claiming production compatibility, obtain the production OpenShift
+Before claiming production compatibility, obtain the OpenShift
 version, storage driver/topology, SCC/RBAC policy, identity integration, registry
 trust and network restrictions, and record each difference with its acceptance
 owner. Local success establishes neither production capacity nor multi-node

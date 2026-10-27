@@ -214,10 +214,19 @@ def test_a_release_note_alone_is_never_the_migration(tree, mutate, category, ite
 
 
 # B3: a refusing stub under the old name is a retirement, not a current item.
+# The `{ echo ... >&2; exit N; }` form the taskfiles use (dev.yml, artifacts.yml, local.yml).
+FLAG_BRACE_STUB = FLAG_STUB.replace('die "--skip-load was renamed: use --no-load"',
+                                    '{ echo "--skip-load was renamed: use --no-load" >&2; exit 2; }')
+TASK_BRACE_STUB = TASK_STUB.replace("'echo \"airgap:pipeline was renamed: use airgap:run\" >&2; exit 1'",
+                                    "'{ echo \"airgap:pipeline was renamed: use airgap:run\" >&2; exit 2; }'")
+
+
 @pytest.mark.parametrize(("path", "old", "stub", "category", "item", "replacement"), [
     (PIPELINE, SKIP_LOAD_ARM, FLAG_STUB, "script_flags", "pipeline.sh --skip-load", "--no-load"),
     (TASKS, "  pipeline:\n", TASK_STUB, "task_names", "airgap:pipeline", "airgap:run"),
-], ids=["flag", "task"])
+    (PIPELINE, SKIP_LOAD_ARM, FLAG_BRACE_STUB, "script_flags", "pipeline.sh --skip-load", "--no-load"),
+    (TASKS, "  pipeline:\n", TASK_BRACE_STUB, "task_names", "airgap:pipeline", "airgap:run"),
+], ids=["flag", "task", "brace-group flag", "brace-group task"])
 def test_a_refusing_stub_needs_its_release_note(tree, path, old, stub, category, item, replacement):
     edit(tree / path, old, stub)
 
@@ -252,3 +261,72 @@ def test_a_values_refusal_is_a_fixed_line_in_the_owner_naming_both_paths(tree):
                "migration: refusal in `scripts/airgap/deploy.sh`")
 
     assert_refreshes(tree, "chart_values", "qdrant:imagePullSecrets[0].name")
+
+
+def test_brace_group_fixtures_use_the_taskfiles_own_idiom():
+    assert "; exit 1; }'" in (ROOT / "taskfiles/dev.yml").read_text(encoding="utf-8")
+    assert "{ echo" in FLAG_BRACE_STUB and "{ echo" in TASK_BRACE_STUB
+
+
+def test_a_conditional_refusal_in_a_real_task_is_not_a_stub(tree):
+    edit(tree / TASKS, "        sh scripts/airgap/pipeline.sh\n",
+         '        if [ -n "${OLD_PIPELINE:-}" ]; then { echo "use airgap:run" >&2; exit 1; }; fi;\n'
+         "        sh scripts/airgap/pipeline.sh\n")
+
+    current = surface.derive(tree)
+    assert "airgap:pipeline" in current["task_names"]
+    assert current.stubs == {}
+    assert surface.compare(tree) == []
+
+
+def test_a_stub_naming_the_replacement_only_in_a_comment_is_refused(tree):
+    edit(tree / PIPELINE, SKIP_LOAD_ARM, "        --no-load)   SKIP_LOAD=1 ;;\n"
+         '        --skip-load) die "--skip-load was removed" # use --no-load\n            ;;\n')
+    note(tree, f"- removed `script_flags:pipeline.sh --skip-load`; replaced by `--no-load`; "
+               f"migration: refusal in `{PIPELINE}`")
+
+    assert ("script_flags", "pipeline.sh --skip-load") in surface.derive(tree).stubs
+    assert_refused(tree, "script_flags", "pipeline.sh --skip-load")
+
+
+# B1: only an executable refusal counts; comments, docstrings and bare strings do not.
+GATEWAY = '            "caConfigMapName": env("GATEWAY_CA_CONFIGMAP"),\n'
+BUILD = "def build_values(deploy_only: bool = False) -> dict:\n"
+FIRST = '    internal_registry = env("INTERNAL_REGISTRY")\n'
+MESSAGE = "gateway.caConfigMapName was renamed to gateway.caConfigMap"
+GUARD = '    if env("GATEWAY_CA_CONFIGMAP_NAME"):\n'
+
+
+@pytest.mark.parametrize(("anchor", "evidence", "counts"), [
+    pytest.param(BUILD, "    # TODO: raise if gateway.caConfigMapName is set (renamed to gateway.caConfigMap)\n",
+                 False, id="TODO comment"),
+    pytest.param(BUILD, f'    """raise: {MESSAGE}"""\n', False, id="docstring"),
+    pytest.param(FIRST, f'    "raise: {MESSAGE}"\n', False, id="bare string"),
+    pytest.param(FIRST, f'    _unused = 0  # die("{MESSAGE}")\n', False, id="trailing comment"),
+    pytest.param(FIRST, f'{GUARD}        raise SystemExit("{MESSAGE}")\n', True, id="raise"),
+    pytest.param(FIRST, f'{GUARD}        die("{MESSAGE}")\n', True, id="die call"),
+])
+def test_a_values_refusal_in_map_values_must_be_executable(tree, anchor, evidence, counts):
+    edit(tree / surface.MAP_VALUES, GATEWAY, GATEWAY.replace('"caConfigMapName"', '"caConfigMap"'))
+    edit(tree / surface.MAP_VALUES, anchor, anchor + evidence)
+    note(tree, "- removed `chart_values:mainframe-rag:gateway.caConfigMapName`; replaced by `gateway.caConfigMap`; "
+               "migration: refusal in `scripts/airgap/map_values.py`")
+
+    if counts:
+        assert_refreshes(tree, "chart_values", "mainframe-rag:gateway.caConfigMapName")
+    else:
+        assert_refused(tree, "chart_values", "mainframe-rag:gateway.caConfigMapName")
+
+
+@pytest.mark.parametrize("evidence", [
+    '# die "imagePullSecrets[0].name was renamed: use imagePullSecrets[0].ref"\n',
+    'true # die "imagePullSecrets[0].name was renamed: use imagePullSecrets[0].ref"\n',
+    '[ -z "${OLD:-}" ] || die "renamed" # imagePullSecrets[0].name, use imagePullSecrets[0].ref\n',
+], ids=["comment line", "trailing comment", "names only in the comment"])
+def test_a_shell_comment_is_not_a_refusal(tree, evidence):
+    edit(tree / surface.DEPLOY, '"imagePullSecrets[0].name=$PULL_SECRET"', '"imagePullSecrets[0].ref=$PULL_SECRET"')
+    edit(tree / surface.DEPLOY, "_sizing=$(", evidence + "_sizing=$(")
+    note(tree, "- removed `chart_values:qdrant:imagePullSecrets[0].name`; replaced by `imagePullSecrets[0].ref`; "
+               "migration: refusal in `scripts/airgap/deploy.sh`")
+
+    assert_refused(tree, "chart_values", "qdrant:imagePullSecrets[0].name")

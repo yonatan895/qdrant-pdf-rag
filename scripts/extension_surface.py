@@ -123,10 +123,9 @@ def env_keys(root: Path) -> list[str]:
     return sorted(set(re.findall(r"(?m)^#?[ \t]*([A-Z][A-Z0-9_]*)=", text)))
 
 
-# A refusal: a fixed message and a failing exit, in shell or Python.
-_REFUSES = re.compile(r"\bdie\b|\braise\b|STOP:|\bexit [1-9]|(?:;|&&|\|\|)\s*false\b|^\s*false\b", re.MULTILINE)
-# A refusing stub does nothing else: every command is a message or a failing exit.
+# Shell: a quoted string, a refusing command, and the commands a stub may run.
 _QUOTED = re.compile(r'"(?:\\.|[^"\\])*"|\'[^\']*\'')
+_SHELL_REFUSES = re.compile(r"\bdie\b|\bexit [1-9]|\bfalse\b")
 _STUB_COMMAND = re.compile(r"(?:echo|printf|die)\b[^|&<>]*(?:>&2)?|exit [1-9][0-9]*|false")
 
 
@@ -135,10 +134,60 @@ def token(name: str, text: str) -> bool:
     return re.search(r"(?<![A-Za-z0-9_.-])" + re.escape(name) + r"(?![A-Za-z0-9_-])", text) is not None
 
 
-def _stub(text: str) -> bool:
-    commands = [c.strip() for c in re.split(r"[;\n]", _QUOTED.sub('""', text)) if c.strip()]
-    return (bool(commands) and all(_STUB_COMMAND.fullmatch(c) for c in commands)
-            and any(re.match(r"die\b|exit|false", c) for c in commands))
+def _shell_lines(text: str) -> list[tuple[str, str]]:
+    """Per line: (the code with quoted strings blanked and `#` comments removed,
+    the text of the quoted strings left in that code). One-line strings only."""
+    lines = []
+    for line in text.splitlines():
+        strings: list[str] = []
+
+        def blank(match: re.Match[str], strings: list[str] = strings) -> str:
+            strings.append(match.group(0)[1:-1])
+            return '""'
+
+        code = _QUOTED.sub(blank, line)
+        comment = re.search(r"(?:^|\s)#", code)
+        if comment:
+            code = code[:comment.start()]
+            strings = strings[:code.count('""')]
+        lines.append((code, "\n".join(strings)))
+    return lines
+
+
+def _stub(text: str) -> str | None:
+    """The messages of a body that only refuses (`die`, `echo ... >&2; exit N`,
+    or either inside a `{ ...; }` group), or None. A refusal behind a condition
+    or next to any other command is not a stub."""
+    lines = _shell_lines(text)
+    code = "\n".join(line for line, _strings in lines)
+    code = re.sub(r"(^|[;\n])\s*\{(?=\s)", r"\1", code)  # A brace group is transparent.
+    code = re.sub(r"(?<=[;\s])\}(?=\s*(?:$|[;\n]))", "", code)
+    commands = [c.strip() for c in re.split(r"[;\n]", code) if c.strip()]
+    if (commands and all(_STUB_COMMAND.fullmatch(c) for c in commands)
+            and any(re.match(r"die\b|exit|false", c) for c in commands)):
+        return "\n".join(strings for _line, strings in lines)
+    return None
+
+
+def _refusals(path: str, text: str) -> list[str]:
+    """The messages of each executable refusal in an owner file: a `raise` or
+    `die(...)`/`exit(...)` call in Python (comments, docstrings and bare strings
+    are not code), or a shell line that dies or exits non-zero (comments removed)."""
+    if path.endswith(".py"):
+        messages = []
+        for node in ast.walk(ast.parse(text)):
+            target: ast.AST | None = None
+            if isinstance(node, ast.Raise):
+                target = node.exc
+            elif isinstance(node, ast.Call) and (
+                    (isinstance(node.func, ast.Name) and node.func.id in ("die", "exit"))
+                    or (isinstance(node.func, ast.Attribute) and node.func.attr == "exit")):
+                target = node
+            if target is not None:
+                messages.append("\n".join(c.value for c in ast.walk(target)
+                                          if isinstance(c, ast.Constant) and isinstance(c.value, str)))
+        return messages
+    return [strings for code, strings in _shell_lines(text) if _SHELL_REFUSES.search(code)]
 
 
 class Surface(dict[str, list[str]]):
@@ -160,11 +209,11 @@ def task_names(root: Path, stubs: dict[tuple[str, str], tuple[str, str]]) -> lis
                 continue
             commands = [c.get("cmd", "") if isinstance(c, dict) else c for c in task.get("cmds") or ()]
             body = "\n".join(c for c in commands if isinstance(c, str))
-            refuses = (bool(commands) and all(isinstance(c, str) for c in commands)
-                       and not task.get("deps") and _stub(body))
+            refusal = (_stub(body) if commands and all(isinstance(c, str) for c in commands)
+                       and not task.get("deps") else None)
             for alias in (name, *(task.get("aliases") or ())):
-                if refuses:
-                    stubs[("task_names", prefix + alias)] = (path, body)
+                if refusal is not None:
+                    stubs[("task_names", prefix + alias)] = (path, refusal)
                 else:
                     names.append(prefix + alias)
         if path == "Taskfile.yml":
@@ -225,8 +274,9 @@ def script_flags(root: Path, stubs: dict[tuple[str, str], tuple[str, str]]) -> l
             for flag in (part for part in label.split("|") if part.startswith("-")):
                 arms.setdefault(flag, []).append(body)
         for flag, bodies in sorted(arms.items()):
-            if all(_stub(body) for body in bodies):
-                stubs[("script_flags", f"{script} {flag}")] = (owner, "\n".join(bodies))
+            refusals = [_stub(body) for body in bodies]
+            if all(message is not None for message in refusals):
+                stubs[("script_flags", f"{script} {flag}")] = (owner, "\n".join(m or "" for m in refusals))
             else:
                 items.append(f"{script} {flag}")
     adr = (root / ADR).read_text(encoding="utf-8")
@@ -336,8 +386,8 @@ def migration_problem(root: Path, note: re.Match[str], current: Surface) -> str 
     if evidence not in _owners(category, note["item"]):
         return f"a {category} refusal is in one of: " + ", ".join(f"`{o}`" for o in _owners(category, note["item"]))
     text = _import_script(root) if evidence == ADR.as_posix() else (root / evidence).read_text(encoding="utf-8")
-    for line in text.splitlines():
-        if _REFUSES.search(line) and token(old, line) and token(new, line):
+    for message in _refusals(evidence, text):
+        if token(old, message) and token(new, message):
             return None
     return f"`{evidence}` has no refusal line naming `{old}` and `{new}`"
 
