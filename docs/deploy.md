@@ -674,6 +674,37 @@ checksums **after**.
   The copy list includes `oauth-proxy-image.tar` when the bundle contains it;
   no manual sidecar-image copy is needed before `airgap:load`.
 
+<a id="release-archive"></a>
+### Release archive (#1118, decision D5)
+
+The 3 newest site releases are kept as **private** GHCR OCI artifacts at
+`ghcr.io/yonatan895/qdrant-pdf-rag-release-archive:<release-sha>`, as input
+for the previous-release to new-release upgrade lane. Each artifact holds the
+loose signed bundle members that the site received, one layer per member.
+[`release-archive.txt`](../release-archive.txt) is the only record. It holds
+one row per release: SHA, manifest digest, SHA-256 of the signing public key
+file, and the packed MANIFEST `date:`. Consumers pull by that digest, never by
+tag. `scripts/release_archive.py` writes the record. It uses ORAS
+([pin](../scripts/tools/oras-pin.txt), installed offline by
+`scripts/tools/install-oras.sh --archive`, binary checksum verified before
+every run) and `gh` for the Packages API:
+
+- `verify`/`push --bundle DIR --release-sha SHA --trusted-pub PUB` fails
+  closed before any registry call in these cases: the bundled key differs from
+  the out-of-band key, the `SHA256SUMS.sig` signature does not verify, a file
+  is unsigned or missing, a member checksum does not match, or MANIFEST does
+  not name `SHA`. Push refuses when the package is not private, both before and
+  after the push; that state is fixed in the package settings and never by the
+  tool. Push never overwrites an existing tag. A tag that already exists with
+  identical layers is adopted, which recovers a push that was never recorded.
+- `pull --digest D --out EMPTY_DIR --trusted-pub PUB` accepts only a recorded
+  digest and the recorded key. It refuses a manifest that does not hash to
+  `D`, then re-runs the full bundle verification on the pulled files.
+- `list [--remote]` prints the rows newest first and marks which ones prune
+  removes. `prune` keeps the 3 newest by packed date. It deletes a dropped
+  digest's package version, then its row. A rerun converges. `prune` needs
+  the `delete:packages` gh scope.
+
 ## 5. Sizing and security
 
 Model servers (reasoning, dense embed, reranker) live in a
