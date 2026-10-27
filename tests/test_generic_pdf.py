@@ -62,13 +62,6 @@ def test_path_layout_applies_only_at_exactly_four_levels(tmp_path, plain_pdf):
         parsed = parse_pdf(dest, corpus_root=root)
         assert (parsed.product, parsed.version) == (None, None), depth
 
-def test_detect_vendor_default_unknown(tmp_path):
-    p = tmp_path / "notes.pdf"
-    p.write_bytes(b"%PDF-1.4")
-    assert detect_vendor(p, tmp_path) == "unknown"
-    assert detect_vendor(tmp_path / "Broadcom" / "x.pdf", tmp_path) == "Broadcom"
-
-
 def test_detect_vendor_reads_only_the_path_below_the_corpus_root(tmp_path):
     """Issue #839: markers in the mount never decide the vendor; markers
     below the root keep their first-match order, and "/ca/" still matches

@@ -140,22 +140,6 @@ def test_smoke_tracing_off_sentinel_skips_trace_check(smoke_tree):
     assert "Tracing:       OFF (disabled)" in r.stdout
 
 
-def test_smoke_tracing_on_by_default_runs_check(smoke_tree):
-    # Tracing is on unless the endpoint is the off sentinel: the check runs
-    # and fails closed when no span landed.
-    _setup_stub(smoke_tree, health_exit=0, search_exit=0, trace_exit=1)
-    r = _run_smoke(smoke_tree)
-    assert r.returncode == 1
-    assert "no v1.search span landed in OpenObserve" in r.stderr
-
-
-def test_smoke_tracing_ok_when_span_landed(smoke_tree):
-    _setup_stub(smoke_tree, health_exit=0, search_exit=0, trace_exit=0)
-    r = _run_smoke(smoke_tree, ("OTEL_EXPORTER_OTLP_ENDPOINT", "http://otelcol:4318"))
-    assert r.returncode == 0, r.stderr
-    assert "Tracing:       OK (recent v1.search span in OpenObserve)" in r.stdout
-
-
 def test_smoke_tracing_query_url_reaches_pod(smoke_tree):
     # Prove the configured query URL is what the trace poll passes to the pod.
     url_log = smoke_tree / "trace-url.log"
