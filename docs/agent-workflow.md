@@ -77,8 +77,8 @@ change cannot close runtime acceptance under #391, #361, #365 or other owners.
 Inspect `git status`, current branch and base SHA before editing. On a clean
 connected checkout, fetch `origin/main` and create `feat/`, `fix/` or `docs/`
 `<issue>-<short>` from it. Preserve another task's workspace and use an isolated
-worktree: link the main checkout's `.tools`, then run `dev:setup`. In the gap use the approved transferred history
-and baseline from [bootstrap](install_and_ops.md); do not require internet.
+worktree: link the main checkout's `.tools`, then run `dev:setup`. In the gap branch from the GitLab fork's `main`
+([ADR-0009](adr/0009-gap-fork.md)); do not require internet.
 Do not reuse an already-merged branch. Do not switch a tree used by running
 spawn workers. Experiments and temporary artifacts belong outside the tree.
 
