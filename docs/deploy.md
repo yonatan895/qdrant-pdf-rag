@@ -697,9 +697,12 @@ every run) and `gh` for the Packages API:
   after the push; that state is fixed in the package settings and never by the
   tool. Push never overwrites an existing tag. A tag that already exists with
   identical layers is adopted, which recovers a push that was never recorded.
-- `pull --digest D --out EMPTY_DIR --trusted-pub PUB` accepts only a recorded
+- `pull --digest D --out DIR --trusted-pub PUB` accepts only a recorded
   digest and the recorded key. It refuses a manifest that does not hash to
-  `D`, then re-runs the full bundle verification on the pulled files.
+  `D`. It then fetches each layer blob, retrying up to `--attempts` times, and
+  checks each blob against its layer digest. A rerun keeps members that already
+  match, so `DIR` may hold only this artifact's members. Finally it re-runs the
+  full bundle verification on the pulled files.
 - `list [--remote]` prints the rows newest first and marks which ones prune
   removes. `prune` keeps the 3 newest by packed date. It deletes a dropped
   digest's package version, then its row. A rerun converges. `prune` needs

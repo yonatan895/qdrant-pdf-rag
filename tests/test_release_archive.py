@@ -100,15 +100,20 @@ if cmd == "manifest" and argv[1] == "fetch":
     if os.environ.get("FAKE_SERVE_OTHER_MANIFEST"):
         raw = raw.replace(b'"schemaVersion":2', b'"schemaVersion": 2')
     sys.stdout.buffer.write(raw); sys.exit(0)
-if cmd == "pull":
-    digest = argv[1].split("@", 1)[1]; out = Path(argv[argv.index("--output") + 1])
-    manifest = json.loads(bytes.fromhex(state["manifests"][digest]))
-    for layer in manifest["layers"]:
-        data = bytes.fromhex(state["blobs"][layer["digest"].split(":", 1)[1]])
-        title = layer["annotations"]["org.opencontainers.image.title"]
-        if title == os.environ.get("FAKE_TAMPER_LAYER"):
-            data = data + b"tampered"
-        (out / title).write_bytes(data)
+if cmd == "blob" and argv[1] == "fetch":
+    out = Path(argv[argv.index("--output") + 1]); hexd = argv[-1].split("@sha256:", 1)[1]
+    titles = {layer["annotations"]["org.opencontainers.image.title"]
+              for raw in state["manifests"].values() for layer in json.loads(bytes.fromhex(raw))["layers"]
+              if layer["digest"] == "sha256:" + hexd}
+    fails = state.setdefault("fail_once", [])
+    if os.environ.get("FAKE_FAIL_ONCE") in titles and hexd not in fails:
+        fails.append(hexd)
+        out.write_bytes(b"partial")  # a stream reset mid-blob
+        save(); sys.exit(1)
+    data = bytes.fromhex(state["blobs"][hexd])
+    if os.environ.get("FAKE_TAMPER_LAYER") in titles:
+        data = data + b"tampered"  # a registry or proxy serving other bytes
+    out.write_bytes(data)
     save(); sys.exit(0)
 print("unsupported", argv, file=sys.stderr); sys.exit(3)
 '''
@@ -377,7 +382,7 @@ def test_pull_refuses_digest_mismatch(env, signing):
                  extra={"FAKE_SERVE_OTHER_MANIFEST": "1"})
     assert result.returncode == 2
     assert "digest mismatch" in result.stderr
-    assert "pull" not in state(env)["calls"]
+    assert "blob" not in state(env)["calls"]
     assert not out.exists() or not any(out.iterdir())
 
 
@@ -388,7 +393,8 @@ def test_pull_refuses_tampered_layer_content(env, signing):
     result = run(env, "pull", "--digest", digest, "--out", str(env["tmp"] / "pulled"),
                  "--trusted-pub", str(signing[1]), extra={"FAKE_TAMPER_LAYER": f"app-agent-{sha}.tar"})
     assert result.returncode == 2
-    assert f"member checksum mismatch: app-agent-{sha}.tar" in result.stderr
+    assert f"fetched blob does not match its layer digest: app-agent-{sha}.tar" in result.stderr
+    assert not (env["tmp"] / "pulled" / f"app-agent-{sha}.tar").exists()
 
 
 def test_pull_refuses_unrecorded_digest_and_wrong_trusted_key(env, signing, tmp_path):
@@ -401,7 +407,65 @@ def test_pull_refuses_unrecorded_digest_and_wrong_trusted_key(env, signing, tmp_
     wrong = run(env, "pull", "--digest", digest, "--out", str(tmp_path / "b"),
                 "--trusted-pub", str(gen_other_pub(tmp_path)))
     assert wrong.returncode == 2 and "trusted key does not match the recorded signing key" in wrong.stderr
-    assert "pull" not in state(env)["calls"]
+    assert "blob" not in state(env)["calls"]
+
+
+def test_pull_reverifies_signature_of_a_self_consistent_substituted_artifact(env, signing):
+    """Registry bytes that match their own layer digests still fail the signed checksums."""
+    sha = sha_of(16)
+    assert push(env, signing, make_bundle(env["tmp"], signing, sha), sha).returncode == 0
+    data = state(env)
+    old = record_rows(env)[0][1]
+    manifest = json.loads(bytes.fromhex(data["manifests"].pop(old)))
+    substitute = b"substituted image bytes"
+    hexd = hashlib.sha256(substitute).hexdigest()
+    data["blobs"][hexd] = substitute.hex()
+    for layer in manifest["layers"]:
+        if layer["annotations"]["org.opencontainers.image.title"] == f"app-agent-{sha}.tar":
+            layer.update(digest="sha256:" + hexd, size=len(substitute))
+    raw = json.dumps(manifest, separators=(",", ":")).encode()
+    new = "sha256:" + hashlib.sha256(raw).hexdigest()
+    data["manifests"][new] = raw.hex()
+    env["state"].write_text(json.dumps(data))
+    env["record"].write_text(env["record"].read_text().replace(old, new))
+    result = run(env, "pull", "--digest", new, "--out", str(env["tmp"] / "pulled"),
+                 "--trusted-pub", str(signing[1]))
+    assert result.returncode == 2
+    assert f"member checksum mismatch: app-agent-{sha}.tar" in result.stderr
+    assert "re-verified" not in result.stdout
+
+
+def test_pull_retries_a_failed_blob_and_resumes_into_partial_output(env, signing):
+    sha = sha_of(14)
+    bundle = make_bundle(env["tmp"], signing, sha)
+    assert push(env, signing, bundle, sha).returncode == 0
+    digest = record_rows(env)[0][1]
+    out = env["tmp"] / "pulled"
+    out.mkdir()
+    shutil.copyfile(bundle / "MANIFEST.txt", out / "MANIFEST.txt")  # left by an interrupted pull
+    (out / "SHA256SUMS").write_text("truncated")
+    result = run(env, "pull", "--digest", digest, "--out", str(out), "--trusted-pub", str(signing[1]),
+                 extra={"FAKE_FAIL_ONCE": f"app-agent-{sha}.tar"})
+    assert result.returncode == 0, result.stderr
+    assert "retrying app-agent-" in result.stderr
+    fetched = state(env)["calls"].count("blob")
+    assert fetched == len(list(bundle.iterdir()))  # MANIFEST kept; agent tar fetched twice
+    for member in bundle.iterdir():
+        assert (out / member.name).read_bytes() == member.read_bytes()
+    assert sorted(p.name for p in env["tmp"].iterdir() if p.name.startswith(".pulled.partial")) == []
+
+
+def test_pull_refuses_foreign_files_in_output(env, signing):
+    sha = sha_of(15)
+    assert push(env, signing, make_bundle(env["tmp"], signing, sha), sha).returncode == 0
+    out = env["tmp"] / "pulled"
+    out.mkdir()
+    (out / "operator-notes.txt").write_text("not a member")
+    result = run(env, "pull", "--digest", record_rows(env)[0][1], "--out", str(out),
+                 "--trusted-pub", str(signing[1]))
+    assert result.returncode == 2
+    assert "output directory must be empty or hold only this artifact's members" in result.stderr
+    assert (out / "operator-notes.txt").read_text() == "not a member"
 
 
 # ------------------------------------------------------------ list and prune

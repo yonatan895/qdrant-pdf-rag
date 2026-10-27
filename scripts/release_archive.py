@@ -357,12 +357,33 @@ def cmd_pull(args: argparse.Namespace, tools: Tools) -> int:
     if _sha256_file(args.trusted_pub) != row.key:
         raise ArchiveError("trusted key does not match the recorded signing key")
     out: Path = args.out
-    if out.exists() and any(out.iterdir()):
-        raise ArchiveError("output directory must be empty")
     tools.login()
     layers = _layers(tools.fetch_manifest(row.digest))
     out.mkdir(parents=True, exist_ok=True)
-    tools.run_oras("pull", "--no-tty", f"{tools.repository}@{row.digest}", "--output", str(out))
+    # Resume: the directory may hold only members of this artifact (an earlier
+    # interrupted pull); a member already matching its layer digest is kept.
+    if not {entry.name for entry in out.iterdir()} <= set(layers):
+        raise ArchiveError("output directory must be empty or hold only this artifact's members")
+    with tempfile.TemporaryDirectory(prefix=f".{out.name}.partial-", dir=out.parent) as partial:
+        for title, (digest, size) in sorted(layers.items()):
+            target = out / title
+            if (target.is_file() and not target.is_symlink() and target.stat().st_size == size
+                    and _sha256_file(target) == digest):
+                continue
+            staged = Path(partial) / title
+            for attempt in range(1, args.attempts + 1):
+                try:
+                    tools.run_oras("blob", "fetch", "--no-tty", "--output", str(staged),
+                                   f"{tools.repository}@sha256:{digest}")
+                    break
+                except ArchiveError:
+                    if attempt == args.attempts:
+                        raise
+                    print(f"release-archive: retrying {title} after a failed fetch "
+                          f"({attempt}/{args.attempts})", file=sys.stderr)
+            if _sha256_file(staged) != digest:
+                raise ArchiveError(f"fetched blob does not match its layer digest: {title}")
+            os.replace(staged, target)
     if {entry.name for entry in out.iterdir()} != set(layers):
         raise ArchiveError("pulled files do not match the artifact layers")
     bundle = verify_bundle(out, row.sha, args.trusted_pub)
@@ -426,6 +447,7 @@ def parser() -> argparse.ArgumentParser:
     pull.add_argument("--digest", required=True)
     pull.add_argument("--out", type=Path, required=True)
     pull.add_argument("--trusted-pub", type=Path, required=True)
+    pull.add_argument("--attempts", type=int, default=5, help="fetch attempts per layer blob")
     listing = sub.add_parser("list")
     listing.add_argument("--remote", action="store_true")
     prune = sub.add_parser("prune")
@@ -438,8 +460,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     tools: Tools | None = None
     try:
-        if getattr(args, "keep", KEEP) < 1:
-            raise ArchiveError("--keep must be at least 1")
+        if getattr(args, "keep", KEEP) < 1 or getattr(args, "attempts", 1) < 1:
+            raise ArchiveError("--keep and --attempts must be at least 1")
         if args.command == "verify":
             return cmd_verify(args)
         if args.command == "list" and not args.remote:
