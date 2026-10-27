@@ -73,12 +73,17 @@ def _run_pipeline(pipe_tree, *args, extra_env=None):
     )
 
 
-@pytest.mark.parametrize("argument", ["--skip-laod"])
-def test_pipeline_unknown_argument_fails_before_stages(pipe_tree, argument):
-    r = _run_pipeline(pipe_tree, argument)
+def test_pipeline_refusals_precede_every_stage(pipe_tree):
+    """An unknown argument and an invalid probe budget both refuse before stage one."""
+    r = _run_pipeline(pipe_tree, "--skip-laod")
     assert r.returncode != 0
-    assert f"unknown argument: {argument}" in r.stderr
+    assert "unknown argument: --skip-laod" in r.stderr
     assert "STAGE" not in r.stdout
+    for bad in ("0", "4097", "bad"):
+        r = _run_pipeline(pipe_tree, extra_env={"GATEWAY_PROBE_MAX_TOKENS": bad})
+        assert r.returncode != 0, bad
+        assert "GATEWAY_PROBE_MAX_TOKENS must be" in r.stderr
+        assert "STAGE" not in r.stdout
 
 
 def test_pipeline_dryrun_full(pipe_tree):
@@ -129,14 +134,6 @@ def test_pipeline_live_gateway_probe_gates_ingest(pipe_tree, probe_exit, skip_in
         assert ("ingest NOT RUN" in r.stdout) is skip_ingest
         assert "Full application/release acceptance remains separate" in r.stdout
     assert "OPERATIONAL & ACCEPTED" not in r.stdout
-
-
-@pytest.mark.parametrize("bad", ["0", "4097", "bad"])
-def test_pipeline_bad_probe_budget_fails_before_stages(pipe_tree, bad):
-    r = _run_pipeline(pipe_tree, extra_env={"GATEWAY_PROBE_MAX_TOKENS": bad})
-    assert r.returncode != 0
-    assert "GATEWAY_PROBE_MAX_TOKENS must be" in r.stderr
-    assert "STAGE" not in r.stdout
 
 
 def test_pipeline_dryrun_including_load(pipe_tree):

@@ -7,6 +7,7 @@ mechanical tree/run/sign/stub plumbing lives here.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import re
@@ -58,6 +59,11 @@ def set_openwebui_pin(tree: Path, digest: str) -> None:
 
 def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def b64(text: str) -> str:
+    """Base64 of a synthetic credential (the encoding the launchers read)."""
+    return base64.b64encode(text.encode()).decode()
 
 
 def write_stub(path: Path, content: str) -> Path:
@@ -172,9 +178,7 @@ def write_signed_manifest(dist: Path, content: str) -> None:
 
 
 def run_sh(script: Path, env: dict, cwd: Path):
-    return subprocess.run(
-        ["sh", str(script)], capture_output=True, text=True, env=env, cwd=cwd, check=False
-    )
+    return subprocess.run(['sh', str(script)], capture_output=True, text=True, env=env, cwd=cwd, check=False)
 
 
 def gen_sign_keypair(artdir: Path, key_name: str = "signing.key") -> Path:
@@ -257,9 +261,7 @@ def assert_no_placeholders(text: str) -> None:
 
 
 def assert_pull_secret_wired(rendered: str, name: str) -> None:
-    assert re.search(
-        rf"^([ ]*)imagePullSecrets:\n\1  - name: {re.escape(name)}$", rendered, re.MULTILINE
-    )
+    assert re.search(f'^([ ]*)imagePullSecrets:\\n\\1  - name: {re.escape(name)}$', rendered, re.MULTILINE)
 
 
 def install_rendering_helm(tree: Path) -> None:

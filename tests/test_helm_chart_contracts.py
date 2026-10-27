@@ -20,9 +20,11 @@ from tests.helpers_helm import (
     container_map,
     env_map,
     ingest_env_map,
+    merge_values,
     run,
     run_new_job_only,
     run_new_template,
+    set_path,
 )
 
 FEEDBACK_ON = {"feedback": {"enabled": True, "secretName": "fb-secret"}}
@@ -175,40 +177,38 @@ def test_route_oauth_contract():
         "apiVersion": "v1",
         "reference": {"kind": "Route", "name": "rag-agent"},
     }
-    for docs in (new,):
-        svc = docs["Service", "rag-agent"]
-        assert svc["metadata"]["annotations"] == {
-            "service.beta.openshift.io/serving-cert-secret-name": "rag-agent-tls"
-        }
-        ports = {(p["name"], p["port"], p["targetPort"]) for p in svc["spec"]["ports"]}
-        assert ports == {("oauth", 8443, "oauth"), ("http", 8080, "http")}
-    for docs in (new,):
-        dep = docs["Deployment", "rag-agent"]
-        assert dep["spec"]["template"]["spec"]["serviceAccountName"] == "rag-agent"
-        oauth = container_map(dep)["oauth-proxy"]
-        assert oauth["image"] == "reg.internal/openshift4/ose-oauth-proxy:v4.14"
-        assert oauth["args"] == [
-            "--provider=openshift",
-            "--https-address=:8443",
-            "--upstream=http://127.0.0.1:8080",
-            "--tls-cert=/etc/tls/private/tls.crt",
-            "--tls-key=/etc/tls/private/tls.key",
-            "--cookie-secret-file=/etc/oauth/cookie-secret",
-            "--email-domain=*",
-            "--openshift-service-account=rag-agent",
-            "--skip-auth-regex=^/livez$",
-        ]
-        assert oauth["ports"] == [{"name": "oauth", "containerPort": 8443}]
-        assert oauth["resources"] == {
-            "requests": {"cpu": "50m", "memory": "64Mi"},
-            "limits": {"cpu": "200m", "memory": "128Mi"},
-        }
-        vols = {v["name"]: v for v in dep["spec"]["template"]["spec"]["volumes"]}
-        assert vols["oauth-tls"] == {"name": "oauth-tls", "secret": {"secretName": "rag-agent-tls"}}
-        assert vols["oauth-cookie"] == {
-            "name": "oauth-cookie",
-            "secret": {"secretName": "rag-agent-oauth-cookie"},
-        }
+    svc = new["Service", "rag-agent"]
+    assert svc["metadata"]["annotations"] == {
+        "service.beta.openshift.io/serving-cert-secret-name": "rag-agent-tls"
+    }
+    ports = {(p["name"], p["port"], p["targetPort"]) for p in svc["spec"]["ports"]}
+    assert ports == {("oauth", 8443, "oauth"), ("http", 8080, "http")}
+    dep = new["Deployment", "rag-agent"]
+    assert dep["spec"]["template"]["spec"]["serviceAccountName"] == "rag-agent"
+    oauth = container_map(dep)["oauth-proxy"]
+    assert oauth["image"] == "reg.internal/openshift4/ose-oauth-proxy:v4.14"
+    assert oauth["args"] == [
+        "--provider=openshift",
+        "--https-address=:8443",
+        "--upstream=http://127.0.0.1:8080",
+        "--tls-cert=/etc/tls/private/tls.crt",
+        "--tls-key=/etc/tls/private/tls.key",
+        "--cookie-secret-file=/etc/oauth/cookie-secret",
+        "--email-domain=*",
+        "--openshift-service-account=rag-agent",
+        "--skip-auth-regex=^/livez$",
+    ]
+    assert oauth["ports"] == [{"name": "oauth", "containerPort": 8443}]
+    assert oauth["resources"] == {
+        "requests": {"cpu": "50m", "memory": "64Mi"},
+        "limits": {"cpu": "200m", "memory": "128Mi"},
+    }
+    vols = {v["name"]: v for v in dep["spec"]["template"]["spec"]["volumes"]}
+    assert vols["oauth-tls"] == {"name": "oauth-tls", "secret": {"secretName": "rag-agent-tls"}}
+    assert vols["oauth-cookie"] == {
+        "name": "oauth-cookie",
+        "secret": {"secretName": "rag-agent-oauth-cookie"},
+    }
     route = new["Route", "rag-agent"]
     assert route["apiVersion"] == "route.openshift.io/v1"
     assert route["metadata"]["namespace"] == "ns"
@@ -256,9 +256,7 @@ def test_servicemonitor_contract():
 def test_ingest_job_contract_normal():
     new = run_new_job_only({"ingest": {"corpusPVC": "corpus-pvc"}})
     new_job = new["Job", "ingest"]
-    new_c = next(
-        c for c in new_job["spec"]["template"]["spec"]["containers"] if c["name"] == "ingest"
-    )
+    new_c = next(c for c in new_job['spec']['template']['spec']['containers'] if c['name'] == 'ingest')
     assert new_c["image"] == f"reg.internal/qdrant-pdf-rag-ingest:{IMAGE_SHA}"
     assert new_c["args"] == ["--src", "/corpus", "--progress", "/work/inventory.jsonl"]
     assert new_c["resources"] == {
@@ -382,9 +380,7 @@ def test_rerank_enabled_without_base_url_falls_back():
     """Empty RERANK_BASE_URL with rerank on is valid: HttpReranker falls back
     to the embedding URL (retrieve/rerank.py). The chart must preserve the
     bare render, not reject it."""
-    new = run_new_template(
-        {"models": {"rerank": {"enabled": True, "baseUrl": "", "model": "my-reranker"}}}
-    )
+    new = run_new_template({'models': {'rerank': {'enabled': True, 'baseUrl': '', 'model': 'my-reranker'}}})
     for docs in (new,):
         env = env_map(docs["Deployment", "rag-agent"])
         assert env["RERANK_ENABLED"]["value"] == "true"
@@ -455,17 +451,8 @@ def test_schema_rejects_invalid_selected_configuration():
     ]
     for mutate, needle in cases:
         values = base_values()
-        values["ingest"]["corpusPVC"] = "c"
-
-        def merge(dst, src):
-            for k, v in src.items():
-                if isinstance(v, dict) and isinstance(dst.get(k), dict):
-                    merge(dst[k], v)
-                else:
-                    dst[k] = v
-
-        merge(values, mutate)
-        r = _helm_template_with_values(values)
+        values["ingest"]["corpusPVC"] = "c"  # a valid default; the case may override it
+        r = _helm_template_with_values(merge_values(values, mutate))
         assert r.returncode != 0, f"schema accepted invalid {needle}"
         assert needle.split(".")[-1] in r.stderr or "schema" in r.stderr.lower()
 
@@ -521,20 +508,24 @@ def test_direct_chart_optional_budget_limits_reach_pod(field, value, environment
     assert pod[environment]["value"] == expected
 
 
-@pytest.mark.parametrize("field,value", [
-    ("maxModelLen", 511), ("maxModelLen", "16384"),
-    ("reservedOutputTokens", 127),
-    ("thinkingReserveTokensComplex", 16385),
-    ("reasoningEffortSimple", "unsupported"),
-    ("reasoningEfforts", "low,maximal"), ("reasoningEfforts", "low, medium"), ("reasoningEfforts", ""),
-    ("stream", "true"),
-])
-def test_direct_chart_refuses_invalid_model_budget(field, value):
-    values = base_values()
-    values["models"]["reasoning"][field] = value
-    result = _helm_template_with_values(values)
+@pytest.mark.parametrize("path,bad", [
+    ("models.reasoning.maxModelLen", 511), ("models.reasoning.maxModelLen", "16384"),
+    ("models.reasoning.reservedOutputTokens", 127),
+    ("models.reasoning.thinkingReserveTokensComplex", 16385),
+    ("models.reasoning.reasoningEffortSimple", "unsupported"),
+    ("models.reasoning.reasoningEfforts", "low,maximal"),
+    ("models.reasoning.reasoningEfforts", "low, medium"),
+    ("models.reasoning.reasoningEfforts", ""),
+    ("models.reasoning.stream", "true"),
+    ("requestDeadlineSeconds", -1), ("requestDeadlineSeconds", 3601),
+    ("requestDeadlineSeconds", "300"), ("requestDeadlineSeconds", 1.5),
+    ("requestMaxConcurrent", -1), ("requestMaxConcurrent", 1001), ("requestMaxConcurrent", "2"),
+    ("requestQueueMax", 1.5), ("requestQueueWaitSeconds", 301), ("requestQueueWaitSeconds", -1),
+], ids=lambda v: v if isinstance(v, str) else str(v))
+def test_direct_chart_refuses_invalid_values(path, bad):
+    result = _helm_template_with_values(set_path(base_values(), path, bad))
     assert result.returncode != 0
-    assert field in result.stderr
+    assert path.rsplit(".", 1)[-1] in result.stderr
 
 
 @pytest.mark.parametrize("route_enabled", [False, True])
@@ -575,23 +566,6 @@ def test_direct_peers_are_typed_and_ingest_only():
     rejected = _helm_template_with_values(values)
     assert rejected.returncode != 0
     assert "peerUrls" in rejected.stderr
-
-
-def test_servicemonitor_decoupled_from_exposition():
-    """OBS-2 item 3: exposition without the monitor (platform-UWM modes).
-    METRICS_ENABLED stays true while the object disappears."""
-    new = run_new_template({"metrics": {"enabled": True, "serviceMonitor": {"enabled": False}}})
-    assert ("ServiceMonitor", "rag-agent") not in new
-    assert env_map(new["Deployment", "rag-agent"])["METRICS_ENABLED"]["value"] == "true"
-
-
-def test_servicemonitor_enabled_with_metrics_off_fails():
-    """OBS-2 item 3: monitoring a disabled endpoint is rejected."""
-    values = base_values()
-    values["metrics"]["serviceMonitor"] = {"enabled": True}
-    raw = _helm_template_with_values(values)
-    assert raw.returncode != 0
-    assert "metrics.serviceMonitor.enabled=true requires metrics.enabled=true" in raw.stderr
 
 
 def _hardening_violations(pod_spec: dict) -> list[str]:
@@ -641,10 +615,7 @@ def test_every_rendered_pod_is_hardened_without_fixed_identities():
         ("Job", "ingest"),
     }
     assert pods["StatefulSet", "rag-feedback"]["automountServiceAccountToken"] is False
-    assert {c["name"] for c in pods["Deployment", "rag-agent"]["containers"]} == {
-        "agent",
-        "oauth-proxy",
-    }
+    assert {c['name'] for c in pods['Deployment', 'rag-agent']['containers']} == {'agent', 'oauth-proxy'}
     for key, pod in pods.items():
         assert _hardening_violations(pod) == [], key
 
@@ -715,8 +686,7 @@ def _assert_app_read_only_paths(pod, container_name, writable_paths):
     volumes = {volume["name"]: volume for volume in pod["volumes"]}
     assert volumes[mounts["/tmp"]["name"]] == {"name": mounts["/tmp"]["name"], "emptyDir": {}}
     if container_name == "feedback":
-        assert volumes[mounts["/data"]["name"]]["persistentVolumeClaim"] == {
-            "claimName": "rag-feedback-data"}
+        assert volumes[mounts['/data']['name']]['persistentVolumeClaim'] == {'claimName': 'rag-feedback-data'}
     if container_name == "ingest":
         assert mounts["/corpus"]["readOnly"] is True
         assert volumes[mounts["/work"]["name"]]["persistentVolumeClaim"] == {"claimName": "ingest-work"}
@@ -766,21 +736,25 @@ def _route_values(**extra):
     return {"route": {"enabled": True, "destinationCA": FAKE_CA}, **extra}
 
 
-def _allows(policy, source_ns, source_ns_labels, port, release_ns="ns"):
+def policy_allows(policy, source_ns, ns_labels, port, pod_labels=None, release_ns="ns"):
     """Independent re-implementation of NetworkPolicy ingress semantics for one
-    pod of `source_ns` reaching an agent pod on TCP `port` (peers within one
-    rule are OR-ed; a rule's ports must also match). It checks the rendered
-    object's meaning; enforcement is the CNI's and stays site evidence."""
+    pod of `source_ns` reaching a pod of `release_ns` on TCP `port` (peers
+    within one rule are OR-ed; a rule's ports must also match). A podSelector
+    peer matches pods of the release namespace, a namespaceSelector peer any pod
+    of a matching namespace. It checks the rendered object's meaning;
+    enforcement is the CNI's and stays site evidence."""
+    pod_labels = pod_labels or {}
     for rule in policy["spec"]["ingress"]:
         if port not in {p["port"] for p in rule["ports"] if p["protocol"] == "TCP"}:
             continue
         for peer in rule["from"]:
-            if peer == {"podSelector": {}}:
-                if source_ns == release_ns:
+            if set(peer) == {"podSelector"}:
+                want = peer["podSelector"].get("matchLabels", {})
+                if source_ns == release_ns and all(pod_labels.get(k) == v for k, v in want.items()):
                     return True
             elif set(peer) == {"namespaceSelector"}:
-                match = peer["namespaceSelector"]["matchLabels"]
-                if all(source_ns_labels.get(k) == v for k, v in match.items()):
+                want = peer["namespaceSelector"]["matchLabels"]
+                if all(ns_labels.get(k) == v for k, v in want.items()):
                     return True
             else:
                 raise AssertionError(f"unexpected peer shape: {peer}")
@@ -821,24 +795,26 @@ def test_networkpolicy_route_adds_router_to_oauth_port_only():
 
 
 def test_networkpolicy_metrics_admits_monitoring_by_label_or_uwm_name():
+    """The collector scrape is the same-namespace rule; monitoring is admitted on
+    the HTTP port by label or by UWM name, keyed on exposition, not the monitor."""
     policy = run_new_template({"metrics": {"enabled": True}})[POLICY_KEY]
-    assert policy["spec"]["ingress"][1:] == [
+    assert policy["spec"]["ingress"] == [
+        {"from": [{"podSelector": {}}],
+         "ports": [{"protocol": "TCP", "port": 8080}]},
         {"from": [{"namespaceSelector": {"matchLabels": MONITORING_LABEL}},
                   {"namespaceSelector": {"matchLabels": UWM_NAME}}],
          "ports": [{"protocol": "TCP", "port": 8080}]},
     ]
-    # Keyed on exposition, not on the ServiceMonitor: a platform-owned scrape
-    # (SERVICEMONITOR_ENABLED=false) still needs the port.
-    scraped = run_new_template({"metrics": {"enabled": True, "serviceMonitor": {"enabled": False}}})
-    assert ("ServiceMonitor", "rag-agent") not in scraped
-    assert scraped[POLICY_KEY]["spec"]["ingress"] == policy["spec"]["ingress"]
+    Scraped = run_new_template({"metrics": {"enabled": True, "serviceMonitor": {"enabled": False}}})
+    assert ("ServiceMonitor", "rag-agent") not in Scraped
+    assert env_map(Scraped["Deployment", "rag-agent"])["METRICS_ENABLED"]["value"] == "true"
+    assert Scraped[POLICY_KEY]["spec"]["ingress"] == policy["spec"]["ingress"]
     assert len(run_new_template({})[POLICY_KEY]["spec"]["ingress"]) == 1
 
 
 def test_networkpolicy_allowed_namespaces_reach_http_only():
     names = ["mcp", "tools-1"]
-    policy = run_new_template(
-        _route_values(networkPolicy={"allowedNamespaces": names}))[POLICY_KEY]
+    policy = run_new_template(_route_values(networkPolicy={'allowedNamespaces': names}))[POLICY_KEY]
     assert policy["spec"]["ingress"][-1] == {
         "from": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": n}}}
                  for n in names],
@@ -854,30 +830,30 @@ def test_networkpolicy_semantics_for_the_documented_counterexamples():
     uwm = _ns("openshift-user-workload-monitoring")  # admitted by name, no label needed
     mcp = _ns("mcp")
     stranger = _ns("someone-else")
+    here = ("ns", {"kubernetes.io/metadata.name": "ns"})
     # The router reaches the OAuth port and nothing else.
-    assert _allows(policy, *router, 8443)
-    assert not _allows(policy, *router, 8080)
+    assert policy_allows(policy, *router, 8443)
+    assert not policy_allows(policy, *router, 8080)
     # Monitoring scrapes /metrics on 8080 only.
     for source in (monitoring, uwm):
-        assert _allows(policy, *source, 8080)
-        assert not _allows(policy, *source, 8443)
+        assert policy_allows(policy, *source, 8080)
+        assert not policy_allows(policy, *source, 8443)
     # Same-namespace consumers keep both ports.
-    assert _allows(policy, "ns", {"kubernetes.io/metadata.name": "ns"}, 8080)
-    assert _allows(policy, "ns", {"kubernetes.io/metadata.name": "ns"}, 8443)
+    assert policy_allows(policy, *here, 8080)
+    assert policy_allows(policy, *here, 8443)
     # An allowed namespace reaches the HTTP port only.
-    assert _allows(policy, *mcp, 8080)
-    assert not _allows(policy, *mcp, 8443)
+    assert policy_allows(policy, *mcp, 8080)
+    assert not policy_allows(policy, *mcp, 8443)
     # Any other namespace is denied on both ports.
-    assert not _allows(policy, *stranger, 8080)
-    assert not _allows(policy, *stranger, 8443)
+    assert not policy_allows(policy, *stranger, 8080)
+    assert not policy_allows(policy, *stranger, 8443)
     # Only the exact policy-group value counts.
-    assert not _allows(policy, *_ns("x", **{"network.openshift.io/policy-group": "other"}), 8443)
+    assert not policy_allows(policy, *_ns("x", **{"network.openshift.io/policy-group": "other"}), 8443)
 
 
 def test_networkpolicy_disabled_renders_nothing_and_leaves_the_rest_unchanged():
     on = run_new_template(_route_values(metrics={"enabled": True}))
-    off = run_new_template(_route_values(
-        metrics={"enabled": True}, networkPolicy={"enabled": False}))
+    off = run_new_template(_route_values(metrics={'enabled': True}, networkPolicy={'enabled': False}))
     assert POLICY_KEY in on and POLICY_KEY not in off
     assert {k: v for k, v in on.items() if k != POLICY_KEY} == off
 
@@ -914,10 +890,15 @@ def test_feedback_off_by_default_renders_nothing_and_changes_nothing():
     explicit enabled=false renders exactly the default (byte-identical)."""
     default = run_new_template({})
     assert not [k for k in default if "feedback" in k[1]]
+    # Helm prunes workload, Service, policy and monitor; the claim's keep policy
+    # is what retains it across the disable.
     assert not [n for n in env_map(default["Deployment", "rag-agent"]) if n.startswith("FEEDBACK")]
     assert run_new_template({"feedback": {"enabled": False}}) == default
     # Settings made while disabled do not leak a thing into the render.
     assert run_new_template({"feedback": {"enabled": False, "secretName": "x", "storageSize": "1Ti"}}) == default
+    # Metrics on must not pull a feedback object in: the guard is feedback.enabled,
+    # never metrics.enabled.
+    assert not [k for k in run_new_template({"metrics": {"enabled": True}}) if "feedback" in k[1]]
     raw = _helm_template_with_values(base_values())
     assert "rag-feedback" not in raw.stdout and "FEEDBACK" not in raw.stdout
 
@@ -1011,59 +992,38 @@ def test_feedback_policy_admits_agent_pods_only_and_monitoring_only_with_metrics
          "ports": [{"protocol": "TCP", "port": 8080}]}]
 
 
-def _feedback_allows(policy, source_ns, ns_labels, pod_labels, port, release_ns="ns"):
-    """Independent NetworkPolicy ingress semantics for one pod (in namespace
-    `source_ns` with `ns_labels`, carrying `pod_labels`) reaching a feedback
-    pod. A podSelector peer matches pods of the release namespace only; a
-    namespaceSelector peer matches any pod of a matching namespace; the rule's
-    ports must match too. Enforcement is the CNI's and stays site evidence."""
-    for rule in policy["spec"]["ingress"]:
-        if port not in {p["port"] for p in rule["ports"] if p["protocol"] == "TCP"}:
-            continue
-        for peer in rule["from"]:
-            if set(peer) == {"podSelector"}:
-                want = peer["podSelector"].get("matchLabels", {})
-                if source_ns == release_ns and all(pod_labels.get(k) == v for k, v in want.items()):
-                    return True
-            elif set(peer) == {"namespaceSelector"}:
-                want = peer["namespaceSelector"]["matchLabels"]
-                if all(ns_labels.get(k) == v for k, v in want.items()):
-                    return True
-            else:
-                raise AssertionError(f"unexpected peer shape: {peer}")
-    return False
-
-
 def test_feedback_policy_semantics_for_the_documented_counterexamples():
     policy = run_new_template({**FEEDBACK_ON, "metrics": {"enabled": True},
                                "networkPolicy": {"allowedNamespaces": ["mcp"]}})[FEEDBACK_POLICY]
     agent = {"app": "rag-agent"}
     here = {"kubernetes.io/metadata.name": "ns"}
     # Agent pod of the release namespace: allowed on 8080 only.
-    assert _feedback_allows(policy, "ns", here, agent, 8080)
-    assert not _feedback_allows(policy, "ns", here, agent, 9090)
+    assert policy_allows(policy, "ns", here, 8080, agent)
+    assert not policy_allows(policy, "ns", here, 9090, agent)
     # The ingest Job, a debug pod and any other pod of the same namespace: denied
     # (unlike rag-agent-ingress, which admits podSelector {}).
     for labels in ({"app": "rag-ingest"}, {"job-name": "ingest"}, {}):
-        assert not _feedback_allows(policy, "ns", here, labels, 8080)
+        assert not policy_allows(policy, "ns", here, 8080, labels)
     # An agent-labelled pod in another namespace, and an allowedNamespaces
     # namespace (admitted to the agent, not to feedback): denied.
-    assert not _feedback_allows(policy, "elsewhere", {"kubernetes.io/metadata.name": "elsewhere"}, agent, 8080)
-    assert not _feedback_allows(policy, "mcp", {"kubernetes.io/metadata.name": "mcp"}, {}, 8080)
+    assert not policy_allows(policy, "elsewhere", {"kubernetes.io/metadata.name": "elsewhere"}, 8080, agent)
+    assert not policy_allows(policy, "mcp", {"kubernetes.io/metadata.name": "mcp"}, 8080, {})
     # Monitoring namespaces (metrics on): admitted by label or by UWM name, 8080 only.
     for name, labels in (("openshift-monitoring", MONITORING_LABEL),
                          ("openshift-user-workload-monitoring", UWM_NAME)):
-        assert _feedback_allows(policy, name, labels, {}, 8080)
-        assert not _feedback_allows(policy, name, labels, {}, 8443)
-    assert not _feedback_allows(policy, "other", {"kubernetes.io/metadata.name": "other"}, {}, 8080)
+        assert policy_allows(policy, name, labels, 8080, {})
+        assert not policy_allows(policy, name, labels, 8443, {})
+    assert not policy_allows(policy, "other", {"kubernetes.io/metadata.name": "other"}, 8080, {})
     # Metrics off: monitoring is not admitted.
     off = run_new_template({**FEEDBACK_ON})[FEEDBACK_POLICY]
-    assert not _feedback_allows(off, "openshift-monitoring", MONITORING_LABEL, {}, 8080)
+    assert not policy_allows(off, "openshift-monitoring", MONITORING_LABEL, 8080, {})
 
 
 def test_feedback_servicemonitor_follows_the_agent_decision_and_authenticates():
     key = ("ServiceMonitor", "rag-feedback")
     docs = run_new_template({**FEEDBACK_ON, "metrics": {"enabled": True}})
+    # With metrics on, the front end is exactly its own objects plus the monitor.
+    assert {k for k in docs if "feedback" in k[1]} == {*FEEDBACK_KEYS, key}
     assert docs[key]["spec"]["selector"] == {"matchLabels": {"app": "rag-feedback"}}
     assert docs[key]["spec"]["endpoints"] == [{
         "port": "http", "path": "/metrics", "interval": "30s", "scrapeTimeout": "10s",
@@ -1105,18 +1065,6 @@ def test_feedback_requires_the_networkpolicy_and_a_secret():
     assert _helm_template_with_values(values).returncode == 0
 
 
-def test_feedback_claim_is_the_only_object_retained_when_disabled():
-    """Disabling renders no feedback object at all (Helm prunes workload,
-    Service, policy and monitor); the claim's keep policy is what retains it."""
-    on = run_new_template({**FEEDBACK_ON, "metrics": {"enabled": True}})
-    off = run_new_template({"metrics": {"enabled": True}})
-    assert {k for k in on if "feedback" in k[1]} == {
-        *FEEDBACK_KEYS, ("ServiceMonitor", "rag-feedback")}
-    assert not [k for k in off if "feedback" in k[1]]
-    assert on["PersistentVolumeClaim", "rag-feedback-data"]["metadata"]["annotations"] == {
-        "helm.sh/resource-policy": "keep"}
-
-
 # ------------------------------------------- Open WebUI front end (#1074)
 
 OWUI_KEYS = {
@@ -1128,32 +1076,28 @@ OWUI_KEYS = {
 # The complete environment of the Open WebUI container (N4: pin every toggle).
 OWUI_ENV_NAMES = {
     "ANONYMIZED_TELEMETRY", "API_KEYS_ALLOWED_ENDPOINTS", "AUDIT_LOG_LEVEL",
-    "BYPASS_EMBEDDING_AND_RETRIEVAL", "BYPASS_MODEL_ACCESS_CONTROL", "CORS_ALLOW_ORIGIN",
-    "DATA_DIR", "DO_NOT_TRACK", "ENABLE_ADMIN_CHAT_ACCESS", "ENABLE_ADMIN_EXPORT",
-    "ENABLE_API_KEYS", "ENABLE_API_KEYS_ENDPOINT_RESTRICTIONS",
-    "ENABLE_AUTOCOMPLETE_GENERATION", "ENABLE_CHANNELS", "ENABLE_CODE_EXECUTION",
-    "ENABLE_CODE_INTERPRETER", "ENABLE_COMMUNITY_SHARING", "ENABLE_DIRECT_CONNECTIONS",
-    "ENABLE_DIRECT_INTEGRATIONS", "ENABLE_EVALUATION_ARENA_MODELS", "ENABLE_FOLDERS",
-    "ENABLE_FOLLOW_UP_GENERATION", "ENABLE_IMAGE_GENERATION", "ENABLE_INITIAL_ADMIN_SIGNUP",
-    "ENABLE_LOGIN_FORM", "ENABLE_MEMORIES", "ENABLE_MESSAGE_RATING", "ENABLE_NOTES",
-    "ENABLE_OAUTH_GROUP_CREATION", "ENABLE_OAUTH_GROUP_MANAGEMENT",
+    "BYPASS_EMBEDDING_AND_RETRIEVAL", "BYPASS_MODEL_ACCESS_CONTROL", "CORS_ALLOW_ORIGIN", "DATA_DIR",
+    "DO_NOT_TRACK", "ENABLE_ADMIN_CHAT_ACCESS", "ENABLE_ADMIN_EXPORT", "ENABLE_API_KEYS",
+    "ENABLE_API_KEYS_ENDPOINT_RESTRICTIONS", "ENABLE_AUTOCOMPLETE_GENERATION", "ENABLE_CHANNELS",
+    "ENABLE_CODE_EXECUTION", "ENABLE_CODE_INTERPRETER", "ENABLE_COMMUNITY_SHARING",
+    "ENABLE_DIRECT_CONNECTIONS", "ENABLE_DIRECT_INTEGRATIONS", "ENABLE_EVALUATION_ARENA_MODELS",
+    "ENABLE_FOLDERS", "ENABLE_FOLLOW_UP_GENERATION", "ENABLE_IMAGE_GENERATION",
+    "ENABLE_INITIAL_ADMIN_SIGNUP", "ENABLE_LOGIN_FORM", "ENABLE_MEMORIES", "ENABLE_MESSAGE_RATING",
+    "ENABLE_NOTES", "ENABLE_OAUTH_GROUP_CREATION", "ENABLE_OAUTH_GROUP_MANAGEMENT",
     "ENABLE_OAUTH_PERSISTENT_CONFIG", "ENABLE_OAUTH_ROLE_MANAGEMENT", "ENABLE_OAUTH_SIGNUP",
     "ENABLE_OAUTH_TOKEN_EXCHANGE", "ENABLE_OLLAMA_API", "ENABLE_OPENAI_API", "ENABLE_OTEL",
-    "ENABLE_PASSWORD_AUTH", "ENABLE_PERSISTENT_CONFIG",
-    "ENABLE_PIP_INSTALL_FRONTMATTER_REQUIREMENTS", "ENABLE_RETRIEVAL_QUERY_GENERATION",
-    "ENABLE_SEARCH_QUERY_GENERATION", "ENABLE_SIGNUP", "ENABLE_TAGS_GENERATION",
-    "ENABLE_TITLE_GENERATION", "ENABLE_TOOLS", "ENABLE_TOOL_SERVERS",
-    "ENABLE_VERSION_UPDATE_CHECK", "ENABLE_WEB_SEARCH", "GLOBAL_LOG_LEVEL", "HF_HUB_OFFLINE",
-    "HOME", "JWT_EXPIRES_IN", "OAUTH_ADMIN_ROLES", "OAUTH_ALLOWED_ROLES", "OAUTH_CLIENT_ID",
-    "OAUTH_CLIENT_SECRET", "OAUTH_EMAIL_CLAIM", "OAUTH_GROUP_CLAIM", "OAUTH_MERGE_ACCOUNTS_BY_EMAIL",
-    "OAUTH_ROLES_CLAIM", "OAUTH_SCOPES", "OAUTH_USERNAME_CLAIM", "OFFLINE_MODE", "OLLAMA_BASE_URL",
-    "OPENID_PROVIDER_URL", "OPENID_REDIRECT_URI", "RAG_EMBEDDING_MODEL_AUTO_UPDATE",
-    "RAG_EMBEDDING_MODEL_TRUST_REMOTE_CODE", "RAG_RERANKING_MODEL_AUTO_UPDATE",
-    "RAG_RERANKING_MODEL_TRUST_REMOTE_CODE", "SCARF_NO_ANALYTICS", "TASK_MODEL",
-    "USER_PERMISSIONS_CHAT_CALL", "USER_PERMISSIONS_CHAT_FILE_UPLOAD",
-    "USER_PERMISSIONS_CHAT_STT", "USER_PERMISSIONS_CHAT_TTS",
-    "USER_PERMISSIONS_FEATURES_API_KEYS", "USER_PERMISSIONS_FEATURES_CODE_INTERPRETER",
-    "USER_PERMISSIONS_FEATURES_DIRECT_TOOL_SERVERS",
+    "ENABLE_PASSWORD_AUTH", "ENABLE_PERSISTENT_CONFIG", "ENABLE_PIP_INSTALL_FRONTMATTER_REQUIREMENTS",
+    "ENABLE_RETRIEVAL_QUERY_GENERATION", "ENABLE_SEARCH_QUERY_GENERATION", "ENABLE_SIGNUP",
+    "ENABLE_TAGS_GENERATION", "ENABLE_TITLE_GENERATION", "ENABLE_TOOLS", "ENABLE_TOOL_SERVERS",
+    "ENABLE_VERSION_UPDATE_CHECK", "ENABLE_WEB_SEARCH", "GLOBAL_LOG_LEVEL", "HF_HUB_OFFLINE", "HOME",
+    "JWT_EXPIRES_IN", "OAUTH_ADMIN_ROLES", "OAUTH_ALLOWED_ROLES", "OAUTH_CLIENT_ID", "OAUTH_CLIENT_SECRET",
+    "OAUTH_EMAIL_CLAIM", "OAUTH_GROUP_CLAIM", "OAUTH_MERGE_ACCOUNTS_BY_EMAIL", "OAUTH_ROLES_CLAIM",
+    "OAUTH_SCOPES", "OAUTH_USERNAME_CLAIM", "OFFLINE_MODE", "OLLAMA_BASE_URL", "OPENID_PROVIDER_URL",
+    "OPENID_REDIRECT_URI", "RAG_EMBEDDING_MODEL_AUTO_UPDATE", "RAG_EMBEDDING_MODEL_TRUST_REMOTE_CODE",
+    "RAG_RERANKING_MODEL_AUTO_UPDATE", "RAG_RERANKING_MODEL_TRUST_REMOTE_CODE", "SCARF_NO_ANALYTICS",
+    "TASK_MODEL", "USER_PERMISSIONS_CHAT_CALL", "USER_PERMISSIONS_CHAT_FILE_UPLOAD",
+    "USER_PERMISSIONS_CHAT_STT", "USER_PERMISSIONS_CHAT_TTS", "USER_PERMISSIONS_FEATURES_API_KEYS",
+    "USER_PERMISSIONS_FEATURES_CODE_INTERPRETER", "USER_PERMISSIONS_FEATURES_DIRECT_TOOL_SERVERS",
     "USER_PERMISSIONS_FEATURES_IMAGE_GENERATION", "USER_PERMISSIONS_FEATURES_MEMORIES",
     "USER_PERMISSIONS_FEATURES_NOTES", "USER_PERMISSIONS_FEATURES_WEB_SEARCH",
     "USER_PERMISSIONS_WORKSPACE_KNOWLEDGE_ACCESS", "USER_PERMISSIONS_WORKSPACE_MODELS_ACCESS",
@@ -1205,6 +1149,14 @@ def _bare_default_values() -> dict:
     """The base values with the Open WebUI block removed: the chart default applies."""
     values = base_values()
     del values["openwebui"]
+    return values
+
+
+def _owui_values(patch: dict | None = None) -> dict:
+    """The base values with the explicit front-end selection (and a shallow patch)."""
+    values = merge_values(base_values(), json.loads(json.dumps(OWUI_ON)))
+    if patch:
+        values["openwebui"].update(patch)
     return values
 
 
@@ -1531,8 +1483,7 @@ def test_openwebui_idp_ca_bundle_refuses_blank_or_garbage_without_echoing_it(owu
     pasted private key reached stderr. The chart refuses with fixed text only.
     (A corrupted certificate body that keeps the PEM shape passes the chart, which
     cannot parse X.509; the ca-trust init step refuses it and the pod is not Ready.)"""
-    values = base_values()
-    values.update(json.loads(json.dumps(OWUI_ON)))
+    values = _owui_values()
     values["openwebui"]["oidc"]["caBundle"] = bad
     r = _helm_template_with_values(values, chart=owui_chart)
     assert r.returncode != 0 and IDP_CA_REFUSAL in r.stderr
@@ -1556,8 +1507,7 @@ def test_openwebui_claim_is_kept_rwo_on_the_block_class(owui_chart):
     assert pvc["metadata"]["annotations"] == {"helm.sh/resource-policy": "keep"}
     assert pvc["spec"] == {"accessModes": ["ReadWriteOnce"], "storageClassName": "fast-block",
                            "resources": {"requests": {"storage": "25Gi"}}}
-    values = base_values()
-    values.update(json.loads(json.dumps(OWUI_ON)))
+    values = _owui_values()
     values["storage"] = {"className": "nfs-client"}
     r = _helm_template_with_values(values, chart=owui_chart)
     assert r.returncode != 0 and "storage" in r.stderr
@@ -1619,6 +1569,14 @@ def test_openwebui_policy_admits_the_router_only_and_egresses_to_agent_dns_and_i
     assert spec["policyTypes"] == ["Ingress", "Egress"]
     assert spec["ingress"] == [{"from": [{"namespaceSelector": {"matchLabels": ROUTER_LABEL}}],
                                 "ports": [{"protocol": "TCP", "port": 8443}]}]
+    # Only the proxy port is exposed; the app itself listens on 127.0.0.1:8080.
+    svc = docs["Service", "rag-openwebui"]["spec"]
+    assert [p["port"] for p in svc["ports"]] == [8443] and svc["ports"][0]["targetPort"] == "https"
+    owui = next(c for c in docs["Deployment", "rag-openwebui"]["spec"]["template"]["spec"]["containers"]
+                if c["name"] == "openwebui")
+    assert "ports" not in owui
+    # Every egress rule carries an explicit port: no rule opens all ports.
+    assert all(rule.get("ports") and all("port" in p for p in rule["ports"]) for rule in spec["egress"])
     agent = {"app": "rag-agent"}
     assert _owui_egress_allows(policy, "ns", agent, None, "TCP", 8080)
     # Counterexamples: other pods or ports of the namespace, Qdrant, OpenObserve,
@@ -1647,8 +1605,7 @@ def test_openwebui_pipe_configmap_carries_the_repository_files_and_their_hashes(
     cm = _owui(owui_chart)["ConfigMap", "rag-openwebui-pipe"]
     installer = (CHART / "files" / "openwebui" / "provision_pipe.py").read_text(encoding="utf-8")
     purge = (CHART / "files" / "openwebui" / "purge_chats.py").read_text(encoding="utf-8")
-    assert cm["data"] == {"docs_pipe.py": OWUI_PIPE, "provision_pipe.py": installer,
-                          "purge_chats.py": purge}
+    assert cm['data'] == {'docs_pipe.py': OWUI_PIPE, 'provision_pipe.py': installer, 'purge_chats.py': purge}
     assert cm["metadata"]["annotations"] == {
         "mainframe-rag/docs-pipe-sha256": hashlib.sha256(OWUI_PIPE.encode()).hexdigest(),
         "mainframe-rag/provision-pipe-sha256": hashlib.sha256(installer.encode()).hexdigest(),
@@ -1740,17 +1697,6 @@ def test_openwebui_proxy_configmap_carries_the_repository_config(owui_chart):
     assert ("ConfigMap", "rag-openwebui-proxy") not in default
 
 
-def test_openwebui_network_policy_admits_only_the_proxy_port_and_nothing_reaches_the_app_port(owui_chart):
-    docs = _owui(owui_chart)
-    ingress = docs["NetworkPolicy", "rag-openwebui"]["spec"]["ingress"]
-    assert [p["port"] for rule in ingress for p in rule["ports"]] == [8443]
-    svc = docs["Service", "rag-openwebui"]["spec"]
-    assert [p["port"] for p in svc["ports"]] == [8443] and svc["ports"][0]["targetPort"] == "https"
-    pod = docs["Deployment", "rag-openwebui"]["spec"]["template"]["spec"]
-    owui = next(c for c in pod["containers"] if c["name"] == "openwebui")
-    assert "ports" not in owui  # the app listens on 127.0.0.1:8080 only
-
-
 def test_openwebui_retention_defaults_to_30_days_and_cannot_be_unset(owui_chart):
     """Maintainer decision 2026-10-24: a 30-day window, enforced by the purge
     sidecar. Omitting it keeps 30; an explicit null fails the render."""
@@ -1776,8 +1722,7 @@ def test_openwebui_refuses_to_enable_without_the_repository_docs_pipe(tmp_path):
     chart = tmp_path / "chart"
     shutil.copytree(CHART, chart)
     (chart / "files" / "openwebui" / "docs_pipe.py").unlink(missing_ok=True)
-    values = base_values()
-    values.update(json.loads(json.dumps(OWUI_ON)))
+    values = _owui_values()
     r = _helm_template_with_values(values, chart=chart)
     assert r.returncode != 0 and "docs Pipe (#1072)" in r.stderr
 
@@ -1819,16 +1764,12 @@ def test_openwebui_chart_pipe_is_byte_identical_to_the_repository_pipe():
     ({"extra": 1}, "openwebui"),
 ])
 def test_openwebui_schema_refuses_invalid_selection(owui_chart, patch, needle):
-    values = base_values()
-    values.update(json.loads(json.dumps(OWUI_ON)))
-    values["openwebui"].update(patch)
-    r = _helm_template_with_values(values, chart=owui_chart)
+    r = _helm_template_with_values(_owui_values(patch), chart=owui_chart)
     assert r.returncode != 0 and needle in r.stderr
 
 
 def test_openwebui_requires_the_namespace_service_ca(owui_chart):
-    values = base_values()
-    values.update(json.loads(json.dumps(OWUI_ON)))
+    values = _owui_values()
     values["route"] = {"enabled": False, "timeoutSeconds": 300, "destinationCA": "  "}
     r = _helm_template_with_values(values, chart=owui_chart)
     assert r.returncode != 0 and "destinationCA" in r.stderr
@@ -1868,15 +1809,6 @@ def test_chart_request_deadline_stays_strictly_below_the_route_timeout():
     values = yaml.safe_load((CHART / "values.yaml").read_text())
     # Strict: a deadline equal to the route timeout races the route cut (#843).
     assert 0 < values["requestDeadlineSeconds"] < values["route"]["timeoutSeconds"]
-
-
-@pytest.mark.parametrize("bad", [-1, 3601, "300", 1.5])
-def test_direct_chart_refuses_invalid_request_deadline(bad):
-    values = base_values()
-    values["requestDeadlineSeconds"] = bad
-    result = _helm_template_with_values(values)
-    assert result.returncode != 0
-    assert "requestDeadlineSeconds" in result.stderr
 
 
 def test_chart_ships_admission_4_4_30_and_reaches_settings(monkeypatch):
@@ -1931,18 +1863,6 @@ def test_direct_chart_requires_queue_wait_when_override_omits_it_while_admission
     values["requestMaxConcurrent"] = 0
     off = _helm_template_with_values(values)
     assert off.returncode == 0, off.stderr
-
-
-@pytest.mark.parametrize("key,bad", [
-    ("requestMaxConcurrent", -1), ("requestMaxConcurrent", 1001), ("requestMaxConcurrent", "2"),
-    ("requestQueueMax", 1.5), ("requestQueueWaitSeconds", 301), ("requestQueueWaitSeconds", -1),
-])
-def test_direct_chart_refuses_invalid_admission_values(key, bad):
-    values = base_values()
-    values[key] = bad
-    result = _helm_template_with_values(values)
-    assert result.returncode != 0
-    assert key in result.stderr
 
 
 # OpenObserve is the only trace backend (issue #956, ADR-0006). Tags in
@@ -2034,11 +1954,9 @@ def test_openobserve_backend_contract():
     assert pvc["spec"]["storageClassName"] == "standard"
     assert pvc["spec"]["resources"]["requests"]["storage"] == "10Gi"
     assert pvc["metadata"]["annotations"]["helm.sh/resource-policy"] == "keep"
-
-
-def test_openobserve_storage_size_is_configurable():
-    docs = run_new_template({"openobserve": {"storage": {"size": "20Gi"}}})
-    assert docs["PersistentVolumeClaim", "openobserve-data"]["spec"]["resources"]["requests"]["storage"] == "20Gi"
+    sized = run_new_template({"openobserve": {"storage": {"size": "20Gi"}}})
+    assert sized["PersistentVolumeClaim", "openobserve-data"]["spec"]["resources"]["requests"][
+        "storage"] == "20Gi"
 
 
 def test_openobserve_egress_policy_denies_all():
@@ -2084,34 +2002,28 @@ def _values_with(**patch):
     return values
 
 
-@pytest.mark.parametrize("patch,needle", [
+@pytest.mark.parametrize(("patch", "needle"), [
     ({"images.openobserve.tag": ""}, "tag"),
     ({"images.otelcol.tag": ""}, "tag"),
     ({"openobserve.credentialsSecretName": ""}, "credentialsSecretName is required"),
-])
+    ({"metrics.enabled": False, "metrics.collector": {"enabled": True}},
+     "metrics.collector.enabled=true requires"),
+    ({"tracing.endpoint": "http://collector.platform:4318", "metrics.collector": {"enabled": True}},
+     "metrics.collector.enabled=true requires"),
+    ({"metrics.enabled": False, "metrics.serviceMonitor": {"enabled": True}},
+     "metrics.serviceMonitor.enabled=true requires metrics.enabled=true"),
+], ids=["openobserve-tag", "otelcol-tag", "missing-credentials-secret", "collector-needs-metrics",
+        "collector-needs-bundled-backend", "monitor-needs-metrics"])
 def test_openobserve_and_collector_fail_closed(patch, needle):
     result = _helm_template_with_values(_values_with(**patch))
     assert result.returncode != 0
     assert needle in result.stderr
 
 
-def test_collector_forced_on_without_prerequisites_fails():
-    for patch in (
-        {"metrics.enabled": False, "metrics.collector": {"enabled": True}},
-        {"tracing.endpoint": "http://collector.platform:4318", "metrics.collector": {"enabled": True}},
-    ):
-        result = _helm_template_with_values(_values_with(**patch))
-        assert result.returncode != 0
-        assert "metrics.collector.enabled=true requires" in result.stderr
-
-
-def test_collector_can_be_switched_off_while_metrics_stay_on():
-    docs = run_new_template({"metrics": {"enabled": True, "collector": {"enabled": False}}})
-    assert not [k for k in docs if "otelcol" in k[1]]
-    assert env_map(docs["Deployment", "rag-agent"])["METRICS_ENABLED"]["value"] == "true"
-
-
 def test_collector_contract():
+    off = run_new_template({"metrics": {"enabled": True, "collector": {"enabled": False}}})
+    assert not [k for k in off if "otelcol" in k[1]]
+    assert env_map(off["Deployment", "rag-agent"])["METRICS_ENABLED"]["value"] == "true"
     docs = run_new_template(METRICS_ON)
     assert {k for k in docs if "otelcol" in k[1]} == {
         ("Deployment", "otelcol"),
@@ -2171,13 +2083,6 @@ def test_collector_egress_allows_only_openobserve_agent_and_dns():
     assert all("ipBlock" not in peer and peer for r in rules for peer in r["to"])
 
 
-def test_agent_ingress_policy_admits_the_collector_scrape():
-    docs = run_new_template(METRICS_ON)
-    first = docs[POLICY_KEY]["spec"]["ingress"][0]
-    assert first["from"] == [{"podSelector": {}}]
-    assert {"protocol": "TCP", "port": 8080} in first["ports"]
-
-
 @pytest.mark.parametrize("path,bad", [
     (("idpEgress", "port"), None), (("idpEgress", "port"), ""), (("idpEgress", "port"), " "),
     (("idpEgress", "port"), 0), (("idpEgress", "port"), "443"),
@@ -2227,15 +2132,11 @@ def test_openwebui_refuses_role_lists_that_would_admit_every_signed_in_user(owui
     sign-in, so AD FS issues the baseline value signed-in to every user
     (docs/deploy.md). A role list containing it, or *, would admit everyone the
     IdP authenticates and make removal from the role groups revoke nothing."""
-    values = base_values()
-    values.update(json.loads(json.dumps(OWUI_ON)))
+    values = _owui_values()
     values["openwebui"]["oidc"][key] = bad
     r = _helm_template_with_values(values, chart=owui_chart)
     assert r.returncode != 0 and ROLE_BASELINE_REFUSAL in r.stderr
     assert "rag-openwebui" not in r.stdout
 
 
-def test_openwebui_networkpolicy_egress_rules_always_carry_a_port(owui_chart):
-    policy = _owui(owui_chart)["NetworkPolicy", "rag-openwebui"]
-    for rule in policy["spec"]["egress"]:
-        assert rule.get("ports") and all("port" in p for p in rule["ports"])
+

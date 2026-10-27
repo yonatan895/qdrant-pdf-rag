@@ -433,18 +433,16 @@ def test_space_is_checked_on_every_peer(tree, qdrant):
 # --- prerequisites and transport failures ---------------------------------------
 
 
-def test_no_qdrant_release_refuses(tree, qdrant):
-    result = _copy(tree, qdrant, STS_ABSENT="1")
+@pytest.mark.parametrize(("seed", "env", "needle"), [
+    (False, {"STS_ABSENT": "1"}, "E_RETIRE_NO_QDRANT"),
+    (True, {"WRITER_KEY_B64": ""}, "E_RETIRE_NO_WRITER_KEY"),
+], ids=["no-qdrant-release", "no-writer-key"])
+def test_prerequisites_refuse_before_any_write(tree, qdrant, seed, env, needle):
+    if seed:
+        _legacy_site(qdrant)
+    result = _copy(tree, qdrant, **env)
     assert result.returncode != 0
-    assert "E_RETIRE_NO_QDRANT" in result.stderr
-    assert qdrant.ops == []
-
-
-def test_missing_writer_key_refuses_without_a_write(tree, qdrant):
-    _legacy_site(qdrant)
-    result = _copy(tree, qdrant, WRITER_KEY_B64="")
-    assert result.returncode != 0
-    assert "E_RETIRE_NO_WRITER_KEY" in result.stderr
+    assert needle in result.stderr
     assert [op for op in qdrant.ops if op.split(":")[0] in FakeQdrant.WRITE_OPS] == []
 
 

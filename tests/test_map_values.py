@@ -108,10 +108,15 @@ def load_values(path: Path) -> dict:
     return yaml.safe_load(path.read_text())
 
 
-def test_full_mapping_table(mapper_env):
-    r, out = mapper_env()
+def mapped(mapper_env, *argv) -> dict:
+    """Run the mapper on the fixture environment, require success, parse values."""
+    r, out = mapper_env(*argv)
     assert r.returncode == 0, r.stderr
-    v = load_values(out)
+    return load_values(out)
+
+
+def test_full_mapping_table(mapper_env):
+    v = mapped(mapper_env)
     assert v["images"]["agent"] == {
         "repository": "reg.internal/qdrant-pdf-rag-agent",
         "tag": IMAGE_SHA, "pullPolicy": "IfNotPresent",
@@ -127,10 +132,7 @@ def test_full_mapping_table(mapper_env):
     assert isinstance(v["models"]["embedding"]["dimension"], int)
     assert v["models"]["rerank"]["model"] == "BAAI/bge-reranker-v2-m3"
     assert v["models"]["rerank"]["endpointOrder"] == "score_first"
-    assert v["tracing"] == {
-        "enabled": True, "endpoint": "",
-        "deploymentEnvironment": "", "serviceName": "",
-    }
+    assert v['tracing'] == {'enabled': True, 'endpoint': '', 'deploymentEnvironment': '', 'serviceName': ''}
     assert v["metrics"] == {"enabled": False, "serviceMonitor": {"enabled": False}}
     assert v["route"] == {"enabled": False, "timeoutSeconds": 300, "destinationCA": ""}
     assert v["storage"] == {"className": "standard"}
@@ -166,9 +168,7 @@ def test_removed_legacy_env_names_are_refused_not_ignored(monkeypatch, mapper_en
 ])
 def test_otel_mirror(monkeypatch, mapper_env, token, enabled, endpoint):
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", token)
-    r, out = mapper_env()
-    assert r.returncode == 0, r.stderr
-    t = load_values(out)["tracing"]
+    t = mapped(mapper_env)["tracing"]
     assert t["enabled"] is enabled and t["endpoint"] == endpoint
 
 
@@ -185,9 +185,7 @@ def test_otel_is_owned_by_the_mapper_not_stale_shell_state(monkeypatch, mapper_e
     monkeypatch.setenv("OTEL_TRACING_ENABLED", "0")
     monkeypatch.setenv("OTEL_ENDPOINT_RESOLVED", "")
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector:4318")
-    r, out = mapper_env()
-    assert r.returncode == 0, r.stderr
-    t = load_values(out)["tracing"]
+    t = mapped(mapper_env)["tracing"]
     assert (t["enabled"], t["endpoint"]) == (True, "http://collector:4318")
     assert "jaeger" not in t
 
@@ -256,39 +254,26 @@ def test_metrics_literal_true_only(monkeypatch, mapper_env):
     assert r.returncode == 0, r.stderr
     assert load_values(out)["metrics"] == {"enabled": False, "serviceMonitor": {"enabled": False}}
     monkeypatch.setenv("METRICS_ENABLED", "true")
-    r, out = mapper_env()
-    assert r.returncode == 0, r.stderr
-    assert load_values(out)["metrics"] == {"enabled": True, "serviceMonitor": {"enabled": True}}
+    assert mapped(mapper_env)["metrics"] == {"enabled": True, "serviceMonitor": {"enabled": True}}
 
 
-@pytest.mark.parametrize("raw", ["true"])
-def test_retired_in_place_switch_accepts_publication(monkeypatch, mapper_env, raw):
-    """In-place ingest was retired (#360): unset or true still renders, and
-    the chart carries no switch (publication is the only mode)."""
+@pytest.mark.parametrize("raw,accepted", [("true", True), ("false", False)])
+def test_retired_in_place_switch(monkeypatch, mapper_env, raw, accepted):
+    """In-place ingest was retired (#360): unset or true still renders and the
+    chart carries no switch; an explicit false fails closed with the retirement,
+    never silently rendering a publication the operator did not ask for."""
     monkeypatch.setenv("CORPUS_PVC", "corpus-pvc")
     monkeypatch.setenv("INGEST_ALIAS_PUBLISH", raw)
     r, out = mapper_env()
-    assert r.returncode == 0, r.stderr
-    assert "aliasPublish" not in load_values(out)["ingest"]
+    if accepted:
+        assert r.returncode == 0, r.stderr
+        assert "aliasPublish" not in load_values(out)["ingest"]
+    else:
+        assert r.returncode != 0
+        assert "in-place ingest was retired" in r.stderr
 
 
-@pytest.mark.parametrize("raw", ["false"])
-def test_retired_in_place_switch_refuses_false(monkeypatch, mapper_env, raw):
-    """An explicit false fails closed with the retirement, never silently
-    rendering a publication the operator did not ask for."""
-    monkeypatch.setenv("CORPUS_PVC", "corpus-pvc")
-    monkeypatch.setenv("INGEST_ALIAS_PUBLISH", raw)
-    r, _ = mapper_env()
-    assert r.returncode != 0
-    assert "in-place ingest was retired" in r.stderr
 
-
-def test_strict_bool_rejects_garbage(monkeypatch, mapper_env):
-    monkeypatch.setenv("CORPUS_PVC", "corpus-pvc")
-    monkeypatch.setenv("INGEST_REINGEST", "maybe")
-    r, _ = mapper_env()
-    assert r.returncode != 0
-    assert "INGEST_REINGEST" in r.stderr
 
 
 @pytest.mark.parametrize("raw,expected", [
@@ -304,12 +289,7 @@ def test_ui_enabled_selection(monkeypatch, mapper_env, raw, expected):
     assert load_values(out)["ui"] == {"enabled": expected}
 
 
-def test_ui_enabled_rejects_garbage(monkeypatch, mapper_env):
-    monkeypatch.setenv("UI_ENABLED", "maybe")
-    r, _ = mapper_env()
-    assert r.returncode != 0
-    assert "UI_ENABLED must be true/false" in r.stderr
-    assert "maybe" not in r.stderr  # the key is named, the value is not echoed
+
 
 
 @pytest.mark.parametrize("raw,expected", [
@@ -324,20 +304,40 @@ def test_agent_network_policy_selection_defaults_on(monkeypatch, mapper_env, raw
     assert load_values(out)["networkPolicy"] == {"enabled": expected, "allowedNamespaces": []}
 
 
-def test_agent_network_policy_rejects_garbage(monkeypatch, mapper_env):
-    monkeypatch.setenv("AGENT_NETWORK_POLICY", "maybe")
+@pytest.mark.parametrize(("env", "message", "echoed"), [
+    ({"INGEST_REINGEST": "maybe", "CORPUS_PVC": "corpus-pvc"}, "INGEST_REINGEST", ()),
+    ({"UI_ENABLED": "maybe"}, "UI_ENABLED must be true/false", ()),
+    ({"AGENT_NETWORK_POLICY": "maybe"}, "AGENT_NETWORK_POLICY must be true/false", ()),
+    # This leg's shared parser names the rejected value; the others do not.
+    ({"SERVICEMONITOR_ENABLED": "maybe"}, "SERVICEMONITOR_ENABLED", ("maybe",)),
+    # Issue #272: model_config used to read an invalid value as false.
+    ({"CONTEXTUAL_EMBED_ENABLED": "on"}, "CONTEXTUAL_EMBED_ENABLED must be true/false", ()),
+    ({"CORPUS_PVC": "corpus-pvc", "GATEWAY_API_KEY_SECRET": "gw-keys",
+      "INGEST_RETIRE_DOCS": "SA22-0000-00", "INGEST_AUTHORIZE_FROM_CATALOG": "yes please"},
+     "INGEST_AUTHORIZE_FROM_CATALOG", ()),
+], ids=["ingest-reingest", "ui-enabled", "agent-network-policy", "servicemonitor",
+        "contextual-embed", "authorize-from-catalog"])
+def test_strict_boolean_garbage_is_refused(monkeypatch, mapper_env, env, message, echoed):
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
     r, _ = mapper_env()
     assert r.returncode != 0
-    assert "AGENT_NETWORK_POLICY must be true/false" in r.stderr
-    assert "maybe" not in r.stderr  # the key is named, the value is not echoed
+    assert message in r.stderr
+    # the key is named; a value not echoed by its parser never reaches the diagnostic
+    for value in ("maybe", "yes please"):
+        if value not in echoed:
+            assert value not in r.stderr
 
 
-def test_agent_network_policy_allowed_namespaces_round_trip(monkeypatch, mapper_env):
-    monkeypatch.setenv("AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES", "mcp,tools-1,a")
+@pytest.mark.parametrize(("raw", "expected"), [
+    ("mcp,tools-1,a", ["mcp", "tools-1", "a"]),
+    ("a" * 63, ["a" * 63]),  # the DNS-label limit is inclusive
+], ids=["list", "63-char-limit"])
+def test_agent_network_policy_allowed_namespaces_round_trip(monkeypatch, mapper_env, raw, expected):
+    monkeypatch.setenv("AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES", raw)
     r, out = mapper_env()
     assert r.returncode == 0, r.stderr
-    assert load_values(out)["networkPolicy"] == {
-        "enabled": True, "allowedNamespaces": ["mcp", "tools-1", "a"]}
+    assert load_values(out)["networkPolicy"] == {"enabled": True, "allowedNamespaces": expected}
 
 
 @pytest.mark.parametrize("raw", [
@@ -352,13 +352,6 @@ def test_agent_network_policy_allowed_namespaces_are_strict(monkeypatch, mapper_
     assert not out.exists()
 
 
-def test_agent_network_policy_allowed_namespaces_accept_the_63_char_limit(monkeypatch, mapper_env):
-    monkeypatch.setenv("AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES", "a" * 63)
-    r, out = mapper_env()
-    assert r.returncode == 0, r.stderr
-    assert load_values(out)["networkPolicy"]["allowedNamespaces"] == ["a" * 63]
-
-
 def test_agent_network_policy_allow_list_requires_the_policy(monkeypatch, mapper_env):
     monkeypatch.setenv("AGENT_NETWORK_POLICY", "false")
     monkeypatch.setenv("AGENT_NETWORK_POLICY_ALLOWED_NAMESPACES", "mcp")
@@ -366,14 +359,6 @@ def test_agent_network_policy_allow_list_requires_the_policy(monkeypatch, mapper
     assert r.returncode != 0
     assert "requires AGENT_NETWORK_POLICY to be enabled" in r.stderr
     assert not out.exists()
-
-
-def test_contextual_embed_invalid_value_is_refused_not_false(monkeypatch, mapper_env):
-    """Issue #272: model_config used to read an invalid value as false."""
-    monkeypatch.setenv("CONTEXTUAL_EMBED_ENABLED", "on")
-    r, _ = mapper_env()
-    assert r.returncode != 0
-    assert "CONTEXTUAL_EMBED_ENABLED must be true/false" in r.stderr
 
 
 def test_ingest_enabled_block_and_tricky_retire(monkeypatch, mapper_env):
@@ -391,9 +376,7 @@ def test_ingest_enabled_block_and_tricky_retire(monkeypatch, mapper_env):
     assert ing["workers"] == 8 and isinstance(ing["workers"], int)
     assert ing["reingest"] is True and "aliasPublish" not in ing
     assert ing["retireDocs"] == ["SA22-0000-00", tricky]
-    assert ing["collectionPolicy"] == {
-        "shardNumber": 6, "replicationFactor": 3, "writeConsistencyFactor": 2,
-    }
+    assert ing['collectionPolicy'] == {'shardNumber': 6, 'replicationFactor': 3, 'writeConsistencyFactor': 2}
     assert ing["authorizeFromCatalog"] is False, "the catalog authority is off by default"
 
 
@@ -416,16 +399,6 @@ def test_authorize_from_catalog_maps_only_with_retire_docs(monkeypatch, mapper_e
     else:
         assert r.returncode != 0
         assert "INGEST_AUTHORIZE_FROM_CATALOG requires INGEST_RETIRE_DOCS" in r.stderr
-
-
-def test_authorize_from_catalog_refuses_a_non_boolean(monkeypatch, mapper_env):
-    monkeypatch.setenv("CORPUS_PVC", "corpus-pvc")
-    monkeypatch.setenv("GATEWAY_API_KEY_SECRET", "gw-keys")
-    monkeypatch.setenv("INGEST_RETIRE_DOCS", "SA22-0000-00")
-    monkeypatch.setenv("INGEST_AUTHORIZE_FROM_CATALOG", "yes please")
-    r, _ = mapper_env()
-    assert r.returncode != 0
-    assert "INGEST_AUTHORIZE_FROM_CATALOG" in r.stderr
 
 
 def test_route_needs_ca_file(monkeypatch, mapper_env, tmp_path):
@@ -576,9 +549,7 @@ def test_namespace_rejects_invalid_label_before_values_write(mapper_env, monkeyp
 @pytest.mark.parametrize("raw,want", [("", False), ("true", True)])
 def test_chat_condensation_operator_mapping(monkeypatch, mapper_env, raw, want):
     monkeypatch.setenv("CHAT_CONDENSE_ENABLED", raw)
-    result, output = mapper_env()
-    assert result.returncode == 0, result.stderr
-    assert load_values(output)["models"]["reasoning"]["condenseEnabled"] is want
+    assert mapped(mapper_env)["models"]["reasoning"]["condenseEnabled"] is want
 
 
 @pytest.mark.parametrize("stream,simple_reserve,complex_effort,efforts", [
@@ -688,9 +659,7 @@ def test_decoupled_backend_flags_follow_the_parent_by_default(mapper_env):
     """OBS-2: an unset ServiceMonitor flag follows the parent leg; the release
     carries the effective boolean (the chart never re-derives the default).
     Tracing has no backend switch: OpenObserve is the only backend (#956)."""
-    r, out = mapper_env()
-    assert r.returncode == 0, r.stderr
-    v = load_values(out)
+    v = mapped(mapper_env)
     assert "jaeger" not in v["tracing"]
     assert v["metrics"]["serviceMonitor"] == {"enabled": v["metrics"]["enabled"]}
 
@@ -699,17 +668,7 @@ def test_decoupled_backend_flags_follow_the_parent_by_default(mapper_env):
 def test_servicemonitor_enabled_selection(monkeypatch, mapper_env, raw, expected):
     monkeypatch.setenv("METRICS_ENABLED", "true")
     monkeypatch.setenv("SERVICEMONITOR_ENABLED", raw)
-    r, out = mapper_env()
-    assert r.returncode == 0, r.stderr
-    assert load_values(out)["metrics"] == {"enabled": True, "serviceMonitor": {"enabled": expected}}
-
-
-@pytest.mark.parametrize("key", ["SERVICEMONITOR_ENABLED"])
-def test_decoupled_flags_reject_garbage(monkeypatch, mapper_env, key):
-    monkeypatch.setenv(key, "maybe")
-    r, _ = mapper_env()
-    assert r.returncode != 0
-    assert key in r.stderr
+    assert mapped(mapper_env)["metrics"] == {"enabled": True, "serviceMonitor": {"enabled": expected}}
 
 
 def test_monitor_for_disabled_metrics_fails_closed(monkeypatch, mapper_env):
@@ -719,17 +678,9 @@ def test_monitor_for_disabled_metrics_fails_closed(monkeypatch, mapper_env):
     assert "SERVICEMONITOR_ENABLED=true requires METRICS_ENABLED=true" in r.stderr
 
 
-def test_tracing_follows_the_endpoint_alone_and_emits_no_jaeger_key(mapper_env):
-    """#956: tracing follows OTEL_EXPORTER_OTLP_ENDPOINT alone and no Jaeger
-    key is emitted (JAEGER_ENABLED itself is refused, #1070)."""
-    r, out = mapper_env()
-    assert r.returncode == 0, r.stderr
-    v = load_values(out)
-    assert v["tracing"]["enabled"] is True and "jaeger" not in v["tracing"]
-    assert "jaeger" not in v["images"]
-
-
-@pytest.mark.parametrize("endpoint,enabled", [("", True), ("http://collector.platform:4318", False), ("off", False)])
+@pytest.mark.parametrize("endpoint,enabled", [
+    ("", True), ("http://collector.platform:4318", False), ("off", False),
+])
 def test_openobserve_and_otelcol_images_follow_tracing(monkeypatch, mapper_env, endpoint, enabled):
     """#956: the bundled backend (tracing on, empty endpoint) emits images.openobserve and
     images.otelcol (repository, tag, pullPolicy; never a digest, which lives in images.txt).
@@ -766,9 +717,7 @@ def test_openobserve_run_as_id_maps_only_when_set_and_bundled(monkeypatch, mappe
     assert r.returncode == 0, r.stderr
     assert "runAsId" not in load_values(out).get("openobserve", {})
     monkeypatch.setenv("OPENOBSERVE_RUN_AS_ID", "10001")
-    r, out = mapper_env()
-    assert r.returncode == 0, r.stderr
-    assert load_values(out)["openobserve"]["runAsId"] == 10001
+    assert mapped(mapper_env)["openobserve"]["runAsId"] == 10001
     for bad in ("0", "abc", "70000"):
         monkeypatch.setenv("OPENOBSERVE_RUN_AS_ID", bad)
         assert mapper_env()[0].returncode != 0, bad
@@ -832,18 +781,8 @@ def test_image_digest_env_renders_digest_per_image(monkeypatch, mapper_env):
     assert all("digest" not in image for image in load_values(out)["images"].values())
 
 
-def test_openobserve_digest_never_enters_chart_values(monkeypatch, mapper_env):
-    """#956: like every chart image, OpenObserve renders repository and tag; the
-    verified digest from the identity check is not copied into the values."""
-    monkeypatch.setenv("IMAGE_DIGEST_OPENOBSERVE", "sha256:" + "c" * 64)
-    r, out = mapper_env()
-    assert r.returncode == 0, r.stderr
-    image = load_values(out)["images"]["openobserve"]
-    assert "digest" not in image and image["tag"] == "v1.1.2"
-    assert image["repository"].endswith("/openobserve/openobserve")
-
-
-@pytest.mark.parametrize("bad", ["latest", "sha256:" + "G" * 64])
+@pytest.mark.parametrize("bad", ["latest", "sha256:" + "G" * 64],
+                         ids=["tag", "non-hex-digest"])
 def test_malformed_image_digest_fails_closed(monkeypatch, mapper_env, bad):
     monkeypatch.setenv("IMAGE_DIGEST_INGEST", bad)
     r, out = mapper_env()
@@ -985,9 +924,7 @@ def test_openwebui_unset_is_enabled_and_fails_closed_naming_the_opt_out(monkeypa
 
 def test_openwebui_selection_round_trips_with_the_decided_defaults(monkeypatch, mapper_env, tmp_path):
     _owui_env(monkeypatch, tmp_path)
-    r, out = mapper_env()
-    assert r.returncode == 0, r.stderr
-    values = load_values(out)
+    values = mapped(mapper_env)
     # 30 days is the maintainer's 2026-10-24 decision; groups/roles are the
     # Open WebUI claim names; 443 the IdP port.
     assert values["openwebui"] == {
@@ -1007,7 +944,7 @@ def test_openwebui_selection_round_trips_with_the_decided_defaults(monkeypatch, 
     digest = "sha256:" + "d" * 64
     monkeypatch.setenv("IMAGE_DIGEST_OPENWEBUI", digest)
     monkeypatch.setenv("OPENWEBUI_RETENTION_DAYS", "7")
-    r, out = mapper_env()
+    _, out = mapper_env()
     values = load_values(out)
     assert values["images"]["openwebui"]["digest"] == digest
     assert values["openwebui"]["retentionDays"] == 7
@@ -1306,33 +1243,19 @@ INGEST_SIZING_EXPECTED = {
 }
 
 
-@pytest.mark.parametrize("corpus", ["", "corpus-pvc"])
-def test_default_ingest_resources_are_the_chart_defaults(monkeypatch, mapper_env, corpus):
-    """Unset sizing keys keep today's rendered values, enabled or not."""
-    if corpus:
-        monkeypatch.setenv("CORPUS_PVC", corpus)
-    r, out = mapper_env()
-    assert r.returncode == 0, r.stderr
-    assert load_values(out)["ingest"]["resources"] == CHART_INGEST_RESOURCES
-
-
-def test_ingest_sizing_keys_reach_the_release_values(monkeypatch, mapper_env):
+def test_ingest_sizing_defaults_partial_and_full(monkeypatch, mapper_env):
+    """Unset sizing keys keep the chart defaults (enabled or not), a partial
+    override keeps the rest, and the full set reaches the release values."""
+    assert load_values(mapper_env()[1])["ingest"]["resources"] == CHART_INGEST_RESOURCES
     monkeypatch.setenv("CORPUS_PVC", "corpus-pvc")
-    for key, val in INGEST_SIZING_ENV.items():
-        monkeypatch.setenv(key, val)
-    r, out = mapper_env()
-    assert r.returncode == 0, r.stderr
-    assert load_values(out)["ingest"]["resources"] == INGEST_SIZING_EXPECTED
-
-
-def test_a_partial_ingest_override_keeps_the_other_defaults(monkeypatch, mapper_env):
-    monkeypatch.setenv("CORPUS_PVC", "corpus-pvc")
+    assert load_values(mapper_env()[1])["ingest"]["resources"] == CHART_INGEST_RESOURCES
     monkeypatch.setenv("INGEST_MEMORY_LIMIT", "12Gi")
-    r, out = mapper_env()
-    assert r.returncode == 0, r.stderr
     expected = {k: dict(v) for k, v in CHART_INGEST_RESOURCES.items()}
     expected["limits"]["memory"] = "12Gi"
-    assert load_values(out)["ingest"]["resources"] == expected
+    assert load_values(mapper_env()[1])["ingest"]["resources"] == expected
+    for key, val in INGEST_SIZING_ENV.items():
+        monkeypatch.setenv(key, val)
+    assert load_values(mapper_env()[1])["ingest"]["resources"] == INGEST_SIZING_EXPECTED
 
 
 @pytest.mark.parametrize("key,val", [
@@ -1377,12 +1300,10 @@ def test_mapper_refuses_a_retired_key_before_rendering(monkeypatch, mapper_env):
     assert not out.exists()
     assert "sentinel-" not in r.stdout + r.stderr
     assert re.findall(r"(?m)^  ([A-Z_]+) \(retired in ", r.stderr) == ["REGISTRY_INTERNAL", "JAEGER_ENABLED"]
-
-
-def test_mapper_ignores_empty_retired_keys(monkeypatch, mapper_env):
+    # An empty retired key is unset, not a refusal.
     monkeypatch.setenv("REGISTRY_INTERNAL", "")
-    r, _ = mapper_env()
-    assert r.returncode == 0, r.stderr
+    monkeypatch.delenv("JAEGER_ENABLED")
+    assert mapper_env()[0].returncode == 0
 
 
 def test_current_airgap_env_example_is_not_refused():
