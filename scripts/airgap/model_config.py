@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import os
 import re
+import ssl
 import sys
 from collections.abc import Mapping
+from fractions import Fraction
+from urllib.parse import urlsplit
 
 REASONING_INTEGER_FIELDS = {
     "LLM_MAX_MODEL_LEN": ("maxModelLen", 512, 131072),
@@ -48,7 +51,7 @@ MODEL_CONFIG_KEYS = (
 OPERATOR_BOOL_KEYS = (
     "UI_ENABLED", "CONTEXTUAL_EMBED_ENABLED", "INGEST_ALIAS_PUBLISH",
     "INGEST_REINGEST", "INGEST_AUTHORIZE_FROM_CATALOG", "CHAT_CONDENSE_ENABLED", "LLM_STREAM", "AGENT_NETWORK_POLICY",
-    "FEEDBACK_ENABLED",
+    "FEEDBACK_ENABLED", "OPENWEBUI_ENABLED",
 )
 
 # Agent ingress NetworkPolicy (issue #373): default ON; the allow-list names
@@ -69,6 +72,72 @@ def parse_strict_bool(name: str, raw: str, default: bool) -> bool:
     if low in ("false", "0", "no"):
         return False
     raise ValueError(f"{name} must be true/false")
+
+
+# Operator keys that earlier releases honoured and the current code ignores
+# (#1070). Ignoring them silently would let an upgrade run with a different
+# registry, namespace, embedding origin or tracing than the operator wrote, so
+# any non-empty value refuses. (key, retiring commit, fixed migration text).
+RETIRED_KEYS: tuple[tuple[str, str, str], ...] = (
+    ("REGISTRY_INTERNAL", "547d04d", "set INTERNAL_REGISTRY and remove it"),
+    ("OPENSHIFT_NAMESPACE", "547d04d", "set NAMESPACE and remove it"),
+    (
+        "VLLM_BASE_URL",
+        "547d04d",
+        ("set EMBED_BASE_URL to the old value plus /v1 (clients append /embeddings to a base "
+         "that must end in /v1; do not repeat /v1), then remove it"),
+    ),
+    (
+        "JAEGER_ENABLED",
+        "d7765dc",
+        "remove it; OTEL_EXPORTER_OTLP_ENDPOINT selects the collector (off disables tracing)",
+    ),
+    (
+        "JAEGER_QUERY_URL",
+        "d7765dc",
+        "remove it; airgap:smoke reads TRACE_QUERY_URL, TRACE_QUERY_USER and TRACE_QUERY_PASSWORD",
+    ),
+)
+
+
+# d53595e's example pointed OTEL_EXPORTER_OTLP_ENDPOINT at the bundled Jaeger
+# Service. Any set endpoint now means an external collector (no OpenObserve),
+# so that value would drop every trace silently (#1070).
+OTEL_ENDPOINT_KEY = "OTEL_EXPORTER_OTLP_ENDPOINT"
+_RETIRED_JAEGER_HOST = re.compile(r"jaeger(\.[a-z0-9-]+\.svc(\.[a-z0-9.-]*)?)?")
+_JAEGER_ENDPOINT_MESSAGE = (
+    "points at the retired in-cluster Jaeger; unset it to use the bundled OpenObserve "
+    "collector, or set your external collector"
+)
+
+
+def _points_at_retired_jaeger(raw: str) -> bool:
+    candidate = raw.strip()
+    if "://" not in candidate:
+        return False  # not a URL: the endpoint validator refuses it with its own message
+    try:
+        host = urlsplit(candidate).hostname or ""
+    except ValueError:
+        return False
+    return _RETIRED_JAEGER_HOST.fullmatch(host.lower().rstrip(".")) is not None
+
+
+def require_no_retired_keys(values: Mapping[str, str]) -> None:
+    """Refuse every retired key that carries a non-empty value, and a tracing
+    endpoint naming the retired in-cluster Jaeger Service. One fixed message
+    lists them all; values are never echoed. Empty or absent is fine."""
+    lines = [
+        f"  {key} (retired in {ref}): {text}"
+        for key, ref, text in RETIRED_KEYS
+        if values.get(key, "") != ""
+    ]
+    if _points_at_retired_jaeger(values.get(OTEL_ENDPOINT_KEY, "")):
+        lines.append(f"  {OTEL_ENDPOINT_KEY} (retired in d7765dc): {_JAEGER_ENDPOINT_MESSAGE}")
+    if lines:
+        raise ValueError(
+            "retired airgap.env keys are set and no longer read; apply the migration "
+            "or empty/remove each key before any cluster change:\n" + "\n".join(lines)
+        )
 
 
 def require_in_place_retired(raw: str) -> None:
@@ -153,7 +222,144 @@ def feedback_config(values: Mapping[str, str]) -> dict[str, object] | None:
     return {"enabled": True, "secretName": secret, "storageSize": size, "retentionDays": days}
 
 
+# Optional Open WebUI docs front end (#1074, ADR-0007). Retention: maintainer
+# decision 2026-10-24 (30 days); the chart's purge sidecar enforces it.
+OPENWEBUI_DEFAULT_RETENTION_DAYS = 30
+OPENWEBUI_DEFAULT_STORAGE_SIZE = "10Gi"
+_HOSTNAME = re.compile(r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?(?:\.[a-z0-9](?:[-a-z0-9]*[a-z0-9])?)+")
+_PROVIDER_URL = re.compile(r"https://[^\s/]+(?:/\S*)?/\.well-known/openid-configuration")
+_CLAIM = re.compile(r"[A-Za-z0-9_:/.-]+")
+_SCOPES = re.compile(r"[A-Za-z0-9_:/.-]+(?: [A-Za-z0-9_:/.-]+)*")
+# The roles-claim value the IdP issues to every signed-in user (docs/deploy.md).
+OPENWEBUI_BASELINE_ROLE = "signed-in"
+# The chart's scope set (values.yaml openwebui.oidc.scopes); AD FS sites set their own.
+OPENWEBUI_DEFAULT_SCOPES = "openid email profile groups offline_access"
+_NAME_LIST = re.compile(r"[^,\s]+(?:,[^,\s]+)*")
+_CIDR = re.compile(r"(?:[0-9]{1,3}\.){3}[0-9]{1,3}/(?:[0-9]|[12][0-9]|3[0-2])")
+
+
+_PEM_BLOCK = re.compile(r"-----BEGIN ([A-Z0-9 ]+)-----\r?\n(.*?)-----END \1-----", re.DOTALL)
+
+
+def pem_certificates(text: str) -> bool:
+    """True when text is one or more PEM CERTIFICATE blocks with only whitespace
+    between them and OpenSSL loads every one (a key, stray text or a corrupted
+    body that is still valid base64 fails). Used for the optional IdP CA bundle;
+    the chart's ca-trust init step (files/openwebui/ca_trust.py) applies the same
+    rule in the pod."""
+    blocks = list(_PEM_BLOCK.finditer(text))
+    if not blocks or _PEM_BLOCK.sub("", text).strip():
+        return False
+    for block in blocks:
+        if block.group(1) != "CERTIFICATE":
+            return False
+        try:
+            der = ssl.PEM_cert_to_DER_cert(block.group(0) + "\n")
+            ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT).load_verify_locations(cadata=der)
+        except (ValueError, ssl.SSLError):
+            return False
+    return True
+
+
+def openwebui_config(values: Mapping[str, str]) -> dict[str, object] | None:
+    """The Open WebUI selection as chart values, or None while it is off.
+
+    Shapes are checked whenever a key is set; the Secret, host, OIDC client,
+    roles and IdP CIDRs are required only when enabled. The IdP egress is
+    NetworkPolicy ipBlocks (a policy cannot match a DNS name), so at least one
+    CIDR is required. Diagnostics name the key, never the value."""
+    enabled = parse_strict_bool("OPENWEBUI_ENABLED", values.get("OPENWEBUI_ENABLED", ""), True)
+    secret = values.get("OPENWEBUI_SECRET", "")
+    if secret and (len(secret) > 253 or _DNS_SUBDOMAIN.fullmatch(secret) is None):
+        raise ValueError("OPENWEBUI_SECRET must be a DNS-subdomain Secret name")
+    host = values.get("OPENWEBUI_HOST", "")
+    if host and (len(host) > 253 or _HOSTNAME.fullmatch(host) is None):
+        raise ValueError("OPENWEBUI_HOST must be a lowercase DNS host name (no scheme or path)")
+    raw_days = values.get("OPENWEBUI_RETENTION_DAYS", "")
+    days = OPENWEBUI_DEFAULT_RETENTION_DAYS
+    if raw_days != "":
+        if re.fullmatch(r"[0-9]+", raw_days) is None or not 1 <= int(raw_days) <= 3650:
+            raise ValueError("OPENWEBUI_RETENTION_DAYS must be an integer from 1 to 3650")
+        days = int(raw_days)
+    size = values.get("OPENWEBUI_STORAGE_SIZE", "") or OPENWEBUI_DEFAULT_STORAGE_SIZE
+    if _QUANTITY.fullmatch(size) is None:
+        raise ValueError("OPENWEBUI_STORAGE_SIZE must be a quantity such as 10Gi (Mi, Gi or Ti)")
+    provider = values.get("OPENWEBUI_OIDC_PROVIDER_URL", "")
+    if provider and _PROVIDER_URL.fullmatch(provider) is None:
+        raise ValueError("OPENWEBUI_OIDC_PROVIDER_URL must be the https://.../.well-known/"
+                         "openid-configuration URL of the identity team's client")
+    client_id = values.get("OPENWEBUI_OIDC_CLIENT_ID", "")
+    if client_id and (len(client_id) > 255 or re.search(r"[\s,]", client_id)):
+        raise ValueError("OPENWEBUI_OIDC_CLIENT_ID must not contain spaces or commas")
+    claims = {}
+    for key, default in (("OPENWEBUI_OIDC_GROUP_CLAIM", "groups"),
+                         ("OPENWEBUI_OIDC_ROLES_CLAIM", "roles"),
+                         ("OPENWEBUI_OIDC_EMAIL_CLAIM", "email"),
+                         ("OPENWEBUI_OIDC_USERNAME_CLAIM", "name")):
+        claims[key] = values.get(key, "") or default
+        if _CLAIM.fullmatch(claims[key]) is None:
+            raise ValueError(f"{key} must be a claim name (letters, digits, _ : / . -)")
+    scopes = values.get("OPENWEBUI_OIDC_SCOPES", "") or OPENWEBUI_DEFAULT_SCOPES
+    if _SCOPES.fullmatch(scopes) is None or "openid" not in scopes.split(" "):
+        raise ValueError("OPENWEBUI_OIDC_SCOPES must be space-separated scope names "
+                         "including openid")
+    roles = {}
+    for key in ("OPENWEBUI_OIDC_ALLOWED_ROLES", "OPENWEBUI_OIDC_ADMIN_ROLES"):
+        roles[key] = values.get(key, "")
+        if roles[key] and _NAME_LIST.fullmatch(roles[key]) is None:
+            raise ValueError(f"{key} must be a comma-separated list of role names")
+        # Revocation through the IdP needs a roles claim on every sign-in, so the
+        # IdP issues the baseline value signed-in to every user (docs/deploy.md,
+        # AD FS). It, or *, in a role list would admit every signed-in user.
+        if set(roles[key].split(",")) & {"*", OPENWEBUI_BASELINE_ROLE}:
+            raise ValueError(f"{key} must not contain * or {OPENWEBUI_BASELINE_ROLE} (the baseline "
+                             "role every signed-in user carries)")
+    cidrs = [part.strip() for part in values.get("OPENWEBUI_IDP_EGRESS_CIDRS", "").split(",")
+             if part.strip()]
+    for cidr in cidrs:
+        if _CIDR.fullmatch(cidr) is None or any(int(o) > 255 for o in cidr.split("/")[0].split(".")):
+            raise ValueError("OPENWEBUI_IDP_EGRESS_CIDRS must be comma-separated IPv4 CIDRs")
+    if len(set(cidrs)) != len(cidrs):
+        raise ValueError("OPENWEBUI_IDP_EGRESS_CIDRS must not repeat a CIDR")
+    raw_port = values.get("OPENWEBUI_IDP_EGRESS_PORT", "") or "443"
+    if re.fullmatch(r"[0-9]{1,5}", raw_port) is None or not 1 <= int(raw_port) <= 65535:
+        raise ValueError("OPENWEBUI_IDP_EGRESS_PORT must be a TCP port from 1 to 65535")
+    if not enabled:
+        return None
+    required = {"OPENWEBUI_SECRET": secret, "OPENWEBUI_HOST": host,
+                "OPENWEBUI_OIDC_PROVIDER_URL": provider, "OPENWEBUI_OIDC_CLIENT_ID": client_id,
+                **roles, "OPENWEBUI_IDP_EGRESS_CIDRS": cidrs}
+    missing = [key for key, value in required.items() if not value]
+    if missing:
+        # The service CA is not an operator input on the live path (deploy.sh
+        # fetches it); map_values enforces it only for dry-run rendering.
+        # One fixed message: key names only, never values.
+        raise ValueError("Open WebUI is enabled by default (ADR-0008) but required inputs are "
+                         f"missing: {', '.join(missing)}. Set them, or opt out with "
+                         "OPENWEBUI_ENABLED=false")
+    return {
+        "enabled": True,
+        "secretName": secret,
+        "host": host,
+        "retentionDays": days,
+        "storageSize": size,
+        "oidc": {
+            "providerUrl": provider,
+            "clientId": client_id,
+            "groupClaim": claims["OPENWEBUI_OIDC_GROUP_CLAIM"],
+            "rolesClaim": claims["OPENWEBUI_OIDC_ROLES_CLAIM"],
+            "allowedRoles": roles["OPENWEBUI_OIDC_ALLOWED_ROLES"],
+            "adminRoles": roles["OPENWEBUI_OIDC_ADMIN_ROLES"],
+            "scopes": scopes,
+            "emailClaim": claims["OPENWEBUI_OIDC_EMAIL_CLAIM"],
+            "usernameClaim": claims["OPENWEBUI_OIDC_USERNAME_CLAIM"],
+        },
+        "idpEgress": {"cidrs": cidrs, "port": int(raw_port)},
+    }
+
+
 def validate_operator_booleans(values: Mapping[str, str]) -> None:
+    require_no_retired_keys(values)
     for name in OPERATOR_BOOL_KEYS:
         parse_strict_bool(name, values.get(name, ""), False)
     require_in_place_retired(values.get("INGEST_ALIAS_PUBLISH", ""))
@@ -230,6 +436,83 @@ def request_overrides(values: Mapping[str, str]) -> dict[str, int | float]:
     return result
 
 
+# Site sizing (#1070 R2): a quota-bound site fits the release into its
+# namespace quota with these keys, not with free-form overlays (those stay
+# CI-only). Unset keeps the chart default, so the default render is unchanged.
+# SIZING_DEFAULTS mirrors charts/qdrant-openshift.values.yaml and
+# charts/mainframe-rag/values.yaml (a test pins both) so a lone limit or
+# request is compared against the value that will actually render.
+SIZING_DEFAULTS = {
+    "QDRANT": {"requests": {"cpu": "4", "memory": "16Gi"}, "limits": {"cpu": "8", "memory": "32Gi"}},
+    "INGEST": {"requests": {"cpu": "4", "memory": "8Gi"}, "limits": {"cpu": "16", "memory": "32Gi"}},
+}
+SIZING_PREFIXES = ("QDRANT", "INGEST")
+QDRANT_VOLUME_KEYS = {"QDRANT_DATA_SIZE": "persistence.size", "QDRANT_SNAPSHOT_SIZE": "snapshotPersistence.size"}
+SIZING_ENV_KEYS = (
+    *QDRANT_VOLUME_KEYS,
+    *(f"{prefix}_{res}_{kind}" for prefix in SIZING_PREFIXES for kind in ("REQUEST", "LIMIT") for res in ("CPU", "MEMORY")),
+)
+_CPU_QUANTITY = re.compile(r"(?:[0-9]+(?:\.[0-9]{1,3})?|[0-9]+m)")
+_BYTE_QUANTITY = re.compile(r"[0-9]+(?:\.[0-9]+)?(?:Ki|Mi|Gi|Ti)")
+_BINARY_UNITS = {"Ki": 2**10, "Mi": 2**20, "Gi": 2**30, "Ti": 2**40}
+
+
+def _quantity(name: str, raw: str, cpu: bool) -> Fraction:
+    """A positive CPU or byte quantity as an exact number; the message never echoes the value."""
+    if cpu:
+        if _CPU_QUANTITY.fullmatch(raw):
+            number = Fraction(raw[:-1]) / 1000 if raw.endswith("m") else Fraction(raw)
+            if number > 0:
+                return number
+        raise ValueError(f"{name} must be a positive CPU quantity (whole or decimal cores, or millicores with an m suffix)")
+    if _BYTE_QUANTITY.fullmatch(raw):
+        number = Fraction(raw[:-2]) * _BINARY_UNITS[raw[-2:]]
+        if number > 0:
+            return number
+    raise ValueError(f"{name} must be a positive quantity with a unit (Ki, Mi, Gi or Ti)")
+
+
+def sizing_resources(values: Mapping[str, str], prefix: str) -> dict[str, dict[str, str]]:
+    """The explicitly selected requests/limits of one workload (`QDRANT` or
+    `INGEST`), validated against each other and the chart default of any side
+    left unset. Unset keys are omitted."""
+    chosen: dict[str, dict[str, str]] = {"requests": {}, "limits": {}}
+    quantities: dict[tuple[str, str], Fraction] = {}
+    for section, kind in (("requests", "REQUEST"), ("limits", "LIMIT")):
+        for field, res in (("cpu", "CPU"), ("memory", "MEMORY")):
+            name = f"{prefix}_{res}_{kind}"
+            raw = values.get(name, "")
+            if raw != "":
+                chosen[section][field] = raw
+            quantities[(section, field)] = _quantity(
+                name, raw or SIZING_DEFAULTS[prefix][section][field], field == "cpu")
+    for field, res in (("cpu", "CPU"), ("memory", "MEMORY")):
+        if quantities[("limits", field)] < quantities[("requests", field)]:
+            raise ValueError(f"{prefix}_{res}_LIMIT must not be below {prefix}_{res}_REQUEST")
+    return {section: fields for section, fields in chosen.items() if fields}
+
+
+def qdrant_sizing(values: Mapping[str, str]) -> list[str]:
+    """`helm key=value` assignments for the Qdrant release, in a fixed order."""
+    result = []
+    for name, helm_key in QDRANT_VOLUME_KEYS.items():
+        raw = values.get(name, "")
+        if raw != "":
+            _quantity(name, raw, False)
+            result.append(f"{helm_key}={raw}")
+    for section, fields in sizing_resources(values, "QDRANT").items():
+        result.extend(f"resources.{section}.{field}={raw}" for field, raw in fields.items())
+    return result
+
+
+def ingest_resources(values: Mapping[str, str]) -> dict[str, dict[str, str]]:
+    """The chart's `ingest.resources` with the selected sizes applied over the defaults."""
+    merged = {section: dict(fields) for section, fields in SIZING_DEFAULTS["INGEST"].items()}
+    for section, fields in sizing_resources(values, "INGEST").items():
+        merged[section].update(fields)
+    return merged
+
+
 def validate_model_config(values: Mapping[str, str]) -> None:
     reasoning_overrides(values)
     request_overrides(values)
@@ -249,12 +532,24 @@ def validate_model_config(values: Mapping[str, str]) -> None:
                 raise ValueError(f"{name} is required when CONTEXTUAL_EMBED_ENABLED is set")
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    args = sys.argv[1:] if argv is None else argv
     try:
+        if args == ["--retired-keys"]:
+            require_no_retired_keys(os.environ)
+            return 0
+        if args == ["--qdrant-sizing"]:
+            require_no_retired_keys(os.environ)
+            print("\n".join(qdrant_sizing(os.environ)))
+            return 0
+            return 0
         validate_operator_booleans(os.environ)
         network_policy(os.environ)
         feedback_config(os.environ)
+        openwebui_config(os.environ)
         validate_model_config(os.environ)
+        qdrant_sizing(os.environ)
+        ingest_resources(os.environ)
     except ValueError as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 1

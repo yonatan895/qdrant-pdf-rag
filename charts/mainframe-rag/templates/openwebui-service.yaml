@@ -1,0 +1,24 @@
+{{- /*
+Open WebUI Service (#1074). ClusterIP, TLS port only: the service-serving
+certificate (Secret rag-openwebui-tls) is the pod's server certificate and
+the Route's reencrypt destination. No plain HTTP port exists to expose.
+*/ -}}
+{{- if include "mainframe-rag.openwebuiEnabled" . }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: rag-openwebui
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: rag-openwebui
+  annotations:
+    service.beta.openshift.io/serving-cert-secret-name: rag-openwebui-tls
+spec:
+  type: ClusterIP
+  selector:
+    app: rag-openwebui
+  ports:
+    - name: https
+      port: 8443
+      targetPort: https
+{{- end }}

@@ -1,0 +1,31 @@
+{{- /*
+Open WebUI Route (ADR-0007 R3, #1074). Users authenticate in Open WebUI itself
+through the identity team's OIDC client, so there is no oauth-proxy here; the
+Route is reencrypt to the TLS port with the namespace service CA (the same
+route.destinationCA value the console Route uses) and HTTP redirected. The
+Route-exposure preflight refuses any other Route in front of rag-openwebui and
+verifies this contract after the release.
+*/ -}}
+{{- if include "mainframe-rag.openwebuiEnabled" . }}
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: rag-openwebui
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: rag-openwebui
+  annotations:
+    haproxy.router.openshift.io/timeout: {{ printf "%ds" (int .Values.route.timeoutSeconds) | quote }}
+spec:
+  host: {{ .Values.openwebui.host | quote }}
+  to:
+    kind: Service
+    name: rag-openwebui
+  port:
+    targetPort: https
+  tls:
+    termination: reencrypt
+    insecureEdgeTerminationPolicy: Redirect
+    destinationCACertificate: |
+{{ .Values.route.destinationCA | indent 6 }}
+{{- end }}

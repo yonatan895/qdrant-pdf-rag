@@ -1,0 +1,54 @@
+# Helm values for rendering the chart's Open WebUI objects (charts/mainframe-rag
+# from the working tree) into the dev Kind cluster and the acceptance lane.
+# Only the openwebui templates are rendered (--show-only). The chart is on by
+# default and fails closed while its site inputs are missing, so every one of
+# them is supplied here: openwebui.secretName/host/oidc.*/idpEgress.cidrs and
+# route.destinationCA. The other keys are synthetic placeholders that let the
+# chart's schema pass, never deployed. The scripts
+# fills the @PLACEHOLDERS@. No secret is a value: the Secret is created at run
+# time (secretName).
+replicaCount: 1
+images:
+  agent: {repository: unused.local/qdrant-pdf-rag-agent, tag: "0000000000000000000000000000000000000000", pullPolicy: Never}
+  ingest: {repository: unused.local/qdrant-pdf-rag-ingest, tag: "0000000000000000000000000000000000000000", pullPolicy: Never}
+  openobserve: {repository: unused.local/openobserve, tag: v0, pullPolicy: Never}
+  otelcol: {repository: unused.local/otelcol, tag: v0, pullPolicy: Never}
+  oauthProxy: {repository: unused.local/ose-oauth-proxy, tag: v0, pullPolicy: Never}
+  # The derived #1073 image and the pinned proxy image, loaded into the node
+  # under these local tags (the digests are checked when they are loaded).
+  openwebui: {repository: "@OWUI_REPO@", tag: "@OWUI_TAG@", pullPolicy: Never}
+  openwebuiProxy: {repository: "@NGINX_REPO@", tag: "@NGINX_TAG@", pullPolicy: Never}
+qdrantRelease: unused-qdrant
+models:
+  embedding: {baseUrl: "http://unused.local/v1", model: unused, revision: unused, dimension: 1024}
+  reasoning: {baseUrl: "", model: ""}
+  rerank: {enabled: false, baseUrl: "", model: unused, endpointOrder: score_first}
+gateway: {apiKeySecretName: "", caConfigMapName: ""}
+tracing: {enabled: false, endpoint: "", deploymentEnvironment: "", serviceName: ""}
+metrics: {enabled: false}
+networkPolicy: {enabled: true, allowedNamespaces: []}
+# The Route itself is not rendered (Kind has no Route API); its timeout is the
+# router stand-in's proxy timeout. The schema needs a destination CA whenever
+# Open WebUI is on; the router stand-in verifies with the run's CA instead.
+route: {enabled: false, timeoutSeconds: 300, destinationCA: "not-rendered-in-kind"}
+storage: {className: standard}
+pullSecret: {name: ""}
+openwebui:
+  enabled: true  # explicit: the dev environment must not depend on the default
+  secretName: rag-openwebui
+  host: "@OWUI_HOST@"
+  retentionDays: 30
+  storageSize: 1Gi
+  oidc:
+    providerUrl: "@OIDC_PROVIDER_URL@"
+    clientId: open-webui
+    groupClaim: groups
+    # Dex static users carry no roles claim; the groups claim serves as both.
+    rolesClaim: groups
+    allowedRoles: "internal-team,docs-readers,owui-admins"
+    adminRoles: owui-admins
+  idpEgress:
+    # Kind stand-in for the IdP's CIDRs: the pod network (Dex is a pod here),
+    # TCP 5556 (the Dex pod port, which a policy matches after Service DNAT).
+    cidrs: ["@POD_CIDR@"]
+    port: 5556

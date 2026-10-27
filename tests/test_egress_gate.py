@@ -345,7 +345,9 @@ def test_the_boundary_step_denies_pod_egress_inside_the_cluster():
     # 39942787786, 39945681590); kindnet enforces this policy in the node.
     policy = boundary_policy()
     assert policy['kind'] == 'NetworkPolicy'
-    assert policy['spec']['podSelector'] == {}
+    # Everything but the Open WebUI front end, whose egress is the chart policy alone (#1070).
+    assert policy['spec']['podSelector'] == {
+        'matchExpressions': [{'key': 'app', 'operator': 'NotIn', 'values': ['rag-openwebui']}]}
     assert policy['spec']['policyTypes'] == ['Egress']
 
 

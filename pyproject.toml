@@ -68,6 +68,12 @@ skip_empty = false
 line-length = 100
 src = ["src", "tests"]
 
+# Bastion scripts run on whatever python3 the site has (3.9+), not the project's
+# 3.14. Without this, `ruff format` strips the parentheses from `except (A, B):`
+# (PEP 758), which is a SyntaxError before 3.14.
+[tool.ruff.per-file-target-version]
+"scripts/openwebui/adfs_claims_check.py" = "py39"
+
 [tool.ruff.lint]
 # extend-select (not select) keeps the default rule set; see #584.
 extend-select = ["B", "SIM", "RET"]

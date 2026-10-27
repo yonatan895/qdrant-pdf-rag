@@ -293,3 +293,13 @@ def test_smoke_off_sentinel_needs_no_trace_settings(smoke_tree):
 def test_smoke_dryrun_names_the_trace_check(smoke_tree):
     r = _run_smoke(smoke_tree, ("AIRGAP_DRYRUN", "1"))
     assert "/app/scripts/trace_arrival.py --url http://o2:5080" in r.stdout
+
+
+def test_smoke_refuses_a_retired_key_before_any_cluster_call(smoke_tree):
+    # #1070: smoke reads airgap.env too, so a stale key must not pass here either.
+    _setup_stub(smoke_tree)
+    r = _run_smoke(smoke_tree, ("JAEGER_QUERY_URL", "sentinel-jaeger-query-url"))
+    assert r.returncode != 0
+    assert "JAEGER_QUERY_URL (retired in d7765dc)" in r.stderr
+    assert "sentinel-" not in r.stdout + r.stderr
+    assert "exec" not in r.stdout

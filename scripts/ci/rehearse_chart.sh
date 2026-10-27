@@ -13,6 +13,10 @@ B_MARKER=chart-lifecycle-B
 export DATA_NS B_MARKER
 PULL_SECRET_SRC=${PULL_SECRET:-}
 export PULL_SECRET_SRC
+# Open WebUI is default-on (ADR-0008) and needs site inputs (an IdP) the Kind
+# lifecycle lane does not have: opt out explicitly, as an operator would.
+OPENWEBUI_ENABLED=${OPENWEBUI_ENABLED:-false}
+export OPENWEBUI_ENABLED
 mkdir -p dist
 # The installed release must never own the explicit ingest Job.
 OTEL_DEPLOYMENT_ENVIRONMENT=chart-lifecycle-A python3 scripts/airgap/map_values.py \

@@ -1,0 +1,64 @@
+{{- /*
+Open WebUI NetworkPolicy (ADR-0007 R2/R3, #1074). Ingress: the OpenShift router
+only, TLS port only (kubelet probes are not pod-network ingress). Egress: the
+agent pods on 8080, cluster DNS by namespace name, and the IdP back channel on
+the listed CIDRs and port; nothing else, never the internet. Rendered whenever
+Open WebUI is, independent of networkPolicy.enabled: this policy is the
+front end's zero-egress control, not the offline settings. Needs an enforcing
+CNI (site evidence).
+*/ -}}
+{{- if include "mainframe-rag.openwebuiEnabled" . }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: rag-openwebui
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: rag-openwebui
+spec:
+  podSelector:
+    matchLabels:
+      app: rag-openwebui
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              network.openshift.io/policy-group: ingress
+      ports:
+        - protocol: TCP
+          port: 8443
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: rag-agent
+      ports:
+        - protocol: TCP
+          port: 8080
+    - to:
+        - namespaceSelector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: In
+                values: [openshift-dns, kube-system]
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+        - protocol: UDP
+          port: 5353
+        - protocol: TCP
+          port: 5353
+    - to:
+        {{- range .Values.openwebui.idpEgress.cidrs }}
+        - ipBlock:
+            cidr: {{ . | quote }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.openwebui.idpEgress.port }}
+{{- end }}

@@ -75,10 +75,13 @@ restores the snapshot over whatever the file assigned; empty stays unset
 - Defaults: `NAMESPACE` defaults to `mainframe-rag`, `QDRANT_RELEASE` to
   `qdrant`, and an empty `IMAGE_SHA` resolves from `git rev-parse HEAD`.
   Explicit model-operation URLs win over `GATEWAY_BASE_URL`, a shared API
-  base including `/v1`. The removed aliases `REGISTRY_INTERNAL`,
-  `OPENSHIFT_NAMESPACE` and the `VLLM_BASE_URL` embedding-origin fallback are
-  not read: set `INTERNAL_REGISTRY`, `NAMESPACE` and `EMBED_BASE_URL` (or
-  `GATEWAY_BASE_URL`).
+  base including `/v1`. The removed `REGISTRY_INTERNAL`, `OPENSHIFT_NAMESPACE`,
+  `VLLM_BASE_URL`, `JAEGER_ENABLED` and `JAEGER_QUERY_URL` are refused when
+  non-empty, before any cluster change, with a fixed migration message
+  (`model_config.RETIRED_KEYS`; values are never printed): set
+  `INTERNAL_REGISTRY`, `NAMESPACE` and `EMBED_BASE_URL` (or `GATEWAY_BASE_URL`),
+  and remove the Jaeger keys (`OTEL_EXPORTER_OTLP_ENDPOINT`/`TRACE_QUERY_URL`
+  replace them).
 - `require_env` collects **all** missing keys before failing, so one run
   tells the operator everything to fill in. `EMBED_MODEL_REVISION` is a
   required key on every air-gap launch path (vllm mode refuses a blank
@@ -90,7 +93,7 @@ restores the snapshot over whatever the file assigned; empty stays unset
 - Operator booleans `UI_ENABLED`, `CONTEXTUAL_EMBED_ENABLED`,
   `INGEST_ALIAS_PUBLISH`, `INGEST_REINGEST`, `INGEST_AUTHORIZE_FROM_CATALOG`,
   `CHAT_CONDENSE_ENABLED`, `LLM_STREAM`
-  `FEEDBACK_ENABLED` and `AGENT_NETWORK_POLICY` (default **true**, unlike the others)
+  `FEEDBACK_ENABLED`, `OPENWEBUI_ENABLED` and `AGENT_NETWORK_POLICY` (default **true**, unlike the others)
   accept only `true/1/yes` or `false/0/no` (any case; unset keeps the
   default). `INGEST_ALIAS_PUBLISH` may only be unset or true: in-place ingest
   was retired (#360) and an explicit false fails closed.
@@ -279,6 +282,13 @@ Compatibility and lifecycle decisions under #448:
   agent pods voids the restriction; a site default-deny is not satisfied by
   this policy for Qdrant or OpenObserve.
 
+- Open WebUI docs front end (issue #1074, ADR-0007, ADR-0008, **default on**): `OPENWEBUI_*`
+  keys, validated by `model_config.openwebui_config` before any mutation, render the
+  objects, Route checks and Pipe install described in
+  [Docs front end](#docs-front-end). Unset means on and, while a required site input is
+  missing, the deploy and the chart render refuse; `OPENWEBUI_ENABLED=false` opts out and
+  renders nothing.
+
 <a id="feedback-service"></a>
 - Answer-feedback service (issue #804, ADR-0005, **default off**). With
   `FEEDBACK_ENABLED=true` the application release renders `StatefulSet/rag-feedback`
@@ -424,6 +434,26 @@ Compatibility and lifecycle decisions under #448:
   no `hostPort`, host namespaces or RBAC objects, and only the chart's own
   ServiceAccount. `CI_REHEARSAL` is captured read-only before the operator file
   is sourced, so the file cannot forge it.
+- **Site sizing keys (#1070).** A quota-bound site fits the release with these
+  `airgap.env` keys, not with the CI-only overlays. Unset keeps the shipped
+  default, so the default render is unchanged. Qdrant:
+  `QDRANT_DATA_SIZE` (`persistence.size`), `QDRANT_SNAPSHOT_SIZE`
+  (`snapshotPersistence.size`), `QDRANT_CPU_REQUEST`, `QDRANT_MEMORY_REQUEST`,
+  `QDRANT_CPU_LIMIT`, `QDRANT_MEMORY_LIMIT` (`resources.{requests,limits}`).
+  Ingest Job (`ingest.resources`): `INGEST_CPU_REQUEST`, `INGEST_MEMORY_REQUEST`,
+  `INGEST_CPU_LIMIT`, `INGEST_MEMORY_LIMIT`. Worker count and scratch size are
+  `INGEST_WORKERS` and `INGEST_WORK_SIZE`. CPU is whole/decimal cores or
+  millicores (`500m`); memory and sizes need a Ki/Mi/Gi/Ti unit. Each value is
+  validated before any change; a limit below its request (or below the default
+  request when only the limit is set) is refused, and diagnostics never echo the
+  value. The specific size keys win over `QDRANT_STORAGE_SIZE`. A StatefulSet's
+  volume claim templates are immutable: before any change `deploy.sh` reads the
+  existing Qdrant StatefulSet (read-only) and refuses when the rendered
+  data/snapshot sizes differ from it, so keep the creation-time sizes in the
+  file and grow a volume with `oc patch pvc` (`check_qdrant_volumes.py`).
+  `QDRANT_EXTRA_VALUES` and `INGEST_EXTRA_PATCH` set outside `CI_REHEARSAL=1`
+  refuse with a message naming these keys. The `OPERATOR_ENV_KEYS` list and the
+  Task bridge for these keys are Verifier-owned (see the PR).
 - `deploy.sh` validates every operator string that becomes a Helm value before
   rendering (`STORAGE_CLASS`/`SNAPSHOT_STORAGE_CLASS`: DNS-1123 name,
   `QDRANT_RELEASE`: DNS-1123 label, `QDRANT_TAG`: image tag,
@@ -921,7 +951,9 @@ collection created with the selected policy, and refuses unless the copy
 holds exactly the source's point ids; the cutover gates then verify the
 staging pair's distribution and placement. A physical collection squatting
 on the alias name (the pre-publication layout) is unsupported and refused,
-never migrated. Supported recovery from lost distributed storage is
+never migrated; deploy and validate refuse it before any change, and the
+upgrade from it is the maintenance-window procedure in
+[install and operations](install_and_ops.md#upgrade-from-a-legacy-flat-collection-issue-1070). Supported recovery from lost distributed storage is
 still a fresh complete generation rebuilt from the protected originals
 (accepted downtime). Node-addressed restore, replacement-peer
 join and replica repair stay unqualified until site evidence exists. The
@@ -1069,6 +1101,8 @@ and CI tooling have different owners and pull credentials.
 | OpenObserve OSS (ADR-0006) | `openobserve/openobserve:v1.1.2` | as the agent; the chart references it by digest only (`images.openobserve.digest`) | `load.sh` | cluster pods when tracing is on with an empty `tracing.endpoint` |
 | otelcol-contrib (ADR-0006) | `otel/opentelemetry-collector-contrib:0.160.0` | as the agent | `load.sh` | cluster pod (`Deployment/otelcol`, container `otelcol`) beside OpenObserve |
 | OAuth sidecar (optional) | `openshift4/ose-oauth-proxy:v4.14` | as the agent; absent while `images.txt` says `sha256:PENDING` | `load.sh` | cluster pods |
+| Open WebUI front end (default on, ADR-0007/ADR-0008, #1074) | `qdrant-pdf-rag-openwebui:v0.12.3-slim` | as the agent; absent while `images.txt` says `sha256:PENDING` (the factory records the pushed manifest digest of the image built from `images/openwebui/Containerfile`, the recipe the `scripts/openwebui/` dev environment and acceptance lane also build); the upstream `open-webui/open-webui:v0.12.3-slim` line is factory build provenance, never pushed | `load.sh` | cluster pod (`Deployment/rag-openwebui`, container `openwebui`) when `openwebui.enabled` |
+| Open WebUI allow-list proxy (ADR-0007 E1, **Verifier-owned** where the workflow builds or mirrors images) | `nginxinc/nginx-unprivileged:1.30.6-alpine` | pinned by digest in `images.txt`; bundled as `openwebui-proxy-image.tar` exactly when the Open WebUI member is | `load.sh` | cluster pod (`Deployment/rag-openwebui`, container `proxy`) when `openwebui.enabled` |
 | CI job image | `ci/python:3.14`, or a complete `CI_PYTHON_IMAGE` | mirrored UBI Python 3.14 (GIL) with git, pip, tar, sha256sum | platform or factory mirror, not this repository | GitLab runner |
 | CI Qdrant service | `qdrant/qdrant@sha256:<images.txt digest>` | the `images.txt` manifest digest, so a tag is never enough | registry-to-registry copy that preserves the digest | GitLab runner (`sim`, `gate-l1`) |
 
@@ -1576,6 +1610,310 @@ PrometheusRule (it would depend on user-workload monitoring, which ADR-0006 repl
   required item on the site-check list below the ADR-0006 open checks (#807).
 The smoke trace check is a later step of #956.
 
+<a id="docs-front-end"></a>
+## Docs front end: Open WebUI (ADR-0007, #1074)
+
+**Naming (maintainer decision 2026-10-26, #1070).** *Rosetta* is the site-facing name of the docs
+assistant: the Open WebUI model users pick, the Route host (suggested example
+`rosetta.apps.<cluster-domain>`, a placeholder), the AD FS client name and the user docs. Code
+identifiers stay `mainframe_rag`, `mainframe-rag` and the Pipe/model ID `mainframe_rag_docs`; Open
+WebUI's own branding stays unmodified (ADR-0007 L1) and the console keeps its title.
+
+Open WebUI is the main docs platform and is **on by default** (maintainer decision 2026-10-26,
+ADR-0008); the console stays the frozen fallback. It is a front end for the docs corpus. It is a
+client of the agent: its only model is the repository docs Pipe (#1072) over `/v1/chat`. It
+holds no gateway key and no model connection, and it does no retrieval of its own. The console
+stays the supported fallback and is untouched. Production use waits for the #1073 trial to
+qualify the image and the settings below, and for the image pin (below). The environment
+variable names, the uvicorn TLS arguments, the Functions API used by the Pipe installer and the
+chat table layout used by the purge are those of Open WebUI v0.12.3, **pending #1073
+qualification**, and are re-qualified on every pin import.
+
+**Enabling it at a site (default).** A site that does nothing gets Open WebUI, so the deploy
+refuses until the site supplies every required input. Both layers refuse before any cluster change:
+
+- `airgap.env` layer (`validate.sh`, `map_values.py`): refuses with one fixed message that names the
+  missing keys (never values), from `OPENWEBUI_SECRET`, `OPENWEBUI_HOST`,
+  `OPENWEBUI_OIDC_PROVIDER_URL`, `OPENWEBUI_OIDC_CLIENT_ID`, `OPENWEBUI_OIDC_ALLOWED_ROLES`,
+  `OPENWEBUI_OIDC_ADMIN_ROLES`, `OPENWEBUI_IDP_EGRESS_CIDRS`, and
+  names the opt-out `OPENWEBUI_ENABLED=false`. `ROUTE_DESTINATION_CA_FILE` is not an operator input on
+  the live path (deploy fetches the service CA); only a dry-run render of the Route needs it.
+- Chart layer (direct `helm template/upgrade`): the same eight inputs as chart values
+  (`openwebui.secretName`, `host`, `oidc.providerUrl`, `oidc.clientId`, `oidc.allowedRoles`,
+  `oidc.adminRoles`, `idpEgress.cidrs`, `route.destinationCA`); the render fails with a fixed message
+  naming the missing values and `--set openwebui.enabled=false`. The schema also refuses an absent or null `oidc.groupClaim`, `oidc.rolesClaim` and `idpEgress.port`
+  (a null port would otherwise render an egress rule open to all TCP ports). A half-configured Open WebUI is
+  never rendered, and there is no placeholder host or local-login fallback.
+- Opt out: `OPENWEBUI_ENABLED=false` in `airgap.env` (the mapper writes `openwebui.enabled: false`)
+  or `--set openwebui.enabled=false`. The opt-out render is byte-identical to a chart without Open
+  WebUI (tested).
+- Test inputs: `charts/mainframe-rag/ci/openwebui-site-values.yaml` holds obviously fake values
+  (`example.invalid`, TEST-NET CIDR) for lint and render tests only. Never use it at a site.
+
+**Upgrade consequence for existing sites.** A site upgrading from a release that predates this
+default and whose `airgap.env` has no `OPENWEBUI_*` keys fails validation at the next
+`airgap:validate`/`airgap:deploy`, before any cluster change, and keeps running the previous
+release. Either supply the inputs and the Secret (procedure below) or set `OPENWEBUI_ENABLED=false`
+to keep today's render unchanged. Scripts and CI that call `map_values.py` or `helm template`
+directly need the same choice. The image pin must also be recorded and bundled (step 1 below) before
+an enabled deploy can pass.
+
+**What `OPENWEBUI_ENABLED=true` (`openwebui.enabled`) renders.** With it off, the render is
+byte-identical to a release without it (tested).
+- `Deployment/rag-openwebui`: one replica, `Recreate`, one uvicorn worker, SQLite on the kept RWO
+  claim `rag-openwebui-data` (`OPENWEBUI_STORAGE_SIZE`, default 10Gi, on `STORAGE_CLASS`; NFS is
+  refused). It runs under `restricted-v2` with a platform-assigned UID: non-root, `drop: [ALL]`,
+  seccomp `RuntimeDefault`, no privilege escalation, no fixed IDs and no `anyuid`. The read-only
+  root filesystem is not claimed; it is a #1073 trial item. The pod serves TLS on 8443 from the
+  service-serving certificate (`rag-openwebui-tls`); there is no plain HTTP port.
+- The chat-purge sidecar (same image, read-only root, no credentials) enforces the retention
+  window (below).
+- `Service/rag-openwebui` (ClusterIP, 8443) and `Route/rag-openwebui`: reencrypt, HTTP
+  redirected, on `OPENWEBUI_HOST`, with the namespace service CA as the destination CA. Users
+  authenticate in Open WebUI through OIDC, so there is no oauth-proxy (ADR-0007 R3). The Route
+  exposure preflight treats `rag-openwebui` as a protected Service. It refuses any other Route
+  in front of it, whether the front end is on or off. It retires an owned Route that differs from
+  the contract before the release, and it verifies the live Route after the release, deleting
+  the Route and failing on a mismatch.
+- `NetworkPolicy/rag-openwebui`. Ingress is allowed from the OpenShift router to 8443 only.
+  Egress is allowed to the agent pods on 8080, to cluster DNS (`openshift-dns`, `kube-system`),
+  and to `OPENWEBUI_IDP_EGRESS_CIDRS` on `OPENWEBUI_IDP_EGRESS_PORT`, and to nothing else. This
+  policy is the zero-egress control; the offline settings are not (the IdP rule carries the server-side
+  OIDC token exchange). The chart also sets `OLLAMA_BASE_URL=http://127.0.0.1:9`: v0.12.3 otherwise
+  probes `host.docker.internal:11434/12434` on first start even with `ENABLE_OLLAMA_API=false` (#1073
+  trial). The policy needs an enforcing CNI, and the site provides that evidence.
+- `ConfigMap/rag-openwebui-pipe`: the repository Pipe, its installer and the purge script, each
+  annotated with its sha256.
+- IdP CA (optional, `OPENWEBUI_IDP_CA_FILE` / `openwebui.oidc.caBundle`): when the IdP's TLS
+  certificate comes from an enterprise CA (usual for AD FS), the PEM file becomes
+  `ConfigMap/rag-openwebui-idp-ca`. A `ca-trust` init step writes OpenSSL's system bundle, the
+  certifi bundle and the IdP CA into one file on an emptyDir. The app mounts it read-only through
+  `SSL_CERT_FILE` (httpx for sign-in, aiohttp for token refresh) and `REQUESTS_CA_BUNDLE`. The
+  public stores stay trusted, and a changed CA rolls the pod. Without it, sign-in fails at the
+  server-side discovery call. A public-CA IdP needs nothing.
+  - Mapping loads every certificate with OpenSSL. It refuses an unreadable or blank file, any
+    key or other text, and a corrupted body, such as one with a line dropped, that is still
+    valid base64.
+  - The chart refuses a value that is not only certificate blocks, with fixed text. It never
+    prints the value.
+  - The init step (`files/openwebui/ca_trust.py`) loads every certificate again. If one does not
+    load, the step exits non-zero with fixed text and the pod stays not Ready, so a bad bundle
+    can never give a Ready pod whose sign-ins fail.
+- Environment, by ADR-0007 condition:
+  - Offline (R2): `OFFLINE_MODE`, no version check, no community sharing, no telemetry, no pip or
+    model downloads.
+  - No vector store (V1): the slim image with no vector DB URL, retrieval bypassed; uploads,
+    knowledge, memories, notes, channels, web search, code execution and the interpreter off.
+  - Answers only through the agent (V2): no OpenAI or Ollama connections, no direct connections
+    or tool servers, task generation off, built-in ratings off.
+  - Chat history (S2, S3): no admin chat access or admin export.
+  - Logs (S4): metadata-only audit.
+  - Identity (R3): OIDC only; no login form, signup, password or initial-admin signup, no token
+    exchange; 8-hour sessions.
+  - `ENABLE_PERSISTENT_CONFIG=false`, so admin-UI edits cannot override this environment.
+
+**What the identity team registers.** One confidential OIDC client on the organisation's IdP
+(AD FS, or Keycloak in front of it):
+- Redirect URI: `https://<OPENWEBUI_HOST>/oauth/oidc/callback`. Scopes: `OPENWEBUI_OIDC_SCOPES`,
+  default `openid email profile groups offline_access` (the IdP must permit every scope; for
+  `offline_access` or its refresh-token equivalent: without a refresh token Open WebUI deletes the
+  session near token expiry and can fall back to an older session's token, per the Kind trial).
+  Client authentication by client secret.
+- The **ID token** must carry the e-mail claim (`OPENWEBUI_OIDC_EMAIL_CLAIM`, default `email`),
+  the group claim (`OPENWEBUI_OIDC_GROUP_CLAIM`, default `groups`) and the roles claim
+  (`OPENWEBUI_OIDC_ROLES_CLAIM`, default `roles`). Open WebUI v0.12.3 reads them from the ID
+  token. It calls userinfo only when the e-mail or username claim (`OPENWEBUI_OIDC_USERNAME_CLAIM`,
+  default `name`) is missing there, and userinfo wins on a conflict. AD FS userinfo returns only
+  `sub`, so AD FS issues these claims through issuance rules (below).
+- Group values must be **names, not SIDs** (AD FS "Token-Groups - Unqualified Names"; in Keycloak,
+  a group-membership mapper with full group path off). Groups are re-synced on every login.
+- Roles claim values: `OPENWEBUI_OIDC_ALLOWED_ROLES` lists the roles whose holders become Open
+  WebUI users (all employees in the pilot). `OPENWEBUI_OIDC_ADMIN_ROLES` lists the roles of the
+  named owners who are Open WebUI admins. Admins can still read chats through the database or a
+  Function (ADR-0007 S3), so keep that group small.
+- The roles claim must be in **every** ID token. The IdP issues the baseline value `signed-in`
+  to every user it authenticates, plus the group roles. Open WebUI v0.12.3 recomputes the role
+  at every sign-in only when the claim is present: if the claim is missing, an existing user
+  keeps the stored role, so a removed admin stays admin. Neither role list may contain
+  `signed-in` or `*`; validate and the chart refuse both.
+- The team hands over: the discovery URL (`https://<idp>/.well-known/openid-configuration`), the
+  client id, the client secret (it goes into the Secret, never `airgap.env`), and the IdP's IPv4
+  CIDRs and port for the egress policy. If an enterprise CA issued the IdP's TLS certificate, they
+  also hand over that CA's PEM certificate(s) for `OPENWEBUI_IDP_CA_FILE`.
+
+**Register Open WebUI with AD FS.** AD FS 2016 or later. Placeholders: `<adfs-host>` is the
+federation service host and `<host>` is `OPENWEBUI_HOST`. Statements marked *(confirm on the test
+client)* are AD FS behaviour that could not be checked from a source here. The Open WebUI
+statements come from the v0.12.3 source in the pinned image.
+1. **Client.** Create an application group with a server application, which is a confidential
+   client authenticated by a generated shared secret. Add a Web API whose identifier is the
+   client id, so it can carry the scopes and rules below *(confirm on the test client)*. A
+   suggested names are `rosetta` (production) and `rosetta-test` (test client); they are only suggestions. The redirect URI is exactly
+   `https://<host>/oauth/oidc/callback`. The client id goes into `OPENWEBUI_OIDC_CLIENT_ID`, and
+   the secret goes into the Secret as `oidc-client-secret`.
+2. **Scopes.** Permit `openid`, `profile`, `email` and `allatclaims`, and set
+   `OPENWEBUI_OIDC_SCOPES=openid profile email allatclaims`. AD FS puts the claims from
+   issuance rules into the access token. They reach the ID token, which Open WebUI reads, only
+   when `allatclaims` is requested *(confirm on the test client)*. Leave out `groups`, which is
+   not an AD FS scope. Add `offline_access` only if AD FS accepts it for this client and returns a
+   refresh token (see above) *(confirm on the test client)*.
+3. **Claim rules** on the Web API. Each outgoing claim type is the plain name Open WebUI reads.
+   AD FS then emits that name as the JWT claim name *(confirm on the test client)*.
+   - E-mail: Open WebUI refuses a sign-in without the e-mail claim (HTTP 400). It reads one
+     top-level claim, lowercases it and does not check its format. AD FS emits no `email` claim
+     without a rule *(confirm on the test client)*. The usual choice is the UPN: map the LDAP
+     attribute User-Principal-Name to `upn` and set `OPENWEBUI_OIDC_EMAIL_CLAIM=upn`.
+   - Name: map Display-Name to `name`, the default `OPENWEBUI_OIDC_USERNAME_CLAIM`. When the name
+     is missing, Open WebUI uses the e-mail as the display name and also calls userinfo.
+   - Groups: map Token-Groups - Unqualified Names to the claim named in
+     `OPENWEBUI_OIDC_GROUP_CLAIM` (`groups`). These are names, not SIDs. Several values arrive as
+     a list. A single string value is split on `;`.
+   - Roles, baseline first. Add a custom rule that issues the baseline to every authenticated
+     user: `=> issue(Type = "roles", Value = "signed-in");`. Its `Type` is the
+     `OPENWEBUI_OIDC_ROLES_CLAIM` name. Then add one "Send Group Membership as a Claim" rule per
+     AD group, with the same outgoing type and a value listed in `OPENWEBUI_OIDC_ALLOWED_ROLES`
+     (for example `docs-user`) or in `OPENWEBUI_OIDC_ADMIN_ROLES` (for example `docs-admin`).
+     Several values arrive as a list. A single string is split on `,`. *(Confirm on the test
+     client that the custom rule's type is emitted as `roles` in the ID token.)*
+   - **What happens at each sign-in.** Open WebUI v0.12.3 recomputes the role from the claim at
+     every sign-in (`utils/oauth.py` `get_user_role`, called from the callback for an existing
+     user). The cases are pinned by a test in the pinned image:
+     - An admin role is present: the user becomes `admin`.
+     - Otherwise an allowed role is present: the user becomes `user`, so a removed admin is
+       demoted.
+     - Only `signed-in` is present: sign-in is refused with HTTP 403 and no session is issued.
+     - No claim at all: an existing user keeps the stored role, and a new user is `pending`.
+       The baseline rule exists to prevent this case.
+   - **Revocation window.** The IdP change takes effect at the next sign-in. A session that is
+     already open stays valid until it expires (`JWT_EXPIRES_IN`, 8 hours). A refused sign-in
+     does not change the stored role. That user's API keys therefore keep their old role until
+     the next successful sign-in, or with no time limit for someone who never signs in again.
+     To remove an admin at once, also demote or delete the account in the Open WebUI admin UI.
+     That takes effect on the next request, because the role is read from the database on each
+     request. If the account owns the installer's admin API key, rotate the key.
+4. **CA.** If the enterprise CA issued the AD FS TLS certificate, export that CA (root and any
+   intermediate) as PEM and set `OPENWEBUI_IDP_CA_FILE`. Without it, Open WebUI cannot reach the
+   discovery URL.
+5. **Egress.** Set `OPENWEBUI_IDP_EGRESS_CIDRS` to the IPv4 addresses that `<adfs-host>` resolves
+   to from the cluster, and `OPENWEBUI_IDP_EGRESS_PORT` (443). Open WebUI calls discovery, token,
+   JWKS and, when needed, userinfo there.
+6. **Verify.** First fetch
+   `https://<adfs-host>/adfs/.well-known/openid-configuration` from the bastion (with
+   `--cacert` set to the CA file). It must return JSON whose `scopes_supported` includes
+   `allatclaims`. This URL is `OPENWEBUI_OIDC_PROVIDER_URL`. After deploy, sign in once with a
+   test account that is in an allowed-role group and in one docs group. The account must appear
+   in the Open WebUI admin user list with its UPN and the `user` role, not `pending`. It must also
+   be a member of that group; the chart does not create groups from the claim, so create the
+   group first. This shows that the ID token carried the e-mail, role and group claims. Then
+   prove revocation: sign in with a test account that is in no role group. It must be refused
+   (HTTP 403, an error on the sign-in page). That shows the baseline claim arrives. Next, remove
+   a test admin from the admin group, keeping it in the user group. At its next sign-in it must
+   show the `user` role.
+
+**Site procedure.**
+1. On the connected side, build the derived image from `images/openwebui/Containerfile` (upstream
+   slim digest plus one ownership layer), push it, and record its manifest digest in `images.txt`. Then pack and load: the bundle carries `openwebui-image.tar` only once the pin is
+   recorded, and validate/deploy refuse `OPENWEBUI_ENABLED=true` while the pin is
+   `sha256:PENDING` or does not match the chart and the bundle.
+2. Create the Secret (`OPENWEBUI_SECRET`) with `webui-secret-key` (`openssl rand -hex 32`) and
+   `oidc-client-secret`. Deploy checks that both keys are present before any mutation.
+3. Set the `OPENWEBUI_*` keys in `airgap.env` (see `airgap.env.example`) and run
+   `sh scripts/tools/run-task.sh airgap:deploy`. The bridge of these keys through
+   `taskfiles/airgap.yml` is a Verifier-owned change (#1074). Deploy verifies the registry image
+   and then the running pod's digest (`check_pod_images`, role `openwebui`), waits for the
+   rollout (schema migrations at first start), and verifies the Route.
+4. First admin: a member of an admin role signs in once, creates an API key in Open WebUI, and
+   adds it to the Secret as `admin-api-key`. Re-run `airgap:deploy`. The installer then runs
+   inside the pod with the key on stdin. It refuses a mounted Pipe whose sha256 differs from the
+   repository file, sends the key only to the pod's own serving certificate, proves it is an
+   admin key on the admin-only Function listing (a refused key, including a non-admin one,
+   fails there and nothing is written), creates the Function when the listing lacks it (v0.12.3
+   answers an absent Function with 401, so a 401 on the Function itself never decides) or
+   updates it, reads it back by hash and activates it. Until the key exists, deploy prints
+   `docs Pipe NOT installed` and the front end offers no model.
+5. Give all signed-in users read access to the Rosetta model in the Open WebUI admin UI (the
+   default visibility is a #1073 trial item). Then sign in as an ordinary user and ask one
+   question: citations show as source chips, and the console still works.
+
+**Retention (ADR-0007 S2).** The window is `OPENWEBUI_RETENTION_DAYS` (`openwebui.retentionDays`),
+default **30 days** (maintainer decision 2026-10-24). An explicit null fails the render.
+- The chat-purge sidecar runs hourly. In one transaction it deletes the chats last updated before
+  the window, their shared snapshots and stale snapshots, every row that references a deleted
+  chat by `chat_id`, and file records with their uploads. Deletion runs with `secure_delete`;
+  the sidecar then truncates the WAL and runs `VACUUM`, so the text is gone from the claim's
+  files. Users may also delete their own chats.
+- An unexpected table layout or a timestamp that is not epoch seconds refuses to delete
+  anything. A busy database or a failed vacuum is a failed run. Each run logs one line of counts.
+  Failures are retried after 5 minutes and counted in `rag-openwebui-data/.mainframe-rag-purge.json`
+  (`consecutive_failures`, `total_failures`, `last_success`). Alert on `consecutive_failures`
+  above 0 for more than a day.
+- Backups of `rag-openwebui-data` hold chat text. They are protected records that never leave
+  the enterprise, and their retention follows the same window: at most 30 days plus one backup
+  cycle.
+
+**Patch policy and advisory switch-off (ADR-0007 P1).** The maintainer owns patching. Agents
+prepare a monthly import of the latest upstream release as a dedicated pin-bump PR, carrying the
+base and derived digests, the licence record, the re-run of every ADR-0007 condition, and an
+upgrade of a PVC copy. Upstream fixes land only on its latest release. If a published High or
+Critical advisory affects the running pin and stays unpatched for **14 days**, switch the front end
+off with the rollback flag below until a qualified import is deployed.
+
+**Rollback (K1).** Set `OPENWEBUI_ENABLED=false` and re-run `airgap:deploy`. Helm removes the
+Deployment, Service, Route, NetworkPolicy and ConfigMap. The claim `rag-openwebui-data` is kept
+(`helm.sh/resource-policy: keep`), and nothing purges it while the front end is off. The agent
+and the console are unchanged. Open WebUI chats cannot move into the console. A database that a
+newer pin has migrated rolls back only through its pre-upgrade snapshot. To retire the front end
+for good, delete the claim explicitly (`oc delete pvc rag-openwebui-data`); no deploy path does
+that.
+
+**Allow-list proxy (ADR-0007 E1).** Open WebUI v0.12.3 disables some features in its UI
+only: `/api/v1/files` stores uploads with uploads off (Kind trial V1), the
+`/api/v1/retrieval/process/*` routes check no feature flag, and knowledge and audio rest on
+permissions that admins bypass. The server also decodes percent-encoding before routing, so a
+raw-path Route cannot block `/api/v1/%66iles/` or `/api/v1%2Ffiles/`. The pod therefore runs
+an `nginx-unprivileged` sidecar (`proxy`, pinned in `images.txt`, bundled with the Open WebUI
+image as `openwebui-proxy-image.tar`) as its only listener. Open WebUI listens on
+`127.0.0.1:8080`. The Service, Route and probes target the proxy on 8443; the config is
+`charts/mainframe-rag/files/openwebui/proxy.nginx.conf`, shipped verbatim in
+`ConfigMap/rag-openwebui-proxy`. It decides on nginx's decoded, normalised `$uri`
+(`merge_slashes on`), forwards the original request line, and answers `403 denied` for
+everything outside the allow-list. Access logs are off.
+
+Site acceptance, with `$C` a signed-in user's session cookie and `$H` the Route host. Every
+request must return `403` (or `400` for the null byte) and must store nothing:
+
+```sh
+for p in /api/v1/files/ /api/v1/files /API/v1/files/ //api/v1/files/ /api/v1/./files/ \
+         /api/v1/%66iles/ /api/v1%2Ffiles/ /api/v1/files%2F /%61pi/v1/files/ \
+         /api/v1/chats/%2e%2e/files/ /api/v1/%2566iles/ /api/v1/files%00 \
+         /api/v1/retrieval/process/text /api/v1/knowledge/ /api/v1/audio/transcriptions \
+         /openai/chat/completions /ollama/api/chat /api/v1/utils/code/execute; do
+  printf '%s ' "$p"; curl -sk -o /dev/null -w '%{http_code}\n' -X POST -b "$C" "https://$H$p"
+done
+```
+
+Then sign in and open a chat: a conversation must answer through the Rosetta model.
+
+**Re-audit the allow-list on every Open WebUI import (ADR-0007 P1).** Each import PR must (1) list
+the router prefixes and handlers of the new release (`main.py` `include_router`, each
+router's feature and permission checks) and sort them into server-enforced and UI-only; (2) record
+the table in the PR; (3) add nothing to the allow-list that is UI-only for a disabled feature;
+(4) re-run the nginx config test (`tests/test_openwebui_proxy_nginx.py`, pinned image) and the
+curl checks above; and (5) re-run a browser trace of the pilot flows (sign-in, chat, admin
+pages, Pipe install) to catch a path the UI newly needs. A UI error on a denied path is the
+signal to decide, not to widen the list by default.
+
+**Admin API key (installer).** The Pipe installer needs one admin key. The chart sets
+`ENABLE_API_KEYS=true`, `USER_PERMISSIONS_FEATURES_API_KEYS=false` (users cannot create keys;
+admins bypass the permission) and `ENABLE_API_KEYS_ENDPOINT_RESTRICTIONS=true` with
+`API_KEYS_ALLOWED_ENDPOINTS=/api/v1/functions`, so a key works only on the Functions API.
+Rotate or delete the key after an install if you prefer: `deploy.sh` prints the explicit
+not-done notice without it. The settings are pending #1073 run-2 qualification.
+
+**Requirements.** The Route API (OpenShift; deploy refuses the front end without it) and an
+enforcing CNI. The Kind lanes do not enable the front end yet: an e2e run with it enabled needs
+the #1073 test IdP and the #1072 Pipe.
+
 <a id="configuration-contract"></a>
 ## Operator configuration propagation contract
 
@@ -1765,3 +2103,55 @@ The pipeline's final banner reports only the stages it executed. Dry runs say
 live acceptance **NOT RUN**; a skipped ingest stays **NOT RUN**. Successful
 smoke stages do not certify grounded answers, console follow-ups or an exact
 production release. Complete the applicable live-stack acceptance separately.
+
+<a id="adfs-claims-check"></a>
+## AD FS claims check (bastion, before any Open WebUI deploy)
+
+`scripts/openwebui/adfs_claims_check.py` proves, from the air-gapped bastion, that the AD FS
+client for Open WebUI issues the claims the chart reads. It is stdlib-only (`python3 -I`),
+talks only to the AD FS host, and checks `iss`, `aud`, `nonce`, `exp` and the claim
+expectations. It prints claim **names**, the roles claim's JSON type and value **count**, and
+yes/no answers. It never prints tokens, the secret, claim values, group names or identity, and
+every failure is one fixed line with a distinct exit code (3 TLS, 5 callback, 6 token, 7 ID
+token, 8 claims). The ID token signature is **not** verified; this is a diagnostic only.
+
+```sh
+python3 -I scripts/openwebui/adfs_claims_check.py \
+  --issuer https://<adfs-host>/adfs --client-id <client-id> \
+  --client-secret-file <file> --ca-bundle <ca.pem> \
+  --roles-claim roles --email-claim upn --username-claim name \
+  --baseline-role signed-in
+```
+
+Flags also read `ADFS_ISSUER`, `ADFS_CLIENT_ID`, `ADFS_CLIENT_SECRET_FILE`, `ADFS_CA_BUNDLE`,
+`ADFS_ROLES_CLAIM`, `ADFS_EMAIL_CLAIM`, `ADFS_USERNAME_CLAIM`, `ADFS_BASELINE_ROLE`,
+`ADFS_SCOPES` (default `openid profile email allatclaims`) and `ADFS_CALLBACK_PORT` (8400).
+The secret is never an argument: without `--client-secret-file` it is prompted for. The
+script prints an authorize URL; open it in a browser that can reach AD FS and the bastion's
+loopback (for example through an SSH port forward of the callback port), sign in, and the
+script listens once on `http://127.0.0.1:<port>/callback` (180 s). Run it with a test account
+in a role group (expect exit 0), then with `--expect-baseline-only` and an account in no role
+group (the baseline must be the only value). `--decode-only <file>` analyses a saved ID token
+offline with the same output rules.
+
+**Paste mode (the default recommendation when the localhost redirect is not registered).**
+It needs only the real redirect URI and works before Open WebUI exists:
+
+```sh
+python3 -I scripts/openwebui/adfs_claims_check.py --paste \
+  --redirect-uri https://<openwebui-host>/oauth/oidc/callback  # plus the flags above
+```
+
+It prints the authorize URL and starts no listener. Sign in; AD FS then redirects to the
+not-yet-deployed host and the router shows an error page. That is expected: copy the full
+address from the address bar (it holds `?code=...&state=...`) and paste it at the hidden
+prompt. Paste immediately: the code expires in minutes, and the whole run is bounded by
+`--total-timeout` (300 s). The script requires the scheme, host and path to equal
+`--redirect-uri`, checks the state, exchanges with the same URI, and never echoes the pasted
+URL or code.
+
+**Listener mode.** Without `--paste` the script sends `http://localhost:8400/callback`.
+Register that second redirect URI on the **test** client only, next to
+`https://<host>/oauth/oidc/callback`, and remove it when the check is done; the production
+client keeps only the HTTPS callback.
+Tests: `tests/test_adfs_claims_check.py` (a fake TLS AD FS, canary leak assertions).

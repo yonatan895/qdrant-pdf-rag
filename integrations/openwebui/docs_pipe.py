@@ -1,5 +1,5 @@
 """
-title: Docs
+title: Rosetta
 author: mainframe-rag
 version: 0.1.0
 required_open_webui_version: 0.12.3
@@ -37,7 +37,7 @@ _URL_LIKE = re.compile(r"\s*(?:http|www\.|//|[a-z][a-z0-9+.\-]*:)", re.IGNORECAS
 # Fixed user-visible texts. The agent's error `message` and any upstream body
 # are never shown: only the stable `code` selects one of these.
 _REJECTED = ("The documentation service rejected the request. Ask an administrator to check "
-             "the Docs Pipe configuration.")
+             "the Rosetta Pipe configuration.")
 ERROR_MESSAGES: dict[str, str] = {
     "invalid_request": "The request was refused as invalid. Shorten or rephrase the question "
                        "and retry.",

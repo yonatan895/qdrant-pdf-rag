@@ -19,6 +19,10 @@ ROLE_TARGETS = {
     "openobserve": ("Deployment", "openobserve", "openobserve"),
     "otelcol": ("Deployment", "otelcol", "otelcol"),
     "oauth_proxy": ("Deployment", "rag-agent", "oauth-proxy"),
+    # Optional docs front end (ADR-0007, #1074): the hardened Open WebUI image.
+    "openwebui": ("Deployment", "rag-openwebui", "openwebui"),
+    # Its allow-list proxy sidecar (ADR-0007 E1): same Deployment, own container.
+    "openwebui_proxy": ("Deployment", "rag-openwebui", "proxy"),
     # The feedback service runs the agent image (#804): same repository and
     # digest as the "agent" role, its own workload.
     "feedback": ("StatefulSet", "rag-feedback", "feedback"),

@@ -1,0 +1,9 @@
+# Pins for the Open WebUI dev environment and acceptance lane (#1070). Plain
+# KEY=VALUE, read with sed (never sourced). Product pins stay in images.txt and
+# charts/mainframe-rag/values.yaml; these are the dev/CI-only stand-ins.
+# Kind node for the local dev cluster (the e2e lanes pin their own node image).
+NODE_IMAGE=kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
+# Test IdP, linux/amd64 manifest digest of dexidp/dex v2.46.0-distroless.
+DEX_PIN=ghcr.io/dexidp/dex@sha256:a9492ee26351ea7aaac1cb5ce3feed0e5796faea73fb39fb1a8eb649433a3912
+# Copies pulled images into the Kind node by digest (docker save of a pulled index omits blobs).
+SKOPEO_IMAGE=quay.io/skopeo/stable@sha256:0f75798d450d0cc0ea3700c79d929ae7609fb7d0e627673c14be8a484587c9b1

@@ -32,23 +32,33 @@ from pathlib import Path
 try:
     from scripts.airgap.model_config import (
         MODEL_CONFIG_KEYS,
+        SIZING_ENV_KEYS,
         feedback_config,
+        ingest_resources,
         network_policy,
+        openwebui_config,
         parse_strict_bool,
+        pem_certificates,
         reasoning_overrides,
         request_overrides,
         require_in_place_retired,
+        require_no_retired_keys,
         validate_model_config,
     )
 except ModuleNotFoundError:
     from model_config import (  # type: ignore[no-redef]  # Direct bastion-script execution.
         MODEL_CONFIG_KEYS,
+        SIZING_ENV_KEYS,
         feedback_config,
+        ingest_resources,
         network_policy,
+        openwebui_config,
         parse_strict_bool,
+        pem_certificates,
         reasoning_overrides,
         request_overrides,
         require_in_place_retired,
+        require_no_retired_keys,
         validate_model_config,
     )
 
@@ -248,14 +258,40 @@ def build_values(deploy_only: bool = False) -> dict:
     except ValueError as exc:
         die(str(exc))
 
+    # Issue #1074: the Open WebUI docs front end, default on (ADR-0008). Validated by its
+    # one owner; the image is emitted only when enabled; OPENWEBUI_ENABLED=false
+    # renders `openwebui.enabled=false` (K1: nothing from the block renders).
+    try:
+        openwebui = openwebui_config(os.environ)
+    except ValueError as exc:
+        die(str(exc))
+
+    # Optional IdP CA (enterprise CA behind AD FS): added to the public trust
+    # stores in the pod. Checked whenever set; fixed texts, never path or content.
+    idp_ca_file = env("OPENWEBUI_IDP_CA_FILE")
+    idp_ca = ""
+    if idp_ca_file:
+        try:
+            idp_ca = Path(idp_ca_file).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            die("OPENWEBUI_IDP_CA_FILE is unreadable")
+        if not idp_ca.strip():
+            die("OPENWEBUI_IDP_CA_FILE is blank")
+        if not pem_certificates(idp_ca):
+            die("OPENWEBUI_IDP_CA_FILE must hold only PEM certificates that load "
+                "(-----BEGIN CERTIFICATE----- blocks, no key or other text)")
+    if openwebui and idp_ca:
+        typing.cast(dict, openwebui["oidc"])["caBundle"] = idp_ca
+
     agent_route = env("AGENT_ROUTE") == "true"
     route_ca = ""
-    if agent_route:
+    # The namespace service CA is the destination CA of both reencrypt Routes.
+    if agent_route or openwebui:
         ca_file = env("ROUTE_DESTINATION_CA_FILE")
         if not ca_file:
             die(
-                "AGENT_ROUTE=true needs ROUTE_DESTINATION_CA_FILE pointing at the "
-                "namespace service-CA bundle (Route rendering; "
+                "AGENT_ROUTE=true or Open WebUI (on by default; opt out with OPENWEBUI_ENABLED=false) needs ROUTE_DESTINATION_CA_FILE "
+                "pointing at the namespace service-CA bundle (Route rendering; "
                 "route-off dry-run needs no CA)"
             )
         try:
@@ -274,6 +310,10 @@ def build_values(deploy_only: bool = False) -> dict:
     # --without-ingest-job so steady-state values keep ingest.enabled=false
     # even when CORPUS_PVC is set for a later explicit ingest operation.
     ingest_enabled = bool(corpus_pvc) and not deploy_only
+    try:
+        sizing = ingest_resources({name: env(name) for name in SIZING_ENV_KEYS})
+    except ValueError as exc:
+        die(str(exc))
     ingest_block: dict = {
         "enabled": False,
         "corpusPVC": "",
@@ -287,10 +327,7 @@ def build_values(deploy_only: bool = False) -> dict:
         "contextLlmBaseUrl": "",
         "contextLlmModel": "",
         "collectionPolicy": {"shardNumber": 6, "replicationFactor": 3, "writeConsistencyFactor": 2},
-        "resources": {
-            "requests": {"cpu": "4", "memory": "8Gi"},
-            "limits": {"cpu": "16", "memory": "32Gi"},
-        },
+        "resources": sizing,
     }
     if ingest_enabled:
         try:
@@ -328,10 +365,7 @@ def build_values(deploy_only: bool = False) -> dict:
             "contextLlmModel": env("CONTEXT_LLM_MODEL"),
             "collectionPolicy": qdrant_policy,
             "peerUrls": env("QDRANT_PEER_URLS"),
-            "resources": {
-                "requests": {"cpu": "4", "memory": "8Gi"},
-                "limits": {"cpu": "16", "memory": "32Gi"},
-            },
+            "resources": sizing,
         }
 
     reasoning_model = env("LLM_MODEL_REASONING")
@@ -355,9 +389,9 @@ def build_values(deploy_only: bool = False) -> dict:
     # endpoint is the external-collector escape hatch and renders neither. Like every other
     # chart image they carry repository and tag only; the pinned digests live in
     # images.txt and are enforced at pack/load and by the pod-image check.
-    tracing_images = {}
+    optional_images = {}
     if tracing_enabled and not otel_endpoint:
-        tracing_images["openobserve"] = {
+        optional_images["openobserve"] = {
             "repository": f"{internal_registry}/openobserve/openobserve",
             "tag": "v1.1.2",
             "pullPolicy": "IfNotPresent",
@@ -365,11 +399,28 @@ def build_values(deploy_only: bool = False) -> dict:
         # The collector scrapes /metrics: the chart renders it only with
         # metrics on (metrics.collector.enabled stays null and follows it).
         if metrics_enabled:
-            tracing_images["otelcol"] = {
+            optional_images["otelcol"] = {
                 "repository": f"{internal_registry}/otel/opentelemetry-collector-contrib",
                 "tag": "0.160.0",
                 "pullPolicy": "IfNotPresent",
             }
+
+    if openwebui:
+        # Same tag-plus-images.txt pin rule as the other third-party images;
+        # the verified registry digest when deploy checked it (#272).
+        optional_images["openwebui"] = {
+            "repository": f"{internal_registry}/qdrant-pdf-rag-openwebui",
+            "tag": "v0.12.3-slim",
+            "pullPolicy": "IfNotPresent",
+            **image_digest("OPENWEBUI"),
+        }
+        # ADR-0007 E1: the allow-list proxy sidecar of the same pod.
+        optional_images["openwebuiProxy"] = {
+            "repository": f"{internal_registry}/nginxinc/nginx-unprivileged",
+            "tag": "1.30.6-alpine",
+            "pullPolicy": "IfNotPresent",
+            **image_digest("OPENWEBUI_PROXY"),
+        }
 
     # Plain Kubernetes (Kind) has no SCC to assign a UID, and the OpenObserve
     # image runs as root: an operator may pin one non-root id for the bundled
@@ -388,7 +439,7 @@ def build_values(deploy_only: bool = False) -> dict:
         **oo_values,
         "replicaCount": 2,
         "images": {
-            **tracing_images,
+            **optional_images,
             "agent": {
                 "repository": f"{internal_registry}/qdrant-pdf-rag-agent",
                 "tag": image_sha,
@@ -446,6 +497,8 @@ def build_values(deploy_only: bool = False) -> dict:
         "ui": {"enabled": ui_enabled},
         "networkPolicy": {"enabled": policy_enabled, "allowedNamespaces": policy_namespaces},
         **({"feedback": feedback} if feedback else {}),
+        # Default on in the chart: an explicit opt-out must reach the render.
+        "openwebui": openwebui if openwebui else {"enabled": False},
         "route": {
             "enabled": agent_route,
             "timeoutSeconds": 300,
@@ -478,6 +531,10 @@ def main(argv: list[str]) -> int:
     out = DEFAULT_OUT
     deploy_only = False
     args = list(argv)
+    try:
+        require_no_retired_keys(os.environ)
+    except ValueError as exc:
+        die(str(exc))
     if args == ["--bundle-decisions"]:
         print_bundle_decisions()
         return 0
