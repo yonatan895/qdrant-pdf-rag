@@ -5,7 +5,9 @@
   - D2 in [comment 6442866734](https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6442866734);
   - D3 and D4 in [comment 6443165098](https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6443165098);
   - Q1, Q2 and Q5, plus coordinator defaults Q3, Q4 and Q6 to Q9, in [GH#1120 comment 6443697962](https://github.com/yonatan895/qdrant-pdf-rag/pull/1120#issuecomment-6443697962);
-  - "the air-gapped environment is production" (maintainer clarification, 2026-10-27).
+  - "the air-gapped environment is production" (maintainer clarification, 2026-10-27);
+  - the namespace answer (open question 1) in [comment 6451566378](https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6451566378);
+  - the extension-surface decision (open question 2) in [comment 6451605866](https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6451605866).
 
   This record replaces the AGENTS.md rule "Keep one public GitHub /
   air-gapped GitLab history". Accepting it changes no product default,
@@ -16,8 +18,8 @@
     it. A single shared history cannot exist, because commits made in the gap
     never return.
   - The air-gapped environment **is** production. Dev pods, GitLab runners
-    and gap builds run alongside the live service, possibly in the same
-    namespace.
+    and gap builds run alongside the live service, today in the same
+    non-production namespace (§2).
   - Development continues there with less capable models, which have
     first-hand production context but no internet and no GitHub.
   - The gap cannot build a unit-test environment from what is transferred
@@ -75,10 +77,17 @@
 
 ## 2. Isolation of development from the live release
 
-- **Preferred:** a dedicated non-production namespace for the dev pod, the
-  runners and gap-release rehearsal, if the site can get one (open
-  question 1).
-- **Otherwise, in the shared namespace** (follow-up F9 records the proof in
+- **Namespaces (open question 1, answered).** Today everything, the live
+  service included, runs in one non-production namespace. Once it has been
+  stable for a period, the service moves to the production cluster with a
+  production IdP client.
+  - The move is a planned fresh install, not an in-place upgrade: the
+    identical signed release is promoted there (§5 step 6) with a new IdP
+    client.
+  - After the move, the current namespace stays as the dev, CI and
+    gap-release rehearsal namespace, the preferred isolation.
+  - Until then, the shared-namespace rules below apply.
+- **In a shared namespace** (follow-up F9 records the proof in
   `gap/records/`):
   - The dev pod, the MR runner and the release-build job each use their own
     ServiceAccount.
@@ -259,6 +268,7 @@ if ! cmp -s "$R/drift.txt" "$R/patches.txt"; then
   echo "STOP: upstream-owned paths differ from the ledger:"; diff "$R/patches.txt" "$R/drift.txt" || true; false
 fi
 git diff "$PREV" "$SHA" -- airgap.env.example > "$R/env-keys.diff"
+git diff "$PREV" "$SHA" -- docs/release-notes.md > "$R/release-notes.diff"
 echo "IMPORT READY $SHA"
 ```
 <!-- import-script:end -->
@@ -272,6 +282,8 @@ After `IMPORT READY`:
      its output.
    - **Keys.** `$R/env-keys.diff` lists the key changes. Apply them to
      `gap/config/` in their own commit.
+   - **Extension surface.** `$R/release-notes.diff` lists each removed or
+     renamed name and its migration (§9). Update every gap-owned use of it.
    - **Set-aside patches.** For each `set-aside GL#NNN <sha>` line in
      `$R/reapplied.txt`, reopen or comment on that GitLab issue: "not
      re-applied on upstream release <SHA>; rework or retire". A rework is a
@@ -435,6 +447,39 @@ refreshed with each kit (Q9).
   names the kit to request (`mfr-devkit-<key>`). Outside a kit image,
   connected development keeps today's checks.
 
+## 9. Extension surface (open question 2, decided)
+
+The names the gap builds on are a **public API**, limited to this list:
+
+| Category | Derived from |
+|---|---|
+| `airgap.env` keys | Every key `airgap.env.example` assigns or shows commented out, plus `RETIRED_KEYS` |
+| Chart values that site config sets | The value paths `map_values.py` writes when every optional block is selected, plus the Qdrant paths `deploy.sh` sets |
+| Task names and operator script flags | Every task `task --list` shows; the flags each `airgap:` task's script parses; the §4 import script's inputs |
+| `gap/` paths | The §3 table |
+| Release bundle layout | The tarball, member and MANIFEST field names `pack.sh` writes, which include everything the §4 import script reads |
+
+- **Change rule.** Removing or renaming an item ships only with both:
+  - a migration path: the old name keeps working, or it is refused with a
+    fixed message naming the new one (the `RETIRED_KEYS` pattern of GH#1111);
+  - a `- removed` line in [the release notes](../release-notes.md).
+
+  An added item needs only a snapshot refresh.
+- **Enforcement.** `scripts/extension_surface.py` derives the list from the
+  code. `tests/test_extension_surface.py` fails with a fixed message when the
+  list differs from the snapshot `tests/fixtures/extension-surface.json`, or
+  when a release note names a migration the code does not provide.
+  - The refresh, `.venv/bin/python scripts/extension_surface.py --write`,
+    refuses a removal without both.
+  - A removed item stays in the snapshot, so its migration stays checked.
+  - The values derivation selects every optional block through one fixed
+    input in that script. A new optional block extends that input.
+- **In the gap.** The import writes `$R/release-notes.diff` (§4). A gap
+  patch that changes the surface also changes the snapshot.
+- **Out of scope.** The protected list and generator command line (F4), the
+  kit key inputs and `agent_doctor` message (F5) and the `Upstream-Release:`
+  trailer stay with their owners. They are not part of this API.
+
 ## Considered options
 
 - **Keep one shared history.** This is impossible while nothing leaves the
@@ -450,6 +495,8 @@ refreshed with each kit (Q9).
   is unchanged.
 - **Build the dev environment in the gap from wheels.** It needs an
   interpreter the gap lacks, and it is a build without an issue.
+- **No stability promise for extension points** (open question 2). Imports
+  would find breaking renames only when a gap patch or site config fails.
 
 ## Consequences
 
@@ -466,16 +513,7 @@ refreshed with each kit (Q9).
   back upstream. Every import reverts and re-applies every gap patch, so each
   patch adds two commits per import, and a patch the release breaks stays
   set aside until its issue is reworked.
-- **Goal, not yet a commitment:** upstream keeps the fork's extension points
-  stable. Those are:
-  - the reserved paths;
-  - the `airgap.env` keys and their retirement refusals;
-  - the protected list and the generator's command line;
-  - the kit key inputs and the `agent_doctor` message;
-  - the GitLab CI/CD variable names;
-  - the `Upstream-Release:` trailer.
-
-  Whether that becomes a rule is open question 2.
+- **Stable extension points** are the public API that §9 defines.
 - **Owner documents** change in the follow-up PRs:
   - [deployment policy](../deploy.md#deployment-policy) and
     [CI policy](../deploy.md#ci-policy): the CI job image becomes this
@@ -502,15 +540,12 @@ refreshed with each kit (Q9).
 | F7 | `scripts/gap/import_release.sh` from §4, with its throwaway-repo tests. §4 then becomes a link | No |
 | F8 | The owner-document updates listed under Consequences | No |
 | F9 | Isolation in the shared namespace: ServiceAccounts, RBAC, NetworkPolicy, and the recorded `can-i` proof | No |
+| F10 | Done with §9: the surface snapshot, its test, the release notes file and the release-procedure step | No |
 
 ## Open questions for the maintainer
 
-1. **Is a second, non-production namespace available** for dev, CI and
-   gap-release rehearsal? If not, §2's shared-namespace rules and a
-   non-production release name are the only isolation.
-2. **Extension points.** Should upstream commit to keeping the fork's
-   extension points stable, and how does a release announce a breaking
-   change?
+1. **Namespaces.** Answered in §2.
+2. **Extension points.** Decided in §9.
 3. **The gap release gate.** Which [release-gate](../release-verification.md)
    checks must a gap release pass? It has no connected lanes.
 4. **The build mechanism** for the unprivileged in-namespace image build

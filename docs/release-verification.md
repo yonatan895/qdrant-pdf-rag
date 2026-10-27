@@ -34,9 +34,12 @@ stands in for those checks.
 
 Mock citations prove interfaces, not answer quality; the Kind lane uses real
 models. Site-specific production storage, identity, network policy and capacity
-acceptance remain separate. No laptop runner or new deployment framework is
-needed. A changed image or configuration requires a new candidate and new
-acceptance; never edit a signed bundle or repack separately per lane.
+acceptance remain separate. A changed image or configuration requires a new
+candidate and new acceptance; never edit a signed bundle or repack separately
+per lane. A candidate that removes or renames an
+[extension-surface](adr/0009-gap-fork.md#9-extension-surface-open-question-2-decided)
+item ships its [release note](release-notes.md);
+`tests/test_extension_surface.py` enforces it.
 
 ## 1. Host and pinned models
 
@@ -780,9 +783,8 @@ to be `PASS`, evidence attributable to this bundle, and named operator sign-off.
 `NOT RUN`, `BLOCKED`, `FAIL`, missing artifacts or stale results prohibit
 transfer. This is an operator-enforced gate; the pack/load scripts do not read the
 record. Transfer **the identical tested tarball and checksum**, plus its record,
-through the approved channel. Do not rebuild, repack, edit or substitute an image.
-Recheck the checksum on arrival, then use the existing bootstrap, validation,
-deployment pipeline, [site OpenShift acceptance](install_and_ops.md#site-openshift-acceptance)
+through the approved channel. Recheck the checksum on arrival, then use the
+existing bootstrap, validation, deployment pipeline, [site OpenShift acceptance](install_and_ops.md#site-openshift-acceptance)
 and production acceptance commands. A bundle or security/configuration fix
 requires a new candidate and a fresh gate.
 
