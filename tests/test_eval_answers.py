@@ -234,7 +234,8 @@ _MALFORMED_ANSWER_CASES = [
     ("answer", _answer_payload(answer={"PRIVATE ANSWER DETAIL": "not prose"}), None),
     ("answer", _answer_payload(citations=["Original p. 1", {"PRIVATE ANSWER DETAIL": "not a cite"}]), None),
     ("answer", _answer_payload(verification_state=[]), None),
-    ("abstain", {}, "malformed answer response"),
+    # Missing required fields are an error for an answer row too.
+    ("answer", {}, "malformed answer response"),
     ("abstain", {"answer": "Original refusal", "citations": None}, "malformed answer response"),
     ("abstain", {"citations": []}, "malformed answer response"),
 ]
@@ -470,8 +471,10 @@ def test_refusal_marker_battery() -> None:
 
 
 # ---------------------------------------------------------------- judge: answer
-# One verdict table: each row is a distinct judge branch with its own expected
-# verdict and (for a fail) the fixed failure text callers see.
+# One verdict table for the verdict branches that have no test of their own;
+# each row names the branch, its verdict and the fixed failure text callers see.
+# The gold-substring, canned zero-hits and must_cite_identifier rules stay as
+# the explicit tests below, which own them.
 _JUDGE_CASES = {
     "grounded-passes": ({}, "LFAREA is set in IEASYSxx.", ["SA23-1380-70 ref, p. 1"], {}, "pass", None),
     "zero-citations-fail": ({}, "LFAREA is set in IEASYSxx.", [], {}, "fail", "zero validated citations"),
@@ -489,28 +492,6 @@ _JUDGE_CASES = {
              "the 2.4, 2.5, and 3.1 variants. For the release shown here the syntax is complete, and the "
              "INCLUDE1MAFC and 1M=/2G= rules document how to size the reservation for each page type."),
         ["SA23-1380-70 ref, p. 1"], {}, "pass", None),
-    "gold-substring-casefolded-fails": ({"gold_must_contain": ["JES2", "JES3"]}, "JES2 does X.",
-                                        ["SA32-0990-02 ref, p. 3"], {}, "fail", "JES3"),
-    "gold-substring-casefolded-passes": ({"gold_must_contain": ["jes2"]}, "JES2 does X.", ["c1"],
-                                         {}, "pass", None),
-    "gold-forbidden-substring-fails": ({"gold_must_not_contain": ["SETROPTS NO"]},
-                                       "Run SETROPTS NO...", ["c1"], {}, "fail", "forbidden substring"),
-    # Seed semantics: NEG-01 demands the literal refusal phrase; the agent's
-    # fixed zero-hits wording does not satisfy it (deliberate strictness).
-    "abstain-gold-phrase-pin-fails": (
-        {"id": "NEG-01", "expected_behavior": "abstain", "gold_must_contain": ["excerpts do not answer"]},
-        ZERO_HITS_ANSWER, [], {}, "fail", "excerpts do not answer"),
-    # run_query suppresses gold checks on the canned zero-hits message.
-    "zero-hits-abstain-skips-gold": (
-        {"expected_behavior": "abstain", "gold_must_contain": ["IEA500I"],
-         "must_cite_identifier": "IEA500I"}, ZERO_HITS_ANSWER, [], {"judge_gold": False}, "pass", None),
-    # The gold suppression must not mask the retrieval gap.
-    "zero-hits-answer-still-fails": ({"id": "DOC-01", "gold_must_contain": ["SA23-1380"]},
-                                     ZERO_HITS_ANSWER, [], {"judge_gold": False}, "fail", "explicit refusal"),
-    "must-cite-identifier-passes": ({"must_cite_identifier": "IEA794I"}, "See the message text.",
-                                    ["SA38-0673-70, IEA794I, p. 5"], {}, "pass", None),
-    "must-cite-identifier-miss-fails": ({"must_cite_identifier": "SMFPRMxx"},
-                                        "Something else entirely.", ["c1"], {}, "fail", "SMFPRMxx"),
     # A clean refusal and a silent (marker-less) uncited one both pass.
     "abstain-zero-citations-passes": ({"expected_behavior": "abstain"}, ZERO_HITS_ANSWER, [], {},
                                       "pass", None),

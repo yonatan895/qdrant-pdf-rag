@@ -115,23 +115,26 @@ def test_gate_uncomputed_metric_fails_closed(runs, metric):
     assert any(metric in r and "not computed" in r for r in reasons)
 
 
-@pytest.mark.parametrize(("runs", "verdict", "needle", "borderline"), [
-    (None, "pass", None, False),
-    # A metric inside the tolerance band: human review, not fail.
-    ([{"grounded_rate": 0.77}] * 2, "hold", "borderline", True),
-    ([{"grounded_rate": 0.60}] * 2, "fail", "grounded_rate", False),
+@pytest.mark.parametrize(("runs", "verdict", "queue", "reason"), [
+    (None, "pass", [], None),
+    # A metric inside the tolerance band is a human-review item, not a fail:
+    # exactly that metric (and no other) enters the review queue.
+    ([{"grounded_rate": 0.77}] * 2, "hold", ["grounded_rate"], ("borderline",)),
+    # Clearly outside the band fails, naming the metric and the direction.
+    ([{"grounded_rate": 0.60}] * 2, "fail", [], ("grounded_rate", "outside")),
     # A lower-is-better metric clearly over its reference fails.
-    ([{"truncation_rate": 0.30}] * 2, "fail", "truncation_rate", False),
+    ([{"truncation_rate": 0.30}] * 2, "fail", [], ("truncation_rate",)),
 ])
-def test_gate_verdict_bands(runs, verdict, needle, borderline):
+def test_gate_verdict_bands(runs, verdict, queue, reason):
     summary = summarize_l4([_run(**kw) for kw in (runs or [{}, {}])])
-    got, reasons, queue = gate_l4(summary, _thresholds())
+    got, reasons, borderline = gate_l4(summary, _thresholds())
     assert got == verdict, reasons
-    assert (queue != []) == borderline
-    if needle is None:
+    assert borderline == queue
+    if reason is None:
         assert reasons == []
     else:
-        assert any(needle in r for r in reasons), reasons
+        # Base semantics: the metric name and the verdict word share one reason.
+        assert any(all(text in r for text in reason) for r in reasons), reasons
 
 
 # ---------------------------------------------------------------- reference file

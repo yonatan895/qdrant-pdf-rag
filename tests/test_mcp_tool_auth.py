@@ -185,8 +185,11 @@ _REFUSED = {
     "jwk-alg-vs-header-alg": lambda: (_token(), None, _Idp({**_rsa_jwk(_RSA_A, "a"), "alg": "RS512"})),
     "encryption-key-is-not-a-signature-key": lambda: (
         _token(), None, _Idp({**_rsa_jwk(_RSA_A, "a"), "use": "enc"})),
-    "kid-listed-twice-is-ambiguous": lambda: (
+    # A kid listed twice is ambiguous: neither signer may authenticate.
+    "kid-listed-twice-refuses-the-first-signer": lambda: (
         _token(_RSA_A, kid="a"), None, _Idp(_rsa_jwk(_RSA_A, "a"), _rsa_jwk(_RSA_B, "a"))),
+    "kid-listed-twice-refuses-the-second-signer": lambda: (
+        _token(_RSA_B, kid="a"), None, _Idp(_rsa_jwk(_RSA_A, "a"), _rsa_jwk(_RSA_B, "a"))),
 }
 
 

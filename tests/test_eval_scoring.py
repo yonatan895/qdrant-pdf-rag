@@ -221,16 +221,18 @@ _REGRESSION_CASES = {
     "recall-regression": (
         _gate_report(**{"recall@5": 0.70}),
         {"recall@1": 0.5, "recall@5": 0.80, "mrr": 0.60, "identifier": {"recall@1": 1.0}},
-        ["recall@5"], 1),
+        [("recall@5",)], 1),
     "query-failures": (
         _gate_report(failures=2),
         {"recall@1": 0.5, "recall@5": 0.75, "mrr": 0.60, "identifier": {"recall@1": 1.0}},
-        ["failures: 2 > 0"], 1),
-    # Absolute identifier gates: a drop of any size fails, never a ratio.
+        [("failures: 2 > 0",)], 1),
+    # Absolute identifier gates: a drop of any size fails, never a ratio. Each
+    # reason names its own metric and the gate that fired, together.
     "identifier-and-message-id-absolute": (
         _gate_report(**{"identifier.recall@1": 0.99, "classes.message_id.recall@1": 0.99}),
         {"identifier": {"recall@1": 0.5}, "classes": {"message_id": {"recall@1": 0.5}}},
-        ["identifier.recall@1", "absolute gate", "classes.message_id.recall@1"], None),
+        [("identifier.recall@1", "absolute gate"),
+         ("classes.message_id.recall@1", "absolute gate")], None),
     # Issue #286: the real-corpus baseline sits below 1.0 and goes green at its
     # own value, while any identifier/message-id drop is still flagged.
     "real-corpus-at-its-own-baseline": (
@@ -242,12 +244,13 @@ _REGRESSION_CASES = {
         _gate_report(**{"identifier.recall@1": 0.65, "classes.message_id.recall@1": 0.75}),
         {"_meta": {"collection": "real_manuals", "embed_mode": "vllm"},
          "identifier": {"recall@1": 0.692}, "classes": {"message_id": {"recall@1": 0.8}}},
-        ["identifier.recall@1", "real-corpus gate", "classes.message_id.recall@1"], None),
+        [("identifier.recall@1", "real-corpus gate"),
+         ("classes.message_id.recall@1", "real-corpus gate")], None),
     # A must_not baseline is a zero gate: its recorded values are not a ratio.
     "must-not-violations": (
         _gate_report(must_not={"violations": 2, "checked": 10, "rate": 0.2}),
         {"must_not": {"violations": 2}},
-        ["must_not.violations"], None),
+        [("must_not.violations",)], None),
     "must-not-clean": (
         _gate_report(must_not={"violations": 0, "checked": 10, "rate": 0.0}),
         {"must_not": {"violations": 0}},
@@ -256,7 +259,7 @@ _REGRESSION_CASES = {
     "missing-required-class": (
         _report(),
         {"classes": {"table": {"n": 1, "scored": 1, "recall@5": 1.0}}},
-        ["table"], None),
+        [("table",)], None),
 }
 
 
@@ -268,8 +271,10 @@ def test_check_baseline_flags_each_regression_kind(case):
         assert len(regressions) == count, regressions
     if not needles:
         assert regressions == []
-    for needle in needles:
-        assert any(needle in r for r in regressions), (needle, regressions)
+    for group in needles:
+        # Every text of a group must share ONE reason string: the metric name
+        # and the gate that fired are the same verdict, never two loose hits.
+        assert any(all(text in r for text in group) for r in regressions), (group, regressions)
 
 
 def test_requested_gate_rejects_empty_and_abstain_only_reports():

@@ -164,5 +164,3 @@ def task_workspace(tmp_path: Path, *scripts: str) -> Path:
         shutil.copy2(REPO_ROOT / "scripts" / name, tmp_path / "scripts" / name)
     (tmp_path / ".venv/bin").mkdir(parents=True)
     return task
-
-
