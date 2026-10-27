@@ -1301,15 +1301,22 @@ class TestNativeExecutionEvidence(unittest.TestCase):
                 self.assertEqual((receipt["head_sha"], receipt["base_sha"], receipt["execution_sha"]),
                                  (head, base, merge))
                 self.assertEqual(receipt["execution_parents"], [base, head])
+                self.assertEqual(receipt["event_base_sha"], base)
                 self.assertEqual((receipt["run_id"], receipt["run_attempt"]), (123, 2))
-                # An updated base or head cannot reuse an earlier test merge.
-                for field in ("base", "head"):
-                    original = payload["pull_request"][field]["sha"]
-                    payload["pull_request"][field]["sha"] = "f" * 40
-                    event.write_text(json.dumps(payload))
-                    with self.assertRaisesRegex(ValueError, "does not bind"):
-                        ci_evidence.identity()
-                    payload["pull_request"][field]["sha"] = original
+                # An updated head cannot reuse an earlier test merge.
+                payload["pull_request"]["head"]["sha"] = "f" * 40
+                event.write_text(json.dumps(payload))
+                with self.assertRaisesRegex(ValueError, "does not bind"):
+                    ci_evidence.identity()
+                payload["pull_request"]["head"]["sha"] = head
+                # A payload base that disagrees with the merge is recorded, not
+                # substituted: the receipt names the base the tree was built on.
+                payload["pull_request"]["base"]["sha"] = "f" * 40
+                event.write_text(json.dumps(payload))
+                moved = ci_evidence.identity()
+                self.assertEqual((moved["base_sha"], moved["event_base_sha"], moved["execution_parents"]),
+                                 (base, "f" * 40, [base, head]))
+                payload["pull_request"]["base"]["sha"] = base
                 event.write_text(json.dumps(payload))
                 policy.write_text("# dirty tracked policy\n")
                 with self.assertRaisesRegex(ValueError, "dirty"):
@@ -1713,6 +1720,100 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
         args["archive"], args["artifact"]["digest"] = self.packed(receipt, xml)
         with self.assertRaises(ValueError):
             normalize_native(**args)
+
+    def test_test_merge_on_a_base_that_moved_after_the_push_round_trips_and_stays_bound(self):
+        """#1118 A1: GitHub's test merge and the payload base.sha can disagree.
+
+        The producer records the base the merge was actually built on, and the
+        consumer accepts that receipt only while the merge is current.
+        """
+        from unittest.mock import patch
+
+        from scripts import ci_evidence
+        from scripts.acceptance_evidence import normalize_native
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+
+            def git(*args):
+                return subprocess.check_output(["git", *args], cwd=root, text=True,
+                                               stderr=subprocess.DEVNULL).strip()
+
+            def commit(message, path):
+                (root / path).write_text(message + "\n")
+                git("add", path)
+                git("commit", "-m", message)
+                return git("rev-parse", "HEAD")
+
+            def merge_on(base):
+                git("checkout", "--detach", base)
+                git("merge", "--no-ff", "--no-edit", head)
+                return git("rev-parse", "HEAD")
+
+            def record(sha):
+                parents = git("show", "-s", "--format=%P", sha).split()
+                return {"sha": sha, "parents": [{"sha": p} for p in parents],
+                        "commit": {"tree": {"sha": git("show", "-s", "--format=%T", sha)},
+                                   "committer": {"date": "2026-10-26T12:00:00Z"}}}
+
+            git("init", "-b", "main")
+            git("config", "user.name", "Synthetic Test")
+            git("config", "user.email", "synthetic@example.invalid")
+            (root / "scripts").mkdir()
+            base0 = commit("synthetic policy", "scripts/review_tooling.py")
+            git("checkout", "-b", "candidate")
+            head = commit("candidate change", "candidate")
+            git("checkout", "main")
+            base1 = commit("base moved after the push", "moved")
+            base2 = commit("base moved again after the run", "again")
+
+            def produce(event_base, merge):
+                git("checkout", "--detach", merge)
+                event = root / "event.json"  # untracked: the clean-checkout rule ignores it
+                event.write_text(json.dumps({"pull_request": {
+                    "number": 3, "head": {"sha": head}, "base": {"sha": event_base}}}))
+                env = {"GITHUB_EVENT_PATH": str(event), "GITHUB_REPOSITORY": "synthetic/repository",
+                       "GITHUB_REPOSITORY_ID": "42", "GITHUB_EVENT_NAME": "pull_request",
+                       "GITHUB_WORKFLOW_REF": "synthetic/repository/.github/workflows/ci.yml@refs/pull/3/merge",
+                       "GITHUB_WORKFLOW_SHA": merge, "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "2",
+                       "GITHUB_JOB": "unit", "GITHUB_ACTOR_ID": "7", "GITHUB_TRIGGERING_ACTOR": "synthetic"}
+                with patch.object(ci_evidence, "ROOT", root), patch.dict(os.environ, env):
+                    return ci_evidence.identity()
+
+            def consume(identity, live_base, current_merge):
+                args, receipt, xml = self.fixture()
+                args["candidate"].update(head_sha=head, base_sha=live_base, execution_sha=current_merge)
+                for holder in (args["run"], args["job"], args["artifact"]["workflow_run"]):
+                    holder["head_sha"] = head
+                receipt.update({key: identity[key] for key in
+                                ("head_sha", "base_sha", "event_base_sha", "execution_sha", "execution_parents")})
+                receipt["workflow_sha"] = identity["workflow_sha"]
+                args["execution_commit"] = record(identity["execution_sha"])
+                args["candidate_commit"] = record(current_merge)
+                archive, args["artifact"]["digest"] = self.packed(receipt, xml)
+                return normalize_native(**args, archive=archive)
+
+            merge1 = merge_on(base1)
+            # The base moved after the push: the payload still names base0, but
+            # GitHub built the test merge on base1.
+            receipt = produce(base0, merge1)
+            self.assertEqual((receipt["base_sha"], receipt["event_base_sha"]), (base1, base0))
+            self.assertEqual(receipt["execution_parents"], [base1, head])
+            self.assertEqual(receipt["execution_sha"], merge1)
+            self.assertEqual(consume(receipt, base1, merge1)["status"], "success")
+            # The base moves again after the run: that receipt is stale, never current.
+            merge2 = merge_on(base2)
+            with self.assertRaises(ValueError):
+                consume(receipt, base2, merge2)
+            # A merge GitHub built on an older base than the payload names is
+            # also refused against the newer live base.
+            merge0 = merge_on(base0)
+            lagging = produce(base1, merge0)
+            self.assertEqual((lagging["base_sha"], lagging["event_base_sha"]), (base0, base1))
+            with self.assertRaises(ValueError):
+                consume(lagging, base1, merge1)
+            # Negative control: a current merge still binds exactly.
+            self.assertEqual(consume(produce(base2, merge2), base2, merge2)["status"], "success")
 
     def test_regenerated_merge_requires_api_tree_and_exact_parents_retaining_tested_sha(self):
 

@@ -649,11 +649,19 @@ The GitHub `hazards` job and offline GitLab `hazards` job run the full catalogue
 and retain its synthetic evidence. The scheduled acceptance consumer requires it
 when selected; #411 owns maintainer enforcement.
 
+<a id="native-ci-execution-evidence"></a>
 ## Native CI execution evidence
 
-PR CI runs on the merge ref, not the PR head. `ci_evidence.py` `identity()`
-requires that commit's parents to equal the event's `[base, head]`, else it
-fails with `checkout does not bind the event head and base`.
+PR CI runs on the merge ref, not the PR head. GitHub builds that ref on the
+base tip it last merged, which can differ from the payload's `base.sha` (#1118).
+`ci_evidence.py` `identity()` requires two parents with the event head second,
+else it fails with `checkout does not bind the event head`. It records the first
+parent as `base_sha` and the payload base as `event_base_sha`. Acceptance alone
+judges currentness: a merge on any base other than the live default-branch tip is stale.
+
+Jobs pin `ubuntu-26.04` and CPython 3.14.8, the patch of the `python-314-minimal`
+image in `images.txt`. Only `runner-canary` (ci.yml) follows `ubuntu-latest`;
+it is `continue-on-error` and must never be a required check.
 
 The existing review-tooling suite owns candidate selection, CI invocation and
 native receipt regression cases. It exercises real temporary Git merge histories,
