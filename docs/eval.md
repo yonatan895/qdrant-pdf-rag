@@ -98,22 +98,16 @@ for text/compare and is refused for HTML directory preparation. With a distinct 
 output aliases retain the existing writer behavior. Missing/corrupt inputs
 fail before an existing output is replaced.
 
-The #508 compatibility delegates are retired. Known callers and Task dispatch
-use these successors; old script commands/imports, including `_AnswerCapture`,
-are deliberately removed. Direct module commands require a prepared editable or
-wheel installation. The eight module Tasks (answers, chat, and six report
-operations) bind `PYTHONPATH=src` at the checkout root, selecting this checkout's
-canonical modules even with a foreign editable installation or inherited
-`PYTHONPATH`. Dependencies still require preparation; help names follow the module.
-
-| Retired module | Successor |
-|---|---|
-| `scripts.venue` | `mainframe_rag.eval.datasets` |
-| `scripts.bootstrap_ci` | `mainframe_rag.eval.statistics` |
-| `scripts.harness_l1` | `mainframe_rag.eval.retrieval` and `eval.datasets.GoldenEntry` |
-| `scripts.eval_answers` | `mainframe_rag.eval.answers`; CLI: `python -m mainframe_rag.eval.answers` |
-| `scripts.eval_chat` | `mainframe_rag.eval.chat`; CLI: `python -m mainframe_rag.eval.chat` |
-| `scripts.render_report` | `mainframe_rag.eval.reports`; CLI: `python -m mainframe_rag.eval.reports` |
+The #508 compatibility delegates are retired: `scripts/venue`,
+`scripts/bootstrap_ci`, `scripts/harness_l1`, `scripts/eval_answers`,
+`scripts/eval_chat` and `scripts/render_report`. Known callers and Task
+dispatch use the package owners above; old script commands/imports, including
+`_AnswerCapture`, are deliberately removed. Direct module commands require a
+prepared editable or wheel installation. The eight module Tasks (answers, chat,
+and six report operations) bind `PYTHONPATH=src` at the checkout root, selecting
+this checkout's canonical modules even with a foreign editable installation or
+inherited `PYTHONPATH`. Dependencies still require preparation; help names
+follow the module.
 
 Retained retrieval/harness/load scripts own operational composition and no
 longer provide compatibility-only helper exports. Import measurement and
@@ -161,17 +155,15 @@ separate passes would clobber each other's pages), then `run_ingest
 --reingest` with a fresh `--progress` file (`--reingest` bypasses
 inventory and Qdrant sha skips; doc_ids are stable across chunking
 changes, so delete-first is unnecessary). `paraphrase-manuals` is the
-`paraphrase.jsonl` venue (14 docs + generic-distractor), same rebuild.
-Both re-ingested 2026-09-10 under current rules (post-#216); `mainframe_manuals`
-was rebuilt in one pass during the 2026-09-12 re-freeze: 214 pts
-(166 narrative / 48 message, 82 docs) and 21 pts (16 narrative / 5 message).
-`real_manuals` (435k pts, 452 real books) is NOT managed here: never
-delete, re-ingest, or gate against it from dev workflows. Its sampled
-mix is ~95% narrative / ~2% message / ~3% syntax / ~0% table — and the
-dev venues hold no syntax/table chunks at all, so the #216 per-type BM25
-boost (default 1.0) was unmeasurable outside the real corpus; its ON
-decision has since been measured OFF on real-corpus record-replay pools
-(see `retrieval.md` §4 for the verdict and reopen gate).
+`paraphrase.jsonl` venue, same rebuild. Point counts and class mixes follow
+the current entries and chunking rules; do not copy them between sessions.
+`real_manuals` (the preserved real-corpus collection) is NOT managed here:
+never delete, re-ingest, or gate against it from dev workflows. Its sampled
+mix is mostly narrative, with little message/syntax/table — and the dev
+venues hold no syntax/table chunks at all, so the #216 per-type BM25 boost
+(default 1.0) was unmeasurable outside the real corpus; its ON decision has
+since been measured OFF on real-corpus record-replay pools (see `retrieval.md`
+§4 for the verdict and reopen gate).
 
 <a id="retrieval-eval"></a>
 ## 2. Retrieval eval (`eval_retrieval.py`)
@@ -869,8 +861,9 @@ L4's reference (`evals/harness-l4-thresholds.json`) is recorded with
 PR. L2/L4 standing red on known product debt is an RC debt signal, not a
 broken target.
 
-Historical command spellings below are preserved as executed; use the
-[current Task migration map](task-runner.md#inventory) for new runs.
+Historical command spellings below are preserved as executed; new runs use the
+current `--list` / `<task> --summary` catalogue
+([task policy](task-runner.md#scope)).
 
 **Dated record.** Each battery run appends a row here in the same PR or
 RC checklist that runs it (`$BUNDLE_DIR` reports are local). Run
@@ -878,29 +871,12 @@ manifests (`evals/runs/*.jsonl`, gitignored) carry the timestamp, git
 SHA, settings hash, model ids, Qdrant version, and snapshot id — the
 committed row is the pointer, the manifest is the detail.
 
+Rows before 2026-10-19 were pruned as superseded history; their detail
+remains in git (`git show 7c4bb00:docs/eval.md`) and, where one exists, in
+the dated record under `docs/records/`.
+
 | Date | Git SHA | Venue | Steps | Result |
 |---|---|---|---|---|
-| 2026-09-02 | pre-#268 | `real_manuals` | `harness-l2` N=24 | 10 structural fails; grounded 0.76, citation precision 0.16, truncation 0.59 — standing red debt (`testing.md` harness section) |
-| 2026-09-11 | 9469d4f | `real_manuals` | `harness-l4-record` N=24×3, then `harness-l4` gate | reference recorded (grounded 0.70, citation P/R 0.60/0.40, truncation 0.43, syntax 0.33, entailment 0.35, relevance 0.97); gate fail on 32 structural fails with no rate outside the 0.15 band, 20-row review queue — standing RC debt |
-| 2026-09-11 | 4db737a | `real_manuals` | `harness-l3-baseline` + `harness-l3` gate (C=8, request timeout 300s) | vllm baseline recorded (search p95 151 ms; answer p95 110 s, ttft p95 108 s under 8-way concurrency on the 8 GB stand-in); gate pass |
-| 2026-09-11 | 632ad3e | `real_manuals` | `harness-l4-record` N=24×3 under strict grounding (#269) | reference re-recorded: grounded 0.48 (was 0.70 — inferred cites no longer count), citation P/R 0.63/0.39, truncation 0.49, entailment 0.29, relevance 0.96; 37 structural fails — standing RC debt |
-| 2026-09-12 | d15fbca | `real_manuals` | `eval_retrieval --no-check` split 2×2, 70-query frozen holdout (vllm, rerank off) | comparative split ON: class r@1 0.286→0.429, class MRR 0.429→0.536, overall r@1 0.603→0.619, overall MRR 0.700→0.712, 0 must_not violations → flipped default-ON; diagnostic neutral-negative (class r@1 flat 0.571, class MRR 0.655→0.643, overall r@5 0.873→0.857) → stays off |
-| 2026-09-12 | 5a952b7 | `real_manuals` | `make eval-holdout` (70-query frozen holdout, vllm, rerank off) | doc-family filter ON: `doc_number` r@1 0.667→1.0 (DOC-03 0→1.0, DOC-04 0→1.0); overall r@1 0.619→0.651, r@5 0.873→0.889, MRR 0.712→0.739; only those two queries moved; 0 violations; gate green |
-| 2026-09-12 | 96f013d | `real_manuals` | `replay_sweep` over dev golden, pools captured with CE at depth 80 | tune baseline (n=104) r@1 0.683 / r@5 0.923 / MRR 0.792; fuse 24→32→40 identical, `page2` r@5 0.904/MRR 0.769, `doc4` neutral, `doc2` +1/104, rerank alphas r@1 ≤0.673 — no adoption, production config stands |
-| 2026-09-12 | dff83f8 | `real_manuals` + synthetic venues | golden/holdout re-freeze (#270 table class) + all baseline re-records | 193 entries (121 dev / 72 holdout), `verify-golden` 0 FAIL/0 WARN; `mainframe_manuals` rebuilt one-pass (82 docs / 214 pts); hash + vllm + holdout baselines re-recorded (holdout r@1 0.631, r@5 0.892, MRR 0.726; table class block present in all); L1 harness baseline re-recorded (new snapshot pin, recall@5 0.908, traps 0); gate-l1/l1-gate/eval/holdout green |
-| 2026-09-12 | dff83f8 | `real_manuals` | `harness-l4-record` N=24×3 on the re-frozen holdout | reference re-recorded: grounded 0.46, citation P/R 0.59/0.42, truncation 0.44, syntax 0.33, entailment 0.68, relevance 0.95; 45 structural fails — standing RC debt (recording gates through product debt) |
-| 2026-09-12 | e0de04a | `real_manuals` | full §10 battery on the re-frozen set (#268 close-out) | `eval-holdout` green (r@1 0.631, r@5 0.892, MRR 0.726, 0 fail, 0 viol, table r@5 1.0); L1 `hold` (no metric beyond CI overlap; `RESTORE=never` — the 09-11 pin file is absent on this host, same 435057 pts); L2 `hold` (13 structural fails); L4 `fail` on 38 structural fails with every rate pass/borderline (ref 45); L3 vllm `pass` (search p95 163 ms, answer p95 98.8 s, 0 err); capture 121q 0 fail; replay sweep no adoption (production stands) |
-| 2026-09-12 | e0de04a | `real_manuals_hash` | `harness-l3-baseline` (hash) + `harness-l3` gate (C=8, request timeout 300s) | hash-vector mirror of `real_manuals` built (435057 pts, ids + payload identical, production hash builders); hash baseline recorded (search p95 75 ms, answer p95 64.8 s, 0 err, 0 missing); same-data gate `pass` |
-| 2026-09-12 | 053c1ab | synthetic paraphrase venue | contextual-embeddings A/B (#300): header-only vs contextual ingests, vllm, gateway-routed E4B gists | 22/22 queries byte-identical (both arms r@1 1.0 — saturated under post-#270 defaults, no headroom); vectors confirmed changed (cosine 0.969, `context` in payload); no RC escalation, stays default-off |
-| 2026-09-12 | 324727a→e2821d9 | `real_manuals` | `harness-l4` N=24×3 before/after the #298 thinking-reserve fix (reserve 0 → 1000) | before: trunc 0.46, grounded 0.41, citation P/R 0.57/0.40, 39 structural fails; after: trunc 0.06, grounded 0.78, P/R 0.47/0.34 (paired-with-cites −0.06), syntax 0.44, entailed 0.75, relevance 0.94, 28 structural fails; complex trunc 0.88→0.0; reserve-500 sensitivity: trunc 0.08, entailed 0.51 (band fail) → 1000 stands |
-| 2026-09-12 | f9304d1 | `real_manuals` | `harness-l2` N=24 — #299 citation WHY report (contract + parse-time telemetry) | formatting modes clean in this sample: 0 malformed, 0 fabricated, 0 absent/never-attempted; 1 truncated-before-cites (LEG-02), 1 inferred row (its index pointed off gold); P/R 0.44/0.33, grounded 0.76, truncation 0.05, 7 structural fails; gold present in the pool for 20/21 answer rows with recall<1 on 15 and 6 explicit refusals (3 zero-cite, 3 hedged) → dominant gap is reader-side completeness/refusal, not citation parsing or retrieval; follow-up issue filed |
-| 2026-09-12 | 24c6403 | `real_manuals` | `harness-l2` N=24 + `harness-l4` N=24×3 — #305 answer-completeness instrument + prompt | verdict fix: answer-tier refusals judged with the agent's `is_abstention` (marker+shape) — 3 of the #299 row's 6 refusals were grounded scope caveats; `answer_completeness` over gold-retrieved rows added; after vs #304-after re-judged under the corrected predicate: L4 structural 17→14, completeness 0.267→0.35, grounded 0.78→0.83, citation P/R 0.47/0.34→0.51/0.40, truncation 0.063→0.032, syntax 0.44→0.56, entailed 0.745→0.737 (flat); refusal rows flat (10/60; DOC-01 identifier-only 3/3→0/3 fixed); residual refusers diagnosed (CMP-02 comparison, TBL-02 missing table caption, DOC-03 holdout premise/title mismatch) → #307; judge pinned at low reasoning effort (server default put CoT in the content channel, 4/24 unparseable) |
-| 2026-09-13 | a62c2ea | `real_manuals` | `eval-chat` N=12 sessions + repeat — multi-turn condensation A/B (M5, ADR-0004) | literal follow-ups score 0 across the board (r@1/r@5/MRR 0.0 — "how do I resolve this?" carries no retrievable topic); condensed: r@1 0.25–0.50, r@3 0.833, r@5 0.917, r@8 1.0, MRR 0.515 (run-to-run spread on 12 sessions), retrieval p50 222 ms; condense call p50 5.37 s (one extra reasoning call per follow-up) is the price; 0 failures. `CHAT_CONDENSE_ENABLED` stays **off**: enabling is a dedicated default-flip PR that must weigh the +1-call latency against this r@5 gain |
-| 2026-09-16 | 080385c | `real_manuals_v2` (rebuilt) | RC corpus rebuild under current extraction rules + committed representation contract (`--reingest` into a clean target; the legacy `real_manuals` and its alias are retained unchanged) + `verify-golden` + `eval-holdout` | 452 docs / 431233 pts (was 435057); `verify-golden` 0 FAIL/0 WARN; frozen-holdout retrieval green vs baseline: r@1 0.631 (flat), r@5 0.892→0.908, MRR 0.726→0.733, nDCG@8 0.758→0.767; identifier r@1 0.744→0.718, nl r@1 0.462→0.50; 0 failures, 0 must_not violations. Triggered by the #365 acceptance prerequisite (the legacy collection predates the #362/#391 contract); a corpus-lifecycle record for the swap/GC decision is owned by the data-integrity track |
-| 2026-09-16 | 080385c | `real_manuals_v2` + LOCAL_CRC_32GB (8GB stand-in) | `eval-answers` N=24 (VENUE=rc, gateway-routed E4B + Qwen3-Embedding-0.6B, rerank off) — #365 acceptance set | 12/24 pass, 0 errors; answer-tier 10/21, abstain 2/3; `false_refusal_rate` 0.0952 (2/21: CMP-02, DOC-03), `unsafe_answer_rate` 0.3333 (1/3: MSG-01 length-truncated before the required identifier); `by_verification_state` accepted 10 / generation_incomplete 10 / insufficient_evidence 4; `state_mismatches` 12; **every** incomplete row is `finish_reason=length` at the stand-in's 4096 window (prompt ~3.1k + completion ~1k) — a stand-in window limit, not a contract defect; `units_omitted_total` 137; `budget_verified` 0 (the gateway exposes no `/tokenize`); `answer_completeness` not computed by this instrument (no pool join — the `harness-l2` row below carries it). DOC-03 is measured as a zero-cite refusal against the adjudicated premise-correction expectation (#307/#365); experimental reference only, not a production-model result |
-| 2026-09-16 | 17d388c | `real_manuals_v2` + LOCAL_CRC_32GB (8GB stand-in) | `harness-l2` N=12 (VENUE=rc, gateway) — #365 claim-support / completeness slice | 0 errors, 5 structural fails; grounded 0.5455, truncation 0.3636 (stand-in window), citation P/R 0.583/0.273, `answer_completeness` 0.1818 (2/11 gold-retrieved); `by_verification_state` accepted 6 / generation_incomplete 4 / insufficient_evidence 2; `state_mismatches` 5; faithfulness judged 6: entailed 0.50, neutral 0.33, contradiction 0.17; `faithfulness_by_class`: comparative 1.0 entailed (n=2), table 1.0 (n=1), diagnostic 0 entailed / 0.5 contradiction (n=2), doc_number neutral 1.0 (n=1); syntax/version/message classes produced no eligible-cite rows to judge in this sample. Experimental reference; judge-assisted, never an entailment proof |
-| 2026-10-03 | (this PR) | `manuals_b5c1756` (full re-ingest at b5c1756, 452 docs, 190440 pts) + synthetic L1 venue | golden/holdout re-freeze: 10 code-lookup rows `SYS-01..10` (#591; `message_id` class, exact page labels) + re-records of `baseline.json` (hash L1), `holdout-baseline.json` (VENUE=rc) and `harness-vllm.json` (VENUE=rc) | 203 entries (127 dev / 76 holdout); existing rows byte-identical; `verify-golden` 0 FAIL/0 WARN on both; L1 hash 127 queries r@1 1.0, gate PASSED; holdout (vllm, rerank off) r@1 0.667, r@5 0.928, MRR 0.763, page hit@5 1.0 (n=4); harness vllm overall r@5 0.934, MRR 0.782. L4 thresholds unchanged (24-row sample identical). `baseline-vllm.json` unchanged: its dev synthetic vllm venue is not reproducible locally |
-| 2026-10-03 | 4414a06 + #307 branch | `manuals_b5c1756` + LOCAL (gemma-4-E4B, Qwen3-Embedding-0.6B, rerank off, temp 0) | `eval-answers` N=24 (VENUE=rc) - #307 stage attribution (read-only analysis of the run report/log; no new run) | 17/23 judged pass (answer 14/20, abstain 3/3), 1 error row; `false_refusals` 4/20 (TBL-01, VER-01, CMP-02, DOC-03); by class pass: comparative 2/3, table 1/2, version 1/3, syntax 2/3, doc_number 2/3, diagnostic 3/3, message_id 3/3; `by_verification_state` accepted 14 / insufficient_evidence 7 / generation_incomplete 2; `units_omitted_total` 111, `budget_verified` 23/23, `answer_completeness` None (no pool join). **Stage attribution** (retrieval from the same-day dev retrieval report, r@8 on the expected doc; supplied counts from the per-request answer log): TBL-02 = **packing/budget** - HTTP 422 `PromptBudgetExceeded` (eval printed `?`; envelope-code bug) with 8 hits retrieved (r@8 1.0); TBL-01, VER-01 = retrieval ok (r@8 1.0, rank 1) but only 3-4 of 8 hits supplied and a short explicit refusal (`finish_reason=stop`) = **packing coverage / reader**, not distinguishable without the supplied-doc manifest; CMP-02 = retrieval ok (both expected docs within r@3, MRR 0.5) but only 2 of 8 hits supplied with 71 units omitted and a refusal = **packing coverage** (comparison needs both docs; supplied-doc ids are not logged); DOC-03 = holdout, premise-correction (adjudicated #406): 2 supplied, stop, refusal = **reader** (no retrieval row in the dev report); VER-03, LEG-02 = **truncation** (`finish_reason=length`, 3 supplied), not refusals. No row is attributed to source/extraction in this sample. Supplied excerpts were 1-4 of 8 hits on 22 of 23 served rows (DOC-01 supplied 8). Code: trim-round bound scales with trimmable excerpts (a dense table pool no longer 422s while droppable evidence remains), error code recorded, pool join added; prompt text, defaults, goldens and baselines unchanged. Live re-measurement external (see #307 report) |
 | 2026-10-23 | 308f70b | `colab_manuals_qwen3_8b_4096_ced400a7` (rules ced400a7, 234,610 pts) + G4 Qwen3.8-27B xhigh, Qwen3-Embedding-8B dim 4096, rerank off, deadline 570 s / client 600 s | `eval-answers` 127 dev rows over 3 sessions (VENUE=rc, frozen holdout excluded) - #830 xhigh answer baseline | 88/127 pass; 127/127 once, 0 timeouts; generation_incomplete 27, retrieval_miss 5, unsafe_answer 3, refusal_gold_present 2, citation_format 2; abstention 7/13 (#798). Per-class counts and per-row attribution (ids only): [record](records/2026-10-23-xhigh-answer-baseline.md) |
 | 2026-10-19 | 3329275 + #845 branch | `colab_manuals_qwen3_8b_4096_c47352b2` (rules `c47352b2`, Qwen3-Embedding-8B dim 4096; pools captured at `912a23f`, depth 40, no CE) | `replay_sweep --grid rrf` over dev golden and section probes, headings joined, rerank off; `rrf_k` ∈ {2,5,10,30,60} × sparse weight ∈ {1,2,3,5}, NL and identifier separately | production (k 2, weights NL 1/1, identifier 1/3) dev r@1 0.667 / r@5 0.921 / MRR 0.766, sections r@5 0.353; 0 `must_not` in every config. **k 60, weights unchanged**: dev r@1 0.702, r@5 0.956, MRR 0.796 (r@1 +9/−5 rows, r@5 +5/−1: SYN-07 rank 4→6; identifier rows gain most; VER-06, CMP-12, CMP-15, SYN-27, SYN-31 lose rank 1), sections r@5 0.471, MRR 0.325. Identifier sparse weight 1: best r@1 (k 5: 0.719, MRR 0.806) but `message_id` r@5 1.00→0.96 (an exact-code row leaves the top 5) — rejected. NL sparse weight 2 at k 60: dev r@5 0.965 but the section gain is lost (0.353) — rejected. **Decision:** no adoption here (dev selection only). `rrf_k` 2→60 with weights unchanged is the candidate for a dedicated default-change concern, confirmed live (dev + frozen holdout once) before any flip |
 | 2026-10-21 | 2a723c6 (G4 sandbox) | `colab_manuals_qwen3_8b_4096_c47352b2` (rules `c47352b2`, Qwen3-Embedding-8B dim 4096, rerank off) | #860 live dev confirmation: `eval_retrieval --no-check` dev (127) and section probes (17) at `RRF_K` 2 and 60, same session and stack; holdout not read (#859) | k2 → k60: dev r@1 0.658→0.702, r@5 0.930→0.956, MRR 0.759→0.796, nDCG@8 0.785→0.813; `message_id` r@1 0.786→0.857, r@5 1.0→1.0; sections r@5 0.353→0.471, MRR 0.279→0.325; `must_not` 0 in both. Rank-1 +9 (CMP-02, CMP-10, DIA-17, DIA-21, MSG-02, MSG-22, SYN-11, SYN-16, SYN-21) / −4 (CMP-12, SYN-27, SYN-31, VER-06), all predicted by the 2026-10-19 replay; top-5 +DIA-17 +DIA-21 +SYN-06 +TBL-05, −SYN-07. Pre-registered #860 rule met → `rrf_k` default 2 → 60 |
@@ -949,8 +925,8 @@ instrumented, including corruption, recovery, precedence and literal paths.
 **Status: PROPOSED in the machine file; accepted by the maintainer (see the
 2026-10-23 registration record below).** The criteria in
 `evals/acceptance-criteria.json` are policy choices, not
-measured production performance; the 2026-09-16 stand-in rows in §10 are not
-evidence for or against them. Until `status` is `registered` (with
+measured production performance; the pruned pre-2026-10-19 stand-in rows in §10
+history are not evidence for or against them. Until `status` is `registered` (with
 `registered_by`/`registered_at`, in a dedicated PR before any scored run),
 every result is non-certifying. A later change needs a new `criteria_id` and a
 new set binding; never edit criteria after seeing scores.

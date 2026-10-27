@@ -516,7 +516,10 @@ For streaming recovery, assert yielded events and fallback-call counts through t
 A test earns its place:
 
 1. **Owner first.** Extend the test that owns the guarantee (owner contract;
-   [2026-10-16 ledger](records/2026-10-16-test-justification-ledger.md)).
+   the live contract-to-owner index is the [context map](agent-workflow.md#context-map)
+   plus the owner docs). The
+   [2026-10-16 ledger](records/2026-10-16-test-justification-ledger.md) is a
+   historical snapshot recoverable from git, not an index of the current suite.
    Add a test or file only when none exists, and say so. Exploratory and
    review-round cases keep only distinct behavior, in the owning suite, never
    in files named after an agent or round.
