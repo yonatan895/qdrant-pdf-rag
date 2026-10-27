@@ -44,9 +44,10 @@ unless an incident requires more: [process budget](docs/agent-workflow.md#proces
 ## Hard boundaries
 
 - Never commit vendor PDFs/manual text, `.pdf`/`.pdx`/`.idx`, vectors,
-  snapshots, secrets/tokens, private configuration outside `gap/config/`,
-  kubeconfigs, image archives, wheelhouses, or generated deployment artifacts. Runtime corpora stay outside
-  git; tests generate original documents. `airgap.env.example` is allowed.
+  snapshots, secrets/tokens, private configuration outside the fork's
+  `gap/config/`, kubeconfigs, image archives, wheelhouses, or generated
+  deployment artifacts. Runtime corpora stay outside git; tests generate
+  original documents. `airgap.env.example` is allowed.
 - Parsing stays generic: IBM signals are optional payload, never ingest gates;
   filename-stem identity and unknown-vendor fallbacks remain supported.
 - Production is air-gapped OpenShift, CPython 3.14 GIL (no free-threading or

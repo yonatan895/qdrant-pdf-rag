@@ -107,7 +107,7 @@
 | Path | Holds |
 |---|---|
 | `gap/README.md` | The gap entry point, read after AGENTS.md. It names the gap maintainer group and the named approvers, restates these rules and says where site inputs live. Never name it `AGENTS.md`: the context check would require it in the upstream chain table |
-| `gap/patches.md` | The gap-patch ledger. A `# Gap patches` title line, then one section per patch: a heading `## GL#NNN <full commit sha>`, then one `- path: <path>` line per upstream-owned path the patch changes. Other lines are free text |
+| `gap/patches.md` | The gap-patch ledger. A `# Gap patches` title line, then one section per patch: a heading `## GL#NNN <full commit sha>`, then one `- path: <path>` line per upstream-owned path the patch changes. Other lines are free text. Sections are in application order: a new patch is appended at the end |
 | `gap/config/` | The site's non-secret configuration (Q2), such as its `airgap.env` without secret values. Secrets stay in Kubernetes Secrets or the site's secret store and are referenced by name only. Rehearsal-only overrides (`CI_REHEARSAL` keys) never go here |
 | `gap/records/` | Dated site records, `YYYY-MM-DD-<slug>.md`: imports, gap releases, go-live checks, isolation proofs, incidents. Gap records never go in `docs/records/` |
 | `gap/runbooks/` | Site procedures that upstream cannot know |
@@ -121,10 +121,11 @@ ADRs and `docs/records/`), `.agents/`, `.claude/`, `.github/`,
 `tests/`, `evals/`, `Taskfile.yml`, `taskfiles/`, the locks and pins, and
 `site/`.
 
-- **Upstream never tracks `gap/` or `.gitlab/`.** A GitHub hygiene step
-  (follow-up F3) asserts that `git ls-files gap .gitlab` prints nothing. It
-  is not a pytest, because the fork does track those paths. Step 3 of the
-  import also refuses a release that tracks them.
+- **Upstream never tracks `gap/` or `.gitlab/`.** F3 lands with this
+  record: a check in `tests/test_hygiene.py` fails on GitHub Actions
+  (`GITHUB_ACTIONS=true`) when either path exists. It asserts nothing
+  elsewhere, because the fork does track those paths and never runs GitHub
+  Actions. Step 3 of the import also refuses a release that tracks them.
 - **Hard boundaries.** Apart from Q2, the site layer obeys every AGENTS.md
   hard boundary: no secrets, tokens, kubeconfigs, manual text, corpora,
   vectors or snapshots.
@@ -173,6 +174,9 @@ export R=/abs/path/releases/$SHA
 
 <!-- import-script:start -->
 ```sh
+# Any failure, including one with no STOP line of its own, ends with a STOP line.
+trap 'rc=$?; [ "$rc" -eq 0 ] || echo "STOP: the import failed (exit $rc); rerun to reset, then report if it stops again"' EXIT
+
 # 0. Reset: safe on every run, and the way to resume after any stop.
 cd "$FORK"
 if git rev-parse -q --verify MERGE_HEAD >/dev/null; then git merge --abort; fi
@@ -207,42 +211,41 @@ if git merge-base --is-ancestor "$SHA" HEAD; then echo "STOP: $SHA is already im
 if ! git merge-base --is-ancestor "$PREV" "$SHA"; then echo "STOP: $SHA does not descend from the last import $PREV"; false; fi
 if [ -n "$(git ls-tree -r --name-only "$SHA" -- gap .gitlab)" ]; then echo "STOP: the release tracks gap/ or .gitlab/"; false; fi
 
-# 4. Set aside every gap patch whose paths this release changes:
-#    revert its commit (newest first) and drop its ledger section.
-: > "$R/affected.txt"
+# 4. Set aside every ledgered gap patch: revert them newest first (the
+#    ledger lists them in application order), then empty the ledger.
+: > "$R/all.txt"
 if [ -f gap/patches.md ]; then
   cp gap/patches.md "$R/patches.before"
-  git diff --name-only "$PREV" "$SHA" > "$R/upstream.txt"
-  awk 'FILENAME==ARGV[1] {up[$1]=1; next}
-       /^## GL#/ {i=$2" "$3}
-       /^- path: / && ($3 in up) && !(i in seen) {seen[i]=1; print i}' "$R/upstream.txt" gap/patches.md > "$R/affected.txt"
+  awk '/^## GL#/ {print $2, $3}' gap/patches.md > "$R/all.txt"
 fi
-for c in $(tac "$R/affected.txt" | awk '{print $2}'); do git revert --no-edit "$c"; done
-if [ -s "$R/affected.txt" ]; then
-  awk 'FILENAME==ARGV[1] {drop[$1]=1; next} /^## / {on=($2 in drop)} !on' "$R/affected.txt" gap/patches.md > "$R/patches.new"
-  cp "$R/patches.new" gap/patches.md
+for c in $(tac "$R/all.txt" | awk '{print $2}'); do
+  if ! git revert --no-edit "$c"; then echo "STOP: cannot set aside gap patch $c; an unledgered change overlaps it"; false; fi
+done
+if [ -s "$R/all.txt" ]; then
+  awk '/^## / {exit} {print}' "$R/patches.before" > gap/patches.md
   git commit -am "Set aside gap patches before importing $SHA"
 fi
 
-# 5. Merge. With the affected patches set aside, any conflict is unexpected.
+# 5. Merge. With every gap patch set aside, any conflict is unexpected.
 if ! git merge --no-ff --no-commit "$SHA"; then
   echo "STOP: conflict in: $(git diff --name-only --diff-filter=U | tr '\n' ' ')"; false
 fi
 git commit -m "Import upstream release $SHA" -m "Upstream-Release: $SHA"
 
-# 6. Re-apply each set-aside patch. One that conflicts or is now empty stays
-#    set aside; the MR lists it and its GL# issue gets a note.
+# 6. Re-apply every patch in ledger order. One that conflicts or is now
+#    empty stays set aside; its GL# issue gets a note (see below).
 : > "$R/reapplied.txt"
-for c in $(awk '{print $2}' "$R/affected.txt"); do
+for c in $(awk '{print $2}' "$R/all.txt"); do
+  i=$(awk -v c="$c" '$2 == c {print $1}' "$R/all.txt")
   if git cherry-pick "$c"; then
-    echo "reapplied $c $(git rev-parse HEAD)" >> "$R/reapplied.txt"
+    echo "reapplied $i $c $(git rev-parse HEAD)" >> "$R/reapplied.txt"
   else
     git cherry-pick --abort
-    echo "set-aside $c" >> "$R/reapplied.txt"
+    echo "set-aside $i $c" >> "$R/reapplied.txt"
   fi
 done
 if grep -q '^reapplied ' "$R/reapplied.txt"; then
-  awk 'FILENAME==ARGV[1] {if ($1 == "reapplied") new[$2]=$3; next}
+  awk 'FILENAME==ARGV[1] {if ($1 == "reapplied") new[$3]=$4; next}
        /^## / {on=($3 in new); if (on) print $1, $2, new[$3]; next}
        on' "$R/reapplied.txt" "$R/patches.before" >> gap/patches.md
   git commit -am "Re-apply gap patches after importing $SHA"
@@ -269,6 +272,10 @@ After `IMPORT READY`:
      its output.
    - **Keys.** `$R/env-keys.diff` lists the key changes. Apply them to
      `gap/config/` in their own commit.
+   - **Set-aside patches.** For each `set-aside GL#NNN <sha>` line in
+     `$R/reapplied.txt`, reopen or comment on that GitLab issue: "not
+     re-applied on upstream release <SHA>; rework or retire". A rework is a
+     new gap patch.
 2. Push the branch with `git push origin "import/$SHA"`.
 3. Open a draft MR named `Import upstream release <SHA>`. Its body gives
    `SHA`, `PREV`, `$R/reapplied.txt` and the follow-up commits.
@@ -449,15 +456,16 @@ refreshed with each kit (Q9).
 - **AGENTS.md** changes in this PR:
   - The "one history" bullet becomes "Air-gapped GitLab is a downstream
     fork" with a link here. The bullet goes from 286 to 283 bytes.
-  - The hard boundary "private configuration" gains "outside `gap/config/`"
-    (Q2).
+  - The hard boundary "private configuration" gains "outside the fork's
+    `gap/config/`" (Q2). On GitHub, the F3 check keeps `gap/` absent.
 
   The file stays under 8192 bytes. The MR and gap-maintainer reading is in
   §6, because the root file has no room for it.
 - **Trade-off.** Gap development has first-hand production context, but
   weaker models do it, next to the live service. Its learning does not flow
-  back upstream. Each gap patch costs a set-aside and re-apply on every
-  import that touches its paths.
+  back upstream. Every import reverts and re-applies every gap patch, so each
+  patch adds two commits per import, and a patch the release breaks stays
+  set aside until its issue is reworked.
 - **Goal, not yet a commitment:** upstream keeps the fork's extension points
   stable. Those are:
   - the reserved paths;
@@ -487,7 +495,7 @@ refreshed with each kit (Q9).
 |---|---|---|
 | F1 | Outside dry-run, load, deploy, ingest and validate refuse a checkout that is not a verified signed release. The trust anchor is required. The opt-out needs `CI_REHEARSAL=1`. Tests go in the air-gap shell suites, and the connected lanes set the opt-out | Lanes and taskfiles: yes |
 | F2 | Two trust anchors (upstream and gap) and the MANIFEST `origin:` field | No |
-| F3 | A GitHub hygiene step: `git ls-files gap .gitlab` prints nothing | Yes (workflow) |
+| F3 | Done in this PR: `tests/test_hygiene.py` fails on GitHub Actions when `gap/` or `.gitlab/` exists | No |
 | F4 | The CODEOWNERS generator, its equality test and the GitLab hygiene check | No |
 | F5 | The dev kit: image recipe, connected factory job, kit pack, verify/install script, issue snapshot, kit key, `.gitlab-ci.yml` default image and the `agent_doctor` refusal | Yes (`agent_doctor.py`, workflow) |
 | F6 | The gap release pipeline: protected-tag build and sign jobs, the unprivileged in-namespace build, the gap pack (`origin: gap`), the key-generation runbook and the release record template | Pack and taskfiles: yes |
