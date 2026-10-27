@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 from mainframe_rag.feedback.service import create_app
 from mainframe_rag.feedback.store import AnswerRecord, FeedbackStore, Rating, UnknownAnswerError
+from tests.helpers_eval_local import free_port as _free_port
 
 RID = "0123456789ab"
 TOKEN = "feedback-test-token"
@@ -262,14 +263,6 @@ def _launch_service(tmp_path, port, extra_env):
         [sys.executable, "-m", "uvicorn", "--factory", "mainframe_rag.feedback.service:app_from_env",
          "--host", "127.0.0.1", "--port", str(port)],
         env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-
-
-def _free_port() -> int:
-    import socket
-
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
 
 
 def _wait_until(predicate, timeout=30.0):

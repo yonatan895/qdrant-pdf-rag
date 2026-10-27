@@ -135,17 +135,65 @@ def test_es256_is_accepted_only_when_configured():
     assert _verify(token, config, idp).sub == "user-1"
 
 
-# --- signature failure ------------------------------------------------------------
+# --- signature, claim and key confusion: every shape is unauthenticated -------
+def _hmac_with_the_public_key() -> str:
+    import hashlib
+    import hmac
+
+    pem = _RSA_A.public_key().public_bytes(
+        serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo
+    )
+    head = jwt.utils.base64url_encode(json.dumps({"alg": "HS256", "typ": "JWT", "kid": "a"}).encode())
+    body = jwt.utils.base64url_encode(json.dumps(_claims()).encode())
+    signing_input = head + b"." + body
+    sig = jwt.utils.base64url_encode(hmac.new(pem, signing_input, hashlib.sha256).digest())
+    return (signing_input + b"." + sig).decode()
 
 
-def test_token_signed_by_a_foreign_key_under_a_known_kid_is_refused():
-    assert _code(_token(_RSA_B, kid="a")) == "unauthenticated"
+def _expired() -> int:
+    return int(time.time())
 
 
-def test_tampered_payload_is_refused():
+def _tampered_payload() -> str:
     head, _, sig = _token(groups=["everyone"]).split(".")
     forged = jwt.utils.base64url_encode(json.dumps(_claims()).encode()).decode()
-    assert _code(f"{head}.{forged}.{sig}") == "unauthenticated"
+    return f"{head}.{forged}.{sig}"
+
+
+def _with_ec_algorithm():
+    return _token(_EC, kid="a", alg="ES256"), _config(algorithms=("RS256", "ES256")), _Idp(_rsa_jwk(_RSA_A, "a"))
+
+
+# name -> () -> (token, config, idp); None means "the default key set/config".
+_REFUSED = {
+    "foreign-key-under-known-kid": lambda: (_token(_RSA_B, kid="a"), None, None),
+    "tampered-payload": lambda: (_tampered_payload(), None, None),
+    "wrong-audience": lambda: (_token(aud="urn:team-tools:gitlab"), None, None),
+    "missing-audience": lambda: (_token(aud=None), None, None),
+    "wrong-issuer": lambda: (_token(iss="https://idp.example.test/adfs-evil"), None, None),
+    "issuer-prefix-is-not-a-match": lambda: (_token(iss="https://idp.example.test/ad"), None, None),
+    "token-without-expiry": lambda: (_token(exp=None), None, None),
+    "expired-with-bad-signature": lambda: (
+        _token(_RSA_B, iat=_expired() - 900, nbf=_expired() - 900, exp=_expired() - 600), None, None),
+    "not-yet-valid": lambda: (_token(nbf=_expired() + 600, exp=_expired() + 900), None, None),
+    "token-without-subject": lambda: (_token(sub=None), None, None),
+    "alg-none": lambda: (jwt.encode(_claims(), None, algorithm="none", headers={"kid": "a"}), None, None),
+    "hmac-signed-with-the-public-key": lambda: (_hmac_with_the_public_key(),
+                                                _config(algorithms=("RS256", "ES256")), None),
+    # The header alg and the named key type must agree.
+    "header-alg-vs-key-type": _with_ec_algorithm,
+    "jwk-alg-vs-header-alg": lambda: (_token(), None, _Idp({**_rsa_jwk(_RSA_A, "a"), "alg": "RS512"})),
+    "encryption-key-is-not-a-signature-key": lambda: (
+        _token(), None, _Idp({**_rsa_jwk(_RSA_A, "a"), "use": "enc"})),
+    "kid-listed-twice-is-ambiguous": lambda: (
+        _token(_RSA_A, kid="a"), None, _Idp(_rsa_jwk(_RSA_A, "a"), _rsa_jwk(_RSA_B, "a"))),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_REFUSED))
+def test_unauthenticated_shapes_are_refused(case):
+    token, config, idp = _REFUSED[case]()
+    assert _code(token, config, idp) == "unauthenticated"
 
 
 def test_malformed_token_is_refused_with_the_fixed_message():
@@ -154,17 +202,6 @@ def test_malformed_token_is_refused_with_the_fixed_message():
     assert (caught.value.code, caught.value.status) == ("unauthenticated", 401)
     assert caught.value.message == "authentication is required"
     assert "not-a-jwt" not in str(caught.value)
-
-
-# --- issuer, audience, expiry and not-before -----------------------------------------
-
-
-def test_wrong_audience_is_refused():
-    assert _code(_token(aud="urn:team-tools:gitlab")) == "unauthenticated"
-
-
-def test_missing_audience_is_refused():
-    assert _code(_token(aud=None)) == "unauthenticated"
 
 
 def test_audience_list_naming_this_gateway_is_accepted_unless_single_is_required():
@@ -197,14 +234,6 @@ def test_set_valued_config_fields_refuse_a_bare_string_or_an_empty_override():
         GatewayAuthMiddleware(_App(), config, _Idp().cache(config), exempt_paths="/healthz")  # type: ignore[arg-type]
 
 
-def test_wrong_issuer_is_refused():
-    assert _code(_token(iss="https://idp.example.test/adfs-evil")) == "unauthenticated"
-
-
-def test_issuer_prefix_is_not_a_match():
-    assert _code(_token(iss="https://idp.example.test/ad")) == "unauthenticated"
-
-
 def test_expired_token_has_its_own_code():
     now = int(time.time())
     with pytest.raises(AuthError) as caught:
@@ -213,41 +242,28 @@ def test_expired_token_has_its_own_code():
     assert caught.value.message == "the token has expired"
 
 
-def test_token_without_expiry_is_refused():
-    assert _code(_token(exp=None)) == "unauthenticated"
-
-
-def test_expired_token_with_a_bad_signature_is_unauthenticated_not_expired():
-    now = int(time.time())
-    assert _code(_token(_RSA_B, iat=now - 900, nbf=now - 900, exp=now - 600)) == "unauthenticated"
-
-
-def test_not_yet_valid_token_is_refused():
-    now = int(time.time())
-    assert _code(_token(nbf=now + 600, exp=now + 900)) == "unauthenticated"
-
-
-def test_token_without_subject_is_refused():
-    assert _code(_token(sub=None)) == "unauthenticated"
-
-
 # --- group authorization -------------------------------------------------------------
+# name -> () -> (token, config)
+_FORBIDDEN = {
+    "another-group-only": lambda: (_token(groups=["everyone"]), None),
+    "missing-group-claim": lambda: (_token(groups=None), None),
+    "non-string-group-values": lambda: (_token(groups=[{"name": GROUP}, 7]), None),
+    "default-config-denies-every-member": lambda: (
+        _token(), GatewayAuthConfig(gateway="splunk", issuer=ISSUER, audience=AUDIENCE, jwks_url=JWKS_URL)),
+}
 
 
-def test_member_of_another_group_only_is_forbidden():
+@pytest.mark.parametrize("case", sorted(_FORBIDDEN))
+def test_authorized_group_is_required(case):
+    token, config = _FORBIDDEN[case]()
     with pytest.raises(AuthError) as caught:
-        _verify(_token(groups=["everyone"]))
+        _verify(token, config)
     assert (caught.value.code, caught.value.status) == ("forbidden", 403)
-
-
-def test_missing_group_claim_is_forbidden():
-    assert _code(_token(groups=None)) == "forbidden"
 
 
 def test_default_config_denies_every_member():
     config = GatewayAuthConfig(gateway="splunk", issuer=ISSUER, audience=AUDIENCE, jwks_url=JWKS_URL)
     assert config.allowed_groups == frozenset()
-    assert _code(_token(), config) == "forbidden"
 
 
 def test_group_claim_name_is_configurable():
@@ -259,56 +275,6 @@ def test_group_claim_name_is_configurable():
 def test_single_string_group_claim_is_one_group():
     assert _verify(_token(groups=GROUP)).groups == frozenset({GROUP})
     assert _code(_token(groups=GROUP + "-x")) == "forbidden"
-
-
-def test_non_string_group_values_never_match():
-    assert _code(_token(groups=[{"name": GROUP}, 7])) == "forbidden"
-
-
-# --- algorithm confusion ---------------------------------------------------------------
-
-
-def test_alg_none_is_refused():
-    token = jwt.encode(_claims(), None, algorithm="none", headers={"kid": "a"})
-    assert _code(token) == "unauthenticated"
-
-
-def test_hmac_signed_with_the_public_key_is_refused():
-    pem = _RSA_A.public_key().public_bytes(
-        serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo
-    )
-    head = jwt.utils.base64url_encode(json.dumps({"alg": "HS256", "typ": "JWT", "kid": "a"}).encode())
-    body = jwt.utils.base64url_encode(json.dumps(_claims()).encode())
-    signing_input = head + b"." + body
-    import hashlib
-    import hmac
-
-    sig = jwt.utils.base64url_encode(hmac.new(pem, signing_input, hashlib.sha256).digest())
-    token = (signing_input + b"." + sig).decode()
-    assert _code(token, _config(algorithms=("RS256", "ES256"))) == "unauthenticated"
-
-
-def test_header_alg_must_match_the_key_type():
-    # An ES256 token whose kid names an RSA key: the key and alg disagree.
-    idp = _Idp(_rsa_jwk(_RSA_A, "a"))
-    token = _token(_EC, kid="a", alg="ES256")
-    assert _code(token, _config(algorithms=("RS256", "ES256")), idp) == "unauthenticated"
-
-
-def test_jwk_alg_must_match_the_header_alg():
-    jwk = {**_rsa_jwk(_RSA_A, "a"), "alg": "RS512"}
-    assert _code(_token(), idp=_Idp(jwk)) == "unauthenticated"
-
-
-def test_encryption_keys_are_not_signature_keys():
-    jwk = {**_rsa_jwk(_RSA_A, "a"), "use": "enc"}
-    assert _code(_token(), idp=_Idp(jwk)) == "unauthenticated"
-
-
-def test_a_kid_listed_twice_is_ambiguous_and_refused():
-    idp = _Idp(_rsa_jwk(_RSA_A, "a"), _rsa_jwk(_RSA_B, "a"))
-    assert _code(_token(_RSA_A, kid="a"), idp=idp) == "unauthenticated"
-    assert _code(_token(_RSA_B, kid="a"), idp=idp) == "unauthenticated"
 
 
 def test_config_refuses_symmetric_or_none_algorithms():

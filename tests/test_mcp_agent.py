@@ -16,9 +16,11 @@ from mainframe_rag.config import Settings
 
 
 def _settings(**overrides) -> Settings:
+    """The bridge client's settings (the fetch suite adds the byte cap)."""
     base = {
         "zowe_mcp_enabled": True,
         "zowe_mcp_base_url": "http://bridge:8081",
+        "zowe_mcp_max_bytes": 100000,
         "_env_file": None,
     }
     base.update(overrides)
@@ -188,26 +190,19 @@ class FakeZoweMCP:
         self.closed = True
 
 
-def _fetch_settings(**overrides) -> Settings:
-    base = {"zowe_mcp_enabled": True, "zowe_mcp_base_url": "http://bridge:8081",
-            "zowe_mcp_max_bytes": 100000, "_env_file": None}
-    base.update(overrides)
-    return Settings(**base)
-
-
 def test_fetch_makes_no_source_call_for_manual_dry_run_unconfigured_or_no_target() -> None:
     fake = FakeZoweMCP()
-    assert fetch_live(_fetch_settings(), fake, "req-1", "What does IEA500I mean?", "manual") == (
+    assert fetch_live(_settings(), fake, "req-1", "What does IEA500I mean?", "manual") == (
         LiveResult(route="manual")
     )
-    out = fetch_live(_fetch_settings(zowe_mcp_dry_run=True), fake, "req-1",
+    out = fetch_live(_settings(zowe_mcp_dry_run=True), fake, "req-1",
                      "Why did JOB00023 fail last night?", "hybrid")
     assert out.degraded == "dry_run"
     assert out.tools_used == ("job_status", "jes_spool_read")
-    out = fetch_live(_fetch_settings(), None, "req-1", "Show me the spool for JOB00023.", "live")
+    out = fetch_live(_settings(), None, "req-1", "Show me the spool for JOB00023.", "live")
     assert out.degraded == "not_configured" and out.texts == ()
     # ADR-0003: no exact job id means no unscoped listing, hence no call at all.
-    out = fetch_live(_fetch_settings(), fake, "req-1", "What is JES doing right now?", "live")
+    out = fetch_live(_settings(), fake, "req-1", "What is JES doing right now?", "live")
     assert out.degraded == "no_target"
     assert out.texts == () and out.tools_used == ()
     assert fake.calls == []
@@ -215,7 +210,7 @@ def test_fetch_makes_no_source_call_for_manual_dry_run_unconfigured_or_no_target
 
 def test_fetch_job_failure_two_calls_and_spool_assumption() -> None:
     fake = FakeZoweMCP({"job_status": "PAYROLL JOB00023 OUTPUT RC=0008", "jes_spool_read": "IEF142I RC=8"})
-    out = fetch_live(_fetch_settings(), fake, "req-1", "Why did JOB00023 fail last night?", "hybrid")
+    out = fetch_live(_settings(), fake, "req-1", "Why did JOB00023 fail last night?", "hybrid")
     assert out.degraded is None
     assert out.tools_used == ("job_status", "jes_spool_read")
     assert [c[0] for c in fake.calls] == ["job_status", "jes_spool_read"]
@@ -223,14 +218,14 @@ def test_fetch_job_failure_two_calls_and_spool_assumption() -> None:
     assert any("spool file 2" in note for note in out.notes)
     assert out.texts == ("PAYROLL JOB00023 OUTPUT RC=0008", "IEF142I RC=8")
     explicit = FakeZoweMCP({"job_status": "X", "jes_spool_read": "Y"})
-    out = fetch_live(_fetch_settings(), explicit, "req-1", "Show spool file 3 of JOB00023.", "live")
+    out = fetch_live(_settings(), explicit, "req-1", "Show spool file 3 of JOB00023.", "live")
     assert explicit.calls[1][1]["spool_id"] == "3"
     assert out.notes == ()
 
 
 def test_fetch_truncates_with_suffix() -> None:
     fake = FakeZoweMCP({"dataset_read": "x" * 5000})
-    out = fetch_live(_fetch_settings(zowe_mcp_max_bytes=1000), fake, "req-1",
+    out = fetch_live(_settings(zowe_mcp_max_bytes=1000), fake, "req-1",
                      "What is in 'SYS1.PARMLIB'?", "live")
     assert out.truncated is True
     assert out.texts[0].endswith("[... truncated: live byte cap ...]")
@@ -239,12 +234,12 @@ def test_fetch_truncates_with_suffix() -> None:
 
 def test_fetch_errors_degrade_with_codes() -> None:
     fake = FakeZoweMCP(error=ZoweMCPError("tool_error", "not_found: gone"))
-    out = fetch_live(_fetch_settings(), fake, "req-1", "Show me the spool for JOB00023.", "live")
+    out = fetch_live(_settings(), fake, "req-1", "Show me the spool for JOB00023.", "live")
     assert out.degraded == "tool_error"
     assert out.texts == ()
 
     boom = FakeZoweMCP(error=RuntimeError("socket died"))
-    out = fetch_live(_fetch_settings(), boom, "req-1", "Show me the spool for JOB00023.", "live")
+    out = fetch_live(_settings(), boom, "req-1", "Show me the spool for JOB00023.", "live")
     assert out.degraded == "upstream_error"
 
 
@@ -260,7 +255,7 @@ def test_fetch_emits_bounded_live_span(monkeypatch) -> None:
     provider.add_span_processor(SimpleSpanProcessor(exporter))
     monkeypatch.setattr(live_state, "tracer", provider.get_tracer("test"))
     fake = FakeZoweMCP({"dataset_read": "password hunter2\nSECRET=abc"})
-    out = fetch_live(_fetch_settings(), fake, "req-1", "What is in 'SYS1.PARMLIB'?", "live")
+    out = fetch_live(_settings(), fake, "req-1", "What is in 'SYS1.PARMLIB'?", "live")
     assert out.texts == ("password hunter2\nSECRET=abc",)
     (span,) = [s for s in exporter.get_finished_spans() if s.name == "live.fetch"]
     attrs = dict(span.attributes or {})
