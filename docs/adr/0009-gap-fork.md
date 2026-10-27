@@ -1,306 +1,509 @@
 # ADR-0009: The air-gapped GitLab is a downstream fork; one pinned dev workspace image
 
 - **Status:** proposed (tracker [GH#1118](https://github.com/yonatan895/qdrant-pdf-rag/issues/1118),
-  items C1 to C3; maintainer decisions D2 in
-  [comment 6442866734](https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6442866734)
-  and D3/D4 in
-  [comment 6443165098](https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6443165098),
-  2026-10-27). Replaces the AGENTS.md rule "Keep one public GitHub /
+  items C1 to C3). Maintainer decisions:
+  - D2 in [comment 6442866734](https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6442866734);
+  - D3 and D4 in [comment 6443165098](https://github.com/yonatan895/qdrant-pdf-rag/issues/1118#issuecomment-6443165098);
+  - Q1, Q2 and Q5, plus coordinator defaults Q3, Q4 and Q6 to Q9, in [GH#1120 comment 6443697962](https://github.com/yonatan895/qdrant-pdf-rag/pull/1120#issuecomment-6443697962);
+  - "the air-gapped environment is production" (maintainer clarification, 2026-10-27).
+
+  This record replaces the AGENTS.md rule "Keep one public GitHub /
   air-gapped GitLab history". Accepting it changes no product default,
-  identity or baseline; the tooling below lands in later issues.
-- **Context:** releases reach the gap as signed bundles, and practically
-  nothing leaves it. A single shared history cannot exist: commits made in the
-  gap never return. Development continues in the gap with less capable models
-  that have first-hand production context, no internet and no GitHub. The gap
-  cannot build a unit-test environment from what is transferred today (the
-  bundle has no dev wheels, Helm or Python 3.14), and review, acceptance and
-  the Verifier exist only on GitHub. The gap's GitLab supports approval rules
-  and CODEOWNERS.
-- **Decision:** the air-gapped GitLab is a **downstream fork**. Its `main` is
-  upstream release merges plus gap-local commits. Gap work lives in a
-  reserved **site layer** so every release merges without conflicts. GitLab
-  CODEOWNERS and approvals stand in for the Verifier. A separate signed **dev
-  kit** carries one pinned dev workspace image that is both the GitLab runner
-  image and the in-namespace dev pod.
+  identity or baseline. The enforcement and tooling it commits to are
+  follow-up items for GH#1118 (listed at the end) and do not exist yet.
+- **Context:**
+  - Releases reach the gap as signed bundles, and practically nothing leaves
+    it. A single shared history cannot exist, because commits made in the gap
+    never return.
+  - The air-gapped environment **is** production. Dev pods, GitLab runners
+    and gap builds run alongside the live service, possibly in the same
+    namespace.
+  - Development continues there with less capable models, which have
+    first-hand production context but no internet and no GitHub.
+  - The gap cannot build a unit-test environment from what is transferred
+    today: the bundle has no dev wheels, no Helm and no Python 3.14.
+  - Review, acceptance and the Verifier exist only on GitHub.
+  - The gap's GitLab supports approval rules and CODEOWNERS.
+- **Decision:**
+  - The air-gapped GitLab is a **downstream fork**. Its `main` is upstream
+    release merges plus gap-local commits.
+  - Gap work lives in a reserved **site layer** so that every release merges
+    cleanly.
+  - Gap code reaches production only as a **signed gap release**. Production
+    deploys only signed releases, never an unsigned checkout.
+  - Development, CI and rehearsal are **isolated from the live release**.
+  - GitLab CODEOWNERS and approvals stand in for the Verifier.
+  - A separate signed **dev kit** carries one pinned dev workspace image. It
+    serves as both the GitLab runner image and the dev pod.
 
-## 1. One-way flow
+## 1. One-way flow and release trust
 
-- Upstream (GitHub `main`) is the only source of release commits. A release
-  enters the gap only as the signed bundle the
-  [release gate](../release-verification.md) accepted, and its `repo.bundle`
-  HEAD is the release commit.
-- Production runs only a pristine bootstrap workspace of a signed release.
-  The existing checkout guard (`check_checkout_sha` in
-  `scripts/airgap/common.sh`) refuses a HEAD other than the packed MANIFEST
-  sha and any tracked change, so the fork's `main` is never an operator
-  workspace. Operators copy site inputs into the release workspace as
-  untracked files, as today ([bootstrap](../install_and_ops.md)).
-- Nothing in this ADR moves code out of the gap. An upstream defect found in
-  the gap leaves only as the organisation permits, at most as a description
-  without site data. Until a release fixes it, it stays a gap patch (§2).
+- **Release sources.** Upstream (GitHub `main`) is the only source of
+  upstream release commits. They enter the gap only as the signed bundle that
+  the [release gate](../release-verification.md) accepted, and the bundle's
+  `repo.bundle` HEAD is the release commit. A **gap release** (§5) is the
+  only other source of production code.
+- **Current behavior** of `check_checkout_sha` in `scripts/airgap/common.sh`,
+  which load, deploy, ingest and validate call:
+  - With a packed MANIFEST, it verifies the MANIFEST chain and requires HEAD
+    to equal the MANIFEST sha with no tracked or hidden changes.
+  - Under `AIRGAP_DRYRUN=1`, or when there is no MANIFEST and no bundle
+    evidence, it prints `Notice: ... not release-verified` and returns 0.
+  - The trust anchor `SNEAKERNET_TRUSTED_PUB` is optional; without it the
+    signature check is trust on first use.
+  - So today a plain clone of the fork passes with a Notice, and only
+    convention keeps gap code out of production.
+- **Decision (follow-up F1):** outside dry-run, load, deploy, ingest and
+  validate refuse, with a fixed message, any checkout that is not a verified
+  signed release. A verified signed release means three things:
+  - the MANIFEST's `SHA256SUMS` signature verifies against a configured
+    trust anchor, either the upstream release key or the gap release key;
+  - HEAD equals the MANIFEST sha;
+  - there is no tracked or hidden change.
+- **The dev-only opt-out** is one explicit variable (proposed
+  `AIRGAP_UNVERIFIED_CHECKOUT=1`). It is accepted only together with the
+  existing `CI_REHEARSAL=1` marker, which already means "only in a
+  disposable lab, never in the air gap". Only connected-side developers and
+  the connected CI and Kind lanes may use it. Nobody in the gap uses it, and
+  gap rehearsals use signed gap releases instead (§5).
+- **Credentials.** The dev pod and the GitLab runner hold no production
+  writer credentials and no write RBAC (§2). So even an unverified checkout
+  in the gap cannot change the live release.
+- **Outbound.** Nothing in this ADR moves code out of the gap. An upstream
+  defect found there leaves only as the organisation permits, at most as a
+  description without site data.
 
-## 2. Site layer
+## 2. Isolation of development from the live release
+
+- **Preferred:** a dedicated non-production namespace for the dev pod, the
+  runners and gap-release rehearsal, if the site can get one (open
+  question 1).
+- **Otherwise, in the shared namespace** (follow-up F9 records the proof in
+  `gap/records/`):
+  - The dev pod, the MR runner and the release-build job each use their own
+    ServiceAccount.
+  - None of them can read the production Secrets: the Qdrant writer and
+    admin keys, the gateway keys, the OIDC client secret and the gap signing
+    key. Only the protected-tag signing job (§5) reads the signing key.
+  - None of them has write RBAC on production Deployments, StatefulSets,
+    PVCs or any other production workload object.
+  - A NetworkPolicy keeps dev and CI pods off production Qdrant and the
+    agent. Their labels never match a production selector.
+  - The proof is the ServiceAccounts' `can-i` lists (verbs and resources
+    only) and the policies.
+- **Test data.** Tests and development never write to the production
+  collection or alias. Dev and CI use a separate Qdrant instance, either the
+  GitLab `sim` service or a non-production release with its own PVCs. The
+  chart fixes the logical collection name, so a separate collection in the
+  production Qdrant is not an option without its own approved concern.
+- **Storage.** The import procedure (§4) needs room for about three times
+  the release tarball, on a dev PVC. Remove `$R` after the import MR
+  merges.
+
+## 3. Site layer
 
 `site/` is taken: it is the public static website. The site layer is:
 
 | Path | Holds |
 |---|---|
-| `gap/README.md` | The gap entry point, read after AGENTS.md: the gap maintainer group, these rules, where site inputs live. Never named `AGENTS.md` (the context check would require it in the upstream chain table) |
-| `gap/patches.md` | The ledger of gap patches: one `- path: <path>` line per upstream-owned path a gap patch changes, under a heading naming its `GL#` issue and retire condition |
-| `gap/records/` | Dated site records, `YYYY-MM-DD-<slug>.md`: imports, site acceptance, incidents. Gap records never go in `docs/records/` |
+| `gap/README.md` | The gap entry point, read after AGENTS.md. It names the gap maintainer group and the named approvers, restates these rules and says where site inputs live. Never name it `AGENTS.md`: the context check would require it in the upstream chain table |
+| `gap/patches.md` | The gap-patch ledger. A `# Gap patches` title line, then one section per patch: a heading `## GL#NNN <full commit sha>`, then one `- path: <path>` line per upstream-owned path the patch changes. Other lines are free text |
+| `gap/config/` | The site's non-secret configuration (Q2), such as its `airgap.env` without secret values. Secrets stay in Kubernetes Secrets or the site's secret store and are referenced by name only. Rehearsal-only overrides (`CI_REHEARSAL` keys) never go here |
+| `gap/records/` | Dated site records, `YYYY-MM-DD-<slug>.md`: imports, gap releases, go-live checks, isolation proofs, incidents. Gap records never go in `docs/records/` |
 | `gap/runbooks/` | Site procedures that upstream cannot know |
-| `gap/config/` | Non-secret site inputs approved for git, such as an extra Helm values file named by `QDRANT_EXTRA_VALUES` (see open question 2) |
 | `gap/dev/` | The dev pod manifest and site dev notes |
-| `.gitlab/CODEOWNERS` | Generated (§4). GitHub ignores `.gitlab/` |
+| `.gitlab/CODEOWNERS` | Generated (§6). GitHub ignores `.gitlab/` |
 | `.gitlab/issue_templates/`, `.gitlab/merge_request_templates/` | Gap issue and MR forms |
 
-Everything else is **upstream-owned**, including `AGENTS.md`, `docs/`
-(ADRs and `docs/records/` too), `.agents/`, `.claude/`, `.github/`,
+Everything else is **upstream-owned**: `AGENTS.md`, `docs/` (including the
+ADRs and `docs/records/`), `.agents/`, `.claude/`, `.github/`,
 `.gitlab-ci.yml`, `airgap.env.example`, `charts/`, `scripts/`, `src/`,
 `tests/`, `evals/`, `Taskfile.yml`, `taskfiles/`, the locks and pins, and
 `site/`.
 
-- Upstream never adds a path under `gap/` or `.gitlab/`. A GitHub-only
-  hygiene step asserts `git ls-files gap .gitlab` is empty. It is not a
-  pytest, because the fork has those paths.
-- The site layer obeys every AGENTS.md hard boundary: no secrets, tokens,
-  kubeconfigs, manual text, corpora, vectors or snapshots.
-- A **gap patch** is a gap commit that changes an upstream-owned path. It
-  needs an approved GitLab issue, is its own commit with a
-  `Gap-Patch: GL#NNN` trailer, and is listed in `gap/patches.md` in the same
-  MR. A Verifier-owned path in a gap patch takes its own commit, as on GitHub
-  (D2). A gap patch never reaches production: production runs only release
-  commits (§1), and builds in the gap still need an approved issue.
+- **Upstream never tracks `gap/` or `.gitlab/`.** A GitHub hygiene step
+  (follow-up F3) asserts that `git ls-files gap .gitlab` prints nothing. It
+  is not a pytest, because the fork does track those paths. Step 3 of the
+  import also refuses a release that tracks them.
+- **Hard boundaries.** Apart from Q2, the site layer obeys every AGENTS.md
+  hard boundary: no secrets, tokens, kubeconfigs, manual text, corpora,
+  vectors or snapshots.
+- **A gap patch** is one gap commit that changes upstream-owned paths. It
+  needs an approved GitLab issue and carries a `Gap-Patch: GL#NNN` trailer.
+  Its ledger section lands in the same MR. A Verifier-owned path takes its
+  own commit, as on GitHub (D2). A gap patch reaches production only inside
+  a signed gap release (§5).
 
-## 3. Release import procedure
+## 4. Release import procedure
 
-Run it in the dev pod (§6), one release at a time, oldest first. Every
-command must succeed. **Stop** means: if a merge is in progress run
-`git merge --abort`, push nothing, and open a GitLab issue titled
-`Release import <SHA> stopped at step N` with the failing command and its
-first error line. Never retry with other flags. Never use `git rebase`,
-`--force`, `-X ours`/`-X theirs` or `--squash`, and never edit an
-upstream-owned path to make a check pass.
+The gap maintainer creates the fork once:
+1. Bootstrap the first upstream release as in step 1 of the script below.
+2. Push its history to the empty GitLab project.
+3. Commit `gap/README.md` and a `gap/patches.md` that holds only its title
+   line, with the trailer `Upstream-Release: <SHA>`.
+4. Then protect `main` (§6).
 
-1. **Set the inputs.** `R` must not exist yet.
-   ```sh
-   export BUNDLE=/abs/path/qdrant-pdf-rag-<SHA>.tar
-   export SNEAKERNET_TRUSTED_PUB=/abs/path/trusted-release-signing.pub
-   export FORK=/abs/path/gitlab-clone
-   export R=/abs/path/releases/<SHA>
-   ```
-2. **Verify the bundle.** `bootstrap.sh` checks the signature against the
-   trust anchor, every member checksum, and that `repo.bundle` HEAD equals the
-   MANIFEST sha. Any `FAIL` line: stop.
-   ```sh
-   cd "$(dirname "$BUNDLE")" && sha256sum -c "$(basename "$BUNDLE").sha256"
-   mkdir "$R" && cd "$R" && tar -xf "$BUNDLE"
-   AIRGAP_WORKSPACE=release sh bootstrap.sh
-   SHA=$(sed -n 's/^sha: *//p' "$R/MANIFEST.txt")
-   ```
-3. **Prepare the fork.** `git status --porcelain` must print nothing.
-   ```sh
-   cd "$FORK" && git status --porcelain
-   git fetch origin && git switch -c "import/$SHA" origin/main
-   PREV=$(git log -1 --format=%B --grep='^Upstream-Release: ' origin/main | sed -n 's/^Upstream-Release: //p')
-   ```
-4. **Fetch and check ancestry.** The checks prove, in order: the fetched
-   commit is the release; it is not imported yet; it descends from the last
-   import. An empty `PREV` means the fork was never created (see below).
-   ```sh
-   git fetch "$R/repo.bundle" HEAD && test "$(git rev-parse FETCH_HEAD)" = "$SHA"
-   ! git merge-base --is-ancestor "$SHA" HEAD
-   test -n "$PREV" && git merge-base --is-ancestor "$PREV" "$SHA"
-   ```
-5. **Merge.**
-   ```sh
-   git merge --no-ff --no-commit FETCH_HEAD
-   git diff --name-only --diff-filter=U
-   ```
-   `git merge` exits non-zero on a conflict; that is the one expected
-   failure. No output from the second command: go on. A listed path under `gap/` or `.gitlab/`: keep the gap
-   side with `git checkout --ours -- <path> && git add <path>`. Any other
-   listed path: stop. Then:
-   ```sh
-   git commit -m "Import upstream release $SHA" -m "Upstream-Release: $SHA"
-   ```
-6. **Prove the upstream tree.** Outside the site layer the fork must equal
-   the release except the ledger paths. `cmp` must print nothing.
-   ```sh
-   git diff --name-only "$SHA" HEAD -- . ':(exclude)gap' ':(exclude).gitlab' | sort > "$R/drift.txt"
-   sed -n 's/^- path: //p' gap/patches.md | sort > "$R/patches.txt"
-   cmp "$R/drift.txt" "$R/patches.txt"
-   ```
-7. **Site follow-ups,** each its own commit, site layer only. A dev kit
-   refusal from `agent_doctor` names the kit to request: stop until it is
-   installed. A CODEOWNERS drift: run the generator (§4) and commit its
-   output. `git diff "$PREV" "$SHA" -- airgap.env.example` lists the key
-   changes the operator applies to the untracked `airgap.env`; record them in
-   `gap/records/`.
-   ```sh
-   python3 scripts/agent_doctor.py --profile unit
-   git diff "$PREV" "$SHA" -- airgap.env.example
-   ```
-8. **Push and open a draft MR** named `Import upstream release <SHA>`, with
-   `SHA`, `PREV`, the step 6 result and the step 7 commits in its body.
-   ```sh
-   git push origin "import/$SHA"
-   ```
-   The gap maintainer merges it with a merge commit once §4 holds. A squashed
-   or rebased import loses upstream ancestry and makes every later import
-   conflict.
+Agents never push `main`.
 
-The first import creates the fork: push the bootstrap clone's history to the
-empty GitLab project, then commit `--allow-empty` with the
-`Upstream-Release: <SHA>` trailer. When the implementing PR moves this
-procedure into its owner document, this section becomes a link.
+**Every later import.** Export the five inputs. Save the script below as
+`$HOME/import-release.sh` and run `sh -eu "$HOME/import-release.sh"`. Until
+follow-up F7 ships it as `scripts/gap/import_release.sh`, this block is the
+script.
 
-## 4. Governance in the gap
+- **Success:** it ends with `IMPORT READY <SHA>`. Then push the branch and
+  open the MR (below).
+- **Failure:** the script stops at a `STOP:` line or at a failing command.
+  Open or update a GitLab issue titled `Release import <SHA> stopped`, with
+  the last 20 lines of output.
+- **Rerun:** after any stop, rerun the same command. The script resets its
+  own state first: it aborts an unfinished merge, revert or cherry-pick,
+  deletes the local `import/<SHA>` branch and removes `$R`.
+- **Never** rerun after the branch has been pushed. Fix forward with new
+  commits on the MR branch instead. Never use `git rebase`, `--force`,
+  `-X ours`, `-X theirs` or `--squash`, and never edit an upstream-owned path
+  to make a check pass.
 
-- **Settings** (the gap maintainer records them once in `gap/records/`):
-  `main` is protected with no direct push; merge requires a successful
-  pipeline and the approval rules below; the merge method is a merge commit
-  and squashing is not allowed.
-- **Protected paths.** Upstream adds a generator (proposed
-  `scripts/gap_codeowners.py`) that writes `.gitlab/CODEOWNERS` from the
-  protected-input list that `scripts/acceptance.py` and
-  `scripts/unit_evidence.py` already define (`VERIFICATION_INPUTS`,
-  `taskfiles/*.yml` and the producer workflows), plus `.gitlab-ci.yml`,
-  `.gitlab/CODEOWNERS` and `gap/patches.md`. The owner group is a generator
-  argument, so no site name enters upstream. Code-owner approval is required
-  on `main`. That list stays the one source of truth: an upstream unit test
-  asserts the generator's path set equals it, and the GitLab hygiene job
-  fails when the committed file differs from the generator output. A release
-  that changes the list therefore fails the import pipeline until step 7
-  regenerates the file.
-- **Required verification met** (gap) means all three: the latest pipeline on
-  the MR head is green, with every job run and the clean-JUnit gate passing;
-  the required approvals are present, including code-owner approval when a
-  protected path changed; and the MR body lists each
-  [live-stack](../live-stack.md#verification-minimums) row the diff selects,
-  naming the GitLab job that produced it (`hygiene`, `lint`, `test`,
-  `hazards`, `sim`, `gate-l1`), a dev pod command and exit code, or NOT RUN.
-  A NOT RUN required row is not a pass, as in AGENTS.md.
+```sh
+export SHA=<40-hex sha from the tarball name qdrant-pdf-rag-<SHA>.tar>
+export BUNDLE=/abs/path/qdrant-pdf-rag-$SHA.tar
+export SNEAKERNET_TRUSTED_PUB=/abs/path/trusted-release-signing.pub
+export FORK=/abs/path/gitlab-clone
+export R=/abs/path/releases/$SHA
+```
+
+<!-- import-script:start -->
+```sh
+# 0. Reset: safe on every run, and the way to resume after any stop.
+cd "$FORK"
+if git rev-parse -q --verify MERGE_HEAD >/dev/null; then git merge --abort; fi
+if git rev-parse -q --verify REVERT_HEAD >/dev/null; then git revert --abort; fi
+if git rev-parse -q --verify CHERRY_PICK_HEAD >/dev/null; then git cherry-pick --abort; fi
+if [ -n "$(git status --porcelain)" ]; then echo "STOP: $FORK has local changes; ask the gap maintainer"; false; fi
+git fetch origin
+git switch --detach origin/main
+if git rev-parse -q --verify "refs/heads/import/$SHA" >/dev/null; then git branch -D "import/$SHA"; fi
+rm -rf "$R"
+
+# 1. Verify the bundle: signature against the trust anchor, every member
+#    checksum, and repo.bundle HEAD equal to the MANIFEST sha.
+cd "$(dirname "$BUNDLE")"
+sha256sum -c "$(basename "$BUNDLE").sha256"
+mkdir -p "$R"
+cd "$R"
+tar -xf "$BUNDLE"
+AIRGAP_WORKSPACE=release sh bootstrap.sh
+if [ "$(sed -n 's/^sha: *//p' "$R/MANIFEST.txt")" != "$SHA" ]; then echo "STOP: MANIFEST sha is not $SHA"; false; fi
+
+# 2. Branch from the fork's main and find the last imported release.
+cd "$FORK"
+git switch -c "import/$SHA" origin/main
+PREV=$(git log -1 --format=%B --grep='^Upstream-Release: ' HEAD | sed -n 's/^Upstream-Release: //p')
+if [ -z "$PREV" ]; then echo "STOP: no Upstream-Release trailer; the fork was never created"; false; fi
+
+# 3. Fetch the release and refuse what the procedure cannot handle.
+git fetch "$R/repo.bundle" HEAD
+if [ "$(git rev-parse FETCH_HEAD)" != "$SHA" ]; then echo "STOP: bundle HEAD is not $SHA"; false; fi
+if git merge-base --is-ancestor "$SHA" HEAD; then echo "STOP: $SHA is already imported"; false; fi
+if ! git merge-base --is-ancestor "$PREV" "$SHA"; then echo "STOP: $SHA does not descend from the last import $PREV"; false; fi
+if [ -n "$(git ls-tree -r --name-only "$SHA" -- gap .gitlab)" ]; then echo "STOP: the release tracks gap/ or .gitlab/"; false; fi
+
+# 4. Set aside every gap patch whose paths this release changes:
+#    revert its commit (newest first) and drop its ledger section.
+: > "$R/affected.txt"
+if [ -f gap/patches.md ]; then
+  cp gap/patches.md "$R/patches.before"
+  git diff --name-only "$PREV" "$SHA" > "$R/upstream.txt"
+  awk 'FILENAME==ARGV[1] {up[$1]=1; next}
+       /^## GL#/ {i=$2" "$3}
+       /^- path: / && ($3 in up) && !(i in seen) {seen[i]=1; print i}' "$R/upstream.txt" gap/patches.md > "$R/affected.txt"
+fi
+for c in $(tac "$R/affected.txt" | awk '{print $2}'); do git revert --no-edit "$c"; done
+if [ -s "$R/affected.txt" ]; then
+  awk 'FILENAME==ARGV[1] {drop[$1]=1; next} /^## / {on=($2 in drop)} !on' "$R/affected.txt" gap/patches.md > "$R/patches.new"
+  cp "$R/patches.new" gap/patches.md
+  git commit -am "Set aside gap patches before importing $SHA"
+fi
+
+# 5. Merge. With the affected patches set aside, any conflict is unexpected.
+if ! git merge --no-ff --no-commit "$SHA"; then
+  echo "STOP: conflict in: $(git diff --name-only --diff-filter=U | tr '\n' ' ')"; false
+fi
+git commit -m "Import upstream release $SHA" -m "Upstream-Release: $SHA"
+
+# 6. Re-apply each set-aside patch. One that conflicts or is now empty stays
+#    set aside; the MR lists it and its GL# issue gets a note.
+: > "$R/reapplied.txt"
+for c in $(awk '{print $2}' "$R/affected.txt"); do
+  if git cherry-pick "$c"; then
+    echo "reapplied $c $(git rev-parse HEAD)" >> "$R/reapplied.txt"
+  else
+    git cherry-pick --abort
+    echo "set-aside $c" >> "$R/reapplied.txt"
+  fi
+done
+if grep -q '^reapplied ' "$R/reapplied.txt"; then
+  awk 'FILENAME==ARGV[1] {if ($1 == "reapplied") new[$2]=$3; next}
+       /^## / {on=($3 in new); if (on) print $1, $2, new[$3]; next}
+       on' "$R/reapplied.txt" "$R/patches.before" >> gap/patches.md
+  git commit -am "Re-apply gap patches after importing $SHA"
+fi
+
+# 7. Prove the upstream tree: outside the site layer the fork equals the
+#    release except the paths the ledger lists.
+git diff --name-only "$SHA" HEAD -- . ':(exclude)gap' ':(exclude).gitlab' | sort -u > "$R/drift.txt"
+if [ -f gap/patches.md ]; then sed -n 's/^- path: //p' gap/patches.md; fi | sort -u > "$R/patches.txt"
+if ! cmp -s "$R/drift.txt" "$R/patches.txt"; then
+  echo "STOP: upstream-owned paths differ from the ledger:"; diff "$R/patches.txt" "$R/drift.txt" || true; false
+fi
+git diff "$PREV" "$SHA" -- airgap.env.example > "$R/env-keys.diff"
+echo "IMPORT READY $SHA"
+```
+<!-- import-script:end -->
+
+After `IMPORT READY`:
+
+1. Until follow-ups F4 and F5 land, run these by hand.
+   - **Dev kit.** If `agent_doctor` refuses the dev kit, it names the kit to
+     request. Stop until that kit is installed.
+   - **CODEOWNERS.** If the file has drifted, run the generator and commit
+     its output.
+   - **Keys.** `$R/env-keys.diff` lists the key changes. Apply them to
+     `gap/config/` in their own commit.
+2. Push the branch with `git push origin "import/$SHA"`.
+3. Open a draft MR named `Import upstream release <SHA>`. Its body gives
+   `SHA`, `PREV`, `$R/reapplied.txt` and the follow-up commits.
+4. Ordinary approvals and the second approver (§6) apply. The gap maintainer
+   merges it with a merge commit. A squashed or rebased import loses
+   upstream ancestry and makes every later import conflict.
+
+## 5. Gap releases
+
+Gap-developed code reaches production only as a signed gap release
+(follow-up F6). AGENTS.md "No builds in the gap without an approved issue"
+stays, and it is the gate.
+
+1. **Authorise.** An approved GitLab issue names the fork commit to
+   release. The gap maintainer creates a protected tag on it. Only
+   protected-tag pipelines can build or sign.
+2. **Build.** The release-build job builds the agent and ingest images
+   unprivileged (`restricted-v2`, no `anyuid`), isolated as in §2. Every
+   input is already in the gap:
+   - base images by digest;
+   - the hash-locked runtime and build wheels (carried by the dev kit, §8);
+   - the BM25 weights from the upstream bundle.
+
+   Nothing is downloaded.
+3. **Pack and sign.** The bundle has the upstream layout, so the same
+   bootstrap, load and deploy path runs it:
+   - `repo.bundle` of the fork;
+   - the image archives;
+   - `MANIFEST.txt`, with `origin: gap`, the upstream release it is based on
+     and the `GL#` issue;
+   - `PACKING_RECORD.txt`, `sbom.json`, the third-party notices and the
+     [licence](../licensing.md) check;
+   - `SHA256SUMS` and its signature.
+
+   The **gap release key** signs it:
+   - The gap maintainer generates the key in the gap and holds it in the
+     site's secret store.
+   - It never leaves the gap and is a separate trust anchor.
+   - Its public key reaches operators inside the site, and its fingerprint
+     is recorded in `gap/records/`.
+4. **Record.** A release record goes in `gap/records/`, shaped like
+   [the release record](../release-record.md). Each release-gate check is
+   marked run with its evidence, or NOT RUN. A NOT RUN required check blocks
+   promotion, as AGENTS.md requires.
+5. **Rehearse.** Bootstrap the tarball into a fresh workspace. Deploy it
+   either to the non-production namespace or to a non-production release
+   name in the shared namespace, with its own Qdrant instance and PVCs and
+   never the production collection or alias. Pass the
+   [go-live checks](../install_and_ops.md#site-openshift-acceptance) there
+   and record them.
+6. **Promote.** Bootstrap the identical rehearsed tarball (no repack) into a
+   fresh operator workspace and deploy it to the production release. It is
+   verified against the gap anchor.
+7. **Roll back** to the previous signed release, upstream or gap. Deploy it
+   from its own retained bootstrap workspace and bundle, as the
+   [bootstrap guide](../install_and_ops.md) requires. Data follows the
+   [upgrade and recovery runbook](../install_and_ops.md#upgrade-and-recovery-runbook-issue-272).
+   Keep the previous release's tarball and workspace until the new one has
+   passed its go-live checks.
+
+An upstream release may take the same rehearse-then-promote path. Later
+upstream imports merge into a fork `main` that contains gap releases. Their
+gap patches stay ledgered.
+
+## 6. Governance in the gap
+
+- **Settings.** The gap maintainer records these once in `gap/records/`:
+  - `main` is protected, with no direct push;
+  - a merge needs a successful pipeline and the approvals below;
+  - the merge method is a merge commit, and squashing is not allowed.
+- **CODEOWNERS (Q5).** A generator (follow-up F4, proposed
+  `scripts/gap_codeowners.py`) writes `.gitlab/CODEOWNERS`. It takes the
+  owner group and the named approvers as arguments, so no site name enters
+  upstream.
+  - **Every path except `gap/`** is owned by the gap maintainer group, and
+    code-owner approval is required on `main`. F4 confirms which
+    CODEOWNERS form leaves `gap/` without an owner on the site's GitLab.
+  - **The protected list** also needs a **second named approver**. It is the
+    list that `scripts/acceptance.py` and `scripts/unit_evidence.py` already
+    define (`VERIFICATION_INPUTS`, `taskfiles/*.yml` and the producer
+    workflows), plus the gap's own gates: `.gitlab-ci.yml`,
+    `.gitlab/CODEOWNERS`, `scripts/check_junit_clean.py`,
+    `scripts/gate_l1.py`, the dev kit pin, and the gap release pipeline and
+    signing files.
+  - **One source of truth.** An upstream unit test asserts that the
+    generator's protected set equals those lists plus the named gap
+    additions. The GitLab hygiene job fails when the committed file differs
+    from the generator output.
+- **Required verification met** (in the gap) means all of the following:
+  - The latest pipeline on the MR head is green, every job ran, and the
+    clean-JUnit gate passes.
+  - The required approvals are present.
+  - The MR body lists each [live-stack](../live-stack.md#verification-minimums)
+    row the diff selects, with the GitLab job that produced it (`hygiene`,
+    `lint`, `test`, `hazards`, `sim` or `gate-l1`) or NOT RUN.
+  - Rows with no GitLab producer (HTTP probes, browser, HA, load, packaging,
+    semantic eval) are NOT RUN in development for now (Q7). A change that
+    selects them is verified only through a gap-release rehearsal (§5). A
+    NOT RUN required row is not a pass.
 - **acceptance.py and the Verifier** stay in the tree byte-identical and
   inert. They need `gh` and GitHub check-runs, and no gap job runs them.
-  Their protected list is reused as data by the generator. The code-owner
-  approval is the gap's Verifier decision, and a human in the gap maintainer
-  group gives it. In the gap, read AGENTS.md "PR" as MR and "yonatan895" as
-  the gap maintainer group. Agents open draft MRs, are not code owners, and
-  never approve, mark ready or merge.
+  Their protected list is reused as data. The second named approval is the
+  gap's Verifier decision.
+- **Reading AGENTS.md in the gap:** "PR" means MR, and "yonatan895" means
+  the gap maintainer group. Agents open draft MRs, are not code owners or
+  named approvers, and never approve, mark ready or merge.
 
-## 5. Issue references
+## 7. Issue references
 
-GitHub issues are public. The dev kit carries an offline snapshot of them
-(§6). Text written after this ADR, upstream and in the site layer, writes
-`GH#NNN` for a GitHub issue and `GL#NNN` for a gap GitLab issue. A bare
-`#NNN` in a committed file predates this ADR and means GitHub; it is not
-rewritten, which would conflict on import. In GitLab issue and MR text, a
-bare `#NNN` is GitLab's own.
+GitHub issues are public. The dev kit carries an offline snapshot of them,
+refreshed with each kit (Q9).
 
-## 6. Dev workspace image and dev kit (D3)
+- Text written after this ADR, upstream and in the site layer, writes
+  `GH#NNN` for a GitHub issue and `GL#NNN` for a gap GitLab issue (Q6).
+- A bare `#NNN` in a committed file predates this ADR and means GitHub. It
+  is not rewritten, because a rewrite would conflict on import.
+- In GitLab issue and MR text, a bare `#NNN` is GitLab's own.
 
-- **One image** serves as both the GitLab runner image and the dev pod in
-  the project namespace. It is UBI-based and holds the CPython 3.14 GIL
-  build, the pinned Task, Helm 4, the hash-locked dev wheels from
-  `requirements.dev.lock.txt`, and the tools the procedure in §3 runs (git,
-  openssl, sha256sum, tar). It runs under `restricted-v2` with
-  an arbitrary non-root UID. The checkout's own source is used in place, so
-  the gap installs and builds nothing.
-- **Keyed by the dev-lock digest:** one SHA-256 over a fixed, ordered list
-  of pin files that upstream owns and protects (proposed:
-  `requirements.dev.lock.txt`, `locks/cp314-linux-x86_64.json`,
-  `scripts/tools/task-pin.txt`, `scripts/tools/helm-pin.txt` and the image
-  recipe). The image is pinned by manifest digest. `.gitlab-ci.yml`'s default
-  `CI_PYTHON_IMAGE` names that digest, a unit test asserts it matches the
-  kit pin, and the gap leaves the project-level variable unset, so each
-  branch's pipeline uses the kit for its own lock.
+## 8. Dev workspace image and dev kit (D3)
+
+- **One image** serves as both the GitLab runner image and the dev pod. It
+  is UBI-based and holds:
+  - the CPython 3.14 GIL build, the pinned Task and Helm 4;
+  - the hash-locked dev wheels from `requirements.dev.lock.txt`;
+  - the tools §4 runs: git, openssl, sha256sum, tar and awk.
+
+  It runs under `restricted-v2` with an arbitrary non-root UID. The
+  checkout's own source is used in place, so development installs and
+  builds nothing.
+- **Kit key (Q3).** One SHA-256 over a fixed, ordered list of pin files that
+  upstream owns and protects: `requirements.dev.lock.txt`,
+  `locks/cp314-linux-x86_64.json`, `scripts/tools/task-pin.txt`,
+  `scripts/tools/helm-pin.txt` and the image recipe.
+  - The image is pinned by manifest digest.
+  - The default `CI_PYTHON_IMAGE` in `.gitlab-ci.yml` names that digest, and
+    a unit test asserts it matches the kit pin.
+  - The gap leaves the project-level variable unset, so each branch's
+    pipeline uses the kit for its own lock.
 - **Built connected-side only.** The connected factory builds the image, as
   it builds product images. The gap only verifies the kit and copies the
-  OCI archive into the site registry. This fits the AGENTS.md rule "No
-  builds in the gap without an approved issue": no build happens in the gap.
-- **The kit** is a signed tarball, separate from the release bundle:
-  `mfr-devkit-<key>.tar` holding the image as an `oci-archive`,
-  `MANIFEST.txt` (key, image digest, the pin-file digests, the upstream
-  commit built from, the snapshot time), `sbom.json`, third-party notices and
-  the [licence](../licensing.md) check, `SHA256SUMS` with its signature, a
-  verify/install script and the GitHub issue snapshot. A release ships a new
-  kit only when its key changes, and its MANIFEST names the key it needs.
+  OCI archive into the site registry. Gap releases (§5) are the only builds
+  in the gap, and each one needs an approved issue.
+- **The kit** is a signed tarball, separate from the release bundle,
+  `mfr-devkit-<key>.tar`. It holds:
+  - the image as an `oci-archive`;
+  - `MANIFEST.txt`, recording the key, the image digest, the pin-file
+    digests, the upstream commit it was built from and the snapshot time;
+  - `sbom.json`, the third-party notices and the licence check;
+  - `SHA256SUMS`, signed with the connected release key (Q4);
+  - a verify/install script;
+  - the GitHub issue snapshot;
+  - the gap-release build inputs from §5.
+
+  A release ships a new kit only when its key changes, and the release
+  MANIFEST names the key it needs.
 - **`agent_doctor` refuses a kit/lock mismatch** with a fixed message that
   names the kit to request (`mfr-devkit-<key>`). Outside a kit image,
   connected development keeps today's checks.
 
 ## Considered options
 
-- **Keep one shared history.** Impossible while nothing leaves the gap.
+- **Keep one shared history.** This is impossible while nothing leaves the
+  gap.
 - **Rebase gap commits onto each release.** This rewrites the published
   `main` and needs force-pushes.
-- **Import releases as unrelated snapshot commits.** Each import becomes a
+- **Import releases as unrelated snapshot commits.** Every import becomes a
   whole-tree diff, and ancestry and blame are lost.
+- **Deploy gap code from a checkout.** This is unsigned and unrehearsed, and
+  it runs next to the live service. Rejected (Q1).
 - **Dev kit as new release-bundle members** (D3 option A). Every release
   would carry the toolchain over the slow transfer path, even when the lock
   is unchanged.
-- **Build the dev environment in the gap from wheels.** This needs an
-  interpreter the gap lacks and conflicts with the no-builds rule.
+- **Build the dev environment in the gap from wheels.** It needs an
+  interpreter the gap lacks, and it is a build without an issue.
 
 ## Consequences
 
-- **AGENTS.md.** The rule becomes:
+- **AGENTS.md** changes in this PR:
+  - The "one history" bullet becomes "Air-gapped GitLab is a downstream
+    fork" with a link here. The bullet goes from 286 to 283 bytes.
+  - The hard boundary "private configuration" gains "outside `gap/config/`"
+    (Q2).
 
-  ```text
-  - Air-gapped GitLab is a [downstream fork](docs/adr/0009-gap-fork.md); never
-    push/force-push `main` or change repository access. Draft PRs only. Only
-    yonatan895 marks ready, requests changes or merges; agents never act for him.
-    [Branches](docs/agent-workflow.md#git-workflow).
-  ```
+  The file stays under 8192 bytes. The MR and gap-maintainer reading is in
+  §6, because the root file has no room for it.
+- **Trade-off.** Gap development has first-hand production context, but
+  weaker models do it, next to the live service. Its learning does not flow
+  back upstream. Each gap patch costs a set-aside and re-apply on every
+  import that touches its paths.
+- **Goal, not yet a commitment:** upstream keeps the fork's extension points
+  stable. Those are:
+  - the reserved paths;
+  - the `airgap.env` keys and their retirement refusals;
+  - the protected list and the generator's command line;
+  - the kit key inputs and the `agent_doctor` message;
+  - the GitLab CI/CD variable names;
+  - the `Upstream-Release:` trailer.
 
-  It is byte-negative and lands with this record. The MR and gap-maintainer
-  reading lives in §4, because the root has no bytes for it.
-- **Trade-off.** Gap development gets first-hand production context, but
-  weaker models do it, and its learning does not flow back upstream. Gap
-  patches cost a stop on every import that touches them, until a release
-  retires them.
-- **Upstream keeps the extension points stable:** the reserved `gap/` and
-  `.gitlab/` paths; the `airgap.env` keys (a rename or retirement keeps the
-  fixed refusal naming its replacement); the protected-input list and the
-  generator's command line; the kit key inputs and the `agent_doctor`
-  message; the GitLab CI/CD variable names; the `Upstream-Release:` trailer
-  and the import procedure. A release that changes any of these says so in
-  its release record, with the site-layer action.
-- **Owner documents** change in the implementing PRs:
-  [deployment policy](../deploy.md#deployment-policy) and
-  [CI policy](../deploy.md#ci-policy) (the CI job image becomes this
-  repository's dev kit image), the live-stack GitLab job map, the
-  [task-runner](../task-runner.md#installation) gap workstation recipe and
-  the bootstrap guide (§3 moves there).
-- **Prerequisites:** "pipeline green" means nothing until the GitLab
+  Whether that becomes a rule is open question 2.
+- **Owner documents** change in the follow-up PRs:
+  - [deployment policy](../deploy.md#deployment-policy) and
+    [CI policy](../deploy.md#ci-policy): the CI job image becomes this
+    repository's dev kit image, and verified-release enforcement is added;
+  - the live-stack GitLab job map;
+  - the [task-runner](../task-runner.md#installation) gap workstation
+    recipe;
+  - the bootstrap guide, which takes over §4 and §5.
+- **Prerequisites.** "Pipeline green" means nothing until the GitLab
   pipeline runs on a real runner
-  ([GH#446](https://github.com/yonatan895/qdrant-pdf-rag/issues/446)) and
+  ([GH#446](https://github.com/yonatan895/qdrant-pdf-rag/issues/446)), and
   GH#1118 A5 (a unit test that skips in GitLab) and C2 are fixed.
-- **Verifier-owned touches** in the implementation: `scripts/agent_doctor.py`
-  and any workflow or taskfile the kit build adds.
+
+## Follow-up items for GH#1118
+
+| Item | Scope | Verifier-owned |
+|---|---|---|
+| F1 | Outside dry-run, load, deploy, ingest and validate refuse a checkout that is not a verified signed release. The trust anchor is required. The opt-out needs `CI_REHEARSAL=1`. Tests go in the air-gap shell suites, and the connected lanes set the opt-out | Lanes and taskfiles: yes |
+| F2 | Two trust anchors (upstream and gap) and the MANIFEST `origin:` field | No |
+| F3 | A GitHub hygiene step: `git ls-files gap .gitlab` prints nothing | Yes (workflow) |
+| F4 | The CODEOWNERS generator, its equality test and the GitLab hygiene check | No |
+| F5 | The dev kit: image recipe, connected factory job, kit pack, verify/install script, issue snapshot, kit key, `.gitlab-ci.yml` default image and the `agent_doctor` refusal | Yes (`agent_doctor.py`, workflow) |
+| F6 | The gap release pipeline: protected-tag build and sign jobs, the unprivileged in-namespace build, the gap pack (`origin: gap`), the key-generation runbook and the release record template | Pack and taskfiles: yes |
+| F7 | `scripts/gap/import_release.sh` from §4, with its throwaway-repo tests. §4 then becomes a link | No |
+| F8 | The owner-document updates listed under Consequences | No |
+| F9 | Isolation in the shared namespace: ServiceAccounts, RBAC, NetworkPolicy, and the recorded `can-i` proof | No |
 
 ## Open questions for the maintainer
 
-1. **What gap code changes are for.** This draft keeps gap patches dev-side:
-   production runs only release commits, and the checkout guard refuses the
-   fork's HEAD. Should a product fix ever ship from the gap? That would need
-   an approved in-gap build and its own ADR.
-2. **Site configuration in git.** May `gap/config/` hold the site's
-   non-secret `airgap.env` and internal names? AGENTS.md forbids committing
-   private configuration, so this draft says no: the file stays untracked
-   and operator-owned.
-3. **Kit key inputs.** Only the dev lock, as decided, or also the Task and
-   Helm pins and the image recipe, as proposed, so that a tool pin bump also
-   yields a new kit?
-4. **Kit signing.** The release-signing key, or a separate dev-kit key?
-5. **Approval scope.** Only the protected list (as decided), or also a
-   catch-all owner for every upstream-owned path, so that every gap patch
-   needs the gap maintainer's approval? And which group is the gap
-   maintainer?
-6. **`GL#NNN`** for GitLab issues in committed files: wanted?
-7. **Rows with no GitLab producer** (HTTP probes, browser, HA, load,
-   packaging, semantic eval): which, if any, the dev pod may run, given that
-   it has no container runtime.
-8. **Directory name** `gap/`.
-9. **Snapshot refresh:** with every kit, or also on a schedule?
+1. **Is a second, non-production namespace available** for dev, CI and
+   gap-release rehearsal? If not, §2's shared-namespace rules and a
+   non-production release name are the only isolation.
+2. **Extension points.** Should upstream commit to keeping the fork's
+   extension points stable, and how does a release announce a breaking
+   change?
+3. **The gap release gate.** Which [release-gate](../release-verification.md)
+   checks must a gap release pass? It has no connected lanes.
+4. **The build mechanism** for the unprivileged in-namespace image build
+   (F6).
