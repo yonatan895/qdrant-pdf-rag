@@ -27,9 +27,11 @@ from mainframe_rag.agent.answer import (
 )
 from mainframe_rag.agent.tokenizer import FallbackTokenizer, VllmTokenizer
 from mainframe_rag.ingest.chunk import UnitSpan, units_for_text
+from mainframe_rag.ingest.ibm_pdf import ParsedDoc
 from mainframe_rag.ports import ChatMessage
 from mainframe_rag.retrieve.query import SearchHit
 from tests.fakes import settings_kw
+from tests.helpers_agent_local import agent_client
 
 # Three JCL statements; the second carries a `//  ` continuation card.
 JCL_TEXT = (
@@ -456,78 +458,56 @@ def _route_search(qdrant, embedder, collection, query, product=None, version=Non
 
 @pytest.fixture
 def budget_client(monkeypatch, synthetic_pdf, servable_representation_gate):
-    from fastapi.testclient import TestClient
 
-    from mainframe_rag.agent import app as app_mod
-
-    monkeypatch.setenv("QDRANT_URL", "http://localhost:6333")
-    monkeypatch.setenv("EMBED_MODE", "hash")
-    monkeypatch.setenv("ALLOW_HASH_MODE", "true")
-    monkeypatch.setenv("LLM_BASE_URL", "http://llm.internal/v1")
-    monkeypatch.setenv("LLM_MODEL_REASONING", "test-reasoning-model")
-    monkeypatch.setenv("UI_ENABLED", "true")
-    monkeypatch.setattr(app_mod, "retrieve_search", _route_search)
-    with TestClient(app_mod.app) as c:
-        monkeypatch.setattr(app_mod, "llm", _NeverLLM())
-        monkeypatch.setattr(app_mod, "tokenizer", _RouteOvershootTokenizer())
+    with agent_client(
+        monkeypatch, llm=_NeverLLM(), search=_route_search,
+        tokenizer=_RouteOvershootTokenizer(), env={"UI_ENABLED": "true"},
+    ) as c:
         yield c
 
 
-def test_answer_and_chat_routes_report_budget_exceeded_422(budget_client):
-    """Fixed 422 envelope with a stable code — never exception text, never
-    a 500, never a model call."""
-    resp = budget_client.post("/v1/answer", json={"query": "IEA500I"})
-    assert resp.status_code == 422
-    assert resp.json() == {
-        "code": "prompt_budget_exceeded",
-        "message": "prompt exceeds the model token budget",
-    }
-    resp = budget_client.post(
-        "/v1/chat", json={"messages": [{"role": "user", "content": "IEA500I"}]}
-    )
-    assert resp.status_code == 422
-    assert resp.json()["code"] == "prompt_budget_exceeded"
-
-
-def test_answer_stream_reports_budget_error_event(budget_client):
-    """Headers are already sent when the generator runs: the stream carries
-    an error event and ends WITHOUT a final."""
-    resp = budget_client.post("/v1/answer?stream=true", json={"query": "IEA500I"})
-    assert resp.status_code == 200
-    names = [
-        line[7:].strip()
-        for line in resp.text.splitlines()
-        if line.startswith("event: ")
-    ]
-    assert "error" in names
-    assert "final" not in names
-
-
-def test_chat_stream_reports_budget_error_frames(budget_client):
-    """Chat streaming on budget overflow yields the error frame and done,
-    with no content delta frames."""
+@pytest.mark.parametrize(
+    "surface", ["answer-json", "answer-stream", "chat-stream", "console"]
+)
+def test_budget_overflow_reports_the_fixed_contract_per_surface(budget_client, surface):
+    """Fixed 422 envelope with a stable code, an error event/frame on each
+    stream and the console's shrink request — never exception text, never a
+    500, never a model call (the client's LLM fails the test if reached)."""
     import json
 
-    resp = budget_client.post(
-        "/v1/chat/completions",
-        json={"messages": [{"role": "user", "content": "IEA500I"}], "stream": True},
-    )
-    assert resp.status_code == 200
-    lines = [line.strip() for line in resp.text.splitlines() if line.startswith("data: ")]
-    assert len(lines) == 2
-    err_payload = json.loads(lines[0][6:])
-    assert "error" in err_payload
-    assert err_payload["error"]["code"] == "upstream_error"
-    assert lines[1] == "data: [DONE]"
-
-
-def test_console_reports_budget_banner(budget_client):
-    """The operator console names the fault as a request to shrink, with a
-    422 page status — not the generic server-fault banner."""
-    resp = budget_client.post("/ui/chat", data={"message": "IEA500I?", "messages": ""})
-    assert resp.status_code == 422
-    assert "token budget" in resp.text
-    assert "could not complete this request" not in resp.text
+    if surface == "answer-json":
+        resp = budget_client.post("/v1/answer", json={"query": "IEA500I"})
+        assert resp.status_code == 422
+        assert resp.json() == {
+            "code": "prompt_budget_exceeded",
+            "message": "prompt exceeds the model token budget",
+        }
+        resp = budget_client.post(
+            "/v1/chat", json={"messages": [{"role": "user", "content": "IEA500I"}]}
+        )
+        assert resp.status_code == 422
+        assert resp.json()["code"] == "prompt_budget_exceeded"
+    elif surface == "answer-stream":
+        resp = budget_client.post("/v1/answer?stream=true", json={"query": "IEA500I"})
+        assert resp.status_code == 200
+        names = [line[7:].strip() for line in resp.text.splitlines()
+                 if line.startswith("event: ")]
+        assert "error" in names and "final" not in names
+    elif surface == "chat-stream":
+        resp = budget_client.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "IEA500I"}], "stream": True},
+        )
+        assert resp.status_code == 200
+        frames = [line.strip() for line in resp.text.splitlines() if line.startswith("data: ")]
+        assert len(frames) == 2
+        assert json.loads(frames[0][6:])["error"]["code"] == "upstream_error"
+        assert frames[1] == "data: [DONE]"
+    else:
+        resp = budget_client.post("/ui/chat", data={"message": "IEA500I?", "messages": ""})
+        assert resp.status_code == 422
+        assert "token budget" in resp.text
+        assert "could not complete this request" not in resp.text
 
 
 # ---------------------------------------------------------------------------
@@ -537,7 +517,6 @@ def test_console_reports_budget_banner(budget_client):
 
 def test_make_chunks_emits_unit_spans_for_structured_and_prose():
     from mainframe_rag.ingest.chunk import UNIT_ATOMIC, make_chunks
-    from mainframe_rag.ingest.ibm_pdf import ParsedDoc
 
     parsed = ParsedDoc(
         path="manual.pdf",
@@ -566,7 +545,6 @@ def test_make_chunks_emits_unit_spans_for_structured_and_prose():
 def test_upsert_chunks_persists_units_only_when_present():
     from mainframe_rag.config import Settings
     from mainframe_rag.ingest.chunk import Chunk, UnitSpan
-    from mainframe_rag.ingest.ibm_pdf import ParsedDoc
     from mainframe_rag.ingest.qdrant_io import upsert_chunks
 
     class _Recorder:
@@ -887,7 +865,6 @@ def _chunker_hits(text: str, heading: str) -> list[SearchHit]:
     from pathlib import Path
 
     from mainframe_rag.ingest.chunk import make_chunks
-    from mainframe_rag.ingest.ibm_pdf import ParsedDoc
 
     parsed = ParsedDoc(
         path=Path("synthetic.pdf"),

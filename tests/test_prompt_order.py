@@ -568,14 +568,17 @@ def test_resolved_code_note_single_turn_and_chat(query, frame, order):
     from mainframe_rag.agent.answer import build_chat_messages
     from mainframe_rag.ports import ChatMessage
 
-    hits = [_hit("SA22-0000-00 Ref, p. 1-6", "Body.")]
+    hits = [_hit("SA22-0000-00 Ref, p. 1-6", "CHUNK-SECRET-TEXT")]
     single = build_messages(query, hits, complexity="simple", order=order).messages[-1].content
     chat = build_chat_messages(
         [ChatMessage(role="user", content=query)], hits, complexity="simple", order=order
     ).messages[-1].content
     for user in (single, chat):
-        assert frame in user
-        assert user.count("Resolved system code:") == 1
+        # The note is the line directly after the question, is stated once,
+        # and carries only the resolution, never the retrieved chunk text.
+        assert f"{frame}\n" in user
+        note_lines = [ln for ln in user.splitlines() if ln.startswith("Resolved system code:")]
+        assert len(note_lines) == 1 and "CHUNK-SECRET-TEXT" not in note_lines[0]
 
 
 @pytest.mark.parametrize("query", _UNCHANGED)
@@ -591,14 +594,6 @@ def test_resolved_code_note_absent_when_nothing_differs(query):
     assert "Resolved system code" not in single
     assert "Resolved system code" not in chat
     assert f"Question: {query}\n" in single
-
-
-def test_resolved_code_note_is_the_line_after_the_question_and_has_no_chunk_text():
-    hits = [_hit("SA22-0000-00 Ref, p. 1-6", "CHUNK-SECRET-TEXT")]
-    user = build_messages("abend SAFB", hits, complexity="simple").messages[-1].content
-    line = "Resolved system code: SAFB = AFB"
-    assert f"Question: abend SAFB\n{line}\n" in user
-    assert "CHUNK-SECRET-TEXT" not in line
 
 
 @pytest.mark.parametrize(

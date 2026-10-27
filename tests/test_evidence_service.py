@@ -21,6 +21,7 @@ import pytest
 
 from mainframe_rag.agent.evidence import (
     PUBLIC_FAILURES,
+    SOURCES_PUBLIC_FAILURES,
     AccessGrant,
     AccessUnavailable,
     EvidenceFailure,
@@ -28,15 +29,18 @@ from mainframe_rag.agent.evidence import (
     SharedCorpusAccess,
     TrustedCaller,
     Unauthenticated,
+    build_evidence,
     encode_reference,
     parse_reference,
 )
+from mainframe_rag.agent.metrics import endpoint_for_path
 from mainframe_rag.agent.serving import ServingGeneration
 from mainframe_rag.config import Settings
-from mainframe_rag.ingest.build import build_aliases, decode_build_binding
+from mainframe_rag.ingest.build import BuildBinding, build_aliases, decode_build_binding
 from mainframe_rag.ingest.chunk import make_chunk_id
 from mainframe_rag.ingest.publish import publication_metadata_point_id
 from tests.fakes import settings_kw
+from tests.helpers_agent_local import set_agent_env
 
 LOGICAL = "wt405_manuals"
 BUILD_A = "00000000-0000-4000-8000-00000000000a"
@@ -295,8 +299,6 @@ class _Access:
 
 
 def test_reference_matches_independent_literal_envelope_bytes():
-    from mainframe_rag.agent.evidence import build_evidence
-    from mainframe_rag.ingest.build import BuildBinding
 
     binding = BuildBinding(BUILD_A, LOGICAL, "wt405_gen_a", "0123456789abcdef", "c" * 12)
     got = build_evidence(binding, CHUNK, _payload())
@@ -317,8 +319,6 @@ def test_reference_matches_independent_literal_envelope_bytes():
     ("units", [[0, 31, "atomic"]]),
 ])
 def test_every_stored_field_changes_the_reference(field, changed):
-    from mainframe_rag.agent.evidence import build_evidence
-    from mainframe_rag.ingest.build import BuildBinding
 
     binding = BuildBinding(BUILD_A, LOGICAL, "p", "0123456789abcdef", "c" * 12)
     base = build_evidence(binding, CHUNK, _payload()).reference
@@ -839,7 +839,6 @@ async def test_listing_fails_closed_on_policy_outage_identity_storage_fault_and_
 
 
 def test_sources_failure_table_is_fixed_and_leaks_nothing():
-    from mainframe_rag.agent.evidence import SOURCES_PUBLIC_FAILURES
 
     assert SOURCES_PUBLIC_FAILURES == {
         "invalid_cursor": (400, "invalid_sources_cursor", "the sources cursor is not valid"),
@@ -862,12 +861,7 @@ def http(monkeypatch, synthetic_pdf, servable_representation_gate):
     from mainframe_rag.agent import app as app_mod
     from mainframe_rag.retrieve.query import SearchHit
 
-    monkeypatch.setenv("QDRANT_URL", "http://localhost:6333")
-    monkeypatch.setenv("EMBED_MODE", "hash")
-    monkeypatch.setenv("ALLOW_HASH_MODE", "true")
-    monkeypatch.setenv("QDRANT_COLLECTION", LOGICAL)
-    monkeypatch.setenv("LLM_BASE_URL", "http://llm.internal/v1")
-    monkeypatch.setenv("LLM_MODEL_REASONING", "test-reasoning-model")
+    set_agent_env(monkeypatch, QDRANT_COLLECTION=LOGICAL)
 
     hit = SearchHit(
         chunk_id=CHUNK, score=0.5, cite="c", heading="Guide > Steps", text=TEXT,
@@ -981,29 +975,40 @@ def test_http_access_outcomes_map_per_contract(http):
     assert _get(http, ref).status_code == 200  # the next ordinary read recovers
 
 
-def test_http_storage_fault_and_deadline_use_fixed_envelopes(http):
-    ref = _search(http)["hits"][0]["reference"]
+@pytest.mark.parametrize("kind, hook, timeout_code", [
+    ("evidence", "before_retrieve", "evidence_timeout"),
+    ("sources", "before_scroll", "sources_timeout"),
+])
+def test_http_storage_fault_and_deadline_use_fixed_envelopes(http, kind, hook, timeout_code):
+    """A storage fault is a fixed 502 with no upstream text; a stalled read is
+    the endpoint's timeout code; the next ordinary request recovers."""
+    if kind == "evidence":
+        ref = _search(http)["hits"][0]["reference"]  # resolved before the fault
+        request = lambda: _get(http, ref)
+        error = _error
+    else:
+        request = lambda: _sources(http)
+        error = _sources_error
 
-    async def boom(name, ids):
+    async def boom(*_a):
         raise ConnectionError("storage-secret-detail")
 
-    http.qd.before_retrieve = boom
-    body = _error(_get(http, ref), 502, "upstream_error")
+    setattr(http.qd, hook, boom)
+    body = error(request(), 502, "upstream_error")
     assert "storage-secret-detail" not in json.dumps(body)
 
-    async def stall(name, ids):
+    async def stall(*_a):
         await asyncio.sleep(5)
 
-    http.qd.before_retrieve = stall
+    setattr(http.qd, hook, stall)
     http.monkeypatch.setattr(http.app.settings, "evidence_timeout_s", 0.05)
-    _error(_get(http, ref), 504, "evidence_timeout")
-    http.qd.before_retrieve = None
+    error(request(), 504, timeout_code)
+    setattr(http.qd, hook, None)
     http.monkeypatch.setattr(http.app.settings, "evidence_timeout_s", 10.0)
-    assert _get(http, ref).status_code == 200
+    assert request().status_code == 200
 
 
 def test_evidence_endpoint_is_counted_with_a_bounded_label():
-    from mainframe_rag.agent.metrics import endpoint_for_path
 
     assert endpoint_for_path("/v1/evidence/ep1.AAAA") == "evidence"
     assert endpoint_for_path("/v1/evidence") is None
@@ -1018,7 +1023,6 @@ def _sources(http, **params):
 
 
 def _sources_error(r, status, code):
-    from mainframe_rag.agent.evidence import SOURCES_PUBLIC_FAILURES
 
     assert r.status_code == status, r.text
     body = r.json()
@@ -1087,27 +1091,7 @@ def test_http_sources_access_outcomes_map_per_contract(http):
     assert len(_sources(http).json()["sources"]) == 3  # the next ordinary listing recovers
 
 
-def test_http_sources_storage_fault_and_deadline_use_fixed_envelopes(http):
-    async def boom(name):
-        raise ConnectionError("storage-secret-detail")
-
-    http.qd.before_scroll = boom
-    body = _sources_error(_sources(http), 502, "upstream_error")
-    assert "storage-secret-detail" not in json.dumps(body)
-
-    async def stall(name):
-        await asyncio.sleep(5)
-
-    http.qd.before_scroll = stall
-    http.monkeypatch.setattr(http.app.settings, "evidence_timeout_s", 0.05)
-    _sources_error(_sources(http), 504, "sources_timeout")
-    http.qd.before_scroll = None
-    http.monkeypatch.setattr(http.app.settings, "evidence_timeout_s", 10.0)
-    assert _sources(http).status_code == 200
-
-
 def test_sources_endpoint_is_counted_with_a_bounded_label():
-    from mainframe_rag.agent.metrics import endpoint_for_path
 
     assert endpoint_for_path("/v1/sources") == "sources"
     assert endpoint_for_path("/v1/sources/") == "sources"
