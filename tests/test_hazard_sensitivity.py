@@ -1,10 +1,22 @@
 """A red mutation run counts only when its intended existing assertion fails."""
 from __future__ import annotations
 
+import os
+import sys
+import tarfile
+import time
 import xml.etree.ElementTree as ET
+from pathlib import Path
 
 import pytest
-from scripts.check_hazard_sensitivity import HazardError, apply_mutation, assess
+from scripts.check_hazard_sensitivity import (
+    HazardError,
+    apply_mutation,
+    assess,
+    run_pair,
+    run_pairs,
+    run_test,
+)
 
 HAZARD = {'test': 'tests/test_behavior.py::test_original', 'assertion': 'assert received == expected'}
 
@@ -87,11 +99,7 @@ def synthetic_tree(tmp_path, body):
 
 
 def test_pristine_pair_does_not_credit_baseline_marker_for_irrelevant_mutation(tmp_path):
-    import sys
-    import tarfile
-    from pathlib import Path
 
-    from scripts.check_hazard_sensitivity import run_pair
 
     root = synthetic_tree(tmp_path, '''import os
 from pathlib import Path
@@ -124,12 +132,7 @@ def test_original():
 
 @pytest.mark.parametrize('baseline_failure', [False, True])
 def test_parallel_pairs_overlap_in_isolated_processes_and_preserve_failed_baseline(tmp_path, monkeypatch, baseline_failure):
-    import os
-    import sys
-    import tarfile
-    from pathlib import Path
 
-    from scripts.check_hazard_sensitivity import run_pairs
 
     gate = tmp_path / 'gate'
     gate.mkdir()
@@ -190,10 +193,7 @@ def test_second():
 
 @pytest.mark.parametrize('workers', [0, True])
 def test_parallel_pair_workers_are_bounded_before_spawning(tmp_path, workers):
-    import sys
-    from pathlib import Path
 
-    from scripts.check_hazard_sensitivity import run_pairs
 
     with pytest.raises(HazardError, match='workers'):
         list(run_pairs(tmp_path / 'missing.tar', tmp_path, Path(sys.executable), [], tmp_path,
@@ -201,10 +201,7 @@ def test_parallel_pair_workers_are_bounded_before_spawning(tmp_path, workers):
 
 
 def test_passing_test_cannot_mutate_snapshot_source(tmp_path):
-    import sys
-    from pathlib import Path
 
-    from scripts.check_hazard_sensitivity import run_test
 
     root = synthetic_tree(tmp_path, '''from pathlib import Path
 
@@ -219,12 +216,7 @@ def test_original():
 
 @pytest.mark.parametrize('parent_wait', [True, False])
 def test_timeout_reaps_started_descendant_and_next_test_is_clean(tmp_path, parent_wait):
-    import os
-    import sys
-    import time
-    from pathlib import Path
 
-    from scripts.check_hazard_sensitivity import run_test
 
     root = synthetic_tree(tmp_path, '''import subprocess
 import sys

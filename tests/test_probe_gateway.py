@@ -249,29 +249,6 @@ def test_probe_stream_flag_accepts_a_complete_stream_with_usage_frame(monkeypatc
     assert any(m == "STREAM" for m, _, _ in fake.calls)
 
 
-def test_probe_stream_without_done_fails(monkeypatch, capsys):
-    routes = [r for r in _healthy_routes() if not (r[0] == "POST" and r[1] == "/chat/completions")]
-    routes.append(
-        (
-            "POST",
-            "/chat/completions",
-            200,
-            {"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]},
-        )
-    )
-    routes.append(
-        (
-            "STREAM",
-            "/chat/completions",
-            200,
-            ['data: {"choices": [{"delta": {"content": "o"}}]}'],
-        )
-    )
-    _, rc = _run(monkeypatch, routes, argv=["--stream"])
-    assert rc == 1
-    assert "no [DONE]" in capsys.readouterr().out
-
-
 @pytest.mark.parametrize("flag,missing", [("--require-reasoning", "LLM_BASE_URL"), ("--stream", "LLM_MODEL_REASONING")])
 def test_required_reasoning_cannot_skip(monkeypatch, capsys, flag, missing):
     _, rc = _run(monkeypatch, _healthy_routes(), argv=[flag], **{missing: None})
@@ -308,6 +285,15 @@ def test_stream_errors_never_pass(monkeypatch, status, lines):
     _, rc = _run(monkeypatch, [("STREAM", "/chat/completions", status, lines), *_healthy_routes()],
                  argv=["--stream"])
     assert rc == 1
+
+
+def test_probe_stream_without_done_fails(monkeypatch, capsys):
+    routes = [r for r in _healthy_routes() if r[1] != "/chat/completions"]
+    routes += [("POST", "/chat/completions", 200, {"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]}),
+               ("STREAM", "/chat/completions", 200, ['data: {"choices": [{"delta": {"content": "o"}}]}'])]
+    _, rc = _run(monkeypatch, routes, argv=["--stream"])
+    assert rc == 1
+    assert "no [DONE]" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("choices", [None, [], [{"finish_reason": "length"}],

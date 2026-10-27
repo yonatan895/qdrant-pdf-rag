@@ -23,6 +23,7 @@ import contextlib
 import hashlib
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -149,6 +150,9 @@ class TaskContractsTests(unittest.TestCase):
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             timeout=60, check=False, text=True, env=env, cwd=str(cwd or self.root),
         )
+
+    def reset_log(self) -> None:
+        self.log.unlink(missing_ok=True)
 
     def calls(self) -> list[dict]:
         if not self.log.exists():
@@ -419,8 +423,7 @@ class TaskContractsTests(unittest.TestCase):
         for task_name in ("qa:lint", "qa:typecheck", "qa:unit", "qa:deps"):
             for env_mode in ("plain", "tooled"):
                 with self.subTest(task=task_name, env=env_mode):
-                    if self.log.exists():
-                        self.log.unlink()
+                    self.reset_log()
                     shutil.rmtree(self.root / ".venv", ignore_errors=True)
                     extra = self.tool_env() if env_mode == "tooled" else None
                     proc = self.run_task(task_name, extra_env=extra)
@@ -495,8 +498,7 @@ class TaskContractsTests(unittest.TestCase):
     def test_failed_prerequisite_never_starts_pytest(self):
         self.make_recorder(self.root / ".venv/bin/python")
         for name in ("qa:unit", "qa:check"):
-            if self.log.exists():
-                self.log.unlink()
+            self.reset_log()
             proc = self.run_task(name, extra_env={**self.recorder_env, "RECORDER_EXIT": "2"})
             self.assertNotEqual(proc.returncode, 0)
             self.assertEqual([c["argv"] for c in self.calls()], [
@@ -507,8 +509,7 @@ class TaskContractsTests(unittest.TestCase):
         self.make_recorder(self.root / "pyrec")
         for profile, expected in (("sim", "sim"), ("false", "false"), ("0", "0"), ("", "")):
             with self.subTest(profile=repr(profile)):
-                if (self.log).exists():
-                    self.log.unlink()
+                self.reset_log()
                 proc = self.run_task("dev:doctor", f"PY={self.root / 'pyrec'}", f"PROFILE={profile}",
                                      extra_env=self.recorder_env)
                 self.assertEqual(proc.returncode, 0, proc.stdout)
@@ -664,8 +665,7 @@ class TaskContractsTests(unittest.TestCase):
             ("baseline", "dev", "--update-baseline"),
         ):
             with self.subTest(task=task):
-                if self.log.exists():
-                    self.log.unlink()
+                self.reset_log()
                 proc = self.run_task(f"eval:{task}", f"BUNDLE_DIR={output}",
                                      extra_env=self.tool_env())
                 self.assertEqual(proc.returncode, 0, proc.stdout)
@@ -681,29 +681,18 @@ class TaskContractsTests(unittest.TestCase):
     def test_holdout_transports_forced_rc_venue(self):
         self.make_venv_fake()
         env = self.tool_env()
-        # CLI VENUE=dev cannot override holdout's VENUE=rc
-        proc = self.run_task("eval:holdout", "VENUE=dev", extra_env=env)
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        calls = self.pip_calls()
-        self.assertEqual(len(calls), 1, "holdout delegates once to the Python owner")
-        self.assertEnvSubset(calls[0], {"EMBED_MODE": "hash", "VENUE": "rc"})
-        self.assertIn("evals/holdout.jsonl", calls[0]["argv"])
-        if (self.log).exists():
-            self.log.unlink()
-        # Ambient VENUE=dev cannot override holdout's VENUE=rc (TR433-F1)
-        proc = self.run_task("eval:holdout", extra_env=dict(env, VENUE="dev"))
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        calls = self.pip_calls()
-        self.assertEnvSubset(calls[0], {"EMBED_MODE": "hash", "VENUE": "rc"})
-        if (self.log).exists():
-            self.log.unlink()
-        # Ambient VENUE=dev AND CLI VENUE=dev together cannot override holdout's VENUE=rc (TR433-F1)
-        proc = self.run_task("eval:holdout", "VENUE=dev", extra_env=dict(env, VENUE="dev"))
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        calls = self.pip_calls()
-        self.assertEnvSubset(calls[0], {"EMBED_MODE": "hash", "VENUE": "rc"})
-        if (self.log).exists():
-            self.log.unlink()
+        # Neither a CLI nor an ambient VENUE=dev can override holdout's
+        # VENUE=rc (TR433-F1); the Python owner is the only delegate.
+        for args, ambient in ((("VENUE=dev",), {}), ((), {"VENUE": "dev"}),
+                              (("VENUE=dev",), {"VENUE": "dev"})):
+            with self.subTest(args=args, ambient=ambient):
+                self.reset_log()
+                proc = self.run_task("eval:holdout", *args, extra_env={**env, **ambient})
+                self.assertEqual(proc.returncode, 0, proc.stdout)
+                calls = self.pip_calls()
+                self.assertEqual(len(calls), 1)
+                self.assertEnvSubset(calls[0], {"EMBED_MODE": "hash", "VENUE": "rc"})
+                self.assertIn("evals/holdout.jsonl", calls[0]["argv"])
         # Pin refusal and recovery run through the real CLI in test_eval_gate.
 
     def test_answer_eval_agent_url_is_optional_and_roundtrips_exactly(self):
@@ -718,7 +707,7 @@ class TaskContractsTests(unittest.TestCase):
             ((), ambient, ambient),
         ):
             with self.subTest(args=args, ambient=value):
-                self.log.unlink(missing_ok=True)
+                self.reset_log()
                 proc = self.run_task("eval:answers", *args, extra_env=dict(env, AGENT_URL=value))
                 self.assertEqual(proc.returncode, 0, proc.stdout)
                 argv = self.pip_calls()[0]["argv"]
@@ -734,13 +723,11 @@ class TaskContractsTests(unittest.TestCase):
         env = self.tool_env()
         for task_name in ("eval:bench", "eval:verify-golden"):
             with self.subTest(task=task_name):
-                if (self.log).exists():
-                    self.log.unlink()
+                self.reset_log()
                 proc = self.run_task(task_name, extra_env=env)
                 self.assertEqual(proc.returncode, 0, proc.stdout)
                 self.assertEnvSubset(self.pip_calls()[0], {"EMBED_MODE": None, "VENUE": None})
-        if (self.log).exists():
-            self.log.unlink()
+        self.reset_log()
         proc = self.run_task("eval:load", "PY=python3base", "AGENT_URL=http://x:9999", extra_env=env)
         self.assertEqual(proc.returncode, 0, proc.stdout)
         base_calls = self.tool_calls("python3base")
@@ -758,11 +745,9 @@ class TaskContractsTests(unittest.TestCase):
         self.assertEqual(argv[argv.index("--bundle-dir") + 1], "bundles")
         self.assertNotIn("--golden", argv)
         self.assertNotIn("--out", argv)
-        if (self.log).exists():
-            self.log.unlink()
+        self.reset_log()
         self.assertNotIn("--depth", argv)
-        if (self.log).exists():
-            self.log.unlink()
+        self.reset_log()
         proc = self.run_task(
             "eval:capture-pool", "OUT=/tmp/x.jsonl", "GOLDEN=g.jsonl", "DEPTH=200", extra_env=env
         )
@@ -783,7 +768,7 @@ class TaskContractsTests(unittest.TestCase):
         self.assertEqual(argv[argv.index("--db") + 1], "/d/a b.sqlite3")
         self.assertEqual(argv[argv.index("--out") + 1], "/o/x y.jsonl")
         self.assertNotIn("--retention-days", argv)
-        self.log.unlink()
+        self.reset_log()
         proc = self.run_task("feedback:import", "IN=/o/x y.jsonl", "DB=/d/a b.sqlite3",
                              "MERGE=1", "KEEP_EXISTING=1", "RETENTION_DAYS=30", extra_env=env)
         self.assertEqual(proc.returncode, 0, proc.stdout)
@@ -794,7 +779,7 @@ class TaskContractsTests(unittest.TestCase):
         self.assertEqual(argv[argv.index("--retention-days") + 1], "30")
         self.assertIn("--merge", argv)
         self.assertIn("--keep-existing", argv)
-        self.log.unlink()
+        self.reset_log()
         proc = self.run_task("feedback:import", "IN=a", "DB=b", extra_env=env)
         argv = self.pip_calls()[0]["argv"]
         self.assertNotIn("--merge", argv)
@@ -810,7 +795,7 @@ class TaskContractsTests(unittest.TestCase):
         self.assertEqual(argv[argv.index("--in") + 1], "/o/x y.jsonl")
         self.assertNotIn("--out", argv)
         self.assertNotIn("--format", argv)
-        self.log.unlink()
+        self.reset_log()
         proc = self.run_task("feedback:report", "IN=a", "OUT=/o/r r.json", "FORMAT=json",
                              extra_env=env)
         self.assertEqual(proc.returncode, 0, proc.stdout)
@@ -825,14 +810,12 @@ class TaskContractsTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stdout)
         argv = self.pip_calls()[0]["argv"]
         self.assertNotIn("--baseline", argv)
-        if (self.log).exists():
-            self.log.unlink()
+        self.reset_log()
         proc = self.run_task("eval:harness:l3", "EMBED_MODE=vllm", extra_env=env)
         self.assertEqual(proc.returncode, 0, proc.stdout)
         argv = self.pip_calls()[0]["argv"]
         self.assertNotIn("--baseline", argv)
-        if (self.log).exists():
-            self.log.unlink()
+        self.reset_log()
         proc = self.run_task("eval:harness:l3", "EMBED_MODE=vllm", "HARNESS_L3_BASELINE=c.json",
                              extra_env=env)
         self.assertEqual(proc.returncode, 0, proc.stdout)
@@ -842,17 +825,15 @@ class TaskContractsTests(unittest.TestCase):
     def test_local_acceptance_dispatches_exact_arguments(self):
         self.prepare_controlled_runner()
         self.make_venv_fake()
-        for task, prefix in (("local:check", ["scripts/check_live.py"]),):
-            self.log.unlink(missing_ok=True)
-            literal = "/private/a space;$(touch SENTINEL).json"
-            result = self.run_controlled(task, "--", "--report", literal,
-                                         extra_env=self.recorder_env)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(self.calls()[0]["argv"], [*prefix, "--report", literal])
-            self.assertFalse((self.root / "SENTINEL").exists())
-            result = self.run_controlled(task, "--", "--help",
-                extra_env={**self.recorder_env, "RECORDER_EXIT": "1"})
-            self.assertNotEqual(result.returncode, 0)
+        literal = "/private/a space;$(touch SENTINEL).json"
+        result = self.run_controlled("local:check", "--", "--report", literal,
+                                     extra_env=self.recorder_env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.calls()[0]["argv"], ["scripts/check_live.py", "--report", literal])
+        self.assertFalse((self.root / "SENTINEL").exists())
+        result = self.run_controlled("local:check", "--", "--help",
+                                     extra_env={**self.recorder_env, "RECORDER_EXIT": "1"})
+        self.assertNotEqual(result.returncode, 0)
 
     def test_query_optional_flags_and_literal_values(self):
         self.make_recorder(self.root / ".venv/bin/python")
@@ -864,8 +845,7 @@ class TaskContractsTests(unittest.TestCase):
         # #777: the local 8 GB lane budget reaches the tool unless a window is declared.
         self.assertEnvSubset(calls[0], {"PYTHONPATH": ".", "EMBED_MODE": "hash",
                                         "LLM_MAX_MODEL_LEN": "4096", "LLM_REASONING_EFFORT_COMPLEX": "high"})
-        if (self.log).exists():
-            self.log.unlink()
+        self.reset_log()
         sentinel = "a b$c;`echo PWNED`"
         proc = self.run_task("local:query", f"QUERY={sentinel}", "LIMIT=5", "LIMIT2=",
                              extra_env=env)
@@ -879,59 +859,32 @@ class TaskContractsTests(unittest.TestCase):
         self.make_venv_fake()
         self.make_script_recorder("run_local_vllm.sh")
         env = self.tool_env()
-        proc = self.run_task("local:llm", extra_env=env)
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        calls = self.script_calls("run_local_vllm.sh")
-        self.assertEqual(len(calls), 1)
-        self.assertEnvSubset(calls[0], {"ROLE": "reasoning"})
-        budget = calls[0]["env"].get("BUDGET_PYTHON")
-        self.assertTrue(budget.startswith("/") and budget.endswith("/.venv/bin/python"), budget)
-        if (self.log).exists():
-            self.log.unlink()
-        # Direct CLI form for local:llm forwards MODEL, PORT, GPU_MEM, MAX_LEN, SEQS, BUDGET_PROFILE (TR434-F2)
-        proc = self.run_task("local:llm", "MODEL=approved-local-model", "PORT=8100",
-                             "GPU_MEM=0.7", "MAX_LEN=4096", "SEQS=4", "BUDGET_PROFILE=custom-profile",
-                             extra_env=env)
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        calls = self.script_calls("run_local_vllm.sh")
-        self.assertEnvSubset(calls[0], {
-            "ROLE": "reasoning",
-            "MODEL": "approved-local-model",
-            "PORT": "8100",
-            "GPU_MEM": "0.7",
-            "MAX_LEN": "4096",
-            "SEQS": "4",
-            "BUDGET_PROFILE": "custom-profile",
-        })
-        if (self.log).exists():
-            self.log.unlink()
-        # Conflicting ambient vs CLI: CLI wins (TR434-F2)
-        proc = self.run_task("local:llm", "MODEL=cli-model", "PORT=8100",
-                             extra_env=dict(env, MODEL="ambient-model", PORT="9999"))
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        calls = self.script_calls("run_local_vllm.sh")
-        self.assertEnvSubset(calls[0], {
-            "ROLE": "reasoning",
-            "MODEL": "cli-model",
-            "PORT": "8100",
-        })
-        if (self.log).exists():
-            self.log.unlink()
-        # Ambient-only invocation is preserved (TR434-F2)
-        proc = self.run_task("local:llm", extra_env=dict(env, MODEL="ambient-only-model", PORT="8200"))
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        calls = self.script_calls("run_local_vllm.sh")
-        self.assertEnvSubset(calls[0], {
-            "ROLE": "reasoning",
-            "MODEL": "ambient-only-model",
-            "PORT": "8200",
-        })
-        if (self.log).exists():
-            self.log.unlink()
-        proc = self.run_task("local:embed", "ROLE=x", "MODEL=m", "PORT=1234", extra_env=env)
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        calls = self.script_calls("run_local_vllm.sh")
-        self.assertEnvSubset(calls[0], {"ROLE": "x", "MODEL": "m", "PORT": "1234"})
+        # Defaults, the direct CLI form and ambient values; CLI wins a conflict
+        # on MODEL/PORT (TR434-F2).
+        for task, args, ambient, expected in (
+            ("local:llm", (), {}, {"ROLE": "reasoning"}),
+            ("local:llm", ("MODEL=approved-local-model", "PORT=8100", "GPU_MEM=0.7",
+                           "MAX_LEN=4096", "SEQS=4", "BUDGET_PROFILE=custom-profile"), {},
+             {"ROLE": "reasoning", "MODEL": "approved-local-model", "PORT": "8100",
+              "GPU_MEM": "0.7", "MAX_LEN": "4096", "SEQS": "4", "BUDGET_PROFILE": "custom-profile"}),
+            ("local:llm", ("MODEL=cli-model", "PORT=8100"),
+             {"MODEL": "ambient-model", "PORT": "9999"},
+             {"ROLE": "reasoning", "MODEL": "cli-model", "PORT": "8100"}),
+            ("local:llm", (), {"MODEL": "ambient-only-model", "PORT": "8200"},
+             {"ROLE": "reasoning", "MODEL": "ambient-only-model", "PORT": "8200"}),
+            ("local:embed", ("ROLE=x", "MODEL=m", "PORT=1234"), {},
+             {"ROLE": "x", "MODEL": "m", "PORT": "1234"}),
+        ):
+            with self.subTest(task=task, args=args):
+                self.reset_log()
+                proc = self.run_task(task, *args, extra_env={**env, **ambient})
+                self.assertEqual(proc.returncode, 0, proc.stdout)
+                calls = self.script_calls("run_local_vllm.sh")
+                self.assertEqual(len(calls), 1)
+                self.assertEnvSubset(calls[0], expected)
+                if not args:
+                    budget = calls[0]["env"].get("BUDGET_PYTHON")
+                    self.assertTrue(budget.startswith("/") and budget.endswith("/.venv/bin/python"), budget)
 
     def test_local_model_served_name_round_trip(self):
         self.make_venv_fake()
@@ -939,14 +892,14 @@ class TaskContractsTests(unittest.TestCase):
         name = "vendor/model with spaces|literal;$(touch PWNED)"
         for task in ("local:llm", "local:embed", "local:rerank"):
             with self.subTest(task=task):
-                self.log.unlink(missing_ok=True)
+                self.reset_log()
                 proc = self.run_task(task, "MODEL=/immutable/revision", f"SERVED_NAME={name}",
                                      extra_env=dict(self.tool_env(), SERVED_NAME="ambient-name"))
                 self.assertEqual(proc.returncode, 0, proc.stdout)
                 self.assertEnvSubset(self.script_calls("run_local_vllm.sh")[0],
                                      {"MODEL": "/immutable/revision", "SERVED_NAME": name})
                 self.assertFalse((self.root / "PWNED").exists())
-                self.log.unlink(missing_ok=True)
+                self.reset_log()
                 proc = self.run_task(task, extra_env=dict(self.tool_env(), SERVED_NAME="ambient-name"))
                 self.assertEqual(proc.returncode, 0, proc.stdout)
                 self.assertEnvSubset(self.script_calls("run_local_vllm.sh")[0],
@@ -961,8 +914,7 @@ class TaskContractsTests(unittest.TestCase):
         self.assertEqual(docker, [
             ["stop", "local-litellm-gateway", "local-litellm-gateway-pg"],
             ["network", "rm", "local-litellm-gateway-net"]])
-        if (self.log).exists():
-            self.log.unlink()
+        self.reset_log()
         proc = self.run_task("local:gateway:down", "GATEWAY_NAME=g", "PG_NAME=p", "PG_NET=n",
                              extra_env=self.tool_env())
         self.assertEqual(proc.returncode, 0, proc.stdout)
@@ -979,20 +931,17 @@ class TaskContractsTests(unittest.TestCase):
         self.assertEqual(docker[0], ["inspect", "custom"])
         self.assertIn("--name", docker[1])
         self.assertIn("custom", docker[1])
-        if (self.log).exists():
-            self.log.unlink()
+        self.reset_log()
         proc = self.run_task("local:qdrant:down", extra_env=env)
         self.assertEqual(proc.returncode, 0, proc.stdout)
         self.assertEqual([c["argv"] for c in self.tool_calls("docker")], [["stop", "qdrant-sim"]])
-        if (self.log).exists():
-            self.log.unlink()
+        self.reset_log()
         # Conflicting ambient vs CLI: CLI wins over ambient SIM_CONTAINER (TR434-F1)
         proc = self.run_task("local:qdrant:down", "SIM_CONTAINER=requested-sim",
                              extra_env=dict(env, SIM_CONTAINER="ambient-sim"))
         self.assertEqual(proc.returncode, 0, proc.stdout)
         self.assertEqual([c["argv"] for c in self.tool_calls("docker")], [["stop", "requested-sim"]])
-        if (self.log).exists():
-            self.log.unlink()
+        self.reset_log()
         proc = self.run_task("local:qdrant:up", "SIM_CONTAINER=requested-sim", "SIM_PORT=6334",
                              extra_env=dict(env, SIM_CONTAINER="ambient-sim", SIM_PORT="6333"))
         self.assertEqual(proc.returncode, 0, proc.stdout)
@@ -1000,8 +949,7 @@ class TaskContractsTests(unittest.TestCase):
         self.assertEqual(docker[0], ["inspect", "requested-sim"])
         self.assertIn("requested-sim", docker[1])
         self.assertIn("127.0.0.1:6334:6333", docker[1])
-        if (self.log).exists():
-            self.log.unlink()
+        self.reset_log()
         # Explicit empty fails closed (TR434-F1)
         proc = self.run_task("local:qdrant:up", "SIM_CONTAINER=", extra_env=env)
         self.assertNotEqual(proc.returncode, 0)
@@ -1010,39 +958,26 @@ class TaskContractsTests(unittest.TestCase):
         self.make_venv_fake()
         self.make_script_recorder("run_local_stack.sh")
         env = self.tool_env()
-        proc = self.run_task("local:stack", "CORPUS_DIR=/data", "GATEWAY_PORT=4001",
-                             "GATEWAY_PROBE_MAX_TOKENS=512",
-                             "LOCAL_INGEST_PROGRESS=/private state/inventory.jsonl",
-                             extra_env=dict(env, GATEWAY_PROBE_MAX_TOKENS="16", LOCAL_INGEST_PROGRESS="ambient-inventory"))
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        calls = self.script_calls("run_local_stack.sh")
-        self.assertEqual(len(calls), 1)
-        self.assertEnvSubset(calls[0], {"CORPUS_DIR": "/data", "GATEWAY_PORT": "4001",
-                                        "GATEWAY_PROBE_MAX_TOKENS": "512",
-                                        "LOCAL_INGEST_PROGRESS": "/private state/inventory.jsonl",
-                                        "LOCAL_AGENT_PORT": None, "O2_PORT": None,
-                                        "LOCAL_STACK_DRYRUN": None})
-        if (self.log).exists():
-            self.log.unlink()
-        # Direct CLI LOCAL_STACK_DRYRUN=1 reaches script (TR434-F2)
-        proc = self.run_task("local:stack", "LOCAL_STACK_DRYRUN=1", extra_env=env)
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        calls = self.script_calls("run_local_stack.sh")
-        self.assertEnvSubset(calls[0], {"LOCAL_STACK_DRYRUN": "1"})
-        if (self.log).exists():
-            self.log.unlink()
-        # Ambient LOCAL_STACK_DRYRUN=1 reaches script (TR434-F2)
-        proc = self.run_task("local:stack", extra_env=dict(env, LOCAL_STACK_DRYRUN="1"))
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        calls = self.script_calls("run_local_stack.sh")
-        self.assertEnvSubset(calls[0], {"LOCAL_STACK_DRYRUN": "1"})
-        if (self.log).exists():
-            self.log.unlink()
-        # Conflicting ambient and CLI: CLI wins (TR434-F2)
-        proc = self.run_task("local:stack", "LOCAL_STACK_DRYRUN=0", extra_env=dict(env, LOCAL_STACK_DRYRUN="1"))
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        calls = self.script_calls("run_local_stack.sh")
-        self.assertEnvSubset(calls[0], {"LOCAL_STACK_DRYRUN": "0"})
+        for args, ambient, expected in (
+            (("CORPUS_DIR=/data", "GATEWAY_PORT=4001", "GATEWAY_PROBE_MAX_TOKENS=512",
+              "LOCAL_INGEST_PROGRESS=/private state/inventory.jsonl"),
+             {"GATEWAY_PROBE_MAX_TOKENS": "16", "LOCAL_INGEST_PROGRESS": "ambient-inventory"},
+             {"CORPUS_DIR": "/data", "GATEWAY_PORT": "4001", "GATEWAY_PROBE_MAX_TOKENS": "512",
+              "LOCAL_INGEST_PROGRESS": "/private state/inventory.jsonl",
+              "LOCAL_AGENT_PORT": None, "O2_PORT": None, "LOCAL_STACK_DRYRUN": None}),
+            # Direct CLI and ambient LOCAL_STACK_DRYRUN both reach the script;
+            # a conflicting CLI value wins (TR434-F2).
+            (("LOCAL_STACK_DRYRUN=1",), {}, {"LOCAL_STACK_DRYRUN": "1"}),
+            ((), {"LOCAL_STACK_DRYRUN": "1"}, {"LOCAL_STACK_DRYRUN": "1"}),
+            (("LOCAL_STACK_DRYRUN=0",), {"LOCAL_STACK_DRYRUN": "1"}, {"LOCAL_STACK_DRYRUN": "0"}),
+        ):
+            with self.subTest(args=args):
+                self.reset_log()
+                proc = self.run_task("local:stack", *args, extra_env={**env, **ambient})
+                self.assertEqual(proc.returncode, 0, proc.stdout)
+                calls = self.script_calls("run_local_stack.sh")
+                self.assertEqual(len(calls), 1)
+                self.assertEnvSubset(calls[0], expected)
 
     def test_stack_explicit_empty_progress_overrides_ambient_to_the_default(self):
         self.make_venv_fake()
@@ -1072,7 +1007,7 @@ class TaskContractsTests(unittest.TestCase):
             proc = self.run_task("local:stack", *args, extra_env=extra)
             self.assertEqual(proc.returncode, 0, proc.stdout)
             self.assertEnvSubset(self.script_calls("run_local_stack.sh")[0], {"LOCAL_INGEST_REINGEST": expected})
-            self.log.unlink()
+            self.reset_log()
         shutil.copyfile(REPO / "scripts/run_local_stack.sh", self.root / "scripts/run_local_stack.sh")
         proc = self.run_task("local:stack", "LOCAL_INGEST_REINGEST=1", "LOCAL_STACK_DRYRUN=1",
                              f"CORPUS_DIR={self.root}", extra_env=env)
@@ -1108,8 +1043,7 @@ class TaskContractsTests(unittest.TestCase):
         self.assertEnvSubset(calls[0], {"LLM_STREAM": "true", "UI_ENABLED": None})
         self.assertIn("--port", calls[0]["argv"])
         self.assertEqual(calls[0]["argv"][calls[0]["argv"].index("--port") + 1], "8080")
-        if (self.log).exists():
-            self.log.unlink()
+        self.reset_log()
         proc = self.run_task("local:agent", "UI_ENABLED=true", "PORT=9090", extra_env=env)
         self.assertEqual(proc.returncode, 0, proc.stdout)
         calls = self.pip_calls()
@@ -1119,45 +1053,35 @@ class TaskContractsTests(unittest.TestCase):
     def test_sim_and_load_use_fixed_tiers(self):
         self.make_venv_fake()
         env = self.tool_env()
-        proc = self.run_task("qa:sim", extra_env=env)
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        self.assertEqual(self.pip_calls()[0]["argv"], ["scripts/agent_doctor.py", "--profile", "sim", "--python", ".venv/bin/python"])
-        self.assertEqual(self.pip_calls()[1]["argv"],
-                         ["-m", "pytest", "-m", "integration",
-                          "--ignore=tests/test_load_tier.py",
-                          "--ignore=tests/test_ha_cluster.py", "-v", "-rs"])
-        if (self.log).exists():
-            self.log.unlink()
-        proc = self.run_task("qa:load", extra_env=env)
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        self.assertEqual(self.pip_calls()[0]["argv"], ["scripts/agent_doctor.py", "--profile", "load", "--python", ".venv/bin/python"])
-        self.assertEqual(self.pip_calls()[1]["argv"],
-                         ["-m", "pytest", "-m", "integration", "tests/test_load_tier.py", "-v"])
-        if (self.log).exists():
-            self.log.unlink()
-        proc = self.run_task("qa:ha", extra_env=env)
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        self.assertEqual(self.pip_calls()[0]["argv"], ["scripts/agent_doctor.py", "--profile", "ha", "--python", ".venv/bin/python"])
-        self.assertEqual(self.pip_calls()[1]["argv"],
-                         ["-m", "pytest", "-m", "integration", "tests/test_ha_cluster.py", "-v"])
+        for task, profile, command in (
+            ("qa:sim", "sim", ["-m", "pytest", "-m", "integration",
+                               "--ignore=tests/test_load_tier.py",
+                               "--ignore=tests/test_ha_cluster.py", "-v", "-rs"]),
+            ("qa:load", "load", ["-m", "pytest", "-m", "integration", "tests/test_load_tier.py", "-v"]),
+            ("qa:ha", "ha", ["-m", "pytest", "-m", "integration", "tests/test_ha_cluster.py", "-v"]),
+        ):
+            with self.subTest(task=task):
+                self.reset_log()
+                proc = self.run_task(task, extra_env=env)
+                self.assertEqual(proc.returncode, 0, proc.stdout)
+                calls = self.pip_calls()
+                self.assertEqual(calls[0]["argv"],
+                                 ["scripts/agent_doctor.py", "--profile", profile, "--python", ".venv/bin/python"])
+                self.assertEqual(calls[1]["argv"], command)
 
-    def test_operator_empty_stays_unset(self):
+    def test_explicit_empty_operator_stays_unset_and_absent_never_defaults(self):
         self.recorder_env = {"RECORDER_LOG": str(self.log), "RECORDER_TAG": "x", "RECORDER_EXIT": "0"}
         self.make_airgap_fixtures({"INTERNAL_REGISTRY": "file-reg"})
         self.make_airgap_stage_double("deploy.sh")
         proc = self.run_task("airgap:deploy", "INTERNAL_REGISTRY=", extra_env=self.tool_env())
         self.assertEqual(proc.returncode, 0, proc.stdout)
         self.assertEqual(self.airgap_calls()[0]["resolved"]["INTERNAL_REGISTRY"], "file-reg")
-
-    def test_operator_unset_stays_empty_no_task_defaults(self):
-        self.recorder_env = {"RECORDER_LOG": str(self.log), "RECORDER_TAG": "x", "RECORDER_EXIT": "0"}
+        self.reset_log()
         self.make_airgap_fixtures({})
-        self.make_airgap_stage_double("deploy.sh")
         proc = self.run_task("airgap:deploy", extra_env=self.tool_env())
         self.assertEqual(proc.returncode, 0, proc.stdout)
         resolved = self.airgap_calls()[0]["resolved"]
-        self.assertEqual(resolved["QUERY"], "")
-        self.assertEqual(resolved["EMBED_MODE"], "")
+        self.assertEqual((resolved["QUERY"], resolved["EMBED_MODE"]), ("", ""))
 
     def test_task_cli_does_not_yet_forward_the_retired_keys(self):
         """Pins a known gap (#1070 review B1): `run-task airgap:validate
@@ -1166,8 +1090,6 @@ class TaskContractsTests(unittest.TestCase):
         diff in PR #1111 ("Needs Verifier decision") adds the five retired keys
         to every stage's TASK_* bridge and TASK_OP_KEYS; when it lands, replace
         this test with an assertion that all five are forwarded."""
-        import re
-
         from scripts.airgap.model_config import RETIRED_KEYS
 
         text = (REPO / "taskfiles/airgap.yml").read_text(encoding="utf-8")
@@ -1176,7 +1098,6 @@ class TaskContractsTests(unittest.TestCase):
         self.assertEqual(forwarded & {key for key, _, _ in RETIRED_KEYS}, set())
 
     def test_bridge_set_matches_operator_keys(self):
-        import re
         common = (REPO / "scripts/airgap/common.sh").read_text(encoding="utf-8")
         keys = re.search(r'OPERATOR_ENV_KEYS="([^"]+)"', common).group(1).split()
         self.assertIn("AIRGAP_ENV", keys, "AIRGAP_ENV must be an operator key")
@@ -1198,7 +1119,7 @@ class TaskContractsTests(unittest.TestCase):
                 encoding="utf-8")
             for mode in ("cli", "ambient", "empty"):
                 with self.subTest(stage=stage, mode=mode):
-                    self.log.unlink(missing_ok=True)
+                    self.reset_log()
                     expected = values if mode == "cli" else ambient if mode == "ambient" else dict.fromkeys(keys, "")
                     args = () if mode == "ambient" else tuple(f"{k}={v}" for k, v in expected.items())
                     proc = self.run_task(f"airgap:{stage}", *args,
@@ -1240,8 +1161,7 @@ class TaskContractsTests(unittest.TestCase):
         resolved = self.airgap_calls()[0]["resolved"]
         self.assertEqual(resolved["INTERNAL_REGISTRY"], "custom-file-reg")
         self.assertEqual(resolved["NAMESPACE"], "custom-file-ns")
-        if (self.log).exists():
-            self.log.unlink()
+        self.reset_log()
         # Ambient selector applies when CLI selector unset
         proc = self.run_task("airgap:deploy",
                              extra_env=dict(self.tool_env(), AIRGAP_ENV=str(ambient_env)))
