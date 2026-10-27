@@ -34,43 +34,51 @@ Models (reasoning, dense embed, reranker) are served by the **platform team's in
 
 ## Model Gateway & Ownership Contract
 
-**Production (air-gap):** the platform team owns the model tier — reasoning, dense embed, and rerank served by vLLM behind a LiteLLM gateway on a separate cluster. This repo owns Qdrant + ingest + retrieval + the FastAPI agent and consumes the model tier **over HTTP only**; it never installs, deploys, or Helm-charts vLLM / LiteLLM / GPU operators on a product path. All model legs go through the gateway — there is no direct-to-vLLM product path. Tracing is **on by default**: the deploy ships OpenObserve for this repo's components (agent + ingest) and `airgap.env` can set `OTEL_EXPORTER_OTLP_ENDPOINT` to a custom collector or to `off` to disable; the model tier's monitoring stays the platform team's.
+**Production (air-gap):** the platform team owns the model tier — reasoning,
+dense embed and rerank behind its LiteLLM gateway on a separate cluster. This
+repo owns Qdrant + ingest + retrieval + the agent and consumes that tier **over
+HTTP only**: never vLLM / LiteLLM / GPU operators on a product path, and no
+direct-to-vLLM leg. Tracing is **on by default** for this repo's components;
+`OTEL_EXPORTER_OTLP_ENDPOINT` in `airgap.env` selects a custom collector or
+`off`. See the [ownership contract](docs/architecture.md#ownership-contract).
 
-**Local dev/test:** `sh scripts/tools/run-task.sh local:stack` simulates the *complete* production topology on one machine — this repo's Qdrant + agent + OpenObserve, plus a **platform stand-in**: local vLLM backends behind the **real** (digest-pinned) LiteLLM gateway. Agent and ingest still reach models through the gateway, so the production wire contract (single origin, model-id routing, per-leg virtual keys) is what gets tested, and a `v1.search` span must land in the local OpenObserve before the stack reports up. The console is on by default (`UI_ENABLED=true`, `GET /ui` smoke-checked; set `UI_ENABLED=false` for the fail-closed route set). The local model/gateway simulation scripts are local-only — never in the air gap or Helm (CI's separate `airgap-rehearsal` uses the documented `scripts/mock_vllm.py` stand-in). See [docs/install_and_ops.md](docs/install_and_ops.md) §3.6.
+**Local dev/test:** `local:stack` simulates the complete topology on one machine
+— this repo's Qdrant + agent + OpenObserve plus local vLLM backends behind the
+**real** (digest-pinned) LiteLLM gateway. Agent and ingest still go through the
+gateway, so the production wire contract (single origin, model-id routing,
+per-leg virtual keys) is what gets tested, and a `v1.search` span must land in
+the local OpenObserve before the stack reports up. The console is on by default
+(`UI_ENABLED=true`; `UI_ENABLED=false` exercises the fail-closed route set). The
+local model/gateway scripts are local-only — CI's `airgap-rehearsal` uses
+`scripts/mock_vllm.py`; see
+[install and operations §3.6](docs/install_and_ops.md#36-local-vllm-inference--gpu-acceleration-rtx-5060--8gb-vram).
 
-Production wiring — all three legs in `airgap.env` (see [docs/install_and_ops.md](docs/install_and_ops.md) §4.3):
-
-| Role | URL key | Auth |
-|---|---|---|
-| Reasoning (`/v1/answer`, `/v1/chat*`, `/ui`) | `LLM_BASE_URL` + `LLM_MODEL_REASONING` | `llm-api-key` |
-| Embed (`/v1/search`, ingest) | `EMBED_BASE_URL` (+ `EMBED_MODEL` + `DENSE_DIM` + `EMBED_MODEL_REVISION`) | `embed-api-key` |
-| Rerank (default off) | `RERANK_BASE_URL` + `RERANK_MODEL` + `RERANK_ENDPOINT_ORDER` | `rerank-api-key` |
-
-Keys live only in one operator-created Secret (`GATEWAY_API_KEY_SECRET`, rendered via `secretKeyRef` — never plaintext in `airgap.env`; unset = keyless). Before ingesting, prove every leg from inside the cluster and take the recommended leg order:
+Every leg and its per-leg key is set in `airgap.env` and one operator-created
+Secret (`GATEWAY_API_KEY_SECRET` via `secretKeyRef`, never plaintext; unset =
+keyless); the
+[wiring table](docs/install_and_ops.md#43-configure-environment--pre-flight-validation)
+owns the names. Prove every leg from inside the cluster and apply the order the
+probe recommends:
 
 ```bash
 kubectl -n mainframe-rag exec deploy/rag-agent -- python3 /app/scripts/probe_gateway.py
-# recommendation: RERANK_ENDPOINT_ORDER=score_first whenever the score leg answers (rerank_first only when the score leg is unavailable) — probe_gateway.py decides
 ```
 
-Local full-stack simulation (Qdrant + gateway + agent + probe; optional ingest).
-Start the two model commands in separate terminals, waiting for each to become
-healthy before starting the next. The default 8 GiB pack has no reranker:
+Local full-stack simulation (model commands in separate terminals; the default
+8 GiB pack has no reranker):
 
 ```bash
 sh scripts/tools/run-task.sh local:llm
 sh scripts/tools/run-task.sh local:embed
 RERANK_ENABLED=false sh scripts/tools/run-task.sh local:stack
-# Optional: CORPUS_DIR=<dir> RERANK_ENABLED=false sh scripts/tools/run-task.sh local:stack
+# Optional ingest: CORPUS_DIR=<dir> RERANK_ENABLED=false sh scripts/tools/run-task.sh local:stack
 ```
 
-For a fresh named Kind deployment from clone and published bundle, use
-[the clean Kind guide](docs/local-kind.md).
-The Helm deployment and preserved-corpus procedure is in
-[local real-corpus operations](docs/local-real-corpus.md). See the
-[current deployment audit](docs/deployment-audit-2026-09-20.md) for dated results
-and environment gaps. Reranking requires the separately selected compatible
-three-model pack; do not add it beside the default reasoning/embedding pair.
+Fresh Kind deployment: [clean Kind guide](docs/local-kind.md). Helm and the
+preserved corpus: [local real-corpus operations](docs/local-real-corpus.md).
+Reranking needs the separately selected compatible three-model pack; never add
+it beside the default reasoning/embedding pair.
+
 
 ## Live State (Optional, Default Off)
 
@@ -92,67 +100,17 @@ three-model pack; do not add it beside the default reasoning/embedding pair.
 
 Use the repository-pinned entry from the checkout root. On a connected host,
 install once with `sh scripts/tools/install-task.sh`; offline bootstrap supplies
-the same tool without network access. Start with
-`sh scripts/tools/run-task.sh --list` and
-`sh scripts/tools/run-task.sh <name> --summary`. See the
-[runner contract](docs/task-runner.md) for inputs and older command names.
+the same tool without network access. Task `desc`/`summary` is the input and
+default catalog:
 
-| Target Category | Command | Description |
-|---|---|---|
-| **Setup & Quality** | `sh scripts/tools/run-task.sh dev:setup PY=python3.14` | Create `.venv` and install locked Python 3.14 dependencies |
-| | `sh scripts/tools/run-task.sh artifacts:bm25` | Download and cache FastEmbed BM25 model weights |
-| | `sh scripts/tools/run-task.sh qa:check` | Run `ruff check`, `mypy src`, and unit test suite |
-| | `sh scripts/tools/run-task.sh qa:unit` | Run unit test suite (`pytest tests -v`) |
-| | `sh scripts/tools/run-task.sh qa:lint` | Run Ruff linter |
-| | `sh scripts/tools/run-task.sh qa:typecheck` | Run Mypy static type checker |
-| **Simulation** | `sh scripts/tools/run-task.sh qa:sim` | Run full integration simulation tier (ephemeral Docker Qdrant + mock LLM) |
-| | `sh scripts/tools/run-task.sh local:qdrant:up` | Start a local Docker Qdrant container on port 6333 |
-| | `sh scripts/tools/run-task.sh local:qdrant:down` | Stop and remove the local Docker Qdrant container |
-| | `sh scripts/tools/run-task.sh qa:load` | Load tier: same composition under concurrency, absolute contracts (fail-closed, no skips) |
-| **Accuracy & Eval** | `sh scripts/tools/run-task.sh eval:retrieval` | Score golden set queries (`evals/golden.jsonl`) against the mode-keyed baseline (`evals/baseline.json` in hash mode, `evals/baseline-vllm.json` in vllm mode) |
-| | `sh scripts/tools/run-task.sh eval:gate-l1` | L1 retrieval gate on an ephemeral Qdrant simulator (automated CI check) |
-| | `sh scripts/tools/run-task.sh eval:answers` | Answer-tier grounding eval (`/v1/answer` must cite, abstain entries must not answer) — live GPU stack |
-| | `sh scripts/tools/run-task.sh eval:paraphrase` | Paraphrase retrieval instrument (semantic queries without near-verbatim echo) — dedicated collection |
-| | `sh scripts/tools/run-task.sh eval:holdout` | Score the frozen holdout (`evals/holdout.jsonl`, sha-pinned) — release candidates only |
-| | `sh scripts/tools/run-task.sh eval:chat` | Multi-turn condensation A/B (`mainframe_rag.eval.chat`) — live GPU stack, evidence-only, RC venue for real corpora |
-| | `sh scripts/tools/run-task.sh eval:baseline` | Re-record committed retrieval accuracy baseline (dedicated PR) |
-| | `sh scripts/tools/run-task.sh eval:draft` | Helper to draft golden-set candidate queries from collection payload |
-| | `sh scripts/tools/run-task.sh eval:verify-golden` | Mechanically verify golden expectations against the live collection (gates the corpus) |
-| | `sh scripts/tools/run-task.sh eval:report` | Print terminal retrieval evaluation report |
-| | `sh scripts/tools/run-task.sh eval:html` | Generate self-contained offline HTML evaluation dashboard (`bundles/eval-report.html`) |
-| | `sh scripts/tools/run-task.sh eval:compare` | Compare evaluation runs with classification shifts and regression checks |
-| | `sh scripts/tools/run-task.sh eval:harness:gate` / `sh scripts/tools/run-task.sh eval:harness:l2` / `sh scripts/tools/run-task.sh eval:harness:l3` / `sh scripts/tools/run-task.sh eval:harness:l4` | Layered harness tiers L1/L2/L3/L4 — RC-only, live GPU stack |
-| | `sh scripts/tools/run-task.sh eval:harness:baseline` / `sh scripts/tools/run-task.sh eval:harness:l3-baseline` | Re-record harness baselines (dedicated PR) |
-| **Benchmarks** | `sh scripts/tools/run-task.sh eval:bench` | Benchmark ingest rate, peak RSS, Qdrant RAM/disk, and latency vs baseline |
-| | `sh scripts/tools/run-task.sh eval:bench-baseline` | Re-record committed performance baseline (dedicated PR) |
-| | `sh scripts/tools/run-task.sh eval:bench-report` | Print terminal benchmark performance report |
-| | `sh scripts/tools/run-task.sh eval:bench-html` | Generate self-contained offline HTML benchmark dashboard (`bundles/bench-report.html`) |
-| | `sh scripts/tools/run-task.sh eval:bench-compare` | Compare benchmark performance against baseline |
-| | `sh scripts/tools/run-task.sh eval:load` | Run concurrent load test against agent search endpoint |
-| **Interactive Demo** | `sh scripts/tools/run-task.sh local:query` | Launch interactive terminal REPL (`rag-search> `) for inspecting queries |
-| | `QUERY="..." sh scripts/tools/run-task.sh local:query` | Inspect a single query with classification, latency, rank, citations & text |
-| | `sh scripts/tools/run-task.sh local:ask` | Launch interactive reasoning Q&A assistant (`rag-answer> `) with LLM & citations |
-| | `QUERY="..." sh scripts/tools/run-task.sh local:ask` | Ask a single question and get grounded reasoning answer with citations |
-| **Local vLLM & GPU** | `sh scripts/tools/run-task.sh local:llm` | Run local vLLM reasoning server on GPU (port 8000, Gemma-4, Budget `GPU_MEM=0.64`) |
-| | `sh scripts/tools/run-task.sh local:embed` | Run local vLLM dense embedding server on GPU (port 8001, Qwen3-Embedding-0.6B, `GPU_MEM=0.33`, `--runner pooling --convert embed --enforce-eager`) |
-| | `sh scripts/tools/run-task.sh local:rerank` | Run local vLLM reranker server on GPU (port 8002, `BAAI/bge-reranker-v2-m3`) |
-| | `sh scripts/tools/run-task.sh local:stack` | Canonical full local simulation (Qdrant + OpenObserve + LiteLLM gateway + agent + console; `UI_ENABLED=true` by default) |
-| | `sh scripts/tools/run-task.sh local:gateway:up` / `sh scripts/tools/run-task.sh local:gateway:down` | Foreground LiteLLM gateway (port 4000) / stop it and its key store |
-| | `sh scripts/tools/run-task.sh local:openobserve:up` / `sh scripts/tools/run-task.sh local:openobserve:down` | OpenObserve trace backend / stop it |
-| | `sh scripts/tools/run-task.sh local:agent` | Start the agent with `LLM_STREAM=true` (reasoning SSE streaming for TTFT) on port 8080; serves `/ui` when `UI_ENABLED=true` |
-| | `sh scripts/tools/run-task.sh local:check -- --agent URL --trace-url URL --query TEXT --followup TEXT --report PATH` | Verify grounded answers, console follow-up and a fresh search trace against an existing stack |
-| **Cluster recipe** | `sh scripts/tools/run-task.sh artifacts:chart-fetch` / `sh scripts/tools/run-task.sh artifacts:helm-render` / `sh scripts/tools/run-task.sh artifacts:helm-lint` | Fetch / render / lint the vendored Qdrant chart against OpenShift values |
-| | `sh scripts/tools/run-task.sh artifacts:wheelhouse` / `sh scripts/tools/run-task.sh artifacts:bm25` / `sh scripts/tools/run-task.sh artifacts:images` | Build offline wheelhouse, cache BM25 weights, build UBI images (connected host) |
-| | `sh scripts/tools/run-task.sh dev:demo-pdfs` | Generate synthetic demo PDFs into `output/demo-pdfs` |
-| | `sh scripts/tools/run-task.sh dev:clean` | Remove `.venv`, caches, `bundles/`, and `output/` |
-| **Packaging & Standard Deployment** | `sh scripts/tools/run-task.sh airgap:pack` | Build sneakernet package (`dist/qdrant-pdf-rag-<sha>.tar`) on connected host |
-| | `sh scripts/tools/run-task.sh airgap:validate` | Pre-flight validation of tools, env, storage class, and OpenShift SCC |
-| | `sh scripts/tools/run-task.sh airgap:load` | Load image archives and push to `${INTERNAL_REGISTRY}` (in air-gap or local test registry) |
-| | `sh scripts/tools/run-task.sh airgap:deploy` | Deploy Qdrant cluster, OpenObserve tracing, and Agent via separate Helm releases |
-| | `sh scripts/tools/run-task.sh airgap:ingest` | Launch one-shot ingest Job against `CORPUS_PVC=<pvc>` |
-| | `sh scripts/tools/run-task.sh airgap:smoke` | Smoke test in-cluster search endpoint with fail-closed `/healthz` probe |
-| | `sh scripts/tools/run-task.sh airgap:pipeline` | Single master orchestrator running validate -> load -> deploy -> ingest -> smoke |
-| | `sh scripts/tools/run-task.sh airgap:dryrun` | Pre-flight dry-run proving manifest rendering and fail-closed rules without cluster |
+```bash
+sh scripts/tools/run-task.sh --list                 # names and one-line goals
+sh scripts/tools/run-task.sh <name> --summary        # inputs, defaults, side effects
+```
+
+Setup, inputs, cwd, exit codes and older command names are owned by the
+[runner contract](docs/task-runner.md). Required verification tiers are owned by
+[docs/live-stack.md](docs/live-stack.md#verification-minimums).
 
 ---
 
@@ -182,68 +140,18 @@ QDRANT_URL=http://127.0.0.1:6333 QDRANT_COLLECTION=dev-corpus \
 
 ## Standard Deployment Architecture (Air-Gap & Local Cluster)
 
-The hardened 5-stage deployment pipeline (`airgap:validate` -> `airgap:load` -> `airgap:deploy` -> `airgap:ingest` -> `airgap:smoke`; `airgap:pack` is the connected-host pre-step) is the **canonical deployment standard across the entire project**. Both production air-gapped OpenShift and local testing environments adhere to this pipeline (using the same scripts and Helm charts, with adapted sizing and SCC for local test clusters).
+The hardened pipeline is `airgap:pack` (connected-host pre-step) then
+`airgap:validate` -> `airgap:load` -> `airgap:deploy` -> `airgap:ingest` ->
+`airgap:smoke` (or `airgap:pipeline`). The same scripts and Helm charts serve
+production air-gapped OpenShift and local testing, with adapted sizing and SCC
+locally. The air gap never builds images; connected `main` is the only image
+factory.
 
-**The air-gap never builds images.** Connected `main` is the only image factory.
-
-### 1. Production Air-Gapped OpenShift Workflow
-
-1. **Connected Host (or CI Release Download):**
-   ```bash
-   git checkout <main-sha>  # Full 40-character Git SHA (or download sneakernet-bundle from GitHub Actions)
-   sh scripts/tools/run-task.sh airgap:pack         # -> dist/qdrant-pdf-rag-<sha>.tar + .sha256 + PACKING_RECORD.txt
-   ```
-
-2. **Sneakernet Transfer & Automated Bootstrap:**
-   ```bash
-   sha256sum -c qdrant-pdf-rag-<sha>.tar.sha256
-   tar -xf qdrant-pdf-rag-<sha>.tar
-   sh bootstrap.sh          # Verifies signature/members; installs offline Task and workspace
-   cd qdrant-pdf-rag
-   ```
-
-3. **Air-Gapped Bastion:**
-   ```bash
-   # Configure environment & pre-flight validation:
-   # Edit the airgap.env created by bootstrap; preserve existing operator settings.
-   sh scripts/tools/run-task.sh airgap:validate               # tools, storage class (refusing NFS), OpenShift SCC, key Secret
-
-   # Option A: Run complete automated pipeline:
-   CORPUS_PVC=<pvc> sh scripts/tools/run-task.sh airgap:pipeline
-
-   # Option B: Or execute step-by-step:
-   sh scripts/tools/run-task.sh airgap:load                   # Push the 4 base image archives (+ the oauth-proxy sidecar archive) to the internal registry
-   sh scripts/tools/run-task.sh airgap:deploy                 # Deploy Qdrant StatefulSet + Agent + OpenObserve (tracing on by default)
-   # Prove the gateway from inside the cluster, apply its leg-order recommendation:
-   kubectl -n mainframe-rag exec deploy/rag-agent -- python3 /app/scripts/probe_gateway.py
-   sh scripts/tools/run-task.sh airgap:ingest CORPUS_PVC=<pvc> # Ingest corpus from storage PVC
-   sh scripts/tools/run-task.sh airgap:smoke                  # Verify search endpoint (/healthz pre-flight check)
-   ```
-
-### 2. Local Cluster Testing Standard (Kind + Local Registry)
-
-To test the deployment scripts and Kubernetes manifests locally with adapted sizing (1-replica Kind with mock/local vLLM instead of 3-replica OpenShift `restricted-v2`):
-
-1. **Bootstrap Kind & Local Registry:**
-   ```bash
-   docker run -d --restart=always -p 5000:5000 --name airgap-registry registry:2.8.3@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
-   kind create cluster --name airgap
-   docker network connect "kind" airgap-registry || true
-   ```
-
-2. **Configure Environment:**
-   Copy `airgap.env.example` to `airgap.env`, pointing `INTERNAL_REGISTRY=airgap-registry:5000`, `STORAGE_CLASS=standard`, `QDRANT_EXTRA_VALUES=scratch/qdrant-local.yaml` (1 replica override), and your vLLM/mock endpoint.
-
-3. **Execute 5-Stage Pipeline:**
-   ```bash
-   sh scripts/tools/run-task.sh airgap:pack
-   INTERNAL_REGISTRY=localhost:5000 INSECURE_REGISTRY=true sh scripts/tools/run-task.sh airgap:load
-   sh scripts/tools/run-task.sh airgap:deploy
-   sh scripts/tools/run-task.sh airgap:ingest CORPUS_PVC=<pvc>
-   sh scripts/tools/run-task.sh airgap:smoke
-   ```
-
-See **[docs/install_and_ops.md](docs/install_and_ops.md#47-local-cluster-testing-standard-kind--local-registry)** for the complete Kind setup, registry configuration, and mock vLLM setup.
+- Production: [install and operations §4](docs/install_and_ops.md#4-standard-deployment-architecture-air-gap-production--local-cluster-testing)
+  and the [release gate](docs/release-verification.md).
+- Local Kind and registry: [docs/local-kind.md](docs/local-kind.md) and
+  [install and operations §4.7](docs/install_and_ops.md#47-local-cluster-testing-standard-kind--local-registry).
+- Packaging, signing, pins, sizing and security: [docs/deploy.md](docs/deploy.md).
 
 ---
 
