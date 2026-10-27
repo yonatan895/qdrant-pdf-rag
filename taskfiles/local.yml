@@ -524,3 +524,57 @@ tasks:
     cmds:
       - .venv/bin/python scripts/check_live.py {{.CLI_ARGS}}
 
+
+  openwebui:dev-up:
+    desc: Open WebUI dev environment on Kind (heavy lock, RAM admission)
+    summary: |
+      `sh scripts/openwebui/dev.sh up`; owner doc docs/openwebui-dev.md.
+      OWUI_STATE (optional) selects the private state directory.
+    env:
+      TASK_OWUI_STATE: '{{.OWUI_STATE}}'
+    cmds:
+      - >-
+        if [ -n "${TASK_OWUI_STATE:-}" ]; then export OWUI_STATE="$TASK_OWUI_STATE"; fi;
+        sh scripts/openwebui/dev.sh up
+
+  openwebui:dev-dry-run:
+    desc: Validate the dev environment without docker or a cluster
+    summary: |
+      `sh scripts/openwebui/dev.sh --dry-run up`: tools, pins, chart render,
+      manifests, ports, memory and the lock. Run it with an isolated OWUI_STATE.
+    env:
+      TASK_OWUI_STATE: '{{.OWUI_STATE}}'
+    cmds:
+      - >-
+        if [ -n "${TASK_OWUI_STATE:-}" ]; then export OWUI_STATE="$TASK_OWUI_STATE"; fi;
+        sh scripts/openwebui/dev.sh --dry-run up
+
+  openwebui:dev-down:
+    desc: Delete only the dev cluster this tooling created
+    summary: |
+      `sh scripts/openwebui/dev.sh down`: deletes the Kind cluster only when the
+      state directory records its node.
+    env:
+      TASK_OWUI_STATE: '{{.OWUI_STATE}}'
+    cmds:
+      - >-
+        if [ -n "${TASK_OWUI_STATE:-}" ]; then export OWUI_STATE="$TASK_OWUI_STATE"; fi;
+        sh scripts/openwebui/dev.sh down
+
+  openwebui:acceptance:
+    desc: Acceptance suite against an existing Kind lane (KIND_NAME, APP_NS, OWUI_STATE required)
+    summary: |
+      `sh scripts/openwebui/acceptance.sh deploy`, then `run`, against a Kind
+      lane whose images were loaded (`acceptance.sh images`). KIND_NAME, APP_NS
+      and OWUI_STATE have no defaults; the script refuses without them.
+    env:
+      TASK_KIND_NAME: '{{.KIND_NAME}}'
+      TASK_APP_NS: '{{.APP_NS}}'
+      TASK_OWUI_STATE: '{{.OWUI_STATE}}'
+    cmds:
+      - >-
+        if [ -n "${TASK_KIND_NAME:-}" ]; then export KIND_NAME="$TASK_KIND_NAME"; fi;
+        if [ -n "${TASK_APP_NS:-}" ]; then export APP_NS="$TASK_APP_NS"; fi;
+        if [ -n "${TASK_OWUI_STATE:-}" ]; then export OWUI_STATE="$TASK_OWUI_STATE"; fi;
+        sh scripts/openwebui/acceptance.sh deploy &&
+        sh scripts/openwebui/acceptance.sh run

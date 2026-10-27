@@ -1653,6 +1653,7 @@ read-only key, and prints only the state code.
 
 **Two stages, never one command.** `retire_legacy.sh` refuses without
 `--stage copy` or `--stage retire`, so nothing is deleted by accident.
+`sh scripts/tools/run-task.sh airgap:retire-legacy -- <flags>` runs the same script.
 
 | Stage | When | What it changes | Search |
 |---|---|---|---|

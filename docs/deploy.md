@@ -77,7 +77,7 @@ restores the snapshot over whatever the file assigned; empty stays unset
   Explicit model-operation URLs win over `GATEWAY_BASE_URL`, a shared API
   base including `/v1`. The removed `REGISTRY_INTERNAL`, `OPENSHIFT_NAMESPACE`,
   `VLLM_BASE_URL`, `JAEGER_ENABLED` and `JAEGER_QUERY_URL` are refused when
-  non-empty, before any cluster change, with a fixed migration message
+  non-empty (from the file, environment or Task CLI), before any cluster change, with a fixed migration message
   (`model_config.RETIRED_KEYS`; values are never printed): set
   `INTERNAL_REGISTRY`, `NAMESPACE` and `EMBED_BASE_URL` (or `GATEWAY_BASE_URL`),
   and remove the Jaeger keys (`OTEL_EXPORTER_OTLP_ENDPOINT`/`TRACE_QUERY_URL`
@@ -159,9 +159,9 @@ restores the snapshot over whatever the file assigned; empty stays unset
   selections keep their previous defaults and interpretation. Render/precedence
   evidence lives in `test_map_values.py`, `test_helm_chart_contracts.py` and
   `test_airgap_deploy_sh.py`; live model/deployment acceptance stays separate.
-- **Maintenance warning:** a new `.example` key that is not added to
-  `OPERATOR_ENV_KEYS` silently regresses to file-wins. The list and the
-  example must change together.
+- **Maintenance rule:** a new `.example` key must join `OPERATOR_ENV_KEYS`
+  and the Task bridge; `test_every_example_key_crosses_the_task_cli_and_beats_the_file`
+  derives the keys from the example and fails until both are updated.
 - The plaintext gateway-key guard (`LLM_API_KEY`, `EMBED_API_KEY`,
   `RERANK_API_KEY`, `CONTEXT_LLM_API_KEY`) scans the operator file text before it
   is sourced (any `export`/`readonly`/`declare`/chained form) and rejects any
@@ -172,7 +172,8 @@ restores the snapshot over whatever the file assigned; empty stays unset
   caller-set operator values to `common.sh`; CLI assignments win over the
   caller environment before that script applies its precedence rule.
   `sh scripts/tools/run-task.sh airgap:dryrun` executes the pipeline with
-  fixed stand-ins for its declared dry-run inputs. Other operator keys still
+  fixed stand-ins for its declared dry-run inputs, including the fake Open WebUI
+  site inputs (`charts/mainframe-rag/ci/`), so Open WebUI renders on. Other operator keys still
   follow `common.sh`; inspect that owner before supplying private config.
   Task `--dry` only previews commands and is not rendering evidence. Render
   custom values through `airgap:pipeline AIRGAP_DRYRUN=1` or the scripts with
@@ -452,8 +453,8 @@ Compatibility and lifecycle decisions under #448:
   data/snapshot sizes differ from it, so keep the creation-time sizes in the
   file and grow a volume with `oc patch pvc` (`check_qdrant_volumes.py`).
   `QDRANT_EXTRA_VALUES` and `INGEST_EXTRA_PATCH` set outside `CI_REHEARSAL=1`
-  refuse with a message naming these keys. The `OPERATOR_ENV_KEYS` list and the
-  Task bridge for these keys are Verifier-owned (see the PR).
+  refuse with a message naming these keys. These keys follow the
+  [precedence rule](#2-environment-precedence) and the Task bridge like every operator key.
 - `deploy.sh` validates every operator string that becomes a Helm value before
   rendering (`STORAGE_CLASS`/`SNAPSHOT_STORAGE_CLASS`: DNS-1123 name,
   `QDRANT_RELEASE`: DNS-1123 label, `QDRANT_TAG`: image tag,
@@ -673,6 +674,55 @@ checksums **after**.
   stage on its own initiative; operator files remain through recovery.
   The copy list includes `oauth-proxy-image.tar` when the bundle contains it;
   no manual sidecar-image copy is needed before `airgap:load`.
+
+<a id="release-archive"></a>
+### Release archive (#1118, decision D5)
+
+The 3 newest site releases are kept as **private** GHCR OCI artifacts at
+`ghcr.io/yonatan895/qdrant-pdf-rag-release-archive:<release-sha>`, as input
+for the previous-release to new-release upgrade lane. Each artifact holds the
+loose signed bundle members that the site received, one layer per member.
+[`release-archive.txt`](../release-archive.txt) is the only record. It holds
+one row per release: SHA, manifest digest, SHA-256 of the signing public key
+file, and the packed MANIFEST `date:`. Consumers pull by that digest, never by
+tag. `scripts/release_archive.py` writes the record. It uses ORAS
+([pin](../scripts/tools/oras-pin.txt), installed offline by
+`scripts/tools/install-oras.sh --archive`, binary checksum verified before
+every run) and `gh` for the Packages API:
+
+- `verify`/`push --bundle DIR --release-sha SHA --trusted-pub PUB` fails
+  closed before any registry call in these cases: the bundled key differs from
+  the out-of-band key, the `SHA256SUMS.sig` signature does not verify, a file
+  is unsigned or missing, a member checksum does not match, or MANIFEST does
+  not name `SHA`. Push refuses when the package is not private, both before and
+  after the push; that state is fixed in the package settings and never by the
+  tool. Push never overwrites an existing tag. A tag that already exists with
+  identical layers is adopted, which recovers a push that was never recorded.
+- Privacy boundary: push only with the maintainer's own `gh` credentials. Never
+  push this package from a workflow with `GITHUB_TOKEN`, and never add an
+  `org.opencontainers.image.source` annotation. Either one links the package to
+  the public repository, so it needs a visibility decision first.
+- `pull --digest D --out DIR --trusted-pub PUB` accepts only a recorded
+  digest and the recorded key. It refuses a manifest that does not hash to `D`.
+  It downloads each layer blob over the registry API with HTTP Range, using the
+  registry bearer token, which is kept in memory and never printed. The registry
+  is pinned to `https://ghcr.io` (loopback only for tests), and the `gh` token is
+  sent only to a token realm on exactly that origin; a challenge naming any other
+  realm is refused before credentials are sent. A dropped connection resumes from
+  the partial file `.DIR.partial/<layer digest>.partial` beside `DIR`, also
+  across reruns; partials of other artifacts are left in place and reported. A server that ignores Range restarts the blob from byte 0.
+  The registry's redirect to blob storage is followed without the
+  `Authorization` header. `--attempts` bounds consecutive tries without
+  progress, with exponential backoff (`--backoff`). The whole file is then
+  re-hashed against its layer digest; on a mismatch the partial is deleted and
+  pull refuses. `DIR` may hold only this artifact's members, and a member that
+  already matches is kept. Finally pull re-runs the full bundle verification.
+- `list [--remote]` prints the rows newest first and marks which ones prune
+  removes. `prune` keeps the 3 newest by packed date, and refuses `--keep`
+  below 3. It deletes a dropped digest's package version, then its row. A rerun
+  converges. `prune` needs the `delete:packages` gh scope.
+- SIGTERM exits through cleanup, so the temporary registry config holding the
+  `gh` token is removed. SIGKILL cannot be handled and may leave it in `TMPDIR`.
 
 ## 5. Sizing and security
 
@@ -1648,7 +1698,8 @@ refuses until the site supplies every required input. Both layers refuse before 
   or `--set openwebui.enabled=false`. The opt-out render is byte-identical to a chart without Open
   WebUI (tested).
 - Test inputs: `charts/mainframe-rag/ci/openwebui-site-values.yaml` holds obviously fake values
-  (`example.invalid`, TEST-NET CIDR) for lint and render tests only. Never use it at a site.
+  (`example.invalid`, TEST-NET CIDR) for lint and render tests, `artifacts:app-helm-*` and the
+  `airgap:dryrun` stand-ins (with `openwebui-route-ca.pem` as the route CA). Never use them at a site.
 
 **Upgrade consequence for existing sites.** A site upgrading from a release that predates this
 default and whose `airgap.env` has no `OPENWEBUI_*` keys fails validation at the next
@@ -1881,8 +1932,7 @@ step 3 then cannot be issued. Steps 1, 2 and 4 to 6 are unchanged; step 3 become
 2. Create the Secret (`OPENWEBUI_SECRET`) with `webui-secret-key` (`openssl rand -hex 32`) and
    `oidc-client-secret`. Deploy checks that both keys are present before any mutation.
 3. Set the `OPENWEBUI_*` keys in `airgap.env` (see `airgap.env.example`) and run
-   `sh scripts/tools/run-task.sh airgap:deploy`. The bridge of these keys through
-   `taskfiles/airgap.yml` is a Verifier-owned change (#1074). Deploy verifies the registry image
+   `sh scripts/tools/run-task.sh airgap:deploy`. Deploy verifies the registry image
    and then the running pod's digest (`check_pod_images`, role `openwebui`), waits for the
    rollout (schema migrations at first start), and verifies the Route.
 4. First admin: a member of an admin role signs in once, creates an API key in Open WebUI, and
