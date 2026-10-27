@@ -159,6 +159,19 @@ def _prepare(original_inputs, tmp_path, name="run", census_producer=None):
                                          census_producer=approved, **arguments)
 
 
+def _child_environment(prepared, target, *, py=None):
+    """Frozen exports plus the fields every production child reasserts."""
+    stored = json.loads(prepared.sidecar.read_text())
+    embedding = stored["expected"]["contract"]["embedding"]
+    return {**prepared.environment, "PY": py or sys.executable,
+            "PYTHONPATH": str(REPO / "src"), "LOCAL_STACK_DRYRUN": "0",
+            "CORPUS_DIR": stored["corpus_root"], "PRODUCTION_CORPUS_DIR": stored["corpus_root"],
+            "PRODUCTION_GOLDEN_PATH": stored["prerequisites"]["golden"]["path"],
+            "LOCAL_INGEST_PROGRESS": production.verify_retained_target(prepared, target),
+            "GATEWAY_EMBED_MODEL": embedding["model"],
+            "GATEWAY_EMBED_MODEL_REVISION": embedding["revision"]}
+
+
 def test_expected_sources_golden_settings_and_native_query_inputs_are_independent(original_inputs):
     config, profile, arguments, _ = original_inputs
     result = production.build_production_expected(config, profile, **arguments)
@@ -782,17 +795,7 @@ def test_complete_census_requires_independently_approved_producer(original_input
 def test_final_workload_environment_refuses_ambient_semantic_overrides(original_inputs, tmp_path):
     _, _, target = _complete(original_inputs)
     prepared = _prepare(original_inputs, tmp_path)
-    stored = json.loads(prepared.sidecar.read_text())
-    embedding = stored["expected"]["contract"]["embedding"]
-    environment = {**prepared.environment, "PY": sys.executable,
-                   "PYTHONPATH": str(REPO / "src"), "LOCAL_STACK_DRYRUN": "0",
-                   "CORPUS_DIR": stored["corpus_root"],
-                   "PRODUCTION_CORPUS_DIR": stored["corpus_root"],
-                   "PRODUCTION_GOLDEN_PATH": stored["prerequisites"]["golden"]["path"],
-                   "LOCAL_INGEST_PROGRESS": production.verify_retained_target(prepared, target),
-                   "GATEWAY_EMBED_MODEL": embedding["model"],
-                   "GATEWAY_EMBED_MODEL_REVISION": embedding["revision"],
-                   "UNRELATED_ORIGINAL_SETTING": "preserved"}
+    environment = {**_child_environment(prepared, target), "UNRELATED_ORIGINAL_SETTING": "preserved"}
     arguments = {"execution_root": REPO, "expected_interpreter": sys.executable, "cwd": REPO}
     production.verify_workload_environment(prepared, environment, **arguments)
     for name in ("PY", "PYTHONPATH", "LOCAL_STACK_DRYRUN", "CORPUS_DIR", "PRODUCTION_GOLDEN_PATH",
@@ -817,15 +820,7 @@ def test_case_insensitive_settings_cannot_override_frozen_exports_or_unsets(
     _, _, target = _complete(original_inputs)
     prepared = _prepare(original_inputs, tmp_path)
     stored = json.loads(prepared.sidecar.read_text())
-    embedding = stored["expected"]["contract"]["embedding"]
-    environment = {**prepared.environment, "PY": sys.executable,
-                   "PYTHONPATH": str(REPO / "src"), "LOCAL_STACK_DRYRUN": "0",
-                   "CORPUS_DIR": stored["corpus_root"],
-                   "PRODUCTION_CORPUS_DIR": stored["corpus_root"],
-                   "PRODUCTION_GOLDEN_PATH": stored["prerequisites"]["golden"]["path"],
-                   "LOCAL_INGEST_PROGRESS": production.verify_retained_target(prepared, target),
-                   "GATEWAY_EMBED_MODEL": embedding["model"],
-                   "GATEWAY_EMBED_MODEL_REVISION": embedding["revision"]}
+    environment = _child_environment(prepared, target)
     # Native Settings folds environment names case-insensitively. Establish the
     # actual child insertion order, including a later conflicting lowercase key.
     controlled = {name.casefold() for name in environment} | {
@@ -857,15 +852,7 @@ def test_interpreter_spelling_is_preserved_even_for_a_venv_symlink(original_inpu
     prepared = _prepare(original_inputs, tmp_path)
     interpreter = tmp_path / "original prepared interpreter"
     interpreter.symlink_to(sys.executable)
-    stored = json.loads(prepared.sidecar.read_text())
-    embedding = stored["expected"]["contract"]["embedding"]
-    environment = {**prepared.environment, "PY": str(interpreter), "PYTHONPATH": str(REPO / "src"),
-                   "LOCAL_STACK_DRYRUN": "0", "CORPUS_DIR": stored["corpus_root"],
-                   "PRODUCTION_CORPUS_DIR": stored["corpus_root"],
-                   "PRODUCTION_GOLDEN_PATH": stored["prerequisites"]["golden"]["path"],
-                   "LOCAL_INGEST_PROGRESS": production.verify_retained_target(prepared, target),
-                   "GATEWAY_EMBED_MODEL": embedding["model"],
-                   "GATEWAY_EMBED_MODEL_REVISION": embedding["revision"]}
+    environment = _child_environment(prepared, target, py=str(interpreter))
     production.verify_workload_environment(prepared, environment, execution_root=REPO,
                                            expected_interpreter=str(interpreter), cwd=REPO)
     with pytest.raises(production.ProductionAdmissionError, match="environment"):
