@@ -41,6 +41,7 @@ ADMIN_GROUP = "CANARY-GROUP-docs-admin"
 UPN = "canary.person@canary-realm.example"
 DISPLAY = "CANARY Display Name"
 BASELINE = "signed-in"
+UPN_ARG = ("--email-claim", "upn")  # the chart default is email; AD FS sites use upn
 
 
 def b64(obj: Any) -> str:
@@ -156,7 +157,18 @@ def test_decode_only_prints_names_only_and_never_the_token(tmp_path, capsys):
     token = make_jwt(claims)
     f = tmp_path / "id.jwt"
     f.write_text(token)
-    rc = chk.main(["--decode-only", str(f), "--baseline-role", BASELINE, "--client-id", CLIENT_ID])
+    rc = chk.main(
+        [
+            "--decode-only",
+            str(f),
+            "--baseline-role",
+            BASELINE,
+            "--client-id",
+            CLIENT_ID,
+            "--email-claim",
+            "upn",
+        ]
+    )
     out = capsys.readouterr().out
     assert rc == 0, out
     assert "NOT verified" in out and "count=2" in out
@@ -375,6 +387,8 @@ def run_check(adfs: FakeAdfs, *extra: str, ca: str = "good-ca.pem", browse: bool
         str(adfs.dir / ca),
         "--baseline-role",
         BASELINE,
+        "--email-claim",
+        "upn",
         "--port",
         str(port),
         "--redirect-host",
@@ -540,16 +554,16 @@ def test_script_parses_as_python_39_with_parenthesised_excepts():
 def test_expect_baseline_only_requires_the_baseline_by_default(tmp_path, capsys):
     f = tmp_path / "id.jwt"
     f.write_text(make_jwt({"roles": ["docs-user"], "upn": "u", "name": "n"}))
-    assert chk.main(["--decode-only", str(f), "--expect-baseline-only"]) == 8
+    assert chk.main(["--decode-only", str(f), "--expect-baseline-only", *UPN_ARG]) == 8
     out = capsys.readouterr().out
     assert "baseline role present: no" in out
     assert "FAIL: baseline role is missing from the roles claim" in out
     assert "RESULT: ok" not in out
     f.write_text(make_jwt({"roles": [BASELINE, "docs-user"], "upn": "u", "name": "n"}))
-    assert chk.main(["--decode-only", str(f), "--expect-baseline-only"]) == 8
+    assert chk.main(["--decode-only", str(f), "--expect-baseline-only", *UPN_ARG]) == 8
     assert "more than the baseline" in capsys.readouterr().out
     f.write_text(make_jwt({"roles": [BASELINE], "upn": "u", "name": "n"}))
-    assert chk.main(["--decode-only", str(f), "--expect-baseline-only"]) == 0
+    assert chk.main(["--decode-only", str(f), "--expect-baseline-only", *UPN_ARG]) == 0
 
 
 def test_empty_baseline_role_is_a_usage_error(capsys):
@@ -665,6 +679,8 @@ def run_paste(adfs: FakeAdfs, mutate=lambda loc: loc, *extra: str):
         "--paste",
         "--redirect-uri",
         REG_URI,
+        "--email-claim",
+        "upn",
         "--total-timeout",
         "30",
         *extra,
@@ -782,3 +798,441 @@ def test_paste_flag_combinations(capsys):
     base = ["--issuer", "https://x/adfs", "--client-id", "c", "--ca-bundle", "ca"]
     assert chk.main([*base, "--paste"]) == 2
     assert chk.main([*base, "--redirect-uri", REG_URI]) == 2
+
+
+# --------------------------------- role-list mode: roles claim = group claim (#1070)
+# An IdP rule form that offers only LDAP-attribute rules cannot issue a constant
+# baseline value. The roles claim is then the group claim itself (tokenGroups,
+# which always carries the primary group), the role lists are group names, and
+# the check predicts the Open WebUI v0.12.3 decision (utils/oauth.py get_user_role).
+
+DOCS_USERS = "docs-users"
+DOCS_ADMINS = "docs-admins"
+PRIMARY = "CANARY-GROUP-primary"
+OTHER = "CANARY-GROUP-other"
+ROLE_ARGS = [
+    "--roles-claim",
+    "groups",
+    "--allowed-roles",
+    DOCS_USERS,
+    "--admin-roles",
+    DOCS_ADMINS,
+    "--email-claim",
+    "upn",
+]
+
+
+def _decode(tmp_path, claims, *extra):
+    f = tmp_path / "id.jwt"
+    token = make_jwt(claims)
+    f.write_text(token)
+    return chk.main(["--decode-only", str(f), *ROLE_ARGS, *extra]), token
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (["a", "b"], ["a", "b"]),
+        ("a,b", ["a", "b"]),
+        ("a;b", ["a;b"]),
+        ("a", ["a"]),
+        (7, ["7"]),
+        (None, []),
+        ({"x": 1}, []),
+        ([], []),
+    ],
+)
+def test_openwebui_roles_reads_the_claim_like_open_webui(value, expected):
+    assert chk.openwebui_roles(value) == expected
+
+
+@pytest.mark.parametrize(
+    ("roles", "outcome"),
+    [
+        ([PRIMARY, DOCS_USERS], "user"),
+        ([PRIMARY, DOCS_ADMINS], "admin"),
+        ([PRIMARY, DOCS_USERS, DOCS_ADMINS], "admin"),
+        ([PRIMARY, OTHER], "refused"),
+        (["*"], "refused"),  # a group literally named * is not a wildcard in the claim
+        ([PRIMARY, "DOCS-USERS"], "refused"),  # exact, case-sensitive match
+        ([PRIMARY, "CORP\\docs-users"], "refused"),  # a domain prefix is a different value
+        ([], "unchanged"),
+    ],
+)
+def test_predict_outcome_matches_open_webui(roles, outcome):
+    assert chk.predict_outcome(roles, [DOCS_USERS], [DOCS_ADMINS]) == outcome
+
+
+@pytest.mark.parametrize("bad", ["*", "a,*", "signed-in", "a,,b", "a b", ",a", "a,"])
+def test_role_lists_are_refused_like_the_chart(bad, capsys):
+    rc = chk.main(["--decode-only", "x", "--allowed-roles", bad, "--admin-roles", DOCS_ADMINS])
+    assert rc == 2 and "FAIL: role lists" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--allowed-roles", DOCS_USERS],
+        ["--admin-roles", DOCS_ADMINS],
+        ["--expect-refused"],
+        [*ROLE_ARGS, "--expect-baseline-only"],
+    ],
+)
+def test_role_list_mode_usage_errors(argv, capsys):
+    assert chk.main(["--decode-only", "x", *argv]) == 2
+    assert "FAIL:" in capsys.readouterr().out
+
+
+def test_parse_role_list_keeps_a_domain_qualified_name_verbatim():
+    assert chk.parse_role_list("CORP\\docs-users,docs-admins") == [
+        "CORP\\docs-users",
+        "docs-admins",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("groups", "matched_allowed", "matched_admin", "outcome"),
+    [
+        ([PRIMARY, OTHER, DOCS_USERS], DOCS_USERS, "(none)", "user"),
+        ([PRIMARY, DOCS_ADMINS], "(none)", DOCS_ADMINS, "admin"),
+        ([PRIMARY, DOCS_USERS, DOCS_ADMINS], DOCS_USERS, DOCS_ADMINS, "admin"),
+    ],
+)
+def test_role_list_mode_reports_matches_and_outcome_without_other_values(
+    tmp_path, capsys, groups, matched_allowed, matched_admin, outcome
+):
+    claims = {"groups": groups, "upn": UPN, "name": DISPLAY, "aud": CLIENT_ID}
+    rc, token = _decode(tmp_path, claims)
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert f"roles claim 'groups': present, type=list, form=list, count={len(groups)}" in out
+    assert f"configured allowed roles matched: {matched_allowed}" in out
+    assert f"configured admin roles matched: {matched_admin}" in out
+    assert f"predicted Open WebUI v0.12.3 outcome: {outcome}\n" in out
+    assert f"ID token size: {len(token)} bytes" in out
+    assert "baseline role" not in out and "RESULT: ok" in out
+    for canary in (PRIMARY, OTHER, UPN, DISPLAY, token, "CANARY-SIGNATURE", "eyJ"):
+        assert canary not in out
+
+
+def test_role_list_mode_no_docs_group_is_refused_and_expect_refused_passes(tmp_path, capsys):
+    claims = {"groups": [PRIMARY, OTHER], "upn": UPN, "name": DISPLAY}
+    rc, _ = _decode(tmp_path, claims)
+    out = capsys.readouterr().out
+    assert rc == 8 and "outcome: refused (redirect to /auth?error=..., no session cookie)" in out
+    assert "FAIL: the account matches no configured role; Open WebUI would refuse it" in out
+    rc, _ = _decode(tmp_path, claims, "--expect-refused")
+    out = capsys.readouterr().out
+    assert rc == 0 and "outcome: refused" in out and PRIMARY not in out and OTHER not in out
+
+
+def test_role_list_mode_expect_refused_fails_for_a_docs_group_member(tmp_path, capsys):
+    rc, _ = _decode(
+        tmp_path, {"groups": [PRIMARY, DOCS_USERS], "upn": UPN, "name": "n"}, "--expect-refused"
+    )
+    assert rc == 8
+    assert (
+        "FAIL: the account matches a configured role; expected a refusal" in capsys.readouterr().out
+    )
+
+
+@pytest.mark.parametrize(
+    "claims", [{"upn": UPN, "name": "n"}, {"groups": [], "upn": UPN, "name": "n"}]
+)
+def test_role_list_mode_absent_claim_fails_even_when_a_refusal_is_expected(
+    tmp_path, capsys, claims
+):
+    # Revocation needs the claim on every sign-in: with no claim Open WebUI keeps
+    # the stored role, which is not the refusal the no-role account must get.
+    for extra in ((), ("--expect-refused",)):
+        rc, _ = _decode(tmp_path, claims, *extra)
+        out = capsys.readouterr().out
+        assert rc == 8 and "no role decision" in out
+        assert (
+            "FAIL: roles claim is absent or empty: Open WebUI would not recompute the role" in out
+        )
+
+
+@pytest.mark.parametrize(
+    ("value", "form", "count", "outcome"),
+    [
+        (f"{PRIMARY},{DOCS_USERS}", "string split on ','", 2, "user"),
+        (PRIMARY, "single string", 1, "refused"),
+        (f"{PRIMARY};{DOCS_USERS}", "single string", 1, "refused"),  # ';' is not a role separator
+    ],
+)
+def test_role_list_mode_string_claim_forms(tmp_path, capsys, value, form, count, outcome):
+    rc, _ = _decode(tmp_path, {"groups": value, "upn": UPN, "name": "n"})
+    out = capsys.readouterr().out
+    assert f"type=string, form={form}, count={count}" in out
+    assert f"predicted Open WebUI v0.12.3 outcome: {outcome}" in out
+    assert rc == (0 if outcome == "user" else 8)
+    assert PRIMARY not in out
+
+
+@pytest.mark.parametrize(
+    ("claim_value", "allowed", "hint"),
+    [
+        ("Docs-Users", DOCS_USERS, "ignoring letter case"),
+        ("CORP\\docs-users", DOCS_USERS, "with a domain prefix"),
+        ("docs-users", "CORP\\docs-users", "without the domain prefix"),
+        # sh removed an unquoted backslash from airgap.env: CORP\docs-users -> CORPdocs-users
+        ("CORP\\docs-users", "CORPdocs-users", "an unquoted backslash was removed"),
+    ],
+)
+def test_role_list_mode_near_miss_hints_fail_and_name_only_the_configured_role(
+    tmp_path, capsys, claim_value, allowed, hint
+):
+    f = tmp_path / "id.jwt"
+    f.write_text(make_jwt({"groups": [PRIMARY, claim_value], "upn": UPN, "name": "n"}))
+    rc = chk.main(
+        [
+            "--decode-only",
+            str(f),
+            "--roles-claim",
+            "groups",
+            "--allowed-roles",
+            allowed,
+            "--admin-roles",
+            DOCS_ADMINS,
+        ]
+    )
+    out = capsys.readouterr().out
+    assert rc == 8 and hint in out and f"configured role '{allowed}'" in out
+    assert out.strip().splitlines()[-1] in (
+        "FAIL: a configured role differs from a claim value only by form (see hint)",
+        "FAIL: the configured role form does not match the claim's value form",
+    )
+    assert PRIMARY not in out
+    if claim_value != allowed:
+        assert f"'{claim_value}'" not in out
+
+
+@pytest.mark.parametrize(
+    ("size", "warn"),
+    [(100, False), (chk.ID_TOKEN_WARN_BYTES, False), (chk.ID_TOKEN_WARN_BYTES + 1, True)],
+)
+def test_id_token_size_lines(size, warn):
+    lines = chk.id_token_size_lines(size)
+    assert lines[0] == f"ID token size: {size} bytes"
+    if not warn:
+        assert len(lines) == 1
+    else:
+        assert len(lines) == 2 and lines[1].startswith("WARN:")
+        assert "sign-out" in lines[1] and "id_token_hint" in lines[1] and "16384" in lines[1]
+
+
+def test_id_token_size_threshold_leaves_room_in_the_idp_request_limit():
+    # The sign-out URL carries the whole token; the IdP's own cookies share the
+    # 16384-byte http.sys default with it.
+    assert chk.ID_TOKEN_WARN_BYTES <= 16384 // 2
+
+
+def test_large_id_token_warns_without_failing_and_prints_no_values(tmp_path, capsys):
+    groups = [PRIMARY, DOCS_USERS] + [f"{OTHER}-{i:04d}" for i in range(400)]
+    rc, token = _decode(tmp_path, {"groups": groups, "upn": UPN, "name": "n"})
+    out = capsys.readouterr().out
+    assert len(token) > chk.ID_TOKEN_WARN_BYTES
+    assert rc == 0 and f"ID token size: {len(token)} bytes" in out
+    assert "WARN: the ID token is above 8000 bytes: sign-out sends it" in out
+    assert OTHER not in out and PRIMARY not in out
+
+
+def test_baseline_mode_also_reports_the_id_token_size(tmp_path, capsys):
+    f = tmp_path / "id.jwt"
+    token = make_jwt({"roles": [BASELINE, GROUP], "upn": UPN, "name": DISPLAY})
+    f.write_text(token + "\n")
+    assert chk.main(["--decode-only", str(f), *UPN_ARG]) == 0
+    assert f"ID token size: {len(token)} bytes" in capsys.readouterr().out
+
+
+@needs_openssl
+def test_paste_role_list_mode_against_the_fake_adfs(adfs):
+    adfs.claims_fn = lambda n: {
+        "groups": [PRIMARY, OTHER, DOCS_ADMINS],
+        "upn": UPN,
+        "name": DISPLAY,
+    }
+    rc, out, pasted = run_paste(adfs, lambda loc: loc, *ROLE_ARGS)
+    assert rc == 0, out
+    assert "roles claim 'groups': present, type=list, form=list, count=3" in out
+    assert f"configured admin roles matched: {DOCS_ADMINS}" in out
+    assert "predicted Open WebUI v0.12.3 outcome: admin" in out and "ID token size: " in out
+    assert PRIMARY not in out and OTHER not in out
+    assert_paste_no_leak(out, pasted)
+
+
+@needs_openssl
+def test_listener_role_list_mode_expect_refused_against_the_fake_adfs(adfs):
+    adfs.claims_fn = lambda n: {"groups": PRIMARY, "upn": UPN, "name": DISPLAY}
+    rc, out = run_check(adfs, *ROLE_ARGS, "--expect-refused")
+    assert rc == 0, out
+    assert (
+        "form=single string, count=1" in out and "outcome: refused (redirect to /auth?error=" in out
+    )
+    assert PRIMARY not in out
+    assert_no_leak(out)
+
+
+# Domain-qualified group names are the default (tokenGroups spans the forest: a
+# bare name also matches a same-named group of any trusted domain, which fails
+# open; a lost backslash fails closed).
+Q_USERS = "CORP\\docs-users"
+Q_ADMINS = "CORP\\docs-admins"
+Q_PRIMARY = "CANARYDOM\\CANARY-GROUP-primary"
+Q_ARGS = [*ROLE_ARGS[:2], "--allowed-roles", Q_USERS, "--admin-roles", Q_ADMINS, *ROLE_ARGS[6:]]
+
+
+def _decode_q(tmp_path, groups, *extra):
+    f = tmp_path / "id.jwt"
+    f.write_text(make_jwt({"groups": groups, "upn": UPN, "name": DISPLAY}))
+    return chk.main(["--decode-only", str(f), *extra])
+
+
+def test_domain_qualified_roles_match_exactly_without_the_bare_name_warning(tmp_path, capsys):
+    rc = _decode_q(tmp_path, [Q_PRIMARY, Q_ADMINS], *Q_ARGS)
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "configured role form: domain-qualified" in out
+    assert "claim value form: domain-qualified" in out
+    assert f"configured admin roles matched: {Q_ADMINS}" in out
+    assert "predicted Open WebUI v0.12.3 outcome: admin" in out
+    assert "WARN: a bare configured role" not in out and "MISMATCH" not in out
+    assert Q_PRIMARY not in out and "CANARYDOM" not in out
+
+
+@pytest.mark.parametrize(
+    ("groups", "args", "config_form", "claim_form"),
+    [
+        ([Q_PRIMARY, Q_USERS], ROLE_ARGS, "bare", "domain-qualified"),
+        ([PRIMARY, DOCS_USERS], Q_ARGS, "domain-qualified", "bare"),
+    ],
+)
+def test_form_mismatch_is_reported_and_fails(
+    tmp_path, capsys, groups, args, config_form, claim_form
+):
+    for extra in ((), ("--expect-refused",)):
+        rc = _decode_q(tmp_path, groups, *args, *extra)
+        out = capsys.readouterr().out
+        assert rc == 8
+        assert (
+            f"MISMATCH: the configured roles are {config_form} names but the claim's values "
+            f"are {claim_form}; no configured role can match"
+        ) in out
+        assert "FAIL: the configured role form does not match the claim's value form" in out
+        assert PRIMARY not in out
+
+
+def test_bare_configured_roles_warn_and_name_the_multi_domain_count_only(tmp_path, capsys):
+    groups = [PRIMARY, DOCS_USERS, "CANARYDOM\\docs-admins", "OTHERDOM\\docs-admins"]
+    rc = _decode_q(tmp_path, groups, *ROLE_ARGS)
+    out = capsys.readouterr().out
+    # bare docs-users matches, but the account holds docs-admins only domain-qualified
+    assert rc == 8 and "predicted Open WebUI v0.12.3 outcome: user" in out
+    assert "claim value form: mixed" in out
+    assert "WARN: a bare configured role also matches a same-named group" in out
+    assert (
+        "WARN: configured role 'docs-admins' is a bare name and the claim holds a group of "
+        "that name from 2 domains"
+    ) in out
+    assert "CANARYDOM" not in out and "OTHERDOM" not in out and PRIMARY not in out
+
+
+# ------------------- claim names as flags, suggestions and airgap.env lines (#1070)
+# A rule form may emit its rule names (role-upn, role-name, role-groups) or URIs
+# as claim names instead of the plain names; that is confirmed only on the site.
+
+RULE_NAMED = {"role-upn": UPN, "role-name": DISPLAY, "role-groups": [Q_PRIMARY, Q_USERS]}
+
+
+def test_claim_flags_default_to_the_chart_defaults():
+    args = chk.parse_args([])
+    assert (args.email_claim, args.username_claim, args.group_claim, args.roles_claim) == (
+        "email",
+        "name",
+        "groups",
+        "roles",
+    )
+
+
+def test_missing_claims_suggest_the_rule_named_claims_and_print_env_lines(tmp_path, capsys):
+    f = tmp_path / "id.jwt"
+    token = make_jwt(RULE_NAMED)
+    f.write_text(token)
+    rc = chk.main(["--decode-only", str(f), "--allowed-roles", Q_USERS, "--admin-roles", Q_ADMINS])
+    out = capsys.readouterr().out
+    assert rc == 8  # the configured roles claim is absent
+    assert "claim names: role-groups, role-name, role-upn" in out
+    for label, wanted, guess in (
+        ("email", "email", "role-upn"),
+        ("username", "name", "role-name"),
+        ("group", "groups", "role-groups"),
+        ("roles", "roles", "role-groups"),  # role-list mode: roles claim = group claim
+    ):
+        assert (
+            f"{label} claim name '{wanted}': absent; closest claim name in the token: '{guess}'"
+        ) in out
+    env_block = out.split("airgap.env lines for what this token carries (review, then paste):\n")[1]
+    assert env_block.splitlines()[:6] == [
+        "OPENWEBUI_OIDC_EMAIL_CLAIM=role-upn",
+        "OPENWEBUI_OIDC_USERNAME_CLAIM=role-name",
+        "OPENWEBUI_OIDC_GROUP_CLAIM=role-groups",
+        "OPENWEBUI_OIDC_ROLES_CLAIM=role-groups",
+        "OPENWEBUI_OIDC_ALLOWED_ROLES='CORP\\docs-users'",
+        "OPENWEBUI_OIDC_ADMIN_ROLES='CORP\\docs-admins'",
+    ]
+    for canary in (UPN, DISPLAY, Q_PRIMARY, "CANARYDOM", token):
+        assert canary not in out
+
+
+def test_rule_named_claims_pass_when_configured(tmp_path, capsys):
+    f = tmp_path / "id.jwt"
+    f.write_text(make_jwt(RULE_NAMED))
+    argv = ["--decode-only", str(f), "--allowed-roles", Q_USERS, "--admin-roles", Q_ADMINS]
+    argv += ["--email-claim", "role-upn", "--username-claim", "role-name"]
+    argv += ["--group-claim", "role-groups", "--roles-claim", "role-groups"]
+    assert chk.main(argv) == 0
+    out = capsys.readouterr().out
+    assert "roles claim name 'role-groups': present" in out
+    assert "predicted Open WebUI v0.12.3 outcome: user" in out
+
+
+def test_uri_claim_names_and_no_match_are_reported(tmp_path, capsys):
+    uri = "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/upn"
+    f = tmp_path / "id.jwt"
+    f.write_text(make_jwt({uri: UPN, "unrelated": "x", "roles": [BASELINE, GROUP]}))
+    assert chk.main(["--decode-only", str(f)]) == 8
+    out = capsys.readouterr().out
+    assert f"email claim name 'email': absent; closest claim name in the token: '{uri}'" in out
+    assert f"OPENWEBUI_OIDC_EMAIL_CLAIM={uri}\n" in out
+    assert "group claim name 'groups': absent; closest claim name in the token: (none)" in out
+    assert "# OPENWEBUI_OIDC_GROUP_CLAIM=  (no matching claim found)" in out
+    assert UPN not in out
+
+
+def test_printed_env_lines_survive_sh_sourcing_verbatim(tmp_path, capsys):
+    """The printed lines are pasted into airgap.env, which sh sources."""
+    f = tmp_path / "id.jwt"
+    f.write_text(make_jwt(RULE_NAMED))
+    allowed, admin = "CORP\\docs-users,CORP\\docs-readers", "CORP\\docs-admins"
+    chk.main(["--decode-only", str(f), "--allowed-roles", allowed, "--admin-roles", admin])
+    out = capsys.readouterr().out
+    lines = [ln for ln in out.splitlines() if ln.startswith("OPENWEBUI_OIDC_")]
+    env_file = tmp_path / "airgap.env"
+    env_file.write_text("\n".join(lines) + "\n")
+    got = subprocess.run(
+        [
+            "sh",
+            "-c",
+            (
+                '. "$1"; printf "%s|%s|%s" "$OPENWEBUI_OIDC_ALLOWED_ROLES" '
+                '"$OPENWEBUI_OIDC_ADMIN_ROLES" "$OPENWEBUI_OIDC_ROLES_CLAIM"'
+            ),
+            "sh",
+            str(env_file),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert got == f"{allowed}|{admin}|role-groups"

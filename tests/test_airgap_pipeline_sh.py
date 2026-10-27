@@ -8,6 +8,7 @@ Tests pipeline.sh in dry-run mode against hermetic stubs:
 """
 
 
+import os
 import shutil
 
 import pytest
@@ -256,3 +257,84 @@ def test_pipeline_refuses_a_d53595e_shaped_env_before_stage_one(pipe_tree):
     assert "sentinel-" not in r.stdout + r.stderr
     assert "STAGE" not in r.stdout
     assert not log.exists()
+
+
+# --- #1118 B2: the Task dry-run renders the default-on Open WebUI from the
+# documented fake site inputs; the operator path keeps failing closed.
+
+def _task_tree(pipe_tree):
+    from tests.test_taskfile_contracts import find_task
+
+    task = find_task()
+    if task is None:
+        if os.environ.get("TASK_CONTRACTS_REQUIRE_RUNNER") == "1":
+            pytest.fail("pinned Task unavailable; the required lane must fail, not skip")
+        pytest.skip("pinned Task not provisioned; see scripts/tools/install-task.sh")
+    shutil.copy(REPO / "Taskfile.yml", pipe_tree / "Taskfile.yml")
+    shutil.copytree(REPO / "taskfiles", pipe_tree / "taskfiles")
+    shutil.copy(REPO / "images.txt", pipe_tree / "images.txt")
+    shutil.copy(REPO / "scripts/airgap/collection-policy.env", pipe_tree / "scripts/airgap")
+    return task
+
+
+def _run_task(pipe_tree, task, *args, extra_env=None):
+    import subprocess as _sp
+
+    env = {"PATH": f"{pipe_tree / 'bin'}:{os.path.dirname(task)}:/usr/bin:/bin",
+           "HOME": str(pipe_tree), **(extra_env or {})}
+    return _sp.run([task, "--taskfile", str(pipe_tree / "Taskfile.yml"), "--dir", str(pipe_tree), *args],
+                   capture_output=True, text=True, env=env, cwd=pipe_tree, check=False, timeout=300)
+
+
+def _subset(expected, actual, path="openwebui"):
+    """Every value the fixture sets reaches the mapped release values."""
+    if isinstance(expected, dict):
+        for key, value in expected.items():
+            assert isinstance(actual, dict) and key in actual, f"{path}.{key} missing"
+            _subset(value, actual[key], f"{path}.{key}")
+    else:
+        assert actual == expected, path
+
+
+def test_task_dryrun_renders_open_webui_from_the_site_fixture(pipe_tree):
+    import yaml
+
+    task = _task_tree(pipe_tree)
+    # An ambient opt-out (as a CI job environment sets) does not mask the default-on path.
+    r = _run_task(pipe_tree, task, "airgap:dryrun", extra_env={"OPENWEBUI_ENABLED": "false"})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "PIPELINE DRY-RUN COMPLETE: rendering passed; live acceptance NOT RUN" in r.stdout
+    fixture = yaml.safe_load((REPO / "charts/mainframe-rag/ci/openwebui-site-values.yaml").read_text())
+    values = yaml.safe_load((pipe_tree / "dist/mainframe-rag-release-values.yaml").read_text())
+    assert values["openwebui"]["enabled"] is True
+    _subset(fixture["openwebui"], values["openwebui"])
+    assert values["route"]["destinationCA"] == fixture["route"]["destinationCA"]
+    assert (REPO / "charts/mainframe-rag/ci/openwebui-route-ca.pem").read_text() == fixture["route"]["destinationCA"]
+    docs = [d for d in yaml.safe_load_all((pipe_tree / "dist/agent-rendered.yaml").read_text()) if d]
+    kinds = {(d["kind"], d["metadata"]["name"]) for d in docs}
+    assert {("Deployment", "rag-openwebui"), ("Route", "rag-openwebui")} <= kinds
+
+
+@pytest.mark.parametrize("stage", ["preview", "live-deploy"])
+def test_operator_path_without_site_inputs_still_refuses_with_the_opt_out(pipe_tree, stage):
+    task = _task_tree(pipe_tree)
+    helm_log = pipe_tree / "helm.log"
+    empty_env = pipe_tree / "empty.env"
+    empty_env.write_text("")
+    operator = {"AIRGAP_ENV": str(empty_env), "IMAGE_SHA": IMAGE_SHA, "INTERNAL_REGISTRY": "reg.internal:5000",
+                "STORAGE_CLASS": "standard", "EMBED_MODEL": "embed-v1", "DENSE_DIM": "768",
+                "EMBED_MODEL_REVISION": "rev-1", "EMBED_BASE_URL": "http://vllm:8000/v1",
+                "HELM_LOG": str(helm_log)}
+    if stage == "preview":
+        r = _run_task(pipe_tree, task, "airgap:pipeline", "AIRGAP_DRYRUN=1", extra_env=operator)
+    else:
+        # A live deploy reads the namespace service CA first (read-only); answer it
+        # so the run reaches the site-input check that this test is about.
+        write_stub(pipe_tree / "bin" / "kubectl", "#!/bin/sh\ncase \"$*\" in *openshift-service-ca.crt*)\n"
+                   "printf -- '-----BEGIN CERTIFICATE-----\\nX\\n-----END CERTIFICATE-----\\n' ;; esac\nexit 0\n")
+        r = _run_task(pipe_tree, task, "airgap:deploy", extra_env=operator)
+    assert r.returncode != 0
+    assert "Open WebUI is enabled by default (ADR-0008) but required inputs are missing" in r.stderr
+    assert "opt out with OPENWEBUI_ENABLED=false" in r.stderr
+    assert "STAGE 3/5" not in r.stdout
+    assert not helm_log.exists() or "upgrade" not in helm_log.read_text().split()

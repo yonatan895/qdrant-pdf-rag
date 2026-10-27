@@ -77,7 +77,7 @@ restores the snapshot over whatever the file assigned; empty stays unset
   Explicit model-operation URLs win over `GATEWAY_BASE_URL`, a shared API
   base including `/v1`. The removed `REGISTRY_INTERNAL`, `OPENSHIFT_NAMESPACE`,
   `VLLM_BASE_URL`, `JAEGER_ENABLED` and `JAEGER_QUERY_URL` are refused when
-  non-empty, before any cluster change, with a fixed migration message
+  non-empty (from the file, environment or Task CLI), before any cluster change, with a fixed migration message
   (`model_config.RETIRED_KEYS`; values are never printed): set
   `INTERNAL_REGISTRY`, `NAMESPACE` and `EMBED_BASE_URL` (or `GATEWAY_BASE_URL`),
   and remove the Jaeger keys (`OTEL_EXPORTER_OTLP_ENDPOINT`/`TRACE_QUERY_URL`
@@ -159,9 +159,9 @@ restores the snapshot over whatever the file assigned; empty stays unset
   selections keep their previous defaults and interpretation. Render/precedence
   evidence lives in `test_map_values.py`, `test_helm_chart_contracts.py` and
   `test_airgap_deploy_sh.py`; live model/deployment acceptance stays separate.
-- **Maintenance warning:** a new `.example` key that is not added to
-  `OPERATOR_ENV_KEYS` silently regresses to file-wins. The list and the
-  example must change together.
+- **Maintenance rule:** a new `.example` key must join `OPERATOR_ENV_KEYS`
+  and the Task bridge; `test_every_example_key_crosses_the_task_cli_and_beats_the_file`
+  derives the keys from the example and fails until both are updated.
 - The plaintext gateway-key guard (`LLM_API_KEY`, `EMBED_API_KEY`,
   `RERANK_API_KEY`, `CONTEXT_LLM_API_KEY`) scans the operator file text before it
   is sourced (any `export`/`readonly`/`declare`/chained form) and rejects any
@@ -172,7 +172,8 @@ restores the snapshot over whatever the file assigned; empty stays unset
   caller-set operator values to `common.sh`; CLI assignments win over the
   caller environment before that script applies its precedence rule.
   `sh scripts/tools/run-task.sh airgap:dryrun` executes the pipeline with
-  fixed stand-ins for its declared dry-run inputs. Other operator keys still
+  fixed stand-ins for its declared dry-run inputs, including the fake Open WebUI
+  site inputs (`charts/mainframe-rag/ci/`), so Open WebUI renders on. Other operator keys still
   follow `common.sh`; inspect that owner before supplying private config.
   Task `--dry` only previews commands and is not rendering evidence. Render
   custom values through `airgap:pipeline AIRGAP_DRYRUN=1` or the scripts with
@@ -452,8 +453,8 @@ Compatibility and lifecycle decisions under #448:
   data/snapshot sizes differ from it, so keep the creation-time sizes in the
   file and grow a volume with `oc patch pvc` (`check_qdrant_volumes.py`).
   `QDRANT_EXTRA_VALUES` and `INGEST_EXTRA_PATCH` set outside `CI_REHEARSAL=1`
-  refuse with a message naming these keys. The `OPERATOR_ENV_KEYS` list and the
-  Task bridge for these keys are Verifier-owned (see the PR).
+  refuse with a message naming these keys. These keys follow the
+  [precedence rule](#2-environment-precedence) and the Task bridge like every operator key.
 - `deploy.sh` validates every operator string that becomes a Helm value before
   rendering (`STORAGE_CLASS`/`SNAPSHOT_STORAGE_CLASS`: DNS-1123 name,
   `QDRANT_RELEASE`: DNS-1123 label, `QDRANT_TAG`: image tag,
@@ -673,6 +674,55 @@ checksums **after**.
   stage on its own initiative; operator files remain through recovery.
   The copy list includes `oauth-proxy-image.tar` when the bundle contains it;
   no manual sidecar-image copy is needed before `airgap:load`.
+
+<a id="release-archive"></a>
+### Release archive (#1118, decision D5)
+
+The 3 newest site releases are kept as **private** GHCR OCI artifacts at
+`ghcr.io/yonatan895/qdrant-pdf-rag-release-archive:<release-sha>`, as input
+for the previous-release to new-release upgrade lane. Each artifact holds the
+loose signed bundle members that the site received, one layer per member.
+[`release-archive.txt`](../release-archive.txt) is the only record. It holds
+one row per release: SHA, manifest digest, SHA-256 of the signing public key
+file, and the packed MANIFEST `date:`. Consumers pull by that digest, never by
+tag. `scripts/release_archive.py` writes the record. It uses ORAS
+([pin](../scripts/tools/oras-pin.txt), installed offline by
+`scripts/tools/install-oras.sh --archive`, binary checksum verified before
+every run) and `gh` for the Packages API:
+
+- `verify`/`push --bundle DIR --release-sha SHA --trusted-pub PUB` fails
+  closed before any registry call in these cases: the bundled key differs from
+  the out-of-band key, the `SHA256SUMS.sig` signature does not verify, a file
+  is unsigned or missing, a member checksum does not match, or MANIFEST does
+  not name `SHA`. Push refuses when the package is not private, both before and
+  after the push; that state is fixed in the package settings and never by the
+  tool. Push never overwrites an existing tag. A tag that already exists with
+  identical layers is adopted, which recovers a push that was never recorded.
+- Privacy boundary: push only with the maintainer's own `gh` credentials. Never
+  push this package from a workflow with `GITHUB_TOKEN`, and never add an
+  `org.opencontainers.image.source` annotation. Either one links the package to
+  the public repository, so it needs a visibility decision first.
+- `pull --digest D --out DIR --trusted-pub PUB` accepts only a recorded
+  digest and the recorded key. It refuses a manifest that does not hash to `D`.
+  It downloads each layer blob over the registry API with HTTP Range, using the
+  registry bearer token, which is kept in memory and never printed. The registry
+  is pinned to `https://ghcr.io` (loopback only for tests), and the `gh` token is
+  sent only to a token realm on exactly that origin; a challenge naming any other
+  realm is refused before credentials are sent. A dropped connection resumes from
+  the partial file `.DIR.partial/<layer digest>.partial` beside `DIR`, also
+  across reruns; partials of other artifacts are left in place and reported. A server that ignores Range restarts the blob from byte 0.
+  The registry's redirect to blob storage is followed without the
+  `Authorization` header. `--attempts` bounds consecutive tries without
+  progress, with exponential backoff (`--backoff`). The whole file is then
+  re-hashed against its layer digest; on a mismatch the partial is deleted and
+  pull refuses. `DIR` may hold only this artifact's members, and a member that
+  already matches is kept. Finally pull re-runs the full bundle verification.
+- `list [--remote]` prints the rows newest first and marks which ones prune
+  removes. `prune` keeps the 3 newest by packed date, and refuses `--keep`
+  below 3. It deletes a dropped digest's package version, then its row. A rerun
+  converges. `prune` needs the `delete:packages` gh scope.
+- SIGTERM exits through cleanup, so the temporary registry config holding the
+  `gh` token is removed. SIGKILL cannot be handled and may leave it in `TMPDIR`.
 
 ## 5. Sizing and security
 
@@ -1570,7 +1620,8 @@ refuses until the site supplies every required input. Both layers refuse before 
   or `--set openwebui.enabled=false`. The opt-out render is byte-identical to a chart without Open
   WebUI (tested).
 - Test inputs: `charts/mainframe-rag/ci/openwebui-site-values.yaml` holds obviously fake values
-  (`example.invalid`, TEST-NET CIDR) for lint and render tests only. Never use it at a site.
+  (`example.invalid`, TEST-NET CIDR) for lint and render tests, `artifacts:app-helm-*` and the
+  `airgap:dryrun` stand-ins (with `openwebui-route-ca.pem` as the route CA). Never use them at a site.
 
 **Upgrade consequence for existing sites.** A site upgrading from a release that predates this
 default and whose `airgap.env` has no `OPENWEBUI_*` keys fails validation at the next
@@ -1599,7 +1650,8 @@ the pod. Without it, sign-in fails at the server-side discovery call; a public-C
 nothing. Mapping, the chart render and the init step each refuse an unreadable, blank,
 non-certificate or corrupted bundle with fixed text without printing the value, so a bad
 bundle cannot yield a Ready pod whose sign-ins fail. Token exchange stays disabled
-(`ENABLE_OAUTH_TOKEN_EXCHANGE=false`).
+(`ENABLE_OAUTH_TOKEN_EXCHANGE=false`), and so does the ID-token cookie
+(`ENABLE_OAUTH_ID_TOKEN_COOKIE=false`, [below](#adfs-ldap-only-rule-form)).
 
 **What the identity team registers.** One confidential OIDC client on the organisation's IdP
 (AD FS, or Keycloak in front of it):
@@ -1624,7 +1676,9 @@ bundle cannot yield a Ready pod whose sign-ins fail. Token exchange stays disabl
   to every user it authenticates, plus the group roles. Open WebUI v0.12.3 recomputes the role
   at every sign-in only when the claim is present: if the claim is missing, an existing user
   keeps the stored role, so a removed admin stays admin. Neither role list may contain
-  `signed-in` or `*`; validate and the chart refuse both.
+  `signed-in` or `*`; validate and the chart refuse both. An IdP that cannot issue a constant
+  value uses the group claim as the roles claim instead (AD FS variant
+  [below](#adfs-ldap-only-rule-form)).
 - The team hands over: the discovery URL (`https://<idp>/.well-known/openid-configuration`), the
   client id, the client secret (it goes into the Secret, never `airgap.env`), and the IdP's IPv4
   CIDRs and port for the egress policy. If an enterprise CA issued the IdP's TLS certificate, they
@@ -1670,7 +1724,9 @@ statements come from the v0.12.3 source in the pinned image.
      - An admin role is present: the user becomes `admin`.
      - Otherwise an allowed role is present: the user becomes `user`, so a removed admin is
        demoted.
-     - Only `signed-in` is present: sign-in is refused with HTTP 403 and no session is issued.
+     - Only `signed-in` is present: sign-in is refused. Open WebUI raises 403 internally and the
+       callback answers with a redirect to `/auth?error=...` and no session cookie
+       (`utils/oauth.py` `handle_callback`), so the browser shows an error on the sign-in page.
      - No claim at all: an existing user keeps the stored role, and a new user is `pending`.
        The baseline rule exists to prevent this case.
    - **Revocation window.** The IdP change takes effect at the next sign-in. A session that is
@@ -1680,6 +1736,64 @@ statements come from the v0.12.3 source in the pinned image.
      To remove an admin at once, also demote or delete the account in the Open WebUI admin UI.
      That takes effect on the next request, because the role is read from the database on each
      request. If the account owns the installer's admin API key, rotate the key.
+<a id="adfs-ldap-only-rule-form"></a>
+**Variant: a self-service rule form that offers only LDAP-attribute rules.** Some AD FS
+deployments give the application owner a form with fixed LDAP attribute queries only: no custom
+rules and no group-to-constant-value rules. The `signed-in` baseline and the role-value rules of
+step 3 then cannot be issued. Steps 1, 2 and 4 to 6 are unchanged; step 3 becomes:
+- **Rules.** User-Principal-Name to `upn` and Display-Name to `name`, as in step 3. For groups,
+  use the **domain-qualified** group-membership query (`tokenGroups(domainQualifiedName)`,
+  values `DOMAIN\group`).
+- **Settings.** `OPENWEBUI_OIDC_ROLES_CLAIM` equals `OPENWEBUI_OIDC_GROUP_CLAIM`: the group claim
+  is the roles claim. `OPENWEBUI_OIDC_ALLOWED_ROLES` and `OPENWEBUI_OIDC_ADMIN_ROLES` are
+  domain-qualified AD group names. Single-quote each list in `airgap.env`, for example
+  `OPENWEBUI_OIDC_ADMIN_ROLES='DOMAIN\docs-admins'`. The file is sourced by `sh`, which removes an
+  unquoted backslash, so validate and deploy refuse a role line whose backslash is outside single
+  quotes (fixed message, value not shown). Names are comma-separated with no spaces. Open WebUI
+  v0.12.3 compares them exactly and case-sensitively with the claim values (`utils/oauth.py`
+  `get_user_role`; the configured names are trimmed, the claim values are not), so copy the case
+  the token carries.
+- **Why domain-qualified.** Group membership spans the forest and its trusts. A bare name such as
+  `docs-admins` also matches a same-named group in any other domain whose users can sign in
+  through this AD FS: that fails open, as a silent admin grant, and admins can read chats. A
+  lost backslash fails closed: `DOMAIN\docs-admins` becomes `DOMAINdocs-admins`, which matches
+  nobody. Bare names (the unqualified query) are an exception for a forest with one domain and
+  no trusts, which the identity team must confirm in writing.
+- **Revocation.** Token-Groups always includes the user's primary group (Domain Users), so the
+  claim is present in every token. A user in neither docs group carries only values that match
+  no configured role and is refused (redirected to `/auth?error=...` without a session), so the
+  guarantee above still holds without a
+  baseline. The chart's refusal of `*` and `signed-in` stays. A group literally named `*` cannot
+  be configured, and a claim value `*` matches nothing (only a configured `*` is a wildcard).
+- **Token size.** Every group of the user is in the ID token. By default Open WebUI v0.12.3
+  also sets the raw ID token as the `oauth_id_token` browser cookie on the sign-in callback
+  (`utils/oauth.py` `handle_callback`). The pod's allow-list proxy reads that response header into
+  nginx's default `proxy_buffer_size` of one 4 KiB page, so a large token failed the sign-in with
+  HTTP 502 (measured on the pinned nginx image and the chart's config). Nothing reads the cookie
+  back, so the chart sets `ENABLE_OAUTH_ID_TOKEN_COOKIE=false` (maintainer decision). The callback
+  headers are then about 800 bytes whatever the token size, and Open WebUI keeps the token in its
+  database (`models/oauth_sessions.py`). One step still carries the whole token: sign-out (below)
+  puts it in the IdP logout URL. AD FS runs on Windows http.sys, which by default limits the
+  request line and headers to 16384 bytes (Microsoft's http.sys registry documentation; not
+  verified here). The claims check warns above 8000 bytes; above that, confirm sign-out on the
+  test client. No size remedy is needed for sign-in. If sign-out to the IdP fails for a very
+  large token, the Rosetta session is already gone: the sign-out response deletes its cookies
+  before the redirect. Do not shrink the group claim: in this form the shorter queries either
+  give bare names (fail open, above) or drop the primary group, and so lose the claim that
+  revocation relies on.
+- **Sign-out.** Open WebUI v0.12.3 (`routers/auths.py` `signout`) deletes its session cookies and,
+  for an OIDC session, sends the browser to the IdP's `end_session_endpoint` from discovery with
+  `id_token_hint` taken from the server-side OAuth session (not from a cookie). Whether AD FS then
+  ends its own SSO session is AD FS behaviour *(confirm on the test client)*. The chart has no
+  Redis, and v0.12.3 revokes session tokens only through Redis (`utils/auth.py`
+  `invalidate_token`). Sign-out therefore removes the browser's Rosetta session, but a copied
+  session token stays valid until it expires (8 hours).
+- **Logs.** A refused sign-in makes Open WebUI log a warning that lists the user's roles claim
+  values, that is, all their group names (v0.12.3 `get_user_role`). This is identity metadata in
+  the pod log, not chat content.
+- **Check.** Run the [claims check](#adfs-claims-check) in role-list mode before deploying. In
+  step 6, the refusal of the account in no docs group shows that the group claim arrives.
+
 4. **CA.** If the enterprise CA issued the AD FS TLS certificate, export that CA (root and any
    intermediate) as PEM and set `OPENWEBUI_IDP_CA_FILE`. Without it, Open WebUI cannot reach the
    discovery URL.
@@ -1695,7 +1809,8 @@ statements come from the v0.12.3 source in the pinned image.
    be a member of that group; the chart does not create groups from the claim, so create the
    group first. This shows that the ID token carried the e-mail, role and group claims. Then
    prove revocation: sign in with a test account that is in no role group. It must be refused
-   (HTTP 403, an error on the sign-in page). That shows the baseline claim arrives. Next, remove
+   (a redirect to `/auth?error=...` with no session cookie, shown as an error on the sign-in
+   page). That shows the baseline claim arrives. Next, remove
    a test admin from the admin group, keeping it in the user group. At its next sign-in it must
    show the `user` role.
 
@@ -1707,8 +1822,7 @@ statements come from the v0.12.3 source in the pinned image.
 2. Create the Secret (`OPENWEBUI_SECRET`) with `webui-secret-key` (`openssl rand -hex 32`) and
    `oidc-client-secret`. Deploy checks that both keys are present before any mutation.
 3. Set the `OPENWEBUI_*` keys in `airgap.env` (see `airgap.env.example`) and run
-   `sh scripts/tools/run-task.sh airgap:deploy`. The bridge of these keys through
-   `taskfiles/airgap.yml` is a Verifier-owned change (#1074). Deploy verifies the registry image
+   `sh scripts/tools/run-task.sh airgap:deploy`. Deploy verifies the registry image
    and then the running pod's digest (`check_pod_images`, role `openwebui`), waits for the
    rollout (schema migrations at first start), and verifies the Route.
 4. First admin: a member of an admin role signs in once, creates an API key in Open WebUI, and
@@ -1999,10 +2113,17 @@ production release. Complete the applicable live-stack acceptance separately.
 `scripts/openwebui/adfs_claims_check.py` proves, from the air-gapped bastion, that the AD FS
 client for Open WebUI issues the claims the chart reads. It is stdlib-only (`python3 -I`),
 talks only to the AD FS host, and checks `iss`, `aud`, `nonce`, `exp` and the claim
-expectations. It prints claim **names**, the roles claim's JSON type and value **count**, and
-yes/no answers. It never prints tokens, the secret, claim values, group names or identity, and
+expectations. It prints claim **names**, the roles claim's JSON type and value **count**, the ID
+token size in bytes, yes/no answers and, in role-list mode, the **configured** roles that
+matched. It never prints tokens, the secret, other claim values or identity, and
 every failure is one fixed line with a distinct exit code (3 TLS, 5 callback, 6 token, 7 ID
 token, 8 claims). The ID token signature is **not** verified; this is a diagnostic only.
+
+Claim names are flags with the chart defaults: `--email-claim` (`email`), `--username-claim`
+(`name`), `--group-claim` (`groups`) and `--roles-claim` (`roles`). When a configured claim is
+absent, the script names the closest claim name the token carries (a rule form may emit its rule
+names or URIs as claim types). It always ends with the `OPENWEBUI_OIDC_*` lines for
+`airgap.env` that match what it found, with any value holding a backslash single-quoted.
 
 ```sh
 python3 -I scripts/openwebui/adfs_claims_check.py \
@@ -2013,7 +2134,8 @@ python3 -I scripts/openwebui/adfs_claims_check.py \
 ```
 
 Flags also read `ADFS_ISSUER`, `ADFS_CLIENT_ID`, `ADFS_CLIENT_SECRET_FILE`, `ADFS_CA_BUNDLE`,
-`ADFS_ROLES_CLAIM`, `ADFS_EMAIL_CLAIM`, `ADFS_USERNAME_CLAIM`, `ADFS_BASELINE_ROLE`,
+`ADFS_ROLES_CLAIM`, `ADFS_GROUP_CLAIM`, `ADFS_EMAIL_CLAIM`, `ADFS_USERNAME_CLAIM`,
+`ADFS_BASELINE_ROLE`, `ADFS_ALLOWED_ROLES`, `ADFS_ADMIN_ROLES`,
 `ADFS_SCOPES` (default `openid profile email allatclaims`) and `ADFS_CALLBACK_PORT` (8400).
 The secret is never an argument: without `--client-secret-file` it is prompted for. The
 script prints an authorize URL; open it in a browser that can reach AD FS and the bastion's
@@ -2022,6 +2144,29 @@ script listens once on `http://127.0.0.1:<port>/callback` (180 s). Run it with a
 in a role group (expect exit 0), then with `--expect-baseline-only` and an account in no role
 group (the baseline must be the only value). `--decode-only <file>` analyses a saved ID token
 offline with the same output rules.
+
+**Role-list mode** ([LDAP-attribute-only rule form](#adfs-ldap-only-rule-form)). Pass the role
+lists as configured; they are checked like validate and the chart check them:
+
+```sh
+python3 -I scripts/openwebui/adfs_claims_check.py --paste \
+  --redirect-uri https://<openwebui-host>/oauth/oidc/callback \
+  --issuer https://<adfs-host>/adfs --client-id <client-id> \
+  --client-secret-file <file> --ca-bundle <ca.pem> \
+  --email-claim upn --username-claim name --group-claim groups --roles-claim groups \
+  --allowed-roles 'DOMAIN\docs-users' --admin-roles 'DOMAIN\docs-admins'
+```
+
+It reports whether the claim is a list or a string (split on `,`), which configured roles
+matched, and the predicted Open WebUI v0.12.3 outcome: `admin`, `user` or refused (a redirect
+to `/auth?error=...` with no session cookie). Run it
+with a docs-group account (expect exit 0), then with `--expect-refused` and an account in
+neither docs group: it passes only if the claim is present and the prediction is a refusal.
+It fails when a configured role differs from a claim value only by letter case, a domain
+prefix or a removed backslash, or when the configured names are bare and the token's are
+domain-qualified (or the reverse); it names only the configured role. It warns on bare
+configured names, and when a bare name occurs in the token under more than one domain prefix
+(the count only). It warns when the ID token is above 8000 bytes (see "Token size" above).
 
 **Paste mode (the default recommendation when the localhost redirect is not registered).**
 It needs only the real redirect URI and works before Open WebUI exists:

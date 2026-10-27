@@ -1,4 +1,5 @@
 import ast
+import os
 import re
 import tomllib
 from pathlib import Path
@@ -79,3 +80,22 @@ def test_litellm_is_only_imported_by_the_gateway_only_hooks():
     assert pins == [], f"litellm must not return to the lockfile: {pins}"
 
 
+
+
+def _site_layer_paths_on_github(root: Path, env: dict[str, str]) -> list[str]:
+    """ADR-0009 site-layer paths present in a GitHub Actions checkout.
+
+    gap/ and .gitlab/ belong only to the air-gapped GitLab fork, which tracks
+    them and never runs GitHub Actions; upstream must never track them.
+    """
+    if env.get("GITHUB_ACTIONS") != "true":
+        return []
+    return [name for name in ("gap", ".gitlab") if (root / name).exists()]
+
+
+def test_github_never_tracks_the_gap_site_layer(tmp_path):
+    assert _site_layer_paths_on_github(ROOT, dict(os.environ)) == []
+    (tmp_path / "gap").mkdir()
+    (tmp_path / ".gitlab").mkdir()
+    assert _site_layer_paths_on_github(tmp_path, {"GITHUB_ACTIONS": "true"}) == ["gap", ".gitlab"]
+    assert _site_layer_paths_on_github(tmp_path, {}) == []

@@ -1,0 +1,11 @@
+# ORAS CLI for the private release archive (#1118, decision D5); Linux x86_64 only.
+# Archive digest: the release's oras_1.3.4_checksums.txt and the GitHub release
+# asset digest agree. Binary digest was measured after verifying that archive;
+# scripts/release_archive.py verifies the binary before every execution.
+version: v1.3.4
+asset: oras_1.3.4_linux_amd64.tar.gz
+sha256: f27adb935022d94df8dc77719c322dda592c78a0d57a6f7dcdd8d900b248c454
+binary-sha256: 246c47e91bf2749a555ffe00a9824844c6df3a26d61974e3ce08f2077d79c556
+origin: https://github.com/oras-project/oras/releases/download/v1.3.4/oras_1.3.4_linux_amd64.tar.gz
+license: Apache-2.0
+platforms: linux-amd64 only

@@ -1270,6 +1270,27 @@ def test_validate_openwebui_refuses_an_incomplete_selection(tree, key, needle):
     assert needle in r.stderr
 
 
+def test_validate_openwebui_domain_qualified_roles_single_quoted_pass_unquoted_refused(tree):
+    r"""#1070: sh drops a backslash outside single quotes when it sources the file
+    (DOMAIN\group -> DOMAINgroup), so validate refuses that form before any tool
+    with a fixed message, and accepts the documented single-quoted value."""
+    _openwebui_tree(tree)
+    base = {k: v for k, v in OWUI_OPERATOR_ENV.items() if not k.endswith("_ROLES")}
+    good = tree / "roles-good.env"
+    good.write_text("OPENWEBUI_OIDC_ALLOWED_ROLES='CORP\\docs-users'\n"
+                    "OPENWEBUI_OIDC_ADMIN_ROLES='CORP\\docs-admins'\n")
+    r = _run(tree, {**base, "AIRGAP_ENV": str(good)})
+    assert r.returncode == 0, r.stderr
+    bad = tree / "roles-bad.env"
+    bad.write_text("OPENWEBUI_OIDC_ALLOWED_ROLES='CORP\\docs-users'\n"
+                   "OPENWEBUI_OIDC_ADMIN_ROLES=CORP\\docs-admins\n")
+    r, calls = _run_with_recording_stubs(tree, {**base, "AIRGAP_ENV": str(bad)})
+    assert r.returncode != 0
+    assert "has a backslash outside single quotes" in r.stderr
+    assert "Single-quote the whole value" in r.stderr and "CORP" not in r.stderr
+    assert calls == []
+
+
 def test_validate_openwebui_pending_pin_refused_only_when_enabled(tree):
     _openwebui_tree(tree, pin="sha256:PENDING")
     r = _openwebui_run(tree)
