@@ -13,17 +13,9 @@ from mainframe_rag.retrieve.filters import build_filter, build_scope_filter, par
 from mainframe_rag.retrieve.query import entry_headed, format_citation, rrf_fuse, search
 from tests.conftest import FakeEmbedder, FakeQdrant, _point, _typed_point
 from tests.fakes import batch_via_query_points
-
-
-def _settings(dim: int | None = 768) -> Settings:
-    return Settings(
-        qdrant_url="http://localhost:6333",
-        qdrant_collection="mainframe_manuals",
-        dense_dim=dim,
-        embed_base_url="http://localhost:8000/v1",
-        embed_model="test-embed",
-        bm25_model="Qdrant/bm25",
-    )
+from tests.helpers_eval_local import eval_settings as _settings
+from tests.helpers_eval_local import hit as _hit
+from tests.helpers_eval_local import point as _spoint
 
 
 def test_parse_query_identifiers():
@@ -169,63 +161,28 @@ def test_search_nl_weights_equal(embedder):
     assert [h.chunk_id for h in hits] == ["dense-only", "sparse-only"]
 
 
-def test_rrf_fuse_tie_order_is_deterministic():
-    """Tied RRF scores must produce stable, deterministic ordering (Timsort stability)."""
-    p1 = _point("chunk-1")
-    p2 = _point("chunk-2")
-    # In equal weight and equal ranks across dense and sparse:
-    hits = rrf_fuse([p1, p2], [p2, p1], weights=(1.0, 1.0), k=2, limit=2)
-    assert len(hits) == 2
-    assert hits[0].score == hits[1].score
-    assert [h.chunk_id for h in hits] == ["chunk-1", "chunk-2"]
-
-
 def _leading_title_point(pid: str, doc_id: str) -> models.ScoredPoint:
     """A document's leading title section (#1001): page 0, heading == title."""
-    point = _point(pid)
-    payload = dict(point.payload or {})
-    payload.update(
-        {
-            "doc_id": doc_id,
-            "title": "z/OS BatchPipes",
-            "heading_path": "z/OS BatchPipes",
-            "page_label": "1-2",
-            "page_start": 0,
-        }
-    )
-    return point.model_copy(update={"payload": payload})
+    return _payload_point(pid, doc_id, title="z/OS BatchPipes", heading_path="z/OS BatchPipes",
+                          page_label="1-2", page_start=0)
 
 
-def _no_outline_body_point(pid: str, doc_id: str, page_start: int = 40) -> models.ScoredPoint:
+def _no_outline_body_point(pid: str, doc_id: str) -> models.ScoredPoint:
     """A body window of a document with no outline: `fallback_sections` gives
     it heading path == title too, but it starts past page 0."""
-    point = _point(pid)
-    payload = dict(point.payload or {})
-    payload.update(
-        {
-            "doc_id": doc_id,
-            "title": "z/OS BatchPipes",
-            "heading_path": "z/OS BatchPipes",
-            "page_label": str(page_start + 1),
-            "page_start": page_start,
-        }
-    )
-    return point.model_copy(update={"payload": payload})
+    return _payload_point(pid, doc_id, title="z/OS BatchPipes", heading_path="z/OS BatchPipes",
+                          page_label="41", page_start=40)
 
 
-def _section_point(pid: str, doc_id: str) -> models.ScoredPoint:
+def _section_point(pid: str, doc_id: str, *, heading_path="z/OS BatchPipes > Planning for BatchPipes",
+                   page_start=181) -> models.ScoredPoint:
+    return _payload_point(pid, doc_id, title="z/OS BatchPipes", heading_path=heading_path,
+                          page_label="182-183", page_start=page_start)
+
+
+def _payload_point(pid: str, doc_id: str, **fields) -> models.ScoredPoint:
     point = _point(pid)
-    payload = dict(point.payload or {})
-    payload.update(
-        {
-            "doc_id": doc_id,
-            "title": "z/OS BatchPipes",
-            "heading_path": "z/OS BatchPipes > Planning for BatchPipes",
-            "page_label": "182-183",
-            "page_start": 181,
-        }
-    )
-    return point.model_copy(update={"payload": payload})
+    return point.model_copy(update={"payload": {**(point.payload or {}), "doc_id": doc_id, **fields}})
 
 
 def _tie(dense_first: models.ScoredPoint, sparse_first: models.ScoredPoint) -> list:
@@ -233,117 +190,77 @@ def _tie(dense_first: models.ScoredPoint, sparse_first: models.ScoredPoint) -> l
     return rrf_fuse([dense_first], [sparse_first], weights=(1.0, 1.0), k=60, limit=4)
 
 
-def test_rrf_fuse_exact_cross_document_tie_prefers_section_chunk():
-    """Issue #1100: each leg can rank a different chunk first, which ties the
-    two RRF sums exactly. The dense-first insertion order then let one
-    document's leading title section take rank 1 from another document's body
-    chunk. On that exact tie the section chunk wins the head; the title chunk
-    stays retrieved at rank 2 (title/cover queries keep it reachable)."""
-    title = _leading_title_point("title-section", "SA23-1376-00")
-    body = _section_point("body", "SC27-3662-02")
-    hits = rrf_fuse(
-        [title, _section_point("dense-2", "SA23-1379-02")],
-        [body, _section_point("sparse-2", "SA23-1391-01")],
-        weights=(1.0, 1.0),
-        k=60,
-        limit=4,
-    )
+def _blank_tie_pair() -> list[models.ScoredPoint]:
+    """Two legacy points with no stored title or heading at all."""
+    return [_payload_point(pid, "D", title="", heading="", page_start=0)
+            for pid in ("chunk-1", "chunk-2")]
+
+
+_TITLE = _leading_title_point("title-section", "SA23-1376-00")
+_LEGACY_TITLE = _payload_point("title-section", "SA23-1376-00", title="z/OS BatchPipes",
+                               heading="z/OS BatchPipes", page_label="1-2")
+_BODY = _section_point("body", "SC27-3662-02")
+_BLANK = _blank_tie_pair()
+
+# Tied RRF scores: the stable head order is one contract (`docs/retrieval.md`),
+# so every tie shape is a row of the same table rather than its own test.
+_RRF_TIE_CASES = {
+    # Timsort stability for two tied chunks in one list (k=2).
+    "stable-leg-order": ([_point("chunk-1"), _point("chunk-2")],
+                         [_point("chunk-2"), _point("chunk-1")], 2, ["chunk-1", "chunk-2"]),
+    # Issue #1100: each leg ranks a different chunk first. The exact tie must
+    # put the cross-document body section at the head and still retrieve the
+    # other document's leading title section at rank 2 (title/cover queries).
+    "exact-cross-document-tie": ([_TITLE, _section_point("dense-2", "SA23-1379-02")],
+                                 [_BODY, _section_point("sparse-2", "SA23-1391-01")], 60,
+                                 ["body", "title-section"]),
+    # Scope guard: a tie inside one document keeps RRF order.
+    "same-document-tie": ([_TITLE], [_section_point("body", "SA23-1376-00")], 60,
+                          ["title-section", "body"]),
+    # Review R1100-B1 (synthetic J): heading == title past page 0 is body.
+    "no-outline-body": ([_no_outline_body_point("no-outline-body", "ZZ11-1111-01")],
+                        [_section_point("other-section", "ZZ22-2222-02")], 60,
+                        ["no-outline-body", "other-section"]),
+    # Review R1100-B1 (synthetic E): the predicate, not the page number alone.
+    "page0-section": ([_section_point("page0-section", "ZZ22-2222-02",
+                                      heading_path="z/OS BatchPipes > Scope", page_start=0)],
+                      [_section_point("other-section", "ZZ33-3333-03")], 60,
+                      ["page0-section", "other-section"]),
+    # Legacy points carry no physical page: the leading predicate fails closed.
+    "missing-page-start": ([_LEGACY_TITLE], [_BODY], 60, ["title-section", "body"]),
+    # No stored title cannot match the leading predicate.
+    "empty-title-keeps-rrf-order": ([_BLANK[0], _BLANK[1]], [_BLANK[1], _BLANK[0]], 2,
+                                    ["chunk-1", "chunk-2"]),
+}
+
+# Rows whose hits must also keep the document they were retrieved from.
+_RRF_TIE_DOCS = {
+    "exact-cross-document-tie": {"body": "SC27-3662-02", "title-section": "SA23-1376-00"},
+}
+
+
+@pytest.mark.parametrize("case", sorted(_RRF_TIE_CASES))
+def test_rrf_fuse_tie_order_is_deterministic(case):
+    """Tied RRF scores must produce stable, deterministic ordering."""
+    dense, sparse, k, order = _RRF_TIE_CASES[case]
+    hits = rrf_fuse(dense, sparse, weights=(1.0, 1.0), k=k, limit=max(4, len(dense)))
     assert hits[0].score == hits[1].score
-    assert [h.chunk_id for h in hits[:2]] == ["body", "title-section"]
+    assert [h.chunk_id for h in hits[:2]] == order
+    # The demoted chunk is still retrievable and keeps its own document.
+    assert {h.chunk_id for h in hits} >= set(order)
+    for chunk_id, doc_id in _RRF_TIE_DOCS.get(case, {}).items():
+        assert next(h.doc_id for h in hits if h.chunk_id == chunk_id) == doc_id
 
 
 def test_rrf_fuse_title_chunk_keeps_rank_one_when_its_evidence_wins():
     """A title/cover query still answers from the title chunk: with a strictly
     higher RRF score (both legs name it) the same competition leaves it at
     rank 1 — the tie-break never demotes a better-scoring chunk."""
-    title = _leading_title_point("title-section", "SA23-1376-00")
-    body = _section_point("body", "SC27-3662-02")
-    hits = rrf_fuse([title], [body, title], weights=(1.0, 1.0), k=60, limit=4)
+    hits = rrf_fuse([_TITLE], [_BODY, _TITLE], weights=(1.0, 1.0), k=60, limit=4)
     assert hits[0].score > hits[1].score
     assert hits[0].chunk_id == "title-section"
     assert hits[1].chunk_id == "body"
 
-
-def test_rrf_fuse_same_document_tie_keeps_leading_title_first():
-    """Scope guard: a tie inside one document keeps RRF order, so a
-    document-level question about that document still returns its leading
-    title section first."""
-    title = _leading_title_point("title-section", "SA23-1376-00")
-    body = _section_point("body", "SA23-1376-00")
-    hits = _tie(title, body)
-    assert hits[0].score == hits[1].score
-    assert [h.chunk_id for h in hits[:2]] == ["title-section", "body"]
-
-
-def test_rrf_fuse_no_outline_body_is_not_demoted_on_a_tie():
-    """Review R1100-B1 (synthetic J): `fallback_sections` gives a no-outline
-    document's body windows heading path == title. Such a chunk past page 0 is
-    body, not a leading section, so an exact cross-document tie leaves it at
-    rank 1 — only the page-0 leading section is demoted."""
-    no_outline = _no_outline_body_point("no-outline-body", "ZZ11-1111-01")
-    other_section = _section_point("other-section", "ZZ22-2222-02")
-    hits = _tie(no_outline, other_section)
-    assert hits[0].score == hits[1].score
-    assert [h.chunk_id for h in hits[:2]] == ["no-outline-body", "other-section"]
-
-
-def test_rrf_fuse_non_title_page_zero_chunk_is_not_demoted():
-    """Review R1100-B1 (synthetic E): a page-0 chunk whose heading is a real
-    section is not a leading title section, so a cross-document tie leaves it
-    first. The gate is the predicate, not the page number alone."""
-    page0_section = _section_point("page0-section", "ZZ22-2222-02")
-    payload = dict(page0_section.payload or {})
-    payload.update({"heading_path": "z/OS BatchPipes > Scope", "page_start": 0})
-    page0_section = page0_section.model_copy(update={"payload": payload})
-    other_section = _section_point("other-section", "ZZ33-3333-03")
-    hits = _tie(page0_section, other_section)
-    assert hits[0].score == hits[1].score
-    assert [h.chunk_id for h in hits[:2]] == ["page0-section", "other-section"]
-
-
-def test_rrf_fuse_missing_page_start_is_not_leading():
-    """Legacy points carry no physical page: the leading predicate fails
-    closed, so an exact tie keeps the stable dense-first order."""
-    title = _leading_title_point("title-section", "SA23-1376-00")
-    payload = dict(title.payload or {})
-    payload.pop("page_start")
-    legacy = title.model_copy(update={"payload": payload})
-    hits = _tie(legacy, _section_point("body", "SC27-3662-02"))
-    assert hits[0].score == hits[1].score
-    assert [h.chunk_id for h in hits[:2]] == ["title-section", "body"]
-
-
-def test_rrf_fuse_empty_title_is_never_leading_title_section():
-    """A point without a stored title cannot match the leading predicate:
-    legacy points keep their stable tie order instead of being demoted."""
-    def blank(pid: str) -> models.ScoredPoint:
-        point = _point(pid)
-        payload = dict(point.payload or {})
-        payload.update({"title": "", "heading_path": "", "page_start": 0})
-        return point.model_copy(update={"payload": payload})
-
-    hits = rrf_fuse(
-        [blank("chunk-1"), blank("chunk-2")],
-        [blank("chunk-2"), blank("chunk-1")],
-        weights=(1.0, 1.0),
-        k=2,
-        limit=2,
-    )
-    assert hits[0].score == hits[1].score
-    assert [h.chunk_id for h in hits] == ["chunk-1", "chunk-2"]
-
-
-def test_rrf_fuse_cross_document_tie_keeps_leading_title_section_retrievable():
-    """Review R1100-B1 (synthetic H): a title query whose leading title section
-    ties another document's section keeps the title chunk in the result set at
-    rank 2. Without query-intent detection the tie goes to the section chunk;
-    retrievability is preserved."""
-    title = _leading_title_point("title-section", "SA23-1376-00")
-    body = _section_point("body", "SC27-3662-02")
-    hits = _tie(title, body)
-    assert hits[0].score == hits[1].score
-    assert [h.chunk_id for h in hits[:2]] == ["body", "title-section"]
-    assert hits[1].doc_id == "SA23-1376-00"
 
 
 def test_rrf_fuse_type_boosts_promote_syntax_on_sparse_leg():
@@ -392,29 +309,15 @@ def test_search_syntax_boost_setting_reaches_ranking(extra, winner):
 
 
 def test_diversify_hits_prevents_page_monopoly():
-    from mainframe_rag.retrieve.query import SearchHit, diversify_hits
-
-    def h(chunk_id: str, doc_id: str, page_label: str, score: float) -> SearchHit:
-        return SearchHit(
-            chunk_id=chunk_id,
-            score=score,
-            cite=f"{doc_id}, p. {page_label}",
-            heading=f"Section {page_label}",
-            text=f"Text {chunk_id}",
-            doc_id=doc_id,
-            title="Title",
-            page_label=page_label,
-            chunk_type="narrative",
-            message_ids=(),
-        )
+    from mainframe_rag.retrieve.query import diversify_hits
 
     # 3 chunks from doc1 page 1, 1 chunk from doc1 page 2, 1 chunk from doc2 page 3
     raw = [
-        h("c1", "doc1", "1", 0.9),
-        h("c2", "doc1", "1", 0.8),
-        h("c3", "doc1", "1", 0.7),
-        h("c4", "doc1", "2", 0.6),
-        h("c5", "doc2", "3", 0.5),
+        _hit("c1", "doc1", 0.9, page_label="1"),
+        _hit("c2", "doc1", 0.8, page_label="1"),
+        _hit("c3", "doc1", 0.7, page_label="1"),
+        _hit("c4", "doc1", 0.6, page_label="2"),
+        _hit("c5", "doc2", 0.5, page_label="3"),
     ]
     # Diversified with max_per_page=1, max_per_doc=1:
     # Phase 1 selects c1 (doc1, p1) and c5 (doc2, p3).
@@ -502,19 +405,8 @@ class FilterAwareFakeQdrant(FakeQdrant):
 
 
 def _search_param_settings(**overrides) -> Settings:
-    base = {
-        "qdrant_url": "http://localhost:6333",
-        "qdrant_collection": "mainframe_manuals",
-        "dense_dim": 768,
-        "embed_base_url": "http://localhost:8000/v1",
-        "embed_model": "test-embed",
-        "bm25_model": "Qdrant/bm25",
-        "dense_hnsw_ef": 200,
-        "dense_quant_rescore": True,
-        "dense_quant_oversampling": 2.0,
-    }
-    base.update(overrides)
-    return Settings(**base)
+    dense = {"dense_hnsw_ef": 200, "dense_quant_rescore": True, "dense_quant_oversampling": 2.0}
+    return _settings(**{**dense, **overrides})
 
 
 def _expected_dense_params() -> models.SearchParams:
@@ -742,28 +634,17 @@ def test_search_fails_closed_inside_running_loop():
     asyncio.run(main())
 
 
-def _matches_filter(point: models.ScoredPoint, flt: models.Filter | None) -> bool:
-    if flt is None:
-        return True
-    payload = point.payload or {}
-    for cond in flt.must or []:
-        val = payload.get(cond.key)
-        if isinstance(cond.match, models.MatchValue):
-            if val != cond.match.value:
-                return False
-        elif isinstance(cond.match, models.MatchAny):
-            if isinstance(val, (list, tuple)):
-                if not any(v in val for v in cond.match.any):
-                    return False
-            elif val not in cond.match.any:
-                return False
-    return True
-
-
 class ScopedFilterAwareFakeQdrant(FakeQdrant):
+    """Applies the pinned client's own filter evaluator to one stored pool."""
+
     def __init__(self, all_points: list[models.ScoredPoint]):
         super().__init__(dense=all_points, sparse=all_points)
         self.batch_calls = 0
+
+    def _matching(self, flt: models.Filter | None) -> list[models.ScoredPoint]:
+        from qdrant_client.local.payload_filters import check_filter
+
+        return [p for p in self._dense if check_filter(flt, p.payload, p.id, {})]
 
     def query_batch_points(self, collection, requests, **_):
         self.batch_calls += 1
@@ -773,139 +654,46 @@ class ScopedFilterAwareFakeQdrant(FakeQdrant):
                 {"using": req.using, "filter": req.filter, "with_payload": req.with_payload}
             )
             self.batch_requests.append(req)
-            matching = [p for p in self._dense if _matches_filter(p, req.filter)]
-            results.append(SimpleNamespace(points=matching))
+            results.append(SimpleNamespace(points=self._matching(req.filter)))
         return results
 
     def query_points(self, collection, query, using, limit, query_filter, with_payload, **_):
         self.queries.append({"using": using, "filter": query_filter, "with_payload": with_payload})
-        matching = [p for p in self._dense if _matches_filter(p, query_filter)]
-        return SimpleNamespace(points=matching[:limit])
+        return SimpleNamespace(points=self._matching(query_filter)[:limit])
 
 
-def test_search_filter_fallback_retains_explicit_scope_and_excludes_out_of_scope(embedder):
-    """Invariant D1: when an identifier matches 0 points, fallback drops identifier
-    clauses but retains explicit caller scope (product, version).
-    Out-of-scope records must never be returned."""
-    in_scope = models.ScoredPoint(
-        id="hit-zos",
-        version=1,
-        score=1.0,
-        payload={
-            "product": "z/OS",
-            "version": "3.1",
-            "doc_id": "SA22-7592-05",
-            "title": "z/OS Manual",
-            "heading_path": "Init",
-            "page_label": "1",
-            "chunk_type": "narrative",
-            "text": "z/OS initialization text",
-        },
-    )
-    out_scope_prod = models.ScoredPoint(
-        id="hit-linux",
-        version=1,
-        score=1.0,
-        payload={
-            "product": "Linux",
-            "version": "3.1",
-            "doc_id": "LN-001",
-            "title": "Linux Manual",
-            "heading_path": "Boot",
-            "page_label": "1",
-            "chunk_type": "narrative",
-            "text": "Linux boot text",
-        },
-    )
-    out_scope_ver = models.ScoredPoint(
-        id="hit-zos-24",
-        version=1,
-        score=1.0,
-        payload={
-            "product": "z/OS",
-            "version": "2.4",
-            "doc_id": "SA22-7592-04",
-            "title": "z/OS Old Manual",
-            "heading_path": "Init",
-            "page_label": "1",
-            "chunk_type": "narrative",
-            "text": "z/OS 2.4 text",
-        },
-    )
+_SCOPE_POOL = [
+    _spoint("zos-31", "SA22-0000-00", product="z/OS", version="3.1"),
+    _spoint("zos-24", "SA22-0000-01", product="z/OS", version="2.4"),
+    _spoint("linux-31", "LN-001", product="Linux", version="3.1"),
+    _spoint("linux-10", "LN-002", product="Linux", version="1.0"),
+]
 
-    fake = ScopedFilterAwareFakeQdrant([in_scope, out_scope_prod, out_scope_ver])
+
+@pytest.mark.parametrize(("pool", "scope", "kept", "projected"), [
+    # Invariant D1: the identifier clause is dropped, the caller's scope is not.
+    (_SCOPE_POOL, {"product": "z/OS", "version": "3.1"}, {"zos-31"}, {("z/OS", "3.1")}),
+    # Scope given as only product or only version survives exactly: the one
+    # supplied key is retained, no other key is invented.
+    (_SCOPE_POOL, {"product": "z/OS"}, {"zos-31", "zos-24"}, {("z/OS", "3.1"), ("z/OS", "2.4")}),
+    (_SCOPE_POOL, {"version": "3.1"}, {"zos-31", "linux-31"}, {("z/OS", "3.1"), ("Linux", "3.1")}),
+    # No point in the database matches the scope: [] beats an out-of-scope hit.
+    (_SCOPE_POOL[3:], {"product": "z/OS", "version": "3.1"}, set(), set()),
+])
+def test_search_fallback_retains_exactly_the_caller_scope(embedder, pool, scope, kept, projected):
+    """Out-of-scope records must never be returned, however empty the result is."""
+    fake = ScopedFilterAwareFakeQdrant(pool)
     hits, kind, _timings = search(
-        fake,
-        embedder,
-        "mainframe_manuals",
-        "Identify SC23-6862",  # Identifier not matching SA22-7592-05
-        product="z/OS",
-        version="3.1",
-        limit=5,
+        fake, embedder, "mainframe_manuals", "Identify SC23-6862",  # matches no stored doc id
+        limit=5, **scope,
     )
-
     assert kind == "identifier"
     assert fake.batch_calls == 2
-    # First batch carried doc_id + product + version -> matched 0 points
-    first_keys = {c.key for c in fake.batch_requests[0].filter.must}
-    assert first_keys == {"doc_id", "product", "version"}
-
-    # Second batch (fallback retry) retained product + version, dropped doc_id
-    fallback_filter = fake.batch_requests[2].filter
-    assert fallback_filter is not None
-    fallback_keys = {c.key for c in fallback_filter.must}
-    assert fallback_keys == {"product", "version"}
-
-    # Recovered hits MUST contain in-scope hit only
-    assert len(hits) == 1
-    assert hits[0].chunk_id == "hit-zos"
-    assert hits[0].product == "z/OS"
-    assert hits[0].version == "3.1"
-    # Never return out-of-scope hits
-    hit_ids = {h.chunk_id for h in hits}
-    assert "hit-linux" not in hit_ids
-    assert "hit-zos-24" not in hit_ids
-
-
-def test_search_filter_fallback_returns_empty_when_no_points_match_scope(embedder):
-    """Invariant D1: if caller supplies scope filters and fallback relaxes
-    identifiers, but no points in the database match the scope, search must
-    return [] and NEVER drop scope constraints to return out-of-scope points."""
-    linux_point = models.ScoredPoint(
-        id="hit-linux",
-        version=1,
-        score=1.0,
-        payload={
-            "product": "Linux",
-            "version": "1.0",
-            "doc_id": "LN-001",
-            "title": "Linux Manual",
-            "heading_path": "Boot",
-            "page_label": "1",
-            "chunk_type": "narrative",
-            "text": "Linux text",
-        },
-    )
-
-    fake = ScopedFilterAwareFakeQdrant([linux_point])
-    hits, kind, _timings = search(
-        fake,
-        embedder,
-        "mainframe_manuals",
-        "Identify SC23-6862",
-        product="z/OS",
-        version="3.1",
-        limit=5,
-    )
-
-    assert kind == "identifier"
-    assert fake.batch_calls == 2
-    # Fallback retry carried scope filter
-    fallback_filter = fake.batch_requests[2].filter
-    assert fallback_filter is not None
-    assert {c.key for c in fallback_filter.must} == {"product", "version"}
-    # Hits must be strictly empty
-    assert hits == []
+    # First batch: identifier + scope -> 0 points. The retry drops doc_id only.
+    assert {c.key for c in fake.batch_requests[0].filter.must} == {"doc_id", *scope}
+    assert {c.key for c in fake.batch_requests[2].filter.must} == set(scope)
+    assert {h.chunk_id for h in hits} == kept
+    assert {(h.product, h.version) for h in hits} == projected
 
 
 def test_search_pure_scope_filter_zero_matches_no_redundant_fallback(embedder):
@@ -932,21 +720,10 @@ def test_search_pure_scope_filter_zero_matches_no_redundant_fallback(embedder):
 # ---------------------------------------------------------------------------
 
 
-def _page_point(pid: str, doc_id: str, page_label: str, page_start: int | None, page_end: object = "absent") -> models.ScoredPoint:
-    payload: dict = {
-        "doc_id": doc_id,
-        "title": "Widget Guide",
-        "heading_path": "Chapter 1. Widgets",
-        "page_label": page_label,
-        "chunk_type": "narrative",
-        "message_ids": [],
-        "text": f"widget text {pid}",
-    }
-    if page_start is not None:
-        payload["page_start"] = page_start
-    if page_end != "absent":
-        payload["page_end"] = page_end
-    return models.ScoredPoint(id=pid, version=1, score=1.0, payload=payload)
+def _page_point(pid: str, doc_id: str, page_label: str, page_start: int | None,
+                page_end: object = "absent") -> models.ScoredPoint:
+    return _spoint(pid, doc_id, page_label=page_label, page_start=page_start, page_end=page_end,
+                   text=f"widget text {pid}")
 
 
 @pytest.mark.parametrize(
@@ -1114,34 +891,6 @@ def test_search_cites_physical_pages_for_unlabeled_manual():
     assert by_id["u0"].endswith(", p. PDF 1–2")
     assert by_id["u2"].endswith(", p. PDF 3")
     assert by_id["lab"].endswith(", p. 3")
-
-
-@pytest.mark.parametrize(
-    ("scope", "kept"),
-    [({"product": "z/OS"}, {"zos-31", "zos-24"}), ({"version": "3.1"}, {"zos-31", "linux-31"})],
-)
-def test_search_fallback_retains_single_key_scope(embedder, scope, kept):
-    """Scope given as only product or only version survives the fallback
-    exactly: the one supplied key is retained, no other key is invented."""
-
-    def pt(pid, product, version, doc_id):
-        return models.ScoredPoint(
-            id=pid, version=1, score=1.0,
-            payload={"product": product, "version": version, "doc_id": doc_id, "title": "T",
-                     "heading_path": "H", "page_label": "1", "chunk_type": "narrative", "text": "t"},
-        )
-
-    fake = ScopedFilterAwareFakeQdrant([
-        pt("zos-31", "z/OS", "3.1", "SA22-0000-00"),
-        pt("zos-24", "z/OS", "2.4", "SA22-0000-01"),
-        pt("linux-31", "Linux", "3.1", "LN-001"),
-        pt("linux-10", "Linux", "1.0", "LN-002"),
-    ])
-    hits, kind, _ = search(fake, embedder, "mainframe_manuals", "Identify SC99-9999", limit=5, **scope)
-    assert kind == "identifier"
-    assert fake.batch_calls == 2
-    assert {c.key for c in fake.batch_requests[2].filter.must} == set(scope)
-    assert {h.chunk_id for h in hits} == kept
 
 
 def test_search_one_empty_leg_does_not_trigger_fallback(embedder):

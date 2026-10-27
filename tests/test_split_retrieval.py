@@ -15,6 +15,7 @@ from qdrant_client import models
 from mainframe_rag.config import Settings
 from mainframe_rag.retrieve.query import max_split_hits, merge_split_hits, search
 from tests.conftest import _point
+from tests.helpers_eval_local import hit as _shared_hit
 
 
 def _doc_point(pid: str, doc_id: str, score: float = 0.9) -> models.ScoredPoint:
@@ -200,13 +201,7 @@ def test_trap_and_exact_anchor_comparatives_stay_single():
 
 
 def _hit(chunk_id: str, doc_id: str, score: float) -> Any:
-    from mainframe_rag.retrieve.query import SearchHit
-
-    return SearchHit(
-        chunk_id=chunk_id, score=score, cite=f"{doc_id} T, H, p. 1",
-        heading="H", text="t", doc_id=doc_id, title="T", page_label="1",
-        chunk_type="narrative", message_ids=(),
-    )
+    return _shared_hit(chunk_id, doc_id, score, heading="H", text="t")
 
 
 def test_max_fusion_prefers_focused_rank1_over_shared_noise():
