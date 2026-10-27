@@ -292,15 +292,15 @@ Retention policy as shipped (no default changed by #372):
   implemented here.
 
 State contract: one origin-wide Web Lock encloses each persisted read/modify/write,
-including rename, delete, new incident and clear-all. Reads used to render do
-not write shared state. A separate incident lock is held from saving the user
-turn through saving its assistant result. A second tab sending to that incident
-gets a visible refusal and keeps its unsent question; it can send after the
-first turn finishes. Other incidents remain usable. Completion reads the latest
-store under the write lock, preserves renames and discards deleted incidents.
-Barrier-controlled browser tests exercise both contenders observing the same
-version before mutation and prove their locked writes serialize. A
-streaming turn is labelled provisional until the final frame; failed, stopped or
+including rename, delete, new incident and clear-all. Render reads never write.
+An incident lock is held from saving the user turn through its assistant
+result; a second tab sending to that incident gets a visible refusal, keeps its
+question, and can send afterwards. Other incidents remain usable. Completion
+re-reads under the write lock, preserving renames and discarding deleted
+incidents. Each write bumps a store revision (absent: 0) and holds a lock
+naming it; Chrome refreshes other tabs' storage late, so the next holder waits
+up to 3 s for it. Tests cover both. A streaming turn is labelled
+provisional until the final frame; failed, stopped or
 EOF-without-final output is stored and restored as `generation_incomplete`, is
 qualified when reused as model context, and an unanswered question is shown as
 such after reload.

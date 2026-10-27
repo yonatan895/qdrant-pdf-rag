@@ -1090,6 +1090,63 @@ def test_web_locks_serialize_cross_tab_writes_against_the_stream(console, page, 
     wait_state(page, "complete", 2 if action == "rename" else 1)
 
 
+_STALE_VIEW = """
+const real = Storage.prototype.getItem;
+const frozen = real.call(localStorage, 'mainframe_rag_sessions');
+window.__realStore = () => JSON.parse(real.call(localStorage, 'mainframe_rag_sessions'));
+window.__stale = true;
+Storage.prototype.getItem = function(key) {
+  return window.__stale && key === 'mainframe_rag_sessions' ? frozen : real.call(this, key);
+};
+"""
+
+
+def test_a_stale_tab_view_waits_for_the_newest_revision_before_writing(console, page):
+    """Chrome refreshes another tab's localStorage copy asynchronously. Tab A's
+    view is frozen at the pre-delete store while tab B deletes an incident
+    under the lock; A's next write must wait for the newer revision and apply
+    to it, never write back the deleted incident. A store written without a
+    revision counts as revision 0."""
+    legacy = {
+        "sessions": {
+            "inc-kept": {"title": "Kept incident", "updated_at": 2, "turns": []},
+            "inc-doomed": {"title": "Doomed incident", "updated_at": 1, "turns": []},
+        },
+        "active": "inc-kept",
+    }
+    page.eval("localStorage.setItem(arguments[0], arguments[1])", STORE_KEY, json.dumps(legacy))
+    page.reload()
+    page.wait("return document.querySelectorAll('.row').length==2", what="tab A restores the legacy store")
+    assert "revision" not in store(page)
+    tab_a = page.handle()
+    tab_b = page.new_tab()
+    page.switch(tab_b)
+    page.get(console.url)
+    page.wait("return document.querySelectorAll('.row').length==2", what="tab B restores the legacy store")
+
+    page.switch(tab_a)
+    page.eval(_STALE_VIEW)
+    page.switch(tab_b)
+    page.eval("document.querySelector('[data-session-id=\"inc-doomed\"] .del').click()")
+    page.wait("return document.querySelectorAll('.row').length==1", what="tab B deletes")
+    deleted = store(page)
+    assert deleted["revision"] == 1 and set(deleted["sessions"]) == {"inc-kept"}
+
+    page.switch(tab_a)
+    page.eval("document.getElementById('new-session-btn').click()")
+    page.eval_async("setTimeout(arguments[arguments.length-1], 500)")
+    assert page.eval("return window.__realStore()") == deleted, "A wrote from its stale view"
+    page.eval("window.__stale = false")
+    page.wait("return window.__realStore().revision >= 2", what="A's write after catching up")
+    data = store(page)
+    assert data["revision"] == 2
+    assert "inc-doomed" not in data["sessions"], "the deleted incident came back"
+    assert sorted(s["title"] for s in data["sessions"].values()) == ["Kept incident", "New Incident"]
+    send(page, "Next ordinary question")
+    wait_state(page, "complete")
+    assert store(page)["revision"] == 4
+
+
 def test_missing_web_locks_uses_visible_tab_memory_fallback(console, browser):
     browser.init_script("Object.defineProperty(navigator, 'locks', {value: undefined});")
     browser.get(console.url)

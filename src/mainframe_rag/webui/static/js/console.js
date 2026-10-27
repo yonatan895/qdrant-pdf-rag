@@ -23,6 +23,8 @@
   const REASONING_KEY = "mainframe_rag_reasoning_effort";
   const MAX_SAVED_SESSIONS = 30;
   const STORE_LOCK = "mainframe-rag-store";
+  const REVISION_MARK = "mainframe-rag-store-revision:";
+  const STALE_WAIT_MS = 3000;
   const sharedLocks = navigator.locks && window.isSecureContext;
   const PROVISIONAL_LABEL = "Provisional — still generating, not verified";
   const ERROR_TEXT = "The reasoning agent could not complete this request. Check the agent logs and retry.";
@@ -100,15 +102,58 @@
     return id;
   }
 
+  /* Store revision. Each locked write bumps `store.revision` (absent = 0).
+   * Chrome refreshes another tab's localStorage copy asynchronously, so the
+   * stored revision can be as stale as the state. The writer therefore also
+   * holds a lock named after its revision: the lock manager orders that name
+   * before the store lock's release, so the next holder sees the newest
+   * revision there and re-reads until its copy catches up (bounded wait). */
+  let knownRevision = 0;
+  let releaseMark = null;
+
+  function revisionOf(store) {
+    return Number.isSafeInteger(store.revision) && store.revision > 0 ? store.revision : 0;
+  }
+
+  function markRevision(revision) {
+    return new Promise((marked) => {
+      navigator.locks.request(REVISION_MARK + revision, { mode: "shared" }, () => new Promise((release) => {
+        if (releaseMark) releaseMark();
+        releaseMark = release;
+        marked();
+      }));
+    });
+  }
+
+  async function freshStore() {
+    const { held } = await navigator.locks.query();
+    const marks = held
+      .filter((lock) => lock.name.startsWith(REVISION_MARK))
+      .map((lock) => Number(lock.name.slice(REVISION_MARK.length)) || 0);
+    const want = Math.max(knownRevision, ...marks);
+    const deadline = Date.now() + STALE_WAIT_MS;
+    let store = loadStore();
+    while (storageOk && revisionOf(store) < want && Date.now() < deadline) {
+      await new Promise((resolve) => window.setTimeout(resolve, 10));
+      store = loadStore();
+    }
+    return { store, want };
+  }
+
   /* The origin-wide Web Lock encloses both the fresh read and the write.
    * A tab without Web Locks uses its own memory store, so it cannot race a
    * shared read-modify-write. Every incident mutation uses this owner. */
   async function mutate(fn) {
-    const apply = () => {
-      const store = loadStore();
+    const apply = async () => {
+      const { store, want } = sharedLocks ? await freshStore() : { store: loadStore(), want: 0 };
       const before = JSON.stringify(store);
       const result = fn(store);
-      if (JSON.stringify(store) !== before) saveStore(store);
+      if (JSON.stringify(store) !== before) {
+        store.revision = Math.max(revisionOf(store), want) + 1;
+        saveStore(store);
+        if (sharedLocks && storageOk) await markRevision(store.revision);
+      }
+      knownRevision = Math.max(knownRevision, revisionOf(store));
       return result;
     };
     return sharedLocks ? navigator.locks.request(STORE_LOCK, apply) : apply();
