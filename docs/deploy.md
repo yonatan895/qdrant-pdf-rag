@@ -1760,7 +1760,7 @@ byte-identical to a release without it (tested).
   - Chat history (S2, S3): no admin chat access or admin export.
   - Logs (S4): metadata-only audit.
   - Identity (R3): OIDC only; no login form, signup, password or initial-admin signup, no token
-    exchange; 8-hour sessions.
+    exchange; 8-hour sessions; no ID-token cookie (`ENABLE_OAUTH_ID_TOKEN_COOKIE=false`, below).
   - `ENABLE_PERSISTENT_CONFIG=false`, so admin-UI edits cannot override this environment.
 
 **What the identity team registers.** One confidential OIDC client on the organisation's IdP
@@ -1786,7 +1786,9 @@ byte-identical to a release without it (tested).
   to every user it authenticates, plus the group roles. Open WebUI v0.12.3 recomputes the role
   at every sign-in only when the claim is present: if the claim is missing, an existing user
   keeps the stored role, so a removed admin stays admin. Neither role list may contain
-  `signed-in` or `*`; validate and the chart refuse both.
+  `signed-in` or `*`; validate and the chart refuse both. An IdP that cannot issue a constant
+  value uses the group claim as the roles claim instead (AD FS variant
+  [below](#adfs-ldap-only-rule-form)).
 - The team hands over: the discovery URL (`https://<idp>/.well-known/openid-configuration`), the
   client id, the client secret (it goes into the Secret, never `airgap.env`), and the IdP's IPv4
   CIDRs and port for the egress policy. If an enterprise CA issued the IdP's TLS certificate, they
@@ -1832,7 +1834,9 @@ statements come from the v0.12.3 source in the pinned image.
      - An admin role is present: the user becomes `admin`.
      - Otherwise an allowed role is present: the user becomes `user`, so a removed admin is
        demoted.
-     - Only `signed-in` is present: sign-in is refused with HTTP 403 and no session is issued.
+     - Only `signed-in` is present: sign-in is refused. Open WebUI raises 403 internally and the
+       callback answers with a redirect to `/auth?error=...` and no session cookie
+       (`utils/oauth.py` `handle_callback`), so the browser shows an error on the sign-in page.
      - No claim at all: an existing user keeps the stored role, and a new user is `pending`.
        The baseline rule exists to prevent this case.
    - **Revocation window.** The IdP change takes effect at the next sign-in. A session that is
@@ -1842,6 +1846,64 @@ statements come from the v0.12.3 source in the pinned image.
      To remove an admin at once, also demote or delete the account in the Open WebUI admin UI.
      That takes effect on the next request, because the role is read from the database on each
      request. If the account owns the installer's admin API key, rotate the key.
+<a id="adfs-ldap-only-rule-form"></a>
+**Variant: a self-service rule form that offers only LDAP-attribute rules.** Some AD FS
+deployments give the application owner a form with fixed LDAP attribute queries only: no custom
+rules and no group-to-constant-value rules. The `signed-in` baseline and the role-value rules of
+step 3 then cannot be issued. Steps 1, 2 and 4 to 6 are unchanged; step 3 becomes:
+- **Rules.** User-Principal-Name to `upn` and Display-Name to `name`, as in step 3. For groups,
+  use the **domain-qualified** group-membership query (`tokenGroups(domainQualifiedName)`,
+  values `DOMAIN\group`).
+- **Settings.** `OPENWEBUI_OIDC_ROLES_CLAIM` equals `OPENWEBUI_OIDC_GROUP_CLAIM`: the group claim
+  is the roles claim. `OPENWEBUI_OIDC_ALLOWED_ROLES` and `OPENWEBUI_OIDC_ADMIN_ROLES` are
+  domain-qualified AD group names. Single-quote each list in `airgap.env`, for example
+  `OPENWEBUI_OIDC_ADMIN_ROLES='DOMAIN\docs-admins'`. The file is sourced by `sh`, which removes an
+  unquoted backslash, so validate and deploy refuse a role line whose backslash is outside single
+  quotes (fixed message, value not shown). Names are comma-separated with no spaces. Open WebUI
+  v0.12.3 compares them exactly and case-sensitively with the claim values (`utils/oauth.py`
+  `get_user_role`; the configured names are trimmed, the claim values are not), so copy the case
+  the token carries.
+- **Why domain-qualified.** Group membership spans the forest and its trusts. A bare name such as
+  `docs-admins` also matches a same-named group in any other domain whose users can sign in
+  through this AD FS: that fails open, as a silent admin grant, and admins can read chats. A
+  lost backslash fails closed: `DOMAIN\docs-admins` becomes `DOMAINdocs-admins`, which matches
+  nobody. Bare names (the unqualified query) are an exception for a forest with one domain and
+  no trusts, which the identity team must confirm in writing.
+- **Revocation.** Token-Groups always includes the user's primary group (Domain Users), so the
+  claim is present in every token. A user in neither docs group carries only values that match
+  no configured role and is refused (redirected to `/auth?error=...` without a session), so the
+  guarantee above still holds without a
+  baseline. The chart's refusal of `*` and `signed-in` stays. A group literally named `*` cannot
+  be configured, and a claim value `*` matches nothing (only a configured `*` is a wildcard).
+- **Token size.** Every group of the user is in the ID token. By default Open WebUI v0.12.3
+  also sets the raw ID token as the `oauth_id_token` browser cookie on the sign-in callback
+  (`utils/oauth.py` `handle_callback`). The pod's allow-list proxy reads that response header into
+  nginx's default `proxy_buffer_size` of one 4 KiB page, so a large token failed the sign-in with
+  HTTP 502 (measured on the pinned nginx image and the chart's config). Nothing reads the cookie
+  back, so the chart sets `ENABLE_OAUTH_ID_TOKEN_COOKIE=false` (maintainer decision). The callback
+  headers are then about 800 bytes whatever the token size, and Open WebUI keeps the token in its
+  database (`models/oauth_sessions.py`). One step still carries the whole token: sign-out (below)
+  puts it in the IdP logout URL. AD FS runs on Windows http.sys, which by default limits the
+  request line and headers to 16384 bytes (Microsoft's http.sys registry documentation; not
+  verified here). The claims check warns above 8000 bytes; above that, confirm sign-out on the
+  test client. No size remedy is needed for sign-in. If sign-out to the IdP fails for a very
+  large token, the Rosetta session is already gone: the sign-out response deletes its cookies
+  before the redirect. Do not shrink the group claim: in this form the shorter queries either
+  give bare names (fail open, above) or drop the primary group, and so lose the claim that
+  revocation relies on.
+- **Sign-out.** Open WebUI v0.12.3 (`routers/auths.py` `signout`) deletes its session cookies and,
+  for an OIDC session, sends the browser to the IdP's `end_session_endpoint` from discovery with
+  `id_token_hint` taken from the server-side OAuth session (not from a cookie). Whether AD FS then
+  ends its own SSO session is AD FS behaviour *(confirm on the test client)*. The chart has no
+  Redis, and v0.12.3 revokes session tokens only through Redis (`utils/auth.py`
+  `invalidate_token`). Sign-out therefore removes the browser's Rosetta session, but a copied
+  session token stays valid until it expires (8 hours).
+- **Logs.** A refused sign-in makes Open WebUI log a warning that lists the user's roles claim
+  values, that is, all their group names (v0.12.3 `get_user_role`). This is identity metadata in
+  the pod log, not chat content.
+- **Check.** Run the [claims check](#adfs-claims-check) in role-list mode before deploying. In
+  step 6, the refusal of the account in no docs group shows that the group claim arrives.
+
 4. **CA.** If the enterprise CA issued the AD FS TLS certificate, export that CA (root and any
    intermediate) as PEM and set `OPENWEBUI_IDP_CA_FILE`. Without it, Open WebUI cannot reach the
    discovery URL.
@@ -1857,7 +1919,8 @@ statements come from the v0.12.3 source in the pinned image.
    be a member of that group; the chart does not create groups from the claim, so create the
    group first. This shows that the ID token carried the e-mail, role and group claims. Then
    prove revocation: sign in with a test account that is in no role group. It must be refused
-   (HTTP 403, an error on the sign-in page). That shows the baseline claim arrives. Next, remove
+   (a redirect to `/auth?error=...` with no session cookie, shown as an error on the sign-in
+   page). That shows the baseline claim arrives. Next, remove
    a test admin from the admin group, keeping it in the user group. At its next sign-in it must
    show the `user` role.
 
@@ -2160,10 +2223,17 @@ production release. Complete the applicable live-stack acceptance separately.
 `scripts/openwebui/adfs_claims_check.py` proves, from the air-gapped bastion, that the AD FS
 client for Open WebUI issues the claims the chart reads. It is stdlib-only (`python3 -I`),
 talks only to the AD FS host, and checks `iss`, `aud`, `nonce`, `exp` and the claim
-expectations. It prints claim **names**, the roles claim's JSON type and value **count**, and
-yes/no answers. It never prints tokens, the secret, claim values, group names or identity, and
+expectations. It prints claim **names**, the roles claim's JSON type and value **count**, the ID
+token size in bytes, yes/no answers and, in role-list mode, the **configured** roles that
+matched. It never prints tokens, the secret, other claim values or identity, and
 every failure is one fixed line with a distinct exit code (3 TLS, 5 callback, 6 token, 7 ID
 token, 8 claims). The ID token signature is **not** verified; this is a diagnostic only.
+
+Claim names are flags with the chart defaults: `--email-claim` (`email`), `--username-claim`
+(`name`), `--group-claim` (`groups`) and `--roles-claim` (`roles`). When a configured claim is
+absent, the script names the closest claim name the token carries (a rule form may emit its rule
+names or URIs as claim types). It always ends with the `OPENWEBUI_OIDC_*` lines for
+`airgap.env` that match what it found, with any value holding a backslash single-quoted.
 
 ```sh
 python3 -I scripts/openwebui/adfs_claims_check.py \
@@ -2174,7 +2244,8 @@ python3 -I scripts/openwebui/adfs_claims_check.py \
 ```
 
 Flags also read `ADFS_ISSUER`, `ADFS_CLIENT_ID`, `ADFS_CLIENT_SECRET_FILE`, `ADFS_CA_BUNDLE`,
-`ADFS_ROLES_CLAIM`, `ADFS_EMAIL_CLAIM`, `ADFS_USERNAME_CLAIM`, `ADFS_BASELINE_ROLE`,
+`ADFS_ROLES_CLAIM`, `ADFS_GROUP_CLAIM`, `ADFS_EMAIL_CLAIM`, `ADFS_USERNAME_CLAIM`,
+`ADFS_BASELINE_ROLE`, `ADFS_ALLOWED_ROLES`, `ADFS_ADMIN_ROLES`,
 `ADFS_SCOPES` (default `openid profile email allatclaims`) and `ADFS_CALLBACK_PORT` (8400).
 The secret is never an argument: without `--client-secret-file` it is prompted for. The
 script prints an authorize URL; open it in a browser that can reach AD FS and the bastion's
@@ -2183,6 +2254,29 @@ script listens once on `http://127.0.0.1:<port>/callback` (180 s). Run it with a
 in a role group (expect exit 0), then with `--expect-baseline-only` and an account in no role
 group (the baseline must be the only value). `--decode-only <file>` analyses a saved ID token
 offline with the same output rules.
+
+**Role-list mode** ([LDAP-attribute-only rule form](#adfs-ldap-only-rule-form)). Pass the role
+lists as configured; they are checked like validate and the chart check them:
+
+```sh
+python3 -I scripts/openwebui/adfs_claims_check.py --paste \
+  --redirect-uri https://<openwebui-host>/oauth/oidc/callback \
+  --issuer https://<adfs-host>/adfs --client-id <client-id> \
+  --client-secret-file <file> --ca-bundle <ca.pem> \
+  --email-claim upn --username-claim name --group-claim groups --roles-claim groups \
+  --allowed-roles 'DOMAIN\docs-users' --admin-roles 'DOMAIN\docs-admins'
+```
+
+It reports whether the claim is a list or a string (split on `,`), which configured roles
+matched, and the predicted Open WebUI v0.12.3 outcome: `admin`, `user` or refused (a redirect
+to `/auth?error=...` with no session cookie). Run it
+with a docs-group account (expect exit 0), then with `--expect-refused` and an account in
+neither docs group: it passes only if the claim is present and the prediction is a refusal.
+It fails when a configured role differs from a claim value only by letter case, a domain
+prefix or a removed backslash, or when the configured names are bare and the token's are
+domain-qualified (or the reverse); it names only the configured role. It warns on bare
+configured names, and when a bare name occurs in the token under more than one domain prefix
+(the count only). It warns when the ID token is above 8000 bytes (see "Token size" above).
 
 **Paste mode (the default recommendation when the localhost redirect is not registered).**
 It needs only the real redirect URI and works before Open WebUI exists:

@@ -279,6 +279,12 @@ spec:
               value: "false"
             - name: ENABLE_OAUTH_PERSISTENT_CONFIG
               value: "false"
+            # No raw ID token in a browser cookie (#1070, maintainer decision). v0.12.3
+            # never reads it back (sign-out takes id_token_hint from the server-side
+            # OAuth session); on the callback it counts against the proxy's 4 KiB
+            # response-header buffer, so a large group claim made sign-in fail with 502.
+            - name: ENABLE_OAUTH_ID_TOKEN_COOKIE
+              value: "false"
             - name: JWT_EXPIRES_IN
               value: 8h
             - name: OPENID_PROVIDER_URL
