@@ -670,16 +670,22 @@ def test_v1_chat_stream_real_client_failure_is_incomplete_no_success_chunk(reque
     assert "SECRET-UPSTREAM-TEXT" not in resp.text
 
 
-@pytest.mark.parametrize("path, body", [
-    ("/v1/answer", {"query": "IEA500I command"}),
-    ("/v1/chat", {"messages": [{"role": "user", "content": "IEA500I command"}]}),
-], ids=["answer", "chat"])
-def test_json_real_client_missing_finish_both_legs_is_502(missing_finish_client, path, body):
-    """The buffered JSON paths cannot synthesize success from a stream and
-    fallback that both lack an explicit finish: fixed 502 envelope only."""
-    resp = missing_finish_client.post(path, json=body)
-    assert resp.status_code == 502
-    assert resp.json() == _ANSWER_FAILED
+def test_v1_answer_real_client_missing_finish_both_legs_is_502(missing_finish_client):
+    """Both buffered JSON legs cannot synthesize success from a stream and a
+    fallback that both lack an explicit finish: the fixed 502 envelope, never
+    an answer body carrying a manufactured finish_reason.
+
+    tests/hazards/critical.json (missing-terminal-finish) pins this exact
+    node, so it stays one unparameterized case covering both legs.
+    """
+    messages = [{"role": "user", "content": "IEA500I command"}]
+    for path, body in (
+        ("/v1/answer", {"query": "IEA500I command"}),
+        ("/v1/chat", {"messages": messages}),
+    ):
+        resp = missing_finish_client.post(path, json=body)
+        assert resp.status_code == 502, path
+        assert resp.json() == _ANSWER_FAILED, path
 
 
 @pytest.fixture
