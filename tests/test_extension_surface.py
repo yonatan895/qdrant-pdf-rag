@@ -1,9 +1,10 @@
 """The upstream/gap extension surface contract (ADR-0009 §9, GH#1118).
 
 The committed snapshot must equal the surface derived from the code. A removed
-or renamed item needs a working migration and a release note; an added item
-needs only a snapshot refresh. The counterexamples run the real derivation and
-refresh on a copy of the input files.
+or renamed item, including one left behind as a refusing stub, needs a release
+note whose migration its owner file provides; an added item needs only a
+snapshot refresh. The counterexamples run the real derivation and refresh on a
+copy of the input files.
 """
 
 from __future__ import annotations
@@ -18,6 +19,17 @@ from scripts import extension_surface as surface
 ROOT = Path(__file__).resolve().parent.parent
 EXAMPLE_KEY = "PULL_SECRET"
 NEW_KEY = "PULL_SECRET_NAME"
+PIPELINE = "scripts/airgap/pipeline.sh"
+TASKS = "taskfiles/airgap.yml"
+SKIP_LOAD_ARM = "        --skip-load)   SKIP_LOAD=1 ;;\n"
+FLAG_STUB = ('        --no-load)   SKIP_LOAD=1 ;;\n'
+             '        --skip-load) die "--skip-load was renamed: use --no-load" ;;\n')
+TASK_STUB = ('  pipeline:\n'
+             '    desc: Renamed to airgap:run\n'
+             '    cmds:\n'
+             '      - \'echo "airgap:pipeline was renamed: use airgap:run" >&2; exit 1\'\n'
+             '\n'
+             '  run:\n')
 
 
 def test_snapshot_equals_the_surface_derived_from_the_code():
@@ -30,12 +42,13 @@ def test_derivation_covers_what_the_gap_reads():
     expected = {
         "airgap_env_keys": {"INTERNAL_REGISTRY", "OPENWEBUI_OIDC_CLIENT_ID", "QDRANT_DATA_SIZE"},
         "retired_env_keys": {"REGISTRY_INTERNAL", "VLLM_BASE_URL"},
-        "task_names": {"airgap:pipeline", "airgap:retire-legacy", "qa:unit"},
+        "task_names": {"airgap:pipeline", "airgap:retire-legacy", "artifacts:chart-check", "qa:unit"},
         "chart_values": {"mainframe-rag:openwebui.oidc.clientId", "mainframe-rag:openwebui.oidc.caBundle",
                          "mainframe-rag:feedback.secretName", "mainframe-rag:ingest.retireDocs",
-                         "qdrant:persistence.size", "qdrant:resources.limits.memory"},
-        "script_flags": {"pipeline.sh --dry-run", "retire_legacy.sh --stage", "import-script SHA",
-                         "import-script SNEAKERNET_TRUSTED_PUB"},
+                         "qdrant:persistence.size", "qdrant:resources.limits.memory",
+                         "qdrant:imagePullSecrets[0].name", "qdrant:imagePullSecrets"},
+        "script_flags": {"pipeline.sh --dry-run", "pipeline.sh -h", "retire_legacy.sh --stage",
+                         "import-script SHA", "import-script SNEAKERNET_TRUSTED_PUB"},
         "gap_paths": {"gap/patches.md", "gap/config/", ".gitlab/CODEOWNERS"},
         # What the §4 import script reads from the bundle.
         "bundle_layout": {"tarball qdrant-pdf-rag-{IMAGE_SHA}.tar.sha256", "member bootstrap.sh",
@@ -43,6 +56,14 @@ def test_derivation_covers_what_the_gap_reads():
     }
     for category, items in expected.items():
         assert items <= set(current[category]), category
+    assert current.stubs == {}
+
+
+def test_names_match_as_whole_tokens():
+    assert not surface.token("-h", 'echo "--help"')
+    assert surface.token("-h", "--help|-h)")
+    assert not surface.token("sbom.json", "old-sbom.json.bak")
+    assert surface.token("airgap:run", 'echo "use airgap:run" >&2')
 
 
 @pytest.fixture
@@ -69,7 +90,7 @@ def example_line(root: Path, key: str) -> str:
     return line + "\n"
 
 
-def removed_message(category: str, item: str) -> str:
+def removed(category: str, item: str) -> str:
     return surface.REMOVED.format(category=category, item=item)
 
 
@@ -83,13 +104,25 @@ def retire(root: Path, key: str, new: str) -> None:
          f'RETIRED_KEYS: tuple[tuple[str, str, str], ...] = (\n    ("{key}", "0000000", "set {new} and remove it"),\n')
 
 
+def assert_refused(root: Path, category: str, item: str) -> None:
+    snapshot = (root / surface.SNAPSHOT).read_bytes()
+    assert removed(category, item) in surface.compare(root)
+    assert removed(category, item) in surface.write(root)
+    assert (root / surface.SNAPSHOT).read_bytes() == snapshot
+
+
+def assert_refreshes(root: Path, category: str, item: str) -> None:
+    assert removed(category, item) not in surface.compare(root)
+    assert surface.write(root) == []
+    assert surface.compare(root) == []
+    assert item in json.loads((root / surface.SNAPSHOT).read_text())["removed"][category]
+
+
 def test_removing_a_key_without_a_migration_fails_and_the_refresh_refuses(tree):
-    snapshot = (tree / surface.SNAPSHOT).read_bytes()
     edit(tree / surface.EXAMPLE, example_line(tree, EXAMPLE_KEY), "")
 
-    assert surface.compare(tree) == [removed_message("airgap_env_keys", EXAMPLE_KEY)]
-    assert surface.write(tree) == [removed_message("airgap_env_keys", EXAMPLE_KEY)]
-    assert (tree / surface.SNAPSHOT).read_bytes() == snapshot
+    assert surface.compare(tree) == [removed("airgap_env_keys", EXAMPLE_KEY)]
+    assert_refused(tree, "airgap_env_keys", EXAMPLE_KEY)
 
 
 @pytest.mark.parametrize("half", ["release note only", "refusal only"])
@@ -102,8 +135,7 @@ def test_a_rename_needs_both_the_refusal_and_the_release_note(tree, half):
     else:
         retire(tree, EXAMPLE_KEY, NEW_KEY)
 
-    assert removed_message("airgap_env_keys", EXAMPLE_KEY) in surface.compare(tree)
-    assert removed_message("airgap_env_keys", EXAMPLE_KEY) in surface.write(tree)
+    assert_refused(tree, "airgap_env_keys", EXAMPLE_KEY)
 
 
 def test_adding_a_key_fails_until_the_snapshot_is_refreshed(tree):
@@ -128,11 +160,8 @@ def test_a_rename_with_a_retired_key_refusal_and_a_release_note_passes(tree):
         surface.ADDED.format(category="retired_env_keys", item=EXAMPLE_KEY),
         surface.UNREFRESHED.format(category="airgap_env_keys", item=EXAMPLE_KEY),
     ])
-    assert surface.write(tree) == []
-    assert surface.compare(tree) == []
-    written = json.loads((tree / surface.SNAPSHOT).read_text())
-    assert written["removed"]["airgap_env_keys"] == [EXAMPLE_KEY]
-    assert NEW_KEY in written["current"]["airgap_env_keys"]
+    assert_refreshes(tree, "airgap_env_keys", EXAMPLE_KEY)
+    assert NEW_KEY in json.loads((tree / surface.SNAPSHOT).read_text())["current"]["airgap_env_keys"]
 
     # The migration stays checked after the refresh: dropping the refusal fails.
     edit(tree / surface.MODEL_CONFIG, f'    ("{EXAMPLE_KEY}", "0000000", "set {NEW_KEY} and remove it"),\n', "")
@@ -140,14 +169,86 @@ def test_a_rename_with_a_retired_key_refusal_and_a_release_note_passes(tree):
                                  reason=f"`{EXAMPLE_KEY}` is not in RETIRED_KEYS") in surface.compare(tree)
 
 
-@pytest.mark.parametrize(("kind", "evidence", "reason"), [
-    ("refusal", "scripts/airgap/pipeline.sh", "`scripts/airgap/pipeline.sh` does not name `--no-load`"),
-    ("alias", "scripts/airgap/absent.sh", "`scripts/airgap/absent.sh` is not a file in the repository"),
-    ("retired-key", "scripts/airgap/pipeline.sh",
-     "a retired-key refusal is an airgap_env_keys entry in `scripts/airgap/model_config.py`"),
+# B1: text alone never satisfies the migration. The evidence is the owner file,
+# names match as tokens, and a refusal names the replacement.
+def _drop_skip_load(root: Path) -> None:
+    edit(root / PIPELINE, SKIP_LOAD_ARM, "")
+
+
+def _drop_short_help(root: Path) -> None:
+    edit(root / PIPELINE, "--help|-h)", "--help)")
+
+
+def _drop_sbom(root: Path) -> None:
+    edit(root / surface.PACK, "PACKING_RECORD.txt sbom.json THIRD-PARTY-NOTICES.txt sneakernet-signing.pub SHA256SUMS SHA256SUMS.sig",
+         "PACKING_RECORD.txt THIRD-PARTY-NOTICES.txt sneakernet-signing.pub SHA256SUMS SHA256SUMS.sig")
+
+
+def _rename_pipeline_task(root: Path) -> None:
+    edit(root / TASKS, "  pipeline:\n", "  run:\n")
+
+
+@pytest.mark.parametrize(("mutate", "category", "item", "line"), [
+    pytest.param(_drop_skip_load, "script_flags", "pipeline.sh --skip-load",
+                 "replaced by `--dry-run`; migration: refusal in `docs/release-notes.md`", id="self-cited note"),
+    pytest.param(_drop_skip_load, "script_flags", "pipeline.sh --skip-load",
+                 "replaced by `--dry-run`; migration: refusal in `scripts/airgap/pipeline.sh`",
+                 id="flag mentioned in usage text, no refusing arm"),
+    pytest.param(_drop_short_help, "script_flags", "pipeline.sh -h",
+                 "replaced by `--help`; migration: refusal in `scripts/airgap/pipeline.sh`", id="-h inside --help"),
+    pytest.param(_drop_sbom, "bundle_layout", "member sbom.json",
+                 "replaced by `MANIFEST.txt`; migration: refusal in `scripts/airgap/pack.sh`",
+                 id="member still mentioned in pack.sh"),
+    pytest.param(_drop_sbom, "bundle_layout", "member sbom.json",
+                 "replaced by `MANIFEST.txt`; migration: alias in `scripts/airgap/pack.sh`", id="alias kind"),
+    pytest.param(_rename_pipeline_task, "task_names", "airgap:pipeline",
+                 "replaced by `airgap:run`; migration: refusal in `docs/release-notes.md`", id="task self-cite"),
+    pytest.param(_rename_pipeline_task, "task_names", "airgap:pipeline",
+                 "replaced by `airgap:run`; migration: refusal in `taskfiles/airgap.yml`", id="task without stub"),
 ])
-def test_a_release_note_must_name_a_migration_the_code_provides(tree, kind, evidence, reason):
+def test_a_release_note_alone_is_never_the_migration(tree, mutate, category, item, line):
+    mutate(tree)
+    note(tree, f"- removed `{category}:{item}`; {line}")
+
+    assert_refused(tree, category, item)
+
+
+# B3: a refusing stub under the old name is a retirement, not a current item.
+@pytest.mark.parametrize(("path", "old", "stub", "category", "item", "replacement"), [
+    (PIPELINE, SKIP_LOAD_ARM, FLAG_STUB, "script_flags", "pipeline.sh --skip-load", "--no-load"),
+    (TASKS, "  pipeline:\n", TASK_STUB, "task_names", "airgap:pipeline", "airgap:run"),
+], ids=["flag", "task"])
+def test_a_refusing_stub_needs_its_release_note(tree, path, old, stub, category, item, replacement):
+    edit(tree / path, old, stub)
+
+    assert removed(category, item) in surface.compare(tree)
+    assert_refused(tree, category, item)
+
+    note(tree, f"- removed `{category}:{item}`; replaced by `{replacement}`; migration: refusal in `{path}`")
+    assert_refreshes(tree, category, item)
+
+
+def test_a_stub_that_does_not_name_the_replacement_is_refused(tree):
+    edit(tree / PIPELINE, SKIP_LOAD_ARM, FLAG_STUB.replace('use --no-load', 'see the docs'))
     note(tree, f"- removed `script_flags:pipeline.sh --skip-load`; replaced by `--no-load`; "
-               f"migration: {kind} in `{evidence}`")
-    [match] = surface.release_notes(tree).values()
-    assert surface.migration_problem(tree, match) == reason
+               f"migration: refusal in `{PIPELINE}`")
+
+    assert_refused(tree, "script_flags", "pipeline.sh --skip-load")
+
+
+# B2: deploy.sh values with list indices and the null form are part of the surface.
+def test_renaming_an_indexed_qdrant_value_is_a_removal(tree):
+    edit(tree / surface.DEPLOY, '"imagePullSecrets[0].name=$PULL_SECRET"', '"imagePullSecrets[0].ref=$PULL_SECRET"')
+
+    assert_refused(tree, "chart_values", "qdrant:imagePullSecrets[0].name")
+
+
+def test_a_values_refusal_is_a_fixed_line_in_the_owner_naming_both_paths(tree):
+    edit(tree / surface.DEPLOY, '"imagePullSecrets[0].name=$PULL_SECRET"', '"imagePullSecrets[0].ref=$PULL_SECRET"')
+    edit(tree / surface.DEPLOY, "_sizing=$(",
+         '[ -z "${QDRANT_VALUES_OLD:-}" ] || die "imagePullSecrets[0].name was renamed: use imagePullSecrets[0].ref"\n'
+         "_sizing=$(")
+    note(tree, "- removed `chart_values:qdrant:imagePullSecrets[0].name`; replaced by `imagePullSecrets[0].ref`; "
+               "migration: refusal in `scripts/airgap/deploy.sh`")
+
+    assert_refreshes(tree, "chart_values", "qdrant:imagePullSecrets[0].name")

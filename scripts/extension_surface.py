@@ -15,9 +15,12 @@ Every category is derived from its owner, never from a hand list:
 - gap_paths: the site-layer table of ADR-0009 §3;
 - bundle_layout: the tarball and member names and MANIFEST fields of pack.sh.
 
-An item that leaves the code needs a `- removed` line in docs/release-notes.md
-whose migration this module verifies (a retired-key refusal, an alias or a
-documented refusal). Refresh: .venv/bin/python scripts/extension_surface.py --write
+A task or flag whose definition only refuses (a stub left under the old name)
+counts as retired, not current. An item that leaves the surface needs a
+`- removed` line in docs/release-notes.md whose migration this module verifies
+in the category's owner file: a RETIRED_KEYS entry for a key, the refusing stub
+for a task or flag, or a fixed refusal line naming the old and the new name.
+Refresh: .venv/bin/python scripts/extension_surface.py --write
 """
 
 from __future__ import annotations
@@ -43,10 +46,12 @@ MODEL_CONFIG = Path("scripts/airgap/model_config.py")
 PACK = Path("scripts/airgap/pack.sh")
 DEPLOY = Path("scripts/airgap/deploy.sh")
 AIRGAP_TASKS = Path("taskfiles/airgap.yml")
+MAP_VALUES = Path("scripts/airgap/map_values.py")
 ROUTE_CA = Path("charts/mainframe-rag/ci/openwebui-route-ca.pem")
+IDP_CA = Path("tests/fixtures/extension-surface-idp-ca.pem")  # A loadable certificate; no key exists.
 # The files the derivation reads (tests copy exactly these).
 INPUTS = (EXAMPLE, Path("scripts/__init__.py"), Path("scripts/airgap"), Path("Taskfile.yml"),
-          Path("taskfiles"), ADR, ROUTE_CA, RELEASE_NOTES, SNAPSHOT)
+          Path("taskfiles"), ADR, ROUTE_CA, IDP_CA, RELEASE_NOTES, SNAPSHOT)
 CATEGORIES = ("airgap_env_keys", "retired_env_keys", "task_names", "chart_values",
               "script_flags", "gap_paths", "bundle_layout")
 REFRESH = ".venv/bin/python scripts/extension_surface.py --write"
@@ -61,7 +66,7 @@ BROKEN = ("extension surface: the release note for {category} `{item}` names a m
           "code does not provide: {reason}")
 NOTE = re.compile(r"^- removed `(?P<category>[a-z_]+):(?P<item>[^`]+)`"
                   r"(?:; replaced by `(?P<replacement>[^`]+)`)?"
-                  r"; migration: (?P<kind>retired-key|alias|refusal) in `(?P<evidence>[^`]+)`\s*$",
+                  r"; migration: (?P<kind>retired-key|refusal) in `(?P<evidence>[^`]+)`\s*$",
                   re.MULTILINE)
 
 # An input that selects every optional block of the values mapping (route,
@@ -118,19 +123,56 @@ def env_keys(root: Path) -> list[str]:
     return sorted(set(re.findall(r"(?m)^#?[ \t]*([A-Z][A-Z0-9_]*)=", text)))
 
 
-def task_names(root: Path) -> list[str]:
+# A refusal: a fixed message and a failing exit, in shell or Python.
+_REFUSES = re.compile(r"\bdie\b|\braise\b|STOP:|\bexit [1-9]|(?:;|&&|\|\|)\s*false\b|^\s*false\b", re.MULTILINE)
+# A refusing stub does nothing else: every command is a message or a failing exit.
+_QUOTED = re.compile(r'"(?:\\.|[^"\\])*"|\'[^\']*\'')
+_STUB_COMMAND = re.compile(r"(?:echo|printf|die)\b[^|&<>]*(?:>&2)?|exit [1-9][0-9]*|false")
+
+
+def token(name: str, text: str) -> bool:
+    """`name` occurs in `text` as a whole token: `-h` is not inside `--help`."""
+    return re.search(r"(?<![A-Za-z0-9_.-])" + re.escape(name) + r"(?![A-Za-z0-9_-])", text) is not None
+
+
+def _stub(text: str) -> bool:
+    commands = [c.strip() for c in re.split(r"[;\n]", _QUOTED.sub('""', text)) if c.strip()]
+    return (bool(commands) and all(_STUB_COMMAND.fullmatch(c) for c in commands)
+            and any(re.match(r"die\b|exit|false", c) for c in commands))
+
+
+class Surface(dict[str, list[str]]):
+    """The derived surface, plus the refusing stubs left under old names:
+    {(category, item): (owner file, refusal text)}."""
+
+    def __init__(self, items: dict[str, list[str]], stubs: dict[tuple[str, str], tuple[str, str]]):
+        super().__init__(items)
+        self.stubs = stubs
+
+
+def task_names(root: Path, stubs: dict[tuple[str, str], tuple[str, str]]) -> list[str]:
     names: list[str] = []
 
-    def add(prefix: str, document: dict) -> None:
+    def add(prefix: str, path: str) -> None:
+        document = yaml.safe_load((root / path).read_text(encoding="utf-8"))
         for name, task in (document.get("tasks") or {}).items():
-            if isinstance(task, dict) and task.get("desc") and not task.get("internal"):
-                names.extend(prefix + alias for alias in (name, *(task.get("aliases") or ())))
+            if not (isinstance(task, dict) and task.get("desc") and not task.get("internal")):
+                continue
+            commands = [c.get("cmd", "") if isinstance(c, dict) else c for c in task.get("cmds") or ()]
+            body = "\n".join(c for c in commands if isinstance(c, str))
+            refuses = (bool(commands) and all(isinstance(c, str) for c in commands)
+                       and not task.get("deps") and _stub(body))
+            for alias in (name, *(task.get("aliases") or ())):
+                if refuses:
+                    stubs[("task_names", prefix + alias)] = (path, body)
+                else:
+                    names.append(prefix + alias)
+        if path == "Taskfile.yml":
+            for namespace, include in (document.get("includes") or {}).items():
+                add(namespace + ":", include["taskfile"].removeprefix("./") if isinstance(include, dict)
+                    else str(include).removeprefix("./"))
 
-    taskfile = yaml.safe_load((root / "Taskfile.yml").read_text(encoding="utf-8"))
-    add("", taskfile)
-    for namespace, include in (taskfile.get("includes") or {}).items():
-        path = include["taskfile"] if isinstance(include, dict) else include
-        add(namespace + ":", yaml.safe_load((root / path).read_text(encoding="utf-8")))
+    add("", "Taskfile.yml")
     return sorted(set(names))
 
 
@@ -141,17 +183,10 @@ def _leaf_paths(node: object, prefix: str) -> list[str]:
 
 
 def chart_values(root: Path) -> list[str]:
-    import certifi  # A real public CA certificate, so the optional IdP CA block is selected.
-
-    bundle = Path(certifi.where()).read_text(encoding="utf-8")
-    end = "-----END CERTIFICATE-----\n"
-    certificate = bundle[bundle.index("-----BEGIN CERTIFICATE-----"):bundle.index(end) + len(end)]
     with tempfile.TemporaryDirectory() as scratch:
-        idp_ca = Path(scratch) / "idp-ca.pem"
-        idp_ca.write_text(certificate, encoding="utf-8")
         environment = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "PYTHONPATH": str(root),
                        "ROUTE_DESTINATION_CA_FILE": str(root / ROUTE_CA),
-                       "OPENWEBUI_IDP_CA_FILE": str(idp_ca)}
+                       "OPENWEBUI_IDP_CA_FILE": str(root / IDP_CA)}
         # A key the tree retires refuses: leave it out, as an operator would.
         retired = retired_keys(root)
         environment.update({key: value for key, value in MAXIMAL_INPUT.items() if key not in retired})
@@ -167,21 +202,33 @@ def chart_values(root: Path) -> list[str]:
             raise ValueError("model_config.py --qdrant-sizing refused the maximal input")
     app = [path[1:] for path in _leaf_paths(values, "")]
     deploy = (root / DEPLOY).read_text(encoding="utf-8")
-    qdrant = set(re.findall(r'--set-string "([A-Za-z][A-Za-z0-9_.]*)=', deploy))
+    # --set and --set-string, with list indices (imagePullSecrets[0].name) and null forms.
+    qdrant = set(re.findall(r'--set(?:-string)? "?([A-Za-z][A-Za-z0-9_.\[\]]*)=', deploy))
     qdrant |= {line.split("=", 1)[0] for line in sizing.stdout.split()}
     return sorted([f"mainframe-rag:{path}" for path in app] + [f"qdrant:{path}" for path in qdrant])
 
 
-def script_flags(root: Path) -> list[str]:
+def _import_script(root: Path) -> str:
+    adr = (root / ADR).read_text(encoding="utf-8")
+    return adr[adr.index("<!-- import-script:start -->"):adr.index("<!-- import-script:end -->")]
+
+
+def script_flags(root: Path, stubs: dict[tuple[str, str], tuple[str, str]]) -> list[str]:
     tasks = (root / AIRGAP_TASKS).read_text(encoding="utf-8")
     items: list[str] = []
     for script in sorted(set(re.findall(r"sh scripts/airgap/([a-z_]+\.sh)", tasks))):
-        text = (root / "scripts/airgap" / script).read_text(encoding="utf-8")
+        owner = f"scripts/airgap/{script}"
+        text = (root / owner).read_text(encoding="utf-8")
         loop = re.search(r'(?ms)^(?:for \w+ in "\$@"|while \[ "\$#" -gt 0 \]); do$(.*?)^done$', text)
-        flags: set[str] = set()
-        for label in re.findall(r"(?m)^\s*(-[-A-Za-z0-9|]*)\)", loop.group(1) if loop else ""):
-            flags.update(part for part in label.split("|") if part.startswith("-"))
-        items.extend(f"{script} {flag}" for flag in sorted(flags))
+        arms: dict[str, list[str]] = {}
+        for label, body in re.findall(r"(?ms)^\s*(-[-A-Za-z0-9|]*)\)(.*?);;", loop.group(1) if loop else ""):
+            for flag in (part for part in label.split("|") if part.startswith("-")):
+                arms.setdefault(flag, []).append(body)
+        for flag, bodies in sorted(arms.items()):
+            if all(_stub(body) for body in bodies):
+                stubs[("script_flags", f"{script} {flag}")] = (owner, "\n".join(bodies))
+            else:
+                items.append(f"{script} {flag}")
     adr = (root / ADR).read_text(encoding="utf-8")
     procedure = adr[adr.index("## 4. Release import procedure"):adr.index("<!-- import-script:start -->")]
     items.extend(f"import-script {name}" for name in re.findall(r"(?m)^export ([A-Z_]+)=", procedure))
@@ -202,12 +249,12 @@ def bundle_layout(root: Path) -> list[str]:
     joined = text.replace("\\\n", " ")
     assignments = dict(re.findall(r'(?m)^\s*([A-Z_]+)="([^"$]+)"', text))
 
-    def name(token: str) -> str:
-        token = token.strip('"')
-        whole = re.fullmatch(r"\$\{?([A-Z_]+)\}?", token)
+    def name(word: str) -> str:
+        word = word.strip('"')
+        whole = re.fullmatch(r"\$\{?([A-Z_]+)\}?", word)
         if whole and whole[1] in assignments:
             return assignments[whole[1]]
-        return re.sub(r'"?\$\{?([A-Z_]+)\}?"?', r"{\1}", token)
+        return re.sub(r'"?\$\{?([A-Z_]+)\}?"?', r"{\1}", word)
 
     command = re.search(r'(?m)^tar -C "\$DIST" -cf "\$OUT_TARBALL" (.*)$', joined)
     tarball = re.search(r'(?m)^OUT_TARBALL="\$DIST/([^"]+)"', text)
@@ -216,52 +263,83 @@ def bundle_layout(root: Path) -> list[str]:
         raise ValueError("pack.sh no longer has the tar command, OUT_TARBALL or the MANIFEST block")
     outer = name(tarball[1])
     items = [f"tarball {outer}", f"tarball {outer}.sha256"]
-    items += [f"member {name(token)}" for token in command[1].split()]
+    items += [f"member {name(word)}" for word in command[1].split()]
     items += [f"manifest {field}" for field in re.findall(r'echo "([a-z0-9_]+): ', manifest[1])]
     return sorted(set(items))
 
 
-def derive(root: Path = ROOT) -> dict[str, list[str]]:
-    return {
+def derive(root: Path = ROOT) -> Surface:
+    stubs: dict[tuple[str, str], tuple[str, str]] = {}
+    items = {
         "airgap_env_keys": env_keys(root),
         "retired_env_keys": sorted(retired_keys(root)),
-        "task_names": task_names(root),
+        "task_names": task_names(root, stubs),
         "chart_values": chart_values(root),
-        "script_flags": script_flags(root),
+        "script_flags": script_flags(root, stubs),
         "gap_paths": gap_paths(root),
         "bundle_layout": bundle_layout(root),
     }
+    return Surface(items, stubs)
 
 
-def _name(category: str, item: str) -> str:
-    """The name inside an item that code spells: `pipeline.sh --dry-run` -> `--dry-run`."""
+def _split(category: str, item: str) -> tuple[str, str]:
+    """(scope, name): the name code spells, and the scope a replacement shares.
+    `pipeline.sh --dry-run` -> (`pipeline.sh `, `--dry-run`)."""
     if category in ("script_flags", "bundle_layout"):
-        return item.split(" ", 1)[1]
+        scope, name = item.split(" ", 1)
+        return scope + " ", name
     if category == "chart_values":
-        return item.split(":", 1)[1]
-    return item
+        scope, name = item.split(":", 1)
+        return scope + ":", name
+    return "", item
 
 
-def migration_problem(root: Path, note: re.Match[str]) -> str | None:
-    """Why the code does not provide the migration a release note names, or None."""
-    item, replacement = _name(note["category"], note["item"]), note["replacement"]
-    evidence = root / note["evidence"]
-    if not evidence.is_file() or not evidence.resolve().is_relative_to(root.resolve()):
-        return f"`{note['evidence']}` is not a file in the repository"
-    if note["kind"] == "retired-key":
-        retired = retired_keys(root)
-        if note["category"] != "airgap_env_keys" or note["evidence"] != MODEL_CONFIG.as_posix():
+def _owners(category: str, item: str) -> tuple[str, ...]:
+    """The files that may hold a fixed refusal for an item that has no structural one."""
+    scope, _name = _split(category, item)
+    if category == "chart_values":
+        return (MAP_VALUES.as_posix(),) if scope == "mainframe-rag:" else (DEPLOY.as_posix(),)
+    if category == "bundle_layout":  # The packer, and the bundle's readers.
+        return tuple(f"scripts/airgap/{name}" for name in ("pack.sh", "bootstrap.sh", "load.sh", "common.sh"))
+    if category == "gap_paths" or scope == "import-script ":
+        return (ADR.as_posix(),)
+    return ()
+
+
+def migration_problem(root: Path, note: re.Match[str], current: Surface) -> str | None:
+    """Why the owner code does not provide the migration a release note names, or None."""
+    category, evidence, kind = note["category"], note["evidence"], note["kind"]
+    scope, old = _split(category, note["item"])
+    new = note["replacement"]
+    if new and scope + new not in current[category]:
+        return f"the replacement `{new}` is not in the current {category}"
+    if kind == "retired-key":
+        if category != "airgap_env_keys" or evidence != MODEL_CONFIG.as_posix():
             return f"a retired-key refusal is an airgap_env_keys entry in `{MODEL_CONFIG}`"
-        if item not in retired:
-            return f"`{item}` is not in RETIRED_KEYS"
-        if replacement and replacement not in retired[item]:
-            return f"the RETIRED_KEYS message for `{item}` does not name `{replacement}`"
+        retired = retired_keys(root)
+        if old not in retired:
+            return f"`{old}` is not in RETIRED_KEYS"
+        if new and not token(new, retired[old]):
+            return f"the RETIRED_KEYS message for `{old}` does not name `{new}`"
         return None
-    text = evidence.read_text(encoding="utf-8")
-    missing = [name for name in (item, replacement) if name and name not in text]
-    if missing:
-        return f"`{note['evidence']}` does not name " + ", ".join(f"`{name}`" for name in missing)
-    return None
+    if not new:
+        return "a refusal names the replacement (`; replaced by`)"
+    if category in ("task_names", "script_flags") and scope != "import-script ":
+        stub = current.stubs.get((category, note["item"]))
+        if stub is None:
+            return f"`{note['item']}` is not a refusing stub in its owner file"
+        if evidence != stub[0]:
+            return f"the refusal for `{note['item']}` is in `{stub[0]}`"
+        if not token(new, stub[1]):
+            return f"the refusal for `{note['item']}` does not name `{new}`"
+        return None
+    if evidence not in _owners(category, note["item"]):
+        return f"a {category} refusal is in one of: " + ", ".join(f"`{o}`" for o in _owners(category, note["item"]))
+    text = _import_script(root) if evidence == ADR.as_posix() else (root / evidence).read_text(encoding="utf-8")
+    for line in text.splitlines():
+        if _REFUSES.search(line) and token(old, line) and token(new, line):
+            return None
+    return f"`{evidence}` has no refusal line naming `{old}` and `{new}`"
 
 
 def release_notes(root: Path) -> dict[tuple[str, str], re.Match[str]]:
@@ -277,7 +355,7 @@ def load_snapshot(root: Path) -> dict[str, dict[str, list[str]]]:
             for part in ("current", "removed")}
 
 
-def _problems(root: Path, current: dict[str, list[str]]) -> list[tuple[bool, str]]:
+def _problems(root: Path, current: Surface) -> list[tuple[bool, str]]:
     """(blocks a refresh, fixed message) for each difference between the code and the snapshot."""
     snapshot = load_snapshot(root)
     notes = release_notes(root)
@@ -287,13 +365,13 @@ def _problems(root: Path, current: dict[str, list[str]]) -> list[tuple[bool, str
         problems += [(False, ADDED.format(category=category, item=item)) for item in sorted(now - before)]
         for item in sorted(before - now):
             note = notes.get((category, item))
-            if note is None or migration_problem(root, note) is not None:
+            if note is None or migration_problem(root, note, current) is not None:
                 problems.append((True, REMOVED.format(category=category, item=item)))
             else:
                 problems.append((False, UNREFRESHED.format(category=category, item=item)))
         for item in sorted(set(snapshot["removed"][category]) - now):
             note = notes.get((category, item))
-            reason = "no `- removed` line" if note is None else migration_problem(root, note)
+            reason = "no `- removed` line" if note is None else migration_problem(root, note, current)
             if reason:
                 problems.append((True, BROKEN.format(category=category, item=item, reason=reason)))
     return problems
@@ -316,7 +394,7 @@ def write(root: Path = ROOT) -> list[str]:
     document = {
         "_about": ("The upstream/gap extension surface (ADR-0009 section 9), derived by "
                    "scripts/extension_surface.py. Do not edit by hand; refresh: " + REFRESH),
-        "current": current,
+        "current": dict(current),
         "removed": removed,
     }
     (root / SNAPSHOT).write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")

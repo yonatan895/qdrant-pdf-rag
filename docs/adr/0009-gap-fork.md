@@ -455,7 +455,7 @@ The names the gap builds on are a **public API**, limited to this list:
 |---|---|
 | `airgap.env` keys | Every key `airgap.env.example` assigns or shows commented out, plus `RETIRED_KEYS` |
 | Chart values that site config sets | The value paths `map_values.py` writes when every optional block is selected, plus the Qdrant paths `deploy.sh` sets |
-| Task names and operator script flags | Every task `task --list` shows; the flags each `airgap:` task's script parses; the §4 import script's inputs |
+| Task names and operator script flags | Every task `task --list` shows, because gap developers use the `qa:` and `dev:` tasks too; the flags each `airgap:` task's script parses; the §4 import script's inputs |
 | `gap/` paths | The §3 table |
 | Release bundle layout | The tarball, member and MANIFEST field names `pack.sh` writes, which include everything the §4 import script reads |
 
@@ -464,7 +464,16 @@ The names the gap builds on are a **public API**, limited to this list:
     fixed message naming the new one (the `RETIRED_KEYS` pattern of GH#1111);
   - a `- removed` line in [the release notes](../release-notes.md).
 
-  An added item needs only a snapshot refresh.
+  A task or flag left under its old name only to refuse is a rename too. An
+  added item needs only a snapshot refresh.
+- **Migration evidence** is in the category's owner file, never in a note:
+  - a key: its `RETIRED_KEYS` entry;
+  - a task or flag: its refusing stub in the taskfile or script;
+  - anything else: a fixed refusal line in the owner (`map_values.py` or
+    `deploy.sh`, the packer or a bundle reader, or the import script).
+
+  The old and new names match as whole tokens. A `RETIRED_KEYS` entry is
+  itself a migration and stays.
 - **Enforcement.** `scripts/extension_surface.py` derives the list from the
   code. `tests/test_extension_surface.py` fails with a fixed message when the
   list differs from the snapshot `tests/fixtures/extension-surface.json`, or

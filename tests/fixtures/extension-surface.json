@@ -328,6 +328,8 @@
       "mainframe-rag:ui.enabled",
       "qdrant:image.repository",
       "qdrant:image.tag",
+      "qdrant:imagePullSecrets",
+      "qdrant:imagePullSecrets[0].name",
       "qdrant:persistence.size",
       "qdrant:persistence.storageClassName",
       "qdrant:resources.limits.cpu",

@@ -13,7 +13,7 @@ platform team.
 ## Gate
 
 Every published-main release must pass both lanes below against the **same
-original signed bundle** before that bundle is transferred into production. A
+original signed bundle** before its transfer into production. A
 missing, skipped or failed required check blocks transfer. The pipeline's
 `OPERATIONAL & ACCEPTED` banner alone does not pass this gate. Copy
 [the record template](release-record.md) outside Git for each candidate and
@@ -34,12 +34,12 @@ stands in for those checks.
 
 Mock citations prove interfaces, not answer quality; the Kind lane uses real
 models. Site-specific production storage, identity, network policy and capacity
-acceptance remain separate. A changed image or configuration requires a new
-candidate and new acceptance; never edit a signed bundle or repack separately
-per lane. A candidate that removes or renames an
+acceptance remain separate. No laptop runner or new deployment framework is
+needed. A changed image or configuration requires a new candidate and new
+acceptance; never edit a signed bundle or repack separately per lane. Removing
+or renaming an
 [extension-surface](adr/0009-gap-fork.md#9-extension-surface-open-question-2-decided)
-item ships its [release note](release-notes.md);
-`tests/test_extension_surface.py` enforces it.
+item needs a [release note](release-notes.md).
 
 ## 1. Host and pinned models
 
@@ -774,17 +774,17 @@ docker network disconnect kind rag-kind-registry
 docker network disconnect kind rag-kind-gateway-tls
 ```
 
-The TLS services keep their original connections and loopback ports, and the
-registry, model files, TLS material and gateway key store remain for the next
-rehearsal. Never delete another cluster or prune its volumes.
+The TLS services, registry, model files, TLS material and gateway key store
+remain for the next rehearsal. Never delete another cluster or prune its volumes.
 
 Promotion requires every required row in [the release record](release-record.md)
 to be `PASS`, evidence attributable to this bundle, and named operator sign-off.
 `NOT RUN`, `BLOCKED`, `FAIL`, missing artifacts or stale results prohibit
 transfer. This is an operator-enforced gate; the pack/load scripts do not read the
 record. Transfer **the identical tested tarball and checksum**, plus its record,
-through the approved channel. Recheck the checksum on arrival, then use the
-existing bootstrap, validation, deployment pipeline, [site OpenShift acceptance](install_and_ops.md#site-openshift-acceptance)
+through the approved channel. Do not rebuild, repack, edit or substitute an image.
+Recheck the checksum on arrival, then use the existing bootstrap, validation,
+deployment pipeline, [site OpenShift acceptance](install_and_ops.md#site-openshift-acceptance)
 and production acceptance commands. A bundle or security/configuration fix
 requires a new candidate and a fresh gate.
 
