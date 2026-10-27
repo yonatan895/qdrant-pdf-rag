@@ -298,12 +298,42 @@ def _point(doc_id: str = "D"):
     return SimpleNamespace(id=f"p-{doc_id}", payload={"doc_id": doc_id}, vector=None)
 
 
+class _SameIdOverwriteStore:
+    """Local boundary fake for the lifecycle test: a same-id upsert replaces
+    the prior control state (issue #391 F2), so the read after a commit sees
+    the committed envelope, never the stale pending first. Only the surface
+    begin/commit/read need is modeled here."""
+
+    def __init__(self):
+        self._points: dict[str, list] = {}
+        self.upserts = 0
+
+    def collection_exists(self, name):
+        return True
+
+    def retrieve(self, name, ids, *, with_payload=True, with_vectors=False):
+        wanted = {str(i) for i in ids}
+        return [
+            SimpleNamespace(id=p.id, payload=p.payload, vector=None)
+            for p in self._points.get(name, [])
+            if str(p.id) in wanted
+        ]
+
+    def upsert(self, name, *, points, wait=True):
+        self.upserts += 1
+        stored = self._points.setdefault(name, [])
+        ids = {str(p.id) for p in points}
+        stored[:] = [p for p in stored if str(p.id) not in ids]
+        stored.extend(points)
+        return SimpleNamespace()
+
+
 def test_begin_commit_lifecycle():
     """A contract change opens as pending BEFORE any document work and only
     the explicit commit flips it; a pending re-declaration stays pending
     (resume), and a committed same-contract begin is zero-write."""
     s = _settings()
-    store = PointStore()
+    store = _SameIdOverwriteStore()
     comp = _completions(s)
     digest, mode = begin_manifest(store, comp, s, RULES)
     assert (digest, mode) == (manifest_digest(s, RULES), "pending")
