@@ -1,6 +1,7 @@
 """Chunk contract tests: outline sections, chunk_id stability, classification."""
 
 import re
+from pathlib import Path
 
 import pytest
 
@@ -227,45 +228,87 @@ def test_jcl_fixture_statements_never_split(jcl_pdf):
     )
 
 
-def test_instream_data_splits_between_lines_not_as_atom():
-    """Blocker 2 (review): a 4000-char SYSIN block must split between data
-    lines; only // cards stay continuation-atomic."""
-    from mainframe_rag.ingest.chunk import SECTION_MAX_CHARS, _split_blocks
+def _chunked_pages(*pages: str):
+    """make_chunks over a TOC-less document whose body is exactly `pages`."""
+    from mainframe_rag.ingest.ibm_pdf import ParsedDoc
+
+    parsed = ParsedDoc(
+        path=Path("synthetic.pdf"), sha256="0" * 64, doc_id="SA22-0000-00",
+        title="Synthetic", product="z/OS", version="9.9", vendor="IBM",
+        toc=[], page_count=len(pages),
+    )
+    return make_chunks(parsed, list(pages), [str(i + 1) for i in range(len(pages))])
+
+
+def test_oversize_atomic_regions_split_between_whole_units():
+    """Blocker 2 + issue #216, end to end through make_chunks: a 4000-char
+    SYSIN block splits between records, oversize code only at statement
+    starts, oversize tables only at row boundaries, one oversize statement
+    stays whole, and overlap seeds back off to whole units."""
+    from mainframe_rag.ingest.chunk import SECTION_MAX_CHARS, detect_table_region
 
     data = [f"RECORD-{i:04d} PAYLOAD-DATA-LINE" for i in range(200)]
-    para = "//SYSIN DD *\n" + "\n".join(data)
-    assert len(para) > SECTION_MAX_CHARS
-    blocks = _split_blocks([(0, para)])
-    assert len(blocks) > 1
-    for _, _, text in blocks:
-        assert len(text) <= SECTION_MAX_CHARS + 100
-    assert blocks[0][2].startswith("//SYSIN DD *")
-    joined = "\n".join(text for _, _, text in blocks)
-    for line in data:
-        assert line in joined
-    # SYSIN data in the paragraph AFTER the DD * card splits between records
-    # too, even across the para boundary; the chain ends at prose.
-    blocks = _split_blocks([(0, "//SYSIN DD *"), (1, "\n".join(data))])
-    assert len(blocks) > 1
-    joined = "\n".join(text for _, _, text in blocks)
+    chunks = _chunked_pages("//SYSIN DD *", "\n".join(data))
+    assert len(chunks) > 1, "the generated region must force splits or the test is vacuous"
+    for chunk in chunks:
+        assert len(chunk.text) <= SECTION_MAX_CHARS + 100
+    assert chunks[0].text.startswith("//SYSIN DD *")
+    joined = "\n".join(c.text for c in chunks)
     for line in data:
         assert line in joined, f"record split: {line!r}"
-    blocks2 = _split_blocks([(0, "//SYSIN DD *"), (1, "REC1 DATA\nREC2 DATA"), (2, "See the manual.")])
-    assert blocks2[-1][2].endswith("See the manual.")
+    # SYSIN data after the DD * card splits between records too, even across
+    # the page boundary; the chain ends at prose.
+    assert _chunked_pages("//SYSIN DD *", "REC1 DATA\nREC2 DATA", "See the manual.")[
+        -1
+    ].text.endswith("See the manual.")
 
+    statements = [f"//S{i:02d} EXEC PGM=IEFBR14,PARM='PHASE-{i:02d}'" for i in range(120)]
+    chunks = _chunked_pages("\n".join(statements))
+    assert len(chunks) > 1
+    for chunk in chunks:
+        # Overlap seeds may carry a leading separator; a sliced card would
+        # still fail this (the opening is not a statement start).
+        assert chunk.text.lstrip().startswith(("//S", "//*")), "chunk opens mid-statement"
+    joined = "\n".join(c.text for c in chunks)
+    for statement in statements:
+        assert statement in joined
+    giant = "//LONG EXEC PGM=X,PARM='" + "Y" * (SECTION_MAX_CHARS + 500) + "'"
+    [whole] = _chunked_pages(giant)
+    assert whole.text == giant, "an oversize single statement is never sliced"
 
-def test_code_runs_share_single_newlines():
-    """Review: adjacent atomic items join with one newline (exact-card
-    sparse fidelity); prose boundaries keep the double newline."""
     from mainframe_rag.ingest.chunk import _split_blocks
 
-    (page, text), = [(0, "//A X\n//B Y")]
-    assert _split_blocks([(page, text)]) == [(0, 0, "//A X\n//B Y")]
-    prose = _split_blocks([(0, "para one"), (0, "para two")])
-    assert prose == [(0, 0, "para one\n\npara two")]
-    # Blocks are (start, end, text): a cross-page accumulation spans both pages.
-    assert _split_blocks([(3, "para one"), (5, "para two")]) == [(3, 5, "para one\n\npara two")]
-    assert _split_blocks([(2, "solo")]) == [(2, 2, "solo")]
+    table = _table_para(120)
+    chunks = _chunked_pages(table)
+    assert len(chunks) > 1
+    # The compatibility projection still yields the stored block text.
+    assert [t for _, _, t in _split_blocks([(0, table)])] == [c.text for c in chunks]
+    for chunk in chunks:
+        assert len(chunk.text) <= SECTION_MAX_CHARS + 100
+    joined = "\n".join(c.text for c in chunks)
+    for line in table.splitlines():
+        assert line in joined, f"row split: {line!r}"
+
+    # Overlap backoff, constructed arithmetic: 2000-char prose + six 300-char
+    # units. The 400-char tail starts inside item 3, so the next block opens
+    # with all of item 3 — never a fragment.
+    code_units = [f"//S{i:02d}  " + "X" * (300 - 7) for i in range(1, 7)]
+    row_units = [(f"PARM{i:02d}      ") + "X" * 288 for i in range(1, 7)]
+    assert all(len(unit) == 300 for unit in [*code_units, *row_units])
+    for units, lead in [(code_units, ""), (row_units, "Parameter   Meaning\n")]:
+        first, second = _chunked_pages("y" * 2000, lead + "\n".join(units))
+        assert first.text.endswith(units[3])
+        assert second.text.startswith(units[3] + "\n" + units[4])
+        for unit in units:
+            assert unit in first.text or unit in second.text
+
+    # Detection: columns are a table; code wins over columns (JCL
+    # continuations carry wide indents that read as columns).
+    jcl = "//DD1 DD DSN=X,DISP=(NEW,CATLG,DELETE),\n//            UNIT=SYSDA,SPACE=(CYL,(1,1))"
+    assert detect_table_region(_table_para(4)) is True
+    assert detect_table_region(jcl) is False
+    assert detect_table_region("Plain narrative prose about system parameters.") is False
+    assert detect_table_region("") is False
 
 
 def test_rexx_fixture_statements_never_split(rexx_pdf):
@@ -286,42 +329,6 @@ def test_rexx_fixture_statements_never_split(rexx_pdf):
     assert [c.chunk_id for c in chunks] == [c.chunk_id for c in again]
 
 
-def test_oversize_code_para_splits_at_statement_starts():
-    from mainframe_rag.ingest.chunk import SECTION_MAX_CHARS, _split_blocks
-
-    statements = [f"//S{i:02d} EXEC PGM=IEFBR14,PARM='PHASE-{i:02d}'" for i in range(120)]
-    para = "\n".join(statements)
-    assert len(para) > SECTION_MAX_CHARS
-    blocks = _split_blocks([(0, para)])
-    assert len(blocks) > 1
-    joined = "\n".join(text for _, _, text in blocks)
-    for statement in statements:
-        assert statement in joined
-    # Every piece opens with a statement start (overlap seeds may carry a
-    # leading separator; strip it before checking — a sliced card would
-    # still fail this assertion).
-    for _, _, text in blocks:
-        opening = text.lstrip()
-        assert opening.startswith(("//S", "//*"))
-    # An oversize single statement is emitted whole, never sliced.
-    giant = "//LONG EXEC PGM=X,PARM='" + "Y" * (SECTION_MAX_CHARS + 500) + "'"
-    giant_blocks = _split_blocks([(0, giant)])
-    assert len(giant_blocks) == 1 and giant_blocks[0][2] == giant
-    # Overlap backoff, constructed arithmetic: prose 2000 + six 300-char JCL
-    # statements. The 400-char overlap tail starts inside S3, so the seed
-    # backs off to whole trailing items and the next block opens with all of
-    # S4 followed by S5, joined with single newlines.
-    prose = "y" * 2000
-    stmts = [f"//S{i:02d}  " + "X" * (300 - 7) for i in range(1, 7)]
-    assert all(len(s) == 300 for s in stmts)
-    two = _split_blocks([(0, prose), (0, "\n".join(stmts))])
-    assert len(two) == 2
-    assert two[0][2].endswith(stmts[3])
-    assert two[1][2].startswith(stmts[3] + "\n" + stmts[4])
-    for statement in stmts:
-        assert statement in two[0][2] or statement in two[1][2]
-
-
 # Issue #216: table/syntax fidelity — atomic blocks, message detector,
 # page labels. Table rows are atomic like code statements (row-boundary
 # splits, whole-row overlap backoff); the 0.6 column rule is shared with
@@ -334,44 +341,10 @@ def _table_para(n_rows: int = 120) -> str:
     return "\n".join([header, *rows])
 
 
-def test_oversize_table_splits_at_row_boundaries():
-    """Table-atomic: a 120-row column block splits into several blocks and
-    every row survives whole — never a mid-row char-slice."""
-    from mainframe_rag.ingest.chunk import SECTION_MAX_CHARS, _split_blocks
-
-    para = _table_para(120)
-    assert len(para) > SECTION_MAX_CHARS
-    blocks = _split_blocks([(0, para)])
-    assert len(blocks) > 1
-    for _, _, text in blocks:
-        assert len(text) <= SECTION_MAX_CHARS + 100
-    joined = "\n".join(text for _, _, text in blocks)
-    for line in para.splitlines():
-        assert line in joined, f"row split across blocks: {line!r}"
-    # Overlap backoff: 2000-char prose + six 300-char table rows. The 400-char
-    # tail starts inside R3, so the next block opens with all of R4 — never a
-    # row fragment.
-    rows = [(f"PARM{i:02d}      ") + "X" * 288 for i in range(1, 7)]
-    assert all(len(r) == 300 for r in rows)
-    two = _split_blocks([(0, "y" * 2000), (0, "Parameter   Meaning\n" + "\n".join(rows))])
-    assert len(two) == 2
-    assert two[0][2].endswith(rows[3])
-    assert two[1][2].startswith(rows[3] + "\n" + rows[4])
-    # Detection: columns are a table; code wins over columns (JCL
-    # continuations carry wide indents that read as columns).
-    from mainframe_rag.ingest.chunk import detect_table_region
-
-    assert detect_table_region(_table_para(4)) is True
-    jcl = "//DD1 DD DSN=X,DISP=(NEW,CATLG,DELETE),\n//            UNIT=SYSDA,SPACE=(CYL,(1,1))"
-    assert detect_table_region(jcl) is False
-    assert detect_table_region("Plain narrative prose about system parameters.") is False
-    assert detect_table_region("") is False
-
-
 def test_mixed_prose_jcl_extracts_cards():
     """Mixed paragraph: prose stays a blob, JCL cards become atomic
     statements; a single `//see`-style line stays prose (byte-identical)."""
-    from mainframe_rag.ingest.chunk import _mixed_jcl_items, _split_blocks
+    from mainframe_rag.ingest.chunk import _mixed_jcl_items
 
     para = (
         "To allocate the dataset use this job.\n"
@@ -392,21 +365,19 @@ def test_mixed_prose_jcl_extracts_cards():
     lone = "See //see the manual for details.\nMore prose here."
     assert _mixed_jcl_items(lone) == [(lone, False)]
     # End to end: statements stay whole; prose/code boundaries keep the
-    # historical double newline, code runs share one.
-    blocks = _split_blocks([(0, para)])
-    assert blocks == [
-        (
-            0,
-            0,
-            (
-                "To allocate the dataset use this job.\n"
-                "Submit it after IPL completes.\n\n"
-                "//STEP1 EXEC PGM=IEFBR14\n"
-                "//DD1 DD DSN=X,DISP=SHR\n\n"
-                "The job ends with condition code zero."
-            ),
-        )
-    ]
+    # historical double newline, code runs share one, and a cross-page
+    # accumulation spans both pages.
+    [block] = _chunked_pages(para)
+    assert block.text == (
+        "To allocate the dataset use this job.\n"
+        "Submit it after IPL completes.\n\n"
+        "//STEP1 EXEC PGM=IEFBR14\n"
+        "//DD1 DD DSN=X,DISP=SHR\n\n"
+        "The job ends with condition code zero."
+    )
+    [across] = _chunked_pages("//A X\n//B Y", "prose tail")
+    assert (across.page_start, across.page_end) == (0, 1)
+    assert across.text == "//A X\n//B Y\n\nprose tail"
 
 
 def test_chunk_id_pins_uuid5_namespace_and_key():
