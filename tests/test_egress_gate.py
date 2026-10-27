@@ -65,10 +65,12 @@ else:
     sys.exit(2)
 '''
 
+# Like Ubuntu 26.04's sudo-rs: -E is ignored and the environment is reset to a
+# secure PATH (here the stub bin dir, standing in for setpriv's location).
 SUDO_STUB = '''#!/bin/sh
 echo "$@" >> "$STATE/sudo.log"
 while [ "${1:-}" = -n ] || [ "${1:-}" = -E ]; do shift; done
-exec "$@"
+exec env -i PATH="$PATH" STATE="$STATE" ${NO_DOCKER_USER:+NO_DOCKER_USER=1} "$@"
 '''
 
 SETPRIV_STUB = '''#!/bin/sh
@@ -187,6 +189,20 @@ def test_run_drops_into_the_gated_group_preserving_arguments_and_status(stubs):
     assert args[args.index('--reuid') + 1] == str(os.getuid())
     assert '--no-new-privs' in args and '--init-groups' in args
     assert stubs('run', 'sh', '-c', 'exit 37').returncode == 37
+
+
+def test_run_carries_the_whole_step_environment_through_a_resetting_sudo(stubs):
+    """GitHub step variables (SHA, GITHUB_*) must reach the gated step even though
+    sudo resets the environment and ignores -E (sudo-rs on Ubuntu 26.04)."""
+    assert stubs('install').returncode == 0
+    out = stubs.tmp / 'env.json'
+    script = 'import json,os,sys; json.dump({k: os.environ.get(k) for k in ("SHA", "ODD", "HOME")}, open(sys.argv[1], "w"))'
+    odd = "a b 'q' \"d\" $x\nline2"
+    result = stubs('run', sys.executable, '-c', script, str(out), SHA='c00acc7', ODD=odd, HOME='/home/rehearsal',
+                    TMPDIR=str(stubs.tmp))
+    assert result.returncode == 0, result.stderr
+    assert json.loads(out.read_text()) == {'SHA': 'c00acc7', 'ODD': odd, 'HOME': '/home/rehearsal'}
+    assert not list(stubs.tmp.glob('**/egress-gate-env.*'))
 
 
 @pytest.mark.parametrize('klass,comment', [('host', 'reject'), ('nodes', 'nodes')])
