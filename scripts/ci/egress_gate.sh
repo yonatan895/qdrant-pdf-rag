@@ -120,8 +120,13 @@ cmd_run() {
     [ -n "$_gid" ] || die "gate group $GROUP is missing; run install first (fail closed)"
     as_root iptables -w -C OUTPUT -m owner --gid-owner "$_gid" -m comment --comment "$TAG:reject" -j REJECT 2>/dev/null ||
         die "egress rules are not installed; refusing to run ungated (fail closed)"
-    exec sudo -n -E setpriv --reuid "$(id -u)" --regid "$_gid" --init-groups --no-new-privs \
-        /usr/bin/env "HOME=${HOME:-/}" "PATH=$PATH" "$@"
+    # sudo resets the environment (sudo-rs ignores -E), so carry the caller's
+    # exported variables in a 0600 snapshot that the unprivileged shell sources
+    # and deletes before exec.
+    _env=$(mktemp "${TMPDIR:-/tmp}/egress-gate-env.XXXXXX")
+    export -p > "$_env"
+    exec sudo -n setpriv --reuid "$(id -u)" --regid "$_gid" --init-groups --no-new-privs \
+        /usr/bin/env /bin/sh -c '. "$0" || exit 125; rm -f -- "$0"; exec "$@"' "$_env" "$@"
 }
 
 hits() {
