@@ -223,7 +223,8 @@ class FakeRegistry:
                 if not match:
                     return self._send(404)
                 if auth != f"Bearer {TOKEN}":
-                    challenge = (f'Bearer realm="{fake.url}/token",service="fake-registry",'
+                    realm = fake.faults.get("realm", f"{fake.url}/token")
+                    challenge = (f'Bearer realm="{realm}",service="fake-registry",'
                                  f'scope="repository:{OWNER}/{PACKAGE}:pull"')
                     return self._send(401, headers={"WWW-Authenticate": challenge})
                 status = fake.faults.get("status")
@@ -531,7 +532,7 @@ def test_pull_refuses_tampered_layer_content(env, signing):
     assert result.returncode == 2
     assert f"fetched blob does not match its layer digest: app-agent-{sha}.tar" in result.stderr
     assert not (env["tmp"] / "pulled" / f"app-agent-{sha}.tar").exists()
-    assert not (env["tmp"] / ".pulled.partial" / f"app-agent-{sha}.tar").exists()
+    assert list((env["tmp"] / ".pulled.partial").iterdir()) == []
 
 
 def test_pull_refuses_unrecorded_digest_and_wrong_trusted_key(env, signing, tmp_path):
@@ -602,10 +603,14 @@ def test_pull_resumes_a_partial_left_by_an_earlier_run(env, signing):
     (out / "SHA256SUMS").write_text("truncated")                  # a damaged member
     partial = env["tmp"] / ".pulled.partial"
     partial.mkdir()
-    (partial / f"app-agent-{sha}.tar").write_bytes((bundle / f"app-agent-{sha}.tar").read_bytes()[:12_345])
+    (partial / f"{agent}.partial").write_bytes((bundle / f"app-agent-{sha}.tar").read_bytes()[:12_345])
+    # A stale same-named partial of another artifact, and an unrelated leftover.
+    (partial / f"{'0' * 64}.partial").write_bytes(b"another artifact's app-agent bytes")
     result = pull(env, signing, record_rows(env)[0][1], out)
     assert result.returncode == 0, result.stderr
     assert env["registry"].storage_ranges(agent) == ["bytes=12345-"]
+    assert "left 1 unrelated partial file(s)" in result.stderr
+    assert [p.name for p in partial.iterdir()] == [f"{'0' * 64}.partial"]
     manifest_hex = hashlib.sha256((bundle / "MANIFEST.txt").read_bytes()).hexdigest()
     assert env["registry"].storage_ranges(manifest_hex) == []
     for member in bundle.iterdir():
@@ -636,7 +641,7 @@ def test_pull_refuses_a_corrupted_resumed_byte(env, signing):
     assert result.returncode == 2
     assert f"fetched blob does not match its layer digest: app-agent-{sha}.tar" in result.stderr
     assert not (out / f"app-agent-{sha}.tar").exists()
-    assert not (env["tmp"] / ".pulled.partial" / f"app-agent-{sha}.tar").exists()
+    assert not (env["tmp"] / ".pulled.partial" / f"{agent}.partial").exists()
     assert "re-verified" not in result.stdout
 
 
@@ -655,6 +660,39 @@ def test_blob_redirect_never_forwards_authorization_and_token_is_never_printed(e
     assert storage and all(r["auth"] is None for r in storage)
     for secret in (TOKEN, "gho_fake"):
         assert secret not in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("realm", ["storage", "https://token.example.invalid/token",
+                                   "http://localhost:{port}/token"])
+def test_challenge_naming_a_foreign_token_realm_gets_no_credentials(env, signing, realm):
+    """The gh token goes only to the registry's own origin (scheme, host and port)."""
+    sha = sha_of(22)
+    assert push(env, signing, make_bundle(env["tmp"], signing, sha), sha).returncode == 0
+    registry = env["registry"]
+    registry.faults["realm"] = (f"{registry.storage_url}/token" if realm == "storage"
+                                else realm.format(port=registry.registry.server_port))
+    result = pull(env, signing, record_rows(env)[0][1], env["tmp"] / "pulled")
+    assert result.returncode == 2
+    assert "registry token realm is not on the registry origin; credentials not sent" in result.stderr
+    assert [r for r in registry.requests if r["path"].startswith("/token")] == []
+    assert all(not (r["auth"] or "").startswith("Basic ") for r in registry.requests)
+
+
+@pytest.mark.parametrize("url", ["https://registry.example.invalid", "https://ghcr.io.example.invalid",
+                                 "http://ghcr.io", "https://ghcr.io:8443", "http://10.0.0.1:5000"])
+def test_non_ghcr_registry_url_is_refused(env, signing, url):
+    sha = sha_of(23)
+    assert push(env, signing, make_bundle(env["tmp"], signing, sha), sha).returncode == 0
+    digest = record_rows(env)[0][1]
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--record", str(env["record"]), "--oras", str(env["stubs"] / "oras"),
+         "--oras-pin", str(env["pin"]), "--registry-url", url, "pull", "--digest", digest,
+         "--out", str(env["tmp"] / "pulled"), "--trusted-pub", str(signing[1])],
+        capture_output=True, text=True, check=False, env=env["env"], stdin=subprocess.DEVNULL)
+    assert result.returncode == 2
+    assert "registry URL must be https://ghcr.io (loopback only for tests)" in result.stderr
+    assert env["registry"].requests == []
+    assert not (env["tmp"] / "pulled").exists()
 
 
 def test_pull_refuses_when_blob_downloads_make_no_progress(env, signing):

@@ -704,9 +704,12 @@ every run) and `gh` for the Packages API:
 - `pull --digest D --out DIR --trusted-pub PUB` accepts only a recorded
   digest and the recorded key. It refuses a manifest that does not hash to `D`.
   It downloads each layer blob over the registry API with HTTP Range, using the
-  registry bearer token, which is kept in memory and never printed. A dropped
-  connection resumes from the partial file in `.DIR.partial/` beside `DIR`, also
-  across reruns. A server that ignores Range restarts the blob from byte 0.
+  registry bearer token, which is kept in memory and never printed. The registry
+  is pinned to `https://ghcr.io` (loopback only for tests), and the `gh` token is
+  sent only to a token realm on exactly that origin; a challenge naming any other
+  realm is refused before credentials are sent. A dropped connection resumes from
+  the partial file `.DIR.partial/<layer digest>.partial` beside `DIR`, also
+  across reruns; partials of other artifacts are left in place and reported. A server that ignores Range restarts the blob from byte 0.
   The registry's redirect to blob storage is followed without the
   `Authorization` header. `--attempts` bounds consecutive tries without
   progress, with exponential backoff (`--backoff`). The whole file is then

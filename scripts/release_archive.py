@@ -33,6 +33,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 RECORD = ROOT / "release-archive.txt"
 REPOSITORY = "ghcr.io/yonatan895/qdrant-pdf-rag-release-archive"
+REGISTRY_URL = "https://ghcr.io"  # the only registry that ever receives gh credentials
 ORAS = ROOT / ".tools" / "bin" / "oras"
 ORAS_PIN = ROOT / "scripts" / "tools" / "oras-pin.txt"
 ARTIFACT_TYPE = "application/vnd.qdrant-pdf-rag.sneakernet-bundle.v1"
@@ -199,8 +200,9 @@ class Tools:
         if len(parts) != 3 or parts[0] != "ghcr.io" or not all(parts):
             raise ArchiveError("repository must be ghcr.io/<owner>/<package>")
         self.owner, self.package = parts[1], parts[2]
-        self.registry_url = (registry_url or f"https://{parts[0]}").rstrip("/")
-        _require_safe_url(self.registry_url)
+        self.registry_url = (registry_url or REGISTRY_URL).rstrip("/")
+        if self.registry_url != REGISTRY_URL and not _is_loopback(self.registry_url):
+            raise ArchiveError("registry URL must be https://ghcr.io (loopback only for tests)")
         self._gh_token: bytes | None = None  # in memory only; never logged or written by the tool
         self._bearer: str | None = None
         self._opener = urllib.request.build_opener(_NoRedirect)
@@ -305,7 +307,11 @@ class Tools:
         if not challenge.lower().startswith("bearer ") or "realm" not in fields:
             raise ArchiveError("registry sent an unsupported authentication challenge")
         realm = fields.pop("realm")
-        _require_safe_url(realm)
+        # The gh token goes only to the pinned registry's own token endpoint
+        # (https://ghcr.io/token): a challenge naming any other origin is refused
+        # before anything is sent.
+        if _origin(realm) != _origin(self.registry_url):
+            raise ArchiveError("registry token realm is not on the registry origin; credentials not sent")
         request = urllib.request.Request(realm + "?" + urllib.parse.urlencode(fields))
         if self._gh_token:
             basic = base64.b64encode(self.owner.encode() + b":" + self._gh_token).decode()
@@ -428,9 +434,20 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def _origin(url: str) -> tuple[str, str]:
+def _origin(url: str) -> tuple[str, str, int]:
+    """(scheme, host, port) with the default port filled in, for exact comparison."""
     parts = urllib.parse.urlsplit(url)
-    return parts.scheme, parts.netloc.lower()
+    try:
+        port = parts.port or {"https": 443, "http": 80}.get(parts.scheme, 0)
+    except ValueError:
+        port = -1
+    return parts.scheme, (parts.hostname or "").lower(), port
+
+
+def _is_loopback(url: str) -> bool:
+    parts = urllib.parse.urlsplit(url)
+    return (parts.scheme in ("http", "https") and parts.hostname in ("127.0.0.1", "localhost")
+            and not parts.username and parts.path in ("", "/"))
 
 
 def _require_safe_url(url: str) -> None:
@@ -542,10 +559,17 @@ def cmd_pull(args: argparse.Namespace, tools: Tools) -> int:
         target = out / title
         if target.is_file() and target.stat().st_size == size and _sha256_file(target) == digest:
             continue
-        staged = partial_dir / title
+        # Named by digest: a stale partial of another artifact's same-named member
+        # can never be resumed into this one.
+        staged = partial_dir / f"{digest}.partial"
         tools.fetch_blob(title, digest, size, staged, args.attempts, args.backoff)
         os.replace(staged, target)
-    partial_dir.rmdir()
+    leftovers = list(partial_dir.iterdir())
+    if leftovers:  # partials of other artifacts: not ours to delete
+        print(f"release-archive: left {len(leftovers)} unrelated partial file(s) in {partial_dir}",
+              file=sys.stderr)
+    else:
+        partial_dir.rmdir()
     if {entry.name for entry in out.iterdir()} != set(layers):
         raise ArchiveError("pulled files do not match the artifact layers")
     bundle = verify_bundle(out, row.sha, args.trusted_pub)
