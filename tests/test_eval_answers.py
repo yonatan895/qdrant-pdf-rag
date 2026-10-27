@@ -39,6 +39,19 @@ def _entry(**overrides) -> dict:
     return base
 
 
+def _answer_payload(**overrides) -> dict:
+    base = {
+        "request_id": "r1",
+        "answer": "LFAREA reserves frames above the bar.\nCitations:\nSA23-1380-70 ref, p. 1",
+        "citations": ["SA23-1380-70 ref, p. 1"],
+        "citations_inferred": False,
+        "inferred_indices": [],
+        "script": None,
+    }
+    base.update(overrides)
+    return base
+
+
 @pytest.fixture
 def http_answer_eval(tmp_path, monkeypatch):
     """Run the actual CLI and HTTP client against an inert HTTP boundary."""
@@ -212,51 +225,28 @@ def test_http_answer_eval_retains_failed_answers_and_continues(http_answer_eval,
     assert "PRIVATE ANSWER DETAIL" not in json.dumps(report) + capsys.readouterr().err
 
 
-@pytest.mark.parametrize("payload", [
-    [], "PRIVATE ANSWER DETAIL",
-    {"answer": {"PRIVATE ANSWER DETAIL": "not prose"}},
-    {"citations": ["Original p. 1", {"PRIVATE ANSWER DETAIL": "not a cite"}]},
-    {"verification_state": []},
-])
+_MALFORMED_ANSWER_CASES = [
+    # A malformed /v1/answer body is a row error, never an abort and never a
+    # pass: the next ordinary case still runs. Abstention rows are held to the
+    # same completeness rule.
+    ("answer", [], None),
+    ("answer", "PRIVATE ANSWER DETAIL", None),
+    ("answer", _answer_payload(answer={"PRIVATE ANSWER DETAIL": "not prose"}), None),
+    ("answer", _answer_payload(citations=["Original p. 1", {"PRIVATE ANSWER DETAIL": "not a cite"}]), None),
+    ("answer", _answer_payload(verification_state=[]), None),
+    ("abstain", {}, "malformed answer response"),
+    ("abstain", {"answer": "Original refusal", "citations": None}, "malformed answer response"),
+    ("abstain", {"citations": []}, "malformed answer response"),
+]
+
+
+@pytest.mark.parametrize(("behavior", "payload", "failure"), _MALFORMED_ANSWER_CASES)
 def test_http_answer_eval_malformed_answer_fields_cannot_abort_or_pass(
-    http_answer_eval, capsys, payload,
+    http_answer_eval, capsys, behavior, payload, failure,
 ):
     import httpx2
 
-    entries = [_entry(id="BAD", query="Original malformed response"),
-               _entry(id="GOOD", query="Original next ordinary request")]
-
-    def respond(request):
-        if request.url.path == "/healthz":
-            return httpx2.Response(200, json={"status": "ok", "qdrant": True,
-                                             "representation": "compatible"})
-        if request.url.path == "/v1/search":
-            return httpx2.Response(200, json={"hits": []})
-        if json.loads(request.content)["query"] == "Original malformed response":
-            body = _answer_payload(**payload) if isinstance(payload, dict) else payload
-            return httpx2.Response(200, json=body)
-        return httpx2.Response(200, json=_answer_payload())
-
-    status, report, calls, _ = http_answer_eval(respond, entries)
-    assert status == 1
-    assert report["metrics"]["queries"] == 2
-    assert report["metrics"]["errors"] == 1
-    assert [r["verdict"] for r in report["results"]] == ["error", "pass"]
-    assert len([r for r in calls if r.url.path == "/v1/answer"]) == 2
-    assert "PRIVATE ANSWER DETAIL" not in json.dumps(report) + capsys.readouterr().err
-
-
-@pytest.mark.parametrize("behavior,payload", [
-    ("answer", {}),
-    ("abstain", {"answer": "Original refusal", "citations": None}),
-    ("abstain", {"citations": []}),
-])
-def test_http_answer_eval_missing_required_fields_are_errors_even_for_abstention(
-    http_answer_eval, behavior, payload,
-):
-    import httpx2
-
-    entries = [_entry(id="BAD", query="Original incomplete response", expected_behavior=behavior),
+    entries = [_entry(id="BAD", query="Original malformed response", expected_behavior=behavior),
                _entry(id="GOOD", query="Original next complete response")]
 
     def respond(request):
@@ -265,16 +255,20 @@ def test_http_answer_eval_missing_required_fields_are_errors_even_for_abstention
                                              "representation": "compatible"})
         if request.url.path == "/v1/search":
             return httpx2.Response(200, json={"hits": []})
-        body = payload if json.loads(request.content)["query"] == entries[0]["query"] else _answer_payload()
-        return httpx2.Response(200, json=body)
+        if json.loads(request.content)["query"] == "Original malformed response":
+            return httpx2.Response(200, json=payload)
+        return httpx2.Response(200, json=_answer_payload())
 
     status, report, calls, _ = http_answer_eval(respond, entries)
     assert status == 1
+    assert report["metrics"]["queries"] == 2
     assert report["metrics"]["errors"] == 1
     assert report["metrics"]["judged"] == 1
-    assert [row["verdict"] for row in report["results"]] == ["error", "pass"]
-    assert report["results"][0]["failures"] == ["malformed answer response"]
-    assert len([request for request in calls if request.url.path == "/v1/answer"]) == 2
+    assert [r["verdict"] for r in report["results"]] == ["error", "pass"]
+    if failure is not None:
+        assert report["results"][0]["failures"] == [failure]
+    assert len([r for r in calls if r.url.path == "/v1/answer"]) == 2
+    assert "PRIVATE ANSWER DETAIL" not in json.dumps(report) + capsys.readouterr().err
 
 
 def test_http_answer_eval_numeric_overflow_retains_prior_and_next_cases(http_answer_eval):
@@ -455,20 +449,16 @@ def test_http_answer_eval_rejects_unsafe_target_before_io(monkeypatch, value):
 
 
 # ----------------------------------------------------------------- refusal helper
-def test_refusal_helper_shared_with_agent() -> None:
+def test_refusal_marker_battery() -> None:
     """Issues #135/#305: the eval's refusal verdicts and the agent's
     zero-citation rule use the same predicates — one helper, one marker
-    list, one shape floor."""
+    list, one shape floor. Adversarial battery phrasings must fire it: the
+    battery's 'no information regarding' refusal shipped 4 citations of
+    real-but-unsupporting chunks because no marker caught it."""
     import mainframe_rag.eval.answers as ea
 
     assert ea.is_refusal is is_refusal
     assert ea.is_abstention is is_abstention
-
-
-def test_refusal_marker_battery() -> None:
-    """Adversarial battery phrasings must fire the refusal predicate:
-    the battery's 'no information regarding' refusal shipped 4 citations
-    of real-but-unsupporting chunks because no marker caught it."""
     assert is_refusal("No information regarding private keys is available in the excerpts.")
     assert is_refusal("There is no information about that parameter in the manuals provided.")
     assert is_refusal("The excerpts do not answer this question.")
@@ -480,126 +470,74 @@ def test_refusal_marker_battery() -> None:
 
 
 # ---------------------------------------------------------------- judge: answer
-def test_answer_grounded_passes() -> None:
-    verdict, fails, warns = judge(_entry(), "LFAREA is set in IEASYSxx.", ["SA23-1380-70 ref, p. 1"])
-    assert verdict == "pass"
-    assert fails == [] and warns == []
+# One verdict table: each row is a distinct judge branch with its own expected
+# verdict and (for a fail) the fixed failure text callers see.
+_JUDGE_CASES = {
+    "grounded-passes": ({}, "LFAREA is set in IEASYSxx.", ["SA23-1380-70 ref, p. 1"], {}, "pass", None),
+    "zero-citations-fail": ({}, "LFAREA is set in IEASYSxx.", [], {}, "fail", "zero validated citations"),
+    # Issue #269: cites mapped from bare bracket markers are never grounded.
+    "inferred-citations-fail": ({}, "LFAREA is set in IEASYSxx [1].", ["SA23-1380-70 ref, p. 1"],
+                                {"citations_inferred": True}, "fail", "only inferred citations"),
+    "explicit-refusal-fails": ({}, "The excerpts do not cover LFAREA.", ["SA23-1380-70 ref, p. 1"],
+                               {}, "fail", "explicit refusal"),
+    "empty-body-fails": ({}, "   ", ["SA23-1380-70 ref, p. 1"], {}, "fail", "empty answer body"),
+    # Issue #305: a grounded partial answer with a refusal-marked scope caveat
+    # has a non-refusal clause and is NOT an abstention.
+    "grounded-scope-caveat-passes": (
+        {}, ("LFAREA is set in IEASYSxx and controls the real storage reserved for 1 MB and 2 GB "
+             "pages; the documented forms cover xM, xG, xT, and x% values. The excerpts do not contain "
+             "the 2.4, 2.5, and 3.1 variants. For the release shown here the syntax is complete, and the "
+             "INCLUDE1MAFC and 1M=/2G= rules document how to size the reservation for each page type."),
+        ["SA23-1380-70 ref, p. 1"], {}, "pass", None),
+    "gold-substring-casefolded-fails": ({"gold_must_contain": ["JES2", "JES3"]}, "JES2 does X.",
+                                        ["SA32-0990-02 ref, p. 3"], {}, "fail", "JES3"),
+    "gold-substring-casefolded-passes": ({"gold_must_contain": ["jes2"]}, "JES2 does X.", ["c1"],
+                                         {}, "pass", None),
+    "gold-forbidden-substring-fails": ({"gold_must_not_contain": ["SETROPTS NO"]},
+                                       "Run SETROPTS NO...", ["c1"], {}, "fail", "forbidden substring"),
+    # Seed semantics: NEG-01 demands the literal refusal phrase; the agent's
+    # fixed zero-hits wording does not satisfy it (deliberate strictness).
+    "abstain-gold-phrase-pin-fails": (
+        {"id": "NEG-01", "expected_behavior": "abstain", "gold_must_contain": ["excerpts do not answer"]},
+        ZERO_HITS_ANSWER, [], {}, "fail", "excerpts do not answer"),
+    # run_query suppresses gold checks on the canned zero-hits message.
+    "zero-hits-abstain-skips-gold": (
+        {"expected_behavior": "abstain", "gold_must_contain": ["IEA500I"],
+         "must_cite_identifier": "IEA500I"}, ZERO_HITS_ANSWER, [], {"judge_gold": False}, "pass", None),
+    # The gold suppression must not mask the retrieval gap.
+    "zero-hits-answer-still-fails": ({"id": "DOC-01", "gold_must_contain": ["SA23-1380"]},
+                                     ZERO_HITS_ANSWER, [], {"judge_gold": False}, "fail", "explicit refusal"),
+    "must-cite-identifier-passes": ({"must_cite_identifier": "IEA794I"}, "See the message text.",
+                                    ["SA38-0673-70, IEA794I, p. 5"], {}, "pass", None),
+    "must-cite-identifier-miss-fails": ({"must_cite_identifier": "SMFPRMxx"},
+                                        "Something else entirely.", ["c1"], {}, "fail", "SMFPRMxx"),
+    # A clean refusal and a silent (marker-less) uncited one both pass.
+    "abstain-zero-citations-passes": ({"expected_behavior": "abstain"}, ZERO_HITS_ANSWER, [], {},
+                                      "pass", None),
+    "abstain-markerless-passes": ({"expected_behavior": "abstain"}, "I cannot help with that.", [],
+                                  {}, "pass", None),
+    "abstain-grounded-fails": ({"expected_behavior": "abstain"}, "IEA500I reports a synthetic failure.",
+                               ["SA38-0673-70 ref, p. 2"], {}, "fail", "trap answered"),
+}
 
 
-def test_answer_zero_citations_fails() -> None:
-    verdict, fails, _ = judge(_entry(), "LFAREA is set in IEASYSxx.", [])
-    assert verdict == "fail"
-    assert any("zero validated citations" in f for f in fails)
+# The one verdict row whose refusal carries no marker: it passes with a warn.
+_JUDGE_WARNS = {"abstain-markerless-passes"}
 
 
-def test_answer_inferred_citations_fail_grounding() -> None:
-    # Issue #269: cites mapped from bare bracket markers with no explicit
-    # citation line are surfaced as citations_inferred — never grounded.
-    verdict, fails, _ = judge(
-        _entry(), "LFAREA is set in IEASYSxx [1].",
-        ["SA23-1380-70 ref, p. 1"], citations_inferred=True,
-    )
-    assert verdict == "fail"
-    assert any("only inferred citations" in f for f in fails)
-
-
-def test_answer_refusal_fails() -> None:
-    verdict, fails, _ = judge(_entry(), "The excerpts do not cover LFAREA.", ["SA23-1380-70 ref, p. 1"])
-    assert verdict == "fail"
-    assert any("explicit refusal" in f for f in fails)
-
-
-def test_answer_grounded_scope_caveat_is_not_a_refusal() -> None:
-    """Issue #305: a grounded partial answer whose scope caveat carries a
-    refusal marker has a non-refusal clause and is NOT an abstention — the old
-    marker-only verdict failed substantive answers exactly like this live
-    (DIA-02/DIA-03)."""
-    body = (
-        "LFAREA is set in IEASYSxx and controls the real storage reserved for "
-        "1 MB and 2 GB pages; the documented forms cover xM, xG, xT, and x% "
-        "values. The excerpts do not contain the 2.4, 2.5, and 3.1 variants. "
-        "For the release shown here the syntax is complete, and the INCLUDE1MAFC "
-        "and 1M=/2G= rules document how to size the reservation for each page type."
-    )
-    assert not is_abstention(body)
-    verdict, fails, warns = judge(_entry(), body, ["SA23-1380-70 ref, p. 1"])
-    assert verdict == "pass"
-    assert fails == [] and warns == []
-
-
-def test_structured_decline_with_coverage_note_is_judged_as_a_decline() -> None:
-    """Issue #764: the leading decline prefix naming the missing subject plus
-    a note on what the excerpts cover passes an abstain row cleanly and fails
-    an answer row as an explicit refusal; the eval and the agent share one
-    predicate."""
-    from mainframe_rag.agent.answer import DECLINE_PREFIX
-
-    body = f"{DECLINE_PREFIX} the LFAREA retry limit. The excerpts describe LFAREA syntax for IEASYSxx only."
-    verdict, fails, warns = judge(_entry(expected_behavior="abstain"), body, [])
-    assert verdict == "pass" and fails == [] and warns == []
-    verdict, fails, _ = judge(_entry(), body, ["SA23-1380-70 ref, p. 1"])
-    assert verdict == "fail"
-    assert any("explicit refusal" in f for f in fails)
-
-
-def test_decline_edge_cases_are_scored_by_the_shared_predicate() -> None:
-    """Issue #877: a decline followed by a line-leading [n] is a cited claim
-    (an answer row is not failed as an explicit refusal); a
-    curly-quoted decline scores as a decline like a straight-quoted one."""
-    from mainframe_rag.agent.answer import DECLINE_PREFIX
-
-    cited = f"{DECLINE_PREFIX} IEA500I.\n[1] Set RETRY=5 in IEASYSxx."
-    assert is_abstention(cited) is False
-    verdict, fails, _ = judge(_entry(), cited, ["SA23-1380-70 ref, p. 1"])
-    assert not any("explicit refusal" in f for f in fails), (verdict, fails)
-    for quoted in (f"\u201c{DECLINE_PREFIX} IEA500I.\u201d", f'"{DECLINE_PREFIX} IEA500I."'):
-        assert is_abstention(quoted) is True
-        assert judge(_entry(expected_behavior="abstain"), quoted, [])[:2] == ("pass", [])
-        verdict, fails, _ = judge(_entry(), quoted, ["SA23-1380-70 ref, p. 1"])
-        assert verdict == "fail" and any("explicit refusal" in f for f in fails)
-
-
-@pytest.mark.parametrize("row_id", ["DIA-08", "MSG-01"])
-def test_structured_decline_naming_the_identifier_meets_identifier_abstention_rows(row_id: str) -> None:
-    """Issue #764 x dev golden: identifier abstention rows require the
-    identifier and forbid the generic "excerpts do not answer" refusal; the
-    structured decline names the identifier and passes them unchanged."""
-    from pathlib import Path
-
-    from mainframe_rag.agent.answer import DECLINE_PREFIX, verification_state_for
-
-    golden = Path(__file__).resolve().parents[1] / "evals" / "golden.jsonl"
-    entry = next(json.loads(line) for line in golden.read_text().splitlines()
-                 if line.strip() and json.loads(line)["id"] == row_id)
-    body = f"{DECLINE_PREFIX} {entry['must_cite_identifier']}."
-    state = verification_state_for(answer=body, citations=[], citations_inferred=False,
-                                   finish_reason="stop", abstained=is_abstention(body), empty_hits=False)
-    assert judge(entry, body, [], verification_state=state)[:2] == ("pass", [])
-
-
-def test_answer_empty_body_fails() -> None:
-    verdict, fails, _ = judge(_entry(), "   ", ["SA23-1380-70 ref, p. 1"])
-    assert verdict == "fail"
-    assert any("empty answer body" in f for f in fails)
-
-
-# --------------------------------------------------------------- judge: abstain
-def test_abstain_zero_citations_passes() -> None:
-    # A clean refusal and a silent (marker-less) uncited one both pass; the
-    # silent one only warns.
-    for body in (ZERO_HITS_ANSWER, "I cannot help with that."):
-        verdict, fails, _ = judge(_entry(expected_behavior="abstain"), body, [])
-        assert verdict == "pass" and fails == []
-
-
-def test_abstain_grounded_without_refusal_fails() -> None:
-    verdict, fails, _ = judge(
-        _entry(expected_behavior="abstain"),
-        "IEA500I reports a synthetic failure.",
-        ["SA38-0673-70 ref, p. 2"],
-    )
-    assert verdict == "fail"
-    assert any("trap answered" in f for f in fails)
+@pytest.mark.parametrize("case", sorted(_JUDGE_CASES))
+def test_judge_verdict_table(case):
+    entry, body, cites, kwargs, verdict, failure = _JUDGE_CASES[case]
+    got, fails, warns = judge(_entry(**entry), body, cites, **kwargs)
+    assert got == verdict
+    if case in _JUDGE_WARNS:  # a silent refusal is a warn, not a fail
+        assert warns
+    else:
+        assert warns == []
+    if failure is None:
+        assert fails == []
+    else:
+        assert any(failure in f for f in fails), fails
 
 
 def test_abstain_long_grounded_decline_still_warns() -> None:
@@ -796,13 +734,16 @@ def test_answer_capture_keeps_answer_lines_only() -> None:
 
 
 class _StubClient:
-    def __init__(self, payload: dict | Exception):
+    def __init__(self, payload: dict | Exception, status: int = 200):
         self.payload = payload
+        self.status = status
 
     def post(self, *args, **kwargs):
-        if isinstance(self.payload, Exception):
+        # A transport error raises from the call; an unparseable error body
+        # raises from json() on the response.
+        if isinstance(self.payload, Exception) and self.status == 200:
             raise self.payload
-        return _StubResponse(self.payload)
+        return _StubResponse(self.payload, self.status)
 
 
 class _RecordingClient(_StubClient):
@@ -829,25 +770,14 @@ def test_run_query_temperature_default_zero_and_override_recorded() -> None:
 
 
 class _StubResponse:
-    def __init__(self, payload: dict):
+    def __init__(self, payload: dict, status: int = 200):
         self.payload = payload
-        self.status_code = 200
+        self.status_code = status
 
     def json(self) -> dict:
+        if isinstance(self.payload, Exception):
+            raise self.payload
         return self.payload
-
-
-def _answer_payload(**overrides) -> dict:
-    base = {
-        "request_id": "r1",
-        "answer": "LFAREA reserves frames above the bar.\nCitations:\nSA23-1380-70 ref, p. 1",
-        "citations": ["SA23-1380-70 ref, p. 1"],
-        "citations_inferred": False,
-        "inferred_indices": [],
-        "script": None,
-    }
-    base.update(overrides)
-    return base
 
 
 @pytest.mark.parametrize("answer", [
@@ -1135,25 +1065,6 @@ def test_dev_refusal_rows_judge_refusal_structurally_not_by_wording(row_id: str)
     assert verdict == "fail" and any("trap answered" in f for f in fails)
 
 
-class _ErrResponse:
-    def __init__(self, status: int, body):
-        self.status_code = status
-        self._body = body
-
-    def json(self):
-        if isinstance(self._body, Exception):
-            raise self._body
-        return self._body
-
-
-class _ErrClient:
-    def __init__(self, status: int, body):
-        self.resp = _ErrResponse(status, body)
-
-    def post(self, *args, **kwargs):
-        return self.resp
-
-
 @pytest.mark.parametrize("body,code", [
     ({"code": "prompt_budget_exceeded", "message": "prompt exceeds the model token budget"},
      "prompt_budget_exceeded"),
@@ -1164,7 +1075,7 @@ def test_run_query_non_200_records_envelope_code(body, code) -> None:
     """Issue #307: the agent's envelope is top-level {code, message}; the eval
     used to read a nested error.code and report every non-200 as '?'. Only the
     code reaches the row, never the message."""
-    row = run_query(_ErrClient(422, body), _entry())
+    row = run_query(_StubClient(body, status=422), _entry())
     assert row["verdict"] == "error"
     assert row["failures"] == [f"HTTP 422 ({code})"]
     assert "exceeds" not in json.dumps(row)

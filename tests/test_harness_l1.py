@@ -395,58 +395,60 @@ def test_fingerprint_orders_by_creation_time_and_prefers_recorded_pin():
     assert fp["snapshot_names"][0] == "c-zzz-2026-09-02-10-00-00.snapshot"
 
 
-def test_resolve_drift_match_skips_restore():
-    fp = {"points_count": 840396, "snapshot_names": ["pin.snapshot"]}
-    recorded = {"points_count": 840396, "snapshot_name": "pin.snapshot"}
-    assert resolve_snapshot_action(fp, recorded, restore="drift", record_mode=False) == ("skip", "pin.snapshot")
+def _fp(points: int, *names: str) -> dict:
+    return {"points_count": points, "snapshot_names": list(names)}
 
 
-def test_resolve_always_restores_the_recorded_pin_and_never_pins_live_state():
-    fp = {"points_count": 840396, "snapshot_names": ["stray.snapshot", "pin.snapshot"]}
-    recorded = {"points_count": 840396, "snapshot_name": "pin.snapshot"}
-    assert resolve_snapshot_action(fp, recorded, restore="never", record_mode=False)[0] == "skip"
-    assert resolve_snapshot_action(fp, recorded, restore="always", record_mode=False) == ("restore", "pin.snapshot")
-    # A gate run with no recorded pin, or whose pin was deleted, must fail rather than restore a stray.
-    action, reason = resolve_snapshot_action(fp, None, restore="always", record_mode=False)
-    assert action == "fail" and "no recorded pin" in reason
-    gone = {"points_count": 840396, "snapshot_name": "deleted.snapshot"}
-    assert resolve_snapshot_action(fp, gone, restore="always", record_mode=False)[0] == "fail"
-    # Only an explicit record run may create a new pin.
-    assert resolve_snapshot_action(fp, gone, restore="always", record_mode=True) == ("pin", None)
-    assert resolve_snapshot_action(fp, recorded, restore="always", record_mode=True) == ("restore", "pin.snapshot")
+def _pin(points: int, name: str) -> dict:
+    return {"points_count": points, "snapshot_name": name}
 
 
-def test_resolve_drift_restores_recorded_pin_despite_drift():
+_PIN, _STRAY, _GONE = "pin.snapshot", "stray.snapshot", "deleted.snapshot"
+_RECORDED = _pin(840396, _PIN)
+
+# The whole snapshot policy is one decision table: what a gate run may do
+# (skip / restore the RECORDED pin / fail closed) and the one case where an
+# explicit record run may create a new pin.
+_RESOLVE_CASES = {
+    # Drift-match: recorded pin first AND the points count equal -> skip.
+    "drift-match-skips": (_fp(840396, _PIN), _RECORDED, "drift", False, "skip", _PIN),
     # Production shape: main() passes prefer_name=recorded, so a stray alone
-    # cannot push the recorded pin out of first place (that combination is
-    # the skip path). Reaching restore-with-stray requires a DRIFTED points
-    # count — and the restore must still target the recorded pin, not the
-    # stray that a naive fingerprint-first policy would pick.
-    fp = {"points_count": 900000, "snapshot_names": ["pin.snapshot", "stray.snapshot"]}
-    recorded = {"points_count": 840396, "snapshot_name": "pin.snapshot"}
-    action, name = resolve_snapshot_action(fp, recorded, restore="drift", record_mode=False)
-    assert (action, name) == ("restore", "pin.snapshot")
+    # cannot push the recorded pin out of first place.
+    "never-skips-the-recorded-pin": (
+        _fp(840396, _STRAY, _PIN), _RECORDED, "never", False, "skip", None),
+    "always-restores-the-recorded-pin": (
+        _fp(840396, _STRAY, _PIN), _RECORDED, "always", False, "restore", _PIN),
+    # A DRIFTED points count must restore the recorded pin, not the stray that
+    # a naive fingerprint-first policy would pick.
+    "drift-restores-pin-not-stray": (
+        _fp(900000, _PIN, _STRAY), _RECORDED, "drift", False, "restore", _PIN),
+    # Blocker 3: a deleted pin on a gate run fails closed at the same count.
+    "drift-fails-on-deleted-pin": (
+        _fp(840396, "other.snapshot"), _RECORDED, "drift", False, "fail", "never pins live state"),
+    "drift-fails-without-recorded-pin": (
+        _fp(840396, "whatever.snapshot"), None, "drift", False, "fail", "no recorded pin"),
+    # Only an explicit record run may create a new pin.
+    "drift-record-mode-pins": (_fp(840396), None, "drift", True, "pin", None),
+    "record-mode-restores-a-live-pin": (
+        _fp(840396, _STRAY, _PIN), _RECORDED, "always", True, "restore", _PIN),
+    "record-mode-pins-a-deleted-pin": (
+        _fp(840396, _STRAY), _pin(840396, _GONE), "always", True, "pin", None),
+}
 
 
-def test_resolve_drift_fails_when_recorded_pin_deleted():
-    # Blocker 3: a deleted pin on a gate run must fail closed — a gate run
-    # never pins live state, even at the same points count.
-    fp = {"points_count": 840396, "snapshot_names": ["other.snapshot"]}
-    recorded = {"points_count": 840396, "snapshot_name": "pin.snapshot"}
-    action, reason = resolve_snapshot_action(fp, recorded, restore="drift", record_mode=False)
-    assert action == "fail"
-    assert "never pins live state" in reason
-
-
-def test_resolve_drift_fails_without_recorded_pin():
-    fp = {"points_count": 840396, "snapshot_names": ["whatever.snapshot"]}
-    action, _ = resolve_snapshot_action(fp, None, restore="drift", record_mode=False)
-    assert action == "fail"
-
-
-def test_resolve_drift_record_mode_pins():
-    fp = {"points_count": 840396, "snapshot_names": []}
-    assert resolve_snapshot_action(fp, None, restore="drift", record_mode=True) == ("pin", None)
+@pytest.mark.parametrize("case", sorted(_RESOLVE_CASES))
+def test_snapshot_action_matrix(case):
+    fingerprint, recorded, restore, record_mode, action, reason = _RESOLVE_CASES[case]
+    got, detail = resolve_snapshot_action(
+        fingerprint, recorded, restore=restore, record_mode=record_mode
+    )
+    assert got == action
+    if action == "pin":
+        assert detail is None
+    elif action == "fail":
+        assert reason in detail
+    elif reason is not None:  # the restore/skip path names the RECORDED pin
+        assert detail == reason
 
 
 def test_pin_snapshot_adopts_only_on_exact_match():
@@ -516,24 +518,13 @@ def harness_input_workspace(tmp_path):
     """Actual Task/CLI/scorers/verdicts; original data and inert external boundaries."""
     import hashlib
     import os
-    import shutil
     import subprocess
     import sys
-    from pathlib import Path
 
-    from tests.test_taskfile_contracts import REQUIRE_RUNNER, find_task
+    from tests.helpers_eval_local import REPO_ROOT as repo
+    from tests.helpers_eval_local import task_workspace
 
-    task = find_task()
-    if task is None:
-        if REQUIRE_RUNNER:
-            pytest.fail("pinned Task unavailable in required lane")
-        pytest.skip("pinned Task unavailable")
-    repo = Path(__file__).resolve().parents[1]
-    shutil.copy2(repo / "Taskfile.yml", tmp_path / "Taskfile.yml")
-    shutil.copytree(repo / "taskfiles", tmp_path / "taskfiles")
-    (tmp_path / "scripts").mkdir()
-    shutil.copy2(repo / "scripts/harness.py", tmp_path / "scripts/harness.py")
-    (tmp_path / ".venv/bin").mkdir(parents=True)
+    task = task_workspace(tmp_path, "harness.py")
     launcher = tmp_path / ".venv/bin/python"
     launcher.write_text(
         f"#!{sys.executable}\n"
@@ -710,26 +701,27 @@ def _golden_sha_run(tmp_path, monkeypatch, capsys, recorded):
     return rc, capsys.readouterr().err
 
 
-def test_golden_sha_mismatch_refuses_before_any_qdrant_call(tmp_path, monkeypatch, capsys):
-    rc, err = _golden_sha_run(tmp_path, monkeypatch, capsys, "differ")
-    assert rc == 1
-    assert GOLDEN_SHA_MISMATCH_MESSAGE in err
+@pytest.mark.parametrize(("recorded", "rc", "required", "forbidden"), [
+    # A recorded digest that does not match refuses before any Qdrant call.
+    ("differ", 1, [GOLDEN_SHA_MISMATCH_MESSAGE], ["unreachable"]),
+    ("match", None, ["unreachable; refusing to evaluate"],
+     [GOLDEN_SHA_MISMATCH_MESSAGE, GOLDEN_SHA_LEGACY_WARNING]),
+    # A baseline recorded before the pin warns and continues.
+    ("legacy", None, [GOLDEN_SHA_LEGACY_WARNING, "unreachable; refusing to evaluate"],
+     [GOLDEN_SHA_MISMATCH_MESSAGE]),
+])
+def test_golden_sha_pin_verdict(tmp_path, monkeypatch, capsys, recorded, rc, required, forbidden):
+    got, err = _golden_sha_run(tmp_path, monkeypatch, capsys, recorded)
+    if rc is not None:
+        assert got == rc
+    for text in required:
+        assert text in err
+    for text in forbidden:
+        assert text not in err
+
+
+def test_golden_sha_codes_carry_their_stable_prefix():
     assert GOLDEN_SHA_MISMATCH_MESSAGE.startswith("FAIL [HARNESS_GOLDEN_SHA_MISMATCH]")
-    assert "unreachable" not in err  # never reached the Qdrant step
-
-
-def test_golden_sha_match_passes_without_warning(tmp_path, monkeypatch, capsys):
-    _, err = _golden_sha_run(tmp_path, monkeypatch, capsys, "match")
-    assert GOLDEN_SHA_MISMATCH_MESSAGE not in err
-    assert GOLDEN_SHA_LEGACY_WARNING not in err
-    assert "unreachable; refusing to evaluate" in err  # got past the sha check
-
-
-def test_golden_sha_legacy_baseline_warns_and_continues(tmp_path, monkeypatch, capsys):
-    _, err = _golden_sha_run(tmp_path, monkeypatch, capsys, "legacy")
-    assert GOLDEN_SHA_LEGACY_WARNING in err
-    assert GOLDEN_SHA_MISMATCH_MESSAGE not in err
-    assert "unreachable; refusing to evaluate" in err
 
 
 def test_save_baseline_records_golden_sha_and_matches_pin_file_digest(tmp_path):
@@ -790,18 +782,19 @@ def test_holdout_pin_read_from_pin_file_and_holdout_never_opened(tmp_path, monke
     assert opened and all(not o.endswith("holdout.jsonl") for o in opened)
 
 
-def test_holdout_pin_match_passes():
-    assert check_holdout_pin({"_meta": {"holdout_pin_sha256": "a" * 64}}, "a" * 64) is None
+@pytest.mark.parametrize(("recorded", "actual", "expected"), [
+    ({"_meta": {"holdout_pin_sha256": "a" * 64}}, "a" * 64, None),
+    ({"_meta": {"holdout_pin_sha256": "a" * 64}}, "b" * 64, HOLDOUT_PIN_MISMATCH_MESSAGE),
+    # A baseline recorded before the pin warns; a dev-only run never checks.
+    ({"_meta": {}}, "a" * 64, HOLDOUT_PIN_LEGACY_WARNING),
+    ({"_meta": {}}, None, None),
+])
+def test_holdout_pin_verdict(recorded, actual, expected):
+    assert check_holdout_pin(recorded, actual) == expected
 
 
-def test_holdout_pin_mismatch_refuses_with_its_own_code():
-    msg = check_holdout_pin({"_meta": {"holdout_pin_sha256": "a" * 64}}, "b" * 64)
-    assert msg == HOLDOUT_PIN_MISMATCH_MESSAGE
-    assert msg.startswith("FAIL [HARNESS_HOLDOUT_PIN_MISMATCH]")
-
-
-def test_holdout_pin_legacy_baseline_warns():
-    assert check_holdout_pin({"_meta": {}}, "a" * 64) == HOLDOUT_PIN_LEGACY_WARNING
+def test_holdout_pin_mismatch_carries_its_own_code():
+    assert HOLDOUT_PIN_MISMATCH_MESSAGE.startswith("FAIL [HARNESS_HOLDOUT_PIN_MISMATCH]")
 
 
 def test_dev_only_runs_are_unaffected_by_holdout_pin(tmp_path):
@@ -899,26 +892,20 @@ def _run_harness_against(url, key, tmp_path, monkeypatch, capsys):
     return rc, err
 
 
-def test_harness_authenticates_to_qdrant_with_the_configured_key(auth_qdrant, tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize(("key", "rc"), [
+    (_AUTH_SECRET, "reached"),
+    (None, 1),
+    ("wrong-key-xyz", 1),
+])
+def test_harness_qdrant_authentication(auth_qdrant, tmp_path, monkeypatch, capsys, key, rc):
+    """The configured key rides every Qdrant call; a missing or wrong key fails
+    closed with the fixed message and never leaks either key."""
     url, seen = auth_qdrant
-    rc, err = _run_harness_against(url, _AUTH_SECRET, tmp_path, monkeypatch, capsys)
-    assert rc == "reached", err
-    assert "unreachable" not in err
-    assert _AUTH_SECRET not in err
-    assert set(seen) == {_AUTH_SECRET}
-
-
-def test_harness_without_key_fails_closed_with_fixed_message_and_no_secret(auth_qdrant, tmp_path, monkeypatch, capsys):
-    url, seen = auth_qdrant
-    rc, err = _run_harness_against(url, None, tmp_path, monkeypatch, capsys)
-    assert rc == 1
-    assert "unreachable; refusing to evaluate" in err
-    assert _AUTH_SECRET not in err
-    assert set(seen) == {None}
-
-
-def test_harness_with_wrong_key_does_not_leak_it(auth_qdrant, tmp_path, monkeypatch, capsys):
-    url, _ = auth_qdrant
-    rc, err = _run_harness_against(url, "wrong-key-xyz", tmp_path, monkeypatch, capsys)
-    assert rc == 1
-    assert "wrong-key-xyz" not in err
+    got, err = _run_harness_against(url, key, tmp_path, monkeypatch, capsys)
+    assert got == rc
+    assert _AUTH_SECRET not in err and "wrong-key-xyz" not in err
+    assert set(seen) == {key}
+    if rc == "reached":
+        assert "unreachable" not in err
+    else:
+        assert "unreachable; refusing to evaluate" in err

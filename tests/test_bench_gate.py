@@ -54,12 +54,17 @@ def test_update_baseline_emits_nested_shape_that_the_gate_reads(tmp_path):
     assert check_baseline(_scaled(0.001), baseline) == [], "improvements never fail"
 
 
-def test_unmeasured_metrics_refuse_required_gate(tmp_path):
-    """qdrant mem/disk are unmeasurable on the QDRANT_SIM_URL reuse path —
-    a requested gate cannot qualify unavailable measurements."""
+@pytest.fixture
+def baseline(tmp_path):
+    """The recorded reference check_baseline reads (nested shape)."""
     path = tmp_path / "baseline.json"
     update_baseline(_result(), path)
-    baseline = json.loads(path.read_text())
+    return json.loads(path.read_text())
+
+
+def test_unmeasured_metrics_refuse_required_gate(baseline):
+    """qdrant mem/disk are unmeasurable on the QDRANT_SIM_URL reuse path —
+    a requested gate cannot qualify unavailable measurements."""
     partial = _result()
     _set(partial, "qdrant.mem_mb", None)
     _set(partial, "qdrant.disk_mb", None)
@@ -71,12 +76,8 @@ def test_unmeasured_metrics_refuse_required_gate(tmp_path):
     ]
 
 
-def test_errors_under_load_fail_the_gate(tmp_path):
+def test_errors_under_load_fail_the_gate(baseline):
     """A load phase where requests fail must not look healthy."""
-    path = tmp_path / "baseline.json"
-    update_baseline(_result(), path)
-    baseline = json.loads(path.read_text())
-
     broken = _result()
     _set(broken, "agent.answer.errors", 5)
     regressions = check_baseline(broken, baseline)
@@ -133,30 +134,24 @@ def test_aggregate_runs_noise_floor_policy():
     assert merged["agent"]["model_note"] == "x"
 
 
-def test_env_mismatch_fails_distinct_before_metric_gates(tmp_path):
-    """A 24-core baseline gating a 4-vCPU runner must fail with an actionable
-    env message — not a misleading `p95 > x3` that sends someone hunting for
-    a code regression that does not exist."""
+@pytest.mark.parametrize(("recorded_env", "live_env", "needle"), [
+    # A 24-core baseline gating a 4-vCPU runner must fail with an actionable
+    # env message — not a misleading `p95 > x3` that sends someone hunting for
+    # a code regression that does not exist.
+    ({"cpu_count": 24}, {"cpu_count": 4}, "cpu_count 24 != runner 4"),
+    ({"cpu_count": 4, "qdrant_image": "qdrant:v1.18.0"},
+     {"cpu_count": 4, "qdrant_image": "qdrant:v1.19.0-unprivileged"}, "qdrant_image"),
+])
+def test_env_mismatch_fails_distinct_before_metric_gates(tmp_path, recorded_env, live_env, needle):
     path = tmp_path / "baseline.json"
-    result = _result()
-    update_baseline({**result, "env": {"cpu_count": 24}}, path)
-    baseline = json.loads(path.read_text())
-    regressions = check_baseline(_scaled(10.0), baseline)  # would blow every metric gate
-    assert len(regressions) == 1
-    assert "cpu_count 24 != runner 4" in regressions[0]
-    assert "p95" not in "".join(regressions)
-
-
-def test_qdrant_image_mismatch_fails_distinct(tmp_path):
-    path = tmp_path / "baseline.json"
-    result = _result()
-    update_baseline({**result, "env": {"cpu_count": 4, "qdrant_image": "qdrant:v1.18.0"}}, path)
+    update_baseline({**_result(), "env": recorded_env}, path)
     baseline = json.loads(path.read_text())
     live = _result()
-    live["env"]["qdrant_image"] = "qdrant:v1.19.0-unprivileged"
-    regressions = check_baseline(live, baseline)
+    live["env"] = live_env
+    regressions = check_baseline(_scaled(10.0) | {"env": live_env}, baseline)
     assert len(regressions) == 1
-    assert "qdrant_image" in regressions[0]
+    assert needle in regressions[0]
+    assert "p95" not in "".join(regressions)  # no metric gate fired
 
 
 def test_ci_prepares_qdrant_before_check_or_record_and_stops_on_preparation_failure(tmp_path):

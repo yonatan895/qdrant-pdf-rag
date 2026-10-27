@@ -38,15 +38,18 @@ def _verbatim_runs(query_words: list[str], page: str, n: int = MAX_VERBATIM_RUN)
     return found
 
 
+_PARAPHRASE_ENTRY = {
+    "id": "PAR-T",
+    "query": "Which manual documents the IEASYSxx members used at IPL?",
+    "expected_doc_ids": ["SA22-8001-00"],
+    "expected_heading": "IEASYSxx members",
+    "must_cite_identifier": "IEASYSxx",
+    "answer_text": "The z/OS MVS Initialization and Tuning Reference describes every IEASYSxx member.",
+}
+
+
 def test_paraphrase_entry_page_has_answer_without_query_echo(tmp_path):
-    entry = {
-        "id": "PAR-T",
-        "query": "Which manual documents the IEASYSxx members used at IPL?",
-        "expected_doc_ids": ["SA22-8001-00"],
-        "expected_heading": "IEASYSxx members",
-        "must_cite_identifier": "IEASYSxx",
-        "answer_text": "The z/OS MVS Initialization and Tuning Reference describes every IEASYSxx member.",
-    }
+    entry = dict(_PARAPHRASE_ENTRY)
     out = tmp_path / "corpus"
     generate_synthetic_golden_corpus([entry], out)
     page = _norm(_page_texts(out, "SA22-8001-00"))
@@ -70,15 +73,7 @@ def test_standard_entry_still_echoes_query(tmp_path):
 
 
 def test_generator_is_deterministic(tmp_path):
-    entries = [
-        {
-            "id": "PAR-T",
-            "query": "Which manual documents the IEASYSxx members used at IPL?",
-            "expected_doc_ids": ["SA22-8001-00"],
-            "expected_heading": "IEASYSxx members",
-            "answer_text": "The z/OS MVS Initialization and Tuning Reference describes every IEASYSxx member.",
-        }
-    ]
+    entries = [dict(_PARAPHRASE_ENTRY)]
     out1, out2 = tmp_path / "a", tmp_path / "b"
     generate_synthetic_golden_corpus(entries, out1)
     generate_synthetic_golden_corpus(entries, out2)
