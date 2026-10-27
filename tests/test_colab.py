@@ -340,7 +340,7 @@ def _run_trail(state):
 
 
 def _print_refusal_cause(exc):
-    """Default test sink (#588): the exception behind a fixed refusal line,
+    """Default test sink (#1118 A4): the exception behind a fixed refusal line,
     printed to the test's captured stdout (shown only for failing tests)."""
     print(f"refusal cause: {type(exc).__name__}: {exc}"
           + (f" <- {type(exc.__cause__).__name__}: {exc.__cause__}" if exc.__cause__ else ""))

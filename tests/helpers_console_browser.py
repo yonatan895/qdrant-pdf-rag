@@ -347,9 +347,7 @@ class Browser:
                 "return {url: location.pathname, visibility: document.visibilityState,"
                 " status: s ? s.textContent.slice(0, 160) : null,"
                 " turns: Array.from(document.querySelectorAll('.turn-assistant')).map(function(t){"
-                "return t.getAttribute('data-state');}),"
-                " attempts: window.__storeAttempts ? window.__storeAttempts.map(function(a){"
-                "return a.acquired;}) : null};"
+                "return t.getAttribute('data-state');})};"
             )
         except Exception as exc:  # noqa: BLE001 - a diagnostic must not mask the timeout
             return f"unavailable ({type(exc).__name__})"
