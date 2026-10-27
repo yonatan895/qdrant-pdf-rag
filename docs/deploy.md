@@ -674,6 +674,55 @@ checksums **after**.
   The copy list includes `oauth-proxy-image.tar` when the bundle contains it;
   no manual sidecar-image copy is needed before `airgap:load`.
 
+<a id="release-archive"></a>
+### Release archive (#1118, decision D5)
+
+The 3 newest site releases are kept as **private** GHCR OCI artifacts at
+`ghcr.io/yonatan895/qdrant-pdf-rag-release-archive:<release-sha>`, as input
+for the previous-release to new-release upgrade lane. Each artifact holds the
+loose signed bundle members that the site received, one layer per member.
+[`release-archive.txt`](../release-archive.txt) is the only record. It holds
+one row per release: SHA, manifest digest, SHA-256 of the signing public key
+file, and the packed MANIFEST `date:`. Consumers pull by that digest, never by
+tag. `scripts/release_archive.py` writes the record. It uses ORAS
+([pin](../scripts/tools/oras-pin.txt), installed offline by
+`scripts/tools/install-oras.sh --archive`, binary checksum verified before
+every run) and `gh` for the Packages API:
+
+- `verify`/`push --bundle DIR --release-sha SHA --trusted-pub PUB` fails
+  closed before any registry call in these cases: the bundled key differs from
+  the out-of-band key, the `SHA256SUMS.sig` signature does not verify, a file
+  is unsigned or missing, a member checksum does not match, or MANIFEST does
+  not name `SHA`. Push refuses when the package is not private, both before and
+  after the push; that state is fixed in the package settings and never by the
+  tool. Push never overwrites an existing tag. A tag that already exists with
+  identical layers is adopted, which recovers a push that was never recorded.
+- Privacy boundary: push only with the maintainer's own `gh` credentials. Never
+  push this package from a workflow with `GITHUB_TOKEN`, and never add an
+  `org.opencontainers.image.source` annotation. Either one links the package to
+  the public repository, so it needs a visibility decision first.
+- `pull --digest D --out DIR --trusted-pub PUB` accepts only a recorded
+  digest and the recorded key. It refuses a manifest that does not hash to `D`.
+  It downloads each layer blob over the registry API with HTTP Range, using the
+  registry bearer token, which is kept in memory and never printed. The registry
+  is pinned to `https://ghcr.io` (loopback only for tests), and the `gh` token is
+  sent only to a token realm on exactly that origin; a challenge naming any other
+  realm is refused before credentials are sent. A dropped connection resumes from
+  the partial file `.DIR.partial/<layer digest>.partial` beside `DIR`, also
+  across reruns; partials of other artifacts are left in place and reported. A server that ignores Range restarts the blob from byte 0.
+  The registry's redirect to blob storage is followed without the
+  `Authorization` header. `--attempts` bounds consecutive tries without
+  progress, with exponential backoff (`--backoff`). The whole file is then
+  re-hashed against its layer digest; on a mismatch the partial is deleted and
+  pull refuses. `DIR` may hold only this artifact's members, and a member that
+  already matches is kept. Finally pull re-runs the full bundle verification.
+- `list [--remote]` prints the rows newest first and marks which ones prune
+  removes. `prune` keeps the 3 newest by packed date, and refuses `--keep`
+  below 3. It deletes a dropped digest's package version, then its row. A rerun
+  converges. `prune` needs the `delete:packages` gh scope.
+- SIGTERM exits through cleanup, so the temporary registry config holding the
+  `gh` token is removed. SIGKILL cannot be handled and may leave it in `TMPDIR`.
+
 ## 5. Sizing and security
 
 Model servers (reasoning, dense embed, reranker) live in a
