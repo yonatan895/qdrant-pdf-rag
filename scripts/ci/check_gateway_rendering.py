@@ -47,10 +47,14 @@ def source_environment(path: Path) -> dict[str, str]:
 def load_render(path: Path, label: str) -> list[dict]:
     if re.search(r"__[A-Z][A-Z0-9_]*__", path.read_text()):
         raise RenderingInputError(f"{label}: unresolved placeholder")
-    result = subprocess.run(
-        ["kubectl", "patch", "--local", "--type=merge", "-p", "{}", "-f", str(path), "-o", "json"],
-        capture_output=True, text=True, timeout=30, check=False,
-    )
+    try:
+        result = subprocess.run(
+            ["kubectl", "patch", "--local", "--type=merge", "-p", "{}", "-f", str(path), "-o", "json"],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+    except subprocess.TimeoutExpired:
+        # A stalled decoder is not malformed input: name it (#1118 A4).
+        raise RenderingInputError(f"{label}: kubectl decode exceeded its 30 s bound") from None
     if result.returncode:
         raise RenderingInputError(f"{label}: cannot decode rendered Kubernetes YAML")
     decoder = json.JSONDecoder()
