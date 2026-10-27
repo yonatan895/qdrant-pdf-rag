@@ -28,6 +28,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeGuard
 
 from mainframe_rag.eval.datasets import RC_ONLY_COLLECTIONS, GoldenEntry
+from mainframe_rag.eval.dotted import dotted_get as _get
+from mainframe_rag.eval.dotted import dotted_set as _set  # noqa: F401 - gate tests import it here
 from mainframe_rag.regexes import find_message_ids
 
 if TYPE_CHECKING:
@@ -295,27 +297,6 @@ EVAL_ABSOLUTE_GATED_METRICS = {
 EVAL_ZERO_GATED_METRICS = (
     "must_not.violations",
 )
-
-
-def _get(result: dict, dotted: str):
-    node: object = result
-    for part in dotted.split("."):
-        if not isinstance(node, dict) or part not in node:
-            return None
-        node = node[part]
-    return node
-
-
-def _set(target: dict, dotted: str, value) -> None:
-    parts = dotted.split(".")
-    node = target
-    for part in parts[:-1]:
-        child = node.get(part)
-        if not isinstance(child, dict):
-            child = {}
-            node[part] = child
-        node = child
-    node[parts[-1]] = value
 
 
 def _absolute_floors_apply(baseline: dict) -> bool:
