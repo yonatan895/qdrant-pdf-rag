@@ -12,13 +12,21 @@ trusted on its own.
 from __future__ import annotations
 
 import argparse
+import base64
+import contextlib
 import hashlib
+import http.client
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import tempfile
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -29,6 +37,8 @@ ORAS = ROOT / ".tools" / "bin" / "oras"
 ORAS_PIN = ROOT / "scripts" / "tools" / "oras-pin.txt"
 ARTIFACT_TYPE = "application/vnd.qdrant-pdf-rag.sneakernet-bundle.v1"
 KEEP = 3
+REDIRECTS = frozenset({301, 302, 303, 307, 308})
+CHUNK = 1 << 20
 SIGNATURE = ("SHA256SUMS", "SHA256SUMS.sig")
 REQUIRED = ("SHA256SUMS", "SHA256SUMS.sig", "sneakernet-signing.pub", "MANIFEST.txt")
 SHA_RE = re.compile(r"[0-9a-f]{40}")
@@ -170,6 +180,7 @@ def write_record(path: Path, rows: list[Row], repository: str) -> None:
     handle, temp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
     with os.fdopen(handle, "w", encoding="utf-8") as stream:
         stream.write(body)
+    os.chmod(temp, 0o644)
     os.replace(temp, path)
 
 
@@ -180,13 +191,19 @@ class Tools:
     """The pinned oras binary (verified before every run) and gh for the
     GitHub Packages API (visibility, versions, deletion)."""
 
-    def __init__(self, oras: Path, pin: Path, repository: str, login: bool):
+    def __init__(self, oras: Path, pin: Path, repository: str, login: bool,
+                 registry_url: str | None = None):
         self.oras = oras
         self.repository = repository
         parts = repository.split("/")
         if len(parts) != 3 or parts[0] != "ghcr.io" or not all(parts):
             raise ArchiveError("repository must be ghcr.io/<owner>/<package>")
         self.owner, self.package = parts[1], parts[2]
+        self.registry_url = (registry_url or f"https://{parts[0]}").rstrip("/")
+        _require_safe_url(self.registry_url)
+        self._gh_token: bytes | None = None  # in memory only; never logged or written by the tool
+        self._bearer: str | None = None
+        self._opener = urllib.request.build_opener(_NoRedirect)
         pin_text = pin.read_text(encoding="utf-8") if pin.is_file() else ""
         want = re.search(r"^binary-sha256: *([0-9a-f]{64})$", pin_text, re.MULTILINE)
         version = re.search(r"^version: *v(\S+)$", pin_text, re.MULTILINE)
@@ -224,8 +241,9 @@ class Tools:
         token = subprocess.run(["gh", "auth", "token"], capture_output=True, check=False)
         if token.returncode != 0 or not token.stdout.strip():
             raise ArchiveError("gh auth token failed; log in with gh (write:packages)")
+        self._gh_token = token.stdout.strip()
         self.run_oras("login", "--username", self.owner, "--password-stdin", "ghcr.io",
-                      stdin=token.stdout.strip() + b"\n")
+                      stdin=self._gh_token + b"\n")
 
     def gh_api(self, *args: str) -> tuple[int, object]:
         done = subprocess.run(["gh", "api", *args], capture_output=True, text=True, check=False)
@@ -279,6 +297,152 @@ class Tools:
         return manifest
 
 
+    # ---------------------------------------------- resumable blob download
+
+    def _token(self, challenge: str) -> str:
+        """Registry bearer token from a `WWW-Authenticate: Bearer` challenge."""
+        fields = dict(re.findall(r'(\w+)="([^"]*)"', challenge))
+        if not challenge.lower().startswith("bearer ") or "realm" not in fields:
+            raise ArchiveError("registry sent an unsupported authentication challenge")
+        realm = fields.pop("realm")
+        _require_safe_url(realm)
+        request = urllib.request.Request(realm + "?" + urllib.parse.urlencode(fields))
+        if self._gh_token:
+            basic = base64.b64encode(self.owner.encode() + b":" + self._gh_token).decode()
+            request.add_unredirected_header("Authorization", f"Basic {basic}")
+        try:
+            with self._opener.open(request, timeout=60) as response:
+                body = json.loads(response.read())
+        except (OSError, ValueError, http.client.HTTPException) as exc:
+            raise ArchiveError("registry token request failed") from exc
+        token = (body.get("token") or body.get("access_token")) if isinstance(body, dict) else None
+        if not isinstance(token, str) or not token:
+            raise ArchiveError("registry token response has no token")
+        return token
+
+    def _open_blob(self, url: str, offset: int) -> http.client.HTTPResponse:
+        """GET with Range from `offset`. Redirects are followed by hand, and the
+        Authorization header never goes to another origin (blob storage)."""
+        current, same_origin, refreshed = url, True, False
+        for _ in range(5):
+            request = urllib.request.Request(current)
+            if offset:
+                request.add_header("Range", f"bytes={offset}-")
+            if same_origin and self._bearer:
+                request.add_unredirected_header("Authorization", f"Bearer {self._bearer}")
+            try:
+                return self._opener.open(request, timeout=60)
+            except urllib.error.HTTPError as err:
+                headers, code = err.headers, err.code
+                err.close()
+                if code in REDIRECTS and headers.get("Location"):
+                    target = urllib.parse.urljoin(current, headers["Location"])
+                    _require_safe_url(target)
+                    if _origin(target) != _origin(current):
+                        same_origin = False
+                    current = target
+                    continue
+                if code == 401 and same_origin and not refreshed:
+                    self._bearer = self._token(headers.get("WWW-Authenticate", ""))
+                    refreshed = True
+                    continue
+                if code == 416:
+                    raise _RangeRefused from None
+                if code in (401, 429) or code >= 500:
+                    raise _Transient from None
+                raise ArchiveError(f"registry refused the blob request (HTTP {code})") from None
+        raise ArchiveError("too many redirects for a blob request")
+
+    def _fetch_once(self, url: str, partial: Path) -> None:
+        offset = partial.stat().st_size if partial.exists() else 0
+        try:
+            response = self._open_blob(url, offset)
+        except _RangeRefused:
+            partial.unlink(missing_ok=True)  # resume point unusable: restart from byte 0
+            raise _Transient from None
+        with response:
+            mode = "wb"
+            if offset and response.status == 206:
+                match = re.fullmatch(r"bytes (\d+)-\d+/(?:\d+|\*)",
+                                     response.headers.get("Content-Range", ""))
+                if not match or int(match[1]) != offset:
+                    partial.unlink(missing_ok=True)
+                    raise _Transient
+                mode = "ab"
+            elif response.status not in (200, 206):
+                raise ArchiveError(f"registry returned an unexpected status (HTTP {response.status})")
+            # A 200 to a ranged request means the server ignored Range: restart cleanly.
+            with partial.open(mode) as stream:
+                while True:
+                    try:
+                        chunk = response.read(CHUNK)
+                    except http.client.IncompleteRead as exc:
+                        stream.write(exc.partial)  # keep what arrived before the drop
+                        raise
+                    if not chunk:
+                        break
+                    stream.write(chunk)
+
+    def fetch_blob(self, title: str, digest: str, size: int, partial: Path,
+                   attempts: int, backoff: float) -> None:
+        """Download one layer blob into `partial`, resuming with HTTP Range after
+        a dropped connection. `attempts` bounds consecutive tries without
+        progress. The whole file is re-hashed at the end; a mismatch deletes it."""
+        url = f"{self.registry_url}/v2/{self.owner}/{self.package}/blobs/sha256:{digest}"
+        stalled = 0
+        while True:
+            before = partial.stat().st_size if partial.exists() else 0
+            if before > size:
+                partial.unlink()
+                before = 0
+            if before == size:
+                break
+            # A dropped stream, 5xx or expired token keeps the partial for the next try.
+            with contextlib.suppress(_Transient, OSError, http.client.HTTPException):
+                self._fetch_once(url, partial)
+            after = partial.stat().st_size if partial.exists() else 0
+            if after >= size:
+                break
+            stalled = 0 if after > before else stalled + 1
+            if stalled >= attempts:
+                raise ArchiveError(f"blob download made no progress in {attempts} attempts: {title}")
+            print(f"release-archive: resuming {title} at byte {after} of {size}", file=sys.stderr)
+            time.sleep(min(backoff * 2 ** stalled, 60.0))
+        if partial.stat().st_size != size or _sha256_file(partial) != digest:
+            partial.unlink()
+            raise ArchiveError(f"fetched blob does not match its layer digest: {title}")
+
+
+class _Transient(Exception):
+    """A retryable transport failure (dropped stream, 5xx, 429, expired token)."""
+
+
+class _RangeRefused(Exception):
+    """HTTP 416: the partial file cannot be resumed."""
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Surface redirects as HTTPError so Tools._open_blob decides about headers."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+        return None
+
+
+def _origin(url: str) -> tuple[str, str]:
+    parts = urllib.parse.urlsplit(url)
+    return parts.scheme, parts.netloc.lower()
+
+
+def _require_safe_url(url: str) -> None:
+    """HTTPS only; plain HTTP is accepted for loopback test registries alone."""
+    parts = urllib.parse.urlsplit(url)
+    if parts.scheme == "https" and parts.hostname:
+        return
+    if parts.scheme == "http" and parts.hostname in ("127.0.0.1", "localhost", "::1"):
+        return
+    raise ArchiveError("registry and token URLs must use HTTPS")
+
+
 def _layers(manifest: dict) -> dict[str, tuple[str, int]]:
     layers: dict[str, tuple[str, int]] = {}
     for layer in manifest.get("layers") or []:
@@ -286,7 +450,10 @@ def _layers(manifest: dict) -> dict[str, tuple[str, int]]:
         digest = layer.get("digest", "")
         if not MEMBER_RE.fullmatch(title) or title in layers or not DIGEST_RE.fullmatch(digest):
             raise ArchiveError("registry artifact has an unsafe or duplicate layer")
-        layers[title] = (digest.removeprefix("sha256:"), int(layer.get("size", -1)))
+        size = layer.get("size")
+        if not isinstance(size, int) or isinstance(size, bool) or size < 0:
+            raise ArchiveError("registry artifact has a layer without a valid size")
+        layers[title] = (digest.removeprefix("sha256:"), size)
     return layers
 
 
@@ -354,6 +521,8 @@ def cmd_pull(args: argparse.Namespace, tools: Tools) -> int:
     row = rows.get(args.digest)
     if row is None:
         raise ArchiveError("digest is not in the release-archive record")
+    if not args.trusted_pub.is_file():
+        raise ArchiveError("trusted public key file not found")
     if _sha256_file(args.trusted_pub) != row.key:
         raise ArchiveError("trusted key does not match the recorded signing key")
     out: Path = args.out
@@ -362,28 +531,21 @@ def cmd_pull(args: argparse.Namespace, tools: Tools) -> int:
     out.mkdir(parents=True, exist_ok=True)
     # Resume: the directory may hold only members of this artifact (an earlier
     # interrupted pull); a member already matching its layer digest is kept.
-    if not {entry.name for entry in out.iterdir()} <= set(layers):
+    entries = list(out.iterdir())
+    if not {entry.name for entry in entries} <= set(layers) or any(
+            entry.is_symlink() or not entry.is_file() for entry in entries):
         raise ArchiveError("output directory must be empty or hold only this artifact's members")
-    with tempfile.TemporaryDirectory(prefix=f".{out.name}.partial-", dir=out.parent) as partial:
-        for title, (digest, size) in sorted(layers.items()):
-            target = out / title
-            if (target.is_file() and not target.is_symlink() and target.stat().st_size == size
-                    and _sha256_file(target) == digest):
-                continue
-            staged = Path(partial) / title
-            for attempt in range(1, args.attempts + 1):
-                try:
-                    tools.run_oras("blob", "fetch", "--no-tty", "--output", str(staged),
-                                   f"{tools.repository}@sha256:{digest}")
-                    break
-                except ArchiveError:
-                    if attempt == args.attempts:
-                        raise
-                    print(f"release-archive: retrying {title} after a failed fetch "
-                          f"({attempt}/{args.attempts})", file=sys.stderr)
-            if _sha256_file(staged) != digest:
-                raise ArchiveError(f"fetched blob does not match its layer digest: {title}")
-            os.replace(staged, target)
+    # Partial downloads survive an interrupted run beside DIR, never inside it.
+    partial_dir = out.parent / f".{out.name}.partial"
+    partial_dir.mkdir(mode=0o700, exist_ok=True)
+    for title, (digest, size) in sorted(layers.items()):
+        target = out / title
+        if target.is_file() and target.stat().st_size == size and _sha256_file(target) == digest:
+            continue
+        staged = partial_dir / title
+        tools.fetch_blob(title, digest, size, staged, args.attempts, args.backoff)
+        os.replace(staged, target)
+    partial_dir.rmdir()
     if {entry.name for entry in out.iterdir()} != set(layers):
         raise ArchiveError("pulled files do not match the artifact layers")
     bundle = verify_bundle(out, row.sha, args.trusted_pub)
@@ -433,6 +595,8 @@ def parser() -> argparse.ArgumentParser:
     top.add_argument("--repository", default=REPOSITORY)
     top.add_argument("--oras", type=Path, default=ORAS)
     top.add_argument("--oras-pin", type=Path, default=ORAS_PIN)
+    top.add_argument("--registry-url", default=None,
+                     help="registry API base for blob downloads (default https://ghcr.io)")
     top.add_argument("--no-login", action="store_true",
                      help="use an empty registry config instead of gh credentials")
     sub = top.add_subparsers(dest="command", required=True)
@@ -447,7 +611,10 @@ def parser() -> argparse.ArgumentParser:
     pull.add_argument("--digest", required=True)
     pull.add_argument("--out", type=Path, required=True)
     pull.add_argument("--trusted-pub", type=Path, required=True)
-    pull.add_argument("--attempts", type=int, default=5, help="fetch attempts per layer blob")
+    pull.add_argument("--attempts", type=int, default=5,
+                      help="consecutive blob fetch attempts without progress before refusing")
+    pull.add_argument("--backoff", type=float, default=2.0,
+                      help="base seconds of exponential backoff between attempts")
     listing = sub.add_parser("list")
     listing.add_argument("--remote", action="store_true")
     prune = sub.add_parser("prune")
@@ -456,17 +623,27 @@ def parser() -> argparse.ArgumentParser:
     return top
 
 
+def _terminate(signum: int, _frame: object) -> None:
+    # SIGTERM's default action skips `finally`; exit through it so the
+    # token-bearing registry config directory is always removed.
+    raise SystemExit(128 + signum)
+
+
 def main(argv: list[str] | None = None) -> int:
+    signal.signal(signal.SIGTERM, _terminate)
     args = parser().parse_args(argv)
     tools: Tools | None = None
     try:
-        if getattr(args, "keep", KEEP) < 1 or getattr(args, "attempts", 1) < 1:
-            raise ArchiveError("--keep and --attempts must be at least 1")
+        if getattr(args, "attempts", 1) < 1 or getattr(args, "backoff", 0.0) < 0:
+            raise ArchiveError("--attempts must be at least 1 and --backoff not negative")
+        if args.command == "prune" and args.keep < KEEP:
+            raise ArchiveError(f"prune keeps at least {KEEP} releases (decision D5)")
         if args.command == "verify":
             return cmd_verify(args)
         if args.command == "list" and not args.remote:
             return cmd_list(args, None)
-        tools = Tools(args.oras, args.oras_pin, args.repository, login=not args.no_login)
+        tools = Tools(args.oras, args.oras_pin, args.repository, login=not args.no_login,
+                      registry_url=args.registry_url)
         if args.command == "list":
             tools.login()
             return cmd_list(args, tools)

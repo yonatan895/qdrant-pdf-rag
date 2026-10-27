@@ -697,16 +697,28 @@ every run) and `gh` for the Packages API:
   after the push; that state is fixed in the package settings and never by the
   tool. Push never overwrites an existing tag. A tag that already exists with
   identical layers is adopted, which recovers a push that was never recorded.
+- Privacy boundary: push only with the maintainer's own `gh` credentials. Never
+  push this package from a workflow with `GITHUB_TOKEN`, and never add an
+  `org.opencontainers.image.source` annotation. Either one links the package to
+  the public repository, so it needs a visibility decision first.
 - `pull --digest D --out DIR --trusted-pub PUB` accepts only a recorded
-  digest and the recorded key. It refuses a manifest that does not hash to
-  `D`. It then fetches each layer blob, retrying up to `--attempts` times, and
-  checks each blob against its layer digest. A rerun keeps members that already
-  match, so `DIR` may hold only this artifact's members. Finally it re-runs the
-  full bundle verification on the pulled files.
+  digest and the recorded key. It refuses a manifest that does not hash to `D`.
+  It downloads each layer blob over the registry API with HTTP Range, using the
+  registry bearer token, which is kept in memory and never printed. A dropped
+  connection resumes from the partial file in `.DIR.partial/` beside `DIR`, also
+  across reruns. A server that ignores Range restarts the blob from byte 0.
+  The registry's redirect to blob storage is followed without the
+  `Authorization` header. `--attempts` bounds consecutive tries without
+  progress, with exponential backoff (`--backoff`). The whole file is then
+  re-hashed against its layer digest; on a mismatch the partial is deleted and
+  pull refuses. `DIR` may hold only this artifact's members, and a member that
+  already matches is kept. Finally pull re-runs the full bundle verification.
 - `list [--remote]` prints the rows newest first and marks which ones prune
-  removes. `prune` keeps the 3 newest by packed date. It deletes a dropped
-  digest's package version, then its row. A rerun converges. `prune` needs
-  the `delete:packages` gh scope.
+  removes. `prune` keeps the 3 newest by packed date, and refuses `--keep`
+  below 3. It deletes a dropped digest's package version, then its row. A rerun
+  converges. `prune` needs the `delete:packages` gh scope.
+- SIGTERM exits through cleanup, so the temporary registry config holding the
+  `gh` token is removed. SIGKILL cannot be handled and may leave it in `TMPDIR`.
 
 ## 5. Sizing and security
 
