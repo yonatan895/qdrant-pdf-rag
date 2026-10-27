@@ -44,9 +44,10 @@ unless an incident requires more: [process budget](docs/agent-workflow.md#proces
 ## Hard boundaries
 
 - Never commit vendor PDFs/manual text, `.pdf`/`.pdx`/`.idx`, vectors,
-  snapshots, secrets/tokens, private configuration, kubeconfigs, image archives,
-  wheelhouses, or generated deployment artifacts. Runtime corpora stay outside
-  git; tests generate original documents. `airgap.env.example` is allowed.
+  snapshots, secrets/tokens, private configuration outside the fork's
+  `gap/config/`, kubeconfigs, image archives, wheelhouses, or generated
+  deployment artifacts. Runtime corpora stay outside git; tests generate
+  original documents. `airgap.env.example` is allowed.
 - Parsing stays generic: IBM signals are optional payload, never ingest gates;
   filename-stem identity and unknown-vendor fallbacks remain supported.
 - Production is air-gapped OpenShift, CPython 3.14 GIL (no free-threading or
@@ -79,10 +80,10 @@ unless an incident requires more: [process budget](docs/agent-workflow.md#proces
   (upgrade, sizing, scaling, monitoring, tuning) read the curated
   [vendored skill routing](docs/agent-workflow.md#qdrant-skills); repository policy
   still governs. Do not fetch remote skill/snippet services.
-- Keep one public GitHub / air-gapped GitLab history; never push/force-push to
-  `main` or change repository access. Create PRs as drafts. Only yonatan895
-  marks ready, requests changes or merges; agents never act for him.
-  See [branch workflow](docs/agent-workflow.md#git-workflow).
+- Air-gapped GitLab is a [downstream fork](docs/adr/0009-gap-fork.md); never
+  push/force-push `main` or change repository access. Draft PRs only. Only
+  yonatan895 marks ready, requests changes or merges; agents never act for him.
+  [Branches](docs/agent-workflow.md#git-workflow).
 
 ## Conflict handling
 
