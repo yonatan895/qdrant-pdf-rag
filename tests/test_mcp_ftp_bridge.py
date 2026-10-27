@@ -82,6 +82,9 @@ def _session(fake: FakeFTP, **overrides) -> bridge.FTPSession:
     return bridge.FTPSession(fake, _config(**overrides))
 
 
+# The dispatch table IS the capability tier (registration lock).
+TOOL_NAMES = ["dataset_read", "uss_read", "job_status", "jes_spool_read"]
+
 JES_FIXTURE = [
     "PAYROLL  JOB00123 READER   OUTPUT A        RC=0000",
     "BACKUP   JOB00124 READER   ACTIVE  B",
@@ -201,20 +204,6 @@ def test_connect_protects_the_data_channel_only_over_tls(monkeypatch) -> None:
 # ------------------------------------------------------- MCP framing
 
 
-def _factory():
-    return _config(), FakeFTP
-
-
-def _call(name: str, args: dict) -> dict:
-    config = _config()
-    return server.handle_request(
-        {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-         "params": {"name": name, "arguments": args}},
-        config,
-        lambda _cfg: FakeFTP(),
-    )
-
-
 def test_initialize_negotiates_and_tools_list_registers_exactly_the_allowlist() -> None:
     """Registration lock: the dispatch table IS the capability tier — any
     fifth tool fails this test."""
@@ -236,7 +225,7 @@ def test_initialize_negotiates_and_tools_list_registers_exactly_the_allowlist() 
         lambda _cfg: FakeFTP(),
     )
     names = [t["name"] for t in reply["result"]["tools"]]
-    assert names == ["dataset_read", "uss_read", "job_status", "jes_spool_read"]
+    assert names == TOOL_NAMES
     for tool in reply["result"]["tools"]:
         assert set(tool["inputSchema"]) >= {"type", "properties"}
 
@@ -307,12 +296,7 @@ def test_stdio_loop_frames_replies_and_skips_blanks(monkeypatch) -> None:
     server.serve_stdio(config, lambda _cfg: FakeFTP())
     frames = [json.loads(line) for line in stdout.getvalue().splitlines()]
     assert [f.get("id") for f in frames] == [1, None]  # list reply + parse error
-    assert [t["name"] for t in frames[0]["result"]["tools"]] == [
-        "dataset_read",
-        "uss_read",
-        "job_status",
-        "jes_spool_read",
-    ]
+    assert [t["name"] for t in frames[0]["result"]["tools"]] == TOOL_NAMES
     assert frames[1]["error"]["code"] == -32700
 
 
@@ -322,12 +306,7 @@ def test_http_transport_lists_tools() -> None:
     client = TestClient(server.create_app(_config(), lambda _cfg: FakeFTP()))
     resp = client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}})
     assert resp.status_code == 200
-    assert [t["name"] for t in resp.json()["result"]["tools"]] == [
-        "dataset_read",
-        "uss_read",
-        "job_status",
-        "jes_spool_read",
-    ]
+    assert [t["name"] for t in resp.json()["result"]["tools"]] == TOOL_NAMES
     bad = client.post("/mcp", content=b"{oops", headers={"Content-Type": "application/json"})
     assert bad.status_code == 400
 

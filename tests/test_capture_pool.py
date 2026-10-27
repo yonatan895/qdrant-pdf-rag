@@ -20,35 +20,20 @@ from scripts.capture_pool import (
     replay_pool,
 )
 
-from mainframe_rag.config import Settings
-from tests.conftest import FakeEmbedder, FakeQdrant, MockReranker, _point
+from tests.conftest import FakeEmbedder, FakeQdrant, MockReranker
+from tests.helpers_eval_local import eval_settings as _settings
+from tests.helpers_eval_local import point as _spoint
 
 
 def _cpoint(pid, doc, page, ctype):
     """Shared point with a per-chunk payload (recorded-schema shapes)."""
-    base = _point(pid)
-    payload = dict(base.payload or {})
-    payload.update({"doc_id": doc, "page_label": page, "chunk_type": ctype})
-    return base.model_copy(update={"payload": payload})
+    return _spoint(pid, doc, page_label=page, chunk_type=ctype, page_start=5)
 
 
 def _legs():
     dense = [_cpoint("p1", "D1", "1", "narrative"), _cpoint("p2", "D2", "2", "table")]
     sparse = [_cpoint("p2", "D2", "2", "table"), _cpoint("p3", "D3", "3", "syntax")]
     return [{"effective_text": "sizing lookaside", "filter_fallback": False, "dense": dense, "sparse": sparse}]
-
-
-def _settings(**overrides):
-    kw = {
-        "qdrant_url": "http://localhost:6333",
-        "qdrant_collection": "mainframe_manuals",
-        "dense_dim": 768,
-        "embed_base_url": "http://localhost:8000/v1",
-        "embed_model": "test-embed",
-        "bm25_model": "Qdrant/bm25",
-    }
-    kw.update(overrides)
-    return Settings(**kw)
 
 
 def test_legs_to_record_shape():
@@ -68,27 +53,16 @@ def test_legs_to_record_shape():
     assert record["_meta"] == {"collection": "c"}
 
 
-@pytest.mark.parametrize("bad_ce", [float("nan"), "high"])
-def test_legs_to_record_rejects_bad_ce(bad_ce):
-    with pytest.raises((ValueError, TypeError)):
-        legs_to_record("q", "nl", _legs(), {"p1": bad_ce}, {})
-
-
-@pytest.mark.parametrize(
-    ("legs", "exc"),
-    [
-        ([], ValueError),
-        ([{"dense": "nope", "sparse": []}], TypeError),
-    ],
-)
-def test_legs_to_record_rejects_bad_legs(legs, exc):
+@pytest.mark.parametrize(("query", "legs", "ce", "exc"), [
+    ("q", "legs", {"p1": float("nan")}, (ValueError, TypeError)),  # CE must be finite
+    ("q", "legs", {"p1": "high"}, (ValueError, TypeError)),
+    ("q", [], {}, ValueError),  # no legs at all
+    ("q", [{"dense": "nope", "sparse": []}], {}, TypeError),  # a leg must be a list
+    ("", "legs", {}, ValueError),  # an empty query cannot be recorded
+])
+def test_legs_to_record_rejects_invalid_input(query, legs, ce, exc):
     with pytest.raises(exc):
-        legs_to_record("q", "nl", legs, {}, {})
-
-
-def test_legs_to_record_empty_query_rejected():
-    with pytest.raises(ValueError):
-        legs_to_record("", "nl", _legs(), {}, {})
+        legs_to_record(query, "nl", _legs() if legs == "legs" else legs, ce, {})
 
 
 def test_record_to_rows_round_trip():
@@ -334,24 +308,13 @@ def capture_workspace(tmp_path):
     """Actual Task/CLI/capture serializer, with shared runtime client fakes."""
     import json
     import os
-    import shutil
     import subprocess
     import sys
-    from pathlib import Path
 
-    from tests.test_taskfile_contracts import REQUIRE_RUNNER, find_task
+    from tests.helpers_eval_local import REPO_ROOT as repo
+    from tests.helpers_eval_local import task_workspace
 
-    task = find_task()
-    if task is None:
-        if REQUIRE_RUNNER:
-            pytest.fail("pinned Task unavailable in required lane")
-        pytest.skip("pinned Task unavailable")
-    repo = Path(__file__).resolve().parents[1]
-    shutil.copy2(repo / "Taskfile.yml", tmp_path / "Taskfile.yml")
-    shutil.copytree(repo / "taskfiles", tmp_path / "taskfiles")
-    (tmp_path / "scripts").mkdir()
-    shutil.copy2(repo / "scripts/capture_pool.py", tmp_path / "scripts/capture_pool.py")
-    (tmp_path / ".venv/bin").mkdir(parents=True)
+    task = task_workspace(tmp_path, "capture_pool.py")
     launcher = tmp_path / ".venv/bin/python"
     launcher.write_text(f"#!{sys.executable}\n" + f"repo = {str(repo)!r}\n" + '''
 import importlib.util, json, sys

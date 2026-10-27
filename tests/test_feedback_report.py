@@ -17,6 +17,8 @@ from mainframe_rag.agent.answer import VERIFICATION_STATES as AGENT_STATES
 from mainframe_rag.config import REASONING_EFFORTS
 from mainframe_rag.feedback import exchange, report
 from mainframe_rag.feedback.store import AnswerRecord, FeedbackStore, Rating
+from tests.helpers_eval_local import lines_of as _lines
+from tests.helpers_eval_local import rehash as _rehash
 
 SENTINEL = "SYNTHETIC-SENTINEL-TEXT"
 SRC = Path(__file__).resolve().parents[1] / "src"
@@ -186,17 +188,6 @@ def test_review_queue_is_bounded(tmp_path, monkeypatch):
     rep = _json(_export(_make_db(tmp_path / "q.sqlite3", rows), tmp_path / "q.jsonl"), tmp_path)
     q = rep["review_queue"]
     assert (q["total_bad"], q["listed"], q["truncated"]) == (5, 2, 3)
-
-
-def _lines(path):
-    return path.read_bytes().split(b"\n")[:-1]
-
-
-def _rehash(lines):
-    body = b"".join(line + b"\n" for line in lines[:-1])
-    t = json.loads(lines[-1])
-    t["sha256"] = hashlib.sha256(body).hexdigest()
-    return body + json.dumps(t, sort_keys=True, separators=(",", ":")).encode() + b"\n"
 
 
 def _mut(lines, idx, **changes):

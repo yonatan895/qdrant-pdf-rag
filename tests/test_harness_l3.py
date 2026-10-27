@@ -68,24 +68,43 @@ def test_gate_verdict_no_baseline_records_but_never_drops_errors():
     assert any("search: 3 request error(s)" in r for r in reasons)
 
 
-def test_gate_verdict_missing_server_timing_header_fails():
-    """Responses returning 200 without Server-Timing headers must fail the gate."""
-    report = _sample_report()
-    report["search"]["missing_timings"] = 5
-    baseline = _sample_baseline()
-    verdict, reasons = gate_verdict_l3(report, baseline)
-    assert verdict == "hold"
-    assert any("search: 5 response(s) missing Server-Timing header" in r for r in reasons)
+def _no_change(report: dict) -> None:
+    return None
 
 
-def test_gate_verdict_missing_expected_stage_fails():
-    """A missing stage present in baseline is a header regression and must fail."""
-    report = _sample_report()
+def _drop_llm_stage(report: dict) -> None:
     del report["answer"]["stages"]["llm_ms"]
-    baseline = _sample_baseline()
-    verdict, reasons = gate_verdict_l3(report, baseline)
-    assert verdict == "hold"
-    assert any("answer.stages: expected stage llm_ms missing" in r for r in reasons)
+
+
+def _slow_llm_stage(report: dict) -> None:
+    report["answer"]["stages"]["llm_ms"]["p95"] = 100.0
+
+
+_GATE_CASES = {
+    # A 200 without Server-Timing headers fails the gate.
+    "missing-server-timing": (
+        lambda r: r["search"].__setitem__("missing_timings", 5), "hold",
+        "search: 5 response(s) missing Server-Timing header"),
+    # A stage present in the baseline but missing now is a header regression.
+    "missing-expected-stage": (_drop_llm_stage, "hold",
+                               "answer.stages: expected stage llm_ms missing"),
+    "within-tolerance": (_no_change, "pass", None),
+    # Baseline llm_ms p95 is 30.0; x3.0 is 90.0, so 100.0 holds.
+    "stage-latency-regression": (_slow_llm_stage, "hold", "answer.stages.llm_ms.p95"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_GATE_CASES))
+def test_gate_verdict_stage_matrix(case):
+    mutate, verdict, needle = _GATE_CASES[case]
+    report = _sample_report()
+    mutate(report)
+    got, reasons = gate_verdict_l3(report, _sample_baseline(), tolerance=3.0)
+    assert got == verdict, reasons
+    if needle is None:
+        assert reasons == []
+    else:
+        assert any(needle in r for r in reasons), reasons
 
 
 def test_gate_verdict_env_mismatch_fails_closed():
@@ -121,24 +140,6 @@ def test_env_snapshot_records_run_provenance_the_gate_compares(monkeypatch):
     assert env["gpu_name"] == "RTX 5060"
     assert (env["concurrency"], env["duration_s"]) == (4, 15)
     assert "request_timeout_s" not in env  # an unset option must not be recorded as a pin
-
-
-def test_gate_verdict_passes_within_tolerance():
-    report = _sample_report()
-    baseline = _sample_baseline()
-    verdict, reasons = gate_verdict_l3(report, baseline, tolerance=3.0)
-    assert verdict == "pass"
-    assert reasons == []
-
-
-def test_gate_verdict_fails_on_stage_latency_regression():
-    report = _sample_report()
-    # Baseline llm_ms p95 is 30.0; x3.0 limit is 90.0; 100.0 should trigger hold
-    report["answer"]["stages"]["llm_ms"]["p95"] = 100.0
-    baseline = _sample_baseline()
-    verdict, reasons = gate_verdict_l3(report, baseline, tolerance=3.0)
-    assert verdict == "hold"
-    assert any("answer.stages.llm_ms.p95" in r for r in reasons)
 
 
 def _stub_l3_operations(monkeypatch):
@@ -188,25 +189,13 @@ def l3_task_workspace(tmp_path):
     """Actual Task and L3 CLI; only HTTP load, GPU and manifest effects are replaced."""
     import json
     import os
-    import shutil
     import subprocess
     import sys
-    from pathlib import Path
 
-    from tests.test_taskfile_contracts import REQUIRE_RUNNER, find_task
+    from tests.helpers_eval_local import REPO_ROOT as repo
+    from tests.helpers_eval_local import task_workspace
 
-    task = find_task()
-    if task is None:
-        if REQUIRE_RUNNER:
-            pytest.fail("pinned Task unavailable in required lane")
-        pytest.skip("pinned Task unavailable")
-    repo = Path(__file__).resolve().parents[1]
-    shutil.copy2(repo / "Taskfile.yml", tmp_path / "Taskfile.yml")
-    shutil.copytree(repo / "taskfiles", tmp_path / "taskfiles")
-    (tmp_path / "scripts").mkdir()
-    for name in ("harness_l3.py", "loadtest.py"):
-        shutil.copy2(repo / "scripts" / name, tmp_path / "scripts" / name)
-    (tmp_path / ".venv/bin").mkdir(parents=True)
+    task = task_workspace(tmp_path, "harness_l3.py", "loadtest.py")
     launcher = tmp_path / ".venv/bin/python"
     launcher.write_text(
         f"#!{sys.executable}\n"
