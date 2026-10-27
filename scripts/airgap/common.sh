@@ -68,6 +68,22 @@ _scan_env_file_keys() {
 for _k in $_GATEWAY_KEY_VARS; do
     eval "_pre_set_${_k}=\${$_k+set}; _pre_val_${_k}=\${$_k:-}"
 done
+# Issue #1070: Open WebUI role lists may hold domain-qualified group names
+# (DOMAIN\group). Sourcing the file removes a backslash outside single quotes
+# (DOMAIN\group becomes DOMAINgroup, which matches nobody), and the result
+# cannot be told apart from a bare name afterwards, so the text is checked
+# before sourcing. A role line with a backslash must be one single-quoted
+# value. Fixed message; the value is never printed.
+_scan_env_file_roles() {
+    [ -s "$1" ] || return 0
+    _rk='OPENWEBUI_OIDC_(ALLOWED|ADMIN)_ROLES'
+    if grep -E "(^|[;&|({[:space:]])${_rk}\+?=" "$1" | grep -Ev "^[[:space:]]*#" |
+        grep -F '\' |
+        grep -Evq "^[[:space:]]*(export[[:space:]]+)?${_rk}='[^']*'[[:space:]]*(#.*)?\$"; then
+        die "OPENWEBUI_OIDC_ALLOWED_ROLES or OPENWEBUI_OIDC_ADMIN_ROLES in $1 has a backslash outside single quotes; sh removes it when sourcing the file (DOMAIN\\group would become DOMAINgroup). Single-quote the whole value, for example OPENWEBUI_OIDC_ADMIN_ROLES='DOMAIN\\docs-admins'"
+    fi
+    unset _rk
+}
 _check_sourced_keys() {
     for _k in $_GATEWAY_KEY_VARS; do
         eval "_now=\${$_k:-}; _was=\${_pre_val_${_k}}"
@@ -87,6 +103,7 @@ if [ -n "${AIRGAP_ENV:-}" ]; then
     # optional: default ./airgap.env when present, else environment-only.
     if [ -f "$AIRGAP_ENV" ] && [ -r "$AIRGAP_ENV" ]; then
         _scan_env_file_keys "$AIRGAP_ENV"
+        _scan_env_file_roles "$AIRGAP_ENV"
         # shellcheck disable=SC1091
         . "$AIRGAP_ENV"
         _check_sourced_keys "$AIRGAP_ENV"
@@ -95,6 +112,7 @@ if [ -n "${AIRGAP_ENV:-}" ]; then
     fi
 elif [ -f airgap.env ]; then
     _scan_env_file_keys airgap.env
+    _scan_env_file_roles airgap.env
     # shellcheck disable=SC1091
     . ./airgap.env
     _check_sourced_keys airgap.env

@@ -1364,6 +1364,85 @@ def test_openwebui_enabled_deploy_renders_verifies_and_installs_the_pipe(tree):
     assert "docs Pipe installed" in r.stdout
 
 
+# Domain-qualified AD group names (#1070): with an IdP rule form that offers only
+# LDAP-attribute rules, the roles claim is the tokenGroups claim and the role lists
+# are DOMAIN\group names. sh drops a backslash outside single quotes when it
+# sources airgap.env (DOMAIN\group -> DOMAINgroup, which matches nobody), so the
+# documented form is single-quoted; Task, the mapper and Helm must keep it as is.
+QUALIFIED_ROLES = {"OPENWEBUI_OIDC_ALLOWED_ROLES": "CORP\\docs-users,CORP\\docs-readers",
+                   "OPENWEBUI_OIDC_ADMIN_ROLES": "CORP\\docs-admins"}
+QUALIFIED_CLAIMS = {"OPENWEBUI_OIDC_GROUP_CLAIM": "groups", "OPENWEBUI_OIDC_ROLES_CLAIM": "groups"}
+
+
+@pytest.mark.parametrize("source", ["file", "environment", "task"])
+def test_openwebui_domain_qualified_roles_reach_the_pod_verbatim(tree, source):
+    import base64
+
+    root, log = tree
+    set_openwebui_pin(root, GOOD_PIN)
+    (root / "charts/mainframe-rag/files/openwebui/docs_pipe.py").write_text(OWUI_PIPE)
+    base = [(k, v) for k, v in OWUI_ENV if k not in QUALIFIED_ROLES]
+    base += [("OWUI_ROUTE_LIVE_FILE", _write_json(tree, "owui-route.json", _owui_route())),
+             ("OWUI_EXEC_STDIN", str(root / "exec-stdin.txt")),
+             ("OWUI_ADMIN_KEY_B64", base64.b64encode(OWUI_ADMIN_KEY.encode()).decode())]
+    selected = {**QUALIFIED_ROLES, **QUALIFIED_CLAIMS}
+    env_file = root / "airgap.env"
+    if source == "file":
+        # The documented airgap.env form: one single-quoted value per line.
+        env_file.write_text("".join(f"{k}='{v}'\n" for k, v in selected.items()))
+        result = _run(tree, ("AIRGAP_ENV", str(env_file)), *base)
+    elif source == "environment":
+        env_file.write_text("")
+        result = _run(tree, ("AIRGAP_ENV", str(env_file)), *base, *selected.items())
+    else:
+        env_file.write_text("")
+        shutil.copyfile(REPO / "Taskfile.yml", root / "Taskfile.yml")
+        shutil.copytree(REPO / "taskfiles", root / "taskfiles")
+        tools = root / "scripts/tools"
+        tools.mkdir()
+        for name in ("run-task.sh", "task-pin.txt"):
+            shutil.copyfile(REPO / "scripts/tools" / name, tools / name)
+        (root / ".tools/bin").mkdir(parents=True)
+        (root / ".tools/bin/task").symlink_to(REPO / ".tools/bin/task")
+        env = {"PATH": f"{root / 'bin'}:/usr/bin:/bin", "HELM_LOG": str(log),
+               "IMAGE_SHA": IMAGE_SHA, "INTERNAL_REGISTRY": "reg.internal", "NAMESPACE": "ns",
+               "STORAGE_CLASS": "standard", "EMBED_MODEL": "embed", "DENSE_DIM": "64",
+               "EMBED_MODEL_REVISION": "rev-1", "EMBED_BASE_URL": "http://vllm:8000/v1",
+               "SKOPEO_REGISTRY": str(root / "registry"), "PODS_FILE": str(root / "pods.json"),
+               "AIRGAP_ENV": str(env_file), **dict(base)}
+        # Task CLI variables (no shell between the caller and Task).
+        result = subprocess.run(
+            ["sh", str(tools / "run-task.sh"), "airgap:deploy",
+             *[f"{k}={v}" for k, v in selected.items()]],
+            capture_output=True, text=True, check=False, cwd=root, env=env)
+    assert result.returncode == 0, result.stderr
+    pod = rendered_env((root / "dist/agent-rendered.yaml").read_text(), "openwebui")
+    assert {k: pod[k] for k in ("OAUTH_ALLOWED_ROLES", "OAUTH_ADMIN_ROLES", "OAUTH_ROLES_CLAIM",
+                                "OAUTH_GROUP_CLAIM")} == {
+        "OAUTH_ALLOWED_ROLES": "CORP\\docs-users,CORP\\docs-readers",
+        "OAUTH_ADMIN_ROLES": "CORP\\docs-admins",
+        "OAUTH_ROLES_CLAIM": "groups", "OAUTH_GROUP_CLAIM": "groups"}
+
+
+@pytest.mark.parametrize("line", [
+    "OPENWEBUI_OIDC_ADMIN_ROLES=CORP\\docs-admins",           # unquoted: sh eats the backslash
+    'OPENWEBUI_OIDC_ADMIN_ROLES="CORP\\docs-admins"',         # double quotes: not the documented form
+    "export OPENWEBUI_OIDC_ALLOWED_ROLES=CORP\\docs-users",
+    "OPENWEBUI_OIDC_ADMIN_ROLES='CORP\\a','CORP\\b'",         # two quoted pieces
+    "X=1; OPENWEBUI_OIDC_ALLOWED_ROLES=CORP\\docs-users",
+])
+def test_openwebui_role_backslash_outside_single_quotes_refuses_before_mutation(tree, line):
+    env_file = tree[0] / "airgap.env"
+    env_file.write_text(line + "\n")
+    r = _owui_deploy(tree, ("AIRGAP_ENV", str(env_file)))
+    assert r.returncode != 0
+    assert ("has a backslash outside single quotes; sh removes it when sourcing the file "
+            "(DOMAIN\\group would become DOMAINgroup). Single-quote the whole value, for "
+            "example OPENWEBUI_OIDC_ADMIN_ROLES='DOMAIN\\docs-admins'") in r.stderr
+    assert "CORP" not in r.stderr  # the value is never printed
+    assert not _helm_log(tree)
+
+
 def test_openwebui_without_an_admin_key_says_the_pipe_is_not_installed(tree):
     r = _owui_deploy(tree, admin_key=False)
     assert r.returncode == 0, r.stderr

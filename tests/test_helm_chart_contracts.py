@@ -2235,6 +2235,34 @@ def test_openwebui_refuses_role_lists_that_would_admit_every_signed_in_user(owui
     assert "rag-openwebui" not in r.stdout
 
 
+def test_openwebui_group_roles_render_domain_qualified_names_verbatim(owui_chart):
+    """#1070: with an IdP rule form that offers only LDAP-attribute rules, the roles
+    claim is the tokenGroups claim and the role lists are DOMAIN\group names. The
+    schema pattern accepts the backslash, and Helm's quote keeps it: the pod gets
+    the exact value Open WebUI compares, case-sensitively, with the claim values."""
+    oidc = {**OWUI_ON["openwebui"]["oidc"], "groupClaim": "groups", "rolesClaim": "groups",
+            "allowedRoles": "CORP\\docs-users,CORP\\docs-readers",
+            "adminRoles": "CORP\\docs-admins"}
+    docs = _owui(owui_chart, {"openwebui": {**OWUI_ON["openwebui"], "oidc": oidc}})
+    env = env_map(docs["Deployment", "rag-openwebui"], "openwebui")
+    assert {k: env[k]["value"] for k in ("OAUTH_ALLOWED_ROLES", "OAUTH_ADMIN_ROLES",
+                                         "OAUTH_ROLES_CLAIM", "OAUTH_GROUP_CLAIM")} == {
+        "OAUTH_ALLOWED_ROLES": "CORP\\docs-users,CORP\\docs-readers",
+        "OAUTH_ADMIN_ROLES": "CORP\\docs-admins",
+        "OAUTH_ROLES_CLAIM": "groups", "OAUTH_GROUP_CLAIM": "groups"}
+
+
+@pytest.mark.parametrize("key,bad", [("allowedRoles", "CORP\\docs-users,*"), ("adminRoles", "*")])
+def test_openwebui_group_roles_still_refuse_the_wildcard(owui_chart, key, bad):
+    """Open WebUI treats an allowed role of exactly * as every user; a group
+    literally named * cannot be configured either, in group-roles mode too."""
+    values = base_values()
+    values.update(json.loads(json.dumps(OWUI_ON)))
+    values["openwebui"]["oidc"].update({"groupClaim": "groups", "rolesClaim": "groups", key: bad})
+    r = _helm_template_with_values(values, chart=owui_chart)
+    assert r.returncode != 0 and ROLE_BASELINE_REFUSAL in r.stderr
+
+
 def test_openwebui_networkpolicy_egress_rules_always_carry_a_port(owui_chart):
     policy = _owui(owui_chart)["NetworkPolicy", "rag-openwebui"]
     for rule in policy["spec"]["egress"]:
