@@ -25,7 +25,7 @@ import logging
 
 import pytest
 
-from tests.helpers_console_browser import CITE, Browser, LiveConsole, find_runtime
+from tests.helpers_console_browser import CITE, Browser, LiveConsole, _hit, find_runtime
 
 RUNTIME = find_runtime()
 pytestmark = [
@@ -147,7 +147,6 @@ def test_filename_bibliography_renders_separately_and_survives_reload_export_cop
     console, page, monkeypatch, header
 ):
     from mainframe_rag.agent import app as app_mod
-    from tests.test_webui import _hit
 
     first = "widget-messages Widget Messages, Recovery > WID001I, p. PDF 12–13"
     second = "widget-guide Widget Guide, Accounts > Suspension, p. 2-4"
@@ -1151,7 +1150,6 @@ def test_supplied_excerpts_expand_as_data_for_current_response_only(console, pag
     as text, show unknown version and omission status, never reach
     localStorage or the export, and become unavailable after a reload."""
     from mainframe_rag.agent import app as app_mod
-    from tests.test_webui import _hit
 
     hostile = '<script>window.__pwned=1</script><img src="http://x.invalid/a">'
     hits = [

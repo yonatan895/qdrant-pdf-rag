@@ -18,36 +18,10 @@ from fastapi.testclient import TestClient
 from mainframe_rag.agent import app as app_mod
 from mainframe_rag.agent.tokenizer import FallbackTokenizer
 from mainframe_rag.ports import ChatResult, TokenUsage
-from mainframe_rag.retrieve.query import SearchHit
 from tests.fakes import parse_sse_events
+from tests.helpers_console_browser import MockSearch, _hit
 
 _VENDOR_DIR = Path(app_mod.__file__).parents[1] / "webui" / "static" / "vendor"
-
-
-def _hit() -> SearchHit:
-    return SearchHit(
-        chunk_id="abc123",
-        score=0.42,
-        cite="SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6",
-        heading="Chapter 2 > IEA500I",
-        text="IEA500I BEFORE IOS IOSCMDS COMMAND REJECTED, REASON=yy",
-        doc_id="SA22-0000-00",
-        title="Synthetic Reference",
-        page_label="1-6",
-        chunk_type="message",
-        product="z/OS",
-        version="9.9",
-        message_ids=("IEA500I",),
-    )
-
-
-class MockSearch:
-    def __init__(self, return_hits: bool = True):
-        self.calls: list[dict] = []
-
-    def search(self, qdrant, embedder, collection, query, product=None, version=None, limit=8, *args, **kwargs):
-        self.calls.append({"query": query})
-        return [_hit()], "identifier", {"embed_ms": 1, "qdrant_ms": 2}
 
 
 class UiFakeLLM:
