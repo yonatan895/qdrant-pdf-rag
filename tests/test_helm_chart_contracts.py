@@ -2248,7 +2248,7 @@ def test_openwebui_keeps_the_raw_id_token_out_of_browser_cookies(owui_chart):
 
 
 def test_openwebui_group_roles_render_domain_qualified_names_verbatim(owui_chart):
-    """#1070: with an IdP rule form that offers only LDAP-attribute rules, the roles
+    r"""#1070: with an IdP rule form that offers only LDAP-attribute rules, the roles
     claim is the tokenGroups claim and the role lists are DOMAIN\group names. The
     schema pattern accepts the backslash, and Helm's quote keeps it: the pod gets
     the exact value Open WebUI compares, case-sensitively, with the claim values."""

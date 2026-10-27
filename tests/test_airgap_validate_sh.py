@@ -1356,7 +1356,7 @@ def test_validate_openwebui_refuses_an_incomplete_selection(tree, key, needle):
 
 
 def test_validate_openwebui_domain_qualified_roles_single_quoted_pass_unquoted_refused(tree):
-    """#1070: sh drops a backslash outside single quotes when it sources the file
+    r"""#1070: sh drops a backslash outside single quotes when it sources the file
     (DOMAIN\group -> DOMAINgroup), so validate refuses that form before any tool
     with a fixed message, and accepts the documented single-quoted value."""
     _openwebui_tree(tree)
