@@ -281,7 +281,7 @@ visible for the maintainer to assess; CI does not parse comment history as votes
 ### Native evidence and consumer rollout (#411)
 
 `scripts/ci_evidence.py` records the actual native job invocation and its PR
-head, base and execution identity. Test lanes count actual test
+head, tested base and execution identity ([merge ref](testing.md#native-ci-execution-evidence)). Test lanes count actual test
 records, reject zero tests, skips and xfails, and refuse pre-existing reports. Receipts
 use attempt-specific artifacts. Packaging receipts identify the checkout only;
 the native packaging job must finish successfully before they can contribute
