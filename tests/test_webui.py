@@ -206,10 +206,14 @@ def test_ui_chat_stream_final_matches_answer_stream_final(ui_client):
     finals = []
     for resp in (console, answer):
         events = _parse_sse_events(resp.text)
-        assert [name for name, _ in events].count("final") == 1
+        names = [name for name, _ in events]
+        assert names.count("final") == 1 and "token" in names
+        assert names.index("token") < names.index("final"), "tokens must precede the single final"
         final = next(payload for name, payload in events if name == "final")
         finals.append({k: v for k, v in final.items() if k != "request_id"})
     console_final, answer_final = finals
+    deltas = "".join(payload["delta"] for name, payload in _parse_sse_events(console.text) if name == "token")
+    assert deltas.startswith(console_final["answer"])  # success-path tokens carry the answer body
     assert console_final == answer_final
     assert "Reissue the command" in console_final["answer"]
     assert console_final["hits"] and console_final["citations"] == [_hit().cite]
@@ -970,3 +974,20 @@ def test_ui_history_payload_never_carries_excerpt_text(ui_client):
     start = resp.text.index(marker) + len(marker)
     history = resp.text[start : resp.text.index('"', start)]
     assert _hit().text not in history  # ...but not in the carried history
+
+
+def test_console_js_keeps_excerpts_out_of_persistence():
+    """Static contract for the in-memory-only view (the browser lane is
+    marker-gated and not collected by a bare `pytest tests`, so the default
+    suite pins it): the live-evidence holder is never written to the store,
+    the export or history, and excerpt text only enters the DOM as text."""
+    js = (
+        Path(app_mod.__file__).resolve().parents[1] / "webui" / "static" / "js" / "console.js"
+    ).read_text()
+    assert ".innerHTML" not in js and "insertAdjacentHTML" not in js
+    assert "supplied_evidence" in js
+    for forbidden in ("setItem(STORAGE_KEY, JSON.stringify(liveEvidence", "turn.supplied_evidence"):
+        assert forbidden not in js
+    start = js.index("function saveStore")
+    assert "liveEvidence" not in js[start : js.index("function newSessionId")]
+    assert "liveEvidence" not in js[js.index("function markdownReport") : js.index("function el(")]
