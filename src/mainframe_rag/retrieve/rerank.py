@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx2
 
-from mainframe_rag.config import bearer_auth_headers
+from mainframe_rag.config import bearer_auth_headers, new_http_client
 from mainframe_rag.logs import error_type
 
 if TYPE_CHECKING:
@@ -137,10 +137,7 @@ class HttpReranker:
 
     def _http(self) -> httpx2.Client:
         if self._client is None:
-            self._client = httpx2.Client(
-                timeout=self._timeout,
-                transport=httpx2.HTTPTransport(retries=self._settings.http_connect_retries),
-            )
+            self._client = new_http_client(self._timeout, self._settings.http_connect_retries)
         return self._client
 
     def score(self, query: str, texts: list[str]) -> list[float]:
