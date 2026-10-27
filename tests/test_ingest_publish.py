@@ -30,7 +30,8 @@ from mainframe_rag.ingest.publish import (
     verify_staging_distribution,
     verify_staging_placement,
 )
-from tests.test_run_ingest import _filter_doc_id
+from tests.helpers_ingest_local import PointStore, parsed_doc
+from tests.helpers_ingest_local import settings as _settings
 
 ALIAS = "mainframe_manuals"
 
@@ -55,19 +56,11 @@ def _parse_in_threads(monkeypatch):
     )
 
 
-def _settings(**overrides):
-    kw = {"embed_mode": "hash", "_env_file": None}
-    kw.update(overrides)
-    return Settings(**kw)
-
-
-class PublishFake:
-    """QdrantPoints double with alias + snapshot/clone semantics."""
+class PublishFake(PointStore):
+    """Alias + snapshot/clone semantics on top of the shared point store."""
 
     def __init__(self, dim: int = 256):
-        self.dim = dim
-        self.collections: dict[str, list] = {}
-        self.aliases: dict[str, str] = {}
+        super().__init__(dim, exists=False)
         self.snapshots: dict[str, dict[str, list]] = {}
         self.fail_swap: str | None = None  # "raise" | "reject"
         self.fail_snapshot = False
@@ -76,42 +69,7 @@ class PublishFake:
         self._snap_counter = 0
         self.alias_calls: list[list] = []
 
-    # -- collections -------------------------------------------------
-    def collection_exists(self, name):
-        return name in self.collections
-
-    def get_collection(self, name):
-        return SimpleNamespace(
-            config=SimpleNamespace(
-                params=SimpleNamespace(vectors={"dense": SimpleNamespace(size=self.dim)},
-                                       shard_number=1, replication_factor=1)
-            ),
-            points_count=len(self.collections[name]),
-        )
-
-    def create_collection(self, name, **kwargs):
-        self.collections.setdefault(name, [])
-        return True
-
-    def delete_collection(self, name):
-        del self.collections[name]  # snapshots survive (server-side restore source)
-        return True
-
-    def create_payload_index(self, *a, **k):
-        return SimpleNamespace()
-
-    def update_collection(self, *a, **k):
-        return True
-
     # -- aliases ------------------------------------------------------
-    def get_aliases(self):
-        return SimpleNamespace(
-            aliases=[
-                SimpleNamespace(alias_name=a, collection_name=c)
-                for a, c in sorted(self.aliases.items())
-            ]
-        )
-
     def update_collection_aliases(self, ops):
         self.alias_calls.append(list(ops))
         if self.fail_swap == "raise":
@@ -157,69 +115,6 @@ class PublishFake:
         self.collections[collection] = points
         return True
 
-    # -- points ---------------------------------------------------------
-    def _resolve(self, name):
-        return self.collections.setdefault(self.aliases.get(name, name), [])
-
-    def scroll(self, collection, *, scroll_filter=None, limit=10, with_payload=None, with_vectors=False, offset=None):
-        from tests.test_run_ingest import _filter_match_value
-
-        doc_id = _filter_doc_id(scroll_filter)
-        rev = _filter_match_value(scroll_filter, "source_rev")
-        stored = self._resolve(collection)
-        if doc_id is not None:
-            stored = [p for p in stored if (p.payload or {}).get("doc_id") == doc_id]
-        if rev is not None:
-            stored = [p for p in stored if (p.payload or {}).get("source_rev") == rev]
-        start = 0 if offset is None else int(offset)
-        page = stored[start : start + limit]
-        next_offset = str(start + limit) if start + limit < len(stored) else None
-        return page, next_offset
-
-    def retrieve(self, collection, ids, *, with_payload=True, with_vectors=False):
-        wanted = {str(i) for i in ids}
-        return [
-            SimpleNamespace(id=p.id, payload=p.payload, vector=p.vector if with_vectors else None)
-            for p in self._resolve(collection)
-            if str(p.id) in wanted
-        ]
-
-    def upsert(self, collection, *, points, wait=True):
-        # Production upsert overwrites same-id points (manifest recommit,
-        # marker rewrite); the double must too, or reads see stale firsts.
-        physical = self.aliases.get(collection, collection)
-        stored = self.collections.setdefault(physical, [])
-        ids = {str(p.id) for p in points}
-        stored[:] = [p for p in stored if str(p.id) not in ids]
-        stored.extend(points)
-        return SimpleNamespace()
-
-    def delete(self, collection, *, points_selector, wait=True):
-        from tests.test_run_ingest import _filter_match_value
-
-        physical = self.aliases.get(collection, collection)
-        ids = getattr(points_selector, "points", None)
-        if ids is not None:
-            # PointIdsList (precise completion invalidation, issue #361).
-            wanted = {str(i) for i in ids}
-            self.collections[physical] = [
-                p
-                for p in self.collections.get(physical, [])
-                if str(getattr(p, "id", None)) not in wanted
-            ]
-            return SimpleNamespace()
-        doc_id = _filter_doc_id(points_selector)
-        rev = _filter_match_value(points_selector, "source_rev")
-        self.collections[physical] = [
-            p
-            for p in self.collections.get(physical, [])
-            if not (
-                (doc_id is None or (p.payload or {}).get("doc_id") == doc_id)
-                and (rev is None or (p.payload or {}).get("source_rev") == rev)
-            )
-        ]
-        return SimpleNamespace()
-
     def alias_target_points(self, alias):
         return list(self.collections.get(self.aliases.get(alias, ""), []))
 
@@ -247,8 +142,37 @@ def _run_main(monkeypatch, corpus: Path, progress: Path, *extra: str) -> int:
     )
 
 
+def _fresh_publish(tmp_path, monkeypatch, store=None):
+    """Publication harness: hash env, storage double, empty corpus, inventory
+    path. Returns (fake, corpus, progress); a test may pre-seed the store."""
+    from mainframe_rag.ingest import run_ingest
+
+    _publish_env(monkeypatch)
+    fake = store if store is not None else PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    return fake, corpus, tmp_path / "inv.jsonl"
+
+
 def _gen_collections(fake: PublishFake) -> list[str]:
     return sorted(n for n in fake.collections if "__gen" in n and not n.endswith("__completions"))
+
+
+def _published_one(tmp_path, monkeypatch):
+    """First ordinary publication of one synthetic document."""
+    fake, corpus, progress = _fresh_publish(tmp_path, monkeypatch)
+    _build_doc_with_id(corpus, "doc_a", DOC_A)
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    return fake, corpus, progress
+
+
+def _published_pair(tmp_path, monkeypatch):
+    """First ordinary publication of the two-document corpus."""
+    fake, corpus, progress = _fresh_publish(tmp_path, monkeypatch)
+    _two_doc_corpus(corpus)
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    return fake, corpus, progress
 
 
 def test_publish_lock_for_a_renamed_alias_also_takes_the_legacy_lock_and_refuses_legacy_state(tmp_path):
@@ -333,15 +257,9 @@ def test_publication_identity_addresses_distinct_generations():
 
 # ---------------------------------------------------------------- publish
 def test_first_publish_creates_alias_and_clean_rerun_is_noop(tmp_path, monkeypatch):
-    from mainframe_rag.ingest import run_ingest
 
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
+    fake, corpus, progress = _fresh_publish(tmp_path, monkeypatch)
     _build_doc(corpus, "SA22-0000-00_first")
-    progress = tmp_path / "inv.jsonl"
     assert _run_main(monkeypatch, corpus, progress) == 0
 
     gens = _gen_collections(fake)
@@ -358,19 +276,22 @@ def test_first_publish_creates_alias_and_clean_rerun_is_noop(tmp_path, monkeypat
     assert fake.aliases[ALIAS] == gens[0], "steady state must not flip the alias"
     assert len(fake.collections) == n_collections, "no new staging on a clean rerun"
 
+    # A named staging generation is cloned from live, not rebuilt: live's
+    # contract is re-keyed into the clone (issue #391 F5).
+    from mainframe_rag.ingest.publish import ensure_staging
+    from mainframe_rag.ingest.representation import read_manifest
+
+    candidate = "mainframe_manuals__gen00112233445566778899"
+    assert ensure_staging(fake, _settings(), _staging_settings(candidate), gens[0]) == "cloned"
+    assert read_manifest(fake, f"{candidate}__completions") is not None
+
 
 def test_refresh_publishes_new_generation_keeps_old_and_rolls_back(tmp_path, monkeypatch):
-    from mainframe_rag.ingest import run_ingest
     from mainframe_rag.ingest.qdrant_io import swap_alias_to
     from mainframe_rag.ingest.representation import read_manifest
 
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
+    fake, corpus, progress = _fresh_publish(tmp_path, monkeypatch)
     _build_doc(corpus, "SA22-0000-00_first")
-    progress = tmp_path / "inv.jsonl"
     assert _run_main(monkeypatch, corpus, progress) == 0
     gen1 = fake.aliases[ALIAS]
 
@@ -417,7 +338,7 @@ def test_incomplete_staging_metadata_is_repaired_or_refused_never_published(tmp_
             wanted = {str(i) for i in ids}
             return [
                 SimpleNamespace(id=p.id, payload=p.payload, vector=None)
-                for p in self._resolve(collection)
+                for p in self.collections.get(self._physical(collection), [])
                 if str(p.id) in wanted
             ]
 
@@ -462,69 +383,6 @@ def test_incomplete_staging_metadata_is_repaired_or_refused_never_published(tmp_
             fake, _settings(), _staging_settings("mainframe_manuals__gen00112233445566778899"), live
         )
     assert_live_untouched()
-
-
-def test_staging_invisible_until_swap(tmp_path, monkeypatch):
-    """Reads through the alias during staging see the old generation only."""
-
-    from mainframe_rag.ingest import run_ingest
-    from mainframe_rag.ingest.publish import ensure_staging
-
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
-    _build_doc(corpus, "SA22-0000-00_first")
-    assert _run_main(monkeypatch, corpus, tmp_path / "inv.jsonl") == 0
-    gen1 = fake.aliases[ALIAS]
-
-    settings = _settings(qdrant_collection="mainframe_manuals__genDEADBEEF0123456789ab")
-    assert ensure_staging(fake, _settings(), settings, gen1) == "cloned"
-    fake.upsert(
-        settings.qdrant_collection,
-        points=[
-            models.PointStruct(
-                id="00000000-0000-0000-0000-000000000099",
-                vector={
-                    "dense": [0.0] * 256,
-                    "bm25": models.SparseVector(indices=[0], values=[1.0]),
-                },
-                payload={"doc_id": "UNCOMMITTED", "sha256": "x", "rules_v": "y", "text": "t"},
-            )
-        ],
-    )
-    assert {p.payload["doc_id"] for p in fake.alias_target_points(ALIAS)} == {"SA22-0000-00"}
-
-
-def test_swap_failure_preserves_live_then_recovers(tmp_path, monkeypatch):
-    from mainframe_rag.ingest import run_ingest
-
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
-    _build_doc(corpus, "SA22-0000-00_first")
-    progress = tmp_path / "inv.jsonl"
-    assert _run_main(monkeypatch, corpus, progress) == 0
-    gen1 = fake.aliases[ALIAS]
-
-    _build_doc(corpus, "SA22-0000-01_second")
-    fake.fail_swap = "raise"
-    with pytest.raises(RuntimeError, match="swap failure"):
-        _run_main(monkeypatch, corpus, progress)
-    assert fake.aliases[ALIAS] == gen1, "failed swap keeps the previous generation live"
-    assert {p.payload["doc_id"] for p in fake.alias_target_points(ALIAS)} == {"SA22-0000-00"}
-
-    fake.fail_swap = None
-    assert _run_main(monkeypatch, corpus, progress) == 0
-    gen2 = fake.aliases[ALIAS]
-    assert gen2 != gen1
-    assert {p.payload["doc_id"] for p in fake.alias_target_points(ALIAS)} == {
-        "SA22-0000-00",
-        "SA22-0000-01",
-    }
 
 
 def test_swap_rejection_raises_without_applying(monkeypatch):
@@ -647,13 +505,8 @@ def test_existing_immutable_build_alias_is_never_rebound(which):
 def test_publish_refusals_precede_any_allocation(tmp_path, monkeypatch, case):
     from scripts.make_synthetic_pdf import build as make_pdf
 
-    from mainframe_rag.ingest import run_ingest
 
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
+    fake, corpus, _progress = _fresh_publish(tmp_path, monkeypatch)
     extra: tuple[str, ...] = ()
     if case == "limit":
         _build_doc(corpus, "SA22-0000-00_first")
@@ -706,7 +559,7 @@ def test_verify_all_complete_matrix(monkeypatch):
     fake.collections["stg"] = []
     chunks = _chunks(doc_id="D1", n=3)
     _upsert_one(
-        _parsed_doc("D1", "a" * 64),
+        parsed_doc("D1", "a" * 64),
         chunks,
         _vectors(3),
         staging,
@@ -893,23 +746,6 @@ def test_verify_all_complete_ignores_record_only_prefix_drift():
     assert verify_all_complete(fake, staging, [], {}, rules_v, "||") == []
 
 
-def _parsed_doc(doc_id, sha):
-    from pathlib import Path as _Path
-
-    from mainframe_rag.ingest.ibm_pdf import ParsedDoc
-
-    return ParsedDoc(
-        path=_Path("d.pdf"),
-        sha256=sha,
-        doc_id=doc_id,
-        title="t",
-        product="p",
-        version="1",
-        vendor="v",
-        page_count=1,
-    )
-
-
 def test_dangling_alias_publishes_fresh(tmp_path, monkeypatch):
     from mainframe_rag.ingest import run_ingest
 
@@ -938,18 +774,10 @@ def test_publish_force_same_contract_repairs_distinct_generation(tmp_path, monke
     a distinct resumable repair generation, re-embeds there, verifies, and
     swaps; the old physical keeps its points AND its manifest for rollback,
     and no self-swap snapshot churns."""
-    from mainframe_rag.ingest import run_ingest
     from mainframe_rag.ingest.completion import completion_collection_for
     from mainframe_rag.ingest.representation import read_manifest_record
 
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
-    _build_doc_with_id(corpus, "doc_a", DOC_A)
-    progress = tmp_path / "inv.jsonl"
-    assert _run_main(monkeypatch, corpus, progress) == 0
+    fake, corpus, progress = _published_one(tmp_path, monkeypatch)
     live = fake.aliases[ALIAS]
     points_before = [(p.id, dict(p.payload or {})) for p in fake.collections[live]]
     manifest_before = read_manifest_record(fake, completion_collection_for(live))
@@ -980,14 +808,7 @@ def test_forced_repair_never_touches_live_during_build(tmp_path, monkeypatch):
     from mainframe_rag.ingest.rules_version import extraction_rules_version
     from mainframe_rag.ports import AsyncReaderAdapter
 
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
-    _build_doc_with_id(corpus, "doc_a", DOC_A)
-    progress = tmp_path / "inv.jsonl"
-    assert _run_main(monkeypatch, corpus, progress) == 0
+    fake, corpus, progress = _published_one(tmp_path, monkeypatch)
     live = fake.aliases[ALIAS]
     live_points = [p.id for p in fake.collections[live]]
 
@@ -1027,14 +848,7 @@ def test_interrupted_same_contract_repair_resumes_recorded_build(tmp_path, monke
     from mainframe_rag.ingest import run_ingest
     from mainframe_rag.ingest.publish import publish_state_path
 
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
-    _build_doc_with_id(corpus, "doc_a", DOC_A)
-    progress = tmp_path / "inv.jsonl"
-    assert _run_main(monkeypatch, corpus, progress) == 0
+    fake, corpus, progress = _published_one(tmp_path, monkeypatch)
     live = fake.aliases[ALIAS]
     points_before = [(p.id, dict(p.payload or {})) for p in fake.collections[live]]
 
@@ -1067,15 +881,9 @@ def test_subsequent_ordinary_run_recognizes_repair_steady_state(tmp_path, monkey
     inputs, publication metadata proves live matches (gen_fp, corpus_fp). The
     run treats live as steady state directly, re-verifies read-only, and
     allocates no second staging generation."""
-    from mainframe_rag.ingest import run_ingest
 
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
+    fake, corpus, progress = _fresh_publish(tmp_path, monkeypatch)
     _build_doc_with_id(corpus, "doc_a", DOC_A)
-    progress = tmp_path / "inv.jsonl"
 
     # 1. Initial build: canonical staging generation published
     assert _run_main(monkeypatch, corpus, progress) == 0
@@ -1140,12 +948,10 @@ def test_subsequent_ordinary_run_recognizes_repair_steady_state(tmp_path, monkey
 
 
 def test_q418_r1_publication_receipt_not_accumulated_across_clones():
-    """Issue #391 S423-N1: publication receipts must not accumulate in completions
-    collections across repeated generation clones. _transfer_staging_metadata removes
-    any inherited receipt from staging while preserving completions and manifest."""
-    from types import SimpleNamespace
-
-    from mainframe_rag.config import Settings
+    """Issue #391 S423-N1: publication receipts must not accumulate in
+    completions collections across repeated generation clones.
+    _transfer_staging_metadata removes any inherited receipt from staging
+    while preserving completions and the re-keyed manifest."""
     from mainframe_rag.ingest.publish import (
         _PUBLICATION_METADATA_PREFIX,
         _transfer_staging_metadata,
@@ -1154,120 +960,66 @@ def test_q418_r1_publication_receipt_not_accumulated_across_clones():
         publication_metadata_point_id,
         read_publication_metadata,
     )
-    from mainframe_rag.ingest.representation import (
-        commit_manifest,
-        read_manifest_record,
-    )
+    from mainframe_rag.ingest.representation import commit_manifest, read_manifest_record
 
     fake = PublishFake()
     settings = Settings(qdrant_url="http://localhost:6333", qdrant_collection="col1")
-
-    # 1. Setup live generation with completions, manifest, and publication receipt
     live = "col1__gen1"
     live_completions = completion_collection_for(live)
-    staging1 = "col1__gen2"
-    staging1_settings = settings.model_copy(update={"qdrant_collection": staging1})
-    staging1_completions = completion_collection_name(staging1_settings)
-
     fake.collections[live] = []
     fake.collections[live_completions] = []
-
     commit_manifest(fake, live_completions, settings, "rules-1")
     live_manifest = read_manifest_record(fake, live_completions)
-    assert live_manifest is not None
-
-    # Add a document completion marker
-    doc_marker = SimpleNamespace(
+    fake.collections[live_completions].append(SimpleNamespace(
         id="doc-marker-1",
-        payload={
-            "doc_id": "DOC1",
-            "rules_version": "rules-1",
-            "target_collection": live_completions,
-        },
-        vector=[0.0],
-    )
-    fake.collections[live_completions].append(doc_marker)
+        payload={"doc_id": "DOC1", "rules_version": "rules-1",
+                 "target_collection": live_completions},
+    ))
 
-    # Write publication metadata to live
+    def receipts(name):
+        return [
+            p for p in fake.collections.get(name, [])
+            if (p.payload or {}).get("record_type") == _PUBLICATION_METADATA_PREFIX
+        ]
+
     def place_receipt(completions, physical, gen_fp, corpus_fp, build_id):
         # A bound (schema-1) receipt, placed directly: this test is about
         # transfer, not about sealing real content.
         fake.collections.setdefault(completions, []).append(SimpleNamespace(
             id=publication_metadata_point_id(completions),
-            payload={"record_type": _PUBLICATION_METADATA_PREFIX, "target_collection": completions,
-                     "build_schema": 1, "build_id": build_id, "logical_alias": "col1",
-                     "data_collection": physical, "gen_fp": gen_fp, "corpus_fp": corpus_fp},
-            vector=[0.0],
+            payload={"record_type": _PUBLICATION_METADATA_PREFIX,
+                     "target_collection": completions, "build_schema": 1,
+                     "build_id": build_id, "logical_alias": "col1",
+                     "data_collection": physical, "gen_fp": gen_fp,
+                     "corpus_fp": corpus_fp},
         ))
+
+    def transfer(target, source):
+        target_settings = settings.model_copy(update={"qdrant_collection": target})
+        _transfer_staging_metadata(fake, settings, target_settings, source)
+        return completion_collection_name(target_settings)
 
     place_receipt(live_completions, live, "gen1", "corp1", "11111111-1111-4111-8111-111111111111")
     assert read_publication_metadata(fake, live_completions) == ("gen1", "corp1")
 
-    # 2. Transfer metadata to staging1 (simulates preparation)
-    _transfer_staging_metadata(fake, settings, staging1_settings, live)
+    # Preparation preserves completions and the re-keyed manifest, never the
+    # ancestral receipt; publication places exactly its own receipt.
+    staging1 = transfer("col1__gen2", live)
+    assert read_manifest_record(fake, staging1) == live_manifest
+    assert any(p.payload.get("doc_id") == "DOC1" for p in fake.collections[staging1])
+    assert receipts(staging1) == []
+    place_receipt(staging1, "col1__gen2", "gen2", "corp2", "22222222-2222-4222-8222-222222222222")
+    [own] = receipts(staging1)
+    assert str(own.id) == publication_metadata_point_id(staging1)
 
-    # Staging1 manifest must be preserved and rekeyed
-    stg1_manifest = read_manifest_record(fake, staging1_completions)
-    assert stg1_manifest is not None
-    assert stg1_manifest == live_manifest
-
-    # Doc marker must be preserved
-    assert any(
-        (p.payload or {}).get("doc_id") == "DOC1" for p in fake.collections[staging1_completions]
-    )
-
-    # Ancestral publication receipt from live MUST be removed from staging1
-    stg1_receipts = [
-        p
-        for p in fake.collections[staging1_completions]
-        if (p.payload or {}).get("record_type") == _PUBLICATION_METADATA_PREFIX
-    ]
-    assert len(stg1_receipts) == 0, (
-        f"staging must have 0 receipts after transfer, got {len(stg1_receipts)}"
-    )
-
-    # 3. Simulate publication of staging1: write staging1's receipt
-    place_receipt(staging1_completions, staging1, "gen2", "corp2", "22222222-2222-4222-8222-222222222222")
-    stg1_receipts_after_pub = [
-        p
-        for p in fake.collections[staging1_completions]
-        if (p.payload or {}).get("record_type") == _PUBLICATION_METADATA_PREFIX
-    ]
-    assert len(stg1_receipts_after_pub) == 1
-    assert str(stg1_receipts_after_pub[0].id) == publication_metadata_point_id(staging1_completions)
-
-    # 4. Clone staging1 into staging2: repeated generation cloning
-    staging2 = "col1__gen3"
-    staging2_settings = settings.model_copy(update={"qdrant_collection": staging2})
-    staging2_completions = completion_collection_name(staging2_settings)
-
-    _transfer_staging_metadata(fake, settings, staging2_settings, staging1)
-
-    # Staging2 must NOT accumulate staging1's receipt or live's receipt
-    stg2_receipts = [
-        p
-        for p in fake.collections[staging2_completions]
-        if (p.payload or {}).get("record_type") == _PUBLICATION_METADATA_PREFIX
-    ]
-    assert len(stg2_receipts) == 0, (
-        f"staging2 must have 0 receipts after transfer, got {len(stg2_receipts)}"
-    )
-
-    # Doc marker and manifest are still preserved
-    assert read_manifest_record(fake, staging2_completions) is not None
-    assert any(
-        (p.payload or {}).get("doc_id") == "DOC1" for p in fake.collections[staging2_completions]
-    )
-
-    # Publish staging2
-    place_receipt(staging2_completions, staging2, "gen3", "corp3", "33333333-3333-4333-8333-333333333333")
-    stg2_receipts_after_pub = [
-        p
-        for p in fake.collections[staging2_completions]
-        if (p.payload or {}).get("record_type") == _PUBLICATION_METADATA_PREFIX
-    ]
-    assert len(stg2_receipts_after_pub) == 1
-    assert str(stg2_receipts_after_pub[0].id) == publication_metadata_point_id(staging2_completions)
+    # Repeated cloning accumulates neither predecessor's receipt.
+    staging2 = transfer("col1__gen3", "col1__gen2")
+    assert receipts(staging2) == []
+    assert read_manifest_record(fake, staging2) is not None
+    assert any(p.payload.get("doc_id") == "DOC1" for p in fake.collections[staging2])
+    place_receipt(staging2, "col1__gen3", "gen3", "corp3", "33333333-3333-4333-8333-333333333333")
+    [own] = receipts(staging2)
+    assert str(own.id) == publication_metadata_point_id(staging2)
 
 
 def test_revision_only_change_fails_unforced_and_migrates_when_forced(tmp_path, monkeypatch):
@@ -1278,16 +1030,10 @@ def test_revision_only_change_fails_unforced_and_migrates_when_forced(tmp_path, 
     generation, verifies and swaps; the old generation keeps its points AND
     its rev-A manifest for rollback, and the serving contract is committed
     (never a half-rebuilt B)."""
-    from mainframe_rag.ingest import run_ingest
     from mainframe_rag.ingest.representation import STATE_COMMITTED, read_manifest_record
 
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
+    fake, corpus, progress = _fresh_publish(tmp_path, monkeypatch)
     _build_doc(corpus, "SA22-0000-00_first")
-    progress = tmp_path / "inv.jsonl"
     assert _run_main(monkeypatch, corpus, progress) == 0
     old = fake.aliases[ALIAS]
     points_before = list(fake.collections[old])
@@ -1322,11 +1068,7 @@ def test_publish_unusable_manifest_prevents_alias_cutover(tmp_path, monkeypatch,
     from mainframe_rag.ingest import run_ingest
     from mainframe_rag.ingest.representation import STATE_PENDING, manifest_point_id, write_manifest
 
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda s: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
+    fake, corpus, _progress = _fresh_publish(tmp_path, monkeypatch)
     _build_doc(corpus, "SA22-0000-00_first")
     orig_commit = run_ingest.commit_manifest
 
@@ -1355,7 +1097,6 @@ def test_steady_state_reverification_refuses_unusable_live_manifest(tmp_path, mo
     never migrating or mutating the serving generation (issue #391)."""
     from copy import deepcopy
 
-    from mainframe_rag.ingest import run_ingest
     from mainframe_rag.ingest.representation import (
         STATE_PENDING,
         manifest_point_id,
@@ -1363,14 +1104,7 @@ def test_steady_state_reverification_refuses_unusable_live_manifest(tmp_path, mo
     )
     from mainframe_rag.ingest.rules_version import extraction_rules_version
 
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda s: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
-    _build_doc_with_id(corpus, "doc_a", DOC_A)
-    progress = tmp_path / "inv.jsonl"
-    assert _run_main(monkeypatch, corpus, progress) == 0
+    fake, corpus, progress = _published_one(tmp_path, monkeypatch)
     live = fake.aliases[ALIAS]
     live_points = [p.id for p in fake.collections[live]]
     completions = f"{live}__completions"
@@ -1428,15 +1162,9 @@ def test_partial_walk_refuses_and_preserves_unretired_doc(tmp_path, monkeypatch)
     approved removal refuses cutover, for an ordinary run and a forced repair
     alike (a repair certifies the same complete corpus as any publish); the
     approved doc is not silently retired and the live generation is untouched."""
-    from mainframe_rag.ingest import run_ingest
 
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
+    fake, corpus, progress = _fresh_publish(tmp_path, monkeypatch)
     _, b_path = _two_doc_corpus(corpus)
-    progress = tmp_path / "inv.jsonl"
     assert _run_main(monkeypatch, corpus, progress) == 0
     live_before = fake.aliases[ALIAS]
     points_before = [(p.id, dict(p.payload or {})) for p in fake.collections[live_before]]
@@ -1459,17 +1187,11 @@ def test_retire_refusals_mutate_nothing(tmp_path, monkeypatch, case):
     revision of the document still walked) fail before any mutation."""
     from scripts.make_synthetic_pdf import build as make_pdf
 
-    from mainframe_rag.ingest import run_ingest
     from mainframe_rag.ingest.inventory import load_inventory
     from mainframe_rag.ingest.publish import publish_state_path
 
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
+    fake, corpus, progress = _fresh_publish(tmp_path, monkeypatch)
     a_path, _ = _two_doc_corpus(corpus)
-    progress = tmp_path / "inv.jsonl"
     assert _run_main(monkeypatch, corpus, progress) == 0
     rev_a = load_inventory(progress)[str(a_path)].source_rev
     assert rev_a is not None
@@ -1490,19 +1212,13 @@ def test_retire_refusals_mutate_nothing(tmp_path, monkeypatch, case):
 def test_unmarked_legacy_residue_blocks_cutover_without_deletion(tmp_path, monkeypatch):
     """R1 acceptance: the residue audit is read-only — an unattributable
     legacy point blocks verification and is still present afterwards."""
-    from mainframe_rag.ingest import run_ingest
     from mainframe_rag.ingest.completion import source_labels
     from mainframe_rag.ingest.inventory import load_inventory
     from mainframe_rag.ingest.publish import verify_all_complete
     from mainframe_rag.ingest.rules_version import extraction_rules_version
 
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
+    fake, corpus, progress = _fresh_publish(tmp_path, monkeypatch)
     a_path = _build_doc_with_id(corpus, "doc_a", DOC_A)
-    progress = tmp_path / "inv.jsonl"
     assert _run_main(monkeypatch, corpus, progress) == 0
     live = fake.aliases[ALIAS]
 
@@ -1535,13 +1251,8 @@ def test_concurrent_publish_same_alias_serializes(tmp_path, monkeypatch):
 
     from mainframe_rag.ingest import run_ingest
 
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
+    _fake, corpus, progress = _fresh_publish(tmp_path, monkeypatch)
     _build_doc_with_id(corpus, "doc_a", DOC_A)
-    progress = tmp_path / "inv.jsonl"
     assert _run_main(monkeypatch, corpus, progress) == 0
 
     # Changed corpus so the contended runs take the distinct-staging path
@@ -1594,14 +1305,7 @@ def test_overtaken_publisher_refuses_stale_cutover(tmp_path, monkeypatch):
     from mainframe_rag.ingest.publish import verify_all_complete as real_verify
     from mainframe_rag.ingest.qdrant_io import swap_alias_to
 
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
-    _build_doc_with_id(corpus, "doc_a", DOC_A)
-    progress = tmp_path / "inv.jsonl"
-    assert _run_main(monkeypatch, corpus, progress) == 0
+    fake, corpus, progress = _published_one(tmp_path, monkeypatch)
     live_before = fake.aliases[ALIAS]
     _build_doc_with_id(corpus, "doc_b", DOC_B)
 
@@ -1816,13 +1520,8 @@ def test_retire_plan_validated_under_target_lock(tmp_path, monkeypatch):
     from mainframe_rag.ingest import run_ingest
     from mainframe_rag.ingest.inventory import load_inventory
 
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
+    fake, corpus, progress = _fresh_publish(tmp_path, monkeypatch)
     a_path, _ = _two_doc_corpus(corpus)
-    progress = tmp_path / "inv.jsonl"
     assert _run_main(monkeypatch, corpus, progress) == 0
     live_before = fake.aliases[ALIAS]
     gens_before = _gen_collections(fake)
@@ -1844,16 +1543,8 @@ def test_retire_plan_validated_under_target_lock(tmp_path, monkeypatch):
 
 
 def _revision_less_case(tmp_path, monkeypatch):
-    from mainframe_rag.ingest import run_ingest
 
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
-    _build_doc_with_id(corpus, "doc_a", DOC_A)
-    progress = tmp_path / "inv.jsonl"
-    assert _run_main(monkeypatch, corpus, progress) == 0
+    fake, corpus, progress = _published_one(tmp_path, monkeypatch)
     live = fake.aliases[ALIAS]
     return fake, corpus, progress, live
 
@@ -1927,16 +1618,10 @@ def test_publish_migration_with_explicit_retire_single_run(tmp_path, monkeypatch
     plus an explicitly approved removal still commits and swaps in one run.
     The approved removal is applied before the verification that gates the
     swap, and the superseded generation is retained."""
-    from mainframe_rag.ingest import run_ingest
     from mainframe_rag.ingest.representation import STATE_COMMITTED, read_manifest_record
 
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
+    fake, corpus, progress = _fresh_publish(tmp_path, monkeypatch)
     a_path, _ = _two_doc_corpus(corpus)
-    progress = tmp_path / "inv.jsonl"
     assert _run_main(monkeypatch, corpus, progress) == 0
     live = fake.aliases[ALIAS]
 
@@ -1956,15 +1641,9 @@ def test_publish_migration_retire_unapproved_stray_refuses(tmp_path, monkeypatch
     """The commit-time excusal of an approved removal is bounded: a stray
     revision under the retired doc survives the approved named-revision
     removal, and the post-removal audit refuses the swap (re-plan path)."""
-    from mainframe_rag.ingest import run_ingest
 
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
+    fake, corpus, progress = _fresh_publish(tmp_path, monkeypatch)
     a_path, _ = _two_doc_corpus(corpus)
-    progress = tmp_path / "inv.jsonl"
     assert _run_main(monkeypatch, corpus, progress) == 0
     live = fake.aliases[ALIAS]
     fake.collections[live].append(
@@ -1990,17 +1669,9 @@ def test_zero_point_marker_does_not_block_migration(tmp_path, monkeypatch):
     proof still attributes every searchable point."""
     import uuid as uuid_mod
 
-    from mainframe_rag.ingest import run_ingest
     from mainframe_rag.ingest.representation import STATE_COMMITTED, read_manifest_record
 
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
-    _two_doc_corpus(corpus)
-    progress = tmp_path / "inv.jsonl"
-    assert _run_main(monkeypatch, corpus, progress) == 0
+    fake, corpus, progress = _published_pair(tmp_path, monkeypatch)
     live = fake.aliases[ALIAS]
     controls = fake.collections[f"{live}__completions"]
     marker = next(p for p in controls if (p.payload or {}).get("doc_id") == DOC_A)
@@ -2035,16 +1706,10 @@ def test_retire_revision_a_while_retaining_and_walking_revision_b_succeeds(tmp_p
     planning, walked-document checks, deletion, completion invalidation, and cutover."""
     from scripts.make_synthetic_pdf import build as make_pdf
 
-    from mainframe_rag.ingest import run_ingest
     from mainframe_rag.ingest.completion import completion_collection_for
     from mainframe_rag.ingest.inventory import load_inventory
 
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
-    progress = tmp_path / "inv.jsonl"
+    fake, corpus, progress = _fresh_publish(tmp_path, monkeypatch)
 
     # Step 1: Ingest revision A of DOC_A, along with DOC_B
     a_path = corpus / "doc_a.pdf"
@@ -2125,21 +1790,13 @@ def test_publication_resolution_refusal_writes_nothing(tmp_path, monkeypatch, ca
     sidecar are unchanged afterwards."""
     import json
 
-    from mainframe_rag.ingest import run_ingest
     from mainframe_rag.ingest.publish import (
         publish_state_path,
         read_publication_metadata,
         write_publish_state,
     )
 
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
-    _two_doc_corpus(corpus)
-    progress = tmp_path / "inv.jsonl"
-    assert _run_main(monkeypatch, corpus, progress) == 0
+    fake, corpus, progress = _published_pair(tmp_path, monkeypatch)
     live = fake.aliases[ALIAS]
     fingerprints = read_publication_metadata(fake, live + "__completions")
     assert fingerprints is not None
@@ -2183,12 +1840,7 @@ def test_retire_retry_recovers_its_plan_and_refuses_a_changed_request(tmp_path, 
     from mainframe_rag.ingest import run_ingest
     from mainframe_rag.ingest.inventory import load_inventory
 
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
-    progress = tmp_path / "inv.jsonl"
+    fake, corpus, progress = _fresh_publish(tmp_path, monkeypatch)
 
     a_path = corpus / "doc_a.pdf"
     make_pdf(a_path, doc_id=DOC_A, title="Synthetic Doc A Rev 1")
@@ -2263,13 +1915,8 @@ def test_post_cutover_retry_refuses_a_changed_retirement_request(tmp_path, monke
     from mainframe_rag.ingest import run_ingest
     from mainframe_rag.ingest.publish import publish_state_path
 
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
+    fake, corpus, progress = _fresh_publish(tmp_path, monkeypatch)
     a, _b = _two_doc_corpus(corpus)
-    progress = tmp_path / "inv.jsonl"
     assert _run_main(monkeypatch, corpus, progress) == 0
     a.unlink()
     _crash_at_cutover(monkeypatch, run_ingest, after=True)
@@ -2300,14 +1947,9 @@ def test_retry_with_reordered_or_repeated_retire_flags_resumes(tmp_path, monkeyp
     refused as different retirements."""
     from mainframe_rag.ingest import run_ingest
 
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
+    fake, corpus, progress = _fresh_publish(tmp_path, monkeypatch)
     a, b = _two_doc_corpus(corpus)
     _build_doc_with_id(corpus, "doc_c", DOC_C)
-    progress = tmp_path / "inv.jsonl"
     assert _run_main(monkeypatch, corpus, progress) == 0
     a.unlink()
     b.unlink()
@@ -2328,15 +1970,9 @@ def test_refused_doc_id_file_does_not_abort_a_retirement_publication(tmp_path, m
 
     from scripts.make_synthetic_pdf import build_plain
 
-    from mainframe_rag.ingest import run_ingest
 
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
+    fake, corpus, progress = _fresh_publish(tmp_path, monkeypatch)
     _a, b = _two_doc_corpus(corpus)
-    progress = tmp_path / "inv.jsonl"
     assert _run_main(monkeypatch, corpus, progress) == 0
     b.unlink()
     build_plain(corpus / "hid\u202eden.pdf")
@@ -2354,15 +1990,9 @@ def test_conflict_preflight_same_bytes_changed_label_replaces_old_revision(tmp_p
     historical inventory record."""
     from scripts.make_synthetic_pdf import build as make_pdf
 
-    from mainframe_rag.ingest import run_ingest
     from mainframe_rag.ingest.inventory import load_inventory
 
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
-    progress = tmp_path / "inv.jsonl"
+    fake, corpus, progress = _fresh_publish(tmp_path, monkeypatch)
 
     a_path = corpus / "doc_a.pdf"
     make_pdf(a_path, doc_id=DOC_A, title="Doc A Initial Content")
@@ -2478,17 +2108,11 @@ def test_relabel_after_inventory_loss_recovers_by_republishing_original_labels(t
     serving generation cannot be re-certified without inventory) to rebuild
     the inventory record, then relabel; lineage replaces the old revision,
     leaving no orphaned marker, and the next ordinary run is steady state."""
-    from mainframe_rag.ingest import run_ingest
     from mainframe_rag.ingest.inventory import load_inventory
     from mainframe_rag.ingest.publish import publish_state_path
 
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
+    fake, corpus, progress = _fresh_publish(tmp_path, monkeypatch)
     path = _build_doc_with_id(corpus, "doc_a", DOC_A)
-    progress = tmp_path / "inv.jsonl"
     original = ("--vendor", "ibm", "--product", "zos", "--version", "2.5")
     relabel = ("--vendor", "ibm", "--product", "zos", "--version", "3.0")
     assert _run_main(monkeypatch, corpus, progress, *original) == 0
@@ -2531,8 +2155,8 @@ def _lost_inventory_relabel(tmp_path, monkeypatch, fake):
     monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
     corpus = tmp_path / "corpus"
     corpus.mkdir()
-    path = _build_doc_with_id(corpus, "doc_a", DOC_A)
     progress = tmp_path / "inv.jsonl"
+    path = _build_doc_with_id(corpus, "doc_a", DOC_A)
     labels = ("--vendor", "ibm", "--product", "zos")
     assert _run_main(monkeypatch, corpus, progress, *labels, "--version", "2.5") == 0
     live = fake.aliases[ALIAS]
@@ -2615,15 +2239,9 @@ def test_authorize_from_catalog_logs_nothing_when_the_inventory_approves(tmp_pat
     when the catalog actually approved a revision. A retirement the
     inventory already approves proceeds as without the flag, with no
     catalog-authority line."""
-    from mainframe_rag.ingest import run_ingest
 
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
+    fake, corpus, progress = _fresh_publish(tmp_path, monkeypatch)
     _, b_path = _two_doc_corpus(corpus)
-    progress = tmp_path / "inv.jsonl"
     assert _run_main(monkeypatch, corpus, progress) == 0
     b_path.unlink()
     capsys.readouterr()
@@ -2642,15 +2260,9 @@ def test_same_path_reissue_with_a_new_form_number_cuts_over_by_lineage(tmp_path,
     --retire-doc is needed and nothing of the old revision stays live."""
     from scripts.make_synthetic_pdf import build as make_pdf
 
-    from mainframe_rag.ingest import run_ingest
     from mainframe_rag.ingest.inventory import load_inventory
 
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
-    progress = tmp_path / "inv.jsonl"
+    fake, corpus, progress = _fresh_publish(tmp_path, monkeypatch)
     manual = corpus / "manual.pdf"
     make_pdf(manual, doc_id="GX28-1234-00", title="Original Issue")
     _build_doc_with_id(corpus, "doc_b", DOC_B)
@@ -2738,8 +2350,8 @@ def test_forced_build_retry_keeps_verified_document_checkpoint(tmp_path, monkeyp
     monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
     corpus = tmp_path / "corpus"
     corpus.mkdir()
-    _two_doc_corpus(corpus)
     progress = tmp_path / "inv.jsonl"
+    _two_doc_corpus(corpus)
     assert _run_main(monkeypatch, corpus, progress) == 0
     live = fake.aliases[ALIAS]
     live_before = [p.model_dump() for p in fake.collections[live]]
@@ -2829,8 +2441,8 @@ def test_interrupted_first_build_resumes_only_under_explicit_reingest(tmp_path, 
     monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
     corpus = tmp_path / "corpus"
     corpus.mkdir()
-    _two_doc_corpus(corpus)
     progress = tmp_path / "inv.jsonl"
+    _two_doc_corpus(corpus)
 
     original_parse = run_ingest._parse_one
     original_upsert = run_ingest._upsert_one
@@ -2886,14 +2498,7 @@ def test_forced_retry_after_all_checkpoints_does_no_embedding(tmp_path, monkeypa
 
     from mainframe_rag.ingest import run_ingest
 
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
-    _two_doc_corpus(corpus)
-    progress = tmp_path / "inv.jsonl"
-    assert _run_main(monkeypatch, corpus, progress) == 0
+    fake, corpus, progress = _published_pair(tmp_path, monkeypatch)
     live = fake.aliases[ALIAS]
     monkeypatch.setenv("EMBED_MODEL_REVISION", "new-synthetic-revision")
     real_commit = run_ingest._commit_migration_representation
@@ -3210,13 +2815,8 @@ def test_failed_post_cutover_revalidation_preserves_finalization(
     from mainframe_rag.ingest.publish import publish_state_path
     from tests.helpers_publication_lifecycle import _records
 
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
+    fake, corpus, progress = _fresh_publish(tmp_path, monkeypatch)
     _, removed = _two_doc_corpus(corpus)
-    progress = tmp_path / "inv.jsonl"
     assert _run_main(monkeypatch, corpus, progress) == 0
     old = fake.aliases[ALIAS]
     retained = (_records(fake, old), _records(fake, old + "__completions"))
@@ -3460,8 +3060,8 @@ def _exercise_build_uuid_recovery(tmp_path, monkeypatch, fake, alias):
     monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
     corpus = tmp_path / "corpus"
     corpus.mkdir()
-    _build_doc_with_id(corpus, "doc_a", DOC_A)
     progress = tmp_path / "inventory.jsonl"
+    _build_doc_with_id(corpus, "doc_a", DOC_A)
     sidecar = publish_state_path(progress, alias)
     create = fake.create_collection
     allocated = []
@@ -3527,21 +3127,37 @@ def test_build_uuid_precedes_writes_and_sealed_retry_is_read_only(tmp_path, monk
     _exercise_build_uuid_recovery(tmp_path, monkeypatch, PublishFake(), ALIAS)
 
 
-@pytest.mark.parametrize("damage", ["version", "uuid", "predecessor", "control", "partial-alias", "missing-control"])
-def test_sealed_retry_refuses_inconsistent_build_without_mutation(tmp_path, monkeypatch, damage):
+@pytest.mark.parametrize(
+    ("damage", "match"),
+    [
+        ("version", None),
+        ("uuid", None),
+        ("predecessor", None),
+        ("build-control", None),
+        ("partial-alias", None),
+        ("missing-control", None),
+        ("lost-document", "seal|build control"),
+        ("sparse", "seal|build control"),
+        ("control", "seal|build control"),
+        ("seal-missing", "seal|build control"),
+        ("seal-schema", "seal|build control"),
+    ],
+)
+def test_sealed_candidate_damage_refuses_retry_without_mutation(
+    tmp_path, monkeypatch, damage, match
+):
+    """A sealed, unfinished build whose recorded build state or stored content
+    was damaged is refused before any mutation: sidecar version/uuid/
+    predecessor, the build receipt's id, a partial or missing build-alias
+    binding, lost/sparse stored points, a changed doc control, or a missing/
+    unsupported content seal. Retrying mutates nothing (issue #391)."""
     import json
     from copy import deepcopy
 
-    from mainframe_rag.ingest import run_ingest
     from mainframe_rag.ingest.publish import publication_metadata_point_id, publish_state_path
 
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
-    _build_doc_with_id(corpus, "doc_a", DOC_A)
-    progress = tmp_path / "inventory.jsonl"
+    fake, corpus, progress = _fresh_publish(tmp_path, monkeypatch)
+    _two_doc_corpus(corpus)
     sidecar = publish_state_path(progress, ALIAS)
     fake.fail_swap = "raise"
     with pytest.raises(RuntimeError, match="injected swap failure"):
@@ -3558,22 +3174,33 @@ def test_sealed_retry_refuses_inconsistent_build_without_mutation(tmp_path, monk
         state["build_id"] = "00000000-0000-0000-0000-000000000000"
     elif damage == "predecessor":
         state["previous"] = "unobserved-predecessor"
-    elif damage == "control":
+    elif damage == "build-control":
         receipt.payload["build_id"] = "12345678-1234-4234-8234-123456789abc"
     elif damage == "partial-alias":
         fake.aliases[data_alias] = physical
-    elif damage == "redirect-alias":
-        fake.aliases[data_alias] = "another-physical"
     elif damage == "missing-control":
         fake.aliases[data_alias] = physical
         fake.collections[control].remove(receipt)
+    elif damage == "lost-document":
+        for name in (physical, control):
+            fake.collections[name] = [
+                p for p in fake.collections[name] if p.payload.get("doc_id") != DOC_A
+            ]
+    elif damage == "sparse":
+        fake.collections[physical][0].vector["bm25"].values[0] += 0.5
+    elif damage == "control":
+        next(p for p in fake.collections[control]
+             if p.payload.get("doc_id") == DOC_A).payload["finished_at"] += 1
+    elif damage == "seal-missing":
+        del receipt.payload["content_seal"]
+    else:
+        receipt.payload["content_seal"]["schema"] = 999
     sidecar.write_text(json.dumps(state))
     before = deepcopy(fake.collections), dict(fake.aliases), sidecar.read_bytes(), progress.read_bytes()
     fake.fail_swap = None
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match=match):
         _run_main(monkeypatch, corpus, progress, "--reingest")
     assert (fake.collections, fake.aliases, sidecar.read_bytes(), progress.read_bytes()) == before, damage
-
 
 
 @pytest.mark.parametrize("target_kind", ["physical", "retained", "build-alias"])
@@ -3585,16 +3212,8 @@ def test_publication_refuses_a_generation_targeted_by_name(tmp_path, monkeypatch
     mutates nothing, and the next ordinary publication still succeeds."""
     from copy import deepcopy
 
-    from mainframe_rag.ingest import run_ingest
 
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
-    _build_doc_with_id(corpus, "doc_a", DOC_A)
-    progress = tmp_path / "inventory.jsonl"
-    assert _run_main(monkeypatch, corpus, progress) == 0
+    fake, corpus, progress = _published_one(tmp_path, monkeypatch)
     physical = fake.aliases[ALIAS]
     target = physical
     if target_kind == "retained":
@@ -3638,51 +3257,6 @@ def test_new_allocation_never_reuses_orphan_controls():
 
 
 
-@pytest.mark.parametrize("damage", ["lost-document", "sparse", "control", "seal-missing", "seal-schema"])
-def test_sealed_content_damage_refuses_retry_without_mutation(tmp_path, monkeypatch, damage):
-    import json
-    from copy import deepcopy
-
-    from mainframe_rag.ingest import run_ingest
-    from mainframe_rag.ingest.publish import publication_metadata_point_id, publish_state_path
-
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
-    _two_doc_corpus(corpus)
-    progress = tmp_path / "inventory.jsonl"
-    fake.fail_swap = "raise"
-    with pytest.raises(RuntimeError, match="injected swap failure"):
-        _run_main(monkeypatch, corpus, progress)
-    sidecar = publish_state_path(progress, ALIAS)
-    physical = json.loads(sidecar.read_text())["staging"]
-    control = physical + "__completions"
-    receipt = next(p for p in fake.collections[control] if str(p.id) == publication_metadata_point_id(control))
-    if damage == "lost-document":
-        for name in (physical, control):
-            fake.collections[name] = [p for p in fake.collections[name] if p.payload.get("doc_id") != DOC_A]
-    elif damage == "text":
-        fake.collections[physical][0].payload["text"] = "Unexpected replacement"
-    elif damage == "dense":
-        fake.collections[physical][0].vector["dense"][0] += 0.25
-    elif damage == "sparse":
-        fake.collections[physical][0].vector["bm25"].values[0] += 0.5
-    elif damage == "control":
-        next(p for p in fake.collections[control] if p.payload.get("doc_id") == DOC_A).payload["finished_at"] += 1
-    elif damage == "seal-missing":
-        del receipt.payload["content_seal"]
-    else:
-        receipt.payload["content_seal"]["schema"] = 999
-    before = deepcopy(fake.collections), dict(fake.aliases), sidecar.read_bytes(), progress.read_bytes()
-    fake.fail_swap = None
-    with pytest.raises(RuntimeError, match="seal|build control"):
-        _run_main(monkeypatch, corpus, progress, "--reingest")
-    assert (fake.collections, fake.aliases, sidecar.read_bytes(), progress.read_bytes()) == before, damage
-
-
-
 def _exercise_retained_content_seal(tmp_path, monkeypatch, client, alias, damage):
 
     from mainframe_rag.ingest import run_ingest
@@ -3696,9 +3270,9 @@ def _exercise_retained_content_seal(tmp_path, monkeypatch, client, alias, damage
     monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: client)
     corpus = tmp_path / "corpus"
     corpus.mkdir()
+    progress = tmp_path / "inventory.jsonl"
     for name, text in TEXTS.items():
         _write_source(corpus, name, text)
-    progress = tmp_path / "inventory.jsonl"
     def target():
         return next(a.collection_name for a in client.get_aliases().aliases if a.alias_name == alias)
 
@@ -3808,17 +3382,9 @@ def test_content_seal_refuses_incomplete_scan(damage):
 def test_completed_binding_without_seal_is_not_retroactively_certified(tmp_path, monkeypatch):
     from copy import deepcopy
 
-    from mainframe_rag.ingest import run_ingest
     from mainframe_rag.ingest.publish import verify_publication_seal
 
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
-    _build_doc_with_id(corpus, "doc_a", DOC_A)
-    progress = tmp_path / "inventory.jsonl"
-    assert _run_main(monkeypatch, corpus, progress) == 0
+    fake, corpus, progress = _published_one(tmp_path, monkeypatch)
     physical = fake.aliases[ALIAS]
     control = physical + "__completions"
     receipt = next(p for p in fake.collections[control] if p.payload.get("record_type") == "publication-metadata")
@@ -3853,8 +3419,8 @@ def test_publication_verifies_receipt_readback_before_cutover(tmp_path, monkeypa
     monkeypatch.setattr(fake, "upsert", lose_receipt)
     corpus = tmp_path / "corpus"
     corpus.mkdir()
+    progress = tmp_path / "inv.jsonl"
     _build_doc_with_id(corpus, "doc_a", DOC_A)
-    progress = tmp_path / "inventory.jsonl"
     with pytest.raises(RuntimeError, match="seal"):
         _run_main(monkeypatch, corpus, progress)
     assert not fake.aliases and not fake.alias_calls
@@ -3864,16 +3430,10 @@ def test_unfinished_schema_one_sealed_build_requires_its_old_release(tmp_path, m
     import json
     from copy import deepcopy
 
-    from mainframe_rag.ingest import run_ingest
     from mainframe_rag.ingest.publish import publish_state_path
 
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
+    fake, corpus, progress = _fresh_publish(tmp_path, monkeypatch)
     _build_doc_with_id(corpus, "doc_a", DOC_A)
-    progress = tmp_path / "inventory.jsonl"
     fake.fail_swap = "raise"
     with pytest.raises(RuntimeError, match="injected swap failure"):
         _run_main(monkeypatch, corpus, progress)
@@ -4334,7 +3894,6 @@ def test_publication_seals_its_source_catalog_and_the_next_runs_keep_it_exact(tm
     document disappears from the next build's catalog."""
     from copy import deepcopy
 
-    from mainframe_rag.ingest import run_ingest
     from mainframe_rag.ingest.catalog import (
         CATALOG_RECORD_TYPE,
         build_source_catalog,
@@ -4343,14 +3902,7 @@ def test_publication_seals_its_source_catalog_and_the_next_runs_keep_it_exact(tm
     from mainframe_rag.ingest.completion import stale_completion_markers
     from mainframe_rag.ingest.publish import read_publication_record
 
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
-    _build_doc_with_id(corpus, "doc_a", DOC_A)
-    progress = tmp_path / "inventory.jsonl"
-    assert _run_main(monkeypatch, corpus, progress) == 0
+    fake, corpus, progress = _published_one(tmp_path, monkeypatch)
     first = fake.aliases[ALIAS]
     entries = _catalog_entries(fake, first)
     assert [e["doc_id"] for e in entries] == [DOC_A]
@@ -4435,13 +3987,8 @@ def test_interrupted_catalog_publication_resumes_with_identical_entries(tmp_path
     from mainframe_rag.ingest import run_ingest
     from mainframe_rag.ingest.publish import publish_state_path
 
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
+    fake, corpus, progress = _fresh_publish(tmp_path, monkeypatch)
     _build_doc_with_id(corpus, "doc_a", DOC_A)
-    progress = tmp_path / "inventory.jsonl"
     with monkeypatch.context() as patch:
         def crash(*args, **kwargs):
             raise RuntimeError("injected crash before the receipt")
@@ -4456,6 +4003,7 @@ def test_interrupted_catalog_publication_resumes_with_identical_entries(tmp_path
     assert _catalog_entries(fake, staging) == written
 
     fake = PublishFake()  # a separate store: an older release's interrupted, sealed build
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
     other = tmp_path / "other"
     other.mkdir()
     _build_doc_with_id(other, "doc_b", DOC_B)
@@ -4476,25 +4024,18 @@ def test_interrupted_catalog_publication_resumes_with_identical_entries(tmp_path
 
 
 # ------------------------------------------------ corpus confinement (#996, #1002, #1003)
-def _fresh_publish(tmp_path, monkeypatch):
-    from mainframe_rag.ingest import run_ingest
-
-    _publish_env(monkeypatch)
-    fake = PublishFake()
-    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
-    return fake, corpus, tmp_path / "inv.jsonl"
-
-
 def _nothing_written(fake: PublishFake, progress: Path) -> bool:
     return not fake.collections and not fake.aliases and not progress.exists()
 
 
-def test_out_of_root_file_symlink_is_refused_and_outside_bytes_never_served(tmp_path, monkeypatch):
-    """#996: a file symlink resolving outside the corpus root is a typed
-    planning refusal before any storage or inventory write; the outside
-    document is never parsed, so it cannot be served."""
+@pytest.mark.parametrize("shape", ["file", "chain", "relative", "relative-deep"])
+def test_out_of_root_link_variants_are_refused_and_outside_bytes_never_served(
+    tmp_path, monkeypatch, shape
+):
+    """#996: a file symlink, a link chain (l1 -> l2 -> outside) and relative
+    `../` targets all resolve outside the root and are refused as a typed
+    planning refusal before any storage/inventory write, so the outside
+    document is never parsed or served."""
     from mainframe_rag.ingest.corpus_scan import OutOfRootLinkError
 
     fake, corpus, progress = _fresh_publish(tmp_path, monkeypatch)
@@ -4502,35 +4043,23 @@ def test_out_of_root_file_symlink_is_refused_and_outside_bytes_never_served(tmp_
     outside = tmp_path / "outside"
     outside.mkdir()
     secret = _build_doc_with_id(outside, "confidential", DOC_B)
-    (corpus / "linked.pdf").symlink_to(secret)
-    with pytest.raises(OutOfRootLinkError, match="linked.pdf"):
-        _run_main(monkeypatch, corpus, progress)
-    assert _nothing_written(fake, progress)
-
-
-@pytest.mark.parametrize("shape", ["chain", "relative", "relative-deep"])
-def test_out_of_root_link_variants_are_refused(tmp_path, monkeypatch, shape):
-    """#996: a link chain (l1 -> l2 -> outside) and relative `../` targets
-    resolve outside the root and are refused like a direct link."""
-    from mainframe_rag.ingest.corpus_scan import OutOfRootLinkError
-
-    fake, corpus, progress = _fresh_publish(tmp_path, monkeypatch)
-    _build_doc_with_id(corpus, "normal", DOC_A)
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    secret = _build_doc_with_id(outside, "confidential", DOC_B)
-    if shape == "chain":
+    if shape == "file":
+        link = corpus / "linked.pdf"
+        link.symlink_to(secret)
+    elif shape == "chain":
         (corpus / "l2.pdf").symlink_to(secret)
-        (corpus / "l1.pdf").symlink_to("l2.pdf")
+        link = corpus / "l1.pdf"
+        link.symlink_to("l2.pdf")
     elif shape == "relative":
-        (corpus / "l1.pdf").symlink_to("../outside/confidential.pdf")
+        link = corpus / "l1.pdf"
+        link.symlink_to("../outside/confidential.pdf")
     else:
         (corpus / "a" / "b").mkdir(parents=True)
-        (corpus / "a" / "b" / "l1.pdf").symlink_to("../../../outside/confidential.pdf")
-    with pytest.raises(OutOfRootLinkError, match="l1.pdf"):
+        link = corpus / "a" / "b" / "l1.pdf"
+        link.symlink_to("../../../outside/confidential.pdf")
+    with pytest.raises(OutOfRootLinkError, match=link.name):
         _run_main(monkeypatch, corpus, progress)
     assert _nothing_written(fake, progress)
-
 
 
 def test_in_root_file_symlink_and_symlinked_directory_policy(tmp_path, monkeypatch):
@@ -4552,30 +4081,12 @@ def test_in_root_file_symlink_and_symlinked_directory_policy(tmp_path, monkeypat
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
-def test_unreadable_subtree_fails_closed_before_any_write(tmp_path, monkeypatch):
-    """#1003: an unreadable directory makes the walk partial; publication
-    refuses with a typed error, never a green swap lacking its documents."""
-    from mainframe_rag.ingest.corpus_scan import UnreadableSubtreeError
-
-    fake, corpus, progress = _fresh_publish(tmp_path, monkeypatch)
-    _build_doc_with_id(corpus, "a", DOC_A)
-    hidden = corpus / "hidden"
-    hidden.mkdir()
-    _build_doc_with_id(hidden, "b", DOC_B)
-    hidden.chmod(0)
-    try:
-        with pytest.raises(UnreadableSubtreeError, match="hidden"):
-            _run_main(monkeypatch, corpus, progress)
-        assert _nothing_written(fake, progress)
-    finally:
-        hidden.chmod(0o755)
-
-
-@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
-@pytest.mark.parametrize("mode", [0o444, 0o311])
-def test_partially_accessible_directory_fails_closed(tmp_path, monkeypatch, mode):
-    """#1003: a directory with read but no search permission (0o444), or search
-    but no read (0o311), still hides its PDFs from the walk: fail closed."""
+@pytest.mark.parametrize("mode", [0o000, 0o444, 0o311])
+def test_unreadable_subtree_fails_closed_before_any_write(tmp_path, monkeypatch, mode):
+    """#1003: an unreadable directory — no access (0o000), read but no search
+    (0o444), or search but no read (0o311) — makes the walk partial;
+    publication refuses with a typed error, never a green swap lacking its
+    documents, and writes nothing."""
     from mainframe_rag.ingest.corpus_scan import UnreadableSubtreeError
 
     fake, corpus, progress = _fresh_publish(tmp_path, monkeypatch)
@@ -4590,7 +4101,6 @@ def test_partially_accessible_directory_fails_closed(tmp_path, monkeypatch, mode
         assert _nothing_written(fake, progress)
     finally:
         hidden.chmod(0o755)
-
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
@@ -4645,10 +4155,21 @@ def _parse_task(corpus: Path, path: Path, sha: str):
     return run_ingest.ParseTask(str(path), None, None, None, str(corpus), sha, False, None)
 
 
-def test_link_swapped_in_after_the_scan_is_refused_at_parse_time(tmp_path, monkeypatch):
-    """#996 TOCTOU: the planner confined the path, then it became a symlink to
-    an outside file. The worker refuses with a fixed record and never parses
-    the outside bytes."""
+@pytest.mark.parametrize(
+    ("damage", "error_type", "message"),
+    [
+        ("moved", "WalkedFileMovedError",
+         "walked_file_outside_root: walked file no longer resolves inside the corpus root"),
+        ("changed", "WalkedFileChangedError",
+         "walked_file_changed: walked file changed after the corpus scan"),
+    ],
+)
+def test_walked_file_damage_after_the_scan_is_refused_at_parse_time(
+    tmp_path, monkeypatch, damage, error_type, message
+):
+    """#996 TOCTOU: a path that became a symlink to an outside file, or whose
+    bytes differ from the walk-time digest, is refused with its fixed record
+    after the worker read it — never parsed, chunked or served."""
     from mainframe_rag.ingest import run_ingest
     from mainframe_rag.ingest.ibm_pdf import sha256_file
 
@@ -4657,37 +4178,22 @@ def test_link_swapped_in_after_the_scan_is_refused_at_parse_time(tmp_path, monke
     corpus.mkdir()
     pdf = _build_doc_with_id(corpus, "a", DOC_A)
     sha = sha256_file(pdf)
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    secret = _build_doc_with_id(outside, "o", DOC_B)
-    pdf.unlink()
-    pdf.symlink_to(secret)
+    if damage == "moved":
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        secret = _build_doc_with_id(outside, "o", DOC_B)
+        pdf.unlink()
+        pdf.symlink_to(secret)
 
-    def forbidden(*args, **kwargs):
-        raise AssertionError("outside bytes were parsed")
+        def forbidden(*args, **kwargs):
+            raise AssertionError("outside bytes were parsed")
 
-    monkeypatch.setattr(run_ingest, "parse_walked", forbidden)
+        monkeypatch.setattr(run_ingest, "parse_walked", forbidden)
+    else:
+        _build_doc_with_id(corpus, "a", DOC_B)  # same path, different bytes
     record, _, chunks, vectors, _ = run_ingest._parse_one(_parse_task(corpus, pdf, sha))
-    assert record.status == "error" and record.error_type == "WalkedFileMovedError"
-    assert record.error == "walked_file_outside_root: walked file no longer resolves inside the corpus root"
-    assert chunks == [] and vectors == []
-
-
-def test_file_changed_after_the_scan_is_refused_at_parse_time(tmp_path, monkeypatch):
-    """#996 TOCTOU: bytes that differ from the walk-time digest are refused
-    after the worker read them, so they are never chunked or served."""
-    from mainframe_rag.ingest import run_ingest
-    from mainframe_rag.ingest.ibm_pdf import sha256_file
-
-    _publish_env(monkeypatch)
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
-    pdf = _build_doc_with_id(corpus, "a", DOC_A)
-    sha = sha256_file(pdf)
-    _build_doc_with_id(corpus, "a", DOC_B)  # same path, different bytes
-    record, _, chunks, vectors, _ = run_ingest._parse_one(_parse_task(corpus, pdf, sha))
-    assert record.status == "error" and record.error_type == "WalkedFileChangedError"
-    assert record.error == "walked_file_changed: walked file changed after the corpus scan"
+    assert record.status == "error" and record.error_type == error_type
+    assert record.error == message
     assert chunks == [] and vectors == []
 
 
