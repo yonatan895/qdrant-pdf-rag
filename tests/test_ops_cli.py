@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import shutil
 import ssl
 import subprocess
@@ -194,6 +195,15 @@ def run(argv: list[str], env: dict[str, str] | None = None, **kw: Any):
 def jrun(agent: FakeAgent, *argv: str, env: dict[str, str] | None = None):
     code, out, err = run([*argv, "--base-url", agent.url, "--format", "json"], env)
     return code, (json.loads(out) if out.strip() else None), err
+
+
+def cli_process(*argv: str) -> subprocess.CompletedProcess:
+    """Run the installed module entry in a real process against the fake server."""
+    return subprocess.run(
+        [sys.executable, "-m", "mainframe_rag.ops", *argv],
+        capture_output=True, text=True, timeout=120, check=False,
+        env={**os.environ, "PYTHONPATH": str(Path(cli.__file__).resolve().parents[2])},
+    )
 
 
 def healthy(agent: FakeAgent) -> None:
@@ -854,14 +864,7 @@ def test_tls_verification_is_enforced_and_ca_file_is_honoured(tmp_path):
 def test_entry_point_is_declared_and_module_runs():
     pyproject = (REPO / "pyproject.toml").read_text()
     assert '[project.scripts]\nmainframe-rag-ops = "mainframe_rag.ops.cli:main"' in pyproject
-    proc = subprocess.run(
-        [sys.executable, "-m", "mainframe_rag.ops", "--help"],
-        capture_output=True,
-        text=True,
-        timeout=120,
-        check=False,
-        env={**__import__("os").environ, "PYTHONPATH": str(Path(cli.__file__).resolve().parents[2])},
-    )
+    proc = cli_process("--help")
     assert proc.returncode == 0 and "Exit codes" in proc.stdout
 
 
@@ -884,12 +887,8 @@ def test_cli_process_malformed_nullable_and_enum_fields_have_fixed_error(agent, 
         agent.on("POST", "/v1/answer", Reply(ctype="text/event-stream", chunks=[sse.format_sse_event("final", final).encode()]))
     else:
         agent.on("POST", "/v1/answer", Reply(body=body))
-    proc = subprocess.run(
-        [sys.executable, "-m", "mainframe_rag.ops", "answer", "q", "--base-url", agent.url,
-         "--format", "json", *(["--stream"] if stream else [])],
-        capture_output=True, text=True, timeout=30, check=False,
-        env={**__import__("os").environ, "PYTHONPATH": str(Path(cli.__file__).resolve().parents[2])},
-    )
+    proc = cli_process("answer", "q", "--base-url", agent.url, "--format", "json",
+                       *(["--stream"] if stream else []))
     assert proc.returncode == cli.EXIT_BAD_RESPONSE
     assert json.loads(proc.stdout)["error"]["code"] == "malformed_response"
     assert "Traceback" not in proc.stderr and "upstream" not in proc.stdout
@@ -905,11 +904,7 @@ def test_search_cli_process_preserves_optional_exact_reference(agent, reference)
     else:
         body["hits"][0]["reference"] = reference
     agent.on("POST", "/v1/search", Reply(body=body))
-    proc = subprocess.run(
-        [sys.executable, "-m", "mainframe_rag.ops", "search", "q", "--base-url", agent.url, "--format", "json"],
-        capture_output=True, text=True, timeout=30, check=False,
-        env={**__import__("os").environ, "PYTHONPATH": str(Path(cli.__file__).resolve().parents[2])},
-    )
+    proc = cli_process("search", "q", "--base-url", agent.url, "--format", "json")
     assert proc.returncode == 0, proc.stderr
     assert json.loads(proc.stdout)["data"]["hits"][0]["reference"] == (None if reference == "absent" else reference)
     assert json.loads(proc.stdout)["data"]["hits"][0]["text"] == hit().text

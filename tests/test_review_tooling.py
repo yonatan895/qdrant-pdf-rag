@@ -11,16 +11,55 @@ Tests:
 """
 from __future__ import annotations
 
+import base64
+import contextlib
+import copy
+import hashlib
+import importlib
+import io
 import json
 import os
 import pathlib
+import re
 import shlex
+import stat
 import subprocess
 import sys
 import tempfile
 import textwrap
 import unittest
+import uuid
+import warnings
+import xml.etree.ElementTree as ET
+import zipfile
+from unittest.mock import patch
 
+import yaml
+from scripts import ci_evidence
+from scripts.acceptance import (
+    VERIFICATION_INPUTS,
+    GitHub,
+    candidate_identity,
+    changed_pr_paths,
+    collect_acceptance,
+    collect_native,
+    main,
+    post_review_template,
+    publish_acceptance,
+    recheck_current,
+    require_current_base,
+    review_template,
+    review_template_comment,
+    verification_inputs,
+)
+from scripts.acceptance_evidence import (
+    PRODUCERS,
+    artifact_members,
+    normalize_native,
+    paginate,
+    unit_producers,
+)
+from scripts.ci_evidence import junit_bytes, junit_counts
 from scripts.review_tooling import (
     CandidateCurrentness,
     CodeAssessment,
@@ -32,17 +71,42 @@ from scripts.review_tooling import (
     changed_paths,
     classify_paths,
     evaluate_lane,
-    evaluate_probe_response,
     extract_review_json,
+    required_lanes,
     validate_review_payload,
 )
+from scripts.unit_durations import durations
+from scripts.unit_evidence import (
+    INPUTS,
+    assign_balanced,
+    input_hashes,
+    parse_durations,
+    rule_record,
+    run_shard,
+    select_nodes,
+    validate,
+    validate_union,
+)
+from scripts.verifier_approval import (
+    VerifierApprovalRequired,
+    allowed_anchor_change,
+    approved_catalogue,
+    approved_inputs,
+    comment_request,
+    latest_decision,
+    parse_command,
+    record_decision,
+    validated_decision,
+)
+
+from mainframe_rag.ingest.rules_version import _RULE_MODULES
+from tests.helpers_tooling_local import CI_UNIT_SOURCE, approved_repository, pack_archive
 
 
 class TestOpencodeWorkflowContract(unittest.TestCase):
     """The /oc comment agent runs only for trusted commenters (#588)."""
 
     def test_comment_trigger_requires_a_trusted_author_association(self):
-        import yaml
 
         path = pathlib.Path(__file__).resolve().parents[1] / ".github/workflows/opencode.yml"
         condition = " ".join(yaml.safe_load(path.read_text())["jobs"]["gate"]["if"].split())
@@ -60,7 +124,6 @@ class TestProfileClassification(unittest.TestCase):
     """Risk-based profile selection and service mapping (§5.1)."""
 
     def _required(self, paths):
-        from scripts.review_tooling import required_lanes
 
         decision = classify_paths(paths)
         return decision, required_lanes({"profile": decision.profile.value,
@@ -121,7 +184,6 @@ class TestProfileClassification(unittest.TestCase):
                 self.assertTrue({"deploy", "storage", "http", "tests"} <= set(decision.matched_categories))
         for manifest in ({}, {"profile": {}}, {"profile": "unknown"}):
             with self.subTest(manifest=manifest):
-                from scripts.review_tooling import required_lanes
 
                 self.assertTrue({"simulation", "packaging", "load", "ha", "agent_probes",
                                  "eval_retrieval", "unit_tests", "hazards"} <= required_lanes(manifest))
@@ -143,7 +205,6 @@ class TestProfileClassification(unittest.TestCase):
 
     def test_every_rule_module_change_selects_the_retrieval_eval_lane(self):
         """The lane list is derived from `_RULE_MODULES`, not hard-coded (#588)."""
-        from mainframe_rag.ingest.rules_version import _RULE_MODULES
 
         self.assertGreaterEqual(len(_RULE_MODULES), 8)
         for rel in _RULE_MODULES:
@@ -176,7 +237,6 @@ class TestProfileClassification(unittest.TestCase):
         self.assertEqual(self._required(["sitemap/x.py"])[0].profile, ProfileName.FULL)
 
     def test_evaluation_package_and_delegates_select_executable_tooling_lanes(self):
-        from scripts.review_tooling import required_lanes
 
         expected = {"context_check", "lint_and_types", "unit_tests", "hazards",
                     "simulation", "gate_l1"}
@@ -270,6 +330,27 @@ def _review_payload(**overrides) -> dict:
     return payload
 
 
+def _review_manifest(profile: str, categories: list[str], dirty: bool = False) -> dict:
+    return {"schema_version": 1, "head_sha": "1" * 40, "base_sha": "2" * 40,
+            "execution_sha": "3" * 40, "profile": profile, "dirty": dirty,
+            "matched_categories": categories}
+
+
+def _ready_review():
+    return validate_review_payload(
+        _review_payload(material_findings=[], evidence={"notes": "ok"}),
+        expected_head="1" * 40, expected_base="2" * 40, expected_execution="3" * 40)
+
+
+def _not_ready_review():
+    return validate_review_payload(
+        _review_payload(code_assessment="changes_required", verification="incomplete",
+                        merge_readiness="not_ready",
+                        material_findings=[{"id": "F1", "disposition": "unresolved", "description": "open"}],
+                        evidence={"notes": "blocked"}),
+        expected_head="1" * 40, expected_base="2" * 40, expected_execution="3" * 40)
+
+
 class TestReviewResultValidator(unittest.TestCase):
     """Schema v1 review result validation and fail-closed handling (§5.3)."""
 
@@ -359,20 +440,7 @@ class TestCandidateAcceptanceSummary(unittest.TestCase):
     """5-state lane taxonomy, anti-skip enforcement, and maintainer merge authority (§5.4)."""
 
     def _sample_manifest(self, profile: str = "offline", dirty: bool = False) -> dict:
-        return {
-            "schema_version": 1,
-            "head_sha": "1" * 40,
-            "base_sha": "2" * 40,
-            "execution_sha": "3" * 40,
-            "profile": profile,
-            "dirty": dirty,
-            "matched_categories": ["prose"] if profile == "offline" else [profile],
-        }
-
-    def _ready_review(self):
-        return validate_review_payload(
-            _review_payload(material_findings=[], evidence={"notes": "ok"}),
-            expected_head="1" * 40, expected_base="2" * 40, expected_execution="3" * 40)
+        return _review_manifest(profile, ["prose"] if profile == "offline" else [profile], dirty)
 
     def test_lane_evaluation_states(self):
         cases = (("simulation", False, None, LaneState.UNSELECTED, False),
@@ -407,20 +475,25 @@ class TestCandidateAcceptanceSummary(unittest.TestCase):
                 statuses = {k: v for k, v in ok.items() if k != lane}
                 if status is not None:
                     statuses[lane] = status
-                summary = build_acceptance_summary(manifest, statuses, review=self._ready_review())
+                summary = build_acceptance_summary(manifest, statuses, review=_ready_review())
                 self.assertFalse(summary.all_prerequisites_met)
                 self.assertEqual(summary.verification_status, "incomplete")
                 self.assertEqual(next(l for l in summary.lanes if l.name == lane).state, state)
         passing = build_acceptance_summary(self._sample_manifest(profile="http"), http_ok,
-                                           review=self._ready_review())
+                                           review=_ready_review())
         self.assertTrue(passing.all_prerequisites_met)
         self.assertEqual(passing.verification_status, "passed")
         self.assertFalse(next(l for l in passing.lanes if l.name == "eval_retrieval").required)
+        # A full-profile union still owes packaging even without a deploy category.
+        full = build_acceptance_summary(self._sample_manifest(profile="full"), http_ok,
+                                        review=_ready_review())
+        self.assertTrue(next(l for l in full.lanes if l.name == "packaging").required)
+        self.assertFalse(full.all_prerequisites_met)
 
         tooling = self._sample_manifest(profile="offline")
         tooling["matched_categories"] = ["tooling"]
         summary = build_acceptance_summary(tooling, {"context_check": "success", "reviewer": "success"},
-                                           review=self._ready_review())
+                                           review=_ready_review())
         self.assertFalse(summary.all_prerequisites_met)
         for name in ("lint_and_types", "unit_tests"):
             self.assertEqual(next(l for l in summary.lanes if l.name == name).state, LaneState.SELECTED_MISSING)
@@ -431,11 +504,11 @@ class TestCandidateAcceptanceSummary(unittest.TestCase):
         manifest = self._sample_manifest(profile="offline")
         summary = build_acceptance_summary(
             manifest, {"context_check": "success", "lint_and_types": "success", "reviewer": "success",
-                       "simulation": "skipped", "gate_l1": "skipped"}, review=self._ready_review())
+                       "simulation": "skipped", "gate_l1": "skipped"}, review=_ready_review())
         self.assertTrue(summary.all_prerequisites_met)
         self.assertEqual(summary.verification_status, "passed")
         summary = build_acceptance_summary(manifest, {"context_check": "success", "reviewer": "success"},
-                                           review=self._ready_review())
+                                           review=_ready_review())
         self.assertTrue(summary.all_prerequisites_met)
         for name in ("lint_and_types", "unit_tests"):
             self.assertEqual(next(l for l in summary.lanes if l.name == name).state, LaneState.UNSELECTED)
@@ -611,73 +684,15 @@ class TestExecutionAttribution(unittest.TestCase):
             tmp.cleanup()
 
 
-class TestReadinessProbes(unittest.TestCase):
-    """F4: an endpoint responding is not proof the service is ready."""
-
-    def test_probe_verdict_depends_on_status_and_agent_contract(self):
-        healthy = json.dumps({"status": "ok", "qdrant": True})
-        degraded = json.dumps({"status": "degraded", "qdrant": True, "representation": "reembed_required"})
-        for code, body, agent_ready, generic_ready in (
-                (200, healthy, True, True),
-                (503, json.dumps({"status": "degraded", "qdrant": True}), False, False),
-                (404, json.dumps({"error": "not found"}), False, False),
-                # Counterexample from the review: degraded overall status with a
-                # nested qdrant:true flag must not count as agent readiness.
-                (200, degraded, False, True),
-                (503, degraded, False, False),
-                # Generic (non-agent) probes accept any 2xx body.
-                (200, "not-json{{{", False, True)):
-            with self.subTest(code=code, body=body[:30]):
-                self.assertEqual(evaluate_probe_response(code, body, require_agent_ok=True), agent_ready)
-                self.assertEqual(evaluate_probe_response(code, body), generic_ready)
-
-
 class TestAcceptanceUnionAndReviewerAuthority(unittest.TestCase):
     """F5/F6: unions of risk never reduce verification; job success is not approval."""
 
     def _manifest(self, profile, categories):
-        return {
-            "schema_version": 1,
-            "head_sha": "1" * 40,
-            "base_sha": "2" * 40,
-            "execution_sha": "3" * 40,
-            "profile": profile,
-            "dirty": False,
-            "matched_categories": categories,
-        }
-
-    def _ready_review(self):
-        return validate_review_payload(
-            _review_payload(material_findings=[], evidence={"notes": "ok"}),
-            expected_head="1" * 40, expected_base="2" * 40, expected_execution="3" * 40)
-
-    def _not_ready_review(self):
-        return validate_review_payload(
-            _review_payload(code_assessment="changes_required", verification="incomplete",
-                            merge_readiness="not_ready",
-                            material_findings=[{"id": "F1", "disposition": "unresolved", "description": "open"}],
-                            evidence={"notes": "blocked"}),
-            expected_head="1" * 40, expected_base="2" * 40, expected_execution="3" * 40)
-
-    def test_full_profile_keeps_packaging_when_deploy_present(self):
-        decision = classify_paths(["pyproject.toml", "src/mainframe_rag/ingest/publish.py"])
-        self.assertEqual(decision.profile, ProfileName.FULL)
-        manifest = self._manifest("full", decision.matched_categories)
-        self.assertIn("deploy", manifest["matched_categories"])
-        statuses = {"context_check": "success", "lint_and_types": "success", "unit_tests": "success",
-                    "simulation": "success", "gate_l1": "success", "reviewer": "success"}
-        summary = build_acceptance_summary(manifest, {**statuses, "packaging": "success"},
-                                           review=self._ready_review())
-        self.assertTrue(next(l for l in summary.lanes if l.name == "packaging").required)
-        # Omitting the packaging lane must block even though profile is full.
-        blocked = build_acceptance_summary(manifest, statuses, review=self._ready_review())
-        self.assertFalse(blocked.all_prerequisites_met)
-        missing = next(l for l in blocked.lanes if l.name == "packaging")
-        self.assertEqual(missing.state, LaneState.SELECTED_MISSING)
+        return _review_manifest(profile, categories)
 
     def test_human_review_neither_changes_nor_replaces_technical_verification(self):
         manifest = self._manifest("offline", ["prose"])
-        for review in (None, self._not_ready_review(), self._ready_review()):
+        for review in (None, _not_ready_review(), _ready_review()):
             for reviewer_status in ("success", "failure", "skipped"):
                 with self.subTest(review=review, status=reviewer_status):
                     summary = build_acceptance_summary(
@@ -687,7 +702,7 @@ class TestAcceptanceUnionAndReviewerAuthority(unittest.TestCase):
                     self.assertNotIn("reviewer", {lane.name for lane in summary.lanes})
                     self.assertEqual(summary.to_dict()["maintainer_authority"]["maintainer_decision"], "pending")
                     self.assertNotIn("recommended_readiness", summary.to_dict())
-        summary = build_acceptance_summary(manifest, {"reviewer": "success"}, review=self._ready_review())
+        summary = build_acceptance_summary(manifest, {"reviewer": "success"}, review=_ready_review())
         self.assertFalse(summary.all_prerequisites_met)
         context = next(lane for lane in summary.lanes if lane.name == "context_check")
         self.assertEqual(context.state, LaneState.SELECTED_MISSING)
@@ -714,7 +729,6 @@ class TestCiUnitPartition(unittest.TestCase):
         (root / "tests" / filename).write_text(source)
 
     def test_native_coverage_refuses_canary_narrowing_and_collection_hooks(self):
-        from scripts.unit_evidence import run_shard
         source = ("import pytest\n" + "\n".join(
             f"def test_failure_{i}():\n    assert False\n" for i in range(6)) +
             "def test_canary_one():\n    pass\ndef test_canary_two():\n    pass\n")
@@ -728,7 +742,6 @@ class TestCiUnitPartition(unittest.TestCase):
                 if variant.endswith("hook"):
                     operation = "items[:] = [i for i in items if 'canary' in i.nodeid]" if variant == "drop-hook" else "items.append(items[0])"
                     (root / "tests/conftest.py").write_text("def pytest_collection_modifyitems(items):\n    " + operation + "\n")
-                from unittest.mock import patch
                 with patch.dict(os.environ, {"PYTEST_ADDOPTS": "-k canary" if variant == "environment-canary" else ""}):
                     for shard in (1, 2):
                         out = root / f"out-{shard}"
@@ -746,14 +759,12 @@ class TestCiUnitPartition(unittest.TestCase):
                                 self.assertEqual(code, 1)
                                 self.assertEqual(len(proof["collect"]["eligible"]), 8)
                                 self.assertEqual(len(proof["execute"]["executed"]), 4)
-                                import xml.etree.ElementTree as ET
                                 self.assertEqual(len(list(ET.parse(out / "result.xml").iter("failure"))), 3)
                             else:
                                 self.assertFalse(proof["collect"]["passed"])
 
 
     def test_shards_cover_each_selected_case_once_and_preserve_failure(self):
-        import xml.etree.ElementTree as ET
 
         with tempfile.TemporaryDirectory() as td:
             root = pathlib.Path(td)
@@ -807,7 +818,6 @@ class TestCiUnitPartition(unittest.TestCase):
             self.assertEqual(proc.returncode, 5)
 
     def test_balanced_assignment_is_a_deterministic_exact_partition(self):
-        from scripts.unit_evidence import assign_balanced, parse_durations, select_nodes
 
         nodes = [f"tests/t.py::t[{index:02d}]" for index in range(40)]
         ms = {nodes[0]: 9000, nodes[1]: 4000, nodes[2]: 4000, nodes[39]: 10}
@@ -841,118 +851,97 @@ class TestCiUnitPartition(unittest.TestCase):
             with self.assertRaises(ValueError):
                 parse_durations(invalid)
 
-    def test_balanced_native_shards_prove_exact_union_and_reject_a_forged_rule(self):
-        import copy
-        import hashlib
-
-        from scripts.unit_evidence import input_hashes, run_shard, validate, validate_union
-
-        source = ("import pytest\n"
-                  "@pytest.mark.parametrize('value', range(9), ids=[f'case {index}::λ' for index in range(9)])\n"
-                  "def test_case(value):\n    assert value >= 0\n"
-                  "def test_unlisted():\n    pass\n"
-                  "@pytest.mark.integration\ndef test_excluded():\n    assert False\n")
-        with tempfile.TemporaryDirectory() as directory:
-            root = pathlib.Path(directory)
-            self.coverage_tree(root, source)
-            listed = {f"tests/test_sample.py::test_case[case {index}::\\u03bb]": 1000 if index < 3 else 10
-                      for index in range(9)}
-            (root / "tests/unit-durations.json").write_text(
-                json.dumps({"schema_version": 1, "default_ms": 10, "ms": listed}, sort_keys=True))
-            records, proofs = [], []
-            for shard in range(1, 5):
-                out = root / f"out-{shard}"
-                out.mkdir()
-                xml = out / "result.xml"
-                code, proof = run_shard(root, sys.executable, shard, xml, out, shards=4,
-                                        durations=pathlib.Path("tests/unit-durations.json"))
-                self.assertEqual(code, 0)
-                record = validate(proof, shard, xml.read_bytes(), input_hashes(root), shards=4)
-                self.assertEqual(proof["collect"]["rule"]["name"], "lpt-durations-v1")
-                records.append(record)
-                proofs.append((proof, xml.read_bytes()))
-            # The three heavy cases are on three different shards, not round-robin neighbours of each other.
-            heavy_homes = [next(r["shard"] for r in records if node in r["executed"]) for node in list(listed)[:3]]
-            self.assertEqual(sorted(heavy_homes), [1, 2, 3])
-            self.assertTrue(any(r["executed"] != r["eligible"][r["shard"] - 1::4] for r in records))
-            executed = sorted(node for r in records for node in r["executed"])
-            self.assertEqual(executed, records[0]["eligible"])
-            self.assertIn("tests/test_sample.py::test_unlisted", executed)
-            self.assertEqual(len({r["rule_sha256"] for r in records}), 1)
-            validate_union(list(reversed(records)), shards=4)
-            mixed = copy.deepcopy(records)
-            mixed[0]["rule_sha256"] = None
-            with self.assertRaises(ValueError):
-                validate_union(mixed, shards=4)
-            proof, xml = copy.deepcopy(proofs[0][0]), proofs[0][1]
-            round_robin = copy.deepcopy(proof)
-            for phase in ("collect", "execute"):
-                round_robin[phase].pop("rule")
-            with self.assertRaises(ValueError):  # balanced results are not a round-robin shard
-                validate(round_robin, 1, xml, input_hashes(root), shards=4)
-            for tamper in ("hash", "text", "name", "missing-phase", "extra"):
-                forged = copy.deepcopy(proof)
-                if tamper == "hash":
-                    forged["collect"]["rule"]["durations_sha256"] = "0" * 64
-                elif tamper == "text":  # a consistent hash for different durations still changes the assignment
-                    text = json.dumps({"schema_version": 1, "default_ms": 1, "ms": {}})
-                    for phase in ("collect", "execute"):
-                        forged[phase]["rule"].update(durations_text=text, durations_sha256=hashlib.sha256(text.encode()).hexdigest())
-                elif tamper == "name":
-                    forged["collect"]["rule"]["name"] = "other"
-                elif tamper == "missing-phase":
-                    forged["execute"].pop("rule")
-                else:
-                    forged["collect"]["rule"]["extra"] = 1
-                    forged["execute"]["rule"]["extra"] = 1
-                with self.subTest(tamper=tamper), self.assertRaises(ValueError):
-                    validate(forged, 1, xml, input_hashes(root), shards=4)
-            out = root / "out-absent"
-            out.mkdir()
-            with self.assertRaises(OSError):  # an unreadable durations file never degrades to round-robin
-                run_shard(root, sys.executable, 1, out / "result.xml", out, shards=4,
-                          durations=pathlib.Path("tests/absent.json"))
-
-    def test_four_native_shards_preserve_exact_union_and_reject_partial_or_forged_coverage(self):
-        import copy
-
-        from scripts.unit_evidence import input_hashes, run_shard, validate, validate_union
-
+    def test_native_shard_layouts_preserve_exact_union_and_reject_forged_coverage(self):
         source = ("import pytest\n"
                   "@pytest.mark.parametrize('value', range(9), ids=[f'case {index}::λ' for index in range(9)])\n"
                   "def test_case(value):\n    assert value >= 0\n"
                   "@pytest.mark.integration\ndef test_excluded():\n    assert False\n")
-        with tempfile.TemporaryDirectory() as directory:
-            root = pathlib.Path(directory)
-            filename = "test_ \t\n four_λ.py"
-            self.coverage_tree(root, source, filename=filename)
-            records = []
-            for shard in range(1, 5):
-                out = root / f"out-{shard}"
+        for balanced in (False, True):
+            with self.subTest(balanced=balanced), tempfile.TemporaryDirectory() as directory:
+                root = pathlib.Path(directory)
+                filename = "test_sample.py" if balanced else "test_ \t\n four_λ.py"
+                self.coverage_tree(root, source + ("def test_unlisted():\n    pass\n" if balanced else ""),
+                                   filename=filename)
+                listed = {f"tests/{filename}::test_case[case {index}::\\u03bb]": 1000 if index < 3 else 10
+                          for index in range(9)}
+                if balanced:
+                    (root / "tests/unit-durations.json").write_text(
+                        json.dumps({"schema_version": 1, "default_ms": 10, "ms": listed}, sort_keys=True))
+                records, proofs = [], []
+                for shard in range(1, 5):
+                    out = root / f"out-{shard}"
+                    out.mkdir()
+                    xml = out / "result.xml"
+                    options = ({"durations": pathlib.Path("tests/unit-durations.json")} if balanced else {})
+                    code, proof = run_shard(root, sys.executable, shard, xml, out, shards=4, **options)
+                    self.assertEqual(code, 0)
+                    record = validate(proof, shard, xml.read_bytes(), input_hashes(root), shards=4)
+                    if balanced:
+                        self.assertEqual(proof["collect"]["rule"]["name"], "lpt-durations-v1")
+                    else:
+                        self.assertEqual(record['executed'],
+                                         [f"tests/{filename}::test_case[case {index}::\\u03bb]"
+                                          for index in range(shard - 1, 9, 4)])
+                        with self.assertRaises(ValueError):
+                            validate(proof, shard, xml.read_bytes(), input_hashes(root), shards=2)
+                    records.append(record)
+                    proofs.append((proof, xml.read_bytes()))
+                validate_union(list(reversed(records)), shards=4)
+                if not balanced:
+                    for invalid in (records[:3], records[:2], records + records[:1],
+                                    records[:3] + records[:1]):
+                        with self.assertRaises(ValueError):
+                            validate_union(invalid, shards=4)
+                    for field in ('all', 'eligible', 'executed'):
+                        forged = copy.deepcopy(records)
+                        forged[-1][field] = forged[-1][field][:-1]
+                        with self.assertRaises(ValueError):
+                            validate_union(forged, shards=4)
+                    with self.assertRaises(ValueError):
+                        validate_union(records)
+                    continue
+                # The three heavy cases are on three different shards, not
+                # round-robin neighbours of each other.
+                heavy_homes = [next(r["shard"] for r in records if node in r["executed"])
+                               for node in list(listed)[:3]]
+                self.assertEqual(sorted(heavy_homes), [1, 2, 3])
+                self.assertTrue(any(r["executed"] != r["eligible"][r["shard"] - 1::4] for r in records))
+                executed = sorted(node for r in records for node in r["executed"])
+                self.assertEqual(executed, records[0]["eligible"])
+                self.assertIn(f"tests/{filename}::test_unlisted", executed)
+                self.assertEqual(len({r["rule_sha256"] for r in records}), 1)
+                mixed = copy.deepcopy(records)
+                mixed[0]["rule_sha256"] = None
+                with self.assertRaises(ValueError):
+                    validate_union(mixed, shards=4)
+                proof, xml = copy.deepcopy(proofs[0][0]), proofs[0][1]
+                round_robin = copy.deepcopy(proof)
+                for phase in ("collect", "execute"):
+                    round_robin[phase].pop("rule")
+                with self.assertRaises(ValueError):  # balanced results are not a round-robin shard
+                    validate(round_robin, 1, xml, input_hashes(root), shards=4)
+                for tamper in ("hash", "text", "name", "missing-phase", "extra"):
+                    forged = copy.deepcopy(proof)
+                    if tamper == "hash":
+                        forged["collect"]["rule"]["durations_sha256"] = "0" * 64
+                    elif tamper == "text":  # a consistent hash for different durations still changes the assignment
+                        text = json.dumps({"schema_version": 1, "default_ms": 1, "ms": {}})
+                        for phase in ("collect", "execute"):
+                            forged[phase]["rule"].update(durations_text=text, durations_sha256=hashlib.sha256(text.encode()).hexdigest())
+                    elif tamper == "name":
+                        forged["collect"]["rule"]["name"] = "other"
+                    elif tamper == "missing-phase":
+                        forged["execute"].pop("rule")
+                    else:
+                        forged["collect"]["rule"]["extra"] = 1
+                        forged["execute"]["rule"]["extra"] = 1
+                    with self.subTest(tamper=tamper), self.assertRaises(ValueError):
+                        validate(forged, 1, xml, input_hashes(root), shards=4)
+                out = root / "out-absent"
                 out.mkdir()
-                xml = out / "result.xml"
-                code, proof = run_shard(root, sys.executable, shard, xml, out, shards=4)
-                self.assertEqual(code, 0)
-                record = validate(proof, shard, xml.read_bytes(), input_hashes(root), shards=4)
-                self.assertEqual(record['executed'],
-                                 [f"tests/{filename}::test_case[case {index}::\\u03bb]"
-                                  for index in range(shard - 1, 9, 4)])
-                records.append(record)
-                with self.assertRaises(ValueError):
-                    validate(proof, shard, xml.read_bytes(), input_hashes(root), shards=2)
-            validate_union(list(reversed(records)), shards=4)
-            for invalid in (records[:3], records[:2], records + records[:1],
-                            records[:3] + records[:1]):
-                with self.assertRaises(ValueError):
-                    validate_union(invalid, shards=4)
-            for field in ('all', 'eligible', 'executed'):
-                forged = copy.deepcopy(records)
-                forged[-1][field] = forged[-1][field][:-1]
-                with self.assertRaises(ValueError):
-                    validate_union(forged, shards=4)
-            with self.assertRaises(ValueError):
-                validate_union(records)
-
+                with self.assertRaises(OSError):  # an unreadable durations file never degrades to round-robin
+                    run_shard(root, sys.executable, 1, out / "result.xml", out, shards=4,
+                              durations=pathlib.Path("tests/absent.json"))
 
 
 class TestTaskCiConsumers(unittest.TestCase):
@@ -961,7 +950,6 @@ class TestTaskCiConsumers(unittest.TestCase):
     root = pathlib.Path(__file__).resolve().parents[1]
 
     def test_ci_runs_on_pull_request_and_nightly_main_not_on_push(self):
-        import yaml
         document = yaml.safe_load((self.root / ".github/workflows/ci.yml").read_text())
         triggers = document.get("on", document.get(True))
         # Candidate acceptance reads only pull_request-event ci runs, so a push
@@ -976,8 +964,6 @@ class TestTaskCiConsumers(unittest.TestCase):
         self.assertEqual(concurrency["cancel-in-progress"], "${{ github.event_name == 'pull_request' }}")
 
     def test_task_edits_trigger_context_and_load_on_push_and_pull_request(self):
-        import yaml
-        from scripts.review_tooling import classify_paths, required_lanes
 
         changes = ("Taskfile.yml", "taskfiles/quality.yml", "taskfiles/airgap.yml",
                    "scripts/tools/run-task.sh", "scripts/tools/task-pin.txt")
@@ -1003,12 +989,6 @@ class TestTaskCiConsumers(unittest.TestCase):
 
 
     def test_committed_unit_durations_parse_and_regenerate_from_junit_shape(self):
-        import base64
-        import tempfile
-
-        from scripts.unit_durations import durations
-        from scripts.unit_evidence import parse_durations
-
         default_ms, ms = parse_durations((self.root / "tests/unit-durations.json").read_text())
         self.assertGreaterEqual(default_ms, 1)
         self.assertTrue(ms and all(node.startswith("tests/") for node in ms))
@@ -1027,11 +1007,6 @@ class TestTaskCiConsumers(unittest.TestCase):
                               "ms": {"tests/a.py::slow[x y]": 1234}})
 
     def test_unit_durations_dedupes_reruns_to_the_latest_attempt(self):
-        import base64
-        import tempfile
-
-        from scripts.unit_durations import durations
-
         def junit(text, seconds):
             value = base64.b64encode(text.encode()).decode()
             return (f'<testsuite><testcase time="{seconds}"><properties><property name="native_nodeid" '
@@ -1047,9 +1022,6 @@ class TestTaskCiConsumers(unittest.TestCase):
             self.assertEqual(durations([root])["ms"], {"tests/a.py::one": 900, "tests/b.py::two": 300})
 
     def test_unit_durations_malformed_input_exits_with_a_fixed_message(self):
-        import subprocess
-        import sys
-        import tempfile
 
         valid = ('<testsuite><testcase time="%s"><properties><property name="native_nodeid" '
                  'value="%s"/></properties></testcase></testsuite>')
@@ -1069,7 +1041,6 @@ class TestTaskCiConsumers(unittest.TestCase):
                 self.assertEqual(len(run.stderr.strip().splitlines()), 1)
 
     def test_four_unit_vms_preserve_a_fail_closed_test_status(self):
-        import yaml
 
         jobs = yaml.safe_load((self.root / ".github/workflows/ci.yml").read_text())["jobs"]
         self.assertEqual(jobs["unit"]["strategy"]["matrix"], {"shard": [1, 2, 3, 4, 5, 6, 7, 8]})
@@ -1091,7 +1062,6 @@ class TestTaskCiConsumers(unittest.TestCase):
             self.assertEqual(proc.returncode == 0, result == "success")
 
     def test_load_step_preserves_failure_skip_and_no_tests_guards(self):
-        import yaml
 
         workflow = yaml.safe_load((self.root / ".github/workflows/load.yml").read_text())
         script = next(step["run"] for step in workflow["jobs"]["load"]["steps"]
@@ -1128,7 +1098,6 @@ class TestTaskCiConsumers(unittest.TestCase):
                 self.assertEqual((root / "calls").read_text(), "qa:load\n")
 
     def test_offline_unit_job_requires_local_archive_before_running_tests(self):
-        import yaml
 
         job = yaml.safe_load((self.root / ".gitlab-ci.yml").read_text())["test"]
         self.assertEqual(job["variables"]["TASK_CONTRACTS_REQUIRE_RUNNER"], "1")
@@ -1194,7 +1163,6 @@ class TestTaskCiConsumers(unittest.TestCase):
 
 class TestNativeExecutionEvidence(unittest.TestCase):
     def test_junit_counts_actual_records_not_declared_totals(self):
-        from scripts.ci_evidence import junit_counts
 
         with tempfile.TemporaryDirectory() as directory:
             report = pathlib.Path(directory) / "tests.xml"
@@ -1211,10 +1179,6 @@ class TestNativeExecutionEvidence(unittest.TestCase):
 
     def test_real_pytest_xfail_and_skip_are_not_passes(self):
         """Real pytest/JUnit semantics: xfail renders as <skipped>, so it cannot read as green."""
-        from unittest.mock import patch
-
-        from scripts import ci_evidence
-
         cases = {
             "xfail": "import pytest\n@pytest.mark.xfail(reason='known')\ndef test_known():\n    assert False\n",
             "skip": "import pytest\n@pytest.mark.skip(reason='later')\ndef test_later():\n    pass\n",
@@ -1247,13 +1211,6 @@ class TestNativeExecutionEvidence(unittest.TestCase):
                     self.assertEqual(evidence["tests"]["executed"], 2)
 
     def test_unittest_expected_failure_and_skip_are_not_passes(self):
-        import contextlib
-        import importlib
-        import io
-        import uuid
-
-        from scripts import ci_evidence
-
         sources = {
             "expected": ("import unittest\nclass T(unittest.TestCase):\n"
                          "    def test_ok(self):\n        pass\n"
@@ -1281,10 +1238,6 @@ class TestNativeExecutionEvidence(unittest.TestCase):
                 sys.path.remove(directory)
 
     def test_native_command_requires_nonzero_fresh_passing_results(self):
-        from unittest.mock import patch
-
-        from scripts import ci_evidence
-
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             for name, xml, exit_code, expected in (
@@ -1313,10 +1266,6 @@ class TestNativeExecutionEvidence(unittest.TestCase):
                         self.assertFalse((root / (name + '-retry')).exists())
 
     def test_identity_binds_real_merge_parents_event_and_clean_checkout(self):
-        from unittest.mock import patch
-
-        from scripts import ci_evidence
-
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             def git(*args):
@@ -1370,10 +1319,6 @@ class TestNativeExecutionEvidence(unittest.TestCase):
                 self.assertEqual(ci_evidence.identity()["execution_sha"], head)
 
     def test_identity_receipt_cannot_claim_results_and_identity_movement_cannot_pass(self):
-        from unittest.mock import patch
-
-        from scripts import ci_evidence
-
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             existing = root / "existing.json"
@@ -1402,14 +1347,6 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
                 self.check_native_union(balanced)
 
     def check_native_union(self, balanced):
-        import base64
-        import copy
-        import hashlib
-
-        from scripts.acceptance_evidence import normalize_native, unit_producers
-        from scripts.ci_evidence import junit_bytes
-        from scripts.unit_evidence import rule_record, select_nodes, validate_union
-
         source = b'    name: unit (${{ matrix.shard }}/4)\n        shard: [1, 2, 3, 4]\n'
         producers = unit_producers(source, hashlib.sha256(source).hexdigest())
         eligible = [f'tests/test_exact \t\n λ.py::test_case[{index}:: a b]' for index in range(9)]
@@ -1452,10 +1389,6 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
                 validate_union(copy.deepcopy(invalid), shards=4)
 
     def test_unit_layout_comes_from_approved_workflow_not_receipts(self):
-        import hashlib
-
-        from scripts.acceptance_evidence import unit_producers
-
         for shards in (2, 4, 8):
             source = (f'    name: unit (${{{{ matrix.shard }}}}/{shards})\n'
                       '        shard: [' + ', '.join(map(str, range(1, shards + 1))) + ']\n').encode()
@@ -1472,11 +1405,6 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
                 unit_producers(source, '0' * 64)
 
     def fixture(self):
-        import hashlib
-
-        from scripts.acceptance_evidence import PRODUCERS
-        from scripts.ci_evidence import junit_bytes
-
         producer = next(p for p in PRODUCERS if p.job == "unit (1/2)")
         candidate = {"repository": "synthetic/repository", "repository_id": 42, "number": 3,
                      "head_sha": "a" * 40, "base_sha": "b" * 40, "execution_sha": "c" * 40,
@@ -1492,7 +1420,6 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
         commit = {"sha": "c" * 40, "parents": [{"sha": "b" * 40}, {"sha": "a" * 40}],
                   "commit": {"tree": {"sha": "1" * 40},
                              "committer": {"date": "2026-10-26T12:00:00Z"}}}
-        import base64
         identity = base64.b64encode(b'tests/test_example.py::actual').decode()
         xml = ('<testsuite tests="999"><testcase name="actual"><properties>'
                f'<property name="native_nodeid" value="{identity}"/>'
@@ -1529,47 +1456,12 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
                 "workflow_digest": hashlib.sha256(b"approved workflow").hexdigest()}, receipt, xml
 
     def packed(self, receipt, xml):
-        import hashlib
-        import io
-        import zipfile
-
-        buffer = io.BytesIO()
-        with zipfile.ZipFile(buffer, "w") as archive:
-            archive.writestr("evidence.json", json.dumps(receipt))
-            archive.writestr("tests.xml", xml)
-        raw = buffer.getvalue()
-        return raw, "sha256:" + hashlib.sha256(raw).hexdigest()
+        return pack_archive(receipt, **{"tests.xml": xml})
 
     def test_collector_requires_all_native_shards_and_never_reuses_an_older_green_run(self):
-        import hashlib
-
-        from scripts.acceptance import VERIFICATION_INPUTS, collect_native
-
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
-            (root / "scripts").mkdir()
-            (root / ".github/workflows").mkdir(parents=True)
-            (root / "scripts/review_tooling.py").write_bytes(b"approved policy")
-            (root / "scripts/ci_evidence.py").write_bytes(b"approved producer")
-            from scripts.acceptance_evidence import PRODUCERS
-            for workflow in {p.workflow for p in PRODUCERS}:
-                source = (b"    name: unit (${{ matrix.shard }}/2)\n        shard: [1, 2]\n"
-                          if workflow == 'ci.yml' else b"approved workflow")
-                (root / ".github/workflows" / workflow).write_bytes(source)
-            for relative in (*VERIFICATION_INPUTS, "taskfiles/quality.yml"):
-                path = root / relative
-                path.parent.mkdir(parents=True, exist_ok=True)
-                if not path.exists():
-                    path.write_bytes(b"approved verifier input")
-            def git(*args):
-                return subprocess.check_output(["git", *args], cwd=root, text=True,
-                                               stderr=subprocess.DEVNULL).strip()
-            git("init", "-b", "main")
-            git("config", "user.name", "Synthetic Test")
-            git("config", "user.email", "synthetic@example.invalid")
-            git("add", ".")
-            git("commit", "-m", "approved base")
-            base = git("rev-parse", "HEAD")
+            base = approved_repository(root)
             args, receipt, xml = self.fixture()
             args["candidate"]["base_sha"] = receipt["base_sha"] = base
             receipt["execution_parents"][0] = base
@@ -1669,11 +1561,7 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
                         collect_native(api, pr, root)
 
     def test_unit_receipt_rejects_incomplete_selection_and_same_count_substitutions(self):
-        import base64
-        import copy
 
-        from scripts.acceptance_evidence import normalize_native
-        from scripts.ci_evidence import junit_bytes
         for variant in ("missing", "wrong-shard", "narrowed-execution", "duplicate-call", "altered-input",
                         "unexpected-plugin", "changed-integration", "same-count-xml", "duplicate-property"):
             with self.subTest(variant=variant):
@@ -1706,8 +1594,6 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
                     normalize_native(**args)
 
     def test_native_agent_probes_require_all_named_transport_witnesses(self):
-        from scripts.acceptance_evidence import PRODUCERS, normalize_native
-        from scripts.ci_evidence import junit_bytes
 
         names = [
             "test_live_agent_contract_and_fresh_trace",
@@ -1762,7 +1648,6 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
 
 
     def test_rejects_wrong_actor_run_attempt_workflow_candidate_and_failed_execution(self):
-        from scripts.acceptance_evidence import normalize_native
 
         for field, value in (("actor_id", 9), ("triggering_actor", "wrong"), ("run_id", 124),
                              ("run_attempt", 1), ("job_key", "other"), ("job_name", "unit (2/2)"),
@@ -1786,26 +1671,21 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
                     normalize_native(**args)
 
     def test_missing_zero_skipped_or_different_raw_test_evidence_cannot_pass(self):
-        from scripts.acceptance_evidence import normalize_native
-        from scripts.ci_evidence import junit_bytes
-
-        for xml in (b'<testsuite tests="100"/>', b'<testsuite><testcase><skipped/></testcase></testsuite>',
-                    b'<testsuite><testcase name="different"/></testsuite>'):
+        # A green receipt must not cover different actual XML, even when both
+        # sides report the same number of cases, and an honest skip count is
+        # still not a pass.
+        for xml, honest in ((b'<testsuite tests="100"/>', False),
+                            (b'<testsuite><testcase><skipped/></testcase></testsuite>', False),
+                            (b'<testsuite><testcase name="different"/></testsuite>', False),
+                            (b'<testsuite><testcase><skipped/></testcase></testsuite>', True)):
             args, receipt, _ = self.fixture()
-            # A green receipt must not cover different actual XML, even if both have one case.
+            if honest:
+                receipt["tests"] = junit_bytes(xml)
             args["archive"], args["artifact"]["digest"] = self.packed(receipt, xml)
             with self.assertRaises(ValueError):
                 normalize_native(**args)
-        args, receipt, _ = self.fixture()
-        xml = b'<testsuite><testcase><skipped/></testcase></testsuite>'
-        receipt["tests"] = junit_bytes(xml)
-        args["archive"], args["artifact"]["digest"] = self.packed(receipt, xml)
-        with self.assertRaises(ValueError):
-            normalize_native(**args)
 
     def test_xfail_shard_report_cannot_pass_even_with_an_honest_or_forged_receipt(self):
-        from scripts.acceptance_evidence import normalize_native
-        from scripts.ci_evidence import junit_bytes
 
         args, receipt, xml = self.fixture()
         args["archive"], args["artifact"]["digest"] = self.packed(receipt, xml)
@@ -1820,7 +1700,6 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
                 normalize_native(**args)
 
     def test_candidate_cannot_substitute_workflow_or_a_different_merge_with_same_parents(self):
-        from scripts.acceptance_evidence import normalize_native
 
         args, receipt, xml = self.fixture()
         args["archive"], args["artifact"]["digest"] = self.packed(receipt, xml)
@@ -1836,7 +1715,6 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
             normalize_native(**args)
 
     def test_regenerated_merge_requires_api_tree_and_exact_parents_retaining_tested_sha(self):
-        from scripts.acceptance_evidence import normalize_native
 
         for fault in (None, "changed-tree", "missing-tree", "empty-tree", "invalid-tree",
                       "stale-base", "stale-head", "reversed-parents", "extra-parent",
@@ -1878,13 +1756,6 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
                         normalize_native(**args)
 
     def test_hazard_receipts_require_each_approved_behavioral_kill(self):
-        import copy
-        import hashlib
-        import io
-        import zipfile
-
-        from scripts.acceptance_evidence import PRODUCERS, normalize_native
-
         hazard = {"id": "retained-state", "contract": "Preserve retained state", "target": "src/state.py",
                   "test": "tests/test_state.py::test_retained", "assertion": "assert retained == expected",
                   "before": "retained = expected", "after": "retained = None", "occurrences": 1,
@@ -1914,12 +1785,7 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
             raw = json.dumps(value).encode()
             receipt.update(job_key="hazards", job_name="hazards", lane="hazards", tests=None,
                            result_sha256=hashlib.sha256(raw).hexdigest())
-            buffer = io.BytesIO()
-            with zipfile.ZipFile(buffer, "w") as archive:
-                archive.writestr("evidence.json", json.dumps(receipt))
-                archive.writestr("results.json", raw)
-            args["archive"] = buffer.getvalue()
-            args["artifact"]["digest"] = "sha256:" + hashlib.sha256(args["archive"]).hexdigest()
+            args["archive"], args["artifact"]["digest"] = pack_archive(receipt, **{"results.json": raw})
             return normalize_native(**args)
 
         self.assertEqual(normalize(report)["status"], "success")
@@ -1951,7 +1817,6 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
 
 
     def test_native_pagination_reads_later_pages_and_refuses_inconsistent_results(self):
-        from scripts.acceptance_evidence import paginate
 
         calls = []
         def get(endpoint):
@@ -1969,14 +1834,6 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
                 paginate(lambda endpoint, response=response: response, "jobs", "jobs")
 
     def test_artifact_tampering_paths_duplicates_and_symlinks_are_rejected(self):
-        import hashlib
-        import io
-        import stat
-        import warnings
-        import zipfile
-
-        from scripts.acceptance_evidence import artifact_members
-
         for name, symlink, duplicate in (("../evidence.json", False, False), ("evidence.json", True, False),
                                         ("evidence.json", False, True)):
             with self.subTest(name=name, symlink=symlink, duplicate=duplicate):
@@ -1998,14 +1855,9 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
             artifact_members(raw + b"tampered", digest)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestAcceptanceSnapshot(unittest.TestCase):
 
     def test_paginated_pr_files_preserve_rename_bytes_and_refuse_truncation(self):
-        from scripts.acceptance import changed_pr_paths
 
         class API:
             prefix = "repos/synthetic/repository/"
@@ -2021,10 +1873,6 @@ class TestAcceptanceSnapshot(unittest.TestCase):
             changed_pr_paths(api, {"number": 3, "changed_files": 102})
 
     def test_recheck_refuses_candidate_and_attempt_movement(self):
-        import copy
-
-        from scripts.acceptance import candidate_identity, recheck_current
-
         pr = {"number": 3, "user": {"id": 99}, "state": "open", "mergeable": True, "draft": False,
               "merge_commit_sha": "c" * 40, "head": {"sha": "a" * 40, "repo": {"id": 84}},
               "base": {"sha": "b" * 40, "ref": "main", "repo": {
@@ -2070,12 +1918,6 @@ class TestAcceptanceSnapshot(unittest.TestCase):
 
 
     def test_bulk_publisher_reports_candidate_failures_without_failing_reconciliation(self):
-        import contextlib
-        import io
-        from unittest.mock import patch
-
-        from scripts.acceptance import main
-
         with patch('scripts.acceptance.GitHub'), patch('scripts.acceptance.paginate', return_value=[{'number': 3}]), \
              patch('scripts.acceptance.publish_acceptance') as publish, contextlib.redirect_stdout(io.StringIO()):
             publish.return_value = {'all_prerequisites_met': False, 'check_run_id': 17}
@@ -2086,12 +1928,6 @@ class TestAcceptanceSnapshot(unittest.TestCase):
             self.assertEqual(main(args), 1)
 
     def test_head_sha_selects_only_candidates_at_that_exact_head(self):
-        import contextlib
-        import io
-        from unittest.mock import patch
-
-        from scripts.acceptance import main
-
         def pull(number, sha):
             return {'number': number, 'head': {'sha': sha * 40}}
 
@@ -2112,12 +1948,6 @@ class TestAcceptanceSnapshot(unittest.TestCase):
                     main([*base, '--head-sha', bad])
 
     def test_read_only_cli_never_emits_success_after_recheck_failure(self):
-        import contextlib
-        import io
-        from unittest.mock import patch
-
-        from scripts.acceptance import main
-
         result = {"all_prerequisites_met": True}
         with patch("scripts.acceptance.collect_acceptance", return_value=result), \
              patch("scripts.acceptance.recheck_current") as recheck:
@@ -2132,12 +1962,7 @@ class TestAcceptanceSnapshot(unittest.TestCase):
             self.assertFalse(json.loads(output.getvalue())["all_prerequisites_met"])
             self.assertNotIn("sensitive", output.getvalue())
 
-    def test_native_summary_ignores_human_comments_and_draft_state(self):
-        import copy
-        from unittest.mock import patch
-
-        from scripts.acceptance import candidate_identity, collect_acceptance
-
+    def test_native_summary_ignores_human_comments_and_review_state(self):
         pr = {"number": 3, "user": {"id": 99}, "state": "open", "mergeable": True, "draft": False, "changed_files": 1,
               "merge_commit_sha": "c" * 40, "head": {"sha": "a" * 40, "repo": {"id": 84}},
               "base": {"sha": "b" * 40, "ref": "main", "repo": {
@@ -2174,9 +1999,7 @@ class TestAcceptanceSnapshot(unittest.TestCase):
             self.assertIn("`" + "f" * 40 + "`", regenerated["markdown_report"])
             self.assertIn("identical file trees", regenerated["markdown_report"])
             self.assertEqual(regenerated["candidate"]["execution_sha"], "c" * 40)
-            api.pr["draft"] = True
-            self.assertTrue(collect_acceptance(api, 3, pathlib.Path.cwd())["all_prerequisites_met"])
-            api.pr["draft"] = False
+            # Draft movement is candidate identity, owned by the recheck test.
             api.payload["code_assessment"] = "changes_required"
             self.assertTrue(collect_acceptance(api, 3, pathlib.Path.cwd())["all_prerequisites_met"])
             api.payload = payload
@@ -2184,11 +2007,6 @@ class TestAcceptanceSnapshot(unittest.TestCase):
             self.assertFalse(collect_acceptance(api, 3, pathlib.Path.cwd())["all_prerequisites_met"])
 
     def test_publisher_pending_precedes_collection_and_stale_result_is_failure(self):
-        import copy
-        from unittest.mock import patch
-
-        from scripts.acceptance import publish_acceptance
-
         events = []
         class API:
             prefix = "repos/synthetic/repository/"
@@ -2214,7 +2032,6 @@ class TestAcceptanceSnapshot(unittest.TestCase):
             self.assertNotIn("upstream detail", json.dumps(events))
 
     def test_publisher_workflow_keeps_candidate_data_out_of_privileged_execution(self):
-        import yaml
 
         root = pathlib.Path(__file__).resolve().parents[1]
         workflow = yaml.safe_load((root / '.github/workflows/acceptance.yml').read_text())
@@ -2259,7 +2076,6 @@ class TestAcceptanceSnapshot(unittest.TestCase):
         self.assertFalse((root / '.github/workflows/acceptance-review-signal.yml').exists())
 
     def test_gitlab_l1_note_appends_literal_body_without_claiming_marker_ownership(self):
-        import yaml
 
         root = pathlib.Path(__file__).resolve().parents[1]
         workflow = yaml.safe_load((root / '.gitlab-ci.yml').read_text())
@@ -2296,39 +2112,10 @@ class TestAcceptancePendingPublication(unittest.TestCase):
     """In-progress current runs leave the check in progress; stale runs fail."""
 
     def approved_base(self, root):
-        from scripts.acceptance import VERIFICATION_INPUTS
-        from scripts.acceptance_evidence import PRODUCERS
-
-        (root / "scripts").mkdir()
-        (root / ".github/workflows").mkdir(parents=True)
-        (root / "scripts/review_tooling.py").write_bytes(b"approved policy")
-        (root / "scripts/ci_evidence.py").write_bytes(b"approved producer")
-        for workflow in {p.workflow for p in PRODUCERS}:
-            source = (b"    name: unit (${{ matrix.shard }}/2)\n        shard: [1, 2]\n"
-                      if workflow == "ci.yml" else b"approved workflow")
-            (root / ".github/workflows" / workflow).write_bytes(source)
-        for relative in (*VERIFICATION_INPUTS, "taskfiles/quality.yml"):
-            path = root / relative
-            path.parent.mkdir(parents=True, exist_ok=True)
-            if not path.exists():
-                path.write_bytes(b"approved verifier input")
-
-        def git(*args):
-            return subprocess.check_output(["git", *args], cwd=root, text=True,
-                                           stderr=subprocess.DEVNULL).strip()
-        git("init", "-b", "main")
-        git("config", "user.name", "Synthetic Test")
-        git("config", "user.email", "synthetic@example.invalid")
-        git("add", ".")
-        git("commit", "-m", "approved base")
-        return git("rev-parse", "HEAD")
+        return approved_repository(root)
 
     def context_archive(self, base, execution_sha="c" * 40):
         """A valid context_check receipt; this producer emits no JUnit file."""
-        import hashlib
-        import io
-        import zipfile
-
         _args, receipt, _xml = TestNativeEvidenceConsumer().fixture()
         receipt.update(
             base_sha=base, execution_sha=execution_sha, workflow_sha=execution_sha,
@@ -2339,16 +2126,12 @@ class TestAcceptancePendingPublication(unittest.TestCase):
             policy_sha256=hashlib.sha256(b"approved policy").hexdigest(),
             producer_sha256=hashlib.sha256(b"approved producer").hexdigest())
         receipt.pop("unit_coverage")
-        buffer = io.BytesIO()
-        with zipfile.ZipFile(buffer, "w") as archive:
-            archive.writestr("evidence.json", json.dumps(receipt))
-        raw = buffer.getvalue()
-        return raw, "sha256:" + hashlib.sha256(raw).hexdigest(), len(raw)
+        raw, digest = pack_archive(receipt)
+        return raw, digest, len(raw)
 
     def scenario(self, *, run_status, started="2026-10-26T12:00:05Z", head_sha="a" * 40,
                  job_conclusion=None, success=False, corrupt=False, twin=False,
                  extra_active_run=False, pull_request_number=None):
-        from scripts.acceptance import publish_acceptance
 
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -2364,14 +2147,8 @@ class TestAcceptancePendingPublication(unittest.TestCase):
                 run["pull_requests"] = [{"number": pull_request_number}]
             runs = [run]
             if extra_active_run:
-                runs.append({
-                    "id": 124, "run_attempt": 2, "event": "pull_request",
-                    "path": ".github/workflows/ci.yml", "head_sha": "a" * 40,
-                    "status": "in_progress", "created_at": "2026-10-26T12:00:05Z",
-                    "run_started_at": "2026-10-26T12:00:05Z",
-                    "repository": {"id": 42, "full_name": repository},
-                    "head_repository": {"id": 84},
-                    "actor": {"id": 7}, "triggering_actor": {"login": "synthetic"}})
+                runs.append({**run, "id": 124, "path": ".github/workflows/ci.yml",
+                             "status": "in_progress"})
             jobs = [] if job_conclusion is None else [
                 {"id": 456, "run_id": 123, "run_attempt": 2, "head_sha": "a" * 40,
                  "name": "check-context", "status": "completed", "conclusion": job_conclusion}]
@@ -2472,26 +2249,32 @@ class TestAcceptancePendingPublication(unittest.TestCase):
         self.assertEqual([patch["status"] for patch in patches], ["completed"])
         self.assertEqual([patch["conclusion"] for patch in patches], ["failure"])
 
+    def lane(self, result):
+        return next(item for item in result["native"] if item["lane"] == "context_check")
+
     def test_in_progress_current_run_leaves_check_in_progress(self):
-        result, writes = self.scenario(run_status="in_progress")
-        self.assertFalse(result["all_prerequisites_met"])
-        self.assertTrue(result["pending"])
-        self.assertIn("context_check", result["pending_lanes"])
-        self.assertEqual(writes[0]["status"], "in_progress")
-        patch = self.assert_pending_patch(writes)
-        self.assertIn("still queued or in progress", patch["output"]["summary"])
+        for pull_request_number in (None, 3):
+            with self.subTest(pull_request_number=pull_request_number):
+                result, writes = self.scenario(run_status="in_progress",
+                                               pull_request_number=pull_request_number)
+                self.assertFalse(result["all_prerequisites_met"])
+                self.assertTrue(result["pending"])
+                self.assertIn("context_check", result["pending_lanes"])
+                self.assertEqual(writes[0]["status"], "in_progress")
+                patch = self.assert_pending_patch(writes)
+                self.assertIn("still queued or in progress", patch["output"]["summary"])
 
     def test_valid_active_evidence_stays_pending(self):
         result, writes = self.scenario(run_status="in_progress", success=True)
         self.assertTrue(result["pending"])
-        lane = next(item for item in result["native"] if item["lane"] == "context_check")
+        lane = self.lane(result)
         self.assertEqual(lane["status"], "pending")
         self.assert_pending_patch(writes)
 
     def test_corrupt_active_artifact_fails_unverified(self):
         result, writes = self.scenario(run_status="in_progress", success=True, corrupt=True)
         self.assertFalse(result["pending"])
-        lane = next(item for item in result["native"] if item["lane"] == "context_check")
+        lane = self.lane(result)
         self.assertEqual(lane["status"], "unverified")
         self.assert_failure_patch(writes)
 
@@ -2501,23 +2284,19 @@ class TestAcceptancePendingPublication(unittest.TestCase):
         self.assertEqual(result["pending_lanes"], [])
         self.assert_failure_patch(writes)
 
-    def test_completed_job_without_artifact_fails_while_run_is_active(self):
-        result, writes = self.scenario(run_status="in_progress", job_conclusion="success")
-        self.assertFalse(result["pending"])
-        lane = next(item for item in result["native"] if item["lane"] == "context_check")
-        self.assertEqual(lane["status"], "missing")
-        self.assert_failure_patch(writes)
-
-    def test_completed_job_without_artifact_fails_after_run_completion(self):
-        result, writes = self.scenario(run_status="completed", job_conclusion="success")
-        self.assertFalse(result["pending"])
-        self.assert_failure_patch(writes)
+    def test_completed_job_without_artifact_fails_while_run_is_active_or_complete(self):
+        for run_status in ("in_progress", "completed"):
+            with self.subTest(run_status=run_status):
+                result, writes = self.scenario(run_status=run_status, job_conclusion="success")
+                self.assertFalse(result["pending"])
+                self.assertEqual(self.lane(result)["status"], "missing")
+                self.assert_failure_patch(writes)
 
     def test_completed_success_publishes_success(self):
         result, writes = self.scenario(run_status="completed", success=True)
         self.assertTrue(result["all_prerequisites_met"])
         self.assertFalse(result["pending"])
-        lane = next(item for item in result["native"] if item["lane"] == "context_check")
+        lane = self.lane(result)
         self.assertEqual(lane["status"], "success")
         self.assertEqual(lane["execution_sha"], "c" * 40)
         patches = self.patch_payloads(writes)
@@ -2529,7 +2308,7 @@ class TestAcceptancePendingPublication(unittest.TestCase):
                                        started="2026-10-26T11:59:00Z")
         self.assertFalse(result["all_prerequisites_met"])
         self.assertFalse(result["pending"])
-        lane = next(item for item in result["native"] if item["lane"] == "context_check")
+        lane = self.lane(result)
         self.assertEqual(lane["status"], "stale")
         self.assert_failure_patch(writes)
 
@@ -2537,7 +2316,7 @@ class TestAcceptancePendingPublication(unittest.TestCase):
         result, writes = self.scenario(run_status="completed", success=True, twin=True,
                                        started="2026-10-26T11:59:00Z")
         self.assertTrue(result["all_prerequisites_met"])
-        lane = next(item for item in result["native"] if item["lane"] == "context_check")
+        lane = self.lane(result)
         self.assertEqual(lane["status"], "success")
         self.assertEqual(lane["execution_sha"], "d" * 40)
         patches = self.patch_payloads(writes)
@@ -2554,7 +2333,7 @@ class TestAcceptancePendingPublication(unittest.TestCase):
     def test_failed_lane_publishes_failure(self):
         result, writes = self.scenario(run_status="completed", job_conclusion="failure")
         self.assertFalse(result["pending"])
-        lane = next(item for item in result["native"] if item["lane"] == "context_check")
+        lane = self.lane(result)
         self.assertEqual(lane["status"], "failure")
         self.assert_failure_patch(writes)
 
@@ -2563,44 +2342,27 @@ class TestAcceptancePendingPublication(unittest.TestCase):
             with self.subTest(conclusion=conclusion):
                 result, writes = self.scenario(run_status="completed", job_conclusion=conclusion)
                 self.assertFalse(result["pending"])
-                lane = next(item for item in result["native"] if item["lane"] == "context_check")
+                lane = self.lane(result)
                 self.assertEqual(lane["status"], "unverified")
                 self.assert_failure_patch(writes)
 
-    def test_run_started_before_current_test_merge_is_not_pending(self):
-        result, writes = self.scenario(run_status="in_progress",
-                                       started="2026-10-26T11:59:00Z")
-        self.assertFalse(result["pending"])
-        self.assertEqual(result["pending_lanes"], [])
-        self.assertEqual([run["run_id"] for run in result["stale_runs"]], [123])
-        self.assert_failure_patch(writes)
-
-    def test_run_for_another_head_is_not_current(self):
-        result, writes = self.scenario(run_status="in_progress", head_sha="d" * 40)
-        self.assertFalse(result["pending"])
-        self.assertEqual(result["pending_lanes"], [])
-        self.assert_failure_patch(writes)
-
-    def test_run_for_another_pull_request_is_not_current(self):
-        result, writes = self.scenario(run_status="in_progress", pull_request_number=4)
-        self.assertFalse(result["pending"])
-        self.assertEqual(result["pending_lanes"], [])
-        self.assertEqual([run["run_id"] for run in result["stale_runs"]], [123])
-        self.assert_failure_patch(writes)
-
-    def test_run_with_matching_pull_request_is_current(self):
-        result, writes = self.scenario(run_status="in_progress", pull_request_number=3)
-        self.assertTrue(result["pending"])
-        self.assert_pending_patch(writes)
+    def test_run_that_is_not_current_never_leaves_the_check_pending(self):
+        for label, scenario, stale in (
+            ("started before the test merge", {"started": "2026-10-26T11:59:00Z"}, True),
+            ("another head", {"head_sha": "d" * 40}, False),
+            ("another pull request", {"pull_request_number": 4}, True),
+        ):
+            with self.subTest(label=label):
+                result, writes = self.scenario(run_status="in_progress", **scenario)
+                self.assertFalse(result["pending"])
+                self.assertEqual(result["pending_lanes"], [])
+                if stale:
+                    self.assertEqual([run["run_id"] for run in result["stale_runs"]], [123])
+                self.assert_failure_patch(writes)
 
 
 class ReviewTemplateTests(unittest.TestCase):
     def test_template_binds_current_merge_without_approving_or_writing(self):
-        import copy
-
-        from scripts.acceptance import review_template
-        from scripts.review_tooling import validate_review_payload
-
         pr = {'number': 3, 'state': 'open', 'mergeable': True, 'draft': False,
               'head': {'sha': 'a' * 40, 'repo': {'id': 84}},
               'base': {'sha': 'b' * 40, 'ref': 'main', 'repo': {
@@ -2640,10 +2402,6 @@ class ReviewTemplateTests(unittest.TestCase):
                 review_template(api, 3)
 
     def test_live_base_requires_exact_commit_ref_and_encodes_branch(self):
-        import copy
-
-        from scripts.acceptance import require_current_base
-
         branch = 'release/topic#雪'
         pr = {'base': {'ref': branch}}
         candidate = {'base_sha': 'b' * 40}
@@ -2673,12 +2431,6 @@ class ReviewTemplateTests(unittest.TestCase):
             require_current_base(API({}), pr, candidate)
 
     def test_template_cli_refuses_publication_and_bulk_selection(self):
-        import contextlib
-        import io
-        from unittest.mock import patch
-
-        from scripts.acceptance import main
-
         for extra in (['--pr', '3', '--publish'], ['--all-open']):
             with self.subTest(extra=extra), patch('scripts.acceptance.GitHub') as api, \
                  contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
@@ -2687,11 +2439,6 @@ class ReviewTemplateTests(unittest.TestCase):
             api.assert_not_called()
 
     def test_failed_acceptance_still_exports_identity_template_and_check_link(self):
-        import tempfile
-        from unittest.mock import patch
-
-        from scripts.acceptance import publish_acceptance
-
         class API:
             repository = 'synthetic/repository'
             prefix = 'repos/synthetic/repository/'
@@ -2727,11 +2474,6 @@ class ReviewTemplateTests(unittest.TestCase):
             self.assertEqual(api.writes[-1][1]['conclusion'], 'failure')
 
     def test_moved_template_is_not_exported_for_old_check_head(self):
-        import tempfile
-        from unittest.mock import patch
-
-        from scripts.acceptance import publish_acceptance
-
         class API:
             prefix = 'repos/synthetic/repository/'
 
@@ -2759,10 +2501,6 @@ class ReviewTemplateTests(unittest.TestCase):
 
 
     def test_template_comments_append_deduplicate_and_preserve_human_text(self):
-        import copy
-
-        from scripts.acceptance import post_review_template, review_template_comment
-
         template = {'head_sha': 'a' * 40, 'base_sha': 'b' * 40, 'execution_sha': 'c' * 40,
                     'code_assessment': '<human input>'}
 
@@ -2794,10 +2532,6 @@ class ReviewTemplateTests(unittest.TestCase):
         self.assertEqual(api.comments[0], original)
 
     def test_comment_write_boundary_cannot_edit_reviews_or_other_repositories(self):
-        from unittest.mock import patch
-
-        from scripts.acceptance import GitHub
-
         api = GitHub('synthetic/repository')
         for endpoint, method in [('repos/synthetic/repository/issues/3/comments', 'PATCH'),
                                  ('repos/synthetic/repository/issues/comments/17', 'PATCH'),
@@ -2812,10 +2546,6 @@ class TestVerifierUpdateDecision(unittest.TestCase):
     """Trust changes must bind real native data, without relaxing test outcomes."""
 
     def fixture(self):
-        import copy
-        import hashlib
-        import io
-        import zipfile
 
         candidate = {"repository": "synthetic/repository", "repository_id": 42, "number": 3,
                      "head_sha": "a" * 40, "base_sha": "b" * 40, "execution_sha": "c" * 40,
@@ -2847,12 +2577,8 @@ class TestVerifierUpdateDecision(unittest.TestCase):
                 self.pack()
                 self.writes = []
             def pack(self):
-                output = io.BytesIO()
-                with zipfile.ZipFile(output, "w") as z:
-                    z.writestr("evidence.json", json.dumps(self.record))
-                self.archive = output.getvalue()
-                self.artifact.update(size_in_bytes=len(self.archive),
-                                     digest="sha256:" + hashlib.sha256(self.archive).hexdigest())
+                self.archive, digest = pack_archive(self.record)
+                self.artifact.update(size_in_bytes=len(self.archive), digest=digest)
             def get(self, endpoint):
                 if "actions/workflows/verifier-update.yml/runs?" in endpoint:
                     return {"total_count": len(self.runs), "workflow_runs": self.runs}
@@ -2895,11 +2621,6 @@ class TestVerifierUpdateDecision(unittest.TestCase):
         return API()
 
     def test_approved_exact_bytes_and_ordinary_unchanged_input(self):
-        import hashlib
-        from unittest.mock import patch
-
-        from scripts.verifier_approval import VerifierApprovalRequired, approved_inputs
-
         api = self.fixture()
         inputs = api.record["inputs"]
         with patch.object(api, 'get', side_effect=AssertionError('Unchanged verifier needs no decision')):
@@ -2913,7 +2634,6 @@ class TestVerifierUpdateDecision(unittest.TestCase):
             approved_inputs(api, api.candidate, old)
 
     def test_wrong_or_stale_native_decision_cannot_grant_trust(self):
-        from scripts.verifier_approval import validated_decision
 
         mutations = [('candidate', key, 'd' * 40) for key in ('head_sha', 'base_sha', 'execution_sha')]
         mutations += [('run', key, value) for key, value in (
@@ -2940,14 +2660,6 @@ class TestVerifierUpdateDecision(unittest.TestCase):
                     validated_decision(api, api.candidate, {k: v for k, v in self.fixture().record['inputs'].items()})
 
     def test_decision_survives_regenerated_merge_only_with_identical_tree_and_parents(self):
-        import copy
-
-        from scripts.verifier_approval import (
-            VerifierApprovalRequired,
-            approved_inputs,
-            validated_decision,
-        )
-
         # #753: the decision recorded merge c; GitHub regenerated the same content as f.
         def regenerated(fault=None):
             api = self.fixture()
@@ -2993,11 +2705,6 @@ class TestVerifierUpdateDecision(unittest.TestCase):
                     approved_inputs(api, api.candidate, {k: "0" * 64 for k in inputs})
 
     def test_latest_revoke_or_pending_decision_blocks_old_approval_and_recheck(self):
-        import copy
-
-        from scripts.acceptance import recheck_current
-        from scripts.verifier_approval import validated_decision
-
         for status, conclusion, decision in [('completed', 'success', 'revoke'),
                                              ('in_progress', None, 'approve'),
                                              ('completed', 'cancelled', 'approve')]:
@@ -3014,10 +2721,6 @@ class TestVerifierUpdateDecision(unittest.TestCase):
                     recheck_current(api, result)
 
     def test_selector_requires_exact_approval_and_catalogue_remains_excluded(self):
-        import hashlib
-
-        from scripts.verifier_approval import VerifierApprovalRequired, approved_inputs
-
         for path in ('scripts/review_tooling.py', 'tests/hazards/critical.json'):
             api = self.fixture()
             api.sources = {path: b'reduced obligations'}
@@ -3044,30 +2747,11 @@ class TestVerifierUpdateDecision(unittest.TestCase):
                         api.sources[path] = original
 
     def test_producer_artifact_round_trip_and_no_failed_evidence_waiver(self):
-        import hashlib
-        from unittest.mock import patch
-
-        from scripts.acceptance import collect_acceptance, collect_native, verification_inputs
-        from scripts.acceptance_evidence import PRODUCERS
-        from scripts.verifier_approval import record_decision, validated_decision
-
         api = self.fixture()
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
-            from scripts.acceptance import VERIFICATION_INPUTS
-            for path in (*VERIFICATION_INPUTS, *{'.github/workflows/' + p.workflow for p in PRODUCERS}):
-                file = root / path
-                file.parent.mkdir(parents=True, exist_ok=True)
-                file.write_bytes(b'approved original')
-            def git(*args):
-                return subprocess.check_output(['git', *args], cwd=root, text=True,
-                                               stderr=subprocess.DEVNULL).strip()
-            git('init', '-b', 'main')
-            git('config', 'user.name', 'Synthetic Test')
-            git('config', 'user.email', 'synthetic@example.invalid')
-            git('add', '.')
-            git('commit', '-m', 'Approved original verifier')
-            base = git('rev-parse', 'HEAD')
+            base = approved_repository(root, policy=b'approved original', producer=b'approved original',
+                                       verifier_input=b'approved original')
             api.candidate['base_sha'] = api.run['head_sha'] = api.job['head_sha'] = base
             api.artifact['workflow_run']['head_sha'] = base
             api.sources = {p: (root / p).read_bytes() for p in verification_inputs(root)}
@@ -3093,7 +2777,6 @@ class TestVerifierUpdateDecision(unittest.TestCase):
             # Approval also cannot suppress a normalizer's failed raw-test check.
             fixture, receipt, xml = TestNativeEvidenceConsumer().fixture()
             fixture['producer_digest'] = receipt['producer_sha256'] = result['producer_sha256']
-            from scripts.acceptance_evidence import normalize_native
             receipt['tests']['failed'] = 1
             archive, digest = TestNativeEvidenceConsumer().packed(receipt, xml)
             fixture['artifact']['digest'] = digest
@@ -3101,7 +2784,6 @@ class TestVerifierUpdateDecision(unittest.TestCase):
                 normalize_native(**fixture, archive=archive)
             # The same approval flows through the real collector and normalizer
             # for both shards; failed/skipped/cancelled native jobs still block.
-            import copy
             native, receipt, xml = TestNativeEvidenceConsumer().fixture()
             native['run']['head_repository']['id'] = 42
             receipt.update(base_sha=base, execution_parents=[base, 'a' * 40],
@@ -3110,10 +2792,7 @@ class TestVerifierUpdateDecision(unittest.TestCase):
             jobs, artifacts, archives = [], [], {}
             for shard in (1, 2):
                 job = {**native['job'], 'id': 456 + shard, 'name': f'unit ({shard}/2)'}
-                import base64
 
-                from scripts.ci_evidence import junit_bytes
-                from scripts.unit_evidence import INPUTS
 
                 report = copy.deepcopy(receipt)
                 report['job_name'] = job['name']
@@ -3208,7 +2887,6 @@ class TestVerifierUpdateDecision(unittest.TestCase):
                 record_decision(api, 3, 'approve', root, 900, 1)
 
     def test_workflow_runs_only_approved_main_with_read_only_token(self):
-        import yaml
 
         root = pathlib.Path(__file__).resolve().parents[1]
         workflow = yaml.safe_load((root / '.github/workflows/verifier-update.yml').read_text())
@@ -3233,10 +2911,6 @@ class TestVerifierUpdateDecision(unittest.TestCase):
         self.assertNotIn('secrets.', json.dumps(workflow))
 
     def test_comment_workflow_never_expands_comment_text_and_acknowledges_with_least_privilege(self):
-        import re
-
-        import yaml
-
         root = pathlib.Path(__file__).resolve().parents[1]
         text = (root / '.github/workflows/verifier-update.yml').read_text()
         workflow = yaml.safe_load(text)
@@ -3267,7 +2941,6 @@ class TestVerifierUpdateDecision(unittest.TestCase):
         self.assertEqual(workflow['name'], 'Verifier update decision')
 
     def comment_fixture(self, body='/verifier approve ' + 'a' * 12):
-        import copy
 
         api = self.fixture()
         api.run.update(event='issue_comment', display_title='Verifier PR 3: approve',
@@ -3290,7 +2963,6 @@ class TestVerifierUpdateDecision(unittest.TestCase):
         return api
 
     def test_comment_approval_binds_the_named_head_and_the_live_comment(self):
-        from scripts.verifier_approval import validated_decision
 
         api = self.comment_fixture()
         inputs = api.record['inputs']
@@ -3331,7 +3003,6 @@ class TestVerifierUpdateDecision(unittest.TestCase):
             validated_decision(api, api.candidate, api.record['inputs'])
 
     def test_other_users_comment_runs_cannot_shadow_or_replace_the_maintainers_decision(self):
-        from scripts.verifier_approval import latest_decision
 
         api = self.comment_fixture()
         api.runs = [api.run, {**api.run, 'id': 950, 'display_title': 'Verifier PR 3: revoke',
@@ -3343,7 +3014,6 @@ class TestVerifierUpdateDecision(unittest.TestCase):
         self.assertEqual(latest_decision(api, api.candidate)['id'], 950)
 
     def test_comment_grammar_is_strict(self):
-        from scripts.verifier_approval import parse_command
 
         sha = 'ab12cd3'
         self.assertEqual(parse_command(f'/verifier approve {sha}\n'), ('approve', 'implementation', sha))
@@ -3359,10 +3029,6 @@ class TestVerifierUpdateDecision(unittest.TestCase):
                 parse_command(body)
 
     def test_comment_event_authorization_and_recording(self):
-        import copy
-
-        from scripts.verifier_approval import comment_request
-
         event = {'action': 'created', 'sender': {'login': 'yonatan895'}, 'issue': {'number': 3, 'pull_request': {}},
                  'comment': {'id': 77, 'body': '/verifier approve ' + 'a' * 12, 'author_association': 'OWNER',
                              'user': {'login': 'yonatan895', 'type': 'User'}}}
@@ -3385,12 +3051,6 @@ class TestVerifierUpdateDecision(unittest.TestCase):
                 comment_request(api, changed)
 
     def test_comment_recording_refuses_a_head_pushed_after_the_comment(self):
-        import copy
-        import subprocess
-        import tempfile
-
-        from scripts.verifier_approval import record_decision
-
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
             subprocess.run(['git', 'init', '-q', str(root)], check=True)
@@ -3401,7 +3061,6 @@ class TestVerifierUpdateDecision(unittest.TestCase):
             head = subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True).strip()
             api = self.comment_fixture()
             api.candidate['base_sha'] = head
-            from unittest.mock import patch
             with patch('scripts.acceptance.verification_inputs', return_value=['scripts/check_hazard_sensitivity.py']):
                 comment = {'id': 77, 'created_at': '2026-09-25T12:00:04Z'}
                 record = record_decision(api, 3, 'approve', root, 900, 1, comment=copy.deepcopy(comment),
@@ -3416,11 +3075,6 @@ class TestVerifierUpdateDecision(unittest.TestCase):
 
 
     def test_publisher_explains_required_decision_without_recommending_a_policy_bypass(self):
-        from unittest.mock import patch
-
-        from scripts.acceptance import publish_acceptance
-        from scripts.verifier_approval import VerifierApprovalRequired
-
         for path, code in [('scripts/check_hazard_sensitivity.py', 'verifier_update_requires_maintainer_decision'),
                            ('scripts/review_tooling.py', 'verifier_update_requires_maintainer_decision'),
                            ('tests/hazards/critical.json', 'verifier_policy_change_not_supported')]:
@@ -3442,7 +3096,6 @@ class TestCatalogueAnchorDecision(unittest.TestCase):
     """A human anchor decision preserves the complete native challenge oracle."""
 
     def catalogues(self):
-        import copy
 
         root = pathlib.Path(__file__).resolve().parents[1]
         original = json.loads((root / 'tests/hazards/critical.json').read_bytes())
@@ -3475,7 +3128,6 @@ class TestCatalogueAnchorDecision(unittest.TestCase):
         return approved, json.dumps(adopted).encode()
 
     def hazard_report(self, catalogue):
-        import hashlib
 
         return {
             'schema_version': 1, 'candidate_sha': 'c' * 40,
@@ -3491,8 +3143,6 @@ class TestCatalogueAnchorDecision(unittest.TestCase):
         }
 
     def fixture(self):
-        import copy
-        import hashlib
 
         approved, adopted = self.catalogues()
         api = TestVerifierUpdateDecision().fixture()
@@ -3517,33 +3167,12 @@ class TestCatalogueAnchorDecision(unittest.TestCase):
         return api, approved, adopted, identity
 
     def collector_fixture(self, root, *, mixed=False):
-        import copy
-        import hashlib
-        import io
-        import zipfile
-
-        from scripts.acceptance import VERIFICATION_INPUTS, verification_inputs
-        from scripts.acceptance_evidence import PRODUCERS
-        from scripts.verifier_approval import record_decision
-
         api, approved, adopted, _ = self.fixture()
-        paths = (*VERIFICATION_INPUTS, 'taskfiles/quality.yml',
-                 *sorted({'.github/workflows/' + producer.workflow for producer in PRODUCERS}))
-        for relative in paths:
-            path = root / relative
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(approved if relative == 'tests/hazards/critical.json' else b'approved original\n')
-        (root / '.github/workflows/ci.yml').write_bytes(
-            b'    name: unit (${{ matrix.shard }}/2)\n        shard: [1, 2]\n')
-        def git(*args):
-            return subprocess.check_output(['git', *args], cwd=root, text=True,
-                                           stderr=subprocess.DEVNULL).strip()
-        git('init', '-b', 'main')
-        git('config', 'user.name', 'Synthetic Test')
-        git('config', 'user.email', 'synthetic@example.invalid')
-        git('add', '.')
-        git('commit', '-m', 'Approved original catalogue and verifier')
-        base = git('rev-parse', 'HEAD')
+        base = approved_repository(
+            root, policy=b'approved original\n', producer=b'approved original\n',
+            verifier_input=b'approved original\n',
+            extras={'tests/hazards/critical.json': approved,
+                    '.github/workflows/ci.yml': CI_UNIT_SOURCE})
         api.candidate['base_sha'] = api.run['head_sha'] = api.job['head_sha'] = base
         api.artifact['workflow_run']['head_sha'] = base
         api.sources = {relative: (root / relative).read_bytes() for relative in verification_inputs(root)}
@@ -3574,13 +3203,8 @@ class TestCatalogueAnchorDecision(unittest.TestCase):
         def pack_native():
             raw = json.dumps(api.native_report).encode()
             api.native_receipt['result_sha256'] = hashlib.sha256(raw).hexdigest()
-            buffer = io.BytesIO()
-            with zipfile.ZipFile(buffer, 'w') as archive:
-                archive.writestr('evidence.json', json.dumps(api.native_receipt))
-                archive.writestr('results.json', raw)
-            api.native_archive = buffer.getvalue()
-            api.native_artifact.update(size_in_bytes=len(api.native_archive),
-                                       digest='sha256:' + hashlib.sha256(api.native_archive).hexdigest())
+            api.native_archive, digest = pack_archive(api.native_receipt, **{'results.json': raw})
+            api.native_artifact.update(size_in_bytes=len(api.native_archive), digest=digest)
         api.pack_native = pack_native
         pack_native()
         original_get, original_raw = api.get, api.raw
@@ -3620,10 +3244,6 @@ class TestCatalogueAnchorDecision(unittest.TestCase):
         return api
 
     def add_implementation_decision(self, api, root):
-        import copy
-
-        from scripts.verifier_approval import record_decision
-
         implementation = TestVerifierUpdateDecision().fixture()
         implementation.candidate = copy.deepcopy(api.candidate)
         implementation.run.update(id=920, head_sha=api.candidate['base_sha'])
@@ -3637,10 +3257,6 @@ class TestCatalogueAnchorDecision(unittest.TestCase):
         return implementation
 
     def test_actual_anchor_record_round_trips_through_collector_and_acceptance(self):
-        import hashlib
-
-        from scripts.acceptance import collect_acceptance, collect_native, recheck_current
-
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             api = self.collector_fixture(root)
@@ -3668,8 +3284,6 @@ class TestCatalogueAnchorDecision(unittest.TestCase):
             self.assertEqual(rejected['lane_statuses']['hazards'], 'unverified')
 
     def test_mixed_catalogue_and_implementation_changes_need_both_distinct_decisions(self):
-        from scripts.acceptance import collect_native
-        from scripts.verifier_approval import VerifierApprovalRequired
 
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -3693,8 +3307,6 @@ class TestCatalogueAnchorDecision(unittest.TestCase):
                 collect_native(api, api.get(api.prefix + 'pulls/3'), root)
 
     def test_catalogue_only_collection_refuses_a_complete_ordinary_decision(self):
-        from scripts.acceptance import collect_native
-        from scripts.verifier_approval import VerifierApprovalRequired
 
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -3705,7 +3317,6 @@ class TestCatalogueAnchorDecision(unittest.TestCase):
                 collect_native(api, api.get(api.prefix + 'pulls/3'), root)
 
     def test_actual_publisher_refuses_anchor_revoked_between_collection_and_final_write(self):
-        from scripts.acceptance import publish_acceptance
 
         with tempfile.TemporaryDirectory() as directory:
             api = self.collector_fixture(pathlib.Path(directory))
@@ -3719,10 +3330,6 @@ class TestCatalogueAnchorDecision(unittest.TestCase):
 
 
     def test_historical_approval_and_native_oracle_survive_repository_anchor_adoption(self):
-        from unittest.mock import patch
-
-        from scripts.verifier_approval import approved_catalogue
-
         catalogue_path = pathlib.Path(__file__).resolve().parents[1] / 'tests/hazards/critical.json'
         repository = json.loads(catalogue_path.read_bytes())
         repository['hazards'][6]['before'] = '            used = tokenizer.count_messages(messages'
@@ -3760,10 +3367,6 @@ class TestCatalogueAnchorDecision(unittest.TestCase):
                 self.normalize_hazards(weakened_bytes, self.hazard_report(weakened_bytes))
 
     def test_anchor_decision_refuses_structural_edits_even_when_python_values_compare_equal(self):
-        import copy
-
-        from scripts.verifier_approval import allowed_anchor_change
-
         approved, adopted = self.catalogues()
         document = json.loads(adopted)
         mutations = []
@@ -3830,11 +3433,6 @@ class TestCatalogueAnchorDecision(unittest.TestCase):
                 allowed_anchor_change(approved, raw)
 
     def test_distinct_anchor_decision_approves_exact_bytes_but_ordinary_approval_stays_excluded(self):
-        from scripts.verifier_approval import (
-            VerifierApprovalRequired,
-            approved_catalogue,
-            approved_inputs,
-        )
 
         api, approved, adopted, identity = self.fixture()
         self.assertEqual(approved_catalogue(api, api.candidate, approved), (adopted, identity))
@@ -3854,7 +3452,6 @@ class TestCatalogueAnchorDecision(unittest.TestCase):
         self.assertEqual(approved_catalogue(api, api.candidate, approved), (approved, None))
 
     def test_anchor_decision_rejects_stale_malformed_or_mixed_provenance(self):
-        from scripts.verifier_approval import approved_catalogue
 
         mutations = [
             ('run', 'head_sha', 'd' * 40), ('run', 'head_branch', 'candidate'),
@@ -3871,11 +3468,14 @@ class TestCatalogueAnchorDecision(unittest.TestCase):
             ('record', 'pr_updated_at', '2026-09-25T12:00:01Z'),
             ('record', 'pr_updated_at', '2026-09-25T12:00:02Z'),
         ]
+        mutations += [('record-candidate', field, 'd' * 40)
+                      for field in ('head_sha', 'base_sha', 'execution_sha')]
         for target, key, value in mutations:
             with self.subTest(target=target, key=key, value=value):
                 api, approved, _, _ = self.fixture()
-                getattr(api, target)[key] = value
-                if target == 'record':
+                holder = api.record['candidate'] if target == 'record-candidate' else getattr(api, target)
+                holder[key] = value
+                if target.startswith('record'):
                     api.pack()
                 with self.assertRaises(ValueError):
                     approved_catalogue(api, api.candidate, approved)
@@ -3887,24 +3487,12 @@ class TestCatalogueAnchorDecision(unittest.TestCase):
                 api.pack()
                 with self.assertRaises(ValueError):
                     approved_catalogue(api, api.candidate, approved)
-        for field in ('head_sha', 'base_sha', 'execution_sha'):
-            with self.subTest(candidate=field):
-                api, approved, _, _ = self.fixture()
-                api.record['candidate'][field] = 'd' * 40
-                api.pack()
-                with self.assertRaises(ValueError):
-                    approved_catalogue(api, api.candidate, approved)
         api, approved, adopted, _ = self.fixture()
         api.sources['tests/hazards/critical.json'] = adopted + b'\n'
         with self.assertRaises(ValueError):
             approved_catalogue(api, api.candidate, approved)
 
     def test_new_anchor_revoke_pending_or_failure_after_collection_blocks_publication(self):
-        import copy
-
-        from scripts.acceptance import recheck_current
-        from scripts.verifier_approval import approved_catalogue
-
         for status, conclusion, decision in (
             ('completed', 'success', 'revoke'), ('in_progress', None, 'approve'),
             ('completed', 'failure', 'approve'), ('completed', 'cancelled', 'approve'),
@@ -3923,12 +3511,6 @@ class TestCatalogueAnchorDecision(unittest.TestCase):
                     recheck_current(api, result)
 
     def normalize_hazards(self, catalogue, report, *, include_results=True):
-        import hashlib
-        import io
-        import zipfile
-
-        from scripts.acceptance_evidence import PRODUCERS, normalize_native
-
         args, receipt, _ = TestNativeEvidenceConsumer().fixture()
         args['producer'] = next(producer for producer in PRODUCERS if producer.lane == 'hazards')
         args['job']['name'] = 'hazards'
@@ -3938,18 +3520,11 @@ class TestCatalogueAnchorDecision(unittest.TestCase):
         raw = json.dumps(report).encode()
         receipt.update(job_key='hazards', job_name='hazards', lane='hazards', tests=None,
                        result_sha256=hashlib.sha256(raw).hexdigest())
-        buffer = io.BytesIO()
-        with zipfile.ZipFile(buffer, 'w') as archive:
-            archive.writestr('evidence.json', json.dumps(receipt))
-            if include_results:
-                archive.writestr('results.json', raw)
-        args['archive'] = buffer.getvalue()
-        args['artifact']['digest'] = 'sha256:' + hashlib.sha256(args['archive']).hexdigest()
+        args['archive'], args['artifact']['digest'] = pack_archive(
+            receipt, **({'results.json': raw} if include_results else {}))
         return normalize_native(**args)
 
     def test_native_receipt_binds_exact_adopted_catalogue_and_all_ten_obligations(self):
-        import copy
-        import hashlib
 
         original, adopted = self.catalogues()
         report = self.hazard_report(adopted)
@@ -3989,7 +3564,6 @@ class TestCatalogueAnchorDecision(unittest.TestCase):
             self.normalize_hazards(adopted, report, include_results=False)
 
     def test_native_policy_cannot_replace_approved_obligations_with_self_consistent_candidate(self):
-        import copy
 
         _, adopted = self.catalogues()
         original = json.loads(adopted)
@@ -4018,7 +3592,6 @@ class TestEvalRetrievalProducer(unittest.TestCase):
     the collection into lane statuses."""
 
     def _eval_receipt(self, candidate, policy_sha256, producer_sha256, results):
-        import hashlib
 
         raw = json.dumps(results).encode()
         return {
@@ -4038,12 +3611,6 @@ class TestEvalRetrievalProducer(unittest.TestCase):
         }, raw
 
     def test_eval_retrieval_receipt_normalizes_to_success(self):
-        import hashlib
-        import io
-        import zipfile
-
-        from scripts.acceptance_evidence import PRODUCERS, normalize_native
-
         args, _, _ = TestNativeEvidenceConsumer().fixture()
         producer = next(p for p in PRODUCERS if p.lane == "eval_retrieval")
         self.assertEqual((producer.workflow, producer.job, producer.artifact, producer.kind),
@@ -4055,44 +3622,20 @@ class TestEvalRetrievalProducer(unittest.TestCase):
         candidate = args["candidate"]
         report = {"n": 121, "scored": 108, "failures": 0, "recall@5": 1.0, "mrr": 0.995}
         receipt, raw = self._eval_receipt(candidate, args["policy_digest"], args["producer_digest"], report)
-        buffer = io.BytesIO()
-        with zipfile.ZipFile(buffer, "w") as archive:
-            archive.writestr("evidence.json", json.dumps(receipt))
-            archive.writestr("results.json", raw)
-        args["archive"] = buffer.getvalue()
-        args["artifact"]["digest"] = "sha256:" + hashlib.sha256(args["archive"]).hexdigest()
+        args["archive"], args["artifact"]["digest"] = pack_archive(receipt, **{"results.json": raw})
         result = normalize_native(**args)
         self.assertEqual((result["lane"], result["status"]), ("eval_retrieval", "success"))
         self.assertEqual(result["results"]["recall@5"], 1.0)
         # A receipt mislabeled to another lane must not satisfy this producer.
-        args["archive"] = buffer.getvalue()
         tampered = dict(receipt, lane="gate_l1")
-        tampered_buffer = io.BytesIO()
-        with zipfile.ZipFile(tampered_buffer, "w") as archive:
-            archive.writestr("evidence.json", json.dumps(tampered))
-            archive.writestr("results.json", raw)
-        args["archive"] = tampered_buffer.getvalue()
-        args["artifact"]["digest"] = "sha256:" + hashlib.sha256(args["archive"]).hexdigest()
+        args["archive"], args["artifact"]["digest"] = pack_archive(tampered, **{"results.json": raw})
         with self.assertRaises(ValueError):
             normalize_native(**args)
 
     def test_collect_native_maps_eval_retrieval_job_to_lane_success(self):
-        import hashlib
-        import io
-        import zipfile
-
-        from scripts.acceptance import VERIFICATION_INPUTS, collect_native
-
-        candidate = {"repository": "synthetic/repository", "repository_id": 42, "number": 3,
-                     "head_sha": "a" * 40, "base_sha": None, "execution_sha": "c" * 40,
-                     "head_repository_id": 84}
-        run = {"id": 123, "run_attempt": 2, "event": "pull_request", "path": ".github/workflows/ci.yml",
-               "head_sha": "a" * 40, "status": "completed", "repository": {"id": 42, "full_name": "synthetic/repository"},
-               "head_repository": {"id": 84}, "actor": {"id": 7}, "triggering_actor": {"login": "synthetic"},
-               "created_at": "2026-10-26T12:00:05Z", "run_started_at": "2026-10-26T12:00:05Z"}
-        commit = {"sha": "c" * 40, "parents": [{"sha": None}, {"sha": "a" * 40}],
-                  "commit": {"tree": {"sha": "1" * 40},
-                             "committer": {"date": "2026-10-26T12:00:00Z"}}}
+        fixture_args, _, _ = TestNativeEvidenceConsumer().fixture()
+        candidate, run, commit = fixture_args["candidate"], fixture_args["run"], fixture_args["execution_commit"]
+        candidate["base_sha"], commit["parents"][0]["sha"] = None, None
         jobs = [{"id": 456 + i, "run_id": 123, "run_attempt": 2, "head_sha": "a" * 40,
                  "name": name, "status": "completed", "conclusion": "success"}
                 for i, name in enumerate(("gate-l1", "eval-retrieval"))]
@@ -4102,29 +3645,7 @@ class TestEvalRetrievalProducer(unittest.TestCase):
         artifacts = []
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
-            (root / "scripts").mkdir()
-            (root / ".github/workflows").mkdir(parents=True)
-            (root / "scripts/review_tooling.py").write_bytes(b"approved policy")
-            (root / "scripts/ci_evidence.py").write_bytes(b"approved producer")
-            from scripts.acceptance_evidence import PRODUCERS
-            for workflow in {p.workflow for p in PRODUCERS}:
-                source = (b"    name: unit (${{ matrix.shard }}/2)\n        shard: [1, 2]\n"
-                          if workflow == 'ci.yml' else b"approved workflow")
-                (root / ".github/workflows" / workflow).write_bytes(source)
-            for relative in (*VERIFICATION_INPUTS, "taskfiles/quality.yml"):
-                path = root / relative
-                path.parent.mkdir(parents=True, exist_ok=True)
-                if not path.exists():
-                    path.write_bytes(b"approved verifier input")
-            def git(*args):
-                return subprocess.check_output(["git", *args], cwd=root, text=True,
-                                               stderr=subprocess.DEVNULL).strip()
-            git("init", "-b", "main")
-            git("config", "user.name", "Synthetic Test")
-            git("config", "user.email", "synthetic@example.invalid")
-            git("add", ".")
-            git("commit", "-m", "approved base")
-            base = git("rev-parse", "HEAD")
+            base = approved_repository(root)
             candidate["base_sha"] = base
             commit["parents"][0]["sha"] = base
             policy_sha256 = hashlib.sha256(b"approved policy").hexdigest()
@@ -4135,16 +3656,11 @@ class TestEvalRetrievalProducer(unittest.TestCase):
                 receipt, raw = self._eval_receipt(
                     {**candidate, "number": 3}, policy_sha256, producer_sha256, results[lane])
                 receipt.update(job_key=job["name"], job_name=job["name"], lane=lane)
-                buffer = io.BytesIO()
-                with zipfile.ZipFile(buffer, "w") as archive:
-                    archive.writestr("evidence.json", json.dumps(receipt))
-                    archive.writestr("results.json", raw)
-                blob = buffer.getvalue()
+                blob, digest = pack_archive(receipt, **{"results.json": raw})
                 archives[aid] = blob
                 artifacts.append({"id": aid, "expired": False,
                                   "name": f"evidence-{job['name']}-attempt-2",
-                                  "size_in_bytes": len(blob),
-                                  "digest": "sha256:" + hashlib.sha256(blob).hexdigest(),
+                                  "size_in_bytes": len(blob), "digest": digest,
                                   "workflow_run": {"id": 123, "repository_id": 42,
                                                    "head_repository_id": 84, "head_sha": "a" * 40}})
                 aid += 1
@@ -4185,3 +3701,7 @@ class TestEvalRetrievalProducer(unittest.TestCase):
             result = collect_native(API(), pr, root)
             self.assertEqual(result["lane_statuses"].get("gate_l1"), "success")
             self.assertEqual(result["lane_statuses"].get("eval_retrieval"), "success")
+
+
+if __name__ == "__main__":
+    unittest.main()
