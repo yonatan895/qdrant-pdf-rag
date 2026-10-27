@@ -29,19 +29,27 @@ def identity() -> dict:
     parents = git('show', '-s', '--format=%P', 'HEAD').split()
     pr = event.get('pull_request')
     head = pr['head']['sha'] if pr else execution
-    base = pr['base']['sha'] if pr else (parents[0] if parents else execution)
-    if not all(re.fullmatch('[a-f0-9]{40}', value) for value in (head, base, execution)):
+    event_base = pr['base']['sha'] if pr else (parents[0] if parents else execution)
+    base = event_base
+    if pr and execution != head:
+        # GitHub builds refs/pull/N/merge on the base tip it last merged, which
+        # can differ from the payload's base.sha in either direction (#1118).
+        # Record the base this tree was actually built on. The consumer binds
+        # it to the live default-branch tip through the commit API, so a stale
+        # test merge reads as stale there, never as current evidence.
+        if len(parents) != 2 or parents[1] != head:
+            raise ValueError('checkout does not bind the event head')
+        base = parents[0]
+    if not all(re.fullmatch('[a-f0-9]{40}', value) for value in (head, base, event_base, execution)):
         raise ValueError('invalid candidate identity')
     if pr and execution == head:
         git('merge-base', '--is-ancestor', base, head)
-    if pr and execution != head and parents != [base, head]:
-        raise ValueError('checkout does not bind the event head and base')
     if git('status', '--porcelain', '--untracked-files=no'):
         raise ValueError('tracked candidate is dirty')
     return {
         'repository': os.environ['GITHUB_REPOSITORY'],
         'repository_id': int(os.environ['GITHUB_REPOSITORY_ID']),
-        'head_sha': head, 'base_sha': base, 'execution_sha': execution,
+        'head_sha': head, 'base_sha': base, 'event_base_sha': event_base, 'execution_sha': execution,
         'execution_parents': parents, 'pull_request': pr['number'] if pr else None,
         'event': os.environ['GITHUB_EVENT_NAME'],
         'workflow_ref': os.environ['GITHUB_WORKFLOW_REF'],

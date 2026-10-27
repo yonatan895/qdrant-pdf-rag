@@ -35,6 +35,9 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
+  # skopeo builds and loads the sneakernet bundle. On the pinned ubuntu-26.04 image the
+  # exact package comes from the immutable resolute Release pocket (#1118).
+  SKOPEO_APT_VERSION: 1.21.0~pre1-2build1
   INGEST_IMAGE_LOCAL: mainframe-rag/ingest
   AGENT_IMAGE_LOCAL: mainframe-rag/agent
 
@@ -45,7 +48,7 @@ jobs:
     concurrency:
       group: select-${{ github.ref || github.run_id }}
       cancel-in-progress: false
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions:
       contents: read
@@ -55,6 +58,10 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
+      # The selector runs repository code: pin its interpreter, never the image's python3 (#1118).
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.14.8"
       - id: profile
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
@@ -75,7 +82,7 @@ jobs:
       fail-fast: false
       matrix:
         artifact: [wheelhouse, bm25-weights]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     env:
       SHARE: "false"
@@ -85,7 +92,7 @@ jobs:
           fetch-depth: 2
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
-          python-version: "3.14"
+          python-version: "3.14.8"
       - name: Acquire verified runtime wheels
         if: matrix.artifact == 'wheelhouse'
         run: python scripts/dependency_lock.py prepare --profile runtime --directory bundles/wheelhouse --download-workers 8
@@ -121,7 +128,7 @@ jobs:
     permissions:
       contents: read
       packages: write
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     env:
       SHARE: "false"
@@ -132,7 +139,7 @@ jobs:
           fetch-depth: 2
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
-          python-version: "3.14"
+          python-version: "3.14.8"
       - run: sh scripts/tools/install-task.sh
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -175,7 +182,7 @@ jobs:
       cancel-in-progress: false
     permissions:
       contents: read
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -183,7 +190,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
-          python-version: "3.14"
+          python-version: "3.14.8"
       - run: python scripts/prepare_python.py --python "$(command -v python)" --wheelhouse .tools/python-wheels/dev --connected --download-workers 8
         timeout-minutes: 4
       - name: Pull the pinned upstream Open WebUI image by digest (images.txt)
@@ -211,7 +218,7 @@ jobs:
     permissions:
       contents: read
       packages: write
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -230,7 +237,9 @@ jobs:
           # of the Containerfile and BuildKit rewrites layer timestamps to it.
           SOURCE_DATE_EPOCH="$(git log -1 --format=%ct -- images/openwebui/Containerfile)"
           export SOURCE_DATE_EPOCH
-          docker buildx create --name owui --driver docker-container --use >/dev/null
+          # BuildKit by digest (#1118): v0.33.1, what buildx-stable-1 resolved to on 2026-10-27.
+          docker buildx create --name owui --driver docker-container --use \
+            --driver-opt image=moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea >/dev/null
           build() {
             docker buildx build --builder owui -f images/openwebui/Containerfile --provenance=false --sbom=false \
               --build-arg SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" --output "$1,rewrite-timestamp=true" images/openwebui
@@ -270,7 +279,7 @@ jobs:
       cancel-in-progress: false
     permissions:
       contents: read
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     outputs:
       sha: ${{ steps.refs.outputs.sha }}
@@ -323,7 +332,7 @@ jobs:
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'schedule' && github.ref == 'refs/heads/main')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     # #1000: the signing key is an environment secret of `release-signing`
     # (deployment branches: main only, required reviewers; docs/deploy.md).
@@ -346,7 +355,7 @@ jobs:
         run: |
           export PATH="/usr/local/bin:$PATH"
           sudo apt-get update -qq
-          sudo apt-get install -y -qq skopeo
+          sudo apt-get install -y -qq --allow-downgrades "skopeo=$SKOPEO_APT_VERSION"
           skopeo --version
 
       - name: Log in to GHCR
@@ -428,7 +437,7 @@ jobs:
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'schedule' && github.ref == 'refs/heads/main')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     env:
       # Open WebUI is default-on (ADR-0008) and fails closed without site inputs; this job
@@ -554,7 +563,7 @@ jobs:
       fail-fast: false
       matrix:
         lane: [pipeline, gateway-chat-upstream, gateway-chat-malformed, gateway-chat-truncated, gateway-embed-upstream, gateway-embed-malformed, gateway-embed-dimension, gateway-auth, lifecycle-chart, lifecycle, shared-gateway, rerank, observability, openwebui]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 60
     permissions:
       contents: read
@@ -599,7 +608,7 @@ jobs:
         run: |
           export PATH="/usr/local/bin:$PATH"
           sudo apt-get update -qq
-          sudo apt-get install -y -qq skopeo
+          sudo apt-get install -y -qq --allow-downgrades "skopeo=$SKOPEO_APT_VERSION"
           skopeo --version
 
       - name: Install pinned kind (ephemeral air-gap-like cluster)
@@ -690,6 +699,11 @@ jobs:
           # StorageClass — no duplicate provisioner, no ambient defaults.
           curl -fsSL -o "$RUNNER_TEMP/local-path.yaml" https://raw.githubusercontent.com/rancher/local-path-provisioner/49b2be8e26d6d34c9afaa21fa33108d2e82f8955/deploy/local-path-storage.yaml
           echo "9781b39c24f3f651bd6d6e41b561e04e4904bbdb6d4f8c7a6009df3a702dcd65  $RUNNER_TEMP/local-path.yaml" | sha256sum -c -
+          # The verified manifest names an untagged busybox helper (latest). Pin it by
+          # digest (#1118): busybox 1.38.0, what latest resolved to on 2026-10-27.
+          test "$(grep -c '^ *image: docker.io/library/busybox$' "$RUNNER_TEMP/local-path.yaml")" = 1
+          sed -i 's|^\( *image: \)docker.io/library/busybox$|\1docker.io/library/busybox@sha256:fd7dc98638c8e305f4dc34e979f1c0fdfdcaeb0fbf8fcff77ae834b6da3d7e6e|' "$RUNNER_TEMP/local-path.yaml"
+          grep -q '^ *image: docker.io/library/busybox@sha256:fd7dc98638c8e305f4dc34e979f1c0fdfdcaeb0fbf8fcff77ae834b6da3d7e6e$' "$RUNNER_TEMP/local-path.yaml"
           /usr/local/bin/kubectl apply -f "$RUNNER_TEMP/local-path.yaml"
           /usr/local/bin/kubectl -n local-path-storage rollout status deploy/local-path-provisioner --timeout=180s
           /usr/local/bin/kubectl get storageclass local-path
@@ -1307,7 +1321,7 @@ jobs:
     permissions:
       contents: read
     timeout-minutes: 5
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     outputs:
       ok: ${{ steps.check.outputs.ok }}
     env:
@@ -1335,7 +1349,7 @@ jobs:
       cancel-in-progress: false
     permissions:
       contents: read
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     env:
       # Open WebUI is default-on (ADR-0008) and fails closed without site inputs; this job
@@ -1620,7 +1634,7 @@ jobs:
       needs.e2e-secrets-check.outputs.ok == 'true' &&
       (github.event_name == 'workflow_dispatch' ||
        (github.event_name == 'schedule' && github.ref == 'refs/heads/main'))
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     env:
       # Open WebUI is default-on (ADR-0008) and fails closed without site inputs; this job
@@ -1671,7 +1685,7 @@ jobs:
           export PATH="/usr/local/bin:$PATH"
           cd "$BUNDLE_CHECKOUT"
           sudo apt-get update -qq
-          sudo apt-get install -y -qq skopeo
+          sudo apt-get install -y -qq --allow-downgrades "skopeo=$SKOPEO_APT_VERSION"
           skopeo --version
 
       - name: Log in to lab OpenShift
