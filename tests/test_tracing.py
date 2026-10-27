@@ -132,7 +132,15 @@ def test_request_cancellation_or_failure_ends_root_once(
     path = (
         ("/ui/chat/stream" if stream else "/ui/chat") if route == "console" else f"/v1/{route}"
     )
-    roots = [span for span in exporter.get_finished_spans() if span.kind == trace.SpanKind.SERVER]
+
+    def server_root(message):
+        roots = [
+            span for span in exporter.get_finished_spans()
+            if span.kind == trace.SpanKind.SERVER
+        ]
+        assert len(roots) == 1, message
+        return roots[0]
+
     if mode == "failure":
         monkeypatch.setattr(
             app_mod, "retrieve_search", MagicSearch(exc=RuntimeError("synthetic failure"))
@@ -151,11 +159,8 @@ def test_request_cancellation_or_failure_ends_root_once(
             )
         )
         assert response.status_code == 502
-        roots = [
-            span for span in exporter.get_finished_spans() if span.kind == trace.SpanKind.SERVER
-        ]
-        assert len(roots) == 1
-        _assert_root_join(events, roots[0], roots[0].attributes["http.request_id"])
+        root = server_root("failed request root must finish exactly once")
+        _assert_root_join(events, root, root.attributes["http.request_id"])
         assert sum(point.value for point in _points(reader, "rag.requests.total")) == 1
         return
 
@@ -184,9 +189,9 @@ def test_request_cancellation_or_failure_ends_root_once(
         app_mod._record_handler_error(request, "internal")
 
     asyncio.run(run())
-    roots = [span for span in exporter.get_finished_spans() if span.kind == trace.SpanKind.SERVER]
-    assert len(roots) == 1, "cancelled request root must finish exactly once"
-    _assert_root_join(events, roots[0], "disconnect-test")
+    _assert_root_join(
+        events, server_root("cancelled request root must finish exactly once"), "disconnect-test"
+    )
     points = _points(reader, "rag.requests.total")
     assert sum(point.value for point in points) == 1
     assert points[0].attributes["outcome"] == "client_disconnect"

@@ -19,6 +19,8 @@ from mainframe_rag.ports import ChatMessage, ChatResult, TokenUsage
 from mainframe_rag.retrieve.query import SearchHit
 from tests.helpers_agent_local import agent_client, agent_hit, chat_frames
 
+_FIXED_422 = {"code": "invalid_request", "message": "request body failed validation"}
+
 
 def _hit(cite_suffix: str = "p. 1-6") -> SearchHit:
     return agent_hit(
@@ -434,7 +436,7 @@ def test_chat_unsearchable_active_user_refuses_before_any_work(chat_client, path
             {"role": "assistant", "content": "This is not the question"},
         ], "stream": stream})
         assert result.status_code == 422, repr(content)
-        assert result.json() == {"code": "invalid_request", "message": "request body failed validation"}
+        assert result.json() == _FIXED_422
     assert chat_client.mock_search.calls == []
     assert chat_client.fake_llm.chat_calls == []
     assert chat_client.fake_llm.stream_calls == []
@@ -493,7 +495,7 @@ def test_chat_condensation_uses_only_history_before_normalized_user(
 def test_chat_invalid_active_turn_has_no_model_or_retrieval(chat_client, messages, path, stream):
     result = chat_client.post(path, json={"messages": messages, "stream": stream})
     assert result.status_code == 422
-    assert result.json() == {"code": "invalid_request", "message": "request body failed validation"}
+    assert result.json() == _FIXED_422
     assert chat_client.mock_search.calls == []
     assert chat_client.fake_llm.chat_calls == chat_client.fake_llm.stream_calls == []
 
@@ -518,7 +520,7 @@ def test_chat_rejects_invalid_temperature(chat_client, path, temperature):
         return
     result = chat_client.post(path, json={"messages": messages, "temperature": temperature})
     assert result.status_code == 422
-    assert result.json() == {"code": "invalid_request", "message": "request body failed validation"}
+    assert result.json() == _FIXED_422
     assert chat_client.mock_search.calls == []
     assert chat_client.fake_llm.chat_calls == chat_client.fake_llm.stream_calls == []
 
@@ -530,7 +532,7 @@ def test_chat_ignored_tail_still_counts_toward_body_limit(chat_client, monkeypat
         {"role": "system", "content": "x" * 64},
     ]})
     assert result.status_code == 422
-    assert result.json() == {"code": "invalid_request", "message": "request body failed validation"}
+    assert result.json() == _FIXED_422
     assert chat_client.mock_search.calls == []
     assert chat_client.fake_llm.chat_calls == []
 

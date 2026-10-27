@@ -177,6 +177,17 @@ def _run(coro_factory):
 SEARCH = ("/v1/search", {"query": "IEA500I"})
 
 
+def _stream_call(endpoint):
+    """(path, JSON body) of one endpoint's streaming surface."""
+    if endpoint == "console":
+        return "/ui/chat/stream", {"messages": [{"role": "user", "content": "IEA500I"}]}
+    if endpoint == "answer":
+        return "/v1/answer", {"query": "IEA500I", "stream": True}
+    return "/v1/chat", {
+        "messages": [{"role": "user", "content": "IEA500I"}], "stream": True,
+    }
+
+
 # ------------------------------------------------------------ controller unit
 
 
@@ -690,7 +701,8 @@ def test_exact_storage_read_shares_admission_and_releases_for_next_request(env, 
 
         qd.before_retrieve = storage_wait
         search = InstantSearch()
-        async with _serving(env, search):
+        async with _serving(env, search), contextlib.AsyncExitStack() as cleanup:
+            cleanup.callback(gate.set)  # release the parked read even on failure
             env.setattr(app_mod, "qdrant", qd)
             ref = _expected_ref(BUILD_A, _expected_envelope())
             holder = _Call(f"/v1/evidence/{ref}", {}, "max_bytes=4" if termination == "refusal" else "", method="GET").start()
@@ -721,7 +733,6 @@ def test_exact_storage_read_shares_admission_and_releases_for_next_request(env, 
             assert next_read.status == 200 and next_read.json()["text"] == TEXT
             assert (await _Call(*SEARCH).start().done()).status == 200
             assert app_mod.admission.active == 0
-            gate.set()
 
     _run(main)
 
@@ -746,12 +757,7 @@ def test_stream_deadline_closes_stalled_asgi_send_and_admits_next_queued_request
                 return release(ticket)
 
             env.setattr(admission_mod.AdmissionTicket, "release", record_release)
-            path = "/ui/chat/stream" if endpoint == "console" else f"/v1/{endpoint}"
-            body = {"query": "IEA500I", "stream": True} if endpoint == "answer" else {
-                "messages": [{"role": "user", "content": "IEA500I"}], "stream": True,
-            }
-            if endpoint == "console":
-                body.pop("stream")
+            path, body = _stream_call(endpoint)
             call = _Call(path, body)
             actual_send = call._send
 
@@ -791,12 +797,7 @@ def test_producer_deadline_terminal_frames_share_one_absolute_delivery_grace(env
     async def main():
         llm = ParkedStreamLLM()
         async with _serving(env, InstantSearch(), llm):
-            path = "/ui/chat/stream" if endpoint == "console" else f"/v1/{endpoint}"
-            body = {"query": "IEA500I", "stream": True} if endpoint == "answer" else {
-                "messages": [{"role": "user", "content": "IEA500I"}],
-            }
-            if endpoint == "chat":
-                body["stream"] = True
+            path, body = _stream_call(endpoint)
             call = _Call(path, body)
             actual_send = call._send
             grace_started = None
@@ -835,12 +836,7 @@ def test_deadline_and_admission_include_the_closing_asgi_body_send(env, endpoint
     async def main():
         async with _serving(env, InstantSearch()):
             closing = asyncio.Event()
-            path = "/ui/chat/stream" if endpoint == "console" else f"/v1/{endpoint}"
-            body = {"query": "IEA500I", "stream": True} if endpoint == "answer" else {
-                "messages": [{"role": "user", "content": "IEA500I"}],
-            }
-            if endpoint == "chat":
-                body["stream"] = True
+            path, body = _stream_call(endpoint)
             call = _Call(path, body)
             actual_send = call._send
 

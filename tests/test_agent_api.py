@@ -2295,6 +2295,11 @@ def test_v1_answer_empty_hits_identifier_names_codes_json_and_stream(client, mon
     assert payload["answer"] == "No manual excerpts carry DSN90221I."
     assert payload["citations"] == []
     assert payload["hits"] == []
+    # The empty final stays closed on the wire: no script can ride this path
+    # and nothing was supplied (mutation of the shared builder must fail).
+    assert payload["script"] is None
+    assert payload["script_lang"] is None
+    assert payload["supplied_evidence"] == [] and payload["evidence_omitted"] == 0
 
     monkeypatch.setattr(app_mod, "retrieve_search", _empty_search("nl"))
     resp = client.post("/v1/answer", json={"query": "random obscure thing"})

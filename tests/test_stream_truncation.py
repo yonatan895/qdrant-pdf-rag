@@ -656,7 +656,7 @@ def test_v1_chat_stream_real_client_failure_is_incomplete_no_success_chunk(reque
         json={"messages": [{"role": "user", "content": "IEA500I command"}], "stream": True},
     )
     assert resp.status_code == 200
-    assert "data: [DONE]" in resp.text
+    assert resp.text.rstrip().endswith("data: [DONE]")
     frames = chat_frames(resp.text)
     error = next(f for f in frames if "error" in f)
     assert error["error"] == {"code": "upstream_error", "message": "stream failed"}
@@ -664,7 +664,7 @@ def test_v1_chat_stream_real_client_failure_is_incomplete_no_success_chunk(reque
     finished = [
         f
         for f in frames
-        if "error" not in f and f.get("choices") and f["choices"][0].get("finish_reason")
+        if f.get("choices") and f["choices"][0].get("finish_reason")
     ]
     assert finished == []
     assert "SECRET-UPSTREAM-TEXT" not in resp.text
@@ -679,7 +679,7 @@ def test_json_real_client_missing_finish_both_legs_is_502(missing_finish_client,
     fallback that both lack an explicit finish: fixed 502 envelope only."""
     resp = missing_finish_client.post(path, json=body)
     assert resp.status_code == 502
-    assert resp.json() == {"code": "upstream_error", "message": "answer failed"}
+    assert resp.json() == _ANSWER_FAILED
 
 
 @pytest.fixture
@@ -709,7 +709,7 @@ def test_v1_chat_json_real_client_buffered_error_is_502(buffered_error_client):
         json={"messages": [{"role": "user", "content": "IEA500I command"}]},
     )
     assert resp.status_code == 502
-    assert resp.json() == {"code": "upstream_error", "message": "answer failed"}
+    assert resp.json() == _ANSWER_FAILED
     assert "PRIVATE-SENTINEL-KEY" not in resp.text
 
 
@@ -915,18 +915,23 @@ def test_truncated_stream_alerts_once_with_one_terminal_frame(
 
 @pytest.fixture
 def blast_client(monkeypatch, synthetic_pdf, servable_representation_gate):
-    """LLM stream yields tokens, then raises a non-truncation error after
-    headers are committed: the wire shape is a fixed error event, never a
-    final, and the request leaves exactly one terminal observation."""
+    """LLM stream yields tokens, then raises a generic (non-truncation)
+    error after headers are committed: the wire shape is a fixed error event,
+    never a final, and the request leaves exactly one terminal observation
+    without a `stream_truncated` alert (that alert is truncation-only)."""
     monkeypatch.setattr(app_mod, "retrieve_search", _search_stub().search)
-    llm = truncation_after_token(RuntimeError("boom after headers"))
+    llm = StreamStubLLM(
+        ({"type": "token", "delta": "Partial ", "token": "Partial ", "ttft_ms": 12},),
+        RuntimeError("boom after headers"),
+    )
     yield from _client(monkeypatch, synthetic_pdf, llm)
 
 
-def test_v1_answer_stream_post_header_exception_single_observation(blast_client, monkeypatch):
-    """OBS-1B: an exception after headers yields error-without-final with a
-    fixed error frame. The single terminal observation rides the same
-    terminal/red_recorded path the truncation legs prove under load; the
+def test_v1_answer_stream_post_header_exception_single_observation(blast_client, monkeypatch, caplog):
+    """OBS-1B: a generic exception after headers yields error-without-final
+    with a fixed error frame and no `stream_truncated` alert (that alert is
+    reserved for typed truncation). The single terminal observation rides the
+    same terminal/red_recorded path the truncation legs prove under load; the
     SERVER span ends ERROR carrying only the error type."""
     import json as json_mod
 
@@ -938,8 +943,10 @@ def test_v1_answer_stream_post_header_exception_single_observation(blast_client,
     provider = TracerProvider()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
     monkeypatch.setattr(app_mod, "tracer", provider.get_tracer("blast-test"))
-    resp = blast_client.post("/v1/answer?stream=true", json={"query": "IEA500I command"})
+    with caplog.at_level(logging.WARNING):
+        resp = blast_client.post("/v1/answer?stream=true", json={"query": "IEA500I command"})
     assert resp.status_code == 200
+    assert not any('"stream_truncated"' in r.getMessage() for r in caplog.records)
     events = _answer_sse_events(resp.text)
     kinds = [kind for kind, _ in events]
     assert "token" in kinds
@@ -975,6 +982,7 @@ _BUDGET_SURFACES = [
     pytest.param("/v1/chat", True, id="chat-stream"),
 ]
 _MODEL_TIMEOUT = {"code": "model_timeout", "message": "model response timed out"}
+_ANSWER_FAILED = {"code": "upstream_error", "message": "answer failed"}
 _HI = [ChatMessage(role="user", content="hi")]
 
 
