@@ -1278,7 +1278,7 @@ def test_other_routes_to_a_protected_service_refuse_before_any_mutation(tree, ba
         r = _run(tree, ("ROUTES_FILE", routes))
     assert r.returncode != 0
     assert "Route shortcut exposes a protected Service" in r.stderr
-    assert "upgrade" not in _helm_log(tree)
+    assert _mutations(tree) == []
 
 
 @pytest.mark.parametrize(("route", "route_on", "message"), [
@@ -1295,7 +1295,7 @@ def test_route_with_a_protected_alternate_backend_refuses_before_mutation(tree, 
     r = _run(tree, ("ROUTES_FILE", routes), *extra)
     assert r.returncode != 0
     assert message in r.stderr
-    assert "upgrade" not in _helm_log(tree)
+    assert _mutations(tree) == []
 
 
 # ------------------------------------------- Open WebUI front end (#1074)

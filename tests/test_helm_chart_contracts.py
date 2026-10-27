@@ -896,6 +896,9 @@ def test_feedback_off_by_default_renders_nothing_and_changes_nothing():
     assert run_new_template({"feedback": {"enabled": False}}) == default
     # Settings made while disabled do not leak a thing into the render.
     assert run_new_template({"feedback": {"enabled": False, "secretName": "x", "storageSize": "1Ti"}}) == default
+    # Metrics on must not pull a feedback object in: the guard is feedback.enabled,
+    # never metrics.enabled.
+    assert not [k for k in run_new_template({"metrics": {"enabled": True}}) if "feedback" in k[1]]
     raw = _helm_template_with_values(base_values())
     assert "rag-feedback" not in raw.stdout and "FEEDBACK" not in raw.stdout
 
@@ -945,9 +948,6 @@ def test_feedback_claim_service_and_agent_wiring():
                              "storage": {"className": "fast-block"}, "metrics": {"enabled": True}})
     pvc = docs["PersistentVolumeClaim", "rag-feedback-data"]
     assert pvc["metadata"]["annotations"]["helm.sh/resource-policy"] == "keep"
-    sized = run_new_template({"openobserve": {"storage": {"size": "20Gi"}}})
-    assert sized["PersistentVolumeClaim", "openobserve-data"]["spec"]["resources"]["requests"][
-        "storage"] == "20Gi"
     assert pvc["spec"] == {"accessModes": ["ReadWriteOnce"], "storageClassName": "fast-block",
                            "resources": {"requests": {"storage": "20Gi"}}}
     env = env_map(docs["StatefulSet", "rag-feedback"], "feedback")
@@ -1954,6 +1954,9 @@ def test_openobserve_backend_contract():
     assert pvc["spec"]["storageClassName"] == "standard"
     assert pvc["spec"]["resources"]["requests"]["storage"] == "10Gi"
     assert pvc["metadata"]["annotations"]["helm.sh/resource-policy"] == "keep"
+    sized = run_new_template({"openobserve": {"storage": {"size": "20Gi"}}})
+    assert sized["PersistentVolumeClaim", "openobserve-data"]["spec"]["resources"]["requests"][
+        "storage"] == "20Gi"
 
 
 def test_openobserve_egress_policy_denies_all():

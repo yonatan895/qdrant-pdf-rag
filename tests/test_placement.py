@@ -321,6 +321,10 @@ def _transferring():
     return [replace(observations[0], transfers=((0, PEERS[1], PEERS[2]),)), *observations[1:]]
 
 
+def _one_peer_unreachable():
+    return _fleet(unreachable=(303,))
+
+
 def _counted(shard_count=None, peers=PEERS):
     return [_obs(peer, shard_count, collection=COLLECTION) for peer in peers]
 
@@ -354,7 +358,7 @@ def _missing_everywhere(extra=None):
     (lambda: _missing_everywhere(), "unservable", None, PEERS),
     (lambda: _fleet() + [_obs(999, None, collection=COLLECTION, missing=True)],
      "unverifiable", "absent", PEERS),
-    (lambda: _fleet(unreachable=(303,)), "degraded", None, PEERS),
+    (_one_peer_unreachable, "degraded", None, PEERS),
     (_no_shard_zero, "unservable", "shard 0", PEERS),
     (_transferring, "recovering", "transfer in progress", PEERS),
     (lambda: _with_local_state(_fleet(), PEERS[0], 0, "INITIALIZING"), "recovering", "initializing", PEERS),
@@ -387,6 +391,8 @@ def test_collection_verdict_matrix(observations, state, needle, accepted):
         assert any(needle in problem for problem in verdict.problems)
     if observations is _one_peer_only:
         assert all(shard.active_peers == (PEERS[0],) for shard in verdict.shards)
+    if observations is _one_peer_unreachable:
+        assert all(len(shard.active_peers) == 2 for shard in verdict.shards)
     if observations is _no_shard_zero or observations is _extra_shard or observations is _foreign_peer_view:
         return
     if state == "degraded" and observations is not _disagreeing:

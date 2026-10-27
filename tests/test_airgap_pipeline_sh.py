@@ -79,10 +79,11 @@ def test_pipeline_refusals_precede_every_stage(pipe_tree):
     assert r.returncode != 0
     assert "unknown argument: --skip-laod" in r.stderr
     assert "STAGE" not in r.stdout
-    r = _run_pipeline(pipe_tree, extra_env={"GATEWAY_PROBE_MAX_TOKENS": "bad"})
-    assert r.returncode != 0
-    assert "GATEWAY_PROBE_MAX_TOKENS must be" in r.stderr
-    assert "STAGE" not in r.stdout
+    for bad in ("0", "4097", "bad"):
+        r = _run_pipeline(pipe_tree, extra_env={"GATEWAY_PROBE_MAX_TOKENS": bad})
+        assert r.returncode != 0, bad
+        assert "GATEWAY_PROBE_MAX_TOKENS must be" in r.stderr
+        assert "STAGE" not in r.stdout
 
 
 def test_pipeline_dryrun_full(pipe_tree):

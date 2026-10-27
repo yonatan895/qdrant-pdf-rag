@@ -781,6 +781,16 @@ def test_image_digest_env_renders_digest_per_image(monkeypatch, mapper_env):
     assert all("digest" not in image for image in load_values(out)["images"].values())
 
 
+@pytest.mark.parametrize("bad", ["latest", "sha256:" + "G" * 64],
+                         ids=["tag", "non-hex-digest"])
+def test_malformed_image_digest_fails_closed(monkeypatch, mapper_env, bad):
+    monkeypatch.setenv("IMAGE_DIGEST_INGEST", bad)
+    r, out = mapper_env()
+    assert r.returncode == 1
+    assert "IMAGE_DIGEST_INGEST must be a sha256 manifest digest" in r.stderr
+    assert not out.exists()
+
+
 # ------------------------------------------------ feedback service (#804)
 
 FEEDBACK_ON = {"FEEDBACK_ENABLED": "true", "FEEDBACK_SECRET": "fb-secret"}

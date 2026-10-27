@@ -298,7 +298,7 @@ def test_load_tampered_sums_fails_signature(load_tree):
 ], ids=["first-party", "openwebui"])
 def test_load_image_digest_mismatch_fails_closed(load_tree, selection, member, key):
     """A validly-signed bundle with a lying digest: only the binding can catch it."""
-    tmp_path, _ = load_tree
+    tmp_path, log = load_tree
     artdir = tmp_path / "dist"
     _make_artifacts(artdir, sha=IMAGE_SHA, **selection)
     manifest = artdir / "MANIFEST.txt"
@@ -308,6 +308,7 @@ def test_load_image_digest_mismatch_fails_closed(load_tree, selection, member, k
     r = _run_load(load_tree)
     assert r.returncode == 1
     assert "does not match MANIFEST" in r.stderr and key in r.stderr
+    assert not _copies(log)
 
 
 def _copies(log: Path) -> list[str]:
