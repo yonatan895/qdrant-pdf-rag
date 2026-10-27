@@ -49,9 +49,7 @@ PEERS = (101, 202, 303)
 
 def _judge(observations, *, collection=COLLECTION, expected=None, accepted=PEERS):
     expected = expected or PlacementPolicy(6, 3, 2)
-    return evaluate_collection_placement(
-        collection, observations, expected, accepted_peers=accepted
-    )
+    return evaluate_collection_placement(collection, observations, expected, accepted_peers=accepted)
 
 
 def _view(
@@ -86,21 +84,15 @@ def _enabled_status(peer_ids=(101, 202, 303), thread="working"):
 
 
 def _local(shard_id, state="ACTIVE"):
-    return models.LocalShardInfo(
-        shard_id=shard_id, points_count=10, state=models.ReplicaState[state]
-    )
+    return models.LocalShardInfo(shard_id=shard_id, points_count=10, state=models.ReplicaState[state])
 
 
 def _remote(shard_id, peer_id, state="ACTIVE"):
-    return models.RemoteShardInfo(
-        shard_id=shard_id, peer_id=peer_id, state=models.ReplicaState[state]
-    )
+    return models.RemoteShardInfo(shard_id=shard_id, peer_id=peer_id, state=models.ReplicaState[state])
 
 
 def _transfer(shard_id, from_peer, to_peer):
-    return models.ShardTransferInfo(
-        shard_id=shard_id, **{"from": from_peer}, to=to_peer, sync=False
-    )
+    return models.ShardTransferInfo(shard_id=shard_id, **{'from': from_peer}, to=to_peer, sync=False)
 
 
 def _info(peer_id, shard_count, local=(), remote=(), transfers=()):
@@ -254,13 +246,9 @@ def test_policy_claims_refused():
     refuse("owner decision", other_tuple, production=True, single_node=False)
     refuse("contradictory", _settings(), production=True, single_node=True)
     refuse("incomplete", _settings(qdrant_replication_factor=2), production=False, single_node=False)
-    bigger = _settings(
-        qdrant_shard_number=6, qdrant_replication_factor=3, qdrant_write_consistency_factor=2
-    )
+    bigger = _settings(qdrant_shard_number=6, qdrant_replication_factor=3, qdrant_write_consistency_factor=2)
     refuse("1/1/1", bigger, production=False, single_node=True)
-    above = _settings(
-        qdrant_shard_number=6, qdrant_replication_factor=2, qdrant_write_consistency_factor=3
-    )
+    above = _settings(qdrant_shard_number=6, qdrant_replication_factor=2, qdrant_write_consistency_factor=3)
     refuse("exceeds", above, production=False, single_node=False)
 
 
@@ -281,9 +269,7 @@ def test_configured_policy_problems():
     problems = configured_policy_problems(COLLECTION, _params(1, 1, 1), expected)
     assert len(problems) == 3
     assert all("migration" in problem for problem in problems)
-    unknown = SimpleNamespace(
-        shard_number=None, replication_factor=None, write_consistency_factor=None
-    )
+    unknown = SimpleNamespace(shard_number=None, replication_factor=None, write_consistency_factor=None)
     problems = configured_policy_problems(COLLECTION, unknown, expected)
     assert len(problems) == 3
     assert all("unknown/unreadable" in problem for problem in problems)
@@ -304,168 +290,107 @@ def test_healthy_rf3_all_six_shards_and_one_copy_per_shard_refused():
     assert any("only 1/3" in problem for problem in verdict.problems)
 
 
-def test_remote_reports_never_count_as_copies():
-    """A single peer's memory of remote replicas is not an observation of
-    those copies: only local reports certify placement."""
+def _one_peer_only():
+    """One peer's local copies plus its memory of every remote replica."""
     peer = PEERS[0]
-    only = _obs(
-        peer,
-        6,
-        local=[_local(shard) for shard in range(6)],
-        remote=[
-            _remote(shard, other)
-            for other in PEERS
-            if other != peer
-            for shard in range(6)
-        ],
-    )
-    assert len(only.remote_shards) == 12
-    verdict = _judge([only])
-    assert verdict.state == "degraded"
-    assert all(shard.active_peers == (peer,) for shard in verdict.shards)
+    return [_obs(peer, 6, local=[_local(s) for s in range(6)],
+                 remote=[_remote(s, other) for other in PEERS if other != peer for s in range(6)])]
 
 
-def test_remote_report_disagreement_or_omission_is_unverifiable():
-    """Another peer's memory contradicting or omitting a reachable peer's own
-    report is an incomplete observation, not a copy."""
+def _disagreeing():
     observations = _fleet()
-    peer = observations[0]
-    local = tuple(
-        (shard_id, "DEAD" if shard_id == 0 else state)
-        for shard_id, state in peer.local_shards
-    )
-    observations[0] = replace(peer, local_shards=local)
-    verdict = _judge(observations)
-    assert verdict.state == "unverifiable"
-    assert any("disagree" in problem for problem in verdict.problems)
+    return [replace(observations[0], local_shards=tuple(
+        ((shard, "DEAD" if shard == 0 else state) for shard, state in observations[0].local_shards))
+    ), *observations[1:]]
+
+
+def _omitting():
     observations = _fleet()
     peer = observations[2]
-    local = tuple(
-        (shard_id, state) for shard_id, state in peer.local_shards if shard_id != 0
-    )
-    observations[2] = _obs(peer.peer_id, 6, local=local, collection=COLLECTION)
-    verdict = _judge(observations)
-    assert verdict.state == "unverifiable"
-    assert any("omits" in problem for problem in verdict.problems)
+    return [*observations[:2], _obs(peer.peer_id, 6, local=tuple(
+        (s, state) for s, state in peer.local_shards if s != 0), collection=COLLECTION)]
 
 
-def test_missing_collection_everywhere_is_unservable_on_one_peer_unverifiable():
-    observations = [_obs(peer, None, collection=COLLECTION, missing=True) for peer in PEERS]
-    assert _judge(observations).state == "unservable"
-    observations = _fleet() + [_obs(999, None, collection=COLLECTION, missing=True)]
-    verdict = _judge(observations)
-    assert verdict.state == "unverifiable"
-    assert any("absent" in problem for problem in verdict.problems)
+def _no_shard_zero():
+    return [_obs(v.peer_id, v.shard_count, local=tuple(c for c in v.local_shards if c[0] != 0),
+                 collection=COLLECTION) for v in _fleet()]
 
 
-def test_unreachable_peer_cannot_certify_healthy():
-    observations = _fleet(peers=(101, 202, 303), copies=3, unreachable=(303,))
-    verdict = _judge(observations)
-    assert verdict.state == "degraded"
-    assert all(len(shard.active_peers) == 2 for shard in verdict.shards)
-
-
-def test_no_copy_observed_with_reachable_peers_is_unservable():
-    observations = _fleet(peers=(101, 202, 303), copies=3)
-    trimmed = [
-        _obs(
-            view.peer_id,
-            view.shard_count,
-            local=tuple(copy for copy in view.local_shards if copy[0] != 0),
-            collection=COLLECTION,
-        )
-        for view in observations
-    ]
-    verdict = _judge(trimmed)
-    assert verdict.state == "unservable"
-    assert any("shard 0" in problem for problem in verdict.problems)
-
-
-def test_transfer_in_progress_is_recovering():
+def _transferring():
     observations = _fleet()
-    observations[0] = _obs(
-        PEERS[0],
-        6,
-        local=observations[0].local_shards,
-        transfers=(_transfer(0, PEERS[1], PEERS[2]),),
-        collection=COLLECTION,
-    )
-    verdict = _judge(observations)
-    assert verdict.state == "recovering"
-    assert any("transfer in progress" in problem for problem in verdict.problems)
+    return [replace(observations[0], transfers=((0, PEERS[1], PEERS[2]),)), *observations[1:]]
 
 
-def test_non_active_replicas_are_recovering_never_healthy():
-    for state, needle in (("INITIALIZING", "initializing"), ("DEAD", "dead"), ("ACTIVEREAD", "active-read")):
-        verdict = _judge(_with_local_state(_fleet(), PEERS[0], 0, state))
-        assert verdict.state == "recovering", state
-        assert any(needle in problem for problem in verdict.problems), state
+def _counted(shard_count=None, peers=PEERS):
+    return [_obs(peer, shard_count, collection=COLLECTION) for peer in peers]
 
 
-def test_unknown_replica_state_is_unverifiable():
-    observations = _with_local_state(_fleet(), PEERS[0], 0, "MYSTERY")
-    verdict = _judge(observations)
-    assert verdict.state == "unverifiable"
-    assert any("unrecognized" in problem for problem in verdict.problems)
-
-
-def test_unknown_or_disagreeing_shard_count_is_unverifiable():
-    unknown = _judge([_obs(peer, None, collection=COLLECTION) for peer in PEERS])
-    assert unknown.state == "unverifiable"
-    assert any("shard count unknown" in problem for problem in unknown.problems)
+def _foreign_peer_view():
     observations = _fleet()
-    observations[0] = _obs(PEERS[0], 5, local=observations[0].local_shards, collection=COLLECTION)
-    verdict = _judge(observations)
-    assert verdict.state == "unverifiable"
-    assert any("disagree" in problem for problem in verdict.problems)
+    return [*observations[:2], _obs(888, 6, local=observations[2].local_shards, collection=COLLECTION)]
 
 
-def test_observed_shard_count_below_policy_is_unservable():
-    observations = _fleet(shard_count=1)
-    verdict = _judge(observations)
-    assert verdict.state == "unservable"
-
-
-def test_peer_view_outside_accepted_membership_is_unverifiable():
-    """F2: a reachable endpoint whose own peer id is outside the accepted
-    member set must never contribute replicas."""
+def _foreign_remote_reference():
     observations = _fleet()
-    observations[2] = _obs(888, 6, local=observations[2].local_shards, collection=COLLECTION)
-    verdict = _judge(observations)
-    assert verdict.state == "unverifiable"
-    assert any("outside the accepted cluster membership" in problem for problem in verdict.problems)
-    assert _judge(_fleet(), accepted=()).state == "unverifiable"
+    return [replace(observations[0],
+                    remote_shards=observations[0].remote_shards + ((0, 999, "ACTIVE"),)), *observations[1:]]
 
 
-def test_remote_reference_outside_membership_is_unverifiable():
-    observations = _fleet()
-    observations[0] = _obs(
-        PEERS[0],
-        6,
-        local=observations[0].local_shards,
-        remote=observations[0].remote_shards + ((0, 999, "ACTIVE"),),
-        collection=COLLECTION,
-    )
-    verdict = _judge(observations)
-    assert verdict.state == "unverifiable"
-    assert any("foreign topology" in problem for problem in verdict.problems)
-
-
-def test_unexpected_shard_id_is_unverifiable():
-    """F2: an unsupported layout must not be silently ignored by iterating
-    only range(shard_count)."""
+def _extra_shard():
     observations = _fleet()
     peer = observations[0]
-    observations[0] = _obs(
-        peer.peer_id,
-        peer.shard_count,
-        local=peer.local_shards + ((6, "ACTIVE"),),
-        remote=peer.remote_shards,
-        collection=COLLECTION,
-    )
-    verdict = _judge(observations)
-    assert verdict.state == "unverifiable"
-    assert any("outside the declared shard set" in problem for problem in verdict.problems)
+    return [replace(peer, local_shards=peer.local_shards + ((6, "ACTIVE"),)), *observations[1:]]
+
+
+def _missing_everywhere(extra=None):
+    observations = [_obs(p, None, collection=COLLECTION, missing=True) for p in PEERS]
+    return observations + list(extra or [])
+
+
+@pytest.mark.parametrize(("observations", "state", "needle", "accepted"), [
+    (_one_peer_only, "degraded", None, PEERS),
+    (_disagreeing, "unverifiable", "disagree", PEERS),
+    (_omitting, "unverifiable", "omits", PEERS),
+    (lambda: _missing_everywhere(), "unservable", None, PEERS),
+    (lambda: _fleet() + [_obs(999, None, collection=COLLECTION, missing=True)],
+     "unverifiable", "absent", PEERS),
+    (lambda: _fleet(unreachable=(303,)), "degraded", None, PEERS),
+    (_no_shard_zero, "unservable", "shard 0", PEERS),
+    (_transferring, "recovering", "transfer in progress", PEERS),
+    (lambda: _with_local_state(_fleet(), PEERS[0], 0, "INITIALIZING"), "recovering", "initializing", PEERS),
+    (lambda: _with_local_state(_fleet(), PEERS[0], 0, "DEAD"), "recovering", "dead", PEERS),
+    (lambda: _with_local_state(_fleet(), PEERS[0], 0, "ACTIVEREAD"), "recovering", "active-read", PEERS),
+    (lambda: _with_local_state(_fleet(), PEERS[0], 0, "MYSTERY"), "unverifiable", "unrecognized", PEERS),
+    (lambda: _counted(None), "unverifiable", "shard count unknown", PEERS),
+    (lambda: [replace(_fleet()[0], shard_count=5), *_fleet()[1:]], "unverifiable", "disagree", PEERS),
+    (lambda: _fleet(shard_count=1), "unservable", None, PEERS),
+    (_foreign_peer_view, "unverifiable", "outside the accepted cluster membership", PEERS),
+    (lambda: _fleet(), "unverifiable", None, ()),  # F2: no accepted membership at all
+    (_foreign_remote_reference, "unverifiable", "foreign topology", PEERS),
+    (_extra_shard, "unverifiable", "outside the declared shard set", PEERS),
+], ids=["remote-reports-are-not-copies", "remote-report-disagrees", "remote-report-omits",
+        "collection-missing-everywhere", "one-peer-missing-collection", "unreachable-peer",
+        "no-copy-for-a-shard", "transfer-in-progress", "initializing-replica", "dead-replica",
+        "active-read-replica", "unknown-replica-state", "shard-count-unknown",
+        "shard-count-disagrees", "shard-count-below-policy", "peer-outside-membership",
+        "no-accepted-membership", "foreign-remote-reference", "unexpected-shard-id"])
+def test_collection_verdict_matrix(observations, state, needle, accepted):
+    """Every refused placement pins its precise cause: a pending, under-replicated,
+    stale, unreachable, remote-only or unknown placement is never healthy. Only a
+    peer's local report certifies a copy; a foreign topology is unverifiable."""
+    built = observations()
+    if observations is _one_peer_only:
+        assert len(built[0].remote_shards) == 12  # the memory exists, but certifies nothing
+    verdict = _judge(built, accepted=accepted)
+    assert verdict.state == state
+    if needle:
+        assert any(needle in problem for problem in verdict.problems)
+    if observations is _one_peer_only:
+        assert all(shard.active_peers == (PEERS[0],) for shard in verdict.shards)
+    if observations is _no_shard_zero or observations is _extra_shard or observations is _foreign_peer_view:
+        return
+    if state == "degraded" and observations is not _disagreeing:
+        assert verdict.problems
 
 
 # ----------------------------------------------------------------- cluster
@@ -479,52 +404,25 @@ def test_cluster_member_loss_ladder():
     def lost(index, url):
         return _view(None, endpoint=url, reachable=False, members=(), consensus="", error="ConnectError")
 
-    one = evaluate_cluster(
-        expected_peers=3, views=(_view(101), _view(202), lost(2, PEER_URLS[2]))
-    )
+    one = evaluate_cluster(expected_peers=3, views=(_view(101), _view(202), lost(2, PEER_URLS[2])))
     assert one.state == "degraded"
     assert any("unreachable" in problem for problem in one.problems)
-    two = evaluate_cluster(
-        expected_peers=3, views=(_view(101), lost(1, PEER_URLS[1]), lost(2, PEER_URLS[2]))
-    )
+    two = evaluate_cluster(expected_peers=3, views=(_view(101), lost(1, PEER_URLS[1]), lost(2, PEER_URLS[2])))
     assert two.state == "unverifiable"
     assert any("insufficient surviving topology" in problem for problem in two.problems)
 
 
-def test_membership_below_expectation_is_unverifiable():
-    views = (
-        _view(101, members=(101,)),
-        _view(202, members=(101,)),
-        _view(303, members=(101,)),
-    )
-    verdict = evaluate_cluster(expected_peers=3, views=views)
+@pytest.mark.parametrize(("views", "needle"), [
+    (lambda: tuple(_view(p, members=(101,)) for p in PEERS), "member peer"),
+    (lambda: (_view(101), _view(202), _view(303, members=(101, 202, 999))),
+     "disagree on cluster membership"),
+    (lambda: (_view(101), _view(202), _view(303, members=(), consensus="")), "membership"),
+    (lambda: (_view(101), _view(202), _view(303, consensus="stopped")), "consensus"),
+], ids=["below-expectation", "members-disagree", "missing-membership", "stopped-consensus"])
+def test_cluster_membership_verdicts(views, needle):
+    verdict = evaluate_cluster(expected_peers=3, views=views())
     assert verdict.state == "unverifiable"
-    assert any("member peer" in problem for problem in verdict.problems)
-
-
-def test_membership_disagreement_is_unverifiable():
-    views = (
-        _view(101),
-        _view(202),
-        _view(303, members=(101, 202, 999)),
-    )
-    verdict = evaluate_cluster(expected_peers=3, views=views)
-    assert verdict.state == "unverifiable"
-    assert any("disagree on cluster membership" in problem for problem in verdict.problems)
-
-
-def test_missing_membership_on_reachable_peer_is_unverifiable():
-    views = (_view(101), _view(202), _view(303, members=(), consensus=""))
-    verdict = evaluate_cluster(expected_peers=3, views=views)
-    assert verdict.state == "unverifiable"
-    assert any("membership" in problem for problem in verdict.problems)
-
-
-def test_stopped_consensus_is_unverifiable():
-    views = (_view(101), _view(202), _view(303, consensus="stopped"))
-    verdict = evaluate_cluster(expected_peers=3, views=views)
-    assert verdict.state == "unverifiable"
-    assert any("consensus" in problem for problem in verdict.problems)
+    assert any(needle in problem for problem in verdict.problems)
 
 
 def test_fewer_endpoints_than_expected_is_unverifiable():
@@ -795,11 +693,7 @@ def test_documented_service_plus_direct_peers_is_healthy(capsys):
     """F1: QDRANT_URL is a load-balanced Service; only --peer-url endpoints
     are authoritative peers."""
     clients = _fleet_clients()
-    report, code = _verify(
-        clients,
-        _production_settings(),
-        _args(production=True, peer_url=list(PEER_URLS)),
-    )
+    report, code = _verify(clients, _production_settings(), _args(production=True, peer_url=list(PEER_URLS)))
     output = capsys.readouterr().out
     assert code == 0, output
     assert report is not None and report.state == "healthy"
@@ -821,11 +715,7 @@ def test_three_urls_reaching_one_peer_cannot_satisfy_rf3(capsys):
     same_peer = clients[PEER_URLS[0]]
     for url in PEER_URLS:
         clients[url] = same_peer
-    report, code = _verify(
-        clients,
-        _production_settings(),
-        _args(production=True, peer_url=list(PEER_URLS)),
-    )
+    report, code = _verify(clients, _production_settings(), _args(production=True, peer_url=list(PEER_URLS)))
     output = capsys.readouterr().out
     assert code == 1, output
     assert report is not None and report.state == "unverifiable"
@@ -837,11 +727,7 @@ def test_failed_member_cannot_be_replaced_by_a_foreign_endpoint(capsys):
     cluster's own membership."""
     clients = _fleet_clients(unreachable=(303,))
     clients[PEER_URLS[2]] = _client(888)
-    report, code = _verify(
-        clients,
-        _production_settings(),
-        _args(production=True, peer_url=list(PEER_URLS)),
-    )
+    report, code = _verify(clients, _production_settings(), _args(production=True, peer_url=list(PEER_URLS)))
     output = capsys.readouterr().out
     assert code == 1, output
     assert report is not None and report.state == "unverifiable"
@@ -853,11 +739,7 @@ def test_entry_membership_mismatch_is_refused(capsys):
     collections) must not certify the direct peers' placement."""
     clients = _fleet_clients()
     clients[SERVICE].status = _enabled_status(peer_ids=(101, 202, 999))
-    report, code = _verify(
-        clients,
-        _production_settings(),
-        _args(production=True, peer_url=list(PEER_URLS)),
-    )
+    report, code = _verify(clients, _production_settings(), _args(production=True, peer_url=list(PEER_URLS)))
     output = capsys.readouterr().out
     assert code == 1, output
     assert report is not None and report.state == "unverifiable"
@@ -877,11 +759,7 @@ def test_entry_membership_mismatch_is_refused(capsys):
 
 def test_one_peer_loss_is_degraded_only_with_the_operational_flag(capsys):
     clients = _fleet_clients(unreachable=(303,))
-    report, code = _verify(
-        clients,
-        _production_settings(),
-        _args(production=True, peer_url=list(PEER_URLS)),
-    )
+    report, code = _verify(clients, _production_settings(), _args(production=True, peer_url=list(PEER_URLS)))
     output = capsys.readouterr().out
     assert code == 1, output
     assert report is not None and report.state == "degraded"
@@ -927,9 +805,7 @@ def test_contradictory_script_options_are_usage_errors():
 
 
 def test_production_without_peer_urls_refused(capsys):
-    report, code = _verify(
-        _fleet_clients(), _production_settings(), _args(production=True)
-    )
+    report, code = _verify(_fleet_clients(), _production_settings(), _args(production=True))
     assert code == 1
     assert report is None
     assert "no authoritative peer endpoints" in capsys.readouterr().out
@@ -964,14 +840,8 @@ def test_peer_policy_drift_or_unreadable_refused(capsys):
 
 def test_peer_identity_contradiction_across_collections_refused(capsys):
     clients = _fleet_clients()
-    clients[PEER_URLS[1]].collections[CONTROL] = _info(
-        999, 6, local=[_local(shard) for shard in range(6)]
-    )
-    report, code = _verify(
-        clients,
-        _production_settings(),
-        _args(production=True, peer_url=list(PEER_URLS)),
-    )
+    clients[PEER_URLS[1]].collections[CONTROL] = _info(999, 6, local=[_local(shard) for shard in range(6)])
+    report, code = _verify(clients, _production_settings(), _args(production=True, peer_url=list(PEER_URLS)))
     output = capsys.readouterr().out
     assert code == 1
     assert report is not None and report.state == "unverifiable"
@@ -1087,11 +957,7 @@ def test_alias_change_is_retried_against_the_new_generation(capsys):
         second=second,
         second_degraded=True,
     )
-    report, code = _verify(
-        clients,
-        _production_settings(),
-        _args(production=True, peer_url=list(PEER_URLS)),
-    )
+    report, code = _verify(clients, _production_settings(), _args(production=True, peer_url=list(PEER_URLS)))
     output = capsys.readouterr().out
     assert code == 1, output
     assert report is not None
@@ -1120,11 +986,7 @@ def test_alias_that_keeps_moving_is_refused(capsys):
             params=original.params,
             status=original.status,
         )
-    report, code = _verify(
-        clients,
-        _production_settings(),
-        _args(production=True, peer_url=list(PEER_URLS)),
-    )
+    report, code = _verify(clients, _production_settings(), _args(production=True, peer_url=list(PEER_URLS)))
     output = capsys.readouterr().out
     assert code == 1, output
     assert report is not None and report.state == "unverifiable"
@@ -1135,11 +997,7 @@ def test_peer_alias_disagreement_is_refused(capsys):
     clients = _fleet_clients()
     peer = clients[PEER_URLS[1]]
     peer.aliases = {"mainframe_manuals": "mainframe_manuals_g4"}
-    report, code = _verify(
-        clients,
-        _production_settings(),
-        _args(production=True, peer_url=list(PEER_URLS)),
-    )
+    report, code = _verify(clients, _production_settings(), _args(production=True, peer_url=list(PEER_URLS)))
     output = capsys.readouterr().out
     assert code == 1, output
     assert report is not None and report.state == "unverifiable"
@@ -1155,11 +1013,7 @@ def test_physical_pair_without_alias_reports_the_physical_target(capsys):
                 "mainframe_manuals": client.collections[COLLECTION],
                 "mainframe_manuals__completions": client.collections[CONTROL],
             }
-    report, code = _verify(
-        clients,
-        _production_settings(),
-        _args(production=True, peer_url=list(PEER_URLS)),
-    )
+    report, code = _verify(clients, _production_settings(), _args(production=True, peer_url=list(PEER_URLS)))
     output = capsys.readouterr().out
     assert code == 0, output
     assert report is not None and report.alias is not None
@@ -1202,9 +1056,7 @@ def test_replacement_peer_is_degraded_then_recovering_until_every_copy_is_active
         accepted=accepted,
     )
     assert initializing.state == "recovering"
-    done = _judge(
-        _replacement_fleet(new_has_shards=True, new_local_state="ACTIVE"), accepted=accepted
-    )
+    done = _judge(_replacement_fleet(new_has_shards=True, new_local_state='ACTIVE'), accepted=accepted)
     assert done.state == "healthy"
     assert all(shard.active_peers == (101, 202, REPLACEMENT) for shard in done.shards)
 

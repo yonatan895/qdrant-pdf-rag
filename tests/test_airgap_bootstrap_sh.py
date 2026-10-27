@@ -85,51 +85,33 @@ def bundle_dir(tmp_path):
     return extract_dir
 
 
-def test_bootstrap_missing_sums_fails(bundle_dir):
-    (bundle_dir / "SHA256SUMS").unlink()
-    r = subprocess.run(["sh", "bootstrap.sh"], cwd=bundle_dir, capture_output=True, text=True, check=False)
-    assert r.returncode != 0
-    assert "SHA256SUMS not found" in r.stderr
-
-
-def test_bootstrap_corrupt_checksum_fails(bundle_dir):
-    (bundle_dir / "qdrant-image.tar").write_bytes(b"corrupt")
-    r = subprocess.run(["sh", "bootstrap.sh"], cwd=bundle_dir, capture_output=True, text=True, check=False)
-    assert r.returncode != 0
-    assert "FAILED" in r.stdout or "FAIL" in r.stderr
-
-
-def test_bootstrap_tampered_sums_fails_signature(bundle_dir):
-    with open(bundle_dir / "SHA256SUMS", "a") as f:
-        f.write("0" * 64 + "  injected\n")
-    r = subprocess.run(["sh", "bootstrap.sh"], cwd=bundle_dir, capture_output=True, text=True, check=False)
-    assert r.returncode != 0
-    assert "signature verification failed" in r.stderr
-
-
-def test_bootstrap_refuses_signed_bundle_without_third_party_notices(bundle_dir):
-    """A validly signed bundle that omits the notice member is not accepted (#376)."""
+def _drop_member(bundle_dir):
     sums = (bundle_dir / "SHA256SUMS").read_text().splitlines(keepends=True)
-    (bundle_dir / "SHA256SUMS").write_text("".join(x for x in sums if not x.endswith("  THIRD-PARTY-NOTICES.txt\n")))
+    (bundle_dir / "SHA256SUMS").write_text(
+        "".join(x for x in sums if not x.endswith("  THIRD-PARTY-NOTICES.txt\n")))
     sign_sums(bundle_dir)
-    r = subprocess.run(["sh", "bootstrap.sh"], cwd=bundle_dir, capture_output=True, text=True, check=False)
+
+
+@pytest.mark.parametrize(("tamper", "needle", "pinned_pub"), [
+    (lambda bundle: (bundle / "SHA256SUMS").unlink(), "SHA256SUMS not found", False),
+    (lambda bundle: (bundle / "qdrant-image.tar").write_bytes(b"corrupt"), "FAIL", False),
+    (lambda bundle: (bundle / "SHA256SUMS").write_text(
+        (bundle / "SHA256SUMS").read_text() + "0" * 64 + "  injected\n"),
+     "signature verification failed", False),
+    # A validly signed bundle that omits a required member is not accepted (#376).
+    (_drop_member, "exactly the required bundle members", False),
+    (lambda bundle: None, "does not match SNEAKERNET_TRUSTED_PUB", True),
+], ids=["missing-sums", "corrupt-member", "injected-sums-line", "omitted-notice-member",
+        "trusted-pub-mismatch"])
+def test_bootstrap_refuses_a_damaged_or_untrusted_bundle(bundle_dir, tamper, needle, pinned_pub):
+    tamper(bundle_dir)
+    env = _offline_env(bundle_dir) if pinned_pub else {"PATH": "/usr/bin:/bin"}
+    if pinned_pub:
+        env["SNEAKERNET_TRUSTED_PUB"] = str(gen_other_pub(bundle_dir))
+    r = _bootstrap(bundle_dir, env)
     assert r.returncode != 0
-    assert "exactly the required bundle members" in r.stderr
+    assert needle in r.stdout + r.stderr
     assert not (bundle_dir / "qdrant-pdf-rag").exists()
-
-
-def test_bootstrap_trusted_pub_mismatch_refuses(bundle_dir):
-    other_pub = gen_other_pub(bundle_dir)
-    env = {
-        "PATH": "/usr/bin:/bin",
-        "AIRGAP_WORKSPACE": "workspace",
-        "SNEAKERNET_TRUSTED_PUB": str(other_pub),
-    }
-    r = subprocess.run(
-        ["sh", "bootstrap.sh"], cwd=bundle_dir, capture_output=True, text=True, env=env, check=False
-    )
-    assert r.returncode != 0
-    assert "does not match SNEAKERNET_TRUSTED_PUB" in r.stderr
 
 
 def test_signed_handoff_executes_workflow_with_shipped_model_modes(bundle_dir):
@@ -311,56 +293,41 @@ def test_bootstrap_refuses_modified_installer(bundle_dir):
     assert not marker.exists()
 
 
-@pytest.mark.parametrize("stage", [True], ids=["staged"])
-def test_bootstrap_refuses_tracked_edit_then_rerun_passes_after_revert(bundle_dir, stage):
-    """Equal HEAD with any tracked edit (here a non-installer file) is not
-    the signed release: refuse before copying artifacts, never touch the
-    operator's work, and pass again once the edit is reverted (issue #414)."""
+@pytest.mark.parametrize("hidden", ["staged-edit", "assume-unchanged"])
+def test_bootstrap_refuses_a_hidden_edit_then_rerun_passes(bundle_dir, hidden):
+    """Equal HEAD with any tracked edit — staged, or invisible behind an index
+    flag — is not the signed release: refuse before copying artifacts, never
+    touch the operator's work, and pass again once it is reverted (issue #414)."""
     assert _bootstrap(bundle_dir).returncode == 0
     workspace = bundle_dir / "operator workspace"
     (workspace / "airgap.env").write_text("INTERNAL_REGISTRY=untracked-operator-file\n")
     (workspace / "dist/retained-evidence.txt").write_text("original")
     (workspace / "dist/MANIFEST.txt").unlink()
-    (workspace / "README.md").write_text("locally edited chart/script stand-in\n")
-    if stage:
+    if hidden == "staged-edit":
+        (workspace / "README.md").write_text("locally edited chart/script stand-in\n")
         subprocess.run(["git", "add", "README.md"], cwd=workspace, check=True)
+        needle = "tracked changes against the approved commit"
+    else:
+        subprocess.run(["git", "update-index", "--assume-unchanged", "README.md"], cwd=workspace, check=True)
+        (workspace / "README.md").write_text("locally edited chart/script stand-in\n")
+        needle = "hides tracked files from change detection"
     refused = _bootstrap(bundle_dir)
     assert refused.returncode != 0
-    assert "tracked changes against the approved commit" in refused.stderr
+    assert needle in refused.stderr
     assert "locally edited" not in refused.stdout + refused.stderr
     assert "SUCCESS" not in refused.stdout
     assert not (workspace / "dist/MANIFEST.txt").exists()
     assert (workspace / "README.md").read_text() == "locally edited chart/script stand-in\n"
-    subprocess.run(["git", "reset", "-q", "HEAD", "--", "README.md"], cwd=workspace, check=True)
+    if hidden == "staged-edit":
+        subprocess.run(["git", "reset", "-q", "HEAD", "--", "README.md"], cwd=workspace, check=True)
+    else:
+        subprocess.run(["git", "update-index", "--no-assume-unchanged", "README.md"], cwd=workspace, check=True)
     subprocess.run(["git", "checkout", "--", "README.md"], cwd=workspace, check=True)
     again = _bootstrap(bundle_dir)
     assert again.returncode == 0, again.stdout + again.stderr
     assert (workspace / "dist/MANIFEST.txt").exists()
     assert (workspace / "airgap.env").read_text() == "INTERNAL_REGISTRY=untracked-operator-file\n"
     assert (workspace / "dist/retained-evidence.txt").read_text() == "original"
-
-
-@pytest.mark.parametrize("flag", ["--assume-unchanged"])
-def test_bootstrap_refuses_index_flags_that_hide_edits_then_rerun_passes(bundle_dir, flag):
-    """An edit under assume-unchanged/skip-worktree is invisible to
-    `git diff`; the flag is refused before dist/ changes and the next run
-    passes once cleared (issue #414)."""
-    assert _bootstrap(bundle_dir).returncode == 0
-    workspace = bundle_dir / "operator workspace"
-    subprocess.run(["git", "update-index", flag, "README.md"], cwd=workspace, check=True)
-    (workspace / "README.md").write_text("hidden edit\n")
-    (workspace / "dist/MANIFEST.txt").unlink()
-    refused = _bootstrap(bundle_dir)
-    assert refused.returncode != 0
-    assert "hides tracked files from change detection" in refused.stderr
-    assert "hidden edit" not in refused.stdout + refused.stderr
-    assert "SUCCESS" not in refused.stdout
-    assert not (workspace / "dist/MANIFEST.txt").exists()
-    assert (workspace / "README.md").read_text() == "hidden edit\n"
-    subprocess.run(["git", "update-index", flag.replace("--", "--no-"), "README.md"], cwd=workspace, check=True)
-    subprocess.run(["git", "checkout", "--", "README.md"], cwd=workspace, check=True)
-    again = _bootstrap(bundle_dir)
-    assert again.returncode == 0, again.stdout + again.stderr
 
 
 def test_bootstrapped_workspace_passes_then_refuses_in_the_real_guard(bundle_dir):

@@ -93,6 +93,12 @@ def test_pymupdf_election_is_recorded_as_an_owner_decision_exception_to_legal_co
     entry["decision"] = {"owner": "yonatan895"}
     problems, _, _ = problems_for(inventory)
     assert any("decision record needs owner, date and disposition" in p for p in problems)
+    # An elected AGPL entry can never be recorded as a declared permissive one.
+    assert entry["elected"] == "AGPL-3.0-only" and entry["class"] == "network-copyleft"
+    assert "AFFERO" in entry["license_declared"]
+    entry["status"] = "declared"
+    problems, _, _ = problems_for(inventory)
+    assert any("pymupdf" in p and "cannot rest on declared metadata" in p for p in problems)
 
 
 def test_recorded_decisions_match_the_maintainer_dispositions():
@@ -157,20 +163,16 @@ def test_open_webui_licence_records_the_maintainer_decision_and_its_conditions()
     problems, _, _ = problems_for(inventory)
     assert any("component:image:openwebui: class proprietary cannot rest on declared metadata" in p
                for p in problems)
-
-
-def test_open_webui_proxy_image_is_recorded_bound_and_permissive():
-    """ADR-0007 E1: the nginx allow-list sidecar is an images.txt member with its
-    own record, bound to the pinned digest."""
-    by_id = {e["id"]: e for e in real_inventory()["components"]}
-    entry = by_id["image:openwebui-proxy"]
+    # ADR-0007 E1: the nginx allow-list sidecar is an images.txt member with its own
+    # record, bound to the pinned digest and classed permissive.
+    proxy = by_id["image:openwebui-proxy"]
     line = next(ln.split() for ln in (REPO / "images.txt").read_text().splitlines()
                 if not ln.startswith("#") and "nginx-unprivileged" in ln)
-    assert entry["bind"] == {"images_txt": line[0], "digest": line[1]}
-    assert (entry["license_spdx"], entry["class"]) == ("BSD-2-Clause", "permissive")
-    assert entry["ships_in"] == ["openwebui-proxy-image.tar (when the Open WebUI member is bundled)"]
-    assert entry["status"] == "approved" and "pending acceptance" not in entry["approval_ref"]
-    assert "ADR-0007 E1 (accepted 2026-10-24)" in entry["approval_ref"]
+    assert proxy["bind"] == {"images_txt": line[0], "digest": line[1]}
+    assert (proxy["license_spdx"], proxy["class"]) == ("BSD-2-Clause", "permissive")
+    assert proxy["ships_in"] == ["openwebui-proxy-image.tar (when the Open WebUI member is bundled)"]
+    assert proxy["status"] == "approved" and "pending acceptance" not in proxy["approval_ref"]
+    assert "ADR-0007 E1 (accepted 2026-10-24)" in proxy["approval_ref"]
 
 
 def test_altered_python_notice_text_is_flagged_and_notices_carry_the_four_texts(tmp_path):
@@ -186,72 +188,72 @@ def test_altered_python_notice_text_is_flagged_and_notices_carry_the_four_texts(
         li.render_notices(REPO, inventory, tmp_path)
 
 
-def test_pymupdf_cannot_be_recorded_as_a_declared_permissive_dependency():
-    entry = next(e for e in real_inventory()["python"] if e["name"] == "pymupdf")
-    assert entry["elected"] == "AGPL-3.0-only" and entry["class"] == "network-copyleft"
-    assert entry["status"] in {"pending-owner-decision", "approved"}
-    assert "AGPL" in entry["license_spdx"]
-    inventory = real_inventory()
-    target = next(e for e in inventory["python"] if e["name"] == "pymupdf")
-    target["status"] = "declared"
-    problems, _, _ = problems_for(inventory)
-    assert any("pymupdf" in p and "cannot rest on declared metadata" in p for p in problems)
-    assert "AFFERO" in target["license_declared"]
+def _drop_record(inventory):
+    return inventory["python"].pop(5)["name"]
 
 
-def test_new_locked_dependency_without_a_record_is_flagged():
-    inventory = real_inventory()
-    removed = inventory["python"].pop(5)
-    problems, _, _ = problems_for(inventory)
-    assert [p for p in problems if removed["name"] in p and "no license record" in p]
-    inventory = real_inventory()
+def _add_ghost(inventory):
     ghost = copy.deepcopy(inventory["python"][0]) | {"name": "ghost-package"}
     inventory["python"].append(ghost)
-    problems, _, _ = problems_for(inventory)
-    assert any("ghost-package" in p and "not in the locked runtime profile" in p for p in problems)
+    return "ghost-package"
 
 
-def test_version_or_wheel_bump_without_review_is_flagged():
-    for field in ("version", "wheel", "sha256"):
-        inventory = real_inventory()
-        inventory["python"][0][field] = "0" * 64 if field == "sha256" else "9.9.9"
-        problems, _, _ = problems_for(inventory)
-        assert any(f"recorded {field} differs from the lock" in p for p in problems)
+def _bump(field):
+    def mutate(inventory):
+        entry = inventory["python"][0]
+        entry[field] = "0" * 64 if field == "sha256" else "9.9.9"
+        return entry["name"]
+    return mutate
 
 
-def test_class_claim_must_follow_the_recorded_expression():
-    inventory = real_inventory()
-    entry = next(e for e in inventory["python"] if e["name"] == "click")
-    entry["license_spdx"] = "AGPL-3.0-only"
-    problems, _, _ = problems_for(inventory)
-    assert any("click" in p and "network-copyleft" in p for p in problems)
-    entry["class"] = "network-copyleft"
-    problems, _, _ = problems_for(inventory)
-    assert any("click" in p and "declared metadata" in p for p in problems)
+def _elect_agpl(inventory):
+    next(e for e in inventory["python"] if e["name"] == "click")["license_spdx"] = "AGPL-3.0-only"
+    return "click"
 
 
-def test_approved_status_needs_a_protected_reference():
-    inventory = real_inventory()
-    entry = next(e for e in inventory["python"] if e["name"] == "pymupdf")
-    entry["approval_ref"] = None
-    problems, _, _ = problems_for(inventory)
-    assert any("pymupdf" in p and "approval_ref" in p for p in problems)
+def _claim_network_copyleft(inventory):
+    _elect_agpl(inventory)
+    next(e for e in inventory["python"] if e["name"] == "click")["class"] = "network-copyleft"
+    return "click"
 
 
-def test_weak_copyleft_requires_a_recorded_obligation():
-    inventory = real_inventory()
-    entry = next(e for e in inventory["python"] if e["name"] == "certifi")
-    del entry["obligation"]
-    problems, _, _ = problems_for(inventory)
-    assert any("certifi" in p and "obligation" in p for p in problems)
+def _drop_approval(inventory):
+    next(e for e in inventory["python"] if e["name"] == "pymupdf")["approval_ref"] = None
+    return "pymupdf"
 
 
-def test_wheel_without_license_text_cannot_be_declared():
-    inventory = real_inventory()
+def _drop_obligation(inventory):
+    del next(e for e in inventory["python"] if e["name"] == "certifi")["obligation"]
+    return "certifi"
+
+
+def _declare_without_text(inventory):
     entry = next(e for e in inventory["python"] if not e["license_files"])
     entry["status"] = "declared"
+    return entry["name"]
+
+
+@pytest.mark.parametrize(("mutate", "needle"), [
+    (_drop_record, "no license record"),
+    (_add_ghost, "not in the locked runtime profile"),
+    (_bump("version"), "recorded version differs from the lock"),
+    (_bump("wheel"), "recorded wheel differs from the lock"),
+    (_bump("sha256"), "recorded sha256 differs from the lock"),
+    (_elect_agpl, "network-copyleft"),
+    (_claim_network_copyleft, "declared metadata"),
+    (_drop_approval, "approval_ref"),
+    (_drop_obligation, "obligation"),
+    (_declare_without_text, "no license text"),
+], ids=["unrecorded-dependency", "ghost-dependency", "version-bump", "wheel-bump",
+        "hash-bump", "class-mismatch", "class-claim-needs-decision", "missing-approval-ref",
+        "missing-obligation", "declared-without-text"])
+def test_record_drift_is_flagged(mutate, needle):
+    """An unrecorded, ghosted, bumped or hand-classed dependency is flagged; an
+    approved restricted class needs its protected reference, obligation and text."""
+    inventory = real_inventory()
+    name = mutate(inventory)
     problems, _, _ = problems_for(inventory)
-    assert any(entry["name"] in p and "no license text" in p for p in problems)
+    assert any(name in p and needle in p for p in problems), problems
 
 
 def test_release_mode_blocks_on_unresolved_decisions_and_missing_approval():
@@ -373,22 +375,17 @@ def test_unrecorded_image_pin_is_flagged_then_passes_after_the_record_is_added(t
     assert run(tree, capsys)[0] == 0
 
 
-def test_changed_image_digest_requires_re_review(tree, capsys):
+@pytest.mark.parametrize(("old", "new", "record"), [
+    ("sha256:efb96a94", "sha256:b0e04fe6", "image:qdrant"),
+    # #1074: changing the recorded Open WebUI digest must not rebind the approved entry.
+    (OPENWEBUI_DIGEST, "d" * 64, "image:openwebui"),
+], ids=["qdrant", "openwebui"])
+def test_changed_image_digest_requires_re_review(tree, capsys, old, new, record):
     images = tree / "images.txt"
-    images.write_text(images.read_text().replace("sha256:efb96a94", "sha256:b0e04fe6"))
+    assert old in images.read_text()
+    images.write_text(images.read_text().replace(old, new))
     code, out = run(tree, capsys)
-    assert code == 1 and "image:qdrant" in out and "re-review the image" in out
-
-
-def test_recording_the_open_webui_digest_requires_re_review(tree, capsys):
-    """#1074: changing the recorded digest without updating the licence record
-    is a refusal, not a silent rebind of the approved entry."""
-    images = tree / "images.txt"
-    pinned = "qdrant-pdf-rag-openwebui:v0.12.3-slim               sha256:" + OPENWEBUI_DIGEST
-    assert pinned in images.read_text()
-    images.write_text(images.read_text().replace(pinned, pinned.replace(OPENWEBUI_DIGEST, "d" * 64)))
-    code, out = run(tree, capsys)
-    assert code == 1 and "image:openwebui" in out and "re-review the image" in out
+    assert code == 1 and record in out and "re-review the image" in out
 
 
 def test_unrecorded_vendored_asset_and_second_chart_are_flagged(tree, capsys):

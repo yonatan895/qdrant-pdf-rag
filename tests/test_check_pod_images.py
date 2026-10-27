@@ -64,6 +64,25 @@ def diagnostic(phase="Succeeded"):
     return pod
 
 
+def _retained_running_diagnostic(document):
+    document["items"].append(diagnostic("Running"))
+
+
+def _terminating_old_replica(document):
+    old = copy.deepcopy(document["items"][-1])
+    old["metadata"].update(name="old-replica", deletionTimestamp="2026-10-03T00:00:00Z")
+    old["status"]["containerStatuses"][0]["imageID"] = f"{REPO_Q}@{OTHER}"
+    document["items"].append(old)
+
+
+@pytest.mark.parametrize("ignored", [_retained_running_diagnostic, _terminating_old_replica],
+                         ids=["retained-diagnostic-job", "terminating-old-replica"])
+def test_pods_outside_the_current_rollout_do_not_invalidate_it(ignored):
+    document = rollout()
+    ignored(document)
+    assert check(document) == []
+
+
 @pytest.mark.parametrize("prefix", ["", "docker-pullable://"])
 def test_runtime_prefixes_and_every_replica(prefix):
     document = rollout(replicas=3)
@@ -77,12 +96,6 @@ def test_different_digest_is_reported():
     document["items"][-1]["status"]["containerStatuses"][0]["imageID"] = f"{REPO_Q}@{OTHER}"
     problems = check(document)
     assert len(problems) == 1 and "qdrant-0" in problems[0]
-
-
-def test_unrelated_diagnostic_jobs_do_not_invalidate_rollout():
-    document = rollout()
-    document["items"].append(diagnostic("Running"))
-    assert check(document) == []
 
 
 def test_wrong_target_repository_cannot_hide_behind_expected_diagnostic():
@@ -216,55 +229,30 @@ def test_oauth_proxy_requires_its_own_container_status():
 
 
 
-def test_openobserve_deployment_is_bound_to_its_own_workload_and_digest():
-    """ADR-0006 (#956): OpenObserve is verified through the Deployment and
-    container the chart names `openobserve`, never through another workload."""
-    document = rollout("Deployment", name="openobserve", container="openobserve")
-    assert check(document, role="openobserve") == []
-    assert check(document, role="openobserve", digest=OTHER) == [
-        f"pod openobserve-0 container openobserve runs {DIGEST}, expected {OTHER}"]
-    assert check({"items": []}, role="openobserve") == ["missing or ambiguous Deployment openobserve"]
-
-
-def test_openwebui_role_is_bound_to_the_rag_openwebui_deployment_container():
-    """ADR-0007 (#1074): the Open WebUI image is verified through Deployment
-    rag-openwebui, container openwebui; a same-image container elsewhere
-    (another workload or container name) does not satisfy it."""
-    document = rollout("Deployment", name="rag-openwebui", container="openwebui")
-    assert check(document, role="openwebui") == []
-    assert check(document, role="openwebui", digest=OTHER) == [
-        f"pod rag-openwebui-0 container openwebui runs {DIGEST}, expected {OTHER}"]
-    assert check({"items": []}, role="openwebui") == ["missing or ambiguous Deployment rag-openwebui"]
-    renamed = rollout("Deployment", name="rag-openwebui", container="webui")
-    assert "Deployment rag-openwebui container openwebui has an unexpected repository" in check(
-        renamed, role="openwebui")
-    other_workload = rollout("Deployment", name="openwebui", container="openwebui")
-    assert check(other_workload, role="openwebui") == ["missing or ambiguous Deployment rag-openwebui"]
-    # The CLI accepts the role (an unknown role is a usage refusal).
-    result = subprocess.run([sys.executable, str(SCRIPT), "ns", "qdrant", f"openwebui={REPO_Q}@{DIGEST}"],
+@pytest.mark.parametrize(("role", "kind", "name", "container", "other_role"), [
+    ("openobserve", "Deployment", "openobserve", "openobserve", None),
+    ("openwebui", "Deployment", "rag-openwebui", "openwebui", None),
+    # #804: the feedback pod runs the agent image but is a different workload;
+    # the Deployment-shaped agent role must not find the StatefulSet.
+    ("feedback", "StatefulSet", "rag-feedback", "feedback", "agent"),
+], ids=["openobserve", "openwebui", "feedback"])
+def test_role_is_bound_to_its_own_workload_and_container(role, kind, name, container, other_role):
+    """ADR-0006/0007/0008: each role is verified through the workload kind, name
+    and container the chart declares, by its own digest; a same-image container
+    under another name, or a workload of another name, never satisfies it."""
+    document = rollout(kind, name=name, container=container)
+    assert check(document, role=role) == []
+    assert check(document, role=role, digest=OTHER) == [
+        f"pod {name}-0 container {container} runs {DIGEST}, expected {OTHER}"]
+    assert check({"items": []}, role=role) == [f"missing or ambiguous {kind} {name}"]
+    renamed = rollout(kind, name=name, container="renamed")
+    assert f"{kind} {name} container {container} has an unexpected repository" in " ".join(
+        check(renamed, role=role))
+    assert check(rollout(kind, name=f"{name}-other", container=container), role=role) == [
+        f"missing or ambiguous {kind} {name}"]
+    if other_role:
+        assert check(document, role=other_role) == ["missing or ambiguous Deployment rag-agent"]
+    # The CLI accepts the role name (an unknown role is a usage refusal).
+    result = subprocess.run([sys.executable, str(SCRIPT), "ns", "qdrant", f"{role}={REPO_Q}@{DIGEST}"],
                             input=json.dumps(document), capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stderr
-
-
-def test_feedback_statefulset_is_bound_to_its_own_workload_and_digest():
-    """#804: the feedback pod runs the agent image but is a different workload;
-    it is verified through its own StatefulSet, never through rag-agent."""
-    document = rollout(name="rag-feedback", container="feedback")
-    assert check(document, role="feedback") == []
-    assert check(document, role="feedback", digest=OTHER) == [
-        f"pod rag-feedback-0 container feedback runs {DIGEST}, expected {OTHER}"]
-    # The Deployment-shaped agent role does not find a StatefulSet by that name.
-    assert check(document, role="agent") == ["missing or ambiguous Deployment rag-agent"]
-    # The feedback role requires its StatefulSet to exist at all.
-    assert check({"items": []}, role="feedback") == ["missing or ambiguous StatefulSet rag-feedback"]
-
-
-def test_feedback_container_with_another_repository_is_rejected():
-    document = rollout(name="rag-feedback", container="feedback")
-    for item in document["items"]:
-        spec = item.get("spec", {})
-        containers = spec.get("template", {}).get("spec", {}).get("containers", []) + spec.get("containers", [])
-        for c in containers:
-            c["image"] = "registry.example/other/image:v1"
-    problems = check(document, role="feedback")
-    assert problems and all("unexpected repository" in p for p in problems)

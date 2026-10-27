@@ -158,12 +158,7 @@ metadata:
   name: openobserve-data
 '''
 
-MANIFEST_STS = MANIFEST_CLEAN + '''---
-apiVersion: apps/v1
-kind: StatefulSet
-metadata:
-  name: sneakysts
-'''
+MANIFEST_STS = MANIFEST_CLEAN + '---\napiVersion: apps/v1\nkind: StatefulSet\nmetadata:\n  name: sneakysts\n'
 
 
 @pytest.fixture()
@@ -235,8 +230,7 @@ def test_full_sequence_green(harness):
     assert result.returncode == 0, result.stderr
     ops = [a[0] for a in helm_calls(calls)]
     mutating = [o for o in ops if o in ('install', 'upgrade', 'rollback')]
-    assert mutating == ['install', 'upgrade', 'upgrade', 'upgrade',
-                        'rollback', 'upgrade', 'upgrade']
+    assert mutating == ['install', 'upgrade', 'upgrade', 'upgrade', 'rollback', 'upgrade', 'upgrade']
     for args in helm_calls(calls):
         if args[0] in ('install', 'upgrade', 'rollback'):
             assert '--server-side=false' in args
@@ -308,30 +302,18 @@ def test_fault_unexpected_success_fails(harness):
     assert 'fault injection unexpectedly succeeded' in result.stderr
 
 
-def test_chart_pvc_change_trips_guard(harness):
-    result, _ = run_harness(harness, ('PVC_TRIP_AFTER', '1'))
+@pytest.mark.parametrize(("setup", "env", "needle"), [
+    (None, ("PVC_TRIP_AFTER", "1"), "chart-namespace PVC identities changed"),
+    (None, ("DATA_TRIP_AFTER", "1"), "data-plane PVC identities changed"),
+    (None, ("STS_TRIP", "1"), "StatefulSet"),
+    (MANIFEST_STS, (), "release manifest owns a StatefulSet"),
+], ids=["chart-pvc-identity", "data-pvc-identity", "statefulset-guard", "manifest-statefulset"])
+def test_retained_state_guards_trip(harness, setup, env, needle):
+    if setup is not None:
+        harness[0].joinpath("manifest.yaml").write_text(setup)
+    result, _ = run_harness(harness, *((env,) if env else ()))
     assert result.returncode != 0
-    assert 'chart-namespace PVC identities changed' in result.stderr
-
-
-def test_data_pvc_change_trips_guard(harness):
-    result, _ = run_harness(harness, ('DATA_TRIP_AFTER', '1'))
-    assert result.returncode != 0
-    assert 'data-plane PVC identities changed' in result.stderr
-
-
-def test_statefulset_trips_guard(harness):
-    result, _ = run_harness(harness, ('STS_TRIP', '1'))
-    assert result.returncode != 0
-    assert 'StatefulSet' in result.stderr
-
-
-def test_statefulset_in_manifest_trips_guard(harness):
-    tmp_path, _env, _ = harness
-    (tmp_path / 'manifest.yaml').write_text(MANIFEST_STS)
-    result, _ = run_harness(harness)
-    assert result.returncode != 0
-    assert 'release manifest owns a StatefulSet' in result.stderr
+    assert needle in result.stderr
 
 
 def test_smoke_failure_blocks(harness):
@@ -354,10 +336,9 @@ def test_preexisting_namespace_is_kept(harness):
     assert not kubectl_calls(calls, 'delete')
 
 
-@pytest.mark.parametrize('argv', [[]])
-def test_arg_validation_before_cluster_calls(harness, argv):
+def test_arg_validation_before_cluster_calls(harness):
     _tmp_path, env, log = harness
-    result = subprocess.run(['sh', str(SCRIPT), *argv],
+    result = subprocess.run(['sh', str(SCRIPT)],
                             env=env, text=True, capture_output=True, check=False, timeout=10)
     assert result.returncode == 2
     assert log.read_text() == ''
