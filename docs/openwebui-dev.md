@@ -24,7 +24,8 @@ agent relay). Production has none of them.
 ## Dev environment
 
 `sh scripts/openwebui/dev.sh [--dry-run] up|ready|status|urls|down|agent-down`
-(also `images|agent-up|cluster|deploy|relay|provision|smoke`). A long-lived Kind
+(also `images|agent-up|cluster|deploy|relay|provision|smoke`; Task:
+`local:openwebui:dev-up|dev-dry-run|dev-down|acceptance`). A long-lived Kind
 cluster (`owui-hands-on`), the chart's Open WebUI objects, a test IdP with three
 users, and the local agent lane (vLLM models, dedicated Qdrant, `local:stack`)
 behind a host relay, reachable from the Windows browser at `https://owui.localhost/`.
