@@ -47,19 +47,22 @@
     return { sessions: {}, active: null };
   }
 
-  function loadStore() {
-    if (!storageOk) return memory;
+  /* The persisted store, or null when the key is absent or unreadable. */
+  function readStored() {
     try {
       const raw = window.localStorage.getItem(STORAGE_KEY);
-      if (!raw) return emptyStore();
+      if (!raw) return null;
       const parsed = JSON.parse(raw);
-      if (!parsed || typeof parsed !== "object" || typeof parsed.sessions !== "object") {
-        return emptyStore();
-      }
+      if (!parsed || typeof parsed !== "object" || typeof parsed.sessions !== "object") return null;
       return parsed;
     } catch (err) {
-      return emptyStore();
+      return null;
     }
+  }
+
+  function loadStore() {
+    if (!storageOk) return memory;
+    return readStored() || emptyStore();
   }
 
   function saveStore(store) {
@@ -107,9 +110,14 @@
    * stored revision can be as stale as the state. The writer therefore also
    * holds a lock named after its revision: the lock manager orders that name
    * before the store lock's release, so the next holder sees the newest
-   * revision there and re-reads until its copy catches up (bounded wait). */
+   * revision there and re-reads until its copy catches up. A copy still
+   * behind after STALE_WAIT_MS fails closed: no write, a re-render and a
+   * fixed notice. An absent store (site data cleared) proceeds. */
   let knownRevision = 0;
   let releaseMark = null;
+  let staleNoticeShown = false;
+  const STALE_TEXT = "Another tab changed your saved incidents; nothing was changed here. Try again.";
+  class StaleStoreError extends Error {}
 
   function revisionOf(store) {
     return Number.isSafeInteger(store.revision) && store.revision > 0 ? store.revision : 0;
@@ -126,10 +134,14 @@
   }
 
   async function freshStore() {
-    const { held } = await navigator.locks.query();
-    const marks = held
-      .filter((lock) => lock.name.startsWith(REVISION_MARK))
-      .map((lock) => Number(lock.name.slice(REVISION_MARK.length)) || 0);
+    let marks;
+    try {
+      marks = (await navigator.locks.query()).held
+        .filter((lock) => lock.name.startsWith(REVISION_MARK))
+        .map((lock) => Number(lock.name.slice(REVISION_MARK.length)) || 0);
+    } catch (err) {
+      throw new StaleStoreError();
+    }
     const want = Math.max(knownRevision, ...marks);
     const deadline = Date.now() + STALE_WAIT_MS;
     let store = loadStore();
@@ -137,7 +149,13 @@
       await new Promise((resolve) => window.setTimeout(resolve, 10));
       store = loadStore();
     }
+    if (storageOk && revisionOf(store) < want && readStored()) throw new StaleStoreError();
     return { store, want };
+  }
+
+  /* Callers whose follow-up must not stop on a refused write. */
+  function ignoreStale(err) {
+    if (!(err instanceof StaleStoreError)) throw err;
   }
 
   /* The origin-wide Web Lock encloses both the fresh read and the write.
@@ -152,11 +170,25 @@
         store.revision = Math.max(revisionOf(store), want) + 1;
         saveStore(store);
         if (sharedLocks && storageOk) await markRevision(store.revision);
+        if (staleNoticeShown) {
+          staleNoticeShown = false;
+          composerNotice("");
+        }
       }
       knownRevision = Math.max(knownRevision, revisionOf(store));
       return result;
     };
-    return sharedLocks ? navigator.locks.request(STORE_LOCK, apply) : apply();
+    try {
+      return await (sharedLocks ? navigator.locks.request(STORE_LOCK, apply) : apply());
+    } catch (err) {
+      if (err instanceof StaleStoreError) {
+        renderMessages();
+        renderSessions();
+        staleNoticeShown = true;
+        composerNotice(STALE_TEXT);
+      }
+      throw err;
+    }
   }
 
   /* Resolve this tab's current incident id inside `store`. `claim` also
@@ -1785,7 +1817,7 @@
       formEl.removeAttribute("hx-swap");
       formEl.addEventListener("submit", onSubmit);
     }
-    await mutate((store) => resolveSession(store, true));
+    await mutate((store) => resolveSession(store, true)).catch(ignoreStale);
     syncStorageNotice();
     renderMessages();
     renderSessions();
@@ -1798,7 +1830,7 @@
     window.addEventListener("storage", async (event) => {
       if (event.key !== null && event.key !== STORAGE_KEY) return;
       if (renaming) return;
-      await mutate((store) => resolveSession(store));
+      await mutate((store) => resolveSession(store)).catch(ignoreStale);
       renderMessages();
       renderSessions();
     });
