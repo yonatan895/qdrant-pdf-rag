@@ -633,24 +633,21 @@ def read_clipboard(b: Browser) -> str:
     return b.eval("return document.getElementById('message').value")
 
 
-def test_copy_works_on_a_plain_http_origin(console, insecure_page):
+@pytest.mark.parametrize("refused,label", [(False, "Copied"), (True, "Copy failed")], ids=["copied", "refused"])
+def test_copy_on_a_plain_http_origin_falls_back_or_reports_the_refusal(console, insecure_page, refused, label):
+    # No async Clipboard API outside a secure context; a refusal is announced, never swallowed.
     assert insecure_page.eval("return [window.isSecureContext, typeof navigator.clipboard]") == [False, "undefined"]
     console.llm.queue(("token", "Reissue the command after initialization."), ("done",))
     send(insecure_page, "What is IEA500I?")
     wait_state(insecure_page, "complete")
+    if refused:
+        insecure_page.eval("document.execCommand = () => false;")
     insecure_page.click(".turn-assistant .copy-turn")
-    insecure_page.wait("return document.querySelector('.turn-assistant .copy-turn').textContent=='Copied'")
-    assert read_clipboard(insecure_page).strip() == "Reissue the command after initialization."
-
-
-def test_copy_refused_on_a_plain_http_origin_is_reported(console, insecure_page):
-    console.llm.queue(("token", "Answer."), ("done",))
-    send(insecure_page, "What is IEA500I?")
-    wait_state(insecure_page, "complete")
-    insecure_page.eval("document.execCommand = () => false;")
-    insecure_page.click(".turn-assistant .copy-turn")
-    insecure_page.wait("return document.querySelector('.turn-assistant .copy-turn').textContent=='Copy failed'")
-    wait_status(insecure_page, "Copy failed.")
+    insecure_page.wait("return document.querySelector('.turn-assistant .copy-turn').textContent===arguments[0]", label)
+    if refused:
+        wait_status(insecure_page, "Copy failed.")
+    else:
+        assert read_clipboard(insecure_page).strip() == "Reissue the command after initialization."
 
 
 # -- retention -----------------------------------------------------------------------
@@ -1014,17 +1011,50 @@ navigator.locks.request = (name, ...args) => {
 """
 
 
-@pytest.mark.parametrize("action", ["rename", "delete"])
-def test_barrier_serializes_cross_tab_mutation_against_stream_completion(console, page, action):
+def _cross_tab_stream(page, console) -> tuple[str, str, str]:
+    """Tab A is streaming one turn; tab B opens the same console. Returns
+    (tab A, tab B, the store snapshot both tabs saw)."""
     tab_a = page.handle()
-    console.llm.queue(("token", "Concurrent answer. "), ("gate", "store-race"), ("done",))
+    console.llm.queue(("token", "Concurrent answer. "), ("gate", "tab-race"), ("done",))
     send(page, "Concurrent incident")
     page.wait("return !!document.querySelector('[data-state=streaming] .md p')")
     tab_b = page.new_tab()
     page.switch(tab_b)
     page.get(console.url)
     page.wait("return document.querySelectorAll('.turn-user').length==1")
-    snapshot = page.eval("return localStorage.getItem(arguments[0])", STORE_KEY)
+    return tab_a, tab_b, page.eval("return localStorage.getItem(arguments[0])", STORE_KEY)
+
+
+@pytest.mark.parametrize("action", ["rename", "delete", "send"])
+def test_web_locks_serialize_cross_tab_writes_against_the_stream(console, page, action):
+    """One stream in tab A and one write in tab B: the store barrier keeps B's
+    mutation behind A's completion (rename/delete), and B's send is refused
+    while A holds the turn lock, then succeeds once the turn is persisted."""
+    tab_a, tab_b, snapshot = _cross_tab_stream(page, console)
+    if action == "send":
+        before = len(console.llm.requests)
+        send(page, "Second overlapping question")
+        wait_status(page, "already generating an answer in another tab")
+        assert page.eval("var n=document.getElementById('composer-notice');return !n.hidden && n.getBoundingClientRect().height>0 && n.innerText.includes('already generating an answer in another tab')")
+        assert page.eval("return document.getElementById('message').value") == "Second overlapping question"
+        assert len(console.llm.requests) == before
+        (session,) = store(page)["sessions"].values()
+        assert [t["content"] for t in session["turns"] if t["role"] == "user"] == ["Concurrent incident"]
+        page.switch(tab_a)
+        console.llm.release("tab-race")
+        wait_state(page, "complete")
+        page.switch(tab_b)
+        page.click("#send-btn")
+        wait_state(page, "complete", 2)
+        assert page.eval("return document.getElementById('composer-notice').hidden")
+        (session,) = store(page)["sessions"].values()
+        assert [t["role"] for t in session["turns"]] == ["user", "assistant"] * 2
+        assert [t["content"] for t in session["turns"] if t["role"] == "user"] == [
+            "Concurrent incident", "Second overlapping question"]
+        assert "Concurrent answer" in session["turns"][1]["content"]
+        assert len(console.llm.requests) == before + 1
+        return
+
     page.eval(_STORE_BARRIER, True)
     if action == "rename":
         page.eval("document.querySelector('.row .ren').click()")
@@ -1038,7 +1068,7 @@ def test_barrier_serializes_cross_tab_mutation_against_stream_completion(console
 
     page.switch(tab_a)
     page.eval(_STORE_BARRIER, False)
-    console.llm.release("store-race")
+    console.llm.release("tab-race")
     page.wait("return window.__storeAttempts.length>0")
     attempts = page.eval("return window.__storeAttempts")
     assert attempts[0]["before"] == snapshot and attempts[0]["acquired"] is False
@@ -1058,43 +1088,6 @@ def test_barrier_serializes_cross_tab_mutation_against_stream_completion(console
         assert "Concurrent answer" not in json.dumps(store(page))
     send(page, "Next ordinary question")
     wait_state(page, "complete", 2 if action == "rename" else 1)
-
-
-def test_overlapping_cross_tab_sends_are_refused_until_first_turn_is_persisted(console, page):
-    tab_a = page.handle()
-    send(page, "Initial turn")
-    wait_state(page, "complete")
-    tab_b = page.new_tab()
-    page.switch(tab_b)
-    page.get(console.url)
-    page.wait("return document.querySelectorAll('.turn').length==2")
-    page.switch(tab_a)
-    console.llm.queue(("token", "First overlapping answer. "), ("gate", "turn-race"), ("done",))
-    send(page, "First overlapping question")
-    page.wait("return !!document.querySelector('[data-state=streaming] .md p')")
-    before = len(console.llm.requests)
-    page.switch(tab_b)
-    send(page, "Second overlapping question")
-    wait_status(page, "already generating an answer in another tab")
-    assert page.eval("var n=document.getElementById('composer-notice');return !n.hidden && n.getBoundingClientRect().height>0 && n.innerText.includes('already generating an answer in another tab')")
-    assert len(console.llm.requests) == before
-    (session,) = store(page)["sessions"].values()
-    assert [turn["content"] for turn in session["turns"] if turn["role"] == "user"] == [
-        "Initial turn", "First overlapping question",
-    ]
-    assert page.eval("return document.getElementById('message').value") == "Second overlapping question"
-    console.llm.release("turn-race")
-    page.wait("return document.querySelectorAll('.turn-assistant[data-state=complete]').length==2")
-    page.click("#send-btn")
-    wait_state(page, "complete", 3)
-    assert page.eval("return document.getElementById('composer-notice').hidden")
-    (session,) = store(page)["sessions"].values()
-    assert [turn["role"] for turn in session["turns"]] == ["user", "assistant"] * 3
-    assert [turn["content"] for turn in session["turns"] if turn["role"] == "user"] == [
-        "Initial turn", "First overlapping question", "Second overlapping question",
-    ]
-    assert "First overlapping answer" in session["turns"][3]["content"]
-    assert len(console.llm.requests) == before + 1
 
 
 def test_missing_web_locks_uses_visible_tab_memory_fallback(console, browser):
@@ -1234,6 +1227,7 @@ def _with_feedback(console, browser, monkeypatch, outcome: str = "ok") -> _Recor
 
 FIRST_RATING = "#messages .turn-assistant .turn-feedback"  # querySelector: the first answer
 UNKNOWN_TEXT = "this answer is not recorded, or not yet; it cannot be rated now"
+RATING = FIRST_RATING + ' .feedback-rating[data-rating="{}"]'
 
 
 def _reach(b: Browser, css: str) -> str:
@@ -1242,13 +1236,20 @@ def _reach(b: Browser, css: str) -> str:
     return css
 
 
+def _answered(console, browser, monkeypatch, outcome: str = "ok", rating: str = "") -> _RecordingFeedback:
+    """Feedback-enabled console with one complete answer, optionally one rating drafted."""
+    feedback = _with_feedback(console, browser, monkeypatch, outcome)
+    send(browser, "What is IEA500I?")
+    wait_state(browser, "complete")
+    if rating:
+        browser.click(_reach(browser, RATING.format(rating)))
+    return feedback
+
+
 def test_unsent_rating_draft_survives_a_rerender_then_sends_once_and_persists(
     console, browser, monkeypatch
 ):
-    feedback = _with_feedback(console, browser, monkeypatch)
-    send(browser, "What is IEA500I?")
-    wait_state(browser, "complete")
-    browser.click(_reach(browser, FIRST_RATING + ' .feedback-rating[data-rating="bad"]'))
+    feedback = _answered(console, browser, monkeypatch, rating="bad")
     browser.click(_reach(browser, FIRST_RATING + ' .feedback-reasons input[value="incomplete"]'))
     browser.type(_reach(browser, FIRST_RATING + " .feedback-comment"), "SYNTHETIC draft comment")
 
@@ -1276,10 +1277,7 @@ def test_unsent_rating_draft_survives_a_rerender_then_sends_once_and_persists(
 
 
 def test_rating_failure_shows_the_fixed_reason_and_keeps_the_draft(console, browser, monkeypatch):
-    feedback = _with_feedback(console, browser, monkeypatch, outcome="unknown")
-    send(browser, "What is IEA500I?")
-    wait_state(browser, "complete")
-    browser.click(_reach(browser, FIRST_RATING + ' .feedback-rating[data-rating="good"]'))
+    feedback = _answered(console, browser, monkeypatch, outcome="unknown", rating="good")
     browser.type(_reach(browser, FIRST_RATING + " .feedback-comment"), "SYNTHETIC")
     browser.click(_reach(browser, FIRST_RATING + " .feedback-submit"))
     browser.wait("return document.querySelector(arguments[0]+' .feedback-status').textContent.length>0",
@@ -1293,13 +1291,10 @@ def test_rating_failure_shows_the_fixed_reason_and_keeps_the_draft(console, brow
 
 
 def test_typing_in_a_rating_comment_survives_a_turn_completing(console, browser, monkeypatch):
-    _with_feedback(console, browser, monkeypatch)
-    send(browser, "What is IEA500I?")
-    wait_state(browser, "complete")
+    _answered(console, browser, monkeypatch, rating="neutral")
     console.llm.queue(("token", "Second answer. "), ("gate", "second"), ("token", FINAL_ANSWER), ("done",))
     send(browser, "Again")
     browser.wait("return !!document.querySelector('.turn-assistant[data-state=streaming] .md p')")
-    browser.click(_reach(browser, FIRST_RATING + ' .feedback-rating[data-rating="neutral"]'))
     browser.type(_reach(browser, FIRST_RATING + " .feedback-comment"), "half a sen")
     console.llm.release("second")  # completion rebuilds every article
     wait_state(browser, "complete", 2)
@@ -1337,10 +1332,7 @@ def _wait_reached(feedback, n=1):
 
 
 def test_a_rebuild_during_an_in_flight_rating_keeps_the_live_box_truthful(console, browser, monkeypatch):
-    feedback = _with_feedback(console, browser, monkeypatch, outcome="unknown")
-    send(browser, "What is IEA500I?")
-    wait_state(browser, "complete")
-    browser.click(_reach(browser, FIRST_RATING + ' .feedback-rating[data-rating="bad"]'))
+    feedback = _answered(console, browser, monkeypatch, outcome="unknown", rating="bad")
     feedback.gate.clear()
     browser.click(_reach(browser, FIRST_RATING + " .feedback-submit"))
     _wait_reached(feedback)
@@ -1353,11 +1345,9 @@ def test_a_rebuild_during_an_in_flight_rating_keeps_the_live_box_truthful(consol
     assert browser.eval(LOCKS_JS, FIRST_RATING) == UNLOCKED
 
 
-def test_focus_stays_on_the_send_control_through_a_failed_send(console, browser, monkeypatch):
-    feedback = _with_feedback(console, browser, monkeypatch, outcome="unavailable")
-    send(browser, "What is IEA500I?")
-    wait_state(browser, "complete")
-    browser.click(_reach(browser, FIRST_RATING + ' .feedback-rating[data-rating="bad"]'))
+def test_keyboard_send_keeps_focus_in_its_box_through_failure_and_success(console, browser, monkeypatch):
+    """The lock never drops focus on failure; a successful retry leaves focus on the rated box."""
+    feedback = _answered(console, browser, monkeypatch, outcome="unavailable", rating="bad")
     feedback.gate.clear()
     browser.eval("document.querySelector(arguments[0]+' .feedback-submit').focus()", FIRST_RATING)
     browser.keys("ENTER")  # keyboard send
@@ -1368,15 +1358,17 @@ def test_focus_stays_on_the_send_control_through_a_failed_send(console, browser,
     browser.wait("return document.querySelector(arguments[0]+' .feedback-status').textContent.length>0",
                  FIRST_RATING, what="failure shown")
     assert browser.eval(on_submit, FIRST_RATING) is True
+    feedback.outcome = "ok"
     browser.keys("ENTER")  # retry from the keyboard, no tabbing back
+    browser.wait("return document.querySelector(arguments[0]).textContent === 'Rated: bad'", FIRST_RATING,
+                 what="rated on retry")
     _wait_reached(feedback, 2)
+    assert browser.eval("return document.activeElement === document.querySelector(arguments[0])",
+                        FIRST_RATING) is True
 
 
 def test_focus_on_the_page_is_never_pulled_into_a_settling_box(console, browser, monkeypatch):
-    feedback = _with_feedback(console, browser, monkeypatch, outcome="unavailable")
-    send(browser, "What is IEA500I?")
-    wait_state(browser, "complete")
-    browser.click(_reach(browser, FIRST_RATING + ' .feedback-rating[data-rating="bad"]'))
+    feedback = _answered(console, browser, monkeypatch, outcome="unavailable", rating="bad")
     feedback.gate.clear()
     browser.click(_reach(browser, FIRST_RATING + " .feedback-submit"))
     _in_flight(browser, FIRST_RATING)
@@ -1387,35 +1379,19 @@ def test_focus_on_the_page_is_never_pulled_into_a_settling_box(console, browser,
     assert browser.eval("return document.activeElement === document.body") is True
 
 
-def test_a_successful_keyboard_send_leaves_focus_on_the_rated_box(console, browser, monkeypatch):
-    _with_feedback(console, browser, monkeypatch)
-    send(browser, "What is IEA500I?")
-    wait_state(browser, "complete")
-    browser.click(_reach(browser, FIRST_RATING + ' .feedback-rating[data-rating="good"]'))
-    browser.eval("document.querySelector(arguments[0]+' .feedback-submit').focus()", FIRST_RATING)
-    browser.keys("ENTER")
-    browser.wait("return document.querySelector(arguments[0]).textContent === 'Rated: good'", FIRST_RATING,
-                 what="rated")
-    assert browser.eval("return document.activeElement === document.querySelector(arguments[0])",
-                        FIRST_RATING) is True
-
-
 def test_controls_are_locked_while_a_rating_is_in_flight_and_the_sent_rating_is_shown(
     console, browser, monkeypatch
 ):
     """What the console shows and saves is exactly what was sent: no edit can
     slip into the draft between the request and its 201."""
-    feedback = _with_feedback(console, browser, monkeypatch)
-    send(browser, "What is IEA500I?")
-    wait_state(browser, "complete")
-    browser.click(_reach(browser, FIRST_RATING + ' .feedback-rating[data-rating="good"]'))
+    feedback = _answered(console, browser, monkeypatch, rating="good")
     browser.type(_reach(browser, FIRST_RATING + " .feedback-comment"), "SENT")
     feedback.gate.clear()
     browser.click(_reach(browser, FIRST_RATING + " .feedback-submit"))
     _in_flight(browser, FIRST_RATING)
     assert browser.eval(LOCKS_JS, FIRST_RATING) == LOCKED
     # Edits while locked change nothing.
-    browser.click(_reach(browser, FIRST_RATING + ' .feedback-rating[data-rating="bad"]'))
+    browser.click(_reach(browser, RATING.format("bad")))
     browser.click(_reach(browser, FIRST_RATING + ' .feedback-reasons input[value="wrong"]'))
     assert browser.eval(
         "var b=document.querySelector(arguments[0]);return [b.querySelector('[data-rating=good]').getAttribute('aria-pressed'),"
@@ -1431,14 +1407,11 @@ def test_controls_are_locked_while_a_rating_is_in_flight_and_the_sent_rating_is_
 
 
 def test_a_settling_send_never_moves_focus_out_of_another_answers_box(console, browser, monkeypatch):
-    feedback = _with_feedback(console, browser, monkeypatch, outcome="unavailable")
-    send(browser, "What is IEA500I?")
-    wait_state(browser, "complete")
+    feedback = _answered(console, browser, monkeypatch, outcome="unavailable", rating="bad")
     send(browser, "Again")
     wait_state(browser, "complete", 2)
     turns = store(browser)["sessions"][store(browser)["active"]]["turns"]
     box_a, box_b = (f'#messages [data-feedback-for="{t["request_id"]}"]' for t in turns if t["role"] == "assistant")
-    browser.click(_reach(browser, box_a + ' .feedback-rating[data-rating="bad"]'))
     feedback.gate.clear()
     browser.eval("document.querySelector(arguments[0]+' .feedback-submit').focus()", box_a)
     browser.keys("ENTER")
@@ -1456,16 +1429,14 @@ def test_a_settling_send_never_moves_focus_out_of_another_answers_box(console, b
 
 
 def test_focus_on_a_rated_box_survives_a_rebuild_and_unrated_boxes_take_no_focus(console, browser, monkeypatch):
-    _with_feedback(console, browser, monkeypatch)
-    send(browser, "What is IEA500I?")
-    wait_state(browser, "complete")
+    _answered(console, browser, monkeypatch)
     # An unrated box is not itself focusable: clicking its blank area saves no
     # control that a rebuild could later move focus onto.
     assert browser.eval("return document.querySelector(arguments[0]).hasAttribute('tabindex')", FIRST_RATING) is False
     console.llm.queue(("token", "Second answer. "), ("gate", "second"), ("token", FINAL_ANSWER), ("done",))
     send(browser, "Again")
     browser.wait("return !!document.querySelector('.turn-assistant[data-state=streaming] .md p')")
-    browser.click(_reach(browser, FIRST_RATING + ' .feedback-rating[data-rating="good"]'))
+    browser.click(_reach(browser, RATING.format("good")))
     browser.eval("document.querySelector(arguments[0]+' .feedback-submit').focus()", FIRST_RATING)
     browser.keys("ENTER")
     browser.wait("return document.querySelector(arguments[0]).textContent === 'Rated: good'", FIRST_RATING,

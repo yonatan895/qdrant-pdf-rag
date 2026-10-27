@@ -680,29 +680,6 @@ def test_ui_chat_fragment_renders_markdown_not_markers(ui_client, monkeypatch):
     assert "Source-matched manual citations" in body
 
 
-def test_ui_chat_passes_reasoning_effort(ui_client, monkeypatch):
-    """Reasoning effort selected in UI form is forwarded to LLM chat call."""
-    fake_llm = UiFakeLLM()
-    monkeypatch.setattr(app_mod, "llm", fake_llm)
-
-    # xhigh: a member of the default served domain (#777)
-    resp_xhigh = ui_client.post(
-        "/ui/chat",
-        data={"message": "What is IEA500I?", "messages": "", "reasoning_effort": "xhigh"},
-        headers={"HX-Request": "true"},
-    )
-    assert resp_xhigh.status_code == 200
-    assert fake_llm.calls[-1]["reasoning_effort"] == "xhigh"
-
-    resp_low = ui_client.post(
-        "/ui/chat",
-        data={"message": "What is IEA500I?", "messages": "", "reasoning_effort": "low"},
-        headers={"HX-Request": "true"},
-    )
-    assert resp_low.status_code == 200
-    assert fake_llm.calls[-1]["reasoning_effort"] == "low"
-
-
 def test_ui_invalid_reasoning_effort_rejected(ui_client):
     """An unknown reasoning effort is a 422 on both the stream and form paths."""
     resp = ui_client.post(
@@ -761,6 +738,11 @@ def test_console_offers_only_served_efforts_and_refuses_others_before_the_model(
     default = ui_client.post("/ui/chat/stream", json={"messages": [{"role": "user", "content": "What is IEA500I?"}]})
     assert default.status_code == 200
     assert fake_llm.stream_calls[-1]["reasoning_effort"] == "low"
+    # The no-JS form forwards what it offers verbatim (#777).
+    for effort in ("xhigh", "low"):
+        form = ui_client.post("/ui/chat", data={"message": "What is IEA500I?", "messages": "",
+                                                "reasoning_effort": effort})
+        assert form.status_code == 200 and fake_llm.calls[-1]["reasoning_effort"] == effort
 
 
 # ---------------------------------------------------------------------------
@@ -827,17 +809,6 @@ def test_ui_fragment_verification_state_presentation(ui_client, monkeypatch):
     assert "Verified" not in body
 
 
-def test_ui_stream_missing_user_is_fixed_validation_error(ui_client):
-    result = ui_client.post("/ui/chat/stream", json={"messages": [
-        {"role": "assistant", "content": "No user question was supplied"},
-    ]})
-    assert result.status_code == 422
-    assert result.json() == {"code": "invalid_request", "message": "request body failed validation"}
-    assert ui_client.mock_search.calls == []
-    assert app_mod.llm.calls == []
-    assert app_mod.llm.stream_calls == []
-
-
 @pytest.mark.parametrize("condense", [False, True])
 @pytest.mark.parametrize("tail_role", ["assistant", "system"])
 def test_ui_stream_retrieval_and_prompt_use_same_active_user(ui_client, monkeypatch, condense, tail_role):
@@ -859,22 +830,18 @@ def test_ui_stream_retrieval_and_prompt_use_same_active_user(ui_client, monkeypa
     assert all("LATER_NON_USER" not in m.content for m in prompt)
 
 
-@pytest.mark.parametrize("message", [" \t\n ", "x" * 2001])
-def test_ui_stream_invalid_active_user_refuses_before_work(ui_client, message):
-    result = ui_client.post("/ui/chat/stream", json={"messages": [
-        {"role": "user", "content": message},
-        {"role": "assistant", "content": "Short tail"},
-    ]})
-    assert result.status_code == 422
-    assert result.json() == {"code": "invalid_request", "message": "request body failed validation"}
-    assert ui_client.mock_search.calls == []
-    assert app_mod.llm.calls == app_mod.llm.stream_calls == []
-
-
-@pytest.mark.parametrize("message", ["\x00x", "a\x1bb"])
-def test_ui_stream_unsearchable_active_user_refuses_before_work(ui_client, message):
-    """Issue #579: control characters and blank turns, fixed 422, no work."""
-    result = ui_client.post("/ui/chat/stream", json={"messages": [{"role": "user", "content": message}]})
+@pytest.mark.parametrize("messages", [
+    pytest.param([{"role": "assistant", "content": "No user question was supplied"}], id="missing-user"),
+    pytest.param([{"role": "user", "content": " \t\n "}, {"role": "assistant", "content": "Short tail"}], id="blank"),
+    pytest.param([{"role": "user", "content": "x" * 2001}, {"role": "assistant", "content": "Short tail"}],
+                 id="over-length"),
+    pytest.param([{"role": "user", "content": "\x00x"}], id="nul"),
+    pytest.param([{"role": "user", "content": "a\x1bb"}], id="escape"),
+])
+def test_ui_stream_unsearchable_question_refuses_before_work(ui_client, messages):
+    """Issue #579: no user turn, blank, over-length or control-character text is
+    a fixed 422 before retrieval or a model call."""
+    result = ui_client.post("/ui/chat/stream", json={"messages": messages})
     assert result.status_code == 422
     assert result.json() == {"code": "invalid_request", "message": "request body failed validation"}
     assert ui_client.mock_search.calls == []

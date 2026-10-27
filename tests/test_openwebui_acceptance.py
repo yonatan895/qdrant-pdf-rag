@@ -353,12 +353,11 @@ def test_the_lane_image_is_the_images_txt_row_and_fails_closed_while_pending(tmp
     assert pending.returncode != 0 and pending.stdout == "" and "OWUI_BUILD=1" in pending.stderr
     assert _owui_pinned(tmp_path, "# no row\n").returncode != 0
 
-
-def test_the_lane_reference_equals_the_real_images_txt_row():
+    # The real images.txt is the only digest source; a pending row fails closed.
     row = next(line.split() for line in (ROOT / "images.txt").read_text().splitlines()
                if "/qdrant-pdf-rag-openwebui:" in line and not line.startswith("#"))
     proc = _owui_pinned(None, None)
     if row[1] == "sha256:PENDING":
-        assert proc.returncode != 0  # fail closed, never a second digest source
+        assert proc.returncode != 0
     else:
         assert proc.stdout.strip() == f"{row[0].split(':')[0]}@{row[1]}"
