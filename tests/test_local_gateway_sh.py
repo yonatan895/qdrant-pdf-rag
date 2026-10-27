@@ -30,8 +30,15 @@ DUMMY_KEYS = {
 }
 
 
-def _render(extra_env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
-    env = {**os.environ, "GATEWAY_DRYRUN": "1", **DUMMY_KEYS, **(extra_env or {})}
+def _render(extra_env: dict[str, str] | None = None, *, keys: bool = True,
+            drop=None) -> subprocess.CompletedProcess:
+    """Render the real script with dummy keys; `keys=False` and `drop` model a
+    caller whose environment has none of the gateway variables set."""
+    env = {key: value for key, value in os.environ.items() if not (drop and drop(key))}
+    env["GATEWAY_DRYRUN"] = "1"
+    if keys:
+        env.update(DUMMY_KEYS)
+    env.update(extra_env or {})
     return subprocess.run(["sh", str(SCRIPT)], capture_output=True, text=True, env=env, check=False)
 
 
@@ -109,10 +116,7 @@ def test_tokenize_targets_reasoning_origin(url):
 
 
 def test_render_generates_keys_when_unset():
-    env = {k: v for k, v in os.environ.items() if not k.startswith("GATEWAY_")}
-    env["GATEWAY_DRYRUN"] = "1"
-    proc = subprocess.run(["sh", str(SCRIPT)], capture_output=True, text=True, env=env, check=False)
-    text = _read_cfg(proc)
+    text = _read_cfg(_render(keys=False, drop=lambda name: name.startswith("GATEWAY_")))
     assert "master_key: sk-local-" in text
     # Generated values are terminal-only material: distinct per start, and
     # the committed tree must never contain one.
@@ -262,15 +266,8 @@ def test_detailed_debug_only_when_explicitly_enabled(value, debug_on):
     """Issue #590: the old ${GATEWAY_DEBUG:+...} expansion turned
     --detailed_debug on for the default "0" (and for any non-empty value),
     logging full request bodies (manual text). Off unless 1/true."""
-    env = {} if value is None else {"GATEWAY_DEBUG": value}
-    if value is None:
-        env_base = {k: v for k, v in os.environ.items() if k != "GATEWAY_DEBUG"}
-        proc = subprocess.run(
-            ["sh", str(SCRIPT)], capture_output=True, text=True, check=False,
-            env={**env_base, "GATEWAY_DRYRUN": "1", **DUMMY_KEYS},
-        )
-    else:
-        proc = _render(env)
+    proc = (_render(drop=lambda name: name == "GATEWAY_DEBUG") if value is None
+            else _render({"GATEWAY_DEBUG": value}))
     args = _gateway_args(proc)[0]
     assert args.startswith("--config /app/gateway/config.yaml")
     assert ("--detailed_debug" in args) is debug_on
