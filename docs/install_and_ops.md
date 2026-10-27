@@ -104,89 +104,20 @@ Qdrant on 6333 is `local:qdrant:up` / `local:qdrant:down`.
 
 ### 3.4 Retrieval Evaluation Gates & Quality Tiers
 
-Tier map, thresholds, and gate semantics live in `eval.md` (§1–§4); the
-rungs your change class owes live in `live-stack.md` (§0, §3). This
-section keeps only the runnable commands.
+Tier map, thresholds, gate semantics, venue rules and the paraphrase no-echo
+contract are owned by [eval.md](eval.md) (§1–§6); the rungs a change class owes
+are owned by [live-stack.md](live-stack.md#verification-minimums) (§0, §3).
+Runnable entries (prefix `sh scripts/tools/run-task.sh`):
 
-#### Automated L1 Retrieval Gate (`sh scripts/tools/run-task.sh eval:gate-l1`)
+| Task | Purpose |
+|---|---|
+| `eval:gate-l1` | Required PR check: runtime synthetic hash corpus into an ephemeral Qdrant simulator; fails closed on query failure or metric regression and posts the PR delta. |
+| `eval:paraphrase` | Scores `evals/paraphrase.jsonl` against the mode-keyed paraphrase baselines; generate the runtime corpus and dedicated collection first (recipe in [eval.md §6](eval.md#paraphrase)); not wired into CI. |
+| `eval:retrieval` / `eval:baseline` | Score the golden set, or re-record the mode-keyed baseline (dedicated PR). |
+| `eval:bench` / `eval:bench-baseline` | Benchmark resources/latency, or re-record the baseline (dedicated PR). |
+| `eval:harness:l2` / `eval:harness:l3` | Live-GPU tiers, run in the RC window (or a dedicated GPU runner / nightly); standing-red debt is RC debt. |
 
-The L1 gate runs automatically on every PR in GitHub Actions and GitLab CI:
-
-```bash
-# Run L1 retrieval evaluation gate locally (starts ephemeral Qdrant simulator if needed)
-sh scripts/tools/run-task.sh eval:gate-l1
-
-# Or run the script directly:
-python scripts/gate_l1.py --out bundles/eval-report.json --delta bundles/eval-delta.md
-```
-
-- **Execution Invariant:** Zero committed PDFs. An original synthetic PDF corpus covering the golden dataset expectations is generated at runtime in a temporary directory and ingested in hash mode.
-- **Fail-Closed Verification:** Fails nonzero on any query failure or metric regression — ratios in `eval.md` §2 (strict `identifier`/`message_id` recall@1, `must_not.violations == 0` absolute).
-- **PR Delta Reporting:** Automatically posts or updates a markdown delta table comment on the PR (GitHub) or merge request note (GitLab).
-
-#### Paraphrase Retrieval Instrument (`sh scripts/tools/run-task.sh eval:paraphrase`)
-
-The main golden set echoes query text into target pages, so semantic
-improvements cannot register — `evals/paraphrase.jsonl` (22 entries) is the
-complementary instrument (rationale, no-echo contract, and baselines in
-`eval.md` §6; never tune against the frozen holdout).
-
-```bash
-# 1. Generate the paraphrase corpus (runtime PDFs, never committed):
-.venv/bin/python -c "
-import json, sys; sys.path.insert(0, 'scripts')
-from pathlib import Path
-from gate_l1 import generate_synthetic_golden_corpus
-entries = [json.loads(l) for l in open('evals/paraphrase.jsonl') if l.strip()]
-generate_synthetic_golden_corpus(entries, Path('/tmp/para-corpus'))"
-
-# 2. Ingest into a dedicated collection (mode decides the embedder):
-QDRANT_URL=http://localhost:6333 QDRANT_COLLECTION=paraphrase-manuals \
-  EMBED_MODE=hash ALLOW_HASH_MODE=true \
-  .venv/bin/python -m mainframe_rag.ingest.run_ingest \
-  --src /tmp/para-corpus --progress /tmp/para-corpus/inventory.jsonl --workers 2
-
-# 3. Score against the mode-keyed paraphrase baselines:
-QDRANT_URL=http://localhost:6333 QDRANT_COLLECTION=paraphrase-manuals sh scripts/tools/run-task.sh eval:paraphrase
-```
-
-Baselines (`evals/baseline-paraphrase.json` hash, `evals/baseline-paraphrase-vllm.json` vllm) gate the same tolerances as the main set (`eval.md` §2). Uses: contextual-prefix A/B, reranker on/off A/B, dense-prefix tuning. Not wired into CI (no cluster, no embed server there).
-
-#### GPU Story for L2 and L3 Tiers (Operational Strategy)
-
-Standard CI runners are CPU-only; L2/L3 need the live GPU stack. Three
-options, cheapest first:
-
-1. **RC gate (primary):** run `sh scripts/tools/run-task.sh eval:harness:l2` / `sh scripts/tools/run-task.sh eval:harness:l3` on lab
-   GPU workstations during the release-candidate window. Standing-red
-   product debts are tracked as explicit RC debt.
-2. **Dedicated GPU runner (optional):** enterprise runner with an NVIDIA
-   GPU tagged `gpu`; workflows target `runs-on: [self-hosted, gpu]`
-   (GitHub) or `tags: [gpu]` (GitLab CI).
-3. **Nightly schedule:** L2/L3 against `main` on the GPU runner instead of
-   per-PR gating. Baselines (`benchmarks/harness-l3-vllm.json`) are
-   captured in the runner's own hardware environment.
-
-#### Manual Evaluation & Baseline Updates
-
-Eval/baseline/bench mechanics (mode-keyed baselines, mismatch skip
-semantics, dedicated-PR re-recording) live in `eval.md` §2; the rungs you
-owe live in `live-stack.md` §3:
-
-```bash
-# Evaluate retrieval accuracy against the golden set (mode-keyed baselines
-# per eval.md §2; mismatch skip semantics per eval.md §2).
-EMBED_MODE=hash QDRANT_URL=http://127.0.0.1:6333 QDRANT_COLLECTION=local-corpus sh scripts/tools/run-task.sh eval:retrieval
-
-# Re-record committed accuracy baseline (dedicated PR only, per AGENTS.md)
-sh scripts/tools/run-task.sh eval:baseline
-
-# Run performance benchmarking
-sh scripts/tools/run-task.sh eval:bench
-
-# Re-record committed benchmark baseline (dedicated PR only)
-sh scripts/tools/run-task.sh eval:bench-baseline
-```
+Mode selection, mismatch/skip semantics and baseline rules: eval.md §2/§8.
 
 ### 3.5 Developer Reporting & Interactive Query Assistant (`sh scripts/tools/run-task.sh local:ask` / `sh scripts/tools/run-task.sh local:query`)
 
@@ -332,37 +263,28 @@ via the `LLM_REASONING_EFFORT_*` / `PROMPT_MAX_CONTEXT_CHARS*` Settings
 
 The secondary `qa:vllm-e2e` command and its script are retired. Use the
 [canonical supervisor](live-stack.md#full-local-simulation) with its private
-gateway handoff, explicit model revision and selected dimension:
-
-```bash
-sh scripts/tools/run-task.sh dev:demo-pdfs
-CORPUS_DIR=output/demo-pdfs sh scripts/tools/run-task.sh local:stack
-```
+gateway handoff, explicit model revision and selected dimension (commands in
+[§3.6](#36-local-vllm-inference--gpu-acceleration-rtx-5060--8gb-vram)).
 
 Check an existing stack with `sh scripts/tools/run-task.sh local:check --
 --agent URL --trace-url URL --query TEXT --followup TEXT --report PATH`; the
 [retained-stack runbook](local-real-corpus.md#4-verify-and-retain-the-complete-live-stack)
 owns endpoint and private-report selection. It requires grounded first and
-follow-up answers, complete SSE and a fresh search trace (`--trace-backend` per [observability](observability.md#backend-status)); the OpenObserve credentials come from `TRACE_QUERY_USER` and `TRACE_QUERY_PASSWORD` in the environment. Representation
-changes use the [snapshot-gated ingestion migration](ingest.md#metadata-contract).
-For semantic answer quality on the configured live GPU stack, run
-`sh scripts/tools/run-task.sh eval:answers` under the [answer-tier contract](testing.md#answer-tier).
+follow-up answers, complete SSE and a fresh search trace (`--trace-backend` per
+[observability](observability.md#backend-status)); OpenObserve credentials come
+from `TRACE_QUERY_USER` and `TRACE_QUERY_PASSWORD`. Representation changes use
+the [snapshot-gated ingestion migration](ingest.md#metadata-contract). For
+semantic answer quality on the configured live GPU stack, run
+`sh scripts/tools/run-task.sh eval:answers` under the
+[answer-tier contract](testing.md#answer-tier).
 
-#### Streaming Reasoning on the Local Stack (`sh scripts/tools/run-task.sh local:agent`)
-```bash
-# Start the agent with LLM_STREAM=true so reasoning SSE reaches the client:
-sh scripts/tools/run-task.sh local:agent                    # uvicorn on http://localhost:8080
+#### Streaming Reasoning on the Local Stack
 
-# Stream a grounded answer (SSE):
-curl -N -X POST "http://localhost:8080/v1/answer?stream=true" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "What parameter controls LFAREA in IEASYSxx?"}'
-```
-The SSE response yields `event: token` deltas as the reasoning model generates, then exactly one terminal `event: final` carrying the full verified answer, citations, optional script, retrieval metadata, `ttft_ms`, and token usage. A mid-stream failure emits `event: error` and ends **without** a `final` event — treat stream-end-without-final as a failed request. `LLM_STREAM` (server-side reasoning SSE) defaults to `false` in production config; `sh scripts/tools/run-task.sh local:agent` enables it for TTFT measurement (also consumed by the L3 harness).
-
-This component runner honors `UI_ENABLED`: `UI_ENABLED=true sh scripts/tools/run-task.sh local:agent` serves the operator console at `http://localhost:8080/ui` (unset keeps `/ui` at the fail-closed 404). `sh scripts/tools/run-task.sh local:stack` sets it true by default; the multi-turn chat and console contracts live in `docs/agent.md` §1/§3.
-
----
+`local:agent` starts the agent with `LLM_STREAM=true` for TTFT measurement
+(production default `false`); it honors `UI_ENABLED` and serves `/ui` when true.
+The frame contract (`token*` → exactly one `final`; `error` ends without
+`final`), the console/chat contracts and a streamed probe are owned by
+[agent.md](agent.md) §1/§3 and [§5.2](#52-agent-endpoints).
 
 ### 3.9 Exporting Standalone Model Weights for Offline Bastions
 

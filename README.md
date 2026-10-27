@@ -34,51 +34,29 @@ Models (reasoning, dense embed, reranker) are served by the **platform team's in
 
 ## Model Gateway & Ownership Contract
 
-**Production (air-gap):** the platform team owns the model tier — reasoning,
-dense embed and rerank behind its LiteLLM gateway on a separate cluster. This
-repo owns Qdrant + ingest + retrieval + the agent and consumes that tier **over
-HTTP only**: never vLLM / LiteLLM / GPU operators on a product path, and no
-direct-to-vLLM leg. Tracing is **on by default** for this repo's components;
-`OTEL_EXPORTER_OTLP_ENDPOINT` in `airgap.env` selects a custom collector or
-`off`. See the [ownership contract](docs/architecture.md#ownership-contract).
+**Production (air-gap):** the platform team owns the reasoning, embed and rerank
+tier behind its LiteLLM gateway; this repo owns Qdrant + ingest + retrieval + the
+agent and consumes that tier **over HTTP only** — no vLLM/LiteLLM/GPU operator
+on a product path and no direct-to-vLLM leg. Tracing is on by default for this
+repo's components (`OTEL_EXPORTER_OTLP_ENDPOINT` selects a collector or `off`).
 
 **Local dev/test:** `local:stack` simulates the complete topology on one machine
-— this repo's Qdrant + agent + OpenObserve plus local vLLM backends behind the
-**real** (digest-pinned) LiteLLM gateway. Agent and ingest still go through the
-gateway, so the production wire contract (single origin, model-id routing,
-per-leg virtual keys) is what gets tested, and a `v1.search` span must land in
-the local OpenObserve before the stack reports up. The console is on by default
-(`UI_ENABLED=true`; `UI_ENABLED=false` exercises the fail-closed route set). The
-local model/gateway scripts are local-only — CI's `airgap-rehearsal` uses
-`scripts/mock_vllm.py`; see
-[install and operations §3.6](docs/install_and_ops.md#36-local-vllm-inference--gpu-acceleration-rtx-5060--8gb-vram).
-
-Every leg and its per-leg key is set in `airgap.env` and one operator-created
-Secret (`GATEWAY_API_KEY_SECRET` via `secretKeyRef`, never plaintext; unset =
-keyless); the
-[wiring table](docs/install_and_ops.md#43-configure-environment--pre-flight-validation)
-owns the names. Prove every leg from inside the cluster and apply the order the
-probe recommends:
-
-```bash
-kubectl -n mainframe-rag exec deploy/rag-agent -- python3 /app/scripts/probe_gateway.py
-```
-
-Local full-stack simulation (model commands in separate terminals; the default
-8 GiB pack has no reranker):
+— this repo's components plus local vLLM backends behind the real, digest-pinned
+gateway — and a `v1.search` span must land in the local OpenObserve before the
+stack reports up. Details: [ownership contract](docs/architecture.md#ownership-contract),
+[local simulation](docs/install_and_ops.md#36-local-vllm-inference--gpu-acceleration-rtx-5060--8gb-vram),
+[wiring table](docs/install_and_ops.md#43-configure-environment--pre-flight-validation).
 
 ```bash
 sh scripts/tools/run-task.sh local:llm
 sh scripts/tools/run-task.sh local:embed
-RERANK_ENABLED=false sh scripts/tools/run-task.sh local:stack
-# Optional ingest: CORPUS_DIR=<dir> RERANK_ENABLED=false sh scripts/tools/run-task.sh local:stack
+RERANK_ENABLED=false sh scripts/tools/run-task.sh local:stack   # optional ingest: CORPUS_DIR=<dir>
 ```
 
-Fresh Kind deployment: [clean Kind guide](docs/local-kind.md). Helm and the
-preserved corpus: [local real-corpus operations](docs/local-real-corpus.md).
-Reranking needs the separately selected compatible three-model pack; never add
-it beside the default reasoning/embedding pair.
-
+Fresh Kind: [clean Kind guide](docs/local-kind.md). Helm and the preserved
+corpus: [local real-corpus operations](docs/local-real-corpus.md). Reranking
+needs the separately selected compatible three-model pack; never add it beside
+the default reasoning/embedding pair.
 
 ## Live State (Optional, Default Off)
 
@@ -157,42 +135,20 @@ factory.
 
 ## Endpoints
 
-The agent listens on port 8080 (ClusterIP `rag-agent:8080` in-cluster; the external console Route is `AGENT_ROUTE=true`). Local ports: Qdrant 6333, reasoning 8000, embed 8001, rerank 8002, LiteLLM gateway 4000 (`sh scripts/tools/run-task.sh local:stack`), OpenObserve (port per `local:stack`).
+The agent listens on 8080 (ClusterIP `rag-agent:8080`; the external console
+Route is `AGENT_ROUTE=true`). Local ports: Qdrant 6333, reasoning 8000, embed
+8001, rerank 8002, LiteLLM gateway 4000, OpenObserve on the `local:stack` port.
+Minimal readiness probe:
 
 ```bash
-# Readiness: {"status":"ok","qdrant":true,"embed":true,"representation":"compatible","rerank":null} (degraded = HTTP 503; rerank is true/false when RERANK_ENABLED=true)
-curl -s http://localhost:8080/healthz
-# Liveness (process only): {"status":"alive"}
-curl -s http://localhost:8080/livez
-
-# Ranked manual chunks with citations, no LLM:
-curl -s -X POST http://localhost:8080/v1/search \
-  -H 'Content-Type: application/json' \
-  -d '{"query":"IEA500I IOSCMDS COMMAND REJECTED","limit":5}'
-
-# Grounded answer from the reasoning model (+ caller Splunk context):
-curl -s -X POST http://localhost:8080/v1/answer \
-  -H 'Content-Type: application/json' \
-  -d '{"query":"How do I resolve IEA500I command rejected?","product":"z/OS"}'
-
-# Streamed answer: token deltas, then exactly one terminal final event
-curl -N -X POST 'http://localhost:8080/v1/answer?stream=true' \
-  -H 'Content-Type: application/json' \
-  -d '{"query":"What should LFAREA be set to in IEASYSxx?"}'
-
-# Multi-turn chat — client-managed history (OpenAI-compatible alias at /v1/chat/completions):
-curl -s -X POST http://localhost:8080/v1/chat \
-  -H 'Content-Type: application/json' \
-  -d '{"messages":[{"role":"user","content":"How do I resolve IEA500I command rejected?"}]}'
-
-# Operator console (ADR-0004) — served when UI_ENABLED=true (sh scripts/tools/run-task.sh local:stack does):
-#   http://localhost:8080/ui
-
-# Prometheus exposition (opt-in via METRICS_ENABLED, else 404):
-curl -s http://localhost:8080/metrics
+curl -s http://localhost:8080/healthz   # {"status":"ok",...}; degraded = HTTP 503
 ```
 
-Errors use a stable `{"code","message"}` envelope (never stack traces or upstream bodies); overlong queries and oversized chat bodies (`chat_max_body_chars`) fail closed with `422 invalid_request`. Full contracts live in [docs/agent.md](docs/agent.md) and [docs/install_and_ops.md](docs/install_and_ops.md) §5.
+Endpoint shapes, the error envelope, SSE framing, console and metrics contracts
+live in [docs/agent.md](docs/agent.md) and
+[install and operations §5](docs/install_and_ops.md#5-day-2-operations--maintenance);
+that guide carries the copy-paste probes for `/v1/search`, `/v1/answer`,
+`/v1/chat` and `/v1/metrics`.
 
 ---
 

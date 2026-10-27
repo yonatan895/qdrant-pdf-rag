@@ -111,14 +111,14 @@ private log. Source its handoff only in consumer shells and then explicitly set
 ## 4. TLS, registry and cluster
 
 Use the [TLS/registry recipe](release-verification.md#tls-services) with
-`LOCAL_STATE=$KIND_STATE` for a **new** identity. It uses the same container names
-as the release rehearsal; if those services already run, reuse them rather than
-creating a second set. Keep the pinned images, non-root TLS proxy, authenticated
-registry, and TLS verification. Registry host port is 5443; gateway host port is
-8444. Use a generated registry password supplied to `htpasswd` on stdin; keep its
-protected auth JSON for the loader and pull Secret.
+`LOCAL_STATE=$KIND_STATE` for a new identity. It uses the same container names
+as the release rehearsal; reuse running services rather than creating a second
+set, and keep the pinned images, non-root TLS proxy, authenticated registry and
+TLS verification. Registry host port is 5443; gateway host port is 8444.
 
-Set the adapter inputs explicitly:
+Set the adapter inputs explicitly, then follow
+[Kind network and node trust](release-verification.md#kind-cluster) through
+cluster creation with this guide's `KIND_NAME` and `KIND_STATE`:
 
 ```sh
 export LOCAL_STATE="$KIND_STATE"
@@ -129,27 +129,17 @@ export REGISTRY_AUTH_FILE="$KIND_STATE/registry-auth.json"
 export PATH="$KIND_BIN:$PATH"
 ```
 
-The fresh auth JSON must contain `auths["rag-kind.test:5000"]` and
-`auths["rag-kind.test:5443"]`, each with the base64-encoded
-`kind-loader:password` credential. Keep it mode 0600. Give the
-Skopeo adapter a directory containing `ca.crt` at `/certs`; when the host path
-contains a colon (for example `rag-kind.test:5000`), use Docker's
-`--mount type=bind,src=...,dst=/certs,readonly`, not the colon-delimited `-v` form.
-Do not mount CA private keys into the loader.
+The TLS recipe owns the auth-file contents (both `rag-kind.test:5000` and
+`:5443` entries, mode 0600) and the `/certs` CA mount; never mount CA private
+keys into the loader. Add read-only Kind node mounts for `$KIND_STATE/corpus`
+at `/mnt/rag-kind-corpus` and `$KIND_STATE/checkpoint` at
+`/mnt/rag-kind-checkpoint`. The corpus is a static read-only local PV; Qdrant
+data/scratch and OpenObserve use writable local-path claims.
 
-Follow [Kind network and node trust](release-verification.md#kind-cluster)
-through cluster creation, using this guide's `KIND_NAME` and `KIND_STATE`. Add read-only Kind node
-mounts for `$KIND_STATE/corpus` at `/mnt/rag-kind-corpus` and
-`$KIND_STATE/checkpoint` at `/mnt/rag-kind-checkpoint`. The corpus is a static
-read-only local PV; Qdrant data/scratch and OpenObserve use writable local-path claims.
-After both services join the `kind` network, the registry gets Docker DNS alias
-`rag-kind.test`; CoreDNS maps that same hostname to the TLS gateway address.
-The node registry and pod gateway use different ports and DNS paths.
-
-The TLS proxy resolves the gateway dynamically through Docker DNS, so it survives
-gateway recreation without a stale upstream address. Validate `nginx -t` and make
-a certificate-verified gateway request from an application pod after startup and
-after any gateway recreation.
+The TLS proxy resolves the gateway dynamically through Docker DNS, so it
+survives gateway recreation without a stale upstream address. Validate
+`nginx -t` and make a certificate-verified gateway request from an application
+pod after startup and after any gateway recreation.
 
 ## 5. Helm deployment and checkpoint restore
 
