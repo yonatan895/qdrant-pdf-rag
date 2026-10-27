@@ -31,6 +31,8 @@ from typing import Any
 
 import httpx
 
+from mainframe_rag.retrieve.query import SearchHit
+
 ELEMENT_KEY = "element-6066-11e4-a52e-4f735466cecf"
 _CACHE = Path(os.environ.get("SE_CACHE_PATH", Path.home() / ".cache" / "selenium"))
 
@@ -71,10 +73,38 @@ def _free_port() -> int:
 
 
 # ---------------------------------------------------------------------------
-# Scripted gateway-shaped LLM + live server
+# Scripted retrieval + gateway-shaped LLM + live server
 # ---------------------------------------------------------------------------
 
 CITE = "SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6"
+
+
+def _hit() -> SearchHit:
+    return SearchHit(
+        chunk_id="abc123",
+        score=0.42,
+        cite=CITE,
+        heading="Chapter 2 > IEA500I",
+        text="IEA500I BEFORE IOS IOSCMDS COMMAND REJECTED, REASON=yy",
+        doc_id="SA22-0000-00",
+        title="Synthetic Reference",
+        page_label="1-6",
+        chunk_type="message",
+        product="z/OS",
+        version="9.9",
+        message_ids=("IEA500I",),
+    )
+
+
+class MockSearch:
+    """The app's retrieval seam: one synthetic hit per call, calls recorded."""
+
+    def __init__(self, return_hits: bool = True):
+        self.calls: list[dict] = []
+
+    def search(self, qdrant, embedder, collection, query, product=None, version=None, limit=8, *args, **kwargs):
+        self.calls.append({"query": query})
+        return [_hit()], "identifier", {"embed_ms": 1, "qdrant_ms": 2}
 DEFAULT_SCRIPT: list[tuple[Any, ...]] = [
     ("token", "Reissue the "),
     ("token", "command after initialization.\n\nCitations:\n- " + CITE + "\n"),
@@ -157,7 +187,6 @@ class LiveConsole:
         from mainframe_rag.agent import app as app_mod
         from mainframe_rag.agent.tokenizer import FallbackTokenizer
         from tests.fakes import ServingGateFake
-        from tests.test_webui import MockSearch
 
         self._patch = __import__("pytest").MonkeyPatch()
         env = {
